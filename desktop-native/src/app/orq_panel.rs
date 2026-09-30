@@ -16,6 +16,11 @@ pub(super) struct State {
     error: Option<(SessionKey, String)>,
     task: Option<(SessionKey, JoinHandle<()>)>,
     generation: u64,
+    view: View,
+}
+
+#[derive(Default)]
+pub(super) struct View {
     queued_open: bool,
     ended_open: bool,
     advanced_open: bool,
@@ -116,7 +121,7 @@ fn local_time(iso: Option<&str>) -> Option<DateTime<Local>> {
 
 fn clock_of(iso: Option<&str>) -> Option<String> { local_time(iso).map(|at| at.format("%H:%M").to_string()) }
 
-fn elapsed_text(seconds: Option<u64>) -> String {
+pub(super) fn elapsed_text(seconds: Option<u64>) -> String {
     let Some(seconds) = seconds else { return "—".into() };
     if seconds < 60 { return tr_shared("orq_elapsed_seconds", &[("n", &seconds.to_string())]); }
     if seconds < 3600 { return tr_shared("orq_elapsed_minutes", &[("n", &(seconds / 60).to_string())]); }
@@ -124,20 +129,20 @@ fn elapsed_text(seconds: Option<u64>) -> String {
 }
 
 /// O início da execução na metodologia: a hora, e a data quando não é de hoje (a execução pode passar da meia-noite).
-fn since_text(iso: Option<&str>) -> String {
+pub(super) fn since_text(iso: Option<&str>) -> String {
     let Some(at) = local_time(iso) else { return "—".into() };
     let time = at.format("%H:%M").to_string();
     if at.date_naive() == Local::now().date_naive() { return time; }
     format!("{} {time}", tr("message_date").replace("{d}", &format!("{:02}", at.day())).replace("{m}", &format!("{:02}", at.month())))
 }
 
-fn section(key: &'static str, title: String, right: Option<String>, body: impl IntoElement, collapsed: bool, cx: &mut Context<Hangar>) -> Div {
+fn section(key: &'static str, title: String, right: Option<String>, body: impl IntoElement, collapsed: bool, history: bool, cx: &mut Context<Hangar>) -> Div {
     div().px_4().py(px(14.)).border_b_1().border_color(theme::border()).flex().flex_col().gap(px(10.))
         .child(div().flex().items_baseline().justify_between().gap_2()
             .child(Button::new(format!("orq-section-{key}")).ghost().xsmall()
                 .icon(if collapsed { IconName::ChevronRight } else { IconName::ChevronDown }).label(title)
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    if !this.side.orq.collapsed.remove(key) { this.side.orq.collapsed.insert(key); }
+                    if !this.orq_view_mut(history).collapsed.remove(key) { this.orq_view_mut(history).collapsed.insert(key); }
                     cx.notify();
                 })))
             .when_some(right, |el, text| el.child(div().min_w_0().truncate().text_xs().text_color(theme::faint()).child(text))))
@@ -159,6 +164,16 @@ fn chip(text: String, color: Hsla) -> Div {
 }
 
 impl Hangar {
+    fn orq_view(&self, history: bool) -> &View {
+        if history && let Some(state) = &self.orq_history { return &state.view; }
+        &self.side.orq.view
+    }
+
+    fn orq_view_mut(&mut self, history: bool) -> &mut View {
+        if history && let Some(state) = &mut self.orq_history { return &mut state.view; }
+        &mut self.side.orq.view
+    }
+
     /// Só com o painel à vista, a aba Contexto escolhida e uma sessão `orq` aberta; troca de sessão cancela a leitura em curso.
     pub(super) fn sync_orq_panel(&mut self, visible: bool) {
         let tab_shown = !self.subagent_tab_open() && !self.side_menu_shown() && self.side_tab() == SideTab::Context;
@@ -169,7 +184,7 @@ impl Hangar {
         if self.side.orq.data.as_ref().is_some_and(|(owner, _)| owner != &key) {
             self.side.orq.data = None;
             self.side.orq.error = None;
-            (self.side.orq.queued_open, self.side.orq.ended_open, self.side.orq.advanced_open) = (false, false, false);
+            self.side.orq.view = View::default();
         }
         let (connection, tx, generation, name) = (self.connection, self.tx.clone(), self.side.orq.generation, key.name.clone());
         let owner = key.clone();
@@ -200,7 +215,7 @@ impl Hangar {
         let panel = self.side.orq.data.as_ref().filter(|(owner, _)| owner == &key).map(|(_, panel)| Arc::clone(panel));
         let error = self.side.orq.error.as_ref().filter(|(owner, _)| owner == &key).map(|(_, error)| error.clone());
         let orq_target = super::sidebar::Target::new(&self.open_server(), &key.name);
-        let live: HashMap<String, String> = self.sessions_of(&key.server).iter().map(|s| (s.name.clone(), s.state.clone())).collect();
+
         let message = |text: String, color: Hsla| div().px_4().py(px(14.)).border_b_1().border_color(theme::border()).text_xs().text_color(color).whitespace_normal().child(text);
 
         let mut content = div().flex().flex_col();
@@ -213,41 +228,55 @@ impl Hangar {
             (Some(panel), error) => {
                 // A leitura anterior segue à vista quando um pedido falha; o erro vem em linha, nunca some.
                 if let Some(error) = error { content = content.child(message(tr_shared("orq_panel_fetch_error", &[("error", error)]), theme::warning())); }
-                for file in &panel.errors {
-                    content = content.child(message(tr_shared("orq_panel_file_error", &[("file", &file.file), ("error", &file.error)]), theme::warning()));
-                }
-                if panel.empty {
-                    content = content.child(message(tr_shared("orq_panel_empty", &[]), theme::muted()));
-                } else {
-                    let all_collapsed = self.side.orq.collapsed.len() == SECTIONS.len();
-                    content = content.child(div().px_4().pt_2().child(Button::new("orq-collapse-all").ghost().xsmall()
-                        .label(tr_shared(if all_collapsed { "orq_expand_all" } else { "orq_collapse_all" }, &[]))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.side.orq.collapsed = if all_collapsed { HashSet::new() } else { SECTIONS.into_iter().collect() };
-                            cx.notify();
-                        }))))
-                        .child(self.orq_timing(&panel.timing, cx))
-                        .child(self.orq_tasks(panel, cx))
-                        .child(self.orq_team(panel, &live, &orq_target, cx))
-                        .child(self.orq_decisions(panel, &orq_target, cx))
-                        .child(self.orq_automation(panel, cx))
-                        .child(self.orq_consumption(panel, cx))
-                        .child(self.orq_integration(panel, cx));
-                }
+                content = content.child(self.render_orq_content(panel, Some(&orq_target), false, cx));
             }
         }
         content.into_any_element()
     }
 
-    fn orq_timing(&self, timing: &OrqTiming, cx: &mut Context<Self>) -> Div {
-        section("time", tr_shared("orq_time_title", &[]), self.side.orq.collapsed.contains("time").then(|| elapsed_text(timing.elapsed_seconds)), div().flex().flex_col().gap_1()
+    pub(super) fn render_orq_content(&self, panel: &OrqPanel, orq_target: Option<&super::sidebar::Target>, history: bool, cx: &mut Context<Self>) -> Div {
+        let live = orq_target.map(|t| self.sessions_of(&t.server).iter().map(|s| (s.name.clone(), s.state.clone())).collect()).unwrap_or_default();
+        let message = |text: String, color: Hsla| div().px_4().py_2().text_xs().text_color(color).whitespace_normal().child(text);
+        let mut content = div().flex().flex_col();
+        if let Some(meta) = &panel.metadata {
+            content = content.child(div().px_4().py_3().flex().flex_col().gap_1()
+                .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).whitespace_normal().child(meta.title.clone()))
+                .child(note(meta.repo.clone())).child(note(tr_shared("orq_history_plan", &[("path", &meta.plan)])))
+                .when_some(meta.error.as_ref(), |el, error| el.child(message(error.clone(), theme::warning()))));
+        }
+        for file in &panel.errors {
+            content = content.child(message(tr_shared("orq_panel_file_error", &[("file", &file.file), ("error", &file.error)]), theme::warning()));
+        }
+        if panel.empty {
+            content = content.child(message(tr_shared("orq_panel_empty", &[]), theme::muted()));
+        } else {
+            let all_collapsed = self.orq_view(history).collapsed.len() == SECTIONS.len();
+            content = content.child(div().px_4().pt_2().child(Button::new("orq-collapse-all").ghost().xsmall()
+                .label(tr_shared(if all_collapsed { "orq_expand_all" } else { "orq_collapse_all" }, &[]))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.orq_view_mut(history).collapsed = if all_collapsed { HashSet::new() } else { SECTIONS.into_iter().collect() };
+                    cx.notify();
+                }))))
+                .child(self.orq_timing(&panel.timing, history, cx))
+                .child(self.orq_tasks(panel, history, cx))
+                .child(self.orq_team(panel, &live, orq_target, history, cx))
+                .child(self.orq_decisions(panel, orq_target, history, cx))
+                .child(self.orq_automation(panel, history, cx))
+                .child(self.orq_consumption(panel, history, cx))
+                .child(self.orq_integration(panel, history, cx));
+        }
+        content
+    }
+
+    fn orq_timing(&self, timing: &OrqTiming, history: bool, cx: &mut Context<Self>) -> Div {
+        section("time", tr_shared("orq_time_title", &[]), self.orq_view(history).collapsed.contains("time").then(|| elapsed_text(timing.elapsed_seconds)), div().flex().flex_col().gap_1()
             .child(div().text_lg().font_weight(FontWeight::SEMIBOLD).text_color(theme::text()).child(elapsed_text(timing.elapsed_seconds)))
             .child(note(tr_shared("orq_time_started", &[("time", &since_text(timing.started_at.as_deref()))])))
             .when_some(timing.finished_at.as_ref(), |el, end| el.child(note(tr_shared("orq_time_finished", &[("time", &since_text(Some(end)))]))))
-            .child(note(tr_shared("orq_time_method", &[]))), self.side.orq.collapsed.contains("time"), cx)
+            .child(note(tr_shared("orq_time_method", &[]))), self.orq_view(history).collapsed.contains("time"), history, cx)
     }
 
-    fn orq_tasks(&self, panel: &OrqPanel, cx: &mut Context<Self>) -> Div {
+    fn orq_tasks(&self, panel: &OrqPanel, history: bool, cx: &mut Context<Self>) -> Div {
         let tasks = &panel.tasks;
         let title = if tasks.total_known {
             tr_shared("orq_tasks_count", &[("n", &tasks.integrated.to_string()), ("total", &tasks.total.to_string())])
@@ -257,7 +286,7 @@ impl Hangar {
         let fraction = if tasks.total_known && tasks.total > 0 { (tasks.integrated as f32 / tasks.total as f32).clamp(0., 1.) } else { 0. };
         let bar = div().h(px(4.)).w_full().rounded_full().bg(theme::raised())
             .child(div().h_full().rounded_full().bg(theme::success()).w(relative(fraction)));
-        let pending: Vec<OrqPanelTask> = tasks.rows.iter().filter(|t| !self.side.orq.only_pending || t.state != "integrated").cloned().collect();
+        let pending: Vec<OrqPanelTask> = tasks.rows.iter().filter(|t| !self.orq_view(history).only_pending || t.state != "integrated").cloned().collect();
         let rows = task_rows(&pending);
         let row = |task: &OrqPanelTask| {
             let color = task_state_color(&task.state);
@@ -268,27 +297,27 @@ impl Hangar {
                     .child(note(tr_shared("orq_task_elapsed", &[("time", &elapsed_text(task.timing.elapsed_seconds))]))))
                 .child(chip(task_state_text(task), color))
         };
-        let queued_open = self.side.orq.queued_open;
-        let queue = (!self.side.orq.only_pending && !rows.queued.is_empty()).then(|| {
+        let queued_open = self.orq_view(history).queued_open;
+        let queue = (!self.orq_view(history).only_pending && !rows.queued.is_empty()).then(|| {
             let label = tr_shared("orq_tasks_queued", &[("n", &rows.queued.len().to_string())]);
             div().flex().flex_col()
                 .child(div().flex().child(Button::new("orq-queued").ghost().xsmall().label(label)
-                    .on_click(cx.listener(|this, _, _, cx| { this.side.orq.queued_open = !this.side.orq.queued_open; cx.notify(); }))))
+                    .on_click(cx.listener(move |this, _, _, cx| { this.orq_view_mut(history).queued_open = !this.orq_view_mut(history).queued_open; cx.notify(); }))))
                 .when(queued_open, |el| el.children(rows.queued.iter().map(|task| row(task))))
         });
         section("tasks", tr_shared("orq_tasks_title", &[]), Some(title), div().flex().flex_col().gap(px(8.))
             .child(bar)
             .child(div().flex().child(Button::new("orq-only-pending").ghost().xsmall()
-                .label(tr_shared(if self.side.orq.only_pending { "orq_show_all_tasks" } else { "orq_show_pending_tasks" }, &[]))
-                .on_click(cx.listener(|this, _, _, cx| { this.side.orq.only_pending = !this.side.orq.only_pending; cx.notify(); }))))
+                .label(tr_shared(if self.orq_view(history).only_pending { "orq_show_all_tasks" } else { "orq_show_pending_tasks" }, &[]))
+                .on_click(cx.listener(move |this, _, _, cx| { this.orq_view_mut(history).only_pending = !this.orq_view_mut(history).only_pending; cx.notify(); }))))
             .when(pending.is_empty(), |el| el.child(note(tr_shared("orq_no_pending_tasks", &[]))))
-            .child(div().flex().flex_col().children(rows.visible.iter().chain(rows.queued.iter().filter(|_| self.side.orq.only_pending)).map(|task| row(task))))
-            .children(queue), self.side.orq.collapsed.contains("tasks"), cx)
+            .child(div().flex().flex_col().children(rows.visible.iter().chain(rows.queued.iter().filter(|_| self.orq_view(history).only_pending)).map(|task| row(task))))
+            .children(queue), self.orq_view(history).collapsed.contains("tasks"), history, cx)
     }
 
-    fn orq_team(&self, panel: &OrqPanel, live: &HashMap<String, String>, orq_target: &super::sidebar::Target, cx: &mut Context<Self>) -> Div {
+    fn orq_team(&self, panel: &OrqPanel, live: &HashMap<String, String>, orq_target: Option<&super::sidebar::Target>, history: bool, cx: &mut Context<Self>) -> Div {
         let (shown, ended) = team_view(&panel.team, live);
-        let server = orq_target.server.clone();
+        let server = orq_target.map(|t| t.server.clone()).unwrap_or_default();
         let card = |row: &TeamRow, clickable: bool, cx: &mut Context<Self>| {
             let member = row.member;
             let round = round_text(row.status.round);
@@ -299,15 +328,15 @@ impl Hangar {
                 "orq_live_waiting" => theme::warning(),
                 _ => theme::faint(),
             };
-            let (name, arbiter, orq, server) = (member.name.clone(), member.role == "arbiter" && member.current, orq_target.clone(), server.clone());
+            let (name, arbiter, orq, server) = (member.name.clone(), member.role == "arbiter" && member.current, orq_target.cloned(), server.clone());
             div().id(SharedString::from(format!("orq-team-{}", member.name))).flex_1().min_w_0().flex().flex_col().gap(px(2.)).px_2().py_2()
                 .rounded(px(8.)).bg(theme::raised()).border_1().border_color(theme::border())
                 .child(div().min_w_0().flex().items_center().gap(px(6.)).child(dot(color))
                     .child(div().min_w_0().truncate().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(theme::text()).child(member.name.clone())))
                 .child(div().truncate().text_size(px(11.)).text_color(theme::faint()).child(format!("{role} · {status}")))
-                .when(clickable, |el| el.cursor_pointer().hover(|el| el.bg(theme::hover()))
+                .when(clickable && !history, |el| el.cursor_pointer().hover(|el| el.bg(theme::hover()))
                     .on_click(cx.listener(move |this, _, window, cx| {
-                        if arbiter { this.open_arbiter(&orq, window, cx); }
+                        if arbiter { if let Some(orq) = &orq { this.open_arbiter(orq, window, cx); } }
                         else { this.open_target(&super::sidebar::Target::new(&server, &name), window, cx); }
                     })))
         };
@@ -321,51 +350,51 @@ impl Hangar {
             div().flex().flex_col().gap(px(6.)).children(lines)
         };
         let live_cards: Vec<_> = shown.iter().map(|row| card(row, true, cx)).collect();
-        let ended_open = self.side.orq.ended_open;
+        let ended_open = self.orq_view(history).ended_open;
         let ended_block = (!ended.is_empty()).then(|| {
             let label = if ended_open { tr_shared("orq_team_hide_ended", &[]) } else { tr_shared("orq_team_show_ended", &[("n", &ended.len().to_string())]) };
             let cards: Vec<_> = if ended_open { ended.iter().map(|row| card(row, false, cx)).collect() } else { Vec::new() };
             div().flex().flex_col().gap(px(6.))
                 .child(div().flex().child(Button::new("orq-ended").ghost().xsmall().label(label)
-                    .on_click(cx.listener(|this, _, _, cx| { this.side.orq.ended_open = !this.side.orq.ended_open; cx.notify(); }))))
+                    .on_click(cx.listener(move |this, _, _, cx| { this.orq_view_mut(history).ended_open = !this.orq_view_mut(history).ended_open; cx.notify(); }))))
                 .when(!cards.is_empty(), |el| el.child(pair(cards)))
         });
-        section("team", tr_shared("orq_team_title", &[]), None, div().flex().flex_col().gap(px(8.)).child(pair(live_cards)).children(ended_block), self.side.orq.collapsed.contains("team"), cx)
+        section("team", tr_shared("orq_team_title", &[]), None, div().flex().flex_col().gap(px(8.)).child(pair(live_cards)).children(ended_block), self.orq_view(history).collapsed.contains("team"), history, cx)
     }
 
-    fn orq_decisions(&self, panel: &OrqPanel, orq_target: &super::sidebar::Target, cx: &mut Context<Self>) -> Div {
-        let has_arbiter = self.arbiter_of(orq_target).is_some();
+    fn orq_decisions(&self, panel: &OrqPanel, orq_target: Option<&super::sidebar::Target>, history: bool, cx: &mut Context<Self>) -> Div {
+        let has_arbiter = orq_target.is_some_and(|t| self.arbiter_of(t).is_some());
         let body = if panel.decisions.is_empty() {
             div().text_xs().text_color(theme::faint()).child(tr_shared("orq_decisions_none", &[]))
         } else {
             div().flex().flex_col().gap_2().children(panel.decisions.iter().enumerate().map(|(index, decision)| {
                 let time = clock_of(decision.ts.as_deref()).unwrap_or_else(|| "—".into());
                 let parecer = decision.parecer.clone().filter(|path| !path.is_empty());
-                let orq = orq_target.clone();
+                let orq = orq_target.cloned();
                 div().flex().flex_col().gap(px(6.)).px_3().py_2().rounded(px(10.)).border_1().border_color(theme::warning().opacity(0.34)).bg(theme::warning().opacity(0.08))
                     .child(div().flex().items_center().gap_2().text_xs().text_color(theme::muted())
                         .children(decision.task.map(|task| chip(format!("T{task}"), theme::warning())))
                         .child(tr_shared("orq_decision_unanswered", &[("time", &time)])))
                     .child(div().text_sm().text_color(theme::text()).whitespace_normal().child(decision.question.clone()))
                     .child(div().flex().flex_wrap().gap_1()
-                        .children(parecer.map(|path| Button::new(SharedString::from(format!("orq-parecer-{index}"))).ghost().xsmall()
+                        .children(parecer.filter(|_| !history).map(|path| Button::new(SharedString::from(format!("orq-parecer-{index}"))).ghost().xsmall()
                             .label(tr_shared("orq_open_parecer", &[]))
                             .on_click(cx.listener(move |this, _, window, cx| this.open_file(path.clone(), None, window, cx)))))
                         .child(Button::new(SharedString::from(format!("orq-arbiter-{index}"))).ghost().xsmall().label(tr_shared("orq_talk_to_arbiter", &[]))
                             .disabled(!has_arbiter)
-                            .on_click(cx.listener(move |this, _, window, cx| this.open_arbiter(&orq, window, cx)))))
+                            .on_click(cx.listener(move |this, _, window, cx| if let Some(orq) = &orq { this.open_arbiter(orq, window, cx); }))))
             }))
         };
-        section("decisions", tr_shared("orq_decisions_title", &[]), (!panel.decisions.is_empty()).then(|| panel.decisions.len().to_string()), body, self.side.orq.collapsed.contains("decisions"), cx)
+        section("decisions", tr_shared("orq_decisions_title", &[]), (!panel.decisions.is_empty()).then(|| panel.decisions.len().to_string()), body, self.orq_view(history).collapsed.contains("decisions"), history, cx)
     }
 
-    fn orq_automation(&self, panel: &OrqPanel, cx: &mut Context<Self>) -> Div {
+    fn orq_automation(&self, panel: &OrqPanel, history: bool, cx: &mut Context<Self>) -> Div {
         let auto = &panel.automation;
         let mode = tr_shared("orq_auto_mode", &[("jev", &mode_text(auto.mode.jev.as_deref().unwrap_or("—"))), ("regex", &mode_text(auto.mode.regex.as_deref().unwrap_or("—")))]);
         let woke = tr_shared("orq_auto_woke_detail", &[("decisions", &auto.woke.decisions.to_string()), ("alarms", &auto.woke.alarms.to_string()), ("messages", &auto.woke.messages.to_string())]);
         let alone = tr_shared("orq_auto_alone_detail", &[("opened", &auto.alone.opened.to_string()), ("integrated", &auto.alone.integrated.to_string()), ("dropped", &auto.alone.dropped.to_string())]);
         let advanced = &auto.advanced;
-        let open = self.side.orq.advanced_open;
+        let open = self.orq_view(history).advanced_open;
         let line = |label: String, value: String, hint: Option<String>| div().flex().flex_col().gap(px(2.))
             .child(div().flex().items_baseline().justify_between().gap_2().text_sm()
                 .child(div().min_w_0().text_color(theme::text()).child(label))
@@ -375,7 +404,7 @@ impl Hangar {
         let details = div().flex().flex_col().gap_2().px_2().py_2().rounded(px(8.)).border_1().border_color(theme::border())
             .child(div().id("orq-advanced").cursor_pointer().text_sm().text_color(theme::muted())
                 .child(format!("{} {}", if open { "▾" } else { "▸" }, tr_shared("orq_adv_title", &[])))
-                .on_click(cx.listener(|this, _, _, cx| { this.side.orq.advanced_open = !this.side.orq.advanced_open; cx.notify(); })))
+                .on_click(cx.listener(move |this, _, _, cx| { this.orq_view_mut(history).advanced_open = !this.orq_view_mut(history).advanced_open; cx.notify(); })))
             .when(open, |el| el
                 .child(line(tr_shared("orq_adv_false_positive", &[]), advanced.would_drop.to_string(), Some(tr_shared("orq_adv_false_positive_hint", &[]))))
                 .child(line(tr_shared("orq_adv_disagree", &[]),
@@ -389,15 +418,15 @@ impl Hangar {
                 .child(stat(auto.alone.total.to_string(), tr_shared("orq_auto_alone", &[])))
                 .child(stat(auto.dropped_by_jev.to_string(), tr_shared("orq_auto_dropped", &[]))))
             .child(note(format!("{woke} · {alone}")))
-            .child(details), self.side.orq.collapsed.contains("automation"), cx)
+            .child(details), self.orq_view(history).collapsed.contains("automation"), history, cx)
     }
 
-    fn orq_consumption(&self, panel: &OrqPanel, cx: &mut Context<Self>) -> Div {
+    fn orq_consumption(&self, panel: &OrqPanel, history: bool, cx: &mut Context<Self>) -> Div {
         let title = tr_shared("orq_use_title", &[]);
         let Some(usage) = panel.consumption.as_ref() else {
             // Consumo que falhou já tem a própria linha de erro no topo: não fica em "calculando".
             let failed = panel.errors.iter().any(|error| error.file == "consumption");
-            return section("consumption", title, None, div().text_xs().text_color(theme::muted()).when(!failed, |el| el.child(tr_shared("orq_use_computing", &[]))), self.side.orq.collapsed.contains("consumption"), cx);
+            return section("consumption", title, None, div().text_xs().text_color(theme::muted()).when(!failed, |el| el.child(tr_shared("orq_use_computing", &[]))), self.orq_view(history).collapsed.contains("consumption"), history, cx);
         };
         let usd = |value: Option<f64>| value.map_or_else(|| "—".to_owned(), |usd| self.money(usd));
         // A coluna já diz a moeda no cabeçalho: na linha vai só o número.
@@ -423,7 +452,9 @@ impl Hangar {
                 table = table.child(row(name, tok(model.new as f64), tok(model.cache_read as f64), usd_number(model.usd), false));
             }
         }
-        let method = tr_shared("orq_use_method", &[("since", &since_text(usage.since.as_deref()))]);
+        let method = if let Some(until) = &usage.until {
+            tr_shared("orq_use_method_completed", &[("since", &since_text(usage.since.as_deref())), ("until", &since_text(Some(until)))])
+        } else { tr_shared("orq_use_method", &[("since", &since_text(usage.since.as_deref()))]) };
         section("consumption", title, Some(usage_header(&usage.sessions)), div().flex().flex_col().gap_2()
             .child(div().flex().gap(px(6.))
                 .child(stat(tok(usage.totals.new as f64), tr_shared("orq_use_new", &[])))
@@ -432,10 +463,10 @@ impl Hangar {
             .child(table)
             .child(note(method))
             .when(!usage.sessions.missing.is_empty(), |el| el.child(note(tr_shared("orq_use_missing", &[("names", &usage.sessions.missing.join(", "))]))))
-            .when(!usage.missing_prices.is_empty(), |el| el.child(note(tr_shared("orq_use_no_price", &[("models", &usage.missing_prices.join(", "))])))), self.side.orq.collapsed.contains("consumption"), cx)
+            .when(!usage.missing_prices.is_empty(), |el| el.child(note(tr_shared("orq_use_no_price", &[("models", &usage.missing_prices.join(", "))])))), self.orq_view(history).collapsed.contains("consumption"), history, cx)
     }
 
-    fn orq_integration(&self, panel: &OrqPanel, cx: &mut Context<Self>) -> Div {
+    fn orq_integration(&self, panel: &OrqPanel, history: bool, cx: &mut Context<Self>) -> Div {
         let integration = &panel.integration;
         let label = |text: String| div().flex_shrink_0().text_sm().text_color(theme::muted()).child(text);
         let mono = |text: String| div().min_w_0().truncate().px(px(6.)).rounded(px(4.)).bg(theme::raised()).text_xs().font_family(crate::theme::MONO).text_color(theme::text()).child(text);
@@ -467,7 +498,7 @@ impl Hangar {
             }))
             .child(div().flex().items_center().gap_2().child(label(tr_shared("orq_int_last", &[]))).child(div().min_w_0().truncate().text_sm().text_color(theme::text()).child(last)))
             .children(outcome.map(|(key, color)| status(tr_shared(key, &[]), color)))
-            .children(checks_line.map(|(text, color)| status(text, color))), self.side.orq.collapsed.contains("integration"), cx)
+            .children(checks_line.map(|(text, color)| status(text, color))), self.orq_view(history).collapsed.contains("integration"), history, cx)
     }
 }
 

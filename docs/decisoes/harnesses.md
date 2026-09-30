@@ -5,6 +5,14 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
 
 ## Regras vigentes
 
+- **Modo de abertura omitido herda a preferência do servidor.** `headless_default` nasce
+  ligado para Claude/Codex; a escolha humana do dono na criação passa a ser o padrão.
+  `headless=false`/`--terminal` e `headless=true`/`--headless` explícitos prevalecem.
+  Chamadas automatizadas não gravam preferência. Convidado pode escolher para sua sessão,
+  mas não acessa a configuração global. Providers sem suporte e isolamento `read_only`
+  usam terminal quando o modo é omitido; `read_only` com sem terminal explícito continua
+  recusado. O wrapper interativo do Codex sempre solicita terminal.
+
 - **Lista e chat do Codex usam o mesmo estado nativo quando a conexão está saudável e assinada.**
   O hook é alternativa para estado indisponível; um `working` antigo não vence a interrupção
   confirmada pelo app-server. O retrato só vale para a mesma thread do rollout.

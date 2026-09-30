@@ -789,7 +789,26 @@ teclado por `poll`/`epoll` (o `read` do fish, o readline do Node/inquirer) não 
 
 ## Orquestrador sem LLM: a conversa e o painel saem dos arquivos da execução
 
-(29/09/2026, pedido do usuário.) A sessão `orq` não tem transcript de modelo; o que ela mostra é
+### Histórico independente das sessões
+
+30/09/2026. O histórico lista as pastas do cofre mesmo depois de a sessão orquestradora sair
+da lista. `GET /api/orq/{id}/panel` reaproveita o painel por execução; não cria sessão fictícia
+e continua só de leitura. Rust abre a consulta pelo relógio da barra superior; o PWA mantém
+sua tela Orquestração. Nome vem do título do plano, com projeto e caminho como identificação.
+
+O fluxo de escrita (`orq init`, início de Task e encerramento) guarda `plan.snapshot.md` para
+preservar títulos e tarefas quando a pasta original for removida. Consultar não cria essa cópia.
+Execuções antigas sem plano preservado usam os dados ainda disponíveis, sem inventar tarefas.
+
+Consumo de execução encerrada ignora sessões vivas de mesmo nome. Claude e Codex são cortados
+por resposta entre início e fim, antes da agregação e da deduplicação; retomadas posteriores
+não aumentam o histórico. Fonte ausente ou sem leitor histórico preciso aparece como consumo
+parcial. Os registros da execução e os transcripts continuam sendo as fontes: apagar um
+transcript pode tornar sua medição indisponível.
+
+### Base do painel (29/09/2026)
+
+A sessão `orq` não tem transcript de modelo; o que ela mostra é
 lido dos arquivos da execução por um parser só, `orq_timeline.py`, e cada cliente desenha o
 resultado. O `ChatEvent` ganha o campo `orq` (estrutura da linha) e mantém o texto cru, para o
 cliente que ainda não conhece o campo (o app Expo) seguir mostrando o aviso de antes.
@@ -821,7 +840,7 @@ que falha vira item de `errors`, nunca exceção.
   nunca trava a orquestração viva: falha vai para o diário e o passo segue. Nome repetido: a
   última linha vence.
 
-**Consumo.** Soma os transcripts do time pelo índice de custos do Hangar, só do uso a partir de
+**Consumo em andamento.** Soma os transcripts do time pelo índice de custos do Hangar, só do uso a partir de
 `execucao_inicio` (no Claude o corte é por segmento diário do índice, não por resposta). Cada
 transcript é achado por, nesta ordem: ids de `sessions.jsonl` (execuções novas), `medicao/*.json`
 e a sessão viva de mesmo nome; o que nenhum caminho alcança entra em `sessions.missing` e o

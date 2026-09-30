@@ -216,7 +216,7 @@ def test_main_cria_sessao_nova_e_escolhe_cliente(w, monkeypatch, tmp_path, promp
     name = f"{tmp_path.name}-2"
     if backend == "ativo":
         assert pedidos[1] == ("POST", "/api/sessions", {
-            "name": name, "cwd": cwd, "provider": "codex", "initial_prompt": prompt,
+            "name": name, "cwd": cwd, "provider": "codex", "headless": False, "initial_prompt": prompt,
         })
     else:
         creation = next(c for c in chamadas if c[1] == "new-session")

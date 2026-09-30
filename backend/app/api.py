@@ -1593,7 +1593,7 @@ class CreateBody(_StrictBody):
     read_only: bool = Field(default=False, strict=True)
     # Claude ou Codex SEM terminal roda atrás do cano, sem tmux. O que depende de pane
     # (painel de terminal, espelho) não existe.
-    headless: bool = Field(default=False, strict=True)
+    headless: bool | None = Field(default=None, strict=True)
 
 
 def _jev_efetivo(pedido: bool | None) -> bool:
@@ -2104,6 +2104,9 @@ def _allowed_scan_root(path: str) -> Path:
 
 
 async def _criar_sessao(body: CreateBody, worktree: dict):
+    if body.headless is None:
+        body = body.model_copy(update={"headless": not body.read_only and body.provider in ("claude", "codex")
+                                      and bool(runtime_config.get("headless_default"))})
     # Handler async por causa da trava de conta mais abaixo. Todo provider passa pelo MESMO
     # registry.create — o Codex tambem, desde que o lancador unico virou o comando do pane dele.
     # registry.create e SINCRONO e spawna um
@@ -4334,7 +4337,7 @@ class PapelBody(_StrictBody):
     conta: str
     modelo: str = ""
     esforco: str = ""
-    headless: bool = False
+    headless: bool | None = None
     permissao: str = ""
     motor: str = ""
     jev: bool = False
@@ -4404,7 +4407,7 @@ class PapelItem(_StrictBody):
     # cabe à conta de índice (N-1) % total. "par" = todas ao mesmo tempo.
     vez: str = ""
     # Abertura da sessão do papel: as mesmas escolhas da criação de sessão, gravadas como flags.
-    headless: bool = False
+    headless: bool | None = None
     permissao: str = ""
     motor: str = ""
     jev: bool = False
@@ -6047,9 +6050,10 @@ async def orq_lista():
         for t in d["tasks"]:
             t.pop("eventos", None)
         d["watchdog"] = vigias[e.id]
+        d["metadata"] = orq.run_metadata(raiz / e.id, e.plano)
         return d
 
-    return {"execucoes": [_resumo(e) for e in execs], "fichas": orq.fichas(execs)}
+    return await asyncio.to_thread(lambda: {"execucoes": [_resumo(e) for e in execs], "fichas": orq.fichas(execs)})
 
 
 @app.get("/api/orq/{exec_id}", dependencies=[Depends(require_auth)])
@@ -6057,7 +6061,17 @@ async def orq_detalhe(exec_id: str):
     e = await asyncio.to_thread(orq.detalhe, orq.raiz_padrao(), exec_id)
     if e is None:
         raise HTTPException(404, detail=erro("erro_nao_encontrado", "execucao nao encontrada"))
-    return asdict(e)
+    metadata = await asyncio.to_thread(orq.run_metadata, orq.raiz_padrao() / e.id, e.plano)
+    return {**asdict(e), "metadata": metadata}
+
+
+@app.get("/api/orq/{exec_id}/panel", dependencies=[Depends(require_auth)])
+async def orq_history_panel(exec_id: str):
+    """O mesmo painel por execução, sem exigir uma sessão viva."""
+    d = orq.exec_dir(orq.raiz_padrao(), exec_id)
+    if d is None or not await asyncio.to_thread((d / "eventos.jsonl").is_file):
+        raise HTTPException(404, detail=erro("erro_nao_encontrado", "execucao nao encontrada"))
+    return await asyncio.to_thread(orq_timeline.panel, d, _guardar_snap)
 
 
 @app.get("/api/orq/{exec_id}/conductor", dependencies=[Depends(require_auth)])

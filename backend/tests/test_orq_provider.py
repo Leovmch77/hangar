@@ -224,3 +224,17 @@ def test_a_parecer_cited_in_the_timeline_opens_through_the_file_route(root, tmp_
     assert [x["parecer"] for x in panel["decisions"]] == [str(parecer)]
     r = client.get("/api/sessions/g1-orq/file", params={"path": str(parecer)}, headers=H)
     assert r.status_code == 200, r.text
+
+
+def test_history_panel_remains_readable_after_session_disappears(root, monkeypatch):
+    from app import api, orq
+    d = _run(root, "2026-09-28-done", "done", ended=True)
+    monkeypatch.setattr(settings, "auth_token", "secret")
+    monkeypatch.setattr(orq, "raiz_padrao", lambda: root)
+    monkeypatch.setattr(orq_timeline, "_consumption", lambda *args: (None, None))
+    with patch.object(api, "_cached_info_sync", side_effect=AssertionError("live session queried")):
+        response = TestClient(api.app).get(f"/api/orq/{d.name}/panel", headers=H)
+    assert response.status_code == 200, response.text
+    assert response.json()["timing"]["elapsed_seconds"] == 3600
+    assert TestClient(api.app).get("/api/orq/missing/panel", headers=H).status_code == 404
+    assert TestClient(api.app).get(f"/api/orq/{d.name}/panel").status_code == 401

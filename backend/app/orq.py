@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -202,6 +203,44 @@ def detalhe(raiz: Path, exec_id: str) -> ExecucaoResumo | None:
         return None
     eventos = _le_eventos(d / "eventos.jsonl")
     return _monta(exec_id, eventos) if eventos else None
+
+
+def run_metadata(d: Path, plan: str = "") -> dict:
+    """Identidade legível mesmo quando a sessão e a pasta de trabalho já saíram da lista."""
+    cfg = {}
+    error = None
+    try:
+        raw = json.loads((d / "orq.json").read_text(encoding="utf-8"))
+        if isinstance(raw, dict):
+            cfg = raw
+    except FileNotFoundError:
+        pass
+    except (OSError, ValueError) as exc:
+        error = str(exc)
+    path = cfg.get("plan") if isinstance(cfg.get("plan"), str) else plan
+    title = Path(path).stem if path else d.name
+    title = re.sub(r"^\d{4}-\d{2}-\d{2}-", "", title).removesuffix(".orq").replace("-", " ")
+    total = None
+    planned = []
+    if path:
+        text = None
+        for source in (Path(path).expanduser(), d / "plan.snapshot.md"):
+            try:
+                text = source.read_text(encoding="utf-8")
+                break
+            except (OSError, ValueError) as exc:
+                error = str(exc)
+        if text is not None:
+            from app import orq_start
+            error = None
+            heading = re.search(r"^#\s+(.+)$", text, re.MULTILINE)
+            if heading:
+                title = heading[1].strip()
+            tasks = orq_start._orq().plan_tasks(text)
+            total = len(tasks) if tasks else None
+            planned = [{"n": task["n"], "title": task["title"]} for task in tasks]
+    return {"title": title or d.name, "plan": path, "repo": cfg.get("repo") if isinstance(cfg.get("repo"), str) else "",
+            "total_tasks": total, "tasks": planned, "error": error}
 
 
 def fichas(execucoes: list[ExecucaoResumo]) -> list[dict]:

@@ -7,13 +7,15 @@ import { money, tok } from '../lib/fmt';
 import { moeda } from '../lib/moeda.svelte';
 import { intlLocale } from '../lib/locale';
 
-const { getPanel, store } = vi.hoisted(() => ({
+const { getPanel, getHistoryPanel, store } = vi.hoisted(() => ({
   getPanel: vi.fn(),
+  getHistoryPanel: vi.fn(),
   store: { retain: vi.fn(), release: vi.fn(), sessionsForServer: vi.fn((_id: string): { name: string; state: string }[] => []) },
 }));
 vi.mock('@hangar/core', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@hangar/core')>()),
   getOrqPanelForServer: getPanel,
+  getOrqHistoryPanelForServer: getHistoryPanel,
 }));
 vi.mock('../lib/sessionsStore.svelte', () => ({ sessionsStore: store }));
 
@@ -45,21 +47,21 @@ function panel(over: Partial<Data> = {}): Data {
 
 let alvo: HTMLElement;
 let comp: ReturnType<typeof mount> | null = null;
-async function montar(extra: Partial<{ arbiter: string | null; onOpenSession: (n: string) => void; onOpenFile: (p: string) => void }> = {}) {
+async function montar(extra: Partial<{ runId: string; arbiter: string | null; onOpenSession: (n: string) => void; onOpenFile: (p: string) => void }> = {}) {
   document.body.innerHTML = '';
   alvo = document.body.appendChild(document.createElement('div'));
   comp = mount(OrqPanel, {
     target: alvo,
     props: { server: SERVER, sessionName: 'g-orq', arbiter: 'g-arbiter', onOpenSession: () => {}, onOpenFile: () => {}, ...extra },
   });
-  await vi.waitFor(() => expect(getPanel).toHaveBeenCalled());
+  await vi.waitFor(() => expect(getPanel.mock.calls.length + getHistoryPanel.mock.calls.length).toBeGreaterThan(0));
   await tick(); await tick();
 }
 const text = () => alvo.textContent ?? '';
 const byText = (sel: string, t: string) =>
   [...alvo.querySelectorAll<HTMLElement>(sel)].find((e) => e.textContent?.includes(t));
 
-beforeEach(() => { getPanel.mockReset(); store.retain.mockReset(); store.release.mockReset(); store.sessionsForServer.mockReset(); store.sessionsForServer.mockReturnValue([]); });
+beforeEach(() => { getPanel.mockReset(); getHistoryPanel.mockReset(); store.retain.mockReset(); store.release.mockReset(); store.sessionsForServer.mockReset(); store.sessionsForServer.mockReturnValue([]); });
 afterEach(async () => {
   if (comp) await unmount(comp);
   comp = null; document.body.innerHTML = '';
@@ -300,4 +302,14 @@ it('filtra tasks pendentes e recolhe todas as seções', async () => {
   byText('button', m.orq_show_all_tasks())!.click();
   await tick();
   expect([...alvo.querySelectorAll('.task-row .n')].map((e) => e.textContent)).toEqual(['T1']);
+});
+
+
+it('abre execução arquivada sem consultar nem assinar uma sessão viva', async () => {
+  getHistoryPanel.mockResolvedValue(panel({ metadata: { title: 'historical-plan', plan: '/plan.md', repo: '/project', total_tasks: 2, error: null } }));
+  await montar({ runId: 'finished-run' });
+  expect(getHistoryPanel).toHaveBeenCalledWith(SERVER, 'finished-run');
+  expect(getPanel).not.toHaveBeenCalled();
+  expect(store.retain).not.toHaveBeenCalled();
+  expect(text()).toContain('historical-plan');
 });

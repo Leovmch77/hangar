@@ -84,11 +84,22 @@ fn configs_of(result: Result<Value, Failure>) -> Result<Vec<ConfigDir>, String> 
     result.map_err(|e| Hangar::fetch_failure(&e)).and_then(|v| serde_json::from_value(v).map_err(|_| tr("invalid_response")))
 }
 
+async fn owner_config(api: &Api) -> (bool, Result<Option<Value>, Failure>) {
+    match api.server_read(&["me"], &[], 8).await {
+        Ok(me) if me.get("role").and_then(Value::as_str) == Some("guest") => return (false, Ok(None)),
+        Ok(me) if me.get("role").and_then(Value::as_str) == Some("owner") => {},
+        Err(error) if error.status == Some(404) => {},
+        Err(error) => return (false, Err(error)),
+        _ => return (false, Err(Failure::local(tr("invalid_response")))),
+    }
+    (true, api.server_read(&["config"], &[], 8).await.map(Some))
+}
+
 impl NewSession {
     pub(super) fn load_extras(&mut self, cx: &mut Context<Self>) {
         let (engines, config, quotas) = (self.engines.start(), self.jev.start(), self.quotas.start());
         self.request(cx, move |api, send| Box::pin(async move {
-            let (e, c, q) = tokio::join!(api.server_read(&["engines"], &[], 15), api.server_read(&["config"], &[], 8),
+            let (e, c, q) = tokio::join!(api.server_read(&["engines"], &[], 15), owner_config(&api),
                 api.server_read(&["cotas"], &[], 15));
             send(CreateReply::Engines(engines, e)).await;
             send(CreateReply::Config(config, c)).await;
@@ -96,10 +107,14 @@ impl NewSession {
         }));
     }
 
-    /// Só a cota: a tela sem sessão não mostra motor nem Jev.
+    /// A tela compacta também lê o modo padrão do servidor.
     pub(super) fn load_quotas(&mut self, cx: &mut Context<Self>) {
-        let seq = self.quotas.start();
-        self.request(cx, move |api, send| Box::pin(async move { send(CreateReply::Quotas(seq, api.server_read(&["cotas"], &[], 15).await)).await }));
+        let (seq, config) = (self.quotas.start(), self.jev.start());
+        self.request(cx, move |api, send| Box::pin(async move {
+            let (q, c) = tokio::join!(api.server_read(&["cotas"], &[], 15), owner_config(&api));
+            send(CreateReply::Quotas(seq, q)).await;
+            send(CreateReply::Config(config, c)).await;
+        }));
     }
 
     /// As contas Claude oferecidas. O `/api/cotas` só traz conta de verdade (carimbada pelo app) e a ativa, o mesmo corte do
@@ -171,7 +186,7 @@ impl NewSession {
 
     /// A permissão existe para o Claude e para o Codex sem terminal, cada um com a própria lista.
     pub(super) fn permissions(&self) -> Option<&'static [&'static str]> {
-        match (self.provider, self.headless) { ("claude", _) => Some(&PERMISSIONS), ("codex", true) => Some(&CODEX_PERMISSIONS), _ => None }
+        match (self.provider, self.headless && !self.headless_inherited()) { ("claude", _) => Some(&PERMISSIONS), ("codex", true) => Some(&CODEX_PERMISSIONS), _ => None }
     }
 
     fn pick_at(choices: &[ModelChoice], value: &str) -> Option<usize> { choices.iter().position(|c| c.id == value).or(Some(0)) }
@@ -315,10 +330,18 @@ impl NewSession {
                 });
                 if self.engines.finish(seq, list) { self.build_engine_pick(window, cx); }
             }
-            CreateReply::Config(seq, result) => {
+            CreateReply::Config(seq, (owner, result)) => {
+                if seq != self.jev.seq { return; }
+                self.headless_owner = Some(owner);
+                if !self.headless_touched && !self.creating {
+                    if let Ok(Some(value)) = &result {
+                        self.headless = value.pointer("/campos/headless_default/valor").and_then(Value::as_bool).unwrap_or(true);
+                        self.build_permission_pick(window, cx);
+                    } else if let Err(error) = &result { self.error = Some(Hangar::fetch_failure(error)); }
+                }
                 let jev = result.map_err(|e| Hangar::fetch_failure(&e)).map(|v| Jev {
-                    key: v.pointer("/campos/jev_api_key/definido").and_then(Value::as_bool).unwrap_or(false),
-                    default: v.pointer("/campos/jev_padrao/valor").and_then(Value::as_bool).unwrap_or(false),
+                    key: v.as_ref().and_then(|v| v.pointer("/campos/jev_api_key/definido")).and_then(Value::as_bool).unwrap_or(false),
+                    default: v.as_ref().and_then(|v| v.pointer("/campos/jev_padrao/valor")).and_then(Value::as_bool).unwrap_or(false),
                 });
                 if self.jev.finish(seq, jev) { self.jev_on = self.jev.ok().is_some_and(|j| j.default); }
             }
@@ -637,6 +660,36 @@ impl NewSession {
 #[cfg(test)]
 mod tests {
     use super::{ModelOption, QuotaLine, until};
+
+    #[tokio::test]
+    async fn config_is_only_requested_for_owner_or_legacy_backend() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for (status, role, owner) in [(200, "guest", false), (200, "owner", true), (404, "", true)] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let api = super::Api::new(&format!("http://{}", listener.local_addr().unwrap()), "test").unwrap();
+            let server = tokio::spawn(async move {
+                let mut paths = Vec::new();
+                let mut replies = vec![(status, serde_json::json!({"role": role}).to_string())];
+                if owner { replies.push((200, "{\"campos\":{}}".into())); }
+                for (status, body) in replies {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    let mut bytes = vec![0; 4096];
+                    let count = stream.read(&mut bytes).await.unwrap();
+                    paths.push(String::from_utf8_lossy(&bytes[..count]).lines().next().unwrap().to_owned());
+                    let response = format!("HTTP/1.1 {status} OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                    stream.write_all(response.as_bytes()).await.unwrap();
+                }
+                paths
+            });
+            let (is_owner, config) = super::owner_config(&api).await;
+            assert_eq!(is_owner, owner);
+            assert_eq!(config.unwrap().is_some(), owner);
+            let paths = tokio::time::timeout(std::time::Duration::from_secs(2), server).await.unwrap().unwrap();
+            assert!(paths[0].starts_with("GET /api/me "));
+            assert_eq!(paths.len(), if owner { 2 } else { 1 });
+            if owner { assert!(paths[1].starts_with("GET /api/config ")); }
+        }
+    }
 
     #[test]
     fn quota_and_models_read_like_the_web() {

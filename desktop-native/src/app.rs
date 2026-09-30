@@ -34,6 +34,8 @@ mod machines;
 mod orchestration;
 mod orq_roles;
 mod orq_panel;
+mod orq_history;
+mod home_usage;
 mod orq_timeline;
 mod panes;
 mod popup;
@@ -462,6 +464,9 @@ pub struct Hangar {
     device: device::Device,
     accounts: accounts::Accounts,
     orchestration: orchestration::Orchestration,
+    orq_history: Option<orq_history::History>,
+    orq_history_serial: u64,
+    home_usage: home_usage::HomeUsage,
     shortcuts: shortcuts::Shortcuts,
     harness: harness::Harnesses,
     server_config: server_config::ServerConfig,
@@ -691,7 +696,7 @@ impl Hangar {
             appearance_note: appearance_error.map(|error| tr("settings_not_loaded").replace("{error}", &error)),
             desktop_note: None,
             palette_seq: 0, backdrop_seq: 0, backdrop_pending: false, backdrop: None, backdrop_note: None, backdrop_busy: None, grain: crate::media::grain(),
-            device: device::Device::default(), accounts: accounts::Accounts::default(), orchestration: orchestration::Orchestration::default(), shortcuts: shortcuts::Shortcuts::default(),
+            device: device::Device::default(), accounts: accounts::Accounts::default(), orchestration: orchestration::Orchestration::default(), orq_history: None, orq_history_serial: 0, home_usage: Default::default(), shortcuts: shortcuts::Shortcuts::default(),
             server_config: server_config::ServerConfig::default(), harness: harness::Harnesses::default(), sync: sync::Sync::default(), shared: shared_config::SharedConfig::default(), machines: machines::Machines::default(),
             costs: Default::default(), usage_stats: Default::default(), search: Default::default(), topbar: Default::default(), computer: computer::Computer::default(), new_session: None, sidebar,
             terminal: None, terminal_serial: 0,

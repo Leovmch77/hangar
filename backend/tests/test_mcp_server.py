@@ -287,3 +287,21 @@ async def test_new_session_recusa_quando_nao_da_pra_ler_a_conta(identidade, monk
 
 async def _coro(v):
     return v
+
+
+@pytest.mark.parametrize("mode", [None, False, True])
+async def test_new_session_preserves_mode_omission(identidade, monkeypatch, mode):
+    from app import api
+    from app.registry import SessionInfo
+    received = []
+    async def create(body):
+        received.append(body.headless)
+        return SessionInfo(name=body.name, cwd=body.cwd, headless=bool(body.headless))
+    monkeypatch.setattr(api, "create_session", create)
+    args = {"nome": "test-mode", "cwd": "/tmp", "conta": "/tmp/test-account"}
+    if mode is not None:
+        args["headless"] = mode
+    async with sessao_mcp({"X-Hangar-Pane": "%3"}) as session:
+        result = await session.call_tool("new_session", args)
+    assert not result.is_error
+    assert received == [mode]

@@ -720,9 +720,18 @@ export interface OrqTask {
   eventos?: OrqEvento[];
 }
 
+export interface OrqRunMetadata {
+  title: string;
+  plan: string;
+  repo: string;
+  total_tasks: number | null;
+  error: string | null;
+}
+
 export interface OrqExecucao {
   id: string;
   plano: string;
+  metadata?: OrqRunMetadata;
   branch: string;
   gid: string;
   inicio: string | null;
@@ -881,6 +890,7 @@ export interface OrqConsumptionModel {
 export interface OrqConsumption {
   computed_at: string;
   since: string | null;
+  until?: string | null;
   sessions: { team: number; measured: number; missing: string[] };
   totals: { new: number; cache_read: number; usd: number | null; usd_partial: boolean };
   providers: {
@@ -905,6 +915,7 @@ export interface OrqIntegration {
 
 export interface OrqPanel {
   run: string;
+  metadata?: OrqRunMetadata;
   gid: string;
   errors: { file: string; error: string }[];
   empty: boolean;

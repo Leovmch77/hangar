@@ -599,9 +599,9 @@ def test_opens_the_wave_up_to_paralelo_with_worktrees_rows_and_kickoffs(tmp_path
     assert git_in(wt2)("rev-parse", "HEAD") == g("rev-parse", "HEAD")
     assert [m for m in sent(log) if m.startswith("--new ")] == [
         f"--new w-t1 {wt1} --provider claude --conta 200-01 --model opus[1m] --effort medium",
-        f"--new w-rev-1 {wt1} --provider claude --model opus[1m] --effort high --read-only",
+        f"--new w-rev-1 {wt1} --provider claude --model opus[1m] --effort high --read-only --terminal",
         f"--new w-t2 {wt2} --provider codex --conta openai-codex --model gpt-6-sol --effort high --headless",
-        f"--new w-rev-2 {wt2} --provider claude --model opus[1m] --effort high --read-only",
+        f"--new w-rev-2 {wt2} --provider claude --model opus[1m] --effort high --read-only --terminal",
     ]
     assert [(x["task"], x["titulo"], x["executor"], x["par"]) for x in events(d)
             if x["tipo"] == "task_inicio"] == [(1, "first", "w-t1", "w-rev-1"), (2, "second", "w-t2", "w-rev-2")]
@@ -729,6 +729,9 @@ def test_role_row_rotation_risk_names_and_flags(monkeypatch):
     assert [m.session_name("w-t*", 4), m.session_name("w-review", 4)] == ["w-t4", "w-review-t4"]
     # The name the backend gives the session (app/names.py), not the one asked for.
     assert [m.session_name("revisão-t*", 4), m.session_name("rev x", 4)] == ["revisao-t4", "rev-x-t4"]
+    assert m.open_flags({"provider": "claude"}, False) == ["--provider", "claude"]
+    assert m.open_flags({"provider": "claude"}, True) == ["--provider", "claude", "--read-only", "--terminal"]
+    assert m.open_flags({"provider": "claude", "abertura": "--terminal"}, False) == ["--provider", "claude", "--terminal"]
     # The backend refuses a session without terminal and read-only together: headless wins.
     assert m.open_flags({"provider": "claude", "abertura": "--headless"}, True) == ["--provider", "claude", "--headless"]
 

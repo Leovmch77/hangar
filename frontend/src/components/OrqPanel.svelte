@@ -2,7 +2,7 @@
   import { onMount, untrack } from 'svelte';
   import type { Snippet } from 'svelte';
   import * as m from '../paraglide/messages';
-  import { formatElapsed, getOrqPanelForServer, pct, providerName, taskRows, teamView } from '@hangar/core';
+  import { formatElapsed, getOrqHistoryPanelForServer, getOrqPanelForServer, pct, providerName, taskRows, teamView } from '@hangar/core';
   import type { OrqPanel, OrqPanelTask, OrqTeamMember, OrqTeamRow, OrqTeamStatus, Server, SessionInfo } from '@hangar/core';
   import Spinner from './Spinner.svelte';
   import { sessionsStore } from '../lib/sessionsStore.svelte';
@@ -13,12 +13,13 @@
   interface Props {
     server: Server;
     sessionName: string;
+    runId?: string;
     arbiter: string | null;
     onOpenSession: (name: string) => void;
     onOpenFile: (path: string) => void;
     actions?: Snippet;
   }
-  let { server, sessionName, arbiter, onOpenSession, onOpenFile, actions }: Props = $props();
+  let { server, sessionName, runId, arbiter, onOpenSession, onOpenFile, actions }: Props = $props();
 
   let panel = $state<OrqPanel | null>(null);
   let error = $state('');
@@ -31,12 +32,12 @@
   // Um pedido por vez por sessão e servidor; resposta de sessão ou servidor já trocados é descartada.
   let inflight: string | null = null;
   async function load() {
-    const name = sessionName, srv = server, key = `${srv.id}::${name}`;
+    const name = sessionName, run = runId, srv = server, key = `${srv.id}::${run ? `run:${run}` : name}`;
     if (inflight === key) return;
     inflight = key;
-    const current = () => name === sessionName && srv.id === server.id;
+    const current = () => name === sessionName && run === runId && srv.id === server.id;
     try {
-      const p = await getOrqPanelForServer(srv, name);
+      const p = run ? await getOrqHistoryPanelForServer(srv, run) : await getOrqPanelForServer(srv, name);
       if (!current()) return;
       panel = p;
       error = '';
@@ -48,7 +49,7 @@
   }
 
   $effect(() => {
-    void sessionName; void server.id;
+    void sessionName; void runId; void server.id;
     untrack(() => {
       panel = null; error = ''; showQueued = false; showEnded = false;
       void load();
@@ -56,17 +57,22 @@
   });
 
   onMount(() => {
-    sessionsStore.retain();
     const tick = () => { if (document.visibilityState === 'visible') void load(); };
     const t = setInterval(tick, 10_000);
     document.addEventListener('visibilitychange', tick);
-    return () => { clearInterval(t); document.removeEventListener('visibilitychange', tick); sessionsStore.release(); };
+    return () => { clearInterval(t); document.removeEventListener('visibilitychange', tick); };
+  });
+
+  $effect(() => {
+    if (runId) return;
+    sessionsStore.retain();
+    return () => sessionsStore.release();
   });
 
   // Só quem vai mostrar custo pede a cotação.
   $effect(() => { if (panel?.consumption?.totals.usd != null) moeda.garantirCotacao(); });
 
-  const live = $derived(new Map(sessionsStore.sessionsForServer(server.id).map((s) => [s.name, s.state as string])));
+  const live = $derived(new Map((runId ? [] : sessionsStore.sessionsForServer(server.id)).map((s) => [s.name, s.state as string])));
   const team = $derived(panel ? teamView(panel.team, live) : { shown: [], ended: [] });
   const pending = $derived(panel?.tasks.rows.filter((t) => t.state !== 'integrated') ?? []);
   const rows = $derived(panel ? taskRows(panel.tasks.rows) : { visible: [], queued: [], queuedCount: 0 });
@@ -123,7 +129,7 @@
 </script>
 
 {#snippet member(t: OrqTeamRow)}
-  <button type="button" class="member" onclick={() => onOpenSession(t.name)}>
+  <button type="button" class="member" disabled={!!runId} onclick={() => onOpenSession(t.name)}>
     <b><span class="dot {dot(t.status.key)}"></span>{t.name}</b>
     <span class="sub">{role(t)} · {status(t.status)}</span>
   </button>
@@ -146,6 +152,15 @@
     {#each panel.errors as e (e.file)}
       <p class="warn">{m.orq_panel_file_error({ file: e.file, error: e.error })}</p>
     {/each}
+
+    {#if panel.metadata}
+      <div class="run-identity">
+        <strong>{panel.metadata.title}</strong>
+        {#if panel.metadata.repo}<p class="note">{panel.metadata.repo}</p>{/if}
+        {#if panel.metadata.plan}<p class="note">{m.orq_history_plan({ path: panel.metadata.plan })}</p>{/if}
+        {#if panel.metadata.error}<p class="warn">{panel.metadata.error}</p>{/if}
+      </div>
+    {/if}
 
     {#if panel.empty}
       <p class="muted">{m.orq_panel_empty()}</p>
@@ -219,9 +234,10 @@
             <div class="row">
               {#if d.parecer}
                 {@const parecer = d.parecer}
-                <button type="button" class="link" onclick={() => onOpenFile(parecer)}>{m.orq_open_parecer()}</button>
+                {#if runId}<code>{parecer}</code>
+                {:else}<button type="button" class="link" onclick={() => onOpenFile(parecer)}>{m.orq_open_parecer()}</button>{/if}
               {/if}
-              <button type="button" class="link" disabled={!arbiter} onclick={() => { if (arbiter) onOpenSession(arbiter); }}>{m.orq_talk_to_arbiter()}</button>
+              <button type="button" class="link" disabled={!arbiter || !!runId} onclick={() => { if (arbiter) onOpenSession(arbiter); }}>{m.orq_talk_to_arbiter()}</button>
             </div>
           </div>
         {:else}
@@ -285,7 +301,9 @@
               {/each}
             </tbody>
           </table>
-          <p class="note">{m.orq_use_method({ since: c.since ? dayTime(c.since) : '—' })}</p>
+          <p class="note">{c.until
+            ? m.orq_use_method_completed({ since: c.since ? dayTime(c.since) : '—', until: dayTime(c.until) })
+            : m.orq_use_method({ since: c.since ? dayTime(c.since) : '—' })}</p>
           {#if c.sessions.missing.length}<p class="note">{m.orq_use_missing({ names: c.sessions.missing.join(', ') })}</p>{/if}
           {#if c.missing_prices.length}<p class="note">{m.orq_use_no_price({ models: c.missing_prices.join(', ') })}</p>{/if}
         {/if}
@@ -350,6 +368,7 @@
   .muted, .note { color: var(--text-muted); }
   .note { font-size: var(--text-xs); }
   .elapsed { font-size: var(--text-lg); font-variant-numeric: tabular-nums; }
+  .run-identity { overflow-wrap: anywhere; }
   .task-detail { display: flex; flex-direction: column; min-width: 0; gap: 2px; }
   .link {
     align-self: flex-start; display: inline-flex; align-items: center;

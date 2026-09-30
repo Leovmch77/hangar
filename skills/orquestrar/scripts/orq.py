@@ -292,6 +292,8 @@ def event_append(d: Path, ev: dict) -> dict:
             ev["session_identity"] = captured[ev["para"]]
     with (d / "eventos.jsonl").open("a", encoding="utf-8") as f:
         f.write(json.dumps(ev, ensure_ascii=False) + "\n")
+    if ev.get("tipo") in {"task_inicio", "execucao_fim"}:
+        snapshot_plan(d)
     return ev
 
 
@@ -520,6 +522,34 @@ def plan_text(path) -> str:
         return Path(path).expanduser().read_text(encoding="utf-8")
     except FileNotFoundError:
         raise OrqError(f"plan not found: {path}") from None
+
+
+def snapshot_plan(d: Path, path: str | None = None) -> None:
+    """Preserva o plano no fluxo de escrita; consultar o histórico não grava nada."""
+    temporary = None
+    try:
+        if path is None:
+            if not (d / "orq.json").exists():
+                return
+            path = json.loads((d / "orq.json").read_text(encoding="utf-8")).get("plan")
+        if not path:
+            return
+        text = plan_text(path)
+        spec = importlib.util.spec_from_file_location("orq_atomic", HERE.parents[2] / "backend" / "app" / "atomico.py")
+        atomic = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(atomic)
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=d, prefix=".plan-snapshot-", delete=False) as stream:
+            temporary = Path(stream.name)
+            stream.write(text)
+        atomic.substituir(temporary, d / "plan.snapshot.md")
+    except Exception as exc:
+        _journal_or_warn(d, f"falha ao preservar plano: {exc}")
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError as exc:
+                _journal_or_warn(d, f"falha ao remover cópia temporária do plano: {exc}")
 
 
 def _section(text: str, name: str) -> list[str]:
@@ -781,6 +811,7 @@ def cmd_init(a) -> int:
     elif identity := capture_identities(d, (a.arbiter,)).get(a.arbiter):
         cfg["arbiter_identity"] = identity
     (d / "orq.json").write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+    snapshot_plan(d, cfg.get("plan"))
     journal_append(d, f"orq init: arbiter={a.arbiter} repo={cfg['repo']}"
                       + (f" auto jev={cfg['jev']} regex={cfg['regex']}" if auto else ""))
     if auto:
@@ -2068,6 +2099,8 @@ def open_flags(row: dict, read_only: bool) -> list[str]:
     # The backend refuses read-only on a session without terminal.
     if read_only and "--read-only" not in extra and "--headless" not in extra:
         flags.append("--read-only")
+    if (read_only or "--read-only" in extra) and "--headless" not in extra and "--terminal" not in extra:
+        flags.append("--terminal")
     # Only auto runs open sessions: the key the settings screen wrote counts too.
     if jev_config(auto=True).get("key") and not {"--jev", "--sem-jev"} & set(extra):
         flags.append("--jev")

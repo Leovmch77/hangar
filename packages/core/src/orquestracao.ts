@@ -19,8 +19,8 @@ export interface Papel {
   viva: string | null;     // nome da sessão viva casada pelo backend, ou null
   id_cota?: string | null; // chave do /api/cotas da conta do papel
   // Como o árbitro abre a sessão do papel — as mesmas opções da folha "Nova sessão".
-  // Opcionais porque o cache pode ter linha de antes deles; ausente = false/''.
-  headless?: boolean;
+  // Opcionais porque o cache pode ter linha de antes deles; modo ausente = padrão do servidor.
+  headless?: boolean | null;
   permissao?: string;      // '' = padrão
   motor?: string;          // '' = conta Anthropic
   jev?: boolean;

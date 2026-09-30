@@ -36,7 +36,7 @@ struct Role {
     modelo: String,
     esforco: String,
     vez: String,
-    headless: bool,
+    headless: Option<bool>,
     permissao: String,
     motor: String,
     jev: bool,
@@ -55,8 +55,8 @@ impl Role {
     /// Só o que vale para o provider escolhido (`abertura()` do web): nenhum caminho de gravação manda motor para o Codex.
     fn normalized(mut self) -> Self {
         let claude = self.provider == "claude";
-        self.headless = (claude || self.provider == "codex") && self.headless;
-        if !(claude || self.headless) { self.permissao.clear(); }
+        if !(claude || self.provider == "codex") { self.headless = None; }
+        if !(claude || self.headless == Some(true)) { self.permissao.clear(); }
         if !claude { self.motor.clear(); }
         if !claude || !self.motor.is_empty() { self.subagente.clear(); }
         if self.provider == "omp" { self.perfil = self.perfil.trim().to_owned(); } else { self.perfil.clear(); }
@@ -449,7 +449,7 @@ impl OrqRoles {
         }
     }
     fn permissions(role: &Role) -> Option<&'static [&'static str]> {
-        match (role.provider.as_str(), role.headless) { ("claude", _) => Some(&PERMISSIONS), ("codex", true) => Some(&CODEX_PERMISSIONS), _ => None }
+        match (role.provider.as_str(), role.headless) { ("claude", _) => Some(&PERMISSIONS), ("codex", Some(true)) => Some(&CODEX_PERMISSIONS), _ => None }
     }
 
     /// Papéis novos usam a identidade do trabalho, sem inferir nomes de outras linhas.
@@ -593,7 +593,7 @@ impl OrqRoles {
             r.provider = provider.into();
             r.conta = conta;
             (r.modelo, r.esforco, r.permissao, r.motor, r.subagente, r.perfil) = Default::default();
-            r.headless = false;
+            r.headless = None;
         });
         self.stale = true;
         cx.notify();
@@ -775,7 +775,7 @@ impl OrqRoles {
             "modelo" => if role.modelo.is_empty() { t("criar_padrao") } else { model_label(&role.modelo) },
             "esforco" => text(&role.esforco),
             "janela" => if role.janela.is_empty() { t("criar_padrao") } else { format!("{}%", role.janela) },
-            "headless" => t(if role.headless { "criar_modo_exec_headless" } else { "criar_modo_exec_tmux" }),
+            "headless" => t(match role.headless { Some(true) => "criar_modo_exec_headless", Some(false) => "criar_modo_exec_tmux", None => "criar_padrao" }),
             "jev" => t(if role.jev { "orqcfg_ligado" } else { "orqcfg_desligado" }),
             "permissao" => text(&role.permissao),
             "motor" => text(&role.motor),
@@ -999,11 +999,12 @@ impl OrqRoles {
             select(&self.picks.permissao, t("criar_permissao"), false)].into_iter().flatten().map(|el| el.flex_1().min_w(px(150.))).collect();
         form = form.child(div().flex().flex_wrap().gap_3().children(trio));
         if matches!(role.provider.as_str(), "claude" | "codex") {
-            let mode = |id: &'static str, on: bool, text: String, headless: bool| choice(id, on, cx).small().label(text)
+            let mode = |id: &'static str, on: bool, text: String, headless: Option<bool>| choice(id, on, cx).small().label(text)
                 .disabled(self.busy).on_click(cx.listener(move |this, _, _, cx| { this.edit(|r| r.headless = headless); this.stale = true; cx.notify(); }));
             form = form.child(field(t("criar_modo_exec"), div().flex().gap(px(6.))
-                .child(mode("orq-exec-tmux", !role.headless, t("criar_modo_exec_tmux"), false))
-                .child(mode("orq-exec-headless", role.headless, t("criar_modo_exec_headless"), true)).into_any_element()));
+                .child(mode("orq-exec-default", role.headless.is_none(), t("criar_padrao"), None))
+                .child(mode("orq-exec-tmux", role.headless == Some(false), t("criar_modo_exec_tmux"), Some(false)))
+                .child(mode("orq-exec-headless", role.headless == Some(true), t("criar_modo_exec_headless"), Some(true))).into_any_element()));
         }
         form = form.children(select(&self.picks.motor, t("comum_motor"), false)).children(select(&self.picks.subagente, t("criar_subagente"), false));
         if role.provider == "omp" {
@@ -1150,7 +1151,7 @@ mod tests {
         let role = Role { provider: "codex".into(), motor: "x".into(), permissao: "auto".into(), subagente: "s".into(), perfil: "p".into(),
             ..Role::default() }.normalized();
         assert_eq!((role.motor.as_str(), role.permissao.as_str(), role.subagente.as_str(), role.perfil.as_str()), ("", "", "", ""));
-        let role = Role { provider: "codex".into(), headless: true, permissao: "Full Access".into(), ..Role::default() }.normalized();
+        let role = Role { provider: "codex".into(), headless: Some(true), permissao: "Full Access".into(), ..Role::default() }.normalized();
         assert_eq!(role.permissao, "Full Access");
     }
 }

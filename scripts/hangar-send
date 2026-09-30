@@ -33,6 +33,8 @@
 #                                  --provider <claude|codex|pi|omp|kimi> escolhe o AGENTE da sessão
 #                                  nova (default claude). Ex: --provider kimi abre o Kimi Code.
 #                                  --read-only bloqueia escrita no código e metadados Git (Linux/bwrap).
+#                                  Sem modo explícito, herda o padrão escolhido no Hangar.
+#                                  --terminal abre com terminal; não combina com --headless.
 #                                  --headless (claude ou codex) abre a sessão SEM terminal: o agente
 #                                  roda fora do tmux e conversa só pelo app. Combina com --model,
 #                                  --effort e --permissao. Ex.: --provider codex --headless
@@ -386,9 +388,9 @@ if [[ "$1" == "--new" ]]; then
                 [[ -n "$jev" ]] && { echo "erro: --jev/--sem-jev informado duas vezes" >&2; exit 2; }
                 [[ "$1" == "--jev" ]] && jev="true" || jev="false"; shift ;;
             # --headless: sessão Claude ou Codex sem terminal (o mesmo campo da tela de criação).
-            --headless)
-                [[ -n "$headless" ]] && { echo "erro: --headless informado duas vezes" >&2; exit 2; }
-                headless="true"; shift ;;
+            --headless|--terminal)
+                [[ -n "$headless" ]] && { echo "erro: --headless/--terminal informado duas vezes" >&2; exit 2; }
+                [[ "$1" == "--headless" ]] && headless="true" || headless="false"; shift ;;
             --read-only)
                 [[ -n "$read_only" ]] && { echo "erro: --read-only informado duas vezes" >&2; exit 2; }
                 read_only="true"; shift ;;
@@ -510,7 +512,7 @@ if sys.argv[9]:
 if sys.argv[10]:
     d["read_only"] = True
 if sys.argv[11]:
-    d["headless"] = True
+    d["headless"] = sys.argv[11] == "true"
 if sys.argv[12]:
     # "true"/"false", nunca ausente-por-omissao: o campo AUSENTE no corpo e o que faz o backend
     # aplicar o padrao do servidor, e mandar `false` cru apagaria esse padrao em todo uso do CLI.

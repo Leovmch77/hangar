@@ -194,6 +194,7 @@ pub struct OrqRegex {
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct OrqPanel {
     #[serde(default)] pub run: String,
+    pub metadata: Option<OrqRunMetadata>,
     #[serde(default)] pub gid: String,
     #[serde(default)] pub errors: Vec<OrqFileError>,
     #[serde(default)] pub empty: bool,
@@ -205,6 +206,15 @@ pub struct OrqPanel {
     /// `null` enquanto o backend ainda soma os transcripts.
     pub consumption: Option<OrqConsumption>,
     #[serde(default)] pub integration: OrqIntegration,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct OrqRunMetadata {
+    #[serde(default)] pub title: String,
+    #[serde(default)] pub plan: String,
+    #[serde(default)] pub repo: String,
+    pub total_tasks: Option<u32>,
+    pub error: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -318,6 +328,7 @@ pub struct OrqMinConfidence {
 pub struct OrqConsumption {
     pub computed_at: Option<String>,
     pub since: Option<String>,
+    pub until: Option<String>,
     #[serde(default)] pub sessions: OrqConsumptionSessions,
     #[serde(default)] pub totals: OrqConsumptionTotals,
     #[serde(default)] pub providers: Vec<OrqConsumptionProvider>,

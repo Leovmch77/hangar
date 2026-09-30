@@ -159,6 +159,9 @@ impl Hangar {
             .map(|el| {
                 let controls = div().flex().justify_end().gap(px(6.))
                     .children(account.map(|account| shrinking(popup::anchor(div().min_w_0(), "topbar-account").child(account))))
+                    .child(control(Button::new("topbar-orq-history").ghost().icon(IconName::Clock).size(px(28.)).disabled(!online)
+                        .tooltip(tr_shared("orq_history_title", &[])).accessibility_label(tr_shared("orq_history_title", &[]))
+                        .on_click(cx.listener(|this, _, window, cx| this.open_orq_history(window, cx)))))
                     .child(control(pill))
                     .children(outdated.map(control))
                     .children(updater.map(control))

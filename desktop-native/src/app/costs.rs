@@ -141,7 +141,7 @@ pub(super) struct Bucket {
 impl Bucket {
     fn zero(key: &str) -> Self { Bucket { key: key.to_owned(), ..Default::default() } }
     /// Os quatro tipos somados (o `brutos` do web).
-    fn raw(&self) -> f64 { self.input + self.output + self.cache_write + self.cache_read }
+    pub(super) fn raw(&self) -> f64 { self.input + self.output + self.cache_write + self.cache_read }
     /// Tokens que o modelo viu pela primeira vez: o cache lido fica de fora.
     fn fresh(&self) -> f64 { self.input + self.cache_write + self.output }
     /// Volume com custo zero só acontece sem tarifa: "não sei o preço", não "de graça".
@@ -215,19 +215,19 @@ struct Rate { model: String, input: f64, output: f64, cache_read: f64, cache_wri
 
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default)]
-struct Report {
-    totals: Bucket,
-    by_day: Vec<Bucket>,
+pub(super) struct Report {
+    pub(super) totals: Bucket,
+    pub(super) by_day: Vec<Bucket>,
     by_provider: Vec<Bucket>,
     by_source: Vec<Bucket>,
     by_project: Vec<Bucket>,
-    by_model: Vec<Bucket>,
+    pub(super) by_model: Vec<Bucket>,
     rates: Vec<Rate>,
-    sem_tarifa: Vec<String>,
+    pub(super) sem_tarifa: Vec<String>,
     custo_sem_cache: f64,
     equivalente_cobrado: f64,
     anterior: Option<Bucket>,
-    usd_brl: Option<f64>,
+    pub(super) usd_brl: Option<f64>,
     combos: Vec<Combo>,
     sessoes: Vec<Session>,
     /// Falso quando o servidor não manda cache de 1 h nem cache perdido (versão antiga).

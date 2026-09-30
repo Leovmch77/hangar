@@ -498,6 +498,10 @@ export function getOrqPanelForServer(s: Server, name: string): Promise<OrqPanel>
   return apiFetchForServer<OrqPanel>(s, `/api/sessions/${encodeURIComponent(name)}/orq/panel`);
 }
 
+export function getOrqHistoryPanelForServer(s: Server, runId: string): Promise<OrqPanel> {
+  return apiFetchForServer<OrqPanel>(s, `/api/orq/${encodeURIComponent(runId)}/panel`);
+}
+
 // Cauda do histórico de UMA sessão de um servidor específico — cards do quadro kanban.
 // limit dispara o tail-read no backend (parseia só o fim do jsonl). Timeout de 8s mantido: disco
 // frio + arquivo grande ainda pode passar dos 4s dos fan-outs acima.
@@ -679,7 +683,7 @@ export function createSession(
                            model: model ?? null, effort: effort ?? null, codex_account: codexAccount };
   if (permissionMode) body.permission_mode = permissionMode;
   if (ompProfile) body.omp_profile = ompProfile;
-  if (headless && (provider === 'claude' || provider === 'codex')) body.headless = true;
+  if (headless !== undefined && (provider === 'claude' || provider === 'codex')) body.headless = headless;
   if (subagentModel && provider === 'claude') body.subagent_model = subagentModel;
   if (jev) body.jev = true;
   return apiFetch<SessionInfo>('/api/sessions', {

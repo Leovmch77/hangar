@@ -49,7 +49,7 @@ class Papel:
     modelo: str
     esforco: str
     vez: str = ""
-    headless: bool = False
+    headless: bool | None = None
     permissao: str = ""
     motor: str = ""
     jev: bool = False
@@ -89,7 +89,7 @@ def chave_da_linha(cab: tuple[str, ...], papel: str, vez: str) -> str | tuple[st
 
 def abertura_texto(p: Papel) -> str:
     """As flags do `hangar-send --new` que o árbitro põe no comando, na ordem fixa."""
-    partes = ["--headless"] if p.headless else []
+    partes = [] if p.headless is None else ["--headless" if p.headless else "--terminal"]
     for flag, valor in (("--permissao", p.permissao), ("--engine", p.motor), ("--subagente", p.subagente),
                         ("--profile", p.perfil)):
         if valor:
@@ -106,7 +106,7 @@ _FLAGS_COM_VALOR = {"--permissao": "permissao", "--engine": "motor", "--subagent
 
 
 def _ler_abertura(celula: str) -> dict:
-    campos: dict = {"headless": False, "permissao": "", "motor": "", "jev": False, "subagente": "",
+    campos: dict = {"headless": None, "permissao": "", "motor": "", "jev": False, "subagente": "",
                     "perfil": ""}
     try:
         toks = [] if celula.strip() in ("", "-") else shlex.split(celula)
@@ -119,6 +119,8 @@ def _ler_abertura(celula: str) -> dict:
         t = toks[i]
         if t in ("--headless", "--jev"):
             campos[t[2:]] = True
+        elif t == "--terminal":
+            campos["headless"] = False
         elif t in _FLAGS_COM_VALOR and i + 1 < len(toks):
             campos[_FLAGS_COM_VALOR[t]] = toks[i + 1]
             i += 1

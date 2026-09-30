@@ -694,3 +694,48 @@ def test_elapsed_time_does_not_invent_missing_or_invalid_dates(start, finish):
     out = ot._with_timing({"tasks": {"rows": []}}, {"timing": timing},
                           datetime.fromisoformat("2026-09-30T10:00:00+00:00"))
     assert out["timing"]["elapsed_seconds"] is None
+
+
+def test_history_name_comes_from_plan_and_survives_missing_plan(tmp_path):
+    from app import orq
+    plan = tmp_path / "2026-09-30-mobile-deliveries.md"
+    plan.write_text("# Entregas do aplicativo móvel\n\n## Tasks\n\n| # | What it is |\n|---|---|\n| 1 | Enviar mensagem |\n")
+    (tmp_path / "orq.json").write_text(json.dumps({"plan": str(plan), "repo": "/fixture/project"}))
+    from app import orq_start
+    orq_start._orq().snapshot_plan(tmp_path)
+    meta = orq.run_metadata(tmp_path)
+    assert (meta["title"], meta["total_tasks"], meta["repo"]) == ("Entregas do aplicativo móvel", 1, "/fixture/project")
+    plan.unlink()
+    meta = orq.run_metadata(tmp_path)
+    assert meta["title"] == "Entregas do aplicativo móvel" and meta["error"] is None
+    assert meta["total_tasks"] == 1 and meta["tasks"] == [{"n": 1, "title": "Enviar mensagem"}]
+
+
+@pytest.mark.parametrize("provider", ["claude", "codex"])
+def test_history_usage_excludes_later_updates_in_the_same_transcript(tmp_path, provider):
+    def record(at, count):
+        if provider == "claude":
+            return {"type": "assistant", "timestamp": at, "message": {"id": "response", "model": "claude-opus-5", "usage": {"input_tokens": count, "output_tokens": 2}}}
+        return {"type": "event_msg", "timestamp": at, "payload": {"type": "token_count", "info": {"total_token_usage": {"input_tokens": count, "output_tokens": 2}}}}
+    path = tmp_path / "transcript.jsonl"
+    lines = [record("2026-09-30T10:00:00Z", 100), record("2026-09-30T12:00:00Z", 999)]
+    path.write_text("".join(json.dumps(row) + "\n" for row in lines))
+    rows = ot._rows_until(provider, str(path), datetime.fromisoformat("2026-09-30T11:00:00+00:00"))
+    assert rows is not None and sum(r.input for r in rows) == 100
+    assert sum(r.output for r in rows) == 2
+
+
+def test_finished_run_never_resolves_a_reused_live_session(tmp_path, monkeypatch):
+    seen = []
+    monkeypatch.setattr(ot, "_team_paths", lambda d, names, live: seen.append(live) or {})
+    result, _ = ot._compute_consumption(tmp_path, ["same-name"],
+        {"since": "2026-09-30T10:00:00Z", "until": "2026-09-30T11:00:00Z", "models": {}}, lambda: [])
+    assert seen == [None]
+    assert result["sessions"]["missing"] == ["same-name"]
+    assert result["totals"]["usd_partial"] is True
+
+
+def test_history_usage_without_time_is_unavailable_instead_of_invented(tmp_path):
+    path = tmp_path / "missing-time.jsonl"
+    path.write_text(json.dumps({"type": "event_msg", "payload": {"type": "token_count", "info": {"total_token_usage": {"input_tokens": 900}}}}) + "\n")
+    assert ot._rows_until("codex", str(path), datetime.fromisoformat("2026-09-30T11:00:00+00:00")) is None

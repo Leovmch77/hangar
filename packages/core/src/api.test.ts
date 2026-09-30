@@ -338,6 +338,14 @@ describe('getHistoryDesde', () => {
 });
 
 describe('createSession', () => {
+  it.each([undefined, false, true])('preserva o modo explícito ou omitido: %s', async (mode) => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{"name":"x"}'));
+    await createSession('x', '/tmp', null, 'claude', null, null, null, null, null, null, mode);
+    const body = JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string);
+    if (mode === undefined) expect(body).not.toHaveProperty('headless');
+    else expect(body.headless).toBe(mode);
+  });
+
   // O backend so aceita provider em ("claude", "codex", "pi", "kimi") e devolve 400 se vier `engine`
   // com provider != claude. O sheet manda engine/config_dir nulos fora do Claude — aqui garantimos que
   // o provider viaja LITERAL (a versao anterior tipava 'claude' | 'codex' e uma sessao Pi nem compilava).

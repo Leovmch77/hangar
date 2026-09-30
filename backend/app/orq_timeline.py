@@ -268,7 +268,7 @@ def event_id(obj: dict) -> str:
 
 # ── retrato do painel ────────────────────────────────────────────────────────────────────────
 
-_PANEL_FILES = ("jev-shadow.jsonl", "eventos.jsonl", "closed.jsonl", "checks.jsonl", "orq.json", "sessions.jsonl")
+_PANEL_FILES = ("jev-shadow.jsonl", "eventos.jsonl", "closed.jsonl", "checks.jsonl", "orq.json", "sessions.jsonl", "plan.snapshot.md")
 _PANELS: dict[str, tuple[tuple, dict, dict]] = {}
 _panels_lock = threading.Lock()
 _VERDICT = {"aprova": "approved", "corrige": "approved", "reprova": "rejected", "devolvido": "rejected"}
@@ -618,13 +618,18 @@ def _build_panel(d: Path) -> tuple[dict, dict]:
                        set(), "tasks", exact=True)
 
     plan = None
+    begin = next((e for e in evs if e.get("tipo") == "execucao_inicio"), {})
+    metadata = orq.run_metadata(d, str(begin.get("plano") or ""))
     if isinstance(cfg.get("plan"), str):
         plan = guard(lambda: m.plan_tasks(m.plan_text(cfg["plan"])), None, "plan", exact=True)
+    if plan is None and metadata.get("tasks"):
+        plan = metadata["tasks"]
     rows = guard(lambda: _task_rows(evs, plan or [], integrated), [], "tasks", exact=True)
-    begin = next((e for e in evs if e.get("tipo") == "execucao_inicio"), {})
-    aux = {"since": begin.get("ts"), "models": _opened_models(entries), "timing": _timing_bounds(evs)}
+    bounds = _timing_bounds(evs)
+    aux = {"since": begin.get("ts"), "until": bounds["finished_at"], "models": _opened_models(entries), "timing": bounds}
     return {
         "run": d.resolve().name, "gid": begin.get("gid") or "", "errors": errors,
+        "metadata": metadata,
         "empty": not lines and not any(e.get("tipo") == "task_inicio" for e in evs),
         "tasks": {"integrated": sum(r["state"] == "integrated" for r in rows),
                   "total": len(plan) if plan is not None else max((r["n"] for r in rows), default=0),
@@ -749,6 +754,47 @@ def _team_paths(d: Path, names: list[str], live) -> dict[str, list[tuple[str, st
     return {n: [(p, path) for path, p in paths.items()] for n, paths in found.items()}
 
 
+def _rows_until(provider: str, path: str, until: datetime) -> list | None:
+    """O corte vem antes da deduplicação: uma resposta retomada não altera a execução encerrada."""
+    if provider not in {"claude", "codex"}:
+        return None
+    p = Path(path)
+    paths = [p, *sorted((p.parent / p.stem / "subagents").glob("*.jsonl"))] if provider == "claude" else [p]
+    rows = []
+    for source in paths:
+        fold = (costs_claude_transcript.DobraClaude(session_id=source.stem, subagente=source != p)
+                if provider == "claude" else costs_sources.RespostasCodex(source.stem, ""))
+        try:
+            with source.open("rb") as stream:
+                for raw in stream:
+                    try:
+                        item = json.loads(raw)
+                    except (ValueError, UnicodeError):
+                        continue
+                    if not isinstance(item, dict):
+                        continue
+                    at = orq_conductor._when(item.get("timestamp"))
+                    if provider == "codex" and at is None and (
+                        item.get("type") == "token_usage_record" or
+                        (item.get("type") == "event_msg" and isinstance(item.get("payload"), dict)
+                         and item["payload"].get("type") == "token_count")
+                    ):
+                        return None
+                    if at is not None and at > until:
+                        continue
+                    if provider == "claude":
+                        fold.linha(raw)
+                    else:
+                        fold.registro(item)
+        except OSError:
+            return None
+        if provider == "claude":
+            rows.extend(costs_claude_transcript._linha_custo(row) for row in fold.respostas.values())
+        else:
+            rows.extend(row for turn in fold.por_turno().values() for row in turn)
+    return rows
+
+
 def _medicao_models(d: Path) -> dict[str, str]:
     out: dict[str, str] = {}
     for f in sorted((d / "medicao").glob("*.json")):
@@ -764,7 +810,8 @@ def _medicao_models(d: Path) -> dict[str, str]:
 def _compute_consumption(d: Path, names: list[str], aux: dict, live) -> tuple[dict, bool]:
     """(consumo, houve transcript indisponível): quem não pôde ser lido conta em `missing`."""
     since = orq_conductor._when(aux.get("since"))
-    paths = _team_paths(d, names, live)
+    until = orq_conductor._when(aux.get("until"))
+    paths = _team_paths(d, names, None if until else live)
     hints = {**aux["models"], **_medicao_models(d)}
     seen: dict[str, bool] = {}     # caminho -> foi lido (dois nomes no mesmo arquivo somam uma vez)
     groups: dict[tuple[str, str], dict] = {}
@@ -777,18 +824,20 @@ def _compute_consumption(d: Path, names: list[str], aux: dict, live) -> tuple[di
                 if seen[path]:
                     readable.add(name)
                 continue
-            rows = _rows_for(provider, path)
+            rows = _rows_until(provider, path, until) if until else _rows_for(provider, path)
             seen[path] = rows is not None
             if rows is None:
                 continue
             readable.add(name)
             for row in rows:
+                if until and (row.ts > until or (since and row.ts < since)):
+                    continue
                 subagents = subagents or bool(row.subagente)
                 # Claude: `ts` é a 1ª resposta do dia (no fuso do balde), então o corte é por dia nesse fuso e inclui o dia inteiro do início.
                 if since is not None and (
                         row.ts.astimezone(costs_claude_transcript.LOCAL).date()
                         < since.astimezone(costs_claude_transcript.LOCAL).date()
-                        if row.source == "claude" else row.ts < since):
+                        if row.source == "claude" and not until else row.ts < since):
                     continue
                 if not row.model and hints.get(name):
                     row = replace(row, model=hints[name])
@@ -818,10 +867,11 @@ def _compute_consumption(d: Path, names: list[str], aux: dict, live) -> tuple[di
     return {
         "computed_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         "since": aux.get("since"),
+        "until": aux.get("until"),
         "sessions": {"team": len(names), "measured": len(readable),
                      "missing": [n for n in names if n not in readable]},
         "totals": {"new": sum(p["new"] for p in providers), "cache_read": sum(p["cache_read"] for p in providers),
-                   "usd": round(sum(p["usd"] for p in providers), 4), "usd_partial": bool(missing_prices)},
+                   "usd": round(sum(p["usd"] for p in providers), 4), "usd_partial": bool(missing_prices) or len(readable) < len(names)},
         "providers": providers, "missing_prices": sorted(missing_prices), "subagents": subagents,
     }, any(paths.get(n) and n not in readable for n in names)
 
@@ -830,7 +880,7 @@ def _consumption(d: Path, names: list[str], aux: dict, live) -> tuple[dict | Non
     """(consumo, erro), refeito depois de `CONSUMPTION_TTL_S` (`_UNAVAILABLE_TTL_S` se algum
     transcript não pôde ser lido). Ninguém espera a soma: o pedido devolve o último valor guardado,
     mesmo vencido, ou `None` (calculando) se ainda não houve nenhum, e o cálculo roda numa thread."""
-    key = str(d.resolve())
+    key = str(d.resolve()) + (f"@{aux['until']}" if aux.get("until") else "")
     with _consumption_guard:
         lock = _consumption_locks.get(key)
         if lock is None:

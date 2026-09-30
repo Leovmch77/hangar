@@ -10,6 +10,7 @@
   import OrqAgora from '../components/OrqAgora.svelte';
   import OrqConductor from '../components/OrqConductor.svelte';
   import OrqConductorChip from '../components/OrqConductorChip.svelte';
+  import OrqPanel from '../components/OrqPanel.svelte';
 
   interface Props {
     onBack?: () => void;                       // só no celular: a tela é rota própria lá
@@ -129,6 +130,7 @@
   let conductor = $state<OrqConductorData | null>(null);
   let conductorError = $state('');
   let conductorSection = $state<HTMLElement>();
+  let showEvents = $state(false);
 
   // Mesma guarda de identidade do `abrir`: a resposta de A não pode cair sob o cabeçalho de B.
   async function loadConductor(linha: ExecComServidor) {
@@ -144,6 +146,7 @@
   }
 
   async function abrir(linha: ExecComServidor, toFeed = false) {
+    showEvents = toFeed;
     aberta = linha;
     detalhe = null;
     erroDetalhe = '';
@@ -227,7 +230,7 @@
     {:else if aberta}
       <button class="voltar" onclick={fechar} aria-label={m.orq_voltar()}>←</button>
     {/if}
-    <h1>{aberta ? aberta.exec.id : m.shell_orq()}</h1>
+    <h1>{aberta ? (aberta.exec.metadata?.title || aberta.exec.id) : m.shell_orq()}</h1>
     {#if !aberta && !firstLoad}
       <span class="contagem">{linhas.length} {m.orq_execucoes()}</span>
     {/if}
@@ -247,6 +250,10 @@
       <div class="centro"><Spinner /></div>
     {:else}
       {@const d = detalhe}
+      <OrqPanel server={aberta.servidor} runId={d.id} sessionName="" arbiter={null}
+        onOpenSession={() => {}} onOpenFile={() => {}} />
+      <details class="historical-events" bind:open={showEvents}>
+        <summary>{m.orq_history_events()}</summary>
       <section class="kpis">
         <div class="kpi"><span class="v">{duracaoLegivel(d.inicio, d.fim) || '—'}</span><span class="l">{hora(d.inicio)}</span></div>
         <div class="kpi"><span class="v">{d.tasks.length}</span><span class="l">{m.orq_tasks()}</span></div>
@@ -301,7 +308,7 @@
         <section>
           <h2>{m.orq_quem_trabalhou()}</h2>
           {#each [...new Set(d.tasks.map((t) => t.executor).filter(Boolean))] as quem (quem)}
-            <button class="card sess" onclick={() => onNavigateToChat?.(quem)}>
+            <button class="card sess" disabled={!!d.fim} onclick={() => onNavigateToChat?.(quem)}>
               <span class="nome">{quem}</span>
               <span class="papel">{parDe(d, quem) || m.orq_executor()}</span>
             </button>
@@ -337,6 +344,7 @@
       <div bind:this={conductorSection}>
         <OrqConductor {conductor} error={conductorError} finished={!!aberta.exec.fim} />
       </div>
+      </details>
     {/if}
   {:else if linhas.length === 0}
     <div class="vazio">
@@ -366,15 +374,16 @@
            nele abre o detalhe já rolado até o feed. -->
       <button class="exec" onclick={(ev) => abrir(linha, (ev.target as Element).closest('.conductor-chip') !== null)}>
         <span class="hd">
-          <span class="nome">{e.id}</span>
+          <span class="nome">{e.metadata?.title || e.id}</span>
           <span class="branch">{e.branch || '—'}</span>
           <span class="estado" class:viva={!e.fim}>
             {e.fim ? (e.resultado === 'abortada' ? m.orq_abortada() : m.orq_concluida()) : m.orq_em_curso()}
           </span>
           <OrqConductorChip watchdog={e.watchdog} finished={!!e.fim} />
         </span>
+        {#if e.metadata?.repo}<span class="nota">{e.metadata.repo}</span>{/if}
         <span class="linha-metricas">
-          <span class="mt">{m.orq_tasks()} <b>{e.tasks.length}</b></span>
+          <span class="mt">{m.orq_tasks()} <b>{e.metadata?.total_tasks ?? e.tasks.length}</b></span>
           <span class="mt">{m.orq_de_primeira()} <b>{e.aprovadas_primeira}</b></span>
           <span class="mt" class:alerta={e.voltas > 0}>{m.orq_voltas()} <b>{e.voltas}</b></span>
           <span class="mt">{duracaoLegivel(e.inicio, e.fim) || hora(e.inicio)}</span>
@@ -461,6 +470,7 @@
   .aviso { color: var(--warning); font-size: var(--text-sm); }
   .vazio { padding: var(--space-6); text-align: center; color: var(--text-secondary); }
   .nota { color: var(--text-muted); font-size: var(--text-xs); }
+  .historical-events > summary { cursor: pointer; padding-block: var(--space-3); }
 
   .kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--space-2); }
   @container (max-width: 560px) { .kpis { grid-template-columns: repeat(2, 1fr); } }

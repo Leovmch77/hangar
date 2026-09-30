@@ -89,6 +89,7 @@ EDITAVEIS: dict[str, type] = {
     # navegador — so aqui a escolha vale nos tres. Quem pede explicito (`--jev`, `jev=true`)
     # continua vencendo naquela sessao, sem mexer neste padrao.
     "jev_padrao": bool,
+    "headless_default": bool,
     # Onde e com qual modelo o Jev decide. Vazio = a API da typesafe com o modelo padrão de cada
     # consumidor; o OpenRouter serve o mesmo Jev com o mesmo corpo em outro endereço.
     "jev_endpoint": str,

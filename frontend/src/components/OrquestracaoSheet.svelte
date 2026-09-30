@@ -74,6 +74,7 @@
   let fEsforco = $state('');
   let fVez = $state('');
   let fHeadless = $state(false);
+  let headlessInherited = $state(true);
   let fPermissao = $state('');
   let fMotor = $state('');
   let fJev = $state(false);
@@ -120,7 +121,7 @@
   const temJev = $derived(segredos.temChave('jev_api_key') || fJev);
 
   const aberturaDe = (p: Papel | null | undefined): AberturaPapel => ({
-    headless: !!p?.headless, permissao: p?.permissao ?? '', motor: p?.motor ?? '',
+    headless: p?.headless ?? null, permissao: p?.permissao ?? '', motor: p?.motor ?? '',
     jev: !!p?.jev, subagente: p?.subagente ?? '', perfil: p?.perfil ?? '',
   });
   /**
@@ -129,7 +130,7 @@
    */
   function abertura(): AberturaPapel {
     const claude = fProvider === 'claude';
-    const headless = (claude || fProvider === 'codex') && fHeadless;
+    const headless = headlessInherited || !(claude || fProvider === 'codex') ? null : fHeadless;
     return {
       headless,
       permissao: claude || headless ? fPermissao : '',
@@ -192,7 +193,7 @@
     if (igual || (sel === 'novo' && !r.papel)) delete rascunhos[k]; else rascunhos[k] = r;
   }
   $effect(() => {
-    void [fPapel, fSessao, fProvider, fConta, fModelo, fEsforco, fVez, fJanela, fHeadless, fPermissao, fMotor, fJev, fSubagente, fPerfil, sel];
+    void [fPapel, fSessao, fProvider, fConta, fModelo, fEsforco, fVez, fJanela, fHeadless, headlessInherited, fPermissao, fMotor, fJev, fSubagente, fPerfil, sel];
     untrack(guardarRascunho);
   });
 
@@ -210,7 +211,8 @@
     fVez = r?.vez ?? p?.vez ?? '';
     fJanela = r?.janela ?? p?.janela ?? '';
     const a = r ?? aberturaDe(p);
-    fHeadless = a.headless; fPermissao = a.permissao; fMotor = a.motor; fJev = a.jev; fSubagente = a.subagente;
+    headlessInherited = a.headless == null;
+    fHeadless = a.headless === true; fPermissao = a.permissao; fMotor = a.motor; fJev = a.jev; fSubagente = a.subagente;
     fPerfil = a.perfil;
     // Papel novo nasce no padrão do servidor, como a folha de nova sessão.
     if (i === 'novo' && !r) fJev = segredos.ligado('jev_padrao');
@@ -332,7 +334,7 @@
     fConta = (politica?.politica.find((c) => c.provider === p)?.conta) ?? '';
     fModelo = ''; fEsforco = '';
     // O Jev vale em qualquer provider; o resto da abertura é por provider e volta ao padrão.
-    fHeadless = false; fPermissao = ''; fMotor = ''; fSubagente = ''; fPerfil = '';
+    fHeadless = false; headlessInherited = true; fPermissao = ''; fMotor = ''; fSubagente = ''; fPerfil = '';
   }
   // Conta travada: o modelo é o primeiro liberado, sem escolha.
   $effect(() => { if (contaTravada && modelos[0]) fModelo = modelos[0].id; });
@@ -410,7 +412,7 @@
     subagente: m.criar_subagente, jev: m.criar_jev, perfil: m.criar_perfil_omp, sessao: m.orqcfg_campo_sessao,
   };
   function valorCampo(c: CampoMudado, v: string): string {
-    if (c === 'headless') return v ? m.criar_modo_exec_headless() : m.criar_modo_exec_tmux();
+    if (c === 'headless') return v == null ? m.criar_padrao() : v ? m.criar_modo_exec_headless() : m.criar_modo_exec_tmux();
     if (c === 'jev') return v ? m.orqcfg_ligado() : m.orqcfg_desligado();
     if (c === 'janela' && v) return `${v}%`;
     if (c === 'modelo' && v) return rotuloModelo(v);
@@ -769,7 +771,8 @@
     <!-- As mesmas opções da folha "Nova sessão": é com elas que o árbitro abre a sessão do papel. -->
     <SessionOpeningFields provider={fProvider} models={modelos} engines={listaMotores} idPrefix="orq-"
       reducedList={!!invConta?.reduced} modelLocked={contaTravada} showJev={temJev}
-      bind:headless={fHeadless} bind:model={fModelo} bind:effort={fEsforco} bind:permission={fPermissao}
+      executionDefault={headlessInherited} onExecutionDefault={() => (headlessInherited = true)}
+      onHeadlessChange={() => (headlessInherited = false)} bind:headless={fHeadless} bind:model={fModelo} bind:effort={fEsforco} bind:permission={fPermissao}
       bind:engine={fMotor} bind:subagent={fSubagente} bind:jev={fJev} bind:ompProfile={fPerfil}>
       {#snippet afterChoices()}
         <div class="os-grid">
