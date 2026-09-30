@@ -4630,6 +4630,7 @@
   "native_shortcuts_send_direct_help": "Desligado, o texto chega no campo de mensagem para você completar",
   "native_shortcuts_confirm": "Confirmar antes",
   "native_shortcuts_form_ok": "Salvar",
+  "native_shortcuts_gone": "Este atalho não está mais na lista (foi removido ou a lista foi restaurada). Feche o formulário e abra de novo.",
   "native_prefill_replace": "Você tem uma mensagem escrita no campo. Trocar por \"{text}\"?",
   "native_stats_rate": "~{n} tok/s",
   "native_ctx_card_usage": "Nesta sessão",

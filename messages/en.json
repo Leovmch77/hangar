@@ -4630,6 +4630,7 @@
   "native_shortcuts_send_direct_help": "Off, the text lands in the message box for you to finish",
   "native_shortcuts_confirm": "Confirm first",
   "native_shortcuts_form_ok": "Save",
+  "native_shortcuts_gone": "This shortcut is no longer in the list (it was removed or the list was restored). Close the form and open it again.",
   "native_prefill_replace": "You have a message typed in the box. Replace it with \"{text}\"?",
   "native_stats_rate": "~{n} tok/s",
   "native_ctx_card_usage": "This session",

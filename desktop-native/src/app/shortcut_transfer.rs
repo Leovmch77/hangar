@@ -12,7 +12,7 @@ pub(super) struct ImportDraft {
     replaced: u64,
     /// (id do atalho, rótulo, nome do marcador, campo mascarado)
     fields: Vec<(String, String, String, Entity<InputState>)>,
-    applying: bool,
+    pub(super) applying: bool,
 }
 
 /// Nome da primeira credencial em branco (`⟦SEGREDO:<nome>⟧`) no comando ou texto do atalho.
@@ -89,6 +89,8 @@ impl Hangar {
     }
 
     fn apply_import(&mut self, cx: &mut Context<Self>) {
+        // Uma gravação da lista em voo e a importação não se cruzam: a segunda apagaria a primeira.
+        if self.shortcuts.busy() { return; }
         let (Some(api), Some(draft)) = (self.api.clone(), self.shortcuts.import.as_mut()) else { return };
         if draft.applying { return; }
         draft.applying = true;
@@ -191,7 +193,7 @@ impl Hangar {
             .child(Button::new("shortcuts-import-cancel").outline().small().label(tr("cancel"))
                 .on_click(cx.listener(|this, _, _, cx| { this.shortcuts.import = None; cx.notify(); })))
             .child(Button::new("shortcuts-import-apply").primary().small().label(tr("shortcuts_import")).loading(draft.applying)
-                .disabled(draft.applying).on_click(cx.listener(|this, _, _, cx| this.apply_import(cx))))))
+                .disabled(self.shortcuts.busy()).on_click(cx.listener(|this, _, _, cx| this.apply_import(cx))))))
     }
 }
 

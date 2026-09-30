@@ -247,9 +247,9 @@ impl Hangar {
         }, &[]);
         let base = Button::new(SharedString::from(format!("hangar-{}-{id}", act as u8)));
         let button = match act {
-            Act::Go => base.custom(ButtonCustomVariant::new(cx).color(theme::accent_press()).foreground(gpui::white())
+            Act::Go => base.custom(ButtonCustomVariant::new(cx).color(theme::accent_press()).foreground(theme::on_press())
                 .hover(theme::accent()).active(theme::accent_press())),
-            Act::Answer => base.custom(ButtonCustomVariant::new(cx).color(theme::warning_press()).foreground(gpui::white())
+            Act::Answer => base.custom(ButtonCustomVariant::new(cx).color(theme::warning_press()).foreground(theme::on_press())
                 .hover(theme::warning_press().opacity(0.88)).active(theme::warning_press().opacity(0.78))),
             Act::Stop => base.custom(ButtonCustomVariant::new(cx).color(transparent_black()).foreground(theme::removed())
                 .hover(theme::danger().opacity(0.12)).active(theme::danger().opacity(0.2))).border_1().border_color(theme::border_strong()),
@@ -498,14 +498,17 @@ fn question_dialog(dialog: Dialog) -> Dialog {
 fn short_text(text: &str) -> &str {
     let t = text.trim_end();
     let t = t.strip_suffix(':').map_or(t, str::trim_end);
-    let t = t.strip_suffix(')').and_then(|head| head.rfind('(').map(|n| head[..n].trim_end())).unwrap_or(t);
-    t.trim_end_matches(':').trim_end()
+    let stripped = t.strip_suffix(')').and_then(|head| head.rfind('(').map(|n| head[..n].trim_end())).unwrap_or(t);
+    let stripped = stripped.trim_end_matches(':').trim_end();
+    // Um prompt que é só o parêntese não pode virar linha vazia.
+    if stripped.is_empty() { t.trim_end_matches(':').trim_end() } else { stripped }
 }
 
 impl Render for QuestionCard {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let pending = self.pending();
-        let mut card = div().w_full().flex().flex_col().gap(px(16.)).p(px(20.)).rounded(px(14.)).bg(theme::surface())
+        let mut card = div().id("question-card").role(Role::Dialog).aria_label(self.title.clone())
+            .w_full().flex().flex_col().gap(px(16.)).p(px(20.)).rounded(px(14.)).bg(theme::surface())
             .border_1().border_color(theme::warning().opacity(0.4))
             .child(div().flex().items_center().gap(px(10.))
                 .child(chrome::small_icon(IconName::SquareTerminal, 18., theme::warning()))
@@ -546,7 +549,7 @@ impl Render for QuestionCard {
             .child(Button::new("question-open-terminal").outline().h(px(36.)).px(px(14.)).rounded(px(8.)).label(tr_shared("pergunta_abrir_terminal", &[]))
                 .on_click(cx.listener(|this, _, window, cx| this.open_terminal(window, cx))))
             .child(Button::new("question-send")
-                .custom(ButtonCustomVariant::new(cx).color(theme::warning_press()).foreground(gpui::white())
+                .custom(ButtonCustomVariant::new(cx).color(theme::warning_press()).foreground(theme::on_press())
                     .hover(theme::warning_press().opacity(0.88)).active(theme::warning_press().opacity(0.78)))
                 .h(px(36.)).px(px(16.)).rounded(px(8.)).label(tr_shared("pergunta_enviar", &[])).loading(self.sending)
                 .disabled(self.sending || !pending).on_click(cx.listener(|this, _, window, cx| this.send(window, cx)))));
@@ -620,6 +623,7 @@ mod live_tests {
         assert_eq!(short_text("Pasta do PSS na VM:"), "Pasta do PSS na VM");
         assert_eq!(short_text("Porta (3000):  "), "Porta");
         assert_eq!(short_text("Senha"), "Senha");
+        assert_eq!(short_text("(x)"), "(x)");
     }
 
     #[test]

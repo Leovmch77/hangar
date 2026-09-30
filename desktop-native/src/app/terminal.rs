@@ -124,6 +124,9 @@ pub(super) struct Panel {
     shell_error: Option<String>,
     /// Quando abriu: o painel sobe do pé da janela nos primeiros 200 ms.
     opened: Instant,
+    /// Fila de abas rolável: ao trocar a aba ativa, rola até ela (uma vez por troca, para não brigar com a roda do mouse).
+    tab_scroll: ScrollHandle,
+    scrolled_to: std::cell::Cell<Option<u64>>,
 }
 
 impl Panel {
@@ -132,7 +135,8 @@ impl Panel {
             else { vec![Slot::new(0, Kind::Session, session.clone(), true), Slot::new(1, Kind::Shell, String::new(), false)] };
         Self { id, tabs, next_uid: 2, session, server, error: None,
             active: 0, focus: cx.focus_handle().tab_stop(true), height: appearance::get().terminal_height, drag: None, maximized: false,
-            shell_pending: false, shell_request: 0, shell_error: None, opened: Instant::now() }
+            shell_pending: false, shell_request: 0, shell_error: None, opened: Instant::now(),
+            tab_scroll: ScrollHandle::new(), scrolled_to: std::cell::Cell::new(None) }
     }
 
     fn index(&self, uid: u64) -> Option<usize> { self.tabs.iter().position(|slot| slot.uid == uid) }
@@ -618,7 +622,8 @@ impl Hangar {
         let failed = panel.tabs.get(tab).is_some_and(|slot| slot.kind == Kind::Shell && panel.shell_error.is_some()
             || matches!(slot.status, Status::Failed(_)));
         // Aba nunca encolhe: com muitas, a fila rola na horizontal em vez de esmagar o rótulo.
-        let mut tabs = div().id("terminal-tabs").flex().items_center().gap_1().min_w_0().flex_1().overflow_x_scroll();
+        let mut tabs = div().id("terminal-tabs").flex().items_center().gap_1().min_w_0().flex_1().overflow_x_scroll().track_scroll(&panel.tab_scroll);
+        let (mut plain, mut grouped, mut active_plain, mut active_grouped) = (0usize, 0usize, None, None);
         let live = self.live_for(&panel.server);
         let mut hangar_tabs = Vec::new();
         for (index, slot) in panel.tabs.iter().enumerate() {
@@ -657,6 +662,8 @@ impl Hangar {
                     let dot = div().size(px(7.)).flex_shrink_0().rounded_full()
                         .when(!term.alive, |el| el.border_1().border_color(theme::faint()))
                         .when(term.alive, |el| el.bg(if asking { theme::warning() } else { theme::success() }));
+                    if selected { active_grouped = Some(grouped); }
+                    grouped += 1;
                     let (id, close_id) = (term.id.clone(), term.id.clone());
                     let stop = tr_shared("term_hangar_parar", &[("label", term.label.as_str())]);
                     hangar_tabs.push(div().flex().items_center().flex_shrink_0()
@@ -678,7 +685,15 @@ impl Hangar {
                     continue;
                 }
             };
+            if selected { active_plain = Some(plain); }
+            plain += 1;
             tabs = tabs.child(element);
+        }
+        // Filhos da fila: as abas comuns, a marca do grupo HANGAR e as abas dele.
+        let active_slot = panel.tabs.get(tab).map(|slot| slot.uid);
+        if panel.scrolled_to.get() != active_slot {
+            if let Some(child) = active_plain.or(active_grouped.map(|n| plain + 1 + n)) { panel.tab_scroll.scroll_to_item(child); }
+            panel.scrolled_to.set(active_slot);
         }
         if !hangar_tabs.is_empty() {
             tabs = tabs.child(div().flex_shrink_0().flex().items_center().gap(px(8.)).ml(px(6.))
@@ -790,7 +805,7 @@ impl Hangar {
 
 /// Rótulo da aba do atalho: o nome e, depois que o comando saiu, o código (o pane continua com a saída na tela).
 fn shortcut_tab_label(term: &ShortcutTerm) -> String {
-    let label = conversation::one_line(&term.label, 40);
+    let label = conversation::one_line(&term.label, 60);
     if term.alive { return label; }
     let status = term.exit_code.map_or_else(|| tr("term_shortcut_ended"), |code| tr("term_shortcut_exit").replace("{code}", &code.to_string()));
     format!("{label} · {status}")

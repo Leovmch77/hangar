@@ -383,6 +383,8 @@ pub fn danger() -> Hsla { rgb(if colors().dark { 0xff453a } else { 0xd12c21 }).i
 /// Texto sobre fundo tingido da mesma cor (marca, linha de estado, nome em destaque): clareado no escuro, o `--success-text` do web.
 pub fn success_text() -> Hsla { if colors().dark { rgb(mix(0x34c759, 0xffffff, 0.45)).into() } else { success() } }
 pub fn warning_text() -> Hsla { if colors().dark { rgb(mix(0xff9f0a, 0xffffff, 0.4)).into() } else { warning() } }
+/// Texto (e ponto de seleção) sobre um botão de cor cheia e escura, como o Enviar âmbar e o Salvar índigo.
+pub fn on_press() -> Hsla { hsla(0., 0., 1., 1.) }
 /// Fundo do botão âmbar (Responder, Enviar) com texto branco: o âmbar escurecido em 25%.
 pub fn warning_press() -> Hsla { rgb(mix(if colors().dark { 0xff9f0a } else { 0xb25e00 }, 0x000000, 0.25)).into() }
 /// Moldura do pedido que espera a pessoa (pergunta do agente, seletor do terminal).
