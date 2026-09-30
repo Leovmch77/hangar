@@ -1028,6 +1028,8 @@
   "composer_sem_microfone": "No microphone found",
   "composer_mic_em_uso": "Microphone in use by another app",
   "composer_sem_acesso_mic": "No microphone access",
+  "composer_draft_recover_attach_busy": "The previous draft has an attachment. Remove the current attachment to recover it.",
+  "composer_sem_acesso_fotos": "No access to photos. Allow it in the device settings, then tap attach again.",
   "composer_audio_nao_suportado": "Audio recording not supported in this browser",
   "composer_falha_envio": "Send failed",
   "composer_inicio_gravacao_falhou": "recording start failed",
