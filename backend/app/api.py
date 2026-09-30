@@ -2555,9 +2555,7 @@ async def rename_session(name: str, body: RenameBody):
             await stack.enter_async_context(adapter.delivery_lock(key))
         task = asyncio.create_task(asyncio.to_thread(_rename_session, name, body))
         try:
-            result = await asyncio.shield(task)
-            await asyncio.to_thread(guest_users.rename_session, name, sanitize_session_name(body.new))
-            return result
+            return await asyncio.shield(task)
         except asyncio.CancelledError:
             await task
             raise
@@ -2587,6 +2585,7 @@ def _rename_session(name: str, body: RenameBody):
         _invalidate_lists()
         forget_frame(name)
         share_store.rename(name, new)
+        guest_users.rename_session(name, new)
         return {"ok": True, "name": new}
     if not tmux.has_session(name):
         raise HTTPException(404, detail=erro("erro_sessao_inexistente", "sessao nao encontrada"))
@@ -2612,6 +2611,7 @@ def _rename_session(name: str, body: RenameBody):
     _codex_lease_rename_finished(new)
     registry.rename(name, new)  # migra o cache name->jsonl (senao serve transcript errado pos-rename)
     share_store.rename(name, new)
+    guest_users.rename_session(name, new)
     from app.pqueue import PromptQueue
     try:
         oq, nq = PromptQueue(name).path, PromptQueue(new).path
@@ -6546,7 +6546,8 @@ def shortcut_shell(name: str, body: ShortcutShellBody, request: Request):
     from app.share_gate import guest_of
     # Convidado nao cria nem reaproveita copia No Hangar: ele nao a ve, nao a fecha, e o reuso traria
     # uma janela pra frente na tela do dono.
-    if body.runs_in == "hangar" and guest_of(request) is not None:
+    guest_user = guest_users.current.get()
+    if body.runs_in == "hangar" and (guest_of(request) is not None or guest_user is not None):
         raise HTTPException(403, detail=erro("erro_shortcut_hangar_convidado",
                                              "convidado nao roda atalho No Hangar"))
     cwd = _session_cwd(name)
@@ -6563,6 +6564,10 @@ def shortcut_shell(name: str, body: ShortcutShellBody, request: Request):
             raise _project_error(e)
         except ValueError as e:
             raise HTTPException(400, detail=erro("erro_shortcut_pasta", str(e), detalhe=str(e)))
+    # `pasta` absoluta passa direto pelo resolve_folder: o convidado não sai da pasta dele.
+    if guest_user is not None and not guest_users.inside_root(guest_user, cwd):
+        raise HTTPException(403, detail=erro("erro_fora_da_pasta",
+                                             "o convidado só abre sessão dentro da pasta dele"))
     # Atalho importado com a credencial em branco: rodar mandaria o marcador literal pro programa.
     from app.shortcut_transfer import has_placeholder
     missing = has_placeholder(command)
