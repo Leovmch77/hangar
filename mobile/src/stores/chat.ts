@@ -2,7 +2,8 @@ import { create } from 'zustand';
 import type { StoreApi, UseBoundStore } from 'zustand';
 import {
   getHistory,
-  openEventStream,
+  getHistoryDesde,
+  openEventStreamForServer,
   prependOlder,
   hasSeam,
   isAbortError,
@@ -13,7 +14,7 @@ import {
   queuedMessages,
   registrarDiag,
 } from '@hangar/core';
-import type { ChatEvent, StateEvent, PreviewEvent, AskQuestionPayload, StatsEvent } from '@hangar/core';
+import type { ChatEvent, StateEvent, PreviewEvent, AskQuestionPayload, StatsEvent, EventSourceLike, Server } from '@hangar/core';
 import * as m from '../paraglide/messages';
 import { reconcilePending, type PendingMsg } from '../chat/pending';
 import { useServers } from './servers';
@@ -76,10 +77,15 @@ export interface ChatApi {
   // Recarrega o histórico depois de falha da primeira carga (o SSE segue vivo por conta
   // própria — onerror reconecta —, então retry é só a parte REST).
   retry: () => void;
+  // Fundo fecha stream/timers e cancela só leituras; volta sincroniza uma vez e reabre com o cursor.
+  setForeground: (active: boolean) => void;
   openAsk: (payload: AskQuestionPayload, piId?: string | null) => void;
   closeAsk: () => void;
   markAskDismissed: () => void;
 }
+
+// Estado do app visto pelos stores que ainda vão nascer: o layout liga antes da primeira tela.
+let foregroundAtual = true;
 
 function criarChatStore(serverId: string, name: string): ChatApi {
   const useChatStore = create<ChatState>(() => ({
@@ -102,8 +108,12 @@ function criarChatStore(serverId: string, name: string): ChatApi {
   }));
 
   // internos — fora do set() para não virar proxy
-  let es: ReturnType<typeof openEventStream> | null = null;
+  let es: EventSourceLike | null = null;
   let lastEventId: string | null = null;
+  let etag: string | null = null;
+  let foreground = foregroundAtual;
+  // Com base carregada a volta pede só a cauda; sem ela (primeira carga falhou, reset) recarrega tudo.
+  let baseLoaded = false;
   let retryTimer: ReturnType<typeof setTimeout> | undefined;
   let retryDelay = SSE_RETRY_MIN_MS;
   let alive = false;
@@ -130,16 +140,27 @@ function criarChatStore(serverId: string, name: string): ChatApi {
     useChatStore.setState({ events });
   }
 
-  async function loadHistory(): Promise<void> {
+  // Destino desta conversa, nunca o servidor ativo: sem ele nenhuma leitura cai em outra máquina.
+  function destino(): Server | undefined {
+    return useServers.getState().servers.find((s) => s.id === serverId);
+  }
+
+  function novaLeitura(): { g: number; signal: AbortSignal } {
     histGen++;
     histAbort?.abort();
     histAbort = new AbortController();
-    const signal = histAbort.signal;
-    const g = histGen;
+    return { g: histGen, signal: histAbort.signal };
+  }
+
+  async function loadHistory(): Promise<void> {
+    const { g, signal } = novaLeitura();
     try {
-      const tail = await getHistory(name, TAIL_FIRST, signal);
+      const target = destino();
+      if (!target) throw new Error(m.chat_servidor_removido());
+      const tail = await getHistory(name, TAIL_FIRST, signal, undefined, target);
       if (g !== histGen) return;
       aplicarEvents(tail);
+      baseLoaded = true;
       useChatStore.setState({ error: '', olderFailed: '' });
       // Histórico antigo NÃO vem automático (diferente da PWA): entra sob demanda no
       // loadOlder(), chamado pelo onStartReached da lista — menos banda em link móvel.
@@ -155,15 +176,55 @@ function criarChatStore(serverId: string, name: string): ChatApi {
     }
   }
 
+  // Volta do fundo: só o que é novo entra, pelo mesmo caminho do SSE (dedup de fila e pending);
+  // sem costura a cauda vira a verdade, e o antigo volta pelo loadOlder.
+  async function syncTail(): Promise<void> {
+    const { g, signal } = novaLeitura();
+    const target = destino();
+    try {
+      if (!target) throw new Error(m.chat_servidor_removido());
+      const r = await getHistoryDesde(name, TAIL_FIRST, etag, signal, undefined, target);
+      if (g !== histGen || !alive || r === 'igual') return;
+      etag = r.etag;
+      const atual = useChatStore.getState().events;
+      if (!r.eventos.length) return;
+      if (!atual.length || !hasSeam(r.eventos, atual)) {
+        // Lista trocada pela cauda: o cursor antigo reenviaria o buraco DEPOIS dela, fora de ordem.
+        lastEventId = null;
+        aplicarEvents(r.eventos);
+        useChatStore.setState({ olderFailed: '' });
+        return;
+      }
+      for (const ev of r.eventos) if (!idIndex.has(ev.id)) ingest(ev);
+    } catch (err) {
+      if (isAbortError(err) || g !== histGen || !alive) return;
+      // A conversa na tela continua válida e o SSE reabre com o cursor; a falha fica no diário.
+      if (target) registrarDiag({ evento: 'chat.sincronia_falhou', nivel: 'erro', tela: 'chat',
+        detalhe: err instanceof Error ? err.message : String(err) }, target.baseUrl);
+    }
+  }
+
+  function sincronizar(): void {
+    if (!alive || !foreground) return;
+    const load = baseLoaded ? syncTail() : loadHistory();
+    const g = histGen;
+    void load.then(() => {
+      if (alive && foreground && g === histGen && !es && !useChatStore.getState().sseRecusado) connectSSE();
+    });
+  }
+
   let olderInFlight = false;
   function loadOlder(): void {
-    if (olderInFlight || !alive) return;
+    if (olderInFlight || !alive || !foreground) return;
     if (useChatStore.getState().olderFailed === 'unjoinable') return;
+    const target = destino();
+    if (!target) return;
     olderInFlight = true;
-    getHistory(name, undefined, histAbort?.signal)
+    const g = histGen;
+    getHistory(name, undefined, histAbort?.signal, undefined, target)
       .then((full) => {
         olderInFlight = false;
-        if (!alive) return;
+        if (!alive || g !== histGen) return;
         const events = useChatStore.getState().events;
         const merged = prependOlder(full, events);
         if (!merged) {
@@ -179,22 +240,92 @@ function criarChatStore(serverId: string, name: string): ChatApi {
       })
       .catch((err) => {
         olderInFlight = false;
-        if (isAbortError(err) || !alive) return;
+        if (isAbortError(err) || !alive || g !== histGen) return;
         useChatStore.setState({ olderFailed: 'failed' });
       });
   }
 
+  function ingest(ev: ChatEvent): void {
+    let { events } = useChatStore.getState();
+    if (ev.queued_confirmed && ev.id.startsWith('queued-')) {
+      events = events.filter((x) => x.id !== ev.id);
+      rebuildIndex(events);
+      useChatStore.setState({ events });
+      return;
+    }
+    // Dedup cruzado fila<->transcript: a fila durável emite user_msg sintético (id
+    // "queued-") e o transcript grava depois o user_msg REAL com texto igual — sem
+    // isto, toda msg enfileirada (cp-send, composer working) aparece DOBRADA. O backend
+    // documenta que o dedup é do front (sse.py: "O front faz o dedup cruzado").
+    // Porte do handler de message do Chat.svelte.
+    if (ev.kind === 'user_msg' && ev.text) {
+      const filas: { i: number; text: string }[] = [];
+      for (let i = 0; i < events.length; i++) {
+        const x = events[i];
+        if (x.kind === 'user_msg' && x.id.startsWith('queued-') && x.text) {
+          filas.push({ i, text: x.text });
+        }
+      }
+      if (ev.id.startsWith('queued-')) {
+        // Sintético só entra se NENHUMA bolha real já cobre este texto sendo ela dona.
+        const candidatos = [...filas.map((f) => f.text), ev.text];
+        const coberto = events.some(
+          (x) =>
+            x.kind === 'user_msg' &&
+            !x.id.startsWith('queued-') &&
+            !!x.text &&
+            especificidade(x.text, ev.text!) >= 0 &&
+            donoDaLinha(x.text!, candidatos) === candidatos.length - 1,
+        );
+        if (coberto) return; // real já cobre e é o dono -> ignora o sintético
+      } else {
+        // Real chegou: remove SÓ a bolha da fila DONA da linha (não todas).
+        const dono = donoDaLinha(ev.text, filas.map((f) => f.text));
+        if (dono >= 0) {
+          const qi = filas[dono].i;
+          events = [...events.slice(0, qi), ...events.slice(qi + 1)];
+        }
+      }
+    }
+    // Dedup por id (replay do SSE + seed do history): existente SUBSTITUI (conteúdo
+    // pode ter crescido), novo entra no fim.
+    const i = idIndex.get(ev.id);
+    if (i !== undefined) {
+      const next = events.slice();
+      next[i] = ev;
+      rebuildIndex(next);
+      useChatStore.setState({ events: next });
+      return;
+    }
+    const next = [...events, ev];
+    idIndex.set(ev.id, next.length - 1);
+    // Reconcilia pending com o evento que acabou de chegar (se for user_msg real)
+    const curPending = useChatStore.getState().pending;
+    const nextPending = curPending.length ? reconcilePending(curPending, ev) : curPending;
+    const pendingPatch = nextPending.length !== curPending.length ? { pending: nextPending } : {};
+    useChatStore.setState({ events: next, ...pendingPatch });
+    // Swap prévia->bolha: o bloco real chegou, a prévia sai no MESMO flush.
+    if (ev.kind === 'assistant_msg' && ev.text && useChatStore.getState().preview) {
+      previewMd = false;
+      previewFull = false;
+      useChatStore.setState({ preview: '', previewMd: false, previewFull: false });
+    }
+  }
+
   function connectSSE(): void {
-    if (!alive) return;
-    const destino = useServers.getState().servers.find((s) => s.id === serverId)?.baseUrl;
+    if (!alive || !foreground) return;
+    const target = destino();
+    const base = target?.baseUrl;
     const quadroFalhou = (codigo: string) => {
-      if (destino !== undefined) registrarDiag({ evento: 'sse.quadro_falhou', nivel: 'erro',
-        tela: 'chat', codigo }, destino);
+      if (base !== undefined) registrarDiag({ evento: 'sse.quadro_falhou', nivel: 'erro',
+        tela: 'chat', codigo }, base);
     };
     clearTimeout(retryTimer);
     es?.close();
+    es = null;
+    if (!target) return;
 
-    es = openEventStream(name, lastEventId);
+    es = openEventStreamForServer(target, name, undefined, lastEventId);
     const source = es;
 
     // Prova de vida pro watchdog do adapter: SEM listener registrado o wrap do adapter
@@ -205,71 +336,7 @@ function criarChatStore(serverId: string, name: string): ChatApi {
       // Só o transcript carrega lastEventId ("<stem>:<offset>"); state/preview/ping vêm sem.
       if (e.lastEventId) lastEventId = e.lastEventId;
       try {
-        const ev = JSON.parse(e.data as string) as ChatEvent;
-        let { events } = useChatStore.getState();
-        if (ev.queued_confirmed && ev.id.startsWith('queued-')) {
-          events = events.filter((x) => x.id !== ev.id);
-          rebuildIndex(events);
-          useChatStore.setState({ events });
-          return;
-        }
-        // Dedup cruzado fila<->transcript: a fila durável emite user_msg sintético (id
-        // "queued-") e o transcript grava depois o user_msg REAL com texto igual — sem
-        // isto, toda msg enfileirada (cp-send, composer working) aparece DOBRADA. O backend
-        // documenta que o dedup é do front (sse.py: "O front faz o dedup cruzado").
-        // Porte do handler de message do Chat.svelte.
-        if (ev.kind === 'user_msg' && ev.text) {
-          const filas: { i: number; text: string }[] = [];
-          for (let i = 0; i < events.length; i++) {
-            const x = events[i];
-            if (x.kind === 'user_msg' && x.id.startsWith('queued-') && x.text) {
-              filas.push({ i, text: x.text });
-            }
-          }
-          if (ev.id.startsWith('queued-')) {
-            // Sintético só entra se NENHUMA bolha real já cobre este texto sendo ela dona.
-            const candidatos = [...filas.map((f) => f.text), ev.text];
-            const coberto = events.some(
-              (x) =>
-                x.kind === 'user_msg' &&
-                !x.id.startsWith('queued-') &&
-                !!x.text &&
-                especificidade(x.text, ev.text!) >= 0 &&
-                donoDaLinha(x.text!, candidatos) === candidatos.length - 1,
-            );
-            if (coberto) return; // real já cobre e é o dono -> ignora o sintético
-          } else {
-            // Real chegou: remove SÓ a bolha da fila DONA da linha (não todas).
-            const dono = donoDaLinha(ev.text, filas.map((f) => f.text));
-            if (dono >= 0) {
-              const qi = filas[dono].i;
-              events = [...events.slice(0, qi), ...events.slice(qi + 1)];
-            }
-          }
-        }
-        // Dedup por id (replay do SSE + seed do history): existente SUBSTITUI (conteúdo
-        // pode ter crescido), novo entra no fim.
-        const i = idIndex.get(ev.id);
-        if (i !== undefined) {
-          const next = events.slice();
-          next[i] = ev;
-          rebuildIndex(next);
-          useChatStore.setState({ events: next });
-          return;
-        }
-        const next = [...events, ev];
-        idIndex.set(ev.id, next.length - 1);
-        // Reconcilia pending com o evento que acabou de chegar (se for user_msg real)
-        const curPending = useChatStore.getState().pending;
-        const nextPending = curPending.length ? reconcilePending(curPending, ev) : curPending;
-        const pendingPatch = nextPending.length !== curPending.length ? { pending: nextPending } : {};
-        useChatStore.setState({ events: next, ...pendingPatch });
-        // Swap prévia->bolha: o bloco real chegou, a prévia sai no MESMO flush.
-        if (ev.kind === 'assistant_msg' && ev.text && useChatStore.getState().preview) {
-          previewMd = false;
-          previewFull = false;
-          useChatStore.setState({ preview: '', previewMd: false, previewFull: false });
-        }
+        ingest(JSON.parse(e.data as string) as ChatEvent);
       } catch {
         quadroFalhou('message');
         // evento ilegível não derruba o stream
@@ -367,6 +434,8 @@ function criarChatStore(serverId: string, name: string): ChatApi {
     es.addEventListener('reset', () => {
       // Transcript trocado (/clear): ids do arquivo antigo não valem mais — zera e recarrega.
       lastEventId = null;
+      etag = null;
+      baseLoaded = false;
       previewMd = false;
       previewFull = false;
       useChatStore.setState({
@@ -397,15 +466,15 @@ function criarChatStore(serverId: string, name: string): ChatApi {
       const refused = status >= 400 && status < 500 && status !== 408 && status !== 429;
       es = null;
       source.close();
-      if (!alive) return;
+      if (!alive || !foreground) return;
       clearTimeout(retryTimer);
       if (refused) {
         useChatStore.setState({ sseRecusado: true });
         return;
       }
       retryTimer = setTimeout(connectSSE, retryDelay);
-      if (destino !== undefined) registrarDiag({ evento: 'sse.retentativa', tela: 'chat',
-        espera_ms: retryDelay }, destino);
+      if (base !== undefined) registrarDiag({ evento: 'sse.retentativa', tela: 'chat',
+        espera_ms: retryDelay }, base);
       retryDelay = Math.min(retryDelay * 2, SSE_RETRY_MAX_MS);
     };
   }
@@ -417,9 +486,7 @@ function criarChatStore(serverId: string, name: string): ChatApi {
       if (refs === 1) {
         alive = true;
         retryDelay = SSE_RETRY_MIN_MS;
-        void loadHistory().then(() => {
-          if (alive) connectSSE();
-        });
+        sincronizar();
       }
     },
     release() {
@@ -435,6 +502,9 @@ function criarChatStore(serverId: string, name: string): ChatApi {
       idIndex.clear();
       pendingSeq = 0;
       prevState = null;
+      lastEventId = null;
+      etag = null;
+      baseLoaded = false;
       useChatStore.setState({
         events: [],
         stateEvent: null,
@@ -456,14 +526,31 @@ function criarChatStore(serverId: string, name: string): ChatApi {
     },
     loadOlder,
     retry: () => {
-      void loadHistory();
+      const recusado = useChatStore.getState().sseRecusado;
+      sincronizar();
       // Recusa definitiva parou o laço de reconexão; tocar em "tentar de novo" é o único caminho
       // de volta, então o retry precisa reabrir o stream, não só recarregar o histórico.
-      if (useChatStore.getState().sseRecusado && alive) {
+      if (recusado && alive && foreground) {
         useChatStore.setState({ sseRecusado: false });
         retryDelay = SSE_RETRY_MIN_MS;
         connectSSE();
       }
+    },
+    setForeground(active: boolean) {
+      if (active === foreground) return;
+      foreground = active;
+      if (!active) {
+        // Só GET é descartável: POST em voo segue, e transcript, pergunta, pending e cursor ficam.
+        histGen++;
+        histAbort?.abort();
+        histAbort = null;
+        clearTimeout(retryTimer);
+        es?.close();
+        es = null;
+        return;
+      }
+      retryDelay = SSE_RETRY_MIN_MS;
+      sincronizar();
     },
     openAsk(payload: AskQuestionPayload, piId: string | null = null) {
       useChatStore.setState({ askPayload: payload, askOpen: true, askPiId: piId });
@@ -512,7 +599,13 @@ export function chatStore(serverId: string, name: string): ChatApi {
   return api;
 }
 
+export function setChatsForeground(active: boolean): void {
+  foregroundAtual = active;
+  for (const api of chats.values()) api.setForeground(active);
+}
+
 export function _resetChatsForTests(): void {
   for (const api of chats.values()) api.release();
   chats.clear();
+  foregroundAtual = true;
 }
