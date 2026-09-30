@@ -57,6 +57,7 @@
 #                                  --jev / --sem-jev liga ou desliga o Jev naquela sessão: com ele,
 #                                  `hangar-preview objetivo` navega e preenche tela sozinho. Sem
 #                                  nenhum dos dois vale o padrão do servidor (tela de Configurações).
+#   hangar-send --whoami               imprime o nome desta sessão (a identidade que assina os recados)
 #   hangar-send --help                esta ajuda (o cabeçalho deste arquivo).
 #
 # OUTRA CONTA: cada conta é um config dir próprio (~/.claude-<nome>), com skills/hooks symlinkados
@@ -287,6 +288,11 @@ me() {
     fi
     echo "${atual:-cli}"
 }
+
+if [[ "${1:-}" == "--whoami" ]]; then
+    me
+    exit 0
+fi
 
 if [[ "${1:-}" == "--list" || $# -eq 0 ]]; then
     listar

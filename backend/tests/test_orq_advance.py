@@ -95,6 +95,7 @@ def start(tmp_path, integ="`test -f a.txt`", par="até 2", rows=ROWS, revisao="s
     # CLAUDE_CONFIG_DIR isolated: jev_config() would otherwise read the real runtime-config.json.
     e = {**os.environ, "ORQ_DIR": str(d), "ORQ_SEND": str(fake), "FAKE_LOG": str(log),
          "ORQ_JEV": "off", "HOME": str(tmp_path), "CLAUDE_CONFIG_DIR": str(tmp_path / "cfg"),
+         "ORQ_WHOAMI": "false",
          "TYPESAFE_API_KEY": "", "ORQ_JEV_URL": "", "JEV_ENDPOINT": "", "JEV_MODEL": ""}
     (tmp_path / "r1.md").write_text("roteiro\n")
     plan = tmp_path / "plan.orq.md"
@@ -482,6 +483,11 @@ def test_opens_the_wave_up_to_paralelo_with_worktrees_rows_and_kickoffs(tmp_path
     assert (d / "kickoffs" / "task1-revisor.md").read_text().startswith("REVISOR T1 first")
     assert any(x["kind"] == "advance" and x["task"] == 1 and "abriu w-t1" in x["text"]
                for x in timeline_lines(d))
+    seen = [json.loads(l) for l in (d / "sessions.jsonl").read_text().splitlines()]
+    assert [(x["name"], x["role"], x["task"], x["provider"]) for x in seen if x["task"] is not None] == [
+        ("w-t1", "executor", 1, "claude"), ("w-rev-1", "revisor", 1, "claude"),
+        ("w-t2", "executor", 2, "codex"), ("w-rev-2", "revisor", 2, "claude")]
+    assert (seen[0]["name"], seen[0]["role"], seen[0]["task"]) == ("arb", "arbitro", None)
     assert run(e, "advance").stdout == ""   # the wave is full, T3 waits for wave 1
 
 

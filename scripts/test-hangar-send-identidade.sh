@@ -102,6 +102,17 @@ export CP_SESSION_KEY="nao-existe"
 checa "chave órfã cai no pane" "outra" "$(me 2>/dev/null)"
 unset CP_SESSION_KEY HANGAR_CANO_KEY HANGAR_HEADLESS_DIR
 
+# 8) `--whoami` do script de verdade: imprime a identidade e sai sem chamar a API (curl falso que falha).
+mkdir -p "$TMP/scripts" "$TMP/backend" "$TMP/claude-headless"
+cp "$REPO/scripts/hangar-send" "$TMP/scripts/hangar-send"
+echo "CP_AUTH_TOKEN=x" > "$TMP/backend/.env"
+printf '{"name": "w-t4", "provider": "claude", "key": "k1"}\n' > "$TMP/claude-headless/t.json"
+printf '#!/usr/bin/env bash\necho chamou-api >> "%s/api.log"\nexit 1\n' "$TMP" > "$TMP/bin/curl"
+chmod +x "$TMP/bin/curl"
+quem=$(CP_SESSION_KEY=k1 HANGAR_HEADLESS_DIR="$TMP/claude-headless" "$TMP/scripts/hangar-send" --whoami 2>/dev/null)
+checa "--whoami imprime a identidade" "w-t4" "$quem"
+checa "--whoami sem chamada à API" "nao" "$([[ -e "$TMP/api.log" ]] && echo sim || echo nao)"
+
 echo
 if (( falhas )); then echo "$falhas falha(s)"; exit 1; fi
 echo "tudo ok"
