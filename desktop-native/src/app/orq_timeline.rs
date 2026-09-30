@@ -57,7 +57,9 @@ fn dec(value: f64) -> String {
 fn badge_text(decided: &OrqDecidedBy, kind: &str) -> String {
     let badge = badge_key(decided, kind);
     let p = badge.p.map(pct).unwrap_or_default();
-    tr_shared(&badge.key, &[("p", &p), ("category", badge.category.as_deref().unwrap_or(""))])
+    let text = tr_shared(&badge.key, &[("p", &p), ("category", badge.category.as_deref().unwrap_or(""))]);
+    // Sem probabilidade ou categoria a frase termina no separador; ele sai junto.
+    text.trim_end().trim_end_matches('·').trim_end().to_owned()
 }
 
 /// O porquê da decisão, uma frase por parte; o que o backend não mandou fica de fora.
@@ -248,7 +250,7 @@ impl Hangar {
 
 #[cfg(test)]
 mod tests {
-    use super::{badge_key, body_preview, day_starts, line_text, raw_line};
+    use super::{badge_key, badge_text, body_preview, day_starts, line_text, raw_line};
     use crate::{api::dto::*, i18n::tr_shared};
     use chrono::{Local, TimeZone};
     use std::collections::HashSet;
@@ -286,6 +288,15 @@ mod tests {
         let regex = OrqDecidedBy { regex: Some(OrqRegex { verdict: "drop".into(), category: Some("janela".into()) }), ..decided("regex") };
         let badge = key(&regex, "would_drop");
         assert_eq!((badge.key.as_str(), badge.category.as_deref()), ("orq_badge_regex_would_drop", Some("janela")));
+    }
+
+    #[test]
+    fn badge_text_never_ends_with_a_dangling_separator() {
+        let no_number = jev("act", None, &[]);
+        let text = badge_text(&no_number, "dropped");
+        assert!(!text.ends_with('·') && !text.ends_with(' '), "{text:?}");
+        assert!(!badge_text(&OrqDecidedBy { regex: Some(OrqRegex { verdict: "drop".into(), category: None }), ..decided("regex") }, "would_drop").ends_with('·'));
+        assert!(badge_text(&jev("nothing", Some(0.97), &[]), "dropped").ends_with("97%"));
     }
 
     #[test]

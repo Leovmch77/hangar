@@ -11,7 +11,7 @@ const REFRESH_EVERY: u64 = 10;
 /// O que a aba guarda entre desenhos: a última leitura, o erro do último pedido e o que o usuário abriu.
 #[derive(Default)]
 pub(super) struct State {
-    data: Option<(SessionKey, OrqPanel)>,
+    data: Option<(SessionKey, Arc<OrqPanel>)>,
     error: Option<(SessionKey, String)>,
     task: Option<(SessionKey, JoinHandle<()>)>,
     generation: u64,
@@ -80,9 +80,12 @@ fn state_key(state: &str) -> Option<&'static str> {
 
 /// Estado que este app não conhece aparece como veio, em vez de sumir.
 fn task_state_text(task: &OrqPanelTask) -> String {
-    let round = task.round.map(|round| round.to_string()).unwrap_or_default();
+    let round = round_text(task.round);
     state_key(&task.state).map_or_else(|| task.state.clone(), |key| tr_shared(key, &[("round", &round)]))
 }
+
+/// Rodada que o backend não sabe aparece como traço, não como "R" sem número.
+fn round_text(round: Option<u32>) -> String { round.map_or_else(|| "—".to_owned(), |round| round.to_string()) }
 
 fn task_state_color(state: &str) -> Hsla {
     match state {
@@ -171,7 +174,7 @@ impl Hangar {
             .and_then(|value| serde_json::from_value::<OrqPanel>(value).map_err(|error| error.to_string()));
         let orq = &mut self.side.orq;
         match parsed {
-            Ok(panel) => { orq.data = Some((key, panel)); orq.error = None; }
+            Ok(panel) => { orq.data = Some((key, Arc::new(panel))); orq.error = None; }
             Err(error) => orq.error = Some((key, error)),
         }
     }
@@ -179,14 +182,14 @@ impl Hangar {
     /// Corpo da aba: carregando, vazio, erro do pedido ou os blocos; as ações da sessão vão sempre por último.
     pub(super) fn render_orq_panel(&mut self, width: f32, readable: bool, cx: &mut Context<Self>) -> AnyElement {
         let Some(key) = self.selected_key() else { return div().into_any_element() };
-        let panel = self.side.orq.data.as_ref().filter(|(owner, _)| owner == &key).map(|(_, panel)| panel.clone());
+        let panel = self.side.orq.data.as_ref().filter(|(owner, _)| owner == &key).map(|(_, panel)| Arc::clone(panel));
         let error = self.side.orq.error.as_ref().filter(|(owner, _)| owner == &key).map(|(_, error)| error.clone());
         let orq_target = super::sidebar::Target::new(&self.open_server(), &key.name);
         let live: HashMap<String, String> = self.sessions_of(&key.server).iter().map(|s| (s.name.clone(), s.state.clone())).collect();
         let message = |text: String, color: Hsla| div().px_4().py(px(14.)).border_b_1().border_color(theme::border()).text_xs().text_color(color).whitespace_normal().child(text);
 
         let mut content = div().flex().flex_col();
-        match (&panel, &error) {
+        match (panel.as_deref(), &error) {
             (None, None) => content = content.child(message(tr_shared("orq_panel_loading", &[]), theme::muted())),
             (None, Some(error)) => content = content.child(div().px_4().py(px(14.)).border_b_1().border_color(theme::border()).flex().flex_col().items_start().gap_2()
                 .child(div().text_xs().text_color(theme::warning()).whitespace_normal().child(tr_shared("orq_panel_fetch_error", &[("error", error)])))
@@ -250,7 +253,7 @@ impl Hangar {
         let server = orq_target.server.clone();
         let card = |row: &TeamRow, clickable: bool, cx: &mut Context<Self>| {
             let member = row.member;
-            let round = row.status.round.map(|round| round.to_string()).unwrap_or_default();
+            let round = round_text(row.status.round);
             let status = tr_shared(&row.status.key, &[("round", &round)]);
             let role = tr_shared(&format!("orq_role_{}", member.role), &[("task", &member.task.map(|task| task.to_string()).unwrap_or_default())]);
             let color = match row.status.key.as_str() {
@@ -293,6 +296,7 @@ impl Hangar {
     }
 
     fn orq_decisions(&self, panel: &OrqPanel, orq_target: &super::sidebar::Target, cx: &mut Context<Self>) -> Div {
+        let has_arbiter = self.arbiter_of(orq_target).is_some();
         let body = if panel.decisions.is_empty() {
             div().text_xs().text_color(theme::faint()).child(tr_shared("orq_decisions_none", &[]))
         } else {
@@ -310,6 +314,7 @@ impl Hangar {
                             .label(tr_shared("orq_open_parecer", &[]))
                             .on_click(cx.listener(move |this, _, window, cx| this.open_file(path.clone(), None, window, cx)))))
                         .child(Button::new(SharedString::from(format!("orq-arbiter-{index}"))).ghost().xsmall().label(tr_shared("orq_talk_to_arbiter", &[]))
+                            .disabled(!has_arbiter)
                             .on_click(cx.listener(move |this, _, window, cx| this.open_arbiter(&orq, window, cx)))))
             }))
         };
@@ -355,6 +360,10 @@ impl Hangar {
             return section(title, None, div().text_xs().text_color(theme::muted()).child(tr_shared("orq_use_computing", &[])));
         };
         let usd = |value: Option<f64>| value.map_or_else(|| "—".to_owned(), |usd| self.money(usd));
+        // A coluna já diz a moeda no cabeçalho: na linha vai só o número.
+        let symbol = self.money(0.).split(' ').next().unwrap_or_default().to_owned();
+        let usd_number = |value: Option<f64>| usd(value).split_once(' ').map_or_else(|| "—".to_owned(), |(_, number)| number.to_owned());
+        let total_cost = format!("{}{}", usd(usage.totals.usd), if usage.totals.usd_partial { "*" } else { "" });
         let cell = |text: String, bold: bool, muted: bool| div().flex_shrink_0().w(px(64.)).text_right().text_size(px(12.)).font_family(crate::theme::MONO)
             .text_color(if muted { theme::muted() } else { theme::text() }).when(bold, |el| el.font_weight(FontWeight::SEMIBOLD)).child(text);
         let row = |name: String, new: String, cache: String, cost: String, provider: bool| div().w_full().flex().items_center().gap_1().py(px(4.))
@@ -364,14 +373,14 @@ impl Hangar {
             .child(cell(new, provider, !provider)).child(cell(cache, provider, !provider)).child(cell(cost, provider, !provider));
         let head = div().w_full().flex().gap_1().text_size(px(11.)).text_color(theme::faint())
             .child(div().flex_1())
-            .children([tr_shared("orq_use_col_new", &[]), tr_shared("orq_use_col_cache", &[]), tr_shared("orq_use_col_cost", &[])]
+            .children([tr_shared("orq_use_col_new", &[]), tr_shared("orq_use_col_cache", &[]), format!("{} {symbol}", tr_shared("orq_use_col_cost", &[]))]
                 .map(|label| div().flex_shrink_0().w(px(64.)).text_right().child(label)));
         let mut table = div().flex().flex_col().child(head);
         for provider in &usage.providers {
-            table = table.child(row(super::side::agent_label(&provider.provider), tok(provider.new as f64), tok(provider.cache_read as f64), usd(provider.usd), true));
+            table = table.child(row(super::side::agent_label(&provider.provider), tok(provider.new as f64), tok(provider.cache_read as f64), usd_number(provider.usd), true));
             for model in &provider.models {
                 let name = tr_shared("orq_use_model_sessions", &[("model", &model.model), ("n", &model.sessions.to_string())]);
-                table = table.child(row(name, tok(model.new as f64), tok(model.cache_read as f64), usd(model.usd), false));
+                table = table.child(row(name, tok(model.new as f64), tok(model.cache_read as f64), usd_number(model.usd), false));
             }
         }
         let method = tr_shared("orq_use_method", &[("since", &since_text(usage.since.as_deref()))]);
@@ -379,7 +388,7 @@ impl Hangar {
             .child(div().flex().gap(px(6.))
                 .child(stat(tok(usage.totals.new as f64), tr_shared("orq_use_new", &[])))
                 .child(stat(tok(usage.totals.cache_read as f64), tr_shared("orq_use_cache", &[])))
-                .child(stat(usd(usage.totals.usd), tr_shared("orq_use_cost", &[]))))
+                .child(stat(total_cost, tr_shared("orq_use_cost", &[]))))
             .child(table)
             .child(note(method))
             .when(!usage.sessions.missing.is_empty(), |el| el.child(note(tr_shared("orq_use_missing", &[("names", &usage.sessions.missing.join(", "))]))))
@@ -472,6 +481,8 @@ mod tests {
         assert_eq!(task_state_text(&reviewing), tr_shared("orq_state_in_review", &[("round", "2")]));
         assert!(task_state_text(&reviewing).contains("R2"));
         assert_eq!(task_state_text(&task(9, "novo")), "novo");
+        // Rodada desconhecida vira traço, nunca "R" solto.
+        assert!(task_state_text(&task(4, "in_review")).ends_with("R—"));
     }
 
     #[test]
