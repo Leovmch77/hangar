@@ -50,6 +50,7 @@
   "convidados_resumo": "{servidores} server(s)",
   "convidados_usuario_em_uso": "This username is already taken. Choose another one.",
   "convidados_usuario_obrigatorio": "Enter a username.",
+  "convidados_usuario_barra": "The username can't contain a slash (/).",
   "convidados_servidor_fora_da_lista": "This server is no longer in your server list.",
   "sessao_do_convidado": "Guest session: {n}",
   "sync_config_conta_existente": "Sign-in for {usuario} already exists. Enable sync to use it again with the same password.",

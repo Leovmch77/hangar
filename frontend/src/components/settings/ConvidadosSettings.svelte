@@ -60,6 +60,8 @@
     // Nome repetido sobrescreveria o cadastro de outro convidado (ou bateria no usuário do dono) depois de já ter criado acesso nos servidores.
     const name = user.trim();
     if (!name) { formError = m.convidados_usuario_obrigatorio(); return; }
+    // O hub recusa "/" depois de os servidores já terem criado o convidado.
+    if (name.includes('/')) { formError = m.convidados_usuario_barra(); return; }
     if (!editing && (name === ownerUser || guests.some((g) => g.user === name))) { formError = m.convidados_usuario_em_uso(); return; }
     if (password.length < 8) { formError = m.sync_password_min(); return; }
     if (!chosen.length) { formError = m.convidados_servidor_obrigatorio(); return; }
