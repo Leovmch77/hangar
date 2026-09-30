@@ -1,9 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { prefs } from './prefs';
 import {
-  clearDraft, clearRecoverableDraft, readDraft, readRecoverableDraft, resolveDraftTranscript, writeDraft, writeRecoverableDraft,
+  clearDraft, clearRecoverableDraft, readDraft, readRecoverableDraft, resolveDraftTranscript, reusableUploadPath, withoutUpload,
+  writeDraft, writeRecoverableDraft,
 } from './drafts';
-import type { ConversationDraft } from './drafts';
+import type { ConversationDraft, DraftAttachment } from './drafts';
 
 const { memory } = vi.hoisted(() => ({ memory: new Map<string, string>() }));
 vi.mock('react-native-mmkv', () => ({
@@ -209,5 +210,41 @@ describe('drafts', () => {
     vi.spyOn(prefs, 'remove').mockImplementationOnce(() => { throw new Error('private storage path'); });
     expect(() => clearDraft('linux', 'sessao')).toThrow();
     expect(readDraft('linux', 'sessao')?.text).toBe('Mensagem atual');
+  });
+});
+
+describe('upload do anexo', () => {
+  const target = { serverId: 'linux', name: 'sessao', transcript: '/sessions/original.jsonl' };
+  const attachment: DraftAttachment = {
+    uri: 'file:///doc/draft-attachments/1-1.png', name: 'foto.png', mime: 'image/png', kind: 'image',
+    uploadedPath: '/uploads/foto.png', uploadedFor: target,
+  };
+
+  beforeEach(() => { memory.clear(); });
+
+  it('reabrir conserva arquivo, caminho enviado e destino', () => {
+    writeDraft('linux', 'sessao', draft({ attachment }));
+    const reopened = readDraft('linux', 'sessao')!.attachment!;
+    expect(reopened).toEqual(attachment);
+    expect(reusableUploadPath(reopened, target)).toBe('/uploads/foto.png');
+  });
+
+  it('reaproveita upload feito antes de a sessão ter transcript', () => {
+    expect(reusableUploadPath({ ...attachment, uploadedFor: { ...target, transcript: null } }, target)).toBe('/uploads/foto.png');
+  });
+
+  it.each([
+    ['outro servidor', { ...target, serverId: 'windows' }],
+    ['outra sessão', { ...target, name: 'outra' }],
+    ['sessão recriada', { ...target, transcript: '/sessions/nova.jsonl' }],
+  ])('%s não herda o caminho', (_caso, other) => {
+    expect(reusableUploadPath(attachment, other)).toBeNull();
+  });
+
+  it('sem destino gravado não reaproveita, e withoutUpload apaga caminho e destino', () => {
+    expect(reusableUploadPath({ ...attachment, uploadedFor: undefined }, target)).toBeNull();
+    const bare = withoutUpload(attachment);
+    expect(bare).toEqual({ uri: attachment.uri, name: 'foto.png', mime: 'image/png', kind: 'image' });
+    expect(reusableUploadPath(bare, target)).toBeNull();
   });
 });

@@ -1028,6 +1028,8 @@
   "composer_sem_microfone": "Nenhum microfone encontrado",
   "composer_mic_em_uso": "Microfone em uso por outro app",
   "composer_sem_acesso_mic": "Sem acesso ao microfone",
+  "composer_draft_recover_attach_busy": "O rascunho anterior tem um anexo. Remova o anexo atual para recuperá-lo.",
+  "composer_sem_acesso_fotos": "Sem acesso às fotos. Libere o acesso nas configurações do aparelho e toque em anexar de novo.",
   "composer_audio_nao_suportado": "Gravação de áudio não suportada neste navegador",
   "composer_falha_envio": "Falha no envio",
   "composer_inicio_gravacao_falhou": "início da gravação falhou",

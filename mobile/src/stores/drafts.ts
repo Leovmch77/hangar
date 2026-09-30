@@ -8,6 +8,11 @@ const attachmentSchema = z.object({
   mime: z.string().min(1),
   kind: z.enum(['image', 'file']),
   uploadedPath: z.string().min(1).optional(),
+  uploadedFor: z.object({
+    serverId: z.string().min(1),
+    name: z.string().min(1),
+    transcript: z.string().min(1).nullable(),
+  }).optional(),
 });
 
 const draftSchema = z.object({
@@ -25,6 +30,19 @@ const draftSchema = z.object({
 
 export type DraftAttachment = z.infer<typeof attachmentSchema>;
 export type ConversationDraft = z.infer<typeof draftSchema>;
+export type UploadTarget = NonNullable<DraftAttachment['uploadedFor']>;
+
+// Upload feito antes de a sessão ter transcript ainda é dela; transcript diferente é sessão recriada.
+export function reusableUploadPath(attachment: DraftAttachment, target: UploadTarget): string | null {
+  const done = attachment.uploadedFor;
+  if (!attachment.uploadedPath || !done || done.serverId !== target.serverId || done.name !== target.name) return null;
+  return done.transcript === null || done.transcript === target.transcript ? attachment.uploadedPath : null;
+}
+
+export function withoutUpload(attachment: DraftAttachment): DraftAttachment {
+  const { uri, name, mime, kind } = attachment;
+  return { uri, name, mime, kind };
+}
 
 const keyOf = (serverId: string, name: string) => `draft.v1:${serverId}::${name}`;
 // Rascunho da sessão anterior de mesmo nome, guardado antes de a sessão recriada gravar na chave principal.

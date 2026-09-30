@@ -4,7 +4,7 @@ import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import * as ImagePicker from 'expo-image-picker';
 import * as DocumentPicker from 'expo-document-picker';
 import { Image } from 'expo-image';
-import { broadcast, formataErro, uploadFile, transcribeFile, steerSession, podeEnviarSozinho } from '@hangar/core';
+import { broadcast, formataErro, uploadFileForServer, transcribeFile, steerSession, podeEnviarSozinho } from '@hangar/core';
 import type { MotivoFim } from '@hangar/core';
 import { Glass } from '../ui/Glass';
 import { Icon } from '../ui/Icon';
@@ -13,7 +13,9 @@ import * as m from '../paraglide/messages';
 import { chatStore, filaCount as filaCountOf, submitConversationDraft, isSubmitting } from '../stores/chat';
 import { confirmFirstInput, readFirstInput, sendFirstInput, useNewConversation } from '../stores/newConversation';
 import { useSessions } from '../stores/sessions';
-import { clearDraft, clearRecoverableDraft, readDraft, readRecoverableDraft, resolveDraftTranscript, writeDraft, writeRecoverableDraft, type ConversationDraft } from '../stores/drafts';
+import { clearDraft, clearRecoverableDraft, readDraft, readRecoverableDraft, resolveDraftTranscript, reusableUploadPath, withoutUpload, writeDraft, writeRecoverableDraft, type ConversationDraft, type DraftAttachment } from '../stores/drafts';
+import { useServers } from '../stores/servers';
+import { removeDraftAttachment, retainDraftAttachment } from './draftAttachments';
 import { useRouter } from 'expo-router';
 import { ModelPill } from '../features/pills/ModelPill';
 import { EffortPill } from '../features/pills/EffortPill';
@@ -37,13 +39,16 @@ interface Props {
   stopping?: boolean;
 }
 
-type PendingAttach = {
-  uri: string;
-  name: string;
-  mime: string;
-  kind: 'image' | 'file';
-  size?: number;
-};
+type PendingAttach = DraftAttachment & { size?: number };
+
+const attachInsert = (attach: DraftAttachment, path: string) =>
+  `📎 ${attach.kind === 'image' ? m.board_imagem() : m.board_arquivo()}: ${path}`;
+const withAttach = (text: string, insert: string) => (text ? `${text} — ${insert}` : insert);
+
+// Chamado depois que o rascunho largou a cópia: falhar aqui deixa só um arquivo órfão na pasta do app.
+function dropCopy(uri: string): void {
+  try { removeDraftAttachment(uri); } catch { /* sem perda de dado */ }
+}
 
 type DraftLoad = { draft: ConversationDraft | null; recoverable: ConversationDraft | null; issue: string; blocked: boolean };
 
@@ -120,6 +125,7 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
   const [draftIssue, setDraftIssue] = useState(boot.issue);
   const [recoverable, setRecoverable] = useState(boot.recoverable);
   const [submission, setSubmission] = useState(boot.draft?.submission ?? null);
+  const [pendingAttach, setPendingAttach] = useState<PendingAttach | null>(boot.draft?.attachment ?? null);
   // Rascunho guardado é mais novo que o texto de handoff/cancelamento que a rota ainda carrega.
   const adoptedDraftRef = useRef(draft);
   const [text, setText] = useState(() => boot.draft?.text ?? (firstInputSent ? '' : draft ?? ''));
@@ -128,7 +134,8 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
     textRef.current = text;
   }, [text]);
 
-  const persistText = useCallback((next: string): boolean => {
+  // Só texto novo avança a revisão: é ela que decide se o ACK pode limpar o campo.
+  const persistDraft = useCallback((patch: { text?: string; attachment?: DraftAttachment | null }): boolean => {
     if (blockedRef.current) return false;
     let current: ConversationDraft | null;
     try { current = readDraft(origin.serverId, origin.name) ?? draftRef.current; } catch (e) {
@@ -136,11 +143,16 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
       return false;
     }
     if (current?.transcript && transcriptRef.current && current.transcript !== transcriptRef.current) current = draftRef.current;
-    const value: ConversationDraft = current
-      ? { ...current, text: next, revision: current.revision + 1, transcript: current.transcript ?? transcriptRef.current }
-      : { version: 1, text: next, revision: 1, transcript: transcriptRef.current, attachment: null, submission: null };
+    const base: ConversationDraft = current
+      ?? { version: 1, text: '', revision: 0, transcript: transcriptRef.current, attachment: null, submission: null };
+    const value: ConversationDraft = {
+      ...base,
+      transcript: base.transcript ?? transcriptRef.current,
+      ...(patch.text !== undefined ? { text: patch.text, revision: base.revision + 1 } : {}),
+      ...(patch.attachment !== undefined ? { attachment: patch.attachment } : {}),
+    };
     try {
-      if (!next && !value.attachment && !value.submission) clearDraft(origin.serverId, origin.name);
+      if (!value.text && !value.attachment && !value.submission) clearDraft(origin.serverId, origin.name);
       else writeDraft(origin.serverId, origin.name, value);
     } catch (e) {
       setDraftIssue(e instanceof Error ? e.message : m.draft_write_error());
@@ -151,6 +163,7 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
     setDraftIssue('');
     return true;
   }, [origin]);
+  const persistText = useCallback((next: string) => persistDraft({ text: next }), [persistDraft]);
 
   useEffect(() => {
     if ((draftRef.current?.text ?? '') !== text) persistText(text);
@@ -160,10 +173,17 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
     if (blockedRef.current) return;
     try {
       const latest = readDraft(origin.serverId, origin.name);
-      if (!latest || (latest.transcript && transcriptRef.current && latest.transcript !== transcriptRef.current)) return;
+      if (!latest) {
+        setPendingAttach(null);
+        return;
+      }
+      if (latest.transcript && transcriptRef.current && latest.transcript !== transcriptRef.current) return;
       const unchanged = textRef.current === (draftRef.current?.text ?? '');
       draftRef.current = latest;
       setSubmission(latest.submission);
+      setPendingAttach((cur) => latest.attachment
+        ? (cur?.uri === latest.attachment.uri ? { ...latest.attachment, size: cur.size } : latest.attachment)
+        : null);
       if (unchanged) {
         textRef.current = latest.text;
         setText(latest.text);
@@ -176,8 +196,12 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
   const handleRecoverSubmission = useCallback(() => {
     if (isSubmitting(origin.serverId, origin.name) || !submission
       || (submission.status !== 'rejected' && submission.status !== 'unknown')) return;
-    const next = textRef.current.trim() === submission.text.trim()
-      ? textRef.current : joinDrafts(textRef.current, submission.text);
+    // O anexo continua no rascunho com o caminho enviado: devolver só o texto evita citar o arquivo duas vezes.
+    const insert = pendingAttach?.uploadedPath ? attachInsert(pendingAttach, pendingAttach.uploadedPath) : null;
+    const sent = insert && submission.text.endsWith(insert)
+      ? submission.text.slice(0, -insert.length).replace(/ — $/, '') : submission.text;
+    const next = textRef.current.trim() === sent.trim()
+      ? textRef.current : joinDrafts(textRef.current, sent);
     try {
       const latest = readDraft(origin.serverId, origin.name);
       if (!latest?.submission || (latest.submission.status !== 'rejected' && latest.submission.status !== 'unknown')) return;
@@ -191,7 +215,7 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
     } catch (e) {
       setDraftIssue(e instanceof Error ? e.message : m.draft_write_error());
     }
-  }, [submission, origin]);
+  }, [submission, origin, pendingAttach]);
 
   // null → caminho é a primeira confirmação (Codex iniciando); caminho → outro é sessão recriada.
   useEffect(() => {
@@ -207,6 +231,7 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
         draftRef.current = null;
         setSubmission(null);
         setRecoverable(kept);
+        setPendingAttach(null);
         setText('');
       } else {
         draftRef.current = kept ?? (draftRef.current && { ...draftRef.current, transcript });
@@ -221,17 +246,24 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
 
   const handleRecoverDraft = useCallback(() => {
     if (!recoverable) return;
+    if (pendingAttach && recoverable.attachment) {
+      setError(m.composer_draft_recover_attach_busy());
+      return;
+    }
     const next = joinDrafts(textRef.current, recoverable.text);
-    if (!persistText(next)) return;
+    // O upload antigo foi para a sessão que morreu: a recriada recebe o arquivo, nunca o caminho.
+    const adopted = !pendingAttach && recoverable.attachment ? withoutUpload(recoverable.attachment) : undefined;
+    if (!persistDraft({ text: next, ...(adopted ? { attachment: adopted } : {}) })) return;
     try {
       clearRecoverableDraft(origin.serverId, origin.name);
     } catch (e) {
       setDraftIssue(e instanceof Error ? e.message : m.draft_clear_error());
     }
+    if (adopted) setPendingAttach(adopted);
     setRecoverable(null);
     setText(next);
     setSelection({ start: next.length, end: next.length });
-  }, [recoverable, persistText, origin]);
+  }, [recoverable, persistDraft, origin, pendingAttach]);
 
   const handleDiscardDraft = useCallback(() => {
     try {
@@ -242,8 +274,9 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
       setDraftIssue(e instanceof Error ? e.message : m.draft_clear_error());
       return;
     }
+    if (recoverable?.attachment && recoverable.attachment.uri !== pendingAttach?.uri) dropCopy(recoverable.attachment.uri);
     setRecoverable(null);
-  }, [origin]);
+  }, [origin, recoverable, pendingAttach]);
 
   const handleRereadDraft = useCallback(() => {
     const load = loadDraft(origin.serverId, origin.name, transcriptRef.current);
@@ -255,6 +288,7 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
     setReadBlocked(false);
     draftRef.current = load.draft;
     setSubmission(load.draft?.submission ?? null);
+    setPendingAttach(load.draft?.attachment ?? null);
     setRecoverable(load.recoverable);
     // O que a pessoa digitou enquanto a leitura falhava fica depois do guardado.
     const next = joinDrafts(load.draft?.text ?? '', typed);
@@ -275,7 +309,6 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
   const [attachMenuOpen, setAttachMenuOpen] = useState(false);
   // null = lista de comandos fechada; string = o que veio depois da `/`.
   const [cmdFiltro, setCmdFiltro] = useState<string | null>(null);
-  const [pendingAttach, setPendingAttach] = useState<PendingAttach | null>(null);
   // Só é definido quando o app MOVE o cursor (ditado, undo, draft); o onSelectionChange devolve o
   // controle ao campo logo em seguida — preso, ele impediria a pessoa de mexer no cursor.
   const [selection, setSelection] = useState<{ start: number; end: number } | undefined>();
@@ -324,7 +357,10 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [draft]);
-  const submissionBlocksSend = !!submission && (isSubmitting(serverId, name) || submission.text.trim() !== text.trim());
+  // Repetir um envio recusado com anexo já enviado gera o mesmo texto: o snapshot não bloqueia.
+  const composedText = pendingAttach?.uploadedPath
+    ? withAttach(text.trim(), attachInsert(pendingAttach, pendingAttach.uploadedPath)) : text.trim();
+  const submissionBlocksSend = !!submission && (isSubmitting(serverId, name) || submission.text.trim() !== composedText);
   const canSend = (text.trim().length > 0 || pendingAttach !== null) && !sending && !uploading && !readBlocked && !submissionBlocksSend;
 
   // A primeira mensagem já pode ter chegado antes de esta tela montar: nunca criar outro eco.
@@ -363,33 +399,45 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
     setCmdFiltro(null);
     setSending(true);
     setError('');
-    // upload do anexo pendente antes de enviar
-    let finalText = trimmed;
-    let toClearAttach = false;
-    if (hasAttach && pendingAttach) {
-      setUploading(true);
-      try {
-        const cur = pendingAttach;
-        const blobRes = await fetch(cur.uri);
-        const blob = await blobRes.blob();
-        const file = new File([blob], cur.name, { type: cur.mime });
-        const { path } = await uploadFile(name, file);
-        const insert = `📎 ${cur.kind === 'image' ? m.board_imagem() : m.board_arquivo()}: ${path}`;
-        finalText = trimmed ? `${trimmed} — ${insert}` : insert;
-        toClearAttach = true;
-      } catch (e) {
-        setError(e instanceof Error ? e.message : m.board_falha_upload());
-        setSending(false);
-        sendingRef.current = false;
-        setUploading(false);
-        return;
-      } finally {
-        setUploading(false);
-      }
-    }
-    if (!finalText.trim()) {
+    const stop = () => {
       setSending(false);
       sendingRef.current = false;
+    };
+    let finalText = trimmed;
+    const attach = pendingAttach;
+    if (attach) {
+      const target = { serverId: origin.serverId, name: origin.name, transcript: transcriptRef.current };
+      let path = reusableUploadPath(attach, target);
+      if (!path) {
+        const server = useServers.getState().servers.find((s) => s.id === origin.serverId);
+        if (!server) {
+          setError(m.chat_servidor_removido());
+          stop();
+          return;
+        }
+        setUploading(true);
+        try {
+          const blob = await (await fetch(attach.uri)).blob();
+          path = (await uploadFileForServer(server, origin.name, new File([blob], attach.name, { type: attach.mime }))).path;
+        } catch (e) {
+          // O backend diz o motivo (tamanho, formato); o texto e o anexo continuam no rascunho.
+          setError(e instanceof Error && e.message ? `${m.board_falha_upload()}: ${e.message}` : m.board_falha_upload());
+          stop();
+          return;
+        } finally {
+          setUploading(false);
+        }
+        const uploaded = { ...attach, uploadedPath: path, uploadedFor: target };
+        if (!persistDraft({ attachment: uploaded })) {
+          stop();
+          return;
+        }
+        setPendingAttach(uploaded);
+      }
+      finalText = withAttach(trimmed, attachInsert(attach, path));
+    }
+    if (!finalText.trim()) {
+      stop();
       return;
     }
     let groupPendingId: string | null = null;
@@ -415,25 +463,23 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
       } else {
         await sendText(finalText, sentRevision);
       }
-      if (toClearAttach) setPendingAttach(null);
+      if (attach && persistDraft({ attachment: null })) {
+        dropCopy(attach.uri);
+        setPendingAttach(null);
+        // Outra tela desta conversa aberta durante o envio ainda mostra o anexo: o aviso vem depois da limpeza.
+        chat.use.setState((s) => ({ draftUpdate: s.draftUpdate + 1 }));
+      }
     } catch (e) {
       if (groupPendingId) {
         chat.use.setState((current) => ({ pending: current.pending.filter((item) => item.id !== groupPendingId) }));
       }
       const msg = e instanceof Error ? e.message : m.composer_falha_envio();
       setError(msg);
-      if (toClearAttach) {
-        try {
-          if (readDraft(serverId, name)?.submission?.text === finalText) setPendingAttach(null);
-        } catch (cause) {
-          setDraftIssue(cause instanceof Error ? cause.message : m.draft_read_error());
-        }
-      }
     } finally {
       setSending(false);
       sendingRef.current = false;
     }
-  }, [text, sending, uploading, chat, sendText, limparUndo, cancelarAuto, pendingAttach, serverId, name, firstInputId, pairPeers, sendToPair, persistText, submissionBlocksSend]);
+  }, [text, sending, uploading, chat, sendText, limparUndo, cancelarAuto, pendingAttach, serverId, name, firstInputId, pairPeers, sendToPair, persistText, persistDraft, origin, submissionBlocksSend]);
 
   // auto-envio: contagem de 3s
   const iniciarAuto = useCallback(
@@ -603,6 +649,23 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
     [handleSend],
   );
 
+  // A seleção vira cópia do app antes de entrar no rascunho: a original pode sumir do cache do picker.
+  const adoptPicked = useCallback(async (picked: PendingAttach) => {
+    let kept: DraftAttachment;
+    try {
+      kept = await retainDraftAttachment(withoutUpload(picked));
+    } catch (e) {
+      setError(e instanceof Error && e.message ? e.message : m.draft_write_error());
+      return;
+    }
+    if (!persistDraft({ attachment: kept })) {
+      dropCopy(kept.uri);
+      return;
+    }
+    if (pendingAttach && pendingAttach.uri !== kept.uri) dropCopy(pendingAttach.uri);
+    setPendingAttach({ ...kept, size: picked.size });
+  }, [persistDraft, pendingAttach]);
+
   const handlePickImage = useCallback(async () => {
     setAttachMenuOpen(false);
     setError('');
@@ -613,7 +676,7 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
       });
       if (res.canceled || !res.assets?.[0]) return;
       const asset = res.assets[0];
-      setPendingAttach({
+      await adoptPicked({
         uri: asset.uri,
         name: asset.fileName ?? 'imagem.jpg',
         mime: asset.mimeType ?? 'image/jpeg',
@@ -621,9 +684,11 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
         size: asset.fileSize,
       });
     } catch (e) {
-      setError(e instanceof Error ? e.message : m.board_falha_upload());
+      const code = (e as { code?: string } | null)?.code;
+      const denied = code === 'ERR_USER_REJECTED_PERMISSIONS' || (e instanceof Error && /permission/i.test(e.message));
+      setError(denied ? m.composer_sem_acesso_fotos() : e instanceof Error ? e.message : m.board_falha_upload());
     }
-  }, []);
+  }, [adoptPicked]);
 
   const handlePickFile = useCallback(async () => {
     setAttachMenuOpen(false);
@@ -636,7 +701,7 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
         const single = res as unknown as { uri: string; name: string; mimeType?: string; size?: number };
         if (!single.uri) return;
         const isImg = /\.(png|jpe?g|gif|webp|bmp|svg|avif)$/i.test(single.name ?? '');
-        setPendingAttach({
+        await adoptPicked({
           uri: single.uri,
           name: single.name ?? 'arquivo',
           mime: single.mimeType ?? 'application/octet-stream',
@@ -646,7 +711,7 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
         return;
       }
       const isImg = /\.(png|jpe?g|gif|webp|bmp|svg|avif)$/i.test(asset.name ?? '');
-      setPendingAttach({
+      await adoptPicked({
         uri: asset.uri,
         name: asset.name ?? 'arquivo',
         mime: asset.mimeType ?? 'application/octet-stream',
@@ -656,11 +721,13 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
     } catch (e) {
       setError(e instanceof Error ? e.message : m.board_falha_upload());
     }
-  }, []);
+  }, [adoptPicked]);
 
   const handleRemoveAttach = useCallback(() => {
+    if (!pendingAttach || !persistDraft({ attachment: null })) return;
+    dropCopy(pendingAttach.uri);
     setPendingAttach(null);
-  }, []);
+  }, [pendingAttach, persistDraft]);
 
   useEffect(() => {
     return () => {
@@ -748,9 +815,11 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
             </View>
             <Pressable
               onPress={handleRemoveAttach}
-              style={[styles.attachRemove, { borderColor: theme.tokens.border.subtle }]}
+              disabled={sending}
+              style={[styles.attachRemove, { borderColor: theme.tokens.border.subtle }, sending && styles.iconBtnDisabled]}
               accessibilityLabel={m.board_remover_anexo()}
               accessibilityRole="button"
+              accessibilityState={{ disabled: sending }}
             >
               <Text style={[styles.attachRemoveTxt, { color: theme.tokens.text.secondary }]}>✕</Text>
             </Pressable>
