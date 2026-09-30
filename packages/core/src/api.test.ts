@@ -14,6 +14,7 @@ import { getConfig, getConfigForServer, patchConfig, patchConfigForServer, creat
 import { mensagemDeErro, formataErro } from './errosApi';
 import { passarBastao, getSyncSetupForServer, setupSyncForServer, disableSyncForServer } from './api';
 import { probeServerResponse } from './api';
+import { scanDir, scanDirForServer, listClaudeConfigs, listClaudeConfigsForServer } from './api';
 import { answerQuestions, interrupt, openEventStreamForServer, sendInputForServer, skipQuestion } from './api';
 import type { Server } from './servers';
 const server = { id: 'a', label: 'Servidor A', baseUrl: 'https://a.test', token: 'token-a' };
@@ -745,5 +746,65 @@ describe('pairSession', () => {
     await pairSession('sessao', ['outra'], 'tarefa', true);
     const [, init] = fetchMock.mock.calls[0];
     expect(JSON.parse(init?.body as string)).toEqual({ peers: ['outra'], task: 'tarefa', replace_task: true });
+  });
+});
+
+describe('catálogos da criação com servidor explícito', () => {
+  const target = { id: 'b', label: 'Servidor B', baseUrl: 'https://b.test', token: 'token-b' };
+
+  it('scanDirForServer consulta B e a chamada antiga continua no ativo', async () => {
+    const body = { entries: [{ name: 'app', path: 'C:\\proj\\app', is_git: true, has_claude_md: false }] };
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(JSON.stringify(body)));
+    await expect(scanDirForServer(target, 'C:\\proj', 'C:\\proj\\app')).resolves.toEqual(body);
+    await scanDir('/home');
+    expect(fetchMock.mock.calls[0][0]).toBe(`https://b.test/api/fs/scan?${new URLSearchParams({ root: 'C:\\proj', path: 'C:\\proj\\app' })}`);
+    expect(fetchMock.mock.calls[0][1]?.headers).toMatchObject({ Authorization: 'Bearer token-b' });
+    expect(fetchMock.mock.calls[0][1]?.signal).toBeInstanceOf(AbortSignal);
+    expect(fetchMock.mock.calls[1][0]).toBe('https://a.test/api/fs/scan?root=%2Fhome');
+    expect(fetchMock.mock.calls[1][1]?.headers).toMatchObject({ Authorization: 'Bearer token-a' });
+  });
+
+  it.each([400, 403, 404, 500])('recusa %i em B vira o mesmo error do scanDir global', async (status) => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response('{"detail":"x"}', { status }));
+    const explicit = await scanDirForServer(target, '/r');
+    expect(explicit).toEqual(await scanDir('/r'));
+    expect(explicit.entries).toEqual([]);
+  });
+
+  it('401 em B borbulha com status e não derruba a credencial ativa', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{"detail":"token"}', { status: 401 }));
+    await expect(scanDirForServer(target, '/r')).rejects.toMatchObject({ status: 401 });
+    expect(onUnauthorizedSpy).not.toHaveBeenCalled();
+  });
+
+  // Falha de rede arma o esfriamento de B até o próximo beforeEach: o cancelamento fica em outro it.
+  it('falha de rede borbulha sem virar recusa de pasta', async () => {
+    const network = new TypeError('rede interrompida');
+    vi.spyOn(globalThis, 'fetch').mockRejectedValueOnce(network);
+    await expect(scanDirForServer(target, '/r')).rejects.toBe(network);
+    expect(network).not.toHaveProperty('status');
+  });
+
+  it('cancelamento de quem chamou borbulha cru', async () => {
+    const cancelled = new AbortController();
+    cancelled.abort();
+    const abort = new DOMException('aborted', 'AbortError');
+    vi.spyOn(globalThis, 'fetch').mockRejectedValueOnce(abort);
+    await expect(scanDirForServer(target, '/r', undefined, cancelled.signal)).rejects.toBe(abort);
+  });
+
+  it('listClaudeConfigsForServer consulta B sem mexer no ativo nem no 401 global', async () => {
+    const configs = [{ label: 'padrao', path: '/home/b/.claude', active: true }];
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(JSON.stringify(configs)));
+    await expect(listClaudeConfigsForServer(target)).resolves.toEqual(configs);
+    await listClaudeConfigs();
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      'https://b.test/api/claude-configs',
+      'https://a.test/api/claude-configs',
+    ]);
+    expect(fetchMock.mock.calls[0][1]?.headers).toMatchObject({ Authorization: 'Bearer token-b' });
+    fetchMock.mockImplementation(async () => new Response('{}', { status: 401 }));
+    await expect(listClaudeConfigsForServer(target)).rejects.toMatchObject({ status: 401 });
+    expect(onUnauthorizedSpy).not.toHaveBeenCalled();
   });
 });
