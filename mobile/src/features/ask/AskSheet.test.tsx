@@ -6,6 +6,9 @@ import { configureApi } from '@hangar/core';
 import type { AskQuestionPayload } from '@hangar/core';
 import { chatStore, _resetChatsForTests } from '../../stores/chat';
 import * as m from '../../paraglide/messages';
+vi.mock('../../stores/prefs', () => ({
+  prefs: { getString: () => undefined, set: vi.fn(), remove: vi.fn() },
+}));
 vi.mock('../../stores/servers', () => ({ useServers: { getState: () => ({
   servers: [{ id: 'srv', baseUrl: 'http://teste' }, { id: 'other', baseUrl: 'http://other' }],
 }) } }));

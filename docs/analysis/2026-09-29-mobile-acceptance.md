@@ -378,3 +378,176 @@ e engoliu toques até ser fechado; é do emulador, não do app.
 **Lote encerrado com pendências.** A entrega 2 não está aceita: os percursos centrais do
 primeiro envio funcionaram no APK, mas a entrada normal pela lista falha e há dois defeitos
 intermitentes. Emulador encerrado, `adb reverse` removido e as cinco reservas liberadas.
+
+
+## Entrega 3 — T32: lote amplo do cotidiano Android
+
+Execução: 30/09/2026, worktree `hangar-mobile-deliveries-cad3e6fe-t32`, branch
+`mobile-deliveries-orq-cad3e6fe-t32`. Base integrada T1–T31:
+`7595169f192bccaebb2f4bedd49913d1b9d70b84`, conferida antes da primeira edição;
+árvore limpa na entrada. Este lote **não aprova a entrega Android**. Não rodaram
+backend/PWA/Rust, lint ou suite adicional fora dos quatro comandos autorizados.
+
+### Preparação, identidade e evidências
+
+Dependências instaladas nesta worktree, core primeiro e mobile depois:
+`npm ci --workspace=@hangar/core --include-workspace-root` (89 pacotes, exit 0) e
+`npm ci --prefix mobile --workspaces=false` (exit 0). Lockfiles preservados.
+O segundo comando informou vulnerabilidades e postinstall de
+`react-native-enriched-markdown@1.0.2` sem aprovação; não houve atualização de
+pacotes, `audit fix` ou aprovação de scripts. Scripts existentes geraram Paraglide.
+
+Executada a skill Superpowers de execução de planos pelo executor, com o recorte
+T32 e registro de Steps em `tasks/t32-execution.md` no diretório durável. Política
+posterior dos cinco lotes substitui testes por Step, repetição de suite, planos
+históricos editados e revisão adicional. A revisão independente da Task recebe
+os resultados; não repete a bateria nem reinicia contadores.
+
+Evidências abaixo estão em `/home/jefferson/.hangar/orq/2026-09-29-cad3e6fe/tasks/`.
+`t32-runs.jsonl` registra comandos, exit, tentativa e duração medida por relógio
+monotônico: inclui subprocesso completo/pre-script e fila do flock. As durações
+internas do Vitest são separadas. Nenhum token foi incluído nesta seção.
+
+### Suites e typechecks — duas tentativas, sem terceira execução
+
+| Família | Tentativa 1 | Correção e tentativa 2 | Resultado real |
+|---|---|---|---|
+| Core check | exit 0, `t32-core-check-attempt1.txt` | não repetido | conferido |
+| Core test | exit 0, 758/758 testes, 48/48 arquivos, `t32-core-test-attempt1.txt` | não repetido | conferido automaticamente |
+| Mobile typecheck | exit 2: `newConversation.test.ts:333`, TS1005; erros seguintes na linha 492, `t32-mobile-typecheck-attempt1.txt` | `expect` fechava antes de `.submission`; parêntese reposicionado sem remover asserção. Único reteste, exit 2, `t32-mobile-typecheck-attempt2.txt`: `useDitado.ts:75,160`, TS2339 em `AudioRecorder.release/addListener`, TS7006 no callback | **falhou**; sintaxe corrigida, declaração Expo pendente, nenhum terceiro check |
+| Mobile test | exit 1, 318/320 testes executados, 35/40 arquivos; três arquivos não coletados, `t32-mobile-test-attempt1.txt` | Reteste somente os cinco arquivos que falharam, exit 1, 104/129 testes, 3/5 arquivos, `t32-mobile-retest-attempt2.txt` | **falhou**; sem terceira suite/reteste |
+| `newConversation.test.ts` | não coletado, sintaxe acima | coletado e passou, asserção do snapshot `sending` preservada | consertado e conferido |
+| `chat.test.ts` | cauda sem costura/reentrada esperava apagar cursor ao remontar | T24 conserva store e cursor da conversa; só expectativa de reentrada alinhada, mantendo proibição de cursor após cauda sem costura e acrescentando conversa preservada; passou | expectativa antiga consertada e conferida, sem mudança produtiva |
+| `AskSheet.test.tsx` | não coletado, `Unexpected token typeof`; store passou a importar persistência nativa | `prefs` substituído por mock para os casos de resposta desta suite; passou | consertado e conferido; não prova MMKV nativo |
+| `semTerminal.test.tsx` | não coletado: `expo-file-system` importava `expo-modules-core` inacessível | cópia nativa isolada, catálogo/revisão/marca de envio atualizados; reteste coletou mas 24 mounts falharam por `AppState.currentState` ausente no mock | **falhou**; segunda correção: mock de AppState, **aplicada, não revalidada** |
+| `FileViewer.test.tsx`, PDF | faltava tradução `arq_pdf_sem_leitor` no mock | tradução acrescentada; reteste falha porque Android exibe aviso e não monta leitor PDF; asserção do leitor autenticado mantida | **falhou**, leitor PDF Android continua pendente |
+
+A contagem 318/320 exclui três arquivos sem coleta; não equivale a 318 testes de
+uma suite de 320 completa. A contagem 104/129 é apenas dos cinco arquivos do reteste,
+não da suite inteira. Vitest: core 65,71 s; mobile inicial 132,22 s; reteste 66,38 s.
+Comandos completos: core check 14,77 s/core test 73,59 s/mobile typecheck1 9,78 s/
+mobile test1 140,20 s/mobile typecheck2 21,58 s/reteste 70,59 s.
+
+Hipótese fundamentada do typecheck: `expo-audio` declara `AudioRecorder extends
+SharedObject` importado de `expo-modules-core`, mas esse pacote só existe aninhado
+em `mobile/node_modules/expo/node_modules/` (57.0.16); não é resolvido pelo import da
+biblioteca irmã. Não foram inseridos casts, assinaturas inventadas ou mudanças
+no áudio para esconder a falha. Sem terceiro check/instalação para testar a hipótese;
+ela não comprova falha nativa de gravação. Os testes do hook de ditado passaram
+na primeira suite, com mocks; áudio Android real continua exigindo o binário do lote.
+
+### Cobertura automática e lacunas de anexo
+
+A primeira suite cobriu rascunhos, revisão/ACK, upload reutilizável, cópia de anexo
+em mock, isolamento de destino, arquivos/plano/par e interrupções do ditado.
+Os arquivos que passaram não foram repetidos depois. Nenhuma alteração produtiva
+foi feita neste lote.
+
+Acrescentados em `semTerminal.test.tsx`: reabrir upload confirmado com input
+`sending`/`unknown`/`rejected`, sem POST automático, e recuperação com anexo atual
+recusada até removê-lo, adotando o anterior sem upload da sessão morta. São quatro
+casos sobre estado persistido previamente, **não conferidos**: todos falharam no
+mount por AppState antes das asserções. O mock final ainda não simula envio em voo,
+MMKV/cópia física nem transcrição/upload real.
+
+Continuam ausentes testes integrados de sucesso/recusa/incerto com envio de anexo
+e sair/remontar, ACK com troca/remoção de anexo/recriação, upload com blob `file://`
+no Android, troca de idioma antes de Recuperar, cópias órfãs após duas recriações,
+anexo anterior no banner e recuperação do primeiro input incerto. A aprovação
+estática da T29 não preenche essas lacunas. Não chamar os quatro casos novos de
+regressões aprovadas nem reiniciar contador para executá-los novamente.
+
+### APK e percursos nativos
+
+Build da T32: `ccb85697-3253-48e3-adf8-1f5d209b46b5`, perfil `preview`,
+`appVersion 0.1.0`, versionCode 1, `gitCommitHash` igual à base acima. CLI existente
+EAS 23.2.0; comando na pasta mobile: `eas build --platform android --profile preview
+--freeze-credentials --non-interactive --no-wait --json`. Keystore remoto existente,
+credenciais congeladas, sem assinatura nova, loja ou OTA. A árvore enviada antecede
+as correções de testes/registro; não há mudança produtiva posterior ao envio.
+
+Primeiro `build:view` foi chamado por engano na raiz e recusou contexto de projeto;
+segundo comando na pasta mobile informou `IN_QUEUE`. O primeiro comando gerou
+`app.json` vazio na raiz às 13:33:49 UTC, fora dos Files; o arquivo criado por essa
+chamada foi identificado por horário/conteúdo e removido, sem staging. Não houve
+segundo build.
+Às 13:38 UTC, ainda sem APK, o árbitro autorizou só acompanhamento desse mesmo
+build até 13:55 UTC, no máximo quatro leituras adicionais a cinco minutos, sem
+cancelamento/build novo/renovação. Estado final e instalação são registrados abaixo
+após essa janela; estar na fila não é aprovação nem falha de compilação.
+
+AVD próprio `hangar`, Pixel 7/API 36/x86_64, 1080×2400/densidade 420/portrait,
+pt-BR. Recursos `screen`, `android-emulator`, `mobile-build`, `mobile-signing` e
+`mobile-version` reservados antes de operar. Nenhum serviço paralelo/Metro,
+instalador ou reinício de backend. `adb reverse tcp:8765 tcp:8765` conecta ao
+backend existente e servidor salvo do APK 2; token não foi redigitado nem capturado.
+APK instalado inicialmente: versão 0.1.0/versionCode 1, atualizado em 30/09 às
+06:22:12, correspondente à entrega 2. Ele **não comprova T22–T31**.
+
+Referência capturada antes das edições:
+`/home/jefferson/.hangar/orq/2026-09-29-cad3e6fe/visual/t32/reference-list.png`:
+lista com servidor salvo e sessões, inspecionada pelo executor. Abertura restaurou
+posteriormente a conversa anteriormente ativa do app; nenhum envio/alteração
+foi feito nela, e o botão Voltar não mudou a rota. Volta pela tecla do Android
+retornou à lista. Tentativa de filtro sem conferir foco foi inválida; a tecla Voltar
+acabou saindo do app. `reference-navigation.png` contém o launcher Android e é
+**inválida como referência de conversa**, não será usada para comparar tela.
+Nada disso comprova funcionamento atual dos botões, cuja família já está esgotada
+em T21. Não houve nova investigação/correção dessa família.
+
+Criada somente a sessão descartável própria `fixture-t32`, Codex headless, conta
+padrão autorizada, pasta no diretório durável `tasks/t32-fixture`. Sem tocar sessões
+de terceiros. A referência do APK anterior não conta como execução da entrega 3;
+enhuma comparação cega se realiza sem artefato correspondente e estado equivalente.
+
+
+Observações posteriores T30/T31, recebidas do árbitro e lidas pelo comando de
+contrato da T32, entram neste mesmo lote sem terceira execução. Sem APK da base,
+continuam **não conferidas**: limpar ditado após inserção pode reoferecer/duplicar
+texto; transcrição vazia conserva áudio/retranscrição; mensagem de falha pode
+aparecer duas vezes; reabrir ditado pending pode oferecer retry enquanto callback
+anterior é descartado por id; opções aninhadas do gravador precisam de prova nativa.
+Histórico antigo com rede interrompida precisa mostrar erro/repetição acessíveis no
+topo; largura 320 dp trabalhando pode deixar pill ultrapassar slot; teclado/controles
+exigem aparelho. Mocks não comprovam essas observações. Ajuste suplementar da
+Nova conversa autorizado pelo usuário fica após T32; não altera este lote/build.
+
+
+### Estado final do build, cobertura nativa e encerramento
+
+Quatro leituras adicionais em 13:40:02, 13:45:02, 13:50:02 e 13:55:02 UTC,
+todas `IN_QUEUE`, exit 0. Evidência: `tasks/t32-eas-additional-reads.jsonl` no
+diretório durável. A última consulta começou no prazo fixo 13:55 e retornou em
+2 s. A espera terminou nessa consulta; **não há APK integrado, download,
+instalação ou execução T22–T31**. Sem segundo build, cancelamento ou consulta
+posterior para reabrir a janela. Sem SHA-256 do APK 3, pois arquivo inexistente;
+o build da fila não é tratado como compilação aprovada ou defeito do código.
+
+| Percurso requerido no APK da entrega 3 | Esperado | Observado / resultado |
+|---|---|---|
+| Atualizar sobre APK 2, sem desinstalar/reset | mesma assinatura/pacote; servidor/projeto preservados | não conferido: nenhum APK 3 disponível; APK 2/dados preservados |
+| Nova conversa → primeiro envio → resposta → Parar | uma criação e destino corretos | não conferido no APK 3; criação/ACK em mocks na suite do lote |
+| Pergunta/aprovação, erro e retorno | decisão nativa no destino capturado | não conferido no APK 3; AskSheet passou no reteste, sem prova Android |
+| Rascunho, troca de sessão/servidor e ACK tardio | edição nova e origem preservadas | não conferido no APK 3; stores passaram na primeira suite; Composer com falha de mock |
+| Anexo, sair/reabrir durante envio e upload confirmado/input pendente | sucesso limpa, recusa/incerto reutilizam upload | não conferido; quatro casos novos não chegaram às asserções |
+| Recuperar com anexo atual e após remoção | recusa sem perda; adoção posterior sem caminho da sessão morta | não conferido; caso novo falhou antes das asserções |
+| Ditado, silêncio/interrupção/resposta tardia e transcrição vazia | áudio recuperável e texto isolado na origem | não conferido no APK 3; useDitado passou com mocks, declaração TS pendente |
+| Arquivo citado fora da raiz, edição/digest/conflito e PDF | leitura/erro visíveis no destino; leitor disponível quando oferecido | não conferido no APK 3; FileViewer PDF continua falhando; APIs/stores em mocks |
+| Plano, par, servidor lembrado e pin em voo | resposta antiga não muda estado novo | não conferido no APK 3; testes existentes em mocks não provam reinicialização de folhas |
+| Teclado, histórico longo, erro ao pedir mensagens antigas, 320 dp | Enviar/Parar/erro/repetição alcançáveis | não conferido: artefato ausente; não repetir família do cabeçalho esgotada em T21 |
+| Bloquear/retornar, rede interrompida, pt-BR/en | estado correto e dados preservados | não conferido no APK 3; referência somente pt-BR do APK 2 |
+| Carregando/vazio/erro/sucesso e comparação visual | estados equivalentes e referência comparável | não conferido no APK 3; sem comparação cega |
+| iOS | mesmos fluxos no recurso iOS disponível | não conferido; nenhum iPhone/Apple disponibilizado neste lote |
+
+A falha de envio inicial fila→Codex, crash nativo e botões do cabeçalho registrados
+em T21 continuam pendentes; esta janela não reabre seus contadores nem altera os
+registros anteriores. Nenhuma sessão alheia recebeu input, pareamento ou fechamento.
+A sessão própria `fixture-t32` foi encerrada; o AVD iniciado pela Task foi fechado,
+`adb reverse` removido e os cinco recursos liberados. O build remoto segue em fila,
+sem cancelamento. Não há serviço local extra para remover.
+
+**Lote encerrado com pendências**, conforme a política aprovada: tentativas limitadas
+e resultados registrados. A entrega 3 **não está aceita**, mobile typecheck/test
+continuam falhando, AppState recebeu segunda correção aplicada/não revalidada,
+PDF Android e percursos do APK 3 permanecem pendentes. Revisão estática da rodada
+não pode ser descrita como aprovação funcional ou repetir a bateria.

@@ -6,6 +6,11 @@ import type { FirstConversationAttempt } from '@hangar/core';
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
+vi.mock('react-native', async (original) => ({
+  ...await original<object>(),
+  AppState: { currentState: 'active', addEventListener: () => ({ remove: () => {} }) },
+}));
+
 const routerPush = vi.hoisted(() => vi.fn());
 const route = vi.hoisted(() => ({ params: { server: 's1', name: 'sess' }, segments: ['s'] }));
 vi.mock('expo-router', () => ({
@@ -41,6 +46,7 @@ vi.mock('../paraglide/messages', () => Object.fromEntries(
   ('arq_aba askq_sua_resposta bastao_dossie_sub bastao_dossie_titulo chat_voltar_sessoes codex_limites_titulo ctx_anexos ctx_atividade ctx_grupo ctx_limites ctx_repositorio ctx_terminal modo_so_ociosa more_fotos_videos_arquivos more_tarefas_agentes navbar_mais_acoes par_titulo recarregar_sessao recarregar_sessao_detalhe sessao_trocar_de term_titulo '
     + 'askq_enviando board_arquivo board_imagem board_remover_anexo codex_orientar composer_anexar_arquivo composer_desfazer_limpeza composer_ditado_limpo composer_enviando_cancelar composer_enviar_mensagem composer_fila_acao composer_fila_aria composer_fila_contagem composer_gravando_audio composer_gravar_audio composer_mandando_grupo composer_mandar_grupo composer_mandar_tambem composer_mensagem composer_parar composer_parar_gravacao composer_pro_grupo composer_pros_dois composer_sessao_trabalhando composer_transcrevendo_audio composer_transcrever_de_novo')
     .concat(' permissao_pedido comum_cancelar msg_aria_mensagens chat_plan_proposto composer_falha_envio nova_conversa_envio_incerto nova_conversa_resultado_salvar_erro')
+    .concat(' askq_enviando board_falha_envio board_falha_upload chat_chegou_mas chat_envio_incerto chat_nao_chegou_em chat_servidor_removido codex_orientar_recebido codex_orientar_sem_envio composer_ditado_anterior composer_ditado_aplicado composer_ditado_indisponivel composer_ditado_interrompido composer_ditado_recuperavel composer_draft_read_again composer_draft_recover_attach_busy composer_falha_gravacao composer_falha_transcricao composer_fila_erro composer_sem_acesso_fotos composer_sem_acesso_mic composer_submission_check composer_submission_rejected composer_submission_sending composer_transcrever_de_novo composer_transcricao_vazia')
     .concat(' draft_read_error draft_invalid draft_write_error draft_clear_error composer_draft_previous composer_draft_recover composer_draft_discard composer_draft_read_again').split(' ').map((k) => [k, () => k]),
 ));
 
@@ -65,6 +71,10 @@ const sessionsState = vi.hoisted(() => ({ rows: [] as { serverId: string; name: 
 const composerChat = vi.hoisted(() => ({ state: 'idle' as string, send: vi.fn(async (_text: string) => {}) }));
 vi.mock('expo-image-picker', () => ({}));
 vi.mock('expo-document-picker', () => ({}));
+vi.mock('./draftAttachments', () => ({
+  retainDraftAttachment: vi.fn(async (attachment: import('../stores/drafts').DraftAttachment) => attachment),
+  removeDraftAttachment: vi.fn(),
+}));
 vi.mock('../ui/Glass', () => ({ Glass: ({ children }: { children: ReactNode }) => createElement('div', null, children) }));
 vi.mock('../ui/MultilineInput', () => ({ MultilineInput: ({ value, onChangeText }: { value: string; onChangeText: (text: string) => void }) =>
   createElement('textarea', { value, readOnly: true, onInput: (e: { currentTarget: { value: string } }) => onChangeText(e.currentTarget.value) }),
@@ -85,7 +95,7 @@ vi.mock('../stores/chat', () => {
   const use = Object.assign((sel: (s: unknown) => unknown) => sel(snap()), {
     getState: snap, setState: () => {}, subscribe: () => () => {},
   });
-  return { chatStore: () => ({ use, send: composerChat.send, retain: () => {}, release: () => {}, retry: () => {} }), filaCount: () => 0 };
+  return { chatStore: () => ({ use, send: composerChat.send, retain: () => {}, release: () => {}, retry: () => {} }), filaCount: () => 0, isSubmitting: () => false };
 });
 
 const firstInput = vi.hoisted(() => ({
@@ -312,7 +322,7 @@ describe('primeiro texto recuperado no Composer', () => {
     expect(reopened.container.querySelector('textarea')!.value).toBe('texto novo');
     await act(async () => reopened.container.querySelector<HTMLButtonElement>('[aria-label="composer_enviar_mensagem"]')!.click());
     expect(firstInput.send).toHaveBeenCalledTimes(1);
-    expect(composerChat.send).toHaveBeenCalledExactlyOnceWith('texto novo');
+    expect(composerChat.send).toHaveBeenCalledExactlyOnceWith('texto novo', expect.any(Number));
     act(() => reopened.root.unmount());
   });
 });
@@ -330,6 +340,53 @@ describe('rascunho guardado no Composer', () => {
   };
   const button = (container: HTMLElement, label: string) => [...container.querySelectorAll('button, [role="button"]')]
     .find((el) => el.textContent === label) as HTMLElement | undefined;
+
+  it.each(['sending', 'unknown', 'rejected'])('reabre upload confirmado com input %s sem reenviar; Recuperar devolve só o texto', async (status) => {
+    composerChat.send.mockClear();
+    const attachment = {
+      uri: 'file:///draft-attachments/1-1.txt', name: 'nota.txt', mime: 'text/plain', kind: 'file',
+      uploadedPath: '/uploads/nota.txt', uploadedFor: { serverId: 's1', name: 'sess', transcript: null },
+    };
+    storage.memory.set('draft.v1:s1::sess', JSON.stringify({
+      version: 1, text: 'nota', revision: 1, transcript: null, attachment,
+      submission: { text: 'nota — 📎 board_arquivo: /uploads/nota.txt', draftRevision: 1, status },
+    }));
+    const first = await render(createElement(Composer, props));
+    act(() => first.root.unmount());
+    const reopened = await render(createElement(Composer, props));
+    expect(composerChat.send).not.toHaveBeenCalled();
+    expect(reopened.container.textContent).toContain('nota.txt');
+    act(() => button(reopened.container, 'composer_draft_recover')!.click());
+    expect(reopened.container.querySelector('textarea')!.value).toBe('nota');
+    expect(JSON.parse(storage.memory.get('draft.v1:s1::sess')!)).toMatchObject({ attachment, submission: null });
+    act(() => reopened.root.unmount());
+  });
+
+  it('recuperação não troca anexo atual; depois de removê-lo adota o anterior sem reutilizar upload da sessão morta', async () => {
+    const attachment = { uri: 'file:///draft-attachments/2-1.txt', name: 'atual.txt', mime: 'text/plain', kind: 'file' };
+    const previous = { ...attachment, uri: 'file:///draft-attachments/1-1.txt', name: 'anterior.txt',
+      uploadedPath: '/uploads/anterior.txt', uploadedFor: { serverId: 's1', name: 'sess', transcript: '/old' } };
+    storage.memory.set('draft.v1:s1::sess', JSON.stringify({
+      version: 1, text: 'atual', revision: 1, transcript: null, attachment, submission: null,
+    }));
+    storage.memory.set('draft.v1.recoverable:s1::sess', JSON.stringify({
+      version: 1, text: 'anterior', revision: 1, transcript: '/old', attachment: previous, submission: null,
+    }));
+    const { container, root } = await render(createElement(Composer, props));
+    act(() => button(container, 'composer_draft_recover')!.click());
+    expect(container.textContent).toContain('composer_draft_recover_attach_busy');
+    expect(container.querySelector('textarea')!.value).toBe('atual');
+    expect(JSON.parse(storage.memory.get('draft.v1:s1::sess')!).attachment).toEqual(attachment);
+    expect(storage.memory.has('draft.v1.recoverable:s1::sess')).toBe(true);
+    act(() => container.querySelector<HTMLButtonElement>('[aria-label="board_remover_anexo"]')!.click());
+    act(() => button(container, 'composer_draft_recover')!.click());
+    expect(container.querySelector('textarea')!.value).toBe('atual\nanterior');
+    expect(JSON.parse(storage.memory.get('draft.v1:s1::sess')!).attachment).toEqual({
+      uri: previous.uri, name: previous.name, mime: previous.mime, kind: previous.kind,
+    });
+    expect(storage.memory.has('draft.v1.recoverable:s1::sess')).toBe(false);
+    act(() => root.unmount());
+  });
 
   it('cada edição grava na conversa de origem; desmontar não apaga e outro servidor com mesmo nome não recebe', async () => {
     sessionsState.rows = [{ serverId: 's1', name: 'sess', jsonl: '/t/a.jsonl' }];
