@@ -163,6 +163,8 @@ export interface ChatEvent {
   // (`interrupted`, `turn_aborted`), e a frase é da interface — o servidor não manda texto de tela.
   kind: 'user_msg' | 'assistant_msg' | 'tool_use' | 'tool_result' | 'thinking' | 'notice';
   id: string;
+  /** Só na sessão do orquestrador sem LLM: a linha do tempo enriquecida (recado, avanço, descarte). */
+  orq?: OrqEntry | null;
   text?: string | null;
   tool_name?: string | null;
   tool_input?: Record<string, unknown> | null;
@@ -759,6 +761,7 @@ export interface OrqJev {
   mode: string | null;
   choice: string | null;
   p: number | null;
+  probs?: Record<string, number | null>;
   veto: Record<string, number | null>;
   held: string[];              // vetos acima do limiar: os que mantiveram o árbitro acordado
   would_drop: boolean | null;
@@ -779,6 +782,129 @@ export interface OrqConductor {
   feed: OrqFeedItem[];
   truncated: boolean;
   skipped: number;
+}
+
+export type OrqEntryKind = 'advance' | 'woke' | 'would_drop' | 'dropped' | 'failed' | 'notice';
+
+export type OrqLine =
+  | { code: 'opened'; sessions: { name: string; provider: string; model: string }[] }
+  | { code: 'integrated'; merge: boolean }
+  | { code: 'delivered'; round: number; commit: string }
+  | { code: 'red_back'; executor: string }
+  | { code: 'red_retry' };
+
+export interface OrqDecidedBy {
+  source: 'rule' | 'alarm' | 'jev' | 'regex';
+  rule: 'mark' | 'orchestrator' | null;
+  jev: OrqJev | null;
+  regex: { verdict: 'drop' | 'wake'; category: string | null } | null;
+  regex_agreed: boolean | null;
+}
+
+export interface OrqEntry {
+  kind: OrqEntryKind;
+  task: number | null;
+  line: OrqLine | null;
+  origin: 'notify' | 'orchestrator' | null;
+  sender: string | null;
+  mark: 'decisao' | null;
+  alarm: boolean;
+  rejected_round: number | null;
+  body: string;
+  question: string | null;
+  parecer: string | null;
+  error: string | null;
+  decided_by: OrqDecidedBy | null;
+}
+
+export type OrqTaskState =
+  | 'queued' | 'executing' | 'in_review' | 'rejected' | 'approved' | 'integrated' | 'integration_red';
+
+export interface OrqPanelTask {
+  n: number;
+  title: string;
+  state: OrqTaskState;
+  round: number | null;
+}
+
+export interface OrqTeamMember {
+  name: string;
+  role: 'arbiter' | 'executor' | 'reviewer';
+  task: number | null;
+  current: boolean;
+  last: {
+    code: 'started' | 'delivered' | 'approved' | 'rejected' | 'swapped_in';
+    round: number | null;
+    ts: string;
+  } | null;
+}
+
+export interface OrqDecision {
+  task: number | null;
+  ts: string;
+  question: string;
+  parecer: string | null;
+  event_id: string;
+}
+
+export interface OrqAutomation {
+  mode: { jev: number; regex: number };
+  woke: { total: number; decisions: number; alarms: number; messages: number };
+  alone: { total: number; opened: number; integrated: number; dropped: number };
+  dropped_by_jev: number;
+  advanced: {
+    would_drop: number;
+    disagree: number;
+    judged: number;
+    min_confidence: { p: number; choice: string; ts: string; text: string } | null;
+    by_rule: number;
+  };
+}
+
+export interface OrqConsumptionModel {
+  model: string;
+  sessions: number;
+  new: number;
+  cache_read: number;
+  usd: number | null;
+}
+
+export interface OrqConsumption {
+  computed_at: string;
+  since: string;
+  sessions: { team: number; measured: number; missing: number };
+  totals: { new: number; cache_read: number; usd: number | null; usd_partial: boolean };
+  providers: {
+    provider: string;
+    sessions: number;
+    new: number;
+    cache_read: number;
+    usd: number | null;
+    models: OrqConsumptionModel[];
+  }[];
+  missing_prices: string[];
+  subagents: boolean;
+}
+
+export interface OrqIntegration {
+  branch: string;
+  last: { task: number; commit: string; ts: string } | null;
+  outcome: 'green' | 'red' | 'conflict' | 'failed' | null;
+  red_log: string | null;
+  delivery_checks: { ok: number; total: number; failing: string[] };
+}
+
+export interface OrqPanel {
+  run: string;
+  gid: string;
+  errors: { file: string; error: string }[];
+  empty: boolean;
+  tasks: { integrated: number; total: number; total_known: boolean; rows: OrqPanelTask[] };
+  team: OrqTeamMember[];
+  decisions: OrqDecision[];
+  automation: OrqAutomation;
+  consumption: OrqConsumption | null;
+  integration: OrqIntegration;
 }
 
 export interface OrqLista {

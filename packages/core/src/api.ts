@@ -32,6 +32,7 @@ import type {
   AnswerItem,
   CostReport,
   OrqConductor,
+  OrqPanel,
   OrqExecucao,
   OrqLista,
   ResumeResult,
@@ -491,6 +492,10 @@ export function getOrqDetalheForServer(s: Server, id: string): Promise<OrqExecuc
 
 export function getOrqConductorForServer(s: Server, id: string): Promise<OrqConductor> {
   return apiFetchForServer<OrqConductor>(s, `/api/orq/${encodeURIComponent(id)}/conductor`);
+}
+
+export function getOrqPanelForServer(s: Server, name: string): Promise<OrqPanel> {
+  return apiFetchForServer<OrqPanel>(s, `/api/sessions/${encodeURIComponent(name)}/orq/panel`);
 }
 
 // Cauda do histórico de UMA sessão de um servidor específico — cards do quadro kanban.

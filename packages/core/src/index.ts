@@ -29,6 +29,7 @@ export * from './format';
 export * from './contextoUso';
 export * from './agruparSessoes';
 export * from './plan';
+export * from './orqTimeline';
 export * from './activity';
 export * from './statusline';
 export * from './askquestion';
