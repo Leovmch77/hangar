@@ -1,8 +1,9 @@
 <script lang="ts">
   import { onDestroy } from 'svelte';
   import type { Server } from '../../lib/auth';
-  import { getSyncSetup, activateSync, disableSync } from '../../lib/sync';
+  import { getSyncSetup, activateSync, disableSync, loadKey } from '../../lib/sync';
   import ConfirmSheet from '../ConfirmSheet.svelte';
+  import ConvidadosSettings from './ConvidadosSettings.svelte';
   import EscopoChip from './EscopoChip.svelte';
   import { copyText } from '../../lib/clipboard';
   import * as m from '../../paraglide/messages';
@@ -24,6 +25,9 @@
   const address = $derived(new URL('/', new URL(server.baseUrl || '/', window.location.href)).href);
   const sameOrigin = $derived(new URL(address).origin === window.location.origin);
   const secure = typeof crypto.subtle !== 'undefined';
+  // Só o dono logado no hub DESTE endereço tem a chave para cifrar o cadastro dos convidados.
+  let hasOwnerKey = $state(false);
+  $effect(() => { if (sameOrigin) void loadKey().then((k) => (hasOwnerKey = !!k)); });
 
   async function load() {
     loading = true;
@@ -118,6 +122,13 @@
     </div>
     <a class="action" href={address} onclick={openSynced}>{m.sync_config_abrir()}</a>
     <button type="button" class="action" disabled={saving} aria-busy={saving} onclick={() => (confirmDisable = true)}>{m.sync_config_desativar()}</button>
+    {#if sameOrigin}
+      {#if hasOwnerKey}
+        <ConvidadosSettings />
+      {:else}
+        <p class="context">{m.convidados_sem_login()}</p>
+      {/if}
+    {/if}
   {:else}
     {#if !setup.enabled}<p class="status">{m.sync_config_direta()}</p>{/if}
     {#if deactivated}

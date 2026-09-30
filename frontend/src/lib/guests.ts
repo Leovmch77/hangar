@@ -37,7 +37,7 @@ export async function saveGuest(
     const old = before.get(want.serverId);
     if (!server) {
       // Sem o servidor na lista não dá pra agir nele; o token antigo fica no cadastro.
-      errors.push({ label: want.serverId, message: 'server not in the owner list' });
+      errors.push({ label: want.serverId, message: m.convidados_servidor_fora_da_lista() });
       if (old) kept.push(old);
       continue;
     }
@@ -63,7 +63,7 @@ export async function saveGuest(
     if (draft.servers.some((w) => w.serverId === old.serverId)) continue;
     const server = byId.get(old.serverId);
     if (!server) {
-      errors.push({ label: old.serverId, message: 'server not in the owner list' });
+      errors.push({ label: old.serverId, message: m.convidados_servidor_fora_da_lista() });
       kept.push(old);
       continue;
     }
