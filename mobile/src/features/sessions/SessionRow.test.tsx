@@ -24,8 +24,8 @@ vi.mock('react-native-gesture-handler/ReanimatedSwipeable', () => ({
 // O mock comum passa `style` direto ao DOM, e o da linha é função de `pressed`.
 vi.mock('react-native', async (original) => ({
   ...await original<typeof import('react-native')>(),
-  Pressable: (props: { accessibilityLabel?: string; onPress?: () => void; children?: ReactNode }) =>
-    createElement('button', { 'aria-label': props.accessibilityLabel, onClick: props.onPress }, props.children),
+  Pressable: (props: { accessibilityLabel?: string; onPress?: () => void; disabled?: boolean; children?: ReactNode }) =>
+    createElement('button', { 'aria-label': props.accessibilityLabel, onClick: props.onPress, disabled: props.disabled }, props.children),
 }));
 vi.mock('expo-haptics', () => ({ impactAsync: () => Promise.resolve(), ImpactFeedbackStyle: { Medium: 'medium' } }));
 vi.mock('../../ui/Icon', () => ({ Icon: () => null }));
@@ -77,6 +77,19 @@ describe('SessionRow', () => {
     expect(container.textContent).not.toContain('orq_row_badge');
     expect(container.querySelector('[aria-label="sessao_excluir_curto"]')).not.toBeNull();
     expect(longPress.enabled).toHaveBeenLastCalledWith(true);
+    act(() => root.unmount());
+  });
+
+  it.each([
+    ['codex', false],
+    ['kimi', false],
+    ['pi', true],
+    ['claude', true],
+  ])('sem vínculo: %s abre a conversa? bloqueada=%s', async (provider, bloqueada) => {
+    const { container, root } = await render({ ...base, name: 'nova', provider: provider as AggSession['provider'], tracked: false });
+    const linha = container.querySelector<HTMLButtonElement>('button[aria-label^="nova,"]');
+    expect(linha).not.toBeNull();
+    expect(linha!.disabled).toBe(bloqueada);
     act(() => root.unmount());
   });
 });

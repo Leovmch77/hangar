@@ -106,8 +106,9 @@ export function SessionRow({ session: s, mostrarServidor, onPress, onGit, onExcl
         <Pressable
           onPress={onPress}
           // sem onLongPress: o toque longo é do `toqueLongo` acima, que abre a folha de ações
-          // kimi sem id é estado NORMAL pré-1º prompt — não bloqueia abrir
-          disabled={untracked && s.provider !== 'kimi'}
+          // kimi sem id é estado NORMAL pré-1º prompt, e codex sem thread ainda está no startup:
+          // a tela da conversa espera o vínculo sem herdar transcript de outra sessão
+          disabled={untracked && s.provider !== 'kimi' && s.provider !== 'codex'}
           style={({ pressed }) => [styles.row, pressed && { backgroundColor: theme.tokens.bg.hover }]}
           accessibilityRole="button"
           // rótulo composto: um label explícito no pai faz o RN descartar o texto dos filhos, e o
