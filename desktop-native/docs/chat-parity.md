@@ -185,6 +185,7 @@ Terminal embutido, navegador, árvore de arquivos e Git completos (stage, commit
 | Brilho de 1 px na borda de cima do painel solto (`inset 0 1px 1px --glass-specular` do `--elev-3`) | implementado | `theme::panel_shadow`; o compositor fica só com a sombra (`card_shadow`) |
 | Cabeçalho: marca de 20 px e "Hangar" em 16 px | implementado | as linhas "Nova conversa" e "Todas as sessões" seguem, desenho do nativo |
 | Seletor "Chat / Quadro / Canvas" e botão de busca abaixo do cabeçalho | pendente | Quadro e Canvas não existem no nativo; a busca mora na barra de cima (Ctrl K) |
+| Busca de conteúdo mostra cada máquina assim que ela responde, com a linha "aguardando X…" e "fora do ar, não consultado: Y" | pendente | `search.rs` junta tudo com `join_all` e só mostra no fim; trocar exige estado parcial no `hits` (hoje `start`/`finish`) e rótulos novos. Máquina sem conexão já falha na hora; o prazo por máquina baixou para 8 s como no web |
 | Botão de modo seleção (enviar para várias) no cabeçalho e o aviãozinho "enviar p/ todas" no cabeçalho de cada máquina | pendente | o envio para várias sessões não existe no nativo |
 | Cabeçalho da máquina: ponto na cor fixa da máquina (`serverColor` do core), rótulo em caixa alta 11 px negrito apagado, contagem em pílula | implementado | a cor sai do id; importadas do Electron têm o mesmo id, cadastradas aqui ganham id próprio e podem cair noutra cor |
 | Cabeçalho da máquina focável pelo teclado, com o anel de foco do destaque | pendente | hoje só o clique alterna; precisa de um foco por máquina |

@@ -196,9 +196,9 @@ impl Hangar {
             futures::future::join_all(machines.into_iter().map(|(key, label, api)| {
                 let query = query.clone();
                 async move {
-                    // 30 s: a busca varre as conversas de todas as contas; termo raro percorre tudo antes de parar.
+                    // 8 s: com o índice FTS a busca responde em milissegundos; esperar mais só prende a tela numa máquina inalcançável.
                     let result = match api {
-                        Ok(api) => api.server_read(&["search"], &[("q", query.as_str())], 30).await.map_err(|e| Hangar::failure(&e)),
+                        Ok(api) => api.server_read(&["search"], &[("q", query.as_str())], 8).await.map_err(|e| Hangar::failure(&e)),
                         Err(reason) => Err(reason),
                     };
                     (key, label, result)
