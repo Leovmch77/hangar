@@ -527,3 +527,62 @@ def test_ultima_linha_do_nome_vence_em_sessions_jsonl(real, tmp_path, monkeypatc
     monkeypatch.setattr(ot, "_rows_for", lambda *a: [])
     ot.panel(real, None)
     assert seen == ["bbbb"]
+
+
+def test_consumo_em_andamento_nao_faz_o_painel_esperar(real, monkeypatch):
+    import threading
+    started, release = threading.Event(), threading.Event()
+
+    def slow(*a):
+        started.set()
+        release.wait(5)
+        return {"computed_at": "x"}, False
+
+    monkeypatch.setattr(ot, "_compute_consumption", slow)
+    first = []
+    t = threading.Thread(target=lambda: first.append(ot.panel(real, None)))
+    t.start()
+    assert started.wait(5)
+    p = ot.panel(real, None)                       # a soma segue: este poll não espera
+    assert p["consumption"] is None and p["tasks"]["rows"]
+    release.set()
+    t.join(5)
+    assert first[0]["consumption"] == {"computed_at": "x"}
+    assert ot.panel(real, None)["consumption"] == {"computed_at": "x"}
+
+
+def test_consumo_em_andamento_devolve_o_ultimo_valor_vencido(real, monkeypatch):
+    import threading
+    monkeypatch.setattr(ot, "_rows_for", lambda *a: [])
+    old = ot.panel(real, None)["consumption"]
+    assert old is not None
+    monkeypatch.setattr(ot, "CONSUMPTION_TTL_S", 0)
+    started, release = threading.Event(), threading.Event()
+    monkeypatch.setattr(ot, "_compute_consumption", lambda *a: (started.set(), release.wait(5), ({"computed_at": "novo"}, False))[2])
+    t = threading.Thread(target=lambda: ot.panel(real, None))
+    t.start()
+    assert started.wait(5)
+    assert ot.panel(real, None)["consumption"] == old
+    release.set()
+    t.join(5)
+
+
+def test_time_que_falhou_nao_gera_consumo_zerado_nem_cache(real, monkeypatch):
+    monkeypatch.setattr(ot, "_team", lambda *a: 1 / 0)
+    ot._CONSUMPTION.clear()
+    p = ot.panel(real, LIVE)
+    assert p["consumption"] is None and [e["file"] for e in p["errors"]] == ["team"]
+    assert str(real.resolve()) not in ot._CONSUMPTION
+
+
+def test_transcript_indisponivel_fica_em_missing_e_tenta_de_novo_logo(real, monkeypatch):
+    calls = {"n": 0}
+    monkeypatch.setattr(ot, "_rows_for", lambda *a: (calls.__setitem__("n", calls["n"] + 1), None)[1])
+    c = ot.panel(real, LIVE)["consumption"]
+    assert c["sessions"]["measured"] == 0 and "hangar-mobile-t5" in c["sessions"]["missing"]
+    ot.panel(real, LIVE)
+    assert calls["n"] == 1                          # dentro dos 5 s ainda é o mesmo resultado
+    now = ot.time.monotonic()
+    monkeypatch.setattr(ot.time, "monotonic", lambda: now + ot._UNAVAILABLE_TTL_S + 1)
+    ot.panel(real, LIVE)
+    assert calls["n"] == 2

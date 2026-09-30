@@ -244,3 +244,10 @@ def test_custos_de_um_transcript_pelo_indice(tmp_path, monkeypatch):
     assert {(r.model, r.input, r.cache_read) for r in rows} == {("claude-opus-5-5", 10, 100), ("claude-sonnet-5", 20, 200)}
     ct.custos_do_transcript(t)
     assert n["v"] == 1
+
+
+def test_transcript_sumido_e_indisponivel_nao_sem_uso(tmp_path):
+    assert ct.custos_do_transcript(tmp_path / "projects" / "-a" / "nao-existe.jsonl") is None
+    vazio = tmp_path / "projects" / "-a" / "vazio.jsonl"
+    _escrever(vazio, [{"type": "user", "timestamp": "2026-09-29T10:00:00Z"}])
+    assert ct.custos_do_transcript(vazio) == []

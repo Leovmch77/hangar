@@ -505,7 +505,10 @@ def panel(d: Path, live=None) -> dict:
             while len(_PANELS) >= _RUNS_MAX and key not in _PANELS:
                 _PANELS.pop(next(iter(_PANELS)), None)
             _PANELS[key] = (sig, out, aux)
-    consumption, error = _consumption(d, [m["name"] for m in out["team"]], aux, live)
+    names = [m["name"] for m in out["team"]]
+    if not names and out["errors"]:
+        return {**out, "consumption": None}    # time que falhou: sem nomes o consumo sairia zerado, e não se guarda
+    consumption, error = _consumption(d, names, aux, live)
     if error:
         return {**out, "errors": [*out["errors"], {"file": "consumo", "error": error}], "consumption": None}
     return {**out, "consumption": consumption}
@@ -614,7 +617,8 @@ def _opened_models(entries: list[tuple[dict, dict]]) -> dict[str, str]:
 # ── consumo ──────────────────────────────────────────────────────────────────────────────────
 
 CONSUMPTION_TTL_S = 60
-_CONSUMPTION: dict[str, tuple[float, dict | None, str | None]] = {}
+_UNAVAILABLE_TTL_S = 5     # transcript que não pôde ser lido agora: tenta de novo logo
+_CONSUMPTION: dict[str, tuple[float, dict | None, str | None, bool]] = {}
 _consumption_locks: dict[str, threading.Lock] = {}
 _consumption_guard = threading.Lock()
 
@@ -641,12 +645,14 @@ def _find_claude(config_dir: str | None, session_id: str) -> str | None:
     return None
 
 
-def _rows_for(provider: str, path: str) -> list:
-    """Linhas de custo de um transcript, com os subagentes do Claude (`<sessão>/subagents/*.jsonl`)."""
+def _rows_for(provider: str, path: str) -> list | None:
+    """Linhas de custo de um transcript, com os subagentes do Claude (`<sessão>/subagents/*.jsonl`).
+    `None` = o Claude não pôde ser lido agora (índice ocupado ou arquivo sumido)."""
     p = Path(path)
     if provider == "claude":
         subs = sorted((p.parent / p.stem / "subagents").glob("*.jsonl"))
-        return [r for f in (p, *subs) for r in costs_claude_transcript.custos_do_transcript(f)]
+        parts = [costs_claude_transcript.custos_do_transcript(f) for f in (p, *subs)]
+        return None if any(x is None for x in parts) else [r for x in parts for r in x]
     if provider == "codex":
         return costs_sources.custos_do_rollout(p)
     if provider in ("pi", "omp"):
@@ -700,20 +706,28 @@ def _medicao_models(d: Path) -> dict[str, str]:
     return out
 
 
-def _compute_consumption(d: Path, names: list[str], aux: dict, live) -> dict:
+def _compute_consumption(d: Path, names: list[str], aux: dict, live) -> tuple[dict, bool]:
+    """(consumo, houve transcript indisponível): quem não pôde ser lido conta em `missing`."""
     since = orq_conductor._when(aux.get("since"))
     paths = _team_paths(d, names, live)
     hints = {**aux["models"], **_medicao_models(d)}
-    seen: set[str] = set()
+    seen: dict[str, bool] = {}     # caminho -> foi lido (dois nomes no mesmo arquivo somam uma vez)
     groups: dict[tuple[str, str], dict] = {}
     missing_prices: set[str] = set()
     subagents = False
+    readable: set[str] = set()
     for name in names:
         for provider, path in paths.get(name, ()):
             if path in seen:
+                if seen[path]:
+                    readable.add(name)
                 continue
-            seen.add(path)
-            for row in _rows_for(provider, path):
+            rows = _rows_for(provider, path)
+            seen[path] = rows is not None
+            if rows is None:
+                continue
+            readable.add(name)
+            for row in rows:
                 subagents = subagents or bool(row.subagente)
                 if since is not None and row.ts < since:
                     continue
@@ -745,16 +759,18 @@ def _compute_consumption(d: Path, names: list[str], aux: dict, live) -> dict:
     return {
         "computed_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         "since": aux.get("since"),
-        "sessions": {"team": len(names), "measured": sum(1 for n in names if paths.get(n)),
-                     "missing": [n for n in names if not paths.get(n)]},
+        "sessions": {"team": len(names), "measured": len(readable),
+                     "missing": [n for n in names if n not in readable]},
         "totals": {"new": sum(p["new"] for p in providers), "cache_read": sum(p["cache_read"] for p in providers),
                    "usd": round(sum(p["usd"] for p in providers), 4), "usd_partial": bool(missing_prices)},
-        "providers": providers, "missing_prices": sorted(missing_prices), "subagents": subagents}
+        "providers": providers, "missing_prices": sorted(missing_prices), "subagents": subagents,
+    }, any(paths.get(n) and n not in readable for n in names)
 
 
 def _consumption(d: Path, names: list[str], aux: dict, live) -> tuple[dict | None, str | None]:
-    """(consumo, erro), refeito depois de `CONSUMPTION_TTL_S`. Quem chega durante a soma espera
-    a mesma trava e recebe o mesmo resultado; a falha também fica no cache pelo mesmo prazo."""
+    """(consumo, erro), refeito depois de `CONSUMPTION_TTL_S` (`_UNAVAILABLE_TTL_S` se algum
+    transcript não pôde ser lido). Quem chega com a soma em andamento não espera: recebe o último
+    valor guardado, mesmo vencido, ou `None` se ainda não houve nenhum."""
     key = str(d.resolve())
     with _consumption_guard:
         lock = _consumption_locks.get(key)
@@ -764,14 +780,22 @@ def _consumption(d: Path, names: list[str], aux: dict, live) -> tuple[dict | Non
                 _consumption_locks.pop(old)
                 _CONSUMPTION.pop(old, None)
             lock = _consumption_locks.setdefault(key, threading.Lock())
-    with lock:
         hit = _CONSUMPTION.get(key)
-        if hit and time.monotonic() - hit[0] < CONSUMPTION_TTL_S:
+    if hit and time.monotonic() - hit[0] < (_UNAVAILABLE_TTL_S if hit[3] else CONSUMPTION_TTL_S):
+        return hit[1], hit[2]
+    if not lock.acquire(blocking=False):
+        return (hit[1], hit[2]) if hit else (None, None)
+    try:
+        hit = _CONSUMPTION.get(key)     # quem tinha a trava pode ter acabado entre a leitura e o acquire
+        if hit and time.monotonic() - hit[0] < (_UNAVAILABLE_TTL_S if hit[3] else CONSUMPTION_TTL_S):
             return hit[1], hit[2]
         try:
-            value, error = _compute_consumption(d, names, aux, live), None
+            value, unavailable = _compute_consumption(d, names, aux, live)
+            error = None
         except Exception as e:
             _log.warning("orq_timeline: consumo falhou", exc_info=True)
-            value, error = None, _err(e)
-        _CONSUMPTION[key] = (time.monotonic(), value, error)
+            value, error, unavailable = None, _err(e), False
+        _CONSUMPTION[key] = (time.monotonic(), value, error, unavailable)
         return value, error
+    finally:
+        lock.release()
