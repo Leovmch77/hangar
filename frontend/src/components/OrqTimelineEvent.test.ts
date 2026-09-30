@@ -95,6 +95,14 @@ it('recado descartado: apagado, remetente no cabeçalho, selo do Jev e detalhe j
   expect(d).toContain(m.orq_detail_regex_agreed());
 });
 
+it('selo do Jev sem probabilidade não termina em separador solto', async () => {
+  const semP = { ...JEV_DROP, jev: { ...JEV_DROP.jev!, choice: 'act', probs: undefined } };
+  await montar({ ev: ev({ kind: 'dropped', body: 'a', decided_by: semP }) });
+  const text = alvo.querySelector('.orq-badge')!.textContent!.trim();
+  expect(text).not.toMatch(/·\s*$/);
+  expect(text.startsWith('Jev')).toBe(true);
+});
+
 it('acordado pelo Jev: detalhe fechado até clicar no selo', async () => {
   const jev = { ...JEV_DROP, jev: { ...JEV_DROP.jev!, would_drop: false } };
   await montar({ ev: ev({ kind: 'woke', body: 'a', decided_by: jev }) });

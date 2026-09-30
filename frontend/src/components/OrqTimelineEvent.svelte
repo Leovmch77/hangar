@@ -92,7 +92,9 @@
   const badge = $derived.by(() => {
     if (!orq.decided_by) return null;
     const b = decidedByBadge(orq.decided_by, orq.kind);
-    return BADGES[b.key]?.({ p: b.p != null ? pct(b.p) : '', category: b.category ?? '' }) ?? null;
+    const text = BADGES[b.key]?.({ p: b.p != null ? pct(b.p) : '', category: b.category ?? '' });
+    // Sem probabilidade/categoria a frase termina no separador; ele sai junto.
+    return text ? text.replace(/\s*·\s*$/, '') : null;
   });
 
   const CHOICES: Record<string, () => string> = {
@@ -207,7 +209,8 @@
     max-width: 760px;
     margin: var(--space-3) 0;
   }
-  .orq-ev.faded { opacity: 0.62; }
+  /* Só o recado some; selo e detalhe do Jev são o que se confere num descarte e ficam no contraste normal. */
+  .orq-ev.faded :is(.orq-av, .orq-body, .orq-who, .orq-tag, .orq-time, .orq-more, .orq-q, .orq-file) { opacity: 0.62; }
   .orq-av {
     width: 28px; height: 28px; border-radius: 50%;
     display: grid; place-items: center; flex: none; margin-top: 2px;
@@ -241,6 +244,9 @@
     border: 1px solid var(--border-subtle); border-radius: var(--radius-sm);
     padding: 0 6px; background: transparent; min-height: 0;
   }
+  button.orq-badge, .orq-more { position: relative; }
+  /* Área de toque de 24px sem mexer no tamanho visual. */
+  button.orq-badge::before, .orq-more::before { content: ''; position: absolute; inset: -5px -4px; }
   button.orq-badge { cursor: pointer; }
   button.orq-badge:hover { border-color: var(--text-muted); }
   button.orq-badge:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }

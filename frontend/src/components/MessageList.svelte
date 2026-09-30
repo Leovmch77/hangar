@@ -413,7 +413,7 @@
     taskRows.ativo ? foldTasks(events, (id) => toolResults.get(id)) : []
   );
   // Só a sessão do orquestrador traz `orq`; o separador de dia abre no primeiro evento de cada dia.
-  const orqDays = $derived(dayStarts(events.filter((e) => e.orq)));
+  const orqDays = $derived(events.some((e) => e.orq) ? dayStarts(events.filter((e) => e.orq)) : new Map<string, number>());
   const EH_TASK = (n?: string | null) => n === 'TaskCreate' || n === 'TaskUpdate';
 
   const renderItems = $derived.by(() => {
