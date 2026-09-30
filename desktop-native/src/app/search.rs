@@ -62,6 +62,14 @@ fn merge_hits(hits: &mut Vec<Hit>, more: Vec<Hit>) {
     hits.sort_by(|a, b| b.mtime.total_cmp(&a.mtime));
 }
 
+/// Junta como `merge_hits` e devolve onde foi parar o trecho `active`: a reordenação por data não pode trocar o destacado
+/// (e o que o Enter abre) por outro.
+fn merge_keeping(hits: &mut Vec<Hit>, more: Vec<Hit>, active: Option<usize>) -> Option<usize> {
+    let key = active.and_then(|i| hits.get(i)).map(Hit::key);
+    merge_hits(hits, more);
+    key.and_then(|key| hits.iter().position(|hit| hit.key() == key))
+}
+
 /// Máquina da busca de conteúdo. `offline`: a lista dela já estava fora do ar quando a busca começou.
 #[derive(Clone, Debug)]
 struct Machine { key: String, label: String, offline: bool }
@@ -87,6 +95,8 @@ pub(super) struct Search {
     error: Option<String>,
     /// Número da busca: toda tecla, reconexão e fechamento o trocam, e a resposta de número antigo é descartada.
     debounce: u64,
+    /// Buscas por máquina em voo.
+    tasks: Vec<tokio::task::AbortHandle>,
     active: usize,
     preview: Option<(String, Remote<Vec<ChatEvent>>)>,
     ask: Remote<(String, Vec<Hit>)>,
@@ -96,6 +106,20 @@ pub(super) struct Search {
     previous_focus: Option<FocusHandle>,
     scroll: ScrollHandle,
     _events: Option<Subscription>,
+}
+
+impl Search {
+    /// Sem isto, a busca de um texto já trocado (ou da paleta fechada) seguia até o prazo da máquina.
+    fn abort_machines(&mut self) {
+        for task in self.tasks.drain(..) { task.abort(); }
+    }
+
+    /// Cada abertura começa vazia, mas o número da busca só cresce: zerado, a resposta de uma abertura anterior ainda em voo
+    /// casaria número e texto com a busca nova.
+    fn reopen(&mut self, previous_focus: Option<FocusHandle>) {
+        self.abort_machines();
+        *self = Search { open: true, input: self.input.take(), previous_focus, _events: self._events.take(), debounce: self.debounce + 1, ..Default::default() };
+    }
 }
 
 /// Palavras da busca, minúsculas e sem repetição (`termos` do backend).
@@ -148,7 +172,7 @@ impl Hangar {
         // Cada abertura começa vazia, como o web.
         input.update(cx, |input, cx| input.set_value("", window, cx));
         let previous = window.focused(cx);
-        self.search = Search { open: true, input: Some(input.clone()), previous_focus: previous, _events: self.search._events.take(), ..Default::default() };
+        self.search.reopen(previous);
         input.update(cx, |input, cx| input.focus(window, cx));
         cx.notify();
     }
@@ -157,6 +181,7 @@ impl Hangar {
         if !self.search.open { return; }
         self.search.open = false;
         self.search.debounce += 1;
+        self.search.abort_machines();
         match self.search.previous_focus.take() { Some(focus) => focus.focus(window, cx), None => self.root_focus.focus(window, cx) }
         cx.notify();
     }
@@ -173,6 +198,7 @@ impl Hangar {
         (self.search.active, self.search.preview, self.search.ask, self.search.resume_error) = (0, None, Remote::default(), None);
         self.search.scroll.set_offset(point(px(0.), px(0.)));
         self.search.debounce += 1;
+        self.search.abort_machines();
         let seq = self.search.debounce;
         if query.is_empty() {
             (self.search.query, self.search.hits, self.search.searching) = (String::new(), Vec::new(), false);
@@ -244,6 +270,7 @@ impl Hangar {
                 tokio::time::timeout(MACHINE_WAIT, api.server_read(&["search"], &[("q", query.as_str())], MACHINE_WAIT.as_secs() + 2)).await
             })
         };
+        self.search.tasks.push(task.abort_handle());
         cx.spawn(async move |this, cx| {
             let joined = task.await;
             let _ = this.update(cx, |this, cx| {
@@ -251,17 +278,28 @@ impl Hangar {
                 if this.search.debounce != seq || this.search.query != query { return; }
                 this.search.pending.retain(|m| m.key != machine.key);
                 this.search.searching = false;
+                // A tela só mostra o rótulo do motivo; a causa vai para o log.
                 let result = match joined {
-                    Err(_) => Err(tr("search_interrupted")),
+                    Err(error) => {
+                        eprintln!("busca em {}: tarefa perdida: {error}", machine.label);
+                        Err(tr("search_interrupted"))
+                    }
                     Ok(Err(_)) => Err(web_with("busca_motivo_timeout", &[])),
                     Ok(Ok(result)) => result
                         .map_err(|e| match e.status { Some(status) => web_with("busca_motivo_http", &[("status", status.to_string())]), None => Hangar::failure(&e) })
-                        .and_then(|v| serde_json::from_value::<Vec<Hit>>(v).map_err(|_| tr("invalid_response"))),
+                        .and_then(|v| serde_json::from_value::<Vec<Hit>>(v).map_err(|error| {
+                            eprintln!("busca em {}: resposta inválida: {error}", machine.label);
+                            tr("invalid_response")
+                        })),
                 };
                 match result {
                     Ok(list) => {
                         let list = list.into_iter().map(|hit| Hit { server: machine.key.clone(), label: machine.label.clone(), ..hit }).collect();
-                        merge_hits(&mut this.search.hits, list);
+                        let active = match this.search_entries(cx).get(this.search.active) { Some(Entry::Hit(i)) => Some(*i), _ => None };
+                        let moved = merge_keeping(&mut this.search.hits, list, active);
+                        if active.is_some() {
+                            this.search.active = moved.and_then(|i| this.search_entries(cx).iter().position(|e| *e == Entry::Hit(i))).unwrap_or(0);
+                        }
                     }
                     Err(reason) => this.search.failed.push((machine, reason)),
                 }
@@ -272,6 +310,8 @@ impl Hangar {
 
     /// Refaz só as que falharam, na mesma busca: o que já chegou fica.
     fn search_retry(&mut self, cx: &mut Context<Self>) {
+        // O botão só aparece com a lista do texto atual; isto cobre o clique que chega junto de uma tecla, cuja busca nova
+        // já vem a caminho.
         if self.search.failed.is_empty() || self.search.query != self.search_text(cx).trim() { return; }
         for (machine, _) in std::mem::take(&mut self.search.failed) { self.search_machine(machine, cx); }
         cx.notify();
@@ -693,11 +733,31 @@ impl Hangar {
 
 #[cfg(test)]
 mod tests {
-    use super::{Hit, marks, merge_hits, terms};
+    use super::{Hit, Search, marks, merge_hits, merge_keeping, terms};
+
+    fn hit(server: &str, line: &str, mtime: f64) -> Hit {
+        Hit { project: "p".into(), session_id: "s".into(), line: line.into(), mtime, server: server.into(), ..Default::default() }
+    }
+
+    #[test]
+    fn highlighted_hit_stays_put_when_a_late_machine_reorders() {
+        let mut hits = Vec::new();
+        merge_hits(&mut hits, vec![hit("a", "x", 2.), hit("a", "y", 1.)]);
+        let moved = merge_keeping(&mut hits, vec![hit("b", "z", 3.)], Some(1));
+        assert_eq!(moved.map(|i| hits[i].key()).as_deref(), Some("a/p/s/y"), "o Enter abriria um trecho que a pessoa não escolheu");
+        assert_eq!(merge_keeping(&mut hits, vec![], None), None);
+    }
+
+    #[test]
+    fn reopening_never_reuses_a_search_number() {
+        let mut search = Search { debounce: 7, query: "x".into(), hits: vec![hit("a", "x", 1.)], ..Default::default() };
+        search.reopen(None);
+        assert!(search.debounce > 7, "resposta da abertura anterior casaria com a busca nova");
+        assert!(search.open && search.query.is_empty() && search.hits.is_empty());
+    }
 
     #[test]
     fn late_machine_merges_without_repeats_newest_first() {
-        let hit = |server: &str, line: &str, mtime: f64| Hit { project: "p".into(), session_id: "s".into(), line: line.into(), mtime, server: server.into(), ..Default::default() };
         let mut hits = Vec::new();
         merge_hits(&mut hits, vec![hit("a", "x", 1.), hit("a", "x", 1.)]);
         merge_hits(&mut hits, vec![hit("b", "x", 3.), hit("a", "y", 2.)]);
