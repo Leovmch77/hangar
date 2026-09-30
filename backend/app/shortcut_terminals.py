@@ -146,8 +146,13 @@ def _set_options(target: str, options) -> bool:
     # Uma chamada por opcao: texto livre terminado em `;` viraria separador de comando no tmux, e no
     # psmux opcao na mesma chamada do new-session derruba a sessao.
     # Mesmo sozinho, o `;` no fim do valor e tirado como separador; `\;` o mantem literal no tmux.
-    return all(tmux._run(["tmux", "set-option", "-t", f"={target}:", opt, _keep_semicolon(value)]).returncode == 0
-               for opt, value in options)
+    for opt, value in options:
+        cp = tmux._run(["tmux", "set-option", "-t", f"={target}:", opt, _keep_semicolon(value)])
+        if cp.returncode != 0:
+            _log.warning("shortcut: set-option %s falhou em %r (rc=%s): %s", opt, target, cp.returncode,
+                         (cp.stderr or "").strip()[:200])
+            return False
+    return True
 
 
 def _keep_semicolon(value: str) -> str:
@@ -156,12 +161,19 @@ def _keep_semicolon(value: str) -> str:
 
 def _abort(target: str) -> None:
     # Sessao que nasceu sem as marcas: sai inteira (com o grupo de processos, se ainda vive).
-    row = next((r for r in _rows() if r["tmux"] == target), None)
+    try:
+        row = next((r for r in _rows() if r["tmux"] == target), None)
+    except MuxUnavailable:
+        row = None
     if row is not None:
-        _close_row(row)
-    elif tmux.kill_session(target) and _IS_WINDOWS:
-        # Sem `_ID` a lista nao o ve: o id vem do nome.
-        _forget_files(target.rsplit("-", 1)[-1])
+        if not _close_row(row):
+            _log.warning("shortcut: sessao %r sem marcas nao saiu ao abortar", target)
+    elif tmux.kill_session(target):
+        if _IS_WINDOWS:
+            # Sem `_ID` a lista nao o ve: o id vem do nome.
+            _forget_files(target.rsplit("-", 1)[-1])
+    else:
+        _log.warning("shortcut: sessao %r sem marcas nao saiu ao abortar", target)
 
 
 def start(owner: str, cwd: str, command: str, label: str, env: dict[str, str],
@@ -214,12 +226,16 @@ def start(owner: str, cwd: str, command: str, label: str, env: dict[str, str],
     return {"id": ident, "label": label, "tmux": target}
 
 
-class MuxUnavailable(Exception):
-    """O multiplexador nao respondeu: nao da pra saber se ja existe uma copia do atalho."""
+class MuxUnavailable(tmux.MuxIndisponivel):
+    """O multiplexador nao respondeu: nao da pra saber se ja existe uma copia do atalho.
+    Herda o erro do tmux pra rota sem tratamento proprio sair no 503 do handler global."""
 
 
 def _rows() -> list[dict]:
-    return _read_rows() or []
+    rows = _read_rows()
+    if rows is None:
+        raise MuxUnavailable("sem resposta do multiplexador")
+    return rows
 
 
 def _read_rows() -> list[dict] | None:
@@ -337,14 +353,24 @@ def close(owner: str, ident: str) -> bool | None:
 
 def close_all(owner: str) -> None:
     """Best-effort, chamado quando a conversa fecha: falhar aqui nao pode desfazer o kill dela."""
-    for row in _rows():
+    try:
+        rows = _rows()
+    except MuxUnavailable:
+        _log.warning("shortcut: multiplexador sem resposta; terminais de %r ficaram abertos", owner)
+        return
+    for row in rows:
         if row["owner"] == owner and not _close_row(row):
             _log.debug("shortcut: %r nao saiu ao fechar %r", row["tmux"], owner)
 
 
 def rename_owner(old: str, new: str) -> None:
     # O dono e a opcao, nao o nome tmux: basta reapontar a opcao pra lista seguir a conversa.
-    for row in _rows():
+    try:
+        rows = _rows()
+    except MuxUnavailable:
+        _log.warning("shortcut: multiplexador sem resposta; terminais de %r nao seguiram o rename", old)
+        return
+    for row in rows:
         if row["owner"] == old:
             tmux._run(["tmux", "set-option", "-t", f"={row['tmux']}:", _OWNER, new])
 
@@ -369,10 +395,11 @@ def start_hangar(key: str, cwd: str, command: str, label: str, env: dict[str, st
 
 def list_all() -> list[dict]:
     """Todos os terminais de atalho (das sessoes e No Hangar), do mais antigo pro mais novo."""
-    found = _read_rows()
-    if _IS_WINDOWS and found is not None:
+    # Sem resposta levanta: lista vazia apagaria as abas e as amostras de pergunta pendente.
+    found = _rows()
+    if _IS_WINDOWS:
         _sweep_orphans({r["id"] for r in found})
-    rows = sorted(found or [], key=lambda r: (r["created"], r["seq"], r["tmux"]))
+    rows = sorted(found, key=lambda r: (r["created"], r["seq"], r["tmux"]))
     terminal_prompt.forget({r["tmux"] for r in rows if r["alive"]})
     return [{**{k: r[k] for k in ("id", "label", "alive", "exit_code", "created", "owner", "key", "origin", "ask")},
              "question": _question(r)} for r in rows]

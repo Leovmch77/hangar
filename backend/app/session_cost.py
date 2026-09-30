@@ -30,7 +30,7 @@ def _usage(path: Path) -> tuple[UsageRow, ...]:
     # O índice lê só o que o rollout ganhou desde a última consulta; aqui só se reagrupa o que
     # ele separou por dia.
     grouped: dict[tuple[str, bool], UsageRow] = {}
-    for row in custos_do_rollout(path):
+    for row in custos_do_rollout(path) or ():
         if not any((row.input, row.output, row.cache_write, row.cache_read)):
             continue
         key = row.model, row.codex_long_context

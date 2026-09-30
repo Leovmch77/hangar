@@ -630,6 +630,19 @@ def test_thread_que_nao_sobe_libera_a_trava_e_o_proximo_pedido_calcula(real, mon
     ot._CONSUMPTION.clear()
     real_start = threading.Thread.start
     monkeypatch.setattr(threading.Thread, "start", lambda self: (_ for _ in ()).throw(RuntimeError("no threads")))
-    assert ot.panel(real, None)["consumption"] is None
+    p = ot.panel(real, None)
+    assert p["consumption"] is None                  # a UI recebe o erro, não "calculando" eterno
+    assert any(e["file"] == "consumption" and "no threads" in e["error"] for e in p["errors"])
     monkeypatch.setattr(threading.Thread, "start", real_start)
+    now = ot.time.monotonic()
+    monkeypatch.setattr(ot.time, "monotonic", lambda: now + ot._UNAVAILABLE_TTL_S + 1)
     assert settled(real, None)["consumption"] == {"computed_at": "x"}
+
+
+def test_codex_sem_leitura_e_provider_desconhecido_nao_contam_como_zero(monkeypatch, tmp_path):
+    from app import costs_sources
+    monkeypatch.setattr(costs_sources, "custos_do_rollout", lambda p: None)
+    assert ot._rows_for("codex", str(tmp_path / "r.jsonl")) is None
+    assert ot._rows_for("ninguem", str(tmp_path / "x.jsonl")) is None
+    monkeypatch.setattr(costs_sources, "custos_do_rollout", lambda p: [])
+    assert ot._rows_for("codex", str(tmp_path / "r.jsonl")) == []     # sem uso de verdade continua lista vazia

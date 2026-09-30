@@ -6562,7 +6562,12 @@ def _focus_hangar_terminal(row: dict | None) -> bool:
 
 def _shortcut_reused(term: dict) -> dict:
     from app import shortcut_terminals
-    focused = _focus_hangar_terminal(shortcut_terminals.hangar_row(term["id"]))
+    try:
+        focused = _focus_hangar_terminal(shortcut_terminals.hangar_row(term["id"]))
+    except shortcut_terminals.MuxUnavailable:
+        # O terminal foi reaproveitado; so o foco da janela ficou sem resposta.
+        _log.warning("shortcut-shell: multiplexador sem resposta ao focar o terminal %s", term["id"])
+        focused = False
     return {"ok": True, "reused": True, "focused": focused,
             "terminal": {"id": term["id"], "label": term["label"], "alive": True, "exit_code": None}}
 

@@ -888,10 +888,11 @@ def _sincronizar() -> None:
     _escopos = escopos
 
 
-def custos_do_rollout(path: Path) -> list[UsageRow]:
+def custos_do_rollout(path: Path) -> list[UsageRow] | None:
     """Linhas de custo de UM rollout, pelo índice: só o que cresceu desde a última leitura é
-    lido. A conta não entra (quem pede quer só o valor da sessão)."""
+    lido. A conta não entra (quem pede quer só o valor da sessão). `None` = o índice não pôde
+    ler agora, o que não é o mesmo que "sem uso"."""
     file_id = costs_cache.sincronizar_arquivo(path, _dobra_codex,
                                               f"codex:{CACHE_VERSAO}:{_USO_CODEX_VERSAO}",
                                               "codex:avulso")
-    return [] if file_id is None else [_usage_row(t) for t in costs_cache.ler_custos(file_id=file_id)]
+    return None if file_id is None else [_usage_row(t) for t in costs_cache.ler_custos(file_id=file_id)]

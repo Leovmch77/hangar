@@ -649,9 +649,12 @@ def _find_claude(config_dir: str | None, session_id: str) -> str | None:
     return None
 
 
+_WARNED_PROVIDERS: set[str] = set()
+
+
 def _rows_for(provider: str, path: str) -> list | None:
     """Linhas de custo de um transcript, com os subagentes do Claude (`<sessão>/subagents/*.jsonl`).
-    `None` = o Claude não pôde ser lido agora (índice ocupado ou arquivo sumido)."""
+    `None` = o transcript não pôde ser lido agora (índice ocupado, arquivo sumido ou provider sem leitor)."""
     p = Path(path)
     if provider == "claude":
         subs = sorted((p.parent / p.stem / "subagents").glob("*.jsonl"))
@@ -664,7 +667,11 @@ def _rows_for(provider: str, path: str) -> list | None:
         return costs_sources._linhas_arquivo_pi(p, raiz, provider)
     if provider == "kimi":
         return costs_sources._linhas_wire_kimi(p)
-    return []
+    # Provider sem leitor não é "zero gasto": sobe como transcript indisponível.
+    if provider not in _WARNED_PROVIDERS:
+        _WARNED_PROVIDERS.add(provider)
+        _log.warning("orq_timeline: no cost reader for provider %r (%s)", provider, path)
+    return None
 
 
 def _team_paths(d: Path, names: list[str], live) -> dict[str, list[tuple[str, str]]]:
@@ -813,7 +820,9 @@ def _consumption(d: Path, names: list[str], aux: dict, live) -> tuple[dict | Non
     # A soma lê transcripts grandes: nunca dentro do pedido. Uma thread por execução (a trava).
     try:
         threading.Thread(target=run, name="orq-consumption", daemon=True).start()
-    except Exception:
+    except Exception as e:
         lock.release()
         _log.warning("orq_timeline: consumption thread did not start", exc_info=True)
+        _CONSUMPTION[key] = (time.monotonic(), None, _err(e), True)     # tenta de novo logo
+        return None, _err(e)
     return stale

@@ -386,7 +386,13 @@ async def _porta_de_entrada(ws: WebSocket, name: str, resolve=None) -> Optional[
             await ws.close(code=1008)
             return
     if resolve is not None:
-        name = await asyncio.to_thread(resolve)
+        try:
+            name = await asyncio.to_thread(resolve)
+        except tmux.MuxIndisponivel:
+            # Sem resposta nao da pra dizer que o terminal nao existe: o cliente tenta de novo.
+            _log.warning("termsock: multiplexador sem resposta ao resolver o terminal")
+            await ws.close(code=1013, reason="multiplexador indisponivel")
+            return None
         if not name:
             await ws.close(code=1008, reason="terminal nao existe")
             return None

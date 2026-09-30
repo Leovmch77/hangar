@@ -752,7 +752,8 @@ def test_windows_sweep_does_nothing_when_the_multiplexer_did_not_answer(monkeypa
     (tmp_path / "aaaaaa.cmd").write_text("x")
     os.utime(tmp_path / "aaaaaa.cmd", (1, 1))
     monkeypatch.setattr(st, "_read_rows", lambda: None)
-    assert st.list_all() == []
+    with pytest.raises(st.MuxUnavailable):
+        st.list_all()
     assert (tmp_path / "aaaaaa.cmd").exists()
 
 
@@ -800,3 +801,33 @@ def test_windows_kill_group_survives_taskkill_timeout_and_missing_binary(monkeyp
             raise _exc
         monkeypatch.setattr(st.subprocess, "run", boom)
         st._kill_group(1234)                                          # nao levanta
+
+
+def test_mux_without_answer_raises_instead_of_an_empty_list(client, monkeypatch):
+    from app import shortcut_terminals as st, terminal_prompt
+    forgotten = []
+    monkeypatch.setattr(st, "_read_rows", lambda: None)
+    monkeypatch.setattr(terminal_prompt, "forget", lambda live: forgotten.append(live))
+    with pytest.raises(st.MuxUnavailable):
+        st.list_all()
+    assert forgotten == []                            # as amostras de pergunta pendente ficam
+    r = client.get("/api/hangar-terminals", headers=_auth())
+    assert r.status_code == 503 and r.json()["detail"]["code"] == "erro_mux_indisponivel"
+    r = client.post("/api/hangar-terminals/abcdef/close", headers=_auth())
+    assert r.status_code == 503                       # nunca 404 "nao existe"
+
+
+def test_mux_without_answer_never_breaks_the_best_effort_paths(monkeypatch):
+    from app import shortcut_terminals as st
+    monkeypatch.setattr(st, "_read_rows", lambda: None)
+    st.close_all("s")
+    st.rename_owner("a", "b")
+    st._abort("shortcut-x-abcdef")                    # sem lista, cai no kill direto
+
+
+def test_set_options_failure_names_the_option(monkeypatch, caplog):
+    from app import shortcut_terminals as st, tmux
+    monkeypatch.setattr(tmux, "_run", lambda args, **kw: subprocess.CompletedProcess(args, 1, "", "boom"))
+    with caplog.at_level("WARNING"):
+        assert st._set_options("t", (("@cp_shortcut_key", "k"),)) is False
+    assert "@cp_shortcut_key" in caplog.text and "rc=1" in caplog.text
