@@ -2717,6 +2717,7 @@
   "erro_pasta_inexistente": "a pasta não existe",
   "erro_fora_da_pasta": "o convidado só abre sessão dentro da pasta dele",
   "erro_convidado_inexistente": "convidado não existe",
+  "erro_convidados_ilegivel": "O arquivo de convidados deste servidor está ilegível. Corrija-o antes de mudar convidados.",
   "erro_so_dono": "só o dono do servidor pode fazer isso",
   "erro_convite_encerrado": "o compartilhamento desta sessão foi encerrado",
   "erro_convite_usado": "este convite já foi usado",

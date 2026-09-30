@@ -28,6 +28,8 @@ _FILE = "guests.json"
 _path_override: Path | None = None
 _lock = threading.RLock()
 _state: dict | None = None
+# Arquivo existe mas não foi lido: gravar por cima apagaria todos os convidados.
+_unreadable = False
 # ponytail: vida cacheada 2 s por nome, igual ao share_gate; cada consulta é um fork do tmux.
 _LIFE_TTL = 2.0
 _life_cache: dict[str, tuple[float, str | None]] = {}
@@ -60,14 +62,15 @@ def _hash(value: str) -> str:
 
 
 def _reset() -> None:
-    global _state
+    global _state, _unreadable
     with _lock:
         _state = None
+        _unreadable = False
         _life_cache.clear()
 
 
 def _load() -> dict:
-    global _state
+    global _state, _unreadable
     with _lock:
         if _state is None:
             try:
@@ -77,14 +80,18 @@ def _load() -> dict:
             except FileNotFoundError:
                 _state = {"guests": {}, "sessions": {}}
             except (OSError, ValueError, TypeError, KeyError) as e:
-                # Ilegível: ninguém entra como convidado, e o dono segue normal.
-                _log.warning("[guests] %s ilegivel, comecando vazio: %s", _path(), e)
+                # Ilegível: ninguém entra como convidado, o dono segue normal e nada grava por cima.
+                _log.warning("[guests] %s ilegivel; sem convidados e sem gravar ate corrigir: %s",
+                             _path(), e)
                 _state = {"guests": {}, "sessions": {}}
+                _unreadable = True
         return _state
 
 
 def _save() -> None:
     st = _load()
+    if _unreadable:
+        raise GuestError("arquivo_ilegivel")
     destino = _path()
     destino.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=str(destino.parent), suffix=".tmp")
@@ -214,7 +221,12 @@ def owner_of(session: str) -> Guest | None:
     if entry["life"] is None and life is not None:
         with _lock:
             entry["life"] = life
-            _save()
+            # Leitura nunca falha por causa da escrita: a vida adotada fica na memória e o disco
+            # tenta de novo na próxima gravação.
+            try:
+                _save()
+            except (OSError, GuestError) as e:
+                _log.warning("[guests] nao gravou a vida de %s: %s", session, e)
         return guest
     # Vida desconhecida (tmux sem responder) mantém o dono registrado; só OUTRA vida desfaz.
     return guest if life is None or life == entry["life"] else None

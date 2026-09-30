@@ -130,3 +130,27 @@ def test_inside_root_blocks_escape(tmp_path):
     assert guest_users.inside_root(g, str(tmp_path / "proj" / "sub"))
     assert not guest_users.inside_root(g, str(tmp_path / "proj" / ".." / "fora"))
     assert not guest_users.inside_root(g, str(tmp_path / "proj" / "atalho"))
+
+
+def test_owner_of_never_raises_when_adopting_life_cannot_be_saved(tmp_path, monkeypatch):
+    g, _ = _guest(tmp_path)
+    guest_users.claim("s1", g.id)            # vida None: tmux ainda sem responder
+    LIVES["s1"] = "t:100"
+
+    def disk_full():
+        raise OSError("disco cheio")
+    monkeypatch.setattr(guest_users, "_save", disk_full)
+    assert guest_users.owner_of("s1").id == g.id
+    LIVES["s1"] = "t:200"                    # a vida adotada vale na memória
+    assert guest_users.owner_of("s1") is None
+
+
+def test_unreadable_file_is_never_overwritten(tmp_path):
+    f = tmp_path / "guests.json"
+    f.write_text("{corrompido")
+    assert guest_users.lookup_token("qualquer") is None
+    assert guest_users.visible_to(None, "s1")          # o dono segue normal
+    with pytest.raises(guest_users.GuestError) as e:
+        _guest(tmp_path)
+    assert e.value.reason == "arquivo_ilegivel"
+    assert f.read_text() == "{corrompido"

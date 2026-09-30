@@ -594,14 +594,21 @@ async def list_events(ping_secs: float = 8.0, only=None, viewer=None):
                 was_error = True
                 continue
             if data is not None:
-                if only is not None:
-                    data = json.dumps([guest_safe(x) for x in json.loads(data)
-                                       if x.get("name") == (only if isinstance(only, str)
-                                                            else only.session)], ensure_ascii=False)
-                if guest_users.has_claims() or viewer is not None:
-                    itens = await asyncio.to_thread(guest_users.filter_visible, viewer,
-                                                    json.loads(data), lambda x: x.get("name"))
-                    data = json.dumps(itens, ensure_ascii=False)
+                try:
+                    if only is not None:
+                        data = json.dumps([guest_safe(x) for x in json.loads(data)
+                                           if x.get("name") == (only if isinstance(only, str)
+                                                                else only.session)], ensure_ascii=False)
+                    if guest_users.has_claims() or viewer is not None:
+                        itens = await asyncio.to_thread(guest_users.filter_visible, viewer,
+                                                        json.loads(data), lambda x: x.get("name"))
+                        data = json.dumps(itens, ensure_ascii=False)
+                except Exception:
+                    # Sem isto o reader morre calado e o cliente fica com a lista congelada e só ping.
+                    _log.exception("sse: recorte da lista falhou")
+                    await queue.put(("list_error", "{}"))
+                    was_error = True
+                    continue
                 # Compara o que sairia: versão só dos terminais de atalho não reenvia `sessions`,
                 # mas renomear a sessão do convidado muda o recorte sem mudar o dado da lista.
                 if data != last_data or was_error:

@@ -2717,6 +2717,7 @@
   "erro_pasta_inexistente": "the folder does not exist",
   "erro_fora_da_pasta": "guests can only open sessions inside their folder",
   "erro_convidado_inexistente": "guest does not exist",
+  "erro_convidados_ilegivel": "This server's guests file is unreadable. Fix it before changing guests.",
   "erro_so_dono": "only the server owner can do this",
   "erro_convite_encerrado": "sharing of this session has ended",
   "erro_convite_usado": "this invite has already been used",

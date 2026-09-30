@@ -458,6 +458,7 @@ const ERROS: Record<string, (params: Parametros) => string> = {
   erro_fora_da_pasta: () => m.erro_fora_da_pasta(),
   erro_pasta_inexistente: () => m.erro_pasta_inexistente(),
   erro_convidado_inexistente: () => m.erro_convidado_inexistente(),
+  erro_convidados_ilegivel: () => m.erro_convidados_ilegivel(),
   erro_so_dono: () => m.erro_so_dono(),
   erro_usuario_em_uso: () => m.erro_usuario_em_uso(),
 };

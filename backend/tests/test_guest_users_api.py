@@ -61,3 +61,12 @@ def test_update_and_delete_force_list_republish(client):
     sse._list_refresher.sig = "velha"
     c.post(f"/api/guests/{gid}/delete", headers=OWNER)
     assert sse._list_refresher.sig is None
+
+
+def test_unreadable_file_refuses_create_with_its_own_code(client, tmp_path):
+    c, root = client
+    (tmp_path / "guests.json").write_text("{corrompido")
+    r = c.post("/api/guests", headers=OWNER,
+               json={"name": "ana", "root": root, "sees_owner": False, "owner_sees": True})
+    assert r.status_code == 500 and r.json()["detail"]["code"] == "erro_convidados_ilegivel"
+    assert (tmp_path / "guests.json").read_text() == "{corrompido"

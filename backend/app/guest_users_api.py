@@ -11,6 +11,8 @@ router = APIRouter(dependencies=[Depends(require_auth)])
 _ERROS = {
     "pasta_inexistente": (400, "erro_pasta_inexistente", "a pasta não existe"),
     "convidado_inexistente": (404, "erro_convidado_inexistente", "convidado não existe"),
+    "arquivo_ilegivel": (500, "erro_convidados_ilegivel",
+                         "o arquivo de convidados está ilegível; corrija-o antes de mudar convidados"),
 }
 
 

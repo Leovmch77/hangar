@@ -316,3 +316,18 @@ def test_failing_shortcuts_snapshot_keeps_previous_and_leaves_list_alone(monkeyp
     assert calls["n"] > 1
     assert not sse._list_refresher.errored
 
+
+
+def test_guest_filter_failure_emits_list_error_instead_of_freezing(monkeypatch):
+    from app import guest_users
+
+    async def fake_list(_snap=None):
+        return [_Info("cc", "idle")]
+
+    def boom(*_a, **_k):
+        raise OSError("disco cheio")
+    monkeypatch.setattr(sse._list_registry, "list_with_state", fake_list)
+    monkeypatch.setattr(guest_users, "has_claims", lambda: True)
+    monkeypatch.setattr(guest_users, "filter_visible", boom)
+    evs = asyncio.run(_take(sse.list_events(ping_secs=9999), 1))
+    assert evs[0]["event"] == "list_error"
