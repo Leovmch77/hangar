@@ -11,6 +11,7 @@ import { Icon } from '../ui/Icon';
 import { MultilineInput } from '../ui/MultilineInput';
 import * as m from '../paraglide/messages';
 import { chatStore, filaCount as filaCountOf } from '../stores/chat';
+import { confirmFirstInput, readFirstInput, sendFirstInput, useNewConversation } from '../stores/newConversation';
 import { useSessions } from '../stores/sessions';
 import { useRouter } from 'expo-router';
 import { ModelPill } from '../features/pills/ModelPill';
@@ -28,6 +29,8 @@ interface Props {
   serverId: string;
   name: string;
   draft?: string;
+  firstInputId?: string;
+  firstInputSent?: boolean;
   sessionProvider?: string | null;
   onStop?: () => void;
   stopping?: boolean;
@@ -41,7 +44,7 @@ type PendingAttach = {
   size?: number;
 };
 
-export function Composer({ serverId, name, draft, sessionProvider, onStop, stopping = false }: Props) {
+export function Composer({ serverId, name, draft, firstInputId, firstInputSent = false, sessionProvider, onStop, stopping = false }: Props) {
   const { theme } = useUnistyles();
   const router = useRouter();
   const chat = chatStore(serverId, name);
@@ -76,6 +79,7 @@ export function Composer({ serverId, name, draft, sessionProvider, onStop, stopp
     textRef.current = text;
   }, [text]);
   const [sending, setSending] = useState(false);
+  const sendingRef = useRef(false);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState('');
   const steeringRef = useRef(false);
@@ -133,14 +137,41 @@ export function Composer({ serverId, name, draft, sessionProvider, onStop, stopp
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [draft]);
+  useEffect(() => {
+    if (firstInputSent && draft !== undefined) setText((current) => current === draft ? '' : current);
+  }, [firstInputSent, draft]);
 
   const canSend = (text.trim().length > 0 || pendingAttach !== null) && !sending && !uploading;
+
+  // A primeira mensagem já pode ter chegado antes de esta tela montar: nunca criar outro eco.
+  const sendText = useCallback(async (value: string): Promise<void> => {
+    if (!firstInputId) return chat.send(value);
+    const snapshot = readFirstInput(serverId, name);
+    if (snapshot?.id !== firstInputId) {
+      if (value.trim() === draft?.trim()) return;
+      return chat.send(value);
+    }
+    if (value.trim() !== snapshot.text.trim()) {
+      return chat.send(value);
+    }
+    if (snapshot.phase === 'created') await sendFirstInput(serverId, snapshot.id);
+    const current = readFirstInput(serverId, name);
+    if (!current || current.id !== snapshot.id) return;
+    if (current.phase === 'sent') {
+      confirmFirstInput(snapshot.id);
+      return;
+    }
+    const issue = useNewConversation.getState().issues[serverId];
+    throw new Error(issue?.message ?? (current.phase === 'created'
+      ? m.composer_falha_envio() : m.nova_conversa_envio_incerto()));
+  }, [serverId, name, firstInputId, draft, chat]);
 
   const handleSend = useCallback(async () => {
     const trimmed = text.trim();
     const hasAttach = pendingAttach !== null;
     if (!trimmed && !hasAttach) return;
-    if (sending || uploading) return;
+    if (sendingRef.current || sending || uploading) return;
+    sendingRef.current = true;
     limparUndo();
     cancelarAuto();
     setCmdFiltro(null);
@@ -163,6 +194,7 @@ export function Composer({ serverId, name, draft, sessionProvider, onStop, stopp
       } catch (e) {
         setError(e instanceof Error ? e.message : m.board_falha_upload());
         setSending(false);
+        sendingRef.current = false;
         setUploading(false);
         return;
       } finally {
@@ -171,13 +203,16 @@ export function Composer({ serverId, name, draft, sessionProvider, onStop, stopp
     }
     if (!finalText.trim()) {
       setSending(false);
+      sendingRef.current = false;
       return;
     }
     setText('');
     if (toClearAttach) setPendingAttach(null);
-    const sendToPairNow = sendToPair && !!pairPeers?.length && !finalText.trimStart().startsWith('/');
     let groupPendingId: string | null = null;
     try {
+      const snapshot = firstInputId ? readFirstInput(serverId, name) : null;
+      const firstDraft = snapshot?.id === firstInputId && snapshot?.text.trim() === finalText.trim();
+      const sendToPairNow = !firstDraft && sendToPair && !!pairPeers?.length && !finalText.trimStart().startsWith('/');
       if (sendToPairNow && pairPeers?.length) {
         const recipients = [name, ...pairPeers];
         groupPendingId = `pending-group-${Date.now()}`;
@@ -192,7 +227,7 @@ export function Composer({ serverId, name, draft, sessionProvider, onStop, stopp
           );
         }
       } else {
-        await chat.send(finalText);
+        await sendText(finalText);
       }
     } catch (e) {
       if (groupPendingId) {
@@ -207,8 +242,9 @@ export function Composer({ serverId, name, draft, sessionProvider, onStop, stopp
       }
     } finally {
       setSending(false);
+      sendingRef.current = false;
     }
-  }, [text, sending, uploading, chat, limparUndo, cancelarAuto, pendingAttach, name, pairPeers, sendToPair]);
+  }, [text, sending, uploading, chat, sendText, limparUndo, cancelarAuto, pendingAttach, serverId, name, firstInputId, pairPeers, sendToPair]);
 
   // auto-envio: contagem de 3s
   const iniciarAuto = useCallback(
@@ -225,8 +261,7 @@ export function Composer({ serverId, name, draft, sessionProvider, onStop, stopp
           if (!toSend) return;
           setText('');
           limparUndo();
-          void chat
-            .send(toSend)
+          void sendText(toSend)
             .then(() => setError(''))
             .catch((e: unknown) => {
               const msg = e instanceof Error ? e.message : m.composer_falha_envio();
@@ -238,7 +273,7 @@ export function Composer({ serverId, name, draft, sessionProvider, onStop, stopp
         setAutoN(Math.ceil(rest / 1000));
       }, 250);
     },
-    [cancelarAuto, chat, limparUndo],
+    [cancelarAuto, sendText, limparUndo],
   );
 
   const handleTranscribe = useCallback(

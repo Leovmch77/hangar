@@ -1,12 +1,37 @@
 // @vitest-environment happy-dom
 import { act, createElement, type ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type { FirstConversationAttempt } from '@hangar/core';
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 const routerPush = vi.hoisted(() => vi.fn());
-vi.mock('expo-router', () => ({ useRouter: () => ({ push: routerPush }) }));
+const route = vi.hoisted(() => ({ params: { server: 's1', name: 'sess' }, segments: ['s'] }));
+vi.mock('expo-router', () => ({
+  useRouter: () => ({ push: routerPush, back: vi.fn(), replace: vi.fn() }),
+  useLocalSearchParams: () => route.params, useSegments: () => route.segments,
+}));
+vi.mock('@hangar/core', async (original) => ({
+  ...await original<typeof import('@hangar/core')>(),
+  fetchSessionsForServer: async () => [{ name: 'sess', provider: 'claude' }],
+}));
+vi.mock('../stores/servers', () => {
+  const state = { ready: true, servers: [{ id: 's1' }, { id: 's2' }], ensureActive: () => true };
+  return { useServers: Object.assign((select: (s: typeof state) => unknown) => select(state), { getState: () => state }) };
+});
+vi.mock('../ui/Screen', () => ({ Screen: ({ children }: { children: ReactNode }) => createElement('div', null, children) }));
+vi.mock('react-native-keyboard-controller', () => ({ KeyboardAvoidingView: ({ children }: { children: ReactNode }) => createElement('div', null, children) }));
+vi.mock('./LoopChip', () => ({ LoopChip: () => null }));
+vi.mock('../features/plan/PlanChip', () => ({ PlanChip: () => null }));
+vi.mock('./OrqFooter', () => ({ OrqFooter: () => null }));
+vi.mock('./TuiPill', () => ({ TuiPill: () => null }));
+vi.mock('./RecarregarPill', () => ({ RecarregarPill: () => null }));
+vi.mock('./PendingPlan', () => ({ PendingPlan: () => null }));
+vi.mock('./SessionProblem', () => ({ SessionProblem: () => null }));
+vi.mock('./StatsStrip', () => ({ StatsStrip: () => null }));
+vi.mock('./SessionPickerSheet', () => ({ SessionPickerSheet: () => null }));
+vi.mock('../features/create/CreateSessionSheet', () => ({ CreateSessionSheet: () => createElement('div', { 'data-create': true }) }));
 vi.mock('../ui/Icon', () => ({ Icon: () => null }));
 vi.mock('../ui/Sheet', () => ({ Sheet: ({ children }: { children: ReactNode }) => createElement('div', null, children) }));
 vi.mock('../features/sessions/StatePill', () => ({ StatePill: () => null }));
@@ -15,15 +40,17 @@ vi.mock('./ContextRing', () => ({ ContextRing: () => null }));
 vi.mock('../paraglide/messages', () => Object.fromEntries(
   ('arq_aba askq_sua_resposta bastao_dossie_sub bastao_dossie_titulo chat_voltar_sessoes codex_limites_titulo ctx_anexos ctx_atividade ctx_grupo ctx_limites ctx_repositorio ctx_terminal modo_so_ociosa more_fotos_videos_arquivos more_tarefas_agentes navbar_mais_acoes par_titulo recarregar_sessao recarregar_sessao_detalhe sessao_trocar_de term_titulo '
     + 'askq_enviando board_arquivo board_imagem board_remover_anexo codex_orientar composer_anexar_arquivo composer_desfazer_limpeza composer_ditado_limpo composer_enviando_cancelar composer_enviar_mensagem composer_fila_acao composer_fila_aria composer_fila_contagem composer_gravando_audio composer_gravar_audio composer_mandando_grupo composer_mandar_grupo composer_mandar_tambem composer_mensagem composer_parar composer_parar_gravacao composer_pro_grupo composer_pros_dois composer_sessao_trabalhando composer_transcrevendo_audio composer_transcrever_de_novo')
-    .concat(' permissao_pedido comum_cancelar msg_aria_mensagens chat_plan_proposto').split(' ').map((k) => [k, () => k]),
+    .concat(' permissao_pedido comum_cancelar msg_aria_mensagens chat_plan_proposto composer_falha_envio nova_conversa_envio_incerto nova_conversa_resultado_salvar_erro').split(' ').map((k) => [k, () => k]),
 ));
 
 // Composer isolado: sem picker, pills, ditado nem store real — só o que decide o botão Parar.
-const composerChat = vi.hoisted(() => ({ state: 'idle' as string }));
+const composerChat = vi.hoisted(() => ({ state: 'idle' as string, send: vi.fn(async (_text: string) => {}) }));
 vi.mock('expo-image-picker', () => ({}));
 vi.mock('expo-document-picker', () => ({}));
 vi.mock('../ui/Glass', () => ({ Glass: ({ children }: { children: ReactNode }) => createElement('div', null, children) }));
-vi.mock('../ui/MultilineInput', () => ({ MultilineInput: () => null }));
+vi.mock('../ui/MultilineInput', () => ({ MultilineInput: ({ value, onChangeText }: { value: string; onChangeText: (text: string) => void }) =>
+  createElement('textarea', { value, readOnly: true, onInput: (e: { currentTarget: { value: string } }) => onChangeText(e.currentTarget.value) }),
+}));
 vi.mock('../features/pills/ModelPill', () => ({ ModelPill: () => null }));
 vi.mock('../features/pills/EffortPill', () => ({ EffortPill: () => null }));
 vi.mock('../features/pills/PermissionPill', () => ({ PermissionPill: () => null }));
@@ -37,9 +64,26 @@ vi.mock('../stores/sessions', () => ({
 }));
 vi.mock('../stores/chat', () => {
   const snap = () => ({ pending: [], events: [], stateEvent: { state: composerChat.state } });
-  const use = Object.assign((sel: (s: unknown) => unknown) => sel(snap()), { getState: snap, setState: () => {} });
-  return { chatStore: () => ({ use, send: async () => {} }), filaCount: () => 0 };
+  const use = Object.assign((sel: (s: unknown) => unknown) => sel(snap()), {
+    getState: snap, setState: () => {}, subscribe: () => () => {},
+  });
+  return { chatStore: () => ({ use, send: composerChat.send, retain: () => {}, release: () => {}, retry: () => {} }), filaCount: () => 0 };
 });
+
+const firstInput = vi.hoisted(() => ({
+  attempt: null as FirstConversationAttempt | null,
+  send: vi.fn<(serverId: string, id: string) => Promise<void>>(),
+  confirm: vi.fn(),
+}));
+vi.mock('../stores/newConversation', () => ({
+  useNewConversation: Object.assign((select: (state: unknown) => unknown) => select({
+    attempts: firstInput.attempt ? { s1: firstInput.attempt } : {}, issues: {}, busy: {},
+  }), { getState: () => ({ attempts: firstInput.attempt ? { s1: firstInput.attempt } : {}, issues: {} }) }),
+  readFirstInput: (serverId: string, name: string) => firstInput.attempt?.serverId === serverId
+    && firstInput.attempt.sessionName === name ? firstInput.attempt : null,
+  confirmFirstInput: firstInput.confirm,
+  sendFirstInput: firstInput.send,
+}));
 
 // Lista isolada: a bolha só registra o texto recebido, pra provar o que chega nela.
 const bubbleTexts = vi.hoisted(() => [] as string[]);
@@ -63,7 +107,7 @@ vi.mock('react-native-enriched-markdown', () => ({
 }));
 vi.mock('./TableChart', () => ({ TableChart: () => null }));
 vi.mock('./tableChartPref', () => ({ getTableChartPref: () => 'table', setTableChartPref: () => {} }));
-vi.mock('./BubbleActions', () => ({ BubbleActions: () => null }));
+vi.mock('./BubbleActions', () => ({ BubbleActions: () => null, pararTts: () => {} }));
 vi.mock('./ArquivoChip', () => ({
   ArquivoChip: ({ caminho, onPress }: { caminho: string; onPress: () => void }) =>
     createElement('button', { onClick: onPress, 'aria-label': caminho }, caminho),
@@ -74,6 +118,8 @@ import { MessageList } from './MessageList';
 import { MoreSheet } from './MoreSheet';
 import { Composer } from './Composer';
 import { OptionButtons } from './OptionButtons';
+import ChatScreen from '../../app/s/[server]/[name]/index';
+import CreateRoute from '../../app/create';
 
 async function render(el: ReturnType<typeof createElement>) {
   const container = document.createElement('div');
@@ -170,6 +216,141 @@ describe('Parar no Composer', () => {
     composerChat.state = 'working';
     const { container, root } = await render(createElement(Composer, props));
     expect(container.querySelector('[aria-label="composer_parar"]')).toBeNull();
+    act(() => root.unmount());
+  });
+});
+
+describe('primeiro texto recuperado no Composer', () => {
+  const props = { serverId: 's1', name: 'sess', draft: 'primeiro texto', firstInputId: 'attempt-1' };
+  beforeEach(() => {
+    composerChat.send.mockClear(); firstInput.confirm.mockClear(); firstInput.send.mockReset();
+    firstInput.attempt = {
+      id: 'attempt-1', serverId: 's1', body: { name: 'sess', cwd: '/repo', provider: 'codex' },
+      sessionName: 'sess', text: 'primeiro texto', phase: 'created',
+    };
+  });
+
+  it('montar/remontar não envia; dois toques explícitos fazem um envio à mesma sessão sem eco local', async () => {
+    let done!: () => void;
+    firstInput.send.mockImplementation(() => new Promise<void>((resolve) => { done = resolve; }));
+    const first = await render(createElement(Composer, props));
+    act(() => first.root.unmount());
+    const { container, root } = await render(createElement(Composer, props));
+    expect(container.querySelector('textarea')!.value).toBe('primeiro texto');
+    expect(firstInput.send).not.toHaveBeenCalled();
+    const send = container.querySelector<HTMLButtonElement>('[aria-label="composer_enviar_mensagem"]')!;
+    act(() => { send.click(); send.click(); });
+    expect(firstInput.send).toHaveBeenCalledExactlyOnceWith('s1', 'attempt-1');
+    expect(composerChat.send).not.toHaveBeenCalled();
+    firstInput.attempt!.phase = 'sent';
+    await act(async () => done());
+    expect(firstInput.confirm).toHaveBeenCalledWith('attempt-1');
+    act(() => root.unmount());
+  });
+
+  it('recusa conserva rascunho; resultado incerto não repete POST', async () => {
+    firstInput.send.mockResolvedValue(undefined);
+    const { container, root } = await render(createElement(Composer, props));
+    await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="composer_enviar_mensagem"]')!.click());
+    expect(container.querySelector('textarea')!.value).toBe('primeiro texto');
+    expect(firstInput.confirm).not.toHaveBeenCalled();
+    firstInput.attempt!.phase = 'send_unknown';
+    firstInput.send.mockClear();
+    await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="composer_enviar_mensagem"]')!.click());
+    expect(firstInput.send).not.toHaveBeenCalled();
+    expect(composerChat.send).not.toHaveBeenCalled();
+    expect(container.querySelector('textarea')!.value).toBe('primeiro texto');
+    expect(container.textContent).toContain('nova_conversa_envio_incerto');
+    act(() => root.unmount());
+  });
+
+  it('ACK confirmado antes de o botão atualizar não repete o texto que ainda aparece', async () => {
+    const { container, root } = await render(createElement(Composer, props));
+    firstInput.attempt = null;
+    await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="composer_enviar_mensagem"]')!.click());
+    expect(firstInput.send).not.toHaveBeenCalled();
+    expect(composerChat.send).not.toHaveBeenCalled();
+    expect(container.querySelector('textarea')!.value).toBe('');
+    act(() => root.unmount());
+  });
+
+  it('ACK tardio preserva nova edição e sent não repete o primeiro input', async () => {
+    let done!: () => void;
+    firstInput.send.mockImplementation(() => new Promise<void>((resolve) => { done = resolve; }));
+    const { container, root } = await render(createElement(Composer, props));
+    act(() => container.querySelector<HTMLButtonElement>('[aria-label="composer_enviar_mensagem"]')!.click());
+    const field = container.querySelector('textarea')!;
+    act(() => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(field, 'texto novo');
+      field.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    firstInput.attempt!.phase = 'sent';
+    await act(async () => done());
+    expect(field.value).toBe('texto novo');
+    expect(firstInput.confirm).toHaveBeenCalledWith('attempt-1');
+    act(() => root.unmount());
+    const reopened = await render(createElement(Composer, props));
+    await act(async () => reopened.container.querySelector<HTMLButtonElement>('[aria-label="composer_enviar_mensagem"]')!.click());
+    expect(firstInput.send).toHaveBeenCalledTimes(1);
+    expect(composerChat.send).not.toHaveBeenCalled();
+    act(() => reopened.root.unmount());
+  });
+});
+
+describe('handoff nas rotas reais', () => {
+  beforeEach(() => {
+    route.params = { server: 's1', name: 'sess' }; route.segments = ['s'];
+    composerChat.send.mockClear(); firstInput.send.mockClear(); firstInput.confirm.mockClear();
+    firstInput.attempt = {
+      id: 'attempt-route', serverId: 's1', body: { name: 'sess', cwd: '/repo', provider: 'claude' },
+      sessionName: 'sess', text: 'rascunho recuperável', phase: 'created',
+    };
+  });
+
+  it('chat recebe rascunho sem POST e a troca de servidor não carrega o texto antigo', async () => {
+    const { container, root } = await render(createElement(ChatScreen));
+    expect(container.querySelector('textarea')!.value).toBe('rascunho recuperável');
+    expect(firstInput.send).not.toHaveBeenCalled();
+    expect(composerChat.send).not.toHaveBeenCalled();
+    route.params = { server: 's2', name: 'sess' };
+    await act(async () => root.render(createElement(ChatScreen)));
+    expect(container.querySelector('textarea')!.value).toBe('');
+    expect(firstInput.confirm).not.toHaveBeenCalled();
+    act(() => root.unmount());
+  });
+
+  it('chat confirma sent sem retornar texto ao campo nem enviar novamente', async () => {
+    firstInput.attempt!.phase = 'sent';
+    const { container, root } = await render(createElement(ChatScreen));
+    expect(container.querySelector('textarea')!.value).toBe('');
+    expect(firstInput.confirm).toHaveBeenCalledWith('attempt-route');
+    expect(firstInput.send).not.toHaveBeenCalled();
+    expect(composerChat.send).not.toHaveBeenCalled();
+    act(() => root.unmount());
+  });
+
+  it.each([false, true])('ACK que chega após o handoff limpa somente o snapshot, edição nova: %s', async (edited) => {
+    const { container, root } = await render(createElement(ChatScreen));
+    const field = container.querySelector('textarea')!;
+    if (edited) act(() => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(field, 'outra mensagem');
+      field.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    firstInput.attempt = { ...firstInput.attempt!, phase: 'sent' };
+    await act(async () => root.render(createElement(ChatScreen)));
+    expect(field.value).toBe(edited ? 'outra mensagem' : '');
+    expect(composerChat.send).not.toHaveBeenCalled();
+    expect(firstInput.send).not.toHaveBeenCalled();
+    act(() => root.unmount());
+  });
+
+  it('Nova conversa desmonta o formulário ao perder a rota para impedir navegação tardia', async () => {
+    route.segments = ['create'];
+    const { container, root } = await render(createElement(CreateRoute));
+    expect(container.querySelector('[data-create]')).not.toBeNull();
+    route.segments = ['s'];
+    await act(async () => root.render(createElement(CreateRoute)));
+    expect(container.querySelector('[data-create]')).toBeNull();
     act(() => root.unmount());
   });
 });

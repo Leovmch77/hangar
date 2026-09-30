@@ -6,6 +6,7 @@ import { KeyboardAvoidingView } from 'react-native-keyboard-controller';
 import { chatStore } from '../../../../src/stores/chat';
 import { useServers } from '../../../../src/stores/servers';
 import { useSessions } from '../../../../src/stores/sessions';
+import { confirmFirstInput, readFirstInput, useNewConversation } from '../../../../src/stores/newConversation';
 import { Screen } from '../../../../src/ui/Screen';
 import { ChatHeader } from '../../../../src/chat/ChatHeader';
 import { LoopChip } from '../../../../src/chat/LoopChip';
@@ -33,6 +34,7 @@ export default function ChatScreen() {
   const params = useLocalSearchParams<{ server: string; name: string; askFallback?: string }>();
   const serverId = Array.isArray(params.server) ? params.server[0] : (params.server ?? '');
   const name = Array.isArray(params.name) ? params.name[0] : (params.name ?? '');
+  const rota = `${serverId}::${name}`;
 
   const chat = chatStore(serverId, name);
   const [servidorSumiu, setServidorSumiu] = useState(false);
@@ -94,7 +96,30 @@ export default function ChatScreen() {
   const askPiDismissed = chat.use((s) => s.askPiDismissed);
 
   // draft devolvido pelo cancelar do picker (Task 3)
-  const [draft, setDraft] = useState<string | undefined>(undefined);
+  const [draft, setDraft] = useState<{ route: string; text: string } | null>(null);
+  const firstAttempt = useNewConversation((s) => s.attempts[serverId]);
+  const firstBusy = useNewConversation((s) => !!s.busy[serverId]);
+  const firstIssue = useNewConversation((s) => s.issues[serverId]);
+  const firstInput = firstAttempt?.sessionName === name ? firstAttempt : null;
+  const handedOff = useRef<string | null>(null);
+  const [handoffError, setHandoffError] = useState<{ route: string; text: string } | null>(null);
+  useEffect(() => {
+    if (!ready) return;
+    try {
+      const snapshot = readFirstInput(serverId, name);
+      if (!snapshot) { handedOff.current = null; return; }
+      if (snapshot.phase === 'sent') {
+        setDraft((current) => current?.route === rota ? null : current);
+        if (!firstBusy) confirmFirstInput(snapshot.id);
+      } else if (handedOff.current !== `${rota}:${snapshot.id}`) {
+        handedOff.current = `${rota}:${snapshot.id}`;
+        setDraft({ route: rota, text: snapshot.text });
+      }
+      setHandoffError(null);
+    } catch {
+      setHandoffError({ route: rota, text: m.nova_conversa_resultado_salvar_erro() });
+    }
+  }, [ready, serverId, name, rota, firstAttempt, firstBusy]);
   const [aviso, setAviso] = useState('');
   const avisoTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   function mostrarAviso(e: unknown) {
@@ -216,7 +241,6 @@ export default function ChatScreen() {
     catch (e) { optionError(e); }
   };
   // Resposta que chega depois de a rota trocar de conversa não mexe na conversa nova.
-  const rota = `${serverId}::${name}`;
   const rotaAtual = useRef(rota);
   rotaAtual.current = rota;
   // Um objeto por toque: a resposta de um Parar antigo só libera a trava que ela mesma criou.
@@ -257,7 +281,7 @@ export default function ChatScreen() {
     const cur = chat.use.getState().pending;
     const last = cur.length ? cur[cur.length - 1] : null;
     // Recupera o texto no toque; um ACK tardio não sobrescreve o que a pessoa digitou depois.
-    if (last) setDraft(last.text);
+    if (last) setDraft({ route: rota, text: last.text });
     try {
       await interrupt(name, !!last, target);
       if (last) chat.use.setState((live) => ({ pending: live.pending.filter((p) => p.id !== last.id) }));
@@ -310,6 +334,13 @@ export default function ChatScreen() {
       <KeyboardAvoidingView behavior="padding" style={styles.body}>
         {stateEvent?.codex_buffering ? (
           <Text style={styles.notice} accessibilityLiveRegion="polite">{m.chat_codex_buffering()}</Text>
+        ) : null}
+        {handoffError?.route === rota || firstInput && firstInput.phase !== 'sent' && firstIssue ? (
+          <Text style={styles.aviso} accessibilityRole="alert">
+            {handoffError?.route === rota ? handoffError.text : firstIssue?.message}
+          </Text>
+        ) : firstInput?.phase === 'send_unknown' ? (
+          <Text style={styles.aviso} accessibilityRole="alert">{m.nova_conversa_envio_incerto()}</Text>
         ) : null}
         {!servidorSumiu && problem ? (
           <View style={styles.problem}><SessionProblem problem={problem} detail={problemDetail} /></View>
@@ -403,7 +434,8 @@ export default function ChatScreen() {
         {!servidorSumiu && !codexPreThread && fetchedSession !== null
           ? orq
             ? <OrqFooter serverId={serverId} arbiter={currentSession?.orq_arbiter} />
-            : <Composer key={rota} serverId={serverId} name={name} draft={draft} sessionProvider={provider}
+            : <Composer key={rota} serverId={serverId} name={name} draft={draft?.route === rota ? draft.text : undefined}
+                        firstInputId={firstInput?.id} firstInputSent={firstInput?.phase === 'sent'} sessionProvider={provider}
                         onStop={handleStop} stopping={stopping} />
           : null}
       </KeyboardAvoidingView>

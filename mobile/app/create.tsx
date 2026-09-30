@@ -1,15 +1,16 @@
 import { View } from 'react-native';
 import { StyleSheet } from 'react-native-unistyles';
-import { useRouter } from 'expo-router';
+import { useRouter, useSegments } from 'expo-router';
 import { Screen } from '../src/ui/Screen';
 import { CreateSessionSheet } from '../src/features/create/CreateSessionSheet';
 
 export default function CreateRoute() {
   const router = useRouter();
+  const segments = useSegments();
   return (
     <Screen>
       <View style={styles.wrap}>
-        <CreateSessionSheet onClose={() => router.back()} />
+        {segments[0] === 'create' ? <CreateSessionSheet onClose={() => router.back()} /> : null}
       </View>
     </Screen>
   );
