@@ -152,7 +152,8 @@ impl Hangar {
                     window.start_window_move();
                 }
             }))
-            .on_click(|event, window, _| if event.click_count() == 2 {
+            // No Windows a barra é legenda do sistema, que já alterna maximizar no duplo clique.
+            .on_click(|event, window, _| if event.click_count() == 2 && !cfg!(target_os = "windows") {
                 if cfg!(target_os = "macos") { window.titlebar_double_click() } else { window.zoom_window() }
             })
             .map(|el| {
