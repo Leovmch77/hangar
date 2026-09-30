@@ -6090,6 +6090,8 @@
   "nova_conversa_abrir": "Open conversation",
   "nova_conversa_reenviar": "Send again in this conversation",
   "nova_conversa_conferir": "Check",
+  "new_conversation_received_messages": "Your latest messages found",
+  "new_conversation_no_received_messages": "No messages from you found.",
   "nova_conversa_adotar": "Use this conversation",
   "nova_conversa_descartar": "Discard attempt",
   "nova_conversa_nome_automatico": "Leave blank to name it after the folder plus a short code.",

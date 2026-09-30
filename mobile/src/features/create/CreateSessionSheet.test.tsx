@@ -12,6 +12,7 @@ const calls = vi.hoisted(() => ({
   preparation: vi.fn(),
   create: vi.fn(),
   send: vi.fn(),
+  history: vi.fn(),
   archives: vi.fn(),
   resume: vi.fn(),
   replace: vi.fn(),
@@ -118,6 +119,7 @@ vi.mock('@hangar/core', async (original) => ({
   getCodexPreparationForServer: calls.preparation,
   createSessionForServer: calls.create,
   sendInputForServer: calls.send,
+  getHistory: calls.history,
   getArchivePorCwd: calls.archives,
   resumeArchivedConversation: calls.resume,
 }));
@@ -156,6 +158,8 @@ vi.mock('../../paraglide/messages', () => ({
   nova_conversa_destino_hint: () => 'nova_conversa_destino_hint', nova_conversa_config_hint: () => 'nova_conversa_config_hint',
   nova_conversa_guardada: () => 'nova_conversa_guardada', nova_conversa_abrir: () => 'nova_conversa_abrir',
   nova_conversa_reenviar: () => 'nova_conversa_reenviar', nova_conversa_conferir: () => 'nova_conversa_conferir',
+  new_conversation_received_messages: () => 'new_conversation_received_messages',
+  new_conversation_no_received_messages: () => 'new_conversation_no_received_messages',
   nova_conversa_adotar: () => 'nova_conversa_adotar', nova_conversa_descartar: () => 'nova_conversa_descartar',
   nova_conversa_nome_automatico: () => 'nova_conversa_nome_automatico',
   nova_conversa_retomada_selecionada: () => 'nova_conversa_retomada_selecionada',
@@ -163,6 +167,7 @@ vi.mock('../../paraglide/messages', () => ({
   nova_conversa_salvar_erro: () => 'nova_conversa_salvar_erro', nova_conversa_servidor_ausente: () => 'nova_conversa_servidor_ausente',
   nova_conversa_resultado_salvar_erro: () => 'nova_conversa_resultado_salvar_erro',
   nova_conversa_envio_recusado: ({ erro }: { erro: string }) => `nova_conversa_envio_recusado:${erro}`,
+  nova_conversa_envio_conferir_erro: ({ erro }: { erro: string }) => `nova_conversa_envio_conferir_erro:${erro}`,
 }));
 
 import { CreateSessionSheet } from './CreateSessionSheet';
@@ -198,6 +203,7 @@ describe('CreateSessionSheet Codex', () => {
     calls.preparation.mockReset();
     calls.create.mockReset().mockResolvedValue({ name: 'nova', state: 'idle' });
     calls.send.mockReset().mockResolvedValue(undefined);
+    calls.history.mockReset().mockResolvedValue([]);
     calls.archives.mockReset().mockResolvedValue([]);
     calls.resume.mockReset().mockResolvedValue({ name: 'retomada', state: 'idle' });
     calls.replace.mockReset();
@@ -502,6 +508,49 @@ describe('CreateSessionSheet Codex', () => {
     expect(calls.replace).toHaveBeenCalledWith('/s/server-b/nova');
     root.unmount();
   });
+
+  it('Conferir mostra só as três últimas mensagens do usuário sem repetir criação ou envio', async () => {
+    calls.send.mockRejectedValueOnce(new TypeError('offline'));
+    calls.history.mockResolvedValue([
+      { kind: 'user_msg', id: 'u1', text: 'mensagem mais antiga' },
+      { kind: 'user_msg', id: 'u2', text: 'primeira recebida' },
+      { kind: 'assistant_msg', id: 'a1', text: 'resposta do assistente' },
+      { kind: 'user_msg', id: 'u3', text: 'segunda recebida' },
+      { kind: 'user_msg', id: 'u4', text: 'terceira recebida' },
+    ]);
+    const { container, root } = await renderSheet();
+    await send(container);
+    expect(container.textContent).not.toContain('new_conversation_received_messages');
+    await act(async () => button(container, 'nova_conversa_conferir')!.click());
+    expect(container.textContent).toContain('new_conversation_received_messages');
+    expect(container.textContent).toContain('primeira recebida');
+    expect(container.textContent).toContain('segunda recebida');
+    expect(container.textContent).toContain('terceira recebida');
+    expect(container.textContent).not.toContain('mensagem mais antiga');
+    expect(container.textContent).not.toContain('resposta do assistente');
+    expect(button(container, 'nova_conversa_enviar')!.disabled).toBe(true);
+    expect(calls.create).toHaveBeenCalledOnce();
+    expect(calls.send).toHaveBeenCalledOnce();
+    root.unmount();
+  });
+
+  it.each([[], [{ kind: 'assistant_msg', id: 'a1', text: 'só resposta' }]])(
+    'Conferir sem user_msg mostra vazio; falha posterior continua visível (%j)', async (events) => {
+      calls.send.mockRejectedValueOnce(new TypeError('offline'));
+      calls.history.mockResolvedValueOnce(events).mockRejectedValueOnce(new Error('consulta indisponível'));
+      const { container, root } = await renderSheet();
+      await send(container);
+      await act(async () => button(container, 'nova_conversa_conferir')!.click());
+      expect(container.textContent).toContain('new_conversation_no_received_messages');
+      expect(container.textContent).not.toContain('só resposta');
+      await act(async () => button(container, 'nova_conversa_conferir')!.click());
+      expect(container.textContent).toContain('nova_conversa_envio_conferir_erro:consulta indisponível');
+      expect(container.textContent).not.toContain('new_conversation_no_received_messages');
+      expect(calls.create).toHaveBeenCalledOnce();
+      expect(calls.send).toHaveBeenCalledOnce();
+      root.unmount();
+    },
+  );
 
   it('cria normalmente sob StrictMode após o ciclo de efeitos', async () => {
     const { container, root } = await renderSheet(true);

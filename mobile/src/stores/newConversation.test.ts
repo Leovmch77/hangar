@@ -3,7 +3,7 @@ import type { SessionInfo } from '@hangar/core';
 
 const { memory, calls, failWrites } = vi.hoisted(() => ({
   memory: new Map<string, string>(),
-  failWrites: { on: false, drafts: false },
+  failWrites: { on: false, drafts: false, remove: false },
   calls: {
     create: vi.fn(),
     sessions: vi.fn(),
@@ -20,7 +20,10 @@ vi.mock('react-native-mmkv', () => ({
       if (failWrites.on || (failWrites.drafts && key.startsWith('draft.v1:'))) throw new Error('disk full');
       memory.set(key, value);
     },
-    remove: (key: string) => { memory.delete(key); },
+    remove: (key: string) => {
+      if (failWrites.remove) throw new Error('disk unavailable');
+      memory.delete(key);
+    },
   }),
 }));
 vi.mock('expo-secure-store', () => ({
@@ -40,7 +43,7 @@ vi.mock('@hangar/core', async (original) => ({
 import { useServers } from './servers';
 import { readDraft, writeDraft } from './drafts';
 import {
-  _resetNewConversationForTests, adoptCandidate, beginAttempt, discardAttempt, recoverAttempt,
+  _resetNewConversationForTests, abandonUnknownAttempt, adoptCandidate, beginAttempt, discardAttempt, recoverAttempt,
   restoreAttempt, useNewConversation, sendFirstInput, readFirstInput, confirmFirstInput,
 } from './newConversation';
 
@@ -69,6 +72,7 @@ describe('newConversation', () => {
     memory.clear();
     failWrites.on = false;
     failWrites.drafts = false;
+    failWrites.remove = false;
     vi.clearAllMocks();
     _resetNewConversationForTests();
     useServers.setState({ servers: [serverA, serverB], activeId: 'server-b' });
@@ -317,7 +321,7 @@ describe('newConversation', () => {
 // Sem ACK não há limpeza; falha de input nunca inicia outra criação.
 describe('primeiro input', () => {
   beforeEach(() => {
-    memory.clear(); failWrites.on = false; failWrites.drafts = false; vi.clearAllMocks();
+    memory.clear(); failWrites.on = false; failWrites.drafts = false; failWrites.remove = false; vi.clearAllMocks();
     _resetNewConversationForTests();
     useServers.setState({ servers: [serverA, serverB], activeId: 'server-a' });
     calls.sessions.mockResolvedValue([]);
@@ -402,7 +406,7 @@ describe('primeiro input', () => {
     calls.send.mockRejectedValueOnce(httpError(502));
     await sendFirstInput('server-a', created.id);
     useServers.setState({ activeId: 'server-b' });
-    const history = [{ type: 'user_msg', text: 'oi', id: 'outro-envio' }];
+    const history = [{ kind: 'user_msg', text: 'oi', id: 'outro-envio' }];
     calls.history.mockResolvedValue(history);
     await recoverAttempt('server-a');
     expect(calls.history).toHaveBeenCalledWith(created.sessionName, 120, undefined, 10000, serverA);
@@ -410,10 +414,73 @@ describe('primeiro input', () => {
     expect(attempt()?.phase).toBe('send_unknown');
     confirmFirstInput(created.id);
     expect(attempt()?.phase).toBe('send_unknown');
+    calls.history.mockResolvedValueOnce([]);
+    await recoverAttempt('server-a');
+    expect(issue()).toMatchObject({ kind: 'unknown', events: [] });
+    expect(attempt()?.phase).toBe('send_unknown');
     calls.history.mockRejectedValueOnce(httpError(404));
     await recoverAttempt('server-a');
     expect(issue()?.kind).toBe('recover_failed');
     expect(attempt()?.phase).toBe('send_unknown');
+    expect(calls.send).toHaveBeenCalledOnce();
+  });
+
+  it('abandono explícito remove só send_unknown e preserva rascunho e outro servidor', async () => {
+    await beginAttempt('server-a', input);
+    const created = attempt()!;
+    expect(abandonUnknownAttempt('server-a', created.id)).toBe(false);
+    calls.send.mockRejectedValueOnce(new TypeError('offline'));
+    await sendFirstInput('server-a', created.id);
+    await beginAttempt('server-b', { ...input, text: 'outro destino' });
+    const draft = readDraft('server-a', created.sessionName!);
+    expect(abandonUnknownAttempt('server-a', 'id-antigo')).toBe(false);
+    expect(abandonUnknownAttempt('server-a', created.id)).toBe(true);
+    expect(attempt()).toBeUndefined();
+    expect(memory.has('create.attempt.v1:server-a')).toBe(false);
+    expect(issue()).toBeNull();
+    expect(readDraft('server-a', created.sessionName!)).toEqual(draft);
+    expect(attempt('server-b')?.text).toBe('outro destino');
+    expect(calls.send).toHaveBeenCalledOnce();
+  });
+
+  it('abandono não remove tentativa sent nem inexistente', async () => {
+    expect(abandonUnknownAttempt('server-a', 'ausente')).toBe(false);
+    await beginAttempt('server-a', input);
+    const created = attempt()!;
+    await sendFirstInput('server-a', created.id);
+    expect(attempt()?.phase).toBe('sent');
+    expect(abandonUnknownAttempt('server-a', created.id)).toBe(false);
+    expect(stored().phase).toBe('sent');
+  });
+
+  it('abandono durante consulta em voo não remove nem envia; depois pode ser explícito', async () => {
+    await beginAttempt('server-a', input);
+    const created = attempt()!;
+    calls.send.mockRejectedValueOnce(new TypeError('offline'));
+    await sendFirstInput('server-a', created.id);
+    const history = deferred<[]>();
+    calls.history.mockReturnValueOnce(history.promise);
+    const recovery = recoverAttempt('server-a');
+    expect(abandonUnknownAttempt('server-a', created.id)).toBe(false);
+    expect(stored().phase).toBe('send_unknown');
+    expect(attempt()?.id).toBe(created.id);
+    history.resolve([]);
+    await recovery;
+    expect(abandonUnknownAttempt('server-a', created.id)).toBe(true);
+    expect(calls.send).toHaveBeenCalledOnce();
+  });
+
+  it('falha ao remover chave conserva tentativa no disco e na memória e mostra erro', async () => {
+    await beginAttempt('server-a', input);
+    const created = attempt()!;
+    calls.send.mockRejectedValueOnce(new TypeError('offline'));
+    await sendFirstInput('server-a', created.id);
+    const unknown = attempt();
+    failWrites.remove = true;
+    expect(abandonUnknownAttempt('server-a', created.id)).toBe(false);
+    expect(attempt()).toBe(unknown);
+    expect(stored()).toMatchObject({ id: created.id, phase: 'send_unknown' });
+    expect(issue()).toMatchObject({ kind: 'local' });
     expect(calls.send).toHaveBeenCalledOnce();
   });
 

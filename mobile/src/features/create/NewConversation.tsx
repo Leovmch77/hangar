@@ -88,6 +88,8 @@ export function NewConversation({ server, destination, destinationPending, desti
   };
 
   const pending = attempt && attempt.phase !== 'draft' ? attempt : null;
+  const receivedMessages = issue?.kind === 'unknown' && issue.events
+    ? issue.events.filter((event) => event.kind === 'user_msg').slice(-3) : null;
   const canSend = !!body && !blocked && !busy && restored && !pending && !!text.trim();
 
   return (
@@ -102,6 +104,14 @@ export function NewConversation({ server, destination, destinationPending, desti
           <View style={styles.pending}>
             <Text style={styles.label}>{m.nova_conversa_guardada()}</Text>
             <Text style={styles.pendingText} numberOfLines={3}>{pending.text}</Text>
+            {receivedMessages ? (
+              <View>
+                <Text style={styles.label}>{m.new_conversation_received_messages()}</Text>
+                {receivedMessages.length ? receivedMessages.map((event) => (
+                  <Text key={event.id} style={styles.pendingText} numberOfLines={3}>{event.text ?? ''}</Text>
+                )) : <Text style={styles.hint}>{m.new_conversation_no_received_messages()}</Text>}
+              </View>
+            ) : null}
             {pending.sessionName && (pending.phase === 'created' || pending.phase === 'sent' || pending.phase === 'send_unknown') ? (
               <Pressable accessibilityRole="button" accessibilityState={{ disabled: busy, busy }} onPress={() => open(pending.sessionName!)} disabled={busy} style={[styles.secondary, busy && styles.disabled]}>
                 <Text style={styles.secondaryTxt}>{m.nova_conversa_abrir()}</Text>
