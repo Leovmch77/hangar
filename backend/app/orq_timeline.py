@@ -3,6 +3,7 @@ tempo no chat e o retrato do painel. Só leitura; arquivo que não se lê vira e
 nunca exceção."""
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import logging
@@ -11,7 +12,7 @@ import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from app import orq_conductor
+from app import orq_conductor, orq_start
 from app.adapters.orq.runs import timeline_path  # noqa: F401  (reexportado: quem lê a linha do tempo pede daqui)
 
 _log = logging.getLogger(__name__)
@@ -254,3 +255,307 @@ def entry(obj: dict, run: RunFiles | None) -> dict | None:
                body=_code(body), question=_code(question) if question else None, parecer=parecer,
                error=err, decided_by=decided)
     return out
+
+
+def event_id(obj: dict) -> str:
+    """O id da linha na conversa: o hash dela é o mesmo no tail, no /history e no painel."""
+    return "orq:" + hashlib.sha1(json.dumps(obj, sort_keys=True).encode("utf-8")).hexdigest()[:16]
+
+
+# ── retrato do painel ────────────────────────────────────────────────────────────────────────
+
+_PANEL_FILES = ("jev-shadow.jsonl", "eventos.jsonl", "closed.jsonl", "checks.jsonl", "orq.json", "sessions.jsonl")
+_PANELS: dict[str, tuple[tuple, dict]] = {}
+_panels_lock = threading.Lock()
+_VERDICT = {"aprova": "approved", "corrige": "approved", "reprova": "rejected", "devolvido": "rejected"}
+_OUTCOME = {"integrada": "green", "integracao_vermelha": "red", "conflito": "conflict",
+            "advance_falhou": "failed"}
+
+
+def _sig(p: Path):
+    try:
+        st = p.stat()
+        return st.st_mtime_ns, st.st_size
+    except OSError:
+        return None
+
+
+def _err(e: Exception) -> str:
+    return f"{type(e).__name__}: {e}"
+
+
+def _read_jsonl(p: Path) -> tuple[list[dict], str | None]:
+    """(objetos, erro): arquivo ausente não é erro; linha que não é objeto JSON é pulada."""
+    try:
+        text = p.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return [], None
+    except (OSError, UnicodeDecodeError) as e:
+        return [], _err(e)
+    rows = []
+    for line in text.splitlines():
+        try:
+            v = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(v, dict):
+            rows.append(v)
+    return rows, None
+
+
+def _first_sentence(body: str) -> str:
+    s = SENTENCE.split(body.replace("`", "").strip(), 1)[0].strip()
+    return s if len(s) <= 160 else s[:159].rstrip() + "…"
+
+
+def _decision_rows(entries: list[tuple[dict, dict]], evs: list[dict]) -> list[dict]:
+    """Decisão do orquestrador que espera o árbitro: nenhuma entrega, veredito ou integração da
+    mesma Task veio depois dela."""
+    later: dict[int, list] = {}
+    for ev in evs:
+        if ev.get("tipo") in ("entrega", "veredito", "integrada") and isinstance(ev.get("task"), int):
+            when = orq_conductor._when(ev.get("ts"))
+            if when is not None:
+                later.setdefault(ev["task"], []).append(when)
+    out = []
+    for obj, e in reversed(entries):
+        orchestrator = e["origin"] == "orchestrator"
+        asks = (e["kind"] in ("woke", "would_drop") and (e["mark"] == "decisao" or orchestrator)) or (
+            e["kind"] == "failed" and orchestrator)
+        if not asks or e["task"] is None:
+            continue
+        when = orq_conductor._when(obj.get("ts"))
+        if when is not None and any(w > when for w in later.get(e["task"], ())):
+            continue
+        out.append({"task": e["task"], "ts": obj.get("ts"), "question": e["question"] or _first_sentence(e["body"]),
+                    "parecer": e["parecer"], "event_id": event_id(obj)})
+    return out
+
+
+def _automation(cfg: dict, entries: list[tuple[dict, dict]], shadow: list[dict]) -> dict:
+    woke = {"total": 0, "decisions": 0, "alarms": 0, "messages": 0}
+    alone = {"total": 0, "opened": 0, "integrated": 0, "dropped": 0}
+    dropped_by_jev = would_drop = by_rule = 0
+    for _, e in entries:
+        kind, orchestrator = e["kind"], e["origin"] == "orchestrator"
+        if kind in ("woke", "would_drop") or (kind == "failed" and orchestrator):
+            woke["total"] += 1
+            woke["decisions" if e["mark"] or orchestrator else "alarms" if e["alarm"] else "messages"] += 1
+        if kind == "would_drop":
+            would_drop += 1
+        code = (e["line"] or {}).get("code")
+        if kind == "advance" and code in ("opened", "integrated"):
+            alone[code] += 1
+        elif kind == "dropped":
+            alone["dropped"] += 1
+            dropped_by_jev += (e["decided_by"] or {}).get("source") == "jev"
+        by_rule += (e["decided_by"] or {}).get("source") in ("rule", "alarm")
+    alone["total"] = alone["opened"] + alone["integrated"] + alone["dropped"]
+
+    decide = _triage()
+    judged = disagree = 0
+    lowest = None
+    for row in shadow:
+        if row.get("error") or not isinstance(row.get("text"), str):
+            continue
+        judged += 1
+        if decide and (decide(row["text"])[0] == "drop") != bool(row.get("would_drop")):
+            disagree += 1
+        probs = row.get("probs") if isinstance(row.get("probs"), dict) else {}
+        choice = row.get("choice")
+        p = orq_conductor._num(probs.get(choice)) if choice in probs else (
+            orq_conductor._num(row.get("p")) if choice == "nothing" else None)
+        if p is not None and (lowest is None or p < lowest["p"]):
+            lowest = {"p": p, "choice": choice, "ts": row.get("ts"), "text": row["text"][:120]}
+    return {"mode": {"jev": cfg.get("jev", "shadow"), "regex": cfg.get("regex", "shadow")},
+            "woke": woke, "alone": alone, "dropped_by_jev": dropped_by_jev,
+            "advanced": {"would_drop": would_drop, "disagree": disagree, "judged": judged,
+                         "min_confidence": lowest, "by_rule": by_rule}}
+
+
+def _task_rows(evs: list[dict], plan: list[dict], integrated: set[int]) -> list[dict]:
+    """Uma linha por Task do plano e por Task que só existe nos eventos; o estado é o do último
+    evento dela, e `round` a rodada desse evento."""
+    titles = {t["n"]: t["title"] for t in plan}
+    deciding: dict[int, tuple[str, int | None]] = {}
+    for ev in evs:
+        n, t = ev.get("task"), ev.get("tipo")
+        if not isinstance(n, int):
+            continue
+        rnd = ev.get("rodada") if isinstance(ev.get("rodada"), int) else None
+        titles.setdefault(n, "")
+        if t == "task_inicio":
+            titles[n] = titles[n] or ev.get("titulo") or ""
+            deciding[n] = ("executing", None)
+        elif t == "entrega":
+            deciding[n] = ("in_review", rnd)
+        elif t == "veredito" and ev.get("resultado") in _VERDICT:
+            deciding[n] = (_VERDICT[ev["resultado"]], rnd)
+        elif t in ("integracao_vermelha", "conflito") or (t == "advance_falhou" and ev.get("passo") == "integrate"):
+            deciding[n] = ("integration_red", None)
+        elif t == "integrada":
+            deciding[n] = ("integrated", None)
+    rows = []
+    for n in sorted(titles):
+        state, rnd = ("integrated", None) if n in integrated else deciding.get(n, ("queued", None))
+        rows.append({"n": n, "title": titles[n], "state": state, "round": rnd})
+    return rows
+
+
+def _team(m, cfg: dict, st: dict, evs: list[dict]) -> list[dict]:
+    """Quem trabalha na execução e o último passo de cada um: o árbitro atual primeiro, depois os
+    anteriores, depois cada Task da mais nova para a mais antiga."""
+    roles: dict[int, dict] = {}
+    last: dict[str, dict] = {}
+    slot: dict[str, tuple[int, str]] = {}
+    arbiter, before = cfg.get("arbiter"), []
+    for ev in evs:
+        t, n, ts = ev.get("tipo"), ev.get("task"), ev.get("ts")
+        rnd = ev.get("rodada") if isinstance(ev.get("rodada"), int) else None
+        if t == "task_inicio":
+            roles[n] = {"executor": ev.get("executor"), "par": ev.get("par")}
+            for who in roles[n].values():
+                if isinstance(who, str):
+                    last[who] = {"code": "started", "round": None, "ts": ts}
+        elif t == "entrega" and isinstance(who := roles.get(n, {}).get("executor"), str):
+            last[who] = {"code": "delivered", "round": rnd, "ts": ts}
+        elif t == "veredito" and isinstance(ev.get("sessao"), str) and ev.get("resultado") in _VERDICT:
+            last[ev["sessao"]] = {"code": _VERDICT[ev["resultado"]], "round": rnd, "ts": ts}
+        elif t == "sessao_trocada":
+            de, para = ev.get("de"), ev.get("para")
+            if de == arbiter:
+                before.append(de)
+                arbiter = para
+            for k, r in roles.items():
+                for key in ("executor", "par"):
+                    if r.get(key) == de:
+                        r[key] = para
+                        slot[de] = (k, "executor" if key == "executor" else "reviewer")
+                        if isinstance(para, str):
+                            last[para] = {"code": "swapped_in", "round": None, "ts": ts}
+    rows = [{"name": st["arbiter"], "role": "arbiter", "task": None, "last": None, "current": True}]
+    rows += [{"name": n, "role": "arbiter", "task": None, "last": None, "current": False}
+             for n in reversed(before)]
+    for n in sorted(st["roles"], reverse=True):
+        for key, role in (("executor", "executor"), ("par", "reviewer")):
+            who = st["roles"][n].get(key)
+            # `par` também guarda a frase "subagente" ou a descrição de quem revisa: nome de sessão não tem espaço.
+            if isinstance(who, str) and who.strip() and " " not in who and who != m.SUBAGENT:
+                rows.append({"name": who, "role": role, "task": n, "last": last.get(who), "current": True})
+    for de, _para in st["replaced"]:
+        if de in slot:
+            n, role = slot[de]
+            rows.append({"name": de, "role": role, "task": n, "last": last.get(de), "current": False})
+    seen: set[str] = set()
+    return [r for r in rows if not (r["name"] in seen or seen.add(r["name"]))]
+
+
+def _integration(m, evs: list[dict], closes: dict, checks: list[dict]) -> dict:
+    begin = next((e for e in evs if e.get("tipo") == "execucao_inicio"), {})
+    done = [e for e in evs if e.get("tipo") == "integrada"]
+    last = done[-1] if done else None
+    outcome = None
+    if closes:
+        n, close = list(closes.items())[-1]
+        outcome = _OUTCOME.get(m._outcome(evs, n, close))
+    red = [e for e in evs if e.get("tipo") == "integracao_vermelha" and isinstance(e.get("motivo"), str)]
+    latest = {c["task"]: c for c in checks if isinstance(c.get("task"), int)}
+    return {"branch": begin.get("branch"),
+            "last": {"task": last.get("task"), "commit": str(last.get("commit") or "")[:7], "ts": last.get("ts")}
+            if last else None,
+            "outcome": outcome, "red_log": red[-1]["motivo"] if red else None,
+            "delivery_checks": {"ok": sum(1 for c in latest.values() if c.get("ok")), "total": len(latest),
+                                "failing": sorted(n for n, c in latest.items() if not c.get("ok"))}}
+
+
+def panel(d: Path, live=None) -> dict:
+    """Um retrato da execução, lido dos arquivos dela. O mesmo retrato serve enquanto nenhum
+    arquivo muda; leitura que falha vira item de `errors`, nunca exceção."""
+    key = str(d.resolve())
+    plan_path = None
+    try:
+        plan_path = json.loads((d / "orq.json").read_text(encoding="utf-8")).get("plan")
+    except (OSError, ValueError, AttributeError):
+        pass
+    sig = tuple(_sig(p) for p in (timeline_path(d), *(d / f for f in _PANEL_FILES),
+                                  Path(plan_path).expanduser() if isinstance(plan_path, str) else d / "plan"))
+    with _panels_lock:
+        hit = _PANELS.get(key)
+    if hit and hit[0] == sig:
+        return {**hit[1], "consumption": None}
+    out = _build_panel(d)
+    with _panels_lock:
+        while len(_PANELS) >= _RUNS_MAX and key not in _PANELS:
+            _PANELS.pop(next(iter(_PANELS)), None)
+        _PANELS[key] = (sig, out)
+    return {**out, "consumption": None}
+
+
+def _build_panel(d: Path) -> dict:
+    m = orq_start._orq()
+    errors: list[dict] = []
+
+    def fail(file: str, error: str) -> None:
+        if not any(e["file"] == file for e in errors):
+            errors.append({"file": file, "error": error})
+
+    def guard(fn, default, file: str):
+        try:
+            return fn()
+        except (m.OrqError, OSError, ValueError) as e:
+            fail(Path(getattr(e, "filename", None) or file).name, _err(e))
+            return default
+
+    cfg: dict = {}
+    try:
+        cfg = json.loads((d / "orq.json").read_text(encoding="utf-8"))
+        if not isinstance(cfg, dict):
+            raise ValueError("orq.json não é um objeto")
+    except (OSError, ValueError) as e:
+        cfg = {}
+        fail("orq.json", _err(e))
+
+    lines, err = _read_jsonl(timeline_path(d))
+    if err:
+        fail(timeline_path(d).name, err)
+    evs, err = _read_jsonl(d / "eventos.jsonl")
+    if err:
+        fail("eventos.jsonl", err)
+    shadow, err = _read_jsonl(d / "jev-shadow.jsonl")
+    if err:
+        fail("jev-shadow.jsonl", err)
+    checks, err = _read_jsonl(d / "checks.jsonl")
+    if err:
+        fail("checks.jsonl", err)
+
+    run = run_files(d)
+    entries = []
+    for obj in lines:
+        try:
+            if (e := entry(obj, run)) is not None:
+                entries.append((obj, e))
+        except Exception as ex:
+            _log.warning("orq_timeline.entry falhou no painel", exc_info=True)
+            fail(timeline_path(d).name, _err(ex))
+
+    st = guard(lambda: m.state(d), None, "orq.json") if cfg else None
+    closes = guard(lambda: m._closes(d), {}, "closed.jsonl")
+    integrated = {n for n, c in closes.items() if m._outcome(evs, n, c) == "integrada"}
+
+    plan = None
+    if isinstance(cfg.get("plan"), str):
+        plan = guard(lambda: m.plan_tasks(m.plan_text(cfg["plan"])), None, "plan")
+    rows = _task_rows(evs, plan or [], integrated)
+    begin = next((e for e in evs if e.get("tipo") == "execucao_inicio"), {})
+    return {
+        "run": d.resolve().name, "gid": begin.get("gid") or "", "errors": errors,
+        "empty": not lines and not any(e.get("tipo") == "task_inicio" for e in evs),
+        "tasks": {"integrated": len(integrated),
+                  "total": len(plan) if plan is not None else max((r["n"] for r in rows), default=0),
+                  "total_known": plan is not None, "rows": rows},
+        "team": _team(m, cfg, st, evs) if st else [],
+        "decisions": _decision_rows(entries, evs),
+        "automation": _automation(cfg, entries, shadow),
+        "consumption": None,
+        "integration": _integration(m, evs, closes, checks),
+    }

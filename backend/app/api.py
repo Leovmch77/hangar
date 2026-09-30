@@ -42,7 +42,7 @@ from app import filesearch, filetree, git_ops
 from app.file_response import file_response
 from app.filesearch import SearchError
 from app.filetree import FileError
-from app import orq, orq_conductor, orq_md, orq_papeis, orq_politica, orq_start
+from app import orq, orq_conductor, orq_md, orq_papeis, orq_politica, orq_start, orq_timeline
 from app import pi_catalog
 from app import cli_probe
 from app import pi_models
@@ -4280,6 +4280,16 @@ async def orq_get(name: str):
         "papeis": [{**asdict(p), "viva": orq_papeis.casar_viva(p, infos),
                     "id_cota": orq_politica.id_cota(p.provider, p.conta)} for p in papeis],
     }
+
+
+@app.get("/api/sessions/{name}/orq/panel", dependencies=[Depends(require_auth)])
+async def orq_panel(name: str):
+    """Painel da sessão do orquestrador sem LLM: um retrato por execução, lido dos arquivos dela."""
+    # A pasta vem da linha em cache da lista: `runs.find` releria todas as execuções a cada pedido.
+    info = await asyncio.to_thread(_cached_info_sync, name)
+    if info is None or info.provider != "orq" or not info.jsonl:
+        raise HTTPException(404, detail=erro("erro_nao_encontrado", "execucao nao encontrada"))
+    return await asyncio.to_thread(orq_timeline.panel, Path(info.jsonl).parent, registry.list)
 
 
 class PapelItem(_StrictBody):

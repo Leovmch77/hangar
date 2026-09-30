@@ -4,7 +4,6 @@ Não há pane nem processo: a conversa é a linha do tempo da execução (uma fr
 estado sai da atividade dela. Entrada nenhuma chega aqui: a API recusa antes (`erro_sessao_orq`).
 """
 import asyncio
-import hashlib
 import json
 import logging
 from datetime import datetime
@@ -28,15 +27,13 @@ def parse_obj(obj: dict, run_dir: Path | None = None) -> list[ChatEvent]:
         ts = datetime.fromisoformat(obj.get("ts")).timestamp()
     except (TypeError, ValueError):
         ts = None
-    # A linha não tem id: o hash dela é o mesmo no tail e no /history, e o cliente junta por id.
-    key = json.dumps(obj, sort_keys=True).encode("utf-8")
     # Exceção aqui mataria o tail da sessão inteira: a linha segue como notice cru.
     try:
         orq = orq_timeline.entry(obj, orq_timeline.run_files(run_dir) if run_dir else None)
     except Exception:
         _log.warning("orq_timeline.entry falhou", exc_info=True)
         orq = None
-    return [ChatEvent(kind="notice", id=f"orq:{hashlib.sha1(key).hexdigest()[:16]}", text=text, ts=ts, orq=orq)]
+    return [ChatEvent(kind="notice", id=orq_timeline.event_id(obj),text=text, ts=ts, orq=orq)]
 
 
 def line_parser(run_dir: Path | None) -> Callable[[str], list[ChatEvent]]:
