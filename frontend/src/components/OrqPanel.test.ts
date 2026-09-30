@@ -128,7 +128,7 @@ it('retrato da execução real: Tasks, fila recolhida, Automação e Avançado',
   const tiles = [...alvo.querySelectorAll('.auto .tile b')].map((e) => e.textContent);
   expect(tiles).toEqual(['4', '9', '0']);
   expect(text()).toContain(m.orq_auto_woke_detail({ decisions: 3, alarms: 1, messages: 0 }));
-  const adv = alvo.querySelector<HTMLDetailsElement>('details')!;
+  const adv = alvo.querySelector<HTMLDetailsElement>('details.adv')!;
   expect(adv.open).toBe(false);
   adv.open = true; await tick();
   expect([...adv.querySelectorAll('.adv-row b')].map((e) => e.textContent)).toEqual(['0', m.orq_adv_disagree_value({ n: 0, m: 0 }), '—', '4']);
@@ -267,4 +267,37 @@ it('aba escondida não pede a cada 10 s e desmontar solta o store', async () => 
   expect(getPanel).toHaveBeenCalledTimes(2);
   await unmount(comp!); comp = null;
   expect(store.release).toHaveBeenCalledTimes(1);
+});
+
+
+it('mostra o tempo total e de cada task sem somar tarefas paralelas', async () => {
+  const timing = { started_at: '2026-09-30T10:00:00Z', finished_at: '2026-09-30T11:30:00Z', elapsed_seconds: 5400 };
+  getPanel.mockResolvedValue(panel({ timing, tasks: { integrated: 1, total: 2, total_known: true, rows: [
+    { ...row(1, 'integrated'), timing: { ...timing, elapsed_seconds: 1200 } }, row(2, 'queued'),
+  ] } }));
+  await montar();
+  expect(text()).toContain(m.orq_elapsed_hours({ h: 1, m: 30 }));
+  expect(text()).toContain(m.orq_task_elapsed({ time: m.orq_elapsed_minutes({ n: 20 }) }));
+  byText('button', m.orq_tasks_queued({ n: 1 }))!.click();
+  await tick();
+  expect(text()).toContain(m.orq_task_elapsed({ time: '—' }));
+  expect(text()).toContain(m.orq_time_method());
+});
+
+
+it('filtra tasks pendentes e recolhe todas as seções', async () => {
+  getPanel.mockResolvedValue(panel());
+  await montar();
+  byText('button', m.orq_show_pending_tasks())!.click();
+  await tick();
+  expect([...alvo.querySelectorAll('.task-row .n')].map((e) => e.textContent)).toEqual(['T2']);
+  byText('button', m.orq_collapse_all())!.click();
+  await tick();
+  expect(alvo.querySelectorAll('.orq-panel > details[open]')).toHaveLength(0);
+  byText('button', m.orq_expand_all())!.click();
+  await tick();
+  expect(alvo.querySelectorAll('.orq-panel > details[open]')).toHaveLength(7);
+  byText('button', m.orq_show_all_tasks())!.click();
+  await tick();
+  expect([...alvo.querySelectorAll('.task-row .n')].map((e) => e.textContent)).toEqual(['T1']);
 });

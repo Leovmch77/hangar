@@ -401,6 +401,11 @@ def test_execucao_recem_criada_e_vazia(tmp_path):
 
 
 def test_linha_do_tempo_grande_usa_o_cache(real, monkeypatch):
+    class Clock(datetime):
+        @classmethod
+        def now(cls):
+            return datetime.fromisoformat("2026-09-30T10:00:00-03:00")
+    monkeypatch.setattr(ot, "datetime", Clock)
     tl = ot.timeline_path(real)
     tl.write_text(tl.read_text() * 400)              # ~5.000 linhas
     first = settled(real)
@@ -646,3 +651,46 @@ def test_codex_sem_leitura_e_provider_desconhecido_nao_contam_como_zero(monkeypa
     assert ot._rows_for("ninguem", str(tmp_path / "x.jsonl")) is None
     monkeypatch.setattr(costs_sources, "custos_do_rollout", lambda p: [])
     assert ot._rows_for("codex", str(tmp_path / "r.jsonl")) == []     # sem uso de verdade continua lista vazia
+
+
+def test_elapsed_time_includes_reviews_and_freezes_at_integration():
+    evs = [
+        {"tipo": "execucao_inicio", "ts": "2026-09-30T10:00:00+00:00"},
+        {"tipo": "task_inicio", "task": 1, "ts": "2026-09-30T10:05:00+00:00"},
+        {"tipo": "entrega", "task": 1, "ts": "2026-09-30T10:10:00+00:00"},
+        {"tipo": "task_inicio", "task": 2, "ts": "2026-09-30T10:05:00+00:00"},
+        {"tipo": "integrada", "task": 1, "ts": "2026-09-30T10:25:00+00:00"},
+    ]
+    out = {"tasks": {"rows": [{"n": 1}, {"n": 2}, {"n": 3}]}}
+    aux = {"timing": ot._timing_bounds(evs)}
+    now = datetime.fromisoformat("2026-09-30T10:30:00+00:00")
+    first = ot._with_timing(out, aux, now)
+    later = ot._with_timing(out, aux, now + timedelta(minutes=5))
+    assert first["timing"]["elapsed_seconds"] == 1800
+    assert [r["timing"]["elapsed_seconds"] for r in first["tasks"]["rows"]] == [1200, 1500, None]
+    assert [r["timing"]["elapsed_seconds"] for r in later["tasks"]["rows"]] == [1200, 1800, None]
+    assert out == {"tasks": {"rows": [{"n": 1}, {"n": 2}, {"n": 3}]}}
+    evs.append({"tipo": "execucao_fim", "ts": "2026-09-30T10:30:00+00:00"})
+    ended = ot._with_timing(out, {"timing": ot._timing_bounds(evs)}, now + timedelta(hours=3))
+    assert ended["timing"]["elapsed_seconds"] == 1800
+    assert ended["tasks"]["rows"][1]["timing"]["elapsed_seconds"] == 1500
+    evs.append({"tipo": "entrega", "task": 1, "rodada": 2, "ts": "2026-09-30T10:32:00+00:00"})
+    reopened = ot._with_timing(out, {"timing": ot._timing_bounds(evs)}, now + timedelta(minutes=5))
+    assert reopened["timing"]["finished_at"] is None
+    assert reopened["tasks"]["rows"][0]["timing"]["elapsed_seconds"] == 1800
+    assert ot._task_rows(evs, [], {1})[0]["state"] == "in_review"
+    evs.append({"tipo": "integrada", "task": 1, "ts": "2026-09-30T10:40:00+00:00"})
+    closed = ot._with_timing(out, {"timing": ot._timing_bounds(evs)}, now + timedelta(hours=3))
+    assert closed["tasks"]["rows"][0]["timing"]["elapsed_seconds"] == 2100
+
+
+@pytest.mark.parametrize("start,finish", [
+    (None, None), ("invalid", None),
+    ("2026-09-30T11:00:00+00:00", "2026-09-30T10:00:00+00:00"),
+    ("2026-09-30T09:00:00+00:00", "invalid"),
+])
+def test_elapsed_time_does_not_invent_missing_or_invalid_dates(start, finish):
+    timing = {"started_at": start, "finished_at": finish, "tasks": {}}
+    out = ot._with_timing({"tasks": {"rows": []}}, {"timing": timing},
+                          datetime.fromisoformat("2026-09-30T10:00:00+00:00"))
+    assert out["timing"]["elapsed_seconds"] is None

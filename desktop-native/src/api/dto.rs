@@ -197,6 +197,7 @@ pub struct OrqPanel {
     #[serde(default)] pub gid: String,
     #[serde(default)] pub errors: Vec<OrqFileError>,
     #[serde(default)] pub empty: bool,
+    #[serde(default)] pub timing: OrqTiming,
     #[serde(default)] pub tasks: OrqPanelTasks,
     #[serde(default)] pub team: Vec<OrqTeamMember>,
     #[serde(default)] pub decisions: Vec<OrqDecision>,
@@ -227,6 +228,14 @@ pub struct OrqPanelTask {
     /// `queued` | `executing` | `in_review` | `rejected` | `approved` | `integrated` | `integration_red`.
     #[serde(default)] pub state: String,
     pub round: Option<u32>,
+    #[serde(default)] pub timing: OrqTiming,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct OrqTiming {
+    pub started_at: Option<String>,
+    pub finished_at: Option<String>,
+    pub elapsed_seconds: Option<u64>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]

@@ -5,14 +5,13 @@ use crate::status::StatusFields;
 use crate::appearance::SideTab;
 
 const MIN_WIDTH: f32 = 240.;
-const MAX_WIDTH: f32 = 480.;
 // Navegador, como no web: abaixo de 400 uma página não serve, e nasce com 42% da janela.
 const BROWSER_MIN: f32 = 400.;
 const BROWSER_SHARE: f32 = 0.42;
 // Caixa solta com o painel aberto: 10 de margem em cada lado da janela e os dois vãos de 10 entre as três caixas.
 const FLOATING_GAPS: f32 = 40.;
 // Largura que a conversa mantém; abaixo disso o painel sai de cena em vez de espremer o texto.
-const CHAT_MIN: f32 = 540.;
+const CHAT_MIN: f32 = 400.;
 const COST_EVERY: u64 = 30;
 const DIFF_MAX: usize = 20_000;
 
@@ -113,7 +112,7 @@ pub(super) struct Side {
     /// O corpo mostra o menu de ferramentas: aberto pelo "+" das abas, fecha ao escolher uma linha, no "+" ou com Esc.
     pub(super) menu: bool,
     width: f32,
-    /// A aba Navegador tem largura própria, como no web: nasce larga e cresce além do teto das outras abas.
+    /// A aba Navegador mantém uma largura própria e nasce com uma fração da janela.
     browser_width: Option<f32>,
     /// (x do início, largura do início, espaço que sobra para o painel).
     drag: Option<(f32, f32, f32)>,
@@ -197,7 +196,7 @@ impl Side {
         (room >= MIN_WIDTH).then(|| if browser {
             self.browser_width.unwrap_or((viewport * BROWSER_SHARE).round()).max(BROWSER_MIN).min(room)
         } else {
-            self.width.clamp(MIN_WIDTH, MAX_WIDTH).min(room)
+            self.width.max(MIN_WIDTH).min(room)
         })
     }
 
@@ -220,7 +219,7 @@ fn merged_tiles(globals: &[Shortcut], project: &[shortcuts::Item], project_key: 
 
 /// Tokens como o painel web: milhar arredondado em "k", milhão com uma casa, menos de mil cru.
 pub(super) fn tokens(n: f64) -> String {
-    if n >= 1e6 { format!("{}M", trim_zero(format!("{:.1}", n / 1e6))) }
+    if n >= 1e6 { format!("{}M", trim_zero(format!("{:.1}", (n / 1e5).round() / 10.))) }
     else if n >= 1e3 { format!("{}k", (n / 1e3).round()) }
     else { format!("{}", n.round()) }
 }
@@ -319,7 +318,7 @@ impl Hangar {
         let wanted = start_width + start_x - x;
         // Preso ao espaço de agora: arrastar além dele não acumula largura que depois teria de ser desfeita.
         if self.side_browser() { self.side.browser_width = Some(wanted.clamp(BROWSER_MIN.min(room), room.max(MIN_WIDTH))); }
-        else { self.side.width = wanted.clamp(MIN_WIDTH, MAX_WIDTH); }
+        else { self.side.width = wanted.clamp(MIN_WIDTH, room.max(MIN_WIDTH)); }
         cx.notify();
     }
 
@@ -969,7 +968,7 @@ impl Hangar {
             if let Some(actions) = self.render_shortcuts(readable, width, cx) { content = content.child(div().px(px(SIDE_PAD)).py(px(14.)).child(actions)); }
         }
         let queued = if readable { self.queued_count() } else { 0 };
-        let orq_body = if orq && tab == Some(SideTab::Context) { self.render_orq_panel(width, readable, cx) } else { div().into_any_element() };
+        let orq_body = if orq && tab == Some(SideTab::Context) { self.render_orq_panel(cx) } else { div().into_any_element() };
         let handle = div().id("side-resize").absolute().left_0().top_0().bottom_0().w(px(6.)).cursor_col_resize()
             .hover(|el| el.bg(theme::accent_dim()))
             .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, window, cx| {
@@ -1023,7 +1022,7 @@ fn shortcut_grid(inner: f32) -> (usize, f32) {
 #[cfg(test)]
 mod tests {
     // Sem glob: o `test` da gpui colide com o atributo padrão.
-    use super::{SHORTCUT_GAP, Shortcut, Side, duration, merged_tiles, parse_shortcuts, shortcut_grid, tokens};
+    use super::{CHAT_MIN, FLOATING_GAPS, MIN_WIDTH, SHORTCUT_GAP, Shortcut, Side, duration, merged_tiles, parse_shortcuts, shortcut_grid, tokens};
     use crate::appearance;
 
     #[test]
@@ -1072,26 +1071,20 @@ mod tests {
 
     #[test]
     fn panel_never_squeezes_the_chat() {
-        let side = Side::default();
+        let mut side = Side::default();
         let sidebar = appearance::Navigation::Sidebar.sidebar_width();
         assert_eq!(side.fitted(1180., false, sidebar, false), Some(300.));
-        assert_eq!(side.fitted(1000., false, sidebar, false), None);
-        assert_eq!(side.fitted(1080., false, sidebar, false), Some(256.));
-        // Na caixa solta as margens também saem da conversa.
-        assert_eq!(side.fitted(1080., true, sidebar, false), None);
-        assert_eq!(side.fitted(1120., true, sidebar, false), Some(256.));
-        // Com as abas no topo a largura da barra lateral volta para a conversa e o painel.
-        assert_eq!(side.fitted(1000., false, appearance::Navigation::Tabs.sidebar_width(), false), Some(300.));
-        let conversations = appearance::Navigation::Conversations.sidebar_width();
-        assert_eq!(side.fitted(1052., false, conversations, false), Some(256.));
-        assert_eq!(side.fitted(1036., false, conversations, false), Some(240.));
-        assert_eq!(side.fitted(1035., false, conversations, false), None);
-        assert_eq!(side.fitted(1092., true, conversations, false), Some(256.));
-        // Navegador: nasce com 42% da janela e passa do teto das outras abas, sem tirar da conversa o mínimo dela.
+        assert_eq!(side.fitted(sidebar + CHAT_MIN + MIN_WIDTH - 1., false, sidebar, false), None);
+        assert_eq!(side.fitted(sidebar + CHAT_MIN + MIN_WIDTH, false, sidebar, false), Some(MIN_WIDTH));
+        // O painel cresce além do limite antigo e encolhe junto com a janela.
+        side.width = 1000.;
+        assert_eq!(side.fitted(1920., false, sidebar, false), Some(1000.));
+        assert_eq!(side.fitted(1180., false, sidebar, false), Some(1180. - sidebar - CHAT_MIN));
+        assert_eq!(side.fitted(1180., true, sidebar, false), Some(1180. - sidebar - CHAT_MIN - FLOATING_GAPS));
         let tabs = appearance::Navigation::Tabs.sidebar_width();
         assert_eq!(side.fitted(1920., false, tabs, true), Some(806.));
         assert_eq!(side.fitted(1000., false, tabs, true), Some(420.));
-        assert_eq!(side.fitted(1100., false, sidebar, true), Some(276.));
+        assert_eq!(side.fitted(1100., false, sidebar, true), Some(1100. - sidebar - CHAT_MIN));
     }
 
     #[test]

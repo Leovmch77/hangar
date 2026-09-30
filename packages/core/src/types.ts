@@ -822,11 +822,18 @@ export interface OrqEntry {
 export type OrqTaskState =
   | 'queued' | 'executing' | 'in_review' | 'rejected' | 'approved' | 'integrated' | 'integration_red';
 
+export interface OrqTiming {
+  started_at: string | null;
+  finished_at: string | null;
+  elapsed_seconds: number | null;
+}
+
 export interface OrqPanelTask {
   n: number;
   title: string;
   state: OrqTaskState;
   round: number | null;
+  timing?: OrqTiming;
 }
 
 export interface OrqTeamMember {
@@ -901,6 +908,7 @@ export interface OrqPanel {
   gid: string;
   errors: { file: string; error: string }[];
   empty: boolean;
+  timing?: OrqTiming;
   tasks: { integrated: number; total: number; total_known: boolean; rows: OrqPanelTask[] };
   team: OrqTeamMember[];
   decisions: OrqDecision[];

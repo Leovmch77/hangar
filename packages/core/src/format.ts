@@ -28,6 +28,14 @@ import type { State, ChatEvent, SessionInfo } from './types';
 import { intlLocale } from './i18n';
 import * as m from './paraglide/messages';
 
+export function formatElapsed(seconds: number | null | undefined): string {
+  if (seconds == null || !Number.isFinite(seconds) || seconds < 0) return '—';
+  const whole = Math.floor(seconds);
+  if (whole < 60) return m.orq_elapsed_seconds({ n: whole });
+  if (whole < 3600) return m.orq_elapsed_minutes({ n: Math.floor(whole / 60) });
+  return m.orq_elapsed_hours({ h: Math.floor(whole / 3600), m: Math.floor((whole % 3600) / 60) });
+}
+
 // Nome humano do provider da sessão. Existe porque cada tela escrevia o próprio ternário
 // (`provider === 'codex' ? 'Codex' : 'Claude'`) e, quando o Pi entrou como terceiro provider, toda
 // sessão Pi aparecia rotulada como "Claude". Um lugar só -> um provider novo não volta a mentir.

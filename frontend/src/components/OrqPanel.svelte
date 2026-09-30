@@ -2,7 +2,7 @@
   import { onMount, untrack } from 'svelte';
   import type { Snippet } from 'svelte';
   import * as m from '../paraglide/messages';
-  import { getOrqPanelForServer, pct, providerName, taskRows, teamView } from '@hangar/core';
+  import { formatElapsed, getOrqPanelForServer, pct, providerName, taskRows, teamView } from '@hangar/core';
   import type { OrqPanel, OrqPanelTask, OrqTeamMember, OrqTeamRow, OrqTeamStatus, Server, SessionInfo } from '@hangar/core';
   import Spinner from './Spinner.svelte';
   import { sessionsStore } from '../lib/sessionsStore.svelte';
@@ -24,6 +24,9 @@
   let error = $state('');
   let showQueued = $state(false);
   let showEnded = $state(false);
+  let onlyPending = $state(false);
+  let expanded = $state({ time: true, tasks: true, team: true, decisions: true, automation: true, consumption: true, integration: true });
+  const allCollapsed = $derived(Object.values(expanded).every((open) => !open));
 
   // Um pedido por vez por sessão e servidor; resposta de sessão ou servidor já trocados é descartada.
   let inflight: string | null = null;
@@ -65,6 +68,7 @@
 
   const live = $derived(new Map(sessionsStore.sessionsForServer(server.id).map((s) => [s.name, s.state as string])));
   const team = $derived(panel ? teamView(panel.team, live) : { shown: [], ended: [] });
+  const pending = $derived(panel?.tasks.rows.filter((t) => t.state !== 'integrated') ?? []);
   const rows = $derived(panel ? taskRows(panel.tasks.rows) : { visible: [], queued: [], queuedCount: 0 });
   const barWidth = $derived.by(() => {
     const t = panel?.tasks;
@@ -146,20 +150,37 @@
     {#if panel.empty}
       <p class="muted">{m.orq_panel_empty()}</p>
     {:else}
-      <section>
-        <h3>
+      <button type="button" class="link" onclick={() => {
+        const open = allCollapsed;
+        expanded = { time: open, tasks: open, team: open, decisions: open, automation: open, consumption: open, integration: open };
+      }}>{allCollapsed ? m.orq_expand_all() : m.orq_collapse_all()}</button>
+      <details class="orq-section" bind:open={expanded.time}>
+        <summary>{m.orq_time_title()}</summary>
+        <strong class="elapsed">{formatElapsed(panel.timing?.elapsed_seconds)}</strong>
+        <p class="note">{m.orq_time_started({ time: panel.timing?.started_at ? dayTime(panel.timing.started_at) : '—' })}</p>
+        {#if panel.timing?.finished_at}
+          <p class="note">{m.orq_time_finished({ time: dayTime(panel.timing.finished_at) })}</p>
+        {/if}
+        <p class="note">{m.orq_time_method()}</p>
+      </details>
+      <details class="orq-section" bind:open={expanded.tasks}>
+        <summary>
           <span>{m.orq_tasks_title()}</span>
           <span>{panel.tasks.total_known
             ? m.orq_tasks_count({ n: panel.tasks.integrated, total: panel.tasks.total })
             : m.orq_tasks_count_unknown({ n: panel.tasks.integrated })}</span>
-        </h3>
+        </summary>
         {#if panel.tasks.total_known}
           <div class="bar"><i style:width={`${barWidth}%`}></i></div>
         {/if}
-        {#each rows.visible as t (t.n)}
+        <button type="button" class="link" aria-pressed={onlyPending} onclick={() => (onlyPending = !onlyPending)}>
+          {onlyPending ? m.orq_show_all_tasks() : m.orq_show_pending_tasks()}
+        </button>
+        {#if onlyPending && pending.length === 0}<p class="note">{m.orq_no_pending_tasks()}</p>{/if}
+        {#each onlyPending ? pending : rows.visible as t (t.n)}
           {@render taskRow(t)}
         {/each}
-        {#if rows.queuedCount > 0}
+        {#if !onlyPending && rows.queuedCount > 0}
           <button type="button" class="link" aria-expanded={showQueued} onclick={() => (showQueued = !showQueued)}>
             {m.orq_tasks_queued({ n: rows.queuedCount })}
           </button>
@@ -169,10 +190,10 @@
             {/each}
           {/if}
         {/if}
-      </section>
+      </details>
 
-      <section>
-        <h3><span>{m.orq_team_title()}</span></h3>
+      <details class="orq-section" bind:open={expanded.team}>
+        <summary><span>{m.orq_team_title()}</span></summary>
         <div class="team">
           {#each team.shown as t (t.name)}{@render member(t)}{/each}
           {#if showEnded}
@@ -184,10 +205,10 @@
             {showEnded ? m.orq_team_hide_ended() : m.orq_team_show_ended({ n: team.ended.length })}
           </button>
         {/if}
-      </section>
+      </details>
 
-      <section>
-        <h3><span>{m.orq_decisions_title()}</span><span>{panel.decisions.length}</span></h3>
+      <details class="orq-section" bind:open={expanded.decisions}>
+        <summary><span>{m.orq_decisions_title()}</span><span>{panel.decisions.length}</span></summary>
         {#each panel.decisions as d (d.event_id)}
           <div class="decision">
             <div class="head">
@@ -206,14 +227,14 @@
         {:else}
           <p class="muted">{m.orq_decisions_none()}</p>
         {/each}
-      </section>
+      </details>
 
       {@const a = panel.automation}
-      <section class="auto">
-        <h3>
+      <details class="orq-section auto" bind:open={expanded.automation}>
+        <summary>
           <span>{m.orq_auto_title()}</span>
           <span>{m.orq_auto_mode({ jev: mode(a.mode.jev), regex: mode(a.mode.regex) })}</span>
-        </h3>
+        </summary>
         <div class="tiles">
           <div class="tile"><b>{a.woke.total}</b><span>{m.orq_auto_woke()}</span></div>
           <div class="tile"><b>{a.alone.total}</b><span>{m.orq_auto_alone()}</span></div>
@@ -232,14 +253,14 @@
           <div class="adv-row"><span>{m.orq_adv_by_rule()}</span><b>{a.advanced.by_rule}</b></div>
           <p class="note">{m.orq_adv_by_rule_hint()}</p>
         </details>
-      </section>
+      </details>
 
       {@const c = panel.consumption}
-      <section class="use">
-        <h3>
+      <details class="orq-section use" bind:open={expanded.consumption}>
+        <summary>
           <span>{m.orq_use_title()}</span>
           {#if c}<span>{m.orq_use_sessions({ measured: c.sessions.measured, team: c.sessions.team })}</span>{/if}
-        </h3>
+        </summary>
         {#if !c}
           <!-- Consumo que falhou já tem a própria linha de erro no topo: não fica em "calculando". -->
           {#if !panel.errors.some((e) => e.file === 'consumption')}
@@ -268,11 +289,11 @@
           {#if c.sessions.missing.length}<p class="note">{m.orq_use_missing({ names: c.sessions.missing.join(', ') })}</p>{/if}
           {#if c.missing_prices.length}<p class="note">{m.orq_use_no_price({ models: c.missing_prices.join(', ') })}</p>{/if}
         {/if}
-      </section>
+      </details>
 
       {@const it = panel.integration}
-      <section class="int">
-        <h3><span>{m.orq_int_title()}</span></h3>
+      <details class="int" bind:open={expanded.integration}>
+        <summary><span>{m.orq_int_title()}</span></summary>
         <p><span class="muted">{m.orq_int_branch()}</span> {#if it.branch}<code>{it.branch}</code>{:else}—{/if}</p>
         <p>
           <span class="muted">{m.orq_int_last()}</span>
@@ -293,7 +314,7 @@
               : m.orq_int_checks_green({ ok: ch.ok, total: ch.total })}
           </p>
         {/if}
-      </section>
+      </details>
     {/if}
   {/if}
 
@@ -306,23 +327,30 @@
 {#snippet taskRow(t: OrqPanelTask)}
   <div class="task-row">
     <span class="n">T{t.n}</span>
-    <span class="title" title={t.title}>{t.title}</span>
+    <span class="task-detail">
+      <span class="title" title={t.title}>{t.title}</span>
+      <span class="note">{m.orq_task_elapsed({ time: formatElapsed(t.timing?.elapsed_seconds) })}</span>
+    </span>
     <span class="st {t.state}">{taskState(t)}</span>
   </div>
 {/snippet}
 
 <style>
   .orq-panel { display: flex; flex-direction: column; gap: var(--space-4); min-width: 0; }
-  section { display: flex; flex-direction: column; gap: var(--space-2); min-width: 0; background: transparent; }
-  h3 {
-    display: flex; justify-content: space-between; gap: var(--space-2); margin: 0;
+  .orq-section { min-width: 0; background: transparent; }
+  .orq-section > :not(summary) { margin-top: var(--space-2); }
+  .orq-section > summary {
+    cursor: pointer; min-height: 32px;
     color: var(--text-muted); font-size: var(--text-xs); font-weight: 600;
     text-transform: uppercase; letter-spacing: 0.06em;
   }
+  .orq-section > summary > span + span { float: right; margin-left: var(--space-2); }
   p { margin: 0; font-size: var(--text-sm); }
   .warn { color: var(--warning); }
   .muted, .note { color: var(--text-muted); }
   .note { font-size: var(--text-xs); }
+  .elapsed { font-size: var(--text-lg); font-variant-numeric: tabular-nums; }
+  .task-detail { display: flex; flex-direction: column; min-width: 0; gap: 2px; }
   .link {
     align-self: flex-start; display: inline-flex; align-items: center;
     min-height: 24px; padding: 4px 0; background: transparent;
@@ -338,7 +366,7 @@
     padding: 4px 0; border-bottom: 1px solid var(--border-subtle); font-size: var(--text-sm);
   }
   .task-row .n { color: var(--text-muted); font-family: var(--font-mono); font-size: var(--text-xs); }
-  .task-row .title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .task-row .title { white-space: normal; overflow-wrap: anywhere; }
   .st { padding: 1px 7px; border-radius: 6px; background: var(--surface-inset); color: var(--text-muted); font-size: var(--text-xs); font-weight: 600; white-space: nowrap; }
   .st.integrated, .st.approved { background: var(--success-dim, var(--surface-inset)); color: var(--success); }
   .st.in_review, .st.executing { background: var(--accent-dim); color: var(--accent); }

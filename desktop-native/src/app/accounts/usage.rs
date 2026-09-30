@@ -1,5 +1,5 @@
 //! Cartões dos anéis do compositor. O de contexto mostra a ocupação e o uso da sessão. O de uso (o `account_usage` do
-//! Zeron) mostra as contas do provider da sessão, a que ela usa
+//! Zeron) mostra as contas Claude e Codex, a que a sessão usa
 //! primeiro, com plano e as janelas de sessão e semana. Lê a mesma lista da página Contas e só quando abre: o servidor
 //! devolve a cota guardada, sem releitura periódica daqui.
 use super::*;
@@ -94,19 +94,18 @@ impl Hangar {
         Some((kind.to_owned(), title, window))
     }
 
-    pub(in crate::app) fn render_usage_card(&self) -> AnyElement {
+    pub(in crate::app) fn render_usage_card(&self, window: &Window) -> AnyElement {
         let session = self.selected.as_ref();
         let kind = session.map(|s| s.provider.as_str()).filter(|p| !p.is_empty()).unwrap_or("claude");
-        let name = match kind { "claude" => "Claude Code", "codex" => "Codex", other => other };
         // A conta da sessão; sem sessão, ou servidor sem esse campo, cai na conta padrão do provider.
         let conta = self.focused_conta();
-        let in_use = |c: &Credential| conta.map_or(c.active, |id| id == c.id);
+        let in_use = |c: &Credential| c.kind == kind && conta.map_or(c.active, |id| id == c.id);
         let note = |text: String, color: Hsla| div().px(px(8.)).py(px(4.)).text_sm().text_color(color).whitespace_normal().child(text).into_any_element();
         let body = match (&self.accounts.list.value, self.accounts.list.ok()) {
             (_, Some(list)) => {
-                let mut mine: Vec<&Credential> = list.iter().filter(|c| c.kind == kind).collect();
+                let mut mine: Vec<&Credential> = list.iter().filter(|c| matches!(c.kind.as_str(), "claude" | "codex")).collect();
                 mine.sort_by_key(|c| !in_use(c));
-                if mine.is_empty() { note(tr("usage_card_empty").replace("{provider}", name), theme::muted()) } else {
+                if mine.is_empty() { note(tr("usage_card_empty"), theme::muted()) } else {
                     let (engines, now) = (HashMap::new(), now());
                     div().flex().flex_col().gap(px(2.))
                         .children(mine.into_iter().map(|c| account_row(c, in_use(c), build_row(c, &engines, false, now).quota)))
@@ -117,8 +116,8 @@ impl Hangar {
             _ => popup::skeleton("usage-card-loading", 1).into_any_element(),
         };
         div().p(px(popup::INSET)).rounded_md().bg(theme::popup_content_fill()).flex().flex_col().gap(px(2.))
-            .child(popup::title(tr("usage_card_title").replace("{provider}", name), None))
-            .child(body)
+            .child(popup::title(tr("usage_card_title"), None))
+            .child(div().id("usage-card-scroll").max_h((window.viewport_size().height - px(140.)).max(px(120.))).overflow_y_scroll().child(body))
             .into_any_element()
     }
 }
@@ -133,8 +132,10 @@ fn account_row(c: &Credential, in_use: bool, quota: QuotaView) -> Div {
         chars.next().map(|first| first.to_uppercase().collect::<String>() + chars.as_str())
     });
     let meta = div().flex().items_center().gap(px(6.)).text_size(px(12.)).text_color(theme::muted())
+        .child(side::agent_label(&c.kind))
+        .when(plan.is_some(), |el| el.child(div().text_color(theme::faint()).child("·")))
         .when_some(plan.clone(), |el, plan| el.child(plan))
-        .when(plan.is_some() && in_use, |el| el.child(div().text_color(theme::faint()).child("·")))
+        .when(in_use, |el| el.child(div().text_color(theme::faint()).child("·")))
         .when(in_use, |el| el.child(div().text_color(theme::accent()).child(tr("usage_card_in_use"))));
     let meters = match quota {
         QuotaView::Bars { bars, stale } => div().flex().flex_col().gap(px(4.)).when(stale.is_some(), |el| el.opacity(0.6))

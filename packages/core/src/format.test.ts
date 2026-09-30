@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import {
-  abbrevNum, attentionFeed, countAwaiting, effectiveGroupBy, fmtWhen, groupSelectedByServer, initials, nextAwaiting,
+  abbrevNum, attentionFeed, countAwaiting, effectiveGroupBy, fmtWhen, formatElapsed, groupSelectedByServer, initials, nextAwaiting,
   pedeMarcacao,
   projectKey, projectLabel, encodeCompareIds, parseCompareIds, latestAssistantEvent, resetsIn, relativeTime,
   clusterByPair, railLabel, sortSessions, bubblesFromTail, ctxWindow, fileKind, fmtBytes, providerName, providerTag, isOrq,
@@ -1088,5 +1088,14 @@ describe('nomeFerramenta', () => {
     expect(nomeFerramenta('mcp__hangar-computer-control__objetivo')).toBe('computer-control · objetivo');
     expect(nomeFerramenta('mcp__jev__ask')).toBe('jev · ask');
     expect(nomeFerramenta('Bash')).toBe('Bash');
+  });
+});
+
+
+describe('formatElapsed', () => {
+  it('distingue tempo desconhecido, zero, minutos e horas sem somar tarefas', () => {
+    overwriteGetLocale(() => 'pt');
+    expect([undefined, null, -1, NaN].map(formatElapsed)).toEqual(['—', '—', '—', '—']);
+    expect([0, 59, 60, 3599, 5400].map(formatElapsed)).toEqual(['0 s', '59 s', '1 min', '59 min', '1 h 30 min']);
   });
 });

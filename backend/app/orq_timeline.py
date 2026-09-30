@@ -15,7 +15,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 
-from app import costs, costs_claude_transcript, costs_sources, orq_conductor, orq_start, pricing
+from app import costs, costs_claude_transcript, costs_sources, orq, orq_conductor, orq_start, pricing
 from app.adapters.orq.runs import timeline_path  # noqa: F401  (reexportado: quem lê a linha do tempo pede daqui)
 from app.config import list_config_dirs
 
@@ -409,7 +409,7 @@ def _task_rows(evs: list[dict], plan: list[dict], integrated: set[int]) -> list[
             deciding[n] = ("integrated", None)
     rows = []
     for n in sorted(titles):
-        state, rnd = ("integrated", None) if n in integrated else deciding.get(n, ("queued", None))
+        state, rnd = deciding.get(n, ("integrated" if n in integrated else "queued", None))
         rows.append({"n": n, "title": titles[n], "state": state, "round": rnd})
     return rows
 
@@ -505,6 +505,7 @@ def panel(d: Path, live=None) -> dict:
             while len(_PANELS) >= _RUNS_MAX and key not in _PANELS:
                 _PANELS.pop(next(iter(_PANELS)), None)
             _PANELS[key] = (sig, out, aux)
+    out = _with_timing(out, aux, datetime.now().astimezone())
     names = [m["name"] for m in out["team"]]
     if not names and out["errors"]:
         # Time que falhou: sem nomes o consumo sairia zerado, e não se guarda; o erro próprio evita "calculando" eterno.
@@ -514,6 +515,49 @@ def panel(d: Path, live=None) -> dict:
     if error:
         return {**out, "errors": [*out["errors"], {"file": "consumption", "error": error}], "consumption": None}
     return {**out, "consumption": consumption}
+
+
+def _timing_bounds(evs: list[dict]) -> dict:
+    begin = next((e.get("ts") for e in evs if e.get("tipo") == "execucao_inicio"), None)
+    end = orq._current_end([e for e in evs if "tipo" in e])
+    tasks: dict[int, dict] = {}
+    for ev in evs:
+        n, kind = ev.get("task"), ev.get("tipo")
+        if not isinstance(n, int) or isinstance(n, bool):
+            continue
+        task = tasks.setdefault(n, {"started_at": None, "finished_at": None})
+        if kind == "task_inicio" and task["started_at"] is None:
+            task["started_at"] = ev.get("ts")
+        if kind == "integrada":
+            task["finished_at"] = ev.get("ts")
+        elif kind in ("task_inicio", "entrega", "veredito", "integracao_vermelha", "conflito") or (
+            kind == "advance_falhou" and ev.get("passo") == "integrate"
+        ):
+            task["finished_at"] = None
+    return {"started_at": begin, "finished_at": end.get("ts") if end else None, "tasks": tasks}
+
+
+def _with_timing(out: dict, aux: dict, now: datetime) -> dict:
+    """O relógio avança a cada leitura sem invalidar o cache dos arquivos."""
+    bounds = aux["timing"]
+
+    def timing(start, finish):
+        first, last = orq_conductor._when(start), orq_conductor._when(finish)
+        seconds = None
+        if first is not None and (last is not None or finish is None):
+            delta = ((last or now) - first).total_seconds()
+            if delta >= 0:
+                seconds = int(delta)
+        return {"started_at": first.isoformat() if first else None,
+                "finished_at": last.isoformat() if last else None, "elapsed_seconds": seconds}
+
+    rows = []
+    for row in out["tasks"]["rows"]:
+        task = bounds["tasks"].get(row["n"], {})
+        rows.append({**row, "timing": timing(task.get("started_at"),
+                                             task.get("finished_at") or bounds["finished_at"])})
+    return {**out, "timing": timing(bounds["started_at"], bounds["finished_at"]),
+            "tasks": {**out["tasks"], "rows": rows}}
 
 
 def _build_panel(d: Path) -> tuple[dict, dict]:
@@ -578,11 +622,11 @@ def _build_panel(d: Path) -> tuple[dict, dict]:
         plan = guard(lambda: m.plan_tasks(m.plan_text(cfg["plan"])), None, "plan", exact=True)
     rows = guard(lambda: _task_rows(evs, plan or [], integrated), [], "tasks", exact=True)
     begin = next((e for e in evs if e.get("tipo") == "execucao_inicio"), {})
-    aux = {"since": begin.get("ts"), "models": _opened_models(entries)}
+    aux = {"since": begin.get("ts"), "models": _opened_models(entries), "timing": _timing_bounds(evs)}
     return {
         "run": d.resolve().name, "gid": begin.get("gid") or "", "errors": errors,
         "empty": not lines and not any(e.get("tipo") == "task_inicio" for e in evs),
-        "tasks": {"integrated": len(integrated),
+        "tasks": {"integrated": sum(r["state"] == "integrated" for r in rows),
                   "total": len(plan) if plan is not None else max((r["n"] for r in rows), default=0),
                   "total_known": plan is not None, "rows": rows},
         "team": guard(lambda: _team(m, cfg, st, evs), [], "team", exact=True) if st else [],
