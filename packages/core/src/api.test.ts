@@ -14,6 +14,8 @@ import { getConfig, getConfigForServer, patchConfig, patchConfigForServer, creat
 import { mensagemDeErro, formataErro } from './errosApi';
 import { passarBastao, getSyncSetupForServer, setupSyncForServer, disableSyncForServer } from './api';
 import { probeServerResponse } from './api';
+import { answerQuestions, interrupt, openEventStreamForServer, sendInputForServer, skipQuestion } from './api';
+import type { Server } from './servers';
 const server = { id: 'a', label: 'Servidor A', baseUrl: 'https://a.test', token: 'token-a' };
 
 it('antes do prazo só a verificação explícita consulta o offline; resposta retira a marca', async () => {
@@ -301,6 +303,168 @@ describe('getHistoryDesde', () => {
       new Response(JSON.stringify({ detail: 'sumiu' }), { status: 404 }),
     );
     await expect(getHistoryDesde('sessao', 400, '"v1"')).rejects.toThrow('sumiu');
+  });
+});
+
+describe('contratos de conversa com servidor explícito', () => {
+  const target = { id: 'b', label: 'Servidor B', baseUrl: 'https://b.test', token: 'token-b' };
+  const mutations = [
+    { path: '/interrupt', body: {}, run: (s?: Server) => interrupt('mesma/sessão', false, s) },
+    { path: '/interrupt?clear=true', body: {}, run: (s?: Server) => interrupt('mesma/sessão', true, s) },
+    { path: '/answer', body: { answers: [], request_id: 0 }, run: (s?: Server) => answerQuestions('mesma/sessão', [], 0, s) },
+    { path: '/answer', body: { answers: [] }, run: (s?: Server) => answerQuestions('mesma/sessão', [], undefined, s) },
+    { path: '/question/skip', body: { request_id: 'req-b' }, run: (s?: Server) => skipQuestion('mesma/sessão', 'req-b', s) },
+  ];
+
+  it.each(mutations)('$path mantém payload e chamada antiga, mas dirige o destino explícito a B', async ({ path, body, run }) => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response('{"ok":true,"fallback":true}'));
+    await run(target);
+    await run();
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      `https://b.test/api/sessions/mesma%2Fsess%C3%A3o${path}`,
+      `https://a.test/api/sessions/mesma%2Fsess%C3%A3o${path}`,
+    ]);
+    expect(fetchMock.mock.calls[0][1]?.headers).toMatchObject({ Authorization: 'Bearer token-b' });
+    expect(fetchMock.mock.calls[1][1]?.headers).toMatchObject({ Authorization: 'Bearer token-a' });
+    if (path === '/answer' || path === '/question/skip') {
+      expect(fetchMock.mock.calls[0][1]?.signal).toBeUndefined();
+    }
+    for (const [, init] of fetchMock.mock.calls) {
+      expect(init?.method).toBe('POST');
+      expect(JSON.parse(init?.body as string)).toEqual(body);
+    }
+  });
+
+  it('resposta textual preserva fallback, respostas e request_id string', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{"ok":true,"fallback":true}'));
+    const answers = [{ kind: 'text' as const, question_id: 'q-b', value: 'outro caminho', type_index: 1, labels: [] }];
+    expect(await answerQuestions('sessao', answers, 'req-b', target)).toEqual({ ok: true, fallback: true });
+    expect(JSON.parse(fetchMock.mock.calls[0][1]?.body as string)).toEqual({ answers, request_id: 'req-b' });
+  });
+
+  it.each(mutations)('$path recusado por B não remove a credencial ativa nem repete POST', async ({ run }) => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{"detail":"recusado"}', { status: 401 }));
+    await expect(run(target)).rejects.toMatchObject({ status: 401, message: '401: recusado' });
+    expect(onUnauthorizedSpy).not.toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(mutations)('$path com transporte incerto conserva o erro e não repete POST', async ({ run }) => {
+    const error = new TypeError('rede interrompida');
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockRejectedValue(error);
+    await expect(run(target)).rejects.toBe(error);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('chamada antiga de interrupção conserva clear=false e tratamento de 401', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 401 }));
+    await expect(interrupt('sessao')).rejects.toMatchObject({ status: 401 });
+    expect(fetchMock.mock.calls[0][0]).toBe('https://a.test/api/sessions/sessao/interrupt');
+    expect(onUnauthorizedSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('histórico explícito conserva limit=0, prazo customizado e servidor legado', async () => {
+    const timeout = vi.spyOn(AbortSignal, 'timeout');
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response('[]'));
+    expect(await getHistory('mesma/sessão', 0, undefined, 12000, target)).toEqual([]);
+    await getHistory('mesma/sessão');
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      'https://b.test/api/sessions/mesma%2Fsess%C3%A3o/history?limit=0',
+      'https://a.test/api/sessions/mesma%2Fsess%C3%A3o/history',
+    ]);
+    expect(fetchMock.mock.calls[0][1]?.headers).toMatchObject({ Authorization: 'Bearer token-b' });
+    expect(timeout).toHaveBeenCalledWith(12000);
+    expect(timeout).toHaveBeenCalledWith(45000);
+  });
+
+  it('histórico condicional em B mantém ETag/304 sem ler corpo', async () => {
+    const unchanged = new Response(null, { status: 304 });
+    const json = vi.spyOn(unchanged, 'json');
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response('[{"kind":"user_msg","id":"b-1"}]', { headers: { ETag: '"b-v1"' } }))
+      .mockResolvedValueOnce(unchanged);
+    expect(await getHistoryDesde('sessao', 400, null, undefined, undefined, target))
+      .toEqual({ eventos: [{ kind: 'user_msg', id: 'b-1' }], etag: '"b-v1"' });
+    expect(await getHistoryDesde('sessao', 400, '"b-v1"', undefined, undefined, target)).toBe('igual');
+    expect(json).not.toHaveBeenCalled();
+    expect(fetchMock.mock.calls[0][1]?.headers).not.toHaveProperty('If-None-Match');
+    expect(fetchMock.mock.calls[1][1]?.headers).toMatchObject({ Authorization: 'Bearer token-b', 'If-None-Match': '"b-v1"' });
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      'https://b.test/api/sessions/sessao/history?limit=400',
+      'https://b.test/api/sessions/sessao/history?limit=400',
+    ]);
+  });
+
+  it('histórico explícito sem ETag devolve validador nulo', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('[]'));
+    expect(await getHistoryDesde('sessao', 400, null, undefined, undefined, target)).toEqual({ eventos: [], etag: null });
+  });
+
+  const reads = [
+    (signal?: AbortSignal) => getHistory('sessao', 400, signal, undefined, target),
+    (signal?: AbortSignal) => getHistoryDesde('sessao', 400, '"b-v1"', signal, undefined, target),
+  ];
+
+  it.each(reads)('cancelamento da leitura explícita aborta o fetch sem marcar B offline', async (read) => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation((_url, init) => new Promise((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true });
+    }));
+    const controller = new AbortController();
+    const pending = read(controller.signal);
+    controller.abort();
+    const error = await pending.catch((e: unknown) => e);
+    expect(isAbortError(error)).toBe(true);
+    expect(fetchMock.mock.calls[0][1]?.signal?.aborted).toBe(true);
+    expect(estaDesligado(target.id)).toBe(false);
+  });
+
+  it.each(reads)('401 da leitura explícita fica em B sem apagar o servidor ativo', async (read) => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{"detail":"token recusado"}', { status: 401 }));
+    await expect(read()).rejects.toMatchObject({ status: 401, message: '401: token recusado' });
+    expect(onUnauthorizedSpy).not.toHaveBeenCalled();
+  });
+
+  it.each(reads)('timeout da leitura explícita conserva a identidade do erro', async (read) => {
+    const error = new DOMException('prazo excedido', 'TimeoutError');
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(error);
+    await expect(read()).rejects.toBe(error);
+  });
+
+  it.each([401, 404, 409, 500])('envio em B preserva status %i e detalhe legível sem timeout/repetição', async (status) => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{"detail":"recusado"}', { status }));
+    await expect(sendInputForServer(target, 'sessao', 'texto')).rejects.toMatchObject({ status, message: `${status}: recusado` });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0][0]).toBe('https://b.test/api/sessions/sessao/input');
+    expect(fetchMock.mock.calls[0][1]?.signal).toBeUndefined();
+    expect(onUnauthorizedSpy).not.toHaveBeenCalled();
+  });
+
+  it('envio com transporte incerto não inventa status nem tenta de novo', async () => {
+    const error = new TypeError('rede interrompida');
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockRejectedValue(error);
+    await expect(sendInputForServer(target, 'sessao', 'texto')).rejects.toBe(error);
+    expect(error).not.toHaveProperty('status');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    { baseUrl: 'https://b.test', credentials: false, token: 'token-b' },
+    { baseUrl: 'https://app.test', credentials: true, token: null },
+  ])('SSE em $baseUrl mantém req terceiro e cursor quarto', ({ baseUrl, credentials, token }) => {
+    const create = vi.fn<import('./apiEnv').ApiEnv['createEventSource']>(() => stubEventSource());
+    configureApi({ getBaseUrl: () => 'https://a.test', getToken: () => 'token-a', onUnauthorized: onUnauthorizedSpy,
+      origin: 'https://app.test', createEventSource: create });
+    const source = openEventStreamForServer({ ...target, baseUrl }, 'mesma/sessão', 'diag-b', 'arquivo:42 +');
+    expect(source).toBe(create.mock.results[0].value);
+    const url = new URL(create.mock.calls[0][0]);
+    expect(url.origin).toBe(baseUrl);
+    expect(url.pathname).toBe('/api/sessions/mesma%2Fsess%C3%A3o/events');
+    expect(url.searchParams.get('diag_req')).toBe('diag-b');
+    expect(url.searchParams.get('last_event_id')).toBe('arquivo:42 +');
+    expect(url.searchParams.get('token')).toBe(token);
+    expect(create.mock.calls[0][1]).toEqual({ withCredentials: credentials });
+    openEventStreamForServer(target, 'sessao', 'req-legado');
+    expect(new URL(create.mock.calls[1][0]).searchParams.has('last_event_id')).toBe(false);
   });
 });
 

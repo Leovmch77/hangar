@@ -596,7 +596,7 @@ export async function sendInputForServer(s: Server, name: string, text: string):
     method: 'POST',
     body: JSON.stringify({ text }),
   }, s);
-  if (!res.ok) throw new Error(`${res.status}: ${await errorDetail(res)}`);
+  if (!res.ok) throw Object.assign(new Error(`${res.status}: ${await errorDetail(res)}`), { status: res.status });
 }
 
 // Responde uma opção do picker (awaiting_input) direto do card. Mesma convenção de índice do
@@ -1056,8 +1056,8 @@ export function isTimeoutError(e: unknown): boolean {
 // `signal` cancela de verdade: sem ele o fetch do histórico COMPLETO (medido: 1596 eventos num
 // jsonl de 136MB) seguia baixando depois de já ter sido descartado — banda e parse à toa no
 // celular, e vários em paralelo quando o usuário pula de sessão em sessão.
-export function getHistory(name: string, limit?: number, signal?: AbortSignal,
-                           timeoutMs = 45_000): Promise<ChatEvent[]> {
+export async function getHistory(name: string, limit?: number, signal?: AbortSignal,
+                           timeoutMs = 45_000, server?: Server): Promise<ChatEvent[]> {
   // Teto largo (transcript grande em link lento existe), mas TETO: o resume do iOS chamava isto
   // sem timeout e um socket pendurado deixava o fetch em voo por minutos, sobrescrevendo estado
   // novo com foto velha quando enfim resolvia.
@@ -1067,9 +1067,13 @@ export function getHistory(name: string, limit?: number, signal?: AbortSignal,
   const cap = AbortSignal.timeout(timeoutMs);
   // `!== undefined` e não truthy: limit=0 é um pedido explícito de zero, não um pedido do arquivo inteiro.
   const q = limit !== undefined ? `?limit=${limit}` : '';
-  return apiFetch<ChatEvent[]>(`/api/sessions/${encodeURIComponent(name)}/history${q}`, {
+  const res = await apiFetchRes(`/api/sessions/${encodeURIComponent(name)}/history${q}`, {
     signal: signal ? AbortSignal.any([signal, cap]) : cap,
-  });
+  }, server);
+  if (server) {
+    if (!res.ok) throw Object.assign(new Error(`${res.status}: ${await errorDetail(res)}`), { status: res.status });
+  } else await ensureOk(res);
+  return res.json() as Promise<ChatEvent[]>;
 }
 
 /** A cauda do histórico, mas SÓ se mudou desde a última vez.
@@ -1083,14 +1087,17 @@ export function getHistory(name: string, limit?: number, signal?: AbortSignal,
  *  guarda os eventos mesmo assim, só não terá o que perguntar na próxima. */
 export async function getHistoryDesde(
   name: string, limit: number, etag: string | null, signal?: AbortSignal, timeoutMs = 45_000,
+  server?: Server,
 ): Promise<{ eventos: ChatEvent[]; etag: string | null } | 'igual'> {
   const cap = AbortSignal.timeout(timeoutMs);
   const res = await apiFetchRes(`/api/sessions/${encodeURIComponent(name)}/history?limit=${limit}`, {
     signal: signal ? AbortSignal.any([signal, cap]) : cap,
     headers: etag ? { 'If-None-Match': etag } : {},
-  });
+  }, server);
   if (res.status === 304) return 'igual';
-  await ensureOk(res);
+  if (server) {
+    if (!res.ok) throw Object.assign(new Error(`${res.status}: ${await errorDetail(res)}`), { status: res.status });
+  } else await ensureOk(res);
   return { eventos: (await res.json()) as ChatEvent[], etag: res.headers.get('ETag') };
 }
 
@@ -2021,25 +2028,38 @@ export function getSessionPlanPreview(name: string, content = true): Promise<Ses
   return apiFetch(`/api/sessions/${encodeURIComponent(name)}/plan-preview?content=${content}`);
 }
 
-export function answerQuestions(name: string, answers: AnswerItem[], requestId?: string | number): Promise<{ ok: boolean; fallback?: boolean }> {
-  return apiFetch<{ ok: boolean; fallback?: boolean }>(`/api/sessions/${encodeURIComponent(name)}/answer`, {
+export async function answerQuestions(name: string, answers: AnswerItem[], requestId?: string | number, server?: Server): Promise<{ ok: boolean; fallback?: boolean }> {
+  const path = `/api/sessions/${encodeURIComponent(name)}/answer`;
+  const init = {
     method: 'POST', body: JSON.stringify({ answers, ...(requestId !== undefined ? { request_id: requestId } : {}) }),
-  });
+  };
+  if (!server) return apiFetch(path, init);
+  const res = await apiFetchRes(path, init, server);
+  if (!res.ok) throw Object.assign(new Error(`${res.status}: ${await errorDetail(res)}`), { status: res.status });
+  return res.json() as Promise<{ ok: boolean; fallback?: boolean }>;
 }
 
-export function skipQuestion(name: string, requestId: string): Promise<{ ok: boolean }> {
-  return apiFetch<{ ok: boolean }>(`/api/sessions/${encodeURIComponent(name)}/question/skip`, {
+export async function skipQuestion(name: string, requestId: string, server?: Server): Promise<{ ok: boolean }> {
+  const path = `/api/sessions/${encodeURIComponent(name)}/question/skip`;
+  const init = {
     method: 'POST', body: JSON.stringify({ request_id: requestId }),
-  });
+  };
+  if (!server) return apiFetch(path, init);
+  const res = await apiFetchRes(path, init, server);
+  if (!res.ok) throw Object.assign(new Error(`${res.status}: ${await errorDetail(res)}`), { status: res.status });
+  return res.json() as Promise<{ ok: boolean }>;
 }
 
 // clear=true tambem limpa o input do terminal (2o Esc no backend). So passar quando havia msg pendente.
-export async function interrupt(name: string, clear = false): Promise<void> {
+export async function interrupt(name: string, clear = false, server?: Server): Promise<void> {
   const q = clear ? '?clear=true' : '';
-  await apiFetch<{ ok: boolean }>(`/api/sessions/${encodeURIComponent(name)}/interrupt${q}`, {
+  const path = `/api/sessions/${encodeURIComponent(name)}/interrupt${q}`;
+  const init = {
     method: 'POST',
     body: JSON.stringify({}),
-  });
+  };
+  await (server ? apiFetchForServer<{ ok: boolean }>(server, path, init)
+                : apiFetch<{ ok: boolean }>(path, init));
 }
 
 // Pergunta lateral (/btw do Claude Code): o backend dirige o overlay da TUI e devolve a resposta.
@@ -2363,13 +2383,14 @@ export function openSessionsStream(s: Server, req = novoReq()): EventSourceLike 
 // ativo) — usado pela grade de comparação (feature #11), que pode misturar sessões de servidores
 // diferentes no mesmo relance. Mesma convenção de openSessionsStream (?token cross-origin,
 // withCredentials same-origin).
-export function openEventStreamForServer(s: Server, name: string, req = novoReq()): EventSourceLike {
+export function openEventStreamForServer(s: Server, name: string, req = novoReq(), lastEventId?: string | null): EventSourceLike {
   const path = `/api/sessions/${encodeURIComponent(name)}/events`;
   const o = apiEnv().origin;
   const base = baseOf(s);
   const isSameOrigin = !!o && (!base || base === o);
   const params = new URLSearchParams();
   if (!isSameOrigin) params.set('token', s.token);
+  if (lastEventId) params.set('last_event_id', lastEventId);
   if (req) params.set('diag_req', req);
   const qs = params.toString();
   const url = `${base}${path}${qs ? `?${qs}` : ''}`;
