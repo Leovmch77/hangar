@@ -38,6 +38,10 @@ def env(tmp_path, monkeypatch):
     def index():
         return {"page": True}
 
+    @app.post("/api/sessions/{name}/codex/mode", dependencies=[Depends(require_auth)])
+    def codex_mode(name: str):
+        return {"ok": True}
+
     @app.websocket("/api/sessions/{name}/codex/voice")
     async def voice(ws: WebSocket, name: str):
         await ws.accept()
@@ -132,3 +136,8 @@ def test_guest_cookie_does_not_break_page_paths(env):
     client.cookies.set("cp_token", tok)
     r = client.get("/")
     assert r.status_code == 200 and r.json() == {"page": True}
+
+
+def test_guest_keeps_codex_mode_on_own_session(env):
+    client, _, tok = env
+    assert client.post("/api/sessions/minha/codex/mode", headers=_h(tok)).status_code == 200

@@ -29,7 +29,8 @@ _GLOBAL_ROUTES = share_gate._GLOBAL_ROUTES | {
 }
 # Voz do Codex e navegador embutido não são do convidado; recusar aqui evita que o navsock
 # registre tentativa falha contra o IP dele.
-_BLOCKED = share_gate._BLOCKED | {"codex", "nav-remoto", "navegador"}
+_BLOCKED = share_gate._BLOCKED | {"nav-remoto", "navegador"}
+_VOICE = (["codex", "voice"], ["codex", "voices"])
 
 
 def guest_allowed_user(guest, method: str, path: str) -> bool:
@@ -43,7 +44,7 @@ def guest_allowed_user(guest, method: str, path: str) -> bool:
     name, rest = parts[3], parts[4:]
     if name.startswith("term-") and rest == ["term"]:
         return guest_users.visible_to(guest, name[len("term-"):])
-    if rest and rest[0] in _BLOCKED:
+    if rest and (rest[0] in _BLOCKED or rest[:2] in _VOICE):
         return False
     return guest_users.visible_to(guest, name)
 
