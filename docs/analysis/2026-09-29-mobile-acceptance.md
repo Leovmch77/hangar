@@ -775,21 +775,24 @@ Evidências em `/home/jefferson/.hangar/orq/2026-09-29-cad3e6fe/tasks/`.
 completo, incluindo pre-script e espera de flock. Os números de testes vêm do resumo Vitest.
 Não rodaram backend/PWA/Rust, lint ou uma sexta rodada de validação.
 
-| Comando/família | Esperado | Primeira execução T44 | Correção/reteste permitido | Resultado |
+| Comando/família | Esperado | Primeira execução T44 | Correção/reteste e limite | Resultado |
 |---|---|---|---|---|
 | `npm --prefix packages/core run check` | nenhum erro TS | exit 0, 29,18 s (`t44-core-check-attempt1.txt`) | não repetido | conferido |
 | `npm --prefix packages/core run test` | todos os casos passam | exit 0, 758/758 testes, 48/48 arquivos, 74,57 s (`t44-core-test-attempt1.txt`) | não repetido | conferido automaticamente |
 | `npm --prefix mobile run typecheck` | nenhum erro TS | exit 2, 43,14 s (`t44-mobile-typecheck-attempt1.txt`): `useDitado.ts:75,160`, TS2339 `release/addListener`, TS7006 `status` | família expo-audio esgotada T32, observada também T37; nenhuma correção/reteste novo | **falhou**, pendência preservada |
 | `npm --prefix mobile run test` | todos os casos passam | exit 1, 404/416 testes, 38/40 arquivos, 187,28 s (`t44-mobile-test-attempt1.txt`) | suite inteira não repetida | **falhou**; duas famílias abaixo |
-| Nova conversa: fechamento de opções/acessibilidade | fechar conserva destino/texto e não duplica picker/POST | 11 falhas em `CreateSessionSheet.test.tsx`; dez TypeError no método de foco e uma asserção de cancelamento após montagens interrompidas | método `AccessibilityInfo.sendAccessibilityEvent` do RN 0.86.2 acrescentado ao mock local; asserções preservadas. Único reteste do arquivo: exit 0, 33/33, 67,71 s (`t44-mobile-create-retest-attempt2.txt`) | reteste 33/33 observado em terceiro ciclo, fora do limite da política; ratificação pendente; não prova foco nativo |
+| Nova conversa: fechamento de opções/acessibilidade | fechar conserva destino/texto e não duplica picker/POST | 11 falhas em `CreateSessionSheet.test.tsx`; dez TypeError no método de foco e uma asserção de cancelamento após montagens interrompidas | método `AccessibilityInfo.sendAccessibilityEvent` do RN 0.86.2 acrescentado ao mock local; asserções preservadas. Único reteste do arquivo: exit 0, 33/33, 67,71 s (`t44-mobile-create-retest-attempt2.txt`) | reteste 33/33 observado em terceiro ciclo, fora do limite da política; não ratificado e excluído do aceite autorizado do lote; não prova foco nativo |
 | PDF Android (`FileViewer.test.tsx`) | leitor autenticado disponível quando oferecido | mesma asserção do leitor falha, como T32/T37 | família esgotada T32; nenhuma correção/reteste | **falhou**, pendência preservada |
 
 A chamada `AccessibilityInfo.sendAccessibilityEvent` veio da T36 (`34b08bbf`) e já estava
 na base do lote T37 (`34d7de6d`); ficou escondida pelas falhas anteriores do mesmo arquivo.
 A correção de mock e o reteste T44 foram o terceiro ciclo de correção/reteste da família
 `CreateSessionSheet.test.tsx`, esgotada na T37. O executor reclassificou indevidamente a
-família; essa execução ficou fora do limite da política e sua ratificação pelo usuário,
-via árbitro, está pendente. A correção é só de teste: o método existe na fonte RN instalada
+família; essa execução ficou fora do limite da política. A decisão `t44-family-limit`,
+comunicada pelo árbitro, não ratifica o terceiro ciclo nem uma nova família: os 33/33
+observados ficam registrados como fato e excluídos do aceite autorizado do lote, sem zerar
+contador ou pedir exceção. A linha de mock permanece sujeita ao julgamento estático do
+revisor. A correção é só de teste: o método existe na fonte RN instalada
 e usa o renderer nativo, indisponível no mock DOM. A asserção de cancelamento também
 passou no reteste, sem ser alterada. Nenhuma asserção de PDF foi removida. Não somar 404 + 33
 como total aprovado: o reteste repete casos de um arquivo, e a suite inteira continua com a
@@ -850,7 +853,7 @@ Estados posteriores conhecidos (T21/T43) ficam atribuídos à janela que os obse
 | T21, entrega 2 | core 742/742; check/typecheck e arquivo mobile corrigidos no reteste | APK `664e770a` instalado sobre `2410f755`; criação/envio/Parar/pergunta/retorno conferidos em combinações Claude/Codex descritas na seção T21; cabeçalho, crash e fila→Codex falharam | não aceita |
 | T32, entrega 3 | core 758/758; mobile typecheck/test falharam; correções e limites registrados | `ccb85697` sem artefato na janela T32, visto FINISHED somente na T43; APK3 não instalado nos registros | não aceita |
 | T37, entrega 4 | core 758/758; semTerminal 38/38 no reteste; mobile check/PDF/criação pendentes | `a9ed153a` em fila na janela T37 e ainda na T43; nenhum APK4/iOS instalado; credencial iOS esgotada | não aceita |
-| T44, entrega 5 | core 758/758; criação 33/33 em terceiro ciclo fora do limite (ratificação pendente); mobile typecheck/PDF continuam falhando | build `620c7bfd`, número 2, estado final registrado acima; nenhum resultado nativo final presumido | não aceita |
+| T44, entrega 5 | core 758/758; criação 33/33 observada em terceiro ciclo fora do limite, não ratificado e excluído do aceite autorizado; mobile typecheck/PDF continuam falhando | build `620c7bfd`, número 2, estado final registrado acima; nenhum resultado nativo final presumido | não aceita |
 
 As combinações de provider conferidas no APK2 pela T21 não são conferidas no código final.
 Claude/Codex com e sem terminal, Pi/omp/Kimi e combinação de dois servidores mantêm as
@@ -867,5 +870,6 @@ reverse removido, APK2/dados preservados e os cinco recursos liberados. Nenhum f
 criado, servidor reiniciado ou serviço paralelo iniciado. Build remoto não foi cancelado;
 sem consulta posterior para reabrir a janela.
 **Lote encerrado com pendências.** Reunidos os cinco registros, com a violação do limite
-na família de criação explicitada e pendente de ratificação pelo usuário. O produto não
-foi aprovado nas duas plataformas e não se exige uma sexta rodada.
+na família de criação explicitada: terceiro ciclo não ratificado e excluído do aceite
+autorizado do lote. O resultado observado foi preservado; o produto não foi aprovado nas
+duas plataformas e não se exige uma sexta rodada.
