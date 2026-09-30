@@ -1,12 +1,15 @@
 import 'react-native-url-polyfill/auto';
 import '../src/theme/unistyles';
 import { useEffect } from 'react';
+import { AppState, type AppStateStatus } from 'react-native';
 import { Stack, useRouter, useSegments } from 'expo-router';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 // Sem o KeyboardProvider, KeyboardStickyView/KeyboardChatScrollView lançam em runtime
 import { KeyboardProvider } from 'react-native-keyboard-controller';
 import { configureCore } from '../src/net/configureCore';
 import { useServers } from '../src/stores/servers';
+import { setChatsForeground } from '../src/stores/chat';
+import { useSessions } from '../src/stores/sessions';
 import { aplicarTemaSalvo, useAparencia } from '../src/stores/aparencia';
 import { aplicarMaterial } from '../src/theme/aplicarMaterial';
 import { Toaster, toast } from '../src/ui/Toast';
@@ -26,6 +29,19 @@ export default function Layout() {
 
   useEffect(() => {
     void useServers.getState().load();
+  }, []);
+
+  // Único dono do primeiro plano: os stores conservam transcript, pergunta e rascunho ao sair
+  // e ignoram repetição do mesmo estado, então voltar não duplica REST/SSE.
+  useEffect(() => {
+    const apply = (state: AppStateStatus) => {
+      const active = state === 'active';
+      setChatsForeground(active);
+      useSessions.getState().setForeground(active);
+    };
+    apply(AppState.currentState ?? 'active');
+    const subscription = AppState.addEventListener('change', apply);
+    return () => subscription.remove();
   }, []);
 
   useEffect(() => {
