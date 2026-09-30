@@ -536,6 +536,7 @@ function CreateSessionForm({ active, onClose }: { active: Server; onClose?: () =
             <Text style={styles.ghostTxt}>{retomando ? m.criar_criando() : m.criar_retomar_acao()}</Text>
           </Pressable>
         </View>
+      ) : null}
 
       {provider === 'codex' && retomando && codexProgress ? (
         <View style={styles.rowCenter}>

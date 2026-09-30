@@ -73,6 +73,8 @@ vi.mock('../../paraglide/messages', () => ({
   codex_ui_account: () => 'codex_ui_account', codex_ui_login_error: () => 'codex_ui_login_error',
   codex_ui_prepare_error: () => 'codex_ui_prepare_error', codex_ui_unknown: () => 'codex_ui_unknown',
   codex_ui_abrindo_sessao: () => 'codex_ui_abrindo_sessao',
+  criar_subagente: () => 'criar_subagente', criar_subagente_padrao: () => 'criar_subagente_padrao',
+  criar_subagente_ajuda: () => 'criar_subagente_ajuda',
   composer_esforco: () => 'composer_esforco', composer_modelo: () => 'composer_modelo',
   comum_carregando: () => 'comum_carregando', comum_conta_claude: () => 'comum_conta_claude',
   comum_motor: () => 'comum_motor', comum_nome: () => 'comum_nome', comum_provider: () => 'comum_provider',
@@ -409,6 +411,33 @@ describe('CreateSessionSheet Codex', () => {
     expect(input.value).toBe('');
     expect(button(container, 'nova_conversa_enviar')!.disabled).toBe(true);
     expect(calls.create).not.toHaveBeenCalled();
+    root.unmount();
+  });
+
+  it('toque duplo em Enviar dispara um único create', async () => {
+    const pending = deferred<{ name: string; state: 'idle' }>();
+    calls.create.mockReturnValue(pending.promise);
+    const { container, root } = await renderSheet();
+    await act(async () => type(container, 'oi'));
+    const enviar = button(container, 'nova_conversa_enviar')!;
+    await act(async () => { enviar.click(); enviar.click(); });
+    await act(async () => pending.resolve({ name: 'nova', state: 'idle' }));
+    for (let i = 0; i < 4; i++) await act(async () => Promise.resolve());
+    expect(calls.create).toHaveBeenCalledTimes(1);
+    expect(calls.send).toHaveBeenCalledTimes(1);
+    root.unmount();
+  });
+
+  it('cwd recusado mantém o texto editável com o motivo e não navega', async () => {
+    calls.create.mockRejectedValueOnce(Object.assign(new Error('400: diretório não existe'), { status: 400 }));
+    const { container, root } = await renderSheet();
+    await send(container);
+    const input = container.querySelector('textarea[aria-label="nova_conversa_placeholder"]') as HTMLTextAreaElement;
+    expect(input.value).toBe('oi');
+    expect(container.textContent).toContain('400: diretório não existe');
+    expect(button(container, 'nova_conversa_enviar')!.disabled).toBe(false);
+    expect(calls.replace).not.toHaveBeenCalled();
+    expect(calls.send).not.toHaveBeenCalled();
     root.unmount();
   });
 

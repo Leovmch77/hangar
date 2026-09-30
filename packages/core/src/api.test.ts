@@ -15,7 +15,7 @@ import { mensagemDeErro, formataErro } from './errosApi';
 import { passarBastao, getSyncSetupForServer, setupSyncForServer, disableSyncForServer } from './api';
 import { probeServerResponse } from './api';
 import { scanDir, scanDirForServer, listClaudeConfigs, listClaudeConfigsForServer } from './api';
-import { answerQuestions, interrupt, openEventStreamForServer, sendInputForServer, skipQuestion } from './api';
+import { answerQuestions, createSessionForServer, interrupt, openEventStreamForServer, sendInputForServer, skipQuestion } from './api';
 import type { Server } from './servers';
 const server = { id: 'a', label: 'Servidor A', baseUrl: 'https://a.test', token: 'token-a' };
 
@@ -438,6 +438,22 @@ describe('contratos de conversa com servidor explícito', () => {
     expect(fetchMock.mock.calls[0][0]).toBe('https://b.test/api/sessions/sessao/input');
     expect(fetchMock.mock.calls[0][1]?.signal).toBeUndefined();
     expect(onUnauthorizedSpy).not.toHaveBeenCalled();
+  });
+
+  it.each([400, 408, 409, 502])('criação em B preserva status %i numérico e não repete o POST', async (status) => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{"detail":"recusado"}', { status }));
+    await expect(createSessionForServer(target, { name: 'repo', cwd: '/repo', provider: 'codex' }))
+      .rejects.toMatchObject({ status, message: `${status}: recusado` });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0][0]).toBe('https://b.test/api/sessions');
+  });
+
+  it('criação com transporte incerto não inventa status nem tenta de novo', async () => {
+    const error = new TypeError('rede interrompida');
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockRejectedValue(error);
+    await expect(createSessionForServer(target, { name: 'repo', cwd: '/repo' })).rejects.toBe(error);
+    expect(error).not.toHaveProperty('status');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it('envio com transporte incerto não inventa status nem tenta de novo', async () => {
