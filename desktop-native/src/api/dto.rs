@@ -47,6 +47,8 @@ pub struct SessionInfo {
     pub pair_task: Option<String>,
     /// Há convite ativo desta sessão (pendente ou já usado): o 🔗 da linha.
     #[serde(default)] pub shared: bool,
+    /// Nome do convidado que criou a sessão; `None` = dono do servidor.
+    pub owner: Option<String>,
     /// Só na linha `orq`: a sessão do árbitro atual, que o "Falar com o árbitro" abre.
     pub orq_arbiter: Option<String>,
     /// Task em andamento do plano que a sessão executa, e o total delas.

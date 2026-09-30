@@ -195,13 +195,15 @@
     /** Sem alvo resolvido as telas de servidor não abrem — aqui elas aparecem apagadas com o
      *  motivo, como na lista da raiz. Some da busca seria esconder que a tela existe. */
     semServidor?: boolean;
+    /** Convidado não vê as telas de servidor: o backend as recusa. */
+    convidado?: boolean;
     /** Só no desktop: a busca mora no topo da navegação lateral, que é estreita. */
     compacta?: boolean;
   }
-  let { onIrPara, semServidor = false, compacta = false }: Props = $props();
+  let { onIrPara, semServidor = false, convidado = false, compacta = false }: Props = $props();
 
   let termo = $state('');
-  const achados = $derived(filtrar(termo));
+  const achados = $derived(filtrar(termo).filter((a) => !convidado || !TELAS_DE_SERVIDOR.includes(a.entrada.tela)));
 
   function abrir(tela: TelaConfig) {
     termo = '';

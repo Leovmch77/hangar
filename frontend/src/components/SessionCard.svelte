@@ -427,7 +427,7 @@ import { textoProblema } from '../lib/problema';
       <!-- 🤝 grupo, ⏳ rate-limit, 🔁 loop e ⚙ motor, no fluxo da coluna de texto (na row-right
            esmagavam o nome — visto no iPhone). A linha só existe quando tem chip: a marca do agente
            subiu pra linha do nome e a conta também, e sem elas sobrava uma linha inteira vazia. -->
-      {#if session.pair_peers?.length || loopChip || session.engine}
+      {#if session.pair_peers?.length || loopChip || session.engine || session.owner}
       <span class="badges-line">
           {#if session.pair_peers?.length}
             <span class="paired-chip" title={m.sessao_grupo_com({ n: session.pair_peers.join(', ') })}><GroupGlyph size={12} />&nbsp;{session.pair_peers.length === 1 ? session.pair_peers[0] : session.pair_peers.length + 1}</span>
@@ -438,6 +438,9 @@ import { textoProblema } from '../lib/problema';
               style="color: {LOOP_TONE_COLOR[loopChip.tone]}; background: color-mix(in srgb, {LOOP_TONE_COLOR[loopChip.tone]} 14%, transparent);"
               title={m.sessao_loop_runner()}
             >{loopChip.label}</span>
+          {/if}
+          {#if session.owner}
+            <span class="engine-chip" title={m.sessao_do_convidado({ n: session.owner })}>👤&nbsp;{session.owner}</span>
           {/if}
           {#if session.engine}
             <!-- Sem isto nada na lista distingue uma sessão de motor de uma da conta Anthropic. NÃO

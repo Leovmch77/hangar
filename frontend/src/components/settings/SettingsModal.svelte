@@ -19,6 +19,7 @@
   import BuscaConfig, { TITULO_TELA } from './BuscaConfig.svelte';
   import { criarConfigServidor } from '../../lib/serverConfig.svelte';
   import { TELAS_DE_SERVIDOR, type TelaConfig } from '../../lib/configRoute';
+  import { papelDo } from '../../lib/papel.svelte';
   import { fly, fade } from 'svelte/transition';
   import { cubicOut } from 'svelte/easing';
   import OrquestracaoContas from '../OrquestracaoContas.svelte';
@@ -123,6 +124,11 @@
     { id: 'orquestracao', secao: 'servidor', rotulo: m.config_modal_orquestracao(), icone: 'sliders', servidor: true },
   ] satisfies readonly { id: TelaConfig; secao: string; rotulo: string; icone: string; servidor: boolean }[];
   const SECOES = ['app', 'servidor'] as const;
+  // Convidado só mexe nas preferências deste aparelho; o servidor é do dono (e o backend recusa).
+  const convidado = $derived(papelDo(resolvedServer) === 'guest');
+  const linhasVisiveis = $derived(convidado ? LINHAS.filter((l) => !l.servidor) : LINHAS);
+  // Link direto para tela de servidor não pode abrir o que o backend recusa.
+  $effect(() => { if (convidado && TELAS_DE_SERVIDOR.includes(tela)) onIrPara('root'); });
 
   // Troca de tela do modal: fly curto na direção da navegação (180ms ease-out, uso ocasional).
   // Entrar numa sub-tela vem da direita; voltar pra raiz vem da esquerda. Com reduced-motion
@@ -280,7 +286,7 @@
       <aside class="st-nav">
         <!-- No desktop a raiz nunca renderiza (cai na Aparência), então o campo mora aqui: é o
              único lugar que existe nas duas colunas o tempo todo. -->
-        <BuscaConfig onIrPara={irPelaBusca} {semServidor} compacta />
+        <BuscaConfig onIrPara={irPelaBusca} {semServidor} {convidado} compacta />
         {#each SECOES as secao (secao)}
           {#if secao === 'servidor' && mostrarSeletor}
             <!-- O rótulo do grupo vira o TROCADOR de alvo: "Servidor" + select com a máquina
@@ -293,7 +299,7 @@
           {:else}
             <p class="st-secao">{secao === 'servidor' && nomeAlvo ? m.config_modal_servidor_de({ nome: nomeAlvo }) : secao === 'servidor' ? m.lista_agrupar_servidor() : m.config_aparencia_app()}</p>
           {/if}
-          {#each LINHAS.filter((l) => l.secao === secao) as l (l.id)}
+          {#each linhasVisiveis.filter((l) => l.secao === secao) as l (l.id)}
             <button class="st-nav-item" class:sel={telaAtual === l.id}
                     aria-current={telaAtual === l.id ? 'page' : undefined}
                     disabled={l.servidor && semServidor}
@@ -353,7 +359,7 @@
     <p class="st-sem-etiqueta">{m.config_escopo_sem_etiqueta()}</p>
   {/if}
   {#if telaAtual === 'root'}
-    <BuscaConfig onIrPara={irPelaBusca} {semServidor} />
+    <BuscaConfig onIrPara={irPelaBusca} {semServidor} {convidado} />
     {#each SECOES as secao (secao)}
       {#if secao === 'servidor' && mostrarSeletor}
         <div class="st-secao st-secao-sel" class:so-uma={servidores.length <= 1}>
@@ -364,7 +370,7 @@
         <p class="st-secao">{secao === 'servidor' && nomeAlvo ? m.config_modal_servidor_de({ nome: nomeAlvo }) : secao === 'servidor' ? m.lista_agrupar_servidor() : m.config_aparencia_app()}</p>
       {/if}
       <div class="st-cartao">
-        {#each LINHAS.filter((l) => l.secao === secao) as l (l.id)}
+        {#each linhasVisiveis.filter((l) => l.secao === secao) as l (l.id)}
           <SettingsRow icone={l.icone} rotulo={l.rotulo}
             desabilitada={l.servidor && semServidor}
             motivo={m.config_modal_escolha_servidor()}

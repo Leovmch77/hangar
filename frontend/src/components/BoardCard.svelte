@@ -406,6 +406,9 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
     <span class="bc-name">{session.name}</span>
     <!-- Servidor por NOME, não só pela cor do dot: com 5+ servidores a cor sozinha não identifica. -->
     <span class="bc-srv" style="color: {color}" title={server.label}>{server.label}</span>
+    {#if session.owner}
+      <span class="bc-srv" title={m.sessao_do_convidado({ n: session.owner })}>👤&nbsp;{session.owner}</span>
+    {/if}
     <!-- Pill de estado SÓ no canvas (fill): lá não há colunas dizendo o estado; no board a coluna
          já diz e o pill viraria ruído repetido. O desenho (vocabulário --pill-* do design system)
          mora no StateChip; este card era o precedente dele.

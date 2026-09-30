@@ -248,3 +248,4 @@ Não há outro documento de paridade do `mobile/` no repositório; as linhas do 
 | Capacidade | Estado | Observação |
 |---|---|---|
 | Conversa e painel da sessão orq | pendente | fora do trabalho de 29/09 por decisão do plano; o app segue mostrando o aviso cru da linha do tempo |
+| Sincronização > Convidados (cadastro e edição de convidados) | pendente | o nativo não tem o login por usuário e senha do hub (só a ativação), e o cadastro precisa da chave do dono que só existe nesse login. O rótulo 👤 do convidado na linha da sessão já existe |

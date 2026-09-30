@@ -997,7 +997,7 @@ import ConfirmDialog from './ConfirmDialog.svelte';
                       {/if}
                     </span>
                   {/if}
-                  {#if s.then_target || s.pair_peers?.length || s.loop_status || s.engine}
+                  {#if s.then_target || s.pair_peers?.length || s.loop_status || s.engine || s.owner}
                     <!-- Chips informativos (⏳/🔗/🤝/↻/⚙) na COLUNA DE TEXTO, nao ao lado do state-chip:
                          inline eles cobriam o cwd em sidebar estreita (mesmo fix do SessionCard mobile).
                          O glifo do agente saiu daqui pro canto do avatar (mesmo arranjo do trilho) e a
@@ -1015,6 +1015,9 @@ import ConfirmDialog from './ConfirmDialog.svelte';
                         {#if lb}
                           <span class="chain-chip" style="color: {LOOP_TONE_COLOR[lb.tone]}; background: color-mix(in srgb, {LOOP_TONE_COLOR[lb.tone]} 14%, transparent);" title={m.sessao_loop_runner()}>{lb.label}</span>
                         {/if}
+                      {/if}
+                      {#if s.owner}
+                        <span class="engine-chip" title={m.sessao_do_convidado({ n: s.owner })}>👤&nbsp;{s.owner}</span>
                       {/if}
                       {#if s.engine}
                         <!-- Sem isto nada na lista distingue uma sessão de motor de uma da conta Anthropic.
