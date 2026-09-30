@@ -228,12 +228,16 @@
   let fPasta = $state('');
   let fSendDirect = $state(true);
   let fConfirm = $state(false);
+  let fRunsIn = $state<'session' | 'hangar'>('session');
+  let fHome = $state(true);
+  let fAsk = $state(true);
   const formOpen = $derived(formScope !== null);
 
   function openNew(sc: Scope) {
     editingIdx = null;
     fType = 'send_text'; fLabel = ''; fGlyph = 'bolt'; fEmoji = '';
     fContent = ''; fPasta = ''; fSendDirect = true; fConfirm = false;
+    fRunsIn = 'session'; fHome = true; fAsk = true;
     formScope = sc;
   }
   function openEdit(sc: Scope, i: number) {
@@ -246,6 +250,9 @@
     fPasta = s.type === 'shell' ? s.pasta ?? '' : '';
     fSendDirect = s.type === 'send_text' ? s.send_direct !== false : true;
     fConfirm = s.confirm === true;
+    fRunsIn = s.type === 'shell' && s.runs_in === 'hangar' ? 'hangar' : 'session';
+    fHome = s.type === 'shell' ? s.hangar_home !== false : true;
+    fAsk = s.type === 'shell' ? s.answer_in_app !== false : true;
     if (s.icon?.startsWith('emoji:')) { fEmoji = s.icon.slice(6); fGlyph = 'bolt'; }
     else { fEmoji = ''; fGlyph = s.icon?.startsWith('glifo:') ? s.icon.slice(6) : 'bolt'; }
     formScope = sc;
@@ -263,7 +270,10 @@
     const folder = sc === 'project' ? fPasta.trim() : kept;
     const pasta = folder ? { pasta: folder } : {};
     const shortcut: ShortcutSendText | ShortcutShell = fType === 'shell'
-      ? { id: formId(sc), type: 'shell', command: fContent.trim(), ...pasta, ...base }
+      ? { id: formId(sc), type: 'shell', command: fContent.trim(), ...pasta,
+          ...(fRunsIn === 'hangar' ? { runs_in: 'hangar' as const } : {}),
+          ...(fRunsIn === 'hangar' && !fHome ? { hangar_home: false } : {}),
+          ...(fAsk ? {} : { answer_in_app: false }), ...base }
       : { id: formId(sc), type: 'send_text', text: fContent.trim(),
           ...(fSendDirect ? {} : { send_direct: false }), ...base };
     const items = itemsOf(sc);
@@ -388,6 +398,12 @@
             <span class="detalhe">{m.atalhos_pasta_linha({ pasta: s.pasta })}</span>
           {/if}
         </span>
+        {#if s.type === 'send_text'}
+          <span class="marca">{m.atalhos_marca_sessao_texto()}</span>
+        {:else if s.type === 'shell'}
+          <span class="marca" class:hangar={s.runs_in === 'hangar'}>{s.runs_in === 'hangar'
+            ? m.atalhos_marca_hangar() : m.atalhos_marca_sessao_comando()}</span>
+        {/if}
         <span class="acoes">
           {#if s.type !== 'internal'}
             <button class="mini" onclick={() => openEdit(sc, i)} aria-label={m.atalhos_editar()}>✎</button>
@@ -443,6 +459,40 @@
             <span>{m.atalhos_pasta()}</span>
             <input type="text" bind:value={fPasta} placeholder={m.atalhos_pasta_placeholder()} />
             <small class="ajuda">{m.atalhos_pasta_dica()}</small>
+          </label>
+        {/if}
+        {#if fType === 'shell'}
+          <fieldset class="onde">
+            <legend>{m.atalhos_onde()}</legend>
+            <div class="onde-opcoes" role="radiogroup" aria-label={m.atalhos_onde()}>
+              <button type="button" class="onde-card" class:sel={fRunsIn === 'session'} role="radio"
+                      aria-checked={fRunsIn === 'session'} onclick={() => (fRunsIn = 'session')}>
+                <span class="onde-titulo"><span class="onde-radio" aria-hidden="true"></span>{m.atalhos_onde_sessao()}</span>
+                <span class="onde-ajuda">{m.atalhos_onde_sessao_ajuda()}</span>
+                <span class="onde-uso">{m.atalhos_onde_sessao_uso()}</span>
+              </button>
+              <button type="button" class="onde-card" class:sel={fRunsIn === 'hangar'} role="radio"
+                      aria-checked={fRunsIn === 'hangar'} onclick={() => (fRunsIn = 'hangar')}>
+                <span class="onde-titulo"><span class="onde-radio" aria-hidden="true"></span>{m.atalhos_onde_hangar()}</span>
+                <span class="onde-ajuda">{m.atalhos_onde_hangar_ajuda()}</span>
+                <span class="onde-uso">{m.atalhos_onde_hangar_uso()}</span>
+              </button>
+            </div>
+            {#if fRunsIn === 'hangar'}
+              <div class="onde-bloco">
+                <span class="onde-bloco-titulo">{m.atalhos_onde_clique_titulo()}</span>
+                <span class="onde-bloco-texto">→ {m.atalhos_onde_clique()}</span>
+                <label class="liga">
+                  <input type="checkbox" bind:checked={fHome} />
+                  <span>{m.atalhos_onde_home({ home: '~' })}</span>
+                </label>
+              </div>
+            {/if}
+          </fieldset>
+          <label class="liga">
+            <input type="checkbox" bind:checked={fAsk} />
+            <span>{m.atalhos_perguntas()}</span>
+            <small>{m.atalhos_perguntas_ajuda()}</small>
           </label>
         {/if}
         {#if fType === 'send_text'}
@@ -531,6 +581,33 @@
   .liga small { grid-column: 2; color: var(--text-muted); font-size: var(--text-xs); }
   .form-acoes { display: flex; justify-content: flex-end; gap: var(--space-2); }
   .ajuda { color: var(--text-muted); font-size: var(--text-xs); }
+
+  .marca { flex-shrink: 0; font-size: var(--text-xs); padding: 2px 8px; border-radius: var(--radius-full);
+    background: var(--surface-raised); color: var(--text-secondary); }
+  .marca.hangar { background: var(--accent-dim); color: var(--text-primary); }
+
+  .onde { margin: 0; padding: 0; border: 0; display: flex; flex-direction: column; gap: var(--space-2); }
+  .onde legend { padding: 0; margin-bottom: var(--space-2); font-size: var(--text-sm); color: var(--text-secondary); }
+  .onde-opcoes { display: grid; grid-template-columns: 1fr; gap: var(--space-2); }
+  @container (min-width: 480px) { .onde-opcoes { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  .onde-card {
+    display: flex; flex-direction: column; gap: 6px; padding: var(--space-3); text-align: left;
+    border: 1px solid var(--border-default); border-radius: var(--radius-md); background: transparent;
+    color: var(--text-secondary); cursor: pointer;
+  }
+  .onde-card.sel { border-color: var(--accent); background: var(--accent-dim); }
+  .onde-card:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .onde-titulo { display: flex; align-items: center; gap: 8px; font-weight: 600; color: var(--text-primary); }
+  .onde-radio { width: 14px; height: 14px; border-radius: 50%; box-sizing: border-box; border: 1.5px solid var(--text-muted); }
+  .onde-card.sel .onde-radio { border: 4px solid var(--accent); background: #fff; }
+  .onde-ajuda { font-size: var(--text-sm); line-height: 1.45; }
+  .onde-uso { font-size: var(--text-xs); color: var(--text-muted); line-height: 1.45; }
+  .onde-bloco {
+    display: flex; flex-direction: column; gap: var(--space-2); padding: var(--space-3);
+    border-radius: var(--radius-md); background: var(--surface-inset); border: 1px solid var(--border-subtle);
+  }
+  .onde-bloco-titulo { font-size: var(--text-sm); font-weight: 500; color: var(--text-primary); }
+  .onde-bloco-texto { font-size: var(--text-sm); color: var(--text-secondary); line-height: 1.45; }
 
   .projeto {
     display: flex; flex-direction: column; gap: var(--space-3);
