@@ -81,7 +81,7 @@ from app import runtime_config
 from app import share_api, share_guest_api, share_store
 from app.share_guest_api import guest_safe
 from app.guest_user_gate import GuestUserGate
-from app import guest_users_api
+from app import guest_users, guest_users_api
 from app.share_gate import ShareGate, guest_of
 from app.share_life import session_life
 from app import tts
@@ -1758,15 +1758,19 @@ async def list_sessions(request: Request):
     # Com a lista SSE aberta, o refresher já decorou isto há menos de um tique: serve dele.
     from app.sse import recent_list
     guest = guest_of(request)
+    viewer = guest_users.current.get()
     decorated = recent_list(2.0)
     if decorated is not None:
         if guest is not None:
             decorated = [i for i in decorated if i.name == guest.session]
+        # Mesmo recorte do caminho sem cache: convidado com login próprio só vê o que lhe cabe.
+        decorated = await asyncio.to_thread(guest_users.filter_visible, viewer, decorated, lambda i: i.name)
         return decorated if guest is None else [guest_safe(i) for i in decorated]
     snap = await asyncio.to_thread(_guardar_snap)
     # Convidado ve so a sessao compartilhada; o filtro fica depois do snapshot para nao tocar no cache.
     if guest is not None:
         snap = [i for i in snap if i.name == guest.session]
+    snap = await asyncio.to_thread(guest_users.filter_visible, viewer, snap, lambda i: i.name)
     decorated = await registry.list_with_state([i.model_copy() for i in snap])
     # O pareamento e o encadeamento são decorados acima e citam outras sessões do dono.
     return decorated if guest is None else [guest_safe(i) for i in decorated]
@@ -3263,7 +3267,8 @@ async def subagent_detail(name: str, agent_id: str, events: int = 0):
 async def sessions_events(request: Request):
     from app.sse import list_events
     guest = guest_of(request)
-    return EventSourceResponse(list_events(only=guest), send_timeout=30)
+    return EventSourceResponse(list_events(only=guest, viewer=guest_users.current.get()),
+                               send_timeout=30)
 
 
 @app.get("/api/sessions/{name}/events", dependencies=[Depends(require_auth)])
@@ -3300,7 +3305,7 @@ async def events(name: str, request: Request):
     # SSE do Codex nunca ligava (chat vazio, sem estado ao vivo).
     return EventSourceResponse(
         merged_events(name, info.jsonl, provider=info.provider, start_offset=start_offset,
-                      count_app=guest_of(request) is None),
+                      count_app=guest_of(request) is None and guest_users.current.get() is None),
         send_timeout=30)
 
 

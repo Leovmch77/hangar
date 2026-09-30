@@ -8,7 +8,7 @@ import sys
 import time
 import traceback
 from pathlib import Path
-from app import atomico, diag, plugin_bridge
+from app import atomico, diag, guest_users, plugin_bridge
 from app.adapters import CLAUDE_HEADLESS, chave_de, get_adapter
 from app.adapters.preview_push import PushPreviewSource, fonte_ferramenta, fonte_pensamento
 from app.difusor import Difusor
@@ -559,7 +559,7 @@ def invalidate_recent_list() -> None:
     _list_invalidated_at = time.monotonic()
 
 
-async def list_events(ping_secs: float = 8.0, only=None):
+async def list_events(ping_secs: float = 8.0, only=None, viewer=None):
     """SSE da LISTA de sessoes. Conexao = PRIORIDADE ABSOLUTA, zero trabalho: um reader que so LE o
     snapshot compartilhado (produzido pelo _ListRefresher unico) e emite quando a versao muda, + um
     ping em timer FIXO por conexao (incondicional). Refresher travado nao afeta a conexao — o ping
@@ -567,12 +567,14 @@ async def list_events(ping_secs: float = 8.0, only=None):
 
     `only` = conexao de convidado: ve so a sessao compartilhada, nao recebe os pedidos de navegador
     do dono (`nav`) e nao conta como app do dono aberto. Aceita o nome ou o registro do convite
-    (`.session`): renomear a sessao muda o registro, e o stream aberto tem que acompanhar."""
+    (`.session`): renomear a sessao muda o registro, e o stream aberto tem que acompanhar.
+    `viewer` = convidado com login proprio (ou None = dono): a lista passa pelo mesmo filtro da
+    rota `/api/sessions`."""
     queue: asyncio.Queue = asyncio.Queue()
     cond = _list_refresher.acquire()
     started = time.monotonic()
     diag.registrar("sse.lista_abriu")
-    if only is None:
+    if only is None and viewer is None:
         plugin_bridge.app_entrou()
 
     async def reader():
@@ -593,13 +595,17 @@ async def list_events(ping_secs: float = 8.0, only=None):
                     data = json.dumps([guest_safe(x) for x in json.loads(data)
                                        if x.get("name") == (only if isinstance(only, str)
                                                             else only.session)], ensure_ascii=False)
+                if guest_users.has_claims() or viewer is not None:
+                    itens = await asyncio.to_thread(guest_users.filter_visible, viewer,
+                                                    json.loads(data), lambda x: x.get("name"))
+                    data = json.dumps(itens, ensure_ascii=False)
                 # Compara o que sairia: versão só dos terminais de atalho não reenvia `sessions`,
                 # mas renomear a sessão do convidado muda o recorte sem mudar o dado da lista.
                 if data != last_data or was_error:
                     last_data, was_error = data, False
                     await queue.put(("sessions", data))
             # Terminal de atalho não entra no stream do convidado.
-            if only is None and shortcuts is not None and shortcuts != last_shortcuts:
+            if only is None and viewer is None and shortcuts is not None and shortcuts != last_shortcuts:
                 last_shortcuts = shortcuts
                 await queue.put(("shortcut_terminals", shortcuts))
 
@@ -623,7 +629,7 @@ async def list_events(ping_secs: float = 8.0, only=None):
             _log.exception("sse: nav_pump da lista morreu")
 
     tasks = [asyncio.create_task(reader()), asyncio.create_task(ping_loop())]
-    if only is None:
+    if only is None and viewer is None:
         tasks.append(asyncio.create_task(nav_pump()))
     try:
         while True:
@@ -633,7 +639,7 @@ async def list_events(ping_secs: float = 8.0, only=None):
         for t in tasks:
             t.cancel()
         _list_refresher.release()
-        if only is None:
+        if only is None and viewer is None:
             plugin_bridge.app_saiu()
         diag.registrar("sse.lista_fechou", ms=int((time.monotonic() - started) * 1000))
 

@@ -115,6 +115,8 @@ export interface SessionInfo {
   conta?: string | null;
   // Há convite ativo desta sessão para outra pessoa: selo nas duas listas.
   shared?: boolean;
+  // Nome do convidado que criou a sessão; ausente/null = dono do servidor.
+  owner?: string | null;
 }
 
 // Detalhe do plano (GET /api/sessions/{name}/plan, Task 5): granularidade de Task/Step que o

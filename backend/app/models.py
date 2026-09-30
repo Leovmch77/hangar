@@ -141,6 +141,8 @@ class SessionInfo(BaseModel):
     limit_reset: Optional[str] = None
     # Sessão com convite ativo (link pendente ou convidado dentro): selo 🔗 nas listas.
     shared: bool = False
+    # Nome do convidado que criou a sessão; None = dono do servidor.
+    owner: Optional[str] = None
     # Feature #12 (encadeamento de sessao): nome da sessao ALVO se esta sessao tem um vinculo 'then'
     # armado ("quando terminar -> enviar pra"), None senao. So o alvo (pro indicador na lista); o texto
     # do prompt fica no sidecar (app.chain.ThenLink), lido so na hora de disparar.

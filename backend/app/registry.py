@@ -22,7 +22,7 @@ from app.models import SessionInfo, session_key
 from app.pqueue import PromptQueue, _sanitize, merged_history
 from app.archive import _texto_simples
 from app.chain import ThenLink
-from app import pair
+from app import guest_users, pair
 from app.pair import PairLink, rename_pair, leave as pair_leave
 from app.adapters.claude_headless import sessions as headless_sessions
 from app.adapters.codex import sessions as codex_sessions
@@ -1767,6 +1767,11 @@ class SessionRegistry:
         ativos = share_store.active_sessions()
         for info in infos:
             info.shared = info.name in ativos
+        if guest_users.has_claims():
+            def _owners() -> None:
+                for info in infos:
+                    info.owner = guest_users.owner_name(info.name)
+            await asyncio.to_thread(_owners)
         return infos + orqs
 
     @diag.rastrear("sessao.criar")
