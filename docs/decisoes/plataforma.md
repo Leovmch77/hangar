@@ -748,3 +748,39 @@ URL de chamada ignora a rede local sem erro nenhum.
 Página HTTPS (PWA pelo `*.ts.net` ou pela VPS) não tenta o `http://` local: o navegador bloqueia
 conteúdo misto. Valem o app nativo, o desktop nativo e o Electron (página em `http://127.0.0.1`).
 A máquina precisa escutar fora do loopback (`CP_LAN_BIND_IP=0.0.0.0`); o token continua exigido.
+
+## Atalho No Hangar: cópia única por atalho, fora da sessão
+
+(29/09/2026, pedido do usuário.) Cada atalho tem duas formas. "Na sessão" é a antiga: o terminal
+pertence à sessão que clicou e morre com ela (`registry.kill` → `close_all`). "No Hangar" roda UMA
+cópia no servidor inteiro, com dono vazio e a opção `@cp_shortcut_key` no multiplexador; `close_all`
+e a lista de uma sessão não a alcançam, e clicar de novo reaproveita a cópia viva. A aba dela
+aparece no painel de terminal de toda sessão.
+
+Por que não uma cópia por sessão: a VM DELPHI-02 aceita uma conexão RDP por usuário, e a segunda
+derruba a primeira (`ERRCONNECT_CONNECT_CANCELLED` no terminal do atalho anterior). Fechar a sessão
+que clicou também levava junto RDP e túnel.
+
+O estado chega pelo evento `shortcut_terminals` do stream da lista, lido em paralelo com a lista de
+sessões para que um tmux travado nunca atrase `sessions`; nunca há um SSE por terminal. Convidado
+não recebe o evento.
+
+**Pergunta.** O app oferece "responder pelo app" quando a linha do cursor termina em `:` ou `?` E o
+processo em primeiro plano dorme esperando leitura do tty (Linux). Linha que quebra em várias linhas
+da tela é reunida de volta (linhas que preenchem a largura do pane).
+
+Medido no Linux (CachyOS, kernel 7.1): o `read -p` do bash de um atalho dorme com `wchan` =
+`wait_woken`; o `sleep` dorme em `hrtimer_nanosleep` (medido em 29/09/2026 num
+`tmux new-session 'sleep 60'` descartável, lendo `/proc/<pid>/wchan` do filho do shell).
+
+Medido no Windows (psmux 3.3.8, DELPHI-02, 29/09/2026): `Start-Sleep` e `Read-Host` mostram variação
+de CPU 0 em 2 s, então lá não há como separar os dois, e a regra é tela + CPU paradas: um prompt
+impresso seguido de um `sleep` vira pergunta falsa. `capture-pane`, `cursor_y` e `send-keys -l` +
+Enter funcionam com `Read-Host` (`Porta [3000]:` lido de volta). Um filho gráfico do pane (notepad)
+é achado na mesma sessão do Windows do backend.
+
+**Ainda não medido no psmux:** o `.cmd` que grava o código de saída e segura o pane com `pause`
+(a sonda falhou ao lançar porque o PowerShell 5.1 estraga as aspas embutidas; falta uma sonda em
+Python espelhando a chamada do backend). O código de saída do próprio psmux não serve
+(`pane_dead_status` veio `0` para um comando que saiu com 3), e `new-session … ; set-option …` na
+mesma chamada derrubou a sessão, por isso a opção é gravada em chamada separada.

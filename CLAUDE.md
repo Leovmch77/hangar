@@ -347,6 +347,10 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
   chamada a um servidor sai por `baseOf` (ou `getBaseUrl` do `ApiEnv`); `s.baseUrl` cru ignora a
   rede local calado. O token só vai ao endereço local depois da prova HMAC (`/api/peers/prova`),
   e o local só vence se provar antes de o principal responder (IP local via VPN é mais lento).
+- **Atalho No Hangar é uma cópia só por atalho, e de nenhuma sessão.** Dono vazio +
+  `@cp_shortcut_key` no multiplexador: `close_all`/lista da sessão não o alcançam; clicar de novo
+  reaproveita. A aba dele fica no painel de terminal de toda sessão. O estado chega pelo stream da
+  lista (`shortcut_terminals`), nunca por SSE próprio; convidado não vê.
 - **Revisão de código:** neste repositório, revisão local e as verificações do projeto.
 - **MCP `hangar` (`/mcp`): identidade do chamador vai no cabeçalho e o backend resolve.** Chave
   vence pane, pane vence nome, pane ambíguo não resolve, nada resolvido é erro (nunca `cli`). O
