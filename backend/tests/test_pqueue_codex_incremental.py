@@ -84,14 +84,66 @@ def test_erro_na_fonte_nao_devolve_cache(tmp_path):
 
 
 def test_cache_limitado_e_separado_por_caminho(tmp_path, monkeypatch):
-    monkeypatch.setattr(pqueue, "_codex_committed", {})
-    monkeypatch.setattr(pqueue, "_CODEX_COMMITTED_MAX", 2)
+    monkeypatch.setattr(pqueue, "_indices", {})
+    monkeypatch.setattr(pqueue, "_INDICES_MAX", 2)
     paths = [tmp_path / str(i) for i in range(3)]
     for i, path in enumerate(paths):
         path.write_text(line(str(i)))
         assert read(path) == {str(i)}
-    assert set(pqueue._codex_committed) == {str(p) for p in paths[1:]}
-    monkeypatch.setattr(pqueue, "_CODEX_COMMITTED_CHARS", 1)
+    assert set(pqueue._indices) == {(str(p), "codex") for p in paths[1:]}
+    monkeypatch.setattr(pqueue, "_INDICE_CHARS", 1)
     paths[2].write_text(line("texto grande"))
     assert read(paths[2]) == {"texto grande"}
-    assert str(paths[2]) not in pqueue._codex_committed
+    assert (str(paths[2]), "codex") not in pqueue._indices
+
+
+# Claude: a confirmação roda a cada envio e durante turno longo. Reler o transcript inteiro (MBs)
+# a cada vez prendia um núcleo; o índice só lê o que foi acrescentado.
+def claude_user(text):
+    return json.dumps({"type": "user", "message": {"role": "user", "content": text}}) + "\n"
+
+
+def claude_queue(op, text=None):
+    obj = {"type": "queue-operation", "operation": op}
+    if text is not None:
+        obj["content"] = text
+    return json.dumps(obj) + "\n"
+
+
+def test_claude_le_so_o_acrescentado(tmp_path, monkeypatch):
+    path = tmp_path / "t.jsonl"
+    path.write_text(claude_user("oi") + claude_user("tudo certo"), encoding="utf-8")
+    vistos = []
+    original = pqueue._CommittedIndex._alimenta_claude
+    monkeypatch.setattr(pqueue._CommittedIndex, "_alimenta_claude",
+                        lambda self, obj: (vistos.append(obj), original(self, obj)))
+    assert {"oi", "tudo certo"} <= pqueue.committed_user_lines(str(path))
+    assert len(vistos) == 2
+    assert {"oi", "tudo certo"} <= pqueue.committed_user_lines(str(path))
+    assert len(vistos) == 2                      # nada novo: nenhuma linha relida
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(claude_user("pode seguir"))
+    assert "pode seguir" in pqueue.committed_user_lines(str(path))
+    assert len(vistos) == 3                      # só a linha acrescentada
+
+
+def test_claude_fila_interna_acompanha_o_acrescentado(tmp_path):
+    path = tmp_path / "t.jsonl"
+    path.write_text(claude_queue("enqueue", "primeira") + claude_queue("enqueue", "segunda"),
+                    encoding="utf-8")
+    assert pqueue.fila_interna_pendente(str(path)) == {"primeira", "segunda"}
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(claude_queue("dequeue"))
+    assert pqueue.fila_interna_pendente(str(path)) == {"segunda"}
+    assert "primeira" in pqueue.committed_user_lines(str(path))
+
+
+def test_claude_truncado_relê_do_inicio(tmp_path):
+    path = tmp_path / "t.jsonl"
+    path.write_text(claude_user("antigo") + claude_queue("enqueue", "presa"), encoding="utf-8")
+    assert "antigo" in pqueue.committed_user_lines(str(path))
+    assert pqueue.fila_interna_pendente(str(path)) == {"presa"}
+    path.write_text(claude_user("novo"), encoding="utf-8")
+    lines = pqueue.committed_user_lines(str(path))
+    assert "novo" in lines and "antigo" not in lines
+    assert pqueue.fila_interna_pendente(str(path)) == set()

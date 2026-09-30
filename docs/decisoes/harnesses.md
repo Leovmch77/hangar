@@ -184,6 +184,12 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   409 `erro_sessao_orq` (`api._recusa_orq`), e os três clientes escondem compositor, terminal,
   parear e rodar, com o botão "Falar com o árbitro" no lugar. Ver
   [Provider `orq`](#provider-orq-a-linha-do-orquestrador-não-tem-pane).
+- **Confirmação de entrega lê o transcript de forma incremental, e o transcript continua sendo a
+  prova.** Uma checagem pendente por sessão (`_agendar_confirmacao`); com a sessão trabalhando o
+  intervalo dobra até 120 s. `committed_user_lines` e `fila_interna_pendente` leem pelo mesmo
+  índice por (arquivo, provider), que só processa o que foi acrescentado. O `UserPromptSubmit`
+  NÃO confirma: dispara também para prompt que outro hook barra. Ver
+  [confirmação de entrega sem reler o transcript](#confirmação-de-entrega-sem-reler-o-transcript).
 - **App-server efêmero do Codex sobe com `-c features.plugins=false` quando não usa plugins.**
   Ver [temporários `git-*` no `.tmp` do Codex](#temporários-git--no-tmp-do-codex).
 - **Cota e catálogo do Codex vão por HTTP primeiro, com o app-server efêmero de reserva.** A rota
@@ -192,6 +198,33 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   vencido ou fora do arquivo, resposta que não é 200, formato estranho ou rede fora → app-server,
   com linha `info` no log. O Hangar nunca renova o token. 429 na cota NÃO cai no app-server: ele
   bateria no mesmo backend. Ver [Cota e catálogo do Codex por HTTP](#cota-e-catálogo-do-codex-por-http).
+
+## Confirmação de entrega sem reler o transcript
+
+Medido em 30/09/2026 pela sessão `Projetos`: backend a 100% de um núcleo. py-spy de 20 s deu
+1046 de 1303 amostras em `_confirm_and_drain`, relendo `.jsonl` de 3 a 24 MB duas ou três vezes
+por chamada. Havia 25 `threading.Timer` vivos para 3 sessões com entrega sem confirmação:
+
+- Send, fim de turno e a própria checagem agendavam cada um o seu Timer, e as cadeias se somavam.
+- No ramo `working`, a entrada nunca vira `desistiu` (`confirm_only`), então a checagem se
+  reagendava a cada 8,5 s pelo turno inteiro.
+
+Correção:
+
+- `_agendar_confirmacao` mantém uma checagem pendente por sessão. A que roda antes vence, e a mais
+  tardia é trocada.
+- Com a sessão trabalhando, o intervalo dobra até `_CONFIRM_WORKING_MAX` (120 s).
+- O índice `_CommittedIndex`, que já existia só para o Codex, passou a servir Claude, Pi, omp e
+  Kimi. Ele guarda o offset, as linhas confirmadas e a fila interna (`queue-operation`), e relê do
+  início quando o arquivo troca, encolhe ou a âncora dos 256 bytes antes do offset não bate.
+
+Confirmar pelo hook `UserPromptSubmit` (texto do prompt no payload, sem ler o transcript) foi
+considerado e descartado. Os hooks do evento rodam em paralelo, e o nosso não sabe se outro barrou
+o prompt: confirmar ali escondia a bolha "não chegou" do prompt barrado (regra "Prompt barrado por
+hook"). O hook também roda antes de a linha existir no `.jsonl`, e a bolha da fila sumiria antes da
+real. A recheca periódica do turno longo continua espaçada, não removida: mensagem orientada no
+meio do turno entra como `attachment/queued_command`, sem `UserPromptSubmit`, e sem a recheca
+voltaria a bolha fantasma dos `test_turno_longo_*`.
 
 ## Cota e catálogo do Codex por HTTP
 
