@@ -5,6 +5,8 @@ use super::*;
 use chrono::{Datelike, Local, TimeZone};
 
 const PREVIEW_MAX: usize = 280;
+/// Só o recado descartado some; o selo e o detalhe do Jev ficam no contraste normal.
+const FADED: f32 = 0.62;
 
 /// Corpo do recado cortado no último espaço antes do limite, sem deixar crase aberta (viraria código sem fim).
 fn body_preview(body: &str, max: usize) -> (String, bool) {
@@ -67,7 +69,7 @@ fn detail_lines(decided: &OrqDecidedBy) -> Vec<String> {
     let mut lines = Vec::new();
     let jev = decided.jev.as_ref();
     if let Some((jev, choice)) = jev.and_then(|jev| jev.choice.as_deref().map(|choice| (jev, choice))) {
-        let p = jev.probs.get(choice).copied().flatten().or(jev.p).map(pct).unwrap_or_default();
+        let p = jev.probs.get(choice).copied().flatten().or(if choice == "nothing" { jev.p } else { None }).map(pct).unwrap_or_default();
         let name = match choice {
             "nothing" | "act" | "none" => tr_shared(&format!("orq_choice_{choice}"), &[]),
             other => other.to_owned(),
@@ -111,7 +113,7 @@ fn line_text(line: &OrqLine) -> Option<String> {
 }
 
 /// Ids dos eventos que abrem um dia novo (hora local), para o separador sair antes deles.
-pub(super) fn day_starts(events: &[ChatEvent]) -> HashSet<String> {
+pub(super) fn day_starts<'a>(events: impl IntoIterator<Item = &'a ChatEvent>) -> HashSet<String> {
     let mut starts = HashSet::new();
     let mut last = None;
     for event in events {
@@ -189,7 +191,7 @@ impl Hangar {
             else if orq.kind == "failed" { ("!", theme::danger()) }
             else { ("⚖", theme::warning()) };
         let tag = |text: String, color: Hsla| div().flex_shrink_0().px(px(6.)).rounded(px(6.)).bg(color.opacity(0.18)).text_size(px(11.))
-            .font_weight(FontWeight::SEMIBOLD).text_color(color).child(text);
+            .font_weight(FontWeight::SEMIBOLD).text_color(color).child(text).when(dropped, |el| el.opacity(FADED));
 
         let detail = orq.decided_by.as_ref().map(detail_lines).unwrap_or_default();
         // Descartado nasce com o porquê à vista, e o clique inverte o que estava.
@@ -222,27 +224,28 @@ impl Hangar {
         let content = div().min_w_0().flex_1().flex().flex_col().gap_1().px(px(12.)).py(px(8.)).rounded(px(10.)).bg(theme::raised())
             .border_1().border_color(theme::border()).text_sm()
             .child(div().flex().flex_wrap().items_center().gap_2().text_xs().text_color(theme::muted())
-                .child(div().font_weight(FontWeight::SEMIBOLD).text_color(theme::text()).child(label))
+                .child(div().font_weight(FontWeight::SEMIBOLD).text_color(theme::text()).when(dropped, |el| el.opacity(FADED)).child(label))
                 .when(orq.mark.as_deref() == Some("decisao"), |el| el.child(tag(tr_shared("orq_tag_decision", &[]), theme::warning())))
                 .when(orq.alarm, |el| el.child(tag(tr_shared("orq_tag_alarm", &[]), theme::warning())))
                 .when_some(orq.task, |el, task| el.child(tag(format!("T{task}"), theme::muted())))
                 .when_some(orq.rejected_round, |el, round| el.child(tag(tr_shared("orq_tag_rejected", &[("round", &round.to_string())]), theme::danger())))
                 .when_some(badge, |el, badge| el.child(badge))
-                .when_some(time, |el, time| el.child(div().ml_auto().flex_shrink_0().text_color(theme::faint()).child(time))))
-            .when_some(body_view, |el, view| el.child(chat_text(&view, cx).markdown_extensions(citation_extensions(id, cx.weak_entity()))))
-            .when(cut, |el| el.child(Button::new(SharedString::from(format!("orq-more-{id}"))).ghost().xsmall()
+                .when_some(time, |el, time| el.child(div().ml_auto().flex_shrink_0().text_color(theme::faint()).when(dropped, |el| el.opacity(FADED)).child(time))))
+            .when_some(body_view, |el, view| el.child(div().when(dropped, |el| el.opacity(FADED))
+                .child(chat_text(&view, cx).markdown_extensions(citation_extensions(id, cx.weak_entity())))))
+            .when(cut, |el| el.child(div().flex().when(dropped, |el| el.opacity(FADED)).child(Button::new(SharedString::from(format!("orq-more-{id}"))).ghost().xsmall()
                 .label(tr_shared(if more_open { "orq_see_less" } else { "orq_see_all" }, &[]))
-                .on_click(cx.listener(move |this, _, _, cx| this.toggle(more_key.clone(), cx)))))
-            .when_some(question_view, |el, view| el.child(div().flex().flex_wrap().gap_1()
+                .on_click(cx.listener(move |this, _, _, cx| this.toggle(more_key.clone(), cx))))))
+            .when_some(question_view, |el, view| el.child(div().flex().flex_wrap().gap_1().when(dropped, |el| el.opacity(FADED))
                 .child(div().font_weight(FontWeight::SEMIBOLD).child(tr_shared("orq_question", &[])))
                 .child(div().min_w_0().flex_1().child(TextView::new(&view).selectable(true).scrollable(false).text_sm().on_link_click(open_web_link)))))
             .when(orq.kind == "failed", |el| el.when_some(orq.error.as_deref(), |el, error|
                 el.child(div().child(tr_shared("orq_failed_reason", &[("error", error)])))))
-            .when_some(parecer, |el, button| el.child(div().flex().child(button)))
+            .when_some(parecer, |el, button| el.child(div().flex().when(dropped, |el| el.opacity(FADED)).child(button)))
             .when(detail_open && !detail.is_empty(), |el| el.child(div().text_xs().text_color(theme::muted()).child(detail.join(" · "))));
 
-        div().w_full().max_w(px(760.)).flex().items_start().gap(px(10.)).when(dropped, |el| el.opacity(0.62))
-            .child(div().size(px(28.)).mt(px(2.)).flex_shrink_0().rounded_full().flex().items_center().justify_center()
+        div().w_full().max_w(px(760.)).flex().items_start().gap(px(10.))
+            .child(div().size(px(28.)).mt(px(2.)).flex_shrink_0().rounded_full().flex().items_center().justify_center().when(dropped, |el| el.opacity(FADED))
                 .bg(tint.opacity(0.18)).text_color(tint).text_size(px(13.)).child(glyph))
             .child(content)
     }
@@ -250,7 +253,7 @@ impl Hangar {
 
 #[cfg(test)]
 mod tests {
-    use super::{badge_key, badge_text, body_preview, day_starts, line_text, raw_line};
+    use super::{badge_key, badge_text, body_preview, day_starts, detail_lines, line_text, raw_line};
     use crate::{api::dto::*, i18n::tr_shared};
     use chrono::{Local, TimeZone};
     use std::collections::HashSet;
@@ -297,6 +300,14 @@ mod tests {
         assert!(!text.ends_with('·') && !text.ends_with(' '), "{text:?}");
         assert!(!badge_text(&OrqDecidedBy { regex: Some(OrqRegex { verdict: "drop".into(), category: None }), ..decided("regex") }, "would_drop").ends_with('·'));
         assert!(badge_text(&jev("nothing", Some(0.97), &[]), "dropped").ends_with("97%"));
+    }
+
+    #[test]
+    fn detail_uses_the_loose_p_only_for_nothing() {
+        // Registro antigo que acordou: choice act com p 0 e sem probs não vira "agir · 0%".
+        let old = detail_lines(&jev("act", Some(0.), &[])).join(" ");
+        assert!(!old.contains("0%"), "{old}");
+        assert!(detail_lines(&jev("nothing", Some(0.9), &[])).join(" ").contains("90%"));
     }
 
     #[test]

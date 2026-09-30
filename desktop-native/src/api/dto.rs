@@ -266,8 +266,8 @@ pub struct OrqAutomation {
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct OrqAutoMode {
     /// `on` | `shadow` | `off`.
-    #[serde(default)] pub jev: String,
-    #[serde(default)] pub regex: String,
+    pub jev: Option<String>,
+    pub regex: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -352,7 +352,8 @@ pub struct OrqConsumptionModel {
 
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct OrqIntegration {
-    #[serde(default)] pub branch: String,
+    /// `null` quando a execução não registrou o início ou o bloco falhou.
+    pub branch: Option<String>,
     pub last: Option<OrqIntegrationLast>,
     /// `green` | `red` | `conflict` | `failed`.
     pub outcome: Option<String>,
@@ -371,7 +372,8 @@ pub struct OrqIntegrationLast {
 pub struct OrqDeliveryChecks {
     #[serde(default)] pub ok: u32,
     #[serde(default)] pub total: u32,
-    #[serde(default)] pub failing: Vec<String>,
+    /// Números das Tasks com check vermelho.
+    #[serde(default)] pub failing: Vec<u32>,
 }
 
 impl ChatEvent {
@@ -585,14 +587,15 @@ mod tests {
                     "models": [{"model": "opus", "sessions": 3, "new": 5, "cache_read": 6, "usd": null}]}],
                 "missing_prices": ["x"], "subagents": true},
             "integration": {"branch": "main", "last": {"task": 4, "commit": "3b799e6", "ts": "2026-09-29T21:00:00Z"}, "outcome": "green",
-                "red_log": null, "delivery_checks": {"ok": 2, "total": 3, "failing": ["lint"]}}});
+                "red_log": null, "delivery_checks": {"ok": 2, "total": 3, "failing": [3, 5]}}});
         let read: OrqPanel = serde_json::from_value(panel.clone()).unwrap();
         assert_eq!(read.tasks.integrated, 4);
-        assert_eq!((read.automation.mode.jev.as_str(), read.automation.mode.regex.as_str()), ("on", "shadow"));
+        assert_eq!((read.automation.mode.jev.as_deref(), read.automation.mode.regex.as_deref()), (Some("on"), Some("shadow")));
         assert_eq!(read.tasks.rows[1].round, None);
         assert_eq!(read.team[0].last.as_ref().unwrap().code, "delivered");
         assert_eq!(read.automation.advanced.min_confidence.unwrap().p, Some(0.61));
-        assert_eq!(read.integration.delivery_checks.failing, ["lint"]);
+        assert_eq!(read.integration.delivery_checks.failing, [3, 5]);
+        assert_eq!(read.integration.branch.as_deref(), Some("main"));
         let use_ = read.consumption.unwrap();
         assert_eq!(use_.totals.new, 12_345_678_901);
         assert!(use_.totals.usd.is_none() && use_.totals.usd_partial);
@@ -600,6 +603,21 @@ mod tests {
         assert!(use_.providers[0].models[0].usd.is_none());
         panel["consumption"] = json!(null);
         assert!(serde_json::from_value::<OrqPanel>(panel).unwrap().consumption.is_none());
+    }
+
+    #[test]
+    fn orq_panel_accepts_the_fallback_blocks_with_nulls() {
+        // O bloco que falha no backend sai com estes nulls; o estado de erro não pode virar erro de parse.
+        let panel = json!({"run": "r", "gid": "", "errors": [{"file": "integration", "error": "x"}], "empty": false,
+            "tasks": {"integrated": 0, "total": 0, "total_known": false, "rows": []}, "team": [], "decisions": [],
+            "automation": {"mode": {"jev": null, "regex": null}, "woke": {"total": 0, "decisions": 0, "alarms": 0, "messages": 0},
+                "alone": {"total": 0, "opened": 0, "integrated": 0, "dropped": 0}, "dropped_by_jev": 0,
+                "advanced": {"would_drop": 0, "disagree": 0, "judged": 0, "min_confidence": null, "by_rule": 0}},
+            "consumption": null,
+            "integration": {"branch": null, "last": null, "outcome": null, "red_log": null,
+                "delivery_checks": {"ok": 0, "total": 0, "failing": []}}});
+        let read: OrqPanel = serde_json::from_value(panel).unwrap();
+        assert!(read.integration.branch.is_none() && read.automation.mode.jev.is_none());
     }
 
     #[test]

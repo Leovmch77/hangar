@@ -323,7 +323,7 @@ impl Hangar {
 
     fn orq_automation(&self, panel: &OrqPanel, cx: &mut Context<Self>) -> Div {
         let auto = &panel.automation;
-        let mode = tr_shared("orq_auto_mode", &[("jev", &mode_text(&auto.mode.jev)), ("regex", &mode_text(&auto.mode.regex))]);
+        let mode = tr_shared("orq_auto_mode", &[("jev", &mode_text(auto.mode.jev.as_deref().unwrap_or("—"))), ("regex", &mode_text(auto.mode.regex.as_deref().unwrap_or("—")))]);
         let woke = tr_shared("orq_auto_woke_detail", &[("decisions", &auto.woke.decisions.to_string()), ("alarms", &auto.woke.alarms.to_string()), ("messages", &auto.woke.messages.to_string())]);
         let alone = tr_shared("orq_auto_alone_detail", &[("opened", &auto.alone.opened.to_string()), ("integrated", &auto.alone.integrated.to_string()), ("dropped", &auto.alone.dropped.to_string())]);
         let advanced = &auto.advanced;
@@ -357,7 +357,9 @@ impl Hangar {
     fn orq_consumption(&self, panel: &OrqPanel) -> Div {
         let title = tr_shared("orq_use_title", &[]);
         let Some(usage) = panel.consumption.as_ref() else {
-            return section(title, None, div().text_xs().text_color(theme::muted()).child(tr_shared("orq_use_computing", &[])));
+            // Consumo que falhou já tem a própria linha de erro no topo: não fica em "calculando".
+            let failed = panel.errors.iter().any(|error| error.file == "consumption");
+            return section(title, None, div().text_xs().text_color(theme::muted()).when(!failed, |el| el.child(tr_shared("orq_use_computing", &[]))));
         };
         let usd = |value: Option<f64>| value.map_or_else(|| "—".to_owned(), |usd| self.money(usd));
         // A coluna já diz a moeda no cabeçalho: na linha vai só o número.
@@ -415,13 +417,16 @@ impl Hangar {
         });
         let checks = &integration.delivery_checks;
         let checks_line = (checks.total > 0).then(|| {
-            let params = [("ok", checks.ok.to_string()), ("total", checks.total.to_string()), ("tasks", checks.failing.join(", "))];
+            let params = [("ok", checks.ok.to_string()), ("total", checks.total.to_string()), ("tasks", checks.failing.iter().map(|task| format!("T{task}")).collect::<Vec<_>>().join(", "))];
             let params: Vec<(&str, &str)> = params.iter().map(|(key, value)| (*key, value.as_str())).collect();
             if checks.ok >= checks.total { (tr_shared("orq_int_checks_green", &params), theme::success()) } else { (tr_shared("orq_int_checks_red", &params), theme::danger()) }
         });
         let status = |text: String, color: Hsla| div().flex().items_center().gap_2().text_sm().text_color(theme::text()).child(dot(color)).child(div().min_w_0().whitespace_normal().child(text));
         section(tr_shared("orq_int_title", &[]), None, div().flex().flex_col().gap(px(6.))
-            .child(div().flex().items_center().gap_2().child(label(tr_shared("orq_int_branch", &[]))).child(mono(integration.branch.clone())))
+            .child(div().flex().items_center().gap_2().child(label(tr_shared("orq_int_branch", &[]))).child(match integration.branch.clone() {
+                Some(branch) => mono(branch).into_any_element(),
+                None => div().text_sm().text_color(theme::muted()).child("—").into_any_element(),
+            }))
             .child(div().flex().items_center().gap_2().child(label(tr_shared("orq_int_last", &[]))).child(div().min_w_0().truncate().text_sm().text_color(theme::text()).child(last)))
             .children(outcome.map(|(key, color)| status(tr_shared(key, &[]), color)))
             .children(checks_line.map(|(text, color)| status(text, color))))

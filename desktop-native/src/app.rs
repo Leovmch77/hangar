@@ -2399,7 +2399,7 @@ impl Hangar {
         self.items = conversation::build(&self.chat.events, conversation::View { thinking: a.thinking_tools, tasks: a.task_list,
             merge_thinking: a.tool_look == appearance::ToolLook::Tree }, &self.pinned);
         self.paired = conversation::pair_results(&self.chat.events).0;
-        self.orq_days = if self.selected.as_ref().is_some_and(SessionInfo::orq) { orq_timeline::day_starts(&self.chat.events.iter().filter(|event| event.orq.is_some()).cloned().collect::<Vec<_>>()) } else { HashSet::new() };
+        self.orq_days = if self.selected.as_ref().is_some_and(SessionInfo::orq) { orq_timeline::day_starts(self.chat.events.iter().filter(|event| event.orq.is_some())) } else { HashSet::new() };
         self.sync_tables(a.table_chart, stable);
         api::open_trace(|| format!("sync_rows built {} items, {stable} events unchanged", self.items.len()));
         self.sync_row_ids(Some(stable), cx);
