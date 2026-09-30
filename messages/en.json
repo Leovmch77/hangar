@@ -604,6 +604,8 @@
   "busca_n_conversas": "in {n} conversations",
   "busca_nenhum_todas": "No message from you or the assistant has all these words: {termos}",
   "busca_servidor_falhou": "{servidor} did not answer the search",
+  "busca_aguardando": "waiting for {servidores}…",
+  "busca_pulados": "offline, skipped: {servidores}",
   "busca_voce": "You",
   "busca_assistente": "Assistant",
   "busca_carregando_contexto": "Loading the conversation…",

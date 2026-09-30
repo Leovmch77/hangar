@@ -604,6 +604,8 @@
   "busca_n_conversas": "em {n} conversas",
   "busca_nenhum_todas": "Nenhuma mensagem sua ou do assistente tem todas estas palavras: {termos}",
   "busca_servidor_falhou": "{servidor} não respondeu à busca",
+  "busca_aguardando": "aguardando {servidores}…",
+  "busca_pulados": "fora do ar, não consultado: {servidores}",
   "busca_voce": "Você",
   "busca_assistente": "Assistente",
   "busca_carregando_contexto": "Carregando a conversa…",
