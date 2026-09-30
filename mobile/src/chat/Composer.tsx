@@ -45,6 +45,8 @@ type PendingAttach = DraftAttachment & { size?: number };
 const attachInsert = (attach: DraftAttachment, path: string) =>
   `📎 ${attach.kind === 'image' ? m.board_imagem() : m.board_arquivo()}: ${path}`;
 const withAttach = (text: string, insert: string) => (text ? `${text} — ${insert}` : insert);
+// Glifo dentro de botão de 44 pt: crescer com o texto ampliado cortava o ícone; o rótulo acessível já diz a ação.
+const GLYPH_MAX_SCALE = 1.4;
 
 // Chamado depois que o rascunho largou a cópia: falhar aqui deixa só um arquivo órfão na pasta do app.
 function dropCopy(uri: string): void {
@@ -1058,15 +1060,16 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
             onPress={handleMicPress}
             disabled={transcribing || sending || (!!dictation && !gravando)}
             accessibilityState={{ disabled: transcribing || sending || (!!dictation && !gravando), busy: transcribing }}
-            style={[
+            style={({ pressed }) => [
               styles.iconBtn,
+              pressed && styles.iconBtnPressed,
               (transcribing || sending || (!!dictation && !gravando)) && styles.iconBtnDisabled,
               gravando && { backgroundColor: theme.tokens.status.error, borderColor: theme.tokens.status.error },
             ]}
             accessibilityLabel={gravando ? m.composer_parar_gravacao() : m.composer_gravar_audio()}
             accessibilityRole="button"
           >
-            <Text style={[styles.iconGlyph, { color: gravando ? '#fff' : theme.tokens.text.secondary }]}>
+            <Text style={[styles.iconGlyph, { color: gravando ? '#fff' : theme.tokens.text.secondary }]} maxFontSizeMultiplier={GLYPH_MAX_SCALE}>
               {gravando ? '■' : '🎤'}
             </Text>
           </Pressable>
@@ -1075,14 +1078,14 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
             onPress={() => setAttachMenuOpen(true)}
             disabled={uploading || sending || gravando}
             accessibilityState={{ disabled: uploading || sending || gravando, busy: uploading }}
-            style={[styles.iconBtn, (uploading || gravando) && styles.iconBtnDisabled]}
+            style={({ pressed }) => [styles.iconBtn, pressed && styles.iconBtnPressed, (uploading || sending || gravando) && styles.iconBtnDisabled]}
             accessibilityLabel={m.composer_anexar_arquivo()}
             accessibilityRole="button"
           >
             {uploading ? (
               <ActivityIndicator size="small" color={theme.tokens.text.secondary} />
             ) : (
-              <Text style={[styles.iconGlyph, { color: theme.tokens.text.secondary }]}>📎</Text>
+              <Text style={[styles.iconGlyph, { color: theme.tokens.text.secondary }]} maxFontSizeMultiplier={GLYPH_MAX_SCALE}>📎</Text>
             )}
           </Pressable>
 
@@ -1090,24 +1093,34 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
             <Pressable
               onPress={onStop}
               disabled={stopping}
-              style={[styles.iconBtn, stopping && styles.iconBtnDisabled]}
+              style={({ pressed }) => [styles.iconBtn, { borderColor: theme.tokens.status.error }, pressed && styles.iconBtnPressed, stopping && styles.iconBtnDisabled]}
               accessibilityLabel={m.composer_parar()}
               accessibilityRole="button"
               accessibilityState={{ disabled: stopping, busy: stopping }}
             >
-              <Icon name="Square" size={20} />
+              {stopping ? (
+                <ActivityIndicator size="small" color={theme.tokens.status.error} />
+              ) : (
+                <Icon name="Square" size={20} color={theme.tokens.status.error} />
+              )}
             </Pressable>
           ) : null}
 
+          {/* Desabilitado vira botão de superfície com seta apagada, não o acento translúcido:
+              com fundo claro ou sem transparência o acento a 40% sumia. */}
           <Pressable
             onPress={handleSend}
             disabled={!canSend}
             accessibilityState={{ disabled: !canSend, busy: sending || uploading }}
-            style={[styles.sendBtn, { backgroundColor: theme.tokens.accent.base }, !canSend && styles.sendBtnDisabled]}
+            style={({ pressed }) => [
+              styles.sendBtn,
+              canSend ? { backgroundColor: theme.tokens.accent.base } : styles.sendBtnDisabled,
+              pressed && canSend && styles.sendBtnPressed,
+            ]}
             accessibilityLabel={m.composer_enviar_mensagem()}
             accessibilityRole="button"
           >
-            <Text style={[styles.sendGlyph, { color: theme.tokens.text.inverse }]}>↑</Text>
+            <Text style={[styles.sendGlyph, { color: canSend ? theme.tokens.text.inverse : theme.tokens.text.muted }]} maxFontSizeMultiplier={GLYPH_MAX_SCALE}>↑</Text>
           </Pressable>
         </View>
 
@@ -1160,7 +1173,7 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
 
         {error ? (
           <View style={styles.errorRow}>
-            <Text style={[styles.error, { color: theme.tokens.status.error }]}>{error}</Text>
+            <Text style={[styles.error, { color: theme.tokens.status.error }]} accessibilityRole="alert" accessibilityLiveRegion="assertive">{error}</Text>
             {failed ? (
               <Pressable onPress={handleRetry} style={[styles.retryBtn, { borderColor: theme.tokens.border.subtle }]} accessibilityRole="button">
                 <Text style={[styles.retryText, { color: theme.tokens.accent.base }]}>{m.composer_transcrever_de_novo()}</Text>
@@ -1171,7 +1184,7 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
 
         {draftIssue ? (
           <View style={styles.errorRow}>
-            <Text style={[styles.error, { color: theme.tokens.status.error }]}>{draftIssue}</Text>
+            <Text style={[styles.error, { color: theme.tokens.status.error }]} accessibilityRole="alert" accessibilityLiveRegion="assertive">{draftIssue}</Text>
             {readBlocked ? (
               <Pressable onPress={handleRereadDraft} style={[styles.retryBtn, { borderColor: theme.tokens.border.subtle }]} accessibilityRole="button">
                 <Text style={[styles.retryText, { color: theme.tokens.accent.base }]}>{m.composer_draft_read_again()}</Text>
@@ -1182,7 +1195,7 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
 
         {submission ? (
           <View style={styles.undoRow}>
-            <Text style={[styles.hint, styles.recoverText, { color: theme.tokens.text.muted }]}>
+            <Text style={[styles.hint, styles.recoverText, { color: theme.tokens.text.muted }]} accessibilityLiveRegion="polite">
               {submission.status === 'rejected' ? m.composer_submission_rejected()
                 : submission.status === 'sending' || sending ? m.composer_submission_sending() : m.chat_envio_incerto()}
             </Text>
@@ -1356,6 +1369,9 @@ const styles = StyleSheet.create((theme) => ({
     borderWidth: 1,
     borderColor: theme.tokens.border.subtle,
   },
+  iconBtnPressed: {
+    backgroundColor: theme.tokens.bg.hover,
+  },
   iconBtnDisabled: {
     opacity: 0.5,
   },
@@ -1371,7 +1387,12 @@ const styles = StyleSheet.create((theme) => ({
     justifyContent: 'center',
   },
   sendBtnDisabled: {
-    opacity: 0.4,
+    backgroundColor: superficie(theme, 0.8),
+    borderWidth: 1,
+    borderColor: theme.tokens.border.subtle,
+  },
+  sendBtnPressed: {
+    opacity: 0.8,
   },
   sendGlyph: {
     fontSize: 20,
@@ -1424,6 +1445,7 @@ const styles = StyleSheet.create((theme) => ({
     fontWeight: '600',
   },
   error: {
+    flexShrink: 1,
     fontSize: theme.base.text.xs,
     paddingHorizontal: theme.base.space[1],
   },
