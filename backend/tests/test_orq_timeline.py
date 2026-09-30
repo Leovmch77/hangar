@@ -604,7 +604,17 @@ def test_transcript_indisponivel_fica_em_missing_e_tenta_de_novo_logo(real, monk
     assert calls["n"] == 2
 
 
-def test_claude_do_dia_do_inicio_entra_inteiro_mesmo_antes_do_inicio(real, monkeypatch):
+@pytest.fixture(params=["UTC", "America/Sao_Paulo"])
+def machine_tz(request, monkeypatch):
+    import time
+    monkeypatch.setenv("TZ", request.param)
+    time.tzset()
+    yield request.param
+    monkeypatch.undo()
+    time.tzset()
+
+
+def test_claude_do_dia_do_inicio_entra_inteiro_mesmo_antes_do_inicio(real, monkeypatch, machine_tz):
     # `ts` do Claude é a 1ª resposta do dia: o árbitro respondeu antes do `execucao_inicio` (21:53 -03:00).
     monkeypatch.setattr(ot, "_exists", lambda p: True)
     fake = {"/p/t5.jsonl": [_row("claude", "claude-opus-5-5", 50, 5, 0, 0, ts="2026-09-29T20:00:00-03:00"),
@@ -612,3 +622,14 @@ def test_claude_do_dia_do_inicio_entra_inteiro_mesmo_antes_do_inicio(real, monke
     monkeypatch.setattr(ot, "_rows_for", lambda provider, path: fake.get(path, []))
     c = settled(real, LIVE)["consumption"]
     assert c["totals"]["new"] == 55                 # o dia anterior fica fora
+
+
+def test_thread_que_nao_sobe_libera_a_trava_e_o_proximo_pedido_calcula(real, monkeypatch):
+    import threading
+    monkeypatch.setattr(ot, "_compute_consumption", lambda *a: ({"computed_at": "x"}, False))
+    ot._CONSUMPTION.clear()
+    real_start = threading.Thread.start
+    monkeypatch.setattr(threading.Thread, "start", lambda self: (_ for _ in ()).throw(RuntimeError("no threads")))
+    assert ot.panel(real, None)["consumption"] is None
+    monkeypatch.setattr(threading.Thread, "start", real_start)
+    assert settled(real, None)["consumption"] == {"computed_at": "x"}

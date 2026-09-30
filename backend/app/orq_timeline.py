@@ -733,9 +733,11 @@ def _compute_consumption(d: Path, names: list[str], aux: dict, live) -> tuple[di
             readable.add(name)
             for row in rows:
                 subagents = subagents or bool(row.subagente)
-                # Claude: `ts` é a 1ª resposta do dia, então o corte é por dia e inclui o dia inteiro do início.
-                if since is not None and (row.ts.astimezone().date() < since.date()
-                                          if row.source == "claude" else row.ts < since):
+                # Claude: `ts` é a 1ª resposta do dia (no fuso do balde), então o corte é por dia nesse fuso e inclui o dia inteiro do início.
+                if since is not None and (
+                        row.ts.astimezone(costs_claude_transcript.LOCAL).date()
+                        < since.astimezone(costs_claude_transcript.LOCAL).date()
+                        if row.source == "claude" else row.ts < since):
                     continue
                 if not row.model and hints.get(name):
                     row = replace(row, model=hints[name])
@@ -809,5 +811,9 @@ def _consumption(d: Path, names: list[str], aux: dict, live) -> tuple[dict | Non
             lock.release()
 
     # A soma lê transcripts grandes: nunca dentro do pedido. Uma thread por execução (a trava).
-    threading.Thread(target=run, name="orq-consumption", daemon=True).start()
+    try:
+        threading.Thread(target=run, name="orq-consumption", daemon=True).start()
+    except Exception:
+        lock.release()
+        _log.warning("orq_timeline: consumption thread did not start", exc_info=True)
     return stale
