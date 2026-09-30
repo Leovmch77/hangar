@@ -6,6 +6,7 @@ estado sai da atividade dela. Entrada nenhuma chega aqui: a API recusa antes (`e
 import asyncio
 import hashlib
 import json
+import logging
 from datetime import datetime
 from pathlib import Path
 from typing import AsyncIterator, Callable
@@ -16,6 +17,7 @@ from app.state import StateEvent
 from app.transcript import ChatEvent, TranscriptTailer
 
 POLL_S = 2.0
+_log = logging.getLogger(__name__)
 
 
 def parse_obj(obj: dict, run_dir: Path | None = None) -> list[ChatEvent]:
@@ -28,9 +30,13 @@ def parse_obj(obj: dict, run_dir: Path | None = None) -> list[ChatEvent]:
         ts = None
     # A linha não tem id: o hash dela é o mesmo no tail e no /history, e o cliente junta por id.
     key = json.dumps(obj, sort_keys=True).encode("utf-8")
-    run = orq_timeline.run_files(run_dir) if run_dir else None
-    return [ChatEvent(kind="notice", id=f"orq:{hashlib.sha1(key).hexdigest()[:16]}", text=text, ts=ts,
-                      orq=orq_timeline.entry(obj, run))]
+    # Exceção aqui mataria o tail da sessão inteira: a linha segue como notice cru.
+    try:
+        orq = orq_timeline.entry(obj, orq_timeline.run_files(run_dir) if run_dir else None)
+    except Exception:
+        _log.warning("orq_timeline.entry falhou", exc_info=True)
+        orq = None
+    return [ChatEvent(kind="notice", id=f"orq:{hashlib.sha1(key).hexdigest()[:16]}", text=text, ts=ts, orq=orq)]
 
 
 def line_parser(run_dir: Path | None) -> Callable[[str], list[ChatEvent]]:

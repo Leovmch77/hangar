@@ -237,3 +237,20 @@ def test_tailer_parser_uses_the_run_dir(synth):
     parse = adapter.line_parser(synth)
     [ev] = parse(json.dumps(lines(synth)[3], ensure_ascii=False))
     assert ev.orq["decided_by"]["jev"]["choice"] == "act"
+
+
+def test_entry_failure_still_yields_a_plain_notice(synth, monkeypatch):
+    obj = lines(synth)[3]
+    monkeypatch.setattr(ot, "entry", lambda *a, **k: 1 / 0)
+    [ev] = adapter.parse_obj(obj, synth)
+    assert ev.kind == "notice" and ev.text == obj["text"] and ev.orq is None and ev.id.startswith("orq:")
+
+
+def test_run_files_reuses_one_and_caps_the_cache(tmp_path):
+    a = ot.run_files(tmp_path)
+    assert ot.run_files(tmp_path) is a
+    for i in range(ot._RUNS_MAX + 4):
+        d = tmp_path / f"r{i}"
+        d.mkdir()
+        ot.run_files(d)
+    assert len(ot._RUNS) <= ot._RUNS_MAX

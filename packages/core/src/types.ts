@@ -789,7 +789,7 @@ export type OrqEntryKind = 'advance' | 'woke' | 'would_drop' | 'dropped' | 'fail
 export type OrqLine =
   | { code: 'opened'; sessions: { name: string; provider: string; model: string }[] }
   | { code: 'integrated'; merge: boolean }
-  | { code: 'delivered'; round: number; commit: string }
+  | { code: 'delivered'; round: number; commit: string | null }
   | { code: 'red_back'; executor: string }
   | { code: 'red_retry' };
 

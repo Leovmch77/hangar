@@ -70,6 +70,7 @@ class RunFiles:
     dir: Path
     _jev_sig: tuple | None = None
     _jev_by_text: dict = field(default_factory=dict)
+    _warned: bool = False
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
     def _jev_index(self) -> dict:
@@ -77,12 +78,21 @@ class RunFiles:
         try:
             st = path.stat()
             sig = (st.st_mtime_ns, st.st_size)
+        except FileNotFoundError:
+            sig = None
         except OSError:
             sig = None
+            if not self._warned:
+                self._warned = True
+                _log.warning("jev-shadow.jsonl ilegível: %s", path, exc_info=True)
         with self._lock:
             if sig != self._jev_sig:
                 index: dict = {}
-                for line in _lines(path) if sig else []:
+                rows = _lines(path) if sig else []
+                if sig and sig[1] and not rows and not self._warned:
+                    self._warned = True
+                    _log.warning("jev-shadow.jsonl existe e não foi lido: %s", path)
+                for line in rows:
                     try:
                         row = json.loads(line)
                     except ValueError:
@@ -116,8 +126,17 @@ class RunFiles:
 _RUNS: dict[str, RunFiles] = {}
 
 
+_RUNS_MAX = 16
+
+
 def run_files(d: Path) -> RunFiles:
-    return _RUNS.setdefault(str(d.resolve()), RunFiles(d))
+    key = str(d.resolve())
+    run = _RUNS.get(key)
+    if run is None:
+        while len(_RUNS) >= _RUNS_MAX:
+            _RUNS.pop(next(iter(_RUNS)), None)
+        run = _RUNS.setdefault(key, RunFiles(d))
+    return run
 
 
 def _advance_line(text: str) -> tuple[dict | None, int | None]:
