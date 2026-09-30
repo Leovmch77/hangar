@@ -200,7 +200,9 @@ def test_registro_gira_no_teto_de_caracteres(env, tmp_path):
     for i in range(45):
         run(e, "event", "sessao_trocada", "--de", f"s{i}", "--para", "y" * 900)
     assert (d / "registro-arquivo-1.md").exists()
-    assert "registro-arquivo-1.md" in (d / "registro.md").read_text().splitlines()[0]
+    # cada troca grava a linha do evento e a da identidade indisponível: o teto gira mais de uma vez
+    ultimo = max(d.glob("registro-arquivo-*.md"), key=lambda f: int(f.stem.rsplit("-", 1)[1]))
+    assert ultimo.name in (d / "registro.md").read_text().splitlines()[0]
     assert (d / "registro.md").stat().st_size < 40_000
 
 
@@ -941,7 +943,7 @@ def test_team_e_os_donos_de_task_aberta_e_o_arbitro_e_nao_cruza_com_done(env, tm
     run(e, "event", "entrega", "--task", "2", "--rodada", "1", "--commit", "abc")
     time_ = run(e, "team").stdout.split()
     assert time_ == ["ex2", "rev2", "arb"]
-    assert _done(e) == [("ex1", "Task 1 closed")]
+    assert _done(e) == [("ex1", "Task 1 closed"), ("rev1", "Task 1 closed")]
 
 
 def _stash(g, r, content="2\n"):
