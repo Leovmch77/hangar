@@ -560,6 +560,7 @@
   "erro_project_shortcuts_projeto": "Could not identify this session's project: {detalhe}",
   "erro_project_shortcuts_arquivo": "The per-project shortcuts file could not be read; nothing was saved so other projects' lists are not erased: {detalhe}",
   "erro_shortcut_pasta": "Invalid shortcut folder: {detalhe}",
+  "erro_shortcut_hangar_convidado": "Guests can't open a shortcut in the owner's Hangar.",
   "atalhos_subir": "Move up",
   "atalhos_descer": "Move down",
   "atalhos_remover": "Remove",

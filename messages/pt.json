@@ -560,6 +560,7 @@
   "erro_project_shortcuts_projeto": "Não deu para identificar o projeto desta sessão: {detalhe}",
   "erro_project_shortcuts_arquivo": "O arquivo de atalhos por projeto não pôde ser lido; nada foi gravado para não apagar as listas dos outros projetos: {detalhe}",
   "erro_shortcut_pasta": "Pasta do atalho inválida: {detalhe}",
+  "erro_shortcut_hangar_convidado": "Convidado não pode abrir atalho no Hangar do dono.",
   "atalhos_subir": "Subir",
   "atalhos_descer": "Descer",
   "atalhos_remover": "Remover",

@@ -452,6 +452,14 @@ const ERROS: Record<string, (params: Parametros) => string> = {
   erro_project_shortcuts_projeto: (p) => m.erro_project_shortcuts_projeto({ detalhe: String(p.detalhe ?? '') }),
   erro_project_shortcuts_arquivo: (p) => m.erro_project_shortcuts_arquivo({ detalhe: String(p.detalhe ?? '') }),
   erro_shortcut_pasta: (p) => m.erro_shortcut_pasta({ detalhe: String(p.detalhe ?? '') }),
+  erro_shortcut_hangar_convidado: () => m.erro_shortcut_hangar_convidado(),
+  // Convidados com login próprio (guest_user_gate, guest_users_api, hub /api/sync/guests).
+  erro_fora_do_convidado: () => m.erro_fora_do_convidado(),
+  erro_fora_da_pasta: () => m.erro_fora_da_pasta(),
+  erro_pasta_inexistente: () => m.erro_pasta_inexistente(),
+  erro_convidado_inexistente: () => m.erro_convidado_inexistente(),
+  erro_so_dono: () => m.erro_so_dono(),
+  erro_usuario_em_uso: () => m.erro_usuario_em_uso(),
 };
 
 export function mensagemDeErro(code: string, params: Parametros = {}): string | undefined {

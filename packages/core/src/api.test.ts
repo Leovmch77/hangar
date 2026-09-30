@@ -403,6 +403,14 @@ describe('mensagemDeErro (parecer task 10)', () => {
     expect(mensagemDeErro('erro_tts_sem_cache')).toBe('áudio não está mais em cache');
   });
 
+  it('codes do convidado com login próprio têm texto no idioma do app', () => {
+    expect(mensagemDeErro('erro_fora_do_convidado')).toBe('fora do acesso do convidado');
+    expect(mensagemDeErro('erro_usuario_em_uso')).toBe('esse usuário já existe');
+    expect(mensagemDeErro('erro_shortcut_hangar_convidado')).toBe(
+      'Convidado não pode abrir atalho no Hangar do dono.',
+    );
+  });
+
   it('code herdado do prototipo devolve undefined, nao quebra nem chama funcao errada', () => {
     expect(mensagemDeErro('constructor')).toBeUndefined();
     expect(mensagemDeErro('__proto__')).toBeUndefined();
