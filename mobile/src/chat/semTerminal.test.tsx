@@ -10,12 +10,14 @@ vi.mock('react-native', async (original) => ({
   ...await original<object>(),
   AppState: { currentState: 'active', addEventListener: () => ({ remove: () => {} }) },
   AccessibilityInfo: { sendAccessibilityEvent: vi.fn() },
-  Pressable: ({ accessibilityState, accessibilityRole, accessibilityLabel, accessibilityHint, onPress, children, disabled, ref }: {
+  Pressable: ({ accessibilityState, accessibilityRole, accessibilityLabel, accessibilityHint, onPress, children, disabled, ref, style }: {
     accessibilityState?: { disabled?: boolean; busy?: boolean; expanded?: boolean }; accessibilityRole?: string;
     accessibilityLabel?: string; onPress?: () => void; children: ReactNode; disabled?: boolean;
-    accessibilityHint?: string; ref?: import('react').Ref<HTMLButtonElement>;
+    accessibilityHint?: string; ref?: import('react').Ref<HTMLButtonElement>; style?: unknown;
   }) => createElement('button', {
     ref, role: accessibilityRole, 'aria-label': accessibilityLabel, title: accessibilityHint, onClick: onPress, disabled,
+    style: [typeof style === 'function' ? style({ pressed: false }) : style].flat(Infinity)
+      .reduce<Record<string, unknown>>((all, part) => (part && typeof part === 'object' ? { ...all, ...part } : all), {}),
     'aria-disabled': accessibilityState?.disabled, 'aria-busy': accessibilityState?.busy,
     'aria-expanded': accessibilityState?.expanded,
   }, children),

@@ -603,3 +603,96 @@ Apple interativo (Apple ID + 2FA) do Jefferson: `(cd <worktree>/mobile && eas cr
 
 **T33 com impedimento registrado; aceite iOS pendente.** Assinatura e instalação dependem
 da ação interativa do Jefferson descrita no Step 2. Android não é afetado.
+
+## Entrega 4 — T37: lote amplo iOS e Android afetado
+
+Execução: 30/09/2026, worktree `hangar-mobile-deliveries-cad3e6fe-t37`, branch
+`mobile-deliveries-orq-cad3e6fe-t37`. Base integrada T1–T36:
+`34d7de6d27b8427cc24c5057214ac7061a36b02a`, conferida antes da primeira edição; árvore
+limpa na entrada. Este lote **não aprova a entrega 4**. Evidências em `tasks/t37-*` do
+diretório durável; `t37-runs.jsonl` registra comando, exit, tentativa e duração por relógio
+monotônico. Nenhum token ou UDID nesta seção.
+
+### Preparação
+
+`npm ci --workspace=@hangar/core --include-workspace-root` e
+`npm ci --prefix mobile --workspaces=false`, ambos exit 0, lockfiles inalterados, sem
+`audit fix` nem atualização de pacote. `eas-cli` 23.2.0 pelo cache do `npx`, sempre em
+subshell dentro de `mobile/`. Recursos `mobile-build`, `mobile-signing` e `mobile-version`
+reservados a cada operação EAS e liberados em seguida; `screen` e `android-emulator` durante
+o uso do AVD.
+
+### Suites e typechecks — cada comando uma vez, reteste só do que falhou
+
+| Família | Tentativa 1 | Correção e tentativa 2 | Resultado real |
+|---|---|---|---|
+| Core check | exit 0, 9,16 s | não repetido | conferido |
+| Core test | exit 0, 758/758 testes, 47,34 s | não repetido | conferido automaticamente |
+| Mobile typecheck | exit 2: `useDitado.ts:75,160`, TS2339 `AudioRecorder.release/addListener`, TS7006 | família esgotada em T32 (duas tentativas); sem correção nem reteste | **falhou**, pendência T32 inalterada |
+| Mobile test | exit 1: 39 falhas/416 testes, 3/40 arquivos (`CreateSessionSheet` 33, `semTerminal` 5, `FileViewer` 1) | reteste único dos dois arquivos corrigidos: 38/38 `semTerminal`, `CreateSessionSheet` 33 falhas | **falhou**; ver linhas abaixo |
+| `semTerminal.test.tsx` | cinco falhas de asserção, agora que a correção de AppState da T32 deixou o arquivo montar (a correção da T32 continua sem contagem de revalidação própria) | quatro causas corrigidas, reteste 38/38 | consertado e conferido na tentativa 2 |
+| ↳ ACK confirmado antes do botão atualizar | `Composer` reenviava o texto do handoff como mensagem nova quando a tentativa já tinha sido confirmada e apagada | `sendText` não envia de novo o texto adotado do handoff sem tentativa e limpa o campo | produto corrigido; conferido no reteste |
+| ↳ rascunho em formato inválido | edição seguinte não gravava: `persistDraft` recusava ao reler o JSON inválido | formato inválido é sobrescrito, como no boot; falha de leitura real continua bloqueando | produto corrigido; conferido no reteste |
+| ↳ ACK que chega após o handoff | campo mantinha o texto entregue quando `firstInputSent` virava verdadeiro | efeito limpa o campo só se ainda igual ao texto do handoff; edição nova fica | produto corrigido; conferido no reteste |
+| ↳ Cancelar da Nova conversa 44×44 | mock do `Pressable` no teste descartava `style` | mock repassa estilo (função resolvida com `pressed:false`) | teste corrigido; conferido no reteste |
+| `CreateSessionSheet.test.tsx` | 33/33 falharam: mock de Paraglide sem `nova_conversa_destino_hint`/`nova_conversa_config_hint` (chaves presentes em `pt.json`/`en.json`) | chaves no mock; reteste falhou 33/33: o mock global do `Pressable` entrega estilo por função ao DOM (`The style prop expects a mapping`) | **falhou**; segunda correção (mock local resolve estilo por função) **aplicada, não revalidada** |
+| `FileViewer.test.tsx`, PDF Android | mesma falha da T32 | família esgotada; sem correção nem reteste | **falhou**, pendência T32 inalterada |
+
+Depois do reteste, a revisão estática por subagente apontou que o texto igual ao primeiro,
+digitado de novo depois, seria engolido. O critério passou a usar o texto adotado do handoff
+uma única vez (`adoptedDraftRef`, zerado ao limpar). Esse refinamento **não foi revalidado**
+por teste (seria terceira execução da família) e entrou no pacote do build 3 abaixo.
+
+### Builds Android e iOS
+
+| Build | Criado (UTC) | Pacote enviado | Destino |
+|---|---|---|---|
+| Android `45f48aa6` | 15:55 | árvore da base, antes das correções | cancelado na fila entre 16:02 e 16:06 (o log do cancelamento não registra horário): o artefato não seria o código corrigido |
+| Android `53d87a12` | 16:03 | base + correções do Composer e testes da tentativa 2 | cancelado na fila às 16:07: o refinamento pós-revisão mudou o Composer |
+| Android `a9ed153a` | 16:07 | base + código final desta rodada | acompanhado conforme decisão `t37-eas-window` do árbitro |
+| iOS `preview` | 16:03 | nenhum | exit 1 antes do upload: "couldn't find any credentials suitable for internal distribution"; segunda falha de credencial, sem terceira tentativa nem login |
+
+O `gitCommitHash` que o EAS mostra é a base `34d7de6d`, não o conteúdo do pacote: as três
+submissões enviaram a árvore de trabalho com as alterações não commitadas da rodada.
+Nenhum aparelho iOS ligado à máquina (`idevice_id -l` sem lista).
+
+Janela do árbitro para `a9ed153a`: quatro leituras em 16:22:03, 16:27:05, 16:32:04 e
+16:37:04 UTC, todas `IN_QUEUE` (`tasks/t37-eas-reads.log`). A espera terminou no prazo;
+**não há APK da entrega 4**, download, SHA-256 ou instalação. Sem build novo, cancelamento
+ou leitura depois da janela. Estar na fila não é defeito de compilação nem aprovação.
+
+### Aparelho e percursos
+
+AVD próprio `hangar`, Pixel 7/API 36/x86_64, 1080×2400, pt-BR, sem janela. App instalado:
+0.1.0/versionCode 1 de 30/09 às 06:22:12, o APK da entrega 2; ele **não comprova T22–T36**
+e não foi usado como prova. `adb reverse tcp:8765` para o backend existente, sem serviço
+paralelo, Metro, instalador ou reinício. Referência de lista capturada antes dos percursos:
+`/home/jefferson/.hangar/orq/2026-09-29-cad3e6fe/visual/t37/reference-apk2-list.png`
+(lista em pt-BR, estado de sucesso após “Carregando sessões…”). Sessão descartável própria
+`fixture-t37` (Codex sem terminal, gpt-5.6-luna/low) criada e fechada sem receber input; nenhuma
+sessão alheia recebeu input, pareamento ou fechamento.
+
+| Percurso (fonte `mobile-04-iphone.md` Task 3) | Esperado | Resultado |
+|---|---|---|
+| Step 1, matriz essencial iPhone: criar no primeiro envio, enviar/receber/Parar, aprovar/negar, pergunta, headless, bloquear/rede, rascunho, incerto, mesmo nome em dois servidores | fluxos corretos no destino capturado | não conferido: sem binário iOS (credencial ad hoc ausente, duas falhas) |
+| Step 2, diário iOS: anexos, permissões, ditado e interrupção, teclado multiline, histórico longo, arquivo citado, plano, `inactive` sem autoenvio | texto preservado, recurso indisponível registrado | não conferido: sem binário iOS; Android não substitui |
+| Step 3, iOS final instalado mantendo dados | build pós-correção instalado | não conferido: build iOS não entrou na fila |
+| Step 3, APK com o mesmo código e percursos afetados no Android | atualização sobre o APK 2 e caminhos de T33–T36 e desta rodada | não conferido: `a9ed153a` em fila no fim da janela |
+| Observações T34/T35: alças 44 pt no Composer, Glass ao trocar material/tema com rascunho e foco | densidade e filhos preservados no aparelho | não conferido no aparelho; nenhuma afirmação visual por leitura |
+| Observação T9: lançamento frio iOS `inactive` | uma ressincronização ao ficar ativo | não conferido |
+| Nova conversa `/create` da T42: aviso duplicado, espaço de avisos vazio, Enviar com teclado, pt/en, claro/escuro, tentativas e resposta tardia | sem duplicação, Enviar alcançável | não conferido no aparelho; `CreateSessionSheet.test.tsx` com segunda correção não revalidada |
+| Handoff do primeiro input no Composer (correções desta rodada) | sem reenvio, edição nova preservada | conferido só em teste com mocks (`semTerminal` 38/38); aparelho não conferido |
+
+### Pendências do lote 4
+
+- Aceite iOS: exige a ação interativa de credencial registrada na T33
+  (`(cd <worktree>/mobile && eas credentials --platform ios)` pelo Jefferson); duas falhas não
+  interativas, sem terceira tentativa.
+- APK da entrega 4 (`a9ed153a`) sem artefato no prazo; percursos Android de T33–T36 e desta
+  rodada não conferidos.
+- Mobile typecheck (`expo-audio`/`expo-modules-core`) e PDF Android: famílias esgotadas na T32.
+- `CreateSessionSheet.test.tsx`: segunda correção aplicada, não revalidada.
+- Refinamento pós-revisão do `Composer` (texto do handoff consumido uma vez): não revalidado.
+
+AVD encerrado, `adb reverse` removido, fixture fechada e os cinco recursos liberados.
+**Lote encerrado com pendências.** A entrega 4 **não está aceita**.
