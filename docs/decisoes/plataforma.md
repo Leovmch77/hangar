@@ -773,14 +773,10 @@ Medido no Linux (CachyOS, kernel 7.1): o `read -p` do bash de um atalho dorme co
 `wait_woken`; o `sleep` dorme em `hrtimer_nanosleep` (medido em 29/09/2026 num
 `tmux new-session 'sleep 60'` descartável, lendo `/proc/<pid>/wchan` do filho do shell).
 
-Medido no Windows (psmux 3.3.8, DELPHI-02, 29/09/2026): `Start-Sleep` e `Read-Host` mostram variação
-de CPU 0 em 2 s, então lá não há como separar os dois, e a regra é tela + CPU paradas: um prompt
-impresso seguido de um `sleep` vira pergunta falsa. `capture-pane`, `cursor_y` e `send-keys -l` +
-Enter funcionam com `Read-Host` (`Porta [3000]:` lido de volta). Um filho gráfico do pane (notepad)
-é achado na mesma sessão do Windows do backend.
+No Windows (psmux) a regra é tela + CPU parados, e o `.cmd` que grava o código de saída tem regras
+próprias: medição, o que falta medir e a regra de `%` em
+[windows.md](windows.md#terminais-de-atalho-no-psmux).
 
-**Ainda não medido no psmux:** o `.cmd` que grava o código de saída e segura o pane com `pause`
-(a sonda falhou ao lançar porque o PowerShell 5.1 estraga as aspas embutidas; falta uma sonda em
-Python espelhando a chamada do backend). O código de saída do próprio psmux não serve
-(`pane_dead_status` veio `0` para um comando que saiu com 3), e `new-session … ; set-option …` na
-mesma chamada derrubou a sessão, por isso a opção é gravada em chamada separada.
+**Limite da detecção.** A pergunta é lida do tty (`wait_woken` / `n_tty_read`): programa que espera o
+teclado por `poll`/`epoll` (o `read` do fish, o readline do Node/inquirer) não vira pergunta. Incluir
+`ep_poll`/`do_select` traria perguntas falsas de qualquer programa de tela cheia, então fica de fora.

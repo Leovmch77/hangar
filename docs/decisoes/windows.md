@@ -57,6 +57,42 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   processo e depois lê a saída sem prazo; o `git.exe` de `Git\cmd` é um lançador cujo filho segura
   o pipe, e a thread fica presa até o git real terminar. `git_ops._run` usa `Popen`, mata os
   filhos pelo `psutil` e drena com prazo.
+- **Terminal de atalho no psmux: opções em chamadas separadas, comando num `.cmd`, `%` dobrado.**
+  `new-session … ; set-option …` numa chamada só derruba a sessão; texto livre nunca vai no argv
+  do psmux (`\n` e `;` quebram), então o comando mora em `<id>-cmd.cmd` e o "Rodar de novo" o
+  relê de lá (`%%` desfeito). Opção de valor vazio nem é gravada. O código de saída vem do
+  `<id>.exit`, nunca do `pane_dead_status`. Arquivo sem terminal dono é varrido. Medição e o que
+  falta medir: [Terminais de atalho no psmux](#terminais-de-atalho-no-psmux).
+
+## Terminais de atalho no psmux
+
+(29/09/2026, psmux 3.3.8, DELPHI-02.) Medido: opção de usuário (`@cp_*`) grava e volta no `-F`;
+`pane_dead_status` vem `0` mesmo para um comando que saiu com 3, por isso o código de saída é
+gravado pelo `.cmd` externo num `.exit`; `new-session … ; set-option …` na mesma chamada derruba
+a sessão, então as opções vão em chamadas separadas (uma por opção); `capture-pane`, `cursor_y` e
+`send-keys -l` + Enter funcionam com `Read-Host` (`Porta [3000]:` lido de volta); `Start-Sleep` e
+`Read-Host` dão o mesmo delta de CPU (0 em 2 s), então a pergunta é tela + CPU parados e um prompt
+impresso seguido de `sleep` vira pergunta falsa; um filho gráfico do pane (notepad) fica na mesma
+sessão do Windows do backend, o que deixa o backend trazer a janela para a frente.
+
+Como o backend lança: o comando do usuário é gravado em `<id>-cmd.cmd` (codepage OEM, CRLF) e roda
+num `cmd /c` filho de `<id>.cmd`, que grava `%ERRORLEVEL%` em `<id>.exit` e segura o pane com
+`pause` em laço; o psmux recebe `cmd /d /c "<id>.cmd"`. O comando não vai para a opção `@cp_shortcut_cmd`
+no Windows (o argv do psmux quebra em `\n` e `;`, e a contrabarra some), e dono vazio não grava
+`@cp_shortcut_owner`: opção ausente volta vazia no `-F`.
+
+Como arquivo de lote, `%` muda de sentido (`%20` numa URL, `%1`, `for %i`). O backend dobra todo `%`
+que não forma `%NOME%` de variável existente (ambiente ou dinâmica: `CD`, `DATE`, `TIME`, `RANDOM`,
+`ERRORLEVEL`); `%VAR:~0,3%` e `%VAR:a=b%` ficam literais. O "Rodar de novo" desfaz a dobra.
+Os `.cmd`/`.exit` podem carregar credencial: são apagados ao fechar o terminal, se o start falha e
+por varredura (`list_all`) dos que não têm terminal, com carência de 60 s para um start em andamento.
+
+**Ainda não medido no psmux:** o lançamento `cmd /d /c "<outer.cmd>"` como um argv só via
+`subprocess`; o `.exit` com o código real; o `pause` segurando o pane; `set-option` com `;` e com
+valor vazio; `logical_line` sobre a tela do psmux; e a regra de `%` acima (só foi decidida lendo a
+documentação do cmd). A sonda é `scripts/probe-shortcut-psmux.ps1` (não rode `taskkill` com PID
+até 4: sessão que não sobe deixa o PID em 0). Um PowerShell 5.1 estraga aspas embutidas numa
+string; a sonda passa os argumentos separados.
 
 ## Tarefa agendada rodava o backend abaixo do normal
 
