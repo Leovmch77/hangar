@@ -872,7 +872,7 @@ export interface OrqConsumptionModel {
 export interface OrqConsumption {
   computed_at: string;
   since: string;
-  sessions: { team: number; measured: number; missing: number };
+  sessions: { team: number; measured: number; missing: string[] };
   totals: { new: number; cache_read: number; usd: number | null; usd_partial: boolean };
   providers: {
     provider: string;
