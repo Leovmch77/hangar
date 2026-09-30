@@ -15,7 +15,19 @@ vi.mock('../../stores/servers', () => ({ useServers: { getState: () => ({
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 const mocks = vi.hoisted(() => ({ back: vi.fn(), replace: vi.fn(), dismissTo: vi.fn(), params: { server: 'srv', name: 'sess' } }));
+const focusNavigation = vi.hoisted(() => ({
+  listener: null as ((event: { data: { closing: boolean } }) => void) | null,
+  focused: true, send: vi.fn(),
+}));
+const nativeNavigation = {
+  isFocused: () => focusNavigation.focused,
+  addListener: (_name: string, listener: (event: { data: { closing: boolean } }) => void) => {
+    focusNavigation.listener = listener;
+    return () => { focusNavigation.listener = null; };
+  },
+};
 vi.mock('expo-router', () => ({
+  useNavigation: () => nativeNavigation,
   useLocalSearchParams: () => mocks.params,
   useRouter: () => ({ canGoBack: () => true, ...mocks }),
 }));
@@ -24,6 +36,7 @@ vi.mock('react-native-keyboard-controller', () => ({
 }));
 vi.mock('react-native', async (original) => ({
   ...await original<object>(),
+  AccessibilityInfo: { sendAccessibilityEvent: focusNavigation.send },
   TextInput: ({ secureTextEntry, value, onChangeText }: {
     secureTextEntry?: boolean; value: string; onChangeText: (value: string) => void;
   }) => React.createElement('input', {
@@ -90,6 +103,22 @@ test('envia identidades nativas e mantém a pergunta quando RPC falha', async ()
   expect(vi.mocked(fetch).mock.calls[0][0]).toBe('http://teste/api/sessions/sess/answer');
 });
 
+test('foco entra na solicitação depois da apresentação e muda só para nova pergunta', async () => {
+  await open();
+  expect(focusNavigation.send).not.toHaveBeenCalled();
+  act(() => focusNavigation.listener?.({ data: { closing: false } }));
+  const heading = container.querySelector('[role="header"]');
+  expect(heading).not.toBeNull();
+  expect(focusNavigation.send).toHaveBeenCalledExactlyOnceWith(heading, 'focus');
+  await act(async () => chatStore('srv', 'sess').use.setState({ preview: 'token novo' }));
+  expect(focusNavigation.send).toHaveBeenCalledTimes(1);
+  await act(async () => chatStore('srv', 'sess').openAsk({ ...payload, request_id: 42 }));
+  expect(focusNavigation.send).toHaveBeenCalledTimes(2);
+  act(() => focusNavigation.listener?.({ data: { closing: true } }));
+  await act(async () => chatStore('srv', 'sess').openAsk({ ...payload, request_id: 43 }));
+  expect(focusNavigation.send).toHaveBeenCalledTimes(2);
+});
+
 test('dois toques e cancelar durante resposta fazem só uma mutação', async () => {
   let finish!: (response: Response) => void;
   vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>((resolve) => { finish = resolve; })));
@@ -100,6 +129,20 @@ test('dois toques e cancelar durante resposta fazem só uma mutação', async ()
   act(() => { send.click(); send.click(); cancel.click(); });
   expect(fetch).toHaveBeenCalledTimes(1);
   await act(async () => finish(new Response('{"ok":true}')));
+});
+
+test('gesto de voltar do VoiceOver fecha a folha sem descartar a pergunta assíncrona', async () => {
+  await open({ ...payload, is_async: true, request_id: 'async-1' });
+  const modal = container.querySelector('[role="header"]')!.parentElement!;
+  const propsKey = Object.keys(modal).find((key) => key.startsWith('__reactProps'));
+  expect(propsKey).toBeDefined();
+  const props = (modal as unknown as Record<string, { onAccessibilityEscape: () => void }>)[propsKey!];
+  await act(async () => props.onAccessibilityEscape());
+  expect(mocks.back).toHaveBeenCalledTimes(1);
+  expect(fetch).not.toHaveBeenCalled();
+  await act(async () => root.render(null));
+  expect(chatStore('srv', 'sess').use.getState().askPayload?.request_id).toBe('async-1');
+  expect(fetch).not.toHaveBeenCalled();
 });
 
 test('cancelamento assíncrono usa o servidor da rota e bloqueia a resposta', async () => {

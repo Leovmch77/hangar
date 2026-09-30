@@ -15,12 +15,13 @@ type Props = {
   children: ReactNode;
   open?: boolean;
   onDismiss?: () => void;
+  onDidPresent?: () => void;
   scrollable?: boolean;
 };
 
 // true-sheet exige New Arch (ligada: app.json newArchEnabled). Teto de 3 detents: Android trunca em 3.
 // Fundo do vidro: a sheet é navegação, então leva o modalAlpha; conteúdo dentro dela usa surfaceAlpha.
-export const Sheet = forwardRef<TrueSheet, Props>(function Sheet({ sizes = ['auto'], open, children, onDismiss, scrollable }, ref) {
+export const Sheet = forwardRef<TrueSheet, Props>(function Sheet({ sizes = ['auto'], open, children, onDismiss, onDidPresent, scrollable }, ref) {
   const { theme, rt } = useUnistyles();
   const reduzir = useReduceTransparency();
   const innerRef = useRef<TrueSheet>(null);
@@ -55,6 +56,7 @@ export const Sheet = forwardRef<TrueSheet, Props>(function Sheet({ sizes = ['aut
       backgroundColor={reduzir ? `rgb(${r},${g},${b})` : `rgba(${r},${g},${b},${alphaDoVidro(theme, 'modal')})`}
       grabber
       scrollable={scrollable}
+      onDidPresent={onDidPresent}
       onDidDismiss={() => {
         apresentada.current = false;
         onDismiss?.();

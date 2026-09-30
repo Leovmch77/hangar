@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
-import { Pressable, ScrollView, Text, View } from 'react-native';
+import { AccessibilityInfo, Pressable, ScrollView, Text, View } from 'react-native';
 import { StyleSheet } from 'react-native-unistyles';
 import { useRouter } from 'expo-router';
 import { KeyboardAvoidingView } from 'react-native-keyboard-controller';
@@ -33,6 +33,15 @@ export function NewConversation({ server, destination, destinationPending, desti
   const busy = useNewConversation((s) => !!s.busy[serverId]);
   const [text, setText] = useState('');
   const [optionsOpen, setOptionsOpen] = useState(false);
+  const destinationRef = useRef<View>(null);
+  const settingsRef = useRef<View>(null);
+  const optionsRef = useRef<View>(null);
+  const closeOptionsRef = useRef<View>(null);
+  const optionsOpener = useRef<View | null>(null);
+  const openOptions = (opener: View | null) => {
+    optionsOpener.current = opener;
+    setOptionsOpen(true);
+  };
   // Enviar só depois de ler a tentativa gravada: antes disso um toque poderia seguir a antiga.
   const [restored, setRestored] = useState(false);
   const mounted = useRef(true);
@@ -94,17 +103,17 @@ export function NewConversation({ server, destination, destinationPending, desti
             <Text style={styles.label}>{m.nova_conversa_guardada()}</Text>
             <Text style={styles.pendingText} numberOfLines={3}>{pending.text}</Text>
             {pending.sessionName && (pending.phase === 'created' || pending.phase === 'sent' || pending.phase === 'send_unknown') ? (
-              <Pressable accessibilityRole="button" onPress={() => open(pending.sessionName!)} disabled={busy} style={[styles.secondary, busy && styles.disabled]}>
+              <Pressable accessibilityRole="button" accessibilityState={{ disabled: busy, busy }} onPress={() => open(pending.sessionName!)} disabled={busy} style={[styles.secondary, busy && styles.disabled]}>
                 <Text style={styles.secondaryTxt}>{m.nova_conversa_abrir()}</Text>
               </Pressable>
             ) : null}
             {pending.phase === 'created' ? (
-              <Pressable accessibilityRole="button" onPress={() => void advance()} disabled={busy} style={[styles.secondary, busy && styles.disabled]}>
+              <Pressable accessibilityRole="button" accessibilityState={{ disabled: busy, busy }} onPress={() => void advance()} disabled={busy} style={[styles.secondary, busy && styles.disabled]}>
                 <Text style={styles.secondaryTxt}>{m.nova_conversa_reenviar()}</Text>
               </Pressable>
             ) : null}
             {pending.phase === 'create_unknown' || pending.phase === 'send_unknown' ? (
-              <Pressable accessibilityRole="button" onPress={() => void recoverAttempt(serverId)} disabled={busy} style={[styles.secondary, busy && styles.disabled]}>
+              <Pressable accessibilityRole="button" accessibilityState={{ disabled: busy, busy }} onPress={() => void recoverAttempt(serverId)} disabled={busy} style={[styles.secondary, busy && styles.disabled]}>
                 <Text style={styles.secondaryTxt}>{m.nova_conversa_conferir()}</Text>
               </Pressable>
             ) : null}
@@ -118,7 +127,7 @@ export function NewConversation({ server, destination, destinationPending, desti
                 </Pressable>
               </>
             ) : null}
-            <Pressable accessibilityRole="button" onPress={() => discardAttempt(serverId, pending.id)} disabled={busy} style={[styles.ghost, busy && styles.disabled]}>
+            <Pressable accessibilityRole="button" accessibilityState={{ disabled: busy }} onPress={() => discardAttempt(serverId, pending.id)} disabled={busy} style={[styles.ghost, busy && styles.disabled]}>
               <Text style={styles.ghostTxt}>{m.nova_conversa_descartar()}</Text>
             </Pressable>
           </View>
@@ -140,27 +149,32 @@ export function NewConversation({ server, destination, destinationPending, desti
             />
           </View>
           <View style={styles.summaries}>
-            <Pressable accessibilityRole="button" onPress={() => setOptionsOpen(true)} style={({ pressed }) => [styles.summary, pressed && styles.pressed]}>
+            <Pressable ref={destinationRef} accessible accessibilityRole="button" accessibilityHint={m.nova_conversa_destino_hint()} accessibilityState={{ expanded: optionsOpen }} onPress={() => openOptions(destinationRef.current)} style={({ pressed }) => [styles.summary, pressed && styles.pressed]}>
               {destinationSummary}
             </Pressable>
-            <Pressable accessibilityRole="button" onPress={() => setOptionsOpen(true)} style={({ pressed }) => [styles.summary, pressed && styles.pressed]}>
+            <Pressable ref={settingsRef} accessible accessibilityRole="button" accessibilityHint={m.nova_conversa_config_hint()} accessibilityState={{ expanded: optionsOpen }} onPress={() => openOptions(settingsRef.current)} style={({ pressed }) => [styles.summary, pressed && styles.pressed]}>
               {settingsSummary}
             </Pressable>
           </View>
         </ScrollView>
         <View style={styles.actions}>
-          <Pressable accessibilityRole="button" onPress={() => setOptionsOpen(true)} style={({ pressed }) => [styles.options, pressed && styles.pressed]}>
+          <Pressable ref={optionsRef} accessible accessibilityRole="button" accessibilityState={{ expanded: optionsOpen }} onPress={() => openOptions(optionsRef.current)} style={({ pressed }) => [styles.options, pressed && styles.pressed]}>
             <Text style={styles.secondaryTxt}>{m.nova_conversa_opcoes()}</Text>
           </Pressable>
-          <Pressable accessibilityRole="button" onPress={() => void handleSend()} disabled={!canSend} style={[styles.primary, !canSend && styles.disabled]}>
+          <Pressable accessibilityRole="button" accessibilityState={{ disabled: !canSend, busy }} onPress={() => void handleSend()} disabled={!canSend} style={[styles.primary, !canSend && styles.disabled]}>
             <Text style={styles.primaryTxt}>{busy ? m.criar_criando() : m.nova_conversa_enviar()}</Text>
           </Pressable>
         </View>
       </View>
       </KeyboardAvoidingView>
-      <Sheet open={optionsOpen} onDismiss={() => setOptionsOpen(false)} sizes={['medium', 'large']} scrollable>
-        <ScrollView contentContainerStyle={styles.scroll} keyboardShouldPersistTaps="handled">
-          <Pressable accessibilityRole="button" onPress={() => setOptionsOpen(false)} style={styles.ghost}>
+      <Sheet open={optionsOpen} onDidPresent={() => {
+        if (mounted.current && closeOptionsRef.current) AccessibilityInfo.sendAccessibilityEvent(closeOptionsRef.current, 'focus');
+      }} onDismiss={() => {
+        setOptionsOpen(false);
+        if (mounted.current && optionsOpener.current) AccessibilityInfo.sendAccessibilityEvent(optionsOpener.current, 'focus');
+      }} sizes={['medium', 'large']} scrollable>
+        <ScrollView accessibilityViewIsModal onAccessibilityEscape={() => setOptionsOpen(false)} contentContainerStyle={styles.scroll} keyboardShouldPersistTaps="handled">
+          <Pressable ref={closeOptionsRef} accessible accessibilityRole="button" onPress={() => setOptionsOpen(false)} style={styles.ghost}>
             <Text style={styles.ghostTxt}>{m.nova_conversa_opcoes_fechar()}</Text>
           </Pressable>
           {optionsOpen ? destination : null}
