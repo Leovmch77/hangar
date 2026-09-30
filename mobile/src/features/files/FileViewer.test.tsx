@@ -36,6 +36,7 @@ vi.mock('../../paraglide/messages', () => ({
   arquivo_carregar_erro: () => 'Erro ao carregar o arquivo',
   sessao_expirada: () => 'Sessão expirada',
   comum_carregando: () => 'Carregando…',
+  arq_pdf_sem_leitor: () => 'Este aparelho não tem leitor de PDF',
 }));
 
 import { FileViewer } from './FileViewer';

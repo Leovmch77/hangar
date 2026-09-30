@@ -330,7 +330,7 @@ describe('primeiro input', () => {
     const ack = deferred<void>();
     calls.send.mockImplementation(() => {
       expect(stored()).toMatchObject({ phase: 'sending', sessionName: attempt()!.sessionName, text: 'oi' });
-      expect(JSON.parse(memory.get(`draft.v1:server-a::${attempt()!.sessionName}`)!)).submission)
+      expect(JSON.parse(memory.get(`draft.v1:server-a::${attempt()!.sessionName}`)!).submission)
         .toMatchObject({ text: 'oi', status: 'sending' });
       return ack.promise;
     });

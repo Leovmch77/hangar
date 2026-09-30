@@ -789,7 +789,7 @@ describe('primeiro plano', () => {
     chat.release();
   });
 
-  test('cauda sem costura e nova entrada abrem o stream sem o cursor antigo', async () => {
+  test('cauda sem costura limpa o cursor; reentrada conserva o cursor da conversa preservada', async () => {
     const pedidos = fetchManual();
     const chat = chatStore('srv1', 'sess');
     chat.retain();
@@ -808,7 +808,8 @@ describe('primeiro plano', () => {
     chat.retain();
     pedidos[2].responder([ev({ id: 'y:9' })]);
     await tick();
-    expect(created.at(-1)!.url).not.toContain('last_event_id');
+    expect(chat.use.getState().events.map((e) => e.id)).toEqual(['y:9']);
+    expect(created.at(-1)!.url).toContain('last_event_id=y%3A9');
     chat.release();
   });
 
