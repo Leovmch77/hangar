@@ -63,6 +63,15 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   relê de lá (`%%` desfeito). Opção de valor vazio nem é gravada. O código de saída vem do
   `<id>.exit`, nunca do `pane_dead_status`. Arquivo sem terminal dono é varrido. Medições completas,
   ver [Terminais de atalho no psmux](#terminais-de-atalho-no-psmux).
+- **App nativo: botão de janela dentro de área `Drag` leva `.occlude()`, e a área `Drag` suprime a
+  seleção de texto no apertar.** O `WM_NCHITTEST` do GPUI devolve a PRIMEIRA área de controle sob o
+  ponteiro na ordem de pintura (`gpui-pre/src/window.rs`, `on_hit_test_window_control`); a barra pinta
+  antes dos filhos, então sem tapar o Min/Max/Close vira `HTCAPTION` e o clique move a janela. Em
+  `HTCAPTION` o `DefWindowProc` entra no laço modal de mover, que engole o `WM_NCLBUTTONUP`: o GPUI
+  recebe o apertar e nunca o soltar, e a seleção de texto da janela (`gpui-base/src/text_selection.rs`,
+  que segue o ponteiro sem olhar o botão) fica presa até o próximo clique. O botão não pode dar
+  `stop_propagation`: apertar consumido pelo GPUI pula o `nc_button_pressed` e o sistema nunca fecha,
+  minimiza nem maximiza. `start_window_move` é vazio no Windows; quem arrasta é o `HTCAPTION`.
 
 ## Terminais de atalho no psmux
 
