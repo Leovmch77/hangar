@@ -14,6 +14,8 @@ use serde::Deserialize;
 /// Espera entre a última tecla e a busca, como o web.
 const DEBOUNCE: Duration = Duration::from_millis(250);
 const SESSIONS_MAX: usize = 8;
+/// Com o índice FTS a busca responde em milissegundos; esperar mais só prende a linha numa máquina inalcançável.
+const MACHINE_WAIT: Duration = Duration::from_secs(8);
 
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default)]
@@ -45,6 +47,25 @@ impl Hit {
     fn live_name(&self) -> Option<&str> { self.session_name.as_deref().filter(|_| self.live) }
 }
 
+/// Backend antigo em outra máquina ainda repete o trecho quando o transcript repete a mensagem: a chave repetida daria
+/// dois elementos com o mesmo id.
+fn without_repeats(hits: Vec<Hit>) -> Vec<Hit> {
+    let mut seen = std::collections::HashSet::new();
+    hits.into_iter().filter(|hit| seen.insert(hit.key())).collect()
+}
+
+/// Junta a resposta de mais uma máquina: sem repetidos, a mais recente primeiro.
+fn merge_hits(hits: &mut Vec<Hit>, more: Vec<Hit>) {
+    let mut all = std::mem::take(hits);
+    all.extend(more);
+    *hits = without_repeats(all);
+    hits.sort_by(|a, b| b.mtime.total_cmp(&a.mtime));
+}
+
+/// Máquina da busca de conteúdo. `offline`: a lista dela já estava fora do ar quando a busca começou.
+#[derive(Clone, Debug)]
+struct Machine { key: String, label: String, offline: bool }
+
 /// O que as setas percorrem: sessões vivas pelo nome e trechos da busca, na ordem da tela.
 #[derive(Clone, Debug, PartialEq)]
 enum Entry { Session(Target), Hit(usize), Answer(usize) }
@@ -55,9 +76,16 @@ pub(super) struct Search {
     input: Option<Entity<InputState>>,
     /// A busca que está na tela (ou em voo).
     query: String,
-    hits: Remote<Vec<Hit>>,
-    /// Máquinas que não responderam à última busca, já com o motivo: as outras mostram o que acharam.
-    failed: Vec<String>,
+    /// Trechos das máquinas que já responderam, entrando conforme chegam.
+    hits: Vec<Hit>,
+    /// Nenhuma máquina respondeu ainda: é o "Buscando…".
+    searching: bool,
+    pending: Vec<Machine>,
+    /// Máquinas que falharam, com o motivo: as outras mostram o que acharam, e "Tentar de novo" refaz só estas.
+    failed: Vec<(Machine, String)>,
+    /// Falha da busca inteira (nenhuma máquina para buscar).
+    error: Option<String>,
+    /// Número da busca: toda tecla, reconexão e fechamento o trocam, e a resposta de número antigo é descartada.
     debounce: u64,
     active: usize,
     preview: Option<(String, Remote<Vec<ChatEvent>>)>,
@@ -147,11 +175,12 @@ impl Hangar {
         self.search.debounce += 1;
         let seq = self.search.debounce;
         if query.is_empty() {
-            (self.search.query, self.search.hits, self.search.failed) = (String::new(), Remote::default(), Vec::new());
+            (self.search.query, self.search.hits, self.search.searching) = (String::new(), Vec::new(), false);
+            (self.search.pending, self.search.failed, self.search.error) = (Vec::new(), Vec::new(), None);
             cx.notify();
             return;
         }
-        self.search.hits.loading = true;
+        self.search.searching = true;
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(DEBOUNCE).await;
             let _ = this.update(cx, |this, cx| if this.search.debounce == seq { this.run_search(query, cx) });
@@ -161,15 +190,19 @@ impl Hangar {
 
     /// Máquinas da busca de conteúdo: as próprias ligadas, a ativa primeiro. Convite fica de fora: a busca é rota do servidor
     /// inteiro do dono.
-    /// Sem conexão, a máquina leva o motivo no lugar dela.
-    fn search_machines(&self, cx: &App) -> Vec<(String, String, Result<Api, String>)> {
+    /// As que já estavam fora do ar vão por último, marcadas.
+    fn search_machines(&self, cx: &App) -> Vec<Machine> {
         let active = self.active_key();
-        let api = |key: &str| self.machine_api(key).ok_or_else(|| self.machine_error(key));
-        let mut list: Vec<(String, String, Result<Api, String>)> = self.servers.iter().filter(|s| !s.disabled && !s.invite)
-            .map(|s| { let key = servers::norm(&s.address); (key.clone(), s.label.clone(), api(&key)) }).collect();
-        if let Some(ix) = list.iter().position(|(key, ..)| *key == active) { let first = list.remove(ix); list.insert(0, first); }
+        let machine = |key: String, label: String| {
+            let offline = key != active && self.remote.get(&key).is_some_and(|l| l.error.is_some());
+            Machine { key, label, offline }
+        };
+        let mut list: Vec<Machine> = self.servers.iter().filter(|s| !s.disabled && !s.invite)
+            .map(|s| machine(servers::norm(&s.address), s.label.clone())).collect();
+        if let Some(ix) = list.iter().position(|m| m.key == active) { let first = list.remove(ix); list.insert(0, first); }
         // A ativa ainda fora da lista gravada (a conexão grava depois da primeira resposta) entra do mesmo jeito.
-        else if !active.is_empty() && !self.active_invite() { list.insert(0, (active.clone(), self.server_label(cx), api(&active))); }
+        else if !active.is_empty() && !self.active_invite() { list.insert(0, machine(active.clone(), self.server_label(cx))); }
+        list.sort_by_key(|m| m.offline);
         list
     }
 
@@ -180,55 +213,68 @@ impl Hangar {
     }
 
     fn run_search(&mut self, query: String, cx: &mut Context<Self>) {
-        self.search.query = query.clone();
-        let seq = self.search.hits.start();
-        // Uma busca por máquina, como o fan-out do web: a lenta ou fora do ar falha sozinha, sem segurar as outras.
+        self.search.query = query;
+        (self.search.hits, self.search.pending, self.search.failed, self.search.error) = (Vec::new(), Vec::new(), Vec::new(), None);
         let machines = self.search_machines(cx);
         // Nenhuma máquina para buscar não é "nada encontrado".
         if machines.is_empty() {
-            self.search.hits.finish(seq, Err(tr("search_no_machines")));
-            self.search.failed.clear();
+            (self.search.error, self.search.searching) = (Some(tr("search_no_machines")), false);
             cx.notify();
             return;
         }
-        let connection = self.connection;
-        let task = self.runtime.spawn(async move {
-            futures::future::join_all(machines.into_iter().map(|(key, label, api)| {
-                let query = query.clone();
-                async move {
-                    // 8 s: com o índice FTS a busca responde em milissegundos; esperar mais só prende a tela numa máquina inalcançável.
-                    let result = match api {
-                        Ok(api) => api.server_read(&["search"], &[("q", query.as_str())], 8).await.map_err(|e| Hangar::failure(&e)),
-                        Err(reason) => Err(reason),
-                    };
-                    (key, label, result)
-                }
-            })).await
-        });
+        for machine in machines { self.search_machine(machine, cx); }
+        cx.notify();
+    }
+
+    /// Uma busca por máquina, como o fan-out do web: cada resposta entra na lista assim que chega, e a lenta ou fora do ar
+    /// falha sozinha, sem segurar as outras.
+    fn search_machine(&mut self, machine: Machine, cx: &mut Context<Self>) {
+        let Some(api) = self.machine_api(&machine.key) else {
+            let reason = self.machine_error(&machine.key);
+            self.search.failed.push((machine, reason));
+            self.search.searching = false;
+            return;
+        };
+        let (seq, query) = (self.search.debounce, self.search.query.clone());
+        self.search.pending.push(machine.clone());
+        let task = {
+            let query = query.clone();
+            // O prazo de fora é o que vale: só ele sabe dizer "tempo esgotado"; o da requisição fica de reserva.
+            self.runtime.spawn(async move {
+                tokio::time::timeout(MACHINE_WAIT, api.server_read(&["search"], &[("q", query.as_str())], MACHINE_WAIT.as_secs() + 2)).await
+            })
+        };
         cx.spawn(async move |this, cx| {
             let joined = task.await;
             let _ = this.update(cx, |this, cx| {
-                // Tarefa perdida ou conexão trocada no meio: a busca termina com o aviso, nunca presa em "Buscando…".
-                let results = match joined {
-                    Ok(results) if this.connection == connection => results,
-                    _ => {
-                        if this.search.hits.finish(seq, Err(tr("search_interrupted"))) { this.search.failed.clear(); }
-                        cx.notify();
-                        return;
-                    }
+                // Resposta velha: outra tecla, reconexão ou a paleta fechou.
+                if this.search.debounce != seq || this.search.query != query { return; }
+                this.search.pending.retain(|m| m.key != machine.key);
+                this.search.searching = false;
+                let result = match joined {
+                    Err(_) => Err(tr("search_interrupted")),
+                    Ok(Err(_)) => Err(web_with("busca_motivo_timeout", &[])),
+                    Ok(Ok(result)) => result
+                        .map_err(|e| match e.status { Some(status) => web_with("busca_motivo_http", &[("status", status.to_string())]), None => Hangar::failure(&e) })
+                        .and_then(|v| serde_json::from_value::<Vec<Hit>>(v).map_err(|_| tr("invalid_response"))),
                 };
-                let (mut hits, mut failed) = (Vec::new(), Vec::new());
-                for (key, label, result) in results {
-                    match result.and_then(|v| serde_json::from_value::<Vec<Hit>>(v).map_err(|_| tr("invalid_response"))) {
-                        Ok(list) => hits.extend(list.into_iter().map(|hit| Hit { server: key.clone(), label: label.clone(), ..hit })),
-                        Err(error) => failed.push(format!("{label} ({error})")),
+                match result {
+                    Ok(list) => {
+                        let list = list.into_iter().map(|hit| Hit { server: machine.key.clone(), label: machine.label.clone(), ..hit }).collect();
+                        merge_hits(&mut this.search.hits, list);
                     }
+                    Err(reason) => this.search.failed.push((machine, reason)),
                 }
-                hits.sort_by(|a, b| b.mtime.total_cmp(&a.mtime));
-                if this.search.hits.finish(seq, Ok(hits)) { this.search.failed = failed; }
                 cx.notify();
             });
         }).detach();
+    }
+
+    /// Refaz só as que falharam, na mesma busca: o que já chegou fica.
+    fn search_retry(&mut self, cx: &mut Context<Self>) {
+        if self.search.failed.is_empty() || self.search.query != self.search_text(cx).trim() { return; }
+        for (machine, _) in std::mem::take(&mut self.search.failed) { self.search_machine(machine, cx); }
+        cx.notify();
     }
 
     /// Sessões vivas de todas as máquinas cujo nome ou pasta tem a busca, as mais recentes primeiro.
@@ -249,7 +295,7 @@ impl Hangar {
     /// Os trechos na ordem da tela: por conversa, a mais recente primeiro.
     fn search_groups(&self) -> Vec<(String, Vec<usize>)> {
         let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
-        for (i, hit) in self.search.hits.ok().map(Vec::as_slice).unwrap_or(&[]).iter().enumerate() {
+        for (i, hit) in self.search.hits.iter().enumerate() {
             let key = hit.conversation();
             match groups.iter_mut().find(|g| g.0 == key) { Some(g) => g.1.push(i), None => groups.push((key, vec![i])) }
         }
@@ -274,7 +320,7 @@ impl Hangar {
 
     fn hit_of(&self, entry: &Entry) -> Option<Hit> {
         match entry {
-            Entry::Hit(i) => self.search.hits.ok()?.get(*i).cloned(),
+            Entry::Hit(i) => self.search.hits.get(*i).cloned(),
             Entry::Answer(i) => self.search.ask.ok()?.1.get(*i).cloned(),
             Entry::Session(_) => None,
         }
@@ -411,7 +457,7 @@ impl Hangar {
                 let parsed = result.and_then(|v| {
                     let answer = v.get("answer").and_then(Value::as_str).unwrap_or_default().to_owned();
                     let hits = serde_json::from_value::<Vec<Hit>>(v.get("hits").cloned().unwrap_or(json!([]))).map_err(|_| tr("invalid_response"))?;
-                    Ok((answer, hits.into_iter().map(|hit| Hit { server: server.clone(), label: label.clone(), ..hit }).collect()))
+                    Ok((answer, without_repeats(hits.into_iter().map(|hit| Hit { server: server.clone(), label: label.clone(), ..hit }).collect())))
                 });
                 this.search.ask.finish(seq, parsed);
                 cx.notify();
@@ -484,46 +530,56 @@ impl Hangar {
             .whitespace_normal().child(text).into_any_element();
         if query.is_empty() {
             rows.push(state_line(web_with("busca_digite_todas", &[]), theme::muted()));
-        } else if self.search.hits.loading || self.search.query != query {
+        } else if self.search.searching || self.search.query != query {
             rows.push(state_line(web_with("switcher_buscando", &[]), theme::muted()));
+        } else if let Some(error) = self.search.error.clone() {
+            rows.push(state_line(error, theme::danger()));
         } else {
             // A máquina que falhou aparece mesmo com resultados das outras, como o web.
-            for failed in &self.search.failed {
-                rows.push(state_line(web_with("busca_servidor_falhou", &[("servidor", failed.clone())]), theme::danger()));
+            for (machine, reason) in &self.search.failed {
+                rows.push(state_line(web_with("busca_servidor_falhou_motivo", &[("servidor", machine.label.clone()), ("motivo", reason.clone())]), theme::danger()));
             }
-            match &self.search.hits.value {
-                // A falha por máquina vai em `failed`; aqui é a da busca inteira, já com o motivo.
-                Some(Err(error)) => rows.push(state_line(error.clone(), theme::danger())),
-                Some(Ok(hits)) if hits.is_empty() && !self.search.failed.is_empty() => {}
-                Some(Ok(hits)) if hits.is_empty() => rows.push(state_line(web_with("busca_nenhum_todas", &[("termos", words.join(", "))]), theme::muted())),
-                Some(Ok(hits)) => {
-                    let hits = hits.clone();
-                    let groups = self.search_groups();
-                    let summary = format!("{} · {}",
-                        if hits.len() == 1 { web_with("busca_um_trecho", &[]) } else { web_with("busca_n_trechos", &[("n", hits.len().to_string())]) },
-                        if groups.len() == 1 { web_with("busca_uma_conversa", &[]) } else { web_with("busca_n_conversas", &[("n", groups.len().to_string())]) });
-                    rows.push(div().px(px(10.)).pb(px(4.)).text_size(px(12.)).text_color(theme::faint()).child(summary).into_any_element());
-                    for (n, (_, indexes)) in groups.iter().enumerate() {
-                        let first = &hits[indexes[0]];
-                        let title = first.live_name().map(str::to_owned).unwrap_or_else(|| first.folder());
-                        let mut meta = Vec::new();
-                        if multi { meta.push(div().child(first.label.clone())); }
-                        if first.live_name().is_some_and(|name| name != first.folder()) { meta.push(div().font_family(theme::MONO).child(first.folder())); }
-                        meta.push(div().when(first.live, |el| el.text_color(theme::success()).font_weight(FontWeight::SEMIBOLD))
-                            .child(web_with(if first.live { "switcher_ativa" } else { "switcher_arquivo" }, &[])));
-                        if first.mtime > 0. { meta.push(div().child(ago(first.mtime))); }
-                        let mut group = div().flex().flex_col().gap(px(2.)).pt(px(6.)).when(n > 0, |el| el.mt(px(4.)).border_t_1().border_color(theme::border()))
-                            .child(div().px(px(10.)).pb(px(2.)).flex().items_center().gap(px(8.)).min_w_0()
-                                .child(div().flex_shrink(1.).min_w_0().truncate().text_size(px(13.5)).font_weight(FontWeight::SEMIBOLD).child(title))
-                                .child(div().flex().items_center().gap(px(6.)).text_size(px(12.)).text_color(theme::faint())
-                                    .children(meta.into_iter().enumerate().flat_map(|(i, el)| [(i > 0).then(|| div().child("·")), Some(el)].into_iter().flatten()))));
-                        for i in indexes {
-                            group = group.child(self.render_hit(Entry::Hit(*i), &hits[*i], false, active.as_ref(), &words, cx));
-                        }
-                        rows.push(group.into_any_element());
-                    }
+            if !self.search.failed.is_empty() {
+                rows.push(div().flex().justify_center().pb(px(6.)).child(Button::new("search-retry").outline().small()
+                    .label(web_with("busca_tentar_de_novo", &[])).on_click(cx.listener(|this, _, _, cx| this.search_retry(cx)))).into_any_element());
+            }
+            let hits = self.search.hits.clone();
+            let groups = self.search_groups();
+            let waiting = |offline: bool, key: &str| {
+                let names: Vec<String> = self.search.pending.iter().filter(|m| m.offline == offline).map(|m| m.label.clone()).collect();
+                (!names.is_empty()).then(|| web_with(key, &[("servidores", names.join(", "))]))
+            };
+            let lead = if !hits.is_empty() {
+                Some(format!("{} · {}",
+                    if hits.len() == 1 { web_with("busca_um_trecho", &[]) } else { web_with("busca_n_trechos", &[("n", hits.len().to_string())]) },
+                    if groups.len() == 1 { web_with("busca_uma_conversa", &[]) } else { web_with("busca_n_conversas", &[("n", groups.len().to_string())]) }))
+            } else if self.search.failed.is_empty() && self.search.pending.is_empty() {
+                Some(web_with("busca_nenhum_todas", &[("termos", words.join(", "))]))
+            } else { None };
+            let status: Vec<String> = [lead, waiting(false, "busca_aguardando"), waiting(true, "busca_tentando_fora")].into_iter().flatten().collect();
+            if !status.is_empty() {
+                let status = status.join(" · ");
+                rows.push(if hits.is_empty() { state_line(status, theme::muted()) }
+                    else { div().px(px(10.)).pb(px(4.)).text_size(px(12.)).text_color(theme::faint()).whitespace_normal().child(status).into_any_element() });
+            }
+            for (n, (_, indexes)) in groups.iter().enumerate() {
+                let first = &hits[indexes[0]];
+                let title = first.live_name().map(str::to_owned).unwrap_or_else(|| first.folder());
+                let mut meta = Vec::new();
+                if multi { meta.push(div().child(first.label.clone())); }
+                if first.live_name().is_some_and(|name| name != first.folder()) { meta.push(div().font_family(theme::MONO).child(first.folder())); }
+                meta.push(div().when(first.live, |el| el.text_color(theme::success()).font_weight(FontWeight::SEMIBOLD))
+                    .child(web_with(if first.live { "switcher_ativa" } else { "switcher_arquivo" }, &[])));
+                if first.mtime > 0. { meta.push(div().child(ago(first.mtime))); }
+                let mut group = div().flex().flex_col().gap(px(2.)).pt(px(6.)).when(n > 0, |el| el.mt(px(4.)).border_t_1().border_color(theme::border()))
+                    .child(div().px(px(10.)).pb(px(2.)).flex().items_center().gap(px(8.)).min_w_0()
+                        .child(div().flex_shrink(1.).min_w_0().truncate().text_size(px(13.5)).font_weight(FontWeight::SEMIBOLD).child(title))
+                        .child(div().flex().items_center().gap(px(6.)).text_size(px(12.)).text_color(theme::faint())
+                            .children(meta.into_iter().enumerate().flat_map(|(i, el)| [(i > 0).then(|| div().child("·")), Some(el)].into_iter().flatten()))));
+                for i in indexes {
+                    group = group.child(self.render_hit(Entry::Hit(*i), &hits[*i], false, active.as_ref(), &words, cx));
                 }
-                None => rows.push(state_line(web_with("switcher_buscando", &[]), theme::muted())),
+                rows.push(group.into_any_element());
             }
         }
         if let Some(error) = self.search.resume_error.clone() {
@@ -637,7 +693,17 @@ impl Hangar {
 
 #[cfg(test)]
 mod tests {
-    use super::{Hit, marks, terms};
+    use super::{Hit, marks, merge_hits, terms};
+
+    #[test]
+    fn late_machine_merges_without_repeats_newest_first() {
+        let hit = |server: &str, line: &str, mtime: f64| Hit { project: "p".into(), session_id: "s".into(), line: line.into(), mtime, server: server.into(), ..Default::default() };
+        let mut hits = Vec::new();
+        merge_hits(&mut hits, vec![hit("a", "x", 1.), hit("a", "x", 1.)]);
+        merge_hits(&mut hits, vec![hit("b", "x", 3.), hit("a", "y", 2.)]);
+        let keys: Vec<String> = hits.iter().map(Hit::key).collect();
+        assert_eq!(keys, ["b/p/s/x", "a/p/s/y", "a/p/s/x"], "repetido viraria dois elementos com o mesmo id");
+    }
 
     #[test]
     fn the_same_conversation_on_two_machines_stays_apart() {
