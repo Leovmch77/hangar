@@ -1,6 +1,7 @@
 import os
 from pathlib import Path
 
+from app import guest_users
 from app.config import resolve_scan_roots, settings
 from app.models import FsEntry, FsRoot, FsScanResult
 
@@ -37,9 +38,15 @@ def _nome_de_raiz(r: Path) -> str:
     return drive or str(r)
 
 
+def allowed_roots() -> list[Path]:
+    # Convidado só enxerga a pasta dele; o dono, a allowlist do servidor.
+    guest = guest_users.current.get()
+    return [Path(guest.root)] if guest else resolve_scan_roots(settings)
+
+
 def list_roots() -> list[FsRoot]:
     # So as raizes da allowlist viram chips.
-    return [FsRoot(name=_nome_de_raiz(r), path=str(r)) for r in resolve_scan_roots(settings)]
+    return [FsRoot(name=_nome_de_raiz(r), path=str(r)) for r in allowed_roots()]
 
 
 def scan_dir(root: str, path: str | None = None) -> FsScanResult:
@@ -51,7 +58,7 @@ def scan_dir(root: str, path: str | None = None) -> FsScanResult:
          escapa sao rejeitados;
       3. nunca lista fora de uma raiz liberada.
     """
-    roots = resolve_scan_roots(settings)
+    roots = allowed_roots()
 
     # 1) raiz precisa casar exatamente uma da allowlist (por realpath).
     root_real = _real(root)

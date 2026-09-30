@@ -31,7 +31,7 @@ from app.send_executor import send_thread as _send_thread
 from app import bastao as bastao_mod   # `bastao` sem sufixo é a ROTA GET, mais abaixo neste arquivo
 from app.bastao import montar as bastao_montar
 from app.commands import comandos_da_cli, list_commands
-from app.fs import FsError, list_roots, scan_dir
+from app.fs import FsError, allowed_roots, list_roots, scan_dir
 from app.model_picker import PickerError
 from app.mensagens import erro
 from app import kimi_models
@@ -2058,8 +2058,12 @@ async def create_session(body: CreateBody):
         try:
             info = await _criar_sessao(body, worktree)
             if body.branch is not None:
-                return info.model_copy(update={"cwd": body.cwd, "branch": body.branch,
+                info = info.model_copy(update={"cwd": body.cwd, "branch": body.branch,
                                                "worktree": Path(body.cwd, ".git").is_file()})
+            guest = guest_users.current.get()
+            if guest is not None:
+                await asyncio.to_thread(guest_users.claim, info.name, guest.id)
+                info = info.model_copy(update={"owner": guest.name})
             return info
         except BaseException:
             if worktree.get("path") and not worktree.get("session_created"):
@@ -2074,7 +2078,7 @@ async def create_session(body: CreateBody):
 
 def _allowed_scan_root(path: str) -> Path:
     target = Path(os.path.realpath(os.path.expanduser(path)))
-    root = next((r for r in resolve_scan_roots(settings) if target.is_relative_to(r)), None)
+    root = next((r for r in allowed_roots() if target.is_relative_to(r)), None)
     if root is None:
         raise FsError(403, "root not allowed")
     scan_dir(str(root), str(target))
@@ -2095,6 +2099,11 @@ async def _criar_sessao(body: CreateBody, worktree: dict):
     # ser rejeitado aqui não pode ter reconciliado a conta (deriva movida, memória criada) à toa.
     if body.provider not in ("claude", "codex", "pi", "kimi", "omp"):
         raise HTTPException(400, detail=erro("erro_provider_sessao_invalido", "provider invalido"))
+    # Antes de qualquer efeito (worktree, registry.create): convidado só abre dentro da pasta dele.
+    guest = guest_users.current.get()
+    if guest is not None and not guest_users.inside_root(guest, body.cwd):
+        raise HTTPException(403, detail=erro("erro_fora_da_pasta",
+                                             "o convidado só abre sessão dentro da pasta dele"))
     # Sem isto a sessão sem terminal nasce e só quebra ao subir o processo, com um ENOENT que não
     # diz qual arquivo faltou.
     if not await asyncio.to_thread(os.path.isdir, os.path.expanduser(body.cwd)):
@@ -2546,7 +2555,9 @@ async def rename_session(name: str, body: RenameBody):
             await stack.enter_async_context(adapter.delivery_lock(key))
         task = asyncio.create_task(asyncio.to_thread(_rename_session, name, body))
         try:
-            return await asyncio.shield(task)
+            result = await asyncio.shield(task)
+            await asyncio.to_thread(guest_users.rename_session, name, sanitize_session_name(body.new))
+            return result
         except asyncio.CancelledError:
             await task
             raise

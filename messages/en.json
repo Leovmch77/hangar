@@ -2689,6 +2689,7 @@
   "erro_fora_do_convite": "outside the shared session",
   "erro_fora_do_convidado": "outside the guest's access",
   "erro_pasta_inexistente": "the folder does not exist",
+  "erro_fora_da_pasta": "guests can only open sessions inside their folder",
   "erro_convidado_inexistente": "guest does not exist",
   "erro_so_dono": "only the server owner can do this",
   "erro_convite_encerrado": "sharing of this session has ended",
