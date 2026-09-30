@@ -1013,7 +1013,10 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
             />
           </View>
 
-          <EstiloPill />
+          {/* Só a pill encolhe: tela estreita ou fonte grande não empurra Enviar/Parar pra fora. */}
+          <View style={styles.estiloSlot}>
+            <EstiloPill />
+          </View>
 
           <Pressable
             onPress={handleMicPress}
@@ -1286,6 +1289,7 @@ const styles = StyleSheet.create((theme) => ({
   },
   inputWrap: {
     flex: 1,
+    minWidth: 64,
     minHeight: 44,
     justifyContent: 'center',
     backgroundColor: superficie(theme),
@@ -1294,6 +1298,10 @@ const styles = StyleSheet.create((theme) => ({
     borderColor: theme.tokens.border.subtle,
     paddingHorizontal: theme.base.space[2],
     paddingVertical: 6,
+  },
+  estiloSlot: {
+    flexShrink: 1,
+    minWidth: 0,
   },
   iconBtn: {
     width: 44,
