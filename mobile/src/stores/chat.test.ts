@@ -589,6 +589,27 @@ function fetchManual(): Pedido[] {
   return pedidos;
 }
 
+test('rejeição antiga não apaga o envio novo após reabrir a conversa', async () => {
+  const pedidos = fetchManual();
+  const chat = chatStore('srv1', 'sess');
+  chat.retain();
+  pedidos[0].responder([]);
+  await tick();
+  const first = chat.send('antiga');
+  chat.release();
+  chat.retain();
+  pedidos[2].responder([]);
+  await tick();
+  const second = chat.send('nova');
+  const rejected = expect(first).rejects.toThrow();
+  pedidos[1].responder(null, { status: 503 });
+  await rejected;
+  expect(chat.use.getState().pending.map((p) => p.text)).toEqual(['nova']);
+  pedidos[3].responder(null);
+  await second;
+  chat.release();
+});
+
 describe('primeiro plano', () => {
   test('fundo fecha stream e timers sem perder conversa; volta sincroniza uma vez sem duplicar', async () => {
     const pedidos = fetchManual();

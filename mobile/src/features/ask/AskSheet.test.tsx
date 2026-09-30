@@ -145,6 +145,7 @@ test('ACK de cancelamento antigo não fecha pergunta em outro servidor', async (
   let finish!: (response: Response) => void;
   vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>((resolve) => { finish = resolve; })));
   await open({ ...payload, is_async: true, request_id: 'async-1' });
+  await click('Primeira');
   await click(m.comum_cancelar());
   mocks.params = { server: 'other', name: 'sess' };
   chatStore('other', 'sess').openAsk({ ...payload, request_id: 42 });

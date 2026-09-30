@@ -500,7 +500,6 @@ function criarChatStore(serverId: string, name: string): ChatApi {
       es = null;
       clearTimeout(retryTimer);
       idIndex.clear();
-      pendingSeq = 0;
       prevState = null;
       lastEventId = null;
       etag = null;

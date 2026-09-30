@@ -5,7 +5,8 @@ import { describe, expect, it, vi } from 'vitest';
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
-vi.mock('expo-router', () => ({ useRouter: () => ({ push: vi.fn() }) }));
+const routerPush = vi.hoisted(() => vi.fn());
+vi.mock('expo-router', () => ({ useRouter: () => ({ push: routerPush }) }));
 vi.mock('../ui/Icon', () => ({ Icon: () => null }));
 vi.mock('../ui/Sheet', () => ({ Sheet: ({ children }: { children: ReactNode }) => createElement('div', null, children) }));
 vi.mock('../features/sessions/StatePill', () => ({ StatePill: () => null }));
@@ -14,7 +15,7 @@ vi.mock('./ContextRing', () => ({ ContextRing: () => null }));
 vi.mock('../paraglide/messages', () => Object.fromEntries(
   ('arq_aba askq_sua_resposta bastao_dossie_sub bastao_dossie_titulo chat_voltar_sessoes codex_limites_titulo ctx_anexos ctx_atividade ctx_grupo ctx_limites ctx_repositorio ctx_terminal modo_so_ociosa more_fotos_videos_arquivos more_tarefas_agentes navbar_mais_acoes par_titulo recarregar_sessao recarregar_sessao_detalhe sessao_trocar_de term_titulo '
     + 'askq_enviando board_arquivo board_imagem board_remover_anexo codex_orientar composer_anexar_arquivo composer_desfazer_limpeza composer_ditado_limpo composer_enviando_cancelar composer_enviar_mensagem composer_fila_acao composer_fila_aria composer_fila_contagem composer_gravando_audio composer_gravar_audio composer_mandando_grupo composer_mandar_grupo composer_mandar_tambem composer_mensagem composer_parar composer_parar_gravacao composer_pro_grupo composer_pros_dois composer_sessao_trabalhando composer_transcrevendo_audio composer_transcrever_de_novo')
-    .concat(' permissao_pedido comum_cancelar msg_aria_mensagens').split(' ').map((k) => [k, () => k]),
+    .concat(' permissao_pedido comum_cancelar msg_aria_mensagens chat_plan_proposto').split(' ').map((k) => [k, () => k]),
 ));
 
 // Composer isolado: sem picker, pills, ditado nem store real — só o que decide o botão Parar.
@@ -55,6 +56,17 @@ vi.mock('@legendapp/list/react-native', () => ({
   LegendList: ({ data, renderItem, keyExtractor }: {
     data: unknown[]; renderItem: (a: { item: unknown }) => ReactNode; keyExtractor: (i: unknown) => string;
   }) => createElement('div', null, data.map((item) => createElement('div', { key: keyExtractor(item) }, renderItem({ item })))),
+}));
+
+vi.mock('react-native-enriched-markdown', () => ({
+  EnrichedMarkdownText: ({ markdown }: { markdown: string }) => createElement('pre', null, markdown),
+}));
+vi.mock('./TableChart', () => ({ TableChart: () => null }));
+vi.mock('./tableChartPref', () => ({ getTableChartPref: () => 'table', setTableChartPref: () => {} }));
+vi.mock('./BubbleActions', () => ({ BubbleActions: () => null }));
+vi.mock('./ArquivoChip', () => ({
+  ArquivoChip: ({ caminho, onPress }: { caminho: string; onPress: () => void }) =>
+    createElement('button', { onClick: onPress, 'aria-label': caminho }, caminho),
 }));
 
 import { ChatHeader } from './ChatHeader';
@@ -174,4 +186,23 @@ describe('plano proposto na lista', () => {
     expect(bubbleTexts).toEqual([text]);
     act(() => root.unmount());
   });
+});
+
+it('plano real preserva prosa, links e abertura do arquivo sem tags do protocolo', async () => {
+  const { AssistantBubble } = await vi.importActual<typeof import('./AssistantBubble')>('./AssistantBubble');
+  routerPush.mockClear();
+  const text = 'Prosa antes\n<proposed_plan>\n# Plano Android\n[Documentação](https://docs.example.test/android)\n[Arquivo do plano](/repo/docs/plano.md)\n</proposed_plan>\nProsa depois';
+  const { container, root } = await render(createElement(AssistantBubble, { text, sessionName: 'sess', serverId: 'srv' }));
+  const markdown = container.querySelector('pre')!.textContent;
+  expect(markdown).toContain('Prosa antes');
+  expect(markdown).toContain('Prosa depois');
+  expect(markdown).toContain('[Documentação](https://docs.example.test/android)');
+  expect(markdown).toContain('[Arquivo do plano](/repo/docs/plano.md)');
+  expect(markdown).not.toContain('proposed_plan');
+  expect(container.textContent).toContain('chat_plan_proposto');
+  const chip = container.querySelector<HTMLButtonElement>('[aria-label="/repo/docs/plano.md"]');
+  expect(chip).not.toBeNull();
+  act(() => chip!.click());
+  expect(routerPush).toHaveBeenCalledExactlyOnceWith('/s/srv/sess/files?path=%2Frepo%2Fdocs%2Fplano.md');
+  act(() => root.unmount());
 });
