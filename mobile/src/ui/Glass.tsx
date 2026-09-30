@@ -38,32 +38,34 @@ export function Glass({ variant = 'panel', style, children, ...rest }: Props) {
   const alvoBlur = useBlurTarget();
   const [r, g, b] = theme.tokens.glass.panelRgb;
   const bg = `rgba(${r},${g},${b},${alphaDoVidro(theme, variant)})`;
+  // O material é só a camada de fundo, irmã do children dentro da MESMA View: trocar tema ou ligar
+  // "Reduzir transparência" com o composer aberto remonta o fundo, nunca o input (foco e rascunho).
+  let fundo;
   if (reduzir) {
-    return <View style={[styles.box, { backgroundColor: `rgb(${r},${g},${b})` }, style]} {...rest}>{children}</View>;
-  }
-  if (Platform.OS === 'ios' && isLiquidGlassAvailable()) {
-    return (
-      <View style={[styles.box, style]} {...rest}>
-        {/* key pelo tema: o material do glass-effect não acompanha troca de tema em runtime.
-            Isolado do children (só o fundo remonta) pra não perder rascunho/foco de um input dentro. */}
-        <GlassView key={rt.themeName} glassEffectStyle="regular" tintColor={bg} style={StyleSheet.absoluteFillObject} pointerEvents="none" />
-        {children}
-      </View>
+    fundo = <View style={[StyleSheet.absoluteFillObject, { backgroundColor: `rgb(${r},${g},${b})` }]} pointerEvents="none" />;
+  } else if (Platform.OS === 'ios' && isLiquidGlassAvailable()) {
+    // key pelo tema: o material do glass-effect não acompanha troca de tema em runtime.
+    fundo = <GlassView key={rt.themeName} glassEffectStyle="regular" tintColor={bg} style={StyleSheet.absoluteFillObject} pointerEvents="none" />;
+  } else {
+    fundo = (
+      <BlurView
+        intensity={40}
+        blurMethod="dimezisBlurView"
+        // Sem alvo (tela que não passa pela Screen) o Android cai em "none" — o rgba abaixo cobre o caso.
+        blurTarget={alvoBlur ?? undefined}
+        tint={rt.themeName === 'dark' ? 'dark' : 'light'}
+        style={StyleSheet.absoluteFillObject}
+        pointerEvents="none"
+      >
+        <View style={[StyleSheet.absoluteFillObject, { backgroundColor: bg }]} />
+      </BlurView>
     );
   }
   return (
-    <BlurView
-      intensity={40}
-      blurMethod="dimezisBlurView"
-      // Sem alvo (tela que não passa pela Screen) o Android cai em "none" — o rgba abaixo cobre o caso.
-      blurTarget={alvoBlur ?? undefined}
-      tint={rt.themeName === 'dark' ? 'dark' : 'light'}
-      style={[styles.box, style]}
-      {...rest}
-    >
-      <View style={[StyleSheet.absoluteFillObject, { backgroundColor: bg }]} />
+    <View style={[styles.box, style]} {...rest}>
+      {fundo}
       {children}
-    </BlurView>
+    </View>
   );
 }
 
