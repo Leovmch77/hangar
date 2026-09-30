@@ -6,15 +6,15 @@ import { prefs } from '../stores/prefs';
 // rodar antes de qualquer coisa tocar o UnistylesRuntime — o store importa `aplicarMaterial`, que
 // mexe no runtime. Sem semear daqui, tudo pintava com alpha de fábrica até o primeiro
 // `aplicarMaterial()`, e a tela abria com um piscão de opacidade errada.
-const alphaSalvo = (chave: string, padrao: number) => {
+const alphaSalvo = (chave: string, padrao: number, minimum = 0) => {
   const v = prefs.getNumber(chave);
-  return typeof v === 'number' && Number.isFinite(v) ? Math.max(0, Math.min(1, v)) : padrao;
+  return typeof v === 'number' && Number.isFinite(v) ? Math.max(minimum, Math.min(1, v)) : padrao;
 };
 
 const mk = (t: typeof themeDark) => ({
   tokens: t,
   base: themeBase,
-  panelAlpha: alphaSalvo('aparencia.panelAlpha', t.glass.panelAlpha),
+  panelAlpha: alphaSalvo('aparencia.panelAlpha', t.glass.panelAlpha, 0.3),
   surfaceAlpha: alphaSalvo('aparencia.surfaceAlpha', 1),
 });
 
