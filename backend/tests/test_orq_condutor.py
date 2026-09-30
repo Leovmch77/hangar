@@ -1182,6 +1182,11 @@ def test_jev_grava_as_probabilidades_da_escolha(env, tmp_path, jev_server):
 
 def test_ids_da_sessao_pelo_sidecar(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
+    fake = tmp_path / "bin"   # o tmux do fallback nunca enxerga as sessões reais da máquina
+    fake.mkdir()
+    (fake / "tmux").write_text("#!/bin/sh\nexit 1\n")
+    (fake / "tmux").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake}{os.pathsep}{os.environ['PATH']}")
     side = tmp_path / ".hangar" / "claude-headless"
     side.mkdir(parents=True)
     (side / "w-t4.json").write_text(json.dumps({"name": "w-t4", "provider": "claude",

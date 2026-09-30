@@ -203,11 +203,11 @@ def _session_ids(name: str) -> dict:
             sc = json.loads(f.read_text(encoding="utf-8"))
             return {**ids, **{k: sc.get(k) for k in ids}, "provider": sc.get("provider") or dflt}
     r = subprocess.run(["tmux", "display", "-p", "-t", f"={name}:", "#{pane_start_command}"],
-                       capture_output=True, text=True)
+                       capture_output=True, text=True, timeout=5)
     m = re.search(r"--session-id[ =]([0-9a-fA-F-]{36})", r.stdout) if r.returncode == 0 else None
     if m:
         env = subprocess.run(["tmux", "show-environment", "-t", f"={name}", "CLAUDE_CONFIG_DIR"],
-                             capture_output=True, text=True).stdout.strip()
+                             capture_output=True, text=True, timeout=5).stdout.strip()
         ids.update(provider="claude", session_id=m.group(1),
                    config_dir=env.split("=", 1)[1] if env.startswith("CLAUDE_CONFIG_DIR=") else None)
     return ids
@@ -219,7 +219,7 @@ def _record_session(d: Path, name: str, role: str | None, task: int | None) -> N
         row = {"ts": now(), "name": name, "role": role, "task": task, **_session_ids(name)}
         with (d / "sessions.jsonl").open("a", encoding="utf-8") as f:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
-    except (OSError, ValueError, subprocess.SubprocessError) as e:
+    except Exception as e:  # noqa: BLE001 — a view of the run: never breaks the step that called it
         _journal_or_warn(d, f"sessions.jsonl not written for {name}: {e}")
 
 
@@ -1460,11 +1460,11 @@ def triage_auto(d: Path, cfg: dict, text: str) -> tuple[str, str, str]:
 def cmd_notify(a) -> int:
     d = base_dir(a.dir)
     m = MARK.match(a.text)
-    who = _sender(a.alarm) if is_auto(d) else None
     if m and m.group(1).lower() == "aviso":
         journal_append(d, f"aviso: {a.text}")
         print("journal")
         return 0
+    who = _sender(a.alarm) if is_auto(d) else None
     kind, line = "woke", f"acordou o árbitro: {a.text}"
     if not m and not a.alarm and is_auto(d):
         verdict, source, why = triage_auto(d, config(d), a.text)

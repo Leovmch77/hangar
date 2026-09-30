@@ -93,7 +93,12 @@ def start(tmp_path, integ="`test -f a.txt`", par="até 2", rows=ROWS, revisao="s
     fake.write_text(FAKE)
     fake.chmod(0o755)
     # CLAUDE_CONFIG_DIR isolated: jev_config() would otherwise read the real runtime-config.json.
-    e = {**os.environ, "ORQ_DIR": str(d), "ORQ_SEND": str(fake), "FAKE_LOG": str(log),
+    nt = tmp_path / "nt-bin"   # tmux falso: o fallback de _session_ids nunca ve as sessoes reais
+    nt.mkdir()
+    (nt / "tmux").write_text("#!/bin/sh\nexit 1\n")
+    (nt / "tmux").chmod(0o755)
+    e = {**os.environ, "PATH": f"{nt}{os.pathsep}{os.environ['PATH']}",
+         "ORQ_DIR": str(d), "ORQ_SEND": str(fake), "FAKE_LOG": str(log),
          "ORQ_JEV": "off", "HOME": str(tmp_path), "CLAUDE_CONFIG_DIR": str(tmp_path / "cfg"),
          "ORQ_WHOAMI": "false",
          "TYPESAFE_API_KEY": "", "ORQ_JEV_URL": "", "JEV_ENDPOINT": "", "JEV_MODEL": ""}
