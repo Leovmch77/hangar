@@ -218,6 +218,7 @@ const ERROS: Record<string, (params: Parametros) => string> = {
   erro_compartilhar_pre_requisito: () => m.erro_compartilhar_pre_requisito(),
   erro_compartilhamento_inexistente: () => m.erro_compartilhamento_inexistente(),
   erro_compartilhar_sem_rede_local: () => m.erro_compartilhar_sem_rede_local(),
+  erro_compartilhar_porta_do_convite: (p) => m.erro_compartilhar_porta_do_convite({ port: String(p.port) }),
   erro_fora_do_convite: () => m.erro_fora_do_convite(),
   erro_convite_encerrado: () => m.erro_convite_encerrado(),
   erro_convite_usado: () => m.erro_convite_usado(),

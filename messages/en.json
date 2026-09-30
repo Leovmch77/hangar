@@ -6156,6 +6156,7 @@
   "erro_compartilhar_pre_requisito": "Sharing is not set up on this machine yet.",
   "erro_compartilhamento_inexistente": "That access no longer exists.",
   "erro_compartilhar_sem_rede_local": "This machine only accepts connections from itself. Set CP_LAN_BIND_IP=0.0.0.0 in backend/.env and restart Hangar.",
+  "erro_compartilhar_porta_do_convite": "Hangar on this machine runs on port {port}, which is the invite port. Change CP_PORT in backend/.env and restart Hangar.",
   "convite_erro_rede": "Could not reach the invite's machine.",
   "convite_rotulo": "Invite · {dono}",
   "convite_encerrado": "Sharing ended",

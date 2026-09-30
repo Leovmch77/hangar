@@ -6156,6 +6156,7 @@
   "erro_compartilhar_pre_requisito": "Falta configurar o compartilhamento nesta máquina.",
   "erro_compartilhamento_inexistente": "Esse acesso não existe mais.",
   "erro_compartilhar_sem_rede_local": "Esta máquina só aceita conexões dela mesma. Grave CP_LAN_BIND_IP=0.0.0.0 no backend/.env e reinicie o Hangar.",
+  "erro_compartilhar_porta_do_convite": "O Hangar desta máquina roda na porta {port}, que é a do convite. Troque CP_PORT no backend/.env e reinicie o Hangar.",
   "convite_erro_rede": "Não deu para falar com a máquina do convite.",
   "convite_rotulo": "Convite · {dono}",
   "convite_encerrado": "Compartilhamento encerrado",

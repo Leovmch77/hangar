@@ -20,7 +20,7 @@ from app.hook_installer import (
 from app import migracao_sidecars, orq_politica, resilient_accept
 from app.hook_state import hook_state
 from app.pi_inbox import escrever_endpoint
-from app.share_tunnel import GUEST_PORT
+from app.share_tunnel import GUEST_PORT, port_clash
 
 LOOPBACK = {"127.0.0.1", "localhost", "::1"}
 
@@ -145,6 +145,10 @@ def _guest_socket() -> socket.socket | None:
     # Pela internet quem expõe é o Funnel (fala com 127.0.0.1); com o backend aberto pra rede, a
     # porta do convite também escuta nela, pro convite funcionar na mesma rede sem Tailscale.
     # Porta ocupada (outra instância nesta máquina) não derruba o boot; só fica sem compartilhar.
+    if port_clash():
+        print(f"[hangar] AVISO: CP_PORT={settings.port} é a porta do convite; "
+              "compartilhar sessão fica desligado até o app usar outra porta")
+        return None
     host = "0.0.0.0" if resolve_bind_ip(settings) in ("0.0.0.0", "::") else "127.0.0.1"
     try:
         return _tcp_socket(host, GUEST_PORT)

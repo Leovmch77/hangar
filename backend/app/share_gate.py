@@ -14,7 +14,7 @@ from starlette.websockets import WebSocket
 from app import share_api, share_store
 from app.mensagens import erro
 from app.share_life import session_life
-from app.share_tunnel import GUEST_PORT
+from app.share_tunnel import GUEST_PORT, port_clash
 
 GUEST_SCOPE_KEY = "hangar_guest"
 
@@ -136,7 +136,7 @@ class ShareGate:
 
     async def __call__(self, scope, receive, send):
         server = scope.get("server") or (None, None)
-        if scope["type"] not in ("http", "websocket") or server[1] != GUEST_PORT:
+        if scope["type"] not in ("http", "websocket") or server[1] != GUEST_PORT or port_clash():
             await self.app(scope, receive, send)
             return
         method = scope.get("method", "GET")

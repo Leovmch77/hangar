@@ -708,6 +708,12 @@ O convite local fica marcado (`local`) e não liga o Funnel. Página e resgate d
 por onde o convidado chegou (`scope["server"]`: loopback = Funnel, senão o IP da rede). Os
 clientes só aceitam `http` num convite quando o host é IP privado (10/8, 172.16/12, 192.168/16).
 
+App na porta do convite (30/09/2026): com `CP_PORT=8766` o portão tratava todo pedido como de
+convidado e respondia 401 até ao dono e ao `/api/peers/ping`; a VPS recusou 21 deploys seguidos
+por isso. Com as portas iguais (`share_tunnel.port_clash()`) o backend não abre a porta do convite,
+o portão não filtra e gerar convite responde 409 `erro_compartilhar_porta_do_convite`: o Funnel da
+8766 exporia a API inteira do dono.
+
 O Funnel expõe só `127.0.0.1:8766`, em `:8443` (a 443 é o `serve` da tailnet e a 10000 é a prévia
 de porta do `tunnel.py`; Funnel só aceita essas três). Nessa porta só vale o token do convidado
 (Bearer ou `?token=`); o token do dono e o cookie são recusados. Abrir `/convite/<código>` não

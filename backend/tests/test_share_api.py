@@ -69,6 +69,15 @@ def test_link_local_nao_liga_o_funnel(cli, syncs, monkeypatch):
     assert all(a is False for a in syncs)
 
 
+@pytest.mark.parametrize("local", ["false", "true"])
+def test_app_na_porta_do_convite_nao_gera_convite(cli, syncs, monkeypatch, local):
+    # O Funnel da 8766 exporia a API do dono na internet.
+    monkeypatch.setattr(settings, "port", share_tunnel.GUEST_PORT)
+    monkeypatch.setattr(share_tunnel, "ensure_on", lambda: pytest.fail("não liga o Funnel"))
+    r = cli.post(f"/api/sessions/proj/share?local={local}", headers=AUTH)
+    assert r.status_code == 409 and r.json()["detail"]["code"] == "erro_compartilhar_porta_do_convite"
+
+
 def test_link_local_com_bind_so_local_explica(cli, syncs, monkeypatch):
     monkeypatch.setattr(share_api, "resolve_bind_ip", lambda s: "127.0.0.1")
     r = cli.post("/api/sessions/proj/share?local=true", headers=AUTH)

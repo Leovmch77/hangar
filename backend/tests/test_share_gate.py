@@ -266,6 +266,17 @@ def test_terminal_de_outra_sessao_recusado(monkeypatch):
             ws.receive_text()
 
 
+def test_app_na_porta_do_convite_nao_passa_pelo_porteiro(monkeypatch):
+    # CP_PORT=8766: sem essa saída, todo pedido do dono levava 401, até a sonda de saúde.
+    from app import main
+    monkeypatch.setattr(settings, "port", 8766)
+    c = _guest_client()
+    assert c.get("/api/peers/ping").json() == {"path": "api/peers/ping", "guest": None}
+    r = c.get("/api/sessions", headers={"Authorization": "Bearer secret"})
+    assert r.status_code == 200 and r.json()["guest"] is None
+    assert main._guest_socket() is None
+
+
 def test_porta_do_convite_ocupada_nao_derruba_o_boot(monkeypatch):
     from app import main
     ocupada = socket.socket()
