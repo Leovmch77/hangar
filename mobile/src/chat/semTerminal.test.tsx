@@ -14,7 +14,7 @@ vi.mock('./ContextRing', () => ({ ContextRing: () => null }));
 vi.mock('../paraglide/messages', () => Object.fromEntries(
   ('arq_aba askq_sua_resposta bastao_dossie_sub bastao_dossie_titulo chat_voltar_sessoes codex_limites_titulo ctx_anexos ctx_atividade ctx_grupo ctx_limites ctx_repositorio ctx_terminal modo_so_ociosa more_fotos_videos_arquivos more_tarefas_agentes navbar_mais_acoes par_titulo recarregar_sessao recarregar_sessao_detalhe sessao_trocar_de term_titulo '
     + 'askq_enviando board_arquivo board_imagem board_remover_anexo codex_orientar composer_anexar_arquivo composer_desfazer_limpeza composer_ditado_limpo composer_enviando_cancelar composer_enviar_mensagem composer_fila_acao composer_fila_aria composer_fila_contagem composer_gravando_audio composer_gravar_audio composer_mandando_grupo composer_mandar_grupo composer_mandar_tambem composer_mensagem composer_parar composer_parar_gravacao composer_pro_grupo composer_pros_dois composer_sessao_trabalhando composer_transcrevendo_audio composer_transcrever_de_novo')
-    .split(' ').map((k) => [k, () => k]),
+    .concat(' permissao_pedido comum_cancelar').split(' ').map((k) => [k, () => k]),
 ));
 
 // Composer isolado: sem picker, pills, ditado nem store real — só o que decide o botão Parar.
@@ -43,6 +43,7 @@ vi.mock('../stores/chat', () => {
 import { ChatHeader } from './ChatHeader';
 import { MoreSheet } from './MoreSheet';
 import { Composer } from './Composer';
+import { OptionButtons } from './OptionButtons';
 
 async function render(el: ReturnType<typeof createElement>) {
   const container = document.createElement('div');
@@ -53,6 +54,24 @@ async function render(el: ReturnType<typeof createElement>) {
 
 const header = { name: 'g1-orq', state: null, onBack: () => {}, onMore: () => {}, onTitlePress: () => {} };
 const sheet = { open: true, onClose: () => {}, serverId: 's1', name: 'g1-orq' };
+
+it.each([0, 1])('opção %s e cancelar compartilham trava, mantendo índice 1-based e liberando no erro', async (selected) => {
+  let fail!: (reason: Error) => void;
+  const onSelect = vi.fn(() => new Promise<void>((_, reject) => { fail = reject; }));
+  const onCancel = vi.fn(async () => {});
+  const { container, root } = await render(createElement(OptionButtons, {
+    question: 'permission', options: ['Yes', 'No'], onSelect, onCancel,
+  }));
+  const buttons = container.querySelectorAll<HTMLButtonElement>('button');
+  act(() => { buttons[selected].click(); buttons[1 - selected].click(); buttons[2].click(); });
+  expect(onSelect).toHaveBeenCalledExactlyOnceWith(selected + 1);
+  expect(onCancel).not.toHaveBeenCalled();
+  expect([...buttons].every((b) => b.disabled)).toBe(true);
+  await act(async () => fail(new Error('recusado')));
+  await act(async () => buttons[2].click());
+  expect(onCancel).toHaveBeenCalledTimes(1);
+  act(() => root.unmount());
+});
 
 describe('terminal escondido', () => {
   it('cabeçalho sem onTerminal não mostra o botão Terminal', async () => {
