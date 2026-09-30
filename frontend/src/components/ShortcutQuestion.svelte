@@ -3,7 +3,7 @@
   // abre (chip, tile, Chat) chama openQuestion(). Fica aberto entre uma pergunta e a seguinte do
   // mesmo terminal e guarda as respostas desta rodada.
   import ConfirmDialog from './ConfirmDialog.svelte';
-  import { answerHangarTerminal, answerShortcutTerminal } from '@hangar/core';
+  import { answerHangarTerminal, answerShortcutTerminal, type ShortcutQuestion } from '@hangar/core';
   import { listServers } from '../lib/auth';
   import { closeQuestion, liveTerminals, requestHangarTab } from '../lib/hangarTerminals.svelte';
   import { focusShortcutTerminal } from '../lib/shortcutTerminals.svelte';
@@ -11,6 +11,9 @@
 
   interface Props { onOpenTerminal?: (serverId: string, owner: string, id: string) => void }
   let { onOpenTerminal }: Props = $props();
+
+  // A tela entra na assinatura: a mesma pergunta repetida (senha errada) tem uma linha nova acima dela.
+  const sigOf = (q: ShortcutQuestion) => `${q.text}|${q.default}|${q.screen.join('\n')}`;
 
   const open = $derived(liveTerminals.question);
   const srv = $derived(open ? listServers().find((s) => s.id === open.serverId) ?? null : null);
@@ -33,13 +36,13 @@
   $effect(() => {
     if (open?.id !== lastId) { lastId = open?.id ?? ''; answered = []; hide = false; sentSig = ''; }
     const q = term?.question;
-    const sig = q ? `${q.text}|${q.default}` : '';
+    const sig = q ? sigOf(q) : '';
     if (!q) { sentSig = ''; return; }
     if (sig === sentSig) return;
     if (sig !== lastSig) { lastSig = sig; answer = q.default; waitingSince = null; }
   });
 
-  const pending = $derived(!!term?.question && `${term.question.text}|${term.question.default}` !== sentSig);
+  const pending = $derived(!!term?.question && sigOf(term.question) !== sentSig);
 
   // Depois de responder, espera a próxima pergunta por 5 s; sem ela, fecha.
   $effect(() => {
@@ -57,7 +60,7 @@
       else await answerHangarTerminal(srv, term.id, answer);
       answered = [...answered, { text: term.question.text, value: answer, hidden: hide }];
       waitingSince = Date.now();
-      sentSig = `${term.question.text}|${term.question.default}`;
+      sentSig = sigOf(term.question);
       lastSig = '';
     } catch (e) {
       error = m.hangar_erro({ msg: e instanceof Error ? e.message : String(e) });

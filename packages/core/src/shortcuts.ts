@@ -27,7 +27,7 @@ export interface ShortcutShell {
   type: 'shell';
   label: string;
   icon?: string;
-  command: string;        // roda na máquina do servidor, cwd da sessão, dispara-e-esquece
+  command: string;        // roda na máquina do servidor, num terminal escondido; cwd da sessão (ou home, No Hangar)
   pasta?: string;         // absoluta ou relativa à raiz da cópia da sessão; ausente = cwd da sessão
   // 'hangar' = uma cópia só no servidor, fora de qualquer sessão; ausente = da sessão que clicou.
   runs_in?: 'session' | 'hangar';

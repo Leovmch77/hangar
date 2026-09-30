@@ -6091,7 +6091,7 @@
   "pergunta_aguardando": "Enviado. Esperando a próxima pergunta…",
   "pergunta_marca_hangar": "NO HANGAR",
   "hangar_sem_sessao": "A sessão que abriu este terminal fechou. Abra o terminal por qualquer sessão desta máquina.",
-  "hangar_servidor_desatualizado": "Esta máquina ainda não tem os atalhos No Hangar. Atualize o Hangar dela.",
+  "hangar_servidor_desatualizado": "Esta máquina ainda não tem os atalhos No Hangar, então o atalho rodou dentro da sessão dela (uma cópia já abriu). Não clique de novo; atualize o Hangar dela.",
   "term_grupo_hangar": "HANGAR",
   "term_hangar_parar": "Parar {label}",
   "atalho_tile_pergunta": "pergunta pra você",

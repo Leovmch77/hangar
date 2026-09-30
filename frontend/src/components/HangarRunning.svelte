@@ -78,7 +78,7 @@
   }
   async function act(serverId: string, fn: (srv: NonNullable<ReturnType<typeof serverOf>>) => Promise<unknown>) {
     const srv = serverOf(serverId);
-    if (!srv) return;
+    if (!srv) { error = m.servidor_nao_existe(); return; }
     error = '';
     try { await fn(srv); } catch (e) { error = m.hangar_erro({ msg: e instanceof Error ? e.message : String(e) }); }
   }

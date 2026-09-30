@@ -2802,7 +2802,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
     }
   }
 
-  // Cópia única do servidor: asking abre a pergunta; rodando, a janela vem pra frente ou o
+  // Cópia única do servidor: perguntando abre a pergunta; rodando, a janela vem pra frente ou o
   // painel abre na aba dele; parado, roda.
   async function runInHangar(s: ShortcutShell) {
     const shortcutKey = shortcutKeyOf(s);

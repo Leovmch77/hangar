@@ -6091,7 +6091,7 @@
   "pergunta_aguardando": "Sent. Waiting for the next question…",
   "pergunta_marca_hangar": "IN HANGAR",
   "hangar_sem_sessao": "The session that opened this terminal is closed. Open the terminal from any session on this machine.",
-  "hangar_servidor_desatualizado": "This machine doesn't have Hangar shortcuts yet. Update its Hangar.",
+  "hangar_servidor_desatualizado": "This machine doesn't have Hangar shortcuts yet, so the shortcut ran inside its session (a copy already opened). Don't click again; update its Hangar.",
   "term_grupo_hangar": "HANGAR",
   "term_hangar_parar": "Stop {label}",
   "atalho_tile_pergunta": "asking you",

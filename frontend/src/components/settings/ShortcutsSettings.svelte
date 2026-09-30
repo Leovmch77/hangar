@@ -457,7 +457,8 @@
         {#if fType === 'shell' && formScope === 'project'}
           <label class="campo">
             <span>{m.atalhos_pasta()}</span>
-            <input type="text" bind:value={fPasta} placeholder={m.atalhos_pasta_placeholder()} />
+            <input type="text" bind:value={fPasta} placeholder={m.atalhos_pasta_placeholder()}
+                   disabled={fRunsIn === 'hangar' && fHome} />
             <small class="ajuda">{m.atalhos_pasta_dica()}</small>
           </label>
         {/if}

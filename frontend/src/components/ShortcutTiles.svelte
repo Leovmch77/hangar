@@ -1,7 +1,7 @@
 <script lang="ts">
   // Seção "Ações": os atalhos customizados como blocos (ícone em cima, rótulo embaixo), no desenho do
-  // painel direito do app nativo. Grade que quebra stateLine em vez de rolar: com mais largura cabem mais
-  // colunas, e cada bloco divide a stateLine por igual. Usada no painel do desktop e no "⋯" do celular.
+  // painel direito do app nativo. Grade que quebra linha em vez de rolar: com mais largura cabem mais
+  // colunas, e cada bloco divide a linha por igual. Usada no painel do desktop e no "⋯" do celular.
   import ShortcutIcon from './icons/ShortcutIcon.svelte';
   import { shortcutMissingSecret, runsInHangar, hangarKeyOf, type LiveShortcutTerminal, type ShortcutSendText, type ShortcutShell } from '@hangar/core';
   import { onDestroy, type Snippet } from 'svelte';
@@ -15,7 +15,7 @@
     onAdd?: () => void;
     // Controles extras do cabeçalho (menu de importar/exportar), à direita do "+".
     extra?: Snippet;
-    // Nome do projeto da sessão (tooltip da marca) e erro ao ler os atalhos dele (uma stateLine discreta).
+    // Nome do projeto da sessão (dica da marca) e erro ao ler os atalhos dele (uma linha discreta).
     projectName?: string;
     projectError?: string;
     // Chave do repositório (identidade da cópia No Hangar de atalho do projeto) e a sessão desta tela.
@@ -74,7 +74,7 @@
         {#if runsInHangar(s)}<span class="acao-hangar" aria-hidden="true">{m.term_grupo_hangar()}</span>{/if}
         <ShortcutIcon icon={s.icon} />
         <span class="acao-rotulo">{s.label}</span>
-        {#if stateLine}<span class="acao-tileState">{stateLine}</span>{/if}
+        {#if stateLine}<span class="acao-estado">{stateLine}</span>{/if}
       </button>
     {/each}
   </div>
@@ -106,9 +106,9 @@
   .acoes-add:hover { background: var(--surface-raised); color: var(--text-primary); }
   .acoes-add:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
   /* auto-fit + minmax: as colunas saem da largura e as vazias somem, então poucos blocos dividem a
-     stateLine inteira em vez de ficarem encostados à esquerda. */
+     linha inteira em vez de ficarem encostados à esquerda. */
   .acoes { container-type: inline-size; }
-  /* No máximo cinco por stateLine: o piso da coluna é o maior entre 88px e um quinto da stateLine. */
+  /* No máximo cinco por linha: o piso da coluna é o maior entre 88px e um quinto da linha. */
   .acoes-grade { display: grid; grid-template-columns: repeat(auto-fit, minmax(max(88px, calc((100% - 24px) / 5)), 1fr)); gap: 6px; }
   @container (max-width: 200px) { .acoes-grade { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
   .acao-bloco {
@@ -134,9 +134,9 @@
   .acao-hangar { position: absolute; top: 4px; left: 6px; font-size: 9px; letter-spacing: 0.05em; color: var(--text-muted); }
   .acao-bloco.rodando .acao-hangar { color: var(--success); }
   .acao-bloco.pergunta .acao-hangar { color: var(--warning); }
-  .acao-tileState { font-size: 10px; color: var(--text-muted); }
-  .acao-bloco.rodando .acao-tileState { color: var(--success); }
-  .acao-bloco.pergunta .acao-tileState { color: var(--warning); }
+  .acao-estado { font-size: 10px; color: var(--text-muted); }
+  .acao-bloco.rodando .acao-estado { color: var(--success); }
+  .acao-bloco.pergunta .acao-estado { color: var(--warning); }
   .acoes-erro {
     margin: 0; font-size: var(--text-xs); color: var(--text-muted);
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;

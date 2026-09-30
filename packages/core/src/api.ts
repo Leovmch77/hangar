@@ -2471,10 +2471,11 @@ export function getRunPane(name: string): Promise<{ pane: string }> {
   return apiFetch(`/api/sessions/${encodeURIComponent(name)}/run/pane`);
 }
 
-/** Terminal escondido de um atalho "shell": uma aba no painel de terminal da sessão. O pane fica
- * depois que o comando sai (`alive: false`), com a saída e o código na tela até alguém fechar. */
+/** Pergunta que o programa do terminal está fazendo (`screen` = fim da tela, pra dar contexto). */
 export interface ShortcutQuestion { text: string; default: string; screen: string[] }
 
+/** Terminal escondido de um atalho "shell": uma aba no painel de terminal da sessão. O pane fica
+ * depois que o comando sai (`alive: false`), com a saída e o código na tela até alguém fechar. */
 export interface ShortcutTerminal {
   id: string;
   label: string;
