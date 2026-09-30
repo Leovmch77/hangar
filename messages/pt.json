@@ -6071,5 +6071,16 @@
   "nova_conversa_envio_recusado": "A conversa foi criada, mas a mensagem foi recusada: {erro}. Você pode enviar novamente nesta mesma conversa.",
   "nova_conversa_envio_incerto": "Não deu para confirmar se a mensagem chegou. Abra a conversa e confira antes de enviar novamente.",
   "nova_conversa_envio_conferir_erro": "Não consegui conferir a mensagem nesta conversa: {erro}",
-  "nova_conversa_resultado_salvar_erro": "Não foi possível guardar o resultado do envio neste aparelho. Confira a conversa antes de enviar novamente."
+  "nova_conversa_resultado_salvar_erro": "Não foi possível guardar o resultado do envio neste aparelho. Confira a conversa antes de enviar novamente.",
+  "nova_conversa_placeholder": "Escreva a primeira mensagem",
+  "nova_conversa_enviar": "Enviar",
+  "nova_conversa_opcoes": "Opções",
+  "nova_conversa_sem_destino": "Escolha um projeto para poder enviar.",
+  "nova_conversa_guardada": "Mensagem guardada",
+  "nova_conversa_abrir": "Abrir conversa",
+  "nova_conversa_reenviar": "Enviar de novo nesta conversa",
+  "nova_conversa_conferir": "Conferir",
+  "nova_conversa_adotar": "Usar esta conversa",
+  "nova_conversa_descartar": "Descartar tentativa",
+  "nova_conversa_nome_automatico": "Em branco, o nome sai da pasta com um código curto."
 }

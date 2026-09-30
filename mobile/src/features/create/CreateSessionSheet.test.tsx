@@ -11,6 +11,7 @@ const calls = vi.hoisted(() => ({
   prepare: vi.fn(),
   preparation: vi.fn(),
   create: vi.fn(),
+  send: vi.fn(),
   archives: vi.fn(),
   resume: vi.fn(),
   replace: vi.fn(),
@@ -22,7 +23,13 @@ vi.mock('expo-router', () => ({ useRouter: () => ({ replace: calls.replace }) })
 vi.mock('react-native', async (original) => ({
   ...await original<typeof import('react-native')>(),
   Alert: { alert: calls.alert },
+  TextInput: (props: { value?: string; accessibilityLabel?: string; onChangeText?: (value: string) => void }) => createElement('textarea', {
+    value: props.value,
+    'aria-label': props.accessibilityLabel,
+    onInput: (event: { currentTarget: { value: string } }) => props.onChangeText?.(event.currentTarget.value),
+  }),
 }));
+vi.mock('../../ui/Sheet', () => ({ Sheet: ({ open, children }: { open?: boolean; children: ReactNode }) => open ? createElement('div', null, children) : null }));
 vi.mock('../../stores/servers', () => ({
   useServers: Object.assign(
     (selector: (state: { active: () => typeof server; servers: typeof server[] }) => unknown) => selector({ active: () => calls.target ?? server, servers: [server] }),
@@ -32,6 +39,7 @@ vi.mock('../../stores/servers', () => ({
 vi.mock('../../stores/prefs', () => ({ prefs: {
   getString: (key: string) => localStorage.getItem(key) ?? undefined,
   set: (key: string, value: string) => { calls.save(key, value); localStorage.setItem(key, value); },
+  remove: (key: string) => localStorage.removeItem(key),
 } }));
 vi.mock('./ProviderPicker', () => ({ ProviderPicker: ({ onChange }: { onChange: (provider: string) => void }) => createElement('div', null,
   createElement('button', { onClick: () => onChange('codex') }, 'Codex'),
@@ -57,6 +65,7 @@ vi.mock('@hangar/core', async (original) => ({
   prepareCodexAccountForServer: calls.prepare,
   getCodexPreparationForServer: calls.preparation,
   createSessionForServer: calls.create,
+  sendInputForServer: calls.send,
   getArchivePorCwd: calls.archives,
   resumeArchivedConversation: calls.resume,
 }));
@@ -88,9 +97,20 @@ vi.mock('../../paraglide/messages', () => ({
   arquivo_ler_falhou: () => 'ler_falhou', arquivo_pasta_nao_encontrada: () => 'pasta_nao_encontrada',
   arquivo_sem_permissao: () => 'sem_permissao', arquivo_ilegivel: () => 'ilegivel',
   arquivo_raiz_nao_liberada: () => 'raiz_nao_liberada', arquivo_caminho_invalido: () => 'caminho_invalido',
+  nova_conversa_placeholder: () => 'nova_conversa_placeholder', nova_conversa_enviar: () => 'nova_conversa_enviar',
+  nova_conversa_opcoes: () => 'nova_conversa_opcoes', nova_conversa_sem_destino: () => 'nova_conversa_sem_destino',
+  nova_conversa_guardada: () => 'nova_conversa_guardada', nova_conversa_abrir: () => 'nova_conversa_abrir',
+  nova_conversa_reenviar: () => 'nova_conversa_reenviar', nova_conversa_conferir: () => 'nova_conversa_conferir',
+  nova_conversa_adotar: () => 'nova_conversa_adotar', nova_conversa_descartar: () => 'nova_conversa_descartar',
+  nova_conversa_nome_automatico: () => 'nova_conversa_nome_automatico',
+  nova_conversa_criacao_incerta: () => 'nova_conversa_criacao_incerta', nova_conversa_envio_incerto: () => 'nova_conversa_envio_incerto',
+  nova_conversa_salvar_erro: () => 'nova_conversa_salvar_erro', nova_conversa_servidor_ausente: () => 'nova_conversa_servidor_ausente',
+  nova_conversa_resultado_salvar_erro: () => 'nova_conversa_resultado_salvar_erro',
+  nova_conversa_envio_recusado: ({ erro }: { erro: string }) => `nova_conversa_envio_recusado:${erro}`,
 }));
 
 import { CreateSessionSheet } from './CreateSessionSheet';
+import { _resetNewConversationForTests } from '../../stores/newConversation';
 
 const connected = { id: 'work', credential_id: 'codex:/work', name: 'Trabalho', home: '/work', is_default: false, auth: { method: 'oauth', status: 'connected', email: 'work@example.com', plan: 'Plus' }, sync: { status: 'ready', trust_pending: false, issues: [] } };
 const defaultAccount = { id: 'default', credential_id: 'codex:/default', name: 'Padrão', home: '/default', is_default: true, auth: { method: 'oauth', status: 'connected', email: 'default@example.com', plan: 'Plus' }, sync: { status: 'ready', trust_pending: false, issues: [] } };
@@ -117,18 +137,36 @@ describe('CreateSessionSheet Codex', () => {
     calls.prepare.mockReset().mockResolvedValue({ status: 'ready', trust_pending: false, issues: [] });
     calls.preparation.mockReset();
     calls.create.mockReset().mockResolvedValue({ name: 'nova', state: 'idle' });
+    calls.send.mockReset().mockResolvedValue(undefined);
     calls.archives.mockReset().mockResolvedValue([]);
     calls.resume.mockReset().mockResolvedValue({ name: 'retomada', state: 'idle' });
     calls.replace.mockReset();
     calls.alert.mockReset();
     localStorage.clear();
+    _resetNewConversationForTests();
   });
+
+  const button = (container: HTMLElement, text: string) =>
+    [...container.querySelectorAll('button')].find((b) => b.textContent === text || b.getAttribute('aria-label') === text);
+
+  function type(container: HTMLElement, text: string) {
+    const input = container.querySelector('textarea[aria-label="nova_conversa_placeholder"]') as HTMLTextAreaElement;
+    input.value = text;
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+
+  async function send(container: HTMLElement, text = 'oi') {
+    await act(async () => type(container, text));
+    await act(async () => button(container, 'nova_conversa_enviar')!.click());
+    for (let i = 0; i < 4; i++) await act(async () => Promise.resolve());
+  }
 
   async function renderSheet(strict = false) {
     const container = document.createElement('div');
     const root = createRoot(container);
     await act(async () => root.render(strict ? createElement(StrictMode, null, createElement(CreateSessionSheet)) : createElement(CreateSessionSheet)));
     await act(async () => Promise.resolve());
+    await act(async () => [...container.querySelectorAll('button')].find((button) => button.textContent === 'nova_conversa_opcoes')!.click());
     await act(async () => [...container.querySelectorAll('button')].find((button) => button.textContent === 'Codex')!.click());
     await act(async () => Promise.resolve());
     return { container, root };
@@ -156,7 +194,7 @@ describe('CreateSessionSheet Codex', () => {
   it('valida a subpasta escolhida e restaura ao reabrir', async () => {
     const { container, root } = await renderSheet();
     calls.scan.mockResolvedValue({ entries: [{ name: 'Child', path: '/repo/child', is_git: true, has_claude_md: false }] });
-    await act(async () => [...container.querySelectorAll('button')].find((button) => button.textContent === 'criar_outra_pasta')!.click());
+    await act(async () => button(container, 'criar_outra_pasta')!.click());
     await act(async () => [...container.querySelectorAll('button')].find((button) => button.textContent === 'Repo')!.click());
     await act(async () => [...container.querySelectorAll('button')].find((button) => button.textContent?.includes('Child'))!.click());
     expect(container.textContent).toContain('/repo/child');
@@ -170,8 +208,15 @@ describe('CreateSessionSheet Codex', () => {
   it('cria Claude no destino explícito do projeto', async () => {
     const { container, root } = await renderSheet();
     await act(async () => [...container.querySelectorAll('button')].find((button) => button.textContent === 'Claude')!.click());
-    await act(async () => [...container.querySelectorAll('button')].find((button) => button.textContent === 'sessao_nova')!.click());
-    expect(calls.create).toHaveBeenCalledWith(server, expect.objectContaining({ provider: 'claude', cwd: '/repo' }));
+    await act(async () => {
+      const field = container.querySelector('textarea[aria-label="comum_nome"]') as HTMLTextAreaElement;
+      field.value = 'meu-nome';
+      field.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await send(container);
+    expect(calls.create).toHaveBeenCalledWith(server, expect.objectContaining({ provider: 'claude', cwd: '/repo', name: 'meu-nome' }));
+    expect(calls.send).toHaveBeenCalledWith(server, 'nova', 'oi');
+    expect(calls.replace).toHaveBeenCalledWith('/s/server-b/nova');
     root.unmount();
   });
 
@@ -206,6 +251,7 @@ describe('CreateSessionSheet Codex', () => {
     calls.target = { id: 'server-c', label: 'Servidor C', baseUrl: 'https://c.local', token: 'token-c' };
     calls.roots.mockResolvedValue([{ name: 'Other', path: '/other' }]);
     await act(async () => root.render(createElement(CreateSessionSheet)));
+    await act(async () => button(container, 'nova_conversa_opcoes')!.click());
     await act(async () => { scan.resolve({ entries: [] }); configs.resolve([{ path: '/old', label: 'Conta antiga', active: true }]); models.resolve({ models: [{ id: 'old', name: 'Modelo antigo' }], reduced: false }); });
     expect(container.textContent).toContain('/other');
     expect(container.textContent).not.toContain('/repo');
@@ -226,9 +272,7 @@ describe('CreateSessionSheet Codex', () => {
   it('seleciona conta do servidor e envia a conta no create', async () => {
     const { container, root } = await renderSheet();
     await act(async () => Promise.resolve());
-    const create = [...container.querySelectorAll('button')].find((button) => button.textContent?.startsWith('sessao_nova'));
-    expect(create).toBeTruthy();
-    await act(async () => create!.click());
+    await send(container);
     expect(calls.create).toHaveBeenCalledWith(server, expect.objectContaining({ provider: 'codex', codex_account: 'work' }));
     root.unmount();
   });
@@ -236,16 +280,14 @@ describe('CreateSessionSheet Codex', () => {
   it('abre a sessão sem esperar a sincronização da conta na tela', async () => {
     calls.prepare.mockReturnValue(new Promise(() => {}));
     const { container, root } = await renderSheet();
-    const create = [...container.querySelectorAll('button')].find((button) => button.textContent?.startsWith('sessao_nova'))!;
-    await act(async () => create.click());
+    await send(container);
     expect(calls.replace).toHaveBeenCalledWith('/s/server-b/nova');
     root.unmount();
   });
 
   it('cria normalmente sob StrictMode após o ciclo de efeitos', async () => {
     const { container, root } = await renderSheet(true);
-    const create = [...container.querySelectorAll('button')].find((button) => button.textContent?.startsWith('sessao_nova'))!;
-    await act(async () => create.click());
+    await send(container);
     expect(calls.create).toHaveBeenCalledWith(server, expect.objectContaining({ provider: 'codex', codex_account: 'work' }));
     expect(calls.replace).toHaveBeenCalled();
     root.unmount();
@@ -259,13 +301,12 @@ describe('CreateSessionSheet Codex', () => {
     const { container, root } = await renderSheet();
     await act(async () => [...container.querySelectorAll('button')].find((button) => button.textContent === 'Sol')!.click());
     await act(async () => [...container.querySelectorAll('button')].find((button) => button.textContent === 'high')!.click());
-    const firstCreate = [...container.querySelectorAll('button')].find((button) => button.textContent?.startsWith('sessao_nova'))!;
-    await act(async () => firstCreate.click());
+    await send(container);
     expect(calls.create).toHaveBeenCalledWith(server, expect.objectContaining({ model: 'sol', effort: 'high', codex_account: 'work' }));
     calls.create.mockClear();
+    await act(async () => button(container, 'nova_conversa_descartar')!.click());
     await act(async () => [...container.querySelectorAll('button')].find((button) => button.textContent === 'Mini')!.click());
-    const create = [...container.querySelectorAll('button')].find((button) => button.textContent?.startsWith('sessao_nova'))!;
-    await act(async () => create.click());
+    await send(container);
     expect(calls.create).toHaveBeenCalledWith(server, expect.objectContaining({ model: 'mini', effort: null, codex_account: 'work' }));
     root.unmount();
   });
@@ -291,12 +332,12 @@ describe('CreateSessionSheet Codex', () => {
     const pending = deferred<{ name: string; state: 'idle' }>();
     calls.create.mockReturnValue(pending.promise);
     const { container, root } = await renderSheet();
-    const create = [...container.querySelectorAll('button')].find((button) => button.textContent?.startsWith('sessao_nova'))!;
-    await act(async () => create.click());
-    await act(async () => Promise.resolve());
+    await send(container);
     root.unmount();
     await act(async () => pending.resolve({ name: 'nova', state: 'idle' }));
+    for (let i = 0; i < 4; i++) await act(async () => Promise.resolve());
     expect(calls.replace).not.toHaveBeenCalled();
+    expect(calls.send).toHaveBeenCalledWith(server, 'nova', 'oi');
   });
 
   it('libera a retomada ao trocar de conta e descarta a operação antiga', async () => {
@@ -310,8 +351,8 @@ describe('CreateSessionSheet Codex', () => {
     await act(async () => [...container.querySelectorAll('button')].find((button) => button.textContent === 'última mensagem')!.click());
     await act(async () => [...container.querySelectorAll('button')].find((button) => button.textContent === 'criar_retomar_acao')!.click());
     await act(async () => [...container.querySelectorAll('button')].find((button) => button.textContent === 'Padrão')!.click());
-    const create = [...container.querySelectorAll('button')].find((button) => button.textContent?.startsWith('sessao_nova'))!;
-    expect(create.disabled).toBe(false);
+    await act(async () => type(container, 'oi'));
+    expect(button(container, 'nova_conversa_enviar')!.disabled).toBe(false);
     await act(async () => pending.resolve({ name: 'retomada', state: 'idle' }));
     expect(calls.replace).not.toHaveBeenCalled();
     root.unmount();
@@ -327,5 +368,61 @@ describe('CreateSessionSheet Codex', () => {
     root.unmount();
     await act(async () => pending.resolve({ name: 'retomada', state: 'idle' }));
     expect(calls.replace).not.toHaveBeenCalled();
+  });
+  it('mostra o campo e aceita texto enquanto as raízes carregam, sem enviar sem destino', async () => {
+    calls.roots.mockReturnValue(new Promise(() => {}));
+    const container = document.createElement('div'); const root = createRoot(container);
+    await act(async () => root.render(createElement(CreateSessionSheet)));
+    await act(async () => type(container, 'primeira'));
+    expect((container.querySelector('textarea[aria-label="nova_conversa_placeholder"]') as HTMLTextAreaElement).value).toBe('primeira');
+    expect(button(container, 'nova_conversa_enviar')!.disabled).toBe(true);
+    expect(container.textContent).toContain('nova_conversa_sem_destino');
+    expect(container.textContent).toContain('Servidor B');
+    root.unmount();
+  });
+
+  it('reabre tentativa gravada em criação como incerta, sem novo POST', async () => {
+    localStorage.setItem('create.attempt.v1:server-b', JSON.stringify({
+      id: 'a1', serverId: 'server-b', text: 'guardada', phase: 'creating', sessionName: null,
+      body: { name: 'repo-a1', cwd: '/repo', provider: 'claude' },
+    }));
+    const { container, root } = await renderSheet();
+    expect(container.textContent).toContain('nova_conversa_guardada');
+    expect(container.textContent).toContain('nova_conversa_criacao_incerta');
+    expect(button(container, 'nova_conversa_conferir')).toBeTruthy();
+    expect(button(container, 'nova_conversa_enviar')!.disabled).toBe(true);
+    expect(calls.create).not.toHaveBeenCalled();
+    root.unmount();
+  });
+
+  it('mensagem já entregue não volta ao campo ao reabrir, nem depois de descartar', async () => {
+    localStorage.setItem('create.attempt.v1:server-b', JSON.stringify({
+      id: 'a2', serverId: 'server-b', text: 'entregue', phase: 'sent', sessionName: 'nova',
+      body: { name: 'repo-a2', cwd: '/repo', provider: 'claude' },
+    }));
+    const { container, root } = await renderSheet();
+    const input = container.querySelector('textarea[aria-label="nova_conversa_placeholder"]') as HTMLTextAreaElement;
+    expect(input.value).toBe('');
+    expect(container.textContent).toContain('nova_conversa_guardada');
+    expect(button(container, 'nova_conversa_abrir')).toBeTruthy();
+    await act(async () => button(container, 'nova_conversa_descartar')!.click());
+    expect(input.value).toBe('');
+    expect(button(container, 'nova_conversa_enviar')!.disabled).toBe(true);
+    expect(calls.create).not.toHaveBeenCalled();
+    root.unmount();
+  });
+
+  it('create OK e input recusado abre a mesma sessão e não cria de novo', async () => {
+    calls.send.mockRejectedValueOnce(Object.assign(new Error('recusado'), { status: 400 }));
+    const { container, root } = await renderSheet();
+    await send(container);
+    expect(calls.create).toHaveBeenCalledTimes(1);
+    expect(calls.replace).toHaveBeenCalledWith('/s/server-b/nova');
+    await act(async () => button(container, 'nova_conversa_reenviar')!.click());
+    for (let i = 0; i < 4; i++) await act(async () => Promise.resolve());
+    expect(calls.create).toHaveBeenCalledTimes(1);
+    expect(calls.send).toHaveBeenCalledTimes(2);
+    expect(calls.send).toHaveBeenLastCalledWith(server, 'nova', 'oi');
+    root.unmount();
   });
 });

@@ -1,8 +1,8 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
-import { ActivityIndicator, Pressable, ScrollView, Text, TextInput, View } from 'react-native';
+import { ActivityIndicator, Pressable, Text, TextInput, View } from 'react-native';
 import { StyleSheet } from 'react-native-unistyles';
 import { useRouter } from 'expo-router';
-import { createSessionForServer, getArchivePorCwd, getCodexAccountsForServer,
+import { getArchivePorCwd, getCodexAccountsForServer,
   getEnginesForServer, fetchSessionsForServer, listClaudeConfigsForServer, probeServerResponse,
   modelOptionsForServer, resumeArchivedConversation } from '@hangar/core';
 import { basename, providerName, cotaDaConta, cotaParada, resumoCota, CLAUDE_PERMISSION_MODES, EFFORT_LEVELS } from '@hangar/core';
@@ -10,19 +10,12 @@ import type { ArchiveEntry, CodexAccount, ConfigDirInfo, Provider, ModelOption, 
 import { MenuView } from '@react-native-menu/menu';
 import { useServers } from '../../stores/servers';
 import { rememberProject } from '../../stores/createPreferences';
+import type { NewConversationInput } from '../../stores/newConversation';
 import { CwdPicker } from './CwdPicker';
 import { ProviderPicker } from './ProviderPicker';
 import { CodexContextControl } from './CodexContextControl';
+import { NewConversation } from './NewConversation';
 import * as m from '../../paraglide/messages';
-
-
-function uniqueName(base: string, taken: Set<string>): string {
-  const clean = base.replace(/[^A-Za-z0-9_-]/g, '-').replace(/^-+|-+$/g, '') || 'sessao';
-  if (!taken.has(clean)) return clean;
-  let i = 2;
-  while (taken.has(`${clean}-${i}`)) i++;
-  return `${clean}-${i}`;
-}
 
 function valorModelo(mm: ModelOption): string {
   return mm.provider ? `${mm.provider}/${mm.id}` : mm.id;
@@ -71,10 +64,7 @@ function CreateSessionForm({ active, onClose }: { active: Server; onClose?: () =
 
   const [picked, setPicked] = useState<string | null>(null);
   const [name, setName] = useState('');
-  const [checking, setChecking] = useState(false);
-  const [takenNames, setTakenNames] = useState<Set<string>>(new Set());
   const [hasSameFolder, setHasSameFolder] = useState(false);
-  const [loading, setLoading] = useState(false);
   const [contextBusy, setContextBusy] = useState(false);
   const [error, setError] = useState('');
   const [catalogError, setCatalogError] = useState('');
@@ -144,7 +134,6 @@ function CreateSessionForm({ active, onClose }: { active: Server; onClose?: () =
     setCodexAccount('');
     setCodexError('');
     setCodexProgress('');
-    setLoading(false);
     setRetomando(false);
     if (provider !== 'codex' || !active) {
       setCodexLoading(false);
@@ -282,22 +271,14 @@ function CreateSessionForm({ active, onClose }: { active: Server; onClose?: () =
       try { rememberProject(active.id, { root, cwd: p }); }
       catch { setProjectWarning(m.criar_projeto_salvar_erro()); }
     }
-    setChecking(true);
+    setHasSameFolder(false);
     try {
       const sessions = await fetchSessionsForServer(active);
       if (!mounted.current || generation !== pickGeneration.current) return;
-      const taken = new Set(sessions.map((s) => s.name));
-      setTakenNames(taken);
-      setHasSameFolder(sessions.some((s) => (s as any).cwd === p));
-      setName(uniqueName(basename(p), taken));
+      setHasSameFolder(sessions.some((s) => s.cwd === p));
     } catch (cause: unknown) {
       if (!mounted.current || generation !== pickGeneration.current) return;
       setError(cause instanceof Error ? cause.message : m.criar_sessao_erro());
-      setTakenNames(new Set());
-      setHasSameFolder(false);
-      setName(basename(p));
-    } finally {
-      if (mounted.current && generation === pickGeneration.current) setChecking(false);
     }
   }, [active]);
 
@@ -306,13 +287,19 @@ function CreateSessionForm({ active, onClose }: { active: Server; onClose?: () =
     if (p) void handlePick(p);
   };
 
-  const canCreate = !!picked && !!name.trim() && codexReady && !loading && !contextBusy && !retomando && !retomavel;
-  const clearCreateLoading = (generation: number) => {
-    if (mounted.current && generation === codexGeneration.current) {
-      setLoading(false);
-      setCodexProgress('');
-    }
-  };
+  // Nome em branco: o store gera projeto + sufixo da tentativa.
+  const settings: Omit<NewConversationInput['body'], 'cwd'> = provider === 'codex'
+    ? { provider: 'codex', model: modelo || null, effort: esforco || null, codex_account: codexAccount }
+    : {
+      provider,
+      config_dir: provider === 'claude' ? selectedConfig : null,
+      engine: provider === 'claude' ? engine || null : null,
+      model: (provider === 'claude' || provider === 'pi' || provider === 'kimi') ? modelo || null : null,
+      effort: (provider === 'claude' || provider === 'pi') ? esforco || null : null,
+      permission_mode: provider === 'claude' ? permissao || null : null,
+      subagent_model: provider === 'claude' && !engine ? subagente || null : null,
+    };
+  const body = picked && codexReady ? { ...settings, cwd: picked, ...(name.trim() ? { name: name.trim() } : {}) } : null;
 
   const handleResume = async () => {
     const entry = retomaveis.find((candidate) => candidate.session_id === retomavel);
@@ -340,56 +327,25 @@ function CreateSessionForm({ active, onClose }: { active: Server; onClose?: () =
     }
   };
 
-  const handleCreate = async () => {
-    if (contextBusy) return;
-    if (!picked || !name.trim()) return;
-    setLoading(true);
-    setError('');
-    const generation = codexGeneration.current;
-    const target = active;
-    const account = codexAccount;
-    try {
-      if (provider === 'codex') {
-        if (!target || !account) return;
-        setCodexProgress(m.codex_ui_abrindo_sessao());
-        const s = await createSessionForServer(target, {
-          name: name.trim(), cwd: picked, provider: 'codex', model: modelo || null,
-          effort: esforco || null, codex_account: account,
-        });
-        if (!mounted.current || generation !== codexGeneration.current) return;
-        router.replace((`/s/${target.id}/${s.name}` as never) as never);
-        return;
-      }
-      const s = await createSessionForServer(target, {
-        name: name.trim(), cwd: picked, provider,
-        config_dir: provider === 'claude' ? selectedConfig : null,
-        engine: provider === 'claude' ? engine || null : null,
-        model: (provider === 'claude' || provider === 'pi' || provider === 'kimi') ? modelo || null : null,
-        effort: (provider === 'claude' || provider === 'pi') ? esforco || null : null,
-        permission_mode: provider === 'claude' ? permissao || null : null,
-        subagent_model: provider === 'claude' && !engine ? subagente || null : null,
-      });
-      // sucesso → abre chat da nova sessão — não chamar onClose (router.back) que desfaz o replace
-      if (!mounted.current || generation !== codexGeneration.current) return;
-      router.replace((`/s/${target.id}/${s.name}` as never) as never);
-    } catch (e) {
-      if (mounted.current && generation === codexGeneration.current) setError(e instanceof Error ? e.message : m.criar_sessao_erro());
-    } finally {
-      clearCreateLoading(generation);
-    }
-  };
-
-  // sem pasta escolhida → picker + opção manual
-  if (!picked) {
-    return (
-      <View style={styles.root}>
-        <ScrollView contentContainerStyle={styles.scroll} keyboardShouldPersistTaps="handled">
-          <Text style={styles.title}>{m.sessao_nova()}</Text>
+  const destination = (
+    <View style={styles.field}>
+      <Text style={styles.label}>{active.label}</Text>
+      {picked ? (
+        <Pressable
+          onPress={() => { pickGeneration.current++; setBrowse(true); setPicked(null); }}
+          style={styles.picked}
+          accessibilityRole="button"
+          accessibilityLabel={m.criar_outra_pasta()}
+        >
+          <Text style={styles.pickedName}>{basename(picked)}</Text>
+          <Text style={styles.pickedPath} numberOfLines={1}>{picked}</Text>
+          <Text style={styles.hintSm}>{m.criar_outra_pasta()}</Text>
+        </Pressable>
+      ) : (
+        <>
           <View style={styles.pickerWrap}>
             <CwdPicker server={active} onPick={handlePick} selected={picked} autoSelect={!browse} />
           </View>
-          {error ? <Text style={styles.error} accessibilityRole="alert">{error}</Text> : null}
-          {catalogError ? <Text style={styles.error} accessibilityRole="alert">{catalogError}</Text> : null}
           <View style={styles.advanced}>
             <Pressable onPress={() => setManualOpen((v) => !v)} style={styles.advToggle}>
               <Text style={styles.advTxt}>{m.criar_avancado()}</Text>
@@ -412,214 +368,196 @@ function CreateSessionForm({ active, onClose }: { active: Server; onClose?: () =
               </View>
             ) : null}
           </View>
-        </ScrollView>
-      </View>
-    );
-  }
-
-  // com pasta → formulário
-  return (
-    <View style={styles.root}>
-      <ScrollView contentContainerStyle={styles.scroll} keyboardShouldPersistTaps="handled">
-        <View style={styles.picked}>
-          <Text style={styles.pickedName}>{basename(picked)}</Text>
-          <Text style={styles.pickedPath} numberOfLines={1}>
-            {picked}
-          </Text>
-        </View>
-        {projectWarning ? <Text style={styles.error} accessibilityRole="alert">{projectWarning}</Text> : null}
-        {catalogError ? <Text style={styles.error} accessibilityRole="alert">{catalogError}</Text> : null}
-
-        {checking ? (
-          <View style={styles.rowCenter}>
-            <ActivityIndicator />
-            <Text style={styles.hint}>{m.criar_verificando()}</Text>
-          </View>
-        ) : (
-          <>
-            {hasSameFolder ? <Text style={styles.hint}>{m.criar_ja_existe()}</Text> : null}
-            <View style={styles.field}>
-                {!retomavel ? <Text style={styles.label}>{m.comum_nome()}</Text> : null}
-              {!retomavel ? <TextInput
-                style={styles.input}
-                value={name}
-                onChangeText={setName}
-                placeholder={m.criar_nome_placeholder()}
-                autoCapitalize="none"
-                autoCorrect={false}
-                placeholderTextColor="#8d8489"
-              /> : null}
-            </View>
-
-            <View style={styles.field}>
-              <Text style={styles.label}>{m.comum_provider()}</Text>
-              <ProviderPicker value={provider} onChange={(p) => setProvider(p)} />
-            </View>
-
-            {provider === 'codex' ? <CodexContextControl server={active ?? null} onBusy={setContextBusy} /> : null}
-
-            {provider === 'codex' ? (
-              <View style={styles.field}>
-                <Text style={styles.label}>{m.criar_conta_aria()}</Text>
-                {codexLoading ? <Text style={styles.hint}>{m.comum_carregando()}</Text> : null}
-                {codexError ? <Text style={styles.error} accessibilityRole="alert">{codexError}</Text> : null}
-                <MenuSelect
-                  value={codexAccount}
-                  options={codexAccounts.map((account) => ({
-                    value: account.id,
-                    label: account.name,
-                    hint: account.auth.status === 'connected'
-                      ? (account.auth.email ?? m.codex_ui_account())
-                      : account.auth.status === 'disconnected' ? m.contas_nao_conectada() : m.codex_ui_unknown(),
-                  }))}
-                  onChange={(value) => {
-                    codexGeneration.current++;
-                    archiveGeneration.current++;
-                    setLoading(false);
-                    setRetomando(false);
-                    setRetomavel('');
-                    setError('');
-                    setCodexProgress('');
-                    setCodexAccount(value);
-                  }}
-                />
-                {contaCodex?.auth.status !== 'connected' ? <Text style={styles.hint}>{m.contas_nao_conectada()}</Text> : null}
-              </View>
-            ) : null}
-
-            {provider === 'claude' && configs.length > 1 ? (
-              <View style={styles.field}>
-                <Text style={styles.label}>{m.comum_conta_claude()}</Text>
-                <MenuSelect
-                  value={selectedConfig ?? ''}
-                  options={configs.map((c) => ({
-                    value: c.path,
-                    label: c.label,
-                    hint: [c.active ? (m.switcher_atual() as string) : '', resumoCota(cotaDaConta(cotas, c.path))]
-                      .filter(Boolean).join(' · ') || undefined,
-                  }))}
-                  onChange={(v) => setSelectedConfig(v)}
-                />
-                {cotaSelecionada ? (
-                  <Text style={styles.hint}>
-                    {resumoCota(cotaSelecionada) ||
-                      `${m.cota_sem_cota()} ${
-                        cotaSelecionada.estado === 'indisponivel'
-                          ? (cotaParada(cotaSelecionada) ? m.cota_conta_parada() : '')
-                          : m.cota_precisa_entrar()
-                      }`.trim()}
-                  </Text>
-                ) : null}
-              </View>
-            ) : null}
-
-            {provider === 'claude' && Object.keys(motores).length ? (
-              <View style={styles.field}>
-                <Text style={styles.label}>{m.comum_motor()}</Text>
-                <MenuSelect
-                  value={engine}
-                  options={[{ value: '', label: m.criar_claude_sua_conta() }, ...Object.entries(motores).map(([k, v]) => ({ value: k, label: (v as any).label ?? k, hint: (v as any).model }))]}
-                  onChange={(v) => setEngine(v)}
-                />
-              </View>
-            ) : null}
-
-            {!retomavel && (provider === 'claude' || provider === 'codex' || provider === 'pi' || provider === 'kimi') && (
-              <View style={styles.field}>
-                <Text style={styles.label}>{m.composer_modelo()}</Text>
-                <MenuSelect
-                  value={modelo}
-                  options={[{ value: '', label: m.criar_padrao() }, ...modelos.map((md) => ({ value: valorModelo(md), label: md.name ?? md.id, hint: [md.provider, (md as any).context ?? ((md as any).context_length ? `${Math.round(((md as any).context_length) / 1000)}K` : null), ((md as any).vision ?? (md as any).images) ? '👁' : null].filter(Boolean).join(' · ') }))]}
-                  onChange={(v) => { setModelo(v); if (provider === 'codex' && !esforcosDoModelo(v).includes(esforco)) setEsforco(''); }}
-                />
-                {listaReduzida ? <Text style={styles.hintSm}>{m.criar_lista_reduzida()}</Text> : null}
-                {erroModelos ? <Text style={styles.hintSm}>{m.criar_abre_padrao({ erro: erroModelos } as any)}</Text> : null}
-              </View>
-            )}
-
-            {!retomavel && niveisEsforco.length > 0 && (
-              <View style={styles.field}>
-                <Text style={styles.label}>{provider === 'pi' ? (m.criar_raciocinio()) : (m.composer_esforco())}</Text>
-                <MenuSelect
-                  value={esforco}
-                  options={[{ value: '', label: m.criar_padrao() }, ...niveisEsforco.map((n) => ({ value: n, label: n }))]}
-                  onChange={(v) => setEsforco(v)}
-                />
-              </View>
-            )}
-
-            {provider === 'claude' && (
-              <View style={styles.field}>
-                <Text style={styles.label}>{m.criar_permissao()}</Text>
-                <MenuSelect
-                  value={permissao}
-                  options={[{ value: '', label: m.criar_permissao_padrao() }, ...CLAUDE_PERMISSION_MODES.map((n) => ({ value: n, label: n }))]}
-                  onChange={(v) => setPermissao(v)}
-                />
-              </View>
-            )}
-
-            {provider === 'claude' && !engine && modelos.length > 0 && (
-              <View style={styles.field}>
-                <Text style={styles.label}>{m.criar_subagente()}</Text>
-                <MenuSelect
-                  value={subagente}
-                  options={[{ value: '', label: m.criar_subagente_padrao() }, ...modelos.filter((md) => md.id !== 'default').map((md) => ({ value: valorModelo(md), label: md.name ?? md.id }))]}
-                  onChange={(v) => setSubagente(v)}
-                />
-                <Text style={styles.hintSm}>{m.criar_subagente_ajuda()}</Text>
-              </View>
-            )}
-
-            {provider === 'codex' && retomaveis.length ? (
-              <View style={styles.field}>
-                <Text style={styles.label}>{m.criar_retomar()}</Text>
-                <MenuSelect
-                  value={retomavel}
-                  options={[{ value: '', label: m.criar_retomar_escolha() }, ...retomaveis.map((entry) => ({ value: entry.session_id, label: entry.ultima || entry.preview || entry.session_id }))]}
-                  onChange={setRetomavel}
-                />
-                <Pressable
-                  onPress={() => void handleResume()}
-                  disabled={!retomavel || retomando || !codexReady}
-                  style={[styles.ghostButton, (!retomavel || retomando || !codexReady) && styles.primaryDis]}
-                >
-                  <Text style={styles.ghostTxt}>{retomando ? m.criar_criando() : m.criar_retomar_acao()}</Text>
-                </Pressable>
-              </View>
-            ) : null}
-
-            {provider === 'codex' && (loading || retomando) && codexProgress ? (
-              <View style={styles.rowCenter}>
-                <ActivityIndicator />
-                <Text style={[styles.hint, { flex: 1 }]} accessibilityLiveRegion="polite">{codexProgress}</Text>
-              </View>
-            ) : null}
-
-            {error ? (
-              <Text style={styles.error} accessibilityRole="alert">
-                {error}
-              </Text>
-            ) : null}
-
-            <Pressable onPress={handleCreate} disabled={!canCreate} style={[styles.primary, !canCreate && styles.primaryDis]}>
-              <Text style={styles.primaryTxt}>{loading ? m.criar_criando() : m.sessao_nova()}</Text>
-            </Pressable>
-
-            <Pressable onPress={() => { pickGeneration.current++; setBrowse(true); setPicked(null); }} style={styles.ghost}>
-              <Text style={styles.ghostTxt}>{m.criar_outra_pasta()}</Text>
-            </Pressable>
-          </>
-        )}
-      </ScrollView>
+        </>
+      )}
+      {hasSameFolder ? <Text style={styles.hint}>{m.criar_ja_existe()}</Text> : null}
+      {/* A conta Codex mora na folha de opções; o motivo do Enviar travado aparece aqui. */}
+      {picked && !codexReady ? (
+        codexError ? <Text style={styles.error} accessibilityRole="alert">{codexError}</Text>
+          : <Text style={styles.hint}>{codexLoading ? m.comum_carregando() : m.contas_nao_conectada()}</Text>
+      ) : null}
+      {projectWarning ? <Text style={styles.error} accessibilityRole="alert">{projectWarning}</Text> : null}
+      {error ? <Text style={styles.error} accessibilityRole="alert">{error}</Text> : null}
+      {catalogError ? <Text style={styles.error} accessibilityRole="alert">{catalogError}</Text> : null}
     </View>
+  );
+
+  const options = (
+    <>
+      {!retomavel ? (
+        <View style={styles.field}>
+          <Text style={styles.label}>{m.comum_nome()}</Text>
+          <TextInput
+            style={styles.input}
+            value={name}
+            onChangeText={setName}
+            placeholder={m.criar_nome_placeholder()}
+            accessibilityLabel={m.comum_nome()}
+            autoCapitalize="none"
+            autoCorrect={false}
+            placeholderTextColor="#8d8489"
+          />
+          <Text style={styles.hintSm}>{m.nova_conversa_nome_automatico()}</Text>
+        </View>
+      ) : null}
+
+      <View style={styles.field}>
+        <Text style={styles.label}>{m.comum_provider()}</Text>
+        <ProviderPicker value={provider} onChange={(p) => setProvider(p)} />
+      </View>
+
+      {provider === 'codex' ? <CodexContextControl server={active ?? null} onBusy={setContextBusy} /> : null}
+
+      {provider === 'codex' ? (
+        <View style={styles.field}>
+          <Text style={styles.label}>{m.criar_conta_aria()}</Text>
+          {codexLoading ? <Text style={styles.hint}>{m.comum_carregando()}</Text> : null}
+          {codexError ? <Text style={styles.error} accessibilityRole="alert">{codexError}</Text> : null}
+          <MenuSelect
+            value={codexAccount}
+            options={codexAccounts.map((account) => ({
+              value: account.id,
+              label: account.name,
+              hint: account.auth.status === 'connected'
+                ? (account.auth.email ?? m.codex_ui_account())
+                : account.auth.status === 'disconnected' ? m.contas_nao_conectada() : m.codex_ui_unknown(),
+            }))}
+            onChange={(value) => {
+              codexGeneration.current++;
+              archiveGeneration.current++;
+              setRetomando(false);
+              setRetomavel('');
+              setError('');
+              setCodexProgress('');
+              setCodexAccount(value);
+            }}
+          />
+          {contaCodex?.auth.status !== 'connected' ? <Text style={styles.hint}>{m.contas_nao_conectada()}</Text> : null}
+        </View>
+      ) : null}
+
+      {provider === 'claude' && configs.length > 1 ? (
+        <View style={styles.field}>
+          <Text style={styles.label}>{m.comum_conta_claude()}</Text>
+          <MenuSelect
+            value={selectedConfig ?? ''}
+            options={configs.map((c) => ({
+              value: c.path,
+              label: c.label,
+              hint: [c.active ? (m.switcher_atual() as string) : '', resumoCota(cotaDaConta(cotas, c.path))]
+                .filter(Boolean).join(' · ') || undefined,
+            }))}
+            onChange={(v) => setSelectedConfig(v)}
+          />
+          {cotaSelecionada ? (
+            <Text style={styles.hint}>
+              {resumoCota(cotaSelecionada) ||
+                `${m.cota_sem_cota()} ${
+                  cotaSelecionada.estado === 'indisponivel'
+                    ? (cotaParada(cotaSelecionada) ? m.cota_conta_parada() : '')
+                    : m.cota_precisa_entrar()
+                }`.trim()}
+            </Text>
+          ) : null}
+        </View>
+      ) : null}
+
+      {provider === 'claude' && Object.keys(motores).length ? (
+        <View style={styles.field}>
+          <Text style={styles.label}>{m.comum_motor()}</Text>
+          <MenuSelect
+            value={engine}
+            options={[{ value: '', label: m.criar_claude_sua_conta() }, ...Object.entries(motores).map(([k, v]) => ({ value: k, label: (v as any).label ?? k, hint: (v as any).model }))]}
+            onChange={(v) => setEngine(v)}
+          />
+        </View>
+      ) : null}
+
+      {!retomavel && (provider === 'claude' || provider === 'codex' || provider === 'pi' || provider === 'kimi') && (
+        <View style={styles.field}>
+          <Text style={styles.label}>{m.composer_modelo()}</Text>
+          <MenuSelect
+            value={modelo}
+            options={[{ value: '', label: m.criar_padrao() }, ...modelos.map((md) => ({ value: valorModelo(md), label: md.name ?? md.id, hint: [md.provider, (md as any).context ?? ((md as any).context_length ? `${Math.round(((md as any).context_length) / 1000)}K` : null), ((md as any).vision ?? (md as any).images) ? '👁' : null].filter(Boolean).join(' · ') }))]}
+            onChange={(v) => { setModelo(v); if (provider === 'codex' && !esforcosDoModelo(v).includes(esforco)) setEsforco(''); }}
+          />
+          {listaReduzida ? <Text style={styles.hintSm}>{m.criar_lista_reduzida()}</Text> : null}
+          {erroModelos ? <Text style={styles.hintSm}>{m.criar_abre_padrao({ erro: erroModelos } as any)}</Text> : null}
+        </View>
+      )}
+
+      {!retomavel && niveisEsforco.length > 0 && (
+        <View style={styles.field}>
+          <Text style={styles.label}>{provider === 'pi' ? (m.criar_raciocinio()) : (m.composer_esforco())}</Text>
+          <MenuSelect
+            value={esforco}
+            options={[{ value: '', label: m.criar_padrao() }, ...niveisEsforco.map((n) => ({ value: n, label: n }))]}
+            onChange={(v) => setEsforco(v)}
+          />
+        </View>
+      )}
+
+      {provider === 'claude' && (
+        <View style={styles.field}>
+          <Text style={styles.label}>{m.criar_permissao()}</Text>
+          <MenuSelect
+            value={permissao}
+            options={[{ value: '', label: m.criar_permissao_padrao() }, ...CLAUDE_PERMISSION_MODES.map((n) => ({ value: n, label: n }))]}
+            onChange={(v) => setPermissao(v)}
+          />
+        </View>
+      )}
+
+      {provider === 'claude' && !engine && modelos.length > 0 && (
+        <View style={styles.field}>
+          <Text style={styles.label}>{m.criar_subagente()}</Text>
+          <MenuSelect
+            value={subagente}
+            options={[{ value: '', label: m.criar_subagente_padrao() }, ...modelos.filter((md) => md.id !== 'default').map((md) => ({ value: valorModelo(md), label: md.name ?? md.id }))]}
+            onChange={(v) => setSubagente(v)}
+          />
+          <Text style={styles.hintSm}>{m.criar_subagente_ajuda()}</Text>
+        </View>
+      )}
+
+      {provider === 'codex' && retomaveis.length ? (
+        <View style={styles.field}>
+          <Text style={styles.label}>{m.criar_retomar()}</Text>
+          <MenuSelect
+            value={retomavel}
+            options={[{ value: '', label: m.criar_retomar_escolha() }, ...retomaveis.map((entry) => ({ value: entry.session_id, label: entry.ultima || entry.preview || entry.session_id }))]}
+            onChange={setRetomavel}
+          />
+          <Pressable
+            onPress={() => void handleResume()}
+            disabled={!retomavel || retomando || !codexReady}
+            style={[styles.ghostButton, (!retomavel || retomando || !codexReady) && styles.primaryDis]}
+          >
+            <Text style={styles.ghostTxt}>{retomando ? m.criar_criando() : m.criar_retomar_acao()}</Text>
+          </Pressable>
+        </View>
+
+      {provider === 'codex' && retomando && codexProgress ? (
+        <View style={styles.rowCenter}>
+          <ActivityIndicator />
+          <Text style={[styles.hint, { flex: 1 }]} accessibilityLiveRegion="polite">{codexProgress}</Text>
+        </View>
+      ) : null}
+    </>
+  );
+
+  return (
+    <NewConversation
+      server={active}
+      destination={destination}
+      options={options}
+      body={body}
+      blocked={contextBusy || retomando || !!retomavel || (!!picked && !codexReady)}
+    />
   );
 }
 
 const styles = StyleSheet.create((theme) => ({
-  root: { flex: 1, backgroundColor: theme.tokens.bg.base },
-  scroll: { padding: theme.base.space[4], gap: theme.base.space[4], paddingBottom: 32 },
-  title: { fontSize: 20, fontWeight: '600', color: theme.tokens.text.primary, marginBottom: 4 },
   pickerWrap: { minHeight: 380, flex: 1 },
   advanced: { borderTopWidth: 1, borderTopColor: theme.tokens.border.subtle, paddingTop: theme.base.space[3], gap: theme.base.space[2] },
   advToggle: { height: 44, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 4 },
@@ -676,16 +614,7 @@ const styles = StyleSheet.create((theme) => ({
   selectTxt: { color: theme.tokens.text.primary, fontSize: 16, flex: 1 },
   selectChevron: { color: theme.tokens.text.muted, fontSize: 18, marginLeft: 8 },
   error: { color: theme.tokens.status.error, fontSize: theme.base.text.sm },
-  primary: {
-    height: 50,
-    backgroundColor: theme.tokens.accent.base,
-    borderRadius: theme.base.radius.md,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
   primaryDis: { opacity: 0.5 },
-  primaryTxt: { color: '#fff', fontWeight: '600', fontSize: theme.base.text.base },
   ghostButton: { height: 44, borderWidth: 1, borderColor: theme.tokens.border.default, borderRadius: theme.base.radius.md, justifyContent: 'center', alignItems: 'center' },
-  ghost: { height: 44, justifyContent: 'center', alignItems: 'center' },
   ghostTxt: { color: theme.tokens.text.secondary, fontSize: theme.base.text.sm },
 }));

@@ -6071,5 +6071,16 @@
   "nova_conversa_envio_recusado": "The conversation was created, but the message was rejected: {erro}. You can send it again in this same conversation.",
   "nova_conversa_envio_incerto": "Could not confirm whether the message arrived. Open the conversation and check before sending again.",
   "nova_conversa_envio_conferir_erro": "Could not check the message in this conversation: {erro}",
-  "nova_conversa_resultado_salvar_erro": "Could not save the send result on this device. Check the conversation before sending again."
+  "nova_conversa_resultado_salvar_erro": "Could not save the send result on this device. Check the conversation before sending again.",
+  "nova_conversa_placeholder": "Write the first message",
+  "nova_conversa_enviar": "Send",
+  "nova_conversa_opcoes": "Options",
+  "nova_conversa_sem_destino": "Pick a project to send.",
+  "nova_conversa_guardada": "Saved message",
+  "nova_conversa_abrir": "Open conversation",
+  "nova_conversa_reenviar": "Send again in this conversation",
+  "nova_conversa_conferir": "Check",
+  "nova_conversa_adotar": "Use this conversation",
+  "nova_conversa_descartar": "Discard attempt",
+  "nova_conversa_nome_automatico": "Leave blank to name it after the folder plus a short code."
 }
