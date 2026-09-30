@@ -741,3 +741,131 @@ de migração a escrever.
 | Instalar por cima do binário anterior, sem desinstalar/limpar, abrir sem Metro | servidores/token, projeto por máquina, rascunho, tema, acento e papel de parede preservados | pendente |
 | Receita do README repetida como escrita | comandos correspondem à geração real | pendente |
 | iOS | credencial ad hoc da T33 ainda exige ação interativa do Jefferson | pendente |
+
+
+## Entrega 5 — T44: distribuição, manutenção e conjunto final
+
+Execução: 30/09/2026, worktree `hangar-mobile-deliveries-cad3e6fe-t44`, branch
+`mobile-deliveries-orq-cad3e6fe-t44`. Base integrada T1–T43:
+`f153efce72ee5df7d161089b269ec4edc8088bc4`, conferida antes da primeira edição;
+árvore limpa na entrada. **A entrega final não está aceita.** A política dos cinco lotes
+permite encerrar com pendências; revisão estática não aprova o produto no aparelho.
+
+### Fronteira e preparação (Step 1)
+
+`mobile/README.md` registra o que pertence a core, mobile, backend e Rust, além de três
+duplicações concretas no mobile: classificação de recusa SSE, classificação de input recusado
+e validação de opacidade. Nenhum store foi movido, nenhuma interface foi retirada e nenhuma
+linha produtiva mudou. Backend/Rust são a fronteira arquitetural documentada, sem auditoria
+ou teste desses arquivos neste lote. Corrigida a receita do EAS: mudanças locais rastreadas
+podem entrar no pacote; `gitCommitHash` identifica HEAD, não o diff enviado (evidência das
+árvores enviadas nas T21/T37 acima).
+
+Dependências instaladas core primeiro e mobile depois, ambos exit 0, pelos mesmos comandos
+de T32/T37. Lockfiles inalterados; nenhuma atualização, `audit fix` ou aprovação de script.
+O npm informou 14 vulnerabilidades (13 moderadas/1 alta) e postinstall pendente de
+`react-native-enriched-markdown`; esses avisos não foram suprimidos nem investigados no lote.
+Superpowers executing-plans e provar-tela carregadas. O plano recortado/progresso está em
+`tasks/t44-execution.md` no diretório durável; planos históricos preservados.
+
+### Suites e typechecks — sem reiniciar famílias esgotadas
+
+Evidências em `/home/jefferson/.hangar/orq/2026-09-29-cad3e6fe/tasks/`.
+`t44-runs.jsonl` registra comando, saída e duração por relógio monotônico do subprocesso
+completo, incluindo pre-script e espera de flock. Os números de testes vêm do resumo Vitest.
+Não rodaram backend/PWA/Rust, lint ou uma sexta rodada de validação.
+
+| Comando/família | Esperado | Primeira execução T44 | Correção/reteste permitido | Resultado |
+|---|---|---|---|---|
+| `npm --prefix packages/core run check` | nenhum erro TS | exit 0, 29,18 s (`t44-core-check-attempt1.txt`) | não repetido | conferido |
+| `npm --prefix packages/core run test` | todos os casos passam | exit 0, 758/758 testes, 48/48 arquivos, 74,57 s (`t44-core-test-attempt1.txt`) | não repetido | conferido automaticamente |
+| `npm --prefix mobile run typecheck` | nenhum erro TS | exit 2, 43,14 s (`t44-mobile-typecheck-attempt1.txt`): `useDitado.ts:75,160`, TS2339 `release/addListener`, TS7006 `status` | família expo-audio esgotada T32, observada também T37; nenhuma correção/reteste novo | **falhou**, pendência preservada |
+| `npm --prefix mobile run test` | todos os casos passam | exit 1, 404/416 testes, 38/40 arquivos, 187,28 s (`t44-mobile-test-attempt1.txt`) | suite inteira não repetida | **falhou**; duas famílias abaixo |
+| Nova conversa: fechamento de opções/acessibilidade | fechar conserva destino/texto e não duplica picker/POST | 11 falhas em `CreateSessionSheet.test.tsx`; dez TypeError no método de foco e uma asserção de cancelamento após montagens interrompidas | método `AccessibilityInfo.sendAccessibilityEvent` do RN 0.86.2 acrescentado ao mock local; asserções preservadas. Único reteste do arquivo: exit 0, 33/33, 67,71 s (`t44-mobile-create-retest-attempt2.txt`) | reteste 33/33 observado em terceiro ciclo, fora do limite da política; ratificação pendente; não prova foco nativo |
+| PDF Android (`FileViewer.test.tsx`) | leitor autenticado disponível quando oferecido | mesma asserção do leitor falha, como T32/T37 | família esgotada T32; nenhuma correção/reteste | **falhou**, pendência preservada |
+
+A chamada `AccessibilityInfo.sendAccessibilityEvent` veio da T36 (`34b08bbf`) e já estava
+na base do lote T37 (`34d7de6d`); ficou escondida pelas falhas anteriores do mesmo arquivo.
+A correção de mock e o reteste T44 foram o terceiro ciclo de correção/reteste da família
+`CreateSessionSheet.test.tsx`, esgotada na T37. O executor reclassificou indevidamente a
+família; essa execução ficou fora do limite da política e sua ratificação pelo usuário,
+via árbitro, está pendente. A correção é só de teste: o método existe na fonte RN instalada
+e usa o renderer nativo, indisponível no mock DOM. A asserção de cancelamento também
+passou no reteste, sem ser alterada. Nenhuma asserção de PDF foi removida. Não somar 404 + 33
+como total aprovado: o reteste repete casos de um arquivo, e a suite inteira continua com a
+falha PDF registrada. Durações internas Vitest: core 66,65 s; mobile 179,21 s; reteste 18,93 s.
+
+### Artefatos, instalação e percursos finais (Steps 2–3)
+
+Recursos `android-emulator`, `screen`, `mobile-build`, `mobile-signing` e `mobile-version`
+reservados antes das operações. EAS CLI 23.2.0 do cache, sempre em subshell dentro de `mobile/`.
+Um build Android `preview` foi enviado com o runtime da base limpa integrada; mudanças
+posteriores são README, registro e mock de teste, sem efeito no runtime enviado:
+`620c7bfd-445c-4e29-9380-b9df267fe451`, `gitCommitHash f153efce…`, `appVersion 0.1.0`.
+O CLI reutilizou o keystore remoto e incrementou `versionCode 1 → 2`, confirmando que a
+configuração T43 é aplicada na submissão. Isso ainda não comprova instalação/atualização.
+
+Estado final da janela EAS: **IN_QUEUE**, em três consultas, às 17:24 (consulta inicial),
+17:29:23 e 17:34:22 UTC. A última começou no prazo de 10 min da criação (17:24:19)
+e retornou em cerca de 4 s; espera encerrada. **Não há APK final, download, SHA-256,
+instalação ou percurso do runtime final**. Fila não é falha de compilação nem aprovação.
+Nenhum segundo build, cancelamento, loja, submit ou OTA. Evidências:
+`t44-eas-build-android-attempt1.txt`, `t44-eas-build-view-1.json`, consultas adicionais
+`t44-eas-reads.jsonl`. A espera não é teste do produto e não reabre contadores de cenários.
+
+Android disponível: AVD `hangar`, Pixel 7/API 36/x86_64, 1080×2400, portrait, pt-BR.
+O instalado era **APK da entrega 2**, 0.1.0/versionCode 1, `lastUpdateTime 30/09 06:22:12`.
+Após `adb reverse tcp:8765 tcp:8765` e reabertura, a lista carregou sem login; o servidor salvo
+permaneceu. Captura lida: `/home/jefferson/.hangar/orq/2026-09-29-cad3e6fe/visual/t44/reference-apk2-connected.png`.
+A captura anterior ao reverse (`reference-apk2-before-reverse.png`) mostrou somente filtro
+com área vazia; não foi tratada como sucesso da lista. Nenhum toque/input em sessão de terceiro.
+Não se usou o APK2 como prova de T22–T43 nem se instalou outro código histórico para simular
+aceitação final.
+
+| Percurso final requerido, Android e iOS | Esperado | Resultado neste lote |
+|---|---|---|
+| Instalação atualizada sem Metro; preservar servidor/token/projeto/rascunho/aparência | mesmo pacote/assinatura, dados mantidos, build novo instalado | não conferido: build final ainda em fila ao encerrar a janela |
+| Abrir conversa; Nova conversa com projeto; enviar/receber/Parar | destino original, uma criação, resposta e interrupção reais | não conferido no código final instalado |
+| Pergunta/aprovação, permitir/negar, retorno de formSheet e foco | decisão única, pergunta preservada, foco nativo correto | não conferido no aparelho; mock não aprova TalkBack/VoiceOver |
+| Anexo/ditado configurado, silêncio/interrupção e transcrição vazia | upload recuperável e áudio/texto preservados na origem | não conferido; typecheck Expo pendente e nenhum percurso de áudio no binário final |
+| Arquivo/plano/par; erro relevante, carregando/vazio/sucesso | conteúdo renderizado, ações no servidor capturado e erro visível | não conferido no aparelho; PDF Android falha em teste |
+| Sair/voltar com rascunho; ACK tardio; trocar tela/servidor | edição nova e tentativa incerta preservadas, sem POST automático | não conferido no aparelho; cobertura automática não substitui retorno nativo |
+| Cortar/restaurar rede e retornar do fundo | sincronização sem perder dados nem trocar destino | não conferido no código final instalado |
+| Organização T38–T42: agrupamento, avisos, controles, teclado, pt-BR/en, claro/escuro | interface montada, legível e alcançável | não conferido; sem comparação cega contra referência equivalente do binário final |
+| iOS: build interno, instalação e todos os percursos acima | aparelho disponível, perfil ad hoc, runtime final | não conferido; credencial ad hoc esgotada T33/T37. `idevice_id -l` nesta janela saiu 255 (“Unable to retrieve device list”), sem aparelho identificado/disponibilizado; ausência física não é inferida desse erro |
+
+Nenhuma terceira tentativa de credencial iOS; nenhum login Apple, UDID ou conta interna
+publicado. Android não comprova iOS. A referência APK2 foi preparada/lida, mas falta a
+captura equivalente do artefato final: comparação cega/cores/foco não foram inventados.
+O compromisso de paridade PWA/Rust permanece; não houve mudança de token compartilhado.
+
+### Consolidação dos cinco lotes e compatibilidade real
+
+A tabela usa os registros anteriores desta página, preservando a janela de cada lote.
+Estados posteriores conhecidos (T21/T43) ficam atribuídos à janela que os observou.
+
+| Lote | Resultado automatizado registrado | Artefato/uso real registrado | Aceitação |
+|---|---|---|---|
+| T12, entrega 1 | core 666/666; checks passaram; duas falhas mobile corrigidas no reteste focado | build `2410f755` sem APK dentro da janela T12; APK foi instalado/aberto somente T21 | pendente |
+| T21, entrega 2 | core 742/742; check/typecheck e arquivo mobile corrigidos no reteste | APK `664e770a` instalado sobre `2410f755`; criação/envio/Parar/pergunta/retorno conferidos em combinações Claude/Codex descritas na seção T21; cabeçalho, crash e fila→Codex falharam | não aceita |
+| T32, entrega 3 | core 758/758; mobile typecheck/test falharam; correções e limites registrados | `ccb85697` sem artefato na janela T32, visto FINISHED somente na T43; APK3 não instalado nos registros | não aceita |
+| T37, entrega 4 | core 758/758; semTerminal 38/38 no reteste; mobile check/PDF/criação pendentes | `a9ed153a` em fila na janela T37 e ainda na T43; nenhum APK4/iOS instalado; credencial iOS esgotada | não aceita |
+| T44, entrega 5 | core 758/758; criação 33/33 em terceiro ciclo fora do limite (ratificação pendente); mobile typecheck/PDF continuam falhando | build `620c7bfd`, número 2, estado final registrado acima; nenhum resultado nativo final presumido | não aceita |
+
+As combinações de provider conferidas no APK2 pela T21 não são conferidas no código final.
+Claude/Codex com e sem terminal, Pi/omp/Kimi e combinação de dois servidores mantêm as
+lacunas por cenário/aparelho das tabelas, sem uma aprovação geral por provider.
+Pendências acumuladas: typecheck de áudio Expo, PDF Android, cabeçalho da lista esgotado,
+crash nativo intermitente, primeiro input fila→Codex, recursos não exercitados em binário
+correspondente e assinatura/instalação iOS. Segunda correção/refinamento não revalidados da
+T37 ficam assim registrados; a suite ampla T44 observou `semTerminal` passando, sem abrir
+um ciclo específico novo. Push com app fechado, lojas, OTA, terminal/CDP e recursos desktop
+continuam fora do conjunto; nenhuma retirada de interfaces foi recomendada.
+
+AVD iniciado por esta Task encerrado (`adb emu kill`, exit 0; processo terminou exit 0),
+reverse removido, APK2/dados preservados e os cinco recursos liberados. Nenhum fixture foi
+criado, servidor reiniciado ou serviço paralelo iniciado. Build remoto não foi cancelado;
+sem consulta posterior para reabrir a janela.
+**Lote encerrado com pendências.** Reunidos os cinco registros, com a violação do limite
+na família de criação explicitada e pendente de ratificação pelo usuário. O produto não
+foi aprovado nas duas plataformas e não se exige uma sexta rodada.

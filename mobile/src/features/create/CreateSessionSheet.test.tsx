@@ -28,6 +28,7 @@ vi.mock('react-native', async (original) => {
   const actual = await original<typeof import('react-native')>();
   return {
   ...actual,
+  AccessibilityInfo: { ...actual.AccessibilityInfo, sendAccessibilityEvent: vi.fn() },
   // O mock global só achata arrays; o estilo por função do Pressable precisa ser resolvido antes.
   Pressable: (props: { style?: unknown }) => (actual.Pressable as unknown as (p: object) => ReactNode)({
     ...props, style: typeof props.style === 'function' ? props.style({ pressed: false }) : props.style,
