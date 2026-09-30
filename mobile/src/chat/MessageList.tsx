@@ -101,7 +101,7 @@ export function MessageList({
           return <UserBubble text={ev.text ?? ''} sessionName={sessionName} ts={ev.ts} />;
         }
         if (ev.kind === 'assistant_msg') {
-          return <AssistantBubble text={codex ? planDisplayText(ev.text ?? '') : ev.text ?? ''} sessionName={sessionName} serverId={serverId} ts={ev.ts} />;
+          return <AssistantBubble text={ev.text ?? ''} sessionName={sessionName} serverId={serverId} ts={ev.ts} />;
         }
         if (ev.kind === 'notice') {
           // Código conhecido vira frase do idioma da tela; desconhecido mostra o que veio, pra um
@@ -122,7 +122,7 @@ export function MessageList({
         return nunca;
       }
     }
-  }, [resultDe, abrirDetalhe, sessionName, serverId, codex]);
+  }, [resultDe, abrirDetalhe, sessionName, serverId]);
 
   return (
     <>
