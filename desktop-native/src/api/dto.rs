@@ -107,12 +107,276 @@ pub struct ChatEvent {
     /// Cache de prompt do turno (só `assistant_msg`): tokens lidos dele e a janela medida em segundos (3600 ou 300).
     pub cache_read: Option<u64>,
     pub cache_ttl_s: Option<u64>,
+    /// Só na linha do tempo de uma sessão `orq`: a entrada já interpretada pelo backend.
+    pub orq: Option<OrqEntry>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct SkillLoaded {
     pub name: String,
     #[serde(default)] pub body: String,
+}
+
+/// Linha da linha do tempo do orquestrador sem LLM, já enriquecida pelo backend (só sessão `orq`).
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct OrqEntry {
+    /// `advance` | `woke` | `would_drop` | `dropped` | `failed` | `notice`.
+    pub kind: String,
+    pub task: Option<u32>,
+    pub line: Option<OrqLine>,
+    /// `notify` | `orchestrator`.
+    pub origin: Option<String>,
+    pub sender: Option<String>,
+    pub mark: Option<String>,
+    #[serde(default)] pub alarm: bool,
+    pub rejected_round: Option<u32>,
+    #[serde(default)] pub body: String,
+    pub question: Option<String>,
+    pub parecer: Option<String>,
+    pub error: Option<String>,
+    pub decided_by: Option<OrqDecidedBy>,
+}
+
+/// Frase curta pelo código; código que este app não conhece cai em `Unknown` em vez de derrubar a leitura.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(tag = "code", rename_all = "snake_case")]
+pub enum OrqLine {
+    Opened { #[serde(default)] sessions: Vec<OrqSessionRef> },
+    Integrated { #[serde(default)] merge: bool },
+    Delivered { round: Option<u32>, commit: Option<String> },
+    RedBack { executor: Option<String> },
+    RedRetry,
+    #[serde(other)] Unknown,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct OrqSessionRef {
+    #[serde(default)] pub name: String,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct OrqDecidedBy {
+    /// `rule` | `alarm` | `jev` | `regex`.
+    #[serde(default)] pub source: String,
+    /// `mark` | `orchestrator`.
+    pub rule: Option<String>,
+    pub jev: Option<OrqJev>,
+    pub regex: Option<OrqRegex>,
+    pub regex_agreed: Option<bool>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct OrqJev {
+    pub mode: Option<String>,
+    pub choice: Option<String>,
+    pub p: Option<f64>,
+    #[serde(default)] pub probs: std::collections::HashMap<String, f64>,
+    pub veto: Option<OrqJevVeto>,
+    #[serde(default)] pub held: Vec<String>,
+    pub would_drop: Option<bool>,
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct OrqJevVeto {
+    pub context: Option<f64>,
+    pub user: Option<f64>,
+    pub problem: Option<f64>,
+    pub deviation: Option<f64>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct OrqRegex {
+    /// `drop` | `wake`.
+    #[serde(default)] pub verdict: String,
+    pub category: Option<String>,
+}
+
+/// `GET /api/sessions/{name}/orq/panel`.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct OrqPanel {
+    #[serde(default)] pub run: String,
+    #[serde(default)] pub gid: String,
+    #[serde(default)] pub errors: Vec<OrqFileError>,
+    #[serde(default)] pub empty: bool,
+    #[serde(default)] pub tasks: OrqPanelTasks,
+    #[serde(default)] pub team: Vec<OrqTeamMember>,
+    #[serde(default)] pub decisions: Vec<OrqDecision>,
+    #[serde(default)] pub automation: OrqAutomation,
+    /// `null` enquanto o backend ainda soma os transcripts.
+    pub consumption: Option<OrqConsumption>,
+    #[serde(default)] pub integration: OrqIntegration,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct OrqFileError {
+    #[serde(default)] pub file: String,
+    #[serde(default)] pub error: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct OrqPanelTasks {
+    #[serde(default)] pub integrated: u32,
+    #[serde(default)] pub total: u32,
+    #[serde(default)] pub total_known: bool,
+    #[serde(default)] pub rows: Vec<OrqPanelTask>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct OrqPanelTask {
+    #[serde(default)] pub n: u32,
+    #[serde(default)] pub title: String,
+    /// `queued` | `executing` | `in_review` | `rejected` | `approved` | `integrated` | `integration_red`.
+    #[serde(default)] pub state: String,
+    pub round: Option<u32>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct OrqTeamMember {
+    #[serde(default)] pub name: String,
+    /// `arbiter` | `executor` | `reviewer`.
+    #[serde(default)] pub role: String,
+    pub task: Option<u32>,
+    #[serde(default)] pub current: bool,
+    pub last: Option<OrqLast>,
+}
+
+/// Último gesto do membro do time: `started` | `delivered` | `approved` | `rejected` | `swapped_in`.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct OrqLast {
+    #[serde(default)] pub code: String,
+    pub round: Option<u32>,
+    pub ts: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct OrqDecision {
+    pub task: Option<u32>,
+    pub ts: Option<String>,
+    #[serde(default)] pub question: String,
+    pub parecer: Option<String>,
+    #[serde(default)] pub event_id: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct OrqAutomation {
+    #[serde(default)] pub mode: OrqAutoMode,
+    #[serde(default)] pub woke: OrqAutoWoke,
+    #[serde(default)] pub alone: OrqAutoAlone,
+    #[serde(default)] pub dropped_by_jev: u32,
+    #[serde(default)] pub advanced: OrqAutoAdvanced,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct OrqAutoMode {
+    #[serde(default)] pub jev: u32,
+    #[serde(default)] pub regex: u32,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct OrqAutoWoke {
+    #[serde(default)] pub total: u32,
+    #[serde(default)] pub decisions: u32,
+    #[serde(default)] pub alarms: u32,
+    #[serde(default)] pub messages: u32,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct OrqAutoAlone {
+    #[serde(default)] pub total: u32,
+    #[serde(default)] pub opened: u32,
+    #[serde(default)] pub integrated: u32,
+    #[serde(default)] pub dropped: u32,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct OrqAutoAdvanced {
+    #[serde(default)] pub would_drop: u32,
+    #[serde(default)] pub disagree: u32,
+    #[serde(default)] pub judged: u32,
+    pub min_confidence: Option<OrqMinConfidence>,
+    #[serde(default)] pub by_rule: u32,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct OrqMinConfidence {
+    pub p: Option<f64>,
+    pub choice: Option<String>,
+    pub ts: Option<String>,
+    #[serde(default)] pub text: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct OrqConsumption {
+    pub computed_at: Option<String>,
+    pub since: Option<String>,
+    #[serde(default)] pub sessions: OrqConsumptionSessions,
+    #[serde(default)] pub totals: OrqConsumptionTotals,
+    #[serde(default)] pub providers: Vec<OrqConsumptionProvider>,
+    #[serde(default)] pub missing_prices: Vec<String>,
+    #[serde(default)] pub subagents: bool,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct OrqConsumptionSessions {
+    #[serde(default)] pub team: u32,
+    #[serde(default)] pub measured: u32,
+    /// Nomes do time sem transcript.
+    #[serde(default)] pub missing: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct OrqConsumptionTotals {
+    #[serde(default)] pub new: u64,
+    #[serde(default)] pub cache_read: u64,
+    /// `null` quando nenhum modelo tem preço.
+    pub usd: Option<f64>,
+    #[serde(default)] pub usd_partial: bool,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct OrqConsumptionProvider {
+    #[serde(default)] pub provider: String,
+    #[serde(default)] pub sessions: u32,
+    #[serde(default)] pub new: u64,
+    #[serde(default)] pub cache_read: u64,
+    pub usd: Option<f64>,
+    #[serde(default)] pub models: Vec<OrqConsumptionModel>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct OrqConsumptionModel {
+    #[serde(default)] pub model: String,
+    #[serde(default)] pub sessions: u32,
+    #[serde(default)] pub new: u64,
+    #[serde(default)] pub cache_read: u64,
+    pub usd: Option<f64>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct OrqIntegration {
+    #[serde(default)] pub branch: String,
+    pub last: Option<OrqIntegrationLast>,
+    /// `green` | `red` | `conflict` | `failed`.
+    pub outcome: Option<String>,
+    pub red_log: Option<String>,
+    #[serde(default)] pub delivery_checks: OrqDeliveryChecks,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct OrqIntegrationLast {
+    pub task: Option<u32>,
+    pub commit: Option<String>,
+    pub ts: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct OrqDeliveryChecks {
+    #[serde(default)] pub ok: u32,
+    #[serde(default)] pub total: u32,
+    #[serde(default)] pub failing: Vec<String>,
 }
 
 impl ChatEvent {
@@ -252,8 +516,95 @@ pub struct Steered {
 
 #[cfg(test)]
 mod tests {
-    use super::SessionInfo;
+    use super::{ChatEvent, OrqEntry, OrqLine, OrqPanel, SessionInfo};
     use serde_json::json;
+
+    #[test]
+    fn orq_entry_reads_a_real_decision() {
+        let entry: OrqEntry = serde_json::from_value(json!({"kind": "woke", "task": 4, "mark": "decisao",
+            "parecer": "/home/jefferson/.hangar/orq/2026-09-29-cad3e6fe/pareceres/task-4-r1-revisor.md",
+            "question": "Incluir `MessageList.tsx:104` em T4 (passar `ev.text` cru) ou deixar para T11?",
+            "body": "…", "origin": "notify", "alarm": false,
+            "decided_by": {"source": "rule", "rule": "mark", "jev": null, "regex": null, "regex_agreed": null}})).unwrap();
+        assert_eq!(entry.task, Some(4));
+        assert_eq!(entry.mark.as_deref(), Some("decisao"));
+        let by = entry.decided_by.unwrap();
+        assert_eq!(by.source, "rule");
+        assert!(by.jev.is_none() && by.regex_agreed.is_none());
+        assert!(entry.parecer.unwrap().ends_with("task-4-r1-revisor.md"));
+    }
+
+    #[test]
+    fn orq_entry_reads_a_dropped_message_with_the_jev() {
+        let entry: OrqEntry = serde_json::from_value(json!({"kind": "dropped", "task": null, "body": "ok", "alarm": false,
+            "decided_by": {"source": "jev", "rule": null, "regex": {"verdict": "drop", "category": "janela"}, "regex_agreed": true,
+                "jev": {"mode": "judge", "choice": "nothing", "p": 0.97, "probs": {"nothing": 0.97, "act": 0.03},
+                    "veto": {"context": 0.1, "user": null, "problem": 0.0, "deviation": 0.0}, "held": [],
+                    "would_drop": null, "error": null}}})).unwrap();
+        let by = entry.decided_by.unwrap();
+        let jev = by.jev.unwrap();
+        assert_eq!(jev.probs["nothing"], 0.97);
+        assert_eq!(jev.p, Some(0.97));
+        assert_eq!(by.regex_agreed, Some(true));
+        assert_eq!(by.regex.unwrap().category.as_deref(), Some("janela"));
+    }
+
+    #[test]
+    fn orq_line_unknown_code_does_not_fail() {
+        let line: OrqLine = serde_json::from_value(json!({"code": "novo"})).unwrap();
+        assert!(matches!(line, OrqLine::Unknown));
+        let opened: OrqLine = serde_json::from_value(json!({"code": "opened",
+            "sessions": [{"name": "t1", "provider": "claude", "model": "opus"}]})).unwrap();
+        assert!(matches!(&opened, OrqLine::Opened { sessions } if sessions[0].name == "t1"));
+        let delivered: OrqLine = serde_json::from_value(json!({"code": "delivered", "round": 2, "commit": "3b799e6"})).unwrap();
+        assert!(matches!(delivered, OrqLine::Delivered { round: Some(2), .. }));
+        assert!(matches!(serde_json::from_value(json!({"code": "red_retry"})).unwrap(), OrqLine::RedRetry));
+    }
+
+    #[test]
+    fn orq_panel_reads_the_contract() {
+        let mut panel = json!({"run": "2026-09-29-cad3e6fe", "gid": "g1", "errors": [{"file": "x.json", "error": "torto"}], "empty": false,
+            "tasks": {"integrated": 4, "total": 11, "total_known": true,
+                "rows": [{"n": 1, "title": "Backend", "state": "integrated", "round": 1}, {"n": 5, "title": "Web", "state": "queued", "round": null}]},
+            "team": [{"name": "arb", "role": "arbiter", "task": null, "current": true,
+                "last": {"code": "delivered", "round": 2, "ts": "2026-09-29T21:00:00Z"}}, {"name": "t1", "role": "executor", "task": 5, "current": false, "last": null}],
+            "decisions": [{"task": 4, "ts": "2026-09-29T21:00:00Z", "question": "?", "parecer": null, "event_id": "e1"}],
+            "automation": {"mode": {"jev": 3, "regex": 1}, "woke": {"total": 5, "decisions": 1, "alarms": 1, "messages": 3},
+                "alone": {"total": 6, "opened": 2, "integrated": 3, "dropped": 1}, "dropped_by_jev": 4,
+                "advanced": {"would_drop": 2, "disagree": 1, "judged": 7,
+                    "min_confidence": {"p": 0.61, "choice": "act", "ts": "2026-09-29T21:00:00Z", "text": "oi"}, "by_rule": 2}},
+            "consumption": {"computed_at": "2026-09-29T21:00:00Z", "since": "2026-09-29T18:00:00Z",
+                "sessions": {"team": 11, "measured": 7, "missing": ["t1"]},
+                "totals": {"new": 12345678901u64, "cache_read": 2, "usd": null, "usd_partial": true},
+                "providers": [{"provider": "claude", "sessions": 3, "new": 5, "cache_read": 6, "usd": 1.5,
+                    "models": [{"model": "opus", "sessions": 3, "new": 5, "cache_read": 6, "usd": null}]}],
+                "missing_prices": ["x"], "subagents": true},
+            "integration": {"branch": "main", "last": {"task": 4, "commit": "3b799e6", "ts": "2026-09-29T21:00:00Z"}, "outcome": "green",
+                "red_log": null, "delivery_checks": {"ok": 2, "total": 3, "failing": ["lint"]}}});
+        let read: OrqPanel = serde_json::from_value(panel.clone()).unwrap();
+        assert_eq!(read.tasks.integrated, 4);
+        assert_eq!(read.tasks.rows[1].round, None);
+        assert_eq!(read.team[0].last.as_ref().unwrap().code, "delivered");
+        assert_eq!(read.automation.advanced.min_confidence.unwrap().p, Some(0.61));
+        assert_eq!(read.integration.delivery_checks.failing, ["lint"]);
+        let use_ = read.consumption.unwrap();
+        assert_eq!(use_.totals.new, 12_345_678_901);
+        assert!(use_.totals.usd.is_none() && use_.totals.usd_partial);
+        assert_eq!(use_.sessions.missing, ["t1"]);
+        assert!(use_.providers[0].models[0].usd.is_none());
+        panel["consumption"] = json!(null);
+        assert!(serde_json::from_value::<OrqPanel>(panel).unwrap().consumption.is_none());
+    }
+
+    #[test]
+    fn chat_event_without_orq_is_unchanged() {
+        let event: ChatEvent = serde_json::from_value(json!({"kind": "notice", "id": "n1", "text": "aviso", "ts": 1.5})).unwrap();
+        assert!(event.orq.is_none());
+        assert_eq!(event.body(), "aviso");
+        let with: ChatEvent = serde_json::from_value(json!({"kind": "notice", "id": "n2", "text": "x",
+            "orq": {"kind": "notice", "body": "x"}})).unwrap();
+        assert_eq!(with.orq.unwrap().kind, "notice");
+    }
 
     #[test]
     fn unreadable_codex_is_loading_except_for_user_question_or_failure() {
