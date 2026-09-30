@@ -331,7 +331,7 @@ export default function ChatScreen() {
                  recarregar={recarregavel ? { bloqueado: recarregarBloqueado, onPress: recarregar } : undefined} />
       <SessionPickerSheet open={pickerOpen} onClose={() => setPickerOpen(false)} atual={name} />
       {/* Lista e Composer dentro do mesmo KAV: ambos sobem com o teclado e a lista termina acima do composer */}
-      <KeyboardAvoidingView behavior="padding" style={styles.body}>
+      <KeyboardAvoidingView behavior="padding" automaticOffset style={styles.body}>
         {stateEvent?.codex_buffering ? (
           <Text style={styles.notice} accessibilityLiveRegion="polite">{m.chat_codex_buffering()}</Text>
         ) : null}
