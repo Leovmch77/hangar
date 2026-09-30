@@ -1,7 +1,7 @@
 <script lang="ts">
   // Editor da fileira de atalhos configurável: lista ordenada única (nativos + customizados),
   // subir/descer, remover, formulário de adicionar/editar com ícone curado ou emoji, e
-  // "restaurar padrão" que apaga o override.
+  // "restaurar padrão" que apaga o override. Cada ação grava na hora: não há "Salvar" separado.
   // O estado salvo mora no servidor (runtime_config.shortcuts) via lib/shortcuts.svelte.ts.
   import * as m from '../../paraglide/messages';
   import {
@@ -35,7 +35,6 @@
   let saving = $state(false);
   let saved = $state(false);
   let saveError = $state('');
-  let dirty = $state(false);
 
   async function load() {
     // Servidor fixado na entrada: se o alvo trocar durante a busca, a resposta velha não pode
@@ -47,7 +46,6 @@
       await loadShortcuts(target);
       if (target !== serverId) return;
       list = shortcutsFor(target).map((s) => ({ ...s }));
-      dirty = false;
     } catch (err) {
       if (target !== serverId) return;
       console.error('shortcuts load error:', err);
@@ -58,23 +56,6 @@
   }
   $effect(() => { serverId; void load(); });
 
-  async function save() {
-    if (saving) return;
-    saving = true;
-    saveError = '';
-    try {
-      await saveShortcuts(list, serverId);
-      dirty = false;
-      saved = true;
-      setTimeout(() => (saved = false), 2500);
-    } catch (e) {
-      // Erro de validação do backend chega como veio ("shortcuts: item 2 …").
-      saveError = e instanceof Error ? e.message : String(e);
-    } finally {
-      saving = false;
-    }
-  }
-
   // ── Deste projeto: mesma edição, gravação própria (PUT da lista inteira do projeto). ──────────
   let proj = $state<ProjectShortcut[]>([]);
   let projName = $state('');
@@ -83,14 +64,53 @@
   let projSaving = $state(false);
   let projSaved = $state(false);
   let projSaveError = $state('');
-  let projDirty = $state(false);
+
+  // Toda ação grava na hora (a lista inteira). Só troca a lista na tela depois de o servidor
+  // aceitar; em erro a lista fica como estava e a mensagem aparece no rodapé.
+  async function persist(sc: Scope, next: Shortcut[]): Promise<boolean> {
+    if (sc === 'global') {
+      if (saving) return false;
+      saving = true;
+      saved = false;
+      saveError = '';
+      try {
+        await saveShortcuts(next, serverId);
+        list = next;
+        saved = true;
+        setTimeout(() => (saved = false), 2500);
+        return true;
+      } catch (e) {
+        // Erro de validação do backend chega como veio ("shortcuts: item 2 …").
+        saveError = e instanceof Error ? e.message : String(e);
+        return false;
+      } finally {
+        saving = false;
+      }
+    }
+    if (projSaving || !projectSession) return false;
+    projSaving = true;
+    projSaved = false;
+    projSaveError = '';
+    try {
+      const r = await saveProjectShortcuts(projectSession, next.filter((s): s is ProjectShortcut => s.type !== 'internal'));
+      proj = r.items.map((s) => ({ ...s }));
+      projSaved = true;
+      setTimeout(() => (projSaved = false), 2500);
+      return true;
+    } catch (e) {
+      // Mensagem já traduzida pelo `code` do backend (errosApi).
+      projSaveError = e instanceof Error ? e.message : String(e);
+      return false;
+    } finally {
+      projSaving = false;
+    }
+  }
 
   async function loadProject() {
     const target = projectSession;
     // A lista da sessão anterior não pode ficar na tela nem ser gravada no projeto da nova.
     proj = [];
     projName = '';
-    projDirty = false;
     if (!target) return;
     projLoading = true;
     projLoadError = '';
@@ -100,7 +120,6 @@
       const p = projectShortcutsFor(target);
       proj = (p?.items ?? []).map((s) => ({ ...s }));
       projName = p?.name ?? '';
-      projDirty = false;
     } catch (e) {
       if (target !== projectSession) return;
       projLoadError = projectShortcutsError(target);
@@ -110,32 +129,16 @@
   }
   $effect(() => { projectSession; void loadProject(); });
 
-  async function saveProject() {
-    if (projSaving || !projectSession) return;
-    projSaving = true;
-    projSaveError = '';
-    try {
-      const r = await saveProjectShortcuts(projectSession, proj);
-      proj = r.items.map((s) => ({ ...s }));
-      projDirty = false;
-      projSaved = true;
-      setTimeout(() => (projSaved = false), 2500);
-    } catch (e) {
-      // Mensagem já traduzida pelo `code` do backend (errosApi).
-      projSaveError = e instanceof Error ? e.message : String(e);
-    } finally {
-      projSaving = false;
-    }
-  }
-
   async function restoreDefaults() {
     if (saving) return;
     saving = true;
+    saved = false;
     saveError = '';
     try {
       await saveShortcuts(null, serverId);
       list = defaultShortcuts();
-      dirty = false;
+      saved = true;
+      setTimeout(() => (saved = false), 2500);
     } catch (e) {
       saveError = e instanceof Error ? e.message : String(e);
     } finally {
@@ -159,12 +162,13 @@
     (Object.keys(INTERNAL_LABEL) as ShortcutInternalAction[]).filter(
       (a) => !list.some((s) => s.type === 'internal' && s.action === a)));
 
-  // As duas listas passam pelas mesmas operações; o escopo diz qual lista e qual "sujo" mudam.
+  // As duas listas passam pelas mesmas operações; o escopo diz qual lista muda.
   function itemsOf(sc: Scope): Shortcut[] { return sc === 'global' ? list : proj; }
-  function setItems(sc: Scope, next: Shortcut[], isDirty = true) {
-    if (sc === 'global') { list = next; dirty = isDirty; }
-    else { proj = next.filter((s): s is ProjectShortcut => s.type !== 'internal'); projDirty = isDirty; }
+  function setItems(sc: Scope, next: Shortcut[]) {
+    if (sc === 'global') list = next;
+    else proj = next.filter((s): s is ProjectShortcut => s.type !== 'internal');
   }
+  const busy = (sc: Scope) => (sc === 'global' ? saving : projSaving);
 
   function move(sc: Scope, i: number, delta: -1 | 1) {
     const items = itemsOf(sc);
@@ -172,19 +176,21 @@
     if (j < 0 || j >= items.length) return;
     const next = [...items];
     [next[i], next[j]] = [next[j], next[i]];
-    setItems(sc, next);
+    void persist(sc, next);
   }
 
   // ── Arrastar pra reordenar. HTML5 DnD não responde ao toque em tablet (regra do repo), então
   // os botões ↑/↓ ficam — são a alternativa exigida pela WCAG 2.2 SC 2.5.7, não redundância. ──
   let dragIdx = $state<number | null>(null);
   let dragScope = $state<Scope | null>(null);
-  // A lista se reordena durante o arrasto; cancelado (Esc, soltar fora) ele volta a como estava.
-  let beforeDrag: { items: Shortcut[]; dirty: boolean } | null = null;
+  // A lista se reordena na tela durante o arrasto e só grava ao soltar; cancelado (Esc, soltar
+  // fora) ou recusado pelo servidor, ele volta a como estava.
+  let beforeDrag: Shortcut[] | null = null;
   function dragStart(e: DragEvent, sc: Scope, i: number) {
+    if (busy(sc)) { e.preventDefault(); return; }
     dragIdx = i;
     dragScope = sc;
-    beforeDrag = { items: itemsOf(sc), dirty: sc === 'global' ? dirty : projDirty };
+    beforeDrag = itemsOf(sc);
     if (e.dataTransfer) {
       e.dataTransfer.effectAllowed = 'move';
       e.dataTransfer.setData('text/plain', String(i));
@@ -200,20 +206,25 @@
     setItems(sc, next);
     dragIdx = i;
   }
-  function dragEnd(e: DragEvent) {
-    if (e.dataTransfer?.dropEffect === 'none' && beforeDrag && dragScope) {
-      setItems(dragScope, beforeDrag.items, beforeDrag.dirty);
-    }
+  async function dragEnd(e: DragEvent) {
+    const sc = dragScope;
+    const before = beforeDrag;
     beforeDrag = null;
     dragIdx = null;
     dragScope = null;
+    if (!sc || !before) return;
+    const now = itemsOf(sc);
+    if (e.dataTransfer?.dropEffect === 'none' || now.every((s, k) => s.id === before[k]?.id)) {
+      setItems(sc, before);
+      return;
+    }
+    if (!(await persist(sc, now))) setItems(sc, before);
   }
   function remove(sc: Scope, i: number) {
-    setItems(sc, itemsOf(sc).filter((_, k) => k !== i));
+    void persist(sc, itemsOf(sc).filter((_, k) => k !== i));
   }
   function restoreNative(a: ShortcutInternalAction) {
-    list = [...list, { id: a, type: 'internal', action: a }];
-    dirty = true;
+    void persist('global', [...list, { id: a, type: 'internal', action: a }]);
   }
 
   // ── Formulário (adicionar/editar customizado) ───────────────────────────────
@@ -258,9 +269,9 @@
     formScope = sc;
   }
   const formValid = $derived(!!fLabel.trim() && !!fContent.trim());
-  function submitForm() {
+  async function submitForm() {
     const sc = formScope;
-    if (!formValid || !sc) return;
+    if (!formValid || !sc || busy(sc)) return;
     const icon = fEmoji.trim() ? `emoji:${fEmoji.trim()}` : `glifo:${fGlyph}`;
     const base = { label: fLabel.trim(), icon, ...(fConfirm ? { confirm: true } : {}) };
     // Pasta só se edita nos atalhos do projeto (a raiz a que ela se refere é a da cópia da sessão);
@@ -277,8 +288,9 @@
       : { id: formId(sc), type: 'send_text', text: fContent.trim(),
           ...(fSendDirect ? {} : { send_direct: false }), ...base };
     const items = itemsOf(sc);
-    setItems(sc, editingIdx === null ? [...items, shortcut] : items.map((s, i) => (i === editingIdx ? shortcut : s)));
-    formScope = null;
+    // Em erro o formulário fica aberto com o que foi digitado, e a mensagem aparece no rodapé.
+    const ok = await persist(sc, editingIdx === null ? [...items, shortcut] : items.map((s, i) => (i === editingIdx ? shortcut : s)));
+    if (ok) formScope = null;
   }
   function formId(sc: Scope): string {
     if (editingIdx !== null) return itemsOf(sc)[editingIdx].id;
@@ -336,16 +348,9 @@
     <div class="rodape">
       <button class="btn" onclick={() => void restoreDefaults()} disabled={saving}
               title={m.atalhos_restaurar_ajuda()}>{m.atalhos_restaurar()}</button>
-      <!-- Importar grava direto no servidor: com edição pendente, salvar depois sobrescreveria o que veio. -->
-      {#if !dirty}<ShortcutTransfer {serverId} onDone={() => void load()} />{/if}
-      <span class="feedback">
-        {#if saveError}<span class="erro">{saveError}</span>
-        {:else if saved}{m.atalhos_salvo()}{/if}
-      </span>
-      <button class="btn primario" onclick={() => void save()} disabled={!dirty || saving}>
-        {m.atalhos_salvar()}
-      </button>
+      <ShortcutTransfer {serverId} onDone={() => void load()} />
     </div>
+    {@render status(saveError, saving, saved)}
   {/if}
 
   {#if projectSession}
@@ -368,19 +373,22 @@
         {:else}
           <button class="btn" onclick={() => openNew('project')}>{m.atalhos_add()}</button>
         {/if}
-        <div class="rodape">
-          <span class="feedback">
-            {#if projSaveError}<span class="erro">{projSaveError}</span>
-            {:else if projSaved}{m.atalhos_salvo()}{/if}
-          </span>
-          <button class="btn primario" onclick={() => void saveProject()} disabled={!projDirty || projSaving}>
-            {m.atalhos_salvar()}
-          </button>
-        </div>
+        {@render status(projSaveError, projSaving, projSaved)}
       {/if}
     </section>
   {/if}
 </div>
+
+{#snippet status(err: string, isSaving: boolean, isSaved: boolean)}
+  {#if err || isSaving || isSaved}
+    <!-- Fixo no pé da área visível: numa lista longa, o resultado de ↑/✕ no topo não pode ficar fora da tela. -->
+    <div class="status" class:erro-caixa={!!err} role="status">
+      {#if err}<span class="erro">{err}</span>
+      {:else if isSaving}<span class="salvando">{m.atalhos_salvando()}</span>
+      {:else}<span class="ok">{m.atalhos_salvo()}</span>{/if}
+    </div>
+  {/if}
+{/snippet}
 
 {#snippet rows(sc: Scope, items: Shortcut[])}
   <ul class="linhas">
@@ -412,9 +420,9 @@
           {#if s.type !== 'internal'}
             <button class="mini" onclick={() => openEdit(sc, i)} aria-label={m.atalhos_editar()}>✎</button>
           {/if}
-          <button class="mini" onclick={() => move(sc, i, -1)} disabled={i === 0} aria-label={m.atalhos_subir()}>↑</button>
-          <button class="mini" onclick={() => move(sc, i, 1)} disabled={i === items.length - 1} aria-label={m.atalhos_descer()}>↓</button>
-          <button class="mini" onclick={() => remove(sc, i)} aria-label={m.atalhos_remover()}>✕</button>
+          <button class="mini" onclick={() => move(sc, i, -1)} disabled={i === 0 || busy(sc)} aria-label={m.atalhos_subir()}>↑</button>
+          <button class="mini" onclick={() => move(sc, i, 1)} disabled={i === items.length - 1 || busy(sc)} aria-label={m.atalhos_descer()}>↓</button>
+          <button class="mini" onclick={() => remove(sc, i)} disabled={busy(sc)} aria-label={m.atalhos_remover()}>✕</button>
         </span>
       </li>
     {/each}
@@ -518,7 +526,9 @@
         </label>
         <div class="form-acoes">
           <button class="btn" onclick={() => (formScope = null)}>{m.comum_cancelar()}</button>
-          <button class="btn primario" onclick={submitForm} disabled={!formValid}>{m.atalhos_salvar()}</button>
+          <button class="btn primario" onclick={() => void submitForm()} disabled={!formValid || busy(formScope ?? 'global')}>
+            {busy(formScope ?? 'global') ? m.atalhos_salvando() : m.atalhos_salvar()}
+          </button>
         </div>
       </div>
 {/snippet}
@@ -660,8 +670,14 @@
   .btn.primario { background: var(--accent); color: #fff; border-color: transparent; }
 
   .rodape { display: flex; align-items: center; gap: var(--space-2); margin-top: var(--space-2); }
-  .feedback { flex: 1; text-align: right; font-size: var(--text-xs); color: var(--success, #30a46c); }
-  .feedback .erro { color: var(--danger, #e5484d); }
+  .status {
+    position: sticky; bottom: 0; z-index: 1; align-self: flex-end; max-width: 100%;
+    padding: 6px 12px; border-radius: var(--radius-md); font-size: var(--text-xs);
+    background: var(--bg-elevated); border: 1px solid var(--border-subtle);
+  }
+  .status.erro-caixa { border-color: var(--danger, #e5484d); }
+  .status .ok { color: var(--success, #30a46c); }
+  .status .salvando { color: var(--text-muted); }
 
   @container (max-width: 480px) {
     .acoes { flex-direction: column; }

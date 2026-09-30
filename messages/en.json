@@ -505,6 +505,7 @@
   "atalhos_confirm": "Confirm first",
   "atalhos_salvar": "Save",
   "atalhos_salvo": "Saved",
+  "atalhos_salvando": "Saving…",
   "atalhos_globais_titulo": "All projects",
   "atalhos_projeto_titulo": "This project ({nome})",
   "atalhos_projeto_titulo_sem_nome": "This project",
