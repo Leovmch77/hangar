@@ -17,7 +17,10 @@ from app.shortcut_transfer import has_placeholder, scrub
 
 @pytest.fixture(autouse=True)
 def _isolate(tmp_path, monkeypatch):
-    monkeypatch.setattr(rc, "_backend_config_base", lambda: tmp_path)
+    monkeypatch.setattr(rc, "_backend_config_base", lambda: tmp_path / "config")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    from app import cli_probe
+    monkeypatch.setattr(cli_probe, "_path_login", "/usr/bin:/bin")
     yield
 
 
@@ -102,7 +105,7 @@ def test_export_scrubs_and_counts_without_touching_the_saved_config(client):
     r = client.get("/api/shortcuts/export", headers=AUTH)
     assert r.status_code == 200
     body = r.json()
-    assert body["version"] == 1 and body["removed"] == 1
+    assert body["version"] == 2 and body["removed"] == 1
     assert body["shortcuts"][0]["command"] == "xfreerdp /v:h /p:⟦SEGREDO:senha⟧"
     assert body["shortcuts"][1:] == items[1:]
     assert json.loads(rc.get("shortcuts"))[0]["command"] == "xfreerdp /v:h /p:abc"
@@ -165,3 +168,555 @@ def test_shell_shortcut_with_placeholder_is_refused(client, monkeypatch, tmp_pat
 def test_transfer_routes_require_auth(client):
     assert client.get("/api/shortcuts/export").status_code == 401
     assert client.post("/api/shortcuts/import", json={"data": []}).status_code == 401
+
+
+@pytest.mark.parametrize("command", [
+    "set -l PASS (cat ~/.local/vm.pw)",
+    'set PASSWORD "$(cat ~/.local/vm.pw)"',
+    "PASS=$(cat ~/.local/vm.pw)",
+])
+def test_scrub_preserves_external_credential_references(command):
+    assert scrub(command) == (command, [])
+
+
+@pytest.mark.parametrize("command, expected", [
+    ("PASS=abc", "PASS=⟦SEGREDO:PASS⟧"),
+    ("pass=abc", "pass=⟦SEGREDO:pass⟧"),
+    ('PASSWORD = "abc"', 'PASSWORD = "⟦SEGREDO:PASSWORD⟧"'),
+    ("set -l PASS abc", "set -l PASS ⟦SEGREDO:PASS⟧"),
+    ("set PASSWORD abc", "set PASSWORD ⟦SEGREDO:PASSWORD⟧"),
+])
+def test_scrub_pass_assignments(command, expected):
+    assert scrub(command)[0] == expected
+
+
+def _script(tmp_path, path, content, mode=0o700):
+    target = tmp_path / path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(content)
+    target.chmod(mode)
+    return target
+
+
+def _bundle(content="echo ok", path=".local/bin/demo", executable=True):
+    return {"version": 2, "shortcuts": [], "scripts": [
+        {"path": path, "content": content, "executable": executable}
+    ]}
+
+
+def test_export_subset_recurses_scripts_fish_and_never_reads_password(tmp_path, monkeypatch):
+    from app import shortcut_transfer as transfer, shortcut_scripts
+    _script(tmp_path, ".config/fish/functions/launch.fish", "function launch\n exec first\nend")
+    _script(tmp_path, ".local/bin/first", "#!/bin/sh\ncommand second")
+    _script(tmp_path, "bin/second", "#!/bin/fish\nset -l PASS (cat ~/.local/bin/vm.pw)\necho $PASS")
+    password = _script(tmp_path, ".local/bin/vm.pw", "NEVER_READ")
+    original = shortcut_scripts.read_file
+    def checked(path):
+        assert path != password
+        return original(path)
+    monkeypatch.setattr(shortcut_scripts, "read_file", checked)
+    _save([{"id": "one", "type": "shell", "label": "One", "command": "launch"},
+           {"id": "two", "type": "send_text", "label": "Two", "text": "hi"}])
+    result = transfer.export_payload(["one"])
+    assert [s["id"] for s in result["shortcuts"]] == ["one"]
+    assert {s["path"] for s in result["scripts"]} == {
+        ".config/fish/functions/launch.fish", ".local/bin/first", "bin/second"}
+    assert any("credencial" in w for w in result["warnings"])
+    assert "NEVER_READ" not in json.dumps(result)
+    assert transfer.export_payload([])["shortcuts"] == []
+    with pytest.raises(ValueError, match="desconhecido"):
+        transfer.export_payload(["unknown"])
+    monkeypatch.setattr(shortcut_scripts, "collect", lambda commands: pytest.fail("chooser read scripts"))
+    assert transfer.export_payload(include_scripts=False)["scripts"] == []
+
+
+def test_bundle_preview_scrubs_without_writing_and_apply_resolves_home(tmp_path):
+    from app.shortcut_transfer import import_shortcuts
+    data = _bundle("PASS=abc\necho ⟦HOME⟧/demo")
+    preview = import_shortcuts(data)
+    target = tmp_path / ".local/bin/demo"
+    assert not target.exists()
+    assert preview["files"] == [{"path": str(target), "status": "create",
+                                 "content": f"PASS=⟦SEGREDO:PASS⟧\necho {tmp_path}/demo"}]
+    assert preview["placeholders"] == [{"id": "script:.local/bin/demo", "label": ".local/bin/demo", "names": ["PASS"]}]
+    with pytest.raises(ValueError, match="segredos"):
+        import_shortcuts(data, apply=True)
+    assert not target.exists()
+    applied = import_shortcuts(data, apply=True, secrets={"script:.local/bin/demo": {"PASS": "filled"}})
+    assert "filled" not in json.dumps(applied)
+    assert target.read_text() == f"PASS=filled\necho {tmp_path}/demo"
+    assert target.stat().st_mode & 0o777 == 0o700
+
+
+def test_export_home_marker(tmp_path):
+    from app.shortcut_transfer import export_payload
+    _script(tmp_path, ".local/bin/demo", f"#!/bin/sh\necho {tmp_path}/example")
+    _save([{"id": "a", "type": "shell", "label": "A", "command": f"{tmp_path}/.local/bin/demo"}])
+    result = export_payload()
+    assert result["shortcuts"][0]["command"] == "⟦HOME⟧/.local/bin/demo"
+    assert "⟦HOME⟧/example" in result["scripts"][0]["content"]
+
+
+@pytest.mark.parametrize("path", ["../demo", "/tmp/demo", ".local/bin/../demo", ".local/bin//demo",
+                                  ".ssh/id_rsa", ".local/bin/a.pw", ".local/bin/.env", ".local/bin/a.conf",
+                                  ".config/fish/functions/demo", ".local/bin/a\x00"])
+def test_bundle_rejects_unsafe_paths(tmp_path, path):
+    from app.shortcut_transfer import import_shortcuts
+    with pytest.raises(ValueError):
+        import_shortcuts(_bundle(path=path), apply=True)
+    assert not (tmp_path / ".local").exists()
+
+
+@pytest.mark.parametrize("parent", [False, True])
+def test_bundle_rejects_symlink_files_and_ancestors(tmp_path, parent):
+    from app.shortcut_transfer import import_shortcuts
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    if parent:
+        (tmp_path / ".local").symlink_to(outside, target_is_directory=True)
+    else:
+        target = _script(tmp_path, "elsewhere/demo", "keep")
+        (tmp_path / ".local/bin").mkdir(parents=True)
+        (tmp_path / ".local/bin/demo").symlink_to(target)
+    with pytest.raises(ValueError, match="link"):
+        import_shortcuts(_bundle(), apply=True)
+
+
+def test_apply_modes_and_same_preview(tmp_path):
+    from app.shortcut_transfer import import_shortcuts
+    data = _bundle(executable=False)
+    import_shortcuts(data, apply=True)
+    assert (tmp_path / ".local/bin/demo").stat().st_mode & 0o777 == 0o600
+    assert import_shortcuts(data)["files"][0]["status"] == "same"
+
+
+def test_config_failure_restores_replaced_and_created_scripts(tmp_path, monkeypatch):
+    from app.shortcut_transfer import import_shortcuts
+    target = _script(tmp_path, ".local/bin/demo", "original", 0o755)
+    data = _bundle()
+    data["scripts"].append({"path": "bin/new", "content": "echo new", "executable": True})
+    monkeypatch.setattr(rc, "aplicar", lambda changes: (_ for _ in ()).throw(OSError("fail")))
+    with pytest.raises(ValueError, match="restaurados"):
+        import_shortcuts(data, apply=True)
+    assert target.read_text() == "original"
+    assert target.stat().st_mode & 0o777 == 0o755
+    assert not (tmp_path / "bin/new").exists()
+
+
+@pytest.mark.parametrize("data", [
+    {"version": 3, "shortcuts": []},
+    {"version": True, "shortcuts": []},
+    {"version": 2, "shortcuts": [], "scripts": [{"path": ".local/bin/a", "content": "a\0", "executable": True}]},
+    {"version": 2, "shortcuts": [{"id": "script:a", "type": "send_text", "label": "A", "text": "a"}]},
+])
+def test_bundle_rejects_version_binary_and_reserved_ids(data):
+    from app.shortcut_transfer import import_shortcuts
+    with pytest.raises(ValueError):
+        import_shortcuts(data, apply=True)
+
+
+
+def test_write_failure_restores_previous_scripts(tmp_path, monkeypatch):
+    from app import shortcut_scripts
+    from app.shortcut_transfer import import_shortcuts
+    target = _script(tmp_path, ".local/bin/demo", "original")
+    data = _bundle()
+    data["scripts"].append({"path": "bin/new", "content": "echo new", "executable": True})
+    write = shortcut_scripts.write_file
+    def fail_new(path, content, mode):
+        if path.name == "new":
+            raise OSError("disk full")
+        write(path, content, mode)
+    monkeypatch.setattr(shortcut_scripts, "write_file", fail_new)
+    with pytest.raises(ValueError, match="restaurados"):
+        import_shortcuts(data, apply=True)
+    assert target.read_text() == "original"
+    assert not (tmp_path / "bin/new").exists()
+
+
+def test_config_failure_after_write_restores_config_too(tmp_path, monkeypatch):
+    from app.shortcut_transfer import import_shortcuts
+    _save([{"id": "old", "type": "send_text", "label": "Old", "text": "old"}])
+    before = rc._caminho().read_bytes()
+    apply = rc.aplicar
+    def write_then_fail(changes):
+        apply(changes)
+        raise OSError("stat failed")
+    monkeypatch.setattr(rc, "aplicar", write_then_fail)
+    data = _bundle()
+    data["shortcuts"] = [{"id": "new", "type": "send_text", "label": "New", "text": "new"}]
+    with pytest.raises(ValueError, match="restaurados"):
+        import_shortcuts(data, apply=True)
+    assert rc._caminho().read_bytes() == before
+    assert [s["id"] for s in json.loads(rc.get("shortcuts"))] == ["old"]
+    assert not (tmp_path / ".local/bin/demo").exists()
+
+
+def test_rollback_failure_is_reported(tmp_path, monkeypatch):
+    from app import shortcut_scripts
+    from app.shortcut_transfer import import_shortcuts
+    _script(tmp_path, ".local/bin/demo", "original")
+    write = shortcut_scripts.write_file
+    def fail_restore(path, content, mode):
+        if content == b"original":
+            raise OSError("restore failed")
+        write(path, content, mode)
+    monkeypatch.setattr(shortcut_scripts, "write_file", fail_restore)
+    monkeypatch.setattr(rc, "aplicar", lambda changes: (_ for _ in ()).throw(OSError("fail")))
+    with pytest.raises(ValueError, match="restauração dos arquivos falhou"):
+        import_shortcuts(_bundle(), apply=True)
+
+
+@pytest.mark.parametrize("change", ["duplicate", "count", "size", "total"])
+def test_bundle_limits_are_checked_before_any_write(tmp_path, change):
+    from app.shortcut_transfer import import_shortcuts
+    data = _bundle()
+    if change == "duplicate":
+        data["scripts"] *= 2
+    elif change == "count":
+        data["scripts"] = [{"path": f"bin/a{i}", "content": "echo", "executable": True} for i in range(33)]
+    elif change == "size":
+        data["scripts"][0]["content"] = "a" * (128 * 1024 + 1)
+    else:
+        data["scripts"] = [{"path": f"bin/a{i}", "content": "a" * (128 * 1024), "executable": True} for i in range(9)]
+    with pytest.raises(ValueError):
+        import_shortcuts(data, apply=True)
+    assert not (tmp_path / "bin").exists()
+    assert not (tmp_path / ".local").exists()
+
+
+
+@pytest.mark.parametrize("apply", [False, True])
+def test_script_bundle_requires_linux_before_writes(tmp_path, monkeypatch, apply):
+    from app import shortcut_scripts
+    from app.shortcut_transfer import import_shortcuts
+    monkeypatch.setattr(shortcut_scripts, "_IS_LINUX", False)
+    with pytest.raises(ValueError, match="Linux"):
+        import_shortcuts(_bundle(), apply=apply)
+    assert not (tmp_path / ".local").exists()
+    assert import_shortcuts({"version": 1, "shortcuts": []}, apply=apply) == {
+        "added": 0, "replaced": 0, "placeholders": []}
+    assert import_shortcuts({"version": 2, "shortcuts": []}, apply=apply)["files"] == []
+
+
+def test_non_linux_export_preserves_shortcuts_without_probing_scripts(monkeypatch):
+    from app import shortcut_scripts, cli_probe
+    from app.shortcut_transfer import export_payload
+    _save([{"id": "a", "type": "shell", "label": "A", "command": "demo"}])
+    monkeypatch.setattr(shortcut_scripts, "_IS_LINUX", False)
+    monkeypatch.setattr(cli_probe, "_obter_path", lambda: pytest.fail("non-Linux PATH probe"))
+    result = export_payload()
+    assert result["shortcuts"][0]["id"] == "a"
+    assert result["scripts"] == []
+    assert any("Linux" in w for w in result["warnings"])
+    assert export_payload(include_scripts=False)["warnings"] == []
+
+
+def test_export_preserves_login_path_precedence(tmp_path, monkeypatch):
+    from app import cli_probe
+    from app.shortcut_transfer import export_payload
+    _script(tmp_path, "bin/precedence", "echo selected")
+    _script(tmp_path, ".local/bin/precedence", "echo shadowed")
+    monkeypatch.setattr(cli_probe, "_path_login", str(tmp_path / "bin") + ":/usr/bin")
+    _save([{"id": "a", "type": "shell", "label": "A", "command": "precedence"}])
+    result = export_payload()
+    assert [s["path"] for s in result["scripts"]] == ["bin/precedence"]
+
+
+def test_credential_warning_names_home_path_without_reading_or_echoing_argv(tmp_path, monkeypatch):
+    from app import shortcut_scripts
+    from app.shortcut_transfer import export_payload
+    monkeypatch.setattr(shortcut_scripts, "read_file", lambda path: pytest.fail("credential read"))
+    _save([{"id": "a", "type": "shell", "label": "A", "command":
+            "set -l PASS (cat ~/.local/vm.pw); echo --password=PRIVATE.pw --token OTHER.pw"}])
+    result = export_payload()
+    warnings = "\n".join(result["warnings"])
+    assert "⟦HOME⟧/.local/vm.pw" in warnings
+    assert "PRIVATE" not in warnings
+    assert "OTHER" not in warnings
+    assert str(tmp_path) not in warnings
+
+
+@pytest.mark.parametrize("warnings", [["a"] * 129, ["a" * 1025], ["a" * 1024] * 17, [42]])
+def test_warning_limits_precede_all_writes(tmp_path, warnings):
+    from app.shortcut_transfer import import_shortcuts
+    data = _bundle()
+    data["warnings"] = warnings
+    with pytest.raises(ValueError, match="avisos"):
+        import_shortcuts(data, apply=True)
+    assert not (tmp_path / ".local").exists()
+    assert not rc._caminho().exists()
+
+
+def test_payload_limit_precedes_all_writes(tmp_path):
+    from app.shortcut_transfer import import_shortcuts, MAX_PAYLOAD_BYTES
+    data = _bundle()
+    data["extra"] = "a" * MAX_PAYLOAD_BYTES
+    with pytest.raises(ValueError, match="grande"):
+        import_shortcuts(data, apply=True)
+    assert not (tmp_path / ".local").exists()
+
+
+def test_secret_expansion_byte_limit_precedes_all_writes(tmp_path):
+    from app.shortcut_transfer import import_shortcuts
+    with pytest.raises(ValueError, match="tamanho"):
+        import_shortcuts(_bundle("PASS=⟦SEGREDO:PASS⟧"), apply=True,
+                         secrets={"script:.local/bin/demo": {"PASS": "é" * (64 * 1024)}})
+    assert not (tmp_path / ".local").exists()
+
+
+def test_export_warning_limit_is_importable(tmp_path):
+    from app.shortcut_transfer import export_payload, import_shortcuts
+    refs = [f"/tmp/{i}-" + "a" * 150 + ".pw" for i in range(180)]
+    _save([{"id": "a", "type": "shell", "label": "A", "command": "cat " + " ".join(refs)}])
+    exported = export_payload()
+    assert any("Limite de avisos" in w for w in exported["warnings"])
+    assert import_shortcuts(exported)["added"] == 0
+
+
+
+@pytest.mark.parametrize("command, expected", [
+    ("PASSWORD='(literal)'", "PASSWORD='⟦SEGREDO:PASSWORD⟧'"),
+    ("tool --password='`literal`'", "tool --password='⟦SEGREDO:senha⟧'"),
+    ("PASSWORD='$LITERAL'", "PASSWORD='⟦SEGREDO:PASSWORD⟧'"),
+    ('tool --password="(literal)"', 'tool --password="⟦SEGREDO:senha⟧"'),
+    ('set -l PASS "(literal)"', 'set -l PASS "⟦SEGREDO:PASS⟧"'),
+    (f"git clone https://user{_C}(literal){_AT}host/repo", f"git clone https://user{_C}⟦SEGREDO:senha⟧{_AT}host/repo"),
+])
+def test_scrub_does_not_treat_literal_password_as_expression(command, expected):
+    assert scrub(command)[0] == expected
+
+
+@pytest.mark.parametrize("command", [
+    'PASSWORD="`cat ~/.local/vm.pw`"',
+    "PASSWORD=`cat ~/.local/vm.pw`",
+    'tool --password="$PASSWORD"',
+    "set -l PASS (cat ~/.local/vm.pw)",
+])
+def test_scrub_keeps_expanding_shell_references(command):
+    assert scrub(command) == (command, [])
+
+
+
+@pytest.mark.parametrize("code", [
+    "if password == 'x': pass",
+    "const valid = password === 'x';",
+    "password => validate(password)",
+])
+def test_scrub_preserves_comparisons_and_arrow_function(code):
+    assert scrub(code) == (code, [])
+
+
+def test_script_failure_before_save_preserves_other_config_write(tmp_path, monkeypatch):
+    from app import shortcut_scripts
+    from app.shortcut_transfer import import_shortcuts
+    _save([{"id": "old", "type": "send_text", "label": "Old", "text": "old"}])
+    before_shortcuts = rc.get("shortcuts")
+    def write_other_config_then_fail(path, content, mode):
+        rc.aplicar({"upload_retention_days": 91})
+        raise OSError("script failed")
+    monkeypatch.setattr(shortcut_scripts, "write_file", write_other_config_then_fail)
+    with pytest.raises(ValueError, match="importação falhou"):
+        import_shortcuts(_bundle(), apply=True)
+    assert rc.get("upload_retention_days") == 91
+    assert rc.get("shortcuts") == before_shortcuts
+
+
+def test_rollback_restores_only_shortcuts_after_save_attempt(tmp_path, monkeypatch):
+    from app.shortcut_transfer import import_shortcuts
+    _save([{"id": "old", "type": "send_text", "label": "Old", "text": "old"}])
+    before_shortcuts = rc.get("shortcuts")
+    apply = rc.aplicar
+    def save_then_other_write_then_fail(changes):
+        apply(changes)
+        apply({"upload_retention_days": 92})
+        raise OSError("failed after write")
+    monkeypatch.setattr(rc, "aplicar", save_then_other_write_then_fail)
+    data = _bundle()
+    data["shortcuts"] = [{"id": "new", "type": "send_text", "label": "New", "text": "new"}]
+    with pytest.raises(ValueError, match="importação falhou"):
+        import_shortcuts(data, apply=True)
+    assert rc.get("upload_retention_days") == 92
+    assert rc.get("shortcuts") == before_shortcuts
+    assert not (tmp_path / ".local/bin/demo").exists()
+
+
+def test_rollback_does_not_revert_later_shortcut_write(tmp_path, monkeypatch):
+    from app.shortcut_transfer import import_shortcuts
+    apply = rc.aplicar
+    later = [{"id": "later", "type": "send_text", "label": "Later", "text": "later"}]
+    def save_then_later_write_then_fail(changes):
+        apply(changes)
+        apply({"shortcuts": json.dumps(later)})
+        raise OSError("failed after write")
+    monkeypatch.setattr(rc, "aplicar", save_then_later_write_then_fail)
+    with pytest.raises(ValueError, match="importação falhou"):
+        import_shortcuts(_bundle(), apply=True)
+    assert json.loads(rc.get("shortcuts")) == later
+    assert not (tmp_path / ".local/bin/demo").exists()
+
+
+
+def test_v2_pasta_resolves_destination_home_without_copying_project(tmp_path, monkeypatch):
+    from app.shortcut_transfer import export_payload, import_shortcuts
+    source_home, destination_home = tmp_path / "source", tmp_path / "destination"
+    monkeypatch.setenv("HOME", str(source_home))
+    source_pasta = str(source_home / "Projects/example")
+    _save([{"id": "a", "type": "shell", "label": "A", "command": "echo ok", "pasta": source_pasta}])
+    exported = export_payload(include_scripts=False)
+    assert exported["shortcuts"][0]["pasta"] == "⟦HOME⟧/Projects/example"
+    monkeypatch.setenv("HOME", str(destination_home))
+    import_shortcuts(exported)
+    assert json.loads(rc.get("shortcuts"))[0]["pasta"] == source_pasta
+    import_shortcuts(exported, apply=True)
+    assert json.loads(rc.get("shortcuts"))[0]["pasta"] == str(destination_home / "Projects/example")
+    assert not destination_home.exists()
+
+
+def test_v1_pasta_remains_literal():
+    from app.shortcut_transfer import import_shortcuts
+    data = {"version": 1, "shortcuts": [{"id": "a", "type": "shell", "label": "A",
+                                        "command": "echo ok", "pasta": "⟦HOME⟧/Projects/example"}]}
+    import_shortcuts(data, apply=True)
+    assert json.loads(rc.get("shortcuts"))[0]["pasta"] == "⟦HOME⟧/Projects/example"
+
+
+
+@pytest.mark.parametrize("command, expected", [
+    (r'PASSWORD="first\"second"', 'PASSWORD="⟦SEGREDO:PASSWORD⟧"'),
+    ("PASSWORD='first'\"second\"", "PASSWORD=⟦SEGREDO:PASSWORD⟧"),
+    (r'set -l PASS "first\"second"', 'set -l PASS "⟦SEGREDO:PASS⟧"'),
+    ("set -l PASS 'first'\"second\"", "set -l PASS ⟦SEGREDO:PASS⟧"),
+    (r'tool --password="first\"second" --port 80', 'tool --password="⟦SEGREDO:senha⟧" --port 80'),
+    ("tool --password='first'\"second\"", "tool --password=⟦SEGREDO:senha⟧"),
+    (r'PASSWORD=first\ second', 'PASSWORD=⟦SEGREDO:PASSWORD⟧'),
+    ('PASSWORD=${PASS}literal', 'PASSWORD=⟦SEGREDO:PASSWORD⟧'),
+    ('PASSWORD="$PASS-literal"', 'PASSWORD="⟦SEGREDO:PASSWORD⟧"'),
+    ('PASSWORD=$PASS"literal"', 'PASSWORD=⟦SEGREDO:PASSWORD⟧'),
+    ('set -l PASS (cat ~/.local/vm.pw)literal', 'set -l PASS ⟦SEGREDO:PASS⟧'),
+])
+def test_scrub_consumes_complete_escaped_and_concatenated_secret(command, expected):
+    assert scrub(command)[0] == expected
+    assert scrub(expected) == (expected, [])
+
+
+def test_export_script_removes_entire_escaped_and_concatenated_values(tmp_path):
+    from app.shortcut_transfer import export_payload
+    _script(tmp_path, ".local/bin/demo", '#!/bin/sh\nPASSWORD="first\\"second"\nPASS=\'first\'"second"\n')
+    _save([{"id": "a", "type": "shell", "label": "A", "command": "demo"}])
+    exported = export_payload()
+    assert exported["scripts"][0]["content"] == '#!/bin/sh\nPASSWORD="⟦SEGREDO:PASSWORD⟧"\nPASS=⟦SEGREDO:PASS⟧\n'
+    assert "first" not in json.dumps(exported)
+    assert "second" not in json.dumps(exported)
+    assert exported["removed"] == 2
+
+
+
+def test_scrub_fish_single_quote_escape_is_one_literal():
+    assert scrub(r"set -l PASS 'first\'second'")[0] == "set -l PASS '⟦SEGREDO:PASS⟧'"
+
+
+
+@pytest.mark.parametrize("command, expected", [
+    (r"tool --password='first\'second half' --port 80", "tool --password='⟦SEGREDO:senha⟧' --port 80"),
+    (r"xfreerdp /p:'first\'second half' /v:host", "xfreerdp /p:'⟦SEGREDO:senha⟧' /v:host"),
+    (r"sshpass -p 'first\'second half' ssh host", "sshpass -p '⟦SEGREDO:senha⟧' ssh host"),
+    (r"mysql -p'first\'second half' db", "mysql -p'⟦SEGREDO:senha⟧' db"),
+])
+def test_scrub_fish_options_consume_complete_single_quoted_value(command, expected):
+    assert scrub(command, fish=True)[0] == expected
+    assert scrub(expected, fish=True) == (expected, [])
+
+
+@pytest.mark.parametrize("command, expected", [
+    (r"tool --password='first\' --user 'other person'", "tool --password='⟦SEGREDO:senha⟧' --user 'other person'"),
+    (r"xfreerdp /p:'first\' /u:'other person'", "xfreerdp /p:'⟦SEGREDO:senha⟧' /u:'other person'"),
+    (r"PASSWORD='first\' tool 'other person'", "PASSWORD='⟦SEGREDO:PASSWORD⟧' tool 'other person'"),
+])
+def test_scrub_bash_trailing_backslash_does_not_consume_next_arguments(command, expected):
+    assert scrub(command, fish=False)[0] == expected
+
+
+@pytest.mark.parametrize("path, shebang", [
+    (".config/fish/functions/demo.fish", ""),
+    (".local/bin/demo", "#!/usr/bin/fish\n"),
+    (".local/bin/demo", "#!/usr/bin/env fish\n"),
+])
+def test_export_and_import_use_fish_script_dialect(tmp_path, path, shebang):
+    from app.shortcut_transfer import export_payload, import_shortcuts
+    body = "tool --password='first\\'second half'\nxfreerdp /p:'first\\'second half' /v:host\n"
+    _script(tmp_path, path, shebang + body)
+    _save([{"id": "a", "type": "shell", "label": "A", "command": "demo"}])
+    exported = export_payload()
+    assert len(exported["scripts"]) == 1
+    assert "second half" not in json.dumps(exported)
+    assert "first" not in json.dumps(exported)
+    incoming = _bundle(shebang + body, path=path)
+    preview = import_shortcuts(incoming)
+    assert "second half" not in json.dumps(preview)
+    assert preview["files"][0]["content"].endswith("xfreerdp /p:'⟦SEGREDO:senha⟧' /v:host\n")
+
+
+def test_export_bash_shebang_wins_over_fish_environment(tmp_path, monkeypatch):
+    from app.shortcut_transfer import export_payload
+    monkeypatch.setenv("SHELL", "/usr/bin/fish")
+    _script(tmp_path, ".local/bin/demo", "#!/bin/bash\ntool --password='first\\' --user 'other person'\n")
+    _save([{"id": "a", "type": "shell", "label": "A", "command": "demo"}])
+    assert export_payload()["scripts"][0]["content"] == "#!/bin/bash\ntool --password='⟦SEGREDO:senha⟧' --user 'other person'\n"
+
+
+def test_shortcut_uses_login_shell_dialect(tmp_path, monkeypatch):
+    from app.shortcut_transfer import export_payload
+    monkeypatch.setenv("SHELL", "/usr/bin/fish")
+    _save([{"id": "a", "type": "shell", "label": "A", "command": "tool --password='first\\'second half'"}])
+    assert export_payload(include_scripts=False)["shortcuts"][0]["command"] == "tool --password='⟦SEGREDO:senha⟧'"
+
+
+@pytest.mark.parametrize("path, prefix, ending", [
+    (".local/bin/demo.py", "PASSWORD = ", "\n"),
+    (".local/bin/demo.js", "const PASSWORD = ", ";\n"),
+    (".local/bin/demo.mjs", "const PASSWORD = ", ";\n"),
+    (".local/bin/demo.rb", "PASSWORD = ", "\n"),
+    (".local/bin/demo.pl", "my $PASSWORD = ", ";\n"),
+])
+def test_non_shell_script_quotes_are_scrubbed_entirely(tmp_path, path, prefix, ending):
+    from app.shortcut_transfer import export_payload, import_shortcuts
+    content = prefix + "'first\\'second half'" + ending
+    _script(tmp_path, path, content)
+    _save([{"id": "a", "type": "shell", "label": "A", "command": str(tmp_path / path)}])
+    exported = export_payload()
+    expected = prefix + "'⟦SEGREDO:PASSWORD⟧'" + ending
+    assert exported["scripts"][0]["content"] == expected
+    assert "second half" not in json.dumps(exported)
+    preview = import_shortcuts(_bundle(content, path=path))
+    assert preview["files"][0]["content"] == expected
+
+
+def test_python_shebang_without_extension_uses_literal_quotes(tmp_path):
+    import ast
+    from app.shortcut_transfer import export_payload
+    content = "#!/usr/bin/env python3\nPASSWORD='first\\'second half'\n"
+    _script(tmp_path, ".local/bin/demo", content)
+    _save([{"id": "a", "type": "shell", "label": "A", "command": "demo"}])
+    cleaned = export_payload()["scripts"][0]["content"]
+    assert cleaned == "#!/usr/bin/env python3\nPASSWORD='⟦SEGREDO:PASSWORD⟧'\n"
+    ast.parse(cleaned)
+
+
+@pytest.mark.parametrize("code, expected", [
+    ('PASSWORD="$LITERAL"', 'PASSWORD="⟦SEGREDO:PASSWORD⟧"'),
+    ('PASSWORD=`literal`;', "PASSWORD='⟦SEGREDO:PASSWORD⟧';"),
+    ('PASSWORD=\'first\'"second"', "PASSWORD='⟦SEGREDO:PASSWORD⟧'"),
+    ("PASSWORD='first\\'second half', OTHER='keep'", "PASSWORD='⟦SEGREDO:PASSWORD⟧', OTHER='keep'"),
+])
+def test_non_shell_literals_do_not_expand_shell_references_or_eat_delimiters(code, expected):
+    assert scrub(code, shell=False)[0] == expected
+
+
+def test_import_warning_resolves_destination_home_without_reading_credential(tmp_path, monkeypatch):
+    from app import shortcut_scripts
+    from app.shortcut_transfer import import_shortcuts
+    monkeypatch.setattr(shortcut_scripts, "read_file", lambda path: pytest.fail("credential read"))
+    result = import_shortcuts({"version": 2, "shortcuts": [], "scripts": [],
+                               "warnings": ["Credencial externa: ⟦HOME⟧/.local/vm.pw --token private-value"]})
+    assert result["warnings"] == [f"Credencial externa: {tmp_path}/.local/vm.pw --token ⟦SEGREDO:token⟧"]

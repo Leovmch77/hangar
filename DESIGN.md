@@ -1,11 +1,15 @@
 # hangar — Design System
 
+Escopo: web/PWA no celular. As referências ao desktop web abaixo descrevem o legado;
+novas interfaces desktop são feitas em `desktop-native/`, conforme a
+[decisão do projeto](docs/decisoes/frontend.md#desktop-no-rust-web-para-pwamobile).
+
 Source of truth: `frontend/src/app.css` (tokens + shared keyframes). This file summarizes it;
 when they disagree, `app.css` wins. Dark is the default (`:root`); light is `[data-theme="light"]`,
 resolved by `lib/theme.ts`.
 
 ## Theme rationale
-Scene: a developer glancing at a phone in a dim room (or a desktop browser late at night) to
+Scene: a developer glancing at a phone in a dim room to
 check whether a long-running agent is working, idle, or waiting on them. Dark is the default
 because the surface is glanced at in low light and must not glare; light is a first-class
 opt-in, not an afterthought (full paper palette, not inverted dark).
@@ -46,11 +50,11 @@ to that family; don't spread bounce to new UI. A global `prefers-reduced-motion`
 keyframes don't each need a guard. Never animate layout props; the sidebar width transition is a
 deliberate, contained exception.
 
-## Desktop conventions (being established)
+## Desktop web legado (referência do que existe)
 - `DesktopShell` mounts the persistent `Sidebar` beside the `Chat` at `min-width: 820px`.
 - Collapsed sidebar = an icon/initials rail; hover expands it.
-- Desktop should prefer keyboard affordances, a breadcrumb/status strip over the mobile back
-  arrow, and side panels over sheets. Mobile surfaces (`SessionList`, sheets) stay untouched.
+- Esta estrutura permanece durante a transição; trabalho novo na web atende PWA/mobile,
+  sem exigir adaptação desktop.
 
 ## Bans (inherited from impeccable, enforced here)
 No gradient text, no colored side-stripe borders, no decorative glass, no em dashes in UI copy,

@@ -12,7 +12,7 @@ import {
   inviteAllows, SharePrerequisiteError, tailscaleEnableUrl, type ShareCreated, type ShareInfo, type SharePrereqs,
 } from './share';
 import type { CotaContaResumo } from './cotaResumo';
-import type { ProjectShortcut, ProjectShortcuts } from './shortcuts';
+import type { Shortcut, ProjectShortcut, ProjectShortcuts } from './shortcuts';
 import type { UsoFiltros, UsoReport } from './uso';
 import type { ConfigSyncItem, ConfigSyncManifest, ConfigSyncProgress, ConfigSyncReport } from './configSync';
 import type {
@@ -105,9 +105,9 @@ export function transcriptImageUrl(name: string, id: string, idx: number): strin
 
 // URL pra servir um arquivo CITADO na conversa (video/html/pdf/img por caminho). `?token` p/ <img>/
 // <video>/<iframe> (sem header). O backend so serve se o path estiver no transcript da sessao.
-export function fileUrl(name: string, path: string): string {
+export function fileUrl(name: string, path: string, download = false): string {
   const t = apiEnv().getToken() ?? '';
-  return `${apiEnv().getBaseUrl()}/api/sessions/${encodeURIComponent(name)}/file?path=${encodeURIComponent(path)}&token=${encodeURIComponent(t)}`;
+  return `${apiEnv().getBaseUrl()}/api/sessions/${encodeURIComponent(name)}/file?path=${encodeURIComponent(path)}&token=${encodeURIComponent(t)}${download ? '&download=1' : ''}`;
 }
 
 // URL nativa (sem token na query) — para WebView/Image nativo que manda Authorization header.
@@ -123,9 +123,9 @@ export function fileAuthHeader(): Record<string, string> {
 
 // URL de uma imagem ENVIADA do phone (upload), servida do cofre (~/.hangar/uploads/<projeto>/<sessão>/).
 // `?token` igual as de cima: <img> nao manda header Authorization e cross-origin nao leva cookie.
-export function uploadUrl(name: string, filename: string): string {
+export function uploadUrl(name: string, filename: string, download = false): string {
   const t = apiEnv().getToken() ?? '';
-  return `${apiEnv().getBaseUrl()}/api/sessions/${encodeURIComponent(name)}/uploads/${encodeURIComponent(filename)}?token=${encodeURIComponent(t)}`;
+  return `${apiEnv().getBaseUrl()}/api/sessions/${encodeURIComponent(name)}/uploads/${encodeURIComponent(filename)}?token=${encodeURIComponent(t)}${download ? '&download=1' : ''}`;
 }
 
 export function uploadUrlNative(name: string, filename: string): string {
@@ -2575,10 +2575,24 @@ export async function listShortcutTerminals(srv: Server, name: string): Promise<
 
 /** Arquivo de exportação dos atalhos: a lista gravada, com cada credencial trocada por
  * `⟦SEGREDO:<nome>⟧` no backend. `removed` = quantas saíram (não vai pro arquivo). */
-export interface ShortcutExport { version: number; shortcuts: unknown[]; removed: number }
+export interface ShortcutScript { path: string; content: string; executable: boolean }
+export interface ShortcutExport {
+  version: number;
+  shortcuts: Shortcut[];
+  scripts?: ShortcutScript[];
+  warnings?: string[];
+  removed: number;
+}
 
-export function exportShortcuts(srv?: Server | null): Promise<ShortcutExport> {
-  const path = '/api/shortcuts/export';
+export function exportShortcuts(
+  srv?: Server | null,
+  options: { ids?: string[]; includeScripts?: boolean } = {},
+): Promise<ShortcutExport> {
+  const query = new URLSearchParams();
+  if (options.ids) for (const id of options.ids.length ? options.ids : ['']) query.append('ids', id);
+  if (options.includeScripts !== undefined) query.set('include_scripts', String(options.includeScripts));
+  const encoded = query.toString();
+  const path = '/api/shortcuts/export' + (encoded ? `?${encoded}` : '');
   return srv ? apiFetchForServer<ShortcutExport>(srv, path) : apiFetch<ShortcutExport>(path);
 }
 
@@ -2586,6 +2600,8 @@ export interface ShortcutImportResult {
   added: number;
   replaced: number;
   placeholders: { id: string; label: string; names: string[] }[];
+  files?: { path: string; status: 'create' | 'replace' | 'same'; content: string }[];
+  warnings?: string[];
 }
 
 /** Importação dos atalhos: sem `apply` só confere e conta; com `apply` preenche os `secrets`

@@ -93,7 +93,7 @@
     return () => { vivo = false; };
   });
 
-  const url = (f: UploadFile) => uploadUrl(sessionName, f.filename);
+  const url = (f: UploadFile, download = false) => uploadUrl(sessionName, f.filename, download);
 
   function icone(f: UploadFile): string {
     const k = fileKind(f.filename);
@@ -168,6 +168,9 @@
               <span class="meta">{fmtBytes(f.size)} · {relativeTime(f.mtime)}</span>
               <span class="prazo" class:urgente={p.urgente}>{p.txt}</span>
             </span>
+            {#if kind === 'document' || kind === 'pdf'}
+              <a class="usar" href={url(f, true)} download={f.filename} aria-label={m.anexos_baixar({ nome: f.filename })}>↓ {m.visor_baixar()}</a>
+            {/if}
             {#if onUsarNoDitado && ehAudio(f)}
               <button class="usar" onclick={() => { onUsarNoDitado(f); onClose(); }}>{m.anexos_usar_no_ditado()}</button>
             {/if}

@@ -1,5 +1,10 @@
 # Paridade do chat nativo com o compositor web
 
+Desde 30/09/2026, [desktop evolui no Rust e web atende PWA/mobile](../../docs/decisoes/frontend.md#desktop-no-rust-web-para-pwamobile).
+Este documento registra capacidades e diferenças; itens pendentes no desktop web são
+históricos e não exigem implementação. Lacunas no Rust e nos clientes móveis continuam
+sujeitas ao escopo de cada trabalho.
+
 Situação ao fim da Task 5 (barra direita e controles da sessão). **Implementado** = código no cliente Rust; **conferido** = exercitado na janela real com fixture sintética (`parity-task4-report.md` para o compositor, `parity-task5-report.md` para a barra direita e os controles); **pendente** = fora do cliente ou adiado, com o motivo. Não há paridade total: terminal, navegador, árvore/Git completos, voz e administração global são módulos à parte (fim do arquivo).
 
 ## Compositor
@@ -70,7 +75,7 @@ Situação ao fim da Task 5 (barra direita e controles da sessão). **Implementa
 | Atalhos da config (`send_text`, `shell`, anexos) | conferido | direto, preencher com proteção, shell só após confirmar e só pela rota existente; internos de terminal/navegador/modo não aparecem |
 | Atalhos por projeto (`GET/PUT /project-shortcuts`): globais e depois os do projeto, com marca de pasta e dica "Deste projeto"; `shell` com `pasta` opcional | implementado | igual ao web no desenho do plano: lidos ao abrir a sessão e a página Atalhos, resposta atrasada descartada pelo número do pedido; carregando/erro não escondem os globais (erro numa linha embaixo); seção "Deste projeto (nome)" na página Atalhos, só com sessão aberta, com adicionar, editar, subir/descer e remover, cada mudança gravada na hora (sem arrastar) |
 | Seção "Ações" em blocos iguais que quebram linha (colunas pela largura do painel, rótulo em até duas linhas) | implementado | o web passou a seguir o nativo: seção própria em grade, fora da fileira que rolava |
-| Exportar/importar atalhos sem credenciais (menu "⋯" de Ações e botões na página Atalhos) | implementado | diálogo de salvar/abrir do sistema; conferência com contagem e um campo mascarado por credencial; atalho com credencial em branco fica apagado e avisa em vez de rodar |
+| Exportar/importar atalhos sem credenciais (menu "⋯" de Ações e botões na página Atalhos) | conferido parcialmente | janela Linux com fixture: seleção 0→2, importação do JSON sintético até a prévia, destino/substituição/conteúdo expandido, segredo mascarado e recusa do exportador v1; 4 testes focados passaram. Pacote preserva scripts/permissões/avisos e descarta respostas antigas por conexão/pedido. Salvar exportação e aplicar importação não exercitados na janela; provas locais em `~/.hangar/proofs/20260930-shortcut-native/` |
 | Terminal de cada atalho `shell` como aba do painel (rótulo, código de saída, ×), botão de terminal em sessão sem pane quando há atalho aberto | implementado | sempre pela rota `shortcut-shell`, também com a sessão nesta máquina; sem pane o painel mostra só as abas dos atalhos |
 | Atalhos No Hangar: configuração (dois cartões "Na sessão" / "No Hangar" com ajuda e uso, bloco "Clicar com ele já rodando" com "Pasta de trabalho: ~", "Responder perguntas pelo app.") e marcas "Na sessão · texto" / "Na sessão" / "No Hangar" nas linhas | feito | mesmos campos do web (`runs_in`, `hangar_home`, `answer_in_app`); só o que difere do padrão é gravado; campo com tipo errado derruba o item, como no web. Não exercitado na janela: verificação manual do nativo (Task 11, Step 9) adiada |
 | Atalhos No Hangar: lista viva (evento `shortcut_terminals` por servidor, sem SSE próprio), rodar/reaproveitar e servidor antigo | feito | estado por máquina (a ativa em `live_terms`, as outras no `RemoteList`); stream caído ou máquina que sai limpa o dela; clicar com o terminal perguntando abre a pergunta; cópia já rodando não vira segunda (janela à frente, ou o painel abre na aba dela); resposta sem `reused` avisa "ainda não tem os atalhos No Hangar". A chave compara com espaço colapsado |
@@ -110,6 +115,7 @@ Terminal embutido, navegador, árvore de arquivos e Git completos (stage, commit
 | Mensagem com marcadores mostra só a legenda e os anexos | conferido | imagem inline pelos bytes do cofre; arquivo como nome + ações |
 | Imagem colada no terminal (`image_count`) | conferido | `/transcript-image`; sem duplicar quando o caminho também foi escrito |
 | Caminhos citados pelo assistente (absoluto, `~/`, relativo com pasta) | conferido | `/file?path=`; recusa do backend aparece com o motivo dele |
+| Documentos citados (DOC/DOCX, ODT/RTF, XLS/XLSX/ODS, PPT/PPTX/ODP) | conferido parcialmente | janela isolada: DOCX com Salvar abre o diálogo do sistema, PDF mantém Abrir/Salvar e código segue no editor; gravação final não conferida porque o foco voltou ao aplicativo do usuário |
 | Abrir | conferido | cópia privada (pasta 700, nome saneado com a extensão preservada) entregue ao programa padrão; só tipos passivos, conferidos no nome gravado |
 | Salvar | conferido | diálogo do sistema; HTML/SVG/desconhecidos só salvam, nunca abrem |
 | Token fora de URL | conferido | leitura sempre com Bearer no cabeçalho |

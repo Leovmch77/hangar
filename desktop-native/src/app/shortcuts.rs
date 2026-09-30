@@ -261,11 +261,18 @@ pub(in crate::app) struct Shortcuts {
     /// Aviso do último exportar/importar (texto, é erro) e a importação esperando confirmação.
     pub(super) transfer_note: Option<(String, bool)>,
     pub(super) import: Option<super::shortcut_transfer::ImportDraft>,
+    pub(super) export: Option<super::shortcut_transfer::ExportDraft>,
+    pub(super) transfer_seq: u64,
+    pub(super) import_loading: bool,
+    pub(super) transfer_warnings: Vec<String>,
 }
 
 impl Shortcuts {
     /// Uma gravação da lista ou a aplicação de uma importação em curso: nenhuma outra escrita entra no meio.
-    pub(super) fn busy(&self) -> bool { self.saving || self.import.as_ref().is_some_and(|draft| draft.applying) }
+    pub(super) fn busy(&self) -> bool {
+        self.saving || self.import_loading || self.import.as_ref().is_some_and(|draft| draft.applying)
+            || self.export.as_ref().is_some_and(|draft| draft.loading || draft.saving)
+    }
 }
 
 pub(super) enum ShortcutsReply {
@@ -274,9 +281,10 @@ pub(super) enum ShortcutsReply {
     Saved(u64, Option<Vec<Item>>, Result<Value, Failure>),
     Commands(Result<Vec<CommandInfo>, Failure>),
     /// Exportar/importar (`shortcut_transfer.rs`): arquivo gravado e quantas credenciais saíram; conferência; gravação.
-    Exported(Result<(PathBuf, u64), String>),
-    Previewed(Value, Result<Value, String>),
-    Imported(Result<Value, String>),
+    ExportCandidates(u64, Result<Value, String>),
+    Exported(u64, Result<(PathBuf, u64, Vec<String>), String>),
+    Previewed(u64, Value, Result<Value, String>),
+    Imported(u64, Result<Value, String>),
 }
 
 impl Hangar {
@@ -295,7 +303,7 @@ impl Hangar {
     /// Os números dos pedidos ficam, para resposta de antes não passar por resposta de agora.
     pub(super) fn shortcuts_opened(&mut self, cx: &mut Context<Self>) {
         let (load, save_seq, saving) = (std::mem::take(&mut self.shortcuts.load.seq), self.shortcuts.save_seq, self.shortcuts.saving);
-        self.shortcuts = Shortcuts { save_seq, saving, ..Shortcuts::default() };
+        self.shortcuts = Shortcuts { save_seq, saving, transfer_seq: self.shortcuts.transfer_seq + 1, ..Shortcuts::default() };
         self.shortcuts.load.seq = load;
         self.load_shortcuts(cx);
         self.load_project_shortcuts();
@@ -376,7 +384,7 @@ impl Hangar {
     }
 
     pub(super) fn receive_shortcuts(&mut self, reply: ShortcutsReply, window: &mut Window, cx: &mut Context<Self>) {
-        if matches!(reply, ShortcutsReply::Exported(_) | ShortcutsReply::Previewed(..) | ShortcutsReply::Imported(_)) {
+        if matches!(reply, ShortcutsReply::ExportCandidates(..) | ShortcutsReply::Exported(..) | ShortcutsReply::Previewed(..) | ShortcutsReply::Imported(..)) {
             self.receive_transfer(reply, window, cx);
             return;
         }
@@ -423,7 +431,7 @@ impl Hangar {
                     s.suggestions = commands.into_iter().map(|c| if c.display.is_empty() { format!("/{}", c.name) } else { c.display }).collect();
                 }
             }
-            ShortcutsReply::Exported(_) | ShortcutsReply::Previewed(..) | ShortcutsReply::Imported(_) => {}
+            ShortcutsReply::ExportCandidates(..) | ShortcutsReply::Exported(..) | ShortcutsReply::Previewed(..) | ShortcutsReply::Imported(..) => {}
         }
         self.drop_stale_form(window, cx);
         if reload { self.load_shortcuts(cx); }
@@ -588,17 +596,19 @@ impl Hangar {
         let feedback = s.saved.filter(|_| s.save_error.is_none()).map(|_| div().text_color(theme::success()).child(tr("shortcuts_saved")));
         let transfer = div().mt(px(16.)).flex().flex_wrap().items_center().gap(px(8.))
             .child(Button::new("shortcuts-import").outline().small().icon(IconName::Upload).label(tr("shortcuts_import"))
-                .disabled(saving || s.import.is_some()).on_click(cx.listener(|this, _, _, cx| this.import_shortcuts(cx))))
+                .loading(s.import_loading)
+                .disabled(saving || s.import.is_some() || s.export.is_some()).on_click(cx.listener(|this, _, _, cx| this.import_shortcuts(cx))))
             .child(Button::new("shortcuts-export").outline().small().icon(IconName::Download).label(tr("shortcuts_export"))
-                .disabled(saving).on_click(cx.listener(|this, _, _, cx| this.export_shortcuts(cx))))
+                .disabled(saving || s.import.is_some() || s.export.is_some()).on_click(cx.listener(|this, _, _, cx| this.export_shortcuts(cx))))
             .children(self.transfer_note_element());
         let draft = self.render_import_draft(cx);
+        let export = self.render_export_draft(cx);
         let footer = self.mark(div().mt(px(24.)).pt(px(16.)), "shortcuts_restore").border_t_1().border_color(theme::border()).flex().items_center().gap(px(10.))
             .child(Button::new("shortcuts-restore").outline().small().label(tr("shortcuts_restore")).tooltip(tr("shortcuts_restore_help"))
                 .disabled(saving).on_click(cx.listener(|this, _, _, cx| this.save_shortcuts(None, cx))))
             .child(div().flex_1().min_w_0().flex().justify_end().text_size(px(12.5)).whitespace_normal().children(feedback));
         let project = self.render_project_shortcuts(cx);
-        page.child(list).children(error_line).children(restore_natives).child(form).child(transfer).children(draft).child(footer).children(project).into_any_element()
+        page.child(list).children(error_line).children(restore_natives).child(form).child(transfer).children(export).children(draft).child(footer).children(project).into_any_element()
     }
 
     /// Seção "Deste projeto": só com uma sessão aberta. Cada mudança grava na hora, sem o Salvar dos globais.

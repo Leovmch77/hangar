@@ -14,7 +14,40 @@ import { getConfig, getConfigForServer, patchConfig, patchConfigForServer, creat
 import { mensagemDeErro, formataErro } from './errosApi';
 import { passarBastao, getSyncSetupForServer, setupSyncForServer, disableSyncForServer } from './api';
 import { probeServerResponse } from './api';
+import { exportShortcuts } from './api';
+import { fileUrl, uploadUrl } from './api';
 const server = { id: 'a', label: 'Servidor A', baseUrl: 'https://a.test', token: 'token-a' };
+
+it('exportação leva IDs selecionados ao servidor escolhido e distingue seleção vazia', async () => {
+  const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}'));
+  const other = { id: 'b', label: 'B', baseUrl: 'https://b.test', token: 'token-b' };
+  await exportShortcuts(other, { ids: ['um', 'dois com espaço'], includeScripts: true });
+  const url = new URL(String(fetchMock.mock.calls[0][0]));
+  expect(url.origin).toBe('https://b.test');
+  expect(url.searchParams.getAll('ids')).toEqual(['um', 'dois com espaço']);
+  expect(url.searchParams.get('include_scripts')).toBe('true');
+  expect(fetchMock.mock.calls[0][1]?.headers).toEqual(expect.objectContaining({ Authorization: 'Bearer token-b' }));
+  fetchMock.mockResolvedValue(new Response('{}'));
+  await exportShortcuts(null, { ids: [], includeScripts: false });
+  const empty = new URL(String(fetchMock.mock.calls[1][0]));
+  expect(empty.searchParams.getAll('ids')).toEqual(['']);
+  expect(empty.searchParams.get('include_scripts')).toBe('false');
+});
+
+it.each(['https://hangar.example', 'https://desktop.example.ts.net', 'http://192.168.1.25:8765'])(
+  'download de documento usa a conexão selecionada (%s), não a origem do PWA', (baseUrl) => {
+  configureApi({ getBaseUrl: () => baseUrl, getToken: () => 'token-a', onUnauthorized: () => {},
+    origin: 'https://pwa.example', createEventSource: () => stubEventSource() });
+  const normal = new URL(fileUrl('session name', '/tmp/Relatório final.docx'));
+  const download = new URL(fileUrl('session name', '/tmp/Relatório final.docx', true));
+  expect(download.origin).toBe(baseUrl);
+  expect(download.pathname).toBe('/api/sessions/session%20name/file');
+  expect(download.searchParams.get('path')).toBe('/tmp/Relatório final.docx');
+  expect(download.searchParams.get('token')).toBe('token-a');
+  expect(download.searchParams.get('download')).toBe('1');
+  expect(normal.searchParams.has('download')).toBe(false);
+  expect(new URL(uploadUrl('s', 'Relatório.pdf', true)).searchParams.get('download')).toBe('1');
+});
 
 it('antes do prazo só a verificação explícita consulta o offline; resposta retira a marca', async () => {
   registrarFalha(server.id);

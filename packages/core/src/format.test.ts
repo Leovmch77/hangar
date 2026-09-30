@@ -1050,6 +1050,14 @@ describe('parseCanal', () => {
 });
 
 describe('parseFilePaths', () => {
+  it('reconhece documentos para baixar sem transformar código em anexo', () => {
+    const paths = parseFilePaths('[Relatório](</tmp/Relatório final.docx>) e docs/tabela.xlsx, /tmp/slides.odp. /tmp/app.ts /tmp/main.py /tmp/lib.rs');
+    expect(paths.map(({ path, kind }) => ({ path, kind }))).toEqual([
+      { path: '/tmp/Relatório final.docx', kind: 'document' },
+      { path: '/tmp/slides.odp', kind: 'document' },
+      { path: 'docs/tabela.xlsx', kind: 'document' },
+    ]);
+  });
   it('crase fecha o caminho — dois nomes em código numa frase não viram um path só', () => {
     const t = 'Li `/proc/smaps_rollup`, e nada mudou; `.scratch/` e `t2-cat-detalhe.png` já estavam.';
     expect(parseFilePaths(t)).toEqual([]);

@@ -5924,7 +5924,7 @@ async def pensamento_para_pt(body: PensamentoPtBody):
 
 
 @app.get("/api/sessions/{name}/uploads/{filename}", dependencies=[Depends(require_auth)])
-def serve_upload(name: str, filename: str):
+def serve_upload(name: str, filename: str, download: bool = False):
     info = _cached_info_sync(name)
     if info is None or not info.cwd:
         raise HTTPException(404, detail=erro("erro_sessao_inexistente", "sessao nao encontrada"))
@@ -5932,7 +5932,7 @@ def serve_upload(name: str, filename: str):
         path = resolve_upload(info.cwd, _id_upload(info), filename)
     except UploadError as e:
         raise HTTPException(e.status, e.detail)
-    return file_response(path)
+    return file_response(path, download=download)
 
 
 @app.get("/api/sessions/{name}/uploads", dependencies=[Depends(require_auth)])
@@ -6796,10 +6796,13 @@ class ShortcutImportBody(BaseModel):
 
 
 @app.get("/api/shortcuts/export", dependencies=[Depends(require_auth)])
-def shortcuts_export():
+def shortcuts_export(ids: list[str] | None = Query(default=None), include_scripts: bool = True):
     # Sem credencial: cada valor de segredo sai como marcador (app/shortcut_transfer.py).
     from app import shortcut_transfer
-    return shortcut_transfer.export_payload()
+    try:
+        return shortcut_transfer.export_payload([] if ids == [""] else ids, include_scripts=include_scripts)
+    except ValueError as e:
+        raise HTTPException(400, detail=str(e))
 
 
 # POST: o import tem corpo e muda a config; o GET/POST e o par que o proxy da frente aceita.
@@ -7346,17 +7349,18 @@ def _resolver_citado(name: str, path: str) -> str:
 
 
 @app.get("/api/sessions/{name}/file", dependencies=[Depends(require_auth)])
-def serve_file(name: str, path: str, request: Request):
+def serve_file(name: str, path: str, request: Request, download: bool = False):
     # FileResponse trata Range -> <video> faz seek/streaming.
     real = _resolver_citado(name, path)
     st = os.stat(real)
-    etag = f'"isolated-{st.st_mtime_ns:x}-{st.st_size:x}"'
+    representation = "download" if download else "isolated"
+    etag = f'"{representation}-{st.st_mtime_ns:x}-{st.st_size:x}"'
     cabecalhos = {"etag": etag, "cache-control": _CACHE_ARQUIVO}
     # Depois da trava do transcript, nunca antes: 304 e resposta sobre um arquivo, e quem nao pode
     # ver o arquivo tambem nao pode saber que ele mudou.
     if request.headers.get("if-none-match") == etag:
         return Response(status_code=304, headers=cabecalhos)
-    return file_response(real, headers=cabecalhos)
+    return file_response(real, headers=cabecalhos, download=download)
 
 
 # Arquivo CITADO na conversa, como texto editavel. O par com `/files/read` e `/files/write` da
