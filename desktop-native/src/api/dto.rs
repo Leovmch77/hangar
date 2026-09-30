@@ -1,5 +1,6 @@
 use serde::Deserialize;
 use serde_json::Value;
+use std::collections::HashMap;
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 pub struct SessionInfo {
@@ -120,8 +121,8 @@ pub struct SkillLoaded {
 /// Linha da linha do tempo do orquestrador sem LLM, já enriquecida pelo backend (só sessão `orq`).
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct OrqEntry {
-    /// `advance` | `woke` | `would_drop` | `dropped` | `failed` | `notice`.
-    pub kind: String,
+    /// `advance` | `woke` | `would_drop` | `dropped` | `failed` | `notice`; vazio conta como `notice`.
+    #[serde(default)] pub kind: String,
     pub task: Option<u32>,
     pub line: Option<OrqLine>,
     /// `notify` | `orchestrator`.
@@ -172,19 +173,12 @@ pub struct OrqJev {
     pub mode: Option<String>,
     pub choice: Option<String>,
     pub p: Option<f64>,
-    #[serde(default)] pub probs: std::collections::HashMap<String, f64>,
-    pub veto: Option<OrqJevVeto>,
+    #[serde(default)] pub probs: HashMap<String, Option<f64>>,
+    /// Mapa aberto (`context`, `user`, `problem`, `deviation`, ...): o backend pode acrescentar chave.
+    pub veto: Option<HashMap<String, Option<f64>>>,
     #[serde(default)] pub held: Vec<String>,
     pub would_drop: Option<bool>,
     pub error: Option<String>,
-}
-
-#[derive(Clone, Debug, Default, Deserialize)]
-pub struct OrqJevVeto {
-    pub context: Option<f64>,
-    pub user: Option<f64>,
-    pub problem: Option<f64>,
-    pub deviation: Option<f64>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -543,10 +537,20 @@ mod tests {
                     "would_drop": null, "error": null}}})).unwrap();
         let by = entry.decided_by.unwrap();
         let jev = by.jev.unwrap();
-        assert_eq!(jev.probs["nothing"], 0.97);
+        assert_eq!(jev.probs["nothing"], Some(0.97));
+        assert_eq!(jev.veto.as_ref().unwrap()["context"], Some(0.1));
+        assert_eq!(jev.veto.unwrap()["user"], None);
         assert_eq!(jev.p, Some(0.97));
         assert_eq!(by.regex_agreed, Some(true));
         assert_eq!(by.regex.unwrap().category.as_deref(), Some("janela"));
+    }
+
+    #[test]
+    fn orq_entry_tolerates_missing_kind_and_null_probability() {
+        let entry: OrqEntry = serde_json::from_value(json!({"body": "x",
+            "decided_by": {"source": "jev", "jev": {"probs": {"act": null}}}})).unwrap();
+        assert_eq!(entry.kind, "");
+        assert_eq!(entry.decided_by.unwrap().jev.unwrap().probs["act"], None);
     }
 
     #[test]
