@@ -25,21 +25,22 @@
   let showQueued = $state(false);
   let showEnded = $state(false);
 
-  // Um pedido por vez por sessão; resposta de uma sessão que já foi trocada é descartada.
+  // Um pedido por vez por sessão e servidor; resposta de sessão ou servidor já trocados é descartada.
   let inflight: string | null = null;
   async function load() {
-    const name = sessionName;
-    if (inflight === name) return;
-    inflight = name;
+    const name = sessionName, srv = server, key = `${srv.id}::${name}`;
+    if (inflight === key) return;
+    inflight = key;
+    const current = () => name === sessionName && srv.id === server.id;
     try {
-      const p = await getOrqPanelForServer(server, name);
-      if (name !== sessionName) return;
+      const p = await getOrqPanelForServer(srv, name);
+      if (!current()) return;
       panel = p;
       error = '';
     } catch (e) {
-      if (name === sessionName) error = e instanceof Error ? e.message : String(e);
+      if (current()) error = e instanceof Error ? e.message : String(e);
     } finally {
-      if (inflight === name) inflight = null;
+      if (inflight === key) inflight = null;
     }
   }
 

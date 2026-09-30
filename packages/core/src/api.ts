@@ -2846,8 +2846,10 @@ async function readConfigSyncStream<T>(res: Response, onProgress: (p: ConfigSync
       }
       if (last) break;
     }
-  } catch {
-    throw new Error(m.shared_config_stream_cut());
+  } catch (e) {
+    // Cancelamento de quem chamou não é corte de stream; os demais guardam a causa.
+    if (isAbortError(e)) throw e;
+    throw new Error(m.shared_config_stream_cut(), { cause: e });
   } finally {
     void reader.cancel().catch(() => {});
   }

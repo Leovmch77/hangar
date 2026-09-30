@@ -45,6 +45,7 @@
         return m.orq_line_delivered({ round: l.round, commit: l.commit ? code(l.commit) : '' }).replace(/\s*·\s*$/, '');
       case 'red_back': return m.orq_line_red_back({ executor: code(l.executor) });
       case 'red_retry': return m.orq_line_red_retry();
+      default: return ev.text ?? '';   // código de uma versão mais nova do backend
     }
   }
   const lineHtml = $derived.by(() => {

@@ -23,6 +23,11 @@ describe('hangarTerminals', () => {
     expect(sessionTerminalFor('srv', 'sess-a', ' global:b \t 2 ')?.id).toBe('def456');
   });
 
+  it('elemento inválido do quadro é descartado sem perder os válidos', () => {
+    setLiveTerminals('srv', JSON.stringify([null, 3, { label: 'sem id' }, hangar]));
+    expect(hangarOf('srv').map((t) => t.id)).toEqual(['abc123']);
+  });
+
   it('servidor que caiu some do chip', () => {
     setLiveTerminals('srv', JSON.stringify([hangar]));
     forgetServer('srv');

@@ -23,7 +23,8 @@ export function setLiveTerminals(serverId: string, raw: string) {
   try {
     const list = JSON.parse(raw);
     if (!Array.isArray(list)) throw new Error('shortcut_terminals frame must be an array');
-    liveTerminals.byServer[serverId] = list;
+    // Elemento torto não pode derrubar quem lê `t.id` depois.
+    liveTerminals.byServer[serverId] = list.filter((t) => t && typeof t.id === 'string');
   } catch (err) {
     console.error('shortcut_terminals:', err);
   }

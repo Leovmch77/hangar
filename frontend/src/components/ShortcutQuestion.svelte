@@ -55,12 +55,14 @@
     if (!srv || !term?.question || !open || sending || !pending) return;
     sending = true;
     error = '';
+    // Fixados antes do await: a pergunta seguinte pode chegar enquanto a resposta viaja.
+    const q = term.question, val = answer, hidden = hide;
     try {
-      if (open.owner) await answerShortcutTerminal(srv, open.owner, term.id, answer);
-      else await answerHangarTerminal(srv, term.id, answer);
-      answered = [...answered, { text: term.question.text, value: answer, hidden: hide }];
+      if (open.owner) await answerShortcutTerminal(srv, open.owner, term.id, val);
+      else await answerHangarTerminal(srv, term.id, val);
+      answered = [...answered, { text: q.text, value: val, hidden }];
       waitingSince = Date.now();
-      sentSig = sigOf(term.question);
+      sentSig = sigOf(q);
       lastSig = '';
     } catch (e) {
       error = m.hangar_erro({ msg: e instanceof Error ? e.message : String(e) });

@@ -198,7 +198,9 @@
     error = '';
     reports = {};
     busy = 'send';
-    steps = Object.fromEntries([[origin.id, { stage: 'packing' }], ...targets.map((t) => [t.id, { stage: 'waiting' }])]);
+    const initial: Record<string, ConfigSyncMachineStep> = { [origin.id]: { stage: 'packing' } };
+    for (const t of targets) initial[t.id] = { stage: 'waiting' };
+    steps = initial;
     try {
       let bundle: Blob;
       try {

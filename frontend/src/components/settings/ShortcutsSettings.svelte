@@ -68,14 +68,17 @@
   // Toda ação grava na hora (a lista inteira). Só troca a lista na tela depois de o servidor
   // aceitar; em erro a lista fica como estava e a mensagem aparece no rodapé.
   async function persist(sc: Scope, next: Shortcut[]): Promise<boolean> {
+    // Alvo fixado na entrada: se a tela mudar de servidor/sessão durante o PUT, a resposta não
+    // pode cair na lista da outra.
+    const srv = serverId, target = projectSession;
     if (sc === 'global') {
       if (saving) return false;
       saving = true;
       saved = false;
       saveError = '';
       try {
-        await saveShortcuts(next, serverId);
-        list = next;
+        await saveShortcuts(next, srv);
+        if (srv === serverId) list = next;
         saved = true;
         setTimeout(() => (saved = false), 2500);
         return true;
@@ -87,13 +90,13 @@
         saving = false;
       }
     }
-    if (projSaving || !projectSession) return false;
+    if (projSaving || !target) return false;
     projSaving = true;
     projSaved = false;
     projSaveError = '';
     try {
-      const r = await saveProjectShortcuts(projectSession, next.filter((s): s is ProjectShortcut => s.type !== 'internal'));
-      proj = r.items.map((s) => ({ ...s }));
+      const r = await saveProjectShortcuts(target, next.filter((s): s is ProjectShortcut => s.type !== 'internal'));
+      if (target === projectSession) proj = r.items.map((s) => ({ ...s }));
       projSaved = true;
       setTimeout(() => (projSaved = false), 2500);
       return true;
@@ -334,7 +337,7 @@
       <div class="repor">
         <span>{m.atalhos_repor()}</span>
         {#each missingNatives as a (a)}
-          <button class="chip" onclick={() => restoreNative(a)}>+ {INTERNAL_LABEL[a]()}</button>
+          <button class="chip" onclick={() => restoreNative(a)} disabled={busy('global')}>+ {INTERNAL_LABEL[a]()}</button>
         {/each}
       </div>
     {/if}
@@ -583,6 +586,7 @@
     border: 1px solid var(--border-subtle);
   }
   .chip:hover { color: var(--text-primary); }
+  .chip:disabled { opacity: 0.35; }
 
   .form {
     display: flex; flex-direction: column; gap: 18px;
