@@ -23,6 +23,7 @@ vi.mock('@hangar/core', async (original) => {
   return {
     ...core,
     checkInviteForServer: checar,
+    rotaDecidida: () => true,   // a decisão de rota (sonda de rede) não é o assunto deste teste
     openSessionsStream: (server: { id: string }) => {
       const obj = { close: vi.fn(), addEventListener: vi.fn() };
       abertos.set(server.id, obj);

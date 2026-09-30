@@ -197,6 +197,7 @@ async def test_monitor_emits_only_on_change():
     with patch.object(state_mod.tmux, "has_session", return_value=True), \
          patch.object(state_mod.tmux, "capture_pane", side_effect=lambda *a, **k: next(panes)):
         mon = StateMonitor("cc", poll=0.001)
+        mon.FRAME_MAX_AGE = 0   # o quadro compartilhado de 0,5 s repetiria o mesmo pane e o spinner "congelaria"
         seen = []
         async for ev in mon.stream():
             seen.append((ev.state, ev.label))

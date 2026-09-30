@@ -21,6 +21,7 @@ vi.mock('./navegadorPanel.svelte', () => ({
 }));
 vi.mock('@hangar/core', async original => ({
   ...await original<typeof import('@hangar/core')>(),
+  rotaDecidida: () => true,   // a decisão de rota (sonda de rede) é assunto de rota.test
   openSessionsStream: (server: { id: string }, req?: string) => {
     connectionIds.set(server.id, req);
     const handlers = new Map();
