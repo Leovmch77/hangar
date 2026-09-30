@@ -31,6 +31,7 @@ import urllib.request
 from collections import Counter
 from contextlib import redirect_stdout
 from datetime import datetime
+from functools import cache
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -230,6 +231,37 @@ def _validator():
     return mod
 
 
+@cache
+def _identity_reader():
+    path = HERE.parents[2] / "backend" / "app" / "orq_identity.py"
+    spec = importlib.util.spec_from_file_location("orq_session_identity", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def session_identity(name: str) -> str:
+    if "::" in name:
+        raise OrqError("cannot capture another server's session locally")
+    identity = _identity_reader().identity(name)
+    if not isinstance(identity, str) or not identity:
+        raise OrqError("session identity is empty")
+    return identity
+
+
+def capture_identities(d: Path, names) -> dict[str, str]:
+    captured = {}
+    for name in dict.fromkeys(names):
+        if not name or name == SUBAGENT:
+            continue
+        try:
+            captured[name] = session_identity(name)
+        except (OrqError, OSError, ValueError, ImportError) as e:
+            # Falta de identidade não autoriza associar outro trabalho pelo nome.
+            journal_append(d, f"session identity unavailable: {name}: {type(e).__name__}")
+    return captured
+
+
 def events(d: Path) -> list[dict]:
     p = d / "eventos.jsonl"
     if not p.exists():
@@ -252,6 +284,12 @@ def event_append(d: Path, ev: dict) -> dict:
         errors = _validator()._valida_linhas("event", [json.dumps(ev, ensure_ascii=False)])
     if errors:
         raise OrqError(buf.getvalue().strip())
+    if ev.get("tipo") == "task_inicio":
+        ev["session_identities"] = capture_identities(d, (ev.get("executor"), ev.get("par")))
+    elif ev.get("tipo") == "sessao_trocada":
+        captured = capture_identities(d, (ev.get("para"),))
+        if captured.get(ev.get("para")):
+            ev["session_identity"] = captured[ev["para"]]
     with (d / "eventos.jsonl").open("a", encoding="utf-8") as f:
         f.write(json.dumps(ev, ensure_ascii=False) + "\n")
     return ev
@@ -354,9 +392,12 @@ def done(d: Path) -> list[tuple[str, str]]:
                 if r.get(k):
                     out.setdefault(r[k], "execution ended")
     for task in sorted(k for k in _closed(d) if isinstance(k, int)):
-        ex = st["roles"].get(task, {}).get("executor")
-        if ex and task not in st["open"]:
-            out.setdefault(ex, f"Task {task} closed")
+        if task in st["open"]:
+            continue
+        for role in ("executor", "par"):
+            name = st["roles"].get(task, {}).get(role)
+            if name:
+                out.setdefault(name, f"Task {task} closed")
     for de, para in st["replaced"]:
         if de:
             out.setdefault(de, f"replaced by {para}")
@@ -732,6 +773,13 @@ def cmd_init(a) -> int:
         if old is None or "plan" in old:
             raise OrqError("plan required: pass --plan <stamped orchestration plan>; only a run "
                            "started without a plan re-inits without one")
+    if old and old.get("arbiter") == a.arbiter and old.get("arbiter_identity"):
+        # Reconfigurar a execução não associa uma sessão recriada com o mesmo nome.
+        cfg["arbiter_identity"] = old["arbiter_identity"]
+    elif old and old.get("arbiter") == a.arbiter:
+        journal_append(d, f"session identity unavailable: {a.arbiter}: previous init has no recorded identity")
+    elif identity := capture_identities(d, (a.arbiter,)).get(a.arbiter):
+        cfg["arbiter_identity"] = identity
     (d / "orq.json").write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
     journal_append(d, f"orq init: arbiter={a.arbiter} repo={cfg['repo']}"
                       + (f" auto jev={cfg['jev']} regex={cfg['regex']}" if auto else ""))

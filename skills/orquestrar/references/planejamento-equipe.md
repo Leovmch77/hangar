@@ -6,55 +6,40 @@ decomposition and the exit gate stay in `planejamento.md`.
 
 `orq` below = `~/.claude/skills/orquestrar/scripts/orq.py --dir <durable dir>`.
 
-## The team: you propose, the user chooses
+## The team: configuration belongs to this work
 
-1. Read `~/.hangar/orquestracao-contas.md`: it says what MAY be used, never what WILL. Copy into
-   the contract only what this work uses. Missing or stale → take the inventory, ask, write the
-   answer there with the date.
-2. Take the inventory:
+1. Leia a política de contas permitidas; ela limita opções, não escolhe o time.
+2. Leia `GET /api/sessions/<sessão-do-trabalho>/orq`. Tela e LLM usam esse mesmo registro.
+   Sem grupo, `arquivo` é o rascunho deste trabalho; com grupo, é seu contrato.
+3. Time já configurado: preserve contas, modelos, esforços, papéis, ordem/vez, janela e flags;
+   não proponha outro nem repita escolhas. Peça somente campo obrigatório ausente.
+   Campos opcionais vazios/- mantêm o padrão do provedor; não os preencha sozinho.
+4. Sem time: configure as escolhas explícitas do usuário pela tela ou pelo POST /orq.
+   Não carregue time padrão, contratos anteriores ou modelos de exemplos.
+5. Nomes novos usam `session_prefix` deste trabalho. Preserve nomes explicitamente escolhidos
+   para ele e os vínculos de sessões já abertas; não encerre sessão por mudança de tabela.
+6. Cada papel tem sua sessão conforme a configuração. A linha de árbitro define quem lança;
+   se for uma sessão nova, abra-a e transfira plano aprovado e referência deste registro.
+   Um escritor por árvore; revisão final fresca e independente.
+7. No lançamento, associe o MESMO registro ao gid real por POST /orq/grupo {gid, mtime}.
+   O contrato acrescenta as demais seções sem reescrever a tabela do time. Não mantenha
+   outra configuração editável no plano, pedido ou arquivo global.
 
-```bash
-claude-engine                                        # engines
-pi --list-models | awk 'NR>1{print $1}' | sort -u    # Pi providers — from the USER's shell (`fish -l -c`)
-ls -d ~/.claude ~/.claude-*                          # Claude accounts
-```
-
-   Harness ≠ engine: list `--provider pi` and own CLIs too. Same-named models → full `provider/id`.
-3. Ask once, proceed on any answer:
-
-> "Route `<audit | full>` (because <reason>). Do you want to pick the team (account and model per
-> role), or do we go with the default?"
-
-4. Wants to pick → two or three combinations from the inventory, they decide. No, or no answer →
-   the default on the account in use: executor Opus effort `medium`; reviewer, arbiter, final
-   review and retrospective Opus effort `high`; rows marked `default` with the date. Leaving the
-   account in use, or entering a per-token account, requires the user's word.
-5. Cast per Task, from the inventory (a model in an example is an example): mechanical volume,
-   subtle reasoning or visual judgment → who writes (possibly one writer per Task); where its error
-   shows → what the reviewer must be able to do; a roteiro needing a capability the executor
-   lacks (vision, a device) → who covers it, in the contract; account and quota → engines and
-   fallback.
-6. One role, one session; each role gets its own. Phase switch (planner → arbiter) and succession
-   are not stacking. Final review in a fresh session. One writer per tree.
-7. Write the table below into `regras-<gid>.md`.
-
-Done when the table is written and every row carries account, model and effort.
+Done when the current work's record contains the explicit choices required by its roles.
 
 ## `## Quem é quem`
 
-Team table in `regras-<gid>.md`, raw values only (`-` = empty). Start from
-`<pair_dir>/regras-padrao.md` when it exists, adjusting only session names:
+Tabela do próprio trabalho, depois associada a `regras-<gid>.md`; valores brutos
+(`-` = padrão opcional escolhido). Exemplo de formato, sem escolher papéis/modelos:
 
 ```markdown
 ## Quem é quem
 
 | papel | sessão | provider | conta | modelo | esforço |
 |---|---|---|---|---|---|
-| árbitro | <work>-arbitro | claude | padrao | opus[1m] | high |
-| executor | <work>-t* | claude | 200-01 | opus[1m] | medium |
-| revisor | <work>-review | pi | clinepass | cline-pass/glm-5.2 | high |
-| revisão final | <work>-final | claude | claude-200-3 | opus[1m] | high |
-| retrospectiva | <work>-retro | claude | claude-200-3 | opus[1m] | high |
+| árbitro | <work>-arbitro | <escolhido> | <escolhida> | <escolhido> | <escolhido-ou-padrão> |
+| executor | <work>-t* | <escolhido> | <escolhida> | <escolhido> | <escolhido-ou-padrão> |
+| revisor | <work>-review* | <escolhido> | <escolhida> | <escolhido> | <escolhido-ou-padrão> |
 ```
 
 - `provider`: `claude` | `codex` | `pi` | `kimi`. `conta`: config-dir name on Claude (`padrao`,
@@ -127,7 +112,7 @@ risk, `—` otherwise.
 
 ## Phase 2 — Launch (the user's single "go ahead")
 
-- On `full`: you are now the arbiter. Read `arbitro.md` and run the launch of
+- On `full`: a sessão escolhida para árbitro lê `arbitro.md` e executa o lançamento de
   `arbitro-lancamento.md` ("Launch"): pre-flight, branch question, baseline, sessions, contract,
   kick-offs.
 - On `audit`: open no session. Run the pre-flight, the branch question and the baseline of

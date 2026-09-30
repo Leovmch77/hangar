@@ -35,14 +35,28 @@ Create the orchestration group with you as its only member; open no session for 
 hangar-send --pair --orq "<work> — each session's role is in the regras-<gid>.md contract"
 ```
 
-Read the `gid` in your own sidecar. An `--orq` group lives with one member while its auto run
-is alive; the sessions the orchestrator opens join it through the watchdog.
+Leia o gid no seu sidecar. Se o time foi configurado em outra sessão planejadora, associe
+o registro dela a este grupo pela API autenticada:
+
+```http
+POST /api/sessions/<sessão-do-trabalho>/orq/grupo
+Content-Type: application/json
+
+{"gid":"<gid-real>","mtime":<mtime-lido-em-GET-orq>}
+```
+
+Faça isso antes de escrever as demais seções do contrato de destino. Conflito retorna 409:
+releia o registro atual, sem copiar tabela antiga ou substituir escolhas. Rascunho do próprio
+fundador é associado na criação do grupo. Depois, leia GET /orq novamente e use o arquivo
+retornado; planejador e árbitro usam o mesmo registro. O grupo orq de um membro fica vivo
+durante a execução auto; o vigia junta as sessões abertas pelo programa.
 
 Done when your sidecar carries the `gid` and the `orq` mark.
 
 ## 3. Contract, init, start event
 
-1. Write `<config>/.hangar-pair/regras-<gid>.md` (skeleton in
+1. Complete o registro atual associado a `regras-<gid>.md`, preservando sua tabela do time
+   (skeleton in
    `~/.claude/skills/orquestrar/references/planejamento-equipe.md`; first lines in
    `~/.claude/skills/orquestrar/references/arbitro.md`, "The four files"), adding under them:
 
@@ -79,7 +93,8 @@ systemd-run --user --unit=vigia-<gid> --property=Restart=always --property=Resta
 
 Its round also runs `orq advance`. Proof: the `[vigia] ARMED …` prompt arrives in your session
 within 2 min; `active` is not proof. Never stop it to ask the user something: ask in text with a
-default and let the orchestrator go on. It stops for good only after `execucao_fim`.
+default and let the orchestrator go on. Desarme somente após execucao_fim e confirmação
+de que os candidatos concluídos foram fechados ou têm impedimento explicitamente registrado.
 
 ## 5. Hand over
 

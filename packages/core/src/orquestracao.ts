@@ -135,6 +135,12 @@ export interface RespostaPapel {
 
 export interface OrqGrupo {
   gid: string;
+  /** Rascunhos têm gid próprio, mas ainda não pertencem a um grupo. */
+  grouped?: boolean;
+  /** Prefixo do trabalho atual para nomes de papéis novos. */
+  session_prefix?: string;
+  /** Identidade da sessão, estável ao promover o rascunho para um grupo. */
+  session_identity?: string | null;
   arquivo: string;
   mtime: number;
   papeis: Papel[];

@@ -1,8 +1,8 @@
 # Role: planner (phases 0, 1 and 2)
 
-Drive the research, write the spec and the plan **with the user**, launch the team. Plan approved →
-you become the arbiter: read `arbitro.md` and write no more code. Route `audit` → you are also the
-writer (step 7).
+Conduza pesquisa e plano com o usuário. A sessão de árbitro é a escolhida para este trabalho;
+plano aprovado não muda seu papel automaticamente. Transfira ao árbitro novo quando configurado.
+Rota audit: quem planejou também escreve, conforme passo 7.
 
 ## Two words: Task and step
 
@@ -65,7 +65,8 @@ Right after the spec closes, before Task 1:
    (no public contract, shared state, destination or credential change); few enough Tasks for one
    writer in one context. One fails → `full`. The user decides; no answer → `full`. Escalation
    runs through `replanejar.md`, reason in the journal.
-2. Ask about the team and the accounts: `planejamento-equipe.md`, "The team".
+2. Leia o time deste trabalho conforme `planejamento-equipe.md`, "The team".
+   Configuração completa: siga sem oferecer outro time; peça só campo obrigatório ausente.
 3. Read each chosen model's card in `~/.hangar/orq/modelos/`. No card → write the plan
    conservatively, do one sweep (vendor guide + community) into a `## What they say` section marked
    hypothesis, and create the card in the retrospective.

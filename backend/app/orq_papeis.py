@@ -64,7 +64,7 @@ class Papel:
         return orq_md.normalizar(self.papel) == ARBITRO
 
 
-GID_PADRAO = "padrao"   # regras-padrao.md: o time que o árbitro copia ao montar um grupo novo
+GID_PADRAO = "padrao"   # Identificador legado, nunca fonte de um trabalho novo.
 
 
 def regras_path(gid: str) -> Path:
@@ -180,31 +180,10 @@ def escrever_papel(texto: str, p: Papel) -> str:
                                {c: valores[c] for c in cab}, SECAO)
 
 
-def _casa_nome(padrao: str, nome: str) -> bool:
-    padrao = padrao.strip()
-    if not padrao:
-        return False
-    return nome.startswith(padrao[:-1]) if padrao.endswith("*") else nome == padrao
-
-
 def gid_por_sessao(nome: str) -> str | None:
-    """Grupo de uma sessão SEM sidecar de pareamento: o contrato já diz quem está nele — a coluna
-    `sessão` da tabela. Um grupo tocado fora do `--pair` (já aconteceu num trabalho real) continua visível.
-    Mais de um contrato casando → o mais recente."""
-    achados: list[tuple[float, str]] = []
-    for p in pair._pair_dir().glob("regras-*.md"):
-        if p.stem == f"regras-{GID_PADRAO}":
-            continue
-        try:
-            texto, mtime = orq_md.ler_arquivo(p)
-        except (OSError, ValueError) as e:
-            # Um contrato ilegível (encoding quebrado por edição à mão) não pode tirar a tela de
-            # TODAS as sessões — pula este e diz qual foi.
-            _log.warning("regras ilegível, ignorado: %s (%s)", p, e)
-            continue
-        if any(_casa_nome(r.sessao, nome) for r in ler(texto)):
-            achados.append((mtime, p.stem.removeprefix("regras-")))
-    return max(achados)[1] if achados else None
+    """O vigia pode ainda não ter juntado uma sessão registrada na execução viva."""
+    from app.orq_context import active_gid
+    return active_gid(nome)
 
 
 def casar_viva(papel: Papel, sessoes) -> str | None:

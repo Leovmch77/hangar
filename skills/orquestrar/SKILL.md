@@ -14,9 +14,8 @@ allowed-tools: Bash(hangar-send:*), Bash(git status:*), Bash(git log:*), Bash(gi
 
 # orquestrar — router for the planner and the arbiter
 
-Invoke only when told: the user asked for the pipeline (by name or in their own words), or a
-kick-off says `Role: arbiter` (arbiter succession). Picked it because the task looked large: stop and ask the user in
-one line before planning, creating sessions, writing a contract or reading a role page.
+Invoque somente por pedido do usuário ou kick-off com `Role: arbiter`.
+Não deduza o fluxo pelo tamanho ou risco da tarefa.
 
 ## Phases and routes
 
@@ -24,7 +23,7 @@ one line before planning, creating sessions, writing a contract or reading a rol
 |---|---|---|---|
 | 0. Research | read-only session/subagent | no | findings in a file the plan cites |
 | 1. Spec + plan | with the user | no | plan approved, decisions and team settled |
-| 2. Launch | the phase-1 session, now the arbiter | never again | team created, contract written, one "go ahead" |
+| 2. Launch | sessão escolhida para árbitro | nunca | registro do time associado ao grupo, contrato escrito, aprovação |
 | 3. Execution | executor + reviewer, separate sessions | executor only | every Task with `APROVA` |
 | 4. Branch review | fresh session that took no part | no | the whole set approved |
 | 5. Retrospective | fresh session that took no part | no | proposed patch for this skill, in the user's hands |
@@ -46,7 +45,7 @@ its page and reads that page plus the sibling pages it names; nothing else of th
 | Role | Page | You are this when |
 |---|---|---|
 | planner | `references/planejamento.md` (+ `references/planejamento-equipe.md` for team, plan skeleton, contract and launch) | the user asked you for the work; no kick-off exists |
-| arbiter | `references/arbitro.md` (+ the per-moment pages it lists) | you wrote the plan and the user approved it |
+| arbiter | `references/arbitro.md` (+ the per-moment pages it lists) | papel declarado e sessão escolhida na configuração deste trabalho |
 | executor | `~/.claude/skills/orquestrar/references/executor.md` | kick-off says `Role: executor` |
 | reviewer | `~/.claude/skills/orquestrar/references/revisor.md` | kick-off says `Role: reviewer` |
 | branch review | `~/.claude/skills/orquestrar/references/revisao-final.md` | kick-off says `Role: branch review` |
@@ -83,17 +82,17 @@ proof mode, parallelism and review mode are the plan's `## Projeto`, written by 
 
 ## Locks for the planner and the arbiter
 
-- The cast comes from the contract, never from `hangar-send --list`. Contract missing or empty:
-  ask the user who is who.
+- O time vem do registro deste trabalho configurado na tela ou pelo LLM, nunca de sessão
+  viva, template global ou contrato anterior. Campo obrigatório ausente: peça só esse campo.
 - The contract is an order: engine, model, account, session name and role are not reopened.
   Unforeseen case: re-read the contract, then ask.
-- Choosing the team is an offer, asked once; any answer unblocks (no answer: the default, on the
-  account in use). Leaving the account or entering a per-token account needs the user's word.
+- Time configurado não é reaberto. Ausência de resposta não escolhe conta, modelo, esforço
+  ou papel. Sair da conta escolhida ou entrar em cobrança por token exige ordem do usuário.
 - The model is the user's decision. Read `~/.hangar/orquestracao-contas.md` before assembling a
   team; missing or stale: take the inventory, ask, write the answer there with the date. The
   contract carries the account↔model table per role; a model outside it is not used even to
-  test. A new session is born on the harness default: switch, read the model back, then send
-  work. Subagents: same account; model switch inside it only where the contract allows; a
+  test. Abra a sessão diretamente com os parâmetros da linha escolhida; confira o modelo
+  real antes de enviar trabalho, sem passar primeiro por um default. Subagents: same account; model switch inside it only where the contract allows; a
   `model:` in an agent's frontmatter overrides yours. Need another model: stop and ask.
 - Stage by explicit path; no `--amend`/rebase/squash; untouchables never enter a commit.
 - Write first, notify after: reports, recipes and journals are files in the durable directory

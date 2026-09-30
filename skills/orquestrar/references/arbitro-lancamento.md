@@ -29,9 +29,11 @@ session is opened or a Task released. Back to `arbitro.md` once the team stands.
    write", below) and the closing items (`arbitro-encerramento.md`); write the a-priori
    estimate: time and rounds per Task.
 5. Survey the tooling (below), once.
-6. Create, in order: `--new` ("Opening a session", below) → `--pair` → read the `gid` in your own
-   sidecar → write the contract (skeleton in `planejamento-equipe.md`; each Task's specifics in a
-   `## Task N` section at the end) → `orq init --arbiter <you> --repo <repo> --contract <regras
+6. Abra as sessões configuradas e forme o grupo. Leia o gid real; associe o registro do time
+   por POST `/api/sessions/<sessão-do-trabalho>/orq/grupo` com `{gid, mtime}` lido em GET /orq.
+   Faça a associação antes de completar o contrato de destino; preserve a tabela atual.
+   Complete o contrato (skeleton in `planejamento-equipe.md`; detalhes por Task em
+   `## Task N` no fim) → `orq init --arbiter <you> --repo <repo> --contract <regras
    path> --plan <user plan dir>/<user plan stem>.orq.md --untouchable <glob>…` (the stamped plan
    itself, never a copy) → `orq event execucao_inicio --plano <plan> --branch <branch> --gid <gid>`
    → arm the watchdog and prove it (`arbitro-vigia.md`, "Arming") → kick-offs ("Kick-off", below).
@@ -88,7 +90,8 @@ Outside tool (skill, subagent, command): the three questions of `SKILL.md`'s loc
 
 - The model comes from the ROLE, including bug worktrees and one-off tasks.
 - Before creating any session: re-read its row and state in the message which engine/model you use and where it came from.
-- A new session is born on the harness default → switch, read the model back, only then send work.
+- Abra a sessão já na conta/modelo/esforço/flags escolhidos para o papel; confira a identidade
+  real antes de enviar trabalho. Divergência não autoriza fallback ou troca da escolha.
 - Subagents: same account always; a model switch inside it only where the contract allows; an agent frontmatter `model:` overrides yours.
 
 ## Who you open
@@ -105,7 +108,9 @@ Outside tool (skill, subagent, command): the three questions of `SKILL.md`'s loc
 
 ## Opening a session — five steps, one unit
 
-1. Create on the agent's default account: `hangar-send --new <name> <cwd>`. "An <agent> session" = that agent's default account; the same model through a gateway or router is another provider. `--engine <engine>` only when the plan named one. Model, effort and permission go on the command (`--model <id> --effort <level> --permissao <mode>`; Pi: `--effort` → `--thinking`; Kimi: `--model` only; `--permissao` Claude-only). Server with a Jev key: every executor and reviewer is born with `--jev`. The row's `abertura` cell goes on the command as written (it may carry `--engine` and `--permissao`); a Codex `conta` other than `openai-codex` → `--conta <name>`. A 400 = session not born: recreate with the flags right, never create-then-switch. Old `hangar-send` without the flags → POST to the API with `model`/`effort`/`permission_mode`.
+1. Crie na conta/provider da linha deste trabalho: `hangar-send --new <name> <cwd>` com
+   os parâmetros escolhidos. Mesmo modelo por outro gateway/router é outro provider;
+   não substitui a escolha do usuário. `--engine <engine>` only when the plan named one. Model, effort and permission go on the command (`--model <id> --effort <level> --permissao <mode>`; Pi: `--effort` → `--thinking`; Kimi: `--model` only; `--permissao` Claude-only). Server with a Jev key: every executor and reviewer is born with `--jev`. The row's `abertura` cell goes on the command as written (it may carry `--engine` and `--permissao`); a Codex `conta` other than `openai-codex` → `--conta <name>`. A 400 = session not born: recreate with the flags right, never create-then-switch. Old `hangar-send` without the flags → POST to the API with `model`/`effort`/`permission_mode`.
 
    ```bash
    hangar-send --new <name> <repo> --provider pi --model <provider>/<id> --effort <level>

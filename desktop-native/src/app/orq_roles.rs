@@ -1,4 +1,4 @@
-//! Aba "Papéis do grupo" da Orquestração (`OrquestracaoSheet.svelte`): as etapas do contrato `regras-<gid>.md` na ordem do
+//! Aba "Time do trabalho" da Orquestração (`OrquestracaoSheet.svelte`): as etapas do contrato `regras-<gid>.md` na ordem do
 //! trabalho, o formulário de um papel, a troca rápida de conta e modelo e o "Começar". Salvar grava o contrato e vale na
 //! próxima sessão de cada papel; sessão viva nunca é tocada. As contas liberadas ficam em Configurações > Orquestração.
 use super::*;
@@ -80,11 +80,20 @@ struct Readiness { phase: String, plan: Option<Plan> }
 #[derive(Deserialize)]
 struct Group {
     gid: String,
+    #[serde(default)]
+    grouped: Option<bool>,
+    #[serde(default)]
+    session_prefix: String,
     arquivo: String,
     mtime: f64,
     papeis: Vec<Row>,
-    arbitro: Option<String>,
     prontidao: Option<Readiness>,
+}
+
+impl Group {
+    fn has_group(&self) -> bool {
+        self.grouped.unwrap_or(self.gid != "padrao" && !self.gid.starts_with("draft-"))
+    }
 }
 
 #[derive(Clone, Deserialize)]
@@ -351,8 +360,7 @@ impl OrqRoles {
     fn original(&self, key: &str) -> Option<&Row> { self.rows().iter().find(|r| r.role.key() == key) }
 
     fn blank(&self) -> Role {
-        Role { provider: "claude".into(), conta: self.allowed("claude").first().map(|a| a.conta.clone()).unwrap_or_default(),
-            jev: self.jev_default, ..Role::default() }
+        Role { provider: "claude".into(), jev: self.jev_default, ..Role::default() }
     }
 
     /// A linha como vai ficar: o rascunho por cima do contrato.
@@ -444,12 +452,11 @@ impl OrqRoles {
         match (role.provider.as_str(), role.headless) { ("claude", _) => Some(&PERMISSIONS), ("codex", true) => Some(&CODEX_PERMISSIONS), _ => None }
     }
 
-    /// Nome da sessão de um papel novo: o prefixo do grupo e o sufixo que a skill usa para o papel.
+    /// Papéis novos usam a identidade do trabalho, sem inferir nomes de outras linhas.
     fn derived_session(&self, papel: &str) -> String {
         let group = self.group.as_ref().and_then(|g| g.as_ref().ok());
-        let base = self.rows().iter().map(|r| r.role.sessao.clone()).find(|s| !s.is_empty())
-            .or_else(|| group.and_then(|g| g.arbitro.clone())).unwrap_or_else(|| self.name.clone());
-        let prefix = match base.rfind('-') { Some(i) if i > 0 => base[..=i].to_owned(), _ => format!("{base}-") };
+        let base = group.map(|g| g.session_prefix.trim()).filter(|p| !p.is_empty()).unwrap_or(&self.name);
+        let prefix = if base.ends_with('-') { base.to_owned() } else { format!("{base}-") };
         let lower = papel.to_lowercase();
         let suffix = match lower.as_str() {
             "árbitro" => "arbitro".into(), "executor" => "t*".into(), "revisor" => "review*".into(), "revisão final" => "final".into(),
@@ -875,7 +882,7 @@ impl OrqRoles {
         });
         let muted = |text: String| div().text_sm().text_color(theme::muted()).whitespace_normal().child(text);
         let mut list = div().flex().flex_col().gap_3()
-            .when(group.gid == "padrao", |el| el.child(muted(t("orqcfg_sem_grupo"))))
+            .when(!group.has_group(), |el| el.child(muted(t("orqcfg_sem_grupo"))))
             .child(muted(t(if rows.is_empty() { "orqcfg_sem_papeis" } else { "orqcfg_papeis_intro" })))
             .when_some(progress, |el, (task, total)| el.child(div().text_sm().text_color(theme::accent()).child(
                 tr_shared("orqcfg_andamento", &[("t", &task.to_string()), ("total", &total.to_string())]))))
@@ -1096,14 +1103,14 @@ impl Render for OrqRoles {
                 .into_any_element(),
         };
         let group = self.group.as_ref().and_then(|g| g.as_ref().ok());
-        let gid = group.map(|g| g.gid.clone());
+        let gid = group.filter(|g| g.has_group()).map(|g| g.gid.clone());
         let footer = self.render_footer(group, cx);
         div().w_full().flex().flex_col().gap_3().child(header(gid, cx)).child(body).children(footer)
     }
 }
 
 impl Hangar {
-    /// Papéis do grupo da sessão aberta, num diálogo; as contas liberadas continuam em Configurações.
+    /// Time do trabalho da sessão aberta; as contas liberadas continuam em Configurações.
     pub(super) fn open_orq_roles(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let (Some(api), Some(key)) = (self.session_api(), self.selected_key()) else { return };
         let (runtime, hangar) = (self.runtime.clone(), cx.entity());

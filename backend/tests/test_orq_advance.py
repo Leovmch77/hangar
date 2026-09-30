@@ -35,6 +35,7 @@ if a[:1] == ["--new"]:
     side.mkdir(parents=True, exist_ok=True)
     (side / (a[1] + ".json")).write_text(json.dumps({
         "name": a[1], "provider": opt("--provider", "claude"),
+        "key": "fake-" + a[1],
         "model": os.environ.get("FAKE_BORN_MODEL") or opt("--model")}))
 """
 
@@ -126,6 +127,129 @@ def close(d, task, h):
     ts = datetime.now().astimezone().isoformat(timespec="seconds")
     with (d / "closed.jsonl").open("a") as f:
         f.write(json.dumps({"ts": ts, "task": task, "hash": h}) + "\n")
+
+
+def test_done_includes_closed_task_reviewer_before_execution_end(tmp_path):
+    d, _, _, e, _ = start(tmp_path)
+    started(e, tasks=(1,))
+    close(d, 1, "a")
+
+    assert dict(orq_mod().done(d)) == {
+        "ex1": "Task 1 closed", "rev1": "Task 1 closed",
+    }
+
+
+def test_done_preserves_reviewer_shared_with_open_task(tmp_path):
+    d, _, _, e, _ = start(tmp_path)
+    started(e, tasks=(1,))
+    run(e, "event", "task_inicio", "--task", "2", "--titulo", "t2",
+        "--executor", "ex2", "--par", "rev1")
+    close(d, 1, "a")
+
+    assert dict(orq_mod().done(d)) == {"ex1": "Task 1 closed"}
+
+
+def test_done_preserves_reopened_task_owners(tmp_path):
+    d, _, _, e, _ = start(tmp_path)
+    started(e, tasks=(1,))
+    close(d, 1, "a")
+    with (d / "eventos.jsonl").open("a") as f:
+        f.write(json.dumps({"ts": "2999-01-01T00:00:00+00:00", "tipo": "task_inicio",
+                            "task": 1, "executor": "ex1", "par": "rev1"}) + "\n")
+
+    assert orq_mod().done(d) == []
+
+
+def test_done_preserves_arbiter_and_subagent_after_close(tmp_path):
+    d, _, _, e, _ = start(tmp_path)
+    run(e, "event", "task_inicio", "--task", "1", "--titulo", "t1",
+        "--executor", "arb", "--par", "subagente")
+    close(d, 1, "a")
+
+    assert orq_mod().done(d) == []
+
+
+def test_done_keeps_replaced_reviewers_in_cleanup(tmp_path):
+    d, _, _, e, _ = start(tmp_path)
+    started(e, tasks=(1,))
+    run(e, "event", "sessao_trocada", "--de", "rev1", "--para", "rev1b")
+    close(d, 1, "a")
+
+    assert dict(orq_mod().done(d)) == {
+        "ex1": "Task 1 closed", "rev1b": "Task 1 closed", "rev1": "replaced by rev1b",
+    }
+
+
+def test_task_start_records_both_session_identities(tmp_path, monkeypatch):
+    d, _, _, _, _ = start(tmp_path)
+    m = orq_mod()
+    monkeypatch.setattr(m, "session_identity", lambda name: f"claude:key-{name}")
+
+    ev = m.event_append(d, {"tipo": "task_inicio", "task": 1, "titulo": "t1",
+                            "executor": "ex1", "par": "rev1"})
+
+    assert ev["session_identities"] == {"ex1": "claude:key-ex1", "rev1": "claude:key-rev1"}
+    assert events(d)[-1]["session_identities"] == ev["session_identities"]
+
+
+def test_session_swap_records_destination_identity(tmp_path, monkeypatch):
+    d, _, _, _, _ = start(tmp_path)
+    m = orq_mod()
+    monkeypatch.setattr(m, "session_identity", lambda name: f"claude:key-{name}")
+
+    ev = m.event_append(d, {"tipo": "sessao_trocada", "de": "arb", "para": "arb2"})
+
+    assert ev["session_identity"] == "claude:key-arb2"
+
+
+def test_identity_failure_records_problem_without_using_name(tmp_path, monkeypatch):
+    d, _, _, _, _ = start(tmp_path)
+    m = orq_mod()
+    def unavailable(name):
+        raise ValueError("missing")
+    monkeypatch.setattr(m, "session_identity", unavailable)
+
+    ev = m.event_append(d, {"tipo": "task_inicio", "task": 1, "titulo": "t1",
+                            "executor": "ex1", "par": "subagente"})
+
+    assert ev["session_identities"] == {}
+    assert "session identity unavailable: ex1: ValueError" in (d / "registro.md").read_text()
+    assert "session identity unavailable: subagente" not in (d / "registro.md").read_text()
+
+
+@pytest.mark.parametrize("swap", [False, True])
+def test_reinit_preserves_original_arbiter_identity(tmp_path, swap):
+    sidecars = tmp_path / ".hangar" / "claude-headless"
+    sidecars.mkdir(parents=True)
+    (sidecars / "arb.json").write_text(json.dumps({"key": "original"}))
+    (sidecars / "arb2.json").write_text(json.dumps({"key": "successor"}))
+    d, r, _, e, _ = start(tmp_path)
+    cfg = json.loads((d / "orq.json").read_text())
+    assert cfg["arbiter_identity"] == "claude:original"
+    if swap:
+        run(e, "event", "sessao_trocada", "--de", "arb", "--para", "arb2")
+    (sidecars / "arb.json").write_text(json.dumps({"key": "unrelated-new-session"}))
+
+    run(e, "init", "--arbiter", "arb", "--repo", str(r), "--contract", cfg["contract"],
+        "--plan", cfg["plan"], "--auto")
+
+    assert json.loads((d / "orq.json").read_text())["arbiter_identity"] == "claude:original"
+
+
+def test_reinit_does_not_bind_legacy_run_to_recreated_arbiter(tmp_path):
+    d, r, _, e, _ = start(tmp_path)
+    cfg = json.loads((d / "orq.json").read_text())
+    cfg.pop("arbiter_identity", None)
+    (d / "orq.json").write_text(json.dumps(cfg))
+    sidecars = tmp_path / ".hangar" / "claude-headless"
+    sidecars.mkdir(parents=True)
+    (sidecars / "arb.json").write_text(json.dumps({"key": "unrelated-new-session"}))
+
+    run(e, "init", "--arbiter", "arb", "--repo", str(r), "--contract", cfg["contract"],
+        "--plan", cfg["plan"], "--auto")
+
+    assert "arbiter_identity" not in json.loads((d / "orq.json").read_text())
+    assert "previous init has no recorded identity" in (d / "registro.md").read_text()
 
 
 def branch_commit(g, r, name, path, content):

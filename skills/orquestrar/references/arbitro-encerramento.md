@@ -51,14 +51,24 @@ Task, if any, is approved.
 
 1. Trigger: every code Task approved. Never "after Task N". A manual Task (asset upload, domain, third-party account) is not a code Task.
 2. Open a fresh session (recipe in `arbitro-lancamento.md`) that took part in nothing; never a subagent of yours (a per-Task reviewer may be a fresh subagent; this one may not).
-3. While the branch review works it is not in `orq ball`: `systemctl --user stop vigia-<gid>`, then the `systemd-run` of `arbitro-vigia.md`, "Arming", with `vigia.sh <branch-review session> <arbiter> -m 5 -d <durable dir>/registro.md` in place of `vigia.sh <arbiter> -e …`; wait for ARMED. Findings back as Tasks → the `-e` form while they run; the phase ends → stop it.
+3. Mantenha o vigia da execução com `-e` até a limpeza das sessões concluídas terminar.
+   Revisão final fora de `orq ball`: monitore-a pela forma avulsa de `arbitro-vigia.md`,
+   com outro nome de unidade e `vigia.sh <branch-review session> <arbiter> -m 5 -d
+   <durable dir>/registro.md`; espere ARMED. Pare apenas esse monitor quando a etapa terminar.
+   Não desarme a limpeza da execução na passagem de fase.
 4. Kick-off: the page pointer, `Role: branch review`, the range `<base>..<tip>`, the parallel paths to ignore, what is out of scope; which commits in the range the pipeline produced and which are foreign, and whether the foreign ones are reviewed or declared out of scope. A foreign commit that is the base of a Task gets a directed question.
 5. With the review open the tree freezes (per-Task rounds too; a docs-only commit earns a DEVOLVIDO). Must touch: announce first, with what; commit, never disk-only; send the new hash and what changed file by file; say what did not change, with the proof command `git diff --stat <hash-under-review> <new-hash> -- <code-dirs>` (empty = their work stands). "The file changed between two reads" → own it, give the new hash, freeze.
 6. Findings return to the normal cycle (`arbitro.md`, steps 2–5). A rejecting final review needs a live executor: open one — the code is theirs, never yours, not even for one line. Record the author of each round's code in the contract, not only the hash (`eventos.jsonl` keeps it in the `veredito`'s `sessao` field). The user asked you for code directly → the request ends, you return to the gate.
 7. Two final reviews in parallel: hold findings that overlap until both deliver, and tell each you are holding.
 8. Closing sentence to the user carries, beyond "approved": which commits in the range came from outside the pipeline; by which step (deploy, publish, install) the approved code reaches where they will use it. Push and MR are the user's.
 
-Done when the branch review approved, the closing sentence is sent, and the branch review, reviewer and executor sessions are closed.
+Após o parecer final, feche explicitamente a sessão de revisão final pelo nome efetivamente
+aberto, conferindo que não há trabalho/subagente em voo. Pares das Tasks são fechados pelo
+vigia: consulte `orq done` e a listagem viva. Candidato ausente está encerrado; presença ainda
+não é encerramento. Respeite proteção de grupo/identidade e registre falha de fechamento.
+
+Done when the branch review approved, the closing sentence is sent, and its session is closed;
+a limpeza restante segue ativa até o encerramento.
 
 ## The branch reopened after approval
 
@@ -67,9 +77,17 @@ Done when the branch review approved, the closing sentence is sent, and the bran
 
 ## Retrospective (phase 5)
 
-Fire the closing item on its trigger: the branch in the user's hands, nothing in flight. Open the fresh session by the recipe in `arbitro-lancamento.md`, on the `retrospectiva` row; the kick-off carries the lines the closing item lists. Watchdog: "Phase 4", step 3, with the retrospective session in place of the branch review; stop it when the phase ends.
+Fire the closing item on its trigger: the branch in the user's hands, nothing in flight. Open the fresh session by the recipe in `arbitro-lancamento.md`, on the `retrospectiva` row; the kick-off carries the lines the closing item lists. Monitor avulso: "Phase 4", passo 3, com a retrospectiva no lugar da revisão final; pare
+apenas esse monitor ao terminar. O vigia da execução permanece responsável pela limpeza.
 
-Done when the proposed patch exists at `~/.hangar/orq/<date>-<gid>.md`, `orq event execucao_fim --resultado <result>` is logged, the watchdog disarmed and the retrospective session closed.
+Feche explicitamente a sessão de retrospectiva concluída pelo nome aberto, sem trabalho
+em voo. Registre `orq event execucao_fim --resultado <result>` e consulte `orq done` e a
+listagem viva; mantenha o vigia até fechar os candidatos elegíveis. Não feche árbitro atual,
+sessão de Task aberta ou pessoa movida para outro grupo/identidade. Impedimento não resolvido
+fica registrado e comunicado; não declare todas fechadas nem desarme silenciosamente.
+
+Done when the patch exists at `~/.hangar/orq/<date>-<gid>.md`, execucao_fim is logged,
+a limpeza foi confirmada, os monitores desarmados e a retrospectiva fechada.
 
 ## Arbiter succession
 

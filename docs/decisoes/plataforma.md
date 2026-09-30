@@ -838,3 +838,48 @@ e execução `auto` nova com as quatro gravações.
 **Paridade.** Web e nativo têm a linha do tempo e a aba Orquestração; a folha Orquestração do
 web (celular e desktop estreito) ainda não existe no nativo, e o app Expo não tem nada disto. O
 estado de cada um está em `desktop-native/docs/chat-parity.md`.
+## Time da orquestração pertence ao trabalho atual
+
+Em 29/09/2026, a configuração do app antes do grupo lia `regras-padrao.md`; trocar conta/modelo
+preservava seus nomes. O planejador reproduziu os nomes globais no contrato cad3e6fe.
+Nove nomes distintos tinham prefixo de outro contexto: árbitro mais quatro executores e quatro
+revisores, contados nos eventos task_inicio T1–T4 e na identidade real do árbitro. Isso é um
+incidente, não nove execuções. O usuário pediu usar somente o time configurado para o trabalho.
+
+O editor e o LLM usam GET/POST `/api/sessions/{name}/orq`. Antes do grupo, o Markdown pertence
+à identidade atual; uma sessão recriada com o mesmo nome não importa configuração anterior.
+GET devolve `grouped`, `session_prefix` e `session_identity` para os clientes distinguirem
+rascunho/grupo e isolarem edições. A criação de grupo orq promove o registro do fundador;
+árbitro novo separado associa o registro de origem por POST `/orq/grupo` com gid e mtime.
+A origem passa a apontar ao mesmo contrato; há uma tabela editável, sem template global.
+Conflitos de versão/contrato respondem 409; edição externa não é sobrescrita pelo rollback.
+
+CLI e backend usam a mesma identidade stdlib: chave do cano ou vida do multiplexador.
+O script registra identidade do árbitro e dos papéis nos eventos, e a leitura de uma execução
+viva exige identidade compatível. Re-init não preenche identidade ausente de um registro
+legado pelo nome atual. Legado com pareamento real continua acessível; ausência de prova não
+autoriza atribuir outra sessão. Codex legado sem chave/pane usa a thread disponível, então
+seu rascunho pode mudar no /clear. Nomes novos são do contexto, escolhas existentes preservadas.
+
+## Fechamento das sessões concluídas na execução automática
+
+Na mesma data, `orq done` oferecia executor de Task fechada, porém só oferecia seu revisor
+quando a execução inteira acabava. Consulta somente leitura com a função corrigida sobre
+cad3e6fe passou a listar os revisores das Tasks 1–5 fechadas, incluindo os quatro nomes
+originais. Nenhuma sessão foi encerrada nesta conferência.
+
+O automático é `vigia.sh -e`: roda `orq advance --detach` e consulta `done` a cada ciclo.
+`advance` não fecha sessões diretamente. Agora `done` oferece executor e revisor concluídos;
+quem tem Task aberta e o árbitro atual ficam fora. O vigia mantém 600 s de inatividade,
+proteção de subagentes, servidor remoto e três falhas de fechamento com aviso. Confere grupo
+e identidade registrada antes de fechar; não alcança pessoa movida/recriada por nome antigo.
+
+As referências antes trocavam/desarmavam o vigia nas etapas finais, podendo deixar os últimos
+pares sem completar sua janela de limpeza. O vigia da execução permanece até os candidatos
+terem fechamento conferido. Revisão final/retrospectiva são fechadas explicitamente pelo nome
+aberto, após entregar e sem trabalho em voo; seus monitores avulsos não substituem a limpeza.
+
+Conferências desta alteração: revisão estática independente, sintaxe Python/Bash, diff e
+seleção readonly de candidatos reais. Regressões foram escritas, não executadas. Fluxos do
+app, compilação e fechamento real ainda não conferidos; mudanças estão na worktree
+`/home/jefferson/Projetos/hangar-orq-team-context`, não instaladas no serviço ativo.

@@ -358,13 +358,13 @@ deliver_alarm() {  # $1 = key (one per alarm), $2 = message, $3 = label for the 
 # Tasks' owners (`orq team`) in the arbiter's group. Every act is journaled, so the panel's feed
 # shows it; three failures on one session → an [aviso] and the watchdog stops trying it.
 CLOSE_IDLE_S=${CP_VIGIA_CLOSE_IDLE_S:-600}   # the smoke test lowers it; nobody else passes it
-declare -A IDLE_CYCLES=() FAILS=() GAVE_UP=()
+declare -A IDLE_CYCLES=() FAILS=() GAVE_UP=() CLOSE_GROUP_WARNED=() CLOSE_IDENTITY_WARNED=()
 warned_no_group=
 GROUP=$(mktemp /tmp/vigia-group-XXXXXX.py)
 LIVESUB=$(mktemp /tmp/vigia-livesub-XXXXXX.py)
 trap 'rm -f "$LEITOR" "$CURLRC" "$LOOPDET" "$CTXDET" "$ORQF" "$BEAT" "$GROUP" "$LIVESUB"' EXIT
 cat > "$LIVESUB" <<'PY'
-import json, re, sys, time
+import importlib.util, json, re, sys, time
 from datetime import datetime
 from pathlib import Path
 # stdin = /api/sessions, argv[1] = session. Prints "live" when its transcript has a background
@@ -376,7 +376,37 @@ from pathlib import Path
 # ponytail: only the current transcript is read, so a launch made before a /clear is not seen.
 FRESH_S = 1800
 name = sys.argv[1]
-s = next((s for s in json.load(sys.stdin) if s.get("name") == name), {})
+sessions = json.load(sys.stdin)
+s = next((s for s in sessions if s.get("name") == name), {})
+gid, identities = None, {}
+for line in (Path(sys.argv[2]) / "eventos.jsonl").read_text(encoding="utf-8").splitlines():
+    try:
+        event = json.loads(line)
+    except ValueError:
+        continue
+    if not isinstance(event, dict):
+        continue
+    if event.get("tipo") == "execucao_inicio":
+        gid = event.get("gid")
+    elif event.get("tipo") == "task_inicio" and isinstance(event.get("session_identities"), dict):
+        identities.update(event["session_identities"])
+    elif event.get("tipo") == "sessao_trocada" and event.get("session_identity"):
+        identities[event.get("para")] = event["session_identity"]
+# O nome nos eventos não autoriza fechar quem foi movido para outro trabalho.
+if s.get("pair_gid"):
+    if not gid:
+        gid = next((item.get("pair_gid") for item in sessions if item.get("name") == sys.argv[3]), None)
+    if s["pair_gid"] != gid:
+        print(f"other-group {s['pair_gid']}")
+        sys.exit()
+if identities.get(name):
+    path = Path(sys.argv[4]).resolve().parents[3] / "backend" / "app" / "orq_identity.py"
+    spec = importlib.util.spec_from_file_location("orq_session_identity", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    if mod.identity(name) != identities[name]:
+        print("other-identity")
+        sys.exit()
 jsonl = s.get("jsonl")
 if not jsonl and s.get("provider", "claude") != "claude":
     print("none")   # Pi/Kimi/omp: no Agent tool, and no jsonl in the listing
@@ -479,9 +509,25 @@ close_finished() {
     [ $(( ${IDLE_CYCLES[$name]} * INTERVALO )) -ge "$CLOSE_IDLE_S" ] || continue
     IDLE_CYCLES[$name]=0
     # A background subagent leaves its parent `idle`; closing would kill it.
-    if ! live=$(printf '%s' "$lista" | python3 "$LIVESUB" "$name" 2>&1); then
+    if ! live=$(printf '%s' "$lista" | python3 "$LIVESUB" "$name" "$ORQD" "$ARB" "$ORQ" 2>&1); then
       attempt_failed "close:$name" "close failed: $name: subagents check: $(tail -n1 <<< "$live" | cut -c1-200)"; continue
     fi
+    if [[ $live == other-group\ * ]]; then
+      if [ "${CLOSE_GROUP_WARNED[$name]:-}" != "$live" ]; then
+        CLOSE_GROUP_WARNED[$name]=$live
+        orq_warn "closure skipped: $name is in another group (${live#other-group }); the watchdog does not close another work's session"
+      fi
+      continue
+    fi
+    unset 'CLOSE_GROUP_WARNED[$name]'
+    if [ "$live" = other-identity ]; then
+      if [ -z "${CLOSE_IDENTITY_WARNED[$name]:-}" ]; then
+        CLOSE_IDENTITY_WARNED[$name]=1
+        orq_warn "closure skipped: $name no longer has the session identity recorded by this run"
+      fi
+      continue
+    fi
+    unset 'CLOSE_IDENTITY_WARNED[$name]'
     [ "$live" = none ] || continue
     # ?by=<arbiter>: the backend spares the arbiter the exit notice of a close it did not ask for.
     if err=$(curl -sS -f --config "$CURLRC" -X DELETE "$BASE/api/sessions/$name?by=$ARB" 2>&1 >/dev/null); then

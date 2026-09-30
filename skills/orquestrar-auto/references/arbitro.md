@@ -61,6 +61,11 @@ there.
 write each into the orchestration plan, stamp it again (`orq plan-check … --stamp`), then
 `orq advance` releases them.
 
+Antes de remover uma worktree, confirme que suas sessões concluídas foram fechadas;
+um processo vivo pode manter cwd/arquivos em uso. Não desarme o vigia na passagem às
+etapas finais: ele fecha executor e revisor de cada Task concluída após inatividade,
+com proteção de grupo, identidade e subagentes.
+
 Before `execucao_fim`, each Task worktree of the run (`git worktree list`, `<repo>-<gid>-t*`):
 trail check first — `grep -rl "<worktree path>" ~/.local/bin <agent config dirs> <service unit
 dir>` — then `git worktree remove <path>`. A hit in the trail → the user, not the remove. The
@@ -68,7 +73,8 @@ dir>` — then `git worktree remove <path>`. A hit in the trail → the user, no
 line.
 
 Done when the branch is in the user's hands, the retrospective delivered, no worktree of the run
-left, `orq event execucao_fim --resultado <result>` logged and the watchdog disarmed.
+left, `orq event execucao_fim --resultado <result>` logged, fechamento das sessões
+concluídas conferido e somente então o vigia desarmado.
 
 ## Succession
 

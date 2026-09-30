@@ -42,7 +42,7 @@ from app import filesearch, filetree, git_ops
 from app.file_response import file_response
 from app.filesearch import SearchError
 from app.filetree import FileError
-from app import orq, orq_conductor, orq_md, orq_papeis, orq_politica, orq_start, orq_timeline
+from app import orq, orq_conductor, orq_context, orq_md, orq_papeis, orq_politica, orq_start, orq_timeline
 from app import pi_catalog
 from app import cli_probe
 from app import pi_models
@@ -3972,6 +3972,8 @@ async def pair_session(name: str, body: PairBody):
         raise HTTPException(409, detail=erro("erro_pareamento_tarefa_existente",
                                              f"o grupo já tem tarefa: {e.existente!r} — repita com "
                                              f"--substituir-tarefa pra trocar", existente=e.existente))
+    except (orq_context.PromotionConflict, orq_md.Conflito) as e:
+        raise HTTPException(409, detail=erro("erro_orq_arquivo_mudou", str(e)))
     link = await asyncio.to_thread(lambda: PairLink(name).get() or {})
     task = link.get("task", body.task)
     # Só quem estava SOLTO recebe o protocolo; veterano não é acordado (consulta o grupo quando
@@ -4251,13 +4253,13 @@ class PapelBody(_StrictBody):
     mtime: float
 
 
-def _gid_de(name: str) -> str:
-    link = PairLink(name).get()
-    if link and link.get("gid"):
-        return link["gid"]
-    # Sem grupo, a tela edita o TIME PADRÃO (regras-padrao.md): é dali que o árbitro parte ao
-    # montar o próximo grupo — configurar antes de começar foi pedido do usuário (26/08/2026).
-    return orq_papeis.gid_por_sessao(name) or orq_papeis.GID_PADRAO
+def _context_de(name: str) -> orq_context.Context:
+    try:
+        return orq_context.resolve(name)
+    except orq_context.IdentityUnavailable as e:
+        raise HTTPException(409, detail=erro("erro_orq_celula_invalida", str(e)))
+    except (OSError, ValueError) as e:
+        raise HTTPException(409, detail=erro("erro_orq_arquivo_mudou", str(e)))
 
 
 def _papeis_de(gid: str) -> tuple[str, float, list[orq_papeis.Papel]]:
@@ -4265,17 +4267,26 @@ def _papeis_de(gid: str) -> tuple[str, float, list[orq_papeis.Papel]]:
     return texto, mtime, orq_papeis.ler(texto)
 
 
+def _orq_identity(name: str) -> str | None:
+    try:
+        return orq_context.identity(name)
+    except orq_context.IdentityUnavailable:
+        return None
+
+
 @app.get("/api/sessions/{name}/orq", dependencies=[Depends(require_auth)])
 async def orq_get(name: str):
-    gid = await asyncio.to_thread(_gid_de, name)
-    _texto, mtime, papeis = await asyncio.to_thread(_papeis_de, gid)
+    context = await asyncio.to_thread(_context_de, name)
+    _texto, mtime, papeis = await asyncio.to_thread(_papeis_de, context.gid)
     # A lista fresca do registry (sem git nem pane): `casar_viva` só precisa de nome + last_activity.
     infos = await asyncio.to_thread(registry.list)
     arbitro = next((p for p in papeis if p.e_arbitro()), None)
     cwd = next((s.cwd for s in infos if s.name == name), None)
-    pronto = await asyncio.to_thread(orq_start.readiness, cwd, gid != orq_papeis.GID_PADRAO, bool(papeis))
+    pronto = await asyncio.to_thread(orq_start.readiness, cwd, context.grouped, bool(papeis))
     return {
-        "gid": gid, "arquivo": str(orq_papeis.regras_path(gid)), "mtime": mtime, "prontidao": pronto,
+        "gid": context.gid, "grouped": context.grouped, "session_prefix": context.session_prefix,
+        "session_identity": await asyncio.to_thread(_orq_identity, name),
+        "arquivo": str(context.path), "mtime": mtime, "prontidao": pronto,
         "arbitro": orq_papeis.casar_viva(arbitro, infos) if arbitro else None,
         "papeis": [{**asdict(p), "viva": orq_papeis.casar_viva(p, infos),
                     "id_cota": orq_politica.id_cota(p.provider, p.conta)} for p in papeis],
@@ -4371,8 +4382,8 @@ async def _aplicar_papeis(name: str, itens: list[PapelItem], mtime_lido: float) 
     salvar um por vez descartava o resto sem aviso."""
     if not itens:
         raise HTTPException(400, detail=erro("erro_orq_celula_invalida", "nenhum papel"))
-    gid = await asyncio.to_thread(_gid_de, name)
-    texto, _mtime, papeis = await asyncio.to_thread(_papeis_de, gid)
+    context = await asyncio.to_thread(_context_de, name)
+    texto, _mtime, papeis = await asyncio.to_thread(_papeis_de, context.gid)
     novos: list[orq_papeis.Papel] = []
     try:
         for it in itens:
@@ -4403,7 +4414,7 @@ async def _aplicar_papeis(name: str, itens: list[PapelItem], mtime_lido: float) 
             # ao arquivo sem passar por ali.
             texto = orq_papeis.escrever_papel(texto, novo)
             novos.append(novo)
-        mtime = await asyncio.to_thread(orq_md.gravar, orq_papeis.regras_path(gid), texto, mtime_lido)
+        mtime = await asyncio.to_thread(orq_context.write, context, texto, mtime_lido)
     except ValueError as e:
         raise HTTPException(400, detail=erro("erro_orq_celula_invalida", str(e)))
     except orq_md.Conflito:
@@ -4423,6 +4434,28 @@ async def orq_papel_set(name: str, body: PapelBody):
 @app.post("/api/sessions/{name}/orq/papeis", dependencies=[Depends(require_auth)])
 async def orq_papeis_set(name: str, body: PapeisBody):
     return await _aplicar_papeis(name, body.papeis, body.mtime)
+
+
+class OrqGroupBody(_StrictBody):
+    gid: str
+    mtime: float
+
+
+@app.post("/api/sessions/{name}/orq/grupo", dependencies=[Depends(require_auth)])
+async def orq_group_set(name: str, body: OrqGroupBody):
+    """Associa o time da planejadora ao grupo real, inclusive com um árbitro novo."""
+    try:
+        context = await asyncio.to_thread(orq_context.associate, name, body.gid, body.mtime)
+    except orq_md.Conflito:
+        raise HTTPException(409, detail=erro("erro_orq_arquivo_mudou",
+                                             "o time mudou desde a leitura — recarregue"))
+    except ValueError as e:
+        raise HTTPException(409, detail=erro("erro_orq_celula_invalida", str(e)))
+    except OSError as e:
+        raise HTTPException(409, detail=erro("erro_orq_arquivo_mudou", str(e)))
+    return {"ok": True, "gid": context.gid, "grouped": context.grouped,
+            "session_prefix": context.session_prefix, "arquivo": str(context.path),
+            "mtime": (await asyncio.to_thread(orq_md.ler_arquivo, context.path))[1]}
 
 
 class ComecarBody(_StrictBody):
@@ -4452,9 +4485,9 @@ async def orq_comecar(name: str, body: ComecarBody):
 
 
 def _prontidao(name: str, cwd: str | None) -> tuple[str, dict]:
-    gid = _gid_de(name)
-    _texto, _mt, papeis = _papeis_de(gid)
-    return gid, orq_start.readiness(cwd, gid != orq_papeis.GID_PADRAO, bool(papeis))
+    context = _context_de(name)
+    _texto, _mt, papeis = _papeis_de(context.gid)
+    return context.gid, orq_start.readiness(cwd, context.grouped, bool(papeis))
 
 
 class RemoverPapelBody(_StrictBody):
@@ -4469,8 +4502,8 @@ async def orq_papel_del(name: str, body: RemoverPapelBody):
     avisa o árbitro — quem mexe na fila normalmente mexe em várias linhas seguidas, e o aviso sai
     uma vez no fim, pelo botão. A sessão viva daquele papel não é tocada: o contrato diz quem
     DEVE rodar, não mata quem está rodando."""
-    gid = await asyncio.to_thread(_gid_de, name)
-    texto, _mtime, papeis = await asyncio.to_thread(_papeis_de, gid)
+    context = await asyncio.to_thread(_context_de, name)
+    texto, _mtime, papeis = await asyncio.to_thread(_papeis_de, context.gid)
     alvo = next((p for p in papeis
                  if orq_md.normalizar(p.papel) == orq_md.normalizar(body.papel)
                  and orq_md.normalizar(p.vez) == orq_md.normalizar(body.vez)), None)
@@ -4480,7 +4513,7 @@ async def orq_papel_del(name: str, body: RemoverPapelBody):
     cab = orq_papeis.cabecalho_atual(texto) or orq_papeis.CABECALHO
     texto = orq_md.remover_linha(texto, cab, orq_papeis.chave_da_linha(cab, alvo.papel, alvo.vez))
     try:
-        mtime = await asyncio.to_thread(orq_md.gravar, orq_papeis.regras_path(gid), texto, body.mtime)
+        mtime = await asyncio.to_thread(orq_context.write, context, texto, body.mtime)
     except orq_md.Conflito:
         raise HTTPException(409, detail=erro("erro_orq_arquivo_mudou",
                                              "o contrato mudou desde a leitura — recarregue"))

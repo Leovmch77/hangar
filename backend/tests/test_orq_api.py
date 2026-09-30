@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi.testclient import TestClient
 
-from app import orq_papeis, orq_politica
+from app import orq_context, orq_papeis, orq_politica, pair
 from app.config import settings
 
 
@@ -26,8 +26,12 @@ def cli(monkeypatch, tmp_path):
     # lista as contas REAIS da máquina de quem roda o teste, e o caso passa ou falha conforme quem
     # tem qual conta instalada (verde aqui, vermelho no CI).
     monkeypatch.setattr(orq_politica, "inventario", lambda *a, **k: inv)
-    monkeypatch.setattr(api_mod, "PairLink", lambda name: SimpleNamespace(
-        get=lambda: {"peers": ["arb"], "gid": "g1"} if name in ("exec", "arb") else None))
+    links = lambda name: SimpleNamespace(
+        get=lambda: {"peers": ["arb"], "gid": "g1"} if name in ("exec", "arb") else None)
+    monkeypatch.setattr(api_mod, "PairLink", links)
+    monkeypatch.setattr(pair, "PairLink", links)
+    monkeypatch.setattr(orq_context, "active_gid", lambda name: None)
+    monkeypatch.setattr(orq_context, "identity", lambda name: "test-session:" + name)
     # `cwd` no stub porque o /orq/comecar procura o plano da PASTA da sessão.
     sessoes = [SimpleNamespace(name="arb", last_activity=1.0, cwd=str(tmp_path)),
                SimpleNamespace(name="exec", last_activity=2.0, cwd=str(tmp_path))]
@@ -68,9 +72,10 @@ def test_politica_put_e_get(cli, tmp_path):
 
 
 def test_papel_post_grava_sem_avisar_arbitro(cli, tmp_path):
-    # Sem grupo: a tela edita o time padrão (regras-padrao.md), sem árbitro pra avisar.
+    # Sem grupo: o registro pertence somente a esta sessão, sem time padrão.
     r = cli.get("/api/sessions/solta/orq", headers=H)
-    assert r.status_code == 200 and r.json()["gid"] == "padrao" and r.json()["papeis"] == []
+    assert r.status_code == 200 and r.json()["gid"].startswith("draft-") and r.json()["papeis"] == []
+    assert r.json()["grouped"] is False and r.json()["session_prefix"] == "solta"
     r = cli.get("/api/sessions/exec/orq", headers=H)
     assert r.status_code == 200 and r.json()["papeis"] == [] and r.json()["arbitro"] is None
     # política com tabela mas sem esta conta -> 400 (política VAZIA não proíbe; ver test_orq_politica)
@@ -104,6 +109,26 @@ def test_papel_post_grava_sem_avisar_arbitro(cli, tmp_path):
     r = cli.post("/api/sessions/exec/orq/papel", headers=H, json={
         "papel": "x|y", "provider": "claude", "conta": "200-01", "mtime": got["mtime"]})
     assert r.status_code == 400 and r.json()["detail"]["code"] == "erro_orq_celula_invalida"
+
+
+def test_pair_promotion_conflict_returns_409(cli, monkeypatch):
+    def conflict(*args, **kwargs):
+        raise orq_context.PromotionConflict("o time já pertence a outro grupo")
+
+    monkeypatch.setattr(pair, "join_group", conflict)
+    r = cli.post("/api/sessions/exec/pair", headers=H,
+                 json={"peers": ["arb"], "orq": True})
+    assert r.status_code == 409 and r.json()["detail"]["code"] == "erro_orq_arquivo_mudou"
+
+
+def test_actual_group_remains_readable_without_identity(cli, monkeypatch):
+    def unavailable(name):
+        raise orq_context.IdentityUnavailable("cannot read current process")
+
+    monkeypatch.setattr(orq_context, "identity", unavailable)
+    r = cli.get("/api/sessions/exec/orq", headers=H)
+    assert r.status_code == 200 and r.json()["grouped"] is True
+    assert r.json()["gid"] == "g1" and r.json()["session_identity"] is None
 
 
 def test_find_plan_ignora_exemplo_e_plano_terminado(tmp_path):

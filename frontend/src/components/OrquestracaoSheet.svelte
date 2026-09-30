@@ -1,5 +1,5 @@
 <script lang="ts">
-  // Modal "Orquestração": quem roda cada papel do grupo (aba Papéis, contrato `regras-<gid>.md`)
+  // Modal "Orquestração": quem roda cada papel deste trabalho (aba Papéis, contrato `regras-<gid>.md`)
   // e quais contas a máquina libera (aba Contas, `orquestracao-contas.md`). Mesmo desenho do
   // CreateSessionSheet: lista à esquerda, formulário à direita; no celular, lista → formulário.
   // Salvar um papel grava a tabela e manda recado ao árbitro — a sessão viva NUNCA é tocada.
@@ -15,6 +15,7 @@
   import { clienteQuery, motores, orqGrupo, orqPolitica } from '../lib/queries';
   import { quotaFeed } from '../lib/quotaFeed.svelte';
   import { segredos } from '../lib/segredos.svelte';
+  import { orqHasGroup, orqSessionPrefix } from '../lib/orq';
   import SessionOpeningFields from './SessionOpeningFields.svelte';
   import CodexContextControl from './CodexContextControl.svelte';
   import {
@@ -90,14 +91,9 @@
   const PAPEIS_CANONICOS = ['árbitro', 'executor', 'revisor', 'revisão final', 'par de research'];
   const papeisDisponiveis = $derived(PAPEIS_CANONICOS.filter((n) => !papeis.some((p) => p.papel.toLowerCase() === n)));
   let papelOutro = $state(false);
-  // O nome da sessão não é escolha do usuário: sai do prefixo do grupo (`trab-` do árbitro ou
-  // do primeiro papel) + sufixo por papel, no padrão que a skill já usa. Papel existente mantém o dele.
+  // Papéis novos recebem a identidade deste trabalho; nomes já configurados são preservados.
   const SUFIXO: Record<string, string> = { 'árbitro': 'arbitro', executor: 't*', revisor: 'review*', 'revisão final': 'final', 'par de research': 'mock' };
-  const prefixoGrupo = $derived.by(() => {
-    const base = papeis.find((p) => p.sessao)?.sessao ?? grupo?.arbitro ?? sessionName;
-    const i = base.lastIndexOf('-');
-    return i > 0 ? base.slice(0, i + 1) : base + '-';
-  });
+  const prefixoGrupo = $derived(orqSessionPrefix(grupo, sessionName));
   const sessaoDerivada = (papel: string) =>
     prefixoGrupo + (SUFIXO[papel.toLowerCase()] ?? papel.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') + '*');
   const contasDoProvider = $derived(politica ? contasLiberadas(politica.politica, politica.inventario, fProvider) : []);
@@ -164,6 +160,19 @@
   // NÃO descarta o que foi mudado: o usuário edita vários e salva tudo no fim, num recado só.
   type Rascunho = { papel: string; sessao: string; provider: Provider; conta: string; modelo: string; esforco: string; vez: string; janela: string } & AberturaPapel;
   let rascunhos = $state<Record<string, Rascunho>>({});
+  let draftContext = '';
+  $effect(() => {
+    if (!grupo) return;
+    const context = JSON.stringify([
+      ...orqGrupo(sessionName).queryKey,
+      grupo.session_identity ?? grupo.session_prefix ?? sessionName,
+    ]);
+    untrack(() => {
+      if (draftContext === context) return;
+      draftContext = context;
+      rascunhos = {}; sel = null;
+    });
+  });
   // Chave papel+vez: num papel que reveza, chavear só pelo nome faria o rascunho da 2ª conta
   // sobrescrever o da 1ª, e salvar mandaria uma linha só.
   const chaveDe = (i: number | 'novo') =>
@@ -587,7 +596,7 @@
 {/snippet}
 
 {#snippet listaPapeis()}
-  {#if grupo?.gid === 'padrao'}
+  {#if grupo && !orqHasGroup(grupo)}
     <p class="os-intro">{m.orqcfg_sem_grupo()}</p>
   {/if}
   {#if carregando && !grupo}
@@ -812,7 +821,7 @@
   {:else if isDesktop}
     <div class="os-split">
       <aside class="os-pane os-esq">
-        <h2 class="sheet-title">{m.orqcfg_titulo()}{#if grupo} <small class="os-gid">{m.orqcfg_sub_grupo({ gid: grupo.gid })}</small>{/if}</h2>
+        <h2 class="sheet-title">{m.orqcfg_titulo()}{#if grupo && orqHasGroup(grupo)} <small class="os-gid">{m.orqcfg_sub_grupo({ gid: grupo.gid })}</small>{/if}</h2>
         {@render abas()}
         {@render listaPapeis()}
         {@render barra()}

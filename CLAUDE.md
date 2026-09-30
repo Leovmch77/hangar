@@ -293,6 +293,11 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
 
 ### Plataforma — nomes, pareamento, planos, ditado → [`docs/decisoes/plataforma.md`](docs/decisoes/plataforma.md)
 
+- **Orquestração: um time por trabalho, editado pela tela ou pelo LLM.** Sem grupo usa
+  rascunho da identidade atual; não importa time padrão/contrato anterior. Ao lançar, associa
+  esse registro ao grupo por `/orq/grupo`, preservando escolhas. O vigia fecha executor e
+  revisor concluídos; desarmar somente após conferir a limpeza. Evidência em plataforma.md.
+
 - **O nome antigo (`claude-pocket`) só existe em ponte de compatibilidade.** Escreva com o nome
   novo; nunca leia o antigo em código novo. O que resta é migração, e ela nunca funde duas pastas.
 - **Comentário explica o PORQUÊ, e é curto.** Medição, versão de CLI e data envelhecem: num

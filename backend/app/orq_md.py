@@ -199,7 +199,9 @@ def trocar_secao(texto: str, titulo: str, corpo: str) -> str:
 def ler_arquivo(path: Path) -> tuple[str, float]:
     """(texto, mtime). Ausente = ('', 0.0) — o chamador decide se cria."""
     try:
-        return path.read_text(encoding="utf-8"), path.stat().st_mtime
+        # Texto e versão pertencem ao mesmo arquivo, mesmo havendo rename durante a leitura.
+        with path.open(encoding="utf-8") as f:
+            return f.read(), os.fstat(f.fileno()).st_mtime
     except FileNotFoundError:
         return "", 0.0
 
@@ -210,7 +212,7 @@ class Conflito(Exception):
 
 # ponytail: trava única do processo — conferir o mtime e gravar têm de ser um ato só, senão dois
 # pedidos (celular + desktop) que leram o mesmo mtime passam os dois e o segundo sobrescreve calado.
-_TRAVA = threading.Lock()
+_TRAVA = threading.RLock()
 
 
 def gravar(path: Path, texto: str, mtime_lido: float | None = None) -> float:

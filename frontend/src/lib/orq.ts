@@ -1,3 +1,14 @@
+import type { OrqGrupo } from '@hangar/core';
+
+export function orqHasGroup(group: OrqGrupo): boolean {
+	return group.grouped ?? (group.gid !== 'padrao' && !group.gid.startsWith('draft-'));
+}
+
+export function orqSessionPrefix(group: OrqGrupo | null, sessionName: string): string {
+	const prefix = group?.session_prefix?.trim() || sessionName;
+	return prefix.endsWith('-') ? prefix : `${prefix}-`;
+}
+
 export function duracaoLegivel(inicioIso: string | null, fimIso: string | null): string {
 	if (!inicioIso || !fimIso) return '';
 	const ms = new Date(fimIso).getTime() - new Date(inicioIso).getTime();
