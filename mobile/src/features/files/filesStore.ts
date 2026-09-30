@@ -1,7 +1,9 @@
 import { create } from 'zustand';
 import type { StoreApi, UseBoundStore } from 'zustand';
 import { listFiles, readFile, searchFiles, pathDiff, writeFile, discardFile } from '@hangar/core';
-import type { FileContent, FileSearchHit, PathDiff, TreeEntry } from '@hangar/core';
+import { fileKind } from '@hangar/core';
+import type { FileContent, FileSearchHit, PathDiff, Server, TreeEntry } from '@hangar/core';
+import { useServers } from '../../stores/servers';
 import * as m from '../../paraglide/messages';
 
 // limpa prefixo "409: " etc — mesmo que gitStore
@@ -60,7 +62,7 @@ export interface FilesApi {
   listaCortada: () => boolean;
 }
 
-function criarFilesStore(sessao: string): FilesApi {
+function criarFilesStore(serverId: string, sessao: string): FilesApi {
   const useStore = create<FilesState>(() => ({
     abertos: new Set<string>(),
     selecionado: null,
@@ -82,6 +84,11 @@ function criarFilesStore(sessao: string): FilesApi {
   let gErro = 0;
   let gResultados = -1;
   let refs = 0;
+
+  // Servidor da sessão, nunca o ativo: trocar de servidor com a folha aberta não desvia leitura nem gravação.
+  function destino(): Server | undefined {
+    return useServers.getState().servers.find((s) => s.id === serverId);
+  }
 
   function getS() {
     return useStore.getState();
@@ -114,10 +121,14 @@ function criarFilesStore(sessao: string): FilesApi {
   async function _listar(path: string, ge: number) {
     const g = (gLista.get(path) ?? 0) + 1;
     gLista.set(path, g);
-    const st = getS();
     if (path === '' && ge === gErro) setS({ erro: null });
+    const srv = destino();
+    if (!srv) {
+      if (ge === gErro) setS({ erro: m.chat_servidor_removido() });
+      return;
+    }
     try {
-      const r = await listFiles(sessao, path || undefined, getS().soModificados);
+      const r = await listFiles(sessao, path || undefined, getS().soModificados, srv);
       if (g !== gLista.get(path)) return;
       const np = new Map(getS().porPasta);
       const nc = new Map(getS().cortePorPasta);
@@ -170,12 +181,23 @@ function criarFilesStore(sessao: string): FilesApi {
     const gr = gResultados;
     const gb = gBusca;
     const podePodar = gb === gr;
-    const [c, d] = await Promise.allSettled([readFile(sessao, path), pathDiff(sessao, path, getS().escopo)]);
+    const srv = destino();
+    if (!srv) {
+      setS({ loading: false, conteudo: null, diff: null, selecionado: null, erro: m.chat_servidor_removido() });
+      return;
+    }
+    const [c, d] = await Promise.allSettled([readFile(sessao, path, srv), pathDiff(sessao, path, getS().escopo, srv)]);
     if (g !== gArquivo) return;
     setS({ loading: false });
     if (c.status === 'rejected') {
-      setS({ conteudo: null, diff: null, selecionado: null });
       const status = (c.reason as Error & { status?: number })?.status;
+      // PDF/imagem não têm texto (415): o leitor mostra pela rota de arquivo, que serve o binário.
+      const kind = fileKind(path);
+      if (status === 415 && (kind === 'pdf' || kind === 'image')) {
+        setS({ conteudo: null, diff: d.status === 'fulfilled' ? d.value : null });
+        return;
+      }
+      setS({ conteudo: null, diff: null, selecionado: null });
       if (status === 404) {
         const pai = path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '';
         _invalidarSubarvore(pai);
@@ -200,8 +222,13 @@ function criarFilesStore(sessao: string): FilesApi {
     setS({ erro: null });
     const g = ++gBusca;
     const ge = ++gErro;
+    const srv = destino();
+    if (!srv) {
+      setS({ erro: m.chat_servidor_removido() });
+      return;
+    }
     try {
-      const r = await searchFiles(sessao, q, mode);
+      const r = await searchFiles(sessao, q, mode, srv);
       if (g !== gBusca) return;
       setS({ resultados: r.hits, buscaCortada: r.truncated });
       gResultados = g;
@@ -212,31 +239,41 @@ function criarFilesStore(sessao: string): FilesApi {
 
   async function salvar(path: string, texto: string): Promise<string | null> {
     const atual = getS().conteudo;
-    if (!atual || atual.path !== path) return 'erro_arq_inexistente';
+    if (!atual || atual.path !== path) return m.erro_arq_inexistente();
+    const srv = destino();
+    if (!srv) return m.chat_servidor_removido();
     try {
-      const r = await writeFile(sessao, path, texto, atual.digest);
+      const r = await writeFile(sessao, path, texto, atual.digest, srv);
       if (getS().conteudo?.path === path) {
         setS({ conteudo: { ...getS().conteudo!, text: texto, size: r.size, digest: r.digest } });
       }
       void recarregarDiff(path);
       return null;
     } catch (e) {
-      return (e as Error)?.message || 'erro_arq_salvar_falhou';
+      return (e instanceof Error && e.message ? cleanErr(e) : '') || m.erro_arq_salvar_falhou();
     }
   }
 
   async function recarregarDiff(path: string) {
+    const g = gArquivo;
+    const srv = destino();
+    if (!srv) return;
     try {
-      const d = await pathDiff(sessao, path, getS().escopo);
-      if (getS().selecionado === path) setS({ diff: d });
+      const d = await pathDiff(sessao, path, getS().escopo, srv);
+      if (g === gArquivo && getS().selecionado === path) setS({ diff: d });
     } catch {
       // diff em enfeite — falha silenciosa
     }
   }
 
   async function descartar(path: string) {
+    const srv = destino();
+    if (!srv) {
+      setS({ erro: m.chat_servidor_removido() });
+      throw new Error(m.chat_servidor_removido());
+    }
     try {
-      await discardFile(sessao, path);
+      await discardFile(sessao, path, srv);
       await recarregarInterno();
       // se o arquivo descartado estava aberto, reabre para atualizar diff/conteúdo
       if (getS().selecionado === path) {
@@ -294,6 +331,8 @@ function criarFilesStore(sessao: string): FilesApi {
       gArquivo++;
       gBusca++;
       gErro++;
+      // leitura em voo foi descartada acima: sem isto a próxima abertura da folha fica em "carregando"
+      if (getS().loading) setS({ loading: false, selecionado: null });
     },
     listar,
     abrir,
@@ -321,7 +360,7 @@ export function filesStore(serverId: string, name: string): FilesApi {
   const chave = `${serverId}::${name}`;
   let api = filesRegistry.get(chave);
   if (!api) {
-    api = criarFilesStore(name);
+    api = criarFilesStore(serverId, name);
     filesRegistry.set(chave, api);
   }
   return api;

@@ -6094,5 +6094,6 @@
   "composer_submission_sending": "Waiting for send confirmation. Your text is still saved.",
   "composer_submission_rejected": "The message was rejected. You can recover it without removing your new edits.",
   "composer_submission_recover_first": "Recover the rejected message before sending different text.",
-  "composer_submission_check": "Check conversation"
+  "composer_submission_check": "Check conversation",
+  "arq_pdf_sem_leitor": "Android can't show PDFs inside the app. Open this file from your computer."
 }

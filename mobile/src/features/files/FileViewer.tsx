@@ -1,9 +1,9 @@
 import { useEffect, useState } from 'react';
-import { ActivityIndicator, Pressable, Text, View, ScrollView } from 'react-native';
+import { ActivityIndicator, Platform, Pressable, Text, View, ScrollView } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { WebView } from 'react-native-webview';
-import type { FileContent, PathDiff } from '@hangar/core';
-import { fileUrlNative, fileAuthHeader, mensagemDeErro } from '@hangar/core';
+import type { FileContent, PathDiff, Server } from '@hangar/core';
+import { fileKind, fileUrlNative, fileAuthHeader, mensagemDeErro } from '@hangar/core';
 import * as m from '../../paraglide/messages';
 import { EditDiff } from '../../chat/tools/EditDiff';
 
@@ -17,14 +17,10 @@ interface Props {
   onEscopo: (e: 'branch' | 'nao_commitado') => void;
   onEditar: () => void;
   name: string; // sessão name para fileUrl
+  server?: Server;
 }
 
-function isHtmlPdf(path: string) {
-  const low = path.toLowerCase();
-  return low.endsWith('.html') || low.endsWith('.htm') || low.endsWith('.pdf');
-}
-
-export function FileViewer({ path, conteudo, diff, loading, erro, escopo, onEscopo, onEditar, name }: Props) {
+export function FileViewer({ path, conteudo, diff, loading, erro, escopo, onEscopo, onEditar, name, server }: Props) {
   const { theme } = useUnistyles();
   const [verArquivo, setVerArquivo] = useState(false);
   const [webErro, setWebErro] = useState<string | null>(null);
@@ -40,12 +36,27 @@ export function FileViewer({ path, conteudo, diff, loading, erro, escopo, onEsco
   useEffect(() => {
     setWebErro(null);
     setWebCarregando(true);
-  }, [path, name]);
+  }, [path, name, server?.id]);
 
-  if (isHtmlPdf(path) && doArquivo) {
-    const uri = fileUrlNative(name, path);
-    const headers = fileAuthHeader();
-    const semToken = Object.keys(headers).length === 0;
+  const kind = fileKind(path);
+  // PDF/imagem chegam sem texto (o backend recusa binário no /files/read); HTML precisa da leitura ok.
+  const documento = (kind === 'html' && !!doArquivo) || ((kind === 'pdf' || kind === 'image') && !doArquivo && !loading && !erro);
+
+  if (documento && kind === 'pdf' && Platform.OS === 'android') {
+    // O WebView do Android não desenha PDF: sem este aviso a área fica em branco.
+    return (
+      <View style={styles.root}>
+        <Text style={[styles.aviso, { color: theme.tokens.text.muted }]} accessibilityRole="alert">
+          {m.arq_pdf_sem_leitor()}
+        </Text>
+      </View>
+    );
+  }
+
+  if (documento) {
+    const uri = fileUrlNative(name, path, server);
+    const headers = fileAuthHeader(server);
+    const semToken = server ? !server.token : Object.keys(headers).length === 0;
     if (semToken) {
       return (
         <View style={styles.root}>

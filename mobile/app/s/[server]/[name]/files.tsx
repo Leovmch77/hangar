@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { ActivityIndicator, Pressable, Text, View } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
-import { useLocalSearchParams } from 'expo-router';
+import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useServers } from '../../../../src/stores/servers';
 import { filesStore, entriesOf, listaCortadaOf } from '../../../../src/features/files/filesStore';
 import { FileTree } from '../../../../src/features/files/FileTree';
@@ -37,36 +37,26 @@ export default function FilesSheet() {
   const [editando, setEditando] = useState(false);
   const [qBusca, setQBusca] = useState('');
   const [modoBusca, setModoBusca] = useState<'names' | 'contents'>('names');
+  const router = useRouter();
   const ready = useServers((s) => s.ready);
-  const [servidorSumiu, setServidorSumiu] = useState(false);
+  // A folha fala com o servidor da sessão (o store resolve pelo id); o servidor ativo não muda aqui.
+  const servidor = useServers((s) => s.servers.find((x) => x.id === serverId));
+  const servidorSumiu = ready && !servidor;
 
   useEffect(() => {
-    if (!ready) return;
-    if (!useServers.getState().ensureActive(serverId)) {
-      setServidorSumiu(true);
-      return;
-    }
-    setServidorSumiu(false);
+    if (!ready || servidorSumiu) return;
     api.retain();
     return () => api.release();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ready, serverId, sessionName]);
+  }, [ready, servidorSumiu, serverId, sessionName]);
 
+  // abrir direto via ?path= — espera a lista de servidores carregar (cold deep-link)
   useEffect(() => {
-    if (!ready) return;
-    const existe = useServers.getState().servers.some((s) => s.id === serverId);
-    if (!existe) setServidorSumiu(true);
-  }, [ready, serverId]);
-
-  // abrir direto via ?path= — espera ready/servidor (cold deep-link) para não chamar active()=null
-  useEffect(() => {
-    if (!ready) return;
-    if (!pathParam) return;
-    if (servidorSumiu) return;
-    if (!useServers.getState().ensureActive(serverId)) return;
+    if (!ready || servidorSumiu || !pathParam) return;
     void api.abrir(pathParam);
     setAba('arquivo');
-  }, [ready, pathParam, serverId, servidorSumiu]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ready, pathParam, serverId, sessionName, servidorSumiu]);
 
   // quando seleciona arquivo, vai para aba arquivo
   useEffect(() => {
@@ -100,7 +90,7 @@ export default function FilesSheet() {
   };
 
   const handleSalvar = async (texto: string): Promise<string | null> => {
-    if (!selecionado) return 'erro_arq_inexistente';
+    if (!selecionado) return m.erro_arq_inexistente();
     const r = await api.salvar(selecionado, texto);
     return r;
   };
@@ -120,12 +110,7 @@ export default function FilesSheet() {
         <Text style={[styles.erro, { color: theme.tokens.status.error }]} accessibilityRole="alert">
           {m.arq_sessao_encerrada()}
         </Text>
-        <Pressable
-          onPress={() => {
-            // volta — o chamador decide; sem rota ativa, não há onde recarregar
-          }}
-          accessibilityRole="button"
-        >
+        <Pressable onPress={() => router.back()} accessibilityRole="button">
           <Text style={{ color: theme.tokens.accent.base, fontSize: 12 }}>{m.comum_voltar()}</Text>
         </Pressable>
       </View>
@@ -183,6 +168,7 @@ export default function FilesSheet() {
             onEscopo={(e) => void api.trocarEscopo(e)}
             onEditar={() => setEditando(true)}
             name={sessionName}
+            server={servidor}
           />
         ) : erro ? (
           <View style={styles.center}>

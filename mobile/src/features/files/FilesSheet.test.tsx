@@ -75,6 +75,7 @@ const mocks = vi.hoisted(() => {
 
 vi.mock('expo-router', () => ({
   useLocalSearchParams: () => ({ server: 'server-1', name: 'fixture-files', path: 'README.md' }),
+  useRouter: () => ({ back: vi.fn() }),
 }));
 vi.mock('../../stores/servers', () => ({ useServers: mocks.useServers }));
 vi.mock('./filesStore', () => ({
@@ -129,6 +130,8 @@ describe('FilesSheet — deep-link', () => {
     expect(mocks.api.retain).toHaveBeenCalledTimes(1);
     expect(mocks.api.abrir).toHaveBeenCalledWith('README.md');
     expect(container.textContent).not.toContain('Nada mudou');
+    // abrir arquivo de outra máquina não troca o servidor ativo
+    expect(mocks.useServers.getState().ensureActive).not.toHaveBeenCalled();
 
     mocks.setFileState({ selecionado: null, erro: 'erro_arq_inexistente' });
     await act(async () => {
@@ -136,6 +139,21 @@ describe('FilesSheet — deep-link', () => {
     });
     expect(container.textContent).toContain('erro_arq_inexistente');
 
+    root.unmount();
+  });
+
+  it('servidor fora da lista mostra aviso e não abre nada', async () => {
+    mocks.state.servers.length = 0;
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    await act(async () => {
+      mocks.setReady(true);
+      root.render(React.createElement(FilesSheet));
+    });
+    expect(container.textContent).toContain('Sessão encerrada');
+    expect(mocks.api.retain).not.toHaveBeenCalled();
+    expect(mocks.api.abrir).not.toHaveBeenCalled();
     root.unmount();
   });
 });
