@@ -1094,6 +1094,33 @@ _CONFIRM_GRACE_KIMI = 30.0
 # hooks de UserPromptSubmit, que com plugins passam de 8s; o prazo cobre isso e ainda termina em
 # `desistiu` visível quando a entrega morreu de verdade (processo caiu logo após a escrita).
 _CONFIRM_GRACE_HEADLESS = 60.0
+# Cada checagem relê o transcript inteiro (MBs). Um prompt parado na fila interna da TUI durante um
+# turno longo reagendava a cada `grace` pelo turno todo; espaça até este teto.
+_CONFIRM_WORKING_MAX = 120.0
+
+# Uma checagem pendente por sessão: send, fim de turno e a própria checagem agendavam cada um o seu
+# Timer, e as cadeias se somavam (dezenas de Timers relendo o mesmo arquivo).
+_confirm_lock = threading.Lock()
+_confirm_pend: dict[str, tuple[threading.Timer, float]] = {}
+_confirm_working_streak: dict[str, int] = {}
+
+
+def _agendar_confirmacao(name: str, delay: float) -> None:
+    """Agenda `_confirm_and_drain(name)`; se já há uma pendente que roda antes, ela basta. Uma
+    pendente mais tardia é trocada: o prazo mais curto (fim de turno, send novo) não espera o espaçado."""
+    due = time.monotonic() + delay
+    with _confirm_lock:
+        atual = _confirm_pend.get(name)
+        if atual is not None:
+            timer, quando = atual
+            if callable(getattr(timer, "is_alive", None)) and timer.is_alive():
+                if quando <= due:
+                    return
+                timer.cancel()
+        timer = threading.Timer(delay, _confirm_and_drain, args=(name,))
+        timer.daemon = True
+        _confirm_pend[name] = (timer, due)
+    timer.start()
 # Kimi: de quanto em quanto tempo reavaliar um "idle" que o transcript desmentiu. Nao ha evento pra
 # esperar (o fim de turno real grava idle sobre idle e nao gera transicao), entao a saida e reolhar.
 # 5s: a sessao demora isso pra aparecer parada, e enquanto o turno anda o custo e um getmtime.
@@ -1159,6 +1186,10 @@ def _confirm_and_drain(name: str) -> None:
     """Confirmacao de entrega: delivered=True so diz 'send_keys chamado' — a TUI pode ter engolido
     as teclas e a msg sumia com cara de entregue. Confere contra o transcript; engolida ->
     re-enfileira (reconcile) e re-drena. Best-effort, roda em Timer/thread."""
+    with _confirm_lock:
+        atual = _confirm_pend.get(name)
+        if atual is not None and atual[0] is threading.current_thread():
+            del _confirm_pend[name]
     try:
         q = PromptQueue(name)
         if not any(r.get("delivered") is True and not r.get("confirmed") for r in q.load()):
@@ -1271,9 +1302,15 @@ def _confirm_and_drain(name: str) -> None:
         # curto a unica checagem caia cedo demais e a entrada ficava sem confirmar E sem desistir —
         # presa ate a proxima mensagem do usuario, ou pra sempre se nao houvesse proxima. O laco
         # termina sozinho: passado o prazo, toda linha vira `confirmed` ou `desistiu`.
+        working = bool(m and m[0] == "working")
+        streak = _confirm_working_streak.get(name, 0) + 1 if working else 0
+        _confirm_working_streak[name] = streak
         if any(r.get("delivered") is True and not r.get("confirmed") and not r.get("desistiu")
                for r in q.load()):
-            threading.Timer(grace + 0.5, _confirm_and_drain, args=(name,)).start()
+            delay = grace + 0.5
+            if streak > 1:
+                delay = max(delay, min(delay * 2 ** (streak - 1), _CONFIRM_WORKING_MAX))
+            _agendar_confirmacao(name, delay)
     except Exception:
         # LOGA, nao `pass` mudo: isto roda num Timer, entao ninguem ve a excecao — e o que mora
         # aqui e a confirmacao de entrega. Falhando calado, a msg do usuario fica sem confirmar pra
@@ -1284,7 +1321,7 @@ def _confirm_and_drain(name: str) -> None:
 # Sem terminal, quem entrega a fila é o drain do adapter (fim de turno, initialize), fora do /input:
 # sem este gatilho nenhuma confirmação era agendada e a entrega que morreu com o processo sumia.
 get_adapter(CLAUDE_HEADLESS).apos_entrega = (
-    lambda name: threading.Timer(_CONFIRM_GRACE_HEADLESS + 0.5, _confirm_and_drain, args=(name,)).start())
+    lambda name: _agendar_confirmacao(name, _CONFIRM_GRACE_HEADLESS + 0.5))
 
 
 def _maybe_chain(name: str) -> None:
@@ -1448,8 +1485,7 @@ def _on_hook_transition(session_id: str, state: str) -> None:
                 # Confirmacao em TODO idle (nao so pos-drain): Timers pendentes morrem no restart
                 # do backend — sem isto, entrada entregue ficava sem confirmar indefinidamente.
                 if sent or real == "idle":
-                    threading.Timer(_CONFIRM_GRACE + 0.5, _confirm_and_drain,
-                                    args=(info.name,)).start()
+                    _agendar_confirmacao(info.name, _CONFIRM_GRACE + 0.5)
                 # Loop runner: no idle, se ha loop ativo e o drain NAO acabou de digitar algo
                 # (sent == 0 -> este idle e fim de turno de trabalho, nao o eco do goal/re-prompt),
                 # tica o loop. Loop ativo SUPRIME o chain (senao cada idle entre iteracoes dispararia).
@@ -3519,7 +3555,7 @@ def _send_one(name: str, text: str, track_entry: bool = False) -> dict:
         except OSError:
             _log.exception("atualizar fila apos envio falhou name=%s", name)
         if result == "sent":
-            threading.Timer(_CONFIRM_GRACE + 0.5, _confirm_and_drain, args=(name,)).start()
+            _agendar_confirmacao(name, _CONFIRM_GRACE + 0.5)
         else:
             threading.Thread(target=_drain_session, args=(name,), daemon=True).start()
     else:
@@ -3545,7 +3581,7 @@ def _send_one(name: str, text: str, track_entry: bool = False) -> dict:
             _log.exception("append na fila falhou (prompt ja digitado) name=%s", name)
         if result == "sent":
             # Confirmacao de entrega: em ~8s confere se o transcript gravou; engolida -> re-drena.
-            threading.Timer(_CONFIRM_GRACE + 0.5, _confirm_and_drain, args=(name,)).start()
+            _agendar_confirmacao(name, _CONFIRM_GRACE + 0.5)
         else:
             # Kick: fecha a corrida append-depois-da-transicao — se o estado virou entregavel entre
             # o "deferred" do send_prompt e o append acima, o gatilho daquele ciclo nao viu esta
