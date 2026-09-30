@@ -80,6 +80,7 @@ from app.config import (list_config_dirs, ConfigDirInfo, _backend_config_base, s
 from app import runtime_config
 from app import share_api, share_guest_api, share_store
 from app.share_guest_api import guest_safe
+from app.guest_user_gate import GuestUserGate
 from app.share_gate import ShareGate, guest_of
 from app.share_life import session_life
 from app import tts
@@ -576,6 +577,7 @@ async def _correlaciona_diag(request: Request, call_next):
 # Porteiro da porta do convidado ANTES do CORS: o CORS o envolve, entao ate o 403/410 dele sai com
 # Access-Control-Allow-Origin e o app do convidado le o codigo em vez de "erro de rede".
 app.add_middleware(ShareGate)
+app.add_middleware(GuestUserGate)
 # Body-size ANTES do CORS no codigo -> CORS fica por FORA (envolve ate o 413, adicionando headers CORS
 # na rejeicao). Ver _BodySizeLimitMiddleware.
 app.add_middleware(_BodySizeLimitMiddleware, max_bytes=MAX_BYTES)

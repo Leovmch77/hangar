@@ -2687,6 +2687,7 @@
   "erro_tts_sem_cache": "áudio não está mais em cache",
   "erro_nao_autorizado": "não autorizado",
   "erro_fora_do_convite": "fora da sessão compartilhada",
+  "erro_fora_do_convidado": "fora do acesso do convidado",
   "erro_convite_encerrado": "o compartilhamento desta sessão foi encerrado",
   "erro_convite_usado": "este convite já foi usado",
   "erro_convite_vencido": "este convite venceu",

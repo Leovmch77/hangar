@@ -2687,6 +2687,7 @@
   "erro_tts_sem_cache": "audio is no longer cached",
   "erro_nao_autorizado": "unauthorized",
   "erro_fora_do_convite": "outside the shared session",
+  "erro_fora_do_convidado": "outside the guest's access",
   "erro_convite_encerrado": "sharing of this session has ended",
   "erro_convite_usado": "this invite has already been used",
   "erro_convite_vencido": "this invite has expired",

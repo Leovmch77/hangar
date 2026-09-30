@@ -113,8 +113,9 @@ def reset_backoff() -> None:
 
 def require_auth(request: Request) -> None:
     # Import tardio: share_gate puxa store/tmux, e auth é importado cedo por quase tudo.
+    from app import guest_users
     from app.share_gate import guest_of
-    if guest_of(request) is not None:
+    if guest_of(request) is not None or guest_users.current.get() is not None:
         return
     auth = request.headers.get("Authorization", "")
     if auth.startswith("Bearer "):
