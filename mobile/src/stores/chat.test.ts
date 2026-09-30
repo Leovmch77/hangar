@@ -1,7 +1,7 @@
 import { describe, test, expect, vi, beforeEach, afterEach } from 'vitest';
 import { configureApi, configureDiag } from '@hangar/core';
 import type { ChatEvent } from '@hangar/core';
-import { chatStore, _resetChatsForTests, filaCount } from './chat';
+import { chatStore, _resetChatsForTests, filaCount, setChatsForeground } from './chat';
 const servidores = vi.hoisted(() => ({
   lista: [] as { id: string; label: string; baseUrl: string; token: string }[],
 }));
@@ -561,5 +561,183 @@ describe('send vai ao servidor da conversa', () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response('{"detail":"x"}', { status: 404 })));
     const err = await chatStore('srv1', 'sess').send('oi').catch((e: unknown) => e);
     expect((err as { status?: number }).status).toBe(404);
+  });
+});
+
+type Pedido = {
+  url: string;
+  init?: RequestInit;
+  responder: (body: ChatEvent[] | null, opts?: { status?: number; etag?: string }) => void;
+};
+
+// fetch que só responde quando o teste manda: permite resposta atrasada chegar fora de ordem.
+function fetchManual(): Pedido[] {
+  const pedidos: Pedido[] = [];
+  vi.stubGlobal(
+    'fetch',
+    vi.fn((url: string, init?: RequestInit) => new Promise<Response>((res) => {
+      pedidos.push({
+        url: String(url),
+        init,
+        responder: (body, { status = 200, etag } = {}) => res(new Response(
+          body === null ? null : JSON.stringify(body),
+          { status, headers: etag ? { ETag: etag } : {} },
+        )),
+      });
+    })),
+  );
+  return pedidos;
+}
+
+describe('primeiro plano', () => {
+  test('fundo fecha stream e timers sem perder conversa; volta sincroniza uma vez sem duplicar', async () => {
+    const pedidos = fetchManual();
+    const chat = chatStore('srv1', 'sess');
+    chat.retain();
+    pedidos[0].responder([ev({ id: 'a:1' }), ev({ id: 'a:2', kind: 'assistant_msg', text: 'olá' })]);
+    await tick();
+    created[0].trigger('message', JSON.stringify(ev({ id: 'a:3', kind: 'assistant_msg', text: 'três' })), 'a:3');
+    const pergunta = { questions: [{ header: 'H', question: 'Q?', multiSelect: false, options: [{ label: 'A' }] }] };
+    created[0].trigger('ask_question', JSON.stringify(pergunta));
+    created[0].fail(); // backoff agendado: o fundo precisa desarmá-lo
+
+    chat.setForeground(false);
+    expect(created[0].close).toHaveBeenCalled();
+    await new Promise((r) => setTimeout(r, 3_100));
+    expect(created).toHaveLength(1);
+    expect(pedidos).toHaveLength(1);
+    const s = chat.use.getState();
+    expect(s.events.map((e) => e.id)).toEqual(['a:1', 'a:2', 'a:3']);
+    expect(s.askOpen).toBe(true);
+
+    chat.setForeground(true);
+    chat.setForeground(true); // volta repetida não abre segunda leitura
+    expect(pedidos).toHaveLength(2);
+    expect(pedidos[1].url).toContain('10.0.0.1:8765/api/sessions/sess/history?limit=400');
+    pedidos[1].responder([ev({ id: 'a:2', kind: 'assistant_msg', text: 'olá' }),
+      ev({ id: 'a:3', kind: 'assistant_msg', text: 'três' }), ev({ id: 'a:4', kind: 'assistant_msg', text: 'quatro' })],
+    { etag: '"v1"' });
+    await tick();
+    expect(chat.use.getState().events.map((e) => e.id)).toEqual(['a:1', 'a:2', 'a:3', 'a:4']);
+    expect(chat.use.getState().askOpen).toBe(true);
+    expect(created).toHaveLength(2);
+    expect(created[1].url).toContain('last_event_id=a%3A3');
+
+    // A próxima volta pergunta pelo ETag guardado; 304 não mexe na lista.
+    chat.setForeground(false);
+    chat.setForeground(true);
+    expect(new Headers(pedidos[2].init?.headers).get('If-None-Match')).toBe('"v1"');
+    pedidos[2].responder(null, { status: 304 });
+    await tick();
+    expect(chat.use.getState().events.map((e) => e.id)).toEqual(['a:1', 'a:2', 'a:3', 'a:4']);
+    expect(created).toHaveLength(3);
+    chat.release();
+  });
+
+  test('consulta antiga não sobrescreve a geração atual', async () => {
+    const pedidos = fetchManual();
+    const chat = chatStore('srv1', 'sess');
+    chat.retain();
+    pedidos[0].responder([ev({ id: 'b:1' }), ev({ id: 'b:2' })]);
+    await tick();
+    chat.loadOlder();
+    chat.setForeground(false);
+    chat.setForeground(true);
+    chat.setForeground(false);
+    chat.setForeground(true);
+    expect(pedidos).toHaveLength(4);
+    pedidos[3].responder([ev({ id: 'b:2' }), ev({ id: 'b:3' })]);
+    await tick();
+    // Respostas velhas chegando depois (sem costura trocaria a lista inteira).
+    pedidos[2].responder([ev({ id: 'velho:9' })]);
+    pedidos[1].responder([ev({ id: 'velho:0' }), ev({ id: 'b:1' })]);
+    await tick();
+    const s = chat.use.getState();
+    expect(s.events.map((e) => e.id)).toEqual(['b:1', 'b:2', 'b:3']);
+    expect(s.olderFailed).toBe('');
+    expect(created).toHaveLength(2);
+    chat.release();
+  });
+
+  test('cauda sem costura e nova entrada abrem o stream sem o cursor antigo', async () => {
+    const pedidos = fetchManual();
+    const chat = chatStore('srv1', 'sess');
+    chat.retain();
+    pedidos[0].responder([ev({ id: 'x:1' })]);
+    await tick();
+    created[0].trigger('message', JSON.stringify(ev({ id: 'x:1' })), 'x:1');
+    chat.setForeground(false);
+    chat.setForeground(true);
+    pedidos[1].responder([ev({ id: 'y:9' })]);
+    await tick();
+    expect(chat.use.getState().events.map((e) => e.id)).toEqual(['y:9']);
+    expect(created.at(-1)!.url).not.toContain('last_event_id');
+
+    created.at(-1)!.trigger('message', JSON.stringify(ev({ id: 'y:9' })), 'y:9');
+    chat.release();
+    chat.retain();
+    pedidos[2].responder([ev({ id: 'y:9' })]);
+    await tick();
+    expect(created.at(-1)!.url).not.toContain('last_event_id');
+    chat.release();
+  });
+
+  test('store novo respeita o fundo e só conecta com consumidor na volta', async () => {
+    historyResponses = [[ev({ id: 'c:1' })]];
+    setChatsForeground(false);
+    const semConsumidor = chatStore('srv1', 'livre');
+    const chat = chatStore('srv1', 'sess');
+    chat.retain();
+    await tick();
+    expect(historyCalls).toBe(0);
+    expect(created).toHaveLength(0);
+
+    setChatsForeground(true);
+    await tick();
+    expect(historyCalls).toBe(1);
+    expect(created).toHaveLength(1);
+    expect(created[0].url).toContain('/api/sessions/sess/events');
+    expect(chat.use.getState().events.map((e) => e.id)).toEqual(['c:1']);
+    expect(semConsumidor.use.getState().loading).toBe(true);
+    chat.release();
+  });
+
+  test('primeira carga cortada pelo fundo recarrega inteira na volta', async () => {
+    const pedidos = fetchManual();
+    const chat = chatStore('srv1', 'sess');
+    chat.retain();
+    chat.setForeground(false);
+    pedidos[0].responder([ev({ id: 'tarde:1' })]);
+    await tick();
+    expect(chat.use.getState().events).toEqual([]);
+    chat.setForeground(true);
+    expect(pedidos[1].url).toContain('/history?limit=400');
+    expect(new Headers(pedidos[1].init?.headers).get('If-None-Match')).toBeNull();
+    pedidos[1].responder([ev({ id: 'd:1' })]);
+    await tick();
+    expect(chat.use.getState().events.map((e) => e.id)).toEqual(['d:1']);
+    expect(chat.use.getState().loading).toBe(false);
+    chat.release();
+  });
+
+  test('envio em voo sobrevive ao fundo e segue ao servidor da conversa', async () => {
+    const pedidos = fetchManual();
+    const chat = chatStore('srv2', 'sess');
+    chat.retain();
+    expect(pedidos[0].url).toContain('10.0.0.2:8765/api/sessions/sess/history');
+    pedidos[0].responder([]);
+    await tick();
+    expect(created[0].url).toContain('10.0.0.2:8765/api/sessions/sess/events');
+
+    const envio = chat.send('oi');
+    chat.setForeground(false);
+    const post = pedidos[1];
+    expect(post.url).toContain('10.0.0.2:8765/api/sessions/sess/input');
+    expect(post.init?.signal?.aborted ?? false).toBe(false);
+    expect(chat.use.getState().pending.map((p) => p.text)).toEqual(['oi']);
+    post.responder([]);
+    await envio;
+    expect(chat.use.getState().pending.map((p) => p.text)).toEqual(['oi']);
+    chat.release();
   });
 });
