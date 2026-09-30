@@ -13,11 +13,20 @@ vi.mock('@hangar/core', async () => {
   };
 });
 
+const servidores = vi.hoisted(() => ({
+  lista: [] as Array<{ id: string; label: string; baseUrl: string; token: string }>,
+}));
+vi.mock('../../stores/servers', () => ({
+  useServers: { getState: () => ({ servers: servidores.lista }) },
+}));
+
 import { filesStore, _resetFilesForTests } from './filesStore';
 import * as core from '@hangar/core';
 
 const sessao = 'sess-test';
 const serverId = 'srv1';
+const srv1 = { id: 'srv1', label: 'Casa', baseUrl: 'http://casa:8765', token: 't1' };
+const srv2 = { id: 'srv2', label: 'Trabalho', baseUrl: 'http://trab:8765', token: 't2' };
 
 function apis() {
   return filesStore(serverId, sessao);
@@ -26,6 +35,7 @@ function apis() {
 beforeEach(() => {
   _resetFilesForTests();
   vi.clearAllMocks();
+  servidores.lista = [srv2, srv1];
   // default mocks: list empty, diff empty
   vi.mocked(core.listFiles).mockResolvedValue({ entries: [], truncated: false });
   vi.mocked(core.pathDiff).mockResolvedValue({
@@ -103,10 +113,10 @@ describe('filesStore', () => {
     expect(err).toBeNull();
     expect(api.use.getState().conteudo?.text).toBe('new');
     expect(api.use.getState().conteudo?.digest).toBe('d-new');
-    expect(writeFile).toHaveBeenCalledWith(sessao, 'a.txt', 'new', 'd-old');
+    expect(writeFile).toHaveBeenCalledWith(sessao, 'a.txt', 'new', 'd-old', srv1);
     // espera o void recarregarDiff(path) — é fire-and-forget, precisa tick
     await new Promise((r) => setTimeout(r, 20));
-    expect(pathDiffMock).toHaveBeenLastCalledWith(sessao, 'a.txt', 'branch');
+    expect(pathDiffMock).toHaveBeenLastCalledWith(sessao, 'a.txt', 'branch', srv1);
     expect(api.use.getState().diff?.diff).toBe('diffnew');
   });
 
@@ -119,9 +129,58 @@ describe('filesStore', () => {
     vi.mocked(core.writeFile).mockRejectedValue(new Error('409: erro_arq_mudou_no_disco'));
 
     const msg = await api.salvar('a.txt', 'new');
-    expect(msg).toContain('erro_arq_mudou_no_disco');
-    // mantém old
+    expect(msg).toBe('erro_arq_mudou_no_disco');
+    // mantém old — e o digest da leitura, que a próxima tentativa precisa mandar
     expect(api.use.getState().conteudo?.text).toBe('old');
+    expect(api.use.getState().conteudo?.digest).toBe('d-old');
+  });
+
+  it('lê e grava no servidor da sessão, não no primeiro da lista', async () => {
+    vi.mocked(core.readFile).mockResolvedValue({ path: 'a.txt', text: 'x', size: 1, truncated: false, digest: 'd' } as never);
+    const api = apis();
+    await api.abrir('a.txt');
+    await api.buscar('a', 'names');
+    expect(core.readFile).toHaveBeenCalledWith(sessao, 'a.txt', srv1);
+    expect(core.searchFiles).toHaveBeenCalledWith(sessao, 'a', 'names', srv1);
+  });
+
+  it('servidor removido vira erro legível, sem chamar a API', async () => {
+    servidores.lista = [srv2];
+    const api = apis();
+    await api.abrir('a.txt');
+    expect(core.readFile).not.toHaveBeenCalled();
+    expect(api.use.getState().loading).toBe(false);
+    expect(api.use.getState().selecionado).toBeNull();
+    expect(api.use.getState().erro).toBeTruthy();
+  });
+
+  it('PDF recusado como binário (415) continua selecionado para o leitor, sem erro', async () => {
+    vi.mocked(core.readFile).mockRejectedValue(Object.assign(new Error('415: binário'), { status: 415 }));
+    const api = apis();
+    await api.abrir('docs/manual.pdf');
+    expect(api.use.getState().selecionado).toBe('docs/manual.pdf');
+    expect(api.use.getState().conteudo).toBeNull();
+    expect(api.use.getState().erro).toBeNull();
+  });
+
+  it('binário que não é documento mostra a causa', async () => {
+    vi.mocked(core.readFile).mockRejectedValue(Object.assign(new Error('415: Arquivo binário'), { status: 415 }));
+    const api = apis();
+    await api.abrir('bin/app.so');
+    expect(api.use.getState().selecionado).toBeNull();
+    expect(api.use.getState().erro).toBe('Arquivo binário');
+  });
+
+  it('fechar a folha com leitura em voo não deixa a próxima abertura em carregando', async () => {
+    vi.mocked(core.readFile).mockReturnValue(new Promise(() => {}));
+    const api = apis();
+    api.retain();
+    void api.abrir('a.txt');
+    await Promise.resolve();
+    expect(api.use.getState().loading).toBe(true);
+    api.release();
+    expect(api.use.getState().loading).toBe(false);
+    expect(api.use.getState().selecionado).toBeNull();
   });
 
   it('404 ao abrir remove hit dos resultados quando busca gravada ainda é a mesma', async () => {
