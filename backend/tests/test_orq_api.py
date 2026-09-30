@@ -33,8 +33,8 @@ def cli(monkeypatch, tmp_path):
     monkeypatch.setattr(orq_context, "active_gid", lambda name: None)
     monkeypatch.setattr(orq_context, "identity", lambda name: "test-session:" + name)
     # `cwd` no stub porque o /orq/comecar procura o plano da PASTA da sessão.
-    sessoes = [SimpleNamespace(name="arb", last_activity=1.0, cwd=str(tmp_path)),
-               SimpleNamespace(name="exec", last_activity=2.0, cwd=str(tmp_path))]
+    sessoes = [SimpleNamespace(name="arb", provider="claude", last_activity=1.0, cwd=str(tmp_path)),
+               SimpleNamespace(name="exec", provider="claude", last_activity=2.0, cwd=str(tmp_path))]
     monkeypatch.setattr(api_mod.registry, "list", lambda: sessoes)
     enviados = []
     monkeypatch.setattr(api_mod, "_send_one", lambda n, t: (enviados.append((n, t)) or {"ok": True, "delivered": True}))
