@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { act, createElement, StrictMode, type ReactNode } from 'react';
+import { act, createElement, StrictMode, useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -16,6 +16,10 @@ const calls = vi.hoisted(() => ({
   resume: vi.fn(),
   replace: vi.fn(),
   alert: vi.fn(),
+  dismiss: null as null | (() => void),
+  pickerActive: 0,
+  pickerPeak: 0,
+  pickerHistory: [] as number[],
 }));
 const server = { id: 'server-b', label: 'Servidor B', baseUrl: 'https://b.local', token: 'token-b' };
 
@@ -29,7 +33,47 @@ vi.mock('react-native', async (original) => ({
     onInput: (event: { currentTarget: { value: string } }) => props.onChangeText?.(event.currentTarget.value),
   }),
 }));
-vi.mock('../../ui/Sheet', () => ({ Sheet: ({ open, children }: { open?: boolean; children: ReactNode }) => open ? createElement('div', null, children) : null }));
+vi.mock('react-native-keyboard-controller', () => ({ KeyboardAvoidingView: ({ children }: { children: ReactNode }) => createElement('div', null, children) }));
+vi.mock('../../ui/Sheet', () => ({ Sheet: ({ open = false, children, onDismiss }: { open?: boolean; children: ReactNode; onDismiss?: () => void }) => {
+  const [retained, setRetained] = useState(open);
+  const callback = useRef(onDismiss);
+  const pending = useRef<null | (() => void)>(null);
+  callback.current = onDismiss;
+  const queueDismiss = useCallback(() => {
+    if (pending.current) return;
+    const dismiss = () => {
+      pending.current = null;
+      if (calls.dismiss === dismiss) calls.dismiss = null;
+      setRetained(false);
+      callback.current?.();
+    };
+    pending.current = dismiss;
+    calls.dismiss = dismiss;
+  }, []);
+  useEffect(() => {
+    if (open) setRetained(true);
+    else if (retained) queueDismiss();
+  }, [open, retained, queueDismiss]);
+  useEffect(() => () => {
+    if (calls.dismiss === pending.current) calls.dismiss = null;
+    pending.current = null;
+  }, []);
+  return open || retained ? createElement('div', { 'data-testid': 'options-sheet', 'data-open': String(open) },
+    children, createElement('button', { onClick: queueDismiss }, 'fechar-folha'),
+  ) : null;
+} }));
+vi.mock('./CwdPicker', async (original) => {
+  const { CwdPicker } = await original<typeof import('./CwdPicker')>();
+  return { CwdPicker: (props: Parameters<typeof CwdPicker>[0]) => {
+    useEffect(() => {
+      calls.pickerActive++;
+      calls.pickerPeak = Math.max(calls.pickerPeak, calls.pickerActive);
+      calls.pickerHistory.push(calls.pickerActive);
+      return () => { calls.pickerActive--; calls.pickerHistory.push(calls.pickerActive); };
+    }, []);
+    return createElement('div', { 'data-testid': 'cwd-picker' }, createElement(CwdPicker, props));
+  } };
+});
 vi.mock('../../stores/servers', () => ({
   useServers: Object.assign(
     (selector: (state: { active: () => typeof server; servers: typeof server[] }) => unknown) => selector({ active: () => calls.target ?? server, servers: [server] }),
@@ -77,7 +121,7 @@ vi.mock('../../paraglide/messages', () => ({
   criar_subagente_ajuda: () => 'criar_subagente_ajuda',
   composer_esforco: () => 'composer_esforco', composer_modelo: () => 'composer_modelo',
   comum_carregando: () => 'comum_carregando', comum_conta_claude: () => 'comum_conta_claude',
-  comum_motor: () => 'comum_motor', comum_nome: () => 'comum_nome', comum_provider: () => 'comum_provider',
+  comum_motor: () => 'comum_motor', comum_nome: () => 'comum_nome', comum_provider: () => 'comum_provider', nova_conversa_opcoes_fechar: () => 'nova_conversa_opcoes_fechar',
   contas_nao_conectada: () => 'contas_nao_conectada', cota_conta_parada: () => 'cota_conta_parada',
   cota_precisa_entrar: () => 'cota_precisa_entrar', cota_sem_cota: () => 'cota_sem_cota',
   criar_abre_padrao: ({ erro }: { erro: string }) => `criar_abre_padrao:${erro}`, criar_avancado: () => 'criar_avancado',
@@ -105,6 +149,7 @@ vi.mock('../../paraglide/messages', () => ({
   nova_conversa_reenviar: () => 'nova_conversa_reenviar', nova_conversa_conferir: () => 'nova_conversa_conferir',
   nova_conversa_adotar: () => 'nova_conversa_adotar', nova_conversa_descartar: () => 'nova_conversa_descartar',
   nova_conversa_nome_automatico: () => 'nova_conversa_nome_automatico',
+  nova_conversa_retomada_selecionada: () => 'nova_conversa_retomada_selecionada',
   nova_conversa_criacao_incerta: () => 'nova_conversa_criacao_incerta', nova_conversa_envio_incerto: () => 'nova_conversa_envio_incerto',
   nova_conversa_salvar_erro: () => 'nova_conversa_salvar_erro', nova_conversa_servidor_ausente: () => 'nova_conversa_servidor_ausente',
   nova_conversa_resultado_salvar_erro: () => 'nova_conversa_resultado_salvar_erro',
@@ -127,6 +172,10 @@ function deferred<T>() {
 describe('CreateSessionSheet Codex', () => {
   afterEach(() => vi.useRealTimers());
   beforeEach(() => {
+    calls.dismiss = null;
+    calls.pickerActive = 0;
+    calls.pickerPeak = 0;
+    calls.pickerHistory = [];
     calls.target = null;
     calls.save.mockReset();
     calls.roots.mockReset().mockResolvedValue([{ name: 'Repo', path: '/repo' }]);
@@ -163,6 +212,11 @@ describe('CreateSessionSheet Codex', () => {
     for (let i = 0; i < 4; i++) await act(async () => Promise.resolve());
   }
 
+  async function flushDismiss() {
+    expect(calls.dismiss).toBeTruthy();
+    await act(async () => calls.dismiss!());
+  }
+
   async function renderSheet(strict = false) {
     const container = document.createElement('div');
     const root = createRoot(container);
@@ -174,12 +228,165 @@ describe('CreateSessionSheet Codex', () => {
     return { container, root };
   }
 
-  it('escolhe a primeira raiz utilizável e grava só depois do scan', async () => {
-    calls.roots.mockResolvedValue([{ name: 'Missing', path: '/missing' }, { name: 'Repo', path: '/repo' }]);
-    calls.scan.mockImplementation(async (_server, _root, path) => path === '/missing' ? { entries: [], error: 'not_found' } : { entries: [] });
-    const { container, root } = await renderSheet();
+  it('abre os resumos e conserva destino, seleções e texto ao fechar a folha', async () => {
+    calls.accounts.mockResolvedValue([defaultAccount, connected]);
+    calls.models.mockResolvedValue({ models: [{ id: 'sol', name: 'Sol', efforts: ['low', 'high'] }], reduced: false });
+    const container = document.createElement('div'); const root = createRoot(container);
+    await act(async () => root.render(createElement(CreateSessionSheet)));
+    await act(async () => type(container, 'primeira mensagem'));
     expect(container.textContent).toContain('/repo');
+    await act(async () => button(container, 'Servidor B · /repo')!.click());
+    calls.scan.mockResolvedValue({ entries: [{ name: 'Child', path: '/repo/child', is_git: true, has_claude_md: false }] });
+    await act(async () => button(container, 'criar_outra_pasta')!.click());
+    await act(async () => button(container, 'Repo')!.click());
+    await act(async () => [...container.querySelectorAll('button')].find((button) => button.textContent?.includes('Child'))!.click());
+    await act(async () => button(container, 'fechar-folha')!.click());
+    await flushDismiss();
+    await act(async () => button(container, 'Claude · criar_padrao')!.click());
+    await act(async () => button(container, 'Codex')!.click());
+    await act(async () => button(container, 'Trabalho')!.click());
+    await act(async () => button(container, 'Sol')!.click());
+    await act(async () => button(container, 'high')!.click());
+    await act(async () => button(container, 'fechar-folha')!.click());
+    await flushDismiss();
+    expect(container.textContent).toContain('Servidor B · /repo/child');
+    expect(container.textContent).toContain('Codex · Sol · high');
+    expect((container.querySelector('textarea[aria-label="nova_conversa_placeholder"]') as HTMLTextAreaElement).value).toBe('primeira mensagem');
+    await act(async () => button(container, 'nova_conversa_enviar')!.click());
+    for (let i = 0; i < 4; i++) await act(async () => Promise.resolve());
+    expect(calls.create).toHaveBeenCalledWith(server, expect.objectContaining({
+      cwd: '/repo/child', provider: 'codex', codex_account: 'work', model: 'sol', effort: 'high',
+    }));
+    expect(calls.create).toHaveBeenCalledTimes(1);
+    expect(calls.send).toHaveBeenCalledWith(server, 'nova', 'primeira mensagem');
+    expect(calls.send).toHaveBeenCalledTimes(1);
+    expect(calls.replace).toHaveBeenCalledWith('/s/server-b/nova');
+    root.unmount();
+  });
+
+  it('autoseleciona a primeira raiz utilizável sem abrir a folha e grava só depois do scan', async () => {
+    const roots = deferred<{ name: string; path: string }[]>();
+    const scan = deferred<{ entries: [] }>();
+    calls.roots.mockReturnValue(roots.promise);
+    calls.scan.mockImplementation(async (_server, _root, path) => path === '/missing' ? { entries: [], error: 'not_found' } : scan.promise);
+    const container = document.createElement('div'); const root = createRoot(container);
+    await act(async () => root.render(createElement(CreateSessionSheet)));
+    await act(async () => type(container, 'primeira mensagem'));
+    expect(container.querySelector('[data-testid="options-sheet"]')).toBeNull();
+    expect(calls.pickerActive).toBe(1);
+    expect(container.textContent).toContain('carregando');
+    expect(button(container, 'nova_conversa_enviar')!.disabled).toBe(true);
+    await act(async () => roots.resolve([{ name: 'Missing', path: '/missing' }, { name: 'Repo', path: '/repo' }]));
+    expect(calls.scan).toHaveBeenCalledWith(server, '/missing', '/missing', expect.any(AbortSignal));
+    expect(calls.scan).toHaveBeenCalledWith(server, '/repo', '/repo', expect.any(AbortSignal));
+    expect(localStorage.getItem('create.project.v1:server-b')).toBeNull();
+    await act(async () => scan.resolve({ entries: [] }));
+    expect(button(container, 'Servidor B · /repo')).toBeTruthy();
+    expect((container.querySelector('textarea[aria-label="nova_conversa_placeholder"]') as HTMLTextAreaElement).value).toBe('primeira mensagem');
+    expect(button(container, 'nova_conversa_enviar')!.disabled).toBe(false);
     expect(localStorage.getItem('create.project.v1:server-b')).toBe('{"root":"/repo","cwd":"/repo"}');
+    expect(calls.create).not.toHaveBeenCalled();
+    expect(calls.send).not.toHaveBeenCalled();
+    expect(calls.pickerPeak).toBe(1);
+    expect(calls.pickerActive).toBe(0);
+    root.unmount();
+  });
+
+  it.each([
+    ['gesto', false], ['controlado', false], ['gesto', true], ['controlado', true],
+  ] as const)('fecha por %s com picked=%s sem dois pickers durante callback tardio', async (closing, picked) => {
+    if (!picked) calls.roots.mockReturnValue(new Promise(() => {}));
+    const container = document.createElement('div'); const root = createRoot(container);
+    await act(async () => root.render(createElement(CreateSessionSheet)));
+    await act(async () => type(container, 'texto conservado'));
+    expect(calls.pickerActive).toBe(picked ? 0 : 1);
+    const initialSignal = calls.roots.mock.calls[0][1] as AbortSignal;
+    if (!picked) expect(initialSignal.aborted).toBe(false);
+    await act(async () => button(container, 'nova_conversa_opcoes')!.click());
+    const sheet = container.querySelector('[data-testid="options-sheet"]')!;
+    expect(sheet).toBeTruthy();
+    expect(sheet.querySelectorAll('[data-testid="cwd-picker"]').length).toBe(picked ? 0 : 1);
+    const sheetSignal = !picked ? calls.roots.mock.calls.at(-1)![1] as AbortSignal : null;
+    if (sheetSignal) {
+      expect(initialSignal.aborted).toBe(true);
+      expect(sheetSignal.aborted).toBe(false);
+    }
+    if (picked) expect(button(container, 'criar_outra_pasta')).toBeTruthy();
+    await act(async () => button(container, closing === 'gesto' ? 'fechar-folha' : 'nova_conversa_opcoes_fechar')!.click());
+    expect(calls.dismiss).toBeTruthy();
+    expect(container.querySelector('[data-testid="options-sheet"]')).toBe(sheet);
+    expect(sheet.getAttribute('data-open')).toBe(closing === 'gesto' ? 'true' : 'false');
+    expect(calls.pickerActive).toBe(picked ? 0 : 1);
+    expect(calls.pickerPeak).toBe(1);
+    if (sheetSignal) expect(sheetSignal.aborted).toBe(closing === 'controlado');
+    if (closing === 'controlado') {
+      expect(sheet.querySelector('[data-testid="cwd-picker"]')).toBeNull();
+      expect(button(sheet as HTMLElement, 'criar_outra_pasta')).toBeUndefined();
+      if (picked) expect(button(container, 'Servidor B · /repo')).toBeTruthy();
+      else expect(container.querySelectorAll('[data-testid="cwd-picker"]').length).toBe(1);
+    } else if (!picked) {
+      expect(sheet.querySelector('[data-testid="cwd-picker"]')).toBeTruthy();
+    }
+    await flushDismiss();
+    expect(container.querySelector('[data-testid="options-sheet"]')).toBeNull();
+    expect(calls.pickerActive).toBe(picked ? 0 : 1);
+    if (sheetSignal) expect(sheetSignal.aborted).toBe(true);
+    expect(calls.pickerHistory.every((active) => active <= 1)).toBe(true);
+    expect((container.querySelector('textarea[aria-label="nova_conversa_placeholder"]') as HTMLTextAreaElement).value).toBe('texto conservado');
+    expect(calls.create).not.toHaveBeenCalled();
+    expect(calls.send).not.toHaveBeenCalled();
+    root.unmount();
+    expect(calls.pickerActive).toBe(0);
+    expect(calls.dismiss).toBeNull();
+  });
+
+  it.each(['raizes', 'scan', 'preferencia', 'catalogo', 'modelos'] as const)('mantém erro de %s e texto editável no principal fechado sem POST', async (failure) => {
+    const message = failure === 'raizes' ? '401: unauthorized'
+      : failure === 'scan' ? 'sem_permissao'
+      : failure === 'preferencia' ? 'projeto_indisponivel'
+      : failure === 'catalogo' ? 'catalogo_recusado' : 'modelos_recusados';
+    if (failure === 'raizes') calls.roots.mockRejectedValue(new Error(message));
+    if (failure === 'scan') calls.scan.mockResolvedValue({ entries: [], error: 'permission_denied' });
+    if (failure === 'preferencia') {
+      localStorage.setItem('create.project.v1:server-b', '{"root":"/repo","cwd":"/repo/deleted"}');
+      calls.scan.mockResolvedValue({ entries: [], error: 'not_found' });
+    }
+    if (failure === 'catalogo' || failure === 'modelos') {
+      calls.scan.mockReturnValue(new Promise(() => {}));
+      if (failure === 'catalogo') calls.configs.mockRejectedValue(new Error(message));
+      else calls.models.mockRejectedValue(new Error(message));
+    }
+    const container = document.createElement('div'); const root = createRoot(container);
+    await act(async () => root.render(createElement(CreateSessionSheet)));
+    await act(async () => type(container, 'antes da folha'));
+    expect(container.textContent).toContain(message);
+    expect(container.querySelector('[data-testid="options-sheet"]')).toBeNull();
+    await act(async () => button(container, 'nova_conversa_opcoes')!.click());
+    await act(async () => button(container, 'nova_conversa_opcoes_fechar')!.click());
+    await flushDismiss();
+    await act(async () => type(container, 'depois da folha'));
+    expect(container.textContent).toContain(message);
+    expect((container.querySelector('textarea[aria-label="nova_conversa_placeholder"]') as HTMLTextAreaElement).value).toBe('depois da folha');
+    expect(button(container, 'nova_conversa_enviar')!.disabled).toBe(true);
+    await act(async () => button(container, 'nova_conversa_enviar')!.click());
+    expect(calls.create).not.toHaveBeenCalled();
+    expect(calls.send).not.toHaveBeenCalled();
+    root.unmount();
+  });
+
+  it('mantém erro da conta no principal após gesto tardio e bloqueia envio sem apagar texto', async () => {
+    calls.accounts.mockRejectedValue(new Error('conta_recusada'));
+    const { container, root } = await renderSheet();
+    await act(async () => type(container, 'texto da conta'));
+    await act(async () => button(container, 'fechar-folha')!.click());
+    await flushDismiss();
+    expect(container.textContent).toContain('conta_recusada');
+    expect(button(container, 'Servidor B · /repo')).toBeTruthy();
+    await act(async () => type(container, 'texto corrigido'));
+    expect((container.querySelector('textarea[aria-label="nova_conversa_placeholder"]') as HTMLTextAreaElement).value).toBe('texto corrigido');
+    expect(button(container, 'nova_conversa_enviar')!.disabled).toBe(true);
+    expect(calls.create).not.toHaveBeenCalled();
+    expect(calls.send).not.toHaveBeenCalled();
     root.unmount();
   });
 

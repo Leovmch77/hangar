@@ -6090,6 +6090,8 @@
   "nova_conversa_adotar": "Usar esta conversa",
   "nova_conversa_descartar": "Descartar tentativa",
   "nova_conversa_nome_automatico": "Em branco, o nome sai da pasta com um código curto.",
+  "nova_conversa_retomada_selecionada": "Retomada selecionada. Abra Opções para continuar a conversa arquivada.",
+  "nova_conversa_opcoes_fechar": "Fechar opções",
   "draft_read_error": "Não foi possível ler o rascunho neste aparelho. Tente novamente; o conteúdo guardado não foi apagado.",
   "draft_invalid": "O rascunho guardado neste aparelho está em formato inválido e não pôde ser restaurado.",
   "draft_write_error": "Não foi possível guardar o rascunho neste aparelho. Mantenha a conversa aberta para não perder o texto.",
