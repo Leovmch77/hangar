@@ -103,6 +103,14 @@ it('selo do Jev sem probabilidade não termina em separador solto', async () => 
   expect(text.startsWith('Jev')).toBe(true);
 });
 
+it('registro antigo que acordou (choice act, p 0, sem probs) não mostra "0%" no detalhe', async () => {
+  const antigo = { ...JEV_DROP, jev: { ...JEV_DROP.jev!, choice: 'act', p: 0, probs: undefined } };
+  await montar({ ev: ev({ kind: 'dropped', body: 'a', decided_by: antigo }) });
+  const d = alvo.querySelector('.orq-detail')!.textContent!;
+  expect(d).toContain(m.orq_detail_choice({ choice: m.orq_choice_act(), p: '' }).trim());
+  expect(d).not.toContain('0%');
+});
+
 it('acordado pelo Jev: detalhe fechado até clicar no selo', async () => {
   const jev = { ...JEV_DROP, jev: { ...JEV_DROP.jev!, would_drop: false } };
   await montar({ ev: ev({ kind: 'woke', body: 'a', decided_by: jev }) });

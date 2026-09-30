@@ -192,7 +192,7 @@ it('Consumo: três números, tabela por provider e modelo, cobertura e metodolog
   await montar();
   const nums = [...alvo.querySelectorAll('.use .tile b')].map((e) => e.textContent);
   expect(nums).toEqual([tok(4_800_000), tok(61_200_000), money(38.4, moeda.cur, moeda.rate)]);
-  expect(alvo.querySelector('.use-table .prov')!.textContent).toContain('claude');
+  expect(alvo.querySelector('.use-table .prov')!.textContent).toContain('Claude');
   expect(text()).toContain(m.orq_use_model_sessions({ model: 'claude-opus-5-5', n: 8 }));
   expect(text()).toContain(m.orq_use_sessions({ measured: 7, team: 11 }));
   expect(text()).toContain(m.orq_use_missing({ names: 'g-t1, g-review1' }));
@@ -204,6 +204,22 @@ it('Consumo null mostra que está somando', async () => {
   getPanel.mockResolvedValue(panel());
   await montar();
   expect(text()).toContain(m.orq_use_computing());
+});
+
+it('Consumo que falhou mostra o erro e não fica em "calculando"', async () => {
+  getPanel.mockResolvedValue(panel({ errors: [{ file: 'consumption', error: 'boom' }] }));
+  await montar();
+  expect(text()).toContain(m.orq_panel_file_error({ file: 'consumption', error: 'boom' }));
+  expect(text()).not.toContain(m.orq_use_computing());
+});
+
+it('Integração: checks vermelhos listam as Tasks como T3, T5', async () => {
+  const base = panel();
+  getPanel.mockResolvedValue(panel({
+    integration: { ...base.integration, delivery_checks: { ok: 3, total: 5, failing: [3, 5] } },
+  }));
+  await montar();
+  expect(text()).toContain(m.orq_int_checks_red({ ok: 3, total: 5, tasks: 'T3, T5' }));
 });
 
 it('Integração: branch, último merge, resultado e checks', async () => {

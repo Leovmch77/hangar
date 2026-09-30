@@ -106,7 +106,8 @@
     const out: string[] = [];
     const j = d.jev;
     if (j?.choice) {
-      const p = j.probs?.[j.choice] ?? j.p;
+      // `p` solto é a confiança em "nada a fazer": em registro antigo que acordou seria "agir · 0%".
+      const p = j.probs?.[j.choice] ?? (j.choice === 'nothing' ? j.p : undefined);
       out.push(m.orq_detail_choice({ choice: (CHOICES[j.choice] ?? (() => j.choice!))(), p: p != null ? pct(p) : '' }).trim());
     }
     const v = j?.veto;

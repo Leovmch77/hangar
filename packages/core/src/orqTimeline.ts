@@ -28,7 +28,8 @@ export function decidedByBadge(d: OrqDecidedBy, kind: OrqEntry['kind']): OrqBadg
   }
   const j = d.jev;
   let p: number | undefined;
-  if (j?.probs) {
+  // O backend manda `probs: {}` quando não há probabilidades; `{}` é truthy e escondia o `p`.
+  if (j?.probs && Object.keys(j.probs).length) {
     const v = j.choice ? j.probs[j.choice] : null;
     if (typeof v === 'number') p = v;
   } else if (j?.choice === 'nothing' && outcome !== 'woke' && typeof j.p === 'number') {

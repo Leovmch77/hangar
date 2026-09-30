@@ -891,7 +891,7 @@ export interface OrqIntegration {
   last: { task: number; commit: string; ts: string } | null;
   outcome: 'green' | 'red' | 'conflict' | 'failed' | null;
   red_log: string | null;
-  delivery_checks: { ok: number; total: number; failing: string[] };
+  delivery_checks: { ok: number; total: number; failing: number[] };
 }
 
 export interface OrqPanel {

@@ -2,8 +2,8 @@
   import { onMount, untrack } from 'svelte';
   import type { Snippet } from 'svelte';
   import * as m from '../paraglide/messages';
-  import { getOrqPanelForServer, pct, taskRows, teamView } from '@hangar/core';
-  import type { OrqPanel, OrqPanelTask, OrqTeamMember, OrqTeamRow, OrqTeamStatus, Server } from '@hangar/core';
+  import { getOrqPanelForServer, pct, providerName, taskRows, teamView } from '@hangar/core';
+  import type { OrqPanel, OrqPanelTask, OrqTeamMember, OrqTeamRow, OrqTeamStatus, Server, SessionInfo } from '@hangar/core';
   import Spinner from './Spinner.svelte';
   import { sessionsStore } from '../lib/sessionsStore.svelte';
   import { money, tok } from '../lib/fmt';
@@ -240,7 +240,10 @@
           {#if c}<span>{m.orq_use_sessions({ measured: c.sessions.measured, team: c.sessions.team })}</span>{/if}
         </h3>
         {#if !c}
-          <p class="muted">{m.orq_use_computing()}</p>
+          <!-- Consumo que falhou já tem a própria linha de erro no topo: não fica em "calculando". -->
+          {#if !panel.errors.some((e) => e.file === 'consumption')}
+            <p class="muted">{m.orq_use_computing()}</p>
+          {/if}
         {:else}
           <div class="tiles">
             <div class="tile"><b>{tok(c.totals.new)}</b><span>{m.orq_use_new()}</span></div>
@@ -253,7 +256,7 @@
             </thead>
             <tbody>
               {#each c.providers as p (p.provider)}
-                <tr class="prov"><td>{p.provider}</td><td>{tok(p.new)}</td><td>{tok(p.cache_read)}</td><td>{cost(p.usd)}</td></tr>
+                <tr class="prov"><td>{providerName(p.provider as SessionInfo['provider'])}</td><td>{tok(p.new)}</td><td>{tok(p.cache_read)}</td><td>{cost(p.usd)}</td></tr>
                 {#each p.models as md (md.model)}
                   <tr class="mdl"><td>{m.orq_use_model_sessions({ model: md.model, n: md.sessions })}</td><td>{tok(md.new)}</td><td>{tok(md.cache_read)}</td><td>{cost(md.usd)}</td></tr>
                 {/each}
@@ -285,7 +288,7 @@
           {@const ch = it.delivery_checks}
           <p class="outcome {ch.failing.length ? 'red' : 'green'}">
             <span class="dot"></span>{ch.failing.length
-              ? m.orq_int_checks_red({ ok: ch.ok, total: ch.total, tasks: ch.failing.join(', ') })
+              ? m.orq_int_checks_red({ ok: ch.ok, total: ch.total, tasks: ch.failing.map((n) => `T${n}`).join(', ') })
               : m.orq_int_checks_green({ ok: ch.ok, total: ch.total })}
           </p>
         {/if}

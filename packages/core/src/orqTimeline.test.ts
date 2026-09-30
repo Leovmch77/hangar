@@ -35,6 +35,10 @@ describe('decidedByBadge', () => {
     expect(decidedByBadge({ source: 'regex', regex: { verdict: 'drop', category: 'janela' } } as never, 'would_drop'))
       .toEqual({ key: 'orq_badge_regex_would_drop', category: 'janela' });
   });
+  it('probs vazio (como o backend manda) cai no p do descarte', () => {
+    expect(decidedByBadge({ source: 'jev', jev: { choice: 'nothing', p: 0.9, probs: {} } } as never, 'dropped'))
+      .toEqual({ key: 'orq_badge_jev_dropped', p: 0.9 });
+  });
   it('sem probs, p só vale em descarte com choice nothing', () => {
     expect(decidedByBadge({ source: 'jev', jev: { choice: 'nothing', p: 0.9 } } as never, 'dropped'))
       .toEqual({ key: 'orq_badge_jev_dropped', p: 0.9 });

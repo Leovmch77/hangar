@@ -358,7 +358,7 @@
   "orq_use_col_cache": "cache",
   "orq_use_col_cost": "custo",
   "orq_use_model_sessions": "{model} · {n} sessões",
-  "orq_use_method": "novos = entrada + saída + cache gravado · cache = cache lido · soma dos transcripts do time (árbitro, executores, revisores, com subagentes) desde o início da execução ({since}); no Claude o corte é por segmento diário · preço pela tabela do Hangar",
+  "orq_use_method": "novos = entrada + saída + cache gravado · cache = cache lido · soma dos transcripts do time (árbitro, executores, revisores, com subagentes) desde o início da execução ({since}); no Claude o corte é por dia e inclui o dia inteiro do início · preço pela tabela do Hangar",
   "orq_use_missing": "sem transcript: {names}",
   "orq_use_no_price": "sem preço na tabela: {models}",
   "orq_use_computing": "Somando os transcripts do time…",

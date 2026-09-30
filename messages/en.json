@@ -358,7 +358,7 @@
   "orq_use_col_cache": "cache",
   "orq_use_col_cost": "cost",
   "orq_use_model_sessions": "{model} · {n} sessions",
-  "orq_use_method": "new = input + output + cache written · cache = cache read · sum of the team's transcripts (arbiter, executors, reviewers, with subagents) since the run started ({since}); for Claude the cut is per daily segment · priced by Hangar's table",
+  "orq_use_method": "new = input + output + cache written · cache = cache read · sum of the team's transcripts (arbiter, executors, reviewers, with subagents) since the run started ({since}); for Claude the cut is per day and includes the whole day the run started · priced by Hangar's table",
   "orq_use_missing": "no transcript: {names}",
   "orq_use_no_price": "no price in the table: {models}",
   "orq_use_computing": "Adding up the team's transcripts…",

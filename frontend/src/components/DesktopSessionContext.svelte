@@ -614,6 +614,9 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
   {#if orqTab && orqServer}
   <!-- Sessão orq não tem LLM: no lugar do medidor de contexto, o retrato da orquestração. -->
   <div class="ctx-scroll ctx-scroll-orq">
+    <!-- Abaixo de 1280px o painel é display:none: montado, ele sondaria o backend às escondidas
+         e em dobro com a folha do celular. -->
+    {#if wideEnough}
     <OrqPanel server={orqServer} sessionName={sessionName ?? ''} arbiter={orqArbiter}
               onOpenSession={(n) => onOpenSession?.(n)} onOpenFile={(p) => onOpenFile?.(p)}>
       {#snippet actions()}
@@ -625,6 +628,7 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
         {/if}
       {/snippet}
     </OrqPanel>
+    {/if}
   </div>
   {:else}
   <div class="ctx-scroll">
