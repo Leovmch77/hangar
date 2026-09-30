@@ -40,8 +40,26 @@ vi.mock('./ContextRing', () => ({ ContextRing: () => null }));
 vi.mock('../paraglide/messages', () => Object.fromEntries(
   ('arq_aba askq_sua_resposta bastao_dossie_sub bastao_dossie_titulo chat_voltar_sessoes codex_limites_titulo ctx_anexos ctx_atividade ctx_grupo ctx_limites ctx_repositorio ctx_terminal modo_so_ociosa more_fotos_videos_arquivos more_tarefas_agentes navbar_mais_acoes par_titulo recarregar_sessao recarregar_sessao_detalhe sessao_trocar_de term_titulo '
     + 'askq_enviando board_arquivo board_imagem board_remover_anexo codex_orientar composer_anexar_arquivo composer_desfazer_limpeza composer_ditado_limpo composer_enviando_cancelar composer_enviar_mensagem composer_fila_acao composer_fila_aria composer_fila_contagem composer_gravando_audio composer_gravar_audio composer_mandando_grupo composer_mandar_grupo composer_mandar_tambem composer_mensagem composer_parar composer_parar_gravacao composer_pro_grupo composer_pros_dois composer_sessao_trabalhando composer_transcrevendo_audio composer_transcrever_de_novo')
-    .concat(' permissao_pedido comum_cancelar msg_aria_mensagens chat_plan_proposto composer_falha_envio nova_conversa_envio_incerto nova_conversa_resultado_salvar_erro').split(' ').map((k) => [k, () => k]),
+    .concat(' permissao_pedido comum_cancelar msg_aria_mensagens chat_plan_proposto composer_falha_envio nova_conversa_envio_incerto nova_conversa_resultado_salvar_erro')
+    .concat(' draft_read_error draft_invalid draft_write_error draft_clear_error composer_draft_previous composer_draft_recover composer_draft_discard composer_draft_read_again').split(' ').map((k) => [k, () => k]),
 ));
+
+// Rascunho em memória no lugar do MMKV; cada teste começa sem nada guardado.
+const storage = vi.hoisted(() => ({ memory: new Map<string, string>(), failSet: false }));
+vi.mock('react-native-mmkv', () => ({
+  createMMKV: () => ({
+    getString: (key: string) => storage.memory.get(key),
+    set: (key: string, value: string) => {
+      if (storage.failSet) throw new Error('storage unavailable');
+      storage.memory.set(key, value);
+    },
+    remove: (key: string) => { storage.memory.delete(key); },
+    getNumber: () => undefined, getBoolean: () => undefined, contains: (key: string) => storage.memory.has(key),
+  }),
+}));
+beforeEach(() => { storage.memory.clear(); storage.failSet = false; sessionsState.rows = []; });
+
+const sessionsState = vi.hoisted(() => ({ rows: [] as { serverId: string; name: string; jsonl?: string | null }[], byServerRecord: {} }));
 
 // Composer isolado: sem picker, pills, ditado nem store real — só o que decide o botão Parar.
 const composerChat = vi.hoisted(() => ({ state: 'idle' as string, send: vi.fn(async (_text: string) => {}) }));
@@ -60,7 +78,7 @@ vi.mock('../features/ditado/useDitado', () => ({ useDitado: () => ({ gravando: f
 vi.mock('../features/ditado/ditadoEstiloStore', () => ({ useDitadoEstiloStore: { getState: () => ({ pronto: false }) } }));
 vi.mock('./CommandSheet', () => ({ CommandSheet: () => null }));
 vi.mock('../stores/sessions', () => ({
-  useSessions: (sel: (s: unknown) => unknown) => sel({ rows: [], byServerRecord: {} }),
+  useSessions: (sel: (s: unknown) => unknown) => sel(sessionsState),
 }));
 vi.mock('../stores/chat', () => {
   const snap = () => ({ pending: [], events: [], stateEvent: { state: composerChat.state } });
@@ -290,10 +308,141 @@ describe('primeiro texto recuperado no Composer', () => {
     expect(firstInput.confirm).toHaveBeenCalledWith('attempt-1');
     act(() => root.unmount());
     const reopened = await render(createElement(Composer, props));
+    // A edição guardada vence o texto de handoff que a rota ainda carrega; enviá-la é mensagem nova.
+    expect(reopened.container.querySelector('textarea')!.value).toBe('texto novo');
     await act(async () => reopened.container.querySelector<HTMLButtonElement>('[aria-label="composer_enviar_mensagem"]')!.click());
     expect(firstInput.send).toHaveBeenCalledTimes(1);
-    expect(composerChat.send).not.toHaveBeenCalled();
+    expect(composerChat.send).toHaveBeenCalledExactlyOnceWith('texto novo');
     act(() => reopened.root.unmount());
+  });
+});
+
+describe('rascunho guardado no Composer', () => {
+  const props = { serverId: 's1', name: 'sess' };
+  const type = (container: HTMLElement, value: string) => act(() => {
+    const field = container.querySelector('textarea')!;
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(field, value);
+    field.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  const stored = (serverId: string, name: string) => {
+    const raw = storage.memory.get(`draft.v1:${serverId}::${name}`);
+    return raw ? JSON.parse(raw) as { text: string; revision: number; transcript: string | null } : null;
+  };
+  const button = (container: HTMLElement, label: string) => [...container.querySelectorAll('button, [role="button"]')]
+    .find((el) => el.textContent === label) as HTMLElement | undefined;
+
+  it('cada edição grava na conversa de origem; desmontar não apaga e outro servidor com mesmo nome não recebe', async () => {
+    sessionsState.rows = [{ serverId: 's1', name: 'sess', jsonl: '/t/a.jsonl' }];
+    const first = await render(createElement(Composer, props));
+    type(first.container, 'o');
+    type(first.container, 'oi');
+    expect(stored('s1', 'sess')).toMatchObject({ text: 'oi', revision: 2, transcript: '/t/a.jsonl' });
+    act(() => first.root.unmount());
+    expect(stored('s1', 'sess')?.text).toBe('oi');
+
+    const other = await render(createElement(Composer, { serverId: 's2', name: 'sess' }));
+    expect(other.container.querySelector('textarea')!.value).toBe('');
+    act(() => other.root.unmount());
+    const reopened = await render(createElement(Composer, props));
+    expect(reopened.container.querySelector('textarea')!.value).toBe('oi');
+    act(() => reopened.root.unmount());
+  });
+
+  it('texto devolvido pelo cancelar das opções é adotado e guardado na mesma conversa', async () => {
+    const { container, root } = await render(createElement(Composer, props));
+    await act(async () => root.render(createElement(Composer, { ...props, draft: 'resposta cancelada' })));
+    expect(container.querySelector('textarea')!.value).toBe('resposta cancelada');
+    expect(stored('s1', 'sess')?.text).toBe('resposta cancelada');
+    act(() => root.unmount());
+  });
+
+  it('primeiro jsonl associa o rascunho provisório sem tratar como sessão recriada', async () => {
+    sessionsState.rows = [{ serverId: 's1', name: 'sess', jsonl: null }];
+    const { container, root } = await render(createElement(Composer, props));
+    type(container, 'antes do transcript');
+    expect(stored('s1', 'sess')?.transcript).toBeNull();
+    sessionsState.rows = [{ serverId: 's1', name: 'sess', jsonl: '/t/first.jsonl' }];
+    await act(async () => root.render(createElement(Composer, props)));
+    expect(container.querySelector('textarea')!.value).toBe('antes do transcript');
+    expect(stored('s1', 'sess')?.transcript).toBe('/t/first.jsonl');
+    expect(container.textContent).not.toContain('composer_draft_previous');
+    act(() => root.unmount());
+  });
+
+  it('sessão recriada não recebe o texto antigo; ele sobrevive a texto novo e reabertura até recuperar', async () => {
+    sessionsState.rows = [{ serverId: 's1', name: 'sess', jsonl: '/t/old.jsonl' }];
+    const old = await render(createElement(Composer, props));
+    type(old.container, 'texto da sessão morta');
+    act(() => old.root.unmount());
+
+    sessionsState.rows = [{ serverId: 's1', name: 'sess', jsonl: '/t/new.jsonl' }];
+    const recreated = await render(createElement(Composer, props));
+    expect(recreated.container.querySelector('textarea')!.value).toBe('');
+    expect(recreated.container.textContent).toContain('composer_draft_previous');
+    type(recreated.container, 'texto novo');
+    expect(stored('s1', 'sess')).toMatchObject({ text: 'texto novo', transcript: '/t/new.jsonl' });
+    act(() => recreated.root.unmount());
+
+    const reopened = await render(createElement(Composer, props));
+    expect(reopened.container.querySelector('textarea')!.value).toBe('texto novo');
+    act(() => button(reopened.container, 'composer_draft_recover')!.click());
+    expect(reopened.container.querySelector('textarea')!.value).toBe('texto novo\ntexto da sessão morta');
+    expect(stored('s1', 'sess')?.text).toBe('texto novo\ntexto da sessão morta');
+    expect(storage.memory.has('draft.v1.recoverable:s1::sess')).toBe(false);
+    expect(reopened.container.textContent).not.toContain('composer_draft_previous');
+    act(() => reopened.root.unmount());
+  });
+
+  it('sessão recriada enquanto aberta tira o texto antigo do campo e oferece recuperar; descartar não reoferece', async () => {
+    sessionsState.rows = [{ serverId: 's1', name: 'sess', jsonl: '/t/old.jsonl' }];
+    const { container, root } = await render(createElement(Composer, props));
+    type(container, 'antigo');
+    sessionsState.rows = [{ serverId: 's1', name: 'sess', jsonl: '/t/new.jsonl' }];
+    await act(async () => root.render(createElement(Composer, props)));
+    expect(container.querySelector('textarea')!.value).toBe('');
+    expect(container.textContent).toContain('composer_draft_previous');
+    act(() => button(container, 'composer_draft_discard')!.click());
+    expect(container.textContent).not.toContain('composer_draft_previous');
+    act(() => root.unmount());
+    const reopened = await render(createElement(Composer, props));
+    expect(reopened.container.textContent).not.toContain('composer_draft_previous');
+    act(() => reopened.root.unmount());
+  });
+
+  it('"Ler de novo" após falha na recriação não traz o texto morto ao campo e Recuperar o devolve uma vez', async () => {
+    sessionsState.rows = [{ serverId: 's1', name: 'sess', jsonl: '/t/old.jsonl' }];
+    const { container, root } = await render(createElement(Composer, props));
+    type(container, 'hello');
+    storage.failSet = true;
+    sessionsState.rows = [{ serverId: 's1', name: 'sess', jsonl: '/t/new.jsonl' }];
+    await act(async () => root.render(createElement(Composer, props)));
+    expect(container.textContent).toContain('draft_write_error');
+    storage.failSet = false;
+    act(() => button(container, 'composer_draft_read_again')!.click());
+    expect(container.querySelector('textarea')!.value).toBe('');
+    expect(container.textContent).toContain('composer_draft_previous');
+    expect(stored('s1', 'sess')?.text).not.toBe('hello');
+    act(() => button(container, 'composer_draft_recover')!.click());
+    expect(container.querySelector('textarea')!.value).toBe('hello');
+    act(() => root.unmount());
+  });
+
+  it('falha ao gravar aparece como aviso e o texto continua no campo', async () => {
+    const { container, root } = await render(createElement(Composer, props));
+    storage.failSet = true;
+    type(container, 'sem espaço');
+    expect(container.querySelector('textarea')!.value).toBe('sem espaço');
+    expect(container.textContent).toContain('draft_write_error');
+    act(() => root.unmount());
+  });
+
+  it('rascunho em formato inválido avisa sem travar e a edição seguinte grava por cima', async () => {
+    storage.memory.set('draft.v1:s1::sess', '{"text":');
+    const { container, root } = await render(createElement(Composer, props));
+    expect(container.textContent).toContain('draft_invalid');
+    type(container, 'recomeço');
+    expect(stored('s1', 'sess')?.text).toBe('recomeço');
+    act(() => root.unmount());
   });
 });
 

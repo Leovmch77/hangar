@@ -13,6 +13,7 @@ import * as m from '../paraglide/messages';
 import { chatStore, filaCount as filaCountOf } from '../stores/chat';
 import { confirmFirstInput, readFirstInput, sendFirstInput, useNewConversation } from '../stores/newConversation';
 import { useSessions } from '../stores/sessions';
+import { clearDraft, clearRecoverableDraft, readRecoverableDraft, resolveDraftTranscript, writeDraft, writeRecoverableDraft, type ConversationDraft } from '../stores/drafts';
 import { useRouter } from 'expo-router';
 import { ModelPill } from '../features/pills/ModelPill';
 import { EffortPill } from '../features/pills/EffortPill';
@@ -44,6 +45,39 @@ type PendingAttach = {
   size?: number;
 };
 
+type DraftLoad = { draft: ConversationDraft | null; recoverable: ConversationDraft | null; issue: string; blocked: boolean };
+
+function loadDraft(serverId: string, name: string, transcript: string | null): DraftLoad {
+  let resolved: ReturnType<typeof resolveDraftTranscript>;
+  try {
+    resolved = resolveDraftTranscript(serverId, name, transcript);
+  } catch (e) {
+    const issue = e instanceof Error ? e.message : m.draft_read_error();
+    // Formato inválido não tem o que salvar; falha de leitura bloqueia gravar para não apagar o guardado.
+    return { draft: null, recoverable: null, issue, blocked: issue !== m.draft_invalid() };
+  }
+  try {
+    const recoverable = resolved.recoverable
+      ? keepRecoverable(serverId, name, resolved.recoverable)
+      : readRecoverableDraft(serverId, name);
+    return { draft: resolved.draft, recoverable, issue: '', blocked: false };
+  } catch (e) {
+    // Com o antigo ainda só na chave principal, gravar o texto novo o apagaria.
+    return { draft: resolved.draft, recoverable: null, issue: e instanceof Error ? e.message : m.draft_read_error(), blocked: !!resolved.recoverable };
+  }
+}
+
+const joinDrafts = (before: string, after: string) => (before.trim() && after.trim() ? `${before}\n${after}` : before.trim() ? before : after);
+
+// Guarda o antigo antes de a sessão recriada gravar; um pendente de outra recriação é somado, nunca trocado.
+function keepRecoverable(serverId: string, name: string, old: ConversationDraft): ConversationDraft {
+  const pending = readRecoverableDraft(serverId, name);
+  if (pending && pending.transcript === old.transcript && pending.revision === old.revision) return pending;
+  const value = pending ? { ...old, text: joinDrafts(pending.text, old.text), attachment: old.attachment ?? pending.attachment } : old;
+  writeRecoverableDraft(serverId, name, value);
+  return value;
+}
+
 export function Composer({ serverId, name, draft, firstInputId, firstInputSent = false, sessionProvider, onStop, stopping = false }: Props) {
   const { theme } = useUnistyles();
   const router = useRouter();
@@ -73,11 +107,113 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
     setSendToPair(false);
   }, [pairPeersKey]);
 
-  const [text, setText] = useState('');
+  // O Composer remonta por rota (key): a origem da montagem é o destino de toda gravação dele.
+  const origin = useRef({ serverId, name }).current;
+  const transcript = useSessions((s) => (s.byServerRecord?.[origin.serverId]?.find((x) => x.name === origin.name)?.jsonl
+    ?? s.rows.find((x) => x.serverId === origin.serverId && x.name === origin.name)?.jsonl) || null);
+  const transcriptRef = useRef(transcript);
+  const [boot] = useState(() => loadDraft(origin.serverId, origin.name, transcript));
+  const draftRef = useRef<ConversationDraft | null>(boot.draft);
+  const blockedRef = useRef(boot.blocked);
+  const [readBlocked, setReadBlocked] = useState(boot.blocked);
+  const [draftIssue, setDraftIssue] = useState(boot.issue);
+  const [recoverable, setRecoverable] = useState(boot.recoverable);
+  // Rascunho guardado é mais novo que o texto de handoff/cancelamento que a rota ainda carrega.
+  const adoptedDraftRef = useRef(draft);
+  const [text, setText] = useState(() => boot.draft?.text || draft || '');
   const textRef = useRef(text);
   useEffect(() => {
     textRef.current = text;
   }, [text]);
+
+  const persistText = useCallback((next: string): boolean => {
+    if (blockedRef.current) return false;
+    const current = draftRef.current;
+    const value: ConversationDraft = current
+      ? { ...current, text: next, revision: current.revision + 1, transcript: current.transcript ?? transcriptRef.current }
+      : { version: 1, text: next, revision: 1, transcript: transcriptRef.current, attachment: null, submission: null };
+    try {
+      if (!next && !value.attachment && !value.submission) clearDraft(origin.serverId, origin.name);
+      else writeDraft(origin.serverId, origin.name, value);
+    } catch (e) {
+      setDraftIssue(e instanceof Error ? e.message : m.draft_write_error());
+      return false;
+    }
+    draftRef.current = value;
+    setDraftIssue('');
+    return true;
+  }, [origin]);
+
+  useEffect(() => {
+    if ((draftRef.current?.text ?? '') !== text) persistText(text);
+  }, [text, persistText]);
+
+  // null → caminho é a primeira confirmação (Codex iniciando); caminho → outro é sessão recriada.
+  useEffect(() => {
+    transcriptRef.current = transcript;
+    const known = draftRef.current?.transcript;
+    if (transcript === null || blockedRef.current || known === undefined || known === transcript) return;
+    try {
+      const { draft: kept, recoverable: old } = resolveDraftTranscript(origin.serverId, origin.name, transcript);
+      if (old) {
+        // Gravação que falhou deixou o campo à frente do guardado: conservar o que está na tela.
+        const latest = draftRef.current?.text === textRef.current ? old : { ...old, text: textRef.current };
+        const kept = keepRecoverable(origin.serverId, origin.name, latest);
+        draftRef.current = null;
+        setRecoverable(kept);
+        setText('');
+      } else {
+        draftRef.current = kept ?? (draftRef.current && { ...draftRef.current, transcript });
+      }
+    } catch (e) {
+      // Sem onde conservar o antigo, gravar o texto novo o apagaria.
+      blockedRef.current = true;
+      setReadBlocked(true);
+      setDraftIssue(e instanceof Error ? e.message : m.draft_read_error());
+    }
+  }, [transcript, origin]);
+
+  const handleRecoverDraft = useCallback(() => {
+    if (!recoverable) return;
+    const next = joinDrafts(textRef.current, recoverable.text);
+    if (!persistText(next)) return;
+    try {
+      clearRecoverableDraft(origin.serverId, origin.name);
+    } catch (e) {
+      setDraftIssue(e instanceof Error ? e.message : m.draft_clear_error());
+    }
+    setRecoverable(null);
+    setText(next);
+    setSelection({ start: next.length, end: next.length });
+  }, [recoverable, persistText, origin]);
+
+  const handleDiscardDraft = useCallback(() => {
+    try {
+      clearRecoverableDraft(origin.serverId, origin.name);
+      // Nada gravado desde a recriação: a chave principal ainda é o antigo e o reofereceria.
+      if (!draftRef.current) clearDraft(origin.serverId, origin.name);
+    } catch (e) {
+      setDraftIssue(e instanceof Error ? e.message : m.draft_clear_error());
+      return;
+    }
+    setRecoverable(null);
+  }, [origin]);
+
+  const handleRereadDraft = useCallback(() => {
+    const load = loadDraft(origin.serverId, origin.name, transcriptRef.current);
+    setDraftIssue(load.issue);
+    if (load.blocked) return;
+    // Texto igual ao último guardado não foi digitado no bloqueio: se for de sessão morta, já está no recuperável.
+    const typed = textRef.current === (draftRef.current?.text ?? '') ? '' : textRef.current;
+    blockedRef.current = false;
+    setReadBlocked(false);
+    draftRef.current = load.draft;
+    setRecoverable(load.recoverable);
+    // O que a pessoa digitou enquanto a leitura falhava fica depois do guardado.
+    const next = joinDrafts(load.draft?.text ?? '', typed);
+    persistText(next);
+    setText(next);
+  }, [origin, persistText]);
   const [sending, setSending] = useState(false);
   const sendingRef = useRef(false);
   const [uploading, setUploading] = useState(false);
@@ -131,6 +267,8 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
 
   // draft devolvido pelo cancelar do picker (Task 3): adota quando muda
   useEffect(() => {
+    if (draft === adoptedDraftRef.current) return;
+    adoptedDraftRef.current = draft;
     if (draft !== undefined && draft !== text) {
       setText(draft);
       setSelection({ start: draft.length, end: draft.length });
@@ -675,6 +813,31 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
           </View>
         ) : null}
 
+        {draftIssue ? (
+          <View style={styles.errorRow}>
+            <Text style={[styles.error, { color: theme.tokens.status.error }]}>{draftIssue}</Text>
+            {readBlocked ? (
+              <Pressable onPress={handleRereadDraft} style={[styles.retryBtn, { borderColor: theme.tokens.border.subtle }]} accessibilityRole="button">
+                <Text style={[styles.retryText, { color: theme.tokens.accent.base }]}>{m.composer_draft_read_again()}</Text>
+              </Pressable>
+            ) : null}
+          </View>
+        ) : null}
+
+        {recoverable ? (
+          <View style={styles.undoRow}>
+            <Text style={[styles.hint, styles.recoverText, { color: theme.tokens.text.muted }]} numberOfLines={2}>
+              {m.composer_draft_previous({ text: recoverable.text.trim().slice(0, 80) })}
+            </Text>
+            <Pressable onPress={handleRecoverDraft} style={[styles.undoBtn, { borderColor: theme.tokens.border.subtle }]} accessibilityRole="button">
+              <Text style={[styles.undoText, { color: theme.tokens.accent.base }]}>{m.composer_draft_recover()}</Text>
+            </Pressable>
+            <Pressable onPress={handleDiscardDraft} style={[styles.undoBtn, { borderColor: theme.tokens.border.subtle }]} accessibilityRole="button">
+              <Text style={[styles.undoText, { color: theme.tokens.text.secondary }]}>{m.composer_draft_discard()}</Text>
+            </Pressable>
+          </View>
+        ) : null}
+
         {/* hint sutil do estado working: quando há pending/queued, já há chip; este texto só aparece em working sem fila */}
         {state === 'working' && filaCount === 0 && !gravando && !transcribing ? (
           <Text style={[styles.hint, { color: theme.tokens.text.muted }]}>{m.composer_sessao_trabalhando()}</Text>
@@ -855,6 +1018,9 @@ const styles = StyleSheet.create((theme) => ({
     flexDirection: 'row',
     alignItems: 'center',
     gap: theme.base.space[2],
+  },
+  recoverText: {
+    flex: 1,
   },
   undoBtn: {
     borderWidth: 1,
