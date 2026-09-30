@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Platform, Pressable, ScrollView, Text, View, type NativeSyntheticEvent, type TextInputKeyPressEventData } from 'react-native';
+import { ActivityIndicator, AppState, Platform, Pressable, ScrollView, Text, View, type NativeSyntheticEvent, type TextInputKeyPressEventData } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import * as ImagePicker from 'expo-image-picker';
 import * as DocumentPicker from 'expo-document-picker';
 import { Image } from 'expo-image';
-import { broadcast, formataErro, uploadFileForServer, transcribeFile, steerSession, podeEnviarSozinho } from '@hangar/core';
-import type { MotivoFim } from '@hangar/core';
+import { broadcast, formataErro, uploadFileForServer, transcribeFileForServer, steerSession, podeEnviarSozinho } from '@hangar/core';
+import type { MotivoFim, Server } from '@hangar/core';
 import { Glass } from '../ui/Glass';
 import { Icon } from '../ui/Icon';
 import { MultilineInput } from '../ui/MultilineInput';
@@ -13,7 +13,7 @@ import * as m from '../paraglide/messages';
 import { chatStore, filaCount as filaCountOf, submitConversationDraft, isSubmitting } from '../stores/chat';
 import { confirmFirstInput, readFirstInput, sendFirstInput, useNewConversation } from '../stores/newConversation';
 import { useSessions } from '../stores/sessions';
-import { clearDraft, clearRecoverableDraft, readDraft, readRecoverableDraft, resolveDraftTranscript, reusableUploadPath, withoutUpload, writeDraft, writeRecoverableDraft, type ConversationDraft, type DraftAttachment } from '../stores/drafts';
+import { clearDraft, clearRecoverableDraft, readDraft, readRecoverableDraft, resolveDraftTranscript, reusableUploadPath, withoutUpload, writeDraft, writeRecoverableDraft, clearDictation, readDictation, writeDictation, finishDictation, recoverDictation, associateDictationTranscript, type ConversationDraft, type DraftAttachment, type DictationDraft } from '../stores/drafts';
 import { useServers } from '../stores/servers';
 import { removeDraftAttachment, retainDraftAttachment } from './draftAttachments';
 import { useRouter } from 'expo-router';
@@ -50,7 +50,7 @@ function dropCopy(uri: string): void {
   try { removeDraftAttachment(uri); } catch { /* sem perda de dado */ }
 }
 
-type DraftLoad = { draft: ConversationDraft | null; recoverable: ConversationDraft | null; issue: string; blocked: boolean };
+type DraftLoad = { draft: ConversationDraft | null; recoverable: ConversationDraft | null; dictation: DictationDraft | null; issue: string; blocked: boolean };
 
 function loadDraft(serverId: string, name: string, transcript: string | null): DraftLoad {
   let resolved: ReturnType<typeof resolveDraftTranscript>;
@@ -59,16 +59,18 @@ function loadDraft(serverId: string, name: string, transcript: string | null): D
   } catch (e) {
     const issue = e instanceof Error ? e.message : m.draft_read_error();
     // Formato inválido não tem o que salvar; falha de leitura bloqueia gravar para não apagar o guardado.
-    return { draft: null, recoverable: null, issue, blocked: issue !== m.draft_invalid() };
+    return { draft: null, recoverable: null, dictation: null, issue, blocked: issue !== m.draft_invalid() };
   }
   try {
     const recoverable = resolved.recoverable
       ? keepRecoverable(serverId, name, resolved.recoverable)
       : readRecoverableDraft(serverId, name);
-    return { draft: resolved.draft, recoverable, issue: '', blocked: false };
+    const dictation = transcript === null ? readDictation(serverId, name)
+      : associateDictationTranscript(serverId, name, transcript);
+    return { draft: resolved.draft, recoverable, dictation, issue: '', blocked: false };
   } catch (e) {
     // Com o antigo ainda só na chave principal, gravar o texto novo o apagaria.
-    return { draft: resolved.draft, recoverable: null, issue: e instanceof Error ? e.message : m.draft_read_error(), blocked: !!resolved.recoverable };
+    return { draft: resolved.draft, recoverable: null, dictation: null, issue: e instanceof Error ? e.message : m.draft_read_error(), blocked: true };
   }
 }
 
@@ -124,6 +126,7 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
   const [readBlocked, setReadBlocked] = useState(boot.blocked);
   const [draftIssue, setDraftIssue] = useState(boot.issue);
   const [recoverable, setRecoverable] = useState(boot.recoverable);
+  const [dictation, setDictation] = useState(boot.dictation);
   const [submission, setSubmission] = useState(boot.draft?.submission ?? null);
   const [pendingAttach, setPendingAttach] = useState<PendingAttach | null>(boot.draft?.attachment ?? null);
   // Rascunho guardado é mais novo que o texto de handoff/cancelamento que a rota ainda carrega.
@@ -172,6 +175,7 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
   useEffect(() => {
     if (blockedRef.current) return;
     try {
+      setDictation(readDictation(origin.serverId, origin.name));
       const latest = readDraft(origin.serverId, origin.name);
       if (!latest) {
         setPendingAttach(null);
@@ -221,8 +225,14 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
   useEffect(() => {
     transcriptRef.current = transcript;
     const known = draftRef.current?.transcript;
-    if (transcript === null || blockedRef.current || known === undefined || known === transcript) return;
+    if (transcript === null || blockedRef.current) return;
     try {
+      setDictation(associateDictationTranscript(origin.serverId, origin.name, transcript));
+      const target = recordingTargetRef.current;
+      if (target?.snapshot.transcript === null) {
+        target.snapshot = { ...target.snapshot, transcript };
+      }
+      if (known === undefined || known === transcript) return;
       const { draft: kept, recoverable: old } = resolveDraftTranscript(origin.serverId, origin.name, transcript);
       if (old) {
         // Gravação que falhou deixou o campo à frente do guardado: conservar o que está na tela.
@@ -290,6 +300,7 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
     setSubmission(load.draft?.submission ?? null);
     setPendingAttach(load.draft?.attachment ?? null);
     setRecoverable(load.recoverable);
+    setDictation(load.dictation);
     // O que a pessoa digitou enquanto a leitura falhava fica depois do guardado.
     const next = joinDrafts(load.draft?.text ?? '', typed);
     persistText(next);
@@ -303,8 +314,14 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
   const [steering, setSteering] = useState(false);
   const [steerFeedback, setSteerFeedback] = useState('');
   const [transcribing, setTranscribing] = useState(false);
-  const [undo, setUndo] = useState<{ before: string; raw: string } | null>(null);
-  const [failed, setFailed] = useState<{ file: File; motivo: MotivoFim } | null>(null);
+  const transcribingRef = useRef(false);
+  const mountedRef = useRef(true);
+  const activeRef = useRef(AppState.currentState === 'active');
+  const activityGenerationRef = useRef(0);
+  const recordingTargetRef = useRef<{ server: Server; snapshot: ConversationDraft; generation: number; estilo?: string } | null>(null);
+  const micStartingRef = useRef(false);
+  const [undo, setUndo] = useState<{ before: string; raw: string; revision: number } | null>(null);
+  const [failed, setFailed] = useState<{ file: File; motivo: MotivoFim; uri: string } | null>(null);
   const [autoN, setAutoN] = useState<number | null>(null);
   const [attachMenuOpen, setAttachMenuOpen] = useState(false);
   // null = lista de comandos fechada; string = o que veio depois da `/`.
@@ -330,9 +347,27 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
       clearInterval(autoTimerRef.current);
       autoTimerRef.current = null;
     }
-    setAutoN(null);
+    if (mountedRef.current) setAutoN(null);
     autoAlvoRef.current = 0;
   }, []);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    activeRef.current = AppState.currentState === 'active';
+    const sub = AppState.addEventListener('change', (next) => {
+      activeRef.current = next === 'active';
+      if (next !== 'active') {
+        activityGenerationRef.current++;
+        cancelarAuto();
+      }
+    });
+    return () => {
+      mountedRef.current = false;
+      activityGenerationRef.current++;
+      cancelarAuto();
+      sub.remove();
+    };
+  }, [cancelarAuto]);
 
   // Atalho `/`: enquanto a linha é só o nome do comando, a lista fica aberta e filtrada.
   const handleChangeText = useCallback(
@@ -485,17 +520,24 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
   const iniciarAuto = useCallback(
     (textoParaEnviar: string) => {
       cancelarAuto();
+      const generation = activityGenerationRef.current;
+      const revision = draftRef.current?.revision;
       autoTextoRef.current = textoParaEnviar;
       autoAlvoRef.current = Date.now() + 3000;
       setAutoN(3);
       autoTimerRef.current = setInterval(() => {
+        if (!mountedRef.current || !activeRef.current || generation !== activityGenerationRef.current
+          || textRef.current !== textoParaEnviar || draftRef.current?.revision !== revision) {
+          cancelarAuto();
+          return;
+        }
         const rest = autoAlvoRef.current - Date.now();
         if (rest <= 0) {
           cancelarAuto();
           const toSend = autoTextoRef.current.trim();
           if (!toSend) return;
           limparUndo();
-          void sendText(toSend)
+          void sendText(toSend, revision)
             .then(() => setError(''))
             .catch((e: unknown) => {
               const msg = e instanceof Error ? e.message : m.composer_falha_envio();
@@ -509,77 +551,152 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
     [cancelarAuto, sendText, limparUndo],
   );
 
-  const handleTranscribe = useCallback(
-    async (file: File, motivo: MotivoFim) => {
-      if (transcribing) {
-        setError(m.composer_aguarde_transcricao());
-        return;
-      }
+  const offerUndo = useCallback((before: string, raw: string, cleaned: string, revision: number) => {
+    limparUndo();
+    if (!raw.trim() || raw.trim() === cleaned.trim()) return;
+    setUndo({ before, raw: raw.trim(), revision });
+    undoTimerRef.current = setTimeout(limparUndo, 10_000);
+  }, [limparUndo]);
+
+  const runTranscription = useCallback(async (voice: DictationDraft, file: File, server: Server, generation: number, allowAuto: boolean) => {
+    if (transcribingRef.current) return;
+    transcribingRef.current = true;
+    if (mountedRef.current) {
       setTranscribing(true);
       setError('');
       setFailed(null);
-      try {
-        const estilo = useDitadoEstiloStore.getState().pronto
-          ? useDitadoEstiloStore.getState().valor
-          : undefined;
-        const { text: t, raw, aviso } = await transcribeFile(name, file, {
-          limpar: true,
-          estilo,
-        });
-        const trimmed = t.trim();
-        if (!trimmed) {
-          setError(m.composer_transcricao_vazia());
-          return;
-        }
-        const before = textRef.current.trim();
-        const next = before ? `${before} ${trimmed}` : trimmed;
-        setText(next);
-        setSelection({ start: next.length, end: next.length });
-        if (raw && raw.trim() !== trimmed) {
-          setUndo({ before, raw: raw.trim() });
-          if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
-          undoTimerRef.current = setTimeout(() => limparUndo(), 10_000);
-        } else {
-          limparUndo();
-        }
-        if (aviso) {
-          setError(aviso);
-        }
-        const shouldAuto = podeEnviarSozinho({
-          motivo,
-          texto: trimmed,
-          aviso: aviso ?? null,
-          rascunhoAntes: before.length > 0,
-        });
-        if (shouldAuto) {
-          iniciarAuto(next);
-        }
-      } catch (e) {
-        setFailed({ file, motivo });
-        const msg = e instanceof Error ? e.message : m.composer_falha_transcricao();
-        setError(msg);
-      } finally {
-        setTranscribing(false);
+    }
+    let saved = false;
+    try {
+      writeDictation(origin.serverId, origin.name, voice);
+      saved = true;
+      if (mountedRef.current) setDictation(voice);
+      const sessions = useSessions.getState();
+      const live = sessions.byServerRecord?.[origin.serverId]?.find((s) => s.name === origin.name)
+        ?? sessions.rows.find((s) => s.serverId === origin.serverId && s.name === origin.name);
+      const currentTranscript = live ? live.jsonl || null : transcriptRef.current;
+      if (voice.transcript !== null && currentTranscript !== voice.transcript) {
+        throw new Error(m.composer_ditado_anterior());
       }
+      // Interrupção durante a cópia/leitura conserva o áudio, sem iniciar outro POST na volta.
+      if (!mountedRef.current || !activeRef.current || generation !== activityGenerationRef.current) {
+        throw new Error(m.composer_ditado_interrompido());
+      }
+      const { text: result, raw, aviso } = await transcribeFileForServer(server, origin.name, file, {
+        limpar: true, estilo: voice.estilo,
+      });
+      const trimmed = result.trim();
+      if (!trimmed) throw new Error(m.composer_transcricao_vazia());
+      const active = mountedRef.current && activeRef.current && !blockedRef.current
+        && generation === activityGenerationRef.current
+        && textRef.current.trim() === voice.before
+        && (voice.transcript === null || voice.transcript === transcriptRef.current);
+      const completed = finishDictation(origin.serverId, origin.name, voice.id,
+        { text: trimmed, raw: raw?.trim() ?? '', issue: aviso ?? '' }, active);
+      if (mountedRef.current) {
+        setDictation(completed.dictation);
+        if (completed.draft) {
+          draftRef.current = completed.draft;
+          textRef.current = completed.draft.text;
+          setText(completed.draft.text);
+          setSelection({ start: completed.draft.text.length, end: completed.draft.text.length });
+          offerUndo(voice.before, raw ?? '', trimmed, completed.draft.revision);
+          if (aviso) setError(aviso);
+          if (allowAuto && podeEnviarSozinho({
+            motivo: voice.motivo, texto: trimmed, aviso: aviso ?? null,
+            rascunhoAntes: !!voice.before.trim() || !!completed.draft.attachment || !!completed.draft.submission,
+          })) iniciarAuto(completed.draft.text);
+        }
+      }
+      if (completed.draft && !completed.dictation) dropCopy(voice.audio.uri);
+    } catch (e) {
+      const detail = e instanceof Error ? e.message : m.composer_falha_transcricao();
+      const issue = /^(501|503):/.test(detail) ? `${m.composer_ditado_indisponivel()}: ${detail}` : detail;
+      if (!saved && mountedRef.current) setFailed({ file, motivo: voice.motivo, uri: voice.audio.uri });
+      try {
+        const latest = readDictation(origin.serverId, origin.name);
+        if (latest?.id === voice.id) {
+          const kept = { ...latest, status: latest.text ? 'ready' as const : 'failed' as const, issue };
+          writeDictation(origin.serverId, origin.name, kept);
+          if (mountedRef.current) setDictation(kept);
+        } else if (!latest && mountedRef.current) {
+          // Falhar a primeira gravação não pode perder a repetição do áudio já copiado.
+          setFailed({ file, motivo: voice.motivo, uri: voice.audio.uri });
+        }
+      } catch (storageError) {
+        if (mountedRef.current) setDraftIssue(storageError instanceof Error ? storageError.message : m.draft_write_error());
+      }
+      if (mountedRef.current) setError(issue);
+    } finally {
+      transcribingRef.current = false;
+      if (mountedRef.current) setTranscribing(false);
+      // Outra montagem da origem lê o áudio/resultado persistido, sem alterar o destino atual.
+      chat.use.setState((s) => ({ draftUpdate: s.draftUpdate + 1 }));
+    }
+  }, [origin, chat, offerUndo, iniciarAuto]);
+
+  const handleTranscribe = useCallback(
+    async (file: File, motivo: MotivoFim, uri: string, allowAuto = true) => {
+      const target = recordingTargetRef.current;
+      if (!target || transcribingRef.current) return;
+      // Bloqueia outro início enquanto a cópia sai do cache para o diretório do app.
+      transcribingRef.current = true;
+      if (mountedRef.current) setTranscribing(true);
+      let audio: DraftAttachment;
+      try {
+        audio = await retainDraftAttachment({ uri, name: file.name, mime: file.type, kind: 'file' });
+      } catch (e) {
+        if (mountedRef.current) {
+          setFailed({ file, motivo, uri });
+          setError(e instanceof Error ? e.message : m.draft_write_error());
+          setTranscribing(false);
+        }
+        transcribingRef.current = false;
+        return;
+      }
+      transcribingRef.current = false;
+      const voice: DictationDraft = {
+        version: 1, id: `${Date.now()}-${Math.random().toString(36).slice(2)}`, audio,
+        transcript: target.snapshot.transcript, draftRevision: target.snapshot.revision,
+        before: target.snapshot.text.trim(), motivo, estilo: target.estilo,
+        status: 'pending', text: '', raw: '', issue: '',
+      };
+      await runTranscription(voice, file, target.server, target.generation, allowAuto);
     },
-    [name, transcribing, limparUndo, iniciarAuto],
+    [runTranscription],
   );
 
   const { gravando, rms, iniciar, parar } = useDitado({
     onFim: handleTranscribe,
-    onErroParada: (e) =>
-      setError(e.message === 'ditado_parada_falhou' ? m.composer_falha_gravacao() : e.message || m.composer_falha_gravacao()),
+    onErroParada: (e) => {
+      if (mountedRef.current) setError(e.message === 'ditado_parada_falhou' ? m.composer_falha_gravacao() : e.message || m.composer_falha_gravacao());
+    },
   });
 
   const handleMicPress = useCallback(async () => {
-    if (transcribing) return;
+    if (transcribingRef.current || micStartingRef.current) return;
     if (gravando) {
       void parar('botao');
       return;
     }
+    if (dictation || !mountedRef.current || !activeRef.current) return;
     if (autoN !== null) cancelarAuto();
+    micStartingRef.current = true;
     try {
+      const server = useServers.getState().servers.find((s) => s.id === origin.serverId);
+      if (!server) throw new Error(m.chat_servidor_removido());
+      if (blockedRef.current || !persistText(textRef.current)) return;
+      const snapshot = draftRef.current!;
+      // Mesmo vazio precisa de revisão em disco para comparar o retorno da voz.
+      writeDraft(origin.serverId, origin.name, snapshot);
+      const style = useDitadoEstiloStore.getState();
+      recordingTargetRef.current = { server: { ...server }, snapshot,
+        generation: activityGenerationRef.current, estilo: style.pronto ? style.valor : undefined };
       await iniciar();
+      // O diálogo de permissão pode resolver antes de chegar o AppState active.
+      if (mountedRef.current && recordingTargetRef.current) {
+        recordingTargetRef.current.generation = activityGenerationRef.current;
+      }
     } catch (e) {
       const msg = e instanceof Error ? e.message : '';
       if (msg === 'permission_denied') {
@@ -587,22 +704,79 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
       } else {
         setError(e instanceof Error ? e.message : m.composer_falha_gravacao());
       }
-    }
-  }, [gravando, transcribing, iniciar, parar, autoN, cancelarAuto]);
+    } finally { micStartingRef.current = false; }
+  }, [gravando, iniciar, parar, autoN, cancelarAuto, dictation, origin, persistText]);
 
   const handleUndo = useCallback(() => {
     if (!undo) return;
+    cancelarAuto();
+    if (draftRef.current?.revision !== undo.revision) { limparUndo(); return; }
     const { before, raw } = undo;
     const restored = before ? `${before} ${raw}` : raw;
+    if (!persistText(restored)) return;
+    textRef.current = restored;
     setText(restored);
     limparUndo();
     setSelection({ start: restored.length, end: restored.length });
-  }, [undo, limparUndo]);
+  }, [undo, limparUndo, cancelarAuto, persistText]);
 
-  const handleRetry = useCallback(() => {
-    if (!failed) return;
-    void handleTranscribe(failed.file, failed.motivo);
-  }, [failed, handleTranscribe]);
+  const handleRetry = useCallback(async () => {
+    if (transcribingRef.current) return;
+    if (failed) { await handleTranscribe(failed.file, failed.motivo, failed.uri, false); return; }
+    if (!dictation || dictation.status === 'ready' || dictation.status === 'applied') return;
+    cancelarAuto();
+    const generation = activityGenerationRef.current;
+    transcribingRef.current = true;
+    setTranscribing(true);
+    try {
+      const server = useServers.getState().servers.find((s) => s.id === origin.serverId);
+      if (!server) throw new Error(m.chat_servidor_removido());
+      if (dictation.transcript !== null && dictation.transcript !== transcriptRef.current) {
+        setError(m.composer_ditado_anterior());
+        return;
+      }
+      const blob = await (await fetch(dictation.audio.uri)).blob();
+      const file = new File([blob], dictation.audio.name, { type: dictation.audio.mime });
+      transcribingRef.current = false;
+      // Repetir é explícito, mas nunca rearma o autoenvio cancelado.
+      await runTranscription({ ...dictation, id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        status: 'pending', issue: '' }, file, { ...server }, generation, false);
+    } catch (e) {
+      if (mountedRef.current) setError(e instanceof Error ? e.message : m.composer_falha_transcricao());
+    } finally {
+      transcribingRef.current = false;
+      if (mountedRef.current) setTranscribing(false);
+    }
+  }, [failed, handleTranscribe, dictation, origin, runTranscription, cancelarAuto]);
+
+  const handleRecoverDictation = useCallback(() => {
+    if (!dictation?.text || dictation.status !== 'ready' || transcribingRef.current) return;
+    cancelarAuto();
+    const before = textRef.current.trim();
+    if (!persistText(textRef.current)) return;
+    try {
+      const recovered = recoverDictation(origin.serverId, origin.name, dictation.id);
+      setDictation(recovered.dictation);
+      if (!recovered.draft) return;
+      draftRef.current = recovered.draft;
+      textRef.current = recovered.draft.text;
+      setText(recovered.draft.text);
+      setSelection({ start: recovered.draft.text.length, end: recovered.draft.text.length });
+      offerUndo(before, dictation.raw, dictation.text, recovered.draft.revision);
+      if (!recovered.dictation) dropCopy(dictation.audio.uri);
+      setError(dictation.issue);
+    } catch (e) { setDraftIssue(e instanceof Error ? e.message : m.draft_clear_error()); }
+  }, [dictation, cancelarAuto, persistText, offerUndo, origin]);
+
+  const handleDiscardDictation = useCallback(() => {
+    if (!dictation || transcribingRef.current) return;
+    try {
+      clearDictation(origin.serverId, origin.name);
+      dropCopy(dictation.audio.uri);
+      setDictation(null);
+      setError('');
+    } catch (e) { setDraftIssue(e instanceof Error ? e.message : m.draft_clear_error()); }
+  }, [dictation, origin]);
 
   const handleSteer = useCallback(async () => {
     if (steeringRef.current) return;
@@ -843,10 +1017,11 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
 
           <Pressable
             onPress={handleMicPress}
-            disabled={transcribing || sending}
+            disabled={transcribing || sending || (!!dictation && !gravando)}
+            accessibilityState={{ disabled: transcribing || sending || (!!dictation && !gravando), busy: transcribing }}
             style={[
               styles.iconBtn,
-              (transcribing || sending) && styles.iconBtnDisabled,
+              (transcribing || sending || (!!dictation && !gravando)) && styles.iconBtnDisabled,
               gravando && { backgroundColor: theme.tokens.status.error, borderColor: theme.tokens.status.error },
             ]}
             accessibilityLabel={gravando ? m.composer_parar_gravacao() : m.composer_gravar_audio()}
@@ -903,6 +1078,28 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
 
         {transcribing ? (
           <Text style={[styles.hint, { color: theme.tokens.text.muted }]}>{m.composer_transcrevendo_audio()}</Text>
+        ) : null}
+
+        {dictation && !transcribing ? (
+          <View style={styles.errorRow}>
+            <Text style={[styles.hint, styles.recoverText, { color: theme.tokens.text.muted }]} accessibilityLiveRegion="polite">
+              {dictation.status === 'applied' ? m.composer_ditado_aplicado()
+                : dictation.text ? m.composer_ditado_recuperavel({ text: dictation.text.slice(0, 80) })
+                : dictation.issue || m.composer_ditado_interrompido()}
+            </Text>
+            {dictation.status === 'applied' ? null : dictation.text ? (
+              <Pressable onPress={handleRecoverDictation} style={[styles.undoBtn, { borderColor: theme.tokens.border.subtle }]} accessibilityRole="button">
+                <Text style={[styles.undoText, { color: theme.tokens.accent.base }]}>{m.composer_draft_recover()}</Text>
+              </Pressable>
+            ) : (
+              <Pressable onPress={handleRetry} style={[styles.retryBtn, { borderColor: theme.tokens.border.subtle }]} accessibilityRole="button">
+                <Text style={[styles.retryText, { color: theme.tokens.accent.base }]}>{m.composer_transcrever_de_novo()}</Text>
+              </Pressable>
+            )}
+            <Pressable onPress={handleDiscardDictation} style={[styles.undoBtn, { borderColor: theme.tokens.border.subtle }]} accessibilityRole="button">
+              <Text style={[styles.undoText, { color: theme.tokens.text.secondary }]}>{m.composer_draft_discard()}</Text>
+            </Pressable>
+          </View>
         ) : null}
 
         {autoN !== null ? (
