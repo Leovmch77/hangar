@@ -5,8 +5,8 @@ import * as m from '../paraglide/messages';
   import ThemeToggle from './ThemeToggle.svelte';
   import BackgroundToggle from './BackgroundToggle.svelte';
   import { basename, relativeTime, rotuloEstado, stateColors } from '@hangar/core';
-  import { listServers, listOwnServers, selectServer, serverColor, getActiveId } from '../lib/auth';
-  import { searchTranscriptsForServer, askHistoryForServer, getSearchContextForServer, type SearchHit } from '@hangar/core';
+  import { listServers, listOwnServers, selectServer, serverColor, getActiveId, type Server } from '../lib/auth';
+  import { searchTranscriptsForServer, askHistoryForServer, getSearchContextForServer, estaDesligado, type SearchHit } from '@hangar/core';
   import type { ChatEvent, SessionInfo, State } from '@hangar/core';
   import { renderMarkdown } from '../lib/markdown';
 
@@ -42,6 +42,10 @@ import * as m from '../paraglide/messages';
   let searchTimer: ReturnType<typeof setTimeout> | undefined;
   // Servidores que falharam na última busca: sem isto a falha virava "Nenhum resultado".
   let falhas = $state<string[]>([]);
+  // Servidores ainda sem resposta e os pulados por já estarem marcados fora do ar.
+  let pending = $state.raw<Server[]>([]);
+  let skipped = $state<string[]>([]);
+  let searchSeq = 0;
 
   const termosBusca = $derived([...new Set(query.trim().toLowerCase().split(/\s+/).filter(Boolean))]);
   const escapar = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -122,7 +126,7 @@ import * as m from '../paraglide/messages';
       mode = searchOnly ? 'search' : 'sessions';   // modo busca abre direto na busca
       query = '';
       results = [];
-      falhas = []; aberto = null;
+      falhas = []; aberto = null; pending = []; skipped = [];
       askAnswer = null; askErr = ''; asking = false;
       activeIdx = 0;
       // espera o sheet montar/animar antes de focar
@@ -155,6 +159,8 @@ import * as m from '../paraglide/messages';
     if (!term) {
       results = [];
       falhas = [];
+      pending = [];
+      skipped = [];
       searching = false;
       return;
     }
@@ -163,28 +169,45 @@ import * as m from '../paraglide/messages';
     return () => clearTimeout(searchTimer);
   });
 
-  async function runSearch(term: string) {
-    // Fan-out: 1 chamada por servidor (mesmo padrao de fetchSessionsForServer); um server lento/offline
-    // falha isolado (allSettled) sem segurar os outros.
-    const servers = listOwnServers();   // a busca de transcrição é do servidor inteiro: convite a barra
-    const settled = await Promise.allSettled(servers.map((s) => searchTranscriptsForServer(s, term)));
-    // Resultado velho: a query mudou (ou trocou de modo) enquanto o fetch voltava -> descarta.
-    if (term !== query.trim() || mode !== 'search') return;
-    const merged: Hit[] = [];
-    const falharam: string[] = [];
-    settled.forEach((r, i) => {
-      if (r.status === 'fulfilled') {
-        for (const h of r.value) merged.push({ ...h, serverId: servers[i].id, serverLabel: servers[i].label });
-      } else {
-        falharam.push(servers[i].label);
-      }
-    });
-    merged.sort((a, b) => b.mtime - a.mtime); // mais recente primeiro
-    results = merged;
-    falhas = falharam;
+  function runSearch(term: string) {
+    // Fan-out: 1 chamada por servidor; cada resposta entra na lista assim que chega, pra um servidor
+    // lento não segurar os resultados dos outros.
+    const seq = ++searchSeq;
+    // Resposta velha: outra busca começou, a query mudou ou trocou de modo -> descarta.
+    const valid = () => seq === searchSeq && term === query.trim() && mode === 'search';
+    const all = listOwnServers();   // a busca de transcrição é do servidor inteiro: convite a barra
+    const active = getActiveId();
+    // O app já sabe que estes estão fora do ar: esperar por eles só prenderia a busca.
+    const servers = all.filter((s) => s.id === active || !estaDesligado(s.id));
+    skipped = all.filter((s) => !servers.includes(s)).map((s) => s.label);
+    pending = servers;
+    results = [];
+    falhas = [];
     aberto = null;
-    searching = false;
+    searching = servers.length > 0;
+    for (const s of servers) {
+      searchTranscriptsForServer(s, term)
+        .then(
+          (hits) => {
+            if (!valid()) return;
+            const tagged = hits.map((h) => ({ ...h, serverId: s.id, serverLabel: s.label }));
+            results = [...results, ...tagged].sort((a, b) => b.mtime - a.mtime); // mais recente primeiro
+          },
+          () => { if (valid()) falhas = [...falhas, s.label]; },
+        )
+        .finally(() => {
+          if (!valid()) return;
+          pending = pending.filter((p) => p.id !== s.id);
+          searching = false;
+        });
+    }
   }
+  const pendingLine = $derived(
+    [
+      pending.length ? m.busca_aguardando({ servidores: pending.map((s) => s.label).join(', ') }) : '',
+      skipped.length ? m.busca_pulados({ servidores: skipped.join(', ') }) : '',
+    ].filter(Boolean).join(' · '),
+  );
 
   const multiServer = $derived(listServers().length > 1);
 
@@ -302,12 +325,13 @@ import * as m from '../paraglide/messages';
     {/if}
     <div class="list" aria-busy={searching}>
       {#each falhas as f (f)}<p class="ask-err" role="alert">{m.busca_servidor_falhou({ servidor: f })}</p>{/each}
+      {#if query.trim() && !searching && pendingLine}<p class="busca-resumo" role="status">{pendingLine}</p>{/if}
       {#if !query.trim()}
         <p class="empty">{m.busca_digite_todas()}</p>
       {:else if searching}
         <p class="empty" role="status">{m.switcher_buscando()}</p>
       {:else if results.length === 0}
-        {#if !falhas.length}<p class="empty">{m.busca_nenhum_todas({ termos: termosBusca.join(', ') })}</p>{/if}
+        {#if !falhas.length && !pending.length}<p class="empty">{m.busca_nenhum_todas({ termos: termosBusca.join(', ') })}</p>{/if}
       {:else}
         <p class="busca-resumo" role="status">{resumoBusca}</p>
         {#each grupos as g (g.chave)}

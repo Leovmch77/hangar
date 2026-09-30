@@ -1291,10 +1291,11 @@ export async function askHistoryForServer(
 }
 
 export async function searchTranscriptsForServer(s: Server, q: string): Promise<SearchHit[]> {
-  // 30s: a busca varre as conversas de todas as contas; um termo raro percorre tudo antes de parar.
+  // 8s: com o índice FTS a busca responde em milissegundos; esperar mais só prende a tela num
+  // servidor inalcançável. O `rg` de antes do índice ficar pronto pode estourar — vira aviso de falha.
   const res = await fetch(`${baseOf(s)}/api/search?q=${encodeURIComponent(q)}`, {
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${s.token}` },
-    signal: AbortSignal.timeout(30000),
+    signal: AbortSignal.timeout(8000),
   });
   if (!res.ok) throw new Error(`${res.status}`);
   return res.json() as Promise<SearchHit[]>;
