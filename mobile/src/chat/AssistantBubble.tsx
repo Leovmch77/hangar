@@ -6,7 +6,7 @@ import { Image } from 'expo-image';
 import { EnrichedMarkdownText } from 'react-native-enriched-markdown';
 import type { MarkdownStyle } from 'react-native-enriched-markdown';
 import { useRouter } from 'expo-router';
-import { fileUrlNative, fileAuthHeader, fileKind, lerTabelaMarkdown, parseCodePaths, parseFilePaths } from '@hangar/core';
+import { fileUrlNative, fileAuthHeader, fileKind, lerTabelaMarkdown, parseCodePaths, parseFilePaths, proposedPlan, planDisplayText } from '@hangar/core';
 import * as m from '../paraglide/messages';
 import { TableChart } from './TableChart';
 import { ArquivoChip } from './ArquivoChip';
@@ -82,6 +82,8 @@ export const AssistantBubble = memo(function AssistantBubble({
 }) {
   const { theme } = useUnistyles();
   const router = useRouter();
+  const proposed = useMemo(() => proposedPlan(text), [text]);
+  const display = useMemo(() => planDisplayText(text), [text]);
   const md = useMemo(() => mkMarkdownStyle(theme), [theme]);
   const refs = useMemo(() => parseFilePaths(text), [text]);
   const hasRefs = refs.length > 0 && !!sessionName;
@@ -90,7 +92,7 @@ export const AssistantBubble = memo(function AssistantBubble({
   // com extensão aberta no absoluto o `parseCodePaths` casa `.png` e o arquivo saía nos dois.
   const codigos = useMemo(() => parseCodePaths(text).filter((p) => !fileKind(p)), [text]);
   const hasCodigos = codigos.length > 0 && !!sessionName && !!serverId;
-  const tabelas = useMemo(() => lerTabelaMarkdown(text), [text]);
+  const tabelas = useMemo(() => lerTabelaMarkdown(display), [display]);
   const [pref, setPref] = useState(() => getTableChartPref());
   const [colIndices, setColIndices] = useState<number[]>(() => tabelas.map(() => 0));
   useEffect(() => {
@@ -99,7 +101,8 @@ export const AssistantBubble = memo(function AssistantBubble({
 
   return (
     <View style={styles.wrap}>
-      <EnrichedMarkdownText markdown={text} markdownStyle={md} flavor="github" />
+      {proposed ? <Text style={styles.planLabel}>{m.chat_plan_proposto()}</Text> : null}
+      <EnrichedMarkdownText markdown={display} markdownStyle={md} flavor="github" />
       {tabelas.length > 0 ? (
         <View style={styles.tableBlock}>
           <Pressable
@@ -171,6 +174,11 @@ export const AssistantBubble = memo(function AssistantBubble({
 });
 
 const styles = StyleSheet.create((theme) => ({
+  planLabel: {
+    color: theme.tokens.accent.base,
+    fontSize: theme.base.text.sm,
+    fontWeight: '600',
+  },
   wrap: {
     alignSelf: 'flex-start',
     maxWidth: '92%',
