@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
 import * as m from '../paraglide/messages';
   import HangarMark from './icons/HangarMark.svelte';
+  import HangarRunning from './HangarRunning.svelte';
   import HangarWorking from './icons/HangarWorking.svelte';
   import IconFolder from './icons/IconFolder.svelte';
   import IconWorktree from './icons/IconWorktree.svelte';
@@ -661,8 +662,8 @@ import ConfirmDialog from './ConfirmDialog.svelte';
          icone como clique morto — foi apagada; sobrou so a escolha de ALTURA, que e o que faltava. -->
     <!-- A marca fica nas DUAS formas do sidebar: expandido acompanha o nome, recolhido (rail) ela
          é o que sobra. Com 2 arcos, porque no rail ela desenha em ~20px. -->
-    <span class="side-mark" aria-label="Hangar"><HangarMark size={20} arcs={2} /></span>
-    {#if expanded}<span class="side-brand">Hangar</span>{/if}
+    <span class="side-mark" aria-label="Hangar"><HangarMark size={20} arcs={2} />{#if !expanded}<HangarRunning rail />{/if}</span>
+    {#if expanded}<span class="side-brand">Hangar</span><HangarRunning />{/if}
     {#if expanded}
     <!-- Broadcast (feature #9): entra/sai do modo seleção multipla. -->
     <button
@@ -1595,7 +1596,7 @@ import ConfirmDialog from './ConfirmDialog.svelte';
   /* o rotulo so aparece se sobrar espaco: no rodape em linha o icone ja basta */
   .fold-label { display: none; }
   .row-mark { display: inline-flex; }
-  .side-mark { display: flex; align-items: center; color: var(--accent); flex: 0 0 auto; }
+  .side-mark { position: relative; display: flex; align-items: center; color: var(--accent); flex: 0 0 auto; }
   /* Colada na borda e recolhida, a marca do trilho fica logo abaixo da marca da barra de abas
      (SessionTabs), na mesma coluna: duas iguais empilhadas. Em caixa solta a margem separa. */
   :global(html[data-panels='edge']) .sidebar.collapsed .side-mark { display: none; }

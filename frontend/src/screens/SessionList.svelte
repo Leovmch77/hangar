@@ -8,6 +8,7 @@
   import { onMount } from 'svelte';
 import * as m from '../paraglide/messages';
   import HangarMark from '../components/icons/HangarMark.svelte';
+  import HangarRunning from '../components/HangarRunning.svelte';
   import GroupGlyph from '../components/icons/GroupGlyph.svelte';
   import SessionCard from '../components/SessionCard.svelte';
   import CreateSessionSheet from '../components/CreateSessionSheet.svelte';
@@ -32,8 +33,9 @@ import * as m from '../paraglide/messages';
     onNavigateToChat: (name: string) => void;
     onCompare: (ids: { serverId: string; name: string }[]) => void;
     onLogout: () => void;
+    onOpenTerminal?: (serverId: string, owner: string, id: string) => void;
   }
-  let { onNavigateToChat, onCompare, onLogout }: Props = $props();
+  let { onNavigateToChat, onCompare, onLogout, onOpenTerminal }: Props = $props();
 
   // Toda a lógica da lista (grupos, filtro, seleção/broadcast, ações) mora no modelo compartilhado
   // com a Sidebar; aqui fica só o chrome do celular (drawer, feed, scroll, Loop) e os embrulhos.
@@ -413,6 +415,7 @@ import * as m from '../paraglide/messages';
       </svg>
     </button>
     <span class="sl-brand"><HangarMark size={18} arcs={2} /> Hangar</span>
+    <HangarRunning {onOpenTerminal} />
     <button
       class="sl-icon-btn"
       class:active={model.selectMode}

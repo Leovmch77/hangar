@@ -28,6 +28,8 @@
   import TtsSelectionPill from './components/TtsSelectionPill.svelte';
   import CodeOverlay from './components/CodeOverlay.svelte';
   import GrupoDropDialog from './components/GrupoDropDialog.svelte';
+  import ShortcutQuestion from './components/ShortcutQuestion.svelte';
+  import { hangarOf } from './lib/hangarTerminals.svelte';
   import { iniciarCodeActions } from './lib/codeActions.svelte';
   import { navegadorNativo } from './lib/navegadorNativo';
   import { sessionsStore } from './lib/sessionsStore.svelte';
@@ -383,6 +385,19 @@
     navigateTo('#/');
   }
 
+  // Desktop: o pedido de aba já foi registrado por quem chamou e o DesktopShell abre o painel.
+  // Celular: nada consome o pedido sozinho, então vai pro Chat da sessão dona do terminal (o Chat
+  // abre o terminal ao montar); terminal No Hangar cuja sessão de origem já fechou fica na lista.
+  let hangarNotice = $state('');
+  function openShortcutTerminal(serverId: string, owner: string, id: string) {
+    if (isDesktop) return;
+    const target = owner || hangarOf(serverId).find((t) => t.id === id)?.origin || '';
+    if (!target) { hangarNotice = m.hangar_sem_sessao(); return; }
+    hangarNotice = '';
+    selectServer(serverId);
+    navigateToChat(target);
+  }
+
   // Entrada da grade de comparação (feature #11): vem da seleção múltipla da lista de sessões
   // (Sidebar/SessionList), reusando a MESMA seleção do broadcast. Menos de 2 não abre — comparar
   // 0/1 sessão não faz sentido (o botão de origem já fica desabilitado antes disso, mas defensivo).
@@ -580,6 +595,7 @@
       onNavigateToChat={navigateToChat}
       onCompare={navigateToCompare}
       {onLogout}
+      onOpenTerminal={openShortcutTerminal}
     />
   {:else if route.name === 'chat'}
     <!-- Remonta ao trocar de sessao (switcher): re-roda loadHistory + reconecta o SSE.
@@ -612,6 +628,14 @@
        a arrastarGrupo.pedido — as quatro superfícies que arrastam (Sidebar/Board/Canvas/celular,
        Task 3+) só chamam arrastarGrupo.soltar/pedirSaida, sem montar o diálogo cada uma. -->
   <GrupoDropDialog />
+  <!-- Pergunta dos terminais de atalho: montado UMA vez, aberto por openQuestion(). -->
+  <ShortcutQuestion onOpenTerminal={openShortcutTerminal} />
+  {#if hangarNotice}
+    <p class="hangar-notice" role="status">
+      {hangarNotice}
+      <button type="button" onclick={() => (hangarNotice = '')} aria-label={m.hangar_dispensar()}>×</button>
+    </p>
+  {/if}
 
   {#if cfg && telaEfetiva && route.name !== 'login' && route.name !== 'loading'}
     <SettingsModal
@@ -632,6 +656,13 @@
 </div>
 
 <style>
+  .hangar-notice {
+    position: fixed; left: var(--space-4); right: var(--space-4); bottom: calc(env(safe-area-inset-bottom) + var(--space-4));
+    z-index: 200; margin: 0; padding: 10px 14px; display: flex; gap: 10px; align-items: center;
+    border-radius: var(--radius-md); background: var(--bg-elevated); border: 1px solid var(--border-default);
+    color: var(--text-primary); font-size: var(--text-sm); box-shadow: 0 12px 32px rgba(0, 0, 0, 0.4);
+  }
+  .hangar-notice button { margin-left: auto; color: var(--text-muted); font-size: 18px; line-height: 1; }
   .app-root {
     height: 100%;
     display: flex;
