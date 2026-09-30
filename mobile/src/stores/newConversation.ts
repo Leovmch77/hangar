@@ -8,6 +8,8 @@ import type {
 } from '@hangar/core';
 import { prefs } from './prefs';
 import { useServers } from './servers';
+import { readDraft, writeDraft } from './drafts';
+import { submitConversationDraft } from './chat';
 import * as m from '../paraglide/messages';
 
 export type NewConversationIssue =
@@ -57,6 +59,13 @@ function isAttempt(value: unknown, serverId: string): value is FirstConversation
 // Grava antes de publicar na memória: o que a tela mostra sempre existe no disco.
 function persist(attempt: FirstConversationAttempt): void {
   prefs.set(KEY(attempt.serverId), JSON.stringify(attempt));
+  // O ACK da criação fica guardado mesmo se a transferência ao rascunho falhar.
+  if (attempt.sessionName && !readDraft(attempt.serverId, attempt.sessionName)) {
+    writeDraft(attempt.serverId, attempt.sessionName, {
+      version: 1, text: attempt.phase === 'sent' ? '' : attempt.text, revision: 1,
+      transcript: null, attachment: null, submission: null,
+    });
+  }
   useNewConversation.setState((s) => ({ attempts: { ...s.attempts, [attempt.serverId]: attempt } }));
 }
 
@@ -108,7 +117,8 @@ export function restoreAttempt(serverId: string): FirstConversationAttempt | nul
   if (attempt.phase === 'creating') attempt = transitionFirstConversation(attempt, { type: 'create_unknown' });
   if (attempt.phase === 'sending') attempt = transitionFirstConversation(attempt, { type: 'send_unknown' });
   try { persist(attempt); } catch {
-    useNewConversation.setState((s) => ({ attempts: { ...s.attempts, [serverId]: attempt } }));
+    setIssue(serverId, { kind: 'local', message: m.nova_conversa_salvar_erro() });
+    return null;
   }
   if (attempt.phase === 'create_unknown' && !useNewConversation.getState().issues[serverId]) {
     setIssue(serverId, { kind: 'unknown', message: m.nova_conversa_criacao_incerta() });
@@ -121,6 +131,7 @@ export function restoreAttempt(serverId: string): FirstConversationAttempt | nul
 
 async function runCreate(serverId: string, input: NewConversationInput): Promise<void> {
   const current = useNewConversation.getState().attempts[serverId] ?? restoreAttempt(serverId);
+  if (!current && prefs.getString(KEY(serverId)) !== undefined) return;
   if (current && current.phase !== 'draft') return;
 
   const server = serverById(serverId);
@@ -161,7 +172,13 @@ async function runCreate(serverId: string, input: NewConversationInput): Promise
         : { kind: 'unknown', message: m.nova_conversa_criacao_incerta() });
     return;
   }
-  apply(creating, { type: 'create_ok', sessionName: session.name });
+  try { apply(creating, { type: 'create_ok', sessionName: session.name }); } catch {
+    // Mantém uma recuperação por leitura disponível, sem publicar destino sem rascunho durável.
+    useNewConversation.setState((s) => ({ attempts: { ...s.attempts, [serverId]: {
+      ...creating, phase: 'create_unknown',
+    } } }));
+    setIssue(serverId, { kind: 'local', message: m.nova_conversa_salvar_erro() });
+  }
 }
 
 function exclusive(serverId: string, work: () => Promise<void>): Promise<void> {
@@ -197,9 +214,31 @@ export function sendFirstInput(serverId: string, attemptId: string): Promise<voi
     setIssue(serverId, null);
 
     // O catch da rede não pode interpretar uma falha posterior no disco como recusa do servidor.
+    let posted = false;
+    let acked = false;
     try {
-      await sendInputForServer(server, attempt.sessionName, sending.text);
+      await submitConversationDraft(serverId, attempt.sessionName, sending.text,
+        async () => {
+          posted = true;
+          await sendInputForServer(server, attempt.sessionName!, sending.text);
+          acked = true;
+        });
     } catch (cause) {
+      if (!posted) {
+        try { apply(sending, { type: 'send_rejected' }); } catch {
+          // A tentativa durável permanece disponível quando o próprio rollback não pode ser salvo.
+        }
+        setIssue(serverId, { kind: 'local', message: messageOf(cause) });
+        return;
+      }
+      if (acked) {
+        try { apply(sending, { type: 'send_ok' }); } catch {
+          setIssue(serverId, { kind: 'local', message: m.nova_conversa_resultado_salvar_erro() });
+          return;
+        }
+        setIssue(serverId, { kind: 'local', message: messageOf(cause) });
+        return;
+      }
       const status = statusOf(cause);
       const rejected = status !== null && status >= 400 && status < 500 && status !== 408;
       try {
@@ -230,7 +269,12 @@ export function readFirstInput(serverId: string, name: string): FirstConversatio
 // Finaliza somente o snapshot cujo ACK já foi gravado, nunca uma tentativa nova ou incerta.
 export function confirmFirstInput(attemptId: string): void {
   const attempt = Object.values(useNewConversation.getState().attempts).find((a) => a.id === attemptId);
-  if (attempt?.phase === 'sent') discardAttempt(attempt.serverId, attemptId);
+  if (attempt?.phase !== 'sent') return;
+  try { persist(attempt); } catch {
+    setIssue(attempt.serverId, { kind: 'local', message: m.nova_conversa_resultado_salvar_erro() });
+    return;
+  }
+  discardAttempt(attempt.serverId, attemptId);
 }
 
 // Consulta lista e progresso do MESMO servidor e nome; nunca cria e nunca troca de nome.
@@ -277,7 +321,11 @@ export function adoptCandidate(serverId: string, attemptId: string): boolean {
   const issue = useNewConversation.getState().issues[serverId];
   const attempt = useNewConversation.getState().attempts[serverId];
   if (issue?.kind !== 'candidate' || attempt?.id !== attemptId) return false;
-  const next = apply(attempt, { type: 'create_ok', sessionName: issue.session.name });
+  let next: FirstConversationAttempt | null;
+  try { next = apply(attempt, { type: 'create_ok', sessionName: issue.session.name }); } catch {
+    setIssue(serverId, { kind: 'local', message: m.nova_conversa_salvar_erro() });
+    return false;
+  }
   if (!next) return false;
   setIssue(serverId, null);
   return true;
