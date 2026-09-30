@@ -33,6 +33,7 @@ mod disk;
 mod machines;
 mod orchestration;
 mod orq_roles;
+mod orq_timeline;
 mod panes;
 mod popup;
 mod rail;
@@ -389,6 +390,8 @@ pub struct Hangar {
     row_signatures: Vec<String>,
     items: Vec<Item>,
     expanded: HashSet<String>,
+    // Sessão orq: ids dos eventos que abrem um dia novo, para o separador sair antes deles.
+    orq_days: HashSet<String>,
     // Coluna que o gráfico de cada tabela mostra, pela chave "<linha>#t<n>".
     table_column: HashMap<String, usize>,
     // Tabelas que dão gráfico em cada resposta, com a fonte de onde saíram: refeitas só quando a fonte muda.
@@ -671,7 +674,7 @@ impl Hangar {
             delivery: DeliveryTracker::default(), stopping: HashSet::new(), stop_feedback: HashMap::new(), drafts: HashMap::new(),
             flight: InFlight::default(), action_feedback: HashMap::new(), live_terms: Vec::new(), question_open: None, question_card: None,
             hangar_open: false, hangar_focus: cx.focus_handle(), hangar_error: None, live_clock: None, ask_form: AskForm::default(), plans_dismissed: HashSet::new(), answered_tools: HashSet::new(), answering: HashMap::new(), ask_scroll: Default::default(), plan_scroll: Default::default(), plan_view: None,
-            list_state, rail_hover: None, follow: Default::default(), row_ids: Vec::new(), row_signatures: Vec::new(), items: Vec::new(), expanded: HashSet::new(),
+            list_state, rail_hover: None, follow: Default::default(), row_ids: Vec::new(), row_signatures: Vec::new(), items: Vec::new(), expanded: HashSet::new(), orq_days: HashSet::new(),
             table_column: HashMap::new(), tables: HashMap::new(), paired: HashMap::new(), activity: Default::default(), pinned: HashSet::new(), last_message: None, live_clear_epoch: [0; 2], rich: HashMap::new(), prepared: HashMap::new(), render_tick: 0,
             preview_drop_epoch: 0, preview_drop_scheduled: false,
             visible_preview: Preview::default(), preview_tick_epoch: 0, preview_tick_scheduled: false,
@@ -2393,6 +2396,7 @@ impl Hangar {
         self.items = conversation::build(&self.chat.events, conversation::View { thinking: a.thinking_tools, tasks: a.task_list,
             merge_thinking: a.tool_look == appearance::ToolLook::Tree }, &self.pinned);
         self.paired = conversation::pair_results(&self.chat.events).0;
+        self.orq_days = if self.selected.as_ref().is_some_and(SessionInfo::orq) { orq_timeline::day_starts(&self.chat.events) } else { HashSet::new() };
         self.sync_tables(a.table_chart, stable);
         api::open_trace(|| format!("sync_rows built {} items, {stable} events unchanged", self.items.len()));
         self.sync_row_ids(Some(stable), cx);
@@ -3740,6 +3744,10 @@ impl Hangar {
         let id = id.to_owned();
         let mut discard = None;
         let mut baton = None;
+        // Sessão orq: linha do tempo do orquestrador já interpretada pelo backend, desenhada à parte.
+        if let Some(&Item::Event(event_index)) = self.items.get(index).filter(|_| id != PREVIEW) {
+            if self.chat.events.get(event_index).is_some_and(|event| event.orq.is_some()) { return self.render_orq_event(&id, event_index, cx); }
+        }
         // Texto preparado quando o chat mudou; a prévia usa a fonte que o passo do streaming já montou.
         let (markdown, blank) = if id == PREVIEW {
             let markdown = self.rich.get(&id).map(|rich| rich.source.clone()).unwrap_or_else(|| preview_source(&self.visible_preview));
