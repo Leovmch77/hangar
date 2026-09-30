@@ -27,9 +27,11 @@ export async function sessionExistsOnServer(s: Server, name: string): Promise<bo
 // `new WebSocket('/api/...')` sozinho levanta SyntaxError — mesmo fallback do termUrl antigo.
 // `shortcut`: terminal de atalho da sessao `name` — o backend resolve o alvo tmux pelo dono.
 export function termUrlForServer(s: Server, name: string, cols: number, rows: number,
-                                 extra?: { shortcut?: string }): string {
+                                 extra?: { shortcut?: string; hangar?: string }): string {
   const base = (baseOf(s) || location.origin).replace(/^http/, 'ws');
   const qs = new URLSearchParams({ token: s.token, cols: String(cols), rows: String(rows) });
+  // `hangar`: terminal No Hangar, sem sessão dona (`name` é ignorado).
+  if (extra?.hangar) return `${base}/api/hangar-terminals/${encodeURIComponent(extra.hangar)}/term?${qs}`;
   if (extra?.shortcut) qs.set('shortcut', extra.shortcut);
   return `${base}/api/sessions/${encodeURIComponent(name)}/term?${qs}`;
 }

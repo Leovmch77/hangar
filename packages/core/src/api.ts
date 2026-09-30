@@ -2473,23 +2473,50 @@ export function getRunPane(name: string): Promise<{ pane: string }> {
 
 /** Terminal escondido de um atalho "shell": uma aba no painel de terminal da sessão. O pane fica
  * depois que o comando sai (`alive: false`), com a saída e o código na tela até alguém fechar. */
+export interface ShortcutQuestion { text: string; default: string; screen: string[] }
+
 export interface ShortcutTerminal {
   id: string;
   label: string;
   alive: boolean;
   exit_code: number | null;
   created?: number;
+  ask?: boolean;
+  key?: string;
+  question?: ShortcutQuestion | null;
 }
+
+/** Linha do evento `shortcut_terminals`: dono vazio + `key` = No Hangar; `origin` = quem abriu. */
+export interface LiveShortcutTerminal extends ShortcutTerminal {
+  owner: string;
+  key: string;
+  origin: string;
+}
+
+export interface ShortcutShellResult {
+  ok: boolean;
+  terminal?: ShortcutTerminal;
+  reused?: boolean;
+  focused?: boolean;
+}
+
+/** Servidor com versão anterior aos atalhos No Hangar: ignoraria `runs_in` e abriria uma cópia da sessão. */
+export class OutdatedServerError extends Error {}
 
 /** Atalho "shell" da fileira, no cwd da sessão. No servidor POSIX cada execução ganha um
  * terminal próprio (`terminal` na resposta). Se o comando sai com erro nos primeiros 2 s, volta
  * 422 com o código e o fim da saída — o terminal continua listado pra ver a saída inteira. */
-export function runShortcutShell(name: string, command: string, label?: string, pasta?: string):
-    Promise<{ ok: boolean; terminal?: ShortcutTerminal }> {
-  return apiFetch(`/api/sessions/${encodeURIComponent(name)}/shortcut-shell`, {
+export async function runShortcutShell(name: string, command: string, label?: string, pasta?: string,
+                                       opts: { key?: string; hangar?: boolean; home?: boolean; ask?: boolean } = {}): Promise<ShortcutShellResult> {
+  const r = await apiFetch<ShortcutShellResult>(`/api/sessions/${encodeURIComponent(name)}/shortcut-shell`, {
     method: 'POST',
-    body: JSON.stringify({ command, ...(label ? { label } : {}), ...(pasta ? { pasta } : {}) }),
+    body: JSON.stringify({ command, ...(label ? { label } : {}), ...(pasta ? { pasta } : {}),
+      ...(opts.key ? { key: opts.key } : {}),
+      ...(opts.hangar ? { runs_in: 'hangar', home: opts.home !== false } : {}),
+      ask: opts.ask !== false }),
   });
+  if (opts.hangar && r.reused === undefined) throw new OutdatedServerError('outdated');
+  return r;
 }
 
 /** Atalhos do projeto da sessão (guardados na máquina do servidor, por repositório). */
@@ -2543,6 +2570,27 @@ export function closeShortcutTerminal(srv: Server, name: string, id: string): Pr
   return apiFetchForServer<{ ok: true }>(
     srv, `/api/sessions/${encodeURIComponent(name)}/shortcut-terminals/${encodeURIComponent(id)}/close`,
     { method: 'POST' });
+}
+
+const hangarPath = (id: string, action: string) => `/api/hangar-terminals/${encodeURIComponent(id)}/${action}`;
+
+export function closeHangarTerminal(srv: Server, id: string): Promise<{ ok: true }> {
+  return apiFetchForServer(srv, hangarPath(id, 'close'), { method: 'POST' });
+}
+export function restartHangarTerminal(srv: Server, id: string): Promise<ShortcutShellResult> {
+  return apiFetchForServer(srv, hangarPath(id, 'restart'), { method: 'POST' });
+}
+/** Digita a resposta e Enter. Vazio = só Enter (aceita o padrão). */
+export function answerHangarTerminal(srv: Server, id: string, text: string): Promise<{ ok: true }> {
+  return apiFetchForServer(srv, hangarPath(id, 'answer'), { method: 'POST', body: JSON.stringify({ text }) });
+}
+export function answerShortcutTerminal(srv: Server, name: string, id: string, text: string): Promise<{ ok: true }> {
+  return apiFetchForServer(srv,
+    `/api/sessions/${encodeURIComponent(name)}/shortcut-terminals/${encodeURIComponent(id)}/answer`,
+    { method: 'POST', body: JSON.stringify({ text }) });
+}
+export function focusHangarTerminal(srv: Server, id: string): Promise<{ focused: boolean }> {
+  return apiFetchForServer(srv, hangarPath(id, 'focus'), { method: 'POST' });
 }
 
 // Limites de uso da conta Codex (Task B) — so sessoes Codex; o back devolve 400 pra Claude.
