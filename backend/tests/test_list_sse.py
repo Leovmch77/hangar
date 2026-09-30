@@ -275,3 +275,44 @@ def test_guest_never_gets_shortcut_terminals(monkeypatch):
     monkeypatch.setattr(sse, "_shortcuts_snapshot", lambda: '[{"id": "abc123"}]')
     evs = asyncio.run(_take(sse.list_events(ping_secs=0.05, only="cc"), 3))
     assert "shortcut_terminals" not in [e["event"] for e in evs]
+
+
+def test_hanging_shortcuts_snapshot_never_delays_sessions(monkeypatch):
+    import threading, time
+    release = threading.Event()
+    async def fake_list(_snap=None):
+        return [_Info("cc", "idle")]
+    monkeypatch.setattr(sse._list_registry, "list_with_state", fake_list)
+    monkeypatch.setattr(sse, "_shortcuts_snapshot", lambda: release.wait(2) and '[{"id": "old"}]')
+    try:
+        async def go():
+            t0 = time.monotonic()
+            evs = await _take(sse.list_events(ping_secs=0.05), 2)
+            return evs, time.monotonic() - t0
+        evs, took = asyncio.run(go())
+        assert evs[0]["event"] == "sessions"
+        assert took < 1.0
+        assert "shortcut_terminals" not in [e["event"] for e in evs]
+    finally:
+        release.set()
+
+
+def test_failing_shortcuts_snapshot_keeps_previous_and_leaves_list_alone(monkeypatch):
+    async def fake_list(_snap=None):
+        return [_Info("cc", "idle")]
+    monkeypatch.setattr(sse._list_registry, "list_with_state", fake_list)
+    calls = {"n": 0}
+
+    def snap():
+        calls["n"] += 1
+        if calls["n"] > 1:
+            raise RuntimeError("tmux caiu")
+        return '[{"id": "a"}]'
+    monkeypatch.setattr(sse, "_shortcuts_snapshot", snap)
+    evs = asyncio.run(_take(sse.list_events(ping_secs=0.1), 3))
+    names = [e["event"] for e in evs]
+    assert "list_error" not in names
+    assert names.count("shortcut_terminals") == 1
+    assert calls["n"] > 1
+    assert not sse._list_refresher.errored
+

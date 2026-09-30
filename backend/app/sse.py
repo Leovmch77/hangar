@@ -403,6 +403,9 @@ class _ListRefresher:
         self.poll = poll
         self.data: str | None = None
         self.shortcuts_data: str | None = None
+        self._sc_task: asyncio.Task | None = None
+        self._sc_started = 0.0
+        self._sc_failing = False
         self.sig: str | None = None
         self.version = 0
         self.errored = False
@@ -421,6 +424,8 @@ class _ListRefresher:
             self._cond = asyncio.Condition()
             self.data = None
             self.shortcuts_data = None
+            self._sc_task = None
+            self._sc_failing = False
             self.sig = None
             self.version = 0
             self.errored = False
@@ -431,16 +436,37 @@ class _ListRefresher:
             context.run(diag.req_atual.set, "")
             self._task = asyncio.create_task(self._run(), context=context)
 
-    async def _read_shortcuts(self) -> str | None:
-        try:
-            return await asyncio.to_thread(_shortcuts_snapshot)
-        except Exception:
-            _log.warning("terminais de atalho: leitura falhou; mantem a anterior", exc_info=True)
+    def _launch_shortcuts(self) -> None:
+        # A lista nunca espera terminal de atalho: a leitura roda ao lado da lista, no máximo uma em
+        # voo (thread não cancela; travada, só segura o valor anterior em vez de acumular threads).
+        if self._sc_task is None:
+            self._sc_task = asyncio.create_task(asyncio.to_thread(_shortcuts_snapshot))
+            self._sc_started = time.monotonic()
+        elif not self._sc_task.done() and time.monotonic() - self._sc_started > 5 and not self._sc_failing:
+            self._sc_failing = True
+            _log.warning("terminais de atalho: leitura travada; mantem a anterior")
+
+    def _harvest_shortcuts(self) -> str | None:
+        task = self._sc_task
+        if task is None or not task.done():
             return self.shortcuts_data
+        self._sc_task = None
+        if task.cancelled():
+            return self.shortcuts_data
+        try:
+            value = task.result()
+        except Exception:
+            # Uma vez por queda, não a cada ciclo.
+            if not self._sc_failing:
+                _log.warning("terminais de atalho: leitura falhou; mantem a anterior", exc_info=True)
+            self._sc_failing = True
+            return self.shortcuts_data
+        self._sc_failing = False
+        return value
 
     async def _run(self):
         while True:
-            shortcuts = await self._read_shortcuts()
+            self._launch_shortcuts()
             try:
                 started = time.monotonic()
                 snap = [i.model_copy() for i in await _cached_list()]
@@ -480,6 +506,7 @@ class _ListRefresher:
             # ignora (last_activity, statusline inteira). Lista já decorada não é mais escrita.
             # Idade conta do início do tique: lista iniciada antes de uma invalidação não vale.
             self.latest = (started, infos)
+            shortcuts = self._harvest_shortcuts()
             # sucesso: emite se a sig mudou OU se estava em erro (pra o front LIMPAR o list_error).
             # `data`/`sig` só andam quando a assinatura da lista muda: gravar `data` numa mudança que
             # é só dos terminais reemitiria `sessions` por um `last_activity` que a assinatura ignora.
@@ -506,6 +533,9 @@ class _ListRefresher:
         if self._refs <= 0 and self._task is not None:
             self._task.cancel()
             self._task = None
+            if self._sc_task is not None:
+                self._sc_task.cancel()
+                self._sc_task = None
             self._refs = 0
 
 
