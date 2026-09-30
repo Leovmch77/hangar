@@ -26,7 +26,9 @@
   let lastId = '';
   // Assinatura da pergunta JÁ respondida: a lista só atualiza ~1,5 s depois do envio, e até lá a
   // pergunta velha não pode voltar como "nova" (o Enter seguinte iria pra pergunta errada).
-  let sentSig = '';
+  // É $state porque o `pending` abaixo lê: sem isso a pergunta velha seguia editável após Enviar.
+  let sentSig = $state('');
+  let field = $state<HTMLInputElement | null>(null);
 
   $effect(() => {
     if (open?.id !== lastId) { lastId = open?.id ?? ''; answered = []; hide = false; sentSig = ''; }
@@ -78,6 +80,7 @@
     title={m.pergunta_titulo({ rotulo: term?.label ?? '' })}
     aria={m.pergunta_titulo({ rotulo: term?.label ?? '' })}
     onClose={closeQuestion}
+    initialFocus={field}
     actions={[
       { label: m.pergunta_abrir_terminal(), onClick: openTerminal },
       { label: m.pergunta_enviar(), kind: 'primary', disabled: sending || !pending, onClick: send },
@@ -93,7 +96,7 @@
     {#if term?.question && pending}
       <label class="pq-field">
         <span class="pq-text">{term.question.text}</span>
-        <input type={hide ? 'password' : 'text'} bind:value={answer} autocomplete="off"
+        <input type={hide ? 'password' : 'text'} bind:value={answer} bind:this={field} autocomplete="off"
                onkeydown={(e) => { if (e.key === 'Enter') { e.preventDefault(); void send(); } }} />
         {#if term.question.default}<small>{m.pergunta_padrao()}</small>{/if}
       </label>

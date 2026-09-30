@@ -29,7 +29,7 @@
   import CodeOverlay from './components/CodeOverlay.svelte';
   import GrupoDropDialog from './components/GrupoDropDialog.svelte';
   import ShortcutQuestion from './components/ShortcutQuestion.svelte';
-  import { hangarOf } from './lib/hangarTerminals.svelte';
+  import { hangarOf, requestOwnerPanel, takeHangarTab } from './lib/hangarTerminals.svelte';
   import { iniciarCodeActions } from './lib/codeActions.svelte';
   import { navegadorNativo } from './lib/navegadorNativo';
   import { sessionsStore } from './lib/sessionsStore.svelte';
@@ -385,14 +385,20 @@
     navigateTo('#/');
   }
 
-  // Desktop: o pedido de aba já foi registrado por quem chamou e o DesktopShell abre o painel.
+  // Desktop: terminal No Hangar já tem o pedido de aba registrado por quem chamou; terminal "Na
+  // sessão" pede ao DesktopShell o painel da sessão dona (a aba vem do foco já registrado).
   // Celular: nada consome o pedido sozinho, então vai pro Chat da sessão dona do terminal (o Chat
-  // abre o terminal ao montar); terminal No Hangar cuja sessão de origem já fechou fica na lista.
+  // abre o terminal ao montar, lendo shortcutTerminals.focus["<servidor>::<dona>"] ou
+  // liveTerminals.panelRequest[servidor]); terminal No Hangar cuja sessão de origem já fechou fica
+  // na lista, e o pedido é descartado pra não ficar pendente.
   let hangarNotice = $state('');
   function openShortcutTerminal(serverId: string, owner: string, id: string) {
-    if (isDesktop) return;
+    if (isDesktop) {
+      if (owner) requestOwnerPanel(serverId, owner);
+      return;
+    }
     const target = owner || hangarOf(serverId).find((t) => t.id === id)?.origin || '';
-    if (!target) { hangarNotice = m.hangar_sem_sessao(); return; }
+    if (!target) { takeHangarTab(serverId); hangarNotice = m.hangar_sem_sessao(); return; }
     hangarNotice = '';
     selectServer(serverId);
     navigateToChat(target);

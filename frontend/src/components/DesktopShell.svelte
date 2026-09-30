@@ -24,7 +24,7 @@ import * as m from '../paraglide/messages';
   import { atualizarUI } from '../lib/atualizarUI.svelte';
   import AtualizarSheet from './AtualizarSheet.svelte';
   import { getActiveId, selectServer } from '../lib/auth';
-  import { hangarOf, liveTerminals, takeHangarTab } from '../lib/hangarTerminals.svelte';
+  import { hangarOf, liveTerminals, takeHangarTab, takeOwnerPanel } from '../lib/hangarTerminals.svelte';
   import { navMode } from '../lib/navMode.svelte';
   import { sidebarPin } from '../lib/sidebarPin.svelte';
   import type { AggSession } from '@hangar/core';
@@ -455,24 +455,52 @@ import * as m from '../paraglide/messages';
     if (terminalOpen && !shortcutsOnlyPanel && !sessoesNaTela.includes(terminalKey)) terminalOpen = false;
   });
 
-  // Pedido de aba No Hangar (chip, cartão da pergunta, tile) com o painel FECHADO: abre o painel da
-  // sessão na tela; sem sessão na tela (Quadro, Canvas), abre o painel só com as abas de atalho.
-  // Pedido de terminal que já não existe é descartado, senão reabriria o painel a cada fechamento.
-  // O pedido fica pro TerminalPanel consumir quando montar (ele seleciona a aba do terminal).
+  // Sessão que o usuário está vendo (Chat, ou o overlay do Quadro/Canvas). Orq não monta Chat.
+  const onScreenSession = $derived(
+    overlaySession ? { name: overlaySession.name, serverId: overlaySession.serverId }
+      : currentSession && view !== 'board' && view !== 'canvas' && view !== 'orq'
+        ? { name: currentSession, serverId: serverIdPrincipal } : null,
+  );
+
+  // Pedido de aba No Hangar (chip, cartão da pergunta, tile) sem painel aberto NAQUELE servidor: abre o
+  // painel da sessão na tela; sem sessão na tela (Quadro, Canvas), abre o painel só com as abas de
+  // atalho. Painel aberto de outro servidor conta como fechado. Pedido de terminal que já não
+  // existe é descartado, senão reabriria o painel a cada fechamento. O pedido fica pro TerminalPanel
+  // consumir quando montar (ele seleciona a aba do terminal).
   $effect(() => {
     const serverId = Object.keys(liveTerminals.panelRequest)[0];
-    if (!serverId || terminalOpen) return;
+    if (!serverId) return;
+    if (terminalOpen && terminalKey.split('::')[0] === serverId) return;
     const id = liveTerminals.panelRequest[serverId];
     if (!hangarOf(serverId).some((t) => t.id === id)) { takeHangarTab(serverId); return; }
-    const onScreen = overlaySession ? { name: overlaySession.name, serverId: overlaySession.serverId }
-      : currentSession && view !== 'board' && view !== 'canvas' && view !== 'orq'
-        ? { name: currentSession, serverId: serverIdPrincipal } : null;
+    const onScreen = onScreenSession;
     if (onScreen && onScreen.serverId === serverId) {
       const headless = rows.find((r) => r.name === onScreen.name && r.serverId === serverId)?.headless === true;
       abrirTerminal(onScreen.name, serverId, headless);
     } else {
       abrirTerminal('', serverId, true, true);
     }
+  });
+
+  // Pedido do painel da sessão dona de um terminal "Na sessão" (cartão da pergunta): leva a sessão pra
+  // tela, se ainda não está, e abre o painel; a aba vem de shortcutTerminals.focus. Sessão que não
+  // existe mais descarta o pedido.
+  let ownerNavKey = '';
+  $effect(() => {
+    const req = liveTerminals.ownerPanelRequest;
+    if (!req) { ownerNavKey = ''; return; }
+    const row = rows.find((r) => r.serverId === req.serverId && r.name === req.owner);
+    if (!row) { takeOwnerPanel(); return; }
+    const onScreen = onScreenSession;
+    if (onScreen && onScreen.serverId === req.serverId && onScreen.name === req.owner) {
+      takeOwnerPanel();
+      abrirTerminal(req.owner, req.serverId, row.headless === true);
+      return;
+    }
+    const key = workspaceSessionKey({ serverId: req.serverId, name: req.owner });
+    if (ownerNavKey === key) return;
+    ownerNavKey = key;
+    openSession(row);
   });
 
   // Overlay do quadro: o Chat REAL (mesmo componente do resto do app) por cima do kanban, em vez de

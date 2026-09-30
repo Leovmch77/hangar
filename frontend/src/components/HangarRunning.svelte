@@ -2,7 +2,9 @@
   // Chip "N no Hangar" + lista. Expandido: chip ao lado da marca; trilho: ponto na marca.
   // Some com zero terminais No Hangar (e enquanto o stream da lista não trouxe nada).
   import { closeHangarTerminal, focusHangarTerminal, restartHangarTerminal } from '@hangar/core';
+  import { untrack } from 'svelte';
   import { listServers } from '../lib/auth';
+  import { portal } from '../lib/portal';
   import { allHangar, openQuestion, requestHangarTab, runningFor } from '../lib/hangarTerminals.svelte';
   import * as m from '../paraglide/messages';
 
@@ -12,18 +14,61 @@
   let open = $state(false);
   let error = $state('');
   let now = $state(Date.now());
-  let root = $state<HTMLDivElement | null>(null);
+  let chip = $state<HTMLButtonElement | null>(null);
+  let menu = $state<HTMLDivElement | null>(null);
+  // O menu vai pro <body> (a sidebar tem overflow:hidden e vira containing block de `fixed`), então a
+  // posição sai do retângulo do chip, presa à janela.
+  let pos = $state({ left: 8, top: 0, width: 400, maxHeight: 400 });
   const items = $derived(allHangar());
   const asking = $derived(items.some(({ t }) => t.alive && t.question));
   const multi = $derived(new Set(items.map((i) => i.serverId)).size > 1);
+
+  function place() {
+    if (!chip) return;
+    const r = chip.getBoundingClientRect();
+    const margin = 8;
+    const width = Math.min(400, window.innerWidth - margin * 2);
+    const top = r.bottom + 6;
+    pos = {
+      width,
+      left: Math.max(margin, Math.min(r.left, window.innerWidth - width - margin)),
+      top,
+      maxHeight: Math.max(160, window.innerHeight - top - margin),
+    };
+  }
+  function toggle() {
+    error = '';
+    if (!open) place();
+    open = !open;
+  }
+  function close(refocus = false) {
+    open = false;
+    if (refocus) chip?.focus();
+  }
+
+  $effect(() => { if (!items.length) open = false; });
 
   $effect(() => {
     if (!open) return;
     now = Date.now();
     const timer = setInterval(() => (now = Date.now()), 30_000);
-    const outside = (e: PointerEvent) => { if (root && !root.contains(e.target as Node)) open = false; };
+    const outside = (e: PointerEvent) => {
+      const target = e.target as Node;
+      if (!menu?.contains(target) && !chip?.contains(target)) open = false;
+    };
+    const onResize = () => place();
     document.addEventListener('pointerdown', outside, true);
-    return () => { clearInterval(timer); document.removeEventListener('pointerdown', outside, true); };
+    window.addEventListener('resize', onResize);
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener('pointerdown', outside, true);
+      window.removeEventListener('resize', onResize);
+    };
+  });
+
+  // Teclado: o foco entra no menu ao abrir (primeira ação), pra o Esc valer.
+  $effect(() => {
+    if (open && menu) untrack(() => menu?.querySelector<HTMLElement>('.hr-actions button')?.focus());
   });
 
   function serverOf(id: string) { return listServers().find((s) => s.id === id) ?? null; }
@@ -37,30 +82,34 @@
     error = '';
     try { await fn(srv); } catch (e) { error = m.hangar_erro({ msg: e instanceof Error ? e.message : String(e) }); }
   }
-  function showTerminal(serverId: string, id: string) {
-    open = false;
+  function showTerminal(serverId: string, id: string, keepOpen = false) {
+    if (!keepOpen) open = false;
     requestHangarTab(serverId, id);
     onOpenTerminal?.(serverId, '', id);
   }
+  // Sem janela: o menu fica aberto pra o aviso ser lido, e o terminal abre por baixo.
   const goToWindow = (serverId: string, id: string) => act(serverId, async (srv) => {
     const r = await focusHangarTerminal(srv, id);
     if (r.focused) { open = false; return; }
     error = m.hangar_sem_janela();
-    showTerminal(serverId, id);
+    showTerminal(serverId, id, true);
   });
 </script>
 
 {#if items.length}
-  <div class="hr" class:rail bind:this={root}>
-    <button type="button" class="hr-chip" class:rail class:asking aria-expanded={open}
+  <div class="hr" class:rail>
+    <button type="button" class="hr-chip" class:rail class:asking aria-expanded={open} aria-haspopup="dialog"
+            bind:this={chip}
             aria-label={m.hangar_chip({ n: items.length })} title={m.hangar_chip({ n: items.length })}
-            onclick={() => (open = !open)}>
+            onclick={toggle}>
       <span class="hr-dot" aria-hidden="true"></span>
       {#if !rail}{m.hangar_chip({ n: items.length })}{/if}
     </button>
     {#if open}
       <div class="hr-menu" role="dialog" aria-label={m.hangar_lista_titulo()} tabindex="-1"
-           onkeydown={(e) => { if (e.key === 'Escape') open = false; }}>
+           use:portal bind:this={menu}
+           style:left="{pos.left}px" style:top="{pos.top}px" style:width="{pos.width}px" style:max-height="{pos.maxHeight}px"
+           onkeydown={(e) => { if (e.key === 'Escape') { e.stopPropagation(); close(true); } }}>
         <p class="hr-head">{m.hangar_lista_titulo()}</p>
         {#each items as { serverId, t } (serverId + t.id)}
           {@const origin = t.origin ? (multi ? `${serverOf(serverId)?.label ?? serverId}::${t.origin}` : t.origin) : ''}
@@ -112,13 +161,14 @@
   .hr-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--success); }
   .hr-chip.asking .hr-dot { background: var(--warning); }
   .hr-chip.rail .hr-dot { display: none; }
-  /* Menu flutuante: fundo sólido, nunca --surface-raised (regra do repo). */
+  /* Colada na borda e recolhida, a marca some (Sidebar) e o ponto fica no fluxo, sem âncora. */
+  :global(html[data-panels='edge']) .hr.rail { position: static; }
+  /* Menu flutuante no <body>: posição e largura vêm do script; fundo sólido, nunca --surface-raised. */
   .hr-menu {
-    position: absolute; top: calc(100% + 6px); left: 0; z-index: 60; width: min(400px, calc(100vw - 32px));
-    max-height: 70vh; overflow: auto; border-radius: var(--radius-lg); background: var(--bg-elevated);
+    position: fixed; z-index: 250; overflow: auto; border-radius: var(--radius-lg); background: var(--bg-elevated);
     border: 1px solid var(--border-default); box-shadow: 0 18px 44px rgba(0, 0, 0, 0.45);
   }
-  .hr.rail .hr-menu { left: 20px; top: 0; }
+  .hr-menu:focus-visible { outline: none; }
   .hr-head { margin: 0; padding: 10px 14px 6px; font-size: var(--text-xs); color: var(--text-muted); }
   .hr-item { display: flex; flex-direction: column; gap: 8px; padding: 10px 14px; border-top: 1px solid var(--border-subtle); }
   .hr-item.asking { background: color-mix(in srgb, var(--warning) 7%, transparent); }

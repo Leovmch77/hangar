@@ -1599,7 +1599,9 @@ import ConfirmDialog from './ConfirmDialog.svelte';
   .side-mark { position: relative; display: flex; align-items: center; color: var(--accent); flex: 0 0 auto; }
   /* Colada na borda e recolhida, a marca do trilho fica logo abaixo da marca da barra de abas
      (SessionTabs), na mesma coluna: duas iguais empilhadas. Em caixa solta a margem separa. */
-  :global(html[data-panels='edge']) .sidebar.collapsed .side-mark { display: none; }
+  :global(html[data-panels='edge']) .sidebar.collapsed .side-mark:not(:has(:global(.hr))) { display: none; }
+  /* Com o chip "N no Hangar" a caixa fica, mas a marca some (a da barra de abas já está lá em cima). */
+  :global(html[data-panels='edge']) .sidebar.collapsed .side-mark > :global(svg) { display: none; }
   .side-brand { flex: 1; min-width: 0; font-size: var(--text-base); font-weight: 600; color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   /* Toggle do modo de seleção: mesma caixa de 36px dos outros controles do header. */
   .select-toggle-btn {

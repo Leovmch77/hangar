@@ -11,7 +11,10 @@ export const liveTerminals = $state<{
   question: { serverId: string; owner: string; id: string } | null;
   // Aba No Hangar que o painel de terminal deve mostrar ao abrir.
   panelRequest: Record<string, string>;
-}>({ byServer: {}, question: null, panelRequest: {} });
+  // Painel da SESSÃO dona de um terminal "Na sessão" fechado: o shell leva a sessão pra tela e abre o
+  // painel; a aba vem de `shortcutTerminals.focus`.
+  ownerPanelRequest: { serverId: string; owner: string } | null;
+}>({ byServer: {}, question: null, panelRequest: {}, ownerPanelRequest: null });
 
 // O backend grava a chave com o espaço colapsado; comparar do mesmo jeito.
 const normKey = (key: string) => key.split(/\s+/).filter(Boolean).join(' ');
@@ -66,3 +69,5 @@ export function takeHangarTab(serverId: string): string | null {
   if (id) delete liveTerminals.panelRequest[serverId];
   return id;
 }
+export function requestOwnerPanel(serverId: string, owner: string) { liveTerminals.ownerPanelRequest = { serverId, owner }; }
+export function takeOwnerPanel() { liveTerminals.ownerPanelRequest = null; }
