@@ -614,6 +614,9 @@ export async function selectOptionForServer(s: Server, name: string, option: num
 export function listClaudeConfigs(): Promise<ConfigDirInfo[]> {
   return apiFetch<ConfigDirInfo[]>('/api/claude-configs');
 }
+export function listClaudeConfigsForServer(server: Server): Promise<ConfigDirInfo[]> {
+  return apiFetchForServer<ConfigDirInfo[]>(server, '/api/claude-configs');
+}
 
 /** Cota de cada credencial do servidor ativo (backend/app/cotas.py). Ver `cotaResumo`. */
 export function listarCotasResumo(): Promise<CotaContaResumo[]> {
@@ -1152,12 +1155,29 @@ export async function scanDir(root: string, path?: string): Promise<FsScanResult
     // com digito (ex: "404 arquivos encontrados"). O status ja vem anotado no proprio erro.
     const status = (e as Error & { status?: number }).status ?? NaN;
     if (status === 401) throw e;
-    const map: Record<number, FsScanError> = {
-      400: 'invalid_path',
-      403: 'root_not_allowed',
-      404: 'not_found',
-    };
-    return { entries: [], error: map[status] ?? 'unknown' };
+    return { entries: [], error: SCAN_ERRORS[status] ?? 'unknown' };
+  }
+}
+
+const SCAN_ERRORS: Record<number, FsScanError> = {
+  400: 'invalid_path',
+  403: 'root_not_allowed',
+  404: 'not_found',
+};
+
+// Mesma tradução de recusa do scanDir, mas sem status HTTP (rede, prazo, cancelamento) o erro
+// borbulha: a criação precisa distinguir "pasta recusada" de "máquina não respondeu".
+export async function scanDirForServer(server: Server, root: string, path?: string,
+  signal?: AbortSignal): Promise<FsScanResult> {
+  const qs = new URLSearchParams({ root });
+  if (path) qs.set('path', path);
+  try {
+    return await apiFetchForServer<FsScanResult>(server, `/api/fs/scan?${qs.toString()}`,
+      { signal: comTeto(signal, 8000) });
+  } catch (e) {
+    const status = (e as { status?: unknown } | null)?.status;
+    if (typeof status !== 'number' || status === 401) throw e;
+    return { entries: [], error: SCAN_ERRORS[status] ?? 'unknown' };
   }
 }
 
