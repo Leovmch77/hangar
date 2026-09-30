@@ -79,7 +79,7 @@ it('bastão captura servidor B e preserva a chamada antiga em A', async () => {
   expect(JSON.parse(fetchMock.mock.calls[0][1]?.body as string)).toEqual(body);
   expect(fetchMock.mock.calls[1][0]).toBe('https://a.test/api/sessions/origin/bastao');
 });
-let onUnauthorizedSpy: ReturnType<typeof vi.fn>;
+let onUnauthorizedSpy: ReturnType<typeof vi.fn<() => void>>;
 function stubEventSource() {
   return { addEventListener() {}, removeEventListener() {}, close() {}, onerror: null, onopen: null, readyState: 0 } as unknown as import('./apiEnv').EventSourceLike;
 }
