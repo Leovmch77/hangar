@@ -26,6 +26,7 @@ mod edits;
 mod git;
 mod grouping;
 mod group_sheet;
+mod hangar_live;
 mod harness;
 mod viewer;
 mod disk;
@@ -204,7 +205,8 @@ enum Reply {
     Cost(u64),
     GitFiles,
     Diff(String),
-    Shell(String),
+    /// Rótulo do atalho e se o pedido foi No Hangar.
+    Shell(String, bool),
     Reload,
     PlanPreview(bool),
     PreSelect(String),
@@ -354,6 +356,16 @@ pub struct Hangar {
     drafts: HashMap<SessionKey, String>,
     flight: InFlight,
     action_feedback: HashMap<SessionKey, (String, bool)>,
+    /// Terminais de atalho vivos da máquina ativa (evento `shortcut_terminals`); as outras máquinas guardam no `RemoteList`.
+    live_terms: Vec<terminal::LiveTerm>,
+    /// Cartão da pergunta aberto: (máquina, dono — vazio = No Hangar, terminal) e o diálogo que o mostra.
+    question_open: Option<(String, String, String)>,
+    question_card: Option<Entity<hangar_live::QuestionCard>>,
+    /// Popover do chip "N no Hangar" aberto, e a falha da última ação dele.
+    hangar_open: bool,
+    hangar_error: Option<String>,
+    /// Relógio do "rodando · N min": redesenha a cada 30 s enquanto há um No Hangar vivo.
+    live_clock: Option<Task<()>>,
     ask_form: AskForm,
     plans_dismissed: HashSet<String>,
     // Pergunta do transcript aceita pelo backend, por sessão: vale até o `tool_result`, mesmo trocando de seleção.
@@ -651,7 +663,8 @@ impl Hangar {
             history_installed: false, pending_chat: Vec::new(),
             history_limit: 400, has_older: false, etag: None, error: None, list_error: None,
             delivery: DeliveryTracker::default(), stopping: HashSet::new(), stop_feedback: HashMap::new(), drafts: HashMap::new(),
-            flight: InFlight::default(), action_feedback: HashMap::new(), ask_form: AskForm::default(), plans_dismissed: HashSet::new(), answered_tools: HashSet::new(), answering: HashMap::new(), ask_scroll: Default::default(), plan_scroll: Default::default(), plan_view: None,
+            flight: InFlight::default(), action_feedback: HashMap::new(), live_terms: Vec::new(), question_open: None, question_card: None,
+            hangar_open: false, hangar_error: None, live_clock: None, ask_form: AskForm::default(), plans_dismissed: HashSet::new(), answered_tools: HashSet::new(), answering: HashMap::new(), ask_scroll: Default::default(), plan_scroll: Default::default(), plan_view: None,
             list_state, rail_hover: None, follow: Default::default(), row_ids: Vec::new(), row_signatures: Vec::new(), items: Vec::new(), expanded: HashSet::new(),
             table_column: HashMap::new(), tables: HashMap::new(), paired: HashMap::new(), activity: Default::default(), pinned: HashSet::new(), last_message: None, live_clear_epoch: [0; 2], rich: HashMap::new(), prepared: HashMap::new(), render_tick: 0,
             preview_drop_epoch: 0, preview_drop_scheduled: false,
@@ -847,13 +860,13 @@ impl Hangar {
         let reopen = self.selected.clone().zip(self.session_server().map(|s| servers::norm(&s)));
         // A lista da máquina que sai fica na barra até o SSE dela chegar, sem piscar vazia.
         let previous = self.server.as_deref().map(servers::norm).filter(|key| *key != servers::norm(&api.identity()))
-            .map(|key| (key, std::mem::take(&mut self.sessions), self.list_online, self.list_error.clone()));
+            .map(|key| (key, std::mem::take(&mut self.sessions), self.list_online, self.list_error.clone(), std::mem::take(&mut self.live_terms)));
         self.drop_connection(window, cx);
         self.active_token = token;
         self.api = Some(api.clone());
         self.server = Some(api.identity());
-        if let Some((key, sessions, online, error)) = previous {
-            self.remote.insert(key, servers::RemoteList { loaded: true, online, sessions, error, api: None });
+        if let Some((key, sessions, online, error, live_terms)) = previous {
+            self.remote.insert(key, servers::RemoteList { loaded: true, online, sessions, error, api: None, live_terms });
         }
         self.start_remote_lists();
         self.sync_updater(cx);
@@ -946,6 +959,8 @@ impl Hangar {
         self.sync_rows(cx);
         self.side.reset_server();
         self.sidebar.reset_server();
+        // A lista viva da nova conexão chega pelo stream dela; o cartão da pergunta segue, com a conexão que ele guarda.
+        (self.live_terms, self.hangar_open, self.hangar_error) = (Vec::new(), false, None);
         self.sync = sync::Sync::default();
         self.controls = controls::Controls::default();
         self.accounts = accounts::Accounts::default();
@@ -1174,9 +1189,13 @@ impl Hangar {
             // Cada máquina tem a própria geração: a troca do ativo não derruba as listas das outras.
             Payload::Remote(generation, key, update) => {
                 if generation == self.remote_gen {
+                    // Os terminais vivos dela (evento novo ou stream caído) acertam o chip, os blocos e o painel.
+                    let live = matches!(&update, servers::RemoteUpdate::Stream(Update::Offline(_)))
+                        || matches!(&update, servers::RemoteUpdate::Stream(Update::Frame(frame)) if frame.event == "shortcut_terminals");
                     // Menu, renomear, fechar e grupo das linhas desta máquina acompanham a lista dela como os da ativa.
                     if self.receive_remote(generation, key.clone(), update, cx) { self.sidebar_sessions_changed(window, cx); }
                     self.remote_changed(&key, window, cx);
+                    if live { self.live_changed(&key, window, cx); }
                 }
                 return;
             }
@@ -1232,7 +1251,15 @@ impl Hangar {
                     self.error = Some(Self::failure(&error));
                 }
                 if is_chat { self.chat_online = false; self.error = Some(self.chat_failure(&error)); }
-                else { self.list_online = false; self.list_error = Some(self.active_failure(&error)); }
+                else {
+                    self.list_online = false;
+                    self.list_error = Some(self.active_failure(&error));
+                    // Stream da lista caído: o chip e os blocos não mostram terminal velho dele.
+                    if !std::mem::take(&mut self.live_terms).is_empty() {
+                        let server = self.active_key();
+                        self.live_changed(&server, window, cx);
+                    }
+                }
             }
             Payload::Stream(Update::Frame(frame)) => {
                 let applied = if is_chat {
@@ -1253,6 +1280,16 @@ impl Hangar {
                     }
                 } else if frame.event == "list_error" { self.list_error = Some(tr("list_stale")); true }
                 else if frame.event == "nav" { self.receive_nav(frame.data, window, cx); true }
+                else if frame.event == "shortcut_terminals" {
+                    let list = terminal::parse_live_terms(&frame.data);
+                    // Lista igual à de antes não redesenha; o tempo de "rodando" anda pelo relógio próprio.
+                    if list != self.live_terms {
+                        self.live_terms = list;
+                        let server = self.active_key();
+                        self.live_changed(&server, window, cx);
+                    } else { visible = false; }
+                    true
+                }
                 else { visible = false; true };
                 let _ = frame.applied.send(applied);
             }
@@ -4175,7 +4212,8 @@ impl Hangar {
         div().w_full().min_h_0().flex().flex_col().when(!fit_content, |el| el.h_full())
             .child(div().h(px(44.)).flex_shrink_0().px(px(14.)).flex().items_center().gap_2()
                 .child(chrome::hangar_mark(20., theme::accent()))
-                .child(div().flex_1().text_base().font_weight(FontWeight::SEMIBOLD).child(tr("brand"))))
+                .child(div().flex_1().text_base().font_weight(FontWeight::SEMIBOLD).child(tr("brand")))
+                .children(self.render_hangar_chip(hangar_live::Chip::Label, cx)))
             // A tela sem sessão, como o "New session" do topo da barra do Zeron; o "Nova sessão" do rodapé segue abrindo o diálogo.
             // Mesma coluna, recuo e altura da linha "Todas as sessões" logo abaixo; o destaque é o translúcido das linhas da
             // lista, e o atalho aparece apagado só com o ponteiro em cima.
@@ -4297,6 +4335,7 @@ impl Hangar {
             .map(|el| if floating { el.rounded(px(theme::PANEL_RADIUS)).border_1().border_color(theme::border()).bg(theme::chrome()).shadow(theme::panel_shadow()) }
                 else { el.bg(theme::chrome()).border_b_1().border_color(theme::border()) })
             .child(div().px(px(6.)).child(chrome::hangar_mark(16., theme::accent())))
+            .children(self.render_hangar_chip(hangar_live::Chip::Label, cx))
             .child(strip)
             .child(chrome::icon_button("tabs-new-chat", IconName::SquarePen, tr("new_chat_title"), cx).selected(self.new_chat_screen())
                 .disabled(self.api.is_none()).on_click(cx.listener(|this, _, window, cx| this.go_home(window, cx))))

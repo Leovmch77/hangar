@@ -19,7 +19,9 @@ const DIFF_MAX: usize = 20_000;
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum Shortcut {
     Send { label: String, text: String, direct: bool, confirm: bool, icon: Option<String> },
-    Shell { label: String, command: String, confirm: bool, icon: Option<String>, pasta: Option<String> },
+    /// `key` é a identidade do atalho (`global:<id>` ou `project:<repo>:<id>`): com ela o backend acha o terminal dele;
+    /// `hangar` roda uma cópia só do servidor (na home se `home`), e `ask` mostra a pergunta do terminal no app.
+    Shell { label: String, command: String, confirm: bool, icon: Option<String>, pasta: Option<String>, key: String, hangar: bool, home: bool, ask: bool },
     Attach,
     Run,
 }
@@ -43,12 +45,14 @@ impl Shortcut {
         }
     }
 
-    /// O que o painel roda de um atalho da config; terminal, modo e navegador são módulos à parte aqui.
-    fn from_item(item: &shortcuts::Item) -> Option<Self> {
+    /// O que o painel roda de um atalho da config; terminal, modo e navegador são módulos à parte aqui. `project` é a
+    /// chave do repositório quando o atalho é do projeto.
+    fn from_item(item: &shortcuts::Item, project: Option<&str>) -> Option<Self> {
         let (label, icon, confirm) = (item.label().to_owned(), item.icon().map(str::to_owned), item.confirm());
         match item.kind() {
             "send_text" => Some(Shortcut::Send { label, text: item.content().to_owned(), direct: item.sends_direct(), confirm, icon }),
-            "shell" => Some(Shortcut::Shell { label, command: item.content().to_owned(), confirm, icon, pasta: item.pasta().map(str::to_owned) }),
+            "shell" => Some(Shortcut::Shell { label, command: item.content().to_owned(), confirm, icon, pasta: item.pasta().map(str::to_owned),
+                key: super::hangar_live::shortcut_key(project, item.id()), hangar: item.runs_in_hangar(), home: item.hangar_home(), ask: item.answer_in_app() }),
             "internal" if item.action() == "anexos" => Some(Shortcut::Attach),
             "internal" if item.action() == "rodar" => Some(Shortcut::Run),
             _ => None,
@@ -66,6 +70,8 @@ struct Cost { usd: Option<f64>, has_usage: bool, missing: Vec<String> }
 #[derive(Clone, Debug)]
 pub(super) struct Project {
     pub(super) name: String,
+    /// Repositório git do projeto: identidade dos atalhos dele No Hangar.
+    pub(super) key: String,
     pub(super) items: Vec<shortcuts::Item>,
     /// A lista como veio: o PUT regrava a inteira, e o que a tela não mostra não pode sumir dela.
     pub(super) raw: Vec<Value>,
@@ -73,7 +79,8 @@ pub(super) struct Project {
 
 impl Project {
     pub(super) fn parse(value: &Value) -> Self {
-        Self { name: value.get("name").and_then(Value::as_str).unwrap_or("").to_owned(), items: shortcuts::project_items(value.get("items")),
+        Self { name: value.get("name").and_then(Value::as_str).unwrap_or("").to_owned(),
+            key: value.get("key").and_then(Value::as_str).unwrap_or("").to_owned(), items: shortcuts::project_items(value.get("items")),
             raw: value.get("items").and_then(Value::as_array).cloned().unwrap_or_default() }
     }
 }
@@ -172,7 +179,7 @@ impl Side {
 
     /// A lista que a página Atalhos leu ou gravou: o painel mostra na hora, sem reler a config.
     pub(super) fn set_shortcuts(&mut self, items: &[shortcuts::Item]) {
-        self.shortcuts = Some(Ok(items.iter().filter_map(Shortcut::from_item).collect()));
+        self.shortcuts = Some(Ok(items.iter().filter_map(|item| Shortcut::from_item(item, None)).collect()));
     }
 
     pub fn receive_config(&mut self, result: Result<Value, String>) {
@@ -197,13 +204,14 @@ impl Side {
 }
 
 /// A resolução do web (`shortcuts::resolve`), reduzida ao que o painel nativo roda.
-fn parse_shortcuts(raw: &str) -> Vec<Shortcut> { shortcuts::resolve(raw).iter().filter_map(Shortcut::from_item).collect() }
+fn parse_shortcuts(raw: &str) -> Vec<Shortcut> { shortcuts::resolve(raw).iter().filter_map(|item| Shortcut::from_item(item, None)).collect() }
 
-/// Blocos do painel: os globais e depois os do projeto, com o id do bloco e se é do projeto. "Anexar" sai porque já é o
-/// clipe do compositor. O id do global é a posição e o do projeto leva o id do item: o mesmo id nas duas listas não colide.
-fn merged_tiles(globals: &[Shortcut], project: &[shortcuts::Item]) -> Vec<(String, Shortcut, bool)> {
+/// Blocos do painel: os globais e depois os do projeto (`project_key` = repositório dele), com o id do bloco e se é do
+/// projeto. "Anexar" sai porque já é o clipe do compositor. O id do global é a posição e o do projeto leva o id do item: o
+/// mesmo id nas duas listas não colide.
+fn merged_tiles(globals: &[Shortcut], project: &[shortcuts::Item], project_key: &str) -> Vec<(String, Shortcut, bool)> {
     let globals = globals.iter().filter(|s| **s != Shortcut::Attach).enumerate().map(|(n, s)| (format!("shortcut-{n}"), s.clone(), false));
-    let own = project.iter().filter_map(|item| Some((format!("shortcut-p-{}", item.id()), Shortcut::from_item(item)?, true)));
+    let own = project.iter().filter_map(|item| Some((format!("shortcut-p-{}", item.id()), Shortcut::from_item(item, Some(project_key))?, true)));
     globals.chain(own).collect()
 }
 
@@ -240,7 +248,7 @@ pub(super) fn since(at: f64) -> String {
     else { format!("{}d", (s / 86_400.).floor()) }
 }
 
-fn now_seconds() -> f64 {
+pub(super) fn now_seconds() -> f64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.)
 }
 
@@ -416,15 +424,21 @@ impl Hangar {
             }
             // Sempre pelo backend, também com a sessão nesta máquina: é ele quem cria o terminal escondido que vira
             // aba do painel, onde dá pra ver a saída e fechar o programa.
-            Shortcut::Shell { label, command, pasta, .. } => {
+            Shortcut::Shell { label, command, pasta, key: shortcut_key, hangar, home, ask, .. } => {
                 let Some(api) = self.api_for(&key.server) else { return; };
+                // Terminal desse atalho perguntando: o clique abre a pergunta em vez de rodar outro.
+                if let Some(asking) = self.asking_term(&key.server, &shortcut_key, hangar, &key.name) {
+                    self.open_question(&key.server, &asking.owner, &asking.term.id, window, cx);
+                    return;
+                }
                 self.action_feedback.insert(key.clone(), (tr("shortcut_started").replace("{label}", &label), false));
                 let (connection, tx) = (self.connection, self.tx.clone());
-                let mut body = json!({"command": command, "label": label});
+                let mut body = json!({"command": command, "label": label, "ask": ask, "key": shortcut_key});
                 if let Some(pasta) = pasta { body["pasta"] = json!(pasta); }
+                if hangar { body["runs_in"] = json!("hangar"); body["home"] = json!(home); }
                 self.runtime.spawn(async move {
                     let result = api.act(&key.name, &["shortcut-shell"], Some(body), false, 30).await;
-                    let _ = tx.send(Envelope { connection, selection: None, payload: Payload::Reply(key, Reply::Shell(label), result) }).await;
+                    let _ = tx.send(Envelope { connection, selection: None, payload: Payload::Reply(key, Reply::Shell(label, hangar), result) }).await;
                 });
             }
         }
@@ -489,9 +503,13 @@ impl Hangar {
                     Err(error) => Err(Self::read_failure(&error)),
                 });
             }
-            Reply::Shell(label) => {
+            Reply::Shell(label, hangar) => {
                 // A aba do terminal vai pra frente (sem abrir o painel); a que falhou também, com a saída inteira.
                 let terminal = result.as_ref().ok().and_then(|value| value.pointer("/terminal/id")).and_then(Value::as_str).map(str::to_owned);
+                if hangar {
+                    self.receive_hangar_shell(key, label, terminal, result, window, cx);
+                    return;
+                }
                 // Só o 422 deixa terminal para trás; sem ele, a aba "mais nova" seria a de outro atalho.
                 let failed_with_terminal = result.as_ref().err().is_some_and(|error| error.status == Some(422));
                 if terminal.is_some() || failed_with_terminal {
@@ -735,7 +753,7 @@ impl Hangar {
             Some(Err(reason)) => (&[][..], Some(failure(tr("side_shortcuts_failed").replace("{reason}", reason)))),
             None => (&[][..], None),
         };
-        let list = merged_tiles(globals, project.map_or(&[][..], |p| p.items.as_slice()));
+        let list = merged_tiles(globals, project.map_or(&[][..], |p| p.items.as_slice()), project.map_or("", |p| p.key.as_str()));
         if list.is_empty() {
             let errors: Vec<Div> = global_error.into_iter().chain(project_error).collect();
             return (!errors.is_empty()).then(|| div().flex().flex_col().gap_1().children(errors).into_any_element());
@@ -747,6 +765,8 @@ impl Hangar {
         // (mais colunas quando ele alarga, no máximo cinco), e cada bloco tem a largura exata da coluna: a grade fica no
         // mesmo recuo do título, sem sobra desigual no fim da linha.
         let (_, tile) = shortcut_grid(width - SIDE_PAD * 2.);
+        // Uma linha por atalho No Hangar vivo que outra sessão abriu: vale também onde a dica do bloco não aparece.
+        let notes = key.as_ref().map(|key| self.hangar_notes(&key.server, &key.name, &list)).unwrap_or_default();
         let buttons: Vec<Button> = list.into_iter().map(|(id, shortcut, own)| {
             // O ícone salvo (glifo ou emoji), como no web; anexos mantém o clipe e Rodar vira parada acesa com o run vivo.
             let icon = match &shortcut {
@@ -763,23 +783,35 @@ impl Hangar {
             };
             let missing = shortcut.missing_secret();
             let tip = missing.as_ref().map_or(tip, |name| tr("shortcut_secret_missing").replace("{name}", name));
+            // Estado do terminal do atalho (No Hangar: a cópia do servidor; na sessão: só a pergunta): borda e fundo verdes
+            // rodando, âmbar perguntando, com a marca HANGAR no canto e a linha de estado embaixo.
+            let live = key.as_ref().map(|key| self.tile_for(&key.server, &key.name, &shortcut)).unwrap_or_default();
+            let tip = live.tip.clone().unwrap_or(tip);
+            let tone = match live.state { hangar_live::TileState::Running => Some((theme::success(), 0.45)), hangar_live::TileState::Asking => Some((theme::warning(), 0.55)), _ => None };
+            let fill = tone.map_or_else(transparent_black, |(color, _)| color.opacity(0.08));
+            let edge = tone.map_or_else(theme::border, |(color, alpha)| color.opacity(alpha));
+            let accessible = if live.line.is_empty() { label.clone() } else { format!("{label} · {}", live.line) };
             Button::new(SharedString::from(id))
-                .custom(ButtonCustomVariant::new(cx).color(transparent_black()).foreground(if running && shortcut == Shortcut::Run { theme::accent() } else { theme::muted() })
+                .custom(ButtonCustomVariant::new(cx).color(fill).foreground(if running && shortcut == Shortcut::Run { theme::accent() } else { theme::muted() })
                     .hover(theme::hover()).active(theme::hover()))
-                .w(px(tile)).flex_shrink_0().h_auto().px(px(4.)).py(px(8.)).rounded(px(10.)).border_1().border_color(theme::border())
-                .tooltip(tip).accessibility_label(label.clone()).disabled(!readable || busy)
+                .w(px(tile)).flex_shrink_0().h_auto().px(px(4.)).py(px(8.)).rounded(px(10.)).border_1().border_color(edge)
+                .tooltip(tip).accessibility_label(accessible).disabled(!readable || busy)
                 // Credencial em branco: o bloco fica apagado, e o clique avisa em vez de rodar.
                 .when(missing.is_some(), |el| el.opacity(0.55))
                 .child(div().relative().w_full().min_w_0().flex().flex_col().items_center().gap(px(4.))
                     // Marca de "deste projeto", no canto: o bloco segue igual aos outros e o motivo está na dica.
                     .when(own, |el| el.child(div().absolute().top(px(-4.)).right(px(0.)).child(chrome::small_icon(IconName::Folder, 10., theme::faint()))))
+                    .when(live.mark, |el| el.child(div().absolute().top(px(-4.)).left(px(2.)).text_size(px(9.)).font_weight(FontWeight::SEMIBOLD)
+                        .text_color(tone.map_or_else(theme::faint, |(color, _)| color)).child(tr_shared("term_grupo_hangar", &[]))))
                     .child(icon)
                     // Duas linhas antes de cortar: "Iniciar sessão" e "delphi-vm ide" cabem inteiros num bloco estreito.
                     // Sem `whitespace_normal` o rótulo não quebra: a caixa passa da largura do bloco e, centralizada, perde as
                     // duas pontas ("car Review Au"). Altura fixa de duas linhas deixa todos os blocos iguais.
                     .child(div().w_full().min_w_0().h(px(28.)).flex().items_center().justify_center()
                         .child(div().w_full().whitespace_normal().text_center().line_clamp(2).text_ellipsis()
-                            .text_size(px(11.5)).line_height(px(14.)).child(label))))
+                            .text_size(px(11.5)).line_height(px(14.)).child(label)))
+                    .when(!live.line.is_empty(), |el| el.child(div().text_size(px(10.)).text_center()
+                        .text_color(tone.map_or_else(theme::faint, |(color, _)| color)).child(live.line.clone()))))
                 .on_click(cx.listener(move |this, _, window, cx| this.run_shortcut(shortcut.clone(), false, window, cx)))
         }).collect();
         let grid = div().flex().flex_wrap().gap(px(SHORTCUT_GAP)).children(buttons);
@@ -789,7 +821,10 @@ impl Hangar {
         Some(div().flex().flex_col().gap(px(10.))
             .child(div().flex().items_center().justify_between().child(chrome::section_label(tr("side_actions")))
                 .child(div().flex().items_center().gap(px(2.)).child(self.transfer_menu_button(cx)).child(add)))
-            .child(grid).children(global_error).children(project_error).children(self.transfer_note_element()).into_any_element())
+            .child(grid)
+            .children(notes.into_iter().map(|note| div().px(px(10.)).py(px(8.)).rounded(px(10.)).bg(theme::inset())
+                .text_size(px(11.)).line_height(px(16.)).text_color(theme::muted()).whitespace_normal().child(note)))
+            .children(global_error).children(project_error).children(self.transfer_note_element()).into_any_element())
     }
 
     // Mesma regra do botão de terminal do cabeçalho.
@@ -979,8 +1014,16 @@ mod tests {
             {"id":"c","type":"send_text","label":"","text":"x"},{"id":"t","type":"internal","action":"terminal"}]"#;
         assert_eq!(parse_shortcuts(raw), vec![
             Shortcut::Send { label: "Relatório".into(), text: "/relatorio".into(), direct: false, confirm: true, icon: None },
-            Shortcut::Shell { label: "Build".into(), command: "make".into(), confirm: false, icon: None, pasta: None },
+            Shortcut::Shell { label: "Build".into(), command: "make".into(), confirm: false, icon: None, pasta: None,
+                key: "global:b".into(), hangar: false, home: true, ask: true },
         ]);
+    }
+
+    #[test]
+    fn shell_shortcut_carries_where_it_runs_and_its_identity() {
+        let raw = r#"[{"id":"vm","type":"shell","label":"VM","command":"rdp","runs_in":"hangar","hangar_home":false,"answer_in_app":false}]"#;
+        assert_eq!(parse_shortcuts(raw), vec![Shortcut::Shell { label: "VM".into(), command: "rdp".into(), confirm: false, icon: None, pasta: None,
+            key: "global:vm".into(), hangar: true, home: false, ask: false }]);
     }
 
     #[test]
@@ -990,11 +1033,13 @@ mod tests {
         let project = crate::app::shortcuts::project_items(Some(&serde_json::json!([
             {"id":"d","type":"shell","label":"Debug","command":"make debug","pasta":"backend"},
             {"id":"t","type":"internal","action":"rodar"}])));
-        let tiles = merged_tiles(&globals, &project);
+        let tiles = merged_tiles(&globals, &project, "/repo");
         // Anexar sai, o interno do projeto não entra e o mesmo id "d" vira dois blocos com ids diferentes.
         assert_eq!(tiles.iter().map(|(id, _, own)| (id.as_str(), *own)).collect::<Vec<_>>(),
             [("shortcut-0", false), ("shortcut-1", false), ("shortcut-p-d", true)]);
-        assert_eq!(tiles[2].1, Shortcut::Shell { label: "Debug".into(), command: "make debug".into(), confirm: false, icon: None, pasta: Some("backend".into()) });
+        // A identidade No Hangar separa o "d" global do "d" do repositório.
+        assert_eq!(tiles[2].1, Shortcut::Shell { label: "Debug".into(), command: "make debug".into(), confirm: false, icon: None, pasta: Some("backend".into()),
+            key: "project:/repo:d".into(), hangar: false, home: true, ask: true });
         assert_eq!(tiles[1].1, Shortcut::Run);
     }
 

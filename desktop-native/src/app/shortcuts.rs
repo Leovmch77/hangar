@@ -37,6 +37,12 @@ impl Item {
     pub(super) fn sends_direct(&self) -> bool { self.0.get("send_direct") != Some(&Value::Bool(false)) }
     /// Pasta do `shell` do projeto (absoluta ou relativa à raiz da cópia da sessão); ausente = a pasta da sessão.
     pub(super) fn pasta(&self) -> Option<&str> { self.0.get("pasta").and_then(Value::as_str).map(str::trim).filter(|p| !p.is_empty()) }
+    /// `shell` que roda numa cópia só do servidor, fora de qualquer sessão.
+    pub(super) fn runs_in_hangar(&self) -> bool { self.kind() == "shell" && self.text("runs_in") == "hangar" }
+    /// No Hangar: ausente = roda na home.
+    pub(super) fn hangar_home(&self) -> bool { self.0.get("hangar_home") != Some(&Value::Bool(false)) }
+    /// Ausente = a pergunta do terminal aparece no app.
+    pub(super) fn answer_in_app(&self) -> bool { self.0.get("answer_in_app") != Some(&Value::Bool(false)) }
 
     fn native(action: &str) -> Self {
         Item(Map::from_iter([("id".into(), json!(action)), ("type".into(), json!("internal")), ("action".into(), json!(action))]))
@@ -51,7 +57,9 @@ impl Item {
         match o.get("type").and_then(Value::as_str) {
             Some("internal") => o.get("action").and_then(Value::as_str).is_some_and(|a| NATIVES.contains(&a)),
             Some("send_text") => filled("label") && filled("text"),
-            Some("shell") => filled("label") && filled("command") && optional("pasta", |p| p.as_str().is_some_and(|p| !p.trim().is_empty())),
+            Some("shell") => filled("label") && filled("command") && optional("pasta", |p| p.as_str().is_some_and(|p| !p.trim().is_empty()))
+                && optional("runs_in", |v| matches!(v.as_str(), Some("session" | "hangar")))
+                && optional("hangar_home", Value::is_boolean) && optional("answer_in_app", Value::is_boolean),
             _ => false,
         }
     }
@@ -168,6 +176,10 @@ struct Form {
     glyph: String,
     direct: bool,
     confirm: bool,
+    /// `shell`: roda No Hangar (uma cópia por servidor) em vez de na sessão; na home, e com a pergunta do terminal no app.
+    hangar: bool,
+    home: bool,
+    ask: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -178,14 +190,18 @@ impl Form {
 }
 
 /// O que o formulário confirmou, já lido dos campos.
-struct Draft { shell: bool, label: String, content: String, icon: String, direct: bool, confirm: bool, pasta: String }
+struct Draft { shell: bool, label: String, content: String, icon: String, direct: bool, confirm: bool, pasta: String, hangar: bool, home: bool, ask: bool }
 
 impl Draft {
     /// Editar parte do objeto gravado: campo que esta versão não conhece continua lá; os do formulário são reescritos.
+    /// Só o que difere do padrão é gravado.
     fn into_item(self, original: Option<Map<String, Value>>, id: String) -> Item {
         let mut o = original.unwrap_or_default();
-        for key in ["send_direct", "confirm", "pasta"] { o.remove(key); }
+        for key in ["send_direct", "confirm", "pasta", "runs_in", "hangar_home", "answer_in_app"] { o.remove(key); }
         if self.shell && !self.pasta.is_empty() { o.insert("pasta".into(), json!(self.pasta)); }
+        if self.shell && self.hangar { o.insert("runs_in".into(), json!("hangar")); }
+        if self.shell && self.hangar && !self.home { o.insert("hangar_home".into(), json!(false)); }
+        if self.shell && !self.ask { o.insert("answer_in_app".into(), json!(false)); }
         o.insert("id".into(), json!(id));
         o.insert("type".into(), json!(if self.shell { "shell" } else { "send_text" }));
         o.insert((if self.shell { "command" } else { "text" }).into(), json!(self.content));
@@ -459,7 +475,8 @@ impl Hangar {
         }
         label.update(cx, |state, cx| state.focus(window, cx));
         self.shortcuts.form = Some(Form { editing, original: item.as_ref().map(|i| i.0.clone()), project, shell, label, emoji, content, folder, glyph, direct: item.as_ref().is_none_or(Item::sends_direct),
-            confirm: item.as_ref().is_some_and(Item::confirm), _subscriptions: subscriptions });
+            confirm: item.as_ref().is_some_and(Item::confirm), hangar: item.as_ref().is_some_and(Item::runs_in_hangar),
+            home: item.as_ref().is_none_or(Item::hangar_home), ask: item.as_ref().is_none_or(Item::answer_in_app), _subscriptions: subscriptions });
         if !shell { self.load_suggestions(); }
         cx.notify();
     }
@@ -472,7 +489,7 @@ impl Hangar {
         let icon = if emoji.is_empty() { format!("glifo:{}", form.glyph) } else { format!("emoji:{emoji}") };
         let pasta = if form.project { Form::value(&form.folder, cx) } else { String::new() };
         let draft = Draft { shell: form.shell, label: Form::value(&form.label, cx), content: Form::value(&form.content, cx), icon,
-            direct: form.direct, confirm: form.confirm, pasta };
+            direct: form.direct, confirm: form.confirm, pasta, hangar: form.hangar, home: form.home, ask: form.ask };
         let (editing, project) = (form.editing.clone(), form.project);
         let item = draft.into_item(form.original.clone(), editing.clone().unwrap_or_else(new_id));
         // O do projeto grava agora e o formulário só fecha com a gravação feita.
@@ -615,6 +632,16 @@ impl Hangar {
         let text = div().flex_1().min_w_0().flex().flex_col().gap(px(2.))
             .child(div().font_weight(FontWeight::MEDIUM).truncate().child(label.clone()))
             .when(!native, |el| el.child(div().text_size(px(12.)).font_family(theme::MONO).text_color(theme::muted()).truncate().child(content)));
+        // Onde o atalho roda: "Na sessão · texto" (envio), "Na sessão" ou "No Hangar" (comando).
+        let mark = match item.kind() {
+            "send_text" => Some((tr_shared("atalhos_marca_sessao_texto", &[]), false)),
+            "shell" if item.runs_in_hangar() => Some((tr_shared("atalhos_marca_hangar", &[]), true)),
+            "shell" => Some((tr_shared("atalhos_marca_sessao_comando", &[]), false)),
+            _ => None,
+        };
+        let mark = mark.map(|(text, hangar)| div().flex_shrink_0().px(px(8.)).py(px(2.)).rounded_full().text_size(px(11.))
+            .when(hangar, |el| el.bg(theme::accent_dim()).text_color(theme::text()))
+            .when(!hangar, |el| el.bg(theme::inset()).text_color(theme::muted())).child(text));
         let dragged = Dragged { id: id.clone(), label };
         // A linha que saiu do lugar esmaece, como a `.linha.arrastando` do web.
         let lifted = !project && cx.has_active_drag() && self.shortcuts.dragging.as_deref() == Some(id.as_str());
@@ -626,6 +653,7 @@ impl Hangar {
             .child(div().size(px(36.)).flex_shrink_0().rounded(px(10.)).border_1().border_color(theme::border()).bg(theme::inset())
                 .flex().items_center().justify_center().child(icon_element(icon, 16., theme::muted())))
             .child(text)
+            .children(mark)
             .child(actions)
             .when(lifted, |el| el.opacity(0.45))
             .when(!saving && !project, |el| el.on_drag(dragged, move |d, _, _, cx| {
@@ -688,12 +716,51 @@ impl Hangar {
             .child(Input::new(&form.folder))
             .child(div().text_size(px(12.)).text_color(theme::muted()).whitespace_normal().child(tr("shortcuts_folder_help"))).into_any_element()));
         let saving = if form.project { self.side.project.saving.is_some() } else { self.shortcuts.saving };
+        let where_card = |id: &'static str, hangar: bool, title: &str, help: &str, usage: &str, cx: &mut Context<Self>| {
+            let on = form.hangar == hangar;
+            Button::new(id)
+                .custom(ButtonCustomVariant::new(cx).color(if on { theme::accent_dim() } else { transparent_black() })
+                    .foreground(theme::text()).hover(theme::hover()).active(theme::hover()))
+                .flex_1().min_w(px(200.)).h_auto().p(px(12.)).rounded(px(10.)).border_1()
+                .border_color(if on { theme::accent() } else { theme::border() }).accessibility_label(title.to_owned())
+                .child(div().w_full().flex().flex_col().items_start().gap(px(4.)).whitespace_normal().text_left()
+                    .child(div().flex().items_center().gap(px(8.))
+                        .child(div().size(px(14.)).flex_shrink_0().rounded_full().border_1().border_color(if on { theme::accent() } else { theme::faint() })
+                            .flex().items_center().justify_center()
+                            .when(on, |el| el.child(div().size(px(6.)).rounded_full().bg(theme::accent()))))
+                        .child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).child(title.to_owned())))
+                    .child(div().text_size(px(12.)).text_color(theme::muted()).child(help.to_owned()))
+                    .child(div().text_size(px(12.)).text_color(theme::faint()).child(usage.to_owned())))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if let Some(f) = this.shortcuts.form.as_mut() { f.hangar = hangar; }
+                    cx.notify();
+                }))
+        };
+        let (where_title, where_click) = (tr_shared("atalhos_onde_clique_titulo", &[]), tr_shared("atalhos_onde_clique", &[]));
+        let where_block = form.shell.then(|| div().flex().flex_col().gap(px(8.))
+            .child(div().text_size(px(13.)).text_color(theme::muted()).child(tr_shared("atalhos_onde", &[])))
+            .child(div().flex().flex_wrap().gap(px(8.))
+                .child(where_card("shortcut-where-session", false, &tr_shared("atalhos_onde_sessao", &[]),
+                    &tr_shared("atalhos_onde_sessao_ajuda", &[]), &tr_shared("atalhos_onde_sessao_uso", &[]), cx))
+                .child(where_card("shortcut-where-hangar", true, &tr_shared("atalhos_onde_hangar", &[]),
+                    &tr_shared("atalhos_onde_hangar_ajuda", &[]), &tr_shared("atalhos_onde_hangar_uso", &[]), cx)))
+            .when(form.hangar, |el| el.child(div().flex().flex_col().gap(px(6.)).p(px(12.)).rounded(px(10.)).bg(theme::inset())
+                .child(div().text_size(px(12.)).font_weight(FontWeight::SEMIBOLD).child(where_title))
+                .child(div().text_size(px(12.)).text_color(theme::muted()).whitespace_normal().child(format!("→ {where_click}")))
+                .child(Checkbox::new("shortcut-home").label(tr_shared("atalhos_onde_home", &[("home", "~")])).checked(form.home)
+                    .on_click(cx.listener(|this, on: &bool, _, cx| { if let Some(f) = this.shortcuts.form.as_mut() { f.home = *on; } cx.notify(); }))))));
+        let ask = form.shell.then(|| div().flex().flex_col().gap(px(2.))
+            .child(Checkbox::new("shortcut-ask").label(tr_shared("atalhos_perguntas", &[])).checked(form.ask)
+                .on_click(cx.listener(|this, on: &bool, _, cx| { if let Some(f) = this.shortcuts.form.as_mut() { f.ask = *on; } cx.notify(); })))
+            .child(div().pl(px(24.)).text_size(px(12.)).text_color(theme::muted()).whitespace_normal().child(tr_shared("atalhos_perguntas_ajuda", &[]))));
         settings_box().mt(px(16.)).p(px(16.)).gap(px(16.))
             .child(field("shortcuts_type", div().flex().child(kind).into_any_element()))
             .child(field("shortcuts_label", Input::new(&form.label).into_any_element()))
             .child(field("shortcuts_icon", glyphs.into_any_element()))
             .child(field(if form.shell { "shortcuts_command" } else { "shortcuts_text" }, content.into_any_element()))
             .children(folder)
+            .children(where_block)
+            .children(ask)
             .children(direct)
             .child(confirm)
             .child(div().flex().justify_end().gap(px(8.))
@@ -744,11 +811,27 @@ mod tests {
 
     #[test]
     fn folder_is_written_only_for_a_shell_and_cleared_when_empty() {
-        let draft = |shell: bool, pasta: &str| Draft { shell, label: "L".into(), content: "c".into(), icon: "glifo:bolt".into(), direct: true, confirm: false, pasta: pasta.into() };
+        let draft = |shell: bool, pasta: &str| Draft { shell, label: "L".into(), content: "c".into(), icon: "glifo:bolt".into(), direct: true, confirm: false, pasta: pasta.into(),
+            hangar: false, home: true, ask: true };
         let original = project_items(Some(&serde_json::json!([{"id":"a","type":"shell","label":"L","command":"c","pasta":"old"}])))[0].0.clone();
         assert_eq!(draft(true, "tools").into_item(Some(original.clone()), "a".into()).pasta(), Some("tools"));
         assert_eq!(draft(true, "").into_item(Some(original), "a".into()).pasta(), None);
         assert_eq!(draft(false, "tools").into_item(None, "b".into()).pasta(), None);
+    }
+
+    #[test]
+    fn where_it_runs_is_written_only_when_it_differs_from_the_default() {
+        let draft = |hangar: bool, home: bool, ask: bool| Draft { shell: true, label: "L".into(), content: "c".into(), icon: "glifo:bolt".into(),
+            direct: true, confirm: false, pasta: String::new(), hangar, home, ask };
+        let plain = draft(false, true, true).into_item(None, "a".into());
+        assert!(["runs_in", "hangar_home", "answer_in_app"].iter().all(|key| !plain.0.contains_key(*key)));
+        assert!(!plain.runs_in_hangar() && plain.hangar_home() && plain.answer_in_app());
+        let hangar = draft(true, false, false).into_item(Some(plain.0.clone()), "a".into());
+        assert!(hangar.runs_in_hangar() && !hangar.hangar_home() && !hangar.answer_in_app());
+        // Sair do Hangar apaga as marcas dele; a home só vale No Hangar.
+        let back = draft(false, false, true).into_item(Some(hangar.0), "a".into());
+        assert!(!back.runs_in_hangar() && !back.0.contains_key("hangar_home") && back.answer_in_app());
+        assert!(resolve(r#"[{"id":"a","type":"shell","label":"L","command":"c","runs_in":"hangar","hangar_home":"x"}]"#).is_empty());
     }
 
     #[test]
@@ -765,7 +848,8 @@ mod tests {
     #[test]
     fn editing_keeps_unknown_fields_and_never_revives_a_removed_item() {
         let mut items = resolve(r#"[{"id":"a","type":"send_text","label":"R","text":"/r","send_direct":false,"confirm":true,"novo":1,"icon":"glifo:futuro"}]"#);
-        let draft = Draft { shell: false, label: "R2".into(), content: "/r2".into(), icon: "glifo:futuro".into(), direct: true, confirm: false, pasta: String::new() };
+        let draft = Draft { shell: false, label: "R2".into(), content: "/r2".into(), icon: "glifo:futuro".into(), direct: true, confirm: false, pasta: String::new(),
+            hangar: false, home: true, ask: true };
         let edited = draft.into_item(Some(items[0].0.clone()), "a".into());
         // O campo desconhecido e o glifo que esta versão não conhece ficam; as marcas desligadas saem.
         assert_eq!(edited.0.get("novo"), Some(&serde_json::json!(1)));

@@ -23,8 +23,9 @@ pub(crate) enum RemoteUpdate { Sessions(Result<Vec<SessionInfo>, Failure>), Stre
 
 /// A lista de uma máquina que não é a ativa. Fora do ar, fica a última lista boa, como no web.
 /// `api` é a conexão guardada da máquina: as ações das linhas dela não montam um cliente HTTP a cada gesto.
+/// `live_terms`: os terminais de atalho vivos dela (evento `shortcut_terminals`); some quando o stream cai.
 #[derive(Default)]
-pub(crate) struct RemoteList { pub sessions: Vec<SessionInfo>, pub loaded: bool, pub online: bool, pub error: Option<String>, pub api: Option<Api> }
+pub(crate) struct RemoteList { pub sessions: Vec<SessionInfo>, pub loaded: bool, pub online: bool, pub error: Option<String>, pub api: Option<Api>, pub(super) live_terms: Vec<super::terminal::LiveTerm> }
 
 /// Mesma máquina escrita de dois jeitos (barra final, maiúsculas) é o mesmo servidor.
 pub(crate) fn norm(address: &str) -> String { address.trim().trim_end_matches('/').to_ascii_lowercase() }
@@ -116,6 +117,7 @@ impl Hangar {
             RemoteUpdate::Stream(Update::Online) => { changed = !list.online || list.error.is_some(); list.online = true; list.error = None; }
             RemoteUpdate::Stream(Update::Offline(error)) => {
                 list.online = false;
+                list.live_terms.clear();
                 list.error = Some(if ended(&error) {
                     self.invite_ended.insert(key.clone());
                     list.sessions.clear();
@@ -132,6 +134,8 @@ impl Hangar {
                         Err(_) => { list.error = Some(tr("invalid_response")); false }
                     },
                     "list_error" => { list.error = Some(tr("list_stale")); true }
+                    // Quem o mostra (chip, blocos, painel) é acertado por `live_changed`, na volta desta função.
+                    "shortcut_terminals" => { list.live_terms = super::terminal::parse_live_terms(&frame.data); changed = false; true }
                     _ => { changed = false; true }
                 };
                 let _ = frame.applied.send(applied);
