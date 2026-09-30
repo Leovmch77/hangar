@@ -4,6 +4,8 @@ import { createRoot } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const calls = vi.hoisted(() => ({
+  roots: vi.fn(), scan: vi.fn(), sessions: vi.fn(), configs: vi.fn(), engines: vi.fn(), save: vi.fn(),
+  target: null as null | { id: string; label: string; baseUrl: string; token: string },
   accounts: vi.fn(),
   models: vi.fn(),
   prepare: vi.fn(),
@@ -23,11 +25,14 @@ vi.mock('react-native', async (original) => ({
 }));
 vi.mock('../../stores/servers', () => ({
   useServers: Object.assign(
-    (selector: (state: { active: () => typeof server; servers: typeof server[] }) => unknown) => selector({ active: () => server, servers: [server] }),
+    (selector: (state: { active: () => typeof server; servers: typeof server[] }) => unknown) => selector({ active: () => calls.target ?? server, servers: [server] }),
     { getState: () => ({ servers: [server], active: () => server }) },
   ),
 }));
-vi.mock('./CwdPicker', () => ({ CwdPicker: ({ onPick }: { onPick: (path: string) => void }) => createElement('button', { onClick: () => onPick('/repo') }, 'Pasta') }));
+vi.mock('../../stores/prefs', () => ({ prefs: {
+  getString: (key: string) => localStorage.getItem(key) ?? undefined,
+  set: (key: string, value: string) => { calls.save(key, value); localStorage.setItem(key, value); },
+} }));
 vi.mock('./ProviderPicker', () => ({ ProviderPicker: ({ onChange }: { onChange: (provider: string) => void }) => createElement('div', null,
   createElement('button', { onClick: () => onChange('codex') }, 'Codex'),
   createElement('button', { onClick: () => onChange('claude') }, 'Claude'),
@@ -41,9 +46,10 @@ vi.mock('@react-native-menu/menu', () => ({
 }));
 vi.mock('@hangar/core', async (original) => ({
   ...await original<typeof import('@hangar/core')>(),
-  listClaudeConfigs: vi.fn().mockResolvedValue([]),
-  listarCotasResumo: vi.fn().mockResolvedValue([]),
-  getEngines: vi.fn().mockResolvedValue({ motores: {} }),
+  listClaudeConfigsForServer: calls.configs,
+  getRootsForServer: calls.roots, scanDirForServer: calls.scan, fetchSessionsForServer: calls.sessions,
+  probeServerResponse: vi.fn().mockImplementation(async () => new Response('[]')),
+  getEnginesForServer: calls.engines,
   modelOptions: vi.fn().mockResolvedValue({ models: [], reduced: false }),
   getSessions: vi.fn().mockResolvedValue([]),
   getCodexAccountsForServer: calls.accounts,
@@ -73,6 +79,15 @@ vi.mock('../../paraglide/messages', () => ({
   criar_retomar_escolha: () => 'criar_retomar_escolha', criar_sessao_erro: () => 'criar_sessao_erro', criar_usar: () => 'criar_usar',
   criar_verificando: () => 'criar_verificando', criar_sessao: () => 'criar_sessao', sessao_nova: () => 'sessao_nova',
   switcher_atual: () => 'switcher_atual',
+  criar_projeto_indisponivel: () => 'projeto_indisponivel', criar_projeto_salvar_erro: () => 'projeto_salvar_erro',
+  criar_motores_erro: () => 'motores_erro', servidor_nao_existe: () => 'servidor_nao_existe',
+  arquivo_carregando: () => 'carregando', arquivo_carregar_raizes_erro: () => 'raizes_erro',
+  arquivo_sem_raizes: () => 'sem_raizes', arquivo_buscar_pasta: () => 'buscar_pasta',
+  arquivo_sem_subpastas: () => 'sem_subpastas', arquivo_sem_resultados: () => 'sem_resultados',
+  arquivo_usar_pasta: () => 'usar_pasta', arquivo_abrir: ({ nome }: { nome: string }) => `abrir:${nome}`,
+  arquivo_ler_falhou: () => 'ler_falhou', arquivo_pasta_nao_encontrada: () => 'pasta_nao_encontrada',
+  arquivo_sem_permissao: () => 'sem_permissao', arquivo_ilegivel: () => 'ilegivel',
+  arquivo_raiz_nao_liberada: () => 'raiz_nao_liberada', arquivo_caminho_invalido: () => 'caminho_invalido',
 }));
 
 import { CreateSessionSheet } from './CreateSessionSheet';
@@ -90,6 +105,13 @@ function deferred<T>() {
 describe('CreateSessionSheet Codex', () => {
   afterEach(() => vi.useRealTimers());
   beforeEach(() => {
+    calls.target = null;
+    calls.save.mockReset();
+    calls.roots.mockReset().mockResolvedValue([{ name: 'Repo', path: '/repo' }]);
+    calls.scan.mockReset().mockResolvedValue({ entries: [] });
+    calls.sessions.mockReset().mockResolvedValue([]);
+    calls.configs.mockReset().mockResolvedValue([]);
+    calls.engines.mockReset().mockResolvedValue({ motores: {} });
     calls.accounts.mockReset().mockResolvedValue([connected]);
     calls.models.mockReset().mockResolvedValue({ models: [], reduced: false });
     calls.prepare.mockReset().mockResolvedValue({ status: 'ready', trust_pending: false, issues: [] });
@@ -106,12 +128,100 @@ describe('CreateSessionSheet Codex', () => {
     const container = document.createElement('div');
     const root = createRoot(container);
     await act(async () => root.render(strict ? createElement(StrictMode, null, createElement(CreateSessionSheet)) : createElement(CreateSessionSheet)));
-    await act(async () => [...container.querySelectorAll('button')].find((button) => button.textContent === 'Pasta')!.click());
     await act(async () => Promise.resolve());
     await act(async () => [...container.querySelectorAll('button')].find((button) => button.textContent === 'Codex')!.click());
     await act(async () => Promise.resolve());
     return { container, root };
   }
+
+  it('escolhe a primeira raiz utilizável e grava só depois do scan', async () => {
+    calls.roots.mockResolvedValue([{ name: 'Missing', path: '/missing' }, { name: 'Repo', path: '/repo' }]);
+    calls.scan.mockImplementation(async (_server, _root, path) => path === '/missing' ? { entries: [], error: 'not_found' } : { entries: [] });
+    const { container, root } = await renderSheet();
+    expect(container.textContent).toContain('/repo');
+    expect(localStorage.getItem('create.project.v1:server-b')).toBe('{"root":"/repo","cwd":"/repo"}');
+    root.unmount();
+  });
+
+  it('confere preferência Windows sem reconstruir o caminho', async () => {
+    const path = 'C:\\work\\repo';
+    localStorage.setItem('create.project.v1:server-b', JSON.stringify({ root: 'C:\\work', cwd: path }));
+    calls.roots.mockResolvedValue([{ name: 'Work', path: 'C:\\work' }]);
+    const { container, root } = await renderSheet();
+    expect(container.textContent).toContain(path);
+    expect(calls.scan).toHaveBeenCalledWith(server, 'C:\\work', path, expect.any(AbortSignal));
+    root.unmount();
+  });
+
+  it('valida a subpasta escolhida e restaura ao reabrir', async () => {
+    const { container, root } = await renderSheet();
+    calls.scan.mockResolvedValue({ entries: [{ name: 'Child', path: '/repo/child', is_git: true, has_claude_md: false }] });
+    await act(async () => [...container.querySelectorAll('button')].find((button) => button.textContent === 'criar_outra_pasta')!.click());
+    await act(async () => [...container.querySelectorAll('button')].find((button) => button.textContent === 'Repo')!.click());
+    await act(async () => [...container.querySelectorAll('button')].find((button) => button.textContent?.includes('Child'))!.click());
+    expect(container.textContent).toContain('/repo/child');
+    expect(localStorage.getItem('create.project.v1:server-b')).toBe('{"root":"/repo","cwd":"/repo/child"}');
+    root.unmount();
+    const reopened = await renderSheet();
+    expect(reopened.container.textContent).toContain('/repo/child');
+    reopened.root.unmount();
+  });
+
+  it('cria Claude no destino explícito do projeto', async () => {
+    const { container, root } = await renderSheet();
+    await act(async () => [...container.querySelectorAll('button')].find((button) => button.textContent === 'Claude')!.click());
+    await act(async () => [...container.querySelectorAll('button')].find((button) => button.textContent === 'sessao_nova')!.click());
+    expect(calls.create).toHaveBeenCalledWith(server, expect.objectContaining({ provider: 'claude', cwd: '/repo' }));
+    root.unmount();
+  });
+
+  it('mostra preferência indisponível sem substituir a pasta', async () => {
+    localStorage.setItem('create.project.v1:server-b', '{"root":"/repo","cwd":"/repo/deleted"}');
+    calls.scan.mockResolvedValue({ entries: [], error: 'not_found' });
+    const container = document.createElement('div'); const root = createRoot(container);
+    await act(async () => root.render(createElement(CreateSessionSheet)));
+    expect(container.textContent).toContain('projeto_indisponivel');
+    expect(container.textContent).toContain('criar_avancado');
+    expect(calls.create).not.toHaveBeenCalled();
+    expect(calls.save).not.toHaveBeenCalled();
+    root.unmount();
+  });
+
+  it('preserva erro de autenticação legível no seletor', async () => {
+    calls.roots.mockRejectedValue(new Error('401: unauthorized'));
+    const container = document.createElement('div'); const root = createRoot(container);
+    await act(async () => root.render(createElement(CreateSessionSheet)));
+    expect(container.textContent).toContain('401: unauthorized');
+    expect(container.textContent).toContain('criar_avancado');
+    root.unmount();
+  });
+
+  it('descarta scan, contas Claude e modelos tardios ao mudar de máquina', async () => {
+    const scan = deferred<{ entries: [] }>(); const models = deferred<{ models: { id: string; name: string }[]; reduced: boolean }>();
+    const configs = deferred<{ path: string; label: string; active: boolean }[]>();
+    calls.configs.mockReturnValueOnce(configs.promise);
+    calls.scan.mockReturnValueOnce(scan.promise); calls.models.mockReturnValueOnce(models.promise);
+    const container = document.createElement('div'); const root = createRoot(container);
+    await act(async () => root.render(createElement(CreateSessionSheet)));
+    calls.target = { id: 'server-c', label: 'Servidor C', baseUrl: 'https://c.local', token: 'token-c' };
+    calls.roots.mockResolvedValue([{ name: 'Other', path: '/other' }]);
+    await act(async () => root.render(createElement(CreateSessionSheet)));
+    await act(async () => { scan.resolve({ entries: [] }); configs.resolve([{ path: '/old', label: 'Conta antiga', active: true }]); models.resolve({ models: [{ id: 'old', name: 'Modelo antigo' }], reduced: false }); });
+    expect(container.textContent).toContain('/other');
+    expect(container.textContent).not.toContain('/repo');
+    expect(container.textContent).not.toContain('Modelo antigo');
+    expect(calls.models).not.toHaveBeenCalledWith(calls.target, 'claude', null, '/old', null, expect.any(AbortSignal));
+    expect(localStorage.getItem('create.project.v1:server-b')).toBeNull();
+    root.unmount();
+  });
+
+  it('informa falha ao salvar preferência sem impedir seleção válida', async () => {
+    calls.save.mockImplementation(() => { throw new Error('storage failed'); });
+    const { container, root } = await renderSheet();
+    expect(container.textContent).toContain('projeto_salvar_erro');
+    expect(container.textContent).toContain('/repo');
+    root.unmount();
+  });
 
   it('seleciona conta do servidor e envia a conta no create', async () => {
     const { container, root } = await renderSheet();
