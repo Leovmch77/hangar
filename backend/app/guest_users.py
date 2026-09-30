@@ -185,6 +185,19 @@ def rename_session(old: str, new: str) -> None:
         _save()
 
 
+def set_life(session: str, life: str | None) -> None:
+    # Trocar terminal <-> sem terminal muda a vida; sem isto a sessão deixaria de ser do convidado.
+    if life is None:
+        return
+    with _lock:
+        entry = _load()["sessions"].get(session)
+        if entry is None:
+            return
+        entry["life"] = life
+        _save()
+        _life_cache.pop(session, None)
+
+
 def has_claims() -> bool:
     return bool(_load()["sessions"])
 

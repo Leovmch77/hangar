@@ -2479,7 +2479,11 @@ async def modo_execucao(name: str, body: ModoExecucaoBody):
     finally:
         # Também na falha: uma troca que morreu no meio pode já ter mudado a identidade.
         try:
-            await asyncio.to_thread(lambda: share_store.set_life(name, session_life(name)))
+            def _move_life():
+                life = session_life(name)
+                share_store.set_life(name, life)
+                guest_users.set_life(name, life)
+            await asyncio.to_thread(_move_life)
         finally:
             share_api.changing_mode.discard(name)
             await asyncio.to_thread(_invalidate_lists)

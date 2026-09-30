@@ -71,6 +71,27 @@ def test_unknown_life_keeps_claim(tmp_path):
     assert guest_users.owner_of("s1").id == g.id
 
 
+def test_set_life_keeps_claim_across_mode_switch(tmp_path):
+    g, _ = _guest(tmp_path)
+    LIVES["s1"] = "t:100"
+    guest_users.claim("s1", g.id)
+    LIVES["s1"] = "k:abc"           # terminal -> sem terminal
+    guest_users.set_life("s1", "k:abc")
+    assert guest_users.owner_of("s1").id == g.id
+    guest_users._reset()            # e sobrevive ao recarregar do disco
+    assert guest_users.owner_of("s1").id == g.id
+
+
+def test_set_life_ignores_unclaimed_and_unknown(tmp_path):
+    g, _ = _guest(tmp_path)
+    guest_users.set_life("sem-dono", "t:1")
+    assert not guest_users.has_claims()
+    LIVES["s1"] = "t:100"
+    guest_users.claim("s1", g.id)
+    guest_users.set_life("s1", None)
+    assert guest_users.owner_of("s1").id == g.id
+
+
 def test_visibility_rules(tmp_path):
     ana, _ = _guest(tmp_path, owner_sees=False)
     bia, _ = guest_users.create("bia", str(tmp_path / "proj"), True, True)
