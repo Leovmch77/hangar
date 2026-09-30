@@ -313,6 +313,10 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
 - **Grupo de 1 só existe no grupo `orq` com execução `auto` viva.** Viva = `orq.json` com `auto`
   e sem `execucao_fim`, nunca o batimento do vigia; acabada (ou não iniciada em 1 h), a varredura
   do `list()` dissolve o grupo e arquiva o contrato.
+- **Sessão orq: a conversa e o painel saem dos arquivos da execução, por um parser só**
+  (`orq_timeline.py`). O `ChatEvent` leva `orq` (texto cru mantido); o painel é um `GET` por
+  execução em `/api/sessions/{name}/orq/panel`, fora do alcance do convidado e sem escrita, e o
+  Time lê o estado da lista de sessões. O `orq.py` só grava o que não dá para derivar.
 - **Plan progress lê o `.md` do plano**, sem arquivo de estado: blocos cercados são removidos
   preservando offsets, e a decoração roda dentro do `to_thread` do git.
 - **Ditado: a transcrição não é o problema, o que vem depois é.** Vocabulário vai para a Whisper

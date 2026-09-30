@@ -780,3 +780,61 @@ próprias: medição, o que falta medir e a regra de `%` em
 **Limite da detecção.** A pergunta é lida do tty (`wait_woken` / `n_tty_read`): programa que espera o
 teclado por `poll`/`epoll` (o `read` do fish, o readline do Node/inquirer) não vira pergunta. Incluir
 `ep_poll`/`do_select` traria perguntas falsas de qualquer programa de tela cheia, então fica de fora.
+
+## Orquestrador sem LLM: a conversa e o painel saem dos arquivos da execução
+
+(29/09/2026, pedido do usuário.) A sessão `orq` não tem transcript de modelo; o que ela mostra é
+lido dos arquivos da execução por um parser só, `orq_timeline.py`, e cada cliente desenha o
+resultado. O `ChatEvent` ganha o campo `orq` (estrutura da linha) e mantém o texto cru, para o
+cliente que ainda não conhece o campo (o app Expo) seguir mostrando o aviso de antes.
+
+**Uma rota por execução, sem SSE por card.** `GET /api/sessions/{name}/orq/panel` devolve um
+retrato da execução: Tasks, Time, Decisões, Automação, Consumo e Integração. A pasta vem da linha
+em cache da lista de sessões; `runs.find` relê todas as execuções e some no reinício do vigia. O
+`orq` está em `_BLOCKED` do `share_gate.py`, então o convidado não alcança a rota. O `GET` nunca
+escreve na execução (o índice sqlite de custos pode ser atualizado pelo módulo de custos que já
+existia). O retrato só é refeito quando um arquivo da execução muda; o estado ao vivo de cada
+sessão do Time vem da lista de sessões que o cliente já mantém (`sessionsStore`), não do retrato. `automation.mode` é texto (`"auto"`, não número), e uma leitura
+que falha vira item de `errors`, nunca exceção.
+
+**Recado do `notify`, a linha e o Jev.** O `notify` grava o Jev, envia (teto de 30 s no
+`orq.py`) e só então escreve a linha; por isso o parser pareia linha e Jev numa janela de 45 s
+(`JEV_MATCH_S`) sobre o arquivo inteiro. Papéis, fechamentos e integração vêm do próprio
+`orq.py`, por `orq_start._orq()`, e não de uma segunda leitura reimplementada.
+
+**As quatro gravações novas do `orq.py`, e o que cada uma resolve:**
+
+- `from` na linha do `notify`: o remetente não se deriva de nada depois (`vigia` no alarme; o
+  nome de quem chamou pelo `hangar-send --whoami`; `null` na dúvida, nunca um palpite).
+- Linha `advance` "T{n} entregou a rodada k · <commit>": o mock mostra a entrega e nenhum
+  evento existente vira essa frase.
+- `probs` na resposta do Jev: a probabilidade de cada escolha não era gravada, só a escolhida.
+- `sessions.jsonl`, uma linha por sessão aberta com os ids (Claude: `session_id` e `config_dir`;
+  Codex: `thread_id` e `codex_home`): o transcript de uma sessão fechada não se acha sem id, e
+  o rollout do Codex só nasce no primeiro turno, então o caminho não serve. Gravar dado extra
+  nunca trava a orquestração viva: falha vai para o diário e o passo segue. Nome repetido: a
+  última linha vence.
+
+**Consumo.** Soma os transcripts do time pelo índice de custos do Hangar, só do uso a partir de
+`execucao_inicio` (no Claude o corte é por segmento diário do índice, não por resposta). Cada
+transcript é achado por, nesta ordem: ids de `sessions.jsonl` (execuções novas), `medicao/*.json`
+e a sessão viva de mesmo nome; o que nenhum caminho alcança entra em `sessions.missing` e o
+painel mostra "M de N sessões". Cache de 60 s (5 s quando algum transcript não pôde ser lido
+agora). **A soma nunca faz um poll esperar:** quem chega com ela em andamento recebe o último
+valor guardado, ou `None` se ainda não houve nenhum (no primeiro poll a tela diz "Somando os transcripts do time…").
+Tokens não são preço nem cota; o total marca `usd_partial` quando algum modelo não tem preço.
+
+**Estado da Task.** Veredito `aprova` ou `corrige` vira "aprovada · Rk" (k = rodada do
+veredito), e só `integrada` fecha a Task; `reprova` e `devolvido` viram "reprovada · Rk".
+
+**Medido em 29/09/2026** (execução `2026-09-29-cad3e6fe`, `orq_timeline.panel` chamado em
+processo contra a pasta real, não por `curl`: o backend de uso ainda não tinha a rota): o
+primeiro retrato levou 0,107 s e o seguinte 0,002 s. Das 23 sessões do time, 7 tiveram transcript
+achado (pela `medicao/` e pelas sessões vivas; a execução começou antes do `orq.py` gravar
+`sessions.jsonl`) e 16 ficaram em `missing`. O total mostrado, 13,17 dólares, é parcial nos dois
+sentidos: `usd_partial` verdadeiro e 16 sessões fora. Não medido: `time curl` pelo backend de uso
+e execução `auto` nova com as quatro gravações.
+
+**Paridade.** Web e nativo têm a linha do tempo e a aba Orquestração; a folha Orquestração do
+web (celular e desktop estreito) ainda não existe no nativo, e o app Expo não tem nada disto. O
+estado de cada um está em `desktop-native/docs/chat-parity.md`.

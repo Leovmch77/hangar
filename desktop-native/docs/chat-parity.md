@@ -225,6 +225,9 @@ Terminal embutido, navegador, árvore de arquivos e Git completos (stage, commit
 | Linha `orq` com o selo "Orquestrador · sem LLM" (`orq_row_badge`), no bloco do grupo do árbitro | implementado | barra e Conversas mostram o selo; no trilho ele vai na dica; nas abas do topo, só o glifo ◇ |
 | Conversa da linha do tempo sem compositor, com "Falar com o árbitro" (`orq_talk_to_arbiter`) abrindo o árbitro atual | implementado | rodapé como o do web: o selo "Orquestrador · sem LLM" e o botão no estilo comum; o árbitro sai de `orq_arbiter` na lista a cada clique; fora da lista, o botão fica desligado; conversa vazia diz que o orquestrador não recebe mensagens |
 | Renomear, fechar, interromper e o terminal da sessão escondidos | implementado | o menu da linha tem só "Falar com o árbitro"; pressionar para renomear e o Esc não agem; sem terminal (o botão do cabeçalho some, mesmo com terminal de atalho); clicar na linha não põe o foco num campo que não está desenhado; um 409 `erro_sessao_orq` que escape aparece com o texto do web |
+| Linha do tempo como linhas curtas e bolhas (rótulo, marcas, selo com vetos, Pergunta, parecer, ver tudo, separador de dia) | implementado | `orq_timeline.rs` sobre o `orq` do `ChatEvent`; conferido só por `cargo check` e testes de unidade (23 do orq), sem exercício na janela real e sem comparar com o mock lado a lado |
+| Aba Orquestração: Tasks com fila recolhida, Time ao vivo, Decisões, Automação com Avançado, Consumo por provider/modelo, Integração, Ações | implementado | `orq_panel.rs`, um `GET /api/sessions/{name}/orq/panel` por sessão aberta e só com a aba visível; sem exercício na janela real |
+| Folha Orquestração pelo rodapé quando o painel lateral não aparece | pendente | web: `OrqPanelSheet` (celular e desktop estreito). No nativo o painel lateral some quando a janela é estreita demais (`Side::fitted`) e nada o substitui: a aba Orquestração só existe dentro dele |
 
 ## Como rodar a prova
 
@@ -234,3 +237,11 @@ PARITY_COMPOSER_PORT=18794 python3 tools/parity_composer_fixture.py   # token pa
 LANG=pt_BR.UTF-8 target/debug/hangar-native                            # Conexão: http://127.0.0.1:18794
 PARITY_SESSION_PORT=18796 python3 tools/parity_session_fixture.py      # barra direita e controles; o token está em TOKEN no topo do arquivo
 ```
+
+## App Expo (mobile/)
+
+Não há outro documento de paridade do `mobile/` no repositório; as linhas do Expo moram aqui.
+
+| Capacidade | Estado | Observação |
+|---|---|---|
+| Conversa e painel da sessão orq | pendente | fora do trabalho de 29/09 por decisão do plano; o app segue mostrando o aviso cru da linha do tempo |
