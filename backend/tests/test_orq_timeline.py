@@ -1,7 +1,7 @@
 import json
 import os
 import shutil
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -408,3 +408,122 @@ def test_linha_do_tempo_grande_usa_o_cache(real, monkeypatch):
     real_entry = ot.entry
     monkeypatch.setattr(ot, "entry", lambda *a, **k: (calls.__setitem__("n", calls["n"] + 1), real_entry(*a, **k))[1])
     assert ot.panel(real) == first and calls["n"] == 0
+
+
+def test_evento_malformado_nao_vira_500(real):
+    with (real / "eventos.jsonl").open("a") as f:
+        f.write(json.dumps({"ts": "2026-09-29T22:26:00-03:00", "tipo": "task_inicio", "executor": "x"}) + "\n")
+        f.write(json.dumps({"ts": "2026-09-29T22:26:01-03:00", "tipo": "veredito", "task": 5, "sessao": "y",
+                            "resultado": ["aprova"]}) + "\n")
+    p = ot.panel(real)
+    assert p["errors"] and all(e["file"] for e in p["errors"])
+    assert p["tasks"]["rows"] and p["automation"]["mode"]["jev"] == "on"   # o resto do retrato sai igual
+
+
+def test_bloco_que_estoura_vira_erro_e_o_resto_sai(real, monkeypatch):
+    monkeypatch.setattr(ot, "_decision_rows", lambda *a: 1 / 0)
+    p = ot.panel(real)
+    assert p["decisions"] == [] and [e["file"] for e in p["errors"]] == ["decisions"]
+    assert len(p["team"]) == 11
+
+
+def test_trocados_ficam_no_bloco_da_task(real):
+    with (real / "eventos.jsonl").open("a") as f:
+        f.write(json.dumps({"ts": "2026-09-29T22:25:59-03:00", "tipo": "sessao_trocada", "de": "hangar-mobile-t5",
+                            "para": "hangar-mobile-t5b", "papel": "executor", "task": 5, "motivo": "x"}) + "\n")
+    team = ot.panel(real)["team"]
+    names = [m["name"] for m in team]
+    i = names.index("hangar-mobile-t5")
+    assert names[i - 2:i] == ["hangar-mobile-t5b", "hangar-mobile-review5"] and team[i]["task"] == 5
+    assert team[i + 1]["task"] == 4                  # o bloco da Task 4 vem depois, não o fim da lista
+
+
+def test_jsonl_com_byte_cortado_nao_zera_o_painel(real):
+    p = real / "eventos.jsonl"
+    p.write_bytes(p.read_bytes() + '{"tipo": "x", "motivo": "é'.encode()[:-1])   # meio caractere multibyte
+    out = ot.panel(real)
+    assert out["tasks"]["rows"] and not any(e["file"] == "eventos.jsonl" for e in out["errors"])
+
+
+def _row(source, model, i, o, cw, cr, ts="2026-09-30T01:00:00+00:00"):
+    from app.costs_sources import UsageRow
+    return UsageRow(ts=datetime.fromisoformat(ts), source=source, provider="", model=model, project="/r",
+                    session_id="s", input=i, output=o, cache_write=cw, cache_read=cr)
+
+
+LIVE = lambda: [type("S", (), {"name": "hangar-mobile-t5", "provider": "claude", "jsonl": "/p/t5.jsonl"})()]
+
+
+def _sources(real, tmp_path):
+    rollout = tmp_path / "rollout-2026-09-29T21-46-41-01a0efc7-25ef-7ee0-b078-1d31dc2c7c7d.jsonl"
+    rollout.write_text("")
+    (real / "sessions.jsonl").write_text(json.dumps({"ts": "…", "name": "w-arbiter", "role": "arbitro",
+        "task": None, "provider": "codex", "session_id": None, "config_dir": None,
+        "thread_id": "01a0efc7-25ef-7ee0-b078-1d31dc2c7c7d", "codex_home": str(tmp_path)}) + "\n")
+    return str(rollout)
+
+
+def test_consumo_por_provider_e_modelo(real, tmp_path, monkeypatch):
+    rollout = _sources(real, tmp_path)
+    monkeypatch.setattr(ot, "_find_rollout", lambda home, thread: rollout)
+    fake = {rollout: [_row("codex", "gpt-6.1-sol", 100, 10, 0, 1000),
+                      _row("codex", "gpt-6.1-sol", 999, 0, 0, 0, ts="2026-09-29T20:00:00+00:00")],  # antes do início
+            "/p/t5.jsonl": [_row("claude", "claude-opus-5-5", 50, 5, 20, 500),
+                            _row("claude", "claude-sonnet-5", 1, 1, 0, 10)]}
+    monkeypatch.setattr(ot, "_rows_for", lambda provider, path: fake[path])
+    before = sorted(p.name for p in real.iterdir())
+    c = ot.panel(real, LIVE)["consumption"]
+    assert sorted(p.name for p in real.iterdir()) == before          # o GET nunca escreve
+    assert c["since"] == "2026-09-29T21:53:31-03:00"
+    assert (c["sessions"]["team"], c["sessions"]["measured"]) == (11, 2)
+    assert "w-t1" in c["sessions"]["missing"]
+    assert c["totals"]["new"] == 100 + 10 + 50 + 5 + 20 + 1 + 1 and c["totals"]["cache_read"] == 1510
+    claude = next(p for p in c["providers"] if p["provider"] == "claude")
+    assert [m["model"] for m in claude["models"]] == ["claude-opus-5-5", "claude-sonnet-5"] and claude["sessions"] == 1
+
+
+def test_medicao_serve_de_fonte_para_execucao_antiga(real, monkeypatch):
+    (real / "medicao").mkdir()
+    (real / "medicao" / "w-arbiter-inicio.json").write_text(json.dumps({
+        "session": "w-arbiter", "provider": "codex", "model_observed": "gpt-6.1-sol",
+        "source": {"path": "/x/rollout.jsonl"}}))
+    monkeypatch.setattr(ot, "_exists", lambda p: True)
+    monkeypatch.setattr(ot, "_rows_for", lambda provider, path: [_row("codex", "gpt-6.1-sol", 1, 1, 0, 0)])
+    assert ot.panel(real, None)["consumption"]["sessions"]["measured"] == 1
+
+
+def test_consumo_e_refeito_so_depois_do_ttl(real, monkeypatch):
+    calls = {"n": 0}
+    monkeypatch.setattr(ot, "_rows_for", lambda *a: (calls.__setitem__("n", calls["n"] + 1), [])[1])
+    monkeypatch.setattr(ot, "_exists", lambda p: True)
+    ot.panel(real, LIVE); ot.panel(real, LIVE)
+    assert calls["n"] == 1
+    monkeypatch.setattr(ot, "CONSUMPTION_TTL_S", 0)
+    ot.panel(real, LIVE)
+    assert calls["n"] == 2
+
+
+def test_modelo_sem_preco_marca_o_total_como_parcial(real, monkeypatch):
+    monkeypatch.setattr(ot, "_exists", lambda p: True)
+    monkeypatch.setattr(ot, "_rows_for", lambda *a: [_row("claude", "modelo-inventado", 1, 1, 0, 0)])
+    c = ot.panel(real, LIVE)["consumption"]
+    assert c["missing_prices"] == ["modelo-inventado"] and c["totals"]["usd_partial"] is True
+
+
+def test_falha_no_consumo_vira_erro_e_o_resto_sai(real, monkeypatch):
+    monkeypatch.setattr(ot, "_rows_for", lambda *a: 1 / 0)
+    p = ot.panel(real, LIVE)
+    assert p["consumption"] is None and any(e["file"] == "consumo" for e in p["errors"])
+    assert len(p["team"]) == 11
+
+
+def test_ultima_linha_do_nome_vence_em_sessions_jsonl(real, tmp_path, monkeypatch):
+    rollout = _sources(real, tmp_path)
+    old = json.loads((real / "sessions.jsonl").read_text())
+    new = {**old, "thread_id": "bbbb"}
+    (real / "sessions.jsonl").write_text(json.dumps(old) + "\n" + json.dumps(new) + "\n")
+    seen = []
+    monkeypatch.setattr(ot, "_find_rollout", lambda home, thread: seen.append(thread) or rollout)
+    monkeypatch.setattr(ot, "_rows_for", lambda *a: [])
+    ot.panel(real, None)
+    assert seen == ["bbbb"]

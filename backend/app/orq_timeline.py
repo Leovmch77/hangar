@@ -7,13 +7,17 @@ import hashlib
 import importlib.util
 import json
 import logging
+import os
 import re
 import threading
-from dataclasses import dataclass, field
+import time
+from dataclasses import dataclass, field, replace
+from datetime import datetime
 from pathlib import Path
 
-from app import orq_conductor, orq_start
+from app import costs, costs_claude_transcript, costs_sources, orq_conductor, orq_start, pricing
 from app.adapters.orq.runs import timeline_path  # noqa: F401  (reexportado: quem lê a linha do tempo pede daqui)
+from app.config import list_config_dirs
 
 _log = logging.getLogger(__name__)
 
@@ -265,9 +269,16 @@ def event_id(obj: dict) -> str:
 # ── retrato do painel ────────────────────────────────────────────────────────────────────────
 
 _PANEL_FILES = ("jev-shadow.jsonl", "eventos.jsonl", "closed.jsonl", "checks.jsonl", "orq.json", "sessions.jsonl")
-_PANELS: dict[str, tuple[tuple, dict]] = {}
+_PANELS: dict[str, tuple[tuple, dict, dict]] = {}
 _panels_lock = threading.Lock()
 _VERDICT = {"aprova": "approved", "corrige": "approved", "reprova": "rejected", "devolvido": "rejected"}
+
+
+def _verdict(ev: dict) -> str | None:
+    r = ev.get("resultado")
+    return _VERDICT.get(r) if isinstance(r, str) else None
+
+
 _OUTCOME = {"integrada": "green", "integracao_vermelha": "red", "conflito": "conflict",
             "advance_falhou": "failed"}
 
@@ -287,10 +298,11 @@ def _err(e: Exception) -> str:
 def _read_jsonl(p: Path) -> tuple[list[dict], str | None]:
     """(objetos, erro): arquivo ausente não é erro; linha que não é objeto JSON é pulada."""
     try:
-        text = p.read_text(encoding="utf-8")
+        # `replace`: meio caractere no fim (arquivo sendo escrito) não pode zerar o painel.
+        text = p.read_text(encoding="utf-8", errors="replace")
     except FileNotFoundError:
         return [], None
-    except (OSError, UnicodeDecodeError) as e:
+    except OSError as e:
         return [], _err(e)
     rows = []
     for line in text.splitlines():
@@ -389,8 +401,8 @@ def _task_rows(evs: list[dict], plan: list[dict], integrated: set[int]) -> list[
             deciding[n] = ("executing", None)
         elif t == "entrega":
             deciding[n] = ("in_review", rnd)
-        elif t == "veredito" and ev.get("resultado") in _VERDICT:
-            deciding[n] = (_VERDICT[ev["resultado"]], rnd)
+        elif t == "veredito" and _verdict(ev):
+            deciding[n] = (_verdict(ev), rnd)
         elif t in ("integracao_vermelha", "conflito") or (t == "advance_falhou" and ev.get("passo") == "integrate"):
             deciding[n] = ("integration_red", None)
         elif t == "integrada":
@@ -419,8 +431,8 @@ def _team(m, cfg: dict, st: dict, evs: list[dict]) -> list[dict]:
                     last[who] = {"code": "started", "round": None, "ts": ts}
         elif t == "entrega" and isinstance(who := roles.get(n, {}).get("executor"), str):
             last[who] = {"code": "delivered", "round": rnd, "ts": ts}
-        elif t == "veredito" and isinstance(ev.get("sessao"), str) and ev.get("resultado") in _VERDICT:
-            last[ev["sessao"]] = {"code": _VERDICT[ev["resultado"]], "round": rnd, "ts": ts}
+        elif t == "veredito" and isinstance(ev.get("sessao"), str) and _verdict(ev):
+            last[ev["sessao"]] = {"code": _verdict(ev), "round": rnd, "ts": ts}
         elif t == "sessao_trocada":
             de, para = ev.get("de"), ev.get("para")
             if de == arbiter:
@@ -436,16 +448,19 @@ def _team(m, cfg: dict, st: dict, evs: list[dict]) -> list[dict]:
     rows = [{"name": st["arbiter"], "role": "arbiter", "task": None, "last": None, "current": True}]
     rows += [{"name": n, "role": "arbiter", "task": None, "last": None, "current": False}
              for n in reversed(before)]
+    replaced: dict[int, list[dict]] = {}
+    for de, _para in st["replaced"]:
+        if de in slot:
+            n, role = slot[de]
+            replaced.setdefault(n, []).append(
+                {"name": de, "role": role, "task": n, "last": last.get(de), "current": False})
     for n in sorted(st["roles"], reverse=True):
         for key, role in (("executor", "executor"), ("par", "reviewer")):
             who = st["roles"][n].get(key)
             # `par` também guarda a frase "subagente" ou a descrição de quem revisa: nome de sessão não tem espaço.
             if isinstance(who, str) and who.strip() and " " not in who and who != m.SUBAGENT:
                 rows.append({"name": who, "role": role, "task": n, "last": last.get(who), "current": True})
-    for de, _para in st["replaced"]:
-        if de in slot:
-            n, role = slot[de]
-            rows.append({"name": de, "role": role, "task": n, "last": last.get(de), "current": False})
+        rows += replaced.get(n, [])
     seen: set[str] = set()
     return [r for r in rows if not (r["name"] in seen or seen.add(r["name"]))]
 
@@ -470,7 +485,8 @@ def _integration(m, evs: list[dict], closes: dict, checks: list[dict]) -> dict:
 
 def panel(d: Path, live=None) -> dict:
     """Um retrato da execução, lido dos arquivos dela. O mesmo retrato serve enquanto nenhum
-    arquivo muda; leitura que falha vira item de `errors`, nunca exceção."""
+    arquivo muda; leitura que falha vira item de `errors`, nunca exceção. O consumo tem cache
+    próprio (por tempo), porque muda sem que nenhum arquivo da execução mude."""
     key = str(d.resolve())
     plan_path = None
     try:
@@ -482,16 +498,20 @@ def panel(d: Path, live=None) -> dict:
     with _panels_lock:
         hit = _PANELS.get(key)
     if hit and hit[0] == sig:
-        return {**hit[1], "consumption": None}
-    out = _build_panel(d)
-    with _panels_lock:
-        while len(_PANELS) >= _RUNS_MAX and key not in _PANELS:
-            _PANELS.pop(next(iter(_PANELS)), None)
-        _PANELS[key] = (sig, out)
-    return {**out, "consumption": None}
+        _, out, aux = hit
+    else:
+        out, aux = _build_panel(d)
+        with _panels_lock:
+            while len(_PANELS) >= _RUNS_MAX and key not in _PANELS:
+                _PANELS.pop(next(iter(_PANELS)), None)
+            _PANELS[key] = (sig, out, aux)
+    consumption, error = _consumption(d, [m["name"] for m in out["team"]], aux, live)
+    if error:
+        return {**out, "errors": [*out["errors"], {"file": "consumo", "error": error}], "consumption": None}
+    return {**out, "consumption": consumption}
 
 
-def _build_panel(d: Path) -> dict:
+def _build_panel(d: Path) -> tuple[dict, dict]:
     m = orq_start._orq()
     errors: list[dict] = []
 
@@ -499,11 +519,16 @@ def _build_panel(d: Path) -> dict:
         if not any(e["file"] == file for e in errors):
             errors.append({"file": file, "error": error})
 
-    def guard(fn, default, file: str):
+    def guard(fn, default, file: str, exact: bool = False):
+        """Bloco que estoura vira item de `errors` e o resto do retrato sai igual. `exact`: o
+        nome do bloco, não o do arquivo que o `OSError` cita."""
         try:
             return fn()
-        except (m.OrqError, OSError, ValueError) as e:
-            fail(Path(getattr(e, "filename", None) or file).name, _err(e))
+        except Exception as e:
+            if not isinstance(e, (m.OrqError, OSError, ValueError)):
+                _log.warning("orq_timeline: bloco %s falhou no painel", file, exc_info=True)
+            name = file if exact else Path(getattr(e, "filename", None) or file).name
+            fail(name, _err(e))
             return default
 
     cfg: dict = {}
@@ -540,22 +565,213 @@ def _build_panel(d: Path) -> dict:
 
     st = guard(lambda: m.state(d), None, "orq.json") if cfg else None
     closes = guard(lambda: m._closes(d), {}, "closed.jsonl")
-    integrated = {n for n, c in closes.items() if m._outcome(evs, n, c) == "integrada"}
+    integrated = guard(lambda: {n for n, c in closes.items() if m._outcome(evs, n, c) == "integrada"},
+                       set(), "tasks", exact=True)
 
     plan = None
     if isinstance(cfg.get("plan"), str):
-        plan = guard(lambda: m.plan_tasks(m.plan_text(cfg["plan"])), None, "plan")
-    rows = _task_rows(evs, plan or [], integrated)
+        plan = guard(lambda: m.plan_tasks(m.plan_text(cfg["plan"])), None, "plan", exact=True)
+    rows = guard(lambda: _task_rows(evs, plan or [], integrated), [], "tasks", exact=True)
     begin = next((e for e in evs if e.get("tipo") == "execucao_inicio"), {})
+    aux = {"since": begin.get("ts"), "models": _opened_models(entries)}
     return {
         "run": d.resolve().name, "gid": begin.get("gid") or "", "errors": errors,
         "empty": not lines and not any(e.get("tipo") == "task_inicio" for e in evs),
         "tasks": {"integrated": len(integrated),
                   "total": len(plan) if plan is not None else max((r["n"] for r in rows), default=0),
                   "total_known": plan is not None, "rows": rows},
-        "team": _team(m, cfg, st, evs) if st else [],
-        "decisions": _decision_rows(entries, evs),
-        "automation": _automation(cfg, entries, shadow),
+        "team": guard(lambda: _team(m, cfg, st, evs), [], "team", exact=True) if st else [],
+        "decisions": guard(lambda: _decision_rows(entries, evs), [], "decisions", exact=True),
+        "automation": guard(lambda: _automation(cfg, entries, shadow), _no_automation(cfg), "automation",
+                            exact=True),
         "consumption": None,
-        "integration": _integration(m, evs, closes, checks),
-    }
+        "integration": guard(lambda: _integration(m, evs, closes, checks), _NO_INTEGRATION, "integration",
+                             exact=True),
+    }, aux
+
+
+_NO_INTEGRATION = {"branch": None, "last": None, "outcome": None, "red_log": None,
+                   "delivery_checks": {"ok": 0, "total": 0, "failing": []}}
+
+
+def _no_automation(cfg: dict) -> dict:
+    return {"mode": {"jev": cfg.get("jev", "shadow"), "regex": cfg.get("regex", "shadow")},
+            "woke": {"total": 0, "decisions": 0, "alarms": 0, "messages": 0},
+            "alone": {"total": 0, "opened": 0, "integrated": 0, "dropped": 0}, "dropped_by_jev": 0,
+            "advanced": {"would_drop": 0, "disagree": 0, "judged": 0, "min_confidence": None, "by_rule": 0}}
+
+
+def _opened_models(entries: list[tuple[dict, dict]]) -> dict[str, str]:
+    """Modelo que cada sessão abriu, dito na linha "abriu …": serve a quem o transcript não nomeia."""
+    out: dict[str, str] = {}
+    for _, e in entries:
+        line = e["line"] or {}
+        if line.get("code") == "opened":
+            out.update({s["name"]: s["model"] for s in line["sessions"]})
+    return out
+
+
+# ── consumo ──────────────────────────────────────────────────────────────────────────────────
+
+CONSUMPTION_TTL_S = 60
+_CONSUMPTION: dict[str, tuple[float, dict | None, str | None]] = {}
+_consumption_locks: dict[str, threading.Lock] = {}
+_consumption_guard = threading.Lock()
+
+
+def _exists(p: str) -> bool:
+    return Path(p).is_file()
+
+
+def _find_rollout(codex_home: str | None, thread_id: str) -> str | None:
+    """Rollout do Codex pelo id da thread; nasce no primeiro turno, então só existe depois."""
+    for home in ([codex_home] if codex_home else []) + [str(costs_sources.raiz_codex().parent)]:
+        hit = next(Path(home).glob(f"sessions/**/rollout-*-{thread_id}.jsonl"), None)
+        if hit:
+            return str(hit)
+    return None
+
+
+def _find_claude(config_dir: str | None, session_id: str) -> str | None:
+    dirs = [config_dir] if config_dir else [c.path for c in list_config_dirs(ordered=False)]
+    for cd in dirs:
+        hit = next(Path(cd, "projects").glob(f"*/{session_id}.jsonl"), None)
+        if hit:
+            return str(hit)
+    return None
+
+
+def _rows_for(provider: str, path: str) -> list:
+    """Linhas de custo de um transcript, com os subagentes do Claude (`<sessão>/subagents/*.jsonl`)."""
+    p = Path(path)
+    if provider == "claude":
+        subs = sorted((p.parent / p.stem / "subagents").glob("*.jsonl"))
+        return [r for f in (p, *subs) for r in costs_claude_transcript.custos_do_transcript(f)]
+    if provider == "codex":
+        return costs_sources.custos_do_rollout(p)
+    if provider in ("pi", "omp"):
+        raiz = costs_sources.raiz_pi() if provider == "pi" else costs_sources.raiz_omp()
+        return costs_sources._linhas_arquivo_pi(p, raiz, provider)
+    if provider == "kimi":
+        return costs_sources._linhas_wire_kimi(p)
+    return []
+
+
+def _team_paths(d: Path, names: list[str], live) -> dict[str, list[tuple[str, str]]]:
+    """Nome do time -> [(provider, caminho do transcript)]: `sessions.jsonl` (a última linha do
+    nome vence), `medicao/*.json` e a sessão viva de mesmo nome; caminho repetido entra uma vez."""
+    found: dict[str, dict[str, str]] = {n: {} for n in names}
+
+    def add(name: str, provider: str, path: str | None) -> None:
+        if name in found and path:
+            found[name].setdefault(os.path.realpath(path), provider)
+
+    last: dict[str, dict] = {}
+    for row in _read_jsonl(d / "sessions.jsonl")[0]:
+        if isinstance(row.get("name"), str):
+            last[row["name"]] = row
+    for name, row in last.items():
+        if row.get("provider") == "claude" and row.get("session_id"):
+            add(name, "claude", _find_claude(row.get("config_dir"), row["session_id"]))
+        elif row.get("provider") == "codex" and row.get("thread_id"):
+            add(name, "codex", _find_rollout(row.get("codex_home"), row["thread_id"]))
+    for f in sorted((d / "medicao").glob("*.json")):
+        try:
+            snap = json.loads(f.read_text(encoding="utf-8"))
+            path = snap["source"]["path"]
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+        if isinstance(snap.get("session"), str) and isinstance(path, str) and _exists(path):
+            add(snap["session"], str(snap.get("provider") or ""), path)
+    for s in (live() if live else []):
+        add(s.name, s.provider, s.jsonl)     # a sessão viva traz o arquivo atual, também depois de um /clear
+    return {n: [(p, path) for path, p in paths.items()] for n, paths in found.items()}
+
+
+def _medicao_models(d: Path) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for f in sorted((d / "medicao").glob("*.json")):
+        try:
+            snap = json.loads(f.read_text(encoding="utf-8"))
+            if isinstance(snap.get("session"), str) and snap.get("model_observed"):
+                out[snap["session"]] = str(snap["model_observed"])
+        except (OSError, ValueError, AttributeError):
+            continue
+    return out
+
+
+def _compute_consumption(d: Path, names: list[str], aux: dict, live) -> dict:
+    since = orq_conductor._when(aux.get("since"))
+    paths = _team_paths(d, names, live)
+    hints = {**aux["models"], **_medicao_models(d)}
+    seen: set[str] = set()
+    groups: dict[tuple[str, str], dict] = {}
+    missing_prices: set[str] = set()
+    subagents = False
+    for name in names:
+        for provider, path in paths.get(name, ()):
+            if path in seen:
+                continue
+            seen.add(path)
+            for row in _rows_for(provider, path):
+                subagents = subagents or bool(row.subagente)
+                if since is not None and row.ts < since:
+                    continue
+                if not row.model and hints.get(name):
+                    row = replace(row, model=hints[name])
+                cost = costs._custo_da_linha(row)
+                model = pricing.canonizar(row.model) or "unknown"
+                g = groups.setdefault((row.source, model), {"names": set(), "new": 0, "cache_read": 0, "usd": 0.0})
+                g["names"].add(name)
+                g["new"] += row.input + row.output + row.cache_write
+                g["cache_read"] += row.cache_read
+                if cost is None:
+                    missing_prices.add(model)
+                else:
+                    g["usd"] += sum(cost.values())
+    by_provider: dict[str, list] = {}
+    for (source, model), g in groups.items():
+        by_provider.setdefault(source, []).append({"model": model, **g})
+    providers = []
+    for source, models in by_provider.items():
+        models.sort(key=lambda g: (-g["usd"], g["model"]))
+        providers.append({
+            "provider": source, "sessions": len(set().union(*(g["names"] for g in models))),
+            "new": sum(g["new"] for g in models), "cache_read": sum(g["cache_read"] for g in models),
+            "usd": round(sum(g["usd"] for g in models), 4),
+            "models": [{"model": g["model"], "sessions": len(g["names"]), "new": g["new"],
+                        "cache_read": g["cache_read"], "usd": round(g["usd"], 4)} for g in models]})
+    providers.sort(key=lambda p: (-p["usd"], p["provider"]))
+    return {
+        "computed_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "since": aux.get("since"),
+        "sessions": {"team": len(names), "measured": sum(1 for n in names if paths.get(n)),
+                     "missing": [n for n in names if not paths.get(n)]},
+        "totals": {"new": sum(p["new"] for p in providers), "cache_read": sum(p["cache_read"] for p in providers),
+                   "usd": round(sum(p["usd"] for p in providers), 4), "usd_partial": bool(missing_prices)},
+        "providers": providers, "missing_prices": sorted(missing_prices), "subagents": subagents}
+
+
+def _consumption(d: Path, names: list[str], aux: dict, live) -> tuple[dict | None, str | None]:
+    """(consumo, erro), refeito depois de `CONSUMPTION_TTL_S`. Quem chega durante a soma espera
+    a mesma trava e recebe o mesmo resultado; a falha também fica no cache pelo mesmo prazo."""
+    key = str(d.resolve())
+    with _consumption_guard:
+        lock = _consumption_locks.get(key)
+        if lock is None:
+            while len(_consumption_locks) >= _RUNS_MAX:
+                old = next(iter(_consumption_locks))
+                _consumption_locks.pop(old)
+                _CONSUMPTION.pop(old, None)
+            lock = _consumption_locks.setdefault(key, threading.Lock())
+    with lock:
+        hit = _CONSUMPTION.get(key)
+        if hit and time.monotonic() - hit[0] < CONSUMPTION_TTL_S:
+            return hit[1], hit[2]
+        try:
+            value, error = _compute_consumption(d, names, aux, live), None
+        except Exception as e:
+            _log.warning("orq_timeline: consumo falhou", exc_info=True)
+            value, error = None, _err(e)
+        _CONSUMPTION[key] = (time.monotonic(), value, error)
+        return value, error

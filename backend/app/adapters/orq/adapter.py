@@ -33,7 +33,7 @@ def parse_obj(obj: dict, run_dir: Path | None = None) -> list[ChatEvent]:
     except Exception:
         _log.warning("orq_timeline.entry falhou", exc_info=True)
         orq = None
-    return [ChatEvent(kind="notice", id=orq_timeline.event_id(obj),text=text, ts=ts, orq=orq)]
+    return [ChatEvent(kind="notice", id=orq_timeline.event_id(obj), text=text, ts=ts, orq=orq)]
 
 
 def line_parser(run_dir: Path | None) -> Callable[[str], list[ChatEvent]]:

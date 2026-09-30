@@ -187,7 +187,7 @@ def test_panel_route_serves_one_snapshot_per_run(root, monkeypatch):
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["run"] == "2026-09-28-g1" and body["gid"] == "g1"
-    assert body["consumption"] is None and body["automation"]["mode"] == {"jev": "shadow", "regex": "shadow"}
+    assert body["consumption"]["sessions"]["team"] == 1 and body["automation"]["mode"] == {"jev": "shadow", "regex": "shadow"}
 
 
 def test_panel_route_without_a_live_run_is_404(root, monkeypatch):

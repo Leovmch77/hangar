@@ -233,3 +233,14 @@ def test_resposta_atualizada_substitui_usage_parcial(tmp_path):
     _escrever(tmp_path / "s.jsonl", [parcial, final])
     (uso,) = ct.ler_transcript(tmp_path / "s.jsonl")
     assert (uso.input, uso.output) == (10, 12)
+
+
+def test_custos_de_um_transcript_pelo_indice(tmp_path, monkeypatch):
+    t = tmp_path / "projects" / "-repo-a" / "s1.jsonl"
+    _escrever(t, [_turno("claude-opus-5-5", 10, 1, 5, 100, "2026-09-29T10:00:01Z"),
+                  _turno("claude-sonnet-5", 20, 2, 0, 200, "2026-09-29T10:05:00Z")])
+    n = _contador(monkeypatch)
+    rows = ct.custos_do_transcript(t)
+    assert {(r.model, r.input, r.cache_read) for r in rows} == {("claude-opus-5-5", 10, 100), ("claude-sonnet-5", 20, 200)}
+    ct.custos_do_transcript(t)
+    assert n["v"] == 1

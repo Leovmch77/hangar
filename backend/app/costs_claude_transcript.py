@@ -260,6 +260,15 @@ def sincronizar(raiz: Path) -> None:
                             _nova_dobra(raiz), f"claude:{CACHE_VERSAO}")
 
 
+def custos_do_transcript(path: Path) -> list:
+    """Linhas de custo de UM transcript pelo índice (só o que cresceu é lido). A raiz é a pasta
+    `projects` acima dele, a mesma da varredura, para o arquivo não ser lido duas vezes."""
+    from app.costs_sources import _usage_row
+    raiz = next((p for p in path.parents if p.name == "projects"), path.parent.parent)
+    file_id = costs_cache.sincronizar_arquivo(path, _nova_dobra(raiz), f"claude:{CACHE_VERSAO}", escopo(raiz))
+    return [] if file_id is None else [_usage_row(t) for t in costs_cache.ler_custos(file_id=file_id)]
+
+
 def _usos_do_indice(raiz: Path) -> list[UsoSessao]:
     return [UsoSessao(session_id=t[5], ts=datetime.fromisoformat(t[0]), model=t[3], cwd=t[4],
                       subagente=bool(t[10]), input=t[6], output=t[7], cache_write=t[8],
