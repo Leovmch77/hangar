@@ -27,6 +27,9 @@ _GLOBAL_ROUTES = share_gate._GLOBAL_ROUTES | {
     ("GET", "/api/me"),
     ("POST", "/api/diag"),
 }
+# Voz do Codex e navegador embutido não são do convidado; recusar aqui evita que o navsock
+# registre tentativa falha contra o IP dele.
+_BLOCKED = share_gate._BLOCKED | {"codex", "nav-remoto", "navegador"}
 
 
 def guest_allowed_user(guest, method: str, path: str) -> bool:
@@ -40,7 +43,7 @@ def guest_allowed_user(guest, method: str, path: str) -> bool:
     name, rest = parts[3], parts[4:]
     if name.startswith("term-") and rest == ["term"]:
         return guest_users.visible_to(guest, name[len("term-"):])
-    if rest and rest[0] in share_gate._BLOCKED:
+    if rest and rest[0] in _BLOCKED:
         return False
     return guest_users.visible_to(guest, name)
 
@@ -69,7 +72,9 @@ class GuestUserGate:
     async def __call__(self, scope, receive, send):
         server = scope.get("server") or (None, None)
         # Na porta do convidado de convite manda o ShareGate; com a porta colidida ela É a principal.
-        if scope["type"] not in ("http", "websocket") or (
+        # Só /api/ tem dono de sessão; página, assets e /convite/ seguem sem o porteiro (o cookie
+        # cp_token do próprio servidor do convidado chega aqui em toda carga da tela).
+        if scope["type"] not in ("http", "websocket") or not scope["path"].startswith("/api/") or (
                 server[1] == GUEST_PORT and not port_clash()):
             await self.app(scope, receive, send)
             return

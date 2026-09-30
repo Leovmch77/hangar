@@ -34,6 +34,18 @@ def env(tmp_path, monkeypatch):
     def config():
         return {"ok": True}
 
+    @app.get("/")
+    def index():
+        return {"page": True}
+
+    @app.websocket("/api/sessions/{name}/codex/voice")
+    async def voice(ws: WebSocket, name: str):
+        await ws.accept()
+
+    @app.websocket("/api/sessions/{name}/nav-remoto")
+    async def nav(ws: WebSocket, name: str):
+        await ws.accept()
+
     @app.websocket("/api/sessions/{name}/term")
     async def term(ws: WebSocket, name: str):
         await ws.accept()
@@ -104,3 +116,19 @@ def test_guest_port_with_clash_is_still_gated(env, monkeypatch):
     monkeypatch.setattr(guest_user_gate, "GUEST_PORT", 80)
     monkeypatch.setattr(guest_user_gate, "port_clash", lambda: True)
     assert client.get("/api/config", headers=_h(tok)).status_code == 403
+
+
+@pytest.mark.parametrize("rota", ["codex/voice", "nav-remoto"])
+def test_guest_blocked_from_codex_voice_and_remote_browser(env, rota):
+    client, _, tok = env
+    with pytest.raises(WebSocketDisconnect) as e:
+        with client.websocket_connect(f"/api/sessions/minha/{rota}?token={tok}"):
+            pass
+    assert e.value.code == 1008
+
+
+def test_guest_cookie_does_not_break_page_paths(env):
+    client, _, tok = env
+    client.cookies.set("cp_token", tok)
+    r = client.get("/")
+    assert r.status_code == 200 and r.json() == {"page": True}
