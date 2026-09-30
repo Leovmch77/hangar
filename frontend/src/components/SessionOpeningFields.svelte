@@ -31,6 +31,7 @@
     jev: boolean;
     ompProfile: string;
     onEngineChange?: (engine: string) => void;
+    onModelChoice?: () => void;
     onJevChange?: () => void;
     /** Entre "onde roda" e os campos de modelo (a folha põe ali o "continuar uma conversa"). */
     afterExecution?: Snippet;
@@ -43,7 +44,7 @@
     resuming = false, allowSubagent = true, showJev = false,
     headless = $bindable(), model = $bindable(), effort = $bindable(), permission = $bindable(),
     engine = $bindable(), subagent = $bindable(), jev = $bindable(), ompProfile = $bindable(),
-    onEngineChange, onJevChange, afterExecution, afterChoices,
+    onEngineChange, onModelChoice, onJevChange, afterExecution, afterChoices,
   }: Props = $props();
 
   const id = (name: string) => `${idPrefix}${name}`;
@@ -61,6 +62,7 @@
     : m.criar_subagente_padrao());
 
   function pickModel(v: string) {
+    onModelChoice?.();
     // Os níveis do Codex são por modelo: um nível que o modelo novo não lista não pode ficar.
     model = v;
     if (effort && !effortLevels(provider, models, v).includes(effort)) effort = '';
@@ -140,7 +142,7 @@
         <label class="field-label" for={id('effort-pick')}>{effortLabel}</label>
         <Select id={id('effort-pick')} class="field-input" ariaLabel={effortLabel} value={effort}
           opcoes={[{ value: '', label: m.criar_padrao() }, ...levels.map((n) => ({ value: n, label: n }))]}
-          onchange={(v) => (effort = v)} />
+          onchange={(v) => { onModelChoice?.(); effort = v; }} />
       </div>
     {/if}
 
@@ -189,7 +191,7 @@
             <Select id={id('subagent-pick')} class="field-input" ariaLabel={m.criar_subagente()} value={subagent}
               opcoes={[{ value: '', label: m.criar_subagente_padrao() },
                        ...models.filter((mod) => mod.id !== 'default').map((mod) => ({ value: valorModelo(mod), label: mod.name ?? mod.id }))]}
-              onchange={(v) => (subagent = v)} />
+              onchange={(v) => { onModelChoice?.(); subagent = v; }} />
             <p class="hint">{m.criar_subagente_ajuda()}</p>
           </div>
         {/if}

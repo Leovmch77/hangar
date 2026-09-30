@@ -183,6 +183,7 @@ impl NewSession {
             .map(|m| ModelChoice { id: m.value(), label: m.label(), hint: m.hint() })).collect();
         let at = Self::pick_at(&models, &self.model);
         self.model_pick = Some(picker(models, at, |this, id, window, cx| {
+            this.model_choice_touched = true;
             this.model = id;
             // Trocar de modelo pode tirar o nível escolhido da lista (só o Codex tem níveis por modelo).
             if !this.levels().contains(&this.effort) { this.effort.clear(); }
@@ -191,7 +192,7 @@ impl NewSession {
         let subagents: Vec<ModelChoice> = std::iter::once(ModelChoice { id: String::new(), label: tr("create_subagent_default"), hint: String::new() })
             .chain(self.catalog().iter().filter(|m| m.id != "default").map(|m| ModelChoice { id: m.value(), label: m.label(), hint: String::new() })).collect();
         let at = Self::pick_at(&subagents, &self.subagent);
-        self.subagent_pick = Some(picker(subagents, at, |this, id, _, _| this.subagent = id, window, cx));
+        self.subagent_pick = Some(picker(subagents, at, |this, id, _, _| { this.model_choice_touched = true; this.subagent = id; }, window, cx));
         self.build_effort_pick(window, cx);
         self.build_permission_pick(window, cx);
     }
@@ -200,7 +201,7 @@ impl NewSession {
         let choices: Vec<ModelChoice> = std::iter::once(String::new()).chain(self.levels())
             .map(|n| ModelChoice { label: if n.is_empty() { tr("create_default") } else { n.clone() }, id: n, hint: String::new() }).collect();
         let at = Self::pick_at(&choices, &self.effort);
-        self.effort_pick = Some(picker(choices, at, |this, id, _, _| this.effort = id, window, cx));
+        self.effort_pick = Some(picker(choices, at, |this, id, _, _| { this.model_choice_touched = true; this.effort = id; }, window, cx));
     }
 
     pub(super) fn build_permission_pick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -255,6 +256,7 @@ impl NewSession {
                         menu_row(SharedString::from(format!("new-chat-model-{id}")), on, label, hint)
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 // O menu fica aberto: o esforço, logo abaixo, costuma ser a escolha seguinte.
+                                this.model_choice_touched = true;
                                 this.model = id.clone();
                                 if !this.levels().contains(&this.effort) { this.effort.clear(); }
                                 this.build_effort_pick(window, cx);
@@ -273,7 +275,7 @@ impl NewSession {
                 .gap(px(4.)).children(std::iter::once(String::new()).chain(levels).map(|level| {
                     let label = if level.is_empty() { tr("create_default") } else { level.clone() };
                     Button::new(SharedString::from(format!("new-chat-effort-{level}"))).ghost().xsmall().selected(self.effort == level).label(label)
-                        .on_click(cx.listener(move |this, _, window, cx| { this.effort = level.clone(); this.build_effort_pick(window, cx); cx.notify(); }))
+                        .on_click(cx.listener(move |this, _, window, cx| { this.model_choice_touched = true; this.effort = level.clone(); this.build_effort_pick(window, cx); cx.notify(); }))
                 }))));
         div().p(px(popup::INSET)).flex().flex_col().gap(px(2.)).child(tabs).child(self.menu_search()).child(list).children(effort)
     }

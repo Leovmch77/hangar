@@ -106,3 +106,117 @@ def test_preserva_variavel_que_a_tela_nao_controla(home):
     principal.write_text(json.dumps(dados))
     cc.save(_pedido(home))
     assert _entrada(principal)["env"]["VIRTUAL_ENV"] == ""
+
+
+@pytest.mark.parametrize("configure_key", [False, True])
+def test_first_install_without_checkout_creates_package_target(tmp_path, monkeypatch, configure_key):
+    from app import runtime_config as rc
+
+    monkeypatch.setattr(cc.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(cc, "list_config_dirs", lambda: [])
+    monkeypatch.setattr(cc, "_cliproxy_running", lambda: False)
+    monkeypatch.setattr(rc, "_backend_config_base", lambda: tmp_path)
+    monkeypatch.setattr(cc.shutil, "which", lambda name: "/bin/uvx" if name == "uvx" else None)
+    monkeypatch.setattr(cc, "_get", lambda url, timeout: (
+        b'{"tag_name":"v1.0.0"}' if "api.github.com" in url else b"MZ-agent"))
+    assert cc.state()["mode"] == "package" and not cc.state()["package_exists"]
+    if configure_key:
+        rc.aplicar({"jev_windows_api_key": "windows-secret-1234"})
+        assert not cc.state()["enabled"]
+        assert not cc._main_file().exists()
+
+    installed = cc.install()
+    assert installed["mode"] == "package" and installed["package_exists"]
+    assert installed["enabled"] is False and installed["targets"] == []
+    created = cc.create_target({"name": "desktop", "transport": "ssh", "host": "desktop"})
+    target = cc._package_targets() / "desktop-agent.json"
+    assert created["mode"] == "package" and created["enabled"] is False
+    assert created["agent_config"] == str(target)
+    assert json.loads(target.read_text())["agent_path"] == str(cc._package_exe())
+    enabled = cc.save({"enabled": True, "agent_config": str(target), "llm_url": cc.PRESET_URL})
+    assert enabled["enabled"] and enabled["mode"] == "package"
+    if configure_key:
+        assert _entrada(cc._main_file())["env"]["TYPESAFE_API_KEY"] == "windows-secret-1234"
+        assert "windows-secret-1234" not in json.dumps(enabled)
+
+
+def test_installed_package_does_not_override_existing_local_entry(home):
+    cc.save(_pedido(home))
+    cc._install_dir().mkdir(parents=True)
+    cc._package_exe().write_bytes(b"MZ-agent")
+    (cc._install_dir() / "install.json").write_text('{"tag":"v1.0.0","uvx":"uvx"}')
+    assert cc.state()["mode"] == "local"
+    assert cc.save({"enabled": False})["mode"] == "local"
+    state = cc.create_target({"name": "still-local", "transport": "ssh", "host": "desktop"})
+    assert state["mode"] == "local"
+    assert (home / "Projetos" / cc.NAME / "still-local-agent.json").is_file()
+
+
+def test_windows_key_updates_only_key_in_active_and_parked_entries(home, monkeypatch):
+    from app import runtime_config as rc
+
+    monkeypatch.setattr(rc, "_backend_config_base", lambda: home)
+    cc.save(_pedido(home))
+    cc.save({"enabled": False})
+    cc.save(_pedido(home))
+    before = {path: json.loads(path.read_text()) for path in [*cc._config_files(), cc._parked_file()]}
+    rc.aplicar({"jev_windows_api_key": "new-windows-key-7890", "jev_api_key": "openrouter-secret"})
+    for path, original in before.items():
+        entry = original if path == cc._parked_file() else original["mcpServers"][cc.NAME]
+        entry["env"]["TYPESAFE_API_KEY"] = "new-windows-key-7890"
+        assert json.loads(path.read_text()) == original
+    assert "jev_windows_api_key" not in json.loads(rc._caminho().read_text())
+    state = rc.estado()["jev_windows_api_key"]
+    assert state["definido"] and state["valor"] != "new-windows-key-7890"
+    for value in ("", "  ", state["valor"]):
+        rc.aplicar({"jev_windows_api_key": value})
+        assert cc.jev_key() == "new-windows-key-7890"
+    cc.save({"enabled": False})
+    rc.aplicar({"jev_windows_api_key": "parked-windows-key"})
+    assert not cc.state()["enabled"] and cc.jev_key() == "parked-windows-key"
+    assert "parked-windows-key" not in json.dumps(rc.estado())
+
+
+def test_windows_key_reads_legacy_settings_without_copying_global_key(home, monkeypatch):
+    from app import runtime_config as rc
+
+    monkeypatch.setattr(rc, "_backend_config_base", lambda: home)
+    rc.aplicar({"jev_api_key": "openrouter-secret"})
+    assert not rc.estado()["jev_windows_api_key"]["definido"]
+    settings = home / ".claude" / "settings.json"
+    settings.parent.mkdir()
+    settings.write_text(json.dumps({"env": {"TYPESAFE_API_KEY": "legacy-typesafe-key"}}))
+    assert cc.jev_key() == "legacy-typesafe-key"
+    rc.aplicar({"jev_windows_api_key": rc.estado()["jev_windows_api_key"]["valor"]})
+    assert not cc._parked_file().exists()
+
+
+@pytest.mark.parametrize("relative,content", [
+    (".claude.json", "{invalid-secret"),
+    (".claude.json", '{"mcpServers": "invalid-secret"}'),
+    (".hangar/computer-control.json", "[\"invalid-secret\"]"),
+    (".claude/settings.json", "{invalid-secret"),
+])
+def test_invalid_windows_config_keeps_other_settings_available(home, monkeypatch, relative, content):
+    from app import runtime_config as rc
+
+    monkeypatch.setattr(rc, "_backend_config_base", lambda: home)
+    path = home / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content)
+    state = rc.estado()
+    assert "upload_retention_days" in state
+    assert state["jev_windows_api_key"]["erro"]
+    assert "invalid-secret" not in json.dumps(state)
+    with pytest.raises(ValueError, match="jev_windows_api_key"):
+        rc.aplicar({"jev_windows_api_key": "replacement-secret"})
+    assert path.read_text() == content
+
+
+def test_invalid_windows_key_type_does_not_write_other_changes(home, monkeypatch):
+    from app import runtime_config as rc
+
+    monkeypatch.setattr(rc, "_backend_config_base", lambda: home)
+    with pytest.raises(ValueError, match="jev_windows_api_key: esperado texto"):
+        rc.aplicar({"jev_windows_api_key": True, "upload_retention_days": 7})
+    assert not cc._parked_file().exists() and not rc._caminho().exists()

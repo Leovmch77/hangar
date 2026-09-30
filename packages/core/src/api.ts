@@ -620,6 +620,10 @@ export function listClaudeConfigs(): Promise<ConfigDirInfo[]> {
   return apiFetch<ConfigDirInfo[]>('/api/claude-configs');
 }
 
+export function getClaudeAccountSuggestion(): Promise<{ path: string }> {
+  return apiFetch<{ path: string }>('/api/cotas/sugestao');
+}
+
 /** Cota de cada credencial do servidor ativo (backend/app/cotas.py). Ver `cotaResumo`. */
 export function listarCotasResumo(): Promise<CotaContaResumo[]> {
   return apiFetch<CotaContaResumo[]>('/api/cotas');
@@ -1392,6 +1396,7 @@ export function listUploads(name: string): Promise<{ files: UploadFile[] }> {
 // ── Configuração do servidor ────────────────────────────────────────────────
 // O segredo (chave da Groq) volta MASCARADO — dá pra conferir qual chave está lá, não pra copiar.
 export interface CampoConfig {
+  erro?: string;
   valor: string | number | boolean | null;
   definido: boolean;
   origem: 'app' | 'env';

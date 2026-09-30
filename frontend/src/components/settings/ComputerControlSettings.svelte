@@ -9,7 +9,7 @@
   import { copyText } from '../../lib/clipboard';
   import * as m from '../../paraglide/messages';
 
-  let { apiTarget }: { apiTarget: Server | null } = $props();
+  let { apiTarget, onConfigureJev }: { apiTarget: Server | null; onConfigureJev: () => void } = $props();
 
   let current = $state<ComputerControlState | null>(null);
   let loading = $state(true);
@@ -25,7 +25,6 @@
   let model = $state('');
   let effort = $state('');
   let newLlmKey = $state('');
-  let newJevKey = $state('');
   let models = $state<string[]>([]);
   let loadingModels = $state(false);
   let modelsError = $state('');
@@ -142,7 +141,6 @@
     model = s.llm_model;
     effort = s.llm_effort;
     newLlmKey = '';
-    newJevKey = '';
   }
 
   async function load() {
@@ -193,7 +191,7 @@
         llm_model: model.trim(),
         llm_effort: effort,
         llm_key: preset === 'custom' ? (newLlmKey || null) : null,
-        jev_key: newJevKey || null,
+        jev_key: null,
         use_cliproxy_key: preset === 'cliproxy',
       });
       fill(s);
@@ -211,12 +209,7 @@
 <div class="cc">
   <p class="cc-title">{m.computer_control_title()} <EscopoChip escopo="servidor" /></p>
   <p>{m.computer_control_what()}</p>
-  <ol class="cc-steps">
-    <li>{m.computer_control_step_tree()}</li>
-    <li>{m.computer_control_step_jev()}</li>
-    <li>{m.computer_control_step_llm()}</li>
-    <li>{m.computer_control_step_repeat()}</li>
-  </ol>
+
 
   {#if error}<p class="err" role="alert">{error}</p>{/if}
   {#if loading}
@@ -226,14 +219,16 @@
   {:else}
     <div class="install">
       <p class="status">
-        {current.mode === 'package'
+        {!current.package_exists && current.mode !== 'local' ? m.computer_control_not_installed()
+          : current.mode === 'package'
           ? m.computer_control_mode_package({ tag: current.installed_tag })
           : m.computer_control_mode_local({ dir: current.project_dir })}
       </p>
-      <p class="hint">{current.mode === 'package' ? m.computer_control_mode_package_hint() : m.computer_control_mode_local_hint()}</p>
+      <p class="hint">{!current.package_exists && current.mode !== 'local' ? m.computer_control_install_hint()
+        : current.mode === 'package' ? m.computer_control_mode_package_hint() : m.computer_control_mode_local_hint()}</p>
       {#if current.agent_exe.exists}
         <p class="hint">{m.computer_control_agent_ok({ path: current.agent_exe.path, mb: (current.agent_exe.size / 1048576).toFixed(1) })}</p>
-      {:else}
+      {:else if current.package_exists || current.mode === 'local'}
         <p class="err" role="alert">
           {current.mode === 'package'
             ? m.computer_control_agent_missing_package({ path: current.agent_exe.path })
@@ -242,8 +237,10 @@
       {/if}
       <button type="button" class="action" onclick={install} disabled={installing || saving} aria-busy={installing}>
         {installing ? m.computer_control_installing()
-          : current.mode === 'package' ? m.computer_control_update() : m.computer_control_install()}
+          : current.package_exists ? m.computer_control_update() : m.computer_control_install()}
       </button>
+      {#if savedMessage}<p class="status" role="status">{savedMessage}</p>{/if}
+      {#if current.package_exists && !current.targets.length}<p class="hint">{m.computer_control_install_next()}</p>{/if}
       {#if installError}<p class="err" role="alert">{installError}</p>{/if}
     </div>
 
@@ -251,7 +248,7 @@
          gerenciador do navegador ignora o autocomplete e enfia e-mail e senha salvos nos campos. -->
     <form onsubmit={save} autocomplete="off">
       <label class="check">
-        <input type="checkbox" bind:checked={enabled} disabled={saving} />
+        <input type="checkbox" bind:checked={enabled} disabled={saving || installing || (!enabled && (!current.targets.length || (current.mode === 'package' && !current.package_exists)))} />
         <span>{m.computer_control_enable()}</span>
       </label>
       <p class="hint">{m.computer_control_enable_hint()}</p>
@@ -264,16 +261,16 @@
       <label for="cc-agent">{m.computer_control_target()}</label>
       <div class="row">
         {#if current.targets.length}
-          <select id="cc-agent" bind:value={agentConfig} disabled={saving || !enabled}>
+          <select id="cc-agent" bind:value={agentConfig} disabled={saving || installing}>
             {#each current.targets as t (t.path)}<option value={t.path}>{targetLabel(t)}</option>{/each}
           </select>
         {:else}
-          <input id="cc-agent" name="cc-agent" autocomplete="off" bind:value={agentConfig} disabled={saving || !enabled} spellcheck="false" />
+          <input id="cc-agent" name="cc-agent" autocomplete="off" bind:value={agentConfig} disabled={saving || installing} spellcheck="false" />
         {/if}
         <button type="button" onclick={() => (showNewTarget = !showNewTarget)} aria-expanded={showNewTarget}
-                disabled={saving || !enabled}>{m.computer_control_new_target()}</button>
+                disabled={saving || installing || (current.mode === 'package' && !current.package_exists)}>{m.computer_control_new_target()}</button>
       </div>
-      <p class="hint">{m.computer_control_target_hint()}</p>
+      <p class="hint">{current.targets.length ? m.computer_control_target_hint() : m.computer_control_target_empty()}</p>
 
       {#if showNewTarget}
         <div class="new-target">
@@ -343,16 +340,13 @@
         </div>
       {/if}
 
-      <label for="cc-jev">{m.computer_control_jev_key()}</label>
-      <p class="hint">
-        {current.jev_key_set
-          ? (current.jev_key_from_settings
-            ? m.computer_control_key_from_settings({ tail: current.jev_key_tail })
-            : m.computer_control_key_saved({ tail: current.jev_key_tail }))
-          : m.computer_control_key_missing()}
-      </p>
-      <input id="cc-jev" name="cc-jev" class="secret" bind:value={newJevKey} placeholder={m.computer_control_replace_key()}
-             autocomplete="off" spellcheck="false" disabled={saving || !enabled} />
+      <div class="jev-status">
+        <p class="status">{m.jev_windows_title()}</p>
+        <p class="hint">{current.jev_key_set
+          ? m.computer_control_key_saved({ tail: current.jev_key_tail })
+          : m.computer_control_key_missing()}</p>
+        <button type="button" onclick={onConfigureJev}>{m.jev_open_settings()}</button>
+      </div>
 
       <p class="cc-title cc-sub">{m.computer_control_llm()}</p>
       <p class="hint">{m.computer_control_llm_hint()}</p>
@@ -408,10 +402,9 @@
         <option value="high">high</option>
       </select>
 
-      <button class="action primary" type="submit" disabled={saving} aria-busy={saving}>
+      <button class="action primary" type="submit" disabled={saving || installing || (enabled && (!agentConfig || (current.mode === 'package' && !current.package_exists)))} aria-busy={saving}>
         {saving ? m.computer_control_saving() : m.computer_control_save()}
       </button>
-      {#if savedMessage}<p class="status" role="status">{savedMessage}</p>{/if}
     </form>
 
     <p class="hint">{m.computer_control_where({ n: String(current.files.length) })}</p>
@@ -426,8 +419,9 @@
     color: var(--text-muted); font-size: var(--label-size); font-weight: var(--label-weight);
     text-transform: uppercase; letter-spacing: var(--label-tracking);
   }
+  .jev-status { display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-2); margin-top: var(--space-4); }
   .cc-sub { margin-top: var(--space-4); }
-  .cc-steps, .help ol { margin: 0; padding-left: var(--space-5); color: var(--text-secondary); font-size: var(--text-sm); line-height: 1.5; }
+  .help ol { margin: 0; padding-left: var(--space-5); color: var(--text-secondary); font-size: var(--text-sm); line-height: 1.5; }
   .hint { color: var(--text-muted); font-size: var(--text-xs); }
   .err { color: var(--error); }
   .status { color: var(--text-primary); font-weight: 600; }

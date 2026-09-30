@@ -14,19 +14,19 @@ mod appearance_page;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Page {
     General, Appearance, Diary, About,
-    Servers, Sync, SharedConfig, Accounts, Orchestration, Harnesses, Voice, Windows, Notifications, Shortcuts, Attachments, Advanced,
+    Servers, Sync, SharedConfig, Accounts, Orchestration, Harnesses, Voice, Jev, Windows, Notifications, Shortcuts, Attachments, Advanced,
 }
 
 impl Page {
     const DEVICE: [Page; 4] = [Page::General, Page::Appearance, Page::Diary, Page::About];
-    const SERVER: [Page; 12] = [Page::Servers, Page::Sync, Page::SharedConfig, Page::Accounts, Page::Orchestration, Page::Harnesses, Page::Voice,
-        Page::Windows, Page::Notifications, Page::Shortcuts, Page::Attachments, Page::Advanced];
+    const SERVER: [Page; 13] = [Page::Servers, Page::Sync, Page::SharedConfig, Page::Accounts, Page::Orchestration, Page::Harnesses, Page::Voice,
+        Page::Jev, Page::Windows, Page::Notifications, Page::Shortcuts, Page::Attachments, Page::Advanced];
 
     fn key(self) -> &'static str {
         match self {
             Page::General => "general", Page::Appearance => "appearance", Page::Diary => "diary", Page::About => "about",
             Page::Servers => "servers", Page::Sync => "sync", Page::SharedConfig => "shared_config", Page::Accounts => "accounts", Page::Orchestration => "orchestration",
-            Page::Harnesses => "harnesses", Page::Voice => "voice", Page::Windows => "windows", Page::Notifications => "notifications",
+            Page::Harnesses => "harnesses", Page::Voice => "voice", Page::Jev => "jev", Page::Windows => "windows", Page::Notifications => "notifications",
             Page::Shortcuts => "shortcuts", Page::Attachments => "attachments", Page::Advanced => "advanced",
         }
     }
@@ -36,13 +36,14 @@ impl Page {
             Page::General => IconName::Globe, Page::Appearance => IconName::Palette, Page::Diary => IconName::FileText,
             Page::About => IconName::Info, Page::Servers => IconName::Server, Page::Sync => IconName::RefreshCw, Page::SharedConfig => IconName::Layers,
             Page::Accounts => IconName::User, Page::Orchestration => IconName::Users, Page::Harnesses => IconName::Activity,
-            Page::Voice => IconName::Mic, Page::Windows => IconName::Monitor, Page::Notifications => IconName::Bell,
+            Page::Voice => IconName::Mic, Page::Jev => IconName::Zap, Page::Windows => IconName::Monitor, Page::Notifications => IconName::Bell,
             Page::Shortcuts => IconName::Keyboard, Page::Attachments => IconName::Paperclip, Page::Advanced => IconName::SlidersHorizontal,
         }
     }
 
     pub(super) fn title(self) -> String {
         // O nome é o do web: uma frase, um dicionário.
+        if self == Page::Jev { return tr_shared("jev_title", &[]); }
         if self == Page::SharedConfig { return tr_shared("shared_config_title", &[]); }
         tr(&format!("settings_page_{}", self.key()))
     }
@@ -105,11 +106,12 @@ const PAGE_ROWS: &[(Page, &[(&str, Option<&str>)])] = &[
         ("computer_control_install", None), ("computer_control_dir", None), ("computer_control_target", Some("computer_control_target_hint"))]),
     (Page::Advanced, &[("server_automations", Some("server_automations_help")), ("server_thinking", Some("server_thinking_help")),
         ("server_translate_thinking", Some("server_translate_thinking_help")), ("server_editor", Some("server_editor_help")),
-        ("server_jev_key", Some("server_jev_key_help")), ("server_jev_default", Some("server_jev_default_help")),
+        ("server_roots", Some("server_roots_help")), ("server_machine_only", Some("server_machine_only_help")), ("server_env", Some("server_env_help"))]),
+    (Page::Jev, &[("server_jev_key", Some("server_jev_key_help")), ("server_jev_default", Some("server_jev_default_help")),
         ("server_jev_endpoint", Some("server_jev_endpoint_help")), ("server_jev_model", Some("server_jev_model_help")),
         ("server_jev_text_endpoint", Some("server_jev_text_endpoint_help")), ("server_jev_text_key", Some("server_jev_text_key_help")),
         ("server_jev_text_model", Some("server_jev_text_model_help")), ("server_jev_cmd", Some("server_jev_cmd_help")),
-        ("server_roots", Some("server_roots_help")), ("server_machine_only", Some("server_machine_only_help")), ("server_env", Some("server_env_help"))]),
+        ("server_jev_windows_key", Some("server_jev_windows_key_help"))]),
 ];
 
 /// Um resultado da busca: a linha de uma página, ou a própria página (`row: None`) quando ela ainda não tem linhas.
@@ -725,7 +727,7 @@ impl Hangar {
             Page::Orchestration => self.render_orchestration(cx),
             Page::Shortcuts => self.render_shortcuts_page(cx),
             Page::Harnesses => self.render_harness(cx),
-            Page::Voice | Page::Notifications | Page::Attachments | Page::Advanced => self.render_server_page(page, cx),
+            Page::Voice | Page::Jev | Page::Notifications | Page::Attachments | Page::Advanced => self.render_server_page(page, cx),
             Page::Servers => self.render_machines(window.viewport_size().width, cx),
             Page::Sync => self.render_sync(cx),
             Page::SharedConfig => self.render_shared_config(cx),
@@ -979,9 +981,9 @@ mod tests {
     }
 
     #[test]
-    fn advanced_search_finds_every_jev_field() {
-        let (_, rows) = super::PAGE_ROWS.iter().find(|(page, _)| *page == super::Page::Advanced).expect("Avançado na busca");
-        for label in ["server_jev_endpoint", "server_jev_model", "server_jev_text_endpoint", "server_jev_text_model"] {
+    fn jev_search_finds_every_jev_field() {
+        let (_, rows) = super::PAGE_ROWS.iter().find(|(page, _)| *page == super::Page::Jev).expect("Jev na busca");
+        for label in ["server_jev_key", "server_jev_default", "server_jev_endpoint", "server_jev_model", "server_jev_text_endpoint", "server_jev_text_key", "server_jev_text_model", "server_jev_cmd", "server_jev_windows_key"] {
             assert!(rows.iter().any(|(row, _)| *row == label), "{label} fora da busca");
         }
     }

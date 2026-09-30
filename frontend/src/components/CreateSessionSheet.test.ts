@@ -28,6 +28,7 @@ vi.mock('@hangar/core', async (importOriginal) => ({
   isTimeoutError: vi.fn(() => false),
   isAbortError: vi.fn(() => false),
   listClaudeConfigs: vi.fn(),
+  getClaudeAccountSuggestion: vi.fn(),
   // Devolve a lista certa por provider: pro Claude os aliases (como o backend real), pro Pi o
   // modelo fake — a memória do Pi jamais pode casar com a lista do Claude.
   modelOptions: vi.fn(async (provider: string) =>
@@ -165,6 +166,77 @@ beforeEach(() => {
   document.body.innerHTML = '';
   // Default: fetch de contas PENDENTE (nunca resolve) — o cenário A.
   vi.mocked(api.listClaudeConfigs).mockImplementation(() => new Promise(() => {}));
+  vi.mocked(api.getClaudeAccountSuggestion).mockRejectedValue(new Error('sem-conta-legivel'));
+});
+
+describe('CreateSessionSheet — conta sugerida pela cota', () => {
+  const accounts = [
+    { path: '/home/x/.claude', label: 'atual', active: true },
+    { path: '/home/x/.claude-nova', label: '.claude-nova', active: false },
+  ];
+
+  it('mostra a sugestão disponível e usa seu catálogo e conta na criação', async () => {
+    vi.mocked(api.listClaudeConfigs).mockResolvedValue(accounts);
+    vi.mocked(api.getClaudeAccountSuggestion).mockResolvedValue({ path: accounts[1].path });
+    const { comp } = montar();
+    await flush();
+    await escolherPasta();
+    expect(document.querySelector('#cfg-pick')!.textContent).toContain('.claude-nova');
+    expect(api.modelOptions).toHaveBeenLastCalledWith('claude', '', accounts[1].path, undefined);
+    (document.querySelector('.primary-btn') as HTMLElement).click();
+    await flush();
+    expect(onCreate.mock.calls[0]?.[2]).toBe(accounts[1].path);
+    unmount(comp);
+  });
+
+  it.each(['indisponível', 'desconhecida'])('mantém a conta ativa com sugestão %s', async (scenario) => {
+    vi.mocked(api.listClaudeConfigs).mockResolvedValue(accounts);
+    if (scenario === 'desconhecida') vi.mocked(api.getClaudeAccountSuggestion).mockResolvedValue({ path: '/outra-conta' });
+    const { comp } = montar();
+    await flush();
+    await escolherPasta();
+    expect(document.querySelector('#cfg-pick')!.textContent).toContain('atual');
+    (document.querySelector('.primary-btn') as HTMLElement).click();
+    await flush();
+    expect(onCreate.mock.calls[0]?.[2]).toBe(accounts[0].path);
+    unmount(comp);
+  });
+
+  it('descarta sugestão tardia depois de escolher outra conta manualmente', async () => {
+    vi.mocked(api.listClaudeConfigs).mockResolvedValue(accounts);
+    let finish!: (value: { path: string }) => void;
+    vi.mocked(api.getClaudeAccountSuggestion).mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+    const { comp } = montar();
+    await flush();
+    await escolherPasta();
+    await escolherNoCombo('#cfg-pick', '.claude-nova');
+    finish({ path: accounts[0].path });
+    await flush();
+    expect(document.querySelector('#cfg-pick')!.textContent).toContain('.claude-nova');
+    unmount(comp);
+  });
+
+  it.each([
+    ['#model-pick', 'opus', 5],
+    ['#effort-pick', 'high', 6],
+  ] as const)('preserva a escolha manual em %s quando a sugestão chega depois', async (selector, value, argument) => {
+    vi.mocked(api.listClaudeConfigs).mockResolvedValue(accounts);
+    let finish!: (value: { path: string }) => void;
+    vi.mocked(api.getClaudeAccountSuggestion).mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+    const { comp } = montar();
+    await flush();
+    await escolherPasta();
+    await escolherNoCombo(selector, value);
+    finish({ path: accounts[1].path });
+    await flush();
+    expect(document.querySelector('#cfg-pick')!.textContent).toContain('atual');
+    expect(document.querySelector(selector)!.textContent).toContain(value);
+    (document.querySelector('.primary-btn') as HTMLElement).click();
+    await flush();
+    expect(onCreate.mock.calls[0]?.[2]).toBe(accounts[0].path);
+    expect(onCreate.mock.calls[0]?.[argument]).toBe(value);
+    unmount(comp);
+  });
 });
 
 describe('CreateSessionSheet — reabertura com a lista de contas fora do ar', () => {

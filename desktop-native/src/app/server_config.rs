@@ -61,7 +61,7 @@ const TUNES: [Tune; 4] = [
 struct Field { key: &'static str, label: &'static str, help: &'static str, icon: IconName, kind: Kind, page: Page }
 
 /// Na ordem do `CAMPOS` do web, filtrada por página.
-const FIELDS: [Field; 32] = [
+const FIELDS: [Field; 33] = [
     Field { key: "upload_retention_days", label: "server_keep_attachments", help: "server_keep_attachments_help", icon: IconName::Paperclip,
         kind: Kind::Number("server_days"), page: Page::Attachments },
     Field { key: "notify_finished", label: "server_notify_finished", help: "server_notify_finished_help", icon: IconName::CircleCheck,
@@ -77,20 +77,22 @@ const FIELDS: [Field; 32] = [
     Field { key: "traduzir_pensamento", label: "server_translate_thinking", help: "server_translate_thinking_help", icon: IconName::Languages,
         kind: Kind::Toggle, page: Page::Advanced },
     Field { key: "editor", label: "server_editor", help: "server_editor_help", icon: IconName::SquarePen, kind: Kind::Text, page: Page::Advanced },
-    Field { key: "jev_api_key", label: "server_jev_key", help: "server_jev_key_help", icon: IconName::Key, kind: Kind::Secret, page: Page::Advanced },
+    Field { key: "jev_api_key", label: "server_jev_key", help: "server_jev_key_help", icon: IconName::Key, kind: Kind::Secret, page: Page::Jev },
     // Logo abaixo da chave, como no web: é o único campo cujo efeito depende dela.
-    Field { key: "jev_padrao", label: "server_jev_default", help: "server_jev_default_help", icon: IconName::Rocket, kind: Kind::Toggle, page: Page::Advanced },
+    Field { key: "jev_padrao", label: "server_jev_default", help: "server_jev_default_help", icon: IconName::Rocket, kind: Kind::Toggle, page: Page::Jev },
     Field { key: "jev_endpoint", label: "server_jev_endpoint", help: "server_jev_endpoint_help", icon: IconName::Globe, kind: Kind::Text,
-        page: Page::Advanced },
-    Field { key: "jev_model", label: "server_jev_model", help: "server_jev_model_help", icon: IconName::Bot, kind: Kind::Text, page: Page::Advanced },
+        page: Page::Jev },
+    Field { key: "jev_model", label: "server_jev_model", help: "server_jev_model_help", icon: IconName::Bot, kind: Kind::Text, page: Page::Jev },
     Field { key: "jev_texto_base_url", label: "server_jev_text_endpoint", help: "server_jev_text_endpoint_help", icon: IconName::Globe,
-        kind: Kind::Text, page: Page::Advanced },
+        kind: Kind::Text, page: Page::Jev },
     Field { key: "jev_texto_api_key", label: "server_jev_text_key", help: "server_jev_text_key_help", icon: IconName::Key, kind: Kind::Secret,
-        page: Page::Advanced },
+        page: Page::Jev },
     Field { key: "jev_texto_modelo", label: "server_jev_text_model", help: "server_jev_text_model_help", icon: IconName::Bot, kind: Kind::Text,
-        page: Page::Advanced },
+        page: Page::Jev },
     Field { key: "jev_texto_cmd", label: "server_jev_cmd", help: "server_jev_cmd_help", icon: IconName::SquareTerminal, kind: Kind::Text,
-        page: Page::Advanced },
+        page: Page::Jev },
+    Field { key: "jev_windows_api_key", label: "server_jev_windows_key", help: "server_jev_windows_key_help", icon: IconName::Key,
+        kind: Kind::Secret, page: Page::Jev },
     // Voz, na ordem do `VozSettings.svelte`; a página as distribui pelas seções dela.
     Field { key: "groq_api_key", label: "voice_groq", help: "voice_groq_help", icon: IconName::Key, kind: Kind::Secret, page: Page::Voice },
     Field { key: "transcription_base_url", label: "voice_transcription_endpoint", help: "voice_transcription_endpoint_help", icon: IconName::Globe,
@@ -170,7 +172,7 @@ mod draft {
 }
 
 /// Páginas que leem e gravam o rascunho do servidor.
-pub(super) fn is_server_page(page: Page) -> bool { matches!(page, Page::Voice | Page::Notifications | Page::Attachments | Page::Advanced) }
+pub(super) fn is_server_page(page: Page) -> bool { matches!(page, Page::Voice | Page::Jev | Page::Notifications | Page::Attachments | Page::Advanced) }
 
 #[derive(Default)]
 pub(in crate::app) struct ServerConfig {
@@ -200,6 +202,7 @@ pub(in crate::app) struct ServerConfig {
     /// não reabre o que a pessoa fechou.
     open: [bool; 6],
     opened_by_read: bool,
+    jev_advanced: bool,
     /// Havia chave da ElevenLabs e comando local no último olhar: a seção de cada um abre quando isso passa a valer.
     readers: [bool; 2],
     /// Vozes da conta e consumo do mês: só lidos no clique, nunca ao abrir a página.
@@ -379,6 +382,9 @@ impl ServerConfig {
             .or_else(|| TUNES.iter().find(|t| label == format!("voice_tune_{}", t.name)).map(|t| t.key))
             .or((label == "voice_voice").then_some("elevenlabs_voice_id"));
         let Some(key) = key else { return };
+        if key.starts_with("jev_") && !["jev_api_key", "jev_padrao", "jev_windows_api_key"].contains(&key) {
+            self.jev_advanced = true;
+        }
         if let Some(n) = SECTIONS.iter().position(|keys| keys.contains(&key)) {
             self.open[n] = true;
             for (child, parent) in PARENTS { if n == child { self.open[parent] = true; } }
@@ -834,6 +840,8 @@ impl Hangar {
                 .child(div().text_sm().text_color(theme::danger()).whitespace_normal().child(error.clone()))
                 .child(Button::new("server-config-retry").outline().small().label(tr("server_retry"))
                     .on_click(cx.listener(|this, _, _, cx| this.load_server_config(cx))))
+        } else if page == Page::Jev {
+            self.render_jev(cx)
         } else if page == Page::Voice {
             self.render_voice(cx)
         } else {
@@ -844,6 +852,29 @@ impl Hangar {
         div().flex().flex_col().child(top).child(body)
             .when(page == Page::Notifications && self.api.is_some(), |el| el.child(self.render_quiet(cx)))
             .into_any_element()
+    }
+
+    fn render_jev(&self, cx: &mut Context<Self>) -> Div {
+        let open = self.server_config.jev_advanced;
+        let owner = cx.entity().downgrade();
+        let heading = |title, help| div().flex().flex_col().gap_1()
+            .child(div().text_lg().font_weight(FontWeight::SEMIBOLD).child(tr_shared(title, &[])))
+            .child(div().text_sm().text_color(theme::muted()).whitespace_normal().child(tr_shared(help, &[])));
+        div().mt_4().flex().flex_col().gap_4()
+            .child(div().text_sm().text_color(theme::muted()).whitespace_normal().child(tr_shared("jev_intro", &[])))
+            .child(heading("jev_browser_title", "jev_browser_help"))
+            .child(settings_box().child(self.config_row(field("jev_api_key"), cx)).child(self.config_row(field("jev_padrao"), cx)))
+            .child(heading("jev_windows_title", "jev_windows_help"))
+            .child(settings_box().child(self.config_row(field("jev_windows_api_key"), cx)))
+            .child(Disclosure::new("jev-advanced", open, tr_shared("jev_advanced", &[]), false)
+                .on_change(move |open, cx| { let _ = owner.update(cx, |this, cx| {
+                    this.server_config.jev_advanced = open; cx.notify();
+                }); }))
+            .when(open, |el| el
+                .child(settings_box().child(self.config_row(field("jev_endpoint"), cx)).child(self.config_row(field("jev_model"), cx)))
+                .child(heading("jev_text_title", "jev_text_help"))
+                .child(settings_box().children(["jev_texto_base_url", "jev_texto_api_key", "jev_texto_modelo", "jev_texto_cmd"]
+                    .into_iter().map(|key| self.config_row(field(key), cx)))))
     }
 
     /// Chip de onde a linha grava, e "editado" quando o valor veio do app e não do `.env`.
@@ -861,7 +892,8 @@ impl Hangar {
         let input = s.inputs.iter().find(|(k, _)| *k == key).map(|(_, i)| i.clone());
         // Campo que a leitura não trouxe (servidor mais antigo) fica desligado: o `stage` recusaria, e o controle mostraria
         // uma escolha que o Salvar não leva.
-        let off = !s.fields.contains_key(key);
+        let error = s.fields.get(key).and_then(|f| f.get("erro")).and_then(Value::as_str).filter(|error| !error.is_empty());
+        let off = !s.fields.contains_key(key) || error.is_some();
         // Liga e número à direita; texto e segredo descem para baixo da ajuda, na largura da coluna: endereço e comando
         // não cabem num campo estreito ao lado.
         let control = match field.kind {
@@ -922,7 +954,9 @@ impl Hangar {
                 .child(div().flex().flex_wrap().items_center().gap(px(8.))
                     .child(div().font_weight(FontWeight::MEDIUM).child(tr(field.label))).child(self.config_badges(key)))
                 .child(div().text_size(px(13.)).text_color(theme::muted()).whitespace_normal().child(tr(field.help)))
-                .children(verdict).children(below).children(removal));
+                .children(verdict).children(below).children(removal)
+                .children(error.map(|error| div().id(SharedString::from(format!("server-{key}-error"))).role(Role::Alert)
+                    .text_sm().text_color(theme::danger()).whitespace_normal().child(error.to_owned()))));
         let row = div().mt(px(-1.)).border_t_1().border_color(theme::border()).flex().items_center().gap(px(14.)).px_4().py(px(14.))
             .child(head).children(control.map(|c| div().flex_shrink_0().child(c)));
         self.mark(row, field.label)
@@ -1316,7 +1350,12 @@ mod tests {
         let jev: Vec<(&str, &str)> = super::FIELDS.iter().filter(|f| f.key.starts_with("jev_")).map(|f| (f.key, f.label)).collect();
         assert_eq!(jev, [("jev_api_key", "server_jev_key"), ("jev_padrao", "server_jev_default"), ("jev_endpoint", "server_jev_endpoint"),
             ("jev_model", "server_jev_model"), ("jev_texto_base_url", "server_jev_text_endpoint"), ("jev_texto_api_key", "server_jev_text_key"),
-            ("jev_texto_modelo", "server_jev_text_model"), ("jev_texto_cmd", "server_jev_cmd")]);
+            ("jev_texto_modelo", "server_jev_text_model"), ("jev_texto_cmd", "server_jev_cmd"), ("jev_windows_api_key", "server_jev_windows_key")]);
+        assert!(super::FIELDS.iter().filter(|f| f.key.starts_with("jev_")).all(|f| f.page == super::Page::Jev));
+        assert!(super::field("jev_windows_api_key").kind == Kind::Secret);
+        let mut s = ServerConfig::default();
+        s.reveal("server_jev_text_model");
+        assert!(s.jev_advanced, "a busca abre os ajustes avançados do Jev");
         // `reveal` acha o campo pelo rótulo: rótulo repetido abriria a seção errada.
         let labels: std::collections::HashSet<&str> = super::FIELDS.iter().map(|f| f.label).collect();
         assert_eq!(labels.len(), super::FIELDS.len());

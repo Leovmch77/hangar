@@ -348,10 +348,10 @@ function semJev() {
   if (process.env.HANGAR_JEV === 'off') {
     return 'o Jev esta desligado nesta sessao. Abra uma com `hangar-send --new <nome> <cwd> --jev`'
       + ' (ou marque o Jev em "Mais opcoes" ao criar). Se a chave ainda nao foi cadastrada, ela fica'
-      + ' em Configuracoes do servidor > Avancado.';
+      + ' em Configuracoes do servidor > Jev.';
   }
   return 'o Jev nao esta configurado nesta sessao. Cadastre a chave em Configuracoes do servidor >'
-    + ' Avancado e abra a sessao com --jev; em sessao aberta antes disso, TYPESAFE_API_KEY no ambiente'
+    + ' Jev e abra a sessao com --jev; em sessao aberta antes disso, TYPESAFE_API_KEY no ambiente'
     + ' tambem serve.';
 }
 

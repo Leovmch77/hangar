@@ -8,7 +8,7 @@
   import { getCodexAccountsForServer, createSessionForServer, codexAccountMessage, patchConfig,
     type CodexAccount } from '@hangar/core';
   import IconFolder from './icons/IconFolder.svelte';
-  import { getSessions, listClaudeConfigs, getEngines, getProviders, criarConta, apagarConta,
+  import { getSessions, listClaudeConfigs, getClaudeAccountSuggestion, getEngines, getProviders, criarConta, apagarConta,
            getArchivePorCwd, resumeArchivedConversation, getArchiveHistory, getBastao, passarBastao,
            getCreationProgress, type CreationProgress,
            type ModelOption, type Motor, type ArchiveEntry } from '@hangar/core';
@@ -246,6 +246,7 @@
   // escrito lá: provider → motor → config em sequência rápida deixa várias respostas em voo, e a
   // mais LENTA venceria — o usuário escolheria um modelo que não existe no que acabou de selecionar.
   let modSeq = 0;
+  let modelChoiceTouched = false;
 
 
   let erroProviders = $state('');
@@ -313,6 +314,7 @@
   let cfgSeq = 0;
   function loadConfigs() {
     const seq = ++cfgSeq;
+    modelChoiceTouched = false;
     configs = [];
     selectedConfig = null;
     motores = {};
@@ -338,6 +340,15 @@
         // config_dir vazio pra rota de modelos, e nada re-dispararia quando os configs aterrissassem
         // (numa máquina com conta secundária, a lista viria reduzida ou da conta errada, sempre).
         carregarModelos();
+        if (provider === 'claude' && !engine) {
+          const modelGeneration = modSeq;
+          getClaudeAccountSuggestion().then(({ path }) => {
+            // A sugestão inicial nunca substitui uma escolha feita enquanto a cota era lida.
+            if (seq !== cfgSeq || modelGeneration !== modSeq || modelChoiceTouched || !open || loading || contaOcupada
+                || provider !== 'claude' || engine || conversaAlvo || !configs.some((c) => c.path === path)) return;
+            if (path !== selectedConfig) { selectedConfig = path; carregarModelos(); }
+          }).catch(() => { /* Sem leitura de cota, fica a conta ativa ou a primeira disponível. */ });
+        }
       })
       // A lista de contas fora do ar NÃO pode deixar a tela com o estado da abertura passada — o
       // reset do `$effect` zera os campos, mas a lista de modelos só volta a ser pedida aqui (e no
@@ -1273,6 +1284,7 @@
       {/if}
 
       <SessionOpeningFields {provider} models={modelos} engines={motores} reducedList={listaReduzida}
+        onModelChoice={() => { modelChoiceTouched = true; }}
         modelError={erroModelos} resuming={!!conversaAlvo} allowSubagent={!bastao} showJev={temJev}
         bind:headless={semTerminal} bind:model={modelo} bind:effort={esforco} bind:permission={permissao}
         bind:engine bind:subagent={subagente} bind:jev bind:ompProfile={perfilOmp}

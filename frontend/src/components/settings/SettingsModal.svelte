@@ -114,6 +114,7 @@
     { id: 'contas', secao: 'servidor', rotulo: m.contas_modelos_titulo(), icone: 'pessoa', servidor: true },
     { id: 'harnesses', secao: 'servidor', rotulo: m.harness_titulo(), icone: 'pulso', servidor: true },
     { id: 'voz', secao: 'servidor', rotulo: m.voz_titulo(), icone: 'mic', servidor: true },
+    { id: 'jev', secao: 'servidor', rotulo: m.jev_title(), icone: 'raio', servidor: true },
     { id: 'computer', secao: 'servidor', rotulo: m.computer_control_title(), icone: 'tela', servidor: true },
     { id: 'notificacoes', secao: 'servidor', rotulo: m.config_modal_notificacoes(), icone: 'sino', servidor: true },
     { id: 'anexos', secao: 'servidor', rotulo: m.config_modal_anexos_curto(), icone: 'clipe', servidor: true },
@@ -409,7 +410,7 @@
   {:else if telaAtual === 'atalhos'}
     <ShortcutsSettings apiTarget={alvo} session={sessao} />
   {:else if telaAtual === 'computer'}
-    <ComputerControlSettings apiTarget={alvo} />
+    <ComputerControlSettings apiTarget={alvo} onConfigureJev={() => onIrPara('jev')} />
   {:else}
     <ServerSettings {store} secao={telaAtual} apiTarget={alvo} />
   {/if}
