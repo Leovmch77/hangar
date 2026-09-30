@@ -152,8 +152,22 @@ def search(q: str, live_names: dict[str, str], limit: int = _MAX_HITS) -> list[S
             _log.warning("busca no índice falhou; caindo no rg", exc_info=True)
             linhas = None
         if linhas is not None:
-            return _hits_do_indice(linhas, t, live_names)
-    return _search_rg(t, live_names, limit)
+            return _sem_repetidos(_hits_do_indice(linhas, t, live_names))
+    return _sem_repetidos(_search_rg(t, live_names, limit))
+
+
+def _sem_repetidos(hits: list[SearchHit]) -> list[SearchHit]:
+    # O Claude Code às vezes grava a mesma mensagem duas vezes no transcript; a tela usa
+    # (sessão, evento) como chave de lista e congela com chave repetida.
+    vistos: set[tuple] = set()
+    out: list[SearchHit] = []
+    for h in hits:
+        chave = (h.project, h.session_id, h.event_id or h.line)
+        if chave in vistos:
+            continue
+        vistos.add(chave)
+        out.append(h)
+    return out
 
 
 def _hits_do_indice(linhas: list[tuple], t: list[str], live_names: dict[str, str]) -> list[SearchHit]:

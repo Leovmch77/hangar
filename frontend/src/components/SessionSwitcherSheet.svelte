@@ -74,6 +74,17 @@ import * as m from '../paraglide/messages';
 
   // Prévia: o trecho aberto mostra a mensagem inteira e as vizinhas, sem sair da busca.
   const chaveHit = (h: Hit) => `${h.serverId}/${h.session_id}/${h.event_id ?? h.line}`;
+  // Chave repetida num {#each} derruba o componente e a busca congela em "Buscando…": servidor
+  // com backend antigo ainda devolve a mesma mensagem duas vezes quando o transcript a repete.
+  function semRepetidos(hits: Hit[]): Hit[] {
+    const vistos = new Set<string>();
+    return hits.filter((h) => {
+      const k = chaveHit(h);
+      if (vistos.has(k)) return false;
+      vistos.add(k);
+      return true;
+    });
+  }
   let aberto = $state<string | null>(null);
   let contexto = $state<ChatEvent[] | null>(null);
   let contextoErro = $state('');
@@ -113,7 +124,7 @@ import * as m from '../paraglide/messages';
       const r = await askHistoryForServer(srv, q);
       askAnswer = {
         answer: r.answer,
-        hits: r.hits.map((h) => ({ ...h, serverId: srv.id, serverLabel: srv.label })),
+        hits: semRepetidos(r.hits.map((h) => ({ ...h, serverId: srv.id, serverLabel: srv.label }))),
       };
     } catch (e) {
       askErr = e instanceof Error ? e.message.replace(/^\d+:\s*/, '') : 'falhou';
@@ -211,7 +222,7 @@ import * as m from '../paraglide/messages';
         (hits) => {
           if (!valid()) return;
           const tagged = hits.map((h) => ({ ...h, serverId: s.id, serverLabel: s.label }));
-          results = [...results, ...tagged].sort((a, b) => b.mtime - a.mtime); // mais recente primeiro
+          results = semRepetidos([...results, ...tagged]).sort((a, b) => b.mtime - a.mtime); // mais recente primeiro
         },
         (e) => {
           if (!valid()) return;

@@ -43,6 +43,13 @@ def test_finds_match_and_returns_fields(tmp_path):
     assert not h.line.startswith("{")
 
 
+def test_mensagem_repetida_no_transcript_vira_um_resultado(tmp_path):
+    j = _write(tmp_path / "-home-u-proj")
+    j.write_text(j.read_text(encoding="utf-8") * 2, encoding="utf-8")
+    hits = search.search("needle", {})
+    assert [(h.session_id, h.event_id) for h in hits] == [(SID, "u1")]
+
+
 def test_blank_query_returns_empty(tmp_path):
     _write(tmp_path / "-home-u-proj")
     assert search.search("", {}) == []

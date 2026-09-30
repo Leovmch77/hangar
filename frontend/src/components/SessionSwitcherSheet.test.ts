@@ -22,6 +22,7 @@ vi.mock('../lib/auth', () => ({
   selectServer: vi.fn(),
   serverColor: () => '#fff',
   getActiveId: () => 'a',
+  servidorDaOrigem: () => null,
 }));
 vi.mock('@hangar/core', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@hangar/core')>()),
