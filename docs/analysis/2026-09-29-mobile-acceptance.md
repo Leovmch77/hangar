@@ -696,3 +696,48 @@ sessão alheia recebeu input, pareamento ou fechamento.
 
 AVD encerrado, `adb reverse` removido, fixture fechada e os cinco recursos liberados.
 **Lote encerrado com pendências.** A entrega 4 **não está aceita**.
+
+## Entrega 5 — T43: receita de geração e versões atualizáveis
+
+Task de implementação: nenhum teste, typecheck, build nem instalação. Base `80413b21`.
+Consultas EAS só de leitura, em subshell dentro de `mobile/`, com `eas-cli/23.2.0` do cache do
+`npx` e o recurso `mobile-version` reservado e liberado. `build:list` falhou sem
+`node_modules` no app; depois de `npm ci --prefix mobile --workspaces=false` (exit 0, lockfiles
+inalterados) as três consultas saíram 0. Saídas em `tasks/t43-*` do diretório durável.
+
+### Fonte da versão e assinatura (Step 1)
+
+| Item | Observado | Resultado |
+|---|---|---|
+| Versão visível | `app.json` `version 0.1.0` = `VERSION` 0.1.0; a tela Sobre mostra só `expoConfig.version` | conferido; `app.json` inalterado |
+| Número do build no EAS | `build:version:get --profile preview`: Android `versionCode 1`, iOS `buildNumber 1` | conferido |
+| Builds `preview` recentes | `ccb85697` (`7595169f`), `664e770a` (`1201802b`), `2410f755` (`8b157f05`) FINISHED; `a9ed153a` (`34d7de6d`) IN_QUEUE; todos `0.1.0`/`appBuildVersion 1` | conferido: o número não subia entre entregas |
+| Causa | `appVersionSource: remote` com `autoIncrement` só em `production` | corrigido: `autoIncrement: true` no `preview`, mantendo `internal`/APK |
+| Pacote/assinatura | `com.hangar.mobile` nos dois; keystore Android remoto reutilizado pelos builds registrados em T12/T32 | inalterados |
+
+Efeito esperado: o próximo build `preview` de cada plataforma sai com número 2, e assim por
+diante. `a9ed153a`, enfileirado antes da mudança, continua com 1. Nenhum binário foi gerado nesta
+Task.
+
+### Receita (Step 2)
+
+`mobile/README.md` criado: conexão ao servidor existente, dependências no monorepo, hook de
+traduções app/core, perfis (`development` não comprovado), versão e número do build, Android e
+iOS interno com credenciais, atualização por cima, trava de verificação e limitações. Sem token,
+arquivo de credencial, restart de backend, `eas submit`, loja ou OTA.
+
+### Preferências na atualização (leitura estática para o Step 3)
+
+Servidores ficam no SecureStore (`cp_servers_v1`); aparência em chaves MMKV avulsas
+(`aparencia.*`, `lista.agrupar`) lidas com valor padrão quando ausentes ou inválidas; rascunhos e
+primeira conversa com `version: 1`. T43 não muda formato nenhum, então não há migração nem teste
+de migração a escrever.
+
+### Cenários para o lote T44
+
+| Cenário | Esperado | Resultado |
+|---|---|---|
+| Build `preview` Android e iOS com o código final | `appBuildVersion` maior que o instalado, mesmo pacote e assinatura | pendente |
+| Instalar por cima do binário anterior, sem desinstalar/limpar, abrir sem Metro | servidores/token, projeto por máquina, rascunho, tema, acento e papel de parede preservados | pendente |
+| Receita do README repetida como escrita | comandos correspondem à geração real | pendente |
+| iOS | credencial ad hoc da T33 ainda exige ação interativa do Jefferson | pendente |
