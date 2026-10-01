@@ -195,7 +195,7 @@
 
 <style>
   .home {
-    flex: 1; min-height: 0; display: flex; flex-direction: column; background: transparent; position: relative;
+    flex: 0 1 auto; height: 100%; min-height: 0; display: flex; flex-direction: column; background: transparent; position: relative;
     padding: env(safe-area-inset-top) var(--space-3) calc(env(safe-area-inset-bottom) + var(--space-3));
   }
   .top { display: flex; justify-content: space-between; align-items: center; min-height: 52px; }
