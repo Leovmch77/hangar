@@ -11,11 +11,17 @@ for i in $(seq $DOWNS); do $D/key.sh $P CTRL Down; sleep 0.4; done
 sleep 2.5
 G=$($D/geom.sh $P)
 grim -g "$G" "$OUT/$SC-$L-pre.png"
-wf-recorder -g "$G" -r 30 -c libx264 -p crf=18 -p preset=veryfast -f "$OUT/$SC-$L-raw.mp4" >/dev/null 2>&1 &
+RAW="$OUT/$SC-$L-raw.mp4"; LOG="$OUT/$SC-$L-wf.log"
+# sem o arquivo velho, "raw existe" prova que esta gravação aconteceu
+rm -f "$RAW"
+fail() { echo "wf-recorder falhou ($LOG):" >&2; tail -n 20 "$LOG" >&2; kill $P 2>/dev/null; exit 1; }
+wf-recorder -g "$G" -r 30 -c libx264 -p crf=18 -p preset=veryfast -f "$RAW" >"$LOG" 2>&1 &
 R=$!
 sleep 1.2
+kill -0 $R 2>/dev/null || fail
 curl -s http://127.0.0.1:47123/control/go >/dev/null
 sleep $SECS
 kill -INT $R; wait $R 2>/dev/null
 kill $P
+[ -s "$RAW" ] || fail
 echo done $SC
