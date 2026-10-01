@@ -848,6 +848,7 @@ class StateMonitor:
                         permission_key, observed_permission, sessao=self.name)
             state, label, question, options = classify(pane)
             spinner = _live_spinner(pane)
+            animating = False
 
             # Aprovacao do Kimi: vem do WIRE, nao do pane (ver `aprovacao_kimi`). Vence o classify
             # de proposito — enquanto o painel esta aberto o pane ainda mostra o spinner do turno,
@@ -894,6 +895,7 @@ class StateMonitor:
                 no_spinner = 0
             elif spinner is not None:
                 no_spinner = 0
+                animating = prev_spinner is not None and spinner != prev_spinner
                 frozen = frozen + 1 if spinner == prev_spinner else 0
                 prev_spinner = spinner
                 # Spinner CONGELADO (byte-idêntico) por STALE_LIMIT polls = marcador de turn concluído.
@@ -917,7 +919,8 @@ class StateMonitor:
             # working/idle: menu e morte continuam do pane, que é quem os enxerga.
             if state in ("working", "idle"):
                 do_plugin = plugin_bridge.estado_recente(self.name)
-                if do_plugin is not None and do_plugin[0] in ("working", "idle"):
+                if do_plugin is not None and do_plugin[0] in ("working", "idle") \
+                        and not (do_plugin[0] == "idle" and animating):
                     if do_plugin[0] != state and (do_plugin[0], state) != ultima_divergencia:
                         # Discordância é o valor desta âncora: aqui se vê o pane errando, e é o
                         # único lugar onde dá pra notar que o caminho novo parou de corrigir. Uma
@@ -938,7 +941,9 @@ class StateMonitor:
                 # do `capture_pane` logo acima e do git status em registry._decorate_git.
                 m = await asyncio.to_thread(self._marcador)
                 if m is not None:
-                    if m[0] == "idle" and state == "working":
+                    # Spinner mudando entre dois quadros é turno vivo: o turno aberto pela volta de um
+                    # agente em segundo plano não dispara UserPromptSubmit e o marcador fica no idle do Stop.
+                    if m[0] == "idle" and state == "working" and not animating:
                         state, label = "idle", None
                     elif m[0] == "working" and state == "idle" \
                             and (self.hook_grace is None or no_spinner < self.hook_grace):

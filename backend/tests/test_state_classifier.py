@@ -733,3 +733,35 @@ def test_rate_limit_reset_ignora_citacao_fora_do_rodape():
     # sessao que investigava o limite de outra ganhava o chip. So o rodape decide.
     citada = "31: You've hit your session limit · resets 9:10pm\n" + "linha\n" * 10 + "❯ \n"
     assert state_mod.rate_limit_reset(citada) is None
+
+
+async def _estados_com_marcador_idle(panes: list[str], n: int) -> list[str]:
+    frames = iter(panes)
+    with patch.object(state_mod.tmux, "has_session", return_value=True), \
+         patch.object(state_mod.tmux, "capture_pane", side_effect=lambda *a, **k: next(frames)), \
+         patch.object(state_mod.hook_state, "get_state", return_value=("idle", 0.0)), \
+         patch.object(state_mod.plugin_bridge, "estado_recente", return_value=None):
+        mon = StateMonitor("cc-idle-marker", poll=0.001, sid_get=lambda: "sid-x")
+        mon.FRAME_MAX_AGE = 0
+        seen = []
+        async for ev in mon.stream():
+            seen.append(ev.state)
+            if len(seen) == n:
+                break
+    return seen
+
+
+@pytest.mark.asyncio
+async def test_spinner_animando_vence_marcador_idle():
+    # Turno aberto pela volta de um agente em segundo plano: sem UserPromptSubmit, o marcador fica no
+    # idle do Stop anterior enquanto o pane mostra o spinner andando.
+    panes = ["✽ Whirring… (1m 20s · thinking)\n", "✶ Whirring… (1m 21s · thinking)\n",
+             "✻ Whirring… (1m 22s · thinking)\n", "✽ Whirring… (1m 23s · thinking)\n"]
+    assert "working" in await _estados_com_marcador_idle(panes, 2)
+
+
+@pytest.mark.asyncio
+async def test_spinner_congelado_continua_idle_com_marcador_idle():
+    # O "✻ Worked for 8s" do turno concluído fica parado no fim do pane: o marcador idle segue valendo.
+    panes = ["✻ Worked for 8s\n"] * 6 + ["❯ \n"] * 6
+    assert await _estados_com_marcador_idle(panes, 1) == ["idle"]

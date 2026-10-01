@@ -58,6 +58,8 @@ _log = logging.getLogger("hangar.registry")
 # (hook_state.demote_awaiting). O grace cobre a janela Notification->menu renderizado: raspar nesse
 # vao nao pode matar um awaiting real que ainda nem apareceu na tela.
 _AWAITING_DEMOTE_GRACE_S = 10.0
+# Folga para as entradas de sistema que o Claude Code grava logo depois do Stop.
+_IDLE_STALE_S = 1.0
 
 # Teto de pares (done, total) por sessao em plan_tasks. O front so segmenta a barra com <= 8 Tasks
 # (PlanBar.svelte), acima disso desenha barra unica e ignora a lista. 9 e nao 8 DE PROPOSITO: cortar
@@ -1532,9 +1534,14 @@ class SessionRegistry:
             # raspava a cada poll (e, com o fast-path stale antigo, mostrava "aguardando" falso pra
             # sempre). Corrigido na RAIZ: pane raspado sem menu REBAIXA o marcador pra idle
             # (demote_awaiting, abaixo) -> proximo poll cai no fast-path de marcador como idle.
-            if marker and marker[0] != "awaiting_input":
+            mtime = _jsonl_mtime(info.jsonl) if marker else None
+            if marker and marker[0] == "idle" and mtime is not None and mtime > marker[1] + _IDLE_STALE_S:
+                # Transcript escrito depois do idle (fora a folga do resumo pós-Stop) é turno aberto sem
+                # UserPromptSubmit, como a volta de um agente em segundo plano. Decide o pane com o spinner animando.
+                pending.append(info)
+            elif marker and marker[0] != "awaiting_input":
                 info.state = marker[0]
-                info.last_activity = _jsonl_mtime(info.jsonl)
+                info.last_activity = mtime
                 if marker[0] != "working":
                     # Turno acabou (hook e autoritativo): o spinner cacheado e do PASSADO — sem
                     # isto o proximo working herdava a barrinha do turno anterior como se fosse
