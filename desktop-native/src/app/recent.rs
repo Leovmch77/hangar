@@ -86,6 +86,12 @@ pub(super) struct Recents {
 
 const HISTORY_TAIL: usize = 100;
 
+/// O rascunho da conversa fechada `session_id` na máquina `server`, à parte do da tela sem sessão. O nome com `\0` não
+/// casa com nenhuma sessão de verdade.
+fn reopen_key(server: &str, session_id: &str) -> SessionKey {
+    SessionKey { server: server.to_owned(), name: "\0reopen".into(), jsonl: session_id.to_owned() }
+}
+
 impl Hangar {
     fn recents_shown(&self) -> bool {
         appearance::get().navigation == appearance::Navigation::Conversations && self.api.is_some() && !self.active_invite()
@@ -134,12 +140,20 @@ impl Hangar {
     fn open_closed(&mut self, entry: ArchiveEntry, window: &mut Window, cx: &mut Context<Self>) {
         if self.recents.sending { return; }
         let Some(api) = self.api.clone() else { return };
+        self.stash_view_draft(cx);
         self.close_open_session(window, cx);
         self.recents.note = None;
-        // A conta vem pré-escolhida na dona da conversa; a pílula usa as contas e cotas que a tela sem sessão já lê.
-        let owner = (entry.provider == "claude" || entry.provider.is_empty()).then(|| entry.config_dir.clone());
-        self.ensure_new_chat(api, window, cx).update(cx, |view, _| view.reopen_config = owner);
+        // A conta vem pré-escolhida na dona da conversa; a pílula usa as contas e cotas que a tela sem sessão já lê, e a
+        // cota é relida: a leitura da conexão pode ser de antes da renovação.
+        let claude = entry.provider == "claude" || entry.provider.is_empty();
+        let owner = claude.then(|| entry.config_dir.clone());
+        let unlisted = claude && entry.config_dir.is_none();
+        self.ensure_new_chat(api, window, cx).update(cx, |view, cx| {
+            (view.reopen_config, view.reopen_default) = (owner, unlisted);
+            if claude { view.load_quotas(cx); }
+        });
         self.reopen = Some(entry);
+        self.load_view_draft(window, cx);
         self.load_reopen_history(cx);
         self.composer.update(cx, |input, cx| input.focus(window, cx));
         cx.notify();
@@ -195,41 +209,85 @@ impl Hangar {
         cx.spawn_in(window, async move |this, cx| {
             let joined = task.await;
             let _ = this.update_in(cx, |this, window, cx| {
-                this.recents.sending = false;
                 let current = this.reopen.as_ref().is_some_and(|r| r.session_id == entry.session_id);
+                let back = reopen_key(&identity, &entry.session_id);
+                // `sending` só cai depois: a seleção abaixo não pode guardar o texto em voo como rascunho desta tela.
                 match joined.unwrap_or_else(|_| Err(tr("search_interrupted"))) {
                     Err(error) if current => this.recents.note = Some(error),
-                    Err(error) => window.push_notification(Notification::warning(error), cx),
+                    Err(error) => {
+                        // Fora da tela, o texto volta ao rascunho da conversa fechada: reabri-la o devolve ao campo.
+                        this.append_draft(back, &text);
+                        window.push_notification(Notification::warning(error), cx);
+                    }
                     Ok(Ok((session, sent))) => {
+                        this.drafts.remove(&back);
                         this.forget_recent(&entry.session_id);
                         this.reopened(identity, session, text, sent, current, window, cx);
                     }
-                    Ok(Err(live)) => this.reopen_live(live, text, current, window, cx),
+                    Ok(Err(live)) => this.reopen_live(identity, back, live, text, current, window, cx),
                 }
+                this.recents.sending = false;
                 cx.notify();
             });
         }).detach();
         cx.notify();
     }
 
-    /// A conversa já estava aberta numa sessão viva: abre essa, com o texto digitado no campo dela, sem enviar.
-    fn reopen_live(&mut self, name: String, text: String, current: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(session) = self.sessions.iter().find(|s| s.name == name).cloned() else {
+    /// A conversa já estava aberta numa sessão viva: abre essa, sem enviar, com o texto digitado somado ao rascunho dela.
+    /// `identity` é a máquina do envio, não a ativa de agora; `back` é o rascunho da conversa fechada.
+    fn reopen_live(&mut self, identity: String, back: SessionKey, name: String, text: String, current: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let target = super::servers::norm(&identity);
+        let list = if self.is_active_key(&target) { Some(&self.sessions) } else { self.remote.get(&target).map(|l| &l.sessions) };
+        let found = list.and_then(|l| l.iter().find(|s| s.name == name)).cloned();
+        let Some((session, key)) = found.and_then(|s| SessionKey::new(&identity, &s).map(|key| (s, key))) else {
+            // Sem a sessão na lista (ou sem conversa legível), o texto não tem onde esperar nela: fica na conversa fechada.
             let note = web_with("conversa_ja_aberta", &[("sessao", name)]);
-            if current { self.recents.note = Some(note); } else { window.push_notification(Notification::warning(note), cx); }
+            if current { self.recents.note = Some(note); } else {
+                self.append_draft(back, &text);
+                window.push_notification(Notification::warning(note), cx);
+            }
             return;
         };
+        self.drafts.remove(&back);
+        self.append_draft(key.clone(), &text);
         if !current {
-            if let Some(key) = self.active_key_for(&session) { self.drafts.entry(key).or_insert(text); }
+            // Ela pode ser a aberta agora: o campo mostra o rascunho somado.
+            if self.selected_key().as_ref() == Some(&key) && let Some(draft) = self.drafts.get(&key).cloned() {
+                self.composer.update(cx, |input, cx| input.set_value(draft, window, cx));
+            }
             return;
         }
-        self.reopen = None;
-        self.select(session, window, cx);
-        if self.composer.read(cx).value().trim().is_empty() { self.composer.update(cx, |input, cx| input.set_value(text, window, cx)); }
-        self.composer.update(cx, |input, cx| input.focus(window, cx));
+        if self.select_on(&target, session, window, cx) { self.composer.update(cx, |input, cx| input.focus(window, cx)); }
     }
 
-    fn active_key_for(&self, session: &SessionInfo) -> Option<SessionKey> { SessionKey::new(self.server.as_deref()?, session) }
+    /// Soma `text` ao rascunho de `key`, com uma linha em branco entre os dois: nenhum se perde.
+    fn append_draft(&mut self, key: SessionKey, text: &str) {
+        let draft = self.drafts.entry(key).or_default();
+        *draft = if draft.trim().is_empty() { text.to_owned() } else { format!("{draft}\n\n{text}") };
+    }
+
+    /// Guarda o campo da tela sem sessão em que se está (nova conversa ou conversa fechada) antes de sair dela: cada uma tem
+    /// o próprio texto. O texto em voo da retomada não fica em nenhuma: o resultado dela decide onde ele vai parar.
+    pub(super) fn stash_view_draft(&mut self, cx: &mut Context<Self>) {
+        if self.selected.is_some() { return; }
+        let key = match &self.reopen {
+            Some(_) if self.recents.sending => return,
+            Some(entry) => reopen_key(self.server.as_deref().unwrap_or_default(), &entry.session_id),
+            None => super::create::new_chat_key(),
+        };
+        let text = self.composer.read(cx).value().to_string();
+        if text.is_empty() { self.drafts.remove(&key); } else { self.drafts.insert(key, text); }
+    }
+
+    /// O campo passa a mostrar o rascunho da tela sem sessão que acabou de abrir.
+    pub(super) fn load_view_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let key = match &self.reopen {
+            Some(entry) => reopen_key(self.server.as_deref().unwrap_or_default(), &entry.session_id),
+            None => super::create::new_chat_key(),
+        };
+        let text = self.drafts.get(&key).cloned().unwrap_or_default();
+        self.composer.update(cx, |input, cx| input.set_value(text, window, cx));
+    }
 
     /// A retomada virou sessão viva: sai da lista já, sem esperar a releitura.
     fn forget_recent(&mut self, session_id: &str) {
@@ -265,10 +323,13 @@ impl Hangar {
             },
         }
         if !current { return; }
-        self.reopen = None;
+        // A seleção tira a conversa fechada da tela; com `sending` ainda ligado, o texto enviado não vira rascunho dela.
         if self.select_on(&target, session.clone(), window, cx) {
             if sent.is_err() && self.composer.read(cx).value().is_empty() { self.composer.update(cx, |input, cx| input.set_value(text, window, cx)); }
             if readable { self.composer.update(cx, |input, cx| input.focus(window, cx)); }
+        } else {
+            self.reopen = None;
+            self.load_view_draft(window, cx);
         }
     }
 

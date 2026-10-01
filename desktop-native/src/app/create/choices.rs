@@ -64,6 +64,18 @@ impl QuotaLine {
     }
 }
 
+/// Cota lida com a janela geral (sessão `5h` ou semana `7d`) cheia e ainda não renovada: `Some` com a volta, a da última
+/// janela cheia (com duas, só volta quando as duas voltarem). Janela por modelo, leitura que não é `lida` ou janela cuja
+/// volta já passou não bloqueiam: a leitura é de antes da renovação.
+fn exhausted(quota: &QuotaLine, now: f64) -> Option<Option<f64>> {
+    if quota.state != "lida" { return None; }
+    let full: Vec<&QuotaWindow> = quota.windows()
+        .filter(|(w, pct)| matches!(w.label.as_str(), "5h" | "7d") && *pct >= 100. && w.reset_ts.is_none_or(|r| r > now))
+        .map(|(w, _)| w).collect();
+    if full.is_empty() { return None; }
+    Some(full.iter().filter_map(|w| w.reset_ts).reduce(f64::max))
+}
+
 /// "2h10", "35m", "3d4h": quanto falta para a janela voltar (`faltaPara` do web).
 fn until(reset: Option<f64>, now: f64) -> String {
     let Some(s) = reset.filter(|r| r.is_finite()).map(|r| r - now).filter(|s| *s > 0.) else { return String::new() };
@@ -108,7 +120,7 @@ impl NewSession {
     }
 
     /// A tela compacta também lê o modo padrão do servidor.
-    pub(super) fn load_quotas(&mut self, cx: &mut Context<Self>) {
+    pub(in crate::app) fn load_quotas(&mut self, cx: &mut Context<Self>) {
         let (seq, config) = (self.quotas.start(), self.jev.start());
         self.request(cx, move |api, send| Box::pin(async move {
             let (q, c) = tokio::join!(api.server_read(&["cotas"], &[], 15), owner_config(&api));
@@ -535,14 +547,12 @@ impl NewSession {
     /// A conta Claude escolhida para retomar a conversa fechada, quando a cota lida dela tem a janela geral (sessão ou semana)
     /// esgotada: o aviso, com a volta se o servidor a deu. Sem leitura, ou leitura vencida, não bloqueia.
     pub(in crate::app) fn reopen_quota_block(&self) -> Option<String> {
+        // Sem caminho (`None`) é a conta do próprio servidor fora da lista: sem cota conhecida, não bloqueia.
         let path = self.reopen_config.clone().flatten()?;
-        let quota = self.quota_of(&format!("claude:{path}")).filter(|q| q.state == "lida")?;
-        let full: Vec<&QuotaWindow> = quota.windows().filter(|(w, pct)| matches!(w.label.as_str(), "5h" | "7d") && *pct >= 100.).map(|(w, _)| w).collect();
-        if full.is_empty() { return None; }
+        let now = chrono::Local::now().timestamp() as f64;
+        let reset = exhausted(self.quota_of(&format!("claude:{path}"))?, now)?;
         let account = self.configs.ok().and_then(|l| l.iter().find(|c| c.path == path)).map(|c| c.label.clone()).unwrap_or(path);
-        // Com duas janelas cheias, só volta quando a última voltar.
-        let reset = full.iter().filter_map(|w| w.reset_ts).fold(None, |acc: Option<f64>, r| Some(acc.map_or(r, |a| a.max(r))));
-        let when = until(reset, chrono::Local::now().timestamp() as f64);
+        let when = until(reset, now);
         use super::super::costs::web_with;
         Some(if when.is_empty() { web_with("conversa_conta_sem_cota", &[("conta", account)]) }
             else { web_with("conversa_conta_sem_cota_volta", &[("conta", account), ("quando", when)]) })
@@ -675,7 +685,7 @@ impl NewSession {
 
 #[cfg(test)]
 mod tests {
-    use super::{ModelOption, QuotaLine, until};
+    use super::{ModelOption, QuotaLine, exhausted, until};
 
     #[tokio::test]
     async fn config_is_only_requested_for_owner_or_legacy_backend() {
@@ -720,5 +730,31 @@ mod tests {
         let m: ModelOption = serde_json::from_value(serde_json::json!({"id": "k3", "name": "Kimi K3", "provider": "kimi-coding",
             "context_length": 256000, "images": true})).unwrap();
         assert_eq!((m.value(), m.hint()), ("kimi-coding/k3".to_owned(), "k3 · kimi-coding · 256K · 👁".to_owned()));
+    }
+
+    #[test]
+    fn exhausted_account_blocks_only_on_a_current_general_window() {
+        let quota = |state: &str, windows: serde_json::Value| -> QuotaLine {
+            serde_json::from_value(serde_json::json!({"id": "claude:/x", "estado": state, "janelas": windows})).unwrap()
+        };
+        let now = 1000.;
+        // Janela geral cheia bloqueia, com a volta dela.
+        assert_eq!(exhausted(&quota("lida", serde_json::json!([{"rotulo": "5h", "pct": 100.0, "reset_ts": 2000.0}])), now), Some(Some(2000.)));
+        // Sem volta conhecida ainda bloqueia, sem hora.
+        assert_eq!(exhausted(&quota("lida", serde_json::json!([{"rotulo": "7d", "pct": 120.0}])), now), Some(None));
+        // Janela por modelo cheia não bloqueia.
+        assert_eq!(exhausted(&quota("lida", serde_json::json!([{"rotulo": "7d opus", "pct": 100.0, "reset_ts": 2000.0},
+            {"rotulo": "5h", "pct": 40.0}])), now), None);
+        // Leitura que não é `lida` não bloqueia.
+        assert_eq!(exhausted(&quota("expirada", serde_json::json!([{"rotulo": "5h", "pct": 100.0, "reset_ts": 2000.0}])), now), None);
+        // Janela cuja volta já passou não bloqueia.
+        assert_eq!(exhausted(&quota("lida", serde_json::json!([{"rotulo": "5h", "pct": 100.0, "reset_ts": 900.0}])), now), None);
+        // Duas cheias: volta quando a última voltar; uma vencida e outra cheia: a cheia decide.
+        assert_eq!(exhausted(&quota("lida", serde_json::json!([{"rotulo": "5h", "pct": 100.0, "reset_ts": 2000.0},
+            {"rotulo": "7d", "pct": 100.0, "reset_ts": 9000.0}])), now), Some(Some(9000.)));
+        assert_eq!(exhausted(&quota("lida", serde_json::json!([{"rotulo": "5h", "pct": 100.0, "reset_ts": 500.0},
+            {"rotulo": "7d", "pct": 100.0, "reset_ts": 9000.0}])), now), Some(Some(9000.)));
+        assert_eq!(exhausted(&quota("lida", serde_json::json!([{"rotulo": "5h", "pct": 99.0, "reset_ts": 2000.0},
+            {"rotulo": "7d", "pct": 50.0, "reset_ts": 9000.0}])), now), None);
     }
 }

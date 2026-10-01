@@ -1030,6 +1030,8 @@ impl Hangar {
         api::open_trace_start(&session.name);
         // Outra conversa escolhida no meio da criação: a mensagem segue sendo enviada, mas a bolha é da tela que ficou.
         self.opening = None;
+        // Vindo da tela sem sessão (nova conversa ou conversa fechada), o texto dela fica guardado com ela.
+        self.stash_view_draft(cx);
         self.reopen = None;
         let same_server = self.open_api.as_ref().map(Api::identity) == open_api.as_ref().map(Api::identity);
         if !same_server || self.selected.as_ref().is_none_or(|selected| selected.name != session.name) {
@@ -1103,8 +1105,12 @@ impl Hangar {
         if self.api.is_none() || window.has_active_dialog(cx) || self.connection_dialog { return; }
         if self.settings.is_some() && !self.settings_live() { self.close_settings(window, cx); }
         self.pending_remote = None;
+        // Cada tela tem o próprio texto: o da conversa fechada fica com ela, e a nova conversa volta com o dela.
+        let home = self.selected.is_none() && self.reopen.is_none();
+        self.stash_view_draft(cx);
         self.close_open_session(window, cx);
         self.reopen = None;
+        if !home { self.load_view_draft(window, cx); }
         self.composer.update(cx, |input, cx| input.focus(window, cx));
         cx.notify();
     }
@@ -4458,7 +4464,7 @@ impl Hangar {
             .child(div().px(px(6.)).child(chrome::hangar_mark(16., theme::accent())))
             .children(self.render_hangar_chip(hangar_live::Chip::Label, cx))
             .child(strip)
-            .child(chrome::icon_button("tabs-new-chat", IconName::SquarePen, tr("new_chat_title"), cx).selected(self.new_chat_screen())
+            .child(chrome::icon_button("tabs-new-chat", IconName::SquarePen, tr("new_chat_title"), cx).selected(self.new_chat_screen() && self.reopen.is_none())
                 .disabled(self.api.is_none()).on_click(cx.listener(|this, _, window, cx| this.go_home(window, cx))))
             .child(self.new_session_button(true, cx))
             .when_some(self.list_error.clone(), |el, text| el.child(div().flex_shrink_0().max_w(px(260.)).flex().items_center().gap_1()

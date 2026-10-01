@@ -347,6 +347,8 @@ pub(in crate::app) struct NewSession {
     /// Com a conversa fechada aberta (`Hangar::reopen`), a conta Claude escolhida para retomá-la; o menu de conta passa a
     /// escolher esta, sem mexer na da tela sem sessão.
     pub(super) reopen_config: Option<Option<String>>,
+    /// A dona é a conta do próprio servidor fora da lista (`config_dir` nulo): o menu ganha a linha "Padrão" para ela.
+    pub(super) reopen_default: bool,
     /// "+ conta": a linha do nome aberta; "Apagar": a confirmação na tela.
     asking: bool,
     confirming: bool,
@@ -418,7 +420,7 @@ impl NewSession {
             step: String::new(), error: None, clock: None, models: Remote::default(), model: String::new(), model_choice_touched: false, effort: String::new(),
             permission: "bypassPermissions".into(), subagent: String::new(), engine: String::new(), model_pick: None, effort_pick: None,
             permission_pick: None, subagent_pick: None, engine_pick: None, engines: Remote::default(), jev: Remote::default(), jev_on: false,
-            more: false, omp, quotas: Remote::default(), reopen_config: None, asking: false, confirming: false, account_busy: false, account_seq: 0, account_name,
+            more: false, omp, quotas: Remote::default(), reopen_config: None, reopen_default: false, asking: false, confirming: false, account_busy: false, account_seq: 0, account_name,
             notice: None, created_path: None, context_seq: 0, context_busy: false, context_on: None, context_want: None, context_error: None,
             archive: Remote::default(), want_resume: false, conversation: String::new(), before: None, preview: Remote::default(),
             preview_scroll: ScrollHandle::new(), resuming: false, baton, baton_by_model: false, baton_open: false,
@@ -1448,7 +1450,9 @@ impl NewSession {
             "claude" | "" => {
                 let list = self.configs.ok().filter(|list| !list.is_empty())?;
                 let chosen = self.reopen_config.clone().flatten();
-                let label = list.iter().find(|c| Some(&c.path) == chosen.as_ref()).map(|c| c.label.clone()).unwrap_or_else(|| tr("create_default"));
+                // Conta fora da lista (pasta antiga) aparece pelo nome da pasta; sem caminho é a do servidor.
+                let label = list.iter().find(|c| Some(&c.path) == chosen.as_ref()).map(|c| c.label.clone())
+                    .or_else(|| chosen.as_deref().map(|p| basename(p).to_owned())).unwrap_or_else(|| tr("create_default"));
                 Some(row.child(quiet_pill(Menu::Account, self.menu.get() == Some(Menu::Account), IconName::CircleUser, label,
                     tr("create_claude_account"), self.configs.loading, cx)))
             }
@@ -1509,7 +1513,12 @@ impl NewSession {
             },
             Menu::Account if self.reopen_config.is_some() => {
                 let chosen = self.reopen_config.clone().flatten();
-                let rows = self.accounts().filter(|c| wanted(&query, &c.label, "")).map(|c| {
+                // `config_dir` nulo no resume = a conta dona da conversa, que aqui é a do servidor.
+                let default = self.reopen_default.then(|| menu_row(SharedString::from("reopen-account-default"), chosen.is_none(),
+                    tr("create_default"), String::new())
+                    .on_click(cx.listener(|this, _, _, cx| { this.menu.set(None); this.reopen_config = Some(None); cx.notify(); }))
+                    .into_any_element()).filter(|_| wanted(&query, &tr("create_default"), ""));
+                let rows = default.into_iter().chain(self.accounts().filter(|c| wanted(&query, &c.label, "")).map(|c| {
                     let path = c.path.clone();
                     let quota = self.quota_line(format!("reopen-account-quota-{path}"), &format!("claude:{path}"));
                     menu_row_with(SharedString::from(format!("reopen-account-{path}")), chosen.as_ref() == Some(&c.path), c.label.clone(),
@@ -1520,7 +1529,7 @@ impl NewSession {
                             cx.notify();
                         }))
                         .into_any_element()
-                }).collect();
+                })).collect();
                 Self::menu_list("reopen-account-list", rows)
             }
             Menu::Account if self.provider == "codex" => {
