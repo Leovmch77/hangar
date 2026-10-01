@@ -677,8 +677,12 @@ export function uniqueSessionName(base: string, taken: Set<string>): string {
   return `${clean}-${i}`;
 }
 
+// Abrir ou retomar sessão leva bem mais que o prazo padrão: estourar antes faz a tela acusar erro
+// com a sessão nascendo e o reenvio duplicá-la.
+const SESSION_BIRTH_MS = 120_000;
+
 export function createSessionForServer(server: Server, body: CreateSessionBody): Promise<SessionInfo> {
-  return apiFetchForServer(server, '/api/sessions', { method: 'POST', body: JSON.stringify(buildCreateSessionBody(body)) });
+  return apiFetchForServer(server, '/api/sessions', { method: 'POST', body: JSON.stringify(buildCreateSessionBody(body)) }, SESSION_BIRTH_MS);
 }
 
 export function createSession(
@@ -961,26 +965,31 @@ export function pickFolderRoot(roots: { path: string }[], cwd: string): string |
   return best;
 }
 
-async function folderRoot(server: Server, cwd: string, signal?: AbortSignal): Promise<string> {
-  const root = pickFolderRoot(await getRootsForServer(server, signal), cwd);
-  if (!root) throw new Error('root not allowed');
-  return root;
+const FOLDER_READ_MS = 30_000;
+const FOLDER_ACTION_MS = 150_000;
+
+// `root` explícito dispensa a consulta a /api/fs/roots (quem escolheu a pasta já sabe a raiz).
+async function folderRoot(server: Server, cwd: string, signal?: AbortSignal, root?: string): Promise<string> {
+  if (root) return root;
+  const found = pickFolderRoot(await getRootsForServer(server, signal), cwd);
+  if (!found) throw new Error('root not allowed');
+  return found;
 }
 
-export async function getFolderBranchesForServer(server: Server, cwd: string, signal?: AbortSignal): Promise<FolderBranches> {
-  const q = new URLSearchParams({ root: await folderRoot(server, cwd, signal), path: cwd });
-  return apiFetchForServer(server, `/api/fs/branches?${q}`, { signal: comTeto(signal, 8000) });
+export async function getFolderBranchesForServer(server: Server, cwd: string, signal?: AbortSignal, root?: string): Promise<FolderBranches> {
+  const q = new URLSearchParams({ root: await folderRoot(server, cwd, signal, root), path: cwd });
+  return apiFetchForServer(server, `/api/fs/branches?${q}`, { signal: comTeto(signal, FOLDER_READ_MS) }, FOLDER_READ_MS);
 }
 
-export async function getFolderGitForServer(server: Server, cwd: string, signal?: AbortSignal): Promise<FolderGit> {
-  const q = new URLSearchParams({ root: await folderRoot(server, cwd, signal), path: cwd });
-  return apiFetchForServer(server, `/api/fs/git?${q}`, { signal: comTeto(signal, 8000) });
+export async function getFolderGitForServer(server: Server, cwd: string, signal?: AbortSignal, root?: string): Promise<FolderGit> {
+  const q = new URLSearchParams({ root: await folderRoot(server, cwd, signal, root), path: cwd });
+  return apiFetchForServer(server, `/api/fs/git?${q}`, { signal: comTeto(signal, FOLDER_READ_MS) }, FOLDER_READ_MS);
 }
 
 // Fetch/pull devolvem o mesmo estado da leitura, já relido.
-export async function folderGitActionForServer(server: Server, cwd: string, action: 'fetch' | 'pull'): Promise<FolderGit> {
-  const root = await folderRoot(server, cwd);
-  return apiFetchForServer(server, `/api/fs/git/${action}`, { method: 'POST', body: JSON.stringify({ root, path: cwd }) });
+export async function folderGitActionForServer(server: Server, cwd: string, action: 'fetch' | 'pull', root?: string): Promise<FolderGit> {
+  const body = JSON.stringify({ root: await folderRoot(server, cwd, undefined, root), path: cwd });
+  return apiFetchForServer(server, `/api/fs/git/${action}`, { method: 'POST', body }, FOLDER_ACTION_MS);
 }
 
 // Importação Claude → Codex da conta padrão (a mesma do "Reconciliar agora" em Harnesses).
@@ -1304,7 +1313,7 @@ export function resumeArchivedConversation(
   codexAccount?: string | null,
   server?: Server | null,
 ): Promise<SessionInfo> {
-  const request = server ? <T>(path: string, init?: RequestInit) => apiFetchForServer<T>(server, path, init) : apiFetch;
+  const request = server ? <T>(path: string, init?: RequestInit) => apiFetchForServer<T>(server, path, init, SESSION_BIRTH_MS) : apiFetch;
   return request<SessionInfo>(
     `/api/archive/${encodeURIComponent(project)}/${encodeURIComponent(sessionId)}/resume`,
     { method: 'POST', body: JSON.stringify({

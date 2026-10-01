@@ -11,6 +11,7 @@ function overwriteGetLocale(fn: () => 'en' | 'pt') {
 import { configureApi } from './apiEnv';
 // `getHistoryDesde` veio da main junto com o histórico condicional (304 + ETag).
 import { getConfig, getConfigForServer, patchConfig, patchConfigForServer, createSession, getHistory, getHistoryDesde, isAbortError, transcribeFile, transcribeFileForServer, getModelOptions, setEngineModel, rotaGenerica, pairSession } from './api';
+import { createSessionForServer, getFolderGitForServer, folderGitActionForServer } from './api';
 import { mensagemDeErro, formataErro } from './errosApi';
 import { passarBastao, getSyncSetupForServer, setupSyncForServer, disableSyncForServer } from './api';
 import { probeServerResponse } from './api';
@@ -630,5 +631,27 @@ describe('pairSession', () => {
     await pairSession('sessao', ['outra'], 'tarefa', true);
     const [, init] = fetchMock.mock.calls[0];
     expect(JSON.parse(init?.body as string)).toEqual({ peers: ['outra'], task: 'tarefa', replace_task: true });
+  });
+});
+
+describe('prazos e raiz explícita (sessão e git de pasta)', () => {
+  it('abrir sessão em outro servidor espera 120 s, não os 8 s padrão', async () => {
+    const timeout = vi.spyOn(AbortSignal, 'timeout');
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{"name":"x"}'));
+    await createSessionForServer(server, { name: 'x' });
+    expect(timeout).toHaveBeenCalledWith(120_000);
+  });
+
+  it('git de pasta com raiz explícita não consulta /api/fs/roots', async () => {
+    const timeout = vi.spyOn(AbortSignal, 'timeout');
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response('{"repo":false}'));
+    await getFolderGitForServer(server, '/home/a/x', undefined, '/home/a');
+    await folderGitActionForServer(server, '/home/a/x', 'fetch', '/home/a');
+    const urls = fetchMock.mock.calls.map(c => String(c[0]));
+    expect(urls).toHaveLength(2);
+    expect(urls.some(u => u.includes('/api/fs/roots'))).toBe(false);
+    expect(new URL(urls[0]).searchParams.get('root')).toBe('/home/a');
+    expect(timeout).toHaveBeenCalledWith(30_000);
+    expect(timeout).toHaveBeenCalledWith(150_000);
   });
 });
