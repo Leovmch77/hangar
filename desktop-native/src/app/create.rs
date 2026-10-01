@@ -1368,7 +1368,9 @@ fn quiet_pill(menu: Menu, open: bool, icon: IconName, text: String, aria: String
 impl NewSession {
     pub(super) fn toggle_menu(&mut self, menu: Menu, window: &mut Window, cx: &mut Context<Self>) {
         let open = self.menu.get() != Some(menu) && !self.creating;
+        let leaving_account = self.menu.get() == Some(Menu::Account) && !(open && menu == Menu::Account);
         self.menu.set(open.then_some(menu));
+        if leaving_account && self.leave_exhausted_account() { self.build_config_pick(window, cx); self.load_models(window, cx); }
         if open && menu == Menu::Folder { self.query.update(cx, |input, cx| input.focus(window, cx)); }
         else if open { self.menu_query.update(cx, |input, cx| { input.set_value("", window, cx); input.focus(window, cx); }); }
         if open && menu == Menu::Git { self.git_opened(cx); }

@@ -343,7 +343,8 @@ impl NewSession {
     /// Na tela sem sessão, a conta Claude escolhida sem esgotar a cota troca sozinha pela de mais folga, salvo escolha à mão
     /// no menu. A conversa fechada não passa por aqui: lá o envio fica bloqueado. `true` quando trocou.
     pub(super) fn leave_exhausted_account(&mut self) -> bool {
-        if !self.compact || self.account_touched || self.reopen_config.is_some() || self.creating || self.account_busy
+        // Com o menu de conta aberto, a lista não muda debaixo do clique: fechar ou a próxima cota reavalia.
+        if !self.compact || self.account_touched || self.menu.get() == Some(Menu::Account) || self.reopen_config.is_some() || self.creating || self.account_busy
             || self.provider != "claude" || !self.engine.is_empty() || self.target().is_some() { return false; }
         let accounts: Vec<_> = self.accounts().map(|c| (c.path.as_str(), c.active, self.quota_of(&format!("claude:{}", c.path)))).collect();
         let Some(path) = quota_switch(self.config.as_deref(), &accounts, chrono::Local::now().timestamp() as f64) else { return false };
@@ -508,6 +509,8 @@ impl NewSession {
                             self.asking = false;
                             self.account_name.update(cx, |input, cx| input.set_value("", window, cx));
                             (self.config, self.created_path, self.notice) = (Some(path.clone()), Some(path), Some((tr("create_account_logged_out"), false)));
+                            // Conta recém-criada é escolha dela: a cota que chegar depois não a tira daqui.
+                            self.account_touched = true;
                             self.build_config_pick(window, cx);
                             self.load_models(window, cx);
                         }
