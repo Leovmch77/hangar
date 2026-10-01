@@ -50,6 +50,7 @@ mod mention;
 mod server_config;
 mod invite;
 mod pair_accept;
+mod external;
 mod servers;
 pub(crate) use servers::{ServerEntry, new_id as new_server_id};
 mod shortcuts;
@@ -541,6 +542,13 @@ pub struct Hangar {
     pending_open: Option<String>,
     /// Sessão de outra máquina clicada antes da lista dela chegar (chave `servers::norm`, nome).
     pending_remote: Option<(String, String)>,
+    /// Pares externos lidos de cada servidor próprio (chave dele, par).
+    external_pairs: Vec<(String, api::ExternalPairDto)>,
+    /// Sessões com par externo na última lista vista: a releitura dos pares só sai quando isto muda.
+    external_seen: Option<Vec<(String, String, Option<PairExternal>)>>,
+    /// Attach já feitos ou em voo (endereço, token da entrada, token do par).
+    attached: HashSet<(String, String, String)>,
+    external_seq: u64,
     dictation: dictation::Dictation,
     connection_origin: Option<WeakFocusHandle>,
     /// Primeira abertura com o app Electron neste computador: a tela de conexão oferece trazer as configurações dele.
@@ -587,7 +595,7 @@ impl Hangar {
         if let Some((address, token)) = &saved
             && !known_servers.iter().any(|s| servers::norm(&s.address) == servers::norm(address)) {
             known_servers.insert(0, servers::ServerEntry { id: servers::new_id(), label: servers::default_label(address),
-                address: address.clone(), token: token.clone(), disabled: false, invite: false, lan: None });
+                address: address.clone(), token: token.clone(), disabled: false, invite: false, lan: None, ephemeral: false });
         }
         let (saved_address, saved_token) = saved.clone().unwrap_or_else(|| ("http://127.0.0.1:8765".into(), String::new()));
         let address = cx.new(|cx| InputState::new(window, cx).default_value(saved_address).placeholder(tr("server")));
@@ -713,6 +721,7 @@ impl Hangar {
             new_chat: None, new_chat_focus: cx.focus_handle().tab_stop(true),
             new_chat_folders: Default::default(), landing: None, opening: None, side_seen: None, side_slide: None, arrived: HashMap::new(), tree_parts: HashSet::new(), part_arrived: HashMap::new(), tree_folds: HashMap::new(), tree_motion: false, active_token: String::new(), ready_sessions: None,
             servers: known_servers, remote: HashMap::new(), remote_tasks: Vec::new(), remote_gen: 0, servers_rev: 0, invite_ended: HashSet::new(), pending_open: None, pending_remote: None,
+            external_pairs: Vec::new(), external_seen: None, attached: HashSet::new(), external_seq: 0,
             dictation: Default::default(),
             connection_origin: None,
             electron_offer: saved.is_none() && crate::electron::exists(),
@@ -1253,7 +1262,7 @@ impl Hangar {
                 if let Some((address, token)) = self.unsaved_connection.take() {
                     let known = self.servers.iter().any(|s| servers::norm(&s.address) == servers::norm(&address));
                     let label = if known { String::new() } else { servers::default_label(&address) };
-                    servers::upsert(&mut self.servers, servers::ServerEntry { id: servers::new_id(), label, address, token, disabled: false, invite: false, lan: None });
+                    servers::upsert(&mut self.servers, servers::ServerEntry { id: servers::new_id(), label, address, token, disabled: false, invite: false, lan: None, ephemeral: false });
                     // Disco fora da thread da janela; só a falha volta.
                     self.persist_servers();
                     self.sync_updater(cx);
@@ -4247,6 +4256,11 @@ impl Hangar {
                     children.push(self.render_pair_header(&gid, &label, &members, remote, window, cx));
                     continue;
                 }
+                grouping::ListRow::External { gid, .. } if self.sidebar.is_collapsed(&grouping::pair_key(&gid, remote)) => continue,
+                grouping::ListRow::External { owner, session, alias, .. } => {
+                    children.push(self.render_external_pair_row(&owner, &session, &alias, remote, window, cx));
+                    continue;
+                }
                 grouping::ListRow::Session(session) if self.pair_collapsed(session, remote) => continue,
                 grouping::ListRow::Session(session) => session,
             };
@@ -5148,8 +5162,10 @@ impl Hangar {
         let action_note = selected_key.as_ref().and_then(|key| self.action_feedback.get(key)).cloned();
         let readable = self.selected.as_ref().is_some_and(|s| s.readable());
         let orq = self.selected.as_ref().filter(|s| s.orq()).map(|s| s.name.clone());
-        let card = if readable { self.render_ask(busy, window, cx).or_else(|| self.render_options(busy, cx)) } else { None };
-        let plan_bar = if readable && card.is_none() {
+        // A sessão da outra pessoa não recebe resposta nem plano daqui: o servidor dela recusa.
+        let read_only = self.selected.as_ref().is_some_and(|s| s.read_only());
+        let card = if readable && !read_only { self.render_ask(busy, window, cx).or_else(|| self.render_options(busy, cx)) } else { None };
+        let plan_bar = if readable && !read_only && card.is_none() {
             self.render_plan_bar(busy, cx).or_else(|| self.render_headless_plan(cx)).or_else(|| self.render_plan_preview(cx))
         } else { None };
         let steer = readable && self.steer_offered();
@@ -5177,6 +5193,7 @@ impl Hangar {
             .when_some(stop_note, |el, (note, warning)| el.child(in_column(div().py_1().text_xs().text_color(if warning { theme::warning() } else { theme::muted() }).child(note))))
             .map(|el| match orq {
                 Some(orq) => el.child(in_column(self.render_orq_footer(&orq, cx))),
+                None if read_only => el.child(in_column(div().py_2().text_sm().text_color(theme::muted()).whitespace_normal().child(tr("par_so_leitura")))),
                 None => el.when(self.selected.is_some() || self.api.is_some(),
                     |el| el.child(self.render_composer(readable, busy, steer, queued, sending, stopping, window, cx))),
             });

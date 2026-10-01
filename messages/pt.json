@@ -6520,5 +6520,8 @@
   "native_par_aceito": "Pareada com {dono} · {sessao}",
   "native_par_whatsapp": "Vamos parear nossas sessões no Hangar: {link}",
   "native_par_sem_sessao": "Nenhuma sessão viva nesta máquina para parear.",
-  "native_par_aceitando": "Pareando…"
+  "native_par_aceitando": "Pareando…",
+  "native_par_rotulo": "Par · {dono}",
+  "native_par_externo": "externo",
+  "native_par_so_leitura": "Sessão de outra pessoa, pareada com a tua: você acompanha, e quem fala com ela é a tua sessão."
 }

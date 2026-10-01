@@ -42,12 +42,14 @@ pub(super) fn can_pair(origin: &SessionInfo, target: &SessionInfo, same_server: 
     Ok(())
 }
 
-/// `canLeave` do web: o par de outro servidor não tem `pair_gid`, por isso os pares também contam.
+/// `canLeave` do web: os pares também contam, para o par de outro servidor que venha sem `pair_gid` (o externo tem um).
 pub(super) fn can_leave(s: &SessionInfo) -> bool { !s.orq() && (s.pair_gid.is_some() || !s.peers().is_empty()) }
 
 pub(super) enum ListRow<'a> {
     Header { gid: String, label: String, members: Vec<&'a SessionInfo> },
     Session(&'a SessionInfo),
+    /// A sessão da outra pessoa, logo abaixo dos membros do grupo.
+    External { gid: String, owner: String, session: String, alias: String },
 }
 
 /// `clusterByPair` do web: cada grupo vira um cabeçalho no lugar do primeiro membro, seguido dos membros; o resto fica onde
@@ -63,7 +65,9 @@ pub(super) fn cluster<'a>(list: &[&'a SessionInfo]) -> Vec<ListRow<'a>> {
         let label = members.iter().filter_map(|m| m.pair_task.as_deref().map(str::trim)).find(|t| !t.is_empty()).map(str::to_owned)
             .unwrap_or_else(|| members.iter().map(|m| m.name.as_str()).collect::<Vec<_>>().join(", "));
         out.push(ListRow::Header { gid: gid.to_owned(), label, members: members.clone() });
+        let external = members.iter().find_map(|m| m.pair_external.clone());
         out.extend(members.into_iter().map(ListRow::Session));
+        if let Some(e) = external { out.push(ListRow::External { gid: gid.to_owned(), owner: e.owner, session: e.session, alias: e.alias }); }
     }
     out
 }
@@ -562,7 +566,7 @@ pub(super) fn fill_group(menu: PopupMenu, hangar: &WeakEntity<Hangar>, origin: &
 mod tests {
     // Sem glob: o `test` do gpui_kit, que o `super::*` traz, esconderia o `#[test]` da linguagem.
     use super::{ListRow, Refusal, SessionInfo, can_leave, can_pair, cluster, existing_group, split_code};
-    use crate::api::dto::PairResult;
+    use crate::api::dto::{PairExternal, PairResult};
 
     fn s(name: &str, gid: Option<&str>, peers: &[&str]) -> SessionInfo {
         SessionInfo { name: name.into(), state: "idle".into(), pair_gid: gid.map(str::to_owned),
@@ -599,11 +603,21 @@ mod tests {
         let shape: Vec<String> = cluster(&list).iter().map(|row| match row {
             ListRow::Header { gid, label, members } => format!("[{gid} {label} {}]", members.len()),
             ListRow::Session(s) => s.name.clone(),
+            ListRow::External { session, .. } => format!("ext {session}"),
         }).collect();
         assert_eq!(shape, ["a", "[g b, d 2]", "b", "d", "c"], "sem tarefa o rótulo são os nomes");
         let tasked = [s("x", Some("g"), &["y"]), SessionInfo { pair_task: Some(" ABC-1 tela ".into()), ..s("y", Some("g"), &["x"]) }];
         let list: Vec<&SessionInfo> = tasked.iter().collect();
         assert!(matches!(&cluster(&list)[0], ListRow::Header { label, .. } if label == "ABC-1 tela"));
+    }
+
+    #[test]
+    fn external_peer_row_follows_its_group() {
+        let x = SessionInfo { pair_external: Some(PairExternal { alias: "pc-ana".into(), owner: "pc-ana".into(), session: "Y".into() }),
+            ..s("X", Some("g"), &["pc-ana::Y"]) };
+        let rows = cluster(&[&x]);
+        assert!(matches!(rows.last(), Some(ListRow::External { gid, session, .. }) if session == "Y" && gid == "g"));
+        assert_eq!(rows.len(), 3, "cabeçalho, membro e a linha da outra pessoa");
     }
 
     #[test]

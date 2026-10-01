@@ -3,7 +3,7 @@
 use super::*;
 use crate::api::sse::Update;
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize, PartialEq)]
 pub(crate) struct ServerEntry {
     pub id: String,
     pub label: String,
@@ -17,6 +17,9 @@ pub(crate) struct ServerEntry {
     /// Rede local aprendida pelo endereço salvo; ausente = nunca perguntado.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lan: Option<api::route::Lan>,
+    /// Entrada só do par externo: refeita da lista de pares a cada abertura, nunca gravada.
+    #[serde(skip, default)]
+    pub ephemeral: bool,
 }
 
 pub(crate) enum RemoteUpdate { Sessions(Result<Vec<SessionInfo>, Failure>), Stream(Update) }
@@ -283,7 +286,8 @@ impl Hangar {
 
     pub(super) fn persist_servers(&self) {
         let active = Some((self.server.clone().unwrap_or_default(), self.active_token.clone())).filter(|(a, t)| !a.is_empty() && !t.is_empty());
-        let (servers, connection, tx) = (self.servers.clone(), self.connection, self.tx.clone());
+        let servers: Vec<ServerEntry> = self.servers.iter().filter(|s| !s.ephemeral).cloned().collect();
+        let (connection, tx) = (self.connection, self.tx.clone());
         self.runtime.spawn(async move {
             let saved = tokio::task::spawn_blocking(move || {
                 // Sem conexão ativa a lista grava do mesmo jeito, mantendo a conexão que o arquivo já tinha.
@@ -347,7 +351,7 @@ mod tests {
 
     #[test]
     fn upsert_matches_same_machine_and_keeps_label() {
-        let entry = |label: &str, address: &str, token: &str| ServerEntry { id: "x".into(), label: label.into(), address: address.into(), token: token.into(), disabled: false, invite: false, lan: None };
+        let entry = |label: &str, address: &str, token: &str| ServerEntry { id: "x".into(), label: label.into(), address: address.into(), token: token.into(), disabled: false, invite: false, lan: None, ephemeral: false };
         let mut list = vec![entry("PC", "http://127.0.0.1:8765", "a")];
         upsert(&mut list, entry("", "http://127.0.0.1:8765/", "b"));
         upsert(&mut list, entry("notebook", "https://notebook.ts.net", "c"));
@@ -359,10 +363,10 @@ mod tests {
     #[test]
     fn invite_flag_survives_the_plain_upsert_of_the_first_connection() {
         let mut list = vec![ServerEntry { id: "i".into(), label: "Convite · Jefferson".into(), address: "https://h:8443".into(),
-            token: "g".into(), disabled: false, invite: true, lan: None }];
+            token: "g".into(), disabled: false, invite: true, lan: None, ephemeral: false }];
         // O `Sessions(Ok)` da conexão faz upsert sem a marca: ela não pode cair.
         upsert(&mut list, ServerEntry { id: "x".into(), label: String::new(), address: "https://h:8443/".into(),
-            token: "g".into(), disabled: false, invite: false, lan: None });
+            token: "g".into(), disabled: false, invite: false, lan: None, ephemeral: false });
         assert!(list[0].invite);
         let old: ServerEntry = serde_json::from_str(r#"{"id":"a","label":"PC","address":"http://127.0.0.1:8765","token":"t"}"#).unwrap();
         assert!(!old.invite);

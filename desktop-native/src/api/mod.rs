@@ -629,6 +629,21 @@ pub async fn redeem_invite(address: &str, code: &str, device: &str, token: Optio
     Api::checked(r, true).await?.json().await.map_err(|_| Failure::local("invalid_response"))
 }
 
+#[derive(Clone, Debug, serde::Deserialize, PartialEq)]
+pub struct ExternalPairDto { pub local_session: String, pub alias: String, pub owner: String, pub session: String, pub address: String, pub token: String }
+
+impl Api {
+    /// Pares externos das sessões deste servidor (só o dono lê).
+    pub async fn external_pairs(&self) -> Result<Vec<ExternalPairDto>, Failure> {
+        serde_json::from_value(self.server_read(&["external-pairs"], &[], 15).await?).map_err(|_| Failure::local("invalid_response"))
+    }
+}
+
+/// Liga a sessão pareada ao token de convite que este app já tem para a máquina dela.
+pub async fn attach_guest(address: &str, holder: &str, other: &str) -> Result<(), Failure> {
+    Api::new(address, holder)?.server_send(reqwest::Method::POST, &["guest", "attach"], Some(json!({"token": other})), 15).await.map(|_| ())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

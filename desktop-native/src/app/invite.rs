@@ -40,10 +40,11 @@ fn own_server_at(list: &[servers::ServerEntry], address: &str) -> bool {
     list.iter().any(|s| !s.invite && servers::norm(&s.address) == servers::norm(address))
 }
 
-/// Token de convite que este app já tem para a máquina: o resgate novo entra nele em vez de trocar de sessão.
+/// Token de convite que este app já tem para a máquina: o resgate novo entra nele em vez de trocar de sessão. O token só do
+/// par não serve: o convite resgatado nele sumiria junto com o par.
 pub(super) fn existing_invite_token(list: &[servers::ServerEntry], address: &str) -> Option<String> {
     let key = servers::norm(address);
-    list.iter().find(|s| s.invite && servers::norm(&s.address) == key).map(|s| s.token.clone()).filter(|t| !t.is_empty())
+    list.iter().find(|s| s.invite && !s.ephemeral && servers::norm(&s.address) == key).map(|s| s.token.clone()).filter(|t| !t.is_empty())
 }
 
 /// Coloca o convite na lista. Já existindo um convite no endereço (mesmo dono), a entrada é a mesma: o token devolvido é o
@@ -156,12 +157,15 @@ impl Hangar {
         let key = servers::norm(&redeemed.address);
         self.invite_ended.remove(&key);
         let entry = servers::ServerEntry { id: servers::new_id(), label: tr_shared("convite_rotulo", &[("dono", &redeemed.owner)]),
-            address: redeemed.address, token: redeemed.token, disabled: false, invite: true, lan: None };
+            address: redeemed.address, token: redeemed.token, disabled: false, invite: true, lan: None, ephemeral: false };
         // Um servidor próprio pode ter entrado na lista enquanto o resgate corria: ele fica intacto.
         if !place_invite(&mut self.servers, entry) {
             window.push_notification(Notification::warning(tr("invite_own_server")), cx);
             return;
         }
+        // A entrada só do par vira a do convite, que fica gravada; o par entra nela pelo attach da próxima reconciliação.
+        if let Some(found) = self.servers.iter_mut().find(|s| servers::norm(&s.address) == key) { found.ephemeral = false; }
+        self.apply_external_pairs(cx);
         self.servers_rev += 1;
         self.persist_servers();
         self.start_remote_lists();
@@ -224,7 +228,7 @@ mod tests {
     use core::prelude::v1::test;
 
     fn entry(id: &str, label: &str, address: &str, token: &str, invite: bool) -> servers::ServerEntry {
-        servers::ServerEntry { id: id.into(), label: label.into(), address: address.into(), token: token.into(), disabled: false, invite, lan: None }
+        servers::ServerEntry { id: id.into(), label: label.into(), address: address.into(), token: token.into(), disabled: false, invite, lan: None, ephemeral: false }
     }
 
     #[test]
@@ -252,6 +256,8 @@ mod tests {
         assert_eq!(existing_invite_token(&list, "https://A.ts.net:8443/").as_deref(), Some("t1"));
         assert_eq!(existing_invite_token(&list, "https://b.ts.net"), None);
         assert_eq!(existing_invite_token(&list, "https://c.ts.net:8443"), None);
+        let pair_only = vec![servers::ServerEntry { ephemeral: true, ..entry("p", "Par", "https://a.ts.net:8443", "tp", true) }];
+        assert_eq!(existing_invite_token(&pair_only, "https://a.ts.net:8443"), None, "o token só do par não recebe convite");
     }
 
     #[test]

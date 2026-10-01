@@ -121,10 +121,11 @@ impl Hangar {
         self.runtime.spawn(async move { let _ = done.send(api.accept_pair(&session, &link).await); });
         cx.spawn_in(window, async move |this, cx| {
             let result: Result<PairAccepted, ShareFailure> = result.await.unwrap_or_else(|_| Err(ShareFailure::Other(Failure::local("network_error"))));
-            let _ = this.update_in(cx, |_, window, cx| match result {
+            let _ = this.update_in(cx, |this, window, cx| match result {
                 Ok(ok) => {
                     window.close_all_dialogs(cx);
                     window.push_notification(Notification::success(tr_shared("native_par_aceito", &[("dono", &ok.owner), ("sessao", &ok.session)])), cx);
+                    this.refresh_external_pairs(cx);
                 }
                 Err(failure) => { let _ = dialog.update(cx, |d, cx| {
                     d.busy = false;
