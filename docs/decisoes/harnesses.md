@@ -1314,7 +1314,7 @@ diálogo de confiança e morte continuam sendo do pane.
   segue no pane até reiniciar; a raspagem inteira do `extract_assistant_text` vira plano B, não
   código morto. Codex nunca raspou pane (app-server).
 
-  Em 19/09/2026, no WinBoat, oito deltas concorrentes com leitura retardada preservaram apenas
+  Em 19/09/2026, no Windows, oito deltas concorrentes com leitura retardada preservaram apenas
   um; segurar o destino aberto por 100 ms também fez perder uma atualização. O hook agora
   serializa o ciclo pelo `msvcrt` no Windows, usa `atomico.substituir` para a janela de leitura
   concorrente e registra a classe da falha sem conteúdo da conversa. A espera da trava usa
@@ -1544,6 +1544,13 @@ local falso confirmaram envio durante o turno, resposta após seu fim e recupera
 Limites nativos medidos: “Pular” só altera a memória da TUI, sem evento/histórico; uma resposta por
 outro cliente não fecha o widget já aberto no terminal. O Hangar reconhece respostas do terminal
 pelo histórico, mas não inventa confirmação de descarte.
+
+Em 01/10/2026, com o CLI 0.159.3, a resposta do terminal passou a chegar em
+`<send_user_message_question_reply>`, com uma lista JSON cujo `questionItemId` identifica a
+ferramenta, a chamada e o índice da pergunta. Reconhecer apenas o título deixava a pergunta
+pendente depois da resposta. O backend resolve esse formato pelo ID e mantém a leitura do
+formato anterior para o histórico. A recuperação do histórico real confirmou zero perguntas
+pendentes; os testes cobrem títulos repetidos, respostas em lote e resposta durante a leitura.
 
 ## Aviso de espera do Codex (11/09/2026, CLI 0.154.0)
 
