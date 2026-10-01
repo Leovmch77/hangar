@@ -40,6 +40,33 @@
   const activeDays = $derived((report?.by_day ?? []).filter((b) => raw(b) > 0).length);
   const partial = $derived((report?.sem_tarifa ?? []).length > 0);
   const maxModel = $derived(Math.max(1, ...models.map(raw)));
+  // Semanas de segunda a domingo; a data vem do histórico, sem deslocar fuso.
+  const day = (d: number) => new Date(d).toISOString().slice(0, 10);
+  const calendar = $derived.by(() => {
+    const byDay = new Map<string, number>();
+    for (const b of report?.by_day ?? []) byDay.set(b.key, (byDay.get(b.key) ?? 0) + raw(b));
+    const keys = [...byDay.keys()].sort();
+    if (!keys.length) return null;
+    const start = Date.parse(`${keys[0]}T00:00:00Z`);
+    const end = Date.parse(`${keys[keys.length - 1]}T00:00:00Z`);
+    if (Number.isNaN(start) || Number.isNaN(end)) return null;
+    const first = start - ((new Date(start).getUTCDay() + 6) % 7) * 86400000;
+    const weeks = Math.floor((end - first) / 86400000 / 7) + 1;
+    const max = Math.max(1, ...byDay.values());
+    const br = (k: string) => k.split('-').reverse().join('/');
+    return {
+      title: m.home_usage_activity({ start: br(keys[0]), end: br(keys[keys.length - 1]) }),
+      weeks: Array.from({ length: weeks }, (_, w) => Array.from({ length: 7 }, (_, d) => {
+        const t = first + (w * 7 + d) * 86400000;
+        const k = day(t);
+        const v = byDay.get(k) ?? 0;
+        return {
+          k, v, visible: t >= start && t <= end, level: v > 0 ? 0.3 + 0.7 * (v / max) : 0,
+          tip: m.home_usage_day({ date: br(k), tokens: dec(v, 0) }),
+        };
+      })),
+    };
+  });
   const cost = (n: number) => money2(n, moeda.cur, report?.usd_brl ?? null);
 
   function stop() {
@@ -59,21 +86,22 @@
       try {
         const r = await fetchCostsForServer(srv, per);
         if (mine !== seq) return;
-        if (r.applied?.period !== per) throw new Error(m.home_usage_period_unsupported());
-        if (!r.totals) throw new Error(m.home_usage_load_failed());
-        report = r;
         loadedAt = Date.now();
+        if (r.applied?.period !== per) error = m.home_usage_period_unsupported();
+        else if (!r.totals) error = m.home_usage_load_failed();
+        else report = r;
         break;
       } catch (e) {
         if (mine !== seq) return;
         if (e instanceof Aquecendo) {
-          if (tries >= WARM_TRIES) { error = m.home_usage_warming_timeout(); break; }
+          if (tries >= WARM_TRIES) { loadedAt = Date.now(); error = m.home_usage_warming_timeout(); break; }
           warming = { read: e.lidos, total: e.total };
           await new Promise<void>((ok) => { timer = setTimeout(ok, WARM_MS); });
           if (mine !== seq) return;
           continue;
         }
-        error = e instanceof Error && e.message && !/^\d+$/.test(e.message) ? e.message : m.home_usage_load_failed();
+        loadedAt = Date.now();
+        error = m.home_usage_load_failed();
         break;
       }
     }
@@ -161,6 +189,20 @@
           <div><dt>{m.home_usage_model_count()}</dt><dd>{models.length}</dd></div>
           <div><dt>{m.home_usage_top_model()}</dt><dd>{models[0] ? (models[0].label ?? models[0].key) : '—'}</dd></div>
         </dl>
+        {#if calendar}
+          <p class="note">{calendar.title}</p>
+          <div class="cal">
+            {#each calendar.weeks as week, wi (wi)}
+              <div class="week">
+                {#each week as c (c.k)}
+                  <span class="cell" class:hidden={!c.visible} title={c.tip} aria-label={c.visible ? c.tip : undefined}
+                    aria-hidden={c.visible ? undefined : 'true'}
+                    style:background={c.v > 0 ? `color-mix(in srgb, var(--accent) ${Math.round(c.level * 100)}%, transparent)` : undefined}></span>
+                {/each}
+              </div>
+            {/each}
+          </div>
+        {/if}
       {/if}
 
       {#if !loading && !error && !empty && totals}
@@ -182,7 +224,12 @@
   .val { font-variant-numeric: tabular-nums; color: var(--text-primary); }
   .chev { flex: none; transition: transform 0.15s; }
   .chev.open { transform: rotate(180deg); }
+  .cal { display: flex; gap: 3px; overflow-x: auto; padding-bottom: 2px; }
+  .week { display: flex; flex-direction: column; gap: 3px; }
+  .cell { width: 11px; height: 11px; flex: none; border-radius: 2px; background: var(--fill-subtle); }
+  .cell.hidden { visibility: hidden; }
   .body {
+    min-height: min(260px, 50dvh); max-height: min(50dvh, 340px); overflow-y: auto;
     display: flex; flex-direction: column; gap: var(--space-2); padding: var(--space-3);
     border: 1px solid var(--border-subtle, var(--fill-subtle)); border-radius: var(--radius-lg);
   }

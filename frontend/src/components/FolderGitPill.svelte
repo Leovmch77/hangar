@@ -23,6 +23,7 @@
   async function load() {
     const mine = ++seq;
     loading = true;
+    busy = null;
     failed = false;
     git = null;
     note = null;
@@ -93,18 +94,21 @@
     if (busy) return;
     busy = action;
     note = null;
+    const mine = ++seq;
     try {
-      git = await folderGitActionForServer(server, cwd, action, root);
+      const g = await folderGitActionForServer(server, cwd, action, root);
+      if (mine !== seq) return;
+      git = g;
       note = {
         kind: 'ok',
         text: action === 'fetch'
           ? m.native_folder_git_fetch_done()
-          : m.native_folder_git_pull_done({ upstream: git.upstream ?? '' }),
+          : m.native_folder_git_pull_done({ upstream: g.upstream ?? '' }),
       };
     } catch (e) {
-      note = { kind: 'err', text: errText(e) };
+      if (mine === seq) note = { kind: 'err', text: errText(e) };
     } finally {
-      busy = null;
+      if (mine === seq) busy = null;
     }
   }
 </script>
@@ -140,7 +144,8 @@
       </div>
       {#if note}
         <p class="help" class:err={note.kind === 'err'} role="alert">{note.text}</p>
-      {:else if pullBlock}
+      {/if}
+      {#if pullBlock}
         <p class="help warn" role="alert">{pullBlock}</p>
       {/if}
     {:else if git}
