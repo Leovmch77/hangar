@@ -1,13 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Pressable, Text } from 'react-native';
-import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { parseStatusLine, getPiModels, getKimiModels, getCodexModels, setModelEffort, setPiModel, setKimiModel, setCodexModel } from '@hangar/core';
 import { chatStore } from '../../stores/chat';
 import { useSessions } from '../../stores/sessions';
 import * as m from '../../paraglide/messages';
 import { PillMenu, type PillMenuItem } from './PillMenu';
 import { pillLabels, semEsforco } from './pills';
-import { superficie } from '../../theme/superficie';
+import { SettingRow } from './SettingRow';
 
 const CLAUDE_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max', 'ultracode'];
 
@@ -17,7 +15,6 @@ interface Props {
 }
 
 export function EffortPill({ serverId, name }: Props) {
-  const { theme } = useUnistyles();
   const chat = chatStore(serverId, name);
   const statusLine = chat.use((s) => s.statusLine);
   const statusFields = useMemo(() => parseStatusLine(statusLine), [statusLine]);
@@ -48,7 +45,7 @@ export function EffortPill({ serverId, name }: Props) {
 
   const display = useMemo(() => {
     if (tempError) return tempError;
-    return pillLabels(statusFields, { effort: chosenEffort }).effort ?? m.composer_nivel();
+    return pillLabels(statusFields, { effort: chosenEffort }).effort ?? '—';
   }, [statusFields, chosenEffort, tempError]);
 
   const load = useCallback(async () => {
@@ -137,16 +134,7 @@ export function EffortPill({ serverId, name }: Props) {
 
   return (
     <>
-      <Pressable
-        onPress={() => setOpen(true)}
-        style={[styles.pill, { backgroundColor: superficie(theme, 0.8), borderColor: theme.tokens.border.subtle }]}
-        accessibilityRole="button"
-        accessibilityLabel={m.composer_nivel()}
-      >
-        <Text style={[styles.pillText, { color: theme.tokens.text.primary }]} numberOfLines={1}>
-          {display}
-        </Text>
-      </Pressable>
+      <SettingRow label={m.composer_nivel()} value={display} onPress={() => setOpen(true)} />
       <PillMenu
         open={open}
         onClose={() => setOpen(false)}
@@ -160,18 +148,3 @@ export function EffortPill({ serverId, name }: Props) {
     </>
   );
 }
-
-const styles = StyleSheet.create((theme) => ({
-  pill: {
-    borderWidth: 1,
-    borderRadius: theme.base.radius.full,
-    paddingHorizontal: theme.base.space[2],
-    paddingVertical: 6,
-    minHeight: 32,
-    justifyContent: 'center',
-  },
-  pillText: {
-    fontSize: theme.base.text.xs,
-    fontWeight: '600',
-  },
-}));

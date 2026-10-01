@@ -5,6 +5,7 @@ import { useLocalSearchParams } from 'expo-router';
 import { getLimits, resetsIn } from '@hangar/core';
 import type { SessionLimits, RateLimitWindow } from '@hangar/core';
 import * as m from '../../../../src/paraglide/messages';
+import { superficie } from '../../../../src/theme/superficie';
 
 export default function CodexLimitsSheet() {
   const { theme } = useUnistyles();
@@ -58,13 +59,13 @@ export default function CodexLimitsSheet() {
       ) : (
         <ScrollView contentContainerStyle={styles.list}>
           {limits.primary ? (
-            <View style={[styles.row, { backgroundColor: theme.tokens.bg.surface }]}>
+            <View style={[styles.row, { backgroundColor: superficie(theme) }]}>
               <Text style={[styles.rowLabel, { color: theme.tokens.text.primary }]}>{m.codex_limite_principal()}</Text>
               <Text style={[styles.rowValue, { color: theme.tokens.text.secondary }]}>{label(limits.primary)}</Text>
             </View>
           ) : null}
           {limits.secondary ? (
-            <View style={[styles.row, { backgroundColor: theme.tokens.bg.surface }]}>
+            <View style={[styles.row, { backgroundColor: superficie(theme) }]}>
               <Text style={[styles.rowLabel, { color: theme.tokens.text.primary }]}>{m.codex_limite_secundario()}</Text>
               <Text style={[styles.rowValue, { color: theme.tokens.text.secondary }]}>{label(limits.secondary)}</Text>
             </View>

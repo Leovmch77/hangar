@@ -9,6 +9,8 @@ import { PlanBar } from './PlanBar';
 import { PillMenu, type PillMenuItem } from '../pills/PillMenu';
 import { currentIndex, taskMark } from './planPanel';
 import * as m from '../../paraglide/messages';
+import { Icon } from '../../ui/Icon';
+import { superficie } from '../../theme/superficie';
 
 interface Props {
   session: SessionInfo | null | undefined;
@@ -179,7 +181,7 @@ export function PlanPanel({ session, name, server }: Props) {
                       <Text style={[styles.stepTitle, { color: s.done ? theme.tokens.text.muted : theme.tokens.text.secondary }]} numberOfLines={1}>
                         {s.title}
                       </Text>
-                      {s.manual ? <Text style={styles.manual}>🙋</Text> : null}
+                      {s.manual ? <View style={styles.manual}><Icon name="Hand" size={12} color={theme.tokens.text.muted} /></View> : null}
                     </View>
                   ))}
                 </View>
@@ -190,7 +192,7 @@ export function PlanPanel({ session, name, server }: Props) {
       ) : <Text style={[styles.muted, { color: theme.tokens.text.muted }]}>{m.erro_sem_plano_ativo()}</Text>}
 
       {showMd && detail ? (
-        <ScrollView style={[styles.mdBox, { borderColor: theme.tokens.border.subtle, backgroundColor: theme.tokens.bg.surface }]} contentContainerStyle={styles.mdContent}>
+        <ScrollView style={[styles.mdBox, { borderColor: theme.tokens.border.subtle, backgroundColor: superficie(theme) }]} contentContainerStyle={styles.mdContent}>
           <EnrichedMarkdownText markdown={detail.markdown} markdownStyle={mdStyle} flavor="github" />
         </ScrollView>
       ) : null}
@@ -244,7 +246,7 @@ const styles = StyleSheet.create((theme) => ({
   stepRow: { flexDirection: 'row', alignItems: 'baseline', gap: theme.base.space[1], paddingVertical: 2 },
   stepDone: { opacity: 0.7 },
   stepTitle: { flex: 1, fontSize: 11, minWidth: 0 },
-  manual: { fontSize: 11 },
+  manual: { justifyContent: 'center' },
   mdBox: { maxHeight: 260, borderWidth: 1, borderRadius: theme.base.radius.md, marginTop: theme.base.space[2] },
   mdContent: { padding: theme.base.space[2] },
 }));

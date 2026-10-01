@@ -15,6 +15,7 @@ import { AgentDetailView } from '../../../../src/features/activity/AgentDetailVi
 import { SubagentLive } from '../../../../src/features/activity/SubagentLive';
 import { PlanPanel } from '../../../../src/features/plan/PlanPanel';
 import * as m from '../../../../src/paraglide/messages';
+import { superficie } from '../../../../src/theme/superficie';
 
 type Level = 'list' | 'workflow' | 'agent' | 'subagent';
 
@@ -250,7 +251,7 @@ export default function ActivitySheet() {
                           <Text style={[styles.agentDesc, { color: theme.tokens.text.primary }]} numberOfLines={1}>
                             {a.description}
                           </Text>
-                          {a.subagentType ? <Text style={[styles.tag, { color: theme.tokens.text.secondary, backgroundColor: theme.tokens.bg.elevated }]}>{a.subagentType}</Text> : null}
+                          {a.subagentType ? <Text style={[styles.tag, { color: theme.tokens.text.secondary, backgroundColor: superficie(theme, 0.8) }]}>{a.subagentType}</Text> : null}
                           {a.model ? <Text style={[styles.tag, styles.tagMuted, { color: theme.tokens.text.muted }]}>{a.model}</Text> : null}
                         </View>
                         {sub ? (
@@ -277,7 +278,7 @@ export default function ActivitySheet() {
                         <Text style={[styles.agentDesc, { color: theme.tokens.text.primary }]} numberOfLines={1}>
                           {tituloDoSub(s2)}
                         </Text>
-                        {s2.agentType ? <Text style={[styles.tag, { color: theme.tokens.text.secondary, backgroundColor: theme.tokens.bg.elevated }]}>{s2.agentType}</Text> : null}
+                        {s2.agentType ? <Text style={[styles.tag, { color: theme.tokens.text.secondary, backgroundColor: superficie(theme, 0.8) }]}>{s2.agentType}</Text> : null}
                       </View>
                       <Text style={[styles.agentNow, { color: theme.tokens.text.muted }]} numberOfLines={1}>
                         {m.atividade_chamadas({ n: s2.toolCalls })}

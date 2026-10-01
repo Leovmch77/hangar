@@ -2,6 +2,7 @@ import { Pressable, Text, View } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import type { WorkflowSummary } from '@hangar/core';
 import * as m from '../../paraglide/messages';
+import { superficie } from '../../theme/superficie';
 
 interface Props {
   workflows: WorkflowSummary[];
@@ -23,11 +24,11 @@ export function WorkflowList({ workflows, onSelect }: Props) {
         <Pressable
           key={w.runId}
           onPress={() => onSelect(w.runId)}
-          style={[styles.card, { backgroundColor: theme.tokens.bg.surface, borderColor: theme.tokens.border.subtle }]}
+          style={[styles.card, { backgroundColor: superficie(theme), borderColor: theme.tokens.border.subtle }]}
           accessibilityRole="button"
           accessibilityLabel={w.name}
         >
-          <View style={[styles.icon, { backgroundColor: w.running ? 'transparent' : theme.tokens.bg.elevated }]}>
+          <View style={[styles.icon, { backgroundColor: w.running ? 'transparent' : superficie(theme, 0.8) }]}>
             <Text style={[styles.iconText, { color: w.running ? theme.tokens.accent.base : theme.tokens.status.success }]}>{w.running ? '◐' : '✓'}</Text>
           </View>
           <View style={styles.body}>
@@ -39,7 +40,7 @@ export function WorkflowList({ workflows, onSelect }: Props) {
               {w.phaseCount ? ` · ${w.phaseCount} ${m.atividade_fases_curto()}` : ''}
             </Text>
           </View>
-          <View style={[styles.badge, { backgroundColor: theme.tokens.bg.elevated }]}>
+          <View style={[styles.badge, { backgroundColor: superficie(theme, 0.8) }]}>
             <Text style={[styles.badgeText, { color: w.running ? theme.tokens.accent.base : theme.tokens.text.muted }]}>{w.running ? m.atividade_rodando() : m.atividade_concluido()}</Text>
           </View>
           <Text style={[styles.chevron, { color: theme.tokens.text.muted }]}>›</Text>

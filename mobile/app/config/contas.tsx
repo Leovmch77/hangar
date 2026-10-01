@@ -8,6 +8,7 @@ import { Linha } from '../../src/features/config/Linha';
 import { CodexContaLogin } from '../../src/features/config/CodexContaLogin';
 import { useServers } from '../../src/stores/servers';
 import * as m from '../../src/paraglide/messages';
+import { superficie } from '../../src/theme/superficie';
 
 type CredentialGroup = ReturnType<typeof credentialGroup>;
 type IdentityRow = { key: string; group: CredentialGroup; title: string; description: string; account: CodexAccount | null };
@@ -227,7 +228,7 @@ export default function Contas() {
 const styles = StyleSheet.create((theme) => ({
   title: { fontSize: theme.base.text.xl, fontWeight: '600', color: theme.tokens.text.primary },
   description: { fontSize: theme.base.text.sm, color: theme.tokens.text.secondary },
-  server: { gap: 2, padding: theme.base.space[3], borderRadius: theme.base.radius.md, backgroundColor: theme.tokens.bg.surface },
+  server: { gap: 2, padding: theme.base.space[3], borderRadius: theme.base.radius.md, backgroundColor: superficie(theme) },
   serverLabel: { fontSize: theme.base.text.xs, color: theme.tokens.text.muted },
   serverName: { fontSize: theme.base.text.base, fontWeight: '600', color: theme.tokens.text.primary },
   serverUrl: { fontFamily: theme.base.fontMono, fontSize: theme.base.text.xs, color: theme.tokens.text.muted },
@@ -236,7 +237,7 @@ const styles = StyleSheet.create((theme) => ({
   actions: { flexDirection: 'row', alignItems: 'center' },
   action: { minHeight: 44, justifyContent: 'center', paddingHorizontal: theme.base.space[2] },
   actionText: { color: theme.tokens.accent.base, fontSize: theme.base.text.xs, fontWeight: '600' },
-  login: { gap: theme.base.space[3], padding: theme.base.space[3], borderRadius: theme.base.radius.lg, backgroundColor: theme.tokens.bg.surface },
+  login: { gap: theme.base.space[3], padding: theme.base.space[3], borderRadius: theme.base.radius.lg, backgroundColor: superficie(theme) },
   loginHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: theme.base.space[2] },
   loginTitle: { flex: 1, fontSize: theme.base.text.lg, fontWeight: '600', color: theme.tokens.text.primary },
   close: { color: theme.tokens.accent.base, fontSize: theme.base.text.sm },

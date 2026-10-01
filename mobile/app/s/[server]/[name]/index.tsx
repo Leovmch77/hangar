@@ -14,6 +14,7 @@ import { PlanChip } from '../../../../src/features/plan/PlanChip';
 import { MessageList } from '../../../../src/chat/MessageList';
 import { pararTts } from '../../../../src/chat/BubbleActions';
 import { Composer } from '../../../../src/chat/Composer';
+import { ComposerStatusLine } from '../../../../src/chat/ComposerStatusLine';
 import { OrqFooter } from '../../../../src/chat/OrqFooter';
 import { TuiPill } from '../../../../src/chat/TuiPill';
 import { RecarregarPill } from '../../../../src/chat/RecarregarPill';
@@ -21,14 +22,12 @@ import { MoreSheet } from '../../../../src/chat/MoreSheet';
 import { OptionButtons } from '../../../../src/chat/OptionButtons';
 import { PendingPlan } from '../../../../src/chat/PendingPlan';
 import { SessionProblem } from '../../../../src/chat/SessionProblem';
-import { StatsStrip } from '../../../../src/chat/StatsStrip';
 import { SessionPickerSheet } from '../../../../src/chat/SessionPickerSheet';
-import { pendingAskFromEvents, askPayloadFromToolUse, fetchSessionsForServer, isOrq, parseStatusLine, selectOptionForServer, interrupt, recarregarSessao } from '@hangar/core';
+import { pendingAskFromEvents, askPayloadFromToolUse, fetchSessionsForServer, isOrq, selectOptionForServer, interrupt, recarregarSessao } from '@hangar/core';
 import type { Provider, SessionInfo } from '@hangar/core';
 import * as m from '../../../../src/paraglide/messages';
 
 // Tela de chat de uma sessão: histórico janelado + SSE ao vivo (store chat.ts).
-// O composer real entra na Task 9; aqui só o placeholder sticky de 56px.
 export default function ChatScreen() {
   const router = useRouter();
   const params = useLocalSearchParams<{ server: string; name: string; askFallback?: string }>();
@@ -83,8 +82,6 @@ export default function ChatScreen() {
   const preview = chat.use((s) => s.preview);
   const previewMd = chat.use((s) => s.previewMd);
   const previewFull = chat.use((s) => s.previewFull);
-  const statusLine = chat.use((s) => s.statusLine);
-  const stats = chat.use((s) => s.stats);
   const loading = chat.use((s) => s.loading);
   const error = chat.use((s) => s.error);
   const olderFailed = chat.use((s) => s.olderFailed);
@@ -313,8 +310,6 @@ export default function ChatScreen() {
         }}
         onMore={() => setMoreOpen(true)}
         onTitlePress={() => setPickerOpen(true)}
-        onTerminal={orq ? undefined : () => router.push(`/s/${serverId}/${name}/terminal` as never)}
-        contextPct={parseStatusLine(statusLine)?.ctxPct ?? null}
         chipPlan={planSession ? <PlanChip session={planSession} onPress={() => router.push(`/s/${serverId}/${name}/activity` as never)} /> : null}
         chipLoop={
           stateEvent?.loop_status ? (
@@ -328,6 +323,7 @@ export default function ChatScreen() {
         }
       />
       <MoreSheet open={moreOpen} onClose={() => setMoreOpen(false)} serverId={serverId} name={name} orq={orq}
+                 provider={provider} semTerminal={!!(stateEvent?.headless ?? currentSession?.headless)} temPergunta={!!askPayload}
                  recarregar={recarregavel ? { bloqueado: recarregarBloqueado, onPress: recarregar } : undefined} />
       <SessionPickerSheet open={pickerOpen} onClose={() => setPickerOpen(false)} atual={name} />
       {/* Lista e Composer dentro do mesmo KAV: ambos sobem com o teclado e a lista termina acima do composer */}
@@ -404,7 +400,6 @@ export default function ChatScreen() {
               preview={preview}
               previewMd={previewMd}
               previewFull={previewFull}
-              statusLine={statusLine}
               session={currentSession}
               olderFailed={olderFailed}
               onLoadOlder={chat.loadOlder}
@@ -423,7 +418,6 @@ export default function ChatScreen() {
             </Text>
           </View>
         ) : null}
-        {!servidorSumiu && !codexPreThread ? <StatsStrip stats={stats} /> : null}
         {!servidorSumiu && !askOpen && askPayload?.provider === 'codex' ? (
           <Text style={styles.retry} onPress={() => chat.openAsk(askPayload)} accessibilityRole="button">
             {m.ask_perguntas()}
@@ -434,9 +428,15 @@ export default function ChatScreen() {
         {!servidorSumiu && !codexPreThread && fetchedSession !== null
           ? orq
             ? <OrqFooter serverId={serverId} arbiter={currentSession?.orq_arbiter} />
-            : <Composer key={rota} serverId={serverId} name={name} draft={draft?.route === rota ? draft.text : undefined}
-                        firstInputId={firstInput?.id} firstInputSent={firstInput?.phase === 'sent'} sessionProvider={provider}
-                        onStop={handleStop} stopping={stopping} />
+            : (
+              <>
+                <Composer key={rota} serverId={serverId} name={name} draft={draft?.route === rota ? draft.text : undefined}
+                          firstInputId={firstInput?.id} firstInputSent={firstInput?.phase === 'sent'} sessionProvider={provider}
+                          onStop={handleStop} stopping={stopping} />
+                {/* Linha de status do app de PC, colada embaixo da caixa: abre a folha de Uso. */}
+                <ComposerStatusLine key={`status:${rota}`} serverId={serverId} name={name} />
+              </>
+            )
           : null}
       </KeyboardAvoidingView>
     </Screen>

@@ -1,4 +1,4 @@
-import { memo, useState } from 'react';
+import { memo, useState, type ReactNode } from 'react';
 import { Pressable, Text, View } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { Image } from 'expo-image';
@@ -7,54 +7,63 @@ import * as m from '../paraglide/messages';
 import { BubbleActions } from './BubbleActions';
 import { superficie } from '../theme/superficie';
 
-// Bolha do usuário: alinhada à direita, cor bubbleUser do tema (espelho do app.css).
-// Se parseImageMessage(text) não nulo → legenda + miniaturas (uploadUrl/fileUrl).
+// Bolha do usuário: pequena, à direita, no fundo superficie(0.8) — o mesmo degrau da bolha do nativo,
+// e por isso acompanha Transparência e Solidez. Se parseImageMessage(text) não nulo → legenda +
+// miniaturas. As ações (copiar, compartilhar) não ficam à mostra: o toque longo abre a linha embaixo.
 export const UserBubble = memo(function UserBubble({ text, sessionName, ts }: { text: string; sessionName?: string; ts?: number | null }) {
   const { theme } = useUnistyles();
   const voice = parseRealtimeDelegation(text);
   const [showOriginal, setShowOriginal] = useState(false);
+  const [acoes, setAcoes] = useState(false);
   const parsed = parseImageMessage(text);
   const hasImages = !!parsed && !!sessionName;
   const caption = hasImages ? parsed!.caption : '';
   const filenames = hasImages ? parsed!.filenames : [];
+  const alternar = () => setAcoes((v) => !v);
+
+  // O texto não é `selectable`: no Android a seleção come o toque longo que abre as ações, e copiar
+  // já está lá.
+  const bolha = (conteudo: ReactNode, textoAcoes: string, voz = false) => (
+    <View style={[styles.col, voz && styles.colVoz]}>
+      <Pressable
+        onLongPress={alternar}
+        delayLongPress={350}
+        style={[styles.bubble, voz && styles.voice]}
+        accessibilityActions={[{ name: 'longpress', label: m.navbar_mais_acoes() }]}
+        onAccessibilityAction={(e) => { if (e.nativeEvent.actionName === 'longpress') alternar(); }}
+      >
+        {conteudo}
+      </Pressable>
+      {acoes ? <BubbleActions text={textoAcoes} ts={ts} ouvir={false} defaultOpen align={voz ? 'start' : 'end'} /> : null}
+    </View>
+  );
 
   if (voice) {
-    return (
-      <View style={[styles.bubble, styles.voice]}>
-        <Text style={styles.voiceLabel}>{m.voice_message_origin()}</Text>
-        <Text style={[styles.txt, { color: theme.tokens.text.primary }]} selectable>{voice.input}</Text>
+    return bolha(
+      <>
+        <Text style={[styles.voiceLabel, { color: theme.tokens.text.secondary }]}>{m.voice_message_origin()}</Text>
+        <Text style={[styles.txt, { color: theme.tokens.text.primary }]}>{voice.input}</Text>
         <Pressable accessibilityRole="button" accessibilityState={{ expanded: showOriginal }}
           onPress={() => setShowOriginal(value => !value)} style={styles.detailsButton}>
           <Text style={{ color: theme.tokens.text.secondary }}>{m.voice_message_original()}</Text>
         </Pressable>
-        {showOriginal ? <Text style={[styles.txt, { color: theme.tokens.text.secondary }]} selectable>{text}</Text> : null}
-        <BubbleActions text={voice.input} ts={ts} ouvir={false} />
-      </View>
+        {showOriginal ? <Text style={[styles.txt, { color: theme.tokens.text.secondary }]}>{text}</Text> : null}
+      </>,
+      voice.input,
+      true,
     );
   }
 
   // Se há imagens válidas, exibe legenda + thumbnails; senão fallback texto cru
   if (hasImages) {
-    // filenames vazios = foto única absorvida como anexo real: mostra só legenda (fallback)
+    // filenames vazios = foto única absorvida como anexo real: mostra só a legenda, ou o texto original
     if (filenames.length === 0) {
-      // Ainda é mensagem de imagem, mas sem miniatura disponível: mostra legenda se houver, senão texto original
       const display = caption || text;
-      return (
-        <View style={styles.bubble}>
-          <Text style={[styles.txt, { color: theme.tokens.text.primary }]} selectable>
-            {display}
-          </Text>
-          <BubbleActions text={display} ts={ts} ouvir={false} />
-        </View>
-      );
+      return bolha(<Text style={[styles.txt, { color: theme.tokens.text.primary }]}>{display}</Text>, display);
     }
-    return (
-      <View style={styles.bubble}>
-        {caption ? (
-          <Text style={[styles.txt, { color: theme.tokens.text.primary }]} selectable>
-            {caption}
-          </Text>
-        ) : null}
+    return bolha(
+      <>
+        {caption ? <Text style={[styles.txt, { color: theme.tokens.text.primary }]}>{caption}</Text> : null}
         <View style={styles.thumbs}>
           {filenames.map((fn) => {
             const uri = uploadUrlNative(sessionName!, fn);
@@ -62,37 +71,35 @@ export const UserBubble = memo(function UserBubble({ text, sessionName, ts }: { 
             return <Image key={fn} source={{ uri, headers }} style={styles.thumb} contentFit="cover" transition={150} />;
           })}
         </View>
-        {/* Se a legenda estava vazia e o texto original era só marcador, já mostramos thumbs */}
-        <BubbleActions text={caption || text} ts={ts} ouvir={false} />
-      </View>
+      </>,
+      caption || text,
     );
   }
 
-  return (
-    <View style={styles.bubble}>
-      <Text style={[styles.txt, { color: theme.tokens.text.primary }]} selectable>
-        {text}
-      </Text>
-      <BubbleActions text={text} ts={ts} ouvir={false} />
-    </View>
-  );
+  return bolha(<Text style={[styles.txt, { color: theme.tokens.text.primary }]}>{text}</Text>, text);
 });
 
 const styles = StyleSheet.create((theme) => ({
-  bubble: {
+  col: {
     alignSelf: 'flex-end',
-    maxWidth: '85%',
-    backgroundColor: theme.tokens.bubbleUser,
-    borderRadius: theme.base.radius.lg,
-    paddingHorizontal: theme.base.space[3],
+    alignItems: 'flex-end',
+    maxWidth: '82%',
+    gap: theme.base.space[1],
+  },
+  colVoz: { alignSelf: 'flex-start', alignItems: 'flex-start' },
+  bubble: {
+    backgroundColor: superficie(theme, 0.8),
+    borderRadius: 14,
+    paddingHorizontal: 13,
     paddingVertical: theme.base.space[2],
     gap: theme.base.space[2],
   },
   txt: {
     fontSize: theme.base.text.base,
   },
-  voice: { alignSelf: 'flex-start', borderWidth: 1, borderColor: theme.tokens.accent.base },
-  voiceLabel: { color: theme.tokens.accent.base, fontWeight: '600', fontSize: theme.base.text.sm },
+  // Delegação por voz: borda fina em vez de cor, que fica para estado e aviso.
+  voice: { borderWidth: 1, borderColor: theme.tokens.border.default },
+  voiceLabel: { fontWeight: '600', fontSize: theme.base.text.sm },
   detailsButton: { minHeight: 44, justifyContent: 'center' },
   thumbs: {
     flexDirection: 'row',

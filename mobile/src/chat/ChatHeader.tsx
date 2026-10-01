@@ -1,25 +1,31 @@
 import { Pressable, Text, View } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { useLocalSearchParams } from 'expo-router';
-import { cwdParts, type State } from '@hangar/core';
+import { cwdParts, rotuloEstado, type State, type ThemeTokens } from '@hangar/core';
 import * as m from '../paraglide/messages';
-import { StatePill } from '../features/sessions/StatePill';
-import { ContextRing } from './ContextRing';
 import { Icon } from '../ui/Icon';
+import { HangarMark } from '../ui/HangarMark';
+import { superficie } from '../theme/superficie';
 import { useSessions } from '../stores/sessions';
 import { useServers } from '../stores/servers';
 
-// Cabeçalho do chat, na ordem da PWA no celular: voltar · título+chevron · anel · pílula de
-// estado · terminal · ⋯. O título é o que cede espaço primeiro, então o chip do plano fica na
-// linha de baixo — na mesma linha ele espremia o nome da sessão até as reticências.
+const PILL: Record<State, keyof ThemeTokens['pill']> = {
+  working: 'working',
+  idle: 'idle',
+  awaiting_input: 'input',
+  dead: 'dead',
+};
+
+// Cabeçalho do chat no layout do nativo: ‹ · marca na cor do estado · nome e "pasta @ servidor" ·
+// pílula de estado · ⋯. A cor fica só na marca e no ponto da pílula, que é onde ela diz algo; o resto
+// é texto. O anel de contexto mora no composer e o terminal no ⋯. Plano e loop descem para uma linha
+// própria: na mesma linha espremiam o nome da sessão até as reticências.
 export function ChatHeader({
   name,
   state,
   onBack,
   onMore,
   onTitlePress,
-  onTerminal,
-  contextPct,
   chipLoop,
   chipPlan,
 }: {
@@ -28,8 +34,6 @@ export function ChatHeader({
   onBack: () => void;
   onMore: () => void;
   onTitlePress: () => void;
-  onTerminal?: () => void;
-  contextPct?: number | null;
   chipLoop?: React.ReactNode;
   chipPlan?: React.ReactNode;
 }) {
@@ -40,7 +44,8 @@ export function ChatHeader({
   const row = useSessions((s) => s.rows.find((r) => r.serverId === serverId && r.name === name) ?? null);
   const serverLabel = useServers((s) => s.servers.find((x) => x.id === serverId)?.label) ?? row?.serverLabel ?? '';
   const pasta = row?.cwd ? cwdParts(row.cwd).base : '';
-  const destino = [serverLabel, pasta].filter(Boolean).join(' · ');
+  const destino = pasta && serverLabel ? `${pasta} @ ${serverLabel}` : pasta || serverLabel;
+  const corEstado = (state && theme.tokens.pill?.[PILL[state]]?.fg) || theme.tokens.text.muted;
   return (
     <View style={styles.wrap}>
       <View style={styles.bar}>
@@ -51,40 +56,37 @@ export function ChatHeader({
           accessibilityRole="button"
           accessibilityLabel={m.chat_voltar_sessoes()}
         >
-          <Icon name="ChevronLeft" size={24} color={theme.tokens.accent.base} />
+          <Icon name="ChevronLeft" size={22} color={theme.tokens.text.primary} />
         </Pressable>
         <Pressable
           onPress={onTitlePress}
           style={({ pressed }) => [styles.titulo, pressed && styles.tocado]}
           accessibilityRole="button"
-          // Nome e destino completos para o leitor de tela; a ação vai na dica.
-          accessibilityLabel={[name, serverLabel, row?.cwd].filter(Boolean).join(', ')}
+          // Nome, estado e destino completos para o leitor de tela; a ação vai na dica.
+          accessibilityLabel={[name, state ? rotuloEstado(state) : '', serverLabel, row?.cwd].filter(Boolean).join(', ')}
           accessibilityHint={m.sessao_trocar_de()}
         >
-          <View style={styles.nomeLinha}>
+          <HangarMark size={18} color={corEstado} />
+          <View style={styles.textos}>
             <Text style={[styles.name, { color: theme.tokens.text.primary }]} numberOfLines={1}>
               {name}
             </Text>
-            <Icon name="ChevronDown" size={14} color={theme.tokens.text.muted} />
+            {destino ? (
+              <Text style={[styles.destino, { color: theme.tokens.text.muted }]} numberOfLines={1}>
+                {destino}
+              </Text>
+            ) : null}
           </View>
-          {destino ? (
-            <Text style={[styles.destino, { color: theme.tokens.text.secondary }]} numberOfLines={1}>
-              {destino}
-            </Text>
-          ) : null}
         </Pressable>
-        <ContextRing pct={contextPct} />
-        {state ? <StatePill state={state} /> : null}
-        {onTerminal ? (
-          <Pressable
-            onPress={onTerminal}
-            hitSlop={8}
-            style={styles.more}
-            accessibilityRole="button"
-            accessibilityLabel={m.term_titulo()}
-          >
-            <Icon name="Terminal" size={20} color={theme.tokens.text.primary} />
-          </Pressable>
+        {/* "Pronta" é o estado normal e não diz nada: a marca já mostra. Trabalhando, aguardando ou
+            encerrada ganham a pílula. */}
+        {state && state !== 'idle' ? (
+          <View style={[styles.pill, { backgroundColor: superficie(theme, 0.8) }]}>
+            <View style={[styles.ponto, { backgroundColor: corEstado }]} />
+            <Text style={[styles.pillTxt, { color: theme.tokens.text.primary }]} numberOfLines={1}>
+              {rotuloEstado(state)}
+            </Text>
+          </View>
         ) : null}
         <Pressable
           onPress={onMore}
@@ -93,7 +95,7 @@ export function ChatHeader({
           accessibilityRole="button"
           accessibilityLabel={m.navbar_mais_acoes()}
         >
-          <Icon name="Ellipsis" size={20} color={theme.tokens.text.primary} />
+          <Icon name="Ellipsis" size={18} color={theme.tokens.text.secondary} />
         </Pressable>
       </View>
       {chipPlan || chipLoop ? (
@@ -114,40 +116,44 @@ const styles = StyleSheet.create((theme) => ({
   bar: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: theme.base.space[2],
-    paddingHorizontal: theme.base.space[2],
+    gap: theme.base.space[1],
+    paddingHorizontal: theme.base.space[1],
     paddingVertical: theme.base.space[1],
-    minHeight: 44,
+    minHeight: 48,
   },
+  // Linha discreta de plano e loop, alinhada ao nome (depois do ‹ e da marca).
   chips: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: theme.base.space[2],
-    paddingHorizontal: theme.base.space[2],
+    paddingLeft: 78, // coluna do nome: recuo + ‹ + marca + vãos
+    paddingRight: theme.base.space[2],
     paddingBottom: theme.base.space[1],
   },
   titulo: {
     flex: 1,
     flexShrink: 1,
     minWidth: 0,
-    justifyContent: 'center',
-    minHeight: 44,
-    borderRadius: theme.base.radius.md,
-  },
-  nomeLinha: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 4,
+    gap: theme.base.space[2],
+    minHeight: 44,
+    paddingHorizontal: theme.base.space[1],
+    borderRadius: theme.base.radius.md,
+  },
+  textos: {
+    flex: 1,
     minWidth: 0,
+    justifyContent: 'center',
   },
   destino: {
-    fontSize: theme.base.text.xs,
+    fontSize: theme.base.text.xxs,
   },
   tocado: {
     backgroundColor: theme.tokens.bg.hover,
   },
   back: {
-    width: 44,
+    width: 40,
     height: 44,
     alignItems: 'center',
     justifyContent: 'center',
@@ -155,7 +161,23 @@ const styles = StyleSheet.create((theme) => ({
   name: {
     fontSize: theme.base.text.base,
     fontWeight: '600',
-    flexShrink: 1,
+  },
+  pill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    paddingHorizontal: 9,
+    paddingVertical: 3,
+    borderRadius: theme.base.radius.full,
+    flexShrink: 0,
+  },
+  ponto: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+  },
+  pillTxt: {
+    fontSize: theme.base.text.xxs,
   },
   more: {
     width: 44,

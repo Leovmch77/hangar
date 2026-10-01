@@ -2,6 +2,7 @@ import { Pressable, Text, View, ScrollView } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import type { TreeEntry } from '@hangar/core';
 import * as m from '../../paraglide/messages';
+import { Icon } from '../../ui/Icon';
 
 interface Props {
   entries: TreeEntry[];
@@ -55,7 +56,7 @@ export function FileTree({ entries, abertos, selecionado, onToggle, onPick, list
               accessibilityRole="button"
             >
               <Text style={[styles.chev, { color: theme.tokens.text.muted }]}>{isDir ? (aberta ? '▾' : '▸') : ''}</Text>
-              <Text style={[styles.icon, { color: theme.tokens.text.muted }]}>{isDir ? '📁' : '📄'}</Text>
+              <View style={styles.icon}><Icon name={isDir ? 'Folder' : 'File'} size={13} color={theme.tokens.text.muted} /></View>
               <Text style={[styles.nome, { color: isDir ? theme.tokens.text.primary : theme.tokens.text.secondary }]} numberOfLines={1}>
                 {ent.name}
               </Text>
@@ -110,8 +111,7 @@ const styles = StyleSheet.create((theme) => ({
   },
   icon: {
     width: 14,
-    textAlign: 'center',
-    fontSize: 11,
+    alignItems: 'center',
   },
   nome: {
     flex: 1,

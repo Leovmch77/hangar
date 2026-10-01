@@ -4,12 +4,13 @@ import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import ReanimatedSwipeable, { type SwipeableMethods } from 'react-native-gesture-handler/ReanimatedSwipeable';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import * as Haptics from 'expo-haptics';
-import { cwdParts, isOrq, loopBadge, planBadge, providerTag, relativeTime, rotuloEstado, untrackedReason, type AggSession } from '@hangar/core';
+import { cwdParts, isOrq, loopBadge, planBadge, providerName, relativeTime, rotuloEstado, untrackedReason, type AggSession, type State } from '@hangar/core';
 import { Chip, type Tone } from '../../ui/Chip';
-import { StateDot } from '../../ui/StateDot';
+import { HangarMark } from '../../ui/HangarMark';
 import { Icon } from '../../ui/Icon';
 import { PlanBar } from '../plan/PlanBar';
 import { SessionMenu } from './SessionMenu';
+import { superficie } from '../../theme/superficie';
 import * as m from '../../paraglide/messages';
 
 // LOOP_TONE_COLOR do core é CSS var (`var(--accent)`) — não serve em RN; o tom vira `Chip tone`.
@@ -18,6 +19,15 @@ const TOM_DO_LOOP: Record<'ok' | 'warn' | 'attention' | 'muted', Tone> = {
   warn: 'warning',
   attention: 'error',
   muted: 'neutral',
+};
+
+// A marca é a única pista visual de estado na linha: lê a cor da pílula do tema, que acompanha
+// tema claro/escuro e o acento escolhido na Aparência.
+const PILL_DO_ESTADO: Record<State, 'working' | 'idle' | 'input' | 'dead'> = {
+  working: 'working',
+  idle: 'idle',
+  awaiting_input: 'input',
+  dead: 'dead',
 };
 
 interface Props {
@@ -64,22 +74,26 @@ export function SessionRow({ session: s, mostrarServidor, onPress, onGit, onExcl
   );
   const untracked = s.tracked === false;
   const cwd = cwdParts(s.cwd);
-  const showCwd = !!s.cwd && cwd.base.toLowerCase() !== s.name.toLowerCase();
   const loop = loopBadge(s.loop_status, s.loop_iter, s.loop_max);
   const plan = planBadge(s);
   const pendingQuestions = s.pending_questions ?? 0;
   const sub = s.question ?? (s.state === 'working' ? s.label : null) ?? null;
+  const peers = s.pair_peers ?? [];
+  // o rótulo do grupo (ex.: o ticket) diz mais que o nome do par; sem ele, o par ou o tamanho
+  const pairLabel = peers.length ? (s.pair_task ?? (peers.length === 1 ? peers[0] : String(peers.length + 1))) : null;
+  const corEstado = theme.tokens.pill[PILL_DO_ESTADO[s.state]].fg;
+  const muted = theme.tokens.text.muted;
 
   const acoes = () => (
     <View style={styles.acoes}>
       {s.cwd ? (
-        <Pressable onPress={onGit} style={[styles.acao, { backgroundColor: theme.tokens.accent.base }]} accessibilityRole="button" accessibilityLabel="Git">
-          <Icon name="GitBranch" size={18} color="#fff" />
+        <Pressable onPress={onGit} style={[styles.acao, { backgroundColor: superficie(theme, 0.8) }]} accessibilityRole="button" accessibilityLabel="Git">
+          <Icon name="GitBranch" size={18} color={theme.tokens.text.secondary} />
         </Pressable>
       ) : null}
       {orq ? null : (
-        <Pressable onPress={onExcluir} style={[styles.acao, { backgroundColor: theme.tokens.status.error }]} accessibilityRole="button" accessibilityLabel={m.sessao_excluir_curto()}>
-          <Icon name="Trash2" size={18} color="#fff" />
+        <Pressable onPress={onExcluir} style={[styles.acao, { backgroundColor: superficie(theme, 0.8) }]} accessibilityRole="button" accessibilityLabel={m.sessao_excluir_curto()}>
+          <Icon name="Trash2" size={18} color={theme.tokens.status.error} />
         </Pressable>
       )}
     </View>
@@ -109,13 +123,13 @@ export function SessionRow({ session: s, mostrarServidor, onPress, onGit, onExcl
           // kimi sem id é estado NORMAL pré-1º prompt, e codex sem thread ainda está no startup:
           // a tela da conversa espera o vínculo sem herdar transcript de outra sessão
           disabled={untracked && s.provider !== 'kimi' && s.provider !== 'codex'}
-          style={({ pressed }) => [styles.row, pressed && { backgroundColor: theme.tokens.bg.hover }]}
+          style={({ pressed }) => [styles.row, pressed && { backgroundColor: superficie(theme, 0.8) }]}
           accessibilityRole="button"
           // rótulo composto: um label explícito no pai faz o RN descartar o texto dos filhos, e o
           // estado e a pergunta sumiriam do leitor de tela.
           // Máquina e projeto entram mesmo quando a tela os esconde (lista agrupada, pasta = nome):
           // é o que distingue duas conversas de mesmo nome no leitor de tela.
-          accessibilityLabel={`${s.name}, ${rotuloEstado(s.state)}${pendingQuestions > 0 ? `, ${m.ask_perguntas()}: ${pendingQuestions}` : ''}${sub ? `, ${sub}` : ''}, ${s.serverLabel}${s.cwd ? `, ${cwd.base}` : ''}`}
+          accessibilityLabel={`${s.name}, ${rotuloEstado(s.state)}${pendingQuestions > 0 ? `, ${m.ask_perguntas()}: ${pendingQuestions}` : ''}${sub ? `, ${sub}` : ''}, ${providerName(s.provider)}, ${s.serverLabel}${s.cwd ? `, ${cwd.base}` : ''}${s.branch ? `, ${s.branch}` : ''}`}
           accessibilityActions={acoesA11y}
           onAccessibilityAction={({ nativeEvent }) => {
             if (nativeEvent.actionName === 'rename') onRenomear();
@@ -123,57 +137,66 @@ export function SessionRow({ session: s, mostrarServidor, onPress, onGit, onExcl
             else if (nativeEvent.actionName === 'delete') onExcluir();
           }}
         >
-          <View style={styles.lead}><StateDot state={s.state} /></View>
+          <View style={styles.lead}><HangarMark size={18} color={corEstado} /></View>
           <View style={styles.col}>
-            <View style={styles.linha1}>
+            <View style={styles.linha}>
               <Text style={[styles.nome, { color: theme.tokens.text.primary }]} numberOfLines={1}>{s.name}</Text>
-              {pendingQuestions > 0 ? <Chip tone="warning">{`? ${pendingQuestions}`}</Chip> : null}
-              {orq ? <Chip>{m.orq_row_badge()}</Chip> : providerTag(s.provider) ? <Chip>{providerTag(s.provider)!}</Chip> : null}
-              {untracked ? <Chip tone="warning">{m.sessao_sem_id()}</Chip> : null}
-            </View>
-            {sub ? (
-              <Text
-                style={[styles.sub, { color: s.question ? theme.tokens.status.warning : theme.tokens.text.secondary, fontStyle: s.question ? 'normal' : 'italic' }]}
-                numberOfLines={1}
-              >
-                {sub}
-              </Text>
-            ) : null}
-            {/* Estado e destino (máquina/projeto) numa linha própria, antes do git: em tela estreita
-                ou texto ampliado o ramo comprido empurrava o projeto para fora. */}
-            <View style={styles.meta}>
-              <Text style={[styles.metaTxt, { color: theme.tokens.text.secondary, flexShrink: 0 }]} numberOfLines={1}>{rotuloEstado(s.state)}</Text>
-              {mostrarServidor ? <Text style={[styles.metaTxt, styles.encolhe, { color: s.serverColor }]} numberOfLines={1}>{s.serverLabel}</Text> : null}
-              {showCwd ? (
-                // Ícone no lugar do prefixo: ele truncava justo a última pasta, que é o que
-                // identifica o projeto. O caminho inteiro segue no menu da linha.
-                <View style={styles.cwd}>
-                  <Icon name="Folder" size={11} color={theme.tokens.text.muted} />
-                  <Text style={[styles.metaTxt, styles.mono, styles.encolhe, { color: theme.tokens.text.secondary }]} numberOfLines={1}>
-                    {cwd.base}
-                  </Text>
+              {pairLabel ? (
+                <View style={[styles.tag, { borderColor: theme.tokens.border.default }]}>
+                  <Icon name="Users" size={11} color={muted} />
+                  <Text style={[styles.tagTxt, { color: theme.tokens.text.secondary }]} numberOfLines={1}>{pairLabel}</Text>
                 </View>
               ) : null}
-              <Text style={[styles.metaTxt, { color: theme.tokens.text.muted, marginLeft: 'auto', flexShrink: 0 }]}>{relativeTime(s.last_activity)}</Text>
+              {pendingQuestions > 0 ? <Chip tone="warning">{`? ${pendingQuestions}`}</Chip> : null}
+              {orq ? <Chip>{m.orq_row_badge()}</Chip> : null}
+              {untracked ? <Chip tone="warning">{m.sessao_sem_id()}</Chip> : null}
+              <Text style={[styles.tempo, { color: muted }]} numberOfLines={1}>{relativeTime(s.last_activity)}</Text>
             </View>
-            {s.worktree || s.branch || s.git_added || s.git_removed ? (
-              <View style={styles.meta}>
-                {s.worktree ? <Chip mono>worktree</Chip> : null}
-                {s.branch ? <Text style={[styles.metaTxt, styles.mono, styles.encolhe, { color: theme.tokens.accent.base }]} numberOfLines={1}>⎇ {s.branch}</Text> : null}
-                {s.git_added || s.git_removed ? (
-                  <Text style={[styles.metaTxt, styles.mono]}>
-                    {s.git_added ? <Text style={{ color: theme.tokens.status.success }}>+{s.git_added}</Text> : null}
-                    {s.git_removed ? <Text style={{ color: theme.tokens.status.error }}> −{s.git_removed}</Text> : null}
-                  </Text>
-                ) : null}
-              </View>
-            ) : null}
-            {s.pair_peers?.length || s.limited || loop || plan || s.engine ? (
+            {/* O que a sessão está fazendo: a pergunta (cor de input), a atividade (itálico) ou o estado. */}
+            <Text
+              style={[
+                styles.sub,
+                s.question
+                  ? { color: theme.tokens.pill.input.fg }
+                  : sub
+                    ? { color: theme.tokens.text.secondary, fontStyle: 'italic' }
+                    : { color: muted },
+              ]}
+              numberOfLines={1}
+            >
+              {sub ?? rotuloEstado(s.state)}
+            </Text>
+            {/* Uma linha só, sem quebrar: pasta e ramo encolhem juntos, o diff nunca. */}
+            <View style={styles.meta}>
+              {orq ? null : <Text style={[styles.metaTxt, styles.provedor, { color: theme.tokens.text.secondary }]} numberOfLines={1}>{providerName(s.provider)}</Text>}
+              {mostrarServidor ? <Text style={[styles.metaTxt, styles.encolhe, { color: s.serverColor }]} numberOfLines={1}>{s.serverLabel}</Text> : null}
+              {s.cwd ? (
+                // Ícone no lugar do prefixo: ele truncava justo a última pasta, que é o que
+                // identifica o projeto. O caminho inteiro segue no menu da linha.
+                <View style={styles.par}>
+                  <Icon name="Folder" size={11} color={muted} />
+                  <Text style={[styles.metaTxt, styles.encolhe, { color: muted }]} numberOfLines={1}>{cwd.base}</Text>
+                </View>
+              ) : null}
+              {s.worktree ? <Icon name="FolderGit2" size={11} color={muted} /> : null}
+              {s.branch ? (
+                <View style={styles.par}>
+                  <Icon name="GitBranch" size={11} color={muted} />
+                  <Text style={[styles.metaTxt, styles.mono, styles.encolhe, { color: muted }]} numberOfLines={1}>{s.branch}</Text>
+                </View>
+              ) : null}
+              {s.git_added || s.git_removed ? (
+                <Text style={[styles.metaTxt, styles.mono, styles.fixo]}>
+                  {s.git_added ? <Text style={{ color: theme.tokens.status.success }}>+{s.git_added}</Text> : null}
+                  {s.git_removed ? <Text style={{ color: theme.tokens.status.error }}> −{s.git_removed}</Text> : null}
+                </Text>
+              ) : null}
+            </View>
+            {s.limited || loop || plan || s.engine ? (
               <View style={styles.chips}>
-                {s.pair_peers?.length ? <Chip icon="Users">{s.pair_peers.length === 1 ? s.pair_peers[0] : String(s.pair_peers.length + 1)}</Chip> : null}
                 {s.limited ? <Chip tone="warning" icon="Hourglass">{s.limit_reset ?? ''}</Chip> : null}
                 {loop ? <Chip tone={TOM_DO_LOOP[loop.tone]}>{loop.label}</Chip> : null}
-                {plan ? <Chip tone={plan.complete ? 'success' : 'accent'} icon="ClipboardList">{plan.label}</Chip> : null}
+                {plan ? <Chip tone={plan.complete ? 'success' : 'neutral'} icon={plan.complete ? 'CircleCheck' : 'ClipboardList'}>{plan.text}</Chip> : null}
                 {s.engine ? <Chip icon="Cog">{s.engine}</Chip> : null}
               </View>
             ) : null}
@@ -181,13 +204,13 @@ export function SessionRow({ session: s, mostrarServidor, onPress, onGit, onExcl
             {plan ? <PlanBar session={s} /> : null}
             {untracked && s.provider !== 'kimi' && s.provider !== 'pi' && s.provider !== 'omp' ? (
               <Pressable onPress={onResume} style={styles.resume} accessibilityRole="button" accessibilityLabel={m.sessao_retomar()}>
-                <Text style={{ color: theme.tokens.accent.base, fontSize: theme.base.text.xs }}>↻ {m.sessao_retomar()}</Text>
+                <Icon name="RotateCw" size={12} color={theme.tokens.text.secondary} />
+                <Text style={[styles.metaTxt, { color: theme.tokens.text.primary }]}>{m.sessao_retomar()}</Text>
               </Pressable>
             ) : untracked ? (
-              <Text style={[styles.metaTxt, { color: theme.tokens.text.muted }]}>{untrackedReason(s.provider)}</Text>
+              <Text style={[styles.metaTxt, { color: muted }]}>{untrackedReason(s.provider)}</Text>
             ) : null}
           </View>
-          <Icon name="ChevronRight" size={16} color={theme.tokens.text.muted} />
         </Pressable>
       </GestureDetector>
       </SessionMenu>
@@ -196,20 +219,25 @@ export function SessionRow({ session: s, mostrarServidor, onPress, onGit, onExcl
 }
 
 const styles = StyleSheet.create((theme) => ({
-  row: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 10, paddingHorizontal: 12, minHeight: 56 },
-  lead: { width: 12, alignItems: 'center' },
-  col: { flex: 1, gap: 3, minWidth: 0 },
-  // quebra em vez de espremer: com texto ampliado os selos deixavam o nome sem largura
-  linha1: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 6 },
+  row: { flexDirection: 'row', alignItems: 'flex-start', gap: 8, paddingVertical: 9, paddingHorizontal: 10, borderRadius: theme.base.radius.md },
+  // a marca alinha com a linha do nome, não com o centro do bloco de 3 linhas
+  lead: { width: 22, alignItems: 'center', paddingTop: 1 },
+  col: { flex: 1, gap: 2, minWidth: 0 },
+  linha: { flexDirection: 'row', alignItems: 'center', gap: 6, minWidth: 0 },
   nome: { fontSize: theme.base.text.base, fontWeight: '600', flexShrink: 1 },
+  tag: { flexDirection: 'row', alignItems: 'center', gap: 4, flexShrink: 1, minWidth: 0, maxWidth: '45%', paddingHorizontal: 6, paddingVertical: 1, borderRadius: theme.base.radius.full, borderWidth: 1 },
+  tagTxt: { fontSize: theme.base.text.xxs, flexShrink: 1 },
+  tempo: { marginLeft: 'auto', flexShrink: 0, fontSize: theme.base.text.xxs },
   sub: { fontSize: theme.base.text.xs },
-  meta: { flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'wrap' },
+  meta: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 1, overflow: 'hidden' },
   metaTxt: { fontSize: theme.base.text.xxs },
+  provedor: { fontWeight: '600', flexShrink: 0 },
   mono: { fontFamily: theme.base.fontMono },
   encolhe: { flexShrink: 1, minWidth: 0 },
-  cwd: { flexDirection: 'row', alignItems: 'center', gap: 3, flexShrink: 1, minWidth: 0 },
-  chips: { flexDirection: 'row', flexWrap: 'wrap', gap: 4, marginTop: 2 },
-  resume: { marginTop: 2 },
+  fixo: { flexShrink: 0 },
+  par: { flexDirection: 'row', alignItems: 'center', gap: 3, flexShrink: 1, minWidth: 0 },
+  chips: { flexDirection: 'row', flexWrap: 'wrap', gap: 4, marginTop: 3 },
+  resume: { flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 3, alignSelf: 'flex-start' },
   acoes: { flexDirection: 'row' },
   acao: { width: 64, justifyContent: 'center', alignItems: 'center' },
 }));

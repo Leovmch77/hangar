@@ -5,6 +5,8 @@ import { fileKind, fmtBytes, relativeTime } from '@hangar/core';
 import type { UploadFile } from '@hangar/core';
 import * as m from '../../paraglide/messages';
 import { uploadUrlNative, fileAuthHeader } from '@hangar/core';
+import { Icon, type IconName } from '../../ui/Icon';
+import { superficie } from '../../theme/superficie';
 
 interface Props {
   file: UploadFile;
@@ -20,9 +22,9 @@ function prazo(d: number | null): { txt: string; urgente: boolean } {
   return { txt: m.anexos_expira_d({ n: Math.round(d) }), urgente: d <= 3 };
 }
 
-function icone(f: UploadFile): string {
+function icone(f: UploadFile): IconName {
   const k = fileKind(f.filename);
-  return k === 'pdf' ? '📄' : k === 'html' ? '🌐' : k === 'audio' ? '🎵' : '📎';
+  return k === 'pdf' ? 'FileText' : k === 'html' ? 'Globe' : k === 'audio' ? 'Music' : 'Paperclip';
 }
 
 export function AttachmentCard({ file, sessionName, onPress }: Props) {
@@ -39,14 +41,14 @@ export function AttachmentCard({ file, sessionName, onPress }: Props) {
         </Pressable>
       ) : kind === 'video' ? (
         <Pressable onPress={onPress} style={styles.tile} accessibilityLabel={m.anexos_ver({ n: file.filename })} accessibilityRole="button">
-          <View style={[styles.tileChip, { backgroundColor: theme.tokens.bg.elevated }]}>
-            <Text style={styles.chipIco}>▶</Text>
+          <View style={[styles.tileChip, { backgroundColor: superficie(theme, 0.8) }]}>
+            <Icon name="Play" size={28} color={theme.tokens.text.secondary} />
           </View>
         </Pressable>
       ) : (
         <Pressable onPress={onPress} style={styles.tile} accessibilityLabel={m.anexos_ver({ n: file.filename })} accessibilityRole="button">
-          <View style={[styles.tileChip, { backgroundColor: theme.tokens.bg.elevated }]}>
-            <Text style={styles.chipIco}>{icone(file)}</Text>
+          <View style={[styles.tileChip, { backgroundColor: superficie(theme, 0.8) }]}>
+            <Icon name={icone(file)} size={28} color={theme.tokens.text.secondary} />
           </View>
         </Pressable>
       )}
@@ -76,15 +78,12 @@ const styles = StyleSheet.create((theme) => ({
     width: '100%',
     borderRadius: theme.base.radius.md,
     overflow: 'hidden',
-    backgroundColor: theme.tokens.bg.elevated,
+    backgroundColor: superficie(theme, 0.8),
   },
   tileChip: {
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-  },
-  chipIco: {
-    fontSize: 28,
   },
   media: {
     width: '100%',

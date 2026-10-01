@@ -2,9 +2,12 @@ import { ActivityIndicator, Pressable, ScrollView, Text, View } from 'react-nati
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { Sheet } from '../../ui/Sheet';
 import * as m from '../../paraglide/messages';
+import { superficie } from '../../theme/superficie';
 
 export interface PillMenuItem {
   label: string;
+  /** Valor que vai para a API quando o rótulo é traduzido; sem ele, o próprio rótulo. */
+  id?: string;
   hint?: string;
   selected?: boolean;
 }
@@ -51,7 +54,7 @@ export function PillMenu({ open, onClose, items, loading, error, onRetry, onSele
               <Pressable
                 key={`${it.label}-${idx}-${it.hint ?? ''}`}
                 onPress={() => onSelect(it)}
-                style={[styles.row, it.selected && { backgroundColor: theme.tokens.bg.elevated }]}
+                style={[styles.row, it.selected && { backgroundColor: superficie(theme, 0.8) }]}
                 accessibilityRole="button"
                 accessibilityState={{ selected: !!it.selected }}
               >

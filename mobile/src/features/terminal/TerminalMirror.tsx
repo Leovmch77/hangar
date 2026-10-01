@@ -6,6 +6,7 @@ import { getPane, sendKey, sendTermInput } from '@hangar/core';
 import type { NavKey } from '@hangar/core';
 import { usePanePoll } from './usePanePoll';
 import * as m from '../../paraglide/messages';
+import { superficie } from '../../theme/superficie';
 
 interface Props {
   name: string;
@@ -119,7 +120,7 @@ export function TerminalMirror({ name, aviso }: Props) {
         <Pressable
           onPress={loadMore}
           disabled={loadingMore}
-          style={[styles.loadMore, { borderColor: theme.tokens.border.subtle, backgroundColor: theme.tokens.bg.elevated }]}
+          style={[styles.loadMore, { borderColor: theme.tokens.border.subtle, backgroundColor: superficie(theme, 0.8) }]}
           accessibilityRole="button"
           accessibilityLabel={m.term_carregar_mais({ n: lines })}
         >
@@ -169,7 +170,7 @@ export function TerminalMirror({ name, aviso }: Props) {
       {!atBottomLocal ? (
         <Pressable
           onPress={toBottom}
-          style={[styles.pending, { backgroundColor: theme.tokens.bg.elevated, borderColor: theme.tokens.border.subtle }]}
+          style={[styles.pending, { backgroundColor: superficie(theme, 0.8), borderColor: theme.tokens.border.subtle }]}
           accessibilityRole="button"
         >
           <Text style={[styles.pendingText, { color: theme.tokens.text.secondary }]}>
@@ -190,7 +191,7 @@ export function TerminalMirror({ name, aviso }: Props) {
             {
               color: theme.tokens.text.primary,
               borderColor: theme.tokens.border.default,
-              backgroundColor: theme.tokens.bg.surface,
+              backgroundColor: superficie(theme),
               fontFamily: theme.base.fontMono,
             },
           ]}
@@ -204,7 +205,7 @@ export function TerminalMirror({ name, aviso }: Props) {
         <Pressable
           onPress={() => submitDraft(false)}
           disabled={!draft || busy}
-          style={[styles.sendBtn, { backgroundColor: theme.tokens.bg.elevated, opacity: !draft || busy ? 0.5 : 1 }]}
+          style={[styles.sendBtn, { backgroundColor: superficie(theme, 0.8), opacity: !draft || busy ? 0.5 : 1 }]}
           accessibilityLabel={m.term_enviar_sem_enter()}
           accessibilityRole="button"
         >
@@ -223,7 +224,7 @@ export function TerminalMirror({ name, aviso }: Props) {
 
       {/* barra de teclas de resgate */}
       <View
-        style={[styles.keysBar, { borderTopColor: theme.tokens.border.subtle, backgroundColor: theme.tokens.bg.surface }]}
+        style={[styles.keysBar, { borderTopColor: theme.tokens.border.subtle, backgroundColor: superficie(theme) }]}
         accessibilityLabel={m.term_teclas_resgate()}
       >
         <Text style={[styles.keysHint, { color: theme.tokens.text.muted }]}>{m.term_resgate()}</Text>
@@ -391,7 +392,7 @@ const styles = StyleSheet.create((theme) => ({
     borderWidth: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: theme.tokens.bg.elevated,
+    backgroundColor: superficie(theme, 0.8),
   },
   keyEnter: {
     backgroundColor: theme.tokens.accent.dim,

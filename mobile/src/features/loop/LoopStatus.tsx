@@ -4,6 +4,7 @@ import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { loopBadge } from '@hangar/core';
 import type { LoopState } from '@hangar/core';
 import * as m from '../../paraglide/messages';
+import { superficie } from '../../theme/superficie';
 
 interface Props {
   loop: LoopState;
@@ -96,7 +97,7 @@ export function LoopStatus({ loop, stopBusy, resolveBusy, stopError, onStop, onR
                   </Text>
                 </Pressable>
                 {expanded ? (
-                  <Text style={[styles.historyTail, { backgroundColor: theme.tokens.bg.elevated, borderColor: theme.tokens.border.subtle, color: theme.tokens.text.muted }]} selectable>
+                  <Text style={[styles.historyTail, { backgroundColor: superficie(theme, 0.8), borderColor: theme.tokens.border.subtle, color: theme.tokens.text.muted }]} selectable>
                     {entry.tail}
                   </Text>
                 ) : null}

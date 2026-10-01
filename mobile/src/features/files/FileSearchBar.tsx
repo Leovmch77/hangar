@@ -3,6 +3,8 @@ import { Pressable, Text, TextInput, View, ScrollView } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import type { FileSearchHit } from '@hangar/core';
 import * as m from '../../paraglide/messages';
+import { Icon } from '../../ui/Icon';
+import { superficie } from '../../theme/superficie';
 
 type ModoBusca = 'names' | 'contents';
 
@@ -47,8 +49,8 @@ export function FileSearchBar({ q, mode, resultados, buscaCortada, onBusca, onPi
 
   return (
     <View style={styles.root}>
-      <View style={[styles.campo, { backgroundColor: theme.tokens.bg.surface, borderColor: theme.tokens.border.subtle }]}>
-        <Text style={styles.lupa}>🔍</Text>
+      <View style={[styles.campo, { backgroundColor: superficie(theme, 0.8), borderColor: theme.tokens.border.subtle }]}>
+        <Icon name="Search" size={14} color={theme.tokens.text.muted} />
         <TextInput
           value={texto}
           onChangeText={handleChange}
@@ -121,7 +123,6 @@ const styles = StyleSheet.create((theme) => ({
     marginHorizontal: theme.base.space[3],
     marginBottom: 6,
   },
-  lupa: { fontSize: 12 },
   input: {
     flex: 1,
     fontSize: 14,

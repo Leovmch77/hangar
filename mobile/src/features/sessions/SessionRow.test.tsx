@@ -29,6 +29,7 @@ vi.mock('react-native', async (original) => ({
 }));
 vi.mock('expo-haptics', () => ({ impactAsync: () => Promise.resolve(), ImpactFeedbackStyle: { Medium: 'medium' } }));
 vi.mock('../../ui/Icon', () => ({ Icon: () => null }));
+vi.mock('../../ui/HangarMark', () => ({ HangarMark: () => null }));
 vi.mock('../plan/PlanBar', () => ({ PlanBar: () => null }));
 vi.mock('./SessionMenu', () => ({ SessionMenu: ({ children }: { children: ReactNode }) => children }));
 vi.mock('../../paraglide/messages', () => ({
@@ -40,7 +41,16 @@ vi.mock('../../paraglide/messages', () => ({
   sessao_sem_id: () => 'sessao_sem_id',
 }));
 
+import { useUnistyles } from 'react-native-unistyles';
 import { SessionRow } from './SessionRow';
+
+// O tema de teste não traz as pílulas de estado, que pintam a marca da linha.
+useUnistyles().theme.tokens.pill = {
+  working: { bg: '#eef', fg: '#00f' },
+  idle: { bg: '#efe', fg: '#0a0' },
+  input: { bg: '#fec', fg: '#f90' },
+  dead: { bg: '#fee', fg: '#f00' },
+};
 
 const base = { serverId: 's1', serverLabel: 'casa', serverColor: '#8b5cf6', tracked: true, state: 'idle' as const, last_activity: 1_700_000_000 };
 

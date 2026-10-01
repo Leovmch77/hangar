@@ -3,6 +3,7 @@ import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import type { SessionInfo, State } from '@hangar/core';
 import { rotuloEstado } from '@hangar/core';
 import * as m from '../../paraglide/messages';
+import { superficie } from '../../theme/superficie';
 
 interface Props {
   sessions: SessionInfo[];
@@ -44,7 +45,7 @@ export function PairPicker({ sessions, picked, task, busy, error, loading, onTog
                 key={session.name}
                 onPress={() => onToggle(session.name)}
                 disabled={busy || loading}
-                style={[styles.row, { borderColor: selected ? theme.tokens.accent.base : 'transparent', backgroundColor: selected ? theme.tokens.bg.elevated : 'transparent' }]}
+                style={[styles.row, { borderColor: selected ? theme.tokens.accent.base : 'transparent', backgroundColor: selected ? superficie(theme, 0.8) : 'transparent' }]}
                 accessibilityRole="checkbox"
                 accessibilityState={{ checked: selected, disabled: busy || loading }}
                 accessibilityLabel={m.par_parear_aria({ nome: session.name, estado: rotuloEstado(session.state) })}
@@ -68,7 +69,7 @@ export function PairPicker({ sessions, picked, task, busy, error, loading, onTog
         onChangeText={onTaskChange}
         placeholder={m.par_tarefa_placeholder()}
         placeholderTextColor={theme.tokens.text.muted}
-        style={[styles.taskInput, { color: theme.tokens.text.primary, backgroundColor: theme.tokens.bg.surface, borderColor: theme.tokens.border.default }]}
+        style={[styles.taskInput, { color: theme.tokens.text.primary, backgroundColor: superficie(theme), borderColor: theme.tokens.border.default }]}
         returnKeyType="done"
         accessibilityLabel={m.par_tarefa_placeholder()}
       />

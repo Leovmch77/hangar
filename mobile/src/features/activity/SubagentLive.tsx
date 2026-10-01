@@ -5,6 +5,7 @@ import { getSubagent } from '@hangar/core';
 import type { SubagentRun } from '@hangar/core';
 import { MessageList } from '../../chat/MessageList';
 import * as m from '../../paraglide/messages';
+import { superficie } from '../../theme/superficie';
 
 interface Props {
   sessionName: string;
@@ -100,11 +101,10 @@ export function SubagentLive({ sessionName, agentId }: Props) {
           </Text>
           {fails > 0 ? <Text style={[styles.metaErr, { color: theme.tokens.status.warning }]}>{error}</Text> : null}
         </View>
-        <View style={[styles.chatBox, { backgroundColor: theme.tokens.bg.surface, borderColor: theme.tokens.border.subtle }]}>
+        <View style={[styles.chatBox, { backgroundColor: superficie(theme), borderColor: theme.tokens.border.subtle }]}>
           <MessageList
             events={detail.events}
             preview=""
-            statusLine={null}
             olderFailed=""
             onLoadOlder={() => {}}
             pending={[]}
@@ -116,7 +116,7 @@ export function SubagentLive({ sessionName, agentId }: Props) {
             <Text style={[styles.rotulo, { color: theme.tokens.text.muted }]}>{m.atividade_ferramentas_chamadas({ n: detail.toolCalls })}</Text>
             <View style={styles.chips}>
               {detail.tools.map((t) => (
-                <View key={t.name} style={[styles.chip, { backgroundColor: theme.tokens.bg.elevated, borderColor: theme.tokens.border.subtle }]}>
+                <View key={t.name} style={[styles.chip, { backgroundColor: superficie(theme, 0.8), borderColor: theme.tokens.border.subtle }]}>
                   <Text style={[styles.chipTxt, { color: theme.tokens.text.secondary }]}>
                     {t.name} ×{t.count}
                   </Text>

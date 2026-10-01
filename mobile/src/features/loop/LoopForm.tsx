@@ -2,6 +2,9 @@ import { Pressable, ScrollView, Text, TextInput, View } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { LOOP_GUIDE, type LoopGuideMessageKey } from '@hangar/core';
 import * as m from '../../paraglide/messages';
+import { Icon } from '../../ui/Icon';
+import { semEmoji } from '../../ui/semEmoji';
+import { superficie } from '../../theme/superficie';
 
 interface Props {
   goal: string;
@@ -86,12 +89,13 @@ export function LoopForm({
               accessibilityRole="button"
               accessibilityLabel={m.loop_reescreve_objetivo()}
             >
-              <Text style={[styles.refineText, { color: theme.tokens.text.secondary }]}>{refining ? m.loop_melhorando() : m.loop_melhorar()}</Text>
+              <Icon name="Sparkles" size={14} color={theme.tokens.text.secondary} />
+              <Text style={[styles.refineText, { color: theme.tokens.text.secondary }]}>{semEmoji(refining ? m.loop_melhorando() : m.loop_melhorar())}</Text>
             </Pressable>
           </View>
         </View>
         <TextInput
-          style={[styles.goalInput, { backgroundColor: theme.tokens.bg.surface, borderColor: theme.tokens.border.default, color: theme.tokens.text.primary }]}
+          style={[styles.goalInput, { backgroundColor: superficie(theme), borderColor: theme.tokens.border.default, color: theme.tokens.text.primary }]}
           value={goal}
           onChangeText={onGoalChange}
           placeholder={m.loop_objetivo_placeholder()}
@@ -112,7 +116,7 @@ export function LoopForm({
       <View style={styles.field}>
         <Text style={[styles.label, { color: theme.tokens.text.secondary }]}>{m.loop_check_label()}</Text>
         <TextInput
-          style={[styles.input, { backgroundColor: theme.tokens.bg.surface, borderColor: theme.tokens.border.default, color: theme.tokens.text.primary }]}
+          style={[styles.input, { backgroundColor: superficie(theme), borderColor: theme.tokens.border.default, color: theme.tokens.text.primary }]}
           value={checkCmd}
           onChangeText={onCheckCmdChange}
           placeholder={m.loop_check_placeholder()}
@@ -127,7 +131,7 @@ export function LoopForm({
               <Pressable
                 key={suggestion}
                 onPress={() => onCheckCmdChange(suggestion)}
-                style={[styles.chip, { backgroundColor: theme.tokens.bg.surface, borderColor: checkCmd === suggestion ? theme.tokens.accent.base : theme.tokens.border.default }]}
+                style={[styles.chip, { backgroundColor: superficie(theme), borderColor: checkCmd === suggestion ? theme.tokens.accent.base : theme.tokens.border.default }]}
                 accessibilityRole="button"
                 accessibilityState={{ selected: checkCmd === suggestion }}
               >
@@ -142,7 +146,7 @@ export function LoopForm({
         <View style={styles.rowField}>
           <Text style={[styles.label, { color: theme.tokens.text.secondary }]}>{m.loop_max_iteracoes()}</Text>
           <TextInput
-            style={[styles.input, { backgroundColor: theme.tokens.bg.surface, borderColor: theme.tokens.border.default, color: theme.tokens.text.primary }]}
+            style={[styles.input, { backgroundColor: superficie(theme), borderColor: theme.tokens.border.default, color: theme.tokens.text.primary }]}
             value={maxItersText}
             onChangeText={(text) => onMaxItersTextChange(text.replace(/[^0-9]/g, ''))}
             onBlur={() => onMaxItersTextChange(String(Math.min(100, Math.max(1, Number(maxItersText) || 1))))}
@@ -155,7 +159,7 @@ export function LoopForm({
           <View style={styles.toggle} accessibilityRole="radiogroup" accessibilityLabel={m.loop_exigir_branch()}>
             <Pressable
               onPress={() => onRequireBranchChange(true)}
-              style={[styles.toggleButton, { backgroundColor: requireBranch ? theme.tokens.accent.dim : theme.tokens.bg.surface, borderColor: requireBranch ? theme.tokens.accent.base : theme.tokens.border.default }]}
+              style={[styles.toggleButton, { backgroundColor: requireBranch ? theme.tokens.accent.dim : superficie(theme), borderColor: requireBranch ? theme.tokens.accent.base : theme.tokens.border.default }]}
               accessibilityRole="radio"
               accessibilityState={{ selected: requireBranch }}
             >
@@ -163,7 +167,7 @@ export function LoopForm({
             </Pressable>
             <Pressable
               onPress={() => onRequireBranchChange(false)}
-              style={[styles.toggleButton, { backgroundColor: !requireBranch ? theme.tokens.accent.dim : theme.tokens.bg.surface, borderColor: !requireBranch ? theme.tokens.accent.base : theme.tokens.border.default }]}
+              style={[styles.toggleButton, { backgroundColor: !requireBranch ? theme.tokens.accent.dim : superficie(theme), borderColor: !requireBranch ? theme.tokens.accent.base : theme.tokens.border.default }]}
               accessibilityRole="radio"
               accessibilityState={{ selected: !requireBranch }}
             >
@@ -251,6 +255,9 @@ const styles = StyleSheet.create((theme) => ({
   },
   refineButton: {
     minHeight: 32,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
     paddingHorizontal: theme.base.space[3],
     borderRadius: theme.base.radius.full,
     borderWidth: 1,
