@@ -97,5 +97,8 @@ node_modules/
 
 # Site gerado por site/build.py
 site/public/
+# saída e configuração isolada do roteiro de gravação
+site/tools/record/out/
+site/tools/record/cfg/
 # vídeos do site são versionados; o *.mp4 acima é só para rascunho de análise
 !site/media/**/*.mp4
