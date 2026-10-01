@@ -94,6 +94,7 @@
     swapIds?: Set<string>;
     // Encaminhar bolha pra outra sessao (long-press/hover ↗). Ausente (ex: Archive) = sem acao.
     onForward?: (text: string) => void;
+    onRunCommand?: (command: string) => void;
     // Botao "descartar" da bolha que o backend desistiu de entregar: tira a entrada da fila
     // duravel (id CRU, sem o prefixo "queued-"). Ausente (Archive) = so o aviso.
     onDescartarFila?: (entryId: string) => void;
@@ -113,7 +114,7 @@
     events, stateEvent, pending, sessionName, dockH, preview = '', previewMd = false, previewFull = false, previewVivo = false, pensamento = '', ferramenta = null, onSelectOption, onSubmitSelected, onCancel, agentesRodando = [], onAbrirAgente = undefined,
     askOpen = false, askPayload = null, askActive = false, onAnswer, onAskClose, onFimDoLocal,
     imageUrl, swapIds, codex = false, plan = null, footer,
-    onForward, onOpenSession, onOpenOrq, onDescartarFila, ancora = 0, focoId = null
+    onForward, onRunCommand, onOpenSession, onOpenOrq, onDescartarFila, ancora = 0, focoId = null
   }: Props = $props();
 
   type PlanComponentProps = {
@@ -646,7 +647,7 @@
         {:else}
         <AssistantBubble text={codex ? planDisplayText(ev.text) : ev.text} ts={ev.ts} {sessionName}
                          animate={!histIds.has(ev.id) && !swapIds?.has(ev.id)}
-                         onForward={onForward ? () => onForward(ev.text ?? '') : null} />
+                         onForward={onForward ? () => onForward(ev.text ?? '') : null} {onRunCommand} />
         {/if}
         {#if plan?.eventId === ev.id}
           <SessionPlanPreview {...planoProps()} />

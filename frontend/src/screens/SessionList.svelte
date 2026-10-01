@@ -574,7 +574,6 @@ import * as m from '../paraglide/messages';
                         onRename={(nv) => handleRename(session, nv)}
                         onGit={() => handleGit(session)}
                         onGroupDrag={(phase, e) => onCardGroupDrag(session, phase, e)}
-                        showProvider={model.showProviderTags}
                         selectMode={model.selectMode}
                         selected={model.selected.has(`${session.serverId}:${session.name}`)}
                         onToggleSelect={() => model.toggleSelected(`${session.serverId}:${session.name}`)}
@@ -629,7 +628,6 @@ import * as m from '../paraglide/messages';
               onRename={(nv) => handleRename(session, nv)}
               onGit={() => handleGit(session)}
               onGroupDrag={(phase, e) => onCardGroupDrag(session, phase, e)}
-              showProvider={model.showProviderTags}
               selectMode={model.selectMode}
               selected={model.selected.has(`${session.serverId}:${session.name}`)}
               onToggleSelect={() => model.toggleSelected(`${session.serverId}:${session.name}`)}

@@ -74,8 +74,8 @@ def _write_cmd(path: Path, text: str) -> None:
         f.write(text)
 
 
-_FILE_SUFFIXES = (".cmd", "-cmd.cmd", ".exit")
-_FILE_RE = re.compile(r"^([0-9a-f]{6})(?:-cmd\.cmd|\.cmd|\.exit)$")
+_FILE_SUFFIXES = (".cmd", "-cmd.cmd", "-cmd.ps1", ".exit")
+_FILE_RE = re.compile(r"^([0-9a-f]{6})(?:-cmd\.cmd|-cmd\.ps1|\.cmd|\.exit)$")
 # Arquivo mais novo que isto pode ser de um start que ainda nao criou a sessao.
 _ORPHAN_GRACE = 60.0
 # Variaveis que o cmd expande sem estarem no ambiente.
@@ -129,7 +129,7 @@ def _sweep_orphans(live: set[str]) -> None:
             pass
 
 
-def _windows_command(ident: str, command: str) -> str:
+def _windows_command(ident: str, command: str, powershell: bool = False) -> str:
     # O comando fica num .cmd proprio (nada de aspas do psmux no caminho dele) e roda num `cmd /c`
     # filho: `exit 3` sem /b mataria um `call`. O de fora grava o codigo com o redirecionamento na
     # frente (`echo 3>x` redirecionaria o handle 3) e segura o pane com `pause` em laco, porque tecla
@@ -137,9 +137,18 @@ def _windows_command(ident: str, command: str) -> str:
     d = _windows_dir()
     inner, outer, exit_file = d / f"{ident}-cmd.cmd", d / f"{ident}.cmd", d / f"{ident}.exit"
     exit_file.unlink(missing_ok=True)
-    body = _batch_escape(command).replace("\r\n", "\n").replace("\n", "\r\n")
-    _write_cmd(inner, f"@echo off\r\n{body}\r\n")
-    _write_cmd(outer, f'@cmd /d /c "{inner}"\r\n@>"{exit_file}" echo %ERRORLEVEL%\r\n:h\r\n@pause >nul\r\n@goto h\r\n')
+    if powershell:
+        script = d / f"{ident}-cmd.ps1"
+        body = command.replace("\r\n", "\n").replace("\n", "\r\n")
+        with open(script, "w", encoding="utf-8-sig", newline="") as f:
+            f.write(body + "\r\n$__hangar_ok = $?\r\nif ($null -ne $LASTEXITCODE) { exit $LASTEXITCODE }\r\nif (-not $__hangar_ok) { exit 1 }\r\n")
+        executable = shutil.which("powershell.exe") or str(Path(os.environ.get("SystemRoot", "C:\\Windows")) / "System32/WindowsPowerShell/v1.0/powershell.exe")
+        launch = f'@"{executable}" -NoProfile -ExecutionPolicy Bypass -File "{script}"'
+    else:
+        body = _batch_escape(command).replace("\r\n", "\n").replace("\n", "\r\n")
+        _write_cmd(inner, f"@echo off\r\n{body}\r\n")
+        launch = f'@cmd /d /c "{inner}"'
+    _write_cmd(outer, f'{launch}\r\n@>"{exit_file}" echo %ERRORLEVEL%\r\n:h\r\n@pause >nul\r\n@goto h\r\n')
     return f'cmd /d /c "{outer}"'
 
 
@@ -178,7 +187,7 @@ def _abort(target: str) -> None:
 
 
 def start(owner: str, cwd: str, command: str, label: str, env: dict[str, str],
-          key: str = "", origin: str = "", ask: bool = True) -> dict | None:
+          key: str = "", origin: str = "", ask: bool = True, powershell: bool = False) -> dict | None:
     """Cria a sessao escondida rodando o comando. None = o multiplexador recusou.
     Dono vazio = terminal No Hangar: nenhuma sessao o lista nem o fecha."""
     ident = secrets.token_hex(3)
@@ -194,7 +203,7 @@ def start(owner: str, cwd: str, command: str, label: str, env: dict[str, str],
                                (_ASK, "1" if ask else "0"), (_CWD, cwd), *(() if _IS_WINDOWS else ((_CMD, command),)))
                  if kv[1])
     if _IS_WINDOWS:
-        cp = tmux._run([*args, _windows_command(ident, command)])
+        cp = tmux._run([*args, _windows_command(ident, command, powershell)])
         if cp.returncode != 0 and not tmux.has_session(target):
             _log.warning("shortcut: psmux recusou criar %r: %s", target, (cp.stderr or "").strip()[:200])
             _forget_files(ident)

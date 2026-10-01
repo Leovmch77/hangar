@@ -911,6 +911,20 @@ html[data-theme='light'] .code-head { background: rgba(0, 0, 0, 0.03); }
 .expand-btn::before { content: '⤢'; font-size: 14px; line-height: 1; }
 .copy-btn.copied { color: var(--accent); opacity: 1; }
 .copy-btn.copied::before { content: '✓'; }
+.run-code-btn {
+  flex-shrink: 0; min-height: 28px; padding: 0 var(--space-2);
+  border: 1px solid var(--border-subtle); border-radius: var(--radius-sm);
+  background: var(--surface-raised); color: var(--text-primary);
+  font-size: var(--text-xs); font-weight: 600;
+}
+.run-code-btn:hover, .run-code-btn:focus-visible { border-color: var(--accent); }
+.run-inline { display: inline; }
+.run-inline-btn {
+  min-height: 24px; margin-left: 2px; padding: 0 var(--space-2);
+  border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); background: var(--surface-raised);
+  color: var(--text-secondary); font-size: 11px; font-weight: 600; vertical-align: middle;
+}
+.run-inline-btn:hover, .run-inline-btn:focus-visible { color: var(--accent); }
 
 /* Com papel de parede a caixa entra no veu — MAIS OPACA que os paineis (0.93 vs --cp-panel-alpha):
    codigo precisa de contraste mais que de transparencia (medido na comparacao de temas ao vivo).

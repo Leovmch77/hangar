@@ -383,6 +383,29 @@ def test_windows_start_writes_wrapper_marks_hidden_first_and_reads_exit_file(mon
     assert shortcut_terminals._windows_status(term["id"]) == (False, 3)
 
 
+def test_run_code_uses_session_folder_and_ignores_shortcut_scope(client, monkeypatch, tmp_path, private_tmux):
+    from app import api
+    monkeypatch.setenv("SHELL", "/bin/sh")
+    monkeypatch.setattr(api, "_session_cwd", lambda name: str(tmp_path))
+    r = client.post("/api/sessions/s/run-code", json={"command": "pwd > prova.txt", "runs_in": "hangar", "pasta": "/tmp"}, headers=_auth())
+    assert r.status_code == 202
+    assert _wait_file(tmp_path / "prova.txt") == str(tmp_path)
+
+
+def test_windows_run_code_writes_powershell_script_with_bom_and_one_crlf(monkeypatch, tmp_path):
+    from app import shortcut_terminals as st
+    monkeypatch.setattr(st, "_windows_dir", lambda: tmp_path)
+    launch = st._windows_command("abcdef", "Write-Host 'ação'\nexit 3", powershell=True)
+    script = (tmp_path / "abcdef-cmd.ps1").read_bytes()
+    outer = (tmp_path / "abcdef.cmd").read_bytes().decode("latin-1")
+    assert script.startswith(b"\xef\xbb\xbf")
+    assert b"\r\r\n" not in script and b"\r\n" in script
+    assert "Write-Host 'ação'" in script.decode("utf-8-sig")
+    assert "powershell.exe" in outer.lower() and "-File" in outer
+    assert "abcdef-cmd.ps1" in outer and launch.endswith('abcdef.cmd"')
+    assert "-cmd.ps1" in st._FILE_SUFFIXES
+
+
 def test_windows_restart_reads_back_the_inner_command_with_crlf_intact(monkeypatch, tmp_path):
     from app import shortcut_terminals, tmux
     monkeypatch.setattr(shortcut_terminals, "_IS_WINDOWS", True)

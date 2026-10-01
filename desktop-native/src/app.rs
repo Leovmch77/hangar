@@ -216,6 +216,7 @@ enum Reply {
     Diff(String),
     /// Rótulo do atalho e se o pedido foi No Hangar.
     Shell(String, bool),
+    RunCode,
     Reload,
     PlanPreview(bool),
     PreSelect(String),
@@ -3869,8 +3870,9 @@ impl Hangar {
             Some(tables) => self.render_charted(&id, &markdown, &tables, cx),
             None if !blank || (files.is_none() && thumbs.is_none()) => {
                 let view = self.text_view(&id, &id, markdown, cx);
-                let text = chat_text(&view, cx).motion(stream_motion(id == PREVIEW)).on_link_click(open_web_link)
-                    .markdown_extensions(citation_extensions(&id, cx.weak_entity()));
+                let runner = (plain && id != PREVIEW).then(|| cx.weak_entity());
+                let text = chat_text_runnable(&view, cx, runner.clone(), &id).motion(stream_motion(id == PREVIEW)).on_link_click(open_web_link)
+                    .markdown_extensions(citation_extensions_with_code(&id, cx.weak_entity(), runner.is_some()));
                 vec![collapse(text, long, open).into_any_element()]
             }
             None => Vec::new(),
@@ -3924,6 +3926,10 @@ fn open_web_link(url: &SharedString, _: &ClickEvent, _: &mut Window, cx: &mut Ap
 }
 
 fn citation_extensions(row: &str, owner: WeakEntity<Hangar>) -> gpui_kit::base::text::MarkdownExtensions {
+    citation_extensions_with_code(row, owner, false)
+}
+
+fn citation_extensions_with_code(row: &str, owner: WeakEntity<Hangar>, runnable: bool) -> gpui_kit::base::text::MarkdownExtensions {
     use gpui_kit::base::text::{markdown_ast, MarkdownExtensions, MarkdownNode, MarkdownParseContext, MarkdownPlugin};
     struct Citations { row: String, owner: WeakEntity<Hangar> }
     impl MarkdownPlugin for Citations {
@@ -3950,7 +3956,36 @@ fn citation_extensions(row: &str, owner: WeakEntity<Hangar>) -> gpui_kit::base::
                 })
         }
     }
-    MarkdownExtensions::default().plugin(Citations { row: row.to_owned(), owner })
+    struct RunnableCode { row: String, owner: WeakEntity<Hangar> }
+    impl MarkdownPlugin for RunnableCode {
+        fn name(&self) -> &str { "runnable-code" }
+        fn parse(&self, node: &markdown_ast::Node, context: &MarkdownParseContext<'_>) -> Option<MarkdownNode> {
+            let markdown_ast::Node::InlineCode(code) = node else { return None; };
+            if !runnable_inline(&code.value) { return None; }
+            Some(MarkdownNode::new(self.name(), code.value.clone()).text(code.value.clone())
+                .markdown(context.node_source(node).unwrap_or_default().to_owned()))
+        }
+        fn render(&self, node: &MarkdownNode, _: &mut Window, _: &mut App) -> impl IntoElement {
+            let code = node.data::<String>().unwrap().clone();
+            let owner = self.owner.clone();
+            div().flex().items_center().gap(px(2.))
+                .child(div().px(px(5.)).py(px(2.)).rounded(px(4.)).bg(theme::inset()).font_family(theme::MONO)
+                    .text_size(px(12.)).text_color(theme::text()).child(code.clone()))
+                .child(Button::new(format!("run-inline-{}-{}", self.row, node.source_range().map_or(0, |range| range.start)))
+                    .ghost().xsmall().label(tr("code_run")).accessibility_label(tr("code_run_aria")).tooltip(tr("code_run_aria"))
+                    .on_click(move |_, _, cx| { let _ = owner.update(cx, |this, cx| this.run_code_command(code.clone(), cx)); }))
+        }
+    }
+    let extensions = MarkdownExtensions::default().plugin(Citations { row: row.to_owned(), owner: owner.clone() });
+    if runnable { extensions.plugin(RunnableCode { row: row.to_owned(), owner }) } else { extensions }
+}
+
+fn runnable_inline(code: &str) -> bool {
+    code.len() <= 4096 && !code.chars().any(|ch| matches!(ch, '\r' | '\n' | '\0')) && code.split_whitespace().nth(1).is_some()
+}
+
+fn shell_code_language(lang: Option<SharedString>) -> bool {
+    lang.is_some_and(|lang| matches!(lang.to_ascii_lowercase().as_str(), "bash" | "sh" | "zsh" | "fish" | "shell" | "powershell" | "ps1" | "pwsh"))
 }
 
 /// Markdown da conversa. É o `TextView` do gpui-base porque o do componente não repassa os campos que só a
@@ -3958,6 +3993,22 @@ fn citation_extensions(row: &str, owner: WeakEntity<Hangar>) -> gpui_kit::base::
 fn chat_text(view: &Entity<TextViewState>, cx: &App) -> gpui_kit::base::TextView {
     gpui_kit::base::TextView::new(view).selectable(true).scrollable(false).style(theme::conversation_markdown(cx))
         .code_block_actions(copy_code)
+}
+
+fn chat_text_runnable(view: &Entity<TextViewState>, cx: &App, runner: Option<WeakEntity<Hangar>>, row: &str) -> gpui_kit::base::TextView {
+    let text = chat_text(view, cx);
+    let Some(owner) = runner else { return text };
+    let row = row.to_owned();
+    text.code_block_actions(move |block, window, cx| {
+        let code = block.code().to_string();
+        let can_run = shell_code_language(block.lang()) && !code.trim().is_empty() && code.len() <= 4096;
+        let owner = owner.clone();
+        div().flex().items_center().gap(px(4.))
+            .when(can_run, |el| el.child(Button::new(format!("run-block-{row}-{}", block.span.as_ref().map_or(0, |span| span.start)))
+                .ghost().xsmall().label(tr("code_run")).accessibility_label(tr("code_run_aria"))
+                .on_click(move |_, _, cx| { let _ = owner.update(cx, |this, cx| this.run_code_command(code.clone(), cx)); })))
+            .child(copy_code(block, window, cx))
+    })
 }
 
 /// Grupo de hover da linha da mensagem: a faixa de hora e copiar acende com ele.
@@ -4191,8 +4242,6 @@ impl Hangar {
             .child(chrome::section_label(label))
             .when_some(count, |el, n| el.child(div().font_family(theme::MONO).text_size(px(11.)).text_color(theme::faint()).child(n.to_string())));
         let mut children: Vec<AnyElement> = Vec::new();
-        // Como o web: o glifo do agente só aparece quando a lista mistura agentes.
-        let mixed = self.sessions.iter().filter(|s| !s.orq()).map(|s| agent_name(&s.provider)).collect::<HashSet<_>>().len() > 1;
         // Membros de um grupo vêm juntos, sob o cabeçalho do bloco, como o `clusterByPair` do web.
         let rows = |list: &[&SessionInfo], remote: Option<&str>, children: &mut Vec<AnyElement>, window: &mut Window, cx: &mut Context<Self>| for row in grouping::cluster(list) {
             let session = match row {
@@ -4206,7 +4255,7 @@ impl Hangar {
             let selected = selected_name == Some(session.name.as_str()) && self.open_key().as_deref() == remote;
             let remote = remote.map(str::to_owned);
             children.push(if conversations { self.render_conversation_row(session.clone(), selected, remote, window, cx) }
-                else { self.render_session_row(session.clone(), selected, mixed, remote, window, cx) });
+                else { self.render_session_row(session.clone(), selected, remote, window, cx) });
         };
         let place = |layout: &sidebar::Layout, remote: Option<&str>, children: &mut Vec<AnyElement>, window: &mut Window, cx: &mut Context<Self>| {
             if !layout.waiting.is_empty() {
@@ -4448,7 +4497,7 @@ impl Hangar {
         };
         let title = div().w_full().min_w_0().h(px(17.)).flex().items_center().gap(px(4.))
             .child(status)
-            .child(chrome::provider_glyph(&session.provider, 13.))
+            .when(!session.orq(), |el| el.child(badge(agent_name(&session.provider).to_owned(), theme::muted())))
             .child(div().flex_1().min_w_0().truncate().text_size(px(13.)).line_height(px(17.)).child(name.clone()))
             .when(session.pending_questions > 0, |el| el.child(div().flex_shrink_0().text_xs().text_color(theme::warning())
                 .child(format!("? {}", session.pending_questions))))
@@ -4505,9 +4554,9 @@ impl Hangar {
     /// worktree), a branch fora de main/master, o ↑/↓ do upstream e o diff.
     /// Mais, como o web: "? N" das perguntas, o ⋯ e o clique direito com o menu da sessão, pressionar 500 ms para renomear
     /// na própria linha e a prévia da última resposta ao parar o mouse. A linha entra no Tab (Enter abre) e o ⋯ vem depois dela.
-    fn render_session_row(&self, session: SessionInfo, selected: bool, mixed: bool, remote: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn render_session_row(&self, session: SessionInfo, selected: bool, remote: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         // O orquestrador não roda agente: selo de provider nele seria mentira.
-        let mixed = mixed && !session.orq();
+        let provider_label = (!session.orq()).then(|| agent_name(&session.provider).to_owned());
         let target = sidebar::Target::new(&remote.clone().unwrap_or_else(|| self.active_key()), &session.name);
         // Ids com a máquina: a de mesmo nome em outra máquina não divide marca, menu nem selos.
         let row_key = if remote.is_some() { target.id() } else { session.name.clone() };
@@ -4515,13 +4564,12 @@ impl Hangar {
         let limited = session.limited == Some(true);
         let untracked = session.tracked == Some(false);
         let mark_color = if limited { theme::limited() } else { theme::status(state) };
-        // Trabalhando, a marca (e o selo, que fica por cima dela) é pintada fora da lista guardada: a batida não redesenha a lista.
+        // Trabalhando, a marca é pintada fora da lista guardada: a batida não redesenha a lista.
         let working = state == "working" && !limited;
         let mark = if working {
-            self.nav_mark(format!("row-mark-{row_key}"), 18., mark_color, mixed.then(|| session.provider.clone().into()))
+            self.nav_mark(format!("row-mark-{row_key}"), 18., mark_color, None)
         } else { chrome::hangar_mark(18., mark_color).into_any_element() };
-        let avatar = div().relative().size(px(18.)).flex_shrink_0().flex().items_center().justify_center().child(mark)
-            .when(mixed && !working, |el| el.child(chrome::provider_badge(&session.provider)));
+        let avatar = div().relative().size(px(18.)).flex_shrink_0().flex().items_center().justify_center().child(mark);
         let state_label = tr(&format!("chip_{}", if limited { "limited" } else { state }));
         let reply = session.last_reply.as_deref().filter(|r| state == "idle" && !r.trim().is_empty());
         let sub = match reply {
@@ -4580,6 +4628,10 @@ impl Hangar {
         };
         let (hover_target, press_target, menu_target, key_open, click_target) = (target.clone(), target.clone(), target.clone(), target.clone(), target.clone());
         let row_id = row_key.clone();
+        let mut spoken = vec![name.clone()];
+        if let Some(label) = &provider_label { spoken.push(label.clone()); }
+        spoken.push(state_label);
+        if session.headless { spoken.push(tr("create_mode_headless")); }
         div().id(SharedString::from(row_id)).relative().flex_shrink_0().flex().flex_col().gap(px(1.)).px(px(8.)).py(px(7.)).rounded(px(10.))
             .when_some(focus.as_ref(), |el, focus| el.track_focus(focus))
             .when(focus.as_ref().is_some_and(|f| f.is_focused(window)), |el| el.focus_ring_style(window, cx))
@@ -4597,7 +4649,7 @@ impl Hangar {
                 cx.stop_propagation();
             }))
             .role(Role::Button).aria_selected(selected)
-            .aria_label(if session.headless { format!("{name} · {} · {state_label}", tr("create_mode_headless")) } else { format!("{name} · {state_label}") })
+            .aria_label(spoken.join(" · "))
             // O ⋯ fica por cima do fim da linha do nome: ela cede o espaço dele.
             .child(div().flex().items_center().gap(px(8.)).when(show_menu, |el| el.pr(px(22.)))
                 .child(avatar)
@@ -4612,9 +4664,10 @@ impl Hangar {
                 .child(div().flex_1().min_w_0().flex().items_center().gap(px(4.)).text_xs().text_color(color)
                     .when(reply.is_some(), |el| el.child(div().flex_shrink_0().text_size(px(8.)).text_color(theme::faint()).child("◆")))
                     .child(div().min_w_0().truncate().when(working, |el| el.italic()).child(text)))))
-            .when(folder.is_some() || branch.is_some() || added.is_some() || removed.is_some() || ahead.is_some() || behind.is_some(), |el| el.child(div().flex().items_center().gap(px(8.))
+            .when(provider_label.is_some() || folder.is_some() || branch.is_some() || added.is_some() || removed.is_some() || ahead.is_some() || behind.is_some(), |el| el.child(div().flex().items_center().gap(px(8.))
                 .text_size(px(11.5)).text_color(theme::faint()).child(lane())
                 .child(div().flex_1().min_w_0().flex().items_center().gap(px(6.))
+                    .when_some(provider_label, |el, label| el.child(div().flex_shrink_0().font_weight(FontWeight::SEMIBOLD).text_color(theme::muted()).child(label)))
                     .when_some(folder, |el, f| el.child(chrome::small_icon(IconName::Folder, 12., theme::faint()))
                         .child(div().min_w_0().truncate().child(f)))
                     .when_some(branch, |el, b| el.child(chrome::small_icon(IconName::GitBranch, 12., theme::faint()))

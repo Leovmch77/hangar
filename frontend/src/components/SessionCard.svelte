@@ -3,7 +3,7 @@
   import type { AggSession, SessionInfo } from '@hangar/core';
 import * as m from '../paraglide/messages';
 import { textoProblema } from '../lib/problema';
-  import { cwdParts, rotuloEstado, stateColors, untrackedReason, providerTag, relativeTime, fmtWhen, isOrq } from '@hangar/core';
+  import { cwdParts, rotuloEstado, stateColors, untrackedReason, providerName, relativeTime, fmtWhen, isOrq } from '@hangar/core';
   import { chipDaConta } from '../lib/conta';
   import { loopBadge, LOOP_TONE_COLOR } from '@hangar/core';
   import IconFolder from './icons/IconFolder.svelte';
@@ -33,13 +33,10 @@ import { textoProblema } from '../lib/problema';
     selectMode?: boolean;
     selected?: boolean;
     onToggleSelect?: () => void;
-    // Só quando a lista MISTURA agentes (mesma regra da Sidebar): com tudo em Claude a marca é a
-    // mesma em toda linha e não separa nada — vira textura ao lado do nome.
-    showProvider?: boolean;
   }
   let {
     session, serverBadge = null, onClick, onDelete, onResume, onRename, onGit, onGroupDrag,
-    selectMode = false, selected = false, onToggleSelect, showProvider = false,
+    selectMode = false, selected = false, onToggleSelect,
   }: Props = $props();
 
 
@@ -92,7 +89,6 @@ import { textoProblema } from '../lib/problema';
 
   const loopChip = $derived(loopBadge(session.loop_status, session.loop_iter, session.loop_max));
   // Provider da linha — só as não-Claude ganham chip (ver providerTag em lib/format).
-  const provTag = $derived(providerTag(session.provider));
   // Orquestrador sem LLM: sem renomear e sem excluir; o backend recusa os dois.
   const orq = $derived(isOrq(session));
   // Tempo relativo da última atividade ("51 min atrás" — o "51m ago" do card do super.engineering).
@@ -348,11 +344,6 @@ import { textoProblema } from '../lib/problema';
           <span class="session-name">{title}</span>
           <SessionSignals browser={browserOpen} headless={session.headless === true}
                           shared={session.shared === true} guest={(session as AggSession).serverInvite === true} />
-          <!-- Marca do agente junto dos outros sinais do nome, não numa fila de chips própria: cada
-               agente tem marca colorida, o nome ao lado repetia o desenho e segue no title. -->
-          {#if showProvider && !orq}
-            <span class="prov-chip prov-chip--so-icone" title={`${m.sessao_grupo()} ${provTag ?? 'Claude'}`}><span class="sr-only">{m.sessao_grupo()}&nbsp;{provTag ?? 'Claude'}</span><ProviderGlyph provider={session.provider} size={12} /></span>
-          {/if}
           {#if pendingQuestions > 0}
             <span class="untracked-badge pending-questions" title={`${m.ask_perguntas()}: ${pendingQuestions}`} aria-label={`${m.ask_perguntas()}: ${pendingQuestions}`}>? {pendingQuestions}</span>
           {/if}
@@ -384,9 +375,13 @@ import { textoProblema } from '../lib/problema';
            muda, entao vem primeiro e nunca some; o cwd fecha a linha e trunca primeiro. O tempo
            relativo ("51 min atrás") vem por último, colado à direita — informação de contexto, não
            de identidade. -->
-      {#if serverBadge || session.branch || mostraPasta || agoLabel
+      {#if !orq || serverBadge || session.branch || mostraPasta || agoLabel
            || session.git_ahead || session.git_behind || session.git_added || session.git_removed}
         <span class="meta-line">
+          {#if !orq}
+            <span class="prov-chip"><ProviderGlyph provider={session.provider} size={12} />{providerName(session.provider)}</span>
+            {#if serverBadge || session.branch || mostraPasta || agoLabel}<span class="meta-sep" aria-hidden="true">·</span>{/if}
+          {/if}
           {#if serverBadge}
             <span class="srv" style="color: {serverBadge.color};">{serverBadge.label}</span>
             {#if session.branch || mostraPasta}<span class="meta-sep">·</span>{/if}
@@ -419,7 +414,7 @@ import { textoProblema } from '../lib/problema';
             <span class="cwd" class:cwd--worktree={session.worktree} title={session.worktree ? `${m.sessao_worktree()}: ${session.cwd}` : session.cwd}><span class="sr-only">{session.worktree ? `${m.sessao_worktree()}: ${session.cwd}` : session.cwd}</span><span class="cwd-icone" aria-hidden="true">{#if session.worktree}<IconWorktree size={11} />{:else}<IconFolder size={11} />{/if}</span><span class="cwd-base" aria-hidden="true">{cwdPartes.base}</span></span>
           {/if}
           {#if agoLabel}
-            {#if serverBadge || session.branch || mostraPasta}<span class="meta-sep" aria-hidden="true">·</span>{/if}
+            {#if !orq || serverBadge || session.branch || mostraPasta}<span class="meta-sep" aria-hidden="true">·</span>{/if}
             <span class="ago" title={fmtWhen(session.last_activity)}>{agoLabel}</span>
           {/if}
         </span>
@@ -930,19 +925,16 @@ import { textoProblema } from '../lib/problema';
     flex-shrink: 0;
   }
 
-  /* Provider da sessão (Codex/Pi). Mesma caixa do engine-chip, tinta NEUTRA: é rótulo de identidade,
-     não alarme nem destaque — não pode competir com o estado, o ⚠ sem id ou o motor. */
+  /* O nome do harness fica antes da pasta, para não sumir quando o nome da sessão é longo. */
   .prov-chip {
-    font-size: 10px; font-weight: 700; letter-spacing: 0.02em;
-    color: var(--text-muted); background: var(--bg-elevated);
+    font-size: 11px; font-weight: 700; letter-spacing: 0.02em;
+    color: var(--text-secondary); background: var(--surface-raised);
     border: 1px solid var(--border-subtle);
     padding: 1px 6px; border-radius: var(--radius-full);
     white-space: nowrap; flex-shrink: 0;
     /* O glifo colorido do provider entrou na frente do texto: sem flex ele quebrava a linha de base do chip. */
     display: inline-flex; align-items: center; gap: 4px;
   }
-  /* Claude (sem texto, só a marca): chip só-ícone fica redondo e menor que os chips com texto. */
-  .prov-chip--so-icone { padding: 1px 3px; }
 
   /* Conta da sessão (Anthropic ou Codex): chip neutro com um ponto na cor da conta — mesma receita
      da Sidebar, onde está o porquê. */

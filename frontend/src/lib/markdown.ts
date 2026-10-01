@@ -15,6 +15,12 @@ function escapeHtml(str: string): string {
     .replace(/"/g, '&quot;');
 }
 
+function inlineCodeHtml(code: string, opts: MarkdownOptions): string {
+  const shown = `<code>${code}</code>`;
+  if (!opts.commandActions || code.length > 4096 || /[\r\n]/.test(code) || !/\S\s+\S/.test(code)) return shown;
+  return `<span class="run-inline">${shown}<button type="button" class="run-inline-btn" data-run-command aria-label="${escapeHtml(m.code_run_aria())}">${m.code_run()}</button></span>`;
+}
+
 // Escapa o texto antes do HTML; fragmentos de citação são gerados separadamente.
 function renderInline(input: string, opts: MarkdownOptions): string {
   const fragments: string[] = [];
@@ -56,7 +62,7 @@ function renderInline(input: string, opts: MarkdownOptions): string {
           return keep(code !== undefined ? `<code>${escapeHtml(code)}</code>` : escapeHtml(label ?? ref.path));
         }
         if (ref) return chip(ref.path, ref.line);
-        return keep(code !== undefined ? `<code>${escapeHtml(code)}</code>` : renderInline(whole, {}));
+        return keep(code !== undefined ? inlineCodeHtml(escapeHtml(code), opts) : renderInline(whole, {}));
       });
     const refs = parseCodeReferences(source);
     for (const ref of refs.reverse()) {
@@ -67,7 +73,7 @@ function renderInline(input: string, opts: MarkdownOptions): string {
   }
   let text = escapeHtml(source);
   // inline code primeiro (pra não interpretar ** dentro de código)
-  text = text.replace(/`([^`]+)`/g, (_, code) => `<code>${code}</code>`);
+  text = text.replace(/`([^`]+)`/g, (_, code) => inlineCodeHtml(code, opts));
   text = text.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
   text = text.replace(/(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)/g, '<em>$1</em>');
   // links [texto](url) — só http(s) (evita javascript:). escapeHtml não toca em "/" -> url intacta;
@@ -102,7 +108,7 @@ function _cells(line: string): string[] {
 // errado pro arquivo — o paragrafo sai picado no meio da frase. Com a opcao ligada, linhas
 // consecutivas de texto sao juntadas, como manda o CommonMark. Blocos (lista, heading, cerca,
 // tabela, citacao, regra) nunca sao juntados.
-export interface MarkdownOptions { joinWrapped?: boolean; fileLinks?: boolean }
+export interface MarkdownOptions { joinWrapped?: boolean; fileLinks?: boolean; commandActions?: boolean }
 
 function joinSoftWraps(input: string): string {
   const src = input.split('\n');
@@ -163,7 +169,10 @@ export function renderMarkdown(input: string, opts: MarkdownOptions = {}): strin
       // Handlers delegados GLOBAIS (lib/codeActions.svelte.ts, listener no document): valem aqui e
       // em qualquer tela que renderize markdown (PairSheet, ActivitySheet, plano...).
       const rotulo = lang ? escapeHtml(lang) : m.comum_codigo();
-      out.push(`<div class="code-block"><div class="code-head"><span class="code-lang">${rotulo}</span><button class="copy-btn" type="button" aria-label="${m.comum_copiar_codigo()}"></button><button class="expand-btn" type="button" aria-label="${m.comum_expandir_codigo()}"></button></div><pre><code${langAttr}>${escapeHtml(code.join('\n'))}</code></pre></div>`);
+      const source = code.join('\n');
+      const run = opts.commandActions && source.trim() && source.length <= 4096 && /^(?:bash|sh|zsh|fish|shell|powershell|ps1|pwsh)$/i.test(lang)
+        ? `<button class="run-code-btn" type="button" data-run-command aria-label="${escapeHtml(m.code_run_aria())}">${m.code_run()}</button>` : '';
+      out.push(`<div class="code-block"><div class="code-head"><span class="code-lang">${rotulo}</span>${run}<button class="copy-btn" type="button" aria-label="${m.comum_copiar_codigo()}"></button><button class="expand-btn" type="button" aria-label="${m.comum_expandir_codigo()}"></button></div><pre><code${langAttr}>${escapeHtml(source)}</code></pre></div>`);
       continue;
     }
 

@@ -2557,6 +2557,13 @@ export async function runShortcutShell(name: string, command: string, label?: st
   return r;
 }
 
+/** Executa o código mostrado na conversa no servidor da sessão, em terminal próprio. */
+export function runCodeCommand(srv: Server, name: string, command: string): Promise<ShortcutShellResult> {
+  return apiFetchForServer<ShortcutShellResult>(srv, `/api/sessions/${encodeURIComponent(name)}/run-code`, {
+    method: 'POST', body: JSON.stringify({ command, label: command.trim().slice(0, 80) }),
+  });
+}
+
 /** Atalhos do projeto da sessão (guardados na máquina do servidor, por repositório). */
 export function getProjectShortcuts(name: string): Promise<ProjectShortcuts> {
   return apiFetch(`/api/sessions/${encodeURIComponent(name)}/project-shortcuts`);

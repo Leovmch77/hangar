@@ -6587,6 +6587,23 @@ def _shortcut_env() -> dict[str, str]:
 @app.post("/api/sessions/{name}/shortcut-shell", dependencies=[Depends(require_auth)],
           status_code=202)
 def shortcut_shell(name: str, body: ShortcutShellBody, request: Request):
+    return _shortcut_shell(name, body, request, powershell=False)
+
+
+@app.post("/api/sessions/{name}/run-code", dependencies=[Depends(require_auth)], status_code=202)
+def run_code(name: str, body: ShortcutShellBody, request: Request):
+    # O corpo desta rota só usa comando/rótulo; flags de atalho não alteram a máquina nem a pasta.
+    if len(body.command) > 4096:
+        raise HTTPException(400, detail=erro("erro_run_code_longo", "comando longo demais"))
+    if "\0" in body.command:
+        raise HTTPException(400, detail=erro("erro_run_code_invalido", "comando invalido"))
+    from app import termsock
+    if not termsock.painel_disponivel():
+        raise HTTPException(409, detail=erro("erro_run_code_terminal", "terminal indisponivel nesta maquina"))
+    return _shortcut_shell(name, ShortcutShellBody(command=body.command, label=body.label), request, powershell=True)
+
+
+def _shortcut_shell(name: str, body: ShortcutShellBody, request: Request, *, powershell: bool):
     # Atalho "shell" da fileira. Cada execucao ganha um terminal escondido proprio
     # (app/shortcut_terminals.py, no tmux e no psmux): a pessoa ve a saida numa aba do painel e
     # fecha quando quiser, e o programa sobrevive a restart do backend. `runs_in="hangar"` cria uma
@@ -6620,14 +6637,15 @@ def shortcut_shell(name: str, body: ShortcutShellBody, request: Request):
     from app.shortcut_transfer import has_placeholder
     missing = has_placeholder(command)
     if missing:
-        raise HTTPException(422, detail=erro("erro_shortcut_segredo",
+        # Na rota nova, 422 fica reservado para comando que abriu terminal e falhou.
+        raise HTTPException(400 if powershell else 422, detail=erro("erro_shortcut_segredo",
                                              f"preencha a credencial {missing} antes de usar",
                                              nome=missing))
     if body.runs_in == "hangar":
         return _shortcut_shell_hangar(name, cwd, command, body)
     from app import shortcut_terminals
     term = shortcut_terminals.start(name, cwd, command, body.label or "", _shortcut_display_env(),
-                                    key=body.key, ask=body.ask)
+                                    key=body.key, ask=body.ask, powershell=powershell)
     if term is None:
         raise HTTPException(500, detail=erro("erro_shortcut_shell", "o multiplexador recusou criar o terminal"))
     # Sem o texto do comando: ele pode carregar credencial.

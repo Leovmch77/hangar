@@ -127,28 +127,12 @@ describe('SessionCard: diff stats e tempo (referência super.engineering)', () =
     unmount(comp);
   });
 
-  it('chip de provider é só o glifo; o nome fica no leitor de tela', () => {
-    // O que a tela mostra, sem o texto que só o leitor de tela lê.
-    const visivel = (n: Element | null | undefined) => {
-      const c = n?.cloneNode(true) as Element | undefined;
-      c?.querySelector('.sr-only')?.remove();
-      return (c?.textContent ?? '').trim();
-    };
-    // `showProvider` nasce false: o chip só entra onde a lista pede. Sem passar aqui, o que se
-    // testava era uma marca que nem renderiza — e o `?.` das asserções escondia isso, porque
-    // `undefined` passa no `not.toBeNull()`.
-    const { el, comp } = montar(sessao({ provider: 'kimi' }), { showProvider: true });
-    const chipKimi = el.querySelector('.prov-chip');
-    expect(chipKimi, 'o chip do provider tem que existir para o resto do teste valer').not.toBeNull();
-    expect(chipKimi?.querySelector('.pg svg')).not.toBeNull();
-    expect(visivel(chipKimi), 'o nome não vai pra tela — cada provider tem marca própria').toBe('');
-    expect(chipKimi?.querySelector('.sr-only')?.textContent).toContain('Kimi');
-    const { el: el2, comp: comp2 } = montar(sessao({ provider: 'claude' }), { showProvider: true });
-    const chipClaude = el2.querySelector('.prov-chip--so-icone');
-    expect(chipClaude).not.toBeNull();
-    expect(chipClaude?.querySelector('.pg svg')).not.toBeNull();
-    expect(visivel(chipClaude)).toBe('');
-    expect(chipClaude?.querySelector('.sr-only')?.textContent).toContain('Claude');
+  it('mostra o nome do harness antes das demais informações', () => {
+    const { el, comp } = montar(sessao({ provider: 'kimi' }));
+    expect(el.querySelector('.meta-line .prov-chip')?.textContent).toContain('Kimi');
+    expect(el.querySelector('.meta-line .prov-chip .pg svg')).not.toBeNull();
+    const { el: el2, comp: comp2 } = montar(sessao({ provider: 'claude' }));
+    expect(el2.querySelector('.meta-line .prov-chip')?.textContent).toContain('Claude');
     unmount(comp);
     unmount(comp2);
   });
@@ -163,7 +147,7 @@ describe('SessionCard: orquestrador sem LLM', () => {
   });
 
   it('sem glifo de provider mesmo quando a lista mistura agentes', () => {
-    const { el, comp } = montar(sessao({ provider: 'orq', orq_arbiter: 'arb' }), { showProvider: true });
+    const { el, comp } = montar(sessao({ provider: 'orq', orq_arbiter: 'arb' }));
     expect(el.querySelector('.prov-chip')).toBeNull();
     unmount(comp);
   });

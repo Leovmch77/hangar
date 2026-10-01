@@ -72,6 +72,17 @@ describe('citações de arquivo inline', () => {
 
 
 describe('renderMarkdown — cercas de código', () => {
+  it('oferece executar só no código marcado da resposta, preservando o texto exato', () => {
+    const opts = { fileLinks: true, commandActions: true };
+    const inline = renderMarkdown('Rode `npx --yes wrangler login` aqui.', opts);
+    expect(inline).toContain('<code>npx --yes wrangler login</code><button type="button" class="run-inline-btn" data-run-command');
+    expect(inline).not.toContain('<code>Rode');
+    expect(renderMarkdown('Veja `src/main.ts`.', opts)).not.toContain('data-run-command');
+    expect(renderMarkdown('Rode `npx --yes wrangler login` aqui.')).not.toContain('data-run-command');
+    expect(renderMarkdown('```powershell\nGet-Process\n```', opts)).toContain('class="run-code-btn"');
+    expect(renderMarkdown('```typescript\nconst x = 1\n```', opts)).not.toContain('data-run-command');
+  });
+
   it('renderiza cerca indentada dentro de item de lista', () => {
     // O Pi escreve assim quando o bloco está dentro de uma lista numerada. Antes disto o bloco
     // inteiro saía como texto cru, com os ``` à mostra na bolha do celular.

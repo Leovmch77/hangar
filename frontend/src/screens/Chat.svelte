@@ -78,7 +78,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   import { hasSeam, mergeHistoryWithLive } from '@hangar/core';
   import { especificidade, donoDaLinha } from '@hangar/core';
   import { parseStatusLine, queuedMessages } from '@hangar/core';
-  import { mergeProjectShortcuts, runShortcutShell, sendsDirect, shortcutMissingSecret } from '@hangar/core';
+  import { mergeProjectShortcuts, runShortcutShell, runCodeCommand, sendsDirect, shortcutMissingSecret } from '@hangar/core';
   import { runsInHangar, answersInApp, hangarHome, hangarKeyOf, OutdatedServerError } from '@hangar/core';
   import {
     hangarForShortcut, hangarOf, liveTerminals, openQuestion, requestHangarTab, sessionTerminalFor, takeHangarTab,
@@ -2806,6 +2806,34 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
     }
   }
 
+  let runningCode = false;
+  let runCodeActive = true;
+  onDestroy(() => { runCodeActive = false; });
+  async function runCommandFromMessage(command: string) {
+    if (runningCode || !command.trim()) return;
+    const server = listServers().find((item) => item.id === chatServerId);
+    if (!server) { mostrarAviso(m.servidor_nao_existe()); return; }
+    runningCode = true;
+    let unsupported = false;
+    const previous = new Set(shortcutTerminalsOf(atalhoKey).map((term) => term.id));
+    try {
+      const result = await runCodeCommand(server, sessionName, command.trim());
+      if (result.terminal) focusShortcutTerminal(atalhoKey, result.terminal.id);
+    } catch (error) {
+      unsupported = (error as { status?: number } | null)?.status === 404;
+      mostrarAviso(unsupported ? m.code_run_update_server() : error);
+    } finally {
+      const list = unsupported ? null : await refreshShortcutTerminals(atalhoKey).catch((error) => { mostrarAviso(error); return null; });
+      const created = list?.slice().reverse().find((term) => !previous.has(term.id));
+      if (created && runCodeActive) {
+        focusShortcutTerminal(atalhoKey, created.id);
+        await tick();
+        xtermOpen = true;
+      }
+      runningCode = false;
+    }
+  }
+
   // Cópia única do servidor: perguntando abre a pergunta; rodando, a janela vem pra frente ou o
   // painel abre na aba dele; parado, roda.
   async function runInHangar(s: ShortcutShell) {
@@ -3233,6 +3261,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
       onAnswer={handleAnswer}
       onAskClose={cancelAsk}
       onForward={(t) => (forwardText = t)}
+      onRunCommand={!desktop ? runCommandFromMessage : undefined}
       onOpenSession={abrirRemetente}
       onOpenOrq={() => (orqOpen = true)}
       onDescartarFila={descartarFila}

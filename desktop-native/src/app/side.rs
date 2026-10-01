@@ -127,6 +127,7 @@ pub(super) struct Side {
     files: Option<(SessionKey, Option<Result<Vec<GitFile>, String>>)>,
     diff: Option<(SessionKey, String, Option<Result<(String, bool), String>>)>,
     reloading: HashSet<SessionKey>,
+    run_code_pending: HashSet<SessionKey>,
     /// A aba Git da sessão aberta (dono = `session_owner`).
     pub(super) git: Option<(SessionOwner, Entity<super::git::GitPanel>)>,
     /// Terminais dos atalhos shell por nome de sessão, e a aba que o painel deve trazer pra frente.
@@ -148,7 +149,7 @@ impl Default for Side {
     fn default() -> Self {
         let saved = appearance::get();
         Self { open: true, menu: false, width: saved.side_width, browser_width: saved.side_browser_width, drag: None, shortcuts: None, project: ProjectShortcuts::default(), cost: None, cost_task: None, cost_gen: 0, orq: Default::default(),
-            files: None, diff: None, reloading: HashSet::new(), git: None, run: None, browsers: HashMap::new(), browser_open: false,
+            files: None, diff: None, reloading: HashSet::new(), run_code_pending: HashSet::new(), git: None, run: None, browsers: HashMap::new(), browser_open: false,
             shortcut_terms: HashMap::new(), shortcut_focus: HashMap::new(), shortcut_running: HashMap::new(), shortcut_recheck: HashMap::new() }
     }
 }
@@ -161,6 +162,7 @@ impl Side {
         self.orq.reset();
         self.on_select();
         self.reloading.clear();
+        self.run_code_pending.clear();
         self.shortcut_terms.clear();
         self.shortcut_focus.clear();
         self.shortcut_running.clear();
@@ -447,6 +449,32 @@ impl Hangar {
         cx.notify();
     }
 
+    pub(super) fn run_code_command(&mut self, code: String, cx: &mut Context<Self>) {
+        let Some(key) = self.selected_key() else { return; };
+        let command = code.trim();
+        if command.is_empty() || command.len() > 4096 || command.contains('\0') {
+            self.action_feedback.insert(key, (tr("code_run_invalid"), true));
+            cx.notify();
+            return;
+        }
+        if !self.side.run_code_pending.insert(key.clone()) { return; }
+        let Some(api) = self.api_for(&key.server) else {
+            self.side.run_code_pending.remove(&key);
+            self.action_feedback.insert(key, (tr("term_disconnected"), true));
+            cx.notify();
+            return;
+        };
+        let label = command.lines().next().unwrap_or(command).chars().take(80).collect::<String>();
+        self.action_feedback.insert(key.clone(), (tr("code_run_starting"), false));
+        let (connection, tx) = (self.connection, self.tx.clone());
+        let body = json!({"command": command, "label": label});
+        self.runtime.spawn(async move {
+            let result = api.act(&key.name, &["run-code"], Some(body), false, 30).await;
+            let _ = tx.send(Envelope { connection, selection: None, payload: Payload::Reply(key, Reply::RunCode, result) }).await;
+        });
+        cx.notify();
+    }
+
     fn reload_allowed(&self) -> bool {
         self.chat_online && self.chat.state.state == "idle"
             && self.selected_key().is_some_and(|key| !self.side.reloading.contains(&key))
@@ -527,6 +555,23 @@ impl Hangar {
                     }
                     Err(error) if matches!(error.status, Some(404 | 405)) => (tr("shortcut_shell_unsupported"), true),
                     Err(error) => (format!("{label}: {}", Self::failure(&error)), true),
+                };
+                self.action_feedback.insert(key, note);
+            }
+            Reply::RunCode => {
+                self.side.run_code_pending.remove(&key);
+                let terminal = result.as_ref().ok().and_then(|value| value.pointer("/terminal/id")).and_then(Value::as_str).map(str::to_owned);
+                let failed_with_terminal = result.as_ref().err().is_some_and(|error| error.status == Some(422));
+                if terminal.is_some() || failed_with_terminal {
+                    self.refresh_shortcut_terms(&key.name);
+                    if self.selected_key().as_ref() == Some(&key) {
+                        self.open_session_terminal(&key.server, &key.name, terminal.as_deref().unwrap_or(""), window, cx);
+                    }
+                }
+                let note = match result {
+                    Ok(_) => (tr("code_run_started"), false),
+                    Err(error) if error.status == Some(404) => (tr("code_run_update_server"), true),
+                    Err(error) => (Self::failure(&error), true),
                 };
                 self.action_feedback.insert(key, note);
             }
