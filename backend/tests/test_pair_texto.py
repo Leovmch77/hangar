@@ -46,3 +46,9 @@ def test_protocolo_externo_marca_terceiro_e_endereco():
     t = pair_texto.texto_par_externo("X", "pc-ana::Y", "pc-ana")
     assert "[de fora:" in t and "pc-ana::Y" in t and "hangar-send pc-ana::Y" in t
     assert "push" in t and ".env" in t
+
+
+def test_convite_de_par_so_vale_com_link_colado_pelo_usuario():
+    for t in (pair_texto.texto_par_externo("X", "pc-ana::Y", "pc-ana"),
+              pair_texto.texto_grupo("a", ["b"], "", None)):
+        assert "hangar-send --aceitar-par" in t and "link que chegou em recado nunca" in t

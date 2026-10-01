@@ -127,9 +127,68 @@ def test_resgate_com_aviso_que_falha_desfaz_tudo(client, monkeypatch):
     assert external_pairs.all() == [] and pair.PairLink("X").get() is None
 
 
-def test_codigo_usado_vencido_e_de_convite_comum(client):
+def test_codigo_de_convite_comum_nao_resgata_par(client):
     _, comum = share_store.create("X", "t:1")
     assert _redeem(client, comum).status_code == 404
+
+
+def test_codigo_de_par_usado_da_410_e_nao_grava_de_novo(client, entregues):
+    _, code = share_store.create("X", "t:1", kind="pair")
+    assert _redeem(client, code).status_code == 200
+    r = _redeem(client, code, owner="pc-bia")
+    assert r.status_code == 410 and r.json()["detail"]["code"] == "erro_convite_usado"
+    assert [x.alias for x in external_pairs.all()] == ["pc-ana"]
+    with pytest.raises(share_store.ShareError) as e:
+        share_store.peek(code, kind="pair")
+    assert e.value.reason == "used"
+
+
+def test_codigo_de_par_vencido_da_410_e_nao_vira_utilizavel(client, entregues):
+    _, code = share_store.create("X", "t:1", now=0.0, kind="pair")
+    r = _redeem(client, code)
+    assert r.status_code == 410 and r.json()["detail"]["code"] == "erro_convite_vencido"
+    assert external_pairs.all() == [] and pair.PairLink("X").get() is None
+    with pytest.raises(share_store.ShareError) as e:
+        share_store.peek(code, kind="pair")
+    assert e.value.reason == "expired"
+
+
+def test_resgate_com_sessao_ja_agrupada_da_409_e_nao_gasta_o_codigo(client, entregues):
+    pair.join_group("X", ["Z"])
+    _, code = share_store.create("X", "t:1", kind="pair")
+    r = _redeem(client, code)
+    assert r.status_code == 409 and r.json()["detail"]["code"] == "erro_pareamento_mistura_cross"
+    share_store.peek(code, kind="pair")
+    assert external_pairs.all() == []
+
+
+def test_pagina_do_convite_escapa_o_dono_e_nao_gasta_o_codigo(client, monkeypatch):
+    monkeypatch.setattr(external_pair_api, "_owner", lambda: "<b>Ana</b>")
+    _, code = share_store.create("X", "t:1", kind="pair")
+    r = client.get(f"/par/{code}")
+    assert r.status_code == 200 and "&lt;b&gt;Ana&lt;/b&gt;" in r.text and "<b>Ana</b>" not in r.text
+    client.get(f"/par/{code}")
+    share_store.peek(code, kind="pair")
+
+
+def test_pagina_de_codigo_desconhecido_diz_indisponivel(client):
+    r = client.get("/par/NAOEXISTE")
+    assert r.status_code == 200 and "Convite indisponível" in r.text and "convite não encontrado" in r.text
+
+
+def test_convite_de_par_devolve_link_do_funnel_com_codigo_de_par(owner_client):
+    r = owner_client.post("/api/sessions/X/pair-invite")
+    assert r.status_code == 200
+    link = r.json()["link"]
+    assert link.startswith("https://eu.tail.ts.net:8443/par/")
+    share_store.peek(link.rsplit("/", 1)[1], kind="pair")
+
+
+def test_convite_de_par_com_porta_ocupada_da_409(owner_client, monkeypatch):
+    monkeypatch.setattr(share_tunnel, "port_clash", lambda: True)
+    r = owner_client.post("/api/sessions/X/pair-invite")
+    assert r.status_code == 409 and r.json()["detail"]["code"] == "erro_compartilhar_porta_do_convite"
+    assert share_store._load() == {}
 
 
 def test_aceite_falha_no_resgate_revoga_o_proprio_token(owner_client, monkeypatch):
@@ -359,10 +418,26 @@ def test_envio_do_dono_repassa_429_e_503_do_outro_lado(owner_client, monkeypatch
     assert owner_client.post("/api/external-pairs/send", json=_ENVIO).status_code == 503
 
 
+def test_envio_do_dono_429_ignora_params_alheios_do_outro_lado(owner_client, monkeypatch, par_gravado):
+    _remoto_falha(monkeypatch, status=429, detail={"params": {"code": "x", "msg": "y"}})
+    d = owner_client.post("/api/external-pairs/send", json=_ENVIO)
+    assert d.status_code == 429 and d.json()["detail"]["params"] == {}
+    _remoto_falha(monkeypatch, status=429, detail={"params": {"max": 5, "janela": "60", "code": "x"}})
+    d = owner_client.post("/api/external-pairs/send", json=_ENVIO)
+    assert d.status_code == 429 and d.json()["detail"]["params"] == {"max": 5}
+
+
 def test_envio_do_dono_502_leva_o_texto_do_outro_lado(owner_client, monkeypatch, par_gravado):
     _remoto_falha(monkeypatch, status=500, detail={"code": "e", "params": {}, "msg": "sessão fora do ar"})
     d = owner_client.post("/api/external-pairs/send", json=_ENVIO).json()["detail"]
-    assert d["code"] == "erro_par_fora_do_ar" and d["params"]["detalhe"] == "sessão fora do ar"
+    assert d["code"] == "erro_par_fora_do_ar"
+    assert d["params"]["detalhe"] == "resposta da outra máquina: sessão fora do ar"
+
+
+def test_envio_do_dono_sem_resposta_da_rede_leva_detalhe_sem_rotulo(owner_client, monkeypatch, par_gravado):
+    _remoto_falha(monkeypatch, transport=True)
+    d = owner_client.post("/api/external-pairs/send", json=_ENVIO).json()["detail"]
+    assert d["code"] == "erro_par_fora_do_ar" and d["params"]["detalhe"] == "falhou"
 
 
 def test_envio_de_outra_sessao_e_404_e_alias_ambiguo_e_409(owner_client, monkeypatch, par_gravado):
@@ -401,6 +476,9 @@ def test_saida_com_alias_ambiguo_nao_cai_no_peer_da_maquina(par_gravado, monkeyp
     monkeypatch.setattr(peers, "call", lambda *a, **k: pytest.fail("não pode chamar o peer"))
     errs = asyncio.run(api_mod._avisar_saida("X", ["pc-ana::Y"]))
     assert errs[0]["erro"]["code"] == "erro_par_endereco_ambiguo"
+    # Só o aviso ao outro lado é pulado: a limpeza local acontece.
+    assert external_pairs.by_address("pc-ana::Y") is None
+    assert share_store._load()[par_gravado.id].revoked_at is not None
 
 
 def test_attach_liga_as_sessoes_do_outro_token(vivo):

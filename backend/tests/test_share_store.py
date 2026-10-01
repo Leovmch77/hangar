@@ -300,3 +300,13 @@ def test_revoke_session_filtra_por_tipo():
     assert share_store.lookup_token(token).share_for("a").revoked_at is None
     assert share_store.revoke_session("a") == 1
     assert share_store.lookup_token(token).share_for("a").revoked_at is not None
+
+
+def test_sessao_compartilhada_e_pareada_no_mesmo_token_resolve_para_o_convite():
+    _, c = share_store.create("proj", "t:1", now=1000.0)
+    _, tok = share_store.redeem(c, "Pixel", now=1001.0)
+    _, tok_par = share_store.create_redeemed("proj", "t:1", kind="pair", now=1002.0)
+    assert share_store.attach(tok, tok_par, now=1003.0) == 1
+    guest = share_store.lookup_token(tok)
+    # A cópia do par é mais nova, mas o convite de verdade vence.
+    assert guest.kind_of("proj") == "share"

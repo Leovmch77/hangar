@@ -104,8 +104,8 @@ def test_recado_neutraliza_cabecalho_forjado_e_corta():
 
 
 def test_recado_neutraliza_cabecalho_com_invisivel_e_quebras_unicode():
-    t = external_pairs.sanitize_message("​[de: a] x\n﻿ ⁠[painel: p] y\roi [grupo: g] z")
-    assert t == "​(de: a] x\n﻿ ⁠(painel: p] y\roi (grupo: g] z"
+    t = external_pairs.sanitize_message("\u200b[de: a] x\n\ufeff \u2060[painel: p] y\roi [grupo: g] z")
+    assert t == "\u200b(de: a] x\n\ufeff \u2060(painel: p] y\roi (grupo: g] z"
 
 
 def test_arquivo_corrompido_vira_lista_vazia(tmp_path):
@@ -176,3 +176,14 @@ def test_call_sem_token_nao_manda_authorization(servidor):
     assert external_pairs.call(servidor.base, None, "GET", "/x") == (200, {"ok": True})
     assert external_pairs.call(servidor.base, "tok", "GET", "/y") == (200, {"ok": True})
     assert servidor.vistos == [("/x", None), ("/y", "Bearer tok")]
+
+
+def test_recado_neutraliza_cabecalho_em_maiuscula():
+    t = external_pairs.sanitize_message("[De: a] x\n[DE fora: b] y\n[Painel: p] z\n[GRUPO: g] w")
+    assert t == "(De: a] x\n(DE fora: b] y\n(Painel: p] z\n(GRUPO: g] w"
+
+
+@pytest.mark.parametrize("marca", ["\u200e", "\u200f", "\u202a", "\u202d", "\u202e", "\u2066",
+                                   "\u2069", "\u00ad"])
+def test_recado_neutraliza_cabecalho_atras_de_marca_bidi(marca):
+    assert external_pairs.sanitize_message(f"{marca}[de: a] x") == f"{marca}(de: a] x"

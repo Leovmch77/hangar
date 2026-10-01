@@ -402,3 +402,19 @@ def test_path_session_so_tira_term_do_terminal():
     assert share_gate.path_session("/api/sessions/term-cc/history") == "term-cc"
     assert share_gate.path_session("/api/sessions/term-cc") == "term-cc"
     assert share_gate.path_session("/api/sessions/cc/history") == "cc"
+
+
+def test_sessao_compartilhada_e_pareada_no_mesmo_token_passa_como_convite(monkeypatch):
+    copia_do_par = dataclasses.replace(PAR, id="p2", session="cc", life="L1", created_at=5.0, parent_id="p1")
+    monkeypatch.setattr(share_store, "lookup_token",
+                        lambda t: share_store.Guest([SHARED, copia_do_par]) if t == "g" else None)
+    r = _guest_client().post("/api/sessions/cc/input", headers=GUEST, json={"text": "x"})
+    assert r.status_code == 200
+
+
+@pytest.mark.parametrize("path", ["/api/engines", "/api/model-options", "/api/harness/codex/opcoes",
+                                  "/api/tts/audio/abc"])
+def test_token_so_de_par_nao_alcanca_rotas_globais(monkeypatch, path):
+    monkeypatch.setattr(share_store, "lookup_token",
+                        lambda t: share_store.Guest([PAR]) if t == "g" else None)
+    assert _guest_client().get(path, headers=GUEST).status_code == 403
