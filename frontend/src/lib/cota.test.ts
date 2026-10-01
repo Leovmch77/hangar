@@ -2,7 +2,7 @@
 // rede aqui — recebe o CotaConta[] de /api/cotas e devolve o quê mostrar.
 import { describe, it, expect, beforeEach } from 'vitest';
 import { overwriteGetLocale } from '../paraglide/runtime';
-import { faixaDeCota, nivelDePct, faltaPara, diaDoReset, janelaLonga, VELHA_APOS_S, piorJanela, exhaustedWindow } from './cota';
+import { faixaDeCota, nivelDePct, faltaPara, diaDoReset, janelaLonga, VELHA_APOS_S, piorJanela, exhaustedWindow, bestAccountWithQuota } from './cota';
 import type { CotaConta } from './contaEstado';
 
 function lida(label: string, cinco: number, sete: number, extra: Partial<CotaConta> = {}): CotaConta {
@@ -169,5 +169,26 @@ describe('exhaustedWindow — conta sem limite bloqueia o envio', () => {
     expect(exhaustedWindow(faixaDeCota([semLeitura('a')])![0])).toBeNull();
     expect(exhaustedWindow({ ...faixaDeCota([lida('a', 100, 100)])![0], estado: 'expirada' })).toBeNull();
     expect(exhaustedWindow(null)).toBeNull();
+  });
+});
+
+describe('bestAccountWithQuota', () => {
+  const paths = ['/home/u/a', '/home/u/b', '/home/u/c'];
+  it('escolhe a conta com mais folga entre as não esgotadas', () => {
+    const l = faixaDeCota([lida('a', 100, 40), lida('b', 50, 70), lida('c', 20, 30)]);
+    expect(bestAccountWithQuota(l, paths)).toBe('/home/u/c');
+  });
+  it('100% de um modelo só não esgota a conta', () => {
+    const b = lida('b', 10, 20);
+    b.janelas = [...b.janelas, { rotulo: 'Fable', pct: 100, reset_ts: 1, por_modelo: true }];
+    expect(bestAccountWithQuota(faixaDeCota([lida('a', 100, 40), b]), paths)).toBe('/home/u/b');
+  });
+  it('nenhuma disponível -> null', () => {
+    expect(bestAccountWithQuota(faixaDeCota([lida('a', 100, 40), semLeitura('b')]), paths)).toBeNull();
+    expect(bestAccountWithQuota(null, paths)).toBeNull();
+  });
+  it('empate fica com a ativa; conta fora da lista não conta', () => {
+    const l = faixaDeCota([lida('a', 30, 30), lida('b', 30, 30, { ativa: true }), lida('z', 0, 0)]);
+    expect(bestAccountWithQuota(l, paths)).toBe('/home/u/b');
   });
 });

@@ -9,6 +9,7 @@ import {
 } from '@hangar/core';
 import { listOwnServers, selectServer, getActiveId, type Server } from './auth';
 import { carregarModelos } from './modelosPorConta';
+import { bestAccountWithQuota, exhaustedWindow, type ContaCota } from './cota';
 import * as m from '../paraglide/messages';
 
 type ProviderProbe = Record<string, { disponivel: boolean; motivo: string | null }>;
@@ -117,6 +118,17 @@ export class NewChatDraft {
     this.#modelTouched = true;
     if (path === this.configDir) return;
     this.configDir = path;
+    void this.loadModels();
+  }
+
+  /** Conta escolhida sem limite e sem escolha manual: troca sozinha pra conta com folga. */
+  switchFromExhausted(linha: ContaCota[] | null) {
+    if (this.provider !== 'claude' || this.#modelTouched || this.configsLoading || !this.configDir) return;
+    const atual = linha?.find((c) => c.id === `claude:${this.configDir}`);
+    if (!exhaustedWindow(atual)) return;
+    const alvo = bestAccountWithQuota(linha, this.configs.map((c) => c.path));
+    if (!alvo || alvo === this.configDir) return;
+    this.configDir = alvo;
     void this.loadModels();
   }
 

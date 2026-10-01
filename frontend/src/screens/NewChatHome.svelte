@@ -12,6 +12,8 @@
   import AccountPill from '../components/newchat/AccountPill.svelte';
   import ModelPill from '../components/newchat/ModelPill.svelte';
   import NewChatComposer from '../components/newchat/NewChatComposer.svelte';
+  import { quotaFeed } from '../lib/quotaFeed.svelte';
+  import { faixaDeCota } from '../lib/cota';
   import { createNewChatDraft } from '../lib/newChatDraft.svelte';
   import { selectServer, getActiveId, listOwnServers } from '../lib/auth';
   import { abrirConfig } from '../lib/configNav';
@@ -24,6 +26,9 @@
 
   const draft = createNewChatDraft();
   draft.init();
+
+  // A pílula de conta mantém o feed vivo; aqui só reage a cada leitura nova.
+  $effect(() => { draft.switchFromExhausted(faixaDeCota(quotaFeed.contas)); });
 
   type Menu = 'machine' | 'folder' | 'branch';
   let menu = $state<Menu | null>(null);
