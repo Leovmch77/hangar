@@ -41,6 +41,8 @@ Only terminal sessions use the tmux pane for live **state** and input. Backend p
 - Also: `pqueue.py` (durable input queue), `preview.py` (live in-flight block), `askquestion.py`
   (native AskUserQuestion stepper), `uploads.py`, `git_ops.py`, `commands.py`, `workflows.py`,
   `model_picker.py`, `config.py`, `fs.py`, `hook_installer.py`.
+- `site/` — landing page de `hangar.dev.br` (HTML estático em PT/EN gerado por `site/build.py`,
+  publicado no Cloudflare Pages); vídeos do app gravados por `site/tools/record/`. Ver `site/README.md`.
 
 Frontend (`frontend/src/`): `screens/` (Chat, Board, …), `components/` (MessageList, NavBar, Composer,
 bubbles, sheets, Spinner/Lottie, …), `lib/` (`api.ts` SSE client, `activity.ts`, `markdown.ts`,
