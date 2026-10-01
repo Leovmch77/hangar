@@ -1,4 +1,4 @@
-// A ponte da sessão, gravada só pelo long-poll do input.ts quando o backend o aceita como dono.
+// A ponte da sessão, gravada só pelo input.ts e apagada quando o backend recusa a instância (409).
 // Os outros arquivos leem SÓ daqui: um `claude -p` filho ou um segundo `claude` no mesmo pane
 // herda o ambiente e não pode falar pela sessão.
 export type Bridge = { url: string; token: string; sessao: string };
