@@ -148,7 +148,7 @@ SCENE_TEXT = {
         "a_tests_desc": "Rodar os testes de webhook",
         "a_flaky_reply": "O teste de timeout ficou estável em 3 rodadas.",
         "k_prompt": "O total da fatura sai com um centavo de diferença em alguns carrinhos. Descubra por quê e corrija.",
-        "k_found": "Achei: `money.ts:41` arredonda **cada item** antes de somar, então um carrinho com 3 itens pode desviar um centavo.",
+        "k_found": "Achei: `money.ts:41` arredonda **cada item** antes de somar, então um carrinho com 3 itens erra por um centavo.",
         "k_answer": ("Corrigido. Cada item mantém a precisão completa e o total é **arredondado uma vez só**.\n\n"
                      "| Carrinho | Antes | Depois |\n|---|---|---|\n| 3 × R$ 3,335 | R$ 10,02 | R$ 10,01 |\n| 7 × R$ 0,145 | R$ 1,05 | R$ 1,02 |\n\n"
                      "Adicionei um teste de propriedade com 10 mil carrinhos aleatórios — **12 testes passam**."),
@@ -159,7 +159,7 @@ SCENE_TEXT = {
         "p_found": "O card de resumo agora separa itens e totais. Mandei o diff para o **checkout-review** dar uma segunda olhada.",
         "p_peer": ("[de: checkout-review] Bloqueante: `money.ts:41` arredonda cada item antes de somar, então um carrinho com 3 itens erra por um centavo. "
                    "Menor: a linha de desconto aparece quando o desconto é 0."),
-        "p_answer": "Os dois corrigidos: o total é arredondado uma vez só e a linha de desconto some quando é `0`. Mandei o commit novo de volta para o **checkout-review**.",
+        "p_answer": "Corrigi os dois: o total é arredondado uma vez só e a linha de desconto some quando é `0`. Mandei o commit novo de volta para o **checkout-review**.",
         "p_reply": "Dois achados, um bloqueante.",
         "p_think": "Corrigir primeiro o arredondamento em money.ts, depois a linha de desconto.",
         "p_tests_desc": "Rodar os testes do checkout",
@@ -286,10 +286,9 @@ def scene_pair(t):
 
 
 def scene_orq(t):
-    # sessões e painel de orquestração do fixture.py, refeitos na língua pedida
+    # sessões de orquestração do fixture.py, refeitas na língua pedida (o painel o setup já refez)
     SESSIONS.clear()
     FX["orq_sessions"](t)
-    FX["PANEL"].clear(); FX["PANEL"].update(FX["panel"](t))
     base_side(t, skip=("mobile-release",))
     SESSIONS["checkout-arbiter"]["state"] = state("working"); SESSIONS["checkout-arbiter"]["info"]["state"] = "working"
     SESSIONS["checkout-arbiter"]["info"]["question"] = None
@@ -349,6 +348,8 @@ def setup(name, lang="en"):
     with LOCK:
         LIVE.clear(); SCR.clear()
         FX["SHORTCUTS"] = FX["shortcuts"](t)
+        # painel refeito a cada cena: nem língua nem avanço da cena anterior vazam
+        FX["PANEL"].clear(); FX["PANEL"].update(FX["panel"](t))
         target, script = SCENES[name](t)
         CUR["script"] = sorted(script, key=lambda x: x[0])
         CUR["target"] = target
