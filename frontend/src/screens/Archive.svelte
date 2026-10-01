@@ -165,6 +165,7 @@ import { intlLocale } from '../lib/locale';
         resumeError = e instanceof Error ? e.message : m.arquivo_retomar_erro();
         return;
       }
+      console.error('archive: resume ok, send failed', name, e);
       // A sessao ja existe: o texto volta ao campo do chat dela pelo rascunho que o Chat ja restaura.
       try { localStorage.setItem(`cp-draft:${name}`, JSON.stringify({ text, jsonl: null })); } catch { /* sem storage */ }
     } finally {
@@ -175,11 +176,10 @@ import { intlLocale } from '../lib/locale';
     window.location.hash = `#/chat/${encodeURIComponent(server.id)}/${encodeURIComponent(name)}`;
   }
 
-  // Conversa aberta por link (lista de Conversas/busca): "voltar" retorna a quem chamou; so cai nas
-  // pastas quando nao ha historico dentro do app.
+  // Conversa aberta por link: "voltar" sai da tela (quem monta decide o destino); pela navegacao de
+  // pastas, volta a lista da pasta.
   function backFromConversation() {
-    if (deepLink && ((history.state?.cpDepth as number | undefined) ?? 0) >= 2) history.back();
-    else if (deepLink) onBack();
+    if (deepLink) onBack();
     else selected = null;
   }
 
