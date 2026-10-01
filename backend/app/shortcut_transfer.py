@@ -9,7 +9,9 @@ fica. Marcador que a pessoa deixou em branco continua no atalho, e o backend rec
 com marcador (ver `has_placeholder`).
 """
 import json
+import os
 import re
+import subprocess
 
 from app import runtime_config as rc
 from app.config import _PALAVRAS_DE_SEGREDO
@@ -171,6 +173,10 @@ def export_payload(ids: list[str] | None = None, include_scripts: bool = True) -
             removed += len(names)
         if isinstance(item.get("pasta"), str):
             item["pasta"] = canonicalize(item["pasta"], roots)
+        if isinstance(item.get("verify"), str):
+            item["verify"], names = scrub(item["verify"], fish=shortcut_scripts.is_fish(item["verify"]))
+            item["verify"] = canonicalize(item["verify"], roots)
+            removed += len(names)
         out.append(item)
     scripts, warnings = shortcut_scripts.collect([
         item["command"] for item in current if item.get("type") == "shell"
@@ -274,6 +280,10 @@ def import_shortcuts(data, apply: bool = False, secrets: dict | None = None) -> 
                 item[field] = resolve(item[field], roots)
         if roots and isinstance(item.get("pasta"), str):
             item["pasta"] = resolve(item["pasta"], roots)
+        if isinstance(item.get("verify"), str):
+            item["verify"], _ = scrub(item["verify"], fish=shortcut_scripts.is_fish(item["verify"]))
+            if roots:
+                item["verify"] = resolve(item["verify"], roots)
     script_items = []
     for script in scripts:
         content, _ = scrub(resolve(script["content"], roots),
@@ -290,7 +300,8 @@ def import_shortcuts(data, apply: bool = False, secrets: dict | None = None) -> 
     merged, added, replaced = _merge(_current(), incoming)
     rc._validate_shortcuts(json.dumps(merged, ensure_ascii=False))
     result = {"added": added, "replaced": replaced,
-              "placeholders": _placeholders(incoming) + _placeholders(script_items)}
+              "placeholders": _placeholders(incoming) + _placeholders(script_items),
+              "verify": [item["id"] for item in incoming if item.get("verify")]}
     if bundled:
         files = []
         for script, filled, display in zip(scripts, script_items, display_scripts):
@@ -335,3 +346,57 @@ def import_shortcuts(data, apply: bool = False, secrets: dict | None = None) -> 
         else:
             save()
     return result
+
+
+VERIFY_TIMEOUT = 60
+MAX_VERIFY_OUTPUT = 4000
+MAX_VERIFY = 20
+
+
+def _verify_argv(command: str) -> list[str]:
+    if os.name == "nt":
+        return ["powershell", "-NoProfile", "-NonInteractive", "-Command", command]
+    return [os.environ.get("SHELL") or "/bin/sh", "-c", command]
+
+
+def fix_prompt(check: dict, scripts: list[str]) -> str:
+    """Pedido de correção para a sessão aberta quando a verificação de um atalho importado falha."""
+    code = "não terminou" if check["code"] is None else f"saiu com {check['code']}"
+    lines = [f'O atalho "{check["label"]}" foi importado nesta máquina, mas a verificação dele falhou.', "",
+             f"Comando de verificação: `{check['command']}` ({code})."]
+    if scripts:
+        lines += ["", "Scripts instalados pela importação:", *(f"- {path}" for path in scripts)]
+    lines += ["", "Saída da verificação:", "```", check["output"] or "(sem saída)", "```", "",
+              "Corrija o que falta para o atalho funcionar, com estas regras:",
+              "- Variável de configuração faltando: pergunte o valor ao usuário e grave no arquivo de configuração que o script lê.",
+              "- Pacote faltando: instale só depois de o usuário confirmar, porque precisa de sudo.",
+              "- Problema em outra máquina (por exemplo, Windows acessado por SSH): resolva por SSH, também só com confirmação do usuário.",
+              f"- No fim, rode `{check['command']}` de novo até sair 0."]
+    return "\n".join(lines)
+
+
+def run_checks(ids: list[str], scripts: list[str], env: dict[str, str]) -> list[dict]:
+    """Roda o `verify` dos atalhos pedidos, sem terminal: o script que pergunta só imprime o que falta."""
+    by_id = {item.get("id"): item for item in _current()}
+    checks = []
+    for shortcut_id in list(dict.fromkeys(ids))[:MAX_VERIFY]:
+        item = by_id.get(shortcut_id) or {}
+        command = item.get("verify")
+        if not isinstance(command, str) or not command.strip():
+            continue
+        try:
+            p = subprocess.run(_verify_argv(command), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                               stderr=subprocess.STDOUT, text=True, errors="replace", timeout=VERIFY_TIMEOUT,
+                               env=env, cwd=os.path.expanduser("~"))
+            code, output = p.returncode, p.stdout or ""
+        except subprocess.TimeoutExpired as e:
+            partial = e.output.decode("utf-8", "replace") if isinstance(e.output, bytes) else (e.output or "")
+            code, output = None, f"{partial}\n(passou de {VERIFY_TIMEOUT} s sem terminar)"
+        except OSError as e:
+            code, output = None, str(e)
+        check = {"id": shortcut_id, "label": item.get("label") or shortcut_id, "command": command,
+                 "code": code, "output": output.strip()[-MAX_VERIFY_OUTPUT:]}
+        if code != 0:
+            check["prompt"] = fix_prompt(check, scripts)
+        checks.append(check)
+    return checks

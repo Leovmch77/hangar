@@ -19,6 +19,26 @@ pub(super) struct ImportDraft {
     expanded: HashSet<String>,
     _changes: Vec<Subscription>,
     pub(super) applying: bool,
+    /// Sessão aberta na hora de importar: recebe o pedido de correção quando um `verify` falha.
+    target: Option<crate::delivery::SessionKey>,
+}
+
+/// Um `verify` rodado pelo backend depois de importar.
+pub(super) struct Check { label: String, ok: bool, output: String }
+
+/// As verificações e o pedido de correção: `fix` diz se foi entregue à sessão aberta (nome) ou o erro do envio;
+/// `None` com falha = não havia sessão desta máquina aberta.
+pub(super) struct Checks { list: Vec<Check>, prompt: String, fix: Option<Result<String, String>> }
+
+fn parse_checks(value: &Value) -> (Vec<Check>, String) {
+    let (mut list, mut prompts) = (Vec::new(), Vec::new());
+    for check in value.get("checks").and_then(Value::as_array).into_iter().flatten() {
+        let text = |key: &str| check.get(key).and_then(Value::as_str).unwrap_or("").to_owned();
+        let ok = check.get("code").and_then(Value::as_i64) == Some(0);
+        if !ok && !text("prompt").is_empty() { prompts.push(text("prompt")); }
+        list.push(Check { label: text("label"), ok, output: text("output") });
+    }
+    (list, prompts.join("\n\n---\n\n"))
 }
 
 pub(super) struct ExportDraft {
@@ -144,6 +164,7 @@ impl Hangar {
         self.shortcuts.import_loading = true;
         self.shortcuts.transfer_note = None;
         self.shortcuts.transfer_warnings.clear();
+        if !self.shortcuts.verifying { self.shortcuts.checks = None; }
         let prompt = cx.prompt_for_paths(PathPromptOptions { files: true, directories: false, multiple: false, prompt: None });
         let (tx, connection, runtime, seq) = (self.tx.clone(), self.connection, self.runtime.handle().clone(), self.shortcuts.transfer_seq);
         cx.spawn(async move |this, cx| {
@@ -180,8 +201,10 @@ impl Hangar {
     fn apply_import(&mut self, cx: &mut Context<Self>) {
         // Uma gravação da lista em voo e a importação não se cruzam: a segunda apagaria a primeira.
         if self.shortcuts.busy() { return; }
+        let target = self.selected_key();
         let Some(draft) = self.shortcuts.import.as_mut() else { return };
         if draft.applying || draft.connection != self.connection { return; }
+        draft.target = target;
         if draft.fields.iter().any(|(id, _, _, input)| id.starts_with("script:") && input.read(cx).value().is_empty()) { return; }
         let api = draft.api.clone();
         let seq = self.shortcuts.transfer_seq;
@@ -201,10 +224,46 @@ impl Hangar {
         cx.notify();
     }
 
+    /// Roda o `verify` dos atalhos recém-importados e, se algum falhar, entrega o pedido de correção à sessão aberta.
+    fn verify_imported(&mut self, draft: ImportDraft, ids: Vec<String>, cx: &mut Context<Self>) {
+        let scripts: Vec<String> = draft.files.iter().filter_map(|f| f.get("path").and_then(Value::as_str)).map(str::to_owned).collect();
+        // Os scripts foram instalados na máquina da importação: sessão de outra máquina não os alcança.
+        let identity = draft.api.identity();
+        let target = draft.target.filter(|key| key.server == identity)
+            .and_then(|key| self.api_for(&key.server).map(|api| (api, key.name)));
+        let (api, seconds) = (draft.api, 60 * ids.len().min(20) as u64 + 15);
+        self.shortcuts.verifying = true;
+        self.shortcuts.checks = None;
+        let done = self.shortcuts_send_later();
+        self.runtime.spawn(async move {
+            let body = json!({"ids": ids, "scripts": scripts});
+            let value = match api.server_send(reqwest::Method::POST, &["shortcuts", "verify"], Some(body), seconds).await {
+                Ok(value) => value,
+                Err(error) => return done(ShortcutsReply::Verified(Err(Hangar::fetch_failure(&error)))).await,
+            };
+            let (list, prompt) = parse_checks(&value);
+            let fix = match target {
+                Some((api, name)) if !prompt.is_empty() =>
+                    Some(api.send(&name, &prompt).await.map(|_| name).map_err(|e| Hangar::fetch_failure(&e))),
+                _ => None,
+            };
+            done(ShortcutsReply::Verified(Ok(Checks { list, prompt, fix }))).await
+        });
+        cx.notify();
+    }
+
+    /// Sem sessão desta máquina aberta: o pedido vai para a área de transferência e abre a criação de sessão.
+    fn open_fix_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(checks) = &self.shortcuts.checks { cx.write_to_clipboard(ClipboardItem::new_string(checks.prompt.clone())); }
+        self.open_new_session(None, window, cx);
+    }
+
     pub(super) fn receive_transfer(&mut self, reply: ShortcutsReply, window: &mut Window, cx: &mut Context<Self>) {
         let seq = match &reply {
             ShortcutsReply::ExportCandidates(seq, _) | ShortcutsReply::Exported(seq, _)
                 | ShortcutsReply::Previewed(seq, ..) | ShortcutsReply::Imported(seq, _) => *seq,
+            // Resultado de atalhos já gravados: vale mesmo com outro exportar/importar começado depois.
+            ShortcutsReply::Verified(..) => self.shortcuts.transfer_seq,
             _ => return,
         };
         if seq != self.shortcuts.transfer_seq { return; }
@@ -260,17 +319,28 @@ impl Hangar {
                     files: preview.get("files").and_then(Value::as_array).cloned().unwrap_or_default(),
                     expanded: HashSet::new(), _changes: changes,
                     added: preview.get("added").and_then(Value::as_u64).unwrap_or(0),
-                    replaced: preview.get("replaced").and_then(Value::as_u64).unwrap_or(0), fields, applying: false });
+                    replaced: preview.get("replaced").and_then(Value::as_u64).unwrap_or(0), fields, applying: false, target: None });
                 cx.notify();
             }
             ShortcutsReply::Previewed(_, _, Err(error)) => {
                 self.shortcuts.import_loading = false;
                 self.transfer_note(tr("shortcuts_import_invalid").replace("{error}", &error), true, cx);
             }
-            ShortcutsReply::Imported(_, Ok(_)) => {
-                self.shortcuts.import = None;
+            ShortcutsReply::Imported(_, Ok(value)) => {
+                let draft = self.shortcuts.import.take();
                 self.transfer_note(tr("shortcuts_imported"), false, cx);
                 self.reload_shortcuts(cx);
+                let ids: Vec<String> = value.get("verify").and_then(Value::as_array).into_iter().flatten()
+                    .filter_map(Value::as_str).map(str::to_owned).collect();
+                if let (false, Some(draft)) = (ids.is_empty(), draft) { self.verify_imported(draft, ids, cx); }
+            }
+            ShortcutsReply::Verified(result) => {
+                self.shortcuts.verifying = false;
+                match result {
+                    Ok(checks) => self.shortcuts.checks = Some(checks),
+                    Err(error) => self.transfer_note(tr("shortcuts_verify_failed").replace("{error}", &error), true, cx),
+                }
+                cx.notify();
             }
             ShortcutsReply::Imported(_, Err(error)) => {
                 if let Some(draft) = self.shortcuts.import.as_mut() { draft.applying = false; }
@@ -314,6 +384,33 @@ impl Hangar {
             .when(!self.shortcuts.transfer_warnings.is_empty(), |el| el
                 .child(div().font_weight(FontWeight::SEMIBOLD).child(tr_shared("shortcut_bundle_warnings", &[])))
                 .children(self.shortcuts.transfer_warnings.iter().map(|warning| div().text_color(theme::warning_text()).child(warning.clone())))))
+    }
+
+    /// Resultado da verificação dos atalhos importados e o caminho da correção.
+    pub(super) fn render_checks(&self, cx: &mut Context<Self>) -> Option<Div> {
+        if self.shortcuts.verifying {
+            return Some(div().w_full().flex().items_center().gap_2().text_xs().text_color(theme::muted())
+                .child(Spinner::new().small()).child(tr("shortcuts_verifying")));
+        }
+        let checks = self.shortcuts.checks.as_ref()?;
+        let mut body = div().w_full().flex().flex_col().gap_2().text_xs().whitespace_normal()
+            .child(div().font_weight(FontWeight::SEMIBOLD).child(tr("shortcuts_check_title")));
+        for check in &checks.list {
+            let (text, color) = if check.ok { (tr("shortcuts_check_ok"), theme::success_text()) } else { (tr("shortcuts_check_failed"), theme::danger()) };
+            body = body.child(div().text_color(color).child(text.replace("{label}", &check.label)))
+                .when(!check.ok && !check.output.is_empty(), |el| el.child(div().p_2().rounded(px(6.)).bg(theme::inset())
+                    .font_family(theme::MONO).text_color(theme::muted()).child(check.output.clone())));
+        }
+        if checks.list.iter().any(|check| !check.ok) {
+            body = match &checks.fix {
+                Some(Ok(name)) => body.child(div().text_color(theme::muted()).child(tr("shortcuts_fix_sent").replace("{name}", name))),
+                Some(Err(error)) => body.child(div().text_color(theme::danger()).child(tr("shortcuts_fix_failed").replace("{error}", error))),
+                None => body.child(div().text_color(theme::muted()).child(tr("shortcuts_fix_no_session")))
+                    .child(div().child(Button::new("shortcuts-fix-session").outline().small().label(tr("shortcuts_open_session"))
+                        .on_click(cx.listener(|this, _, window, cx| this.open_fix_session(window, cx))))),
+            };
+        }
+        Some(body)
     }
 
     pub(super) fn render_export_draft(&self, cx: &mut Context<Self>) -> Option<Div> {

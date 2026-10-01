@@ -207,6 +207,8 @@ impl Draft {
     fn into_item(self, original: Option<Map<String, Value>>, id: String) -> Item {
         let mut o = original.unwrap_or_default();
         for key in ["send_direct", "confirm", "pasta", "runs_in", "hangar_home", "answer_in_app"] { o.remove(key); }
+        // `verify` é só de atalho de comando; o backend recusa a lista com ele num de texto.
+        if !self.shell { o.remove("verify"); }
         if self.shell && !self.pasta.is_empty() { o.insert("pasta".into(), json!(self.pasta)); }
         if self.shell && self.hangar { o.insert("runs_in".into(), json!("hangar")); }
         if self.shell && self.hangar && !self.home { o.insert("hangar_home".into(), json!(false)); }
@@ -272,6 +274,9 @@ pub(in crate::app) struct Shortcuts {
     pub(super) transfer_seq: u64,
     pub(super) import_loading: bool,
     pub(super) transfer_warnings: Vec<String>,
+    /// Verificação dos atalhos importados (`verify`): em curso e o resultado de cada um.
+    pub(super) verifying: bool,
+    pub(super) checks: Option<super::shortcut_transfer::Checks>,
 }
 
 impl Shortcuts {
@@ -292,6 +297,7 @@ pub(super) enum ShortcutsReply {
     Exported(u64, Result<(PathBuf, u64, Vec<String>), String>),
     Previewed(u64, Value, Result<Value, String>),
     Imported(u64, Result<Value, String>),
+    Verified(Result<super::shortcut_transfer::Checks, String>),
 }
 
 impl Hangar {
@@ -391,7 +397,8 @@ impl Hangar {
     }
 
     pub(super) fn receive_shortcuts(&mut self, reply: ShortcutsReply, window: &mut Window, cx: &mut Context<Self>) {
-        if matches!(reply, ShortcutsReply::ExportCandidates(..) | ShortcutsReply::Exported(..) | ShortcutsReply::Previewed(..) | ShortcutsReply::Imported(..)) {
+        if matches!(reply, ShortcutsReply::ExportCandidates(..) | ShortcutsReply::Exported(..) | ShortcutsReply::Previewed(..)
+            | ShortcutsReply::Imported(..) | ShortcutsReply::Verified(..)) {
             self.receive_transfer(reply, window, cx);
             return;
         }
@@ -438,7 +445,8 @@ impl Hangar {
                     s.suggestions = commands.into_iter().map(|c| if c.display.is_empty() { format!("/{}", c.name) } else { c.display }).collect();
                 }
             }
-            ShortcutsReply::ExportCandidates(..) | ShortcutsReply::Exported(..) | ShortcutsReply::Previewed(..) | ShortcutsReply::Imported(..) => {}
+            ShortcutsReply::ExportCandidates(..) | ShortcutsReply::Exported(..) | ShortcutsReply::Previewed(..)
+                | ShortcutsReply::Imported(..) | ShortcutsReply::Verified(..) => {}
         }
         self.drop_stale_form(window, cx);
         if reload { self.load_shortcuts(cx); }
@@ -615,7 +623,8 @@ impl Hangar {
                 .disabled(saving || s.import.is_some() || s.export.is_some()).on_click(cx.listener(|this, _, _, cx| this.import_shortcuts(cx))))
             .child(Button::new("shortcuts-export").outline().small().icon(IconName::Download).label(tr("shortcuts_export"))
                 .disabled(saving || s.import.is_some() || s.export.is_some()).on_click(cx.listener(|this, _, _, cx| this.export_shortcuts(cx))))
-            .children(self.transfer_note_element()));
+            .children(self.transfer_note_element())
+            .children(self.render_checks(cx)));
         let draft = self.render_import_draft(cx);
         let export = self.render_export_draft(cx);
         let footer = self.mark(div().mt(px(8.)).pt(px(16.)), "shortcuts_restore").border_t_1().border_color(theme::border()).flex().items_center().gap(px(10.))

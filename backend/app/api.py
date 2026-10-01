@@ -6889,6 +6889,18 @@ def shortcuts_import(body: ShortcutImportBody):
         raise HTTPException(400, detail=erro("erro_shortcut_import_invalido", str(e), motivo=str(e)))
 
 
+class ShortcutVerifyBody(BaseModel):
+    ids: list[str]
+    # Caminhos dos scripts instalados pela importação, citados no pedido de correção.
+    scripts: list[str] = Field(default_factory=list)
+
+
+@app.post("/api/shortcuts/verify", dependencies=[Depends(require_auth)])
+def shortcuts_verify(body: ShortcutVerifyBody):
+    from app import shortcut_transfer
+    return {"checks": shortcut_transfer.run_checks(body.ids, body.scripts[:50], _shortcut_env())}
+
+
 # --- launcher de projetos (standalone, chaveado pelo projects.json — nao por sessao viva) ----
 
 @app.get("/api/projects", dependencies=[Depends(require_auth)],
