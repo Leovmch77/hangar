@@ -895,7 +895,7 @@ class StateMonitor:
                 no_spinner = 0
             elif spinner is not None:
                 no_spinner = 0
-                animating = prev_spinner is not None and spinner != prev_spinner
+                animating = prev_spinner is not None and spinner != prev_spinner and "…" in spinner
                 frozen = frozen + 1 if spinner == prev_spinner else 0
                 prev_spinner = spinner
                 # Spinner CONGELADO (byte-idêntico) por STALE_LIMIT polls = marcador de turn concluído.

@@ -858,6 +858,8 @@ class SessionRegistry:
 
     def __init__(self, projects_dir: Path | None = None):
         self.projects_dir = Path(projects_dir or settings.projects_dir)
+        # mtime do transcript cujo pane já foi conferido como parado: não raspa de novo até ele mudar.
+        self._idle_conferido: dict[str, float] = {}
 
     def resolve_jsonl(self, cwd: str, projects_dir: Path | None = None) -> Optional[str]:
         # FALLBACK por cwd: jsonl mais recente do dir do projeto. So usado quando nao ha --session-id
@@ -1535,7 +1537,8 @@ class SessionRegistry:
             # sempre). Corrigido na RAIZ: pane raspado sem menu REBAIXA o marcador pra idle
             # (demote_awaiting, abaixo) -> proximo poll cai no fast-path de marcador como idle.
             mtime = _jsonl_mtime(info.jsonl) if marker else None
-            if marker and marker[0] == "idle" and mtime is not None and mtime > marker[1] + _IDLE_STALE_S:
+            if (getattr(info, "provider", "claude") == "claude" and marker and marker[0] == "idle" and mtime is not None
+                    and mtime > marker[1] + _IDLE_STALE_S and self._idle_conferido.get(info.name) != mtime):
                 # Transcript escrito depois do idle (fora a folga do resumo pós-Stop) é turno aberto sem
                 # UserPromptSubmit, como a volta de um agente em segundo plano. Decide o pane com o spinner animando.
                 pending.append(info)
@@ -1567,6 +1570,10 @@ class SessionRegistry:
                 info.question = c[2]
                 info.options = c[3]
                 info.last_activity = _jsonl_mtime(info.jsonl)
+                if c[0] == "idle" and info.last_activity is not None:
+                    self._idle_conferido[info.name] = info.last_activity
+                else:
+                    self._idle_conferido.pop(info.name, None)
                 # Pane (verdade) contradisse marcador awaiting (Notification de idle-60s, nao menu):
                 # rebaixa pra idle no hook_state (mapa+sidecar) — mata o "aguardando" fantasma e
                 # devolve a sessao ao fast-path (anti-tempestade). Grace: ver _AWAITING_DEMOTE_GRACE_S.

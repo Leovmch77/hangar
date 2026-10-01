@@ -49,3 +49,15 @@ async def test_idle_com_transcript_da_folga_pos_stop_nao_raspa_o_pane(tmp_path, 
     monkeypatch.setattr(registry.tmux, "capture_pane", proibido)
     out = {s.name: s for s in await reg.list_with_state([info])}
     assert out["cc"].state == "idle"
+
+
+async def test_pane_conferido_parado_nao_e_raspado_de_novo_no_mesmo_mtime(tmp_path, monkeypatch):
+    reg = registry.SessionRegistry(projects_dir=tmp_path)
+    info = _sessao(tmp_path, 1010.0)
+    monkeypatch.setattr(reg, "list", lambda: [info])
+    monkeypatch.setattr(registry.hook_state, "get_state", lambda sid: ("idle", 1000.0))
+    capturas = []
+    monkeypatch.setattr(registry.tmux, "capture_pane", lambda *a, **k: capturas.append(1) or "❯ \n")
+    await reg.list_with_state([info])
+    await reg.list_with_state([info])
+    assert len(capturas) == 1
