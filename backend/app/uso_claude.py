@@ -24,7 +24,7 @@ import base64
 import re
 from collections import defaultdict
 import struct
-from dataclasses import asdict, dataclass, replace
+from dataclasses import dataclass, replace
 
 from app import uso_areas
 
@@ -34,11 +34,9 @@ _ROTULO_HOOK_CHARS = 60
 # Proporção de preço da Anthropic em relação ao token de entrada novo.
 _PESO_CACHE_WRITE = 1.25
 _PESO_CACHE_READ = 0.1
-_CAMPOS_USAGE = ("input_tokens", "output_tokens", "cache_creation_input_tokens",
-                 "cache_read_input_tokens", "cache_1h")
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class UsoLinha:
     dia: str            # YYYY-MM-DD no fuso local
     cwd: str
@@ -70,17 +68,7 @@ class UsoLinha:
     fonte: str = "claude"   # claude | codex — decide a tarifa no custo
     subagente: bool = False  # transcript/rollout de subagente: não conta como sessão
     session_id: str = ""
-    conta: str = ""     # identidade da conta (anthropic:<uuid>), aplicada depois do cache
-
-    def para_dict(self) -> dict:
-        return asdict(self)
-
-    @classmethod
-    def de_dict(cls, d: dict) -> "UsoLinha | None":
-        try:
-            return cls(**d)
-        except TypeError:
-            return None
+    conta: str = ""     # identidade da conta (anthropic:<uuid>), aplicada na leitura do índice
 
 
 def _int(v) -> int:
@@ -217,12 +205,50 @@ def skill_do_caminho(caminho: str) -> tuple[str, bool] | None:
     return (f"{plugin}:{nome}" if plugin else nome), e_skill_md
 
 
+# Campos do input de uma tool que o resultado dela ainda consulta. O resto (conteúdo de Write,
+# diffs) fica fora: o acumulador é guardado no cache pra retomar do ponto onde parou.
+_CAMPOS_ENTRADA = ("file_path", "command", "subagent_type")
+
+
+def linhas_de_area(entradas) -> list[UsoLinha]:
+    """Linhas `area` a partir das entradas guardadas (`Acumulador.entradas_de_area`), com o mapa
+    de áreas ATUAL. O uso REAL de cada turno vai às áreas na proporção das tools; sem tool de
+    arquivo, à conversa. Tokens por maior resto: a soma das áreas fecha com o turno."""
+    cabecalho, turnos = entradas
+    linhas: dict[tuple, list] = {}
+    for registros, unidades in turnos:
+        contadas = uso_areas.contar_areas(registros)
+        pesos = contadas or {uso_areas.CONVERSA: 1}
+        for i, (dia, cwd, model, fast, *valores) in enumerate(unidades):
+            partes = [uso_areas.repartir(v, pesos) for v in valores]
+            for a in pesos:
+                i_, o, cw, cr, c1h = (p[a] for p in partes)
+                l = linhas.setdefault((dia, cwd, model, a), [0, 0, 0, 0, 0, 0, False])
+                # Turno que atravessa dia/modelo: as tools contam só no primeiro grupo.
+                l[0] += contadas.get(a, 0) if i == 0 else 0
+                l[1] += i_
+                l[2] += o
+                l[3] += cw
+                l[4] += cr
+                l[5] += min(max(0, c1h), max(0, cw))
+                l[6] = l[6] or fast
+    return [UsoLinha(dia=dia, cwd=cwd, model=model, tipo="area", nome=a, chamadas=v[0],
+                     input=v[1], output=v[2], cache_write=v[3], cache_read=v[4],
+                     cache_write_1h=v[5], fast=v[6], **cabecalho)
+            for (dia, cwd, model, a), v in linhas.items()]
+
+
+def _ordem(l: UsoLinha) -> tuple:
+    return (l.dia, l.tipo, l.nome, l.detalhe)
+
+
 class Acumulador:
-    """Recebe cada linha decodificada do transcript, na ordem do arquivo."""
+    """Recebe cada linha decodificada do transcript, na ordem do arquivo. Só guarda estado que o
+    pickle leva: o cache retoma a leitura do meio do arquivo com o acumulador salvo."""
 
     def __init__(self) -> None:
         self._linhas: dict[tuple, UsoLinha] = {}
-        self._tools: dict[str, tuple[str, dict]] = {}      # tool_use id -> (nome, input)
+        self._tools: dict[str, tuple[str, dict]] = {}      # tool_use id -> (nome, input enxuto)
         self._respostas_vistas: set = set()
         # Skill chamada (ferramenta ou barra) esperando o texto dela entrar: (nome, origem, chave).
         self._skill_pendente: tuple | None = None
@@ -234,9 +260,10 @@ class Acumulador:
         self._dia = ""
         self._cwd = ""
         self._model = ""
-        # Áreas: tools por área de cada turno (um promptId) e, por resposta, (turno, grupo, usage).
-        self._turnos: list[dict[str, int]] = [{}]
-        self._respostas: dict[tuple, tuple[int, tuple, dict]] = {}
+        # Áreas: registros das tools de cada turno (um promptId) e, por resposta,
+        # (turno, grupo, (input, output, cache_write, cache_read, cache_1h)).
+        self._turnos: list[list[tuple]] = [[]]
+        self._respostas: dict[tuple, tuple[int, tuple, tuple]] = {}
 
     def _carregar(self, nome: str, origem: str, chars: int, chamadas: int = 1,
                   chave: tuple | None = None) -> None:
@@ -328,7 +355,7 @@ class Acumulador:
                 continue
             entrada = b.get("input") if isinstance(b.get("input"), dict) else {}
             if isinstance(b.get("id"), str):
-                self._tools[b["id"]] = (nome, entrada)
+                self._tools[b["id"]] = (nome, {k: entrada[k] for k in _CAMPOS_ENTRADA if k in entrada})
             self._turno_tool(nome, entrada)
             if nome == "Skill" and isinstance(entrada.get("skill"), str):
                 skill = entrada["skill"]
@@ -351,7 +378,7 @@ class Acumulador:
         conteudo = msg.get("content") if isinstance(msg, dict) else None
         prompt_id = d.get("promptId")
         if prompt_id and prompt_id != self._prompt_id:
-            self._turnos.append({})
+            self._turnos.append([])
             self._prompt_id = prompt_id
             self._skill_pendente = None
         if isinstance(conteudo, str):
@@ -496,55 +523,40 @@ class Acumulador:
         com promptId novo pode chegar no meio dela. Sem identidade, cada linha é uma resposta."""
         chave = ident if ident else ("linha", len(self._respostas))
         turno = self._respostas[chave][0] if chave in self._respostas else len(self._turnos) - 1
-        self._respostas[chave] = (turno, (self._dia, self._cwd, self._model,
-                                          u.get("speed") == "fast"), u)
+        cw = _int(u.get("cache_creation_input_tokens"))
+        criacao = u.get("cache_creation")
+        c1h = min(max(0, _int(criacao.get("ephemeral_1h_input_tokens"))), cw) if isinstance(criacao, dict) else 0
+        self._respostas[chave] = (turno, (self._dia, self._cwd, self._model, u.get("speed") == "fast"),
+                                  (_int(u.get("input_tokens")), _int(u.get("output_tokens")), cw,
+                                   _int(u.get("cache_read_input_tokens")), c1h))
 
     def _turno_tool(self, nome: str, entrada: dict) -> None:
-        """Cada tool conta 1 em cada área distinta que tocou."""
-        regras = uso_areas.regras_de(self._cwd)
-        areas: set[str] = set()
+        """Guarda o ALVO da tool no turno; a área sai dele na hora do relatório (`linhas_de_area`)."""
+        reg = None
         if nome in ("Read", "Edit", "Write", "NotebookEdit", "Grep", "Glob"):
             caminho = entrada.get("file_path") or entrada.get("notebook_path") or entrada.get("path")
             if isinstance(caminho, str) and caminho:
-                areas.add(uso_areas.area_do_caminho(caminho, self._cwd, regras))
+                reg = ("P", self._cwd, self._cwd, (caminho,))
         elif nome == "Bash" and isinstance(entrada.get("command"), str):
-            areas = uso_areas.areas_do_comando(entrada["command"], self._cwd, regras)
+            reg = ("C", self._cwd, self._cwd, uso_areas.candidatos_do_comando(entrada["command"]))
         elif nome == "Skill" and isinstance(entrada.get("skill"), str):
-            a = uso_areas.area_do_alvo(f"skill:{entrada['skill']}", regras)
-            if a:
-                areas.add(a)
-        for a in areas:
-            self._turnos[-1][a] = self._turnos[-1].get(a, 0) + 1
+            reg = ("S", self._cwd, f"skill:{entrada['skill']}")
+        if reg:
+            self._turnos[-1].append(reg)
 
-    def _areas(self) -> None:
-        """O uso REAL de cada turno vai às áreas na proporção das tools; sem tool de arquivo, à
-        conversa. Tokens por maior resto: a soma das áreas fecha com o turno, sem sobra."""
-        somas: dict[int, dict[tuple, dict]] = defaultdict(dict)
+    def entradas_de_area(self) -> tuple[dict, list]:
+        """(cabeçalho, turnos) que `linhas_de_area` transforma em linhas; não muda o acumulador.
+        Cada turno: (registros das tools, uso somado por grupo dia/cwd/modelo/rápido)."""
+        somas: dict[int, dict[tuple, list]] = defaultdict(dict)
         for turno, grupo, u in self._respostas.values():
-            t = somas[turno].setdefault(grupo, dict.fromkeys(_CAMPOS_USAGE, 0))
-            cw = _int(u.get("cache_creation_input_tokens"))
-            t["input_tokens"] += _int(u.get("input_tokens"))
-            t["output_tokens"] += _int(u.get("output_tokens"))
-            t["cache_creation_input_tokens"] += cw
-            t["cache_read_input_tokens"] += _int(u.get("cache_read_input_tokens"))
-            criacao = u.get("cache_creation")
-            if isinstance(criacao, dict):
-                t["cache_1h"] += min(max(0, _int(criacao.get("ephemeral_1h_input_tokens"))), cw)
-        for turno, grupos in somas.items():
-            contadas = self._turnos[turno]
-            pesos = contadas or {uso_areas.CONVERSA: 1}
-            for i, ((dia, cwd, model, fast), u) in enumerate(grupos.items()):
-                self._dia, self._cwd, self._model = dia, cwd, model
-                partes: dict[str, dict] = {a: {} for a in pesos}
-                for campo, valor in u.items():
-                    for a, v in uso_areas.repartir(valor, pesos).items():
-                        partes[a][campo] = v
-                for a, p in partes.items():
-                    usage = {**p, "cache_creation": {"ephemeral_1h_input_tokens": p["cache_1h"]},
-                             "speed": "fast" if fast else ""}
-                    # Turno que atravessa dia/modelo: as tools contam só no primeiro grupo.
-                    self._somar("area", a, chamadas=contadas.get(a, 0) if i == 0 else 0, usage=usage)
+            t = somas[turno].setdefault(grupo, [0, 0, 0, 0, 0])
+            for k in range(5):
+                t[k] += u[k]
+        return {}, [(tuple(self._turnos[turno]), [(*g, *u) for g, u in grupos.items()])
+                    for turno, grupos in somas.items()]
+
+    def linhas_sem_area(self) -> list[UsoLinha]:
+        return sorted(self._linhas.values(), key=_ordem)
 
     def resultado(self) -> list[UsoLinha]:
-        self._areas()
-        return sorted(self._linhas.values(), key=lambda l: (l.dia, l.tipo, l.nome, l.detalhe))
+        return sorted(self.linhas_sem_area() + linhas_de_area(self.entradas_de_area()), key=_ordem)

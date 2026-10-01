@@ -24,6 +24,7 @@ import * as m from '../paraglide/messages';
   import { atualizarUI } from '../lib/atualizarUI.svelte';
   import AtualizarSheet from './AtualizarSheet.svelte';
   import { getActiveId, selectServer } from '../lib/auth';
+  import { hangarOf, liveTerminals, takeHangarTab, takeOwnerPanel } from '../lib/hangarTerminals.svelte';
   import { navMode } from '../lib/navMode.svelte';
   import { sidebarPin } from '../lib/sidebarPin.svelte';
   import type { AggSession } from '@hangar/core';
@@ -79,10 +80,14 @@ import * as m from '../paraglide/messages';
   let terminalKey = $state('');
   // Sessao sem pane (sem terminal): o painel so mostra as abas dos atalhos, que sao tmux proprio.
   let terminalHeadless = $state(false);
-  function abrirTerminal(nome: string, serverId: string, headless = false) {
+  // Painel sem sessão nenhuma (aberto pelo chip com o Quadro/Canvas na tela): só as abas de atalho,
+  // e a regra que fecha o painel quando a sessão sai da tela não vale pra ele.
+  let shortcutsOnlyPanel = $state(false);
+  function abrirTerminal(nome: string, serverId: string, headless = false, shortcutsOnly = false) {
     terminalSession = nome;
     terminalKey = workspaceSessionKey({ serverId, name: nome });
     terminalHeadless = headless;
+    shortcutsOnlyPanel = shortcutsOnly;
     terminalOpen = true;
   }
   // Maximizado o painel cobre o chat mas continua translucido (mesmo veu do encaixado, ver
@@ -447,7 +452,55 @@ import * as m from '../paraglide/messages';
       workspaceSessionKey({ serverId: nome === currentSession ? serverIdPrincipal : serverIdAtivo, name: nome }));
   });
   $effect(() => {
-    if (terminalOpen && !sessoesNaTela.includes(terminalKey)) terminalOpen = false;
+    if (terminalOpen && !shortcutsOnlyPanel && !sessoesNaTela.includes(terminalKey)) terminalOpen = false;
+  });
+
+  // Sessão que o usuário está vendo (Chat, ou o overlay do Quadro/Canvas). Orq não monta Chat.
+  const onScreenSession = $derived(
+    overlaySession ? { name: overlaySession.name, serverId: overlaySession.serverId }
+      : currentSession && view !== 'board' && view !== 'canvas' && view !== 'orq'
+        ? { name: currentSession, serverId: serverIdPrincipal } : null,
+  );
+
+  // Pedido de aba No Hangar (chip, cartão da pergunta, tile) sem painel aberto NAQUELE servidor: abre o
+  // painel da sessão na tela; sem sessão na tela (Quadro, Canvas), abre o painel só com as abas de
+  // atalho. Painel aberto de outro servidor conta como fechado. Pedido de terminal que já não
+  // existe é descartado, senão reabriria o painel a cada fechamento. O pedido fica pro TerminalPanel
+  // consumir quando montar (ele seleciona a aba do terminal).
+  $effect(() => {
+    const serverId = Object.keys(liveTerminals.panelRequest)[0];
+    if (!serverId) return;
+    if (terminalOpen && terminalKey.split('::')[0] === serverId) return;
+    const id = liveTerminals.panelRequest[serverId];
+    if (!hangarOf(serverId).some((t) => t.id === id)) { takeHangarTab(serverId); return; }
+    const onScreen = onScreenSession;
+    if (onScreen && onScreen.serverId === serverId) {
+      const headless = rows.find((r) => r.name === onScreen.name && r.serverId === serverId)?.headless === true;
+      abrirTerminal(onScreen.name, serverId, headless);
+    } else {
+      abrirTerminal('', serverId, true, true);
+    }
+  });
+
+  // Pedido do painel da sessão dona de um terminal "Na sessão" (cartão da pergunta): leva a sessão pra
+  // tela, se ainda não está, e abre o painel; a aba vem de shortcutTerminals.focus. Sessão que não
+  // existe mais descarta o pedido.
+  let ownerNavKey = '';
+  $effect(() => {
+    const req = liveTerminals.ownerPanelRequest;
+    if (!req) { ownerNavKey = ''; return; }
+    const row = rows.find((r) => r.serverId === req.serverId && r.name === req.owner);
+    if (!row) { takeOwnerPanel(); return; }
+    const onScreen = onScreenSession;
+    if (onScreen && onScreen.serverId === req.serverId && onScreen.name === req.owner) {
+      takeOwnerPanel();
+      abrirTerminal(req.owner, req.serverId, row.headless === true);
+      return;
+    }
+    const key = workspaceSessionKey({ serverId: req.serverId, name: req.owner });
+    if (ownerNavKey === key) return;
+    ownerNavKey = key;
+    openSession(row);
   });
 
   // Overlay do quadro: o Chat REAL (mesmo componente do resto do app) por cima do kanban, em vez de
@@ -654,7 +707,7 @@ import * as m from '../paraglide/messages';
     {/if}
   </main>
   <TerminalPanel sessionName={terminalSession} connKey={terminalKey} open={terminalOpen} headless={terminalHeadless}
-                 onClose={() => (terminalOpen = false)}
+                 onClose={() => { terminalOpen = false; shortcutsOnlyPanel = false; }}
                  onMaximizar={(v) => (terminalMaximizado = v)} />
   </div>
 

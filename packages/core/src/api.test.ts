@@ -11,14 +11,48 @@ function overwriteGetLocale(fn: () => 'en' | 'pt') {
 import { configureApi } from './apiEnv';
 // `getHistoryDesde` veio da main junto com o histórico condicional (304 + ETag).
 import { getConfig, getConfigForServer, patchConfig, patchConfigForServer, createSession, getHistory, getHistoryDesde, isAbortError, transcribeFile, transcribeFileForServer, getModelOptions, setEngineModel, rotaGenerica, pairSession } from './api';
+import { createSessionForServer, getFolderGitForServer, folderGitActionForServer } from './api';
 import { mensagemDeErro, formataErro } from './errosApi';
 import { passarBastao, getSyncSetupForServer, setupSyncForServer, disableSyncForServer } from './api';
 import { probeServerResponse } from './api';
 import { scanDir, scanDirForServer, listClaudeConfigs, listClaudeConfigsForServer } from './api';
-import { answerQuestions, createSessionForServer, interrupt, openEventStreamForServer, sendInputForServer, skipQuestion } from './api';
+import { answerQuestions, interrupt, openEventStreamForServer, sendInputForServer, skipQuestion } from './api';
 import { discardFile, fileAuthHeader, fileUrlNative, getPairContract, getPlans, listFiles, pathDiff, readFile, searchFiles, setPlanPin, unpairSession, writeFile } from './api';
 import type { Server } from './servers';
+import { exportShortcuts } from './api';
+import { fileUrl, uploadUrl } from './api';
 const server = { id: 'a', label: 'Servidor A', baseUrl: 'https://a.test', token: 'token-a' };
+
+it('exportação leva IDs selecionados ao servidor escolhido e distingue seleção vazia', async () => {
+  const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}'));
+  const other = { id: 'b', label: 'B', baseUrl: 'https://b.test', token: 'token-b' };
+  await exportShortcuts(other, { ids: ['um', 'dois com espaço'], includeScripts: true });
+  const url = new URL(String(fetchMock.mock.calls[0][0]));
+  expect(url.origin).toBe('https://b.test');
+  expect(url.searchParams.getAll('ids')).toEqual(['um', 'dois com espaço']);
+  expect(url.searchParams.get('include_scripts')).toBe('true');
+  expect(fetchMock.mock.calls[0][1]?.headers).toEqual(expect.objectContaining({ Authorization: 'Bearer token-b' }));
+  fetchMock.mockResolvedValue(new Response('{}'));
+  await exportShortcuts(null, { ids: [], includeScripts: false });
+  const empty = new URL(String(fetchMock.mock.calls[1][0]));
+  expect(empty.searchParams.getAll('ids')).toEqual(['']);
+  expect(empty.searchParams.get('include_scripts')).toBe('false');
+});
+
+it.each(['https://hangar.example', 'https://desktop.example.ts.net', 'http://192.168.1.25:8765'])(
+  'download de documento usa a conexão selecionada (%s), não a origem do PWA', (baseUrl) => {
+  configureApi({ getBaseUrl: () => baseUrl, getToken: () => 'token-a', onUnauthorized: () => {},
+    origin: 'https://pwa.example', createEventSource: () => stubEventSource() });
+  const normal = new URL(fileUrl('session name', '/tmp/Relatório final.docx'));
+  const download = new URL(fileUrl('session name', '/tmp/Relatório final.docx', true));
+  expect(download.origin).toBe(baseUrl);
+  expect(download.pathname).toBe('/api/sessions/session%20name/file');
+  expect(download.searchParams.get('path')).toBe('/tmp/Relatório final.docx');
+  expect(download.searchParams.get('token')).toBe('token-a');
+  expect(download.searchParams.get('download')).toBe('1');
+  expect(normal.searchParams.has('download')).toBe(false);
+  expect(new URL(uploadUrl('s', 'Relatório.pdf', true)).searchParams.get('download')).toBe('1');
+});
 
 it('antes do prazo só a verificação explícita consulta o offline; resposta retira a marca', async () => {
   registrarFalha(server.id);
@@ -487,6 +521,14 @@ describe('contratos de conversa com servidor explícito', () => {
 });
 
 describe('createSession', () => {
+  it.each([undefined, false, true])('preserva o modo explícito ou omitido: %s', async (mode) => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{"name":"x"}'));
+    await createSession('x', '/tmp', null, 'claude', null, null, null, null, null, null, mode);
+    const body = JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string);
+    if (mode === undefined) expect(body).not.toHaveProperty('headless');
+    else expect(body.headless).toBe(mode);
+  });
+
   // O backend so aceita provider em ("claude", "codex", "pi", "kimi") e devolve 400 se vier `engine`
   // com provider != claude. O sheet manda engine/config_dir nulos fora do Claude — aqui garantimos que
   // o provider viaja LITERAL (a versao anterior tipava 'claude' | 'codex' e uma sessao Pi nem compilava).
@@ -583,6 +625,14 @@ describe('mensagemDeErro (parecer task 10)', () => {
 
   it('erro_tts_sem_cache vem com acento em pt', () => {
     expect(mensagemDeErro('erro_tts_sem_cache')).toBe('áudio não está mais em cache');
+  });
+
+  it('codes do convidado com login próprio têm texto no idioma do app', () => {
+    expect(mensagemDeErro('erro_fora_do_convidado')).toBe('fora do acesso do convidado');
+    expect(mensagemDeErro('erro_usuario_em_uso')).toBe('esse usuário já existe');
+    expect(mensagemDeErro('erro_shortcut_hangar_convidado')).toBe(
+      'Convidado não pode abrir atalho no Hangar do dono.',
+    );
   });
 
   it('code herdado do prototipo devolve undefined, nao quebra nem chama funcao errada', () => {
@@ -898,5 +948,27 @@ describe('arquivos, planos e contrato do par com servidor explícito', () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{"detail":"não existe"}', { status: 404 }));
     await expect(readFile(s, 'x.md', target)).rejects.toMatchObject({ status: 404 });
     await expect(listFiles(s, 'sumiu', true, target)).rejects.toMatchObject({ status: 404 });
+  });
+});
+
+describe('prazos e raiz explícita (sessão e git de pasta)', () => {
+  it('abrir sessão em outro servidor espera 120 s, não os 8 s padrão', async () => {
+    const timeout = vi.spyOn(AbortSignal, 'timeout');
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{"name":"x"}'));
+    await createSessionForServer(server, { name: 'x' });
+    expect(timeout).toHaveBeenCalledWith(120_000);
+  });
+
+  it('git de pasta com raiz explícita não consulta /api/fs/roots', async () => {
+    const timeout = vi.spyOn(AbortSignal, 'timeout');
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response('{"repo":false}'));
+    await getFolderGitForServer(server, '/home/a/x', undefined, '/home/a');
+    await folderGitActionForServer(server, '/home/a/x', 'fetch', '/home/a');
+    const urls = fetchMock.mock.calls.map(c => String(c[0]));
+    expect(urls).toHaveLength(2);
+    expect(urls.some(u => u.includes('/api/fs/roots'))).toBe(false);
+    expect(new URL(urls[0]).searchParams.get('root')).toBe('/home/a');
+    expect(timeout).toHaveBeenCalledWith(30_000);
+    expect(timeout).toHaveBeenCalledWith(150_000);
   });
 });

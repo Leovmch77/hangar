@@ -113,12 +113,17 @@ async fn alive(child: &mut std::process::Child, path: &Path) -> bool {
 }
 
 async fn install(client: reqwest::Client, exe: Option<PathBuf>, offer: Offer) -> Result<(), String> {
+    // A oferta pode ter horas e a release é republicada a cada push: o sha que vale é o do manifesto de agora.
+    let offer = check(&client).await.ok().flatten().unwrap_or(offer);
     let bytes = client.get(&offer.url).send().await.and_then(reqwest::Response::error_for_status).map_err(|e| e.to_string())?
         .bytes().await.map_err(|e| e.to_string())?;
+    // O CI sobe os binários antes do manifesto: no meio da publicação o binário já é o novo e o sha ainda o antigo.
+    let sha256 = if sha256_hex(&bytes) == offer.sha256 { offer.sha256 }
+        else { check(&client).await.ok().flatten().map_or(offer.sha256, |fresh| fresh.sha256) };
     let exe = exe.ok_or_else(|| tr("app_update_swap_failed").replace("{reason}", "current_exe"))?;
     // Dezenas de MB conferidos, gravados e copiados: fora das duas threads do runtime.
     let target = exe.clone();
-    let old = tokio::task::spawn_blocking(move || swap(&target, &bytes, &offer.sha256)).await.map_err(|e| e.to_string())??;
+    let old = tokio::task::spawn_blocking(move || swap(&target, &bytes, &sha256)).await.map_err(|e| e.to_string())??;
     let signal = sibling(&exe, ".alive");
     let _ = std::fs::remove_file(&signal);
     // A versão nova assume o arquivo da janela única antes de provar que subiu.

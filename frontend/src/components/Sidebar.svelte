@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
 import * as m from '../paraglide/messages';
   import HangarMark from './icons/HangarMark.svelte';
+  import HangarRunning from './HangarRunning.svelte';
   import HangarWorking from './icons/HangarWorking.svelte';
   import IconFolder from './icons/IconFolder.svelte';
   import IconWorktree from './icons/IconWorktree.svelte';
@@ -661,8 +662,8 @@ import ConfirmDialog from './ConfirmDialog.svelte';
          icone como clique morto — foi apagada; sobrou so a escolha de ALTURA, que e o que faltava. -->
     <!-- A marca fica nas DUAS formas do sidebar: expandido acompanha o nome, recolhido (rail) ela
          é o que sobra. Com 2 arcos, porque no rail ela desenha em ~20px. -->
-    <span class="side-mark" aria-label="Hangar"><HangarMark size={20} arcs={2} /></span>
-    {#if expanded}<span class="side-brand">Hangar</span>{/if}
+    <span class="side-mark" aria-label="Hangar"><HangarMark size={20} arcs={2} />{#if !expanded}<HangarRunning rail />{/if}</span>
+    {#if expanded}<span class="side-brand">Hangar</span><HangarRunning />{/if}
     {#if expanded}
     <!-- Broadcast (feature #9): entra/sai do modo seleção multipla. -->
     <button
@@ -996,7 +997,7 @@ import ConfirmDialog from './ConfirmDialog.svelte';
                       {/if}
                     </span>
                   {/if}
-                  {#if s.then_target || s.pair_peers?.length || s.loop_status || s.engine}
+                  {#if s.then_target || s.pair_peers?.length || s.loop_status || s.engine || s.owner}
                     <!-- Chips informativos (⏳/🔗/🤝/↻/⚙) na COLUNA DE TEXTO, nao ao lado do state-chip:
                          inline eles cobriam o cwd em sidebar estreita (mesmo fix do SessionCard mobile).
                          O glifo do agente saiu daqui pro canto do avatar (mesmo arranjo do trilho) e a
@@ -1014,6 +1015,9 @@ import ConfirmDialog from './ConfirmDialog.svelte';
                         {#if lb}
                           <span class="chain-chip" style="color: {LOOP_TONE_COLOR[lb.tone]}; background: color-mix(in srgb, {LOOP_TONE_COLOR[lb.tone]} 14%, transparent);" title={m.sessao_loop_runner()}>{lb.label}</span>
                         {/if}
+                      {/if}
+                      {#if s.owner}
+                        <span class="engine-chip" title={m.sessao_do_convidado({ n: s.owner })}>👤&nbsp;{s.owner}</span>
                       {/if}
                       {#if s.engine}
                         <!-- Sem isto nada na lista distingue uma sessão de motor de uma da conta Anthropic.
@@ -1595,11 +1599,13 @@ import ConfirmDialog from './ConfirmDialog.svelte';
   /* o rotulo so aparece se sobrar espaco: no rodape em linha o icone ja basta */
   .fold-label { display: none; }
   .row-mark { display: inline-flex; }
-  .side-mark { display: flex; align-items: center; color: var(--accent); flex: 0 0 auto; }
+  .side-mark { position: relative; display: flex; align-items: center; color: var(--accent); flex: 0 0 auto; }
   /* Colada na borda e recolhida, a marca do trilho fica logo abaixo da marca da barra de abas
      (SessionTabs), na mesma coluna: duas iguais empilhadas. Em caixa solta a margem separa. */
-  :global(html[data-panels='edge']) .sidebar.collapsed .side-mark { display: none; }
-  .side-brand { flex: 1; min-width: 0; font-size: var(--text-base); font-weight: 600; color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  :global(html[data-panels='edge']) .sidebar.collapsed .side-mark:not(:has(:global(.hr))) { display: none; }
+  /* Com o chip "N no Hangar" a caixa fica, mas a marca some (a da barra de abas já está lá em cima). */
+  :global(html[data-panels='edge']) .sidebar.collapsed .side-mark > :global(svg) { display: none; }
+  .side-brand { flex: 1 0 auto; font-size: var(--text-base); font-weight: 600; color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   /* Toggle do modo de seleção: mesma caixa de 36px dos outros controles do header. */
   .select-toggle-btn {
     flex-shrink: 0; width: 36px; height: 36px;

@@ -54,6 +54,8 @@ uv run --directory <hangar>/backend --no-sync python -m app.orq_consumo report \
 - The observed window includes waiting and measures no productivity. Tokens are not price nor
   subscription percentage. A quota variation belongs to the whole account; do not attribute it
   to this work without separate measurement.
+- The Hangar panel sums the team's transcripts since the run started and shows the coverage; the
+  interval measurement stays the one here.
 
 ## Comparing configurations
 

@@ -12,7 +12,12 @@ pub(super) enum Reply {
     Socket(u64, u64, u64, Result<ws::Event, ws::Error>),
     /// Lista de terminais de atalho da sessão `name` (lida ao abrir o painel, ao escolher a sessão e depois de rodar/fechar).
     List(String, Result<Value, Failure>),
+    CodeList(SessionKey, String, u8, Result<Value, Failure>),
     Closed(String, Result<Value, Failure>),
+    /// Resposta do ✕ de uma aba No Hangar, pelo `id` do painel que a pediu.
+    HangarClosed(u64, Result<Value, Failure>),
+    /// Ação do popover do chip: a rota, a máquina, o terminal e a resposta.
+    Hangar(super::hangar_live::HangarCall, String, String, Result<Value, Failure>),
 }
 
 /// Terminal escondido de um atalho shell (`GET /shortcut-terminals`). Fica depois que o comando sai, com a saída na tela.
@@ -28,10 +33,38 @@ pub(super) fn parse_shortcut_terms(value: &Value) -> Vec<ShortcutTerm> {
     })).collect()).unwrap_or_default()
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct TermQuestion { pub text: String, pub default: String, pub screen: Vec<String> }
+
+/// Linha do evento `shortcut_terminals`: dono vazio + `key` = No Hangar.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct LiveTerm { pub term: ShortcutTerm, pub owner: String, pub key: String, pub origin: String, pub created: i64, pub question: Option<TermQuestion> }
+
+pub(super) fn parse_live_terms(value: &Value) -> Vec<LiveTerm> {
+    value.as_array().map(|list| list.iter().filter_map(|t| Some(LiveTerm {
+        term: ShortcutTerm {
+            id: t.get("id")?.as_str()?.to_owned(),
+            label: t.get("label").and_then(Value::as_str).unwrap_or("").to_owned(),
+            alive: t.get("alive").and_then(Value::as_bool).unwrap_or(true),
+            exit_code: t.get("exit_code").and_then(Value::as_i64),
+        },
+        owner: t.get("owner").and_then(Value::as_str).unwrap_or("").to_owned(),
+        key: t.get("key").and_then(Value::as_str).unwrap_or("").to_owned(),
+        origin: t.get("origin").and_then(Value::as_str).unwrap_or("").to_owned(),
+        created: t.get("created").and_then(Value::as_i64).unwrap_or(0),
+        question: t.get("question").and_then(|q| Some(TermQuestion {
+            text: q.get("text")?.as_str()?.to_owned(),
+            default: q.get("default").and_then(Value::as_str).unwrap_or("").to_owned(),
+            screen: q.get("screen").and_then(Value::as_array)
+                .map(|l| l.iter().filter_map(|s| s.as_str().map(str::to_owned)).collect()).unwrap_or_default(),
+        })),
+    })).collect()).unwrap_or_default()
+}
+
 enum Status { Connecting, Connected, Failed(String) }
 
 #[derive(Clone, PartialEq)]
-enum Kind { Session, Shell, Shortcut(ShortcutTerm) }
+enum Kind { Session, Shell, Shortcut(ShortcutTerm), Hangar(ShortcutTerm) }
 
 struct Slot {
     uid: u64,
@@ -61,6 +94,11 @@ impl Slot {
 
     fn shortcut(&self) -> Option<&ShortcutTerm> { if let Kind::Shortcut(term) = &self.kind { Some(term) } else { None } }
 
+    fn hangar(&self) -> Option<&ShortcutTerm> { if let Kind::Hangar(term) = &self.kind { Some(term) } else { None } }
+
+    /// O terminal da aba quando ela é de atalho (`hangar` falso) ou No Hangar (`hangar` verdadeiro).
+    fn term(&self, hangar: bool) -> Option<&ShortcutTerm> { if hangar { self.hangar() } else { self.shortcut() } }
+
     fn accepts_input(&self) -> bool {
         matches!(self.status, Status::Connected) && self.socket.is_some()
             || self.fixture_loaded && self.socket.is_none() && matches!(self.status, Status::Connected | Status::Failed(_))
@@ -70,6 +108,10 @@ impl Slot {
 pub(super) struct Panel {
     id: u64,
     session: String,
+    /// Máquina do painel (endereço normalizado): a da sessão, ou a dos terminais No Hangar quando não há sessão dela à vista.
+    server: String,
+    /// Falha do ✕ de uma aba No Hangar, no cabeçalho como no web.
+    error: Option<String>,
     /// Sessão sem pane nasce sem aba da sessão nem Shell: só os terminais dos atalhos.
     tabs: Vec<Slot>,
     next_uid: u64,
@@ -83,41 +125,49 @@ pub(super) struct Panel {
     shell_error: Option<String>,
     /// Quando abriu: o painel sobe do pé da janela nos primeiros 200 ms.
     opened: Instant,
+    /// Fila de abas rolável: ao trocar a aba ativa, rola até ela (uma vez por troca, para não brigar com a roda do mouse).
+    tab_scroll: ScrollHandle,
+    scrolled_to: std::cell::Cell<Option<u64>>,
 }
 
 impl Panel {
-    fn new(id: u64, session: String, headless: bool, cx: &mut Context<Hangar>) -> Self {
+    fn new(id: u64, session: String, server: String, headless: bool, cx: &mut Context<Hangar>) -> Self {
         let tabs = if headless { Vec::new() }
             else { vec![Slot::new(0, Kind::Session, session.clone(), true), Slot::new(1, Kind::Shell, String::new(), false)] };
-        Self { id, tabs, next_uid: 2, session,
+        Self { id, tabs, next_uid: 2, session, server, error: None,
             active: 0, focus: cx.focus_handle().tab_stop(true), height: appearance::get().terminal_height, drag: None, maximized: false,
-            shell_pending: false, shell_request: 0, shell_error: None, opened: Instant::now() }
+            shell_pending: false, shell_request: 0, shell_error: None, opened: Instant::now(),
+            tab_scroll: ScrollHandle::new(), scrolled_to: std::cell::Cell::new(None) }
     }
 
     fn index(&self, uid: u64) -> Option<usize> { self.tabs.iter().position(|slot| slot.uid == uid) }
 
+    /// O painel é da máquina `server` (endereço normalizado)?
+    pub(super) fn server_is(&self, server: &str) -> bool { self.server == server }
+
     fn shell_index(&self) -> Option<usize> { self.tabs.iter().position(|slot| slot.kind == Kind::Shell) }
 
-    /// Acerta as abas de atalho com a lista do servidor: novas entram no fim, as que sumiram saem. Devolve os `uid`
-    /// das novas, para conectar.
-    fn sync(&mut self, terms: &[ShortcutTerm]) -> Vec<u64> {
+    /// Acerta as abas de atalho (ou, com `hangar`, as No Hangar) com a lista do servidor: novas entram no fim, as que
+    /// sumiram saem. Devolve os `uid` das novas, para conectar.
+    fn sync_terms(&mut self, terms: &[ShortcutTerm], hangar: bool) -> Vec<u64> {
+        let kind = |term: &ShortcutTerm| if hangar { Kind::Hangar(term.clone()) } else { Kind::Shortcut(term.clone()) };
         let active_uid = self.tabs.get(self.active).map(|slot| slot.uid);
-        self.tabs.retain_mut(|slot| match &slot.kind {
-            Kind::Shortcut(term) if !terms.iter().any(|t| t.id == term.id) => {
+        self.tabs.retain_mut(|slot| {
+            if slot.term(hangar).is_some_and(|term| !terms.iter().any(|t| t.id == term.id)) {
                 if let Some(socket) = slot.socket.as_mut() { socket.close(); }
-                false
+                return false;
             }
-            _ => true,
+            true
         });
         let mut added = Vec::new();
         for term in terms {
-            if let Some(slot) = self.tabs.iter_mut().find(|slot| slot.shortcut().is_some_and(|t| t.id == term.id)) {
-                slot.kind = Kind::Shortcut(term.clone());
+            if let Some(slot) = self.tabs.iter_mut().find(|slot| slot.term(hangar).is_some_and(|t| t.id == term.id)) {
+                slot.kind = kind(term);
                 continue;
             }
             let uid = self.next_uid;
             self.next_uid += 1;
-            self.tabs.push(Slot::new(uid, Kind::Shortcut(term.clone()), self.session.clone(), false));
+            self.tabs.push(Slot::new(uid, kind(term), self.session.clone(), false));
             added.push(uid);
         }
         self.active = active_uid.and_then(|uid| self.index(uid)).unwrap_or(0).min(self.tabs.len().saturating_sub(1));
@@ -126,6 +176,13 @@ impl Panel {
 
     fn select_shortcut(&mut self, id: &str) -> bool {
         match self.tabs.iter().position(|slot| slot.shortcut().is_some_and(|t| t.id == id)) {
+            Some(index) => { self.active = index; true }
+            None => false,
+        }
+    }
+
+    fn select_hangar(&mut self, id: &str) -> bool {
+        match self.tabs.iter().position(|slot| slot.hangar().is_some_and(|t| t.id == id)) {
             Some(index) => { self.active = index; true }
             None => false,
         }
@@ -144,6 +201,16 @@ fn failure_message(error: Failure) -> String {
     if error.status == Some(404) { tr("term_missing") } else { Hangar::failure(&error) }
 }
 
+/// Falha de uma ação No Hangar: a resposta do servidor (um 500 vem marcado como incerto, mas ele respondeu e diz o motivo);
+/// sem resposta, o texto de rede.
+pub(super) fn hangar_failure(error: &Failure) -> String {
+    match error.status {
+        Some(401 | 403) => tr("auth_error"),
+        Some(_) => crate::i18n::tr_web(&error.detail, &HashMap::new()).unwrap_or_else(|| error.detail.clone()),
+        None => Hangar::setting_failure(error),
+    }
+}
+
 /// O botão de terminal do cabeçalho: sessão sem pane só tem terminal quando um atalho abriu um; o orquestrador não tem nenhum.
 pub(super) fn terminal_offered(session: &SessionInfo, shortcut_terms: bool) -> bool {
     !session.orq() && (!session.headless || shortcut_terms)
@@ -155,11 +222,99 @@ impl Hangar {
         if self.selected.as_ref().is_some_and(SessionInfo::orq) { return; }
         let Some((session, headless)) = self.selected.as_ref().map(|s| (s.name.clone(), s.headless)) else { return; };
         self.terminal_serial += 1;
-        self.terminal = Some(Panel::new(self.terminal_serial, session.clone(), headless, cx));
+        self.terminal = Some(Panel::new(self.terminal_serial, session.clone(), self.open_server(), headless, cx));
         self.terminal.as_ref().unwrap().focus.focus(window, cx);
         if !headless { self.connect_terminal(0); }
         self.sync_shortcut_tabs();
+        self.sync_hangar_tabs();
         self.refresh_shortcut_terms(&session);
+        cx.notify();
+    }
+
+    /// Painel só com os terminais No Hangar de `server`: para quando não há sessão dessa máquina à vista.
+    fn open_hangar_panel(&mut self, server: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.terminal_serial += 1;
+        self.terminal = Some(Panel::new(self.terminal_serial, String::new(), server, true, cx));
+        self.terminal.as_ref().unwrap().focus.focus(window, cx);
+        self.sync_hangar_tabs();
+        cx.notify();
+    }
+
+    /// Abre o painel de terminal na aba No Hangar `id` da máquina `server` (chip, tile e cartão da pergunta).
+    pub(super) fn open_hangar_terminal(&mut self, server: &str, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let server = servers::norm(server);
+        if self.terminal.as_ref().is_some_and(|panel| panel.server != server) { self.close_terminal(false, window, cx); }
+        if self.terminal.is_none() {
+            let here = self.selected.as_ref().is_some_and(|s| !s.orq()) && self.open_server() == server;
+            if here { self.toggle_terminal(window, cx); } else { self.open_hangar_panel(server, window, cx); }
+        }
+        if let Some(panel) = self.terminal.as_mut() {
+            if panel.select_hangar(id) { panel.focus.focus(window, cx); }
+        }
+        self.refresh_hangar_sockets();
+        cx.notify();
+    }
+
+    /// Abre o painel de terminal da sessão `owner` na aba do atalho `id`, levando a sessão à tela se preciso.
+    pub(super) fn open_session_terminal(&mut self, server: &str, owner: &str, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let server = servers::norm(server);
+        let open_here = self.open_server() == server && self.selected.as_ref().is_some_and(|s| s.name == owner);
+        if !open_here {
+            let Some(session) = self.sessions_of(&server).iter().find(|s| s.name == owner).cloned() else {
+                window.push_notification(Notification::warning(tr("search_session_gone").replace("{name}", owner)), cx);
+                return;
+            };
+            if !self.select_on(&server, session, window, cx) { return; }
+        }
+        // O foco é lido quando a aba existir na lista; a aba que ainda não chegou entra assim que chegar.
+        self.side.shortcut_focus.insert(owner.to_owned(), id.to_owned());
+        if self.terminal.is_none() { self.toggle_terminal(window, cx); } else { self.sync_shortcut_tabs(); }
+        if let Some(panel) = self.terminal.as_ref() { panel.focus.focus(window, cx); }
+        cx.notify();
+    }
+
+    /// O backend aceita um cliente por terminal No Hangar: só a aba à vista fica conectada, e as outras soltam o socket.
+    pub(super) fn refresh_hangar_sockets(&mut self) {
+        let Some(panel) = self.terminal.as_mut() else { return; };
+        let active = panel.active;
+        let mut connect = None;
+        for (index, slot) in panel.tabs.iter_mut().enumerate() {
+            if slot.hangar().is_none() { continue; }
+            if index == active {
+                if slot.socket.is_none() && matches!(slot.status, Status::Connecting) { connect = Some(index); }
+            } else if slot.socket.is_some() || !matches!(slot.status, Status::Connecting) {
+                if let Some(socket) = slot.socket.as_mut() { socket.close(); }
+                slot.socket = None;
+                slot.generation += 1;
+                slot.status = Status::Connecting;
+            }
+        }
+        if let Some(index) = connect { self.connect_terminal(index); }
+    }
+
+    /// Acerta as abas No Hangar do painel aberto com a lista viva da máquina dele.
+    pub(super) fn sync_hangar_tabs(&mut self) {
+        let Some(server) = self.terminal.as_ref().map(|panel| panel.server.clone()) else { return; };
+        let terms = self.hangar_terms_of(&server);
+        if let Some(panel) = self.terminal.as_mut() { panel.sync_terms(&terms, true); }
+        self.refresh_hangar_sockets();
+    }
+
+    /// Conexão da máquina do painel aberto.
+    fn panel_api(&self) -> Option<Api> {
+        let server = &self.terminal.as_ref()?.server;
+        self.machine_api(server)
+    }
+
+    fn close_hangar(&mut self, id: String, cx: &mut Context<Self>) {
+        let Some(api) = self.panel_api() else { return; };
+        let Some(panel) = self.terminal.as_mut() else { return; };
+        panel.error = None;
+        let (connection, tx, panel_id) = (self.connection, self.tx.clone(), panel.id);
+        self.runtime.spawn(async move {
+            let result = api.server_send(reqwest::Method::POST, &["hangar-terminals", &id, "close"], None, 15).await;
+            let _ = tx.send(Envelope { connection, selection: None, payload: Payload::Terminal(Reply::HangarClosed(panel_id, result)) }).await;
+        });
         cx.notify();
     }
 
@@ -194,15 +349,30 @@ impl Hangar {
         });
     }
 
-    /// Sessão aberta tem terminal de atalho? É o que mostra o botão de terminal numa sessão sem pane.
+    pub(super) fn read_run_code_terms(&mut self, key: SessionKey, request_key: String, attempt: u8) {
+        let Some(api) = self.api_for(&key.server) else {
+            self.action_feedback.insert(key, (tr("code_run_not_found"), true));
+            return;
+        };
+        let (connection, tx) = (self.connection, self.tx.clone());
+        self.runtime.spawn(async move {
+            if attempt > 0 { tokio::time::sleep(std::time::Duration::from_secs(1)).await; }
+            let result = api.read(&key.name, &["shortcut-terminals"], &[], 10).await;
+            let _ = tx.send(Envelope { connection, selection: None, payload: Payload::Terminal(Reply::CodeList(key, request_key, attempt, result)) }).await;
+        });
+    }
+
+    /// Sessão aberta tem terminal de atalho, ou a máquina dela tem um No Hangar? É o que mostra o botão de terminal numa
+    /// sessão sem pane.
     pub(super) fn has_shortcut_terms(&self) -> bool {
         self.selected.as_ref().and_then(|s| self.side.shortcut_terms.get(&s.name)).is_some_and(|list| !list.is_empty())
+            || !self.hangar_terms_of(&self.open_server()).is_empty()
     }
 
     fn sync_shortcut_tabs(&mut self) {
         let Some(panel) = self.terminal.as_mut() else { return; };
         let terms = self.side.shortcut_terms.get(&panel.session).cloned().unwrap_or_default();
-        let added = panel.sync(&terms);
+        let added = panel.sync_terms(&terms, false);
         // Id vazio = o atalho falhou antes de devolver o terminal: a aba dele é a mais nova.
         if let Some(id) = self.side.shortcut_focus.get(&panel.session).cloned() {
             let id = if id.is_empty() { terms.last().map(|t| t.id.clone()) } else { Some(id) };
@@ -211,6 +381,7 @@ impl Hangar {
         for uid in added {
             if let Some(tab) = self.terminal.as_ref().and_then(|panel| panel.index(uid)) { self.connect_terminal(tab); }
         }
+        self.refresh_hangar_sockets();
     }
 
     fn close_shortcut(&mut self, id: String, cx: &mut Context<Self>) {
@@ -233,7 +404,7 @@ impl Hangar {
     }
 
     fn connect_terminal(&mut self, tab: usize) {
-        let api = self.session_api();
+        let api = self.panel_api();
         let Some(panel) = self.terminal.as_mut() else { return; };
         let Some(slot) = panel.tabs.get_mut(tab) else { return; };
         if slot.fixture_error { return; }
@@ -260,19 +431,18 @@ impl Hangar {
     }
 
     fn open_terminal_socket(&mut self, uid: u64, id: u64, generation: u64) {
-        // O token vai na URL do socket: é o da máquina da sessão aberta, não o do servidor ativo.
-        let token = match &self.open_api {
-            Some(api) => self.server_entry(&servers::norm(&api.identity())).map(|s| s.token.clone()).unwrap_or_default(),
-            None => self.active_token.clone(),
-        };
-        let (Some(api), Some(panel)) = (self.session_api(), self.terminal.as_mut()) else { return; };
+        // O token vai na URL do socket: é o da máquina do painel, não o do servidor ativo.
+        let Some(server) = self.terminal.as_ref().map(|panel| panel.server.clone()) else { return; };
+        let token = if self.is_active_key(&server) { self.active_token.clone() }
+            else { self.server_entry(&server).map(|s| s.token.clone()).unwrap_or_default() };
+        let (Some(api), Some(panel)) = (self.panel_api(), self.terminal.as_mut()) else { return; };
         let api = &api;
         let Some(tab) = panel.index(uid) else { return; };
         if panel.id != id || panel.tabs[tab].generation != generation { return; }
         let slot = &mut panel.tabs[tab];
         let (cols, rows) = slot.view.dimensions();
-        let shortcut = slot.shortcut().map(|t| t.id.clone());
-        let socket = ws::Terminal::open(self.runtime.handle(), api, &slot.name, shortcut.as_deref(), token, cols, rows);
+        let (hangar, shortcut) = (slot.hangar().is_some(), slot.shortcut().or(slot.hangar()).map(|t| t.id.clone()));
+        let socket = ws::Terminal::open(self.runtime.handle(), api, &slot.name, shortcut.as_deref(), hangar, token, cols, rows);
         let events = socket.events();
         slot.socket = Some(socket);
         let (connection, tx) = (self.connection, self.tx.clone());
@@ -288,7 +458,7 @@ impl Hangar {
         let api = self.session_api();
         let Some(panel) = self.terminal.as_mut() else { return; };
         let Some(shell) = panel.shell_index() else { return; };
-        panel.active = shell;
+        (panel.active, panel.error) = (shell, None);
         panel.focus.focus(window, cx);
         if panel.tabs[shell].name.is_empty() && !panel.shell_pending {
             panel.shell_pending = true;
@@ -307,11 +477,13 @@ impl Hangar {
                 panel.shell_error = Some(tr("term_disconnected"));
             }
         }
+        self.refresh_hangar_sockets();
         cx.notify();
     }
 
-    pub(super) fn receive_terminal(&mut self, reply: Reply, _window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn receive_terminal(&mut self, reply: Reply, window: &mut Window, cx: &mut Context<Self>) {
         match reply {
+            Reply::Hangar(call, server, id, result) => { self.receive_hangar_call(call, server, id, result, window, cx); return; }
             Reply::Probe(id, uid, generation, result) => {
                 let Some(panel) = self.terminal.as_mut().filter(|panel| panel.id == id) else { return; };
                 let Some(tab) = panel.index(uid).filter(|&tab| panel.tabs[tab].generation == generation) else { return; };
@@ -347,6 +519,20 @@ impl Hangar {
                     Err(error) => { slot.socket = None; slot.status = Status::Failed(socket_error(error)); }
                 }
             }
+            Reply::CodeList(key, request_key, attempt, result) => {
+                if self.selected_key().as_ref() != Some(&key) { return; }
+                let id = result.as_ref().ok().and_then(|value| value.get("terminals")).and_then(Value::as_array)
+                    .and_then(|terms| terms.iter().find(|term| term.get("key").and_then(Value::as_str) == Some(request_key.as_str())))
+                    .and_then(|term| term.get("id")).and_then(Value::as_str).map(str::to_owned);
+                self.receive_terminal(Reply::List(key.name.clone(), result), window, cx);
+                if let Some(id) = id {
+                    self.open_session_terminal(&key.server, &key.name, &id, window, cx);
+                } else if attempt == 0 {
+                    self.read_run_code_terms(key, request_key, 1);
+                } else {
+                    self.action_feedback.insert(key, (tr("code_run_not_found"), true));
+                }
+            }
             Reply::List(name, result) => {
                 // Falha de leitura mantém a lista anterior: o botão não some por um GET perdido.
                 let Ok(value) = result else {
@@ -373,6 +559,13 @@ impl Hangar {
                     self.action_feedback.insert(key, (tr("term_shortcut_close_error").replace("{error}", &Hangar::failure(&error)), true));
                 }
                 self.refresh_shortcut_terms(&name);
+            }
+            // A aba sai pela lista viva; só a falha precisa aparecer.
+            Reply::HangarClosed(id, result) => {
+                let Some(panel) = self.terminal.as_mut().filter(|panel| panel.id == id) else { return; };
+                if let Err(error) = result {
+                    panel.error = Some(tr("term_shortcut_close_error").replace("{error}", &hangar_failure(&error)));
+                }
             }
         }
         cx.notify();
@@ -456,15 +649,21 @@ impl Hangar {
         };
         let failed = panel.tabs.get(tab).is_some_and(|slot| slot.kind == Kind::Shell && panel.shell_error.is_some()
             || matches!(slot.status, Status::Failed(_)));
-        let mut tabs = div().flex().items_center().gap_1().min_w_0().flex_1().overflow_hidden();
+        // Aba nunca encolhe: com muitas, a fila rola na horizontal em vez de esmagar o rótulo.
+        let mut tabs = div().id("terminal-tabs").flex().items_center().gap_1().min_w_0().flex_1().overflow_x_scroll().track_scroll(&panel.tab_scroll);
+        let (mut plain, mut grouped, mut active_plain, mut active_grouped) = (0usize, 0usize, None, None);
+        let live = self.live_for(&panel.server);
+        let mut hangar_tabs = Vec::new();
         for (index, slot) in panel.tabs.iter().enumerate() {
             let selected = index == tab;
-            tabs = tabs.child(match &slot.kind {
-                Kind::Session => Button::new("term-session").ghost().small().selected(selected).label(panel.session.clone())
+            let element = match &slot.kind {
+                Kind::Session => Button::new("term-session").ghost().small().flex_shrink_0().selected(selected).label(panel.session.clone())
                     .on_click(cx.listener(move |this, _, window, cx| {
-                        if let Some(panel) = this.terminal.as_mut() { panel.active = index; panel.focus.focus(window, cx); cx.notify(); }
+                        if let Some(panel) = this.terminal.as_mut() { (panel.active, panel.error) = (index, None); panel.focus.focus(window, cx); }
+                        this.refresh_hangar_sockets();
+                        cx.notify();
                     })).into_any_element(),
-                Kind::Shell => Button::new("term-shell").ghost().small().selected(selected).label(tr("term_shell"))
+                Kind::Shell => Button::new("term-shell").ghost().small().flex_shrink_0().selected(selected).label(tr("term_shell"))
                     .on_click(cx.listener(|this, _, window, cx| this.show_shell(window, cx))).into_any_element(),
                 Kind::Shortcut(term) => {
                     let label = shortcut_tab_label(term);
@@ -474,8 +673,11 @@ impl Hangar {
                             .label(label).tooltip(term.label.clone())
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 if let Some(panel) = this.terminal.as_mut() {
-                                    if panel.select_shortcut(&id) { panel.focus.focus(window, cx); cx.notify(); }
+                                    panel.error = None;
+                                    if panel.select_shortcut(&id) { panel.focus.focus(window, cx); }
                                 }
+                                this.refresh_hangar_sockets();
+                                cx.notify();
                             })))
                         .child(Button::new(SharedString::from(format!("term-sc-close-{}", term.id))).ghost().xsmall().label("×")
                             .accessibility_label(tr("term_shortcut_close").replace("{label}", &term.label))
@@ -483,11 +685,54 @@ impl Hangar {
                             .on_click(cx.listener(move |this, _, _, cx| { this.close_shortcut(close_id.clone(), cx); cx.stop_propagation(); })))
                         .into_any_element()
                 }
-            });
+                Kind::Hangar(term) => {
+                    let asking = live.iter().any(|t| t.term.id == term.id && t.term.alive && t.question.is_some());
+                    let dot = div().size(px(7.)).flex_shrink_0().rounded_full()
+                        .when(!term.alive, |el| el.border_1().border_color(theme::faint()))
+                        .when(term.alive, |el| el.bg(if asking { theme::warning() } else { theme::success() }));
+                    if selected { active_grouped = Some(grouped); }
+                    grouped += 1;
+                    let (id, close_id) = (term.id.clone(), term.id.clone());
+                    let stop = tr_shared("term_hangar_parar", &[("label", term.label.as_str())]);
+                    hangar_tabs.push(div().flex().items_center().flex_shrink_0()
+                        .child(Button::new(SharedString::from(format!("term-hg-{}", term.id))).ghost().small().selected(selected)
+                            .tooltip(term.label.clone())
+                            .child(div().flex().items_center().gap(px(6.)).child(dot).child(shortcut_tab_label(term)))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                if let Some(panel) = this.terminal.as_mut() {
+                                    panel.error = None;
+                                    if panel.select_hangar(&id) { panel.focus.focus(window, cx); }
+                                }
+                                this.refresh_hangar_sockets();
+                                cx.notify();
+                            })))
+                        .child(Button::new(SharedString::from(format!("term-hg-close-{}", term.id))).ghost().xsmall().label("×")
+                            .accessibility_label(stop.clone()).tooltip(stop)
+                            .on_click(cx.listener(move |this, _, _, cx| { this.close_hangar(close_id.clone(), cx); cx.stop_propagation(); })))
+                        .into_any_element());
+                    continue;
+                }
+            };
+            if selected { active_plain = Some(plain); }
+            plain += 1;
+            tabs = tabs.child(element);
+        }
+        // Filhos da fila: as abas comuns, a marca do grupo HANGAR e as abas dele.
+        let active_slot = panel.tabs.get(tab).map(|slot| slot.uid);
+        if panel.scrolled_to.get() != active_slot {
+            if let Some(child) = active_plain.or(active_grouped.map(|n| plain + 1 + n)) { panel.tab_scroll.scroll_to_item(child); }
+            panel.scrolled_to.set(active_slot);
+        }
+        if !hangar_tabs.is_empty() {
+            tabs = tabs.child(div().flex_shrink_0().flex().items_center().gap(px(8.)).ml(px(6.))
+                .child(div().w(px(1.)).h(px(18.)).bg(theme::border_strong()))
+                .child(div().text_size(px(10.)).font_weight(FontWeight::MEDIUM).text_color(theme::faint()).child(tr_shared("term_grupo_hangar", &[])))).children(hangar_tabs);
         }
         let header = div().h(px(38.)).flex_shrink_0().flex().items_center().gap_1().px_2()
             .bg(theme::raised()).border_b_1().border_color(theme::border())
             .child(tabs)
+            .when_some(panel.error.clone(), |el, error| el.child(div().id("term-hangar-error").role(Role::Alert).flex_shrink_0().max_w(px(320.)).truncate()
+                .text_xs().text_color(theme::warning()).child(error)))
             .when(failed, |el| el.child(Button::new("term-reconnect").ghost().small().icon(IconName::RefreshCw)
                 .label(tr("term_reconnect")).on_click(cx.listener(|this, _, window, cx| {
                     if let Some(panel) = this.terminal.as_ref() {
@@ -588,10 +833,30 @@ impl Hangar {
 
 /// Rótulo da aba do atalho: o nome e, depois que o comando saiu, o código (o pane continua com a saída na tela).
 fn shortcut_tab_label(term: &ShortcutTerm) -> String {
-    let label = conversation::one_line(&term.label, 24);
+    let label = conversation::one_line(&term.label, 60);
     if term.alive { return label; }
     let status = term.exit_code.map_or_else(|| tr("term_shortcut_ended"), |code| tr("term_shortcut_exit").replace("{code}", &code.to_string()));
     format!("{label} · {status}")
+}
+
+#[cfg(test)]
+mod live_tests {
+    // Sem glob: o `test` da gpui colide com o atributo padrão.
+    use super::{parse_live_terms, TermQuestion};
+    use serde_json::json;
+
+    #[test]
+    fn parses_hangar_and_question_and_skips_rows_without_id() {
+        let list = parse_live_terms(&json!([
+            {"id": "abc123", "label": "PMW", "alive": true, "exit_code": null, "created": 10, "owner": "", "key": "a-1",
+             "origin": "sessao-a", "question": {"text": "Porta", "default": "3000", "screen": ["Porta [3000]:"]}},
+            {"label": "sem id"}
+        ]));
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].key, "a-1");
+        assert_eq!(list[0].question, Some(TermQuestion { text: "Porta".into(), default: "3000".into(), screen: vec!["Porta [3000]:".into()] }));
+        assert!(parse_live_terms(&json!({"not": "a list"})).is_empty());
+    }
 }
 
 #[cfg(test)]

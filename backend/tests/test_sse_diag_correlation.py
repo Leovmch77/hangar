@@ -61,7 +61,7 @@ async def test_lista_registra_abertura_e_fechamento_por_conexao(monkeypatch):
     monkeypatch.setattr(diag, "registrar", lambda event, **fields: records.append((event, diag.req_atual.get())))
     monkeypatch.setattr(sse, "_list_refresher", SimpleNamespace(
         acquire=lambda: asyncio.Condition(), release=lambda: None,
-        version=1, errored=False, data="[]"))
+        version=1, errored=False, data="[]", shortcuts_data=None))
     previous = diag.req_atual.set("lista-1")
     try:
         stream = sse.list_events()
@@ -78,7 +78,7 @@ async def test_duas_conexoes_mantem_ids_distintos_ate_o_fechamento(monkeypatch):
     monkeypatch.setattr(diag, "registrar", lambda event, **fields: records.append((event, diag.req_atual.get())))
     monkeypatch.setattr(sse, "_list_refresher", SimpleNamespace(
         acquire=lambda: asyncio.Condition(), release=lambda: None,
-        version=1, errored=False, data="[]"))
+        version=1, errored=False, data="[]", shortcuts_data=None))
     barrier = asyncio.Barrier(2)
 
     async def connect(req):

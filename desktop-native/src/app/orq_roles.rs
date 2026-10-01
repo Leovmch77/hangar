@@ -1,4 +1,4 @@
-//! Aba "Papéis do grupo" da Orquestração (`OrquestracaoSheet.svelte`): as etapas do contrato `regras-<gid>.md` na ordem do
+//! Aba "Time do trabalho" da Orquestração (`OrquestracaoSheet.svelte`): as etapas do contrato `regras-<gid>.md` na ordem do
 //! trabalho, o formulário de um papel, a troca rápida de conta e modelo e o "Começar". Salvar grava o contrato e vale na
 //! próxima sessão de cada papel; sessão viva nunca é tocada. As contas liberadas ficam em Configurações > Orquestração.
 use super::*;
@@ -36,7 +36,7 @@ struct Role {
     modelo: String,
     esforco: String,
     vez: String,
-    headless: bool,
+    headless: Option<bool>,
     permissao: String,
     motor: String,
     jev: bool,
@@ -55,8 +55,8 @@ impl Role {
     /// Só o que vale para o provider escolhido (`abertura()` do web): nenhum caminho de gravação manda motor para o Codex.
     fn normalized(mut self) -> Self {
         let claude = self.provider == "claude";
-        self.headless = (claude || self.provider == "codex") && self.headless;
-        if !(claude || self.headless) { self.permissao.clear(); }
+        if !(claude || self.provider == "codex") { self.headless = None; }
+        if !(claude || self.headless == Some(true)) { self.permissao.clear(); }
         if !claude { self.motor.clear(); }
         if !claude || !self.motor.is_empty() { self.subagente.clear(); }
         if self.provider == "omp" { self.perfil = self.perfil.trim().to_owned(); } else { self.perfil.clear(); }
@@ -80,11 +80,20 @@ struct Readiness { phase: String, plan: Option<Plan> }
 #[derive(Deserialize)]
 struct Group {
     gid: String,
+    #[serde(default)]
+    grouped: Option<bool>,
+    #[serde(default)]
+    session_prefix: String,
     arquivo: String,
     mtime: f64,
     papeis: Vec<Row>,
-    arbitro: Option<String>,
     prontidao: Option<Readiness>,
+}
+
+impl Group {
+    fn has_group(&self) -> bool {
+        self.grouped.unwrap_or(self.gid != "padrao" && !self.gid.starts_with("draft-"))
+    }
 }
 
 #[derive(Clone, Deserialize)]
@@ -351,8 +360,7 @@ impl OrqRoles {
     fn original(&self, key: &str) -> Option<&Row> { self.rows().iter().find(|r| r.role.key() == key) }
 
     fn blank(&self) -> Role {
-        Role { provider: "claude".into(), conta: self.allowed("claude").first().map(|a| a.conta.clone()).unwrap_or_default(),
-            jev: self.jev_default, ..Role::default() }
+        Role { provider: "claude".into(), jev: self.jev_default, ..Role::default() }
     }
 
     /// A linha como vai ficar: o rascunho por cima do contrato.
@@ -441,15 +449,14 @@ impl OrqRoles {
         }
     }
     fn permissions(role: &Role) -> Option<&'static [&'static str]> {
-        match (role.provider.as_str(), role.headless) { ("claude", _) => Some(&PERMISSIONS), ("codex", true) => Some(&CODEX_PERMISSIONS), _ => None }
+        match (role.provider.as_str(), role.headless) { ("claude", _) => Some(&PERMISSIONS), ("codex", Some(true)) => Some(&CODEX_PERMISSIONS), _ => None }
     }
 
-    /// Nome da sessão de um papel novo: o prefixo do grupo e o sufixo que a skill usa para o papel.
+    /// Papéis novos usam a identidade do trabalho, sem inferir nomes de outras linhas.
     fn derived_session(&self, papel: &str) -> String {
         let group = self.group.as_ref().and_then(|g| g.as_ref().ok());
-        let base = self.rows().iter().map(|r| r.role.sessao.clone()).find(|s| !s.is_empty())
-            .or_else(|| group.and_then(|g| g.arbitro.clone())).unwrap_or_else(|| self.name.clone());
-        let prefix = match base.rfind('-') { Some(i) if i > 0 => base[..=i].to_owned(), _ => format!("{base}-") };
+        let base = group.map(|g| g.session_prefix.trim()).filter(|p| !p.is_empty()).unwrap_or(&self.name);
+        let prefix = if base.ends_with('-') { base.to_owned() } else { format!("{base}-") };
         let lower = papel.to_lowercase();
         let suffix = match lower.as_str() {
             "árbitro" => "arbitro".into(), "executor" => "t*".into(), "revisor" => "review*".into(), "revisão final" => "final".into(),
@@ -586,7 +593,7 @@ impl OrqRoles {
             r.provider = provider.into();
             r.conta = conta;
             (r.modelo, r.esforco, r.permissao, r.motor, r.subagente, r.perfil) = Default::default();
-            r.headless = false;
+            r.headless = None;
         });
         self.stale = true;
         cx.notify();
@@ -768,7 +775,7 @@ impl OrqRoles {
             "modelo" => if role.modelo.is_empty() { t("criar_padrao") } else { model_label(&role.modelo) },
             "esforco" => text(&role.esforco),
             "janela" => if role.janela.is_empty() { t("criar_padrao") } else { format!("{}%", role.janela) },
-            "headless" => t(if role.headless { "criar_modo_exec_headless" } else { "criar_modo_exec_tmux" }),
+            "headless" => t(match role.headless { Some(true) => "criar_modo_exec_headless", Some(false) => "criar_modo_exec_tmux", None => "criar_padrao" }),
             "jev" => t(if role.jev { "orqcfg_ligado" } else { "orqcfg_desligado" }),
             "permissao" => text(&role.permissao),
             "motor" => text(&role.motor),
@@ -875,7 +882,7 @@ impl OrqRoles {
         });
         let muted = |text: String| div().text_sm().text_color(theme::muted()).whitespace_normal().child(text);
         let mut list = div().flex().flex_col().gap_3()
-            .when(group.gid == "padrao", |el| el.child(muted(t("orqcfg_sem_grupo"))))
+            .when(!group.has_group(), |el| el.child(muted(t("orqcfg_sem_grupo"))))
             .child(muted(t(if rows.is_empty() { "orqcfg_sem_papeis" } else { "orqcfg_papeis_intro" })))
             .when_some(progress, |el, (task, total)| el.child(div().text_sm().text_color(theme::accent()).child(
                 tr_shared("orqcfg_andamento", &[("t", &task.to_string()), ("total", &total.to_string())]))))
@@ -992,11 +999,12 @@ impl OrqRoles {
             select(&self.picks.permissao, t("criar_permissao"), false)].into_iter().flatten().map(|el| el.flex_1().min_w(px(150.))).collect();
         form = form.child(div().flex().flex_wrap().gap_3().children(trio));
         if matches!(role.provider.as_str(), "claude" | "codex") {
-            let mode = |id: &'static str, on: bool, text: String, headless: bool| choice(id, on, cx).small().label(text)
+            let mode = |id: &'static str, on: bool, text: String, headless: Option<bool>| choice(id, on, cx).small().label(text)
                 .disabled(self.busy).on_click(cx.listener(move |this, _, _, cx| { this.edit(|r| r.headless = headless); this.stale = true; cx.notify(); }));
             form = form.child(field(t("criar_modo_exec"), div().flex().gap(px(6.))
-                .child(mode("orq-exec-tmux", !role.headless, t("criar_modo_exec_tmux"), false))
-                .child(mode("orq-exec-headless", role.headless, t("criar_modo_exec_headless"), true)).into_any_element()));
+                .child(mode("orq-exec-default", role.headless.is_none(), t("criar_padrao"), None))
+                .child(mode("orq-exec-tmux", role.headless == Some(false), t("criar_modo_exec_tmux"), Some(false)))
+                .child(mode("orq-exec-headless", role.headless == Some(true), t("criar_modo_exec_headless"), Some(true))).into_any_element()));
         }
         form = form.children(select(&self.picks.motor, t("comum_motor"), false)).children(select(&self.picks.subagente, t("criar_subagente"), false));
         if role.provider == "omp" {
@@ -1096,14 +1104,14 @@ impl Render for OrqRoles {
                 .into_any_element(),
         };
         let group = self.group.as_ref().and_then(|g| g.as_ref().ok());
-        let gid = group.map(|g| g.gid.clone());
+        let gid = group.filter(|g| g.has_group()).map(|g| g.gid.clone());
         let footer = self.render_footer(group, cx);
         div().w_full().flex().flex_col().gap_3().child(header(gid, cx)).child(body).children(footer)
     }
 }
 
 impl Hangar {
-    /// Papéis do grupo da sessão aberta, num diálogo; as contas liberadas continuam em Configurações.
+    /// Time do trabalho da sessão aberta; as contas liberadas continuam em Configurações.
     pub(super) fn open_orq_roles(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let (Some(api), Some(key)) = (self.session_api(), self.selected_key()) else { return };
         let (runtime, hangar) = (self.runtime.clone(), cx.entity());
@@ -1143,7 +1151,7 @@ mod tests {
         let role = Role { provider: "codex".into(), motor: "x".into(), permissao: "auto".into(), subagente: "s".into(), perfil: "p".into(),
             ..Role::default() }.normalized();
         assert_eq!((role.motor.as_str(), role.permissao.as_str(), role.subagente.as_str(), role.perfil.as_str()), ("", "", "", ""));
-        let role = Role { provider: "codex".into(), headless: true, permissao: "Full Access".into(), ..Role::default() }.normalized();
+        let role = Role { provider: "codex".into(), headless: Some(true), permissao: "Full Access".into(), ..Role::default() }.normalized();
         assert_eq!(role.permissao, "Full Access");
     }
 }

@@ -45,6 +45,9 @@ def _plugin(marketplace: Path, name: str, version: str = "1.0.0") -> Path:
 
 @pytest.fixture
 def contas(tmp_path, monkeypatch):
+    # No Windows o tmp_path vem com a caixa do login (`administrator`); a produção resolve e compara
+    # com a caixa real do disco.
+    tmp_path = tmp_path.resolve()
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
     home = tmp_path / "home"
     home.mkdir()
@@ -101,8 +104,15 @@ class FakeNative:
         assert method == "hooks/list"
         return copy.deepcopy(self.state.get("hooks", {"data": []}))
 
-    async def cli(self, args: list[str]) -> dict:
+    async def cli(self, args: list[str], *, esperado: str = "") -> dict:
         self.calls.append((str(self.codex_home), "cli", list(args)))
+        if args[:3] == ["plugin", "marketplace", "remove"]:
+            self.state.pop("orphan", None)
+            return {"marketplaceName": args[3]}
+        if args[:3] == ["plugin", "marketplace", "add"] and self.state.get("orphan"):
+            from app.codex_importador import CodexNativoErro
+            raise CodexNativoErro("falhou", data={"stderr": "Error: marketplace 'x' is already "
+                                                            "added from a different source; remove it"})
         if args[:4] == ["plugin", "marketplace", "list", "--json"]:
             config_path = self.codex_home / "config.toml"
             config = tomllib.loads(config_path.read_text(encoding="utf-8")) if config_path.is_file() else {}
@@ -257,6 +267,48 @@ async def test_instala_somente_plugins_da_fonte_e_preserva_exclusivos(contas, fa
     assert not any(call[2] == "exclusive@other" for call in FakeNative.calls if call[1] == "install")
 
 
+async def test_clone_orfao_do_marketplace_e_removido_e_readicionado(contas, fake_native):
+    _, source, target, marketplace = contas
+    source_state = FakeNative.states[str(source.home)]
+    source_state["marketplaces"] = [{
+        "name": "accounts-local", "root": str(marketplace),
+        "marketplaceSource": {"sourceType": "local", "source": str(marketplace)},
+    }]
+    source_state["plugins"] = [_entry(marketplace)]
+    FakeNative.states[str(target.home)]["orphan"] = True
+
+    result = await sync_plugins(source, target, {})
+
+    assert not result["issues"], result
+    comandos = [call[2][:3] for call in FakeNative.calls
+                if call[0] == str(target.home) and call[1] == "cli" and call[2][2] != "list"]
+    assert comandos == [["plugin", "marketplace", "add"], ["plugin", "marketplace", "remove"],
+                        ["plugin", "marketplace", "add"]]
+
+
+async def test_marketplace_declarado_no_config_nunca_e_removido(contas, fake_native, monkeypatch):
+    _, source, target, marketplace = contas
+    source_state = FakeNative.states[str(source.home)]
+    source_state["marketplaces"] = [{
+        "name": "accounts-local", "root": str(marketplace),
+        "marketplaceSource": {"sourceType": "local", "source": str(marketplace)},
+    }]
+    source_state["plugins"] = [_entry(marketplace)]
+    FakeNative.states[str(target.home)]["orphan"] = True
+    (target.home / "config.toml").write_text(
+        '[marketplaces.accounts-local]\nsource_type = "git"\nsource = "https://x/y"\n', encoding="utf-8")
+
+    async def listagem_sem_ele(native):
+        return []
+
+    monkeypatch.setattr("app.codex_contas_plugins._marketplaces", listagem_sem_ele)
+
+    result = await sync_plugins(source, target, {})
+
+    assert any(issue["code"] == "codex_account_plugin_marketplace_add_failed" for issue in result["issues"])
+    assert not any(call[2][:3] == ["plugin", "marketplace", "remove"] for call in FakeNative.calls)
+
+
 async def test_plugin_remote_ja_instalado_nao_exige_marketplace_homonimo(contas, fake_native):
     _, source, target, _ = contas
     remote = {
@@ -321,9 +373,9 @@ async def test_marketplace_embutido_ausente_e_materializado_na_conta_destino(con
     assert (target_root / ".agents/plugins/marketplace.json").is_file()
     assert (target_root / "plugins/browser/.codex-plugin/plugin.json").is_file()
     assert not (target_root / "plugins/latex").exists()
-    config_text = (target.home / "config.toml").read_text(encoding="utf-8")
-    assert str(target_root) in config_text
-    assert str(source_root) not in config_text
+    # Lido como TOML: no Windows a barra invertida vem escapada no texto cru.
+    config = tomllib.loads((target.home / "config.toml").read_text(encoding="utf-8"))
+    assert config["marketplaces"]["openai-bundled"]["source"] == str(target_root)
     assert any(item["pluginId"] == "browser@openai-bundled"
                for item in FakeNative.states[str(target.home)]["plugins"])
 
@@ -363,7 +415,8 @@ async def test_remocao_da_fonte_desabilita_apenas_plugin_gerenciado(contas, fake
     previous = {"plugins": {"sample@accounts-local": {
         "pluginId": "sample@accounts-local", "marketplace": "accounts-local",
         "version": "1.0.0", "enabled": True,
-        "origem": {"type": "local", "source": str(marketplace)},
+        # Forma que o manifesto grava: normcase minúscula no Windows.
+        "origem": {"type": "local", "source": os.path.normcase(str(marketplace))},
     }}}
 
     result = await sync_plugins(source, target, previous)

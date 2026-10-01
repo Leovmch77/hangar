@@ -3,6 +3,7 @@
   import { desktop } from '../lib/desktop.svelte';
   import * as m from '../paraglide/messages';
   import type { CommandInfo } from '@hangar/core';
+  import { skipChatConfirmations, rememberSkipChatConfirmations } from '../lib/confirmActions';
 
   // Folha de comandos: busca no topo + lista agrupada (Built-ins, Suas skills, Plugins).
   // Comportamento ao tocar: destrutivos pedem confirmacao inline; model/effort abrem o
@@ -22,12 +23,16 @@
 
   let query = $state('');
   let confirming = $state<string | null>(null);
+  let skipNext = $state(false);
+  let saveError = $state(false);
 
   // Zera busca e confirmacao toda vez que a folha abre.
   $effect(() => {
     if (open) {
       query = '';
       confirming = null;
+      skipNext = false;
+      saveError = false;
     }
   });
 
@@ -65,7 +70,10 @@
       return;
     }
     if (c.destructive) {
+      if (skipChatConfirmations()) { onCommand('/' + c.name); onClose(); return; }
       confirming = c.name; // pede confirmacao inline antes de enviar
+      skipNext = false;
+      saveError = false;
       return;
     }
     if (c.argumentHint) {
@@ -78,6 +86,7 @@
   }
 
   function confirm(c: CommandInfo) {
+    if (skipNext && !rememberSkipChatConfirmations()) { saveError = true; return; }
     confirming = null;
     onCommand('/' + c.name);
     onClose();
@@ -154,6 +163,8 @@
                       <button class="cbtn cbtn--no" onclick={() => (confirming = null)}>{m.comandos_nao()}</button>
                       <button class="cbtn cbtn--yes" onclick={() => confirm(c)}>{m.comandos_sim()}</button>
                     </div>
+                    <label class="confirm-skip"><input type="checkbox" bind:checked={skipNext} onchange={() => (saveError = false)} />{m.confirm_no_ask_actions()}</label>
+                    {#if saveError}<span class="confirm-error" role="alert">{m.confirm_no_ask_save_failed()}</span>{/if}
                   </div>
                 {:else}
                   <button class="cmd-row" onclick={() => handleTap(c)}>
@@ -303,6 +314,7 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
+    flex-wrap: wrap;
     gap: var(--space-2);
     min-height: 44px;
     padding: var(--space-2) var(--space-3);
@@ -324,6 +336,10 @@
     gap: var(--space-2);
     flex-shrink: 0;
   }
+
+  .confirm-skip { width: 100%; display: flex; align-items: center; gap: var(--space-2); font-size: var(--text-sm); color: var(--text-secondary); }
+  .confirm-skip input { width: 20px; height: 20px; accent-color: var(--accent); }
+  .confirm-error { width: 100%; font-size: var(--text-sm); color: var(--error); }
 
   .cbtn {
     padding: 0 var(--space-3);

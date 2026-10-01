@@ -1,7 +1,7 @@
 <script lang="ts">
   // Editor da fileira de atalhos configurável: lista ordenada única (nativos + customizados),
   // subir/descer, remover, formulário de adicionar/editar com ícone curado ou emoji, e
-  // "restaurar padrão" que apaga o override.
+  // "restaurar padrão" que apaga o override. Cada ação grava na hora: não há "Salvar" separado.
   // O estado salvo mora no servidor (runtime_config.shortcuts) via lib/shortcuts.svelte.ts.
   import * as m from '../../paraglide/messages';
   import {
@@ -35,7 +35,6 @@
   let saving = $state(false);
   let saved = $state(false);
   let saveError = $state('');
-  let dirty = $state(false);
 
   async function load() {
     // Servidor fixado na entrada: se o alvo trocar durante a busca, a resposta velha não pode
@@ -47,7 +46,6 @@
       await loadShortcuts(target);
       if (target !== serverId) return;
       list = shortcutsFor(target).map((s) => ({ ...s }));
-      dirty = false;
     } catch (err) {
       if (target !== serverId) return;
       console.error('shortcuts load error:', err);
@@ -58,23 +56,6 @@
   }
   $effect(() => { serverId; void load(); });
 
-  async function save() {
-    if (saving) return;
-    saving = true;
-    saveError = '';
-    try {
-      await saveShortcuts(list, serverId);
-      dirty = false;
-      saved = true;
-      setTimeout(() => (saved = false), 2500);
-    } catch (e) {
-      // Erro de validação do backend chega como veio ("shortcuts: item 2 …").
-      saveError = e instanceof Error ? e.message : String(e);
-    } finally {
-      saving = false;
-    }
-  }
-
   // ── Deste projeto: mesma edição, gravação própria (PUT da lista inteira do projeto). ──────────
   let proj = $state<ProjectShortcut[]>([]);
   let projName = $state('');
@@ -83,14 +64,56 @@
   let projSaving = $state(false);
   let projSaved = $state(false);
   let projSaveError = $state('');
-  let projDirty = $state(false);
+
+  // Toda ação grava na hora (a lista inteira). Só troca a lista na tela depois de o servidor
+  // aceitar; em erro a lista fica como estava e a mensagem aparece no rodapé.
+  async function persist(sc: Scope, next: Shortcut[]): Promise<boolean> {
+    // Alvo fixado na entrada: se a tela mudar de servidor/sessão durante o PUT, a resposta não
+    // pode cair na lista da outra.
+    const srv = serverId, target = projectSession;
+    if (sc === 'global') {
+      if (saving) return false;
+      saving = true;
+      saved = false;
+      saveError = '';
+      try {
+        await saveShortcuts(next, srv);
+        if (srv === serverId) list = next;
+        saved = true;
+        setTimeout(() => (saved = false), 2500);
+        return true;
+      } catch (e) {
+        // Erro de validação do backend chega como veio ("shortcuts: item 2 …").
+        saveError = e instanceof Error ? e.message : String(e);
+        return false;
+      } finally {
+        saving = false;
+      }
+    }
+    if (projSaving || !target) return false;
+    projSaving = true;
+    projSaved = false;
+    projSaveError = '';
+    try {
+      const r = await saveProjectShortcuts(target, next.filter((s): s is ProjectShortcut => s.type !== 'internal'));
+      if (target === projectSession) proj = r.items.map((s) => ({ ...s }));
+      projSaved = true;
+      setTimeout(() => (projSaved = false), 2500);
+      return true;
+    } catch (e) {
+      // Mensagem já traduzida pelo `code` do backend (errosApi).
+      projSaveError = e instanceof Error ? e.message : String(e);
+      return false;
+    } finally {
+      projSaving = false;
+    }
+  }
 
   async function loadProject() {
     const target = projectSession;
     // A lista da sessão anterior não pode ficar na tela nem ser gravada no projeto da nova.
     proj = [];
     projName = '';
-    projDirty = false;
     if (!target) return;
     projLoading = true;
     projLoadError = '';
@@ -100,7 +123,6 @@
       const p = projectShortcutsFor(target);
       proj = (p?.items ?? []).map((s) => ({ ...s }));
       projName = p?.name ?? '';
-      projDirty = false;
     } catch (e) {
       if (target !== projectSession) return;
       projLoadError = projectShortcutsError(target);
@@ -110,32 +132,16 @@
   }
   $effect(() => { projectSession; void loadProject(); });
 
-  async function saveProject() {
-    if (projSaving || !projectSession) return;
-    projSaving = true;
-    projSaveError = '';
-    try {
-      const r = await saveProjectShortcuts(projectSession, proj);
-      proj = r.items.map((s) => ({ ...s }));
-      projDirty = false;
-      projSaved = true;
-      setTimeout(() => (projSaved = false), 2500);
-    } catch (e) {
-      // Mensagem já traduzida pelo `code` do backend (errosApi).
-      projSaveError = e instanceof Error ? e.message : String(e);
-    } finally {
-      projSaving = false;
-    }
-  }
-
   async function restoreDefaults() {
     if (saving) return;
     saving = true;
+    saved = false;
     saveError = '';
     try {
       await saveShortcuts(null, serverId);
       list = defaultShortcuts();
-      dirty = false;
+      saved = true;
+      setTimeout(() => (saved = false), 2500);
     } catch (e) {
       saveError = e instanceof Error ? e.message : String(e);
     } finally {
@@ -159,12 +165,13 @@
     (Object.keys(INTERNAL_LABEL) as ShortcutInternalAction[]).filter(
       (a) => !list.some((s) => s.type === 'internal' && s.action === a)));
 
-  // As duas listas passam pelas mesmas operações; o escopo diz qual lista e qual "sujo" mudam.
+  // As duas listas passam pelas mesmas operações; o escopo diz qual lista muda.
   function itemsOf(sc: Scope): Shortcut[] { return sc === 'global' ? list : proj; }
-  function setItems(sc: Scope, next: Shortcut[], isDirty = true) {
-    if (sc === 'global') { list = next; dirty = isDirty; }
-    else { proj = next.filter((s): s is ProjectShortcut => s.type !== 'internal'); projDirty = isDirty; }
+  function setItems(sc: Scope, next: Shortcut[]) {
+    if (sc === 'global') list = next;
+    else proj = next.filter((s): s is ProjectShortcut => s.type !== 'internal');
   }
+  const busy = (sc: Scope) => (sc === 'global' ? saving : projSaving);
 
   function move(sc: Scope, i: number, delta: -1 | 1) {
     const items = itemsOf(sc);
@@ -172,19 +179,21 @@
     if (j < 0 || j >= items.length) return;
     const next = [...items];
     [next[i], next[j]] = [next[j], next[i]];
-    setItems(sc, next);
+    void persist(sc, next);
   }
 
   // ── Arrastar pra reordenar. HTML5 DnD não responde ao toque em tablet (regra do repo), então
   // os botões ↑/↓ ficam — são a alternativa exigida pela WCAG 2.2 SC 2.5.7, não redundância. ──
   let dragIdx = $state<number | null>(null);
   let dragScope = $state<Scope | null>(null);
-  // A lista se reordena durante o arrasto; cancelado (Esc, soltar fora) ele volta a como estava.
-  let beforeDrag: { items: Shortcut[]; dirty: boolean } | null = null;
+  // A lista se reordena na tela durante o arrasto e só grava ao soltar; cancelado (Esc, soltar
+  // fora) ou recusado pelo servidor, ele volta a como estava.
+  let beforeDrag: Shortcut[] | null = null;
   function dragStart(e: DragEvent, sc: Scope, i: number) {
+    if (busy(sc)) { e.preventDefault(); return; }
     dragIdx = i;
     dragScope = sc;
-    beforeDrag = { items: itemsOf(sc), dirty: sc === 'global' ? dirty : projDirty };
+    beforeDrag = itemsOf(sc);
     if (e.dataTransfer) {
       e.dataTransfer.effectAllowed = 'move';
       e.dataTransfer.setData('text/plain', String(i));
@@ -200,20 +209,25 @@
     setItems(sc, next);
     dragIdx = i;
   }
-  function dragEnd(e: DragEvent) {
-    if (e.dataTransfer?.dropEffect === 'none' && beforeDrag && dragScope) {
-      setItems(dragScope, beforeDrag.items, beforeDrag.dirty);
-    }
+  async function dragEnd(e: DragEvent) {
+    const sc = dragScope;
+    const before = beforeDrag;
     beforeDrag = null;
     dragIdx = null;
     dragScope = null;
+    if (!sc || !before) return;
+    const now = itemsOf(sc);
+    if (e.dataTransfer?.dropEffect === 'none' || now.every((s, k) => s.id === before[k]?.id)) {
+      setItems(sc, before);
+      return;
+    }
+    if (!(await persist(sc, now))) setItems(sc, before);
   }
   function remove(sc: Scope, i: number) {
-    setItems(sc, itemsOf(sc).filter((_, k) => k !== i));
+    void persist(sc, itemsOf(sc).filter((_, k) => k !== i));
   }
   function restoreNative(a: ShortcutInternalAction) {
-    list = [...list, { id: a, type: 'internal', action: a }];
-    dirty = true;
+    void persist('global', [...list, { id: a, type: 'internal', action: a }]);
   }
 
   // ── Formulário (adicionar/editar customizado) ───────────────────────────────
@@ -228,12 +242,16 @@
   let fPasta = $state('');
   let fSendDirect = $state(true);
   let fConfirm = $state(false);
+  let fRunsIn = $state<'session' | 'hangar'>('session');
+  let fHome = $state(true);
+  let fAsk = $state(true);
   const formOpen = $derived(formScope !== null);
 
   function openNew(sc: Scope) {
     editingIdx = null;
     fType = 'send_text'; fLabel = ''; fGlyph = 'bolt'; fEmoji = '';
     fContent = ''; fPasta = ''; fSendDirect = true; fConfirm = false;
+    fRunsIn = 'session'; fHome = true; fAsk = true;
     formScope = sc;
   }
   function openEdit(sc: Scope, i: number) {
@@ -246,14 +264,17 @@
     fPasta = s.type === 'shell' ? s.pasta ?? '' : '';
     fSendDirect = s.type === 'send_text' ? s.send_direct !== false : true;
     fConfirm = s.confirm === true;
+    fRunsIn = s.type === 'shell' && s.runs_in === 'hangar' ? 'hangar' : 'session';
+    fHome = s.type === 'shell' ? s.hangar_home !== false : true;
+    fAsk = s.type === 'shell' ? s.answer_in_app !== false : true;
     if (s.icon?.startsWith('emoji:')) { fEmoji = s.icon.slice(6); fGlyph = 'bolt'; }
     else { fEmoji = ''; fGlyph = s.icon?.startsWith('glifo:') ? s.icon.slice(6) : 'bolt'; }
     formScope = sc;
   }
   const formValid = $derived(!!fLabel.trim() && !!fContent.trim());
-  function submitForm() {
+  async function submitForm() {
     const sc = formScope;
-    if (!formValid || !sc) return;
+    if (!formValid || !sc || busy(sc)) return;
     const icon = fEmoji.trim() ? `emoji:${fEmoji.trim()}` : `glifo:${fGlyph}`;
     const base = { label: fLabel.trim(), icon, ...(fConfirm ? { confirm: true } : {}) };
     // Pasta só se edita nos atalhos do projeto (a raiz a que ela se refere é a da cópia da sessão);
@@ -263,12 +284,16 @@
     const folder = sc === 'project' ? fPasta.trim() : kept;
     const pasta = folder ? { pasta: folder } : {};
     const shortcut: ShortcutSendText | ShortcutShell = fType === 'shell'
-      ? { id: formId(sc), type: 'shell', command: fContent.trim(), ...pasta, ...base }
+      ? { id: formId(sc), type: 'shell', command: fContent.trim(), ...pasta,
+          ...(fRunsIn === 'hangar' ? { runs_in: 'hangar' as const } : {}),
+          ...(fRunsIn === 'hangar' && !fHome ? { hangar_home: false } : {}),
+          ...(fAsk ? {} : { answer_in_app: false }), ...base }
       : { id: formId(sc), type: 'send_text', text: fContent.trim(),
           ...(fSendDirect ? {} : { send_direct: false }), ...base };
     const items = itemsOf(sc);
-    setItems(sc, editingIdx === null ? [...items, shortcut] : items.map((s, i) => (i === editingIdx ? shortcut : s)));
-    formScope = null;
+    // Em erro o formulário fica aberto com o que foi digitado, e a mensagem aparece no rodapé.
+    const ok = await persist(sc, editingIdx === null ? [...items, shortcut] : items.map((s, i) => (i === editingIdx ? shortcut : s)));
+    if (ok) formScope = null;
   }
   function formId(sc: Scope): string {
     if (editingIdx !== null) return itemsOf(sc)[editingIdx].id;
@@ -293,6 +318,7 @@
 </script>
 
 <div class="at">
+  <h2 class="pagina-titulo">{m.atalhos_titulo()}</h2>
   {#if projectSession}<h3 class="titulo">{m.atalhos_globais_titulo()}</h3>{/if}
   <p class="sub">{m.atalhos_sub()}</p>
 
@@ -311,7 +337,7 @@
       <div class="repor">
         <span>{m.atalhos_repor()}</span>
         {#each missingNatives as a (a)}
-          <button class="chip" onclick={() => restoreNative(a)}>+ {INTERNAL_LABEL[a]()}</button>
+          <button class="chip" onclick={() => restoreNative(a)} disabled={busy('global')}>+ {INTERNAL_LABEL[a]()}</button>
         {/each}
       </div>
     {/if}
@@ -325,16 +351,9 @@
     <div class="rodape">
       <button class="btn" onclick={() => void restoreDefaults()} disabled={saving}
               title={m.atalhos_restaurar_ajuda()}>{m.atalhos_restaurar()}</button>
-      <!-- Importar grava direto no servidor: com edição pendente, salvar depois sobrescreveria o que veio. -->
-      {#if !dirty}<ShortcutTransfer {serverId} onDone={() => void load()} />{/if}
-      <span class="feedback">
-        {#if saveError}<span class="erro">{saveError}</span>
-        {:else if saved}{m.atalhos_salvo()}{/if}
-      </span>
-      <button class="btn primario" onclick={() => void save()} disabled={!dirty || saving}>
-        {m.atalhos_salvar()}
-      </button>
+      <ShortcutTransfer {serverId} onDone={() => void load()} />
     </div>
+    {@render status(saveError, saving, saved)}
   {/if}
 
   {#if projectSession}
@@ -357,24 +376,28 @@
         {:else}
           <button class="btn" onclick={() => openNew('project')}>{m.atalhos_add()}</button>
         {/if}
-        <div class="rodape">
-          <span class="feedback">
-            {#if projSaveError}<span class="erro">{projSaveError}</span>
-            {:else if projSaved}{m.atalhos_salvo()}{/if}
-          </span>
-          <button class="btn primario" onclick={() => void saveProject()} disabled={!projDirty || projSaving}>
-            {m.atalhos_salvar()}
-          </button>
-        </div>
+        {@render status(projSaveError, projSaving, projSaved)}
       {/if}
     </section>
   {/if}
 </div>
 
+{#snippet status(err: string, isSaving: boolean, isSaved: boolean)}
+  {#if err || isSaving || isSaved}
+    <!-- Fixo no pé da área visível: numa lista longa, o resultado de ↑/✕ no topo não pode ficar fora da tela. -->
+    <div class="status" class:erro-caixa={!!err} role="status">
+      {#if err}<span class="erro">{err}</span>
+      {:else if isSaving}<span class="salvando">{m.atalhos_salvando()}</span>
+      {:else}<span class="ok">{m.atalhos_salvo()}</span>{/if}
+    </div>
+  {/if}
+{/snippet}
+
 {#snippet rows(sc: Scope, items: Shortcut[])}
   <ul class="linhas">
     {#each items as s, i (s.id)}
-      <li class="linha" class:arrastando={dragScope === sc && dragIdx === i} draggable="true"
+      {@const editing = formScope === sc && editingIdx === i}
+      <li class="linha" class:arrastando={dragScope === sc && dragIdx === i} class:editando={editing} draggable="true"
           ondragstart={(e) => dragStart(e, sc, i)} ondragover={(e) => dragOver(e, sc, i)}
           ondragend={dragEnd}>
         <span class="alca" aria-hidden="true">⠿</span>
@@ -388,13 +411,21 @@
             <span class="detalhe">{m.atalhos_pasta_linha({ pasta: s.pasta })}</span>
           {/if}
         </span>
+        {#if editing}
+          <span class="marca-editando">{m.atalhos_editando()}</span>
+        {:else if s.type === 'send_text'}
+          <span class="marca">{m.atalhos_marca_sessao_texto()}</span>
+        {:else if s.type === 'shell'}
+          <span class="marca" class:hangar={s.runs_in === 'hangar'}>{s.runs_in === 'hangar'
+            ? m.atalhos_marca_hangar() : m.atalhos_marca_sessao_comando()}</span>
+        {/if}
         <span class="acoes">
           {#if s.type !== 'internal'}
             <button class="mini" onclick={() => openEdit(sc, i)} aria-label={m.atalhos_editar()}>✎</button>
           {/if}
-          <button class="mini" onclick={() => move(sc, i, -1)} disabled={i === 0} aria-label={m.atalhos_subir()}>↑</button>
-          <button class="mini" onclick={() => move(sc, i, 1)} disabled={i === items.length - 1} aria-label={m.atalhos_descer()}>↓</button>
-          <button class="mini" onclick={() => remove(sc, i)} aria-label={m.atalhos_remover()}>✕</button>
+          <button class="mini" onclick={() => move(sc, i, -1)} disabled={i === 0 || busy(sc)} aria-label={m.atalhos_subir()}>↑</button>
+          <button class="mini" onclick={() => move(sc, i, 1)} disabled={i === items.length - 1 || busy(sc)} aria-label={m.atalhos_descer()}>↓</button>
+          <button class="mini" onclick={() => remove(sc, i)} disabled={busy(sc)} aria-label={m.atalhos_remover()}>✕</button>
         </span>
       </li>
     {/each}
@@ -410,10 +441,22 @@
             <option value="shell">{m.atalhos_tipo_shell()}</option>
           </select>
         </label>
-        <label class="campo">
-          <span>{m.atalhos_rotulo()}</span>
-          <input type="text" bind:value={fLabel} maxlength="24" />
-        </label>
+        <div class="par">
+          <label class="campo">
+            <span>{m.atalhos_rotulo()}</span>
+            <input type="text" bind:value={fLabel} maxlength="24" />
+          </label>
+          <label class="campo">
+            <span>{fType === 'shell' ? m.atalhos_comando() : m.atalhos_texto()}</span>
+            <input type="text" class:mono={fType === 'shell'} bind:value={fContent} list={fType === 'send_text' ? 'atalho-skills' : undefined}
+                   placeholder={fType === 'shell' ? m.atalhos_comando_dica() : m.atalhos_texto_dica()} />
+            {#if fType === 'send_text'}
+              <datalist id="atalho-skills">
+                {#each suggestions as sk (sk)}<option value={sk}></option>{/each}
+              </datalist>
+            {/if}
+          </label>
+        </div>
         <div class="campo">
           <span>{m.atalhos_icone()}</span>
           <div class="glifos" role="radiogroup" aria-label={m.atalhos_icone()}>
@@ -428,28 +471,56 @@
                    placeholder={m.atalhos_emoji_dica()} aria-label={m.atalhos_emoji_dica()} />
           </div>
         </div>
-        <label class="campo">
-          <span>{fType === 'shell' ? m.atalhos_comando() : m.atalhos_texto()}</span>
-          <input type="text" bind:value={fContent} list={fType === 'send_text' ? 'atalho-skills' : undefined}
-                 placeholder={fType === 'shell' ? m.atalhos_comando_dica() : m.atalhos_texto_dica()} />
-          {#if fType === 'send_text'}
-            <datalist id="atalho-skills">
-              {#each suggestions as sk (sk)}<option value={sk}></option>{/each}
-            </datalist>
-          {/if}
-        </label>
         {#if fType === 'shell' && formScope === 'project'}
           <label class="campo">
             <span>{m.atalhos_pasta()}</span>
-            <input type="text" bind:value={fPasta} placeholder={m.atalhos_pasta_placeholder()} />
+            <input type="text" bind:value={fPasta} placeholder={m.atalhos_pasta_placeholder()}
+                   disabled={fRunsIn === 'hangar' && fHome} />
             <small class="ajuda">{m.atalhos_pasta_dica()}</small>
+          </label>
+        {/if}
+        {#if fType === 'shell'}
+          <fieldset class="onde">
+            <legend>{m.atalhos_onde()}</legend>
+            <div class="onde-opcoes" role="radiogroup" aria-label={m.atalhos_onde()}>
+              <button type="button" class="onde-card" class:sel={fRunsIn === 'session'} role="radio"
+                      aria-checked={fRunsIn === 'session'} onclick={() => (fRunsIn = 'session')}>
+                <span class="onde-titulo"><span class="onde-radio" aria-hidden="true"></span>{m.atalhos_onde_sessao()}</span>
+                <span class="onde-ajuda">{m.atalhos_onde_sessao_ajuda()}</span>
+                <span class="onde-uso">{m.atalhos_onde_sessao_uso()}</span>
+              </button>
+              <button type="button" class="onde-card" class:sel={fRunsIn === 'hangar'} role="radio"
+                      aria-checked={fRunsIn === 'hangar'} onclick={() => (fRunsIn = 'hangar')}>
+                <span class="onde-titulo"><span class="onde-radio" aria-hidden="true"></span>{m.atalhos_onde_hangar()}</span>
+                <span class="onde-ajuda">{m.atalhos_onde_hangar_ajuda()}</span>
+                <span class="onde-uso">{m.atalhos_onde_hangar_uso()}</span>
+              </button>
+            </div>
+            {#if fRunsIn === 'hangar'}
+              {@const home = m.atalhos_onde_home({ home: '~' }).split('~')}
+              <div class="onde-bloco">
+                <span class="onde-bloco-titulo">{m.atalhos_onde_clique_titulo()}</span>
+                <span class="onde-seta">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                       stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6" /></svg>
+                  <span class="onde-bloco-texto">{m.atalhos_onde_clique()}</span>
+                </span>
+                <label class="liga">
+                  <input type="checkbox" bind:checked={fHome} />
+                  <span>{home[0]}<span class="mono">~</span>{home.slice(1).join('~')}</span>
+                </label>
+              </div>
+            {/if}
+          </fieldset>
+          <label class="liga">
+            <input type="checkbox" bind:checked={fAsk} />
+            <span><span class="liga-titulo">{m.atalhos_perguntas()}</span> {m.atalhos_perguntas_ajuda()}</span>
           </label>
         {/if}
         {#if fType === 'send_text'}
           <label class="liga">
             <input type="checkbox" bind:checked={fSendDirect} />
-            <span>{m.atalhos_send_direct()}</span>
-            <small>{m.atalhos_send_direct_ajuda()}</small>
+            <span><span class="liga-titulo">{m.atalhos_send_direct()}</span> {m.atalhos_send_direct_ajuda()}</span>
           </label>
         {/if}
         <label class="liga">
@@ -458,7 +529,9 @@
         </label>
         <div class="form-acoes">
           <button class="btn" onclick={() => (formScope = null)}>{m.comum_cancelar()}</button>
-          <button class="btn primario" onclick={submitForm} disabled={!formValid}>{m.comum_confirmar()}</button>
+          <button class="btn primario" onclick={() => void submitForm()} disabled={!formValid || busy(formScope ?? 'global')}>
+            {busy(formScope ?? 'global') ? m.atalhos_salvando() : m.atalhos_salvar()}
+          </button>
         </div>
       </div>
 {/snippet}
@@ -466,26 +539,34 @@
 <style>
   /* Container query, não media query: quem aperta a linha é a largura do PAINEL (regra do repo). */
   .at { container-type: inline-size; display: flex; flex-direction: column; gap: var(--space-3); }
+  .at input[type='checkbox'] { accent-color: var(--accent); }
+  .pagina-titulo { margin: 0; font-size: 22px; font-weight: 600; color: var(--text-primary); }
   .sub { margin: 0; font-size: var(--text-sm); color: var(--text-secondary); }
   .estado { margin: 0; font-size: var(--text-sm); color: var(--text-muted); }
   .erro { color: var(--danger, #e5484d); }
 
-  .linhas { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
-  .linha {
-    display: flex; align-items: center; gap: var(--space-3);
-    padding: var(--space-2); border-radius: var(--radius-md);
-    background: var(--surface-inset);
+  /* Lista num bloco só, linhas separadas por divisória. */
+  .linhas {
+    list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; overflow: hidden;
+    border: 1px solid var(--border-subtle); border-radius: var(--radius-md);
+    background: color-mix(in srgb, var(--surface-card) 70%, transparent);
   }
+  .linha {
+    display: flex; align-items: center; gap: 14px; padding: 12px 16px;
+    border-bottom: 1px solid var(--border-subtle);
+  }
+  .linha:last-child { border-bottom: 0; }
+  .linha.editando { background: color-mix(in srgb, var(--accent) 6%, transparent); }
   .linha.arrastando { opacity: 0.45; }
   .alca { flex-shrink: 0; color: var(--text-muted); cursor: grab; font-size: var(--text-sm); user-select: none; }
   .ico {
     width: 32px; height: 32px; flex-shrink: 0;
     display: inline-flex; align-items: center; justify-content: center;
-    border-radius: var(--radius-sm); background: var(--surface-raised);
+    border-radius: var(--radius-xs); background: var(--surface-raised);
     color: var(--text-secondary);
   }
-  .txt { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
-  .rotulo { font-size: var(--text-sm); font-weight: 600; color: var(--text-primary); }
+  .txt { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+  .rotulo { font-size: 15px; font-weight: 500; color: var(--text-primary); }
   .detalhe {
     font-size: var(--text-xs); color: var(--text-muted); font-family: var(--font-mono);
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -505,18 +586,23 @@
     border: 1px solid var(--border-subtle);
   }
   .chip:hover { color: var(--text-primary); }
+  .chip:disabled { opacity: 0.35; }
 
   .form {
-    display: flex; flex-direction: column; gap: var(--space-3);
-    padding: var(--space-3); border-radius: var(--radius-md);
-    border: 1px solid var(--border-subtle); background: var(--surface-inset);
+    display: flex; flex-direction: column; gap: 18px;
+    padding: var(--space-6); border-radius: var(--radius-md);
+    border: 1px solid var(--border-default); background: var(--surface-card);
   }
-  .campo { display: flex; flex-direction: column; gap: var(--space-1); font-size: var(--text-sm); color: var(--text-secondary); }
+  /* Rótulo e comando lado a lado; a coluna única volta quando o painel aperta. */
+  .par { display: grid; grid-template-columns: 1fr; gap: var(--space-4); }
+  @container (min-width: 480px) { .par { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  .campo { display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: var(--text-secondary); }
   .campo input[type='text'], .campo select {
-    padding: 8px 10px; border-radius: var(--radius-sm);
-    border: 1px solid var(--border-subtle); background: var(--surface-raised);
+    height: 38px; padding: 0 12px; border-radius: var(--radius-xs); font-family: inherit;
+    border: 1px solid var(--border-default); background: var(--surface-inset);
     color: var(--text-primary); font-size: var(--text-sm);
   }
+  .campo input.mono { font-family: var(--font-mono); font-size: 13px; }
   .glifos { display: flex; flex-wrap: wrap; gap: 2px; align-items: center; }
   .glifo {
     width: 34px; height: 34px; display: inline-flex; align-items: center; justify-content: center;
@@ -524,13 +610,52 @@
   }
   .glifo:hover { background: var(--surface-raised); }
   .glifo.sel { background: var(--accent-dim); color: var(--accent); }
-  .emoji { width: 96px; padding: 6px 8px; border-radius: var(--radius-sm);
-    border: 1px solid var(--border-subtle); background: var(--surface-raised);
+  .emoji { width: 96px; padding: 6px 8px; border-radius: var(--radius-xs); font-family: inherit;
+    border: 1px solid var(--border-default); background: var(--surface-inset);
     color: var(--text-primary); font-size: var(--text-sm); }
-  .liga { display: grid; grid-template-columns: auto 1fr; gap: 2px var(--space-2); align-items: center; font-size: var(--text-sm); color: var(--text-primary); }
-  .liga small { grid-column: 2; color: var(--text-muted); font-size: var(--text-xs); }
-  .form-acoes { display: flex; justify-content: flex-end; gap: var(--space-2); }
+  .liga { display: flex; gap: 10px; align-items: flex-start; font-size: 13px; line-height: 1.5; color: var(--text-secondary); }
+  .liga input { flex-shrink: 0; width: 16px; height: 16px; margin: 2px 0 0; }
+  .liga-titulo { color: var(--text-primary); }
+  .mono { font-family: var(--font-mono); color: var(--text-primary); }
+  .form-acoes { display: flex; justify-content: flex-end; gap: 10px; }
+  .form-acoes .btn { align-self: auto; height: 38px; min-height: 0; padding: 0 16px; border-radius: var(--radius-xs);
+    font-size: var(--text-sm); font-weight: 500; background: transparent; border-color: var(--border-default); }
+  .form-acoes .btn:hover { background: var(--bg-hover); }
+  .form-acoes .btn.primario { padding: 0 18px; border-color: transparent; background: var(--accent-press); color: #fff; }
   .ajuda { color: var(--text-muted); font-size: var(--text-xs); }
+
+  .marca { flex-shrink: 0; font-size: var(--text-xs); padding: 3px 8px; border-radius: var(--radius-full);
+    background: var(--surface-raised); color: var(--text-secondary); }
+  .marca.hangar { background: color-mix(in srgb, var(--accent) 16%, transparent);
+    color: color-mix(in srgb, var(--accent-text) 75%, var(--accent)); }
+  .marca-editando { flex-shrink: 0; font-size: var(--text-xs); color: var(--text-muted); }
+
+  .onde { margin: 0; padding: 0; border: 0; display: flex; flex-direction: column; gap: var(--space-2); }
+  .onde legend { padding: 0; margin-bottom: 10px; font-size: 13px; color: var(--text-secondary); }
+  .onde-opcoes { display: grid; grid-template-columns: 1fr; gap: var(--space-3); }
+  @container (min-width: 480px) { .onde-opcoes { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  /* O botão global centraliza o conteúdo; aqui o texto começa à esquerda. */
+  .onde-card {
+    display: flex; flex-direction: column; align-items: stretch; justify-content: flex-start; gap: 8px;
+    min-height: 0; padding: var(--space-4); text-align: left;
+    border: 1px solid var(--border-default); border-radius: 10px; background: transparent;
+    color: var(--text-secondary); cursor: pointer;
+  }
+  .onde-card.sel { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); }
+  .onde-card:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .onde-titulo { display: flex; align-items: center; gap: 10px; font-size: 15px; font-weight: 600; color: var(--text-primary); }
+  .onde-radio { width: 14px; height: 14px; flex-shrink: 0; border-radius: 50%; box-sizing: border-box; border: 1.5px solid var(--text-muted); }
+  .onde-card.sel .onde-radio { border: 4px solid var(--accent); background: #fff; }
+  .onde-ajuda { font-size: 13px; line-height: 1.5; }
+  .onde-uso { font-size: var(--text-xs); color: var(--text-muted); line-height: 1.5; }
+  .onde-bloco {
+    display: flex; flex-direction: column; gap: 12px; padding: var(--space-4);
+    border-radius: 10px; background: var(--surface-inset); border: 1px solid var(--border-subtle);
+  }
+  .onde-bloco-titulo { font-size: 13px; font-weight: 500; color: var(--text-primary); }
+  .onde-seta { display: flex; gap: 10px; align-items: flex-start; color: var(--accent); }
+  .onde-seta svg { flex-shrink: 0; margin-top: 2px; }
+  .onde-bloco-texto { font-size: 13px; color: var(--text-secondary); line-height: 1.5; }
 
   .projeto {
     display: flex; flex-direction: column; gap: var(--space-3);
@@ -549,8 +674,14 @@
   .btn.primario { background: var(--accent); color: #fff; border-color: transparent; }
 
   .rodape { display: flex; align-items: center; gap: var(--space-2); margin-top: var(--space-2); }
-  .feedback { flex: 1; text-align: right; font-size: var(--text-xs); color: var(--success, #30a46c); }
-  .feedback .erro { color: var(--danger, #e5484d); }
+  .status {
+    position: sticky; bottom: 0; z-index: 1; align-self: flex-end; max-width: 100%;
+    padding: 6px 12px; border-radius: var(--radius-md); font-size: var(--text-xs);
+    background: var(--bg-elevated); border: 1px solid var(--border-subtle);
+  }
+  .status.erro-caixa { border-color: var(--danger, #e5484d); }
+  .status .ok { color: var(--success, #30a46c); }
+  .status .salvando { color: var(--text-muted); }
 
   @container (max-width: 480px) {
     .acoes { flex-direction: column; }

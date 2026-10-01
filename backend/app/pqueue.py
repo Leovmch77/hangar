@@ -337,30 +337,11 @@ def fila_interna_pendente(jsonl: str, provider: str = "claude") -> set[str]:
     """
     if provider != "claude":
         return set()
-    pendente: list[str] = []
-    try:
-        with open(jsonl, encoding="utf-8", errors="replace") as fh:
-            for line in fh:
-                try:
-                    obj = json.loads(line)
-                except (json.JSONDecodeError, ValueError):
-                    continue
-                if obj.get("type") != "queue-operation":
-                    continue
-                if not isinstance(obj.get("content"), str):
-                    # Sem texto, sai a primeira entrada, inclusive quando há pedidos repetidos.
-                    if obj.get("operation") == "dequeue" and pendente:
-                        pendente.pop(0)
-                    continue
-                c = obj["content"].strip()
-                if obj.get("operation") == "enqueue":
-                    pendente.append(c)
-                elif c in pendente:
-                    pendente.remove(c)
-    except OSError:
+    lido = _ler_indice(jsonl, provider)
+    if lido is None:
         return set()
     out: set[str] = set()
-    for t in pendente:
+    for t in lido[1]:
         base = _IMG_PREFIX.sub("", t)
         fonte = _IMG_SOURCE.sub(lambda m: f"📎 imagem: {m.group(1)}", t)
         for variant in (t, base, _strip_attach(t), _strip_attach(base), fonte):
@@ -371,17 +352,85 @@ def fila_interna_pendente(jsonl: str, provider: str = "claude") -> set[str]:
     return out
 
 
-class _CodexCommitted:
-    def __init__(self):
+class _CommittedIndex:
+    """Leitura incremental do transcript pra confirmar entregas: guarda o offset lido e só processa
+    o que foi acrescentado. A confirmação roda a cada envio e durante turno longo; reler arquivos de
+    dezenas de MB a cada vez prendia um núcleo inteiro. Troca de arquivo, truncamento ou reescrita
+    (âncora dos bytes antes do offset não bate) zeram o índice e releem do início."""
+
+    def __init__(self, provider: str):
+        self.provider = provider
         self.lock = threading.Lock()
         self.offset = 0
         self.signature = None
         self.anchor = b""
         self.lines: set[str] = set()
+        self.pendente: list[str] = []   # fila interna do Claude Code, na ordem do enqueue
 
-    def read(self, path: str) -> set[str] | None:
-        from app.adapters.codex.rollout import parse_rollout_obj
+    def _zera(self) -> None:
+        self.offset = 0
+        self.lines.clear()
+        self.pendente.clear()
 
+    def _parser(self):
+        # Import local pelo mesmo motivo do merged_history: app.adapters importa app.pqueue no boot.
+        if self.provider == "codex":
+            from app.adapters.codex.rollout import parse_rollout_obj
+            return parse_rollout_obj
+        if self.provider in ("pi", "omp"):
+            from app.adapters.pi.transcript import parse_obj
+            return parse_obj
+        if self.provider == "kimi":
+            # Kimi: sem o parser proprio, NENHUMA linha do wire casa o shape do Claude (o role mora em
+            # `context.append_message`) -> oraculo vazio -> reconcile lia TODA entrega como engolida e
+            # redigitava ate max_attempts (medido em producao: 3x "ola", 2026-08-11).
+            from app.adapters.kimi.transcript import parse_obj
+            return parse_obj
+        return None
+
+    def _alimenta_claude(self, obj: dict) -> None:
+        etype = obj.get("type")
+        # system NAO entra de proposito: recado preso em entrega BLOQUEADA por hook tem
+        # preventContinuation=true — o agente nunca o recebeu, e committed_user_lines e o
+        # oraculo de "aterrissou na sessao". Conta-lo confirmaria a entrega e a bolha
+        # ficaria sem a marca vermelha sobre uma mensagem que nunca chegou (ver parecer
+        # G2 rev1, bloqueador 1).
+        if etype == "queue-operation":
+            c = obj.get("content")
+            if not isinstance(c, str):
+                # Sem texto, sai a primeira entrada, inclusive quando há pedidos repetidos.
+                if obj.get("operation") == "dequeue" and self.pendente:
+                    self.pendente.pop(0)
+                return
+            self.lines.update(_chaves_de_commit(c))
+            c = c.strip()
+            if obj.get("operation") == "enqueue":
+                self.pendente.append(c)
+            elif c in self.pendente:
+                self.pendente.remove(c)
+            return
+        # Claude sem terminal: msg orientada no meio do turno aterrissa como
+        # `attachment/queued_command`, nunca como `user`. Sem isto a entrega orientada
+        # ficava pra sempre sem confirmação e a bolha da fila duplicava a real.
+        if etype == "attachment":
+            att = obj.get("attachment")
+            if isinstance(att, dict) and att.get("type") == "queued_command":
+                for b in att.get("prompt") or []:
+                    if isinstance(b, dict) and b.get("type") == "text" and isinstance(b.get("text"), str):
+                        self.lines.update(_chaves_de_commit(b["text"]))
+            return
+        if etype != "user":
+            return
+        content = (obj.get("message") or {}).get("content")
+        if isinstance(content, str):
+            self.lines.update(_chaves_de_commit(content))
+        elif isinstance(content, list):
+            for b in content:
+                if isinstance(b, dict) and b.get("type") == "text":
+                    self.lines.update(_chaves_de_commit(str(b.get("text", ""))))
+
+    def read(self, path: str) -> tuple[set[str], list[str]] | None:
+        parse = self._parser()
         with self.lock:
             try:
                 with open(path, "rb") as fh:
@@ -393,8 +442,7 @@ class _CodexCommitted:
                             or stat.st_size < self.signature[2]
                             or stat.st_size == self.signature[2] and signature != self.signature
                             or not unchanged):
-                        self.offset = 0
-                        self.lines.clear()
+                        self._zera()
                     fh.seek(self.offset)
                     while fh.tell() < stat.st_size:
                         start = fh.tell()
@@ -406,7 +454,12 @@ class _CodexCommitted:
                             obj = json.loads(raw.decode("utf-8", "replace"))
                         except ValueError:
                             continue
-                        for event in parse_rollout_obj(obj):
+                        if not isinstance(obj, dict):
+                            continue
+                        if parse is None:
+                            self._alimenta_claude(obj)
+                            continue
+                        for event in parse(obj):
                             if event.kind == "user_msg" and event.text:
                                 self.lines.update(_chaves_de_commit(event.text))
                     current = os.stat(path)
@@ -417,36 +470,35 @@ class _CodexCommitted:
                     fh.seek(max(0, self.offset - 256))
                     self.anchor = fh.read(min(self.offset, 256))
                     self.signature = signature
-                    return self.lines.copy()
+                    return self.lines.copy(), list(self.pendente)
             except OSError as exc:
-                self.offset = 0
+                self._zera()
                 self.signature = None
                 self.anchor = b""
-                self.lines.clear()
                 _log.warning("nao deu pra ler o transcript %s pra confirmar entregas: %s", path, exc)
                 return None
 
 
-_codex_committed: dict[str, _CodexCommitted] = {}
-_codex_committed_lock = threading.Lock()
-_CODEX_COMMITTED_MAX = 8
-_CODEX_COMMITTED_CHARS = 1_000_000
+_indices: dict[tuple[str, str], _CommittedIndex] = {}
+_indices_lock = threading.Lock()
+_INDICES_MAX = 32
+_INDICE_CHARS = 1_000_000
 
 
-def _committed_codex_lines(jsonl: str) -> set[str] | None:
-    path = str(Path(jsonl))
-    with _codex_committed_lock:
-        index = _codex_committed.pop(path, None) or _CodexCommitted()
-        _codex_committed[path] = index
-        while len(_codex_committed) > _CODEX_COMMITTED_MAX:
-            del _codex_committed[next(iter(_codex_committed))]
-    lines = index.read(path)
+def _ler_indice(jsonl: str, provider: str) -> tuple[set[str], list[str]] | None:
+    chave = (str(Path(jsonl)), provider if provider in ("codex", "pi", "omp", "kimi") else "claude")
+    with _indices_lock:
+        index = _indices.pop(chave, None) or _CommittedIndex(chave[1])
+        _indices[chave] = index
+        while len(_indices) > _INDICES_MAX:
+            del _indices[next(iter(_indices))]
+    lido = index.read(chave[0])
     # Índice grande continua correto, mas não fica retido entre chamadas.
-    if lines is None or sum(map(len, lines)) > _CODEX_COMMITTED_CHARS:
-        with _codex_committed_lock:
-            if _codex_committed.get(path) is index:
-                del _codex_committed[path]
-    return lines
+    if lido is None or sum(map(len, lido[0])) > _INDICE_CHARS:
+        with _indices_lock:
+            if _indices.get(chave) is index:
+                del _indices[chave]
+    return lido
 
 
 def committed_user_lines(jsonl: str, provider: str = "claude") -> set[str] | None:
@@ -471,89 +523,11 @@ def committed_user_lines(jsonl: str, provider: str = "claude") -> set[str] | Non
     redigitava o mesmo prompt (double-send medido: pi-e2e.jsonl com attempts: 2). Pi nao tem fila
     interna com `queue-operation`, entao o parser proprio ja basta. Kimi: mesmo motivo, shape
     `context.append_message` — o parser do adapter e usado do mesmo jeito."""
-    if provider == "codex":
-        return _committed_codex_lines(jsonl)
-    out: set[str] = set()
-
-    def add(t: str) -> None:
-        # Indexa a variante CRUA e a SEM marcador de anexo: a msg do app e digitada COM o
-        # "📎 imagem: <path>" na mesma linha (o transcript guarda a linha inteira), mas o reconcile
-        # compara o texto podado — sem indexar as DUAS variantes, msg COM ANEXO nunca confirmava
-        # e era redigitada (as duplicatas so-com-imagem de 2026-07-02).
-        # E a variante SEM o prefixo "[Image #N]": o Claude Code PREPENDA isso ao prompt quando
-        # anexa imagem (e remove o path do marcador) — sem normalizar, msg com imagem entregue
-        # mid-turn nunca confirmava e era redigitada ate max_attempts (a entrega tripla de
-        # 2026-07-17).
-        base = _IMG_PREFIX.sub("", t)
-        fonte = _IMG_SOURCE.sub(lambda m: f"📎 imagem: {m.group(1)}", t)
-        for variant in (t, base, _strip_attach(t), _strip_attach(base), fonte):
-            variant = variant.strip()
-            if not variant:
-                continue
-            out.add(variant)
-            for ln in variant.split("\n"):
-                out.add(ln.strip())
-
-    # Import local pelo mesmo motivo do merged_history: app.adapters importa app.pqueue no boot.
-    pi_parse = None
-    kimi_parse = None
-    if provider in ("pi", "omp"):
-        from app.adapters.pi.transcript import parse_obj as pi_parse
-    elif provider == "kimi":
-        # Kimi: sem o parser proprio, NENHUMA linha do wire casa o shape do Claude (o role mora em
-        # `context.append_message`) -> oraculo vazio -> reconcile lia TODA entrega como engolida e
-        # redigitava ate max_attempts (medido em producao: 3x "ola", 2026-08-11).
-        from app.adapters.kimi.transcript import parse_obj as kimi_parse
-
-    try:
-        with open(jsonl, encoding="utf-8", errors="replace") as fh:
-            for line in fh:
-                try:
-                    obj = json.loads(line)
-                except (json.JSONDecodeError, ValueError):
-                    continue
-                parse = pi_parse or kimi_parse
-                if parse is not None:
-                    for ev in parse(obj):
-                        if ev.kind == "user_msg" and ev.text:
-                            add(ev.text)
-                    continue
-                etype = obj.get("type")
-                # system NAO entra de proposito: recado preso em entrega BLOQUEADA por hook tem
-                # preventContinuation=true — o agente nunca o recebeu, e committed_user_lines e o
-                # oraculo de "aterrissou na sessao". Conta-lo confirmaria a entrega e a bolha
-                # ficaria sem a marca vermelha sobre uma mensagem que nunca chegou (ver parecer
-                # G2 rev1, bloqueador 1).
-                if etype == "queue-operation":
-                    c = obj.get("content")
-                    if isinstance(c, str):
-                        add(c)
-                    continue
-                # Claude sem terminal: msg orientada no meio do turno aterrissa como
-                # `attachment/queued_command`, nunca como `user`. Sem isto a entrega orientada
-                # ficava pra sempre sem confirmação e a bolha da fila duplicava a real.
-                if etype == "attachment":
-                    att = obj.get("attachment")
-                    if isinstance(att, dict) and att.get("type") == "queued_command":
-                        for b in att.get("prompt") or []:
-                            if isinstance(b, dict) and b.get("type") == "text" and isinstance(b.get("text"), str):
-                                add(b["text"])
-                    continue
-                if etype != "user":
-                    continue
-                content = (obj.get("message") or {}).get("content")
-                if isinstance(content, str):
-                    add(content)
-                elif isinstance(content, list):
-                    for b in content:
-                        if isinstance(b, dict) and b.get("type") == "text":
-                            add(str(b.get("text", "")))
-    except OSError as e:
-        # LOGA e devolve None: `pass` com o set meio montado era pior que nao ler nada — virava
-        # "estas 40 chegaram e as suas nao", e a que faltava era redigitada.
-        _log.warning("nao deu pra ler o transcript %s pra confirmar entregas: %s", jsonl, e)
-        return None
-    return out
+    # Variantes (cru, sem "[Image #N]", sem marcador de anexo, por linha): ver _chaves_de_commit.
+    # Falha de leitura devolve None, nunca o set parcial: "estas 40 chegaram e as suas nao" fazia
+    # a que faltava ser redigitada.
+    lido = _ler_indice(jsonl, provider)
+    return None if lido is None else lido[0]
 
 
 def linha_mais_parecida(texto: str, committed: set[str]) -> str | None:
@@ -970,7 +944,8 @@ class PromptQueue:
         # yield_on_timeout: cobre entrada gravada entre o emit_new acima e o watcher armar (senao so
         # apareceria no proximo write da fila). O dir e COMPARTILHADO por todas as sessoes -> filtra:
         # so recarrega quando o toque e no NOSSO arquivo (ou no timeout do heartbeat).
-        async for changes in awatch(self.path.parent, yield_on_timeout=True, rust_timeout=5000):
+        async for changes in awatch(self.path.parent, yield_on_timeout=True, rust_timeout=5000,
+                                    recursive=False):
             if changes and not any(Path(p).name == self.path.name for _, p in changes):
                 continue
             for ev in await asyncio.to_thread(emit_new):
@@ -1033,7 +1008,9 @@ def merged_history(name: str, jsonl: str, provider: str = "claude",
         # parse_obj solto basta: o parser do wire do Kimi nao guarda estado entre linhas.
         from app.adapters.kimi.transcript import parse_obj as _parse
     elif provider == "orq":
-        from app.adapters.orq.adapter import parse_obj as _parse
+        from functools import partial
+        from app.adapters.orq.adapter import parse_obj as orq_parse_obj
+        _parse = partial(orq_parse_obj, run_dir=Path(jsonl).parent)
     else:
         _parse = parse_obj
     items: list[tuple[float, int, ChatEvent]] = []

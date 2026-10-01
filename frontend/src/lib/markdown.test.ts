@@ -72,6 +72,14 @@ describe('citações de arquivo inline', () => {
 
 
 describe('renderMarkdown — cercas de código', () => {
+  it('oferece executar só em bloco de shell, nunca em código inline', () => {
+    const opts = { fileLinks: true, commandActions: true };
+    expect(renderMarkdown('Agora `cargo check` e pronto.', opts)).not.toContain('data-run-command');
+    expect(renderMarkdown('```bash\nnpx --yes wrangler login\n```')).not.toContain('data-run-command');
+    expect(renderMarkdown('```powershell\nGet-Process\n```', opts)).toContain('class="run-code-btn"');
+    expect(renderMarkdown('```typescript\nconst x = 1\n```', opts)).not.toContain('data-run-command');
+  });
+
   it('renderiza cerca indentada dentro de item de lista', () => {
     // O Pi escreve assim quando o bloco está dentro de uma lista numerada. Antes disto o bloco
     // inteiro saía como texto cru, com os ``` à mostra na bolha do celular.

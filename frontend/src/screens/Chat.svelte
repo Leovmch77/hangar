@@ -27,8 +27,10 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   import BtwSheet from '../components/BtwSheet.svelte';
   import PairSheet from '../components/PairSheet.svelte';
   import OrquestracaoSheet from '../components/OrquestracaoSheet.svelte';
+  import OrqPanelSheet from '../components/OrqPanelSheet.svelte';
   import { prefetchOrq, lerCaudaChat, guardarCaudaChat } from '../lib/queries';
   import { sessionsStore } from '../lib/sessionsStore.svelte';
+  import { fitKeyboard } from '../lib/keyboardInset';
   import { textoProblema } from '../lib/problema';
   import { aoAquecer, segurarAquecimento, soltarAquecimento } from '../lib/aquecimento';
   import { capacidades } from '../lib/capacidades.svelte';
@@ -77,7 +79,11 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   import { hasSeam, mergeHistoryWithLive } from '@hangar/core';
   import { especificidade, donoDaLinha } from '@hangar/core';
   import { parseStatusLine, queuedMessages } from '@hangar/core';
-  import { mergeProjectShortcuts, runShortcutShell, sendsDirect, shortcutMissingSecret } from '@hangar/core';
+  import { mergeProjectShortcuts, runShortcutShell, runCodeCommand, sendsDirect, shortcutMissingSecret } from '@hangar/core';
+  import { runsInHangar, answersInApp, hangarHome, hangarKeyOf, OutdatedServerError } from '@hangar/core';
+  import {
+    hangarForShortcut, hangarOf, liveTerminals, openQuestion, requestHangarTab, sessionTerminalFor, takeHangarTab,
+  } from '../lib/hangarTerminals.svelte';
   import { shortcutTerminals, shortcutTerminalsOf, refreshShortcutTerminals, focusShortcutTerminal } from '../lib/shortcutTerminals.svelte';
   import type { ShortcutSendText, ShortcutShell } from '@hangar/core';
   import {
@@ -190,6 +196,9 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   // de este Chat desmontar, e a cauda desta sessão seria gravada sob a chave da OUTRA máquina.
   // Mesmo padrão do `filesChave` abaixo, e pelo mesmo motivo.
   const servidorDaCauda = getActiveId() ?? '';
+  // Servidor DESTA sessão, fixado na entrada pelo mesmo motivo: os terminais No Hangar e as perguntas
+  // são consultados por servidor, e o ativo pode mudar sob um Chat aberto por overlay.
+  const chatServerId = servidorDaCauda;
 
   // Store da aba Arquivos — MESMA instância do FilesPanel (registry por identidade
   // serverId::sessionName). Quem desenha o arquivo aberto no DESKTOP é este Chat (mock 2: o
@@ -695,6 +704,8 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   // Pareamento ("trabalhando juntas"): sheet + par atual derivado da lista já carregada.
   let pairOpen = $state(false);
   let orqOpen = $state(false);
+  // Folha "Orquestração" da sessão orq, para onde o painel lateral não aparece.
+  let orqPanelOpen = $state(false);
   // Aquece o painel de Orquestração ao ENTRAR na sessão: o GET da política lê o disco e já foi
   // medido em ~3s frio, então buscá-lo no toque do botão é o que fazia o painel abrir em spinner.
   // Mesmo padrão do prefetch de modelos no Composer.
@@ -929,6 +940,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   // Orquestrador sem LLM: não recebe texto nem interrupção. O rodapé leva ao árbitro atual.
   const orqSession = $derived(isOrq({ provider: sessionProvider }));
   const orqArbiter = $derived(allSessions.find((s) => s.name === sessionName)?.orq_arbiter ?? null);
+  const orqServer = $derived(listServers().find((s) => s.id === getActiveId()));
   // Claude sem terminal: não há pane, então nada de painel de terminal, espelho ou shell.
   // O stream da sessão diz primeiro: no celular a lista é a do servidor ativo e chega por poll.
   // Com stream, só ele: depois de trocar de modo a lista ainda diz o modo antigo por um poll.
@@ -1409,16 +1421,31 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   // do AskUserQuestion: o fallback existe pra destravar picker, e o painel bloqueia o /answer (Task 3).
   function abrirTerminalReal() {
     // Sem pane só há o que os atalhos abriram: painel/terminal com as abas deles, nunca o espelho.
-    if (sessionHeadless && !temTerminalDeAtalho) return;
+    if (sessionHeadless && !temTerminalDeAtalho && hangarOf(chatServerId).length === 0) return;
     if (desktop && onOpenTerminalPanel && terminalPanelDisponivel) onOpenTerminalPanel(sessionHeadless);
     else if (!desktop && terminalCapazMobile) xtermOpen = true;
     else if (!sessionHeadless) mirrorOpen = true;
   }
   // Terminais dos atalhos "shell" desta sessão (lib/shortcutTerminals.svelte.ts). Sessão sem pane
   // ganha o botão de terminal quando existe pelo menos um.
-  const atalhoKey = $derived(`${getActiveId() ?? ''}::${sessionName}`);
+  const atalhoKey = $derived(`${chatServerId}::${sessionName}`);
   const temTerminalDeAtalho = $derived(shortcutTerminalsOf(atalhoKey).length > 0);
-  const botaoTerminal = $derived(!orqSession && (!sessionHeadless || temTerminalDeAtalho));
+  const botaoTerminal = $derived(!orqSession && (!sessionHeadless || temTerminalDeAtalho || hangarOf(chatServerId).length > 0));
+  // Celular: pedido de aba No Hangar (chip, tile, pergunta) ou pergunta de terminal "Na sessão" desta
+  // sessão abre o terminal; quem escolhe a aba e consome o pedido é o TerminalMobile. Pedido de
+  // terminal que já não existe é descartado. Foco de atalho comum não abre nada: só a pergunta abre.
+  $effect(() => {
+    if (desktop || xtermOpen) return;
+    const id = liveTerminals.panelRequest[chatServerId];
+    const focusId = shortcutTerminals.focus[atalhoKey];
+    const asking = focusId
+      ? (liveTerminals.byServer[chatServerId] ?? []).find((t) => t.id === focusId && t.owner === sessionName && t.alive && t.question)
+      : null;
+    if (id) {
+      if (hangarOf(chatServerId).some((t) => t.id === id) && terminalCapazMobile) abrirTerminalReal();
+      else takeHangarTab(chatServerId);
+    } else if (asking && terminalCapazMobile) abrirTerminalReal();
+  });
   $effect(() => {
     const key = atalhoKey;
     refreshShortcutTerminals(key).catch(() => { /* servidor sem a rota ou fora: sem botão extra */ });
@@ -2379,71 +2406,12 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
     document.removeEventListener('visibilitychange', onVisible);
   });
 
-  // Layout teclado-safe: a .chat-screen acompanha a ALTURA da viewport visivel. Quando o
-  // teclado abre, vv.height encolhe -> o container encolhe pra area acima do teclado, com a
-  // NavBar colada no topo e o composer no rodape (ambos flex-shrink:0) e a MessageList (flex:1)
-  // como UNICO scroller. offsetTop compensa o pan do iOS (senao o composer some pro topo).
+  // Layout teclado-safe (ver lib/keyboardInset). Dentro do modal do par a tela NÃO é a viewport: lá
+  // manda a altura do modal. No desktop não há teclado virtual e o fit sobrescreveria o height:100%
+  // que acompanha a pane (que encolhe com o TerminalPanel).
   $effect(() => {
-    const vv = window.visualViewport;
-    if (!vv || !screenEl) return;
-    // Dentro do modal do par a tela NÃO é a viewport: o `fit` fixava height=vv.height (900px medidos)
-    // num modal de 858 e a última linha do composer ficava cortada. Lá quem manda é a altura do
-    // modal (CSS 100%), e o teclado é problema do modal, como já é em qualquer sheet.
-    // Desktop: nao ha teclado virtual, entao este fit nunca precisou rodar aqui — mas RODAVA, e
-    // gravava screenEl.style.height = vv.height (a viewport INTEIRA), sobrepondo o "height: 100%"
-    // que faz a tela acompanhar a pane (que encolhe quando o TerminalPanel abre no rodape do
-    // DesktopShell). Resultado: o composer ficava atras do painel de terminal, clipado pelo
-    // overflow:hidden da pane. Mesma classe de bug do modal do par, mesmo remedio.
-    if (nested || desktop) return;
-    function fit() {
-      if (!screenEl || !vv) return;
-      // Ignora valores transientes (a animacao do teclado reporta alturas minusculas por 1 frame).
-      if (vv.height < 120) return;
-      const h = vv.height + 'px';
-      // offsetTop = quanto o iOS PANEIA a visual viewport ao abrir o teclado (body travado -> e pan
-      // VISUAL). Compensamos via `top` em position:relative (sem transform: nao promove layer com
-      // tiled-backing -> SEM retangulo preto; nao cria containing-block que prenda os sheets fixed).
-      // EXPERIMENTO teclado iOS (#1): o pan (offsetTop) e bugado no iOS 26 (Apple #800125) e deixava o
-      // composer com um vao acima do teclado. Mata o pan (scrollTo 0) e ancora top=0 -> a tela passa a
-      // ser SO a altura visivel (vv.height), com o dock colado no rodape dela = topo do teclado.
-      // Guard: so scrolla se houver scroll REAL. scrollTo a cada evento do viewport (toda tecla)
-      // disparava o dialog "Desfazer" (shake-to-undo) do iOS toda hora.
-      if (window.scrollY !== 0) window.scrollTo(0, 0);
-      if (screenEl.style.height !== h) screenEl.style.height = h;
-      if (screenEl.style.top !== '0px') screenEl.style.top = '0px';
-      if (screenEl.style.transform) screenEl.style.transform = '';
-      // Cola mais o composer no teclado: aberto -> zera o padding-bottom de safe-area (home indicator,
-      // inutil com teclado) que deixava um vao; fechado -> volta a safe-area (fallback do --composer-pb).
-      if (vv.height < window.innerHeight - 100) screenEl.style.setProperty('--composer-pb', 'var(--space-2)');
-      else screenEl.style.removeProperty('--composer-pb');
-    }
-    function onFocusIn() {
-      requestAnimationFrame(fit);
-      setTimeout(fit, 300); // iOS as vezes so estabiliza apos a animacao do teclado
-    }
-    // iOS 26: offsetTop/height as vezes NAO zeram ao fechar o teclado. No blur sem outro campo focado,
-    // forca estado limpo (senao sobra um vao no rodape).
-    function onFocusOut() {
-      setTimeout(() => {
-        if (!screenEl) return;
-        const a = document.activeElement;
-        if (a && (a.tagName === 'TEXTAREA' || a.tagName === 'INPUT')) return;
-        screenEl.style.top = '0px';
-        screenEl.style.height = '';   // volta pro height do CSS (100vh)
-        screenEl.style.transform = '';
-      }, 50);
-    }
-    fit();
-    vv.addEventListener('resize', fit);
-    vv.addEventListener('scroll', fit);
-    screenEl.addEventListener('focusin', onFocusIn);
-    screenEl.addEventListener('focusout', onFocusOut);
-    return () => {
-      vv.removeEventListener('resize', fit);
-      vv.removeEventListener('scroll', fit);
-      screenEl?.removeEventListener('focusin', onFocusIn);
-      screenEl?.removeEventListener('focusout', onFocusOut);
-    };
+    if (!screenEl || nested || desktop) return;
+    return fitKeyboard(screenEl);
   });
 
   // Mede a altura do dock (composer) e expoe via prop pra lista. ResizeObserver dispara SO quando
@@ -2754,15 +2722,86 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
 
   // Cada execução vira uma aba no painel de terminal. O painel não abre sozinho: a aba só vai pra
   // frente, e fica listada (inclusive a que falhou, com a saída inteira) até alguém fechar.
+  const tileHangar = (key: string) => hangarForShortcut(chatServerId, key);
+  const tileSessionTerminal = (key: string) => sessionTerminalFor(chatServerId, sessionName, key);
+
+  // Identidade do atalho clicado: a mesma que os tiles usam (`hangarKeyOf`).
+  function shortcutKeyOf(s: ShortcutShell): string {
+    const scoped = shortcuts.find((x) => x.shortcut === s);
+    return hangarKeyOf(scoped?.scope ?? 'global', s.id, projectShortcuts?.key);
+  }
+
   async function rodarAtalhoShell(s: ShortcutShell) {
+    if (runsInHangar(s)) { await runInHangar(s); return; }
+    const shortcutKey = shortcutKeyOf(s);
+    // Pergunta pendente do terminal deste atalho: o clique abre a pergunta em vez de rodar outro.
+    const asking = sessionTerminalFor(chatServerId, sessionName, shortcutKey);
+    if (asking?.alive && asking.question) { openQuestion(chatServerId, sessionName, asking.id); return; }
     const key = atalhoKey;
     try {
-      const r = await runShortcutShell(sessionName, s.command, s.label, s.pasta);
+      const r = await runShortcutShell(sessionName, s.command, s.label, s.pasta, { key: shortcutKey, ask: answersInApp(s) });
       if (r.terminal) focusShortcutTerminal(key, r.terminal.id);
     } finally {
       const lista = await refreshShortcutTerminals(key).catch(() => null);
       const ultimo = lista?.at(-1);
       if (ultimo && !shortcutTerminals.focus[key]) focusShortcutTerminal(key, ultimo.id);
+    }
+  }
+
+  let runningCode = false;
+  let runCodeActive = true;
+  onDestroy(() => { runCodeActive = false; });
+  async function runCommandFromMessage(command: string, language?: string) {
+    if (runningCode || !command.trim()) return;
+    const server = listServers().find((item) => item.id === chatServerId);
+    if (!server) { mostrarAviso(m.servidor_nao_existe()); return; }
+    runningCode = true;
+    let unsupported = false;
+    let mayHaveStarted = true;
+    const requestKey = `run-code:${globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`}`;
+    try {
+      await runCodeCommand(server, sessionName, command.trim(), language, requestKey);
+    } catch (error) {
+      const status = (error as { status?: number } | null)?.status;
+      unsupported = status === 404;
+      mayHaveStarted = status == null || status === 422 || status >= 500;
+      mostrarAviso(unsupported ? m.code_run_update_server() : error);
+    } finally {
+      let list = mayHaveStarted ? await refreshShortcutTerminals(atalhoKey).catch((error) => { mostrarAviso(error); return null; }) : null;
+      let created = list?.find((term) => term.key === requestKey);
+      if (!created && mayHaveStarted && runCodeActive) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 1000));
+        list = await refreshShortcutTerminals(atalhoKey).catch((error) => { mostrarAviso(error); return null; });
+        created = list?.find((term) => term.key === requestKey);
+      }
+      if (created && runCodeActive) {
+        focusShortcutTerminal(atalhoKey, created.id);
+        await tick();
+        xtermOpen = true;
+      } else if (mayHaveStarted && runCodeActive) {
+        mostrarAviso(m.code_run_not_found());
+      }
+      runningCode = false;
+    }
+  }
+
+  // Cópia única do servidor: perguntando abre a pergunta; rodando, a janela vem pra frente ou o
+  // painel abre na aba dele; parado, roda.
+  async function runInHangar(s: ShortcutShell) {
+    const shortcutKey = shortcutKeyOf(s);
+    const current = hangarForShortcut(chatServerId, shortcutKey);
+    if (current?.alive && current.question) { openQuestion(chatServerId, '', current.id); return; }
+    let r;
+    try {
+      r = await runShortcutShell(sessionName, s.command, s.label, s.pasta,
+        { key: shortcutKey, hangar: true, home: hangarHome(s), ask: answersInApp(s) });
+    } catch (err) {
+      if (err instanceof OutdatedServerError) throw new Error(m.hangar_servidor_desatualizado());
+      throw err;
+    }
+    if (r.reused && !r.focused && r.terminal) {
+      requestHangarTab(chatServerId, r.terminal.id);
+      abrirTerminalReal();
     }
   }
 
@@ -2973,6 +3012,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
       {shortcuts}
       projectName={projectShortcuts?.name}
       projectError={projectShortcutsErr}
+      projectKey={projectShortcuts?.key} hangarOf={tileHangar} sessionTerminal={tileSessionTerminal}
       onShortcut={triggerShortcut}
       onEditShortcuts={() => abrirConfig('atalhos', null, sessionName)}
       onOpenActivity={hasActivity ? () => (ctxPanel.aba = 'atividade') : undefined}
@@ -2989,6 +3029,9 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
       onProviderTap={isCodex ? () => (limitsOpen = true) : undefined}
       onOpenPair={orqSession ? undefined : () => (pairOpen = true)}
       onOpenOrq={() => (orqOpen = true)}
+      {orqArbiter}
+      onOpenSession={onNavigateToChat}
+      onOpenFile={(p) => void abrirArquivoCitado(p, null)}
       onOpenPeerChat={nested ? undefined : (peer) => (peerChat = peer)}
       onOpenGit={() => (gitOpen = true)}
       recarregarMotivo={avisoErr ? null : recarregarMotivo}
@@ -3169,6 +3212,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
       onAnswer={handleAnswer}
       onAskClose={cancelAsk}
       onForward={(t) => (forwardText = t)}
+      onRunCommand={!desktop ? runCommandFromMessage : undefined}
       onOpenSession={abrirRemetente}
       onOpenOrq={() => (orqOpen = true)}
       onDescartarFila={descartarFila}
@@ -3246,8 +3290,14 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
            já procura `.dead-footer .back-btn`, e aqui ele cai no botão do árbitro. -->
       <div class="dead-footer orq-footer">
         <p class="dead-text">{m.orq_row_badge()}</p>
-        <button class="back-btn" disabled={!orqArbiter}
-                onclick={() => { if (orqArbiter) onNavigateToChat(orqArbiter); }}>{m.orq_talk_to_arbiter()}</button>
+        <div class="orq-footer-btns">
+          <button class="back-btn" disabled={!orqArbiter}
+                  onclick={() => { if (orqArbiter) onNavigateToChat(orqArbiter); }}>{m.orq_talk_to_arbiter()}</button>
+          {#if !filesInContext && orqServer}
+            <!-- Sem o painel lateral (celular, 820–1280 px, recolhido) o retrato abre em folha. -->
+            <button class="back-btn" onclick={() => (orqPanelOpen = true)}>{m.orq_tab_title()}</button>
+          {/if}
+        </div>
       </div>
     {:else}
       <!-- `!codexPreThread`: sem thread o /events 404a por definição, e a faixa acusava o servidor
@@ -3349,6 +3399,18 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
     onClose={() => (orqOpen = false)}
   />
 
+  {#if orqSession && orqServer}
+    <OrqPanelSheet
+      open={orqPanelOpen && !filesInContext}
+      onClose={() => (orqPanelOpen = false)}
+      server={orqServer}
+      {sessionName}
+      arbiter={orqArbiter}
+      onOpenSession={onNavigateToChat}
+      onOpenFile={(p) => void abrirArquivoCitado(p, null)}
+    />
+  {/if}
+
   <PairSheet
     open={pairOpen}
     {sessionName}
@@ -3378,6 +3440,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   <MoreSheet open={moreOpen} onClose={() => (moreOpen = false)}
              shortcuts={customShortcuts} onShortcut={triggerShortcut}
              projectName={projectShortcuts?.name} projectError={projectShortcutsErr}
+             projectKey={projectShortcuts?.key} {sessionName} hangarOf={tileHangar} sessionTerminal={tileSessionTerminal}
              onEditShortcuts={() => abrirConfig('atalhos', null, sessionName)}
              onRun={orqSession ? undefined : () => (runOpen = true)} {runRunning}
              onActivity={(hasActivity || !!planName) ? () => (activityOpen = true) : undefined}
@@ -3979,6 +4042,8 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
     padding: var(--space-5) var(--space-6);
     background: var(--bg-base);
   }
+
+  .orq-footer-btns { display: flex; flex-wrap: wrap; justify-content: center; gap: var(--space-2); }
 
   .dead-text {
     font-size: var(--text-sm);

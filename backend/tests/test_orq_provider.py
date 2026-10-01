@@ -10,7 +10,7 @@ from unittest.mock import patch
 import pytest
 from fastapi.testclient import TestClient
 
-from app import pair, pqueue, registry
+from app import orq_timeline, pair, pqueue, registry
 from app.adapters import get_adapter
 from app.adapters.codex import sessions as codex_sessions
 from app.adapters.orq import runs
@@ -177,3 +177,64 @@ def test_name_ending_in_orq_without_a_live_run_is_not_refused(root, monkeypatch)
         r = TestClient(app).post("/api/sessions/g1-orq/input", headers=H, json={"text": "oi"})
     assert r.status_code == 404
     assert r.json()["detail"]["code"] == "erro_sessao_recado_nao_enfileirado"
+
+
+def test_panel_route_serves_one_snapshot_per_run(root, monkeypatch):
+    _run(root, "2026-09-28-g1", "g1")
+    monkeypatch.setattr(settings, "auth_token", "secret")
+    from app.api import app
+    client = TestClient(app)
+    r = client.get("/api/sessions/g1-orq/orq/panel", headers=H)
+    assert r.status_code == 200, r.text
+    assert r.json()["consumption"] is None            # a soma roda numa thread: o 1º pedido não espera
+    for lock in list(orq_timeline._consumption_locks.values()):
+        with lock:                                     # a thread solta a trava ao terminar
+            pass
+    r = client.get("/api/sessions/g1-orq/orq/panel", headers=H)
+    body = r.json()
+    assert body["run"] == "2026-09-28-g1" and body["gid"] == "g1"
+    assert body["consumption"]["sessions"]["team"] == 1 and body["automation"]["mode"] == {"jev": "shadow", "regex": "shadow"}
+
+
+def test_panel_route_without_a_live_run_is_404(root, monkeypatch):
+    _run(root, "2026-09-28-g1", "g1", ended=True)
+    monkeypatch.setattr(settings, "auth_token", "secret")
+    from app.api import app
+    with patch("app.tmux.has_session", return_value=False):
+        r = TestClient(app).get("/api/sessions/g1-orq/orq/panel", headers=H)
+    assert r.status_code == 404 and r.json()["detail"]["code"] == "erro_nao_encontrado"
+
+
+def test_panel_route_is_closed_to_shared_session_guests():
+    from app import share_gate
+    assert share_gate.guest_allowed("GET", "/api/sessions/g1-orq/orq/panel", "g1-orq") is False
+
+
+def test_a_parecer_cited_in_the_timeline_opens_through_the_file_route(root, tmp_path, monkeypatch):
+    d = _run(root, "2026-09-28-g1", "g1")
+    parecer = tmp_path / "task-4-r1-revisor.md"
+    parecer.write_text("# parecer\n", encoding="utf-8")
+    line = {"ts": "2026-09-28T10:05:00-03:00", "kind": "woke", "task": None,
+            "text": f"acordou o árbitro: [decisao] T4: incluir a tela? Parecer: {parecer}"}
+    (d / "timeline-2026-09-28-g1.jsonl").write_text(json.dumps(line, ensure_ascii=False) + "\n", encoding="utf-8")
+    monkeypatch.setattr(settings, "auth_token", "secret")
+    from app.api import app
+    client = TestClient(app)
+    panel = client.get("/api/sessions/g1-orq/orq/panel", headers=H).json()
+    assert [x["parecer"] for x in panel["decisions"]] == [str(parecer)]
+    r = client.get("/api/sessions/g1-orq/file", params={"path": str(parecer)}, headers=H)
+    assert r.status_code == 200, r.text
+
+
+def test_history_panel_remains_readable_after_session_disappears(root, monkeypatch):
+    from app import api, orq
+    d = _run(root, "2026-09-28-done", "done", ended=True)
+    monkeypatch.setattr(settings, "auth_token", "secret")
+    monkeypatch.setattr(orq, "raiz_padrao", lambda: root)
+    monkeypatch.setattr(orq_timeline, "_consumption", lambda *args: (None, None))
+    with patch.object(api, "_cached_info_sync", side_effect=AssertionError("live session queried")):
+        response = TestClient(api.app).get(f"/api/orq/{d.name}/panel", headers=H)
+    assert response.status_code == 200, response.text
+    assert response.json()["timing"]["elapsed_seconds"] == 3600
+    assert TestClient(api.app).get("/api/orq/missing/panel", headers=H).status_code == 404
+    assert TestClient(api.app).get(f"/api/orq/{d.name}/panel").status_code == 401

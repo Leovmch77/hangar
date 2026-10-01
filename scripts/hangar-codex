@@ -164,6 +164,7 @@ def _create(cwd: str, prompt: str | None) -> str:
                 "name": name,
                 "cwd": cwd,
                 "provider": "codex",
+                "headless": False,
                 "initial_prompt": prompt,
             }
             if codex_account is not None:

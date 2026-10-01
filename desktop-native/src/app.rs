@@ -26,12 +26,18 @@ mod edits;
 mod git;
 mod grouping;
 mod group_sheet;
+mod hangar_live;
 mod harness;
 mod viewer;
 mod disk;
 mod machines;
 mod orchestration;
 mod orq_roles;
+mod orq_panel;
+mod orq_history;
+mod home_usage;
+mod recent;
+mod orq_timeline;
 mod panes;
 mod popup;
 mod rail;
@@ -53,6 +59,8 @@ mod sidebar;
 mod subagent;
 mod dictation;
 mod sync;
+mod guests;
+mod shared_config;
 mod tree;
 mod costs;
 mod stats;
@@ -176,6 +184,8 @@ enum Payload {
     // Notificações e Anexos: rascunho do servidor e horas silenciosas da conexão atual.
     ServerConfig(server_config::ServerConfigReply),
     Sync(sync::SyncReply),
+    // Configuração compartilhada: fala com várias máquinas, cada uma pelo token dela.
+    SharedConfig(shared_config::SharedConfigReply),
     // Máquinas: identificador, alcance e reinício do servidor conectado.
     Machines(machines::MachinesReply),
     Computer(computer::ComputerReply),
@@ -202,9 +212,13 @@ enum Reply {
     // Valor aplicado e o que a fonte ao vivo mostrava no gesto.
     Applied(controls::Ctl, String, Option<String>),
     Cost(u64),
+    /// Leitura do painel da orquestração, com o número do pedido.
+    OrqPanel(u64),
     GitFiles,
     Diff(String),
-    Shell(String),
+    /// Rótulo do atalho e se o pedido foi No Hangar.
+    Shell(String, bool),
+    RunCode(String),
     Reload,
     PlanPreview(bool),
     PreSelect(String),
@@ -354,6 +368,18 @@ pub struct Hangar {
     drafts: HashMap<SessionKey, String>,
     flight: InFlight,
     action_feedback: HashMap<SessionKey, (String, bool)>,
+    /// Terminais de atalho vivos da máquina ativa (evento `shortcut_terminals`); as outras máquinas guardam no `RemoteList`.
+    live_terms: Vec<terminal::LiveTerm>,
+    /// Cartão da pergunta aberto: (máquina, dono — vazio = No Hangar, terminal) e o diálogo que o mostra.
+    question_open: Option<(String, String, String)>,
+    question_card: Option<Entity<hangar_live::QuestionCard>>,
+    /// Popover do chip "N no Hangar" aberto, e a falha da última ação dele.
+    hangar_open: bool,
+    /// Primeira ação da lista do chip: recebe o foco quando ela abre.
+    hangar_focus: FocusHandle,
+    hangar_error: Option<String>,
+    /// Relógio do "rodando · N min": redesenha a cada 30 s enquanto há um No Hangar vivo.
+    live_clock: Option<Task<()>>,
     ask_form: AskForm,
     plans_dismissed: HashSet<String>,
     // Pergunta do transcript aceita pelo backend, por sessão: vale até o `tool_result`, mesmo trocando de seleção.
@@ -372,6 +398,8 @@ pub struct Hangar {
     row_signatures: Vec<String>,
     items: Vec<Item>,
     expanded: HashSet<String>,
+    // Sessão orq: ids dos eventos que abrem um dia novo, para o separador sair antes deles.
+    orq_days: HashSet<String>,
     // Coluna que o gráfico de cada tabela mostra, pela chave "<linha>#t<n>".
     table_column: HashMap<String, usize>,
     // Tabelas que dão gráfico em cada resposta, com a fonte de onde saíram: refeitas só quando a fonte muda.
@@ -409,6 +437,7 @@ pub struct Hangar {
     context_card: bool,
     command_search: Entity<InputState>,
     confirm: Option<Confirm>,
+    confirm_no_ask: bool,
     terminal_suggestion: String,
     recent: Option<Recent>,
     media: MediaCache<(SessionKey, Source)>,
@@ -439,10 +468,17 @@ pub struct Hangar {
     device: device::Device,
     accounts: accounts::Accounts,
     orchestration: orchestration::Orchestration,
+    orq_history: Option<orq_history::History>,
+    orq_history_serial: u64,
+    home_usage: home_usage::HomeUsage,
+    // Conversas fechadas do modo Conversas; `reopen` é a aberta na área principal, que só vira sessão no Enviar.
+    recents: recent::Recents,
+    reopen: Option<recent::ArchiveEntry>,
     shortcuts: shortcuts::Shortcuts,
     harness: harness::Harnesses,
     server_config: server_config::ServerConfig,
     sync: sync::Sync,
+    shared: shared_config::SharedConfig,
     machines: machines::Machines,
     // Custos e Estatísticas de uso: página própria por cima da janela, fora das Configurações.
     costs: costs::Costs,
@@ -651,14 +687,15 @@ impl Hangar {
             history_installed: false, pending_chat: Vec::new(),
             history_limit: 400, has_older: false, etag: None, error: None, list_error: None,
             delivery: DeliveryTracker::default(), stopping: HashSet::new(), stop_feedback: HashMap::new(), drafts: HashMap::new(),
-            flight: InFlight::default(), action_feedback: HashMap::new(), ask_form: AskForm::default(), plans_dismissed: HashSet::new(), answered_tools: HashSet::new(), answering: HashMap::new(), ask_scroll: Default::default(), plan_scroll: Default::default(), plan_view: None,
-            list_state, rail_hover: None, follow: Default::default(), row_ids: Vec::new(), row_signatures: Vec::new(), items: Vec::new(), expanded: HashSet::new(),
+            flight: InFlight::default(), action_feedback: HashMap::new(), live_terms: Vec::new(), question_open: None, question_card: None,
+            hangar_open: false, hangar_focus: cx.focus_handle(), hangar_error: None, live_clock: None, ask_form: AskForm::default(), plans_dismissed: HashSet::new(), answered_tools: HashSet::new(), answering: HashMap::new(), ask_scroll: Default::default(), plan_scroll: Default::default(), plan_view: None,
+            list_state, rail_hover: None, follow: Default::default(), row_ids: Vec::new(), row_signatures: Vec::new(), items: Vec::new(), expanded: HashSet::new(), orq_days: HashSet::new(),
             table_column: HashMap::new(), tables: HashMap::new(), paired: HashMap::new(), activity: Default::default(), pinned: HashSet::new(), last_message: None, live_clear_epoch: [0; 2], rich: HashMap::new(), prepared: HashMap::new(), render_tick: 0,
             preview_drop_epoch: 0, preview_drop_scheduled: false,
             visible_preview: Preview::default(), preview_tick_epoch: 0, preview_tick_scheduled: false,
             preview_last_tick: None, preview_carry: 0., preview_deadline: None,
             attachments: HashMap::new(), attach_seq: 0, uploading: HashMap::new(), commands: HashMap::new(),
-            suggest_pick: 0, suggest_dismissed: None, command_panel: false, context_card: false, command_search, confirm: None,
+            suggest_pick: 0, suggest_dismissed: None, command_panel: false, context_card: false, command_search, confirm: None, confirm_no_ask: false,
             mention: Default::default(),
             terminal_suggestion: String::new(), recent: None, media: MediaCache::new(), full_images: viewer::full_images(), stats: None,
             side: side::Side::default(), controls: controls::Controls::default(),
@@ -666,8 +703,8 @@ impl Hangar {
             appearance_note: appearance_error.map(|error| tr("settings_not_loaded").replace("{error}", &error)),
             desktop_note: None,
             palette_seq: 0, backdrop_seq: 0, backdrop_pending: false, backdrop: None, backdrop_note: None, backdrop_busy: None, grain: crate::media::grain(),
-            device: device::Device::default(), accounts: accounts::Accounts::default(), orchestration: orchestration::Orchestration::default(), shortcuts: shortcuts::Shortcuts::default(),
-            server_config: server_config::ServerConfig::default(), harness: harness::Harnesses::default(), sync: sync::Sync::default(), machines: machines::Machines::default(),
+            device: device::Device::default(), accounts: accounts::Accounts::default(), orchestration: orchestration::Orchestration::default(), orq_history: None, orq_history_serial: 0, home_usage: Default::default(), recents: Default::default(), reopen: None, shortcuts: shortcuts::Shortcuts::default(),
+            server_config: server_config::ServerConfig::default(), harness: harness::Harnesses::default(), sync: sync::Sync::default(), shared: shared_config::SharedConfig::default(), machines: machines::Machines::default(),
             costs: Default::default(), usage_stats: Default::default(), search: Default::default(), topbar: Default::default(), computer: computer::Computer::default(), new_session: None, sidebar,
             terminal: None, terminal_serial: 0,
             system_notifications: SystemNotifications::default(),
@@ -750,6 +787,8 @@ impl Hangar {
     /// Nome curto do servidor conectado (endereço sem o esquema), para a lista e as configurações.
     fn server_label(&self, cx: &App) -> String {
         let address = self.address.read(cx).value().to_string();
+        if let Some(entry) = self.server_entry(&servers::norm(&address))
+            && !entry.label.is_empty() && entry.label != servers::default_label(&address) { return entry.label.clone(); }
         let host = address.trim_start_matches("http://").trim_start_matches("https://").trim_end_matches('/');
         if host.is_empty() { tr("connection") } else { host.to_owned() }
     }
@@ -847,13 +886,13 @@ impl Hangar {
         let reopen = self.selected.clone().zip(self.session_server().map(|s| servers::norm(&s)));
         // A lista da máquina que sai fica na barra até o SSE dela chegar, sem piscar vazia.
         let previous = self.server.as_deref().map(servers::norm).filter(|key| *key != servers::norm(&api.identity()))
-            .map(|key| (key, std::mem::take(&mut self.sessions), self.list_online, self.list_error.clone()));
+            .map(|key| (key, std::mem::take(&mut self.sessions), self.list_online, self.list_error.clone(), std::mem::take(&mut self.live_terms)));
         self.drop_connection(window, cx);
         self.active_token = token;
         self.api = Some(api.clone());
         self.server = Some(api.identity());
-        if let Some((key, sessions, online, error)) = previous {
-            self.remote.insert(key, servers::RemoteList { loaded: true, online, sessions, error, api: None });
+        if let Some((key, sessions, online, error, live_terms)) = previous {
+            self.remote.insert(key, servers::RemoteList { loaded: true, online, sessions, error, api: None, live_terms });
         }
         self.start_remote_lists();
         self.sync_updater(cx);
@@ -923,6 +962,7 @@ impl Hangar {
         for slot in [&mut self.list_task, &mut self.session_task, &mut self.history_task] { if let Some(t) = slot.take() { t.abort(); } }
         self.leave_accounts();
         (self.selected, self.open_api, self.pending_remote) = (None, None, None);
+        (self.recents, self.reopen) = (Default::default(), None);
         self.sessions.clear();
         self.chat = Chat::default();
         self.turn_seen = None;
@@ -946,7 +986,10 @@ impl Hangar {
         self.sync_rows(cx);
         self.side.reset_server();
         self.sidebar.reset_server();
+        // A lista viva da nova conexão chega pelo stream dela; o cartão da pergunta segue, com a conexão que ele guarda.
+        (self.live_terms, self.hangar_open, self.hangar_error) = (Vec::new(), false, None);
         self.sync = sync::Sync::default();
+        self.shared = shared_config::SharedConfig::default();
         self.controls = controls::Controls::default();
         self.accounts = accounts::Accounts::default();
         self.orchestration = orchestration::Orchestration::default();
@@ -987,6 +1030,9 @@ impl Hangar {
         api::open_trace_start(&session.name);
         // Outra conversa escolhida no meio da criação: a mensagem segue sendo enviada, mas a bolha é da tela que ficou.
         self.opening = None;
+        // Vindo da tela sem sessão (nova conversa ou conversa fechada), o texto dela fica guardado com ela.
+        self.stash_view_draft(cx);
+        self.reopen = None;
         let same_server = self.open_api.as_ref().map(Api::identity) == open_api.as_ref().map(Api::identity);
         if !same_server || self.selected.as_ref().is_none_or(|selected| selected.name != session.name) {
             self.close_terminal(false, window, cx);
@@ -1059,7 +1105,12 @@ impl Hangar {
         if self.api.is_none() || window.has_active_dialog(cx) || self.connection_dialog { return; }
         if self.settings.is_some() && !self.settings_live() { self.close_settings(window, cx); }
         self.pending_remote = None;
+        // Cada tela tem o próprio texto: o da conversa fechada fica com ela, e a nova conversa volta com o dela.
+        let home = self.selected.is_none() && self.reopen.is_none();
+        self.stash_view_draft(cx);
         self.close_open_session(window, cx);
+        self.reopen = None;
+        if !home { self.load_view_draft(window, cx); }
         self.composer.update(cx, |input, cx| input.focus(window, cx));
         cx.notify();
     }
@@ -1174,9 +1225,13 @@ impl Hangar {
             // Cada máquina tem a própria geração: a troca do ativo não derruba as listas das outras.
             Payload::Remote(generation, key, update) => {
                 if generation == self.remote_gen {
+                    // Os terminais vivos dela (evento novo ou stream caído) acertam o chip, os blocos e o painel.
+                    let live = matches!(&update, servers::RemoteUpdate::Stream(Update::Offline(_)))
+                        || matches!(&update, servers::RemoteUpdate::Stream(Update::Frame(frame)) if frame.event == "shortcut_terminals");
                     // Menu, renomear, fechar e grupo das linhas desta máquina acompanham a lista dela como os da ativa.
                     if self.receive_remote(generation, key.clone(), update, cx) { self.sidebar_sessions_changed(window, cx); }
                     self.remote_changed(&key, window, cx);
+                    if live { self.live_changed(&key, window, cx); }
                 }
                 return;
             }
@@ -1232,7 +1287,15 @@ impl Hangar {
                     self.error = Some(Self::failure(&error));
                 }
                 if is_chat { self.chat_online = false; self.error = Some(self.chat_failure(&error)); }
-                else { self.list_online = false; self.list_error = Some(self.active_failure(&error)); }
+                else {
+                    self.list_online = false;
+                    self.list_error = Some(self.active_failure(&error));
+                    // Stream da lista caído: o chip e os blocos não mostram terminal velho dele.
+                    if !std::mem::take(&mut self.live_terms).is_empty() {
+                        let server = self.active_key();
+                        self.live_changed(&server, window, cx);
+                    }
+                }
             }
             Payload::Stream(Update::Frame(frame)) => {
                 let applied = if is_chat {
@@ -1253,6 +1316,16 @@ impl Hangar {
                     }
                 } else if frame.event == "list_error" { self.list_error = Some(tr("list_stale")); true }
                 else if frame.event == "nav" { self.receive_nav(frame.data, window, cx); true }
+                else if frame.event == "shortcut_terminals" {
+                    let list = terminal::parse_live_terms(&frame.data);
+                    // Lista igual à de antes não redesenha; o tempo de "rodando" anda pelo relógio próprio.
+                    if list != self.live_terms {
+                        self.live_terms = list;
+                        let server = self.active_key();
+                        self.live_changed(&server, window, cx);
+                    } else { visible = false; }
+                    true
+                }
                 else { visible = false; true };
                 let _ = frame.applied.send(applied);
             }
@@ -1369,6 +1442,7 @@ impl Hangar {
                 self.receive_server_config(reply, window, cx); return;
             }
             Payload::Sync(reply) => { self.receive_sync(reply, window, cx); return; }
+            Payload::SharedConfig(reply) => { self.receive_shared_config(reply, cx); return; }
             Payload::Machines(reply) => { self.receive_machines(reply, window, cx); return; }
             Payload::Computer(reply) => { self.receive_computer(reply, window, cx); return; }
             Payload::Create(dialog, reply) => { self.receive_create(dialog, reply, window, cx); return; }
@@ -1445,7 +1519,10 @@ impl Hangar {
         // Aba com o foco, pela posição na lista antiga: se a sessão dela sumir, o foco não pode ficar numa alça morta.
         let focused_tab = self.sessions.iter().position(|s| self.tab_focus.get(&s.name).is_some_and(|f| f.is_focused(window)))
             .map(|ix| (ix, self.sessions[ix].name.clone()));
+        // Sessão que sumiu da lista acabou de fechar: a conversa dela passa a ser recente.
+        let closed = self.sessions.iter().any(|old| !sessions.iter().any(|s| s.name == old.name));
         self.sessions = sessions;
+        self.recents_sessions_changed(closed, cx);
         self.resolve_local_dirs(cx);
         // Cada aba guarda o próprio foco pela vida da sessão; aba de sessão que sumiu leva o dela junto.
         self.tab_focus.retain(|name, _| self.sessions.iter().any(|s| &s.name == name));
@@ -1810,6 +1887,7 @@ impl Hangar {
 
     // `confirmed` = a pessoa já aceitou o aviso de comando destrutivo para este mesmo texto.
     fn submit(&mut self, steer: bool, confirmed: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.selected.is_none() && self.reopen.is_some() { self.send_reopen(window, cx); return; }
         if self.selected.is_none() {
             let text = self.composer.read(cx).value().to_string();
             let attached = self.attachments.get(&create::new_chat_key()).map(|list| list.iter()
@@ -1839,8 +1917,9 @@ impl Hangar {
                 cx.notify();
                 return;
             }
-            if command.destructive && !confirmed {
+            if command.destructive && !confirmed && !appearance::get().skip_chat_confirmations {
                 self.confirm = Some(Confirm::Destructive(text));
+                self.confirm_no_ask = false;
                 cx.notify();
                 return;
             }
@@ -2116,9 +2195,11 @@ impl Hangar {
         provider != "orq" && self.chat_online && (self.chat.state.state == "working" || headless && self.chat.state.state == "awaiting_input")
     }
 
-    fn request_stop(&mut self, cx: &mut Context<Self>) {
+    fn request_stop(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.connection_dialog || !self.can_interrupt() { return; }
+        if appearance::get().skip_chat_confirmations { self.interrupt(window, cx); return; }
         self.confirm = Some(Confirm::Stop);
+        self.confirm_no_ask = false;
         cx.notify();
     }
 
@@ -2348,6 +2429,7 @@ impl Hangar {
         self.items = conversation::build(&self.chat.events, conversation::View { thinking: a.thinking_tools, tasks: a.task_list,
             merge_thinking: a.tool_look == appearance::ToolLook::Tree }, &self.pinned);
         self.paired = conversation::pair_results(&self.chat.events).0;
+        self.orq_days = if self.selected.as_ref().is_some_and(SessionInfo::orq) { orq_timeline::day_starts(self.chat.events.iter().filter(|event| event.orq.is_some())) } else { HashSet::new() };
         self.sync_tables(a.table_chart, stable);
         api::open_trace(|| format!("sync_rows built {} items, {stable} events unchanged", self.items.len()));
         self.sync_row_ids(Some(stable), cx);
@@ -2379,7 +2461,11 @@ impl Hangar {
         let events = &self.chat.events;
         let items = self.items.len();
         let (mut ids, mut signatures): (Vec<String>, Vec<String>) = if full {
-            (self.items.iter().map(|item| item.id(events)).collect(), self.items.iter().map(|item| signature(item, events)).collect())
+            (self.items.iter().map(|item| item.id(events)).collect(), self.items.iter().map(|item| {
+                // O separador de dia muda a altura da linha quando histórico mais antigo chega antes dela.
+                let day = matches!(item, Item::Event(_)) && self.orq_days.contains(&item.id(events));
+                if day { format!("day{}", signature(item, events)) } else { signature(item, events) }
+            }).collect())
         } else { (self.row_ids[..items].to_vec(), self.row_signatures[..items].to_vec()) };
         if !self.chat.live_thinking.is_empty() { ids.push(LIVE_THINKING.into()); signatures.push(String::new()); }
         if let Some(tool) = &self.chat.live_tool { ids.push(LIVE_TOOL.into()); signatures.push(format!("{}{}", tool.name, tool.input)); }
@@ -3371,26 +3457,39 @@ impl Hangar {
             Confirm::Replace(name) => (tr("command_replace").replace("{cmd}", &format!("/{name}")), tr("command_replace_ok")),
             Confirm::Prefill(text) => (tr("prefill_replace").replace("{text}", &conversation::one_line(text, 60)), tr("command_replace_ok")),
         };
-        Some(div().p_3().rounded_md().border_1().border_color(theme::warning()).flex().items_center().gap_2()
-            .child(div().flex_1().min_w_0().text_sm().child(text))
-            .child(Button::new("confirm-cancel").small().ghost().label(tr("cancel")).on_click(cx.listener(|this, _, window, cx| {
-                this.confirm = None;
-                this.composer.update(cx, |input, cx| input.focus(window, cx));
-                cx.notify();
-            })))
-            .child(Button::new("confirm-ok").small().primary().label(action).on_click(cx.listener(move |this, _, window, cx| match &confirm {
-                Confirm::Stop => this.interrupt(window, cx),
+        let can_skip = matches!(&confirm, Confirm::Stop | Confirm::Destructive(_));
+        Some(div().p_3().rounded_md().border_1().border_color(theme::warning()).flex().flex_col().gap_2()
+            .child(div().flex().items_center().gap_2()
+                .child(div().flex_1().min_w_0().text_sm().child(text))
+                .child(Button::new("confirm-cancel").small().ghost().label(tr("cancel")).on_click(cx.listener(|this, _, window, cx| {
+                    this.confirm = None;
+                    this.confirm_no_ask = false;
+                    this.composer.update(cx, |input, cx| input.focus(window, cx));
+                    cx.notify();
+                })))
+                .child(Button::new("confirm-ok").small().primary().label(action).on_click(cx.listener(move |this, _, window, cx| match &confirm {
+                Confirm::Stop => { if this.can_interrupt() { this.remember_skip_chat_confirmations(cx); this.interrupt(window, cx); } },
                 Confirm::Destructive(text) => {
                     // Só vale para o texto que a pessoa viu no aviso.
-                    if this.composer.read(cx).value().as_ref() == text { this.submit(false, true, window, cx); }
+                    if this.composer.read(cx).value().as_ref() == text { this.remember_skip_chat_confirmations(cx); this.submit(false, true, window, cx); }
                     else { this.confirm = None; cx.notify(); }
                 }
                 Confirm::Replace(name) => { this.confirm = None; this.fill_command(&name.clone(), false, window, cx); }
                 Confirm::Prefill(text) => { this.confirm = None; this.prefill(&text.clone(), false, window, cx); }
                 Confirm::Shortcut(_, shortcut) => { this.confirm = None; this.run_shortcut(shortcut.clone(), true, window, cx); }
                 Confirm::Reload => { this.confirm = None; this.reload(cx); }
-            })))
+                }))))
+            .when(can_skip, |el| el.child(Checkbox::new("confirm-no-ask").small().label(tr("confirm_no_ask_actions"))
+                .checked(self.confirm_no_ask).on_click(cx.listener(|this, checked: &bool, _, cx| { this.confirm_no_ask = *checked; cx.notify(); }))))
             .into_any_element())
+    }
+
+    fn remember_skip_chat_confirmations(&mut self, cx: &mut Context<Self>) {
+        if !self.confirm_no_ask { return; }
+        let mut next = appearance::get();
+        next.skip_chat_confirmations = true;
+        self.apply_appearance(next, true, cx);
+        self.confirm_no_ask = false;
     }
 
     fn render_suggestions(&self, suggestions: &[CommandInfo], cx: &mut Context<Self>) -> AnyElement {
@@ -3409,7 +3508,10 @@ impl Hangar {
 
     #[allow(clippy::too_many_arguments)]
     fn render_composer(&mut self, readable: bool, busy: bool, steer: bool, queued: usize, sending: bool, stopping: bool, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let new_chat = self.selected.is_none() && self.new_chat.is_some();
+        // Conversa fechada aberta: o campo escreve para ela, e o Enviar a retoma (`send_reopen`).
+        let reopen = self.selected.is_none() && self.reopen.is_some();
+        let resuming = reopen && self.reopen_sending();
+        let new_chat = !reopen && self.selected.is_none() && self.new_chat.is_some();
         let creating = new_chat && self.new_chat.as_ref().is_some_and(|view| view.read(cx).creating);
         let can_create = new_chat && self.new_chat.as_ref().is_some_and(|view| view.read(cx).can_create(cx));
         let key = self.composer_key();
@@ -3430,7 +3532,11 @@ impl Hangar {
         let (pills, mode) = self.render_ctl_pills(readable, cx);
         let pills = if new_chat { self.new_chat_pills(cx) } else { pills };
         let (provider, headless) = self.provider();
-        let provider = if new_chat { self.new_chat_provider(cx) } else { provider }.to_owned();
+        let provider = match self.reopen.as_ref().filter(|_| reopen) {
+            Some(entry) if !entry.provider.is_empty() => entry.provider.clone(),
+            Some(_) => "claude".to_owned(),
+            None => if new_chat { self.new_chat_provider(cx) } else { provider }.to_owned(),
+        };
         let provider = provider.as_str();
         // A dica do terminal e o destinatário moram no placeholder, como no web.
         let placeholder = if readable && !self.terminal_suggestion.is_empty() {
@@ -3442,11 +3548,11 @@ impl Hangar {
         }
         let steer_text = readable && has_input && (provider == "codex" || headless) && self.chat.state.state == "working"
             && self.selected_key().is_none_or(|key| self.group_targets(&key, "").is_none());
-        let blocked = if new_chat { !can_create } else { sending || uploading.is_some() || !self.chat_online || !self.history_installed };
+        let blocked = if reopen { resuming || self.reopen_blocked(cx) } else if new_chat { !can_create } else { sending || uploading.is_some() || !self.chat_online || !self.history_installed };
         let can_stop = self.can_interrupt();
         let focused = self.composer.read(cx).focus_handle(cx).is_focused(window);
         let paste_target = cx.entity().downgrade();
-        let textarea = Textarea::new(&self.composer).appearance(false).disabled((!readable && !new_chat) || creating).on_paste(move |item, _, cx| {
+        let textarea = Textarea::new(&self.composer).appearance(false).disabled((!readable && !new_chat && !reopen) || creating || resuming).on_paste(move |item, _, cx| {
             paste_target.update(cx, |this, cx| this.paste(item, cx)).unwrap_or(false)
         });
         let field = div().id("composer-field").text_base()
@@ -3454,7 +3560,7 @@ impl Hangar {
             .capture_action(cx.listener(|this, _: &MoveUp, _, cx| this.move_suggestion(-1, cx)))
             .capture_action(cx.listener(|this, _: &MoveDown, _, cx| this.move_suggestion(1, cx)))
             .capture_action(cx.listener(|this, _: &IndentInline, window, cx| this.tab(window, cx)))
-            .capture_action(cx.listener(|this, _: &Escape, _, cx| this.escape(cx)))
+                .capture_action(cx.listener(|this, _: &Escape, window, cx| this.escape(window, cx)))
             .child(textarea);
 
         // Aviso e sugestões seguem o que se digita: ficam presos à borda de cima, sem cortina. Os painéis abertos por
@@ -3529,12 +3635,12 @@ impl Hangar {
                 .child(usage)
         });
 
-        let send_label = tr(if creating { "create_creating" } else if sending || uploading.is_some() { "sending" } else { "send" });
+        let send_label = tr(if creating { "create_creating" } else if sending || uploading.is_some() || resuming { "sending" } else { "send" });
         let action = if can_stop && !has_input {
             Button::new("stop").custom(ButtonCustomVariant::new(cx).color(theme::elevated()).foreground(theme::danger()).hover(theme::raised()).active(theme::raised()))
                 .bg(theme::elevated()).child(div().size(px(10.)).rounded(px(2.)).bg(theme::danger())).size(px(30.)).rounded_full()
                 .tooltip(tr("stop_hint")).accessibility_label(tr("stop")).disabled(stopping)
-                .on_click(cx.listener(|this, _, _, cx| this.request_stop(cx)))
+                .on_click(cx.listener(|this, _, window, cx| this.request_stop(window, cx)))
         } else {
             let enabled = !blocked && has_input;
             // Colado: botão claro com a seta na cor do fundo; caixa solta: destaque, como nos mocks.
@@ -3621,13 +3727,17 @@ impl Hangar {
     }
 
     // Esc fecha o que está aberto sobre o campo; sem nada aberto e com a sessão trabalhando, pede para interromper.
-    fn escape(&mut self, cx: &mut Context<Self>) {
-        if self.confirm.is_some() { self.confirm = None; }
+    fn escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.confirm.is_some() { self.confirm = None; self.confirm_no_ask = false; }
+        else if self.cancel_machine_rename() {}
         else if self.mention_is_open(cx) { self.mention.close(); }
         else if !self.visible_suggestions(cx).is_empty() { self.suggest_dismissed = Some(self.composer.read(cx).value().to_string()); }
         else if self.close_popups() {}
         else if self.side_menu_escape(cx) {}
-        else if self.can_interrupt() { self.confirm = Some(Confirm::Stop); }
+        else if self.can_interrupt() {
+            if appearance::get().skip_chat_confirmations { self.interrupt(window, cx); }
+            else { self.confirm = Some(Confirm::Stop); self.confirm_no_ask = false; }
+        }
         else { return; }
         cx.stop_propagation();
         cx.notify();
@@ -3695,6 +3805,10 @@ impl Hangar {
         let id = id.to_owned();
         let mut discard = None;
         let mut baton = None;
+        // Sessão orq: linha do tempo do orquestrador já interpretada pelo backend, desenhada à parte.
+        if let Some(&Item::Event(event_index)) = self.items.get(index).filter(|_| id != PREVIEW) {
+            if self.chat.events.get(event_index).is_some_and(|event| event.orq.is_some()) { return self.render_orq_event(&id, event_index, cx); }
+        }
         // Texto preparado quando o chat mudou; a prévia usa a fonte que o passo do streaming já montou.
         let (markdown, blank) = if id == PREVIEW {
             let markdown = self.rich.get(&id).map(|rich| rich.source.clone()).unwrap_or_else(|| preview_source(&self.visible_preview));
@@ -3781,7 +3895,8 @@ impl Hangar {
             Some(tables) => self.render_charted(&id, &markdown, &tables, cx),
             None if !blank || (files.is_none() && thumbs.is_none()) => {
                 let view = self.text_view(&id, &id, markdown, cx);
-                let text = chat_text(&view, cx).motion(stream_motion(id == PREVIEW)).on_link_click(open_web_link)
+                let runner = (plain && id != PREVIEW).then(|| cx.weak_entity());
+                let text = chat_text_runnable(&view, cx, runner.clone(), &id).motion(stream_motion(id == PREVIEW)).on_link_click(open_web_link)
                     .markdown_extensions(citation_extensions(&id, cx.weak_entity()));
                 vec![collapse(text, long, open).into_any_element()]
             }
@@ -3865,11 +3980,32 @@ fn citation_extensions(row: &str, owner: WeakEntity<Hangar>) -> gpui_kit::base::
     MarkdownExtensions::default().plugin(Citations { row: row.to_owned(), owner })
 }
 
+fn shell_code_language(lang: Option<&str>) -> bool {
+    lang.is_some_and(|lang| matches!(lang.to_ascii_lowercase().as_str(), "bash" | "sh" | "zsh" | "fish" | "shell" | "powershell" | "ps1" | "pwsh"))
+}
+
 /// Markdown da conversa. É o `TextView` do gpui-base porque o do componente não repassa os campos que só a
 /// conversa liga (marcador em coluna, faixa de linguagem).
 fn chat_text(view: &Entity<TextViewState>, cx: &App) -> gpui_kit::base::TextView {
     gpui_kit::base::TextView::new(view).selectable(true).scrollable(false).style(theme::conversation_markdown(cx))
         .code_block_actions(copy_code)
+}
+
+fn chat_text_runnable(view: &Entity<TextViewState>, cx: &App, runner: Option<WeakEntity<Hangar>>, row: &str) -> gpui_kit::base::TextView {
+    let text = chat_text(view, cx);
+    let Some(owner) = runner else { return text };
+    let row = row.to_owned();
+    text.code_block_actions(move |block, window, cx| {
+        let code = block.code().to_string();
+        let language = block.lang().map(|lang| lang.to_string());
+        let can_run = shell_code_language(language.as_deref()) && !code.trim().is_empty() && code.len() <= 4096;
+        let owner = owner.clone();
+        div().flex().items_center().gap(px(4.))
+            .when(can_run, |el| el.child(Button::new(format!("run-block-{row}-{}", block.span.as_ref().map_or(0, |span| span.start)))
+                .ghost().xsmall().label(tr("code_run")).accessibility_label(tr("code_run_aria"))
+                .on_click(move |_, _, cx| { let _ = owner.update(cx, |this, cx| this.run_code_command(code.clone(), language.clone(), cx)); })))
+            .child(copy_code(block, window, cx))
+    })
 }
 
 /// Grupo de hover da linha da mensagem: a faixa de hora e copiar acende com ele.
@@ -4103,8 +4239,6 @@ impl Hangar {
             .child(chrome::section_label(label))
             .when_some(count, |el, n| el.child(div().font_family(theme::MONO).text_size(px(11.)).text_color(theme::faint()).child(n.to_string())));
         let mut children: Vec<AnyElement> = Vec::new();
-        // Como o web: o glifo do agente só aparece quando a lista mistura agentes.
-        let mixed = self.sessions.iter().filter(|s| !s.orq()).map(|s| agent_name(&s.provider)).collect::<HashSet<_>>().len() > 1;
         // Membros de um grupo vêm juntos, sob o cabeçalho do bloco, como o `clusterByPair` do web.
         let rows = |list: &[&SessionInfo], remote: Option<&str>, children: &mut Vec<AnyElement>, window: &mut Window, cx: &mut Context<Self>| for row in grouping::cluster(list) {
             let session = match row {
@@ -4118,7 +4252,7 @@ impl Hangar {
             let selected = selected_name == Some(session.name.as_str()) && self.open_key().as_deref() == remote;
             let remote = remote.map(str::to_owned);
             children.push(if conversations { self.render_conversation_row(session.clone(), selected, remote, window, cx) }
-                else { self.render_session_row(session.clone(), selected, mixed, remote, window, cx) });
+                else { self.render_session_row(session.clone(), selected, remote, window, cx) });
         };
         let place = |layout: &sidebar::Layout, remote: Option<&str>, children: &mut Vec<AnyElement>, window: &mut Window, cx: &mut Context<Self>| {
             if !layout.waiting.is_empty() {
@@ -4158,6 +4292,7 @@ impl Hangar {
         } else {
             place(&layout, None, &mut children, window, cx);
         }
+        children.extend(self.render_recents(window, cx));
         let active = self.active_key();
         let empty = remote_rows == 0 && self.sessions.iter().all(|s| self.sidebar.is_hidden(&active, &s.name));
         let list = div().id("session-list").min_h_0().overflow_y_scroll().px(px(8.)).flex().flex_col().gap(px(2.))
@@ -4175,12 +4310,13 @@ impl Hangar {
         div().w_full().min_h_0().flex().flex_col().when(!fit_content, |el| el.h_full())
             .child(div().h(px(44.)).flex_shrink_0().px(px(14.)).flex().items_center().gap_2()
                 .child(chrome::hangar_mark(20., theme::accent()))
-                .child(div().flex_1().text_base().font_weight(FontWeight::SEMIBOLD).child(tr("brand"))))
+                .child(div().flex_1().text_base().font_weight(FontWeight::SEMIBOLD).child(tr("brand")))
+                .children(self.render_hangar_chip(hangar_live::Chip::Label, cx)))
             // A tela sem sessão, como o "New session" do topo da barra do Zeron; o "Nova sessão" do rodapé segue abrindo o diálogo.
             // Mesma coluna, recuo e altura da linha "Todas as sessões" logo abaixo; o destaque é o translúcido das linhas da
             // lista, e o atalho aparece apagado só com o ponteiro em cima.
             .child({
-                let (on, enabled) = (self.new_chat_screen(), self.api.is_some());
+                let (on, enabled) = (self.new_chat_screen() && self.reopen.is_none(), self.api.is_some());
                 div().id("sidebar-new-chat").group("sidebar-new-chat").flex_shrink_0().mx(px(8.)).mt(px(4.)).h(px(32.)).px(px(8.))
                     .flex().items_center().gap_2().rounded(px(8.)).font_weight(FontWeight::MEDIUM)
                     .track_focus(&self.new_chat_focus)
@@ -4297,8 +4433,9 @@ impl Hangar {
             .map(|el| if floating { el.rounded(px(theme::PANEL_RADIUS)).border_1().border_color(theme::border()).bg(theme::chrome()).shadow(theme::panel_shadow()) }
                 else { el.bg(theme::chrome()).border_b_1().border_color(theme::border()) })
             .child(div().px(px(6.)).child(chrome::hangar_mark(16., theme::accent())))
+            .children(self.render_hangar_chip(hangar_live::Chip::Label, cx))
             .child(strip)
-            .child(chrome::icon_button("tabs-new-chat", IconName::SquarePen, tr("new_chat_title"), cx).selected(self.new_chat_screen())
+            .child(chrome::icon_button("tabs-new-chat", IconName::SquarePen, tr("new_chat_title"), cx).selected(self.new_chat_screen() && self.reopen.is_none())
                 .disabled(self.api.is_none()).on_click(cx.listener(|this, _, window, cx| this.go_home(window, cx))))
             .child(self.new_session_button(true, cx))
             .when_some(self.list_error.clone(), |el, text| el.child(div().flex_shrink_0().max_w(px(260.)).flex().items_center().gap_1()
@@ -4358,12 +4495,13 @@ impl Hangar {
         };
         let title = div().w_full().min_w_0().h(px(17.)).flex().items_center().gap(px(4.))
             .child(status)
-            .child(chrome::provider_glyph(&session.provider, 13.))
+            .when(!session.orq(), |el| el.child(badge(agent_name(&session.provider).to_owned(), theme::muted())))
             .child(div().flex_1().min_w_0().truncate().text_size(px(13.)).line_height(px(17.)).child(name.clone()))
             .when(session.pending_questions > 0, |el| el.child(div().flex_shrink_0().text_xs().text_color(theme::warning())
                 .child(format!("? {}", session.pending_questions))))
             .when(session.tracked == Some(false), |el| el.child(badge(tr("untracked_badge"), theme::muted())))
             .when(session.orq(), |el| el.child(badge(tr_shared("orq_row_badge", &[]), theme::muted())))
+            .when_some(session.owner.clone(), |el, owner| el.child(badge(format!("👤 {owner}"), theme::muted())))
             .child(div().w(px(21.)).h(px(17.)).flex_shrink_0().flex().items_center()
                 .when(show_menu, |el| el.child(menu()))).child(time);
         let (open, menu_target, click_target) = (target.clone(), target.clone(), target.clone());
@@ -4414,9 +4552,9 @@ impl Hangar {
     /// worktree), a branch fora de main/master, o ↑/↓ do upstream e o diff.
     /// Mais, como o web: "? N" das perguntas, o ⋯ e o clique direito com o menu da sessão, pressionar 500 ms para renomear
     /// na própria linha e a prévia da última resposta ao parar o mouse. A linha entra no Tab (Enter abre) e o ⋯ vem depois dela.
-    fn render_session_row(&self, session: SessionInfo, selected: bool, mixed: bool, remote: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn render_session_row(&self, session: SessionInfo, selected: bool, remote: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         // O orquestrador não roda agente: selo de provider nele seria mentira.
-        let mixed = mixed && !session.orq();
+        let provider_label = (!session.orq()).then(|| agent_name(&session.provider).to_owned());
         let target = sidebar::Target::new(&remote.clone().unwrap_or_else(|| self.active_key()), &session.name);
         // Ids com a máquina: a de mesmo nome em outra máquina não divide marca, menu nem selos.
         let row_key = if remote.is_some() { target.id() } else { session.name.clone() };
@@ -4424,13 +4562,12 @@ impl Hangar {
         let limited = session.limited == Some(true);
         let untracked = session.tracked == Some(false);
         let mark_color = if limited { theme::limited() } else { theme::status(state) };
-        // Trabalhando, a marca (e o selo, que fica por cima dela) é pintada fora da lista guardada: a batida não redesenha a lista.
+        // Trabalhando, a marca é pintada fora da lista guardada: a batida não redesenha a lista.
         let working = state == "working" && !limited;
         let mark = if working {
-            self.nav_mark(format!("row-mark-{row_key}"), 18., mark_color, mixed.then(|| session.provider.clone().into()))
+            self.nav_mark(format!("row-mark-{row_key}"), 18., mark_color, None)
         } else { chrome::hangar_mark(18., mark_color).into_any_element() };
-        let avatar = div().relative().size(px(18.)).flex_shrink_0().flex().items_center().justify_center().child(mark)
-            .when(mixed && !working, |el| el.child(chrome::provider_badge(&session.provider)));
+        let avatar = div().relative().size(px(18.)).flex_shrink_0().flex().items_center().justify_center().child(mark);
         let state_label = tr(&format!("chip_{}", if limited { "limited" } else { state }));
         let reply = session.last_reply.as_deref().filter(|r| state == "idle" && !r.trim().is_empty());
         let sub = match reply {
@@ -4483,11 +4620,16 @@ impl Hangar {
                 .when(session.shared, |el| el.child(div().id(SharedString::from(format!("row-shared-{row_key}"))).flex_shrink_0().flex()
                     .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new(tr_shared("sessao_compartilhada", &[])).build(window, cx))
                     .child(chrome::small_icon(IconName::Link, 12., theme::accent()))))
+                .when_some(session.owner.clone(), |el, owner| el.child(badge(format!("👤 {owner}"), theme::muted())))
                 .when(questions > 0, |el| el.child(div().flex_shrink_0().text_xs().text_color(theme::warning()).child(format!("? {questions}"))))
                 .when(untracked, |el| el.child(badge(tr("untracked_badge"), theme::faint()))).into_any_element(),
         };
         let (hover_target, press_target, menu_target, key_open, click_target) = (target.clone(), target.clone(), target.clone(), target.clone(), target.clone());
         let row_id = row_key.clone();
+        let mut spoken = vec![name.clone()];
+        if let Some(label) = &provider_label { spoken.push(label.clone()); }
+        spoken.push(state_label);
+        if session.headless { spoken.push(tr("create_mode_headless")); }
         div().id(SharedString::from(row_id)).relative().flex_shrink_0().flex().flex_col().gap(px(1.)).px(px(8.)).py(px(7.)).rounded(px(10.))
             .when_some(focus.as_ref(), |el, focus| el.track_focus(focus))
             .when(focus.as_ref().is_some_and(|f| f.is_focused(window)), |el| el.focus_ring_style(window, cx))
@@ -4505,7 +4647,7 @@ impl Hangar {
                 cx.stop_propagation();
             }))
             .role(Role::Button).aria_selected(selected)
-            .aria_label(if session.headless { format!("{name} · {} · {state_label}", tr("create_mode_headless")) } else { format!("{name} · {state_label}") })
+            .aria_label(spoken.join(" · "))
             // O ⋯ fica por cima do fim da linha do nome: ela cede o espaço dele.
             .child(div().flex().items_center().gap(px(8.)).when(show_menu, |el| el.pr(px(22.)))
                 .child(avatar)
@@ -4520,9 +4662,10 @@ impl Hangar {
                 .child(div().flex_1().min_w_0().flex().items_center().gap(px(4.)).text_xs().text_color(color)
                     .when(reply.is_some(), |el| el.child(div().flex_shrink_0().text_size(px(8.)).text_color(theme::faint()).child("◆")))
                     .child(div().min_w_0().truncate().when(working, |el| el.italic()).child(text)))))
-            .when(folder.is_some() || branch.is_some() || added.is_some() || removed.is_some() || ahead.is_some() || behind.is_some(), |el| el.child(div().flex().items_center().gap(px(8.))
+            .when(provider_label.is_some() || folder.is_some() || branch.is_some() || added.is_some() || removed.is_some() || ahead.is_some() || behind.is_some(), |el| el.child(div().flex().items_center().gap(px(8.))
                 .text_size(px(11.5)).text_color(theme::faint()).child(lane())
                 .child(div().flex_1().min_w_0().flex().items_center().gap(px(6.))
+                    .when_some(provider_label, |el, label| el.child(div().flex_shrink_0().font_weight(FontWeight::SEMIBOLD).text_color(theme::muted()).child(label)))
                     .when_some(folder, |el, f| el.child(chrome::small_icon(IconName::Folder, 12., theme::faint()))
                         .child(div().min_w_0().truncate().child(f)))
                     .when_some(branch, |el, b| el.child(chrome::small_icon(IconName::GitBranch, 12., theme::faint()))
@@ -4982,6 +5125,7 @@ impl Hangar {
 
     /// Cartões, faixas e avisos entre a conversa e o compositor, e o compositor.
     fn render_bottom_area(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        if self.new_chat_screen() && self.reopen.is_some() { return self.render_reopen(window, cx); }
         if self.new_chat_screen() { return self.render_new_chat(window, cx); }
         let selected_key = self.selected_key();
         let sending = selected_key.as_ref().is_some_and(|key| self.delivery.pending(key));

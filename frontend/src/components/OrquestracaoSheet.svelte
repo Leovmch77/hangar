@@ -1,5 +1,5 @@
 <script lang="ts">
-  // Modal "Orquestração": quem roda cada papel do grupo (aba Papéis, contrato `regras-<gid>.md`)
+  // Modal "Orquestração": quem roda cada papel deste trabalho (aba Papéis, contrato `regras-<gid>.md`)
   // e quais contas a máquina libera (aba Contas, `orquestracao-contas.md`). Mesmo desenho do
   // CreateSessionSheet: lista à esquerda, formulário à direita; no celular, lista → formulário.
   // Salvar um papel grava a tabela e manda recado ao árbitro — a sessão viva NUNCA é tocada.
@@ -15,6 +15,7 @@
   import { clienteQuery, motores, orqGrupo, orqPolitica } from '../lib/queries';
   import { quotaFeed } from '../lib/quotaFeed.svelte';
   import { segredos } from '../lib/segredos.svelte';
+  import { orqHasGroup, orqSessionPrefix } from '../lib/orq';
   import SessionOpeningFields from './SessionOpeningFields.svelte';
   import CodexContextControl from './CodexContextControl.svelte';
   import {
@@ -73,6 +74,7 @@
   let fEsforco = $state('');
   let fVez = $state('');
   let fHeadless = $state(false);
+  let headlessInherited = $state(true);
   let fPermissao = $state('');
   let fMotor = $state('');
   let fJev = $state(false);
@@ -90,14 +92,9 @@
   const PAPEIS_CANONICOS = ['árbitro', 'executor', 'revisor', 'revisão final', 'par de research'];
   const papeisDisponiveis = $derived(PAPEIS_CANONICOS.filter((n) => !papeis.some((p) => p.papel.toLowerCase() === n)));
   let papelOutro = $state(false);
-  // O nome da sessão não é escolha do usuário: sai do prefixo do grupo (`trab-` do árbitro ou
-  // do primeiro papel) + sufixo por papel, no padrão que a skill já usa. Papel existente mantém o dele.
+  // Papéis novos recebem a identidade deste trabalho; nomes já configurados são preservados.
   const SUFIXO: Record<string, string> = { 'árbitro': 'arbitro', executor: 't*', revisor: 'review*', 'revisão final': 'final', 'par de research': 'mock' };
-  const prefixoGrupo = $derived.by(() => {
-    const base = papeis.find((p) => p.sessao)?.sessao ?? grupo?.arbitro ?? sessionName;
-    const i = base.lastIndexOf('-');
-    return i > 0 ? base.slice(0, i + 1) : base + '-';
-  });
+  const prefixoGrupo = $derived(orqSessionPrefix(grupo, sessionName));
   const sessaoDerivada = (papel: string) =>
     prefixoGrupo + (SUFIXO[papel.toLowerCase()] ?? papel.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') + '*');
   const contasDoProvider = $derived(politica ? contasLiberadas(politica.politica, politica.inventario, fProvider) : []);
@@ -124,7 +121,7 @@
   const temJev = $derived(segredos.temChave('jev_api_key') || fJev);
 
   const aberturaDe = (p: Papel | null | undefined): AberturaPapel => ({
-    headless: !!p?.headless, permissao: p?.permissao ?? '', motor: p?.motor ?? '',
+    headless: p?.headless ?? null, permissao: p?.permissao ?? '', motor: p?.motor ?? '',
     jev: !!p?.jev, subagente: p?.subagente ?? '', perfil: p?.perfil ?? '',
   });
   /**
@@ -133,7 +130,7 @@
    */
   function abertura(): AberturaPapel {
     const claude = fProvider === 'claude';
-    const headless = (claude || fProvider === 'codex') && fHeadless;
+    const headless = headlessInherited || !(claude || fProvider === 'codex') ? null : fHeadless;
     return {
       headless,
       permissao: claude || headless ? fPermissao : '',
@@ -164,6 +161,19 @@
   // NÃO descarta o que foi mudado: o usuário edita vários e salva tudo no fim, num recado só.
   type Rascunho = { papel: string; sessao: string; provider: Provider; conta: string; modelo: string; esforco: string; vez: string; janela: string } & AberturaPapel;
   let rascunhos = $state<Record<string, Rascunho>>({});
+  let draftContext = '';
+  $effect(() => {
+    if (!grupo) return;
+    const context = JSON.stringify([
+      ...orqGrupo(sessionName).queryKey,
+      grupo.session_identity ?? grupo.session_prefix ?? sessionName,
+    ]);
+    untrack(() => {
+      if (draftContext === context) return;
+      draftContext = context;
+      rascunhos = {}; sel = null;
+    });
+  });
   // Chave papel+vez: num papel que reveza, chavear só pelo nome faria o rascunho da 2ª conta
   // sobrescrever o da 1ª, e salvar mandaria uma linha só.
   const chaveDe = (i: number | 'novo') =>
@@ -183,7 +193,7 @@
     if (igual || (sel === 'novo' && !r.papel)) delete rascunhos[k]; else rascunhos[k] = r;
   }
   $effect(() => {
-    void [fPapel, fSessao, fProvider, fConta, fModelo, fEsforco, fVez, fJanela, fHeadless, fPermissao, fMotor, fJev, fSubagente, fPerfil, sel];
+    void [fPapel, fSessao, fProvider, fConta, fModelo, fEsforco, fVez, fJanela, fHeadless, headlessInherited, fPermissao, fMotor, fJev, fSubagente, fPerfil, sel];
     untrack(guardarRascunho);
   });
 
@@ -201,7 +211,8 @@
     fVez = r?.vez ?? p?.vez ?? '';
     fJanela = r?.janela ?? p?.janela ?? '';
     const a = r ?? aberturaDe(p);
-    fHeadless = a.headless; fPermissao = a.permissao; fMotor = a.motor; fJev = a.jev; fSubagente = a.subagente;
+    headlessInherited = a.headless == null;
+    fHeadless = a.headless === true; fPermissao = a.permissao; fMotor = a.motor; fJev = a.jev; fSubagente = a.subagente;
     fPerfil = a.perfil;
     // Papel novo nasce no padrão do servidor, como a folha de nova sessão.
     if (i === 'novo' && !r) fJev = segredos.ligado('jev_padrao');
@@ -323,7 +334,7 @@
     fConta = (politica?.politica.find((c) => c.provider === p)?.conta) ?? '';
     fModelo = ''; fEsforco = '';
     // O Jev vale em qualquer provider; o resto da abertura é por provider e volta ao padrão.
-    fHeadless = false; fPermissao = ''; fMotor = ''; fSubagente = ''; fPerfil = '';
+    fHeadless = false; headlessInherited = true; fPermissao = ''; fMotor = ''; fSubagente = ''; fPerfil = '';
   }
   // Conta travada: o modelo é o primeiro liberado, sem escolha.
   $effect(() => { if (contaTravada && modelos[0]) fModelo = modelos[0].id; });
@@ -401,7 +412,7 @@
     subagente: m.criar_subagente, jev: m.criar_jev, perfil: m.criar_perfil_omp, sessao: m.orqcfg_campo_sessao,
   };
   function valorCampo(c: CampoMudado, v: string): string {
-    if (c === 'headless') return v ? m.criar_modo_exec_headless() : m.criar_modo_exec_tmux();
+    if (c === 'headless') return v == null ? m.criar_padrao() : v ? m.criar_modo_exec_headless() : m.criar_modo_exec_tmux();
     if (c === 'jev') return v ? m.orqcfg_ligado() : m.orqcfg_desligado();
     if (c === 'janela' && v) return `${v}%`;
     if (c === 'modelo' && v) return rotuloModelo(v);
@@ -587,7 +598,7 @@
 {/snippet}
 
 {#snippet listaPapeis()}
-  {#if grupo?.gid === 'padrao'}
+  {#if grupo && !orqHasGroup(grupo)}
     <p class="os-intro">{m.orqcfg_sem_grupo()}</p>
   {/if}
   {#if carregando && !grupo}
@@ -760,7 +771,8 @@
     <!-- As mesmas opções da folha "Nova sessão": é com elas que o árbitro abre a sessão do papel. -->
     <SessionOpeningFields provider={fProvider} models={modelos} engines={listaMotores} idPrefix="orq-"
       reducedList={!!invConta?.reduced} modelLocked={contaTravada} showJev={temJev}
-      bind:headless={fHeadless} bind:model={fModelo} bind:effort={fEsforco} bind:permission={fPermissao}
+      executionDefault={headlessInherited} onExecutionDefault={() => (headlessInherited = true)}
+      onHeadlessChange={() => (headlessInherited = false)} bind:headless={fHeadless} bind:model={fModelo} bind:effort={fEsforco} bind:permission={fPermissao}
       bind:engine={fMotor} bind:subagent={fSubagente} bind:jev={fJev} bind:ompProfile={fPerfil}>
       {#snippet afterChoices()}
         <div class="os-grid">
@@ -812,7 +824,7 @@
   {:else if isDesktop}
     <div class="os-split">
       <aside class="os-pane os-esq">
-        <h2 class="sheet-title">{m.orqcfg_titulo()}{#if grupo} <small class="os-gid">{m.orqcfg_sub_grupo({ gid: grupo.gid })}</small>{/if}</h2>
+        <h2 class="sheet-title">{m.orqcfg_titulo()}{#if grupo && orqHasGroup(grupo)} <small class="os-gid">{m.orqcfg_sub_grupo({ gid: grupo.gid })}</small>{/if}</h2>
         {@render abas()}
         {@render listaPapeis()}
         {@render barra()}

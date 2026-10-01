@@ -235,6 +235,38 @@ def test_usd_brl_cacheia_e_nao_rebate_na_rede(monkeypatch):
     assert calls["n"] == n_after_fail
 
 
+def test_usd_brl_vencida_responde_a_ultima_e_busca_atras(monkeypatch):
+    import io
+    import threading
+
+    liberar = threading.Event()
+    buscou = threading.Event()
+
+    class FakeResp(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def lenta(url, timeout=None):
+        liberar.wait(5)
+        buscou.set()
+        return FakeResp(b'{"USDBRL": {"bid": "6.0"}}')
+
+    monkeypatch.setattr(costs.urllib.request, "urlopen", lenta)
+    monkeypatch.setattr(costs, "_rate", 5.0)
+    monkeypatch.setattr(costs, "_rate_at", time.monotonic() - 4000)
+    assert costs.usd_brl() == 5.0          # não esperou a rede
+    liberar.set()
+    assert buscou.wait(5)
+    for _ in range(100):
+        if costs._rate == 6.0:
+            break
+        time.sleep(0.01)
+    assert costs.usd_brl() == 6.0
+
+
 def test_combos_somam_igual_ao_total():
     """A rota é a mesma e o dado é o mesmo: somar os combos tem que dar o total. Divergência
     aqui é a definição de 'a tela mostra número que o dado não sustenta'. Fixture, não disco:

@@ -1,0 +1,201 @@
+<script lang="ts">
+  // Chip "N no Hangar" + lista. Expandido: chip ao lado da marca; trilho: ponto na marca.
+  // Some com zero terminais No Hangar (e enquanto o stream da lista não trouxe nada).
+  import { closeHangarTerminal, focusHangarTerminal, restartHangarTerminal } from '@hangar/core';
+  import { untrack } from 'svelte';
+  import { listServers } from '../lib/auth';
+  import { portal } from '../lib/portal';
+  import { allHangar, openQuestion, requestHangarTab, runningFor } from '../lib/hangarTerminals.svelte';
+  import * as m from '../paraglide/messages';
+
+  // No celular nada consome o pedido de aba sozinho: quem monta passa como abrir o terminal.
+  interface Props { rail?: boolean; onOpenTerminal?: (serverId: string, owner: string, id: string) => void }
+  let { rail = false, onOpenTerminal }: Props = $props();
+  let open = $state(false);
+  let error = $state('');
+  let now = $state(Date.now());
+  let chip = $state<HTMLButtonElement | null>(null);
+  let menu = $state<HTMLDivElement | null>(null);
+  // O menu vai pro <body> (a sidebar tem overflow:hidden e vira containing block de `fixed`), então a
+  // posição sai do retângulo do chip, presa à janela.
+  let pos = $state({ left: 8, top: 0, width: 424, maxHeight: 400 });
+  const items = $derived(allHangar());
+  const asking = $derived(items.some(({ t }) => t.alive && t.question));
+  const multi = $derived(new Set(items.map((i) => i.serverId)).size > 1);
+
+  function place() {
+    if (!chip) return;
+    const r = chip.getBoundingClientRect();
+    const margin = 8;
+    const width = Math.min(424, window.innerWidth - margin * 2);
+    const top = r.bottom + 6;
+    pos = {
+      width,
+      left: Math.max(margin, Math.min(r.left, window.innerWidth - width - margin)),
+      top,
+      maxHeight: Math.max(160, window.innerHeight - top - margin),
+    };
+  }
+  function toggle() {
+    error = '';
+    if (!open) place();
+    open = !open;
+  }
+  function close(refocus = false) {
+    open = false;
+    if (refocus) chip?.focus();
+  }
+
+  $effect(() => { if (!items.length) open = false; });
+
+  $effect(() => {
+    if (!open) return;
+    now = Date.now();
+    const timer = setInterval(() => (now = Date.now()), 30_000);
+    const outside = (e: PointerEvent) => {
+      const target = e.target as Node;
+      if (!menu?.contains(target) && !chip?.contains(target)) open = false;
+    };
+    const onResize = () => place();
+    document.addEventListener('pointerdown', outside, true);
+    window.addEventListener('resize', onResize);
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener('pointerdown', outside, true);
+      window.removeEventListener('resize', onResize);
+    };
+  });
+
+  // Teclado: o foco entra no menu ao abrir (primeira ação), pra o Esc valer.
+  $effect(() => {
+    if (open && menu) untrack(() => menu?.querySelector<HTMLElement>('.hr-actions button')?.focus());
+  });
+
+  function serverOf(id: string) { return listServers().find((s) => s.id === id) ?? null; }
+  function elapsed(created: number | undefined) {
+    const r = runningFor(created ?? 0, now);
+    return 'minutes' in r ? m.hangar_min({ n: r.minutes }) : m.hangar_h({ n: r.hours });
+  }
+  async function act(serverId: string, fn: (srv: NonNullable<ReturnType<typeof serverOf>>) => Promise<unknown>) {
+    const srv = serverOf(serverId);
+    if (!srv) { error = m.servidor_nao_existe(); return; }
+    error = '';
+    try { await fn(srv); } catch (e) { error = m.hangar_erro({ msg: e instanceof Error ? e.message : String(e) }); }
+  }
+  function showTerminal(serverId: string, id: string, keepOpen = false) {
+    if (!keepOpen) open = false;
+    requestHangarTab(serverId, id);
+    onOpenTerminal?.(serverId, '', id);
+  }
+  // Sem janela: o menu fica aberto pra o aviso ser lido, e o terminal abre por baixo.
+  const goToWindow = (serverId: string, id: string) => act(serverId, async (srv) => {
+    const r = await focusHangarTerminal(srv, id);
+    if (r.focused) { open = false; return; }
+    error = m.hangar_sem_janela();
+    showTerminal(serverId, id, true);
+  });
+</script>
+
+{#if items.length}
+  <div class="hr" class:rail>
+    <button type="button" class="hr-chip" class:rail class:asking aria-expanded={open} aria-haspopup="dialog"
+            bind:this={chip}
+            aria-label={m.hangar_chip({ n: items.length })} title={m.hangar_chip({ n: items.length })}
+            onclick={toggle}>
+      <span class="hr-dot" aria-hidden="true"></span>
+      {#if !rail}<span class="hr-txt">{m.hangar_chip({ n: items.length })}</span>{/if}
+    </button>
+    {#if open}
+      <div class="hr-menu" role="dialog" aria-label={m.hangar_lista_titulo()} tabindex="-1"
+           use:portal bind:this={menu}
+           style:left="{pos.left}px" style:top="{pos.top}px" style:width="{pos.width}px" style:max-height="{pos.maxHeight}px"
+           onkeydown={(e) => { if (e.key === 'Escape') { e.stopPropagation(); close(true); } }}>
+        <p class="hr-head">{m.hangar_lista_titulo()}</p>
+        {#each items as { serverId, t } (serverId + t.id)}
+          {@const origin = t.origin ? (multi ? `${serverOf(serverId)?.label ?? serverId}::${t.origin}` : t.origin) : ''}
+          <div class="hr-item" class:asking={t.alive && t.question}>
+            <div class="hr-row">
+              <span class="hr-state" class:live={t.alive && !t.question} class:asking={t.alive && t.question}></span>
+              <span class="hr-name" class:dead={!t.alive}>{t.label}</span>
+              <span class="hr-meta" class:failed={!t.alive}>
+                {#if !t.alive}{m.hangar_caiu({ codigo: String(t.exit_code ?? '?') })}
+                {:else if t.question}{m.hangar_esperando()}
+                {:else}{elapsed(t.created)}{#if origin}{' · '}{m.hangar_aberto_em({ sessao: origin })}{/if}{/if}
+              </span>
+            </div>
+            {#if t.alive && t.question}<p class="hr-question">{t.question.text}</p>{/if}
+            <div class="hr-actions">
+              {#if !t.alive}
+                <button type="button" onclick={() => showTerminal(serverId, t.id)}>{m.hangar_ver_saida()}</button>
+                <button type="button" onclick={() => act(serverId, (srv) => restartHangarTerminal(srv, t.id))}>{m.hangar_rodar_de_novo()}</button>
+                <button type="button" class="quiet" onclick={() => act(serverId, (srv) => closeHangarTerminal(srv, t.id))}>{m.hangar_dispensar()}</button>
+              {:else}
+                {#if t.question}
+                  <button type="button" class="alert" onclick={() => { open = false; openQuestion(serverId, '', t.id); }}>{m.hangar_responder()}</button>
+                {:else}
+                  <button type="button" class="primary" onclick={() => goToWindow(serverId, t.id)}>{m.hangar_ir_janela()}</button>
+                {/if}
+                <button type="button" onclick={() => showTerminal(serverId, t.id)}>{m.hangar_terminal()}</button>
+                <button type="button" class="danger" onclick={() => act(serverId, (srv) => closeHangarTerminal(srv, t.id))}>{m.hangar_parar()}</button>
+              {/if}
+            </div>
+          </div>
+        {/each}
+        {#if error}<p class="hr-error" role="alert">{error}</p>{/if}
+      </div>
+    {/if}
+  </div>
+{/if}
+
+<style>
+  /* Sem espaço, o chip cede (corta o texto) e o título "Hangar" ao lado fica inteiro. */
+  .hr { position: relative; margin-left: auto; min-width: 0; }
+  .hr-txt { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .hr.rail { position: absolute; top: -2px; right: -2px; margin: 0; }
+  .hr-chip {
+    position: relative; height: 30px; min-height: 0; min-width: 0; display: inline-flex; align-items: center; gap: 8px;
+    padding: 0 12px; border-radius: var(--radius-full);
+    border: 1px solid color-mix(in srgb, var(--accent) 50%, transparent);
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    color: var(--accent-text); font-size: var(--text-xs); cursor: pointer; white-space: nowrap; max-width: 100%;
+  }
+  .hr-chip.rail { width: 12px; height: 12px; padding: 0; border: 2px solid var(--bg-base); background: var(--success); }
+  /* Ponto de 12px com alvo de toque maior. */
+  .hr-chip.rail::after { content: ''; position: absolute; inset: -8px; }
+  .hr-chip.rail.asking { background: var(--warning); }
+  .hr-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .hr-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--success); }
+  .hr-chip.asking .hr-dot { background: var(--warning); }
+  .hr-chip.rail .hr-dot { display: none; }
+  /* Colada na borda e recolhida, a marca some (Sidebar) e o ponto fica no fluxo, sem âncora. */
+  :global(html[data-panels='edge']) .hr.rail { position: static; }
+  /* Menu flutuante no <body>: posição e largura vêm do script; fundo sólido, nunca --surface-raised. */
+  .hr-menu {
+    position: fixed; z-index: 250; overflow: auto; border-radius: var(--radius-lg); background: var(--bg-elevated);
+    border: 1px solid var(--border-default); box-shadow: 0 18px 44px rgba(0, 0, 0, 0.45);
+  }
+  .hr-menu:focus-visible { outline: none; }
+  .hr-head { margin: 0; padding: 12px 16px 8px; font-size: var(--text-xs); color: var(--text-muted); }
+  .hr-item { display: flex; flex-direction: column; gap: 10px; padding: 12px 16px; border-top: 1px solid var(--border-subtle); }
+  .hr-item.asking { background: color-mix(in srgb, var(--warning) 7%, transparent); }
+  .hr-row { display: flex; align-items: center; gap: 10px; min-width: 0; }
+  .hr-state { width: 8px; height: 8px; flex-shrink: 0; border-radius: 50%; box-sizing: border-box; border: 1.5px solid var(--text-muted); }
+  .hr-state.live { border: 0; background: var(--success); }
+  .hr-state.asking { border: 0; background: var(--warning); }
+  .hr-name { font-size: var(--text-sm); font-weight: 500; color: var(--text-primary); }
+  .hr-name.dead { color: var(--text-secondary); }
+  .hr-meta { font-size: var(--text-xs); color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .hr-meta.failed { color: var(--error); }
+  .hr-item.asking .hr-meta { color: var(--warning-text); }
+  .hr-question { margin: 0 0 0 18px; font-size: var(--text-xs); color: var(--text-secondary); }
+  .hr-actions { display: flex; flex-wrap: wrap; gap: 6px; padding-left: 18px; }
+  .hr-actions button {
+    height: 30px; min-height: 0; min-width: 0; padding: 0 12px; border-radius: 7px; border: 1px solid var(--border-default);
+    background: transparent; color: var(--text-primary); font-size: var(--text-xs); cursor: pointer;
+  }
+  .hr-actions button.primary { border: 0; background: var(--accent-press); color: #fff; }
+  .hr-actions button.alert { border: 0; background: color-mix(in srgb, var(--warning) 75%, black); color: #fff; }
+  .hr-actions button.danger { color: var(--error); }
+  .hr-actions button.quiet { border: 0; color: var(--text-muted); }
+  .hr-error { margin: 0; padding: 8px 14px; color: var(--error); font-size: var(--text-sm); }
+</style>

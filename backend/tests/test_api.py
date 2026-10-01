@@ -1673,6 +1673,24 @@ def test_resume_archived_route_422_when_cwd_missing(api_client):
     assert r.status_code == 422
 
 
+def test_resume_archived_409_when_transcript_already_live(api_client, tmp_path):
+    jsonl = tmp_path / f"{_SID}.jsonl"
+    jsonl.write_text("{}\n")
+    viva = SessionInfo(name="ja-aberta", cwd="/home/u/my-proj", jsonl=str(jsonl))
+    with patch("app.api.archive_cwd", return_value="/home/u/my-proj"), \
+         patch("app.api.archive_jsonl", return_value=jsonl), \
+         patch("app.api.registry.list", return_value=[viva]), \
+         patch("app.api.registry.create") as create, \
+         patch("app.api.move_conversation") as mover:
+        r = api_client.post(f"/api/archive/-home-u-my-proj/{_SID}/resume", headers=_h())
+    assert r.status_code == 409
+    detail = r.json()["detail"]
+    assert detail["code"] == "erro_conversa_viva"
+    assert detail["params"]["sessao"] == "ja-aberta"
+    create.assert_not_called()
+    mover.assert_not_called()
+
+
 def test_resume_archived_route_404_when_transcript_missing(api_client):
     with patch("app.api.archive_cwd", side_effect=FileNotFoundError()):
         r = api_client.post(f"/api/archive/-home-u-my-proj/{_SID}/resume", headers=_h())

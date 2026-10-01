@@ -140,6 +140,74 @@ const WARNING: Record<string, (p: P) => string> = {
   config_sync_link_replaced: (p) => m.config_sync_link_replaced({ entry: p.entry ?? '', target: p.target ?? '' }),
 };
 
+/** Linha `progress` do NDJSON do manifesto e da aplicação. `index`/`total` só vêm na troca de item. */
+export interface ConfigSyncProgress {
+  phase: 'read' | 'apply' | 'install' | 'after';
+  item: ConfigSyncItem | null;
+  entry: string | null;
+  index?: number;
+  total?: number;
+}
+
+export type ConfigSyncStage = 'waiting' | 'connecting' | 'read' | 'read_done' | 'packing' | 'packed'
+  | 'uploading' | 'apply' | 'install' | 'after' | 'applied' | 'partial' | 'failed';
+
+/** Onde uma máquina está. `detailed` falso = Hangar antigo, que só devolve o resultado no fim. */
+export interface ConfigSyncMachineStep {
+  stage: ConfigSyncStage;
+  item?: ConfigSyncItem | null;
+  entry?: string | null;
+  index?: number;
+  total?: number;
+  detailed?: boolean;
+  error?: string;
+  /** Itens com falha num relatório que terminou (`partial`). */
+  failed?: number;
+}
+
+export function configSyncStepFrom(prev: ConfigSyncMachineStep, p: ConfigSyncProgress): ConfigSyncMachineStep {
+  const itemLevel = p.entry === null && p.total !== undefined;
+  // Os passos finais não são itens: contador e barra do último item ficariam parados.
+  const counted = p.phase !== 'after';
+  return {
+    stage: p.phase, item: p.item ?? prev.item, entry: p.entry, detailed: true,
+    index: !counted ? undefined : itemLevel ? p.index : prev.index,
+    total: !counted ? undefined : itemLevel ? p.total : prev.total,
+  };
+}
+
+/** Etapa final de um destino pelo relatório: `done` com item falho não é "aplicado". */
+export function configSyncReportStep(r: ConfigSyncReport): ConfigSyncMachineStep {
+  const failed = Object.values(r.items).filter((i) => i?.status === 'failed').length;
+  return failed ? { stage: 'partial', failed } : { stage: 'applied' };
+}
+
+const AFTER: Record<string, () => string> = {
+  skill_bridge: m.shared_config_step_after_skill_bridge,
+  hangar_hooks: m.shared_config_step_after_hangar_hooks,
+  codex_integration: m.shared_config_step_after_codex_integration,
+};
+
+export function configSyncStepText(s: ConfigSyncMachineStep): string {
+  const item = s.item ? configSyncItemLabel(s.item) : '';
+  switch (s.stage) {
+    case 'waiting': return m.shared_config_step_waiting();
+    case 'connecting': return m.shared_config_step_connecting();
+    case 'read': return m.shared_config_step_read({ item });
+    case 'read_done': return m.shared_config_step_read_done();
+    case 'packing': return m.shared_config_step_packing();
+    case 'packed': return m.shared_config_step_packed();
+    case 'uploading': return m.shared_config_step_uploading();
+    case 'apply': return m.shared_config_step_apply({ item });
+    case 'install': return m.shared_config_step_install({ entry: s.entry ?? '' });
+    case 'after': return Object.prototype.hasOwnProperty.call(AFTER, s.entry ?? '')
+      ? AFTER[s.entry!]() : m.shared_config_step_after_other({ step: s.entry ?? '' });
+    case 'applied': return m.shared_config_step_applied();
+    case 'partial': return m.shared_config_step_partial({ count: s.failed ?? 0 });
+    case 'failed': return m.shared_config_step_failed();
+  }
+}
+
 export function configSyncWarningText(w: ConfigSyncWarning): string {
   return Object.prototype.hasOwnProperty.call(WARNING, w.code) ? WARNING[w.code](w.params ?? {}) : w.code;
 }

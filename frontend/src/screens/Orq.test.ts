@@ -8,7 +8,7 @@ import Orq from './Orq.svelte';
 vi.mock('../lib/queries', () => ({ orqDetalhe: vi.fn(() => ({})), clienteQuery: { fetchQuery: vi.fn() } }));
 vi.mock('@hangar/core', async (original) => ({
   ...await original<typeof import('@hangar/core')>(),
-  getOrqForServer: vi.fn(), getOrqConductorForServer: vi.fn(),
+  getOrqForServer: vi.fn(), getOrqConductorForServer: vi.fn(), getOrqHistoryPanelForServer: vi.fn(),
 }));
 
 const SRV = { id: 'A', label: 'A', baseUrl: 'https://a.test', token: 'a' };
@@ -30,6 +30,7 @@ async function montar() {
   vi.mocked(api.getOrqForServer).mockResolvedValue({ execucoes: [EXEC], fichas: [] });
   vi.mocked(queries.clienteQuery.fetchQuery).mockResolvedValue(EXEC as never);
   vi.mocked(api.getOrqConductorForServer).mockResolvedValue(CONDUCTOR);
+  vi.mocked(api.getOrqHistoryPanelForServer).mockRejectedValue(new Error('fixture-panel'));
   const target = document.body.appendChild(document.createElement('div'));
   const component = mount(Orq, { target, props: {} });
   await flush();

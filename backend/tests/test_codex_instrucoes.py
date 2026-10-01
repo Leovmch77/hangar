@@ -1,10 +1,22 @@
 from pathlib import Path
+from functools import partial
+import hashlib
+import json
 import shutil
 import subprocess
 
 import pytest
 
-from app.codex_instrucoes import preparar_instrucoes, preparar_projeto
+from app.codex_instrucoes import preparar_instrucoes as prepare_instructions, preparar_projeto as prepare_project
+
+
+preparar_instrucoes = partial(prepare_instructions, force=True)
+preparar_projeto = partial(prepare_project, force=True)
+
+
+def instruction_backups(codex_home):
+    return [json.loads(path.read_text()) for path in
+            (codex_home / '.hangar-instrucoes/backups').glob('*/*.json')]
 
 
 def ambiente(tmp_path):
@@ -75,14 +87,28 @@ def test_escopo_raiz_ate_cwd_e_nome_maiusculo(tmp_path):
     assert not (home / 'AGENTS.override.md').exists()
 
 
-def test_override_pessoal_nao_e_sobrescrito(tmp_path):
+def test_sync_enabled_replaces_existing_override_with_backup(tmp_path):
     home, cx, projeto = ambiente(tmp_path)
     (projeto / 'CLAUDE.md').write_text('Claude')
     target = projeto / 'AGENTS.override.md'
     target.write_text('personalizado')
-    with pytest.raises(ValueError, match='AGENTS.override.md'):
-        preparar_instrucoes(home, cx, projeto)
-    assert target.read_text() == 'personalizado'
+    preparar_instrucoes(home, cx, projeto)
+    assert target.read_text() == 'Claude'
+    saved = instruction_backups(cx)
+    assert len(saved) == 1
+    assert saved[0]['path'] == str(target)
+    assert bytes.fromhex(saved[0]['conteudo_hex']).decode() == 'personalizado'
+
+
+def test_harness_sync_option_updates_global_override(tmp_path, monkeypatch):
+    home, cx, projeto = ambiente(tmp_path)
+    (home / '.claude/CLAUDE.md').write_text('Claude atualizado')
+    target = cx / 'AGENTS.override.md'
+    target.write_text('Codex desatualizado')
+    monkeypatch.setattr('app.codex_integracao.sincronizacao_ligada', lambda: True)
+    prepare_instructions(home, cx, projeto)
+    assert target.read_text() == 'Claude atualizado'
+    assert bytes.fromhex(instruction_backups(cx)[0]['conteudo_hex']).decode() == 'Codex desatualizado'
 
 
 def test_copia_windows_atualiza_e_remove_sem_fonte(tmp_path, monkeypatch):
@@ -103,7 +129,7 @@ def test_copia_windows_atualiza_e_remove_sem_fonte(tmp_path, monkeypatch):
     assert not target.exists()
 
 
-def test_copia_editada_pelo_usuario_e_preservada(tmp_path, monkeypatch):
+def test_sync_enabled_updates_changed_copy_and_registry(tmp_path, monkeypatch):
     home, cx, projeto = ambiente(tmp_path)
     (projeto / 'CLAUDE.md').write_text('Claude')
     def sem_link(*args, **kwargs):
@@ -112,9 +138,54 @@ def test_copia_editada_pelo_usuario_e_preservada(tmp_path, monkeypatch):
     preparar_instrucoes(home, cx, projeto)
     target = projeto / 'AGENTS.override.md'
     target.write_text('minha edição')
-    with pytest.raises(ValueError):
-        preparar_instrucoes(home, cx, projeto)
-    assert target.read_text() == 'minha edição'
+    preparar_instrucoes(home, cx, projeto)
+    assert target.read_text() == 'Claude'
+    assert bytes.fromhex(instruction_backups(cx)[0]['conteudo_hex']).decode() == 'minha edição'
+    records = [json.loads(path.read_text()) for path in (cx / '.hangar-instrucoes').glob('*.json')]
+    record = next(record for record in records if record['alvo'] == str(target))
+    assert record['hash'] == hashlib.sha256(target.read_bytes()).hexdigest()
+    before = target.stat().st_mtime_ns
+    preparar_instrucoes(home, cx, projeto)
+    assert target.stat().st_mtime_ns == before
+
+
+def test_sync_disabled_preserves_overrides_and_registry(tmp_path, monkeypatch):
+    home, cx, projeto = ambiente(tmp_path)
+    (home / '.claude/CLAUDE.md').write_text('GLOBAL Claude')
+    (projeto / 'CLAUDE.md').write_text('PROJETO Claude')
+    preparar_instrucoes(home, cx, projeto)
+    global_target = cx / 'AGENTS.override.md'
+    project_target = projeto / 'AGENTS.override.md'
+    global_target.unlink()
+    global_target.write_text('GLOBAL Codex')
+    project_target.unlink()
+    project_target.write_text('PROJETO Codex')
+    records = {path.name: path.read_bytes() for path in (cx / '.hangar-instrucoes').glob('*.json')}
+    monkeypatch.setattr('app.codex_integracao.sincronizacao_ligada', lambda: False)
+    prepare_instructions(home, cx, projeto)
+    prepare_project(cx, projeto)
+    assert global_target.read_text() == 'GLOBAL Codex'
+    assert project_target.read_text() == 'PROJETO Codex'
+    assert records == {path.name: path.read_bytes() for path in (cx / '.hangar-instrucoes').glob('*.json')}
+    assert instruction_backups(cx) == []
+
+
+def test_sync_enabled_replaces_foreign_link_without_editing_its_source(tmp_path):
+    home, cx, projeto = ambiente(tmp_path)
+    (projeto / 'CLAUDE.md').write_text('Claude')
+    personal = home / 'personal.md'
+    personal.write_text('Codex pessoal')
+    target = projeto / 'AGENTS.override.md'
+    try:
+        target.symlink_to(personal)
+    except OSError:
+        pytest.skip('Sistema sem links simbólicos')
+    preparar_instrucoes(home, cx, projeto)
+    assert target.read_text() == 'Claude'
+    assert personal.read_text() == 'Codex pessoal'
+    saved = instruction_backups(cx)[0]
+    assert saved['symlink'] == str(personal)
+    assert bytes.fromhex(saved['conteudo_hex']).decode() == 'Codex pessoal'
 
 
 def test_sem_claude_preserva_override_pessoal(tmp_path):

@@ -23,6 +23,9 @@ Proof: <test/harness to create or run, and what it must say>
 - Async data read by a consumer → the recipe declares the three states (success, failure,
   pending). An action that types into the user's session → the recipe declares its trigger.
   Same for a recipe the arbiter closes in a replanning.
+- A recipe that adds a branch to a function, or syncs state between instances, names by
+  file:line the read the branch decides on (at entry, or after which await), every caller
+  including automatic ones, and every writer of that state after that read.
 
 ## Close the class, not the entry
 

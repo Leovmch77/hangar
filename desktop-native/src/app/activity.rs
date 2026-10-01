@@ -951,6 +951,7 @@ impl Hangar {
     pub(super) fn render_side_title(&self, cx: &mut Context<Self>) -> AnyElement {
         let readable = self.selected.as_ref().is_some_and(|s| s.readable());
         let git = readable && self.selected.as_ref().is_some_and(super::sidebar::has_git);
+        let orq = self.selected.as_ref().is_some_and(SessionInfo::orq);
         let current = (self.act.active_tab.is_none() && !self.side_menu_shown()).then(|| self.side_tab());
         let tab = |id: &'static str, label: String, which: SideTab, close: Option<Button>, cx: &mut Context<Self>| {
             let text = div().min_w_0().truncate().text_size(px(12.)).child(label.clone());
@@ -976,7 +977,7 @@ impl Hangar {
             .tooltip(tr("browser_close")).accessibility_label(tr("browser_close"))
             .on_click(cx.listener(|this, _, window, cx| { cx.stop_propagation(); this.close_browser(window, cx); })));
         div().id("side-tabs").flex_1().h_full().min_w_0().flex().gap(px(2.)).overflow_hidden()
-            .child(tab("side-tab-context", tr("side_context"), SideTab::Context, None, cx))
+            .child(tab("side-tab-context", if orq { tr_shared("orq_tab_title", &[]) } else { tr("side_context") }, SideTab::Context, None, cx))
             .when(readable, |el| el.child(tab("side-tab-files", web("arq_aba"), SideTab::Files, None, cx)))
             .when(self.has_activity(), |el| el.child(tab("side-tab-activity", web("ctx_atividade"), SideTab::Activity, None, cx)))
             .when(git, |el| el.child(tab("side-tab-git", web("git_coluna_abrir"), SideTab::Git, None, cx)))

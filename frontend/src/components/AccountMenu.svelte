@@ -34,7 +34,7 @@
     // Recebe o TOKEN ja extraido e validado (o parse mora num arquivo so — nos dois pais
     // viraria validacao duplicada, e Sidebar/SessionList sao justamente os que vivem divergindo).
     // Devolve false quando o servidor nao existe mais, pra UI poder dizer isso em vez de fingir.
-    onUpdateServerToken: (id: string, token: string) => boolean;
+    onUpdateServerToken: (id: string, token: string, baseUrl?: string) => boolean;
     onRemoveServer: (id: string) => void;
     // Só o popover (não-embedded) mostra o ServerManager com "Adicionar servidor"; o drawer do
     // celular não tem o gesto (gestão em Configurações → Servidores), então o pai embedded não passa.

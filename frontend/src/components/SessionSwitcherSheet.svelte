@@ -5,8 +5,8 @@ import * as m from '../paraglide/messages';
   import ThemeToggle from './ThemeToggle.svelte';
   import BackgroundToggle from './BackgroundToggle.svelte';
   import { basename, relativeTime, rotuloEstado, stateColors } from '@hangar/core';
-  import { listServers, listOwnServers, selectServer, serverColor, getActiveId } from '../lib/auth';
-  import { searchTranscriptsForServer, askHistoryForServer, getSearchContextForServer, type SearchHit } from '@hangar/core';
+  import { listServers, listOwnServers, selectServer, serverColor, getActiveId, type Server } from '../lib/auth';
+  import { searchTranscriptsForServer, askHistoryForServer, getSearchContextForServer, estaDesligado, type SearchHit } from '@hangar/core';
   import type { ChatEvent, SessionInfo, State } from '@hangar/core';
   import { renderMarkdown } from '../lib/markdown';
 
@@ -41,7 +41,14 @@ import * as m from '../paraglide/messages';
   let searching = $state(false);
   let searchTimer: ReturnType<typeof setTimeout> | undefined;
   // Servidores que falharam na última busca: sem isto a falha virava "Nenhum resultado".
-  let falhas = $state<string[]>([]);
+  type Falha = { server: Server; motivo: string };
+  let falhas = $state.raw<Falha[]>([]);
+  // Servidores ainda sem resposta; os marcados fora do ar ganham rótulo próprio enquanto esperam.
+  let pending = $state.raw<Server[]>([]);
+  let foraDoAr = $state.raw<Set<string>>(new Set());
+  let semServidores = $state(false);
+  let searchSeq = 0;
+  let searchTerm = '';
 
   const termosBusca = $derived([...new Set(query.trim().toLowerCase().split(/\s+/).filter(Boolean))]);
   const escapar = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -66,7 +73,18 @@ import * as m from '../paraglide/messages';
   );
 
   // Prévia: o trecho aberto mostra a mensagem inteira e as vizinhas, sem sair da busca.
-  const chaveHit = (h: Hit) => `${h.serverId}/${h.session_id}/${h.event_id ?? h.line}`;
+  const chaveHit = (h: Hit) => `${h.serverId}/${h.project}/${h.session_id}/${h.event_id || h.line}`;
+  // Chave repetida num {#each} derruba o componente e a busca congela em "Buscando…": servidor
+  // com backend antigo ainda devolve a mesma mensagem duas vezes quando o transcript a repete.
+  function semRepetidos(hits: Hit[]): Hit[] {
+    const vistos = new Set<string>();
+    return hits.filter((h) => {
+      const k = chaveHit(h);
+      if (vistos.has(k)) return false;
+      vistos.add(k);
+      return true;
+    });
+  }
   let aberto = $state<string | null>(null);
   let contexto = $state<ChatEvent[] | null>(null);
   let contextoErro = $state('');
@@ -106,7 +124,7 @@ import * as m from '../paraglide/messages';
       const r = await askHistoryForServer(srv, q);
       askAnswer = {
         answer: r.answer,
-        hits: r.hits.map((h) => ({ ...h, serverId: srv.id, serverLabel: srv.label })),
+        hits: semRepetidos(r.hits.map((h) => ({ ...h, serverId: srv.id, serverLabel: srv.label }))),
       };
     } catch (e) {
       askErr = e instanceof Error ? e.message.replace(/^\d+:\s*/, '') : 'falhou';
@@ -122,9 +140,11 @@ import * as m from '../paraglide/messages';
       mode = searchOnly ? 'search' : 'sessions';   // modo busca abre direto na busca
       query = '';
       results = [];
-      falhas = []; aberto = null;
+      falhas = []; aberto = null; pending = []; foraDoAr = new Set(); semServidores = false;
       askAnswer = null; askErr = ''; asking = false;
       activeIdx = 0;
+      searchSeq++; // resposta de antes de fechar não entra na busca nova
+
       // espera o sheet montar/animar antes de focar
       requestAnimationFrame(() => searchEl?.focus());
     }
@@ -155,7 +175,12 @@ import * as m from '../paraglide/messages';
     if (!term) {
       results = [];
       falhas = [];
+      pending = [];
+      foraDoAr = new Set();
+      semServidores = false;
       searching = false;
+      // Redigitar o mesmo termo antes do debounce reaproveitaria as respostas antigas.
+      searchSeq++;
       return;
     }
     searching = true;
@@ -163,28 +188,85 @@ import * as m from '../paraglide/messages';
     return () => clearTimeout(searchTimer);
   });
 
-  async function runSearch(term: string) {
-    // Fan-out: 1 chamada por servidor (mesmo padrao de fetchSessionsForServer); um server lento/offline
-    // falha isolado (allSettled) sem segurar os outros.
-    const servers = listOwnServers();   // a busca de transcrição é do servidor inteiro: convite a barra
-    const settled = await Promise.allSettled(servers.map((s) => searchTranscriptsForServer(s, term)));
-    // Resultado velho: a query mudou (ou trocou de modo) enquanto o fetch voltava -> descarta.
-    if (term !== query.trim() || mode !== 'search') return;
-    const merged: Hit[] = [];
-    const falharam: string[] = [];
-    settled.forEach((r, i) => {
-      if (r.status === 'fulfilled') {
-        for (const h of r.value) merged.push({ ...h, serverId: servers[i].id, serverLabel: servers[i].label });
-      } else {
-        falharam.push(servers[i].label);
-      }
-    });
-    merged.sort((a, b) => b.mtime - a.mtime); // mais recente primeiro
-    results = merged;
-    falhas = falharam;
+  function runSearch(term: string) {
+    // Fan-out: 1 chamada por servidor; cada resposta entra na lista assim que chega, pra um servidor
+    // lento não segurar os resultados dos outros.
+    const seq = ++searchSeq;
+    searchTerm = term;
+    const all = listOwnServers();   // a busca de transcrição é do servidor inteiro: convite a barra
+    const active = getActiveId();
+    // Os já marcados fora do ar saem por último: não atrasam o disparo dos outros.
+    const offline = all.filter((s) => s.id !== active && estaDesligado(s.id));
+    const servers = [...all.filter((s) => !offline.includes(s)), ...offline];
+    foraDoAr = new Set(offline.map((s) => s.id));
+    semServidores = all.length === 0;
+    pending = servers;
+    results = [];
+    falhas = [];
     aberto = null;
-    searching = false;
+    searching = servers.length > 0;
+    for (const s of servers) consultar(s, term, seq);
   }
+
+  function motivoFalha(e: unknown): string {
+    if (e instanceof DOMException && e.name === 'TimeoutError') return m.busca_motivo_timeout();
+    const msg = e instanceof Error ? e.message : String(e);
+    return /^\d{3}$/.test(msg) ? m.busca_motivo_http({ status: msg }) : msg;
+  }
+
+  function consultar(s: Server, term: string, seq: number) {
+    // Resposta velha: outra busca começou, a query mudou ou trocou de modo -> descarta.
+    const valid = () => seq === searchSeq && term === query.trim() && mode === 'search';
+    searchTranscriptsForServer(s, term)
+      .then(
+        (hits) => {
+          if (!valid()) return;
+          const tagged = hits.map((h) => ({ ...h, serverId: s.id, serverLabel: s.label }));
+          results = semRepetidos([...results, ...tagged]).sort((a, b) => b.mtime - a.mtime); // mais recente primeiro
+        },
+        (e) => {
+          if (!valid()) return;
+          console.warn(`busca em ${s.label} falhou`, e);
+          falhas = [...falhas, { server: s, motivo: motivoFalha(e) }];
+        },
+      )
+      .finally(() => {
+        if (!valid()) return;
+        pending = pending.filter((p) => p.id !== s.id);
+        searching = false;
+      });
+  }
+
+  // Refaz só quem falhou, na mesma busca: as respostas que já chegaram ficam.
+  function retentar() {
+    if (searchTerm !== query.trim() || !falhas.length) return;
+    const alvo = falhas.map((f) => f.server);
+    falhas = [];
+    pending = [...pending, ...alvo];
+    for (const s of alvo) consultar(s, searchTerm, searchSeq);
+  }
+
+  const pendingLine = $derived.by(() => {
+    const normais = pending.filter((s) => !foraDoAr.has(s.id)).map((s) => s.label);
+    const fora = pending.filter((s) => foraDoAr.has(s.id)).map((s) => s.label);
+    return [
+      normais.length ? m.busca_aguardando({ servidores: normais.join(', ') }) : '',
+      fora.length ? m.busca_tentando_fora({ servidores: fora.join(', ') }) : '',
+    ].filter(Boolean).join(' · ');
+  });
+
+  // Uma região viva só, cujo texto muda: leitor de tela anuncia a troca, não um nó novo por estado.
+  const statusText = $derived.by(() => {
+    if (mode !== 'search' || !query.trim()) return '';
+    if (semServidores) return m.busca_sem_servidores();
+    if (searching) return m.switcher_buscando();
+    const partes = [
+      results.length ? resumoBusca
+        : !falhas.length && !pending.length ? m.busca_nenhum_todas({ termos: termosBusca.join(', ') }) : '',
+      pendingLine,
+    ];
+    return partes.filter(Boolean).join(' · ');
+  });
 
   const multiServer = $derived(listServers().length > 1);
 
@@ -300,16 +382,15 @@ import * as m from '../paraglide/messages';
         {#each askAnswer.hits as h (chaveHit(h))}{@render trecho(h, true)}{/each}
       </div>
     {/if}
-    <div class="list" aria-busy={searching}>
-      {#each falhas as f (f)}<p class="ask-err" role="alert">{m.busca_servidor_falhou({ servidor: f })}</p>{/each}
+    <div class="list" aria-busy={searching || pending.length > 0}>
+      {#each falhas as f (f.server.id)}
+        <p class="ask-err" role="alert">{m.busca_servidor_falhou_motivo({ servidor: f.server.label, motivo: f.motivo })}</p>
+      {/each}
+      {#if falhas.length}<button class="retry-btn" onclick={retentar}>{m.busca_tentar_de_novo()}</button>{/if}
+      <p class="busca-resumo" class:empty={!results.length && !!statusText} role="status">{statusText}</p>
       {#if !query.trim()}
         <p class="empty">{m.busca_digite_todas()}</p>
-      {:else if searching}
-        <p class="empty" role="status">{m.switcher_buscando()}</p>
-      {:else if results.length === 0}
-        {#if !falhas.length}<p class="empty">{m.busca_nenhum_todas({ termos: termosBusca.join(', ') })}</p>{/if}
-      {:else}
-        <p class="busca-resumo" role="status">{resumoBusca}</p>
+      {:else if !searching && results.length}
         {#each grupos as g (g.chave)}
           {@const h0 = g.hits[0]}
           <section class="grupo">
@@ -748,6 +829,12 @@ import * as m from '../paraglide/messages';
   .ask-btn:active:not(:disabled) { background: var(--accent-dim); }
   .ask-btn:disabled { opacity: 0.6; }
   .ask-err { margin: var(--space-2) 0 0; color: var(--error); font-size: var(--text-sm); }
+  .retry-btn {
+    align-self: flex-start; min-height: 32px; margin: var(--space-1) 0;
+    padding: 0 var(--space-2); border: 1px solid var(--border-default); border-radius: var(--radius-md);
+    background: transparent; color: var(--accent); font-size: var(--text-sm);
+  }
+  .retry-btn:active { background: var(--accent-dim); }
   .ask-card {
     margin-top: var(--space-3); padding: var(--space-3);
     background: var(--bg-surface); border: 1px solid var(--border-subtle); border-radius: var(--radius-md);

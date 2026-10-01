@@ -41,6 +41,8 @@ Only terminal sessions use the tmux pane for live **state** and input. Backend p
 - Also: `pqueue.py` (durable input queue), `preview.py` (live in-flight block), `askquestion.py`
   (native AskUserQuestion stepper), `uploads.py`, `git_ops.py`, `commands.py`, `workflows.py`,
   `model_picker.py`, `config.py`, `fs.py`, `hook_installer.py`.
+- `site/` — landing page de `hangar.dev.br` (HTML estático em PT/EN gerado por `site/build.py`,
+  publicado no Cloudflare Pages); vídeos do app gravados por `site/tools/record/`. Ver `site/README.md`.
 
 Frontend (`frontend/src/`): `screens/` (Chat, Board, …), `components/` (MessageList, NavBar, Composer,
 bubbles, sheets, Spinner/Lottie, …), `lib/` (`api.ts` SSE client, `activity.ts`, `markdown.ts`,
@@ -197,17 +199,21 @@ registrado, fora do caminho de leitura, para não competir com o que vale hoje.
   Lógica (API, formatação, parser, tipos) entra em `packages/core` e serve as duas. Tela é por
   interface, escrita duas vezes. O check completo, quando pedido, é `npm run check` **na raiz**,
   que cobre as três.
-- **Desktop tem dois clientes: o PWA no Electron e o app nativo em Rust (`desktop-native/`).**
-  O nativo não importa `packages/core`; o que os dois compartilham é a API do backend e os
-  `messages/*.json`. Mudança de tela ou comportamento na visão desktop do `frontend/` entra no
-  nativo no mesmo trabalho, ou vira linha `pendente` com o motivo em
-  `desktop-native/docs/chat-parity.md` (e vice-versa). O nativo é o padrão: o instalador o baixa
+- **Desktop evolui no Rust (`desktop-native/`); web (`frontend/`) evolui para PWA/mobile.**
+  Mudanças desktop entram no nativo, sem exigir implementação ou adaptação da tela desktop web.
+  Recursos usados no celular continuam entrando na web/PWA e no app `mobile/`, conforme o
+  escopo. O Electron e o desktop web estão em descontinuação gradual: preserve o que existe;
+  remoção exige pedido explícito. A paridade desktop entre web e Rust deixou de ser requisito.
+  O nativo não importa `packages/core`; compartilha a API do backend e `messages/*.json`.
+  Decisão e alcance em [frontend.md](docs/decisoes/frontend.md#desktop-no-rust-web-para-pwamobile).
+  O nativo é o padrão: o instalador o baixa
   da release `native-latest` no pacote da máquina (`scripts/install-native.sh`/`.ps1`) e o
   Electron fica ao lado como "Hangar (Electron)", porque o navegador embutido com tela remota e
   abas mora nele; no Windows o nativo já atende o `hangar-preview` (CDP dentro do processo, um
   navegador por sessão, sem abas).
-- **Two views: mobile & desktop (820px).** `Sidebar` (desktop) e `SessionList` (mobile) são
-  arquivos separados: template e CSS mudam nos DOIS e se verifica nos DOIS. Lógica da lista vai
+- **A web existente tem duas vistas (820px):** `Sidebar` (desktop legado) e `SessionList`
+  (mobile). Trabalho novo na web considera PWA/mobile; não exige alterar as duas vistas.
+  Preserve o desktop existente ao tocar código compartilhado. Lógica da lista vai
   no `lib/sessionListModel.svelte.ts`, e a agregação SSE no `lib/sessionsStore.svelte.ts` — uma
   por servidor, nunca uma por card.
 - **Todo texto de interface vem de `m.<chave>()`** (Paraglide). `pt.json` e `en.json` no mesmo
@@ -293,6 +299,11 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
 
 ### Plataforma — nomes, pareamento, planos, ditado → [`docs/decisoes/plataforma.md`](docs/decisoes/plataforma.md)
 
+- **Orquestração: um time por trabalho, editado pela tela ou pelo LLM.** Sem grupo usa
+  rascunho da identidade atual; não importa time padrão/contrato anterior. Ao lançar, associa
+  esse registro ao grupo por `/orq/grupo`, preservando escolhas. O vigia fecha executor e
+  revisor concluídos; desarmar somente após conferir a limpeza. Evidência em plataforma.md.
+
 - **O nome antigo (`claude-pocket`) só existe em ponte de compatibilidade.** Escreva com o nome
   novo; nunca leia o antigo em código novo. O que resta é migração, e ela nunca funde duas pastas.
 - **Comentário explica o PORQUÊ, e é curto.** Medição, versão de CLI e data envelhecem: num
@@ -313,6 +324,10 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
 - **Grupo de 1 só existe no grupo `orq` com execução `auto` viva.** Viva = `orq.json` com `auto`
   e sem `execucao_fim`, nunca o batimento do vigia; acabada (ou não iniciada em 1 h), a varredura
   do `list()` dissolve o grupo e arquiva o contrato.
+- **Sessão orq: a conversa e o painel saem dos arquivos da execução, por um parser só**
+  (`orq_timeline.py`). O `ChatEvent` leva `orq` (texto cru mantido); o painel é um `GET` por
+  execução em `/api/sessions/{name}/orq/panel`, fora do alcance do convidado e sem escrita, e o
+  Time lê o estado da lista de sessões. O `orq.py` só grava o que não dá para derivar.
 - **Plan progress lê o `.md` do plano**, sem arquivo de estado: blocos cercados são removidos
   preservando offsets, e a decoração roda dentro do `to_thread` do git.
 - **Ditado: a transcrição não é o problema, o que vem depois é.** Vocabulário vai para a Whisper
@@ -347,6 +362,10 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
   chamada a um servidor sai por `baseOf` (ou `getBaseUrl` do `ApiEnv`); `s.baseUrl` cru ignora a
   rede local calado. O token só vai ao endereço local depois da prova HMAC (`/api/peers/prova`),
   e o local só vence se provar antes de o principal responder (IP local via VPN é mais lento).
+- **Atalho No Hangar é uma cópia só por atalho, e de nenhuma sessão.** Dono vazio +
+  `@cp_shortcut_key` no multiplexador: `close_all`/lista da sessão não o alcançam; clicar de novo
+  reaproveita. A aba dele fica no painel de terminal de toda sessão. O estado chega pelo stream da
+  lista (`shortcut_terminals`), nunca por SSE próprio; convidado não vê.
 - **Revisão de código:** neste repositório, revisão local e as verificações do projeto.
 - **MCP `hangar` (`/mcp`): identidade do chamador vai no cabeçalho e o backend resolve.** Chave
   vence pane, pane vence nome, pane ambíguo não resolve, nada resolvido é erro (nunca `cli`). O

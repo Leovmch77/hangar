@@ -26,6 +26,7 @@ def env(tmp_path):
     fake.chmod(0o755)
     e = {**os.environ, "ORQ_DIR": str(d), "ORQ_SEND": str(fake), "ORQ_JEV": "off",
          "HOME": str(tmp_path), "CLAUDE_CONFIG_DIR": str(tmp_path / ".claude"),
+         "ORQ_WHOAMI": "false",   # nunca o hangar-send real: o remetente fica desconhecido
          "TYPESAFE_API_KEY": "", "JEV_ENDPOINT": "", "JEV_MODEL": ""}
     return d, log, e
 
@@ -199,7 +200,9 @@ def test_registro_gira_no_teto_de_caracteres(env, tmp_path):
     for i in range(45):
         run(e, "event", "sessao_trocada", "--de", f"s{i}", "--para", "y" * 900)
     assert (d / "registro-arquivo-1.md").exists()
-    assert "registro-arquivo-1.md" in (d / "registro.md").read_text().splitlines()[0]
+    # cada troca grava a linha do evento e a da identidade indisponível: o teto gira mais de uma vez
+    ultimo = max(d.glob("registro-arquivo-*.md"), key=lambda f: int(f.stem.rsplit("-", 1)[1]))
+    assert ultimo.name in (d / "registro.md").read_text().splitlines()[0]
     assert (d / "registro.md").stat().st_size < 40_000
 
 
@@ -940,7 +943,7 @@ def test_team_e_os_donos_de_task_aberta_e_o_arbitro_e_nao_cruza_com_done(env, tm
     run(e, "event", "entrega", "--task", "2", "--rodada", "1", "--commit", "abc")
     time_ = run(e, "team").stdout.split()
     assert time_ == ["ex2", "rev2", "arb"]
-    assert _done(e) == [("ex1", "Task 1 closed")]
+    assert _done(e) == [("ex1", "Task 1 closed"), ("rev1", "Task 1 closed")]
 
 
 def _stash(g, r, content="2\n"):
@@ -1128,6 +1131,83 @@ def test_auto_sem_chave_regex_so_anotando_acorda_e_marca_teria_descartado(env, t
     [t] = linha_do_tempo(d)
     assert t["kind"] == "would_drop" and t["task"] is None
     assert t["text"] == "teria descartado (regex: janela); acordou o árbitro: janela de prova fechada"
+
+
+def _quem(tmp_path, nome, aviso=False):
+    """--whoami falso: imprime `nome`; com `aviso`, também o aviso do fallback do me()."""
+    f = tmp_path / f"whoami-{nome}"
+    extra = 'echo "aviso: sessão sem CP_SESSION_NAME válido" >&2\n' if aviso else ""
+    f.write_text(f'#!/bin/sh\n[ "$1" = "--whoami" ] || exit 9\n{extra}echo "{nome}"\n')
+    f.chmod(0o755)
+    return str(f)
+
+
+def test_auto_grava_o_remetente_do_recado(env, tmp_path):
+    d, log, e = env
+    init(e, tmp_path, flags=("--auto",))
+    run({**e, "ORQ_WHOAMI": _quem(tmp_path, "w-t4")}, "notify", "[decisao] T4: pode?")
+    run({**e, "ORQ_WHOAMI": _quem(tmp_path, "w-t4")}, "notify", "--alarm", "[vigia] x parado")
+    run({**e, "ORQ_WHOAMI": _quem(tmp_path, "cli")}, "notify", "[decisao] T4: e agora?")
+    run({**e, "ORQ_WHOAMI": _quem(tmp_path, "outra", aviso=True)}, "notify", "[decisao] T4: e isto?")
+    a, b, c, x = linha_do_tempo(d)
+    assert (a["from"], b["from"], c["from"], x["from"]) == ("w-t4", "vigia", None, None)
+    assert sent(log)[0] == "arb [decisao] T4: pode?"
+
+
+def test_linha_do_orquestrador_nao_leva_from(env, tmp_path):
+    d, _, e = env
+    init(e, tmp_path, flags=("--auto",))
+    _orq_mod().timeline(d, "advance", "T1 fechada → integração verde", 1)
+    assert "from" not in linha_do_tempo(d)[0]
+
+
+def test_entrega_em_execucao_auto_vira_linha_do_tempo(env, tmp_path):
+    d, _, e = env
+    init(e, tmp_path, flags=("--auto",))
+    (d / "advance.log").mkdir()   # sem passada do advance em segundo plano (molde de test_orq_advance.py)
+    run(e, "event", "task_inicio", "--task", "4", "--titulo", "t", "--executor", "ex", "--par", "rev")
+    run(e, "event", "entrega", "--task", "4", "--rodada", "2", "--commit", "3b799e6665ba59f7801a11e5836d9f5f62772c46")
+    # O spawn_advance que falha grava outra linha depois: procurar pela frase, nunca por [-1].
+    assert {"kind": "advance", "task": 4, "text": "T4 entregou a rodada 2 · 3b799e6"}.items() <= next(
+        l for l in linha_do_tempo(d) if l["text"].startswith("T4 entregou")).items()
+
+
+def test_jev_grava_as_probabilidades_da_escolha(env, tmp_path, jev_server):
+    d, _, e = env
+    init(e, tmp_path)
+    jev_server["resp"] = {**_answers("act", 0.94), "kind": {"choice": "act",
+                          "probabilities": {"act": 0.94, "nothing": 0.06}}}
+    run(_jev_env(e, jev_server, "shadow"), "notify", "preciso da tela, posso usar?")
+    r = json.loads((d / "jev-shadow.jsonl").read_text())
+    assert r["probs"] == {"act": 0.94, "nothing": 0.06} and r["p"] == 0.0
+
+
+def test_ids_da_sessao_pelo_sidecar(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    fake = tmp_path / "bin"   # o tmux do fallback nunca enxerga as sessões reais da máquina
+    fake.mkdir()
+    (fake / "tmux").write_text("#!/bin/sh\nexit 1\n")
+    (fake / "tmux").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake}{os.pathsep}{os.environ['PATH']}")
+    side = tmp_path / ".hangar" / "claude-headless"
+    side.mkdir(parents=True)
+    (side / "w-t4.json").write_text(json.dumps({"name": "w-t4", "provider": "claude",
+        "session_id": "de3d45d5-a9c1-436b-b324-607f23b74058", "config_dir": "/home/x/.claude-200-01"}))
+    cx = tmp_path / ".hangar" / "codex-sessions"
+    cx.mkdir(parents=True)
+    (cx / "w-arbiter.json").write_text(json.dumps({"name": "w-arbiter", "provider": "codex",
+        "thread_id": "01a0efc7-25ef-7ee0-b078-1d31dc2c7c7d", "codex_home": "/home/x/.codex-j", "rollout_path": ""}))
+    d = tmp_path / "run"
+    d.mkdir()
+    m = _orq_mod()
+    m._record_session(d, "w-t4", "executor", 4)
+    m._record_session(d, "w-arbiter", "arbitro", None)
+    m._record_session(d, "sumiu", "revisor", 4)   # sem sidecar nem pane: grava o nome, ids nulos
+    a, b, c = [json.loads(l) for l in (d / "sessions.jsonl").read_text().splitlines()]
+    assert (a["provider"], a["session_id"], a["config_dir"], a["role"], a["task"]) == (
+        "claude", "de3d45d5-a9c1-436b-b324-607f23b74058", "/home/x/.claude-200-01", "executor", 4)
+    assert (b["provider"], b["thread_id"], b["codex_home"]) == ("codex", "01a0efc7-25ef-7ee0-b078-1d31dc2c7c7d", "/home/x/.codex-j")
+    assert c["name"] == "sumiu" and c["session_id"] is None
 
 
 def test_auto_regex_ligada_descarta_com_texto_inteiro(env, tmp_path):

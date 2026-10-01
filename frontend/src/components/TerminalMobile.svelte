@@ -19,8 +19,9 @@
   import type { FitAddon } from '@xterm/addon-fit';
   import * as m from '../paraglide/messages';
   import { untrack } from 'svelte';
-  import { closeShortcutTerminal } from '@hangar/core';
+  import { closeShortcutTerminal, closeHangarTerminal } from '@hangar/core';
   import { shortcutTerminals, shortcutTerminalsOf, refreshShortcutTerminals } from '../lib/shortcutTerminals.svelte';
+  import { hangarOf, liveTerminals, takeHangarTab } from '../lib/hangarTerminals.svelte';
 
   interface Props {
     open: boolean;
@@ -33,9 +34,13 @@
 
   // Alvo do cano: '' = a sessao; senao o id do terminal de atalho (um socket so, troca = reconecta).
   let alvoAtalho = $state('');
+  // O alvo é um terminal No Hangar (sem sessão dona) e não um atalho da sessão.
+  let hangarTarget = $state(false);
   let scErro = $state<string | null>(null);
   const scKey = $derived(`${getActiveId() ?? ''}::${sessionName}`);
   const scLista = $derived(shortcutTerminalsOf(scKey));
+  const hgServerId = $derived(scKey.split('::')[0] ?? '');
+  const hangarList = $derived(hangarOf(hgServerId));
 
   $effect(() => {
     const key = scKey;
@@ -44,14 +49,32 @@
     refreshShortcutTerminals(key).catch((e) => { scErro = e instanceof Error ? e.message : String(e); });
   });
   // Atalho recem-clicado vai pra frente; aba que sumiu cai na sessao (ou no primeiro atalho).
+  // Pedido de aba No Hangar (chip, tile, pergunta) tambem chega aqui; terminal que ja nao existe
+  // descarta o pedido.
   $effect(() => {
     const pedido = shortcutTerminals.focus[scKey];
+    const hangarRequest = liveTerminals.panelRequest[hgServerId];
     const ids = scLista.map((t) => t.id);
+    const hangarIds = hangarList.map((t) => t.id);
     if (!open) return;
     untrack(() => {
-      if (pedido && ids.includes(pedido)) { alvoAtalho = pedido; delete shortcutTerminals.focus[scKey]; return; }
-      if (alvoAtalho && !ids.includes(alvoAtalho)) alvoAtalho = headless ? (ids[0] ?? '') : '';
-      else if (!alvoAtalho && headless && ids.length) alvoAtalho = ids[0];
+      if (hangarRequest) {
+        takeHangarTab(hgServerId);
+        if (hangarIds.includes(hangarRequest)) { alvoAtalho = hangarRequest; hangarTarget = true; return; }
+      }
+      if (pedido && ids.includes(pedido)) {
+        alvoAtalho = pedido; hangarTarget = false; delete shortcutTerminals.focus[scKey]; return;
+      }
+      const known = hangarTarget ? hangarIds : ids;
+      if (alvoAtalho && !known.includes(alvoAtalho)) {
+        hangarTarget = false;
+        alvoAtalho = headless ? (ids[0] ?? '') : '';
+      }
+      // Sem pane nao ha aba da sessao: cai no primeiro terminal que existe.
+      if (!alvoAtalho && headless) {
+        if (ids.length) alvoAtalho = ids[0];
+        else if (hangarIds.length) { alvoAtalho = hangarIds[0]; hangarTarget = true; }
+      }
     });
   });
   async function fecharAtalho(id: string) {
@@ -61,6 +84,14 @@
     try { await closeShortcutTerminal(srv, sessionName, id); }
     catch (e) { scErro = m.term_atalho_erro_fechar({ msg: e instanceof Error ? e.message : String(e) }); }
     await refreshShortcutTerminals(scKey).catch(() => {});
+  }
+
+  async function stopHangar(id: string) {
+    const srv = servidorAtivo();
+    if (!srv) { scErro = m.servidor_nao_existe(); return; }
+    scErro = null;
+    try { await closeHangarTerminal(srv, id); }
+    catch (e) { scErro = m.term_atalho_erro_fechar({ msg: e instanceof Error ? e.message : String(e) }); }
   }
 
   let host = $state<HTMLDivElement | null>(null);
@@ -155,7 +186,7 @@
 
   $effect(() => {
     const alvo = sessionName;
-    const atalho = alvoAtalho;
+    const atalho = alvoAtalho, isHangar = hangarTarget;
     void geracao;
     if (!open || !host) return;
     // Sem pane e sem terminal de atalho escolhido nao ha o que anexar.
@@ -209,7 +240,7 @@
       mo = new MutationObserver(() => { t.options.theme = temaDe(hostEl); });
       mo.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
 
-      sock = new TermSocket(termUrlForServer(srv, alvo, t.cols, t.rows, atalho ? { shortcut: atalho } : undefined), {
+      sock = new TermSocket(termUrlForServer(srv, alvo, t.cols, t.rows, atalho ? (isHangar ? { hangar: atalho } : { shortcut: atalho }) : undefined), {
         data: (b) => { t.write(b); agendarBuscaDeUrl(); },
         open: () => { if (vivo) pronto = true; },
         // `vivo`, nao incondicional: o close() dispara onclose ASSINCRONO, e sem a guarda o "caiu"
@@ -376,16 +407,16 @@
       </div>
     </header>
 
-    {#if scLista.length > 0 || headless}
+    {#if scLista.length > 0 || hangarList.length > 0 || headless}
       <div class="tx-abas" role="tablist">
         {#if !headless}
           <button class="tx-aba" class:sel={!alvoAtalho} role="tab" aria-selected={!alvoAtalho}
-                  onclick={() => (alvoAtalho = '')}>{sessionName}</button>
+                  onclick={() => { alvoAtalho = ''; hangarTarget = false; }}>{sessionName}</button>
         {/if}
         {#each scLista as t (t.id)}
-          <span class="tx-aba" class:sel={alvoAtalho === t.id} class:morto={!t.alive}>
-            <button class="tx-aba-rotulo" role="tab" aria-selected={alvoAtalho === t.id}
-                    onclick={() => (alvoAtalho = t.id)}>
+          <span class="tx-aba" class:sel={!hangarTarget && alvoAtalho === t.id} class:morto={!t.alive}>
+            <button class="tx-aba-rotulo" role="tab" aria-selected={!hangarTarget && alvoAtalho === t.id}
+                    onclick={() => { alvoAtalho = t.id; hangarTarget = false; }}>
               {t.label}{#if !t.alive}<span class="tx-aba-saida">{t.exit_code == null
                 ? m.term_atalho_encerrado() : m.term_atalho_saiu({ codigo: t.exit_code })}</span>{/if}
             </button>
@@ -393,7 +424,23 @@
                     aria-label={m.term_atalho_fechar({ label: t.label })}>✕</button>
           </span>
         {/each}
-        {#if headless && scLista.length === 0}
+        {#if hangarList.length}
+          <span class="tx-grupo" aria-hidden="true">{m.term_grupo_hangar()}</span>
+          {#each hangarList as t (t.id)}
+            {@const sel = hangarTarget && alvoAtalho === t.id}
+            <span class="tx-aba" class:sel class:morto={!t.alive}>
+              <button class="tx-aba-rotulo" role="tab" aria-selected={sel}
+                      onclick={() => { alvoAtalho = t.id; hangarTarget = true; }}>
+                <span class="tx-hg-ponto" class:pergunta={t.alive && t.question} class:morto={!t.alive}></span>
+                {t.label}{#if !t.alive}<span class="tx-aba-saida">{t.exit_code == null
+                  ? m.term_atalho_encerrado() : m.term_atalho_saiu({ codigo: t.exit_code })}</span>{/if}
+              </button>
+              <button class="tx-aba-x" onclick={() => stopHangar(t.id)}
+                      aria-label={m.term_hangar_parar({ label: t.label })}>✕</button>
+            </span>
+          {/each}
+        {/if}
+        {#if headless && scLista.length === 0 && hangarList.length === 0}
           <span class="tx-aba-vazio" role="status">{m.term_atalho_vazio()}</span>
         {/if}
       </div>
@@ -498,6 +545,11 @@
     min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .tx-aba-saida { margin-left: var(--space-1); color: var(--text-muted); }
   .tx-aba-x { border: 0; background: transparent; color: var(--text-muted); min-width: 28px; min-height: 28px; }
+  .tx-grupo { align-self: center; margin: 0 2px 0 6px; padding-left: 8px; border-left: 1px solid var(--border-default);
+    font-size: 10px; letter-spacing: 0.06em; color: var(--text-muted); }
+  .tx-hg-ponto { display: inline-block; width: 6px; height: 6px; margin-right: 6px; border-radius: 50%; background: var(--success); }
+  .tx-hg-ponto.pergunta { background: var(--warning); }
+  .tx-hg-ponto.morto { background: var(--text-muted); }
   .tx-aba-vazio { font-size: var(--text-xs); color: var(--text-muted); padding: var(--space-1) 0; }
   .tx-caiu {
     flex-shrink: 0; display: flex; align-items: center; justify-content: space-between; gap: var(--space-2);

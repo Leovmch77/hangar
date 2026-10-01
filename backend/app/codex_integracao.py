@@ -321,6 +321,32 @@ class IntegracaoCodex:
         path = self.raiz / "estado.json"
         gravar(path, json_bytes(registro), ler(path))
 
+    async def _run_phase(self, name: str, registry: dict, action, *, force: bool = False) -> None:
+        current = await asyncio.to_thread(self._phase_fingerprints, registry=registry, only=name)
+        previous = registry.setdefault('phases', {}).get(name, {})
+        if not force and previous.get('fingerprint') == current[name]:
+            self._estado['erros'].extend(previous.get('errors', []))
+            self._estado['avisos'].extend(previous.get('warnings', []))
+            if name == 'plugins':
+                self._plugins_confirmados = set(previous.get('confirmed', []))
+                self._estado['plugins'] = previous.get('plugins', [])
+                self._estado['proxima_atualizacao'] = previous.get('next_update')
+            return
+        registry['phases'].pop(name, None)
+        sources = await asyncio.to_thread(self._phase_fingerprints, fontes=True, registry=registry, only=name)
+        errors, warnings = len(self._estado['erros']), len(self._estado['avisos'])
+        await action()
+        final_sources = await asyncio.to_thread(self._phase_fingerprints, fontes=True, registry=registry, only=name)
+        if sources[name] == final_sources[name]:
+            final = await asyncio.to_thread(self._phase_fingerprints, registry=registry, only=name)
+            result = {'fingerprint': final[name], 'attempted_at': time.time(),
+                      'errors': [serializar(e) for e in self._estado['erros'][errors:]],
+                      'warnings': [serializar(e) for e in self._estado['avisos'][warnings:]]}
+            if name == 'plugins':
+                result.update(confirmed=sorted(self._plugins_confirmados), plugins=self._estado['plugins'],
+                              next_update=self._estado['proxima_atualizacao'])
+            registry['phases'][name] = result
+
     def _normalizar(self, data: dict, wrapper: tuple[str, str] | None = None) -> dict:
         python, script = wrapper or (sys.executable, str(_REPO / "scripts" / "codex-hook-allow.py"))
         return normalizar_hooks(data, python, Path(script), windows=os.name == "nt")
@@ -346,7 +372,7 @@ class IntegracaoCodex:
     def _confianca(self) -> None:
         self._estado["confianca_pendente"] = True
         aviso = msg("aviso_hooks_alterados")
-        if aviso not in self._estado["avisos"]:
+        if not any(serializar(item).get('codigo') == aviso.codigo for item in self._estado['avisos']):
             self._estado["avisos"].append(aviso)
 
     async def reconciliar(self, motivo: str = "manual", forcar: bool = False) -> dict:
@@ -377,21 +403,34 @@ class IntegracaoCodex:
             settings = json_obj(self.home / ".claude" / "settings.json")
             desejados = _plugins_desejados(settings)
             self._passo(2, msg("etapa_instrucoes"))
-            await self._mutacao(self._instrucoes)
-            await self._mutacao(self._migrar_ponte_antiga)
-            await self._mutacao(self._hooks, {}, registro)
+            async def instructions():
+                await self._mutacao(self._instrucoes, forcar)
+                await self._mutacao(self._migrar_ponte_antiga)
+                await self._mutacao(self._hooks, {}, registro)
+            await self._run_phase('instructions', registro, instructions, force=forcar)
             async with self.nativo(self.home, self.codex_home, self.binario) as codex:
-                await self._config(codex, {}, {})
                 self._passo(3, msg("etapa_importando"))
-                await self._plugins(codex, desejados, registro, forcar)
+                now = time.time()
+                attempted = max(registro.get('marketplaces_em', 0), registro.get('marketplaces_tentativa_em', 0))
+                retry_plugins = bool(registro.get('marketplaces_pendentes') or registro.get('plugins_pendentes'))
+                previous_plugins = registro.get('phases', {}).get('plugins', {})
+                if previous_plugins.get('errors'):
+                    retry_plugins = True
+                    attempted = previous_plugins.get('attempted_at', attempted)
+                plugins_due = now < attempted or now - attempted >= (_RETENTATIVA if retry_plugins else _INTERVALO)
+                await self._run_phase('plugins', registro,
+                                      lambda: self._plugins(codex, desejados, registro, forcar),
+                                      force=forcar or plugins_due)
                 self._passo(4, msg("etapa_fragmentos"))
-                await self._fragmentos(codex, settings, registro)
-                # DEPOIS da importação: é ela que reescreve os comandos pra `<codex>/hooks/` e
-                # decide o que copiar. Antes dela não há o que materializar.
-                await self._mutacao(self._hooks_arquivos)
+                async def fragments():
+                    await self._config(codex, {}, {})
+                    await self._fragmentos(codex, settings, registro)
+                    await self._mutacao(self._hooks_arquivos)
+                await self._run_phase('fragments', registro, fragments, force=forcar or memoria_ligada())
                 self._checkpoint(registro)
                 self._passo(5, msg("etapa_skills"))
-                await self._mutacao(self._skills, registro)
+                await self._run_phase('skills', registro, lambda: self._mutacao(self._skills, registro),
+                                      force=forcar or plugins_due)
                 self._checkpoint(registro)
                 await self._conferir_confianca(codex)
             self._estado["estado"] = "parcial" if self._estado["erros"] else "ok"
@@ -419,7 +458,7 @@ class IntegracaoCodex:
                 # Fonte que mudou no meio da rodada não vira assinatura: a próxima abertura relê.
                 try:
                     registro["fingerprint"] = (self.fingerprint() if fonte_inicial == self.fingerprint(fontes=True) else None)
-                except OSError:
+                except (OSError, ValueError):
                     registro["fingerprint"] = None
                 try:
                     path = self.raiz / "estado.json"
@@ -430,8 +469,8 @@ class IntegracaoCodex:
                 await lock.__aexit__(None, None, None)
         return self.status()
 
-    def _instrucoes(self) -> None:
-        preparar_instrucoes(self.home, self.codex_home)
+    def _instrucoes(self, force: bool = False) -> None:
+        preparar_instrucoes(self.home, self.codex_home, force=force)
         alvo = self.codex_home / 'AGENTS.md'
         if alvo.is_file() and not alvo.is_symlink():
             transformar(alvo, lambda raw: remover_instrucao_de_leitura(raw.decode()).encode(), self.backups)
@@ -451,7 +490,7 @@ class IntegracaoCodex:
             else:
                 self._estado["confianca_pendente"] = False
                 self._estado["avisos"] = [a for a in self._estado["avisos"]
-                                          if getattr(a, "codigo", None) != "aviso_hooks_alterados"]
+                                          if serializar(a).get('codigo') != "aviso_hooks_alterados"]
         except CodexNativoErro:
             self._estado["avisos"].append(msg("aviso_confianca_indisponivel"))
 
@@ -943,43 +982,93 @@ class IntegracaoCodex:
         registro["skills"] = manifesto
         self._estado["avisos"].extend(avisos)
 
-    def fingerprint(self, *, fontes: bool = False) -> str:
-        h = hashlib.sha256()
-        h.update(b"instrucoes-nativas-v1-ecc-keep-v1-marketplace-skills-v1")
-        h.update(_HOOK_IMPORT_POLICY)
-        caminhos = [self.home / ".claude" / "settings.json", self.home / ".claude.json"]
-        caminhos.append(self.home / ".claude/ecc-slim-keep.txt")
-        caminhos.extend(self.home / ".claude" / nome for nome in ("CLAUDE.md", "CLAUDE.MD"))
+    def _phase_fingerprints(self, *, fontes: bool = False, registry: dict | None = None,
+                            only: str | None = None) -> dict[str, str]:
+        from app import skill_bridge
+        from app.codex_instrucoes import _importado
+        registry = json_obj(self.raiz / 'estado.json') if registry is None else registry
+        settings = json_obj(self.home / '.claude/settings.json')
+        config = _toml(self.codex_home / 'config.toml')
+        paths = {name: set() for name in ('instructions', 'plugins', 'fragments', 'skills')}
+        values = {
+            'instructions': {'projects': sorted(config.get('projects', {}))},
+            'plugins': {'enabled': sorted(_plugins_desejados(settings))},
+            'fragments': {'hooks': settings.get('hooks', {}), 'env': settings.get('env', {}),
+                          'mcp': json_obj(self.home / '.claude.json').get('mcpServers', {}),
+                          'memory': memoria_ligada()},
+            'skills': {},
+        }
+        instruction_sources = {self.home / '.claude' / name for name in ('CLAUDE.md', 'CLAUDE.MD')}
         for path in (self.codex_home / ".hangar-instrucoes").glob('*.json'):
             dados = json_obj(path)
-            caminhos.extend([path, Path(dados['fonte']), Path(dados['alvo'])])
+            instruction_sources.add(Path(dados['fonte']))
+            if not fontes:
+                paths['instructions'].update((path, Path(dados['alvo'])))
+        pending = list(instruction_sources) if only in (None, 'instructions') else []
+        visited = set()
+        while pending:
+            path = pending.pop()
+            paths['instructions'].add(path)
+            if not path.is_file() or path.resolve() in visited:
+                continue
+            visited.add(path.resolve())
+            for line in path.read_text(encoding='utf-8').splitlines():
+                imported = _importado(line, path.parent)
+                if imported is not None and imported.resolve() not in visited:
+                    instruction_sources.add(imported)
+                    pending.append(imported)
+        paths['plugins'].update(self.home / '.claude/plugins' / name
+                                for name in ('installed_plugins.json', 'known_marketplaces.json'))
+        trees = {
+            'fragments': {self.home / '.claude' / name for name in ('commands', 'agents', 'hooks')},
+            'skills': {self.home / '.claude/skills', self.home / '.agents/skills', _REPO / 'skills'},
+        }
+        if only in (None, 'skills'):
+            trees['skills'].update(path.resolve() for path in skill_bridge._varrer_fontes(self.home).values())
+        paths['skills'].add(self.home / '.claude/ecc-slim-keep.txt')
         if not fontes:
-            caminhos.extend([self.codex_home / "hooks.json", self.codex_home / "AGENTS.md",
-                             self.codex_home / "config.toml", self.codex_home / "plugins" / "installed_plugins.json"])
-            caminhos.append(_REPO / "scripts/codex-hook-json.py")
-            caminhos.append(self.codex_home / ".hangar-hooks/codex-hook-json.py")
-        caminhos.extend([self.home / ".claude/plugins/installed_plugins.json",
-                         self.home / ".claude/plugins/known_marketplaces.json"])
-        from app import skill_bridge
-        roots = {self.home / ".claude/commands", self.home / ".claude/agents"}
-        roots.update(p.resolve() for p in skill_bridge._varrer_fontes(self.home).values())
-        roots.update({self.home / ".claude/skills", self.home / ".agents/skills", _REPO / "skills"})
-        for raiz in sorted(roots):
-            caminhos.append(raiz)
-            def falhou(exc):
-                if not isinstance(exc, FileNotFoundError):
-                    raise exc
-            for atual, dirs, nomes in os.walk(raiz, onerror=falhou):
-                dirs[:] = [d for d in dirs if d not in ("__pycache__", ".git")]
-                nomes = [n for n in nomes if not n.endswith(".pyc")]
-                caminhos.extend(Path(atual) / nome for nome in [*dirs, *nomes])
-        for path in sorted(caminhos):
-            try:
-                st = path.stat()
-                h.update(f"{path}:{st.st_size}:{st.st_mtime_ns}".encode())
-            except FileNotFoundError:
-                h.update(f"{path}:ausente".encode())
-        return h.hexdigest()
+            paths['instructions'].add(self.codex_home / 'AGENTS.md')
+            values['instructions'].update(limit=config.get('project_doc_max_bytes'),
+                                          fallbacks=config.get('project_doc_fallback_filenames'))
+            values['plugins'].update(plugins=config.get('plugins', {}), markets=config.get('marketplaces', {}))
+            paths['plugins'].add(self.codex_home / 'plugins/installed_plugins.json')
+            paths['plugins'].update(Path(item['path']) for item in registry.get('plugins', {}).values()
+                                    if isinstance(item, dict) and isinstance(item.get('path'), str))
+            values['fragments'].update(agents=config.get('agents', {}), mcp_target=config.get('mcp_servers', {}),
+                                       env_target=config.get('shell_environment_policy', {}).get('set', {}),
+                                       features=config.get('features', {}), limit=limite_instrucoes(self.codex_home),
+                                       fallbacks=config.get('project_doc_fallback_filenames'))
+            paths['fragments'].update((self.codex_home / 'hooks.json', _REPO / 'scripts/codex-hook-json.py',
+                                       self.codex_home / '.hangar-hooks/codex-hook-json.py'))
+            paths['fragments'].update(Path(path) for path in registry.get('artefatos', {}))
+            paths['skills'].update(Path(path) for path in registry.get('skills', {}) if Path(path).is_absolute())
+        for name, roots in trees.items():
+            if only is not None and name != only:
+                continue
+            for root in sorted(roots):
+                paths[name].add(root)
+                def failed(exc):
+                    if not isinstance(exc, FileNotFoundError):
+                        raise exc
+                for directory, dirs, files in os.walk(root, onerror=failed):
+                    dirs[:] = [d for d in dirs if d not in ('__pycache__', '.git', '.hangar-uploads')]
+                    paths[name].update(Path(directory) / entry for entry in (*dirs, *files) if not entry.endswith('.pyc'))
+        result = {}
+        for name, items in paths.items():
+            if only is not None and name != only:
+                continue
+            digest = hashlib.sha256(b'codex-phases-v1' + _HOOK_IMPORT_POLICY + json_bytes(values[name]))
+            for path in sorted(items):
+                try:
+                    stat = path.stat()
+                    digest.update(f'{path}:{stat.st_size}:{stat.st_mtime_ns}'.encode())
+                except FileNotFoundError:
+                    digest.update(f'{path}:ausente'.encode())
+            result[name] = digest.hexdigest()
+        return result
+
+    def fingerprint(self, *, fontes: bool = False) -> str:
+        return hash_bytes(json_bytes(self._phase_fingerprints(fontes=fontes)))
 
     def precisa_reconciliar(self) -> bool:
         """Cache por conteúdo: fonte igual à da última rodada, marketplace dentro do prazo e sem
@@ -990,7 +1079,10 @@ class IntegracaoCodex:
             registro = json_obj(self.raiz / "estado.json")
         except (OSError, ValueError):
             return True
-        if registro.get("fingerprint") != self.fingerprint():
+        try:
+            if registro.get("fingerprint") != self.fingerprint():
+                return True
+        except (OSError, ValueError):
             return True
         status = registro.get("status", {})
         proxima = status.get("proxima_atualizacao")

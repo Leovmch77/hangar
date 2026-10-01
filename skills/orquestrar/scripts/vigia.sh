@@ -136,7 +136,6 @@ fi
 export CP_VIGIA_LOG
 
 parados=0
-avisos=0
 PSEQ=()          # straight stalled readings, per session (the per-session notice uses this)
 NUDGE=()         # already nudged this session in this stall? (1 push per stall, not per notice)
 RHASH=()         # hash of the last seen command, per session (loop detector)
@@ -161,14 +160,17 @@ if [ -n "$ORQD" ]; then
   SESSOES=("$ARB")
 fi
 ARMADO="${ORQD:+$ORQD/.vigia-armado}"
+# Cada árbitro recebe a prova do canal, inclusive o sucessor no ciclo da troca.
+prove_channel() {
+  avisar_arb "[vigia] ARMED over: ${SESSOES[*]} (window ${LIMITE}min${DIARIO:+, journal $DIARIO}). This message IS the channel's proof — if you read it, the alarms arrive. Do not reply." || return
+  [ -z "$ARMADO" ] || printf '%s' "$ARB" > "$ARMADO"
+}
 if [ -n "$ARMADO" ] && [ "$(cat "$ARMADO" 2>/dev/null)" = "$ARB" ]; then
-  # The channel to this arbiter was already proven in this run: one proof per arbiter, not per arming.
   echo "[vigia] re-armed over: ${SESSOES[*]} (channel to $ARB already proven)"
   rc_arm=0
 else
-  avisar_arb "[vigia] ARMED over: ${SESSOES[*]} (window ${LIMITE}min${DIARIO:+, journal $DIARIO}). This message IS the channel's proof — if you read it, the alarms arrive. Do not reply."
+  prove_channel
   rc_arm=$?
-  [ "$rc_arm" -eq 0 ] && [ -n "$ARMADO" ] && printf '%s' "$ARB" > "$ARMADO"
 fi
 if [ "$rc_arm" -ne 0 ]; then
   echo "[vigia] FAILED to prove the channel with '$ARB' (rc=$rc_arm, stderr in $CP_VIGIA_LOG). I am NOT armed." >&2
@@ -358,13 +360,13 @@ deliver_alarm() {  # $1 = key (one per alarm), $2 = message, $3 = label for the 
 # Tasks' owners (`orq team`) in the arbiter's group. Every act is journaled, so the panel's feed
 # shows it; three failures on one session → an [aviso] and the watchdog stops trying it.
 CLOSE_IDLE_S=${CP_VIGIA_CLOSE_IDLE_S:-600}   # the smoke test lowers it; nobody else passes it
-declare -A IDLE_CYCLES=() FAILS=() GAVE_UP=()
+declare -A IDLE_CYCLES=() FAILS=() GAVE_UP=() CLOSE_GROUP_WARNED=() CLOSE_IDENTITY_WARNED=()
 warned_no_group=
 GROUP=$(mktemp /tmp/vigia-group-XXXXXX.py)
 LIVESUB=$(mktemp /tmp/vigia-livesub-XXXXXX.py)
 trap 'rm -f "$LEITOR" "$CURLRC" "$LOOPDET" "$CTXDET" "$ORQF" "$BEAT" "$GROUP" "$LIVESUB"' EXIT
 cat > "$LIVESUB" <<'PY'
-import json, re, sys, time
+import importlib.util, json, re, sys, time
 from datetime import datetime
 from pathlib import Path
 # stdin = /api/sessions, argv[1] = session. Prints "live" when its transcript has a background
@@ -376,7 +378,37 @@ from pathlib import Path
 # ponytail: only the current transcript is read, so a launch made before a /clear is not seen.
 FRESH_S = 1800
 name = sys.argv[1]
-s = next((s for s in json.load(sys.stdin) if s.get("name") == name), {})
+sessions = json.load(sys.stdin)
+s = next((s for s in sessions if s.get("name") == name), {})
+gid, identities = None, {}
+for line in (Path(sys.argv[2]) / "eventos.jsonl").read_text(encoding="utf-8").splitlines():
+    try:
+        event = json.loads(line)
+    except ValueError:
+        continue
+    if not isinstance(event, dict):
+        continue
+    if event.get("tipo") == "execucao_inicio":
+        gid = event.get("gid")
+    elif event.get("tipo") == "task_inicio" and isinstance(event.get("session_identities"), dict):
+        identities.update(event["session_identities"])
+    elif event.get("tipo") == "sessao_trocada" and event.get("session_identity"):
+        identities[event.get("para")] = event["session_identity"]
+# O nome nos eventos não autoriza fechar quem foi movido para outro trabalho.
+if s.get("pair_gid"):
+    if not gid:
+        gid = next((item.get("pair_gid") for item in sessions if item.get("name") == sys.argv[3]), None)
+    if s["pair_gid"] != gid:
+        print(f"other-group {s['pair_gid']}")
+        sys.exit()
+if identities.get(name):
+    path = Path(sys.argv[4]).resolve().parents[3] / "backend" / "app" / "orq_identity.py"
+    spec = importlib.util.spec_from_file_location("orq_session_identity", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    if mod.identity(name) != identities[name]:
+        print("other-identity")
+        sys.exit()
 jsonl = s.get("jsonl")
 if not jsonl and s.get("provider", "claude") != "claude":
     print("none")   # Pi/Kimi/omp: no Agent tool, and no jsonl in the listing
@@ -479,9 +511,25 @@ close_finished() {
     [ $(( ${IDLE_CYCLES[$name]} * INTERVALO )) -ge "$CLOSE_IDLE_S" ] || continue
     IDLE_CYCLES[$name]=0
     # A background subagent leaves its parent `idle`; closing would kill it.
-    if ! live=$(printf '%s' "$lista" | python3 "$LIVESUB" "$name" 2>&1); then
+    if ! live=$(printf '%s' "$lista" | python3 "$LIVESUB" "$name" "$ORQD" "$ARB" "$ORQ" 2>&1); then
       attempt_failed "close:$name" "close failed: $name: subagents check: $(tail -n1 <<< "$live" | cut -c1-200)"; continue
     fi
+    if [[ $live == other-group\ * ]]; then
+      if [ "${CLOSE_GROUP_WARNED[$name]:-}" != "$live" ]; then
+        CLOSE_GROUP_WARNED[$name]=$live
+        orq_warn "closure skipped: $name is in another group (${live#other-group }); the watchdog does not close another work's session"
+      fi
+      continue
+    fi
+    unset 'CLOSE_GROUP_WARNED[$name]'
+    if [ "$live" = other-identity ]; then
+      if [ -z "${CLOSE_IDENTITY_WARNED[$name]:-}" ]; then
+        CLOSE_IDENTITY_WARNED[$name]=1
+        orq_warn "closure skipped: $name no longer has the session identity recorded by this run"
+      fi
+      continue
+    fi
+    unset 'CLOSE_IDENTITY_WARNED[$name]'
     [ "$live" = none ] || continue
     # ?by=<arbiter>: the backend spares the arbiter the exit notice of a close it did not ask for.
     if err=$(curl -sS -f --config "$CURLRC" -X DELETE "$BASE/api/sessions/$name?by=$ARB" 2>&1 >/dev/null); then
@@ -523,6 +571,11 @@ join_team() {
   done <<< "$out"
 }
 
+# Com -e: all | owners | none indicam quem está coberto por espera registrada.
+coverage() {
+  [ -n "$ORQD" ] && ORQ_DIR="$ORQD" python3 "$ORQ" ball --coverage 2>>"$CP_VIGIA_LOG"
+}
+
 # Interval between readings. It exists as a variable only so the smoke test can run the whole
 # loop in seconds; in normal use nobody passes it.
 INTERVALO=${CP_VIGIA_INTERVALO:-60}
@@ -540,6 +593,9 @@ for i in $(seq 1 "$CICLOS"); do
         SESSOES=("${nova[@]}")
         PSEQ=(); NUDGE=(); RHASH=(); RSEQ=(); RAVISO=(); ALARM_FAILS=(); avisou_travado=; avisou_cota=
         echo "[vigia] watching: ${SESSOES[*]}"
+      fi
+      if [ -n "$ARMADO" ] && [ "$(cat "$ARMADO" 2>/dev/null)" != "$ARB" ]; then
+        prove_channel || echo "[vigia] FAILED to prove the channel with the new arbiter '$ARB'; retrying next cycle" >&2
       fi
     else
       echo "[vigia] orq ball failed; keeping: ${SESSOES[*]}" >&2
@@ -699,7 +755,8 @@ for i in $(seq 1 "$CICLOS"); do
       if [ "$mtime_ev" -lt "$mtime" ]; then parado=$eventos; mtime=$mtime_ev; fi
     fi
     idade=$(( $(date +%s) - mtime ))
-    if [ "$idade" -ge 3600 ] && [ "$diario_avisado" -lt "$(( idade / 3600 ))" ]; then
+    # Com todos os responsáveis em espera, nenhum evento é devido antes do prazo.
+    if [ "$idade" -ge 3600 ] && [ "$diario_avisado" -lt "$(( idade / 3600 ))" ] && [ "$(coverage)" != all ]; then
       if deliver_alarm trail "[vigia] The trail ($parado) has gone $(( idade / 60 ))min without a write, with the group active. The journal and eventos.jsonl are written AT the event — if reports/merges happened in this window, they are outside the trail." "trail alarm"; then
         diario_avisado=$(( idade / 3600 ))
         echo "[vigia] trail stalled for $(( idade / 60 ))min ($parado)"
@@ -737,16 +794,12 @@ for i in $(seq 1 "$CICLOS"); do
   if [ "$quieto" -eq 1 ]; then parados=$((parados+1)); else parados=0; fi
 
   if [ "$parados" -ge "$LIMITE" ]; then
+    case "$(coverage)" in all|owners) parados=0 ;; esac   # aguardam um prazo registrado
+  fi
+  if [ "$parados" -ge "$LIMITE" ]; then
     msg="[vigia] Nobody has had the ball for ${LIMITE} min: $resumo (minute $i). If you fell (an API error), this is what brings you back. Check whether someone delivered while you were out — a report stuck in the queue and a stalled verdict are the two ways the pipeline locks up with nobody noticing."
     echo "$msg"
-    if deliver_alarm nobody "$msg" "nobody-has-the-ball alarm"; then
-      avisos=$((avisos+1))
-      parados=0
-      if [ "$avisos" -ge 20 ]; then
-        echo "20 warnings without unblocking; shutting the watchdog down"
-        exit 0
-      fi
-    fi
+    deliver_alarm nobody "$msg" "nobody-has-the-ball alarm" && parados=0
   fi
 done
 echo "1440min over; last state: ${resumo:-}"

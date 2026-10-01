@@ -28,6 +28,14 @@ import type { State, ChatEvent, SessionInfo } from './types';
 import { intlLocale } from './i18n';
 import * as m from './paraglide/messages';
 
+export function formatElapsed(seconds: number | null | undefined): string {
+  if (seconds == null || !Number.isFinite(seconds) || seconds < 0) return '—';
+  const whole = Math.floor(seconds);
+  if (whole < 60) return m.orq_elapsed_seconds({ n: whole });
+  if (whole < 3600) return m.orq_elapsed_minutes({ n: Math.floor(whole / 60) });
+  return m.orq_elapsed_hours({ h: Math.floor(whole / 3600), m: Math.floor((whole % 3600) / 60) });
+}
+
 // Nome humano do provider da sessão. Existe porque cada tela escrevia o próprio ternário
 // (`provider === 'codex' ? 'Codex' : 'Claude'`) e, quando o Pi entrou como terceiro provider, toda
 // sessão Pi aparecia rotulada como "Claude". Um lugar só -> um provider novo não volta a mentir.
@@ -337,16 +345,18 @@ export function parseCanal(text: string): { canal: string; text: string } | null
   return { canal: m[1], text: text.slice(m[0].length) };
 }
 
-// Anexos de arquivo por CAMINHO citado na conversa (sua ou minha msg). v1 = só "preview-worthy"
-// (mídia + html + pdf); texto/código fora de proposito pra nao virar ruido (caminho de codigo
-// aparece toda hora na prosa). O backend so serve o que esta no transcript (consentido).
-export type FileKind = 'image' | 'video' | 'audio' | 'html' | 'pdf';
+// Código permanece no editor; mídia e documentos citados ganham anexo na conversa.
+// O backend só serve arquivos que aparecem no transcript.
+export type FileKind = 'image' | 'video' | 'audio' | 'html' | 'pdf' | 'document';
 const EXT_KIND: Record<string, FileKind> = {
   png: 'image', jpg: 'image', jpeg: 'image', gif: 'image', webp: 'image', svg: 'image', avif: 'image', bmp: 'image',
   mp4: 'video', mov: 'video', webm: 'video', mkv: 'video', m4v: 'video', avi: 'video',
   mp3: 'audio', wav: 'audio', m4a: 'audio', ogg: 'audio', flac: 'audio', aac: 'audio',
   html: 'html', htm: 'html',
   pdf: 'pdf',
+  doc: 'document', docx: 'document', odt: 'document', rtf: 'document',
+  xls: 'document', xlsx: 'document', ods: 'document',
+  ppt: 'document', pptx: 'document', odp: 'document',
 };
 const _EXTS = Object.keys(EXT_KIND).join('|');
 // Caminho ABSOLUTO (/ ou ~/) — lazy ate a 1a extensao conhecida, seguida de fim/espaco/delimitador
@@ -358,18 +368,18 @@ const _EXTS = Object.keys(EXT_KIND).join('|');
 // O lookahead casa o do `_ABS_RE` de arquivosCitados.ts de proposito: quem decide "vira chip de
 // codigo" e quem decide "vira miniatura" precisa enxergar o MESMO fim de caminho. Divergiu uma vez
 // e "salvei em /tmp/x.png." (ponto final colado) perdeu os dois — nem chip nem imagem.
-const _PATH_RE = new RegExp(`(?<![\\w.~:/*])(~?/[^\\n\`]*?\\.(${_EXTS}))(?=$|\\.(?=\\s|$)|[\\s)\\]"'\`,;:*])`, 'gi');
+const _PATH_RE = new RegExp(`(?<![\\w.~:/*])(~?/[^\\n\`]*?\\.(${_EXTS}))(?=$|\\.(?=\\s|$)|[\\s)\\]"'\`,;:*>])`, 'gi');
 // Caminho RELATIVO com DIRETORIO (./x.png, ../a/x.png, sub/dir/x.png) — jeito comum do Claude citar
 // arquivo que criou no cwd. Exige >=1 segmento "dir/" -> NAO casa nome puro "x.png" (ruido de prosa).
 // O backend resolve contra o cwd da sessao. Lookbehind tira word/`/`/~/./:/- (nao pega pedaco de path
 // absoluto nem de dentro de URL).
-const _REL_RE = new RegExp(`(?<![\\w/~.:*-])((?:[\\w.-]+/)+[\\w.-]+\\.(${_EXTS}))(?=$|\\.(?=\\s|$)|[\\s)\\]"'\`,;:*])`, 'gi');
+const _REL_RE = new RegExp(`(?<![\\w/~.:*-])((?:[\\w.-]+/)+[\\w.-]+\\.(${_EXTS}))(?=$|\\.(?=\\s|$)|[\\s)\\]"'\`,;:*>])`, 'gi');
 
 export interface FileRef { path: string; name: string; kind: FileKind; url?: string; }
 
 // Tipo de um arquivo pelo NOME (sem passar pelo parser de prosa acima) — a galeria de anexos já
-// recebe a lista pronta do backend e só precisa saber o que dá pra desenhar. null = extensão sem
-// preview (zip, txt, ...): quem chama mostra um chip genérico. Mesma tabela EXT_KIND do chat, pra
+// recebe a lista pronta do backend e só precisa classificar o anexo. null = extensão fora da lista
+// (zip, txt, ...): quem chama mostra um chip genérico. Mesma tabela EXT_KIND do chat, pra
 // um .webp não ser imagem numa tela e "arquivo" na outra.
 export function fileKind(filename: string): FileKind | null {
   const ext = filename.split('.').pop()?.toLowerCase() ?? '';

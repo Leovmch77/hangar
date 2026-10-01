@@ -70,6 +70,7 @@ impl Controls {
 // Modo conhecido aparece traduzido; valor que o backend inventar depois aparece cru.
 fn shown(ctl: Ctl, value: String) -> String {
     match ctl {
+        Ctl::Effort => effort_label(&value),
         Ctl::Mode if CLAUDE_MODES.contains(&value.as_str()) => tr(&format!("mode_{value}")),
         Ctl::Mode if value == "default" => tr("codex_mode_default"),
         _ => value,
@@ -79,6 +80,14 @@ fn shown(ctl: Ctl, value: String) -> String {
 fn capitalized(label: &str) -> String {
     let mut chars = label.chars();
     chars.next().map(|first| first.to_uppercase().chain(chars).collect()).unwrap_or_default()
+}
+
+fn effort_label(label: &str) -> String {
+    let value = label.to_ascii_lowercase();
+    match value.as_str() {
+        "low" | "medium" | "high" | "xhigh" | "max" | "ultra" => tr_shared(&format!("reasoning_level_{value}"), &[]),
+        _ => capitalized(label),
+    }
 }
 
 /// A linha de status do Claude escreve o modelo colado ("Opus5.5·1M"); na pílula ele sai com espaços ("Opus 5.5 · 1M").
@@ -522,7 +531,7 @@ impl Hangar {
             let name = tr(&format!("ctl_{}", ctl.key()));
             let value = self.ctl_label(ctl).map(|v| shown(ctl, v)).map(|v| if claude && ctl == Ctl::Model { spaced(&v) } else { v });
             if paired && ctl == Ctl::Model {
-                let effort = self.ctl_label(Ctl::Effort).map(|e| capitalized(&e));
+                let effort = self.ctl_label(Ctl::Effort).map(|e| effort_label(&e));
                 let applying = match busy { Some(Ctl::Model) => Some(name.clone()), Some(Ctl::Effort) => Some(tr("ctl_effort")), _ => None };
                 let text = applying.map(|what| tr("ctl_applying").replace("{what}", &what)).or(value.clone()).unwrap_or_else(|| name.clone());
                 let aria = [Some(format!("{name}: {text}")), effort.clone().map(|e| format!("{}: {e}", tr("ctl_effort")))]
@@ -625,7 +634,7 @@ impl Hangar {
         let (current, lit, enabled) = (c.current, lit && c.enabled, c.enabled);
         // Id pelo pedido que a linha faria: filtrando, a mesma linha muda de posição e não herda o estado de outra.
         let id = SharedString::from(format!("ctl-choice-{}", c.body));
-        let shown = if ctl == Ctl::Effort { capitalized(&c.label) } else { c.label };
+        let shown = if ctl == Ctl::Effort { effort_label(&c.label) } else { c.label };
         let name = div().truncate().text_sm().text_color(theme::text()).child(shown);
         let text = if inline {
             div().flex_1().min_w_0().flex().items_center().gap(px(6.)).child(name.flex_none().max_w_full().font_weight(FontWeight::MEDIUM))
@@ -659,8 +668,10 @@ impl Hangar {
             .child(div().id("ctl-efforts").role(Role::Group).aria_label(tr("new_chat_reasoning")).px(px(4.)).pb(px(2.)).flex().flex_wrap().gap(px(4.))
                 .children(levels.into_iter().map(|c| {
                     let on = if live { c.label.eq_ignore_ascii_case(now.trim()) } else { c.current };
-                    let label = capitalized(&c.label);
-                    Button::new(SharedString::from(format!("ctl-effort-{}", c.label))).ghost().xsmall().selected(on).label(label)
+                    let label = effort_label(&c.label);
+                    Button::new(SharedString::from(format!("ctl-effort-{}", c.label))).small().h(px(32.)).px_3().selected(on).label(label)
+                        .when(on, |button| button.primary().icon(IconName::Check))
+                        .when(!on, |button| button.outline())
                         .disabled(busy || !c.enabled)
                         .on_click(cx.listener(move |this, _, _, cx| {
                             if on { return; }

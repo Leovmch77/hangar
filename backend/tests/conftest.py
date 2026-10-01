@@ -161,11 +161,12 @@ def _sem_padrao_do_jev_da_maquina():
     # Mesmo defeito do fixture acima, outro interruptor: `jev_padrao` é config da MÁQUINA, e com ele
     # ligado todo teste que confere os argumentos do `registry.create` ganhava um `jev=True` que a
     # asserção não espera. Passava no CI (sem config gravada) e falhava em quem usa o recurso.
-    # Só esta chave é forçada — o resto do `get` continua o de verdade, e quem testa o padrão ligado
+    # `headless_default` (nasce true) entra junto: o create passaria `headless=True` aos mocks.
+    # Só estas chaves são forçadas — o resto do `get` continua o de verdade, e quem testa o padrão ligado
     # troca o `get` inteiro no próprio teste.
     from app import runtime_config
     original = runtime_config.get
-    runtime_config.get = lambda campo: False if campo == "jev_padrao" else original(campo)
+    runtime_config.get = lambda campo: False if campo in ("jev_padrao", "headless_default") else original(campo)
     try:
         yield
     finally:
@@ -279,15 +280,29 @@ def _reset_sem_agente_avisadas():
 
 
 @pytest.fixture(autouse=True)
+def _reset_pane_frames():
+    # Quadro compartilhado de estado/prévia é por nome: sem limpar, o dublê de um teste responderia
+    # no seguinte que usa o mesmo nome dentro da idade máxima.
+    from app import state
+    state._frames.clear()
+    state._frames_inflight.clear()
+    yield
+    state._frames.clear()
+    state._frames_inflight.clear()
+
+
+@pytest.fixture(autouse=True)
 def _reset_list_snapshot():
     # Endpoints quentes (history/workflows) resolvem a sessao via snapshot com TTL de
     # registry.list() (api._list_snap). Os testes patcham app.api.registry.list POR teste (context
     # manager) -> sem este reset, o snapshot preenchido num teste vazaria pro seguinte dentro do
     # TTL de 1s (fakes de um teste respondendo no outro).
-    from app import api
+    from app import api, sse
     api._list_snap["snap"] = None
+    sse._list_refresher.latest = None
     yield
     api._list_snap["snap"] = None
+    sse._list_refresher.latest = None
 
 
 @pytest.fixture(autouse=True)

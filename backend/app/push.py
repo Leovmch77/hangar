@@ -10,7 +10,7 @@ from datetime import datetime, time as dtime
 from pathlib import Path
 from threading import Lock, Timer
 
-from app import atomico
+from app import atomico, guest_users
 from app.config import settings
 
 _log = logging.getLogger("hangar.push")
@@ -152,8 +152,14 @@ def _in_quiet_hours(now: dtime | None = None) -> bool:
 def _suppressed(session_name: str) -> bool:
     """True se este push deve ser silenciado: sessao mutada (mute por sessao) OU dentro da janela de
     quiet hours (global). Consultado no topo de TODO notify_* (awaiting/finished/dead/stalled/limited)
-    -> quiet hours silencia TODOS os pushes; mutar uma sessao silencia TODOS os tipos de push dela."""
-    return is_muted(session_name) or _in_quiet_hours()
+    -> quiet hours silencia TODOS os pushes; mutar uma sessao silencia TODOS os tipos de push dela.
+    Sessao de convidado que escondeu as dele do dono tambem nao notifica."""
+    return is_muted(session_name) or _in_quiet_hours() or _hidden_guest(session_name)
+
+
+def _hidden_guest(session_name: str) -> bool:
+    owner = guest_users.owner_of(session_name)
+    return owner is not None and not owner.owner_sees
 
 
 def add_subscription(subscription: dict, label: str, server_id: str, locale: str = "pt") -> None:

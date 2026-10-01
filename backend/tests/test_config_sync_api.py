@@ -88,6 +88,37 @@ def test_bundle_then_apply_on_other_machine(cli, ana, tmp_path, monkeypatch):
     assert r.json()["items"]["claude_env"]["changed"] == ["JIRA_TOKEN"]
 
 
+def _lines(r) -> list[dict]:
+    assert r.headers["content-type"].startswith("application/x-ndjson")
+    return [json.loads(line) for line in r.text.splitlines()]
+
+
+def test_manifest_stream_reports_each_item_then_done(cli, ana):
+    events = _lines(cli.get("/api/config-sync/manifest?stream=1", headers=AUTH))
+    reads = [e for e in events if e["type"] == "progress" and e["entry"] is None]
+    assert [e["item"] for e in reads] == list(config_sync.ITEMS)
+    assert reads[0]["total"] == len(config_sync.ITEMS)
+    assert any(e["type"] == "progress" and e["entry"] for e in events)
+    assert events[-1]["type"] == "done"
+    assert "JIRA_TOKEN" in events[-1]["result"]["items"]["claude_env"]["hashes"]
+
+
+def test_apply_stream_reports_item_then_done(cli, ana, tmp_path, monkeypatch):
+    raw = cli.get("/api/config-sync/bundle?items=claude_env", headers=AUTH).content
+    _be(monkeypatch, make_machine(tmp_path, "bia", full=False))
+
+    async def no_after(ctx, items):
+        return None
+
+    monkeypatch.setattr(config_sync, "_after_apply", no_after)
+    r = cli.post("/api/config-sync/apply?items=claude_env&stream=1", headers=GZIP, content=raw)
+    events = _lines(r)
+    assert events[0] == {"type": "progress", "phase": "apply", "item": "claude_env",
+                         "entry": None, "index": 0, "total": 1}
+    assert events[-1]["type"] == "done"
+    assert events[-1]["result"]["items"]["claude_env"]["changed"] == ["JIRA_TOKEN"]
+
+
 def test_bundle_is_not_gzipped_again_nor_cached(cli, ana):
     # Maior que o minimum_size do GZipMiddleware, para ele ter motivo de comprimir.
     (Path(ana.home) / "Projetos/skills/minha/blob.bin").write_bytes(os.urandom(4096))

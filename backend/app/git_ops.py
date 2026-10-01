@@ -146,14 +146,65 @@ def _parse_status_branch(out: str) -> dict | None:
 # poll do painel é 2s. Ele é chamado de dentro de um asyncio.to_thread (ver registry), então
 # requests concorrentes podem bater no dict de threads distintas -> pior caso um fork redundante,
 # sem corrupção (benigno por idempotência, mesma classe do _status_cache de classe). Sem lock.
-# cache: cwd -> (ts, result, ttl). O ttl e gravado por-entrada: SO o timeout (GitError) ganha o TTL
+# cache: cwd -> (ts, result, ttl, fingerprint). O ttl e gravado por-entrada: SO o timeout (GitError) ganha o TTL
 # longo (30s); resultado bom E falha transitoria (returncode!=0, ex. index.lock) ficam no TTL curto.
-_summary_cache: dict[str, tuple[float, dict | None, float]] = {}
+_summary_cache: dict[str, tuple[float, dict | None, float, tuple | None]] = {}
 _SUMMARY_TTL = 3.0          # resultado bom OU falha transitoria: curto (volta rapido quando normaliza)
 _SUMMARY_TTL_NEG = 30.0     # SO timeout de git (repo enorme/NFS): longo — nao re-forka o lento a cada poll
 _SUMMARY_TIMEOUT = 2.0      # proprio (nao o _TIMEOUT global de 20s de push/log): um git status pendurado
                             # num NFS/repo enorme custava 20s de tick re-pago a cada poll -> watchdog
                             # de 25s dos clientes estourava em massa. 2s corta a cauda cedo.
+# Passado o TTL, resultado bom so e refeito se index/HEAD/ref mudaram ou apos este teto. Edicao de
+# arquivo rastreado ou untracked novo nao toca o .git: o teto e o atraso maximo desses casos.
+_SUMMARY_MAX_AGE = 10.0
+
+
+def _repo_fingerprint(cwd: str) -> tuple | None:
+    """mtimes de index, HEAD, ref atual, packed-refs e FETCH_HEAD; None quando nao da pra ler (sem
+    atalho). Worktree ligada: index/HEAD na gitdir dela, refs e FETCH_HEAD na pasta comum."""
+    try:
+        gitdir = os.path.join(cwd, ".git")
+        if os.path.isfile(gitdir):
+            with open(gitdir, encoding="utf-8", errors="replace") as f:
+                ponteiro = f.read().strip()
+            if not ponteiro.startswith("gitdir: "):
+                return None
+            gitdir = os.path.join(cwd, ponteiro[len("gitdir: "):])
+        common = gitdir
+        try:
+            with open(os.path.join(gitdir, "commondir"), encoding="utf-8") as f:
+                common = os.path.join(gitdir, f.read().strip())
+        except FileNotFoundError:
+            pass
+        head_path = os.path.join(gitdir, "HEAD")
+        with open(head_path, encoding="utf-8", errors="replace") as f:
+            head = f.read().strip()
+        # FETCH_HEAD: fetch muda ahead/behind sem tocar em index nem na ref local.
+        paths = [os.path.join(gitdir, "index"), head_path, os.path.join(common, "packed-refs"),
+                 os.path.join(common, "FETCH_HEAD")]
+        if head.startswith("ref: "):
+            paths.append(os.path.join(common, head[len("ref: "):]))
+        fp = []
+        for p in paths:
+            try:
+                fp.append(os.stat(p).st_mtime_ns)
+            except FileNotFoundError:
+                fp.append(0)
+        return (head, *fp)
+    except OSError:
+        return None
+
+
+def _cache_hit(cache: dict, cwd: str, now: float) -> tuple[bool, dict | None]:
+    """(acertou, resultado). Falha e timeout nao usam o atalho: seguem o TTL."""
+    hit = cache.get(cwd)
+    if hit and now - hit[0] < hit[2]:
+        return True, hit[1]
+    if hit and hit[1] is not None and now - hit[0] < _SUMMARY_MAX_AGE:
+        fp = _repo_fingerprint(cwd)
+        if fp is not None and hit[3] == fp:
+            return True, hit[1]
+    return False, None
 
 
 def git_summary(cwd: str | None) -> dict | None:
@@ -164,9 +215,9 @@ def git_summary(cwd: str | None) -> dict | None:
     if not cwd or not os.path.exists(os.path.join(cwd, ".git")):
         return None
     now = time.monotonic()
-    hit = _summary_cache.get(cwd)
-    if hit and now - hit[0] < hit[2]:
-        return hit[1]
+    ok, cached = _cache_hit(_summary_cache, cwd, now)
+    if ok:
+        return cached
     ttl = _SUMMARY_TTL
     try:
         p = _run(cwd, "status", "--porcelain=v1", "--branch", timeout=_SUMMARY_TIMEOUT)
@@ -188,7 +239,8 @@ def git_summary(cwd: str | None) -> dict | None:
             _log.warning("git_summary returncode=%s em %s (badge omitido, retry em %ss)",
                          p.returncode, cwd, _SUMMARY_TTL)
             result = None
-    _summary_cache[cwd] = (now, result, ttl)
+    # Fingerprint DEPOIS do git: o `git status` regrava o index, e o de antes nunca casaria.
+    _summary_cache[cwd] = (now, result, ttl, _repo_fingerprint(cwd))
     return result
 
 
@@ -210,7 +262,7 @@ def _parse_numstat(out: str) -> dict:
 
 # Cache proprio, mesmo contrato do _summary_cache acima (por cwd, TTL curto/longo por-entrada,
 # sem lock): o diff roda por sessao na decoracao da listagem junto do git_summary e o poll e 2s.
-_diffstat_cache: dict[str, tuple[float, dict | None, float]] = {}
+_diffstat_cache: dict[str, tuple[float, dict | None, float, tuple | None]] = {}
 
 
 def git_diffstat(cwd: str | None) -> dict | None:
@@ -223,9 +275,9 @@ def git_diffstat(cwd: str | None) -> dict | None:
     if not cwd or not os.path.exists(os.path.join(cwd, ".git")):
         return None
     now = time.monotonic()
-    hit = _diffstat_cache.get(cwd)
-    if hit and now - hit[0] < hit[2]:
-        return hit[1]
+    ok, cached = _cache_hit(_diffstat_cache, cwd, now)
+    if ok:
+        return cached
     ttl = _SUMMARY_TTL
     try:
         p = _run(cwd, "diff", "--numstat", "HEAD", timeout=_SUMMARY_TIMEOUT)
@@ -248,7 +300,7 @@ def git_diffstat(cwd: str | None) -> dict | None:
             _log.warning("git_diffstat returncode=%s em %s (badge omitido, retry em %ss)",
                          p.returncode, cwd, _SUMMARY_TTL)
             result = None
-    _diffstat_cache[cwd] = (now, result, ttl)
+    _diffstat_cache[cwd] = (now, result, ttl, _repo_fingerprint(cwd))
     return result
 
 

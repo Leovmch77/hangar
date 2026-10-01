@@ -8,7 +8,7 @@ import sys
 import time
 import traceback
 from pathlib import Path
-from app import atomico, diag, plugin_bridge
+from app import atomico, diag, guest_users, plugin_bridge
 from app.adapters import CLAUDE_HEADLESS, chave_de, get_adapter
 from app.adapters.preview_push import PushPreviewSource, fonte_ferramenta, fonte_pensamento
 from app.difusor import Difusor
@@ -189,17 +189,6 @@ _list_registry = SessionRegistry()
 
 _log = logging.getLogger("hangar.sse")
 
-# Snapshot compartilhado de registry.list() pros LOOPS do SSE (jsonl_watcher de cada conexao de chat
-# + list_events): cada um re-varria o /proc inteiro + tmux no proprio ciclo -> N conexoes = N
-# varreduras completas a cada ~2s. Com TTL < poll dos consumidores, vira no maximo ~1 varredura/s no
-# total, sem atraso percebido. Endpoints request/response seguem chamando registry.list() fresco.
-# ponytail: check-then-set sem lock (dois callers no vencimento do TTL = 2 scans, igual a hoje);
-# lock de asyncio aqui arriscaria bind em event loop errado nos testes.
-_LIST_TTL = 1.0
-_list_snap: dict = {"t": 0.0, "infos": None}
-_list_lock = asyncio.Lock()
-
-
 # "Abrir o navegador embutido" vindo do AGENTE (POST /api/sessions/<nome>/nav, via CLI
 # hangar-preview open). É um MARCADOR por sessão {url, ts}, não uma fila: cada conexão SSE (a do
 # chat da sessão e a da lista) o entrega UMA vez e ele fica, até o desktop confirmar que criou o
@@ -288,19 +277,13 @@ def nav_novos(vistos: dict[str, float], name: str | None = None) -> list[tuple[s
 
 
 async def _cached_list():
-    now = time.monotonic()
-    if _list_snap["infos"] is not None and now - _list_snap["t"] < _LIST_TTL:
-        return _list_snap["infos"]
-    # Single-flight, pelo mesmo motivo do api._guardar_snap: o `await` cede o loop, entao os loops
-    # de todas as conexoes SSE erram o cache juntos e disparam um `registry.list()` cada. Com o
-    # lock, um varre e os outros aproveitam.
-    async with _list_lock:
-        if _list_snap["infos"] is not None and time.monotonic() - _list_snap["t"] < _LIST_TTL:
-            return _list_snap["infos"]
-        infos = await asyncio.to_thread(_registry.list)
-        _list_snap["infos"] = infos
-        _list_snap["t"] = time.monotonic()
-        return infos
+    # Um snapshot só no processo: o do api (`_guardar_snap`, single-flight e invalidado na criação
+    # e no rename). Dois caches eram duas varreduras de /proc + tmux por segundo pro mesmo dado.
+    from app import api  # api importa este módulo
+    snap = api._list_snap["snap"]
+    if snap is not None and time.monotonic() - snap[0] < api._LIST_TTL:
+        return snap[1]
+    return await asyncio.to_thread(api._guardar_snap)
 
 
 # Reducao ESTAVEL da statusline pro dedup da lista: modelo, contexto em baldes de 5%, ⚡5h% e 📅7d%.
@@ -395,11 +378,19 @@ def _list_sig(infos) -> str:
           # Ligar/desligar o compartilhamento não mexe em mais nada da sessão: sem isto o selo 🔗
           # não aparece nem some até outra coisa mudar a assinatura.
           getattr(i, "shared", False),
+          # O dono da sessão (convidado) é gravado depois da criação, e some ao apagar o convidado:
+          # sem isto o rótulo e a visibilidade ficam velhos até outra coisa mudar a assinatura.
+          getattr(i, "owner", None),
           # Sucessão do árbitro muda só este campo na linha do orquestrador.
           getattr(i, "orq_arbiter", None))
          for i in infos],
         ensure_ascii=False,
     )
+
+
+def _shortcuts_snapshot() -> str | None:
+    from app import shortcut_terminals
+    return json.dumps(shortcut_terminals.list_all(), ensure_ascii=False)
 
 
 class _ListRefresher:
@@ -414,9 +405,14 @@ class _ListRefresher:
     def __init__(self, poll: float = 1.5):
         self.poll = poll
         self.data: str | None = None
+        self.shortcuts_data: str | None = None
+        self._sc_task: asyncio.Task | None = None
+        self._sc_started = 0.0
+        self._sc_failing = False
         self.sig: str | None = None
         self.version = 0
         self.errored = False
+        self.latest: tuple[float, list] | None = None
         self._task: asyncio.Task | None = None
         self._refs = 0
         self._loop = None
@@ -430,22 +426,58 @@ class _ListRefresher:
             self._loop = loop
             self._cond = asyncio.Condition()
             self.data = None
+            self.shortcuts_data = None
+            self._sc_task = None
+            self._sc_failing = False
             self.sig = None
             self.version = 0
             self.errored = False
+            self.latest = None
             self._refs = 0
             # O produtor atende todas as conexões, não pertence ao primeiro assinante.
             context = contextvars.copy_context()
             context.run(diag.req_atual.set, "")
             self._task = asyncio.create_task(self._run(), context=context)
 
+    def _launch_shortcuts(self) -> None:
+        # A lista nunca espera terminal de atalho: a leitura roda ao lado da lista, no máximo uma em
+        # voo (thread não cancela; travada, só segura o valor anterior em vez de acumular threads).
+        if self._sc_task is None:
+            self._sc_task = asyncio.create_task(asyncio.to_thread(_shortcuts_snapshot))
+            self._sc_started = time.monotonic()
+        elif not self._sc_task.done() and time.monotonic() - self._sc_started > 5 and not self._sc_failing:
+            self._sc_failing = True
+            _log.warning("terminais de atalho: leitura travada; mantem a anterior")
+
+    def _harvest_shortcuts(self) -> str | None:
+        task = self._sc_task
+        if task is None or not task.done():
+            return self.shortcuts_data
+        self._sc_task = None
+        if task.cancelled():
+            return self.shortcuts_data
+        try:
+            value = task.result()
+        except Exception:
+            # Uma vez por queda, não a cada ciclo.
+            if not self._sc_failing:
+                _log.warning("terminais de atalho: leitura falhou; mantem a anterior", exc_info=True)
+            self._sc_failing = True
+            return self.shortcuts_data
+        self._sc_failing = False
+        return value
+
     async def _run(self):
         while True:
+            self._launch_shortcuts()
             try:
+                started = time.monotonic()
                 snap = [i.model_copy() for i in await _cached_list()]
                 infos = await _list_registry.list_with_state(snap)
-                data = json.dumps([i.model_dump(mode="json") for i in infos], ensure_ascii=False)
                 sig = _list_sig(infos)
+                # Serializar a lista inteira só quando vai ser publicada (a sig decide, como antes).
+                data = (json.dumps([i.model_dump(mode="json") for i in infos], ensure_ascii=False)
+                        if sig != self.sig or self.errored else None)
             except Exception:
                 # Decoracao/raspagem falhou -> MANTEM o snapshot anterior (stale > morto), nunca derruba
                 # a conexao. Loga (padrao da casa) E sinaliza 'list_error' UMA vez (na transicao) pras
@@ -473,14 +505,23 @@ class _ListRefresher:
                         self._cond.notify_all()
                 await asyncio.sleep(self.poll)
                 continue
+            # A cada tique, mesmo sem mudança na sig: o /api/sessions serve daqui campos que a sig
+            # ignora (last_activity, statusline inteira). Lista já decorada não é mais escrita.
+            # Idade conta do início do tique: lista iniciada antes de uma invalidação não vale.
+            self.latest = (started, infos)
+            shortcuts = self._harvest_shortcuts()
             # sucesso: emite se a sig mudou OU se estava em erro (pra o front LIMPAR o list_error).
-            if sig != self.sig or self.errored:
+            # `data`/`sig` só andam quando a assinatura da lista muda: gravar `data` numa mudança que
+            # é só dos terminais reemitiria `sessions` por um `last_activity` que a assinatura ignora.
+            if data is not None or shortcuts != self.shortcuts_data:
                 if self.errored:
                     diag.registrar("lista.recuperada", quantidade=len(infos))
                 async with self._cond:
-                    self.errored = False
-                    self.sig = sig
-                    self.data = data
+                    if data is not None:
+                        self.errored = False
+                        self.sig = sig
+                        self.data = data
+                    self.shortcuts_data = shortcuts
                     self.version += 1
                     self._cond.notify_all()
             await asyncio.sleep(self.poll)
@@ -495,13 +536,33 @@ class _ListRefresher:
         if self._refs <= 0 and self._task is not None:
             self._task.cancel()
             self._task = None
+            if self._sc_task is not None:
+                self._sc_task.cancel()
+                self._sc_task = None
             self._refs = 0
 
 
 _list_refresher = _ListRefresher()
 
 
-async def list_events(ping_secs: float = 8.0, only=None):
+def recent_list(max_age: float) -> list | None:
+    """Última lista decorada do refresher, se viva e com no máximo `max_age` s. Só leitura."""
+    latest = getattr(_list_refresher, "latest", None)
+    if latest is None or time.monotonic() - latest[0] > max_age or latest[0] < _list_invalidated_at:
+        return None
+    return latest[1]
+
+
+# Criação/rename: a lista do refresher ainda não tem a sessão nova; /api/sessions recalcula.
+_list_invalidated_at = 0.0
+
+
+def invalidate_recent_list() -> None:
+    global _list_invalidated_at
+    _list_invalidated_at = time.monotonic()
+
+
+async def list_events(ping_secs: float = 8.0, only=None, viewer=None):
     """SSE da LISTA de sessoes. Conexao = PRIORIDADE ABSOLUTA, zero trabalho: um reader que so LE o
     snapshot compartilhado (produzido pelo _ListRefresher unico) e emite quando a versao muda, + um
     ping em timer FIXO por conexao (incondicional). Refresher travado nao afeta a conexao — o ping
@@ -509,30 +570,54 @@ async def list_events(ping_secs: float = 8.0, only=None):
 
     `only` = conexao de convidado: ve so a sessao compartilhada, nao recebe os pedidos de navegador
     do dono (`nav`) e nao conta como app do dono aberto. Aceita o nome ou o registro do convite
-    (`.session`): renomear a sessao muda o registro, e o stream aberto tem que acompanhar."""
+    (`.session`): renomear a sessao muda o registro, e o stream aberto tem que acompanhar.
+    `viewer` = convidado com login proprio (ou None = dono): a lista passa pelo mesmo filtro da
+    rota `/api/sessions`."""
     queue: asyncio.Queue = asyncio.Queue()
     cond = _list_refresher.acquire()
     started = time.monotonic()
     diag.registrar("sse.lista_abriu")
-    if only is None:
+    if only is None and viewer is None:
         plugin_bridge.app_entrou()
 
     async def reader():
-        last_version = -1
+        last_version, last_data, last_shortcuts, was_error = -1, None, None, False
         while True:
             async with cond:
                 await cond.wait_for(lambda: _list_refresher.version != last_version)
                 last_version = _list_refresher.version
                 errored = _list_refresher.errored
                 data = _list_refresher.data
+                shortcuts = _list_refresher.shortcuts_data
             if errored:
                 await queue.put(("list_error", "{}"))   # falha do refresher — front distingue de offline
-            elif data is not None:
-                if only is not None:
-                    data = json.dumps([guest_safe(x) for x in json.loads(data)
-                                       if x.get("name") == (only if isinstance(only, str)
-                                                            else only.session)], ensure_ascii=False)
-                await queue.put(("sessions", data))
+                was_error = True
+                continue
+            if data is not None:
+                try:
+                    if only is not None:
+                        data = json.dumps([guest_safe(x) for x in json.loads(data)
+                                           if x.get("name") == (only if isinstance(only, str)
+                                                                else only.session)], ensure_ascii=False)
+                    if guest_users.has_claims() or viewer is not None:
+                        itens = await asyncio.to_thread(guest_users.filter_visible, viewer,
+                                                        json.loads(data), lambda x: x.get("name"))
+                        data = json.dumps(itens, ensure_ascii=False)
+                except Exception:
+                    # Sem isto o reader morre calado e o cliente fica com a lista congelada e só ping.
+                    _log.exception("sse: recorte da lista falhou")
+                    await queue.put(("list_error", "{}"))
+                    was_error = True
+                    continue
+                # Compara o que sairia: versão só dos terminais de atalho não reenvia `sessions`,
+                # mas renomear a sessão do convidado muda o recorte sem mudar o dado da lista.
+                if data != last_data or was_error:
+                    last_data, was_error = data, False
+                    await queue.put(("sessions", data))
+            # Terminal de atalho não entra no stream do convidado.
+            if only is None and viewer is None and shortcuts is not None and shortcuts != last_shortcuts:
+                last_shortcuts = shortcuts
+                await queue.put(("shortcut_terminals", shortcuts))
 
     async def ping_loop():
         while True:
@@ -554,7 +639,7 @@ async def list_events(ping_secs: float = 8.0, only=None):
             _log.exception("sse: nav_pump da lista morreu")
 
     tasks = [asyncio.create_task(reader()), asyncio.create_task(ping_loop())]
-    if only is None:
+    if only is None and viewer is None:
         tasks.append(asyncio.create_task(nav_pump()))
     try:
         while True:
@@ -564,7 +649,7 @@ async def list_events(ping_secs: float = 8.0, only=None):
         for t in tasks:
             t.cancel()
         _list_refresher.release()
-        if only is None:
+        if only is None and viewer is None:
             plugin_bridge.app_saiu()
         diag.registrar("sse.lista_fechou", ms=int((time.monotonic() - started) * 1000))
 

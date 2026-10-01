@@ -31,7 +31,12 @@
     jev: boolean;
     ompProfile: string;
     onEngineChange?: (engine: string) => void;
+    onModelChoice?: () => void;
     onJevChange?: () => void;
+    onHeadlessChange?: () => void;
+    executionDisabled?: boolean;
+    executionDefault?: boolean;
+    onExecutionDefault?: () => void;
     /** Entre "onde roda" e os campos de modelo (a folha põe ali o "continuar uma conversa"). */
     afterExecution?: Snippet;
     /** Depois de modelo/esforço/permissão (controle de contexto do Codex, teto e cota do papel). */
@@ -43,7 +48,7 @@
     resuming = false, allowSubagent = true, showJev = false,
     headless = $bindable(), model = $bindable(), effort = $bindable(), permission = $bindable(),
     engine = $bindable(), subagent = $bindable(), jev = $bindable(), ompProfile = $bindable(),
-    onEngineChange, onJevChange, afterExecution, afterChoices,
+    onEngineChange, onModelChoice, onJevChange, onHeadlessChange, executionDisabled = false, executionDefault = false, onExecutionDefault, afterExecution, afterChoices,
   }: Props = $props();
 
   const id = (name: string) => `${idPrefix}${name}`;
@@ -51,7 +56,7 @@
   let moreOpen = $state(false);
 
   const levels = $derived(effortLevels(provider, models, model));
-  const modes = $derived(permissionModes(provider, headless));
+  const modes = $derived(permissionModes(provider, headless && !executionDefault));
   const hasEngine = $derived(provider === 'claude' && Object.keys(engines).length > 0);
   const hasSubagent = $derived(!resuming && allowSubagent && provider === 'claude' && !engine && models.length > 0);
   const effortLabel = $derived(provider === 'pi' || provider === 'omp' ? m.criar_raciocinio() : m.composer_esforco());
@@ -61,6 +66,7 @@
     : m.criar_subagente_padrao());
 
   function pickModel(v: string) {
+    onModelChoice?.();
     // Os níveis do Codex são por modelo: um nível que o modelo novo não lista não pode ficar.
     model = v;
     if (effort && !effortLevels(provider, models, v).includes(effort)) effort = '';
@@ -72,14 +78,18 @@
   <div class="field">
     <span class="field-label" id={id('modo-exec-rotulo')}>{m.criar_modo_exec()}</span>
     <div class="modos" role="group" aria-labelledby={id('modo-exec-rotulo')}>
-      <button type="button" class="modo" class:on={!headless} aria-pressed={!headless} onclick={() => (headless = false)}>
+      {#if onExecutionDefault}
+        <button type="button" class="modo" class:on={executionDefault} aria-pressed={executionDefault}
+          disabled={executionDisabled} onclick={onExecutionDefault}>{m.criar_padrao()}</button>
+      {/if}
+      <button type="button" class="modo" class:on={!headless && !executionDefault} aria-pressed={!headless && !executionDefault} disabled={executionDisabled} onclick={() => { headless = false; onHeadlessChange?.(); }}>
         <span class="modo-radio" aria-hidden="true"></span>
         <span class="modo-nome">{m.criar_modo_exec_tmux()}</span>
         <span class="modo-resumo">{provider === 'codex' ? m.criar_modo_exec_tmux_resumo_codex() : m.criar_modo_exec_tmux_resumo()}</span>
       </button>
-      <button type="button" class="modo" class:on={headless} aria-pressed={headless} onclick={() => (headless = true)}>
+      <button type="button" class="modo" class:on={headless && !executionDefault} aria-pressed={headless && !executionDefault} disabled={executionDisabled} onclick={() => { headless = true; onHeadlessChange?.(); }}>
         <span class="modo-radio" aria-hidden="true"></span>
-        <span class="modo-nome">{m.criar_modo_exec_headless()} <span class="modo-beta">{m.comum_beta()}</span></span>
+        <span class="modo-nome">{m.criar_modo_exec_headless()}</span>
         <span class="modo-resumo">{provider === 'codex' ? m.criar_modo_exec_headless_resumo_codex() : m.criar_modo_exec_headless_resumo()}</span>
       </button>
     </div>
@@ -140,7 +150,7 @@
         <label class="field-label" for={id('effort-pick')}>{effortLabel}</label>
         <Select id={id('effort-pick')} class="field-input" ariaLabel={effortLabel} value={effort}
           opcoes={[{ value: '', label: m.criar_padrao() }, ...levels.map((n) => ({ value: n, label: n }))]}
-          onchange={(v) => (effort = v)} />
+          onchange={(v) => { onModelChoice?.(); effort = v; }} />
       </div>
     {/if}
 
@@ -189,7 +199,7 @@
             <Select id={id('subagent-pick')} class="field-input" ariaLabel={m.criar_subagente()} value={subagent}
               opcoes={[{ value: '', label: m.criar_subagente_padrao() },
                        ...models.filter((mod) => mod.id !== 'default').map((mod) => ({ value: valorModelo(mod), label: mod.name ?? mod.id }))]}
-              onchange={(v) => (subagent = v)} />
+              onchange={(v) => { onModelChoice?.(); subagent = v; }} />
             <p class="hint">{m.criar_subagente_ajuda()}</p>
           </div>
         {/if}
@@ -237,10 +247,6 @@
     border-radius: 50%; border: 1.5px solid var(--text-muted);
   }
   .modo.on .modo-radio { border-color: var(--accent); background: radial-gradient(circle, var(--accent) 0 4px, transparent 4.5px); }
-  .modo-beta {
-    font-size: 10px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase; padding: 2px 6px;
-    border-radius: var(--radius-sm); background: var(--warning, #f2b64d); color: #1c1406;
-  }
   .modo-diferenca {
     align-self: flex-start; display: inline-flex; align-items: center; gap: var(--space-1);
     padding: 2px 0; font-size: var(--text-xs); color: var(--accent);

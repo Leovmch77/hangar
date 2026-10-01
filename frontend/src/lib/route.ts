@@ -4,6 +4,8 @@ import { parseCompareIds, type CompareId } from '@hangar/core';
 export type Route =
   | { name: 'loading' }
   | { name: 'login' }
+  // Tela inicial (#/): nova conversa no celular; no desktop é a mesma coisa que a lista.
+  | { name: 'home' }
   | { name: 'sessions' }
   | { name: 'costs' }
   // Uso (#/uso): irmã da tela de custos — skills, tools, hooks e agentes mais chamados.
@@ -53,6 +55,8 @@ export function parseHash(hash: string): Route {
   // cada campo por dentro (decodificar o param inteiro de novo ia dar decode duplo).
   const compareMatch = path.match(/^\/compare\/(.+)$/);
   if (compareMatch) return { name: 'compare', ids: parseCompareIds(compareMatch[1]) };
+  if (path === '' || path === '/') return { name: 'home' };
+  if (path === '/sessions') return { name: 'sessions' };
   if (path === '/costs') return { name: 'costs' };
   if (path === '/uso') return { name: 'uso' };
   // Deep-link da busca (feature #10): #/archive/<serverId>/<project>/<sid> abre a conversa arquivada

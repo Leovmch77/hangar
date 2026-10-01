@@ -25,6 +25,7 @@ deixaria lixo de sessao que morreu fora da vista dele; e so no startup deixaria 
 longa duracao (unit systemd do usuario) acumulando para sempre. Periodica cobre os dois.
 """
 
+import json
 import logging
 import re
 import time
@@ -80,7 +81,7 @@ def _config_bases() -> list[Path]:
     # Mesmas bases dos outros leitores (statusline/hook_state): todos os config dirs das
     # contas + o base do backend.
     try:
-        return list({Path(c.path) for c in list_config_dirs()} | {_backend_config_base().resolve()})
+        return list({Path(c.path) for c in list_config_dirs(ordered=False)} | {_backend_config_base().resolve()})
     except OSError:
         return [_backend_config_base()]
 
@@ -157,6 +158,36 @@ def _podar_tmp(d: Path, agora: float) -> int:
     return n
 
 
+def _podar_active(d: Path, chaves_stem: set[str], agora: float) -> int:
+    """`.hangar-active/<boot_id>.json`: a chave e o boot_id, que difere do session_key depois de
+    resume/clear, entao quem prova vida e o `pid` gravado pelo hook. Sai so com idade >= _MIN_AGE
+    E pid gravado e morto; o registry le todos a cada tick, e o acumulo pesava ali. Sem pid nao ha
+    prova de morte, e o marcador fica."""
+    from app.procinfo import pid_vivo
+
+    if not d.is_dir():
+        return 0
+    n = 0
+    try:
+        for f in d.glob("*.json"):
+            try:
+                if f.stem in chaves_stem or agora - f.stat().st_mtime < _MIN_AGE:
+                    continue
+                try:
+                    pid = json.loads(f.read_text(encoding="utf-8")).get("pid")
+                except (ValueError, AttributeError):
+                    pid = None
+                if not isinstance(pid, int) or pid_vivo(pid):
+                    continue
+                f.unlink()
+                n += 1
+            except OSError:
+                continue
+    except OSError:
+        pass
+    return n
+
+
 def _podar(bases: list[Path], chaves_stem: set[str], chaves_nome: set[str],
            chaves_pane: set[str], agora: float) -> dict[str, int]:
     """Varre as bases e devolve {subdir: quantos apagou}. Separada de prune_sidecars para o
@@ -187,6 +218,8 @@ def _podar(bases: list[Path], chaves_stem: set[str], chaves_nome: set[str],
                     apagados[f"{d.name} (.tmp)"] = apagados.get(f"{d.name} (.tmp)", 0) + n
         except OSError:
             pass
+        apagados[".hangar-active"] = (apagados.get(".hangar-active", 0)
+                                      + _podar_active(base / ".hangar-active", chaves_stem, agora))
         if chaves_stem:
             for sub in _STEM_KEYED:
                 apagados[sub] = apagados.get(sub, 0) + _podar_dir(base / sub, chaves_stem, agora)

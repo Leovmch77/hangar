@@ -117,15 +117,16 @@ pub fn parse_marked(text: &str) -> Option<Marked> {
     Some(Marked { caption, files, image_marks })
 }
 
-const EXTS: [&str; 26] = ["png", "jpg", "jpeg", "gif", "webp", "svg", "avif", "bmp", "mp4", "mov", "webm", "mkv", "m4v", "avi",
-    "mp3", "wav", "m4a", "ogg", "flac", "aac", "html", "htm", "pdf", "tiff", "tif", "json"];
+const EXTS: [&str; 36] = ["png", "jpg", "jpeg", "gif", "webp", "svg", "avif", "bmp", "mp4", "mov", "webm", "mkv", "m4v", "avi",
+    "mp3", "wav", "m4a", "ogg", "flac", "aac", "html", "htm", "pdf", "tiff", "tif", "json",
+    "doc", "docx", "odt", "rtf", "xls", "xlsx", "ods", "ppt", "pptx", "odp"];
 
 fn ends_path(text: &str, end: usize) -> bool {
     let rest = &text[end..];
     match rest.chars().next() {
         None => true,
         Some('.') => rest[1..].chars().next().is_none_or(char::is_whitespace),
-        Some(c) => c.is_whitespace() || ")]\"'`,;:*".contains(c),
+        Some(c) => c.is_whitespace() || ")]\"'`,;:*>".contains(c),
     }
 }
 
@@ -428,6 +429,24 @@ mod tests {
         assert!(cited_paths("veja /tmp/a.óculos e ./b.çã e /x/y.ó").is_empty());
         // Imagem em markdown: o caminho local vira anexo; a URL fica para `image_urls`.
         assert_eq!(cited_paths("![a](/tmp/a.png) ![](out/b.gif) ![r](https://h/r.png)"), vec!["/tmp/a.png", "out/b.gif"]);
+    }
+
+    #[test]
+    fn cited_documents_use_save_actions_and_preserve_code_links() {
+        for ext in ["pdf", "doc", "docx", "odt", "rtf", "xls", "xlsx", "ods", "ppt", "pptx", "odp"] {
+            let absolute = format!("/tmp/relatório final.{ext}");
+            let relative = format!("out/report.{ext}");
+            let home = format!("~/out/report.{}", ext.to_uppercase());
+            let source = format!("[Documento](<{absolute}>) `{relative}` {home}");
+            assert_eq!(cited_paths(&source), [absolute, relative, home]);
+            assert_eq!(citation_markdown(&source), source);
+            assert_eq!(openable(&format!("report.{ext}")), ext == "pdf");
+            let ignored = format!("https://h/report.{ext} [remoto](https://h/report.{ext}) report.{ext}");
+            assert!(cited_paths(&ignored).is_empty());
+        }
+        let code = "[fonte](src/main.rs) `/tmp/config.py:12`";
+        assert!(cited_paths(code).is_empty());
+        assert_eq!(citation_markdown(code).matches("hangar-file:").count(), 2);
     }
 
     #[test]

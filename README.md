@@ -243,7 +243,7 @@ hangar-send --list
 hangar-send --pair <session-name> "coordinate the demo task"
 hangar-send --pair <session-name> --substituir-tarefa "new task"
 hangar-send --group [--tmux] "milestone for the whole group"
-hangar-send --new <session-name> [cwd] [--provider claude|codex] [--headless] [--model <id>]
+hangar-send --new <session-name> [cwd] [--provider claude|codex] [--headless|--terminal] [--model <id>]
 ```
 
 Pairing is local to the machine. The app shows the shared contract and conversation, while each session remains independently controlled.

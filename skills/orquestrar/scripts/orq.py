@@ -16,6 +16,7 @@ import http.client
 import importlib.util
 import io
 import json
+import math
 import os
 import re
 import shlex
@@ -30,6 +31,7 @@ import urllib.request
 from collections import Counter
 from contextlib import redirect_stdout
 from datetime import datetime
+from functools import cache
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -50,7 +52,7 @@ MERGE_TIMEOUT_S = CHECK_TIMEOUT_S
 TIMELINE_KINDS = ("advance", "woke", "dropped", "would_drop", "failed", "notice")
 EVENT_FIELDS_INT = ("task", "rodada")
 EVENT_FIELDS_STR = ("commit", "resultado", "sessao", "motivo", "titulo", "executor", "par",
-                    "de", "para", "plano", "branch", "gid", "fase", "patch")
+                    "de", "para", "plano", "branch", "gid", "fase", "patch", "ate")
 JEV_URL = "https://api.typesafe.ai/v1/systemone"
 JEV_MODEL = "jev-1.13.0"
 # The same Jev served by OpenRouter, for a `sk-or-` key with no endpoint configured.
@@ -157,14 +159,19 @@ def is_auto(d: Path) -> bool:
     return isinstance(cfg, dict) and cfg.get("auto") is True
 
 
-def timeline(d: Path, kind: str, text: str, task: int | None = None) -> None:
+def timeline(d: Path, kind: str, text: str, task: int | None = None, *, notify: bool = False,
+             sender: str | None = None) -> None:
     """One pt-BR line of what the orchestrator did, shown by Hangar's orq row. Auto runs only;
     the file name carries the run so two runs never share an SSE id."""
     if kind not in TIMELINE_KINDS:
         raise ValueError(f"unknown timeline kind: {kind}")
     if not is_auto(d):
         return
-    line = json.dumps({"ts": now(), "kind": kind, "text": text, "task": task}, ensure_ascii=False)
+    row = {"ts": now(), "kind": kind, "text": text, "task": task}
+    if notify:
+        # A chave diz ao Hangar que a linha veio do `notify`, mesmo com remetente desconhecido.
+        row["from"] = sender
+    line = json.dumps(row, ensure_ascii=False)
     try:
         with (d / f"timeline-{d.resolve().name}.jsonl").open("a", encoding="utf-8") as f:
             f.write(line + "\n")
@@ -173,11 +180,86 @@ def timeline(d: Path, kind: str, text: str, task: int | None = None) -> None:
         print(f"orq: timeline not written: {e}", file=sys.stderr)
 
 
+def _sender(alarm: bool) -> str | None:
+    """Quem chamou `orq notify`, pela identidade que assina o recado; na dúvida, ninguém."""
+    if alarm:
+        return "vigia"
+    try:
+        r = subprocess.run([os.environ.get("ORQ_WHOAMI", "hangar-send"), "--whoami"],
+                           capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    name = r.stdout.strip() if r.returncode == 0 else ""
+    # "cli" e o "aviso:" são o fallback do me(): o nome pode ser o de outra sessão.
+    return name if name and name != "cli" and "aviso:" not in r.stderr else None
+
+
+def _session_ids(name: str) -> dict:
+    """Como achar o transcript de uma sessão do time depois que ela fecha: ids, nunca o caminho
+    (o rollout do Codex só nasce no primeiro turno)."""
+    ids = dict.fromkeys(("provider", "session_id", "config_dir", "thread_id", "codex_home"))
+    for sub, dflt in (("claude-headless", "claude"), ("codex-sessions", "codex")):
+        f = Path.home() / ".hangar" / sub / f"{name}.json"
+        if f.exists():
+            sc = json.loads(f.read_text(encoding="utf-8"))
+            return {**ids, **{k: sc.get(k) for k in ids}, "provider": sc.get("provider") or dflt}
+    r = subprocess.run(["tmux", "display", "-p", "-t", f"={name}:", "#{pane_start_command}"],
+                       capture_output=True, text=True, timeout=5)
+    m = re.search(r"--session-id[ =]([0-9a-fA-F-]{36})", r.stdout) if r.returncode == 0 else None
+    if m:
+        env = subprocess.run(["tmux", "show-environment", "-t", f"={name}", "CLAUDE_CONFIG_DIR"],
+                             capture_output=True, text=True, timeout=5).stdout.strip()
+        ids.update(provider="claude", session_id=m.group(1),
+                   config_dir=env.split("=", 1)[1] if env.startswith("CLAUDE_CONFIG_DIR=") else None)
+    return ids
+
+
+def _record_session(d: Path, name: str, role: str | None, task: int | None) -> None:
+    """Uma linha em sessions.jsonl; é visão do Hangar e nunca custa o passo de quem chama."""
+    try:
+        row = {"ts": now(), "name": name, "role": role, "task": task, **_session_ids(name)}
+        with (d / "sessions.jsonl").open("a", encoding="utf-8") as f:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    except Exception as e:  # noqa: BLE001 — a view of the run: never breaks the step that called it
+        _journal_or_warn(d, f"sessions.jsonl not written for {name}: {e}")
+
+
 def _validator():
     spec = importlib.util.spec_from_file_location("orq_valida_eventos", HERE / "orq-valida-eventos.py")
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
+
+
+@cache
+def _identity_reader():
+    path = HERE.parents[2] / "backend" / "app" / "orq_identity.py"
+    spec = importlib.util.spec_from_file_location("orq_session_identity", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def session_identity(name: str) -> str:
+    if "::" in name:
+        raise OrqError("cannot capture another server's session locally")
+    identity = _identity_reader().identity(name)
+    if not isinstance(identity, str) or not identity:
+        raise OrqError("session identity is empty")
+    return identity
+
+
+def capture_identities(d: Path, names) -> dict[str, str]:
+    captured = {}
+    for name in dict.fromkeys(names):
+        if not name or name == SUBAGENT:
+            continue
+        try:
+            captured[name] = session_identity(name)
+        except (OrqError, OSError, ValueError, ImportError) as e:
+            # Falta de identidade não autoriza associar outro trabalho pelo nome.
+            journal_append(d, f"session identity unavailable: {name}: {type(e).__name__}")
+    return captured
 
 
 def events(d: Path) -> list[dict]:
@@ -202,8 +284,16 @@ def event_append(d: Path, ev: dict) -> dict:
         errors = _validator()._valida_linhas("event", [json.dumps(ev, ensure_ascii=False)])
     if errors:
         raise OrqError(buf.getvalue().strip())
+    if ev.get("tipo") == "task_inicio":
+        ev["session_identities"] = capture_identities(d, (ev.get("executor"), ev.get("par")))
+    elif ev.get("tipo") == "sessao_trocada":
+        captured = capture_identities(d, (ev.get("para"),))
+        if captured.get(ev.get("para")):
+            ev["session_identity"] = captured[ev["para"]]
     with (d / "eventos.jsonl").open("a", encoding="utf-8") as f:
         f.write(json.dumps(ev, ensure_ascii=False) + "\n")
+    if ev.get("tipo") in {"task_inicio", "execucao_fim"}:
+        snapshot_plan(d)
     return ev
 
 
@@ -234,6 +324,14 @@ def _closed_after(closed_ts, ev_ts) -> bool:
         return True
 
 
+def _until_future(deadline) -> bool:
+    """Prazo inválido não dispensa ninguém: o responsável continua com a bola."""
+    try:
+        return datetime.fromisoformat(deadline) > datetime.now().astimezone()
+    except (TypeError, ValueError):
+        return False
+
+
 def state(d: Path) -> dict:
     """One pass over the events: who executes and reviews each Task (after swaps), who has the
     ball, who the arbiter is now, which Tasks are open, whether the run has ended, and which swaps
@@ -243,14 +341,27 @@ def state(d: Path) -> dict:
     last: dict[int, dict] = {}
     ended = False
     replaced: list[tuple[str, str]] = []
+    waits: dict[str, dict] = {}   # sessão → última espera ainda não encerrada por evento
     for ev in events(d):
         t = ev.get("tipo")
+        if t == "espera":
+            waits[ev.get("sessao")] = ev
+            continue
+        # Só evento registrado encerra a espera antes do prazo; `orq log` não é evento.
+        waits.pop(ev.get("sessao"), None)
+        if isinstance(ev.get("task"), int):
+            # task_inicio nomeia suas sessões antes de registrá-las em roles.
+            r = ev if t == "task_inicio" else roles.get(ev["task"], {})
+            for who, w in list(waits.items()):
+                if w.get("task") == ev["task"] or (w.get("task") is None and who in (r.get("executor"), r.get("par"))):
+                    del waits[who]
         if t == "task_inicio":
             roles[ev.get("task")] = {"executor": ev.get("executor"), "par": ev.get("par")}
             last[ev.get("task")] = ev
         elif t in ("entrega", "veredito"):
             last[ev.get("task")] = ev
         elif t == "sessao_trocada":
+            waits.pop(ev.get("de"), None)
             was_arbiter = ev.get("de") == arbiter
             if was_arbiter:
                 arbiter = ev.get("para")
@@ -268,10 +379,11 @@ def state(d: Path) -> dict:
             # Work may resume in the same file without a new execucao_inicio; only Tasks
             # touched after the end can own the ball.
             last.clear()
+            waits.clear()
             ended = True
         if t != "execucao_fim" and isinstance(ev.get("task"), int):
             ended = False
-    ball: list[str] = []
+    owners: list[str] = []
     open_tasks: list[int] = []
     closed = _closed(d)
     for task, ev in last.items():
@@ -286,10 +398,14 @@ def state(d: Path) -> dict:
             owner = None  # the arbiter's, and he is always watched
         else:
             owner = r.get("executor")
-        if owner and owner not in ball:
-            ball.append(owner)
-    return {"roles": roles, "ball": ball, "arbiter": arbiter, "open": open_tasks, "ended": ended,
-            "replaced": replaced}
+        if owner and owner not in owners:
+            owners.append(owner)
+    # Fechar a Task encerra sua cobertura, mesmo sem evento de integração.
+    waiting = {who for who, w in waits.items()
+               if _until_future(w.get("ate")) and (w.get("task") is None or w["task"] in open_tasks)}
+    ball = [o for o in owners if o not in waiting]
+    return {"roles": roles, "ball": ball, "owners": owners, "waiting": waiting, "arbiter": arbiter,
+            "open": open_tasks, "ended": ended, "replaced": replaced}
 
 
 def done(d: Path) -> list[tuple[str, str]]:
@@ -304,9 +420,12 @@ def done(d: Path) -> list[tuple[str, str]]:
                 if r.get(k):
                     out.setdefault(r[k], "execution ended")
     for task in sorted(k for k in _closed(d) if isinstance(k, int)):
-        ex = st["roles"].get(task, {}).get("executor")
-        if ex and task not in st["open"]:
-            out.setdefault(ex, f"Task {task} closed")
+        if task in st["open"]:
+            continue
+        for role in ("executor", "par"):
+            name = st["roles"].get(task, {}).get(role)
+            if name:
+                out.setdefault(name, f"Task {task} closed")
     for de, para in st["replaced"]:
         if de:
             out.setdefault(de, f"replaced by {para}")
@@ -327,7 +446,7 @@ def _event_line(ev: dict) -> str:
         parts.append(f"T{ev['task']}")
     if "rodada" in ev:
         parts.append(f"r{ev['rodada']}")
-    for k in ("resultado", "fase", "commit", "sessao", "executor", "par", "de", "para", "motivo"):
+    for k in ("resultado", "fase", "commit", "sessao", "ate", "executor", "par", "de", "para", "motivo"):
         if k in ev:
             parts.append(f"{k}={ev[k]}")
     if ev.get("reincide"):
@@ -429,6 +548,34 @@ def plan_text(path) -> str:
         return Path(path).expanduser().read_text(encoding="utf-8")
     except FileNotFoundError:
         raise OrqError(f"plan not found: {path}") from None
+
+
+def snapshot_plan(d: Path, path: str | None = None) -> None:
+    """Preserva o plano no fluxo de escrita; consultar o histórico não grava nada."""
+    temporary = None
+    try:
+        if path is None:
+            if not (d / "orq.json").exists():
+                return
+            path = json.loads((d / "orq.json").read_text(encoding="utf-8")).get("plan")
+        if not path:
+            return
+        text = plan_text(path)
+        spec = importlib.util.spec_from_file_location("orq_atomic", HERE.parents[2] / "backend" / "app" / "atomico.py")
+        atomic = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(atomic)
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=d, prefix=".plan-snapshot-", delete=False) as stream:
+            temporary = Path(stream.name)
+            stream.write(text)
+        atomic.substituir(temporary, d / "plan.snapshot.md")
+    except Exception as exc:
+        _journal_or_warn(d, f"falha ao preservar plano: {exc}")
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError as exc:
+                _journal_or_warn(d, f"falha ao remover cópia temporária do plano: {exc}")
 
 
 def _section(text: str, name: str) -> list[str]:
@@ -682,9 +829,19 @@ def cmd_init(a) -> int:
         if old is None or "plan" in old:
             raise OrqError("plan required: pass --plan <stamped orchestration plan>; only a run "
                            "started without a plan re-inits without one")
+    if old and old.get("arbiter") == a.arbiter and old.get("arbiter_identity"):
+        # Reconfigurar a execução não associa uma sessão recriada com o mesmo nome.
+        cfg["arbiter_identity"] = old["arbiter_identity"]
+    elif old and old.get("arbiter") == a.arbiter:
+        journal_append(d, f"session identity unavailable: {a.arbiter}: previous init has no recorded identity")
+    elif identity := capture_identities(d, (a.arbiter,)).get(a.arbiter):
+        cfg["arbiter_identity"] = identity
     (d / "orq.json").write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+    snapshot_plan(d, cfg.get("plan"))
     journal_append(d, f"orq init: arbiter={a.arbiter} repo={cfg['repo']}"
                       + (f" auto jev={cfg['jev']} regex={cfg['regex']}" if auto else ""))
+    if auto:
+        _record_session(d, a.arbiter, "arbitro", None)
     print("ok")
     return 0
 
@@ -772,6 +929,27 @@ def cmd_event(a) -> int:
             ev[k] = v
     if a.reincide:
         ev["reincide"] = True
+    if ev.get("tipo") == "espera":
+        st = state(d)
+        # Evento de Task após execucao_fim indica retomada; espera não reabre a execução.
+        if st["ended"]:
+            raise OrqError("the run has ended (execucao_fim): no wait to record")
+        if "task" in ev and ev["task"] not in st["roles"]:
+            raise OrqError(f"Task {ev['task']} has no task_inicio: a wait names a Task that started")
+        # roles mantém Tasks fechadas; sua espera esconderia a Task aberta da mesma sessão.
+        if "task" in ev and ev["task"] not in st["open"]:
+            raise OrqError(f"Task {ev['task']} is not open: a wait names a started Task not yet closed")
+        if "task" in ev:
+            r = st["roles"][ev["task"]]
+            known = {st["arbiter"], r.get("executor"), r.get("par")} - {None, SUBAGENT}
+            if ev.get("sessao") not in known:
+                raise OrqError(f"{ev.get('sessao')} is neither the arbiter nor an executor or reviewer "
+                               f"of Task {ev['task']}")
+        known = {st["arbiter"]} | {n for r in st["roles"].values() for n in r.values() if n and n != SUBAGENT}
+        if ev.get("sessao") not in known:
+            raise OrqError(f"{ev.get('sessao')} is neither the arbiter nor a session of this run")
+        if not _until_future(ev.get("ate")):
+            raise OrqError("--ate must be a future ISO-8601 time with offset (date -Iseconds -d '+30 min')")
     if ev.get("tipo") == "entrega" and ev.get("fase") != "prova" and plan_of(d).get("checagens"):
         if not ev.get("commit"):
             raise OrqError("the plan declares checks: deliver with `--commit <stash>`, the object "
@@ -805,6 +983,12 @@ def cmd_event(a) -> int:
                            "never edits code; restore the round and judge again")
     ev = event_append(d, ev)
     journal_append(d, _event_line(ev))
+    if ev["tipo"] == "entrega" and ev.get("fase") != "prova":
+        commit = (ev.get("commit") or "")[:7]
+        timeline(d, "advance", f"T{ev.get('task')} entregou a rodada {ev.get('rodada')}"
+                 + (f" · {commit}" if commit else ""), ev.get("task"))
+    if ev["tipo"] == "sessao_trocada" and ev.get("para"):
+        _record_session(d, ev["para"], ev.get("papel"), ev.get("task"))
     # Before the notices: a failed send must not cost the orchestrator its trigger.
     if ev["tipo"] in ("entrega", "veredito") and config(d).get("auto"):
         if err := spawn_advance(d):
@@ -844,6 +1028,12 @@ def cmd_read(a) -> int:
 
 def cmd_ball(a) -> int:
     st = state(base_dir(a.dir))
+    if a.coverage:
+        # all dispensa também o alarme da trilha; owners dispensa só o alarme coletivo.
+        owners_covered = all(o in st["waiting"] for o in st["owners"])
+        print("all" if owners_covered and st["arbiter"] in st["waiting"]
+              else "owners" if owners_covered and st["owners"] else "none")
+        return 0
     names = st["ball"]
     if a.with_arbiter:
         # The watchdog's list: the arbiter of the moment last, so it follows succession.
@@ -1325,7 +1515,7 @@ def jev_config(auto: bool = False) -> dict:
 
 
 def jev_ask(text: str, auto: bool = False) -> dict:
-    """{'choice', 'p', 'veto'} or {'error'}; never raises — an error never lets the Jev drop a message."""
+    """{'choice', 'p', 'veto', 'probs'} or {'error'}; never raises — an error never lets the Jev drop a message."""
     c = jev_config(auto)
     if not c["key"]:
         return {"error": "no key"}
@@ -1340,10 +1530,13 @@ def jev_ask(text: str, auto: bool = False) -> dict:
         # Only a "nothing" winner can drop; its probability, not `confidence`.
         p = (answers["kind"].get("probabilities") or {}).get("nothing") if choice == "nothing" else 0.0
         veto = {k: float(answers[k]["noul"]) for k in JEV_VETOES}
+        probs = {str(k): float(v) for k, v in (answers["kind"].get("probabilities") or {}).items()
+                 if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)}
     except (urllib.error.URLError, http.client.HTTPException, OSError, ValueError, KeyError,
             TypeError, AttributeError) as e:
         return {"error": f"{type(e).__name__}: {str(e)[:120]}"}
-    return {"choice": choice, "p": float(p) if isinstance(p, (int, float)) else 0.0, "veto": veto}
+    return {"choice": choice, "p": float(p) if isinstance(p, (int, float)) else 0.0, "veto": veto,
+            "probs": probs}
 
 
 def triage(d: Path, text: str, alarm: bool) -> str:
@@ -1403,12 +1596,14 @@ def cmd_notify(a) -> int:
         journal_append(d, f"aviso: {a.text}")
         print("journal")
         return 0
+    who = _sender(a.alarm) if is_auto(d) else None
     kind, line = "woke", f"acordou o árbitro: {a.text}"
     if not m and not a.alarm and is_auto(d):
         verdict, source, why = triage_auto(d, config(d), a.text)
         if verdict == "drop":
             journal_append(d, f"({source}: no action) {a.text}")
-            timeline(d, "dropped", f"recado registrado sem acordar o árbitro ({why}): {a.text}")
+            timeline(d, "dropped", f"recado registrado sem acordar o árbitro ({why}): {a.text}",
+                     notify=True, sender=who)
             print(f"journal ({source})")
             return 0
         if verdict == "would_drop":
@@ -1424,9 +1619,9 @@ def cmd_notify(a) -> int:
         send(state(d)["arbiter"], a.text, tmux=a.alarm)
     except OrqError as e:
         journal_append(d, f"notify FAILED: {e}")
-        timeline(d, "failed", f"recado ao árbitro não entregue ({e}): {a.text}")
+        timeline(d, "failed", f"recado ao árbitro não entregue ({e}): {a.text}", notify=True, sender=who)
         raise
-    timeline(d, kind, line)
+    timeline(d, kind, line, notify=True, sender=who)
     print("arbiter woken")
     return 0
 
@@ -1954,9 +2149,14 @@ def open_flags(row: dict, read_only: bool) -> list[str]:
     if row.get("esforco") and prov != "kimi":
         flags += ["--effort", row["esforco"]]
     extra = shlex.split(row.get("abertura", ""))
-    # The backend refuses read-only on a session without terminal.
-    if read_only and "--read-only" not in extra and "--headless" not in extra:
+    # O backend recusa proteção com --headless; a proteção pedida deve ser preservada.
+    if (read_only or "--read-only" in extra) and "--headless" in extra:
+        raise OrqError(f"row `{row.get('sessao', '?')}`: a read-only session cannot open with --headless; "
+                       "remove --headless from its `abertura` cell")
+    if read_only and "--read-only" not in extra:
         flags.append("--read-only")
+    if (read_only or "--read-only" in extra) and "--terminal" not in extra:
+        flags.append("--terminal")
     # Only auto runs open sessions: the key the settings screen wrote counts too.
     if jev_config(auto=True).get("key") and not {"--jev", "--sem-jev"} & set(extra):
         flags.append("--jev")
@@ -2050,6 +2250,7 @@ def _open_task(d: Path, cfg: dict, pj: dict, t: dict) -> str:
             why = prove_born(name, row)
             if why:
                 raise OrqError(f"born wrong: {why}")
+            _record_session(d, name, "revisor" if read_only else "executor", n)
         ev = event_append(d, {"tipo": "task_inicio", "task": n, "titulo": title, "executor": ex, "par": rev})
         recorded = True
         journal_append(d, _event_line(ev))
@@ -2131,7 +2332,9 @@ def _announce_batch(d: Path, cfg: dict, acts: list[str]) -> None:
 def _final_review(d: Path, cfg: dict, acts: list[str]) -> None:
     tasks = plan_tasks(plan_text(cfg["plan"]))
     evs = events(d)
-    if not tasks or any(ev.get("tipo") == "tudo_integrado" for ev in evs):
+    # Nova integração após o aviso muda a versão que a revisão final precisa conferir.
+    last_integrated = max((i for i, ev in enumerate(evs) if ev.get("tipo") == "integrada"), default=-1)
+    if not tasks or any(ev.get("tipo") == "tudo_integrado" for ev in evs[last_integrated + 1:]):
         return
     if not {t["n"] for t in tasks} <= _integrated(d, evs):
         return
@@ -2309,6 +2512,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--last", type=int, default=15)
     s = sub.add_parser("ball", help="who owes work now")
     s.add_argument("--with-arbiter", action="store_true", help="append the current arbiter, last")
+    s.add_argument("--coverage", action="store_true",
+                   help="all | owners | none: who of the owners and the arbiter has a wait in force")
     sub.add_parser("done", help="sessions whose part is over (the watchdog closes them)")
     sub.add_parser("team", help="who must be in the arbiter's group (the watchdog joins them)")
     for name, extra in (("lock", True), ("screen", False)):

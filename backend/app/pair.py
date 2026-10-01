@@ -207,7 +207,17 @@ def join_group(name: str, others: list[str], task: str = "", substituir_task: bo
         orq = orq or any((st or {}).get("orq") for st in snap.values())
         try:
             _write_group(members, final_task, gid, todos, orq)
+            if orq and not gids:
+                from app import orq_context
+                try:
+                    orq_context.promote(name, gid)
+                except orq_context.IdentityUnavailable:
+                    # Sem identidade não houve configuração pela API para promover.
+                    _log.warning("pair: sem identidade para promover o grupo %s", gid)
         except OSError:
+            _restore_locked(snap)
+            raise
+        except ValueError:
             _restore_locked(snap)
             raise
         return members, snap

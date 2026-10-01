@@ -708,6 +708,12 @@ O convite local fica marcado (`local`) e não liga o Funnel. Página e resgate d
 por onde o convidado chegou (`scope["server"]`: loopback = Funnel, senão o IP da rede). Os
 clientes só aceitam `http` num convite quando o host é IP privado (10/8, 172.16/12, 192.168/16).
 
+App na porta do convite (30/09/2026): com `CP_PORT=8766` o portão tratava todo pedido como de
+convidado e respondia 401 até ao dono e ao `/api/peers/ping`; a VPS recusou 21 deploys seguidos
+por isso. Com as portas iguais (`share_tunnel.port_clash()`) o backend não abre a porta do convite,
+o portão não filtra e gerar convite responde 409 `erro_compartilhar_porta_do_convite`: o Funnel da
+8766 exporia a API inteira do dono.
+
 O Funnel expõe só `127.0.0.1:8766`, em `:8443` (a 443 é o `serve` da tailnet e a 10000 é a prévia
 de porta do `tunnel.py`; Funnel só aceita essas três). Nessa porta só vale o token do convidado
 (Bearer ou `?token=`); o token do dono e o cookie são recusados. Abrir `/convite/<código>` não
@@ -748,3 +754,157 @@ URL de chamada ignora a rede local sem erro nenhum.
 Página HTTPS (PWA pelo `*.ts.net` ou pela VPS) não tenta o `http://` local: o navegador bloqueia
 conteúdo misto. Valem o app nativo, o desktop nativo e o Electron (página em `http://127.0.0.1`).
 A máquina precisa escutar fora do loopback (`CP_LAN_BIND_IP=0.0.0.0`); o token continua exigido.
+
+## Atalho No Hangar: cópia única por atalho, fora da sessão
+
+(29/09/2026, pedido do usuário.) Cada atalho tem duas formas. "Na sessão" é a antiga: o terminal
+pertence à sessão que clicou e morre com ela (`registry.kill` → `close_all`). "No Hangar" roda UMA
+cópia no servidor inteiro, com dono vazio e a opção `@cp_shortcut_key` no multiplexador; `close_all`
+e a lista de uma sessão não a alcançam, e clicar de novo reaproveita a cópia viva. A aba dela
+aparece no painel de terminal de toda sessão.
+
+Por que não uma cópia por sessão: a VM DELPHI-02 aceita uma conexão RDP por usuário, e a segunda
+derruba a primeira (`ERRCONNECT_CONNECT_CANCELLED` no terminal do atalho anterior). Fechar a sessão
+que clicou também levava junto RDP e túnel.
+
+O estado chega pelo evento `shortcut_terminals` do stream da lista, lido em paralelo com a lista de
+sessões para que um tmux travado nunca atrase `sessions`; nunca há um SSE por terminal. Convidado
+não recebe o evento.
+
+**Pergunta.** O app oferece "responder pelo app" quando a linha do cursor termina em `:` ou `?` E o
+processo em primeiro plano dorme esperando leitura do tty (Linux). Linha que quebra em várias linhas
+da tela é reunida de volta (linhas que preenchem a largura do pane).
+
+Medido no Linux (CachyOS, kernel 7.1): o `read -p` do bash de um atalho dorme com `wchan` =
+`wait_woken`; o `sleep` dorme em `hrtimer_nanosleep` (medido em 29/09/2026 num
+`tmux new-session 'sleep 60'` descartável, lendo `/proc/<pid>/wchan` do filho do shell).
+
+No Windows (psmux) a regra é tela + CPU parados, e o `.cmd` que grava o código de saída tem regras
+próprias: medição, o que falta medir e a regra de `%` em
+[windows.md](windows.md#terminais-de-atalho-no-psmux).
+
+**Limite da detecção.** A pergunta é lida do tty (`wait_woken` / `n_tty_read`): programa que espera o
+teclado por `poll`/`epoll` (o `read` do fish, o readline do Node/inquirer) não vira pergunta. Incluir
+`ep_poll`/`do_select` traria perguntas falsas de qualquer programa de tela cheia, então fica de fora.
+
+## Orquestrador sem LLM: a conversa e o painel saem dos arquivos da execução
+
+### Histórico independente das sessões
+
+30/09/2026. O histórico lista as pastas do cofre mesmo depois de a sessão orquestradora sair
+da lista. `GET /api/orq/{id}/panel` reaproveita o painel por execução; não cria sessão fictícia
+e continua só de leitura. Rust abre a consulta pelo relógio da barra superior; o PWA mantém
+sua tela Orquestração. Nome vem do título do plano, com projeto e caminho como identificação.
+
+O fluxo de escrita (`orq init`, início de Task e encerramento) guarda `plan.snapshot.md` para
+preservar títulos e tarefas quando a pasta original for removida. Consultar não cria essa cópia.
+Execuções antigas sem plano preservado usam os dados ainda disponíveis, sem inventar tarefas.
+
+Consumo de execução encerrada ignora sessões vivas de mesmo nome. Claude e Codex são cortados
+por resposta entre início e fim, antes da agregação e da deduplicação; retomadas posteriores
+não aumentam o histórico. Fonte ausente ou sem leitor histórico preciso aparece como consumo
+parcial. Os registros da execução e os transcripts continuam sendo as fontes: apagar um
+transcript pode tornar sua medição indisponível.
+
+### Base do painel (29/09/2026)
+
+A sessão `orq` não tem transcript de modelo; o que ela mostra é
+lido dos arquivos da execução por um parser só, `orq_timeline.py`, e cada cliente desenha o
+resultado. O `ChatEvent` ganha o campo `orq` (estrutura da linha) e mantém o texto cru, para o
+cliente que ainda não conhece o campo (o app Expo) seguir mostrando o aviso de antes.
+
+**Uma rota por execução, sem SSE por card.** `GET /api/sessions/{name}/orq/panel` devolve um
+retrato da execução: Tasks, Time, Decisões, Automação, Consumo e Integração. A pasta vem da linha
+em cache da lista de sessões; `runs.find` relê todas as execuções e some no reinício do vigia. O
+`orq` está em `_BLOCKED` do `share_gate.py`, então o convidado não alcança a rota. O `GET` nunca
+escreve na execução (o índice sqlite de custos pode ser atualizado pelo módulo de custos que já
+existia). O retrato só é refeito quando um arquivo da execução muda; o estado ao vivo de cada
+sessão do Time vem da lista de sessões que o cliente já mantém (`sessionsStore`), não do retrato. `automation.mode` é texto (`"auto"`, não número), e uma leitura
+que falha vira item de `errors`, nunca exceção.
+
+**Recado do `notify`, a linha e o Jev.** O `notify` grava o Jev, envia (teto de 30 s no
+`orq.py`) e só então escreve a linha; por isso o parser pareia linha e Jev numa janela de 45 s
+(`JEV_MATCH_S`) sobre o arquivo inteiro. Papéis, fechamentos e integração vêm do próprio
+`orq.py`, por `orq_start._orq()`, e não de uma segunda leitura reimplementada.
+
+**As quatro gravações novas do `orq.py`, e o que cada uma resolve:**
+
+- `from` na linha do `notify`: o remetente não se deriva de nada depois (`vigia` no alarme; o
+  nome de quem chamou pelo `hangar-send --whoami`; `null` na dúvida, nunca um palpite).
+- Linha `advance` "T{n} entregou a rodada k · <commit>": o mock mostra a entrega e nenhum
+  evento existente vira essa frase.
+- `probs` na resposta do Jev: a probabilidade de cada escolha não era gravada, só a escolhida.
+- `sessions.jsonl`, uma linha por sessão aberta com os ids (Claude: `session_id` e `config_dir`;
+  Codex: `thread_id` e `codex_home`): o transcript de uma sessão fechada não se acha sem id, e
+  o rollout do Codex só nasce no primeiro turno, então o caminho não serve. Gravar dado extra
+  nunca trava a orquestração viva: falha vai para o diário e o passo segue. Nome repetido: a
+  última linha vence.
+
+**Consumo em andamento.** Soma os transcripts do time pelo índice de custos do Hangar, só do uso a partir de
+`execucao_inicio` (no Claude o corte é por segmento diário do índice, não por resposta). Cada
+transcript é achado por, nesta ordem: ids de `sessions.jsonl` (execuções novas), `medicao/*.json`
+e a sessão viva de mesmo nome; o que nenhum caminho alcança entra em `sessions.missing` e o
+painel mostra "M de N sessões". Cache de 60 s (5 s quando algum transcript não pôde ser lido
+agora). **A soma nunca faz um poll esperar:** quem chega com ela em andamento recebe o último
+valor guardado, ou `None` se ainda não houve nenhum (no primeiro poll a tela diz "Somando os transcripts do time…").
+Tokens não são preço nem cota; o total marca `usd_partial` quando algum modelo não tem preço.
+
+**Estado da Task.** Veredito `aprova` ou `corrige` vira "aprovada · Rk" (k = rodada do
+veredito), e só `integrada` fecha a Task; `reprova` e `devolvido` viram "reprovada · Rk".
+
+**Medido em 29/09/2026** (execução `2026-09-29-cad3e6fe`, `orq_timeline.panel` chamado em
+processo contra a pasta real, não por `curl`: o backend de uso ainda não tinha a rota): o
+primeiro retrato levou 0,107 s e o seguinte 0,002 s. Das 23 sessões do time, 7 tiveram transcript
+achado (pela `medicao/` e pelas sessões vivas; a execução começou antes do `orq.py` gravar
+`sessions.jsonl`) e 16 ficaram em `missing`. O total mostrado, 13,17 dólares, é parcial nos dois
+sentidos: `usd_partial` verdadeiro e 16 sessões fora. Não medido: `time curl` pelo backend de uso
+e execução `auto` nova com as quatro gravações.
+
+**Paridade.** Web e nativo têm a linha do tempo e a aba Orquestração; a folha Orquestração do
+web (celular e desktop estreito) ainda não existe no nativo, e o app Expo não tem nada disto. O
+estado de cada um está em `desktop-native/docs/chat-parity.md`.
+## Time da orquestração pertence ao trabalho atual
+
+Em 29/09/2026, a configuração do app antes do grupo lia `regras-padrao.md`; trocar conta/modelo
+preservava seus nomes. O planejador reproduziu os nomes globais no contrato cad3e6fe.
+Nove nomes distintos tinham prefixo de outro contexto: árbitro mais quatro executores e quatro
+revisores, contados nos eventos task_inicio T1–T4 e na identidade real do árbitro. Isso é um
+incidente, não nove execuções. O usuário pediu usar somente o time configurado para o trabalho.
+
+O editor e o LLM usam GET/POST `/api/sessions/{name}/orq`. Antes do grupo, o Markdown pertence
+à identidade atual; uma sessão recriada com o mesmo nome não importa configuração anterior.
+GET devolve `grouped`, `session_prefix` e `session_identity` para os clientes distinguirem
+rascunho/grupo e isolarem edições. A criação de grupo orq promove o registro do fundador;
+árbitro novo separado associa o registro de origem por POST `/orq/grupo` com gid e mtime.
+A origem passa a apontar ao mesmo contrato; há uma tabela editável, sem template global.
+Conflitos de versão/contrato respondem 409; edição externa não é sobrescrita pelo rollback.
+
+CLI e backend usam a mesma identidade stdlib: chave do cano ou vida do multiplexador.
+O script registra identidade do árbitro e dos papéis nos eventos, e a leitura de uma execução
+viva exige identidade compatível. Re-init não preenche identidade ausente de um registro
+legado pelo nome atual. Legado com pareamento real continua acessível; ausência de prova não
+autoriza atribuir outra sessão. Codex legado sem chave/pane usa a thread disponível, então
+seu rascunho pode mudar no /clear. Nomes novos são do contexto, escolhas existentes preservadas.
+
+## Fechamento das sessões concluídas na execução automática
+
+Na mesma data, `orq done` oferecia executor de Task fechada, porém só oferecia seu revisor
+quando a execução inteira acabava. Consulta somente leitura com a função corrigida sobre
+cad3e6fe passou a listar os revisores das Tasks 1–5 fechadas, incluindo os quatro nomes
+originais. Nenhuma sessão foi encerrada nesta conferência.
+
+O automático é `vigia.sh -e`: roda `orq advance --detach` e consulta `done` a cada ciclo.
+`advance` não fecha sessões diretamente. Agora `done` oferece executor e revisor concluídos;
+quem tem Task aberta e o árbitro atual ficam fora. O vigia mantém 600 s de inatividade,
+proteção de subagentes, servidor remoto e três falhas de fechamento com aviso. Confere grupo
+e identidade registrada antes de fechar; não alcança pessoa movida/recriada por nome antigo.
+
+As referências antes trocavam/desarmavam o vigia nas etapas finais, podendo deixar os últimos
+pares sem completar sua janela de limpeza. O vigia da execução permanece até os candidatos
+terem fechamento conferido. Revisão final/retrospectiva são fechadas explicitamente pelo nome
+aberto, após entregar e sem trabalho em voo; seus monitores avulsos não substituem a limpeza.
+
+Conferências desta alteração: revisão estática independente, sintaxe Python/Bash, diff e
+seleção readonly de candidatos reais. Regressões foram escritas, não executadas. Fluxos do
+app, compilação e fechamento real ainda não conferidos; mudanças estão na worktree
+`/home/jefferson/Projetos/hangar-orq-team-context`, não instaladas no serviço ativo.

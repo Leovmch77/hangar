@@ -74,8 +74,8 @@
     renameServer(id, label);
     sessionsStore.refreshServers();
   }
-  function updateToken(id: string, token: string): boolean {
-    const ok = updateServer(id, { token });
+  function updateToken(id: string, token: string, baseUrl?: string): boolean {
+    const ok = updateServer(id, { token, baseUrl });
     if (!ok) return false;
     sessionsStore.refreshServers();
     sessionsStore.reconnect();
@@ -778,6 +778,8 @@
       <h2 class="sv-cab-nome">{resolvedServer.label}</h2>
       <span class="sv-cab-sub">{m.peers_esta_maquina()}</span>
     </div>
+    <button type="button" class="sv-editar" onclick={() => { emEdicao = resolvedServer; esteAberto = false; }}
+            aria-label={m.servidor_editar_aria({ nome: resolvedServer.label })}>{m.servidor_editar_titulo()}</button>
     {#if comFechar}
       <button type="button" class="sv-fechar" onclick={() => (esteAberto = false)} aria-label={m.sessao_fechar()}>✕</button>
     {/if}
@@ -1113,6 +1115,9 @@
   .sv-cab-txt { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
   .sv-cab-nome { margin: 0; font-size: var(--text-lg); font-weight: 600; color: var(--text-primary); }
   .sv-cab-sub { font-size: var(--text-xs); color: var(--text-muted); }
+  .sv-editar { flex-shrink: 0; min-height: 36px; padding: 0 var(--space-3); border: 1px solid var(--border-default); border-radius: var(--radius-sm); color: var(--text-primary); font-size: var(--text-sm); }
+  .sv-editar:hover { background: var(--bg-hover); }
+  .sv-editar:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   .sv-fechar { width: 36px; height: 36px; min-height: 0; flex-shrink: 0; border-radius: var(--radius-sm); color: var(--text-muted); }
   .sv-fechar:hover { background: var(--bg-hover); color: var(--text-primary); }
   .sv-rodape { display: flex; justify-content: flex-end; margin-top: var(--space-4); }

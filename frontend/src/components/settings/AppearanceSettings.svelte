@@ -23,6 +23,7 @@
   import CorTemaSettings from './CorTemaSettings.svelte';
   import { sidebarPrefs, type SidebarHeight } from '../../lib/sidebarPrefs.svelte';
   import { navMode, type NavMode } from '../../lib/navMode.svelte';
+  import { sessionOrganization, type SessionOrganization } from '../../lib/sessionOrganization.svelte';
   import { toolLook, type ToolLook } from '../../lib/toolLook.svelte';
   import { taskRows, type TaskRowsPref } from '../../lib/taskRows.svelte';
   import { pensamentoTools, type PensamentoTools } from '../../lib/pensamentoTools.svelte';
@@ -421,6 +422,24 @@
       onPick={(v) => { tableChartPref.pref = v as TableChartPref; }}
     />
   </div>
+
+  {#if !isDesktop}
+  <div class="ap-row">
+    <div class="ap-label">
+      <strong>{m.aparencia_organizar_sessoes()}</strong>
+      <span>{m.aparencia_organizar_dica()}</span>
+    </div>
+    <SegmentedPicker
+      value={sessionOrganization.mode}
+      options={[
+        { v: 'sessions', label: m.aparencia_organizar_sessoes_opcao(), aria: m.aparencia_organizar_sessoes_opcao() },
+        { v: 'conversations', label: m.aparencia_organizar_conversas_opcao(), aria: m.aparencia_organizar_conversas_opcao() },
+      ]}
+      ariaLabel={m.aparencia_organizar_sessoes()}
+      onPick={(v) => { sessionOrganization.mode = v as SessionOrganization; }}
+    />
+  </div>
+  {/if}
 
   <div class="ap-row ap-row--stack">
     <div class="ap-head">

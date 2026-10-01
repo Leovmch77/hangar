@@ -12,12 +12,18 @@
     danger?: boolean;
     // Alvo concreto pro foco voltar quando o gatilho sumiu/ficou oculto (ex: drawer fechado).
     fallbackFocus?: HTMLElement | null;
+    skipLabel?: string;
+    onSkip?: () => boolean;
     onConfirm: () => void;
     onClose: () => void;
   }
-  let { open, title, message = null, confirmLabel = m.comum_confirmar(), cancelLabel = m.comum_cancelar(), danger = false, fallbackFocus = null, onConfirm, onClose }: Props = $props();
+  let { open, title, message = null, confirmLabel = m.comum_confirmar(), cancelLabel = m.comum_cancelar(), danger = false, fallbackFocus = null, skipLabel, onSkip, onConfirm, onClose }: Props = $props();
+  let skip = $state(false);
+  let saveError = $state(false);
+  $effect(() => { if (open) { skip = false; saveError = false; } });
 
   function confirm() {
+    if (skip && onSkip && !onSkip()) { saveError = true; return; }
     onConfirm();
     onClose();
   }
@@ -27,6 +33,10 @@
   <div class="confirm">
     <h2 class="confirm-title">{title}</h2>
     {#if message}<p class="confirm-msg">{message}</p>{/if}
+    {#if skipLabel && onSkip}
+      <label class="confirm-skip"><input type="checkbox" bind:checked={skip} onchange={() => (saveError = false)} />{skipLabel}</label>
+      {#if saveError}<p class="confirm-error" role="alert">{m.confirm_no_ask_save_failed()}</p>{/if}
+    {/if}
     <div class="confirm-actions">
       <button class="btn btn-cancel" onclick={onClose}>{cancelLabel}</button>
       <button class="btn btn-confirm" class:danger onclick={confirm}>{confirmLabel}</button>
@@ -38,6 +48,9 @@
   .confirm { display: flex; flex-direction: column; gap: var(--space-3); padding: var(--space-2) 0; }
   .confirm-title { font-size: var(--text-base); font-weight: 600; color: var(--text-primary); }
   .confirm-msg { font-size: var(--text-sm); color: var(--text-secondary); }
+  .confirm-skip { display: flex; align-items: center; gap: var(--space-2); font-size: var(--text-sm); color: var(--text-secondary); }
+  .confirm-skip input { width: 20px; height: 20px; accent-color: var(--accent); }
+  .confirm-error { margin: 0; color: var(--error); font-size: var(--text-sm); }
   .confirm-actions { display: flex; gap: var(--space-3); margin-top: var(--space-2); }
   .btn { flex: 1; height: 48px; border-radius: var(--radius-md); font-size: var(--text-sm); font-weight: 500; }
   .btn-cancel { background: var(--bg-hover); color: var(--text-secondary); }

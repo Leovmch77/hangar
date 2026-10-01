@@ -24,9 +24,16 @@ does.
    - every symbol, file and command the plan cites exists (`grep`, `git ls-files`);
    - two Tasks touching the same files: `git merge-tree` over their file lists, output pasted;
    - what breaks if the order is followed (a Task using what a later one creates);
+   - every Task's `Files` holds each file its steps must change to reach the behavior named: read
+     the callers of the functions it changes and the module that owns the state it writes; a
+     missing file → add it, with the `file:line` that makes it needed;
+   - every behavior a roteiro or a Task expects from reused code (library, store, component) is
+     found in that code or its installed source; not found → it moves to "What their plan does
+     NOT decide" as an open decision;
    - every Task with proof has a roteiro the plan can support (what to run, what to look at,
      what counts as pass); a Task on a screen cites the `provar-tela` skill in its roteiro;
-   - a Task too big for one session (the size line of `planejamento.md`) → cut it.
+   - Task with independent responsibilities or distinct dependencies → separate those
+     parts; line counts, including tests/translations, impose no split or block.
 3. Build the waves: independent Tasks share a wave, never more per wave than `Paralelo:`.
    Suggest `Revisão: subagente` unless the user asked for another model or account to review.
    A Task on a screen → suggest `Prova: manual` unless the user asked for automated proof.

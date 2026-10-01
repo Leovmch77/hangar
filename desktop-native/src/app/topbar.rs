@@ -37,11 +37,15 @@ fn shrinking(el: impl IntoElement) -> Div {
 }
 
 /// Minimizar, maximizar e fechar do Windows, desenhados na barra do app. A área de cada um é marcada para o sistema, que
-/// cuida do clique e do menu de encaixe do Windows 11; por isso não há `on_click` aqui.
+/// cuida do clique e do menu de encaixe do Windows 11; por isso não há `on_click` aqui, nem `stop_propagation`: apertar
+/// consumido pelo GPUI nunca vira clique de botão do sistema.
 fn window_buttons(window: &Window, floating: bool) -> Div {
     let button = |id: &'static str, icon: IconName, area: WindowControlArea, close: bool| div().id(id)
         .w(px(46.)).h_full().flex().items_center().justify_center().text_color(theme::muted())
         .hover(move |el| if close { el.bg(gpui::rgb(0xc42b1c)).text_color(gpui::white()) } else { el.bg(theme::hover()).text_color(theme::text()) })
+        // Sem tapar a barra, o teste de área do GPUI acha primeiro o Drag dela (pintada antes) e o sistema recebe barra
+        // de título em vez de botão.
+        .occlude()
         .window_control_area(area)
         .child(Icon::new(icon).size(px(14.)));
     let max = if window.is_maximized() { IconName::WindowRestore } else { IconName::WindowMaximize };
@@ -133,7 +137,12 @@ impl Hangar {
             // Ao lado da lateral, sem fundo próprio: o que está atrás é o do chat.
             .when(!floating && beside.is_none(), |el| el.bg(wall))
             .window_control_area(WindowControlArea::Drag)
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, _| this.topbar.should_move = true))
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                this.topbar.should_move = true;
+                // No Windows o arrasto da barra é o laço modal do sistema, que engole o soltar: uma seleção de texto
+                // começada aqui ficaria presa e o ponteiro solto seguiria selecionando o chat.
+                gpui_kit::component::GlobalState::suppress_text_selection(cx);
+            }))
             .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, _| this.topbar.should_move = false))
             .on_mouse_down_out(cx.listener(|this, _, _, _| this.topbar.should_move = false))
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, _| {
@@ -143,12 +152,16 @@ impl Hangar {
                     window.start_window_move();
                 }
             }))
-            .on_click(|event, window, _| if event.click_count() == 2 {
+            // No Windows a barra é legenda do sistema, que já alterna maximizar no duplo clique.
+            .on_click(|event, window, _| if event.click_count() == 2 && !cfg!(target_os = "windows") {
                 if cfg!(target_os = "macos") { window.titlebar_double_click() } else { window.zoom_window() }
             })
             .map(|el| {
                 let controls = div().flex().justify_end().gap(px(6.))
                     .children(account.map(|account| shrinking(popup::anchor(div().min_w_0(), "topbar-account").child(account))))
+                    .child(control(Button::new("topbar-orq-history").ghost().icon(IconName::Clock).size(px(28.)).disabled(!online)
+                        .tooltip(tr_shared("orq_history_title", &[])).accessibility_label(tr_shared("orq_history_title", &[]))
+                        .on_click(cx.listener(|this, _, window, cx| this.open_orq_history(window, cx)))))
                     .child(control(pill))
                     .children(outdated.map(control))
                     .children(updater.map(control))

@@ -22,7 +22,7 @@ from app.models import SessionInfo, session_key
 from app.pqueue import PromptQueue, _sanitize, merged_history
 from app.archive import _texto_simples
 from app.chain import ThenLink
-from app import pair
+from app import guest_users, pair
 from app.pair import PairLink, rename_pair, leave as pair_leave
 from app.adapters.claude_headless import sessions as headless_sessions
 from app.adapters.codex import sessions as codex_sessions
@@ -58,6 +58,8 @@ _log = logging.getLogger("hangar.registry")
 # (hook_state.demote_awaiting). O grace cobre a janela Notification->menu renderizado: raspar nesse
 # vao nao pode matar um awaiting real que ainda nem apareceu na tela.
 _AWAITING_DEMOTE_GRACE_S = 10.0
+# Folga para as entradas de sistema que o Claude Code grava logo depois do Stop.
+_IDLE_STALE_S = 1.0
 
 # Teto de pares (done, total) por sessao em plan_tasks. O front so segmenta a barra com <= 8 Tasks
 # (PlanBar.svelte), acima disso desenha barra unica e ignora a lista. 9 e nao 8 DE PROPOSITO: cortar
@@ -259,6 +261,10 @@ def _newest_after_clear(projdir: Path, sid_jsonl: str, exclude: set[str]) -> str
     return best
 
 
+# pasta .hangar-active -> {nome: (mtime_ns, jsonl, pid, ts)}
+_marker_cache: dict[str, dict[str, tuple[int, Optional[str], object, float]]] = {}
+
+
 def _marker_by_pids(config_base: Path, pids: list[int], exclude: set[str]) -> Optional[str]:
     # Marcador do hook casado por PID: o state_hook grava {jsonl, ts, cwd, pid} onde pid = o REPL
     # claude que disparou o evento. Se esse pid e DESCENDENTE deste pane, o marcador e desta sessao
@@ -268,20 +274,35 @@ def _marker_by_pids(config_base: Path, pids: list[int], exclude: set[str]) -> Op
     pidset = set(pids)
     best: tuple[float, str] | None = None
     try:
-        files = list(d.glob("*.json"))
+        entries = list(os.scandir(d))
     except OSError:
         return None
-    for f in files:
-        try:
-            o = json.loads(f.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+    # Relido so o marcador cujo mtime mudou: com centenas deles, o json.loads de todos a cada tick
+    # da lista era o custo. O dict e refeito por chamada, entao marcador apagado sai dele.
+    anterior = _marker_cache.get(str(d), {})
+    atual: dict[str, tuple[int, Optional[str], object, float]] = {}
+    for e in entries:
+        if not e.name.endswith(".json"):
             continue
-        j, pid = o.get("jsonl"), o.get("pid")
+        try:
+            mtime = e.stat().st_mtime_ns
+        except OSError:
+            continue
+        hit = anterior.get(e.name)
+        if hit is None or hit[0] != mtime:
+            try:
+                with open(e.path, encoding="utf-8") as fh:
+                    o = json.loads(fh.read())
+                hit = (mtime, o.get("jsonl"), o.get("pid"), float(o.get("ts") or 0.0))
+            except (OSError, ValueError, AttributeError, TypeError):
+                continue
+        atual[e.name] = hit
+    _marker_cache[str(d)] = atual
+    for _mt, j, pid, ts in atual.values():
         if not j or pid not in pidset:
             continue
         if not os.path.exists(j) or os.path.realpath(j) in exclude:
             continue
-        ts = float(o.get("ts") or 0.0)
         if best is None or ts > best[0]:
             best = (ts, j)
     return best[1] if best else None
@@ -837,6 +858,8 @@ class SessionRegistry:
 
     def __init__(self, projects_dir: Path | None = None):
         self.projects_dir = Path(projects_dir or settings.projects_dir)
+        # mtime do transcript cujo pane já foi conferido como parado: não raspa de novo até ele mudar.
+        self._idle_conferido: dict[str, float] = {}
 
     def resolve_jsonl(self, cwd: str, projects_dir: Path | None = None) -> Optional[str]:
         # FALLBACK por cwd: jsonl mais recente do dir do projeto. So usado quando nao ha --session-id
@@ -1513,9 +1536,15 @@ class SessionRegistry:
             # raspava a cada poll (e, com o fast-path stale antigo, mostrava "aguardando" falso pra
             # sempre). Corrigido na RAIZ: pane raspado sem menu REBAIXA o marcador pra idle
             # (demote_awaiting, abaixo) -> proximo poll cai no fast-path de marcador como idle.
-            if marker and marker[0] != "awaiting_input":
+            mtime = _jsonl_mtime(info.jsonl) if marker else None
+            if (getattr(info, "provider", "claude") == "claude" and marker and marker[0] == "idle" and mtime is not None
+                    and mtime > marker[1] + _IDLE_STALE_S and self._idle_conferido.get(info.name) != mtime):
+                # Transcript escrito depois do idle (fora a folga do resumo pós-Stop) é turno aberto sem
+                # UserPromptSubmit, como a volta de um agente em segundo plano. Decide o pane com o spinner animando.
+                pending.append(info)
+            elif marker and marker[0] != "awaiting_input":
                 info.state = marker[0]
-                info.last_activity = _jsonl_mtime(info.jsonl)
+                info.last_activity = mtime
                 if marker[0] != "working":
                     # Turno acabou (hook e autoritativo): o spinner cacheado e do PASSADO — sem
                     # isto o proximo working herdava a barrinha do turno anterior como se fosse
@@ -1541,6 +1570,10 @@ class SessionRegistry:
                 info.question = c[2]
                 info.options = c[3]
                 info.last_activity = _jsonl_mtime(info.jsonl)
+                if c[0] == "idle" and info.last_activity is not None:
+                    self._idle_conferido[info.name] = info.last_activity
+                else:
+                    self._idle_conferido.pop(info.name, None)
                 # Pane (verdade) contradisse marcador awaiting (Notification de idle-60s, nao menu):
                 # rebaixa pra idle no hook_state (mapa+sidecar) — mata o "aguardando" fantasma e
                 # devolve a sessao ao fast-path (anti-tempestade). Grace: ver _AWAITING_DEMOTE_GRACE_S.
@@ -1748,6 +1781,11 @@ class SessionRegistry:
         ativos = share_store.active_sessions()
         for info in infos:
             info.shared = info.name in ativos
+        if guest_users.has_claims():
+            def _owners() -> None:
+                for info in infos:
+                    info.owner = guest_users.owner_name(info.name)
+            await asyncio.to_thread(_owners)
         return infos + orqs
 
     @diag.rastrear("sessao.criar")

@@ -95,7 +95,8 @@ Done when the item is journaled and the ball is back with executor or reviewer.
 1. `orq commit` checked tip, approved round and untouchables; its message is that check.
    Read the approving report's WASTE and NOTED lines (its path: the `veredito`'s `motivo=` in
    `orq read journal --task <N>`): NOTED → contract, WASTE → lessons. Add one PROGRESS line with
-   `orq log --task <N>`: elapsed time and code rounds (proof rounds apart) vs the estimate; past 2× either → stop and ask.
+   `orq log --task <N>`: elapsed time and code rounds (proof rounds apart) vs the estimate;
+   past 2× either → reassess as arbitro-vigia.md defines; estimates/diffs do not block.
    Context counts only for rotation.
    - Commit diverging from the approved round → new round to the executor; the second
      commit is legitimate.
@@ -111,7 +112,7 @@ Done when the item is journaled and the ball is back with executor or reviewer.
 4. Wave: merge one at a time after its APROVA; `git fetch` before every merge, only then read
    `## main...origin/main`; remove no worktree without checking its trail in global config
    (`paralelo-worktree.md`).
-5. Closed: update the contract's progress, retire the executor (`arbitro-vigia.md`,
+5. Closed: write `Progress:` in the Task's `## Task N` section, retire the executor (`arbitro-vigia.md`,
    "Rotation"), release the ready Tasks (step 2); last code Task approved → step 6.
 
 Done when `orq commit`'s message reached you and the contract carries the hash.
@@ -136,7 +137,7 @@ Done when the branch is in the user's hands, the retrospective delivered,
 - Only you write rules and lessons. Journal and events are written through `orq` by whoever acts: you (`task_inicio`, `sessao_trocada`, `execucao_*`, `log`), the executor (`entrega`, `commit`), the reviewer (`veredito`).
 - Lessons: raw material is the **waste** line of each review report; its "would have prevented" becomes a guideline written as a principle, with the measured case as proof next to it, born in `licoes.md`. Every guideline stays: no cap, never deleted. You copy the ones a Task needs, by subject (database, channel, file), never by age, into its `## Task N` section; no kick-off carries `licoes.md`.
 - By type, not subject: it happened → journal; agreement decided at launch → rules; guideline born now → lessons.
-- Turn state (released Task, counterpart) goes in the kick-off and `orq event`; the rules get only the Progress hash.
+- Turn state (released Task, counterpart) goes in the kick-off and `orq event`; the rules get only the `Progress:` line, in that Task's section.
 - First lines of the rules file:
 
 ```markdown
@@ -154,7 +155,6 @@ Done when the branch is in the user's hands, the retrospective delivered,
 - The contract chooses, you don't: engine, model, account, effort and name of every session, who executes, reviews or only reads (`## Quem é quem`, fixed columns, `planejamento-equipe.md`; + `vez` when a role rotates); whether a Task may start (contract progress + plan); what is untouchable — and the kick-off carries the literal list.
 - A written contract is an order. In doubt, re-read.
 - Restrictions, untouchable exceptions, off-plan Tasks: `arbitro-lancamento.md`, "Contract lines you write".
-- Who belongs to the group comes from the contract, never from `hangar-send --list`. Missing or empty contract → ask the user who is who.
 
 ## Locks
 

@@ -173,3 +173,11 @@ export function piorJanela(linha: ContaCota[] | null, modelo?: string | null): {
   }
   return pior;
 }
+
+// Conta sem limite para enviar: a primeira janela geral em 100%. Janela de um modelo só não
+// bloqueia (outro modelo da conta ainda responde) e leitura que não é `lida` também não — não
+// saber a cota nunca impede o envio.
+export function exhaustedWindow(account: ContaCota | null | undefined): JanelaExibida | null {
+  if (account?.estado !== 'lida') return null;
+  return account.janelas.find((j) => !j.porModelo && j.pct >= 100) ?? null;
+}

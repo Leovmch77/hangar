@@ -27,8 +27,12 @@ export interface ShortcutShell {
   type: 'shell';
   label: string;
   icon?: string;
-  command: string;        // roda na máquina do servidor, cwd da sessão, dispara-e-esquece
+  command: string;        // roda na máquina do servidor, num terminal escondido; cwd da sessão (ou home, No Hangar)
   pasta?: string;         // absoluta ou relativa à raiz da cópia da sessão; ausente = cwd da sessão
+  // 'hangar' = uma cópia só no servidor, fora de qualquer sessão; ausente = da sessão que clicou.
+  runs_in?: 'session' | 'hangar';
+  hangar_home?: boolean;  // No Hangar: ausente = roda na home
+  answer_in_app?: boolean; // ausente = a pergunta do terminal aparece no app
   confirm?: boolean;
 }
 
@@ -61,7 +65,10 @@ function isValid(item: unknown): item is Shortcut {
   if (o.type === 'shell') {
     return typeof o.label === 'string' && !!o.label.trim()
       && typeof o.command === 'string' && !!o.command.trim()
-      && (o.pasta === undefined || (typeof o.pasta === 'string' && !!o.pasta.trim()));
+      && (o.pasta === undefined || (typeof o.pasta === 'string' && !!o.pasta.trim()))
+      && (o.runs_in === undefined || o.runs_in === 'session' || o.runs_in === 'hangar')
+      && (o.hangar_home === undefined || typeof o.hangar_home === 'boolean')
+      && (o.answer_in_app === undefined || typeof o.answer_in_app === 'boolean');
   }
   return false;
 }
@@ -126,6 +133,20 @@ export function mergeProjectShortcuts(
 export function sendsDirect(s: ShortcutSendText): boolean {
   return s.send_direct !== false;
 }
+
+// `boolean`, não type guard: com guard, o `if (runsInHangar(s)) return;` estreita `s` pra `never`
+// no resto da função.
+export function runsInHangar(s: ShortcutSendText | ShortcutShell): boolean {
+  return s.type === 'shell' && s.runs_in === 'hangar';
+}
+
+/** Identidade da cópia No Hangar: global = `global:<id>`; do projeto = `project:<chave do repo>:<id>`
+ * (o mesmo id em repositórios diferentes não pode dividir uma cópia). */
+export function hangarKeyOf(scope: ShortcutScope, id: string, projectKey?: string): string {
+  return scope === 'project' ? `project:${projectKey ?? ''}:${id}` : `global:${id}`;
+}
+export function hangarHome(s: ShortcutShell): boolean { return s.hangar_home !== false; }
+export function answersInApp(s: ShortcutShell): boolean { return s.answer_in_app !== false; }
 
 /** Credencial que a importação deixou em branco (`⟦SEGREDO:<nome>⟧` no comando ou texto): o
  * atalho fica salvo mas não roda até alguém preencher. Devolve o nome, ou null. */

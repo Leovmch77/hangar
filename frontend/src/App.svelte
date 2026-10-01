@@ -16,6 +16,7 @@
   import * as diag from './lib/diag';
   import Login from './screens/Login.svelte';
   import SessionList from './screens/SessionList.svelte';
+  import NewChatHome from './screens/NewChatHome.svelte';
   import Orq from './screens/Orq.svelte';
   import Costs from './screens/Costs.svelte';
   import Uso from './screens/Uso.svelte';
@@ -28,6 +29,8 @@
   import TtsSelectionPill from './components/TtsSelectionPill.svelte';
   import CodeOverlay from './components/CodeOverlay.svelte';
   import GrupoDropDialog from './components/GrupoDropDialog.svelte';
+  import ShortcutQuestion from './components/ShortcutQuestion.svelte';
+  import { hangarOf, requestOwnerPanel, takeHangarTab } from './lib/hangarTerminals.svelte';
   import { iniciarCodeActions } from './lib/codeActions.svelte';
   import { navegadorNativo } from './lib/navegadorNativo';
   import { sessionsStore } from './lib/sessionsStore.svelte';
@@ -361,9 +364,9 @@
   }
 
   const ehRelatorio = (h: string) => h.startsWith('#/costs') || h.startsWith('#/uso');
-  let hashAntesDoRelatorio = '#/';
+  let hashAntesDoRelatorio = '#/sessions';
   function voltarDoRelatorio() {
-    navigateTo(ehRelatorio(hashAntesDoRelatorio) ? '#/' : hashAntesDoRelatorio);
+    navigateTo(ehRelatorio(hashAntesDoRelatorio) ? '#/sessions' : hashAntesDoRelatorio);
   }
 
   function navigateToChat(name: string) {
@@ -380,7 +383,26 @@
   }
 
   function navigateToSessions() {
-    navigateTo('#/');
+    navigateTo('#/sessions');
+  }
+
+  // Desktop: terminal No Hangar já tem o pedido de aba registrado por quem chamou; terminal "Na
+  // sessão" pede ao DesktopShell o painel da sessão dona (a aba vem do foco já registrado).
+  // Celular: nada consome o pedido sozinho, então vai pro Chat da sessão dona do terminal (o Chat
+  // abre o terminal ao montar, lendo shortcutTerminals.focus["<servidor>::<dona>"] ou
+  // liveTerminals.panelRequest[servidor]); terminal No Hangar cuja sessão de origem já fechou fica
+  // na lista, e o pedido é descartado pra não ficar pendente.
+  let hangarNotice = $state('');
+  function openShortcutTerminal(serverId: string, owner: string, id: string) {
+    if (isDesktop) {
+      if (owner) requestOwnerPanel(serverId, owner);
+      return;
+    }
+    const target = owner || hangarOf(serverId).find((t) => t.id === id)?.origin || '';
+    if (!target) { takeHangarTab(serverId); hangarNotice = m.hangar_sem_sessao(); return; }
+    hangarNotice = '';
+    selectServer(serverId);
+    navigateToChat(target);
   }
 
   // Entrada da grade de comparação (feature #11): vem da seleção múltipla da lista de sessões
@@ -545,7 +567,7 @@
   {:else if route.name === 'archive'}
     <!-- Remonta ao trocar de deep-link (busca -> outra conversa): reabre com o novo alvo. -->
     {#key route.deepLink ? `${route.deepLink.serverId}/${route.deepLink.project}/${route.deepLink.sessionId}/${route.deepLink.eventId ?? ''}` : ''}
-      <Archive onBack={() => navigateTo('#/')} deepLink={route.deepLink ?? null} />
+      <Archive onBack={navigateToSessions} deepLink={route.deepLink ?? null} />
     {/key}
   {:else if route.name === 'compare'}
     <!-- Remonta ao trocar o conjunto comparado: fecha os streams antigos e abre os novos. -->
@@ -574,12 +596,16 @@
     <!-- Orquestração TEM tela no celular (diferente do quadro/canvas): é leitura, não arrasto de
          card, e é a tela que o usuário abre longe da máquina. -->
     <Orq onBack={navigateToSessions} onNavigateToChat={navigateToChat} />
+  {:else if route.name === 'home'}
+    <!-- Celular abre na nova conversa; no desktop `home` caiu no DesktopShell acima, como a lista. -->
+    <NewChatHome onOpenList={navigateToSessions} />
   {:else if route.name === 'sessions' || route.name === 'board' || route.name === 'canvas'}
     <!-- Quadro/canvas são só desktop: no mobile caem na lista normal (em vez de tela em branco). -->
     <SessionList
       onNavigateToChat={navigateToChat}
       onCompare={navigateToCompare}
       {onLogout}
+      onOpenTerminal={openShortcutTerminal}
     />
   {:else if route.name === 'chat'}
     <!-- Remonta ao trocar de sessao (switcher): re-roda loadHistory + reconecta o SSE.
@@ -612,6 +638,14 @@
        a arrastarGrupo.pedido — as quatro superfícies que arrastam (Sidebar/Board/Canvas/celular,
        Task 3+) só chamam arrastarGrupo.soltar/pedirSaida, sem montar o diálogo cada uma. -->
   <GrupoDropDialog />
+  <!-- Pergunta dos terminais de atalho: montado UMA vez, aberto por openQuestion(). -->
+  <ShortcutQuestion onOpenTerminal={openShortcutTerminal} />
+  {#if hangarNotice}
+    <p class="hangar-notice" role="status">
+      {hangarNotice}
+      <button type="button" onclick={() => (hangarNotice = '')} aria-label={m.hangar_dispensar()}>×</button>
+    </p>
+  {/if}
 
   {#if cfg && telaEfetiva && route.name !== 'login' && route.name !== 'loading'}
     <SettingsModal
@@ -632,6 +666,13 @@
 </div>
 
 <style>
+  .hangar-notice {
+    position: fixed; left: var(--space-4); right: var(--space-4); bottom: calc(env(safe-area-inset-bottom) + var(--space-4));
+    z-index: 200; margin: 0; padding: 10px 14px; display: flex; gap: 10px; align-items: center;
+    border-radius: var(--radius-md); background: var(--bg-elevated); border: 1px solid var(--border-default);
+    color: var(--text-primary); font-size: var(--text-sm); box-shadow: 0 12px 32px rgba(0, 0, 0, 0.4);
+  }
+  .hangar-notice button { margin-left: auto; color: var(--text-muted); font-size: 18px; line-height: 1; }
   .app-root {
     height: 100%;
     display: flex;

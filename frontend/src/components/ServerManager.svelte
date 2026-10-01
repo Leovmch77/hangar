@@ -28,7 +28,7 @@
     // papel inválido (WCAG 4.1.2). Default seguro: botão comum. (round 7)
     menuitem?: boolean;
     onRename: (id: string, label: string) => void;
-    onUpdateToken: (id: string, token: string) => boolean;
+    onUpdateToken: (id: string, token: string, baseUrl?: string) => boolean;
     onRemove: (id: string) => void;
     onAdd: () => void;
   }

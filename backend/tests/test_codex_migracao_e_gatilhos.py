@@ -346,7 +346,7 @@ async def test_erro_inesperado_nao_deixa_o_estado_preso_em_executando(tmp_path, 
 
     home = _home(tmp_path)
     service = IntegracaoCodex(home, home / ".codex", nativo=Nativo)
-    monkeypatch.setattr(service, "_instrucoes", lambda: None)
+    monkeypatch.setattr(service, "_instrucoes", lambda *_a, **_k: None)
     monkeypatch.setattr(service, "_config", AsyncMock())
     monkeypatch.setattr(service, "_plugins", AsyncMock(side_effect=TypeError("shape inesperado")))
     estado = await service.reconciliar()
@@ -418,8 +418,9 @@ def test_status_traz_resumo_de_skills_do_manifesto(tmp_path):
 async def test_rodada_grava_assinatura_da_fonte(tmp_path, monkeypatch):
     home = _home(tmp_path)
     service = IntegracaoCodex(home, home / ".codex", nativo=object)
-    (home / ".claude/settings.json").write_text('{"enabledPlugins": []}')  # inválido: rodada em erro
-    await service.reconciliar()
+    monkeypatch.setattr(service, "_instrucoes", lambda *_a, **_k: None)
+    (home / ".claude/settings.json").write_text('{"enabledPlugins": {}}')
+    await service.reconciliar()  # nativo=object não abre: a rodada termina em erro DEPOIS de ler a fonte
     registro = json.loads((service.raiz / "estado.json").read_text())
     assert registro["fingerprint"] == service.fingerprint()
     assert registro["status"]["estado"] == "erro"

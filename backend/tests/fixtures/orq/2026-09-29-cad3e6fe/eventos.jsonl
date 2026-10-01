@@ -1,0 +1,25 @@
+{"ts": "2026-09-29T21:53:31-03:00", "tipo": "execucao_inicio", "plano": "/home/jefferson/Projetos/hangar-mobile-deliveries/docs/superpowers/plans/2026-09-29-mobile-deliveries.orq.md", "branch": "mobile-deliveries-orq", "gid": "cad3e6fe"}
+{"ts": "2026-09-29T21:53:37-03:00", "tipo": "task_inicio", "task": 1, "titulo": "Levantamento de empacotamento Android e viabilidade iOS", "executor": "w-t1", "par": "w-review1"}
+{"ts": "2026-09-29T21:56:24-03:00", "tipo": "entrega", "task": 1, "rodada": 1, "commit": "559e6e1f1d7901b6205add133579591831cf9dbe"}
+{"ts": "2026-09-29T21:57:08-03:00", "tipo": "veredito", "task": 1, "rodada": 1, "resultado": "aprova", "sessao": "w-review1", "motivo": "/home/jefferson/.hangar/orq/2026-09-29-cad3e6fe/pareceres/task1-r1.md"}
+{"ts": "2026-09-29T21:57:41-03:00", "tipo": "entrega", "task": 1, "rodada": 2, "commit": "522d3a35f9036d1d0d586f131b98fd553e0d46ce"}
+{"ts": "2026-09-29T21:58:02-03:00", "tipo": "veredito", "task": 1, "rodada": 2, "resultado": "aprova", "sessao": "w-review1", "motivo": "/home/jefferson/.hangar/orq/2026-09-29-cad3e6fe/pareceres/task1-r2.md"}
+{"ts": "2026-09-29T21:58:08-03:00", "tipo": "integrada", "task": 1, "commit": "bfb213d3e69866507e5b9269beda1bf4eb935e83"}
+{"ts": "2026-09-29T21:58:10-03:00", "tipo": "task_inicio", "task": 2, "titulo": "Contratos de API de conversa, histórico e perguntas", "executor": "w-t2", "par": "w-review2"}
+{"ts": "2026-09-29T21:58:30-03:00", "tipo": "task_inicio", "task": 3, "titulo": "Entrada Codex durante startup", "executor": "w-t3", "par": "w-review3"}
+{"ts": "2026-09-29T21:58:39-03:00", "tipo": "task_inicio", "task": 4, "titulo": "Apresentação de problema e plano pendente", "executor": "w-t4", "par": "w-review4"}
+{"ts": "2026-09-29T22:00:17-03:00", "tipo": "entrega", "task": 3, "rodada": 1, "commit": "879ca9168f3ebb1e5c27b6d5cf0eca0accff77e0"}
+{"ts": "2026-09-29T22:01:00-03:00", "tipo": "veredito", "task": 3, "rodada": 1, "resultado": "aprova", "sessao": "w-review3", "motivo": "/home/jefferson/.hangar/orq/2026-09-29-cad3e6fe/pareceres/task3-r1.md"}
+{"ts": "2026-09-29T22:01:05-03:00", "tipo": "integrada", "task": 3, "commit": "ac9f02619772d439f8bdf1d7f11d36364ef80eb5"}
+{"ts": "2026-09-29T22:06:58-03:00", "tipo": "entrega", "task": 2, "rodada": 1, "commit": "fcbe567b6503662dd9e6c7891b96b72879b01878"}
+{"ts": "2026-09-29T22:08:46-03:00", "tipo": "veredito", "task": 2, "rodada": 1, "resultado": "reprova", "sessao": "w-review2", "motivo": "/home/jefferson/.hangar/orq/2026-09-29-cad3e6fe/pareceres/task2-r1.md"}
+{"ts": "2026-09-29T22:10:07-03:00", "tipo": "entrega", "task": 4, "rodada": 1, "commit": "9cfd354f0c4bc9e84ff74696f1f719ec10ebfcbb"}
+{"ts": "2026-09-29T22:10:46-03:00", "tipo": "entrega", "task": 2, "rodada": 2, "commit": "06a8c88c7ea4d1b933c6fbb7ecdec9af2f887e64"}
+{"ts": "2026-09-29T22:10:57-03:00", "tipo": "veredito", "task": 2, "rodada": 2, "resultado": "aprova", "sessao": "w-review2", "motivo": "/home/jefferson/.hangar/orq/2026-09-29-cad3e6fe/pareceres/task2-r2.md"}
+{"ts": "2026-09-29T22:11:19-03:00", "tipo": "integrada", "task": 2, "commit": "f04902c869ef1ced0509130eded2f42cd2e0bc27"}
+{"ts": "2026-09-29T22:12:21-03:00", "tipo": "veredito", "task": 4, "rodada": 1, "resultado": "reprova", "sessao": "w-review4", "motivo": "/home/jefferson/.hangar/orq/2026-09-29-cad3e6fe/pareceres/task-4-r1-revisor.md"}
+{"ts": "2026-09-29T22:18:18-03:00", "tipo": "entrega", "task": 4, "rodada": 2, "commit": "3b799e6665ba59f7801a11e5836d9f5f62772c46"}
+{"ts": "2026-09-29T22:18:36-03:00", "tipo": "veredito", "task": 4, "rodada": 2, "resultado": "aprova", "sessao": "w-review4", "motivo": "/home/jefferson/.hangar/orq/2026-09-29-cad3e6fe/pareceres/task-4-r2-revisor.md"}
+{"ts": "2026-09-29T22:19:00-03:00", "tipo": "integrada", "task": 4, "commit": "538ac4d1328abfb6a0cf6155d9d2fe28fcf9ed5f"}
+{"ts": "2026-09-29T22:19:03-03:00", "tipo": "task_inicio", "task": 5, "titulo": "Envio e Parar no servidor da rota", "executor": "hangar-mobile-t5", "par": "hangar-mobile-review5"}
+{"ts": "2026-09-29T22:25:58-03:00", "tipo": "entrega", "task": 5, "rodada": 1, "commit": "785899773658b0d04f3fabc978f7fb84842e9cf4"}

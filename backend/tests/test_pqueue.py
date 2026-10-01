@@ -1009,6 +1009,50 @@ def test_confirm_adia_enquanto_trabalha(tmp_path, monkeypatch):
     assert "confirmed" not in row and not row.get("attempts")
 
 
+def test_uma_confirmacao_pendente_por_sessao(monkeypatch):
+    # Send, fim de turno e a propria checagem agendavam cada um o seu Timer e as cadeias se
+    # somavam: 25 Timers vivos relendo transcripts de MBs para 3 sessoes.
+    import threading
+    import app.api as api
+
+    criados = []
+    real = threading.Timer
+
+    class Rec(real):
+        def __init__(self, *a, **k):
+            super().__init__(*a, **k)
+            criados.append(self)
+
+    monkeypatch.setattr(api.threading, "Timer", Rec)
+    try:
+        api._agendar_confirmacao("dup", 50)
+        api._agendar_confirmacao("dup", 60)
+        assert len(criados) == 1                  # a pendente roda antes: basta ela
+        api._agendar_confirmacao("dup", 40)
+        assert len(criados) == 2                  # prazo mais curto troca a pendente
+        criados[0].join(1)
+        assert not criados[0].is_alive()
+    finally:
+        for t in criados:
+            t.cancel()
+        api._confirm_pend.pop("dup", None)
+
+
+def test_turno_longo_espaca_a_rechecagem(tmp_path, monkeypatch):
+    # Prompt parado na fila interna da TUI durante um turno longo: sem espacar, relia o
+    # transcript inteiro a cada 8,5s pelo turno todo.
+    import app.api as api
+    api._confirm_working_streak.pop("turno-longo", None)
+    _, timers, _ = _cenario_turno_longo(tmp_path, monkeypatch, com_texto=False)
+    for _ in range(6):
+        api._confirm_and_drain("turno-longo")
+    delays = [d for d, *_ in timers]
+    assert delays[0] == api._CONFIRM_GRACE + 0.5
+    assert delays[1] == 2 * delays[0]
+    assert delays[-1] == api._CONFIRM_WORKING_MAX
+    api._confirm_working_streak.pop("turno-longo", None)
+
+
 def _cenario_turno_longo(tmp_path, monkeypatch, com_texto, provider="claude"):
     """Entrega antiga nao-confirmada + marcador working + transcript COM (ou SEM) o texto.
     Devolve (chamou_drain, timers_agendados, linha_da_fila_depois)."""

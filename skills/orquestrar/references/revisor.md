@@ -115,6 +115,9 @@ Done when the file is on disk with every field filled.
   one you approved and that the round's paths are unchanged from it (`git diff <object> --stat
   -- $(git diff --name-only <object>^1 <object>^2)` empty, run in the Task's checkout — its
   worktree in a wave); a code change in them is a REPROVA back to a code round.
+- A `[decisao]` your verdict depends on (scope, recipe, a blocker's call) holds the verdict: end
+  the turn and wait for the arbiter's answer, which arrives as a message; never poll the journal
+  for it. A context ceiling notice holds nothing: keep judging.
 - Messages: form and transport rungs in `hangar-send --help`; the rung used goes in the report.
 
 Done when `orq event` exits 0 and, on REPROVA, the executor has the path.

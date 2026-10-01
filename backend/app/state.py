@@ -4,6 +4,7 @@ import logging
 import os
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import AsyncIterator, Callable, Optional
 
 from app import plugin_bridge
@@ -705,7 +706,68 @@ def corrige_ocioso_kimi(marker, jsonl: Optional[str], folga: float = KIMI_FOLGA_
     return ("working", marker[1])
 
 
+# Pool próprio pro tmux: rajada de /history ou de transcript no pool padrão não pode deixar estado e
+# prévia na fila.
+tmux_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="hangar-tmux")
+
+
+async def run_tmux(fn, *args):
+    return await asyncio.get_running_loop().run_in_executor(tmux_pool, fn, *args)
+
+
+# Último quadro de texto puro por sessão: monitor de estado e prévia olham o MESMO pane, e cada um
+# capturando no seu ritmo eram ~8 forks/s por chat trabalhando. Quem precisa de quadro aceita um
+# recente dentro da sua idade máxima; captura já em voo é aguardada em vez de repetida.
+_frames: dict[str, tuple[float, str]] = {}
+# nome -> (início, captura em voo)
+_frames_inflight: dict[str, tuple[float, asyncio.Future]] = {}
+# Sessão que morre fora do monitor (kill por outra rota, sumiço do tmux) não passa por forget_frame.
+_FRAME_EVICT_AGE = 60.0
+
+
+async def _capture_and_store(name: str, started: float) -> str:
+    # Idade conta do INÍCIO da captura: o quadro pode ser até isso mais velho, nunca mais novo.
+    # Um argumento só, como antes: há dublê de teste com essa assinatura.
+    pane = await run_tmux(tmux.capture_pane, name)
+    if pane:
+        prev = _frames.get(name)
+        if prev is None or prev[0] <= started:   # captura antiga que terminou depois não sobrescreve
+            _frames[name] = (started, pane)
+        for n in [n for n, (t, _) in _frames.items() if started - t > _FRAME_EVICT_AGE]:
+            _frames.pop(n, None)
+    return pane
+
+
+async def shared_capture(name: str, max_age: float) -> str:
+    """Quadro do pane com no máximo `max_age` s; senão captura (ou espera a captura em voo)."""
+    now = time.monotonic()
+    hit = _frames.get(name)
+    if hit is not None and now - hit[0] <= max_age:
+        return hit[1]
+    inflight = _frames_inflight.get(name)
+    # Captura em voo que começou antes da janela pedida (max_age=0 depois de um wake do plugin)
+    # traria o pane de antes do evento: começa outra.
+    if (inflight is None or inflight[0] < now - max_age or inflight[1].done()
+            or inflight[1].get_loop() is not asyncio.get_running_loop()):
+        fut = asyncio.ensure_future(_capture_and_store(name, now))
+        _frames_inflight[name] = (now, fut)
+        fut.add_done_callback(
+            lambda f: _frames_inflight.pop(name, None)
+            if (_frames_inflight.get(name) or (0, None))[1] is f else None)
+    else:
+        fut = inflight[1]
+    # shield: quem desiste (conexão caiu) não cancela a captura que o outro consumidor espera.
+    return await asyncio.shield(fut)
+
+
+def forget_frame(name: str) -> None:
+    _frames.pop(name, None)
+
+
 class StateMonitor:
+    # Idade máxima do quadro emprestado da prévia: abaixo do poll, pra pergunta/menu não atrasar
+    # mais que um tique.
+    FRAME_MAX_AGE = 0.5
     # Polls com o MESMO spinner antes de tratá-lo como marcador de turn CONCLUÍDO congelado (idle)
     # em vez de spinner vivo animando (working).
     STALE_LIMIT = 3
@@ -758,21 +820,23 @@ class StateMonitor:
         ultima_divergencia: tuple[str, str] | None = None
         permission_mode = None
         previous_non_plan = None
+        max_age = self.FRAME_MAX_AGE
         while True:
             # Um spawn por tick, nao dois: o capture-pane de uma sessao sumida devolve "" (rc != 0),
             # e so ai vale pagar o has-session pra separar "morreu" de "pane em branco". No psmux
             # cada comando custa ~50ms (medido na VM), e isto roda a 0,75s por chat aberto.
-            pane = await asyncio.to_thread(tmux.capture_pane, self.name)
+            pane = await shared_capture(self.name, max_age)
             if not pane:
                 # None = tmux nao respondeu: nao e morte (o watcher do Codex ja matou app-servers
                 # vivos lendo timeout como sessao sumida); espera o proximo tick.
-                existe = await asyncio.to_thread(tmux.sessao_existe, self.name)
+                existe = await run_tmux(tmux.sessao_existe, self.name)
                 from app.adapters.claude_headless.sessions import em_troca
                 if existe is False and em_troca(self.name):
                     await asyncio.sleep(self.poll)
                     continue
                 if existe is False:
                     plugin_bridge.esquecer(self.name)
+                    forget_frame(self.name)
                     yield StateEvent(session=self.name, state="dead")
                     return
             if self.observe_permission:
@@ -784,6 +848,7 @@ class StateMonitor:
                         permission_key, observed_permission, sessao=self.name)
             state, label, question, options = classify(pane)
             spinner = _live_spinner(pane)
+            animating = False
 
             # Aprovacao do Kimi: vem do WIRE, nao do pane (ver `aprovacao_kimi`). Vence o classify
             # de proposito — enquanto o painel esta aberto o pane ainda mostra o spinner do turno,
@@ -830,6 +895,7 @@ class StateMonitor:
                 no_spinner = 0
             elif spinner is not None:
                 no_spinner = 0
+                animating = prev_spinner is not None and spinner != prev_spinner and "…" in spinner
                 frozen = frozen + 1 if spinner == prev_spinner else 0
                 prev_spinner = spinner
                 # Spinner CONGELADO (byte-idêntico) por STALE_LIMIT polls = marcador de turn concluído.
@@ -853,7 +919,8 @@ class StateMonitor:
             # working/idle: menu e morte continuam do pane, que é quem os enxerga.
             if state in ("working", "idle"):
                 do_plugin = plugin_bridge.estado_recente(self.name)
-                if do_plugin is not None and do_plugin[0] in ("working", "idle"):
+                if do_plugin is not None and do_plugin[0] in ("working", "idle") \
+                        and not (do_plugin[0] == "idle" and animating):
                     if do_plugin[0] != state and (do_plugin[0], state) != ultima_divergencia:
                         # Discordância é o valor desta âncora: aqui se vê o pane errando, e é o
                         # único lugar onde dá pra notar que o caminho novo parou de corrigir. Uma
@@ -874,7 +941,9 @@ class StateMonitor:
                 # do `capture_pane` logo acima e do git status em registry._decorate_git.
                 m = await asyncio.to_thread(self._marcador)
                 if m is not None:
-                    if m[0] == "idle" and state == "working":
+                    # Spinner mudando entre dois quadros é turno vivo: o turno aberto pela volta de um
+                    # agente em segundo plano não dispara UserPromptSubmit e o marcador fica no idle do Stop.
+                    if m[0] == "idle" and state == "working" and not animating:
                         state, label = "idle", None
                     elif m[0] == "working" and state == "idle" \
                             and (self.hook_grace is None or no_spinner < self.hook_grace):
@@ -924,6 +993,9 @@ class StateMonitor:
             # Com o plugin vivo, aviso dele (turno, pergunta, fim) acorda o laço na hora; o tique
             # do pane segue igual por baixo. Sem plugin é o sleep de sempre.
             if plugin_bridge.vivo(self.name):
+                inicio = time.monotonic()
                 await plugin_bridge.esperar_evento(self.name, self.poll)
+                # Acordado pelo plugin: quadro emprestado pode ser de antes do aviso.
+                max_age = 0.0 if time.monotonic() - inicio < self.poll else self.FRAME_MAX_AGE
             else:
                 await asyncio.sleep(self.poll)

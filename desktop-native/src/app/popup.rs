@@ -65,7 +65,7 @@ impl<T: Clone> Presence<T> {
 
 /// Painel do compositor e a cópia do que ele mostra.
 #[derive(Clone)]
-enum Floating { Controls(super::controls::Open), Commands, Recent(Recent), NewChat(super::create::Menu), Usage, Context }
+enum Floating { Controls(super::controls::Open), Commands, Recent(Recent), NewChat(super::create::Menu), Usage, Context, Hangar }
 
 impl Hangar {
     fn floating(&self) -> Option<Floating> {
@@ -73,6 +73,8 @@ impl Hangar {
         let page = self.settings.is_some() && !self.settings_ui.live;
         // O cartão aberto pela pílula da barra do topo existe em qualquer tela, com ou sem sessão.
         if self.accounts.card && self.accounts.card_top { return Some(Floating::Usage); }
+        // A lista do chip "N no Hangar" também vale em qualquer tela: o chip mora na barra de sessões.
+        if self.hangar_open { return Some(Floating::Hangar); }
         if let Some(menu) = self.new_chat_folders.get().filter(|_| !page && self.selected.is_none() && self.api.is_some()) {
             return Some(Floating::NewChat(menu));
         }
@@ -89,8 +91,10 @@ impl Hangar {
     /// Fecha o painel aberto sobre o compositor; diz se havia um.
     pub(super) fn close_popups(&mut self) -> bool {
         let folders = self.new_chat_folders.replace(None).is_some();
-        let open = folders || self.controls_open() || self.command_panel || self.recent.is_some() || self.accounts.card || self.context_card;
+        let open = folders || self.controls_open() || self.command_panel || self.recent.is_some() || self.accounts.card || self.context_card
+            || self.hangar_open;
         self.close_controls();
+        self.hangar_open = false;
         self.command_panel = false;
         self.accounts.card = false;
         self.context_card = false;
@@ -110,8 +114,9 @@ impl Hangar {
             Floating::Controls(open) => (open.anchor(), Align::End, true, self.render_ctl_panel_for(open, window, cx)),
             Floating::Commands => ("composer".to_owned(), Align::Start, false, Some(self.render_command_panel(cx))),
             Floating::Usage => ((if self.accounts.card_top { "topbar-account" } else { "composer-account" }).to_owned(), Align::End, true,
-                Some(self.render_usage_card())),
+                Some(self.render_usage_card(window))),
             Floating::Context => ("composer-ctx".to_owned(), Align::End, true, Some(self.render_context_card())),
+            Floating::Hangar => ("hangar-chip".to_owned(), Align::Start, true, Some(self.render_hangar_popover(window, cx))),
             Floating::Recent(recent) => {
                 let live = self.recent.replace(recent);
                 let content = self.render_recent(cx);

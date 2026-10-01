@@ -12,6 +12,8 @@ def _stub_cached_list(monkeypatch):
     monkeypatch.setattr(sse, "_cached_list", _fc)
     # Refresher unico (singleton): poll rapido pros testes; re-bind por event loop cuida do reset.
     monkeypatch.setattr(sse._list_refresher, "poll", 0.001)
+    # None = nada a mandar de terminais de atalho: os testes de `sessions` nao contam esse evento.
+    monkeypatch.setattr(sse, "_shortcuts_snapshot", lambda: None)
 
 
 class _Info:
@@ -248,3 +250,84 @@ def test_status_sig_reduz_sem_relogio_e_custo():
     assert sse._status_sig(a) != sse._status_sig(c)          # % mudou -> sig muda
     assert sse._status_sig(None) is None
     assert sse._status_sig("sem emojis") == (None, None, None, None, None)
+
+
+def test_shortcut_terminals_go_out_as_own_event_without_resending_sessions(monkeypatch):
+    async def fake_list(_snap=None):
+        return [_Info("cc", "idle")]
+    monkeypatch.setattr(sse._list_registry, "list_with_state", fake_list)
+    frames = iter(["[]", '[{"id": "abc123"}]'])
+    last = {"v": "[]"}
+
+    def snap():
+        last["v"] = next(frames, last["v"])
+        return last["v"]
+    monkeypatch.setattr(sse, "_shortcuts_snapshot", snap)
+    evs = asyncio.run(_take(sse.list_events(ping_secs=9999), 3))
+    assert [e["event"] for e in evs] == ["sessions", "shortcut_terminals", "shortcut_terminals"]
+    assert json.loads(evs[2]["data"]) == [{"id": "abc123"}]
+
+
+def test_guest_never_gets_shortcut_terminals(monkeypatch):
+    async def fake_list(_snap=None):
+        return [_Info("cc", "idle")]
+    monkeypatch.setattr(sse._list_registry, "list_with_state", fake_list)
+    monkeypatch.setattr(sse, "_shortcuts_snapshot", lambda: '[{"id": "abc123"}]')
+    evs = asyncio.run(_take(sse.list_events(ping_secs=0.05, only="cc"), 3))
+    assert "shortcut_terminals" not in [e["event"] for e in evs]
+
+
+def test_hanging_shortcuts_snapshot_never_delays_sessions(monkeypatch):
+    import threading, time
+    release = threading.Event()
+    async def fake_list(_snap=None):
+        return [_Info("cc", "idle")]
+    monkeypatch.setattr(sse._list_registry, "list_with_state", fake_list)
+    monkeypatch.setattr(sse, "_shortcuts_snapshot", lambda: release.wait(2) and '[{"id": "old"}]')
+    try:
+        async def go():
+            t0 = time.monotonic()
+            evs = await _take(sse.list_events(ping_secs=0.05), 2)
+            return evs, time.monotonic() - t0
+        evs, took = asyncio.run(go())
+        assert evs[0]["event"] == "sessions"
+        assert took < 1.0
+        assert "shortcut_terminals" not in [e["event"] for e in evs]
+    finally:
+        release.set()
+
+
+def test_failing_shortcuts_snapshot_keeps_previous_and_leaves_list_alone(monkeypatch):
+    async def fake_list(_snap=None):
+        return [_Info("cc", "idle")]
+    monkeypatch.setattr(sse._list_registry, "list_with_state", fake_list)
+    calls = {"n": 0}
+
+    def snap():
+        calls["n"] += 1
+        if calls["n"] > 1:
+            raise RuntimeError("tmux caiu")
+        return '[{"id": "a"}]'
+    monkeypatch.setattr(sse, "_shortcuts_snapshot", snap)
+    evs = asyncio.run(_take(sse.list_events(ping_secs=0.1), 3))
+    names = [e["event"] for e in evs]
+    assert "list_error" not in names
+    assert names.count("shortcut_terminals") == 1
+    assert calls["n"] > 1
+    assert not sse._list_refresher.errored
+
+
+
+def test_guest_filter_failure_emits_list_error_instead_of_freezing(monkeypatch):
+    from app import guest_users
+
+    async def fake_list(_snap=None):
+        return [_Info("cc", "idle")]
+
+    def boom(*_a, **_k):
+        raise OSError("disco cheio")
+    monkeypatch.setattr(sse._list_registry, "list_with_state", fake_list)
+    monkeypatch.setattr(guest_users, "has_claims", lambda: True)
+    monkeypatch.setattr(guest_users, "filter_visible", boom)
+    evs = asyncio.run(_take(sse.list_events(ping_secs=9999), 1))
+    assert evs[0]["event"] == "list_error"

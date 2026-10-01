@@ -77,13 +77,22 @@ def make_verifier(auth_hash: str, verifier_salt: bytes) -> str:
     return base64.b64encode(dk).decode()
 
 
+def _account(v: dict | None, user: str) -> dict | None:
+    # Dono no topo do arquivo (formato de sempre); convidados em `guests`, mesmo formato de conta.
+    if not v:
+        return None
+    if v.get("user") == user:
+        return v
+    return (v.get("guests") or {}).get(user)
+
+
 def verify_credentials(user: str, auth_hash: str) -> bool:
-    v = load_vault()
-    if not v or v.get("user") != user:
+    acc = _account(load_vault(), user)
+    if not acc:
+        make_verifier(auth_hash, bytes(16))  # mesmo custo de uma conta real: o tempo não revela quem existe
         return False
-    vsalt = base64.b64decode(v["verifier_salt"])
-    expect = make_verifier(auth_hash, vsalt)
-    return hmac.compare_digest(expect, v["auth_verifier"])
+    vsalt = base64.b64decode(acc["verifier_salt"])
+    return hmac.compare_digest(make_verifier(auth_hash, vsalt), acc["auth_verifier"])
 
 
 # ── Session cookie (signed) ──────────────────────────────────────────────────────────────────
@@ -93,14 +102,20 @@ _SESSION_SECRET = (settings.sync_session_secret or secrets.token_hex(32)).encode
 COOKIE_NAME = "cp_sync"
 
 
-def sign_session(user: str) -> str:
+def _generation(acc: dict) -> str:
+    # Muda quando a conta é recriada ou troca de senha (verifier_salt novo): derruba cookies antigos.
+    return base64.b64decode(acc["verifier_salt"])[:4].hex()
+
+
+def sign_session(user: str, gen: str | None = None) -> str:
     exp = int(time.time()) + _SESSION_TTL
-    msg = f"{user}.{exp}"
+    msg = f"{user}.{exp}" if gen is None else f"{user}.{exp}:{gen}"
     sig = hmac.new(_SESSION_SECRET, msg.encode(), hashlib.sha256).hexdigest()
     return f"{msg}.{sig}"
 
 
-def verify_session(cookie: str | None) -> str | None:
+def verify_session(cookie: str | None) -> tuple[str, str | None] | None:
+    # Devolve (usuário, geração); cookie no formato antigo (`user.exp.sig`) vem com geração None.
     if not cookie:
         return None
     try:
@@ -111,31 +126,41 @@ def verify_session(cookie: str | None) -> str | None:
     good = hmac.new(_SESSION_SECRET, msg.encode(), hashlib.sha256).hexdigest()
     if not hmac.compare_digest(good, sig):
         return None
-    if int(exp_s) < int(time.time()):
+    exp_s, _, gen = exp_s.partition(":")
+    if not exp_s.isdigit() or int(exp_s) < int(time.time()):
         return None
-    return user
+    return user, (gen or None)
 
 
-def _set_session_cookie(response: Response, user: str, request: Request) -> None:
+def _set_session_cookie(response: Response, user: str, request: Request, gen: str | None = None) -> None:
     # Loopback bind = dev over http (Secure off senao o cookie nao gruda); qualquer bind non-loopback
     # = deploy real (HTTPS exigido) -> forca Secure mesmo que o proxy reporte http.
     secure = request.url.scheme == "https" or settings.lan_bind_ip not in _LOOPBACK
     response.set_cookie(
-        COOKIE_NAME, sign_session(user),
+        COOKIE_NAME, sign_session(user, gen),
         max_age=_SESSION_TTL, httponly=True, samesite="lax", secure=secure, path="/",
     )
 
 
 def require_session(request: Request, response: Response) -> str:
     cookie = request.cookies.get(COOKIE_NAME)
-    user = verify_session(cookie)
+    session = verify_session(cookie)
     ip = request.client.host if request.client else "?"
+    user = gen = None
+    if session:
+        user, gen = session
+        v = load_vault()
+        if v:
+            acc = _account(v, user)
+            # Formato antigo (sem geração) só vale para o dono, para o deploy não deslogá-lo.
+            if acc is None or (gen != _generation(acc) if gen else user != v.get("user")):
+                user = None
     if not user:
         registrar_acesso(ip, "cookie", "sessao_invalida_ou_expirada" if cookie else "cookie_ausente",
                          dominio="sync.sessao")
         raise HTTPException(status_code=401, detail=erro("erro_nao_autorizado", "unauthorized"))
     registrar_acesso(ip, "cookie", None, dominio="sync.sessao")
-    _set_session_cookie(response, user, request)  # sliding: renova o prazo a cada request autenticado
+    _set_session_cookie(response, user, request, gen)  # sliding: renova o prazo a cada request autenticado
     return user
 
 
@@ -320,10 +345,17 @@ class VaultPutBody(BaseModel):
 
 @sync_router.get("/prelogin")
 def prelogin(user: str) -> dict:
-    # Always return the stored salt + iterations regardless of username, to avoid user enumeration.
-    # A wrong user just fails later at /login. If no account yet, return a stable placeholder salt.
+    # Usuário desconhecido recebe um salt falso e estável por nome (HMAC com o verifier_salt do dono,
+    # que sobrevive a restart), indistinguível do salt de uma conta real. Sem cadastro, salt fixo.
     v = load_vault()
-    salt = v["salt"] if v else base64.b64encode(b"unregistered----").decode()
+    acc = _account(v, user)
+    if acc:
+        salt = acc["salt"]
+    elif v:
+        key = base64.b64decode(v["verifier_salt"])
+        salt = base64.b64encode(hmac.new(key, user.encode(), hashlib.sha256).digest()[:16]).decode()
+    else:
+        salt = base64.b64encode(b"unregistered----").decode()
     return {"salt": salt, "iterations": PBKDF2_ITERATIONS}
 
 
@@ -338,7 +370,7 @@ def login(body: LoginBody, request: Request, response: Response) -> dict:
         registrar_acesso(ip, "senha", "credenciais_invalidas", dominio="sync.login")
         record_fail(ip)
         raise HTTPException(status_code=401, detail=erro("erro_nao_autorizado", "unauthorized"))
-    _set_session_cookie(response, body.user, request)
+    _set_session_cookie(response, body.user, request, _generation(_account(load_vault(), body.user)))
     registrar_acesso(ip, "senha", None, dominio="sync.login")
     diag.registrar("sync.login_concluido")
     return {"ok": True}
@@ -353,8 +385,14 @@ def logout(response: Response) -> dict:
 
 @sync_router.get("/vault")
 def get_vault(user: str = Depends(require_session)) -> dict:
-    v = load_vault() or {"enc_blob": None, "rev": 0}
-    return {"enc_blob": v.get("enc_blob"), "rev": v.get("rev", 0)}
+    v = load_vault()
+    if not v:
+        return {"enc_blob": None, "rev": 0}
+    acc = _account(v, user)
+    if acc is None:
+        # Convidado removido com o cookie ainda vivo: o app trata 401 como fim da sessão de sync.
+        raise HTTPException(status_code=401, detail=erro("erro_nao_autorizado", "unauthorized"))
+    return {"enc_blob": acc.get("enc_blob"), "rev": acc.get("rev", 0)}
 
 
 @sync_router.put("/vault")
@@ -365,11 +403,86 @@ def put_vault(body: VaultPutBody, user: str = Depends(require_session)) -> dict:
         if not v:
             diag.registrar("sync.gravacao_recusada", "aviso", detalhe="cadastro_ausente", codigo="409")
             raise HTTPException(status_code=409, detail={"enc_blob": None, "rev": 0})
-        if body.base_rev != v["rev"]:
+        acc = _account(v, user)
+        if acc is None:
+            raise HTTPException(status_code=401, detail=erro("erro_nao_autorizado", "unauthorized"))
+        if body.base_rev != acc["rev"]:
             diag.registrar("sync.gravacao_recusada", "aviso", detalhe="revisao_desatualizada", codigo="409")
-            raise HTTPException(status_code=409, detail={"enc_blob": v["enc_blob"], "rev": v["rev"]})
-        v["enc_blob"] = body.enc_blob
-        v["rev"] += 1
+            raise HTTPException(status_code=409, detail={"enc_blob": acc["enc_blob"], "rev": acc["rev"]})
+        acc["enc_blob"] = body.enc_blob
+        acc["rev"] += 1
         save_vault(v)
         diag.registrar("sync.gravado")
-        return {"rev": v["rev"]}
+        return {"rev": acc["rev"]}
+
+
+def require_owner(user: str = Depends(require_session)) -> str:
+    v = load_vault()
+    if not v or v.get("user") != user:
+        raise HTTPException(status_code=403, detail=erro("erro_so_dono", "só o dono"))
+    return user
+
+
+class GuestAccountBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    user: str = Field(min_length=1, max_length=100)
+    salt: str = Field(max_length=24)
+    auth_hash: str = Field(max_length=44)
+    enc_blob: SetupBlob
+    admin_blob: SetupBlob
+
+    @field_validator("user")
+    @classmethod
+    def validate_user(cls, value: str) -> str:
+        # "/" quebraria a rota /guests/{user}/delete.
+        value = value.strip()
+        if not value or "/" in value:
+            raise ValueError("usuário inválido")
+        return value
+
+    @field_validator("salt", "auth_hash")
+    @classmethod
+    def validate_base64(cls, value, info):
+        if len(base64.b64decode(value, validate=True)) != (16 if info.field_name == "salt" else 32):
+            raise ValueError("tamanho inválido da credencial")
+        return value
+
+
+@sync_router.get("/guests")
+def list_guests(_: str = Depends(require_owner)) -> list[dict]:
+    v = load_vault() or {}
+    return [{"user": u, "admin_blob": a.get("admin_blob")} for u, a in (v.get("guests") or {}).items()]
+
+
+@sync_router.post("/guests")
+@diag.rastrear("sync.convidado_gravar")
+def put_guest(body: GuestAccountBody, _: str = Depends(require_owner)) -> dict:
+    user = body.user.strip()
+    with _vault_lock:
+        v = load_vault()
+        if user == v["user"]:
+            raise HTTPException(status_code=409, detail=erro("erro_usuario_em_uso", "usuário já existe"))
+        guests = v.setdefault("guests", {})
+        old = guests.get(user)
+        vsalt = secrets.token_bytes(16)
+        # O dono sempre vence: a revisão sobe e o app do convidado relê na próxima gravação (409).
+        guests[user] = {
+            "salt": body.salt,
+            "verifier_salt": base64.b64encode(vsalt).decode(),
+            "auth_verifier": make_verifier(body.auth_hash, vsalt),
+            "enc_blob": body.enc_blob.model_dump(),
+            "admin_blob": body.admin_blob.model_dump(),
+            "rev": (old["rev"] + 1) if old else 1,
+        }
+        save_vault(v)
+    return {"ok": True}
+
+
+@sync_router.post("/guests/{user}/delete")
+def delete_guest(user: str, _: str = Depends(require_owner)) -> dict:
+    with _vault_lock:
+        v = load_vault()
+        if (v.get("guests") or {}).pop(user, None) is None:
+            raise HTTPException(status_code=404, detail=erro("erro_convidado_inexistente", "convidado não existe"))
+        save_vault(v)
+    return {"ok": True}

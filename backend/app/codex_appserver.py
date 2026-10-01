@@ -9,14 +9,23 @@ linha no stdout, aceita `model/list` (0,78s) e `account/rateLimits/read` (1,2s) 
 sem pane e sem sessão. A credencial que ele usa é a do `~/.codex/auth.json` — que é justamente o
 que o painel de cotas quer: uma fonte por CREDENCIAL, não por sessão.
 
+As duas leituras tentam antes o backend do ChatGPT por HTTP (`backend_get`), a mesma rota que o
+próprio binário chama com o token da conta; o app-server fica de reserva. Ver "Cota e catálogo do
+Codex por HTTP" em docs/decisoes/harnesses.md.
+
 Só stdlib, de propósito: o `scripts/hangar-codex-tui` roda no `python3` do sistema e pode um dia
 precisar disto.
 """
+import base64
+import http.client
 import json
 import os
 import shutil
 import subprocess
 import threading
+import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 from app import codex_contas
@@ -97,7 +106,10 @@ def perguntar(metodo: str, timeout: float = _TIMEOUT, *,
     """
     try:
         proc = subprocess.Popen(
-            [_binario(), "app-server"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            # Sem plugins: na largada o app-server confere cada marketplace git num temporário em
+            # CODEX_HOME/.tmp, e morto antes de acabar (sempre, aqui) deixa o temporário para trás.
+            [_binario(), "app-server", "-c", "features.plugins=false"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace", bufsize=1,
             env=_environment(codex_home),
         )
@@ -142,3 +154,74 @@ def perguntar(metodo: str, timeout: float = _TIMEOUT, *,
         carrasco.cancel()
         proc.kill()
         proc.wait()
+
+
+_BACKEND = "https://chatgpt.com/backend-api"
+# Margem pro relógio: token que vence durante a ida vira 401 e custa as duas rotas.
+_FOLGA_TOKEN_S = 60.0
+
+
+def _expira_em(token: str) -> float | None:
+    try:
+        parte = token.split(".")[1]
+        exp = json.loads(base64.urlsafe_b64decode(parte + "=" * (-len(parte) % 4))).get("exp")
+    except (IndexError, ValueError, AttributeError):
+        return None
+    return float(exp) if isinstance(exp, (int, float)) and not isinstance(exp, bool) else None
+
+
+def backend_get(caminho: str, *, codex_home: str | Path | None = None,
+                timeout: float = _TIMEOUT) -> tuple[int, object]:
+    """GET no backend do ChatGPT com o token da conta, com os cabeçalhos que o CLI manda.
+
+    Devolve (status, json) quando houve resposta HTTP; json é None fora do 200. Levanta
+    `CodexIndisponivel` quando nem dá pra tentar ou não houve resposta — o chamador cai no
+    app-server. Nunca renova o token: o refresh é do CLI, e girá-lo aqui deslogaria o CLI.
+    """
+    raiz = (Path(codex_home) if codex_home is not None else codex_contas.default_home()).expanduser()
+    try:
+        tokens = json.loads((raiz / "auth.json").read_text(encoding="utf-8")).get("tokens")
+        token, conta = tokens["access_token"], tokens["account_id"]
+    except (OSError, ValueError, AttributeError, TypeError, KeyError) as exc:
+        raise CodexIndisponivel("sem token no auth.json") from exc
+    if not (isinstance(token, str) and token and isinstance(conta, str) and conta):
+        raise CodexIndisponivel("sem token no auth.json")
+    exp = _expira_em(token)
+    if exp is None or exp - _FOLGA_TOKEN_S <= time.time():
+        raise CodexIndisponivel("token vencido ou ilegivel")
+    req = urllib.request.Request(_BACKEND + caminho, method="GET", headers={
+        "Authorization": f"Bearer {token}", "ChatGPT-Account-Id": conta, "User-Agent": "codex-cli",
+    })
+    try:
+        with _opener.open(req, timeout=timeout) as r:
+            return r.status, json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        if 300 <= exc.code < 400:
+            raise CodexIndisponivel(f"redirecionado: http {exc.code}") from exc
+        return exc.code, None
+    except (urllib.error.URLError, OSError, ValueError, TimeoutError,
+            http.client.HTTPException) as exc:
+        raise CodexIndisponivel(f"sem resposta: {type(exc).__name__}") from exc
+
+
+class _SemRedirect(urllib.request.HTTPRedirectHandler):
+    # Seguir o redirect levaria o token e o id da conta para outro host.
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_opener = urllib.request.build_opener(_SemRedirect)
+
+
+def versao() -> str:
+    """Versão do `codex` que o app-server usaria. O catálogo HTTP depende dela: a mesma conta com
+    `client_version` antigo recebe outra lista."""
+    try:
+        r = subprocess.run([_binario(), "--version"], capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=10)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise CodexIndisponivel(f"codex --version falhou: {exc}") from exc
+    partes = (r.stdout or "").split()
+    if r.returncode != 0 or len(partes) < 2 or not partes[-1][:1].isdigit():
+        raise CodexIndisponivel("codex --version sem versao")
+    return partes[-1]

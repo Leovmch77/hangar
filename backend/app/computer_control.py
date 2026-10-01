@@ -67,8 +67,9 @@ def _read(p: Path) -> dict:
     except FileNotFoundError:
         return {}
     except (OSError, ValueError) as e:
-        raise ComputerControlError(500, "erro_computer_control_read", f"não consegui ler {p}: {e}",
-                                   file=str(p), error=str(e))
+        error = e.strerror if isinstance(e, OSError) else "JSON ou encoding inválido"
+        raise ComputerControlError(500, "erro_computer_control_read", f"não consegui ler {p}: {error}",
+                                   file=str(p), error=error) from e
     if not isinstance(data, dict):
         raise ComputerControlError(500, "erro_computer_control_read", f"{p} não é um objeto JSON",
                                    file=str(p), error="")
@@ -82,7 +83,11 @@ def _write(p: Path, data: dict) -> None:
 
 
 def _entry(p: Path) -> dict | None:
-    e = (_read(p).get("mcpServers") or {}).get(NAME)
+    servers = _read(p).get("mcpServers") or {}
+    if not isinstance(servers, dict):
+        raise ComputerControlError(500, "erro_computer_control_read", f"mcpServers em {p} não é um objeto JSON",
+                                   file=str(p), error="mcpServers inválido")
+    e = servers.get(NAME)
     return e if isinstance(e, dict) else None
 
 
@@ -245,12 +250,39 @@ def _cliproxy_running() -> bool:
 
 
 def _jev_from_settings() -> str:
-    try:
-        env = json.loads((Path.home() / ".claude" / "settings.json").read_text(encoding="utf-8")).get("env") or {}
-    except (OSError, ValueError):
-        return ""
+    env = _read(Path.home() / ".claude" / "settings.json").get("env") or {}
     v = env.get("TYPESAFE_API_KEY") if isinstance(env, dict) else None
     return v if isinstance(v, str) else ""
+
+
+def jev_key() -> str:
+    env = (_known_entry() or {}).get("env") or {}
+    if not isinstance(env, dict):
+        raise ComputerControlError(500, "erro_computer_control_read", "env do MCP Windows não é um objeto JSON")
+    key = env.get("TYPESAFE_API_KEY")
+    return key if isinstance(key, str) and key else _jev_from_settings()
+
+
+def save_jev_key(key: str) -> None:
+    """Atualiza só a chave, sem ligar o MCP nem substituir ajustes de cada conta."""
+    pending = []
+    for path in _config_files():
+        entry = _entry(path)
+        if entry is not None:
+            data = _read(path)
+            env = entry.get("env") or {}
+            if not isinstance(env, dict):
+                raise ComputerControlError(500, "erro_computer_control_read", f"env em {path} não é um objeto JSON")
+            data["mcpServers"][NAME] = {**entry, "env": {**env, "TYPESAFE_API_KEY": key}}
+            pending.append((path, data))
+    parked = _read(_parked_file())
+    env = parked.get("env") or {}
+    if not isinstance(env, dict):
+        raise ComputerControlError(500, "erro_computer_control_read", "env do MCP Windows guardado não é um objeto JSON")
+    if parked or not pending:
+        _park({**parked, "env": {**env, "TYPESAFE_API_KEY": key}})
+    for path, data in pending:
+        _write(path, data)
 
 
 def _tail(key: str) -> str:
@@ -277,7 +309,14 @@ def _targets(project: Path) -> list[dict]:
 
 def _mode(entry: dict | None) -> str:
     """`package` = instalado pelo botão (uvx + release); `local` = rodando de uma pasta com o código."""
-    return "package" if entry and Path(str(entry.get("command", ""))).name in ("uvx", "uvx.exe") else "local"
+    command = (entry or {}).get("command")
+    if command:
+        return "package" if Path(str(command)).name in ("uvx", "uvx.exe") else "local"
+    install = _read(_install_dir() / "install.json")
+    if install.get("tag") and _package_exe().is_file():
+        return "package"
+    project = Path.home() / "Projetos" / NAME
+    return "local" if (project / "servidor_mcp.py").is_file() and _venv_python(project).is_file() else "package"
 
 
 def _local_project(entry: dict | None) -> Path:

@@ -5,6 +5,14 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
 
 ## Regras vigentes
 
+- **Modo de abertura omitido herda a preferência do servidor.** `headless_default` nasce
+  ligado para Claude/Codex; a escolha humana do dono na criação passa a ser o padrão.
+  `headless=false`/`--terminal` e `headless=true`/`--headless` explícitos prevalecem.
+  Chamadas automatizadas não gravam preferência. Convidado pode escolher para sua sessão,
+  mas não acessa a configuração global. Providers sem suporte e isolamento `read_only`
+  usam terminal quando o modo é omitido; `read_only` com sem terminal explícito continua
+  recusado. O wrapper interativo do Codex sempre solicita terminal.
+
 - **Lista e chat do Codex usam o mesmo estado nativo quando a conexão está saudável e assinada.**
   O hook é alternativa para estado indisponível; um `working` antigo não vence a interrupção
   confirmada pelo app-server. O retrato só vale para a mesma thread do rollout.
@@ -72,7 +80,9 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   25% de cota (decide antes de gastar), só sobe com a TUI, e vale a partir da SEGUNDA sessão — o
   índice entra na abertura, então quem manda consolidar não vê o próprio resultado.
 - **Instruções nativas do Codex entram por `AGENTS.override.md`** apontando para o `CLAUDE.md`.
-  Override pessoal nunca é sobrescrito; onde existe `AGENTS.md` de verdade, ele deixa de ser lido.
+  Com sincronização ativada, o Claude vence a cópia do Codex; divergência é guardada em backup.
+  Desativada, a abertura não altera os aliases. Reconciliar manualmente autoriza a atualização.
+  Onde existe `AGENTS.md` de verdade, ele deixa de ser lido.
 - **A ponte de skills é a ÚNICA dona das pastas de ponte**, é stdlib-only, e só mexe em symlink
   cujo alvo está numa fonte conhecida. Config alheia é conferida, nunca editada.
 - **Motor de modelo: `engines.py` é stdlib-only**, é `ANTHROPIC_AUTH_TOKEN` (nunca `_API_KEY`),
@@ -182,6 +192,91 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   409 `erro_sessao_orq` (`api._recusa_orq`), e os três clientes escondem compositor, terminal,
   parear e rodar, com o botão "Falar com o árbitro" no lugar. Ver
   [Provider `orq`](#provider-orq-a-linha-do-orquestrador-não-tem-pane).
+- **Confirmação de entrega lê o transcript de forma incremental, e o transcript continua sendo a
+  prova.** Uma checagem pendente por sessão (`_agendar_confirmacao`); com a sessão trabalhando o
+  intervalo dobra até 120 s. `committed_user_lines` e `fila_interna_pendente` leem pelo mesmo
+  índice por (arquivo, provider), que só processa o que foi acrescentado. O `UserPromptSubmit`
+  NÃO confirma: dispara também para prompt que outro hook barra. Ver
+  [confirmação de entrega sem reler o transcript](#confirmação-de-entrega-sem-reler-o-transcript).
+- **App-server efêmero do Codex sobe com `-c features.plugins=false` quando não usa plugins.**
+  Ver [temporários `git-*` no `.tmp` do Codex](#temporários-git--no-tmp-do-codex).
+- **Cota e catálogo do Codex vão por HTTP primeiro, com o app-server efêmero de reserva.** A rota
+  é a do próprio binário (`chatgpt.com/backend-api/wham/usage`, `/wham/rate-limit-reset-credits`,
+  `/codex/models?client_version=<codex --version>`), com o token do `auth.json` da conta. Token
+  vencido ou fora do arquivo, resposta que não é 200, formato estranho ou rede fora → app-server,
+  com linha `info` no log. O Hangar nunca renova o token. 429 na cota NÃO cai no app-server: ele
+  bateria no mesmo backend. Ver [Cota e catálogo do Codex por HTTP](#cota-e-catálogo-do-codex-por-http).
+
+## Confirmação de entrega sem reler o transcript
+
+Medido em 30/09/2026 pela sessão `Projetos`: backend a 100% de um núcleo. py-spy de 20 s deu
+1046 de 1303 amostras em `_confirm_and_drain`, relendo `.jsonl` de 3 a 24 MB duas ou três vezes
+por chamada. Havia 25 `threading.Timer` vivos para 3 sessões com entrega sem confirmação:
+
+- Send, fim de turno e a própria checagem agendavam cada um o seu Timer, e as cadeias se somavam.
+- No ramo `working`, a entrada nunca vira `desistiu` (`confirm_only`), então a checagem se
+  reagendava a cada 8,5 s pelo turno inteiro.
+
+Correção:
+
+- `_agendar_confirmacao` mantém uma checagem pendente por sessão. A que roda antes vence, e a mais
+  tardia é trocada.
+- Com a sessão trabalhando, o intervalo dobra até `_CONFIRM_WORKING_MAX` (120 s).
+- O índice `_CommittedIndex`, que já existia só para o Codex, passou a servir Claude, Pi, omp e
+  Kimi. Ele guarda o offset, as linhas confirmadas e a fila interna (`queue-operation`), e relê do
+  início quando o arquivo troca, encolhe ou a âncora dos 256 bytes antes do offset não bate.
+
+Confirmar pelo hook `UserPromptSubmit` (texto do prompt no payload, sem ler o transcript) foi
+considerado e descartado. Os hooks do evento rodam em paralelo, e o nosso não sabe se outro barrou
+o prompt: confirmar ali escondia a bolha "não chegou" do prompt barrado (regra "Prompt barrado por
+hook"). O hook também roda antes de a linha existir no `.jsonl`, e a bolha da fila sumiria antes da
+real. A recheca periódica do turno longo continua espaçada, não removida: mensagem orientada no
+meio do turno entra como `attachment/queued_command`, sem `UserPromptSubmit`, e sem a recheca
+voltaria a bolha fantasma dos `test_turno_longo_*`.
+
+## Cota e catálogo do Codex por HTTP
+
+Em 29/09/2026 (codex-cli 0.159.0) o binário traz as rotas do `backend-client`: com base
+`https://chatgpt.com/backend-api` ele usa o estilo `/wham/...` (`/wham/usage`,
+`/wham/rate-limit-reset-credits`); o catálogo sai de `https://chatgpt.com/backend-api/codex` +
+`/models?client_version=`. Cabeçalhos: `Authorization: Bearer <access_token>`,
+`ChatGPT-Account-Id: <tokens.account_id>`, `User-Agent: codex-cli`. A leitura antiga dizia que
+o endpoint "não é público"; ele é o mesmo que o CLI chama, com a mesma credencial.
+
+- **Mapeamento da cota**: `rate_limit.primary_window`/`secondary_window` →
+  `usedPercent = used_percent`, `windowDurationMins = limit_window_seconds / 60`,
+  `resetsAt = reset_at`. A lista de redefinições (validade, estado, título) só vem na segunda
+  rota, com `expires_at` em ISO (vira epoch truncado, igual ao app-server). As duas saem em
+  paralelo; sem redefinição disponível, falha da segunda não conta.
+- **Paridade medida** nas duas contas desta máquina: janelas, percentuais, resets e redefinições
+  idênticos ao `account/rateLimits/read`; catálogo idêntico ao `model/list` depois do `parse`
+  (id, nome, descrição, esforços por modelo, esforço padrão; `visibility != "list"` =
+  `hidden`; ordem por `priority`). `client_version` muda a lista: `0.151.0` devolve 6 modelos,
+  `0.159.0` devolve 10, sem ele é 400 — por isso a versão sai do `codex --version` do mesmo
+  binário (~10 ms).
+- **Tempo** (mediana de 5, por conta): cota por HTTP 0,56–0,62 s contra 0,83–0,91 s do
+  app-server; em série as duas rotas davam 0,9–1,0 s, igual ao app-server. O ganho maior é de
+  recurso: o app-server gasta ~0,41 s de CPU e ~200 MB de pico por leitura de cota; o HTTP,
+  ~0,02 s de CPU dentro do backend. Catálogo: HTTP 0,45 s (picos de 1,5–2 s) contra 0,22 s do
+  app-server, que responde do `models_cache.json` local — mais lento em tempo de parede, mas sem
+  processo (0,26 s de CPU a menos por leitura), e a lista tem cache de 10 min.
+- **O que NÃO se faz**: renovar o token. O refresh é do CLI, e girar o refresh token por fora
+  deslogaria o CLI. Token a menos de 60 s de vencer já vai pro app-server, que usa a credencial pelo
+  próprio CLI.
+
+## Temporários `git-*` no `.tmp` do Codex
+
+Em 29/09/2026 (codex-cli 0.159.0) `~/.codex/.tmp` tinha 7.245 pastas `git-XXXXXX` vazias
+(`HEAD` + `objects/` + `refs/`) e `~/.codex-<conta>/.tmp` outras 3.434. Na largada, todo
+`codex app-server` roda `git ls-remote` em cada marketplace `source_type = "git"` usando um
+diretório temporário; se o processo sai antes de a conferência acabar, o temporário fica. Os
+comandos `codex plugin ... --json` não fazem isso. `codex_appserver.perguntar` (cota a cada
+poucos minutos por credencial e catálogo de modelos) mata o processo ~1 s depois de subir, então
+cada leitura deixava uma pasta. Medido em `CODEX_HOME` descartável com 3 marketplaces git:
+3 largadas mortas = 3 sobras; fechando o stdin também 3 (sair "limpo" não resolve); com
+`-c features.plugins=false`, 0. `account/rateLimits/read` e `model/list` respondem igual sem
+plugins. O `CodexNativo` do importador precisa de plugins e segue deixando uma sobra ocasional
+por rodada.
 
 ## Primeira mensagem na TUI recém-aberta
 
@@ -1384,7 +1479,7 @@ inventário. Isso mede chamadas evitadas, não ganho de tempo da abertura real.
 — nome que o Codex 0.153.4 lê no lugar do `AGENTS.md` da mesma pasta — como link para o
 `CLAUDE.md` global (`<codex>/AGENTS.override.md`) e dos projetos registrados no `config.toml`; o
 lançador prepara também os escopos raiz→cwd antes de subir o app-server. `CLAUDE.MD` é a segunda
-opção. Override pessoal não é sobrescrito. Sem permissão de symlink, usa cópia gerenciada que é
+opção. Sem permissão de symlink, usa cópia gerenciada que é
 atualizada na próxima preparação. Isso INVERTE a decisão de 06/09 (bloco "leia o CLAUDE.md" no
 `AGENTS.md`, custo de as regras não estarem no primeiro token): o bloco antigo sai com backup e o
 `CLAUDE.md` inteiro entra no primeiro request — por isso `project_doc_max_bytes` sobe pra pelo menos
@@ -1397,7 +1492,42 @@ substitui, não soma). Teste com CLI real captura a primeira requisição em ser
 modelo: global + projeto acima de 180 KB presentes, AGENTS preteridos ausentes. Projeto novo
 aberto pelo IDE/CLI cru precisa ser registrado e reconciliado antes de ganhar prioridade sobre um
 AGENTS existente. Sessões já abertas conservam o contexto inicial. Falha na preparação (override
-pessoal, `config.toml` ilegível) não impede a TUI de abrir: sai aviso no stderr do pane.
+pessoal sem fonte Claude, `config.toml` ilegível) não impede a TUI de abrir: sai aviso no stderr do pane.
+
+**Decisão de 29/09/2026.** Ativar sincronização no menu Harness autoriza atualizar as instruções
+do Codex a partir do Claude mesmo quando o destino divergiu do registro. O destino anterior é
+guardado em backup restrito por conteúdo; fonte externa de um symlink não é modificada. A
+preparação automática dos aliases também respeita o interruptor, inclusive pelo lançador.
+Reconciliar manualmente continua sendo uma ação explícita, permitida com o interruptor desligado.
+A falha observada foi um `ValueError` na preparação global: o `AGENTS.override.md` da instalação
+principal diferia do hash registrado, e a rodada parava antes de atualizar skills. A alteração
+de data sozinha não explica a falha. Regressões acrescentadas para fonte autoritativa, backup,
+interruptor desligado, link externo e segunda preparação; testes não executados nesta tarefa.
+Na conferência real, a integração principal concluiu com estado `ok`, sem erros; o override
+passou a coincidir com o conteúdo expandido do Claude e com o hash registrado, com backup do
+destino anterior. A skill `orquestrar-auto` foi instalada na principal.
+O preparo da conta `jefferson-felizardo` também copiou as instruções e a skill; permaneceu
+parcial pelos conflitos de origem dos marketplaces, com confiança dos hooks pendente. Essa
+pendência não foi autoaprovada nem tratada como sincronização completa da conta.
+
+## Preparo do Codex sem repetir etapas inalteradas
+
+**Regra vigente.** Conferir inventário antes de materializar os recursos da conta. Separar as
+assinaturas de instruções, plugins, fragmentos e skills; executar apenas categorias alteradas.
+Falhas de plugins continuam visíveis e são reutilizadas por até 300 s quando fonte, destino e
+CLI permanecem iguais; forçar atualização ou mudar o inventário invalida esse prazo. Confiança
+pendente dos hooks é consultada separadamente, sem autoaprovação. Importação de memória ativada
+continua passando pela etapa de fragmentos. Fonte e destino são reconferidos antes de guardar o
+inventário validado; erro de validação não vira sucesso de cache.
+
+**Conferência em 29/09/2026.** Na conta `jefferson-felizardo`, uma chamada real de preparação
+levou 60,482 s antes da alteração. Após aplicar, a primeira rodada levou 50,127 s para preencher
+os registros; as duas seguintes levaram 2,027 s e 1,017 s. Medição pelo tempo monotônico entre o
+POST `/api/codex-contas/jefferson-felizardo/prepare` e o estado final, consultado a cada segundo.
+São uma amostra anterior e duas posteriores com cache preenchido, não percentis nem promessa
+para importação completa. O estado permaneceu parcial, com conflitos de plugins e confiança
+pendente visíveis. Regressões foram acrescentadas para inventário, cache, aprovação dos hooks e
+mudança de skill isolada; testes automatizados não foram executados.
 
 ## Perguntas assíncronas do Codex (11/09/2026, CLI 0.154.0)
 

@@ -175,7 +175,7 @@ async def unpair(ctx: Context) -> dict[str, Any]:
 
 @mcp.tool(description="Cria outra sessão nesta máquina, como `hangar-send --new <nome> <cwd>`. Nunca "
                       "`tmux new-session` cru. `provider`: claude|codex|pi|omp|kimi; `headless` só "
-                      "claude/codex. A sessão nasce na MESMA conta de quem chama, e a resposta "
+                      "claude/codex; omitido herda o modo padrão do servidor, false força terminal. A sessão nasce na MESMA conta de quem chama, e a resposta "
                       "devolve o `config_dir` usado — confira. `conta` (caminho do config dir) "
                       "força outra; pra conta que ainda precisa ser preparada, use o CLI "
                       "(`hangar-send --new --conta <nome>`). `jev`: a sessão nasce com a chave do "
@@ -183,7 +183,7 @@ async def unpair(ctx: Context) -> dict[str, Any]:
                       "preenche tela sozinho) funciona nela. Omitido, vale o padrão do servidor.")
 async def new_session(ctx: Context, nome: str, cwd: str, provider: str = "claude", engine: str | None = None,
                       model: str | None = None, effort: str | None = None, permissao: str | None = None,
-                      headless: bool = False, read_only: bool = False,
+                      headless: bool | None = None, read_only: bool = False,
                       conta: str | None = None, jev: bool | None = None) -> dict[str, Any]:
     from app import api
     eu = await _eu(ctx)

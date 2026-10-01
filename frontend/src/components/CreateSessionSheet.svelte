@@ -6,18 +6,19 @@
   import ProviderGlyph from './icons/ProviderGlyph.svelte';
   import CodexContextControl from './CodexContextControl.svelte';
   import { getCodexAccountsForServer, createSessionForServer, codexAccountMessage, patchConfig,
-    type CodexAccount } from '@hangar/core';
+    getConfigForServer, patchConfigForServer, type CodexAccount } from '@hangar/core';
   import IconFolder from './icons/IconFolder.svelte';
-  import { getSessions, listClaudeConfigs, getEngines, getProviders, criarConta, apagarConta,
+  import { getSessions, listClaudeConfigs, getClaudeAccountSuggestion, getEngines, getProviders, criarConta, apagarConta,
            getArchivePorCwd, resumeArchivedConversation, getArchiveHistory, getBastao, passarBastao,
            getCreationProgress, type CreationProgress,
-           type ModelOption, type Motor, type ArchiveEntry } from '@hangar/core';
+           type ModelOption, type Motor, type ArchiveEntry, sanitizeSessionName, uniqueSessionName } from '@hangar/core';
   import { carregarModelos as carregarModelosDaConta, temEscolhaDeModelo } from '../lib/modelosPorConta';
   import { basename, providerName, relativeTime, cotaDaConta, resumoCota, effortLevels, SESSION_PROVIDERS } from '@hangar/core';
   import SessionOpeningFields from './SessionOpeningFields.svelte';
   import { renderMarkdown } from '../lib/markdown';
   import { quotaFeed } from '../lib/quotaFeed.svelte';
   import { segredos } from '../lib/segredos.svelte';
+  import { papelDo } from '../lib/papel.svelte';
   import { faixaDeCota, faltaPara, motivoParado } from '../lib/cota';
   import type { ChatEvent } from '@hangar/core';
   import { selectServer, getActiveId, listOwnServers, serverColor, serverIdentidade } from '../lib/auth';
@@ -172,35 +173,16 @@
     return () => { vivo = false; clearInterval(relogio); passo = ''; segundos = 0; };
   }
 
-  // A MESMA regra do backend (`app/names.py:sanitize_session_name`): NFKD, descarta o acento,
-  // troca o resto por `-` e apara as pontas. O NFKD vem ANTES do filtro pelo motivo escrito lá —
-  // sem ele a letra acentuada vira `-` e o aparo do fim a come junto ("Área" -> "rea").
-  // Sanitizar aqui não é cosmético: é o nome que a checagem de colisão compara. Comparar o cru
-  // (`api.v2b`) contra uma lista de nomes já sanitizados deixa passar uma colisão com o
-  // `api-v2b` que existe — e o erro só apareceria lá no create.
-  function sanitizar(nome: string): string {
-    return nome.normalize('NFKD').replace(/\p{M}/gu, '').replace(/[^A-Za-z0-9_-]/g, '-').replace(/^-+|-+$/g, '');
-  }
-
-  // Nome unico p/ tmux: sanitiza (igual ao backend) e, se ja existir, sufixa -2/-3...
-  function uniqueName(base: string, taken: Set<string>): string {
-    const clean = sanitizar(base) || 'sessao';
-    if (!taken.has(clean)) return clean;
-    let i = 2;
-    while (taken.has(`${clean}-${i}`)) i++;
-    return `${clean}-${i}`;
-  }
-
   // Nome do sucessor: pm18368-t24 -> pm18368-t24b, e a proxima letra livre se aquela ja existir.
   // Sufixo de LETRA e nao `-2` de proposito: `-2` e o desempate de nome do fluxo normal (duas
   // sessoes na mesma pasta), e ler `foo-2` como "quem continua foo" seria adivinhacao.
   function nomeSucessor(origem: string, taken: Set<string>): string {
-    const base = sanitizar(origem);
-    if (!base) return uniqueName('sessao', taken);
+    const base = sanitizeSessionName(origem);
+    if (!base) return uniqueSessionName('sessao', taken);
     for (const c of 'bcdefghijklmnopqrstuvwxyz') {
       if (!taken.has(base + c)) return base + c;
     }
-    return uniqueName(`${base}b`, taken);
+    return uniqueSessionName(`${base}b`, taken);
   }
 
   // Config dirs do Claude (ex: ~/.claude, ~/.claude-work). Picker so aparece quando ha mais de um.
@@ -232,7 +214,57 @@
   let permissao = $state('');
   // Claude/Codex sem terminal: processo gerenciado pelo backend, sem tmux. Fora do modo bastão e
   // sem retomar conversa (a retomada nasce por outro caminho).
-  let semTerminal = $state(false);
+  let semTerminal = $state(true);
+  let headlessTouched = $state(false);
+  let headlessSaving = $state(false);
+  let headlessLoading = $state(false);
+  let headlessError = $state('');
+  let headlessGeneration = 0;
+  const viewerRole = $derived(open ? papelDo(codexServer) : null);
+  const headlessInherited = $derived(viewerRole !== 'owner' && !headlessTouched);
+  $effect(() => {
+    void codexIdentity;
+    ++headlessGeneration;
+    headlessTouched = false;
+    semTerminal = true;
+    headlessError = '';
+    headlessSaving = false;
+    headlessLoading = false;
+    void open;
+    return () => { ++headlessGeneration; };
+  });
+  $effect(() => {
+    void codexIdentity;
+    const server = untrack(() => codexServer);
+    const generation = headlessGeneration;
+    if (open && server && viewerRole === 'owner') {
+      headlessLoading = true;
+      void segredos.carregar().then(() => {
+        if (generation === headlessGeneration && !jevTocado) jev = segredos.ligado('jev_padrao');
+      });
+      void getConfigForServer(server).then((config) => {
+        if (generation === headlessGeneration && !headlessTouched)
+          semTerminal = config.campos.headless_default?.valor !== false;
+      }).catch((e) => {
+        if (generation === headlessGeneration && !headlessTouched) headlessError = e instanceof Error ? e.message : m.falha_conexao();
+      }).finally(() => { if (generation === headlessGeneration) headlessLoading = false; });
+    }
+  });
+
+  async function saveHeadlessDefault() {
+    headlessTouched = true;
+    const server = codexServer, generation = headlessGeneration;
+    if (!server || headlessSaving || viewerRole !== 'owner') return;
+    headlessSaving = true;
+    headlessError = '';
+    try {
+      await patchConfigForServer(server, { headless_default: semTerminal });
+    } catch (e) {
+      if (generation === headlessGeneration) headlessError = m.session_mode_save_failed() + ' ' + (e instanceof Error ? e.message : m.falha_conexao());
+    } finally {
+      if (generation === headlessGeneration) headlessSaving = false;
+    }
+  }
   // Quem escreve o resumo da continuação. Padrão: o Hangar monta por código — funciona com a cota
   // da origem esgotada e cita literal. Ligado, o modelo reescreve por cima disso (gasta cota dela).
   let resumoPorModelo = $state(false);
@@ -246,6 +278,7 @@
   // escrito lá: provider → motor → config em sequência rápida deixa várias respostas em voo, e a
   // mais LENTA venceria — o usuário escolheria um modelo que não existe no que acabou de selecionar.
   let modSeq = 0;
+  let modelChoiceTouched = false;
 
 
   let erroProviders = $state('');
@@ -313,6 +346,7 @@
   let cfgSeq = 0;
   function loadConfigs() {
     const seq = ++cfgSeq;
+    modelChoiceTouched = false;
     configs = [];
     selectedConfig = null;
     motores = {};
@@ -338,6 +372,15 @@
         // config_dir vazio pra rota de modelos, e nada re-dispararia quando os configs aterrissassem
         // (numa máquina com conta secundária, a lista viria reduzida ou da conta errada, sempre).
         carregarModelos();
+        if (provider === 'claude' && !engine) {
+          const modelGeneration = modSeq;
+          getClaudeAccountSuggestion().then(({ path }) => {
+            // A sugestão inicial nunca substitui uma escolha feita enquanto a cota era lida.
+            if (seq !== cfgSeq || modelGeneration !== modSeq || modelChoiceTouched || !open || loading || contaOcupada
+                || provider !== 'claude' || engine || conversaAlvo || !configs.some((c) => c.path === path)) return;
+            if (path !== selectedConfig) { selectedConfig = path; carregarModelos(); }
+          }).catch(() => { /* Sem leitura de cota, fica a conta ativa ou a primeira disponível. */ });
+        }
       })
       // A lista de contas fora do ar NÃO pode deixar a tela com o estado da abertura passada — o
       // reset do `$effect` zera os campos, mas a lista de modelos só volta a ser pedida aqui (e no
@@ -607,14 +650,9 @@
       // anterior sobrevive à reabertura quando o fetch de contas falha — o reset de carregarModelos
       // fica atrás dele e não roda. Escolha de Pi indo pro create do Claude é pane no ar e erro no
       // primeiro turno, calado.
-      modelo = ''; esforco = ''; subagente = ''; permissao = ''; semTerminal = false;
+      modelo = ''; esforco = ''; subagente = ''; permissao = '';
       jev = segredos.ligado('jev_padrao'); jevTocado = false;
-      // A releitura existe porque o `segredos.carregar()` do App roda SEM await: abrir a folha
-      // logo no boot lia `valores` ainda vazio, e o interruptor nascia desligado com o padrão
-      // ligado no servidor — errado e calado. Só reaplica se a pessoa ainda não mexeu nele.
-      void segredos.carregar().then(() => {
-        if (open && !jevTocado) jev = segredos.ligado('jev_padrao');
-      });
+      // A leitura do dono reaplica o padrão se a pessoa ainda não mexeu no interruptor.
       // Fora desta lista, "a sessão escreve" vinha marcado na abertura seguinte e a continuação
       // gastava cota da origem sem ninguém ter escolhido isso de novo.
       resumoPorModelo = false;
@@ -674,7 +712,7 @@
       hasSameFolder = sessions.some((s) => s.cwd === p);
       // Modo bastão: o nome vem da ORIGEM, não da pasta. Derivar do basename aqui apagava o nome do
       // sucessor toda vez que a pasta era (re)escolhida — inclusive no pré-preenchimento.
-      name = bastao ? nomeSucessor(bastao.name, takenNames) : uniqueName(basename(p), takenNames);
+      name = bastao ? nomeSucessor(bastao.name, takenNames) : uniqueSessionName(basename(p), takenNames);
     } catch {
       takenNames = new Set();
       hasSameFolder = false;
@@ -737,7 +775,7 @@
 
   // Sem chave cadastrada o interruptor não é um botão que falha, é um botão que não devia estar
   // ali — mesmo critério do chip "Ouvir" (lib/segredos).
-  const temJev = $derived(!bastao && segredos.temChave('jev_api_key'));
+  const temJev = $derived(viewerRole === 'owner' && !bastao && segredos.temChave('jev_api_key'));
 
   /** Guarda a escolha do interruptor como padrão das próximas sessões, quando ela mudou.
    *
@@ -870,20 +908,21 @@
     // Guarda de verdade, não só o `disabled` do botão: o precedente aqui é a sonda de provider
     // (C5), cujo teste dispara um clique sintético justamente pra provar que o atributo não basta.
     if (bastaoSemServidor) return;
-    if (providersCarregando) return;
+    if (providersCarregando || headlessSaving || headlessLoading) return;
     if (providers[provider] && !providers[provider].disponivel) return;
     loading = true;
     error = '';
     const g = codexGeneration, server = codexServer, account = codexAccount;
     const baton = bastao;
+    const requestedHeadless = headlessInherited ? undefined : semTerminal;
     const pararAcompanhamento = acompanharCriacao(name.trim(), provider === 'codex' ? server : null);
     const body = { name: name.trim(), cwd: picked, provider, codex_account: account,
       model: modelo || null, effort: esforco || null,
       // O Codex é criado por este corpo e retorna antes do `onCreate` lá embaixo: sem o `jev`
       // aqui, a caixa marcada nunca chegava ao backend e a sessão nascia no padrão do servidor.
       ...(temJev ? { jev } : {}),
-      ...(provider === 'codex' && semTerminal
-        ? { headless: true, permission_mode: permissao || null } : {}) };
+      ...(provider === 'codex' && requestedHeadless !== undefined ? { headless: requestedHeadless,
+        ...(requestedHeadless ? { permission_mode: permissao || null } : {}) } : {}) };
     try {
       // Memória ANTES do onCreate: se a criação falhar (rede, 400), a escolha não se perde — o
       // valor lembrado é casado contra a lista na próxima abertura, então id de provedor que saiu
@@ -922,7 +961,7 @@
           permission_mode: body.provider === 'claude' ? (permissao || null) : null,
           omp_profile: body.provider === 'omp' ? (perfilOmp.trim() || null) : null,
           // Só Claude e Codex têm modo sem terminal; nos outros o seletor nem aparece.
-          headless: (body.provider === 'claude' || body.provider === 'codex') ? semTerminal : false,
+          headless: (body.provider === 'claude' || body.provider === 'codex') ? requestedHeadless : false,
           resumo_por_modelo: resumoPorModelo,
         }, ...(body.provider === 'codex' ? [server] : []));
         // O aviso vem ANTES da guarda de resposta obsoleta logo abaixo: a sessão foi criada de
@@ -939,10 +978,10 @@
       if (provider === 'claude' && semTerminal) {
         // Os dois argumentos do fim só existem aqui: perfil (só omp) vazio e a flag sem terminal.
         await onCreate(name.trim(), picked, selectedConfig, provider, engine || null, modelo || null,
-                       esforco || null, permissao || null, null, true, (!engine && subagente) || null, jev);
+                       esforco || null, permissao || null, null, requestedHeadless, (!engine && subagente) || null, jev);
       } else if (provider === 'claude' && !engine && subagente) {
         await onCreate(name.trim(), picked, selectedConfig, provider, null, modelo || null,
-                       esforco || null, permissao || null, null, false, subagente, jev);
+                       esforco || null, permissao || null, null, requestedHeadless, subagente, jev);
       } else {
         await onCreate(name.trim(), picked, provider === 'claude' ? selectedConfig : null, provider,
                        provider === 'claude' ? (engine || null) : null, modelo || null, esforco || null,
@@ -950,7 +989,8 @@
                        // Explícitos até o fim: a cadeia posicional passou a ter o `jev` no 12º, e
                        // encurtá-la aqui faria o valor cair no argumento errado. `null`/`false` são
                        // os mesmos valores que os defaults davam.
-                       provider === 'omp' ? (perfilOmp.trim() || null) : null, false, null, jev);
+                       provider === 'omp' ? (perfilOmp.trim() || null) : null,
+                       provider === 'claude' ? requestedHeadless : false, null, jev);
       }
       onClose();
     } catch (err) {
@@ -1138,7 +1178,6 @@
               disabled={providers[p] ? !providers[p].disponivel : false}
               onclick={() => {
                 if (p !== provider) {
-                  semTerminal = false;
                   permissao = p === 'codex' ? 'Full Access' : '';
                 }
                 provider = p;
@@ -1272,11 +1311,16 @@
         </div>
       {/if}
 
+      {#if headlessError}<p role="alert" class="error-msg">{headlessError}</p>{/if}
+      {#if headlessInherited && (provider === 'claude' || provider === 'codex')}<p class="hint">{m.session_mode_server_default()}</p>{/if}
       <SessionOpeningFields {provider} models={modelos} engines={motores} reducedList={listaReduzida}
+        onModelChoice={() => { modelChoiceTouched = true; }}
         modelError={erroModelos} resuming={!!conversaAlvo} allowSubagent={!bastao} showJev={temJev}
         bind:headless={semTerminal} bind:model={modelo} bind:effort={esforco} bind:permission={permissao}
         bind:engine bind:subagent={subagente} bind:jev bind:ompProfile={perfilOmp}
-        onEngineChange={() => carregarModelos()} onJevChange={() => (jevTocado = true)}>
+        onEngineChange={() => carregarModelos()} onJevChange={() => (jevTocado = true)}
+        onHeadlessChange={saveHeadlessDefault} executionDefault={headlessInherited}
+        executionDisabled={headlessSaving || loading || viewerRole === null}>
         {#snippet afterExecution()}
           {#if retomaveis.length}
             <!-- Comecar do zero e o caminho normal; continuar uma conversa da pasta e a excecao,
@@ -1389,7 +1433,7 @@
               : m.criar_retomar_acao()}
           </button>
         {:else}
-          <button class="primary-btn" onclick={create} disabled={loading || contextBusy || codexUnavailable || !name.trim() || providersCarregando || bastaoSemServidor || (providers[provider] && !providers[provider].disponivel)}>
+          <button class="primary-btn" onclick={create} disabled={loading || headlessSaving || headlessLoading || contextBusy || codexUnavailable || !name.trim() || providersCarregando || bastaoSemServidor || (providers[provider] && !providers[provider].disponivel)}>
             {loading ? m.criar_criando() : (bastao ? m.bastao_acao() : m.sessao_nova())}
           </button>
           {#if loading}
@@ -1406,7 +1450,7 @@
     {/if}
 {/snippet}
 
-<BottomSheet {open} {onClose} ariaLabel={titulo} wide={isDesktop} centered={isDesktop} split={isDesktop}>
+<BottomSheet {open} onClose={() => { if (!headlessSaving) onClose(); }} ariaLabel={titulo} wide={isDesktop} centered={isDesktop} split={isDesktop}>
   {#if isDesktop}
     <!-- Dois painéis (referência: fluxo "New Project" da Vercel): escolher a pasta à esquerda,
          configurar a sessão à direita. Escolher já preenche o formulário — sem troca de passo. -->

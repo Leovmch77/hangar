@@ -49,7 +49,7 @@ describe('ShareSessionSheet', () => {
     await settle();
     botao(m.compartilhar_gerar()).click();
     await settle();
-    expect(core.createShare).toHaveBeenCalledWith('s1');
+    expect(core.createShare).toHaveBeenCalledWith('s1', false);
     const campo = document.querySelector<HTMLInputElement>(`input[aria-label="${m.compartilhar_link_novo()}"]`)!;
     expect(campo.value).toBe('https://d.ts.net:8443/convite/K7P2');
     const wa = document.querySelector<HTMLAnchorElement>('a[href^="https://wa.me/"]')!;

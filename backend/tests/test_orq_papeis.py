@@ -81,7 +81,7 @@ def test_abertura_vira_coluna_so_quando_usada_e_volta_igual():
     t = op.escrever_papel(REGRAS, p)
     assert "| papel | sessão | provider | conta | modelo | esforço | abertura |" in t
     assert "--headless --permissao bypassPermissions --subagente sonnet --jev" in t
-    assert op.ler(t)[1] == p and op.ler(t)[0].headless is False
+    assert op.ler(t)[1] == p and op.ler(t)[0].headless is None
     # Com rodízio por cima: as duas colunas convivem e a linha antiga mantém a abertura.
     t2 = op.escrever_papel(t, op.Papel("revisor", "pm1-rev*", "codex", "openai-codex", "", "", "1", headless=True))
     assert "| papel | vez | sessão | provider | conta | modelo | esforço | abertura |" in t2
@@ -176,3 +176,10 @@ def test_merge_funde_regras_e_apaga_o_orfao():
     assert not op.regras_path(perdedor).exists()
     texto = op.regras_path(vivo).read_text()
     assert "regras A" in texto and "regras C" in texto
+
+
+def test_session_mode_preserves_omission_and_explicit_terminal():
+    for mode, flag in ((None, ""), (False, "--terminal"), (True, "--headless")):
+        role = op.Papel("executor", "test", "claude", "default", "", "", headless=mode)
+        assert op.abertura_texto(role) == flag
+        assert op._ler_abertura(flag)["headless"] is mode

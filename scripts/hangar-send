@@ -33,6 +33,8 @@
 #                                  --provider <claude|codex|pi|omp|kimi> escolhe o AGENTE da sessão
 #                                  nova (default claude). Ex: --provider kimi abre o Kimi Code.
 #                                  --read-only bloqueia escrita no código e metadados Git (Linux/bwrap).
+#                                  Sem modo explícito, herda o padrão escolhido no Hangar.
+#                                  --terminal abre com terminal; não combina com --headless.
 #                                  --headless (claude ou codex) abre a sessão SEM terminal: o agente
 #                                  roda fora do tmux e conversa só pelo app. Combina com --model,
 #                                  --effort e --permissao. Ex.: --provider codex --headless
@@ -57,6 +59,7 @@
 #                                  --jev / --sem-jev liga ou desliga o Jev naquela sessão: com ele,
 #                                  `hangar-preview objetivo` navega e preenche tela sozinho. Sem
 #                                  nenhum dos dois vale o padrão do servidor (tela de Configurações).
+#   hangar-send --whoami               imprime o nome desta sessão (a identidade que assina os recados)
 #   hangar-send --help                esta ajuda (o cabeçalho deste arquivo).
 #
 # OUTRA CONTA: cada conta é um config dir próprio (~/.claude-<nome>), com skills/hooks symlinkados
@@ -125,7 +128,8 @@ import json, sys
 try:
     peers = json.load(open(sys.argv[1]))
     p = peers.get(sys.argv[2])
-    if not p:
+    # Entrada só com "app" é máquina da lista do app, não peer de recado.
+    if not p or not p.get("base_url"):
         known = ", ".join(peers) or "nenhum"
         sys.exit("erro: servidor '%s' não está em %s (conhecidos: %s)" % (sys.argv[2], sys.argv[1], known))
     # \t como separador (mesmo formato do peers_tsv do --list): token/URL com espaço não quebra o parse.
@@ -176,6 +180,9 @@ if eu.get("pair_peers"):
     if [[ -f "$PEERS_FILE" ]]; then
         peers_tsv=$(python3 -c 'import json, sys
 for k, v in json.load(open(sys.argv[1])).items():
+    # Só com "app" (sem base_url) é máquina da lista do app, não peer: fora da varredura, calada.
+    if isinstance(v, dict) and "app" in v and not v.get("base_url"):
+        continue
     # "enabled": false -> máquina que o dono sabe que está desligada. Fica FORA da varredura
     # (cada uma custa o timeout inteiro), mas avisa: some da lista sem nota nenhuma e daqui a
     # duas semanas vira "cadê meu PC?". Endereçar servidor::sessao continua funcionando.
@@ -288,6 +295,11 @@ me() {
     echo "${atual:-cli}"
 }
 
+if [[ "${1:-}" == "--whoami" ]]; then
+    me
+    exit 0
+fi
+
 if [[ "${1:-}" == "--list" || $# -eq 0 ]]; then
     listar
 fi
@@ -376,9 +388,9 @@ if [[ "$1" == "--new" ]]; then
                 [[ -n "$jev" ]] && { echo "erro: --jev/--sem-jev informado duas vezes" >&2; exit 2; }
                 [[ "$1" == "--jev" ]] && jev="true" || jev="false"; shift ;;
             # --headless: sessão Claude ou Codex sem terminal (o mesmo campo da tela de criação).
-            --headless)
-                [[ -n "$headless" ]] && { echo "erro: --headless informado duas vezes" >&2; exit 2; }
-                headless="true"; shift ;;
+            --headless|--terminal)
+                [[ -n "$headless" ]] && { echo "erro: --headless/--terminal informado duas vezes" >&2; exit 2; }
+                [[ "$1" == "--headless" ]] && headless="true" || headless="false"; shift ;;
             --read-only)
                 [[ -n "$read_only" ]] && { echo "erro: --read-only informado duas vezes" >&2; exit 2; }
                 read_only="true"; shift ;;
@@ -500,7 +512,7 @@ if sys.argv[9]:
 if sys.argv[10]:
     d["read_only"] = True
 if sys.argv[11]:
-    d["headless"] = True
+    d["headless"] = sys.argv[11] == "true"
 if sys.argv[12]:
     # "true"/"false", nunca ausente-por-omissao: o campo AUSENTE no corpo e o que faz o backend
     # aplicar o padrao do servidor, e mandar `false` cru apagaria esse padrao em todo uso do CLI.

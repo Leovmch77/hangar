@@ -7,13 +7,13 @@ Single power user (developer) with **more than one machine**. Drives live Claude
 sessions running in tmux on his own machines, over LAN/VPN. Not multi-tenant, not
 public: LAN/VPN-only by design.
 
-**Mobile and desktop are equally important surfaces.** Neither is primary. Some
-features only make sense on one of them (touch sheets on mobile; keyboard shortcuts,
-side panels, terminal on desktop) — that's fine, but both must work equally well.
+**Desktop no Rust; web para PWA/mobile.** O celular e o desktop continuam atendidos,
+cada um no seu cliente. Electron e desktop web entram em descontinuação gradual,
+conforme a [decisão do projeto](docs/decisoes/frontend.md#desktop-no-rust-web-para-pwamobile).
 
 ## Product purpose
-Read Claude Code's JSONL transcript and drive the session (send prompts, pick options,
-answer AskUserQuestion, run git/workflows) from a phone or a desktop browser.
+Ler a conversa estruturada e controlar a sessão (enviar mensagens, escolher opções,
+responder perguntas e executar operações de Git) pelo celular ou pelo aplicativo desktop em Rust.
 
 What "good" means for this product, in the user's own priorities:
 - **Full control away from the PC** — nothing should force going back to the terminal.
@@ -45,9 +45,8 @@ neutral user bubble, chat rhythm). When in doubt about chat UX, look there first
   tmux pane is only peeked for live *state*.
 - State legibility first: the user must always know if a session is working, idle, or
   waiting on them, without reading text.
-- Two first-class surfaces: a change on one must never degrade the other. Shared
-  components gate desktop behavior behind `min-width: 820px` / the DesktopShell;
-  mobile surfaces (SessionList, sheets) keep working untouched.
+- Funcionalidades desktop evoluem no Rust; funcionalidades web atendem PWA/mobile.
+  Código compartilhado preserva o uso existente, sem exigir novas telas desktop na web.
 - Reduce trips to the terminal: when a Claude Code capability is hidden in the TUI,
   prefer exposing it in the app over documenting a terminal workaround.
 

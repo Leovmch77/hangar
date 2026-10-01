@@ -1,0 +1,12 @@
+{"ts": "2026-09-29T22:18:40-03:00", "kind": "dropped", "text": "recado registrado sem acordar o árbitro (jev): Rodada 2 entregue ao revisor, sigo aguardando o veredito.", "task": null, "from": "w-t4"}
+{"ts": "2026-09-29T22:19:30-03:00", "kind": "dropped", "text": "recado registrado sem acordar o árbitro (jev): tela fechada, 41 de 60 ações", "task": null, "from": "w-t4"}
+{"ts": "2026-09-29T22:20:05-03:00", "kind": "would_drop", "text": "teria descartado (regex: janela); acordou o árbitro: janela de prova fechada", "task": null}
+{"ts": "2026-09-29T22:21:31-03:00", "kind": "woke", "text": "acordou o árbitro: T5: preciso da tela do celular, posso usar?", "task": null, "from": "hangar-mobile-t5"}
+{"ts": "2026-09-29T22:22:10-03:00", "kind": "woke", "text": "acordou o árbitro: o build do android travou de novo", "task": null, "from": "hangar-mobile-t5"}
+{"ts": "2026-09-29T22:23:00-03:00", "kind": "woke", "text": "acordou o árbitro: sigo na rodada 1", "task": null, "from": null}
+{"ts": "2026-09-29T22:24:00-03:00", "kind": "failed", "text": "recado ao árbitro não entregue (hangar-send w-arbiter failed (rc=1): boom): [decisao] T5: rodada 1 congelada", "task": null, "from": "hangar-mobile-t5"}
+{"ts": "2026-09-29T22:25:00-03:00", "kind": "failed", "text": "falhou ao integrar a T3: merge abortado", "task": 3}
+{"ts": "2026-09-29T22:26:00-03:00", "kind": "woke", "text": "acordou o árbitro: lote de prova pronto (T1, T2)", "task": null}
+{"ts": "2026-09-29T22:27:00-03:00", "kind": "notice", "text": "T5: a linha principal tem mudanças não commitadas; a integração espera a árvore limpa", "task": 5}
+{"ts": "2026-09-29T22:28:00-03:00", "kind": "advance", "text": "T5 entregou a rodada 1 · 7858997", "task": 5}
+{"ts": "2026-09-29T22:29:00-03:00", "kind": "advance", "text": "T3: integração vermelha → devolvida ao executor w-t3", "task": 3}

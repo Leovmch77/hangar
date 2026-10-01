@@ -1,10 +1,10 @@
 //! Atalhos: a fileira de ações do painel da sessão, deste servidor (`runtime_config.shortcuts`, JSON numa string; vazio =
-//! os cinco nativos). Porta de `packages/core/src/shortcuts.ts` e do editor `ShortcutsSettings.svelte`: a página edita a
-//! lista inteira e grava de uma vez (`POST /api/config`); o painel lateral lê a mesma resolução, e o que for salvo ou lido
-//! aqui aparece lá na hora.
+//! os cinco nativos). Porta de `packages/core/src/shortcuts.ts` e do editor `ShortcutsSettings.svelte`: cada mudança
+//! (formulário, ordem, remover) grava a lista inteira na hora (`POST /api/config`), sem um segundo "Salvar"; o painel
+//! lateral lê a mesma resolução, e o que for salvo ou lido aqui aparece lá na hora.
 use super::*;
 use super::device::Remote;
-use super::settings::{segments, settings_box};
+use super::settings::{section_head, segments, settings_box};
 use serde_json::Map;
 
 /// Os botões nativos de hoje, na ordem de hoje. Só "anexos" roda no painel nativo; os outros são preservados na ordem.
@@ -37,6 +37,12 @@ impl Item {
     pub(super) fn sends_direct(&self) -> bool { self.0.get("send_direct") != Some(&Value::Bool(false)) }
     /// Pasta do `shell` do projeto (absoluta ou relativa à raiz da cópia da sessão); ausente = a pasta da sessão.
     pub(super) fn pasta(&self) -> Option<&str> { self.0.get("pasta").and_then(Value::as_str).map(str::trim).filter(|p| !p.is_empty()) }
+    /// `shell` que roda numa cópia só do servidor, fora de qualquer sessão.
+    pub(super) fn runs_in_hangar(&self) -> bool { self.kind() == "shell" && self.text("runs_in") == "hangar" }
+    /// No Hangar: ausente = roda na home.
+    pub(super) fn hangar_home(&self) -> bool { self.0.get("hangar_home") != Some(&Value::Bool(false)) }
+    /// Ausente = a pergunta do terminal aparece no app.
+    pub(super) fn answer_in_app(&self) -> bool { self.0.get("answer_in_app") != Some(&Value::Bool(false)) }
 
     fn native(action: &str) -> Self {
         Item(Map::from_iter([("id".into(), json!(action)), ("type".into(), json!("internal")), ("action".into(), json!(action))]))
@@ -51,7 +57,9 @@ impl Item {
         match o.get("type").and_then(Value::as_str) {
             Some("internal") => o.get("action").and_then(Value::as_str).is_some_and(|a| NATIVES.contains(&a)),
             Some("send_text") => filled("label") && filled("text"),
-            Some("shell") => filled("label") && filled("command") && optional("pasta", |p| p.as_str().is_some_and(|p| !p.trim().is_empty())),
+            Some("shell") => filled("label") && filled("command") && optional("pasta", |p| p.as_str().is_some_and(|p| !p.trim().is_empty()))
+                && optional("runs_in", |v| matches!(v.as_str(), Some("session" | "hangar")))
+                && optional("hangar_home", Value::is_boolean) && optional("answer_in_app", Value::is_boolean),
             _ => false,
         }
     }
@@ -110,6 +118,13 @@ pub(super) fn parse_icon(icon: Option<&str>) -> Glyph {
     Glyph::Icon(GLYPHS.iter().find(|(g, _)| *g == name).map_or(IconName::Zap, |(_, i)| *i))
 }
 
+/// Rodapé colado na caixa: a ação que alimenta a lista mora DENTRO dela, com a mesma divisória das linhas — solta
+/// embaixo, ela virava só mais um botão numa pilha que não dizia sobre o que agia.
+fn card_footer() -> Div {
+    div().mt(px(-1.)).border_t_1().border_color(theme::border()).px(px(16.)).py(px(10.))
+        .flex().flex_wrap().items_center().gap(px(8.))
+}
+
 pub(super) fn icon_element(icon: Option<&str>, size: f32, color: Hsla) -> AnyElement {
     match parse_icon(icon) {
         Glyph::Icon(name) => chrome::small_icon(name, size, color).into_any_element(),
@@ -156,6 +171,8 @@ fn new_id() -> String {
 struct Form {
     /// Id do atalho sendo editado; `None` = novo.
     editing: Option<String>,
+    /// Id que o formulário grava: o do editado, ou um novo gerado uma vez só (o reenvio reusa o mesmo).
+    id: String,
     /// O objeto gravado do atalho editado.
     original: Option<Map<String, Value>>,
     /// Atalho do projeto da sessão aberta: grava na hora (PUT) e o `shell` ganha a pasta.
@@ -168,6 +185,10 @@ struct Form {
     glyph: String,
     direct: bool,
     confirm: bool,
+    /// `shell`: roda No Hangar (uma cópia por servidor) em vez de na sessão; na home, e com a pergunta do terminal no app.
+    hangar: bool,
+    home: bool,
+    ask: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -178,14 +199,18 @@ impl Form {
 }
 
 /// O que o formulário confirmou, já lido dos campos.
-struct Draft { shell: bool, label: String, content: String, icon: String, direct: bool, confirm: bool, pasta: String }
+struct Draft { shell: bool, label: String, content: String, icon: String, direct: bool, confirm: bool, pasta: String, hangar: bool, home: bool, ask: bool }
 
 impl Draft {
     /// Editar parte do objeto gravado: campo que esta versão não conhece continua lá; os do formulário são reescritos.
+    /// Só o que difere do padrão é gravado.
     fn into_item(self, original: Option<Map<String, Value>>, id: String) -> Item {
         let mut o = original.unwrap_or_default();
-        for key in ["send_direct", "confirm", "pasta"] { o.remove(key); }
+        for key in ["send_direct", "confirm", "pasta", "runs_in", "hangar_home", "answer_in_app"] { o.remove(key); }
         if self.shell && !self.pasta.is_empty() { o.insert("pasta".into(), json!(self.pasta)); }
+        if self.shell && self.hangar { o.insert("runs_in".into(), json!("hangar")); }
+        if self.shell && self.hangar && !self.home { o.insert("hangar_home".into(), json!(false)); }
+        if self.shell && !self.ask { o.insert("answer_in_app".into(), json!(false)); }
         o.insert("id".into(), json!(id));
         o.insert("type".into(), json!(if self.shell { "shell" } else { "send_text" }));
         o.insert((if self.shell { "command" } else { "text" }).into(), json!(self.content));
@@ -202,7 +227,8 @@ impl Draft {
 fn apply_edit(items: &mut Vec<Item>, editing: Option<&str>, item: Item) {
     match editing {
         Some(id) => if let Some(n) = items.iter().position(|i| i.id() == id) { items[n] = item; },
-        None => items.push(item),
+        // Reenviar um atalho novo depois de uma falha de rede não pode duplicá-lo se a primeira gravação chegou.
+        None => match items.iter().position(|i| i.id() == item.id()) { Some(n) => items[n] = item, None => items.push(item) },
     }
 }
 
@@ -227,8 +253,9 @@ impl Render for Dragged {
 pub(in crate::app) struct Shortcuts {
     load: Remote<()>,
     items: Vec<Item>,
-    dirty: bool,
     saving: bool,
+    /// O formulário global espera a gravação: só fecha com ela feita (falhou, fica aberto com o que foi digitado).
+    submitting: bool,
     /// Número do salvar cujo "Salvo" está na tela: some 2,5 s depois se nenhum outro o trocou.
     saved: Option<u64>,
     save_seq: u64,
@@ -241,6 +268,18 @@ pub(in crate::app) struct Shortcuts {
     /// Aviso do último exportar/importar (texto, é erro) e a importação esperando confirmação.
     pub(super) transfer_note: Option<(String, bool)>,
     pub(super) import: Option<super::shortcut_transfer::ImportDraft>,
+    pub(super) export: Option<super::shortcut_transfer::ExportDraft>,
+    pub(super) transfer_seq: u64,
+    pub(super) import_loading: bool,
+    pub(super) transfer_warnings: Vec<String>,
+}
+
+impl Shortcuts {
+    /// Uma gravação da lista ou a aplicação de uma importação em curso: nenhuma outra escrita entra no meio.
+    pub(super) fn busy(&self) -> bool {
+        self.saving || self.import_loading || self.import.as_ref().is_some_and(|draft| draft.applying)
+            || self.export.as_ref().is_some_and(|draft| draft.loading || draft.saving)
+    }
 }
 
 pub(super) enum ShortcutsReply {
@@ -249,9 +288,10 @@ pub(super) enum ShortcutsReply {
     Saved(u64, Option<Vec<Item>>, Result<Value, Failure>),
     Commands(Result<Vec<CommandInfo>, Failure>),
     /// Exportar/importar (`shortcut_transfer.rs`): arquivo gravado e quantas credenciais saíram; conferência; gravação.
-    Exported(Result<(PathBuf, u64), String>),
-    Previewed(Value, Result<Value, String>),
-    Imported(Result<Value, String>),
+    ExportCandidates(u64, Result<Value, String>),
+    Exported(u64, Result<(PathBuf, u64, Vec<String>), String>),
+    Previewed(u64, Value, Result<Value, String>),
+    Imported(u64, Result<Value, String>),
 }
 
 impl Hangar {
@@ -270,7 +310,7 @@ impl Hangar {
     /// Os números dos pedidos ficam, para resposta de antes não passar por resposta de agora.
     pub(super) fn shortcuts_opened(&mut self, cx: &mut Context<Self>) {
         let (load, save_seq, saving) = (std::mem::take(&mut self.shortcuts.load.seq), self.shortcuts.save_seq, self.shortcuts.saving);
-        self.shortcuts = Shortcuts { save_seq, saving, ..Shortcuts::default() };
+        self.shortcuts = Shortcuts { save_seq, saving, transfer_seq: self.shortcuts.transfer_seq + 1, ..Shortcuts::default() };
         self.shortcuts.load.seq = load;
         self.load_shortcuts(cx);
         self.load_project_shortcuts();
@@ -284,11 +324,11 @@ impl Hangar {
         cx.notify();
     }
 
-    fn save_shortcuts(&mut self, restore: bool, cx: &mut Context<Self>) {
+    /// Toda mudança da lista global grava na hora (`POST /api/config`); `None` restaura o padrão.
+    fn save_shortcuts(&mut self, list: Option<Vec<Item>>, cx: &mut Context<Self>) {
         let s = &mut self.shortcuts;
-        if s.saving { return; }
+        if s.busy() { return; }
         let Some(api) = self.api.clone() else { return };
-        let list = (!restore).then(|| s.items.clone());
         s.save_seq += 1;
         (s.saving, s.save_error, s.saved) = (true, None, None);
         let (seq, done) = (s.save_seq, self.shortcuts_send_later());
@@ -351,11 +391,12 @@ impl Hangar {
     }
 
     pub(super) fn receive_shortcuts(&mut self, reply: ShortcutsReply, window: &mut Window, cx: &mut Context<Self>) {
-        if matches!(reply, ShortcutsReply::Exported(_) | ShortcutsReply::Previewed(..) | ShortcutsReply::Imported(_)) {
+        if matches!(reply, ShortcutsReply::ExportCandidates(..) | ShortcutsReply::Exported(..) | ShortcutsReply::Previewed(..) | ShortcutsReply::Imported(..)) {
             self.receive_transfer(reply, window, cx);
             return;
         }
         let s = &mut self.shortcuts;
+        let mut reload = false;
         match reply {
             ShortcutsReply::Loaded(seq, result) => {
                 let parsed = result.map_err(|e| Self::failure(&e)).and_then(|config| match config.pointer("/campos") {
@@ -365,7 +406,7 @@ impl Hangar {
                 let list = parsed.as_ref().ok().cloned();
                 if !s.load.finish(seq, parsed.map(|_| ())) { return; }
                 if let Some(list) = list {
-                    (s.items, s.dirty) = (list.clone(), false);
+                    s.items = list.clone();
                     // O painel mostra os atalhos da máquina da conversa aberta; esta página é da ativa.
                     if self.open_api.is_none() { self.side.set_shortcuts(&list); }
                 }
@@ -378,15 +419,17 @@ impl Hangar {
                 s.saving = false;
                 match result {
                     Ok(_) => {
-                        (s.items, s.dirty) = (saved, false);
+                        s.items = saved;
                         s.saved = Some(seq);
+                        if std::mem::take(&mut s.submitting) && s.form.as_ref().is_some_and(|form| !form.project) { self.close_shortcut_form(window, cx); }
                         cx.spawn(async move |this, cx| {
                             cx.background_executor().timer(Duration::from_millis(2500)).await;
                             let _ = this.update(cx, |this, cx| if this.shortcuts.saved == Some(seq) { this.shortcuts.saved = None; cx.notify(); });
                         }).detach();
                     }
                     // Erro de validação do backend chega como veio ("shortcuts: item 2 …").
-                    Err(error) => s.save_error = Some(Self::fetch_failure(&error)),
+                    // Uma falha de rede pode ter gravado mesmo assim: relê para a tela mostrar o que ficou.
+                    Err(error) => { (s.save_error, s.submitting) = (Some(Self::fetch_failure(&error)), false); reload = true; }
                 }
             }
             ShortcutsReply::Commands(result) => {
@@ -395,16 +438,25 @@ impl Hangar {
                     s.suggestions = commands.into_iter().map(|c| if c.display.is_empty() { format!("/{}", c.name) } else { c.display }).collect();
                 }
             }
-            ShortcutsReply::Exported(_) | ShortcutsReply::Previewed(..) | ShortcutsReply::Imported(_) => {}
+            ShortcutsReply::ExportCandidates(..) | ShortcutsReply::Exported(..) | ShortcutsReply::Previewed(..) | ShortcutsReply::Imported(..) => {}
         }
+        self.drop_stale_form(window, cx);
+        if reload { self.load_shortcuts(cx); }
         cx.notify();
     }
 
+    /// O atalho aberto no formulário global saiu da lista (removido, padrão restaurado, lista relida): não há o que gravar.
+    fn drop_stale_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let stale = self.shortcuts.form.as_ref().is_some_and(|form| !form.project
+            && form.editing.as_deref().is_some_and(|id| !self.shortcuts.items.iter().any(|i| i.id() == id)));
+        if stale { self.close_shortcut_form(window, cx); }
+    }
+
     fn shortcuts_edit(&mut self, cx: &mut Context<Self>, change: impl FnOnce(&mut Vec<Item>)) {
-        if self.shortcuts.saving { return; }
-        change(&mut self.shortcuts.items);
-        self.shortcuts.dirty = true;
-        cx.notify();
+        if self.shortcuts.busy() { return; }
+        let mut list = self.shortcuts.items.clone();
+        change(&mut list);
+        self.save_shortcuts(Some(list), cx);
     }
 
     fn shortcut_position(&self, id: &str) -> Option<usize> { self.shortcuts.items.iter().position(|i| i.id() == id) }
@@ -458,27 +510,40 @@ impl Hangar {
             }));
         }
         label.update(cx, |state, cx| state.focus(window, cx));
-        self.shortcuts.form = Some(Form { editing, original: item.as_ref().map(|i| i.0.clone()), project, shell, label, emoji, content, folder, glyph, direct: item.as_ref().is_none_or(Item::sends_direct),
-            confirm: item.as_ref().is_some_and(Item::confirm), _subscriptions: subscriptions });
+        let id = editing.clone().unwrap_or_else(new_id);
+        self.shortcuts.form = Some(Form { editing, id, original: item.as_ref().map(|i| i.0.clone()), project, shell, label, emoji, content, folder, glyph, direct: item.as_ref().is_none_or(Item::sends_direct),
+            confirm: item.as_ref().is_some_and(Item::confirm), hangar: item.as_ref().is_some_and(Item::runs_in_hangar),
+            home: item.as_ref().is_none_or(Item::hangar_home), ask: item.as_ref().is_none_or(Item::answer_in_app), _subscriptions: subscriptions });
         if !shell { self.load_suggestions(); }
         cx.notify();
     }
 
-    fn submit_shortcut_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn submit_shortcut_form(&mut self, _: &mut Window, cx: &mut Context<Self>) {
         // Com um salvar em voo a lista não muda: o formulário fica aberto com o que foi digitado até ele terminar.
-        if self.shortcuts.saving || self.side.project.saving.is_some() { return; }
+        if self.shortcuts.busy() || self.side.project.saving.is_some() { return; }
         let Some(form) = self.shortcuts.form.as_ref().filter(|f| f.valid(cx)) else { return };
         let emoji = Form::value(&form.emoji, cx);
         let icon = if emoji.is_empty() { format!("glifo:{}", form.glyph) } else { format!("emoji:{emoji}") };
         let pasta = if form.project { Form::value(&form.folder, cx) } else { String::new() };
         let draft = Draft { shell: form.shell, label: Form::value(&form.label, cx), content: Form::value(&form.content, cx), icon,
-            direct: form.direct, confirm: form.confirm, pasta };
+            direct: form.direct, confirm: form.confirm, pasta, hangar: form.hangar, home: form.home, ask: form.ask };
         let (editing, project) = (form.editing.clone(), form.project);
-        let item = draft.into_item(form.original.clone(), editing.clone().unwrap_or_else(new_id));
-        // O do projeto grava agora e o formulário só fecha com a gravação feita.
+        let item = draft.into_item(form.original.clone(), form.id.clone());
+        // O editado pode ter saído da lista com o formulário aberto: sem isto a gravação não mudaria nada e diria "Salvo".
+        let key = self.selected_key();
+        let present = editing.as_deref().is_none_or(|id| if project {
+            self.side.project.of(key.as_ref()).is_some_and(|p| p.items.iter().any(|i| i.id() == id))
+        } else { self.shortcuts.items.iter().any(|i| i.id() == id) });
+        if !present {
+            let error = tr("shortcuts_gone");
+            if project { self.side.project.save_error = Some(error); } else { self.shortcuts.save_error = Some(error); }
+            cx.notify();
+            return;
+        }
         if project { self.project_edit(cx, |items| apply_edit(items, editing.as_deref(), item)); return; }
-        self.close_shortcut_form(window, cx);
+        // O global grava agora e o formulário só fecha com a gravação feita.
         self.shortcuts_edit(cx, |items| apply_edit(items, editing.as_deref(), item));
+        self.shortcuts.submitting = self.shortcuts.saving;
     }
 
     /// O campo com foco sai junto com o formulário: o foco volta à raiz, senão o Esc seguinte não chega a lugar nenhum.
@@ -491,6 +556,8 @@ impl Hangar {
     /// Esc com o formulário aberto fecha só ele.
     pub(super) fn shortcuts_escape(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         if self.settings != Some(super::settings::Page::Shortcuts) || self.shortcuts.form.is_none() { return false; }
+        // Gravando, o formulário fica: o Esc não pode esconder o que ainda pode falhar.
+        if self.shortcuts.busy() || self.side.project.saving.is_some() { return true; }
         self.close_shortcut_form(window, cx);
         true
     }
@@ -512,45 +579,53 @@ impl Hangar {
             }
             _ => {}
         }
-        let saving = s.saving;
+        let saving = s.busy();
         let count = s.items.len();
-        let mut list = settings_box().mt(px(24.));
+        let mut list = settings_box();
         if count == 0 { list = list.child(note(tr("shortcuts_empty"), theme::muted())); }
         for (n, item) in s.items.iter().enumerate() {
             list = list.child(self.render_shortcut_row(item, n, count, saving, false, cx));
         }
+        // Repor um nativo é adicionar um item à lista: vive no rodapé DELA, ao lado do Adicionar, não numa linha solta
+        // no meio da pilha de botões.
         let missing: Vec<&str> = NATIVES.into_iter().filter(|a| !s.items.iter().any(|i| i.kind() == "internal" && i.action() == *a)).collect();
-        let restore_natives = (!missing.is_empty()).then(|| div().mt(px(12.)).flex().flex_wrap().items_center().gap(px(8.))
+        let restore_natives = (!missing.is_empty()).then(|| div().flex().flex_wrap().items_center().justify_end().gap(px(6.))
             .child(div().text_size(px(12.5)).text_color(theme::muted()).child(tr("shortcuts_restore_native")))
-            .children(missing.into_iter().map(|action| Button::new(SharedString::from(format!("shortcut-native-{action}"))).outline().small()
+            .children(missing.into_iter().map(|action| Button::new(SharedString::from(format!("shortcut-native-{action}"))).ghost().small()
                 .icon(IconName::Plus).label(native_label(action)).disabled(saving)
                 .on_click(cx.listener(move |this, _, _, cx| this.shortcuts_edit(cx, |items| items.push(Item::native(action))))))));
-        let form = match &s.form {
-            Some(form) if !form.project => self.render_shortcut_form(form, cx),
-            _ => self.mark(div().mt(px(16.)).flex(), "shortcuts_add").child(Button::new("shortcut-add").outline().small().icon(IconName::Plus).label(tr("shortcuts_add"))
-                .disabled(saving).on_click(cx.listener(|this, _, window, cx| this.open_shortcut_form(None, false, window, cx)))),
-        };
-        let feedback = match (&s.save_error, s.saved) {
-            (Some(error), _) => Some(div().text_color(theme::danger()).child(error.clone())),
-            (None, Some(_)) => Some(div().text_color(theme::success()).child(tr("shortcuts_saved"))),
-            _ => None,
-        };
-        // Importar grava direto no servidor: com edição pendente, o Salvar seguinte apagaria o que veio.
-        let transfer = div().mt(px(16.)).flex().flex_wrap().items_center().gap(px(8.))
+        // Adicionar é a ação da lista: botão primário no rodapé DA CAIXA, colado nela, em vez de solto embaixo com o
+        // mesmo peso de Importar, Exportar e Restaurar.
+        let add = self.mark(card_footer(), "shortcuts_add")
+            .child(Button::new("shortcut-add").primary().small().icon(IconName::Plus).label(tr("shortcuts_add"))
+                .disabled(saving).on_click(cx.listener(|this, _, window, cx| this.open_shortcut_form(None, false, window, cx))))
+            .child(div().flex_1().min_w_0().flex().justify_end().children(restore_natives));
+        let open_form = matches!(&s.form, Some(form) if !form.project);
+        let list = list.when(!open_form, |el| el.child(add));
+        let form = open_form.then(|| match &s.form { Some(form) => self.render_shortcut_form(form, cx), None => div() });
+        // A falha fica logo abaixo da lista (e dentro do formulário aberto), nunca só no rodapé fora da tela.
+        let error_line = s.save_error.clone().map(|error| div().id("shortcuts-save-error").role(Role::Alert).text_size(px(12.5))
+            .text_color(theme::danger()).whitespace_normal().child(error));
+        let feedback = s.saved.filter(|_| s.save_error.is_none()).map(|_| div().text_color(theme::success()).child(tr("shortcuts_saved")));
+        // Caixa própria para mover a lista para outra máquina; repor o padrão fica no rodapé da página.
+        let transfer = settings_box().child(div().px(px(16.)).py(px(12.))
+            .flex().flex_wrap().items_center().gap(px(8.))
             .child(Button::new("shortcuts-import").outline().small().icon(IconName::Upload).label(tr("shortcuts_import"))
-                .disabled(saving || s.dirty || s.import.is_some()).on_click(cx.listener(|this, _, _, cx| this.import_shortcuts(cx))))
+                .loading(s.import_loading)
+                .disabled(saving || s.import.is_some() || s.export.is_some()).on_click(cx.listener(|this, _, _, cx| this.import_shortcuts(cx))))
             .child(Button::new("shortcuts-export").outline().small().icon(IconName::Download).label(tr("shortcuts_export"))
-                .disabled(saving).on_click(cx.listener(|this, _, _, cx| this.export_shortcuts(cx))))
-            .children(self.transfer_note_element());
+                .disabled(saving || s.import.is_some() || s.export.is_some()).on_click(cx.listener(|this, _, _, cx| this.export_shortcuts(cx))))
+            .children(self.transfer_note_element()));
         let draft = self.render_import_draft(cx);
-        let footer = self.mark(div().mt(px(24.)).pt(px(16.)), "shortcuts_restore").border_t_1().border_color(theme::border()).flex().items_center().gap(px(10.))
+        let export = self.render_export_draft(cx);
+        let footer = self.mark(div().mt(px(8.)).pt(px(16.)), "shortcuts_restore").border_t_1().border_color(theme::border()).flex().items_center().gap(px(10.))
             .child(Button::new("shortcuts-restore").outline().small().label(tr("shortcuts_restore")).tooltip(tr("shortcuts_restore_help"))
-                .disabled(saving).on_click(cx.listener(|this, _, _, cx| this.save_shortcuts(true, cx))))
-            .child(div().flex_1().min_w_0().flex().justify_end().text_size(px(12.5)).whitespace_normal().children(feedback))
-            .child(Button::new("shortcuts-save").primary().small().label(tr("shortcuts_save")).loading(saving).disabled(!s.dirty || saving)
-                .on_click(cx.listener(|this, _, _, cx| this.save_shortcuts(false, cx))));
+                .disabled(saving).on_click(cx.listener(|this, _, _, cx| this.save_shortcuts(None, cx))))
+            .child(div().flex_1().min_w_0().flex().justify_end().text_size(px(12.5)).whitespace_normal().children(feedback));
         let project = self.render_project_shortcuts(cx);
-        page.child(list).children(restore_natives).child(form).child(transfer).children(draft).child(footer).children(project).into_any_element()
+        // Uma pilha de caixas com o mesmo vão, como Máquinas e Contas: a página deixa de ser lista + botões avulsos.
+        page.child(div().mt(px(20.)).flex().flex_col().gap(px(16.)).pb(px(8.))
+            .child(list).children(error_line).children(form).child(transfer).children(export).children(draft).child(footer).children(project)).into_any_element()
     }
 
     /// Seção "Deste projeto": só com uma sessão aberta. Cada mudança grava na hora, sem o Salvar dos globais.
@@ -559,17 +634,19 @@ impl Hangar {
         let p = &self.side.project;
         if p.owner.as_ref() != Some(&key) { return None; }
         let note = |text: String, color: Hsla| div().px_4().py(px(18.)).text_size(px(13.)).text_color(color).whitespace_normal().child(text);
-        let heading = |text: String| div().mt(px(28.)).mb(px(4.)).text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).child(text);
-        let section = div().id("project-shortcuts").flex().flex_col();
-        let save_error = p.save_error.clone().map(|error| div().mt(px(10.)).text_size(px(12.5)).text_color(theme::danger()).whitespace_normal().child(error));
+        // Mesmo cabeçalho das outras páginas de config (ícone no quadradinho, título, linha que explica): o título
+        // miúdo em negrito não dizia que dali para baixo era outra lista.
+        let head = |title: String| section_head(IconName::Folder, title, Some(tr("shortcuts_project_lead")), None, px(16.));
+        let section = div().id("project-shortcuts").flex().flex_col().gap(px(10.));
+        let save_error = p.save_error.clone().map(|error| div().text_size(px(12.5)).text_color(theme::danger()).whitespace_normal().child(error));
         let project = match (&p.list.value, p.list.loading) {
-            (None, _) => return Some(section.child(heading(tr("shortcuts_project")))
-                .child(settings_box().mt(px(8.)).child(note(tr("shortcuts_project_loading"), theme::muted())))),
+            (None, _) => return Some(section.child(settings_box().child(head(tr("shortcuts_project")))
+                .child(note(tr("shortcuts_project_loading"), theme::muted())))),
             (Some(Err(error)), loading) => {
                 let retry = Button::new("project-shortcuts-retry").outline().small().icon(IconName::RefreshCw)
                     .label(tr(if loading { "shortcuts_loading" } else { "shortcuts_retry" })).disabled(loading)
                     .on_click(cx.listener(|this, _, _, cx| { this.load_project_shortcuts(); cx.notify(); }));
-                return Some(section.child(heading(tr("shortcuts_project"))).child(settings_box().mt(px(8.))
+                return Some(section.child(settings_box().child(head(tr("shortcuts_project")))
                     .child(note(tr("shortcuts_project_failed").replace("{reason}", error), theme::danger()))
                     .child(div().px_4().pb(px(16.)).flex().child(retry))).children(save_error));
             }
@@ -577,20 +654,18 @@ impl Hangar {
         };
         let saving = p.saving.is_some();
         let count = project.items.len();
-        let mut list = settings_box().mt(px(16.));
+        let mut list = settings_box().child(head(tr("shortcuts_project_named").replace("{name}", &project.name)));
         if count == 0 { list = list.child(note(tr("shortcuts_project_empty"), theme::muted())); }
         for (n, item) in project.items.iter().enumerate() {
             list = list.child(self.render_shortcut_row(item, n, count, saving, true, cx));
         }
-        let form = match &self.shortcuts.form {
-            Some(form) if form.project => self.render_shortcut_form(form, cx),
-            _ => div().mt(px(16.)).flex().child(Button::new("project-shortcut-add").outline().small().icon(IconName::Plus)
+        let open_form = matches!(&self.shortcuts.form, Some(form) if form.project);
+        let list = list.when(!open_form, |el| el.child(card_footer()
+            .child(Button::new("project-shortcut-add").primary().small().icon(IconName::Plus)
                 .label(tr("shortcuts_project_add")).loading(saving).disabled(saving)
-                .on_click(cx.listener(|this, _, window, cx| this.open_shortcut_form(None, true, window, cx)))),
-        };
-        Some(section.child(heading(tr("shortcuts_project_named").replace("{name}", &project.name)))
-            .child(div().text_size(px(13.)).text_color(theme::muted()).whitespace_normal().child(tr("shortcuts_project_lead")))
-            .child(list).child(form).children(save_error))
+                .on_click(cx.listener(|this, _, window, cx| this.open_shortcut_form(None, true, window, cx))))));
+        let form = open_form.then(|| match &self.shortcuts.form { Some(form) => self.render_shortcut_form(form, cx), None => div() });
+        Some(section.child(list).children(form).children(save_error))
     }
 
     /// Linha de um atalho; `project` = da seção "Deste projeto" (ids próprios, grava na hora, sem arrastar).
@@ -602,29 +677,54 @@ impl Hangar {
         let button = |key: &str, icon: IconName, tip: &str, off: bool| chrome::icon_button(SharedString::from(format!("{prefix}-{key}-{id}")), icon, tr(tip), cx)
             .small().disabled(off || saving);
         let (up, down, remove, edit) = (id.clone(), id.clone(), id.clone(), id.clone());
-        let actions = div().flex().flex_shrink_0().gap(px(2.))
+        // Reordenar é um par; editar e remover são outra coisa. Quatro glifos com o mesmo vão liam como um borrão —
+        // o par fica junto, com folga dos vizinhos.
+        let actions = div().flex().flex_shrink_0().items_center().gap(px(8.))
             .when(!native, |el| el.child(button("edit", IconName::Pencil, "shortcuts_edit", false)
                 .on_click(cx.listener(move |this, _, window, cx| this.open_shortcut_form(Some(edit.clone()), project, window, cx)))))
-            .child(button("up", IconName::ArrowUp, "shortcuts_up", n == 0).on_click(cx.listener(move |this, _, _, cx| this.move_shortcut(&up, -1, project, cx))))
-            .child(button("down", IconName::ArrowDown, "shortcuts_down", n + 1 == count).on_click(cx.listener(move |this, _, _, cx| this.move_shortcut(&down, 1, project, cx))))
+            .child(div().flex().gap(px(1.))
+                .child(button("up", IconName::ArrowUp, "shortcuts_up", n == 0).on_click(cx.listener(move |this, _, _, cx| this.move_shortcut(&up, -1, project, cx))))
+                .child(button("down", IconName::ArrowDown, "shortcuts_down", n + 1 == count).on_click(cx.listener(move |this, _, _, cx| this.move_shortcut(&down, 1, project, cx)))))
             .child(button("remove", IconName::Close, "shortcuts_remove", false).on_click(cx.listener(move |this, _, _, cx| {
                 let change = |items: &mut Vec<Item>| items.retain(|i| i.id() != remove);
                 if project { this.project_edit(cx, change) } else { this.shortcuts_edit(cx, change) }
             })));
         let content = match item.pasta() { Some(pasta) => format!("{} · {pasta}", item.content()), None => item.content().to_owned() };
+        // Onde o atalho roda: "Na sessão · texto" (envio), "Na sessão" ou "No Hangar" (comando).
+        let mark = match item.kind() {
+            "send_text" => Some((tr_shared("atalhos_marca_sessao_texto", &[]), false)),
+            "shell" if item.runs_in_hangar() => Some((tr_shared("atalhos_marca_hangar", &[]), true)),
+            "shell" => Some((tr_shared("atalhos_marca_sessao_comando", &[]), false)),
+            _ => None,
+        };
+        // As duas marcas com o mesmo peso: só o "No Hangar" tinha fundo visível, e a coluna ficava desalinhada a olho
+        // (o fundo da outra some no vidro). A borda entra nas duas, senão uma fica 2px mais alta que a vizinha.
+        let mark = mark.map(|(text, hangar)| div().flex_shrink_0().px(px(8.)).py(px(3.)).rounded_full().text_size(px(12.)).border_1()
+            .when(hangar, |el| el.bg(theme::accent().opacity(0.16)).border_color(theme::accent().opacity(0.35)).text_color(theme::accent_text()))
+            .when(!hangar, |el| el.bg(theme::raised()).border_color(theme::border()).text_color(theme::muted())).child(text));
+        // A linha aberta no formulário troca a marca por "editando" e ganha um realce de destaque.
+        let editing = self.shortcuts.form.as_ref().is_some_and(|f| f.project == project && f.editing.as_deref() == Some(id.as_str()));
+        let mark = if editing { Some(div().flex_shrink_0().text_size(px(12.)).text_color(theme::faint()).child(tr_shared("atalhos_editando", &[]))) } else { mark };
+        // A marca vem colada ao nome, não encostada nas setas: encostada, sobrava uma faixa vazia no meio de toda linha
+        // e as marcas nunca começavam na mesma coluna.
         let text = div().flex_1().min_w_0().flex().flex_col().gap(px(2.))
-            .child(div().font_weight(FontWeight::MEDIUM).truncate().child(label.clone()))
-            .when(!native, |el| el.child(div().text_size(px(12.)).font_family(theme::MONO).text_color(theme::muted()).truncate().child(content)));
+            .child(div().flex().items_center().gap(px(8.)).min_w_0()
+                .child(div().min_w_0().text_size(px(15.)).font_weight(FontWeight::MEDIUM).truncate().child(label.clone()))
+                .children(mark))
+            .when(!native, |el| el.child(div().text_size(px(12.)).font_family(theme::MONO).text_color(theme::faint()).truncate().child(content)));
         let dragged = Dragged { id: id.clone(), label };
         // A linha que saiu do lugar esmaece, como a `.linha.arrastando` do web.
         let lifted = !project && cx.has_active_drag() && self.shortcuts.dragging.as_deref() == Some(id.as_str());
         let this = cx.entity().downgrade();
         // Divisória em cima de toda linha, como nas outras páginas; a da primeira some sob a borda da caixa.
+        // Altura igual em toda linha: a do nativo tem uma linha de texto e a do customizado duas, e a lista ficava
+        // com degraus. O quadradinho do ícone ganha borda — sem ela o fundo somia no vidro.
         div().id(SharedString::from(format!("{prefix}-row-{id}"))).mt(px(-1.)).border_t_1().border_color(theme::border())
-            .flex().items_center().gap(px(12.)).px_4().py(px(10.))
+            .flex().items_center().gap(px(12.)).px(px(16.)).py(px(10.)).min_h(px(56.))
+            .when(editing, |el| el.bg(theme::accent().opacity(0.06)))
             .child(chrome::small_icon(IconName::GripVertical, 16., theme::faint()))
-            .child(div().size(px(36.)).flex_shrink_0().rounded(px(10.)).border_1().border_color(theme::border()).bg(theme::inset())
-                .flex().items_center().justify_center().child(icon_element(icon, 16., theme::muted())))
+            .child(div().size(px(34.)).flex_shrink_0().rounded(px(9.)).bg(theme::raised()).border_1().border_color(theme::border())
+                .flex().items_center().justify_center().child(icon_element(icon, 17., theme::muted())))
             .child(text)
             .child(actions)
             .when(lifted, |el| el.opacity(0.45))
@@ -670,7 +770,9 @@ impl Hangar {
         let picks: Vec<String> = if form.shell { Vec::new() } else {
             self.shortcuts.suggestions.iter().filter(|s| **s != typed && s.to_lowercase().contains(&typed.to_lowercase())).take(6).cloned().collect()
         };
-        let content = div().flex().flex_col().gap(px(6.)).child(Input::new(&form.content))
+        // O comando de um `shell` é lido como código.
+        let content = div().flex().flex_col().gap(px(6.))
+            .child(div().when(form.shell, |el| el.font_family(theme::MONO).text_size(px(13.))).child(Input::new(&form.content)))
             .when(!picks.is_empty(), |el| el.child(div().flex().flex_wrap().gap(px(6.)).children(picks.into_iter().map(|pick| {
                 Button::new(SharedString::from(format!("shortcut-pick-{pick}"))).ghost().small().label(pick.clone())
                     .on_click(cx.listener(move |this, _, window, cx| {
@@ -687,20 +789,84 @@ impl Hangar {
         let folder = (form.project && form.shell).then(|| field("shortcuts_folder", div().flex().flex_col().gap(px(6.))
             .child(Input::new(&form.folder))
             .child(div().text_size(px(12.)).text_color(theme::muted()).whitespace_normal().child(tr("shortcuts_folder_help"))).into_any_element()));
-        let saving = if form.project { self.side.project.saving.is_some() } else { self.shortcuts.saving };
-        settings_box().mt(px(16.)).p(px(16.)).gap(px(16.))
+        let own = if form.project { self.side.project.saving.is_some() } else { self.shortcuts.saving };
+        let busy = self.shortcuts.busy() || self.side.project.saving.is_some();
+        let form_error = if form.project { self.side.project.save_error.clone() } else { self.shortcuts.save_error.clone() };
+        let where_card = |id: &'static str, hangar: bool, title: &str, help: &str, usage: &str, cx: &mut Context<Self>| {
+            let on = form.hangar == hangar;
+            Button::new(id)
+                .custom(ButtonCustomVariant::new(cx).color(if on { theme::accent().opacity(0.10) } else { transparent_black() })
+                    .foreground(theme::text()).hover(theme::hover()).active(theme::hover()))
+                .flex_1().min_w(px(200.)).h_auto().p(px(16.)).rounded(px(10.)).border_1()
+                .border_color(if on { theme::accent() } else { theme::border_strong() }).accessibility_label(title.to_owned())
+                .child(div().w_full().flex().flex_col().items_start().gap(px(8.)).whitespace_normal().text_left()
+                    .child(div().flex().items_center().gap(px(10.))
+                        .child(div().size(px(14.)).flex_shrink_0().rounded_full().border_color(if on { theme::accent() } else { theme::faint() })
+                            .when(on, |el| el.border_4().bg(theme::on_press())).when(!on, |el| el.border_1()))
+                        .child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).child(title.to_owned())))
+                    .child(div().text_size(px(13.)).line_height(px(19.)).text_color(theme::muted()).child(help.to_owned()))
+                    .child(div().text_size(px(12.)).text_color(theme::faint()).child(usage.to_owned())))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if let Some(f) = this.shortcuts.form.as_mut() { f.hangar = hangar; }
+                    cx.notify();
+                }))
+        };
+        let (where_title, where_click) = (tr_shared("atalhos_onde_clique_titulo", &[]), tr_shared("atalhos_onde_clique", &[]));
+        let home_text = tr_shared("atalhos_onde_home", &[("home", "~")]);
+        let (home_before, home_after) = match home_text.split_once('~') {
+            Some((before, after)) => (before.trim_end().to_owned(), after.trim_start().to_owned()),
+            None => (home_text.clone(), String::new()),
+        };
+        let where_block = form.shell.then(|| div().flex().flex_col().gap(px(10.))
+            .child(div().text_size(px(13.)).text_color(theme::muted()).child(tr_shared("atalhos_onde", &[])))
+            .child(div().flex().flex_wrap().gap(px(12.))
+                .child(where_card("shortcut-where-session", false, &tr_shared("atalhos_onde_sessao", &[]),
+                    &tr_shared("atalhos_onde_sessao_ajuda", &[]), &tr_shared("atalhos_onde_sessao_uso", &[]), cx))
+                .child(where_card("shortcut-where-hangar", true, &tr_shared("atalhos_onde_hangar", &[]),
+                    &tr_shared("atalhos_onde_hangar_ajuda", &[]), &tr_shared("atalhos_onde_hangar_uso", &[]), cx)))
+            .when(form.hangar, |el| el.child(div().flex().flex_col().gap(px(12.)).p(px(16.)).rounded(px(10.)).bg(theme::inset()).border_1().border_color(theme::border())
+                .child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).child(where_title))
+                .child(div().flex().items_start().gap(px(10.))
+                    .child(div().mt(px(2.)).flex_shrink_0().child(chrome::small_icon(IconName::ArrowRight, 16., theme::accent())))
+                    .child(div().flex_1().min_w_0().text_size(px(13.)).line_height(px(19.)).text_color(theme::muted()).whitespace_normal().child(where_click)))
+                .child(div().flex().items_center().gap(px(10.))
+                    .child(Checkbox::new("shortcut-home").accessibility_label(home_text.clone()).checked(form.home)
+                        .on_click(cx.listener(|this, on: &bool, _, cx| { if let Some(f) = this.shortcuts.form.as_mut() { f.home = *on; } cx.notify(); })))
+                    // O `~` é código: o texto do cartão vem partido nele.
+                    .child(div().id("shortcut-home-text").flex().flex_wrap().items_center().gap(px(4.)).text_size(px(13.)).text_color(theme::muted()).cursor_pointer()
+                        .child(home_before).child(div().font_family(theme::MONO).text_color(theme::text()).child("~")).child(home_after)
+                        .on_click(cx.listener(|this, _, _, cx| { if let Some(f) = this.shortcuts.form.as_mut() { f.home = !f.home; } cx.notify(); })))))));
+        // "Responder perguntas pelo app." em destaque e a ajuda na mesma frase, como no desenho.
+        let ask_title = tr_shared("atalhos_perguntas", &[]);
+        let ask_text = StyledText::new(format!("{ask_title} {}", tr_shared("atalhos_perguntas_ajuda", &[])))
+            .with_highlights([(0..ask_title.len(), HighlightStyle { color: Some(theme::text()), ..Default::default() })]);
+        let ask = form.shell.then(|| div().flex().items_start().gap(px(10.))
+            .child(div().mt(px(2.)).flex_shrink_0().child(Checkbox::new("shortcut-ask").accessibility_label(ask_title.clone()).checked(form.ask)
+                .on_click(cx.listener(|this, on: &bool, _, cx| { if let Some(f) = this.shortcuts.form.as_mut() { f.ask = *on; } cx.notify(); }))))
+            .child(div().id("shortcut-ask-text").flex_1().min_w_0().text_size(px(13.)).line_height(px(19.)).text_color(theme::muted()).whitespace_normal().cursor_pointer()
+                .child(ask_text).on_click(cx.listener(|this, _, _, cx| { if let Some(f) = this.shortcuts.form.as_mut() { f.ask = !f.ask; } cx.notify(); }))));
+        // Rótulo e comando lado a lado; o ícone desce para depois dos dois.
+        let pair = div().flex().flex_wrap().gap(px(16.))
+            .child(field("shortcuts_label", Input::new(&form.label).into_any_element()).flex_1().min_w(px(220.)))
+            .child(field(if form.shell { "shortcuts_command" } else { "shortcuts_text" }, content.into_any_element()).flex_1().min_w(px(220.)));
+        settings_box().mt(px(16.)).p(px(24.)).gap(px(18.)).rounded(px(12.)).bg(theme::surface()).border_color(theme::border_strong())
             .child(field("shortcuts_type", div().flex().child(kind).into_any_element()))
-            .child(field("shortcuts_label", Input::new(&form.label).into_any_element()))
+            .child(pair)
             .child(field("shortcuts_icon", glyphs.into_any_element()))
-            .child(field(if form.shell { "shortcuts_command" } else { "shortcuts_text" }, content.into_any_element()))
             .children(folder)
+            .children(where_block)
+            .children(ask)
             .children(direct)
             .child(confirm)
-            .child(div().flex().justify_end().gap(px(8.))
-                .child(Button::new("shortcut-form-cancel").ghost().small().label(tr("cancel"))
+            .children(form_error.map(|error| div().id("shortcut-form-error").role(Role::Alert).text_size(px(13.)).text_color(theme::danger())
+                .whitespace_normal().child(error)))
+            .child(div().flex().justify_end().gap(px(10.))
+                .child(Button::new("shortcut-form-cancel").outline().h(px(38.)).px(px(16.)).rounded(px(8.)).label(tr("cancel")).disabled(busy)
                     .on_click(cx.listener(|this, _, window, cx| this.close_shortcut_form(window, cx))))
-                .child(Button::new("shortcut-form-ok").primary().small().label(tr("shortcuts_form_ok")).loading(form.project && saving)
-                    .disabled(!form.valid(cx) || saving)
+                .child(Button::new("shortcut-form-ok")
+                    .custom(ButtonCustomVariant::new(cx).color(theme::accent_press()).foreground(theme::on_press()).hover(theme::accent()).active(theme::accent_press()))
+                    .h(px(38.)).px(px(18.)).rounded(px(8.)).label(tr("shortcuts_form_ok")).loading(own)
+                    .disabled(!form.valid(cx) || busy)
                     .on_click(cx.listener(|this, _, window, cx| this.submit_shortcut_form(window, cx)))))
     }
 }
@@ -744,11 +910,27 @@ mod tests {
 
     #[test]
     fn folder_is_written_only_for_a_shell_and_cleared_when_empty() {
-        let draft = |shell: bool, pasta: &str| Draft { shell, label: "L".into(), content: "c".into(), icon: "glifo:bolt".into(), direct: true, confirm: false, pasta: pasta.into() };
+        let draft = |shell: bool, pasta: &str| Draft { shell, label: "L".into(), content: "c".into(), icon: "glifo:bolt".into(), direct: true, confirm: false, pasta: pasta.into(),
+            hangar: false, home: true, ask: true };
         let original = project_items(Some(&serde_json::json!([{"id":"a","type":"shell","label":"L","command":"c","pasta":"old"}])))[0].0.clone();
         assert_eq!(draft(true, "tools").into_item(Some(original.clone()), "a".into()).pasta(), Some("tools"));
         assert_eq!(draft(true, "").into_item(Some(original), "a".into()).pasta(), None);
         assert_eq!(draft(false, "tools").into_item(None, "b".into()).pasta(), None);
+    }
+
+    #[test]
+    fn where_it_runs_is_written_only_when_it_differs_from_the_default() {
+        let draft = |hangar: bool, home: bool, ask: bool| Draft { shell: true, label: "L".into(), content: "c".into(), icon: "glifo:bolt".into(),
+            direct: true, confirm: false, pasta: String::new(), hangar, home, ask };
+        let plain = draft(false, true, true).into_item(None, "a".into());
+        assert!(["runs_in", "hangar_home", "answer_in_app"].iter().all(|key| !plain.0.contains_key(*key)));
+        assert!(!plain.runs_in_hangar() && plain.hangar_home() && plain.answer_in_app());
+        let hangar = draft(true, false, false).into_item(Some(plain.0.clone()), "a".into());
+        assert!(hangar.runs_in_hangar() && !hangar.hangar_home() && !hangar.answer_in_app());
+        // Sair do Hangar apaga as marcas dele; a home só vale No Hangar.
+        let back = draft(false, false, true).into_item(Some(hangar.0), "a".into());
+        assert!(!back.runs_in_hangar() && !back.0.contains_key("hangar_home") && back.answer_in_app());
+        assert!(resolve(r#"[{"id":"a","type":"shell","label":"L","command":"c","runs_in":"hangar","hangar_home":"x"}]"#).is_empty());
     }
 
     #[test]
@@ -765,7 +947,8 @@ mod tests {
     #[test]
     fn editing_keeps_unknown_fields_and_never_revives_a_removed_item() {
         let mut items = resolve(r#"[{"id":"a","type":"send_text","label":"R","text":"/r","send_direct":false,"confirm":true,"novo":1,"icon":"glifo:futuro"}]"#);
-        let draft = Draft { shell: false, label: "R2".into(), content: "/r2".into(), icon: "glifo:futuro".into(), direct: true, confirm: false, pasta: String::new() };
+        let draft = Draft { shell: false, label: "R2".into(), content: "/r2".into(), icon: "glifo:futuro".into(), direct: true, confirm: false, pasta: String::new(),
+            hangar: false, home: true, ask: true };
         let edited = draft.into_item(Some(items[0].0.clone()), "a".into());
         // O campo desconhecido e o glifo que esta versão não conhece ficam; as marcas desligadas saem.
         assert_eq!(edited.0.get("novo"), Some(&serde_json::json!(1)));
@@ -776,6 +959,15 @@ mod tests {
         items.clear();
         apply_edit(&mut items, Some("a"), edited);
         assert!(items.is_empty());
+    }
+
+    #[test]
+    fn resending_a_new_shortcut_with_the_same_id_does_not_duplicate_it() {
+        let mut items = resolve(r#"[{"id":"a","type":"send_text","label":"A","text":"a"}]"#);
+        let again = resolve(r#"[{"id":"n","type":"send_text","label":"N","text":"n"}]"#).remove(0);
+        apply_edit(&mut items, None, again.clone());
+        apply_edit(&mut items, None, again);
+        assert_eq!(items.iter().map(Item::id).collect::<Vec<_>>(), ["a", "n"]);
     }
 
     #[test]

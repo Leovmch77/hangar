@@ -12,9 +12,9 @@ import {
   inviteAllows, SharePrerequisiteError, tailscaleEnableUrl, type ShareCreated, type ShareInfo, type SharePrereqs,
 } from './share';
 import type { CotaContaResumo } from './cotaResumo';
-import type { ProjectShortcut, ProjectShortcuts } from './shortcuts';
+import type { Shortcut, ProjectShortcut, ProjectShortcuts } from './shortcuts';
 import type { UsoFiltros, UsoReport } from './uso';
-import type { ConfigSyncItem, ConfigSyncManifest, ConfigSyncReport } from './configSync';
+import type { ConfigSyncItem, ConfigSyncManifest, ConfigSyncProgress, ConfigSyncReport } from './configSync';
 import type {
   Atualizacao,
   SessionInfo,
@@ -24,6 +24,7 @@ import type {
   ConfigDirInfo,
   FsRoot,
   FsScanResult,
+  FsEntry,
   FsScanError,
   WorkflowSummary,
   SubagentRun,
@@ -32,6 +33,7 @@ import type {
   AnswerItem,
   CostReport,
   OrqConductor,
+  OrqPanel,
   OrqExecucao,
   OrqLista,
   ResumeResult,
@@ -104,9 +106,9 @@ export function transcriptImageUrl(name: string, id: string, idx: number): strin
 
 // URL pra servir um arquivo CITADO na conversa (video/html/pdf/img por caminho). `?token` p/ <img>/
 // <video>/<iframe> (sem header). O backend so serve se o path estiver no transcript da sessao.
-export function fileUrl(name: string, path: string): string {
+export function fileUrl(name: string, path: string, download = false): string {
   const t = apiEnv().getToken() ?? '';
-  return `${apiEnv().getBaseUrl()}/api/sessions/${encodeURIComponent(name)}/file?path=${encodeURIComponent(path)}&token=${encodeURIComponent(t)}`;
+  return `${apiEnv().getBaseUrl()}/api/sessions/${encodeURIComponent(name)}/file?path=${encodeURIComponent(path)}&token=${encodeURIComponent(t)}${download ? '&download=1' : ''}`;
 }
 
 // URL nativa (sem token na query) — para WebView/Image nativo que manda Authorization header.
@@ -123,9 +125,9 @@ export function fileAuthHeader(server?: Server): Record<string, string> {
 
 // URL de uma imagem ENVIADA do phone (upload), servida do cofre (~/.hangar/uploads/<projeto>/<sessão>/).
 // `?token` igual as de cima: <img> nao manda header Authorization e cross-origin nao leva cookie.
-export function uploadUrl(name: string, filename: string): string {
+export function uploadUrl(name: string, filename: string, download = false): string {
   const t = apiEnv().getToken() ?? '';
-  return `${apiEnv().getBaseUrl()}/api/sessions/${encodeURIComponent(name)}/uploads/${encodeURIComponent(filename)}?token=${encodeURIComponent(t)}`;
+  return `${apiEnv().getBaseUrl()}/api/sessions/${encodeURIComponent(name)}/uploads/${encodeURIComponent(filename)}?token=${encodeURIComponent(t)}${download ? '&download=1' : ''}`;
 }
 
 export function uploadUrlNative(name: string, filename: string): string {
@@ -162,14 +164,14 @@ export async function errorDetail(res: Response): Promise<string> {
 
 // Mensagem traduzida + o CÓDIGO cru do backend (`erro_*`). O código é o que deixa quem chama
 // decidir por identidade e não por texto — a mensagem muda com o idioma.
-async function lerErro(res: Response): Promise<{ msg: string; code?: string }> {
+async function lerErro(res: Response): Promise<{ msg: string; code?: string; envelope?: Record<string, unknown> }> {
   const text = await res.text().catch(() => '');
   try {
     const j = JSON.parse(text);
     if (j && typeof j.detail === 'string') return { msg: j.detail };
     const envelope = j?.detail ?? j;
     if (envelope && typeof envelope.code === 'string') {
-      return { msg: formataErro(envelope)!, code: envelope.code };
+      return { msg: formataErro(envelope)!, code: envelope.code, envelope };
     }
   } catch { /* corpo nao-JSON: cai no texto cru abaixo */ }
   // text e statusText podem os DOIS vir vazios (502 de infra sem corpo JSON, servidor HTTP/2 que
@@ -197,8 +199,9 @@ async function ensureOk(res: Response): Promise<void> {
   // MENSAGEM fica limpa (sem o "409: " na frente) — quem precisa do numero le `.status`, nao
   // texto que o usuario acaba vendo cru (ex: window.confirm da confirmacao de custo do TTS).
   if (!res.ok) {
-    const { msg, code } = await lerErro(res);
-    throw Object.assign(new Error(msg), { status: res.status, code });
+    const { msg, code, envelope } = await lerErro(res);
+    // `envelope` = detail cru: quem precisa de campo extra do erro (ex: `sessao`) lê daqui.
+    throw Object.assign(new Error(msg), { status: res.status, code, envelope });
   }
 }
 
@@ -494,6 +497,14 @@ export function getOrqConductorForServer(s: Server, id: string): Promise<OrqCond
   return apiFetchForServer<OrqConductor>(s, `/api/orq/${encodeURIComponent(id)}/conductor`);
 }
 
+export function getOrqPanelForServer(s: Server, name: string): Promise<OrqPanel> {
+  return apiFetchForServer<OrqPanel>(s, `/api/sessions/${encodeURIComponent(name)}/orq/panel`);
+}
+
+export function getOrqHistoryPanelForServer(s: Server, runId: string): Promise<OrqPanel> {
+  return apiFetchForServer<OrqPanel>(s, `/api/orq/${encodeURIComponent(runId)}/panel`);
+}
+
 // Cauda do histórico de UMA sessão de um servidor específico — cards do quadro kanban.
 // limit dispara o tail-read no backend (parseia só o fim do jsonl). Timeout de 8s mantido: disco
 // frio + arquivo grande ainda pode passar dos 4s dos fan-outs acima.
@@ -619,6 +630,10 @@ export function listClaudeConfigsForServer(server: Server): Promise<ConfigDirInf
   return apiFetchForServer<ConfigDirInfo[]>(server, '/api/claude-configs');
 }
 
+export function getClaudeAccountSuggestion(): Promise<{ path: string }> {
+  return apiFetch<{ path: string }>('/api/cotas/sugestao');
+}
+
 /** Cota de cada credencial do servidor ativo (backend/app/cotas.py). Ver `cotaResumo`. */
 export function listarCotasResumo(): Promise<CotaContaResumo[]> {
   return apiFetch<CotaContaResumo[]>('/api/cotas');
@@ -642,15 +657,37 @@ export interface CreateSessionBody {
   // Jev no `hangar-preview objetivo`: ligado, a sessão nasce com a chave no ambiente. Escolha da
   // abertura — é assim que se roda a mesma tarefa com e sem, sem apagar a configuração.
   jev?: boolean;
+  // Branch já existente (local ou remota) em que a sessão nasce; vazio = a atual da pasta.
+  branch?: string | null;
 }
 
 export function buildCreateSessionBody(body: CreateSessionBody): CreateSessionBody {
-  const { codex_account, ...rest } = body;
-  return rest.provider === 'codex' && codex_account ? { ...rest, codex_account } : rest;
+  const { codex_account, branch, ...rest } = body;
+  const out: CreateSessionBody = rest.provider === 'codex' && codex_account ? { ...rest, codex_account } : rest;
+  return branch ? { ...out, branch } : out;
 }
 
+// A MESMA regra do backend (`app/names.py:sanitize_session_name`): NFKD antes do filtro, senão a
+// letra acentuada vira `-` e o aparo das pontas a come junto ("Área" -> "rea").
+export function sanitizeSessionName(name: string): string {
+  return name.normalize('NFKD').replace(/\p{M}/gu, '').replace(/[^A-Za-z0-9_-]/g, '-').replace(/^-+|-+$/g, '');
+}
+
+// Nome único p/ tmux: sanitiza e, se já existir, sufixa -2/-3...
+export function uniqueSessionName(base: string, taken: Set<string>): string {
+  const clean = sanitizeSessionName(base) || 'sessao';
+  if (!taken.has(clean)) return clean;
+  let i = 2;
+  while (taken.has(`${clean}-${i}`)) i++;
+  return `${clean}-${i}`;
+}
+
+// Abrir ou retomar sessão leva bem mais que o prazo padrão: estourar antes faz a tela acusar erro
+// com a sessão nascendo e o reenvio duplicá-la.
+const SESSION_BIRTH_MS = 120_000;
+
 export function createSessionForServer(server: Server, body: CreateSessionBody): Promise<SessionInfo> {
-  return apiFetchForServer(server, '/api/sessions', { method: 'POST', body: JSON.stringify(buildCreateSessionBody(body)) });
+  return apiFetchForServer(server, '/api/sessions', { method: 'POST', body: JSON.stringify(buildCreateSessionBody(body)) }, SESSION_BIRTH_MS);
 }
 
 export function createSession(
@@ -674,7 +711,7 @@ export function createSession(
                            model: model ?? null, effort: effort ?? null, codex_account: codexAccount };
   if (permissionMode) body.permission_mode = permissionMode;
   if (ompProfile) body.omp_profile = ompProfile;
-  if (headless && (provider === 'claude' || provider === 'codex')) body.headless = true;
+  if (headless !== undefined && (provider === 'claude' || provider === 'codex')) body.headless = headless;
   if (subagentModel && provider === 'claude') body.subagent_model = subagentModel;
   if (jev) body.jev = true;
   return apiFetch<SessionInfo>('/api/sessions', {
@@ -896,6 +933,70 @@ export function consumeCodexRateLimitReset(
 export function getRootsForServer(server: Server, signal?: AbortSignal): Promise<FsRoot[]> {
   return apiFetchForServer(server, '/api/fs/roots', { signal: comTeto(signal, 8000) });
 }
+// Git da pasta (`/api/fs/branches`, `/api/fs/git*`): as rotas pedem `root` (uma raiz liberada, igual
+// à lista de `/api/fs/roots`) e `path` (a pasta). O cliente recebe só a pasta e acha a raiz que a contém.
+export interface FolderBranches {
+  current: string | null;
+  branches: string[];
+  remotes: string[];   // nome curto, sem a local correspondente
+  dirty: boolean;
+}
+
+export interface FolderGit {
+  repo: boolean;       // false = pasta fora de repositório; os demais campos não vêm
+  current?: string | null;
+  upstream?: string | null;
+  toplevel?: string | null;
+  dirty?: number;
+  ahead?: number | null;
+  behind?: number | null;
+  last_fetch?: number | null;   // epoch s do último fetch
+  sessions?: string[];          // sessões vivas no mesmo checkout
+}
+
+// Compara por forma normalizada (barra, sem separador final, sem caixa em caminho de unidade do
+// Windows), mas devolve a string ORIGINAL da raiz: o backend exige igualdade com a dele.
+export function pickFolderRoot(roots: { path: string }[], cwd: string): string | null {
+  const norm = (p: string) => {
+    const f = p.replace(/\\/g, '/').replace(/\/+$/, '');
+    return /^[A-Za-z]:/.test(f) ? f.toLowerCase() : f;
+  };
+  const target = norm(cwd);
+  let best: string | null = null;
+  for (const r of roots) {
+    const root = norm(r.path);
+    if ((target === root || target.startsWith(root + '/')) && (best === null || r.path.length > best.length)) best = r.path;
+  }
+  return best;
+}
+
+const FOLDER_READ_MS = 30_000;
+const FOLDER_ACTION_MS = 150_000;
+
+// `root` explícito dispensa a consulta a /api/fs/roots (quem escolheu a pasta já sabe a raiz).
+async function folderRoot(server: Server, cwd: string, signal?: AbortSignal, root?: string): Promise<string> {
+  if (root) return root;
+  const found = pickFolderRoot(await getRootsForServer(server, signal), cwd);
+  if (!found) throw new Error('root not allowed');
+  return found;
+}
+
+export async function getFolderBranchesForServer(server: Server, cwd: string, signal?: AbortSignal, root?: string): Promise<FolderBranches> {
+  const q = new URLSearchParams({ root: await folderRoot(server, cwd, signal, root), path: cwd });
+  return apiFetchForServer(server, `/api/fs/branches?${q}`, { signal: comTeto(signal, FOLDER_READ_MS) }, FOLDER_READ_MS);
+}
+
+export async function getFolderGitForServer(server: Server, cwd: string, signal?: AbortSignal, root?: string): Promise<FolderGit> {
+  const q = new URLSearchParams({ root: await folderRoot(server, cwd, signal, root), path: cwd });
+  return apiFetchForServer(server, `/api/fs/git?${q}`, { signal: comTeto(signal, FOLDER_READ_MS) }, FOLDER_READ_MS);
+}
+
+// Fetch/pull devolvem o mesmo estado da leitura, já relido.
+export async function folderGitActionForServer(server: Server, cwd: string, action: 'fetch' | 'pull', root?: string): Promise<FolderGit> {
+  const body = JSON.stringify({ root: await folderRoot(server, cwd, undefined, root), path: cwd });
+  return apiFetchForServer(server, `/api/fs/git/${action}`, { method: 'POST', body }, FOLDER_ACTION_MS);
+}
+
 // Importação Claude → Codex da conta padrão (a mesma do "Reconciliar agora" em Harnesses).
 export function getCodexIntegrationForServer(server: Server, signal?: AbortSignal): Promise<CodexIntegracaoEstado> {
   return apiFetchForServer(server, '/api/harness/codex/integracao', { signal: comTeto(signal, 8000) });
@@ -1144,11 +1245,12 @@ export function getRoots(): Promise<FsRoot[]> {
  * renderização (lê `result.error`), em vez de misturar throws com campos. Apenas 401
  * borbulha (problema de auth, não de varredura).
  */
-export async function scanDir(root: string, path?: string): Promise<FsScanResult> {
+export async function scanDir(root: string, path?: string, server?: Server): Promise<FsScanResult> {
   const qs = new URLSearchParams({ root });
   if (path) qs.set('path', path);
+  const url = `/api/fs/scan?${qs.toString()}`;
   try {
-    return await apiFetch<FsScanResult>(`/api/fs/scan?${qs.toString()}`);
+    return await (server ? apiFetchForServer<FsScanResult>(server, url) : apiFetch<FsScanResult>(url));
   } catch (e) {
     if (!(e instanceof Error)) throw e;
     // `.status`, nao parseInt(e.message): ensureOk (api.ts) parava de embutir o status no TEXTO
@@ -1182,6 +1284,13 @@ export async function scanDirForServer(server: Server, root: string, path?: stri
   }
 }
 
+// Cria a subpasta `name` em `path` (default = raiz), sob a mesma allowlist do scan.
+export function makeDir(root: string, path: string | null, name: string, server?: Server): Promise<FsEntry> {
+  const init = { method: 'POST', body: JSON.stringify({ root, path, name }) };
+  // Prazo largo: estourar depois de o servidor criar mostraria falha de uma pasta que existe.
+  return server ? apiFetchForServer<FsEntry>(server, '/api/fs/mkdir', init, 20_000) : apiFetch<FsEntry>('/api/fs/mkdir', init);
+}
+
 // ── Arquivo: conversas mortas (transcripts sem sessão tmux viva) ──────────────
 // Navegação pasta-primeiro: nível 1 = pastas (agregado barato), nível 2 = conversas da pasta.
 export interface ArchiveFolder {
@@ -1210,6 +1319,10 @@ export function getArchive(): Promise<ArchiveFolder[]> {
   return apiFetch<ArchiveFolder[]>('/api/archive');
 }
 
+export function getArchiveRecentForServer(server: Server, cap = 40, signal?: AbortSignal): Promise<ArchiveEntry[]> {
+  return apiFetchForServer(server, `/api/archive/recent?cap=${cap}`, { signal: comTeto(signal, 8000) });
+}
+
 export function getArchiveFolder(project: string): Promise<ArchiveEntry[]> {
   return apiFetch<ArchiveEntry[]>(`/api/archive/${encodeURIComponent(project)}`);
 }
@@ -1229,7 +1342,7 @@ export function resumeArchivedConversation(
   codexAccount?: string | null,
   server?: Server | null,
 ): Promise<SessionInfo> {
-  const request = server ? <T>(path: string, init?: RequestInit) => apiFetchForServer<T>(server, path, init) : apiFetch;
+  const request = server ? <T>(path: string, init?: RequestInit) => apiFetchForServer<T>(server, path, init, SESSION_BIRTH_MS) : apiFetch;
   return request<SessionInfo>(
     `/api/archive/${encodeURIComponent(project)}/${encodeURIComponent(sessionId)}/resume`,
     { method: 'POST', body: JSON.stringify({
@@ -1314,10 +1427,11 @@ export async function askHistoryForServer(
 }
 
 export async function searchTranscriptsForServer(s: Server, q: string): Promise<SearchHit[]> {
-  // 30s: a busca varre as conversas de todas as contas; um termo raro percorre tudo antes de parar.
+  // 8s: com o índice FTS a busca responde em milissegundos; esperar mais só prende a tela num
+  // servidor inalcançável. O `rg` de antes do índice ficar pronto pode estourar — vira aviso de falha.
   const res = await fetch(`${baseOf(s)}/api/search?q=${encodeURIComponent(q)}`, {
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${s.token}` },
-    signal: AbortSignal.timeout(30000),
+    signal: AbortSignal.timeout(8000),
   });
   if (!res.ok) throw new Error(`${res.status}`);
   return res.json() as Promise<SearchHit[]>;
@@ -1416,6 +1530,7 @@ export function listUploads(name: string): Promise<{ files: UploadFile[] }> {
 // ── Configuração do servidor ────────────────────────────────────────────────
 // O segredo (chave da Groq) volta MASCARADO — dá pra conferir qual chave está lá, não pra copiar.
 export interface CampoConfig {
+  erro?: string;
   valor: string | number | boolean | null;
   definido: boolean;
   origem: 'app' | 'env';
@@ -2390,6 +2505,28 @@ export function disableSyncForServer(server: Server): Promise<SyncSetup> {
   return apiFetchForServer(server, '/api/sync/setup/disable', { method: 'POST' });
 }
 
+export type Me = { role: 'owner' | 'guest'; name: string | null };
+
+export function getMeForServer(server: Server, signal?: AbortSignal): Promise<Me> {
+  return apiFetchForServer(server, '/api/me', { signal: comTeto(signal, 8000) });
+}
+
+export function createGuestForServer(
+  server: Server, body: { name: string; root: string; sees_owner: boolean; owner_sees: boolean },
+): Promise<{ id: string; token: string }> {
+  return apiFetchForServer(server, '/api/guests', { method: 'POST', body: JSON.stringify(body) });
+}
+
+export function updateGuestForServer(
+  server: Server, id: string, body: { root: string; sees_owner: boolean; owner_sees: boolean },
+): Promise<{ id: string }> {
+  return apiFetchForServer(server, `/api/guests/${encodeURIComponent(id)}`, { method: 'POST', body: JSON.stringify(body) });
+}
+
+export function deleteGuestForServer(server: Server, id: string): Promise<{ ok: true }> {
+  return apiFetchForServer(server, `/api/guests/${encodeURIComponent(id)}/delete`, { method: 'POST' });
+}
+
 // EventSource da LISTA de UM servidor (baseUrl/token explícitos). ?token cross-origin (EventSource
 // não manda header e cross-origin não leva cookie); withCredentials same-origin. Por-servidor:
 // cada um tem o seu, falha isolada.
@@ -2518,6 +2655,9 @@ export function getRunPane(name: string): Promise<{ pane: string }> {
   return apiFetch(`/api/sessions/${encodeURIComponent(name)}/run/pane`);
 }
 
+/** Pergunta que o programa do terminal está fazendo (`screen` = fim da tela, pra dar contexto). */
+export interface ShortcutQuestion { text: string; default: string; screen: string[] }
+
 /** Terminal escondido de um atalho "shell": uma aba no painel de terminal da sessão. O pane fica
  * depois que o comando sai (`alive: false`), com a saída e o código na tela até alguém fechar. */
 export interface ShortcutTerminal {
@@ -2526,16 +2666,48 @@ export interface ShortcutTerminal {
   alive: boolean;
   exit_code: number | null;
   created?: number;
+  ask?: boolean;
+  key?: string;
+  question?: ShortcutQuestion | null;
 }
+
+/** Linha do evento `shortcut_terminals`: dono vazio + `key` = No Hangar; `origin` = quem abriu. */
+export interface LiveShortcutTerminal extends ShortcutTerminal {
+  owner: string;
+  key: string;
+  origin: string;
+}
+
+export interface ShortcutShellResult {
+  ok: boolean;
+  terminal?: ShortcutTerminal;
+  reused?: boolean;
+  focused?: boolean;
+}
+
+/** Servidor com versão anterior aos atalhos No Hangar: ignoraria `runs_in` e abriria uma cópia da sessão. */
+export class OutdatedServerError extends Error {}
 
 /** Atalho "shell" da fileira, no cwd da sessão. No servidor POSIX cada execução ganha um
  * terminal próprio (`terminal` na resposta). Se o comando sai com erro nos primeiros 2 s, volta
  * 422 com o código e o fim da saída — o terminal continua listado pra ver a saída inteira. */
-export function runShortcutShell(name: string, command: string, label?: string, pasta?: string):
-    Promise<{ ok: boolean; terminal?: ShortcutTerminal }> {
-  return apiFetch(`/api/sessions/${encodeURIComponent(name)}/shortcut-shell`, {
+export async function runShortcutShell(name: string, command: string, label?: string, pasta?: string,
+                                       opts: { key?: string; hangar?: boolean; home?: boolean; ask?: boolean } = {}): Promise<ShortcutShellResult> {
+  const r = await apiFetch<ShortcutShellResult>(`/api/sessions/${encodeURIComponent(name)}/shortcut-shell`, {
     method: 'POST',
-    body: JSON.stringify({ command, ...(label ? { label } : {}), ...(pasta ? { pasta } : {}) }),
+    body: JSON.stringify({ command, ...(label ? { label } : {}), ...(pasta ? { pasta } : {}),
+      ...(opts.key ? { key: opts.key } : {}),
+      ...(opts.hangar ? { runs_in: 'hangar', home: opts.home !== false } : {}),
+      ask: opts.ask !== false }),
+  });
+  if (opts.hangar && r.reused === undefined) throw new OutdatedServerError('outdated');
+  return r;
+}
+
+/** Executa o código mostrado na conversa no servidor da sessão, em terminal próprio. */
+export function runCodeCommand(srv: Server, name: string, command: string, language: string | undefined, key: string): Promise<ShortcutShellResult> {
+  return apiFetchForServer<ShortcutShellResult>(srv, `/api/sessions/${encodeURIComponent(name)}/run-code`, {
+    method: 'POST', body: JSON.stringify({ command, key, ...(language ? { language } : {}) }),
   });
 }
 
@@ -2561,10 +2733,24 @@ export async function listShortcutTerminals(srv: Server, name: string): Promise<
 
 /** Arquivo de exportação dos atalhos: a lista gravada, com cada credencial trocada por
  * `⟦SEGREDO:<nome>⟧` no backend. `removed` = quantas saíram (não vai pro arquivo). */
-export interface ShortcutExport { version: number; shortcuts: unknown[]; removed: number }
+export interface ShortcutScript { path: string; content: string; executable: boolean }
+export interface ShortcutExport {
+  version: number;
+  shortcuts: Shortcut[];
+  scripts?: ShortcutScript[];
+  warnings?: string[];
+  removed: number;
+}
 
-export function exportShortcuts(srv?: Server | null): Promise<ShortcutExport> {
-  const path = '/api/shortcuts/export';
+export function exportShortcuts(
+  srv?: Server | null,
+  options: { ids?: string[]; includeScripts?: boolean } = {},
+): Promise<ShortcutExport> {
+  const query = new URLSearchParams();
+  if (options.ids) for (const id of options.ids.length ? options.ids : ['']) query.append('ids', id);
+  if (options.includeScripts !== undefined) query.set('include_scripts', String(options.includeScripts));
+  const encoded = query.toString();
+  const path = '/api/shortcuts/export' + (encoded ? `?${encoded}` : '');
   return srv ? apiFetchForServer<ShortcutExport>(srv, path) : apiFetch<ShortcutExport>(path);
 }
 
@@ -2572,6 +2758,8 @@ export interface ShortcutImportResult {
   added: number;
   replaced: number;
   placeholders: { id: string; label: string; names: string[] }[];
+  files?: { path: string; status: 'create' | 'replace' | 'same'; content: string }[];
+  warnings?: string[];
 }
 
 /** Importação dos atalhos: sem `apply` só confere e conta; com `apply` preenche os `secrets`
@@ -2590,6 +2778,27 @@ export function closeShortcutTerminal(srv: Server, name: string, id: string): Pr
   return apiFetchForServer<{ ok: true }>(
     srv, `/api/sessions/${encodeURIComponent(name)}/shortcut-terminals/${encodeURIComponent(id)}/close`,
     { method: 'POST' });
+}
+
+const hangarPath = (id: string, action: string) => `/api/hangar-terminals/${encodeURIComponent(id)}/${action}`;
+
+export function closeHangarTerminal(srv: Server, id: string): Promise<{ ok: true }> {
+  return apiFetchForServer(srv, hangarPath(id, 'close'), { method: 'POST' });
+}
+export function restartHangarTerminal(srv: Server, id: string): Promise<ShortcutShellResult> {
+  return apiFetchForServer(srv, hangarPath(id, 'restart'), { method: 'POST' });
+}
+/** Digita a resposta e Enter. Vazio = só Enter (aceita o padrão). */
+export function answerHangarTerminal(srv: Server, id: string, text: string): Promise<{ ok: true }> {
+  return apiFetchForServer(srv, hangarPath(id, 'answer'), { method: 'POST', body: JSON.stringify({ text }) });
+}
+export function answerShortcutTerminal(srv: Server, name: string, id: string, text: string): Promise<{ ok: true }> {
+  return apiFetchForServer(srv,
+    `/api/sessions/${encodeURIComponent(name)}/shortcut-terminals/${encodeURIComponent(id)}/answer`,
+    { method: 'POST', body: JSON.stringify({ text }) });
+}
+export function focusHangarTerminal(srv: Server, id: string): Promise<{ focused: boolean }> {
+  return apiFetchForServer(srv, hangarPath(id, 'focus'), { method: 'POST' });
 }
 
 // Limites de uso da conta Codex (Task B) — so sessoes Codex; o back devolve 400 pra Claude.
@@ -2802,10 +3011,65 @@ export async function resolveLoopForServer(s: Server, name: string, accept: bool
   return res.json() as Promise<{ loop: LoopState }>;
 }
 
+// Com `stream=1` o backend manda uma linha por etapa e o resultado na última. Hangar antigo
+// ignora o parâmetro e devolve JSON puro: aí só o resultado, sem as etapas.
+async function readConfigSyncStream<T>(res: Response, onProgress: (p: ConfigSyncProgress) => void,
+  onPlain: () => void): Promise<T> {
+  if (!res.ok) throw Object.assign(new Error(`${res.status}: ${await errorDetail(res)}`), { status: res.status });
+  if (!res.headers.get('content-type')?.includes('ndjson') || !res.body) {
+    onPlain();
+    return res.json() as Promise<T>;
+  }
+  const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
+  // Só a linha `error` é falha certa; corte, prazo ou linha ilegível no meio deixam o
+  // resultado em aberto (o servidor segue aplicando), e a mensagem diz para conferir a máquina.
+  let rest = '';
+  let last: { type: string; result?: T; status?: number; detail?: unknown } | null = null;
+  const take = (line: string) => {
+    if (!line.trim()) return;
+    const ev = JSON.parse(line);
+    if (ev.type === 'progress') onProgress(ev as ConfigSyncProgress);
+    else last = ev;
+  };
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) {
+        take(rest);
+        break;
+      }
+      rest += value;
+      const lines = rest.split('\n');
+      rest = lines.pop() ?? '';
+      for (const line of lines) {
+        take(line);
+        if (last) break;
+      }
+      if (last) break;
+    }
+  } catch (e) {
+    // Cancelamento de quem chamou não é corte de stream; os demais guardam a causa.
+    if (isAbortError(e)) throw e;
+    throw new Error(m.shared_config_stream_cut(), { cause: e });
+  } finally {
+    void reader.cancel().catch(() => {});
+  }
+  const end = last as { type: string; result?: T; status?: number; detail?: unknown } | null;
+  if (end?.type === 'done') return end.result as T;
+  if (end?.type === 'error') {
+    const detail = formataErro(end.detail) ?? String(end.detail);
+    throw Object.assign(new Error(`${end.status}: ${detail}`), { status: end.status });
+  }
+  throw new Error(m.shared_config_stream_cut());
+}
+
 // Configuração compartilhada. O manifesto soma o disco inteiro de skills da máquina, e a
 // aplicação instala plugins no destino: os prazos são de minutos, não os 8s de uma leitura.
-export function getConfigSyncManifestForServer(s: Server, signal?: AbortSignal): Promise<ConfigSyncManifest> {
-  return apiFetchForServer(s, '/api/config-sync/manifest', { signal: comTeto(signal, 60_000) }, 60_000);
+export async function getConfigSyncManifestForServer(s: Server, signal?: AbortSignal,
+  onProgress?: (p: ConfigSyncProgress) => void, onPlain?: () => void): Promise<ConfigSyncManifest> {
+  if (!onProgress) return apiFetchForServer(s, '/api/config-sync/manifest', { signal: comTeto(signal, 60_000) }, 60_000);
+  const res = await apiFetchRes('/api/config-sync/manifest?stream=1', { signal: comTeto(signal, 180_000) }, s);
+  return readConfigSyncStream(res, onProgress, onPlain ?? (() => {}));
 }
 
 export async function getConfigSyncBundleForServer(s: Server, items: readonly ConfigSyncItem[], signal?: AbortSignal,
@@ -2827,13 +3091,15 @@ export function translateConfigSyncTextsForServer(s: Server, texts: string[], la
   }, 300_000);
 }
 
-export async function applyConfigSyncForServer(s: Server, items: readonly ConfigSyncItem[], bundle: Blob, signal?: AbortSignal): Promise<ConfigSyncReport> {
-  const res = await apiFetchRes(`/api/config-sync/apply?items=${encodeURIComponent(items.join(','))}`, {
+export async function applyConfigSyncForServer(s: Server, items: readonly ConfigSyncItem[], bundle: Blob, signal?: AbortSignal,
+  onProgress?: (p: ConfigSyncProgress) => void, onPlain?: () => void): Promise<ConfigSyncReport> {
+  const res = await apiFetchRes(`/api/config-sync/apply?items=${encodeURIComponent(items.join(','))}${onProgress ? '&stream=1' : ''}`, {
     method: 'POST',
     body: bundle,
     headers: { 'Content-Type': 'application/gzip' },
     signal: comTeto(signal, 600_000),
   }, s);
+  if (onProgress) return readConfigSyncStream(res, onProgress, onPlain ?? (() => {}));
   if (!res.ok) throw Object.assign(new Error(`${res.status}: ${await errorDetail(res)}`), { status: res.status });
   return res.json() as Promise<ConfigSyncReport>;
 }

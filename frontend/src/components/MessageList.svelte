@@ -2,7 +2,8 @@
   import { agruparConversa, type ItemConversa } from '@hangar/core';
   import { tick } from 'svelte';
   import type { Snippet } from 'svelte';
-  import { planDisplayText, parseContextoUso } from '@hangar/core';
+  import { planDisplayText, parseContextoUso, dayStarts } from '@hangar/core';
+  import OrqTimelineEvent from './OrqTimelineEvent.svelte';
   import ContextCard from './ContextCard.svelte';
   import SessionPlanPreview from './SessionPlanPreview.svelte';
   import * as m from '../paraglide/messages';
@@ -93,6 +94,7 @@
     swapIds?: Set<string>;
     // Encaminhar bolha pra outra sessao (long-press/hover ↗). Ausente (ex: Archive) = sem acao.
     onForward?: (text: string) => void;
+    onRunCommand?: (command: string, language?: string) => void;
     // Botao "descartar" da bolha que o backend desistiu de entregar: tira a entrada da fila
     // duravel (id CRU, sem o prefixo "queued-"). Ausente (Archive) = so o aviso.
     onDescartarFila?: (entryId: string) => void;
@@ -112,7 +114,7 @@
     events, stateEvent, pending, sessionName, dockH, preview = '', previewMd = false, previewFull = false, previewVivo = false, pensamento = '', ferramenta = null, onSelectOption, onSubmitSelected, onCancel, agentesRodando = [], onAbrirAgente = undefined,
     askOpen = false, askPayload = null, askActive = false, onAnswer, onAskClose, onFimDoLocal,
     imageUrl, swapIds, codex = false, plan = null, footer,
-    onForward, onOpenSession, onOpenOrq, onDescartarFila, ancora = 0, focoId = null
+    onForward, onRunCommand, onOpenSession, onOpenOrq, onDescartarFila, ancora = 0, focoId = null
   }: Props = $props();
 
   type PlanComponentProps = {
@@ -411,6 +413,8 @@
   const tarefas = $derived(
     taskRows.ativo ? foldTasks(events, (id) => toolResults.get(id)) : []
   );
+  // Só a sessão do orquestrador traz `orq`; o separador de dia abre no primeiro evento de cada dia.
+  const orqDays = $derived(events.some((e) => e.orq) ? dayStarts(events.filter((e) => e.orq)) : new Map<string, number>());
   const EH_TASK = (n?: string | null) => n === 'TaskCreate' || n === 'TaskUpdate';
 
   const renderItems = $derived.by(() => {
@@ -643,7 +647,7 @@
         {:else}
         <AssistantBubble text={codex ? planDisplayText(ev.text) : ev.text} ts={ev.ts} {sessionName}
                          animate={!histIds.has(ev.id) && !swapIds?.has(ev.id)}
-                         onForward={onForward ? () => onForward(ev.text ?? '') : null} />
+                         onForward={onForward ? () => onForward(ev.text ?? '') : null} {onRunCommand} />
         {/if}
         {#if plan?.eventId === ev.id}
           <SessionPlanPreview {...planoProps()} />
@@ -651,7 +655,9 @@
         {:else if ev.kind === 'notice'}
           <!-- Código conhecido vira frase do idioma da tela; desconhecido mostra o que veio, pra um
                aviso novo do harness não sumir calado. -->
-          {#if ev.text === 'hook_prompt'}
+          {#if ev.orq}
+            <OrqTimelineEvent {ev} dayTs={orqDays.get(ev.id)} />
+          {:else if ev.text === 'hook_prompt'}
             <div class="notice notice-hook">
               <p>{m.notice_hook_prompt()}</p>
               {#if ev.hook_error}<p class="notice-hook-texto">{ev.hook_error}</p>{/if}

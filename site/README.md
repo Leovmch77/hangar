@@ -1,0 +1,71 @@
+# site
+
+Landing page de `hangar.dev.br`: PT em `/`, EN em `/en/`, gerada em `site/public/` (fora do git).
+
+## Gerar e ver
+
+```bash
+python3 site/build.py
+python3 -m http.server -d site/public 8099
+```
+
+## Testar
+
+Só quando pedido.
+
+```bash
+python3 -m unittest discover site/tests
+node --test site/tests/site.test.mjs
+```
+
+## Publicar
+
+Uma vez só, antes do primeiro upload: crie o projeto pela API (o `wrangler pages project
+create` atual cai no Workers e pede um subdomínio workers.dev) e faça o login do wrangler (o da
+`cf` não serve para upload):
+
+```bash
+CLOUDFLARE_ACCOUNT_ID=<id da conta> cf pages create --body '{"name":"hangar-site","production_branch":"main"}'
+npx --yes wrangler login
+```
+
+Depois:
+
+```bash
+site/deploy.sh          # prévia (preview.<subdomínio>.pages.dev)
+site/deploy.sh main     # produção
+```
+
+Não troque o `deploy.sh` por wrangler na raiz: ela é workspace npm e o wrangler recusa.
+
+## Cache
+
+Tudo em `/assets/media/` (vídeos, capas, imagens, `og.png`) sai `immutable` por um ano
+(`site/static/_headers`). Arquivo trocado precisa de nome novo.
+
+## Regravar vídeos
+
+Só Linux/Hyprland. Abre janelas na tela de quem grava.
+
+```bash
+python3 site/tools/record/live.py &
+site/tools/record/record.sh <cena> <segundos> <ctrl-down> <lang>
+site/tools/record/enc.sh <cena> <lang>
+```
+
+| cena | segundos | ctrl-down |
+|---|---|---|
+| `agents` | 15 | 1 |
+| `ask` | 16 | 1 |
+| `pair` | 15 | 1 |
+| `orq` | 13 | 4 (seleciona `orq-checkout`, a 4ª linha da lateral) |
+
+- `<lang>` é `en` ou `pt`. A saída fica em `site/tools/record/out/`; copie `<cena>-<lang>.mp4`
+  e `.jpg` com nome NOVO (`agents-v2.mp4`/`agents-v2.jpg`) para `site/media/` (EN) ou
+  `site/media/pt/` (PT) e troque o `video`/`poster` da cena em `CLIPS` (`site/src/strings.py`,
+  posição PT ou EN): o cache `immutable` serviria o vídeo antigo com o nome antigo.
+- A janela tem 1600x960 na posição 160,60: o monitor precisa de pelo menos 1760x1020 lógicos
+  (tamanho dividido pela escala). `launch.sh` recusa se não couber.
+- Variáveis: `HANGAR_RECORD_MONITOR=<nome>` escolhe o monitor (padrão: o focado);
+  `HANGAR_RECORD_SIZE`, `HANGAR_RECORD_POS`, `HANGAR_NATIVE_BIN` (padrão: `hangar-native` no
+  `PATH`) e `HANGAR_RECORD_OUT` mudam tamanho, posição, binário e pasta de saída.

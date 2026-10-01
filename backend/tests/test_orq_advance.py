@@ -35,6 +35,7 @@ if a[:1] == ["--new"]:
     side.mkdir(parents=True, exist_ok=True)
     (side / (a[1] + ".json")).write_text(json.dumps({
         "name": a[1], "provider": opt("--provider", "claude"),
+        "key": "fake-" + a[1],
         "model": os.environ.get("FAKE_BORN_MODEL") or opt("--model")}))
 """
 
@@ -93,8 +94,14 @@ def start(tmp_path, integ="`test -f a.txt`", par="até 2", rows=ROWS, revisao="s
     fake.write_text(FAKE)
     fake.chmod(0o755)
     # CLAUDE_CONFIG_DIR isolated: jev_config() would otherwise read the real runtime-config.json.
-    e = {**os.environ, "ORQ_DIR": str(d), "ORQ_SEND": str(fake), "FAKE_LOG": str(log),
+    nt = tmp_path / "nt-bin"   # tmux falso: o fallback de _session_ids nunca ve as sessoes reais
+    nt.mkdir()
+    (nt / "tmux").write_text("#!/bin/sh\nexit 1\n")
+    (nt / "tmux").chmod(0o755)
+    e = {**os.environ, "PATH": f"{nt}{os.pathsep}{os.environ['PATH']}",
+         "ORQ_DIR": str(d), "ORQ_SEND": str(fake), "FAKE_LOG": str(log),
          "ORQ_JEV": "off", "HOME": str(tmp_path), "CLAUDE_CONFIG_DIR": str(tmp_path / "cfg"),
+         "ORQ_WHOAMI": "false",
          "TYPESAFE_API_KEY": "", "ORQ_JEV_URL": "", "JEV_ENDPOINT": "", "JEV_MODEL": ""}
     (tmp_path / "r1.md").write_text("roteiro\n")
     plan = tmp_path / "plan.orq.md"
@@ -120,6 +127,129 @@ def close(d, task, h):
     ts = datetime.now().astimezone().isoformat(timespec="seconds")
     with (d / "closed.jsonl").open("a") as f:
         f.write(json.dumps({"ts": ts, "task": task, "hash": h}) + "\n")
+
+
+def test_done_includes_closed_task_reviewer_before_execution_end(tmp_path):
+    d, _, _, e, _ = start(tmp_path)
+    started(e, tasks=(1,))
+    close(d, 1, "a")
+
+    assert dict(orq_mod().done(d)) == {
+        "ex1": "Task 1 closed", "rev1": "Task 1 closed",
+    }
+
+
+def test_done_preserves_reviewer_shared_with_open_task(tmp_path):
+    d, _, _, e, _ = start(tmp_path)
+    started(e, tasks=(1,))
+    run(e, "event", "task_inicio", "--task", "2", "--titulo", "t2",
+        "--executor", "ex2", "--par", "rev1")
+    close(d, 1, "a")
+
+    assert dict(orq_mod().done(d)) == {"ex1": "Task 1 closed"}
+
+
+def test_done_preserves_reopened_task_owners(tmp_path):
+    d, _, _, e, _ = start(tmp_path)
+    started(e, tasks=(1,))
+    close(d, 1, "a")
+    with (d / "eventos.jsonl").open("a") as f:
+        f.write(json.dumps({"ts": "2999-01-01T00:00:00+00:00", "tipo": "task_inicio",
+                            "task": 1, "executor": "ex1", "par": "rev1"}) + "\n")
+
+    assert orq_mod().done(d) == []
+
+
+def test_done_preserves_arbiter_and_subagent_after_close(tmp_path):
+    d, _, _, e, _ = start(tmp_path)
+    run(e, "event", "task_inicio", "--task", "1", "--titulo", "t1",
+        "--executor", "arb", "--par", "subagente")
+    close(d, 1, "a")
+
+    assert orq_mod().done(d) == []
+
+
+def test_done_keeps_replaced_reviewers_in_cleanup(tmp_path):
+    d, _, _, e, _ = start(tmp_path)
+    started(e, tasks=(1,))
+    run(e, "event", "sessao_trocada", "--de", "rev1", "--para", "rev1b")
+    close(d, 1, "a")
+
+    assert dict(orq_mod().done(d)) == {
+        "ex1": "Task 1 closed", "rev1b": "Task 1 closed", "rev1": "replaced by rev1b",
+    }
+
+
+def test_task_start_records_both_session_identities(tmp_path, monkeypatch):
+    d, _, _, _, _ = start(tmp_path)
+    m = orq_mod()
+    monkeypatch.setattr(m, "session_identity", lambda name: f"claude:key-{name}")
+
+    ev = m.event_append(d, {"tipo": "task_inicio", "task": 1, "titulo": "t1",
+                            "executor": "ex1", "par": "rev1"})
+
+    assert ev["session_identities"] == {"ex1": "claude:key-ex1", "rev1": "claude:key-rev1"}
+    assert events(d)[-1]["session_identities"] == ev["session_identities"]
+
+
+def test_session_swap_records_destination_identity(tmp_path, monkeypatch):
+    d, _, _, _, _ = start(tmp_path)
+    m = orq_mod()
+    monkeypatch.setattr(m, "session_identity", lambda name: f"claude:key-{name}")
+
+    ev = m.event_append(d, {"tipo": "sessao_trocada", "de": "arb", "para": "arb2"})
+
+    assert ev["session_identity"] == "claude:key-arb2"
+
+
+def test_identity_failure_records_problem_without_using_name(tmp_path, monkeypatch):
+    d, _, _, _, _ = start(tmp_path)
+    m = orq_mod()
+    def unavailable(name):
+        raise ValueError("missing")
+    monkeypatch.setattr(m, "session_identity", unavailable)
+
+    ev = m.event_append(d, {"tipo": "task_inicio", "task": 1, "titulo": "t1",
+                            "executor": "ex1", "par": "subagente"})
+
+    assert ev["session_identities"] == {}
+    assert "session identity unavailable: ex1: ValueError" in (d / "registro.md").read_text()
+    assert "session identity unavailable: subagente" not in (d / "registro.md").read_text()
+
+
+@pytest.mark.parametrize("swap", [False, True])
+def test_reinit_preserves_original_arbiter_identity(tmp_path, swap):
+    sidecars = tmp_path / ".hangar" / "claude-headless"
+    sidecars.mkdir(parents=True)
+    (sidecars / "arb.json").write_text(json.dumps({"key": "original"}))
+    (sidecars / "arb2.json").write_text(json.dumps({"key": "successor"}))
+    d, r, _, e, _ = start(tmp_path)
+    cfg = json.loads((d / "orq.json").read_text())
+    assert cfg["arbiter_identity"] == "claude:original"
+    if swap:
+        run(e, "event", "sessao_trocada", "--de", "arb", "--para", "arb2")
+    (sidecars / "arb.json").write_text(json.dumps({"key": "unrelated-new-session"}))
+
+    run(e, "init", "--arbiter", "arb", "--repo", str(r), "--contract", cfg["contract"],
+        "--plan", cfg["plan"], "--auto")
+
+    assert json.loads((d / "orq.json").read_text())["arbiter_identity"] == "claude:original"
+
+
+def test_reinit_does_not_bind_legacy_run_to_recreated_arbiter(tmp_path):
+    d, r, _, e, _ = start(tmp_path)
+    cfg = json.loads((d / "orq.json").read_text())
+    cfg.pop("arbiter_identity", None)
+    (d / "orq.json").write_text(json.dumps(cfg))
+    sidecars = tmp_path / ".hangar" / "claude-headless"
+    sidecars.mkdir(parents=True)
+    (sidecars / "arb.json").write_text(json.dumps({"key": "unrelated-new-session"}))
+
+    run(e, "init", "--arbiter", "arb", "--repo", str(r), "--contract", cfg["contract"],
+        "--plan", cfg["plan"], "--auto")
+
+    assert "arbiter_identity" not in json.loads((d / "orq.json").read_text())
+    assert "previous init has no recorded identity" in (d / "registro.md").read_text()
 
 
 def branch_commit(g, r, name, path, content):
@@ -469,9 +599,9 @@ def test_opens_the_wave_up_to_paralelo_with_worktrees_rows_and_kickoffs(tmp_path
     assert git_in(wt2)("rev-parse", "HEAD") == g("rev-parse", "HEAD")
     assert [m for m in sent(log) if m.startswith("--new ")] == [
         f"--new w-t1 {wt1} --provider claude --conta 200-01 --model opus[1m] --effort medium",
-        f"--new w-rev-1 {wt1} --provider claude --model opus[1m] --effort high --read-only",
+        f"--new w-rev-1 {wt1} --provider claude --model opus[1m] --effort high --read-only --terminal",
         f"--new w-t2 {wt2} --provider codex --conta openai-codex --model gpt-6-sol --effort high --headless",
-        f"--new w-rev-2 {wt2} --provider claude --model opus[1m] --effort high --read-only",
+        f"--new w-rev-2 {wt2} --provider claude --model opus[1m] --effort high --read-only --terminal",
     ]
     assert [(x["task"], x["titulo"], x["executor"], x["par"]) for x in events(d)
             if x["tipo"] == "task_inicio"] == [(1, "first", "w-t1", "w-rev-1"), (2, "second", "w-t2", "w-rev-2")]
@@ -482,6 +612,11 @@ def test_opens_the_wave_up_to_paralelo_with_worktrees_rows_and_kickoffs(tmp_path
     assert (d / "kickoffs" / "task1-revisor.md").read_text().startswith("REVISOR T1 first")
     assert any(x["kind"] == "advance" and x["task"] == 1 and "abriu w-t1" in x["text"]
                for x in timeline_lines(d))
+    seen = [json.loads(l) for l in (d / "sessions.jsonl").read_text().splitlines()]
+    assert [(x["name"], x["role"], x["task"], x["provider"]) for x in seen if x["task"] is not None] == [
+        ("w-t1", "executor", 1, "claude"), ("w-rev-1", "revisor", 1, "claude"),
+        ("w-t2", "executor", 2, "codex"), ("w-rev-2", "revisor", 2, "claude")]
+    assert (seen[0]["name"], seen[0]["role"], seen[0]["task"]) == ("arb", "arbitro", None)
     assert run(e, "advance").stdout == ""   # the wave is full, T3 waits for wave 1
 
 
@@ -540,6 +675,22 @@ def test_last_task_integrated_wakes_the_arbiter_for_the_final_review_once(tmp_pa
     assert len([m for m in sent(log) if "Every Task of the plan is integrated" in m]) == 1
 
 
+def test_a_later_integration_wakes_the_arbiter_for_the_final_review_again(tmp_path):
+    d, r, g, e, log = start(tmp_path, par="sequencial", rows=ONE.format(rot="—"))
+    started(e, tasks=(1,))
+    close(d, 1, g("rev-parse", "HEAD"))
+    run(e, "advance")
+    time.sleep(1.1)   # encerramentos e eventos têm precisão de segundos
+    (r / "a.txt").write_text("fixed\n")
+    g("commit", "-qam", "fix after the final review")
+    close(d, 1, g("rev-parse", "HEAD"))
+    assert run(e, "advance").stdout.splitlines()[-1] == "all integrated: arbiter woken for the final review"
+    run(e, "advance")
+    assert [x["tipo"] for x in events(d) if x["tipo"] in ("integrada", "tudo_integrado")] == [
+        "integrada", "tudo_integrado", "integrada", "tudo_integrado"]
+    assert len([m for m in sent(log) if "Every Task of the plan is integrated" in m]) == 2
+
+
 def test_full_proof_batch_is_announced_once_its_tasks_are_integrated(tmp_path):
     d, r, g, e, log = start(tmp_path, par="sequencial", rows=ONE.format(rot="r1.md"), prova="lote(1)")
     started(e, tasks=(1,))
@@ -594,8 +745,14 @@ def test_role_row_rotation_risk_names_and_flags(monkeypatch):
     assert [m.session_name("w-t*", 4), m.session_name("w-review", 4)] == ["w-t4", "w-review-t4"]
     # The name the backend gives the session (app/names.py), not the one asked for.
     assert [m.session_name("revisão-t*", 4), m.session_name("rev x", 4)] == ["revisao-t4", "rev-x-t4"]
-    # The backend refuses a session without terminal and read-only together: headless wins.
-    assert m.open_flags({"provider": "claude", "abertura": "--headless"}, True) == ["--provider", "claude", "--headless"]
+    assert m.open_flags({"provider": "claude"}, False) == ["--provider", "claude"]
+    assert m.open_flags({"provider": "claude"}, True) == ["--provider", "claude", "--read-only", "--terminal"]
+    assert m.open_flags({"provider": "claude", "abertura": "--terminal"}, False) == ["--provider", "claude", "--terminal"]
+    assert m.open_flags({"provider": "claude", "abertura": "--headless"}, False) == ["--provider", "claude", "--headless"]
+    # A combinação recusada pelo backend deve falhar sem descartar a proteção.
+    for abertura, read_only in (("--headless", True), ("--headless --read-only", False)):
+        with pytest.raises(m.OrqError, match="read-only session cannot open with --headless"):
+            m.open_flags({"provider": "claude", "sessao": "rev-t*", "abertura": abertura}, read_only)
 
 
 def test_kickoff_mold_with_an_unknown_placeholder_is_an_error(tmp_path, monkeypatch):

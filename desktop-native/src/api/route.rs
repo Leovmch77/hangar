@@ -56,7 +56,7 @@ pub fn forget(api: &Api) {
 
 impl Api {
     /// Base dos pedidos: a rota decidida ou, sem decisão, o endereço salvo.
-    pub(super) fn route(&self) -> Url {
+    pub(crate) fn route(&self) -> Url {
         with(|t| t.get(self.base.as_str()).and_then(|known| known.route.clone())).unwrap_or_else(|| self.base.clone())
     }
 }

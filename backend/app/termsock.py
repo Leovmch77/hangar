@@ -27,7 +27,7 @@ from fastapi import WebSocket
 from starlette.websockets import WebSocketDisconnect
 from uvicorn.protocols.utils import ClientDisconnected
 
-from app import tmux
+from app import guest_users, tmux
 from app.auth import _LOOPBACK, _blocked, _record_fail
 from app.config import settings
 from app.share_gate import guest_of
@@ -369,8 +369,10 @@ async def _porta_de_entrada(ws: WebSocket, name: str, resolve=None) -> Optional[
         # compare_digest, nao `!=` de string (mesmo cuidado do require_auth, auth.py:104): `!=` sai fora
         # na primeira letra diferente e vira canal lateral de tempo. Este e o endpoint que abre um shell
         # completo. `.encode()` tambem evita o TypeError do compare_digest com string nao-ASCII.
-        if not settings.auth_token or not secrets.compare_digest(tok.encode(),
-                                                                 settings.auth_token.encode()):
+        # Convidado com login próprio: o porteiro já o reconheceu; a Origin abaixo continua valendo.
+        if guest_users.current.get() is None and (
+                not settings.auth_token or not secrets.compare_digest(
+                    tok.encode(), settings.auth_token.encode())):
             if host not in _LOOPBACK:            # mesma isencao do require_auth (auth.py:46)
                 _record_fail(host, agora)
             await ws.close(code=1008)            # fecha SEM accept: o PTY nunca chega a nascer
@@ -386,7 +388,13 @@ async def _porta_de_entrada(ws: WebSocket, name: str, resolve=None) -> Optional[
             await ws.close(code=1008)
             return
     if resolve is not None:
-        name = await asyncio.to_thread(resolve)
+        try:
+            name = await asyncio.to_thread(resolve)
+        except tmux.MuxIndisponivel:
+            # Sem resposta nao da pra dizer que o terminal nao existe: o cliente tenta de novo.
+            _log.warning("termsock: multiplexador sem resposta ao resolver o terminal")
+            await ws.close(code=1013, reason="multiplexador indisponivel")
+            return None
         if not name:
             await ws.close(code=1008, reason="terminal nao existe")
             return None

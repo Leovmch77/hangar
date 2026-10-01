@@ -458,7 +458,7 @@ impl Hangar {
         fn text(this: &mut Hangar, key: String, row: &str, source: String, out: &mut Vec<AnyElement>, cx: &mut Context<Hangar>) {
             if source.trim().is_empty() { return; }
             let view = this.text_view(&key, row, source, cx);
-            out.push(chat_text(&view, cx).on_link_click(open_web_link)
+            out.push(chat_text_runnable(&view, cx, Some(cx.weak_entity()), &key).on_link_click(open_web_link)
                 .markdown_extensions(citation_extensions(&key, cx.weak_entity())).into_any_element());
         }
         for (n, table) in tables.iter().enumerate() {

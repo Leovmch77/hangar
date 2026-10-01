@@ -26,8 +26,9 @@
     vivo?: boolean;      // previa dos deltas do proprio modelo: ja chega no ritmo real, sem digitacao
     animate?: boolean;   // false = bubble de HISTORICO remontada (paginacao/janela): sem fade/slide
     onForward?: (() => void) | null; // abre o picker "encaminhar pra sessao" (botao ↗)
+    onRunCommand?: ((command: string, language?: string) => void) | null;
   }
-  let { text, ts, sessionName = '', preview = false, streaming = false, md = false, full = false, vivo = false, animate = true, onForward = null }: Props = $props();
+  let { text, ts, sessionName = '', preview = false, streaming = false, md = false, full = false, vivo = false, animate = true, onForward = null, onRunCommand = null }: Props = $props();
 
   // Previa em texto PLANO era consequencia da FONTE, nao escolha: raspada do pane, ela ja vinha
   // pintada pela TUI e renderizar de novo estragaria. Quando o proprio agente publica o texto
@@ -83,7 +84,18 @@
   const textoPrevia = $derived(preview ? tw.texto : textoPreviaBruto);
 
   const previewHtml = $derived(preview && md ? comCaret(renderMarkdown(textoPrevia, { fileLinks: !!sessionName })) : '');
-  const html = $derived(preview ? '' : renderMarkdown(text, { fileLinks: !!sessionName }));
+  const html = $derived(preview ? '' : renderMarkdown(text, { fileLinks: !!sessionName, commandActions: !!onRunCommand && !!sessionName }));
+
+  function runCodeClick(event: MouseEvent) {
+    if (!(event.target instanceof Element)) return;
+    const button = event.target.closest('button[data-run-command]');
+    if (!button || !onRunCommand) return;
+    const command = button.closest('.code-block')?.querySelector('code')?.textContent?.trim();
+    if (!command) return;
+    const language = button.closest('.code-block')?.querySelector('.code-lang')?.textContent?.trim();
+    event.stopPropagation();
+    onRunCommand(command, language || undefined);
+  }
   // Anexos por caminho citado na minha msg (img/video/html/pdf que eu "mandar").
   // Mídia/html/pdf fica de fora dos caminhos de código: com extensão aberta no absoluto o
   // `parseCodePaths` também casa `.png`, e o filtro abaixo apagava a miniatura.
@@ -202,8 +214,11 @@
       <div class="prose plain" class:masked={plainOverflows} bind:this={plainEl}><span class="live">{todo ? todo.rest : textoPrevia}<span class="caret" aria-hidden="true"></span></span></div>
     {/if}
   {:else}
+    <!-- Os botões gerados no Markdown têm foco e Enter próprios; este clique só delega a ação deles. -->
+    <!-- svelte-ignore a11y_click_events_have_key_events -->
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
     <!-- eslint-disable-next-line svelte/no-at-html-tags -->
-    <div class="prose" bind:this={proseEl}>{@html html}</div>
+    <div class="prose" bind:this={proseEl} onclick={runCodeClick}>{@html html}</div>
     {#if fileRefs.length}<FileAttachment {sessionName} refs={fileRefs} />{/if}
     {#if mediaRefs.length}<FileAttachment {sessionName} refs={mediaRefs} />{/if}
     <div class="msg-actions">

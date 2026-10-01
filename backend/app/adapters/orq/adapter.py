@@ -4,19 +4,22 @@ Não há pane nem processo: a conversa é a linha do tempo da execução (uma fr
 estado sai da atividade dela. Entrada nenhuma chega aqui: a API recusa antes (`erro_sessao_orq`).
 """
 import asyncio
-import hashlib
 import json
+import logging
 from datetime import datetime
+from pathlib import Path
 from typing import AsyncIterator, Callable
 
+from app import orq_timeline
 from app.adapters.orq import runs
 from app.state import StateEvent
 from app.transcript import ChatEvent, TranscriptTailer
 
 POLL_S = 2.0
+_log = logging.getLogger(__name__)
 
 
-def parse_obj(obj: dict) -> list[ChatEvent]:
+def parse_obj(obj: dict, run_dir: Path | None = None) -> list[ChatEvent]:
     text = obj.get("text")
     if not isinstance(text, str) or not text.strip():
         return []
@@ -24,24 +27,33 @@ def parse_obj(obj: dict) -> list[ChatEvent]:
         ts = datetime.fromisoformat(obj.get("ts")).timestamp()
     except (TypeError, ValueError):
         ts = None
-    # A linha não tem id: o hash dela é o mesmo no tail e no /history, e o cliente junta por id.
-    key = json.dumps(obj, sort_keys=True).encode("utf-8")
-    return [ChatEvent(kind="notice", id=f"orq:{hashlib.sha1(key).hexdigest()[:16]}", text=text, ts=ts)]
-
-
-def parse_line(line: str) -> list[ChatEvent]:
+    # Exceção aqui mataria o tail da sessão inteira: a linha segue como notice cru.
     try:
-        obj = json.loads(line)
-    except ValueError:
-        return []   # linha pela metade: o tailer relê quando ela fechar
-    return parse_obj(obj) if isinstance(obj, dict) else []
+        orq = orq_timeline.entry(obj, orq_timeline.run_files(run_dir) if run_dir else None)
+    except Exception:
+        _log.warning("orq_timeline.entry falhou", exc_info=True)
+        orq = None
+    return [ChatEvent(kind="notice", id=orq_timeline.event_id(obj), text=text, ts=ts, orq=orq)]
+
+
+def line_parser(run_dir: Path | None) -> Callable[[str], list[ChatEvent]]:
+    def parse_line(line: str) -> list[ChatEvent]:
+        try:
+            obj = json.loads(line)
+        except ValueError:
+            return []   # linha pela metade: o tailer relê quando ela fechar
+        return parse_obj(obj, run_dir) if isinstance(obj, dict) else []
+    return parse_line
+
+
+parse_line = line_parser(None)
 
 
 class OrqAdapter:
     provider = "orq"
 
     def transcript_stream(self, path: str, start_offset: int | None = None) -> AsyncIterator[ChatEvent]:
-        return TranscriptTailer(path, parse_line=parse_line).follow(start_offset)
+        return TranscriptTailer(path, parse_line=line_parser(Path(path).parent)).follow(start_offset)
 
     def state_monitor(self, name: str, sid_get: Callable[[], str],
                       transcript_get: Callable[[], str | None] | None = None) -> AsyncIterator[StateEvent]:

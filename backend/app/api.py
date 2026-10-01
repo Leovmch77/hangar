@@ -31,7 +31,7 @@ from app.send_executor import send_thread as _send_thread
 from app import bastao as bastao_mod   # `bastao` sem sufixo é a ROTA GET, mais abaixo neste arquivo
 from app.bastao import montar as bastao_montar
 from app.commands import comandos_da_cli, list_commands
-from app.fs import FsError, list_roots, scan_dir
+from app.fs import FsError, allowed_roots, list_roots, make_dir, scan_dir
 from app.model_picker import PickerError
 from app.mensagens import erro
 from app import kimi_models
@@ -42,7 +42,7 @@ from app import filesearch, filetree, git_ops
 from app.file_response import file_response
 from app.filesearch import SearchError
 from app.filetree import FileError
-from app import orq, orq_conductor, orq_md, orq_papeis, orq_politica, orq_start
+from app import orq, orq_conductor, orq_context, orq_md, orq_papeis, orq_politica, orq_start, orq_timeline
 from app import pi_catalog
 from app import cli_probe
 from app import pi_models
@@ -52,8 +52,8 @@ from app import registry as registry_mod
 from app.registry import KillFailed, SessionRegistry, sanitize_cwd
 from app.names import sanitize_session_name
 from app.models import (SessionInfo, ChatEvent, CostReport, UsoReport, RunnersResponse, RunBody,
-                        RunInfo, Runner, CustomRunnersBody, ProjectStatus, ShortcutShellBody,
-                        ProjectShortcutsBody, session_key)
+                        RunInfo, Runner, CustomRunnersBody, ProjectStatus, ShortcutShellBody, RunCodeBody,
+                        ProjectShortcutsBody, ShortcutAnswerBody, session_key)
 from app import uso_report
 from app.planprog import (plan_progress, list_plans, write_pin, is_safe_stem, _plans_dir,
                           PlanPinError, PIN_NONE, marcar_step, arquivar, caminho_do_plano,
@@ -69,8 +69,8 @@ from app.adapters import CLAUDE_HEADLESS, get_adapter
 from app.adapters.claude_headless import sessions as headless_sessions
 from app.adapters.codex import sessions as codex_sessions
 from app.adapters.orq import runs as orq_runs
-from app.sse import merged_events, nav_confirmar, nav_pendente
-from app.state import corrige_ocioso_kimi, menu_codex
+from app.sse import invalidate_recent_list, merged_events, nav_confirmar, nav_pendente
+from app.state import corrige_ocioso_kimi, forget_frame, menu_codex
 from app.uploads import save_upload, resolve_upload, prune_old, list_uploads, UploadError, MAX_BYTES
 from app.video import is_video, extract_frames, extract_audio
 from app.transcribe import transcribe, TranscribeError
@@ -80,6 +80,8 @@ from app.config import (list_config_dirs, ConfigDirInfo, _backend_config_base, s
 from app import runtime_config
 from app import share_api, share_guest_api, share_store
 from app.share_guest_api import guest_safe
+from app.guest_user_gate import GuestUserGate
+from app import guest_users, guest_users_api
 from app.share_gate import ShareGate, guest_of
 from app.share_life import session_life
 from app import tts
@@ -100,7 +102,8 @@ from app import project_shortcuts
 from app import projects
 from app import archive_providers
 from app.archive import (ArchiveEntry, ArchiveFolder, archive_cwd, archive_jsonl, conta_de,
-                         list_conversations, list_folders, move_conversation, tail_events)
+                         list_conversations, list_folders, list_recent, move_conversation,
+                         tail_events)
 from app.search import SearchHit, search, extract_terms, search_terms, build_ask_prompt
 from app.askquestion import clear_pending_askq, read_pending_askq
 from app import pair
@@ -417,9 +420,13 @@ async def _lifespan(app: FastAPI):
     # montar(). Sem aquecer aqui, o primeiro /api/costs depois de todo restart paga a coleta fria
     # (657ms medidos) MAIS até 3s de câmbio, contra o AbortSignal.timeout(4000) do cliente.
     threading.Thread(target=_usd_brl, name="usd-brl-warm", daemon=True).start()
+    # Catálogo do pi/omp em fundo: a primeira lista de modelos depois do restart levava segundos.
+    pi_catalog.warm()
     # Primeira coleta de custos/uso desta subida, em background e só depois de o boot assentar:
     # máquina nova varre 1 GB+ de transcript sem ninguém ter clicado, e a tela já abre pronta.
     costs_sources.agendar_aquecimento(30)
+    from app import transcript_index
+    transcript_index.start_background()
     # A linha vive no loop do servidor, mas o send_prompt roda em thread — ver pi_inbox.entregar_sync.
     INBOX.ligar_loop(asyncio.get_running_loop())
     # Mesmo motivo, outro caminho: o drain do Codex e assincrono (app-server) e quem o chama sao
@@ -572,6 +579,7 @@ async def _correlaciona_diag(request: Request, call_next):
 # Porteiro da porta do convidado ANTES do CORS: o CORS o envolve, entao ate o 403/410 dele sai com
 # Access-Control-Allow-Origin e o app do convidado le o codigo em vez de "erro de rede".
 app.add_middleware(ShareGate)
+app.add_middleware(GuestUserGate)
 # Body-size ANTES do CORS no codigo -> CORS fica por FORA (envolve ate o 413, adicionando headers CORS
 # na rejeicao). Ver _BodySizeLimitMiddleware.
 app.add_middleware(_BodySizeLimitMiddleware, max_bytes=MAX_BYTES)
@@ -594,6 +602,7 @@ app.add_middleware(
 app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=5)
 app.include_router(sync_admin_router)
 app.include_router(sync_router)
+app.include_router(guest_users_api.router)
 app.include_router(deploy_router)
 # Roteadores por assunto (Task 1 do plano descoberta-e-configuracao): cada Task do lote escreve
 # só no módulo dela. Última edição de api.py deste plano.
@@ -763,6 +772,17 @@ async def term_ws_route(ws: WebSocket, name: str):
     await termsock.term_ws(ws, name, resolve)
 
 
+@app.websocket("/api/hangar-terminals/{ident}/term")
+async def hangar_term_ws_route(ws: WebSocket, ident: str):
+    # Terminal de nenhuma sessao: convidado de sessao compartilhada nunca chega aqui.
+    from app import shortcut_terminals, termsock
+    from app.share_gate import guest_of
+    if guest_of(ws) is not None:
+        await ws.close(code=1008)
+        return
+    await termsock.term_ws(ws, "hangar", lambda: shortcut_terminals.find_hangar(ident))
+
+
 @app.websocket("/api/sessions/{name}/nav-remoto")
 async def nav_ws_route(ws: WebSocket, name: str):
     # Acesso remoto ao navegador embutido DAQUELA sessao: quadros pra fora, toque/tecla pra dentro.
@@ -910,8 +930,8 @@ def abrir_terminal_nativo(name: str):
 
 # Snapshot com TTL de registry.list() pros endpoints request/response QUENTES (history/workflows):
 # o mount do board dispara dezenas de /history de uma vez e cada list() fresco e um scan completo
-# de /proc + fork de tmux list-panes. Mesmo padrao do sse._list_snap (la pros loops de SSE; caches
-# separados porque as instancias de SessionRegistry sao separadas). Miss por nome (sessao criada ha
+# de /proc + fork de tmux list-panes. Os loops do SSE leem este mesmo snapshot (sse._cached_list).
+# Miss por nome (sessao criada ha
 # <1s) -> fallback pro list() fresco, entao o TTL nunca causa 404 falso.
 _LIST_TTL = 1.0
 # UMA chave, guardando o par (quando, lista). Guardar `t` e `infos` em chaves separadas deixava as
@@ -946,6 +966,14 @@ def _guardar_snap(forcar: bool = False) -> list[SessionInfo]:
         infos = registry.list()
         _list_snap["snap"] = (time.monotonic(), infos)
         return infos
+
+
+def _invalidate_lists() -> None:
+    """Descarta o snapshot cru e a lista decorada do refresher: quem pedir /api/sessions depois de
+    uma mudança de membro ou de modo recalcula em vez de ver a sessão como era."""
+    with _list_lock:
+        _list_snap["snap"] = None
+    invalidate_recent_list()
 
 
 def _cached_info_sync(name: str) -> SessionInfo | None:
@@ -1071,6 +1099,33 @@ _CONFIRM_GRACE_KIMI = 30.0
 # hooks de UserPromptSubmit, que com plugins passam de 8s; o prazo cobre isso e ainda termina em
 # `desistiu` visível quando a entrega morreu de verdade (processo caiu logo após a escrita).
 _CONFIRM_GRACE_HEADLESS = 60.0
+# Cada checagem relê o transcript inteiro (MBs). Um prompt parado na fila interna da TUI durante um
+# turno longo reagendava a cada `grace` pelo turno todo; espaça até este teto.
+_CONFIRM_WORKING_MAX = 120.0
+
+# Uma checagem pendente por sessão: send, fim de turno e a própria checagem agendavam cada um o seu
+# Timer, e as cadeias se somavam (dezenas de Timers relendo o mesmo arquivo).
+_confirm_lock = threading.Lock()
+_confirm_pend: dict[str, tuple[threading.Timer, float]] = {}
+_confirm_working_streak: dict[str, int] = {}
+
+
+def _agendar_confirmacao(name: str, delay: float) -> None:
+    """Agenda `_confirm_and_drain(name)`; se já há uma pendente que roda antes, ela basta. Uma
+    pendente mais tardia é trocada: o prazo mais curto (fim de turno, send novo) não espera o espaçado."""
+    due = time.monotonic() + delay
+    with _confirm_lock:
+        atual = _confirm_pend.get(name)
+        if atual is not None:
+            timer, quando = atual
+            if callable(getattr(timer, "is_alive", None)) and timer.is_alive():
+                if quando <= due:
+                    return
+                timer.cancel()
+        timer = threading.Timer(delay, _confirm_and_drain, args=(name,))
+        timer.daemon = True
+        _confirm_pend[name] = (timer, due)
+    timer.start()
 # Kimi: de quanto em quanto tempo reavaliar um "idle" que o transcript desmentiu. Nao ha evento pra
 # esperar (o fim de turno real grava idle sobre idle e nao gera transicao), entao a saida e reolhar.
 # 5s: a sessao demora isso pra aparecer parada, e enquanto o turno anda o custo e um getmtime.
@@ -1136,6 +1191,10 @@ def _confirm_and_drain(name: str) -> None:
     """Confirmacao de entrega: delivered=True so diz 'send_keys chamado' — a TUI pode ter engolido
     as teclas e a msg sumia com cara de entregue. Confere contra o transcript; engolida ->
     re-enfileira (reconcile) e re-drena. Best-effort, roda em Timer/thread."""
+    with _confirm_lock:
+        atual = _confirm_pend.get(name)
+        if atual is not None and atual[0] is threading.current_thread():
+            del _confirm_pend[name]
     try:
         q = PromptQueue(name)
         if not any(r.get("delivered") is True and not r.get("confirmed") for r in q.load()):
@@ -1248,9 +1307,15 @@ def _confirm_and_drain(name: str) -> None:
         # curto a unica checagem caia cedo demais e a entrada ficava sem confirmar E sem desistir —
         # presa ate a proxima mensagem do usuario, ou pra sempre se nao houvesse proxima. O laco
         # termina sozinho: passado o prazo, toda linha vira `confirmed` ou `desistiu`.
+        working = bool(m and m[0] == "working")
+        streak = _confirm_working_streak.get(name, 0) + 1 if working else 0
+        _confirm_working_streak[name] = streak
         if any(r.get("delivered") is True and not r.get("confirmed") and not r.get("desistiu")
                for r in q.load()):
-            threading.Timer(grace + 0.5, _confirm_and_drain, args=(name,)).start()
+            delay = grace + 0.5
+            if streak > 1:
+                delay = max(delay, min(delay * 2 ** (streak - 1), _CONFIRM_WORKING_MAX))
+            _agendar_confirmacao(name, delay)
     except Exception:
         # LOGA, nao `pass` mudo: isto roda num Timer, entao ninguem ve a excecao — e o que mora
         # aqui e a confirmacao de entrega. Falhando calado, a msg do usuario fica sem confirmar pra
@@ -1261,7 +1326,7 @@ def _confirm_and_drain(name: str) -> None:
 # Sem terminal, quem entrega a fila é o drain do adapter (fim de turno, initialize), fora do /input:
 # sem este gatilho nenhuma confirmação era agendada e a entrega que morreu com o processo sumia.
 get_adapter(CLAUDE_HEADLESS).apos_entrega = (
-    lambda name: threading.Timer(_CONFIRM_GRACE_HEADLESS + 0.5, _confirm_and_drain, args=(name,)).start())
+    lambda name: _agendar_confirmacao(name, _CONFIRM_GRACE_HEADLESS + 0.5))
 
 
 def _maybe_chain(name: str) -> None:
@@ -1425,8 +1490,7 @@ def _on_hook_transition(session_id: str, state: str) -> None:
                 # Confirmacao em TODO idle (nao so pos-drain): Timers pendentes morrem no restart
                 # do backend — sem isto, entrada entregue ficava sem confirmar indefinidamente.
                 if sent or real == "idle":
-                    threading.Timer(_CONFIRM_GRACE + 0.5, _confirm_and_drain,
-                                    args=(info.name,)).start()
+                    _agendar_confirmacao(info.name, _CONFIRM_GRACE + 0.5)
                 # Loop runner: no idle, se ha loop ativo e o drain NAO acabou de digitar algo
                 # (sent == 0 -> este idle e fim de turno de trabalho, nao o eco do goal/re-prompt),
                 # tica o loop. Loop ativo SUPRIME o chain (senao cada idle entre iteracoes dispararia).
@@ -1530,7 +1594,7 @@ class CreateBody(_StrictBody):
     read_only: bool = Field(default=False, strict=True)
     # Claude ou Codex SEM terminal roda atrás do cano, sem tmux. O que depende de pane
     # (painel de terminal, espelho) não existe.
-    headless: bool = Field(default=False, strict=True)
+    headless: bool | None = Field(default=None, strict=True)
 
 
 def _jev_efetivo(pedido: bool | None) -> bool:
@@ -1692,11 +1756,25 @@ async def list_sessions(request: Request):
     # decoracao, e o estado decorado ainda vazaria pro snapshot que `/history` e `/workflows` leem
     # esperando a lista crua. `model_copy` rasa basta: a decoracao ATRIBUI campos, nunca muta em
     # lugar o que ja esta neles.
+    # Com a lista SSE aberta, o refresher já decorou isto há menos de um tique: serve dele.
+    from app.sse import recent_list
+    guest = guest_of(request)
+    viewer = guest_users.current.get()
+    decorated = recent_list(2.0)
+    if decorated is not None:
+        if guest is not None:
+            decorated = [i for i in decorated if i.name == guest.session]
+        # Mesmo recorte do caminho sem cache: convidado com login próprio só vê o que lhe cabe.
+        if viewer is not None or guest_users.has_claims():
+            decorated = await asyncio.to_thread(guest_users.filter_visible, viewer, decorated,
+                                                lambda i: i.name)
+        return decorated if guest is None else [guest_safe(i) for i in decorated]
     snap = await asyncio.to_thread(_guardar_snap)
     # Convidado ve so a sessao compartilhada; o filtro fica depois do snapshot para nao tocar no cache.
-    guest = guest_of(request)
     if guest is not None:
         snap = [i for i in snap if i.name == guest.session]
+    if viewer is not None or guest_users.has_claims():
+        snap = await asyncio.to_thread(guest_users.filter_visible, viewer, snap, lambda i: i.name)
     decorated = await registry.list_with_state([i.model_copy() for i in snap])
     # O pareamento e o encadeamento são decorados acima e citam outras sessões do dono.
     return decorated if guest is None else [guest_safe(i) for i in decorated]
@@ -1977,6 +2055,15 @@ async def creation_progress(name: str):
     return _criacao_passo.get(sanitize_session_name(name)) or {"step": None, "params": {}}
 
 
+async def _kill_unclaimed(name: str) -> None:
+    try:
+        await asyncio.to_thread(registry.kill, name)
+    except Exception:
+        _log.exception("[guests] sessao %s sem dono nao encerrou", name)
+    finally:
+        await asyncio.to_thread(_invalidate_lists)
+
+
 @app.post("/api/sessions", dependencies=[Depends(require_auth)], response_model=SessionInfo)
 async def create_session(body: CreateBody):
     with _acompanhar_criacao(body.name):
@@ -1984,8 +2071,20 @@ async def create_session(body: CreateBody):
         try:
             info = await _criar_sessao(body, worktree)
             if body.branch is not None:
-                return info.model_copy(update={"cwd": body.cwd, "branch": body.branch,
-                                               "worktree": Path(body.cwd, ".git").is_file()})
+                # O cwd da worktree vem do dict: `_criar_sessao` pode trabalhar numa cópia do body.
+                cwd = worktree.get("cwd", body.cwd)
+                info = info.model_copy(update={"cwd": cwd, "branch": body.branch,
+                                               "worktree": Path(cwd, ".git").is_file()})
+            guest = guest_users.current.get()
+            if guest is not None:
+                try:
+                    await asyncio.to_thread(guest_users.claim, info.name, guest.id)
+                except Exception:
+                    # Sem o dono registrado a sessão ficaria à vista do dono e sumida para o convidado.
+                    _log.exception("[guests] claim de %s falhou; encerrando a sessao", info.name)
+                    await _kill_unclaimed(info.name)
+                    raise
+                info = info.model_copy(update={"owner": guest.name})
             return info
         except BaseException:
             if worktree.get("path") and not worktree.get("session_created"):
@@ -2000,7 +2099,7 @@ async def create_session(body: CreateBody):
 
 def _allowed_scan_root(path: str) -> Path:
     target = Path(os.path.realpath(os.path.expanduser(path)))
-    root = next((r for r in resolve_scan_roots(settings) if target.is_relative_to(r)), None)
+    root = next((r for r in allowed_roots() if target.is_relative_to(r)), None)
     if root is None:
         raise FsError(403, "root not allowed")
     scan_dir(str(root), str(target))
@@ -2008,6 +2107,9 @@ def _allowed_scan_root(path: str) -> Path:
 
 
 async def _criar_sessao(body: CreateBody, worktree: dict):
+    if body.headless is None:
+        body = body.model_copy(update={"headless": not body.read_only and body.provider in ("claude", "codex")
+                                      and bool(runtime_config.get("headless_default"))})
     # Handler async por causa da trava de conta mais abaixo. Todo provider passa pelo MESMO
     # registry.create — o Codex tambem, desde que o lancador unico virou o comando do pane dele.
     # registry.create e SINCRONO e spawna um
@@ -2021,6 +2123,11 @@ async def _criar_sessao(body: CreateBody, worktree: dict):
     # ser rejeitado aqui não pode ter reconciliado a conta (deriva movida, memória criada) à toa.
     if body.provider not in ("claude", "codex", "pi", "kimi", "omp"):
         raise HTTPException(400, detail=erro("erro_provider_sessao_invalido", "provider invalido"))
+    # Antes de qualquer efeito (worktree, registry.create): convidado só abre dentro da pasta dele.
+    guest = guest_users.current.get()
+    if guest is not None and not guest_users.inside_root(guest, body.cwd):
+        raise HTTPException(403, detail=erro("erro_fora_da_pasta",
+                                             "o convidado só abre sessão dentro da pasta dele"))
     # Sem isto a sessão sem terminal nasce e só quebra ao subir o processo, com um ENOENT que não
     # diz qual arquivo faltou.
     if not await asyncio.to_thread(os.path.isdir, os.path.expanduser(body.cwd)):
@@ -2122,7 +2229,7 @@ async def _criar_sessao(body: CreateBody, worktree: dict):
             raise HTTPException(exc.status, detail=erro("erro_criacao_sessao", exc.detail)) from None
         if created:
             worktree.update(source=source, path=path)
-        body.cwd = path
+        body.cwd = worktree["cwd"] = path
 
     # Janela do modelo escolhido, pra entrar no env do motor (Task 3). O número já está no cache do
     # catálogo do provedor (_engine_models); vir do navegador seria deixar um terceiro escolher uma
@@ -2161,8 +2268,7 @@ async def _criar_sessao(body: CreateBody, worktree: dict):
             info = registry.create(body.name, body.cwd, body.config_dir, **kwargs)
             worktree["session_created"] = True
             # O mesmo nome pode estar no snapshot com o transcript da sessão encerrada.
-            with _list_lock:
-                _list_snap["snap"] = None
+            _invalidate_lists()
             return info
 
         worker = asyncio.create_task(asyncio.to_thread(create))
@@ -2299,7 +2405,10 @@ async def kill_session(name: str, by: str | None = None):
         await asyncio.to_thread(registry.kill, name)
     except KillFailed as e:
         raise HTTPException(500, str(e))
+    finally:
+        await asyncio.to_thread(_invalidate_lists)
     plugin_bridge.esquecer(name)
+    forget_frame(name)
     if await asyncio.to_thread(share_store.revoke_session, name):
         await asyncio.to_thread(share_api.sync_tunnel)
     warn = None
@@ -2394,9 +2503,18 @@ async def modo_execucao(name: str, body: ModoExecucaoBody):
     finally:
         # Também na falha: uma troca que morreu no meio pode já ter mudado a identidade.
         try:
-            await asyncio.to_thread(lambda: share_store.set_life(name, session_life(name)))
+            def _move_life():
+                life = session_life(name)
+                share_store.set_life(name, life)
+                try:
+                    guest_users.set_life(name, life)
+                except Exception:
+                    # Não troca o resultado da troca de modo pelo erro de gravar o dono.
+                    _log.exception("[guests] dono de %s nao acompanhou a troca de modo", name)
+            await asyncio.to_thread(_move_life)
         finally:
             share_api.changing_mode.discard(name)
+            await asyncio.to_thread(_invalidate_lists)
 
 
 async def _trocar_modo(name: str, body: ModoExecucaoBody):
@@ -2475,6 +2593,14 @@ async def rename_session(name: str, body: RenameBody):
             raise
 
 
+def _rename_guest_claim(name: str, new: str) -> None:
+    # A sessão já foi renomeada; falhar aqui não pode pular a migração da fila e do bastão.
+    try:
+        guest_users.rename_session(name, new)
+    except Exception:
+        _log.exception("[guests] dono de %s nao acompanhou o rename para %s", name, new)
+
+
 def _rename_session(name: str, body: RenameBody):
     from app import tmux
     _recusa_orq(name)
@@ -2496,9 +2622,10 @@ def _rename_session(name: str, body: RenameBody):
         od, nd = bastao_mod.caminho(name), bastao_mod.caminho(new)
         if od.exists():
             atomico.substituir(od, nd)
-        with _list_lock:
-            _list_snap["snap"] = None
+        _invalidate_lists()
+        forget_frame(name)
         share_store.rename(name, new)
+        _rename_guest_claim(name, new)
         return {"ok": True, "name": new}
     if not tmux.has_session(name):
         raise HTTPException(404, detail=erro("erro_sessao_inexistente", "sessao nao encontrada"))
@@ -2524,6 +2651,7 @@ def _rename_session(name: str, body: RenameBody):
     _codex_lease_rename_finished(new)
     registry.rename(name, new)  # migra o cache name->jsonl (senao serve transcript errado pos-rename)
     share_store.rename(name, new)
+    _rename_guest_claim(name, new)
     from app.pqueue import PromptQueue
     try:
         oq, nq = PromptQueue(name).path, PromptQueue(new).path
@@ -2734,6 +2862,8 @@ def resume_session(name: str, body: ResumeBody):
         return registry.resume(name, sid)
     except ValueError as e:
         raise HTTPException(409, str(e))
+    finally:
+        _invalidate_lists()
 
 
 @app.get("/api/sessions/{name}/history", dependencies=[Depends(require_auth)], response_model=list[ChatEvent])
@@ -3188,7 +3318,8 @@ async def subagent_detail(name: str, agent_id: str, events: int = 0):
 async def sessions_events(request: Request):
     from app.sse import list_events
     guest = guest_of(request)
-    return EventSourceResponse(list_events(only=guest), send_timeout=30)
+    return EventSourceResponse(list_events(only=guest, viewer=guest_users.current.get()),
+                               send_timeout=30)
 
 
 @app.get("/api/sessions/{name}/events", dependencies=[Depends(require_auth)])
@@ -3225,7 +3356,7 @@ async def events(name: str, request: Request):
     # SSE do Codex nunca ligava (chat vazio, sem estado ao vivo).
     return EventSourceResponse(
         merged_events(name, info.jsonl, provider=info.provider, start_offset=start_offset,
-                      count_app=guest_of(request) is None),
+                      count_app=guest_of(request) is None and guest_users.current.get() is None),
         send_timeout=30)
 
 
@@ -3484,7 +3615,7 @@ def _send_one(name: str, text: str, track_entry: bool = False) -> dict:
         except OSError:
             _log.exception("atualizar fila apos envio falhou name=%s", name)
         if result == "sent":
-            threading.Timer(_CONFIRM_GRACE + 0.5, _confirm_and_drain, args=(name,)).start()
+            _agendar_confirmacao(name, _CONFIRM_GRACE + 0.5)
         else:
             threading.Thread(target=_drain_session, args=(name,), daemon=True).start()
     else:
@@ -3510,7 +3641,7 @@ def _send_one(name: str, text: str, track_entry: bool = False) -> dict:
             _log.exception("append na fila falhou (prompt ja digitado) name=%s", name)
         if result == "sent":
             # Confirmacao de entrega: em ~8s confere se o transcript gravou; engolida -> re-drena.
-            threading.Timer(_CONFIRM_GRACE + 0.5, _confirm_and_drain, args=(name,)).start()
+            _agendar_confirmacao(name, _CONFIRM_GRACE + 0.5)
         else:
             # Kick: fecha a corrida append-depois-da-transicao — se o estado virou entregavel entre
             # o "deferred" do send_prompt e o append acima, o gatilho daquele ciclo nao viu esta
@@ -3937,6 +4068,8 @@ async def pair_session(name: str, body: PairBody):
         raise HTTPException(409, detail=erro("erro_pareamento_tarefa_existente",
                                              f"o grupo já tem tarefa: {e.existente!r} — repita com "
                                              f"--substituir-tarefa pra trocar", existente=e.existente))
+    except (orq_context.PromotionConflict, orq_md.Conflito) as e:
+        raise HTTPException(409, detail=erro("erro_orq_arquivo_mudou", str(e)))
     link = await asyncio.to_thread(lambda: PairLink(name).get() or {})
     task = link.get("task", body.task)
     # Só quem estava SOLTO recebe o protocolo; veterano não é acordado (consulta o grupo quando
@@ -4207,7 +4340,7 @@ class PapelBody(_StrictBody):
     conta: str
     modelo: str = ""
     esforco: str = ""
-    headless: bool = False
+    headless: bool | None = None
     permissao: str = ""
     motor: str = ""
     jev: bool = False
@@ -4216,13 +4349,13 @@ class PapelBody(_StrictBody):
     mtime: float
 
 
-def _gid_de(name: str) -> str:
-    link = PairLink(name).get()
-    if link and link.get("gid"):
-        return link["gid"]
-    # Sem grupo, a tela edita o TIME PADRÃO (regras-padrao.md): é dali que o árbitro parte ao
-    # montar o próximo grupo — configurar antes de começar foi pedido do usuário (26/08/2026).
-    return orq_papeis.gid_por_sessao(name) or orq_papeis.GID_PADRAO
+def _context_de(name: str) -> orq_context.Context:
+    try:
+        return orq_context.resolve(name)
+    except orq_context.IdentityUnavailable as e:
+        raise HTTPException(409, detail=erro("erro_orq_celula_invalida", str(e)))
+    except (OSError, ValueError) as e:
+        raise HTTPException(409, detail=erro("erro_orq_arquivo_mudou", str(e)))
 
 
 def _papeis_de(gid: str) -> tuple[str, float, list[orq_papeis.Papel]]:
@@ -4230,21 +4363,40 @@ def _papeis_de(gid: str) -> tuple[str, float, list[orq_papeis.Papel]]:
     return texto, mtime, orq_papeis.ler(texto)
 
 
+def _orq_identity(name: str) -> str | None:
+    try:
+        return orq_context.identity(name)
+    except orq_context.IdentityUnavailable:
+        return None
+
+
 @app.get("/api/sessions/{name}/orq", dependencies=[Depends(require_auth)])
 async def orq_get(name: str):
-    gid = await asyncio.to_thread(_gid_de, name)
-    _texto, mtime, papeis = await asyncio.to_thread(_papeis_de, gid)
+    context = await asyncio.to_thread(_context_de, name)
+    _texto, mtime, papeis = await asyncio.to_thread(_papeis_de, context.gid)
     # A lista fresca do registry (sem git nem pane): `casar_viva` só precisa de nome + last_activity.
     infos = await asyncio.to_thread(registry.list)
     arbitro = next((p for p in papeis if p.e_arbitro()), None)
     cwd = next((s.cwd for s in infos if s.name == name), None)
-    pronto = await asyncio.to_thread(orq_start.readiness, cwd, gid != orq_papeis.GID_PADRAO, bool(papeis))
+    pronto = await asyncio.to_thread(orq_start.readiness, cwd, context.grouped, bool(papeis))
     return {
-        "gid": gid, "arquivo": str(orq_papeis.regras_path(gid)), "mtime": mtime, "prontidao": pronto,
+        "gid": context.gid, "grouped": context.grouped, "session_prefix": context.session_prefix,
+        "session_identity": await asyncio.to_thread(_orq_identity, name),
+        "arquivo": str(context.path), "mtime": mtime, "prontidao": pronto,
         "arbitro": orq_papeis.casar_viva(arbitro, infos) if arbitro else None,
         "papeis": [{**asdict(p), "viva": orq_papeis.casar_viva(p, infos),
                     "id_cota": orq_politica.id_cota(p.provider, p.conta)} for p in papeis],
     }
+
+
+@app.get("/api/sessions/{name}/orq/panel", dependencies=[Depends(require_auth)])
+async def orq_panel(name: str):
+    """Painel da sessão do orquestrador sem LLM: um retrato por execução, lido dos arquivos dela."""
+    # A pasta vem da linha em cache da lista: `runs.find` releria todas as execuções a cada pedido.
+    info = await asyncio.to_thread(_cached_info_sync, name)
+    if info is None or info.provider != "orq" or not info.jsonl:
+        raise HTTPException(404, detail=erro("erro_nao_encontrado", "execucao nao encontrada"))
+    return await asyncio.to_thread(orq_timeline.panel, Path(info.jsonl).parent, _guardar_snap)
 
 
 class PapelItem(_StrictBody):
@@ -4258,7 +4410,7 @@ class PapelItem(_StrictBody):
     # cabe à conta de índice (N-1) % total. "par" = todas ao mesmo tempo.
     vez: str = ""
     # Abertura da sessão do papel: as mesmas escolhas da criação de sessão, gravadas como flags.
-    headless: bool = False
+    headless: bool | None = None
     permissao: str = ""
     motor: str = ""
     jev: bool = False
@@ -4326,8 +4478,8 @@ async def _aplicar_papeis(name: str, itens: list[PapelItem], mtime_lido: float) 
     salvar um por vez descartava o resto sem aviso."""
     if not itens:
         raise HTTPException(400, detail=erro("erro_orq_celula_invalida", "nenhum papel"))
-    gid = await asyncio.to_thread(_gid_de, name)
-    texto, _mtime, papeis = await asyncio.to_thread(_papeis_de, gid)
+    context = await asyncio.to_thread(_context_de, name)
+    texto, _mtime, papeis = await asyncio.to_thread(_papeis_de, context.gid)
     novos: list[orq_papeis.Papel] = []
     try:
         for it in itens:
@@ -4358,7 +4510,7 @@ async def _aplicar_papeis(name: str, itens: list[PapelItem], mtime_lido: float) 
             # ao arquivo sem passar por ali.
             texto = orq_papeis.escrever_papel(texto, novo)
             novos.append(novo)
-        mtime = await asyncio.to_thread(orq_md.gravar, orq_papeis.regras_path(gid), texto, mtime_lido)
+        mtime = await asyncio.to_thread(orq_context.write, context, texto, mtime_lido)
     except ValueError as e:
         raise HTTPException(400, detail=erro("erro_orq_celula_invalida", str(e)))
     except orq_md.Conflito:
@@ -4378,6 +4530,28 @@ async def orq_papel_set(name: str, body: PapelBody):
 @app.post("/api/sessions/{name}/orq/papeis", dependencies=[Depends(require_auth)])
 async def orq_papeis_set(name: str, body: PapeisBody):
     return await _aplicar_papeis(name, body.papeis, body.mtime)
+
+
+class OrqGroupBody(_StrictBody):
+    gid: str
+    mtime: float
+
+
+@app.post("/api/sessions/{name}/orq/grupo", dependencies=[Depends(require_auth)])
+async def orq_group_set(name: str, body: OrqGroupBody):
+    """Associa o time da planejadora ao grupo real, inclusive com um árbitro novo."""
+    try:
+        context = await asyncio.to_thread(orq_context.associate, name, body.gid, body.mtime)
+    except orq_md.Conflito:
+        raise HTTPException(409, detail=erro("erro_orq_arquivo_mudou",
+                                             "o time mudou desde a leitura — recarregue"))
+    except ValueError as e:
+        raise HTTPException(409, detail=erro("erro_orq_celula_invalida", str(e)))
+    except OSError as e:
+        raise HTTPException(409, detail=erro("erro_orq_arquivo_mudou", str(e)))
+    return {"ok": True, "gid": context.gid, "grouped": context.grouped,
+            "session_prefix": context.session_prefix, "arquivo": str(context.path),
+            "mtime": (await asyncio.to_thread(orq_md.ler_arquivo, context.path))[1]}
 
 
 class ComecarBody(_StrictBody):
@@ -4407,9 +4581,9 @@ async def orq_comecar(name: str, body: ComecarBody):
 
 
 def _prontidao(name: str, cwd: str | None) -> tuple[str, dict]:
-    gid = _gid_de(name)
-    _texto, _mt, papeis = _papeis_de(gid)
-    return gid, orq_start.readiness(cwd, gid != orq_papeis.GID_PADRAO, bool(papeis))
+    context = _context_de(name)
+    _texto, _mt, papeis = _papeis_de(context.gid)
+    return context.gid, orq_start.readiness(cwd, context.grouped, bool(papeis))
 
 
 class RemoverPapelBody(_StrictBody):
@@ -4424,8 +4598,8 @@ async def orq_papel_del(name: str, body: RemoverPapelBody):
     avisa o árbitro — quem mexe na fila normalmente mexe em várias linhas seguidas, e o aviso sai
     uma vez no fim, pelo botão. A sessão viva daquele papel não é tocada: o contrato diz quem
     DEVE rodar, não mata quem está rodando."""
-    gid = await asyncio.to_thread(_gid_de, name)
-    texto, _mtime, papeis = await asyncio.to_thread(_papeis_de, gid)
+    context = await asyncio.to_thread(_context_de, name)
+    texto, _mtime, papeis = await asyncio.to_thread(_papeis_de, context.gid)
     alvo = next((p for p in papeis
                  if orq_md.normalizar(p.papel) == orq_md.normalizar(body.papel)
                  and orq_md.normalizar(p.vez) == orq_md.normalizar(body.vez)), None)
@@ -4435,7 +4609,7 @@ async def orq_papel_del(name: str, body: RemoverPapelBody):
     cab = orq_papeis.cabecalho_atual(texto) or orq_papeis.CABECALHO
     texto = orq_md.remover_linha(texto, cab, orq_papeis.chave_da_linha(cab, alvo.papel, alvo.vez))
     try:
-        mtime = await asyncio.to_thread(orq_md.gravar, orq_papeis.regras_path(gid), texto, body.mtime)
+        mtime = await asyncio.to_thread(orq_context.write, context, texto, body.mtime)
     except orq_md.Conflito:
         raise HTTPException(409, detail=erro("erro_orq_arquivo_mudou",
                                              "o contrato mudou desde a leitura — recarregue"))
@@ -5756,7 +5930,7 @@ async def pensamento_para_pt(body: PensamentoPtBody):
 
 
 @app.get("/api/sessions/{name}/uploads/{filename}", dependencies=[Depends(require_auth)])
-def serve_upload(name: str, filename: str):
+def serve_upload(name: str, filename: str, download: bool = False):
     info = _cached_info_sync(name)
     if info is None or not info.cwd:
         raise HTTPException(404, detail=erro("erro_sessao_inexistente", "sessao nao encontrada"))
@@ -5764,7 +5938,7 @@ def serve_upload(name: str, filename: str):
         path = resolve_upload(info.cwd, _id_upload(info), filename)
     except UploadError as e:
         raise HTTPException(e.status, e.detail)
-    return file_response(path)
+    return file_response(path, download=download)
 
 
 @app.get("/api/sessions/{name}/uploads", dependencies=[Depends(require_auth)])
@@ -5879,9 +6053,10 @@ async def orq_lista():
         for t in d["tasks"]:
             t.pop("eventos", None)
         d["watchdog"] = vigias[e.id]
+        d["metadata"] = orq.run_metadata(raiz / e.id, e.plano)
         return d
 
-    return {"execucoes": [_resumo(e) for e in execs], "fichas": orq.fichas(execs)}
+    return await asyncio.to_thread(lambda: {"execucoes": [_resumo(e) for e in execs], "fichas": orq.fichas(execs)})
 
 
 @app.get("/api/orq/{exec_id}", dependencies=[Depends(require_auth)])
@@ -5889,7 +6064,17 @@ async def orq_detalhe(exec_id: str):
     e = await asyncio.to_thread(orq.detalhe, orq.raiz_padrao(), exec_id)
     if e is None:
         raise HTTPException(404, detail=erro("erro_nao_encontrado", "execucao nao encontrada"))
-    return asdict(e)
+    metadata = await asyncio.to_thread(orq.run_metadata, orq.raiz_padrao() / e.id, e.plano)
+    return {**asdict(e), "metadata": metadata}
+
+
+@app.get("/api/orq/{exec_id}/panel", dependencies=[Depends(require_auth)])
+async def orq_history_panel(exec_id: str):
+    """O mesmo painel por execução, sem exigir uma sessão viva."""
+    d = orq.exec_dir(orq.raiz_padrao(), exec_id)
+    if d is None or not await asyncio.to_thread((d / "eventos.jsonl").is_file):
+        raise HTTPException(404, detail=erro("erro_nao_encontrado", "execucao nao encontrada"))
+    return await asyncio.to_thread(orq_timeline.panel, d, _guardar_snap)
 
 
 @app.get("/api/orq/{exec_id}/conductor", dependencies=[Depends(require_auth)])
@@ -6404,37 +6589,97 @@ def _shortcut_env() -> dict[str, str]:
 
 @app.post("/api/sessions/{name}/shortcut-shell", dependencies=[Depends(require_auth)],
           status_code=202)
-def shortcut_shell(name: str, body: ShortcutShellBody):
-    # Atalho "shell" da fileira, no cwd da sessao. No POSIX cada execucao ganha um terminal
-    # escondido proprio (app/shortcut_terminals.py): a pessoa ve a saida numa aba do painel e fecha
-    # quando quiser. O tmux sobrevive a restart do backend, entao o programa tambem.
+def shortcut_shell(name: str, body: ShortcutShellBody, request: Request):
+    return _shortcut_shell(name, body, request, powershell=False)
+
+
+@app.post("/api/sessions/{name}/run-code", dependencies=[Depends(require_auth)], status_code=202)
+def run_code(name: str, body: RunCodeBody, request: Request):
+    if len(body.command) > 4096:
+        raise HTTPException(400, detail=erro("erro_run_code_longo", "comando longo demais"))
+    if "\0" in body.command:
+        raise HTTPException(400, detail=erro("erro_run_code_invalido", "comando invalido"))
+    if body.key and (not body.key.startswith("run-code:") or not all(c.isascii() and (c.isalnum() or c in ":-") for c in body.key)):
+        raise HTTPException(400, detail=erro("erro_run_code_invalido", "identificador invalido"))
+    language = (body.language or "").strip().lower()
+    unix = {"bash", "sh", "zsh", "fish"}
+    powershell = {"powershell", "ps1", "pwsh"}
+    if language and language not in unix | powershell | {"shell"}:
+        raise HTTPException(400, detail=erro("erro_run_code_linguagem", "linguagem de terminal invalida"))
+    if (os.name == "nt" and language in unix) or (os.name != "nt" and language in powershell):
+        raise HTTPException(409, detail=erro("erro_run_code_shell_incompativel", "o bloco nao combina com o sistema deste servidor",
+                                              linguagem=language, sistema="Windows" if os.name == "nt" else "Linux"))
+    shell = None
+    if os.name == "nt" and language == "pwsh":
+        shell = shutil.which("pwsh.exe")
+    elif os.name != "nt" and language not in ("", "shell"):
+        shell = shutil.which(language)
+    if language not in ("", "shell") and shell is None and (os.name != "nt" or language == "pwsh"):
+        raise HTTPException(409, detail=erro("erro_run_code_shell_ausente", "interpretador nao instalado", linguagem=language))
+    from app import termsock
+    if not termsock.painel_disponivel():
+        raise HTTPException(409, detail=erro("erro_run_code_terminal", "terminal indisponivel nesta maquina"))
+    # O nome da aba vai ao SSE; nunca derive dos bytes do comando, que podem conter credencial.
+    return _shortcut_shell(name, ShortcutShellBody(command=body.command, label="Terminal", key=body.key), request, powershell=True, shell=shell)
+
+
+def _shortcut_shell(name: str, body: ShortcutShellBody, request: Request, *, powershell: bool, shell: str | None = None):
+    # Atalho "shell" da fileira. Cada execucao ganha um terminal escondido proprio
+    # (app/shortcut_terminals.py, no tmux e no psmux): a pessoa ve a saida numa aba do painel e
+    # fecha quando quiser, e o programa sobrevive a restart do backend. `runs_in="hangar"` cria uma
+    # copia unica do servidor, sem dono.
+    from app.share_gate import guest_of
+    # Convidado nao cria nem reaproveita copia No Hangar: ele nao a ve, nao a fecha, e o reuso traria
+    # uma janela pra frente na tela do dono.
+    guest_user = guest_users.current.get()
+    if body.runs_in == "hangar" and (guest_of(request) is not None or guest_user is not None):
+        raise HTTPException(403, detail=erro("erro_shortcut_hangar_convidado",
+                                             "convidado nao roda atalho No Hangar"))
     cwd = _session_cwd(name)
     command = body.command.strip()
     if not command:
         raise HTTPException(400, detail=erro("erro_shortcut_vazio", "comando vazio"))
-    if body.pasta is not None:
+    # No Hangar a pasta e a home, mesmo com `pasta` configurada; com `home` desligado vale a pasta.
+    if body.runs_in == "hangar" and body.home:
+        cwd = os.path.expanduser("~")
+    elif body.pasta is not None:
         try:
             cwd = project_shortcuts.resolve_folder(cwd, body.pasta)
         except project_shortcuts.ProjectError as e:
             raise _project_error(e)
         except ValueError as e:
             raise HTTPException(400, detail=erro("erro_shortcut_pasta", str(e), detalhe=str(e)))
+    # `pasta` absoluta passa direto pelo resolve_folder: o convidado não sai da pasta dele.
+    if guest_user is not None and not guest_users.inside_root(guest_user, cwd):
+        raise HTTPException(403, detail=erro("erro_fora_da_pasta",
+                                             "o convidado só abre sessão dentro da pasta dele"))
     # Atalho importado com a credencial em branco: rodar mandaria o marcador literal pro programa.
     from app.shortcut_transfer import has_placeholder
     missing = has_placeholder(command)
     if missing:
-        raise HTTPException(422, detail=erro("erro_shortcut_segredo",
+        # Na rota nova, 422 fica reservado para comando que abriu terminal e falhou.
+        raise HTTPException(400 if powershell else 422, detail=erro("erro_shortcut_segredo",
                                              f"preencha a credencial {missing} antes de usar",
                                              nome=missing))
-    if os.name == "nt":
-        return _shortcut_shell_detached(name, cwd, command)
+    if body.runs_in == "hangar":
+        return _shortcut_shell_hangar(name, cwd, command, body)
     from app import shortcut_terminals
-    env = {k: v for k, v in _shortcut_env().items() if k in _DISPLAY_VARS}
-    term = shortcut_terminals.start(name, cwd, command, body.label or "", env)
+    term = shortcut_terminals.start(name, cwd, command, body.label or "", _shortcut_display_env(),
+                                    key=body.key, ask=body.ask, powershell=powershell, shell=shell)
     if term is None:
-        raise HTTPException(500, detail=erro("erro_shortcut_shell", "tmux recusou criar o terminal"))
+        raise HTTPException(500, detail=erro("erro_shortcut_shell", "o multiplexador recusou criar o terminal"))
     # Sem o texto do comando: ele pode carregar credencial.
     _log.info("shortcut-shell: sessao=%s terminal=%s", name, term["tmux"])
+    return _shortcut_started(name, term)
+
+
+def _shortcut_display_env() -> dict[str, str]:
+    return {k: v for k, v in _shortcut_env().items() if k in _DISPLAY_VARS}
+
+
+def _shortcut_started(name: str, term: dict) -> dict:
+    """202 quando o processo ainda vive (ou saiu 0) na janela; 422 com o fim da saida se morreu."""
+    from app import shortcut_terminals
     public = {"id": term["id"], "label": term["label"]}
     # Quem clicou precisa saber que falhou. Comando que erra (nao existe, sintaxe, VPN fora)
     # morre em segundos; o que ainda roda depois da janela e programa longo e conta como ok.
@@ -6455,46 +6700,82 @@ def shortcut_shell(name: str, body: ShortcutShellBody):
                                          terminal={**public, "alive": False, "exit_code": code}))
 
 
-def _shortcut_shell_detached(name: str, cwd: str, command: str):
-    # Windows: sem tmux de verdade (psmux), o atalho segue dispara-e-esquece, desprendido do
-    # backend (grupo proprio e sem console, em valor literal porque subprocess.CREATE_* so existe
-    # la). Saida num arquivo anonimo, lida so se o comando morrer com erro na janela abaixo.
-    detach = {"creationflags": 0x00000200 | 0x08000000}
-    with tempfile.TemporaryFile() as out:
-        try:
-            proc = subprocess.Popen(command, shell=True, cwd=cwd, env=_shortcut_env(),
-                                    stdin=subprocess.DEVNULL, stdout=out,
-                                    stderr=subprocess.STDOUT, **detach)
-        except OSError as e:
-            raise HTTPException(500, detail=erro("erro_shortcut_shell", str(e)))
-        _log.info("shortcut-shell: sessao=%s pid=%s", name, proc.pid)
-        try:
-            code = proc.wait(timeout=_SHORTCUT_FAIL_WINDOW)
-        except subprocess.TimeoutExpired:
-            return {"ok": True}
-        if code == 0:
-            return {"ok": True}
-        out.seek(0)
-        tail = _shortcut_output_tail(out.read())
-    _log.info("shortcut-shell: sessao=%s pid=%s saiu com %s", name, proc.pid, code)
-    msg = f"o comando saiu com o código {code}" + (f": {tail}" if tail else "")
-    raise HTTPException(422, detail=erro("erro_shortcut_falhou", msg, codigo=code, saida=tail))
+def _focus_hangar_terminal(row: dict | None) -> bool:
+    if not row or not row["alive"] or not row["pid"]:
+        return False
+    from app import window_focus
+    return window_focus.focus_tree(row["pid"], _shortcut_env())
+
+
+def _shortcut_reused(term: dict) -> dict:
+    from app import shortcut_terminals
+    try:
+        focused = _focus_hangar_terminal(shortcut_terminals.hangar_row(term["id"]))
+    except shortcut_terminals.MuxUnavailable:
+        # O terminal foi reaproveitado; so o foco da janela ficou sem resposta.
+        _log.warning("shortcut-shell: multiplexador sem resposta ao focar o terminal %s", term["id"])
+        focused = False
+    return {"ok": True, "reused": True, "focused": focused,
+            "terminal": {"id": term["id"], "label": term["label"], "alive": True, "exit_code": None}}
+
+
+def _shortcut_mux_unavailable() -> HTTPException:
+    # Sem resposta nao da pra saber se a copia ja existe: abrir outra derrubaria a primeira.
+    return HTTPException(500, detail=erro("erro_shortcut_mux_indisponivel",
+                                          "o multiplexador nao respondeu; tente de novo"))
+
+
+def _shortcut_shell_hangar(name: str, cwd: str, command: str, body: ShortcutShellBody):
+    # Copia unica do servidor: clicar de novo reaproveita em vez de abrir outra (a VM do RDP so
+    # aceita uma conexao por usuario, e a segunda derrubava a primeira).
+    key = body.key.strip()
+    if not key:
+        raise HTTPException(400, detail=erro("erro_shortcut_sem_chave", "atalho No Hangar sem chave"))
+    from app import shortcut_terminals
+    try:
+        term, reused = shortcut_terminals.start_hangar(key, cwd, command, body.label or "",
+                                                       _shortcut_display_env(), name, body.ask)
+    except shortcut_terminals.MuxUnavailable:
+        raise _shortcut_mux_unavailable()
+    if term is None:
+        raise HTTPException(500, detail=erro("erro_shortcut_shell", "o multiplexador recusou criar o terminal"))
+    _log.info("shortcut-shell: hangar terminal=%s reaproveitou=%s", term["tmux"], reused)
+    if reused:
+        return _shortcut_reused(term)
+    return {**_shortcut_started(name, term), "reused": False, "focused": False}
 
 
 @app.get("/api/sessions/{name}/shortcut-terminals", dependencies=[Depends(require_auth)])
 def shortcut_terminals_list(name: str):
-    # Lista vazia no Windows: la o atalho nao cria terminal (ver _shortcut_shell_detached).
-    if os.name == "nt":
-        return {"terminals": []}
     from app import shortcut_terminals
     return {"terminals": shortcut_terminals.list_for(name)}
+
+
+def _answer(target: str | None, text: str, missing: HTTPException):
+    # Uma linha so, sem tecla de controle: `\n` viraria dois comandos, `\x03` um Ctrl+C, `\x1b` um Esc.
+    if any(ord(c) < 0x20 or ord(c) == 0x7F for c in text):
+        raise HTTPException(400, detail=erro("erro_shortcut_resposta_invalida", "a resposta e uma linha so"))
+    if target is None:
+        raise missing
+    from app import terminal_prompt
+    if not terminal_prompt.answer(target, text):
+        raise HTTPException(500, detail=erro("erro_shortcut_resposta", "o terminal recusou a resposta"))
+    return {"ok": True}
+
+
+@app.post("/api/sessions/{name}/shortcut-terminals/{ident}/answer", dependencies=[Depends(require_auth)])
+def shortcut_terminal_answer(name: str, ident: str, body: ShortcutAnswerBody):
+    from app import shortcut_terminals
+    return _answer(shortcut_terminals.find(name, ident), body.text,
+                   HTTPException(404, detail=erro("erro_shortcut_terminal_inexistente",
+                                                  "terminal do atalho nao encontrado")))
 
 
 # POST, nao DELETE: o proxy da frente so deixa passar GET/POST.
 @app.post("/api/sessions/{name}/shortcut-terminals/{ident}/close", dependencies=[Depends(require_auth)])
 def shortcut_terminal_close(name: str, ident: str):
     from app import shortcut_terminals
-    closed = None if os.name == "nt" else shortcut_terminals.close(name, ident)
+    closed = shortcut_terminals.close(name, ident)
     if closed is None:
         raise HTTPException(404, detail=erro("erro_shortcut_terminal_inexistente",
                                              "terminal do atalho nao encontrado"))
@@ -6502,6 +6783,60 @@ def shortcut_terminal_close(name: str, ident: str):
         raise HTTPException(500, detail=erro("erro_shortcut_terminal_fechar",
                                              "o terminal do atalho nao fechou"))
     return {"ok": True}
+
+
+@app.get("/api/hangar-terminals", dependencies=[Depends(require_auth)])
+def hangar_terminals_list():
+    from app import shortcut_terminals
+    return {"terminals": [t for t in shortcut_terminals.list_all() if not t["owner"]]}
+
+
+def _hangar_404():
+    return HTTPException(404, detail=erro("erro_hangar_terminal_inexistente", "terminal No Hangar nao encontrado"))
+
+
+# POST, nao DELETE: o proxy da frente so deixa passar GET/POST.
+@app.post("/api/hangar-terminals/{ident}/close", dependencies=[Depends(require_auth)])
+def hangar_terminal_close(ident: str):
+    from app import shortcut_terminals
+    closed = shortcut_terminals.close_hangar(ident)
+    if closed is None:
+        raise _hangar_404()
+    if not closed:
+        raise HTTPException(500, detail=erro("erro_hangar_terminal_fechar", "o terminal No Hangar nao fechou"))
+    return {"ok": True}
+
+
+@app.post("/api/hangar-terminals/{ident}/answer", dependencies=[Depends(require_auth)])
+def hangar_terminal_answer(ident: str, body: ShortcutAnswerBody):
+    from app import shortcut_terminals
+    return _answer(shortcut_terminals.find_hangar(ident), body.text, _hangar_404())
+
+
+@app.post("/api/hangar-terminals/{ident}/focus", dependencies=[Depends(require_auth)])
+def hangar_terminal_focus(ident: str):
+    from app import shortcut_terminals
+    row = shortcut_terminals.hangar_row(ident)
+    if row is None:
+        raise _hangar_404()
+    return {"focused": _focus_hangar_terminal(row)}
+
+
+@app.post("/api/hangar-terminals/{ident}/restart", dependencies=[Depends(require_auth)], status_code=202)
+def hangar_terminal_restart(ident: str):
+    from app import shortcut_terminals
+    try:
+        term, reused = shortcut_terminals.restart_hangar(ident, _shortcut_display_env())
+    except shortcut_terminals.RestartError:
+        raise HTTPException(500, detail=erro("erro_hangar_terminal_rodar_de_novo",
+                                             "nao foi possivel recuperar o comando do terminal No Hangar"))
+    except shortcut_terminals.MuxUnavailable:
+        raise _shortcut_mux_unavailable()
+    if term is None:
+        raise _hangar_404()
+    if reused:
+        return _shortcut_reused(term)
+    return {**_shortcut_started("hangar", term), "reused": False, "focused": False}
 
 
 class ShortcutImportBody(BaseModel):
@@ -6513,10 +6848,13 @@ class ShortcutImportBody(BaseModel):
 
 
 @app.get("/api/shortcuts/export", dependencies=[Depends(require_auth)])
-def shortcuts_export():
+def shortcuts_export(ids: list[str] | None = Query(default=None), include_scripts: bool = True):
     # Sem credencial: cada valor de segredo sai como marcador (app/shortcut_transfer.py).
     from app import shortcut_transfer
-    return shortcut_transfer.export_payload()
+    try:
+        return shortcut_transfer.export_payload([] if ids == [""] else ids, include_scripts=include_scripts)
+    except ValueError as e:
+        raise HTTPException(400, detail=str(e))
 
 
 # POST: o import tem corpo e muda a config; o GET/POST e o par que o proxy da frente aceita.
@@ -6679,6 +7017,14 @@ def archive_por_cwd(cwd: str, config_dir: str | None = None, cap: int = 12,
     return [e for e in todas if e.provider == provider][:cap]
 
 
+@app.get("/api/archive/recent", dependencies=[Depends(require_auth)],
+         response_model=list[ArchiveEntry])
+def archive_recent(cap: int = 40):
+    # A lista "Conversas" do celular e do nativo: as vivas vêm da lista de sessões, as fechadas daqui.
+    live = {os.path.realpath(s.jsonl) for s in registry.list() if s.jsonl}
+    return list_recent(live, cap=max(1, min(cap, 100)))
+
+
 @app.get("/api/archive/{project}", dependencies=[Depends(require_auth)],
          response_model=list[ArchiveEntry])
 def archive_folder(project: str, codex_account: str | None = None):
@@ -6713,9 +7059,11 @@ def archive_history(project: str, session_id: str, tail: int = 0, config_dir: st
         if provider != "claude":
             # Fora do Claude nao ha fila duravel keyed por este arquivo: o transcript e a conversa
             # inteira, e cada provider tem o parser dele.
-            return [ev for linha in p.read_text(encoding="utf-8", errors="replace").splitlines()
-                    if (o := _json_dict(linha)) is not None
-                    for ev in archive_providers.parse_obj(provider, o)]
+            # Linha a linha: rollout de dezenas de MB inteiro na memória, mais a lista das linhas.
+            with open(p, encoding="utf-8", errors="replace") as fh:
+                return [ev for linha in fh
+                        if (o := _json_dict(linha)) is not None
+                        for ev in archive_providers.parse_obj(provider, o)]
     except codex_accounts.AccountError as e:
         raise _erro_conta_codex(e) from None
     except ValueError:
@@ -6757,6 +7105,15 @@ class ResumeArchivedBody(_StrictBody):
     codex_account: str | None = None
 
 
+def _sessao_com_transcript(jsonl: Path) -> str | None:
+    """Nome da sessao viva que escreve neste transcript, ou None."""
+    alvo = os.path.realpath(str(jsonl))
+    for s in registry.list():
+        if s.jsonl and os.path.realpath(s.jsonl) == alvo:
+            return s.name
+    return None
+
+
 @app.post("/api/archive/{project}/{session_id}/resume", dependencies=[Depends(require_auth)],
           response_model=SessionInfo)
 def resume_archived(project: str, session_id: str, body: ResumeArchivedBody = ResumeArchivedBody()):
@@ -6796,10 +7153,11 @@ def resume_archived(project: str, session_id: str, body: ResumeArchivedBody = Re
             elif dona != cfg:
                 # Conversa ABERTA nao muda de conta: o processo dela ainda escreve no arquivo, e o
                 # rename deixaria ele gravando num inode que a lista nao acha mais.
-                origem_jsonl = os.path.realpath(str(archive_jsonl(project, session_id, dona)))
-                if any(s.jsonl and os.path.realpath(s.jsonl) == origem_jsonl for s in registry.list()):
+                viva = _sessao_com_transcript(archive_jsonl(project, session_id, dona))
+                if viva:
                     raise HTTPException(409, detail=erro("erro_conversa_viva",
-                                                         "conversa aberta nao muda de conta"))
+                                                         "conversa aberta nao muda de conta",
+                                                         sessao=viva))
                 mover = (dona,)
         except (ValueError, FileNotFoundError):
             pass
@@ -6828,6 +7186,17 @@ def resume_archived(project: str, session_id: str, body: ResumeArchivedBody = Re
         raise HTTPException(404, detail=erro("erro_transcript_nao_encontrado", "transcript not found"))
     if not cwd:
         raise HTTPException(422, detail=erro("erro_cwd_ausente", "cwd not found in transcript"))
+    # Mesmo transcript ja aberto numa sessao: um segundo `--resume` poria dois processos gravando
+    # no mesmo arquivo. Antes do move e de qualquer spawn.
+    try:
+        viva = _sessao_com_transcript(archive_jsonl(
+            project, session_id, mover[0] if mover else cfg, body.provider,
+            origem_codex_account if body.provider == "codex" else None))
+    except (ValueError, FileNotFoundError):
+        viva = None
+    if viva:
+        raise HTTPException(409, detail=erro("erro_conversa_viva", "conversa já está aberta",
+                                             sessao=viva))
     if body.engine is not None and body.engine not in engines.listar():
         raise HTTPException(400, detail=erro("erro_motor_invalido", "motor invalido"))
     base = sanitize_session_name(Path(cwd).name) or "sessao"
@@ -6852,8 +7221,10 @@ def resume_archived(project: str, session_id: str, body: ResumeArchivedBody = Re
     try:
         extras = {"codex_account": origem_codex_account} \
             if body.provider == "codex" and origem_codex_account is not None else {}
-        return registry.create(name, cwd, config_dir=cfg, provider=body.provider,
+        info = registry.create(name, cwd, config_dir=cfg, provider=body.provider,
                                resume_session_id=session_id, engine=body.engine, **extras)
+        _invalidate_lists()
+        return info
     except ValueError as e:
         if mover:
             # Sessao nao nasceu: a conversa volta pra conta de origem. Falha aqui nao pode
@@ -7059,17 +7430,18 @@ def _resolver_citado(name: str, path: str) -> str:
 
 
 @app.get("/api/sessions/{name}/file", dependencies=[Depends(require_auth)])
-def serve_file(name: str, path: str, request: Request):
+def serve_file(name: str, path: str, request: Request, download: bool = False):
     # FileResponse trata Range -> <video> faz seek/streaming.
     real = _resolver_citado(name, path)
     st = os.stat(real)
-    etag = f'"isolated-{st.st_mtime_ns:x}-{st.st_size:x}"'
+    representation = "download" if download else "isolated"
+    etag = f'"{representation}-{st.st_mtime_ns:x}-{st.st_size:x}"'
     cabecalhos = {"etag": etag, "cache-control": _CACHE_ARQUIVO}
     # Depois da trava do transcript, nunca antes: 304 e resposta sobre um arquivo, e quem nao pode
     # ver o arquivo tambem nao pode saber que ele mudou.
     if request.headers.get("if-none-match") == etag:
         return Response(status_code=304, headers=cabecalhos)
-    return file_response(real, headers=cabecalhos)
+    return file_response(real, headers=cabecalhos, download=download)
 
 
 # Arquivo CITADO na conversa, como texto editavel. O par com `/files/read` e `/files/write` da
@@ -7593,6 +7965,7 @@ async def permission_mode_set(name: str, body: PermissionModeBody):
         except Exception as e:
             raise HTTPException(409, detail=erro("erro_permissao_leitura", f"não consegui trocar o modo: {e}"))
         vivo = hl._sessions.get(name)
+        await asyncio.to_thread(_invalidate_lists)
         return {"mode": ficou, "current": ficou,
                 "previous_non_plan": vivo.modo_nao_plan if vivo else None}
     _guard_perm(name, info)
@@ -7610,6 +7983,8 @@ async def permission_mode_set(name: str, body: PermissionModeBody):
         raise HTTPException(409, detail=erro("erro_permissao_leitura", str(e)))
     except ValueError as e:
         raise HTTPException(409, detail=erro("erro_permissao_invalida", str(e)))
+    finally:
+        await asyncio.to_thread(_invalidate_lists)
     # cache da lista pode ter ficado com current velho; atualiza o current mas mantém modos
     key = _cache_key_perm(name, info)
     hit = _perm_modes_cache.get(key)
@@ -8193,6 +8568,20 @@ def fs_scan(root: str, path: str | None = None):
     # a FsError pro status HTTP correspondente.
     try:
         return scan_dir(root, path)
+    except FsError as e:
+        raise HTTPException(e.status, e.detail)
+
+
+class FsMkdirBody(BaseModel):
+    root: str
+    path: str | None = None
+    name: str
+
+
+@app.post("/api/fs/mkdir", dependencies=[Depends(require_auth)])
+def fs_mkdir(body: FsMkdirBody):
+    try:
+        return make_dir(body.root, body.path, body.name)
     except FsError as e:
         raise HTTPException(e.status, e.detail)
 

@@ -1,5 +1,6 @@
 import json
 import os
+import sqlite3
 from datetime import timezone
 from pathlib import Path
 
@@ -29,16 +30,20 @@ def _limpo(tmp_path, monkeypatch):
 
 
 def _contador(monkeypatch):
-    """Devolve (dict com a contagem). Contar chamadas ao parser é a ÚNICA forma de provar
-    que o cache existe — a lição da fase 1: comparar só o resultado passa sem cache nenhum."""
+    """Devolve (dict com a contagem de leituras do ZERO). Contar leituras é a ÚNICA forma de
+    provar que o índice existe — a lição da fase 1: comparar só o resultado passa sem cache."""
     n = {"v": 0}
-    real = ct.ler_completo
+    real = ct._nova_dobra
 
-    def contado(p):
-        n["v"] += 1
-        return real(p)
+    def contado(raiz):
+        fabrica = real(raiz)
 
-    monkeypatch.setattr(ct, "ler_completo", contado)
+        def nova(p):
+            n["v"] += 1
+            return fabrica(p)
+        return nova
+
+    monkeypatch.setattr(ct, "_nova_dobra", contado)
     return n
 
 
@@ -163,50 +168,27 @@ def test_cache_de_versao_antiga_e_RELIDO(tmp_path, monkeypatch):
     o resultado seria o mesmo e o teste passaria sem provar nada."""
     _escrever(tmp_path / "p1" / "a.jsonl", [_turno("claude-opus-5", 3, 0, 0, 0, "2026-07-01T10:00:00Z")])
     ct.varrer(tmp_path)
-    p = cc.caminho_cache("transcripts", tmp_path)
-    d = json.loads(p.read_text(encoding="utf-8"))
-    d["versao"] = ct.CACHE_VERSAO - 1
-    p.write_text(json.dumps(d), encoding="utf-8")
-    ct.invalidar_cache()
+    with sqlite3.connect(cc._CACHE_DIR / cc._ARQUIVO) as conn:
+        conn.execute("UPDATE files SET versao = 'velha'")
     n = _contador(monkeypatch)
     ct.varrer(tmp_path)
     assert n["v"] == 1, "versão velha tem que forçar releitura"
 
 
-def test_cache_corrompido_nao_derruba(tmp_path):
-    """JSON válido do tipo errado, e entrada com campo de tipo errado. Nenhum dos dois pode
-    levantar — o pior caso aceitável é reler."""
-    _escrever(tmp_path / "p1" / "a.jsonl", [_turno("claude-opus-5", 4, 0, 0, 0, "2026-07-01T10:00:00Z")])
+def test_estado_ilegivel_vira_releitura(tmp_path, monkeypatch):
+    """Estado de retomada corrompido não pode levantar — o pior caso aceitável é reler."""
+    a = tmp_path / "p1" / "a.jsonl"
+    _escrever(a, [_turno("claude-opus-5", 4, 0, 0, 0, "2026-07-01T10:00:00Z")])
+    with open(a, "a", encoding="utf-8") as f:
+        f.write("\n")
     ct.varrer(tmp_path)
-    p = cc.caminho_cache("transcripts", tmp_path)
-    for lixo in ("null", "[1,2]", '{"versao": 1, "itens": {"x": {"sig": ["abc", 1]}}}'):
-        p.write_text(lixo, encoding="utf-8")
-        ct.invalidar_cache()
-        assert len(ct.varrer(tmp_path)) == 1
-
-
-def test_cache_com_bytes_invalidos_nao_derruba(tmp_path):
-    """Achado da revisão: `UnicodeDecodeError` é subclasse de `ValueError`, não de `OSError` —
-    um cache com bytes que não decodificam como UTF-8 (corrupção de disco, edição externa)
-    propagava por `varrer()` até o chamador em vez de virar releitura."""
-    _escrever(tmp_path / "p1" / "a.jsonl", [_turno("claude-opus-5", 4, 0, 0, 0, "2026-07-01T10:00:00Z")])
-    ct.varrer(tmp_path)
-    p = cc.caminho_cache("transcripts", tmp_path)
-    p.write_bytes(b"\xff\xfe\x00lixo")
-    ct.invalidar_cache()
-    assert len(ct.varrer(tmp_path)) == 1
-
-
-def test_falha_ao_gravar_cache_nao_derruba(tmp_path, monkeypatch):
-    """Cache é otimização. Disco cheio ou diretório só-leitura tem que virar log, não 500 —
-    regra do projeto: o núcleo nunca quebra por causa de uma feature."""
-    _escrever(tmp_path / "p1" / "a.jsonl", [_turno("claude-opus-5", 6, 0, 0, 0, "2026-07-01T10:00:00Z")])
-
-    def explode(*a, **kw):
-        raise OSError("disco cheio")
-
-    monkeypatch.setattr(cc, "_gravar", explode)
-    assert len(ct.varrer(tmp_path)) == 1
+    with sqlite3.connect(cc._CACHE_DIR / cc._ARQUIVO) as conn:
+        conn.execute("UPDATE files SET estado = ?", (b"\xff\xfe\x00lixo",))
+    with open(a, "a", encoding="utf-8") as f:
+        f.write(json.dumps(_turno("claude-opus-5", 1, 0, 0, 0, "2026-07-01T10:05:00Z")) + "\n")
+    n = _contador(monkeypatch)
+    assert sum(u.input for u in ct.varrer(tmp_path)) == 5
+    assert n["v"] == 1
 
 
 def test_dias_modelos_e_blocos_da_mesma_resposta_sobrevivem_ao_cache(tmp_path, monkeypatch):
@@ -251,3 +233,21 @@ def test_resposta_atualizada_substitui_usage_parcial(tmp_path):
     _escrever(tmp_path / "s.jsonl", [parcial, final])
     (uso,) = ct.ler_transcript(tmp_path / "s.jsonl")
     assert (uso.input, uso.output) == (10, 12)
+
+
+def test_custos_de_um_transcript_pelo_indice(tmp_path, monkeypatch):
+    t = tmp_path / "projects" / "-repo-a" / "s1.jsonl"
+    _escrever(t, [_turno("claude-opus-5-5", 10, 1, 5, 100, "2026-09-29T10:00:01Z"),
+                  _turno("claude-sonnet-5", 20, 2, 0, 200, "2026-09-29T10:05:00Z")])
+    n = _contador(monkeypatch)
+    rows = ct.custos_do_transcript(t)
+    assert {(r.model, r.input, r.cache_read) for r in rows} == {("claude-opus-5-5", 10, 100), ("claude-sonnet-5", 20, 200)}
+    ct.custos_do_transcript(t)
+    assert n["v"] == 1
+
+
+def test_transcript_sumido_e_indisponivel_nao_sem_uso(tmp_path):
+    assert ct.custos_do_transcript(tmp_path / "projects" / "-a" / "nao-existe.jsonl") is None
+    vazio = tmp_path / "projects" / "-a" / "vazio.jsonl"
+    _escrever(vazio, [{"type": "user", "timestamp": "2026-09-29T10:00:00Z"}])
+    assert ct.custos_do_transcript(vazio) == []

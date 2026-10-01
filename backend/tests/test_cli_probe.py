@@ -126,18 +126,18 @@ def test_cache_nao_re_sonda_dentro_do_ttl(tmp_path, monkeypatch):
     _make_sh(tmp_path, "claude", exit_code=0)
     monkeypatch.setattr(cli_probe, "_path_login", str(tmp_path))
     chamadas = {"n": 0}
-    orig_run = subprocess.run
+    orig_isfile = os.path.isfile
 
-    def fake_run(*a, **kw):
+    def fake_isfile(p):
         chamadas["n"] += 1
-        return orig_run(*a, **kw)
+        return orig_isfile(p)
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(os.path, "isfile", fake_isfile)
     # primeira sonda
     cli_probe.sondar_providers()
     n1 = chamadas["n"]
     assert n1 >= 1
-    # segunda sonda dentro do TTL não deve chamar subprocess de novo para --version
+    # segunda sonda dentro do TTL não deve olhar o PATH de novo
     # (o PATH também é cacheado, mas o ponto é o cache de 60s do resultado)
     cli_probe.sondar_providers()
     n2 = chamadas["n"]
@@ -171,3 +171,16 @@ def test_windows_path_com_drive_e_pathext(tmp_path, monkeypatch):
     # pi e kimi não existem → nao_encontrado
     assert res["pi"]["disponivel"] is False
     assert res["kimi"]["disponivel"] is False
+
+
+def test_windows_ignora_pathext_que_nao_e_cli(tmp_path, monkeypatch):
+    # PATHEXT traz .JS/.VBS/.WSF, mas um `claude.js` no PATH não é o agente instalado.
+    monkeypatch.setattr(os, "name", "nt")
+    monkeypatch.setattr(os, "pathsep", ";")
+    monkeypatch.setenv("PATHEXT", ".COM;.EXE;.BAT;.CMD;.VBS;.JS;.WSF")
+    for nome in ("claude.JS", "codex.VBS", "pi.WSF"):
+        (tmp_path / nome).write_text("x")
+    monkeypatch.setattr(cli_probe, "_path_login", str(tmp_path))
+    res = cli_probe.sondar_providers()
+    for p in ("claude", "codex", "pi"):
+        assert res[p] == {"disponivel": False, "motivo": "nao_encontrado"}

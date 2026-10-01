@@ -45,6 +45,13 @@ def _renovar_em_fundo(provider: str) -> None:
     threading.Thread(target=_run, name=f"{provider}-catalog-refresh", daemon=True).start()
 
 
+def warm() -> None:
+    """Enche o cache na subida: a primeira lista depois do restart custava segundos na tela."""
+    for provider in _BIN:
+        if shutil.which(_BIN[provider]):
+            _renovar_em_fundo(provider)
+
+
 class PiAusente(RuntimeError):
     """`pi`/`omp` não está no PATH deste backend — não é falha do comando, é ausência do binário."""
 

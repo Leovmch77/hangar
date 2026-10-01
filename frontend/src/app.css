@@ -120,6 +120,10 @@
   --success:  #34c759;
   --error:    #ff453a;
   --warning:  #ff9f0a;
+  /* Texto sobre fundo tingido da mesma cor (chip, marca, linha de estado). */
+  --accent-text:  color-mix(in srgb, var(--accent) 30%, #fff);
+  --success-text: color-mix(in srgb, var(--success) 55%, #fff);
+  --warning-text: color-mix(in srgb, var(--warning) 60%, #fff);
 
   /* Luminância das cores de grupo de pareamento (lib/format.ts pairColor): pastel claro sobre
      fundo escuro; o tema claro sobrescreve pra mais fundo (aro fino sumia sobre quase-branco). */
@@ -283,6 +287,9 @@
   --success:  #146c30;
   --error:    #b3251c;
   --warning:  #7a5408;
+  --accent-text:  var(--accent-press);
+  --success-text: var(--success);
+  --warning-text: var(--warning);
 
   /* Cores de grupo mais fundas no claro (mesma razao dos semanticos acima). */
   --pair-l: 0.5;
@@ -904,6 +911,13 @@ html[data-theme='light'] .code-head { background: rgba(0, 0, 0, 0.03); }
 .expand-btn::before { content: '⤢'; font-size: 14px; line-height: 1; }
 .copy-btn.copied { color: var(--accent); opacity: 1; }
 .copy-btn.copied::before { content: '✓'; }
+.run-code-btn {
+  flex-shrink: 0; min-height: 28px; padding: 0 var(--space-2);
+  border: 1px solid var(--border-subtle); border-radius: var(--radius-sm);
+  background: var(--surface-raised); color: var(--text-primary);
+  font-size: var(--text-xs); font-weight: 600;
+}
+.run-code-btn:hover, .run-code-btn:focus-visible { border-color: var(--accent); }
 
 /* Com papel de parede a caixa entra no veu — MAIS OPACA que os paineis (0.93 vs --cp-panel-alpha):
    codigo precisa de contraste mais que de transparencia (medido na comparacao de temas ao vivo).

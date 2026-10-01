@@ -57,6 +57,58 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   processo e depois lê a saída sem prazo; o `git.exe` de `Git\cmd` é um lançador cujo filho segura
   o pipe, e a thread fica presa até o git real terminar. `git_ops._run` usa `Popen`, mata os
   filhos pelo `psutil` e drena com prazo.
+- **Terminal de atalho no psmux: opções em chamadas separadas, comando num `.cmd`, `%` dobrado.**
+  `new-session … ; set-option …` numa chamada só derruba a sessão; texto livre nunca vai no argv
+  do psmux (`\n` e `;` quebram), então o comando mora em `<id>-cmd.cmd` e o "Rodar de novo" o
+  relê de lá (`%%` desfeito). Opção de valor vazio nem é gravada. O código de saída vem do
+  `<id>.exit`, nunca do `pane_dead_status`. Arquivo sem terminal dono é varrido. Medições completas,
+  ver [Terminais de atalho no psmux](#terminais-de-atalho-no-psmux).
+- **App nativo: botão de janela dentro de área `Drag` leva `.occlude()`, e a área `Drag` suprime a
+  seleção de texto no apertar.** O `WM_NCHITTEST` do GPUI devolve a PRIMEIRA área de controle sob o
+  ponteiro na ordem de pintura (`gpui-pre/src/window.rs`, `on_hit_test_window_control`); a barra pinta
+  antes dos filhos, então sem tapar o Min/Max/Close vira `HTCAPTION` e o clique move a janela. Em
+  `HTCAPTION` o `DefWindowProc` entra no laço modal de mover, que engole o `WM_NCLBUTTONUP`: o GPUI
+  recebe o apertar e nunca o soltar, e a seleção de texto da janela (`gpui-base/src/text_selection.rs`,
+  que segue o ponteiro sem olhar o botão) fica presa até o próximo clique. O botão não pode dar
+  `stop_propagation`: apertar consumido pelo GPUI pula o `nc_button_pressed` e o sistema nunca fecha,
+  minimiza nem maximiza. `start_window_move` é vazio no Windows; quem arrasta é o `HTCAPTION`.
+
+## Terminais de atalho no psmux
+
+(29/09/2026, psmux 3.3.8, DELPHI-02.) Medido: opção de usuário (`@cp_*`) grava e volta no `-F`;
+`pane_dead_status` vem `0` mesmo para um comando que saiu com 3, por isso o código de saída é
+gravado pelo `.cmd` externo num `.exit`; `new-session … ; set-option …` na mesma chamada derruba
+a sessão, então as opções vão em chamadas separadas (uma por opção); `capture-pane`, `cursor_y` e
+`send-keys -l` + Enter funcionam com `Read-Host` (`Porta [3000]:` lido de volta); `Start-Sleep` e
+`Read-Host` dão o mesmo delta de CPU (0 em 2 s), então a pergunta é tela + CPU parados e um prompt
+impresso seguido de `sleep` vira pergunta falsa; um filho gráfico do pane (notepad) fica na mesma
+sessão do Windows do backend, o que deixa o backend trazer a janela para a frente.
+
+Como o backend lança: o comando do usuário é gravado em `<id>-cmd.cmd` (codepage OEM, CRLF) e roda
+num `cmd /c` filho de `<id>.cmd`, que grava `%ERRORLEVEL%` em `<id>.exit` e segura o pane com
+`pause` em laço; o psmux recebe `cmd /d /c "<id>.cmd"`. O comando não vai para a opção `@cp_shortcut_cmd`
+no Windows (o argv do psmux quebra em `\n` e `;`, e a contrabarra some), e dono vazio não grava
+`@cp_shortcut_owner`: opção ausente volta vazia no `-F`.
+
+Como arquivo de lote, `%` muda de sentido (`%20` numa URL, `%1`, `for %i`). O backend dobra todo `%`
+que não forma `%NOME%` de variável existente (ambiente ou dinâmica: `CD`, `DATE`, `TIME`, `RANDOM`,
+`ERRORLEVEL`); `%VAR:~0,3%` e `%VAR:a=b%` ficam literais. O "Rodar de novo" desfaz a dobra.
+Os `.cmd`/`.exit` podem carregar credencial: são apagados ao fechar o terminal, se o start falha e
+por varredura (`list_all`) dos que não têm terminal, com carência de 60 s para um start em andamento.
+
+**Medido nesta data** (29/09/2026 via `app.shortcut_terminals` em clone limpo de main at 3964985b):
+o lançamento `cmd /d /c "<outer.cmd>"` como um argv só via `subprocess` funciona; o `.exit` recebe
+o código real (exit 3 → `exit_code: 3`, `alive: False`); o `pause` segura o pane após saída; o
+"Rodar de novo" reutiliza a mesma linha de comando (`exit 3` de novo); a segunda `start_hangar` com
+a mesma chave reutiliza a cópia viva (`reused: True`); a regra de `%` funciona (echo URL=a%20b
+USER=%USERNAME% imprime `URL=a%20b USER=administrator`, literal `%20`, env var expandida);
+detecção de pergunta com `Read-Host 'Porta [3000]'` → `{"text": "Porta", "default": "3000"}`;
+entrega de resposta via `terminal_prompt.answer` funciona; limpeza ao fechar é OK (sem orfãos).
+
+**Ainda não medido no psmux:** `set-option` com `;` no valor e `logical_line` numa prompt envolvida
+em múltiplas linhas. A sonda é `scripts/probe-shortcut-psmux.ps1` (não rode `taskkill` com PID
+até 4: sessão que não sobe deixa o PID em 0). Um PowerShell 5.1 estraga aspas embutidas numa
+string; a sonda passa os argumentos separados.
 
 ## Tarefa agendada rodava o backend abaixo do normal
 

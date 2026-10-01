@@ -17,9 +17,9 @@
   // Paths que falharam ao carregar -> some o anexo.
   let failed = $state<Set<string>>(new Set());
 
-  function url(r: FileRef): string {
+  function url(r: FileRef, download = false): string {
     // url absoluta (midia remota) usa direto; senao monta a do backend pelo path local.
-    return r.url ?? fileUrl(sessionName, r.path);
+    return r.url ?? fileUrl(sessionName, r.path, download);
   }
   function fail(r: FileRef) {
     failed = new Set(failed).add(r.path);
@@ -70,13 +70,23 @@
         </button>
       {:else if r.kind === 'audio'}
         <audio class="att-audio" src={url(r)} controls onerror={() => fail(r)}></audio>
-      {:else}
-        <!-- html / pdf -> chip que abre o modal -->
-        <button class="att-chip" onclick={() => (open = r)}>
-          <span class="att-ico" aria-hidden="true">{icon(r.kind)}</span>
+      {:else if r.kind === 'document'}
+        <a class="att-chip" href={url(r, true)} download={r.name} aria-label={m.anexos_baixar({ nome: r.name })}>
+          <span class="att-ico" aria-hidden="true">📄</span>
           <span class="att-name">{r.name}</span>
-          <span class="att-open" aria-hidden="true">{m.paleta_abrir()} ›</span>
-        </button>
+          <span class="att-open" aria-hidden="true">↓ {m.visor_baixar()}</span>
+        </a>
+      {:else}
+        <div class="att-document">
+          <button class="att-chip" onclick={() => (open = r)}>
+            <span class="att-ico" aria-hidden="true">{icon(r.kind)}</span>
+            <span class="att-name">{r.name}</span>
+            <span class="att-open" aria-hidden="true">{m.paleta_abrir()} ›</span>
+          </button>
+          {#if r.kind === 'pdf'}
+            <a class="att-download" href={url(r, true)} download={r.name} aria-label={m.anexos_baixar({ nome: r.name })}>↓ {m.visor_baixar()}</a>
+          {/if}
+        </div>
       {/if}
     {/each}
   </div>
@@ -93,6 +103,9 @@
       <div class="doc-modal">
         <div class="doc-bar">
           <span class="doc-name">{cur.name}</span>
+          {#if cur.kind === 'pdf'}
+            <a class="doc-btn" href={url(cur, true)} download={cur.name} aria-label={m.anexos_baixar({ nome: cur.name })}>↓ {m.visor_baixar()}</a>
+          {/if}
           <a class="doc-btn" href={url(cur)} target="_blank" rel="noopener noreferrer" aria-label={m.anexos_abrir_nova_aba({ nome: cur.name })}>↗ {m.anexos_nova_aba()}</a>
           <button class="doc-btn" type="button" onclick={() => (open = null)} aria-label={m.anexos_fechar_visualizacao()}>✕</button>
         </div>
@@ -124,8 +137,10 @@
   .att-chip {
     display: inline-flex; align-items: center; gap: var(--space-2); max-width: 100%; min-width: 0; height: 38px;
     padding: 0 var(--space-3); background: var(--surface-raised); border: 1px solid var(--border-subtle);
-    border-radius: var(--radius-md); color: var(--text-primary); font-size: var(--text-sm);
+    border-radius: var(--radius-md); color: var(--text-primary); font-size: var(--text-sm); text-decoration: none;
   }
+  .att-document { display: inline-flex; align-items: center; gap: var(--space-1); max-width: 100%; min-width: 0; }
+  .att-download { display: inline-flex; align-items: center; flex-shrink: 0; min-height: 38px; padding: 0 var(--space-2); color: var(--accent); font-size: var(--text-sm); }
   .att-chip:active { background: var(--bg-hover); }
   .att-ico { flex-shrink: 0; }
   .att-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); }

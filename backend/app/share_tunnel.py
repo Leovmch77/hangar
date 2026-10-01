@@ -11,9 +11,15 @@ import re
 import sys
 
 from app import tunnel
+from app.config import settings
 
 GUEST_PORT = 8766
 FUNNEL_PORT = 8443
+
+
+def port_clash() -> bool:
+    # App na mesma porta do convite: o porteiro trancaria o dono e o Funnel exporia a API inteira.
+    return settings.port == GUEST_PORT
 
 _FIX_OPERATOR = "sudo tailscale set --operator=$USER"
 _FIX_FUNNEL = ("libere o Funnel na política da tailnet (nodeAttrs \"funnel\"): "

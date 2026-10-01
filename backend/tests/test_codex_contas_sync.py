@@ -136,13 +136,14 @@ async def test_plugin_preparation_cache_is_short_and_invalidated(isolated, fake_
 
 
 @pytest.mark.parametrize("issue,trust", [(True, False), (False, True)])
-async def test_plugin_preparation_does_not_cache_pending_results(isolated, fake_writer, monkeypatch, issue, trust):
+async def test_plugin_failures_are_cached_but_hook_trust_is_rechecked(isolated, fake_writer, monkeypatch, issue, trust):
     from app import codex_contas_plugins as plugins
 
     _, source, account = isolated
     _config(source / "config.toml", plugins={"sample@market": {"enabled": True}})
     monkeypatch.setattr(sync, "_cli_version", lambda: "test")
     calls = []
+    trust_checks = []
 
     async def synchronize(*args):
         calls.append(args)
@@ -150,9 +151,75 @@ async def test_plugin_preparation_does_not_cache_pending_results(isolated, fake_
                 "issues": [{"code": "codex_account_plugin_inventory_failed"}] if issue else []}
 
     monkeypatch.setattr(plugins, "sync_plugins", synchronize)
-    await sync.prepare_account(account)
-    await sync.prepare_account(account)
-    assert len(calls) == 2
+    async def check_trust(account):
+        trust_checks.append(account)
+        return trust
+    monkeypatch.setattr(plugins, 'check_trust', check_trust)
+    first = await sync.prepare_account(account)
+    second = await sync.prepare_account(account)
+    assert first == second
+    assert len(calls) == 1
+    assert len(trust_checks) == int(trust)
+    assert second['status'] == ('partial' if issue else 'ready')
+
+
+async def test_unchanged_preparation_checks_inventory_before_reading_resources(isolated, fake_writer, monkeypatch):
+    _, source, account = isolated
+    _config(source / 'config.toml', model='sample')
+    (source / 'skills/sample').mkdir(parents=True)
+    (source / 'skills/sample/SKILL.md').write_text('sample')
+    monkeypatch.setattr(sync, '_cli_version', lambda: 'test')
+    first = await sync.prepare_account(account)
+    original = sync._source_resources
+    scans = []
+    def scan(root, *, read_contents=True):
+        scans.append(read_contents)
+        return original(root, read_contents=read_contents)
+    def transform(*args):
+        raise AssertionError('recursos inalterados não devem ser transformados')
+    monkeypatch.setattr(sync, '_source_resources', scan)
+    monkeypatch.setattr(sync, '_transform_resources', transform)
+    assert await sync.prepare_account(account) == first
+    assert scans == [False]
+
+
+async def test_cached_preparation_observes_hook_approval(isolated, fake_writer, monkeypatch):
+    from app import codex_contas_plugins as plugins
+    _, source, account = isolated
+    _config(source / 'config.toml', plugins={'sample@market': {'enabled': True}})
+    monkeypatch.setattr(sync, '_cli_version', lambda: 'test')
+    calls = []
+    async def synchronize(*args):
+        calls.append(args)
+        return {'manifest': {'plugins': {}}, 'issues': [], 'trust_pending': True}
+    async def check_trust(account):
+        return False
+    monkeypatch.setattr(plugins, 'sync_plugins', synchronize)
+    monkeypatch.setattr(plugins, 'check_trust', check_trust)
+    assert (await sync.prepare_account(account))['trust_pending'] is True
+    assert (await sync.prepare_account(account))['trust_pending'] is False
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize('change', ['new_file', 'removed_file', 'profile', 'mode'])
+def test_inventory_detects_resource_and_profile_changes(isolated, change):
+    _, source, _ = isolated
+    (source / 'hooks').mkdir()
+    hook = source / 'hooks/sample.sh'
+    hook.write_text('sample')
+    initial, issues = sync._source_inventory(source)
+    assert not issues
+    if change == 'new_file':
+        (source / 'hooks/new.sh').write_text('new')
+    elif change == 'removed_file':
+        hook.unlink()
+    elif change == 'profile':
+        _config(source / 'sample.config.toml', model='sample')
+    elif os.name == 'nt':
+        pytest.skip('modo de execução POSIX')
+    else:
+        hook.chmod(hook.stat().st_mode ^ 0o100)
+    assert sync._source_inventory(source)[0] != initial
 
 
 async def test_plugin_cache_preserves_informational_mcp_exclusions(isolated, fake_writer, monkeypatch):

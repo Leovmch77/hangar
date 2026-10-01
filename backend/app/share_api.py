@@ -85,6 +85,11 @@ def _create(name: str, local: bool = False) -> dict:
     life = session_life(name)
     if life is None:
         raise HTTPException(404, detail=erro("erro_sessao_inexistente", "sessão não encontrada"))
+    if share_tunnel.port_clash():
+        raise HTTPException(409, detail=erro(
+            "erro_compartilhar_porta_do_convite",
+            f"o app roda na porta do convite ({share_tunnel.GUEST_PORT}): troque CP_PORT no backend/.env e reinicie",
+            port=share_tunnel.GUEST_PORT))
     if local:
         # Mesma rede, sem Tailscale: só com a porta do convite de fato escutando no IP da rede
         # (bind 0.0.0.0, porta livre no boot). Senão o link sairia sem ninguém atendendo.

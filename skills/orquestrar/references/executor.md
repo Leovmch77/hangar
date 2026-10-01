@@ -19,9 +19,10 @@ is yours to read.
    Plan, journal and lessons belong to the arbiter; something missing → ask him.
 2. `git branch --show-current`, `git status --short`, `git log --oneline -5`. HEAD differs from
    the kick-off's `Expected HEAD` → stop and report.
-3. Read model and effort back (statusline or the switch command's return).
+3. Read model and effort back from your own session (statusline, turn record); a kick-off
+   copy is `not read back`.
 4. Record: `orq notify "[aviso] T<N> wake-up: branch <b>, HEAD <h>, model <m>/<effort>,
-   untouchables read"`. It goes to the journal and wakes nobody.
+   untouchables read"`.
 
 Done when the wake-up line is recorded and HEAD matches.
 

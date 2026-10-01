@@ -15,8 +15,7 @@ session: read them, never reply to them with `hangar-send`.
    `<durable dir>/timeline-<date>-<gid>.jsonl`.
 2. Bookkeeping since the last wake, from the journal: each approving report's NOTED lines →
    contract, WASTE lines → `licoes.md` as guidelines, and into the `## Task N` section of every
-   Task not yet released that needs them; each `commit` → the contract's Progress row with its
-   hash.
+   Task not yet released that needs them. Closes are the orchestrator's record, not yours.
 3. Act on the row below; journal the decision with `orq log --task <N> "…"` before acting.
 4. End with `orq advance`. Its output lists what the orchestrator did next.
 
@@ -28,10 +27,10 @@ you, or the user holds a decision.
 | Wakes you | Do |
 |---|---|
 | `[painel: orquestrador <gid>]` a step with no rule (`regra sem saída`) | read the named Task's journal; decide as `~/.claude/skills/orquestrar/references/arbitro.md`, step 4 table, the closest row; unforeseen → ask the user, decision ready |
-| a session's message the triage kept (Jev asked, the regex did not drop it, or triage is in `shadow`) | `~/.claude/skills/orquestrar/references/arbitro.md`, step 4 table. The timeline shows it `would_drop` and it needed you → `orq log "triage: would_drop needed the arbiter — <why>"` |
+| a session's message the triage kept (Jev asked, the regex did not drop it, or triage is in `shadow`) | `~/.claude/skills/orquestrar/references/arbitro.md`, step 4 table; a `[decisao]` about a Task → answer its executor and its reviewer both. The timeline shows it `would_drop` and it needed you → `orq log "triage: would_drop needed the arbiter — <why>"` |
 | merge conflict in a file the plan did not declare additive (`T<a> conflitou com T<b> em <file>`) | `~/.claude/skills/orquestrar/references/paralelo-worktree.md`, "Integration": the losing Task gets a correction round on the merged base, same executor. Its worktree `<repo>-<gid>-t<N>` and branch `<branch>-<gid>-t<N>` already exist: the round's worktree is `<repo>-<gid>-t<N>-r2` on branch `<branch>-<gid>-t<N>-r2`, from the merged tip. Then `orq event task_inicio` again for that Task and the replacement kick-off (below), with the old branch's commit as the approved diff. The round's `orq commit` reopens the integration by itself: never merge nor record `integrada` by hand |
 | DEVOLVIDO | `~/.claude/skills/orquestrar/references/arbitro.md`, step 4, first row; wake the user only by `~/.claude/skills/orquestrar/references/arbitro-vigia.md`, "Deciding vs waking the user" |
-| a Task past 2× its estimate (time or code rounds) | stop and ask the user: continue, replan (`~/.claude/skills/orquestrar/references/replanejar.md`) or cut. The rest of the run goes on |
+| a Task past 2× its estimate (time or code rounds) | reassess; decide routine matters or ask in text with a recommendation and a 10 min deadline as arbitro-vigia.md defines. Do not stop for line counts; keep independent Tasks moving |
 | red base: the plan's checks red on the branch with no Task to return it to | the user decides: fix first (a fix Task through the gate) or record a known failure the review ignores |
 | `advance_falhou` (a `failed` timeline line: session not born, `hangar-send` refused, git failed) | read the output in the event. Session not born → open it by `~/.claude/skills/orquestrar/references/arbitro-lancamento.md`, "Opening a session", then the replacement kick-off. Git or repo state → resolve it in the tree only if it is not code; code → back to the Task's executor. Outside your reach → the user. Never re-run the failed step blindly |
 | proof batch taken | `~/.claude/skills/orquestrar/references/prova-lote.md` |
@@ -61,6 +60,11 @@ there.
 write each into the orchestration plan, stamp it again (`orq plan-check … --stamp`), then
 `orq advance` releases them.
 
+Before removing a worktree, confirm its completed sessions have been closed;
+a live process may keep cwd/files in use. Do not disarm the watchdog when entering
+the final phases: it closes each completed Task's executor and reviewer after idleness,
+with group, identity and subagent protection.
+
 Before `execucao_fim`, each Task worktree of the run (`git worktree list`, `<repo>-<gid>-t*`):
 trail check first — `grep -rl "<worktree path>" ~/.local/bin <agent config dirs> <service unit
 dir>` — then `git worktree remove <path>`. A hit in the trail → the user, not the remove. The
@@ -68,20 +72,23 @@ dir>` — then `git worktree remove <path>`. A hit in the trail → the user, no
 line.
 
 Done when the branch is in the user's hands, the retrospective delivered, no worktree of the run
-left, `orq event execucao_fim --resultado <result>` logged and the watchdog disarmed.
+left, `orq event execucao_fim --resultado <result>` logged, completed sessions' closure
+checked and only then the watchdog disarmed.
 
 ## Succession
 
 `~/.claude/skills/orquestrar/references/arbitro-encerramento.md`, "Arbiter succession", with one
 change: the successor's kick-off says to invoke the `orquestrar-auto` skill with the arbiter
-role. After `orq event sessao_trocada`, the orchestrator wakes the successor by itself; the
-watchdog stays untouched.
+role. After `orq event sessao_trocada`, every notice goes to the successor; its kick-off comes
+from you; the watchdog stays untouched and proves its channel to the successor with `ARMED`.
 
 ## Locks
 
 - Never do by hand what the orchestrator does (`SKILL.md`, "Locks"). A Task you want held →
   `orq log` the reason and ask the user; never race `orq advance`.
-- Never stop the watchdog to ask the user: ask in text with a default, the run goes on.
+- Operational questions go in text, without blocking AskUserQuestion/request_user_input.
+  Give a recommendation and a 10 min deadline; without a reply, apply the authorized recommendation
+  within scope. Schedule a wake as arbitro-vigia.md defines; the watchdog/independent Tasks continue.
 - The four files, the contract commands and the locks of
   `~/.claude/skills/orquestrar/references/arbitro.md` bind here too.
 - Talk little with the user: one line when a wave closes; a decision only they can make,

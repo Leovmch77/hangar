@@ -16,10 +16,12 @@ import Harness from './CreateSessionSheet.harness.svelte';
 import * as api from '@hangar/core';
 import * as contaEstado from '../lib/contaEstado';
 import { quotaFeed } from '../lib/quotaFeed.svelte';
+import { papelDo } from '../lib/papel.svelte';
 
 // Assinatura larga: o teste do "Sem terminal" lê `mock.calls[...][9]`, e um `vi.fn(async () => {})`
 // tipa as chamadas como tupla vazia — o svelte-check recusava e o CI ficou vermelho (dist parado).
 const onCreate = vi.hoisted(() => vi.fn(async (..._args: unknown[]) => {}));
+vi.mock('../lib/papel.svelte', () => ({ papelDo: vi.fn(() => 'owner') }));
 
 vi.mock('@hangar/core', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@hangar/core')>()),
@@ -28,6 +30,7 @@ vi.mock('@hangar/core', async (importOriginal) => ({
   isTimeoutError: vi.fn(() => false),
   isAbortError: vi.fn(() => false),
   listClaudeConfigs: vi.fn(),
+  getClaudeAccountSuggestion: vi.fn(),
   // Devolve a lista certa por provider: pro Claude os aliases (como o backend real), pro Pi o
   // modelo fake — a memória do Pi jamais pode casar com a lista do Claude.
   modelOptions: vi.fn(async (provider: string) =>
@@ -58,6 +61,9 @@ vi.mock('@hangar/core', async (importOriginal) => ({
   getBastao: vi.fn(async () => '# dossiê'),
   passarBastao: vi.fn(),
   patchConfig: vi.fn(async () => ({ campos: {} })),
+  getConfig: vi.fn(async () => ({ campos: {}, somente_leitura: {} })),
+  getConfigForServer: vi.fn(async () => ({ campos: { headless_default: { valor: false } }, somente_leitura: {} })),
+  patchConfigForServer: vi.fn(async () => ({ campos: {} })),
 }));
 vi.mock('./FolderScanner.svelte', () => ({
   default: createRawSnippet(() => ({ render: () => '<div />' })),
@@ -79,7 +85,7 @@ function montar() {
   document.body.appendChild(el);
   const comp = mount(Harness, {
     target: el,
-    props: { onCreate, onOpenSession: vi.fn() },
+    props: { onCreate, onOpenSession: vi.fn(), servidores: [{ id: "test", label: "test", baseUrl: "http://test", token: "test" }] },
   });
   return { el, comp };
 }
@@ -160,19 +166,91 @@ async function confirmarApagar() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.mocked(papelDo).mockReturnValue('owner');
   quotaFeed.resetParaTeste();
   localStorage.clear();
   document.body.innerHTML = '';
   // Default: fetch de contas PENDENTE (nunca resolve) — o cenário A.
   vi.mocked(api.listClaudeConfigs).mockImplementation(() => new Promise(() => {}));
+  vi.mocked(api.getClaudeAccountSuggestion).mockRejectedValue(new Error('sem-conta-legivel'));
+});
+
+describe('CreateSessionSheet — conta sugerida pela cota', () => {
+  const accounts = [
+    { path: '/home/x/.claude', label: 'atual', active: true },
+    { path: '/home/x/.claude-nova', label: '.claude-nova', active: false },
+  ];
+
+  it('mostra a sugestão disponível e usa seu catálogo e conta na criação', async () => {
+    vi.mocked(api.listClaudeConfigs).mockResolvedValue(accounts);
+    vi.mocked(api.getClaudeAccountSuggestion).mockResolvedValue({ path: accounts[1].path });
+    const { comp } = montar();
+    await flush();
+    await escolherPasta();
+    expect(document.querySelector('#cfg-pick')!.textContent).toContain('.claude-nova');
+    expect(api.modelOptions).toHaveBeenLastCalledWith('claude', '', accounts[1].path, undefined);
+    (document.querySelector('.primary-btn') as HTMLElement).click();
+    await flush();
+    expect(onCreate.mock.calls[0]?.[2]).toBe(accounts[1].path);
+    unmount(comp);
+  });
+
+  it.each(['indisponível', 'desconhecida'])('mantém a conta ativa com sugestão %s', async (scenario) => {
+    vi.mocked(api.listClaudeConfigs).mockResolvedValue(accounts);
+    if (scenario === 'desconhecida') vi.mocked(api.getClaudeAccountSuggestion).mockResolvedValue({ path: '/outra-conta' });
+    const { comp } = montar();
+    await flush();
+    await escolherPasta();
+    expect(document.querySelector('#cfg-pick')!.textContent).toContain('atual');
+    (document.querySelector('.primary-btn') as HTMLElement).click();
+    await flush();
+    expect(onCreate.mock.calls[0]?.[2]).toBe(accounts[0].path);
+    unmount(comp);
+  });
+
+  it('descarta sugestão tardia depois de escolher outra conta manualmente', async () => {
+    vi.mocked(api.listClaudeConfigs).mockResolvedValue(accounts);
+    let finish!: (value: { path: string }) => void;
+    vi.mocked(api.getClaudeAccountSuggestion).mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+    const { comp } = montar();
+    await flush();
+    await escolherPasta();
+    await escolherNoCombo('#cfg-pick', '.claude-nova');
+    finish({ path: accounts[0].path });
+    await flush();
+    expect(document.querySelector('#cfg-pick')!.textContent).toContain('.claude-nova');
+    unmount(comp);
+  });
+
+  it.each([
+    ['#model-pick', 'opus', 5],
+    ['#effort-pick', 'high', 6],
+  ] as const)('preserva a escolha manual em %s quando a sugestão chega depois', async (selector, value, argument) => {
+    vi.mocked(api.listClaudeConfigs).mockResolvedValue(accounts);
+    let finish!: (value: { path: string }) => void;
+    vi.mocked(api.getClaudeAccountSuggestion).mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+    const { comp } = montar();
+    await flush();
+    await escolherPasta();
+    await escolherNoCombo(selector, value);
+    finish({ path: accounts[1].path });
+    await flush();
+    expect(document.querySelector('#cfg-pick')!.textContent).toContain('atual');
+    expect(document.querySelector(selector)!.textContent).toContain(value);
+    (document.querySelector('.primary-btn') as HTMLElement).click();
+    await flush();
+    expect(onCreate.mock.calls[0]?.[2]).toBe(accounts[0].path);
+    expect(onCreate.mock.calls[0]?.[argument]).toBe(value);
+    unmount(comp);
+  });
 });
 
 describe('CreateSessionSheet — reabertura com a lista de contas fora do ar', () => {
   it('A: fetch pendente — a escolha da abertura anterior não sobrevive ao reabrir', async () => {
     // Memória simulada de uma escolha feita (o create a gravaria): a chave é do Pi, e a lista do
     // Claude não pode casá-la — vira Padrão, nunca flag.
-    localStorage.setItem('cp_last_model::pi:-', 'openai-codex/gpt-5.6-luna');
-    localStorage.setItem('cp_last_model::pi:-:effort', 'high');
+    localStorage.setItem('cp_last_model:test:pi:-', 'openai-codex/gpt-5.6-luna');
+    localStorage.setItem('cp_last_model:test:pi:-:effort', 'high');
 
     const { comp } = montar();
     await flush();
@@ -443,8 +521,8 @@ describe('CreateSessionSheet — B4/B6 da revisão final da branch', () => {
     await escolherNoCombo('#effort-pick', 'high');
     (document.querySelector('.primary-btn') as HTMLElement).click();
     await flush();
-    expect(localStorage.getItem('cp_last_model::claude:-')).toBe('sonnet');
-    expect(localStorage.getItem('cp_last_model::claude:-:effort')).toBe('high');
+    expect(localStorage.getItem('cp_last_model:test:claude:-')).toBe('sonnet');
+    expect(localStorage.getItem('cp_last_model:test:claude:-:effort')).toBe('high');
 
     // 2ª abertura: a memória restaura sonnet/high; o usuário escolhe Padrão nos dois e cria.
     await reabrirFechado();
@@ -455,8 +533,8 @@ describe('CreateSessionSheet — B4/B6 da revisão final da branch', () => {
     await flush();
 
     // B6: o create APAGA as chaves — sem o removeItem, a 3ª abertura restauraria sonnet/high.
-    expect(localStorage.getItem('cp_last_model::claude:-')).toBeNull();
-    expect(localStorage.getItem('cp_last_model::claude:-:effort')).toBeNull();
+    expect(localStorage.getItem('cp_last_model:test:claude:-')).toBeNull();
+    expect(localStorage.getItem('cp_last_model:test:claude:-:effort')).toBeNull();
 
     // 3ª abertura: abre em Padrão, não na escolha da 1ª.
     await reabrirFechado();
@@ -1000,7 +1078,7 @@ describe('CreateSessionSheet — modelo e esforço do Codex', () => {
     await flush();
     // (nome, cwd, configDir, provider, engine, model, effort, permissao)
     expect(api.createSessionForServer).toHaveBeenCalledWith(expect.objectContaining({ id: 'B' }), {
-      name: 'x', cwd: '/tmp/x', provider: 'codex', codex_account: 'default', model: 'gpt-5.6-sol', effort: 'xhigh',
+      name: 'x', cwd: '/tmp/x', provider: 'codex', codex_account: 'default', headless: false, model: 'gpt-5.6-sol', effort: 'xhigh',
     });
     expect(window.location.hash).toBe('#/chat/B/x');
     expect(onCreate).not.toHaveBeenCalled();
@@ -1012,7 +1090,7 @@ describe('CreateSessionSheet — modelo e esforço do Codex', () => {
     const headless = [...document.querySelectorAll<HTMLElement>('.modo')]
       .find((b) => b.textContent?.includes(m.criar_modo_exec_headless()));
     headless!.click();
-    await tick();
+    await flush();
     const trio = document.querySelector('.trio')!;
     expect(trio.querySelector('#perm-pick')).not.toBeNull();
     expect(trio.querySelector('.context-control')).toBeNull();
@@ -1029,7 +1107,7 @@ describe('CreateSessionSheet — modelo e esforço do Codex', () => {
     const headless = [...document.querySelectorAll<HTMLElement>('.modo')]
       .find((b) => b.textContent?.includes(m.criar_modo_exec_headless()));
     headless!.click();
-    await tick();
+    await flush();
     expect(document.querySelector('#perm-pick')!.textContent).toContain('Full Access');
     (document.querySelector('.primary-btn') as HTMLElement).click();
     await flush();
@@ -1043,12 +1121,12 @@ describe('CreateSessionSheet — modelo e esforço do Codex', () => {
     const headless = [...document.querySelectorAll<HTMLElement>('.modo')]
       .find((b) => b.textContent?.includes(m.criar_modo_exec_headless()));
     headless!.click();
-    await tick();
+    await flush();
     await escolherNoCombo('#perm-pick', 'Ask for approval');
     headless!.click();
-    await tick();
+    await flush();
     headless!.click();
-    await tick();
+    await flush();
     expect(document.querySelector('#perm-pick')!.textContent).toContain('Ask for approval');
     unmount(comp);
   });
@@ -1081,4 +1159,107 @@ describe('CreateSessionSheet — modelo e esforço do Codex', () => {
     expect(document.body.textContent).toContain(m.codex_contexto_titulo());
     unmount(comp);
   });
+});
+
+
+describe('padrão compartilhado do modo de sessão', () => {
+  it.each([
+    ['claude', undefined], ['claude', false], ['claude', true],
+    ['codex', undefined], ['codex', false], ['codex', true],
+  ] as const)('convidado %s: modo %s sem consultar ou gravar configuração', async (provider, requested) => {
+    vi.mocked(papelDo).mockReturnValue('guest');
+    vi.mocked(api.modelOptionsForServer).mockResolvedValue({ kind: 'codex', reduced: false, models: [] } as never);
+    const { comp } = montar();
+    await flush(); await escolherPasta();
+    if (provider === 'codex') {
+      [...document.querySelectorAll<HTMLButtonElement>('.provider-tile')]
+        .find((b) => b.textContent?.trim().endsWith('Codex'))!.click();
+      await flush();
+    }
+    const modes = [...document.querySelectorAll<HTMLButtonElement>('.modo')];
+    expect(modes.map((b) => b.getAttribute('aria-pressed'))).toEqual(['false', 'false']);
+    expect(document.body.textContent).toContain(m.session_mode_server_default());
+    if (requested !== undefined) { modes[requested ? 1 : 0].click(); await flush(); }
+    (document.querySelector('.primary-btn') as HTMLButtonElement).click();
+    await flush();
+    if (provider === 'claude') expect(onCreate.mock.calls.at(-1)?.[9]).toBe(requested);
+    else {
+      const body = vi.mocked(api.createSessionForServer).mock.calls.at(-1)?.[1];
+      expect(body).toBeDefined();
+      if (requested === undefined) expect(body).not.toHaveProperty('headless');
+      else expect(body?.headless).toBe(requested);
+    }
+    expect(api.getConfig).not.toHaveBeenCalled();
+    expect(api.getConfigForServer).not.toHaveBeenCalled();
+    expect(api.patchConfig).not.toHaveBeenCalled();
+    expect(api.patchConfigForServer).not.toHaveBeenCalled();
+    await unmount(comp);
+  });
+
+  it('leitura tardia não substitui a escolha humana e grava só o clique', async () => {
+    let finish!: (value: api.ConfigServidor) => void;
+    vi.mocked(api.getConfigForServer).mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    const { comp } = montar();
+    await flush(); await escolherPasta();
+    const terminal = [...document.querySelectorAll<HTMLButtonElement>('.modo')]
+      .find((b) => b.textContent?.includes(m.criar_modo_exec_tmux()))!;
+    terminal.click(); await flush();
+    expect(api.patchConfigForServer).toHaveBeenCalledWith(expect.anything(), { headless_default: false });
+    finish({ campos: { headless_default: { valor: true, definido: true, origem: 'app' } }, somente_leitura: {} });
+    await flush();
+    expect(terminal.getAttribute('aria-pressed')).toBe('true');
+    await unmount(comp);
+  });
+
+  it('expõe erro ao falhar a gravação do padrão', async () => {
+    vi.mocked(api.patchConfigForServer).mockRejectedValueOnce(new Error('offline'));
+    const { comp } = montar();
+    await flush(); await escolherPasta();
+    const headless = [...document.querySelectorAll<HTMLButtonElement>('.modo')]
+      .find((b) => b.textContent?.includes(m.criar_modo_exec_headless()))!;
+    headless.click(); await flush();
+    expect(document.body.textContent).toContain(m.session_mode_save_failed());
+    await unmount(comp);
+  });
+});
+
+it('resposta do servidor anterior não troca o modo do destino atual', async () => {
+  let finish!: (value: api.ConfigServidor) => void;
+  vi.mocked(api.getConfigForServer).mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+  const el = document.body.appendChild(document.createElement('div'));
+  const comp = mount(Harness, { target: el, props: { onCreate, onOpenSession: vi.fn(), servidores: [
+    { id: 'mode-a', label: 'mode-a', baseUrl: 'http://a', token: 'a' },
+    { id: 'mode-b', label: 'mode-b', baseUrl: 'http://b', token: 'b' },
+  ] } });
+  await flush();
+  [...document.querySelectorAll<HTMLButtonElement>('.server-chip')].find((b) => b.textContent?.includes('mode-b'))!.click();
+  await flush(); await escolherPasta();
+  finish({ campos: { headless_default: { valor: true, definido: true, origem: 'app' } }, somente_leitura: {} });
+  await flush();
+  const terminal = [...document.querySelectorAll<HTMLButtonElement>('.modo')]
+    .find((b) => b.textContent?.includes(m.criar_modo_exec_tmux()))!;
+  expect(terminal.getAttribute('aria-pressed')).toBe('true');
+  expect(api.patchConfigForServer).not.toHaveBeenCalled();
+  await unmount(comp);
+});
+
+
+it('mantém a folha aberta até a gravação do modo responder', async () => {
+  let fail!: (error: Error) => void;
+  vi.mocked(api.patchConfigForServer).mockImplementationOnce(() => new Promise((_resolve, reject) => { fail = reject; }));
+  const { comp } = montar();
+  try {
+    await flush(); await escolherPasta();
+    [...document.querySelectorAll<HTMLButtonElement>('.modo')].find((b) => b.textContent?.includes(m.criar_modo_exec_headless()))!.click();
+    await flush();
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    await flush();
+    expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+    fail(new Error('offline'));
+    await flush();
+    expect(document.body.textContent).toContain(m.session_mode_save_failed());
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    await flush();
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+  } finally { await unmount(comp); }
 });

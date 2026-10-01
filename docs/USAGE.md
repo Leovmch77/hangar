@@ -200,6 +200,10 @@ válido (Let's Encrypt) → escaneie o QR / preencha o token → **Adicionar à 
 ### Sessões
 - **Criar:** botão **＋ / Nova sessão** → escolha a pasta (cwd), o agente e como ele roda. Com
   terminal, o backend cria um tmux novo; sem terminal, cria um processo gerenciado pelo Hangar.
+- **Modo padrão:** a última escolha do dono entre com e sem terminal fica no servidor. Novas
+  aberturas sem modo explícito seguem essa preferência; `--terminal` e `--headless` prevalecem.
+  Para Claude/Codex, sem terminal é o padrão inicial recomendado para usar só pelo Hangar.
+  Convidados escolhem apenas para sua sessão, sem alterar a preferência do dono.
 - **Sem terminal (Claude ou Codex):** na Nova sessão, em **Como rodar**, escolha **Sem terminal
   (processo do Hangar)**. Pelo terminal, use `hangar-send --new <nome> [cwd] --headless`; acrescente
   `--provider codex` para Codex. Combina com `--model`, `--effort` e `--permissao`. O agente roda
@@ -655,6 +659,11 @@ comando configurado, a leitura usa o motor local automaticamente.
 
 ## 5. Sessões-irmãs, pareamento e orquestração (hangar-send)
 
+**Histórico de orquestrações:** no Rust, abra o relógio da barra superior; no PWA, abra
+**Orquestração**. As execuções continuam disponíveis depois que a sessão sai da lista, com nome
+do plano, projeto, duração e tarefas. O detalhe reaproveita o painel da execução e indica quando
+o consumo é parcial. O resumo de uso da tela inicial é uma visão separada, por período e modelo.
+
 Sessões Claude da mesma máquina conversam entre si pelo backend via `scripts/hangar-send`:
 
 ```bash
@@ -664,6 +673,7 @@ hangar-send --pair api-fix "tarefa"   # pareia ESTA sessão com outra num grupo 
 hangar-send --group "terminei"        # aviso de marco pro grupo todo (unidirecional)
 hangar-send --new front ~/repo/front  # cria sessão nova gerenciada pelo app (visível na UI)
 hangar-send --new front ~/repo/front --headless  # Claude sem terminal
+hangar-send --new front ~/repo/front --terminal  # força terminal, sem alterar o padrão
 hangar-send --new api ~/repo/api --provider codex --headless  # Codex sem terminal
 ```
 

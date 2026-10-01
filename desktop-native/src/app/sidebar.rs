@@ -1329,9 +1329,12 @@ impl Hangar {
             place(&local, None, &mut rows, cx);
         }
         let host = self.server_label(cx);
-        let (on, enabled) = (self.new_chat_screen(), self.api.is_some());
+        let (on, enabled) = (self.new_chat_screen() && self.reopen.is_none(), self.api.is_some());
         div().w_full().min_h_0().flex().flex_col().items_center().when(!fit_content, |el| el.h_full())
-            .child(div().h(px(44.)).flex_shrink_0().flex().items_center().justify_center().child(chrome::hangar_mark(20., theme::accent())))
+            // O ponto do chip "N no Hangar" fica no canto da marca.
+            .child(div().relative().h(px(44.)).w_full().flex_shrink_0().flex().items_center().justify_center()
+                .child(chrome::hangar_mark(20., theme::accent()))
+                .children(self.render_hangar_chip(hangar_live::Chip::Dot, cx).map(|dot| div().absolute().top(px(6.)).right(px(8.)).child(dot))))
             // A tela sem sessão da barra aberta, só com o ícone.
             .child(div().id("rail-new-chat").flex_shrink_0().size(px(36.)).mb(px(4.)).flex().items_center().justify_center().rounded(px(8.))
                 .role(Role::Button).aria_selected(on).aria_label(tr("new_chat_title"))

@@ -102,6 +102,21 @@ def test_304_nao_fura_a_trava_do_transcript(cliente, sessao, monkeypatch):
     assert r.status_code == 403
 
 
+@pytest.mark.parametrize('filename', ['document.docx', 'document.html'])
+def test_upload_download_preserves_original_file_without_active_content(cliente, sessao, monkeypatch, filename):
+    path = sessao / filename
+    content = b'<script>parent.alert(1)</script>original-bytes'
+    path.write_bytes(content)
+    monkeypatch.setattr(api, 'resolve_upload', lambda *args: path)
+    response = cliente.get(f'/api/sessions/s1/uploads/{filename}',
+                           params={'download': 'true', 'token': 'secret'})
+    assert response.status_code == 200
+    assert response.content == content
+    assert response.headers['content-disposition'] == f'attachment; filename="{filename}"'
+    assert response.headers['content-security-policy'] == "sandbox; script-src 'none'"
+    assert response.headers['x-content-type-options'] == 'nosniff'
+
+
 @pytest.mark.parametrize("upload", [False, True])
 def test_html_runs_only_inside_an_isolated_document(cliente, sessao, monkeypatch, upload):
     _citado(monkeypatch)

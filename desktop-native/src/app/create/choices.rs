@@ -64,6 +64,18 @@ impl QuotaLine {
     }
 }
 
+/// Cota lida com a janela geral (sessão `5h` ou semana `7d`) cheia e ainda não renovada: `Some` com a volta, a da última
+/// janela cheia (com duas, só volta quando as duas voltarem). Janela por modelo, leitura que não é `lida` ou janela cuja
+/// volta já passou não bloqueiam: a leitura é de antes da renovação.
+fn exhausted(quota: &QuotaLine, now: f64) -> Option<Option<f64>> {
+    if quota.state != "lida" { return None; }
+    let full: Vec<&QuotaWindow> = quota.windows()
+        .filter(|(w, pct)| matches!(w.label.as_str(), "5h" | "7d") && *pct >= 100. && w.reset_ts.is_none_or(|r| r > now))
+        .map(|(w, _)| w).collect();
+    if full.is_empty() { return None; }
+    Some(full.iter().filter_map(|w| w.reset_ts).reduce(f64::max))
+}
+
 /// "2h10", "35m", "3d4h": quanto falta para a janela voltar (`faltaPara` do web).
 fn until(reset: Option<f64>, now: f64) -> String {
     let Some(s) = reset.filter(|r| r.is_finite()).map(|r| r - now).filter(|s| *s > 0.) else { return String::new() };
@@ -84,11 +96,22 @@ fn configs_of(result: Result<Value, Failure>) -> Result<Vec<ConfigDir>, String> 
     result.map_err(|e| Hangar::fetch_failure(&e)).and_then(|v| serde_json::from_value(v).map_err(|_| tr("invalid_response")))
 }
 
+async fn owner_config(api: &Api) -> (bool, Result<Option<Value>, Failure>) {
+    match api.server_read(&["me"], &[], 8).await {
+        Ok(me) if me.get("role").and_then(Value::as_str) == Some("guest") => return (false, Ok(None)),
+        Ok(me) if me.get("role").and_then(Value::as_str) == Some("owner") => {},
+        Err(error) if error.status == Some(404) => {},
+        Err(error) => return (false, Err(error)),
+        _ => return (false, Err(Failure::local(tr("invalid_response")))),
+    }
+    (true, api.server_read(&["config"], &[], 8).await.map(Some))
+}
+
 impl NewSession {
     pub(super) fn load_extras(&mut self, cx: &mut Context<Self>) {
         let (engines, config, quotas) = (self.engines.start(), self.jev.start(), self.quotas.start());
         self.request(cx, move |api, send| Box::pin(async move {
-            let (e, c, q) = tokio::join!(api.server_read(&["engines"], &[], 15), api.server_read(&["config"], &[], 8),
+            let (e, c, q) = tokio::join!(api.server_read(&["engines"], &[], 15), owner_config(&api),
                 api.server_read(&["cotas"], &[], 15));
             send(CreateReply::Engines(engines, e)).await;
             send(CreateReply::Config(config, c)).await;
@@ -96,10 +119,14 @@ impl NewSession {
         }));
     }
 
-    /// Só a cota: a tela sem sessão não mostra motor nem Jev.
-    pub(super) fn load_quotas(&mut self, cx: &mut Context<Self>) {
-        let seq = self.quotas.start();
-        self.request(cx, move |api, send| Box::pin(async move { send(CreateReply::Quotas(seq, api.server_read(&["cotas"], &[], 15).await)).await }));
+    /// A tela compacta também lê o modo padrão do servidor.
+    pub(in crate::app) fn load_quotas(&mut self, cx: &mut Context<Self>) {
+        let (seq, config) = (self.quotas.start(), self.jev.start());
+        self.request(cx, move |api, send| Box::pin(async move {
+            let (q, c) = tokio::join!(api.server_read(&["cotas"], &[], 15), owner_config(&api));
+            send(CreateReply::Quotas(seq, q)).await;
+            send(CreateReply::Config(config, c)).await;
+        }));
     }
 
     /// As contas Claude oferecidas. O `/api/cotas` só traz conta de verdade (carimbada pelo app) e a ativa, o mesmo corte do
@@ -171,7 +198,7 @@ impl NewSession {
 
     /// A permissão existe para o Claude e para o Codex sem terminal, cada um com a própria lista.
     pub(super) fn permissions(&self) -> Option<&'static [&'static str]> {
-        match (self.provider, self.headless) { ("claude", _) => Some(&PERMISSIONS), ("codex", true) => Some(&CODEX_PERMISSIONS), _ => None }
+        match (self.provider, self.headless && !self.headless_inherited()) { ("claude", _) => Some(&PERMISSIONS), ("codex", true) => Some(&CODEX_PERMISSIONS), _ => None }
     }
 
     fn pick_at(choices: &[ModelChoice], value: &str) -> Option<usize> { choices.iter().position(|c| c.id == value).or(Some(0)) }
@@ -183,6 +210,7 @@ impl NewSession {
             .map(|m| ModelChoice { id: m.value(), label: m.label(), hint: m.hint() })).collect();
         let at = Self::pick_at(&models, &self.model);
         self.model_pick = Some(picker(models, at, |this, id, window, cx| {
+            this.model_choice_touched = true;
             this.model = id;
             // Trocar de modelo pode tirar o nível escolhido da lista (só o Codex tem níveis por modelo).
             if !this.levels().contains(&this.effort) { this.effort.clear(); }
@@ -191,7 +219,7 @@ impl NewSession {
         let subagents: Vec<ModelChoice> = std::iter::once(ModelChoice { id: String::new(), label: tr("create_subagent_default"), hint: String::new() })
             .chain(self.catalog().iter().filter(|m| m.id != "default").map(|m| ModelChoice { id: m.value(), label: m.label(), hint: String::new() })).collect();
         let at = Self::pick_at(&subagents, &self.subagent);
-        self.subagent_pick = Some(picker(subagents, at, |this, id, _, _| this.subagent = id, window, cx));
+        self.subagent_pick = Some(picker(subagents, at, |this, id, _, _| { this.model_choice_touched = true; this.subagent = id; }, window, cx));
         self.build_effort_pick(window, cx);
         self.build_permission_pick(window, cx);
     }
@@ -200,7 +228,7 @@ impl NewSession {
         let choices: Vec<ModelChoice> = std::iter::once(String::new()).chain(self.levels())
             .map(|n| ModelChoice { label: if n.is_empty() { tr("create_default") } else { n.clone() }, id: n, hint: String::new() }).collect();
         let at = Self::pick_at(&choices, &self.effort);
-        self.effort_pick = Some(picker(choices, at, |this, id, _, _| this.effort = id, window, cx));
+        self.effort_pick = Some(picker(choices, at, |this, id, _, _| { this.model_choice_touched = true; this.effort = id; }, window, cx));
     }
 
     pub(super) fn build_permission_pick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -255,6 +283,7 @@ impl NewSession {
                         menu_row(SharedString::from(format!("new-chat-model-{id}")), on, label, hint)
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 // O menu fica aberto: o esforço, logo abaixo, costuma ser a escolha seguinte.
+                                this.model_choice_touched = true;
                                 this.model = id.clone();
                                 if !this.levels().contains(&this.effort) { this.effort.clear(); }
                                 this.build_effort_pick(window, cx);
@@ -273,7 +302,7 @@ impl NewSession {
                 .gap(px(4.)).children(std::iter::once(String::new()).chain(levels).map(|level| {
                     let label = if level.is_empty() { tr("create_default") } else { level.clone() };
                     Button::new(SharedString::from(format!("new-chat-effort-{level}"))).ghost().xsmall().selected(self.effort == level).label(label)
-                        .on_click(cx.listener(move |this, _, window, cx| { this.effort = level.clone(); this.build_effort_pick(window, cx); cx.notify(); }))
+                        .on_click(cx.listener(move |this, _, window, cx| { this.model_choice_touched = true; this.effort = level.clone(); this.build_effort_pick(window, cx); cx.notify(); }))
                 }))));
         div().p(px(popup::INSET)).flex().flex_col().gap(px(2.)).child(tabs).child(self.menu_search()).child(list).children(effort)
     }
@@ -313,10 +342,18 @@ impl NewSession {
                 });
                 if self.engines.finish(seq, list) { self.build_engine_pick(window, cx); }
             }
-            CreateReply::Config(seq, result) => {
+            CreateReply::Config(seq, (owner, result)) => {
+                if seq != self.jev.seq { return; }
+                self.headless_owner = Some(owner);
+                if !self.headless_touched && !self.creating {
+                    if let Ok(Some(value)) = &result {
+                        self.headless = value.pointer("/campos/headless_default/valor").and_then(Value::as_bool).unwrap_or(true);
+                        self.build_permission_pick(window, cx);
+                    } else if let Err(error) = &result { self.error = Some(Hangar::fetch_failure(error)); }
+                }
                 let jev = result.map_err(|e| Hangar::fetch_failure(&e)).map(|v| Jev {
-                    key: v.pointer("/campos/jev_api_key/definido").and_then(Value::as_bool).unwrap_or(false),
-                    default: v.pointer("/campos/jev_padrao/valor").and_then(Value::as_bool).unwrap_or(false),
+                    key: v.as_ref().and_then(|v| v.pointer("/campos/jev_api_key/definido")).and_then(Value::as_bool).unwrap_or(false),
+                    default: v.as_ref().and_then(|v| v.pointer("/campos/jev_padrao/valor")).and_then(Value::as_bool).unwrap_or(false),
                 });
                 if self.jev.finish(seq, jev) { self.jev_on = self.jev.ok().is_some_and(|j| j.default); }
             }
@@ -507,6 +544,20 @@ impl NewSession {
         Some(self.render_quota(id, &quota).into_any_element())
     }
 
+    /// A conta Claude escolhida para retomar a conversa fechada, quando a cota lida dela tem a janela geral (sessão ou semana)
+    /// esgotada: o aviso, com a volta se o servidor a deu. Sem leitura, ou leitura vencida, não bloqueia.
+    pub(in crate::app) fn reopen_quota_block(&self) -> Option<String> {
+        // Sem caminho (`None`) é a conta do próprio servidor fora da lista: sem cota conhecida, não bloqueia.
+        let path = self.reopen_config.clone().flatten()?;
+        let now = chrono::Local::now().timestamp() as f64;
+        let reset = exhausted(self.quota_of(&format!("claude:{path}"))?, now)?;
+        let account = self.configs.ok().and_then(|l| l.iter().find(|c| c.path == path)).map(|c| c.label.clone()).unwrap_or(path);
+        let when = until(reset, now);
+        use super::super::costs::web_with;
+        Some(if when.is_empty() { web_with("conversa_conta_sem_cota", &[("conta", account)]) }
+            else { web_with("conversa_conta_sem_cota_volta", &[("conta", account), ("quando", when)]) })
+    }
+
     pub(super) fn render_codex_quota(&self, credential: Option<&str>) -> Option<Stateful<Div>> {
         let quota = self.quota_of(credential?)?;
         Some(self.render_quota("create-codex-quota".into(), quota))
@@ -634,7 +685,37 @@ impl NewSession {
 
 #[cfg(test)]
 mod tests {
-    use super::{ModelOption, QuotaLine, until};
+    use super::{ModelOption, QuotaLine, exhausted, until};
+
+    #[tokio::test]
+    async fn config_is_only_requested_for_owner_or_legacy_backend() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for (status, role, owner) in [(200, "guest", false), (200, "owner", true), (404, "", true)] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let api = super::Api::new(&format!("http://{}", listener.local_addr().unwrap()), "test").unwrap();
+            let server = tokio::spawn(async move {
+                let mut paths = Vec::new();
+                let mut replies = vec![(status, serde_json::json!({"role": role}).to_string())];
+                if owner { replies.push((200, "{\"campos\":{}}".into())); }
+                for (status, body) in replies {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    let mut bytes = vec![0; 4096];
+                    let count = stream.read(&mut bytes).await.unwrap();
+                    paths.push(String::from_utf8_lossy(&bytes[..count]).lines().next().unwrap().to_owned());
+                    let response = format!("HTTP/1.1 {status} OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                    stream.write_all(response.as_bytes()).await.unwrap();
+                }
+                paths
+            });
+            let (is_owner, config) = super::owner_config(&api).await;
+            assert_eq!(is_owner, owner);
+            assert_eq!(config.unwrap().is_some(), owner);
+            let paths = tokio::time::timeout(std::time::Duration::from_secs(2), server).await.unwrap().unwrap();
+            assert!(paths[0].starts_with("GET /api/me "));
+            assert_eq!(paths.len(), if owner { 2 } else { 1 });
+            if owner { assert!(paths[1].starts_with("GET /api/config ")); }
+        }
+    }
 
     #[test]
     fn quota_and_models_read_like_the_web() {
@@ -649,5 +730,31 @@ mod tests {
         let m: ModelOption = serde_json::from_value(serde_json::json!({"id": "k3", "name": "Kimi K3", "provider": "kimi-coding",
             "context_length": 256000, "images": true})).unwrap();
         assert_eq!((m.value(), m.hint()), ("kimi-coding/k3".to_owned(), "k3 · kimi-coding · 256K · 👁".to_owned()));
+    }
+
+    #[test]
+    fn exhausted_account_blocks_only_on_a_current_general_window() {
+        let quota = |state: &str, windows: serde_json::Value| -> QuotaLine {
+            serde_json::from_value(serde_json::json!({"id": "claude:/x", "estado": state, "janelas": windows})).unwrap()
+        };
+        let now = 1000.;
+        // Janela geral cheia bloqueia, com a volta dela.
+        assert_eq!(exhausted(&quota("lida", serde_json::json!([{"rotulo": "5h", "pct": 100.0, "reset_ts": 2000.0}])), now), Some(Some(2000.)));
+        // Sem volta conhecida ainda bloqueia, sem hora.
+        assert_eq!(exhausted(&quota("lida", serde_json::json!([{"rotulo": "7d", "pct": 120.0}])), now), Some(None));
+        // Janela por modelo cheia não bloqueia.
+        assert_eq!(exhausted(&quota("lida", serde_json::json!([{"rotulo": "7d opus", "pct": 100.0, "reset_ts": 2000.0},
+            {"rotulo": "5h", "pct": 40.0}])), now), None);
+        // Leitura que não é `lida` não bloqueia.
+        assert_eq!(exhausted(&quota("expirada", serde_json::json!([{"rotulo": "5h", "pct": 100.0, "reset_ts": 2000.0}])), now), None);
+        // Janela cuja volta já passou não bloqueia.
+        assert_eq!(exhausted(&quota("lida", serde_json::json!([{"rotulo": "5h", "pct": 100.0, "reset_ts": 900.0}])), now), None);
+        // Duas cheias: volta quando a última voltar; uma vencida e outra cheia: a cheia decide.
+        assert_eq!(exhausted(&quota("lida", serde_json::json!([{"rotulo": "5h", "pct": 100.0, "reset_ts": 2000.0},
+            {"rotulo": "7d", "pct": 100.0, "reset_ts": 9000.0}])), now), Some(Some(9000.)));
+        assert_eq!(exhausted(&quota("lida", serde_json::json!([{"rotulo": "5h", "pct": 100.0, "reset_ts": 500.0},
+            {"rotulo": "7d", "pct": 100.0, "reset_ts": 9000.0}])), now), Some(Some(9000.)));
+        assert_eq!(exhausted(&quota("lida", serde_json::json!([{"rotulo": "5h", "pct": 99.0, "reset_ts": 2000.0},
+            {"rotulo": "7d", "pct": 50.0, "reset_ts": 9000.0}])), now), None);
     }
 }

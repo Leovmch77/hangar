@@ -14,10 +14,10 @@ replaced, and when unsure whether to decide alone or wake the user.
      "${CLAUDE_SKILL_DIR}/scripts/vigia.sh" <arbiter> -e ~/.hangar/orq/<date>-<gid> -m 5
    ```
 
-2. The list follows `orq ball` every cycle: whoever owes work now, plus you. Nothing to rewrite at a handoff; a session waiting as it was told is never on it.
-3. Ball with the user: `systemctl --user stop vigia-<gid>` before asking; on the answer, run the arming command of step 1 again; same arbiter → no new ARMED, the proof is `[vigia] re-armed …` in `journalctl --user -u vigia-<gid> -n 5`. `orq event execucao_fim --resultado <result>` logged → stop it for good.
+2. The list follows `orq ball` every cycle: whoever owes work now, plus you. Nothing to rewrite at a handoff.
+3. A wait with a known end (the user's answer, an external job, a phase with no Task events): `orq event espera --sessao <owner> --ate <deadline> [--task <N>] --motivo "<what>"`. The owner leaves `orq ball` until the deadline or its next recorded Task/session event (`orq log` is none; never invent one to clear a wait); the trail alarm waits only while every owner and you are covered. `orq event execucao_fim --resultado <result>` logged → stop it for good.
 
-Done when the `[vigia] ARMED …` prompt arrives in your session within 2 min of arming — the proof it works; it arrives only for a new arbiter, a re-arm proves itself by the `re-armed` line above. `active` is not proof; a hand-typed test is not proof.
+Done when the `[vigia] ARMED …` prompt arrives in your session within 2 min of arming; it arrives once per arbiter, a successor included; a restart proves itself by its `[vigia] re-armed …` journal line. `active` or a hand-typed test is not proof.
 
 ## What it does
 
@@ -72,8 +72,8 @@ Any failing → stop at the current Task's end and wake the user before sleeping
 
 Gone from `hangar-send --list` without your order → open another and move on; the investigation is skipped.
 
-1. Read its transcript (most recent jsonl, `assistant` messages) and, if it had a terminal, its pane (`tmux capture-pane -p -t "=<name>:" -S -200`): the report or review may be there, complete.
-2. Open the substitute by the recipe in `arbitro-lancamento.md`; `orq event sessao_trocada --de <old> --para <new> --motivo vanished` before its full kick-off.
+1. Read its transcript ("Idleness", 3.2) and, if it had a terminal, its pane (`tmux capture-pane -p -t "=<name>:" -S -200`): the report or review may be there, complete.
+2. Open the substitute by the recipe in `arbitro-lancamento.md`; `sessao_trocada` as in "Rotation" (`--motivo vanished`) before its full kick-off.
 3. One line in the contract: which session vanished, what was recovered, who took over.
 
 It becomes a case only if the repo is strange (unexplained dirty tree, unreported commit, untouchable touched) — then the subject is the repo. Time correlation is not authorship: name an author only when the command appears in their transcript; otherwise "author unidentified", investigate the mechanism.
@@ -81,17 +81,16 @@ It becomes a case only if the repo is strange (unexplained dirty tree, unreporte
 ## Rotation
 
 - Executor: one session per Task, retired at the approved milestone.
-- Mid-gate swap, mandatory: the same cause failing round after round. Swap now, mid-gate, before the gate closes.
+- Mid-gate swap, mandatory: the same cause failing round after round; swap now, before the gate closes.
 - The context ceiling (the row's `janela`, default 50% of the session's own window, or a ceiling the user set) is a reference for your decision, never an order to stop. At it, decide by cost, with numbers: the session's context now, what is left (actions, report) and the context it will end at, against a new session's start (its opening context, uncached, plus rereading the handover and the code).
   - Little left to close the act or the round → the session finishes, past the ceiling if needed.
   - Much left → swap at the nearest clean point (end of a step or of the round).
   - Either way, `orq log --task <N> "…"` the decision with its numbers.
-- Writer at the ceiling: it reports what is left (the watchdog prompts it) and keeps working until you decide.
 - Reviewer: before dispatching a round, add the round's measured cost (measure it on Task 1) to its current context; crossing the ceiling → decide as above before the correction arrives.
 - Reviewer rotated with a report in flight: the retired report dies, the successor judges from scratch, and the round closes only with the verdict of a reviewer named in the journal. Rotation between accounts never puts two reviewers on one commit.
 - Provider drops are not a reason; throughput is: swap when ctx barely moves between drops, or no revival after two nudges.
 - Handover in a file that points: HEAD, `git status`, uncommitted disk, what remains, traps paid, paths of plan, contract and Task excerpt, and every decision made. No line count; never a context copy.
-- Retiring is an act with a message: stop, don't commit, release the stage without killing. In the same act tell the reviewer the new address.
+- Retiring is an act with a message: stop, don't commit. In the same act tell the reviewer the new address.
 - Mid-gate: release, don't kill; close it once the substitute confirms. Closed milestone (approved, committed, nothing in flight): close it at once.
 - Every executor or reviewer replacement: `orq event sessao_trocada --de <old> --para <new> --motivo <reason>` before the substitute's kick-off.
 - The substitute gets the full kick-off (`arbitro-lancamento.md`) with `Frozen round`, and proves model/effort before its first `Edit`. Interrupted turn → list the half-edited paths as untrusted draft.
@@ -99,7 +98,10 @@ It becomes a case only if the repo is strange (unexplained dirty tree, unreporte
 
 ## Closing sessions
 
-The watchdog (`-e`) closes what `orq done` lists once it has been `idle` for 10 min: the executor of a committed Task, the `de` side of a `sessao_trocada`, and, after `execucao_fim`, every executor and reviewer. It also keeps you and the open Tasks' executor and reviewer in your group (`orq team`). Each act leaves `closed session:` or `joined group:` in the journal; 3 failures on one session → an `[aviso]` and it stops trying. `--no-housekeeping` turns both off.
+The watchdog (`-e`) closes `orq done` candidates after 10 min idle: completed Tasks' executors
+and reviewers, replaced sessions and completed roles at the run's end. It protects open Tasks,
+the current arbiter, other groups, recreated identities and subagents in flight. Do not disarm it
+before checking cleanup, including during final review/retrospective. It also keeps you and the open Tasks' executor and reviewer in your group (`orq team`). Each act leaves `closed session:` or `joined group:` in the journal; 3 failures on one session → an `[aviso]` and it stops trying. `--no-housekeeping` turns both off.
 
 You close, with `hangar-send --close <name>`, what `orq` does not see; never your own:
 
@@ -130,7 +132,30 @@ Done when `hangar-send --list` shows only the current phase's sessions plus you.
 | phase-1 item missing (untouchables, verification command) | decide the conservative default, record, report later |
 | two consecutive rounds whose waste is "closed only the case the previous report named" | no guideline: ask the user whether the path is worth the cost, spend in hand. User unavailable and the spiral started → tighten the criterion in the next reviewer kick-off (`arbitro-lancamento.md`, "Tightened criterion"); journal it with the date; not before the third round |
 
-Score before waking; the highest axis wins. 8+ → stop and wait. 4–7 → ask without stopping: declare decision and default, proceed. 0–3 → decide, record, report later. Stop between Tasks, never during. Wake with the decision ready: stakes, options, recommendation.
+Score before asking: 0–3, decide and record; for an operational decision within scope,
+ask in text with lettered options, an explicit recommendation and a 10 min deadline. That
+deadline is your rule toward the user, never the team's in the contract. Do not use
+blocking AskUserQuestion/request_user_input, stop the watchdog or independent Tasks.
+Line counts/exceeded estimates do not themselves require consultation or an exception.
+
+Record the question id, options, recommendation, time and deadline before sending it, and your wait (Arming, step 3). With no
+reply by the deadline, apply the recommendation: this behavior is preauthorized for operational
+decisions in the run. Record "deadline expired; recommendation applied", not approval received.
+A reply before the deadline prevails; a resolved question is not applied again.
+This does not authorize leaving the chosen account/model/scope, or destructive or external action
+without authorization: keep that boundary and proceed with the rest of the authorized work.
+
+Schedule a nonblocking wake; a unique id and notify target the arbiter after succession:
+
+```bash
+systemd-run --user --collect --unit=orq-question-<gid>-<id> --on-active=10m \
+  /usr/bin/python3 ~/.claude/skills/orquestrar/scripts/orq.py --dir <durable-dir> \
+  notify --alarm "[decisao] Question <id> deadline: check reply/journal; if still pending, apply the authorized recommendation and record it."
+```
+
+Confirm scheduling; a failure is not an armed timer. On waking, check deadline/reply;
+never act on a finished run. Without systemd, confirm another
+scheduler using the same channel.
 
 | Axis | 0–3 | 4–7 | 8–10 |
 |---|---|---|---|

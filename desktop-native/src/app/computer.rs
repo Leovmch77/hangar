@@ -10,7 +10,7 @@ use serde::Deserialize;
 use std::rc::Rc;
 
 #[derive(Clone, Deserialize)]
-struct AgentExe { path: String, exists: bool, size: u64 }
+struct AgentExe { exists: bool }
 
 #[derive(Clone, Deserialize)]
 struct ConfigFile { enabled: bool }
@@ -63,7 +63,6 @@ fn parse_state(value: Value) -> Result<ComputerState, String> {
 struct ComputerForm {
     project_dir: Entity<InputState>,
     agent_config: Entity<InputState>,
-    jev_key: Entity<InputState>,
     llm_url: Entity<InputState>,
     llm_key: Entity<InputState>,
     llm_model: Entity<InputState>,
@@ -339,7 +338,6 @@ impl Hangar {
         let form = self.computer.form.get_or_insert_with(|| {
             let project_dir = cx.new(|cx| InputState::new(window, cx));
             let agent_config = cx.new(|cx| InputState::new(window, cx));
-            let jev_key = cx.new(|cx| InputState::new(window, cx).masked(true).placeholder(tr("computer_control_replace_key")));
             let llm_url = cx.new(|cx| InputState::new(window, cx).placeholder("https://…/v1/chat/completions"));
             let llm_key = cx.new(|cx| InputState::new(window, cx).masked(true).placeholder(tr("computer_control_replace_key")));
             let llm_model = cx.new(|cx| InputState::new(window, cx));
@@ -348,23 +346,20 @@ impl Hangar {
                     if matches!(event, InputEvent::PressEnter { .. }) { this.save_computer(cx); }
                 })).into_iter().collect::<Vec<_>>();
             let mut subscriptions = subscriptions;
-            for input in [&jev_key, &llm_model] {
-                subscriptions.push(cx.subscribe_in(input, window, |this: &mut Hangar, _, event: &InputEvent, _, cx| {
-                    if matches!(event, InputEvent::PressEnter { .. }) { this.save_computer(cx); }
-                }));
-            }
+            subscriptions.push(cx.subscribe_in(&llm_model, window, |this: &mut Hangar, _, event: &InputEvent, _, cx| {
+                if matches!(event, InputEvent::PressEnter { .. }) { this.save_computer(cx); }
+            }));
             for input in [&llm_url, &llm_key] {
                 subscriptions.push(cx.subscribe_in(input, window, |this: &mut Hangar, _, event: &InputEvent, _, cx| {
                     if matches!(event, InputEvent::PressEnter { .. }) { this.save_computer(cx); }
                     if matches!(event, InputEvent::Change) { this.clear_computer_models(); cx.notify(); }
                 }));
             }
-            ComputerForm { project_dir, agent_config, jev_key, llm_url, llm_key, llm_model,
+            ComputerForm { project_dir, agent_config, llm_url, llm_key, llm_model,
                 target_picker: None, picker_subscription: None, _subscriptions: subscriptions }
         });
         form.project_dir.update(cx, |input, cx| input.set_value(state.project_dir.clone(), window, cx));
         form.agent_config.update(cx, |input, cx| input.set_value(state.agent_config.clone(), window, cx));
-        form.jev_key.update(cx, |input, cx| input.set_value("", window, cx));
         form.llm_url.update(cx, |input, cx| input.set_value(state.llm_url.clone(), window, cx));
         form.llm_key.update(cx, |input, cx| input.set_value("", window, cx));
         form.llm_model.update(cx, |input, cx| input.set_value(state.llm_model.clone(), window, cx));
@@ -426,6 +421,7 @@ impl Hangar {
         let Some(state) = self.computer.state.ok() else { return };
         let Some(form) = &self.computer.form else { return };
         if self.computer.busy.is_some() || self.computer.state.loading { return; }
+        if !state.agent_exe.exists { return; }
         let project_dir = form.project_dir.read(cx).value().trim().to_owned();
         let (local_available, ssh_hosts) = (state.local_available, state.ssh_hosts.clone());
         let hangar = cx.entity();
@@ -465,6 +461,7 @@ impl Hangar {
     fn save_computer(&mut self, cx: &mut Context<Self>) {
         let (Some(api), Some(state), Some(form)) = (self.api.clone(), self.computer.state.ok(), self.computer.form.as_ref()) else { return };
         if self.computer.busy.is_some() || self.computer.state.loading { return; }
+        if self.computer.enabled && (!state.agent_exe.exists || form.agent_config.read(cx).value().trim().is_empty()) { return; }
         let body = json!({
             "enabled": self.computer.enabled, "mode": state.mode,
             "project_dir": form.project_dir.read(cx).value().trim(),
@@ -472,7 +469,6 @@ impl Hangar {
             "llm_url": if self.computer.cliproxy { state.cliproxy.preset_url.clone() } else { form.llm_url.read(cx).value().trim().to_owned() },
             "llm_model": form.llm_model.read(cx).value().trim(), "llm_effort": self.computer.effort.as_str(),
             "llm_key": if self.computer.cliproxy { None } else { Some(form.llm_key.read(cx).value().to_string()).filter(|key| !key.is_empty()) },
-            "jev_key": Some(form.jev_key.read(cx).value().to_string()).filter(|key| !key.is_empty()),
             "use_cliproxy_key": self.computer.cliproxy,
         });
         self.write_computer(Write::Save, api, Some(body), cx);
@@ -520,7 +516,11 @@ impl Hangar {
                         self.computer.state.loading = false;
                         self.fill_computer(&state, window, cx);
                         self.computer.note = Some(match action {
-                            Write::Install => tr("computer_control_installed").replace("{tag}", &state.installed_tag),
+                            Write::Install => {
+                                let installed = tr("computer_control_installed").replace("{tag}", &state.installed_tag);
+                                if state.targets.is_empty() { format!("{installed}\n{}", tr_shared("computer_control_install_next", &[])) }
+                                else { installed }
+                            }
                             Write::Save if state.enabled => tr("computer_control_saved_on").replace("{n}", &state.files.iter().filter(|file| file.enabled).count().to_string()),
                             Write::Save => tr("computer_control_saved_off"),
                         });
@@ -605,7 +605,9 @@ impl Hangar {
             .child(div().flex().flex_col().gap_1()
                 .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(tr("computer_control_jev_key")))
                 .child(div().text_xs().text_color(theme::muted()).whitespace_normal().child(key_status))
-                .child(Input::new(&form.jev_key).disabled(disabled).aria_label(tr("computer_control_jev_key"))))
+                .child(div().flex().child(Button::new("computer-jev-settings").outline().small()
+                    .label(tr_shared("jev_open_settings", &[])).disabled(self.computer.busy.is_some())
+                    .on_click(cx.listener(|this, _, window, cx| this.open_settings(Page::Jev, window, cx))))))
             .child(div().text_lg().font_weight(FontWeight::SEMIBOLD).child(tr("computer_control_llm")))
             .child(div().text_sm().text_color(theme::muted()).whitespace_normal().child(tr("computer_control_llm_hint")));
         let presets = [tr("computer_control_preset_cliproxy"), tr("computer_control_preset_custom")];
@@ -689,11 +691,7 @@ impl Hangar {
             .child(div().flex().items_center().gap_2()
                 .child(div().text_xl().font_weight(FontWeight::SEMIBOLD).child(Page::Windows.title()))
                 .child(chip(tr("server_scope"), theme::muted(), theme::raised())))
-            .child(div().text_sm().text_color(theme::muted()).whitespace_normal().child(tr("computer_control_what")))
-            .child(div().flex().flex_col().gap_1().children([
-                "computer_control_step_tree", "computer_control_step_jev", "computer_control_step_llm", "computer_control_step_repeat",
-            ].into_iter().enumerate().map(|(n, key)| div().text_sm().text_color(theme::muted()).whitespace_normal()
-                .child(format!("{}. {}", n + 1, tr(key))))));
+            .child(div().text_sm().text_color(theme::muted()).whitespace_normal().child(tr("computer_control_what")));
         if self.api.is_none() {
             return page.child(div().text_sm().text_color(theme::muted()).child(tr("settings_offline"))).into_any_element();
         }
@@ -712,44 +710,41 @@ impl Hangar {
         };
         let Some(form) = &self.computer.form else { return page.into_any_element() };
         let busy = self.computer.busy.is_some();
+        let installed = state.agent_exe.exists;
         let package = state.mode == "package";
-        let mode = if package { tr("computer_control_mode_package").replace("{tag}", &state.installed_tag) }
+        let target_missing = form.agent_config.read(cx).value().trim().is_empty();
+        let mode = if !installed { tr_shared("computer_control_not_installed", &[]) }
+            else if package { tr("computer_control_mode_package").replace("{tag}", &state.installed_tag) }
             else { tr("computer_control_mode_local").replace("{dir}", &state.project_dir) };
-        let agent = if state.agent_exe.exists {
-            tr("computer_control_agent_ok").replace("{path}", &state.agent_exe.path)
-                .replace("{mb}", &format!("{:.1}", state.agent_exe.size as f64 / 1_048_576.))
-        } else {
-            tr(if package { "computer_control_agent_missing_package" } else { "computer_control_agent_missing_local" })
-                .replace("{path}", &state.agent_exe.path)
-        };
+        let install_hint = if !installed { tr_shared("computer_control_install_hint", &[]) }
+            else { tr(if package { "computer_control_mode_package_hint" } else { "computer_control_mode_local_hint" }) };
         page = page.child(self.mark(settings_box().p_3().gap_1()
             .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).whitespace_normal().child(mode))
-            .child(div().text_sm().text_color(theme::muted()).whitespace_normal()
-                .child(tr(if package { "computer_control_mode_package_hint" } else { "computer_control_mode_local_hint" })))
-            .child(div().id("computer-agent").role(if state.agent_exe.exists { Role::Status } else { Role::Alert })
-                .text_sm().text_color(if state.agent_exe.exists { theme::muted() } else { theme::danger() })
-                .whitespace_normal().child(agent))
+            .child(div().text_sm().text_color(theme::muted()).whitespace_normal().child(install_hint))
             .child(div().flex().child(Button::new("computer-install").outline().small()
                 .label(tr(if matches!(self.computer.busy, Some(Write::Install)) { "computer_control_installing" }
-                    else if package { "computer_control_update" } else { "computer_control_install" }))
+                    else if installed && package { "computer_control_update" } else { "computer_control_install" }))
                 .disabled(busy).on_click(cx.listener(|this, _, _, cx| this.install_computer(cx))))), "computer_control_install"))
             .child(self.mark(div().flex().flex_col().gap_1()
-                .child(Checkbox::new("computer-enable").checked(self.computer.enabled).disabled(busy)
+                .child(Checkbox::new("computer-enable").checked(self.computer.enabled).disabled(busy || (!self.computer.enabled && (!installed || target_missing)))
                     .label(tr("computer_control_enable"))
                     .on_change(cx.listener(|this, checked: &bool, _, cx| { this.computer.enabled = *checked; cx.notify(); })))
                 .child(div().text_sm().text_color(theme::muted()).whitespace_normal().child(tr("computer_control_enable_hint"))), "computer_control_enable"));
-        if !package {
-            page = page.child(self.mark(input_row("computer_control_dir", &form.project_dir, busy || !self.computer.enabled), "computer_control_dir"));
+        if !package && (installed || state.enabled) {
+            page = page.child(self.mark(input_row("computer_control_dir", &form.project_dir, busy), "computer_control_dir"));
         }
         let target = if let Some(picker) = &form.target_picker {
             div().flex().flex_col().gap_1().child(div().text_sm().font_weight(FontWeight::MEDIUM).child(tr("computer_control_target")))
-                .child(Select::new(picker).small().disabled(busy || !self.computer.enabled).accessibility_label(tr("computer_control_target")))
-        } else { input_row("computer_control_target", &form.agent_config, busy || !self.computer.enabled) };
+                .child(Select::new(picker).small().disabled(busy || !installed).accessibility_label(tr("computer_control_target")))
+        } else { div().flex().flex_col().gap_1()
+            .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(tr("computer_control_target")))
+            .child(div().text_sm().text_color(theme::muted()).whitespace_normal()
+                .child(tr_shared(if installed { "computer_control_target_empty" } else { "computer_control_install_hint" }, &[]))) };
         page = page.child(self.mark(div().flex().items_end().gap_2()
                 .child(div().flex_1().min_w_0().child(target))
                 .child(machines::FocusOnClick { id: "computer-new-target".into(),
                     button: Button::new("computer-new-target").outline().small().label(tr("computer_control_new_target"))
-                        .disabled(busy || !self.computer.enabled),
+                        .disabled(busy || !installed),
                     open: Rc::new({ let owner = cx.entity().downgrade(); move |window, cx| {
                         let _ = owner.update(cx, |this, cx| this.open_computer_target(window, cx));
                     } }) }), "computer_control_target"))
@@ -757,7 +752,7 @@ impl Hangar {
             .child(self.render_computer_llm(state, form, cx))
             .child(div().flex().child(Button::new("computer-save").primary().small()
                 .label(tr(if matches!(self.computer.busy, Some(Write::Save)) { "computer_control_saving" } else { "computer_control_save" }))
-                .disabled(busy).on_click(cx.listener(|this, _, _, cx| this.save_computer(cx)))));
+                .disabled(busy || (self.computer.enabled && (!installed || target_missing))).on_click(cx.listener(|this, _, _, cx| this.save_computer(cx)))));
         if let Some(note) = &self.computer.note { page = page.child(div().id("computer-saved").role(Role::Status).text_sm().font_weight(FontWeight::SEMIBOLD).child(note.clone())); }
         if let Some(warning) = &self.computer.migration_warning {
             page = page.child(div().id("computer-migration-warning").role(Role::Alert).text_sm().text_color(theme::danger()).whitespace_normal().child(warning.clone()));

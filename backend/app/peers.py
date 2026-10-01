@@ -6,6 +6,7 @@ pelo caller async — os POSTs de pareamento são ação de usuário, não hot p
 
 ponytail: só o que o pareamento precisa — resolver base/token e um POST/DELETE com erro claro.
 Grupo cross-server de N não existe (o pareamento cross-server é 1:1); quando existir, isto não muda."""
+import hashlib
 import http.client
 import json
 import logging
@@ -14,6 +15,7 @@ import re
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -212,13 +214,9 @@ def gravar_peer(server_id: str, base_url: str, token: str, web_url: str | None =
 
     def _gravar(dados: dict) -> dict:
         antigo = dados.get(server_id)
-        dados[server_id] = {"base_url": base.rstrip("/"), "token": tok}
-        if isinstance(antigo, dict) and antigo.get("enabled") is not None:
-            dados[server_id]["enabled"] = antigo["enabled"]
-        # web_url é do painel (hangar_panel_common/hangar-panel-data), não deste formulário: quem regrava
-        # sem informá-lo não está pedindo pra apagá-lo. Mesmo racional do enabled.
-        if isinstance(antigo, dict) and antigo.get("web_url"):
-            dados[server_id]["web_url"] = antigo["web_url"]
+        # O resto da entrada (enabled e web_url do painel, a parte `app` da lista das máquinas) não é
+        # deste formulário: quem regrava endereço e token não está pedindo pra apagá-lo.
+        dados[server_id] = {**(antigo if isinstance(antigo, dict) else {}), "base_url": base.rstrip("/"), "token": tok}
         if web_url:
             w = web_url.strip()
             if w:
@@ -234,7 +232,7 @@ def set_peer_enabled(server_id: str, enabled: bool) -> dict:
 
     def _definir(dados: dict) -> dict:
         cfg = dados.get(server_id)
-        if not isinstance(cfg, dict):
+        if not _eh_peer(cfg):
             raise ValueError(f"servidor '{server_id}' não está no peers.json")
         cfg["enabled"] = enabled
         return cfg
@@ -248,11 +246,136 @@ def remover_peer(server_id: str) -> None:
     validar_id(server_id)
 
     def _remover(dados: dict) -> None:
-        if server_id not in dados:
+        cfg = dados.get(server_id)
+        if not _eh_peer(cfg):
             raise ValueError(f"servidor '{server_id}' não está no peers.json")
-        del dados[server_id]
+        # Tirar os recados não tira a máquina da lista do app: a parte `app` fica.
+        if isinstance(cfg.get("app"), dict):
+            dados[server_id] = {"app": cfg["app"]}
+        else:
+            del dados[server_id]
 
     _mutar(_remover)
+
+
+def _eh_peer(cfg: object) -> bool:
+    """Entrada que é peer de recados. Só com a parte `app` é máquina da lista do app, não peer."""
+    return isinstance(cfg, dict) and ("base_url" in cfg or "app" not in cfg)
+
+
+# ── Lista de máquinas dos apps ──────────────────────────────────────────────────────────────
+# A lista que o app nativo mostra mora aqui, na parte `app` de cada entrada: uma máquina, uma
+# entrada. Entrada só com `app` (sem base_url) não é peer: nenhum leitor de recados a enxerga.
+
+_APP_CAMPOS_BOOL = ("disabled", "invite")
+
+
+class ListaMudou(Exception):
+    """A lista mudou desde a leitura de quem grava (outro app gravou antes)."""
+
+
+def _app_entrada(bruta: object) -> dict:
+    if not isinstance(bruta, dict):
+        raise ValueError("máquina precisa ser um objeto")
+    e = {}
+    for campo in ("id", "label", "address", "token"):
+        v = bruta.get(campo, "")
+        if not isinstance(v, str):
+            raise ValueError(f"{campo} precisa ser texto")
+        e[campo] = v
+    if not e["id"] or len(e["id"]) > 64:
+        raise ValueError("id da máquina vazio ou longo demais")
+    if not e["address"].startswith(("http://", "https://")):
+        raise ValueError("endereço precisa ser http(s)://")
+    for campo in _APP_CAMPOS_BOOL:
+        v = bruta.get(campo, False)
+        if not isinstance(v, bool):
+            raise ValueError(f"{campo} precisa ser true ou false")
+        e[campo] = v
+    lan = bruta.get("lan")
+    if lan is not None:
+        if not isinstance(lan, dict) or not all(isinstance(lan.get(k), str) for k in ("url", "id")):
+            raise ValueError("lan precisa ser {url, id}")
+        e["lan"] = {"url": lan["url"], "id": lan["id"]}
+    return e
+
+
+def _app_lista(dados: dict) -> list[dict]:
+    partes = [cfg["app"] for cfg in dados.values() if isinstance(cfg, dict) and isinstance(cfg.get("app"), dict)]
+    partes.sort(key=lambda a: a.get("pos", 0) if isinstance(a.get("pos"), int) else 0)
+    return [{k: v for k, v in a.items() if k != "pos"} for a in partes]
+
+
+def _revisao(lista: list[dict]) -> str:
+    bruto = json.dumps(lista, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(bruto.encode()).hexdigest()[:16]
+
+
+def ler_lista_app() -> tuple[str, list[dict]]:
+    """(revisão, máquinas na ordem do app). Arquivo corrompido é erro: lista vazia faria o app
+    achar que não tem máquina nenhuma."""
+    lista = _app_lista(_ler_estrito())
+    return _revisao(lista), lista
+
+
+def _host(url: str) -> str:
+    return (urllib.parse.urlsplit(url).hostname or "").lower()
+
+
+def _loopback(host: str) -> bool:
+    return host in ("localhost", "::1") or host.startswith("127.")
+
+
+def _chave_livre(app_id: str, dados: dict) -> str:
+    base = re.sub(r"[^a-z0-9_-]", "-", app_id.lower()).strip("-_")[:28] or "maquina"
+    if not base[0].isalnum():
+        base = "m" + base[:27]
+    chave, n = base, 2
+    while chave in dados:
+        chave, n = f"{base}-{n}", n + 1
+    return chave
+
+
+def gravar_lista_app(revisao: str, maquinas: list) -> tuple[str, list[dict]]:
+    """Troca a lista inteira do app, tudo ou nada. `revisao` é a da leitura de quem grava: diferente
+    da atual, outro app gravou no meio e nada muda (ListaMudou).
+
+    Cada máquina volta à entrada que já era dela (pelo id do app); nova casa com o peer de mesmo
+    host, senão ganha entrada própria. Convite e endereço local nunca casam com peer: o token de
+    convidado e o 127.0.0.1 deste app não podem virar credencial de recado."""
+    if not isinstance(maquinas, list):
+        raise ValueError("servers precisa ser uma lista")
+    novas = [_app_entrada(m) for m in maquinas]
+    if len({m["id"] for m in novas}) != len(novas):
+        raise ValueError("id de máquina repetido")
+
+    def _trocar(dados: dict) -> tuple[str, list[dict]]:
+        if _revisao(_app_lista(dados)) != revisao:
+            raise ListaMudou()
+        dona = {}
+        for chave, cfg in list(dados.items()):
+            if isinstance(cfg, dict) and isinstance(cfg.get("app"), dict):
+                dona[cfg["app"].get("id")] = chave
+                del cfg["app"]
+                if not cfg:
+                    del dados[chave]
+        usadas: set[str] = set()
+        for pos, m in enumerate(novas):
+            chave = dona.get(m["id"])
+            if chave in usadas:
+                chave = None
+            host = _host(m["address"])
+            if chave is None and not m["invite"] and not _loopback(host):
+                chave = next((k for k, cfg in dados.items() if k not in usadas and isinstance(cfg, dict)
+                              and "app" not in cfg and host in (_host(str(cfg.get("base_url", ""))), _host(str(cfg.get("web_url", ""))))), None)
+            if chave is None:
+                chave = _chave_livre(m["id"], dados)
+            dados.setdefault(chave, {})["app"] = {**m, "pos": pos}
+            usadas.add(chave)
+        lista = _app_lista(dados)
+        return _revisao(lista), lista
+
+    return _mutar(_trocar)
 
 
 def peer_cfg(server_id: str) -> tuple[str, str] | None:

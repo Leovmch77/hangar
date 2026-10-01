@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import {
-  abbrevNum, attentionFeed, countAwaiting, effectiveGroupBy, fmtWhen, groupSelectedByServer, initials, nextAwaiting,
+  abbrevNum, attentionFeed, countAwaiting, effectiveGroupBy, fmtWhen, formatElapsed, groupSelectedByServer, initials, nextAwaiting,
   pedeMarcacao,
   projectKey, projectLabel, encodeCompareIds, parseCompareIds, latestAssistantEvent, resetsIn, relativeTime,
   clusterByPair, railLabel, sortSessions, bubblesFromTail, ctxWindow, fileKind, fmtBytes, providerName, providerTag, isOrq,
@@ -1050,6 +1050,14 @@ describe('parseCanal', () => {
 });
 
 describe('parseFilePaths', () => {
+  it('reconhece documentos para baixar sem transformar código em anexo', () => {
+    const paths = parseFilePaths('[Relatório](</tmp/Relatório final.docx>) e docs/tabela.xlsx, /tmp/slides.odp. /tmp/app.ts /tmp/main.py /tmp/lib.rs');
+    expect(paths.map(({ path, kind }) => ({ path, kind }))).toEqual([
+      { path: '/tmp/Relatório final.docx', kind: 'document' },
+      { path: '/tmp/slides.odp', kind: 'document' },
+      { path: 'docs/tabela.xlsx', kind: 'document' },
+    ]);
+  });
   it('crase fecha o caminho — dois nomes em código numa frase não viram um path só', () => {
     const t = 'Li `/proc/smaps_rollup`, e nada mudou; `.scratch/` e `t2-cat-detalhe.png` já estavam.';
     expect(parseFilePaths(t)).toEqual([]);
@@ -1080,5 +1088,14 @@ describe('nomeFerramenta', () => {
     expect(nomeFerramenta('mcp__hangar-computer-control__objetivo')).toBe('computer-control · objetivo');
     expect(nomeFerramenta('mcp__jev__ask')).toBe('jev · ask');
     expect(nomeFerramenta('Bash')).toBe('Bash');
+  });
+});
+
+
+describe('formatElapsed', () => {
+  it('distingue tempo desconhecido, zero, minutos e horas sem somar tarefas', () => {
+    overwriteGetLocale(() => 'pt');
+    expect([undefined, null, -1, NaN].map(formatElapsed)).toEqual(['—', '—', '—', '—']);
+    expect([0, 59, 60, 3599, 5400].map(formatElapsed)).toEqual(['0 s', '59 s', '1 min', '59 min', '1 h 30 min']);
   });
 });

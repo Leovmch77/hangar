@@ -1,8 +1,9 @@
 # Role: retrospective (phase 5)
 
 You are a fresh session that took no part in anything. Read-only in everything: no commit, no
-fix, no opinion on the product. Your product is a proposed patch for the `orquestrar` skill,
-with the evidence of the work that just ran. This page, the kick-off and the durable directory
+fix, no opinion on the product. Your product is a proposed patch for the skills and components of
+the route that ran (`orquestrar`, plus `orquestrar-auto` and its program when used), with the
+evidence of the work that just ran. This page, the kick-off and the durable directory
 are your whole context.
 
 Use only the account and model of your kick-off; subagents on the same account, model switch
@@ -20,8 +21,8 @@ ls  ~/.hangar/orq/<date>-<gid>/pareceres/*.md       # review reports: each round
 ls  ~/.hangar/orq/<date>-<gid>/kickoffs/            # what each session knew when starting
 cat ~/.hangar/orq/<date>-<gid>/licoes.md            # every guideline written mid-work
 git log --oneline <base>..<tip>                     # commits per Task, correction rounds
-git -C <skill-repo> log --oneline --since="<start-date>" -- skills/orquestrar
-git -C <skill-repo> diff <commit-before-the-work>..HEAD -- skills/orquestrar
+git -C <skill-repo> log --oneline --since="<start-date>" -- <every skill of the route that ran>
+git -C <skill-repo> diff <commit-before-the-work>..HEAD -- <every skill of the route that ran>
 cat ~/.hangar/orq/<date>-<gid>/eventos.jsonl        # rounds, verdicts, times per Task
 cat ~/.hangar/orq/<date>-<gid>/medicao/relatorio.json   # consumption per role (consumo.md)
 ```
@@ -31,6 +32,8 @@ cat ~/.hangar/orq/<date>-<gid>/medicao/relatorio.json   # consumption per role (
 - Check the consumption sources and intervals before comparing; a missing or incomplete
   measurement is declared, never reconstructed or treated as zero.
 - Every guideline in `licoes.md` and every line the skill gained mid-work is a candidate patch.
+- Name the route that ran (`orq.json`: `auto: true` → `skills/orquestrar-auto` too) and read
+  every skill, program and kick-off mold it executed; a proposal names who carries out its rule.
 
 ## The report: five sections, in this order
 

@@ -51,14 +51,24 @@ Task, if any, is approved.
 
 1. Trigger: every code Task approved. Never "after Task N". A manual Task (asset upload, domain, third-party account) is not a code Task.
 2. Open a fresh session (recipe in `arbitro-lancamento.md`) that took part in nothing; never a subagent of yours (a per-Task reviewer may be a fresh subagent; this one may not).
-3. While the branch review works it is not in `orq ball`: `systemctl --user stop vigia-<gid>`, then the `systemd-run` of `arbitro-vigia.md`, "Arming", with `vigia.sh <branch-review session> <arbiter> -m 5 -d <durable dir>/registro.md` in place of `vigia.sh <arbiter> -e …`; wait for ARMED. Findings back as Tasks → the `-e` form while they run; the phase ends → stop it.
+3. Keep the execution watchdog running with `-e` until cleanup of completed sessions finishes.
+   Final review outside `orq ball`: monitor it in standalone mode from `arbitro-vigia.md`,
+   with another unit name and `vigia.sh <branch-review session> <arbiter> -m 5 -d
+   <durable dir>/registro.md`; wait for ARMED. Stop only this monitor when the phase finishes.
+   Do not disarm execution cleanup at a phase transition.
 4. Kick-off: the page pointer, `Role: branch review`, the range `<base>..<tip>`, the parallel paths to ignore, what is out of scope; which commits in the range the pipeline produced and which are foreign, and whether the foreign ones are reviewed or declared out of scope. A foreign commit that is the base of a Task gets a directed question.
 5. With the review open the tree freezes (per-Task rounds too; a docs-only commit earns a DEVOLVIDO). Must touch: announce first, with what; commit, never disk-only; send the new hash and what changed file by file; say what did not change, with the proof command `git diff --stat <hash-under-review> <new-hash> -- <code-dirs>` (empty = their work stands). "The file changed between two reads" → own it, give the new hash, freeze.
 6. Findings return to the normal cycle (`arbitro.md`, steps 2–5). A rejecting final review needs a live executor: open one — the code is theirs, never yours, not even for one line. Record the author of each round's code in the contract, not only the hash (`eventos.jsonl` keeps it in the `veredito`'s `sessao` field). The user asked you for code directly → the request ends, you return to the gate.
 7. Two final reviews in parallel: hold findings that overlap until both deliver, and tell each you are holding.
 8. Closing sentence to the user carries, beyond "approved": which commits in the range came from outside the pipeline; by which step (deploy, publish, install) the approved code reaches where they will use it. Push and MR are the user's.
 
-Done when the branch review approved, the closing sentence is sent, and the branch review, reviewer and executor sessions are closed.
+After the final verdict, explicitly close the final-review session by the name actually
+opened, checking that no work/subagent is in flight. The watchdog closes Task pairs:
+check `orq done` and the live session list. An absent candidate is closed; one still present
+is not closed. Respect group/identity protection and record closing failures.
+
+Done when the branch review approved, the closing sentence is sent, and its session is closed;
+remaining cleanup stays active until closure.
 
 ## The branch reopened after approval
 
@@ -67,9 +77,17 @@ Done when the branch review approved, the closing sentence is sent, and the bran
 
 ## Retrospective (phase 5)
 
-Fire the closing item on its trigger: the branch in the user's hands, nothing in flight. Open the fresh session by the recipe in `arbitro-lancamento.md`, on the `retrospectiva` row; the kick-off carries the lines the closing item lists. Watchdog: "Phase 4", step 3, with the retrospective session in place of the branch review; stop it when the phase ends.
+Fire the closing item on its trigger: the branch in the user's hands, nothing in flight. Open the fresh session by the recipe in `arbitro-lancamento.md`, on the `retrospectiva` row; the kick-off carries the lines the closing item lists. Standalone monitor: "Phase 4", step 3, with the retrospective instead of final review; stop
+only this monitor on completion. The execution watchdog remains responsible for cleanup.
 
-Done when the proposed patch exists at `~/.hangar/orq/<date>-<gid>.md`, `orq event execucao_fim --resultado <result>` is logged, the watchdog disarmed and the retrospective session closed.
+Explicitly close the completed retrospective session by its opened name, with no work
+in flight. Record `orq event execucao_fim --resultado <result>` and check `orq done` and the
+live session list; keep the watchdog until eligible candidates are closed. Do not close the
+current arbiter, an open Task's session or someone moved to another group/identity. Record
+and report unresolved impediments; do not declare all closed or silently disarm.
+
+Done when the patch exists at `~/.hangar/orq/<date>-<gid>.md`, execucao_fim is logged,
+cleanup is confirmed, the monitors are disarmed and the retrospective is closed.
 
 ## Arbiter succession
 
@@ -77,7 +95,7 @@ When you leave: your context past your row's `janela` (default 50%) and your dec
 
 1. Finish the task at hand: the open gate closes or rejects; every background subagent of yours has returned. Dispatch no new Task.
 2. `<durable dir>/passagem.md`, headed `# Handover to the next arbiter (<output of date -Iseconds>)`: the line `my running subagents: none`; current Task and gate state; live sessions per role (name, account, model, effort, measured ctx) and which are retired; HEAD and `git status`; what is on disk uncommitted; pending items and what remains of the plan; the user's decisions not yet rules, one by one, dated; traps paid; absolute paths of plan, `regras-<gid>.md`, `licoes.md`, `eventos.jsonl`, durable dir; the last line written to `eventos.jsonl`; the closing items with who carries each. No line cap, no context copy: what the successor cannot discover from the files pointed at.
-3. Open the successor by the usual recipe on the `árbitro` row as it stands. Right after `--new`, before its kick-off: `orq event sessao_trocada --de <you> --para <successor> --motivo <reason>`; from then on `orq` and the watchdog route to the successor by themselves, and the successor leaves the watchdog untouched. Kick-off: invoke the `orquestrar` skill with the arbiter role; the `<durable dir>/passagem.md` path, the rules, the plan; "take over: you are the arbiter from now on; once you confirm, close me: `hangar-send --close <your name>`".
+3. Open the successor by the usual recipe on the `árbitro` row as it stands. Right after `--new`, before its kick-off: `orq event sessao_trocada --de <you> --para <successor> --motivo <reason>`; from then on `orq` and the watchdog route to the successor by themselves; the successor proves it is in the work's group (the same gid in its own sidecar) before its first act, and leaves the watchdog untouched: its `ARMED` to the successor is the channel's proof. Kick-off: invoke the `orquestrar` skill with the arbiter role; the `<durable dir>/passagem.md` path, the rules, the plan; "take over: you are the arbiter from now on; once you confirm, close me: `hangar-send --close <your name>`".
 4. Change the `árbitro` row's session name to the new name.
 5. `orq log` ("left at <ctx>, successor `<name>` took over"); stop sending work. You never close yourself: the successor does.
 

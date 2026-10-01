@@ -19,7 +19,7 @@
   interface Props {
     store: ConfigServidorStore;
     /** Qual fatia mostrar. O ESTADO e um so, compartilhado pelas tres. */
-    secao: 'notificacoes' | 'anexos' | 'avancado';
+    secao: 'notificacoes' | 'anexos' | 'avancado' | 'jev';
     // Só a seção notificacoes lê: onde as horas silenciosas são gravadas. null = servidor ativo.
     apiTarget?: Server | null;
   }
@@ -31,6 +31,7 @@
     notificacoes: m.config_modal_notificacoes(),
     anexos: m.config_modal_anexos_curto(),
     avancado: m.config_modal_avancado(),
+    jev: m.jev_title(),
   };
 
   interface Campo {
@@ -67,25 +68,24 @@
       ajuda: m.config_server_marcar_travada_ajuda() },
     { chave: 'editor', rotulo: m.config_server_editor(), tipo: 'texto', secao: 'avancado',
       ajuda: m.config_server_editor_ajuda() },
-    // A ajuda diz ONDE a chave é usada: `objetivo`, `confere` e a triagem da orquestração. Não há
-    // registro de consumidores; quem ganhar outro atualiza a lista da frase.
-    { chave: 'jev_api_key', rotulo: m.config_server_jev_chave(), tipo: 'segredo', secao: 'avancado',
+    { chave: 'jev_api_key', rotulo: m.config_server_jev_chave(), tipo: 'segredo', secao: 'jev',
       ajuda: m.config_server_jev_chave_ajuda() },
-    // Logo abaixo da chave de propósito: é o único campo cujo efeito depende dela estar preenchida.
-    { chave: 'jev_padrao', rotulo: m.config_server_jev_padrao(), tipo: 'liga', secao: 'avancado',
+    { chave: 'jev_padrao', rotulo: m.config_server_jev_padrao(), tipo: 'liga', secao: 'jev',
       ajuda: m.config_server_jev_padrao_ajuda() },
-    { chave: 'jev_endpoint', rotulo: m.config_server_jev_endpoint(), tipo: 'texto', secao: 'avancado',
+    { chave: 'jev_endpoint', rotulo: m.config_server_jev_endpoint(), tipo: 'texto', secao: 'jev',
       ajuda: m.config_server_jev_endpoint_ajuda() },
-    { chave: 'jev_model', rotulo: m.config_server_jev_modelo(), tipo: 'texto', secao: 'avancado',
+    { chave: 'jev_model', rotulo: m.config_server_jev_modelo(), tipo: 'texto', secao: 'jev',
       ajuda: m.config_server_jev_modelo_ajuda() },
-    { chave: 'jev_texto_base_url', rotulo: m.config_server_jev_texto_endpoint(), tipo: 'texto', secao: 'avancado',
+    { chave: 'jev_texto_base_url', rotulo: m.config_server_jev_texto_endpoint(), tipo: 'texto', secao: 'jev',
       ajuda: m.config_server_jev_texto_endpoint_ajuda() },
-    { chave: 'jev_texto_api_key', rotulo: m.config_server_jev_texto_chave(), tipo: 'segredo', secao: 'avancado',
+    { chave: 'jev_texto_api_key', rotulo: m.config_server_jev_texto_chave(), tipo: 'segredo', secao: 'jev',
       ajuda: m.config_server_jev_texto_chave_ajuda() },
-    { chave: 'jev_texto_modelo', rotulo: m.config_server_jev_texto_modelo(), tipo: 'texto', secao: 'avancado',
+    { chave: 'jev_texto_modelo', rotulo: m.config_server_jev_texto_modelo(), tipo: 'texto', secao: 'jev',
       ajuda: m.config_server_jev_texto_modelo_ajuda() },
-    { chave: 'jev_texto_cmd', rotulo: m.config_server_jev_texto_cmd(), tipo: 'texto', secao: 'avancado',
+    { chave: 'jev_texto_cmd', rotulo: m.config_server_jev_texto_cmd(), tipo: 'texto', secao: 'jev',
       ajuda: m.config_server_jev_texto_cmd_ajuda() },
+    { chave: 'jev_windows_api_key', rotulo: m.jev_windows_key(), tipo: 'segredo', secao: 'jev',
+      ajuda: m.jev_windows_key_help() },
   ];
 
   const visiveis = $derived(CAMPOS.filter((c) => c.secao === secao));
@@ -192,11 +192,47 @@
     <p class="aviso erro">{store.erro}</p>
     <button class="btn" onclick={() => void store.carregar()}>{m.config_server_tentar_de_novo()}</button>
   {:else}
-    <div class="lista">
-      {#each visiveis as c (c.chave)}
-        <LinhaConfig campo={c} {store} veredito={c.veredito} motivo={c.motivo} />
-      {/each}
-    </div>
+    {#if secao === 'jev'}
+      <p class="jev-intro">{m.jev_intro()}</p>
+      <section class="jev-section" aria-labelledby="jev-browser">
+        <h3 id="jev-browser">{m.jev_browser_title()}</h3>
+        <p class="ajuda">{m.jev_browser_help()}</p>
+        {#each visiveis.filter((c) => c.chave === 'jev_api_key' || c.chave === 'jev_padrao') as c (c.chave)}
+          <LinhaConfig campo={c} {store} />
+        {/each}
+        <details class="jev-details">
+          <summary>{m.jev_advanced()}</summary>
+          {#each visiveis.filter((c) => c.chave === 'jev_endpoint' || c.chave === 'jev_model') as c (c.chave)}
+            <LinhaConfig campo={c} {store} />
+          {/each}
+          <h4>{m.jev_text_title()}</h4>
+          <p class="ajuda">{m.jev_text_help()}</p>
+          {#each visiveis.filter((c) => c.chave.startsWith('jev_texto_')) as c (c.chave)}
+            <LinhaConfig campo={c} {store} />
+          {/each}
+        </details>
+      </section>
+      <section class="jev-section" aria-labelledby="jev-windows">
+        <h3 id="jev-windows">{m.jev_windows_title()}</h3>
+        <p class="ajuda">{m.jev_windows_help()}</p>
+        {#if store.campos.jev_windows_api_key?.erro}
+          <p class="aviso erro" role="alert">{store.campos.jev_windows_api_key.erro}</p>
+        {/if}
+        {#if store.campos.jev_windows_api_key}
+          {#each visiveis.filter((c) => c.chave === 'jev_windows_api_key') as c (c.chave)}
+            <LinhaConfig campo={c} {store} />
+          {/each}
+        {:else}
+          <p class="aviso">{m.jev_windows_update_required()}</p>
+        {/if}
+      </section>
+    {:else}
+      <div class="lista">
+        {#each visiveis as c (c.chave)}
+          <LinhaConfig campo={c} {store} veredito={c.veredito} motivo={c.motivo} />
+        {/each}
+      </div>
+    {/if}
 
     {#if secao === 'avancado'}
       <div class="raizes">
@@ -323,6 +359,13 @@
   .push { padding-top: 0; }
   .cfg-head h2 { margin: 0; font-size: var(--text-lg); font-weight: 600; color: var(--text-primary); }
 
+  .jev-intro { max-width: 65ch; color: var(--text-secondary); font-size: var(--text-sm); line-height: 1.5; }
+  .jev-section { margin-top: var(--space-5); }
+  .jev-section h3, .jev-section h4 { margin: 0 0 var(--space-2); font-size: var(--text-base); color: var(--text-primary); }
+  .jev-section h4 { margin-top: var(--space-4); font-size: var(--text-sm); }
+  .jev-details { margin-top: var(--space-3); }
+  .jev-details summary { cursor: pointer; color: var(--text-secondary); font-size: var(--text-sm); padding: var(--space-2) 0; }
+  .jev-details summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
   .lista { display: flex; flex-direction: column; }
   /* "editado" = veio de override, não do .env — sem isso não dá pra saber de onde o valor vem.
      Usada nas raízes mapeadas (badge de scan_roots, abaixo), fora da lista de campos — por isso

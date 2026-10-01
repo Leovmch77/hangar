@@ -569,6 +569,9 @@ Os servidores offline ficam em um resumo recolhido; expandi-lo não dispara cons
 
 ## Dois clientes desktop: o PWA no Electron e o app nativo em Rust (27/09/2026)
 
+Registro histórico: a exigência de paridade abaixo foi substituída pela decisão
+[Desktop no Rust; web para PWA/mobile](#desktop-no-rust-web-para-pwamobile).
+
 Com o app nativo (`desktop-native/`, Rust/GPUI) publicado na release `native-latest`, o desktop
 passou a ter dois clientes do mesmo backend: o front web (`frontend/`), que o Electron de `shell/`
 carrega, e o nativo. Toda mudança agora tem dois lugares para entrar, e sem regra os dois se
@@ -609,6 +612,24 @@ O plano original da troca, mantido como registro:
   nova.
 - Antes: fechar ou aceitar por escrito as linhas `pendente` de `chat-parity.md` e os módulos
   listados ali como fora do nativo (terminal, navegador, Git completo, voz, Board/Canvas).
+
+## Desktop no Rust; web para PWA/mobile
+
+30/09/2026. Jefferson definiu a descontinuação gradual do Electron/desktop web.
+Toda alteração voltada ao desktop passa a ser feita no cliente Rust (`desktop-native/`).
+A web (`frontend/`) continua recebendo o que precisa funcionar no celular, pelo navegador
+ou como PWA, sem exigir tela, layout ou implementação equivalente para desktop web.
+O aplicativo móvel Expo (`mobile/`) continua com seu escopo próprio.
+
+Isso substitui a obrigação de alterar `Sidebar` e `SessionList` juntas e a paridade
+bidirecional entre desktop web e Rust. Pendências de implementação no desktop web em
+`desktop-native/docs/chat-parity.md` passam a ser histórico, não exigência para concluir
+trabalhos. Recursos móveis continuam sendo implementados nos clientes móveis pertinentes.
+
+O pedido muda a direção do desenvolvimento; não remove o Electron nem telas existentes.
+Código compartilhado deve preservar os usos atuais. API e textos seguem compartilhados
+com o Rust; `packages/core` continua servindo web e Expo. Dependências ainda atendidas pelo
+Electron permanecem até substituição ou remoção explicitamente autorizada.
 
 ## Navegador do app nativo: CDP dentro do processo no Windows (29/09/2026)
 

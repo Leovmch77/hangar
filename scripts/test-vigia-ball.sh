@@ -212,11 +212,11 @@ M=100 CICLOS=6 vigia
 [ "$(grep -c "^- [^·]* · aviso: \[aviso\] \[vigia\] alarm dropped after 3 failed deliveries: .*Account out of quota" "$d/registro.md")" -eq 1 ] \
   || fail "o alarme largado não deixou um [aviso] no registro"
 
-# Arrumação: executor de Task fechada que está idle fecha depois da janela, uma vez, pela API com
+# Arrumação: executor e revisor de Task fechada idle fecham depois da janela pela API com
 # ?by=<árbitro>; quem trabalha não fecha; --no-housekeeping desliga; falha para em 3 com [aviso].
 closes() { grep -c "DELETE http://127.0.0.1:8765/api/sessions/$1?by=arb\$" "$t/urls" || true; }
 finished() {  # exec1 fechou a Task 1 e está idle; exec2 fechou a Task 2 e trabalha
-  printf '%s' '[{"name":"exec1","state":"idle","jsonl":"'"$t/exec1.jsonl"'"},{"name":"exec2","state":"working","last_activity":9999999999},{"name":"rev1","state":"idle"},{"name":"arb","state":"idle"}]' > "$t/sessions.json"
+  printf '%s' '[{"name":"exec1","state":"idle","jsonl":"'"$t/exec1.jsonl"'"},{"name":"exec2","state":"working","last_activity":9999999999},{"name":"rev1","state":"idle","provider":"pi"},{"name":"arb","state":"idle"}]' > "$t/sessions.json"
   novo "$1"
   orq event task_inicio --task 1 --titulo x --executor exec1 --par rev1
   orq event task_inicio --task 2 --titulo y --executor exec2 --par rev1
@@ -238,9 +238,23 @@ launch() {
 finished fecha
 INTERVALO=1 CICLOS=3 CLOSE_IDLE_S=2 vigia
 [ "$(closes exec1)" -eq 1 ] || fail "exec1 ociosa não foi fechada exatamente uma vez depois da janela"
+[ "$(closes rev1)" -eq 1 ] || fail "rev1 de Tasks fechadas não foi fechada depois da janela"
 [ "$(closes exec2)" -eq 0 ] || fail "fechou sessão trabalhando"
 if grep -q -- '--close' "$t/sent.log"; then fail "fechou por hangar-send em vez da API"; fi
 grep -q "closed session: exec1 (Task 1 closed)" "$d/registro.md" || fail "fechamento sem linha no registro"
+
+finished revisor-outro-grupo
+orq event execucao_inicio --plano "$t/orq-plano.md" --branch main --gid g1
+printf '%s' '[{"name":"exec1","state":"idle","provider":"pi","pair_gid":"g1"},{"name":"rev1","state":"idle","provider":"pi","pair_gid":"g2"},{"name":"arb","state":"idle","pair_gid":"g1"}]' > "$t/sessions.json"
+CLOSE_IDLE_S=0 CICLOS=3 vigia
+[ "$(closes exec1)" -ge 1 ] || fail "não fechou executor do próprio grupo"
+[ "$(closes rev1)" -eq 0 ] || fail "fechou revisor movido para outro grupo"
+[ "$(grep -c 'aviso: \[aviso\] closure skipped: rev1 is in another group (g2)' "$d/registro.md")" -eq 1 ] || fail "proteção de outro grupo não deixou aviso único"
+
+finished revisor-ainda-ativo
+orq event task_inicio --task 3 --titulo z --executor exec3 --par rev1
+CLOSE_IDLE_S=0 CICLOS=3 vigia
+[ "$(closes rev1)" -eq 0 ] || fail "fechou revisor que ainda possui Task aberta"
 
 # Subagente de fundo lançado e sem notificação: não fecha. Notificado, fecha. Bash de fundo não
 # notificado não segura o fechamento.

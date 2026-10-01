@@ -8,6 +8,7 @@
   import { onMount } from 'svelte';
 import * as m from '../paraglide/messages';
   import HangarMark from '../components/icons/HangarMark.svelte';
+  import HangarRunning from '../components/HangarRunning.svelte';
   import GroupGlyph from '../components/icons/GroupGlyph.svelte';
   import SessionCard from '../components/SessionCard.svelte';
   import CreateSessionSheet from '../components/CreateSessionSheet.svelte';
@@ -24,6 +25,8 @@ import * as m from '../paraglide/messages';
   import { sessionsStore } from '../lib/sessionsStore.svelte';
   import { createSessionListModel, groupItems, pairCodigo, pairResto } from '../lib/sessionListModel.svelte';
   import { countAwaiting, fmtWhen, initials, clusterByPair } from '@hangar/core';
+  import ConversationList from '../components/ConversationList.svelte';
+  import { sessionOrganization } from '../lib/sessionOrganization.svelte';
   import { updateBadge } from '../lib/badge';
   import { arrastarGrupo, mensagemRecusa, type ChaveSessao } from '../lib/arrastarGrupo.svelte';
   import { dragChave, resolveDrop, autoScrollDir } from '../lib/dragToGroup';
@@ -32,8 +35,9 @@ import * as m from '../paraglide/messages';
     onNavigateToChat: (name: string) => void;
     onCompare: (ids: { serverId: string; name: string }[]) => void;
     onLogout: () => void;
+    onOpenTerminal?: (serverId: string, owner: string, id: string) => void;
   }
-  let { onNavigateToChat, onCompare, onLogout }: Props = $props();
+  let { onNavigateToChat, onCompare, onLogout, onOpenTerminal }: Props = $props();
 
   // Toda a lógica da lista (grupos, filtro, seleção/broadcast, ações) mora no modelo compartilhado
   // com a Sidebar; aqui fica só o chrome do celular (drawer, feed, scroll, Loop) e os embrulhos.
@@ -96,6 +100,12 @@ import * as m from '../paraglide/messages';
     };
   });
 
+  // Viva de qualquer servidor: a rota com servidor, depois de apontar o ativo pra ele.
+  function openConversationLive(serverId: string, name: string) {
+    selectServer(serverId);
+    window.location.hash = `#/chat/${encodeURIComponent(serverId)}/${encodeURIComponent(name)}`;
+  }
+
   // Renomear servidor: o AccountMenu cuida da UI inline; aqui só persistimos e mandamos o store
   // recarregar a lista de servidores pra os badges das sessões pegarem o nome novo.
   function onRenameServer(id: string, label: string) {
@@ -105,10 +115,10 @@ import * as m from '../paraglide/messages';
 
   // Trocar o token de um servidor já cadastrado (rotação de CP_AUTH_TOKEN, sem remover+re-parear).
   // Aceita o token cru OU a URL de pareamento inteira — mesmo parse do fluxo de adicionar.
-  function onUpdateServerToken(id: string, token: string): boolean {
-    // Só o token: o AccountMenu já extraiu e validou (inclusive o caso "URL de pareamento de outro
-    // host", que NÃO reaponta o servidor — o botão promete trocar token, não endereço).
-    const ok = updateServer(id, { token });
+  function onUpdateServerToken(id: string, token: string, baseUrl?: string): boolean {
+    // O endereço só chega aqui depois de a folha conferir que é a mesma máquina. URL de pareamento
+    // colada no campo do token continua sem reapontar o servidor.
+    const ok = updateServer(id, { token, baseUrl });
     if (!ok) return false;                      // servidor sumiu: quem avisa é o AccountMenu
     sessionsStore.refreshServers();
     // reconnect, não só refresh: os SSE abertos seguem autenticados com o token ANTIGO até serem
@@ -413,17 +423,27 @@ import * as m from '../paraglide/messages';
       </svg>
     </button>
     <span class="sl-brand"><HangarMark size={18} arcs={2} /> Hangar</span>
-    <button
-      class="sl-icon-btn"
-      class:active={model.selectMode}
-      onclick={toggleSelectMode}
-      aria-label={model.selectMode ? m.lista_cancelar_selecao() : m.sessao_selecionar()}
-      title={model.selectMode ? m.lista_cancelar_selecao() : m.lista_selecionar_broadcast()}
-    >
-      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-        <path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>
-      </svg>
-    </button>
+    <HangarRunning {onOpenTerminal} />
+    <!-- Sem seleção em lote nem atalho de nova conversa aqui: a lista de conversas já traz o seu. -->
+    {#if sessionOrganization.mode !== 'conversations'}
+      <button type="button" class="sl-icon-btn" onclick={() => { window.location.hash = '#/'; }}
+        aria-label={m.conversas_nova()} title={m.conversas_nova()}>
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+          <path d="M12 5v14M5 12h14"/>
+        </svg>
+      </button>
+      <button
+        class="sl-icon-btn"
+        class:active={model.selectMode}
+        onclick={toggleSelectMode}
+        aria-label={model.selectMode ? m.lista_cancelar_selecao() : m.sessao_selecionar()}
+        title={model.selectMode ? m.lista_cancelar_selecao() : m.lista_selecionar_broadcast()}
+      >
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>
+        </svg>
+      </button>
+    {/if}
   </header>
 
   <div
@@ -432,6 +452,9 @@ import * as m from '../paraglide/messages';
     bind:this={listEl}
     onscroll={onListScroll}
   >
+    {#if sessionOrganization.mode === 'conversations'}
+      <ConversationList onNavigateToChat={openConversationLive} />
+    {:else}
     <!-- "Precisa de você" (feature #6): fila fixa no topo com as sessoes AGUARDANDO de TODOS os
          servidores. Responder aqui (picker inline) nao abre o chat; nativo AskUserQuestion abre. -->
     <AttentionFeed {sessions} onOpenChat={openSession} />
@@ -571,7 +594,6 @@ import * as m from '../paraglide/messages';
                         onRename={(nv) => handleRename(session, nv)}
                         onGit={() => handleGit(session)}
                         onGroupDrag={(phase, e) => onCardGroupDrag(session, phase, e)}
-                        showProvider={model.showProviderTags}
                         selectMode={model.selectMode}
                         selected={model.selected.has(`${session.serverId}:${session.name}`)}
                         onToggleSelect={() => model.toggleSelected(`${session.serverId}:${session.name}`)}
@@ -626,7 +648,6 @@ import * as m from '../paraglide/messages';
               onRename={(nv) => handleRename(session, nv)}
               onGit={() => handleGit(session)}
               onGroupDrag={(phase, e) => onCardGroupDrag(session, phase, e)}
-              showProvider={model.showProviderTags}
               selectMode={model.selectMode}
               selected={model.selected.has(`${session.serverId}:${session.name}`)}
               onToggleSelect={() => model.toggleSelected(`${session.serverId}:${session.name}`)}
@@ -636,6 +657,7 @@ import * as m from '../paraglide/messages';
           {/each}
         {/if}
       {/if}
+    {/if}
     {/if}
   </div>
 

@@ -15,10 +15,12 @@ Red baseline → the user decides before anything opens.
 
 Then, specific to this skill:
 
-1. `## Quem é quem` has the rows the orchestrator opens, with `papel` written exactly
-   `executor` and, on `Revisão: sessão`, exactly `revisor`; each `abertura` cell complete; the
-   `executor` row's `sessão` ending in `*`. Missing or wrong → fix the contract with the user;
-   the launch waits.
+1. `## Quem é quem` has one row per role the run opens: the orchestrator's, with `papel` written
+   exactly `executor` and, on `Revisão: sessão`, exactly `revisor`, plus final review and
+   retrospective; each `abertura` cell complete and a combination the session creator accepts
+   (a read-only role never carries `--headless`); the `executor` row's `sessão` ending in `*`.
+   Missing or wrong → fix the contract with the user now, not when the phase arrives; the
+   launch waits.
 2. The orchestration plan is stamped (`orq plan-check <plan> --repo <repo> --stamp`) and states
    `Paralelo:`, `Integração:`, the additive files and the a-priori estimate.
 3. Triage mode: `--jev on --regex shadow`, unless the user said otherwise. The Jev was measured
@@ -35,14 +37,28 @@ Create the orchestration group with you as its only member; open no session for 
 hangar-send --pair --orq "<work> — each session's role is in the regras-<gid>.md contract"
 ```
 
-Read the `gid` in your own sidecar. An `--orq` group lives with one member while its auto run
-is alive; the sessions the orchestrator opens join it through the watchdog.
+Read the gid from your sidecar. If the team was configured in another planner session, link
+its record to this group through the authenticated API:
+
+```http
+POST /api/sessions/<work-session>/orq/grupo
+Content-Type: application/json
+
+{"gid":"<real-gid>","mtime":<mtime-read-from-GET-orq>}
+```
+
+Do this before writing the destination contract's other sections. A conflict returns 409:
+re-read the current record, without copying an old table or replacing choices. The founder's
+own draft is linked when the group is created. Then read GET /orq again and use the returned
+file; planner and arbiter use the same record. The one-member orq group stays alive during
+auto execution; the watchdog joins sessions opened by the program.
 
 Done when your sidecar carries the `gid` and the `orq` mark.
 
 ## 3. Contract, init, start event
 
-1. Write `<config>/.hangar-pair/regras-<gid>.md` (skeleton in
+1. Complete the current record linked to `regras-<gid>.md`, preserving its team table
+   (skeleton in
    `~/.claude/skills/orquestrar/references/planejamento-equipe.md`; first lines in
    `~/.claude/skills/orquestrar/references/arbitro.md`, "The four files"), adding under them:
 
@@ -79,7 +95,8 @@ systemd-run --user --unit=vigia-<gid> --property=Restart=always --property=Resta
 
 Its round also runs `orq advance`. Proof: the `[vigia] ARMED …` prompt arrives in your session
 within 2 min; `active` is not proof. Never stop it to ask the user something: ask in text with a
-default and let the orchestrator go on. It stops for good only after `execucao_fim`.
+default and let the orchestrator go on. Disarm only after execucao_fim and confirmation
+that completed candidates were closed or have an explicitly recorded impediment.
 
 ## 5. Hand over
 

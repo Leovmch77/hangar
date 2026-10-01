@@ -4,6 +4,7 @@ O registry so enxerga sessoes tmux; os jsonl antigos ficam orfaos. Aqui: listage
 data, se esta em uso por uma sessao viva) + resolucao de path VALIDADA (nunca leitura arbitraria de
 disco: projeto no alfabeto do sanitize_cwd, session_id uuid, e o arquivo tem que existir dentro do
 projects_dir)."""
+import heapq
 import json
 import logging
 import os
@@ -227,8 +228,26 @@ def _projeto_de(cwd: Optional[str]) -> Optional[str]:
 
 
 def _conversas_de_outros_providers():
-    from app import archive_providers
+    from app import archive_providers, transcript_index
+    idx = transcript_index.current()
+    # A varredura de Pi/Kimi/Codex custa mais que o resto da listagem: vale a da ultima passada do
+    # indice (conversa nova aparece com no maximo um intervalo de atraso).
+    if idx is not None and idx.providers is not None:
+        return idx.providers
     return archive_providers.conversas()
+
+
+def _heads() -> dict[str, tuple[str, Optional[str]]]:
+    """Cabecalhos (preview, cwd) ja lidos pelo indice; arquivo fora dele cai no _head_info."""
+    from app import transcript_index
+    idx = transcript_index.current()
+    if idx is None:
+        return {}
+    try:
+        return idx.heads()
+    except Exception:
+        _log.warning("arquivo: indice ilegivel, lendo cabecalhos do disco", exc_info=True)
+        return {}
 
 
 def list_folders(config_dir: Optional[str] = None) -> list[ArchiveFolder]:
@@ -236,6 +255,7 @@ def list_folders(config_dir: Optional[str] = None) -> list[ArchiveFolder]:
     costuma existir em varias contas -- aqui elas somam numa linha so (a pasta e o que o usuario
     procura; de qual conta e cada conversa so importa um nivel abaixo)."""
     agg: dict[str, ArchiveFolder] = {}
+    heads = _heads()
     for _cfg, _rot, base in _contas(config_dir):
         try:
             projdirs = [d for d in base.iterdir() if d.is_dir()]
@@ -245,7 +265,8 @@ def list_folders(config_dir: Optional[str] = None) -> list[ArchiveFolder]:
             files = _folder_files(proj)
             if not files:
                 continue
-            _, cwd = _head_info(files[0][1])   # cwd real do transcript mais recente (1 leitura/pasta)
+            # cwd real do transcript mais recente (1 leitura/pasta quando o indice ainda nao tem)
+            _, cwd = heads.get(str(files[0][1])) or _head_info(files[0][1])
             ja = agg.get(proj.name)
             if ja is None:
                 agg[proj.name] = ArchiveFolder(project=proj.name, cwd=cwd, count=len(files),
@@ -310,8 +331,9 @@ def list_conversations(project: str, live_realpaths: set[str], cap: int = 100,
     if provider is not None and provider != "claude":
         linhas = []
     out: list[ArchiveEntry] = []
+    heads = _heads() if linhas else {}
     for mt, f, cfg, rotulo in linhas[:cap]:
-        preview, cwd = _head_info(f)
+        preview, cwd = heads.get(str(f)) or _head_info(f)
         out.append(ArchiveEntry(
             project=project, cwd=cwd, session_id=f.stem, mtime=mt,
             preview=preview, ultima=_tail_info(f), config_dir=cfg, conta=rotulo,
@@ -336,6 +358,34 @@ def list_conversations(project: str, live_realpaths: set[str], cap: int = 100,
             codex_home=c.codex_home if c.provider == "codex" else None,
             codex_account=owner.id if owner is not None else None,
         ))
+    out.sort(key=lambda e: e.mtime, reverse=True)
+    return out[:cap]
+
+
+def list_recent(live_realpaths: set[str], cap: int = 40) -> list[ArchiveEntry]:
+    """Conversas mais recentes de TODAS as pastas. Duas fases: uma varredura barata (so mtime) acha
+    de quais pastas vem as `cap` mais novas e quantas de cada; so entao se le o preview/fim delas."""
+    candidatas: list[tuple[float, str]] = []
+    for _cfg, _rot, base in _contas():
+        try:
+            projdirs = [d for d in base.iterdir() if d.is_dir()]
+        except OSError:
+            continue
+        for proj in projdirs:
+            candidatas += [(mt, proj.name) for mt, _f in _folder_files(proj)]
+    for c in _conversas_de_outros_providers():
+        proj = _projeto_de(c.cwd)
+        if proj is not None:
+            candidatas.append((c.mtime, proj))
+    por_pasta: dict[str, int] = {}
+    for _mt, proj in heapq.nlargest(cap, candidatas, key=lambda t: t[0]):
+        por_pasta[proj] = por_pasta.get(proj, 0) + 1
+    out: list[ArchiveEntry] = []
+    for proj, k in por_pasta.items():
+        try:
+            out += list_conversations(proj, live_realpaths, cap=k)
+        except (ValueError, FileNotFoundError):
+            continue
     out.sort(key=lambda e: e.mtime, reverse=True)
     return out[:cap]
 

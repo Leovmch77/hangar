@@ -59,6 +59,13 @@ class Bundle:
     items: dict[str, dict] = field(default_factory=dict)
     files: dict[str, FileBlob] = field(default_factory=dict)
     warnings: dict[str, list[dict]] = field(default_factory=dict)
+    progress: object = None
+
+
+def _emit(progress, phase: str, item: str | None = None, entry: str | None = None,
+          **extra) -> None:
+    if progress:
+        progress({"phase": phase, "item": item, "entry": entry, **extra})
 
 
 class BundleError(Exception):
@@ -246,6 +253,7 @@ def _export_dir_item(roots: Roots, item: str, bundle: Bundle, keep: set[str] | N
     for name, path in _entries(roots, item, warnings).items():
         if keep is not None and name not in keep:
             continue
+        _emit(bundle.progress, "read", item, name)
         files, texts = _walk(path, roots, name, warnings)
         for rel, blob in files.items():
             bundle.files[_member(item, name, rel)] = blob
@@ -524,9 +532,11 @@ def _item_bytes(bundle: Bundle, item: str) -> int:
 
 
 def export_bundle(roots: Roots, items, *, limit: bool = True,
-                  keep: dict[str, list[str]] | None = None) -> Bundle:
-    bundle = Bundle()
-    for item in items:
+                  keep: dict[str, list[str]] | None = None, progress=None) -> Bundle:
+    bundle = Bundle(progress=progress)
+    items = list(items)
+    for index, item in enumerate(items):
+        _emit(progress, "read", item, index=index, total=len(items))
         try:
             chosen = set(keep[item]) if keep and item in keep else None
             bundle.items[item] = _EXPORTERS[item](roots, bundle, chosen)
@@ -542,10 +552,10 @@ def export_bundle(roots: Roots, items, *, limit: bool = True,
     return bundle
 
 
-def manifest(roots: Roots) -> dict:
+def manifest(roots: Roots, progress=None) -> dict:
     """Só impressões digitais, na forma canônica: duas máquinas com a mesma configuração dão os
     mesmos hashes mesmo com casas diferentes. Nada de conteúdo, nem de segredo."""
-    bundle = export_bundle(roots, ITEMS, limit=False)
+    bundle = export_bundle(roots, ITEMS, limit=False, progress=progress)
     return {"version": VERSION, "items": {
         item: {"ok": item in bundle.items,
                "hashes": (bundle.items.get(item) or {}).get("hashes", {}),
@@ -619,6 +629,7 @@ class _Apply:
     report: dict[str, dict]
     bundle: Bundle
     runner: object = None
+    progress: object = None
 
 
 def _result(ctx: _Apply, item: str) -> dict:
@@ -779,6 +790,7 @@ def _apply_dir_item(ctx: _Apply, item: str) -> None:
             continue
         if folder == "hooks" and base in own_hooks:
             continue
+        _emit(ctx.progress, "apply", item, name)
         texts = set(entry.get("text") or [])
         files = {rel: _blob(ctx, _member(item, name, rel), rel in texts) for rel in rels}
         if _write_entry(Path(ctx.roots.claude) / name, entry.get("kind", "dir"), files, ctx,
@@ -1050,6 +1062,7 @@ def _install_plugins(ctx: _Apply) -> None:
         if not arg:
             res["warnings"].append(_warn("config_sync_marketplace_unknown", marketplace=name))
             continue
+        _emit(ctx.progress, "install", "claude_plugins", f"marketplace:{name}")
         ok, detail = runner([claude, "plugin", "marketplace", "add", arg])
         if ok:
             res["changed"].append(f"marketplace:{name}")
@@ -1059,6 +1072,7 @@ def _install_plugins(ctx: _Apply) -> None:
     for plugin, enabled in sorted((data.get("enabledPlugins") or {}).items()):
         if not enabled or plugin in installed:
             continue
+        _emit(ctx.progress, "install", "claude_plugins", f"plugin:{plugin}")
         ok, detail = runner([claude, "plugin", "install", plugin])
         if ok:
             res["changed"].append(f"plugin:{plugin}")
@@ -1140,12 +1154,15 @@ async def _after_apply(ctx: _Apply, items: list[str]) -> None:
 
     touched = [i for i in ("claude_skills", "claude_hooks", "claude_plugins") if i in items]
     if touched:
+        _emit(ctx.progress, "after", touched[0], "skill_bridge")
         await step(touched[0], "skill_bridge", bridge)
     if "claude_hooks" in items:
+        _emit(ctx.progress, "after", "claude_hooks", "hangar_hooks")
         for name in _HANGAR_HOOK_INSTALLERS:
             await step("claude_hooks", name,
                        lambda name=name: asyncio.to_thread(getattr(hook_installer, name)))
     if "codex" in items and runtime_config.get("codex_sync"):
+        _emit(ctx.progress, "after", "codex", "codex_integration")
         from app import codex_integracao
         await step("codex", "codex_integracao",
                    lambda: codex_integracao.SERVICO.iniciar("config_sync", True))
@@ -1172,13 +1189,14 @@ def _new_backups(roots: Roots) -> Path:
 
 
 async def apply_bundle(bundle: Bundle, items: list[str], roots: Roots, *, runner=None,
-                       after=None) -> dict:
+                       after=None, progress=None) -> dict:
     """Aplica os itens escolhidos, na ordem de ITEMS. Item que quebra vira `failed` no relatório
     e os outros seguem: parar no meio deixaria a máquina pela metade sem dizer o quê."""
     ctx = _Apply(roots=roots, backups=_new_backups(roots), report={}, bundle=bundle,
-                 runner=runner)
+                 runner=runner, progress=progress)
     chosen = [i for i in ITEMS if i in items]
-    for item in chosen:
+    for index, item in enumerate(chosen):
+        _emit(progress, "apply", item, index=index, total=len(chosen))
         res = _result(ctx, item)
         applier = _APPLIERS.get(item)
         if item not in bundle.items or applier is None:

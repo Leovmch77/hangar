@@ -89,6 +89,7 @@ EDITAVEIS: dict[str, type] = {
     # navegador — so aqui a escolha vale nos tres. Quem pede explicito (`--jev`, `jev=true`)
     # continua vencendo naquela sessao, sem mexer neste padrao.
     "jev_padrao": bool,
+    "headless_default": bool,
     # Onde e com qual modelo o Jev decide. Vazio = a API da typesafe com o modelo padrão de cada
     # consumidor; o OpenRouter serve o mesmo Jev com o mesmo corpo em outro endereço.
     "jev_endpoint": str,
@@ -115,13 +116,13 @@ EDITAVEIS: dict[str, type] = {
 # Explícito mesmo quando o nome já casaria com `_PALAVRAS_DE_SEGREDO`: depender do acaso do nome
 # quebra calado no dia em que alguém renomeia o campo.
 SEGREDOS = {"groq_api_key", "elevenlabs_api_key", "llm_api_key", "llm_briefing_api_key",
-            "jev_api_key", "jev_texto_api_key"}
+            "jev_api_key", "jev_texto_api_key", "jev_windows_api_key"}
 
-# Campo que a tela edita mas que NÃO mora neste arquivo: a verdade é o `settings.json` do Claude
-# Code, porque quem o lê é o `claude` na largada da sessão. Guardar uma cópia aqui daria dois
-# valores divergindo assim que alguém editasse aquele arquivo à mão. Ver app/pensamento.py.
+# Campos lidos pelo Claude ao abrir a sessão: ficam nos arquivos dele para não manter
+# duas cópias que divergem quando a pessoa edita a configuração à mão.
 EXTERNOS: dict[str, type] = {
     "mostrar_pensamento": bool,   # settings.json["showThinkingSummaries"]
+    "jev_windows_api_key": str,  # TYPESAFE_API_KEY do MCP Windows, ativo ou guardado
 }
 
 _ARQUIVO = "runtime-config.json"
@@ -277,6 +278,11 @@ def validate_shortcut_item(item: Any, where: str) -> None:
             raise ValueError(f"{where} (shell) sem comando")
     else:
         raise ValueError(f"{where} tem type desconhecido '{kind}'")
+    if item.get("runs_in") is not None and (kind != "shell" or item["runs_in"] not in ("session", "hangar")):
+        raise ValueError(f"{where} tem runs_in invalido (so em atalho shell: 'session' ou 'hangar')")
+    for flag in ("hangar_home", "answer_in_app"):
+        if item.get(flag) is not None and (kind != "shell" or not isinstance(item[flag], bool)):
+            raise ValueError(f"{where} tem {flag} invalido (so em atalho shell, verdadeiro ou falso)")
     if kind in ("send_text", "shell") and (
         not isinstance(item.get("label"), str) or not item["label"].strip()
     ):
@@ -406,7 +412,8 @@ def _aplicar_travado(mudancas: dict[str, Any], remover: set[str]) -> dict[str, A
     # e gravar depois deixa os dois arquivos combinando com o que a tela diz.
     for campo, valor in externos.items():
         if not isinstance(valor, EXTERNOS[campo]):
-            raise ValueError(f"{campo}: esperado true/false")
+            esperado = "true/false" if EXTERNOS[campo] is bool else "texto"
+            raise ValueError(f"{campo}: esperado {esperado}")
     # Escreve o EXTERNO primeiro. Não há como comitar dois arquivos junto, então a ordem escolhe
     # qual falha deixa a máquina inteira. A falha realista aqui é o settings.json ilegível — e
     # nessa ordem ela para tudo antes de gravar qualquer coisa. A ordem contrária gravaria o
@@ -441,6 +448,15 @@ def _gravar_externo(campo: str, valor: Any) -> None:
     Erro de escrita SOBE (vira 400 na tela) em vez de virar log: o interruptor tem que dizer que
     não pegou, senão a pessoa acha que ligou o resumo e a próxima sessão nasce sem ele.
     """
+    if campo == "jev_windows_api_key":
+        from app import computer_control
+        try:
+            key = valor.strip()
+            if key and key != mascarar(computer_control.jev_key()):
+                computer_control.save_jev_key(key)
+        except (OSError, computer_control.ComputerControlError) as e:
+            raise ValueError(f"{campo}: {e}") from e
+        return
     if not isinstance(valor, bool):
         raise ValueError(f"{campo}: esperado true/false")
     from app import pensamento
@@ -470,4 +486,14 @@ def estado() -> dict[str, Any]:
         # ela o Claude Code trata como desligado, que é o "padrão" desta máquina.
         "origem": "app" if pensamento.definido() else "env",
     }
+    from app import computer_control
+    try:
+        key = computer_control.jev_key()
+        out["jev_windows_api_key"] = {
+            "valor": mascarar(key), "definido": bool(key), "origem": "app",
+        }
+    except computer_control.ComputerControlError as e:
+        out["jev_windows_api_key"] = {
+            "valor": "", "definido": False, "origem": "app", "erro": str(e),
+        }
     return out

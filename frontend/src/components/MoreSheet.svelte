@@ -4,7 +4,7 @@
   import ShortcutTiles from './ShortcutTiles.svelte';
   import ShortcutTransfer from './ShortcutTransfer.svelte';
   import { desktop } from '../lib/desktop.svelte';
-  import type { ShortcutSendText, ShortcutShell } from '@hangar/core';
+  import type { LiveShortcutTerminal, ShortcutSendText, ShortcutShell } from '@hangar/core';
   import type { CustomScoped } from '../lib/shortcuts.svelte';
 
   // Acoes que saíram da NavBar do CELULAR pro menu "⋯". Elas custavam 80px fixos da barra e sao de
@@ -18,6 +18,10 @@
     shortcuts?: CustomScoped[];
     projectName?: string;
     projectError?: string;
+    projectKey?: string;
+    sessionName?: string;
+    hangarOf?: (key: string) => LiveShortcutTerminal | null;
+    sessionTerminal?: (key: string) => LiveShortcutTerminal | null;
     onShortcut?: (s: ShortcutSendText | ShortcutShell) => void;
     onEditShortcuts?: () => void;
     onRun?: () => void;           // ausente = sessão sem workflow (orquestrador)
@@ -41,7 +45,8 @@
   }
   let {
     open, onClose, onRun, runRunning = false,
-    shortcuts = [], projectName = '', projectError = '', onShortcut = undefined, onEditShortcuts = undefined,
+    shortcuts = [], projectName = '', projectError = '', projectKey = undefined, sessionName = undefined,
+    hangarOf = undefined, sessionTerminal = undefined, onShortcut = undefined, onEditShortcuts = undefined,
     onActivity, activityRunning = false, activityBadge = 0, onAttachments, onBastao, onShare,
     onTrocarModo, modoDestinoTerminal = false, modoBloqueado = false,
     onRecarregar, recarregarBloqueado = false,
@@ -61,7 +66,8 @@
          fixas abaixo, como no painel do desktop e no app nativo. -->
     {#if (shortcuts.length || projectError) && onShortcut}
       <div class="more-acoes">
-        <ShortcutTiles {shortcuts} {projectName} {projectError} onShortcut={(s) => pick(() => onShortcut?.(s))}
+        <ShortcutTiles {shortcuts} {projectName} {projectError} {projectKey} {sessionName} {hangarOf} {sessionTerminal}
+                       onShortcut={(s) => pick(() => onShortcut?.(s))}
                        onAdd={onEditShortcuts ? () => pick(onEditShortcuts) : undefined}>
           {#snippet extra()}<ShortcutTransfer compact />{/snippet}
         </ShortcutTiles>

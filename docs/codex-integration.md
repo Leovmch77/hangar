@@ -118,7 +118,11 @@ As compatibilidades próprias do Hangar ficam em `backend/app/codex_compat.py` e
   cria `AGENTS.override.md` como link para a fonte, no Codex home (global) e nos escopos dos
   projetos registrados no `config.toml`. O lançador prepara também o cwd novo, antes do
   app-server. O conteúdo é carregado pelo Codex, sem ordem de leitura nem hook de contexto.
-  `AGENTS.md` permanece intacto; um override pessoal preexistente é preservado com erro explícito.
+  `AGENTS.md` permanece intacto. Com a sincronização ativada no menu Harness, o Claude é a fonte:
+  um override preexistente ou alterado é atualizado, com backup restrito do conteúdo substituído.
+  A preparação automática não altera aliases com a sincronização desligada; Reconciliar
+  manualmente é autorização explícita para atualizar. Sem fonte Claude, um arquivo pessoal
+  independente continua preservado.
   A ordem de leitura gerenciada antiga é removida do `AGENTS.md` global, com backup.
 - Os aliases são locais à instalação e não devem ser commitados: o Hangar os grava no
   `.git/info/exclude` do repositório, então não aparecem no `git status`. Para abrir pelo IDE/CLI cru

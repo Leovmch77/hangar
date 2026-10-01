@@ -213,7 +213,7 @@ def ensure_state_hooks_installed() -> list[str]:
     """Instala (idempotente) o state_hook nos 5 eventos, em cada config dir. Fail-soft por arquivo;
     nunca derruba o startup. Retorna os dirs onde gravou (so pra log)."""
     try:
-        dirs = {Path(c.path) for c in list_config_dirs()} | {_backend_config_base().resolve()}
+        dirs = {Path(c.path) for c in list_config_dirs(ordered=False)} | {_backend_config_base().resolve()}
     except Exception:
         return []
     touched: list[str] = []
@@ -243,7 +243,7 @@ def ensure_preview_hook_installed() -> list[str]:
     """Instala (idempotente) o publicador de previa do Claude nos 2 eventos, em cada config dir.
     Fail-soft por arquivo, como os demais. Retorna os dirs onde gravou (so pra log)."""
     try:
-        dirs = {Path(c.path) for c in list_config_dirs()} | {_backend_config_base().resolve()}
+        dirs = {Path(c.path) for c in list_config_dirs(ordered=False)} | {_backend_config_base().resolve()}
     except Exception:
         return []
     touched: list[str] = []
@@ -277,7 +277,7 @@ def ensure_subagent_hook_installed() -> list[str]:
     não duplicar a entrada quando o caminho do repo mudar de lugar.
     """
     try:
-        dirs = {Path(c.path) for c in list_config_dirs()} | {_backend_config_base().resolve()}
+        dirs = {Path(c.path) for c in list_config_dirs(ordered=False)} | {_backend_config_base().resolve()}
     except Exception:
         return []
     touched: list[str] = []
@@ -338,7 +338,7 @@ def ensure_guard_hooks_installed() -> list[str]:
     hangar e justamente a que tem varias sessoes tmux vivas pra perder, e subagente nasce sem
     memoria e sem regra de CLAUDE.md de quem o criou. Fail-soft igual aos outros."""
     try:
-        dirs = {Path(c.path) for c in list_config_dirs()} | {_backend_config_base().resolve()}
+        dirs = {Path(c.path) for c in list_config_dirs(ordered=False)} | {_backend_config_base().resolve()}
     except Exception:
         return []
     touched: list[str] = []
@@ -381,7 +381,7 @@ def ensure_pair_hook_installed() -> list[str]:
     """Instala (idempotente) o reinjetor do protocolo de grupo no SessionStart, em cada config dir.
     Fail-soft por arquivo, como os demais. Retorna os dirs onde gravou (so pra log)."""
     try:
-        dirs = {Path(c.path) for c in list_config_dirs()} | {_backend_config_base().resolve()}
+        dirs = {Path(c.path) for c in list_config_dirs(ordered=False)} | {_backend_config_base().resolve()}
         command = _pair_command()
     except Exception:
         return []
@@ -404,7 +404,7 @@ def ensure_nav_hook_installed() -> list[str]:
     """Instala (idempotente) o aviso de navegador embutido no UserPromptSubmit, em cada config dir.
     A cada prompt, e nao so na abertura: o navegador abre e fecha no meio da sessao."""
     try:
-        dirs = {Path(c.path) for c in list_config_dirs()} | {_backend_config_base().resolve()}
+        dirs = {Path(c.path) for c in list_config_dirs(ordered=False)} | {_backend_config_base().resolve()}
     except Exception:
         return []
     touched: list[str] = []
@@ -423,7 +423,7 @@ def ensure_askq_hook_installed() -> list[str]:
     de cada config dir do Claude. Fail-soft por arquivo: um settings.json problematico nunca
     derruba o backend no startup. Retorna os dirs onde gravou (so pra log)."""
     try:
-        dirs = {Path(c.path) for c in list_config_dirs()} | {_backend_config_base().resolve()}
+        dirs = {Path(c.path) for c in list_config_dirs(ordered=False)} | {_backend_config_base().resolve()}
     except Exception:
         return []  # descoberta de dirs falhou (ex: HOME ausente) -> startup NUNCA quebra
     touched: list[str] = []

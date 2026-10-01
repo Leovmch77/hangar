@@ -141,6 +141,8 @@ class SessionInfo(BaseModel):
     limit_reset: Optional[str] = None
     # Sessão com convite ativo (link pendente ou convidado dentro): selo 🔗 nas listas.
     shared: bool = False
+    # Nome do convidado que criou a sessão; None = dono do servidor.
+    owner: Optional[str] = None
     # Feature #12 (encadeamento de sessao): nome da sessao ALVO se esta sessao tem um vinculo 'then'
     # armado ("quando terminar -> enviar pra"), None senao. So o alvo (pro indicador na lista); o texto
     # do prompt fica no sidecar (app.chain.ThenLink), lido so na hora de disparar.
@@ -209,6 +211,8 @@ class ChatEvent(BaseModel):
     # Só em notice `skill_loaded`: {name, path, body} da skill que o harness injetou como fala do
     # usuário. O corpo vem inteiro pra interface abrir sob demanda.
     skill: Optional[dict] = None
+    # Só em notice da linha do tempo do orquestrador: a leitura estruturada da linha (orq_timeline.entry).
+    orq: Optional[dict] = None
     # Transporte da fila, não confirmação no transcript; ausente em entradas legadas.
     queued_delivered: Optional[bool] = None
     # Só em bolha da fila: o relógio da ENTRADA (epoch), pra ordenar no front quando ela chega ao
@@ -623,6 +627,24 @@ class ShortcutShellBody(BaseModel):
     label: str = Field(default="", max_length=200)
     # Onde rodar: absoluta ou relativa a raiz da copia da sessao; ausente = cwd da sessao.
     pasta: Optional[str] = Field(default=None, max_length=4096)
+    runs_in: Literal["session", "hangar"] = "session"
+    # Identidade da copia unica No Hangar: o id do atalho.
+    key: str = Field(default="", max_length=200)
+    # No Hangar: roda na home (padrao) em vez da pasta da sessao que clicou.
+    home: bool = True
+    # Mostrar no app a pergunta que o terminal fizer.
+    ask: bool = True
+
+
+class RunCodeBody(BaseModel):
+    command: str = Field(max_length=200_000)
+    language: Optional[str] = Field(default=None, max_length=32)
+    key: str = Field(default="", max_length=80)
+
+
+class ShortcutAnswerBody(BaseModel):
+    # Vazio = so Enter (aceita o valor padrao da pergunta).
+    text: str = Field(default="", max_length=4096)
 
 
 # `Any` nos itens: item torto volta 400 apontando qual (validate_shortcut_item), nao 422 generico.

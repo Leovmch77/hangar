@@ -10,7 +10,6 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
     uploadFileForServer, transcribeFileForServer,
   } from '@hangar/core';
   import { ditadoEstilo } from '../lib/ditadoEstilo.svelte';
-  import { keepWarmMic, takeWarmMic } from '../lib/warmMic';
   import { relativeTime, bubblesFromTail, pairColor, parsePeerMessage, parseRealtimeDelegation, providerTag, isOrq } from '@hangar/core';
   import { parseStatusLine } from '@hangar/core';
   import { lerSubagenteCodex, rotuloSubagente } from '../lib/subagenteCodex';
@@ -214,17 +213,26 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
   let fileInput = $state<HTMLInputElement>();
   let attach = $state<File[]>([]);
   let attachBusy = $state(false);
-  let recState = $state<'idle' | 'rec' | 'busy'>('idle');
+  let recState = $state<'idle' | 'starting' | 'rec' | 'busy'>('idle');
   let recorder: MediaRecorder | null = null;
   let recStream: MediaStream | null = null;
   let recChunks: Blob[] = [];
+  let recGeneration = 0;
+  let destroyed = false;
+
+  function releaseMicrophone() {
+    recStream?.getTracks().forEach((track) => track.stop());
+    recStream = null;
+    recorder = null;
+  }
 
   // Card destruído GRAVANDO (troca de coluna/estado remonta o card — ver comentário do topo): sem
   // teardown o mic ficava ligado pra sempre numa closure morta, indicador aceso. Mesmo papel do
   // teardownRecording+onDestroy do Composer do chat.
   onDestroy(() => {
+    destroyed = true;
     if (recorder?.state === 'recording') recorder.stop();
-    recStream?.getTracks().forEach((t) => t.stop());
+    releaseMicrophone();
   });
 
   function onFiles(e: Event) {
@@ -238,21 +246,28 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
 
   async function toggleRec() {
     if (recState === 'rec') { recorder?.stop(); return; }
+    if (recState === 'starting') { recGeneration++; recState = 'idle'; return; }
     if (recState !== 'idle') return;
+    recState = 'starting';
+    const generation = ++recGeneration;
     let stream: MediaStream | null = null;
     try {
-      stream = takeWarmMic() ?? await navigator.mediaDevices.getUserMedia({ audio: true });
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      if (destroyed || generation !== recGeneration) {
+        stream.getTracks().forEach((track) => track.stop());
+        return;
+      }
       recStream = stream;
       recChunks = [];
-      recorder = new MediaRecorder(stream);
-      recorder.ondataavailable = (e) => { if (e.data.size) recChunks.push(e.data); };
-      recorder.onstop = async () => {
-        // Card desmontado gravando já encerrou as tracks; senão o mic fica morno pra próxima gravação.
-        if (recStream?.getTracks().some((t) => t.readyState === 'live')) keepWarmMic(recStream);
-        recStream = null;
+      const activeRecorder = new MediaRecorder(stream);
+      recorder = activeRecorder;
+      activeRecorder.ondataavailable = (e) => { if (recorder === activeRecorder && e.data.size) recChunks.push(e.data); };
+      activeRecorder.onstop = async () => {
+        if (destroyed || recorder !== activeRecorder) return;
+        releaseMicrophone();
         recState = 'busy';
         try {
-          const blob = new Blob(recChunks, { type: recorder?.mimeType || 'audio/webm' });
+          const blob = new Blob(recChunks, { type: activeRecorder.mimeType || 'audio/webm' });
           // `limpar: true` porque isto é o MICROFONE, não um anexo — mesma regra do Composer. Sem
           // ele o card devolvia a transcrição crua ("cp send list", sem pontuação, com os "é... é")
           // enquanto o chat, com o mesmo áudio, devolvia limpa. Era o mesmo botão dando resultados
@@ -284,15 +299,22 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
           onSendError(err instanceof Error ? err.message : m.board_falha_transcricao());
         } finally {
           recState = 'idle';
-          recorder = null;
         }
       };
-      recorder.start();
+      activeRecorder.onerror = () => {
+        if (destroyed || recorder !== activeRecorder) return;
+        releaseMicrophone();
+        recState = 'idle';
+        onSendError(m.composer_falha_gravacao());
+      };
+      activeRecorder.start();
       recState = 'rec';
     } catch (err) {
+      if (destroyed || generation !== recGeneration) return;
       // getUserMedia deu certo mas MediaRecorder/start falhou: solta o mic também neste caminho.
       stream?.getTracks().forEach((t) => t.stop());
-      recStream = null;
+      releaseMicrophone();
+      recState = 'idle';
       onSendError(err instanceof Error ? err.message : m.board_microfone_indisponivel());
     }
   }
@@ -406,6 +428,9 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
     <span class="bc-name">{session.name}</span>
     <!-- Servidor por NOME, não só pela cor do dot: com 5+ servidores a cor sozinha não identifica. -->
     <span class="bc-srv" style="color: {color}" title={server.label}>{server.label}</span>
+    {#if session.owner}
+      <span class="bc-srv" title={m.sessao_do_convidado({ n: session.owner })}>👤&nbsp;{session.owner}</span>
+    {/if}
     <!-- Pill de estado SÓ no canvas (fill): lá não há colunas dizendo o estado; no board a coluna
          já diz e o pill viraria ruído repetido. O desenho (vocabulário --pill-* do design system)
          mora no StateChip; este card era o precedente dele.
@@ -594,8 +619,8 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
                 title={m.board_anexar_imagem()} aria-label={m.board_anexar()}>📎</button>
         <button class="bc-tool" class:bc-rec={recState === 'rec'} onclick={toggleRec}
                 disabled={recState === 'busy'}
-                title={recState === 'rec' ? m.board_parar_transcrever() : m.board_gravar_audio()}
-                aria-label={m.board_gravar_audio()}>{recState === 'busy' ? '…' : '🎤'}</button>
+                title={recState === 'rec' ? m.board_parar_transcrever() : recState === 'starting' ? m.composer_cancelar_prep_mic() : m.board_gravar_audio()}
+                aria-label={recState === 'starting' ? m.composer_cancelar_prep_mic() : m.board_gravar_audio()}>{recState === 'busy' || recState === 'starting' ? '…' : '🎤'}</button>
         <textarea rows="1" placeholder={attachBusy ? m.board_enviando_anexos() : recState === 'busy' ? m.board_transcrevendo() : m.composer_mensagem()}
                   bind:value={text} onkeydown={onKey}></textarea>
         <button class="bc-send" onclick={send}

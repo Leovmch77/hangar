@@ -187,6 +187,12 @@ struct Line {
     this: bool,
 }
 
+struct MachineRename {
+    ids: Vec<String>,
+    input: Entity<InputState>,
+    _events: Subscription,
+}
+
 impl Line {
     /// Guardar o token troca a chave da mesma máquina; o detalhe aberto segue pelo identificador.
     fn open_key(&self) -> &str { self.ident.as_deref().unwrap_or(&self.key) }
@@ -456,6 +462,7 @@ pub(in crate::app) struct Machines {
     /// A máquina do detalhe aberto (`Line::open_key`) e o Avançado dele.
     peer_open: Option<String>,
     peer_advanced: bool,
+    rename: Option<MachineRename>,
     /// O diálogo Adicionar aberto.
     add: Option<Entity<AddMachine>>,
     pair: Pair,
@@ -495,7 +502,7 @@ impl Hangar {
         if !m.upgrade.busy() { m.upgrade = Upgrade { seq: m.upgrade.seq + 1, ..Upgrade::default() }; }
         (m.id_saved, m.leave_error, m.peer_error, m.adopt_error, m.far_failed) = (false, None, None, None, false);
         // "Não respondem" nasce fechado, como o `<details>` do web remontado; o painel volta a este servidor.
-        (m.silent_open, m.peer_open, m.peer_advanced) = (false, None, false);
+        (m.silent_open, m.peer_open, m.peer_advanced, m.rename) = (false, None, false, None);
         // Medições só em memória: cada abertura mede de novo, e a resposta de um teste de antes cai pelo `seq`.
         m.checks.clear();
         if !m.id_saving { self.load_machine_id(cx); }
@@ -665,10 +672,46 @@ impl Hangar {
         let peer = self.machine_lines().into_iter().find(|l| l.open_key() == key).and_then(|l| l.peer);
         if let Some(peer) = peer { self.check_peer(&peer.id, cx); }
         let (m, id) = (&mut self.machines, key);
-        (m.peer_open, m.peer_advanced) = (Some(id.clone()), false);
+        (m.peer_open, m.peer_advanced, m.rename) = (Some(id.clone()), false, None);
         if m.peer_error.as_ref().is_some_and(|(_, spot, _)| *spot != Spot::Row) { m.peer_error = None; }
         if m.stacked { self.jump_to("machines_detail"); }
         cx.notify();
+    }
+
+    fn start_machine_rename(&mut self, ids: Vec<String>, label: String, window: &mut Window, cx: &mut Context<Self>) {
+        let input = cx.new(|cx| InputState::new(window, cx).default_value(label));
+        let events = cx.subscribe_in(&input, window, |this: &mut Hangar, _, event: &InputEvent, _, cx| {
+            if matches!(event, InputEvent::PressEnter { .. }) { this.save_machine_rename(cx); }
+        });
+        input.update(cx, |input, cx| input.focus(window, cx));
+        self.machines.rename = Some(MachineRename { ids, input, _events: events });
+        cx.notify();
+    }
+
+    fn save_machine_rename(&mut self, cx: &mut Context<Self>) {
+        let Some(rename) = self.machines.rename.take() else { return };
+        let typed = rename.input.read(cx).value().trim().to_owned();
+        let Some(first) = self.servers.iter().find(|server| rename.ids.contains(&server.id)) else { cx.notify(); return };
+        let label = if typed.is_empty() { servers::default_label(&first.address) } else { typed };
+        for server in &mut self.servers {
+            if rename.ids.contains(&server.id) { server.label = label.clone(); }
+        }
+        self.servers_rev += 1;
+        self.persist_servers();
+        cx.notify();
+    }
+
+    pub(super) fn cancel_machine_rename(&mut self) -> bool { self.machines.rename.take().is_some() }
+
+    fn machine_rename_editor(&self, ids: &[String], cx: &mut Context<Self>) -> Option<AnyElement> {
+        let rename = self.machines.rename.as_ref().filter(|rename| rename.ids == ids)?;
+        Some(div().flex().items_center().gap(px(8.))
+            .child(div().w(px(250.)).max_w_full().child(Input::new(&rename.input).small().aria_label(tr_shared("comum_nome", &[]))))
+            .child(Button::new("machines-rename-save").primary().small().label(tr("server_save"))
+                .on_click(cx.listener(|this, _, _, cx| this.save_machine_rename(cx))))
+            .child(Button::new("machines-rename-cancel").ghost().small().label(tr("cancel"))
+                .on_click(cx.listener(|this, _, _, cx| { this.machines.rename = None; cx.notify(); })))
+            .into_any_element())
     }
 
     fn peer_error_at(&self, id: &str, spot: Spot) -> Option<String> {
@@ -976,7 +1019,9 @@ impl Hangar {
                 if let Some(add) = self.add_dialog(dialog) { add.update(cx, |add, cx| add.discovered(seq, parsed, cx)); }
             }
             MachinesReply::Probed(dialog, seq, result) => {
-                if let Some(add) = self.add_dialog(dialog) { add.update(cx, |add, cx| add.probed(seq, result, window, cx)); }
+                // O diálogo não pode ler o Hangar daqui de dentro (ele está em atualização): o nome conhecido vai pronto.
+                let known = result.as_ref().ok().and_then(|f| self.known_machine(f.id())).map(|k| k.label).filter(|l| !l.is_empty());
+                if let Some(add) = self.add_dialog(dialog) { add.update(cx, |add, cx| add.probed(seq, result, known, window, cx)); }
             }
             MachinesReply::Registered(dialog, seq, result) => {
                 // Gravou aqui: a lista já tem a máquina, mesmo que o outro lado tenha falhado.
@@ -1069,7 +1114,7 @@ impl Hangar {
         chrome::confirm_alert(window, cx, title, description, ok, ButtonVariant::Danger, move |window, cx| {
             // Saiu: o detalhe e esta pergunta fecham juntos. Não saiu: o aviso aparece onde se clicou.
             let left = this.update(cx, |this, cx| this.forget_connection(leave, window, cx)).unwrap_or(false);
-            if left { window.close_all_dialogs(cx); }
+            if left { let _ = this.update(cx, |this, _| this.forget_question()); window.close_all_dialogs(cx); }
             !left
         });
     }
@@ -1307,6 +1352,8 @@ impl Hangar {
         let own_id = m.id_loaded().to_owned();
         let (card, row) = (card_state(&line, check, &own_id), row_state(&line, check));
         let (here, name) = (self.server_label(cx), line.name.clone());
+        let rename_ids = line.entries.iter().map(|entry| entry.id.clone()).collect::<Vec<_>>();
+        let rename_editor = self.machine_rename_editor(&rename_ids, cx);
         let fill = |key: &str| tr(key).replace("{este}", &here).replace("{nome}", &name);
         let tested = if check.is_some_and(|c| c.testing) || card == Card::Testing || row == Row::Testing { tr("machines_testing") } else {
             match check.and_then(|c| c.at) {
@@ -1507,6 +1554,10 @@ impl Hangar {
                         .when_some(chip_id, |el, id| el.child(div().px(px(8.)).rounded_full().border_1().border_color(theme::border())
                             .font_family(theme::MONO).text_size(px(11.)).text_color(theme::muted()).child(id))))
                     .child(div().text_size(px(12.5)).text_color(theme::muted()).child(tested))))
+                .when(!rename_ids.is_empty(), |el| el.child(Button::new("machines-peer-rename").ghost().small().label(tr("machines_rename"))
+                    .accessibility_label(tr("machines_rename_aria").replace("{nome}", &name))
+                    .on_click(cx.listener(move |this, _, window, cx| this.start_machine_rename(rename_ids.clone(), name.clone(), window, cx)))))
+            .children(rename_editor)
             .child(device)
             .child(messages)
             .children(advanced)
@@ -1516,6 +1567,9 @@ impl Hangar {
     fn render_machine_detail(&mut self, cx: &mut Context<Self>) -> Div {
         let m = &self.machines;
         let id = m.id_loaded().to_owned();
+        let rename_ids = self.servers.iter().filter(|entry| self.server.as_ref().is_some_and(|address| servers::norm(&entry.address) == servers::norm(address)))
+            .map(|entry| entry.id.clone()).collect::<Vec<_>>();
+        let rename_editor = self.machine_rename_editor(&rename_ids, cx);
         let muted = |text: String| div().text_size(px(12.5)).text_color(theme::muted()).whitespace_normal().child(text);
 
         // Identificador: o CP_SERVER_ID do .env. Vazio, os outros servidores não conseguem registrar este.
@@ -1717,17 +1771,22 @@ impl Hangar {
                 .on_click(cx.listener(|this, _, window, cx| this.confirm_leave(Leave::Remove, window, cx))));
 
         let (summary, light) = self.reach_summary();
+        let server_name = self.server_label(cx);
         let head = div().mb(px(2.)).flex().items_center().gap(px(14.))
             .child(tile(chrome::small_icon(IconName::Server, 22., theme::accent_text()), 46., theme::accent_dim(), Some(light.dot())))
             .child(div().flex_1().min_w_0().flex().flex_col().gap(px(3.))
-                .child(div().text_lg().font_weight(FontWeight::SEMIBOLD).child(self.server_label(cx)))
+                .child(div().text_lg().font_weight(FontWeight::SEMIBOLD).child(server_name.clone()))
                 .child(div().text_size(px(12.5)).text_color(theme::muted()).whitespace_normal()
                     .child(format!("{} · {summary}", tr("machines_this_server")))))
+            .when(!rename_ids.is_empty(), |el| el.child(Button::new("machines-this-rename").ghost().small().label(tr("machines_rename"))
+                .accessibility_label(tr("machines_rename_aria").replace("{nome}", &server_name))
+                .on_click(cx.listener(move |this, _, window, cx| this.start_machine_rename(rename_ids.clone(), server_name.clone(), window, cx)))))
             .when(!id.is_empty(), |el| el.child(div().flex_shrink_0().px(px(10.)).py(px(2.)).rounded_full().border_1().border_color(theme::border())
                 .font_family(theme::MONO).text_size(px(12.)).text_color(theme::muted()).child(id.clone())));
         let scope_env = chip(tr("machines_scope_env"), theme::muted(), theme::raised()).flex_shrink_0().into_any_element();
         div().flex().flex_col().gap(px(16.)).pb(px(8.))
             .child(head)
+            .children(rename_editor)
             .children(verdict)
             .child(settings_box().child(section_head(IconName::Hash, tr("machines_id"), None, Some(scope_env), px(16.)))
                 .child(div().px_4().pb_4().child(identifier)))

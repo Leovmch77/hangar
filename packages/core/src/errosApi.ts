@@ -218,6 +218,7 @@ const ERROS: Record<string, (params: Parametros) => string> = {
   erro_compartilhar_pre_requisito: () => m.erro_compartilhar_pre_requisito(),
   erro_compartilhamento_inexistente: () => m.erro_compartilhamento_inexistente(),
   erro_compartilhar_sem_rede_local: () => m.erro_compartilhar_sem_rede_local(),
+  erro_compartilhar_porta_do_convite: (p) => m.erro_compartilhar_porta_do_convite({ port: String(p.port) }),
   erro_fora_do_convite: () => m.erro_fora_do_convite(),
   erro_convite_encerrado: () => m.erro_convite_encerrado(),
   erro_convite_usado: () => m.erro_convite_usado(),
@@ -451,6 +452,21 @@ const ERROS: Record<string, (params: Parametros) => string> = {
   erro_project_shortcuts_projeto: (p) => m.erro_project_shortcuts_projeto({ detalhe: String(p.detalhe ?? '') }),
   erro_project_shortcuts_arquivo: (p) => m.erro_project_shortcuts_arquivo({ detalhe: String(p.detalhe ?? '') }),
   erro_shortcut_pasta: (p) => m.erro_shortcut_pasta({ detalhe: String(p.detalhe ?? '') }),
+  erro_shortcut_hangar_convidado: () => m.erro_shortcut_hangar_convidado(),
+  erro_run_code_longo: () => m.erro_run_code_longo(),
+  erro_run_code_invalido: () => m.erro_run_code_invalido(),
+  erro_run_code_linguagem: () => m.erro_run_code_linguagem(),
+  erro_run_code_shell_incompativel: (p) => m.erro_run_code_shell_incompativel({ linguagem: String(p.linguagem ?? ''), sistema: String(p.sistema ?? '') }),
+  erro_run_code_shell_ausente: (p) => m.erro_run_code_shell_ausente({ linguagem: String(p.linguagem ?? '') }),
+  erro_run_code_terminal: () => m.erro_run_code_terminal(),
+  // Convidados com login próprio (guest_user_gate, guest_users_api, hub /api/sync/guests).
+  erro_fora_do_convidado: () => m.erro_fora_do_convidado(),
+  erro_fora_da_pasta: () => m.erro_fora_da_pasta(),
+  erro_pasta_inexistente: () => m.erro_pasta_inexistente(),
+  erro_convidado_inexistente: () => m.erro_convidado_inexistente(),
+  erro_convidados_ilegivel: () => m.erro_convidados_ilegivel(),
+  erro_so_dono: () => m.erro_so_dono(),
+  erro_usuario_em_uso: () => m.erro_usuario_em_uso(),
 };
 
 export function mensagemDeErro(code: string, params: Parametros = {}): string | undefined {

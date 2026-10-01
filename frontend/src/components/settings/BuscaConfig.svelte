@@ -21,6 +21,7 @@
     sincronizacao: m.sync_config_titulo,
     'shared-config': m.shared_config_title,
     computer: m.computer_control_title,
+    jev: m.jev_title,
   };
 
   export interface EntradaBusca {
@@ -144,6 +145,13 @@
     { tela: 'orquestracao', rotulo: m.orqcfg_pode_trocar, descricao: m.orqcfg_pode_trocar_desc },
     { tela: 'orquestracao', rotulo: m.orqcfg_escolha_conta, descricao: m.orqcfg_modelos_liberados_porque },
 
+    { tela: 'jev', rotulo: m.config_server_jev_chave, descricao: m.config_server_jev_chave_ajuda },
+    { tela: 'jev', rotulo: m.config_server_jev_padrao, descricao: m.config_server_jev_padrao_ajuda },
+    { tela: 'jev', rotulo: m.config_server_jev_endpoint, descricao: m.config_server_jev_endpoint_ajuda },
+    { tela: 'jev', rotulo: m.config_server_jev_modelo, descricao: m.config_server_jev_modelo_ajuda },
+    { tela: 'jev', rotulo: m.jev_windows_key, descricao: m.jev_windows_key_help },
+    { tela: 'jev', rotulo: m.jev_text_title, descricao: m.jev_text_help },
+
     { tela: 'computer', rotulo: m.computer_control_enable, descricao: m.computer_control_enable_hint },
     { tela: 'computer', rotulo: m.computer_control_install, descricao: m.computer_control_mode_local_hint },
     { tela: 'computer', rotulo: m.computer_control_target, descricao: m.computer_control_target_hint },
@@ -187,13 +195,15 @@
     /** Sem alvo resolvido as telas de servidor não abrem — aqui elas aparecem apagadas com o
      *  motivo, como na lista da raiz. Some da busca seria esconder que a tela existe. */
     semServidor?: boolean;
+    /** Convidado não vê as telas de servidor: o backend as recusa. */
+    convidado?: boolean;
     /** Só no desktop: a busca mora no topo da navegação lateral, que é estreita. */
     compacta?: boolean;
   }
-  let { onIrPara, semServidor = false, compacta = false }: Props = $props();
+  let { onIrPara, semServidor = false, convidado = false, compacta = false }: Props = $props();
 
   let termo = $state('');
-  const achados = $derived(filtrar(termo));
+  const achados = $derived(filtrar(termo).filter((a) => !convidado || !TELAS_DE_SERVIDOR.includes(a.entrada.tela)));
 
   function abrir(tela: TelaConfig) {
     termo = '';

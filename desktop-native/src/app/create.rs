@@ -34,19 +34,19 @@ fn provider_name(p: &str) -> &'static str {
 }
 
 #[derive(Clone, Debug, Deserialize)]
-struct Root { name: String, path: String }
+pub(super) struct Root { pub(super) name: String, pub(super) path: String }
 
 #[derive(Clone, Debug, Deserialize)]
-struct Entry {
-    name: String,
-    path: String,
+pub(super) struct Entry {
+    pub(super) name: String,
+    pub(super) path: String,
     #[serde(default)] is_git: bool,
     #[serde(default)] has_claude_md: bool,
     mtime: Option<f64>,
 }
 
 /// Uma pasta lida: as subpastas, ou o motivo de não haver lista (código do backend já em texto).
-pub(super) struct Scan { entries: Vec<Entry>, error: Option<String> }
+pub(super) struct Scan { pub(super) entries: Vec<Entry>, pub(super) error: Option<String> }
 
 #[derive(Clone, Debug, Deserialize)]
 struct Probe { disponivel: bool }
@@ -120,6 +120,7 @@ pub(super) enum CreateReply {
     Sessions(u64, Result<Vec<SessionInfo>, Failure>),
     Providers(u64, Result<Value, Failure>),
     Configs(u64, Result<Value, Failure>),
+    ConfigSuggestion(u64, u64, Result<Value, Failure>),
     Codex(u64, Result<Value, Failure>),
     /// Passo da criação em voo; `None` é consulta que falhou, e o passo anterior fica.
     Step(u64, Option<String>),
@@ -129,8 +130,9 @@ pub(super) enum CreateReply {
     /// O catálogo de modelos e o último modelo e esforço lembrados para a chave dele.
     Models(u64, Result<Value, Failure>, (String, String)),
     Engines(u64, Result<Value, Failure>),
-    /// A configuração do servidor: só a chave do Jev e o padrão dele interessam aqui.
-    Config(u64, Result<Value, Failure>),
+    /// A configuração do servidor: modo de sessão e Jev.
+    Config(u64, (bool, Result<Option<Value>, Failure>)),
+    HeadlessSaved(u64, Result<Value, Failure>),
     Quotas(u64, Result<Value, Failure>),
     Context(u64, Result<Value, Failure>),
     Account(u64, AccountDone),
@@ -178,7 +180,7 @@ fn rel_path(root: &str, path: &str) -> String {
 }
 
 /// Migalhas da raiz até a pasta atual: rótulo e caminho de cada nível.
-fn crumbs(root: &Root, path: &str) -> Vec<(String, String)> {
+pub(super) fn crumbs(root: &Root, path: &str) -> Vec<(String, String)> {
     let mut out = vec![(root.name.clone(), root.path.clone())];
     let mut acc = root.path.clone();
     for part in path.strip_prefix(&root.path).unwrap_or_default().split('/').filter(|s| !s.is_empty()) {
@@ -194,7 +196,7 @@ fn shown(query: &str, root: &str, entry: &Entry) -> bool {
 }
 
 /// A leitura de uma pasta: a recusa de fronteira do backend vira o motivo dela, como o `scanDir` do web.
-fn scan_of(result: Result<Value, Failure>) -> Result<Scan, String> {
+pub(super) fn scan_of(result: Result<Value, Failure>) -> Result<Scan, String> {
     let code = match result {
         Ok(value) => {
             let entries = serde_json::from_value(value.get("entries").cloned().unwrap_or_default()).map_err(|_| tr("invalid_response"))?;
@@ -309,6 +311,9 @@ pub(in crate::app) struct NewSession {
     codex_account: String,
     codex_pick: Option<Picker>,
     headless: bool,
+    headless_owner: Option<bool>,
+    headless_touched: bool,
+    headless_saving: bool,
     difference: bool,
     manual_open: bool,
     manual: Entity<InputState>,
@@ -323,6 +328,7 @@ pub(in crate::app) struct NewSession {
     clock: Option<Task<()>>,
     models: Remote<Catalog>,
     model: String,
+    model_choice_touched: bool,
     effort: String,
     permission: String,
     subagent: String,
@@ -338,6 +344,11 @@ pub(in crate::app) struct NewSession {
     more: bool,
     omp: Entity<InputState>,
     quotas: Remote<Vec<QuotaLine>>,
+    /// Com a conversa fechada aberta (`Hangar::reopen`), a conta Claude escolhida para retomá-la; o menu de conta passa a
+    /// escolher esta, sem mexer na da tela sem sessão.
+    pub(super) reopen_config: Option<Option<String>>,
+    /// A dona é a conta do próprio servidor fora da lista (`config_dir` nulo): o menu ganha a linha "Padrão" para ela.
+    pub(super) reopen_default: bool,
     /// "+ conta": a linha do nome aberta; "Apagar": a confirmação na tela.
     asking: bool,
     confirming: bool,
@@ -404,12 +415,12 @@ impl NewSession {
             roots: Remote::default(), root: None, dir: String::new(), scan: Remote::default(), folders: Vec::new(), query, picked: None,
             checkout: Remote::default(), branch: String::new(), git: Default::default(), git_name,
             sessions: Remote::default(), same_folder: false, name, provider: "claude", providers: Remote::default(), configs: Remote::default(),
-            config: None, config_pick: None, codex: Remote::default(), codex_account: String::new(), codex_pick: None, headless: true,
+            config: None, config_pick: None, codex: Remote::default(), codex_account: String::new(), codex_pick: None, headless: true, headless_owner: None, headless_touched: false, headless_saving: false,
             difference: false, manual_open: false, manual, choosing: false, choose_error: None, create_seq: 0, creating: false, started: None,
-            step: String::new(), error: None, clock: None, models: Remote::default(), model: String::new(), effort: String::new(),
+            step: String::new(), error: None, clock: None, models: Remote::default(), model: String::new(), model_choice_touched: false, effort: String::new(),
             permission: "bypassPermissions".into(), subagent: String::new(), engine: String::new(), model_pick: None, effort_pick: None,
             permission_pick: None, subagent_pick: None, engine_pick: None, engines: Remote::default(), jev: Remote::default(), jev_on: false,
-            more: false, omp, quotas: Remote::default(), asking: false, confirming: false, account_busy: false, account_seq: 0, account_name,
+            more: false, omp, quotas: Remote::default(), reopen_config: None, reopen_default: false, asking: false, confirming: false, account_busy: false, account_seq: 0, account_name,
             notice: None, created_path: None, context_seq: 0, context_busy: false, context_on: None, context_want: None, context_error: None,
             archive: Remote::default(), want_resume: false, conversation: String::new(), before: None, preview: Remote::default(),
             preview_scroll: ScrollHandle::new(), resuming: false, baton, baton_by_model: false, baton_open: false,
@@ -454,6 +465,10 @@ impl NewSession {
         }
         (self.root, self.picked, self.config, self.config_pick) = (None, None, None, None);
         (self.same_folder, self.error, self.notice, self.created_path, self.asking, self.confirming) = (false, None, None, None, false, false);
+        self.headless = true;
+        self.headless_owner = None;
+        self.headless_touched = false;
+        self.headless_saving = false;
         self.dir.clear();
         self.folders.clear();
         self.branch.clear();
@@ -547,6 +562,7 @@ impl NewSession {
 
     fn load_configs(&mut self, cx: &mut Context<Self>) {
         let seq = self.configs.start();
+        self.model_choice_touched = false;
         self.request(cx, move |api, send| Box::pin(async move { send(CreateReply::Configs(seq, api.server_read(&["claude-configs"], &[], 15).await)).await }));
     }
 
@@ -629,11 +645,10 @@ impl NewSession {
         cx.notify();
     }
 
-    /// Trocar de provider volta modo e permissão ao padrão (sem terminal onde existe; Claude em bypass, Codex em
-    /// "Full Access") e relê o que depende dele.
+    /// Trocar de provider preserva o modo escolhido e relê as opções e permissões dele.
     fn set_provider(&mut self, provider: &'static str, window: &mut Window, cx: &mut Context<Self>) {
         if provider == self.provider || self.creating { return; }
-        (self.provider, self.headless, self.error) = (provider, true, None);
+        (self.provider, self.error) = (provider, None);
         self.permission = match provider { "codex" => "Full Access".into(), "claude" => "bypassPermissions".into(), _ => String::new() };
         if provider == "codex" { self.load_codex(cx); self.load_context(cx); } else { self.drop_context(); self.drop_codex(); }
         self.load_models(window, cx);
@@ -643,10 +658,22 @@ impl NewSession {
     }
 
     fn set_headless(&mut self, headless: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.headless_saving || self.creating || (self.jev.loading && self.headless_owner.is_none()) { return; }
         self.headless = headless;
+        self.headless_touched = true;
         self.build_permission_pick(window, cx);
         cx.notify();
+        if self.headless_owner != Some(true) { return; }
+        self.headless_saving = true;
+        let seq = self.jev.seq;
+        self.error = None;
+        self.request(cx, move |api, send| Box::pin(async move {
+            send(CreateReply::HeadlessSaved(seq, api.server_send(reqwest::Method::POST, &["config"],
+                Some(json!({"headless_default": headless})), 8).await)).await;
+        }));
     }
+
+    fn headless_inherited(&self) -> bool { self.headless_owner != Some(true) && !self.headless_touched }
 
     fn provider_ready(&self) -> Option<bool> {
         if self.providers.loading { return None; }
@@ -674,7 +701,7 @@ impl NewSession {
     }
 
     pub(super) fn can_create(&self, cx: &App) -> bool {
-        !self.creating && self.picked.is_some() && !self.sessions.loading && (self.compact || !self.name.read(cx).value().trim().is_empty())
+        !self.creating && !self.headless_saving && !self.jev.loading && self.picked.is_some() && !self.sessions.loading && (self.compact || !self.name.read(cx).value().trim().is_empty())
             && self.provider_ready() == Some(true) && self.codex_ready() && !(self.provider == "codex" && self.context_busy)
             && (!self.compact || ((self.provider != "claude" || (!self.configs.loading && self.configs.ok().is_some_and(|list| !list.is_empty())))
                 && !self.models.loading && self.models.ok().is_some()
@@ -702,9 +729,9 @@ impl NewSession {
             "omp" => { let profile = self.omp.read(cx).value().trim().to_owned(); if !profile.is_empty() { body["omp_profile"] = json!(profile); } }
             _ => {}
         }
-        if self.headless && matches!(provider, "claude" | "codex") {
-            body["headless"] = json!(true);
-            if provider == "codex" { body["permission_mode"] = text(&self.permission); }
+        if matches!(provider, "claude" | "codex") && !self.headless_inherited() {
+            body["headless"] = json!(self.headless);
+            if provider == "codex" && self.headless { body["permission_mode"] = text(&self.permission); }
         }
         // O bastão não leva o Jev (o interruptor nem aparece) e vai por rota própria, que monta, grava e manda o resumo.
         let baton = self.baton.as_ref().map(|b| b.name.clone());
@@ -721,6 +748,7 @@ impl NewSession {
                 "headless": matches!(provider, "claude" | "codex") && self.headless,
                 "resumo_por_modelo": self.baton_by_model});
             if provider == "codex" { body["codex_account"] = json!(self.codex_account); }
+            if self.headless_inherited() { body.as_object_mut().unwrap().remove("headless"); }
         }
         // A memória vai antes do POST: a escolha não se perde se a criação falhar.
         let (key, model, effort) = (self.memory_key(), self.model.clone(), self.effort.clone());
@@ -792,6 +820,11 @@ impl NewSession {
     /// Guarda a resposta que ainda é deste diálogo; a criação que deu certo sai daqui para o `Hangar` abrir a sessão.
     fn receive(&mut self, reply: CreateReply, window: &mut Window, cx: &mut Context<Self>) -> Option<Opened> {
         match reply {
+            CreateReply::HeadlessSaved(seq, result) => {
+                if seq != self.jev.seq { return None; }
+                self.headless_saving = false;
+                if let Err(error) = result { self.error = Some(format!("{} {}", tr("session_mode_save_failed"), Hangar::fetch_failure(&error))); }
+            }
             CreateReply::Roots(seq, result, last) => {
                 let roots = result.map_err(|e| Hangar::fetch_failure(&e))
                     .and_then(|v| serde_json::from_value::<Vec<Root>>(v).map_err(|_| tr("invalid_response")));
@@ -831,6 +864,23 @@ impl NewSession {
                 self.build_config_pick(window, cx);
                 // Lista que falhou também pede o catálogo: sem conta, o backend usa a padrão.
                 self.load_models(window, cx);
+                if self.provider == "claude" && self.engine.is_empty() {
+                    let models = self.models.seq;
+                    self.request(cx, move |api, send| Box::pin(async move {
+                        send(CreateReply::ConfigSuggestion(seq, models, api.server_read(&["cotas", "sugestao"], &[], 15).await)).await
+                    }));
+                }
+            }
+            CreateReply::ConfigSuggestion(seq, models, result) => {
+                // Trocar conta, provider ou motor relê o catálogo e invalida a sugestão inicial.
+                if seq != self.configs.seq || models != self.models.seq || self.model_choice_touched || self.creating || self.account_busy
+                    || self.provider != "claude" || !self.engine.is_empty() || self.target().is_some() { return None; }
+                let path = result.ok().and_then(|v| v.get("path").and_then(Value::as_str).map(str::to_owned));
+                if let Some(path) = path.filter(|p| self.accounts().any(|c| &c.path == p) && self.config.as_ref() != Some(p)) {
+                    self.config = Some(path);
+                    self.build_config_pick(window, cx);
+                    self.load_models(window, cx);
+                }
             }
             CreateReply::Codex(seq, result) => {
                 let list = result.map_err(|e| Hangar::fetch_failure(&e))
@@ -1200,8 +1250,9 @@ impl NewSession {
         });
         let modes = (fresh && matches!(self.provider, "claude" | "codex")).then(|| {
             let codex = self.provider == "codex";
+            let inherited = self.headless_inherited();
             let mode = |id: &'static str, on: bool, title: String, beta: bool, summary: String, headless: bool| {
-                option_card(id, on, title, beta, summary, busy, cx)
+                option_card(id, on, title, beta, summary, busy || self.headless_saving || (self.jev.loading && self.headless_owner.is_none()), cx)
                     .on_click(cx.listener(move |this, _, window, cx| this.set_headless(headless, window, cx)))
             };
             let help = match (codex, self.headless) {
@@ -1211,10 +1262,11 @@ impl NewSession {
             let this = cx.entity().downgrade();
             div().flex().flex_col().gap(px(8.))
                 .child(label(tr("create_mode")))
+                .when(inherited, |el| el.child(muted(tr("session_mode_server_default"))))
                 .child(div().id("create-modes").role(Role::Group).aria_label(tr("create_mode")).flex().gap(px(12.))
-                    .child(mode("create-mode-tmux", !self.headless, tr("create_mode_tmux"), false,
+                    .child(mode("create-mode-tmux", !self.headless && !inherited, tr("create_mode_tmux"), false,
                         tr(if codex { "create_mode_tmux_summary_codex" } else { "create_mode_tmux_summary" }), false))
-                    .child(mode("create-mode-headless", self.headless, tr("create_mode_headless"), true,
+                    .child(mode("create-mode-headless", self.headless && !inherited, tr("create_mode_headless"), false,
                         tr(if codex { "create_mode_headless_summary_codex" } else { "create_mode_headless_summary" }), true)))
                 .child(div().child(Disclosure::new("create-difference", self.difference, tr("create_mode_difference"), true)
                     .on_change(move |open, cx| { let _ = this.update(cx, |this, cx| { this.difference = open; cx.notify(); }); })))
@@ -1390,6 +1442,28 @@ impl NewSession {
             .children(self.render_git_pill(open == Some(Menu::Git), cx))
     }
 
+    /// A conta da conversa fechada aberta, abaixo do compositor: Claude troca pelo menu (com a cota de cada conta), Codex só
+    /// mostra a de origem (o servidor recusa outra), os demais não têm conta.
+    pub(super) fn render_reopen_account(&self, provider: &str, codex_label: String, cx: &mut Context<Self>) -> Option<Div> {
+        let row = div().flex().items_center().gap(px(2.)).pt(px(2.)).pl(px(6.));
+        match provider {
+            "claude" | "" => {
+                let list = self.configs.ok().filter(|list| !list.is_empty())?;
+                let chosen = self.reopen_config.clone().flatten();
+                // Conta fora da lista (pasta antiga) aparece pelo nome da pasta; sem caminho é a do servidor.
+                let label = list.iter().find(|c| Some(&c.path) == chosen.as_ref()).map(|c| c.label.clone())
+                    .or_else(|| chosen.as_deref().map(|p| basename(p).to_owned())).unwrap_or_else(|| tr("create_default"));
+                Some(row.child(quiet_pill(Menu::Account, self.menu.get() == Some(Menu::Account), IconName::CircleUser, label,
+                    tr("create_claude_account"), self.configs.loading, cx)))
+            }
+            "codex" => Some(row.child(div().id("reopen-codex-account").h(px(26.)).px(px(8.)).flex().items_center().gap(px(6.))
+                .text_size(px(12.5)).text_color(theme::muted()).aria_label(format!("{}: {codex_label}", tr("create_codex_account")))
+                .child(chrome::small_icon(IconName::CircleUser, 14., theme::faint()))
+                .child(div().max_w(px(220.)).truncate().child(codex_label)))),
+            _ => None,
+        }
+    }
+
     /// O que impede ou explica o envio, abaixo das pílulas: a criação em voo, a falha dela, ou a leitura que faltou.
     /// O nome que a sessão da tela sem sessão vai ter (a pasta; o desempate do servidor pode somar um número) e o agente.
     pub(super) fn opening_name(&self) -> String { self.picked.as_deref().map(basename).unwrap_or_default().to_owned() }
@@ -1437,6 +1511,27 @@ impl NewSession {
                 }
                 _ => div().into_any_element(),
             },
+            Menu::Account if self.reopen_config.is_some() => {
+                let chosen = self.reopen_config.clone().flatten();
+                // `config_dir` nulo no resume = a conta dona da conversa, que aqui é a do servidor.
+                let default = self.reopen_default.then(|| menu_row(SharedString::from("reopen-account-default"), chosen.is_none(),
+                    tr("create_default"), String::new())
+                    .on_click(cx.listener(|this, _, _, cx| { this.menu.set(None); this.reopen_config = Some(None); cx.notify(); }))
+                    .into_any_element()).filter(|_| wanted(&query, &tr("create_default"), ""));
+                let rows = default.into_iter().chain(self.accounts().filter(|c| wanted(&query, &c.label, "")).map(|c| {
+                    let path = c.path.clone();
+                    let quota = self.quota_line(format!("reopen-account-quota-{path}"), &format!("claude:{path}"));
+                    menu_row_with(SharedString::from(format!("reopen-account-{path}")), chosen.as_ref() == Some(&c.path), c.label.clone(),
+                        if c.active { tr("create_current") } else { String::new() }, quota)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.menu.set(None);
+                            this.reopen_config = Some(Some(path.clone()));
+                            cx.notify();
+                        }))
+                        .into_any_element()
+                })).collect();
+                Self::menu_list("reopen-account-list", rows)
+            }
             Menu::Account if self.provider == "codex" => {
                 let rows = self.codex.ok().into_iter().flatten().filter(|a| wanted(&query, &a.name, &a.hint())).map(|account| {
                     let id = account.id.clone();
@@ -1462,6 +1557,7 @@ impl NewSession {
                                 .map_or_else(|| c.label.clone(), |hint| format!("{}, {hint}", c.label)))
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.menu.set(None);
+                                this.model_choice_touched = true;
                                 if this.config.as_ref() != Some(&path) { this.config = Some(path.clone()); this.load_models(window, cx); }
                                 cx.notify();
                             }))
@@ -1544,7 +1640,8 @@ impl Hangar {
     /// Onde o compositor guarda anexos: a sessão aberta ou, na tela sem sessão antes do Enviar, a conversa por nascer.
     /// Com a criação em voo não há onde pôr: o que já foi anexado segue com ela.
     pub(super) fn composer_key(&self) -> Option<SessionKey> {
-        self.selected_key().or_else(|| (self.new_chat_screen() && self.opening.is_none()).then(new_chat_key))
+        // A conversa fechada aberta não anexa: os anexos sobem para uma sessão, e ela só existe depois do Enviar.
+        self.selected_key().or_else(|| (self.new_chat_screen() && self.opening.is_none() && self.reopen.is_none()).then(new_chat_key))
     }
 
     /// A máquina escolhida nos chips da tela sem sessão, que é onde a conversa vai nascer.
@@ -1568,6 +1665,31 @@ impl Hangar {
         let Some(api) = self.api.clone() else {
             return div().flex_1().flex().items_center().justify_center().text_color(theme::muted()).child(tr("choose_session")).into_any_element();
         };
+        self.home_usage_opened(cx);
+        let view = self.ensure_new_chat(api, window, cx);
+        view.update(cx, |view, _| view.reopen_config = None);
+        if self.opening.is_some() && view.read(cx).creating { return self.render_opening(view, window, cx); }
+        let (top, bottom, note) = view.update(cx, |view, cx| (view.render_top_pills(cx), view.render_bottom_pills(cx), view.note()));
+        // Anexo recusado (grande demais, ilegível) avisa aqui, onde a tela sem sessão mostra os avisos dela.
+        let note = self.action_feedback.get(&new_chat_key()).cloned().or(note);
+        let composer = self.render_composer(false, false, false, 0, false, false, window, cx);
+        // A tela chega como um objeto só, descendo 10 px até o lugar (o `settle-down` do kit, no tempo do `fade-in`).
+        let settle = motion::enter("new-chat-in", motion::FADE_IN, window, cx);
+        // O fundo pertence à janela; a tela vazia nunca o cobre com uma superfície opaca. O compositor fica um pouco acima do meio.
+        div().id("new-chat").size_full().overflow_y_scroll().flex().flex_col()
+            .child(motion::settle_down(div(), settle).my_auto().pb(rems(4.)).w_full().flex_shrink_0().flex().flex_col()
+                .child(landing_column(self.render_home_usage(cx).max_w(px(560.)).mx_auto()).mb_6())
+                .child(landing_column(popup::anchor(top, super::landing::TOP)))
+                .child(composer)
+                .child(landing_column(div().flex().flex_col().gap_1().child(popup::anchor(bottom, super::landing::BOTTOM))
+                    .children(note.map(|(text, warning)| div().id("new-chat-note").role(if warning { Role::Alert } else { Role::Status })
+                        .px(px(14.)).text_sm().whitespace_normal().text_color(if warning { theme::warning() } else { theme::muted() }).child(text))))))
+            .into_any_element()
+    }
+
+    /// A view da tela sem sessão, refeita quando a conexão ou a lista de máquinas mudam. A conversa fechada aberta usa a
+    /// mesma, pelas contas e cotas que ela já lê.
+    pub(super) fn ensure_new_chat(&mut self, api: Api, window: &mut Window, cx: &mut Context<Self>) -> Entity<NewSession> {
         if self.new_chat.as_ref().is_none_or(|view| { let link = &view.read(cx).link; link.connection != self.connection || link.servers_rev != self.servers_rev }) {
             let link = Link { api, runtime: self.runtime.clone(), tx: self.tx.clone(), connection: self.connection,
                 servers: self.server_choices(), servers_rev: self.servers_rev };
@@ -1581,23 +1703,7 @@ impl Hangar {
             }));
             cx.observe(self.new_chat.as_ref().unwrap(), |this, _, cx| this.redraw(panes::Area::Bottom, cx)).detach();
         }
-        let view = self.new_chat.clone().unwrap();
-        if self.opening.is_some() && view.read(cx).creating { return self.render_opening(view, window, cx); }
-        let (top, bottom, note) = view.update(cx, |view, cx| (view.render_top_pills(cx), view.render_bottom_pills(cx), view.note()));
-        // Anexo recusado (grande demais, ilegível) avisa aqui, onde a tela sem sessão mostra os avisos dela.
-        let note = self.action_feedback.get(&new_chat_key()).cloned().or(note);
-        let composer = self.render_composer(false, false, false, 0, false, false, window, cx);
-        // A tela chega como um objeto só, descendo 10 px até o lugar (o `settle-down` do kit, no tempo do `fade-in`).
-        let settle = motion::enter("new-chat-in", motion::FADE_IN, window, cx);
-        // O fundo pertence à janela; a tela vazia nunca o cobre com uma superfície opaca. O compositor fica um pouco acima do meio.
-        div().id("new-chat").size_full().overflow_y_scroll().flex().flex_col()
-            .child(motion::settle_down(div(), settle).my_auto().pb(rems(4.)).w_full().flex_shrink_0().flex().flex_col()
-                .child(landing_column(popup::anchor(top, super::landing::TOP)))
-                .child(composer)
-                .child(landing_column(div().flex().flex_col().gap_1().child(popup::anchor(bottom, super::landing::BOTTOM))
-                    .children(note.map(|(text, warning)| div().id("new-chat-note").role(if warning { Role::Alert } else { Role::Status })
-                        .px(px(14.)).text_sm().whitespace_normal().text_color(if warning { theme::warning() } else { theme::muted() }).child(text))))))
-            .into_any_element()
+        self.new_chat.clone().unwrap()
     }
 
     /// Com `baton`, o mesmo diálogo cria a sessão que continua aquela (o "Continuar em outra conta" do menu da sessão).
@@ -1619,7 +1725,7 @@ impl Hangar {
         let width = (window.viewport_size().width * 0.94).min(px(1320.));
         window.open_dialog(cx, move |d, _, cx| {
             // Criando, o diálogo não fecha: ele é o único lugar onde o resultado aparece, como o Adicionar de Máquinas.
-            let busy = dialog.read(cx).creating;
+            let busy = dialog.read(cx).creating || dialog.read(cx).headless_saving;
             let (weak, me) = (weak.clone(), dialog.entity_id());
             popup::dialog(d).w(width).margin_top(px(DIALOG_TOP)).child(dialog.clone()).keyboard(!busy).overlay_closable(!busy).close_button(!busy)
                 .on_ok(enter_to_focused)

@@ -7,7 +7,7 @@ from pathlib import Path
 from fastapi.responses import FileResponse, StreamingResponse
 
 
-def file_response(path: str | Path, *, headers: dict[str, str] | None = None):
+def file_response(path: str | Path, *, headers: dict[str, str] | None = None, download: bool = False):
     path = Path(path)
     media = mimetypes.guess_type(path)[0] or "application/octet-stream"
     headers = {
@@ -15,6 +15,10 @@ def file_response(path: str | Path, *, headers: dict[str, str] | None = None):
         "X-Content-Type-Options": "nosniff",
         "Referrer-Policy": "no-referrer",
     }
+    if download:
+        headers["Content-Security-Policy"] = "sandbox; script-src 'none'"
+        return FileResponse(path, media_type=media, headers=headers, filename=path.name,
+                            content_disposition_type="attachment")
     if media in ("text/html", "application/xhtml+xml"):
         def document():
             # Blocos múltiplos de três permitem concatenar base64 sem padding intermediário.

@@ -71,6 +71,31 @@ def gravar_peer(body: dict) -> list:
     return _lista()
 
 
+@peers_router.get("/app-list", dependencies=[Depends(require_auth)])
+def ler_lista_app() -> dict:
+    """A lista de máquinas do app, com os tokens: é dela que o app abre a conexão de cada uma.
+    Só o dono chega aqui (a porta do convidado não tem /api/peers)."""
+    try:
+        rev, lista = peers.ler_lista_app()
+    except ValueError as e:
+        raise HTTPException(503, detail=erro("peers_arquivo_ilegivel", str(e))) from e
+    return {"rev": rev, "servers": lista}
+
+
+@peers_router.put("/app-list", dependencies=[Depends(require_auth)])
+def gravar_lista_app(body: dict) -> dict:
+    rev = body.get("rev")
+    if not isinstance(rev, str):
+        raise HTTPException(400, detail=erro("peers_registro_invalido", "rev obrigatório"))
+    try:
+        rev, lista = peers.gravar_lista_app(rev, body.get("servers"))
+    except peers.ListaMudou as e:
+        raise HTTPException(409, detail=erro("peers_lista_mudou", "a lista mudou em outro app")) from e
+    except ValueError as e:
+        raise HTTPException(400, detail=erro("peers_registro_invalido", str(e))) from e
+    return {"rev": rev, "servers": lista}
+
+
 @peers_router.put("/{server_id}/enabled", dependencies=[Depends(require_auth)])
 def set_peer_enabled(server_id: str, body: dict) -> list:
     enabled = body.get("enabled")

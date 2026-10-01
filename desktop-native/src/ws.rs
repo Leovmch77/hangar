@@ -43,13 +43,11 @@ pub struct Terminal {
 
 impl Terminal {
     /// `token` é a credencial da conexão de `api`, nunca o texto atual do formulário.
-    /// `shortcut`: terminal de atalho da sessão; o backend confere o dono antes de anexar.
-    pub fn open(runtime: &Handle, api: &Api, session: &str, shortcut: Option<&str>, token: String, cols: u16, rows: u16) -> Self {
-        let (cols, rows) = dimensions(cols, rows);
-        let mut url = api.endpoint(Some(session), Some("term"));
-        url.query_pairs_mut().append_pair("token", token.trim())
-            .append_pair("cols", &cols.to_string()).append_pair("rows", &rows.to_string());
-        if let Some(id) = shortcut { url.query_pairs_mut().append_pair("shortcut", id); }
+    /// `shortcut`: terminal de atalho da sessão; o backend confere o dono antes de anexar. Com `hangar`, é o terminal
+    /// No Hangar `shortcut`, que não pertence a sessão nenhuma.
+    #[allow(clippy::too_many_arguments)]
+    pub fn open(runtime: &Handle, api: &Api, session: &str, shortcut: Option<&str>, hangar: bool, token: String, cols: u16, rows: u16) -> Self {
+        let url = terminal_url(api, session, shortcut, hangar, &token, cols, rows);
         let (commands, input) = async_channel::bounded(8);
         let (output, events) = async_channel::bounded(8);
         let (stop, mut stopped) = oneshot::channel();
@@ -101,6 +99,21 @@ impl Terminal {
 impl Drop for Terminal { fn drop(&mut self) { self.task.abort(); } }
 
 fn dimensions(cols: u16, rows: u16) -> (u16, u16) { (cols.clamp(20, 500), rows.clamp(5, 200)) }
+
+/// O terminal No Hangar mora fora de qualquer sessão, na própria rota; o de atalho e o da sessão, na dela.
+fn terminal_url(api: &Api, session: &str, shortcut: Option<&str>, hangar: bool, token: &str, cols: u16, rows: u16) -> url::Url {
+    let (cols, rows) = dimensions(cols, rows);
+    let mut url = if let (true, Some(id)) = (hangar, shortcut) {
+        let mut url = api.route();
+        url.path_segments_mut().expect("validated HTTP base").pop_if_empty()
+            .extend(["api", "hangar-terminals", id, "term"]);
+        url
+    } else { api.endpoint(Some(session), Some("term")) };
+    url.query_pairs_mut().append_pair("token", token.trim())
+        .append_pair("cols", &cols.to_string()).append_pair("rows", &rows.to_string());
+    if let (false, Some(id)) = (hangar, shortcut) { url.query_pairs_mut().append_pair("shortcut", id); }
+    url
+}
 
 fn accept_key(key: &str) -> String {
     let bytes = format!("{key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
@@ -266,6 +279,17 @@ mod tests {
         wire
     }
 
+    #[test]
+    fn hangar_terminal_uses_its_own_route_and_never_the_session_one() {
+        let api = Api::new("http://127.0.0.1:8765", "").unwrap();
+        let path = |url: url::Url| (url.path().to_owned(), url.query().unwrap_or("").to_owned());
+        assert_eq!(path(terminal_url(&api, "pm-1", Some("ab12"), true, " tok ", 80, 24)),
+            ("/api/hangar-terminals/ab12/term".to_owned(), "token=tok&cols=80&rows=24".to_owned()));
+        assert_eq!(path(terminal_url(&api, "pm-1", Some("ab12"), false, "tok", 80, 24)),
+            ("/api/sessions/pm-1/term".to_owned(), "token=tok&cols=80&rows=24&shortcut=ab12".to_owned()));
+        assert_eq!(path(terminal_url(&api, "pm-1", None, false, "tok", 80, 24)).0, "/api/sessions/pm-1/term");
+    }
+
     #[tokio::test]
     async fn framing_lengths_masks_fragments_and_rejections() {
         let mut buffered = tokio::io::BufWriter::new(Vec::new());
@@ -379,7 +403,7 @@ mod tests {
                     if opcode == 1 { socket.write_all(&[0x82, 1, b'!']).await.unwrap(); }
                 }
             });
-            let mut terminal = Terminal::open(&Handle::current(), &api, "fixture", None, STANDARD.encode([17; 24]), 999, 0);
+            let mut terminal = Terminal::open(&Handle::current(), &api, "fixture", None, false, STANDARD.encode([17; 24]), 999, 0);
             let events = terminal.events();
             assert!(matches!(events.recv().await, Ok(Ok(Event::Connected))));
             terminal.send(b"echo hi\r").unwrap();

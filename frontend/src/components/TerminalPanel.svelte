@@ -1,7 +1,8 @@
 <script lang="ts">
   import { TermSocket, termUrlForServer, sessionExistsOnServer } from '../lib/term';
   import { motivoDeOrigemRecusada } from '../lib/termOrigem';
-  import { openShell, openNativeTerminal, closeShortcutTerminal } from '@hangar/core';
+  import { openShell, openNativeTerminal, closeShortcutTerminal, closeHangarTerminal } from '@hangar/core';
+  import { hangarOf, liveTerminals, takeHangarTab } from '../lib/hangarTerminals.svelte';
   import { untrack } from 'svelte';
   import ShortcutTerminalTab from './ShortcutTerminalTab.svelte';
   import { shortcutTerminals, shortcutTerminalsOf, refreshShortcutTerminals } from '../lib/shortcutTerminals.svelte';
@@ -498,14 +499,39 @@
     untrack(() => { abaAtiva = `sc:${id}`; delete shortcutTerminals.focus[connKey]; });
   });
 
+  // Terminais No Hangar do servidor: moram fora de qualquer sessão, então o grupo aparece no painel
+  // de TODAS as sessões desse servidor.
+  const hgServerId = $derived(connKey.split('::')[0] ?? '');
+  const hangarList = $derived(hangarOf(hgServerId));
+
+  // Pedido de aba No Hangar (chip, tile, pergunta), com o painel aberto ou abrindo. Terminal que já
+  // não existe descarta o pedido, senão ele ficaria no store e reabriria o painel depois.
+  $effect(() => {
+    const id = liveTerminals.panelRequest[hgServerId];
+    if (!open || !id) return;
+    const existe = hangarList.some((t) => t.id === id);
+    untrack(() => {
+      if (existe) abaAtiva = `hg:${id}`;
+      takeHangarTab(hgServerId);
+    });
+  });
+
   // Aba de atalho que sumiu (fechada aqui ou noutro aparelho) ou sessao sem pane ainda sem aba:
   // cai no primeiro terminal que existe; sem nenhum, na aba da sessao (ou no vazio, sem pane).
   $effect(() => {
-    const ids = scLista.map((t) => `sc:${t.id}`);
+    const ids = [...scLista.map((t) => `sc:${t.id}`), ...hangarList.map((t) => `hg:${t.id}`)];
     const atual = abaAtiva;
     if (atual === 'attach' || atual === 'shell' || ids.includes(atual)) return;
     untrack(() => { abaAtiva = ids[0] ?? (headless ? '' : 'attach'); });
   });
+
+  async function stopHangar(id: string) {
+    const srv = scServidor;
+    if (!srv) { scErro = m.servidor_nao_existe(); return; }
+    scErro = null;
+    try { await closeHangarTerminal(srv, id); }
+    catch (e) { scErro = m.term_atalho_erro_fechar({ msg: e instanceof Error ? e.message : String(e) }); }
+  }
 
   async function fecharAtalho(id: string) {
     const srv = scServidor;
@@ -564,6 +590,22 @@
                     aria-label={m.term_atalho_fechar({ label: t.label })} title={m.term_atalho_fechar({ label: t.label })}>✕</button>
           </span>
         {/each}
+        {#if hangarList.length}
+          <span class="tp-grupo" aria-hidden="true">{m.term_grupo_hangar()}</span>
+          {#each hangarList as t (t.id)}
+            {@const sel = abaAtiva === `hg:${t.id}`}
+            <span class="tp-aba tp-aba-sc" class:sel class:morto={!t.alive}>
+              <button class="tp-aba-rotulo" role="tab" aria-selected={sel} title={t.label}
+                      onclick={() => (abaAtiva = `hg:${t.id}`)}>
+                <span class="tp-hg-ponto" class:pergunta={t.alive && t.question} class:morto={!t.alive}></span>
+                {t.label}{#if !t.alive}<span class="tp-aba-saida">{t.exit_code == null
+                  ? m.term_atalho_encerrado() : m.term_atalho_saiu({ codigo: t.exit_code })}</span>{/if}
+              </button>
+              <button class="tp-aba-x" onclick={() => stopHangar(t.id)}
+                      aria-label={m.term_hangar_parar({ label: t.label })} title={m.term_hangar_parar({ label: t.label })}>✕</button>
+            </span>
+          {/each}
+        {/if}
       </div>
       {#if scErro}
         <span class="tp-sc-erro" role="alert" title={scErro}>{scErro}</span>
@@ -617,8 +659,11 @@
         {#each scLista as t (t.id)}
           <ShortcutTerminalTab srv={scServidor} {sessionName} id={t.id} visible={abaAtiva === `sc:${t.id}`} />
         {/each}
+        {#each hangarList as t (t.id)}
+          <ShortcutTerminalTab srv={scServidor} {sessionName} id={t.id} visible={abaAtiva === `hg:${t.id}`} hangar />
+        {/each}
       {/if}
-      {#if headless && scLista.length === 0}
+      {#if headless && scLista.length === 0 && hangarList.length === 0}
         <div class="tp-screen tp-status" role="status">
           <p class="tp-msg">{scCarregando ? m.comum_carregando() : m.term_atalho_vazio()}</p>
         </div>
@@ -666,31 +711,42 @@
      absolute, height:6px) cobria os 2px de cima dos botoes (abas, ↗, ⤢, ✕), que comecavam em y≈4px --
      clicar ali comecava um arrasto em vez de acionar o botao. */
   .tp-bar { display: flex; align-items: center; gap: var(--space-2); padding: var(--space-1) var(--space-2); padding-top: 6px; background: var(--glass-panel); }
-  .tp-abas { display: flex; gap: var(--space-1); flex: 1; min-width: 0; }
+  /* O botão global tem piso de 44px; a barra do desenho é mais baixa, então os botões dela pedem menos. */
+  .tp-bar > button { min-height: 28px; min-width: 28px; }
+  /* Aba nunca encolhe: com muitas, a fila rola em vez de esmagar o rótulo. */
+  .tp-abas { display: flex; gap: var(--space-1); flex: 1; min-width: 0; overflow-x: auto; scrollbar-width: thin; }
   .tp-aba {
-    padding: 2px var(--space-2); border-radius: var(--radius-sm); border: 1px solid transparent;
-    background: transparent; color: var(--text-muted); font-size: var(--text-xs); cursor: pointer;
+    flex: 0 0 auto; min-height: 0; min-width: 0;
+    padding: 5px 10px; border-radius: var(--radius-sm); border: 1px solid transparent;
+    background: transparent; color: var(--text-secondary); font-size: var(--text-xs); cursor: pointer;
     max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
   .tp-aba:hover { background: var(--bg-hover); }
   /* Botao nativo como os irmaos da barra (↗ ⤢ ✕): so o teto de largura, mesmo par max-width+
      ellipsis do .tp-aba acima. O rotulo agora carrega o MOTIVO da queda, que pode ser uma frase
      longa (mensagem de import quebrado) — sem o teto ela espremia as abas ate sumir. */
-  .tp-recon { max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .tp-aba.sel { background: var(--accent-dim); color: var(--accent); }
-  /* Aba de atalho: rotulo + ✕ na mesma pilula; encerrado fica apagado com o codigo ao lado. */
-  .tp-aba-sc { display: inline-flex; align-items: center; gap: 2px; padding-right: 2px; }
+  .tp-recon { font-size: var(--text-xs); max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tp-aba.sel { background: var(--surface-raised); color: var(--text-primary); }
+  /* Aba de atalho: rotulo + ✕ na mesma pilula; encerrado fica apagado com o codigo ao lado. O padding
+     mora nos botões (não na pílula) pra a área de clique cobrir a aba inteira. */
+  .tp-aba-sc { display: inline-flex; align-items: center; gap: 2px; padding: 0 2px 0 0; }
   .tp-aba-sc.morto { opacity: 0.75; }
   .tp-aba-rotulo {
-    border: 0; background: transparent; color: inherit; font: inherit; cursor: pointer; padding: 0;
-    min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    border: 0; background: transparent; color: inherit; font: inherit; cursor: pointer; padding: 5px 4px 5px 10px;
+    min-height: 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
   .tp-aba-saida { margin-left: var(--space-1); color: var(--text-muted); }
   .tp-aba-x {
+    flex-shrink: 0; width: 24px; height: 24px; min-height: 0; min-width: 0;
     border: 0; background: transparent; color: var(--text-muted); cursor: pointer;
-    padding: 0 2px; font-size: 10px; line-height: 1; border-radius: var(--radius-sm);
+    padding: 0; font-size: 10px; line-height: 1; border-radius: var(--radius-sm);
   }
   .tp-aba-x:hover { color: var(--text-primary); background: var(--bg-hover); }
+  .tp-grupo { align-self: center; margin: 0 4px 0 10px; padding-left: 10px; border-left: 1px solid var(--border-default);
+    font-size: 10px; letter-spacing: 0.06em; color: var(--text-muted); }
+  .tp-hg-ponto { display: inline-block; width: 6px; height: 6px; margin-right: 6px; border-radius: 50%; background: var(--success); }
+  .tp-hg-ponto.pergunta { background: var(--warning); }
+  .tp-hg-ponto.morto { background: var(--text-muted); }
   .tp-sc-erro { max-width: 30%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     font-size: var(--text-xs); color: var(--error); }
   /* Posicionamento relativo: as duas telas se empilham em cima uma da outra (position:absolute) e a

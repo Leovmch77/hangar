@@ -21,7 +21,6 @@
   import { novoEstadoVad, passoVad } from '@hangar/core';
   import type { EstadoVad } from '@hangar/core';
   import { lerMaosLivres } from '../lib/maosLivres';
-  import { keepWarmMic, stopWarmMic, takeWarmMic } from '../lib/warmMic';
   import { podeEnviarSozinho } from '@hangar/core';
   import type { MotivoFim } from '@hangar/core';
   import IconSend from './icons/IconSend.svelte';
@@ -58,6 +57,7 @@ import { cachePrazo } from '../lib/cachePrazo';
   import SlashSuggest from './SlashSuggest.svelte';
   import CommandSheet from './CommandSheet.svelte';
   import ConfirmSheet from './ConfirmSheet.svelte';
+  import { skipChatConfirmations, rememberSkipChatConfirmations } from '../lib/confirmActions';
   import DitadoEstiloPopover from './DitadoEstiloPopover.svelte';
   import { ditadoEstilo } from '../lib/ditadoEstilo.svelte';
   import { estilosDitado, type EstiloDitado } from '@hangar/core';
@@ -1154,7 +1154,9 @@ import { cachePrazo } from '../lib/cachePrazo';
     // passar pro resto da tela (overlays, visor).
     if (e.key === 'Escape' && podeInterromper) {
       e.preventDefault();
-      onInterrupt();
+      e.stopPropagation();
+      if (skipChatConfirmations()) onInterrupt();
+      else confirmStopOpen = true;
       return;
     }
     // Shift+Tab no campo = a tecla do terminal do Claude. Só com o foco aqui, pra não roubar a
@@ -1418,16 +1420,14 @@ import { cachePrazo } from '../lib/cachePrazo';
   }
 
   // ── Gravar audio: toggle (tap grava, tap para) -> vira um anexo de audio ─────
-  // Mic morno compartilhado (lib/warmMic.ts): sobrevive a troca de sessao, que desmonta este Composer.
   let voiceBusy = $state(false);
 
   function prepareVoice() {
-    stopWarmMic();
     ttsPlayer.close();
   }
 
   // Para a gravacao e zera o estado. Chamado no onstop, no onerror, em falha e no onDestroy
-  // (trocar de sessao com gravacao ativa desmonta o Composer). O stream vira o mic morno, desabilitado.
+  // (trocar de sessao com gravacao ativa desmonta o Composer).
   function teardownRecording() {
     if (rafId) { cancelAnimationFrame(rafId); rafId = 0; }
     if (recTimer) { clearInterval(recTimer); recTimer = undefined; }
@@ -1437,7 +1437,7 @@ import { cachePrazo } from '../lib/cachePrazo';
       audioCtx?.close().catch((err) => console.warn(m.composer_audiocontext_close_falhou(), err));
       audioCtx = undefined;
     }
-    if (recStream) keepWarmMic(recStream);
+    recStream?.getTracks().forEach((track) => track.stop());
     recStream = undefined;
     mediaRecorder = undefined;
     recording = false;
@@ -1569,14 +1569,15 @@ import { cachePrazo } from '../lib/cachePrazo';
 
   // Grava webm/mp4 e transcreve na Groq ao parar -> cai no composer.
   function startMediaRecorder(stream: MediaStream) {
-    mediaRecorder = new MediaRecorder(stream);
-    mediaRecorder.ondataavailable = (e) => { if (e.data.size) recChunks.push(e.data); };
-    mediaRecorder.onstop = () => {
+    const recorder = new MediaRecorder(stream);
+    mediaRecorder = recorder;
+    recorder.ondataavailable = (e) => { if (mediaRecorder === recorder && e.data.size) recChunks.push(e.data); };
+    recorder.onstop = () => {
       // Componente destruído com gravação no ar: parar as tracks dispara este onstop DEPOIS do
       // destroy em browser que segue a spec — sem o guard, uma transcrição fantasma rodava na
       // sessão que o usuário acabou de trocar (revisão do diff).
-      if (destroyed) return;
-      const type = mediaRecorder?.mimeType || 'audio/webm';
+      if (destroyed || mediaRecorder !== recorder) return;
+      const type = recorder.mimeType || 'audio/webm';
       // Chrome grava webm/opus; iOS Safari grava mp4/aac. A Groq aceita os dois direto.
       const ext = type.includes('mp4') ? 'm4a' : type.includes('ogg') ? 'ogg' : 'webm';
       // onerror dispara stop logo depois -> se ja falhou, nao anexa o audio (truncado). Sem chunk
@@ -1598,7 +1599,8 @@ import { cachePrazo } from '../lib/cachePrazo';
         teardownRecording();
       }
     };
-    mediaRecorder.onerror = (e) => {
+    recorder.onerror = (e) => {
+      if (destroyed || mediaRecorder !== recorder) return;
       console.error(m.composer_mediarecorder_erro(), (e as { error?: unknown }).error ?? e);
       recFailed = true;
       recError = m.composer_falha_gravacao();
@@ -1611,7 +1613,7 @@ import { cachePrazo } from '../lib/cachePrazo';
       }
       teardownRecording();
     };
-    mediaRecorder.start();
+    recorder.start();
   }
 
   async function toggleRecord() {
@@ -1637,35 +1639,23 @@ import { cachePrazo } from '../lib/cachePrazo';
     // o que o app estava lendo em voz alta.
     if (ttsPlayer.playing) ttsPlayer.toggle();
 
-    // Grava pelo mic e transcreve na Groq ao parar; waveform real do audio.
-    // Reusa o mic morno quando ha um (sem prompt); senao pede o stream ao navegador.
-    const morno = takeWarmMic();
     let stream: MediaStream;
-    if (morno) {
-      stream = morno;
-    } else {
-      try {
-        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      } catch (err) {
-        // Reject TARDIO de uma tentativa morta (cancelada ou componente destruido): silencio total —
-        // zerar starting aqui mataria o hint de uma tentativa NOVA em voo, e o recError seria um
-        // erro de algo que o usuario deliberadamente cancelou.
-        if (destroyed || geracao !== recGeracao) return;
-        console.error(m.composer_getusermedia_falhou(), err);
-        const name = err instanceof DOMException ? err.name : '';
-        recError = name === 'NotFoundError' ? m.composer_sem_microfone()
-          : name === 'NotReadableError' ? m.composer_mic_em_uso()
-          : m.composer_sem_acesso_mic();
-        starting = false;
-        return;
-      }
-      // A promise resolveu TARDE: ou o usuario cancelou a espera (2o tap), ou trocou de sessao e
-      // este Composer morreu no meio do await. Sem este guard, a stream abria o mic num componente
-      // destruido/sem UI — gravador e interval vazavam pra sempre, sem ninguem pra chamar stop().
-      if (destroyed || geracao !== recGeracao) {
-        stream.getTracks().forEach((t) => t.stop());
-        return;
-      }
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch (err) {
+      // Uma resposta cancelada não pode alterar a tentativa seguinte.
+      if (destroyed || geracao !== recGeracao) return;
+      console.error(m.composer_getusermedia_falhou(), err);
+      const name = err instanceof DOMException ? err.name : '';
+      recError = name === 'NotFoundError' ? m.composer_sem_microfone()
+        : name === 'NotReadableError' ? m.composer_mic_em_uso()
+        : m.composer_sem_acesso_mic();
+      starting = false;
+      return;
+    }
+    if (destroyed || geracao !== recGeracao) {
+      stream.getTracks().forEach((t) => t.stop());
+      return;
     }
     recStream = stream;
     maosLivres = lerMaosLivres();
@@ -1695,12 +1685,9 @@ import { cachePrazo } from '../lib/cachePrazo';
   }
 
   onDestroy(() => {
-    // Gravando: encerrar as tracks e o que para o MediaRecorder. Parado, o mic vira morno e a proxima
-    // sessao grava sem novo prompt.
-    if (mediaRecorder?.state === 'recording') { recStream?.getTracks().forEach((t) => t.stop()); recStream = undefined; }
+    destroyed = true;
     teardownRecording();
   });
-  onDestroy(() => { destroyed = true; });   // getUserMedia em voo se descarta ao resolver (toggleRecord)
   onDestroy(fecharDitado);   // troca de sessao desmonta o Composer -> revoga o objectURL do audio
   onDestroy(cancelarContagem);   // troca de sessao desmonta o Composer -> nao deixa o setInterval solto
   // Fecha o audioCtx incondicionalmente no unmount: teardownRecording() so fecha quando !maosLivres
@@ -2442,7 +2429,7 @@ import { cachePrazo } from '../lib/cachePrazo';
         {#if podeInterromper && !hasInput}
           <!-- Pensando + input vazio -> o slot vira STOP. Ao digitar/colar algo, volta a ser SEND
                (enfileira a msg). Um slot so -> ganha espaco. -->
-          <button class="stop-btn" onclick={() => (confirmStopOpen = true)} aria-label={m.composer_interromper_aria()}>
+          <button class="stop-btn" onclick={() => { if (skipChatConfirmations()) onInterrupt(); else confirmStopOpen = true; }} aria-label={m.composer_interromper_aria()}>
             <IconInterrupt size={18} />
           </button>
         {:else}
@@ -2673,6 +2660,8 @@ import { cachePrazo } from '../lib/cachePrazo';
     message={m.composer_interromper_msg()}
     confirmLabel={m.composer_interromper()}
     danger={true}
+    skipLabel={m.confirm_no_ask_actions()}
+    onSkip={rememberSkipChatConfirmations}
     onConfirm={onInterrupt}
     onClose={() => (confirmStopOpen = false)}
   />

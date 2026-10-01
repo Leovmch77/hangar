@@ -10,6 +10,7 @@ import type { EventSourceLike } from '@hangar/core';
 import { openSessionsStream, registrarDiag, novoReqDiag, checkInviteForServer, decidirRota, esquecerRota, rotaDecidida } from '@hangar/core';
 import { getActiveId, listServers, onServersChanged, type Server } from './auth';
 import { navPelaLista } from './navPelaLista';
+import { forgetServer, setLiveTerminals } from './hangarTerminals.svelte';
 import { getIdentificador } from './peers';
 import { ouvirFechamentoNav, podarNavMortos } from './navegadorPanel.svelte';
 import { aggregateSessions, epocasDeRecriacao, jsonlDaSessao, sweepHidden, type Slot, type Aggregate, type Epocas } from '@hangar/core';
@@ -122,7 +123,7 @@ function createSessionsStore() {
     }
     for (const [id, es] of streams) {
       if (!list.some((s) => s.id === id)) {
-        es.close(); streams.delete(id); slots.delete(id); ultimoSinal.delete(id);
+        es.close(); streams.delete(id); slots.delete(id); ultimoSinal.delete(id); forgetServer(id);
         clearTimeout(watchdogs.get(id)); watchdogs.delete(id);
         clearTimeout(primeiros.get(id)); primeiros.delete(id);
         clearTimeout(retryTimers.get(id)); retryTimers.delete(id);
@@ -138,6 +139,7 @@ function createSessionsStore() {
         clearTimeout(watchdogs.get(s.id)); watchdogs.delete(s.id);
         clearTimeout(primeiros.get(s.id)); primeiros.delete(s.id);
         slots.set(s.id, { sessions: [], error: m.convite_encerrado() });
+        forgetServer(s.id);
         continue;
       }
       if (streams.has(s.id)) continue;
@@ -205,6 +207,7 @@ function createSessionsStore() {
           // Mesmo tratamento do onerror: o slot que motivou o watchdog está potencialmente velho —
           // marca offline (mantendo a última lista boa) em vez de segui-lo servindo como bom.
           slots.set(s.id, { sessions: slots.get(s.id)?.sessions ?? null, error: 'offline' });
+          forgetServer(s.id);
           recompute();
           scheduleRetry(s.id);
         }, WATCHDOG_MS));
@@ -225,6 +228,7 @@ function createSessionsStore() {
         falhou('primeiro_quadro_timeout', PRIMEIRO_QUADRO_MS);
         if (primeiros.get(s.id) === tPrimeiro) primeiros.delete(s.id);
         slots.set(s.id, { sessions: slots.get(s.id)?.sessions ?? null, error: 'offline' });
+        forgetServer(s.id);
         recompute();
         // Conexão que nunca entregou quadro é o caso da máquina morta atrás da VPN: o socket fica
         // pendurado, o `onerror` nunca vem, e o EventSource reabre sozinho a cada ~3s pra sempre.
@@ -315,6 +319,11 @@ function createSessionsStore() {
         arm();
         void navPelaLista(s, (e as MessageEvent).data);
       });
+      es.addEventListener('shortcut_terminals', (e) => {
+        if (!isCurrent()) return;
+        arm();
+        setLiveTerminals(s.id, (e as MessageEvent).data);
+      });
       // Refresher do backend falhou (achado do hunter): sem isto, lista vazia por erro interno era
       // indistinguível de zero sessões. Mantém a última lista boa; o erro aparece distinto de offline.
       es.addEventListener('list_error', () => {
@@ -333,6 +342,7 @@ function createSessionsStore() {
         if (!isCurrent()) return;
         falhou(es.readyState === 2 ? 'stream_fechado' : 'stream_interrompido');
         slots.set(s.id, { sessions: slots.get(s.id)?.sessions ?? null, error: 'offline' });
+        forgetServer(s.id);
         recompute();
         // Assume o controle do retry (o nativo martela): fecha e reagenda com backoff.
         es.close();

@@ -80,6 +80,8 @@ pub(super) fn parse_discovered(value: &Value) -> Option<Vec<Discovered>> {
 #[derive(Clone)]
 pub(in crate::app) struct Found { base: String, token: String, id: String, id_error: Option<String> }
 
+impl Found { pub(super) fn id(&self) -> &str { &self.id } }
+
 /// O que o outro servidor disse, como o web mostra ("401: …"); queda de rede não tem texto próprio.
 fn reason(error: &Failure) -> Option<String> {
     match error.status {
@@ -319,12 +321,11 @@ impl AddMachine {
         cx.notify();
     }
 
-    pub(super) fn probed(&mut self, seq: u64, result: Result<Found, String>, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn probed(&mut self, seq: u64, result: Result<Found, String>, known: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
         if !self.waiting(seq) { return; }
         self.busy = false;
         match result {
             Ok(found) => {
-                let known = self.hangar.upgrade().and_then(|h| h.read(cx).known_machine(&found.id)).map(|k| k.label).filter(|l| !l.is_empty());
                 let name = known.unwrap_or_else(|| if found.id.is_empty() { short_host(&found.base) } else { found.id.clone() });
                 self.name.update(cx, |input, cx| input.set_value(name, window, cx));
                 self.found = Some(found);
@@ -543,7 +544,7 @@ impl Hangar {
     }
 
     /// A entrada deste aparelho que já é a máquina deste identificador (`conhecidas` do web).
-    fn known_machine(&self, id: &str) -> Option<ServerEntry> {
+    pub(super) fn known_machine(&self, id: &str) -> Option<ServerEntry> {
         if id.is_empty() { return None; }
         let active = self.server.as_deref().map(servers::norm).unwrap_or_default();
         self.machine_lines().into_iter().find(|l| l.ident.as_deref() == Some(id)).and_then(|l| l.entry).filter(|e| !e.invite)

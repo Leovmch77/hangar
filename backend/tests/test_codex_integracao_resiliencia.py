@@ -39,7 +39,7 @@ def home(tmp_path, monkeypatch):
 
 def _servico_isolado(home, monkeypatch):
     service = IntegracaoCodex(home, home / ".codex", nativo=NativoVazio)
-    monkeypatch.setattr(service, "_instrucoes", lambda: None)
+    monkeypatch.setattr(service, "_instrucoes", lambda *_a, **_k: None)
     monkeypatch.setattr(service, "_hooks", lambda *args: None)
     monkeypatch.setattr(service, "_config", AsyncMock())
     monkeypatch.setattr(service, "_plugins", AsyncMock())
