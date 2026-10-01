@@ -77,8 +77,8 @@ def guest_allowed(method: str, path: str, guest: share_store.Guest) -> bool:
         return guest.pair_share() is not None
     if (method, path) in _GLOBAL_ROUTES or any(method == m and path.startswith(p)
                                                for m, p in _GLOBAL_PREFIXES):
-        # Sem convite de verdade (só par), as rotas globais ficam na leitura.
-        return method == "GET" or any(s.kind == "share" and s.revoked_at is None for s in guest.shares)
+        # Token só de par não alcança nem as globais de leitura.
+        return any(s.kind == "share" and s.revoked_at is None for s in guest.shares)
     parts = path.split("/")
     if len(parts) < 4 or parts[1:3] != ["api", "sessions"]:
         return False

@@ -4644,19 +4644,21 @@ async def _avisar_saida(name: str, expeers: list[str]) -> list[dict]:
     for p in expeers:
         if not peers.is_remote(p):
             continue
-        rec = external_pairs.by_address(p)
+        # O sidecar de `name` prova que o par é dele: a busca é pela sessão, não só pelo endereço.
+        rec = next((r for r in external_pairs.by_local(name) if r.address == p), None)
         if rec is not None:
             if external_pairs.ambiguous(rec.alias):
+                # Só o aviso ao outro lado é pulado (o alias também é máquina tua); a limpeza local vale.
                 errs.append({"sessao": p, "erro": erro(
                     "erro_par_endereco_ambiguo",
                     f"'{rec.alias}' é ao mesmo tempo máquina tua e par externo", peer=p)})
-                continue
-            try:
-                await asyncio.to_thread(external_pairs.call, rec.peer_address, rec.peer_token,
-                                        "DELETE", "/api/pair")
-            except (peers.PeerError, ValueError) as ex:
-                if getattr(ex, "status", None) != 410:
-                    errs.append({"sessao": p, "erro": erro("erro_peer_nao_avisado", str(ex), peer=p)})
+            else:
+                try:
+                    await asyncio.to_thread(external_pairs.call, rec.peer_address, rec.peer_token,
+                                            "DELETE", "/api/pair")
+                except (peers.PeerError, ValueError) as ex:
+                    if getattr(ex, "status", None) != 410:
+                        errs.append({"sessao": p, "erro": erro("erro_peer_nao_avisado", str(ex), peer=p)})
             external_pair_api._guarded("remover o registro", external_pairs.remove, rec.share_id)
             external_pair_api._guarded("revogar o convite", share_store.revoke, rec.share_id)
             continue

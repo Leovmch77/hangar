@@ -6502,7 +6502,7 @@
   "erro_par_nome_invalido": "The pair's machine name has unsupported characters.",
   "erro_par_link_invalido": "This is not a pairing invite link.",
   "erro_par_recusado": "The other machine refused the invite: {detalhe}",
-  "erro_par_fora_do_ar": "The pair's machine did not answer. Check that it is on and its Funnel is active.",
+  "erro_par_fora_do_ar": "The pair's machine did not answer. Check that it is on and its Funnel is active. {detalhe}",
   "erro_par_resposta_invalida": "The pair's machine sent an unexpected answer.",
   "erro_par_encerrado": "The pair was ended on the other side.",
   "erro_par_endereco_ambiguo": "This name is both one of your machines and an external pair. Rename the machine in peers.json.",

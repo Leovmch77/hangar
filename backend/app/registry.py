@@ -2080,6 +2080,8 @@ class SessionRegistry:
         # E pro PAREAMENTO, pelo mesmo motivo: o kill() ja tira a sessao do grupo, mas quem morre
         # FORA dele (pane fechado na mao, maquina reiniciada) deixa o sidecar keyed pelo nome no
         # disco — e a sessao nova de mesmo nome nascia dentro de um grupo que nao existe mais.
+        # Nome reusado não herda o par externo da sessão antiga.
+        _encerrar_pares_externos(name)
         self._clear_pair(name)
         # Fixa o jsonl FRESCO no cache na hora: resolve() devolve este uuid mesmo antes do claude
         # escrever o arquivo, evitando o fallback newest-by-mtime pescar um jsonl ja existente da pasta.
@@ -2130,6 +2132,8 @@ class SessionRegistry:
                                       subagent_model=subagent_model, jev=jev)
         PromptQueue(name).clear()
         ThenLink(name).clear()
+        # Nome reusado não herda o par externo da sessão antiga.
+        _encerrar_pares_externos(name)
         self._clear_pair(name)
         jsonl = get_adapter(CLAUDE_HEADLESS).transcript_path_de(meta)
         self._jsonl_cache[name] = jsonl
@@ -2166,6 +2170,8 @@ class SessionRegistry:
                             jev=jev)
         PromptQueue(name).clear()
         ThenLink(name).clear()
+        # Nome reusado não herda o par externo da sessão antiga.
+        _encerrar_pares_externos(name)
         self._clear_pair(name)
         diag.registrar("sessao.criada", sessao=name, provider="codex", etapa="sidecar_gravado")
         return SessionInfo(name=name, cwd=cwd, jsonl=rollout or None, tracked=True, provider="codex",

@@ -77,7 +77,8 @@ class Guest:
         live = [s for s in cand if s.revoked_at is None]
         # Só revogado: devolve mesmo assim, para o porteiro dizer "encerrado" e não "fora do convite".
         pool = live or cand
-        return max(pool, key=lambda s: s.created_at) if pool else None
+        # Sessão compartilhada E pareada sob o mesmo token: o convite vence a cópia do par.
+        return max(pool, key=lambda s: (s.kind == "share", s.created_at)) if pool else None
 
     def sessions(self) -> set[str]:
         return {s.session for s in self.shares if s.revoked_at is None}

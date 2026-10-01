@@ -100,6 +100,11 @@ async def pair_redeem(body: PairRedeemBody):
     except share_tunnel.TunnelError:
         raise HTTPException(503, detail=erro("erro_sessao_indisponivel", "indisponível por instantes"))
     name = invite.session
+    # Antes de gastar o código: sessão já agrupada recusa sem queimar o convite.
+    if await asyncio.to_thread(lambda: pair.PairLink(name).get()) is not None:
+        raise HTTPException(409, detail=erro(
+            "erro_pareamento_mistura_cross",
+            "a sessão já está em grupo ou pareada — desfaça esse par antes de parear com outra máquina"))
     alias = external_pairs.free_alias(body.owner)
     peer = f"{alias}::{body.session}"
     harness = {s.name: s.provider for s in await asyncio.to_thread(api.registry.list)}
@@ -204,7 +209,7 @@ async def pair_accept(name: str, body: PairAcceptBody):
         share_store.revoke(mine.id)
         if e.status in (404, 410, 409, 400):
             raise _refused(e)
-        raise HTTPException(502, detail=erro("erro_par_fora_do_ar", str(e)))
+        raise _fora_do_ar(str(e), remoto=e.status is not None)
     resp = resp if isinstance(resp, dict) else {}
     owner, session, token = resp.get("owner", ""), resp.get("session", ""), resp.get("token", "")
     if not (isinstance(owner, str) and isinstance(session, str) and isinstance(token, str)
@@ -308,20 +313,30 @@ class ExternalSendBody(BaseModel):
     text: str
 
 
+_REMOTE_LABEL = "resposta da outra máquina: "
+
+
+def _fora_do_ar(texto: str, remoto: bool) -> HTTPException:
+    # Texto que o outro lado escreveu vai rotulado: a tela não deve tomá-lo por mensagem do app.
+    detalhe = (_REMOTE_LABEL if remoto else "") + texto[:300]
+    return HTTPException(502, detail=erro("erro_par_fora_do_ar", detalhe, detalhe=detalhe))
+
+
 def _remote_failure(e: Exception) -> HTTPException:
     status = e.status if isinstance(e, peers.PeerError) else None
     d = e.detail if isinstance(e, peers.PeerError) else None
     if status == 429:
-        params = d.get("params") if isinstance(d, dict) and isinstance(d.get("params"), dict) else {}
+        # Só os dois números que a mensagem usa: params do outro lado não entram em erro() soltos.
+        raw = d.get("params") if isinstance(d, dict) and isinstance(d.get("params"), dict) else {}
+        params = {k: raw[k] for k in ("max", "janela")
+                  if isinstance(raw.get(k), int) and not isinstance(raw.get(k), bool)}
         return HTTPException(429, detail=erro("erro_group_message_tempestade",
                                               "recados demais em pouco tempo", **params))
     if status == 503:
         return HTTPException(503, detail=erro("erro_sessao_indisponivel", "o par ainda está abrindo"))
     if isinstance(d, dict) and isinstance(d.get("msg"), str):
-        texto = d["msg"]
-    else:
-        texto = str(d) if d is not None else str(e)
-    return HTTPException(502, detail=erro("erro_par_fora_do_ar", texto[:300], detalhe=texto[:300]))
+        return _fora_do_ar(d["msg"], remoto=True)
+    return _fora_do_ar(str(d) if d is not None else str(e), remoto=d is not None)
 
 
 async def send_external(rec: ExternalPair, text: str) -> dict:

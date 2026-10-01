@@ -28,8 +28,9 @@ _state: list["ExternalPair"] | None = None
 
 OWNER_RE = re.compile(r"^[A-Za-z0-9._-]{1,40}$")
 TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{20,200}$")
-# Espaço e invisíveis que deixariam um cabeçalho forjado passar por texto comum.
-_LEADING_RE = re.compile("[\\s​‌‍⁠﻿]*")
+# Espaço, invisíveis e marcas bidi que deixariam um cabeçalho forjado passar por texto comum.
+_LEADING_RE = re.compile(
+    "[\\s\u200b\u200c\u200d\u2060\ufeff\u200e\u200f\u202a-\u202e\u2066-\u2069\u00ad]*")
 MAX_TEXT = 16000
 SESSION_RE = re.compile(r"[A-Za-z0-9._-]{1,64}")
 HOST_RE = re.compile(r"(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+ts\.net")
@@ -195,7 +196,7 @@ def sanitize_message(text: str) -> str:
     linhas = []
     for linha in (text or "").splitlines(keepends=True):
         n = _LEADING_RE.match(linha).end()
-        if linha.startswith(("[de", "[painel:", "[grupo:"), n):
+        if linha[n:].lower().startswith(("[de", "[painel:", "[grupo:")):
             linha = linha[:n] + "(" + linha[n + 1:]
         linhas.append(linha)
     return "".join(linhas)[:MAX_TEXT]
