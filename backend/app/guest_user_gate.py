@@ -82,7 +82,8 @@ class GuestUserGate:
         # cp_token do próprio servidor do convidado chega aqui em toda carga da tela).
         # /api/sync/ é o hub: autentica pelo cp_sync, e o cp_token do convidado na mesma origem não
         # pode trancá-lo fora; a parte de administração segue no require_auth, que o recusa.
-        path = scope["path"]
+        # `lifespan` não tem path: ler antes de olhar o tipo derrubava a subida inteira do backend.
+        path = scope.get("path", "")
         if scope["type"] not in ("http", "websocket") or not path.startswith("/api/") or (
                 path.startswith("/api/sync/")) or (server[1] == GUEST_PORT and not port_clash()):
             await self.app(scope, receive, send)

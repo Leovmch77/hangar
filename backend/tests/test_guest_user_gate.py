@@ -185,3 +185,16 @@ def test_hiding_owner_sessions_closes_open_terminal(env):
         with pytest.raises(WebSocketDisconnect) as e:
             ws.receive_text()
         assert e.value.code == 4410
+
+
+def test_lifespan_scope_passes_through():
+    # `lifespan` não tem path; quebrar aqui fazia o uvicorn pular a subida do backend inteira.
+    import asyncio
+
+    recebidos = []
+
+    async def inner(scope, receive, send):
+        recebidos.append(scope["type"])
+
+    asyncio.run(guest_user_gate.GuestUserGate(inner)({"type": "lifespan"}, None, None))
+    assert recebidos == ["lifespan"]
