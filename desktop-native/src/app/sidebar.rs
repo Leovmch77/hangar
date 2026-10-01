@@ -1118,7 +1118,8 @@ fn fill_menu(menu: PopupMenu, hangar: &WeakEntity<Hangar>, target: &Target, sess
     menu_style(menu).min_w(px(240.)).label(session.name.clone())
         .item(item(tr("sidebar_rename"), |this, target, window, cx| this.start_session_rename(target, window, cx)))
         .when(!invite, |menu| menu.item(mute_item(hangar, target, mute))
-            .item(item(tr_shared("compartilhar_menu", &[]), |this, target, window, cx| this.open_share_dialog(target, window, cx))))
+            .item(item(tr_shared("compartilhar_menu", &[]), |this, target, window, cx| this.open_share_dialog(target, window, cx)))
+            .item(item(tr("par_menu"), |this, target, window, cx| this.open_pair_accept_dialog(Some(target), None, window, cx))))
         .when_some(cwd, |menu, cwd| menu
             .item(PopupMenuItem::new(tr("sidebar_copy_cwd")).on_click(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(cwd.clone()))))
             .when(!invite, |menu| menu.item(item(tr("sidebar_open_editor"), |this, target, _, cx| this.write(target, Write::Editor, cx)))))

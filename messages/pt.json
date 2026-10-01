@@ -6495,5 +6495,17 @@
   "erro_par_resposta_invalida": "A máquina do par respondeu algo inesperado.",
   "erro_par_encerrado": "O par foi encerrado do outro lado.",
   "erro_par_endereco_ambiguo": "Este nome é ao mesmo tempo uma máquina tua e um par externo. Renomeie a máquina no peers.json.",
-  "erro_par_inexistente": "Este par externo não existe."
+  "erro_par_inexistente": "Este par externo não existe.",
+  "native_par_menu": "Parear por convite…",
+  "native_par_convidar": "Convidar para parear",
+  "native_par_titulo": "Parear com convite",
+  "native_par_titulo_sessao": "Parear {sessao} com convite",
+  "native_par_aceitar_ajuda": "Cole o link /par/ que a outra pessoa te mandou. A sessão dela e a tua vão poder trocar recados, e cada um vê a sessão do outro sem poder digitar nela.",
+  "native_par_campo_aria": "Link do convite de par",
+  "native_par_placeholder": "https://….ts.net:8443/par/…",
+  "native_par_qual_sessao": "Parear com qual sessão tua?",
+  "native_par_escolha_sessao": "Escolha a sessão que vai parear.",
+  "native_par_aceitar": "Parear",
+  "native_par_aceito": "Pareada com {dono} · {sessao}",
+  "native_par_whatsapp": "Vamos parear nossas sessões no Hangar: {link}"
 }

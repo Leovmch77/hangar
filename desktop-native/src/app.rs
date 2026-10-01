@@ -49,6 +49,7 @@ mod settings;
 mod mention;
 mod server_config;
 mod invite;
+mod pair_accept;
 mod servers;
 pub(crate) use servers::{ServerEntry, new_id as new_server_id};
 mod shortcuts;

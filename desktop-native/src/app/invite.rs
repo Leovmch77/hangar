@@ -74,6 +74,12 @@ pub(super) struct InviteDialog { hangar: WeakEntity<Hangar>, input: Entity<Input
 impl InviteDialog {
     fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.busy { return; }
+        // Link de par colado onde se colam convites: este diálogo cede lugar ao de par.
+        if let Some(link) = super::pair_accept::parse_pair_link(&self.input.read(cx).value()) {
+            window.close_all_dialogs(cx);
+            let _ = self.hangar.update(cx, |this, cx| this.open_pair_accept_dialog(None, Some(link), window, cx));
+            return;
+        }
         let Some((address, code)) = parse_invite_link(&self.input.read(cx).value()) else {
             self.error = Some(tr_shared("convite_link_invalido", &[]));
             cx.notify();

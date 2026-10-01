@@ -17,7 +17,7 @@ pub(super) fn when_label(epoch: f64) -> String {
         .unwrap_or_default()
 }
 
-enum Created { Link(ShareCreated), Blocked(SharePrereqs) }
+enum Created { Link(ShareCreated), Pair(ShareCreated), Blocked(SharePrereqs) }
 
 /// Só a linha do comando: colar o `fix` inteiro num terminal rodaria também a frase do Funnel.
 fn operator_command(p: &SharePrereqs) -> Option<&str> {
@@ -99,13 +99,15 @@ impl ShareDialog {
         cx.notify();
     }
 
-    fn create(&mut self, cx: &mut Context<Self>) {
+    /// `pair` gera o convite de par em vez do de compartilhamento: mesma rota de túnel, mesmos pré-requisitos.
+    fn create(&mut self, pair: bool, cx: &mut Context<Self>) {
         if self.busy { return; }
         (self.busy, self.copied, self.created, self.authorize_error) = (true, false, None, None);
         let name = self.name.clone();
         self.call(move |api| async move {
-            let result = match api.share_create(&name).await {
-                Ok(link) => Ok(Created::Link(link)),
+            let made = if pair { api.create_pair_invite(&name).await.map(Created::Pair) } else { api.share_create(&name).await.map(Created::Link) };
+            let result = match made {
+                Ok(created) => Ok(created),
                 Err(ShareFailure::Blocked(prereqs)) => Ok(Created::Blocked(prereqs)),
                 Err(ShareFailure::Other(e)) => Err(Hangar::failure(&e)),
             };
@@ -190,8 +192,9 @@ impl ShareDialog {
 
     fn render_created(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         Some(match self.created.as_ref()? {
-            Ok(Created::Link(c)) => {
-                let (copy, send) = (c.link.clone(), whatsapp_url(&tr_shared("compartilhar_whatsapp_texto", &[("link", &c.link)])));
+            Ok(Created::Link(c) | Created::Pair(c)) => {
+                let key = if matches!(self.created, Some(Ok(Created::Pair(_)))) { "native_par_whatsapp" } else { "compartilhar_whatsapp_texto" };
+                let (copy, send) = (c.link.clone(), whatsapp_url(&tr_shared(key, &[("link", &c.link)])));
                 div().flex().flex_col().gap_2()
                     .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(theme::muted()).child(tr_shared("compartilhar_link_novo", &[])))
                     .child(div().p_2().rounded_md().bg(theme::inset()).font_family(theme::MONO).text_sm().whitespace_normal().child(c.link.clone()))
@@ -269,13 +272,17 @@ impl Render for ShareDialog {
             })).into_any_element(),
         };
         let any = self.list.ok().is_some_and(|l| !l.is_empty());
-        let link_shown = matches!(self.created, Some(Ok(Created::Link(_))));
+        let link_shown = matches!(self.created, Some(Ok(Created::Link(_) | Created::Pair(_))));
         div().flex().flex_col().gap_3()
             .child(div().p_2().rounded_md().bg(theme::accent_dim()).text_sm().whitespace_normal().child(tr_shared("compartilhar_aviso_confianca", &[])))
             .children(self.render_created(cx))
-            .when(!link_shown, |el| el.child(Button::new("share-create").primary()
-                .label(tr_shared(if self.busy { "compartilhar_gerando" } else { "compartilhar_gerar" }, &[])).disabled(self.busy || self.watching)
-                .on_click(cx.listener(|d, _, _, cx| d.create(cx)))))
+            .when(!link_shown, |el| el.child(div().flex().flex_wrap().gap_2()
+                .child(Button::new("share-create").primary()
+                    .label(tr_shared(if self.busy { "compartilhar_gerando" } else { "compartilhar_gerar" }, &[])).disabled(self.busy || self.watching)
+                    .on_click(cx.listener(|d, _, _, cx| d.create(false, cx))))
+                .child(Button::new("share-create-pair")
+                    .label(tr("par_convidar")).disabled(self.busy || self.watching)
+                    .on_click(cx.listener(|d, _, _, cx| d.create(true, cx))))))
             .child(chrome::section_label(tr_shared("compartilhar_quem_entrou", &[])))
             .child(list)
             .when_some(self.revoke_error.clone(), |el, error| el.child(div().id("share-revoke-error").role(Role::Alert).text_sm()

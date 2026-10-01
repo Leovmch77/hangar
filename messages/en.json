@@ -6495,5 +6495,17 @@
   "erro_par_resposta_invalida": "The pair's machine sent an unexpected answer.",
   "erro_par_encerrado": "The pair was ended on the other side.",
   "erro_par_endereco_ambiguo": "This name is both one of your machines and an external pair. Rename the machine in peers.json.",
-  "erro_par_inexistente": "This external pair does not exist."
+  "erro_par_inexistente": "This external pair does not exist.",
+  "native_par_menu": "Pair by invite…",
+  "native_par_convidar": "Invite to pair",
+  "native_par_titulo": "Pair with an invite",
+  "native_par_titulo_sessao": "Pair {sessao} with an invite",
+  "native_par_aceitar_ajuda": "Paste the /par/ link the other person sent you. Their session and yours will exchange messages, and each of you sees the other's session without typing in it.",
+  "native_par_campo_aria": "Pair invite link",
+  "native_par_placeholder": "https://….ts.net:8443/par/…",
+  "native_par_qual_sessao": "Pair with which of your sessions?",
+  "native_par_escolha_sessao": "Choose the session to pair.",
+  "native_par_aceitar": "Pair",
+  "native_par_aceito": "Paired with {dono} · {sessao}",
+  "native_par_whatsapp": "Let's pair our Hangar sessions: {link}"
 }
