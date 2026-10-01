@@ -24,8 +24,9 @@ function initShowcase(root) {
   let i = 0;
   const play = () => {
     if (reducedMotion()) { video.controls = true; return; }
-    // autoplay negado: sem controles o vídeo ficaria preso na capa e as abas não andariam
-    video.play().catch(() => { video.controls = true; });
+    // autoplay negado: sem controles o vídeo ficaria preso na capa e as abas não andariam.
+    // AbortError é só troca de src ou pause no meio do play, não negação.
+    video.play().catch((e) => { if (e.name !== 'AbortError') video.controls = true; });
   };
   const show = (k, focus = false) => {
     i = k;
@@ -115,7 +116,7 @@ function initLoopVideos() {
   const vids = [...document.querySelectorAll('video.loop')];
   if (reducedMotion()) { vids.forEach((v) => { v.controls = true; }); return; }
   const io = new IntersectionObserver((entries) => entries.forEach((e) => {
-    if (e.isIntersecting) e.target.play().catch(() => { e.target.controls = true; });
+    if (e.isIntersecting) e.target.play().catch((err) => { if (err.name !== 'AbortError') e.target.controls = true; });
     else e.target.pause();
   }), { threshold: 0.25 });
   vids.forEach((v) => io.observe(v));
