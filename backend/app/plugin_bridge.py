@@ -215,6 +215,20 @@ def _publish_address(home: Path | None = None) -> None:
 publish_address = _publish_address
 
 
+def _socket_do_tmux() -> str | None:
+    """Socket do servidor tmux do Hangar, ou None quando não dá para saber (aí não se compara)."""
+    # ponytail: no Windows o formato do `TMUX` do psmux não foi medido; comparar lá arriscaria
+    # recusar toda sessão. Medir e ligar quando for preciso.
+    if os.name == "nt":
+        return None
+    from app import tmux
+    cp = tmux._run(["tmux", "list-sessions", "-F", "#{socket_path}"])
+    if cp.returncode != 0:
+        return None
+    caminho = next(iter((cp.stdout or "").splitlines()), "").strip()
+    return caminho if caminho and "#{" not in caminho else None
+
+
 def _sessao_do_tmux(tmux_env: str) -> str | None:
     """`TMUX` é `socket,pid,id`: no psmux o pane se repete entre sessões, o id da sessão não."""
     partes = (tmux_env or "").split(",")
@@ -473,6 +487,11 @@ async def whoami(body: WhoamiBody, request: Request):
         raise HTTPException(403, detail="whoami só da própria máquina")
     if not secrets.compare_digest(machine_key(), body.chave):
         raise HTTPException(403, detail="chave do plugin invalida")
+    if body.tmux:
+        meu = await asyncio.to_thread(_socket_do_tmux)
+        if meu and body.tmux.split(",")[0] != meu:
+            # Outro servidor tmux: o mesmo pane id lá é outra sessão, não uma do Hangar.
+            return {"sessao": None}
     from app import quem_chama
     if body.pane:
         try:
@@ -514,9 +533,10 @@ async def pull(body: PullBody):
         return {"text": None}
     finally:
         with _lock:
-            _donos[body.sessao] = (body.instance,
-                                   _donos.get(body.sessao, (body.instance, {"fill"}, 0))[1],
-                                   time.monotonic())
+            # Só renova o próprio dono: um `esquecer` ou outra instância no meio não é desfeito.
+            dono = _donos.get(body.sessao)
+            if dono and dono[0] == body.instance:
+                _donos[body.sessao] = (dono[0], dono[1], time.monotonic())
             _batidas[body.sessao] = time.monotonic()
             if _waiters.get(body.sessao) is fila:
                 del _waiters[body.sessao]

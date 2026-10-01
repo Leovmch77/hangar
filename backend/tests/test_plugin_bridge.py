@@ -196,6 +196,40 @@ def test_segunda_instancia_com_dono_vivo_recebe_409(monkeypatch):
     assert asyncio.run(cena()) == 409
 
 
+def test_esquecer_libera_a_sessao_mesmo_com_o_pull_antigo_terminando(monkeypatch):
+    monkeypatch.setattr(pb, "ESPERA_S", 0.2)
+
+    async def cena():
+        antiga = asyncio.create_task(pb.pull(_pull(instance="a")))
+        await asyncio.wait_for(_ate(lambda: pb.aguardando("s1")), 5)
+        pb.esquecer("s1")
+        await asyncio.gather(antiga, pb.pull(_pull(instance="b")))
+
+    asyncio.run(cena())
+    assert pb._donos["s1"][0] == "b"
+
+
+def test_pull_antigo_nao_recria_o_dono_esquecido(monkeypatch):
+    monkeypatch.setattr(pb, "ESPERA_S", 0.2)
+
+    async def cena():
+        antiga = asyncio.create_task(pb.pull(_pull(instance="a")))
+        await asyncio.wait_for(_ate(lambda: pb.aguardando("s1")), 5)
+        pb.esquecer("s1")
+        await antiga
+
+    asyncio.run(cena())
+    assert "s1" not in pb._donos
+
+
+def test_dono_sem_batida_expira_e_outra_instancia_assume(monkeypatch):
+    import time
+    monkeypatch.setattr(pb, "ESPERA_S", 0.2)
+    pb._donos["s1"] = ("a", {"fill"}, time.monotonic() - (pb.ESPERA_S + 10) - 1)
+    asyncio.run(pb.pull(_pull(instance="b")))
+    assert pb._donos["s1"][0] == "b"
+
+
 def test_modos_declarados_ficam_com_o_dono(monkeypatch):
     monkeypatch.setattr(pb, "ESPERA_S", 0.2)
     asyncio.run(pb.pull(_pull(instance="a", modos=("fill", "user"))))
@@ -225,6 +259,22 @@ def test_whoami_nome_so_vale_sem_pane(monkeypatch):
     com_pane = asyncio.run(pb.whoami(pb.WhoamiBody(chave=pb.machine_key(), pane="%0", nome="s1"), _req("127.0.0.1")))
     sem_pane = asyncio.run(pb.whoami(pb.WhoamiBody(chave=pb.machine_key(), nome="s1"), _req("127.0.0.1")))
     assert com_pane == {"sessao": None} and sem_pane["sessao"] == "s1"
+
+
+def test_whoami_de_outro_servidor_tmux_nao_resolve(monkeypatch):
+    from app import quem_chama
+    monkeypatch.setattr(pb, "_socket_do_tmux", lambda: "/tmp/tmux-1000/default")
+    monkeypatch.setattr(quem_chama, "_por_pane", lambda pane: "s1")
+    corpo = pb.WhoamiBody(chave=pb.machine_key(), pane="%3", tmux="/tmp/tmux-1000/outro,42,0")
+    assert asyncio.run(pb.whoami(corpo, _req("127.0.0.1"))) == {"sessao": None}
+
+
+def test_whoami_sem_socket_conhecido_nao_compara(monkeypatch):
+    from app import quem_chama
+    monkeypatch.setattr(pb, "_socket_do_tmux", lambda: None)
+    monkeypatch.setattr(quem_chama, "_por_pane", lambda pane: "s1")
+    corpo = pb.WhoamiBody(chave=pb.machine_key(), pane="%3", tmux="/tmp/tmux-1000/outro,42,0")
+    assert asyncio.run(pb.whoami(corpo, _req("127.0.0.1")))["sessao"] == "s1"
 
 
 def test_whoami_recusa_chave_errada_e_cliente_de_fora():

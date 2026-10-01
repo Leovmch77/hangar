@@ -1,5 +1,5 @@
 import type { EngineInterface, On } from "claude-code";
-import { type Bridge, instance, setBridge } from "./bridge";
+import { type Bridge, clearBridge, instance, setBridge } from "./bridge";
 
 // A largada divide o `session.start` com o state.ts por MATCHER — dois hooks no
 // mesmo evento sem matcher o engine recusa. O filtro não é enfeite: sem prompt
@@ -24,7 +24,6 @@ export function registerInput(on: On) {
     // chave da fila lá, e não o uuid do transcript.
     const sessao = await $.env.get("CP_SESSION_NAME");
     if (url && token && sessao) {
-      setBridge({ url, token, sessao });
       $.clock.after(REARM_MS, () => void pull($, { url, token, sessao }));
     } else {
       $.clock.after(REARM_MS, () => void discover($));
@@ -52,7 +51,6 @@ async function discover($: EngineInterface) {
     if (r.status !== 200) return;
     const { sessao, token } = JSON.parse(r.text) as { sessao: string | null; token?: string };
     if (!sessao || !token) return;
-    setBridge({ url, token, sessao });
     void pull($, { url, token, sessao });
   } catch {
     // Sem arquivo, backend fora ou resposta estranha: o plugin fica parado e o tmux segue.
@@ -67,6 +65,10 @@ async function pull($: EngineInterface, ponte: Bridge) {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ sessao: ponte.sessao, token: ponte.token, instance: instance(), modos: ["fill"] }),
     });
+    // Os outros hooks só falam pela sessão depois que o backend aceitou esta instância como
+    // dona; erro de rede ou outro status não tira a ponte de quem já é dono.
+    if (r.status === 409) clearBridge();
+    else setBridge(ponte);
     if (r.status === 200) {
       const { text, modo } = JSON.parse(r.text) as { text?: string | null; modo?: string };
       if (text && modo === "fill") {
