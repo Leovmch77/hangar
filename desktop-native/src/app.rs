@@ -4271,8 +4271,8 @@ impl Hangar {
                     continue;
                 }
                 grouping::ListRow::External { gid, .. } if self.sidebar.is_collapsed(&grouping::pair_key(&gid, remote)) => continue,
-                grouping::ListRow::External { owner, session, alias, .. } => {
-                    children.push(self.render_external_pair_row(&owner, &session, &alias, remote, window, cx));
+                grouping::ListRow::External { gid, owner, session, alias } => {
+                    children.push(self.render_external_pair_row(&gid, &owner, &session, &alias, remote, window, cx));
                     continue;
                 }
                 grouping::ListRow::Session(session) if self.pair_collapsed(session, remote) => continue,

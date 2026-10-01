@@ -163,8 +163,7 @@ impl Hangar {
             window.push_notification(Notification::warning(tr("invite_own_server")), cx);
             return;
         }
-        // A entrada só do par vira a do convite, que fica gravada; o par entra nela pelo attach da próxima reconciliação.
-        if let Some(found) = self.servers.iter_mut().find(|s| servers::norm(&s.address) == key) { found.ephemeral = false; }
+        // A entrada só do par virou a do convite (o upsert a torna gravada); o par entra nela pelo attach da reconciliação.
         self.apply_external_pairs(cx);
         self.servers_rev += 1;
         self.persist_servers();

@@ -629,8 +629,16 @@ pub async fn redeem_invite(address: &str, code: &str, device: &str, token: Optio
     Api::checked(r, true).await?.json().await.map_err(|_| Failure::local("invalid_response"))
 }
 
-#[derive(Clone, Debug, serde::Deserialize, PartialEq)]
+#[derive(Clone, serde::Deserialize, PartialEq)]
 pub struct ExternalPairDto { pub local_session: String, pub alias: String, pub owner: String, pub session: String, pub address: String, pub token: String }
+
+// O token é credencial: fica fora de qualquer log.
+impl std::fmt::Debug for ExternalPairDto {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExternalPairDto").field("alias", &self.alias).field("session", &self.session).field("address", &self.address)
+            .field("token", &"***").finish_non_exhaustive()
+    }
+}
 
 impl Api {
     /// Pares externos das sessões deste servidor (só o dono lê).

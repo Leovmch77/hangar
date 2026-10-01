@@ -150,8 +150,8 @@ impl ShareDialog {
             let all = id.is_none();
             let result = api.share_revoke(&name, id.as_deref()).await.map_err(|e| Hangar::failure(&e));
             move |d: &mut ShareDialog| match result {
-                // Encerrar todos invalida também o link recém-gerado que ainda está na tela.
-                Ok(()) => if all { d.created = None; },
+                // Encerrar todos invalida o link recém-gerado na tela; o convite de par segue valendo no backend.
+                Ok(()) => if all && matches!(d.created, Some(Ok(Created::Link(_)))) { d.created = None; },
                 Err(e) => d.revoke_error = Some(e),
             }
         }, cx);
