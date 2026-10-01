@@ -12,6 +12,10 @@ const BROWSER_SHARE: f32 = 0.42;
 const FLOATING_GAPS: f32 = 40.;
 // Largura que a conversa mantém; abaixo disso o painel sai de cena em vez de espremer o texto.
 const CHAT_MIN: f32 = 400.;
+// A borda do cartão fica DENTRO da largura pedida (o layout mede por border-box), e o meio pixel da
+// janela some no arredondamento. Quem divide a linha em colunas exatas tem de descontar os dois: um
+// pixel a mais na conta derruba a última coluna para a linha de baixo.
+const PANEL_EDGE: f32 = 3.;
 const COST_EVERY: u64 = 30;
 const DIFF_MAX: usize = 20_000;
 
@@ -808,16 +812,20 @@ impl Hangar {
         // "Ações" do mock: grade de blocos iguais, ícone em cima e rótulo embaixo. As colunas saem da largura do painel
         // (mais colunas quando ele alarga, no máximo cinco), e cada bloco tem a largura exata da coluna: a grade fica no
         // mesmo recuo do título, sem sobra desigual no fim da linha.
-        let (_, tile) = shortcut_grid(width - SIDE_PAD * 2.);
+        let (_, tile) = shortcut_grid(width - SIDE_PAD * 2. - PANEL_EDGE, list.len());
         // Uma linha por atalho No Hangar vivo que outra sessão abriu: vale também onde a dica do bloco não aparece.
         let notes = key.as_ref().map(|key| self.hangar_notes(&key.server, &key.name, &list)).unwrap_or_default();
+        // O respiro do topo é da GRADE, não do bloco: reservado só onde a marca "No Hangar" aparecia, ele empurrava
+        // aquele bloco para baixo e tirava ícone e rótulo do prumo dos vizinhos.
+        let lift = if key.as_ref().is_some_and(|key| list.iter().any(|(_, s, _)| self.tile_for(&key.server, &key.name, s).mark)) { 22. } else { 8. };
         let buttons: Vec<Button> = list.into_iter().map(|(id, shortcut, own)| {
             // O ícone salvo (glifo ou emoji), como no web; anexos mantém o clipe e Rodar vira parada acesa com o run vivo.
+            // 18 px é a medida do web (`.acao-bloco svg`): em 16 o ícone ficava miúdo dentro do bloco.
             let icon = match &shortcut {
-                Shortcut::Attach => chrome::small_icon(IconName::Paperclip, 16., theme::muted()).into_any_element(),
-                Shortcut::Run if running => chrome::small_icon(IconName::CircleStop, 16., theme::accent()).into_any_element(),
-                Shortcut::Run => chrome::small_icon(IconName::Play, 16., theme::muted()).into_any_element(),
-                Shortcut::Send { icon, .. } | Shortcut::Shell { icon, .. } => shortcuts::icon_element(icon.as_deref(), 16., theme::muted()),
+                Shortcut::Attach => chrome::small_icon(IconName::Paperclip, 18., theme::muted()).into_any_element(),
+                Shortcut::Run if running => chrome::small_icon(IconName::CircleStop, 18., theme::accent()).into_any_element(),
+                Shortcut::Run => chrome::small_icon(IconName::Play, 18., theme::muted()).into_any_element(),
+                Shortcut::Send { icon, .. } | Shortcut::Shell { icon, .. } => shortcuts::icon_element(icon.as_deref(), 18., theme::muted()),
             };
             let (label, tip) = match &shortcut {
                 Shortcut::Run if running => (tr("run_running"), tr("run_running_open")),
@@ -835,18 +843,18 @@ impl Hangar {
             let tone = match live.state { hangar_live::TileState::Running => Some((theme::success(), 0.45)), hangar_live::TileState::Asking => Some((theme::warning(), 0.55)), _ => None };
             let fill = tone.map_or_else(|| theme::raised().opacity(0.5), |(color, _)| color.opacity(0.08));
             let text_tone = match live.state { hangar_live::TileState::Running => Some(theme::success_text()), hangar_live::TileState::Asking => Some(theme::warning_text()), _ => None };
-            // A marca HANGAR mora no canto de cima; o bloco com marca ganha respiro em cima para ela não cobrir o ícone.
-            let lift = if live.mark { 22. } else { 8. };
             let edge = tone.map_or_else(theme::border, |(color, alpha)| color.opacity(alpha));
             let accessible = if live.line.is_empty() { label.clone() } else { format!("{label} · {}", live.line) };
             Button::new(SharedString::from(id))
                 .custom(ButtonCustomVariant::new(cx).color(fill).foreground(if running && shortcut == Shortcut::Run { theme::accent() } else { theme::text() })
                     .hover(theme::hover()).active(theme::hover()))
-                .w(px(tile)).flex_shrink_0().h_auto().px(px(4.)).pt(px(lift)).pb(px(8.)).rounded(px(10.)).border_1().border_color(edge)
+                // Piso de altura em vez de caixa fixa para o rótulo: o bloco de uma linha deixava de sobra a segunda,
+                // e o ícone flutuava acima de um vão. Os da mesma linha se igualam pelo esticar do flex, como no web.
+                .w(px(tile)).flex_shrink_0().h_auto().min_h(px(58.)).px(px(4.)).pt(px(lift)).pb(px(8.)).rounded(px(10.)).border_1().border_color(edge)
                 .tooltip(tip).accessibility_label(accessible).disabled(!readable || busy)
                 // Credencial em branco: o bloco fica apagado, e o clique avisa em vez de rodar.
                 .when(missing.is_some(), |el| el.opacity(0.55))
-                .child(div().relative().w_full().min_w_0().flex().flex_col().items_center().gap(px(if tone.is_some() { 6. } else { 8. }))
+                .child(div().relative().w_full().min_w_0().flex().flex_col().items_center().justify_center().gap(px(if tone.is_some() { 6. } else { 4. }))
                     // Marca de "deste projeto", no canto: o bloco segue igual aos outros e o motivo está na dica.
                     .when(own, |el| el.child(div().absolute().top(px(9. - lift)).right(px(4.)).child(chrome::small_icon(IconName::Folder, 10., theme::faint()))))
                     .when(live.mark, |el| el.child(div().absolute().top(px(8. - lift)).right(px(if own { 20. } else { 4. })).flex().items_center().gap(px(4.))
@@ -855,8 +863,8 @@ impl Hangar {
                     .child(icon)
                     // Duas linhas antes de cortar: "Iniciar sessão" e "delphi-vm ide" cabem inteiros num bloco estreito.
                     // Sem `whitespace_normal` o rótulo não quebra: a caixa passa da largura do bloco e, centralizada, perde as
-                    // duas pontas ("car Review Au"). Altura fixa de duas linhas deixa todos os blocos iguais.
-                    .child(div().w_full().min_w_0().h(px(32.)).flex().items_center().justify_center()
+                    // duas pontas ("car Review Au").
+                    .child(div().w_full().min_w_0().flex().items_center().justify_center()
                         .child(div().w_full().whitespace_normal().text_center().line_clamp(2).text_ellipsis()
                             .text_size(px(13.)).line_height(px(16.)).child(label)))
                     .when(!live.line.is_empty(), |el| el.child(div().flex().items_center().justify_center().gap(px(5.)).text_size(px(11.))
@@ -1051,11 +1059,14 @@ const SIDE_PAD: f32 = 16.;
 const SHORTCUT_GAP: f32 = 6.;
 const SHORTCUT_MIN: f32 = 76.;
 
-/// Colunas e largura de cada bloco de atalho para a largura útil `inner`: o máximo de colunas com bloco de pelo menos
-/// `SHORTCUT_MIN`, entre 2 e 5 (mais que cinco por linha fica miúdo), e os blocos dividindo a linha inteira.
-fn shortcut_grid(inner: f32) -> (usize, f32) {
+/// Colunas e largura de cada bloco de atalho para a largura útil `inner` e `count` blocos: o máximo de colunas com bloco
+/// de pelo menos `SHORTCUT_MIN`, entre 2 e 5 (mais que cinco por linha fica miúdo), e os blocos dividindo a linha
+/// inteira. Coluna que ninguém ocupa sai da conta, como o `auto-fit` do web: três atalhos num painel largo dividem a
+/// linha em três, em vez de ficarem encostados à esquerda com um vão de bloco no fim.
+fn shortcut_grid(inner: f32, count: usize) -> (usize, f32) {
     let inner = inner.max(SHORTCUT_MIN);
-    let columns = (((inner + SHORTCUT_GAP) / (SHORTCUT_MIN + SHORTCUT_GAP)).floor() as usize).clamp(2, 5);
+    let fitting = (((inner + SHORTCUT_GAP) / (SHORTCUT_MIN + SHORTCUT_GAP)).floor() as usize).clamp(2, 5);
+    let columns = fitting.min(count.max(1));
     let tile = ((inner - SHORTCUT_GAP * (columns - 1) as f32) / columns as f32).floor();
     (columns, tile)
 }
@@ -1063,7 +1074,7 @@ fn shortcut_grid(inner: f32) -> (usize, f32) {
 #[cfg(test)]
 mod tests {
     // Sem glob: o `test` da gpui colide com o atributo padrão.
-    use super::{CHAT_MIN, FLOATING_GAPS, MIN_WIDTH, SHORTCUT_GAP, Shortcut, Side, duration, merged_tiles, parse_shortcuts, shortcut_grid, tokens};
+    use super::{CHAT_MIN, FLOATING_GAPS, MIN_WIDTH, PANEL_EDGE, SHORTCUT_GAP, SIDE_PAD, Shortcut, Side, duration, merged_tiles, parse_shortcuts, shortcut_grid, tokens};
     use crate::appearance;
 
     #[test]
@@ -1131,11 +1142,39 @@ mod tests {
     #[test]
     fn shortcut_grid_fills_the_row_and_grows_columns_with_the_panel() {
         for inner in [150., 268., 400., 700., 2000.] {
-            let (columns, tile) = shortcut_grid(inner);
+            let (columns, tile) = shortcut_grid(inner, 9);
             assert!((2..=5).contains(&columns));
             let used = tile * columns as f32 + SHORTCUT_GAP * (columns - 1) as f32;
             assert!(used <= inner && inner - used < columns as f32, "{inner}: {columns}x{tile}");
         }
-        assert!(shortcut_grid(268.).0 < shortcut_grid(700.).0);
+        assert!(shortcut_grid(268., 9).0 < shortcut_grid(700., 9).0);
+    }
+
+    #[test]
+    fn shortcut_row_fits_inside_the_card_border() {
+        // A conta da grade é a da largura do painel; a borda do cartão come dela. Num painel de 300 as três colunas
+        // pediam 267 e só havia 266: a última caía para a linha de baixo e sobrava um vão do tamanho de um bloco.
+        for width in [272., 300., 328., 378.74, 480.] {
+            for count in [1, 3, 5, 9] {
+                let (columns, tile) = shortcut_grid(width - SIDE_PAD * 2. - PANEL_EDGE, count);
+                let used = tile * columns as f32 + SHORTCUT_GAP * (columns - 1) as f32;
+                let available = width - 2. - SIDE_PAD * 2.;
+                assert!(used <= available, "{width}/{count}: {columns}x{tile} passa de {available}");
+            }
+        }
+    }
+
+    #[test]
+    fn few_shortcuts_split_the_whole_row() {
+        // O `auto-fit` do web derruba a coluna vazia: três atalhos num painel largo viram três blocos que enchem a
+        // linha, não três estreitos com um vão de bloco no fim.
+        let inner = 378.74 - SIDE_PAD * 2. - PANEL_EDGE;
+        for count in [1, 2, 3] {
+            let (columns, tile) = shortcut_grid(inner, count);
+            assert_eq!(columns, count, "{count} atalhos deveriam ocupar {count} colunas");
+            let leftover = inner - (tile * columns as f32 + SHORTCUT_GAP * (columns - 1) as f32);
+            assert!(leftover < columns as f32, "{count}: sobra {leftover}");
+        }
+        assert_eq!(shortcut_grid(inner, 9).0, 4);
     }
 }
