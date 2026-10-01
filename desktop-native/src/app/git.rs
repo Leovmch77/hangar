@@ -23,7 +23,7 @@ const ACCENT_BAR: f32 = 3.;
 /// Linha do histórico do Zeron e as colunas fixas dela.
 const COMMIT_H: f32 = 36.;
 const AUTHOR_W: f32 = 96.;
-const DATE_W: f32 = 88.;
+const DATE_W: f32 = 112.;
 const SHA_W: f32 = 74.;
 const LOG_PAGE: usize = 50;
 const LOG_MAX: usize = 2000;
@@ -245,7 +245,7 @@ fn output(value: &Value) -> Option<String> {
 // ── Histórico ──
 
 #[derive(Clone, Debug)]
-struct Commit { hash: String, short: String, subject: String, body: String, author: String, ts: i64, refs: Vec<String> }
+struct Commit { hash: String, short: String, subject: String, body: String, author: String, ts: i64, refs: Vec<String>, local: bool }
 
 fn commits(value: &Value) -> Vec<Commit> {
     value.get("commits").and_then(Value::as_array).map(|list| list.iter().filter_map(|c| {
@@ -256,13 +256,14 @@ fn commits(value: &Value) -> Vec<Commit> {
             // "HEAD -> main, origin/main, tag: v1": a seta e o HEAD solto não são nome de ref.
             refs: text("refs").split(", ").map(|r| r.trim_start_matches("HEAD -> ").to_owned())
                 .filter(|r| !r.is_empty() && r != "HEAD" && !r.ends_with("/HEAD")).collect(),
+            local: c.get("local").and_then(Value::as_bool).unwrap_or(false),
         })
     }).collect()).unwrap_or_default()
 }
 
 fn date(ts: i64) -> String {
     chrono::DateTime::from_timestamp(ts, 0).map(|d| d.with_timezone(&chrono::Local)
-        .format(if crate::i18n::english() { "%b %-d, %Y" } else { "%d/%m/%Y" }).to_string()).unwrap_or_default()
+        .format(if crate::i18n::english() { "%b %-d, %Y %H:%M" } else { "%d/%m/%Y %H:%M" }).to_string()).unwrap_or_default()
 }
 
 /// Selo de ref do Zeron: branch em destaque, remota apagada, tag em âmbar.
@@ -272,6 +273,12 @@ fn ref_badge(name: &str, remotes: &[String]) -> Div {
         else { (name.to_owned(), theme::accent()) };
     div().flex_shrink_0().max_w(px(112.)).h(px(16.)).px(px(6.)).flex().items_center().rounded(px(4.)).bg(color.opacity(0.07))
         .text_size(px(10.)).text_color(color).truncate().child(label)
+}
+
+fn unpushed_badge() -> Div {
+    let color = theme::warning();
+    div().flex_shrink_0().h(px(16.)).px(px(6.)).flex().items_center().rounded(px(4.)).bg(color.opacity(0.12))
+        .text_size(px(10.)).text_color(color).child(format!("↑ {}", tr("git_commit_local")))
 }
 
 // ── Painel ──
@@ -837,7 +844,8 @@ impl GitPanel {
                             .child(div().min_w_0().truncate().text_size(px(12.)).text_color(theme::text())
                                 .child(if commit.subject.is_empty() { tr("git_no_subject") } else { commit.subject.clone() }))
                             .children(refs)
-                            .when(extra > 0, |el| el.child(div().text_size(px(10.)).text_color(theme::faint()).child(format!("+{extra}")))))
+                            .when(extra > 0, |el| el.child(div().text_size(px(10.)).text_color(theme::faint()).child(format!("+{extra}"))))
+                            .when(commit.local, |el| el.child(unpushed_badge())))
                         .child(div().w(px(AUTHOR_W)).flex_shrink_0().truncate().text_size(px(11.)).text_color(theme::muted()).child(commit.author.clone()))
                         .child(div().w(px(DATE_W)).flex_shrink_0().text_size(px(11.)).text_color(theme::muted()).child(date(commit.ts)))
                         .child(div().w(px(SHA_W)).flex_shrink_0().font_family(theme::MONO).text_size(px(10.5)).text_color(theme::faint()).child(commit.short.clone()))
@@ -859,7 +867,8 @@ impl GitPanel {
         let meta = div().flex_none().flex().flex_col().gap_1().px_4().py_3().border_b_1().border_color(theme::border())
             .child(div().flex().items_center().gap_2()
                 .child(div().px(px(6.)).rounded(px(4.)).bg(theme::hover()).font_family(theme::MONO).text_size(px(10.5)).text_color(theme::muted()).child(commit.short.clone()))
-                .child(div().min_w_0().truncate().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text()).child(commit.subject.clone())))
+                .child(div().min_w_0().truncate().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text()).child(commit.subject.clone()))
+                .when(commit.local, |el| el.child(unpushed_badge())))
             .when(!commit.body.trim().is_empty(), |el| el.child(div().text_size(px(12.)).text_color(theme::muted()).whitespace_normal().child(commit.body.trim().to_owned())))
             .child(div().text_size(px(11.)).text_color(theme::faint()).child(format!("{} · {} · {}", commit.author, date(commit.ts), commit.hash)));
         let body = match &opened.state.value {

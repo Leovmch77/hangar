@@ -198,12 +198,16 @@ fn log(cwd: &Path, n: usize) -> Result<Value, Refusal> {
             return Err((409, out.fail("git log falhou")));
         }
     }
+    // Só aqui, ainda não no upstream. Sem upstream fica vazio: não há com o que comparar.
+    let unpushed: HashSet<String> = run(cwd, &["rev-list", "@{upstream}..HEAD"]).ok().filter(|o| o.code == 0)
+        .map(|o| o.stdout.lines().map(|l| l.trim().to_owned()).filter(|l| !l.is_empty()).collect()).unwrap_or_default();
     for record in out.stdout.split('\x1e') {
         let record = record.trim_matches('\n');
         let f: Vec<&str> = record.splitn(9, '\x1f').collect();
         if f.len() < 9 { continue; }
         commits.push(json!({"hash": f[0], "short": f[1], "parents": f[2].split_whitespace().collect::<Vec<_>>(), "refs": f[3].trim(),
-            "author": f[4], "ts": f[5].parse::<i64>().unwrap_or(0), "rel": f[6], "subject": f[7], "body": f[8].trim_matches('\n')}));
+            "author": f[4], "ts": f[5].parse::<i64>().unwrap_or(0), "rel": f[6], "subject": f[7], "body": f[8].trim_matches('\n'),
+            "local": unpushed.contains(f[0])}));
     }
     // À frente/atrás só com upstream de verdade, como o `git_summary` do backend.
     let status = run(cwd, &["status", "--porcelain=v1", "--branch"]).ok().filter(|o| o.code == 0);

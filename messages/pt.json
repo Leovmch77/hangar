@@ -4642,6 +4642,7 @@
   "native_git_col_commit": "Commit",
   "native_git_col_author": "Autor",
   "native_git_col_date": "Data",
+  "native_git_commit_local": "não enviado",
   "native_git_no_commits": "Nenhum commit encontrado",
   "native_git_no_subject": "(sem assunto)",
   "native_git_loading": "Carregando…",
