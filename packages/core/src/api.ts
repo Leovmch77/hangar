@@ -1172,7 +1172,8 @@ export async function scanDir(root: string, path?: string, server?: Server): Pro
 // Cria a subpasta `name` em `path` (default = raiz), sob a mesma allowlist do scan.
 export function makeDir(root: string, path: string | null, name: string, server?: Server): Promise<FsEntry> {
   const init = { method: 'POST', body: JSON.stringify({ root, path, name }) };
-  return server ? apiFetchForServer<FsEntry>(server, '/api/fs/mkdir', init) : apiFetch<FsEntry>('/api/fs/mkdir', init);
+  // Prazo largo: estourar depois de o servidor criar mostraria falha de uma pasta que existe.
+  return server ? apiFetchForServer<FsEntry>(server, '/api/fs/mkdir', init, 20_000) : apiFetch<FsEntry>('/api/fs/mkdir', init);
 }
 
 // ── Arquivo: conversas mortas (transcripts sem sessão tmux viva) ──────────────

@@ -691,7 +691,8 @@ impl Hangar {
         let alert = |id: &'static str, text: String| div().id(id).role(Role::Alert).text_sm().text_color(theme::danger()).whitespace_normal().child(text);
         let retry = |id: &'static str| Button::new(id).outline().small().label(tr_shared("lista_tentar_novamente", &[])).disabled(busy);
         let frame = div().flex().flex_col().gap_2().p_2().rounded(px(8.)).border_1().border_color(theme::border());
-        let close = Button::new("guests-browse-close").ghost().small().label(tr_shared("comum_cancelar", &[])).disabled(busy)
+        // Fechar no meio do mkdir descartaria a resposta: a pasta nasceria sem ninguém saber.
+        let close = Button::new("guests-browse-close").ghost().small().label(tr_shared("comum_cancelar", &[])).disabled(busy || browser.making.is_some())
             .on_click(cx.listener(|this, _, _, cx| { if let Some(form) = this.sync.guests.form.as_mut() { form.browser = None; } cx.notify(); }));
         let roots = match browser.roots.value.as_ref() {
             _ if browser.roots.loading => return frame.child(loading("guests-roots-loading")).child(div().child(close)),
@@ -753,7 +754,8 @@ impl Hangar {
                     })))
         });
         let dir = browser.dir.clone();
-        let readable = browser.scan.ok().is_some_and(|scan| scan.error.is_none());
+        // Durante a leitura `dir` já é a pasta nova e `scan` ainda é a anterior.
+        let readable = !browser.scan.loading && browser.scan.ok().is_some_and(|scan| scan.error.is_none());
         frame.child(chips).child(trail).child(rows)
             .children(naming)
             .when_some(browser.make_error.clone(), |el, error| el.child(alert("guests-mkdir-error", error)))

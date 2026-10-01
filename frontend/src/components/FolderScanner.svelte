@@ -29,6 +29,7 @@
   let roots = $state<FsRoot[]>([]);
   let rootsLoading = $state(true);
   let rootsError = $state(false);
+  let failText = $state('');
   let activeRoot = $state<FsRoot | null>(null);
   let path = $state('');                 // diretorio atual (default = raiz)
   let entries = $state<FsEntry[]>([]);
@@ -40,21 +41,23 @@
   onMount(async () => {
     try {
       roots = server ? await getRootsForServer(server) : await getRoots();
-    } catch {
+    } catch (e) {
+      failText = e instanceof Error ? e.message : String(e);
       rootsError = true;
       rootsLoading = false;
       return;
     }
     rootsLoading = false;
     if (roots.length === 0) return;
-    const last = localStorage.getItem(LAST_ROOT_KEY);
+    const last = server ? null : localStorage.getItem(LAST_ROOT_KEY);
     selectRoot(roots.find((r) => r.path === last) ?? roots[0]);
   });
 
   function selectRoot(r: FsRoot) {
     activeRoot = r;
     try {
-      localStorage.setItem(LAST_ROOT_KEY, r.path);
+      // A raiz lembrada é a do servidor ativo; a de outra máquina não casa com a dele.
+      if (!server) localStorage.setItem(LAST_ROOT_KEY, r.path);
     } catch {
       // localStorage indisponivel (modo privado) -> segue sem persistir
     }
@@ -68,7 +71,15 @@
     path = target;
     scanning = true;
     scanError = null;
-    const res = await scanDir(root, target, server);
+    failText = '';
+    let res: Awaited<ReturnType<typeof scanDir>>;
+    try {
+      res = await scanDir(root, target, server);
+    } catch (e) {
+      // 401 e queda de rede sobem de scanDir; sem isto o esqueleto ficava na tela para sempre.
+      res = { entries: [], error: 'unknown' };
+      failText = e instanceof Error ? e.message : String(e);
+    }
     // descarta respostas obsoletas se o usuario navegou rapido pra outra pasta/raiz
     if (activeRoot?.path !== root || path !== target) return;
     entries = res.entries;
@@ -81,8 +92,7 @@
   let createBusy = $state(false);
   let createError = $state('');
 
-  async function create(event: SubmitEvent) {
-    event.preventDefault();
+  async function create() {
     if (!activeRoot || createBusy || !newName.trim()) return;
     createBusy = true;
     createError = '';
@@ -90,8 +100,8 @@
       const made = await makeDir(activeRoot.path, path, newName.trim(), server);
       creating = false;
       newName = '';
-      onPick(made.path);
       await scan(path);
+      onPick(made.path);
     } catch (e) {
       createError = m.arquivo_criar_pasta_erro({ erro: e instanceof Error ? e.message : String(e) });
     } finally {
@@ -153,13 +163,14 @@
       <span class="chip chip--skel"></span>
     </div>
   {:else if rootsError}
-    <p class="state-msg">{m.arquivo_carregar_raizes_erro()}</p>
+    <p class="state-msg">{m.arquivo_carregar_raizes_erro()}{failText ? ` (${failText})` : ''}</p>
   {:else if roots.length === 0}
     <p class="state-msg">{m.arquivo_sem_raizes()}</p>
   {:else}
     <div class="chips" role="tablist" aria-label={m.arquivo_raizes_aria()}>
       {#each roots as r (r.path)}
         <button
+          type="button"
           class="chip"
           class:chip--active={activeRoot?.path === r.path}
           role="tab"
@@ -184,6 +195,7 @@
       autocapitalize="off"
       spellcheck={false}
       aria-label={m.arquivo_buscar_pasta()}
+      onkeydown={(e) => { if (e.key === 'Enter') e.preventDefault(); }}
     />
 
     <!-- Breadcrumb (so quando aprofundou): toque numa migalha sobe -->
@@ -191,26 +203,27 @@
       <div class="crumbs" aria-label={m.arquivo_caminho_aria()}>
         {#each crumbs as c, i (c.path)}
           {#if i > 0}<span class="crumb-sep" aria-hidden="true">/</span>{/if}
-          <button class="crumb" onclick={() => scan(c.path)}>{c.label}</button>
+          <button type="button" class="crumb" onclick={() => scan(c.path)}>{c.label}</button>
         {/each}
       </div>
-      <button class="use-here" onclick={() => onPick(path)}>
+      <button type="button" class="use-here" onclick={() => onPick(path)}>
         {m.arquivo_usar_pasta()}
       </button>
     {/if}
 
     {#if canCreate}
       {#if creating}
-        <form class="new-folder" onsubmit={create}>
+        <div class="new-folder">
           <input class="search" bind:value={newName} placeholder={m.arquivo_nova_pasta_nome()}
+            onkeydown={(e) => { if (e.key === 'Enter') { e.preventDefault(); void create(); } }}
             aria-label={m.arquivo_nova_pasta_nome()} autocomplete="off" autocorrect="off"
             autocapitalize="off" spellcheck={false} disabled={createBusy} />
-          <button class="use-here" type="submit" disabled={createBusy || !newName.trim()} aria-busy={createBusy}>
+          <button class="use-here" type="button" onclick={create} disabled={createBusy || !newName.trim()} aria-busy={createBusy}>
             {m.arquivo_criar_pasta()}
           </button>
           <button class="use-here" type="button" disabled={createBusy}
             onclick={() => { creating = false; createError = ''; }}>{m.comum_cancelar()}</button>
-        </form>
+        </div>
       {:else}
         <button class="use-here" type="button" onclick={() => (creating = true)}>{m.arquivo_nova_pasta()}</button>
       {/if}
@@ -227,7 +240,7 @@
           </div>
         {/each}
       {:else if scanError}
-        <p class="state-msg">{SCAN_MSG[scanError]}</p>
+        <p class="state-msg">{SCAN_MSG[scanError]}{failText ? ` (${failText})` : ''}</p>
       {:else if filtered.length === 0}
         <p class="state-msg">
           {query.trim() ? m.arquivo_sem_resultados() : m.arquivo_sem_subpastas()}
@@ -235,7 +248,7 @@
       {:else}
         {#each filtered as e (e.path)}
           <div class="row" class:row--sel={selected === e.path} role="listitem">
-            <button class="row-body" aria-pressed={selected === e.path} onclick={() => onPick(e.path)}>
+            <button type="button" class="row-body" aria-pressed={selected === e.path} onclick={() => onPick(e.path)}>
               <span class="row-name">{e.name}</span>
               <span class="row-path">{relPath(e.path)}</span>
               <span class="row-badges">
@@ -244,7 +257,7 @@
                 {#if e.mtime}<span class="row-time">{relativeTime(e.mtime)}</span>{/if}
               </span>
             </button>
-            <button class="drill" onclick={() => drill(e)} aria-label={m.arquivo_abrir({ nome: e.name })}>
+            <button type="button" class="drill" onclick={() => drill(e)} aria-label={m.arquivo_abrir({ nome: e.name })}>
               <svg width="9" height="15" viewBox="0 0 9 15" fill="none" aria-hidden="true">
                 <path d="M1 1l6.5 6.5L1 14" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
               </svg>
