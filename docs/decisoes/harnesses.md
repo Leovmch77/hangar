@@ -1243,6 +1243,29 @@ atravessa `import` — cada arquivo lê o ambiente e chama `$.http.fetch` sozinh
 O `capture-pane` a 0,75 s não foi reduzido: menu de permissão fora da regra acima, `/model`,
 diálogo de confiança e morte continuam sendo do pane.
 
+### Mods no 2.1.287 medidos (01/10/2026)
+
+Claude Code 2.1.287 (G), mod descartável `hangar-exp` (hooks `session.start`, `turn.start`,
+`turn.step`, `turn.complete`, `classic.Notification`) avisando um ouvinte local; sessão de teste
+com terminal criada por `hangar-send --new`, conta `~/.claude-200-01`, que já nasce com
+`--plugin-dir plugins/hangar` (outro nome, convive sem conflito).
+
+| | o que foi medido |
+|---|---|
+| A — pasta de skills | link `~/.claude/skills/hangar-exp` → `claude plugin list` mostra `hangar-exp@skills-dir`, `Scope: user`, `Status: ✔ loaded`. Na sessão o mod rodou de verdade: `session.start` chegou do pane `%15` sem flag nenhuma para ele |
+| B — pasta de skills + `--plugin-dir` do mesmo nome | carrega UM só: `hangar-exp@inline` `✔ loaded`, e a cópia da pasta de skills sai com erro registrado — `✘ Not loaded — the name "hangar-exp" is already taken by a session-only plugin (--plugin-dir / --plugin-url), which takes precedence`. No `--json` ela vem com `enabled: false` e `errors: [...]` (`generic-error`). Não há carga dupla; há uma linha de erro por sessão |
+| B2 — outra conta | `CLAUDE_CONFIG_DIR=~/.claude-claude-200-2` também lista `hangar-exp@skills-dir` `✔ loaded` (path `~/.claude-claude-200-2/skills/hangar-exp`): a `skills` das contas é link para `~/.claude/skills` |
+| C1 — `submit({asUser})` parado | a promessa resolve em 0,63 s, logo depois dos hooks de `UserPromptSubmit`, antes do `turn.start`. No jsonl é `type: "user"` comum, sem `isMeta` e sem moldura: `"message":{"role":"user","content":"EXP-PARADO: responda só OK"},"origin":{"kind":"plugin","name":"hangar-exp","asUser":true},"promptSource":"system","turnOrigin":"system","queuePriority":"later"`. O digitado vem `"origin":{"kind":"human"},"promptSource":"typed"`. O terminal mostra `› Prompt from the hangar-exp plugin` acima do texto; o `/history` do Hangar mostra a bolha de usuário normal |
+| C2 — `submit({asUser})` com turno rodando | entra na fila na hora (`queue-operation enqueue` às 21:42:41,822 UTC) mas a promessa só resolve 10,07 s depois, quando o turno em curso acabou e o texto abriu o PRÓPRIO turno: fim do turno 2 (marcador `idle`) 21:42:50,577 → entrada `user` 51,122 → promessa 51,887 → `turn.start` 51,927. Não injeta no meio do turno |
+| C3 — hooks de configuração | `UserPromptSubmit` dispara para o texto do mod (anexo `hook_additional_context` de `UserPromptSubmit` logo após as duas entradas `user` do mod) e o marcador do `state_hook` vai a `working` (21:42:51,250, 0,67 s depois do `idle` do turno anterior) |
+| D — `classic.Notification` | não chega a plugin carregado pela pasta de skills: o `Notification` dos settings disparou (marcador `awaiting_input` 60,3 s após o `idle`) e o hook do mod não rodou em 182 s parado. Mesmo resultado do `--plugin-dir` em 18/09 |
+| E — primeiro texto × sidecar de prévia | `turn.step` vê o primeiro trecho de texto antes da primeira escrita de `.hangar-preview/<uuid>.json`: +112 ms, +131 ms e +39 ms nos três turnos medidos |
+| F — `$.session.usage()` no `turn.complete` | `{startedAt, context:{tokens,window,percent}, rateLimits:[{kind:"five_hour"/"seven_day", percentUsed, resetsAt}], cost:{usd}}`. Bate com o sidecar da statusline do mesmo instante (`84918` tokens × `85k`; `0,887` × `$0.89`; 5h 84 %, 7d 74 % iguais). Não traz modelo nem esforço; o sidecar traz (`model`, `effort`) |
+
+Fora do mod: pelo `/input` do app, `!echo oi` chegou ao modelo como texto (`promptSource:"typed"`,
+o modelo rodou o Bash sozinho), não como modo bash; e `@README.md resuma…` enviado com o turno
+rodando foi absorvido nele (`queue-operation remove`, `reason: absorbed_mid_turn`).
+
 ## O `wire.jsonl` do Kimi não é um transcript bem-comportado
 
 — duas armadilhas medidas em
