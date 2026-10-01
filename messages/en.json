@@ -4995,6 +4995,7 @@
   "native_settings_font_desc": "Conversation messages.",
   "native_settings_font_search": "Search fonts",
   "native_settings_text_size": "Size",
+  "native_settings_size_custom": "Custom",
   "native_settings_line_height": "Line height",
   "native_settings_column": "Column width",
   "native_settings_conversation_group": "Conversation",

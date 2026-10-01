@@ -540,10 +540,13 @@ impl Hangar {
         // Fonte e tamanho na mesma linha; a busca pelo tamanho ("Tamanho do código") destaca a linha da fonte.
         let type_row = |area: Area, title: &'static str, description: &'static str, size_key: &'static str| {
             let (_, font, size) = self.settings_ui.type_picks.iter().find(|(a, ..)| *a == area).expect("every area has pickers");
+            let custom = self.settings_ui.custom_sizes.iter().find(|(a, _)| *a == area).map(|(_, input)| input)
+                .filter(|_| area.custom_shown(self.settings_ui.custom_open.contains(&area)));
             let control = div().flex().items_center().gap_2()
                 .child(Select::new(font).id(SharedString::from(format!("font-{area:?}"))).small().w(px(if live { 172. } else { 200. }))
                     .menu_width(px(260.)).search_placeholder(tr("settings_font_search")).accessibility_label(tr(title)))
-                .child(Select::new(size).id(SharedString::from(format!("font-size-{area:?}"))).small().w(px(96.)).accessibility_label(tr(size_key)))
+                .child(Select::new(size).id(SharedString::from(format!("font-size-{area:?}"))).small().w(px(112.)).accessibility_label(tr(size_key)))
+                .when_some(custom, |el, input| el.child(Input::new(input).small().w(px(56.)).aria_label(tr("settings_size_custom"))))
                 .into_any_element();
             self.mark(self.line(title, Some(tr(description)), true, control, false), size_key)
         };
