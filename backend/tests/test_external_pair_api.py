@@ -236,3 +236,20 @@ def test_aceite_com_falha_ao_gravar_o_registro_desfaz_la(owner_client, monkeypat
     assert owner_client.post("/api/sessions/Y/pair-accept", json={"link": LINK}).status_code == 502
     assert ("DELETE", "/api/pair") in chamadas
     assert not any(s.revoked_at is None for s in share_store._load().values())
+
+
+def test_aceite_com_disco_cheio_revoga_e_avisa_o_outro_lado_mesmo_sem_remover(owner_client, monkeypatch):
+    chamadas = []
+
+    def call(address, token, method, path, body=None, **k):
+        chamadas.append((method, path))
+        return 200, GOOD
+
+    def save():
+        raise OSError("disco cheio")
+    monkeypatch.setattr(external_pairs, "call", call)
+    monkeypatch.setattr(external_pairs, "_save", save)
+    r = owner_client.post("/api/sessions/Y/pair-accept", json={"link": LINK})
+    assert r.status_code == 502
+    assert ("DELETE", "/api/pair") in chamadas
+    assert not any(s.revoked_at is None for s in share_store._load().values())

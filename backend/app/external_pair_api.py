@@ -132,13 +132,19 @@ async def pair_redeem(body: PairRedeemBody):
             "token": token}
 
 
-async def _undo_local(snap: dict, share_id: str) -> None:
-    await asyncio.to_thread(pair.restore, snap)
-    share_store.revoke(share_id)
+def _guarded(what: str, fn, *args) -> None:
+    # Cada passo do desfazer roda mesmo que o anterior falhe; senão sobra token vivo no disco.
     try:
-        external_pairs.remove(share_id)
+        fn(*args)
     except OSError as ex:
-        _log.warning("par externo: registro %s não removido: %s", share_id, ex)
+        _log.warning("par externo: %s falhou ao desfazer: %s", what, ex)
+
+
+async def _undo_local(snap: dict | None, share_id: str) -> None:
+    if snap is not None:
+        await asyncio.to_thread(_guarded, "restaurar o grupo", pair.restore, snap)
+    _guarded("revogar o convite", share_store.revoke, share_id)
+    _guarded("remover o registro", external_pairs.remove, share_id)
 
 
 class PairAcceptBody(BaseModel):
@@ -220,10 +226,10 @@ async def pair_accept(name: str, body: PairAcceptBody):
             raise RuntimeError(api._erro_texto(falha))
     except Exception as e:  # noqa: BLE001 — qualquer falha aqui desfaz os dois lados
         if snap is not None:
-            await asyncio.to_thread(pair.restore, snap)
-        external_pairs.remove(mine.id)
-        share_store.revoke(mine.id)
+            await asyncio.to_thread(_guarded, "restaurar o grupo", pair.restore, snap)
+        _guarded("revogar o convite", share_store.revoke, mine.id)
         await _undo_remote(address, token)
+        _guarded("remover o registro", external_pairs.remove, mine.id)
         raise HTTPException(502, detail=erro("erro_pareamento_desfeito",
                                              f"pareamento desfeito: falha ao avisar as sessões ({e})",
                                              avisos=str(e)))
