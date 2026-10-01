@@ -416,16 +416,21 @@ fi
 # ── App nativo (desktop-native, release native-latest) ───────────────────────
 # É a única janela de desktop instalada. Falhar aqui não derruba a instalação: o Hangar segue no navegador.
 say "App nativo"
-if ./scripts/install-native.sh; then
-  if [ -x "$HOME/.local/bin/hangar-native" ]; then
-    ok "app nativo instalado (lançador \"Hangar\")"
-    if [ "$TEM_TTY" = 1 ] && [ "$UPDATE" = 0 ] && { [ -n "${WAYLAND_DISPLAY:-}" ] || [ -n "${DISPLAY:-}" ]; }; then
-      ABRIR_NATIVO=1
-    fi
+case "$(uname -s)-$(uname -m)" in
+  Linux-x86_64) NATIVO_APP="$HOME/.local/bin/hangar-native" ;;
+  Darwin-arm64) NATIVO_APP="$HOME/Applications/Hangar.app" ;;
+  *) NATIVO_APP= ;;
+esac
+if [ -z "$NATIVO_APP" ]; then
+  ./scripts/install-native.sh || true
+  falta "sem app nativo para esta máquina — use o Hangar pelo navegador"
+elif ./scripts/install-native.sh && [ -e "$NATIVO_APP" ]; then
+  ok "app nativo instalado (lançador \"Hangar\")"
+  if [ -x "$HOME/.local/bin/hangar-native" ] && [ "$TEM_TTY" = 1 ] && [ "$UPDATE" = 0 ] && { [ -n "${WAYLAND_DISPLAY:-}" ] || [ -n "${DISPLAY:-}" ]; }; then
+    ABRIR_NATIVO=1
   fi
 else
-  falta "o app nativo não instalou — use o Hangar pelo navegador (tente: ./scripts/install-native.sh)"
-  echo "##HANGAR-AVISO## o app nativo nao instalou; use o Hangar pelo navegador"
+  anota_problema "o app nativo não instalou — use o Hangar pelo navegador (tente: ./scripts/install-native.sh)"
 fi
 
 # ── 5/8 Wrappers do claude e do codex ────────────────────────────────────────
@@ -719,7 +724,15 @@ if [ "${ABRIR_NATIVO:-0}" = 1 ]; then
   done
   # Destacado do instalador (setsid + sem stdio): fechar o terminal não leva a janela junto.
   setsid "$HOME/.local/bin/hangar-native" </dev/null >/dev/null 2>&1 &
-  ok "janela do Hangar aberta"
+  PID_NATIVO=$!
+  # Lançar não prova que abriu: um crash na largada sai depois. Com um Hangar já aberto, o novo
+  # pode entregar a chamada a ele e sair, então vale qualquer instância viva.
+  sleep 2
+  if kill -0 "$PID_NATIVO" 2>/dev/null || pgrep -x hangar-native >/dev/null 2>&1; then
+    ok "janela do Hangar aberta"
+  else
+    falta "o app Hangar fechou logo ao abrir — use o Hangar pelo navegador (endereço no resumo abaixo)"
+  fi
 fi
 URL_FIM=$(grep '^CP_PUBLIC_URL=' backend/.env 2>/dev/null | tail -1 | cut -d= -f2- || true)
 # O valor do token só aparece com terminal: sem TTY isto roda em provisionamento e o stdout

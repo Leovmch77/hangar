@@ -1209,6 +1209,7 @@ if (-not $SoChecar) {
         Nota 'sem app nativo para esta maquina; use o Hangar pelo navegador'
     } else {
         Falta 'o app nativo nao instalou - use o Hangar pelo navegador (rode scripts\install-native.ps1)'
+        $script:pendencias += 'app nativo'
         Write-Host '##HANGAR-AVISO## o app nativo nao instalou; use o Hangar pelo navegador'
     }
 }
