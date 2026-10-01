@@ -49,7 +49,7 @@ pub(super) enum FileReply {
 
 /// Da raiz, direto do disco (servidor nesta máquina); fora dela, pela rota de arquivo citado, que só serve o que a
 /// conversa mencionou.
-enum Picture { Disk(PathBuf), Loading, Ready(Arc<RenderImage>), Failed(String) }
+enum Picture { Disk(PathBuf), Loading, Ready(Arc<RenderImage>), Failed(String), Audio, Video }
 
 struct Document {
     editor: Entity<EditorState>,
@@ -176,9 +176,12 @@ impl Hangar {
         self.files.serial += 1;
         let id = self.files.serial;
         let local = self.tree.local_root(&self.session_owner());
-        // A leitura de texto recusa binário: imagem vem do disco ou da rota de arquivo citado.
-        let picture = is_image(&path).then(|| local.as_ref().and_then(|root| super::tree::resolve(root, &path).ok())
-            .map_or(Picture::Loading, Picture::Disk));
+        // A leitura de texto recusa binário: imagem vem do disco ou da rota de arquivo citado; áudio toca no player e
+        // vídeo abre no programa do sistema.
+        let picture = if crate::audio::is_audio(&path) { Some(Picture::Audio) }
+            else if crate::audio::is_video(&path) { Some(Picture::Video) }
+            else { is_image(&path).then(|| local.as_ref().and_then(|root| super::tree::resolve(root, &path).ok())
+                .map_or(Picture::Loading, Picture::Disk)) };
         let fetch_picture = matches!(picture, Some(Picture::Loading));
         let is_picture = picture.is_some();
         let preview = file_language(&path) == "markdown";
@@ -382,6 +385,7 @@ impl Hangar {
 
     fn close_file(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
         let Some(ix) = self.files.tabs.iter().position(|tab| tab.id == id) else { return };
+        self.stop_audio(&format!("file:{id}"));
         release(self.files.tabs.remove(ix), window, cx);
         if self.files.tabs.is_empty() { self.restore_file_focus(window, cx); }
         else {
@@ -422,6 +426,29 @@ impl Hangar {
         if !self.side.open { self.toggle_side(cx); }
         self.choose_side_tab(crate::appearance::SideTab::Files, window, cx);
         self.tree_reveal_path(path, cx);
+    }
+
+    /// Do disco quando a sessão é desta máquina; senão pela rota de arquivo citado.
+    fn play_file_audio(&mut self, id: u64, path: String, cx: &mut Context<Self>) {
+        let key = format!("file:{id}");
+        if let Some(real) = self.file_on_disk(&path) {
+            return self.toggle_audio(key, &path, async move {
+                tokio::task::spawn_blocking(move || std::fs::read(&real)).await.map_err(|e| e.to_string())?.map_err(|e| e.to_string())
+            }, cx);
+        }
+        let (Some(api), Some(session)) = (self.session_api(), self.selected_key()) else { return };
+        let uploads = self.uploads_for(&session);
+        let name = path.clone();
+        self.toggle_audio(key, &name, async move {
+            uploads.fetch(&api, &session.name, &Source::Cited(path)).await.map_err(|error| Self::fetch_failure(&error))
+        }, cx);
+    }
+
+    fn open_file_video(&mut self, cx: &mut Context<Self>) {
+        let path = self.files.tabs[self.files.active].path.clone();
+        if let Some(real) = self.file_on_disk(&path) { cx.open_with_system(&real); return; }
+        let name = composer::basename(&path).to_owned();
+        self.keep_file(Source::Cited(path), name, true, cx);
     }
 
     fn file_reveal_system(&mut self, cx: &mut Context<Self>) {
@@ -510,6 +537,17 @@ impl Hangar {
                 .child(img(path.clone()).max_w_full().max_h_full().object_fit(ObjectFit::Contain)).into_any_element(),
             (Some(Picture::Ready(image)), _) => div().size_full().p_4().flex().items_center().justify_center()
                 .child(img(image.clone()).max_w_full().max_h_full().object_fit(ObjectFit::Contain)).into_any_element(),
+            (Some(Picture::Audio), _) => {
+                let (id, path) = (tab.id, tab.path.clone());
+                div().size_full().flex().items_center().justify_center()
+                    .child(self.audio_controls(&format!("file:{id}"), move |this, cx| this.play_file_audio(id, path.clone(), cx), cx))
+                    .into_any_element()
+            }
+            (Some(Picture::Video), _) => div().size_full().flex().flex_col().items_center().justify_center().gap_3().p_4()
+                .child(div().text_sm().text_color(theme::muted()).child(tr("file_video_external")))
+                .child(Button::new("file-video-open").outline().small().label(tr("file_video_open"))
+                    .on_click(cx.listener(|this, _, _, cx| this.open_file_video(cx))))
+                .into_any_element(),
             (Some(Picture::Loading), _) | (None, None) => state(tr("file_loading"), theme::faint()),
             (Some(Picture::Failed(error)), _) | (None, Some(Err(error))) => state(error.clone(), theme::danger()),
             (None, Some(Ok(doc))) if tab.preview && doc.markdown.is_some() => {

@@ -30,6 +30,7 @@ mod hangar_live;
 mod harness;
 mod viewer;
 mod disk;
+mod player;
 mod machines;
 mod orchestration;
 mod orq_roles;
@@ -550,6 +551,7 @@ pub struct Hangar {
     attached: HashSet<(String, String, String)>,
     external_seq: u64,
     dictation: dictation::Dictation,
+    player: player::Player,
     connection_origin: Option<WeakFocusHandle>,
     /// Primeira abertura com o app Electron neste computador: a tela de conexão oferece trazer as configurações dele.
     electron_offer: bool,
@@ -723,6 +725,7 @@ impl Hangar {
             servers: known_servers, remote: HashMap::new(), remote_tasks: Vec::new(), remote_gen: 0, servers_rev: 0, invite_ended: HashSet::new(), pending_open: None, pending_remote: None,
             external_pairs: Vec::new(), external_seen: None, attached: HashSet::new(), external_seq: 0,
             dictation: Default::default(),
+            player: Default::default(),
             connection_origin: None,
             electron_offer: saved.is_none() && crate::electron::exists(),
         }
@@ -3273,10 +3276,21 @@ impl Hangar {
                     .child(thumb))
             } else { None };
             let (open_source, open_name) = (source.clone(), name.clone());
+            let player = crate::audio::is_audio(&name).then(|| {
+                let (audio_key, play_source, play_name) = (format!("ref:{row}:{n}"), source.clone(), name.clone());
+                self.audio_controls(&audio_key.clone(), move |this, cx| {
+                    let (Some(api), Some(key)) = (this.session_api(), this.selected_key()) else { return };
+                    let (uploads, source) = (this.uploads_for(&key), play_source.clone());
+                    this.toggle_audio(audio_key.clone(), &play_name, async move {
+                        uploads.fetch(&api, &key.name, &source).await.map_err(|error| Self::fetch_failure(&error))
+                    }, cx);
+                }, cx)
+            });
             let (save_source, save_name) = (source, name.clone());
             let openable = composer::openable(&composer::safe_name(&name));
             list = list.child(div().flex().flex_col().gap_1()
                 .when_some(preview, |el, preview| el.child(preview))
+                .when_some(player, |el, player| el.child(player))
                 .child(div().flex().items_center().gap_2().text_sm()
                     .child(div().flex_1().min_w_0().truncate().text_color(theme::muted()).child(name))
                     .when(openable, |el| el.child(Button::new(SharedString::from(format!("open-{row}-{n}"))).ghost().xsmall().label(tr("open"))

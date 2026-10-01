@@ -352,6 +352,7 @@ impl Hangar {
         if self.connection_dialog || self.settings.is_some() || window.has_active_dialog(cx) { return; }
         if !self.dictation_ready() { return; }
         self.dictation.cancel();
+        self.stop_audio("dictation");
         match Recorder::start() {
             Ok(recorder) => {
                 self.dictation.owner = self.dictation_owner();
@@ -606,7 +607,12 @@ impl Hangar {
             .when(again, |el| el.child(
                 Button::new("dictation-retranscribe").ghost().small().label(tr("dictation_again"))
                     .disabled(recording || transcribing)
-                    .on_click(cx.listener(|this, _, window, cx| this.revise_dictation(None, window, cx))))));
+                    .on_click(cx.listener(|this, _, window, cx| this.revise_dictation(None, window, cx)))))
+            // A gravação que virou o texto, para ouvir de novo antes de enviar.
+            .when(!recording, |el| el.child(self.audio_controls("dictation", |this, cx| {
+                let wav = this.dictation.audio.lock().unwrap().clone();
+                this.toggle_audio("dictation".into(), "ditado.wav", async move { Ok(wav) }, cx);
+            }, cx))));
         let status = (recording || transcribing).then(|| {
             let label = tr(if recording { "dictation_active" } else if self.dictation.cleaning { "dictation_cleaning" } else { "dictation_working" });
             let seconds = self.dictation.started.map(|start| start.elapsed().as_secs()).unwrap_or(0);

@@ -30,6 +30,7 @@ rusty-leveldb = "=4.0.1"
 notify = "=7.0.0"
 cpal = "=0.18.2"
 notify-rust = "=4.18.0"
+symphonia = { version = "=0.5.4", features = ["mp3", "aac", "isomp4"] }
 
 [target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]
 wry = "=0.55.1"
