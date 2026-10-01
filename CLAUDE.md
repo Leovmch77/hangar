@@ -200,10 +200,11 @@ registrado, fora do caminho de leitura, para não competir com o que vale hoje.
   interface, escrita duas vezes. O check completo, quando pedido, é `npm run check` **na raiz**,
   que cobre as três.
 - **Desktop evolui no Rust (`desktop-native/`); web (`frontend/`) evolui para PWA/mobile.**
-  Mudanças desktop entram no nativo, sem exigir implementação ou adaptação da tela desktop web.
-  Recursos usados no celular continuam entrando na web/PWA e no app `mobile/`, conforme o
-  escopo. O Electron e o desktop web estão em descontinuação gradual: preserve o que existe;
-  remoção exige pedido explícito. A paridade desktop entre web e Rust deixou de ser requisito.
+  Mudanças desktop entram só no nativo. No Svelte entra apenas o que serve ao PWA/celular; a
+  tela desktop web e o Electron ficam parados onde estão, sem recurso novo. Recursos usados no
+  celular continuam entrando na web/PWA e no app `mobile/`, conforme o escopo. O Electron e o
+  desktop web estão em descontinuação: preserve o que existe; remoção exige pedido explícito.
+  A paridade desktop entre web e Rust deixou de ser requisito.
   O nativo não importa `packages/core`; compartilha a API do backend e `messages/*.json`.
   Decisão e alcance em [frontend.md](docs/decisoes/frontend.md#desktop-no-rust-web-para-pwamobile).
   O nativo é o único app de desktop do instalador: ele o baixa da release `native-latest` no
@@ -211,7 +212,7 @@ registrado, fora do caminho de leitura, para não competir com o que vale hoje.
   O instalador não instala mais o Electron; quem já o tinha fica com ele. No Windows o nativo
   atende o `hangar-preview` (CDP dentro do processo, um navegador por sessão, sem abas).
 - **A web existente tem duas vistas (820px):** `Sidebar` (desktop legado) e `SessionList`
-  (mobile). Trabalho novo na web considera PWA/mobile; não exige alterar as duas vistas.
+  (mobile). Trabalho novo na web é só para PWA/mobile; a vista desktop não ganha recurso.
   Preserve o desktop existente ao tocar código compartilhado. Lógica da lista vai
   no `lib/sessionListModel.svelte.ts`, e a agregação SSE no `lib/sessionsStore.svelte.ts` — uma
   por servidor, nunca uma por card.
