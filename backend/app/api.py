@@ -303,6 +303,11 @@ async def _lifespan(app: FastAPI):
     # sockets do Claude; sem ele o recibo de retenção/recusa não tem pra onde voltar.
     if uds_messaging.INBOX.ligar(_ao_recibo_nativo):
         _log.info("inbox nativo ligado em %s", uds_messaging.INBOX.path)
+    try:
+        plugin_bridge.publish_address()
+    except OSError:
+        _log.warning("plugin: endereço da ponte não gravado; sessão de terminal fica no tmux",
+                     exc_info=True)
     # Claude sem terminal: o processo vive num cano fora do backend e sobrevive ao restart. Só
     # morre aqui o cano cuja sessão foi encerrada enquanto o backend estava fora; nos outros o
     # backend religa e recupera o que estava em aberto (turno, permissão pendente).

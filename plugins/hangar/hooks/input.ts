@@ -1,4 +1,5 @@
 import type { EngineInterface, On } from "claude-code";
+import { type Bridge, instance, setBridge } from "./bridge";
 
 // A largada divide o `session.start` com o state.ts por MATCHER — dois hooks no
 // mesmo evento sem matcher o engine recusa. O filtro não é enfeite: sem prompt
@@ -7,8 +8,7 @@ const REARM_MS = 50;
 // Sem o long-poll a espera cairia num `$.clock.sleep`, o único `$` que CONSOME
 // o orçamento de 10 s do hook; a chamada HTTP em voo não consome nada.
 const BACKOFF_MS = 2000;
-
-type Ponte = { url: string; token: string; sessao: string };
+const BACKOFF_DONO_MS = 30000;
 
 /** Entrada sem `tmux send-keys` digitando: o backend segura a resposta até ter
  *  texto na fila e diz COMO entregar.
@@ -24,19 +24,48 @@ export function registerInput(on: On) {
     // chave da fila lá, e não o uuid do transcript.
     const sessao = await $.env.get("CP_SESSION_NAME");
     if (url && token && sessao) {
+      setBridge({ url, token, sessao });
       $.clock.after(REARM_MS, () => void pull($, { url, token, sessao }));
+    } else {
+      $.clock.after(REARM_MS, () => void discover($));
     }
     return next(e);
   });
 }
 
-async function pull($: EngineInterface, ponte: Ponte) {
+async function discover($: EngineInterface) {
+  try {
+    // USERPROFILE antes: no Git Bash do Windows o HOME vem como /c/Users/...
+    const home = (await $.env.get("USERPROFILE")) ?? (await $.env.get("HOME"));
+    if (!home) return;
+    const { url, chave } = JSON.parse(await $.fs.read(`${home}/.hangar/plugin.json`)) as { url: string; chave: string };
+    const r = await $.http.fetch(`${url}/whoami`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        chave,
+        pane: await $.env.get("TMUX_PANE"),
+        nome: await $.env.get("CP_SESSION_NAME"),
+        tmux: await $.env.get("TMUX"),
+      }),
+    });
+    if (r.status !== 200) return;
+    const { sessao, token } = JSON.parse(r.text) as { sessao: string | null; token?: string };
+    if (!sessao || !token) return;
+    setBridge({ url, token, sessao });
+    void pull($, { url, token, sessao });
+  } catch {
+    // Sem arquivo, backend fora ou resposta estranha: o plugin fica parado e o tmux segue.
+  }
+}
+
+async function pull($: EngineInterface, ponte: Bridge) {
   let espera = REARM_MS;
   try {
     const r = await $.http.fetch(`${ponte.url}/pull`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ sessao: ponte.sessao, token: ponte.token }),
+      body: JSON.stringify({ sessao: ponte.sessao, token: ponte.token, instance: instance(), modos: ["fill"] }),
     });
     if (r.status === 200) {
       const { text, modo } = JSON.parse(r.text) as { text?: string | null; modo?: string };
@@ -59,8 +88,8 @@ async function pull($: EngineInterface, ponte: Ponte) {
       }
     } else {
       // 403 é token de outra vida da sessão: insistir de 50 ms bateria no
-      // backend para sempre.
-      espera = BACKOFF_MS;
+      // backend para sempre. 409 é outra instância dona da sessão: espera mais.
+      espera = r.status === 409 ? BACKOFF_DONO_MS : BACKOFF_MS;
     }
   } catch {
     espera = BACKOFF_MS;

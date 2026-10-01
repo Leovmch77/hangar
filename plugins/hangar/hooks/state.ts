@@ -1,25 +1,16 @@
 import type { EngineInterface, On } from "claude-code";
+import { bridge } from "./bridge";
 
-// O scanner do engine não segue `$` através de um import: cada arquivo fala com
-// a ponte sozinho. Por isso o endereço é lido e enviado aqui, sem helper comum.
-let url: string | null = null;
-let token: string | null = null;
-let sessao: string | null = null;
-let lido = false;
-
+// O scanner do engine não segue `$` através de um import: o envio fica aqui, e
+// do bridge.ts vem só o endereço.
 async function send($: EngineInterface, estado: string, extra: Record<string, unknown> = {}) {
-  if (!lido) {
-    url = (await $.env.get("HANGAR_PLUGIN_URL")) ?? null;
-    token = (await $.env.get("HANGAR_PLUGIN_TOKEN")) ?? null;
-    sessao = (await $.env.get("CP_SESSION_NAME")) ?? null;
-    lido = true;
-  }
-  if (!url || !token || !sessao) return;
+  const p = bridge();
+  if (!p) return;
   try {
-    await $.http.fetch(`${url}/state`, {
+    await $.http.fetch(`${p.url}/state`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ sessao, token, estado, ...extra }),
+      body: JSON.stringify({ sessao: p.sessao, token: p.token, estado, ...extra }),
     });
   } catch {
     // Backend fora do ar: o aviso se perde e o pane segue decidindo. Lançar aqui impediria o

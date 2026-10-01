@@ -1,6 +1,6 @@
 import type { EngineInterface, On } from "claude-code";
+import { type Bridge as Ponte, bridge } from "./bridge";
 
-type Ponte = { url: string; token: string; sessao: string };
 type DoApp = { permitir?: boolean | null; soltar?: boolean };
 
 // `tool.check` roda ANTES do diálogo de permissão: enquanto este hook segura o
@@ -18,11 +18,8 @@ export function registerPerm(on: On) {
   on("tool.check", async ($, e, next) => {
     const base = await next(e);
     if (base.decision !== "ask" || !e.tool_use_id || SAO_DIALOGO.has(e.tool)) return base;
-    const url = await $.env.get("HANGAR_PLUGIN_URL");
-    const token = await $.env.get("HANGAR_PLUGIN_TOKEN");
-    const sessao = await $.env.get("CP_SESSION_NAME");
-    if (!url || !token || !sessao) return base;
-    const ponte: Ponte = { url, token, sessao };
+    const ponte = bridge();
+    if (!ponte) return base;
     const id = `perm:${e.tool_use_id}`;
 
     const r = await doApp($, ponte, id, e.tool, resumo(e.input));

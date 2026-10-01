@@ -14,7 +14,8 @@ from app import plugin_bridge as pb
 @pytest.fixture(autouse=True)
 def _limpa():
     yield
-    for d in (pb._perguntas, pb._waiters, pb._estados, pb._batidas, pb._eventos, pb._fechadas):
+    for d in (pb._perguntas, pb._waiters, pb._estados, pb._batidas, pb._eventos, pb._fechadas,
+              pb._donos):
         d.clear()
     pb._apps_abertos = 0
 
@@ -156,3 +157,80 @@ def test_interruptor_desligado_tira_o_plugin_mesmo_com_mods_por_padrao(monkeypat
     monkeypatch.setattr(pb, "mods_by_default", lambda: True)
     monkeypatch.setattr(runtime_config, "get", lambda k: False if k == "claude_function_hooks" else None)
     assert pb._ligado_de_verdade() is False
+
+
+async def _ate(cond):
+    while not cond():
+        await asyncio.sleep(0.01)
+
+
+class _Cliente:
+    def __init__(self, host):
+        self.host = host
+
+
+class _Req:
+    def __init__(self, host):
+        self.client = _Cliente(host)
+
+
+def _req(host):
+    return _Req(host)
+
+
+def _pull(sessao="s1", instance="a", modos=("fill",)):
+    return pb.PullBody(sessao=sessao, token=pb.mint(sessao), instance=instance, modos=list(modos))
+
+
+def test_segunda_instancia_com_dono_vivo_recebe_409(monkeypatch):
+    monkeypatch.setattr(pb, "ESPERA_S", 0.2)
+
+    async def cena():
+        primeira = asyncio.create_task(pb.pull(_pull(instance="a")))
+        await asyncio.wait_for(_ate(lambda: pb.aguardando("s1")), 5)
+        with pytest.raises(HTTPException) as e:
+            await pb.pull(_pull(instance="b"))
+        await primeira
+        return e.value.status_code
+
+    assert asyncio.run(cena()) == 409
+
+
+def test_modos_declarados_ficam_com_o_dono(monkeypatch):
+    monkeypatch.setattr(pb, "ESPERA_S", 0.2)
+    asyncio.run(pb.pull(_pull(instance="a", modos=("fill", "user"))))
+    assert pb.declared_modes("s1") == {"fill", "user"}
+
+
+def test_endereco_da_maquina_e_gravado_sem_o_bearer(tmp_path):
+    pb._publish_address(tmp_path)
+    texto = pb.machine_file(tmp_path).read_text(encoding="utf-8")
+    from app.config import settings
+    assert json.loads(texto)["url"].endswith("/api/plugin")
+    assert json.loads(texto)["chave"] == pb.machine_key()
+    assert not settings.auth_token or settings.auth_token not in texto
+
+
+def test_whoami_resolve_pelo_pane(monkeypatch):
+    from app import quem_chama
+    monkeypatch.setattr(quem_chama, "_por_pane", lambda pane: "s1" if pane == "%3" else None)
+    r = asyncio.run(pb.whoami(pb.WhoamiBody(chave=pb.machine_key(), pane="%3"), _req("127.0.0.1")))
+    assert r == {"sessao": "s1", "token": pb.mint("s1"), "origem": "pane"}
+
+
+def test_whoami_nome_so_vale_sem_pane(monkeypatch):
+    from app import quem_chama
+    monkeypatch.setattr(quem_chama, "_por_pane", lambda pane: None)
+    monkeypatch.setattr(quem_chama, "_por_nome", lambda nome: nome)
+    com_pane = asyncio.run(pb.whoami(pb.WhoamiBody(chave=pb.machine_key(), pane="%0", nome="s1"), _req("127.0.0.1")))
+    sem_pane = asyncio.run(pb.whoami(pb.WhoamiBody(chave=pb.machine_key(), nome="s1"), _req("127.0.0.1")))
+    assert com_pane == {"sessao": None} and sem_pane["sessao"] == "s1"
+
+
+def test_whoami_recusa_chave_errada_e_cliente_de_fora():
+    with pytest.raises(HTTPException) as e:
+        asyncio.run(pb.whoami(pb.WhoamiBody(chave="x", pane="%3"), _req("127.0.0.1")))
+    assert e.value.status_code == 403
+    with pytest.raises(HTTPException) as e:
+        asyncio.run(pb.whoami(pb.WhoamiBody(chave=pb.machine_key(), pane="%3"), _req("100.64.0.9")))
+    assert e.value.status_code == 403

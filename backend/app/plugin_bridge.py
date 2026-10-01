@@ -43,6 +43,16 @@ _lock = threading.Lock()
 _waiters: dict[str, asyncio.Queue] = {}
 _loop: asyncio.AbstractEventLoop | None = None
 
+# Dono do long-poll por sessão: (instância, modos declarados, última batida). Um segundo `claude` com
+# o mesmo nome ou pane não pode tomar a fila do primeiro.
+_donos: dict[str, tuple[str, set[str], float]] = {}
+
+
+def declared_modes(name: str) -> set[str]:
+    with _lock:
+        dono = _donos.get(name)
+    return set(dono[1]) if dono else set()
+
 
 # Capacidade do CLI, não versão: o número seria um palpite sobre qual release ganhou a flag, e
 # quem derruba a sessão é a flag desconhecida — `claude --plugin-dir` inexistente sai com erro e o
@@ -175,9 +185,57 @@ def mint(name: str) -> str:
     return hmac.new(segredo, f"plugin:{name}".encode(), hashlib.sha256).hexdigest()[:32]
 
 
+def machine_key() -> str:
+    """Chave desta máquina para o `/whoami`: derivada como o `mint`, e só abre aquela rota."""
+    from app.config import settings
+    segredo = (settings.auth_token or "hangar").encode()
+    return hmac.new(segredo, b"plugin:machine", hashlib.sha256).hexdigest()[:32]
+
+
+def machine_file(home: Path | None = None) -> Path:
+    return (home or Path.home()) / ".hangar" / "plugin.json"
+
+
+def _publish_address(home: Path | None = None) -> None:
+    """Onde o plugin acha a ponte: sessão aberta fora do Hangar não recebe `HANGAR_PLUGIN_*`."""
+    from app.config import settings
+    alvo = machine_file(home)
+    alvo.parent.mkdir(parents=True, exist_ok=True)
+    tmp = alvo.with_name(alvo.name + ".tmp")
+    tmp.write_text(json.dumps({"url": f"http://127.0.0.1:{settings.port}/api/plugin",
+                               "chave": machine_key()}), encoding="utf-8")
+    try:
+        tmp.chmod(0o600)
+    except OSError:
+        pass
+    tmp.replace(alvo)
+
+
+# O conftest troca `publish_address`; o teste chega na implementação por `_publish_address`.
+publish_address = _publish_address
+
+
+def _sessao_do_tmux(tmux_env: str) -> str | None:
+    """`TMUX` é `socket,pid,id`: no psmux o pane se repete entre sessões, o id da sessão não."""
+    partes = (tmux_env or "").split(",")
+    if len(partes) < 3 or not partes[2].strip():
+        return None
+    from app import tmux
+    cp = tmux._run(["tmux", "list-sessions", "-F", "#{session_id} #{session_name}"])
+    if cp.returncode != 0:
+        return None
+    alvo = "$" + partes[2].strip().lstrip("$")
+    for linha in (cp.stdout or "").splitlines():
+        sid, _, nome = linha.partition(" ")
+        if sid == alvo:
+            return nome
+    return None
+
+
 def esquecer(name: str) -> None:
     with _lock:
         _waiters.pop(name, None)
+        _donos.pop(name, None)
         _estados.pop(name, None)
         _perguntas.pop(name, None)
         _batidas.pop(name, None)
@@ -385,6 +443,8 @@ def _entregar(name: str, texto: str, modo: str) -> bool:
 class PullBody(BaseModel):
     sessao: str
     token: str
+    instance: str = ""
+    modos: list[str] = []
 
 
 class StateBody(BaseModel):
@@ -398,6 +458,36 @@ class StateBody(BaseModel):
     origin: str | None = None
 
 
+class WhoamiBody(BaseModel):
+    chave: str
+    pane: str | None = None
+    nome: str | None = None
+    tmux: str | None = None
+
+
+@plugin_router.post("/whoami")
+async def whoami(body: WhoamiBody, request: Request):
+    """Sessão aberta fora do Hangar descobre nome e token. Só da própria máquina; pane único resolve,
+    o id da sessão do tmux desempata o pane repetido do psmux, e o nome só vale sem pane."""
+    if not request.client or request.client.host not in ("127.0.0.1", "::1"):
+        raise HTTPException(403, detail="whoami só da própria máquina")
+    if not secrets.compare_digest(machine_key(), body.chave):
+        raise HTTPException(403, detail="chave do plugin invalida")
+    from app import quem_chama
+    if body.pane:
+        try:
+            nome, origem = await asyncio.to_thread(quem_chama.resolver, {quem_chama.CAB_PANE: body.pane})
+            return {"sessao": nome, "token": mint(nome), "origem": origem}
+        except quem_chama.SessaoDesconhecida:
+            nome = await asyncio.to_thread(_sessao_do_tmux, body.tmux or "")
+            return {"sessao": nome, "token": mint(nome), "origem": "tmux"} if nome else {"sessao": None}
+    try:
+        nome, origem = await asyncio.to_thread(quem_chama.resolver, {quem_chama.CAB_NOME: body.nome or ""})
+    except quem_chama.SessaoDesconhecida:
+        return {"sessao": None}
+    return {"sessao": nome, "token": mint(nome), "origem": origem}
+
+
 @plugin_router.post("/pull")
 async def pull(body: PullBody):
     """Long-poll do plugin. Sempre 200: com o texto, ou `{"text": null}` quando a janela fecha vazia.
@@ -406,6 +496,12 @@ async def pull(body: PullBody):
     app. O token por sessão é a credencial daqui.
     """
     _confere(body.sessao, body.token)
+    agora = time.monotonic()
+    with _lock:
+        dono = _donos.get(body.sessao)
+        if dono and dono[0] != body.instance and agora - dono[2] < ESPERA_S + 10:
+            raise HTTPException(409, detail="outra instância do plugin já atende esta sessão")
+        _donos[body.sessao] = (body.instance, set(body.modos) or {"fill"}, agora)
     global _loop
     fila: asyncio.Queue = asyncio.Queue()
     with _lock:
@@ -418,6 +514,9 @@ async def pull(body: PullBody):
         return {"text": None}
     finally:
         with _lock:
+            _donos[body.sessao] = (body.instance,
+                                   _donos.get(body.sessao, (body.instance, {"fill"}, 0))[1],
+                                   time.monotonic())
             _batidas[body.sessao] = time.monotonic()
             if _waiters.get(body.sessao) is fila:
                 del _waiters[body.sessao]
