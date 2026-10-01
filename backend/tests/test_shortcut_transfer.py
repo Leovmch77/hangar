@@ -120,8 +120,26 @@ def test_import_preview_counts_and_lists_placeholders_without_saving(client):
     r = client.post("/api/shortcuts/import", json={"data": data}, headers=AUTH)
     assert r.status_code == 200
     assert r.json() == {"added": 1, "replaced": 1,
-                        "placeholders": [{"id": "rdp", "label": "RDP", "names": ["senha"]}]}
+                        "placeholders": [{"id": "rdp", "label": "RDP", "names": ["senha"]}], "verify": []}
     assert json.loads(rc.get("shortcuts")) == [{"id": "a", "type": "send_text", "label": "A", "text": "oi"}]
+
+
+def test_imported_verify_runs_and_failure_becomes_a_fix_prompt(client):
+    data = {"version": 1, "shortcuts": [
+        {"id": "ok", "type": "shell", "label": "Pronto", "command": "true", "verify": "echo OK; exit 0"},
+        {"id": "vm", "type": "shell", "label": "VM", "command": "vm", "verify": "echo 'FALTA  VM_HOST'; exit 1"},
+        {"id": "t", "type": "send_text", "label": "T", "text": "oi"},
+    ]}
+    r = client.post("/api/shortcuts/import", json={"data": data, "apply": True}, headers=AUTH)
+    assert r.status_code == 200 and r.json()["verify"] == ["ok", "vm"]
+    r = client.post("/api/shortcuts/verify", json={"ids": ["ok", "vm", "t"], "scripts": ["/x/vm"]}, headers=AUTH)
+    checks = {c["id"]: c for c in r.json()["checks"]}
+    assert set(checks) == {"ok", "vm"}
+    assert checks["ok"]["code"] == 0 and "prompt" not in checks["ok"]
+    assert checks["vm"]["code"] == 1 and checks["vm"]["output"] == "FALTA  VM_HOST"
+    assert "FALTA  VM_HOST" in checks["vm"]["prompt"] and "/x/vm" in checks["vm"]["prompt"]
+    bad = {"version": 1, "shortcuts": [{"id": "t", "type": "send_text", "label": "T", "text": "oi", "verify": "x"}]}
+    assert client.post("/api/shortcuts/import", json={"data": bad}, headers=AUTH).status_code == 400
 
 
 def test_import_apply_merges_by_id_keeps_order_and_fills_secrets(client):
@@ -395,7 +413,7 @@ def test_script_bundle_requires_linux_before_writes(tmp_path, monkeypatch, apply
         import_shortcuts(_bundle(), apply=apply)
     assert not (tmp_path / ".local").exists()
     assert import_shortcuts({"version": 1, "shortcuts": []}, apply=apply) == {
-        "added": 0, "replaced": 0, "placeholders": []}
+        "added": 0, "replaced": 0, "placeholders": [], "verify": []}
     assert import_shortcuts({"version": 2, "shortcuts": []}, apply=apply)["files"] == []
 
 
