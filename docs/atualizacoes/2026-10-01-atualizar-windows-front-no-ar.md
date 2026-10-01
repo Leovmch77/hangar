@@ -1,7 +1,9 @@
 ---
 id: 2026-10-01-atualizar-windows-front-no-ar
 titulo: No Windows, o Atualizar deixa de falhar quando as dependências da tela mudam
-destrutivo: false
+comando_windows: powershell -NoProfile -ExecutionPolicy Bypass -Command "try { . .\scripts\windows-tasks.ps1; Stop-HangarFrontend (Get-Location).Path } catch { Write-Host $_ }"
+prova: scripts/windows-tasks.ps1
+destrutivo: true
 ---
 
 No Windows, uma atualização que trazia dependências novas da tela parava em "as dependências do

@@ -212,6 +212,12 @@ conseguir atualizar, nem pelo botão nem pelo instalador:
     (`workbox-build`, que usa o rollup) morria em `Cannot find module
     @rollup/rollup-win32-x64-msvc`. A entrada do pacote win32 foi acrescentada à mão no lock.
     Quem regenerar o lock no Linux confere se ela continua lá.
+  - **O passo desta mudança para o front, e é `destrutivo: true` só para não rodar na subida.**
+    O motor carrega o `atualizar.py` antes do `git pull`, então a atualização que ENTREGA este
+    conserto ainda roda o `_preparar` antigo — e como ela também muda o lock, cairia no mesmo
+    `EPERM`. Os passos rodam depois do pull e antes do `npm ci`: o comando Windows do passo chama
+    `Stop-HangarFrontend`, e o `_reiniciar` sobe a tarefa. Na subida do backend ninguém a subiria
+    de volta, por isso o passo espera o botão.
 
 ## Passo com comando por sistema (14/09/2026)
 
