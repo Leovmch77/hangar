@@ -4644,6 +4644,22 @@ async def _avisar_saida(name: str, expeers: list[str]) -> list[dict]:
     for p in expeers:
         if not peers.is_remote(p):
             continue
+        rec = external_pairs.by_address(p)
+        if rec is not None:
+            if external_pairs.ambiguous(rec.alias):
+                errs.append({"sessao": p, "erro": erro(
+                    "erro_par_endereco_ambiguo",
+                    f"'{rec.alias}' é ao mesmo tempo máquina tua e par externo", peer=p)})
+                continue
+            try:
+                await asyncio.to_thread(external_pairs.call, rec.peer_address, rec.peer_token,
+                                        "DELETE", "/api/pair")
+            except (peers.PeerError, ValueError) as ex:
+                if getattr(ex, "status", None) != 410:
+                    errs.append({"sessao": p, "erro": erro("erro_peer_nao_avisado", str(ex), peer=p)})
+            external_pair_api._guarded("remover o registro", external_pairs.remove, rec.share_id)
+            external_pair_api._guarded("revogar o convite", share_store.revoke, rec.share_id)
+            continue
         if not settings.server_id:
             errs.append({"sessao": p,
                          "erro": erro("erro_pareamento_server_id_ausente",

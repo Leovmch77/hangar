@@ -32,7 +32,7 @@ text-align:center;border:1px solid #888;background:transparent;color:inherit;tex
 
 
 # Campos da lista que citam OUTRAS sessões do dono (pareamento e encadeamento).
-_OTHER_SESSIONS = {"pair_peers": None, "pair_task": None, "pair_gid": None, "then_target": None}
+_OTHER_SESSIONS = {"pair_peers": None, "pair_external": None,"pair_task": None, "pair_gid": None, "then_target": None}
 
 
 def guest_safe(info, guest=None):

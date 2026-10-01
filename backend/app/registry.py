@@ -88,6 +88,36 @@ async def _atualizar_git(cwd: str) -> None:
         _git_em_voo.discard(cwd)
 
 
+def _pair_external(name: str, peers_: list[str] | None) -> dict | None:
+    from app import external_pairs
+    for r in external_pairs.by_local(name):
+        if r.address in (peers_ or []):
+            return {"alias": r.alias, "owner": r.peer_owner, "session": r.peer_session}
+    return None
+
+
+def _encerrar_pares_externos(morta: str) -> None:
+    """Sessão morta fora do app: o par externo dela não tem quem o desfaça. Registro e convite
+    saem na hora; o aviso ao outro lado vai em thread solta, porque isto roda dentro do list()."""
+    from app import external_pairs
+    alvo = [r for r in external_pairs.all() if r.local_session == morta or _sanitize(r.local_session) == morta]
+    for r in alvo:
+        for fn, arg in ((external_pairs.remove, r.share_id), (share_store.revoke, r.share_id)):
+            try:
+                fn(arg)
+            except OSError as e:
+                _log.warning("varredura de pares: par externo '%s' não limpo: %r", r.address, e)
+        threading.Thread(target=_avisar_par_externo, args=(r,), daemon=True).start()
+
+
+def _avisar_par_externo(rec) -> None:
+    from app import external_pairs, peers
+    try:
+        external_pairs.call(rec.peer_address, rec.peer_token, "DELETE", "/api/pair")
+    except (peers.PeerError, ValueError) as e:
+        _log.info("varredura de pares: outro lado de '%s' não avisado: %s", rec.address, e)
+
+
 def _decorate_loop(info) -> None:
     """Decora loop_status/iter/max de UMA sessao a partir do sidecar (app.loop). Sem loop -> tudo None
     (sem badge). Module-level (nao closure) pra ser testavel isolado."""
@@ -1247,6 +1277,7 @@ class SessionRegistry:
                                branch=br, worktree=wt,
                                then_target=link.get("target") if link else None,
                                pair_peers=pair.get("peers") if pair else None,
+                               pair_external=_pair_external(p["name"], pair.get("peers") if pair else None),
                                pair_gid=pair.get("gid") if pair else None,
                                pair_task=pair.get("task") if pair else None)
             if prov in ("pi", "omp", "kimi", "codex"):
@@ -1306,6 +1337,7 @@ class SessionRegistry:
                 branch=br, worktree=wt,
                 then_target=(ThenLink(meta["name"]).get() or {}).get("target"),
                 pair_peers=(PairLink(meta["name"]).get() or {}).get("peers"),
+                pair_external=_pair_external(meta["name"], (PairLink(meta["name"]).get() or {}).get("peers")),
                 pair_gid=(PairLink(meta["name"]).get() or {}).get("gid"),
                 pair_task=(PairLink(meta["name"]).get() or {}).get("task"),
             ))
@@ -1324,6 +1356,7 @@ class SessionRegistry:
                 branch=br, worktree=wt,
                 then_target=(ThenLink(meta["name"]).get() or {}).get("target"),
                 pair_peers=(PairLink(meta["name"]).get() or {}).get("peers"),
+                pair_external=_pair_external(meta["name"], (PairLink(meta["name"]).get() or {}).get("peers")),
                 pair_gid=(PairLink(meta["name"]).get() or {}).get("gid"),
                 pair_task=(PairLink(meta["name"]).get() or {}).get("task"),
             ))
@@ -2459,6 +2492,7 @@ class SessionRegistry:
                 _log.warning("varredura de pares: '%s' morto fora do app, leave falhou: %r", n, e)
                 continue
             _log.info("varredura de pares: '%s' morreu fora do app; saiu do grupo (%s)", n, ex)
+            _encerrar_pares_externos(n)
             if any("::" in p for p in ex):
                 _log.warning("varredura de pares: '%s' tinha par remoto; sidecar de lá fica órfão", n)
 

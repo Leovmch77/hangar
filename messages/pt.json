@@ -6492,5 +6492,8 @@
   "erro_par_link_invalido": "Este não é um link de convite para parear.",
   "erro_par_recusado": "A outra máquina recusou o convite: {detalhe}",
   "erro_par_fora_do_ar": "A máquina do par não respondeu. Confira se ela está ligada e com o Funnel ativo.",
-  "erro_par_resposta_invalida": "A máquina do par respondeu algo inesperado."
+  "erro_par_resposta_invalida": "A máquina do par respondeu algo inesperado.",
+  "erro_par_encerrado": "O par foi encerrado do outro lado.",
+  "erro_par_endereco_ambiguo": "Este nome é ao mesmo tempo uma máquina tua e um par externo. Renomeie a máquina no peers.json.",
+  "erro_par_inexistente": "Este par externo não existe."
 }

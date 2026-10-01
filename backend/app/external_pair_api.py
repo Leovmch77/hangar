@@ -7,7 +7,7 @@ import logging
 import re
 import time
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
@@ -15,6 +15,7 @@ from app import external_pairs, pair, pair_texto, peers, share_api, share_store,
 from app.auth import require_auth
 from app.external_pairs import ExternalPair
 from app.mensagens import erro
+from app.share_gate import GUEST_TOKEN_KEY, guest_of
 from app.share_guest_api import _PAGE, _REASONS, _owner
 from app.share_life import session_life
 
@@ -234,3 +235,127 @@ async def pair_accept(name: str, body: PairAcceptBody):
                                              f"pareamento desfeito: falha ao avisar as sessões ({e})",
                                              avisos=str(e)))
     return {"ok": True, "alias": alias, "owner": owner, "session": session}
+
+
+async def teardown(rec: ExternalPair, notify: bool) -> None:
+    from app import api
+    _guarded("remover o registro", external_pairs.remove, rec.share_id)
+    _guarded("revogar o convite", share_store.revoke, rec.share_id)
+    await asyncio.to_thread(_guarded, "sair do grupo", pair.leave, rec.local_session)
+    if notify:
+        await api._deliver(rec.local_session,
+                           f"[painel: par externo encerrado] '{rec.address}' saiu do pareamento. "
+                           "Volte a operar independente.")
+
+
+def _pair_of(request: Request):
+    guest = guest_of(request)
+    share = guest.pair_share() if guest else None
+    if share is None:
+        raise HTTPException(403, detail=erro("erro_fora_do_convite", "fora do par"))
+    return share
+
+
+class PairMessageBody(BaseModel):
+    text: str
+
+
+@router.post("/api/pair/message")
+async def pair_message(body: PairMessageBody, request: Request):
+    from app import api
+    share = _pair_of(request)
+    rec = external_pairs.by_share(share.id)
+    if rec is None:
+        raise HTTPException(503, detail=erro("erro_sessao_indisponivel", "par ainda abrindo"),
+                            headers={"Retry-After": "5"})
+    if api._group_estourou(f"ext:{share.id}", time.time()):
+        raise HTTPException(429, detail=erro(
+            "erro_group_message_tempestade",
+            f"mais de {api._GROUP_MAX_NA_JANELA} avisos de grupo em {api._GROUP_JANELA_S}s — parece loop; "
+            "espere ou responda 1:1", max=api._GROUP_MAX_NA_JANELA, janela=api._GROUP_JANELA_S))
+    # O cabeçalho sai do registro (carimbado pelo token), nunca do texto que o outro lado mandou.
+    texto = f"[de fora: {rec.address}] {external_pairs.sanitize_message(body.text)}"
+    return await api.input_prompt(share.session, api.InputBody(text=texto, steer=True))
+
+
+@router.delete("/api/pair")
+async def pair_leave(request: Request):
+    share = _pair_of(request)
+    rec = external_pairs.by_share(share.id)
+    if rec is not None:
+        await teardown(rec, notify=True)
+    else:
+        share_store.revoke(share.id)
+    return {"ok": True}
+
+
+def _owner_only(request: Request) -> None:
+    if guest_of(request) is not None:
+        raise HTTPException(403, detail=erro("erro_fora_do_convite", "só o dono"))
+
+
+@router.get("/api/external-pairs", dependencies=[Depends(require_auth)])
+async def list_external_pairs(request: Request):
+    _owner_only(request)
+    return [{"local_session": r.local_session, "alias": r.alias, "owner": r.peer_owner,
+             "session": r.peer_session, "address": r.peer_address, "token": r.peer_token}
+            for r in external_pairs.all()]
+
+
+class ExternalSendBody(BaseModel):
+    sender: str
+    target: str
+    text: str
+
+
+def _remote_failure(e: Exception) -> HTTPException:
+    status = e.status if isinstance(e, peers.PeerError) else None
+    d = e.detail if isinstance(e, peers.PeerError) else None
+    if status == 429:
+        params = d.get("params") if isinstance(d, dict) and isinstance(d.get("params"), dict) else {}
+        return HTTPException(429, detail=erro("erro_group_message_tempestade",
+                                              "recados demais em pouco tempo", **params))
+    if status == 503:
+        return HTTPException(503, detail=erro("erro_sessao_indisponivel", "o par ainda está abrindo"))
+    if isinstance(d, dict) and isinstance(d.get("msg"), str):
+        texto = d["msg"]
+    else:
+        texto = str(d) if d is not None else str(e)
+    return HTTPException(502, detail=erro("erro_par_fora_do_ar", texto[:300], detalhe=texto[:300]))
+
+
+async def send_external(rec: ExternalPair, text: str) -> dict:
+    try:
+        _, resp = await asyncio.to_thread(external_pairs.call, rec.peer_address, rec.peer_token,
+                                          "POST", "/api/pair/message", {"text": text})
+    except (peers.PeerError, ValueError) as e:
+        if isinstance(e, peers.PeerError) and e.status == 410:
+            await teardown(rec, notify=True)
+            raise HTTPException(410, detail=erro("erro_par_encerrado", "o par foi encerrado do outro lado"))
+        raise _remote_failure(e)
+    return resp if isinstance(resp, dict) else {}
+
+
+@router.post("/api/external-pairs/send", dependencies=[Depends(require_auth)])
+async def external_send(body: ExternalSendBody, request: Request):
+    _owner_only(request)
+    alias = body.target.split("::", 1)[0]
+    if external_pairs.ambiguous(alias):
+        raise HTTPException(409, detail=erro("erro_par_endereco_ambiguo",
+                                             f"'{alias}' é ao mesmo tempo máquina tua e par externo"))
+    rec = external_pairs.by_address(body.target)
+    if rec is None or rec.local_session != body.sender:
+        raise HTTPException(404, detail=erro("erro_par_inexistente", "este par externo não existe"))
+    return await send_external(rec, body.text)
+
+
+class AttachBody(BaseModel):
+    token: str
+
+
+@router.post("/api/guest/attach")
+async def guest_attach(body: AttachBody, request: Request):
+    if guest_of(request) is None:
+        raise HTTPException(403, detail=erro("erro_fora_do_convite", "só convidado"))
+    mine = request.scope.get(GUEST_TOKEN_KEY, "")
+    return {"attached": await asyncio.to_thread(share_store.attach, mine, body.token)}
