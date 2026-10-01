@@ -15,12 +15,6 @@ function escapeHtml(str: string): string {
     .replace(/"/g, '&quot;');
 }
 
-function inlineCodeHtml(code: string, opts: MarkdownOptions): string {
-  const shown = `<code>${code}</code>`;
-  if (!opts.commandActions || code.length > 4096 || /[\r\n]/.test(code) || !/\S\s+\S/.test(code)) return shown;
-  return `<span class="run-inline">${shown}<button type="button" class="run-inline-btn" data-run-command aria-label="${escapeHtml(m.code_run_aria())}">${m.code_run()}</button></span>`;
-}
-
 // Escapa o texto antes do HTML; fragmentos de citação são gerados separadamente.
 function renderInline(input: string, opts: MarkdownOptions): string {
   const fragments: string[] = [];
@@ -62,7 +56,7 @@ function renderInline(input: string, opts: MarkdownOptions): string {
           return keep(code !== undefined ? `<code>${escapeHtml(code)}</code>` : escapeHtml(label ?? ref.path));
         }
         if (ref) return chip(ref.path, ref.line);
-        return keep(code !== undefined ? inlineCodeHtml(escapeHtml(code), opts) : renderInline(whole, {}));
+        return keep(code !== undefined ? `<code>${escapeHtml(code)}</code>` : renderInline(whole, {}));
       });
     const refs = parseCodeReferences(source);
     for (const ref of refs.reverse()) {
@@ -73,7 +67,7 @@ function renderInline(input: string, opts: MarkdownOptions): string {
   }
   let text = escapeHtml(source);
   // inline code primeiro (pra não interpretar ** dentro de código)
-  text = text.replace(/`([^`]+)`/g, (_, code) => inlineCodeHtml(code, opts));
+  text = text.replace(/`([^`]+)`/g, '<code>$1</code>');
   text = text.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
   text = text.replace(/(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)/g, '<em>$1</em>');
   // links [texto](url) — só http(s) (evita javascript:). escapeHtml não toca em "/" -> url intacta;

@@ -459,7 +459,7 @@ impl Hangar {
             if source.trim().is_empty() { return; }
             let view = this.text_view(&key, row, source, cx);
             out.push(chat_text_runnable(&view, cx, Some(cx.weak_entity()), &key).on_link_click(open_web_link)
-                .markdown_extensions(citation_extensions_with_code(&key, cx.weak_entity(), true)).into_any_element());
+                .markdown_extensions(citation_extensions(&key, cx.weak_entity())).into_any_element());
         }
         for (n, table) in tables.iter().enumerate() {
             text(self, format!("{id}#s{n}"), id, lines[cursor..table.start].join("\n"), &mut out, cx);

@@ -90,7 +90,7 @@
     if (!(event.target instanceof Element)) return;
     const button = event.target.closest('button[data-run-command]');
     if (!button || !onRunCommand) return;
-    const command = button.closest('.run-inline, .code-block')?.querySelector('code')?.textContent?.trim();
+    const command = button.closest('.code-block')?.querySelector('code')?.textContent?.trim();
     if (!command) return;
     const language = button.closest('.code-block')?.querySelector('.code-lang')?.textContent?.trim();
     event.stopPropagation();
