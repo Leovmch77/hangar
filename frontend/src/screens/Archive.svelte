@@ -6,8 +6,11 @@ import { intlLocale } from '../lib/locale';
   import * as m from '../paraglide/messages';
   import {
     getArchiveFolder, getArchiveHistory, archiveImageUrl, resumeArchivedConversation, sendInputForServer,
-    getEngines, type ArchiveFolder, type ArchiveEntry, type Motor,
+    getEngines, listClaudeConfigs, getCodexAccountsForServer,
+    type ArchiveFolder, type ArchiveEntry, type Motor, type ConfigDirInfo, type CodexAccount,
   } from '@hangar/core';
+  import NewChatComposer from '../components/newchat/NewChatComposer.svelte';
+  import AccountPill from '../components/newchat/AccountPill.svelte';
   import { arquivo, clienteQuery } from '../lib/queries';
   import { takeEntry } from '../lib/conversationList';
   import type { ChatEvent } from '@hangar/core';
@@ -47,6 +50,20 @@ import { intlLocale } from '../lib/locale';
   // e dois toques rapidos em conversas de servidores DIFERENTES deixam getEngines() em voo -- sem
   // isto a resposta do servidor ERRADO aterrissa por cima da certa e oferece motores de outro host.
   let motorSeq = 0;
+  // Contas da conversa aberta: a lista do servidor dela, a escolha do usuário (null = não mexeu,
+  // vale a dona da conversa) e o aviso de conta sem limite que a pílula devolve.
+  let configs = $state<ConfigDirInfo[]>([]);
+  let codexAccounts = $state<CodexAccount[]>([]);
+  let accountsLoading = $state(false);
+  let pickedConfig = $state<string | null>(null);
+  let accountBlocked = $state<string | null>(null);
+  let accountSeq = 0;
+  // config_dir null = conta do próprio backend, que a lista marca como ativa.
+  const selectedAccount = $derived(selected?.provider === 'codex'
+    ? (selected.codex_account ?? null)
+    : (pickedConfig ?? selected?.config_dir ?? configs.find((c) => c.active)?.path ?? null));
+  // Motor próprio não gasta a conta Claude: a trava não vale.
+  const blockedNow = $derived(selected?.provider === 'claude' && !engine ? accountBlocked : null);
 
   // Servidor DE ONDE navegar o arquivo: apiFetch usa o servidor ATIVO, entao sem um seletor o arquivo
   // so mostrava o servidor ativo e nao dava pra saber/escolher de qual servidor abrir (multi-servidor).
@@ -126,6 +143,24 @@ import { intlLocale } from '../lib/locale';
     showEngine = false;
     engine = '';
     motores = {};
+    pickedConfig = null;
+    accountBlocked = null;
+    configs = [];
+    codexAccounts = [];
+    const accSeq = ++accountSeq;
+    if (e.provider === 'claude' || e.provider === 'codex') {
+      accountsLoading = true;
+      // Lista de contas sem variante por servidor no Claude: usa o ativo, que já é o desta conversa.
+      const accounts = e.provider === 'claude' || !server ? listClaudeConfigs() : getCodexAccountsForServer(server);
+      accounts
+        .then((list) => {
+          if (accSeq !== accountSeq) return;
+          if (e.provider === 'claude') configs = list as ConfigDirInfo[];
+          else codexAccounts = list as CodexAccount[];
+        })
+        .catch(() => { /* sem lista: sem pílula, retomar segue na conta de origem */ })
+        .finally(() => { if (accSeq === accountSeq) accountsLoading = false; });
+    } else accountsLoading = false;
     const seq = ++motorSeq;
     // Best-effort: sem isto o seletor de motor nao aparece, mas retomar continua funcionando.
     getEngines()
@@ -149,7 +184,7 @@ import { intlLocale } from '../lib/locale';
   // servidor DONO da conversa.
   async function sendAndResume() {
     const text = draft.trim();
-    if (!selected || !text || resuming) return;
+    if (!selected || !text || resuming || accountsLoading || blockedNow) return;
     const entry = selected, server = servers.find((s) => s.id === activeServerId);
     if (!server) return;
     resuming = true;
@@ -157,7 +192,7 @@ import { intlLocale } from '../lib/locale';
     let name = '';
     try {
       const info = await resumeArchivedConversation(entry.project, entry.session_id,
-                                                    engine || null, entry.config_dir,
+                                                    engine || null, pickedConfig ?? entry.config_dir,
                                                     entry.provider, entry.codex_account, server);
       name = info.name;
       await sendInputForServer(server, name, text);
@@ -252,17 +287,19 @@ import { intlLocale } from '../lib/locale';
           {m.comum_motor()}: {engine ? (motores[engine]?.label ?? engine) : m.criar_claude_sua_conta()}
         </button>
       {/if}
-      {#if resumeError}<p class="resume-err">{resumeError}</p>{/if}
-      <div class="composer-row">
-        <textarea class="composer-input" rows="1" bind:value={draft} disabled={resuming}
-          placeholder={m.conversa_continuar_placeholder()}
-          aria-label={m.conversa_continuar_placeholder()}></textarea>
-        <button class="send-btn" type="button" onclick={sendAndResume}
-          disabled={resuming || !draft.trim()}
-          aria-label={resuming ? m.arquivo_retomando() : m.composer_enviar_mensagem()}>
-          {resuming ? '…' : '↑'}
-        </button>
-      </div>
+      <NewChatComposer bind:value={draft} placeholder={m.conversa_continuar_placeholder()}
+        busy={resuming} blocked={accountsLoading || !!blockedNow}
+        note={blockedNow ? { text: blockedNow, warning: true } : resumeError ? { text: resumeError, warning: true } : null}
+        onsend={sendAndResume}>
+        {#snippet below()}
+          <div class="account-row">
+            <AccountPill server={activeServerId} provider={sel.provider} {configs} {codexAccounts}
+              selected={selectedAccount} loading={accountsLoading}
+              disabled={resuming || sel.provider === 'codex'} blockExhausted bind:blocked={accountBlocked}
+              onchange={(id) => (pickedConfig = id)} />
+          </div>
+        {/snippet}
+      </NewChatComposer>
     </div>
   </div>
 {:else if folder}
@@ -461,30 +498,7 @@ import { intlLocale } from '../lib/locale';
     padding: var(--space-1) 0;
     margin-bottom: var(--space-2);
   }
-  .composer-row { display: flex; gap: var(--space-2); align-items: flex-end; }
-  .composer-input {
-    flex: 1;
-    min-height: 44px;
-    max-height: 160px;
-    resize: none;
-    padding: 11px var(--space-3);
-    background: var(--bg-surface);
-    border-radius: var(--radius-md);
-    color: var(--text-primary);
-    font-family: var(--font-ui);
-    font-size: var(--text-sm);
-  }
-  .send-btn {
-    width: 44px;
-    height: 44px;
-    flex-shrink: 0;
-    background: var(--accent);
-    border-radius: var(--radius-md);
-    color: #fff;
-    font-size: var(--text-lg);
-    font-weight: 600;
-  }
-  .send-btn:disabled { opacity: 0.5; cursor: default; }
+  .account-row { display: flex; align-items: center; min-height: 28px; }
 
   .engine-pick {
     display: flex;
@@ -510,5 +524,4 @@ import { intlLocale } from '../lib/locale';
     color: var(--text-muted);
     margin: 0 0 var(--space-3);
   }
-  .resume-err { color: var(--error); font-size: var(--text-xs); margin: var(--space-2) 0 0; }
 </style>
