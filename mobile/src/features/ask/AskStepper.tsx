@@ -4,6 +4,9 @@ import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import type { AnswerItem, AskQuestionPayload } from '@hangar/core';
 import * as m from '../../paraglide/messages';
 import { buildAnswers, type PickState } from './buildAnswers';
+import { Icon } from '../../ui/Icon';
+import { semEmoji } from '../../ui/semEmoji';
+import { superficie } from '../../theme/superficie';
 
 interface Props {
   payload: AskQuestionPayload;
@@ -93,7 +96,7 @@ export function AskStepper({ payload, onSubmit, onClose }: Props) {
   const selectedIndices = currentPick?.kind === 'option' ? currentPick.indices : [];
   const statusHeader = (
     <View style={styles.statusRow}>
-      <View style={[styles.statusGlyph, { backgroundColor: theme.tokens.bg.elevated }]}>
+      <View style={[styles.statusGlyph, { backgroundColor: superficie(theme, 0.8) }]}>
         <Text style={[styles.statusGlyphText, { color: theme.tokens.accent.base }]}>?</Text>
       </View>
       <Text style={[styles.statusLabel, { color: theme.tokens.text.secondary }]}>{m.board_precisa_de_voce()}</Text>
@@ -119,7 +122,7 @@ export function AskStepper({ payload, onSubmit, onClose }: Props) {
         <Text style={[styles.sheetTitle, { color: theme.tokens.text.primary }]}>{m.askq_revisar()}</Text>
         <View style={styles.reviewList}>
           {questions.map((q, qi) => (
-            <View key={qi} style={[styles.reviewItem, { backgroundColor: theme.tokens.bg.surface, borderColor: theme.tokens.border.subtle }]}>
+            <View key={qi} style={[styles.reviewItem, { backgroundColor: superficie(theme), borderColor: theme.tokens.border.subtle }]}>
               <Text style={[styles.reviewQ, { color: theme.tokens.text.secondary }]}>{q.header}</Text>
               <Text style={[styles.reviewA, { color: theme.tokens.text.primary }]}>{pickLabel(qi)}</Text>
             </View>
@@ -178,7 +181,7 @@ export function AskStepper({ payload, onSubmit, onClose }: Props) {
               onPress={() => toggleOption(i)}
               style={[
                 styles.optionBtn,
-                { backgroundColor: theme.tokens.bg.surface, borderColor: sel ? theme.tokens.accent.base : theme.tokens.border.default },
+                { backgroundColor: superficie(theme), borderColor: sel ? theme.tokens.accent.base : theme.tokens.border.default },
                 sel && { backgroundColor: theme.tokens.accent.dim },
               ]}
               accessibilityRole={q.multiSelect ? 'checkbox' : 'radio'}
@@ -202,7 +205,7 @@ export function AskStepper({ payload, onSubmit, onClose }: Props) {
                   <Text style={[styles.optDesc, { color: theme.tokens.text.secondary }]}>{opt.description}</Text>
                 ) : null}
                 {opt.preview ? (
-                  <View style={[styles.previewBox, { backgroundColor: theme.tokens.bg.elevated, borderColor: theme.tokens.border.subtle }]}>
+                  <View style={[styles.previewBox, { backgroundColor: superficie(theme, 0.8), borderColor: theme.tokens.border.subtle }]}>
                     <Text style={[styles.previewTxt, { color: theme.tokens.text.secondary }]}>{opt.preview}</Text>
                   </View>
                 ) : null}
@@ -231,7 +234,8 @@ export function AskStepper({ payload, onSubmit, onClose }: Props) {
             style={[styles.ghostOpt, { borderColor: theme.tokens.border.default }]}
             accessibilityRole="button"
           >
-            <Text style={[styles.ghostOptTxt, { color: theme.tokens.text.primary }]}>{m.askq_digitar_resposta()}</Text>
+            <Icon name="PenLine" size={14} color={theme.tokens.text.secondary} />
+            <Text style={[styles.ghostOptTxt, { color: theme.tokens.text.primary }]}>{semEmoji(m.askq_digitar_resposta())}</Text>
           </Pressable>
           {payload.provider !== 'codex' ? (
             <Pressable
@@ -239,7 +243,8 @@ export function AskStepper({ payload, onSubmit, onClose }: Props) {
               style={[styles.ghostOpt, { borderColor: theme.tokens.border.default }]}
               accessibilityRole="button"
             >
-              <Text style={[styles.ghostOptTxt, { color: theme.tokens.text.primary }]}>{m.askq_conversar_sobre()}</Text>
+              <Icon name="MessageCircle" size={14} color={theme.tokens.text.secondary} />
+              <Text style={[styles.ghostOptTxt, { color: theme.tokens.text.primary }]}>{semEmoji(m.askq_conversar_sobre())}</Text>
             </Pressable>
           ) : null}
         </View>
@@ -249,7 +254,7 @@ export function AskStepper({ payload, onSubmit, onClose }: Props) {
           <TextInput
             style={[
               styles.fieldInput,
-              { backgroundColor: theme.tokens.bg.surface, borderColor: theme.tokens.border.default, color: theme.tokens.text.primary },
+              { backgroundColor: superficie(theme), borderColor: theme.tokens.border.default, color: theme.tokens.text.primary },
             ]}
             value={textValue}
             onChangeText={setTextValue}
@@ -444,6 +449,8 @@ const styles = StyleSheet.create((theme) => ({
   },
   ghostOpt: {
     height: 44,
+    flexDirection: 'row',
+    gap: 6,
     justifyContent: 'center',
     alignItems: 'center',
     borderWidth: 1,

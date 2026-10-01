@@ -3,6 +3,8 @@ import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import type { SessionInfo, State } from '@hangar/core';
 import { rotuloEstado } from '@hangar/core';
 import * as m from '../../paraglide/messages';
+import { Icon } from '../../ui/Icon';
+import { superficie } from '../../theme/superficie';
 
 interface Props {
   peers: string[];
@@ -72,7 +74,7 @@ export function PairMembers({ peers, candidates, sessions, picked, adding, busy,
                   <Pressable
                     key={session.name}
                     onPress={() => onToggle(session.name)}
-                    style={[styles.row, { borderColor: selected ? theme.tokens.accent.base : 'transparent', backgroundColor: selected ? theme.tokens.bg.elevated : 'transparent' }]}
+                    style={[styles.row, { borderColor: selected ? theme.tokens.accent.base : 'transparent', backgroundColor: selected ? superficie(theme, 0.8) : 'transparent' }]}
                     accessibilityRole="checkbox"
                     accessibilityState={{ checked: selected }}
                     accessibilityLabel={m.par_adicionar_aria({ nome: session.name, estado: rotuloEstado(state) })}
@@ -82,7 +84,12 @@ export function PairMembers({ peers, candidates, sessions, picked, adding, busy,
                       <Text style={[styles.name, { color: theme.tokens.text.primary }]} numberOfLines={1}>{session.name}</Text>
                       {session.cwd ? <Text style={[styles.cwd, { color: theme.tokens.text.muted }]} numberOfLines={1}>{session.cwd}</Text> : null}
                     </View>
-                    {session.pair_peers?.length ? <Text style={[styles.paired, { color: theme.tokens.text.muted }]}>{`🤝 ${session.pair_peers.length}`}</Text> : null}
+                    {session.pair_peers?.length ? (
+                      <View style={styles.paired}>
+                        <Icon name="Handshake" size={13} color={theme.tokens.text.muted} />
+                        <Text style={[styles.pairedTxt, { color: theme.tokens.text.muted }]}>{session.pair_peers.length}</Text>
+                      </View>
+                    ) : null}
                   </Pressable>
                 );
               })
@@ -115,7 +122,8 @@ const styles = StyleSheet.create((theme) => ({
   name: { fontSize: theme.base.text.base, fontWeight: '600' },
   state: { fontSize: theme.base.text.xs },
   cwd: { fontSize: theme.base.text.xs },
-  paired: { fontSize: theme.base.text.xs, flexShrink: 0 },
+  paired: { flexDirection: 'row', alignItems: 'center', gap: 3, flexShrink: 0 },
+  pairedTxt: { fontSize: theme.base.text.xs },
   chevron: { fontSize: 24, lineHeight: 24 },
   addingBlock: { gap: theme.base.space[3] },
   empty: { fontSize: theme.base.text.sm, textAlign: 'center', paddingVertical: theme.base.space[3] },

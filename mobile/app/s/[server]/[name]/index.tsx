@@ -323,6 +323,7 @@ export default function ChatScreen() {
         }
       />
       <MoreSheet open={moreOpen} onClose={() => setMoreOpen(false)} serverId={serverId} name={name} orq={orq}
+                 provider={provider} semTerminal={!!(stateEvent?.headless ?? currentSession?.headless)} temPergunta={!!askPayload}
                  recarregar={recarregavel ? { bloqueado: recarregarBloqueado, onPress: recarregar } : undefined} />
       <SessionPickerSheet open={pickerOpen} onClose={() => setPickerOpen(false)} atual={name} />
       {/* Lista e Composer dentro do mesmo KAV: ambos sobem com o teclado e a lista termina acima do composer */}

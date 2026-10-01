@@ -196,7 +196,7 @@ export function SessionRow({ session: s, mostrarServidor, onPress, onGit, onExcl
               <View style={styles.chips}>
                 {s.limited ? <Chip tone="warning" icon="Hourglass">{s.limit_reset ?? ''}</Chip> : null}
                 {loop ? <Chip tone={TOM_DO_LOOP[loop.tone]}>{loop.label}</Chip> : null}
-                {plan ? <Chip tone={plan.complete ? 'success' : 'neutral'} icon="ClipboardList">{plan.label}</Chip> : null}
+                {plan ? <Chip tone={plan.complete ? 'success' : 'neutral'} icon={plan.complete ? 'CircleCheck' : 'ClipboardList'}>{plan.text}</Chip> : null}
                 {s.engine ? <Chip icon="Cog">{s.engine}</Chip> : null}
               </View>
             ) : null}

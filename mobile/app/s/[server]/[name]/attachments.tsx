@@ -10,6 +10,7 @@ import { AttachmentCard } from '../../../../src/features/attachments/AttachmentC
 import { Lightbox } from '../../../../src/features/attachments/Lightbox';
 import { fileKind } from '@hangar/core';
 import { useServers } from '../../../../src/stores/servers';
+import { superficie } from '../../../../src/theme/superficie';
 
 export default function AttachmentsSheet() {
   const { theme } = useUnistyles();
@@ -165,7 +166,7 @@ export default function AttachmentsSheet() {
     <View style={[styles.container, { backgroundColor: theme.tokens.bg.base }]}>
       <Text style={[styles.title, { color: theme.tokens.text.primary }]}>
         {m.ctx_anexos()}
-        {files.length ? <Text style={[styles.count, { color: theme.tokens.text.secondary, backgroundColor: theme.tokens.bg.elevated }]}> {files.length}</Text> : null}
+        {files.length ? <Text style={[styles.count, { color: theme.tokens.text.secondary, backgroundColor: superficie(theme, 0.8) }]}> {files.length}</Text> : null}
       </Text>
 
       {loading ? (

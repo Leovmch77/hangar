@@ -23,7 +23,7 @@ describe('usageWindows', () => {
 
 describe('settingsLabel', () => {
   it('junta modelo e nível; sem modelo usa o nome do campo', () => {
-    expect(settingsLabel('Opus5.5·1M', 'high')).toBe('Opus5.5·1M · high');
+    expect(settingsLabel('Opus5.5·1M', 'high')).toBe('Opus 5.5 · 1M · high');
     expect(settingsLabel('Haiku', null)).toBe('Haiku');
     expect(settingsLabel(null, 'high')).toBe('Modelo');
   });

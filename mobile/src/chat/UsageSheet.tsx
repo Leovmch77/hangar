@@ -46,7 +46,7 @@ export function UsageSheet({ open, onClose, serverId, name }: Props) {
   if (chip('cost')) rows.push({ label: m.uso_custo(), value: chip('cost')! });
   if (f?.sessionTime) rows.push({ label: m.uso_tempo_sessao(), value: f.sessionTime });
   if (f?.model) rows.push({ label: m.composer_modelo(), value: settingsLabel(f.model, f.effort) });
-  if (f?.repo || f?.branch) rows.push({ label: m.uso_linha_projeto(), value: chip('repo') ?? f?.repo ?? '' });
+  if (f?.repo || f?.branch) rows.push({ label: m.uso_linha_projeto(), value: [f.repo, f.branch].filter(Boolean).join(' · ') });
   const ctxPct = f?.ctxPct;
   const hasCtx = typeof ctxPct === 'number' && isFinite(ctxPct);
   const ctxTokens = f?.ctxUsed != null ? `${f.ctxUsed.toLocaleString()}${f.ctxTotal ? ` / ${f.ctxTotal.toLocaleString()}` : ''}` : '';

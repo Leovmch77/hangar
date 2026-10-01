@@ -14,6 +14,7 @@ import { PairPicker } from '../../../../src/features/pair/PairPicker';
 import { PairFeed } from '../../../../src/features/pair/PairFeed';
 import { montarFeed } from '../../../../src/features/pair/pairFeed';
 import * as m from '../../../../src/paraglide/messages';
+import { superficie } from '../../../../src/theme/superficie';
 
 export default function PairSheet() {
   const { theme } = useUnistyles();
@@ -255,7 +256,7 @@ export default function PairSheet() {
               ) : contract?.content.trim() ? (
                 <View style={[styles.contract, { borderTopColor: theme.tokens.border.subtle }]}>
                   <Text style={[styles.sectionTitle, { color: theme.tokens.text.secondary }]}>{m.par_contrato_titulo()}</Text>
-                  <View style={[styles.contractBody, { backgroundColor: theme.tokens.bg.surface, borderColor: theme.tokens.border.subtle }]}>
+                  <View style={[styles.contractBody, { backgroundColor: superficie(theme), borderColor: theme.tokens.border.subtle }]}>
                     <EnrichedMarkdownText markdown={contract.content} markdownStyle={mdStyle} flavor="github" />
                   </View>
                   <Text style={[styles.path, { color: theme.tokens.text.muted }]} numberOfLines={1} selectable>{contract.path}</Text>

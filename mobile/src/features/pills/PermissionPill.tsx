@@ -4,6 +4,7 @@ import { useSessions } from '../../stores/sessions';
 import * as m from '../../paraglide/messages';
 import { PillMenu, type PillMenuItem } from './PillMenu';
 import { SettingRow } from './SettingRow';
+import { permissionLabel } from './permissionLabel';
 
 interface Props {
   serverId: string;
@@ -29,7 +30,7 @@ export function PermissionPill({ serverId, name }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [items, setItems] = useState<PillMenuItem[]>([]);
 
-  const display = tempError ?? current ?? '—';
+  const display = tempError ?? (current ? permissionLabel(current) : '—');
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -37,7 +38,7 @@ export function PermissionPill({ serverId, name }: Props) {
     try {
       const res = await getPermissionModes(name);
       setCurrent(res.current);
-      setItems(res.modes.map((mo) => ({ label: mo, selected: mo === res.current })));
+      setItems(res.modes.map((mo) => ({ id: mo, label: permissionLabel(mo), selected: mo === res.current })));
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -57,8 +58,9 @@ export function PermissionPill({ serverId, name }: Props) {
   const handleSelect = useCallback(
     async (it: PillMenuItem) => {
       try {
-        const res = await setPermissionMode(name, it.label);
-        const ficou = (res as { mode?: string; current?: string }).mode ?? (res as { current?: string }).current ?? it.label;
+        const modo = it.id ?? it.label;
+        const res = await setPermissionMode(name, modo);
+        const ficou = (res as { mode?: string; current?: string }).mode ?? (res as { current?: string }).current ?? modo;
         setCurrent(ficou);
         setOpen(false);
       } catch (e) {
@@ -72,7 +74,7 @@ export function PermissionPill({ serverId, name }: Props) {
           try {
             const cur = await getPermissionModes(name);
             setCurrent(cur.current);
-            setItems(cur.modes.map((mo) => ({ label: mo, selected: mo === cur.current })));
+            setItems(cur.modes.map((mo) => ({ id: mo, label: permissionLabel(mo), selected: mo === cur.current })));
           } catch {}
         } else {
           setError(msg);

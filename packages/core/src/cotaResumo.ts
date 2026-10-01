@@ -26,6 +26,13 @@ export function cotaDaConta<T extends { id: string }>(cotas: T[], path: string):
   return cotas.find((c) => c.id === `claude:${path}`);
 }
 
+/** Rótulo da primeira janela da conta inteira em 100% ("7d"); null se nenhuma estourou. A janela de
+ *  um modelo só não trava a conta, por isso fica de fora. */
+export function janelaEsgotada(c: CotaContaResumo | undefined): string | null {
+  if (!c || c.estado !== 'lida') return null;
+  return c.janelas.find((j) => !j.por_modelo && typeof j.pct === 'number' && j.pct >= 100)?.rotulo ?? null;
+}
+
 /** "5h 42% · 7d 18%"; string vazia sem leitura ou sem janela (quem chama decide o texto). */
 export function resumoCota(c: CotaContaResumo | undefined): string {
   if (!c || c.estado !== 'lida') return '';

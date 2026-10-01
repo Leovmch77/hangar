@@ -16,6 +16,11 @@ interface Props {
   /** Linha do orquestrador: sem pane nem entrada, então Terminal, resposta e anexos não têm o que abrir;
    *  o grupo é montado pelo orq, então parear à mão também sai. */
   orq?: boolean;
+  /** Os itens que dependem da sessão só aparecem quando têm o que abrir: Terminal precisa de pane,
+   *  Limites é da conta Codex e "Sua resposta" reabre uma pergunta que ficou pendente. */
+  provider?: string | null;
+  semTerminal?: boolean;
+  temPergunta?: boolean;
 }
 
 type Item = {
@@ -27,7 +32,7 @@ type Item = {
   disabled?: boolean;
 };
 
-export function MoreSheet({ open, onClose, serverId, name, recarregar, orq }: Props) {
+export function MoreSheet({ open, onClose, serverId, name, recarregar, orq, provider, semTerminal, temPergunta }: Props) {
   const { theme } = useUnistyles();
   const router = useRouter();
 
@@ -40,13 +45,13 @@ export function MoreSheet({ open, onClose, serverId, name, recarregar, orq }: Pr
       onPress: recarregar.onPress,
       disabled: recarregar.bloqueado,
     }] : []),
-    ...(orq ? [] : [{ icon: 'CircleHelp' as IconName, label: m.askq_sua_resposta(), route: 'ask' }]),
+    ...(orq || !temPergunta ? [] : [{ icon: 'CircleHelp' as IconName, label: m.askq_sua_resposta(), route: 'ask' }]),
     { icon: 'Activity', label: m.ctx_atividade(), sub: m.more_tarefas_agentes(), route: 'activity' },
     ...(orq ? [] : [{ icon: 'Users' as IconName, label: m.par_titulo(), sub: m.ctx_grupo(), route: 'pair' }]),
     { icon: 'Folder', label: m.arq_aba(), sub: m.ctx_repositorio(), route: 'files' },
-    ...(orq ? [] : [{ icon: 'Terminal' as IconName, label: m.term_titulo(), sub: m.ctx_terminal(), route: 'terminal' }]),
+    ...(orq || semTerminal ? [] : [{ icon: 'Terminal' as IconName, label: m.term_titulo(), sub: m.ctx_terminal(), route: 'terminal' }]),
     ...(orq ? [] : [{ icon: 'Paperclip' as IconName, label: m.ctx_anexos(), sub: m.more_fotos_videos_arquivos(), route: 'attachments' }]),
-    { icon: 'Gauge', label: m.codex_limites_titulo(), sub: m.ctx_limites(), route: 'codex-limits' },
+    ...(provider === 'codex' ? [{ icon: 'Gauge' as IconName, label: m.codex_limites_titulo(), sub: m.ctx_limites(), route: 'codex-limits' }] : []),
     { icon: 'Flag', label: m.bastao_dossie_titulo(), sub: m.bastao_dossie_sub(), route: 'bastao' },
   ];
 

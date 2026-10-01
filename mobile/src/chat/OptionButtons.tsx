@@ -4,6 +4,8 @@ import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { kindOf, isPermission } from '@hangar/core';
 import * as m from '../paraglide/messages';
 import { superficie } from '../theme/superficie';
+import { Icon } from '../ui/Icon';
+import { semEmoji } from '../ui/semEmoji';
 
 interface Props {
   question: string;
@@ -42,7 +44,8 @@ export function OptionButtons({ question, options, onSelect, onCancel }: Props) 
     <View style={styles.wrap}>
       {permission ? (
         <View style={[styles.permChip, { backgroundColor: theme.tokens.accent.dim }]}>
-          <Text style={[styles.permTxt, { color: theme.tokens.accent.base }]}>{m.permissao_pedido()}</Text>
+          <Icon name="ShieldAlert" size={13} color={theme.tokens.accent.base} />
+          <Text style={[styles.permTxt, { color: theme.tokens.accent.base }]}>{semEmoji(m.permissao_pedido())}</Text>
         </View>
       ) : null}
       <Text style={[styles.question, { color: theme.tokens.text.primary }]}>
@@ -125,6 +128,9 @@ const styles = StyleSheet.create((theme) => ({
   },
   permChip: {
     alignSelf: 'flex-start',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
     borderRadius: theme.base.radius.full,
     paddingHorizontal: theme.base.space[2],
     paddingVertical: 4,

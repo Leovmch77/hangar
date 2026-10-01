@@ -38,7 +38,7 @@ export function usageWindows(f: StatusFields | null): UsageWindow[] {
 // Rótulo do botão único do composer: "Opus5.5·1M · high". Sem modelo lido, cai no nome do campo.
 export function settingsLabel(model: string | null | undefined, effort: string | null | undefined): string {
   if (!model) return m.composer_modelo();
-  return effort ? `${model} · ${effort}` : model;
+  return effort ? `${spacedModel(model)} · ${effort}` : spacedModel(model);
 }
 
 // "Opus5.5·1M" → "Opus 5.5 · 1M": a statusline cola tudo; no chip do composer o nome tem de ler

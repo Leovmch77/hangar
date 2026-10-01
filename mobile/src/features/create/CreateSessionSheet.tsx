@@ -5,7 +5,7 @@ import { useRouter } from 'expo-router';
 import { getArchivePorCwd, getCodexAccountsForServer,
   getEnginesForServer, fetchSessionsForServer, listClaudeConfigsForServer, probeServerResponse,
   modelOptionsForServer, resumeArchivedConversation } from '@hangar/core';
-import { basename, providerName, cotaDaConta, cotaParada, resumoCota, CLAUDE_PERMISSION_MODES, EFFORT_LEVELS } from '@hangar/core';
+import { basename, providerName, cotaDaConta, cotaParada, janelaEsgotada, resumoCota, CLAUDE_PERMISSION_MODES, EFFORT_LEVELS } from '@hangar/core';
 import type { ArchiveEntry, CodexAccount, ConfigDirInfo, Provider, ModelOption, CotaContaResumo, Server } from '@hangar/core';
 import { MenuView } from '@react-native-menu/menu';
 import { useServers } from '../../stores/servers';
@@ -386,8 +386,11 @@ function CreateSessionForm({ active, onClose }: { active: Server; onClose?: () =
   const statusLabel = retomavel
     ? m.criar_retomar()
     : [settings.engine ? motores[engine]?.label ?? engine : null, modelLabel, settings.effort, settings.permission_mode].filter(Boolean).join(' · ');
+  // Conta com a janela em 100% não responde: o aviso diz isso em cor de alerta, além dos números.
+  const janelaCheia = provider === 'claude' ? janelaEsgotada(cotaSelecionada) : null;
   const quotaNotice = provider === 'claude' && cotaSelecionada ? (
-    <Text style={styles.hint}>
+    <Text style={[styles.hint, janelaCheia ? styles.hintAlerta : null]} accessibilityRole={janelaCheia ? 'alert' : undefined}>
+      {janelaCheia ? `${m.cota_conta_no_limite({ janela: janelaCheia })} ` : ''}
       {resumoCota(cotaSelecionada) ||
         `${m.cota_sem_cota()} ${
           cotaSelecionada.estado === 'indisponivel'
@@ -630,6 +633,7 @@ const styles = StyleSheet.create((theme) => ({
   pickedPath: { fontFamily: theme.base.fontMono, fontSize: theme.base.text.xs, color: theme.tokens.text.muted },
   rowCenter: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   hint: { fontSize: theme.base.text.sm, color: theme.tokens.text.secondary },
+  hintAlerta: { color: theme.tokens.status.warning },
   hintSm: { fontSize: 12, color: theme.tokens.text.muted, marginTop: 4 },
   field: { gap: theme.base.space[2] },
   label: { fontSize: theme.base.text.sm, color: theme.tokens.text.secondary, fontWeight: '500' },

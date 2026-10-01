@@ -6,6 +6,7 @@ import * as m from '../../paraglide/messages';
 import { PillMenu, type PillMenuItem } from './PillMenu';
 import { pillLabels, reconcileChosen } from './pills';
 import { SettingRow } from './SettingRow';
+import { spacedModel } from '../../chat/usage';
 
 interface Props {
   serverId: string;
@@ -13,6 +14,13 @@ interface Props {
 }
 
 // Linha "Modelo" da folha de ajustes do composer; o anel de contexto mora no botão que abre a folha.
+// A statusline escreve "Opus5.5·1M" e a lista do Claude, "Opus 5.5": compara sem espaço, pontuação
+// e o sufixo de contexto, senão o modelo atual nunca aparece marcado.
+const semEnfeite = (s: string) => s.split('·')[0].toLowerCase().replace(/[^a-z0-9]/g, '');
+function mesmoModelo(nome: string, statusModel: string | null | undefined): boolean {
+  return !!statusModel && semEnfeite(nome) === semEnfeite(statusModel);
+}
+
 export function ModelPill({ serverId, name }: Props) {
   const chat = chatStore(serverId, name);
   const statusLine = chat.use((s) => s.statusLine);
@@ -41,7 +49,8 @@ export function ModelPill({ serverId, name }: Props) {
 
   const display = useMemo(() => {
     if (tempError) return tempError;
-    return pillLabels(statusFields, { model: chosenModel }).model ?? '—';
+    const model = pillLabels(statusFields, { model: chosenModel }).model;
+    return model ? spacedModel(model) : '—';
   }, [statusFields, chosenModel, tempError]);
 
   // reconcilia quando statusline confirma
@@ -91,7 +100,7 @@ export function ModelPill({ serverId, name }: Props) {
           res.models.map((mo) => ({
             label: mo.name ?? mo.id,
             hint: mo.desc ?? undefined,
-            selected: mo.id === chosenModel,
+            selected: chosenModel ? mo.id === chosenModel : mesmoModelo(mo.name ?? mo.id, statusFields?.model),
           })),
         );
       }

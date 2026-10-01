@@ -3,6 +3,7 @@ import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { relativeTime } from '@hangar/core';
 import type { PeerMsg } from './pairFeed';
 import * as m from '../../paraglide/messages';
+import { superficie } from '../../theme/superficie';
 
 interface Props {
   sessionName: string;
@@ -25,7 +26,7 @@ export function PairFeed({ sessionName, feed, failed, loading }: Props) {
       ) : (
         <View style={styles.list}>
           {feed.map((message, index) => (
-            <View key={`${message.ts}-${message.from}-${message.to}-${index}`} style={[styles.item, { backgroundColor: theme.tokens.bg.surface, borderColor: message.from === sessionName ? theme.tokens.accent.base : theme.tokens.border.subtle }]}>
+            <View key={`${message.ts}-${message.from}-${message.to}-${index}`} style={[styles.item, { backgroundColor: superficie(theme), borderColor: message.from === sessionName ? theme.tokens.accent.base : theme.tokens.border.subtle }]}>
               <Text style={[styles.meta, { color: theme.tokens.text.muted }]} selectable>
                 {message.from} → {message.to}{message.ts ? ` · ${relativeTime(message.ts)}` : ''}
               </Text>

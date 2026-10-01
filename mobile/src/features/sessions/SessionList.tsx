@@ -314,8 +314,9 @@ export function SessionList({ onOpenServers, onOpenSettings }: Props) {
     </View>
   );
 
-  const vazio = (titulo: string | null, texto: string | null) => (
-    <View style={styles.empty}>
+  // `noTopo`: com a busca aberta o teclado cobre a metade de baixo, e o aviso centrado sumia atrás dele.
+  const vazio = (titulo: string | null, texto: string | null, noTopo = false) => (
+    <View style={[styles.empty, noTopo && styles.emptyTopo]}>
       {titulo ? <Text style={styles.emptyTitle}>{titulo}</Text> : null}
       {texto ? <Text style={styles.emptyTxt}>{texto}</Text> : null}
     </View>
@@ -382,7 +383,7 @@ export function SessionList({ onOpenServers, onOpenSettings }: Props) {
           />
         )}
         onScrollBeginDrag={() => trocarAberta(null)}
-        ListEmptyComponent={busca ? vazio(m.lista_vazia_filtro(), null) : vazio(m.lista_nenhuma_ativa(), m.lista_toque_criar())}
+        ListEmptyComponent={busca ? vazio(m.lista_vazia_filtro(), null, true) : vazio(m.lista_nenhuma_ativa(), m.lista_toque_criar())}
         contentContainerStyle={styles.listContent}
         keyboardShouldPersistTaps="handled"
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
@@ -429,6 +430,7 @@ const styles = StyleSheet.create((theme) => ({
   ativo: { flexDirection: 'row', alignItems: 'center', gap: 6, marginLeft: 'auto', flexShrink: 1, minWidth: 0 },
   ativoTxt: { flexShrink: 1, fontSize: theme.base.text.xxs },
   empty: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: theme.base.space[6], gap: 8 },
+  emptyTopo: { flex: 0, justifyContent: 'flex-start', paddingTop: theme.base.space[4] },
   emptyTitle: { fontSize: theme.base.text.lg, fontWeight: '600', color: theme.tokens.text.primary, textAlign: 'center' },
   emptyTxt: { fontSize: theme.base.text.sm, color: theme.tokens.text.muted, textAlign: 'center' },
 }));

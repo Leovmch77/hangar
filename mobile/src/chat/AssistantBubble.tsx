@@ -32,11 +32,14 @@ export function mkMarkdownStyle(t: TemaApp): MarkdownStyle {
     link: { color: t.tokens.accent.base, underline: true },
     strong: { color: t.tokens.text.primary },
     em: { color: t.tokens.text.primary },
+    // Código inline é pílula na cor de destaque, sem contorno: sem `borderColor` a lib desenha a
+    // borda rosa de fábrica, que corta a frase em caixinhas.
     code: {
       fontFamily: t.base.fontMono,
       fontSize: t.base.text.sm,
-      color: t.tokens.text.primary,
-      backgroundColor: superficie(t, 0.8),
+      color: t.tokens.accent.base,
+      backgroundColor: t.tokens.accent.dim,
+      borderColor: 'transparent',
     },
     codeBlock: {
       color: t.tokens.text.primary,

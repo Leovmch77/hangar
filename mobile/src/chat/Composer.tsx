@@ -982,7 +982,7 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
         {pairPeers?.length ? (
           <Pressable
             onPress={() => setSendToPair((current) => !current)}
-            style={[styles.pairChip, { borderColor: sendToPair ? theme.tokens.accent.base : theme.tokens.border.subtle, backgroundColor: sendToPair ? theme.tokens.bg.elevated : 'transparent' }]}
+            style={[styles.pairChip, { borderColor: sendToPair ? theme.tokens.accent.base : theme.tokens.border.subtle, backgroundColor: sendToPair ? superficie(theme, 0.8) : 'transparent' }]}
             accessibilityRole="switch"
             accessibilityState={{ checked: sendToPair }}
             accessibilityLabel={m.composer_mandar_grupo()}

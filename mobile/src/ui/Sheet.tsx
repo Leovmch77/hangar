@@ -1,5 +1,5 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, type ReactNode } from 'react';
-import { Platform } from 'react-native';
+import { Platform, View } from 'react-native';
 import { TrueSheet, type SheetDetent } from '@lodev09/react-native-true-sheet';
 import { useUnistyles } from 'react-native-unistyles';
 import { alphaDoVidro, useReduceTransparency } from './Glass';
@@ -23,9 +23,10 @@ type Props = {
 // true-sheet exige New Arch (ligada: app.json newArchEnabled). Teto de 3 detents: Android trunca em 3.
 // Fundo do vidro: a sheet é navegação, então leva o modalAlpha; conteúdo dentro dela usa surfaceAlpha.
 // No Android a true-sheet não desfoca (`backgroundBlur` é só do iOS): sem desfoque, a folha
-// translúcida deixa o texto da conversa vazar por trás do dela. Lá ela fica quase opaca.
+// translúcida deixa o texto da conversa vazar por trás do dela — mesmo a 97%, folha sobre folha
+// mostrava o texto de baixo. Lá ela é opaca.
 const alphaFolha = (theme: Parameters<typeof alphaDoVidro>[0]) =>
-  Platform.OS === 'android' ? Math.max(0.97, alphaDoVidro(theme, 'modal')) : alphaDoVidro(theme, 'modal');
+  Platform.OS === 'android' ? 1 : alphaDoVidro(theme, 'modal');
 
 export const Sheet = forwardRef<TrueSheet, Props>(function Sheet({ sizes = ['auto'], open, children, onDismiss, onDidPresent, scrollable }, ref) {
   const { theme, rt } = useUnistyles();
@@ -61,6 +62,10 @@ export const Sheet = forwardRef<TrueSheet, Props>(function Sheet({ sizes = ['aut
       backgroundBlur={reduzir ? undefined : rt.themeName === 'dark' ? 'dark' : 'light'}
       backgroundColor={reduzir ? `rgb(${r},${g},${b})` : `rgba(${r},${g},${b},${alphaFolha(theme)})`}
       grabber
+      // A alça sobe e ganha uma faixa própria: no padrão (16 dp do topo) ela caía em cima do título
+      // de toda folha, que começa logo ali.
+      grabberOptions={{ topMargin: 8, color: theme.tokens.text.muted }}
+      header={<View style={{ height: 16 }} />}
       scrollable={scrollable}
       onDidPresent={onDidPresent}
       onDidDismiss={() => {

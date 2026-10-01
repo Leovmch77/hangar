@@ -6,6 +6,8 @@ import type { SessionInfo } from './types';
 
 export interface PlanBadge {
   label: string;
+  // Rótulo sem o emoji, para quem já desenha o próprio ícone (app nativo).
+  text: string;
   pct: number;        // 0..100
   title: string;      // tooltip: plano · Task N/M · done/total steps
   complete: boolean;
@@ -31,6 +33,7 @@ export function planBadge(s: PlanCarrier | null | undefined): PlanBadge | null {
     // no repo (13 aqui), "Task 4/5" sozinho nao identifica nada. O nome vem primeiro porque e o que
     // se procura; quem corta quando falta espaco e o CSS do chip, e o numero fica preso na ponta.
     label: complete ? m.plan_chip_concluido({ nome: s.plan_name }) : m.plan_chip_progresso({ nome: s.plan_name, progresso: task }),
+    text: complete ? s.plan_name : `${s.plan_name} · ${task}`,
     pct,
     // sem task, o rótulo já É done/total — repetir daria "x · 3/10 · 3/10 steps"
     title: hasTask ? `${s.plan_name} · ${task} · ${done}/${total} steps`

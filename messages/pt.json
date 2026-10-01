@@ -2999,6 +2999,7 @@
   "cota_idade": "há {n}",
   "cota_precisa_entrar": "— precisa entrar",
   "cota_conta_parada": "— abra uma sessão nela",
+  "cota_conta_no_limite": "Conta no limite da janela {janela}. Escolha outra conta para a sessão responder.",
   "cota_sessao_viva": "— a sessão aberta renova sozinha, o número volta já",
   "cota_sem_cota": "sem cota",
   "cota_uso_contas": "Uso das contas",
