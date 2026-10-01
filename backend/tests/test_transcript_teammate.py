@@ -38,8 +38,14 @@ def test_varios_blocos_mostram_so_os_recados():
     assert _textos(_user(_DOIS)) == [("user_msg", "[de: beto] Versões: git 2.55.0, Python 3.14.7.")]
 
 
-def test_aviso_de_fim_do_colega_some():
-    assert parse_obj(_user("Teammate @pss-braden finished Relatório final.\n\nResultado")) == []
+def test_texto_do_usuario_sobre_colega_continua_dele():
+    texto = "Teammate @bob finished the PR, revisa"
+    assert _textos(_user(texto)) == [("user_msg", texto)]
+
+
+def test_tag_de_colega_malformada_continua_texto():
+    texto = "Another Claude session sent a message:\n<teammate-message teammate_id=\"ana\">sem fechar"
+    assert [k for k, _ in _textos(_user(texto))] == ["user_msg"]
 
 
 def test_colega_pelo_origin_de_recado():

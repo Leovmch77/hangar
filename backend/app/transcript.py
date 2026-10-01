@@ -98,11 +98,9 @@ _AGENT_MSG_RE = re.compile(r'<agent-message from="([^"]+)"[^>]*>(.*)</agent-mess
 # Equipe de agentes do Claude Code: recado de colega pro líder, entregue como msg "user" que começa
 # com "Another Claude session sent a message:" e traz um ou mais <teammate-message teammate_id=…>.
 # Não é fala do usuário: recado com conteúdo vira "[de: colega] …" (a bolha de outra sessão que o
-# front já desenha); o aviso JSON de colega ocioso some. O "Teammate @nome finished …" do fim do
-# turno do colega também some.
+# front já desenha); o aviso JSON de colega ocioso some.
 _TEAMMATE_INICIO_RE = re.compile(r"(?:Another Claude session sent a message:\s*)?<teammate-message\b")
 _TEAMMATE_BLOCO_RE = re.compile(r'<teammate-message\b([^>]*)>\n?(.*?)\n?</teammate-message>', re.DOTALL)
-_TEAMMATE_FIM_RE = re.compile(r"T?eammate @[\w.-]+ finished\b")
 
 
 def _teammate_textos(texto) -> Optional[list[str]]:
@@ -110,12 +108,13 @@ def _teammate_textos(texto) -> Optional[list[str]]:
     if not isinstance(texto, str):
         return None
     t = texto.lstrip()
-    if _TEAMMATE_FIM_RE.match(t):
-        return []
     if not _TEAMMATE_INICIO_RE.match(t):
         return None
+    blocos = _TEAMMATE_BLOCO_RE.findall(t)
+    if not blocos:
+        return None  # tag sem bloco válido: segue como texto normal, nada some
     out = []
-    for attrs, corpo in _TEAMMATE_BLOCO_RE.findall(t):
+    for attrs, corpo in blocos:
         corpo = corpo.strip()
         if corpo.startswith("{"):
             try:
