@@ -1197,84 +1197,8 @@ if ($precisa -and $Update) {
     Ok 'frontend ja buildado e atualizado (nada mudou no git desde o ultimo build)'
 }
 
-# -- Janela nativa (Electron, shell\) -----------------------------------------
-# So as DEPENDENCIAS, nunca o `npm run dist`. O `git pull` traz o `main.cjs` novo, e quem roda o
-# app a partir do repo ja o executa no proximo start — mas se o `package-lock.json` do shell mudar
-# (Electron novo, dependencia nova), a janela roda com dependencia velha e nada avisa. Empacotar
-# (NSIS/AppImage) e outra coisa: leva minutos e produz um INSTALADOR, que alguem ainda tem que
-# instalar — publicacao, nao atualizacao, e nao cabe num botao que roda sozinho.
-$shellDir = "$raiz\shell"
-if (Test-Path "$shellDir\package.json") {
-    # Compara com `node_modules\.package-lock.json`, que o npm reescreve a CADA instalacao — e nao
-    # com a PASTA node_modules, cuja data nao acompanha o que aconteceu dentro dela (medido: pasta
-    # de 16/08 com lock de 22/08, o que faria o `npm ci` rodar em toda atualizacao, a toa).
-    $marcaShell = "$shellDir\node_modules\.package-lock.json"
-    $lock = "$shellDir\package-lock.json"
-    $precisaShell = (-not (Test-Path $marcaShell)) -or
-                    ((Test-Path $lock) -and ((Get-Item $lock).LastWriteTime -gt (Get-Item $marcaShell).LastWriteTime))
-    if ($precisaShell) {
-        Titulo 'Janela nativa (Electron)'
-        $eapAnterior = $ErrorActionPreference
-        $ErrorActionPreference = 'Continue'
-        Push-Location $shellDir
-        try {
-            # Mesmo motivo do $quieto acima: o `if` desembrulha o array e o splat vira caractere.
-            $quietoShell = @()
-            if (-not $Update) { $quietoShell = @('--silent') }
-            npm ci @quietoShell
-            $rcShell = $LASTEXITCODE
-        } finally {
-            Pop-Location
-            $ErrorActionPreference = $eapAnterior
-        }
-        if ($rcShell -eq 0) {
-            Ok 'dependencias da janela instaladas'
-        } else {
-            # Nao derruba a atualizacao: o app funciona no navegador sem a janela nativa.
-            Falta "npm ci do shell\ falhou (exit $rcShell) - a janela nativa pode nao abrir"
-            Nota 'rodar na mao:  cd shell ; npm ci'
-            # Marca canonica (nao traduzida, nao colorida): e como o motor da atualizacao sabe que
-            # algo ficou pra tras sem o instalador precisar falhar inteiro. Sem ela, a tela dizia
-            # "Atualizado" com a janela nativa quebrada, e a unica pista era uma linha amarela
-            # perdida no log.
-            Write-Host '##HANGAR-AVISO## a janela nativa (Electron) ficou com dependencias desatualizadas'
-        }
-    } else {
-        Ok 'janela nativa ja com as dependencias em dia'
-    }
-    # Reescreve os atalhos porque o checkout e o nivel de permissao podem mudar.
-    $electronExe = "$shellDir\node_modules\electron\dist\electron.exe"
-    if (Test-Path $electronExe) {
-        # "Hangar (Electron)": o "Hangar" e do app nativo, instalado logo abaixo.
-        $shortcutPaths = @(
-            (Join-Path ([Environment]::GetFolderPath('Programs')) 'Hangar (Electron).lnk'),
-            (Join-Path ([Environment]::GetFolderPath('DesktopDirectory')) 'Hangar (Electron).lnk')
-        )
-        foreach ($lnk in $shortcutPaths) {
-            try {
-                $ws = New-Object -ComObject WScript.Shell
-                $atalho = $ws.CreateShortcut($lnk)
-                $atalho.TargetPath = $electronExe
-                $atalho.Arguments = 'main.cjs'
-                $atalho.WorkingDirectory = $shellDir
-                $atalho.IconLocation = "$shellDir\build\icon.ico,0"
-                $atalho.Description = 'Hangar'
-                $atalho.Save()
-                Set-ShortcutElevation $lnk ($script:installRunLevel -eq 'Highest')
-                Ok "atalho Hangar criado ($lnk)"
-            } catch {
-                Falta "nao consegui criar o atalho Hangar ($lnk): $_"
-                $script:pendencias += "atalho Hangar ($lnk)"
-            }
-        }
-    } else {
-        Falta "electron.exe nao encontrado em $electronExe - atalho do Menu Iniciar nao criado"
-    }
-}
-
 # -- App nativo (desktop-native, release native-latest) ----------------------
-# E a janela padrao. O Electron continua instalado ao lado, como "Hangar (Electron)": o navegador
-# embutido do hangar-preview mora nele. Falhar aqui nao derruba a instalacao - a janela vira o Electron.
+# E a unica janela de desktop instalada. Falhar aqui nao derruba a instalacao: o Hangar segue no navegador.
 $nativoExe = Join-Path $env:LOCALAPPDATA 'Programs\Hangar\Hangar.exe'
 if (-not $SoChecar) {
     Titulo 'App nativo'
@@ -1282,10 +1206,10 @@ if (-not $SoChecar) {
     if ($LASTEXITCODE -eq 0 -and (Test-Path $nativoExe)) {
         Ok 'app nativo instalado (atalho "Hangar")'
     } elseif ($LASTEXITCODE -eq 0) {
-        Nota 'sem app nativo para esta maquina; a janela segue sendo o Electron'
+        Nota 'sem app nativo para esta maquina; use o Hangar pelo navegador'
     } else {
-        Falta 'o app nativo nao instalou - a janela segue sendo o Electron (rode scripts\install-native.ps1)'
-        Write-Host '##HANGAR-AVISO## o app nativo nao instalou; a janela segue sendo o Electron'
+        Falta 'o app nativo nao instalou - use o Hangar pelo navegador (rode scripts\install-native.ps1)'
+        Write-Host '##HANGAR-AVISO## o app nativo nao instalou; use o Hangar pelo navegador'
     }
 }
 
@@ -2415,32 +2339,18 @@ if ($vivo -and -not $Update) {
     $base = if ($script:cpPublicUrl) { $script:cpPublicUrl } else { "http://127.0.0.1:$portaBack" }
     $abrir = if ($tokenAgora) { "$base/?token=$([uri]::EscapeDataString($tokenAgora))" } else { $base }
     Pausa-Log   # a URL de fallback carrega o token
-    # O app de desktop (Electron) quando existe; o navegador so como reserva. O main.cjs le a URL
-    # inicial de COCKPIT_URL, e a tela de login guarda o `?token=` igual ao QR.
-    $electronExe = "$raiz\shell\node_modules\electron\dist\electron.exe"
+    # O app nativo; o navegador so como reserva. O nativo ja nasce conectado (o install-native.ps1
+    # grava a conexao com o token), e a tela de login do navegador guarda o `?token=` igual ao QR.
     $abriuApp = $false
-    # O app nativo primeiro: ele ja nasce conectado (o install-native.ps1 grava a conexao com o token).
     $nativoExe = Join-Path $env:LOCALAPPDATA 'Programs\Hangar\Hangar.exe'
     if (Test-Path $nativoExe) {
         try {
             $procApp = Start-Process -FilePath $nativoExe -PassThru
+            # Lancar nao prova que abriu: um crash na largada sai depois.
             Start-Sleep 2
             if ($procApp -and -not $procApp.HasExited) { $abriuApp = $true; Retoma-Log; Ok 'abri o app Hangar' }
-            else { Nota 'o app nativo fechou logo ao abrir; tentando o Electron' }
+            else { Nota 'o app nativo fechou logo ao abrir; abrindo no navegador' }
         } catch { Nota "nao consegui abrir o app nativo: $($_.Exception.Message)" }
-    }
-    if (-not $abriuApp -and (Test-Path $electronExe)) {
-        try {
-            $env:COCKPIT_URL = $abrir
-            $procApp = Start-Process -FilePath $electronExe -ArgumentList 'main.cjs' -WorkingDirectory "$raiz\shell" -PassThru
-            Remove-Item Env:COCKPIT_URL -ErrorAction SilentlyContinue
-            # Lancar nao prova que abriu: um crash na largada (node_modules quebrado) sai depois.
-            Start-Sleep 2
-            if ($procApp -and -not $procApp.HasExited) {
-                $abriuApp = $true
-                Retoma-Log; Ok "abri o app Hangar (ja autenticado em $base)"
-            } else { Nota 'o app Hangar fechou logo ao abrir; abrindo no navegador' }
-        } catch { Remove-Item Env:COCKPIT_URL -ErrorAction SilentlyContinue; Nota "nao consegui abrir o app: $($_.Exception.Message)" }
     }
     if (-not $abriuApp) {
         try { Start-Process $abrir | Out-Null; Retoma-Log; Ok "abri $base no navegador (ja autenticado)" }

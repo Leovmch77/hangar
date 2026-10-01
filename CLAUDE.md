@@ -206,11 +206,10 @@ registrado, fora do caminho de leitura, para não competir com o que vale hoje.
   remoção exige pedido explícito. A paridade desktop entre web e Rust deixou de ser requisito.
   O nativo não importa `packages/core`; compartilha a API do backend e `messages/*.json`.
   Decisão e alcance em [frontend.md](docs/decisoes/frontend.md#desktop-no-rust-web-para-pwamobile).
-  O nativo é o padrão: o instalador o baixa
-  da release `native-latest` no pacote da máquina (`scripts/install-native.sh`/`.ps1`) e o
-  Electron fica ao lado como "Hangar (Electron)", porque o navegador embutido com tela remota e
-  abas mora nele; no Windows o nativo já atende o `hangar-preview` (CDP dentro do processo, um
-  navegador por sessão, sem abas).
+  O nativo é o único app de desktop do instalador: ele o baixa da release `native-latest` no
+  pacote da máquina (`scripts/install-native.sh`/`.ps1`); sem o nativo, a reserva é o navegador.
+  O instalador não instala mais o Electron; quem já o tinha fica com ele. No Windows o nativo
+  atende o `hangar-preview` (CDP dentro do processo, um navegador por sessão, sem abas).
 - **A web existente tem duas vistas (820px):** `Sidebar` (desktop legado) e `SessionList`
   (mobile). Trabalho novo na web considera PWA/mobile; não exige alterar as duas vistas.
   Preserve o desktop existente ao tocar código compartilhado. Lógica da lista vai

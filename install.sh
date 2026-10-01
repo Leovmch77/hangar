@@ -413,59 +413,8 @@ else
 fi
 fi
 
-# ── Janela nativa (Electron, shell/) ──────────────────────────────────────────
-# Só as DEPENDÊNCIAS, nunca o `npm run dist`. O `git pull` traz o `main.cjs` novo, e quem roda o
-# app a partir do repo já o executa no próximo start — mas se o `package-lock.json` do shell mudar
-# (Electron novo, dependência nova), a janela roda com dependência velha e nada avisa. Empacotar
-# (AppImage/NSIS) é outra coisa: leva minutos e produz um INSTALADOR, que alguém ainda tem que
-# instalar — publicação, não atualização, e não cabe num botão que roda sozinho.
-if [ -d shell ] && [ -f shell/package.json ]; then
-  # Compara com `node_modules/.package-lock.json`, que o npm reescreve a CADA instalação — e não
-  # com a pasta `node_modules`, cuja data não acompanha o que aconteceu dentro dela. Medido aqui:
-  # a pasta era de 16/08 e o lock de 22/08, então a condição dava "precisa" toda vez e um `npm ci`
-  # de minutos rodaria em cada atualização, à toa.
-  MARCA_SHELL=shell/node_modules/.package-lock.json
-  if [ ! -f "$MARCA_SHELL" ] || [ shell/package-lock.json -nt "$MARCA_SHELL" ]; then
-    say "Janela nativa (Electron)"
-    QUIETO_SHELL=--silent; [ "$UPDATE" = 1 ] && QUIETO_SHELL=
-    build_shell() { (cd shell && npm ci $QUIETO_SHELL); }
-    if gira "npm ci da janela nativa" build_shell; then
-      ok "dependências da janela instaladas"
-    else
-      # Não derruba a atualização: o app funciona no navegador sem a janela nativa.
-      falta "npm ci do shell/ falhou — a janela nativa pode não abrir (rode: cd shell && npm ci)"
-      # Marca canônica (não traduzida, não colorida): é como o motor da atualização sabe que algo
-      # ficou pra trás sem o instalador precisar falhar inteiro. Sem ela, a tela dizia "Atualizado"
-      # com a janela nativa quebrada, e a única pista era uma linha amarela perdida no log.
-      echo "##HANGAR-AVISO## a janela nativa (Electron) ficou com dependencias desatualizadas"
-    fi
-  else
-    ok "janela nativa já com as dependências em dia"
-  fi
-  # Registro no lançador: o `.desktop` do repo com o marcador trocado pelo caminho real. Sem isto
-  # o app só abre por `npm start` e ninguém descobre que a janela existe. Reescrito sempre — o
-  # caminho do checkout pode ter mudado, e o arquivo é nosso.
-  ELECTRON_BIN=shell/node_modules/electron/dist/electron
-  if [ -x "$ELECTRON_BIN" ]; then
-    APPS_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
-    mkdir -p "$APPS_DIR"
-    sed "s|__SHELL_DIR__|$PWD/shell|g" shell/hangar.desktop > "$APPS_DIR/hangar.desktop"
-    if command -v update-desktop-database >/dev/null 2>&1; then update-desktop-database "$APPS_DIR" 2>/dev/null || true; fi
-    ok "Hangar registrado no lançador ($APPS_DIR/hangar.desktop)"
-    # Abre a janela ao fim de uma instalação interativa com sessão gráfica. Não no --update (o
-    # app já está aberto, é ele que chamou) nem sem TTY (provisionamento). Se já há um Hangar no
-    # ar, o Electron entrega a chamada pra instância viva em vez de abrir outra.
-    if [ "$TEM_TTY" = 1 ] && [ "$UPDATE" = 0 ] && { [ -n "${WAYLAND_DISPLAY:-}" ] || [ -n "${DISPLAY:-}" ]; }; then
-      ABRIR_SHELL=1
-    fi
-  else
-    falta "binário do Electron não encontrado em $ELECTRON_BIN — o lançador não foi registrado"
-  fi
-fi
-
 # ── App nativo (desktop-native, release native-latest) ───────────────────────
-# É a janela padrão. O Electron continua instalado ao lado, como "Hangar (Electron)": o navegador
-# embutido do hangar-preview mora nele. Falhar aqui não derruba a instalação — a janela vira o Electron.
+# É a única janela de desktop instalada. Falhar aqui não derruba a instalação: o Hangar segue no navegador.
 say "App nativo"
 if ./scripts/install-native.sh; then
   if [ -x "$HOME/.local/bin/hangar-native" ]; then
@@ -475,8 +424,8 @@ if ./scripts/install-native.sh; then
     fi
   fi
 else
-  falta "o app nativo não instalou — a janela segue sendo o Electron (tente: ./scripts/install-native.sh)"
-  echo "##HANGAR-AVISO## o app nativo nao instalou; a janela segue sendo o Electron"
+  falta "o app nativo não instalou — use o Hangar pelo navegador (tente: ./scripts/install-native.sh)"
+  echo "##HANGAR-AVISO## o app nativo nao instalou; use o Hangar pelo navegador"
 fi
 
 # ── 5/8 Wrappers do claude e do codex ────────────────────────────────────────
@@ -759,7 +708,7 @@ if [ ${#PROBLEMAS[@]} -gt 0 ]; then
 else
   say "Pronto"
 fi
-if [ "${ABRIR_NATIVO:-0}" = 1 ] || [ "${ABRIR_SHELL:-0}" = 1 ]; then
+if [ "${ABRIR_NATIVO:-0}" = 1 ]; then
   # O passo 7/8 acabou de reiniciar o backend; abrir antes da porta voltar mostra a tela de
   # "não consegui carregar a interface" (medido: serviço active às :53, janela aberta no mesmo
   # segundo, porta ainda fechada). Espera até 20s; sem serviço a porta nunca abre e aí a janela
@@ -769,11 +718,7 @@ if [ "${ABRIR_NATIVO:-0}" = 1 ] || [ "${ABRIR_SHELL:-0}" = 1 ]; then
     sleep 0.5
   done
   # Destacado do instalador (setsid + sem stdio): fechar o terminal não leva a janela junto.
-  if [ "${ABRIR_NATIVO:-0}" = 1 ]; then
-    setsid "$HOME/.local/bin/hangar-native" </dev/null >/dev/null 2>&1 &
-  else
-    (cd shell && setsid ./node_modules/electron/dist/electron main.cjs </dev/null >/dev/null 2>&1 &)
-  fi
+  setsid "$HOME/.local/bin/hangar-native" </dev/null >/dev/null 2>&1 &
   ok "janela do Hangar aberta"
 fi
 URL_FIM=$(grep '^CP_PUBLIC_URL=' backend/.env 2>/dev/null | tail -1 | cut -d= -f2- || true)

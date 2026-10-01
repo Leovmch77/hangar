@@ -600,6 +600,15 @@ continua instalado como "Hangar (Electron)": o navegador embutido do `hangar-pre
 As máquinas já instaladas recebem a troca pelo passo `2026-09-28-app-nativo-padrao`. As linhas
 `pendente` de `chat-parity.md` seguem abertas; o usuário aceitou trocar com elas.
 
+### Feito (01/10/2026): o Electron saiu do instalador
+
+Pedido do usuário: o nativo passa a ser o único app de desktop baixado. `install.sh`/`install.ps1`
+não rodam mais o `npm ci` do `shell/`, não gravam o lançador `hangar.desktop` nem os atalhos
+"Hangar (Electron)", e o fim da instalação abre o nativo ou, sem ele, o navegador. Instalação
+existente mantém o Electron que já tinha (o botão Atualizar não roda o instalador). No Linux o
+navegador embutido com tela remota e abas do `hangar-preview` só existe no Electron, então
+instalação nova no Linux fica sem ele.
+
 O plano original da troca, mantido como registro:
 
 - `shell/hangar.desktop`: `Name=Hangar (Electron)`. O `install.sh` (linha que grava
