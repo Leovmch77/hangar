@@ -129,7 +129,7 @@ def _sweep_orphans(live: set[str]) -> None:
             pass
 
 
-def _windows_command(ident: str, command: str, powershell: bool = False) -> str:
+def _windows_command(ident: str, command: str, powershell: bool = False, shell: str | None = None) -> str:
     # O comando fica num .cmd proprio (nada de aspas do psmux no caminho dele) e roda num `cmd /c`
     # filho: `exit 3` sem /b mataria um `call`. O de fora grava o codigo com o redirecionamento na
     # frente (`echo 3>x` redirecionaria o handle 3) e segura o pane com `pause` em laco, porque tecla
@@ -141,8 +141,8 @@ def _windows_command(ident: str, command: str, powershell: bool = False) -> str:
         script = d / f"{ident}-cmd.ps1"
         body = command.replace("\r\n", "\n").replace("\n", "\r\n")
         with open(script, "w", encoding="utf-8-sig", newline="") as f:
-            f.write(body + "\r\n$__hangar_ok = $?\r\nif ($null -ne $LASTEXITCODE) { exit $LASTEXITCODE }\r\nif (-not $__hangar_ok) { exit 1 }\r\n")
-        executable = shutil.which("powershell.exe") or str(Path(os.environ.get("SystemRoot", "C:\\Windows")) / "System32/WindowsPowerShell/v1.0/powershell.exe")
+            f.write(body + "\r\n$__hangar_ok = $?\r\nif (-not $__hangar_ok) { if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; exit 1 }\r\n")
+        executable = shell or shutil.which("powershell.exe") or str(Path(os.environ.get("SystemRoot", "C:\\Windows")) / "System32/WindowsPowerShell/v1.0/powershell.exe")
         launch = f'@"{executable}" -NoProfile -ExecutionPolicy Bypass -File "{script}"'
     else:
         body = _batch_escape(command).replace("\r\n", "\n").replace("\n", "\r\n")
@@ -187,7 +187,7 @@ def _abort(target: str) -> None:
 
 
 def start(owner: str, cwd: str, command: str, label: str, env: dict[str, str],
-          key: str = "", origin: str = "", ask: bool = True, powershell: bool = False) -> dict | None:
+          key: str = "", origin: str = "", ask: bool = True, powershell: bool = False, shell: str | None = None) -> dict | None:
     """Cria a sessao escondida rodando o comando. None = o multiplexador recusou.
     Dono vazio = terminal No Hangar: nenhuma sessao o lista nem o fecha."""
     ident = secrets.token_hex(3)
@@ -203,7 +203,7 @@ def start(owner: str, cwd: str, command: str, label: str, env: dict[str, str],
                                (_ASK, "1" if ask else "0"), (_CWD, cwd), *(() if _IS_WINDOWS else ((_CMD, command),)))
                  if kv[1])
     if _IS_WINDOWS:
-        cp = tmux._run([*args, _windows_command(ident, command, powershell)])
+        cp = tmux._run([*args, _windows_command(ident, command, powershell, shell)])
         if cp.returncode != 0 and not tmux.has_session(target):
             _log.warning("shortcut: psmux recusou criar %r: %s", target, (cp.stderr or "").strip()[:200])
             _forget_files(ident)
@@ -213,7 +213,7 @@ def start(owner: str, cwd: str, command: str, label: str, env: dict[str, str],
             _abort(target)
             return None
         return {"id": ident, "label": label, "tmux": target}
-    shell = os.environ.get("SHELL") or "/bin/sh"
+    shell = shell or os.environ.get("SHELL") or "/bin/sh"
     args += ["--", shell, "-c", command]
     # Invocacao unica pras opcoes fixas: o tmux executa a lista inteira antes de tratar a saida do
     # filho, entao um comando que morre na hora ainda encontra o remain-on-exit ligado, e a lista

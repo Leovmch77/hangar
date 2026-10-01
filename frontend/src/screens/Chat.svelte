@@ -2809,26 +2809,35 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   let runningCode = false;
   let runCodeActive = true;
   onDestroy(() => { runCodeActive = false; });
-  async function runCommandFromMessage(command: string) {
+  async function runCommandFromMessage(command: string, language?: string) {
     if (runningCode || !command.trim()) return;
     const server = listServers().find((item) => item.id === chatServerId);
     if (!server) { mostrarAviso(m.servidor_nao_existe()); return; }
     runningCode = true;
     let unsupported = false;
-    const previous = new Set(shortcutTerminalsOf(atalhoKey).map((term) => term.id));
+    let mayHaveStarted = true;
+    const requestKey = `run-code:${globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`}`;
     try {
-      const result = await runCodeCommand(server, sessionName, command.trim());
-      if (result.terminal) focusShortcutTerminal(atalhoKey, result.terminal.id);
+      await runCodeCommand(server, sessionName, command.trim(), language, requestKey);
     } catch (error) {
-      unsupported = (error as { status?: number } | null)?.status === 404;
+      const status = (error as { status?: number } | null)?.status;
+      unsupported = status === 404;
+      mayHaveStarted = status == null || status === 422 || status >= 500;
       mostrarAviso(unsupported ? m.code_run_update_server() : error);
     } finally {
-      const list = unsupported ? null : await refreshShortcutTerminals(atalhoKey).catch((error) => { mostrarAviso(error); return null; });
-      const created = list?.slice().reverse().find((term) => !previous.has(term.id));
+      let list = mayHaveStarted ? await refreshShortcutTerminals(atalhoKey).catch((error) => { mostrarAviso(error); return null; }) : null;
+      let created = list?.find((term) => term.key === requestKey);
+      if (!created && mayHaveStarted && runCodeActive) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 1000));
+        list = await refreshShortcutTerminals(atalhoKey).catch((error) => { mostrarAviso(error); return null; });
+        created = list?.find((term) => term.key === requestKey);
+      }
       if (created && runCodeActive) {
         focusShortcutTerminal(atalhoKey, created.id);
         await tick();
         xtermOpen = true;
+      } else if (mayHaveStarted && runCodeActive) {
+        mostrarAviso(m.code_run_not_found());
       }
       runningCode = false;
     }

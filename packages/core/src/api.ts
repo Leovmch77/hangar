@@ -2558,9 +2558,9 @@ export async function runShortcutShell(name: string, command: string, label?: st
 }
 
 /** Executa o código mostrado na conversa no servidor da sessão, em terminal próprio. */
-export function runCodeCommand(srv: Server, name: string, command: string): Promise<ShortcutShellResult> {
+export function runCodeCommand(srv: Server, name: string, command: string, language: string | undefined, key: string): Promise<ShortcutShellResult> {
   return apiFetchForServer<ShortcutShellResult>(srv, `/api/sessions/${encodeURIComponent(name)}/run-code`, {
-    method: 'POST', body: JSON.stringify({ command, label: command.trim().slice(0, 80) }),
+    method: 'POST', body: JSON.stringify({ command, key, ...(language ? { language } : {}) }),
   });
 }
 

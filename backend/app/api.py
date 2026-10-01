@@ -52,7 +52,7 @@ from app import registry as registry_mod
 from app.registry import KillFailed, SessionRegistry, sanitize_cwd
 from app.names import sanitize_session_name
 from app.models import (SessionInfo, ChatEvent, CostReport, UsoReport, RunnersResponse, RunBody,
-                        RunInfo, Runner, CustomRunnersBody, ProjectStatus, ShortcutShellBody,
+                        RunInfo, Runner, CustomRunnersBody, ProjectStatus, ShortcutShellBody, RunCodeBody,
                         ProjectShortcutsBody, ShortcutAnswerBody, session_key)
 from app import uso_report
 from app.planprog import (plan_progress, list_plans, write_pin, is_safe_stem, _plans_dir,
@@ -6591,19 +6591,36 @@ def shortcut_shell(name: str, body: ShortcutShellBody, request: Request):
 
 
 @app.post("/api/sessions/{name}/run-code", dependencies=[Depends(require_auth)], status_code=202)
-def run_code(name: str, body: ShortcutShellBody, request: Request):
-    # O corpo desta rota só usa comando/rótulo; flags de atalho não alteram a máquina nem a pasta.
+def run_code(name: str, body: RunCodeBody, request: Request):
     if len(body.command) > 4096:
         raise HTTPException(400, detail=erro("erro_run_code_longo", "comando longo demais"))
     if "\0" in body.command:
         raise HTTPException(400, detail=erro("erro_run_code_invalido", "comando invalido"))
+    if body.key and (not body.key.startswith("run-code:") or not all(c.isascii() and (c.isalnum() or c in ":-") for c in body.key)):
+        raise HTTPException(400, detail=erro("erro_run_code_invalido", "identificador invalido"))
+    language = (body.language or "").strip().lower()
+    unix = {"bash", "sh", "zsh", "fish"}
+    powershell = {"powershell", "ps1", "pwsh"}
+    if language and language not in unix | powershell | {"shell"}:
+        raise HTTPException(400, detail=erro("erro_run_code_linguagem", "linguagem de terminal invalida"))
+    if (os.name == "nt" and language in unix) or (os.name != "nt" and language in powershell):
+        raise HTTPException(409, detail=erro("erro_run_code_shell_incompativel", "o bloco nao combina com o sistema deste servidor",
+                                              linguagem=language, sistema="Windows" if os.name == "nt" else "Linux"))
+    shell = None
+    if os.name == "nt" and language == "pwsh":
+        shell = shutil.which("pwsh.exe")
+    elif os.name != "nt" and language not in ("", "shell"):
+        shell = shutil.which(language)
+    if language not in ("", "shell") and shell is None and (os.name != "nt" or language == "pwsh"):
+        raise HTTPException(409, detail=erro("erro_run_code_shell_ausente", "interpretador nao instalado", linguagem=language))
     from app import termsock
     if not termsock.painel_disponivel():
         raise HTTPException(409, detail=erro("erro_run_code_terminal", "terminal indisponivel nesta maquina"))
-    return _shortcut_shell(name, ShortcutShellBody(command=body.command, label=body.label), request, powershell=True)
+    # O nome da aba vai ao SSE; nunca derive dos bytes do comando, que podem conter credencial.
+    return _shortcut_shell(name, ShortcutShellBody(command=body.command, label="Terminal", key=body.key), request, powershell=True, shell=shell)
 
 
-def _shortcut_shell(name: str, body: ShortcutShellBody, request: Request, *, powershell: bool):
+def _shortcut_shell(name: str, body: ShortcutShellBody, request: Request, *, powershell: bool, shell: str | None = None):
     # Atalho "shell" da fileira. Cada execucao ganha um terminal escondido proprio
     # (app/shortcut_terminals.py, no tmux e no psmux): a pessoa ve a saida numa aba do painel e
     # fecha quando quiser, e o programa sobrevive a restart do backend. `runs_in="hangar"` cria uma
@@ -6645,7 +6662,7 @@ def _shortcut_shell(name: str, body: ShortcutShellBody, request: Request, *, pow
         return _shortcut_shell_hangar(name, cwd, command, body)
     from app import shortcut_terminals
     term = shortcut_terminals.start(name, cwd, command, body.label or "", _shortcut_display_env(),
-                                    key=body.key, ask=body.ask, powershell=powershell)
+                                    key=body.key, ask=body.ask, powershell=powershell, shell=shell)
     if term is None:
         raise HTTPException(500, detail=erro("erro_shortcut_shell", "o multiplexador recusou criar o terminal"))
     # Sem o texto do comando: ele pode carregar credencial.

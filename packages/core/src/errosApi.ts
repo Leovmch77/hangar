@@ -453,6 +453,12 @@ const ERROS: Record<string, (params: Parametros) => string> = {
   erro_project_shortcuts_arquivo: (p) => m.erro_project_shortcuts_arquivo({ detalhe: String(p.detalhe ?? '') }),
   erro_shortcut_pasta: (p) => m.erro_shortcut_pasta({ detalhe: String(p.detalhe ?? '') }),
   erro_shortcut_hangar_convidado: () => m.erro_shortcut_hangar_convidado(),
+  erro_run_code_longo: () => m.erro_run_code_longo(),
+  erro_run_code_invalido: () => m.erro_run_code_invalido(),
+  erro_run_code_linguagem: () => m.erro_run_code_linguagem(),
+  erro_run_code_shell_incompativel: (p) => m.erro_run_code_shell_incompativel({ linguagem: String(p.linguagem ?? ''), sistema: String(p.sistema ?? '') }),
+  erro_run_code_shell_ausente: (p) => m.erro_run_code_shell_ausente({ linguagem: String(p.linguagem ?? '') }),
+  erro_run_code_terminal: () => m.erro_run_code_terminal(),
   // Convidados com login próprio (guest_user_gate, guest_users_api, hub /api/sync/guests).
   erro_fora_do_convidado: () => m.erro_fora_do_convidado(),
   erro_fora_da_pasta: () => m.erro_fora_da_pasta(),

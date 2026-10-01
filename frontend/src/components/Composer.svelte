@@ -1154,7 +1154,8 @@ import { cachePrazo } from '../lib/cachePrazo';
     // passar pro resto da tela (overlays, visor).
     if (e.key === 'Escape' && podeInterromper) {
       e.preventDefault();
-      onInterrupt();
+      if (skipChatConfirmations()) onInterrupt();
+      else confirmStopOpen = true;
       return;
     }
     // Shift+Tab no campo = a tecla do terminal do Claude. Só com o foco aqui, pra não roubar a

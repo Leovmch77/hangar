@@ -94,7 +94,7 @@
     swapIds?: Set<string>;
     // Encaminhar bolha pra outra sessao (long-press/hover ↗). Ausente (ex: Archive) = sem acao.
     onForward?: (text: string) => void;
-    onRunCommand?: (command: string) => void;
+    onRunCommand?: (command: string, language?: string) => void;
     // Botao "descartar" da bolha que o backend desistiu de entregar: tira a entrada da fila
     // duravel (id CRU, sem o prefixo "queued-"). Ausente (Archive) = so o aviso.
     onDescartarFila?: (entryId: string) => void;

@@ -636,6 +636,12 @@ class ShortcutShellBody(BaseModel):
     ask: bool = True
 
 
+class RunCodeBody(BaseModel):
+    command: str = Field(max_length=200_000)
+    language: Optional[str] = Field(default=None, max_length=32)
+    key: str = Field(default="", max_length=80)
+
+
 class ShortcutAnswerBody(BaseModel):
     # Vazio = so Enter (aceita o valor padrao da pergunta).
     text: str = Field(default="", max_length=4096)

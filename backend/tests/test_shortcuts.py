@@ -387,9 +387,25 @@ def test_run_code_uses_session_folder_and_ignores_shortcut_scope(client, monkeyp
     from app import api
     monkeypatch.setenv("SHELL", "/bin/sh")
     monkeypatch.setattr(api, "_session_cwd", lambda name: str(tmp_path))
-    r = client.post("/api/sessions/s/run-code", json={"command": "pwd > prova.txt", "runs_in": "hangar", "pasta": "/tmp"}, headers=_auth())
+    r = client.post("/api/sessions/s/run-code", json={"command": "pwd > prova.txt", "key": "run-code:proof", "label": "Bearer secret", "runs_in": "hangar", "pasta": "/tmp"}, headers=_auth())
     assert r.status_code == 202
+    assert r.json()["terminal"]["label"] == "Terminal"
+    terminals = client.get("/api/sessions/s/shortcut-terminals", headers=_auth()).json()["terminals"]
+    assert any(term["key"] == "run-code:proof" for term in terminals)
     assert _wait_file(tmp_path / "prova.txt") == str(tmp_path)
+
+
+def test_run_code_uses_declared_linux_shell_and_rejects_powershell(client, monkeypatch, tmp_path, private_tmux):
+    if os.name == "nt":
+        pytest.skip("teste exclusivo de Linux")
+    from app import api
+    monkeypatch.setenv("SHELL", "/bin/false")
+    monkeypatch.setattr(api, "_session_cwd", lambda name: str(tmp_path))
+    wrong = client.post("/api/sessions/s/run-code", json={"command": "Write-Output 1", "language": "powershell"}, headers=_auth())
+    assert wrong.status_code == 409 and wrong.json()["detail"]["code"] == "erro_run_code_shell_incompativel"
+    right = client.post("/api/sessions/s/run-code", json={"command": "printf BASH > prova.txt", "language": "bash"}, headers=_auth())
+    assert right.status_code == 202
+    assert _wait_file(tmp_path / "prova.txt") == "BASH"
 
 
 def test_windows_run_code_writes_powershell_script_with_bom_and_one_crlf(monkeypatch, tmp_path):

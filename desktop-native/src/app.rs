@@ -216,7 +216,7 @@ enum Reply {
     Diff(String),
     /// Rótulo do atalho e se o pedido foi No Hangar.
     Shell(String, bool),
-    RunCode,
+    RunCode(String),
     Reload,
     PlanPreview(bool),
     PreSelect(String),
@@ -3973,7 +3973,7 @@ fn citation_extensions_with_code(row: &str, owner: WeakEntity<Hangar>, runnable:
                     .text_size(px(12.)).text_color(theme::text()).child(code.clone()))
                 .child(Button::new(format!("run-inline-{}-{}", self.row, node.source_range().map_or(0, |range| range.start)))
                     .ghost().xsmall().label(tr("code_run")).accessibility_label(tr("code_run_aria")).tooltip(tr("code_run_aria"))
-                    .on_click(move |_, _, cx| { let _ = owner.update(cx, |this, cx| this.run_code_command(code.clone(), cx)); }))
+                    .on_click(move |_, _, cx| { let _ = owner.update(cx, |this, cx| this.run_code_command(code.clone(), None, cx)); }))
         }
     }
     let extensions = MarkdownExtensions::default().plugin(Citations { row: row.to_owned(), owner: owner.clone() });
@@ -3984,7 +3984,7 @@ fn runnable_inline(code: &str) -> bool {
     code.len() <= 4096 && !code.chars().any(|ch| matches!(ch, '\r' | '\n' | '\0')) && code.split_whitespace().nth(1).is_some()
 }
 
-fn shell_code_language(lang: Option<SharedString>) -> bool {
+fn shell_code_language(lang: Option<&str>) -> bool {
     lang.is_some_and(|lang| matches!(lang.to_ascii_lowercase().as_str(), "bash" | "sh" | "zsh" | "fish" | "shell" | "powershell" | "ps1" | "pwsh"))
 }
 
@@ -4001,12 +4001,13 @@ fn chat_text_runnable(view: &Entity<TextViewState>, cx: &App, runner: Option<Wea
     let row = row.to_owned();
     text.code_block_actions(move |block, window, cx| {
         let code = block.code().to_string();
-        let can_run = shell_code_language(block.lang()) && !code.trim().is_empty() && code.len() <= 4096;
+        let language = block.lang().map(|lang| lang.to_string());
+        let can_run = shell_code_language(language.as_deref()) && !code.trim().is_empty() && code.len() <= 4096;
         let owner = owner.clone();
         div().flex().items_center().gap(px(4.))
             .when(can_run, |el| el.child(Button::new(format!("run-block-{row}-{}", block.span.as_ref().map_or(0, |span| span.start)))
                 .ghost().xsmall().label(tr("code_run")).accessibility_label(tr("code_run_aria"))
-                .on_click(move |_, _, cx| { let _ = owner.update(cx, |this, cx| this.run_code_command(code.clone(), cx)); })))
+                .on_click(move |_, _, cx| { let _ = owner.update(cx, |this, cx| this.run_code_command(code.clone(), language.clone(), cx)); })))
             .child(copy_code(block, window, cx))
     })
 }

@@ -71,6 +71,11 @@ fn failure_detail(body: Option<Value>, status: u16) -> String {
                     .map(|(k, v)| (k.clone(), v.as_str().map_or_else(|| v.to_string(), str::to_owned))).collect()).unwrap_or_default();
                 if let Some(message) = crate::i18n::tr_web(code, &params) { return Some(message); }
             }
+            if let Some(code) = fields.get("code").and_then(Value::as_str).filter(|code| code.starts_with("erro_run_code_")) {
+                let params = fields.get("params").and_then(Value::as_object).map(|p| p.iter()
+                    .map(|(k, v)| (k.clone(), v.as_str().map_or_else(|| v.to_string(), str::to_owned))).collect()).unwrap_or_default();
+                if let Some(message) = crate::i18n::tr_web(code, &params) { return Some(message); }
+            }
             // Atalhos do projeto: a frase do web pelo código, com o motivo (`params.detalhe`) dentro; sem a frase, o `msg`.
             if let Some(code @ ("erro_project_shortcuts" | "erro_project_shortcuts_projeto" | "erro_project_shortcuts_arquivo" | "erro_shortcut_pasta")) = fields.get("code").and_then(Value::as_str) {
                 let reason = fields.get("params").and_then(|p| p.get("detalhe")).and_then(Value::as_str).or(msg).unwrap_or("");

@@ -12,6 +12,7 @@ pub(super) enum Reply {
     Socket(u64, u64, u64, Result<ws::Event, ws::Error>),
     /// Lista de terminais de atalho da sessão `name` (lida ao abrir o painel, ao escolher a sessão e depois de rodar/fechar).
     List(String, Result<Value, Failure>),
+    CodeList(SessionKey, String, u8, Result<Value, Failure>),
     Closed(String, Result<Value, Failure>),
     /// Resposta do ✕ de uma aba No Hangar, pelo `id` do painel que a pediu.
     HangarClosed(u64, Result<Value, Failure>),
@@ -348,6 +349,19 @@ impl Hangar {
         });
     }
 
+    pub(super) fn read_run_code_terms(&mut self, key: SessionKey, request_key: String, attempt: u8) {
+        let Some(api) = self.api_for(&key.server) else {
+            self.action_feedback.insert(key, (tr("code_run_not_found"), true));
+            return;
+        };
+        let (connection, tx) = (self.connection, self.tx.clone());
+        self.runtime.spawn(async move {
+            if attempt > 0 { tokio::time::sleep(std::time::Duration::from_secs(1)).await; }
+            let result = api.read(&key.name, &["shortcut-terminals"], &[], 10).await;
+            let _ = tx.send(Envelope { connection, selection: None, payload: Payload::Terminal(Reply::CodeList(key, request_key, attempt, result)) }).await;
+        });
+    }
+
     /// Sessão aberta tem terminal de atalho, ou a máquina dela tem um No Hangar? É o que mostra o botão de terminal numa
     /// sessão sem pane.
     pub(super) fn has_shortcut_terms(&self) -> bool {
@@ -503,6 +517,20 @@ impl Hangar {
                     Ok(ws::Event::Data(bytes)) => { slot.view.feed(&bytes); Self::flush_terminal(slot); }
                     Ok(ws::Event::Closed) => { slot.socket = None; slot.status = Status::Failed(tr("term_disconnected")); }
                     Err(error) => { slot.socket = None; slot.status = Status::Failed(socket_error(error)); }
+                }
+            }
+            Reply::CodeList(key, request_key, attempt, result) => {
+                if self.selected_key().as_ref() != Some(&key) { return; }
+                let id = result.as_ref().ok().and_then(|value| value.get("terminals")).and_then(Value::as_array)
+                    .and_then(|terms| terms.iter().find(|term| term.get("key").and_then(Value::as_str) == Some(request_key.as_str())))
+                    .and_then(|term| term.get("id")).and_then(Value::as_str).map(str::to_owned);
+                self.receive_terminal(Reply::List(key.name.clone(), result), window, cx);
+                if let Some(id) = id {
+                    self.open_session_terminal(&key.server, &key.name, &id, window, cx);
+                } else if attempt == 0 {
+                    self.read_run_code_terms(key, request_key, 1);
+                } else {
+                    self.action_feedback.insert(key, (tr("code_run_not_found"), true));
                 }
             }
             Reply::List(name, result) => {

@@ -449,7 +449,7 @@ impl Hangar {
         cx.notify();
     }
 
-    pub(super) fn run_code_command(&mut self, code: String, cx: &mut Context<Self>) {
+    pub(super) fn run_code_command(&mut self, code: String, language: Option<String>, cx: &mut Context<Self>) {
         let Some(key) = self.selected_key() else { return; };
         let command = code.trim();
         if command.is_empty() || command.len() > 4096 || command.contains('\0') {
@@ -464,13 +464,13 @@ impl Hangar {
             cx.notify();
             return;
         };
-        let label = command.lines().next().unwrap_or(command).chars().take(80).collect::<String>();
         self.action_feedback.insert(key.clone(), (tr("code_run_starting"), false));
         let (connection, tx) = (self.connection, self.tx.clone());
-        let body = json!({"command": command, "label": label});
+        let request_key = format!("run-code:{}", servers::new_id());
+        let body = json!({"command": command, "language": language, "key": request_key.clone()});
         self.runtime.spawn(async move {
             let result = api.act(&key.name, &["run-code"], Some(body), false, 30).await;
-            let _ = tx.send(Envelope { connection, selection: None, payload: Payload::Reply(key, Reply::RunCode, result) }).await;
+            let _ = tx.send(Envelope { connection, selection: None, payload: Payload::Reply(key, Reply::RunCode(request_key), result) }).await;
         });
         cx.notify();
     }
@@ -558,15 +558,11 @@ impl Hangar {
                 };
                 self.action_feedback.insert(key, note);
             }
-            Reply::RunCode => {
+            Reply::RunCode(request_key) => {
                 self.side.run_code_pending.remove(&key);
-                let terminal = result.as_ref().ok().and_then(|value| value.pointer("/terminal/id")).and_then(Value::as_str).map(str::to_owned);
-                let failed_with_terminal = result.as_ref().err().is_some_and(|error| error.status == Some(422));
-                if terminal.is_some() || failed_with_terminal {
-                    self.refresh_shortcut_terms(&key.name);
-                    if self.selected_key().as_ref() == Some(&key) {
-                        self.open_session_terminal(&key.server, &key.name, terminal.as_deref().unwrap_or(""), window, cx);
-                    }
+                let may_have_terminal = result.is_ok() || result.as_ref().err().is_some_and(|error| error.status == Some(422) || error.status.is_some_and(|status| status >= 500) || error.uncertain);
+                if may_have_terminal && self.selected_key().as_ref() == Some(&key) {
+                    self.read_run_code_terms(key.clone(), request_key, 0);
                 }
                 let note = match result {
                     Ok(_) => (tr("code_run_started"), false),

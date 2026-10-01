@@ -26,7 +26,7 @@
     vivo?: boolean;      // previa dos deltas do proprio modelo: ja chega no ritmo real, sem digitacao
     animate?: boolean;   // false = bubble de HISTORICO remontada (paginacao/janela): sem fade/slide
     onForward?: (() => void) | null; // abre o picker "encaminhar pra sessao" (botao ↗)
-    onRunCommand?: ((command: string) => void) | null;
+    onRunCommand?: ((command: string, language?: string) => void) | null;
   }
   let { text, ts, sessionName = '', preview = false, streaming = false, md = false, full = false, vivo = false, animate = true, onForward = null, onRunCommand = null }: Props = $props();
 
@@ -92,8 +92,9 @@
     if (!button || !onRunCommand) return;
     const command = button.closest('.run-inline, .code-block')?.querySelector('code')?.textContent?.trim();
     if (!command) return;
+    const language = button.closest('.code-block')?.querySelector('.code-lang')?.textContent?.trim();
     event.stopPropagation();
-    onRunCommand(command);
+    onRunCommand(command, language || undefined);
   }
   // Anexos por caminho citado na minha msg (img/video/html/pdf que eu "mandar").
   // Mídia/html/pdf fica de fora dos caminhos de código: com extensão aberta no absoluto o
