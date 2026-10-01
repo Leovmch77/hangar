@@ -1,7 +1,11 @@
 <script lang="ts">
   import BottomSheet from './BottomSheet.svelte';
-  import { validarPareamento } from '../lib/auth';
+  import { listAllServers, validarPareamento } from '../lib/auth';
   import { vaultPush } from '../lib/vaultPush.svelte';
+  import { getIdentificador } from '../lib/peers';
+  import { rememberedIds } from '../lib/maquinas';
+  import { normalizeBaseUrl } from '../lib/url';
+  import { probeServerResponse } from '@hangar/core';
   import type { Server } from '../lib/auth';
   import * as m from '../paraglide/messages';
 
@@ -15,12 +19,15 @@
     server: Server | null;
     onClose: () => void;
     onRename: (id: string, label: string) => void;
-    onUpdateToken: (id: string, token: string) => boolean;
+    onUpdateToken: (id: string, token: string, baseUrl?: string) => boolean;
   }
   let { open, server, onClose, onRename, onUpdateToken }: Props = $props();
+  const uid = $props.id();
 
   let label = $state('');
   let token = $state('');
+  let endereco = $state('');
+  let salvando = $state(false);
   let revelado = $state(false);
   let erro = $state('');
   let aviso = $state('');
@@ -36,19 +43,50 @@
   // fazia o Salvar (mesmo sem ninguem mexer no campo) reescrever "Casa" por cima, calado.
   let baseLabel = '';
   let baseToken = '';
+  let baseEndereco = '';
   $effect(() => {
     const chave = open && server ? server.id : '';
     if (chave === ultimo) return;
     ultimo = chave;
     label = baseLabel = server?.label ?? '';
     token = baseToken = server?.token ?? '';
+    endereco = baseEndereco = server?.baseUrl ?? '';
     revelado = false;
     erro = '';
     aviso = '';
   });
 
-  function salvar() {
-    if (!server) return;
+  // Endereço novo só vale se for a MESMA máquina: aceita o token gravado e, quando os dois lados têm
+  // identificador, responde o mesmo. Sem isto, um endereço digitado errado reapontaria nome, token e
+  // histórico para outra máquina.
+  async function conferirEndereco(atual: Server, novo: string, tok: string): Promise<string> {
+    let url: URL;
+    try { url = new URL(novo); } catch { return m.servidor_endereco_invalido(); }
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return m.servidor_endereco_invalido();
+    const norm = (u: string) => u.replace(/\/+$/, '');
+    if (listAllServers().some((s) => s.id !== atual.id && norm(s.baseUrl) === novo)) return m.servidor_endereco_repetido();
+    // Id próprio e sem `lan`: a rota aprendida para a entrada atual não pode atender este teste.
+    const teste: Server = { id: `${atual.id}#novo`, label: atual.label, baseUrl: novo, token: tok };
+    let novoId: string;
+    try {
+      // 20 s: do celular pela Tailscale em relay a primeira conexão passa dos 8 s padrão.
+      const res = await probeServerResponse(teste, '/api/peers/identificador', { signal: AbortSignal.timeout(20000) });
+      if (res.status === 401) return m.servidor_endereco_token_recusado();
+      if (!res.ok) return m.servidor_endereco_sem_resposta({ url: novo });
+      novoId = ((await res.json()) as { identificador?: string }).identificador ?? '';
+    } catch {
+      return m.servidor_endereco_sem_resposta({ url: novo });
+    }
+    let antigoId = rememberedIds()[atual.id] ?? '';
+    if (!antigoId) {
+      try { antigoId = (await getIdentificador(atual)).identificador ?? ''; } catch { /* fora do ar: vale o token */ }
+    }
+    if (novoId && antigoId && novoId !== antigoId) return m.servidor_endereco_outra_maquina({ id: novoId });
+    return '';
+  }
+
+  async function salvar() {
+    if (!server || salvando) return;
     const nome = label.trim();
     const texto = token.trim();
     // Vazio nao e "nao mexe": o campo ja vem preenchido, entao em branco significa que o usuario
@@ -59,6 +97,9 @@
       tokenEl?.focus();
       return;
     }
+
+    const enderecoFinal = endereco.trim() ? normalizeBaseUrl(endereco) : baseEndereco;
+    const mudouEndereco = enderecoFinal !== baseEndereco.replace(/\/+$/, '');
 
     let tokenFinal = texto;
     let outroHost = false;
@@ -74,15 +115,23 @@
       // So o TOKEN: colar a URL de outra maquina nao pode reapontar calado um servidor ja cadastrado.
       tokenFinal = parsed.token;
       outroHost = !!parsed.base
-        && parsed.base.replace(/\/+$/, '') !== server.baseUrl.replace(/\/+$/, '');
+        && parsed.base.replace(/\/+$/, '') !== enderecoFinal;
+    }
+
+    if (mudouEndereco) {
+      salvando = true;
+      erro = '';
+      const falha = await conferirEndereco(server, enderecoFinal, tokenFinal);
+      salvando = false;
+      if (falha) { erro = falha; return; }
     }
 
     // Grava so o que MUDOU NESTA FOLHA (base = valor carregado ao abrir). Comparar com o `server`
     // atual mandava de volta o valor velho por cima do que o sync tinha acabado de trazer.
     if (nome !== baseLabel) onRename(server.id, nome);
-    if (tokenFinal !== baseToken) {
+    if (tokenFinal !== baseToken || mudouEndereco) {
       vaultPush.clear();                        // tentativa NOVA: zera o resultado do push antigo
-      if (!onUpdateToken(server.id, tokenFinal)) {
+      if (!onUpdateToken(server.id, tokenFinal, mudouEndereco ? enderecoFinal : undefined)) {
         // false = o id sumiu (removido noutra aba/aparelho entre abrir e salvar). Raro, mas
         // indistinguivel de sucesso se ficasse calado.
         erro = m.servidor_nao_existe();
@@ -91,11 +140,12 @@
     }
     baseLabel = nome;
     baseToken = tokenFinal;
+    baseEndereco = endereco = enderecoFinal;
     if (outroHost) {
       // Salvou, mas o endereco NAO mudou: fica aberta pra o usuario ler o que aconteceu com a URL
       // que ele colou. Fechar aqui esconderia justamente a parte que ele nao esperava.
       erro = '';
-      aviso = m.servidor_token_trocado({ url: server.baseUrl });
+      aviso = m.servidor_token_trocado({ url: enderecoFinal });
       token = tokenFinal;
       return;
     }
@@ -114,12 +164,11 @@
     </label>
 
     <div class="se-campo">
-      <span class="se-rotulo">{m.servidor_campo_endereco()}</span>
-      <!-- Somente leitura de proposito: trocar o host de um servidor ja cadastrado e outra coisa
-           (credencial, historico e nome ficam apontando pra maquina errada). Aqui ele existe pra
-           ser LIDO — era o que faltava pra saber qual "Casa" da lista e qual. -->
-      <p class="se-fixo">{server.baseUrl}</p>
-      <p class="se-ajuda">{m.servidor_endereco_fixo()}</p>
+      <label class="se-rotulo" for="{uid}-endereco">{m.servidor_campo_endereco()}</label>
+      <input id="{uid}-endereco" class="se-input se-mono" bind:value={endereco} inputmode="url" autocomplete="off"
+             autocapitalize="off" autocorrect="off" spellcheck="false" aria-describedby="{uid}-endereco-ajuda"
+             onkeydown={(e) => { if (e.key === 'Enter') salvar(); }} />
+      <p id="{uid}-endereco-ajuda" class="se-ajuda">{m.servidor_endereco_ajuda()}</p>
     </div>
 
     <div class="se-campo">
@@ -153,7 +202,9 @@
 
     <div class="se-acoes">
       <button class="se-btn" type="button" onclick={onClose}>{m.comum_cancelar()}</button>
-      <button class="se-btn se-salvar" type="button" onclick={salvar}>{m.ctx_salvar()}</button>
+      <button class="se-btn se-salvar" type="button" onclick={salvar} disabled={salvando} aria-busy={salvando}>
+        {salvando ? m.servidor_endereco_conferindo() : m.ctx_salvar()}
+      </button>
     </div>
   {/if}
 </BottomSheet>
@@ -179,12 +230,7 @@
     border: 1px solid var(--border-subtle); border-radius: var(--radius-md, 8px);
     background: var(--surface-raised); color: var(--text-secondary); font-size: var(--text-base);
   }
-  .se-fixo {
-    margin: 0; padding: var(--space-2) var(--space-3);
-    background: var(--surface-inset); border-radius: var(--radius-md, 8px);
-    color: var(--text-secondary); font-family: var(--font-mono); font-size: var(--text-sm);
-    overflow-wrap: anywhere;
-  }
+  .se-mono { font-family: var(--font-mono); }
   .se-ajuda { margin: var(--space-1) 0 0; font-size: var(--text-xs); color: var(--text-muted); line-height: 1.4; }
   .se-erro { margin: 0 0 var(--space-3); font-size: var(--text-sm); color: var(--error); line-height: 1.4; }
   .se-aviso { margin: 0 0 var(--space-3); font-size: var(--text-sm); color: var(--warning); line-height: 1.4; }

@@ -74,8 +74,8 @@
     renameServer(id, label);
     sessionsStore.refreshServers();
   }
-  function updateToken(id: string, token: string): boolean {
-    const ok = updateServer(id, { token });
+  function updateToken(id: string, token: string, baseUrl?: string): boolean {
+    const ok = updateServer(id, { token, baseUrl });
     if (!ok) return false;
     sessionsStore.refreshServers();
     sessionsStore.reconnect();

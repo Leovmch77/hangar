@@ -107,10 +107,10 @@ import * as m from '../paraglide/messages';
 
   // Trocar o token de um servidor já cadastrado (rotação de CP_AUTH_TOKEN, sem remover+re-parear).
   // Aceita o token cru OU a URL de pareamento inteira — mesmo parse do fluxo de adicionar.
-  function onUpdateServerToken(id: string, token: string): boolean {
-    // Só o token: o AccountMenu já extraiu e validou (inclusive o caso "URL de pareamento de outro
-    // host", que NÃO reaponta o servidor — o botão promete trocar token, não endereço).
-    const ok = updateServer(id, { token });
+  function onUpdateServerToken(id: string, token: string, baseUrl?: string): boolean {
+    // O endereço só chega aqui depois de a folha conferir que é a mesma máquina. URL de pareamento
+    // colada no campo do token continua sem reapontar o servidor.
+    const ok = updateServer(id, { token, baseUrl });
     if (!ok) return false;                      // servidor sumiu: quem avisa é o AccountMenu
     sessionsStore.refreshServers();
     // reconnect, não só refresh: os SSE abertos seguem autenticados com o token ANTIGO até serem
