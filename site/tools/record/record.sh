@@ -2,8 +2,11 @@
 # usage: record.sh <scene> <seconds> <downs> [lang]  (precisa do live.py rodando)
 D=$(cd "$(dirname "$0")" && pwd); OUT="${HANGAR_RECORD_OUT:-$D/out}"; SC=$1; SECS=$2; DOWNS=${3:-1}; L=${4:-en}
 mkdir -p "$OUT"
-curl -s "http://127.0.0.1:47123/control/setup?scene=$SC&lang=$L" >/dev/null
-P=$($D/launch.sh $L) || exit 1; echo $P > "$OUT/mypid"
+curl -sf --retry 5 --retry-connrefused "http://127.0.0.1:47123/control/setup?scene=$SC&lang=$L" >/dev/null || { echo "fixture fora do ar em 127.0.0.1:47123" >&2; exit 1; }
+P=$($D/launch.sh $L) || exit 1
+# sem pid ou com mais de um, o vídeo sairia sem a janela certa
+[ "$(printf '%s\n' "$P" | grep -c .)" = 1 ] || { echo "launch.sh devolveu '$P'; esperado um pid" >&2; exit 1; }
+echo $P > "$OUT/mypid"
 for i in $(seq $DOWNS); do $D/key.sh $P CTRL Down; sleep 0.4; done
 sleep 2.5
 G=$($D/geom.sh $P)
