@@ -1,36 +1,8 @@
 //! Continuar uma conversa antiga da pasta escolhida (`CreateSessionSheet.svelte`): a lista de `archive-por-cwd`, a prévia das
 //! últimas mensagens no lugar da lista de pastas e o retomar pela rota do arquivo. Escolher uma conversa leva a conta à dona dela.
 use super::*;
-
-#[derive(Clone, Debug, Deserialize)]
-pub(super) struct ArchiveEntry {
-    project: String,
-    session_id: String,
-    #[serde(default)] mtime: f64,
-    #[serde(default)] preview: String,
-    #[serde(default)] ultima: String,
-    #[serde(default)] live: bool,
-    config_dir: Option<String>,
-    #[serde(default)] conta: String,
-    #[serde(default)] provider: String,
-    codex_account: Option<String>,
-}
-
-impl ArchiveEntry {
-    /// A última mensagem é o que identifica a conversa meses depois.
-    fn title(&self) -> String {
-        [&self.ultima, &self.preview].into_iter().find(|t| !t.trim().is_empty()).cloned().unwrap_or_else(|| tr("create_no_messages"))
-    }
-    fn query(&self) -> Vec<(String, String)> {
-        let mut q = Vec::new();
-        if self.provider != "claude" && !self.provider.is_empty() { q.push(("provider".into(), self.provider.clone())); }
-        if self.provider == "codex" && let Some(a) = &self.codex_account { q.push(("codex_account".into(), a.clone())); }
-        q
-    }
-}
-
-/// Uma mensagem da prévia: a do usuário vem realçada.
-pub(super) struct PreviewLine { mine: bool, view: Entity<TextViewState> }
+pub(super) use super::super::recent::{ArchiveEntry, PreviewLine};
+use super::super::recent::{preview_lines, render_preview_lines};
 
 impl NewSession {
     /// A lista da pasta e do agente escolhidos; a escolha anterior não vale para outra pasta ou conta.
@@ -97,9 +69,7 @@ impl NewSession {
             }
             return;
         };
-        let mut query = c.query();
-        query.push(("tail".into(), "30".into()));
-        if let Some(dir) = c.config_dir.clone() { query.push(("config_dir".into(), dir)); }
+        let query = c.history_query(30);
         self.request(cx, move |api, send| Box::pin(async move {
             let query: Vec<(&str, &str)> = query.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
             send(CreateReply::Preview(seq, api.server_read(&["archive", &c.project, &c.session_id, "history"], &query, 15).await)).await
@@ -115,11 +85,8 @@ impl NewSession {
                 self.archive.finish(seq, list.map(|l| l.into_iter().filter(|c| !c.live).collect()));
             }
             CreateReply::Preview(seq, result) => {
-                let events = result.map_err(|e| Hangar::fetch_failure(&e)).and_then(|v| serde_json::from_value::<Vec<ChatEvent>>(v).map_err(|_| tr("invalid_response")));
-                if let Err(error) = &events { eprintln!("prévia da conversa falhou: {error}"); }
-                let lines = events.map(|events| events.into_iter().filter(|e| matches!(e.kind.as_str(), "user_msg" | "assistant_msg"))
-                    .filter_map(|e| e.text.filter(|t| !t.trim().is_empty()).map(|t| (e.kind == "user_msg", t)))
-                    .map(|(mine, text)| PreviewLine { mine, view: cx.new(|cx| TextViewState::markdown(&safe_markdown(&text), cx)) }).collect());
+                let lines = preview_lines(result, cx);
+                if let Err(error) = &lines { eprintln!("prévia da conversa falhou: {error}"); }
                 // A prévia abre no fim: ela existe para mostrar onde a conversa parou.
                 if self.preview.finish(seq, lines) { self.preview_scroll.scroll_to_bottom(); }
             }
@@ -189,14 +156,7 @@ impl NewSession {
             None => muted(tr("loading")).into_any_element(),
             Some(Err(_)) => alert("create-preview-error", tr("create_preview_failed")).into_any_element(),
             Some(Ok(lines)) if lines.is_empty() => muted(tr("create_no_messages")).into_any_element(),
-            Some(Ok(lines)) => div().flex().flex_col().gap(px(8.)).children(lines.iter().map(|line| div().p(px(10.)).rounded(px(8.)).text_sm()
-                .when(line.mine, |el| el.bg(theme::accent_dim()).ml(px(32.))).when(!line.mine, |el| el.bg(theme::inset()).mr(px(32.)))
-                .child(TextView::new(&line.view).selectable(true).scrollable(false).style({
-                    let (font, size) = theme::original_code_typography(cx);
-                    gpui_kit::component::text::TextViewStyle::default()
-                        .code_block(StyleRefinement::default().font_family(font.clone()).text_size(size))
-                        .inline_code_font_family(font)
-                })))).into_any_element(),
+            Some(Ok(lines)) => render_preview_lines(lines, cx).into_any_element(),
         };
         div().flex_1().min_h_0().flex().flex_col().gap(px(8.))
             .child(div().flex().items_center().gap(px(8.))

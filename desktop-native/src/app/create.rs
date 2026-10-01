@@ -1592,7 +1592,8 @@ impl Hangar {
     /// Onde o compositor guarda anexos: a sessão aberta ou, na tela sem sessão antes do Enviar, a conversa por nascer.
     /// Com a criação em voo não há onde pôr: o que já foi anexado segue com ela.
     pub(super) fn composer_key(&self) -> Option<SessionKey> {
-        self.selected_key().or_else(|| (self.new_chat_screen() && self.opening.is_none()).then(new_chat_key))
+        // A conversa fechada aberta não anexa: os anexos sobem para uma sessão, e ela só existe depois do Enviar.
+        self.selected_key().or_else(|| (self.new_chat_screen() && self.opening.is_none() && self.reopen.is_none()).then(new_chat_key))
     }
 
     /// A máquina escolhida nos chips da tela sem sessão, que é onde a conversa vai nascer.

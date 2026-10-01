@@ -1329,7 +1329,7 @@ impl Hangar {
             place(&local, None, &mut rows, cx);
         }
         let host = self.server_label(cx);
-        let (on, enabled) = (self.new_chat_screen(), self.api.is_some());
+        let (on, enabled) = (self.new_chat_screen() && self.reopen.is_none(), self.api.is_some());
         div().w_full().min_h_0().flex().flex_col().items_center().when(!fit_content, |el| el.h_full())
             // O ponto do chip "N no Hangar" fica no canto da marca.
             .child(div().relative().h(px(44.)).w_full().flex_shrink_0().flex().items_center().justify_center()

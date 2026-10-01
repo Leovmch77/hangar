@@ -36,6 +36,7 @@ mod orq_roles;
 mod orq_panel;
 mod orq_history;
 mod home_usage;
+mod recent;
 mod orq_timeline;
 mod panes;
 mod popup;
@@ -470,6 +471,9 @@ pub struct Hangar {
     orq_history: Option<orq_history::History>,
     orq_history_serial: u64,
     home_usage: home_usage::HomeUsage,
+    // Conversas fechadas do modo Conversas; `reopen` é a aberta na área principal, que só vira sessão no Enviar.
+    recents: recent::Recents,
+    reopen: Option<recent::ArchiveEntry>,
     shortcuts: shortcuts::Shortcuts,
     harness: harness::Harnesses,
     server_config: server_config::ServerConfig,
@@ -699,7 +703,7 @@ impl Hangar {
             appearance_note: appearance_error.map(|error| tr("settings_not_loaded").replace("{error}", &error)),
             desktop_note: None,
             palette_seq: 0, backdrop_seq: 0, backdrop_pending: false, backdrop: None, backdrop_note: None, backdrop_busy: None, grain: crate::media::grain(),
-            device: device::Device::default(), accounts: accounts::Accounts::default(), orchestration: orchestration::Orchestration::default(), orq_history: None, orq_history_serial: 0, home_usage: Default::default(), shortcuts: shortcuts::Shortcuts::default(),
+            device: device::Device::default(), accounts: accounts::Accounts::default(), orchestration: orchestration::Orchestration::default(), orq_history: None, orq_history_serial: 0, home_usage: Default::default(), recents: Default::default(), reopen: None, shortcuts: shortcuts::Shortcuts::default(),
             server_config: server_config::ServerConfig::default(), harness: harness::Harnesses::default(), sync: sync::Sync::default(), shared: shared_config::SharedConfig::default(), machines: machines::Machines::default(),
             costs: Default::default(), usage_stats: Default::default(), search: Default::default(), topbar: Default::default(), computer: computer::Computer::default(), new_session: None, sidebar,
             terminal: None, terminal_serial: 0,
@@ -958,6 +962,7 @@ impl Hangar {
         for slot in [&mut self.list_task, &mut self.session_task, &mut self.history_task] { if let Some(t) = slot.take() { t.abort(); } }
         self.leave_accounts();
         (self.selected, self.open_api, self.pending_remote) = (None, None, None);
+        (self.recents, self.reopen) = (Default::default(), None);
         self.sessions.clear();
         self.chat = Chat::default();
         self.turn_seen = None;
@@ -1025,6 +1030,7 @@ impl Hangar {
         api::open_trace_start(&session.name);
         // Outra conversa escolhida no meio da criação: a mensagem segue sendo enviada, mas a bolha é da tela que ficou.
         self.opening = None;
+        self.reopen = None;
         let same_server = self.open_api.as_ref().map(Api::identity) == open_api.as_ref().map(Api::identity);
         if !same_server || self.selected.as_ref().is_none_or(|selected| selected.name != session.name) {
             self.close_terminal(false, window, cx);
@@ -1098,6 +1104,7 @@ impl Hangar {
         if self.settings.is_some() && !self.settings_live() { self.close_settings(window, cx); }
         self.pending_remote = None;
         self.close_open_session(window, cx);
+        self.reopen = None;
         self.composer.update(cx, |input, cx| input.focus(window, cx));
         cx.notify();
     }
@@ -1506,7 +1513,10 @@ impl Hangar {
         // Aba com o foco, pela posição na lista antiga: se a sessão dela sumir, o foco não pode ficar numa alça morta.
         let focused_tab = self.sessions.iter().position(|s| self.tab_focus.get(&s.name).is_some_and(|f| f.is_focused(window)))
             .map(|ix| (ix, self.sessions[ix].name.clone()));
+        let names = |list: &[SessionInfo]| list.iter().map(|s| s.name.clone()).collect::<HashSet<_>>();
+        let names_changed = names(&self.sessions) != names(&sessions);
         self.sessions = sessions;
+        self.recents_sessions_changed(names_changed, cx);
         self.resolve_local_dirs(cx);
         // Cada aba guarda o próprio foco pela vida da sessão; aba de sessão que sumiu leva o dela junto.
         self.tab_focus.retain(|name, _| self.sessions.iter().any(|s| &s.name == name));
@@ -1871,6 +1881,7 @@ impl Hangar {
 
     // `confirmed` = a pessoa já aceitou o aviso de comando destrutivo para este mesmo texto.
     fn submit(&mut self, steer: bool, confirmed: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.selected.is_none() && self.reopen.is_some() { self.send_reopen(window, cx); return; }
         if self.selected.is_none() {
             let text = self.composer.read(cx).value().to_string();
             let attached = self.attachments.get(&create::new_chat_key()).map(|list| list.iter()
@@ -3491,7 +3502,10 @@ impl Hangar {
 
     #[allow(clippy::too_many_arguments)]
     fn render_composer(&mut self, readable: bool, busy: bool, steer: bool, queued: usize, sending: bool, stopping: bool, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let new_chat = self.selected.is_none() && self.new_chat.is_some();
+        // Conversa fechada aberta: o campo escreve para ela, e o Enviar a retoma (`send_reopen`).
+        let reopen = self.selected.is_none() && self.reopen.is_some();
+        let resuming = reopen && self.reopen_sending();
+        let new_chat = !reopen && self.selected.is_none() && self.new_chat.is_some();
         let creating = new_chat && self.new_chat.as_ref().is_some_and(|view| view.read(cx).creating);
         let can_create = new_chat && self.new_chat.as_ref().is_some_and(|view| view.read(cx).can_create(cx));
         let key = self.composer_key();
@@ -3512,7 +3526,11 @@ impl Hangar {
         let (pills, mode) = self.render_ctl_pills(readable, cx);
         let pills = if new_chat { self.new_chat_pills(cx) } else { pills };
         let (provider, headless) = self.provider();
-        let provider = if new_chat { self.new_chat_provider(cx) } else { provider }.to_owned();
+        let provider = match self.reopen.as_ref().filter(|_| reopen) {
+            Some(entry) if !entry.provider.is_empty() => entry.provider.clone(),
+            Some(_) => "claude".to_owned(),
+            None => if new_chat { self.new_chat_provider(cx) } else { provider }.to_owned(),
+        };
         let provider = provider.as_str();
         // A dica do terminal e o destinatário moram no placeholder, como no web.
         let placeholder = if readable && !self.terminal_suggestion.is_empty() {
@@ -3524,11 +3542,11 @@ impl Hangar {
         }
         let steer_text = readable && has_input && (provider == "codex" || headless) && self.chat.state.state == "working"
             && self.selected_key().is_none_or(|key| self.group_targets(&key, "").is_none());
-        let blocked = if new_chat { !can_create } else { sending || uploading.is_some() || !self.chat_online || !self.history_installed };
+        let blocked = if reopen { resuming } else if new_chat { !can_create } else { sending || uploading.is_some() || !self.chat_online || !self.history_installed };
         let can_stop = self.can_interrupt();
         let focused = self.composer.read(cx).focus_handle(cx).is_focused(window);
         let paste_target = cx.entity().downgrade();
-        let textarea = Textarea::new(&self.composer).appearance(false).disabled((!readable && !new_chat) || creating).on_paste(move |item, _, cx| {
+        let textarea = Textarea::new(&self.composer).appearance(false).disabled((!readable && !new_chat && !reopen) || creating || resuming).on_paste(move |item, _, cx| {
             paste_target.update(cx, |this, cx| this.paste(item, cx)).unwrap_or(false)
         });
         let field = div().id("composer-field").text_base()
@@ -3611,7 +3629,7 @@ impl Hangar {
                 .child(usage)
         });
 
-        let send_label = tr(if creating { "create_creating" } else if sending || uploading.is_some() { "sending" } else { "send" });
+        let send_label = tr(if creating { "create_creating" } else if sending || uploading.is_some() || resuming { "sending" } else { "send" });
         let action = if can_stop && !has_input {
             Button::new("stop").custom(ButtonCustomVariant::new(cx).color(theme::elevated()).foreground(theme::danger()).hover(theme::raised()).active(theme::raised()))
                 .bg(theme::elevated()).child(div().size(px(10.)).rounded(px(2.)).bg(theme::danger())).size(px(30.)).rounded_full()
@@ -4297,6 +4315,7 @@ impl Hangar {
         } else {
             place(&layout, None, &mut children, window, cx);
         }
+        children.extend(self.render_recents(window, cx));
         let active = self.active_key();
         let empty = remote_rows == 0 && self.sessions.iter().all(|s| self.sidebar.is_hidden(&active, &s.name));
         let list = div().id("session-list").min_h_0().overflow_y_scroll().px(px(8.)).flex().flex_col().gap(px(2.))
@@ -4320,7 +4339,7 @@ impl Hangar {
             // Mesma coluna, recuo e altura da linha "Todas as sessões" logo abaixo; o destaque é o translúcido das linhas da
             // lista, e o atalho aparece apagado só com o ponteiro em cima.
             .child({
-                let (on, enabled) = (self.new_chat_screen(), self.api.is_some());
+                let (on, enabled) = (self.new_chat_screen() && self.reopen.is_none(), self.api.is_some());
                 div().id("sidebar-new-chat").group("sidebar-new-chat").flex_shrink_0().mx(px(8.)).mt(px(4.)).h(px(32.)).px(px(8.))
                     .flex().items_center().gap_2().rounded(px(8.)).font_weight(FontWeight::MEDIUM)
                     .track_focus(&self.new_chat_focus)
@@ -5129,6 +5148,7 @@ impl Hangar {
 
     /// Cartões, faixas e avisos entre a conversa e o compositor, e o compositor.
     fn render_bottom_area(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        if self.new_chat_screen() && self.reopen.is_some() { return self.render_reopen(window, cx); }
         if self.new_chat_screen() { return self.render_new_chat(window, cx); }
         let selected_key = self.selected_key();
         let sending = selected_key.as_ref().is_some_and(|key| self.delivery.pending(key));

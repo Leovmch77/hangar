@@ -589,7 +589,7 @@ impl Hangar {
         let navigation = tiles("collapsed-nav", &[tr("settings_collapsed_sidebar"), tr("settings_collapsed_tabs"), tr("settings_nav_conversations")],
             Vec::from(NAVIGATION.map(art_navigation)), NAVIGATION.iter().position(|n| *n == a.navigation).unwrap_or(0), NAVIGATION.len(), false,
             tr("settings_next_version"), live,
-            |this: &mut Hangar, index, _: &mut Window, cx| { let mut next = appearance::get(); next.navigation = NAVIGATION[index]; this.apply_appearance(next, true, cx); }, cx);
+            |this: &mut Hangar, index, _: &mut Window, cx| { let mut next = appearance::get(); next.navigation = NAVIGATION[index]; this.apply_appearance(next, true, cx); this.recents_sessions_changed(false, cx); }, cx);
         let conversations_nav = a.navigation == Navigation::Conversations;
         let height = segmented("sidebar-height", &[tr("settings_sidebar_full"), tr("settings_sidebar_content")],
             if a.sidebar_height == SidebarHeight::Content { 1 } else { 0 }, floating,

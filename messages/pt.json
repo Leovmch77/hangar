@@ -6417,5 +6417,8 @@
   "newchat_abrir_lista": "Abrir lista de conversas",
   "newchat_sem_servidor": "Nenhuma máquina sua cadastrada para abrir conversa. Adicione uma nas Configurações.",
   "newchat_conta_sem_limite": "A conta {conta} está sem limite — volta {quando}. Troque de conta para enviar.",
-  "newchat_conta_sem_limite_sem_hora": "A conta {conta} está sem limite. Troque de conta para enviar."
+  "newchat_conta_sem_limite_sem_hora": "A conta {conta} está sem limite. Troque de conta para enviar.",
+  "conversas_recentes_falhou": "Não foi possível carregar as conversas recentes.",
+  "conversa_reabrir_dica": "Ao enviar, esta conversa é retomada com a mensagem.",
+  "conversa_retomando": "Retomando a conversa…"
 }

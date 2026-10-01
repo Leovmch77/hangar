@@ -6417,5 +6417,8 @@
   "newchat_abrir_lista": "Open conversation list",
   "newchat_sem_servidor": "No machine of yours is registered to start a conversation. Add one in Settings.",
   "newchat_conta_sem_limite": "{conta} is out of quota — resets {quando}. Switch account to send.",
-  "newchat_conta_sem_limite_sem_hora": "{conta} is out of quota. Switch account to send."
+  "newchat_conta_sem_limite_sem_hora": "{conta} is out of quota. Switch account to send.",
+  "conversas_recentes_falhou": "Could not load recent conversations.",
+  "conversa_reabrir_dica": "Sending resumes this conversation with your message.",
+  "conversa_retomando": "Resuming the conversation…"
 }
