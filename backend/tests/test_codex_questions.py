@@ -125,10 +125,11 @@ async def test_cancelamento_sem_sse_nao_reabre_pedido(conectado):
     await notifications.aclose()
 
 
-async def test_async_visivel_trabalhando_reabre_e_responde_sem_terminal(conectado, monkeypatch, tmp_path):
+@pytest.mark.parametrize("terminal_format", ["legacy", "structured"])
+async def test_async_visivel_trabalhando_reabre_e_responde_sem_terminal(conectado, monkeypatch, tmp_path, terminal_format):
     from unittest.mock import AsyncMock
     from app import pqueue
-    from tests.test_codex_async_questions import question, answer
+    from tests.test_codex_async_questions import question, answer, terminal_answer
     monkeypatch.setattr(pqueue, "_queue_dir", lambda: tmp_path)
     client, ws = conectado
     adapter = CodexAdapter()
@@ -147,7 +148,8 @@ async def test_async_visivel_trabalhando_reabre_e_responde_sem_terminal(conectad
         await stream.aclose()
         stream = adapter.state_monitor("cx", lambda: "thread")
         assert (await anext(stream)).codex_question == event.codex_question
-        await ws.send(json.dumps({"method": "item/completed", "params": {"threadId": "thread", "item": answer()}}))
+        reply = terminal_answer() if terminal_format == "structured" else answer()
+        await ws.send(json.dumps({"method": "item/completed", "params": {"threadId": "thread", "item": reply}}))
         event = await asyncio.wait_for(anext(stream), 2)
         assert event.codex_question["questions"][0]["question"] == "Qual tamanho?"
         responding = asyncio.create_task(adapter.answer_questions("cx", event.codex_question["request_id"], [

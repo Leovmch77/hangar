@@ -1,5 +1,6 @@
 """Perguntas assíncronas e respostas no mesmo formato do histórico nativo do Codex."""
 from collections import Counter
+import json
 
 from .questions import response
 
@@ -56,13 +57,45 @@ class AsyncQuestions:
             if self._echoes[text]:
                 self._echoes[text] -= 1
                 return False
-            # A TUI envia uma resposta por vez, citando o título e sem ID de resolução.
+            self._resolve_terminal_reply(text)
+            # O histórico antigo cita o título; cada resposta consome uma pergunta só.
             for request_id, payload in self._pending.items():
                 prefix = "> " + payload["questions"][0]["question"] + "\n\n"
                 if text.startswith(prefix) and text[len(prefix):].strip():
                     self.resolve(request_id)
                     break
         return before != tuple(self._pending)
+
+    def _resolve_terminal_reply(self, text: str) -> None:
+        opening, closing = "<send_user_message_question_reply>", "</send_user_message_question_reply>"
+        text = text.strip()
+        if not text.startswith(opening) or not text.endswith(closing):
+            return
+        try:
+            replies = json.loads(text[len(opening):-len(closing)])
+        except json.JSONDecodeError:
+            return
+        if not isinstance(replies, list):
+            return
+        for reply in replies:
+            if not isinstance(reply, dict):
+                continue
+            answer, item_id = reply.get("answer"), reply.get("questionItemId")
+            if not isinstance(answer, str) or not answer.strip() or not isinstance(item_id, str):
+                continue
+            try:
+                identity = json.loads(item_id)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(identity, list) or len(identity) != 3:
+                continue
+            tool, call_id, index = identity
+            if tool != "request_user_input_async" or not isinstance(call_id, str) \
+                    or type(index) is not int or index < 0:
+                continue
+            request_id = f"async:{self.thread_id}:{call_id}:{index}"
+            if request_id in self._pending:
+                self.resolve(request_id)
 
     def hydrate(self, thread: dict) -> None:
         restored = AsyncQuestions(self.thread_id, self.skipped)
