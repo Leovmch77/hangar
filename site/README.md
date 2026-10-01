@@ -57,7 +57,7 @@ site/tools/record/enc.sh <cena> <lang>
 |---|---|---|
 | `agents` | 15 | 1 |
 | `ask` | 16 | 1 |
-| `pair` | 14 | 1 |
+| `pair` | 15 | 1 |
 | `orq` | 13 | 4 (seleciona `orq-checkout`, a 4ª linha da lateral) |
 
 - `<lang>` é `en` ou `pt`. A saída fica em `site/tools/record/out/`; copie `<cena>-<lang>.mp4`
