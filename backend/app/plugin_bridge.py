@@ -285,6 +285,42 @@ def aguardando(name: str) -> bool:
 #    deixa de digitar o texto — a parte que hoje fatia, espera e às vezes corta.
 MODO_PADRAO = "fill"
 
+# `user`: `$.prompt.submit({text, asUser: true})` entra como fala da pessoa, sem tecla nenhuma. Só com
+# a sessão parada (no turno a promessa espera o fim), só se o plugin dono declarou o modo (plugin
+# velho trataria como `submit` com moldura) e só com texto que o modo não estraga: `@arquivo` não é
+# expandido, `!` é modo bash digitado e `/` é menu da TUI.
+_MENCAO = re.compile(r"(^|\s)@\S")
+PROVA_TRANSCRIPT_S = 10.0
+# Sem confirmação e sem transcript legível: nem entregue, nem livre para digitar.
+INCERTO = "incerto"
+
+
+def choose_mode(name: str, text: str) -> str:
+    recente = estado_recente(name)
+    if (mods_by_default() and "user" in declared_modes(name) and recente is not None
+            and recente[0] == "idle" and not _MENCAO.search(text)
+            and not text.lstrip().startswith(("!", "/"))):
+        return "user"
+    return MODO_PADRAO
+
+
+def _no_transcript(jsonl: str | None, texto: str) -> bool | None:
+    """O texto já é fala do usuário no transcript? None = não deu para ler (não autoriza digitar)."""
+    if not jsonl:
+        return None
+    from app import pqueue
+    limite = time.monotonic() + PROVA_TRANSCRIPT_S
+    alvo = texto.strip()
+    while True:
+        linhas = pqueue.committed_user_lines(jsonl)
+        if linhas is None:
+            return None
+        if alvo in linhas:
+            return True
+        if time.monotonic() >= limite:
+            return False
+        time.sleep(0.25)
+
 # Teto da espera pelo aviso de que o rascunho entrou. Passou disso, o Enter NÃO
 # é enviado: apertar Enter num composer que não recebeu o texto submete o que
 # estiver lá — ou nada.
@@ -394,8 +430,9 @@ def estado_recente(name: str) -> tuple[str, str | None] | None:
     return estado, motivo
 
 
-def entregar(name: str, texto: str, modo: str = MODO_PADRAO) -> bool:
-    """Passa o texto ao long-poll da sessão. False = ninguém ouvindo (usa o pane).
+def entregar(name: str, texto: str, modo: str = MODO_PADRAO, jsonl: str | None = None):
+    """Passa o texto ao long-poll da sessão. True = entregue; False = ninguém entregou (use o pane);
+    `INCERTO` = pode ter entrado e não dá para provar (não digite; a reconciliação decide).
 
     Chamado de dentro do `drain`/`_send_one`, que rodam em thread: o Queue é do
     loop do FastAPI, então a entrega atravessa por `call_soon_threadsafe`.
@@ -406,17 +443,17 @@ def entregar(name: str, texto: str, modo: str = MODO_PADRAO) -> bool:
     """
     from app import terminal_input
     with terminal_input._send_lock(name):
-        return _entregar(name, texto, modo)
+        return _entregar(name, texto, modo, jsonl)
 
 
-def _entregar(name: str, texto: str, modo: str) -> bool:
+def _entregar(name: str, texto: str, modo: str, jsonl: str | None = None):
     with _lock:
         fila = _waiters.get(name)
         loop = _loop
     if fila is None or loop is None:
         return False
     aviso = threading.Event()
-    if modo == "fill":
+    if modo in ("fill", "user"):
         with _lock:
             _confirmacoes[name] = aviso
             _preenchido.pop(name, None)
@@ -425,12 +462,20 @@ def _entregar(name: str, texto: str, modo: str) -> bool:
     except RuntimeError:
         # Loop morrendo (shutdown): não é entrega, e o caller tem o pane.
         return False
-    if modo != "fill":
+    if modo not in ("fill", "user"):
         return True
     confirmou = aviso.wait(CONFIRMA_S)
     with _lock:
         ok = _preenchido.pop(name, False)
         _confirmacoes.pop(name, None)
+    if modo == "user":
+        if confirmou:
+            return ok
+        _log.warning("plugin %s: envio sem confirmação em %.0fs — conferindo o transcript", name, CONFIRMA_S)
+        prova = _no_transcript(jsonl, texto)
+        if prova is None:
+            return INCERTO
+        return prova
     if not confirmou:
         _log.warning("plugin %s: rascunho sem confirmação em %.0fs — sem Enter", name, CONFIRMA_S)
     from app import terminal_input, tmux
@@ -714,6 +759,24 @@ async def filled(body: FilledBody):
     """O plugin avisa que o rascunho entrou (ou não) no composer.
 
     É o que libera o Enter: sem esse aviso o Hangar não aperta tecla nenhuma."""
+    _confere(body.sessao, body.token)
+    with _lock:
+        aviso = _confirmacoes.get(body.sessao)
+        _preenchido[body.sessao] = body.ok
+    if aviso is not None:
+        aviso.set()
+    return {"ok": True}
+
+
+class SubmittedBody(BaseModel):
+    sessao: str
+    token: str
+    ok: bool
+
+
+@plugin_router.post("/submitted")
+async def submitted(body: SubmittedBody):
+    """O plugin avisa se o `$.prompt.submit` do modo `user` foi aceito."""
     _confere(body.sessao, body.token)
     with _lock:
         aviso = _confirmacoes.get(body.sessao)

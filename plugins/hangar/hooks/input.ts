@@ -15,7 +15,8 @@ const BACKOFF_DONO_MS = 30000;
  *
  *  `fill` põe o rascunho no composer e o Hangar manda só o Enter — a mensagem
  *  chega como a fala do usuário. `submit` entrega inteiro por `$.prompt.submit`,
- *  sem tecla nenhuma, ao custo da moldura de "prompt de plugin". */
+ *  sem tecla nenhuma, ao custo da moldura de "prompt de plugin". `user` é o
+ *  `submit` com `asUser`: sem tecla e sem moldura, só com a sessão parada. */
 export function registerInput(on: On) {
   on("session.start", { isInteractive: true }, async ($, e, next) => {
     const url = await $.env.get("HANGAR_PLUGIN_URL");
@@ -67,7 +68,7 @@ async function pull($: EngineInterface, ponte: Bridge) {
     const r = await $.http.fetch(`${ponte.url}/pull`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ sessao: ponte.sessao, token: ponte.token, instance: instance(), modos: ["fill"] }),
+      body: JSON.stringify({ sessao: ponte.sessao, token: ponte.token, instance: instance(), modos: ["fill", "user"] }),
     });
     // 409 cala os outros hooks; depois dele a ponte só volta com um `/pull` aceito. Erro de rede
     // ou outro status não tira a ponte de quem já é dono.
@@ -88,6 +89,19 @@ async function pull($: EngineInterface, ponte: Bridge) {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ sessao: ponte.sessao, token: ponte.token, ok: isFilled }),
+        });
+      } else if (text && modo === "user") {
+        let ok = false;
+        try {
+          await $.prompt.submit({ text, asUser: true });
+          ok = true;
+        } catch (err) {
+          $.ui.log(`hangar: prompt.submit falhou: ${String(err)}`, { to: "debug" });
+        }
+        await $.http.fetch(`${ponte.url}/submitted`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ sessao: ponte.sessao, token: ponte.token, ok }),
         });
       } else if (text) {
         await $.prompt.submit({ text });

@@ -673,7 +673,7 @@ def _send_lock(name: str) -> threading.Lock:
     return _send_locks.setdefault(name, threading.Lock())
 
 
-def _drain_pelo_plugin(name: str, q: PromptQueue, start_ts: float) -> int:
+def _drain_pelo_plugin(name: str, q: PromptQueue, start_ts: float, jsonl: str | None = None) -> int:
     """Entrega a fila pelo function-hook, enquanto houver long-poll ouvindo.
 
     Uma entrada por volta: o plugin some da escuta ao processar, e insistir com
@@ -690,10 +690,13 @@ def _drain_pelo_plugin(name: str, q: PromptQueue, start_ts: float) -> int:
         if not claimed:
             break
         entry = claimed[0]
-        if plugin_bridge.entregar(name, entry["text"]):
+        modo = plugin_bridge.choose_mode(name, entry["text"])
+        entregue = plugin_bridge.entregar(name, entry["text"], modo, jsonl)
+        # INCERTO fica como entregue: pode ter entrado, e digitar por cima duplicaria.
+        if entregue is True or entregue == plugin_bridge.INCERTO:
             entregues += 1
-            _log.info("drain name=%s: entrada %s entregue pelo plugin (sem tecla)",
-                      name, entry.get("id"))
+            _log.info("drain name=%s: entrada %s entregue pelo plugin (sem tecla) modo=%s resultado=%s",
+                      name, entry.get("id"), modo, entregue)
             continue
         # Ninguém ouvindo entre o gate e a entrega: NADA foi digitado, então a
         # entrada volta pra fila inteira e o caminho de tecla assume.
@@ -743,7 +746,7 @@ def drain(name: str, jsonl: str, provider: str = "claude") -> int:
     # Caminho NATIVO: com o function-hook da sessão ouvindo, a entrega é por
     # `$.prompt.submit` e nenhuma tecla é emitida. Sem long-poll aberto, cai no
     # de sempre logo abaixo — o fallback é ausência, não erro.
-    sent = _drain_pelo_plugin(name, q, start_ts)
+    sent = _drain_pelo_plugin(name, q, start_ts, jsonl)
     if sent:
         return sent
     ti = TerminalInput()

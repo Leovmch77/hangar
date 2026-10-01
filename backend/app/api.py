@@ -3466,6 +3466,18 @@ def _ao_recibo_nativo(mid: str, estado: str, detalhe: str) -> None:
     fut.add_done_callback(_feito)
 
 
+def _jsonl_atual(name: str) -> str | None:
+    """O transcript para onde o nome resolve AGORA (não o do cache da lista: depois de um `/clear`
+    a prova leria o transcript velho e autorizaria digitar de novo)."""
+    try:
+        from app import tmux as _tmux
+        _cwd = next((p["cwd"] for p in _tmux.list_panes_active() if p["name"] == name), "")
+        return registry.resolve_tracked(name, _cwd)[0] or None
+    except Exception:
+        _log.exception("jsonl da sessao %s nao resolvido para a prova do plugin", name)
+        return None
+
+
 def _send_one(name: str, text: str, track_entry: bool = False) -> dict:
     """Sequencia UNICA de envio de prompt: send_prompt + registro na fila duravel + confirmacao/drain.
     Usada pelo /input (uma sessao) e pelo /broadcast (loop por N sessoes) — o broadcast NAO reimplementa
@@ -3547,12 +3559,18 @@ def _send_one(name: str, text: str, track_entry: bool = False) -> dict:
     nativo = _enviar_nativo(name, text) if provider == "claude" and not stripped.startswith("/") else None
     if nativo:
         _log.info("SEND name=%s pelo socket nativo msg_id=%s text=%r", name, nativo, text[:80])
-    pelo_plugin = (not nativo and provider == "claude" and not stripped.startswith("/")
-                   and plugin_bridge.aguardando(name)
-                   and terminal_input.deliverable(name)
-                   and plugin_bridge.entregar(name, text))
+    entrega_plugin = False
+    if (not nativo and provider == "claude" and not stripped.startswith("/")
+            and plugin_bridge.aguardando(name)
+            and terminal_input.deliverable(name)):
+        modo = plugin_bridge.choose_mode(name, text)
+        entrega_plugin = plugin_bridge.entregar(name, text, modo,
+                                                _jsonl_atual(name) if modo == "user" else None)
+    # INCERTO conta como entregue para não digitar por cima; a reconciliação decide depois.
+    pelo_plugin = entrega_plugin is True or entrega_plugin == plugin_bridge.INCERTO
     if pelo_plugin:
-        _log.info("SEND name=%s pelo plugin (sem tecla) text=%r", name, text[:80])
+        _log.info("SEND name=%s pelo plugin (sem tecla) modo=%s resultado=%s text=%r",
+                  name, modo, entrega_plugin, text[:80])
     try:
         result = "sent" if (nativo or pelo_plugin) else terminal.send_prompt(
             name, text, provider, pane_id=pane_id,

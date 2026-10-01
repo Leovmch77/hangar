@@ -105,7 +105,7 @@ def test_entrega_roda_sob_a_trava_de_envio_da_sessao(monkeypatch):
     from app import terminal_input
     visto: dict = {}
     monkeypatch.setattr(pb, "_entregar",
-                        lambda n, t, m: visto.update(travada=terminal_input._send_lock(n).locked()))
+                        lambda n, t, m, j: visto.update(travada=terminal_input._send_lock(n).locked()))
     pb.entregar("s1", "oi")
     assert visto["travada"] is True
     assert terminal_input._send_lock("s1").locked() is False
@@ -284,3 +284,57 @@ def test_whoami_recusa_chave_errada_e_cliente_de_fora():
     with pytest.raises(HTTPException) as e:
         asyncio.run(pb.whoami(pb.WhoamiBody(chave=pb.machine_key(), pane="%3"), _req("100.64.0.9")))
     assert e.value.status_code == 403
+
+
+def test_modo_user_so_com_dono_que_declarou_sessao_parada_e_texto_simples(monkeypatch):
+    monkeypatch.setattr(pb, "mods_by_default", lambda: True)
+    monkeypatch.setattr(pb, "declared_modes", lambda name: {"fill", "user"})
+    monkeypatch.setattr(pb, "estado_recente", lambda name: ("idle", None))
+    assert pb.choose_mode("s1", "roda os testes\ne commita") == "user"
+    assert pb.choose_mode("s1", "manda pro a@b.com") == "user"
+    for texto in ("olha @src/app.py", "@README.md resume", "!ls", "/model"):
+        assert pb.choose_mode("s1", texto) == "fill", texto
+    monkeypatch.setattr(pb, "estado_recente", lambda name: ("working", None))
+    assert pb.choose_mode("s1", "oi") == "fill"
+    monkeypatch.setattr(pb, "estado_recente", lambda name: ("idle", None))
+    monkeypatch.setattr(pb, "declared_modes", lambda name: {"fill"})
+    assert pb.choose_mode("s1", "oi") == "fill"
+    monkeypatch.setattr(pb, "declared_modes", lambda name: {"fill", "user"})
+    monkeypatch.setattr(pb, "mods_by_default", lambda: False)
+    assert pb.choose_mode("s1", "oi") == "fill"
+
+
+def _entrega_user(monkeypatch, confirma: bool | None, no_transcript: set[str] | None):
+    monkeypatch.setattr(pb, "CONFIRMA_S", 0.3)
+    monkeypatch.setattr(pb, "PROVA_TRANSCRIPT_S", 0.3)
+    from app import pqueue, tmux
+    monkeypatch.setattr(tmux, "send_keys", lambda *a, **k: pytest.fail("modo user não aperta tecla"))
+    monkeypatch.setattr(pqueue, "committed_user_lines", lambda jsonl, provider="claude": no_transcript)
+
+    async def cena():
+        pull = asyncio.create_task(pb.pull(pb.PullBody(sessao="s1", token=pb.mint("s1"), instance="a",
+                                                       modos=["fill", "user"])))
+        await asyncio.wait_for(_ate(lambda: pb.aguardando("s1")), 5)
+        entrega = asyncio.create_task(asyncio.to_thread(pb._entregar, "s1", "oi", "user", "/x.jsonl"))
+        assert (await asyncio.wait_for(pull, 5)) == {"text": "oi", "modo": "user"}
+        if confirma is not None:
+            await pb.submitted(pb.SubmittedBody(sessao="s1", token=pb.mint("s1"), ok=confirma))
+        return await asyncio.wait_for(entrega, 5)
+
+    return asyncio.run(cena())
+
+
+def test_modo_user_confirmado_entrega_sem_tecla(monkeypatch):
+    assert _entrega_user(monkeypatch, True, set()) is True
+
+
+def test_modo_user_sem_confirmacao_mas_no_transcript_conta_como_entregue(monkeypatch):
+    assert _entrega_user(monkeypatch, None, {"oi"}) is True
+
+
+def test_modo_user_sem_confirmacao_e_fora_do_transcript_volta_pro_tmux(monkeypatch):
+    assert _entrega_user(monkeypatch, None, set()) is False
+
+
+def test_modo_user_sem_confirmacao_e_transcript_ilegivel_nao_volta_pra_tecla(monkeypatch):
+    assert _entrega_user(monkeypatch, None, None) is pb.INCERTO
