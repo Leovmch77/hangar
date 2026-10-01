@@ -588,13 +588,16 @@ pub fn share_blocked(body: &Value) -> Option<SharePrereqs> {
 #[derive(Clone, Debug, serde::Deserialize)]
 pub struct Redeemed { pub token: String, pub session: String, pub owner: String, pub address: String }
 
-/// Resgate do convite: sem token (quem chega ainda não tem um) e sem seguir redirecionamento.
-pub async fn redeem_invite(address: &str, code: &str, device: &str) -> Result<Redeemed, Failure> {
+/// Resgate do convite, sem seguir redirecionamento. O `token` é o que o app já tem para a máquina: com ele o convite novo
+/// entra no mesmo token em vez de trocar de sessão.
+pub async fn redeem_invite(address: &str, code: &str, device: &str, token: Option<&str>) -> Result<Redeemed, Failure> {
     let mut url = Url::parse(address).map_err(|_| Failure::local("invalid_url"))?;
     url.path_segments_mut().map_err(|_| Failure::local("invalid_url"))?.pop_if_empty().extend(["api", "guest", "redeem"]);
     let client = Client::builder().connect_timeout(Duration::from_secs(10)).redirect(reqwest::redirect::Policy::none())
         .build().map_err(|_| Failure::local("network_error"))?;
-    let r = client.post(url).json(&json!({"code": code, "device": device})).timeout(Duration::from_secs(20)).send().await
+    let mut body = json!({"code": code, "device": device});
+    if let Some(token) = token { body["token"] = json!(token); }
+    let r = client.post(url).json(&body).timeout(Duration::from_secs(20)).send().await
         .map_err(|_| Failure::transport(true))?;
     Api::checked(r, true).await?.json().await.map_err(|_| Failure::local("invalid_response"))
 }

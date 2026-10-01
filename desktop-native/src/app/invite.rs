@@ -40,7 +40,14 @@ fn own_server_at(list: &[servers::ServerEntry], address: &str) -> bool {
     list.iter().any(|s| !s.invite && servers::norm(&s.address) == servers::norm(address))
 }
 
-/// Coloca o convite na lista. Já existindo um convite no endereço (mesmo dono), o mais novo vence: troca token e rótulo.
+/// Token de convite que este app já tem para a máquina: o resgate novo entra nele em vez de trocar de sessão.
+pub(super) fn existing_invite_token(list: &[servers::ServerEntry], address: &str) -> Option<String> {
+    let key = servers::norm(address);
+    list.iter().find(|s| s.invite && servers::norm(&s.address) == key).map(|s| s.token.clone()).filter(|t| !t.is_empty())
+}
+
+/// Coloca o convite na lista. Já existindo um convite no endereço (mesmo dono), a entrada é a mesma: o token devolvido é o
+/// que o app mandou, e o rótulo se atualiza.
 /// Falso quando o endereço é de um servidor próprio, que fica como está.
 fn place_invite(list: &mut Vec<servers::ServerEntry>, entry: servers::ServerEntry) -> bool {
     if own_server_at(list, &entry.address) { return false; }
@@ -118,11 +125,12 @@ impl Hangar {
 
     fn redeem_invite(&mut self, dialog: WeakEntity<InviteDialog>, address: String, code: String, window: &mut Window, cx: &mut Context<Self>) {
         let device = device_label();
+        let existing = existing_invite_token(&self.servers, &address);
         let (done, result) = tokio::sync::oneshot::channel();
         self.runtime.spawn(async move {
             // O endereço devolvido vira o servidor que recebe o token: só vale se for o mesmo host do convite.
             let host = |a: &str| url::Url::parse(a).ok().map(|u| (u.host_str().map(str::to_owned), u.port_or_known_default()));
-            let result = api::redeem_invite(&address, &code, &device).await.map(|mut r| {
+            let result = api::redeem_invite(&address, &code, &device, existing.as_deref()).await.map(|mut r| {
                 if host(&r.address).is_none() || host(&r.address) != host(&address) { r.address = address.clone(); }
                 r
             });
@@ -230,6 +238,14 @@ mod tests {
         assert!(place_invite(&mut list, entry("j", "Convite · Ana B", "https://h:8443/", "new", true)));
         assert_eq!(list.len(), 2);
         assert_eq!((list[0].id.as_str(), list[0].token.as_str(), list[0].label.as_str(), list[0].invite), ("i", "new", "Convite · Ana B", true));
+    }
+
+    #[test]
+    fn existing_invite_token_only_from_invite_entries_at_that_address() {
+        let list = vec![entry("i", "Convite", "https://a.ts.net:8443", "t1", true), entry("o", "PC", "https://b.ts.net", "own", false)];
+        assert_eq!(existing_invite_token(&list, "https://A.ts.net:8443/").as_deref(), Some("t1"));
+        assert_eq!(existing_invite_token(&list, "https://b.ts.net"), None);
+        assert_eq!(existing_invite_token(&list, "https://c.ts.net:8443"), None);
     }
 
     #[test]
