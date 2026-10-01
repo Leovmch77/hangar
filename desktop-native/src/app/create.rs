@@ -329,6 +329,8 @@ pub(in crate::app) struct NewSession {
     models: Remote<Catalog>,
     model: String,
     model_choice_touched: bool,
+    /// A conta escolhida à mão no menu da tela sem sessão: a troca por cota esgotada não passa por cima dela.
+    account_touched: bool,
     effort: String,
     permission: String,
     subagent: String,
@@ -417,7 +419,7 @@ impl NewSession {
             sessions: Remote::default(), same_folder: false, name, provider: "claude", providers: Remote::default(), configs: Remote::default(),
             config: None, config_pick: None, codex: Remote::default(), codex_account: String::new(), codex_pick: None, headless: true, headless_owner: None, headless_touched: false, headless_saving: false,
             difference: false, manual_open: false, manual, choosing: false, choose_error: None, create_seq: 0, creating: false, started: None,
-            step: String::new(), error: None, clock: None, models: Remote::default(), model: String::new(), model_choice_touched: false, effort: String::new(),
+            step: String::new(), error: None, clock: None, models: Remote::default(), model: String::new(), model_choice_touched: false, account_touched: false, effort: String::new(),
             permission: "bypassPermissions".into(), subagent: String::new(), engine: String::new(), model_pick: None, effort_pick: None,
             permission_pick: None, subagent_pick: None, engine_pick: None, engines: Remote::default(), jev: Remote::default(), jev_on: false,
             more: false, omp, quotas: Remote::default(), reopen_config: None, reopen_default: false, asking: false, confirming: false, account_busy: false, account_seq: 0, account_name,
@@ -562,7 +564,7 @@ impl NewSession {
 
     fn load_configs(&mut self, cx: &mut Context<Self>) {
         let seq = self.configs.start();
-        self.model_choice_touched = false;
+        (self.model_choice_touched, self.account_touched) = (false, false);
         self.request(cx, move |api, send| Box::pin(async move { send(CreateReply::Configs(seq, api.server_read(&["claude-configs"], &[], 15).await)).await }));
     }
 
@@ -861,6 +863,7 @@ impl NewSession {
                     .and_then(|v| serde_json::from_value::<Vec<ConfigDir>>(v).map_err(|_| tr("invalid_response")));
                 if !self.configs.finish(seq, list) { return None; }
                 self.config = self.fallback_config();
+                self.leave_exhausted_account();
                 self.build_config_pick(window, cx);
                 // Lista que falhou também pede o catálogo: sem conta, o backend usa a padrão.
                 self.load_models(window, cx);
@@ -1557,7 +1560,7 @@ impl NewSession {
                                 .map_or_else(|| c.label.clone(), |hint| format!("{}, {hint}", c.label)))
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.menu.set(None);
-                                this.model_choice_touched = true;
+                                (this.model_choice_touched, this.account_touched) = (true, true);
                                 if this.config.as_ref() != Some(&path) { this.config = Some(path.clone()); this.load_models(window, cx); }
                                 cx.notify();
                             }))
