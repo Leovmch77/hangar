@@ -6486,5 +6486,11 @@
   "conversa_conta_sem_cota": "A conta {conta} está sem cota. Escolha outra conta para enviar.",
   "conversa_conta_sem_cota_volta": "A conta {conta} está sem cota; volta em {quando}. Escolha outra conta para enviar.",
   "conversa_ja_aberta": "Esta conversa já está aberta na sessão {sessao}.",
-  "conversa_ja_aberta_sem_nome": "Esta conversa já está aberta em outra sessão."
+  "conversa_ja_aberta_sem_nome": "Esta conversa já está aberta em outra sessão.",
+  "erro_par_endereco_invalido": "O endereço do par não é um endereço do Tailscale Funnel (https://….ts.net:8443).",
+  "erro_par_nome_invalido": "O nome da máquina do par tem caracteres não aceitos.",
+  "erro_par_link_invalido": "Este não é um link de convite para parear.",
+  "erro_par_recusado": "A outra máquina recusou o convite: {detalhe}",
+  "erro_par_fora_do_ar": "A máquina do par não respondeu. Confira se ela está ligada e com o Funnel ativo.",
+  "erro_par_resposta_invalida": "A máquina do par respondeu algo inesperado."
 }

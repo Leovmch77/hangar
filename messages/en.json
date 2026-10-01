@@ -6486,5 +6486,11 @@
   "conversa_conta_sem_cota": "The {conta} account is out of quota. Pick another account to send.",
   "conversa_conta_sem_cota_volta": "The {conta} account is out of quota; it resets in {quando}. Pick another account to send.",
   "conversa_ja_aberta": "This conversation is already open in session {sessao}.",
-  "conversa_ja_aberta_sem_nome": "This conversation is already open in another session."
+  "conversa_ja_aberta_sem_nome": "This conversation is already open in another session.",
+  "erro_par_endereco_invalido": "The pair address is not a Tailscale Funnel address (https://….ts.net:8443).",
+  "erro_par_nome_invalido": "The pair's machine name has unsupported characters.",
+  "erro_par_link_invalido": "This is not a pairing invite link.",
+  "erro_par_recusado": "The other machine refused the invite: {detalhe}",
+  "erro_par_fora_do_ar": "The pair's machine did not answer. Check that it is on and its Funnel is active.",
+  "erro_par_resposta_invalida": "The pair's machine sent an unexpected answer."
 }

@@ -154,8 +154,8 @@ def _token(scope) -> str:
 
 
 def _is_open(method: str, path: str) -> bool:
-    return method == "OPTIONS" or path.startswith("/convite/") or (
-        method == "POST" and path == "/api/guest/redeem")
+    return method == "OPTIONS" or path.startswith(("/convite/", "/par/")) or (
+        method == "POST" and path in ("/api/guest/redeem", "/api/pair/redeem"))
 
 
 async def _deny(scope, receive, send, status: int, code: str, msg: str,
