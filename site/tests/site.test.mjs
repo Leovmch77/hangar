@@ -6,6 +6,8 @@ test('desktop por userAgent', () => {
   assert.equal(detectPlatform('Mozilla/5.0 (X11; Linux x86_64) Chrome/140', 'Linux x86_64'), 'linux');
   assert.equal(detectPlatform('Mozilla/5.0 (Windows NT 10.0; Win64; x64)', 'Win32'), 'windows');
   assert.equal(detectPlatform('Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5)', 'MacIntel', 0), 'macos');
+  // "Darwin" contém "win" e não pode virar Windows
+  assert.equal(detectPlatform('Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) Darwin/23', 'MacIntel', 0), 'macos');
 });
 
 test('celular nunca vira Linux nem macOS', () => {

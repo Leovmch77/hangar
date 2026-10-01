@@ -1,7 +1,8 @@
 """Synthetic LIVE backend for landing-page recordings: fixture.py + scripted scenes that change over time.
-GET /control/setup?scene=X[&lang=en|pt]  resets sessions for scene X (unknown scene -> 400).   GET /control/go  starts its timeline.
+GET /control/setup?scene=X[&lang=en|pt]  resets sessions for scene X (unknown scene or lang -> 400).
+GET /control/go  starts its timeline (409 without setup or while running).   GET /control/status  progress and first error.
 """
-import pathlib, threading, time
+import pathlib, threading, time, traceback
 from urllib.parse import parse_qs, urlparse
 
 HERE = pathlib.Path(__file__).resolve().parent
@@ -342,8 +343,10 @@ SCENES = {"group": scene_group, "agents": scene_agents, "ask": scene_ask, "pair"
 CUR = {"script": []}
 
 
+RUN = {"running": False, "error": None, "done": 0, "total": 0}
+
+
 def setup(name, lang="en"):
-    lang = lang if lang in SCENE_TEXT else "en"
     t = {**FX["SCENE_TEXT"][lang], **SCENE_TEXT[lang]}
     with LOCK:
         LIVE.clear(); SCR.clear()
@@ -354,19 +357,44 @@ def setup(name, lang="en"):
         CUR["script"] = sorted(script, key=lambda x: x[0])
         CUR["target"] = target
         EPOCH["n"] += 1
+        RUN.update(running=False, error=None, done=0, total=len(CUR["script"]))
         bump()
     return target
 
 
 def go():
+    """Começa a timeline da cena preparada; devolve o motivo da recusa ou None."""
+    with LOCK:
+        if "target" not in CUR:
+            return "nenhuma cena preparada; chame /control/setup antes"
+        if RUN["running"]:
+            return "a timeline desta cena já está rodando"
+        RUN.update(running=True, error=None, done=0)
+        epoch, script = EPOCH["n"], CUR["script"]
+
     def run():
         t0 = time.time()
-        for at, fn in CUR["script"]:
-            d = t0 + at - time.time()
-            if d > 0: time.sleep(d)
+        try:
+            for at, fn in script:
+                d = t0 + at - time.time()
+                if d > 0: time.sleep(d)
+                with LOCK:
+                    # setup novo no meio: os passos que faltam são da cena velha
+                    if EPOCH["n"] != epoch: return
+                    try:
+                        fn()
+                    except Exception as e:
+                        # o vídeo sairia com a cena parada; o record.sh lê isto no /control/status
+                        traceback.print_exc()
+                        RUN["error"] = RUN["error"] or f"passo em {at}s: {e!r}"
+                    else:
+                        RUN["done"] += 1
+                    bump()
+        finally:
             with LOCK:
-                fn(); bump()
+                if EPOCH["n"] == epoch: RUN["running"] = False
     threading.Thread(target=run, daemon=True).start()
+    return None
 
 
 class L(FX["H"]):
@@ -377,9 +405,19 @@ class L(FX["H"]):
             scene = q.get("scene", [""])[0]
             if scene not in SCENES:
                 self.send_json({"detail": f"cena desconhecida: {scene!r}; use {', '.join(SCENES)}"}, 400); return
-            self.send_json({"target": setup(scene, q.get("lang", ["en"])[0])}); return
+            lang = q.get("lang", [""])[0] or "en"
+            if lang not in SCENE_TEXT:
+                self.send_json({"detail": f"língua desconhecida: {lang!r}; use {', '.join(SCENE_TEXT)}"}, 400); return
+            self.send_json({"target": setup(scene, lang)}); return
         if url.path == "/control/go":
-            go(); self.send_json({"ok": True}); return
+            refused = go()
+            if refused:
+                self.send_json({"detail": refused}, 409); return
+            self.send_json({"ok": True}); return
+        if url.path == "/control/status":
+            with LOCK:
+                body = {"running": RUN["running"], "error": RUN["error"], "steps_done": RUN["done"], "steps_total": RUN["total"]}
+            self.send_json(body); return
         super().do_GET()
 
     def stream_session(self, name):

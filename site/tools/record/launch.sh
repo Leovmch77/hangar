@@ -20,7 +20,9 @@ fi
 
 # configuração isolada: a do app de quem grava nunca é lida nem alterada
 mkdir -p "$D/cfg/hangar-native"
-jq --arg l "$L" '.language = $l' "$D/appearance.json" > "$D/cfg/hangar-native/appearance.json"
+# redirecionar direto deixaria um appearance.json vazio quando o jq falha
+APP="$D/cfg/hangar-native/appearance.json"
+jq --arg l "$L" '.language = $l' "$D/appearance.json" > "$APP.tmp" && mv "$APP.tmp" "$APP" || { rm -f "$APP.tmp"; echo "jq falhou ao gerar $APP" >&2; exit 1; }
 printf '{"address":"http://127.0.0.1:47123/","token":"sintetica-fixture-sessao-0000"}\n' > "$D/cfg/hangar-native/connection.json"
 
 before=$(pgrep -f "^$HANGAR_NATIVE_BIN\$" | sort)

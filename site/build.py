@@ -120,6 +120,17 @@ def build(out: pathlib.Path) -> list[pathlib.Path]:
         f"<url><loc>{S.BASE_URL}/</loc></url><url><loc>{S.BASE_URL}/en/</loc></url></urlset>\n",
         encoding="utf-8",
     )
+    # referência local quebrada vira 404 no ar; o deploy.sh roda o build, então falha aqui
+    missing = []
+    for page in pages:
+        for ref in re.findall(r'(?:src|href|poster|data-src|data-poster)="(/[^"#]*)"', page.read_text(encoding="utf-8")):
+            target = out / ref.lstrip("/")
+            if ref.endswith("/"):
+                target = target / "index.html"
+            if not target.exists():
+                missing.append(f"{page.relative_to(out).as_posix()}: {ref}")
+    if missing:
+        raise SystemExit("referência local sem arquivo:\n" + "\n".join(missing))
     return pages
 
 

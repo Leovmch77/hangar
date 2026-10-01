@@ -6,7 +6,8 @@ export const INSTALL = {
 export function detectPlatform(ua = '', platform = '', touchPoints = 0) {
   if (/Android|iPhone|iPod|iPad|Mobile/i.test(ua)) return 'phone';
   if (/Mac/i.test(platform) && touchPoints > 1) return 'phone';
-  if (/Win/i.test(`${ua} ${platform}`)) return 'windows';
+  // /Win/ sozinho casa "Darwin" no userAgent do macOS
+  if (/Windows|Win32|Win64/i.test(`${ua} ${platform}`)) return 'windows';
   if (/Mac/i.test(`${ua} ${platform}`)) return 'macos';
   return 'linux';
 }
@@ -22,8 +23,10 @@ function initShowcase(root) {
   const video = root.querySelector('video');
   const caption = root.querySelector('.sc-caption');
   let i = 0;
+  let visible = true;
   const play = () => {
     if (reducedMotion()) { video.controls = true; return; }
+    if (!visible) return;
     // autoplay negado: sem controles o vídeo ficaria preso na capa e as abas não andariam.
     // AbortError é só troca de src ou pause no meio do play, não negação.
     video.play().catch((e) => { if (e.name !== 'AbortError') video.controls = true; });
@@ -47,12 +50,27 @@ function initShowcase(root) {
   root.querySelector('[role=tablist]').addEventListener('keydown', (e) => {
     if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
     e.preventDefault();
-    show(e.key === 'ArrowRight' ? nextIndex(i, tabs.length) : prevIndex(i, tabs.length), true);
+    // a aba em foco pode não ser a que toca: o avanço automático muda i sem mover o foco
+    const f = tabs.indexOf(e.target.closest('[role=tab]'));
+    const k = f < 0 ? i : f;
+    show(e.key === 'ArrowRight' ? nextIndex(k, tabs.length) : prevIndex(k, tabs.length), true);
   });
   video.addEventListener('timeupdate', () => {
     if (video.duration) tabs[i].querySelector('.sc-bar').style.width = `${(video.currentTime / video.duration) * 100}%`;
   });
   video.addEventListener('ended', () => show(nextIndex(i, tabs.length)));
+  // sem 'ended' as abas param; com controles o visitante ainda vê o que der
+  video.addEventListener('error', () => {
+    video.controls = true;
+    console.error('showcase: vídeo não carregou', video.currentSrc || video.src, video.error);
+  });
+  // fora da tela pausa, então 'ended' não dispara e as abas não andam escondidas
+  if (!reducedMotion() && typeof IntersectionObserver !== 'undefined') {
+    new IntersectionObserver(([e]) => {
+      visible = e.isIntersecting;
+      if (visible) play(); else video.pause();
+    }, { threshold: 0.25 }).observe(video);
+  }
   show(0);
 }
 
@@ -93,7 +111,8 @@ function initInstall(root, platform) {
   root.querySelector('[role=tablist]').addEventListener('keydown', (e) => {
     if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
     e.preventDefault();
-    const k = tabs.findIndex((t) => t.dataset.os === os);
+    const f = tabs.indexOf(e.target.closest('[role=tab]'));
+    const k = f < 0 ? tabs.findIndex((t) => t.dataset.os === os) : f;
     const t = tabs[e.key === 'ArrowRight' ? nextIndex(k, tabs.length) : prevIndex(k, tabs.length)];
     pick(t);
     t.focus();
@@ -126,7 +145,7 @@ function initPlatform(platform) {
 
 function initLoopVideos() {
   const vids = [...document.querySelectorAll('video.loop')];
-  if (reducedMotion()) { vids.forEach((v) => { v.controls = true; }); return; }
+  if (reducedMotion() || typeof IntersectionObserver === 'undefined') { vids.forEach((v) => { v.controls = true; }); return; }
   const io = new IntersectionObserver((entries) => entries.forEach((e) => {
     if (e.isIntersecting) e.target.play().catch((err) => { if (err.name !== 'AbortError') e.target.controls = true; });
     else e.target.pause();
@@ -137,10 +156,12 @@ function initLoopVideos() {
 if (typeof document !== 'undefined') {
   document.addEventListener('DOMContentLoaded', () => {
     const platform = detectPlatform(navigator.userAgent, navigator.platform, navigator.maxTouchPoints);
-    document.querySelectorAll('[data-showcase]').forEach(initShowcase);
-    document.querySelectorAll('[data-terminal]').forEach(initTerminal);
-    document.querySelectorAll('[data-install]').forEach((el) => initInstall(el, platform));
-    initPlatform(platform);
-    initLoopVideos();
+    // uma parte quebrada não pode levar as outras junto
+    const safe = (name, fn) => { try { fn(); } catch (e) { console.error(`${name} falhou`, e); } };
+    safe('showcase', () => document.querySelectorAll('[data-showcase]').forEach(initShowcase));
+    safe('terminal', () => document.querySelectorAll('[data-terminal]').forEach(initTerminal));
+    safe('install', () => document.querySelectorAll('[data-install]').forEach((el) => initInstall(el, platform)));
+    safe('platform', () => initPlatform(platform));
+    safe('loopVideos', initLoopVideos);
   });
 }

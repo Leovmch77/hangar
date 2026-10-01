@@ -1,5 +1,5 @@
 """Synthetic backend for landing-page screenshots. Reuses task14 fixture handler; replaces sessions."""
-import pathlib, time
+import copy, pathlib, time
 TOOLS = pathlib.Path(__file__).resolve().parents[3] / "desktop-native" / "tools"
 import sys; sys.path.insert(0, str(TOOLS))
 SRC = (TOOLS / "task14_sidebar_fixture.py").read_text(encoding="utf-8")
@@ -332,7 +332,10 @@ class H(NS["Handler"]):
             return
         if len(parts) == 5 and parts[:2] == ["api", "sessions"] and parts[3:] == ["orq", "panel"]:
             if not self.authorized(): return
-            self.send_json(PANEL); return
+            # o live.py altera o PANEL sob o LOCK; serializar fora dele pega o dict no meio da mudança
+            with BASE["LOCK"]:
+                panel = copy.deepcopy(PANEL)
+            self.send_json(panel); return
         if parts[:2] == ["api", "costs"] or parts[:2] == ["api", "uso"]:
             if not self.authorized(): return
             q = parse_qs(urlparse(self.path).query)
