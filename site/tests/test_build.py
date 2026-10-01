@@ -72,7 +72,8 @@ class BuildTest(unittest.TestCase):
         pt = (self.out / "index.html").read_text()
         en = (self.out / "en/index.html").read_text()
         self.assertIn('data-src="/assets/media/pt/agents.mp4"', pt)
-        self.assertIn('src="/assets/media/pt/orq.mp4"', pt)
+        self.assertIn('class="shot loop" src="/assets/media/pt/orq.mp4"', pt)
+        self.assertIn('class="shot loop" src="/assets/media/pt/pair.mp4"', pt)
         self.assertIn('data-src="/assets/media/agents.mp4"', en)
         self.assertNotIn("/assets/media/pt/", en)
 

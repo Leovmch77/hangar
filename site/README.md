@@ -15,17 +15,24 @@ Só quando pedido.
 
 ```bash
 python3 -m unittest discover site/tests
-node --test site/tests/        # Node >= 22
+node --test site/tests/site.test.mjs
 ```
 
 ## Publicar
+
+Uma vez só, antes do primeiro upload (o login da `cf` não serve para upload):
+
+```bash
+npx --yes wrangler login
+npx --yes wrangler pages project create hangar-site --production-branch main
+```
+
+Depois:
 
 ```bash
 site/deploy.sh          # prévia
 site/deploy.sh main     # produção
 ```
-
-Rode `npx wrangler login` uma vez antes: o login da `cf` não serve para upload.
 
 ## Cache
 

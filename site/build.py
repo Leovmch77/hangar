@@ -11,7 +11,7 @@ SITE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(SITE / "src"))
 import strings as S  # noqa: E402
 
-ICONS = json.loads((SITE / "src" / "icons.json").read_text())
+ICONS = json.loads((SITE / "src" / "icons.json").read_text(encoding="utf-8"))
 esc = html.escape
 
 
@@ -77,7 +77,7 @@ def render_showcase(i):
 
 def render_page(i):
     lang = S.LANGS[i]
-    page = (SITE / "src" / "page.html").read_text()
+    page = (SITE / "src" / "page.html").read_text(encoding="utf-8")
     words = S.T["h1"][i].split(" ")
     clip = {c["key"]: c for c in S.CLIPS}
     extra = {
@@ -113,11 +113,12 @@ def build(out: pathlib.Path) -> list[pathlib.Path]:
     pages = []
     for i, lang in enumerate(S.LANGS):
         dest = out / ("index.html" if lang == "pt" else "en/index.html")
-        dest.write_text(render_page(i))
+        dest.write_text(render_page(i), encoding="utf-8")
         pages.append(dest)
     (out / "sitemap.xml").write_text(
         '<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
-        f"<url><loc>{S.BASE_URL}/</loc></url><url><loc>{S.BASE_URL}/en/</loc></url></urlset>\n"
+        f"<url><loc>{S.BASE_URL}/</loc></url><url><loc>{S.BASE_URL}/en/</loc></url></urlset>\n",
+        encoding="utf-8",
     )
     return pages
 
