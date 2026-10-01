@@ -13,6 +13,7 @@ import { ArquivoChip } from './ArquivoChip';
 import { BubbleActions } from './BubbleActions';
 import { getTableChartPref, setTableChartPref } from './tableChartPref';
 import { superficie } from '../theme/superficie';
+import { Icon, type IconName } from '../ui/Icon';
 
 // Tema completo do unistyles (tokens + base) — UnistylesTheme não é exportado na raiz.
 type TemaApp = UnistylesThemes[keyof UnistylesThemes];
@@ -35,7 +36,7 @@ export function mkMarkdownStyle(t: TemaApp): MarkdownStyle {
       fontFamily: t.base.fontMono,
       fontSize: t.base.text.sm,
       color: t.tokens.text.primary,
-      backgroundColor: t.tokens.bg.hover,
+      backgroundColor: superficie(t, 0.8),
     },
     codeBlock: {
       color: t.tokens.text.primary,
@@ -62,6 +63,9 @@ export function mkMarkdownStyle(t: TemaApp): MarkdownStyle {
     table: {
       headerBackgroundColor: superficie(t, 0.8),
       headerTextColor: t.tokens.text.primary,
+      // Sem estas duas a biblioteca pinta as linhas de branco, e o texto claro do tema some nelas.
+      rowEvenBackgroundColor: 'transparent',
+      rowOddBackgroundColor: superficie(t, 0.3),
       borderColor: t.tokens.border.subtle,
       borderWidth: 1,
       color: t.tokens.text.primary,
@@ -145,10 +149,10 @@ export const AssistantBubble = memo(function AssistantBubble({
             if (isImg) {
               return <Image key={r.path} source={{ uri, headers }} style={styles.thumb} contentFit="cover" transition={150} />;
             }
-            const icon = r.kind === 'pdf' ? '📄' : r.kind === 'html' ? '🌐' : r.kind === 'audio' ? '🎵' : '📎';
+            const icon: IconName = r.kind === 'pdf' ? 'FileText' : r.kind === 'html' ? 'Globe' : r.kind === 'audio' ? 'Music' : 'Paperclip';
             return (
               <View key={r.path} style={[styles.chip, { backgroundColor: superficie(theme), borderColor: theme.tokens.border.subtle }]}>
-                <Text style={styles.chipIco}>{icon}</Text>
+                <Icon name={icon} size={14} color={theme.tokens.text.secondary} />
                 <Text style={[styles.chipName, { color: theme.tokens.text.primary }]} numberOfLines={1}>
                   {r.name}
                 </Text>
@@ -179,13 +183,10 @@ const styles = StyleSheet.create((theme) => ({
     fontSize: theme.base.text.sm,
     fontWeight: '600',
   },
+  // Sem bolha, como no nativo: texto corrido na largura toda. Só tabela, código e anexo têm caixa,
+  // e essa caixa vem da superficie() para seguir Transparência e Solidez.
   wrap: {
-    alignSelf: 'flex-start',
-    maxWidth: '92%',
-    backgroundColor: superficie(theme, 0.8),
-    borderRadius: theme.base.radius.lg,
-    paddingHorizontal: theme.base.space[3],
-    paddingVertical: theme.base.space[2],
+    alignSelf: 'stretch',
     gap: theme.base.space[2],
   },
   atts: {
@@ -209,9 +210,6 @@ const styles = StyleSheet.create((theme) => ({
     borderRadius: theme.base.radius.md,
     borderWidth: 1,
     maxWidth: 220,
-  },
-  chipIco: {
-    fontSize: 16,
   },
   chipName: {
     fontSize: theme.base.text.xs,

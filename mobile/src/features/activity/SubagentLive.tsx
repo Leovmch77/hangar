@@ -104,7 +104,6 @@ export function SubagentLive({ sessionName, agentId }: Props) {
           <MessageList
             events={detail.events}
             preview=""
-            statusLine={null}
             olderFailed=""
             onLoadOlder={() => {}}
             pending={[]}

@@ -99,6 +99,9 @@ vi.mock('./ProviderPicker', () => ({ ProviderPicker: ({ onChange }: { onChange: 
   createElement('button', { onClick: () => onChange('claude') }, 'Claude'),
 ) }));
 vi.mock('./CodexContextControl', () => ({ CodexContextControl: () => null }));
+vi.mock('../../ui/Icon', () => ({ Icon: () => null }));
+vi.mock('../../ui/HangarMark', () => ({ HangarMark: () => null }));
+vi.mock('../../ui/Glass', () => ({ Glass: ({ children }: { children: ReactNode }) => createElement('div', null, children) }));
 vi.mock('@react-native-menu/menu', () => ({
   MenuView: ({ actions, onPressAction, children }: { actions: { id: string; title: string }[]; onPressAction: (event: { nativeEvent: { event: string } }) => void; children: ReactNode }) => createElement('div', null,
     children,
@@ -154,6 +157,7 @@ vi.mock('../../paraglide/messages', () => ({
   arquivo_sem_permissao: () => 'sem_permissao', arquivo_ilegivel: () => 'ilegivel',
   arquivo_raiz_nao_liberada: () => 'raiz_nao_liberada', arquivo_caminho_invalido: () => 'caminho_invalido',
   nova_conversa_placeholder: () => 'nova_conversa_placeholder', nova_conversa_enviar: () => 'nova_conversa_enviar',
+  native_new_chat_folder: () => 'native_new_chat_folder', native_empty_chat_hint: () => 'native_empty_chat_hint',
   nova_conversa_opcoes: () => 'nova_conversa_opcoes', nova_conversa_sem_destino: () => 'nova_conversa_sem_destino',
   nova_conversa_destino_hint: () => 'nova_conversa_destino_hint', nova_conversa_config_hint: () => 'nova_conversa_config_hint',
   nova_conversa_guardada: () => 'nova_conversa_guardada', nova_conversa_abrir: () => 'nova_conversa_abrir',
@@ -237,7 +241,7 @@ describe('CreateSessionSheet Codex', () => {
     const root = createRoot(container);
     await act(async () => root.render(strict ? createElement(StrictMode, null, createElement(CreateSessionSheet)) : createElement(CreateSessionSheet)));
     await act(async () => Promise.resolve());
-    await act(async () => [...container.querySelectorAll('button')].find((button) => button.textContent === 'nova_conversa_opcoes')!.click());
+    await act(async () => button(container, 'Claude · criar_padrao')!.click());
     await act(async () => [...container.querySelectorAll('button')].find((button) => button.textContent === 'Codex')!.click());
     await act(async () => Promise.resolve());
     return { container, root };
@@ -249,7 +253,7 @@ describe('CreateSessionSheet Codex', () => {
     const container = document.createElement('div'); const root = createRoot(container);
     await act(async () => root.render(createElement(CreateSessionSheet)));
     await act(async () => type(container, 'primeira mensagem'));
-    expect(container.textContent).toContain('/repo');
+    expect(button(container, 'Servidor B · /repo')).toBeTruthy();
     await act(async () => button(container, 'Servidor B · /repo')!.click());
     calls.scan.mockResolvedValue({ entries: [{ name: 'Child', path: '/repo/child', is_git: true, has_claude_md: false }] });
     await act(async () => button(container, 'criar_outra_pasta')!.click());
@@ -264,8 +268,9 @@ describe('CreateSessionSheet Codex', () => {
     await act(async () => button(container, 'high')!.click());
     await act(async () => button(container, 'fechar-folha')!.click());
     await flushDismiss();
-    expect(container.textContent).toContain('Servidor B · /repo/child');
-    expect(container.textContent).toContain('Codex · Sol · high');
+    expect(button(container, 'Servidor B · /repo/child')).toBeTruthy();
+    expect(button(container, 'Codex · Sol · high')).toBeTruthy();
+    expect(container.textContent).toContain('Sol · high');
     expect((container.querySelector('textarea[aria-label="nova_conversa_placeholder"]') as HTMLTextAreaElement).value).toBe('primeira mensagem');
     await act(async () => button(container, 'nova_conversa_enviar')!.click());
     for (let i = 0; i < 4; i++) await act(async () => Promise.resolve());
@@ -317,7 +322,7 @@ describe('CreateSessionSheet Codex', () => {
     expect(calls.pickerActive).toBe(picked ? 0 : 1);
     const initialSignal = calls.roots.mock.calls[0][1] as AbortSignal;
     if (!picked) expect(initialSignal.aborted).toBe(false);
-    await act(async () => button(container, 'nova_conversa_opcoes')!.click());
+    await act(async () => button(container, 'Claude · criar_padrao')!.click());
     const sheet = container.querySelector('[data-testid="options-sheet"]')!;
     expect(sheet).toBeTruthy();
     expect(sheet.querySelectorAll('[data-testid="cwd-picker"]').length).toBe(picked ? 0 : 1);
@@ -376,7 +381,7 @@ describe('CreateSessionSheet Codex', () => {
     await act(async () => type(container, 'antes da folha'));
     expect(container.textContent).toContain(message);
     expect(container.querySelector('[data-testid="options-sheet"]')).toBeNull();
-    await act(async () => button(container, 'nova_conversa_opcoes')!.click());
+    await act(async () => button(container, 'Claude · criar_padrao')!.click());
     await act(async () => button(container, 'nova_conversa_opcoes_fechar')!.click());
     await flushDismiss();
     await act(async () => type(container, 'depois da folha'));
@@ -475,7 +480,7 @@ describe('CreateSessionSheet Codex', () => {
     calls.target = { id: 'server-c', label: 'Servidor C', baseUrl: 'https://c.local', token: 'token-c' };
     calls.roots.mockResolvedValue([{ name: 'Other', path: '/other' }]);
     await act(async () => root.render(createElement(CreateSessionSheet)));
-    await act(async () => button(container, 'nova_conversa_opcoes')!.click());
+    await act(async () => button(container, 'Claude · criar_padrao')!.click());
     await act(async () => { scan.resolve({ entries: [] }); configs.resolve([{ path: '/old', label: 'Conta antiga', active: true }]); models.resolve({ models: [{ id: 'old', name: 'Modelo antigo' }], reduced: false }); });
     expect(container.textContent).toContain('/other');
     expect(container.textContent).not.toContain('/repo');

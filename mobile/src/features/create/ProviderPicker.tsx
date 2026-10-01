@@ -2,6 +2,7 @@ import { Pressable, Text, View } from 'react-native';
 import { StyleSheet } from 'react-native-unistyles';
 import { providerName } from '@hangar/core';
 import type { Provider } from '@hangar/core';
+import { superficie } from '../../theme/superficie';
 
 const PROVIDERS: Provider[] = ['claude', 'codex', 'pi', 'kimi'];
 
@@ -53,7 +54,7 @@ const styles = StyleSheet.create((theme) => ({
     borderRadius: theme.base.radius.md,
     borderWidth: 1,
     borderColor: theme.tokens.border.default,
-    backgroundColor: theme.tokens.bg.surface,
+    backgroundColor: superficie(theme),
   },
   tileOn: {
     borderColor: theme.tokens.accent.base,

@@ -5,12 +5,10 @@ import { LegendList } from '@legendapp/list/react-native';
 import { UserBubble } from './UserBubble';
 import { AssistantBubble } from './AssistantBubble';
 import { PreviewBubble } from './PreviewBubble';
-import { ToolCard } from './tools/ToolCard';
 import { ToolGroup } from './tools/ToolGroup';
 import { ToolDetailSheet, type ToolDetailHandle } from './tools/ToolDetailSheet';
-import { StatusLine } from './StatusLine';
-import { ThinkingBlock } from './ThinkingBlock';
-import { agruparConversa, entraNoPensamento, planDisplayText, type ChatEvent, type ItemConversa, type SessionInfo } from '@hangar/core';
+import { foldConversation, type ConversationRow } from './tools/fold';
+import { agruparConversa, entraNoPensamento, planDisplayText, type ChatEvent, type SessionInfo } from '@hangar/core';
 import { useAparencia } from '../stores/aparencia';
 import type { PendingMsg } from './pending';
 import * as m from '../paraglide/messages';
@@ -27,7 +25,6 @@ interface Props {
   preview: string;
   previewMd?: boolean; // prévia do agente = markdown (default true = comportamento antigo)
   previewFull?: boolean;
-  statusLine: string | null;
   session?: SessionInfo | null;
   olderFailed: '' | 'failed' | 'unjoinable';
   onLoadOlder: () => void;
@@ -37,8 +34,8 @@ interface Props {
   serverId?: string;
 }
 
-// Bolha sem texto não vira item nenhum. O tool_result é descartado pelo agruparConversa (entra no
-// card do tool_use pareado), então aqui sobra só o vazio.
+// Bolha sem texto não vira item nenhum. O tool_result é descartado pelo agruparConversa (entra na
+// linha do tool_use pareado), então aqui sobra só o vazio.
 function visivel(ev: ChatEvent): boolean {
   if (ev.kind === 'user_msg' || ev.kind === 'assistant_msg') return !!ev.text;
   return true;
@@ -49,7 +46,6 @@ export function MessageList({
   preview,
   previewMd = true,
   previewFull = false,
-  statusLine,
   session,
   olderFailed,
   onLoadOlder,
@@ -73,20 +69,18 @@ export function MessageList({
   // refeita a cada token, em vez de só o rodapé, que é onde a prévia mora. Os itens são `memo`
   // pelo mesmo motivo; sem as duas metades, qualquer uma sozinha não adianta.
   const resultDe = useCallback((t: ChatEvent) => results.get(t.tool_use_id ?? '') ?? null, [results]);
+  // Layout do nativo: o que vem entre duas mensagens (raciocínio, chamadas, grupos) vira UM trecho
+  // dobrado. O agrupamento continua o do core; o foldConversation só junta o desenho.
   const data = useMemo(
-    () => agruparConversa(events.filter(visivel), { entraNoPensamento: (n) => entraNoPensamento(pref, n) }),
+    () => foldConversation(agruparConversa(events.filter(visivel), { entraNoPensamento: (n) => entraNoPensamento(pref, n) })),
     [events, pref],
   );
   const abrirDetalhe = useCallback((ev: ChatEvent) => detail.current?.abrir(ev), []);
 
-  const renderItem = useCallback(({ item }: { item: ItemConversa }) => {
+  const renderItem = useCallback(({ item }: { item: ConversationRow }) => {
     switch (item.type) {
-      case 'group':
-        return <ToolGroup tools={item.tools} resultOf={resultDe} onAbrir={abrirDetalhe} />;
-      case 'tool':
-        return <ToolCard use={item.ev} result={resultDe(item.ev)} onPress={abrirDetalhe} />;
-      case 'pensamento':
-        return <ThinkingBlock eventos={item.eventos} />;
+      case 'fold':
+        return <ToolGroup parts={item.parts} resultOf={resultDe} onAbrir={abrirDetalhe} />;
       case 'event': {
         const ev = item.ev;
         if (ev.kind === 'user_msg') {
@@ -142,7 +136,6 @@ export function MessageList({
       contentContainerStyle={styles.content}
       ListFooterComponent={
         <View style={styles.footer}>
-          <StatusLine line={statusLine} session={session} />
           {olderFailed === 'failed' ? (
             <Text
               style={styles.gap}
@@ -171,12 +164,14 @@ export function MessageList({
 }
 
 const styles = StyleSheet.create((theme) => ({
+  // Resposta sem bolha ocupa a largura: a margem lateral é o que separa o texto da borda da tela.
   content: {
-    padding: theme.base.space[3],
-    gap: theme.base.space[2],
+    paddingHorizontal: theme.base.space[4],
+    paddingVertical: theme.base.space[3],
+    gap: theme.base.space[3],
   },
   footer: {
-    gap: theme.base.space[2],
+    gap: theme.base.space[3],
   },
   gap: {
     fontSize: theme.base.text.xs,

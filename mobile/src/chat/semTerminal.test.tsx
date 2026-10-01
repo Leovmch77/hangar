@@ -66,10 +66,10 @@ vi.mock('./TuiPill', () => ({ TuiPill: () => null }));
 vi.mock('./RecarregarPill', () => ({ RecarregarPill: () => null }));
 vi.mock('./PendingPlan', () => ({ PendingPlan: () => null }));
 vi.mock('./SessionProblem', () => ({ SessionProblem: () => null }));
-vi.mock('./StatsStrip', () => ({ StatsStrip: () => null }));
 vi.mock('./SessionPickerSheet', () => ({ SessionPickerSheet: () => null }));
 vi.mock('../features/create/CreateSessionSheet', () => ({ CreateSessionSheet: () => createElement('div', { 'data-create': true }) }));
 vi.mock('../ui/Icon', () => ({ Icon: () => null }));
+vi.mock('../ui/HangarMark', () => ({ HangarMark: () => null }));
 const sheetEvents = vi.hoisted(() => ({ presented: undefined as (() => void) | undefined, dismissed: undefined as (() => void) | undefined }));
 vi.mock('../ui/Sheet', () => ({ Sheet: ({ children, onDidPresent, onDismiss }: { children: ReactNode; onDidPresent?: () => void; onDismiss?: () => void }) => {
   sheetEvents.presented = onDidPresent;
@@ -82,10 +82,13 @@ vi.mock('./ContextRing', () => ({ ContextRing: () => null }));
 vi.mock('../paraglide/messages', () => Object.fromEntries(
   ('arq_aba askq_sua_resposta bastao_dossie_sub bastao_dossie_titulo chat_voltar_sessoes codex_limites_titulo ctx_anexos ctx_atividade ctx_grupo ctx_limites ctx_repositorio ctx_terminal modo_so_ociosa more_fotos_videos_arquivos more_tarefas_agentes navbar_mais_acoes par_titulo recarregar_sessao recarregar_sessao_detalhe sessao_trocar_de term_titulo '
     + 'askq_enviando board_arquivo board_imagem board_remover_anexo codex_orientar composer_anexar_arquivo composer_desfazer_limpeza composer_ditado_limpo composer_enviando_cancelar composer_enviar_mensagem composer_fila_acao composer_fila_aria composer_fila_contagem composer_gravando_audio composer_gravar_audio composer_mandando_grupo composer_mandar_grupo composer_mandar_tambem composer_mensagem composer_parar composer_parar_gravacao composer_pro_grupo composer_pros_dois composer_sessao_trabalhando composer_transcrevendo_audio composer_transcrever_de_novo')
+    .concat(' composer_mic_style_hint composer_dictation_style composer_session_settings composer_session_settings_hint ditado_estilo_titulo uso_aria')
     .concat(' permissao_pedido comum_cancelar msg_aria_mensagens chat_plan_proposto composer_falha_envio nova_conversa_envio_incerto nova_conversa_resultado_salvar_erro nova_conversa_salvar_erro')
     .concat(' askq_enviando board_falha_envio board_falha_upload chat_chegou_mas chat_envio_incerto chat_nao_chegou_em chat_servidor_removido codex_orientar_recebido codex_orientar_sem_envio composer_ditado_anterior composer_ditado_aplicado composer_ditado_indisponivel composer_ditado_interrompido composer_ditado_recuperavel composer_draft_read_again composer_draft_recover_attach_busy composer_falha_gravacao composer_falha_transcricao composer_fila_erro composer_sem_acesso_fotos composer_sem_acesso_mic composer_submission_check composer_submission_rejected composer_submission_sending composer_transcrever_de_novo composer_transcricao_vazia')
     .concat(' draft_read_error draft_invalid draft_write_error draft_clear_error composer_draft_previous composer_draft_recover composer_draft_discard composer_draft_read_again')
-    .concat(' sessao_nova nova_conversa_placeholder nova_conversa_sem_destino nova_conversa_opcoes nova_conversa_opcoes_fechar nova_conversa_destino_hint nova_conversa_config_hint nova_conversa_enviar criar_criando').split(' ').map((k) => [k, () => k]),
+    .concat(' sessao_nova nova_conversa_placeholder nova_conversa_sem_destino nova_conversa_opcoes nova_conversa_opcoes_fechar nova_conversa_destino_hint nova_conversa_config_hint nova_conversa_enviar criar_criando')
+    .concat(' composer_mensagem_para comandos_titulo native_new_chat_title native_empty_chat_hint')
+    .concat(' uso_titulo uso_vazio uso_secao_cota uso_secao_conversa uso_secao_numeros uso_statusline uso_custo uso_tempo_sessao uso_linha_projeto uso_reset composer_modelo ctx_contexto stats_faixa_aria').split(' ').map((k) => [k, () => k]),
 ));
 
 // Rascunho em memória no lugar do MMKV; cada teste começa sem nada guardado.
@@ -125,7 +128,8 @@ vi.mock('../features/pills/ModelPill', () => ({ ModelPill: () => null }));
 vi.mock('../features/pills/EffortPill', () => ({ EffortPill: () => null }));
 vi.mock('../features/pills/PermissionPill', () => ({ PermissionPill: () => null }));
 vi.mock('../features/pills/PillMenu', () => ({ PillMenu: () => null }));
-vi.mock('../features/ditado/EstiloPill', () => ({ EstiloPill: () => null }));
+vi.mock('../features/ditado/EstiloPill', () => ({ DictationStyleMenu: () => null, useDictationStyleLabel: () => 'estilo' }));
+vi.mock('./SessionSettings', () => ({ SessionSettingsButton: () => createElement('button', { 'aria-label': 'composer_session_settings' }) }));
 vi.mock('../features/ditado/useDitado', () => ({ useDitado: (callbacks: { onFim: typeof voiceInput.onFim }) => {
   voiceInput.onFim = callbacks.onFim;
   return { gravando: false, rms: 0, iniciar: () => {}, parar: () => {} };
@@ -174,7 +178,6 @@ const bubbleTexts = vi.hoisted(() => [] as string[]);
 vi.mock('./AssistantBubble', () => ({ AssistantBubble: ({ text }: { text: string }) => { bubbleTexts.push(text); return null; } }));
 vi.mock('./UserBubble', () => ({ UserBubble: () => null }));
 vi.mock('./PreviewBubble', () => ({ PreviewBubble: () => null }));
-vi.mock('./StatusLine', () => ({ StatusLine: () => null }));
 vi.mock('./ThinkingBlock', () => ({ ThinkingBlock: () => null }));
 vi.mock('./tools/ToolCard', () => ({ ToolCard: () => null }));
 vi.mock('./tools/ToolGroup', () => ({ ToolGroup: () => null }));
@@ -237,15 +240,10 @@ it.each([0, 1])('opção %s e cancelar compartilham trava, mantendo índice 1-ba
 });
 
 describe('terminal escondido', () => {
-  it('cabeçalho sem onTerminal não mostra o botão Terminal', async () => {
+  it('cabeçalho não tem botão Terminal: ele mora só no "⋯"', async () => {
     const { container, root } = await render(createElement(ChatHeader, header));
     expect(container.querySelector('[aria-label="term_titulo"]')).toBeNull();
-    act(() => root.unmount());
-  });
-
-  it('cabeçalho com onTerminal continua mostrando o botão', async () => {
-    const { container, root } = await render(createElement(ChatHeader, { ...header, onTerminal: () => {} }));
-    expect(container.querySelector('[aria-label="term_titulo"]')).not.toBeNull();
+    expect(container.querySelector('[aria-label="navbar_mais_acoes"]')).not.toBeNull();
     act(() => root.unmount());
   });
 
@@ -274,8 +272,8 @@ it('opções da Nova conversa recebem foco e devolvem ao seletor que abriu, pres
   vi.mocked(AccessibilityInfo.sendAccessibilityEvent).mockClear();
   const { container, root } = await render(createElement(NewConversation, {
     server: { id: 's1' } as never,
-    destination: null, destinationPending: false, destinationSummary: 'srv /repo',
-    settingsSummary: 'Codex', notices: null, options: null,
+    destination: null, destinationPending: false, folderLabel: 'repo', destinationLabel: 'srv · /repo',
+    providerLabel: 'Codex', settingsLabel: 'Codex', statusLabel: '', notices: null, options: null,
     body: { cwd: '/repo', provider: 'codex' }, blocked: false,
   }));
   const field = container.querySelector('textarea')!;
@@ -311,13 +309,13 @@ describe('Parar no Composer', () => {
     act(() => root.unmount());
   });
 
-  it('trabalhando: Parar ao lado do envio, e o toque chama onStop', async () => {
+  it('trabalhando sem texto: Parar no lugar do envio, e o toque chama onStop', async () => {
     composerChat.state = 'working';
     const onStop = vi.fn();
     const { container, root } = await render(createElement(Composer, { ...props, onStop }));
     const parar = container.querySelector<HTMLButtonElement>('[aria-label="composer_parar"]');
     expect(parar).not.toBeNull();
-    expect(container.querySelector('[aria-label="composer_enviar_mensagem"]')).not.toBeNull();
+    expect(container.querySelector('[aria-label="composer_enviar_mensagem"]')).toBeNull();
     act(() => parar!.click());
     expect(onStop).toHaveBeenCalledTimes(1);
     act(() => root.unmount());
@@ -374,6 +372,22 @@ describe('Parar no Composer', () => {
     composerChat.state = 'working';
     const { container, root } = await render(createElement(Composer, props));
     expect(container.querySelector('[aria-label="composer_parar"]')).toBeNull();
+    act(() => root.unmount());
+  });
+});
+
+describe('linha de botões do Composer', () => {
+  it('campo em linha própria; botão único de ajustes e microfone com a dica do estilo', async () => {
+    composerChat.state = 'idle';
+    const { container, root } = await render(createElement(Composer, { serverId: 's1', name: 'sess' }));
+    const field = container.querySelector('[aria-label="composer_mensagem"]')!;
+    const settings = container.querySelector('[aria-label="composer_session_settings"]')!;
+    expect(settings).not.toBeNull();
+    // O campo não divide a linha com os botões.
+    expect(field.parentElement!.contains(settings)).toBe(false);
+    expect(container.querySelector<HTMLButtonElement>('[aria-label="composer_gravar_audio"]')!.title).toBe('composer_mic_style_hint');
+    expect(container.querySelector('[aria-label="comandos_titulo"]')).not.toBeNull();
+    expect(container.querySelector('[aria-label="composer_anexar_arquivo"]')).not.toBeNull();
     act(() => root.unmount());
   });
 });
@@ -498,7 +512,8 @@ describe('primeiro envio incerto com os stores reais', () => {
 
     const creation = await render(createElement(NewConversation, {
       server: { id: 's1', label: 'S1', baseUrl: 'http://s1', token: 'fixture' },
-      destination: null, destinationPending: false, destinationSummary: null, settingsSummary: null,
+      destination: null, destinationPending: false, folderLabel: 'repo', destinationLabel: 'S1 · /repo',
+      providerLabel: 'Codex', settingsLabel: 'Codex', statusLabel: '',
       notices: null, options: null, body: { cwd: '/repo', provider: 'codex' }, blocked: false,
     }));
     act(() => {
@@ -599,7 +614,7 @@ describe('rascunho guardado no Composer', () => {
     return raw ? JSON.parse(raw) as { text: string; revision: number; transcript: string | null } : null;
   };
   const button = (container: HTMLElement, label: string) => [...container.querySelectorAll('button, [role="button"]')]
-    .find((el) => el.textContent === label) as HTMLElement | undefined;
+    .find((el) => el.textContent === label || el.getAttribute('aria-label') === label) as HTMLElement | undefined;
 
   it.each(['sending', 'unknown', 'rejected'])('reabre upload confirmado com input %s sem reenviar; Recuperar devolve só o texto', async (status) => {
     composerChat.send.mockClear();
@@ -846,7 +861,7 @@ describe('plano proposto na lista', () => {
     const text = 'Antes\n<proposed_plan>\n# Plano\n- passo\n</proposed_plan>';
     const { root } = await render(createElement(MessageList, {
       events: [{ id: 'a1', kind: 'assistant_msg', text }],
-      preview: '', statusLine: null, olderFailed: '', onLoadOlder: () => {},
+      preview: '', olderFailed: '', onLoadOlder: () => {},
       session: { provider: 'codex' } as never,
     } as never));
     expect(bubbleTexts).toEqual([text]);

@@ -4,6 +4,7 @@ import { StyleSheet } from 'react-native-unistyles';
 import { getRootsForServer, scanDirForServer } from '@hangar/core';
 import type { FsRoot, FsEntry, FsScanError, Server } from '@hangar/core';
 import { readProject } from '../../stores/createPreferences';
+import { superficie } from '../../theme/superficie';
 import * as m from '../../paraglide/messages';
 
 function scanMessage(error: FsScanError): string {
@@ -243,7 +244,7 @@ const styles = StyleSheet.create((theme) => ({
     minHeight: 44,
     paddingHorizontal: theme.base.space[4],
     borderRadius: 9999,
-    backgroundColor: theme.tokens.bg.surface,
+    backgroundColor: superficie(theme),
     borderWidth: 1,
     borderColor: theme.tokens.border.default,
     justifyContent: 'center',
@@ -253,7 +254,7 @@ const styles = StyleSheet.create((theme) => ({
   chipTxtOn: { color: theme.tokens.text.primary },
   search: {
     height: 44,
-    backgroundColor: theme.tokens.bg.surface,
+    backgroundColor: superficie(theme),
     borderWidth: 1,
     borderColor: theme.tokens.border.default,
     borderRadius: theme.base.radius.md,

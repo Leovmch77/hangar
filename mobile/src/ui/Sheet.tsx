@@ -1,4 +1,5 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, type ReactNode } from 'react';
+import { Platform } from 'react-native';
 import { TrueSheet, type SheetDetent } from '@lodev09/react-native-true-sheet';
 import { useUnistyles } from 'react-native-unistyles';
 import { alphaDoVidro, useReduceTransparency } from './Glass';
@@ -21,6 +22,11 @@ type Props = {
 
 // true-sheet exige New Arch (ligada: app.json newArchEnabled). Teto de 3 detents: Android trunca em 3.
 // Fundo do vidro: a sheet é navegação, então leva o modalAlpha; conteúdo dentro dela usa surfaceAlpha.
+// No Android a true-sheet não desfoca (`backgroundBlur` é só do iOS): sem desfoque, a folha
+// translúcida deixa o texto da conversa vazar por trás do dela. Lá ela fica quase opaca.
+const alphaFolha = (theme: Parameters<typeof alphaDoVidro>[0]) =>
+  Platform.OS === 'android' ? Math.max(0.97, alphaDoVidro(theme, 'modal')) : alphaDoVidro(theme, 'modal');
+
 export const Sheet = forwardRef<TrueSheet, Props>(function Sheet({ sizes = ['auto'], open, children, onDismiss, onDidPresent, scrollable }, ref) {
   const { theme, rt } = useUnistyles();
   const reduzir = useReduceTransparency();
@@ -53,7 +59,7 @@ export const Sheet = forwardRef<TrueSheet, Props>(function Sheet({ sizes = ['aut
       detents={sizes.slice(0, 3).map((s) => DETENT[s])}
       cornerRadius={theme.base.radius.xl}
       backgroundBlur={reduzir ? undefined : rt.themeName === 'dark' ? 'dark' : 'light'}
-      backgroundColor={reduzir ? `rgb(${r},${g},${b})` : `rgba(${r},${g},${b},${alphaDoVidro(theme, 'modal')})`}
+      backgroundColor={reduzir ? `rgb(${r},${g},${b})` : `rgba(${r},${g},${b},${alphaFolha(theme)})`}
       grabber
       scrollable={scrollable}
       onDidPresent={onDidPresent}

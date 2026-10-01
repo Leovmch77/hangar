@@ -1,60 +1,41 @@
-import { memo, useState } from 'react';
+import { memo, useMemo, useState } from 'react';
 import { Pressable, Text, View } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
-import { ehBusca, resumoPensamento, summarizeToolInput, type ChatEvent } from '@hangar/core';
-import { Icon } from '../ui/Icon';
+import { EnrichedMarkdownText } from 'react-native-enriched-markdown';
+import { resumoPensamento, type ChatEvent } from '@hangar/core';
 import * as m from '../paraglide/messages';
+import { mkMarkdownStyle } from './AssistantBubble';
 
-// Um turno de raciocínio recolhido numa linha só, que abre no lugar. O ToolSearch entra no bloco
-// (senão ele quebraria no meio) mas não vira linha: "select:WebSearch,WebFetch" é encanamento.
-export const ThinkingBlock = memo(function ThinkingBlock({ eventos }: { eventos: ChatEvent[] }) {
+// Um raciocínio como linha do trecho dobrado: "Raciocínio  <primeira frase>", e o toque abre o texto
+// inteiro embaixo, em markdown (o resumo do raciocínio traz **título**). Vive dentro do fio do
+// trecho, então não tem caixa própria.
+export const ThinkingBlock = memo(function ThinkingBlock({ ev }: { ev: ChatEvent }) {
   const { theme } = useUnistyles();
   const [aberto, setAberto] = useState(false);
-  const pensamentos = eventos.filter((e) => e.kind === 'thinking');
-  const chamadas = eventos.filter((e) => e.kind === 'tool_use' && e.tool_name !== 'ToolSearch');
-  const soBusca = chamadas.every((e) => ehBusca(e.tool_name));
-  const n = chamadas.length;
-  const rotulo =
-    n === 0
-      ? m.pensamento_rotulo()
-      : soBusca
-        ? n === 1
-          ? m.pensamento_uma_busca()
-          : m.pensamento_buscas({ n })
-        : n === 1
-          ? m.pensamento_uma_chamada()
-          : m.pensamento_chamadas({ n });
-  const resumo = resumoPensamento(pensamentos[0]?.text ?? '');
+  const texto = ev.text ?? '';
+  const md = useMemo(() => {
+    const base = mkMarkdownStyle(theme);
+    return { ...base, paragraph: { ...base.paragraph, color: theme.tokens.text.secondary, fontSize: theme.base.text.sm } };
+  }, [theme]);
   return (
-    <View style={styles.wrap}>
+    <View>
       <Pressable
         onPress={() => setAberto((v) => !v)}
-        style={styles.head}
+        style={({ pressed }) => [styles.line, pressed && { backgroundColor: theme.tokens.bg.hover }]}
         accessibilityRole="button"
         accessibilityLabel={m.pensamento_abrir()}
         accessibilityState={{ expanded: aberto }}
       >
-        <Icon name="Brain" size={13} color={theme.tokens.text.muted} />
-        <Text style={[styles.rotulo, { color: theme.tokens.text.muted }]}>{rotulo}</Text>
+        <Text style={[styles.rotulo, { color: theme.tokens.text.secondary }]}>{m.native_thinking()}</Text>
         {!aberto ? (
           <Text style={[styles.resumo, { color: theme.tokens.text.muted }]} numberOfLines={1}>
-            {resumo}
+            {resumoPensamento(texto.replace(/\*\*/g, ''))}
           </Text>
         ) : null}
       </Pressable>
       {aberto ? (
-        <View style={[styles.corpo, { borderLeftColor: theme.tokens.border.subtle }]}>
-          {eventos.map((e) =>
-            e.kind === 'thinking' ? (
-              <Text key={e.id} style={[styles.texto, { color: theme.tokens.text.secondary }]}>
-                {e.text}
-              </Text>
-            ) : e.tool_name === 'ToolSearch' ? null : (
-              <Text key={e.id} style={[styles.busca, { color: theme.tokens.text.muted }]}>
-                · {e.tool_name}: {summarizeToolInput(e.tool_name ?? '', e.tool_input ?? {})}
-              </Text>
-            ),
-          )}
+        <View style={styles.texto}>
+          <EnrichedMarkdownText markdown={texto} markdownStyle={md} flavor="github" />
         </View>
       ) : null}
     </View>
@@ -62,13 +43,18 @@ export const ThinkingBlock = memo(function ThinkingBlock({ eventos }: { eventos:
 });
 
 const styles = StyleSheet.create((theme) => ({
-  wrap: { paddingVertical: 2 },
-  head: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingVertical: 6, paddingHorizontal: 4 },
-  rotulo: { fontSize: theme.base.text.xs, fontStyle: 'italic' },
-  resumo: { flex: 1, fontSize: theme.base.text.xs, fontStyle: 'italic' },
-  // Fio à esquerda em vez de caixa: o pensamento é aparte da conversa, não um cartão — superfície
-  // própria aqui viraria retângulo chapado por cima do papel de parede.
-  corpo: { gap: 6, marginLeft: 9, paddingLeft: 14, paddingRight: 8, paddingBottom: 6, borderLeftWidth: 1 },
-  texto: { fontSize: theme.base.text.sm, lineHeight: 20 },
-  busca: { fontSize: theme.base.text.xs, fontFamily: theme.base.fontMono },
+  line: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: theme.base.space[2],
+    minHeight: 36,
+    paddingHorizontal: theme.base.space[1],
+    borderRadius: theme.base.radius.sm,
+  },
+  rotulo: { flexShrink: 0, fontSize: theme.base.text.xs, fontWeight: '500' },
+  resumo: { flex: 1, minWidth: 0, fontSize: theme.base.text.xs, fontStyle: 'italic' },
+  texto: {
+    paddingHorizontal: theme.base.space[1],
+    paddingBottom: theme.base.space[2],
+  },
 }));

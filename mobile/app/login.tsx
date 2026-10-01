@@ -137,7 +137,8 @@ export default function Login() {
         </Glass>
       </View>
 
-      <Sheet open={scanning} sizes={['large']} onDismiss={() => setScanning(false)}>
+      {/* `scrollable` é o que faz a sheet dar a altura do detent ao conteúdo; sem ele o flex:1 da câmera colapsa numa faixa. */}
+      <Sheet open={scanning} sizes={['large']} scrollable onDismiss={() => setScanning(false)}>
         <QrScanner onScan={handleScan} onClose={() => setScanning(false)} />
       </Sheet>
     </Screen>

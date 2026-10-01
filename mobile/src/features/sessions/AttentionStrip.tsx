@@ -1,32 +1,11 @@
-import { Pressable, ScrollView } from 'react-native';
-import { StyleSheet } from 'react-native-unistyles';
 import { attentionFeed, type AggSession } from '@hangar/core';
-import { Chip } from '../../ui/Chip';
 
 // "Precisa de você": quem está aguardando resposta, de todos os servidores, mais antigo primeiro.
-export function AttentionStrip({ sessions, onOpen }: { sessions: AggSession[]; onOpen: (s: AggSession) => void }) {
-  const fila = attentionFeed(sessions);
-  if (!fila.length) return null;
-  return (
-    <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.faixa}>
-      {fila.map((s) => (
-        <Pressable
-          key={`${s.serverId}::${s.name}`}
-          onPress={() => onOpen(s)}
-          accessibilityRole="button"
-          // o label do pai apaga o texto do chip pro leitor de tela — a pergunta vai junto
-          accessibilityLabel={s.question ? `${s.name}, ${s.question}` : s.name}
-          hitSlop={6}
-          style={styles.item}
-        >
-          <Chip tone="warning" icon="CircleHelp">{s.question ? `${s.name} · ${s.question}` : s.name}</Chip>
-        </Pressable>
-      ))}
-    </ScrollView>
-  );
+// Vira o primeiro grupo do painel, e quem entra nele sai do grupo de origem: a mesma sessão em
+// dois lugares repetia a pergunta, e num grupo recolhido ela ficava escondida.
+export function splitAttention(rows: AggSession[]): { attention: AggSession[]; rest: AggSession[] } {
+  const attention = attentionFeed(rows);
+  if (!attention.length) return { attention, rest: rows };
+  const fora = new Set(attention);
+  return { attention, rest: rows.filter((r) => !fora.has(r)) };
 }
-
-const styles = StyleSheet.create((theme) => ({
-  faixa: { flexDirection: 'row', gap: theme.base.space[2], paddingHorizontal: theme.base.space[3], paddingBottom: theme.base.space[2] },
-  item: { maxWidth: 260 },
-}));

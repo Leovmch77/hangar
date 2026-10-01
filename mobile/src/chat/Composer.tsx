@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { AccessibilityInfo, ActivityIndicator, AppState, Platform, Pressable, ScrollView, Text, View, type NativeSyntheticEvent, type TextInput, type TextInputKeyPressEventData } from 'react-native';
+import { AccessibilityInfo, ActivityIndicator, AppState, Platform, Pressable, Text, View, type NativeSyntheticEvent, type TextInput, type TextInputKeyPressEventData } from 'react-native';
 import type { NativeStackNavigationProp } from 'expo-router';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import * as ImagePicker from 'expo-image-picker';
 import * as DocumentPicker from 'expo-document-picker';
 import { Image } from 'expo-image';
-import { broadcast, formataErro, uploadFileForServer, transcribeFileForServer, steerSession, podeEnviarSozinho } from '@hangar/core';
-import type { MotivoFim, Server } from '@hangar/core';
+import { broadcast, formataErro, uploadFileForServer, transcribeFileForServer, steerSession, podeEnviarSozinho, providerName } from '@hangar/core';
+import type { MotivoFim, Provider, Server } from '@hangar/core';
 import { Glass } from '../ui/Glass';
 import { Icon } from '../ui/Icon';
 import { MultilineInput } from '../ui/MultilineInput';
@@ -17,15 +17,13 @@ import { useSessions } from '../stores/sessions';
 import { clearDraft, clearRecoverableDraft, readDraft, readRecoverableDraft, resolveDraftTranscript, reusableUploadPath, withoutUpload, writeDraft, writeRecoverableDraft, clearDictation, readDictation, writeDictation, finishDictation, recoverDictation, associateDictationTranscript, type ConversationDraft, type DraftAttachment, type DictationDraft } from '../stores/drafts';
 import { useServers } from '../stores/servers';
 import { removeDraftAttachment, retainDraftAttachment } from './draftAttachments';
-import { useNavigation, useRouter } from 'expo-router';
-import { ModelPill } from '../features/pills/ModelPill';
-import { EffortPill } from '../features/pills/EffortPill';
-import { PermissionPill } from '../features/pills/PermissionPill';
-import { EstiloPill } from '../features/ditado/EstiloPill';
+import { useNavigation } from 'expo-router';
+import { DictationStyleMenu, useDictationStyleLabel } from '../features/ditado/EstiloPill';
 import { useDitado } from '../features/ditado/useDitado';
 import { useDitadoEstiloStore } from '../features/ditado/ditadoEstiloStore';
 import { PillMenu } from '../features/pills/PillMenu';
 import { CommandSheet } from './CommandSheet';
+import { SessionSettingsButton } from './SessionSettings';
 import { comandoParcial } from './comandoParcial';
 import { superficie } from '../theme/superficie';
 
@@ -45,7 +43,7 @@ type PendingAttach = DraftAttachment & { size?: number };
 const attachInsert = (attach: DraftAttachment, path: string) =>
   `📎 ${attach.kind === 'image' ? m.board_imagem() : m.board_arquivo()}: ${path}`;
 const withAttach = (text: string, insert: string) => (text ? `${text} — ${insert}` : insert);
-// Glifo dentro de botão de 44 pt: crescer com o texto ampliado cortava o ícone; o rótulo acessível já diz a ação.
+// Número do selo da fila: crescer com o texto ampliado o cortava dentro do botão; a dica acessível já diz a contagem.
 const GLYPH_MAX_SCALE = 1.4;
 
 // Chamado depois que o rascunho largou a cópia: falhar aqui deixa só um arquivo órfão na pasta do app.
@@ -90,7 +88,6 @@ function keepRecoverable(serverId: string, name: string, old: ConversationDraft)
 
 export function Composer({ serverId, name, draft, firstInputId, firstInputSent = false, sessionProvider, onStop, stopping = false }: Props) {
   const { theme } = useUnistyles();
-  const router = useRouter();
   const navigation = useNavigation<NativeStackNavigationProp<Record<string, object | undefined>>>();
   const inputRef = useRef<TextInput>(null);
   const restoreFocus = useRef(false);
@@ -352,8 +349,11 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
   const [failed, setFailed] = useState<{ file: File; motivo: MotivoFim; uri: string } | null>(null);
   const [autoN, setAutoN] = useState<number | null>(null);
   const [attachMenuOpen, setAttachMenuOpen] = useState(false);
+  const [styleMenuOpen, setStyleMenuOpen] = useState(false);
+  const dictationStyle = useDictationStyleLabel();
   // null = lista de comandos fechada; string = o que veio depois da `/`.
   const [cmdFiltro, setCmdFiltro] = useState<string | null>(null);
+  const commandsFromButtonRef = useRef(false);
   // Só é definido quando o app MOVE o cursor (ditado, undo, draft); o onSelectionChange devolve o
   // controle ao campo logo em seguida — preso, ele impediria a pessoa de mexer no cursor.
   const [selection, setSelection] = useState<{ start: number; end: number } | undefined>();
@@ -424,7 +424,10 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
   const composedText = pendingAttach?.uploadedPath
     ? withAttach(text.trim(), attachInsert(pendingAttach, pendingAttach.uploadedPath)) : text.trim();
   const submissionBlocksSend = !!submission && (isSubmitting(serverId, name) || submission.text.trim() !== composedText);
-  const canSend = (text.trim().length > 0 || pendingAttach !== null) && !sending && !uploading && !readBlocked && !submissionBlocksSend;
+  const hasContent = text.trim().length > 0 || pendingAttach !== null;
+  const canSend = hasContent && !sending && !uploading && !readBlocked && !submissionBlocksSend;
+  const showStop = !!onStop && state === 'working';
+  const showSend = !showStop || hasContent || sending || uploading || filaCount > 0;
 
   // A primeira mensagem já pode ter chegado antes de esta tela montar: nunca criar outro eco.
   const sendText = useCallback(async (value: string, revision?: number, explicit = false): Promise<void> => {
@@ -956,63 +959,41 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
 
   return (
     <Glass variant="chrome" style={styles.glass}>
-        {/* chip de fila: pending local + queued-* do SSE (contado no store como pending até chegar o real) */}
-        {filaCount > 0 || steering ? (
-          <View style={styles.filaChip}>
-            {!steering ? <Text style={[styles.filaText, { color: theme.tokens.text.secondary }]}>
-              ⏳ {m.composer_fila_contagem({ n: filaCount })}
-            </Text> : null}
-            {showSteer ? (
-              <Pressable
-                onPress={handleSteer}
-                disabled={steering}
-                accessibilityState={{ disabled: steering, busy: steering }}
-                style={[styles.steerBtn, { borderColor: theme.tokens.accent.base }]}
-                accessibilityLabel={m.composer_fila_aria()}
-                accessibilityRole="button"
-              >
-                <Text style={[styles.steerText, { color: theme.tokens.accent.base }]}>
-                  {steering ? m.askq_enviando() : isCodex ? m.codex_orientar() : m.composer_fila_acao()}
-                </Text>
-              </Pressable>
-            ) : null}
-          </View>
+        {/* A contagem da fila mora no selo do Enviar; aqui fica só a ação de mandar a fila agora. */}
+        {showSteer ? (
+          <Pressable
+            onPress={handleSteer}
+            disabled={steering}
+            accessibilityState={{ disabled: steering, busy: steering }}
+            style={[styles.steerBtn, { borderColor: theme.tokens.accent.base }]}
+            accessibilityLabel={m.composer_fila_aria()}
+            accessibilityRole="button"
+          >
+            <Text style={[styles.steerText, { color: theme.tokens.accent.base }]}>
+              {steering ? m.askq_enviando() : isCodex ? m.codex_orientar() : m.composer_fila_acao()}
+            </Text>
+          </Pressable>
         ) : null}
 
         {steerFeedback && state === 'working' ? <Text style={[styles.steerText, { color: theme.tokens.text.secondary }]} accessibilityLiveRegion="polite">{steerFeedback}</Text> : null}
 
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.pillsRow} keyboardShouldPersistTaps="handled">
-          <View style={styles.pillDuo}>
-            <ModelPill serverId={serverId} name={name} />
-            <EffortPill serverId={serverId} name={name} />
-          </View>
-          <PermissionPill serverId={serverId} name={name} />
-          {pairPeers?.length ? (
-            <Pressable
-              onPress={() => setSendToPair((current) => !current)}
-              style={[styles.pairChip, { borderColor: sendToPair ? theme.tokens.accent.base : theme.tokens.border.subtle, backgroundColor: sendToPair ? theme.tokens.bg.elevated : 'transparent' }]}
-              accessibilityRole="switch"
-              accessibilityState={{ checked: sendToPair }}
-              accessibilityLabel={m.composer_mandar_grupo()}
-              accessibilityHint={sendToPair ? m.composer_mandando_grupo() : m.composer_mandar_tambem({ n: pairPeers.join(', ') })}
-            >
-              <Text style={[styles.pairChipText, { color: sendToPair ? theme.tokens.accent.base : theme.tokens.text.secondary }]}>⇄</Text>
-              <Text style={[styles.pairChipLabel, { color: sendToPair ? theme.tokens.accent.base : theme.tokens.text.secondary }]} numberOfLines={1}>
-                {sendToPair ? (pairPeers.length === 1 ? m.composer_pros_dois() : m.composer_pro_grupo()) : m.composer_mandar_tambem({ n: pairPeers.join(', ') })}
-              </Text>
-            </Pressable>
-          ) : null}
-          {isCodex ? (
-            <Pressable
-              onPress={() => router.push(`/s/${serverId}/${name}/codex-limits` as never)}
-              style={[styles.codexChip, { backgroundColor: superficie(theme, 0.8), borderColor: theme.tokens.border.subtle }]}
-              accessibilityRole="button"
-              accessibilityLabel={m.codex_limites_titulo()}
-            >
-              <Text style={[styles.codexChipText, { color: theme.tokens.text.primary }]}>{m.codex_limites_titulo()}</Text>
-            </Pressable>
-          ) : null}
-        </ScrollView>
+        {/* Modelo, nível e permissão foram para o botão único da linha de baixo; o par fica à vista
+            porque muda para quem a mensagem vai. */}
+        {pairPeers?.length ? (
+          <Pressable
+            onPress={() => setSendToPair((current) => !current)}
+            style={[styles.pairChip, { borderColor: sendToPair ? theme.tokens.accent.base : theme.tokens.border.subtle, backgroundColor: sendToPair ? theme.tokens.bg.elevated : 'transparent' }]}
+            accessibilityRole="switch"
+            accessibilityState={{ checked: sendToPair }}
+            accessibilityLabel={m.composer_mandar_grupo()}
+            accessibilityHint={sendToPair ? m.composer_mandando_grupo() : m.composer_mandar_tambem({ n: pairPeers.join(', ') })}
+          >
+            <Icon name="ArrowLeftRight" size={14} color={sendToPair ? theme.tokens.accent.base : theme.tokens.text.secondary} />
+            <Text style={[styles.pairChipLabel, { color: sendToPair ? theme.tokens.accent.base : theme.tokens.text.secondary }]} numberOfLines={1}>
+              {sendToPair ? (pairPeers.length === 1 ? m.composer_pros_dois() : m.composer_pro_grupo()) : m.composer_mandar_tambem({ n: pairPeers.join(', ') })}
+            </Text>
+          </Pressable>
+        ) : null}
 
         {pendingAttach ? (
           <View style={[styles.attachPreview, { backgroundColor: superficie(theme, 0.8), borderColor: theme.tokens.border.subtle }]}>
@@ -1020,7 +1001,7 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
               <Image source={{ uri: pendingAttach.uri }} style={styles.attachThumb} contentFit="cover" transition={150} />
             ) : (
               <View style={[styles.attachFileIcon, { backgroundColor: superficie(theme) }]}>
-                <Text style={styles.attachFileIco}>📎</Text>
+                <Icon name="Paperclip" size={18} color={theme.tokens.text.secondary} />
               </View>
             )}
             <View style={styles.attachInfo}>
@@ -1039,53 +1020,49 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
               accessibilityRole="button"
               accessibilityState={{ disabled: sending }}
             >
-              <Text style={[styles.attachRemoveTxt, { color: theme.tokens.text.secondary }]}>✕</Text>
+              <Icon name="X" size={16} color={theme.tokens.text.secondary} />
             </Pressable>
           </View>
         ) : null}
 
+        {/* Campo em linha própria: dividindo a linha com os botões ele ficava só com a sobra. */}
+        <View style={styles.inputWrap}>
+          <MultilineInput
+            ref={inputRef}
+            accessible
+            accessibilityLabel={m.composer_mensagem()}
+            value={text}
+            onChangeText={handleChangeText}
+            placeholder={provider ? m.composer_mensagem_para({ nome: providerName(provider as Provider) }) : m.composer_mensagem()}
+            maxHeight={120}
+            onKeyPress={handleKeyPress}
+            selection={selection}
+            onSelectionChange={() => setSelection(undefined)}
+          />
+        </View>
+
+        {/* Linha do app de PC: ferramentas pequenas à esquerda, o chip de modelo · nível ocupa a sobra
+            e Enviar/Parar fecham a linha, sempre à vista. */}
         <View style={styles.row}>
-          <View style={styles.inputWrap}>
-            <MultilineInput
-              ref={inputRef}
-              accessible
-              accessibilityLabel={m.composer_mensagem()}
-              value={text}
-              onChangeText={handleChangeText}
-              placeholder={m.composer_mensagem()}
-              maxHeight={120}
-              onKeyPress={handleKeyPress}
-              selection={selection}
-              onSelectionChange={() => setSelection(undefined)}
-            />
-          </View>
-
-          {/* Só a pill encolhe: tela estreita ou fonte grande não empurra Enviar/Parar pra fora. */}
-          <View style={styles.estiloSlot}>
-            <EstiloPill />
-          </View>
-
           <Pressable
-            onPress={handleMicPress}
-            disabled={transcribing || sending || (!!dictation && !gravando)}
-            accessibilityState={{ disabled: transcribing || sending || (!!dictation && !gravando), busy: transcribing }}
-            style={({ pressed }) => [
-              styles.iconBtn,
-              pressed && styles.iconBtnPressed,
-              (transcribing || sending || (!!dictation && !gravando)) && styles.iconBtnDisabled,
-              gravando && { backgroundColor: theme.tokens.status.error, borderColor: theme.tokens.status.error },
-            ]}
-            accessibilityLabel={gravando ? m.composer_parar_gravacao() : m.composer_gravar_audio()}
+            onPress={() => {
+              commandsFromButtonRef.current = true;
+              setCmdFiltro('');
+            }}
+            disabled={sending || gravando}
+            hitSlop={4}
+            accessibilityState={{ disabled: sending || gravando }}
+            style={({ pressed }) => [styles.iconBtn, pressed && styles.iconBtnPressed, (sending || gravando) && styles.iconBtnDisabled]}
+            accessibilityLabel={m.comandos_titulo()}
             accessibilityRole="button"
           >
-            <Text style={[styles.iconGlyph, { color: gravando ? '#fff' : theme.tokens.text.secondary }]} maxFontSizeMultiplier={GLYPH_MAX_SCALE}>
-              {gravando ? '■' : '🎤'}
-            </Text>
+            <Icon name="SquareSlash" size={18} color={theme.tokens.text.secondary} />
           </Pressable>
 
           <Pressable
             onPress={() => setAttachMenuOpen(true)}
             disabled={uploading || sending || gravando}
+            hitSlop={4}
             accessibilityState={{ disabled: uploading || sending || gravando, busy: uploading }}
             style={({ pressed }) => [styles.iconBtn, pressed && styles.iconBtnPressed, (uploading || sending || gravando) && styles.iconBtnDisabled]}
             accessibilityLabel={m.composer_anexar_arquivo()}
@@ -1094,15 +1071,45 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
             {uploading ? (
               <ActivityIndicator size="small" color={theme.tokens.text.secondary} />
             ) : (
-              <Text style={[styles.iconGlyph, { color: theme.tokens.text.secondary }]} maxFontSizeMultiplier={GLYPH_MAX_SCALE}>📎</Text>
+              <Icon name="Paperclip" size={18} color={theme.tokens.text.secondary} />
             )}
           </Pressable>
 
-          {onStop && state === 'working' ? (
+          <Pressable
+            onPress={handleMicPress}
+            disabled={transcribing || sending || (!!dictation && !gravando)}
+            hitSlop={4}
+            accessibilityState={{ disabled: transcribing || sending || (!!dictation && !gravando), busy: transcribing }}
+            style={({ pressed }) => [
+              styles.iconBtn,
+              pressed && styles.iconBtnPressed,
+              (transcribing || sending || (!!dictation && !gravando)) && styles.iconBtnDisabled,
+            ]}
+            accessibilityLabel={gravando ? m.composer_parar_gravacao() : m.composer_gravar_audio()}
+            accessibilityRole="button"
+            // O estilo do ditado saiu da linha e mora no toque longo; o leitor de tela recebe a mesma
+            // ação nomeada, e a dica diz qual estilo vale antes de falar.
+            onLongPress={gravando ? undefined : () => setStyleMenuOpen(true)}
+            accessibilityHint={m.composer_mic_style_hint({ estilo: dictationStyle })}
+            accessibilityActions={gravando ? undefined : [{ name: 'longpress', label: m.ditado_estilo_titulo() }]}
+            onAccessibilityAction={(e) => {
+              if (e.nativeEvent.actionName === 'longpress' && !gravando) setStyleMenuOpen(true);
+            }}
+          >
+            {/* Gravando, o vermelho é o aviso: o quadrado diz "toque para parar". */}
+            {gravando
+              ? <Icon name="Square" size={16} color={theme.tokens.status.error} />
+              : <Icon name="Mic" size={18} color={theme.tokens.text.secondary} />}
+          </Pressable>
+
+          <SessionSettingsButton serverId={serverId} name={name} />
+
+          {showStop ? (
             <Pressable
               onPress={onStop}
               disabled={stopping}
-              style={({ pressed }) => [styles.iconBtn, { borderColor: theme.tokens.status.error }, pressed && styles.iconBtnPressed, stopping && styles.iconBtnDisabled]}
+              hitSlop={5}
+              style={({ pressed }) => [styles.roundBtn, pressed && styles.iconBtnPressed, stopping && styles.iconBtnDisabled]}
               accessibilityLabel={m.composer_parar()}
               accessibilityRole="button"
               accessibilityState={{ disabled: stopping, busy: stopping }}
@@ -1110,28 +1117,45 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
               {stopping ? (
                 <ActivityIndicator size="small" color={theme.tokens.status.error} />
               ) : (
-                <Icon name="Square" size={20} color={theme.tokens.status.error} />
+                <View style={[styles.stopMark, { backgroundColor: theme.tokens.status.error }]} />
               )}
             </Pressable>
           ) : null}
 
-          {/* Desabilitado vira botão de superfície com seta apagada, não o acento translúcido:
-              com fundo claro ou sem transparência o acento a 40% sumia. */}
-          <Pressable
-            onPress={handleSend}
-            disabled={!canSend}
-            accessibilityState={{ disabled: !canSend, busy: sending || uploading }}
-            style={({ pressed }) => [
-              styles.sendBtn,
-              canSend ? { backgroundColor: theme.tokens.accent.base } : styles.sendBtnDisabled,
-              pressed && canSend && styles.sendBtnPressed,
-            ]}
-            accessibilityLabel={m.composer_enviar_mensagem()}
-            accessibilityRole="button"
-          >
-            <Text style={[styles.sendGlyph, { color: canSend ? theme.tokens.text.inverse : theme.tokens.text.muted }]} maxFontSizeMultiplier={GLYPH_MAX_SCALE}>↑</Text>
-          </Pressable>
+          {/* Trabalhando e sem nada para mandar, o Parar ocupa o lugar do Enviar (como no PC); com
+              texto ou fila, os dois ficam, porque a mensagem entra na fila. Desabilitado vira círculo
+              de superfície com seta apagada: o claro cheio sumiria no tema claro. */}
+          {showSend ? (
+            <Pressable
+              onPress={handleSend}
+              disabled={!canSend}
+              hitSlop={5}
+              accessibilityState={{ disabled: !canSend, busy: sending || uploading }}
+              style={({ pressed }) => [
+                styles.roundBtn,
+                canSend ? { backgroundColor: theme.tokens.text.primary } : styles.sendBtnDisabled,
+                pressed && canSend && styles.sendBtnPressed,
+              ]}
+              accessibilityLabel={m.composer_enviar_mensagem()}
+              accessibilityHint={filaCount > 0 ? m.composer_fila_contagem({ n: filaCount }) : undefined}
+              accessibilityRole="button"
+            >
+              <Icon name="ArrowUp" size={18} color={canSend ? theme.tokens.bg.base : theme.tokens.text.muted} />
+              {/* Fila (pending local + queued-* do SSE): selo no canto, dentro do botão para o Android não cortar. */}
+              {filaCount > 0 ? (
+                <View style={[styles.queueBadge, { backgroundColor: theme.tokens.status.warning }]} pointerEvents="none">
+                  <Text style={[styles.queueBadgeText, { color: theme.tokens.text.inverse }]} maxFontSizeMultiplier={GLYPH_MAX_SCALE}>
+                    {filaCount > 9 ? '9+' : filaCount}
+                  </Text>
+                </View>
+              ) : null}
+            </Pressable>
+          ) : null}
         </View>
+
+        {gravando ? (
+          <Text style={[styles.hint, { color: theme.tokens.text.muted }]}>{m.composer_dictation_style({ estilo: dictationStyle })}</Text>
+        ) : null}
 
         {gravando ? (
           <View style={[styles.rmsTrack, { backgroundColor: superficie(theme, 0.8), borderColor: theme.tokens.border.subtle }]} accessibilityLabel={m.composer_gravando_audio()}>
@@ -1235,23 +1259,31 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
           </View>
         ) : null}
 
-        {/* hint sutil do estado working: quando há pending/queued, já há chip; este texto só aparece em working sem fila */}
+        {/* hint sutil do estado working: com fila, o selo do Enviar já avisa; este texto só aparece em working sem fila */}
         {state === 'working' && filaCount === 0 && !gravando && !transcribing ? (
           <Text style={[styles.hint, { color: theme.tokens.text.muted }]}>{m.composer_sessao_trabalhando()}</Text>
         ) : null}
 
         <CommandSheet
           open={cmdFiltro !== null}
-          onClose={() => setCmdFiltro(null)}
+          onClose={() => {
+            commandsFromButtonRef.current = false;
+            setCmdFiltro(null);
+          }}
           name={name}
           filtro={cmdFiltro ?? ''}
           onEscolher={(display) => {
-            const novo = `${display} `;
+            // Pelo botão, com texto já escrito, o comando entra na frente e o texto fica como argumento.
+            const kept = commandsFromButtonRef.current && comandoParcial(textRef.current) === null ? textRef.current.trim() : '';
+            commandsFromButtonRef.current = false;
+            const novo = kept ? `${display} ${kept}` : `${display} `;
             setCmdFiltro(null);
             setText(novo);
             setSelection({ start: novo.length, end: novo.length });
           }}
         />
+
+        <DictationStyleMenu open={styleMenuOpen} onClose={() => setStyleMenuOpen(false)} />
 
         <PillMenu
           open={attachMenuOpen}
@@ -1268,29 +1300,17 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
 }
 
 const styles = StyleSheet.create((theme) => ({
+  // Caixa flutuante do app de PC; a linha de status vem logo embaixo, por isso a margem curta.
   glass: {
     marginHorizontal: theme.base.space[2],
-    marginBottom: theme.base.space[2],
-    padding: theme.base.space[2],
-    gap: theme.base.space[2],
-  },
-  filaChip: {
-    alignSelf: 'flex-start',
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: theme.base.space[2],
-    backgroundColor: superficie(theme, 0.8),
-    borderRadius: theme.base.radius.full,
+    marginBottom: theme.base.space[1],
     paddingHorizontal: theme.base.space[2],
-    paddingVertical: 4,
-    borderWidth: 1,
-    borderColor: theme.tokens.border.subtle,
-  },
-  filaText: {
-    fontSize: theme.base.text.xs,
-    fontWeight: '500',
+    paddingTop: theme.base.space[2],
+    paddingBottom: 6,
+    gap: theme.base.space[1],
   },
   steerBtn: {
+    alignSelf: 'flex-start',
     minWidth: 44,
     minHeight: 44,
     justifyContent: 'center',
@@ -1303,31 +1323,8 @@ const styles = StyleSheet.create((theme) => ({
     fontSize: theme.base.text.xs,
     fontWeight: '700',
   },
-  pillsRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: theme.base.space[2],
-    paddingVertical: 2,
-  },
-  pillDuo: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: theme.base.space[1],
-  },
-  codexChip: {
-    borderWidth: 1,
-    borderRadius: theme.base.radius.full,
-    paddingHorizontal: theme.base.space[2],
-    paddingVertical: 6,
-    minWidth: 44,
-    minHeight: 44,
-    justifyContent: 'center',
-  },
-  codexChipText: {
-    fontSize: theme.base.text.xs,
-    fontWeight: '600',
-  },
   pairChip: {
+    alignSelf: 'flex-start',
     flexDirection: 'row',
     alignItems: 'center',
     gap: theme.base.space[1],
@@ -1338,10 +1335,6 @@ const styles = StyleSheet.create((theme) => ({
     borderRadius: theme.base.radius.full,
     paddingHorizontal: theme.base.space[2],
   },
-  pairChipText: {
-    fontSize: theme.base.text.sm,
-    fontWeight: '700',
-  },
   pairChipLabel: {
     flexShrink: 1,
     fontSize: theme.base.text.xs,
@@ -1349,34 +1342,22 @@ const styles = StyleSheet.create((theme) => ({
   },
   row: {
     flexDirection: 'row',
-    alignItems: 'flex-end',
-    gap: theme.base.space[2],
+    alignItems: 'center',
+    gap: 2,
   },
+  // O campo é o próprio vidro, sem caixa dentro da caixa.
   inputWrap: {
-    flex: 1,
-    minWidth: 64,
-    minHeight: 44,
+    minHeight: 40,
     justifyContent: 'center',
-    backgroundColor: superficie(theme),
-    borderRadius: theme.base.radius.lg,
-    borderWidth: 1,
-    borderColor: theme.tokens.border.subtle,
-    paddingHorizontal: theme.base.space[2],
-    paddingVertical: 6,
+    paddingHorizontal: theme.base.space[1],
   },
-  estiloSlot: {
-    flexShrink: 1,
-    minWidth: 0,
-  },
+  // 36 pt + hitSlop 4 = 44 pt de toque; o ícone fica pequeno e sem fundo, como no PC.
   iconBtn: {
-    width: 44,
-    height: 44,
-    borderRadius: theme.base.radius.full,
+    width: 36,
+    height: 36,
+    borderRadius: theme.base.radius.md,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: superficie(theme, 0.8),
-    borderWidth: 1,
-    borderColor: theme.tokens.border.subtle,
   },
   iconBtnPressed: {
     backgroundColor: theme.tokens.bg.hover,
@@ -1384,16 +1365,33 @@ const styles = StyleSheet.create((theme) => ({
   iconBtnDisabled: {
     opacity: 0.5,
   },
-  iconGlyph: {
-    fontSize: 18,
-    lineHeight: 22,
-  },
-  sendBtn: {
-    width: 44,
-    height: 44,
+  roundBtn: {
+    width: 34,
+    height: 34,
     borderRadius: theme.base.radius.full,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  stopMark: {
+    width: 12,
+    height: 12,
+    borderRadius: 2,
+  },
+  queueBadge: {
+    position: 'absolute',
+    top: 0,
+    right: 0,
+    minWidth: 15,
+    height: 15,
+    paddingHorizontal: 3,
+    borderRadius: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  queueBadgeText: {
+    fontSize: 10,
+    fontWeight: '700',
+    lineHeight: 13,
   },
   sendBtnDisabled: {
     backgroundColor: superficie(theme, 0.8),
@@ -1402,11 +1400,6 @@ const styles = StyleSheet.create((theme) => ({
   },
   sendBtnPressed: {
     opacity: 0.8,
-  },
-  sendGlyph: {
-    fontSize: 20,
-    fontWeight: '700',
-    lineHeight: 22,
   },
   rmsTrack: {
     height: 6,
@@ -1502,9 +1495,6 @@ const styles = StyleSheet.create((theme) => ({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  attachFileIco: {
-    fontSize: 22,
-  },
   attachInfo: {
     flex: 1,
     gap: 2,
@@ -1523,9 +1513,5 @@ const styles = StyleSheet.create((theme) => ({
     borderWidth: 1,
     alignItems: 'center',
     justifyContent: 'center',
-  },
-  attachRemoveTxt: {
-    fontSize: 14,
-    fontWeight: '700',
   },
 }));

@@ -1,22 +1,19 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Pressable, Text, View } from 'react-native';
-import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { parseStatusLine, getModelOptions, getPiModels, getKimiModels, getCodexModels, setModelEffort, setPiModel, setKimiModel, setCodexModel } from '@hangar/core';
 import { chatStore } from '../../stores/chat';
 import { useSessions } from '../../stores/sessions';
 import * as m from '../../paraglide/messages';
-import { ContextRing } from '../../chat/ContextRing';
 import { PillMenu, type PillMenuItem } from './PillMenu';
 import { pillLabels, reconcileChosen } from './pills';
-import { superficie } from '../../theme/superficie';
+import { SettingRow } from './SettingRow';
 
 interface Props {
   serverId: string;
   name: string;
 }
 
+// Linha "Modelo" da folha de ajustes do composer; o anel de contexto mora no botão que abre a folha.
 export function ModelPill({ serverId, name }: Props) {
-  const { theme } = useUnistyles();
   const chat = chatStore(serverId, name);
   const statusLine = chat.use((s) => s.statusLine);
   const statusFields = useMemo(() => parseStatusLine(statusLine), [statusLine]);
@@ -44,7 +41,7 @@ export function ModelPill({ serverId, name }: Props) {
 
   const display = useMemo(() => {
     if (tempError) return tempError;
-    return pillLabels(statusFields, { model: chosenModel }).model ?? m.composer_modelo();
+    return pillLabels(statusFields, { model: chosenModel }).model ?? '—';
   }, [statusFields, chosenModel, tempError]);
 
   // reconcilia quando statusline confirma
@@ -165,23 +162,9 @@ export function ModelPill({ serverId, name }: Props) {
     [name, isCodex, isPi, isKimi],
   );
 
-  const pct = statusFields?.ctxPct ?? null;
-
   return (
     <>
-      <Pressable
-        onPress={() => setOpen(true)}
-        style={[styles.pill, { backgroundColor: superficie(theme, 0.8), borderColor: theme.tokens.border.subtle }]}
-        accessibilityRole="button"
-        accessibilityLabel={m.composer_modelo()}
-      >
-        <View style={styles.pillInner}>
-          <Text style={[styles.pillText, { color: theme.tokens.text.primary }]} numberOfLines={1}>
-            {display}
-          </Text>
-          <ContextRing pct={pct} />
-        </View>
-      </Pressable>
+      <SettingRow label={m.composer_modelo()} value={display} onPress={() => setOpen(true)} />
       <PillMenu
         open={open}
         onClose={() => setOpen(false)}
@@ -195,26 +178,3 @@ export function ModelPill({ serverId, name }: Props) {
     </>
   );
 }
-
-const styles = StyleSheet.create((theme) => ({
-  pill: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    borderWidth: 1,
-    borderRadius: theme.base.radius.full,
-    paddingHorizontal: theme.base.space[2],
-    paddingVertical: 6,
-    gap: theme.base.space[1],
-    minHeight: 32,
-  },
-  pillInner: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-  },
-  pillText: {
-    fontSize: theme.base.text.xs,
-    fontWeight: '600',
-    maxWidth: 120,
-  },
-}));

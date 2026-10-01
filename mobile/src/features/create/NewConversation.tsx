@@ -1,11 +1,15 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
-import { AccessibilityInfo, Pressable, ScrollView, Text, View } from 'react-native';
-import { StyleSheet } from 'react-native-unistyles';
+import { AccessibilityInfo, ActivityIndicator, Pressable, ScrollView, Text, View } from 'react-native';
+import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { useRouter } from 'expo-router';
 import { KeyboardAvoidingView } from 'react-native-keyboard-controller';
 import type { Server } from '@hangar/core';
 import { MultilineInput } from '../../ui/MultilineInput';
 import { Sheet } from '../../ui/Sheet';
+import { Glass } from '../../ui/Glass';
+import { Icon } from '../../ui/Icon';
+import { HangarMark } from '../../ui/HangarMark';
+import { superficie } from '../../theme/superficie';
 import {
   adoptCandidate, beginAttempt, discardAttempt, recoverAttempt, restoreAttempt, sendFirstInput,
   useNewConversation, type NewConversationInput,
@@ -16,8 +20,14 @@ type Props = {
   server: Server;
   destination: ReactNode;
   destinationPending: boolean;
-  destinationSummary: ReactNode;
-  settingsSummary: ReactNode;
+  // Chip da pasta: nome curto à vista, máquina e caminho inteiros para o leitor de tela.
+  folderLabel: string;
+  destinationLabel: string;
+  // Chip do provedor: o nome à vista, o resumo das escolhas para o leitor de tela.
+  providerLabel: string;
+  settingsLabel: string;
+  // Linha embaixo da caixa: modelo · nível · permissão (a máquina vai na frente, aqui dentro).
+  statusLabel: string;
   notices: ReactNode;
   options: ReactNode;
   // null enquanto falta destino ou conta; o texto continua editável.
@@ -25,8 +35,12 @@ type Props = {
   blocked: boolean;
 };
 
-export function NewConversation({ server, destination, destinationPending, destinationSummary, settingsSummary, notices, options, body, blocked }: Props) {
+export function NewConversation({
+  server, destination, destinationPending, folderLabel, destinationLabel, providerLabel, settingsLabel, statusLabel,
+  notices, options, body, blocked,
+}: Props) {
   const router = useRouter();
+  const { theme } = useUnistyles();
   const serverId = server.id;
   const attempt = useNewConversation((s) => s.attempts[serverId] ?? null);
   const issue = useNewConversation((s) => s.issues[serverId] ?? null);
@@ -35,7 +49,6 @@ export function NewConversation({ server, destination, destinationPending, desti
   const [optionsOpen, setOptionsOpen] = useState(false);
   const destinationRef = useRef<View>(null);
   const settingsRef = useRef<View>(null);
-  const optionsRef = useRef<View>(null);
   const closeOptionsRef = useRef<View>(null);
   const optionsOpener = useRef<View | null>(null);
   const openOptions = (opener: View | null) => {
@@ -92,12 +105,20 @@ export function NewConversation({ server, destination, destinationPending, desti
     ? issue.events.filter((event) => event.kind === 'user_msg').slice(-3) : null;
   const canSend = !!body && !blocked && !busy && restored && !pending && !!text.trim();
 
+  // Sem pasta escolhida o seletor ocupa o meio; escolhida, o meio fica com a marca, como no PC.
+  const showPicker = destinationPending && !optionsOpen;
+
   return (
     <View style={styles.root}>
       <KeyboardAvoidingView behavior="padding" automaticOffset style={styles.keyboard}>
       <ScrollView style={styles.states} contentContainerStyle={styles.scroll} keyboardShouldPersistTaps="handled">
-        <Text style={styles.title}>{m.sessao_nova()}</Text>
-        {destinationPending && !optionsOpen ? destination : null}
+        {showPicker ? destination : null}
+        {!showPicker && !pending ? (
+          <View style={styles.hero}>
+            <HangarMark size={44} color={theme.tokens.text.muted} />
+            <Text style={styles.heroText}>{m.native_empty_chat_hint({ agent: providerLabel })}</Text>
+          </View>
+        ) : null}
         {notices}
 
         {pending ? (
@@ -146,35 +167,74 @@ export function NewConversation({ server, destination, destinationPending, desti
         {issue ? <Text style={styles.error} accessibilityRole="alert">{issue.message}</Text> : null}
         {!body && !blocked && !pending ? <Text style={styles.hint}>{m.nova_conversa_sem_destino()}</Text> : null}
       </ScrollView>
-      <View style={styles.entry}>
-        <ScrollView style={styles.entryScroll} contentContainerStyle={styles.entryContent} keyboardShouldPersistTaps="handled">
-          <View style={styles.inputWrap}>
-            <MultilineInput
-              value={text}
-              onChangeText={setText}
-              placeholder={m.nova_conversa_placeholder()}
-              accessibilityLabel={m.nova_conversa_placeholder()}
-              autoFocus
-              maxHeight={200}
-            />
-          </View>
-          <View style={styles.summaries}>
-            <Pressable ref={destinationRef} accessible accessibilityRole="button" accessibilityHint={m.nova_conversa_destino_hint()} accessibilityState={{ expanded: optionsOpen }} onPress={() => openOptions(destinationRef.current)} style={({ pressed }) => [styles.summary, pressed && styles.pressed]}>
-              {destinationSummary}
-            </Pressable>
-            <Pressable ref={settingsRef} accessible accessibilityRole="button" accessibilityHint={m.nova_conversa_config_hint()} accessibilityState={{ expanded: optionsOpen }} onPress={() => openOptions(settingsRef.current)} style={({ pressed }) => [styles.summary, pressed && styles.pressed]}>
-              {settingsSummary}
-            </Pressable>
-          </View>
-        </ScrollView>
-        <View style={styles.actions}>
-          <Pressable ref={optionsRef} accessible accessibilityRole="button" accessibilityState={{ expanded: optionsOpen }} onPress={() => openOptions(optionsRef.current)} style={({ pressed }) => [styles.options, pressed && styles.pressed]}>
-            <Text style={styles.secondaryTxt}>{m.nova_conversa_opcoes()}</Text>
+
+      {/* A mesma caixa do composer do chat: campo em cima, pasta e provedor à esquerda, Enviar à
+          direita. Os dois chips abrem a folha de Opções de sempre. */}
+      <Glass variant="chrome" style={styles.box}>
+        <View style={styles.inputWrap}>
+          <MultilineInput
+            value={text}
+            onChangeText={setText}
+            placeholder={m.nova_conversa_placeholder()}
+            accessibilityLabel={m.nova_conversa_placeholder()}
+            autoFocus
+            maxHeight={160}
+          />
+        </View>
+        <View style={styles.row}>
+          <Pressable
+            ref={destinationRef}
+            accessible
+            accessibilityRole="button"
+            accessibilityLabel={destinationLabel}
+            accessibilityHint={m.nova_conversa_destino_hint()}
+            accessibilityState={{ expanded: optionsOpen }}
+            onPress={() => openOptions(destinationRef.current)}
+            hitSlop={6}
+            style={({ pressed }) => [styles.chip, { backgroundColor: pressed ? theme.tokens.bg.hover : superficie(theme, 0.6) }]}
+          >
+            <Icon name="Folder" size={14} color={theme.tokens.text.secondary} />
+            <Text style={styles.chipText} numberOfLines={1}>{folderLabel}</Text>
+            <Icon name="ChevronDown" size={12} color={theme.tokens.text.muted} />
           </Pressable>
-          <Pressable accessibilityRole="button" accessibilityState={{ disabled: !canSend, busy }} onPress={() => void handleSend()} disabled={!canSend} style={[styles.primary, !canSend && styles.disabled]}>
-            <Text style={styles.primaryTxt}>{busy ? m.criar_criando() : m.nova_conversa_enviar()}</Text>
+          <Pressable
+            ref={settingsRef}
+            accessible
+            accessibilityRole="button"
+            accessibilityLabel={settingsLabel}
+            accessibilityHint={m.nova_conversa_config_hint()}
+            accessibilityState={{ expanded: optionsOpen }}
+            onPress={() => openOptions(settingsRef.current)}
+            hitSlop={6}
+            style={({ pressed }) => [styles.chip, { backgroundColor: pressed ? theme.tokens.bg.hover : superficie(theme, 0.6) }]}
+          >
+            <Icon name="Bot" size={14} color={theme.tokens.text.secondary} />
+            <Text style={styles.chipText} numberOfLines={1}>{providerLabel}</Text>
+            <Icon name="ChevronDown" size={12} color={theme.tokens.text.muted} />
+          </Pressable>
+          <View style={styles.spacer} />
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={m.nova_conversa_enviar()}
+            accessibilityState={{ disabled: !canSend, busy }}
+            onPress={() => void handleSend()}
+            disabled={!canSend}
+            hitSlop={5}
+            style={({ pressed }) => [
+              styles.send,
+              canSend ? { backgroundColor: theme.tokens.text.primary } : { backgroundColor: superficie(theme, 0.8) },
+              pressed && canSend && styles.sendPressed,
+            ]}
+          >
+            {busy
+              ? <ActivityIndicator size="small" color={canSend ? theme.tokens.bg.base : theme.tokens.text.muted} />
+              : <Icon name="ArrowUp" size={18} color={canSend ? theme.tokens.bg.base : theme.tokens.text.muted} />}
           </Pressable>
         </View>
+      </Glass>
+      <View style={styles.status}>
+        <Text style={styles.statusText} numberOfLines={1}>{server.label}</Text>
+        {statusLabel ? <Text style={[styles.statusText, styles.statusRest]} numberOfLines={1}>{statusLabel}</Text> : null}
       </View>
       </KeyboardAvoidingView>
       <Sheet open={optionsOpen} onDidPresent={() => {
@@ -183,7 +243,7 @@ export function NewConversation({ server, destination, destinationPending, desti
         setOptionsOpen(false);
         if (mounted.current && optionsOpener.current) AccessibilityInfo.sendAccessibilityEvent(optionsOpener.current, 'focus');
       }} sizes={['medium', 'large']} scrollable>
-        <ScrollView accessibilityViewIsModal onAccessibilityEscape={() => setOptionsOpen(false)} contentContainerStyle={styles.scroll} keyboardShouldPersistTaps="handled">
+        <ScrollView accessibilityViewIsModal onAccessibilityEscape={() => setOptionsOpen(false)} contentContainerStyle={styles.sheetScroll} keyboardShouldPersistTaps="handled">
           <Pressable ref={closeOptionsRef} accessible accessibilityRole="button" onPress={() => setOptionsOpen(false)} style={styles.ghost}>
             <Text style={styles.ghostTxt}>{m.nova_conversa_opcoes_fechar()}</Text>
           </Pressable>
@@ -195,67 +255,57 @@ export function NewConversation({ server, destination, destinationPending, desti
   );
 }
 
+// Fundo transparente: quem pinta é o Background da Screen, então Aparência (Liso, Textura, Luz,
+// Imagem, Transparência) vale aqui como no chat.
 const styles = StyleSheet.create((theme) => ({
-  root: { flex: 1, backgroundColor: theme.tokens.bg.base },
+  root: { flex: 1, backgroundColor: 'transparent' },
   keyboard: { flex: 1 },
   states: { flex: 1, minHeight: 44 },
-  scroll: { padding: theme.base.space[4], gap: theme.base.space[4], paddingBottom: 32 },
-  entry: { flexShrink: 1, padding: theme.base.space[4], gap: theme.base.space[2] },
-  entryScroll: { flexGrow: 0, flexShrink: 1 },
-  entryContent: { gap: theme.base.space[2] },
-  summaries: { flexDirection: 'row', flexWrap: 'wrap', gap: theme.base.space[2] },
-  summary: {
-    flexGrow: 1,
-    flexBasis: '45%',
-    minWidth: 104,
-    minHeight: 44,
-    justifyContent: 'center',
-    padding: theme.base.space[2],
-    borderWidth: 1,
-    borderColor: theme.tokens.border.default,
-    borderRadius: theme.base.radius.md,
+  scroll: { flexGrow: 1, padding: theme.base.space[4], gap: theme.base.space[4] },
+  sheetScroll: { padding: theme.base.space[4], gap: theme.base.space[4], paddingBottom: 32 },
+  hero: { flexGrow: 1, minHeight: 160, alignItems: 'center', justifyContent: 'center', gap: theme.base.space[3], paddingHorizontal: theme.base.space[5] },
+  heroText: { fontSize: theme.base.text.sm, color: theme.tokens.text.muted, textAlign: 'center' },
+  box: {
+    marginHorizontal: theme.base.space[2],
+    marginBottom: theme.base.space[1],
+    paddingHorizontal: theme.base.space[2],
+    paddingTop: theme.base.space[2],
+    paddingBottom: 6,
+    gap: theme.base.space[1],
   },
-  pressed: { backgroundColor: theme.tokens.accent.dim },
-  title: { fontSize: 20, fontWeight: '600', color: theme.tokens.text.primary },
-  inputWrap: {
-    minHeight: 96,
-    backgroundColor: theme.tokens.bg.surface,
-    borderWidth: 1,
-    borderColor: theme.tokens.border.default,
-    borderRadius: theme.base.radius.md,
+  // O campo é o próprio vidro, sem caixa dentro da caixa.
+  inputWrap: { minHeight: 40, justifyContent: 'center', paddingHorizontal: theme.base.space[1] },
+  row: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[1] },
+  chip: {
+    flexShrink: 1,
+    minWidth: 0,
+    maxWidth: '45%',
+    height: 32,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    borderRadius: theme.base.radius.xs,
+    paddingHorizontal: theme.base.space[2],
   },
+  chipText: { flexShrink: 1, fontSize: theme.base.text.xs, color: theme.tokens.text.secondary },
+  spacer: { flex: 1 },
+  send: { width: 34, height: 34, borderRadius: theme.base.radius.full, alignItems: 'center', justifyContent: 'center' },
+  sendPressed: { opacity: 0.8 },
+  status: { flexDirection: 'row', gap: theme.base.space[3], paddingHorizontal: theme.base.space[4], paddingBottom: theme.base.space[2], paddingTop: 2 },
+  statusText: { fontFamily: theme.base.fontMono, fontSize: 11, color: theme.tokens.text.muted },
+  statusRest: { flexShrink: 1 },
   pending: {
     padding: theme.base.space[3],
     gap: theme.base.space[2],
     borderWidth: 1,
     borderColor: theme.tokens.border.subtle,
     borderRadius: theme.base.radius.md,
+    backgroundColor: superficie(theme),
   },
   pendingText: { fontSize: theme.base.text.sm, color: theme.tokens.text.primary },
   label: { fontSize: theme.base.text.sm, color: theme.tokens.text.secondary, fontWeight: '500' },
   hint: { fontSize: theme.base.text.sm, color: theme.tokens.text.secondary },
   error: { color: theme.tokens.status.error, fontSize: theme.base.text.sm },
-  actions: { flexDirection: 'row', gap: theme.base.space[2] },
-  options: {
-    minHeight: 50,
-    paddingVertical: theme.base.space[2],
-    paddingHorizontal: theme.base.space[4],
-    borderWidth: 1,
-    borderColor: theme.tokens.border.default,
-    borderRadius: theme.base.radius.md,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  primary: {
-    flex: 1,
-    minHeight: 50,
-    paddingVertical: theme.base.space[2],
-    backgroundColor: theme.tokens.accent.base,
-    borderRadius: theme.base.radius.md,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  primaryTxt: { color: '#fff', fontWeight: '600', fontSize: theme.base.text.base },
   secondary: { minHeight: 44, padding: theme.base.space[2], borderWidth: 1, borderColor: theme.tokens.border.default, borderRadius: theme.base.radius.md, justifyContent: 'center', alignItems: 'center' },
   secondaryTxt: { color: theme.tokens.text.primary, fontSize: theme.base.text.sm, fontWeight: '500' },
   ghost: { minHeight: 44, padding: theme.base.space[2], justifyContent: 'center', alignItems: 'center' },

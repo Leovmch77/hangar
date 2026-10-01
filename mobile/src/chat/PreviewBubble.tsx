@@ -4,7 +4,6 @@ import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { EnrichedMarkdownText } from 'react-native-enriched-markdown';
 import { splitTodoBlock } from '@hangar/core';
 import { mkMarkdownStyle } from './AssistantBubble';
-import { superficie } from '../theme/superficie';
 
 interface Props {
   text: string;
@@ -72,17 +71,9 @@ export function PreviewBubble({ text, md, full }: Props) {
 }
 
 const styles = StyleSheet.create((theme) => ({
+  // Sem bolha, igual à resposta pronta: o que distingue a prévia é o texto secondary e o caret.
   wrap: {
-    alignSelf: 'flex-start',
-    maxWidth: '92%',
-    backgroundColor: superficie(theme, 0.8),
-    borderRadius: theme.base.radius.lg,
-    paddingHorizontal: theme.base.space[3],
-    paddingVertical: theme.base.space[2],
-    opacity: 0.85,
-    borderWidth: 1,
-    borderColor: theme.tokens.border.default,
-    borderStyle: 'dashed',
+    alignSelf: 'stretch',
     gap: theme.base.space[1],
   },
   plain: {
@@ -98,7 +89,7 @@ const styles = StyleSheet.create((theme) => ({
     fontSize: theme.base.text.xxs,
   },
   caret: {
-    color: theme.tokens.accent.base,
+    color: theme.tokens.text.primary,
     fontSize: theme.base.text.sm,
   },
 }));

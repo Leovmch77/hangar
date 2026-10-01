@@ -1,43 +1,42 @@
 import { useEffect, useState } from 'react';
-import { Pressable, Text } from 'react-native';
-import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { estilosDitado } from '@hangar/core';
 import * as m from '../../paraglide/messages';
 import { useDitadoEstiloStore } from './ditadoEstiloStore';
 import { PillMenu } from '../pills/PillMenu';
-import { superficie } from '../../theme/superficie';
 
-export function EstiloPill() {
-  const { theme } = useUnistyles();
+// Rótulo do estilo vigente: é o que a pessoa precisa ler antes de falar.
+export function useDictationStyleLabel(): string {
   const valor = useDitadoEstiloStore((s) => s.valor);
-  const revalidar = useDitadoEstiloStore((s) => s.revalidar);
-  const trocar = useDitadoEstiloStore((s) => s.trocar);
-
-  const [open, setOpen] = useState(false);
-  const [erro, setErro] = useState<string | null>(null);
-  const [aplicando, setAplicando] = useState<string | null>(null);
-
   // carrega na montagem
   useEffect(() => {
     void useDitadoEstiloStore.getState().carregar();
   }, []);
+  return estilosDitado().find((e) => e.valor === valor)?.rotulo ?? m.ditado_estilo_prosa();
+}
+
+// Seletor do estilo do ditado sem gatilho próprio: no composer ele abre pelo toque longo no microfone.
+export function DictationStyleMenu({ open, onClose }: { open: boolean; onClose: () => void }) {
+  const valor = useDitadoEstiloStore((s) => s.valor);
+  const revalidar = useDitadoEstiloStore((s) => s.revalidar);
+  const trocar = useDitadoEstiloStore((s) => s.trocar);
+
+  const [erro, setErro] = useState<string | null>(null);
+  const [aplicando, setAplicando] = useState<string | null>(null);
+
+  // Revalida a cada abertura: a lista não pode exibir um valor trocado noutro aparelho.
+  useEffect(() => {
+    if (!open) return;
+    setErro(null);
+    setAplicando(null);
+    void revalidar();
+  }, [open, revalidar]);
 
   const lista = estilosDitado();
-  const atual = lista.find((e) => e.valor === valor);
-  const label = atual?.rotulo ?? m.ditado_estilo_prosa();
-
   const items = lista.map((e) => ({
     label: e.rotulo,
     hint: e.hint,
     selected: e.valor === valor,
   }));
-
-  const handleOpen = () => {
-    setErro(null);
-    setAplicando(null);
-    void revalidar();
-    setOpen(true);
-  };
 
   const handleSelect = async (item: { label: string }) => {
     const hit = lista.find((e) => e.rotulo === item.label);
@@ -46,7 +45,7 @@ export function EstiloPill() {
     setErro(null);
     try {
       await trocar(hit.valor);
-      setOpen(false);
+      onClose();
     } catch (e) {
       setErro(e instanceof Error ? e.message : 'falha');
     } finally {
@@ -55,47 +54,16 @@ export function EstiloPill() {
   };
 
   return (
-    <>
-      <Pressable
-        onPress={handleOpen}
-        style={[
-          styles.pill,
-          { backgroundColor: superficie(theme, 0.8), borderColor: theme.tokens.border.subtle },
-        ]}
-        accessibilityRole="button"
-        accessibilityLabel={m.ditado_estilo_titulo()}
-      >
-        <Text style={[styles.text, { color: theme.tokens.text.primary }]} numberOfLines={1}>
-          {label}
-        </Text>
-      </Pressable>
-      <PillMenu
-        open={open}
-        onClose={() => setOpen(false)}
-        items={items.map((it) => ({
-          ...it,
-          label: it.label + (aplicando && lista.find((x) => x.valor === aplicando)?.rotulo === it.label ? ' …' : ''),
-        }))}
-        onSelect={handleSelect}
-        error={erro}
-        title={m.ditado_estilo_titulo()}
-      />
-    </>
+    <PillMenu
+      open={open}
+      onClose={onClose}
+      items={items.map((it) => ({
+        ...it,
+        label: it.label + (aplicando && lista.find((x) => x.valor === aplicando)?.rotulo === it.label ? ' …' : ''),
+      }))}
+      onSelect={handleSelect}
+      error={erro}
+      title={m.ditado_estilo_titulo()}
+    />
   );
 }
-
-const styles = StyleSheet.create((theme) => ({
-  pill: {
-    borderWidth: 1,
-    borderRadius: theme.base.radius.full,
-    paddingHorizontal: theme.base.space[2],
-    paddingVertical: 6,
-    minHeight: 32,
-    justifyContent: 'center',
-    maxWidth: 140,
-  },
-  text: {
-    fontSize: theme.base.text.xs,
-    fontWeight: '600',
-  },
-}));

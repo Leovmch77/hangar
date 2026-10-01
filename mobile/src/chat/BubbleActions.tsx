@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Pressable, Share, Text, View } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
 import { createAudioPlayer, type AudioPlayer } from 'expo-audio';
@@ -32,11 +32,20 @@ type ComListener = {
   addListener(evento: 'playbackStatusUpdate', fn: (s: { didJustFinish: boolean; error: string | null }) => void): unknown;
 };
 
-// Hora + copiar/compartilhar/ouvir. Compartilhar usa o Share do RN (texto puro, sem lib). Ouvir
+// Hora + copiar/compartilhar/ouvir, discretos: fechado é só "14:02 ⋯" apagado, e o ⋯ abre os três
+// ícones no lugar. Ícone grande em toda resposta disputava atenção com o texto. `defaultOpen` é de
+// quem já abriu por gesto (toque longo na bolha do usuário). Compartilhar usa o Share do RN; Ouvir
 // chama o mesmo POST /api/tts da PWA e toca a URL devolvida.
-export function BubbleActions({ text, ts, ouvir = true }: { text: string; ts?: number | null; ouvir?: boolean }) {
+export function BubbleActions({ text, ts, ouvir = true, defaultOpen = false, align = 'start' }: {
+  text: string;
+  ts?: number | null;
+  ouvir?: boolean;
+  defaultOpen?: boolean;
+  align?: 'start' | 'end';
+}) {
   const { theme } = useUnistyles();
   const c = theme.tokens.text.muted;
+  const [aberto, setAberto] = useState(defaultOpen);
   // A lista é virtualizada: a bolha pode sair da tela antes de o /api/tts responder.
   const vivo = useRef(true);
   useEffect(() => () => { vivo.current = false; }, []);
@@ -79,24 +88,34 @@ export function BubbleActions({ text, ts, ouvir = true }: { text: string; ts?: n
     }
   };
   return (
-    <View style={styles.row}>
-      <Text style={[styles.hora, { color: c }]}>{hora(ts)}</Text>
-      <Pressable onPress={() => void copiar()} hitSlop={8} accessibilityRole="button" accessibilityLabel={m.bubble_copiar()}>
-        <Icon name="Copy" size={13} color={c} />
-      </Pressable>
-      <Pressable onPress={() => void compartilhar()} hitSlop={8} accessibilityRole="button" accessibilityLabel={m.bolha_compartilhar()}>
-        <Icon name="Share2" size={13} color={c} />
-      </Pressable>
-      {ouvir ? (
-        <Pressable onPress={() => void falar()} hitSlop={8} accessibilityRole="button" accessibilityLabel={m.bubble_ouvir()}>
-          <Icon name="Volume2" size={13} color={c} />
+    <View style={[styles.row, align === 'end' && styles.fim]}>
+      {ts ? <Text style={[styles.hora, { color: c }]}>{hora(ts)}</Text> : null}
+      {!aberto ? (
+        <Pressable onPress={() => setAberto(true)} hitSlop={12} accessibilityRole="button"
+          accessibilityLabel={m.navbar_mais_acoes()} accessibilityState={{ expanded: false }}>
+          <Icon name="Ellipsis" size={14} color={c} />
         </Pressable>
-      ) : null}
+      ) : (
+        <>
+          <Pressable onPress={() => void copiar()} hitSlop={12} accessibilityRole="button" accessibilityLabel={m.bubble_copiar()}>
+            <Icon name="Copy" size={14} color={c} />
+          </Pressable>
+          <Pressable onPress={() => void compartilhar()} hitSlop={12} accessibilityRole="button" accessibilityLabel={m.bolha_compartilhar()}>
+            <Icon name="Share2" size={14} color={c} />
+          </Pressable>
+          {ouvir ? (
+            <Pressable onPress={() => void falar()} hitSlop={12} accessibilityRole="button" accessibilityLabel={m.bubble_ouvir()}>
+              <Icon name="Volume2" size={14} color={c} />
+            </Pressable>
+          ) : null}
+        </>
+      )}
     </View>
   );
 }
 
 const styles = StyleSheet.create(() => ({
-  row: { flexDirection: 'row', alignItems: 'center', gap: 14, paddingHorizontal: 6, paddingTop: 4 },
-  hora: { fontSize: 11, marginRight: 'auto' },
+  row: { flexDirection: 'row', alignItems: 'center', gap: 16, minHeight: 24 },
+  fim: { justifyContent: 'flex-end' },
+  hora: { fontSize: 11 },
 }));

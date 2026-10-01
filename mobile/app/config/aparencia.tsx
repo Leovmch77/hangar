@@ -10,6 +10,7 @@ import { Icon } from '../../src/ui/Icon';
 import { toast } from '../../src/ui/Toast';
 import { useAparencia, type Fundo } from '../../src/stores/aparencia';
 import * as m from '../../src/paraglide/messages';
+import { opacidadeDe, transparenciaDe } from '../../src/theme/superficie';
 
 // As mesmas cores que a PWA oferece (SW_DESTAQUE de components/settings/CorTemaSettings.svelte).
 const PALETA = ['#d97757', '#34c759', '#0ea5e9', '#e879f9', '#f59e0b'] as const;
@@ -78,11 +79,12 @@ export default function Aparencia() {
       ) : null}
 
       <Linha titulo={m.config_fundo_transparencia()} descricao={m.config_fundo_transparencia_detalhe()}>
+        {/* O valor guardado é a OPACIDADE do vidro; o slider mostra o que o rótulo diz (direita = mais transparente). */}
         <Slider
-          valor={panelAlpha}
-          min={0.3}
+          valor={transparenciaDe(panelAlpha)}
+          min={0}
           max={1}
-          onChange={(v) => useAparencia.getState().setPanelAlpha(v)}
+          onChange={(v) => useAparencia.getState().setPanelAlpha(opacidadeDe(v))}
           label={m.config_fundo_transparencia()}
         />
       </Linha>

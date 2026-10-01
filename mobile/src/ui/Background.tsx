@@ -6,6 +6,7 @@ import { useUnistyles } from 'react-native-unistyles';
 import { useAparencia } from '../stores/aparencia';
 import { toast } from './Toast';
 import * as m from '../paraglide/messages';
+import { transparenciaDe } from '../theme/superficie';
 
 // Mesmos modos do `lib/background.ts` da PWA, com os valores do app.css:
 //   texture/aurora = faixa vertical (app.css:356 e :551);
@@ -61,6 +62,16 @@ export function Background() {
             toast.erro(m.erro_desconhecido());
             void useAparencia.getState().setImagemUri(null);
           }}
+        />
+      ) : null}
+      {fundo === 'image' && uri ? (
+        // Véu da PWA (lib/background.ts): sem ele a foto crua briga com o texto. Anda com o slider
+        // Transparência; no máximo ainda sobra 10% de véu.
+        <View
+          style={[
+            RN.absoluteFill,
+            { backgroundColor: `rgba(${theme.tokens.veuRgb.join(',')},${1 - 0.9 * transparenciaDe(theme.panelAlpha)})` },
+          ]}
         />
       ) : null}
     </View>

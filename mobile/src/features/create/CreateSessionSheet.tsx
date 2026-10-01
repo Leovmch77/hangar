@@ -15,6 +15,7 @@ import { CwdPicker } from './CwdPicker';
 import { ProviderPicker } from './ProviderPicker';
 import { CodexContextControl } from './CodexContextControl';
 import { NewConversation } from './NewConversation';
+import { superficie } from '../../theme/superficie';
 import * as m from '../../paraglide/messages';
 
 function valorModelo(mm: ModelOption): string {
@@ -378,8 +379,13 @@ function CreateSessionForm({ active, onClose }: { active: Server; onClose?: () =
   const settingsLabel = retomavel
     ? `${providerName(provider)} · ${m.criar_retomar()}`
     : [providerName(provider), settings.engine ? motores[engine]?.label ?? engine : null, modelLabel, settings.effort].filter(Boolean).join(' · ');
-  const destinationSummary = <Text style={styles.summary} numberOfLines={2}>{active.label} · {picked || m.nova_conversa_sem_destino()}</Text>;
-  const settingsSummary = <Text style={styles.summary} numberOfLines={2}>{settingsLabel}</Text>;
+  // Caixa da Nova conversa: chips curtos à vista, resumo inteiro no rótulo acessível e a linha de
+  // status embaixo com modelo · nível · permissão.
+  const folderLabel = picked ? basename(picked) : m.native_new_chat_folder();
+  const destinationLabel = `${active.label} · ${picked || m.nova_conversa_sem_destino()}`;
+  const statusLabel = retomavel
+    ? m.criar_retomar()
+    : [settings.engine ? motores[engine]?.label ?? engine : null, modelLabel, settings.effort, settings.permission_mode].filter(Boolean).join(' · ');
   const quotaNotice = provider === 'claude' && cotaSelecionada ? (
     <Text style={styles.hint}>
       {resumoCota(cotaSelecionada) ||
@@ -571,8 +577,11 @@ function CreateSessionForm({ active, onClose }: { active: Server; onClose?: () =
       server={active}
       destination={destination}
       destinationPending={!picked}
-      destinationSummary={destinationSummary}
-      settingsSummary={settingsSummary}
+      folderLabel={folderLabel}
+      destinationLabel={destinationLabel}
+      providerLabel={providerName(provider)}
+      settingsLabel={settingsLabel}
+      statusLabel={statusLabel}
       notices={notices}
       options={options}
       body={body}
@@ -592,7 +601,7 @@ const styles = StyleSheet.create((theme) => ({
   input: {
     flex: 1,
     height: 44,
-    backgroundColor: theme.tokens.bg.surface,
+    backgroundColor: superficie(theme),
     borderWidth: 1,
     borderColor: theme.tokens.border.default,
     borderRadius: theme.base.radius.md,
@@ -611,7 +620,7 @@ const styles = StyleSheet.create((theme) => ({
   manualGoTxt: { color: theme.tokens.text.primary, fontWeight: '600', fontSize: theme.base.text.sm },
   picked: {
     padding: theme.base.space[3],
-    backgroundColor: theme.tokens.bg.surface,
+    backgroundColor: superficie(theme),
     borderWidth: 1,
     borderColor: theme.tokens.border.subtle,
     borderRadius: theme.base.radius.md,
@@ -619,7 +628,6 @@ const styles = StyleSheet.create((theme) => ({
   },
   pickedName: { fontSize: theme.base.text.lg, fontWeight: '600', color: theme.tokens.text.primary },
   pickedPath: { fontFamily: theme.base.fontMono, fontSize: theme.base.text.xs, color: theme.tokens.text.muted },
-  summary: { fontSize: theme.base.text.sm, color: theme.tokens.text.primary },
   rowCenter: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   hint: { fontSize: theme.base.text.sm, color: theme.tokens.text.secondary },
   hintSm: { fontSize: 12, color: theme.tokens.text.muted, marginTop: 4 },
@@ -627,7 +635,7 @@ const styles = StyleSheet.create((theme) => ({
   label: { fontSize: theme.base.text.sm, color: theme.tokens.text.secondary, fontWeight: '500' },
   selectBtn: {
     height: 44,
-    backgroundColor: theme.tokens.bg.surface,
+    backgroundColor: superficie(theme),
     borderWidth: 1,
     borderColor: theme.tokens.border.default,
     borderRadius: theme.base.radius.md,
