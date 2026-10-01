@@ -50,7 +50,9 @@ site/tools/record/enc.sh <cena> <lang>
 | `orq` | 13 | 4 (seleciona `orq-checkout`, a 4ª linha da lateral) |
 
 - `<lang>` é `en` ou `pt`. A saída fica em `site/tools/record/out/`; copie `<cena>-<lang>.mp4`
-  e `.jpg` para `site/media/` (EN) ou `site/media/pt/` (PT), com o nome `<cena>.mp4`/`.jpg`.
+  e `.jpg` com nome NOVO (`agents-v2.mp4`/`agents-v2.jpg`) para `site/media/` (EN) ou
+  `site/media/pt/` (PT) e troque o `video`/`poster` da cena em `CLIPS` (`site/src/strings.py`,
+  posição PT ou EN): o cache `immutable` serviria o vídeo antigo com o nome antigo.
 - A janela tem 1600x960 na posição 160,60: o monitor precisa de pelo menos 1760x1020 lógicos
   (tamanho dividido pela escala). `launch.sh` recusa se não couber.
 - Variáveis: `HANGAR_RECORD_MONITOR=<nome>` escolhe o monitor (padrão: o focado);
