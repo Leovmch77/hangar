@@ -386,6 +386,12 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
   o token do dono.** Confiança = usuário do sistema do dono. No servidor de convite, 410 e 401 são
   "encerrado" (nunca apagar o servidor nem abrir login) e 503 é tentar de novo. Motivo em
   [plataforma.md](docs/decisoes/plataforma.md#compartilhar-sessão-a-porta-do-convidado-é-a-única-na-internet).
+- **Par externo: o token de entrada é um `Share` de `kind: "pair"` (só leitura), o de saída mora
+  em `external_pairs.json`.** Só endereço `https://*.ts.net:8443`; quem assina o recado é o token
+  (`[de fora: alias::sessao]`), nunca o texto; só 410 desfaz o par; nome de sessão de fora é
+  `[A-Za-z0-9._-]{1,64}`; chamada à outra máquina nunca segue redirect. Um token de convidado cobre
+  várias sessões da mesma máquina. Motivo em
+  [plataforma.md](docs/decisoes/plataforma.md#par-externo-sessões-de-pessoas-diferentes).
 - **Logs pertencem ao Hangar, não à conta.** Use `log_paths.base()`; diário exportável registra
   etapas, códigos e origem da falha. Texto de conversa, credenciais e saídas brutas ficam fora
   dele. O shell Electron também escreve lá (`privado/shell.log`): lançado pelo `.desktop`, o
