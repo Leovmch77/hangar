@@ -6411,5 +6411,10 @@
   "conversas_nova": "New conversation",
   "conversas_recentes": "Recent",
   "conversas_vazio": "No conversations yet. Tap New conversation to start.",
-  "conversas_servidor_falhou": "Couldn't load conversations from {servidor}."
+  "conversas_servidor_falhou": "Couldn't load conversations from {servidor}.",
+  "newchat_sem_pasta": "Choose a folder before sending.",
+  "newchat_abrir_lista": "Open conversation list",
+  "newchat_sem_servidor": "No machine of yours is registered to start a conversation. Add one in Settings.",
+  "newchat_conta_sem_limite": "{conta} is out of quota — resets {quando}. Switch account to send.",
+  "newchat_conta_sem_limite_sem_hora": "{conta} is out of quota. Switch account to send."
 }

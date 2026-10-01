@@ -16,6 +16,7 @@
   import * as diag from './lib/diag';
   import Login from './screens/Login.svelte';
   import SessionList from './screens/SessionList.svelte';
+  import NewChatHome from './screens/NewChatHome.svelte';
   import Orq from './screens/Orq.svelte';
   import Costs from './screens/Costs.svelte';
   import Uso from './screens/Uso.svelte';
@@ -363,9 +364,9 @@
   }
 
   const ehRelatorio = (h: string) => h.startsWith('#/costs') || h.startsWith('#/uso');
-  let hashAntesDoRelatorio = '#/';
+  let hashAntesDoRelatorio = '#/sessoes';
   function voltarDoRelatorio() {
-    navigateTo(ehRelatorio(hashAntesDoRelatorio) ? '#/' : hashAntesDoRelatorio);
+    navigateTo(ehRelatorio(hashAntesDoRelatorio) ? '#/sessoes' : hashAntesDoRelatorio);
   }
 
   function navigateToChat(name: string) {
@@ -382,7 +383,7 @@
   }
 
   function navigateToSessions() {
-    navigateTo('#/');
+    navigateTo('#/sessoes');
   }
 
   // Desktop: terminal No Hangar já tem o pedido de aba registrado por quem chamou; terminal "Na
@@ -566,7 +567,7 @@
   {:else if route.name === 'archive'}
     <!-- Remonta ao trocar de deep-link (busca -> outra conversa): reabre com o novo alvo. -->
     {#key route.deepLink ? `${route.deepLink.serverId}/${route.deepLink.project}/${route.deepLink.sessionId}/${route.deepLink.eventId ?? ''}` : ''}
-      <Archive onBack={() => navigateTo('#/')} deepLink={route.deepLink ?? null} />
+      <Archive onBack={navigateToSessions} deepLink={route.deepLink ?? null} />
     {/key}
   {:else if route.name === 'compare'}
     <!-- Remonta ao trocar o conjunto comparado: fecha os streams antigos e abre os novos. -->
@@ -595,6 +596,9 @@
     <!-- Orquestração TEM tela no celular (diferente do quadro/canvas): é leitura, não arrasto de
          card, e é a tela que o usuário abre longe da máquina. -->
     <Orq onBack={navigateToSessions} onNavigateToChat={navigateToChat} />
+  {:else if route.name === 'home'}
+    <!-- Celular abre na nova conversa; no desktop `home` caiu no DesktopShell acima, como a lista. -->
+    <NewChatHome onOpenList={navigateToSessions} />
   {:else if route.name === 'sessions' || route.name === 'board' || route.name === 'canvas'}
     <!-- Quadro/canvas são só desktop: no mobile caem na lista normal (em vez de tela em branco). -->
     <SessionList

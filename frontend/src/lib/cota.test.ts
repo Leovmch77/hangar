@@ -2,7 +2,7 @@
 // rede aqui — recebe o CotaConta[] de /api/cotas e devolve o quê mostrar.
 import { describe, it, expect, beforeEach } from 'vitest';
 import { overwriteGetLocale } from '../paraglide/runtime';
-import { faixaDeCota, nivelDePct, faltaPara, diaDoReset, janelaLonga, VELHA_APOS_S, piorJanela } from './cota';
+import { faixaDeCota, nivelDePct, faltaPara, diaDoReset, janelaLonga, VELHA_APOS_S, piorJanela, exhaustedWindow } from './cota';
 import type { CotaConta } from './contaEstado';
 
 function lida(label: string, cinco: number, sete: number, extra: Partial<CotaConta> = {}): CotaConta {
@@ -149,5 +149,25 @@ describe('piorJanela — o smart da pílula do topo', () => {
   it('sem conta ou sem janela nenhuma: null (a pílula não inventa número)', () => {
     expect(piorJanela(faixaDeCota([]))).toBeNull();
     expect(piorJanela(faixaDeCota([semLeitura('jefferson')]))).toBeNull();
+  });
+});
+
+describe('exhaustedWindow — conta sem limite bloqueia o envio', () => {
+  it('janela geral em 100% bloqueia', () => {
+    const conta = faixaDeCota([lida('a', 100, 40)])![0];
+    expect(exhaustedWindow(conta)?.rotulo).toBe('5h');
+  });
+  it('99% não bloqueia', () => {
+    expect(exhaustedWindow(faixaDeCota([lida('a', 99, 99)])![0])).toBeNull();
+  });
+  it('janela de um modelo só em 100% não bloqueia', () => {
+    const c = lida('a', 10, 20);
+    c.janelas = [...c.janelas, { rotulo: 'Fable', pct: 100, reset_ts: 300_000, por_modelo: true }];
+    expect(exhaustedWindow(faixaDeCota([c])![0])).toBeNull();
+  });
+  it('leitura que não é lida não bloqueia', () => {
+    expect(exhaustedWindow(faixaDeCota([semLeitura('a')])![0])).toBeNull();
+    expect(exhaustedWindow({ ...faixaDeCota([lida('a', 100, 100)])![0], estado: 'expirada' })).toBeNull();
+    expect(exhaustedWindow(null)).toBeNull();
   });
 });

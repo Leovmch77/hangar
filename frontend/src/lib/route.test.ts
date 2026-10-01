@@ -29,8 +29,14 @@ describe('parseHash ignora o eixo do painel de configuracoes', () => {
 });
 
 describe('parseHash sem painel segue como era', () => {
-  it('raiz vira sessions', () => {
-    expect(parseHash('#/')).toEqual({ name: 'sessions' });
+  it('raiz vira a tela inicial', () => {
+    expect(parseHash('#/')).toEqual({ name: 'home' });
+    expect(parseHash('')).toEqual({ name: 'home' });
+    expect(parseHash('#/?config=aparencia')).toEqual({ name: 'home' });
+  });
+  it('#/sessoes é a lista e rota desconhecida também cai nela', () => {
+    expect(parseHash('#/sessoes')).toEqual({ name: 'sessions' });
+    expect(parseHash('#/xyz')).toEqual({ name: 'sessions' });
   });
   it('auto-cura de nome invalido continua valendo', () => {
     expect(parseHash('#/chat/undefined')).toEqual({ name: 'sessions' });
