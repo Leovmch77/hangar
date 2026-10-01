@@ -62,17 +62,22 @@ impl Hangar {
         cx.notify();
     }
 
-    /// Redesenha a barra enquanto toca; no fim, pausa a saída.
+    /// Redesenha a barra enquanto toca; no fim, pausa a saída. Erro do fluxo fecha o áudio e aparece no player dele.
     fn watch_audio(&mut self, cx: &mut Context<Self>) {
         if self.player.ticking { return; }
         self.player.ticking = true;
         cx.spawn(async move |this, cx| loop {
             cx.background_executor().timer(Duration::from_millis(250)).await;
             let playing = this.update(cx, |this, cx| {
-                let playing = this.player.current.as_mut().is_some_and(|(_, playback)| {
-                    playback.settle();
-                    !playback.paused()
-                });
+                let settled = this.player.current.as_mut().map(|(_, playback)| playback.settle().map(|()| !playback.paused()));
+                let playing = match settled {
+                    Some(Ok(playing)) => playing,
+                    Some(Err(error)) => {
+                        if let Some((key, _)) = this.player.current.take() { this.player.error = Some((key, error)); }
+                        false
+                    }
+                    None => false,
+                };
                 if !playing { this.player.ticking = false; }
                 cx.notify();
                 playing

@@ -16,6 +16,7 @@ pub(super) struct ImportDraft {
     /// (id do atalho, rótulo, nome do marcador, campo mascarado)
     fields: Vec<(String, String, String, Entity<InputState>)>,
     files: Vec<Value>,
+    verify_commands: Vec<(String, String)>,
     expanded: HashSet<String>,
     _changes: Vec<Subscription>,
     pub(super) applying: bool,
@@ -27,10 +28,10 @@ pub(super) struct ImportDraft {
 pub(super) struct Check { label: String, ok: bool, output: String }
 
 /// As verificações e o pedido de correção: `fix` diz se foi entregue à sessão aberta (nome) ou o erro do envio;
-/// `None` com falha = não havia sessão desta máquina aberta.
-pub(super) struct Checks { list: Vec<Check>, prompt: String, fix: Option<Result<String, String>> }
+/// `None` com falha = não havia sessão desta máquina aberta. `skipped`: (rótulo ou id, motivo) dos que o backend não rodou.
+pub(super) struct Checks { list: Vec<Check>, skipped: Vec<(String, String)>, prompt: String, fix: Option<Result<String, String>> }
 
-fn parse_checks(value: &Value) -> (Vec<Check>, String) {
+fn parse_checks(value: &Value) -> (Vec<Check>, Vec<(String, String)>, String) {
     let (mut list, mut prompts) = (Vec::new(), Vec::new());
     for check in value.get("checks").and_then(Value::as_array).into_iter().flatten() {
         let text = |key: &str| check.get(key).and_then(Value::as_str).unwrap_or("").to_owned();
@@ -38,7 +39,20 @@ fn parse_checks(value: &Value) -> (Vec<Check>, String) {
         if !ok && !text("prompt").is_empty() { prompts.push(text("prompt")); }
         list.push(Check { label: text("label"), ok, output: text("output") });
     }
-    (list, prompts.join("\n\n---\n\n"))
+    let skipped = value.get("skipped").and_then(Value::as_array).into_iter().flatten().map(|item| {
+        let text = |key: &str| item.get(key).and_then(Value::as_str).unwrap_or("").to_owned();
+        (Some(text("label")).filter(|label| !label.is_empty()).unwrap_or_else(|| text("id")), text("motivo"))
+    }).collect();
+    (list, skipped, prompts.join("\n\n---\n\n"))
+}
+
+/// (rótulo ou id, comando) de cada `verify` que roda logo depois de importar.
+fn verify_commands(preview: &Value) -> Vec<(String, String)> {
+    preview.get("verify_commands").and_then(Value::as_array).into_iter().flatten().filter_map(|item| {
+        let text = |key: &str| item.get(key).and_then(Value::as_str).unwrap_or("").to_owned();
+        let label = Some(text("label")).filter(|label| !label.is_empty()).unwrap_or_else(|| text("id"));
+        Some((label, text("command"))).filter(|(_, command)| !command.is_empty())
+    }).collect()
 }
 
 pub(super) struct ExportDraft {
@@ -241,13 +255,13 @@ impl Hangar {
                 Ok(value) => value,
                 Err(error) => return done(ShortcutsReply::Verified(Err(Hangar::fetch_failure(&error)))).await,
             };
-            let (list, prompt) = parse_checks(&value);
+            let (list, skipped, prompt) = parse_checks(&value);
             let fix = match target {
                 Some((api, name)) if !prompt.is_empty() =>
                     Some(api.send(&name, &prompt).await.map(|_| name).map_err(|e| Hangar::fetch_failure(&e))),
                 _ => None,
             };
-            done(ShortcutsReply::Verified(Ok(Checks { list, prompt, fix }))).await
+            done(ShortcutsReply::Verified(Ok(Checks { list, skipped, prompt, fix }))).await
         });
         cx.notify();
     }
@@ -317,7 +331,7 @@ impl Hangar {
                 self.shortcuts.transfer_warnings = warnings(&preview);
                 self.shortcuts.import = Some(ImportDraft { api, connection: self.connection, data,
                     files: preview.get("files").and_then(Value::as_array).cloned().unwrap_or_default(),
-                    expanded: HashSet::new(), _changes: changes,
+                    verify_commands: verify_commands(&preview), expanded: HashSet::new(), _changes: changes,
                     added: preview.get("added").and_then(Value::as_u64).unwrap_or(0),
                     replaced: preview.get("replaced").and_then(Value::as_u64).unwrap_or(0), fields, applying: false, target: None });
                 cx.notify();
@@ -395,6 +409,15 @@ impl Hangar {
         let checks = self.shortcuts.checks.as_ref()?;
         let mut body = div().w_full().flex().flex_col().gap_2().text_xs().whitespace_normal()
             .child(div().font_weight(FontWeight::SEMIBOLD).child(tr("shortcuts_check_title")));
+        let total = checks.list.len() + checks.skipped.len();
+        if total > 0 {
+            body = body.child(div().text_color(theme::muted()).child(tr("shortcuts_check_count")
+                .replace("{n}", &checks.list.len().to_string()).replace("{m}", &total.to_string())));
+        }
+        for (label, reason) in &checks.skipped {
+            body = body.child(div().text_color(theme::warning_text())
+                .child(tr("shortcuts_check_skipped").replace("{label}", label).replace("{reason}", reason)));
+        }
         for check in &checks.list {
             let (text, color) = if check.ok { (tr("shortcuts_check_ok"), theme::success_text()) } else { (tr("shortcuts_check_failed"), theme::danger()) };
             body = body.child(div().text_color(color).child(text.replace("{label}", &check.label)))
@@ -499,6 +522,11 @@ impl Hangar {
                     .when(expanded, |el| el.child(div().p_2().font_family(theme::MONO).text_xs().whitespace_normal().child(content))));
             }
         }
+        if !draft.verify_commands.is_empty() {
+            body = body.child(div().text_sm().font_weight(FontWeight::SEMIBOLD).whitespace_normal().child(tr("shortcuts_import_verify")))
+                .children(draft.verify_commands.iter().map(|(label, command)| div().p_2().rounded(px(6.)).bg(theme::elevated())
+                    .font_family(theme::MONO).text_xs().whitespace_normal().child(format!("{label}: {command}"))));
+        }
         if !draft.fields.is_empty() {
             if draft.fields.iter().any(|(id, ..)| !id.starts_with("script:")) {
                 body = body.child(div().text_xs().text_color(theme::muted()).whitespace_normal().child(tr("shortcuts_import_secrets")));
@@ -525,8 +553,19 @@ impl Hangar {
 #[cfg(test)]
 mod tests {
     // Sem glob: o `test` da gpui colide com o atributo padrão.
-    use super::{export_file, export_query, export_supported, import_supported, missing_secret, warnings};
+    use super::{export_file, export_query, export_supported, import_supported, missing_secret, parse_checks, verify_commands, warnings};
     use serde_json::json;
+
+    #[test]
+    fn verify_reports_skipped_and_preview_lists_commands() {
+        let (list, skipped, prompt) = parse_checks(&json!({
+            "checks": [{"label": "rdp", "code": null, "error": "timeout", "prompt": "conserta"}],
+            "skipped": [{"id": "vm", "motivo": "sem verify"}, {"id": "x", "label": "X", "motivo": "limite"}]}));
+        assert_eq!((list.len(), list[0].ok, prompt.as_str()), (1, false, "conserta"));
+        assert_eq!(skipped, [("vm".to_owned(), "sem verify".to_owned()), ("X".to_owned(), "limite".to_owned())]);
+        let commands = verify_commands(&json!({"verify_commands": [{"id": "a", "label": "", "command": "which x"}, {"id": "b", "command": ""}]}));
+        assert_eq!(commands, [("a".to_owned(), "which x".to_owned())]);
+    }
 
     #[test]
     fn missing_secret_names_the_first_blank_credential() {

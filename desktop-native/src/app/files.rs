@@ -433,7 +433,13 @@ impl Hangar {
         let key = format!("file:{id}");
         if let Some(real) = self.file_on_disk(&path) {
             return self.toggle_audio(key, &path, async move {
-                tokio::task::spawn_blocking(move || std::fs::read(&real)).await.map_err(|e| e.to_string())?.map_err(|e| e.to_string())
+                tokio::task::spawn_blocking(move || {
+                    // O arquivo inteiro vai para a memória antes de decodificar.
+                    if std::fs::metadata(&real).map_err(|e| e.to_string())?.len() > 200 * 1024 * 1024 {
+                        return Err("arquivo maior que 200 MB".to_owned());
+                    }
+                    std::fs::read(&real).map_err(|e| e.to_string())
+                }).await.map_err(|e| e.to_string())?
             }, cx);
         }
         let (Some(api), Some(session)) = (self.session_api(), self.selected_key()) else { return };
@@ -453,7 +459,13 @@ impl Hangar {
 
     fn file_reveal_system(&mut self, cx: &mut Context<Self>) {
         let path = self.files.tabs[self.files.active].path.clone();
-        if let Some(real) = self.file_on_disk(&path) { cx.reveal_path(&real); }
+        match self.file_on_disk(&path) {
+            Some(real) => cx.reveal_path(&real),
+            None => if let Some(key) = self.selected_key() {
+                self.action_feedback.insert(key, (tr("file_not_on_disk"), true));
+                cx.notify();
+            },
+        }
     }
 
     pub(super) fn render_file_view(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -528,7 +540,7 @@ impl Hangar {
             .child(chrome::icon_button("file-reveal", IconName::FolderOpen, tr("file_reveal"), cx).disabled(tab.path.starts_with(['/', '~']))
                 .on_click(cx.listener(|this, _, window, cx| this.file_reveal(window, cx))))
             .child(chrome::icon_button("file-reveal-system", IconName::ExternalLink, tr("file_reveal_system"), cx)
-                .disabled(self.file_on_disk(&tab.path).is_none())
+                .disabled(!self.session_on_disk())
                 .on_click(cx.listener(|this, _, _, cx| this.file_reveal_system(cx))));
         let state = |text: String, color: Hsla| div().size_full().flex().items_center().justify_center().p_4().text_sm().text_color(color)
             .child(text).into_any_element();

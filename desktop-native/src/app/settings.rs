@@ -380,7 +380,9 @@ impl SettingsUi {
             subscriptions.push(cx.subscribe_in(&custom, window, move |this: &mut Hangar, input, event: &InputEvent, window, cx| {
                 if !matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur) { return; }
                 let typed = input.read(cx).value().trim().replace(',', ".");
-                if let Some(px) = typed.trim_end_matches("px").trim().parse::<f32>().ok().filter(|px| px.is_finite()) {
+                // O gravado é mais fino que o meio pixel à vista: sair do campo sem mudar o número não pode arredondá-lo.
+                let shown = (area.px(area.size(&appearance::get())) * 2.).round() / 2.;
+                if let Some(px) = typed.trim_end_matches("px").trim().parse::<f32>().ok().filter(|px| px.is_finite() && *px != shown) {
                     let mut next = appearance::get();
                     area.set_size(&mut next, area.stored(px));
                     this.apply_appearance(next, true, cx);

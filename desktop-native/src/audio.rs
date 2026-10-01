@@ -1,7 +1,7 @@
 //! Tocar áudio dentro do app: o `symphonia` decodifica (mp3, wav, ogg, flac, m4a) e o `cpal`, o mesmo do ditado, toca.
 //! Vídeo não passa por aqui: abre no player do sistema.
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 // ponytail: decodifica o arquivo inteiro na memória (10 min de estéreo a 48 kHz em i16 = ~110 MB); áudio maior pede
 // decodificação em fluxo, com o decodificador alimentando a saída por um canal.
@@ -61,7 +61,9 @@ pub struct Playback {
     stream: cpal::Stream,
     clip: Arc<Clip>,
     position: Arc<AtomicU64>,
-    paused: bool,
+    // A pausa vale no `fill`: há backend em que `stream.pause()` falha ou não para a saída.
+    paused: Arc<AtomicBool>,
+    failed: Arc<Mutex<Option<String>>>,
 }
 
 impl Playback {
@@ -70,13 +72,18 @@ impl Playback {
         let device = cpal::default_host().default_output_device().ok_or_else(|| "sem saída de som".to_owned())?;
         let config = device.default_output_config().map_err(|e| e.to_string())?;
         let position = Arc::new(AtomicU64::new(0f64.to_bits()));
+        let paused = Arc::new(AtomicBool::new(false));
+        let failed = Arc::new(Mutex::new(None));
         let (out_channels, out_rate) = (config.channels().max(1) as usize, config.sample_rate());
         macro_rules! output {
             ($t:ty) => {{
-                let (clip, position) = (clip.clone(), position.clone());
+                let (clip, position, paused, failed) = (clip.clone(), position.clone(), paused.clone(), failed.clone());
                 device.build_output_stream::<$t, _, _>(config.clone().into(),
-                    move |data: &mut [$t], _| fill(data, &clip, &position, out_channels, out_rate),
-                    |error| eprintln!("audio stream: {error}"), None)
+                    move |data: &mut [$t], _| fill(data, &clip, &position, &paused, out_channels, out_rate),
+                    move |error| {
+                        eprintln!("audio stream: {error}");
+                        *failed.lock().unwrap() = Some(error.to_string());
+                    }, None)
             }};
         }
         let stream = match config.sample_format() {
@@ -90,24 +97,31 @@ impl Playback {
             other => return Err(format!("formato de saída {other:?}")),
         }.map_err(|e| e.to_string())?;
         stream.play().map_err(|e| e.to_string())?;
-        Ok(Self { stream, clip, position, paused: false })
+        Ok(Self { stream, clip, position, paused, failed })
     }
 
+    /// Terminado (mesmo antes do `settle` marcar a pausa): recomeça do início. Senão, alterna.
     pub fn toggle(&mut self) {
-        use cpal::traits::StreamTrait;
-        // Terminado: o play recomeça do início.
-        if self.finished() { self.seek(0.); }
-        self.paused = !self.paused;
-        let _ = if self.paused { self.stream.pause() } else { self.stream.play() };
+        let paused = if self.finished() { self.seek(0.); false } else { !self.paused() };
+        self.set_paused(paused);
     }
 
-    /// Chegou ao fim: pausa a saída em vez de mandar silêncio, e o próximo play recomeça.
-    pub fn settle(&mut self) {
+    fn set_paused(&self, paused: bool) {
         use cpal::traits::StreamTrait;
-        if self.finished() && !self.paused { self.paused = true; let _ = self.stream.pause(); }
+        self.paused.store(paused, Ordering::Relaxed);
+        if let Err(error) = if paused { self.stream.pause() } else { self.stream.play() } {
+            eprintln!("audio stream: {error}");
+        }
     }
 
-    pub fn paused(&self) -> bool { self.paused }
+    /// Erro do fluxo (saída de som caiu) volta aqui; no fim, pausa a saída e o próximo play recomeça.
+    pub fn settle(&mut self) -> Result<(), String> {
+        if let Some(error) = self.failed.lock().unwrap().take() { return Err(error); }
+        if self.finished() && !self.paused() { self.set_paused(true); }
+        Ok(())
+    }
+
+    pub fn paused(&self) -> bool { self.paused.load(Ordering::Relaxed) }
     pub fn duration(&self) -> f64 { self.clip.duration() }
     pub fn elapsed(&self) -> f64 { f64::from_bits(self.position.load(Ordering::Relaxed)) / self.clip.rate as f64 }
     pub fn finished(&self) -> bool { self.elapsed() >= self.duration() }
@@ -118,7 +132,12 @@ impl Playback {
     }
 }
 
-fn fill<T: cpal::SizedSample + cpal::FromSample<f32>>(data: &mut [T], clip: &Clip, position: &AtomicU64, out_channels: usize, out_rate: u32) {
+fn fill<T: cpal::SizedSample + cpal::FromSample<f32>>(data: &mut [T], clip: &Clip, position: &AtomicU64, paused: &AtomicBool,
+    out_channels: usize, out_rate: u32) {
+    if paused.load(Ordering::Relaxed) {
+        data.fill(T::from_sample(0f32));
+        return;
+    }
     let (frames, step) = (clip.frames(), clip.rate as f64 / out_rate as f64);
     let mut at = f64::from_bits(position.load(Ordering::Relaxed));
     for frame in data.chunks_mut(out_channels) {
@@ -138,7 +157,8 @@ fn fill<T: cpal::SizedSample + cpal::FromSample<f32>>(data: &mut [T], clip: &Cli
 /// Extensões que o player do app toca; vídeo e o resto abrem no programa do sistema.
 pub fn is_audio(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
-    ["mp3", "wav", "ogg", "oga", "opus", "flac", "m4a", "aac"].iter().any(|ext| lower.ends_with(&format!(".{ext}")))
+    // Sem opus/oga: o symphonia não decodifica Opus, e esses abrem no programa do sistema.
+    ["mp3", "wav", "ogg", "flac", "m4a", "aac"].iter().any(|ext| lower.ends_with(&format!(".{ext}")))
 }
 
 pub fn is_video(name: &str) -> bool {
@@ -181,15 +201,21 @@ mod tests {
         let position = AtomicU64::new(1f64.to_bits());
         let mut out = [0f32; 4];
         // Saída a 32 kHz: cada quadro do arquivo vira dois, e o mono vai para os dois lados.
-        fill(&mut out, &clip, &position, 2, 32_000);
+        fill(&mut out, &clip, &position, &AtomicBool::new(false), 2, 32_000);
         assert_eq!(out, [0.5, 0.5, 0.0, 0.0]);
+        assert_eq!(f64::from_bits(position.load(Ordering::Relaxed)), 2.);
+        // Pausado: silêncio e a posição não anda.
+        let mut out = [1f32; 4];
+        fill(&mut out, &clip, &position, &AtomicBool::new(true), 2, 32_000);
+        assert_eq!(out, [0.; 4]);
         assert_eq!(f64::from_bits(position.load(Ordering::Relaxed)), 2.);
         assert!(decode(b"nada".to_vec(), Some("wav")).is_err());
     }
 
     #[test]
     fn audio_and_video_by_extension_and_clock() {
-        assert!(is_audio("ditado.WAV") && is_audio("a.mp3") && !is_audio("a.mp4"));
+        assert!(is_audio("ditado.WAV") && is_audio("a.mp3") && is_audio("a.ogg") && !is_audio("a.mp4"));
+        assert!(!is_audio("voz.opus") && !is_audio("voz.oga"));
         assert!(is_video("clip.mkv") && !is_video("a.ogg"));
         assert_eq!(clock(65.4), "1:05");
     }
