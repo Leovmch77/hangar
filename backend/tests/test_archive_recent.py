@@ -45,3 +45,39 @@ def test_list_recent_marca_viva(tmp_path, monkeypatch):
     out = archive.list_recent({viva})
 
     assert out[0].live is True
+
+
+def test_list_recent_cap_1_le_so_a_pasta_mais_nova(tmp_path, monkeypatch):
+    base = tmp_path / "projects"
+    agora = time.time()
+    _conv(base, "-tmp-a", "11111111-1111-1111-1111-111111111111", "a", agora - 300)
+    _conv(base, "-tmp-b", "22222222-2222-2222-2222-222222222222", "b", agora - 10)
+    _conv(base, "-tmp-c", "33333333-3333-3333-3333-333333333333", "c", agora - 100)
+    _isolar(monkeypatch, base)
+    chamadas = []
+    original = archive.list_conversations
+
+    def espia(project, live, cap=100, **kw):
+        chamadas.append((project, cap))
+        return original(project, live, cap=cap, **kw)
+
+    monkeypatch.setattr(archive, "list_conversations", espia)
+
+    out = archive.list_recent(set(), cap=1)
+
+    assert chamadas == [("-tmp-b", 1)]
+    assert [e.preview for e in out] == ["b"]
+
+
+def test_list_recent_ordena_entre_pastas(tmp_path, monkeypatch):
+    base = tmp_path / "projects"
+    agora = time.time()
+    _conv(base, "-tmp-a", "11111111-1111-1111-1111-111111111111", "a1", agora - 10)
+    _conv(base, "-tmp-b", "22222222-2222-2222-2222-222222222222", "b1", agora - 20)
+    _conv(base, "-tmp-a", "33333333-3333-3333-3333-333333333333", "a2", agora - 30)
+    _conv(base, "-tmp-b", "44444444-4444-4444-4444-444444444444", "b2", agora - 40)
+    _isolar(monkeypatch, base)
+
+    out = archive.list_recent(set(), cap=3)
+
+    assert [e.preview for e in out] == ["a1", "b1", "a2"]

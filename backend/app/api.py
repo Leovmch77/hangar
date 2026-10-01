@@ -7103,6 +7103,15 @@ class ResumeArchivedBody(_StrictBody):
     codex_account: str | None = None
 
 
+def _sessao_com_transcript(jsonl: Path) -> str | None:
+    """Nome da sessao viva que escreve neste transcript, ou None."""
+    alvo = os.path.realpath(str(jsonl))
+    for s in registry.list():
+        if s.jsonl and os.path.realpath(s.jsonl) == alvo:
+            return s.name
+    return None
+
+
 @app.post("/api/archive/{project}/{session_id}/resume", dependencies=[Depends(require_auth)],
           response_model=SessionInfo)
 def resume_archived(project: str, session_id: str, body: ResumeArchivedBody = ResumeArchivedBody()):
@@ -7142,10 +7151,11 @@ def resume_archived(project: str, session_id: str, body: ResumeArchivedBody = Re
             elif dona != cfg:
                 # Conversa ABERTA nao muda de conta: o processo dela ainda escreve no arquivo, e o
                 # rename deixaria ele gravando num inode que a lista nao acha mais.
-                origem_jsonl = os.path.realpath(str(archive_jsonl(project, session_id, dona)))
-                if any(s.jsonl and os.path.realpath(s.jsonl) == origem_jsonl for s in registry.list()):
+                viva = _sessao_com_transcript(archive_jsonl(project, session_id, dona))
+                if viva:
                     raise HTTPException(409, detail=erro("erro_conversa_viva",
-                                                         "conversa aberta nao muda de conta"))
+                                                         "conversa aberta nao muda de conta",
+                                                         sessao=viva))
                 mover = (dona,)
         except (ValueError, FileNotFoundError):
             pass
@@ -7174,6 +7184,17 @@ def resume_archived(project: str, session_id: str, body: ResumeArchivedBody = Re
         raise HTTPException(404, detail=erro("erro_transcript_nao_encontrado", "transcript not found"))
     if not cwd:
         raise HTTPException(422, detail=erro("erro_cwd_ausente", "cwd not found in transcript"))
+    # Mesmo transcript ja aberto numa sessao: um segundo `--resume` poria dois processos gravando
+    # no mesmo arquivo. Antes do move e de qualquer spawn.
+    try:
+        viva = _sessao_com_transcript(archive_jsonl(
+            project, session_id, mover[0] if mover else cfg, body.provider,
+            origem_codex_account if body.provider == "codex" else None))
+    except (ValueError, FileNotFoundError):
+        viva = None
+    if viva:
+        raise HTTPException(409, detail=erro("erro_conversa_viva", "conversa já está aberta",
+                                             sessao=viva))
     if body.engine is not None and body.engine not in engines.listar():
         raise HTTPException(400, detail=erro("erro_motor_invalido", "motor invalido"))
     base = sanitize_session_name(Path(cwd).name) or "sessao"

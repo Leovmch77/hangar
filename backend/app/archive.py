@@ -4,6 +4,7 @@ O registry so enxerga sessoes tmux; os jsonl antigos ficam orfaos. Aqui: listage
 data, se esta em uso por uma sessao viva) + resolucao de path VALIDADA (nunca leitura arbitraria de
 disco: projeto no alfabeto do sanitize_cwd, session_id uuid, e o arquivo tem que existir dentro do
 projects_dir)."""
+import heapq
 import json
 import logging
 import os
@@ -362,18 +363,30 @@ def list_conversations(project: str, live_realpaths: set[str], cap: int = 100,
 
 
 def list_recent(live_realpaths: set[str], cap: int = 40) -> list[ArchiveEntry]:
-    """Conversas mais recentes de TODAS as pastas. A pasta vem ordenada pela conversa mais nova
-    dela, entao assim que a pasta seguinte for mais velha que a ultima ja escolhida, nenhuma
-    conversa dela entra: para ali em vez de abrir todas as pastas."""
-    out: list[ArchiveEntry] = []
-    for folder in list_folders():
-        if len(out) >= cap and folder.mtime <= out[cap - 1].mtime:
-            break
+    """Conversas mais recentes de TODAS as pastas. Duas fases: uma varredura barata (so mtime) acha
+    de quais pastas vem as `cap` mais novas e quantas de cada; so entao se le o preview/fim delas."""
+    candidatas: list[tuple[float, str]] = []
+    for _cfg, _rot, base in _contas():
         try:
-            out += list_conversations(folder.project, live_realpaths, cap=cap)
+            projdirs = [d for d in base.iterdir() if d.is_dir()]
+        except OSError:
+            continue
+        for proj in projdirs:
+            candidatas += [(mt, proj.name) for mt, _f in _folder_files(proj)]
+    for c in _conversas_de_outros_providers():
+        proj = _projeto_de(c.cwd)
+        if proj is not None:
+            candidatas.append((c.mtime, proj))
+    por_pasta: dict[str, int] = {}
+    for _mt, proj in heapq.nlargest(cap, candidatas, key=lambda t: t[0]):
+        por_pasta[proj] = por_pasta.get(proj, 0) + 1
+    out: list[ArchiveEntry] = []
+    for proj, k in por_pasta.items():
+        try:
+            out += list_conversations(proj, live_realpaths, cap=k)
         except (ValueError, FileNotFoundError):
             continue
-        out.sort(key=lambda e: e.mtime, reverse=True)
+    out.sort(key=lambda e: e.mtime, reverse=True)
     return out[:cap]
 
 
