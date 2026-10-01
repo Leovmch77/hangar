@@ -6,17 +6,28 @@ import { mount, unmount, tick } from 'svelte';
 import ServerEditSheet from './ServerEditSheet.svelte';
 import * as m from '../paraglide/messages';
 import * as auth from '../lib/auth';
+import * as core from '@hangar/core';
+import * as maquinas from '../lib/maquinas';
 import type { Server } from '../lib/auth';
 
 vi.mock('../lib/auth', () => ({
   serverColor: () => '#fff',
   validarPareamento: vi.fn(),
+  listAllServers: vi.fn(() => []),
+}));
+vi.mock('../lib/peers', () => ({ getIdentificador: vi.fn() }));
+vi.mock('../lib/maquinas', () => ({ rememberedIds: vi.fn(() => ({})) }));
+vi.mock('@hangar/core', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@hangar/core')>()),
+  probeServerResponse: vi.fn(),
 }));
 vi.mock('../lib/vaultPush.svelte', () => ({
   vaultPush: { estado: 'idle', detalhe: '', clear: vi.fn() },
 }));
 
 const authMock = vi.mocked(auth);
+const probeMock = vi.mocked(core.probeServerResponse);
+const idsMock = vi.mocked(maquinas.rememberedIds);
 const SRV: Server = { id: 'srv-a', label: 'Casa', baseUrl: 'http://a', token: 'tok-velho' } as Server;
 
 async function montar(props: Record<string, unknown> = {}) {
@@ -51,12 +62,31 @@ async function digitarToken(texto: string) {
   await tick();
 }
 
-beforeEach(() => { document.body.innerHTML = ''; });
+const campoEndereco = () => document.querySelector<HTMLInputElement>('input[inputmode="url"]')!;
+
+async function digitarEndereco(texto: string) {
+  const input = campoEndereco();
+  input.value = texto;
+  input.dispatchEvent(new Event('input'));
+  await tick();
+  input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+  await tick();
+}
+
+const resposta = (status: number, corpo: unknown = {}) =>
+  new Response(JSON.stringify(corpo), { status, headers: { 'Content-Type': 'application/json' } });
+
+beforeEach(() => {
+  document.body.innerHTML = '';
+  probeMock.mockReset();
+  idsMock.mockReturnValue({ 'srv-a': 'casa' });
+  authMock.listAllServers.mockReturnValue([SRV]);
+});
 
 describe('ServerEditSheet', () => {
   it('mostra o que está gravado: nome, endereço e token (mascarado)', async () => {
     const t = await montar();
-    expect(document.body.textContent).toContain('http://a');
+    expect(campoEndereco().value).toBe('http://a');
     expect(campoToken().value).toBe('tok-velho');     // trocar SÓ o token: dá pra ver o atual
     expect(campoToken().type).toBe('password');       // ...sem exibir o segredo na tela
     unmount(t.comp);
@@ -145,7 +175,7 @@ describe('ServerEditSheet', () => {
     const onClose = vi.fn();
     const t = await montar({ onUpdateToken, onClose });
     await digitarToken('tok-novo');
-    expect(onUpdateToken).toHaveBeenCalledWith('srv-a', 'tok-novo');
+    expect(onUpdateToken).toHaveBeenCalledWith('srv-a', 'tok-novo', undefined);
     expect(onClose).toHaveBeenCalled();
     unmount(t.comp);
   });
@@ -156,7 +186,7 @@ describe('ServerEditSheet', () => {
     const onClose = vi.fn();
     const t = await montar({ onUpdateToken, onClose });
     await digitarToken('https://outra/?token=tok-outro');
-    expect(onUpdateToken).toHaveBeenCalledWith('srv-a', 'tok-outro');   // base preservada
+    expect(onUpdateToken).toHaveBeenCalledWith('srv-a', 'tok-outro', undefined);   // base preservada
     expect(onClose).not.toHaveBeenCalled();
     expect(document.body.textContent).toContain(m.servidor_token_trocado({ url: 'http://a' }));
     unmount(t.comp);
@@ -170,5 +200,81 @@ describe('ServerEditSheet', () => {
     expect(onClose).not.toHaveBeenCalled();
     expect(document.querySelector('#se-err')?.textContent).toContain(m.servidor_nao_existe());
     unmount(t.comp);
+  });
+
+  describe('troca de endereço', () => {
+    it('mesma máquina no endereço novo: grava o endereço com o token gravado e fecha', async () => {
+      probeMock.mockResolvedValue(resposta(200, { identificador: 'casa' }));
+      const onUpdateToken = vi.fn(() => true);
+      const onClose = vi.fn();
+      const t = await montar({ onUpdateToken, onClose });
+      await digitarEndereco('https://novo.dev/casa/');
+      await vi.waitFor(() => expect(onUpdateToken).toHaveBeenCalledWith('srv-a', 'tok-velho', 'https://novo.dev/casa'));
+      expect(probeMock.mock.calls[0][0]).toMatchObject({ baseUrl: 'https://novo.dev/casa', token: 'tok-velho' });
+      expect(onClose).toHaveBeenCalled();
+      unmount(t.comp);
+    });
+
+    it('sem esquema digitado tenta https primeiro', async () => {
+      probeMock.mockResolvedValue(resposta(200, { identificador: 'casa' }));
+      const onUpdateToken = vi.fn(() => true);
+      const t = await montar({ onUpdateToken });
+      await digitarEndereco('novo.dev/casa');
+      await vi.waitFor(() => expect(onUpdateToken).toHaveBeenCalledWith('srv-a', 'tok-velho', 'https://novo.dev/casa'));
+      unmount(t.comp);
+    });
+
+    it('token recusado no endereço novo: não grava e diz por quê', async () => {
+      probeMock.mockResolvedValue(resposta(401));
+      const onUpdateToken = vi.fn(() => true);
+      const t = await montar({ onUpdateToken });
+      await digitarEndereco('https://outra.dev');
+      await vi.waitFor(() => expect(document.querySelector('#se-err')?.textContent).toContain(m.servidor_endereco_token_recusado()));
+      expect(onUpdateToken).not.toHaveBeenCalled();
+      unmount(t.comp);
+    });
+
+    it('endereço novo responde como outra máquina: não grava', async () => {
+      probeMock.mockResolvedValue(resposta(200, { identificador: 'vps' }));
+      const onUpdateToken = vi.fn(() => true);
+      const t = await montar({ onUpdateToken });
+      await digitarEndereco('https://outra.dev');
+      await vi.waitFor(() => expect(document.querySelector('#se-err')?.textContent).toContain(m.servidor_endereco_outra_maquina({ id: 'vps' })));
+      expect(onUpdateToken).not.toHaveBeenCalled();
+      unmount(t.comp);
+    });
+
+    it('endereço de outra entrada da lista: recusa sem consultar a rede', async () => {
+      authMock.listAllServers.mockReturnValue([SRV, { id: 'srv-b', label: 'Vps', baseUrl: 'https://b.dev', token: 'x' } as Server]);
+      const onUpdateToken = vi.fn(() => true);
+      const t = await montar({ onUpdateToken });
+      await digitarEndereco('https://b.dev');
+      await vi.waitFor(() => expect(document.querySelector('#se-err')?.textContent).toContain(m.servidor_endereco_repetido()));
+      expect(probeMock).not.toHaveBeenCalled();
+      expect(onUpdateToken).not.toHaveBeenCalled();
+      unmount(t.comp);
+    });
+
+    it('outra máquina aberta durante a conferência: não grava em nenhuma', async () => {
+      let responder!: (r: Response) => void;
+      probeMock.mockReturnValue(new Promise<Response>((r) => { responder = r; }));
+      const onUpdateToken = vi.fn(() => true);
+      const onRename = vi.fn();
+      const props = $state({ open: true, server: SRV, onClose: vi.fn(), onRename, onUpdateToken });
+      const el = document.createElement('div');
+      document.body.appendChild(el);
+      const comp = mount(ServerEditSheet, { target: el, props });
+      await tick();
+      await digitarEndereco('https://novo.dev/casa');
+      props.server = { id: 'srv-b', label: 'Delphi', baseUrl: 'https://b.dev', token: 'tok-b' } as Server;
+      await tick();
+      responder(resposta(200, { identificador: 'casa' }));
+      await new Promise((r) => setTimeout(r, 0));
+      await tick();
+      expect(onUpdateToken).not.toHaveBeenCalled();
+      expect(onRename).not.toHaveBeenCalled();
+      expect(campoEndereco().value).toBe('https://b.dev');
+      unmount(comp);
+    });
   });
 });

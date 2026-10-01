@@ -4,7 +4,7 @@
   import { vaultPush } from '../lib/vaultPush.svelte';
   import { getIdentificador } from '../lib/peers';
   import { rememberedIds } from '../lib/maquinas';
-  import { normalizeBaseUrl } from '../lib/url';
+  import { normalizarEndereco } from '../lib/url';
   import { probeServerResponse } from '@hangar/core';
   import type { Server } from '../lib/auth';
   import * as m from '../paraglide/messages';
@@ -26,8 +26,8 @@
 
   let label = $state('');
   let token = $state('');
-  let endereco = $state('');
-  let salvando = $state(false);
+  let address = $state('');
+  let checking = $state(false);
   let revelado = $state(false);
   let erro = $state('');
   let aviso = $state('');
@@ -43,50 +43,64 @@
   // fazia o Salvar (mesmo sem ninguem mexer no campo) reescrever "Casa" por cima, calado.
   let baseLabel = '';
   let baseToken = '';
-  let baseEndereco = '';
+  let baseAddress = '';
   $effect(() => {
     const chave = open && server ? server.id : '';
     if (chave === ultimo) return;
     ultimo = chave;
     label = baseLabel = server?.label ?? '';
     token = baseToken = server?.token ?? '';
-    endereco = baseEndereco = server?.baseUrl ?? '';
+    address = baseAddress = server?.baseUrl ?? '';
     revelado = false;
     erro = '';
     aviso = '';
   });
 
+  type AddressCheck = { error: string } | { address: string };
+
   // Endereço novo só vale se for a MESMA máquina: aceita o token gravado e, quando os dois lados têm
   // identificador, responde o mesmo. Sem isto, um endereço digitado errado reapontaria nome, token e
   // histórico para outra máquina.
-  async function conferirEndereco(atual: Server, novo: string, tok: string): Promise<string> {
-    let url: URL;
-    try { url = new URL(novo); } catch { return m.servidor_endereco_invalido(); }
-    if (url.protocol !== 'http:' && url.protocol !== 'https:') return m.servidor_endereco_invalido();
-    const norm = (u: string) => u.replace(/\/+$/, '');
-    if (listAllServers().some((s) => s.id !== atual.id && norm(s.baseUrl) === novo)) return m.servidor_endereco_repetido();
-    // Id próprio e sem `lan`: a rota aprendida para a entrada atual não pode atender este teste.
-    const teste: Server = { id: `${atual.id}#novo`, label: atual.label, baseUrl: novo, token: tok };
-    let novoId: string;
-    try {
-      // 20 s: do celular pela Tailscale em relay a primeira conexão passa dos 8 s padrão.
-      const res = await probeServerResponse(teste, '/api/peers/identificador', { signal: AbortSignal.timeout(20000) });
-      if (res.status === 401) return m.servidor_endereco_token_recusado();
-      if (!res.ok) return m.servidor_endereco_sem_resposta({ url: novo });
-      novoId = ((await res.json()) as { identificador?: string }).identificador ?? '';
-    } catch {
-      return m.servidor_endereco_sem_resposta({ url: novo });
+  async function checkAddress(current: Server, typed: string, tok: string): Promise<AddressCheck> {
+    const n = normalizarEndereco(typed);
+    if (!n || !/^https?:\/\//.test(n.base)) return { error: m.servidor_endereco_invalido() };
+    let lastError = '';
+    // Sem esquema digitado, https vem primeiro e http na porta padrão é a reserva — só quando a
+    // primeira tentativa nem chegou a responder.
+    for (const candidate of [n.base, n.alternativa].filter((c): c is string => !!c)) {
+      if (listAllServers().some((s) => s.id !== current.id && trimSlash(s.baseUrl) === candidate)) {
+        return { error: m.servidor_endereco_repetido() };
+      }
+      // Id próprio e sem `lan`: a rota aprendida para a entrada atual não pode atender este teste.
+      const probe: Server = { id: `${current.id}#novo`, label: current.label, baseUrl: candidate, token: tok };
+      let res: Response;
+      try {
+        // 20 s: do celular pela Tailscale em relay a primeira conexão passa dos 8 s padrão.
+        res = await probeServerResponse(probe, '/api/peers/identificador', { signal: AbortSignal.timeout(20000) });
+      } catch {
+        lastError = m.servidor_endereco_sem_resposta({ url: candidate });
+        continue;
+      }
+      if (res.status === 401) return { error: m.servidor_endereco_token_recusado() };
+      if (!res.ok) return { error: m.servidor_endereco_sem_resposta({ url: candidate }) };
+      let newId = '';
+      try { newId = ((await res.json()) as { identificador?: string }).identificador ?? ''; } catch { /* sem nome: vale o token */ }
+      let oldId = rememberedIds()[current.id] ?? '';
+      if (!oldId) {
+        try { oldId = (await getIdentificador(current)).identificador ?? ''; } catch { /* fora do ar: vale o token */ }
+      }
+      if (newId && oldId && newId !== oldId) return { error: m.servidor_endereco_outra_maquina({ id: newId }) };
+      return { address: candidate };
     }
-    let antigoId = rememberedIds()[atual.id] ?? '';
-    if (!antigoId) {
-      try { antigoId = (await getIdentificador(atual)).identificador ?? ''; } catch { /* fora do ar: vale o token */ }
-    }
-    if (novoId && antigoId && novoId !== antigoId) return m.servidor_endereco_outra_maquina({ id: novoId });
-    return '';
+    return { error: lastError };
   }
 
+  const trimSlash = (u: string) => u.replace(/\/+$/, '');
+
   async function salvar() {
-    if (!server || salvando) return;
+    if (!server || checking) return;
+    // A conferência do endereço espera a rede: o `server` do prop pode ser outro quando ela voltar.
+    const target = server;
     const nome = label.trim();
     const texto = token.trim();
     // Vazio nao e "nao mexe": o campo ja vem preenchido, entao em branco significa que o usuario
@@ -98,8 +112,8 @@
       return;
     }
 
-    const enderecoFinal = endereco.trim() ? normalizeBaseUrl(endereco) : baseEndereco;
-    const mudouEndereco = enderecoFinal !== baseEndereco.replace(/\/+$/, '');
+    const typedAddress = address.trim();
+    const addressChanged = !!typedAddress && trimSlash(typedAddress) !== trimSlash(baseAddress);
 
     let tokenFinal = texto;
     let outroHost = false;
@@ -113,25 +127,29 @@
         return;
       }
       // So o TOKEN: colar a URL de outra maquina nao pode reapontar calado um servidor ja cadastrado.
+      // Com o campo Endereço alterado, quem decide o endereço é ele, e o aviso não se aplica.
       tokenFinal = parsed.token;
-      outroHost = !!parsed.base
-        && parsed.base.replace(/\/+$/, '') !== enderecoFinal;
+      outroHost = !addressChanged && !!parsed.base && trimSlash(parsed.base) !== trimSlash(baseAddress);
     }
 
-    if (mudouEndereco) {
-      salvando = true;
+    let newAddress: string | undefined;
+    if (addressChanged) {
+      checking = true;
       erro = '';
-      const falha = await conferirEndereco(server, enderecoFinal, tokenFinal);
-      salvando = false;
-      if (falha) { erro = falha; return; }
+      const result = await checkAddress(target, typedAddress, tokenFinal);
+      checking = false;
+      // Folha fechada ou outra máquina aberta durante a conferência: o resultado é de outra edição.
+      if (ultimo !== target.id) return;
+      if ('error' in result) { erro = result.error; return; }
+      newAddress = result.address;
     }
 
     // Grava so o que MUDOU NESTA FOLHA (base = valor carregado ao abrir). Comparar com o `server`
     // atual mandava de volta o valor velho por cima do que o sync tinha acabado de trazer.
-    if (nome !== baseLabel) onRename(server.id, nome);
-    if (tokenFinal !== baseToken || mudouEndereco) {
+    if (nome !== baseLabel) onRename(target.id, nome);
+    if (tokenFinal !== baseToken || newAddress) {
       vaultPush.clear();                        // tentativa NOVA: zera o resultado do push antigo
-      if (!onUpdateToken(server.id, tokenFinal, mudouEndereco ? enderecoFinal : undefined)) {
+      if (!onUpdateToken(target.id, tokenFinal, newAddress)) {
         // false = o id sumiu (removido noutra aba/aparelho entre abrir e salvar). Raro, mas
         // indistinguivel de sucesso se ficasse calado.
         erro = m.servidor_nao_existe();
@@ -140,12 +158,12 @@
     }
     baseLabel = nome;
     baseToken = tokenFinal;
-    baseEndereco = endereco = enderecoFinal;
+    if (newAddress) baseAddress = address = newAddress;
     if (outroHost) {
       // Salvou, mas o endereco NAO mudou: fica aberta pra o usuario ler o que aconteceu com a URL
       // que ele colou. Fechar aqui esconderia justamente a parte que ele nao esperava.
       erro = '';
-      aviso = m.servidor_token_trocado({ url: enderecoFinal });
+      aviso = m.servidor_token_trocado({ url: baseAddress });
       token = tokenFinal;
       return;
     }
@@ -165,7 +183,7 @@
 
     <div class="se-campo">
       <label class="se-rotulo" for="{uid}-endereco">{m.servidor_campo_endereco()}</label>
-      <input id="{uid}-endereco" class="se-input se-mono" bind:value={endereco} inputmode="url" autocomplete="off"
+      <input id="{uid}-endereco" class="se-input se-mono" bind:value={address} inputmode="url" autocomplete="off"
              autocapitalize="off" autocorrect="off" spellcheck="false" aria-describedby="{uid}-endereco-ajuda"
              onkeydown={(e) => { if (e.key === 'Enter') salvar(); }} />
       <p id="{uid}-endereco-ajuda" class="se-ajuda">{m.servidor_endereco_ajuda()}</p>
@@ -202,8 +220,8 @@
 
     <div class="se-acoes">
       <button class="se-btn" type="button" onclick={onClose}>{m.comum_cancelar()}</button>
-      <button class="se-btn se-salvar" type="button" onclick={salvar} disabled={salvando} aria-busy={salvando}>
-        {salvando ? m.servidor_endereco_conferindo() : m.ctx_salvar()}
+      <button class="se-btn se-salvar" type="button" onclick={salvar} disabled={checking} aria-busy={checking}>
+        {checking ? m.servidor_endereco_conferindo() : m.ctx_salvar()}
       </button>
     </div>
   {/if}
