@@ -11,7 +11,7 @@
   import { getSessions, listClaudeConfigs, getClaudeAccountSuggestion, getEngines, getProviders, criarConta, apagarConta,
            getArchivePorCwd, resumeArchivedConversation, getArchiveHistory, getBastao, passarBastao,
            getCreationProgress, type CreationProgress,
-           type ModelOption, type Motor, type ArchiveEntry } from '@hangar/core';
+           type ModelOption, type Motor, type ArchiveEntry, sanitizeSessionName, uniqueSessionName } from '@hangar/core';
   import { carregarModelos as carregarModelosDaConta, temEscolhaDeModelo } from '../lib/modelosPorConta';
   import { basename, providerName, relativeTime, cotaDaConta, resumoCota, effortLevels, SESSION_PROVIDERS } from '@hangar/core';
   import SessionOpeningFields from './SessionOpeningFields.svelte';
@@ -173,35 +173,16 @@
     return () => { vivo = false; clearInterval(relogio); passo = ''; segundos = 0; };
   }
 
-  // A MESMA regra do backend (`app/names.py:sanitize_session_name`): NFKD, descarta o acento,
-  // troca o resto por `-` e apara as pontas. O NFKD vem ANTES do filtro pelo motivo escrito lá —
-  // sem ele a letra acentuada vira `-` e o aparo do fim a come junto ("Área" -> "rea").
-  // Sanitizar aqui não é cosmético: é o nome que a checagem de colisão compara. Comparar o cru
-  // (`api.v2b`) contra uma lista de nomes já sanitizados deixa passar uma colisão com o
-  // `api-v2b` que existe — e o erro só apareceria lá no create.
-  function sanitizar(nome: string): string {
-    return nome.normalize('NFKD').replace(/\p{M}/gu, '').replace(/[^A-Za-z0-9_-]/g, '-').replace(/^-+|-+$/g, '');
-  }
-
-  // Nome unico p/ tmux: sanitiza (igual ao backend) e, se ja existir, sufixa -2/-3...
-  function uniqueName(base: string, taken: Set<string>): string {
-    const clean = sanitizar(base) || 'sessao';
-    if (!taken.has(clean)) return clean;
-    let i = 2;
-    while (taken.has(`${clean}-${i}`)) i++;
-    return `${clean}-${i}`;
-  }
-
   // Nome do sucessor: pm18368-t24 -> pm18368-t24b, e a proxima letra livre se aquela ja existir.
   // Sufixo de LETRA e nao `-2` de proposito: `-2` e o desempate de nome do fluxo normal (duas
   // sessoes na mesma pasta), e ler `foo-2` como "quem continua foo" seria adivinhacao.
   function nomeSucessor(origem: string, taken: Set<string>): string {
-    const base = sanitizar(origem);
-    if (!base) return uniqueName('sessao', taken);
+    const base = sanitizeSessionName(origem);
+    if (!base) return uniqueSessionName('sessao', taken);
     for (const c of 'bcdefghijklmnopqrstuvwxyz') {
       if (!taken.has(base + c)) return base + c;
     }
-    return uniqueName(`${base}b`, taken);
+    return uniqueSessionName(`${base}b`, taken);
   }
 
   // Config dirs do Claude (ex: ~/.claude, ~/.claude-work). Picker so aparece quando ha mais de um.
@@ -731,7 +712,7 @@
       hasSameFolder = sessions.some((s) => s.cwd === p);
       // Modo bastão: o nome vem da ORIGEM, não da pasta. Derivar do basename aqui apagava o nome do
       // sucessor toda vez que a pasta era (re)escolhida — inclusive no pré-preenchimento.
-      name = bastao ? nomeSucessor(bastao.name, takenNames) : uniqueName(basename(p), takenNames);
+      name = bastao ? nomeSucessor(bastao.name, takenNames) : uniqueSessionName(basename(p), takenNames);
     } catch {
       takenNames = new Set();
       hasSameFolder = false;

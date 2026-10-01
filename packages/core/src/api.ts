@@ -652,11 +652,29 @@ export interface CreateSessionBody {
   // Jev no `hangar-preview objetivo`: ligado, a sessão nasce com a chave no ambiente. Escolha da
   // abertura — é assim que se roda a mesma tarefa com e sem, sem apagar a configuração.
   jev?: boolean;
+  // Branch já existente (local ou remota) em que a sessão nasce; vazio = a atual da pasta.
+  branch?: string | null;
 }
 
 export function buildCreateSessionBody(body: CreateSessionBody): CreateSessionBody {
-  const { codex_account, ...rest } = body;
-  return rest.provider === 'codex' && codex_account ? { ...rest, codex_account } : rest;
+  const { codex_account, branch, ...rest } = body;
+  const out: CreateSessionBody = rest.provider === 'codex' && codex_account ? { ...rest, codex_account } : rest;
+  return branch ? { ...out, branch } : out;
+}
+
+// A MESMA regra do backend (`app/names.py:sanitize_session_name`): NFKD antes do filtro, senão a
+// letra acentuada vira `-` e o aparo das pontas a come junto ("Área" -> "rea").
+export function sanitizeSessionName(name: string): string {
+  return name.normalize('NFKD').replace(/\p{M}/gu, '').replace(/[^A-Za-z0-9_-]/g, '-').replace(/^-+|-+$/g, '');
+}
+
+// Nome único p/ tmux: sanitiza e, se já existir, sufixa -2/-3...
+export function uniqueSessionName(base: string, taken: Set<string>): string {
+  const clean = sanitizeSessionName(base) || 'sessao';
+  if (!taken.has(clean)) return clean;
+  let i = 2;
+  while (taken.has(`${clean}-${i}`)) i++;
+  return `${clean}-${i}`;
 }
 
 export function createSessionForServer(server: Server, body: CreateSessionBody): Promise<SessionInfo> {
@@ -906,6 +924,51 @@ export function consumeCodexRateLimitReset(
 export function getRootsForServer(server: Server, signal?: AbortSignal): Promise<FsRoot[]> {
   return apiFetchForServer(server, '/api/fs/roots', { signal: comTeto(signal, 8000) });
 }
+// Git da pasta (`/api/fs/branches`, `/api/fs/git*`): as rotas pedem `root` (uma raiz liberada, igual
+// à lista de `/api/fs/roots`) e `path` (a pasta). O cliente recebe só a pasta e acha a raiz que a contém.
+export interface FolderBranches {
+  current: string | null;
+  branches: string[];
+  remotes: string[];   // nome curto, sem a local correspondente
+  dirty: boolean;
+}
+
+export interface FolderGit {
+  repo: boolean;       // false = pasta fora de repositório; os demais campos não vêm
+  current?: string | null;
+  upstream?: string | null;
+  toplevel?: string | null;
+  dirty?: number;
+  ahead?: number | null;
+  behind?: number | null;
+  last_fetch?: number | null;   // epoch s do último fetch
+  sessions?: string[];          // sessões vivas no mesmo checkout
+}
+
+async function folderRoot(server: Server, cwd: string, signal?: AbortSignal): Promise<string> {
+  const roots = await getRootsForServer(server, signal);
+  const root = roots.filter(r => cwd === r.path || cwd.startsWith(r.path.replace(/\/+$/, '') + '/'))
+    .sort((a, b) => b.path.length - a.path.length)[0];
+  if (!root) throw new Error('root not allowed');
+  return root.path;
+}
+
+export async function getFolderBranchesForServer(server: Server, cwd: string, signal?: AbortSignal): Promise<FolderBranches> {
+  const q = new URLSearchParams({ root: await folderRoot(server, cwd, signal), path: cwd });
+  return apiFetchForServer(server, `/api/fs/branches?${q}`, { signal: comTeto(signal, 8000) });
+}
+
+export async function getFolderGitForServer(server: Server, cwd: string, signal?: AbortSignal): Promise<FolderGit> {
+  const q = new URLSearchParams({ root: await folderRoot(server, cwd, signal), path: cwd });
+  return apiFetchForServer(server, `/api/fs/git?${q}`, { signal: comTeto(signal, 8000) });
+}
+
+// Fetch/pull devolvem o mesmo estado da leitura, já relido.
+export async function folderGitActionForServer(server: Server, cwd: string, action: 'fetch' | 'pull'): Promise<FolderGit> {
+  const root = await folderRoot(server, cwd);
+  return apiFetchForServer(server, `/api/fs/git/${action}`, { method: 'POST', body: JSON.stringify({ root, path: cwd }) });
+}
+
 // Importação Claude → Codex da conta padrão (a mesma do "Reconciliar agora" em Harnesses).
 export function getCodexIntegrationForServer(server: Server, signal?: AbortSignal): Promise<CodexIntegracaoEstado> {
   return apiFetchForServer(server, '/api/harness/codex/integracao', { signal: comTeto(signal, 8000) });
@@ -1202,6 +1265,10 @@ export interface ArchiveEntry {
 
 export function getArchive(): Promise<ArchiveFolder[]> {
   return apiFetch<ArchiveFolder[]>('/api/archive');
+}
+
+export function getArchiveRecentForServer(server: Server, cap = 40, signal?: AbortSignal): Promise<ArchiveEntry[]> {
+  return apiFetchForServer(server, `/api/archive/recent?cap=${cap}`, { signal: comTeto(signal, 8000) });
 }
 
 export function getArchiveFolder(project: string): Promise<ArchiveEntry[]> {
