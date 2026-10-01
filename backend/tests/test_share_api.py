@@ -275,3 +275,19 @@ def test_funnel_fica_ligado_na_carencia_e_cai_depois(syncs):
     share_store._load()[s.id].revoked_at -= share_api.ENDED_GRACE + 1
     share_api.sync_tunnel()
     assert syncs[-1] is False
+
+
+def test_so_par_ativo_mantem_o_funnel(monkeypatch):
+    chamadas = []
+    monkeypatch.setattr(share_api.share_tunnel, "sync", lambda ativo: chamadas.append(ativo))
+    share_store.create_redeemed("proj", "t:1", kind="pair")
+    share_api.sync_tunnel()
+    assert chamadas == [True]
+
+
+def test_encerrar_todos_nao_derruba_o_par(cli, syncs):
+    _, token = share_store.create_redeemed("proj", "t:1", kind="pair")
+    cli.post("/api/sessions/proj/share", headers=AUTH)
+    r = cli.delete("/api/sessions/proj/share", headers=AUTH)
+    assert r.json() == {"ok": True, "revoked": 1}
+    assert share_store.lookup_token(token).share_for("proj").revoked_at is None

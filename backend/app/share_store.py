@@ -263,10 +263,11 @@ def revoke(share_id: str) -> bool:
         return True
 
 
-def revoke_session(session: str) -> int:
+def revoke_session(session: str, kind: str | None = None) -> int:
     now = time.time()
     with _lock:
-        alvo = [x for x in _load().values() if x.session == session and x.revoked_at is None]
+        alvo = [x for x in _load().values() if x.session == session and x.revoked_at is None
+                and (kind is None or x.kind == kind)]
         for x in alvo:
             x.revoked_at = now
         if alvo:

@@ -385,3 +385,20 @@ def test_socket_principal_nao_e_herdado_por_processos_filhos():
 
 def test_guest_of_sem_scope_devolve_none():
     assert share_gate.guest_of(object()) is None
+
+
+@pytest.mark.parametrize("path,esperado", [
+    ("/api/sessions/yy/uploads/foto.png", 200), ("/api/sessions/yy/uploads", 403),
+    ("/api/sessions/yy/runners", 403), ("/api/sessions/yy/project-shortcuts", 403),
+    ("/api/sessions/yy/shortcut-terminals", 403), ("/api/sessions/yy/transcript-image", 200)])
+def test_par_le_so_o_que_esta_na_lista(monkeypatch, path, esperado):
+    monkeypatch.setattr(share_store, "lookup_token",
+                        lambda t: share_store.Guest([PAR]) if t == "g" else None)
+    assert _guest_client().get(path, headers=GUEST).status_code == esperado
+
+
+def test_path_session_so_tira_term_do_terminal():
+    assert share_gate.path_session("/api/sessions/term-cc/term") == "cc"
+    assert share_gate.path_session("/api/sessions/term-cc/history") == "term-cc"
+    assert share_gate.path_session("/api/sessions/term-cc") == "term-cc"
+    assert share_gate.path_session("/api/sessions/cc/history") == "cc"

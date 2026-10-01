@@ -38,7 +38,7 @@ _BLOCKED = {"pair", "pair-remote", "unpair-remote", "group-message", "then", "or
             "open-terminal", "open-editor", "nav", "share", "pair-invite", "pair-accept"}
 # Leituras do chat do nativo: quem só vê a sessão pareada não alcança arquivo, terminal nem git.
 _PAIR_READ = {"", "events", "history", "commands", "plan-preview", "subagents", "uploads",
-              "transcript-image", "runners", "project-shortcuts", "shortcut-terminals"}
+              "transcript-image"}
 _PAIR_ROUTES = {("POST", "/api/pair/message"), ("DELETE", "/api/pair")}
 _ANY_GUEST_ROUTES = {("POST", "/api/guest/attach")}
 
@@ -64,7 +64,10 @@ def path_session(path: str) -> str | None:
     if len(parts) < 4 or parts[1:3] != ["api", "sessions"] or parts[3] == "events":
         return None
     name = parts[3]
-    return name[len("term-"):] if name.startswith("term-") else name
+    # O terminal é `term-X/term`; sessão cujo nome começa com "term-" não vira outra.
+    if name.startswith("term-") and parts[4:] == ["term"]:
+        return name[len("term-"):]
+    return name
 
 
 def guest_allowed(method: str, path: str, guest: share_store.Guest) -> bool:
@@ -85,7 +88,10 @@ def guest_allowed(method: str, path: str, guest: share_store.Guest) -> bool:
     if share is None:
         return False
     if share.kind == "pair":
-        return method == "GET" and not name.startswith("term-") and (rest[0] if rest else "") in _PAIR_READ
+        head = rest[0] if rest else ""
+        # Anexo é um arquivo só; a listagem de uploads fica fechada.
+        return (method == "GET" and not name.startswith("term-") and head in _PAIR_READ
+                and (head != "uploads" or len(rest) == 2))
     if name.startswith("term-"):
         return rest == ["term"]
     # Fechar mata a sessão do dono; o convidado só para de acompanhar do lado dele.

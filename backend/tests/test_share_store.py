@@ -291,3 +291,12 @@ def test_attach_em_cadeia_aponta_para_a_raiz_e_revogar_a_raiz_derruba_tudo():
     share_store.revoke(pai.id)
     assert share_store.lookup_token(tok_t2).sessions() == {"proj-w", "proj-z"}
     assert share_store.lookup_token(tok_t).sessions() == {"proj-z"}
+
+
+def test_revoke_session_filtra_por_tipo():
+    share_store.create("a", "t:1", now=1000.0)
+    par, token = share_store.create_redeemed("a", "t:1", kind="pair", now=1000.0)
+    assert share_store.revoke_session("a", kind="share") == 1
+    assert share_store.lookup_token(token).share_for("a").revoked_at is None
+    assert share_store.revoke_session("a") == 1
+    assert share_store.lookup_token(token).share_for("a").revoked_at is not None
