@@ -56,7 +56,7 @@ export function parseHash(hash: string): Route {
   const compareMatch = path.match(/^\/compare\/(.+)$/);
   if (compareMatch) return { name: 'compare', ids: parseCompareIds(compareMatch[1]) };
   if (path === '' || path === '/') return { name: 'home' };
-  if (path === '/sessoes') return { name: 'sessions' };
+  if (path === '/sessions') return { name: 'sessions' };
   if (path === '/costs') return { name: 'costs' };
   if (path === '/uso') return { name: 'uso' };
   // Deep-link da busca (feature #10): #/archive/<serverId>/<project>/<sid> abre a conversa arquivada

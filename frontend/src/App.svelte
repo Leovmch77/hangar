@@ -364,9 +364,9 @@
   }
 
   const ehRelatorio = (h: string) => h.startsWith('#/costs') || h.startsWith('#/uso');
-  let hashAntesDoRelatorio = '#/sessoes';
+  let hashAntesDoRelatorio = '#/sessions';
   function voltarDoRelatorio() {
-    navigateTo(ehRelatorio(hashAntesDoRelatorio) ? '#/sessoes' : hashAntesDoRelatorio);
+    navigateTo(ehRelatorio(hashAntesDoRelatorio) ? '#/sessions' : hashAntesDoRelatorio);
   }
 
   function navigateToChat(name: string) {
@@ -383,7 +383,7 @@
   }
 
   function navigateToSessions() {
-    navigateTo('#/sessoes');
+    navigateTo('#/sessions');
   }
 
   // Desktop: terminal No Hangar já tem o pedido de aba registrado por quem chamou; terminal "Na

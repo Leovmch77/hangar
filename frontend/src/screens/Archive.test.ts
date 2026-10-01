@@ -13,6 +13,9 @@ vi.mock('@hangar/core', async (original) => ({
   ...await original<typeof import('@hangar/core')>(),
   getArchiveFolder: vi.fn(), getArchiveHistory: vi.fn(async () => []),
   getEngines: vi.fn(async () => ({ motores: {} })),
+  listClaudeConfigs: vi.fn(async () => []),
+  getCodexAccountsForServer: vi.fn(async () => []),
+  sendInputForServer: vi.fn(async () => undefined),
   resumeArchivedConversation: vi.fn(async () => ({ name: 'resumed' })),
 }));
 
@@ -29,9 +32,14 @@ it('deep-link usa conta/provider dos metadados na leitura e retomada', async () 
     for (let i = 0; i < 15; i++) await tick();
     expect(api.getArchiveHistory).toHaveBeenCalledWith('project', 'thread', undefined, null, 'codex', 'work', b);
     expect(target.textContent).toContain('history');
-    target.querySelector<HTMLButtonElement>('.resume-btn')!.click();
+    const field = target.querySelector<HTMLTextAreaElement>('textarea')!;
+    field.value = 'continua';
+    field.dispatchEvent(new Event('input', { bubbles: true }));
+    for (let i = 0; i < 5; i++) await tick();
+    target.querySelector<HTMLButtonElement>('button.send')!.click();
     for (let i = 0; i < 10; i++) await tick();
     expect(api.resumeArchivedConversation).toHaveBeenCalledWith('project', 'thread', null, null, 'codex', 'work', b);
+    expect(api.sendInputForServer).toHaveBeenCalledWith(b, 'resumed', 'continua');
     expect(location.hash).toBe('#/chat/B/resumed');
   } finally { await unmount(component); target.remove(); localStorage.clear(); location.hash = ''; }
 });

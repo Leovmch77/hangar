@@ -34,8 +34,8 @@ describe('parseHash sem painel segue como era', () => {
     expect(parseHash('')).toEqual({ name: 'home' });
     expect(parseHash('#/?config=aparencia')).toEqual({ name: 'home' });
   });
-  it('#/sessoes é a lista e rota desconhecida também cai nela', () => {
-    expect(parseHash('#/sessoes')).toEqual({ name: 'sessions' });
+  it('#/sessions é a lista e rota desconhecida também cai nela', () => {
+    expect(parseHash('#/sessions')).toEqual({ name: 'sessions' });
     expect(parseHash('#/xyz')).toEqual({ name: 'sessions' });
   });
   it('auto-cura de nome invalido continua valendo', () => {
