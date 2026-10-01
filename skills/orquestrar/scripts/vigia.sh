@@ -160,7 +160,7 @@ if [ -n "$ORQD" ]; then
   SESSOES=("$ARB")
 fi
 ARMADO="${ORQD:+$ORQD/.vigia-armado}"
-# One proof per arbiter, not per arming: a successor gets its own the cycle it takes over.
+# Cada árbitro recebe a prova do canal, inclusive o sucessor no ciclo da troca.
 prove_channel() {
   avisar_arb "[vigia] ARMED over: ${SESSOES[*]} (window ${LIMITE}min${DIARIO:+, journal $DIARIO}). This message IS the channel's proof — if you read it, the alarms arrive. Do not reply." || return
   [ -z "$ARMADO" ] || printf '%s' "$ARB" > "$ARMADO"
@@ -571,7 +571,7 @@ join_team() {
   done <<< "$out"
 }
 
-# Under -e: `all` | `owners` | `none`, who is covered by a recorded wait (`orq event espera`).
+# Com -e: all | owners | none indicam quem está coberto por espera registrada.
 coverage() {
   [ -n "$ORQD" ] && ORQ_DIR="$ORQD" python3 "$ORQ" ball --coverage 2>>"$CP_VIGIA_LOG"
 }
@@ -755,7 +755,7 @@ for i in $(seq 1 "$CICLOS"); do
       if [ "$mtime_ev" -lt "$mtime" ]; then parado=$eventos; mtime=$mtime_ev; fi
     fi
     idade=$(( $(date +%s) - mtime ))
-    # Every owner and the arbiter on a recorded wait: no event is due before its deadline.
+    # Com todos os responsáveis em espera, nenhum evento é devido antes do prazo.
     if [ "$idade" -ge 3600 ] && [ "$diario_avisado" -lt "$(( idade / 3600 ))" ] && [ "$(coverage)" != all ]; then
       if deliver_alarm trail "[vigia] The trail ($parado) has gone $(( idade / 60 ))min without a write, with the group active. The journal and eventos.jsonl are written AT the event — if reports/merges happened in this window, they are outside the trail." "trail alarm"; then
         diario_avisado=$(( idade / 3600 ))
@@ -794,7 +794,7 @@ for i in $(seq 1 "$CICLOS"); do
   if [ "$quieto" -eq 1 ]; then parados=$((parados+1)); else parados=0; fi
 
   if [ "$parados" -ge "$LIMITE" ]; then
-    case "$(coverage)" in all|owners) parados=0 ;; esac   # they wait on a recorded deadline
+    case "$(coverage)" in all|owners) parados=0 ;; esac   # aguardam um prazo registrado
   fi
   if [ "$parados" -ge "$LIMITE" ]; then
     msg="[vigia] Nobody has had the ball for ${LIMITE} min: $resumo (minute $i). If you fell (an API error), this is what brings you back. Check whether someone delivered while you were out — a report stuck in the queue and a stalled verdict are the two ways the pipeline locks up with nobody noticing."

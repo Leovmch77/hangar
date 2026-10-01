@@ -324,10 +324,10 @@ def _closed_after(closed_ts, ev_ts) -> bool:
         return True
 
 
-def _until_future(ate) -> bool:
-    """A deadline that does not parse covers nobody: the owner stays on the ball."""
+def _until_future(deadline) -> bool:
+    """Prazo inválido não dispensa ninguém: o responsável continua com a bola."""
     try:
-        return datetime.fromisoformat(ate) > datetime.now().astimezone()
+        return datetime.fromisoformat(deadline) > datetime.now().astimezone()
     except (TypeError, ValueError):
         return False
 
@@ -341,16 +341,16 @@ def state(d: Path) -> dict:
     last: dict[int, dict] = {}
     ended = False
     replaced: list[tuple[str, str]] = []
-    waits: dict[str, dict] = {}   # session → its latest `espera` not yet ended by an event
+    waits: dict[str, dict] = {}   # sessão → última espera ainda não encerrada por evento
     for ev in events(d):
         t = ev.get("tipo")
         if t == "espera":
             waits[ev.get("sessao")] = ev
             continue
-        # Only a recorded event ends a wait early; a journal line (`orq log`) is not one.
+        # Só evento registrado encerra a espera antes do prazo; `orq log` não é evento.
         waits.pop(ev.get("sessao"), None)
         if isinstance(ev.get("task"), int):
-            # A task_inicio names its own sessions before roles records them.
+            # task_inicio nomeia suas sessões antes de registrá-las em roles.
             r = ev if t == "task_inicio" else roles.get(ev["task"], {})
             for who, w in list(waits.items()):
                 if w.get("task") == ev["task"] or (w.get("task") is None and who in (r.get("executor"), r.get("par"))):
@@ -400,7 +400,7 @@ def state(d: Path) -> dict:
             owner = r.get("executor")
         if owner and owner not in owners:
             owners.append(owner)
-    # A wait on a Task stops covering once that Task closes, with or without an event.
+    # Fechar a Task encerra sua cobertura, mesmo sem evento de integração.
     waiting = {who for who, w in waits.items()
                if _until_future(w.get("ate")) and (w.get("task") is None or w["task"] in open_tasks)}
     ball = [o for o in owners if o not in waiting]
@@ -931,12 +931,12 @@ def cmd_event(a) -> int:
         ev["reincide"] = True
     if ev.get("tipo") == "espera":
         st = state(d)
-        # A Task event after execucao_fim reads as the run resumed: a wait never reopens it.
+        # Evento de Task após execucao_fim indica retomada; espera não reabre a execução.
         if st["ended"]:
             raise OrqError("the run has ended (execucao_fim): no wait to record")
         if "task" in ev and ev["task"] not in st["roles"]:
             raise OrqError(f"Task {ev['task']} has no task_inicio: a wait names a Task that started")
-        # roles keeps closed Tasks: a wait on one would hide the same session's open Task.
+        # roles mantém Tasks fechadas; sua espera esconderia a Task aberta da mesma sessão.
         if "task" in ev and ev["task"] not in st["open"]:
             raise OrqError(f"Task {ev['task']} is not open: a wait names a started Task not yet closed")
         if "task" in ev:
@@ -1029,7 +1029,7 @@ def cmd_read(a) -> int:
 def cmd_ball(a) -> int:
     st = state(base_dir(a.dir))
     if a.coverage:
-        # The watchdog's quiet test: `all` mutes the trail too; `owners` only "nobody has the ball".
+        # all dispensa também o alarme da trilha; owners dispensa só o alarme coletivo.
         owners_covered = all(o in st["waiting"] for o in st["owners"])
         print("all" if owners_covered and st["arbiter"] in st["waiting"]
               else "owners" if owners_covered and st["owners"] else "none")
@@ -2149,7 +2149,7 @@ def open_flags(row: dict, read_only: bool) -> list[str]:
     if row.get("esforco") and prov != "kimi":
         flags += ["--effort", row["esforco"]]
     extra = shlex.split(row.get("abertura", ""))
-    # The backend refuses read-only on a session without terminal: never drop the protection silently.
+    # O backend recusa proteção com --headless; a proteção pedida deve ser preservada.
     if (read_only or "--read-only" in extra) and "--headless" in extra:
         raise OrqError(f"row `{row.get('sessao', '?')}`: a read-only session cannot open with --headless; "
                        "remove --headless from its `abertura` cell")
@@ -2332,7 +2332,7 @@ def _announce_batch(d: Path, cfg: dict, acts: list[str]) -> None:
 def _final_review(d: Path, cfg: dict, acts: list[str]) -> None:
     tasks = plan_tasks(plan_text(cfg["plan"]))
     evs = events(d)
-    # A new integration after the last notice changes the tip the final review must read.
+    # Nova integração após o aviso muda a versão que a revisão final precisa conferir.
     last_integrated = max((i for i, ev in enumerate(evs) if ev.get("tipo") == "integrada"), default=-1)
     if not tasks or any(ev.get("tipo") == "tudo_integrado" for ev in evs[last_integrated + 1:]):
         return

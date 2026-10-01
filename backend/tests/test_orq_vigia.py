@@ -252,7 +252,7 @@ def test_wait_on_a_closed_task_is_refused_until_it_reopens(run):
     run.start_task(1, "exec1", "rev1", delivered=True)
     ts = datetime.now().astimezone().isoformat(timespec="seconds")
     run.d.joinpath("closed.jsonl").write_text(json.dumps({"ts": ts, "task": 1, "hash": "abc"}) + "\n")
-    time.sleep(1.1)   # closes and events have second precision
+    time.sleep(1.1)   # encerramentos e eventos têm precisão de segundos
     run.start_task(2, "exec1", "rev2")
     r = run.orq("event", "espera", "--sessao", "exec1", "--ate", "2099-01-01T10:00:00+00:00", "--task", "1", check=False)
     assert r.returncode != 0 and "Task 1 is not open" in r.stdout + r.stderr

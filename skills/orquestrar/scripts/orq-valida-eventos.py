@@ -83,16 +83,16 @@ def _valida_linhas(path: str, linhas) -> int:
             print(f"{path}:{i}: resultado {ev.get('resultado')!r} fora de {sorted(RESULTADOS)}"); erros += 1
         if "fase" in ev and ev["fase"] not in FASES:
             print(f"{path}:{i}: fase {ev['fase']!r} fora de {sorted(FASES)}"); erros += 1
-        if tipo == "espera" and not _iso_com_offset(ev.get("ate")):
+        if tipo == "espera" and not _iso_with_offset(ev.get("ate")):
             print(f"{path}:{i}: ate {ev.get('ate')!r} nao e ISO-8601 com offset"); erros += 1
         if "reincide" in ev and not isinstance(ev["reincide"], bool):
             print(f"{path}:{i}: reincide nao e bool ({ev['reincide']!r})"); erros += 1
     return erros
 
 
-def _iso_com_offset(valor) -> bool:
+def _iso_with_offset(value) -> bool:
     try:
-        return datetime.fromisoformat(valor).tzinfo is not None
+        return datetime.fromisoformat(value).tzinfo is not None
     except (TypeError, ValueError):
         return False
 

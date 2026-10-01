@@ -680,7 +680,7 @@ def test_a_later_integration_wakes_the_arbiter_for_the_final_review_again(tmp_pa
     started(e, tasks=(1,))
     close(d, 1, g("rev-parse", "HEAD"))
     run(e, "advance")
-    time.sleep(1.1)   # closes and events have second precision
+    time.sleep(1.1)   # encerramentos e eventos têm precisão de segundos
     (r / "a.txt").write_text("fixed\n")
     g("commit", "-qam", "fix after the final review")
     close(d, 1, g("rev-parse", "HEAD"))
@@ -749,7 +749,7 @@ def test_role_row_rotation_risk_names_and_flags(monkeypatch):
     assert m.open_flags({"provider": "claude"}, True) == ["--provider", "claude", "--read-only", "--terminal"]
     assert m.open_flags({"provider": "claude", "abertura": "--terminal"}, False) == ["--provider", "claude", "--terminal"]
     assert m.open_flags({"provider": "claude", "abertura": "--headless"}, False) == ["--provider", "claude", "--headless"]
-    # The backend refuses read-only without terminal: the protection is never dropped in silence.
+    # A combinação recusada pelo backend deve falhar sem descartar a proteção.
     for abertura, read_only in (("--headless", True), ("--headless --read-only", False)):
         with pytest.raises(m.OrqError, match="read-only session cannot open with --headless"):
             m.open_flags({"provider": "claude", "sessao": "rev-t*", "abertura": abertura}, read_only)
