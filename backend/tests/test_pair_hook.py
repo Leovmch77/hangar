@@ -91,3 +91,24 @@ def test_sidecar_sem_peers_fora_de_orq_nao_imprime_nada(tmp_path):
     (tmp_path / "api.json").write_text(json.dumps({"peers": [], "task": "PM-9", "gid": "g1"}))
     bin_ = _fake_tmux(tmp_path, "%3\tapi\n")
     assert _run(tmp_path, {"TMUX_PANE": "%3", "PATH": f"{bin_}:{os.environ['PATH']}"}) == ""
+
+
+def test_par_externo_reinjeta_protocolo_externo(tmp_path):
+    (tmp_path / "api.json").write_text(json.dumps({"peers": ["pc-ana::Y"], "gid": "g1"}))
+    (tmp_path / "external_pairs.json").write_text(json.dumps([{
+        "share_id": "s1", "local_session": "api", "alias": "pc-ana", "peer_owner": "pc-ana",
+        "peer_session": "Y", "peer_address": "https://a.ts.net:8443", "peer_token": "t", "created_at": 1.0}]))
+    bin_ = _fake_tmux(tmp_path, "%3\tapi\n")
+    out = _run(tmp_path, {"TMUX_PANE": "%3", "PATH": f"{bin_}:{os.environ['PATH']}"})
+    ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
+    assert "[de fora: pc-ana::Y]" in ctx and "OUTRA pessoa" in ctx
+
+
+def test_par_externo_de_outra_sessao_local_nao_vira_protocolo_externo(tmp_path):
+    (tmp_path / "api.json").write_text(json.dumps({"peers": ["pc-ana::Y"], "gid": "g1"}))
+    (tmp_path / "external_pairs.json").write_text(json.dumps([{
+        "share_id": "s1", "local_session": "outra", "alias": "pc-ana", "peer_owner": "pc-ana",
+        "peer_session": "Y", "peer_address": "https://a.ts.net:8443", "peer_token": "t", "created_at": 1.0}]))
+    bin_ = _fake_tmux(tmp_path, "%3\tapi\n")
+    out = _run(tmp_path, {"TMUX_PANE": "%3", "PATH": f"{bin_}:{os.environ['PATH']}"})
+    assert "[de fora:" not in out

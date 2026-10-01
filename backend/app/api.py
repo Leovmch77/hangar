@@ -26,6 +26,7 @@ from sse_starlette.sse import EventSourceResponse
 from app import (agentes_sync, atomico, atualizacoes, atualizar, btw, diag, harness_api,
                  loop_monitor, pensamento_pt, permission_mode, plugin_bridge, procinfo, quem_chama, tmux,
                  uds_messaging)
+from app import external_pairs
 from app.auth import require_auth, require_loopback
 from app.send_executor import send_thread as _send_thread
 from app import bastao as bastao_mod   # `bastao` sem sufixo é a ROTA GET, mais abaixo neste arquivo
@@ -2625,6 +2626,7 @@ def _rename_session(name: str, body: RenameBody):
         _invalidate_lists()
         forget_frame(name)
         share_store.rename(name, new)
+        external_pairs.rename_local(name, new)
         _rename_guest_claim(name, new)
         return {"ok": True, "name": new}
     if not tmux.has_session(name):
@@ -2651,6 +2653,7 @@ def _rename_session(name: str, body: RenameBody):
     _codex_lease_rename_finished(new)
     registry.rename(name, new)  # migra o cache name->jsonl (senao serve transcript errado pos-rename)
     share_store.rename(name, new)
+    external_pairs.rename_local(name, new)
     _rename_guest_claim(name, new)
     from app.pqueue import PromptQueue
     try:

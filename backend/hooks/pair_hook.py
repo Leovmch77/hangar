@@ -11,7 +11,7 @@ import subprocess
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-from app.pair_texto import texto_grupo, texto_grupo_orq  # noqa: E402  (stdlib-only; app/__init__.py é vazio)
+from app.pair_texto import texto_grupo, texto_grupo_orq, texto_par_externo  # noqa: E402  (stdlib-only; app/__init__.py é vazio)
 
 
 def _tmux(*args: str) -> subprocess.CompletedProcess:
@@ -86,6 +86,19 @@ def main() -> None:
         return
     peers = [p for p in (d.get("peers") or []) if p]
     if not peers:
+        return
+    externos = {}
+    try:
+        with open(os.path.join(pair_dir, "external_pairs.json"), encoding="utf-8") as fh:
+            externos = {f'{r["alias"]}::{r["peer_session"]}': r for r in json.load(fh)
+                        if r.get("local_session") == nome}
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        pass
+    par = next((externos[p] for p in peers if p in externos), None)
+    if par is not None:
+        texto = texto_par_externo(nome, f'{par["alias"]}::{par["peer_session"]}', par["peer_owner"])
+        print(json.dumps({"hookSpecificOutput": {"hookEventName": "SessionStart",
+                                                 "additionalContext": texto}}))
         return
     gid = d.get("gid") or ""
     cross = any("::" in p for p in peers)
