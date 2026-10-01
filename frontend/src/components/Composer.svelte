@@ -1154,6 +1154,7 @@ import { cachePrazo } from '../lib/cachePrazo';
     // passar pro resto da tela (overlays, visor).
     if (e.key === 'Escape' && podeInterromper) {
       e.preventDefault();
+      e.stopPropagation();
       if (skipChatConfirmations()) onInterrupt();
       else confirmStopOpen = true;
       return;
