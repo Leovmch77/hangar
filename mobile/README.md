@@ -41,7 +41,7 @@ o hook `eas-build-post-install` compila as duas antes do bundle; sem a do core o
 | Perfil | Para quê | Situação |
 |---|---|---|
 | `preview` | uso diário: APK Android e iOS ad hoc, instalação interna, sem Metro | caminho de instalação deste README |
-| `development` | `developmentClient: true` | **não comprovado**: `expo-dev-client` não está nas dependências; não use para instalar |
+| `development` | `developmentClient: true`, carrega o JS do Metro | iPhone sem conta paga: ver "iPhone com Apple ID gratuito" |
 | `production` | loja | fora do escopo; sem `eas submit`, loja ou OTA |
 
 ## Versão
@@ -82,6 +82,22 @@ build identifica o HEAD e, sozinho, não identifica alterações locais enviadas
   sem `--non-interactive`. Aparelho fora do perfil não instala.
 
 `npx expo export` só prova o bundle JS; não substitui a compilação nativa nem conta como APK.
+
+## iPhone com Apple ID gratuito (sem Mac)
+
+Dev build: instala uma vez e depois cada edição aparece na hora, pelo Metro.
+
+1. GitHub → Actions → **iOS dev build** → *Run workflow*. Baixe o artefato `hangar-dev-ipa`
+   (`.ipa` sem assinatura). Rodar de novo só quando mudar dependência nativa ou `app.json`.
+2. Instale com o Apple ID gratuito pelo [SideStore](https://sidestore.io) (reassina no próprio
+   iPhone pelo Wi-Fi; o pareamento inicial sai de `jitterbugpair`, com o iPhone no USB).
+   No iPhone, ligue Ajustes → Privacidade e Segurança → Modo de Desenvolvedor.
+3. Na máquina: `(cd mobile && npm start)`. Pelo Tailscale, defina antes
+   `REACT_NATIVE_PACKAGER_HOSTNAME=<ip-tailscale-da-máquina>`. No app, abra a URL que o Metro
+   mostra.
+
+Limites do Apple ID gratuito: a assinatura vale 7 dias (o SideStore renova), no máximo 3 apps
+instalados assim e sem push da Apple.
 
 ## Instalar e atualizar mantendo os dados
 
