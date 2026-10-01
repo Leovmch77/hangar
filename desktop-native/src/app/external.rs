@@ -106,9 +106,17 @@ impl Hangar {
     fn open_external_pair(&mut self, own: &str, alias: &str, session: &str, window: &mut Window, cx: &mut Context<Self>) {
         let address = self.external_pairs.iter().find(|(key, p)| key == own && p.alias == alias && p.session == session)
             .map(|(_, p)| p.address.clone());
-        match address {
-            Some(address) => self.open_remote(&servers::norm(&address), session.to_owned(), window, cx),
-            None => window.push_notification(Notification::warning(tr("search_session_gone").replace("{name}", session)), cx),
+        let Some(key) = address.map(|a| servers::norm(&a)) else {
+            window.push_notification(Notification::warning(tr("search_session_gone").replace("{name}", session)), cx);
+            return;
+        };
+        // Entrada da máquina dela tirada da lista: volta a do par antes de abrir, senão o clique esperaria uma lista que não vem.
+        if !self.remote.contains_key(&key) && !self.is_active_key(&key) { self.apply_external_pairs(cx); }
+        if self.is_active_key(&key) { self.open_target(&super::sidebar::Target::new(&key, session), window, cx); }
+        else if self.remote.contains_key(&key) { self.open_remote(&key, session.to_owned(), window, cx); }
+        else {
+            let text = tr("remote_open_failed").replace("{name}", session).replace("{erro}", &self.machine_error(&key));
+            window.push_notification(Notification::warning(text), cx);
         }
     }
 

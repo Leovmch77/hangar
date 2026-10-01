@@ -157,6 +157,8 @@ impl Hangar {
     }
 
     pub(super) fn open_file(&mut self, path: String, line: Option<u32>, window: &mut Window, cx: &mut Context<Self>) {
+        // Arquivos da sessão da outra pessoa são recusados pelo servidor dela.
+        if self.open_read_only() { return; }
         let (Some(api), Some(key)) = (self.session_api(), self.selected_key()) else { return };
         if !self.files_visible() {
             let owner = self.session_owner();

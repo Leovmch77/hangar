@@ -218,6 +218,8 @@ impl Hangar {
         self.servers_rev += 1;
         self.persist_servers();
         self.start_remote_lists();
+        // O par que estava nesta entrada volta na entrada só dele.
+        self.apply_external_pairs(cx);
         cx.notify();
     }
 }

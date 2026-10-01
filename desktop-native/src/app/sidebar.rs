@@ -535,9 +535,11 @@ impl Hangar {
         self.sidebar.menu_seq += 1;
         let seq = self.sidebar.menu_seq;
         // Branches só onde o menu mostra o git (pasta num repositório); como o silenciar, lidas a cada abertura do menu.
-        let git = self.target_session(&target).is_some_and(has_git);
+        // A sessão da outra pessoa num par não tem esses itens: o servidor dela recusaria as leituras.
+        let read_only = self.target_session(&target).is_some_and(SessionInfo::read_only);
+        let git = !read_only && self.target_session(&target).is_some_and(has_git);
         // Convite não tem Silenciar: as preferências de aviso são do servidor inteiro, fora do convite (web: `if (invite) return`).
-        let mute = !self.invite_target(&target);
+        let mute = !read_only && !self.invite_target(&target);
         let Some(api) = self.machine_api(&target.server) else {
             let failed = self.machine_error(&target.server);
             self.sidebar.menu = Some(MenuRead { target, seq, mute: Mute::Failed(failed.clone()), branches: git.then_some(Branches::Failed(failed)) });
