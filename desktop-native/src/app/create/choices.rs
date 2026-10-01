@@ -532,6 +532,22 @@ impl NewSession {
         Some(self.render_quota(id, &quota).into_any_element())
     }
 
+    /// A conta Claude escolhida para retomar a conversa fechada, quando a cota lida dela tem a janela geral (sessão ou semana)
+    /// esgotada: o aviso, com a volta se o servidor a deu. Sem leitura, ou leitura vencida, não bloqueia.
+    pub(in crate::app) fn reopen_quota_block(&self) -> Option<String> {
+        let path = self.reopen_config.clone().flatten()?;
+        let quota = self.quota_of(&format!("claude:{path}")).filter(|q| q.state == "lida")?;
+        let full: Vec<&QuotaWindow> = quota.windows().filter(|(w, pct)| matches!(w.label.as_str(), "5h" | "7d") && *pct >= 100.).map(|(w, _)| w).collect();
+        if full.is_empty() { return None; }
+        let account = self.configs.ok().and_then(|l| l.iter().find(|c| c.path == path)).map(|c| c.label.clone()).unwrap_or(path);
+        // Com duas janelas cheias, só volta quando a última voltar.
+        let reset = full.iter().filter_map(|w| w.reset_ts).fold(None, |acc: Option<f64>, r| Some(acc.map_or(r, |a| a.max(r))));
+        let when = until(reset, chrono::Local::now().timestamp() as f64);
+        use super::super::costs::web_with;
+        Some(if when.is_empty() { web_with("conversa_conta_sem_cota", &[("conta", account)]) }
+            else { web_with("conversa_conta_sem_cota_volta", &[("conta", account), ("quando", when)]) })
+    }
+
     pub(super) fn render_codex_quota(&self, credential: Option<&str>) -> Option<Stateful<Div>> {
         let quota = self.quota_of(credential?)?;
         Some(self.render_quota("create-codex-quota".into(), quota))

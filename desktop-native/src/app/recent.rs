@@ -1,7 +1,8 @@
 //! Conversas fechadas no modo Conversas da barra (o "Recentes" do app do Claude): a lista vem de `archive/recent` da máquina
 //! ativa, e abrir uma mostra o histórico com o compositor. A sessão só é retomada no Enviar, e a mensagem vai para ela.
 use super::*;
-use super::costs::web;
+use super::costs::{web, web_with};
+use crate::api::Resumed;
 use super::device::Remote;
 use serde::Deserialize;
 
@@ -9,6 +10,7 @@ use serde::Deserialize;
 pub(super) struct ArchiveEntry {
     pub(super) project: String,
     pub(super) session_id: String,
+    #[serde(default)] pub(super) cwd: String,
     #[serde(default)] pub(super) mtime: f64,
     #[serde(default)] pub(super) preview: String,
     #[serde(default)] pub(super) ultima: String,
@@ -41,7 +43,8 @@ impl ArchiveEntry {
         query
     }
     fn meta(&self) -> String {
-        [Some(self.conta.clone()).filter(|s| !s.is_empty()), Some(super::side::ago(chrono::Local::now().timestamp() as f64 - self.mtime))]
+        let folder = self.cwd.trim_end_matches(['/', '\\']).rsplit(['/', '\\']).next().filter(|s| !s.is_empty()).map(str::to_owned);
+        [folder, Some(self.conta.clone()).filter(|s| !s.is_empty()), Some(super::side::ago(chrono::Local::now().timestamp() as f64 - self.mtime))]
             .into_iter().flatten().collect::<Vec<_>>().join(" · ")
     }
 }
@@ -90,11 +93,11 @@ impl Hangar {
 
     pub(super) fn reopen_sending(&self) -> bool { self.recents.sending }
 
-    /// A lista de sessões chegou: conexão nova ou sessão que entrou ou saiu (a que sumiu acabou de fechar) relê a lista.
-    pub(super) fn recents_sessions_changed(&mut self, changed: bool, cx: &mut Context<Self>) {
+    /// A lista de sessões da máquina ativa chegou: conexão nova ou sessão que fechou relê a lista; troca de estado, não.
+    pub(super) fn recents_sessions_changed(&mut self, closed: bool, cx: &mut Context<Self>) {
         if !self.recents_shown() { return; }
         let fresh = self.recents.connection != Some(self.connection);
-        if fresh || changed || (self.recents.list.value.is_none() && !self.recents.list.loading) { self.load_recents(cx); }
+        if fresh || closed || (self.recents.list.value.is_none() && !self.recents.list.loading) { self.load_recents(cx); }
     }
 
     fn load_recents(&mut self, cx: &mut Context<Self>) {
@@ -130,8 +133,12 @@ impl Hangar {
     /// Clicar numa fechada: a sessão aberta sai, a área principal mostra o histórico dela com o compositor.
     fn open_closed(&mut self, entry: ArchiveEntry, window: &mut Window, cx: &mut Context<Self>) {
         if self.recents.sending { return; }
+        let Some(api) = self.api.clone() else { return };
         self.close_open_session(window, cx);
         self.recents.note = None;
+        // A conta vem pré-escolhida na dona da conversa; a pílula usa as contas e cotas que a tela sem sessão já lê.
+        let owner = (entry.provider == "claude" || entry.provider.is_empty()).then(|| entry.config_dir.clone());
+        self.ensure_new_chat(api, window, cx).update(cx, |view, _| view.reopen_config = owner);
         self.reopen = Some(entry);
         self.load_reopen_history(cx);
         self.composer.update(cx, |input, cx| input.focus(window, cx));
@@ -166,19 +173,24 @@ impl Hangar {
         let text = self.composer.read(cx).value().to_string();
         if text.trim().is_empty() { return; }
         let Some(api) = self.api.clone() else { return };
-        let claude = entry.provider == "claude";
-        let mut body = json!({"config_dir": if claude { json!(entry.config_dir) } else { Value::Null }, "provider": entry.provider});
+        if let Some(block) = self.reopen_quota_block(cx) { self.recents.note = Some(block); cx.notify(); return; }
+        let claude = entry.provider == "claude" || entry.provider.is_empty();
+        // Claude pode retomar em outra conta: o servidor move a conversa para a escolhida, como no "Continuar" do diálogo.
+        let config = self.new_chat.as_ref().and_then(|view| view.read(cx).reopen_config.clone()).unwrap_or_else(|| entry.config_dir.clone());
+        let mut body = json!({"config_dir": if claude { json!(config) } else { Value::Null }, "provider": entry.provider});
         if entry.provider == "codex" && let Some(account) = &entry.codex_account { body["codex_account"] = json!(account); }
         (self.recents.sending, self.recents.note) = (true, None);
         let identity = api.identity();
         let message = text.clone();
         let (project, id) = (entry.project.clone(), entry.session_id.clone());
         let task = self.runtime.spawn(async move {
-            let session = api.server_send(reqwest::Method::POST, &["archive", &project, &id, "resume"], Some(body), 120).await
-                .map_err(|e| Self::fetch_failure(&e))
-                .and_then(|v| serde_json::from_value::<SessionInfo>(v).map_err(|_| tr("invalid_response")))?;
-            let sent = api.send(&session.name, &message).await;
-            Ok::<_, String>((session, sent))
+            match api.resume_archive(&project, &id, body).await.map_err(|e| Self::fetch_failure(&e))? {
+                Resumed::Live(name) => Ok::<_, String>(Err(name)),
+                Resumed::New(session) => {
+                    let sent = api.send(&session.name, &message).await;
+                    Ok(Ok((session, sent)))
+                }
+            }
         });
         cx.spawn_in(window, async move |this, cx| {
             let joined = task.await;
@@ -188,13 +200,49 @@ impl Hangar {
                 match joined.unwrap_or_else(|_| Err(tr("search_interrupted"))) {
                     Err(error) if current => this.recents.note = Some(error),
                     Err(error) => window.push_notification(Notification::warning(error), cx),
-                    Ok((session, sent)) => this.reopened(identity, session, text, sent, current, window, cx),
+                    Ok(Ok((session, sent))) => {
+                        this.forget_recent(&entry.session_id);
+                        this.reopened(identity, session, text, sent, current, window, cx);
+                    }
+                    Ok(Err(live)) => this.reopen_live(live, text, current, window, cx),
                 }
                 cx.notify();
             });
         }).detach();
         cx.notify();
     }
+
+    /// A conversa já estava aberta numa sessão viva: abre essa, com o texto digitado no campo dela, sem enviar.
+    fn reopen_live(&mut self, name: String, text: String, current: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(session) = self.sessions.iter().find(|s| s.name == name).cloned() else {
+            let note = web_with("conversa_ja_aberta", &[("sessao", name)]);
+            if current { self.recents.note = Some(note); } else { window.push_notification(Notification::warning(note), cx); }
+            return;
+        };
+        if !current {
+            if let Some(key) = self.active_key_for(&session) { self.drafts.entry(key).or_insert(text); }
+            return;
+        }
+        self.reopen = None;
+        self.select(session, window, cx);
+        if self.composer.read(cx).value().trim().is_empty() { self.composer.update(cx, |input, cx| input.set_value(text, window, cx)); }
+        self.composer.update(cx, |input, cx| input.focus(window, cx));
+    }
+
+    fn active_key_for(&self, session: &SessionInfo) -> Option<SessionKey> { SessionKey::new(self.server.as_deref()?, session) }
+
+    /// A retomada virou sessão viva: sai da lista já, sem esperar a releitura.
+    fn forget_recent(&mut self, session_id: &str) {
+        if let Some(Ok(list)) = self.recents.list.value.as_mut() { list.retain(|e| e.session_id != session_id); }
+        self.recents.focus.remove(session_id);
+    }
+
+    /// O aviso de conta sem cota que impede o Enviar na conversa fechada.
+    fn reopen_quota_block(&self, cx: &App) -> Option<String> {
+        self.new_chat.as_ref().filter(|_| self.reopen.is_some()).and_then(|view| view.read(cx).reopen_quota_block())
+    }
+
+    pub(super) fn reopen_blocked(&self, cx: &App) -> bool { self.reopen_quota_block(cx).is_some() }
 
     /// A ordem é a da primeira mensagem da tela sem sessão (`receive_create`): rascunho, entrega, e só então a seleção,
     /// que põe no campo o rascunho que sobrou (o texto, se a entrega falhou).
@@ -294,10 +342,18 @@ impl Hangar {
             Some(Ok(lines)) => render_preview_lines(lines, cx).into_any_element(),
         };
         let composer = self.render_composer(false, false, false, 0, false, false, window, cx);
-        let (note, warning) = match (&self.recents.note, self.recents.sending) {
-            (Some(error), _) => (error.clone(), true),
-            (None, true) => (web("conversa_retomando"), false),
-            (None, false) => (web("conversa_reabrir_dica"), false),
+        // Mesma view da tela sem sessão: a pílula de conta e o menu dela (com a cota) vêm de lá.
+        let account = self.api.clone().and_then(|api| {
+            let codex = [&entry.conta, entry.codex_account.as_ref().unwrap_or(&String::new())].into_iter()
+                .find(|s| !s.is_empty()).cloned().unwrap_or_else(|| tr("create_default"));
+            self.ensure_new_chat(api, window, cx).update(cx, |view, cx| view.render_reopen_account(&entry.provider, codex, cx))
+        });
+        let block = self.reopen_quota_block(cx);
+        let (note, warning) = match (&self.recents.note, self.recents.sending, block) {
+            (Some(error), ..) => (error.clone(), true),
+            (None, true, _) => (web("conversa_retomando"), false),
+            (None, false, Some(block)) => (block, true),
+            (None, false, None) => (web("conversa_reabrir_dica"), false),
         };
         div().id("reopen").size_full().flex().flex_col()
             .child(div().id("reopen-history").flex_1().min_h_0().overflow_y_scroll().track_scroll(&self.recents.scroll).pt(px(20.)).pb(px(12.))
@@ -307,6 +363,7 @@ impl Hangar {
                         .child(div().text_xs().text_color(theme::faint()).child(entry.meta())))
                     .child(body))))
             .child(composer)
+            .children(account.map(landing_column))
             .child(landing_column(div().id("reopen-note").role(if warning { Role::Alert } else { Role::Status }).px(px(14.)).pb(px(10.))
                 .text_sm().whitespace_normal().text_color(if warning { theme::warning() } else { theme::muted() }).child(note)))
             .into_any_element()

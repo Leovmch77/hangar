@@ -1513,10 +1513,10 @@ impl Hangar {
         // Aba com o foco, pela posição na lista antiga: se a sessão dela sumir, o foco não pode ficar numa alça morta.
         let focused_tab = self.sessions.iter().position(|s| self.tab_focus.get(&s.name).is_some_and(|f| f.is_focused(window)))
             .map(|ix| (ix, self.sessions[ix].name.clone()));
-        let names = |list: &[SessionInfo]| list.iter().map(|s| s.name.clone()).collect::<HashSet<_>>();
-        let names_changed = names(&self.sessions) != names(&sessions);
+        // Sessão que sumiu da lista acabou de fechar: a conversa dela passa a ser recente.
+        let closed = self.sessions.iter().any(|old| !sessions.iter().any(|s| s.name == old.name));
         self.sessions = sessions;
-        self.recents_sessions_changed(names_changed, cx);
+        self.recents_sessions_changed(closed, cx);
         self.resolve_local_dirs(cx);
         // Cada aba guarda o próprio foco pela vida da sessão; aba de sessão que sumiu leva o dela junto.
         self.tab_focus.retain(|name, _| self.sessions.iter().any(|s| &s.name == name));
@@ -3542,7 +3542,7 @@ impl Hangar {
         }
         let steer_text = readable && has_input && (provider == "codex" || headless) && self.chat.state.state == "working"
             && self.selected_key().is_none_or(|key| self.group_targets(&key, "").is_none());
-        let blocked = if reopen { resuming } else if new_chat { !can_create } else { sending || uploading.is_some() || !self.chat_online || !self.history_installed };
+        let blocked = if reopen { resuming || self.reopen_blocked(cx) } else if new_chat { !can_create } else { sending || uploading.is_some() || !self.chat_online || !self.history_installed };
         let can_stop = self.can_interrupt();
         let focused = self.composer.read(cx).focus_handle(cx).is_focused(window);
         let paste_target = cx.entity().downgrade();

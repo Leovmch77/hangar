@@ -414,6 +414,22 @@ impl Api {
         Ok((r.json().await.map_err(|_| Failure::local("invalid_response"))?, session))
     }
 
+    /// Retoma uma conversa do arquivo. Já aberta numa sessão viva, o servidor responde 409 `erro_conversa_viva` com o nome
+    /// dela em `params.sessao`: volta como `Resumed::Live`, para quem chamou abrir essa sessão em vez de mostrar erro.
+    pub async fn resume_archive(&self, project: &str, session_id: &str, body: Value) -> Result<Resumed, Failure> {
+        let r = self.client.post(self.server_url(&["archive", project, session_id, "resume"], &[])).json(&body)
+            .timeout(Duration::from_secs(120)).send().await.map_err(|_| Failure::transport(true))?;
+        if r.status() == StatusCode::CONFLICT {
+            let body = r.json::<Value>().await.ok();
+            let live = body.as_ref().and_then(|b| b.get("detail")).filter(|d| d.get("code").and_then(Value::as_str) == Some("erro_conversa_viva"))
+                .and_then(|d| d.pointer("/params/sessao")).and_then(Value::as_str).filter(|name| !name.is_empty()).map(str::to_owned);
+            if let Some(name) = live { return Ok(Resumed::Live(name)); }
+            return Err(Failure { status: Some(409), detail: failure_detail(body, 409).chars().take(500).collect(), retry_after: None, uncertain: false });
+        }
+        let session = Self::checked(r, true).await?.json().await.map_err(|_| Failure::local("invalid_response"))?;
+        Ok(Resumed::New(session))
+    }
+
     /// DELETE com parâmetros na URL (cancelar o login do Codex leva a tentativa na query).
     pub async fn server_delete(&self, path: &[&str], query: &[(&str, &str)], seconds: u64) -> Result<Value, Failure> {
         let r = self.client.delete(self.server_url(path, query)).timeout(Duration::from_secs(seconds)).send().await
@@ -538,6 +554,9 @@ impl Api {
 }
 
 pub struct History { pub events: Option<Vec<ChatEvent>>, pub etag: Option<String> }
+
+/// Resultado de retomar do arquivo: a sessão nova, ou o nome da viva que já tem a conversa aberta.
+pub enum Resumed { New(SessionInfo), Live(String) }
 
 #[derive(Clone, Debug, serde::Deserialize)]
 pub struct ShareCreated { pub link: String, pub expires_at: f64 }

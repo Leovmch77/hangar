@@ -6420,5 +6420,8 @@
   "newchat_conta_sem_limite_sem_hora": "{conta} is out of quota. Switch account to send.",
   "conversas_recentes_falhou": "Could not load recent conversations.",
   "conversa_reabrir_dica": "Sending resumes this conversation with your message.",
-  "conversa_retomando": "Resuming the conversation…"
+  "conversa_retomando": "Resuming the conversation…",
+  "conversa_conta_sem_cota": "The {conta} account is out of quota. Pick another account to send.",
+  "conversa_conta_sem_cota_volta": "The {conta} account is out of quota; it resets in {quando}. Pick another account to send.",
+  "conversa_ja_aberta": "This conversation is already open in session {sessao}."
 }

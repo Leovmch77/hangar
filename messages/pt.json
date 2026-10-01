@@ -6420,5 +6420,8 @@
   "newchat_conta_sem_limite_sem_hora": "A conta {conta} está sem limite. Troque de conta para enviar.",
   "conversas_recentes_falhou": "Não foi possível carregar as conversas recentes.",
   "conversa_reabrir_dica": "Ao enviar, esta conversa é retomada com a mensagem.",
-  "conversa_retomando": "Retomando a conversa…"
+  "conversa_retomando": "Retomando a conversa…",
+  "conversa_conta_sem_cota": "A conta {conta} está sem cota. Escolha outra conta para enviar.",
+  "conversa_conta_sem_cota_volta": "A conta {conta} está sem cota; volta em {quando}. Escolha outra conta para enviar.",
+  "conversa_ja_aberta": "Esta conversa já está aberta na sessão {sessao}."
 }

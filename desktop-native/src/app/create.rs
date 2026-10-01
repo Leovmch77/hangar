@@ -344,6 +344,9 @@ pub(in crate::app) struct NewSession {
     more: bool,
     omp: Entity<InputState>,
     quotas: Remote<Vec<QuotaLine>>,
+    /// Com a conversa fechada aberta (`Hangar::reopen`), a conta Claude escolhida para retomá-la; o menu de conta passa a
+    /// escolher esta, sem mexer na da tela sem sessão.
+    pub(super) reopen_config: Option<Option<String>>,
     /// "+ conta": a linha do nome aberta; "Apagar": a confirmação na tela.
     asking: bool,
     confirming: bool,
@@ -415,7 +418,7 @@ impl NewSession {
             step: String::new(), error: None, clock: None, models: Remote::default(), model: String::new(), model_choice_touched: false, effort: String::new(),
             permission: "bypassPermissions".into(), subagent: String::new(), engine: String::new(), model_pick: None, effort_pick: None,
             permission_pick: None, subagent_pick: None, engine_pick: None, engines: Remote::default(), jev: Remote::default(), jev_on: false,
-            more: false, omp, quotas: Remote::default(), asking: false, confirming: false, account_busy: false, account_seq: 0, account_name,
+            more: false, omp, quotas: Remote::default(), reopen_config: None, asking: false, confirming: false, account_busy: false, account_seq: 0, account_name,
             notice: None, created_path: None, context_seq: 0, context_busy: false, context_on: None, context_want: None, context_error: None,
             archive: Remote::default(), want_resume: false, conversation: String::new(), before: None, preview: Remote::default(),
             preview_scroll: ScrollHandle::new(), resuming: false, baton, baton_by_model: false, baton_open: false,
@@ -1437,6 +1440,26 @@ impl NewSession {
             .children(self.render_git_pill(open == Some(Menu::Git), cx))
     }
 
+    /// A conta da conversa fechada aberta, abaixo do compositor: Claude troca pelo menu (com a cota de cada conta), Codex só
+    /// mostra a de origem (o servidor recusa outra), os demais não têm conta.
+    pub(super) fn render_reopen_account(&self, provider: &str, codex_label: String, cx: &mut Context<Self>) -> Option<Div> {
+        let row = div().flex().items_center().gap(px(2.)).pt(px(2.)).pl(px(6.));
+        match provider {
+            "claude" | "" => {
+                let list = self.configs.ok().filter(|list| !list.is_empty())?;
+                let chosen = self.reopen_config.clone().flatten();
+                let label = list.iter().find(|c| Some(&c.path) == chosen.as_ref()).map(|c| c.label.clone()).unwrap_or_else(|| tr("create_default"));
+                Some(row.child(quiet_pill(Menu::Account, self.menu.get() == Some(Menu::Account), IconName::CircleUser, label,
+                    tr("create_claude_account"), self.configs.loading, cx)))
+            }
+            "codex" => Some(row.child(div().id("reopen-codex-account").h(px(26.)).px(px(8.)).flex().items_center().gap(px(6.))
+                .text_size(px(12.5)).text_color(theme::muted()).aria_label(format!("{}: {codex_label}", tr("create_codex_account")))
+                .child(chrome::small_icon(IconName::CircleUser, 14., theme::faint()))
+                .child(div().max_w(px(220.)).truncate().child(codex_label)))),
+            _ => None,
+        }
+    }
+
     /// O que impede ou explica o envio, abaixo das pílulas: a criação em voo, a falha dela, ou a leitura que faltou.
     /// O nome que a sessão da tela sem sessão vai ter (a pasta; o desempate do servidor pode somar um número) e o agente.
     pub(super) fn opening_name(&self) -> String { self.picked.as_deref().map(basename).unwrap_or_default().to_owned() }
@@ -1484,6 +1507,22 @@ impl NewSession {
                 }
                 _ => div().into_any_element(),
             },
+            Menu::Account if self.reopen_config.is_some() => {
+                let chosen = self.reopen_config.clone().flatten();
+                let rows = self.accounts().filter(|c| wanted(&query, &c.label, "")).map(|c| {
+                    let path = c.path.clone();
+                    let quota = self.quota_line(format!("reopen-account-quota-{path}"), &format!("claude:{path}"));
+                    menu_row_with(SharedString::from(format!("reopen-account-{path}")), chosen.as_ref() == Some(&c.path), c.label.clone(),
+                        if c.active { tr("create_current") } else { String::new() }, quota)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.menu.set(None);
+                            this.reopen_config = Some(Some(path.clone()));
+                            cx.notify();
+                        }))
+                        .into_any_element()
+                }).collect();
+                Self::menu_list("reopen-account-list", rows)
+            }
             Menu::Account if self.provider == "codex" => {
                 let rows = self.codex.ok().into_iter().flatten().filter(|a| wanted(&query, &a.name, &a.hint())).map(|account| {
                     let id = account.id.clone();
@@ -1618,20 +1657,8 @@ impl Hangar {
             return div().flex_1().flex().items_center().justify_center().text_color(theme::muted()).child(tr("choose_session")).into_any_element();
         };
         self.home_usage_opened(cx);
-        if self.new_chat.as_ref().is_none_or(|view| { let link = &view.read(cx).link; link.connection != self.connection || link.servers_rev != self.servers_rev }) {
-            let link = Link { api, runtime: self.runtime.clone(), tx: self.tx.clone(), connection: self.connection,
-                servers: self.server_choices(), servers_rev: self.servers_rev };
-            self.new_chat_folders.set(None);
-            self.new_chat = Some(cx.new(|cx| {
-                let mut view = NewSession::new(link, None, window, cx);
-                view.compact = true;
-                view.menu = self.new_chat_folders.clone();
-                cx.defer_in(window, |view, window, cx| view.load(window, cx));
-                view
-            }));
-            cx.observe(self.new_chat.as_ref().unwrap(), |this, _, cx| this.redraw(panes::Area::Bottom, cx)).detach();
-        }
-        let view = self.new_chat.clone().unwrap();
+        let view = self.ensure_new_chat(api, window, cx);
+        view.update(cx, |view, _| view.reopen_config = None);
         if self.opening.is_some() && view.read(cx).creating { return self.render_opening(view, window, cx); }
         let (top, bottom, note) = view.update(cx, |view, cx| (view.render_top_pills(cx), view.render_bottom_pills(cx), view.note()));
         // Anexo recusado (grande demais, ilegível) avisa aqui, onde a tela sem sessão mostra os avisos dela.
@@ -1649,6 +1676,25 @@ impl Hangar {
                     .children(note.map(|(text, warning)| div().id("new-chat-note").role(if warning { Role::Alert } else { Role::Status })
                         .px(px(14.)).text_sm().whitespace_normal().text_color(if warning { theme::warning() } else { theme::muted() }).child(text))))))
             .into_any_element()
+    }
+
+    /// A view da tela sem sessão, refeita quando a conexão ou a lista de máquinas mudam. A conversa fechada aberta usa a
+    /// mesma, pelas contas e cotas que ela já lê.
+    pub(super) fn ensure_new_chat(&mut self, api: Api, window: &mut Window, cx: &mut Context<Self>) -> Entity<NewSession> {
+        if self.new_chat.as_ref().is_none_or(|view| { let link = &view.read(cx).link; link.connection != self.connection || link.servers_rev != self.servers_rev }) {
+            let link = Link { api, runtime: self.runtime.clone(), tx: self.tx.clone(), connection: self.connection,
+                servers: self.server_choices(), servers_rev: self.servers_rev };
+            self.new_chat_folders.set(None);
+            self.new_chat = Some(cx.new(|cx| {
+                let mut view = NewSession::new(link, None, window, cx);
+                view.compact = true;
+                view.menu = self.new_chat_folders.clone();
+                cx.defer_in(window, |view, window, cx| view.load(window, cx));
+                view
+            }));
+            cx.observe(self.new_chat.as_ref().unwrap(), |this, _, cx| this.redraw(panes::Area::Bottom, cx)).detach();
+        }
+        self.new_chat.clone().unwrap()
     }
 
     /// Com `baton`, o mesmo diálogo cria a sessão que continua aquela (o "Continuar em outra conta" do menu da sessão).
