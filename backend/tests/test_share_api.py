@@ -143,15 +143,21 @@ def test_prereqs_sem_tailscale_e_409_de_pre_requisito(cli, monkeypatch):
     assert r.json()["detail"]["params"] == {"missing": [], "fix": "tailscale nao encontrado"}
 
 
+def _guest(session: str):
+    return share_store.Guest([share_store.Share(
+        id="s", session=session, life="L", created_at=0.0, code_expires_at=0.0, code_hash="",
+        token_hash="t", redeemed_at=1.0)])
+
+
 def test_prereqs_fora_da_porta_do_convidado():
     from app.share_gate import guest_allowed
-    assert guest_allowed("GET", "/api/share/prereqs", "proj") is False
+    assert guest_allowed("GET", "/api/share/prereqs", _guest("proj")) is False
 
 
 def test_convidado_nao_fecha_a_sessao_do_dono():
     from app.share_gate import guest_allowed
-    assert guest_allowed("DELETE", "/api/sessions/proj", "proj") is False
-    assert guest_allowed("GET", "/api/sessions/proj", "proj") is True
+    assert guest_allowed("DELETE", "/api/sessions/proj", _guest("proj")) is False
+    assert guest_allowed("GET", "/api/sessions/proj", _guest("proj")) is True
 
 
 def test_fechar_sessao_revoga(cli, syncs, monkeypatch):

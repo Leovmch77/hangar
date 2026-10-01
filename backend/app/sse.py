@@ -596,9 +596,11 @@ async def list_events(ping_secs: float = 8.0, only=None, viewer=None):
             if data is not None:
                 try:
                     if only is not None:
-                        data = json.dumps([guest_safe(x) for x in json.loads(data)
-                                           if x.get("name") == (only if isinstance(only, str)
-                                                                else only.session)], ensure_ascii=False)
+                        # `only` em str é só o nome (usos internos); o Guest tem o registro vivo.
+                        sees = (lambda n: n == only) if isinstance(only, str) else only.sees
+                        data = json.dumps([guest_safe(x, None if isinstance(only, str) else only)
+                                           for x in json.loads(data) if sees(x.get("name"))],
+                                          ensure_ascii=False)
                     if guest_users.has_claims() or viewer is not None:
                         itens = await asyncio.to_thread(guest_users.filter_visible, viewer,
                                                         json.loads(data), lambda x: x.get("name"))

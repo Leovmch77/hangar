@@ -1763,21 +1763,21 @@ async def list_sessions(request: Request):
     decorated = recent_list(2.0)
     if decorated is not None:
         if guest is not None:
-            decorated = [i for i in decorated if i.name == guest.session]
+            decorated = [i for i in decorated if guest.sees(i.name)]
         # Mesmo recorte do caminho sem cache: convidado com login próprio só vê o que lhe cabe.
         if viewer is not None or guest_users.has_claims():
             decorated = await asyncio.to_thread(guest_users.filter_visible, viewer, decorated,
                                                 lambda i: i.name)
-        return decorated if guest is None else [guest_safe(i) for i in decorated]
+        return decorated if guest is None else [guest_safe(i, guest) for i in decorated]
     snap = await asyncio.to_thread(_guardar_snap)
     # Convidado ve so a sessao compartilhada; o filtro fica depois do snapshot para nao tocar no cache.
     if guest is not None:
-        snap = [i for i in snap if i.name == guest.session]
+        snap = [i for i in snap if guest.sees(i.name)]
     if viewer is not None or guest_users.has_claims():
         snap = await asyncio.to_thread(guest_users.filter_visible, viewer, snap, lambda i: i.name)
     decorated = await registry.list_with_state([i.model_copy() for i in snap])
     # O pareamento e o encadeamento são decorados acima e citam outras sessões do dono.
-    return decorated if guest is None else [guest_safe(i) for i in decorated]
+    return decorated if guest is None else [guest_safe(i, guest) for i in decorated]
 
 
 @app.post("/api/diag", dependencies=[Depends(require_auth)])

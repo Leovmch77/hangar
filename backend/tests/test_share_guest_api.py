@@ -30,7 +30,7 @@ def guest_client(monkeypatch):
 def test_pagina_do_convite_nao_gasta_o_codigo(guest_client, monkeypatch):
     chamadas = []
     monkeypatch.setattr(share_store, "peek", lambda code: SHARED)
-    monkeypatch.setattr(share_store, "redeem", lambda *a: chamadas.append(a))
+    monkeypatch.setattr(share_store, "redeem", lambda *a, **kw: chamadas.append(a))
     r = guest_client.get("/convite/ABCD")
     assert r.status_code == 200
     assert "cc" in r.text
@@ -76,7 +76,7 @@ def test_pagina_escapa_o_nome_da_sessao(guest_client, monkeypatch):
 
 
 def test_resgate_devolve_token_e_endereco(guest_client, monkeypatch):
-    monkeypatch.setattr(share_store, "redeem", lambda code, device: (SHARED, "tok"))
+    monkeypatch.setattr(share_store, "redeem", lambda code, device, **kw: (SHARED, "tok"))
     r = guest_client.post("/api/guest/redeem", json={"code": "ABCD", "device": "Pixel"})
     assert r.status_code == 200
     body = r.json()
@@ -94,7 +94,7 @@ def test_convite_pela_rede_local_usa_o_ip_e_nao_o_tunel(guest_client, monkeypatc
     monkeypatch.setattr(share_tunnel, "host", sem_tunel)
     monkeypatch.setattr(share_store, "peek", lambda code: SHARED)
     assert "hangar://convite/192.168.77.142:8766/ABCD" in local.get("/convite/ABCD").text
-    monkeypatch.setattr(share_store, "redeem", lambda code, device: (SHARED, "tok"))
+    monkeypatch.setattr(share_store, "redeem", lambda code, device, **kw: (SHARED, "tok"))
     r = local.post("/api/guest/redeem", json={"code": "ABCD", "device": "Pixel"})
     assert r.json()["address"] == "http://192.168.77.142:8766"
 
@@ -104,7 +104,7 @@ def test_resgate_com_tunel_fora_nao_gasta_o_codigo(guest_client, monkeypatch):
         raise share_tunnel.TunnelError([], "sem tailscale")
     chamadas = []
     monkeypatch.setattr(share_tunnel, "host", sem_tunel)
-    monkeypatch.setattr(share_store, "redeem", lambda *a: chamadas.append(a))
+    monkeypatch.setattr(share_store, "redeem", lambda *a, **kw: chamadas.append(a))
     r = guest_client.post("/api/guest/redeem", json={"code": "ABCD", "device": "Pixel"})
     assert r.status_code == 503
     assert r.json()["detail"]["code"] == "erro_sessao_indisponivel"
@@ -115,7 +115,7 @@ def test_resgate_com_tunel_fora_nao_gasta_o_codigo(guest_client, monkeypatch):
     ("used", 410, "erro_convite_usado"), ("expired", 410, "erro_convite_vencido"),
     ("revoked", 410, "erro_convite_revogado"), ("unknown", 404, "erro_convite_inexistente")])
 def test_resgate_recusado_com_motivo(guest_client, monkeypatch, reason, status, code):
-    def redeem(code_, device):
+    def redeem(code_, device, **kw):
         raise share_store.ShareError(reason)
     monkeypatch.setattr(share_store, "redeem", redeem)
     r = guest_client.post("/api/guest/redeem", json={"code": "ABCD", "device": "Pixel"})
@@ -125,7 +125,7 @@ def test_resgate_recusado_com_motivo(guest_client, monkeypatch, reason, status, 
 
 
 def test_lista_do_convidado_so_tem_a_sessao_dele(guest_client, monkeypatch):
-    monkeypatch.setattr(share_store, "lookup_token", lambda t: REDEEMED)
+    monkeypatch.setattr(share_store, "lookup_token", lambda t: share_store.Guest([REDEEMED]))
     infos = [SessionInfo(name="cc", cwd="/p"), SessionInfo(name="outra", cwd="/q")]
     with patch("app.api.registry.list", return_value=infos):
         r = guest_client.get("/api/sessions", headers={"Authorization": "Bearer g"})
@@ -134,7 +134,7 @@ def test_lista_do_convidado_so_tem_a_sessao_dele(guest_client, monkeypatch):
 
 
 def test_lista_do_convidado_nao_cita_outras_sessoes(guest_client, monkeypatch):
-    monkeypatch.setattr(share_store, "lookup_token", lambda t: REDEEMED)
+    monkeypatch.setattr(share_store, "lookup_token", lambda t: share_store.Guest([REDEEMED]))
     infos = [SessionInfo(name="cc", cwd="/p", pair_peers=["outra"], pair_task="PM-1",
                          pair_gid="g1", then_target="outra")]
 
@@ -154,7 +154,7 @@ def test_lista_do_convidado_nao_cita_outras_sessoes(guest_client, monkeypatch):
 def test_guest_cannot_start_a_hangar_copy(guest_client, monkeypatch):
     from app import shortcut_terminals
     started = []
-    monkeypatch.setattr(share_store, "lookup_token", lambda t: REDEEMED)
+    monkeypatch.setattr(share_store, "lookup_token", lambda t: share_store.Guest([REDEEMED]))
     monkeypatch.setattr(shortcut_terminals, "start_hangar", lambda *a: started.append(a) or (None, False))
     r = guest_client.post("/api/sessions/cc/shortcut-shell", headers={"Authorization": "Bearer g"},
                           json={"command": "notepad", "runs_in": "hangar", "key": "global:k"})
@@ -165,7 +165,7 @@ def test_guest_cannot_start_a_hangar_copy(guest_client, monkeypatch):
 
 def test_guest_does_not_reach_the_hangar_terminal_routes(guest_client, monkeypatch):
     # O porteiro so deixa passar `/api/sessions/<a sessao do convite>/...`: nem lista, nem fecha, nem terminal.
-    monkeypatch.setattr(share_store, "lookup_token", lambda t: REDEEMED)
+    monkeypatch.setattr(share_store, "lookup_token", lambda t: share_store.Guest([REDEEMED]))
     auth = {"Authorization": "Bearer g"}
     assert guest_client.get("/api/hangar-terminals", headers=auth).status_code == 403
     assert guest_client.post("/api/hangar-terminals/abcdef/close", headers=auth).status_code == 403
@@ -217,7 +217,7 @@ async def test_stream_da_lista_nao_cita_outras_sessoes(monkeypatch):
 def test_stream_da_sessao_do_convidado_nao_conta_como_app_do_dono(guest_client, monkeypatch):
     # Contar o convidado como app aberto calaria as notificações push do dono.
     from app import api as api_mod
-    monkeypatch.setattr(share_store, "lookup_token", lambda t: REDEEMED)
+    monkeypatch.setattr(share_store, "lookup_token", lambda t: share_store.Guest([REDEEMED]))
     chamadas = []
 
     async def fake_merged(name, jsonl, provider="claude", start_offset=None, count_app=True):
@@ -236,7 +236,7 @@ async def test_stream_da_lista_acompanha_a_sessao_renomeada(monkeypatch):
     fake = _FakeRefresher(json.dumps([{"name": "cc"}, {"name": "novo"}]))
     monkeypatch.setattr(sse, "_list_refresher", fake)
     share = dataclasses.replace(REDEEMED)
-    gen = sse.list_events(ping_secs=60, only=share)
+    gen = sse.list_events(ping_secs=60, only=share_store.Guest([share]))
     ev = await asyncio.wait_for(gen.__anext__(), 2)
     assert [s["name"] for s in json.loads(ev["data"])] == ["cc"]
     share.session = "novo"
@@ -246,3 +246,32 @@ async def test_stream_da_lista_acompanha_a_sessao_renomeada(monkeypatch):
     ev = await asyncio.wait_for(gen.__anext__(), 2)
     await gen.aclose()
     assert [s["name"] for s in json.loads(ev["data"])] == ["novo"]
+
+
+def test_resgate_com_token_existente_devolve_o_mesmo_token(guest_client, tmp_path, monkeypatch):
+    # Registro isolado: os dois convites daqui não podem ficar no arquivo da sessão de testes.
+    monkeypatch.setattr(share_store, "_path_override", tmp_path / "shares.json")
+    share_store._reset()
+    try:
+        _, ca = share_store.create("proj-a", "t:1")
+        _, cb = share_store.create("proj-b", "t:2")
+        tok = guest_client.post("/api/guest/redeem", json={"code": ca, "device": "PC"}).json()["token"]
+        r = guest_client.post("/api/guest/redeem", json={"code": cb, "device": "PC", "token": tok})
+        assert r.json()["token"] == tok and r.json()["session"] == "proj-b"
+    finally:
+        share_store._reset()
+
+
+def test_lista_do_convidado_marca_o_tipo_de_cada_sessao(guest_client, monkeypatch):
+    par = dataclasses.replace(REDEEMED, id="p1", session="yy", kind="pair")
+    monkeypatch.setattr(share_store, "lookup_token", lambda t: share_store.Guest([REDEEMED, par]))
+    infos = [SessionInfo(name="cc", cwd="/p"), SessionInfo(name="yy", cwd="/q"),
+             SessionInfo(name="outra", cwd="/r")]
+
+    async def with_state(lst):
+        return lst
+
+    with patch("app.api.registry.list", return_value=infos), \
+            patch("app.api.registry.list_with_state", with_state):
+        r = guest_client.get("/api/sessions", headers={"Authorization": "Bearer g"})
+    assert {s["name"]: s["guest_kind"] for s in r.json()} == {"cc": "share", "yy": "pair"}

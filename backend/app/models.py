@@ -141,6 +141,8 @@ class SessionInfo(BaseModel):
     limit_reset: Optional[str] = None
     # Sessão com convite ativo (link pendente ou convidado dentro): selo 🔗 nas listas.
     shared: bool = False
+    # Só na lista do convidado: "share" (conversa) ou "pair" (só leitura); None para o dono.
+    guest_kind: Optional[str] = None
     # Nome do convidado que criou a sessão; None = dono do servidor.
     owner: Optional[str] = None
     # Feature #12 (encadeamento de sessao): nome da sessao ALVO se esta sessao tem um vinculo 'then'
