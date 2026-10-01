@@ -275,3 +275,19 @@ def test_lista_do_dialogo_e_marca_compartilhada_ignoram_par():
     share_store.create("proj", "t:1", now=1000.0, kind="pair")
     assert share_store.list_for("proj", now=1001.0) == []
     assert share_store.active_sessions(now=1001.0) == set()
+
+
+def test_attach_em_cadeia_aponta_para_a_raiz_e_revogar_a_raiz_derruba_tudo():
+    pai, tok_p = share_store.create_redeemed("proj-y", "t:9", kind="pair", now=1000.0)
+    _, c1 = share_store.create("proj-z", "t:3", now=1000.0)
+    _, tok_t = share_store.redeem(c1, "Pixel", now=1001.0)
+    _, c2 = share_store.create("proj-w", "t:4", now=1000.0)
+    _, tok_t2 = share_store.redeem(c2, "PC", now=1001.0)
+    assert share_store.attach(tok_t, tok_p, now=1002.0) == 1
+    assert share_store.attach(tok_t2, tok_t, now=1003.0) == 2
+    assert share_store.attach(tok_t2, tok_t, now=1004.0) == 0  # sem duplicar
+    copia = share_store.lookup_token(tok_t2).share_for("proj-y")
+    assert copia.parent_id == pai.id
+    share_store.revoke(pai.id)
+    assert share_store.lookup_token(tok_t2).sessions() == {"proj-w", "proj-z"}
+    assert share_store.lookup_token(tok_t).sessions() == {"proj-z"}

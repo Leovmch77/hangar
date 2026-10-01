@@ -82,7 +82,7 @@ from app import share_api, share_guest_api, share_store
 from app.share_guest_api import guest_safe
 from app.guest_user_gate import GuestUserGate
 from app import guest_users, guest_users_api
-from app.share_gate import ShareGate, guest_of
+from app.share_gate import GUEST_TOKEN_KEY, ShareGate, guest_of
 from app.share_life import session_life
 from app import tts
 from app.tts_text import preparar as tts_preparar
@@ -3318,8 +3318,10 @@ async def subagent_detail(name: str, agent_id: str, events: int = 0):
 async def sessions_events(request: Request):
     from app.sse import list_events
     guest = guest_of(request)
-    return EventSourceResponse(list_events(only=guest, viewer=guest_users.current.get()),
-                               send_timeout=30)
+    return EventSourceResponse(
+        list_events(only=guest, viewer=guest_users.current.get(),
+                    token=request.scope.get(GUEST_TOKEN_KEY)),
+        send_timeout=30)
 
 
 @app.get("/api/sessions/{name}/events", dependencies=[Depends(require_auth)])

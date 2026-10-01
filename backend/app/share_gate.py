@@ -18,6 +18,8 @@ from app.share_life import session_life
 from app.share_tunnel import GUEST_PORT, port_clash
 
 GUEST_SCOPE_KEY = "hangar_guest"
+# Token cru: o stream da lista relê o registro a cada envio, para enxergar sessão ligada depois.
+GUEST_TOKEN_KEY = "hangar_guest_token"
 
 _LIST_ROUTES = {("GET", "/api/sessions"), ("GET", "/api/sessions/events")}
 _GLOBAL_ROUTES = {
@@ -249,6 +251,7 @@ class ShareGate:
                         "fora da sessao compartilhada")
             return
         scope[GUEST_SCOPE_KEY] = guest
+        scope[GUEST_TOKEN_KEY] = token
         if _is_long(scope, path):
             await watch(self.app, scope, receive, send, lambda: _still_valid(token, session))
         else:

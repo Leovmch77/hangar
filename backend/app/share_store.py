@@ -223,11 +223,17 @@ def attach(holder_token: str, other_token: str, now: float | None = None) -> int
     h = _hash(holder_token)
     with _lock:
         estado = _load()
+        # A cópia aponta sempre para a RAIZ: revogar o registro original derruba toda a cadeia.
         feitos = {x.parent_id for x in estado.values() if x.token_hash == h and x.parent_id}
-        novos = [Share(id=secrets.token_hex(8), session=s.session, life=s.life, created_at=now,
-                       code_expires_at=now, code_hash="", token_hash=h, redeemed_at=now,
-                       kind=s.kind, parent_id=s.id)
-                 for s in other.shares if s.revoked_at is None and s.id not in feitos]
+        novos = []
+        for s in other.shares:
+            raiz = s.parent_id or s.id
+            if s.revoked_at is not None or raiz in feitos:
+                continue
+            feitos.add(raiz)
+            novos.append(Share(id=secrets.token_hex(8), session=s.session, life=s.life, created_at=now,
+                               code_expires_at=now, code_hash="", token_hash=h, redeemed_at=now,
+                               kind=s.kind, parent_id=raiz))
         for n in novos:
             estado[n.id] = n
         if novos:

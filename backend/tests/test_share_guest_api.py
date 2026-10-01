@@ -275,3 +275,21 @@ def test_lista_do_convidado_marca_o_tipo_de_cada_sessao(guest_client, monkeypatc
             patch("app.api.registry.list_with_state", with_state):
         r = guest_client.get("/api/sessions", headers={"Authorization": "Bearer g"})
     assert {s["name"]: s["guest_kind"] for s in r.json()} == {"cc": "share", "yy": "pair"}
+
+
+async def test_stream_da_lista_enxerga_sessao_ligada_ao_token_depois_de_aberto(monkeypatch):
+    fake = _FakeRefresher(json.dumps([{"name": "cc"}, {"name": "novo"}]))
+    monkeypatch.setattr(sse, "_list_refresher", fake)
+    vivo = {"guest": share_store.Guest([REDEEMED])}
+    monkeypatch.setattr(share_store, "lookup_token", lambda t: vivo["guest"])
+    gen = sse.list_events(ping_secs=60, only=vivo["guest"], token="g")
+    ev = await asyncio.wait_for(gen.__anext__(), 2)
+    assert [s["name"] for s in json.loads(ev["data"])] == ["cc"]
+    # Resgate com token (ou attach) liga outra sessão ao mesmo token com o stream já aberto.
+    vivo["guest"] = share_store.Guest([REDEEMED, dataclasses.replace(REDEEMED, id="s2", session="novo")])
+    async with fake._cond:
+        fake.version += 1
+        fake._cond.notify_all()
+    ev = await asyncio.wait_for(gen.__anext__(), 2)
+    await gen.aclose()
+    assert [s["name"] for s in json.loads(ev["data"])] == ["cc", "novo"]
