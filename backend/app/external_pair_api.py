@@ -9,7 +9,7 @@ import time
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app import external_pairs, pair, pair_texto, peers, share_api, share_store, share_tunnel
 from app.auth import require_auth
@@ -23,6 +23,9 @@ _log = logging.getLogger(__name__)
 router = APIRouter()
 
 _CODE_RE = re.compile(r"[A-Za-z0-9]{1,64}")
+_MSG_JA_PAREADA = "a sessão já está em grupo ou pareada — desfaça esse par antes de parear com outra máquina"
+_REMOTE_LABEL = "resposta da outra máquina: "
+_MSG_PARCIAL = "pareamento desfeito aqui, mas a outra máquina pode continuar pareada: desfaça lá"
 
 
 def _my_owner() -> str:
@@ -76,11 +79,11 @@ def pair_page(code: str):
 
 
 class PairRedeemBody(BaseModel):
-    code: str
-    session: str
-    address: str
-    token: str
-    owner: str
+    code: str = Field(max_length=64)
+    session: str = Field(max_length=64)
+    address: str = Field(max_length=200)
+    token: str = Field(max_length=200)
+    owner: str = Field(max_length=40)
 
 
 @router.post("/api/pair/redeem")
@@ -97,43 +100,44 @@ async def pair_redeem(body: PairRedeemBody):
         my_host = await asyncio.to_thread(share_tunnel.host)
     except share_store.ShareError as e:
         raise _code_error(e)
-    except share_tunnel.TunnelError:
+    except share_tunnel.TunnelError as e:
+        _log.warning("par externo: túnel indisponível ao resgatar convite: %s", e)
         raise HTTPException(503, detail=erro("erro_sessao_indisponivel", "indisponível por instantes"))
     name = invite.session
     # Antes de gastar o código: sessão já agrupada recusa sem queimar o convite.
     if await asyncio.to_thread(lambda: pair.PairLink(name).get()) is not None:
-        raise HTTPException(409, detail=erro(
-            "erro_pareamento_mistura_cross",
-            "a sessão já está em grupo ou pareada — desfaça esse par antes de parear com outra máquina"))
+        raise HTTPException(409, detail=erro("erro_pareamento_mistura_cross", _MSG_JA_PAREADA))
     alias = external_pairs.free_alias(body.owner)
     peer = f"{alias}::{body.session}"
     harness = {s.name: s.provider for s in await asyncio.to_thread(api.registry.list)}
     # Junta antes de gastar o código: grupo recusado não queima o convite.
     try:
         _, snap = await asyncio.to_thread(pair.join_group, name, [peer], "", substituir_task=True, harness=harness)
-    except pair.PairMixError as e:
-        raise HTTPException(409, detail=erro("erro_pareamento_mistura_cross", str(e)))
-    except pair.TaskConflito as e:
-        raise HTTPException(409, detail=erro("erro_pareamento_tarefa_existente",
-                                             f"o grupo já tem tarefa: {e.existente!r}", existente=e.existente))
+    except (pair.PairMixError, pair.TaskConflito) as e:
+        _log.warning("par externo: grupo recusou o resgate de '%s': %s", name, e)
+        raise HTTPException(409, detail=erro("erro_pareamento_mistura_cross", _MSG_JA_PAREADA))
     try:
         share, token = await asyncio.to_thread(share_store.redeem, body.code, body.owner, None, None, "pair")
-    except share_store.ShareError as e:
-        await asyncio.to_thread(pair.restore, snap)
-        raise _code_error(e)
+    except Exception as e:  # noqa: BLE001 — o grupo já foi montado: sempre desfaz antes de responder
+        if snap is not None:
+            await _guarded_async("restaurar o grupo", pair.restore, snap)
+        if isinstance(e, share_store.ShareError):
+            raise _code_error(e)
+        _log.warning("par externo: resgate de '%s' falhou: %r", name, e)
+        raise HTTPException(500, detail=erro("erro_pareamento_desfeito", "pareamento desfeito",
+                                             avisos=""))
     try:
-        external_pairs.add(ExternalPair(share.id, name, alias, body.owner, body.session, address,
-                                        body.token, time.time()))
+        await asyncio.to_thread(external_pairs.add, ExternalPair(
+            share.id, name, alias, body.owner, body.session, address, body.token, time.time()))
         falha = await api._deliver(name, pair_texto.texto_par_externo(name, peer, body.owner))
     except Exception as e:  # noqa: BLE001 — código já gasto: desfaz tudo antes de propagar
+        _log.warning("par externo: resgate de '%s' desfeito: %r", name, e)
         await _undo_local(snap, share.id)
-        raise HTTPException(500, detail=erro("erro_pareamento_desfeito",
-                                             f"pareamento desfeito: {e}", avisos=str(e)))
+        raise HTTPException(500, detail=erro("erro_pareamento_desfeito", "pareamento desfeito", avisos=""))
     if falha:
+        _log.warning("par externo: aviso a '%s' falhou, resgate desfeito: %s", name, api._erro_texto(falha))
         await _undo_local(snap, share.id)
-        raise HTTPException(502, detail=erro("erro_pareamento_aviso_falhou",
-                                             f"pareamento desfeito: falha ao avisar '{name}': {api._erro_texto(falha)}",
-                                             nome=name, erro=falha))
+        raise HTTPException(502, detail=erro("erro_pareamento_desfeito", "pareamento desfeito", avisos=""))
     return {"session": name, "owner": _my_owner(), "address": f"https://{my_host}:{share_tunnel.FUNNEL_PORT}",
             "token": token}
 
@@ -142,15 +146,19 @@ def _guarded(what: str, fn, *args) -> None:
     # Cada passo do desfazer roda mesmo que o anterior falhe; senão sobra token vivo no disco.
     try:
         fn(*args)
-    except OSError as ex:
-        _log.warning("par externo: %s falhou ao desfazer: %s", what, ex)
+    except Exception as ex:  # noqa: BLE001
+        _log.warning("par externo: %s falhou ao desfazer: %r", what, ex)
+
+
+async def _guarded_async(what: str, fn, *args) -> None:
+    await asyncio.to_thread(_guarded, what, fn, *args)
 
 
 async def _undo_local(snap: dict | None, share_id: str) -> None:
     if snap is not None:
-        await asyncio.to_thread(_guarded, "restaurar o grupo", pair.restore, snap)
-    _guarded("revogar o convite", share_store.revoke, share_id)
-    _guarded("remover o registro", external_pairs.remove, share_id)
+        await _guarded_async("restaurar o grupo", pair.restore, snap)
+    await _guarded_async("revogar o convite", share_store.revoke, share_id)
+    await _guarded_async("remover o registro", external_pairs.remove, share_id)
 
 
 class PairAcceptBody(BaseModel):
@@ -167,14 +175,18 @@ def _refused(e: peers.PeerError) -> HTTPException:
         texto = d.get("msg") if isinstance(d.get("msg"), str) else str(d)
     else:
         texto = str(d) if d is not None else str(e)
-    return HTTPException(e.status, detail=erro("erro_par_recusado", texto[:300], detalhe=texto[:300]))
+    # Texto que o outro lado escreveu vai rotulado: a tela não deve tomá-lo por mensagem do app.
+    texto = _REMOTE_LABEL + texto[:300]
+    return HTTPException(e.status, detail=erro("erro_par_recusado", texto, detalhe=texto))
 
 
-async def _undo_remote(address: str, token: str) -> None:
+async def _undo_remote(address: str, token: str) -> bool:
     try:
         await asyncio.to_thread(external_pairs.call, address, token, "DELETE", "/api/pair")
     except (peers.PeerError, ValueError) as ex:
         _log.warning("par externo: outro lado não desfeito (%s): %s", address, ex)
+        return False
+    return True
 
 
 @router.post("/api/sessions/{name}/pair-accept", dependencies=[Depends(require_auth)])
@@ -189,9 +201,7 @@ async def pair_accept(name: str, body: PairAcceptBody):
         raise HTTPException(404, detail=erro("erro_sessao_inexistente", "sessão não encontrada"))
     # Antes de chamar o outro lado: recusar depois queimaria o código dele à toa.
     if await asyncio.to_thread(lambda: pair.PairLink(name).get()) is not None:
-        raise HTTPException(409, detail=erro(
-            "erro_pareamento_mistura_cross",
-            "a sessão já está em grupo ou pareada — desfaça esse par antes de parear com outra máquina"))
+        raise HTTPException(409, detail=erro("erro_pareamento_mistura_cross", _MSG_JA_PAREADA))
     if share_tunnel.port_clash():
         raise HTTPException(409, detail=erro("erro_compartilhar_porta_do_convite", "porta do convite",
                                              port=share_tunnel.GUEST_PORT))
@@ -206,25 +216,32 @@ async def pair_accept(name: str, body: PairAcceptBody):
                                           {"code": code, "session": name, "address": my_base,
                                            "token": my_token, "owner": _my_owner()})
     except peers.PeerError as e:
-        share_store.revoke(mine.id)
+        await _guarded_async("revogar o convite", share_store.revoke, mine.id)
         if e.status in (404, 410, 409, 400):
             raise _refused(e)
+        if e.transport:
+            # A chamada pode ter chegado e gravado o par lá; só a resposta se perdeu.
+            raise HTTPException(502, detail=erro("erro_par_incerto", "não deu para confirmar o pareamento"))
         raise _fora_do_ar(str(e), remoto=e.status is not None)
     resp = resp if isinstance(resp, dict) else {}
     owner, session, token = resp.get("owner", ""), resp.get("session", ""), resp.get("token", "")
     if not (isinstance(owner, str) and isinstance(session, str) and isinstance(token, str)
             and external_pairs.valid_owner(owner) and external_pairs.valid_session(session)
             and external_pairs.valid_token(token)):
-        share_store.revoke(mine.id)
+        await _guarded_async("revogar o convite", share_store.revoke, mine.id)
         # O outro lado já gravou o par com o nosso token: desfaz lá, se o token dele serve pra isso.
+        desfeito = True
         if isinstance(token, str) and token and token.isascii() and token.isprintable():
-            await _undo_remote(address, token)
+            desfeito = await _undo_remote(address, token)
+        if not desfeito:
+            raise HTTPException(502, detail=erro("erro_pareamento_desfeito_parcial", _MSG_PARCIAL))
         raise HTTPException(502, detail=erro("erro_par_resposta_invalida", "resposta do par inválida"))
     alias = external_pairs.free_alias(owner)
     peer = f"{alias}::{session}"
     snap = None
     try:
-        external_pairs.add(ExternalPair(mine.id, name, alias, owner, session, address, token, time.time()))
+        await asyncio.to_thread(external_pairs.add, ExternalPair(
+            mine.id, name, alias, owner, session, address, token, time.time()))
         harness = {s.name: s.provider for s in await asyncio.to_thread(api.registry.list)}
         _, snap = await asyncio.to_thread(pair.join_group, name, [peer], "", substituir_task=True, harness=harness)
         falha = await api._deliver(name, pair_texto.texto_par_externo(name, peer, owner))
@@ -232,10 +249,12 @@ async def pair_accept(name: str, body: PairAcceptBody):
             raise RuntimeError(api._erro_texto(falha))
     except Exception as e:  # noqa: BLE001 — qualquer falha aqui desfaz os dois lados
         if snap is not None:
-            await asyncio.to_thread(_guarded, "restaurar o grupo", pair.restore, snap)
-        _guarded("revogar o convite", share_store.revoke, mine.id)
-        await _undo_remote(address, token)
-        _guarded("remover o registro", external_pairs.remove, mine.id)
+            await _guarded_async("restaurar o grupo", pair.restore, snap)
+        await _guarded_async("revogar o convite", share_store.revoke, mine.id)
+        desfeito = await _undo_remote(address, token)
+        await _guarded_async("remover o registro", external_pairs.remove, mine.id)
+        if not desfeito:
+            raise HTTPException(502, detail=erro("erro_pareamento_desfeito_parcial", _MSG_PARCIAL))
         raise HTTPException(502, detail=erro("erro_pareamento_desfeito",
                                              f"pareamento desfeito: falha ao avisar as sessões ({e})",
                                              avisos=str(e)))
@@ -244,13 +263,16 @@ async def pair_accept(name: str, body: PairAcceptBody):
 
 async def teardown(rec: ExternalPair, notify: bool) -> None:
     from app import api
-    _guarded("remover o registro", external_pairs.remove, rec.share_id)
-    _guarded("revogar o convite", share_store.revoke, rec.share_id)
-    await asyncio.to_thread(_guarded, "sair do grupo", pair.leave, rec.local_session)
+    await _guarded_async("remover o registro", external_pairs.remove, rec.share_id)
+    await _guarded_async("revogar o convite", share_store.revoke, rec.share_id)
+    await _guarded_async("sair do grupo", pair.leave, rec.local_session)
     if notify:
-        await api._deliver(rec.local_session,
-                           f"[painel: par externo encerrado] '{rec.address}' saiu do pareamento. "
-                           "Volte a operar independente.")
+        falha = await api._deliver(rec.local_session,
+                                   f"[painel: par externo encerrado] '{rec.address}' saiu do pareamento. "
+                                   "Volte a operar independente.")
+        if falha:
+            _log.warning("par externo: aviso de encerramento a '%s' falhou: %s", rec.local_session,
+                         api._erro_texto(falha))
 
 
 def _pair_of(request: Request):
@@ -262,7 +284,7 @@ def _pair_of(request: Request):
 
 
 class PairMessageBody(BaseModel):
-    text: str
+    text: str = Field(max_length=64000)
 
 
 @router.post("/api/pair/message")
@@ -290,7 +312,7 @@ async def pair_leave(request: Request):
     if rec is not None:
         await teardown(rec, notify=True)
     else:
-        share_store.revoke(share.id)
+        await asyncio.to_thread(share_store.revoke, share.id)
     return {"ok": True}
 
 
@@ -311,9 +333,6 @@ class ExternalSendBody(BaseModel):
     sender: str
     target: str
     text: str
-
-
-_REMOTE_LABEL = "resposta da outra máquina: "
 
 
 def _fora_do_ar(texto: str, remoto: bool) -> HTTPException:
@@ -339,6 +358,9 @@ def _remote_failure(e: Exception) -> HTTPException:
     return _fora_do_ar(str(d) if d is not None else str(e), remoto=d is not None)
 
 
+_RESP_KEYS = ("ok", "delivered", "steered", "native", "queued")
+
+
 async def send_external(rec: ExternalPair, text: str) -> dict:
     try:
         _, resp = await asyncio.to_thread(external_pairs.call, rec.peer_address, rec.peer_token,
@@ -348,7 +370,9 @@ async def send_external(rec: ExternalPair, text: str) -> dict:
             await teardown(rec, notify=True)
             raise HTTPException(410, detail=erro("erro_par_encerrado", "o par foi encerrado do outro lado"))
         raise _remote_failure(e)
-    return resp if isinstance(resp, dict) else {}
+    # Só as chaves que o app conhece, com valor primitivo: o dict do outro lado nunca passa adiante.
+    resp = resp if isinstance(resp, dict) else {}
+    return {k: resp[k] for k in _RESP_KEYS if isinstance(resp.get(k), (bool, int, float))}
 
 
 @router.post("/api/external-pairs/send", dependencies=[Depends(require_auth)])
@@ -373,4 +397,7 @@ async def guest_attach(body: AttachBody, request: Request):
     if guest_of(request) is None:
         raise HTTPException(403, detail=erro("erro_fora_do_convite", "só convidado"))
     mine = request.scope.get(GUEST_TOKEN_KEY, "")
+    other = await asyncio.to_thread(share_store.lookup_token, body.token)
+    if other is None or not other.sessions():
+        raise HTTPException(409, detail=erro("erro_par_attach_invalido", "token a ligar inválido ou sem sessão viva"))
     return {"attached": await asyncio.to_thread(share_store.attach, mine, body.token)}

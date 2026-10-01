@@ -411,6 +411,27 @@ def call(server_id: str, method: str, path: str, body: dict | None = None, timeo
     return call_url(base, token, method, path, body, timeout, label=server_id, follow_redirects=True)
 
 
+_MAX_CORPO = 1 << 20
+
+
+def _ler_corpo(r, prazo: float, truncar: bool = False) -> bytes:
+    """Lê até 1 MiB dentro do prazo TOTAL: o timeout do socket só vale por leitura, e um servidor
+    que pinga um byte por vez seguraria a thread pra sempre."""
+    partes, total = [], 0
+    while True:
+        if time.monotonic() > prazo:
+            raise TimeoutError("prazo total da chamada estourou")
+        parte = r.read1(65536)
+        if not parte:
+            return b"".join(partes)
+        total += len(parte)
+        if total > _MAX_CORPO:
+            if truncar:
+                return b"".join(partes + [parte])[:_MAX_CORPO]
+            raise PeerError("resposta maior que 1 MiB", transport=True)
+        partes.append(parte)
+
+
 def call_url(base: str, token: str | None, method: str, path: str, body: dict | None = None,
              timeout: int = 8, label: str = "", follow_redirects: bool = False):
     """Chamada HTTP a um backend por endereço. Sem `token`, não manda Authorization. Endereço que
@@ -425,20 +446,24 @@ def call_url(base: str, token: str | None, method: str, path: str, body: dict | 
     if correlation := diag.req_atual.get():
         headers["X-Hangar-Req"] = correlation
     req = urllib.request.Request(base + path, data=data, method=method, headers=headers)
+    prazo = inicio + timeout * 2
     try:
         abrir = urllib.request.urlopen if follow_redirects else _opener_sem_redirect.open
         with abrir(req, timeout=timeout) as r:
             status = r.status
-            raw = r.read().decode()
+            raw = _ler_corpo(r, prazo).decode(errors="replace")
     except urllib.error.HTTPError as e:
         diag.registrar("peer.falhou", "erro", etapa=etapa, codigo=str(e.code),
                        detalhe="http_recusado", erro_tipo=type(e).__name__,
                        ms=int((time.monotonic() - inicio) * 1000))
         # Peer respondeu !2xx — rejeitou de forma limpa, NÃO comitou. transport=False.
-        raw = e.read().decode(errors="replace")
+        try:
+            raw = _ler_corpo(e, prazo, truncar=True).decode(errors="replace")
+        except (OSError, TimeoutError):
+            raw = ""
         try:
             detail = json.loads(raw).get("detail", raw)
-        except (json.JSONDecodeError, ValueError, AttributeError):
+        except (ValueError, RecursionError, AttributeError):
             detail = raw
         raise PeerError(f"{label} respondeu HTTP {e.code}: {detail}", transport=False, status=e.code,
                         detail=detail)
@@ -452,7 +477,7 @@ def call_url(base: str, token: str | None, method: str, path: str, body: dict | 
         raise PeerError(f"{label} inacessível: {e}", transport=True)
     try:
         resultado = json.loads(raw) if raw.strip() else None
-    except (json.JSONDecodeError, ValueError) as e:
+    except (ValueError, RecursionError, UnicodeError) as e:
         diag.registrar("peer.falhou", "erro", etapa=etapa, codigo=str(status),
                        detalhe="resposta_json_ilegivel", erro_tipo=type(e).__name__,
                        ms=int((time.monotonic() - inicio) * 1000))

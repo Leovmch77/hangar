@@ -6529,5 +6529,8 @@
   "native_par_aceitando": "Pairing…",
   "native_par_rotulo": "Pair · {dono}",
   "native_par_externo": "external",
-  "native_par_so_leitura": "Someone else's session, paired with yours: you follow along, and your session is the one that talks to it."
+  "native_par_so_leitura": "Someone else's session, paired with yours: you follow along, and your session is the one that talks to it.",
+  "erro_par_incerto": "Could not confirm whether the other machine paired. If it still shows the pair, undo it there.",
+  "erro_pareamento_desfeito_parcial": "The pairing was undone here, but the other machine could not be told: it may still show the pair. Undo it there.",
+  "erro_par_attach_invalido": "The token to attach is invalid or has no live session."
 }

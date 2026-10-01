@@ -115,7 +115,7 @@ def _avisar_par_externo(rec) -> None:
     try:
         external_pairs.call(rec.peer_address, rec.peer_token, "DELETE", "/api/pair")
     except (peers.PeerError, ValueError) as e:
-        _log.info("varredura de pares: outro lado de '%s' não avisado: %s", rec.address, e)
+        _log.warning("varredura de pares: outro lado de '%s' não avisado: %s", rec.address, e)
 
 
 def _decorate_loop(info) -> None:

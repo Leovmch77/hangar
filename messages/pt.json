@@ -6529,5 +6529,8 @@
   "native_par_aceitando": "Pareando…",
   "native_par_rotulo": "Par · {dono}",
   "native_par_externo": "externo",
-  "native_par_so_leitura": "Sessão de outra pessoa, pareada com a tua: você acompanha, e quem fala com ela é a tua sessão."
+  "native_par_so_leitura": "Sessão de outra pessoa, pareada com a tua: você acompanha, e quem fala com ela é a tua sessão.",
+  "erro_par_incerto": "Não deu para confirmar se a outra máquina pareou. Se ela continuar mostrando o par, desfaça lá.",
+  "erro_pareamento_desfeito_parcial": "O pareamento foi desfeito aqui, mas não deu para avisar a outra máquina: ela pode continuar mostrando o par. Desfaça lá.",
+  "erro_par_attach_invalido": "O token a ligar é inválido ou não tem sessão viva."
 }

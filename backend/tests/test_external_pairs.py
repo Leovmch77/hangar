@@ -129,6 +129,7 @@ class _Servidor:
 
     def __init__(self):
         self.vistos = []
+        self.corpo = None
         dono = self
 
         class H(http.server.BaseHTTPRequestHandler):
@@ -139,7 +140,7 @@ class _Servidor:
                     self.send_header("Location", f"http://127.0.0.1:{dono.porta}/alvo")
                     self.end_headers()
                     return
-                corpo = json.dumps({"ok": True}).encode()
+                corpo = dono.corpo if dono.corpo is not None else json.dumps({"ok": True}).encode()
                 self.send_response(200)
                 self.send_header("Content-Length", str(len(corpo)))
                 self.end_headers()
@@ -187,3 +188,55 @@ def test_recado_neutraliza_cabecalho_em_maiuscula():
                                    "\u2069", "\u00ad"])
 def test_recado_neutraliza_cabecalho_atras_de_marca_bidi(marca):
     assert external_pairs.sanitize_message(f"{marca}[de: a] x") == f"{marca}(de: a] x"
+
+
+@pytest.mark.parametrize("texto", [
+    "[ de: x]", "[\tde: y]", "[painel : x]", "\u061c[de: x]", "\u180e[de: x]", "\u2061[de: x]",
+    "\U000e0001[de: x]", "\uff3bde: x\uff3d", "\u3010de: x\u3011", "\u00a0\u3000[grupo: x]", "[x] qualquer"])
+def test_recado_neutraliza_burlas_unicode(texto):
+    t = external_pairs.sanitize_message(texto)
+    resto = t.lstrip("".join(c for c in t if external_pairs._invisible(c)))
+    assert resto[0] == "(", repr(t)
+
+
+def test_recado_mantem_colchete_no_meio_da_linha():
+    assert external_pairs.sanitize_message("veja [de: a] e \uff3bx\uff3d") == "veja [de: a] e [x]"
+
+
+def test_arquivo_corrompido_vai_para_o_lado_antes_de_comecar_vazio(tmp_path):
+    caminho = tmp_path / "external_pairs.json"
+    caminho.write_text("{nao e json")
+    external_pairs._reset()
+    external_pairs.add(_rec())
+    assert [p.read_text() for p in tmp_path.glob("external_pairs.json.bad-*")] == ["{nao e json"]
+    assert len(external_pairs.all()) == 1
+
+
+def test_add_desfaz_o_append_se_gravar_falhar(monkeypatch):
+    def save():
+        raise OSError("disco cheio")
+    monkeypatch.setattr(external_pairs, "_save", save)
+    with pytest.raises(OSError):
+        external_pairs.add(_rec())
+    assert external_pairs.all() == []
+
+
+def test_call_com_corpo_fora_de_utf8_nao_estoura(servidor):
+    servidor.corpo = b"\xff\xfe nao e utf-8"
+    with pytest.raises(peers.PeerError) as e:
+        external_pairs.call(servidor.base, None, "GET", "/x")
+    assert e.value.transport is True
+
+
+def test_call_com_json_fundo_demais_vira_peer_error(servidor):
+    servidor.corpo = b"[" * 200000
+    with pytest.raises(peers.PeerError) as e:
+        external_pairs.call(servidor.base, None, "GET", "/x")
+    assert e.value.transport is True
+
+
+def test_call_recusa_corpo_acima_de_1_mib(servidor):
+    servidor.corpo = b" " * (peers._MAX_CORPO + 10)
+    with pytest.raises(peers.PeerError) as e:
+        external_pairs.call(servidor.base, None, "GET", "/x")
+    assert e.value.transport is True and "1 MiB" in str(e.value)

@@ -124,9 +124,18 @@ def _load() -> dict[str, Share]:
                 _state = {}
             except (OSError, ValueError, TypeError, KeyError) as e:
                 # Arquivo ilegível vira "nenhum convite": perde acessos, mas não derruba o backend.
+                # Vai pro lado, senão o próximo _save o apagaria de vez.
                 _log.warning("[share] %s ilegivel, comecando vazio: %s", _path(), e)
+                _quarentena(_path())
                 _state = {}
         return _state
+
+
+def _quarentena(arq: Path) -> None:
+    try:
+        arq.rename(arq.with_name(f"{arq.name}.bad-{int(time.time())}"))
+    except OSError as e:
+        _log.warning("[share] nao consegui guardar %s ilegivel: %s", arq.name, e)
 
 
 def _save() -> None:

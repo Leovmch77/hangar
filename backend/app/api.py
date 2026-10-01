@@ -4658,9 +4658,11 @@ async def _avisar_saida(name: str, expeers: list[str]) -> list[dict]:
                                             "DELETE", "/api/pair")
                 except (peers.PeerError, ValueError) as ex:
                     if getattr(ex, "status", None) != 410:
-                        errs.append({"sessao": p, "erro": erro("erro_peer_nao_avisado", str(ex), peer=p)})
-            external_pair_api._guarded("remover o registro", external_pairs.remove, rec.share_id)
-            external_pair_api._guarded("revogar o convite", share_store.revoke, rec.share_id)
+                        # Texto do outro lado vai rotulado: a tela não deve tomá-lo por mensagem do app.
+                        texto = (external_pair_api._REMOTE_LABEL if getattr(ex, "status", None) else "") + str(ex)[:300]
+                        errs.append({"sessao": p, "erro": erro("erro_peer_nao_avisado", texto, peer=p)})
+            await external_pair_api._guarded_async("remover o registro", external_pairs.remove, rec.share_id)
+            await external_pair_api._guarded_async("revogar o convite", share_store.revoke, rec.share_id)
             continue
         if not settings.server_id:
             errs.append({"sessao": p,

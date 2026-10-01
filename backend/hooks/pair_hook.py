@@ -92,8 +92,16 @@ def main() -> None:
         with open(os.path.join(pair_dir, "external_pairs.json"), encoding="utf-8") as fh:
             externos = {f'{r["alias"]}::{r["peer_session"]}': r for r in json.load(fh)
                         if r.get("local_session") == nome}
-    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+    except FileNotFoundError:
         pass
+    except (OSError, ValueError, TypeError, KeyError, AttributeError) as e:
+        # Sem o registro não dá para saber quem é externo: na dúvida, par com "::" é de outra pessoa.
+        cego = next((p for p in peers if "::" in p), None)
+        if cego:
+            print(f"[hangar] external_pairs.json ilegível ({e!r}): par '{cego}' tratado como externo",
+                  file=sys.stderr)
+            externos = {cego: {"alias": cego.split("::", 1)[0], "peer_session": cego.split("::", 1)[1],
+                               "peer_owner": "desconhecido"}}
     par = next((externos[p] for p in peers if p in externos), None)
     if par is not None:
         texto = texto_par_externo(nome, f'{par["alias"]}::{par["peer_session"]}', par["peer_owner"])

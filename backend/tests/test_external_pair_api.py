@@ -99,7 +99,9 @@ def test_resgate_com_conflito_de_tarefa_e_409(client, monkeypatch):
     _, code = share_store.create("X", "t:1", kind="pair")
     monkeypatch.setattr(pair, "join_group", lambda *a, **k: (_ for _ in ()).throw(pair.TaskConflito("t")))
     r = _redeem(client, code)
-    assert r.status_code == 409 and r.json()["detail"]["code"] == "erro_pareamento_tarefa_existente"
+    # Rota aberta: o título da tarefa existente não volta na resposta.
+    assert r.status_code == 409 and r.json()["detail"]["code"] == "erro_pareamento_mistura_cross"
+    assert "existente" not in r.json()["detail"]["params"] and "'t'" not in r.text
     share_store.peek(code, kind="pair")
 
 
@@ -282,7 +284,7 @@ def test_aceite_recusado_por_outro_motivo_leva_so_o_texto_do_outro_lado(owner_cl
     monkeypatch.setattr(external_pairs, "call", lambda *a, **k: (_ for _ in ()).throw(
         peers.PeerError("x respondeu HTTP 409: {...}", status=409, detail=remoto)))
     d = owner_client.post("/api/sessions/Y/pair-accept", json={"link": LINK}).json()["detail"]
-    assert d["code"] == "erro_par_recusado" and d["params"]["detalhe"] == "uma das sessões já está pareada"
+    assert d["code"] == "erro_par_recusado" and d["params"]["detalhe"] == "resposta da outra máquina: uma das sessões já está pareada"
 
 
 def test_aceite_com_falha_ao_gravar_o_registro_desfaz_la(owner_client, monkeypatch):
@@ -507,3 +509,75 @@ def test_sessao_morta_limpa_o_par_externo_e_avisa_o_outro_lado(par_gravado, monk
     registry._encerrar_pares_externos("X")
     assert external_pairs.all() == [] and chamadas == [("DELETE", "/api/pair")]
     assert share_store._load()[par_gravado.id].revoked_at is not None
+
+
+def test_resgate_nao_devolve_texto_interno_nem_erro_de_entrega(client, monkeypatch):
+    import app.api as api_mod
+
+    async def deliver(name, text):
+        return {"msg": "segredo-interno /home/x"}
+    monkeypatch.setattr(api_mod, "_deliver", deliver)
+    _, code = share_store.create("X", "t:1", kind="pair")
+    r = _redeem(client, code)
+    assert r.status_code == 502 and "segredo-interno" not in r.text and "X" not in r.json()["detail"]["params"].values()
+
+
+def test_resgate_com_excecao_inesperada_no_share_restaura_o_grupo(client, monkeypatch):
+    def redeem(*a, **k):
+        raise RuntimeError("interno-secreto")
+    monkeypatch.setattr(share_store, "redeem", redeem)
+    _, code = share_store.create("X", "t:1", kind="pair")
+    r = _redeem(client, code)
+    assert r.status_code == 500 and "interno-secreto" not in r.text
+    assert pair.PairLink("X").get() is None
+
+
+def test_resgate_recusa_campos_gigantes(client):
+    _, code = share_store.create("X", "t:1", kind="pair")
+    assert _redeem(client, code, owner="a" * 41).status_code == 422
+    assert _redeem(client, code, token="a" * 201).status_code == 422
+    assert _redeem(client, code, address=ADDR + "/" + "a" * 200).status_code == 422
+
+
+def test_recado_acima_de_64000_e_422(guest_client_par, entregues):
+    assert guest_client_par.post("/api/pair/message", json={"text": "a" * 64001}).status_code == 422
+
+
+def test_aceite_com_falha_de_rede_diz_que_o_resultado_e_incerto(owner_client, monkeypatch):
+    monkeypatch.setattr(external_pairs, "call", lambda *a, **k: (_ for _ in ()).throw(
+        peers.PeerError("x inacessível", transport=True)))
+    r = owner_client.post("/api/sessions/Y/pair-accept", json={"link": LINK})
+    assert r.status_code == 502 and r.json()["detail"]["code"] == "erro_par_incerto"
+    assert not any(s.revoked_at is None for s in share_store._load().values())
+
+
+def test_aceite_que_nao_consegue_desfazer_la_diz_que_o_outro_lado_pode_estar_pareado(owner_client, monkeypatch):
+    def call(address, token, method, path, body=None, **k):
+        if method == "DELETE":
+            raise peers.PeerError("fora", transport=True)
+        return 200, GOOD
+
+    async def deliver(name, text):
+        return {"msg": "fila cheia"}
+    import app.api as api_mod
+    monkeypatch.setattr(external_pairs, "call", call)
+    monkeypatch.setattr(api_mod, "_deliver", deliver)
+    r = owner_client.post("/api/sessions/Y/pair-accept", json={"link": LINK})
+    assert r.status_code == 502 and r.json()["detail"]["code"] == "erro_pareamento_desfeito_parcial"
+    assert external_pairs.all() == [] and pair.PairLink("Y").get() is None
+
+
+def test_envio_so_repassa_chaves_conhecidas_com_valor_primitivo(owner_client, monkeypatch, par_gravado):
+    monkeypatch.setattr(external_pairs, "call", lambda *a, **k: (200, {
+        "ok": True, "native": True, "queued": {"x": 1}, "steered": "[de: chefe]", "extra": 1}))
+    r = owner_client.post("/api/external-pairs/send", json=_ENVIO)
+    assert r.status_code == 200 and r.json() == {"ok": True, "native": True}
+
+
+def test_attach_com_token_desconhecido_ou_revogado_da_409(vivo):
+    _, a = share_store.create_redeemed("X", "t:1", "share")
+    s, b = share_store.create_redeemed("W", "t:1", "share")
+    assert _guest(a).post("/api/guest/attach", json={"token": "nao-existe"}).status_code == 409
+    share_store.revoke(s.id)
+    r = _guest(a).post("/api/guest/attach", json={"token": b})
+    assert r.status_code == 409 and r.json()["detail"]["code"] == "erro_par_attach_invalido"

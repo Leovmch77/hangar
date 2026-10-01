@@ -110,6 +110,9 @@ def test_arquivo_corrompido_nao_derruba(tmp_path):
     (tmp_path / "shares.json").write_text("{nao e json")
     share_store._reset()
     assert share_store.has_active() is False
+    # Vai pro lado, senão o próximo save o apagaria.
+    share_store.create("a", "t:1")
+    assert [p.read_text() for p in tmp_path.glob("shares.json.bad-*")] == ["{nao e json"]
 
 
 def test_set_life():
