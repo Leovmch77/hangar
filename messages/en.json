@@ -6447,6 +6447,7 @@
   "home_usage_all": "All",
   "home_usage_30d": "30d",
   "home_usage_7d": "7d",
+  "home_usage_1d": "Today",
   "home_usage_sessions": "Sessions",
   "home_usage_tokens": "Total tokens",
   "home_usage_cost": "Estimated cost",

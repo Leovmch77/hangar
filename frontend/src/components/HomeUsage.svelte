@@ -9,11 +9,12 @@
   // linha com o total, para o compositor continuar visível com o teclado aberto.
   let { server }: { server: Server } = $props();
 
-  type Period = 'all' | '30d' | '7d';
+  type Period = 'all' | '30d' | '7d' | '1d';
   const PERIODS: { key: Period; label: () => string }[] = [
     { key: 'all', label: m.home_usage_all },
     { key: '30d', label: m.home_usage_30d },
     { key: '7d', label: m.home_usage_7d },
+    { key: '1d', label: m.home_usage_1d },
   ];
   const WARM_MS = 3000;
   const WARM_TRIES = 100;

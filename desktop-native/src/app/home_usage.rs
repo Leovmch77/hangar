@@ -17,11 +17,11 @@ pub(super) struct HomeUsage {
 }
 
 #[derive(Clone, Copy, Default, PartialEq)]
-enum Period { #[default] All, Month, Week }
+enum Period { #[default] All, Month, Week, Day }
 
 impl Period {
-    fn key(self) -> &'static str { match self { Self::All => "all", Self::Month => "30d", Self::Week => "7d" } }
-    fn label(self) -> String { web(match self { Self::All => "home_usage_all", Self::Month => "home_usage_30d", Self::Week => "home_usage_7d" }) }
+    fn key(self) -> &'static str { match self { Self::All => "all", Self::Month => "30d", Self::Week => "7d", Self::Day => "1d" } }
+    fn label(self) -> String { web(match self { Self::All => "home_usage_all", Self::Month => "home_usage_30d", Self::Week => "home_usage_7d", Self::Day => "home_usage_1d" }) }
 }
 
 struct Summary {
@@ -125,7 +125,7 @@ impl Hangar {
                 Button::new(key).ghost().small().selected(state.models == models).label(web(key))
                     .on_click(cx.listener(move |this, _, _, cx| { this.home_usage.models = models; cx.notify(); }))
             })))
-            .child(div().flex().gap_1().children([Period::All, Period::Month, Period::Week].map(|period| {
+            .child(div().flex().gap_1().children([Period::All, Period::Month, Period::Week, Period::Day].map(|period| {
                 Button::new(SharedString::from(format!("home-usage-{}", period.key()))).ghost().small()
                     .selected(state.period == period).label(period.label())
                     .on_click(cx.listener(move |this, _, _, cx| {
