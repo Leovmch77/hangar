@@ -134,8 +134,13 @@ def ligado() -> bool:
 
 
 def raizes_dos_plugins(config_dir: Path | None = None) -> list[str]:
-    """`--plugin-dir` só quando o plugin não está na pasta de skills da conta: lá ele já carrega."""
-    if not ligado() or plugin_in_skills_dir(config_dir):
+    """`--plugin-dir` só quando o plugin não está na pasta de skills da conta: lá ele já carrega.
+
+    A pasta de skills só foi medida carregando plugin no CLI com mods por padrão; no anterior,
+    `--plugin-dir` continua sendo o único caminho."""
+    if not ligado():
+        return []
+    if plugin_in_skills_dir(config_dir) and mods_by_default():
         return []
     return [str(PLUGIN_SRC)]
 

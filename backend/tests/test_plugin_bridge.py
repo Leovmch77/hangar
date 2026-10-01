@@ -131,6 +131,7 @@ def test_versao_do_cli_diz_se_os_mods_vem_ligados(monkeypatch):
 
 def test_plugin_na_pasta_de_skills_da_conta_dispensa_o_plugin_dir(monkeypatch, tmp_path):
     monkeypatch.setattr(pb, "ligado", lambda: True)
+    monkeypatch.setattr(pb, "mods_by_default", lambda: True)
     assert pb.raizes_dos_plugins(tmp_path) == [str(pb.PLUGIN_SRC)]
     manifesto = tmp_path / "skills" / "hangar" / ".claude-plugin" / "plugin.json"
     manifesto.parent.mkdir(parents=True)
@@ -138,6 +139,16 @@ def test_plugin_na_pasta_de_skills_da_conta_dispensa_o_plugin_dir(monkeypatch, t
     assert pb.raizes_dos_plugins(tmp_path) == [str(pb.PLUGIN_SRC)]
     manifesto.write_text('{"name": "hangar"}', encoding="utf-8")
     assert pb.raizes_dos_plugins(tmp_path) == []
+
+
+def test_cli_sem_mods_por_padrao_mantem_o_plugin_dir_mesmo_com_o_plugin_nas_skills(monkeypatch, tmp_path):
+    # A pasta de skills só foi medida carregando o plugin no CLI com mods por padrão.
+    monkeypatch.setattr(pb, "ligado", lambda: True)
+    monkeypatch.setattr(pb, "mods_by_default", lambda: False)
+    manifesto = tmp_path / "skills" / "hangar" / ".claude-plugin" / "plugin.json"
+    manifesto.parent.mkdir(parents=True)
+    manifesto.write_text('{"name": "hangar"}', encoding="utf-8")
+    assert pb.raizes_dos_plugins(tmp_path) == [str(pb.PLUGIN_SRC)]
 
 
 def test_interruptor_desligado_tira_o_plugin_mesmo_com_mods_por_padrao(monkeypatch):

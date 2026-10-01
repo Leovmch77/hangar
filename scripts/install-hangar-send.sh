@@ -73,23 +73,29 @@ done
 
 # Plugin do Hangar (mods do Claude Code): pasta com .claude-plugin/plugin.json na pasta de skills
 # carrega em toda sessão. No Git Bash do Windows o `ln -s` copia e devolve 0; a junção acompanha o
-# git pull, a cópia não.
+# git pull, a cópia não. O MSYS mostra a junção como link (`-L`).
+plugin_src="$REPO/plugins/hangar"
 plugin_dst="$HOME/.claude/skills/hangar"
-if [ -d "$plugin_dst" ] && [ ! -L "$plugin_dst" ]; then
-    rm -rf "$plugin_dst"
+case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) msys=1 ;; *) msys= ;; esac
+if [ -L "$plugin_dst" ] && [ "$(realpath "$plugin_dst")" = "$(realpath "$plugin_src")" ]; then
+    echo "ok: ~/.claude/skills/hangar -> $plugin_src (plugin, ja linkado)"
+else
+    if [ -L "$plugin_dst" ]; then
+        # Só o link sai: `rm -rf` atravessaria a junção e apagaria o destino dela.
+        if [ -n "$msys" ]; then cmd //c rmdir "$(cygpath -w "$plugin_dst")"; else rm -f "$plugin_dst"; fi
+    elif [ -e "$plugin_dst" ]; then
+        rm -rf "$plugin_dst"
+    fi
+    if [ -z "$msys" ]; then
+        ln -sn "$plugin_src" "$plugin_dst"
+        echo "ok: ~/.claude/skills/hangar -> $plugin_src (plugin)"
+    elif cmd //c mklink /J "$(cygpath -w "$plugin_dst")" "$(cygpath -w "$plugin_src")" >/dev/null 2>&1; then
+        echo "ok: ~/.claude/skills/hangar -> $plugin_src (plugin, juncao)"
+    else
+        cp -r "$plugin_src" "$plugin_dst"
+        echo "ok: ~/.claude/skills/hangar (COPIA do plugin — re-rode apos git pull)"
+    fi
 fi
-case "$(uname -s)" in
-    MINGW*|MSYS*|CYGWIN*)
-        if cmd //c mklink /J "$(cygpath -w "$plugin_dst")" "$(cygpath -w "$REPO/plugins/hangar")" >/dev/null 2>&1; then
-            echo "ok: ~/.claude/skills/hangar -> $REPO/plugins/hangar (plugin, juncao)"
-        else
-            cp -r "$REPO/plugins/hangar" "$plugin_dst"
-            echo "ok: ~/.claude/skills/hangar (COPIA do plugin — re-rode apos git pull)"
-        fi ;;
-    *)
-        ln -sfn "$REPO/plugins/hangar" "$plugin_dst"
-        echo "ok: ~/.claude/skills/hangar -> $REPO/plugins/hangar (plugin)" ;;
-esac
 
 # Agentes das skills (ex.: preparar-plano da orquestrar): link no Claude, .toml em cada home do Codex.
 python3 "$REPO/scripts/instalar-agentes.py"
