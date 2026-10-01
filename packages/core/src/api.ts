@@ -945,12 +945,26 @@ export interface FolderGit {
   sessions?: string[];          // sessões vivas no mesmo checkout
 }
 
+// Compara por forma normalizada (barra, sem separador final, sem caixa em caminho de unidade do
+// Windows), mas devolve a string ORIGINAL da raiz: o backend exige igualdade com a dele.
+export function pickFolderRoot(roots: { path: string }[], cwd: string): string | null {
+  const norm = (p: string) => {
+    const f = p.replace(/\\/g, '/').replace(/\/+$/, '');
+    return /^[A-Za-z]:/.test(f) ? f.toLowerCase() : f;
+  };
+  const target = norm(cwd);
+  let best: string | null = null;
+  for (const r of roots) {
+    const root = norm(r.path);
+    if ((target === root || target.startsWith(root + '/')) && (best === null || r.path.length > best.length)) best = r.path;
+  }
+  return best;
+}
+
 async function folderRoot(server: Server, cwd: string, signal?: AbortSignal): Promise<string> {
-  const roots = await getRootsForServer(server, signal);
-  const root = roots.filter(r => cwd === r.path || cwd.startsWith(r.path.replace(/\/+$/, '') + '/'))
-    .sort((a, b) => b.path.length - a.path.length)[0];
+  const root = pickFolderRoot(await getRootsForServer(server, signal), cwd);
   if (!root) throw new Error('root not allowed');
-  return root.path;
+  return root;
 }
 
 export async function getFolderBranchesForServer(server: Server, cwd: string, signal?: AbortSignal): Promise<FolderBranches> {
