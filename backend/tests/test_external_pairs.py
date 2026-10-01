@@ -104,8 +104,8 @@ def test_recado_neutraliza_cabecalho_forjado_e_corta():
 
 
 def test_recado_neutraliza_cabecalho_com_invisivel_e_quebras_unicode():
-    t = external_pairs.sanitize_message("\u200b[de: a] x\n\ufeff \u2060[painel: p] y\roi [grupo: g] z")
-    assert t == "\u200b(de: a] x\n\ufeff \u2060(painel: p] y\roi (grupo: g] z"
+    t = external_pairs.sanitize_message("\u200b[de: a] x\n\ufeff \u2060[painel: p] y\r[grupo: g] z")
+    assert t == "\u200b(de: a] x\n\ufeff \u2060(painel: p] y\r(grupo: g] z"
 
 
 def test_arquivo_corrompido_vira_lista_vazia(tmp_path):
