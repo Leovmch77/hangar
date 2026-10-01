@@ -11,6 +11,7 @@ com marcador (ver `has_placeholder`).
 import json
 import os
 import re
+import shutil
 import signal
 import subprocess
 import tempfile
@@ -395,7 +396,9 @@ def _kill_tree(proc: subprocess.Popen) -> None:
     # Matar só o shell deixaria os filhos dele rodando sem dono.
     try:
         if os.name == "nt":
-            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True)
+            taskkill = shutil.which("taskkill")
+            if taskkill:
+                subprocess.run([taskkill, "/F", "/T", "/PID", str(proc.pid)], capture_output=True)
             proc.kill()
         else:
             os.killpg(proc.pid, signal.SIGKILL)
