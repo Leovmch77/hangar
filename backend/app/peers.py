@@ -44,10 +44,12 @@ class PeerError(Exception):
     e sido processada no peer, só a resposta se perdeu; o estado remoto fica INCERTO (o caller
     compensa). transport=False: o peer respondeu !2xx (rejeitou limpo, não comitou)."""
 
-    def __init__(self, msg: str, transport: bool = False, status: int | None = None):
+    def __init__(self, msg: str, transport: bool = False, status: int | None = None, detail=None):
         super().__init__(msg)
         self.transport = transport
         self.status = status
+        # `detail` do corpo da resposta (dict do envelope ou string), sem o prefixo da mensagem.
+        self.detail = detail
 
 
 def is_remote(name: str) -> bool:
@@ -438,7 +440,8 @@ def call_url(base: str, token: str | None, method: str, path: str, body: dict | 
             detail = json.loads(raw).get("detail", raw)
         except (json.JSONDecodeError, ValueError, AttributeError):
             detail = raw
-        raise PeerError(f"{label} respondeu HTTP {e.code}: {detail}", transport=False, status=e.code)
+        raise PeerError(f"{label} respondeu HTTP {e.code}: {detail}", transport=False, status=e.code,
+                        detail=detail)
     except (urllib.error.URLError, http.client.IncompleteRead, OSError, TimeoutError) as e:
         causa = e.reason if isinstance(e, urllib.error.URLError) and isinstance(e.reason, BaseException) else e
         diag.registrar("peer.falhou", "erro", etapa=etapa, detalhe="transporte_resultado_incerto",

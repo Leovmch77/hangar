@@ -115,13 +115,16 @@ async def pair_redeem(body: PairRedeemBody):
     except share_store.ShareError as e:
         await asyncio.to_thread(pair.restore, snap)
         raise _code_error(e)
-    external_pairs.add(ExternalPair(share.id, name, alias, body.owner, body.session, address,
-                                    body.token, time.time()))
-    falha = await api._deliver(name, pair_texto.texto_par_externo(name, peer, body.owner))
+    try:
+        external_pairs.add(ExternalPair(share.id, name, alias, body.owner, body.session, address,
+                                        body.token, time.time()))
+        falha = await api._deliver(name, pair_texto.texto_par_externo(name, peer, body.owner))
+    except Exception as e:  # noqa: BLE001 — código já gasto: desfaz tudo antes de propagar
+        await _undo_local(snap, share.id)
+        raise HTTPException(500, detail=erro("erro_pareamento_desfeito",
+                                             f"pareamento desfeito: {e}", avisos=str(e)))
     if falha:
-        await asyncio.to_thread(pair.restore, snap)
-        external_pairs.remove(share.id)
-        share_store.revoke(share.id)
+        await _undo_local(snap, share.id)
         raise HTTPException(502, detail=erro("erro_pareamento_aviso_falhou",
                                              f"pareamento desfeito: falha ao avisar '{name}': {api._erro_texto(falha)}",
                                              nome=name, erro=falha))
@@ -129,8 +132,30 @@ async def pair_redeem(body: PairRedeemBody):
             "token": token}
 
 
+async def _undo_local(snap: dict, share_id: str) -> None:
+    await asyncio.to_thread(pair.restore, snap)
+    share_store.revoke(share_id)
+    try:
+        external_pairs.remove(share_id)
+    except OSError as ex:
+        _log.warning("par externo: registro %s não removido: %s", share_id, ex)
+
+
 class PairAcceptBody(BaseModel):
     link: str
+
+
+def _refused(e: peers.PeerError) -> HTTPException:
+    """O outro lado respondeu com o envelope de erro dele: convite usado/vencido vira a frase própria."""
+    d = e.detail
+    if isinstance(d, dict):
+        for reason, (code, msg) in _REASONS.items():
+            if d.get("code") == code:
+                return HTTPException(e.status, detail=erro(code, msg, reason=reason))
+        texto = d.get("msg") if isinstance(d.get("msg"), str) else str(d)
+    else:
+        texto = str(d) if d is not None else str(e)
+    return HTTPException(e.status, detail=erro("erro_par_recusado", texto[:300], detalhe=texto[:300]))
 
 
 async def _undo_remote(address: str, token: str) -> None:
@@ -171,7 +196,7 @@ async def pair_accept(name: str, body: PairAcceptBody):
     except peers.PeerError as e:
         share_store.revoke(mine.id)
         if e.status in (404, 410, 409, 400):
-            raise HTTPException(e.status, detail=erro("erro_par_recusado", str(e), detalhe=str(e)))
+            raise _refused(e)
         raise HTTPException(502, detail=erro("erro_par_fora_do_ar", str(e)))
     resp = resp if isinstance(resp, dict) else {}
     owner, session, token = resp.get("owner", ""), resp.get("session", ""), resp.get("token", "")
@@ -185,10 +210,10 @@ async def pair_accept(name: str, body: PairAcceptBody):
         raise HTTPException(502, detail=erro("erro_par_resposta_invalida", "resposta do par inválida"))
     alias = external_pairs.free_alias(owner)
     peer = f"{alias}::{session}"
-    external_pairs.add(ExternalPair(mine.id, name, alias, owner, session, address, token, time.time()))
-    harness = {s.name: s.provider for s in await asyncio.to_thread(api.registry.list)}
     snap = None
     try:
+        external_pairs.add(ExternalPair(mine.id, name, alias, owner, session, address, token, time.time()))
+        harness = {s.name: s.provider for s in await asyncio.to_thread(api.registry.list)}
         _, snap = await asyncio.to_thread(pair.join_group, name, [peer], "", substituir_task=True, harness=harness)
         falha = await api._deliver(name, pair_texto.texto_par_externo(name, peer, owner))
         if falha:

@@ -193,3 +193,46 @@ def test_aceite_com_aviso_que_falha_restaura_o_grupo_e_desfaz_la(owner_client, m
     assert owner_client.post("/api/sessions/Y/pair-accept", json={"link": LINK}).status_code == 502
     assert ("DELETE", "/api/pair") in chamadas
     assert external_pairs.all() == [] and pair.PairLink("Y").get() is None
+
+
+def test_resgate_com_falha_ao_gravar_o_registro_desfaz_tudo(client, entregues, monkeypatch):
+    def add(rec):
+        raise OSError("disco cheio")
+    monkeypatch.setattr(external_pairs, "add", add)
+    _, code = share_store.create("X", "t:1", kind="pair")
+    assert _redeem(client, code).status_code == 500
+    assert pair.PairLink("X").get() is None and entregues == []
+    assert not any(s.redeemed_at and s.revoked_at is None for s in share_store._load().values())
+
+
+def test_aceite_com_convite_usado_mostra_a_frase_do_convite(owner_client, monkeypatch):
+    remoto = {"code": "erro_convite_usado", "params": {"reason": "used"}, "msg": "este convite já foi usado"}
+    monkeypatch.setattr(external_pairs, "call", lambda *a, **k: (_ for _ in ()).throw(
+        peers.PeerError(f"x respondeu HTTP 410: {remoto}", status=410, detail=remoto)))
+    r = owner_client.post("/api/sessions/Y/pair-accept", json={"link": LINK})
+    assert r.status_code == 410
+    assert r.json()["detail"]["code"] == "erro_convite_usado"
+
+
+def test_aceite_recusado_por_outro_motivo_leva_so_o_texto_do_outro_lado(owner_client, monkeypatch):
+    remoto = {"code": "erro_x", "params": {}, "msg": "uma das sessões já está pareada"}
+    monkeypatch.setattr(external_pairs, "call", lambda *a, **k: (_ for _ in ()).throw(
+        peers.PeerError("x respondeu HTTP 409: {...}", status=409, detail=remoto)))
+    d = owner_client.post("/api/sessions/Y/pair-accept", json={"link": LINK}).json()["detail"]
+    assert d["code"] == "erro_par_recusado" and d["params"]["detalhe"] == "uma das sessões já está pareada"
+
+
+def test_aceite_com_falha_ao_gravar_o_registro_desfaz_la(owner_client, monkeypatch):
+    chamadas = []
+
+    def call(address, token, method, path, body=None, **k):
+        chamadas.append((method, path))
+        return 200, GOOD
+
+    def add(rec):
+        raise OSError("disco cheio")
+    monkeypatch.setattr(external_pairs, "call", call)
+    monkeypatch.setattr(external_pairs, "add", add)
+    assert owner_client.post("/api/sessions/Y/pair-accept", json={"link": LINK}).status_code == 502
+    assert ("DELETE", "/api/pair") in chamadas
+    assert not any(s.revoked_at is None for s in share_store._load().values())
