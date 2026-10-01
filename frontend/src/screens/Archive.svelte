@@ -5,7 +5,7 @@ import { intlLocale } from '../lib/locale';
   import Select from '../components/Select.svelte';
   import * as m from '../paraglide/messages';
   import {
-    getArchiveFolder, getArchiveHistory, archiveImageUrl, resumeArchivedConversation,
+    getArchiveFolder, getArchiveHistory, archiveImageUrl, resumeArchivedConversation, sendInputForServer,
     getEngines, type ArchiveFolder, type ArchiveEntry, type Motor,
   } from '@hangar/core';
   import { arquivo, clienteQuery } from '../lib/queries';
@@ -34,6 +34,8 @@ import { intlLocale } from '../lib/locale';
   let loadingChat = $state(false);
   let resuming = $state(false);
   let resumeError = $state('');
+  let draft = $state('');
+  let showEngine = $state(false);
   // Motor pro resume (Task 5, item 1 do review): o pane original morreu, entao o app NAO sabe qual
   // motor rodava a conversa -- so o nome do modelo fica no transcript, nao qual dos motores do
   // usuario o produziu. '' = conta Anthropic (default de hoje). Falha ao listar -> sem seletor,
@@ -117,6 +119,8 @@ import { intlLocale } from '../lib/locale';
     loadingChat = true;
     events = [];
     resumeError = '';
+    draft = '';
+    showEngine = false;
     engine = '';
     motores = {};
     const seq = ++motorSeq;
@@ -137,30 +141,46 @@ import { intlLocale } from '../lib/locale';
     }
   }
 
-  // "Retomar conversa": sobe uma sessao tmux nova (claude --resume <uuid>) no cwd original e navega
-  // pro chat dela. Serverid do deep-link (se veio da busca) e reaplicado ANTES de trocar de tela, pra
-  // o chat abrir no servidor DONO da conversa (mesma convencao de openCompareSession no App.svelte).
-  async function resumeConversation() {
-    if (!selected) return;
+  // Enviar numa conversa fechada = retomar (claude --resume na conta dela) e entregar o texto na
+  // sessao nova. O servidor do deep-link e reaplicado ANTES de trocar de tela, pro chat abrir no
+  // servidor DONO da conversa.
+  async function sendAndResume() {
+    const text = draft.trim();
+    if (!selected || !text || resuming) return;
     const entry = selected, server = servers.find((s) => s.id === activeServerId);
+    if (!server) return;
     resuming = true;
     resumeError = '';
+    let name = '';
     try {
-      // A conta vai junto: `claude --resume` na conta errada morre com "No conversation found".
       const info = await resumeArchivedConversation(entry.project, entry.session_id,
                                                     engine || null, entry.config_dir,
                                                     entry.provider, entry.codex_account, server);
-      if (selected !== entry || activeServerId !== server?.id) return;
-      if (deepLink) selectServer(deepLink.serverId);
-      // Rota server-aware (#/chat/<server>/<nome>): homônimas em servidores diferentes.
-      const sid = server?.id;
-      window.location.hash = '#/chat/' + (sid ? encodeURIComponent(sid) + '/' : '') + encodeURIComponent(info.name);
+      name = info.name;
+      await sendInputForServer(server, name, text);
+      draft = '';
     } catch (e) {
-      if (selected !== entry || activeServerId !== server?.id) return;
-      resumeError = e instanceof Error ? e.message : m.arquivo_retomar_erro();
+      if (!name) {
+        if (selected !== entry || activeServerId !== server.id) return;
+        resumeError = e instanceof Error ? e.message : m.arquivo_retomar_erro();
+        return;
+      }
+      // A sessao ja existe: o texto volta ao campo do chat dela pelo rascunho que o Chat ja restaura.
+      try { localStorage.setItem(`cp-draft:${name}`, JSON.stringify({ text, jsonl: null })); } catch { /* sem storage */ }
     } finally {
       resuming = false;
     }
+    if (!name) return;
+    if (deepLink) selectServer(deepLink.serverId);
+    window.location.hash = `#/chat/${encodeURIComponent(server.id)}/${encodeURIComponent(name)}`;
+  }
+
+  // Conversa aberta por link (lista de Conversas/busca): "voltar" retorna a quem chamou; so cai nas
+  // pastas quando nao ha historico dentro do app.
+  function backFromConversation() {
+    if (deepLink && ((history.state?.cpDepth as number | undefined) ?? 0) >= 2) history.back();
+    else if (deepLink) onBack();
+    else selected = null;
   }
 
   // Nome curto da pasta (ultimo segmento do cwd real; fallback: nome sanitizado do projeto).
@@ -182,28 +202,7 @@ import { intlLocale } from '../lib/locale';
   <div class="archive-screen" style="--nav-h: 0px">
     <!-- `preview` (1a msg) só existe no Claude; fora dele o titulo cairia no slice do id e virava
          "session_" pra TODA conversa do Kimi. A ultima msg identifica melhor de qualquer forma. -->
-    <NavBar title={sel.preview || sel.ultima || sel.session_id.slice(0, 8)} showBack={true} onBack={() => (selected = null)} />
-    <div class="resume-bar">
-      <!-- Motor é do Claude: mandá-lo num resume de Pi/Kimi faria o hangar-engine exportar chave de
-           outro provedor pra um CLI que nem lê essas variáveis. -->
-      {#if sel.provider === 'claude' && Object.keys(motores).length}
-        <label class="engine-pick">
-          <span class="engine-pick-label">{m.comum_motor()}</span>
-          <Select ariaLabel={m.comum_motor()} value={engine}
-            opcoes={[{ value: '', label: m.criar_claude_sua_conta() },
-                     ...Object.entries(motores).map(([nome, motor]) => ({
-                       value: nome, label: motor.label ?? nome, hint: motor.model }))]}
-            onchange={(v) => (engine = v)} />
-        </label>
-        <!-- O app nao sabe qual motor rodava esta conversa (o pane original morreu, sem /proc pra
-             ler) -- so o nome do modelo fica gravado no transcript. Escolha e sua, nao memoria. -->
-        <p class="engine-pick-hint">{m.arquivo_motor_escolha()}</p>
-      {/if}
-      <button class="resume-btn" onclick={resumeConversation} disabled={resuming}>
-        {resuming ? m.arquivo_retomando() : m.sessao_retomar()}
-      </button>
-      {#if resumeError}<p class="resume-err">{resumeError}</p>{/if}
-    </div>
+    <NavBar title={sel.preview || sel.ultima || sel.session_id.slice(0, 8)} showBack={true} onBack={backFromConversation} />
     {#if loadingChat}
       <p class="muted">{m.arquivo_carregando()}</p>
     {:else}
@@ -219,6 +218,40 @@ import { intlLocale } from '../lib/locale';
         focoId={deepLink?.sessionId === sel.session_id ? (deepLink.eventId ?? null) : null}
       />
     {/if}
+    <div class="resume-bar">
+      <!-- Motor é do Claude: mandá-lo num resume de Pi/Kimi faria o hangar-engine exportar chave de
+           outro provedor pra um CLI que nem lê essas variáveis. -->
+      {#if sel.provider === 'claude' && Object.keys(motores).length}
+        {#if showEngine}
+          <label class="engine-pick">
+            <span class="engine-pick-label">{m.comum_motor()}</span>
+            <Select ariaLabel={m.comum_motor()} value={engine}
+              opcoes={[{ value: '', label: m.criar_claude_sua_conta() },
+                       ...Object.entries(motores).map(([nome, motor]) => ({
+                         value: nome, label: motor.label ?? nome, hint: motor.model }))]}
+              onchange={(v) => (engine = v)} />
+          </label>
+          <!-- O app nao sabe qual motor rodava esta conversa (o pane original morreu, sem /proc pra
+               ler) -- so o nome do modelo fica gravado no transcript. Escolha e sua, nao memoria. -->
+          <p class="engine-pick-hint">{m.arquivo_motor_escolha()}</p>
+        {/if}
+        <button class="engine-opt" type="button" aria-expanded={showEngine}
+          onclick={() => (showEngine = !showEngine)}>
+          {m.comum_motor()}: {engine ? (motores[engine]?.label ?? engine) : m.criar_claude_sua_conta()}
+        </button>
+      {/if}
+      {#if resumeError}<p class="resume-err">{resumeError}</p>{/if}
+      <div class="composer-row">
+        <textarea class="composer-input" rows="1" bind:value={draft} disabled={resuming}
+          placeholder={m.conversa_continuar_placeholder()}
+          aria-label={m.conversa_continuar_placeholder()}></textarea>
+        <button class="send-btn" type="button" onclick={sendAndResume}
+          disabled={resuming || !draft.trim()}
+          aria-label={resuming ? m.arquivo_retomando() : m.composer_enviar_mensagem()}>
+          {resuming ? '…' : '↑'}
+        </button>
+      </div>
+    </div>
   </div>
 {:else if folder}
   {@const f = folder}
@@ -405,23 +438,41 @@ import { intlLocale } from '../lib/locale';
   .chev { color: var(--text-muted); flex-shrink: 0; }
 
   .resume-bar {
-    padding: var(--space-3) var(--space-4) 0;
+    padding: var(--space-3) var(--space-4) calc(var(--space-3) + env(safe-area-inset-bottom));
     max-width: 700px;
     width: 100%;
     margin: 0 auto;
   }
-  .resume-btn {
-    width: 100%;
-    height: 44px;
-    background: var(--accent-dim);
+  .engine-opt {
+    font-size: var(--text-xs);
+    color: var(--text-secondary);
+    padding: var(--space-1) 0;
+    margin-bottom: var(--space-2);
+  }
+  .composer-row { display: flex; gap: var(--space-2); align-items: flex-end; }
+  .composer-input {
+    flex: 1;
+    min-height: 44px;
+    max-height: 160px;
+    resize: none;
+    padding: 11px var(--space-3);
+    background: var(--bg-surface);
     border-radius: var(--radius-md);
     color: var(--text-primary);
+    font-family: var(--font-ui);
     font-size: var(--text-sm);
-    font-weight: 600;
-    transition: background 180ms var(--ease-out);
   }
-  .resume-btn:hover:not(:disabled) { background: var(--accent); color: #fff; }
-  .resume-btn:disabled { opacity: 0.6; cursor: default; }
+  .send-btn {
+    width: 44px;
+    height: 44px;
+    flex-shrink: 0;
+    background: var(--accent);
+    border-radius: var(--radius-md);
+    color: #fff;
+    font-size: var(--text-lg);
+    font-weight: 600;
+  }
+  .send-btn:disabled { opacity: 0.5; cursor: default; }
 
   .engine-pick {
     display: flex;

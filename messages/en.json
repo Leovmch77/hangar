@@ -6400,5 +6400,7 @@
   "aparencia_organizar_sessoes": "Organize sessions",
   "aparencia_organizar_sessoes_opcao": "Sessions",
   "aparencia_organizar_conversas_opcao": "Conversations",
-  "aparencia_organizar_dica": "Conversations also lists the ones already closed, newest first."
+  "aparencia_organizar_dica": "Conversations also lists the ones already closed, newest first.",
+  "conversa_continuar_placeholder": "Continue this conversation…",
+  "conversa_motor_opcao": "Conversation engine"
 }

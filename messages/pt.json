@@ -6400,5 +6400,7 @@
   "aparencia_organizar_sessoes": "Organizar sessões",
   "aparencia_organizar_sessoes_opcao": "Sessões",
   "aparencia_organizar_conversas_opcao": "Conversas",
-  "aparencia_organizar_dica": "Conversas lista também as que já fecharam, da mais recente para a mais antiga."
+  "aparencia_organizar_dica": "Conversas lista também as que já fecharam, da mais recente para a mais antiga.",
+  "conversa_continuar_placeholder": "Continuar esta conversa…",
+  "conversa_motor_opcao": "Motor da conversa"
 }
