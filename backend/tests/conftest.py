@@ -161,11 +161,12 @@ def _sem_padrao_do_jev_da_maquina():
     # Mesmo defeito do fixture acima, outro interruptor: `jev_padrao` é config da MÁQUINA, e com ele
     # ligado todo teste que confere os argumentos do `registry.create` ganhava um `jev=True` que a
     # asserção não espera. Passava no CI (sem config gravada) e falhava em quem usa o recurso.
-    # Só esta chave é forçada — o resto do `get` continua o de verdade, e quem testa o padrão ligado
+    # `headless_default` (nasce true) entra junto: o create passaria `headless=True` aos mocks.
+    # Só estas chaves são forçadas — o resto do `get` continua o de verdade, e quem testa o padrão ligado
     # troca o `get` inteiro no próprio teste.
     from app import runtime_config
     original = runtime_config.get
-    runtime_config.get = lambda campo: False if campo == "jev_padrao" else original(campo)
+    runtime_config.get = lambda campo: False if campo in ("jev_padrao", "headless_default") else original(campo)
     try:
         yield
     finally:
