@@ -12,6 +12,7 @@ vi.mock('./auth', () => ({ listOwnServers: () => [srv], selectServer: vi.fn(() =
 import { createNewChatDraft, isNotRepo } from './newChatDraft.svelte';
 
 function never() { return new Promise(() => {}); }
+const flush = () => new Promise((r) => setTimeout(r, 0));
 
 // vitest roda em node, sem localStorage.
 function fakeStorage(initial: Record<string, string>) {
@@ -23,25 +24,33 @@ function fakeStorage(initial: Record<string, string>) {
   };
 }
 
-describe('NewChatDraft.send', () => {
-  beforeEach(() => {
-    vi.resetAllMocks();
-    vi.stubGlobal('localStorage', fakeStorage({ 'cp_newchat_cwd:pc': '/home/u/proj' }));
-    for (const fn of [core.getProviders, core.getRootsForServer, core.listClaudeConfigs, core.getFolderBranchesForServer])
-      fn.mockImplementation(never);
-  });
+beforeEach(() => {
+  vi.resetAllMocks();
+  vi.stubGlobal('localStorage', fakeStorage({ 'cp_newchat_cwd:pc': '/home/u/proj' }));
+  for (const fn of [core.getProviders, core.getRootsForServer, core.getFolderBranchesForServer, core.getClaudeAccountSuggestion])
+    fn.mockImplementation(never);
+  core.listClaudeConfigs.mockResolvedValue([{ path: '/c', label: 'c', active: true }]);
+  core.modelOptions.mockResolvedValue({ models: [], reduced: false });
+});
 
+async function ready() {
+  const draft = createNewChatDraft();
+  draft.init();
+  await flush();
+  return draft;
+}
+
+describe('NewChatDraft.send', () => {
   it('cria com o nome desempatado e envia no nome devolvido pelo backend', async () => {
     core.fetchSessionsForServer.mockResolvedValue([{ name: 'proj' }]);
     core.createSessionForServer.mockResolvedValue({ name: 'proj-3' });
     core.sendInputForServer.mockResolvedValue(undefined);
-    const draft = createNewChatDraft();
-    draft.init();
+    const draft = await ready();
 
     const r = await draft.send('oi');
 
     expect(core.createSessionForServer).toHaveBeenCalledWith(srv, expect.objectContaining({
-      name: 'proj-2', cwd: '/home/u/proj', provider: 'claude' }));
+      name: 'proj-2', cwd: '/home/u/proj', provider: 'claude', config_dir: '/c' }));
     expect(core.sendInputForServer).toHaveBeenCalledWith(srv, 'proj-3', 'oi');
     expect(r).toEqual({ serverId: 'pc', name: 'proj-3' });
   });
@@ -50,8 +59,7 @@ describe('NewChatDraft.send', () => {
     core.fetchSessionsForServer.mockResolvedValue([]);
     core.createSessionForServer.mockResolvedValue({ name: 'proj' });
     core.sendInputForServer.mockRejectedValueOnce(new Error('500: caiu')).mockResolvedValueOnce(undefined);
-    const draft = createNewChatDraft();
-    draft.init();
+    const draft = await ready();
 
     await expect(draft.send('oi')).rejects.toThrow('caiu');
     expect(draft.note?.text).toBe('500: caiu');
@@ -61,10 +69,56 @@ describe('NewChatDraft.send', () => {
     expect(core.sendInputForServer).toHaveBeenLastCalledWith(srv, 'proj', 'oi');
   });
 
-  it('sem pasta não cria nada', async () => {
-    localStorage.removeItem('cp_newchat_cwd:pc');
+  it('trocar uma escolha depois da falha de envio cria sessão nova com a escolha nova', async () => {
+    core.fetchSessionsForServer.mockResolvedValue([]);
+    core.createSessionForServer.mockResolvedValueOnce({ name: 'proj' }).mockResolvedValueOnce({ name: 'proj-2' });
+    core.sendInputForServer.mockRejectedValueOnce(new Error('500: caiu')).mockResolvedValueOnce(undefined);
+    const draft = await ready();
+
+    await expect(draft.send('oi')).rejects.toThrow('caiu');
+    draft.branch = 'feature';
+    await draft.send('oi');
+
+    expect(core.createSessionForServer).toHaveBeenCalledTimes(2);
+    expect(core.createSessionForServer).toHaveBeenLastCalledWith(srv, expect.objectContaining({ branch: 'feature' }));
+    expect(core.sendInputForServer).toHaveBeenLastCalledWith(srv, 'proj-2', 'oi');
+  });
+
+  it('contas ainda carregando: não envia', async () => {
+    core.listClaudeConfigs.mockImplementation(never);
     const draft = createNewChatDraft();
     draft.init();
+    expect(draft.loading).toBe(true);
+    await expect(draft.send('oi')).rejects.toThrow();
+    expect(core.createSessionForServer).not.toHaveBeenCalled();
+  });
+
+  it('sem pasta não cria nada', async () => {
+    localStorage.removeItem('cp_newchat_cwd:pc');
+    const draft = await ready();
+    await expect(draft.send('oi')).rejects.toThrow();
+    expect(core.createSessionForServer).not.toHaveBeenCalled();
+  });
+});
+
+describe('NewChatDraft — respostas atrasadas', () => {
+  it('trocar de provider com o catálogo do Claude em voo: a resposta velha é descartada e o modelo some', async () => {
+    localStorage.setItem('cp_last_model:pc:claude:-', 'opus');
+    let resolveClaude!: (v: unknown) => void;
+    core.modelOptions.mockImplementationOnce(() => new Promise((r) => { resolveClaude = r; }));
+    core.getCodexAccountsForServer.mockRejectedValue(new Error('codex fora'));
+    const draft = await ready();
+    expect(draft.modelsLoading).toBe(true);
+
+    draft.setProvider('codex');
+    await flush();
+    resolveClaude({ models: [{ id: 'opus' }], reduced: false });
+    await flush();
+
+    expect(draft.models).toEqual([]);
+    expect(draft.model).toBe('');
+    expect(draft.modelsLoading).toBe(false);
+    expect(draft.note?.text).toBe('codex fora');
     await expect(draft.send('oi')).rejects.toThrow();
     expect(core.createSessionForServer).not.toHaveBeenCalled();
   });

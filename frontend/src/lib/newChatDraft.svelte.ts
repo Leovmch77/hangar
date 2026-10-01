@@ -69,10 +69,16 @@ export class NewChatDraft {
   #modSeq = 0;
   #branchSeq = 0;
   #modelTouched = false;
-  // Sessão já criada cujo primeiro envio falhou: tentar de novo reenvia nela em vez de criar outra.
-  #created: { serverId: string; cwd: string; name: string } | null = null;
+  // Sessão já criada cujo primeiro envio falhou: tentar de novo reenvia nela em vez de criar outra,
+  // desde que nenhuma escolha tenha mudado desde então.
+  #created: { choices: string; name: string } | null = null;
 
   get serverObj(): Server | null { return this.servers.find((s) => s.id === this.server) ?? null; }
+  get #choices(): string {
+    return JSON.stringify([this.server, this.cwd, this.provider, this.configDir, this.codexAccount, this.model, this.effort, this.branch]);
+  }
+  /** Contas ou modelos ainda chegando: enviar agora mandaria conta/modelo vazios e cairia no padrão do servidor calado. */
+  get loading(): boolean { return this.configsLoading || this.codexLoading || this.modelsLoading; }
   get levels(): readonly string[] { return effortLevels(this.provider, this.models, this.model); }
   get providerAvailable(): boolean { return this.providers[this.provider]?.disponivel !== false; }
 
@@ -86,7 +92,6 @@ export class NewChatDraft {
   pickServer(id: string) {
     this.server = id;
     selectServer(id);
-    this.#created = null;
     this.cwd = readStorage(cwdKey(id));
     this.branch = '';
     void this.loadProviders();
@@ -160,7 +165,10 @@ export class NewChatDraft {
   }
 
   loadAccounts() {
-    ++this.#cfgSeq; ++this.#codexSeq;
+    // O modelo é da conta/provider anterior: invalida a lista em voo e limpa a escolha já, para um
+    // catálogo atrasado (ou a falha da conta nova) não deixar modelo de outro provider no envio.
+    ++this.#cfgSeq; ++this.#codexSeq; ++this.#modSeq;
+    this.models = []; this.model = ''; this.effort = ''; this.modelsLoading = false; this.modelsError = '';
     this.configs = []; this.configDir = null; this.configsLoading = false; this.configsError = '';
     this.codexAccounts = []; this.codexAccount = ''; this.codexLoading = false; this.codexError = '';
     if (this.provider === 'claude') void this.loadConfigs();
@@ -281,8 +289,11 @@ export class NewChatDraft {
     try {
       if (!server || !cwd) throw new Error(m.newchat_sem_pasta());
       if (!this.providerAvailable) throw new Error(m.native_create_provider_missing({ p: this.provider }));
+      if (this.loading) throw new Error(m.comum_carregando());
+      if (this.provider === 'codex' && !this.codexAccount) throw new Error(m.newchat_sem_conta_codex());
       this.sending = true;
-      let name = this.#created?.serverId === server.id && this.#created.cwd === cwd ? this.#created.name : '';
+      const choices = this.#choices;
+      let name = this.#created?.choices === choices ? this.#created.name : '';
       if (!name) {
         const taken = new Set((await fetchSessionsForServer(server)).map((s) => s.name));
         // Memória antes de criar, como a folha: a escolha não se perde se a criação falhar.
@@ -298,7 +309,7 @@ export class NewChatDraft {
         });
         // O nome que vale é o devolvido pelo backend: ele pode desempatar de novo.
         name = info.name;
-        this.#created = { serverId: server.id, cwd, name };
+        this.#created = { choices, name };
       }
       await sendInputForServer(server, name, text);
       this.#created = null;

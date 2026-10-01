@@ -8,7 +8,7 @@
   interface Props {
     value: string;
     placeholder: string;
-    /** Campo e pílulas travados (envio em voo). */
+    /** Envio em voo: campo só leitura, enviar travado. */
     busy?: boolean;
     /** Só o botão enviar travado (falta pasta, conta sem limite…). */
     blocked?: boolean;
@@ -46,7 +46,8 @@
 
 <div class="wrap">
   <div class="box" class:busy>
-    <textarea bind:this={field} bind:value rows="1" {placeholder} aria-label={placeholder} disabled={busy} {onkeydown}></textarea>
+    <!-- readonly, não disabled: desabilitar tira o foco e fecha o teclado do iPhone no meio do envio. -->
+    <textarea bind:this={field} bind:value rows="1" {placeholder} aria-label={placeholder} readonly={busy} aria-busy={busy} {onkeydown}></textarea>
     <div class="bar">
       <div class="pills">{@render pills?.()}</div>
       <button type="button" class="send" disabled={!canSend} aria-label={m.native_send()} onclick={send}>
