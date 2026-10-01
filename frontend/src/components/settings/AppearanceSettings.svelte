@@ -423,6 +423,7 @@
     />
   </div>
 
+  {#if !isDesktop}
   <div class="ap-row">
     <div class="ap-label">
       <strong>{m.aparencia_organizar_sessoes()}</strong>
@@ -438,6 +439,7 @@
       onPick={(v) => { sessionOrganization.mode = v as SessionOrganization; }}
     />
   </div>
+  {/if}
 
   <div class="ap-row ap-row--stack">
     <div class="ap-head">

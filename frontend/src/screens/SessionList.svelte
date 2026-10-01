@@ -25,6 +25,8 @@ import * as m from '../paraglide/messages';
   import { sessionsStore } from '../lib/sessionsStore.svelte';
   import { createSessionListModel, groupItems, pairCodigo, pairResto } from '../lib/sessionListModel.svelte';
   import { countAwaiting, fmtWhen, initials, clusterByPair } from '@hangar/core';
+  import ConversationList from '../components/ConversationList.svelte';
+  import { sessionOrganization } from '../lib/sessionOrganization.svelte';
   import { updateBadge } from '../lib/badge';
   import { arrastarGrupo, mensagemRecusa, type ChaveSessao } from '../lib/arrastarGrupo.svelte';
   import { dragChave, resolveDrop, autoScrollDir } from '../lib/dragToGroup';
@@ -97,6 +99,12 @@ import * as m from '../paraglide/messages';
       stopAutoScroll();
     };
   });
+
+  // Viva de qualquer servidor: a rota com servidor, depois de apontar o ativo pra ele.
+  function openConversationLive(serverId: string, name: string) {
+    selectServer(serverId);
+    window.location.hash = `#/chat/${encodeURIComponent(serverId)}/${encodeURIComponent(name)}`;
+  }
 
   // Renomear servidor: o AccountMenu cuida da UI inline; aqui só persistimos e mandamos o store
   // recarregar a lista de servidores pra os badges das sessões pegarem o nome novo.
@@ -435,6 +443,9 @@ import * as m from '../paraglide/messages';
     bind:this={listEl}
     onscroll={onListScroll}
   >
+    {#if sessionOrganization.mode === 'conversations'}
+      <ConversationList onNavigateToChat={openConversationLive} />
+    {:else}
     <!-- "Precisa de você" (feature #6): fila fixa no topo com as sessoes AGUARDANDO de TODOS os
          servidores. Responder aqui (picker inline) nao abre o chat; nativo AskUserQuestion abre. -->
     <AttentionFeed {sessions} onOpenChat={openSession} />
@@ -637,6 +648,7 @@ import * as m from '../paraglide/messages';
           {/each}
         {/if}
       {/if}
+    {/if}
     {/if}
   </div>
 

@@ -163,14 +163,14 @@ export async function errorDetail(res: Response): Promise<string> {
 
 // Mensagem traduzida + o CÓDIGO cru do backend (`erro_*`). O código é o que deixa quem chama
 // decidir por identidade e não por texto — a mensagem muda com o idioma.
-async function lerErro(res: Response): Promise<{ msg: string; code?: string }> {
+async function lerErro(res: Response): Promise<{ msg: string; code?: string; envelope?: Record<string, unknown> }> {
   const text = await res.text().catch(() => '');
   try {
     const j = JSON.parse(text);
     if (j && typeof j.detail === 'string') return { msg: j.detail };
     const envelope = j?.detail ?? j;
     if (envelope && typeof envelope.code === 'string') {
-      return { msg: formataErro(envelope)!, code: envelope.code };
+      return { msg: formataErro(envelope)!, code: envelope.code, envelope };
     }
   } catch { /* corpo nao-JSON: cai no texto cru abaixo */ }
   // text e statusText podem os DOIS vir vazios (502 de infra sem corpo JSON, servidor HTTP/2 que
@@ -198,8 +198,9 @@ async function ensureOk(res: Response): Promise<void> {
   // MENSAGEM fica limpa (sem o "409: " na frente) — quem precisa do numero le `.status`, nao
   // texto que o usuario acaba vendo cru (ex: window.confirm da confirmacao de custo do TTS).
   if (!res.ok) {
-    const { msg, code } = await lerErro(res);
-    throw Object.assign(new Error(msg), { status: res.status, code });
+    const { msg, code, envelope } = await lerErro(res);
+    // `envelope` = detail cru: quem precisa de campo extra do erro (ex: `sessao`) lê daqui.
+    throw Object.assign(new Error(msg), { status: res.status, code, envelope });
   }
 }
 

@@ -6407,5 +6407,9 @@
   "aparencia_organizar_sessoes_opcao": "Sessões",
   "aparencia_organizar_conversas_opcao": "Conversas",
   "aparencia_organizar_dica": "Conversas lista também as que já fecharam, da mais recente para a mais antiga.",
-  "conversa_continuar_placeholder": "Continuar esta conversa…"
+  "conversa_continuar_placeholder": "Continuar esta conversa…",
+  "conversas_nova": "Nova conversa",
+  "conversas_recentes": "Recentes",
+  "conversas_vazio": "Nenhuma conversa ainda. Toque em Nova conversa para começar.",
+  "conversas_servidor_falhou": "Não consegui carregar as conversas de {servidor}."
 }

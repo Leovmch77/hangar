@@ -9,6 +9,7 @@ import { intlLocale } from '../lib/locale';
     getEngines, type ArchiveFolder, type ArchiveEntry, type Motor,
   } from '@hangar/core';
   import { arquivo, clienteQuery } from '../lib/queries';
+  import { takeEntry } from '../lib/conversationList';
   import type { ChatEvent } from '@hangar/core';
   import { selectServer, listOwnServers, getActiveId, serverColor } from '../lib/auth';
   import ProviderGlyph from '../components/icons/ProviderGlyph.svelte';
@@ -86,7 +87,9 @@ import { intlLocale } from '../lib/locale';
       activeServerId = deepLink.serverId;   // mantem o seletor coerente ao voltar da conversa
       load();
       const link = deepLink;
-      getArchiveFolder(link.project).then((items) => {
+      const known = takeEntry(link.serverId, link.project, link.sessionId);
+      if (known) void openConversation(known);
+      else getArchiveFolder(link.project).then((items) => {
         if (deepLink !== link || activeServerId !== link.serverId) return;
         const matches = items.filter((item) => item.session_id === link.sessionId);
         if (matches.length === 1) void openConversation(matches[0]);
@@ -162,6 +165,15 @@ import { intlLocale } from '../lib/locale';
     } catch (e) {
       if (!name) {
         if (selected !== entry || activeServerId !== server.id) return;
+        // Conversa já aberta noutra sessão: o texto vai pro rascunho dela e o chat abre lá.
+        const err = e as { status?: number; code?: string; envelope?: { sessao?: unknown; params?: { sessao?: unknown } } };
+        const live = err.envelope?.sessao ?? err.envelope?.params?.sessao;
+        if (err.status === 409 && err.code === 'erro_conversa_viva' && typeof live === 'string' && live) {
+          try { localStorage.setItem(`cp-draft:${live}`, JSON.stringify({ text, jsonl: null })); } catch { /* sem storage */ }
+          if (deepLink) selectServer(deepLink.serverId);
+          window.location.hash = `#/chat/${encodeURIComponent(server.id)}/${encodeURIComponent(live)}`;
+          return;
+        }
         resumeError = e instanceof Error ? e.message : m.arquivo_retomar_erro();
         return;
       }

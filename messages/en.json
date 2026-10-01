@@ -6407,5 +6407,9 @@
   "aparencia_organizar_sessoes_opcao": "Sessions",
   "aparencia_organizar_conversas_opcao": "Conversations",
   "aparencia_organizar_dica": "Conversations also lists the ones already closed, newest first.",
-  "conversa_continuar_placeholder": "Continue this conversation…"
+  "conversa_continuar_placeholder": "Continue this conversation…",
+  "conversas_nova": "New conversation",
+  "conversas_recentes": "Recent",
+  "conversas_vazio": "No conversations yet. Tap New conversation to start.",
+  "conversas_servidor_falhou": "Couldn't load conversations from {servidor}."
 }
