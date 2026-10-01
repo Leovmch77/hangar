@@ -81,11 +81,23 @@ function initInstall(root, platform) {
     if (state !== 'idle') timer = setTimeout(() => label(btn.dataset.labelCopy, 'idle'), 1800);
   };
   const render = () => {
-    tabs.forEach((t) => t.setAttribute('aria-selected', String(t.dataset.os === os)));
+    tabs.forEach((t) => {
+      t.setAttribute('aria-selected', String(t.dataset.os === os));
+      t.tabIndex = t.dataset.os === os ? 0 : -1;
+    });
     code.textContent = INSTALL[os];
     prompt.textContent = os === 'win' ? 'PS>' : '$';
   };
-  tabs.forEach((t) => t.addEventListener('click', () => { os = t.dataset.os; render(); label(btn.dataset.labelCopy, 'idle'); }));
+  const pick = (t) => { os = t.dataset.os; render(); label(btn.dataset.labelCopy, 'idle'); };
+  tabs.forEach((t) => t.addEventListener('click', () => pick(t)));
+  root.querySelector('[role=tablist]').addEventListener('keydown', (e) => {
+    if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
+    e.preventDefault();
+    const k = tabs.findIndex((t) => t.dataset.os === os);
+    const t = tabs[e.key === 'ArrowRight' ? nextIndex(k, tabs.length) : prevIndex(k, tabs.length)];
+    pick(t);
+    t.focus();
+  });
   btn.addEventListener('click', async () => {
     try {
       await navigator.clipboard.writeText(INSTALL[os]);
