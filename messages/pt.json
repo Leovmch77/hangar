@@ -6396,5 +6396,9 @@
   "home_usage_period_unsupported": "Este servidor não confirmou o período. Atualize-o para mostrar os números.",
   "home_usage_load_failed": "Não foi possível carregar o consumo. Tente novamente.",
   "session_mode_server_default": "Padrão do servidor",
-  "native_session_mode_server_default": "Padrão do servidor"
+  "native_session_mode_server_default": "Padrão do servidor",
+  "aparencia_organizar_sessoes": "Organizar sessões",
+  "aparencia_organizar_sessoes_opcao": "Sessões",
+  "aparencia_organizar_conversas_opcao": "Conversas",
+  "aparencia_organizar_dica": "Conversas lista também as que já fecharam, da mais recente para a mais antiga."
 }

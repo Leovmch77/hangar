@@ -6396,5 +6396,9 @@
   "home_usage_period_unsupported": "This server did not confirm the period. Update it to show usage.",
   "home_usage_load_failed": "Could not load usage. Try again.",
   "session_mode_server_default": "Server default",
-  "native_session_mode_server_default": "Server default"
+  "native_session_mode_server_default": "Server default",
+  "aparencia_organizar_sessoes": "Organize sessions",
+  "aparencia_organizar_sessoes_opcao": "Sessions",
+  "aparencia_organizar_conversas_opcao": "Conversations",
+  "aparencia_organizar_dica": "Conversations also lists the ones already closed, newest first."
 }
