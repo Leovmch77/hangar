@@ -58,6 +58,7 @@ mod sidebar;
 mod subagent;
 mod dictation;
 mod sync;
+mod guests;
 mod shared_config;
 mod tree;
 mod costs;

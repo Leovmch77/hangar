@@ -7,25 +7,51 @@ use base64::{Engine as _, engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD}};
 use ring::{aead, hkdf, pbkdf2, rand::{SecureRandom, SystemRandom}};
 use std::num::NonZeroU32;
 
-const PBKDF2_ITERATIONS: u32 = 600_000;
+pub(super) const PBKDF2_ITERATIONS: u32 = 600_000;
+
+/// Chaves da conta no hub, como o web: PBKDF2 da senha → HKDF em dois ramos, `cp-auth` (vai ao hub) e `cp-enc` (fica aqui).
+pub(super) struct Keys { pub(super) auth_hash: String, pub(super) enc: [u8; 32] }
+
+pub(super) fn derive_keys(password: &str, salt: &[u8], iterations: u32) -> Option<Keys> {
+    let mut master = [0u8; 32];
+    pbkdf2::derive(pbkdf2::PBKDF2_HMAC_SHA256, NonZeroU32::new(iterations)?, salt, password.as_bytes(), &mut master);
+    let prk = hkdf::Salt::new(hkdf::HKDF_SHA256, &[]).extract(&master);
+    let (mut auth, mut enc) = ([0u8; 32], [0u8; 32]);
+    prk.expand(&[b"cp-auth"], hkdf::HKDF_SHA256).and_then(|okm| okm.fill(&mut auth)).ok()?;
+    prk.expand(&[b"cp-enc"], hkdf::HKDF_SHA256).and_then(|okm| okm.fill(&mut enc)).ok()?;
+    Some(Keys { auth_hash: STANDARD.encode(auth), enc })
+}
+
+pub(super) fn random<const N: usize>() -> Option<[u8; N]> {
+    let mut bytes = [0u8; N];
+    SystemRandom::new().fill(&mut bytes).ok()?;
+    Some(bytes)
+}
+
+/// `{iv, data}` em base64, com a tag do GCM no fim de `data`: o formato que o web cifra e decifra.
+pub(super) fn encrypt_json(key: &[u8; 32], value: &impl serde::Serialize) -> Option<Value> {
+    let iv = random::<12>()?;
+    let mut data = serde_json::to_vec(value).ok()?;
+    let key = aead::LessSafeKey::new(aead::UnboundKey::new(&aead::AES_256_GCM, key).ok()?);
+    key.seal_in_place_append_tag(aead::Nonce::assume_unique_for_key(iv), aead::Aad::empty(), &mut data).ok()?;
+    Some(json!({"iv": STANDARD.encode(iv), "data": STANDARD.encode(data)}))
+}
+
+pub(super) fn decrypt_json<T: serde::de::DeserializeOwned>(key: &[u8; 32], blob: &Value) -> Option<T> {
+    let iv: [u8; 12] = STANDARD.decode(blob.get("iv")?.as_str()?).ok()?.try_into().ok()?;
+    let mut data = STANDARD.decode(blob.get("data")?.as_str()?).ok()?;
+    let key = aead::LessSafeKey::new(aead::UnboundKey::new(&aead::AES_256_GCM, key).ok()?);
+    let plain = key.open_in_place(aead::Nonce::assume_unique_for_key(iv), aead::Aad::empty(), &mut data).ok()?;
+    serde_json::from_slice(plain).ok()
+}
 
 fn registration_body(user: String, password: String, base: String, label: String, token: String) -> Result<Value, Failure> {
-    let rng = SystemRandom::new();
-    let (mut salt, mut iv, mut id) = ([0u8; 16], [0u8; 12], [0u8; 8]);
-    for bytes in [&mut salt[..], &mut iv[..], &mut id[..]] { rng.fill(bytes).map_err(|_| Failure::local("sync_config_erro"))?; }
-    let mut master = [0u8; 32];
-    pbkdf2::derive(pbkdf2::PBKDF2_HMAC_SHA256, NonZeroU32::new(PBKDF2_ITERATIONS).unwrap(), &salt, password.as_bytes(), &mut master);
-    let prk = hkdf::Salt::new(hkdf::HKDF_SHA256, &[]).extract(&master);
-    let (mut auth, mut key) = ([0u8; 32], [0u8; 32]);
-    prk.expand(&[b"cp-auth"], hkdf::HKDF_SHA256).and_then(|okm| okm.fill(&mut auth)).map_err(|_| Failure::local("sync_config_erro"))?;
-    prk.expand(&[b"cp-enc"], hkdf::HKDF_SHA256).and_then(|okm| okm.fill(&mut key)).map_err(|_| Failure::local("sync_config_erro"))?;
+    let fail = || Failure::local("sync_config_erro");
+    let (salt, id) = (random::<16>().ok_or_else(fail)?, random::<8>().ok_or_else(fail)?);
+    let keys = derive_keys(&password, &salt, PBKDF2_ITERATIONS).ok_or_else(fail)?;
     let server = json!([{"id": format!("srv-{}", URL_SAFE_NO_PAD.encode(id)), "label": label, "baseUrl": base, "token": token}]);
-    let mut data = serde_json::to_vec(&server).map_err(|_| Failure::local("sync_config_erro"))?;
-    let key = aead::LessSafeKey::new(aead::UnboundKey::new(&aead::AES_256_GCM, &key).map_err(|_| Failure::local("sync_config_erro"))?);
-    key.seal_in_place_append_tag(aead::Nonce::assume_unique_for_key(iv), aead::Aad::empty(), &mut data)
-        .map_err(|_| Failure::local("sync_config_erro"))?;
-    Ok(json!({"user": user, "salt": STANDARD.encode(salt), "auth_hash": STANDARD.encode(auth),
-        "enc_blob": {"iv": STANDARD.encode(iv), "data": STANDARD.encode(data)}}))
+    let blob = encrypt_json(&keys.enc, &server).ok_or_else(fail)?;
+    Ok(json!({"user": user, "salt": STANDARD.encode(salt), "auth_hash": keys.auth_hash, "enc_blob": blob}))
 }
 
 fn secure_setup(address: &str) -> bool {
@@ -37,7 +63,7 @@ fn secure_setup(address: &str) -> bool {
     })
 }
 
-fn sync_field(label: String, input: &Entity<InputState>, saving: bool) -> Div {
+pub(super) fn sync_field(label: String, input: &Entity<InputState>, saving: bool) -> Div {
     div().flex().flex_col().gap(px(6.)).child(div().text_sm().font_weight(FontWeight::MEDIUM).child(label.clone()))
         .child(Input::new(input).disabled(saving).aria_label(label))
 }
@@ -70,6 +96,11 @@ pub(in crate::app) struct Sync {
     deactivated: bool,
     copied: bool,
     form: Option<SyncForm>,
+    pub(super) guests: super::guests::Guests,
+}
+
+impl Sync {
+    pub(super) fn owner(&self) -> Option<String> { self.setup.ok().and_then(|setup| setup.user.clone()) }
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -78,6 +109,7 @@ pub(super) enum Write { Enable, Disable, Register }
 pub(super) enum SyncReply {
     Loaded(u64, Result<Value, Failure>),
     Saved(u64, Write, Result<Value, Failure>),
+    Guests(super::guests::GuestsReply),
 }
 
 impl Hangar {
@@ -96,7 +128,8 @@ impl Hangar {
         self.load_sync(cx);
     }
 
-    pub(super) fn sync_page_left(&mut self) { self.sync.form = None; }
+    // A sessão do dono no hub (cookie e chave) também sai: só vive enquanto a página está aberta.
+    pub(super) fn sync_page_left(&mut self) { (self.sync.form, self.sync.guests) = (None, Default::default()); }
 
     fn sync_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.sync.form.is_some() || self.settings != Some(Page::Sync) { return; }
@@ -176,6 +209,7 @@ impl Hangar {
 
     pub(super) fn receive_sync(&mut self, reply: SyncReply, window: &mut Window, cx: &mut Context<Self>) {
         match reply {
+            SyncReply::Guests(reply) => { self.receive_guests(reply, window, cx); return; }
             SyncReply::Loaded(seq, result) => {
                 if seq != self.sync.setup.seq { return; }
                 let result = result.map_err(|error| Self::fetch_failure(&error)).and_then(parse_setup);
@@ -209,6 +243,10 @@ impl Hangar {
                     }
                 }
             }
+        }
+        if self.sync.setup.ok().is_some_and(|setup| setup.enabled && setup.registered) {
+            let owner = self.sync.owner();
+            self.guests_login_form(owner.as_deref(), window, cx);
         }
         cx.notify();
     }
@@ -260,6 +298,7 @@ impl Hangar {
                         .on_click(move |_, _, cx| cx.open_url(&address)))
                     .child(self.mark(div().rounded(px(8.)).child(Button::new("sync-disable").outline().small().label(tr("sync_config_desativar"))
                         .disabled(self.sync.saving).on_click(cx.listener(|this, _, window, cx| this.confirm_disable_sync(window, cx)))), "sync_config_desativar")))
+                .child(self.render_guests(cx))
         } else {
             if !setup.enabled {
                 page = page.child(self.mark(div().rounded(px(6.)).text_sm().text_color(theme::muted()).whitespace_normal()

@@ -395,6 +395,25 @@ impl Api {
         Self::checked(r, true).await?.json().await.map_err(|_| Failure::transport(true))
     }
 
+    /// Rota do hub de sincronização: a sessão ali é o cookie `cp_sync`, não o token. Devolve também o `cp_sync=…` que a
+    /// resposta trouxer, pra quem chama guardar em memória e mandar de volta.
+    pub async fn hub(&self, method: reqwest::Method, path: &[&str], query: &[(&str, &str)], body: Option<Value>, cookie: Option<&str>,
+        seconds: u64) -> Result<(Value, Option<String>), Failure> {
+        let post = method != reqwest::Method::GET;
+        let mut req = self.client.request(method, self.server_url(path, query));
+        if let Some(cookie) = cookie {
+            let mut value = header::HeaderValue::from_str(cookie).map_err(|_| Failure::local("invalid_token"))?;
+            value.set_sensitive(true);
+            req = req.header(header::COOKIE, value);
+        }
+        if let Some(body) = body { req = req.json(&body); }
+        let r = req.timeout(Duration::from_secs(seconds)).send().await.map_err(|_| Failure::transport(post))?;
+        let r = Self::checked(r, post).await?;
+        let session = r.headers().get_all(header::SET_COOKIE).iter().filter_map(|v| v.to_str().ok())
+            .filter_map(|v| v.split(';').next()).find(|v| v.starts_with("cp_sync=")).map(str::to_owned);
+        Ok((r.json().await.map_err(|_| Failure::local("invalid_response"))?, session))
+    }
+
     /// DELETE com parâmetros na URL (cancelar o login do Codex leva a tentativa na query).
     pub async fn server_delete(&self, path: &[&str], query: &[(&str, &str)], seconds: u64) -> Result<Value, Failure> {
         let r = self.client.delete(self.server_url(path, query)).timeout(Duration::from_secs(seconds)).send().await
