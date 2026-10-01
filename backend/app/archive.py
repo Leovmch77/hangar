@@ -361,6 +361,22 @@ def list_conversations(project: str, live_realpaths: set[str], cap: int = 100,
     return out[:cap]
 
 
+def list_recent(live_realpaths: set[str], cap: int = 40) -> list[ArchiveEntry]:
+    """Conversas mais recentes de TODAS as pastas. A pasta vem ordenada pela conversa mais nova
+    dela, entao assim que a pasta seguinte for mais velha que a ultima ja escolhida, nenhuma
+    conversa dela entra: para ali em vez de abrir todas as pastas."""
+    out: list[ArchiveEntry] = []
+    for folder in list_folders():
+        if len(out) >= cap and folder.mtime <= out[cap - 1].mtime:
+            break
+        try:
+            out += list_conversations(folder.project, live_realpaths, cap=cap)
+        except (ValueError, FileNotFoundError):
+            continue
+        out.sort(key=lambda e: e.mtime, reverse=True)
+    return out[:cap]
+
+
 def archive_jsonl(project: str, session_id: str, config_dir: Optional[str] = None,
                   provider: str = "claude", codex_account: str | None = None) -> Path:
     """Path validado do transcript arquivado. ValueError = componente invalido (traversal barrado);

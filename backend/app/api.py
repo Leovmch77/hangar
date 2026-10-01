@@ -102,7 +102,8 @@ from app import project_shortcuts
 from app import projects
 from app import archive_providers
 from app.archive import (ArchiveEntry, ArchiveFolder, archive_cwd, archive_jsonl, conta_de,
-                         list_conversations, list_folders, move_conversation, tail_events)
+                         list_conversations, list_folders, list_recent, move_conversation,
+                         tail_events)
 from app.search import SearchHit, search, extract_terms, search_terms, build_ask_prompt
 from app.askquestion import clear_pending_askq, read_pending_askq
 from app import pair
@@ -7012,6 +7013,14 @@ def archive_por_cwd(cwd: str, config_dir: str | None = None, cap: int = 12,
     except (ValueError, FileNotFoundError):
         return []
     return [e for e in todas if e.provider == provider][:cap]
+
+
+@app.get("/api/archive/recent", dependencies=[Depends(require_auth)],
+         response_model=list[ArchiveEntry])
+def archive_recent(cap: int = 40):
+    # A lista "Conversas" do celular e do nativo: as vivas vêm da lista de sessões, as fechadas daqui.
+    live = {os.path.realpath(s.jsonl) for s in registry.list() if s.jsonl}
+    return list_recent(live, cap=max(1, min(cap, 100)))
 
 
 @app.get("/api/archive/{project}", dependencies=[Depends(require_auth)],
