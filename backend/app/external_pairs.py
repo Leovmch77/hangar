@@ -31,7 +31,8 @@ TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{20,200}$")
 # Espaço e invisíveis que deixariam um cabeçalho forjado passar por texto comum.
 _LEADING_RE = re.compile("[\\s​‌‍⁠﻿]*")
 MAX_TEXT = 16000
-MAX_SESSION = 64
+SESSION_RE = re.compile(r"[A-Za-z0-9._-]{1,64}")
+HOST_RE = re.compile(r"(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+ts\.net")
 FUNNEL_PORT = 8443
 
 
@@ -158,12 +159,9 @@ def valid_owner(owner: str) -> bool:
 
 
 def valid_session(name: str) -> bool:
-    """Nome de sessão que o outro lado informou: entra em endereço e em cabeçalho `[de fora: …]`."""
-    if not isinstance(name, str) or not name or len(name) > MAX_SESSION:
-        return False
-    if "[" in name or "]" in name or "::" in name:
-        return False
-    return not any(ord(c) < 32 or c in "  \u0085" for c in name)
+    """Nome que o outro lado informou: vai pro endereço, pro cabeçalho e pra um comando de shell
+    que o modelo copia; só o alfabeto dos nomes do Hangar (names.sanitize_session_name)."""
+    return bool(SESSION_RE.fullmatch(name if isinstance(name, str) else ""))
 
 
 def valid_token(token: str) -> bool:
@@ -177,7 +175,7 @@ def normalize_address(addr: str) -> str | None:
     except ValueError:
         return None
     host = u.hostname or ""
-    if (u.scheme != "https" or port != FUNNEL_PORT or not host.endswith(".ts.net") or u.username
+    if (u.scheme != "https" or port != FUNNEL_PORT or not HOST_RE.fullmatch(host) or u.username
             or u.password or u.query or u.fragment or u.path not in ("", "/")):
         return None
     return f"https://{host}:{FUNNEL_PORT}"
