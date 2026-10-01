@@ -434,6 +434,7 @@ pub struct Hangar {
     context_card: bool,
     command_search: Entity<InputState>,
     confirm: Option<Confirm>,
+    confirm_no_ask: bool,
     terminal_suggestion: String,
     recent: Option<Recent>,
     media: MediaCache<(SessionKey, Source)>,
@@ -688,7 +689,7 @@ impl Hangar {
             visible_preview: Preview::default(), preview_tick_epoch: 0, preview_tick_scheduled: false,
             preview_last_tick: None, preview_carry: 0., preview_deadline: None,
             attachments: HashMap::new(), attach_seq: 0, uploading: HashMap::new(), commands: HashMap::new(),
-            suggest_pick: 0, suggest_dismissed: None, command_panel: false, context_card: false, command_search, confirm: None,
+            suggest_pick: 0, suggest_dismissed: None, command_panel: false, context_card: false, command_search, confirm: None, confirm_no_ask: false,
             mention: Default::default(),
             terminal_suggestion: String::new(), recent: None, media: MediaCache::new(), full_images: viewer::full_images(), stats: None,
             side: side::Side::default(), controls: controls::Controls::default(),
@@ -780,6 +781,8 @@ impl Hangar {
     /// Nome curto do servidor conectado (endereço sem o esquema), para a lista e as configurações.
     fn server_label(&self, cx: &App) -> String {
         let address = self.address.read(cx).value().to_string();
+        if let Some(entry) = self.server_entry(&servers::norm(&address))
+            && !entry.label.is_empty() && entry.label != servers::default_label(&address) { return entry.label.clone(); }
         let host = address.trim_start_matches("http://").trim_start_matches("https://").trim_end_matches('/');
         if host.is_empty() { tr("connection") } else { host.to_owned() }
     }
@@ -1895,8 +1898,9 @@ impl Hangar {
                 cx.notify();
                 return;
             }
-            if command.destructive && !confirmed {
+            if command.destructive && !confirmed && !appearance::get().skip_chat_confirmations {
                 self.confirm = Some(Confirm::Destructive(text));
+                self.confirm_no_ask = false;
                 cx.notify();
                 return;
             }
@@ -2172,9 +2176,11 @@ impl Hangar {
         provider != "orq" && self.chat_online && (self.chat.state.state == "working" || headless && self.chat.state.state == "awaiting_input")
     }
 
-    fn request_stop(&mut self, cx: &mut Context<Self>) {
+    fn request_stop(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.connection_dialog || !self.can_interrupt() { return; }
+        if appearance::get().skip_chat_confirmations { self.interrupt(window, cx); return; }
         self.confirm = Some(Confirm::Stop);
+        self.confirm_no_ask = false;
         cx.notify();
     }
 
@@ -3432,26 +3438,39 @@ impl Hangar {
             Confirm::Replace(name) => (tr("command_replace").replace("{cmd}", &format!("/{name}")), tr("command_replace_ok")),
             Confirm::Prefill(text) => (tr("prefill_replace").replace("{text}", &conversation::one_line(text, 60)), tr("command_replace_ok")),
         };
-        Some(div().p_3().rounded_md().border_1().border_color(theme::warning()).flex().items_center().gap_2()
-            .child(div().flex_1().min_w_0().text_sm().child(text))
-            .child(Button::new("confirm-cancel").small().ghost().label(tr("cancel")).on_click(cx.listener(|this, _, window, cx| {
-                this.confirm = None;
-                this.composer.update(cx, |input, cx| input.focus(window, cx));
-                cx.notify();
-            })))
-            .child(Button::new("confirm-ok").small().primary().label(action).on_click(cx.listener(move |this, _, window, cx| match &confirm {
-                Confirm::Stop => this.interrupt(window, cx),
+        let can_skip = matches!(&confirm, Confirm::Stop | Confirm::Destructive(_));
+        Some(div().p_3().rounded_md().border_1().border_color(theme::warning()).flex().flex_col().gap_2()
+            .child(div().flex().items_center().gap_2()
+                .child(div().flex_1().min_w_0().text_sm().child(text))
+                .child(Button::new("confirm-cancel").small().ghost().label(tr("cancel")).on_click(cx.listener(|this, _, window, cx| {
+                    this.confirm = None;
+                    this.confirm_no_ask = false;
+                    this.composer.update(cx, |input, cx| input.focus(window, cx));
+                    cx.notify();
+                })))
+                .child(Button::new("confirm-ok").small().primary().label(action).on_click(cx.listener(move |this, _, window, cx| match &confirm {
+                Confirm::Stop => { if this.can_interrupt() { this.remember_skip_chat_confirmations(cx); this.interrupt(window, cx); } },
                 Confirm::Destructive(text) => {
                     // Só vale para o texto que a pessoa viu no aviso.
-                    if this.composer.read(cx).value().as_ref() == text { this.submit(false, true, window, cx); }
+                    if this.composer.read(cx).value().as_ref() == text { this.remember_skip_chat_confirmations(cx); this.submit(false, true, window, cx); }
                     else { this.confirm = None; cx.notify(); }
                 }
                 Confirm::Replace(name) => { this.confirm = None; this.fill_command(&name.clone(), false, window, cx); }
                 Confirm::Prefill(text) => { this.confirm = None; this.prefill(&text.clone(), false, window, cx); }
                 Confirm::Shortcut(_, shortcut) => { this.confirm = None; this.run_shortcut(shortcut.clone(), true, window, cx); }
                 Confirm::Reload => { this.confirm = None; this.reload(cx); }
-            })))
+                }))))
+            .when(can_skip, |el| el.child(Checkbox::new("confirm-no-ask").small().label(tr("confirm_no_ask_actions"))
+                .checked(self.confirm_no_ask).on_click(cx.listener(|this, checked: &bool, _, cx| { this.confirm_no_ask = *checked; cx.notify(); }))))
             .into_any_element())
+    }
+
+    fn remember_skip_chat_confirmations(&mut self, cx: &mut Context<Self>) {
+        if !self.confirm_no_ask { return; }
+        let mut next = appearance::get();
+        next.skip_chat_confirmations = true;
+        self.apply_appearance(next, true, cx);
+        self.confirm_no_ask = false;
     }
 
     fn render_suggestions(&self, suggestions: &[CommandInfo], cx: &mut Context<Self>) -> AnyElement {
@@ -3515,7 +3534,7 @@ impl Hangar {
             .capture_action(cx.listener(|this, _: &MoveUp, _, cx| this.move_suggestion(-1, cx)))
             .capture_action(cx.listener(|this, _: &MoveDown, _, cx| this.move_suggestion(1, cx)))
             .capture_action(cx.listener(|this, _: &IndentInline, window, cx| this.tab(window, cx)))
-            .capture_action(cx.listener(|this, _: &Escape, _, cx| this.escape(cx)))
+                .capture_action(cx.listener(|this, _: &Escape, window, cx| this.escape(window, cx)))
             .child(textarea);
 
         // Aviso e sugestões seguem o que se digita: ficam presos à borda de cima, sem cortina. Os painéis abertos por
@@ -3595,7 +3614,7 @@ impl Hangar {
             Button::new("stop").custom(ButtonCustomVariant::new(cx).color(theme::elevated()).foreground(theme::danger()).hover(theme::raised()).active(theme::raised()))
                 .bg(theme::elevated()).child(div().size(px(10.)).rounded(px(2.)).bg(theme::danger())).size(px(30.)).rounded_full()
                 .tooltip(tr("stop_hint")).accessibility_label(tr("stop")).disabled(stopping)
-                .on_click(cx.listener(|this, _, _, cx| this.request_stop(cx)))
+                .on_click(cx.listener(|this, _, window, cx| this.request_stop(window, cx)))
         } else {
             let enabled = !blocked && has_input;
             // Colado: botão claro com a seta na cor do fundo; caixa solta: destaque, como nos mocks.
@@ -3682,13 +3701,17 @@ impl Hangar {
     }
 
     // Esc fecha o que está aberto sobre o campo; sem nada aberto e com a sessão trabalhando, pede para interromper.
-    fn escape(&mut self, cx: &mut Context<Self>) {
-        if self.confirm.is_some() { self.confirm = None; }
+    fn escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.confirm.is_some() { self.confirm = None; self.confirm_no_ask = false; }
+        else if self.cancel_machine_rename() {}
         else if self.mention_is_open(cx) { self.mention.close(); }
         else if !self.visible_suggestions(cx).is_empty() { self.suggest_dismissed = Some(self.composer.read(cx).value().to_string()); }
         else if self.close_popups() {}
         else if self.side_menu_escape(cx) {}
-        else if self.can_interrupt() { self.confirm = Some(Confirm::Stop); }
+        else if self.can_interrupt() {
+            if appearance::get().skip_chat_confirmations { self.interrupt(window, cx); }
+            else { self.confirm = Some(Confirm::Stop); self.confirm_no_ask = false; }
+        }
         else { return; }
         cx.stop_propagation();
         cx.notify();

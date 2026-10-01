@@ -57,6 +57,7 @@ import { cachePrazo } from '../lib/cachePrazo';
   import SlashSuggest from './SlashSuggest.svelte';
   import CommandSheet from './CommandSheet.svelte';
   import ConfirmSheet from './ConfirmSheet.svelte';
+  import { skipChatConfirmations, rememberSkipChatConfirmations } from '../lib/confirmActions';
   import DitadoEstiloPopover from './DitadoEstiloPopover.svelte';
   import { ditadoEstilo } from '../lib/ditadoEstilo.svelte';
   import { estilosDitado, type EstiloDitado } from '@hangar/core';
@@ -2426,7 +2427,7 @@ import { cachePrazo } from '../lib/cachePrazo';
         {#if podeInterromper && !hasInput}
           <!-- Pensando + input vazio -> o slot vira STOP. Ao digitar/colar algo, volta a ser SEND
                (enfileira a msg). Um slot so -> ganha espaco. -->
-          <button class="stop-btn" onclick={() => (confirmStopOpen = true)} aria-label={m.composer_interromper_aria()}>
+          <button class="stop-btn" onclick={() => { if (skipChatConfirmations()) onInterrupt(); else confirmStopOpen = true; }} aria-label={m.composer_interromper_aria()}>
             <IconInterrupt size={18} />
           </button>
         {:else}
@@ -2657,6 +2658,8 @@ import { cachePrazo } from '../lib/cachePrazo';
     message={m.composer_interromper_msg()}
     confirmLabel={m.composer_interromper()}
     danger={true}
+    skipLabel={m.confirm_no_ask_actions()}
+    onSkip={rememberSkipChatConfirmations}
     onConfirm={onInterrupt}
     onClose={() => (confirmStopOpen = false)}
   />
