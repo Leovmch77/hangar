@@ -1,6 +1,6 @@
 import { useCallback, useMemo, useRef, type ReactNode } from 'react';
-import { Text, View } from 'react-native';
-import { StyleSheet } from 'react-native-unistyles';
+import { Text, View, useWindowDimensions } from 'react-native';
+import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { LegendList } from '@legendapp/list/react-native';
 import { UserBubble } from './UserBubble';
 import { AssistantBubble } from './AssistantBubble';
@@ -8,8 +8,9 @@ import { PreviewBubble } from './PreviewBubble';
 import { ToolGroup } from './tools/ToolGroup';
 import { ToolDetailSheet, type ToolDetailHandle } from './tools/ToolDetailSheet';
 import { foldConversation, type ConversationRow } from './tools/fold';
-import { agruparConversa, entraNoPensamento, planDisplayText, type ChatEvent, type SessionInfo } from '@hangar/core';
+import { agruparConversa, entraNoPensamento, foldTasks, hexParaRgb, planDisplayText, type ChatEvent, type SessionInfo } from '@hangar/core';
 import { useAparencia } from '../stores/aparencia';
+import { TaskList } from './TaskList';
 import type { PendingMsg } from './pending';
 import * as m from '../paraglide/messages';
 
@@ -32,6 +33,8 @@ interface Props {
   optionsSlot?: ReactNode;
   sessionName?: string;
   serverId?: string;
+  // Altura da caixa que flutua por cima do fim da lista: o último item rola até ficar acima dela.
+  bottomInset?: number;
 }
 
 // Bolha sem texto não vira item nenhum. O tool_result é descartado pelo agruparConversa (entra na
@@ -39,6 +42,29 @@ interface Props {
 function visivel(ev: ChatEvent): boolean {
   if (ev.kind === 'user_msg' || ev.kind === 'assistant_msg') return !!ev.text;
   return true;
+}
+
+const SEM_TAREFAS: ReturnType<typeof foldTasks> = [];
+const ehTask = (ev: ChatEvent) => ev.kind === 'tool_use' && (ev.tool_name === 'TaskCreate' || ev.tool_name === 'TaskUpdate');
+
+// Com a Lista de tarefas ligada, as chamadas de tarefa saem da conversa e o bloco entra ONDE a
+// última delas aconteceu: logo depois da linha que tem o evento anterior a ela (como o web).
+function comTarefas(rows: ConversationRow[], eventos: ChatEvent[]): ConversationRow[] {
+  let ancora: string | null = null;
+  let tem = false;
+  for (let i = eventos.length - 1; i >= 0 && !tem; i--) {
+    if (!ehTask(eventos[i])) continue;
+    tem = true;
+    for (let j = i - 1; j >= 0; j--) {
+      if (!ehTask(eventos[j]) && eventos[j].kind !== 'tool_result') { ancora = eventos[j].id; break; }
+    }
+  }
+  if (!tem) return rows;
+  const pos = ancora === null ? -1
+    : rows.findIndex((r) => (r.type === 'event' ? r.ev.id === ancora : r.type === 'fold' && r.parts.some((p) => p.id === ancora)));
+  const out = [...rows];
+  out.splice(pos + 1, 0, { type: 'tasks', id: 'tasks' });
+  return out;
 }
 
 export function MessageList({
@@ -53,11 +79,17 @@ export function MessageList({
   optionsSlot,
   sessionName,
   serverId,
+  bottomInset = 0,
 }: Props) {
   const codex = session?.provider === 'codex';
   const visiblePreview = codex ? planDisplayText(preview) : preview;
   const detail = useRef<ToolDetailHandle>(null);
   const pref = useAparencia((s) => s.pensamentoTools);
+  const look = useAparencia((s) => s.ferramentas);
+  const tarefasLigadas = useAparencia((s) => s.tarefas);
+  const folha = useAparencia((s) => (s.leitura === 'sheet' ? s.solidezFolha : null));
+  const { theme } = useUnistyles();
+  const { width } = useWindowDimensions();
   const results = useMemo(() => {
     const mapa = new Map<string, ChatEvent>();
     for (const e of events) if (e.kind === 'tool_result' && e.tool_use_id) mapa.set(e.tool_use_id, e);
@@ -71,16 +103,23 @@ export function MessageList({
   const resultDe = useCallback((t: ChatEvent) => results.get(t.tool_use_id ?? '') ?? null, [results]);
   // Layout do nativo: o que vem entre duas mensagens (raciocínio, chamadas, grupos) vira UM trecho
   // dobrado. O agrupamento continua o do core; o foldConversation só junta o desenho.
-  const data = useMemo(
-    () => foldConversation(agruparConversa(events.filter(visivel), { entraNoPensamento: (n) => entraNoPensamento(pref, n) })),
-    [events, pref],
+  const tasks = useMemo(
+    () => (tarefasLigadas ? foldTasks(events, (id) => results.get(id)) : SEM_TAREFAS),
+    [tarefasLigadas, events, results],
   );
+  const data = useMemo(() => {
+    const vis = events.filter((e) => visivel(e) && !(tarefasLigadas && ehTask(e)));
+    const rows = foldConversation(agruparConversa(vis, { entraNoPensamento: (n) => entraNoPensamento(pref, n) }), look === 'tree');
+    return tarefasLigadas && tasks.length ? comTarefas(rows, events) : rows;
+  }, [events, pref, look, tarefasLigadas, tasks.length]);
   const abrirDetalhe = useCallback((ev: ChatEvent) => detail.current?.abrir(ev), []);
 
   const renderItem = useCallback(({ item }: { item: ConversationRow }) => {
     switch (item.type) {
       case 'fold':
-        return <ToolGroup parts={item.parts} resultOf={resultDe} onAbrir={abrirDetalhe} />;
+        return <ToolGroup parts={item.parts} resultOf={resultDe} onAbrir={abrirDetalhe} look={look} />;
+      case 'tasks':
+        return <TaskList tasks={tasks} />;
       case 'event': {
         const ev = item.ev;
         if (ev.kind === 'user_msg') {
@@ -116,10 +155,21 @@ export function MessageList({
         return nunca;
       }
     }
-  }, [resultDe, abrirDetalhe, sessionName, serverId]);
+  }, [resultDe, abrirDetalhe, sessionName, serverId, look, tasks]);
+
+  // Largura da coluna (Aparência › Texto da conversa): abaixo de 100% a conversa estreita no meio.
+  const recuo = ((width - 2 * theme.base.space[4]) * (1 - theme.conversa.coluna)) / 2;
+  const elevado = hexParaRgb(theme.tokens.bg.elevated);
 
   return (
-    <>
+    <View style={styles.area}>
+    {/* Leitura Folha: a folha atrás da conversa; a Solidez da folha diz quanto ela tapa o fundo. */}
+    {folha !== null && elevado ? (
+      <View
+        pointerEvents="none"
+        style={[styles.folha, { backgroundColor: `rgba(${elevado.join(',')},${folha})`, left: recuo + theme.base.space[2], right: recuo + theme.base.space[2] }]}
+      />
+    ) : null}
     <LegendList
       data={data}
       keyExtractor={(i) => i.id}
@@ -133,20 +183,19 @@ export function MessageList({
       keyboardShouldPersistTaps="handled"
       onStartReached={onLoadOlder}
       onStartReachedThreshold={1}
-      contentContainerStyle={styles.content}
+      contentContainerStyle={[styles.content, recuo > 0 && { paddingHorizontal: theme.base.space[4] + recuo }]}
+      // O histórico antigo carrega pelo topo: o aviso da falha fica lá, não perto do composer.
+      ListHeaderComponent={
+        olderFailed === 'failed' ? (
+          <Text style={styles.gap} onPress={onLoadOlder} accessibilityRole="button">
+            {m.chat_historico_antigo()}
+          </Text>
+        ) : olderFailed === 'unjoinable' ? (
+          <Text style={styles.gap}>{m.chat_sem_historico_anterior()}</Text>
+        ) : null
+      }
       ListFooterComponent={
         <View style={styles.footer}>
-          {olderFailed === 'failed' ? (
-            <Text
-              style={styles.gap}
-              onPress={onLoadOlder}
-              accessibilityRole="button"
-            >
-              {m.chat_historico_antigo()}
-            </Text>
-          ) : olderFailed === 'unjoinable' ? (
-            <Text style={styles.gap}>{m.chat_sem_historico_anterior()}</Text>
-          ) : null}
           {pending.map((p) => (
             <View key={p.id} style={[styles.pending, p.solid && styles.pendingSolid]}>
               <UserBubble text={p.text} sessionName={sessionName} />
@@ -154,16 +203,19 @@ export function MessageList({
           ))}
           {optionsSlot ?? null}
           {visiblePreview ? <PreviewBubble text={visiblePreview} md={previewMd} full={previewFull} /> : null}
+          {bottomInset > 0 ? <View style={{ height: bottomInset }} /> : null}
         </View>
       }
       accessibilityLabel={m.msg_aria_mensagens()}
     />
     <ToolDetailSheet ref={detail} resultOf={resultDe} />
-    </>
+    </View>
   );
 }
 
 const styles = StyleSheet.create((theme) => ({
+  area: { flex: 1 },
+  folha: { position: 'absolute', top: theme.base.space[2], bottom: 0, borderRadius: 16 },
   // Resposta sem bolha ocupa a largura: a margem lateral é o que separa o texto da borda da tela.
   content: {
     paddingHorizontal: theme.base.space[4],

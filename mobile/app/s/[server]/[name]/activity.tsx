@@ -343,9 +343,9 @@ const styles = StyleSheet.create((theme) => ({
   agentBody: { flex: 1, gap: 3, minWidth: 0 },
   agentHead: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[1], minWidth: 0 },
   agentDesc: { fontSize: theme.base.text.sm, minWidth: 0, flexShrink: 1 },
-  tag: { fontFamily: theme.base.fontMono, fontSize: 10, paddingHorizontal: 6, paddingVertical: 1, borderRadius: theme.base.radius.full, overflow: 'hidden' },
+  tag: { fontFamily: theme.base.fontMono, fontSize: 11, paddingHorizontal: 6, paddingVertical: 1, borderRadius: theme.base.radius.full, overflow: 'hidden' },
   tagMuted: {},
-  agentNow: { fontFamily: theme.base.fontMono, fontSize: 10 },
+  agentNow: { fontFamily: theme.base.fontMono, fontSize: 11 },
   chevron: { fontSize: theme.base.text.base, lineHeight: theme.base.text.base },
   error: { fontSize: theme.base.text.sm, textAlign: 'center', padding: theme.base.space[4] },
 }));

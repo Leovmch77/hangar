@@ -99,11 +99,11 @@ const styles = StyleSheet.create((theme) => ({
   },
   path: {
     flex: 1,
-    fontSize: 12,
+    fontSize: 13,
     fontWeight: '500',
   },
   naoSalvo: {
-    fontSize: 11,
+    fontSize: 12,
   },
   btn: {
     paddingHorizontal: 12,
@@ -113,7 +113,7 @@ const styles = StyleSheet.create((theme) => ({
     borderColor: theme.tokens.border.subtle,
   },
   btnTxt: {
-    fontSize: 12,
+    fontSize: 13,
     fontWeight: '500',
   },
   btnPrim: {
@@ -123,7 +123,7 @@ const styles = StyleSheet.create((theme) => ({
     backgroundColor: theme.tokens.accent.base,
   },
   btnPrimTxt: {
-    fontSize: 12,
+    fontSize: 13,
     fontWeight: '600',
   },
   salvo: {

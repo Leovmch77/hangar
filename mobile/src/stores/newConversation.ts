@@ -1,14 +1,14 @@
 import { create } from 'zustand';
 import {
   basename, createSessionForServer, fetchSessionsForServer, getCreationProgress, getHistory,
-  sendInputForServer, transitionFirstConversation,
+  sendInputForServer, transitionFirstConversation, uploadFileForServer,
 } from '@hangar/core';
 import type {
   ChatEvent, CreateSessionBody, FirstConversationAttempt, FirstConversationEvent, Server, SessionInfo,
 } from '@hangar/core';
 import { prefs } from './prefs';
 import { useServers } from './servers';
-import { readDraft, writeDraft } from './drafts';
+import { clearDraft, readDraft, withoutUpload, writeDraft, type DraftAttachment } from './drafts';
 import { submitConversationDraft } from './chat';
 import * as m from '../paraglide/messages';
 
@@ -26,7 +26,37 @@ export type NewConversationInput = {
   // Sem `name`, o store gera o nome estável; com ele, o nome escolhido fica congelado na tentativa.
   body: Omit<CreateSessionBody, 'name' | 'cwd'> & { cwd: string; name?: string };
   text: string;
+  // Escolhido antes de a sessão existir: o upload é por sessão, então ele sobe depois que ela nasce.
+  attachment?: DraftAttachment | null;
 };
+
+export const attachInsert = (attach: DraftAttachment, path: string) =>
+  `📎 ${attach.kind === 'image' ? m.board_imagem() : m.board_arquivo()}: ${path}`;
+export const withAttach = (text: string, insert: string) => (text ? `${text} — ${insert}` : insert);
+
+// Campo extra da tentativa: as transições do core espalham o objeto e o preservam.
+export function attemptAttachment(attempt: FirstConversationAttempt): DraftAttachment | null {
+  const a = (attempt as { attachment?: Partial<DraftAttachment> | null }).attachment;
+  return a && typeof a.uri === 'string' && typeof a.name === 'string' && typeof a.mime === 'string'
+    && (a.kind === 'image' || a.kind === 'file') ? a as DraftAttachment : null;
+}
+
+// O caminho do upload mora no rascunho da sessão, onde o composer da conversa também o grava.
+function uploadedPath(attempt: FirstConversationAttempt, attach: DraftAttachment): string | null {
+  if (!attempt.sessionName) return null;
+  let kept: DraftAttachment | null | undefined;
+  try { kept = readDraft(attempt.serverId, attempt.sessionName)?.attachment; } catch { return null; }
+  const done = kept?.uploadedFor;
+  return kept?.uri === attach.uri && kept.uploadedPath && done?.serverId === attempt.serverId
+    && done.name === attempt.sessionName ? kept.uploadedPath : null;
+}
+
+// A primeira mensagem como ela sai: o texto digitado e, com o anexo já enviado, a citação dele.
+export function firstInputMessage(attempt: FirstConversationAttempt): string {
+  const attach = attemptAttachment(attempt);
+  const path = attach && uploadedPath(attempt, attach);
+  return attach && path ? withAttach(attempt.text.trim(), attachInsert(attach, path)) : attempt.text;
+}
 
 type State = {
   attempts: Record<string, FirstConversationAttempt>;
@@ -63,7 +93,7 @@ function persist(attempt: FirstConversationAttempt): void {
   if (attempt.sessionName && !readDraft(attempt.serverId, attempt.sessionName)) {
     writeDraft(attempt.serverId, attempt.sessionName, {
       version: 1, text: attempt.phase === 'sent' ? '' : attempt.text, revision: 1,
-      transcript: null, attachment: null, submission: null,
+      transcript: null, attachment: attempt.phase === 'sent' ? null : attemptAttachment(attempt), submission: null,
     });
   }
   useNewConversation.setState((s) => ({ attempts: { ...s.attempts, [attempt.serverId]: attempt } }));
@@ -146,10 +176,10 @@ async function runCreate(serverId: string, input: NewConversationInput): Promise
     try { taken = new Set((await fetchSessionsForServer(server)).map((s) => s.name)); } catch { /* backend decide */ }
     while (taken.has(stableName(input.body.cwd, id))) id = newId();
   }
-  const draft: FirstConversationAttempt = {
-    id, serverId, text: input.text, phase: 'draft', sessionName: null,
+  const draft: FirstConversationAttempt = Object.assign({
+    id, serverId, text: input.text, phase: 'draft' as const, sessionName: null,
     body: { ...input.body, name: explicit || stableName(input.body.cwd, id) },
-  };
+  }, input.attachment ? { attachment: input.attachment } : {});
   const creating = transitionFirstConversation(draft, { type: 'begin' });
   try { persist(creating); } catch {
     setIssue(serverId, { kind: 'local', message: m.nova_conversa_salvar_erro() });
@@ -205,6 +235,50 @@ export function sendFirstInput(serverId: string, attemptId: string): Promise<voi
     if (!attempt || attempt.id !== attemptId || attempt.phase !== 'created' || !attempt.sessionName) return;
     const server = serverById(serverId);
     if (!server) { setIssue(serverId, { kind: 'local', message: m.nova_conversa_servidor_ausente() }); return; }
+    const sessionName = attempt.sessionName;
+    const attach = attemptAttachment(attempt);
+    let path = attach && uploadedPath(attempt, attach);
+    if (attach && !path) {
+      try {
+        const blob = await (await fetch(attach.uri)).blob();
+        path = (await uploadFileForServer(server, sessionName, new File([blob], attach.name, { type: attach.mime }))).path;
+      } catch (cause) {
+        // A sessão existe; o anexo segue na tentativa e no rascunho dela, para reenviar aqui ou na conversa.
+        setIssue(serverId, { kind: 'local', message: m.nova_conversa_anexo_falhou({ erro: messageOf(cause) }) });
+        return;
+      }
+      try {
+        const kept = readDraft(serverId, sessionName);
+        // Outro anexo escolhido na conversa não é trocado por este.
+        if (!kept?.attachment || kept.attachment.uri === attach.uri) {
+          writeDraft(serverId, sessionName, {
+            ...(kept ?? { version: 1, text: attempt.text, revision: 1, transcript: null, attachment: null, submission: null }),
+            attachment: { ...withoutUpload(attach), uploadedPath: path, uploadedFor: { serverId, name: sessionName, transcript: null } },
+          });
+        }
+      } catch {
+        setIssue(serverId, { kind: 'local', message: m.nova_conversa_salvar_erro() });
+        return;
+      }
+    }
+    const message = attach && path ? withAttach(attempt.text.trim(), attachInsert(attach, path)) : attempt.text;
+    // Com anexo o texto enviado difere do rascunho; a revisão explícita deixa o ACK limpar o campo.
+    let draftRevision: number | undefined;
+    if (attach) {
+      try {
+        const current = readDraft(serverId, sessionName);
+        if (current && current.text.trim() === attempt.text.trim()) draftRevision = current.revision;
+      } catch { /* sem revisão, o ACK só não limpa o campo */ }
+    }
+    const releaseAttachment = () => {
+      if (!attach) return;
+      try {
+        const current = readDraft(serverId, sessionName);
+        if (current?.attachment?.uri !== attach.uri) return;
+        if (!current.text && !current.submission) clearDraft(serverId, sessionName);
+        else writeDraft(serverId, sessionName, { ...current, attachment: null });
+      } catch { /* o anexo já foi; sobra só a prévia no rascunho */ }
+    };
     let sending: FirstConversationAttempt | null;
     try { sending = apply(attempt, { type: 'send_begin' }); } catch {
       setIssue(serverId, { kind: 'local', message: m.nova_conversa_salvar_erro() });
@@ -217,12 +291,13 @@ export function sendFirstInput(serverId: string, attemptId: string): Promise<voi
     let posted = false;
     let acked = false;
     try {
-      await submitConversationDraft(serverId, attempt.sessionName, sending.text,
+      await submitConversationDraft(serverId, sessionName, message,
         async () => {
           posted = true;
-          await sendInputForServer(server, attempt.sessionName!, sending.text);
+          await sendInputForServer(server, sessionName, message);
           acked = true;
-        });
+          releaseAttachment();
+        }, draftRevision);
     } catch (cause) {
       if (!posted) {
         try { apply(sending, { type: 'send_rejected' }); } catch {

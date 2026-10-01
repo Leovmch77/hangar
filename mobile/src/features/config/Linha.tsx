@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react';
+import { Children, Fragment, isValidElement, type ReactNode } from 'react';
 import { Pressable, Text, View } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { Icon, type IconName } from '../../ui/Icon';
@@ -56,10 +56,48 @@ export function Linha({ titulo, descricao, icon, onPress, onLongPress, children,
   );
 }
 
+/**
+ * Grupo de linhas no formato de lista agrupada do iOS: um bloco de vidro só, linhas separadas por
+ * divisória fina. Filho nulo some; sem nenhuma linha, a seção (e o título) não aparece.
+ */
+export function Section({ title, children }: { title?: string; children: ReactNode }) {
+  const rows = Children.toArray(children);
+  if (rows.length === 0) return null;
+  return (
+    <View style={styles.secao}>
+      {title ? (
+        <Text style={styles.secaoTitulo} accessibilityRole="header">
+          {title}
+        </Text>
+      ) : null}
+      <View style={styles.grupo}>
+        {rows.map((row, i) => (
+          <Fragment key={isValidElement(row) && row.key != null ? row.key : i}>
+            {i > 0 ? <View style={styles.divisoria} /> : null}
+            {row}
+          </Fragment>
+        ))}
+      </View>
+    </View>
+  );
+}
+
 const styles = StyleSheet.create((theme) => ({
+  secao: { gap: theme.base.space[1] },
+  secaoTitulo: {
+    fontSize: theme.base.text.xs,
+    fontWeight: '600',
+    color: theme.tokens.text.muted,
+    paddingHorizontal: theme.base.space[3],
+  },
+  // overflow: o realce de toque da primeira e da última linha não vaza pelos cantos.
+  grupo: { backgroundColor: superficie(theme, 0.6), borderRadius: theme.base.radius.lg, overflow: 'hidden' },
+  divisoria: {
+    height: StyleSheet.hairlineWidth,
+    marginLeft: theme.base.space[3],
+    backgroundColor: theme.tokens.border.default,
+  },
   linha: {
-    backgroundColor: superficie(theme, 0.6),
-    borderRadius: theme.base.radius.lg,
     paddingHorizontal: theme.base.space[3],
     paddingVertical: theme.base.space[3],
     gap: theme.base.space[3],

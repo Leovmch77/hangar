@@ -70,7 +70,7 @@ const styles = StyleSheet.create((theme) => ({
   root: { gap: theme.base.space[2] },
   row: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', minHeight: 44, gap: 12 },
   label: { color: theme.tokens.text.primary, flexShrink: 1 },
-  hint: { color: theme.tokens.text.secondary, fontSize: 12 },
-  error: { color: theme.tokens.status.error, fontSize: 12 },
+  hint: { color: theme.tokens.text.secondary, fontSize: 13 },
+  error: { color: theme.tokens.status.error, fontSize: 13 },
   retry: { minHeight: 44, justifyContent: 'center' },
 }));

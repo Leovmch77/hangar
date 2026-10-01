@@ -6,20 +6,10 @@ import type { AggSession } from '@hangar/core';
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
-const longPress = vi.hoisted(() => ({ enabled: vi.fn() }));
-
-vi.mock('react-native-gesture-handler', () => {
-  const chain: Record<string, unknown> = {};
-  for (const k of ['minDuration', 'runOnJS', 'onStart']) chain[k] = () => chain;
-  chain.enabled = (on: boolean) => {
-    longPress.enabled(on);
-    return chain;
-  };
-  return { Gesture: { LongPress: () => chain }, GestureDetector: ({ children }: { children: ReactNode }) => children };
-});
-vi.mock('react-native-gesture-handler/ReanimatedSwipeable', () => ({
-  default: ({ children, renderRightActions }: { children: ReactNode; renderRightActions?: () => ReactNode }) =>
-    createElement('div', null, renderRightActions?.(), children),
+// O menu expõe os ids das ações: são o único caminho visível pro Git, Renomear e Excluir.
+vi.mock('@react-native-menu/menu', () => ({
+  MenuView: ({ children, actions }: { children: ReactNode; actions: { id: string }[] }) =>
+    createElement('div', { 'data-menu': actions.map((a) => a.id).join(' ') }, children),
 }));
 // O mock comum passa `style` direto ao DOM, e o da linha é função de `pressed`.
 vi.mock('react-native', async (original) => ({
@@ -31,7 +21,6 @@ vi.mock('expo-haptics', () => ({ impactAsync: () => Promise.resolve(), ImpactFee
 vi.mock('../../ui/Icon', () => ({ Icon: () => null }));
 vi.mock('../../ui/HangarMark', () => ({ HangarMark: () => null }));
 vi.mock('../plan/PlanBar', () => ({ PlanBar: () => null }));
-vi.mock('./SessionMenu', () => ({ SessionMenu: ({ children }: { children: ReactNode }) => children }));
 vi.mock('../../paraglide/messages', () => ({
   ask_perguntas: () => 'ask_perguntas',
   orq_row_badge: () => 'orq_row_badge',
@@ -65,28 +54,24 @@ async function render(session: AggSession) {
 }
 
 describe('SessionRow', () => {
-  it('orquestrador: selo próprio, sem excluir no arrasto e sem menu de toque longo', async () => {
-    longPress.enabled.mockClear();
+  it('orquestrador sem pasta: selo próprio e sem menu de toque longo', async () => {
     const { container, root } = await render({ ...base, name: 'g1-orq', provider: 'orq', pair_gid: 'g1', orq_arbiter: 'arb' });
     expect(container.textContent).toContain('orq_row_badge');
-    expect(container.querySelector('[aria-label="sessao_excluir_curto"]')).toBeNull();
-    expect(longPress.enabled).toHaveBeenLastCalledWith(false);
+    expect(container.querySelector('[data-menu]')).toBeNull();
     act(() => root.unmount());
   });
 
-  it('orquestrador com cwd: Git no arrasto continua, excluir não', async () => {
+  it('orquestrador com cwd: menu só com Git', async () => {
     const { container, root } = await render({ ...base, name: 'g1-orq', provider: 'orq', pair_gid: 'g1', orq_arbiter: 'arb', cwd: '/repo' });
-    expect(container.querySelector('[aria-label="Git"]')).not.toBeNull();
-    expect(container.querySelector('[aria-label="sessao_excluir_curto"]')).toBeNull();
+    expect(container.querySelector('[data-menu]')?.getAttribute('data-menu')).toBe('git');
     act(() => root.unmount());
   });
 
-  it('sessão comum continua com excluir e toque longo', async () => {
-    longPress.enabled.mockClear();
+  it('sessão comum: renomear e excluir no toque longo, sem botões de arrasto', async () => {
     const { container, root } = await render({ ...base, name: 'api', provider: 'claude' });
     expect(container.textContent).not.toContain('orq_row_badge');
-    expect(container.querySelector('[aria-label="sessao_excluir_curto"]')).not.toBeNull();
-    expect(longPress.enabled).toHaveBeenLastCalledWith(true);
+    expect(container.querySelector('[data-menu]')?.getAttribute('data-menu')).toBe('rename delete');
+    expect(container.querySelector('[aria-label="sessao_excluir_curto"]')).toBeNull();
     act(() => root.unmount());
   });
 

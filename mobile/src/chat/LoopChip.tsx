@@ -46,7 +46,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   text: {
-    fontSize: 11,
+    fontSize: 12,
     fontWeight: '600',
     fontVariant: ['tabular-nums'],
   },

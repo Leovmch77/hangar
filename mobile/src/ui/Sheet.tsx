@@ -1,6 +1,7 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, type ReactNode } from 'react';
 import { Platform, View } from 'react-native';
 import { TrueSheet, type SheetDetent } from '@lodev09/react-native-true-sheet';
+import { isLiquidGlassAvailable } from 'expo-glass-effect';
 import { useUnistyles } from 'react-native-unistyles';
 import { alphaDoVidro, useReduceTransparency } from './Glass';
 import { toast } from './Toast';
@@ -54,13 +55,15 @@ export const Sheet = forwardRef<TrueSheet, Props>(function Sheet({ sizes = ['aut
   }, [open]);
 
   const [r, g, b] = theme.tokens.glass.panelRgb;
+  const vidroNativo = Platform.OS === 'ios' && isLiquidGlassAvailable();
   return (
     <TrueSheet
       ref={innerRef}
       detents={sizes.slice(0, 3).map((s) => DETENT[s])}
-      cornerRadius={theme.base.radius.xl}
-      backgroundBlur={reduzir ? undefined : rt.themeName === 'dark' ? 'dark' : 'light'}
-      backgroundColor={reduzir ? `rgb(${r},${g},${b})` : `rgba(${r},${g},${b},${alphaFolha(theme)})`}
+      // iOS 26: sem raio, cor e desfoque próprios a folha usa o vidro do sistema, igual às folhas nativas.
+      cornerRadius={vidroNativo ? undefined : theme.base.radius.xl}
+      backgroundBlur={reduzir || vidroNativo ? undefined : rt.themeName === 'dark' ? 'dark' : 'light'}
+      backgroundColor={reduzir ? `rgb(${r},${g},${b})` : vidroNativo ? undefined : `rgba(${r},${g},${b},${alphaFolha(theme)})`}
       grabber
       // A alça sobe e ganha uma faixa própria: no padrão (16 dp do topo) ela caía em cima do título
       // de toda folha, que começa logo ali.

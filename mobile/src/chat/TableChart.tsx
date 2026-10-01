@@ -54,8 +54,8 @@ export function TableChart({ tabela, coluna, onColuna }: Props) {
         barWidth={28}
         frontColor={theme.tokens.accent.base}
         formatYLabel={(label: string) => formatarValor(Number(label))}
-        yAxisTextStyle={{ color: theme.tokens.text.muted, fontSize: 10 }}
-        xAxisLabelTextStyle={{ color: theme.tokens.text.muted, fontSize: 10, width: 60 }}
+        yAxisTextStyle={{ color: theme.tokens.text.muted, fontSize: 11 }}
+        xAxisLabelTextStyle={{ color: theme.tokens.text.muted, fontSize: 11, width: 60 }}
         yAxisLabelWidth={56}
         yAxisThickness={1}
         xAxisThickness={1}
@@ -93,6 +93,6 @@ const styles = StyleSheet.create((theme) => ({
     fontWeight: '500',
   },
   selectorArrow: {
-    fontSize: 10,
+    fontSize: 11,
   },
 }));

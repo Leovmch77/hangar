@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { AccessibilityInfo, Platform, ScrollView, Text, View } from 'react-native';
+import { AccessibilityInfo, ActivityIndicator, Platform, ScrollView, Text, View } from 'react-native';
 import { StyleSheet } from 'react-native-unistyles';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { KeyboardAvoidingView } from 'react-native-keyboard-controller';
@@ -28,6 +28,9 @@ import type { Provider, SessionInfo } from '@hangar/core';
 import * as m from '../../../../src/paraglide/messages';
 
 // Tela de chat de uma sessão: histórico janelado + SSE ao vivo (store chat.ts).
+// A conversa para antes da curva de baixo da caixa: senão o texto vaza pelos cantos arredondados.
+const BORDA_DOCK = 20;
+
 export default function ChatScreen() {
   const router = useRouter();
   const params = useLocalSearchParams<{ server: string; name: string; askFallback?: string }>();
@@ -39,6 +42,8 @@ export default function ChatScreen() {
   const [servidorSumiu, setServidorSumiu] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(false);
+  // A conversa rola por baixo da caixa do composer: sem conteúdo atrás, o vidro vira caixa chapada.
+  const [dockH, setDockH] = useState(0);
   const existe = useServers((s) => s.servers.some((x) => x.id === serverId));
   const ready = useServers((s) => s.ready);
   const retido = useRef(false); // só quem reteve solta; zera nos dois caminhos
@@ -341,7 +346,7 @@ export default function ChatScreen() {
         {!servidorSumiu && problem ? (
           <View style={styles.problem}><SessionProblem problem={problem} detail={problemDetail} /></View>
         ) : null}
-        <View style={styles.inner}>
+        <View style={[styles.inner, { marginBottom: -Math.max(0, dockH - BORDA_DOCK) }]}>
           {servidorSumiu ? (
             <View style={styles.erro}>
               <Text style={styles.hint}>{m.chat_servidor_removido()}</Text>
@@ -386,7 +391,10 @@ export default function ChatScreen() {
               </Text>
             </View>
           ) : loading && !error ? (
-            <Text style={styles.hint}>{m.chat_carregando_historico()}</Text>
+            <View style={styles.carregando}>
+              <ActivityIndicator />
+              <Text style={styles.hint}>{m.chat_carregando_historico()}</Text>
+            </View>
           ) : error ? (
             <View style={styles.erro}>
               <Text style={styles.hint}>{error}</Text>
@@ -407,9 +415,11 @@ export default function ChatScreen() {
               optionsSlot={optionsSlot}
               sessionName={name}
               serverId={serverId}
+              bottomInset={dockH}
             />
           )}
         </View>
+        <View onLayout={(e) => setDockH(e.nativeEvent.layout.height)}>
         {sseRecusado && !servidorSumiu && !codexPreThread ? (
           <View style={styles.sseRecusado} accessibilityRole="alert">
             <Text style={styles.sseRecusadoTexto}>{m.chat_sse_recusado()}</Text>
@@ -433,10 +443,13 @@ export default function ChatScreen() {
                 <Composer key={rota} serverId={serverId} name={name} draft={draft?.route === rota ? draft.text : undefined}
                           firstInputId={firstInput?.id} firstInputSent={firstInput?.phase === 'sent'} sessionProvider={provider}
                           onStop={handleStop} stopping={stopping} />
-                {/* Linha de status do app de PC, colada embaixo da caixa: abre a folha de Uso. */}
-                <ComposerStatusLine key={`status:${rota}`} serverId={serverId} name={name} />
               </>
             )
+          : null}
+        </View>
+        {/* Linha de status do app de PC, colada embaixo da caixa e fora da área que a conversa cobre. */}
+        {!servidorSumiu && !codexPreThread && fetchedSession !== null && !orq
+          ? <ComposerStatusLine key={`status:${rota}`} serverId={serverId} name={name} />
           : null}
       </KeyboardAvoidingView>
     </Screen>
@@ -447,6 +460,7 @@ const styles = StyleSheet.create((theme) => ({
   body: {
     flex: 1,
   },
+  carregando: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8 },
   inner: {
     flex: 1,
   },
@@ -490,12 +504,21 @@ const styles = StyleSheet.create((theme) => ({
     fontSize: theme.base.text.sm,
     color: theme.tokens.text.muted,
   },
+  // Ação de recuperação tem cara de botão: texto azul solto passava por link.
   retry: {
     fontSize: theme.base.text.sm,
+    fontWeight: '600',
     color: theme.tokens.accent.base,
     textAlign: 'center',
-    minHeight: 44,
-    lineHeight: 44,
+    alignSelf: 'center',
+    minHeight: 40,
+    lineHeight: 38,
+    paddingHorizontal: theme.base.space[4],
+    marginVertical: theme.base.space[1],
+    borderWidth: 1,
+    borderColor: theme.tokens.accent.base,
+    borderRadius: theme.base.radius.full,
+    overflow: 'hidden',
   },
   problem: {
     paddingHorizontal: theme.base.space[3],

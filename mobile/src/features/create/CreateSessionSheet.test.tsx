@@ -71,6 +71,10 @@ vi.mock('../../ui/Sheet', () => ({ Sheet: ({ open = false, children, onDismiss }
     children, createElement('button', { onClick: queueDismiss }, 'fechar-folha'),
   ) : null;
 } }));
+vi.mock('../../ui/AnchoredPanel', () => ({
+  AnchoredPanel: ({ open, children }: { open: boolean; children: ReactNode }) =>
+    open ? createElement('div', { 'data-testid': 'folder-panel' }, children) : null,
+}));
 vi.mock('./CwdPicker', async (original) => {
   const { CwdPicker } = await original<typeof import('./CwdPicker')>();
   return { CwdPicker: (props: Parameters<typeof CwdPicker>[0]) => {
@@ -156,6 +160,16 @@ vi.mock('../../paraglide/messages', () => ({
   arquivo_ler_falhou: () => 'ler_falhou', arquivo_pasta_nao_encontrada: () => 'pasta_nao_encontrada',
   arquivo_sem_permissao: () => 'sem_permissao', arquivo_ilegivel: () => 'ilegivel',
   arquivo_raiz_nao_liberada: () => 'raiz_nao_liberada', arquivo_caminho_invalido: () => 'caminho_invalido',
+  native_create_roots: () => 'native_create_roots', native_create_roots_failed: () => 'native_create_roots_failed',
+  native_create_search: () => 'native_create_search', native_create_path: () => 'native_create_path',
+  native_create_use_folder: () => 'native_create_use_folder', native_create_computer_folder: () => 'native_create_computer_folder',
+  native_create_no_subfolders: () => 'native_create_no_subfolders', native_create_no_results: () => 'native_create_no_results',
+  native_create_open: ({ nome }: { nome: string }) => `native_create_open:${nome}`, native_create_use: () => 'native_create_use',
+  native_create_path_placeholder: () => 'native_create_path_placeholder', native_create_path_aria: () => 'native_create_path_aria',
+  native_retry: () => 'native_retry', cota_conta_no_limite: ({ janela }: { janela: string }) => `cota_conta_no_limite:${janela}`,
+  new_chat_account_switched: ({ conta }: { conta: string }) => `new_chat_account_switched:${conta}`,
+  native_dictation_active: () => 'native_dictation_active', native_dictation_level: () => 'native_dictation_level',
+  native_dictation_cancel: () => 'native_dictation_cancel',
   nova_conversa_placeholder: () => 'nova_conversa_placeholder', nova_conversa_enviar: () => 'nova_conversa_enviar',
   native_new_chat_folder: () => 'native_new_chat_folder', native_empty_chat_hint: () => 'native_empty_chat_hint',
   nova_conversa_opcoes: () => 'nova_conversa_opcoes', nova_conversa_sem_destino: () => 'nova_conversa_sem_destino',
@@ -455,7 +469,7 @@ describe('CreateSessionSheet Codex', () => {
     const container = document.createElement('div'); const root = createRoot(container);
     await act(async () => root.render(createElement(CreateSessionSheet)));
     expect(container.textContent).toContain('projeto_indisponivel');
-    expect(container.textContent).toContain('criar_avancado');
+    expect(container.textContent).toContain('native_create_computer_folder');
     expect(calls.create).not.toHaveBeenCalled();
     expect(calls.save).not.toHaveBeenCalled();
     root.unmount();
@@ -466,7 +480,7 @@ describe('CreateSessionSheet Codex', () => {
     const container = document.createElement('div'); const root = createRoot(container);
     await act(async () => root.render(createElement(CreateSessionSheet)));
     expect(container.textContent).toContain('401: unauthorized');
-    expect(container.textContent).toContain('criar_avancado');
+    expect(container.textContent).toContain('native_create_computer_folder');
     root.unmount();
   });
 

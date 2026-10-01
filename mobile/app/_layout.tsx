@@ -77,7 +77,8 @@ export default function Layout() {
               ? { presentation: 'card', headerShown: false }
               : { presentation: 'formSheet', headerShown: false, sheetAllowedDetents: [0.92], sheetGrabberVisible: true }}
           />
-          <Stack.Screen name="config" options={{ presentation: 'formSheet', headerShown: false, sheetAllowedDetents: [0.92], sheetGrabberVisible: true }} />
+          {/* Página inteira, como no desktop: são várias páginas com ida e volta, e na folha arrastar fechava tudo. */}
+          <Stack.Screen name="config" options={{ headerShown: false }} />
           <Stack.Screen name="s/[server]/[name]/ask" options={{ presentation: 'formSheet', headerShown: false, sheetAllowedDetents: [0.92], sheetGrabberVisible: true }} />
           <Stack.Screen name="s/[server]/[name]/activity" options={{ presentation: 'formSheet', headerShown: false, sheetAllowedDetents: [0.92], sheetGrabberVisible: true }} />
           <Stack.Screen name="s/[server]/[name]/loop" options={{ presentation: 'formSheet', headerShown: false, sheetAllowedDetents: [0.92], sheetGrabberVisible: true }} />
@@ -88,7 +89,7 @@ export default function Layout() {
           <Stack.Screen name="s/[server]/[name]/codex-limits" options={{ presentation: 'formSheet', headerShown: false, sheetAllowedDetents: [0.92], sheetGrabberVisible: true }} />
           <Stack.Screen name="s/[server]/[name]/bastao" options={{ presentation: 'formSheet', headerShown: false, sheetAllowedDetents: [0.92], sheetGrabberVisible: true }} />
         </Stack>
-        <Toaster position="bottom-center" />
+        <Toaster position="top-center" />
       </GestureHandlerRootView>
     </KeyboardProvider>
   );

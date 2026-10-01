@@ -95,7 +95,7 @@ const styles = StyleSheet.create((theme) => ({
     gap: theme.base.space[2],
   },
   txt: {
-    fontSize: theme.base.text.base,
+    fontSize: theme.base.text.base * theme.conversa.texto,
   },
   // Delegação por voz: borda fina em vez de cor, que fica para estado e aviso.
   voice: { borderWidth: 1, borderColor: theme.tokens.border.default },

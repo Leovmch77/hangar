@@ -16,8 +16,14 @@
           "NSAllowsArbitraryLoads": true
         },
         "NSLocalNetworkUsageDescription": "Conecta ao seu servidor Hangar na rede local.",
-        "NSCameraUsageDescription": "Lê o QR de pareamento do servidor.",
-        "NSMicrophoneUsageDescription": "Grava o ditado pro composer."
+        "NSCameraUsageDescription": "Lê o QR de pareamento do servidor e tira fotos para anexar na conversa.",
+        "NSMicrophoneUsageDescription": "Grava o ditado pro composer.",
+        "CFBundleDevelopmentRegion": "pt-BR",
+        "CFBundleLocalizations": [
+          "pt-BR",
+          "en"
+        ],
+        "NSPhotoLibraryUsageDescription": "Mostra suas fotos recentes para anexar na conversa."
       }
     },
     "android": {
@@ -59,6 +65,14 @@
         "expo-audio",
         {
           "microphonePermission": "Grava o ditado pro composer."
+        }
+      ],
+      [
+        "expo-media-library",
+        {
+          "photosPermission": "Mostra suas fotos recentes para anexar na conversa.",
+          "savePhotosPermission": "Salva imagens da conversa nas suas fotos.",
+          "isAccessMediaLocationEnabled": false
         }
       ]
     ],

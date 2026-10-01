@@ -6490,5 +6490,19 @@
   "conversa_conta_sem_cota": "The {conta} account is out of quota. Pick another account to send.",
   "conversa_conta_sem_cota_volta": "The {conta} account is out of quota; it resets in {quando}. Pick another account to send.",
   "conversa_ja_aberta": "This conversation is already open in session {sessao}.",
-  "conversa_ja_aberta_sem_nome": "This conversation is already open in another session."
+  "conversa_ja_aberta_sem_nome": "This conversation is already open in another session.",
+  "config_geral_lead": "Language and session list on this device. Applies here only.",
+  "config_aparencia_lead": "How Hangar looks on this device. Applies here only.",
+  "aparencia_efeito_aplicando": "Applying the effect to the image… Pick another to cancel.",
+  "aparencia_efeito_erro": "Background effect not applied: {reason}. The image stays without an effect.",
+  "aparencia_efeito_webview": "the built-in image processor failed",
+  "aparencia_efeito_ilegivel": "the image could not be read",
+  "new_chat_account_switched": "{conta} was out of quota; switched to the account with the most room.",
+  "nova_conversa_anexo_falhou": "The conversation was created, but the attachment didn't upload ({erro}). It's still saved: resend here or open the conversation and send it from there.",
+  "nova_conversa_so_terminal": "{provider} only opens in the terminal",
+  "home_usage_today": "Today",
+  "mobile_sync_register_elsewhere": "Creating the sync account is not available on the phone yet: create it from the desktop app or from this machine’s page in a browser. Once it exists, re-enabling and disabling work here.",
+  "composer_adicionar_arquivos": "Add files",
+  "composer_sem_acesso_camera": "No camera access. Allow it in the device settings and tap attach again.",
+  "config_aparencia_estilo_dica": "Compact sets text, line height, code, column and tool calls. Each option stays adjustable."
 }

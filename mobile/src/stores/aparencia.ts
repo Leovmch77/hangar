@@ -1,16 +1,34 @@
 import { create } from 'zustand';
 import { AccessibilityInfo } from 'react-native';
 import { UnistylesRuntime } from 'react-native-unistyles';
-import { PENSAMENTO_TOOLS, hexParaRgb, type PensamentoTools, type GroupBy } from '@hangar/core';
+import {
+  PENSAMENTO_TOOLS,
+  hexParaRgb,
+  isBackgroundEffect,
+  type BackgroundEffect,
+  type PensamentoTools,
+  type GroupBy,
+} from '@hangar/core';
 import { prefs } from './prefs';
-import { aplicarMaterial } from '../theme/aplicarMaterial';
+import { aplicarMaterial, CONVERSA_PADRAO, type Conversa } from '../theme/aplicarMaterial';
+export { leituraEmVigor } from '../theme/aplicarMaterial';
+import type { Paleta } from '../theme/paleta';
 
 export type Tema = 'system' | 'light' | 'dark';
 export type Fundo = 'flat' | 'texture' | 'aurora' | 'image';
 export type Idioma = 'system' | 'pt' | 'en';
+/** Leitura do Rust: o que segura o texto da conversa sobre o fundo. */
+export type Leitura = 'auto' | 'none' | 'text' | 'sheet';
+/** Como a chamada de ferramenta aparece na conversa (ToolLook do Rust). */
+export type Ferramentas = 'classic' | 'chips' | 'tree';
+export type DestaquePergunta = 'accent' | 'amber';
 const TEMAS: Tema[] = ['system', 'light', 'dark'];
 const FUNDOS: Fundo[] = ['flat', 'texture', 'aurora', 'image'];
 const IDIOMAS: Idioma[] = ['system', 'pt', 'en'];
+const PALETAS: Paleta[] = ['classic', 'neutral'];
+const LEITURAS: Leitura[] = ['auto', 'none', 'text', 'sheet'];
+const FERRAMENTAS: Ferramentas[] = ['classic', 'chips', 'tree'];
+const DESTAQUES: DestaquePergunta[] = ['accent', 'amber'];
 const AGRUPAR: GroupBy[] = ['none', 'server', 'project'];
 const K = 'aparencia.tema';
 const K_IDIOMA = 'aparencia.idioma';
@@ -21,6 +39,26 @@ const K_IMAGEM = 'aparencia.imagemUri';
 const K_PANEL = 'aparencia.panelAlpha';
 const K_SURFACE = 'aparencia.surfaceAlpha';
 const K_ACENTO = 'aparencia.acento';
+const K_EFEITO = 'aparencia.efeito';
+const K_PALETA = 'aparencia.paleta';
+const K_TINTA = 'aparencia.tinta';
+const K_FORCA_TINTA = 'aparencia.forcaTinta';
+const K_LEITURA = 'aparencia.leitura';
+const K_SOLIDEZ_FOLHA = 'aparencia.solidezFolha';
+const K_CONTRASTE = 'aparencia.contraste';
+const K_CONVERSA = 'aparencia.conversa';
+const K_FERRAMENTAS = 'aparencia.ferramentas';
+const K_TAREFAS = 'aparencia.tarefas';
+const K_GRAFICO = 'aparencia.graficoTabela';
+const K_DESTAQUE_PERGUNTA = 'aparencia.destaquePergunta';
+
+// Padrões do Rust (appearance.rs DEFAULT), salvo onde o celular já tinha comportamento próprio:
+// Árvore era o único desenho das ferramentas aqui e o botão Gráfico sempre aparecia.
+const FORCA_TINTA_PADRAO = 0.4;
+const SOLIDEZ_FOLHA_PADRAO = 0.6;
+const CONTRASTE_PADRAO = 0.3;
+/** "Estilo: Compacto" do Rust, na parte que existe no celular (sem fonte, coluna nem barra lateral). */
+export const CONVERSA_COMPACTA: Conversa = { texto: 1, linha: 1.08, codigo: 12.5, coluna: 0.94 };
 
 // Piso do painel: abaixo de 0.3 o texto do header/composer deixa de ter contraste sobre foto clara.
 const PANEL_MIN = 0.3;
@@ -72,9 +110,51 @@ function lerAlpha(k: string, padrao: number, min: number): number {
   return typeof v === 'number' ? faixa(v, min, padrao) : padrao;
 }
 
+// Valor desconhecido vira `none`, como o `#[serde(other)]` do Rust.
+function lerEfeito(): BackgroundEffect {
+  const v = prefs.getString(K_EFEITO);
+  return isBackgroundEffect(v) ? v : 'none';
+}
+
 function lerAcento(): string | null {
   const v = prefs.getString(K_ACENTO);
   return v && hexParaRgb(v) ? v : null;
+}
+
+function lerOpcao<T extends string>(k: string, lista: readonly T[], padrao: T): T {
+  const v = prefs.getString(k) as T | undefined;
+  return v && lista.includes(v) ? v : padrao;
+}
+
+function lerFaixa(k: string, min: number, max: number, padrao: number): number {
+  const v = prefs.getNumber(k);
+  return typeof v === 'number' && Number.isFinite(v) ? Math.max(min, Math.min(max, v)) : padrao;
+}
+
+function lerBool(k: string, padrao: boolean): boolean {
+  const v = prefs.getBoolean(k);
+  return typeof v === 'boolean' ? v : padrao;
+}
+
+// Valor fora da escala (arquivo de outra versão, slider quebrado) volta para dentro dela, como o `clamped` do Rust.
+function conversaValida(v: Partial<Conversa> | null | undefined): Conversa {
+  const f = (x: unknown, min: number, max: number, padrao: number) =>
+    typeof x === 'number' && Number.isFinite(x) ? Math.max(min, Math.min(max, x)) : padrao;
+  return {
+    texto: f(v?.texto, 0.5, 1.5, CONVERSA_PADRAO.texto),
+    linha: f(v?.linha, 0.5, 1.5, CONVERSA_PADRAO.linha),
+    codigo: f(v?.codigo, 8, 24, CONVERSA_PADRAO.codigo),
+    coluna: f(v?.coluna, 0.5, 1, CONVERSA_PADRAO.coluna),
+  };
+}
+
+function lerConversa(): Conversa {
+  try {
+    const v = prefs.getString(K_CONVERSA);
+    return conversaValida(v ? JSON.parse(v) : null);
+  } catch {
+    return CONVERSA_PADRAO;
+  }
 }
 
 interface Aparencia {
@@ -98,6 +178,39 @@ interface Aparencia {
   setSurfaceAlpha: (v: number) => void;
   acento: string | null;
   setAcento: (v: string | null) => void;
+  /** Efeito sobre a imagem de fundo (effects.rs do desktop). */
+  efeito: BackgroundEffect;
+  setEfeito: (v: BackgroundEffect) => void;
+  /** Última variante pronta no cache; não persiste, o arquivo é que fica. */
+  efeitoImagem: { fonte: string; efeito: BackgroundEffect; claro: boolean; uri: string } | null;
+  efeitoProcessando: boolean;
+  paleta: Paleta;
+  setPaleta: (v: Paleta) => void;
+  /** Índice em TINTAS (theme/paleta.ts); 0 = sem tinta. */
+  tinta: number;
+  setTinta: (v: number) => void;
+  forcaTinta: number;
+  setForcaTinta: (v: number) => void;
+  leitura: Leitura;
+  setLeitura: (v: Leitura) => void;
+  solidezFolha: number;
+  setSolidezFolha: (v: number) => void;
+  contraste: number;
+  setContraste: (v: number) => void;
+  conversa: Conversa;
+  setConversa: (v: Partial<Conversa>) => void;
+  ferramentas: Ferramentas;
+  setFerramentas: (v: Ferramentas) => void;
+  tarefas: boolean;
+  setTarefas: (v: boolean) => void;
+  graficoTabela: boolean;
+  setGraficoTabela: (v: boolean) => void;
+  destaquePergunta: DestaquePergunta;
+  setDestaquePergunta: (v: DestaquePergunta) => void;
+  /** "Estilo: Compacto": texto, entrelinha, código, coluna e ferramentas em Árvore. */
+  aplicarCompacto: () => void;
+  /** "Voltar ao padrão" do Rust: não mexe em tema, paleta, fundo nem no jeito da conversa. */
+  redefinir: () => void;
 }
 
 // "Reduzir transparência" do sistema não é preferência do app: não persiste, e vale por cima do
@@ -122,10 +235,7 @@ export const useAparencia = create<Aparencia>((set, get) => {
   // levanta deixa a fila intacta pro tick seguinte, em vez de persistir o que não pintou.
   const aGravar: Array<() => void> = [];
   let agendado: ReturnType<typeof setTimeout> | null = null;
-  const material = (
-    patch: Partial<Pick<Aparencia, 'panelAlpha' | 'surfaceAlpha' | 'acento'>>,
-    gravar: () => void,
-  ) => {
+  const material = (patch: Partial<Aparencia>, gravar: () => void) => {
     set(patch);
     aGravar.push(gravar);
     if (agendado) return;
@@ -148,21 +258,18 @@ export const useAparencia = create<Aparencia>((set, get) => {
     agrupar: lerAgrupar(),
     setAgrupar: (v) => { prefs.set(K_AGRUPAR, v); set({ agrupar: v }); },
     fundo: lerFundo(),
-    setFundo: (v) => { prefs.set(K_FUNDO, v); set({ fundo: v }); },
+    // Passa pelo tema: com a Leitura Automática, imagem atrás liga o contraste do Texto.
+    setFundo: (v) => material({ fundo: v }, () => prefs.set(K_FUNDO, v)),
     imagemUri: prefs.getString(K_IMAGEM) ?? null,
     setImagemUri: async (uri) => {
       if (!uri) {
-        prefs.remove(K_IMAGEM);
-        prefs.set(K_FUNDO, 'flat');
-        set({ imagemUri: null, fundo: 'flat' });
+        material({ imagemUri: null, fundo: 'flat' }, () => { prefs.remove(K_IMAGEM); prefs.set(K_FUNDO, 'flat'); });
         return;
       }
       const anterior = get().imagemUri;
       try {
         const destino = await copiarPapelDeParede(uri, anterior);
-        prefs.set(K_IMAGEM, destino);
-        prefs.set(K_FUNDO, 'image');
-        set({ imagemUri: destino, fundo: 'image' });
+        material({ imagemUri: destino, fundo: 'image' }, () => { prefs.set(K_IMAGEM, destino); prefs.set(K_FUNDO, 'image'); });
       } catch {
         // Imports tardios: o store roda em teste de node, e Toast + mensagens arrastam a UI inteira.
         const [{ toast }, m] = await Promise.all([import('../ui/Toast'), import('../paraglide/messages')]);
@@ -183,6 +290,65 @@ export const useAparencia = create<Aparencia>((set, get) => {
     setAcento: (v) => {
       const hex = v && hexParaRgb(v) ? v : null;
       material({ acento: hex }, () => { if (hex) prefs.set(K_ACENTO, hex); else prefs.remove(K_ACENTO); });
+    },
+    efeito: lerEfeito(),
+    setEfeito: (v) => { prefs.set(K_EFEITO, v); set({ efeito: v }); },
+    efeitoImagem: null,
+    efeitoProcessando: false,
+    paleta: lerOpcao(K_PALETA, PALETAS, 'classic'),
+    setPaleta: (v) => material({ paleta: v }, () => prefs.set(K_PALETA, v)),
+    tinta: lerFaixa(K_TINTA, 0, 3, 0),
+    setTinta: (v) => {
+      const n = Math.max(0, Math.min(3, Math.round(v)));
+      material({ tinta: n }, () => prefs.set(K_TINTA, n));
+    },
+    forcaTinta: lerFaixa(K_FORCA_TINTA, 0.05, 1, FORCA_TINTA_PADRAO),
+    setForcaTinta: (v) => {
+      const n = faixa(v, 0.05, FORCA_TINTA_PADRAO);
+      material({ forcaTinta: n }, () => prefs.set(K_FORCA_TINTA, n));
+    },
+    leitura: lerOpcao(K_LEITURA, LEITURAS, 'auto'),
+    setLeitura: (v) => material({ leitura: v }, () => prefs.set(K_LEITURA, v)),
+    solidezFolha: lerFaixa(K_SOLIDEZ_FOLHA, 0, 1, SOLIDEZ_FOLHA_PADRAO),
+    setSolidezFolha: (v) => {
+      const n = faixa(v, 0, SOLIDEZ_FOLHA_PADRAO);
+      prefs.set(K_SOLIDEZ_FOLHA, n);
+      set({ solidezFolha: n });
+    },
+    contraste: lerFaixa(K_CONTRASTE, 0, 1, CONTRASTE_PADRAO),
+    setContraste: (v) => {
+      const n = faixa(v, 0, CONTRASTE_PADRAO);
+      material({ contraste: n }, () => prefs.set(K_CONTRASTE, n));
+    },
+    conversa: lerConversa(),
+    setConversa: (v) => {
+      const n = conversaValida({ ...get().conversa, ...v });
+      material({ conversa: n }, () => prefs.set(K_CONVERSA, JSON.stringify(n)));
+    },
+    ferramentas: lerOpcao(K_FERRAMENTAS, FERRAMENTAS, 'tree'),
+    setFerramentas: (v) => { prefs.set(K_FERRAMENTAS, v); set({ ferramentas: v }); },
+    tarefas: lerBool(K_TAREFAS, false),
+    setTarefas: (v) => { prefs.set(K_TAREFAS, v); set({ tarefas: v }); },
+    graficoTabela: lerBool(K_GRAFICO, true),
+    setGraficoTabela: (v) => { prefs.set(K_GRAFICO, v); set({ graficoTabela: v }); },
+    destaquePergunta: lerOpcao(K_DESTAQUE_PERGUNTA, DESTAQUES, 'accent'),
+    setDestaquePergunta: (v) => { prefs.set(K_DESTAQUE_PERGUNTA, v); set({ destaquePergunta: v }); },
+    aplicarCompacto: () => {
+      get().setFerramentas('tree');
+      get().setConversa(CONVERSA_COMPACTA);
+    },
+    redefinir: () => {
+      const s = get();
+      s.setAcento(null);
+      s.setTinta(0);
+      s.setForcaTinta(FORCA_TINTA_PADRAO);
+      s.setPanelAlpha(PANEL_PADRAO);
+      s.setSurfaceAlpha(1);
+      s.setLeitura('auto');
+      s.setSolidezFolha(SOLIDEZ_FOLHA_PADRAO);
+      s.setContraste(CONTRASTE_PADRAO);
+      s.setConversa(CONVERSA_PADRAO);
+      s.setDestaquePergunta('accent');
     },
   };
 });

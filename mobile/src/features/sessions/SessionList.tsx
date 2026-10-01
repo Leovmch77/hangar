@@ -1,9 +1,9 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { Alert, Pressable, RefreshControl, SectionList, Text, TextInput, View } from 'react-native';
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { Alert, Pressable, RefreshControl, SectionList, Text, TextInput, View, ActivityIndicator } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { MenuView } from '@react-native-menu/menu';
-import type { SwipeableMethods } from 'react-native-gesture-handler/ReanimatedSwipeable';
 import { useRouter } from 'expo-router';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
   agruparSessoes,
   deleteSession,
@@ -48,12 +48,14 @@ interface Section {
   data: AggSession[];
 }
 
+// Conteúdo da gaveta da tela inicial: `onClose` fecha a gaveta antes de navegar, e "Nova conversa"
+// só fecha, porque a tela de baixo já é a nova conversa.
 interface Props {
+  onClose: () => void;
   onOpenServers: () => void;
-  onOpenSettings: () => void;
 }
 
-export function SessionList({ onOpenServers, onOpenSettings }: Props) {
+export function SessionList({ onClose, onOpenServers }: Props) {
   const { theme } = useUnistyles();
   const router = useRouter();
   const servers = useServers((s) => s.servers);
@@ -64,18 +66,12 @@ export function SessionList({ onOpenServers, onOpenSettings }: Props) {
   const activeId = useServers((s) => s.activeId);
   const byServer = useSessions((s) => s.byServer);
   const [filtro, setFiltro] = useState('');
-  const [buscaAberta, setBuscaAberta] = useState(false);
+  const insets = useSafeAreaInsets();
   // chave `modo:id`: trocar o Agrupar por não herda o recolhido de um grupo de outro tipo
   const [recolhidos, setRecolhidos] = useState<ReadonlySet<string>>(() => new Set());
   const [refreshing, setRefreshing] = useState(false);
   // guarda a sessão inteira, não o nome: dois servidores podem ter sessões de mesmo nome
   const [renomeando, setRenomeando] = useState<AggSession | null>(null);
-  // uma linha aberta por vez: a anterior fecha quando outra abre, e ao rolar
-  const aberta = useRef<SwipeableMethods | null>(null);
-  const trocarAberta = useCallback((nova: SwipeableMethods | null) => {
-    if (aberta.current && aberta.current !== nova) aberta.current.close();
-    aberta.current = nova;
-  }, []);
 
   // 1 stream por servidor via refcount compartilhado
   useEffect(() => {
@@ -92,8 +88,14 @@ export function SessionList({ onOpenServers, onOpenSettings }: Props) {
     fn();
   }, []);
 
-  const abrir = useCallback((s: AggSession) => router.push(`/s/${s.serverId}/${s.name}` as never), [router]);
-  const abrirGit = useCallback((s: AggSession) => router.push(`/s/${s.serverId}/${s.name}/files` as never), [router]);
+  const abrir = useCallback((s: AggSession) => {
+    onClose();
+    router.push(`/s/${s.serverId}/${s.name}` as never);
+  }, [router, onClose]);
+  const abrirGit = useCallback((s: AggSession) => {
+    onClose();
+    router.push(`/s/${s.serverId}/${s.name}/files` as never);
+  }, [router, onClose]);
 
   const excluir = useCallback(
     (s: AggSession) =>
@@ -165,7 +167,7 @@ export function SessionList({ onOpenServers, onOpenSettings }: Props) {
     const { attention, rest } = splitAttention(visiveis);
     const out: Section[] = [];
     if (attention.length) {
-      out.push({ id: 'attention', label: m.board_precisa_de_voce(), color: null, attention: true, total: attention.length, collapsed: false, data: attention });
+      out.push({ id: 'attention', label: m.native_sidebar_awaiting(), color: null, attention: true, total: attention.length, collapsed: false, data: attention });
     }
     for (const g of agruparSessoes(rest, modo)) {
       if (!g.sessions.length) continue;
@@ -188,20 +190,16 @@ export function SessionList({ onOpenServers, onOpenSettings }: Props) {
     [modo],
   );
 
-  const alternarBusca = useCallback(() => {
-    // fechar o campo com texto dentro deixaria a lista filtrada sem nada na tela dizendo por quê
-    if (buscaAberta) setFiltro('');
-    setBuscaAberta(!buscaAberta);
-  }, [buscaAberta]);
-
   // "Todas as sessões" desfaz tudo que esconde linha: filtro e grupos recolhidos.
   const mostrarTodas = useCallback(() => {
     setFiltro('');
-    setBuscaAberta(false);
     setRecolhidos(new Set());
   }, []);
 
-  const novaConversa = useCallback(() => router.push('/create' as never), [router]);
+  const abrirConfig = useCallback(() => {
+    onClose();
+    router.push('/config' as never);
+  }, [router, onClose]);
 
   const ativo = servers.find((s) => s.id === activeId) ?? null;
   const baldeAtivo = byServer.find((b) => b.server.id === activeId);
@@ -214,27 +212,13 @@ export function SessionList({ onOpenServers, onOpenSettings }: Props) {
         : ativo.label
     : '';
 
-  const iconeTopo = (icon: 'Search' | 'Server' | 'Settings', label: string, onPress: () => void, ativoIcone = false) => (
-    <Pressable
-      onPress={onPress}
-      style={styles.icone}
-      accessibilityRole="button"
-      accessibilityLabel={label}
-      accessibilityState={icon === 'Search' ? { expanded: buscaAberta } : undefined}
-      hitSlop={4}
-    >
-      <Icon name={icon} size={18} color={ativoIcone ? theme.tokens.text.primary : theme.tokens.text.secondary} />
-    </Pressable>
-  );
-
   const topo = (
     <View style={styles.topo}>
-      <HangarMark size={18} color={theme.tokens.text.primary} />
+      <HangarMark size={20} color={theme.tokens.text.primary} />
       <Text style={[styles.marca, { color: theme.tokens.text.primary }]} numberOfLines={1} accessibilityRole="header">
         {m.native_brand()}
       </Text>
       <View style={styles.topoAcoes}>
-        {iconeTopo('Search', m.lista_filtrar(), alternarBusca, buscaAberta || !!filtro)}
         <MenuView
           onPressAction={({ nativeEvent }) => {
             if (ehGroupBy(nativeEvent.event)) useAparencia.getState().setAgrupar(nativeEvent.event);
@@ -246,86 +230,80 @@ export function SessionList({ onOpenServers, onOpenSettings }: Props) {
           }))}
         >
           <View style={styles.icone} accessible accessibilityRole="button" accessibilityLabel={m.lista_agrupar()} accessibilityValue={{ text: ROTULO_AGRUPAR[agrupar]() }}>
-            <Icon name="ListFilter" size={18} color={theme.tokens.text.secondary} />
+            <Icon name="ListFilter" size={20} color={theme.tokens.text.secondary} />
           </View>
         </MenuView>
-        {iconeTopo('Server', m.maquinas_este_aparelho(), onOpenServers)}
-        {iconeTopo('Settings', m.config_modal_titulo(), onOpenSettings)}
       </View>
     </View>
   );
 
-  const campoBusca = buscaAberta ? (
-    <View style={[styles.campo, { backgroundColor: superficie(theme, 0.8), borderColor: theme.tokens.border.subtle }]}>
-      <Icon name="Search" size={14} color={theme.tokens.text.muted} />
+  // Campo sempre à vista, como Claude/ChatGPT: buscar é o primeiro gesto de quem tem muitas sessões.
+  const campoBusca = (
+    <View style={[styles.campo, { backgroundColor: superficie(theme, 0.6) }]}>
+      <Icon name="Search" size={16} color={theme.tokens.text.muted} />
       <TextInput
         value={filtro}
         onChangeText={setFiltro}
-        placeholder={m.lista_filtro_placeholder()}
+        placeholder={m.lista_buscar()}
         placeholderTextColor={theme.tokens.text.muted}
         returnKeyType="search"
         autoCapitalize="none"
         autoCorrect={false}
-        autoFocus
         accessibilityLabel={m.lista_filtrar()}
         style={[styles.input, { color: theme.tokens.text.primary }]}
       />
       {filtro ? (
-        <Pressable onPress={() => setFiltro('')} hitSlop={8} accessibilityRole="button" accessibilityLabel={m.lista_filtro_limpar()}>
-          <Icon name="X" size={14} color={theme.tokens.text.muted} />
+        <Pressable onPress={() => setFiltro('')} hitSlop={10} accessibilityRole="button" accessibilityLabel={m.lista_filtro_limpar()}>
+          <Icon name="X" size={16} color={theme.tokens.text.muted} />
         </Pressable>
       ) : null}
     </View>
-  ) : null;
+  );
 
-  const itemNav = (icon: 'SquarePen' | 'List', label: string, onPress: () => void, contagem?: number) => (
+  // `atual`: a gaveta só existe sobre a tela inicial, então "Nova conversa" é sempre o lugar atual.
+  const itemNav = (icon: 'SquarePen' | 'List', label: string, onPress: () => void, contagem?: number, atual = false) => (
     <Pressable
       onPress={onPress}
-      style={({ pressed }) => [styles.nav, pressed && { backgroundColor: superficie(theme, 0.8) }]}
+      style={({ pressed }) => [styles.nav, (pressed || atual) && { backgroundColor: superficie(theme, atual ? 0.8 : 0.6) }]}
       accessibilityRole="button"
+      accessibilityState={atual ? { selected: true } : undefined}
       accessibilityLabel={contagem === undefined ? label : `${label}, ${contagem}`}
     >
-      <Icon name={icon} size={16} color={theme.tokens.text.secondary} />
-      <Text style={[styles.navTxt, { color: theme.tokens.text.primary }]} numberOfLines={1}>{label}</Text>
+      <View style={styles.navIcone}>
+        <Icon name={icon} size={20} color={atual ? theme.tokens.text.primary : theme.tokens.text.secondary} />
+      </View>
+      <Text style={[styles.navTxt, atual && styles.navAtual, { color: theme.tokens.text.primary }]} numberOfLines={1}>{label}</Text>
       {contagem === undefined ? null : <Text style={[styles.navConta, { color: theme.tokens.text.muted }]}>{contagem}</Text>}
     </Pressable>
   );
 
   const rodape = (
-    <View style={styles.rodape}>
-      {servers.length ? (
-        <Pressable
-          onPress={novaConversa}
-          // texto e fundo trocados entre si: a pílula inverte sozinha no tema claro e no escuro
-          style={({ pressed }) => [styles.nova, { backgroundColor: theme.tokens.text.primary, opacity: pressed ? 0.8 : 1 }]}
-          accessibilityRole="button"
-          accessibilityLabel={m.sessao_nova()}
-        >
-          <Icon name="Plus" size={16} color={theme.tokens.bg.base} />
-          <Text style={[styles.novaTxt, { color: theme.tokens.bg.base }]}>{m.lista_nova_curto()}</Text>
-        </Pressable>
-      ) : null}
+    <View style={[styles.rodape, { borderTopColor: theme.tokens.border.subtle }]}>
       {ativo ? (
-        <Pressable onPress={onOpenServers} style={styles.ativo} accessibilityRole="button" accessibilityLabel={rotuloAtivo} hitSlop={6}>
+        <Pressable onPress={onOpenServers} style={styles.ativo} accessibilityRole="button" accessibilityLabel={rotuloAtivo}>
           <View style={[styles.ponto, { backgroundColor: corAtivo }]} />
-          <Text style={[styles.ativoTxt, { color: theme.tokens.text.muted }]} numberOfLines={1}>{ativo.label}</Text>
+          <Text style={[styles.ativoTxt, { color: theme.tokens.text.secondary }]} numberOfLines={1}>{ativo.label}</Text>
         </Pressable>
-      ) : null}
+      ) : <View style={styles.ativo} />}
+      <Pressable onPress={abrirConfig} style={styles.icone} accessibilityRole="button" accessibilityLabel={m.config_modal_titulo()}>
+        <Icon name="Settings" size={20} color={theme.tokens.text.secondary} />
+      </Pressable>
     </View>
   );
 
   // `noTopo`: com a busca aberta o teclado cobre a metade de baixo, e o aviso centrado sumia atrás dele.
-  const vazio = (titulo: string | null, texto: string | null, noTopo = false) => (
+  const vazio = (titulo: string | null, texto: string | null, noTopo = false, girando = false) => (
     <View style={[styles.empty, noTopo && styles.emptyTopo]}>
+      {girando ? <ActivityIndicator /> : null}
       {titulo ? <Text style={styles.emptyTitle}>{titulo}</Text> : null}
       {texto ? <Text style={styles.emptyTxt}>{texto}</Text> : null}
     </View>
   );
 
   let corpo: ReactNode;
-  if (!ready) corpo = vazio(null, m.comum_carregando());
+  if (!ready) corpo = vazio(null, m.comum_carregando(), false, true);
   else if (servers.length === 0) corpo = vazio(m.lista_nenhum_servidor(), m.lista_pareie_qr());
-  else if (loading && rows.length === 0) corpo = vazio(null, m.lista_carregando());
+  else if (loading && rows.length === 0) corpo = vazio(null, m.lista_carregando(), false, true);
   else {
     corpo = (
       <SectionList
@@ -336,7 +314,7 @@ export function SessionList({ onOpenServers, onOpenSettings }: Props) {
         stickySectionHeadersEnabled={false}
         ListHeaderComponent={
           <View style={styles.navs}>
-            {itemNav('SquarePen', m.native_new_chat_title(), novaConversa)}
+            {itemNav('SquarePen', m.native_new_chat_title(), onClose, undefined, true)}
             {itemNav('List', m.native_sidebar_all_sessions(), mostrarTodas, rows.length)}
           </View>
         }
@@ -349,7 +327,7 @@ export function SessionList({ onOpenServers, onOpenSettings }: Props) {
                 <Icon name={section.collapsed ? 'ChevronRight' : 'ChevronDown'} size={12} color={theme.tokens.text.muted} />
               )}
               <View style={[styles.ponto, { backgroundColor: cor }]} />
-              <Text style={[styles.grupoTxt, { color: theme.tokens.text.muted }]} numberOfLines={1}>{section.label}</Text>
+              <Text style={[styles.grupoTxt, { color: section.attention ? cor : theme.tokens.text.secondary }]} numberOfLines={1}>{section.label}</Text>
               <Text style={[styles.grupoConta, { color: theme.tokens.text.muted }]}>{section.total}</Text>
             </>
           );
@@ -374,16 +352,14 @@ export function SessionList({ onOpenServers, onOpenSettings }: Props) {
           <SessionRow
             session={item}
             mostrarServidor={variosServidores && (section.attention || modo !== 'server')}
-            onPress={() => abrir(item)}
-            onGit={() => abrirGit(item)}
-            onExcluir={() => excluir(item)}
-            onRenomear={() => setRenomeando(item)}
-            onResume={() => retomar(item)}
-            aoAbrir={trocarAberta}
+            onPress={abrir}
+            onGit={abrirGit}
+            onExcluir={excluir}
+            onRenomear={setRenomeando}
+            onResume={retomar}
           />
         )}
-        onScrollBeginDrag={() => trocarAberta(null)}
-        ListEmptyComponent={busca ? vazio(m.lista_vazia_filtro(), null, true) : vazio(m.lista_nenhuma_ativa(), m.lista_toque_criar())}
+        ListEmptyComponent={busca ? vazio(m.lista_vazia_filtro(), null, true) : vazio(m.lista_nenhuma_ativa(), null)}
         contentContainerStyle={styles.listContent}
         keyboardShouldPersistTaps="handled"
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
@@ -394,7 +370,8 @@ export function SessionList({ onOpenServers, onOpenSettings }: Props) {
   return (
     <>
       {/* Sem caixa: a lista fica direto sobre o fundo escolhido em Aparência, como no app de PC. */}
-      <View style={styles.painel}>
+      {/* A gaveta passa por baixo da barra de status e do indicador de início: a margem segura é daqui. */}
+      <View style={[styles.painel, { paddingTop: insets.top + 8, paddingBottom: Math.max(insets.bottom, 8) }]}>
         {topo}
         {campoBusca}
         <View style={styles.corpo}>{corpo}</View>
@@ -406,29 +383,30 @@ export function SessionList({ onOpenServers, onOpenSettings }: Props) {
 }
 
 const styles = StyleSheet.create((theme) => ({
-  painel: { flex: 1, marginHorizontal: theme.base.space[1], marginTop: 6, marginBottom: theme.base.space[2], paddingTop: theme.base.space[3], paddingHorizontal: theme.base.space[2], paddingBottom: 10 },
-  topo: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[2], paddingLeft: theme.base.space[2], paddingBottom: 6 },
+  painel: { flex: 1, paddingHorizontal: theme.base.space[2] },
+  // Tudo alinha na mesma coluna de 12 pt das linhas: marca, ícones da navegação e marcas de estado.
+  topo: { flexDirection: 'row', alignItems: 'center', gap: 10, minHeight: 48, paddingLeft: 13 },
   // encolhe a marca, não os botões: com texto ampliado o nome empurrava as ações para fora
-  marca: { flexShrink: 1, fontSize: theme.base.text.base, fontWeight: '700' },
+  marca: { flexShrink: 1, fontSize: theme.base.text.xl, fontWeight: '700' },
   topoAcoes: { flexDirection: 'row', alignItems: 'center', marginLeft: 'auto' },
-  icone: { width: 40, height: 40, alignItems: 'center', justifyContent: 'center' },
-  campo: { flexDirection: 'row', alignItems: 'center', gap: 6, marginHorizontal: 6, marginBottom: 6, paddingHorizontal: 10, borderRadius: theme.base.radius.md, borderWidth: 1, minHeight: 38 },
-  input: { flex: 1, fontSize: theme.base.text.sm, paddingVertical: 8 },
+  icone: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center' },
+  campo: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 4, marginBottom: 8, paddingHorizontal: 12, borderRadius: theme.base.radius.lg, minHeight: 40 },
+  input: { flex: 1, fontSize: theme.base.text.base, paddingVertical: 8 },
   corpo: { flex: 1 },
   listContent: { flexGrow: 1, paddingBottom: theme.base.space[2] },
-  navs: { paddingBottom: 4 },
-  nav: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 7, paddingHorizontal: 10, borderRadius: theme.base.radius.md },
-  navTxt: { flexShrink: 1, fontSize: theme.base.text.sm },
-  navConta: { marginLeft: 'auto', fontSize: theme.base.text.xs },
-  grupo: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingTop: 10, paddingBottom: 6, paddingHorizontal: 10, backgroundColor: 'transparent' },
-  grupoTxt: { flexShrink: 1, fontSize: theme.base.text.xxs, fontWeight: '700', letterSpacing: 0.8, textTransform: 'uppercase' },
-  grupoConta: { marginLeft: 'auto', fontSize: theme.base.text.xxs },
+  navs: { paddingBottom: 8, gap: 2 },
+  nav: { flexDirection: 'row', alignItems: 'center', gap: 12, minHeight: 48, paddingHorizontal: 12, borderRadius: theme.base.radius.lg },
+  navIcone: { width: 22, alignItems: 'center' },
+  navTxt: { flexShrink: 1, fontSize: theme.base.text.base },
+  navAtual: { fontWeight: '600' },
+  navConta: { marginLeft: 'auto', fontSize: theme.base.text.xs, fontVariant: ['tabular-nums'] },
+  grupo: { flexDirection: 'row', alignItems: 'center', gap: 6, minHeight: 36, paddingTop: 12, paddingBottom: 4, paddingHorizontal: 12, backgroundColor: 'transparent' },
+  grupoTxt: { flexShrink: 1, fontSize: theme.base.text.xs, fontWeight: '600' },
+  grupoConta: { marginLeft: 'auto', fontSize: theme.base.text.xs, fontVariant: ['tabular-nums'] },
   ponto: { width: 7, height: 7, borderRadius: 4 },
-  rodape: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingTop: theme.base.space[2], paddingHorizontal: 6 },
-  nova: { flexDirection: 'row', alignItems: 'center', gap: 6, height: 36, paddingHorizontal: theme.base.space[4], borderRadius: theme.base.radius.full },
-  novaTxt: { fontSize: theme.base.text.sm, fontWeight: '600' },
-  ativo: { flexDirection: 'row', alignItems: 'center', gap: 6, marginLeft: 'auto', flexShrink: 1, minWidth: 0 },
-  ativoTxt: { flexShrink: 1, fontSize: theme.base.text.xxs },
+  rodape: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingTop: 4, paddingLeft: 12, borderTopWidth: StyleSheet.hairlineWidth },
+  ativo: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 8, minWidth: 0, minHeight: 44 },
+  ativoTxt: { flexShrink: 1, fontSize: theme.base.text.sm },
   empty: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: theme.base.space[6], gap: 8 },
   emptyTopo: { flex: 0, justifyContent: 'flex-start', paddingTop: theme.base.space[4] },
   emptyTitle: { fontSize: theme.base.text.lg, fontWeight: '600', color: theme.tokens.text.primary, textAlign: 'center' },

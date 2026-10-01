@@ -4,7 +4,9 @@ import { StyleSheet } from 'react-native-unistyles';
 import Constants from 'expo-constants';
 import { getConfig } from '@hangar/core';
 import { Pagina } from '../../src/features/config/Pagina';
-import { Linha } from '../../src/features/config/Linha';
+import { PageHeader } from '../../src/features/config/PageHeader';
+import { SectionCard } from '../../src/features/config/SectionCard';
+import { SettingsRow } from '../../src/features/config/SettingsRow';
 import { toast } from '../../src/ui/Toast';
 import { useServers } from '../../src/stores/servers';
 import * as m from '../../src/paraglide/messages';
@@ -44,27 +46,31 @@ export default function Sobre() {
 
   return (
     <Pagina>
-      <Text style={styles.desc}>{m.config_sobre_desc()}</Text>
-      {versao ? (
-        <Linha
-          titulo={m.atualizar_versao()}
-          descricao={typeof runtime === 'string' ? `${versao} · ${runtime}` : versao}
-        />
-      ) : null}
-      <Linha
-        titulo={m.config_sobre_servidor()}
-        descricao={ativo?.baseUrl ?? m.maquinas_vazio()}
-        direita={
-          falhou ? <Text style={styles.erro}>{m.atualizar_procurar_falhou()}</Text> : null
-        }
+      <PageHeader
+        title={m.config_modal_sobre()}
+        subtitle={m.config_sobre_desc()}
+        actions={[{ icon: 'ExternalLink', label: REPO.replace('https://', ''), onPress: abrirRepo }]}
       />
-      {servidor ? <Linha titulo={m.atualizar_versao_servidor()} descricao={servidor} /> : null}
-      <Linha icon="ExternalLink" titulo={REPO.replace('https://', '')} onPress={abrirRepo} />
+      {versao ? (
+        <SectionCard icon="Smartphone" title={m.native_settings_about_app_group()}>
+          <SettingsRow
+            title={m.atualizar_versao()}
+            description={typeof runtime === 'string' ? `${versao} · ${runtime}` : versao}
+          />
+        </SectionCard>
+      ) : null}
+      <SectionCard icon="Server" title={m.native_settings_about_server_group()}>
+        <SettingsRow
+          title={m.config_sobre_servidor()}
+          description={ativo?.baseUrl ?? m.maquinas_vazio()}
+          right={falhou ? <Text style={styles.erro}>{m.atualizar_procurar_falhou()}</Text> : null}
+        />
+        {servidor ? <SettingsRow title={m.atualizar_versao_servidor()} description={servidor} /> : null}
+      </SectionCard>
     </Pagina>
   );
 }
 
 const styles = StyleSheet.create((theme) => ({
-  desc: { fontSize: theme.base.text.sm, color: theme.tokens.text.secondary, paddingHorizontal: theme.base.space[1] },
   erro: { fontSize: theme.base.text.xxs, color: theme.tokens.status.error },
 }));

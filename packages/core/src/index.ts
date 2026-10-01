@@ -55,3 +55,4 @@ export * from './pairGroups';
 export * from './configSync';
 export * from './sessionOptions';
 export * from './firstConversation';
+export * from './backgroundEffect';

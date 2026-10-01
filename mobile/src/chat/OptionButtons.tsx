@@ -6,6 +6,7 @@ import * as m from '../paraglide/messages';
 import { superficie } from '../theme/superficie';
 import { Icon } from '../ui/Icon';
 import { semEmoji } from '../ui/semEmoji';
+import { useAparencia } from '../stores/aparencia';
 
 interface Props {
   question: string;
@@ -22,6 +23,8 @@ export function OptionButtons({ question, options, onSelect, onCancel }: Props) 
   const mounted = useRef(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  // Aparência › Destaque das perguntas: a moldura do pedido que espera a pessoa.
+  const destaque = useAparencia((s) => s.destaquePergunta);
   useEffect(() => {
     mounted.current = true;
     return () => { mounted.current = false; };
@@ -41,7 +44,7 @@ export function OptionButtons({ question, options, onSelect, onCancel }: Props) 
   }
 
   return (
-    <View style={styles.wrap}>
+    <View style={[styles.wrap, { borderColor: destaque === 'amber' ? theme.tokens.status.warning : theme.tokens.accent.base }]}>
       {permission ? (
         <View style={[styles.permChip, { backgroundColor: theme.tokens.accent.dim }]}>
           <Icon name="ShieldAlert" size={13} color={theme.tokens.accent.base} />
@@ -125,6 +128,8 @@ const styles = StyleSheet.create((theme) => ({
   wrap: {
     padding: theme.base.space[3],
     gap: theme.base.space[3],
+    borderWidth: 1,
+    borderRadius: 14,
   },
   permChip: {
     alignSelf: 'flex-start',
@@ -146,7 +151,7 @@ const styles = StyleSheet.create((theme) => ({
   },
   qCode: {
     fontFamily: theme.base.fontMono,
-    fontSize: 13,
+    fontSize: 14,
     paddingHorizontal: 4,
     borderRadius: 4,
   },

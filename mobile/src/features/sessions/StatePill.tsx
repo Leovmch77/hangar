@@ -28,7 +28,7 @@ const styles = StyleSheet.create({
     borderRadius: 9999,
   },
   txt: {
-    fontSize: 11,
+    fontSize: 12,
     fontWeight: '600',
     letterSpacing: 0.2,
   },

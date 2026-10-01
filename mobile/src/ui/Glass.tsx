@@ -55,7 +55,9 @@ export function Glass({ variant = 'panel', style, children, ...rest }: Props) {
     fundo = <View style={[StyleSheet.absoluteFillObject, { backgroundColor: `rgb(${r},${g},${b})` }]} pointerEvents="none" />;
   } else if (Platform.OS === 'ios' && isLiquidGlassAvailable()) {
     // key pelo tema: o material do glass-effect não acompanha troca de tema em runtime.
-    fundo = <GlassView key={rt.themeName} glassEffectStyle="regular" tintColor={bg} style={StyleSheet.absoluteFillObject} pointerEvents="none" />;
+    // O chrome flutua sobre a conversa: tinta quase opaca apaga a refração e o vidro vira caixa chapada.
+    const tinta = variant === 'chrome' ? `rgba(${r},${g},${b},${alphaDoVidro(theme, variant) * 0.4})` : bg;
+    fundo = <GlassView key={rt.themeName} glassEffectStyle="regular" tintColor={tinta} isInteractive={variant === 'chrome'} style={StyleSheet.absoluteFillObject} pointerEvents="none" />;
   } else {
     fundo = (
       <BlurView

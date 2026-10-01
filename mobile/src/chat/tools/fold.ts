@@ -5,13 +5,16 @@ import * as m from '../../paraglide/messages';
 // chamadas seguidas) dobrado numa linha só.
 export type ConversationRow =
   | { type: 'event'; id: string; ev: ChatEvent }
-  | { type: 'fold'; id: string; parts: ChatEvent[] };
+  /** `source`: de que item do core o trecho veio; ausente quando a Árvore juntou vários. */
+  | { type: 'fold'; id: string; parts: ChatEvent[]; source?: 'tool' | 'group' | 'pensamento' }
+  | { type: 'tasks'; id: string };
 
-// Junta o que o agruparConversa separou (pensamento, chamada solta, grupo) quando vem em sequência:
-// entre duas mensagens o nativo mostra UM resumo, não um bloco por tipo. A regra de quem entra no
-// pensamento continua no core; aqui só muda o desenho. O id do trecho é o do primeiro item, então
-// fica estável enquanto o trecho cresce na cauda durante o streaming.
-export function foldConversation(items: ItemConversa[]): ConversationRow[] {
+// Na Árvore (`merge`), junta o que o agruparConversa separou (pensamento, chamada solta, grupo)
+// quando vem em sequência: entre duas mensagens o nativo mostra UM resumo, não um bloco por tipo.
+// No Clássico e nos Chips cada item do core vira o seu trecho. A regra de quem entra no pensamento
+// continua no core; aqui só muda o desenho. O id do trecho é o do primeiro item, então fica estável
+// enquanto o trecho cresce na cauda durante o streaming.
+export function foldConversation(items: ItemConversa[], merge = true): ConversationRow[] {
   const rows: ConversationRow[] = [];
   let open: { type: 'fold'; id: string; parts: ChatEvent[] } | null = null;
   for (const item of items) {
@@ -21,7 +24,8 @@ export function foldConversation(items: ItemConversa[]): ConversationRow[] {
       continue;
     }
     const parts = item.type === 'tool' ? [item.ev] : item.type === 'group' ? item.tools : item.eventos;
-    if (open) open.parts = [...open.parts, ...parts];
+    if (!merge) rows.push({ type: 'fold', id: `f-${item.id}`, parts, source: item.type });
+    else if (open) open.parts = [...open.parts, ...parts];
     else {
       open = { type: 'fold', id: `f-${item.id}`, parts };
       rows.push(open);

@@ -1,18 +1,19 @@
-import { Alert, Pressable, Text, View } from 'react-native';
-import { StyleSheet, useUnistyles } from 'react-native-unistyles';
+import { Alert, View } from 'react-native';
+import { StyleSheet } from 'react-native-unistyles';
 import { useRouter } from 'expo-router';
 import { getConfigForServer, type Server } from '@hangar/core';
 import { Pagina } from '../../src/features/config/Pagina';
-import { Linha } from '../../src/features/config/Linha';
+import { PageHeader, Pill } from '../../src/features/config/PageHeader';
+import { SectionCard } from '../../src/features/config/SectionCard';
+import { SettingsRow } from '../../src/features/config/SettingsRow';
+import { InfoNotice } from '../../src/features/config/InfoNotice';
 import { StateDot } from '../../src/ui/StateDot';
-import { Icon } from '../../src/ui/Icon';
 import { toast } from '../../src/ui/Toast';
 import { useServers } from '../../src/stores/servers';
 import * as m from '../../src/paraglide/messages';
 
 export default function Maquinas() {
   const router = useRouter();
-  const { theme } = useUnistyles();
   const servers = useServers((s) => s.servers);
   const activeId = useServers((s) => s.activeId);
 
@@ -31,49 +32,37 @@ export default function Maquinas() {
 
   return (
     <Pagina>
-      <Text style={styles.intro}>{m.maquinas_intro()}</Text>
-      {servers.length === 0 ? <Text style={styles.vazio}>{m.maquinas_vazio()}</Text> : null}
-      {servers.map((s) => (
-        <Linha
-          key={s.id}
-          titulo={s.label}
-          descricao={s.baseUrl}
-          onPress={() => useServers.getState().setActive(s.id)}
-          onLongPress={() => remover(s)}
-          direita={
-            <View style={styles.direita}>
-              {/* Ponto só na ativa: as outras não estão erradas, estão paradas — um ponto
-                  vermelho ali leria como máquina fora do ar, que ninguém mediu. */}
-              {s.id === activeId ? <StateDot state="idle" /> : null}
-              <Pressable
-                onPress={() => testar(s)}
-                accessibilityRole="button"
-                accessibilityLabel={m.config_maquinas_testar()}
-                hitSlop={8}
-                style={styles.testar}
-              >
-                <Icon name="Plug" size={16} color={theme.tokens.accent.base} />
-                <Text style={[styles.testarTxt, { color: theme.tokens.accent.base }]}>
-                  {m.config_maquinas_testar()}
-                </Text>
-              </Pressable>
-            </View>
-          }
-        />
-      ))}
-      <Linha
-        icon="Plus"
-        titulo={m.sessao_adicionar_servidor()}
-        onPress={() => router.push('/login' as never)}
+      <PageHeader
+        title={m.maquinas_titulo()}
+        subtitle={m.maquinas_intro()}
+        actions={[{ icon: 'Plus', label: m.sessao_adicionar_servidor(), onPress: () => router.push('/login' as never) }]}
       />
+      {servers.length === 0 ? <InfoNotice text={m.maquinas_vazio()} /> : null}
+      {servers.length > 0 ? (
+        <SectionCard icon="Server" title={m.native_machines_others()}>
+          {servers.map((s) => (
+            <SettingsRow
+              key={s.id}
+              icon="Monitor"
+              title={s.label}
+              description={s.baseUrl}
+              onPress={() => useServers.getState().setActive(s.id)}
+              onLongPress={() => remover(s)}
+              // Ponto só na ativa: as outras não estão erradas, estão paradas — um ponto
+              // vermelho ali leria como máquina fora do ar, que ninguém mediu.
+              right={s.id === activeId ? <StateDot state="idle" /> : null}
+            >
+              <View style={styles.pills}>
+                <Pill icon="Plug" label={m.config_maquinas_testar()} onPress={() => testar(s)} />
+              </View>
+            </SettingsRow>
+          ))}
+        </SectionCard>
+      ) : null}
     </Pagina>
   );
 }
 
-const styles = StyleSheet.create((theme) => ({
-  intro: { fontSize: theme.base.text.xs, color: theme.tokens.text.muted, paddingHorizontal: theme.base.space[1] },
-  vazio: { fontSize: theme.base.text.sm, color: theme.tokens.text.secondary, paddingHorizontal: theme.base.space[1] },
-  direita: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[2] },
-  testar: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[1] },
-  testarTxt: { fontSize: theme.base.text.xs, fontWeight: '600' },
-}));
+const styles = StyleSheet.create({
+  pills: { flexDirection: 'row' },
+});

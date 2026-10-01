@@ -7,6 +7,10 @@ export type IconName = Exclude<keyof typeof Lucide, 'Icon' | 'createLucideIcon' 
 
 type IconCmp = ComponentType<{ size: number; color: string; strokeWidth?: number }>;
 
+// O Lucide escala o traço com o tamanho: fixo em 1.75 o ícone de 11 some e o de 22 engrossa.
+// Mira ~1.6px na tela em qualquer tamanho.
+const traco = (size: number) => Math.max(1.5, Math.min(2.5, (1.6 * 24) / size));
+
 export function Icon({ name, size = 18, color }: { name: IconName; size?: number; color?: string }) {
   const { theme } = useUnistyles();
   const cor = color ?? theme.tokens.text.secondary;
@@ -15,5 +19,5 @@ export function Icon({ name, size = 18, color }: { name: IconName; size?: number
     console.warn('Icon: nome desconhecido', name);
     return <Lucide.CircleAlert size={size} color={cor} strokeWidth={1.75} />;
   }
-  return <Cmp size={size} color={cor} strokeWidth={1.75} />;
+  return <Cmp size={size} color={cor} strokeWidth={traco(size)} />;
 }

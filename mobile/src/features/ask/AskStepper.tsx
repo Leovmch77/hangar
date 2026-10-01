@@ -325,7 +325,7 @@ const styles = StyleSheet.create((theme) => ({
     borderRadius: theme.base.radius.full,
   },
   statusBadgeText: {
-    fontSize: 10,
+    fontSize: 11,
     fontWeight: '700',
     textTransform: 'uppercase',
   },
@@ -397,7 +397,7 @@ const styles = StyleSheet.create((theme) => ({
     borderRadius: theme.base.radius.full,
   },
   checkMark: {
-    fontSize: 12,
+    fontSize: 13,
     fontWeight: '700',
     lineHeight: 14,
   },

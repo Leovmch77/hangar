@@ -12,12 +12,15 @@ export function Slider({
   max,
   onChange,
   label,
+  disabled = false,
 }: {
   valor: number;
   min: number;
   max: number;
   onChange: (v: number) => void;
   label: string;
+  /** Ajuste que depende de outro (Força sem tinta): fica à vista e apagado, como no Rust. */
+  disabled?: boolean;
 }) {
   const { theme } = useUnistyles();
   return (
@@ -30,7 +33,8 @@ export function Slider({
       maximumTrackTintColor={theme.tokens.border.strong}
       thumbTintColor={theme.tokens.accent.base}
       accessibilityLabel={label}
-      style={{ width: '100%', height: 40 }}
+      disabled={disabled}
+      style={{ width: '100%', height: 40, opacity: disabled ? 0.4 : 1 }}
     />
   );
 }

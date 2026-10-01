@@ -1,10 +1,10 @@
 import { Pressable, Text, View } from 'react-native';
 import { StyleSheet } from 'react-native-unistyles';
-import { providerName } from '@hangar/core';
+import { providerName, SESSION_PROVIDERS } from '@hangar/core';
 import type { Provider } from '@hangar/core';
 import { superficie } from '../../theme/superficie';
 
-const PROVIDERS: Provider[] = ['claude', 'codex', 'pi', 'kimi'];
+const PROVIDERS = SESSION_PROVIDERS;
 
 export function ProviderPicker({
   value,

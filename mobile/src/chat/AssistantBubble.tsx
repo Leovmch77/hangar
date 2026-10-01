@@ -1,5 +1,5 @@
 import { memo, useEffect, useMemo, useState } from 'react';
-import { Pressable, View, Text } from 'react-native';
+import { Platform, Pressable, View, Text } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import type { UnistylesThemes } from 'react-native-unistyles';
 import { Image } from 'expo-image';
@@ -14,21 +14,34 @@ import { BubbleActions } from './BubbleActions';
 import { getTableChartPref, setTableChartPref } from './tableChartPref';
 import { superficie } from '../theme/superficie';
 import { Icon, type IconName } from '../ui/Icon';
+import { useAparencia } from '../stores/aparencia';
 
 // Tema completo do unistyles (tokens + base) — UnistylesTheme não é exportado na raiz.
 type TemaApp = UnistylesThemes[keyof UnistylesThemes];
 
+// Entrelinha de fábrica de cada bloco da lib (normalizeMarkdownStyle): a escala da Aparência anda
+// em cima dela, para 100% continuar igual ao que era.
+const ios = Platform.OS === 'ios';
+const LH = {
+  p: ios ? 24 : 26, h1: ios ? 36 : 38, h2: ios ? 30 : 32, h3: ios ? 26 : 28, h4: ios ? 24 : 26,
+  h5: ios ? 22 : 24, h6: ios ? 20 : 22, quote: ios ? 24 : 26, list: ios ? 22 : 26, code: ios ? 20 : 22,
+};
+const CODIGO_FABRICA = 14;
+
 // Tema do markdown mapeado dos tokens do app (cores/links/code) — a lib recebe um
 // MarkdownStyle plano; sem ele usa defaults pretos que somem no tema escuro.
+// Tamanho, entrelinha e código vêm de Aparência › Texto da conversa (`theme.conversa`).
 export function mkMarkdownStyle(t: TemaApp): MarkdownStyle {
+  const { texto, linha, codigo } = t.conversa;
+  const bloco = (size: number, lh: number) => ({ fontSize: size * texto, lineHeight: Math.round(lh * texto * linha) });
   return {
-    paragraph: { color: t.tokens.text.primary, fontSize: t.base.text.base },
-    h1: { color: t.tokens.text.primary, fontSize: t.base.text.xl, fontWeight: '700' },
-    h2: { color: t.tokens.text.primary, fontSize: t.base.text.lg, fontWeight: '700' },
-    h3: { color: t.tokens.text.primary, fontSize: t.base.text.base, fontWeight: '600' },
-    h4: { color: t.tokens.text.primary, fontSize: t.base.text.base, fontWeight: '600' },
-    h5: { color: t.tokens.text.primary, fontSize: t.base.text.sm, fontWeight: '600' },
-    h6: { color: t.tokens.text.secondary, fontSize: t.base.text.sm, fontWeight: '600' },
+    paragraph: { color: t.tokens.text.primary, ...bloco(t.base.text.base, LH.p) },
+    h1: { color: t.tokens.text.primary, ...bloco(t.base.text.xl, LH.h1), fontWeight: '700' },
+    h2: { color: t.tokens.text.primary, ...bloco(t.base.text.lg, LH.h2), fontWeight: '700' },
+    h3: { color: t.tokens.text.primary, ...bloco(t.base.text.base, LH.h3), fontWeight: '600' },
+    h4: { color: t.tokens.text.primary, ...bloco(t.base.text.base, LH.h4), fontWeight: '600' },
+    h5: { color: t.tokens.text.primary, ...bloco(t.base.text.sm, LH.h5), fontWeight: '600' },
+    h6: { color: t.tokens.text.secondary, ...bloco(t.base.text.sm, LH.h6), fontWeight: '600' },
     link: { color: t.tokens.accent.base, underline: true },
     strong: { color: t.tokens.text.primary },
     em: { color: t.tokens.text.primary },
@@ -36,12 +49,15 @@ export function mkMarkdownStyle(t: TemaApp): MarkdownStyle {
     // borda rosa de fábrica, que corta a frase em caixinhas.
     code: {
       fontFamily: t.base.fontMono,
-      fontSize: t.base.text.sm,
+      fontSize: codigo,
       color: t.tokens.accent.base,
       backgroundColor: t.tokens.accent.dim,
       borderColor: 'transparent',
     },
     codeBlock: {
+      fontFamily: t.base.fontMono,
+      fontSize: codigo,
+      lineHeight: Math.round((LH.code * codigo) / CODIGO_FABRICA),
       color: t.tokens.text.primary,
       backgroundColor: superficie(t),
       borderColor: t.tokens.border.subtle,
@@ -61,8 +77,8 @@ export function mkMarkdownStyle(t: TemaApp): MarkdownStyle {
         comment: t.tokens.text.muted,
       },
     },
-    blockquote: { borderColor: t.tokens.border.default, backgroundColor: 'transparent', color: t.tokens.text.secondary },
-    list: { bulletColor: t.tokens.text.muted, color: t.tokens.text.primary },
+    blockquote: { borderColor: t.tokens.border.default, backgroundColor: 'transparent', color: t.tokens.text.secondary, ...bloco(t.base.text.base, LH.quote) },
+    list: { bulletColor: t.tokens.text.muted, color: t.tokens.text.primary, ...bloco(t.base.text.base, LH.list) },
     table: {
       headerBackgroundColor: superficie(t, 0.8),
       headerTextColor: t.tokens.text.primary,
@@ -101,6 +117,8 @@ export const AssistantBubble = memo(function AssistantBubble({
   const hasCodigos = codigos.length > 0 && !!sessionName && !!serverId;
   const tabelas = useMemo(() => lerTabelaMarkdown(display), [display]);
   const [pref, setPref] = useState(() => getTableChartPref());
+  // Aparência › Gráfico nas tabelas: desligado, nem o botão aparece.
+  const grafico = useAparencia((s) => s.graficoTabela);
   const [colIndices, setColIndices] = useState<number[]>(() => tabelas.map(() => 0));
   useEffect(() => {
     if (colIndices.length !== tabelas.length) setColIndices(tabelas.map(() => 0));
@@ -110,7 +128,7 @@ export const AssistantBubble = memo(function AssistantBubble({
     <View style={styles.wrap}>
       {proposed ? <Text style={styles.planLabel}>{m.chat_plan_proposto()}</Text> : null}
       <EnrichedMarkdownText markdown={display} markdownStyle={md} flavor="github" />
-      {tabelas.length > 0 ? (
+      {grafico && tabelas.length > 0 ? (
         <View style={styles.tableBlock}>
           <Pressable
             onPress={() => {

@@ -107,7 +107,7 @@ const styles = StyleSheet.create((theme) => ({
   chev: {
     width: 12,
     textAlign: 'center',
-    fontSize: 9,
+    fontSize: 10,
   },
   icon: {
     width: 14,
@@ -115,23 +115,23 @@ const styles = StyleSheet.create((theme) => ({
   },
   nome: {
     flex: 1,
-    fontSize: 13,
+    fontSize: 14,
   },
   numView: {
     flexDirection: 'row',
   },
   numAdd: {
-    fontSize: 10.5,
+    fontSize: 11.5,
     fontFamily: theme.base.fontMono,
   },
   numDel: {
-    fontSize: 10.5,
+    fontSize: 11.5,
     fontFamily: theme.base.fontMono,
   },
   marca: {
     width: 14,
     textAlign: 'center',
-    fontSize: 11,
+    fontSize: 12,
     fontWeight: '600',
     fontFamily: theme.base.fontMono,
   },

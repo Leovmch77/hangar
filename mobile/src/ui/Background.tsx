@@ -1,3 +1,4 @@
+import { useEffect } from 'react';
 import { StyleSheet as RN, View } from 'react-native';
 import { Image } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -7,6 +8,10 @@ import { useAparencia } from '../stores/aparencia';
 import { toast } from './Toast';
 import * as m from '../paraglide/messages';
 import { transparenciaDe } from '../theme/superficie';
+import { misturar } from '../theme/paleta';
+import { themeDark, themeLight } from '@hangar/core';
+import { failBackgroundEffect, syncBackgroundEffect } from '../features/config/effectImage';
+import { EffectWorker } from '../features/config/EffectWorker';
 
 // Mesmos modos do `lib/background.ts` da PWA, com os valores do app.css:
 //   texture/aurora = faixa vertical (app.css:356 e :551);
@@ -20,8 +25,23 @@ export function Background() {
   const { theme, rt } = useUnistyles();
   const fundo = useAparencia((s) => s.fundo);
   const uri = useAparencia((s) => s.imagemUri);
+  const efeito = useAparencia((s) => s.efeito);
+  const pronta = useAparencia((s) => s.efeitoImagem);
+  const processando = useAparencia((s) => s.efeitoProcessando);
   const claro = rt.themeName === 'light';
-  const faixa = FAIXA[claro ? 'light' : 'dark'];
+  // Paleta Neutra ou tinta mudaram o fundo: a faixa sai dele pela conta do window_fill do Rust (um
+  // degrau mais fundo em cima, um toque do destaque embaixo). Sem mudança, a faixa fixa do app.css.
+  const fabrica = (claro ? themeLight : themeDark).bg.base;
+  const base = theme.tokens.bg.base;
+  const faixa = base === fabrica
+    ? FAIXA[claro ? 'light' : 'dark']
+    : [misturar(base, claro ? '#6b5f55' : '#000000', claro ? 0.03 : 0.22), misturar(base, theme.tokens.accent.base, claro ? 0.04 : 0.05)] as const;
+  const comImagem = fundo === 'image' && !!uri;
+  useEffect(() => {
+    void syncBackgroundEffect(comImagem ? uri : null, efeito, !claro);
+  }, [comImagem, uri, efeito, claro]);
+  // Enquanto a variante nova processa fica a anterior da mesma foto, como o desktop.
+  const mostrada = comImagem && efeito !== 'none' && pronta?.fonte === uri ? pronta.uri : uri;
   return (
     // Camadas decorativas: o leitor de tela não tem o que anunciar aqui, e `pointerEvents` só
     // resolve o toque.
@@ -49,15 +69,16 @@ export function Background() {
           <Rect x="0" y="0" width="100%" height="100%" fill="url(#aurora)" />
         </Svg>
       ) : null}
-      {fundo === 'image' && uri ? (
+      {comImagem && mostrada ? (
         <Image
-          source={{ uri }}
+          source={{ uri: mostrada }}
           style={RN.absoluteFill}
           contentFit="cover"
           transition={200}
           // Arquivo apagado por reinstalação ou limpeza: sem isto a preferência continua em `image`
           // e a tela fica chapada sem dizer por quê. Volta pro `flat`, que é o que está na tela.
           onError={(e) => {
+            if (mostrada !== uri) { failBackgroundEffect(mostrada, e); return; }
             console.warn('Background: papel de parede não abriu', uri, e);
             toast.erro(m.erro_desconhecido());
             void useAparencia.getState().setImagemUri(null);
@@ -65,15 +86,18 @@ export function Background() {
         />
       ) : null}
       {fundo === 'image' && uri ? (
-        // Véu da PWA (lib/background.ts): sem ele a foto crua briga com o texto. Anda com o slider
-        // Transparência; no máximo ainda sobra 10% de véu.
+        // Véu sobre a foto: anda com o slider Transparência; no máximo ainda sobra 10% de véu. A curva
+        // (t²) concentra o efeito na metade de baixo: em linha reta, perto do mínimo a foto forte
+        // ainda vazava e o controle parecia não fazer nada.
         <View
           style={[
             RN.absoluteFill,
-            { backgroundColor: `rgba(${theme.tokens.veuRgb.join(',')},${1 - 0.9 * transparenciaDe(theme.panelAlpha)})` },
+            { backgroundColor: `rgba(${theme.tokens.veuRgb.join(',')},${1 - 0.9 * transparenciaDe(theme.panelAlpha) ** 2})` },
           ]}
         />
       ) : null}
+      {/* Só existe enquanto processa: a WebView é um processo inteiro a mais na memória. */}
+      {processando ? <EffectWorker /> : null}
     </View>
   );
 }

@@ -124,6 +124,7 @@ const styles = StyleSheet.create((theme) => ({
     minHeight: 32,
     justifyContent: 'center',
     paddingHorizontal: theme.base.space[4],
+    paddingTop: theme.base.space[1],
     paddingBottom: theme.base.space[1],
   },
   pressed: {
@@ -141,7 +142,7 @@ const styles = StyleSheet.create((theme) => ({
   },
   text: {
     fontFamily: theme.base.fontMono,
-    fontSize: 11,
+    fontSize: 12,
   },
   dot: {
     width: 6,

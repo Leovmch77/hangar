@@ -599,6 +599,27 @@ export async function transcribeFileForServer(
   return res.json() as Promise<{ path: string; text: string; raw?: string; aviso?: string | null }>;
 }
 
+// Ditado da tela de nova conversa: a sessão ainda não existe, então o áudio só é transcrito e
+// limpo (sem pasta onde guardar), com o mesmo `estilo` que a pílula mostrava.
+export async function transcribeDictationForServer(
+  s: Server,
+  file: File,
+  estilo?: string,
+): Promise<{ text: string; raw?: string; aviso?: string | null }> {
+  const qs = estilo ? `?estilo=${encodeURIComponent(estilo)}` : '';
+  const res = await apiFetchRes(`/api/dictation/transcribe${qs}`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': file.type || 'application/octet-stream',
+      'X-Filename': encodeURIComponent(file.name || 'audio.m4a'),
+    },
+    body: file,
+    signal: AbortSignal.timeout(300_000),
+  }, s);
+  if (!res.ok) throw new Error(`${res.status}: ${await errorDetail(res)}`);
+  return res.json() as Promise<{ text: string; raw?: string; aviso?: string | null }>;
+}
+
 // Envia prompt pra sessão de um servidor específico (input do card do quadro). 404 = sessão morta:
 // o chamador REMOVE o eco pendente e sinaliza — mensagem nunca "some" calada (mesmo contrato do
 // feedback de entrega do Chat). SEM timeout de propósito (igual ao sendInput por-servidor-ativo):
@@ -1747,6 +1768,10 @@ export function getEngines(): Promise<EnginesResponse> {
 
 export function getProviders(): Promise<Record<string, { disponivel: boolean; motivo: string | null }>> {
   return apiFetch('/api/providers');
+}
+
+export function getProvidersForServer(s: Server, signal?: AbortSignal): Promise<Record<string, { disponivel: boolean; motivo: string | null }>> {
+  return apiFetchForServer(s, '/api/providers', { signal: comTeto(signal, 8000) });
 }
 
 export function getEnginesForServer(s: Server): Promise<EnginesResponse> {
@@ -3147,4 +3172,76 @@ export function revokeAllShares(name: string): Promise<{ ok: boolean; revoked: n
 export async function checkInviteForServer(s: Server): Promise<boolean> {
   const res = await apiFetchRes('/api/sessions', { signal: AbortSignal.timeout(4000) }, s, true);
   return res.status === 410 || res.status === 401;
+}
+
+// ── Páginas de servidor do app (Configurações): variantes com o servidor explícito ────────────
+// O menu de Configurações escolhe a máquina; ler do servidor "ativo" global trocaria de máquina calado.
+
+export function getOrqPoliticaForServer(s: Server, signal?: AbortSignal): Promise<import('./orquestracao').OrqPolitica> {
+  return apiFetchForServer(s, '/api/orquestracao/politica', { signal: comTeto(signal, 10_000) }, 10_000);
+}
+
+export function putOrqContaForServer(
+  s: Server,
+  conta: string,
+  body: { provider: string; apelido?: string; modelos?: string[]; trocar?: boolean; ligada?: boolean; mtime: number },
+): Promise<{ ok: boolean; mtime: number }> {
+  return apiFetchForServer(s, `/api/orquestracao/politica/${encodeURIComponent(conta)}`,
+    { method: 'PUT', body: JSON.stringify(body) }, 10_000);
+}
+
+export function getDiagSummaryForServer(s: Server, signal?: AbortSignal): Promise<ResumoDiag> {
+  return apiFetchForServer(s, '/api/diag', { signal: comTeto(signal, 20_000) }, 20_000);
+}
+
+/** O diário inteiro (NDJSON) como texto: no celular ele sai pela folha de compartilhar. */
+export async function getDiagFileForServer(s: Server): Promise<string> {
+  const res = await apiFetchRes('/api/diag/arquivo', { signal: AbortSignal.timeout(60_000) }, s);
+  if (!res.ok) throw Object.assign(new Error(`${res.status}: ${await errorDetail(res)}`), { status: res.status });
+  return res.text();
+}
+
+/** Um item da saúde de um harness (`/api/harness`): `codigo`/`params` viram texto pelas chaves `harness_*`. */
+export interface HarnessItem {
+  id: string;
+  ok: boolean | null;
+  codigo: string;
+  params?: Record<string, string>;
+  /** Id do conserto que o servidor sabe fazer; `sync:` = sincronizar. */
+  conserto: string | null;
+  info?: boolean;
+}
+export interface HarnessCli { id: string; nome: string; instalado: boolean; versao: string | null; itens: HarnessItem[] }
+
+/** Estado da instalação de um CLI, que vive no servidor e é lido por polling. */
+export interface HarnessInstall {
+  fase: string;
+  harness?: string | null;
+  etapa?: string | null;
+  passo?: number;
+  total?: number;
+  log?: string[];
+  avisos?: string[];
+  ok?: boolean | null;
+  erro?: string | null;
+  comandos?: Record<string, string>;
+  manual?: Record<string, string>;
+}
+
+// `--version` de cinco CLIs em série no servidor: o prazo é de leitura lenta.
+export function getHarnessesForServer(s: Server, signal?: AbortSignal): Promise<HarnessCli[]> {
+  return apiFetchForServer(s, '/api/harness', { signal: comTeto(signal, 30_000) }, 30_000);
+}
+
+export function repairHarnessForServer(s: Server, id: string): Promise<{ feito: string; harnesses: HarnessCli[] }> {
+  return apiFetchForServer(s, `/api/harness/conserto/${id.split('/').map(encodeURIComponent).join('/')}`,
+    { method: 'POST' }, 120_000);
+}
+
+export function getHarnessInstallForServer(s: Server, signal?: AbortSignal): Promise<HarnessInstall> {
+  return apiFetchForServer(s, '/api/harness/instalar', { signal: comTeto(signal, 15_000) }, 15_000);
+}
+
+export function startHarnessInstallForServer(s: Server, cli: string): Promise<HarnessInstall> {
+  return apiFetchForServer(s, `/api/harness/instalar/${encodeURIComponent(cli)}`, { method: 'POST' }, 30_000);
 }

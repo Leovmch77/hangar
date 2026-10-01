@@ -6490,5 +6490,19 @@
   "conversa_conta_sem_cota": "A conta {conta} está sem cota. Escolha outra conta para enviar.",
   "conversa_conta_sem_cota_volta": "A conta {conta} está sem cota; volta em {quando}. Escolha outra conta para enviar.",
   "conversa_ja_aberta": "Esta conversa já está aberta na sessão {sessao}.",
-  "conversa_ja_aberta_sem_nome": "Esta conversa já está aberta em outra sessão."
+  "conversa_ja_aberta_sem_nome": "Esta conversa já está aberta em outra sessão.",
+  "config_geral_lead": "Idioma e lista de sessões neste aparelho. Vale só aqui.",
+  "config_aparencia_lead": "Como o Hangar aparece neste aparelho. Vale só aqui.",
+  "aparencia_efeito_aplicando": "Aplicando o efeito na imagem… Escolha outro para cancelar.",
+  "aparencia_efeito_erro": "Efeito de fundo não aplicado: {reason}. A imagem segue sem efeito.",
+  "aparencia_efeito_webview": "o processador de imagem embutido falhou",
+  "aparencia_efeito_ilegivel": "a imagem não pôde ser lida",
+  "new_chat_account_switched": "{conta} estava sem cota; trocada pela conta com mais folga.",
+  "nova_conversa_anexo_falhou": "A conversa foi criada, mas o anexo não subiu ({erro}). Ele continua guardado: reenvie aqui ou abra a conversa e envie de lá.",
+  "nova_conversa_so_terminal": "{provider} só abre no terminal",
+  "home_usage_today": "Hoje",
+  "mobile_sync_register_elsewhere": "Criar a conta de sincronização ainda não dá pelo celular: crie pelo app do computador ou pela página desta máquina no navegador. Depois de criada, reativar e desativar funcionam aqui.",
+  "composer_adicionar_arquivos": "Adicionar arquivos",
+  "composer_sem_acesso_camera": "Sem acesso à câmera. Libere o acesso nas configurações do aparelho e toque em anexar de novo.",
+  "config_aparencia_estilo_dica": "Compacto aplica texto, entrelinha, código, coluna e ferramentas. Cada opção continua ajustável."
 }

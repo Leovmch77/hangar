@@ -1,14 +1,17 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Alert, Pressable, Text, View } from 'react-native';
+import { Alert, Text, View } from 'react-native';
 import { StyleSheet } from 'react-native-unistyles';
 import { codexCliAusente, credentialAuth, credentialGroup, deleteCodexAccountForServer, getCodexAccountsForServer,
   getCredentialsForServer, type CodexAccount, type Credencial } from '@hangar/core';
 import { Pagina } from '../../src/features/config/Pagina';
-import { Linha } from '../../src/features/config/Linha';
+import { PageHeader, Pill, type PageAction } from '../../src/features/config/PageHeader';
+import { SectionCard } from '../../src/features/config/SectionCard';
+import { SettingsRow } from '../../src/features/config/SettingsRow';
+import { InfoNotice } from '../../src/features/config/InfoNotice';
 import { CodexContaLogin } from '../../src/features/config/CodexContaLogin';
+import type { IconName } from '../../src/ui/Icon';
 import { useServers } from '../../src/stores/servers';
 import * as m from '../../src/paraglide/messages';
-import { superficie } from '../../src/theme/superficie';
 
 type CredentialGroup = ReturnType<typeof credentialGroup>;
 type IdentityRow = { key: string; group: CredentialGroup; title: string; description: string; account: CodexAccount | null };
@@ -80,6 +83,7 @@ export default function Contas() {
   const groupForAccount = (account: CodexAccount): CredentialGroup => (
     account.auth.method === 'oauth' ? 'subscription' : account.auth.method === 'api_key' ? 'api_key' : 'unknown'
   );
+  const canSignIn = (account: CodexAccount) => account.auth.status !== 'connected' && !codexCliAusente(account);
   const credentialStatus = (credential: Credencial) => {
     const auth = credentialAuth(credential);
     if (auth === 'unknown') return codexCliAusente(credential) ? m.codex_ui_cli_ausente() : m.codex_ui_unknown();
@@ -140,106 +144,66 @@ export default function Contas() {
   const apiKeys = identities.filter((identity) => identity.group === 'api_key');
   const unknown = identities.filter((identity) => identity.group === 'unknown');
   const renderIdentity = (identity: IdentityRow) => (
-    <Linha
-      key={identity.key}
-      icon="KeyRound"
-      titulo={identity.title}
-      descricao={identity.description}
-      direita={identity.account ? (
+    <SettingsRow key={identity.key} icon="KeyRound" title={identity.title} description={identity.description}>
+      {identity.account && (canSignIn(identity.account) || !identity.account.is_default) ? (
         <View style={styles.actions}>
-          {identity.account.auth.status !== 'connected' && !codexCliAusente(identity.account) ? (
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel={m.contas_entrar()}
-              onPress={() => startLogin(identity.account!.id)}
-              style={styles.action}
-            >
-              <Text style={styles.actionText}>{m.contas_entrar()}</Text>
-            </Pressable>
+          {canSignIn(identity.account) ? (
+            <Pill icon="LogIn" label={m.contas_entrar()} onPress={() => startLogin(identity.account!.id)} />
           ) : null}
           {!identity.account.is_default ? (
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel={m.lista_remover()}
-              onPress={() => removeAccount(identity.account!)}
-              style={styles.action}
-            >
-              <Text style={styles.actionText}>{m.lista_remover()}</Text>
-            </Pressable>
+            <Pill icon="Trash2" label={m.lista_remover()} onPress={() => removeAccount(identity.account!)} />
           ) : null}
         </View>
       ) : null}
-    />
+    </SettingsRow>
   );
+  // Seção vazia não aparece, e o título vai junto.
+  const section = (icon: IconName, title: string, subtitle: string, rows: IdentityRow[]) =>
+    rows.length ? <SectionCard icon={icon} title={title} subtitle={subtitle}>{rows.map(renderIdentity)}</SectionCard> : null;
+  const actions: PageAction[] = [{ icon: 'RefreshCw', label: m.contas_atualizar(), onPress: () => load(server) }];
+  // O rótulo já traz o "+"; ícone repetiria o sinal.
+  if (server) actions.push({ label: m.contas_nova(), onPress: () => startLogin() });
 
   return (
     <Pagina>
-      <Text style={styles.title}>{m.contas_titulo()}</Text>
-      <Text style={styles.description}>{m.contas_descricao()}</Text>
-      <View style={styles.server}>
-        <Text style={styles.serverLabel}>{m.maquinas_titulo()}</Text>
-        <Text style={styles.serverName}>{server?.label ?? m.maquinas_vazio()}</Text>
-        {server ? <Text style={styles.serverUrl}>{server.baseUrl}</Text> : null}
-      </View>
-
-      <Linha
-        icon="RefreshCw"
-        titulo={m.contas_atualizar()}
-        onPress={() => load(server)}
-      />
-      {!server ? <Text style={styles.muted}>{m.maquinas_vazio()}</Text> : null}
+      <PageHeader title={m.contas_modelos_titulo()} subtitle={m.contas_descricao()} actions={actions} />
+      {server ? (
+        <SectionCard icon="Server" title={server.label} subtitle={`${m.maquinas_titulo()} · ${server.baseUrl}`} />
+      ) : (
+        <InfoNotice text={m.maquinas_vazio()} />
+      )}
       {loading ? <Text style={styles.muted}>{m.comum_carregando()}</Text> : null}
       {error ? <Text accessibilityRole="alert" style={styles.error}>{error}</Text> : null}
 
-      {subscriptions.length ? <Text style={styles.section}>{m.contas_secao_claude()}</Text> : null}
-      {subscriptions.map(renderIdentity)}
-      {claudeEngines.length ? <Text style={styles.section}>{m.contas_secao_modelos()}</Text> : null}
-      {claudeEngines.map(renderIdentity)}
-      {apiKeys.length ? <Text style={styles.section}>{m.contas_secao_outros()}</Text> : null}
-      {apiKeys.map(renderIdentity)}
-      {unknown.length ? <Text style={styles.section}>{m.codex_ui_unknown()}</Text> : null}
-      {unknown.map(renderIdentity)}
-
-      {server ? (
-        <Linha icon="Plus" titulo={m.contas_nova()} onPress={() => startLogin()} />
-      ) : null}
+      {section('CreditCard', m.contas_secao_claude(), m.contas_secao_claude_leg(), subscriptions)}
+      {section('Cpu', m.contas_secao_modelos(), m.contas_secao_modelos_leg(), claudeEngines)}
+      {section('KeyRound', m.contas_secao_outros(), m.contas_secao_outros_leg(), apiKeys)}
+      {section('CircleHelp', m.codex_ui_unknown(), '', unknown)}
 
       {selected || newLogin ? (
-        <View style={styles.login}>
-          <View style={styles.loginHeader}>
-            <Text style={styles.loginTitle}>{selected?.name ?? m.novacred_codex_nome()}</Text>
-            <Pressable accessibilityRole="button" accessibilityLabel={m.login_fechar()} onPress={() => { setLoginAccount(null); setNewLogin(false); }}>
-              <Text style={styles.close}>{m.login_fechar()}</Text>
-            </Pressable>
-          </View>
+        <SectionCard
+          icon="LogIn"
+          title={selected?.name ?? m.novacred_codex_nome()}
+          extra={<Pill label={m.login_fechar()} onPress={() => { setLoginAccount(null); setNewLogin(false); }} />}
+        >
           {server ? (
-            <CodexContaLogin
-              server={server}
-              accountId={selected?.id}
-              onComplete={() => { void load(server); }}
-            />
+            <View style={styles.login}>
+              <CodexContaLogin
+                server={server}
+                accountId={selected?.id}
+                onComplete={() => { void load(server); }}
+              />
+            </View>
           ) : null}
-        </View>
+        </SectionCard>
       ) : null}
     </Pagina>
   );
 }
 
 const styles = StyleSheet.create((theme) => ({
-  title: { fontSize: theme.base.text.xl, fontWeight: '600', color: theme.tokens.text.primary },
-  description: { fontSize: theme.base.text.sm, color: theme.tokens.text.secondary },
-  server: { gap: 2, padding: theme.base.space[3], borderRadius: theme.base.radius.md, backgroundColor: superficie(theme) },
-  serverLabel: { fontSize: theme.base.text.xs, color: theme.tokens.text.muted },
-  serverName: { fontSize: theme.base.text.base, fontWeight: '600', color: theme.tokens.text.primary },
-  serverUrl: { fontFamily: theme.base.fontMono, fontSize: theme.base.text.xs, color: theme.tokens.text.muted },
-  muted: { fontSize: theme.base.text.sm, color: theme.tokens.text.muted },
-  error: { fontSize: theme.base.text.sm, color: theme.tokens.status.error },
-  actions: { flexDirection: 'row', alignItems: 'center' },
-  action: { minHeight: 44, justifyContent: 'center', paddingHorizontal: theme.base.space[2] },
-  actionText: { color: theme.tokens.accent.base, fontSize: theme.base.text.xs, fontWeight: '600' },
-  login: { gap: theme.base.space[3], padding: theme.base.space[3], borderRadius: theme.base.radius.lg, backgroundColor: superficie(theme) },
-  loginHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: theme.base.space[2] },
-  loginTitle: { flex: 1, fontSize: theme.base.text.lg, fontWeight: '600', color: theme.tokens.text.primary },
-  close: { color: theme.tokens.accent.base, fontSize: theme.base.text.sm },
-  section: { fontSize: theme.base.text.sm, fontWeight: '600', color: theme.tokens.text.secondary, paddingTop: theme.base.space[2] },
+  muted: { fontSize: theme.base.text.sm, color: theme.tokens.text.muted, paddingHorizontal: 4 },
+  error: { fontSize: theme.base.text.sm, color: theme.tokens.status.error, paddingHorizontal: 4 },
+  actions: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  login: { paddingHorizontal: 16, paddingBottom: 16 },
 }));

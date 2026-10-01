@@ -57,5 +57,5 @@ const styles = StyleSheet.create((theme) => ({
   solid: { gap: 0 },
   seg: { flex: 1, height: 5, borderRadius: theme.base.radius.full, backgroundColor: superficie(theme, 0.8), overflow: 'hidden' },
   fill: { height: '100%', borderRadius: theme.base.radius.full },
-  lbl: { fontSize: 10, fontVariant: ['tabular-nums'], flexShrink: 0 },
+  lbl: { fontSize: 11, fontVariant: ['tabular-nums'], flexShrink: 0 },
 }));

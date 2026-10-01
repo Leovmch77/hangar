@@ -1,31 +1,32 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import * as Haptics from 'expo-haptics';
 import { AccessibilityInfo, ActivityIndicator, AppState, Platform, Pressable, Text, View, type NativeSyntheticEvent, type TextInput, type TextInputKeyPressEventData } from 'react-native';
 import type { NativeStackNavigationProp } from 'expo-router';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
-import * as ImagePicker from 'expo-image-picker';
-import * as DocumentPicker from 'expo-document-picker';
-import { Image } from 'expo-image';
 import { broadcast, formataErro, uploadFileForServer, transcribeFileForServer, steerSession, podeEnviarSozinho, providerName } from '@hangar/core';
 import type { MotivoFim, Provider, Server } from '@hangar/core';
 import { Glass } from '../ui/Glass';
 import { Icon } from '../ui/Icon';
 import { MultilineInput } from '../ui/MultilineInput';
+import { RecordingWave } from '../ui/RecordingWave';
 import * as m from '../paraglide/messages';
 import { chatStore, filaCount as filaCountOf, submitConversationDraft, isSubmitting } from '../stores/chat';
-import { abandonUnknownAttempt, confirmFirstInput, readFirstInput, sendFirstInput, useNewConversation } from '../stores/newConversation';
+import { abandonUnknownAttempt, attachInsert, confirmFirstInput, firstInputMessage, readFirstInput, sendFirstInput, useNewConversation, withAttach } from '../stores/newConversation';
 import { useSessions } from '../stores/sessions';
 import { clearDraft, clearRecoverableDraft, readDraft, readRecoverableDraft, resolveDraftTranscript, reusableUploadPath, withoutUpload, writeDraft, writeRecoverableDraft, clearDictation, readDictation, writeDictation, finishDictation, recoverDictation, associateDictationTranscript, type ConversationDraft, type DraftAttachment, type DictationDraft } from '../stores/drafts';
 import { useServers } from '../stores/servers';
 import { removeDraftAttachment, retainDraftAttachment } from './draftAttachments';
-import { useNavigation } from 'expo-router';
+import { useNavigation, useRouter } from 'expo-router';
 import { DictationStyleMenu, useDictationStyleLabel } from '../features/ditado/EstiloPill';
 import { useDitado } from '../features/ditado/useDitado';
 import { useDitadoEstiloStore } from '../features/ditado/ditadoEstiloStore';
-import { PillMenu } from '../features/pills/PillMenu';
 import { CommandSheet } from './CommandSheet';
 import { SessionSettingsButton } from './SessionSettings';
 import { comandoParcial } from './comandoParcial';
 import { superficie } from '../theme/superficie';
+import type { PickedAttachment } from '../ui/attachmentPicker';
+import { AttachSheet } from '../ui/AttachSheet';
+import { AttachmentPreview } from '../ui/AttachmentPreview';
 
 interface Props {
   serverId: string;
@@ -38,11 +39,7 @@ interface Props {
   stopping?: boolean;
 }
 
-type PendingAttach = DraftAttachment & { size?: number };
-
-const attachInsert = (attach: DraftAttachment, path: string) =>
-  `📎 ${attach.kind === 'image' ? m.board_imagem() : m.board_arquivo()}: ${path}`;
-const withAttach = (text: string, insert: string) => (text ? `${text} — ${insert}` : insert);
+type PendingAttach = PickedAttachment;
 // Número do selo da fila: crescer com o texto ampliado o cortava dentro do botão; a dica acessível já diz a contagem.
 const GLYPH_MAX_SCALE = 1.4;
 
@@ -452,7 +449,7 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
       }
       return chat.send(value, revision);
     }
-    if (value.trim() !== snapshot.text.trim()) {
+    if (value.trim() !== firstInputMessage(snapshot).trim()) {
       return chat.send(value, revision);
     }
     if (snapshot.phase === 'created') await sendFirstInput(serverId, snapshot.id);
@@ -525,7 +522,7 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
     let groupPendingId: string | null = null;
     try {
       const snapshot = firstInputId ? readFirstInput(serverId, name) : null;
-      const firstDraft = snapshot?.id === firstInputId && snapshot?.text.trim() === finalText.trim();
+      const firstDraft = !!snapshot && snapshot.id === firstInputId && firstInputMessage(snapshot).trim() === finalText.trim();
       const sendToPairNow = !firstDraft && sendToPair && !!pairPeers?.length && !finalText.trimStart().startsWith('/');
       if (sendToPairNow && pairPeers?.length) {
         const recipients = [name, ...pairPeers];
@@ -887,62 +884,17 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
     setPendingAttach({ ...kept, size: picked.size });
   }, [persistDraft, pendingAttach]);
 
-  const handlePickImage = useCallback(async () => {
-    setAttachMenuOpen(false);
+  const handlePicked = useCallback((picked: PickedAttachment) => {
     setError('');
-    try {
-      const res = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: ImagePicker.MediaTypeOptions.Images,
-        quality: 0.8,
-      });
-      if (res.canceled || !res.assets?.[0]) return;
-      const asset = res.assets[0];
-      await adoptPicked({
-        uri: asset.uri,
-        name: asset.fileName ?? 'imagem.jpg',
-        mime: asset.mimeType ?? 'image/jpeg',
-        kind: 'image',
-        size: asset.fileSize,
-      });
-    } catch (e) {
-      const code = (e as { code?: string } | null)?.code;
-      const denied = code === 'ERR_USER_REJECTED_PERMISSIONS' || (e instanceof Error && /permission/i.test(e.message));
-      setError(denied ? m.composer_sem_acesso_fotos() : e instanceof Error ? e.message : m.board_falha_upload());
-    }
+    void adoptPicked(picked);
   }, [adoptPicked]);
 
-  const handlePickFile = useCallback(async () => {
-    setAttachMenuOpen(false);
-    setError('');
-    try {
-      const res = await DocumentPicker.getDocumentAsync({ type: '*/*', copyToCacheDirectory: true });
-      if (res.canceled) return;
-      const asset = (res as unknown as { assets: { uri: string; name: string; mimeType?: string; size?: number }[] }).assets?.[0];
-      if (!asset) {
-        const single = res as unknown as { uri: string; name: string; mimeType?: string; size?: number };
-        if (!single.uri) return;
-        const isImg = /\.(png|jpe?g|gif|webp|bmp|svg|avif)$/i.test(single.name ?? '');
-        await adoptPicked({
-          uri: single.uri,
-          name: single.name ?? 'arquivo',
-          mime: single.mimeType ?? 'application/octet-stream',
-          kind: isImg ? 'image' : 'file',
-          size: single.size,
-        });
-        return;
-      }
-      const isImg = /\.(png|jpe?g|gif|webp|bmp|svg|avif)$/i.test(asset.name ?? '');
-      await adoptPicked({
-        uri: asset.uri,
-        name: asset.name ?? 'arquivo',
-        mime: asset.mimeType ?? 'application/octet-stream',
-        kind: isImg ? 'image' : 'file',
-        size: asset.size,
-      });
-    } catch (e) {
-      setError(e instanceof Error ? e.message : m.board_falha_upload());
-    }
-  }, [adoptPicked]);
+  // Só o que este app enviou deixa a marca do attachInsert no texto; basta para saber se há galeria.
+  const hasSentAttachments = useMemo(
+    () => events.some((e) => e.kind === 'user_msg' && !!e.text?.includes('📎')),
+    [events],
+  );
+  const router = useRouter();
 
   const handleRemoveAttach = useCallback(() => {
     if (!pendingAttach || !persistDraft({ attachment: null })) return;
@@ -996,33 +948,7 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
         ) : null}
 
         {pendingAttach ? (
-          <View style={[styles.attachPreview, { backgroundColor: superficie(theme, 0.8), borderColor: theme.tokens.border.subtle }]}>
-            {pendingAttach.kind === 'image' ? (
-              <Image source={{ uri: pendingAttach.uri }} style={styles.attachThumb} contentFit="cover" transition={150} />
-            ) : (
-              <View style={[styles.attachFileIcon, { backgroundColor: superficie(theme) }]}>
-                <Icon name="Paperclip" size={18} color={theme.tokens.text.secondary} />
-              </View>
-            )}
-            <View style={styles.attachInfo}>
-              <Text style={[styles.attachName, { color: theme.tokens.text.primary }]} numberOfLines={1}>
-                {pendingAttach.name}
-              </Text>
-              {pendingAttach.size ? (
-                <Text style={[styles.attachMeta, { color: theme.tokens.text.muted }]}>{Math.round(pendingAttach.size / 1024)} KB</Text>
-              ) : null}
-            </View>
-            <Pressable
-              onPress={handleRemoveAttach}
-              disabled={sending}
-              style={[styles.attachRemove, { borderColor: theme.tokens.border.subtle }, sending && styles.iconBtnDisabled]}
-              accessibilityLabel={m.board_remover_anexo()}
-              accessibilityRole="button"
-              accessibilityState={{ disabled: sending }}
-            >
-              <Icon name="X" size={16} color={theme.tokens.text.secondary} />
-            </Pressable>
-          </View>
+          <AttachmentPreview attachment={pendingAttach} onRemove={handleRemoveAttach} disabled={sending} />
         ) : null}
 
         {/* Campo em linha própria: dividindo a linha com os botões ele ficava só com a sobra. */}
@@ -1106,7 +1032,7 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
 
           {showStop ? (
             <Pressable
-              onPress={onStop}
+              onPress={() => { void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium); onStop?.(); }}
               disabled={stopping}
               hitSlop={5}
               style={({ pressed }) => [styles.roundBtn, pressed && styles.iconBtnPressed, stopping && styles.iconBtnDisabled]}
@@ -1127,7 +1053,7 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
               de superfície com seta apagada: o claro cheio sumiria no tema claro. */}
           {showSend ? (
             <Pressable
-              onPress={handleSend}
+              onPress={() => { void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); void handleSend(); }}
               disabled={!canSend}
               hitSlop={5}
               accessibilityState={{ disabled: !canSend, busy: sending || uploading }}
@@ -1158,9 +1084,8 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
         ) : null}
 
         {gravando ? (
-          <View style={[styles.rmsTrack, { backgroundColor: superficie(theme, 0.8), borderColor: theme.tokens.border.subtle }]} accessibilityLabel={m.composer_gravando_audio()}>
-            <View style={[styles.rmsFill, { width: `${Math.round(Math.min(1, rms) * 100)}%`, backgroundColor: theme.tokens.accent.base }]} />
-          </View>
+          // Sem alvo, o fim da gravação não transcreve: é o Cancelar do PC, que joga o áudio fora.
+          <RecordingWave rms={rms} onCancel={() => { recordingTargetRef.current = null; void parar('botao'); }} />
         ) : null}
 
         {transcribing ? (
@@ -1285,15 +1210,14 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
 
         <DictationStyleMenu open={styleMenuOpen} onClose={() => setStyleMenuOpen(false)} />
 
-        <PillMenu
+        <AttachSheet
           open={attachMenuOpen}
           onClose={() => setAttachMenuOpen(false)}
-          title={m.composer_anexar_arquivo()}
-          items={[{ label: m.board_imagem() }, { label: m.board_arquivo() }]}
-          onSelect={(it) => {
-            if (it.label === m.board_imagem()) void handlePickImage();
-            else void handlePickFile();
-          }}
+          onPick={handlePicked}
+          onError={setError}
+          onSessionAttachments={hasSentAttachments
+            ? () => router.push(`/s/${origin.serverId}/${origin.name}/attachments` as never)
+            : undefined}
         />
     </Glass>
   );
@@ -1303,7 +1227,6 @@ const styles = StyleSheet.create((theme) => ({
   // Caixa flutuante do app de PC; a linha de status vem logo embaixo, por isso a margem curta.
   glass: {
     marginHorizontal: theme.base.space[2],
-    marginBottom: theme.base.space[1],
     paddingHorizontal: theme.base.space[2],
     paddingTop: theme.base.space[2],
     paddingBottom: 6,
@@ -1389,7 +1312,7 @@ const styles = StyleSheet.create((theme) => ({
     justifyContent: 'center',
   },
   queueBadgeText: {
-    fontSize: 10,
+    fontSize: 11,
     fontWeight: '700',
     lineHeight: 13,
   },
@@ -1400,16 +1323,6 @@ const styles = StyleSheet.create((theme) => ({
   },
   sendBtnPressed: {
     opacity: 0.8,
-  },
-  rmsTrack: {
-    height: 6,
-    borderRadius: 3,
-    overflow: 'hidden',
-    borderWidth: 1,
-  },
-  rmsFill: {
-    height: '100%',
-    borderRadius: 3,
   },
   autoChip: {
     minWidth: 44,
@@ -1473,45 +1386,5 @@ const styles = StyleSheet.create((theme) => ({
   hint: {
     fontSize: theme.base.text.xs,
     paddingHorizontal: theme.base.space[1],
-  },
-  attachPreview: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: theme.base.space[2],
-    padding: theme.base.space[2],
-    borderRadius: theme.base.radius.md,
-    borderWidth: 1,
-  },
-  attachThumb: {
-    width: 48,
-    height: 48,
-    borderRadius: theme.base.radius.sm,
-    backgroundColor: superficie(theme),
-  },
-  attachFileIcon: {
-    width: 48,
-    height: 48,
-    borderRadius: theme.base.radius.sm,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  attachInfo: {
-    flex: 1,
-    gap: 2,
-  },
-  attachName: {
-    fontSize: theme.base.text.sm,
-    fontWeight: '600',
-  },
-  attachMeta: {
-    fontSize: theme.base.text.xs,
-  },
-  attachRemove: {
-    width: 44,
-    height: 44,
-    borderRadius: theme.base.radius.full,
-    borderWidth: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
   },
 }));

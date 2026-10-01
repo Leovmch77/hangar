@@ -33,6 +33,34 @@ export function janelaEsgotada(c: CotaContaResumo | undefined): string | null {
   return c.janelas.find((j) => !j.por_modelo && typeof j.pct === 'number' && j.pct >= 100)?.rotulo ?? null;
 }
 
+/** Janela geral cheia e ainda não renovada (o `exhausted` do app de PC): reset já passado é leitura velha. */
+function bloqueada(c: CotaContaResumo | undefined, now: number): boolean {
+  if (!c || c.estado !== 'lida') return false;
+  return c.janelas.some((j) => !j.por_modelo && typeof j.pct === 'number' && j.pct >= 100 && (j.reset_ts == null || j.reset_ts > now));
+}
+
+/** Para onde sair quando a conta Claude `atual` tem a janela geral esgotada: a de mais folga (100 menos a
+ *  pior janela, a regra do `sugerir_claude` do backend) entre as lidas e não esgotadas; empate fica com a
+ *  ativa. null quando a atual não está esgotada, não tem cota lida ou nenhuma outra serve. `now` em segundos. */
+export function contaComFolga(
+  atual: string | null | undefined,
+  contas: { path: string; active?: boolean }[],
+  cotas: CotaContaResumo[],
+  now: number,
+): string | null {
+  if (!atual || !bloqueada(cotaDaConta(cotas, atual), now)) return null;
+  let best: { folga: number; ativa: boolean; path: string } | null = null;
+  for (const conta of contas) {
+    const c = cotaDaConta(cotas, conta.path);
+    const pcts = c?.estado === 'lida' ? c.janelas.map((j) => j.pct).filter((p) => typeof p === 'number' && isFinite(p)) : [];
+    if (!pcts.length || bloqueada(c, now)) continue;
+    const folga = 100 - Math.max(...pcts);
+    const ativa = !!conta.active;
+    if (!best || folga > best.folga || (folga === best.folga && ativa && !best.ativa)) best = { folga, ativa, path: conta.path };
+  }
+  return best?.path ?? null;
+}
+
 /** "5h 42% · 7d 18%"; string vazia sem leitura ou sem janela (quem chama decide o texto). */
 export function resumoCota(c: CotaContaResumo | undefined): string {
   if (!c || c.estado !== 'lida') return '';

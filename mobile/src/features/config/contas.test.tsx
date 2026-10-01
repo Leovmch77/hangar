@@ -27,18 +27,29 @@ vi.mock('./CodexContaLogin', () => ({
   },
 }));
 vi.mock('./Pagina', () => ({ Pagina: ({ children }: { children: ReactNode }) => createElement('main', null, children) }));
-vi.mock('./Linha', () => ({
-  Linha: ({ titulo, descricao, onPress, children, direita }: { titulo: string; descricao?: string; onPress?: () => void; children?: ReactNode; direita?: ReactNode }) =>
-    createElement('section', null,
-      createElement('button', { onClick: onPress, disabled: !onPress }, titulo),
-      descricao ? createElement('span', null, descricao) : null,
-      direita,
-      children,
-    ),
+vi.mock('./SettingsRow', () => ({
+  SettingsRow: ({ title, description, children }: { title: string; description?: string; children?: ReactNode }) =>
+    createElement('section', null, createElement('strong', null, title), description ? createElement('span', null, description) : null, children),
 }));
+vi.mock('./SectionCard', () => ({
+  SectionCard: ({ title, subtitle, extra, children }: { title?: string; subtitle?: string; extra?: ReactNode; children?: ReactNode }) =>
+    createElement('article', null, title, subtitle ? createElement('small', null, subtitle) : null, extra, children),
+}));
+vi.mock('./InfoNotice', () => ({ InfoNotice: ({ text }: { text: string }) => createElement('p', null, text) }));
+vi.mock('./PageHeader', () => {
+  const Pill = ({ label, onPress }: { label: string; onPress: () => void }) => createElement('button', { onClick: onPress }, label);
+  return {
+    Pill,
+    PageHeader: ({ title, actions }: { title: string; actions?: Array<{ label: string; onPress: () => void }> }) =>
+      createElement('header', null, title, ...(actions ?? []).map((a) => createElement(Pill, { key: a.label, ...a }))),
+  };
+});
 vi.mock('../../paraglide/messages', () => ({
-  contas_titulo: () => 'Contas',
+  contas_modelos_titulo: () => 'Contas e modelos',
   contas_descricao: () => 'credenciais',
+  contas_secao_claude_leg: () => 'leg assinaturas',
+  contas_secao_modelos_leg: () => 'leg modelos',
+  contas_secao_outros_leg: () => 'leg outras',
   contas_atualizar: () => 'Atualizar',
   contas_nova: () => '+ Nova conta',
   contas_entrar: () => 'Entrar',

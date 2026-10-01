@@ -213,7 +213,7 @@ const styles = StyleSheet.create((theme) => ({
     fontWeight: '600',
   },
   count: {
-    fontSize: 11,
+    fontSize: 12,
     fontWeight: '700',
     paddingHorizontal: 8,
     paddingVertical: 2,

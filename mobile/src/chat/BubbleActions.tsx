@@ -91,20 +91,20 @@ export function BubbleActions({ text, ts, ouvir = true, defaultOpen = false, ali
     <View style={[styles.row, align === 'end' && styles.fim]}>
       {ts ? <Text style={[styles.hora, { color: c }]}>{hora(ts)}</Text> : null}
       {!aberto ? (
-        <Pressable onPress={() => setAberto(true)} hitSlop={12} accessibilityRole="button"
+        <Pressable onPress={() => setAberto(true)} style={styles.btn} accessibilityRole="button"
           accessibilityLabel={m.navbar_mais_acoes()} accessibilityState={{ expanded: false }}>
           <Icon name="Ellipsis" size={14} color={c} />
         </Pressable>
       ) : (
         <>
-          <Pressable onPress={() => void copiar()} hitSlop={12} accessibilityRole="button" accessibilityLabel={m.bubble_copiar()}>
+          <Pressable onPress={() => void copiar()} style={styles.btn} accessibilityRole="button" accessibilityLabel={m.bubble_copiar()}>
             <Icon name="Copy" size={14} color={c} />
           </Pressable>
-          <Pressable onPress={() => void compartilhar()} hitSlop={12} accessibilityRole="button" accessibilityLabel={m.bolha_compartilhar()}>
+          <Pressable onPress={() => void compartilhar()} style={styles.btn} accessibilityRole="button" accessibilityLabel={m.bolha_compartilhar()}>
             <Icon name="Share2" size={14} color={c} />
           </Pressable>
           {ouvir ? (
-            <Pressable onPress={() => void falar()} hitSlop={12} accessibilityRole="button" accessibilityLabel={m.bubble_ouvir()}>
+            <Pressable onPress={() => void falar()} style={styles.btn} accessibilityRole="button" accessibilityLabel={m.bubble_ouvir()}>
               <Icon name="Volume2" size={14} color={c} />
             </Pressable>
           ) : null}
@@ -115,7 +115,9 @@ export function BubbleActions({ text, ts, ouvir = true, defaultOpen = false, ali
 }
 
 const styles = StyleSheet.create(() => ({
-  row: { flexDirection: 'row', alignItems: 'center', gap: 16, minHeight: 24 },
+  row: { flexDirection: 'row', alignItems: 'center', gap: 0, minHeight: 24 },
+  // 44pt de toque sem crescer a linha: a margem negativa devolve a altura extra à conversa.
+  btn: { width: 44, height: 44, marginVertical: -10, alignItems: 'center', justifyContent: 'center' },
   fim: { justifyContent: 'flex-end' },
-  hora: { fontSize: 11 },
+  hora: { fontSize: 12 },
 }));
