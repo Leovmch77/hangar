@@ -132,3 +132,60 @@ describe('isNotRepo', () => {
     expect(isNotRepo(new Error('rede'))).toBe(false);
   });
 });
+
+describe('NewChatDraft.switchFromExhausted', () => {
+  const conta = (path: string, pct: number, ativa = false) => ({
+    id: `claude:${path}`, label: path, provedor: 'claude' as const, ativa, estado: 'lida' as const,
+    janelas: [{ rotulo: '5h', pct, nivel: 'normal' as const, resetTs: null, porModelo: false }],
+    velha: false, idade_s: 1, motivo: null, loginVenceDias: null,
+  });
+  beforeEach(() => {
+    core.listClaudeConfigs.mockResolvedValue([
+      { path: '/c', label: 'c', active: true }, { path: '/d', label: 'd', active: false }]);
+  });
+
+  it('conta escolhida esgotada troca pra conta com folga e recarrega os modelos', async () => {
+    const draft = await ready();
+    const antes = core.modelOptions.mock.calls.length;
+    draft.switchFromExhausted([conta('/c', 100, true), conta('/d', 20)]);
+    await flush();
+    expect(draft.configDir).toBe('/d');
+    expect(core.modelOptions.mock.calls.length).toBeGreaterThan(antes);
+    const depois = core.modelOptions.mock.calls.length;
+    draft.switchFromExhausted([conta('/c', 100, true), conta('/d', 20)]);
+    await flush();
+    expect(draft.configDir).toBe('/d');
+    expect(core.modelOptions.mock.calls.length).toBe(depois);
+  });
+
+  it('escolher só o modelo não desliga a troca', async () => {
+    const draft = await ready();
+    draft.setModel('x');
+    draft.switchFromExhausted([conta('/c', 100, true), conta('/d', 20)]);
+    expect(draft.configDir).toBe('/d');
+  });
+
+  it('com as contas carregando ou fora do claude não troca', async () => {
+    const draft = await ready();
+    draft.configsLoading = true;
+    draft.switchFromExhausted([conta('/c', 100, true), conta('/d', 20)]);
+    expect(draft.configDir).toBe('/c');
+    draft.configsLoading = false;
+    draft.provider = 'codex';
+    draft.switchFromExhausted([conta('/c', 100, true), conta('/d', 20)]);
+    expect(draft.configDir).toBe('/c');
+  });
+
+  it('escolha manual não é desfeita', async () => {
+    const draft = await ready();
+    draft.setConfig('/c');
+    draft.switchFromExhausted([conta('/c', 100, true), conta('/d', 20)]);
+    expect(draft.configDir).toBe('/c');
+  });
+
+  it('sem conta com folga fica na atual', async () => {
+    const draft = await ready();
+    draft.switchFromExhausted([conta('/c', 100, true), conta('/d', 100)]);
+    expect(draft.configDir).toBe('/c');
+  });
+});

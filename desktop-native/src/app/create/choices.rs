@@ -76,6 +76,17 @@ fn exhausted(quota: &QuotaLine, now: f64) -> Option<Option<f64>> {
     Some(full.iter().filter_map(|w| w.reset_ts).reduce(f64::max))
 }
 
+/// A conta para onde sair quando a escolhida (`selected`) tem a janela geral esgotada: a de mais folga (100 menos a maior
+/// janela, a regra do `sugerir_claude` do backend) entre as de cota lida e não esgotada, empate com a ativa. `None` quando a
+/// escolhida não está esgotada, não tem cota conhecida ou nenhuma outra serve.
+fn quota_switch(selected: Option<&str>, accounts: &[(&str, bool, Option<&QuotaLine>)], now: f64) -> Option<String> {
+    exhausted(accounts.iter().find(|a| Some(a.0) == selected)?.2?, now)?;
+    accounts.iter().filter_map(|&(path, active, quota)| {
+        let quota = quota.filter(|q| exhausted(q, now).is_none() && q.state == "lida")?;
+        Some((100. - quota.windows().map(|(_, p)| p).reduce(f64::max)?, active, path))
+    }).max_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1))).map(|(_, _, path)| path.to_owned())
+}
+
 /// "2h10", "35m", "3d4h": quanto falta para a janela voltar (`faltaPara` do web).
 fn until(reset: Option<f64>, now: f64) -> String {
     let Some(s) = reset.filter(|r| r.is_finite()).map(|r| r - now).filter(|s| *s > 0.) else { return String::new() };
@@ -329,6 +340,18 @@ impl NewSession {
         }, window, cx));
     }
 
+    /// Na tela sem sessão, a conta Claude escolhida sem esgotar a cota troca sozinha pela de mais folga, salvo escolha à mão
+    /// no menu. A conversa fechada não passa por aqui: lá o envio fica bloqueado. `true` quando trocou.
+    pub(super) fn leave_exhausted_account(&mut self) -> bool {
+        // Com o menu de conta aberto, a lista não muda debaixo do clique: fechar ou a próxima cota reavalia.
+        if !self.compact || self.account_touched || self.menu.get() == Some(Menu::Account) || self.reopen_config.is_some() || self.creating || self.account_busy
+            || self.provider != "claude" || !self.engine.is_empty() || self.target().is_some() { return false; }
+        let accounts: Vec<_> = self.accounts().map(|c| (c.path.as_str(), c.active, self.quota_of(&format!("claude:{}", c.path)))).collect();
+        let Some(path) = quota_switch(self.config.as_deref(), &accounts, chrono::Local::now().timestamp() as f64) else { return false };
+        self.config = Some(path);
+        true
+    }
+
     fn quota_of(&self, id: &str) -> Option<&QuotaLine> { self.quotas.ok()?.iter().find(|q| q.id == id) }
 
     pub(super) fn receive_extra(&mut self, reply: CreateReply, window: &mut Window, cx: &mut Context<Self>) {
@@ -361,10 +384,9 @@ impl NewSession {
                 let list = result.map_err(|e| Hangar::fetch_failure(&e)).and_then(|v| serde_json::from_value(v).map_err(|_| tr("invalid_response")));
                 if !self.quotas.finish(seq, list) { return; }
                 // A escolhida antes da cota chegar pode ser uma pasta que não é conta.
-                if self.config.as_ref().is_some_and(|path| !self.accounts().any(|c| &c.path == path)) {
-                    self.config = self.fallback_config();
-                    self.load_models(window, cx);
-                }
+                let stale = self.config.as_ref().is_some_and(|path| !self.accounts().any(|c| &c.path == path));
+                if stale { self.config = self.fallback_config(); }
+                if self.leave_exhausted_account() || stale { self.load_models(window, cx); }
                 self.build_config_pick(window, cx);
             }
             CreateReply::Models(seq, result, remembered) => self.receive_models(seq, result, remembered, window, cx),
@@ -487,6 +509,8 @@ impl NewSession {
                             self.asking = false;
                             self.account_name.update(cx, |input, cx| input.set_value("", window, cx));
                             (self.config, self.created_path, self.notice) = (Some(path.clone()), Some(path), Some((tr("create_account_logged_out"), false)));
+                            // Conta recém-criada é escolha dela: a cota que chegar depois não a tira daqui.
+                            self.account_touched = true;
                             self.build_config_pick(window, cx);
                             self.load_models(window, cx);
                         }
@@ -685,7 +709,7 @@ impl NewSession {
 
 #[cfg(test)]
 mod tests {
-    use super::{ModelOption, QuotaLine, exhausted, until};
+    use super::{ModelOption, QuotaLine, exhausted, quota_switch, until};
 
     #[tokio::test]
     async fn config_is_only_requested_for_owner_or_legacy_backend() {
@@ -756,5 +780,29 @@ mod tests {
             {"rotulo": "7d", "pct": 100.0, "reset_ts": 9000.0}])), now), Some(Some(9000.)));
         assert_eq!(exhausted(&quota("lida", serde_json::json!([{"rotulo": "5h", "pct": 99.0, "reset_ts": 2000.0},
             {"rotulo": "7d", "pct": 50.0, "reset_ts": 9000.0}])), now), None);
+    }
+
+    #[test]
+    fn exhausted_account_switches_to_the_roomiest() {
+        let quota = |windows: serde_json::Value| -> QuotaLine {
+            serde_json::from_value(serde_json::json!({"id": "claude:/x", "estado": "lida", "janelas": windows})).unwrap()
+        };
+        let now = 1000.;
+        let full = quota(serde_json::json!([{"rotulo": "5h", "pct": 100.0, "reset_ts": 2000.0}]));
+        let busy = quota(serde_json::json!([{"rotulo": "5h", "pct": 70.0}, {"rotulo": "7d", "pct": 10.0}]));
+        let free = quota(serde_json::json!([{"rotulo": "5h", "pct": 20.0}, {"rotulo": "7d opus", "pct": 40.0}]));
+        let model_full = quota(serde_json::json!([{"rotulo": "7d opus", "pct": 100.0}, {"rotulo": "5h", "pct": 10.0}]));
+        // Esgotada: vai para a de mais folga, contando todas as janelas; a sem leitura não entra.
+        assert_eq!(quota_switch(Some("/a"), &[("/a", true, Some(&full)), ("/b", false, Some(&busy)), ("/c", false, Some(&free)), ("/d", false, None)], now),
+            Some("/c".into()));
+        // Janela por modelo cheia não é esgotada: fica onde está.
+        assert_eq!(quota_switch(Some("/a"), &[("/a", true, Some(&model_full)), ("/c", false, Some(&free))], now), None);
+        // Nenhuma serve: fica.
+        assert_eq!(quota_switch(Some("/a"), &[("/a", true, Some(&full)), ("/b", false, Some(&full)), ("/d", false, None)], now), None);
+        // Sem conta escolhida conhecida: fica.
+        assert_eq!(quota_switch(None, &[("/a", true, Some(&full)), ("/c", false, Some(&free))], now), None);
+        // Empate fica com a ativa, em qualquer ordem.
+        assert_eq!(quota_switch(Some("/a"), &[("/a", false, Some(&full)), ("/c", true, Some(&free)), ("/e", false, Some(&free))], now), Some("/c".into()));
+        assert_eq!(quota_switch(Some("/a"), &[("/a", false, Some(&full)), ("/e", false, Some(&free)), ("/c", true, Some(&free))], now), Some("/c".into()));
     }
 }

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import { basename, createSession, pickFolderRoot, providerName, type Provider } from '@hangar/core';
   import HomeUsage from '../components/HomeUsage.svelte';
   import FolderGitPill from '../components/FolderGitPill.svelte';
@@ -12,6 +13,8 @@
   import AccountPill from '../components/newchat/AccountPill.svelte';
   import ModelPill from '../components/newchat/ModelPill.svelte';
   import NewChatComposer from '../components/newchat/NewChatComposer.svelte';
+  import { quotaFeed } from '../lib/quotaFeed.svelte';
+  import { faixaDeCota } from '../lib/cota';
   import { createNewChatDraft } from '../lib/newChatDraft.svelte';
   import { selectServer, getActiveId, listOwnServers } from '../lib/auth';
   import { abrirConfig } from '../lib/configNav';
@@ -24,6 +27,12 @@
 
   const draft = createNewChatDraft();
   draft.init();
+
+  // A pílula de conta mantém o feed vivo; aqui só reage a cada leitura nova.
+  $effect(() => {
+    const linha = faixaDeCota(quotaFeed.contas);
+    untrack(() => draft.switchFromExhausted(linha));
+  });
 
   type Menu = 'machine' | 'folder' | 'branch';
   let menu = $state<Menu | null>(null);

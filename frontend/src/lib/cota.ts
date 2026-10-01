@@ -181,3 +181,16 @@ export function exhaustedWindow(account: ContaCota | null | undefined): JanelaEx
   if (account?.estado !== 'lida') return null;
   return account.janelas.find((j) => !j.porModelo && j.pct >= 100) ?? null;
 }
+
+// Conta Claude (entre `paths`) com mais folga entre as lidas e sem limite esgotado; mesma folga
+// do `sugerir_claude` do backend (100 - pior janela, de qualquer tipo). Empate fica com a ativa.
+export function bestAccountWithQuota(linha: ContaCota[] | null, paths: string[]): string | null {
+  let best: { folga: number; ativa: boolean; path: string } | null = null;
+  for (const c of linha ?? []) {
+    const path = c.id.startsWith('claude:') ? c.id.slice('claude:'.length) : null;
+    if (path === null || !paths.includes(path) || c.estado !== 'lida' || c.janelas.length === 0 || exhaustedWindow(c)) continue;
+    const folga = 100 - Math.max(...c.janelas.map((j) => j.pct));
+    if (!best || folga > best.folga || (folga === best.folga && c.ativa && !best.ativa)) best = { folga, ativa: c.ativa, path };
+  }
+  return best?.path ?? null;
+}
