@@ -675,6 +675,22 @@ def test_last_task_integrated_wakes_the_arbiter_for_the_final_review_once(tmp_pa
     assert len([m for m in sent(log) if "Every Task of the plan is integrated" in m]) == 1
 
 
+def test_a_later_integration_wakes_the_arbiter_for_the_final_review_again(tmp_path):
+    d, r, g, e, log = start(tmp_path, par="sequencial", rows=ONE.format(rot="—"))
+    started(e, tasks=(1,))
+    close(d, 1, g("rev-parse", "HEAD"))
+    run(e, "advance")
+    time.sleep(1.1)   # closes and events have second precision
+    (r / "a.txt").write_text("fixed\n")
+    g("commit", "-qam", "fix after the final review")
+    close(d, 1, g("rev-parse", "HEAD"))
+    assert run(e, "advance").stdout.splitlines()[-1] == "all integrated: arbiter woken for the final review"
+    run(e, "advance")
+    assert [x["tipo"] for x in events(d) if x["tipo"] in ("integrada", "tudo_integrado")] == [
+        "integrada", "tudo_integrado", "integrada", "tudo_integrado"]
+    assert len([m for m in sent(log) if "Every Task of the plan is integrated" in m]) == 2
+
+
 def test_full_proof_batch_is_announced_once_its_tasks_are_integrated(tmp_path):
     d, r, g, e, log = start(tmp_path, par="sequencial", rows=ONE.format(rot="r1.md"), prova="lote(1)")
     started(e, tasks=(1,))
@@ -732,8 +748,11 @@ def test_role_row_rotation_risk_names_and_flags(monkeypatch):
     assert m.open_flags({"provider": "claude"}, False) == ["--provider", "claude"]
     assert m.open_flags({"provider": "claude"}, True) == ["--provider", "claude", "--read-only", "--terminal"]
     assert m.open_flags({"provider": "claude", "abertura": "--terminal"}, False) == ["--provider", "claude", "--terminal"]
-    # The backend refuses a session without terminal and read-only together: headless wins.
-    assert m.open_flags({"provider": "claude", "abertura": "--headless"}, True) == ["--provider", "claude", "--headless"]
+    assert m.open_flags({"provider": "claude", "abertura": "--headless"}, False) == ["--provider", "claude", "--headless"]
+    # The backend refuses read-only without terminal: the protection is never dropped in silence.
+    for abertura, read_only in (("--headless", True), ("--headless --read-only", False)):
+        with pytest.raises(m.OrqError, match="read-only session cannot open with --headless"):
+            m.open_flags({"provider": "claude", "sessao": "rev-t*", "abertura": abertura}, read_only)
 
 
 def test_kickoff_mold_with_an_unknown_placeholder_is_an_error(tmp_path, monkeypatch):

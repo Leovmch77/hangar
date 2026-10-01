@@ -49,8 +49,7 @@ Done when every command's result is pasted with its runner.
 ### 4. Write and deliver
 
 Use the format of `revisor.md` (step 4): `VEREDITO` first; `Verified` with commands, results
-and who ran them; each blocker with cause reproduced, location, all callers, proof of the
-mechanism, steps, final behavior and verification. File first, in the durable directory; the
+and who ran them; each blocker with its recipe, read from `revisor-receita.md`. File first, in the durable directory; the
 message carries the path.
 
 - Route `full`: findings go straight to the executor the kick-off names

@@ -99,8 +99,8 @@ chosen model has a card or a `## What they say` section.
      first. Two checks (gate item 10): no Task does what a skill step does internally
      (that Task does not exist — demand the step's evidence inside its containing Task); no
      skill step without a Task citing it. Add the set-level verification the skill lacks.
-   - An OWNER in every step that waits on something external: the executor, as an
-     explicit prior step.
+   - Every step that waits on something external: its OWNER (the executor, as an explicit
+     prior step) and its wait ceiling, taken from one measured run of that wait.
    - `Risk` column: `low | high` when the executor row is selected by risk. `low` = bounded, fully
      specified, small blast radius; `high` = judgment-heavy, wide blast radius, context-heavy, or
      touching a public contract, shared state, destination or credential. Proposed with the team,

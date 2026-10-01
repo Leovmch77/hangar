@@ -64,7 +64,7 @@ def identity(name: str, *, mux_bin: str = "tmux") -> str:
         if isinstance(meta.get("key"), str) and meta["key"]:
             return f"{provider}:{meta['key']}"
     try:
-        cp = subprocess.run([mux_bin, "display-message", "-p", "-t", f"={name}",
+        cp = subprocess.run([mux_bin, "display-message", "-p", "-t", f"={name}:",
                              "#{pid}\t#{session_id}\t#{session_created}"],
                             capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5)
         fields = cp.stdout.strip().split("\t") if cp.returncode == 0 and "\ufffd" not in cp.stdout else []

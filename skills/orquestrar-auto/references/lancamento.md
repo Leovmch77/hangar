@@ -15,10 +15,12 @@ Red baseline → the user decides before anything opens.
 
 Then, specific to this skill:
 
-1. `## Quem é quem` has the rows the orchestrator opens, with `papel` written exactly
-   `executor` and, on `Revisão: sessão`, exactly `revisor`; each `abertura` cell complete; the
-   `executor` row's `sessão` ending in `*`. Missing or wrong → fix the contract with the user;
-   the launch waits.
+1. `## Quem é quem` has one row per role the run opens: the orchestrator's, with `papel` written
+   exactly `executor` and, on `Revisão: sessão`, exactly `revisor`, plus final review and
+   retrospective; each `abertura` cell complete and a combination the session creator accepts
+   (a read-only role never carries `--headless`); the `executor` row's `sessão` ending in `*`.
+   Missing or wrong → fix the contract with the user now, not when the phase arrives; the
+   launch waits.
 2. The orchestration plan is stamped (`orq plan-check <plan> --repo <repo> --stamp`) and states
    `Paralelo:`, `Integração:`, the additive files and the a-priori estimate.
 3. Triage mode: `--jev on --regex shadow`, unless the user said otherwise. The Jev was measured

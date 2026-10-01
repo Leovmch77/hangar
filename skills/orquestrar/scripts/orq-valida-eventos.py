@@ -14,6 +14,7 @@ Os tipos e seus campos obrigatórios estão em TIPOS abaixo: os seis da orquestr
     o executor o aplica com `orq apply-patch`). `entrega` leva o hash da rodada (stash) no campo `commit`.
   - `fase` (opcional, em `entrega` e `veredito`) ∈ codigo|prova: rodada em duas fases de Task com
     prova de tela. Sem `fase`, a rodada é única.
+  - `espera.ate` é ISO-8601 com offset: o prazo da espera de `sessao`, que sai da bola até ele.
   - Campo extra pode; tipo novo só entra aqui. O app agrega pelos seis primeiros e ignora o resto.
 
 Exemplo, no fecho de uma rodada:
@@ -22,6 +23,7 @@ Exemplo, no fecho de uma rodada:
 """
 import json
 import sys
+from datetime import datetime
 
 TIPOS = {
     "execucao_inicio": {"plano", "branch", "gid"},
@@ -36,6 +38,8 @@ TIPOS = {
     "conflito": {"task", "motivo"},
     "advance_falhou": {"passo", "motivo"},
     "tudo_integrado": set(),
+    # Quem espera algo com fim conhecido; o app não lê.
+    "espera": {"sessao", "ate"},
 }
 RESULTADOS = {"aprova", "reprova", "devolvido", "corrige"}
 FASES = {"codigo", "prova"}
@@ -79,9 +83,18 @@ def _valida_linhas(path: str, linhas) -> int:
             print(f"{path}:{i}: resultado {ev.get('resultado')!r} fora de {sorted(RESULTADOS)}"); erros += 1
         if "fase" in ev and ev["fase"] not in FASES:
             print(f"{path}:{i}: fase {ev['fase']!r} fora de {sorted(FASES)}"); erros += 1
+        if tipo == "espera" and not _iso_com_offset(ev.get("ate")):
+            print(f"{path}:{i}: ate {ev.get('ate')!r} nao e ISO-8601 com offset"); erros += 1
         if "reincide" in ev and not isinstance(ev["reincide"], bool):
             print(f"{path}:{i}: reincide nao e bool ({ev['reincide']!r})"); erros += 1
     return erros
+
+
+def _iso_com_offset(valor) -> bool:
+    try:
+        return datetime.fromisoformat(valor).tzinfo is not None
+    except (TypeError, ValueError):
+        return False
 
 
 if __name__ == "__main__":

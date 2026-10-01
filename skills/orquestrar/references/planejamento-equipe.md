@@ -25,7 +25,9 @@ decomposition and the exit gate stay in `planejamento.md`.
    The contract adds its other sections without rewriting the team table. Keep no other
    editable configuration in the plan, request or global file.
 
-Done when the current work's record contains the explicit choices required by its roles.
+Done when the record holds one filled row per role the route opens, final review and
+retrospective included, and each row's `abertura` is a combination the session creator
+accepts, checked now, not when the phase arrives.
 
 ## `## Quem é quem`
 
@@ -40,6 +42,8 @@ This work's own table, later linked to `regras-<gid>.md`; raw values
 | árbitro | <work>-arbitro | <selected> | <selected> | <selected> | <selected-or-default> |
 | executor | <work>-t* | <selected> | <selected> | <selected> | <selected-or-default> |
 | revisor | <work>-review* | <selected> | <selected> | <selected> | <selected-or-default> |
+| revisão final | <work>-final | <selected> | <selected> | <selected> | <selected-or-default> |
+| retrospectiva | <work>-retro | <selected> | <selected> | <selected> | <selected-or-default> |
 ```
 
 - `provider`: `claude` | `codex` | `pi` | `kimi`. `conta`: config-dir name on Claude (`padrao`,
@@ -150,13 +154,10 @@ Baseline: <command> → <result>, <date>.
 ## Quota and fallback
 <remaining quota per account, with reading time; where to migrate when it runs out>
 
-## Progress
-| Task | Hash | Verdict | Who fixed |
-|---|---|---|---|
-
 ## Supervening decisions
 <date> — <decision, whose, reason in one line>
 
 ## Task N — <title>
-<that Task's specifics: its worktree, its roteiro path, untouchable exceptions, recipe path>
+<that Task's specifics: its worktree, its roteiro path, untouchable exceptions, recipe path;
+on close, `Progress: <hash> · <verdict> · <who fixed>`>
 ````

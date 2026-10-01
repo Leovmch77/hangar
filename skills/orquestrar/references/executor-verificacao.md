@@ -15,6 +15,9 @@ Read at step 4 of `executor.md`.
 - Output goes to a file in the durable directory (`<command> > <durable>/out-task-<N>-r<R>.txt
   2>&1`); read `tail -n 40` and `grep -nE 'FAIL|Error|error\['` of it, never the file whole,
   and paste those lines in the report.
+- A retry budget per failure family counts from the base where that family first failed: before
+  calling a failure new, check whether its cause is already in that base. Reclassifying a family
+  is the arbiter's decision, before any run.
 
 ## Proof
 
@@ -23,6 +26,9 @@ Before pasting a proof, say what would make it fail. Then:
 - A proof of something served checks what the target loaded, never what your side built.
 - "X shows up when it should not" needs a negative assertion on the same real fixture.
 - Real world before mock; mock only after the real one failed, saying why.
+- A round proved by reading, not by running: each mock, stub and claim about code outside the
+  diff cites the file:line, or the installed source, it stands for; nothing to cite → drop the
+  stub or the claim.
 - A long-lived service serves the code from when it started: check its start time against the
   commit, or bring up your own instance. The user's service keeps running.
 - A blocker fix ships with its trap in the same round: the test that fails without the fix
@@ -41,8 +47,11 @@ Before pasting a proof, say what would make it fail. Then:
 
 ## Waiting on an external condition (any step)
 
-- Cap: 10 attempts or 10 minutes. Blew it → stop and report "waiting on <condition>; tried N
+- Cap: the plan's ceiling for this wait; none written → 10 attempts or 10 minutes. Blew it → stop and report "waiting on <condition>; tried N
   times over T", last return pasted.
+- A wait still valid past the cap: report it as above and record it, `orq event espera --task <N>
+  --sessao <you> --ate <deadline> --motivo "<condition>"`; keep your own finite check, end the turn. Only your next recorded
+  event or the deadline ends it; never record one just to clear it.
 - An identical response 3 times in a row → change the check, or stop and report.
 - The stage of your proof (server, test account, proof session) is created by you, as an
   explicit step, before checking. Repeated exit 0 is as stalled as repeated error.

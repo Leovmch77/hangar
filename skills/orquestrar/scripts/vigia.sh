@@ -136,7 +136,6 @@ fi
 export CP_VIGIA_LOG
 
 parados=0
-avisos=0
 PSEQ=()          # straight stalled readings, per session (the per-session notice uses this)
 NUDGE=()         # already nudged this session in this stall? (1 push per stall, not per notice)
 RHASH=()         # hash of the last seen command, per session (loop detector)
@@ -161,14 +160,17 @@ if [ -n "$ORQD" ]; then
   SESSOES=("$ARB")
 fi
 ARMADO="${ORQD:+$ORQD/.vigia-armado}"
+# One proof per arbiter, not per arming: a successor gets its own the cycle it takes over.
+prove_channel() {
+  avisar_arb "[vigia] ARMED over: ${SESSOES[*]} (window ${LIMITE}min${DIARIO:+, journal $DIARIO}). This message IS the channel's proof — if you read it, the alarms arrive. Do not reply." || return
+  [ -z "$ARMADO" ] || printf '%s' "$ARB" > "$ARMADO"
+}
 if [ -n "$ARMADO" ] && [ "$(cat "$ARMADO" 2>/dev/null)" = "$ARB" ]; then
-  # The channel to this arbiter was already proven in this run: one proof per arbiter, not per arming.
   echo "[vigia] re-armed over: ${SESSOES[*]} (channel to $ARB already proven)"
   rc_arm=0
 else
-  avisar_arb "[vigia] ARMED over: ${SESSOES[*]} (window ${LIMITE}min${DIARIO:+, journal $DIARIO}). This message IS the channel's proof — if you read it, the alarms arrive. Do not reply."
+  prove_channel
   rc_arm=$?
-  [ "$rc_arm" -eq 0 ] && [ -n "$ARMADO" ] && printf '%s' "$ARB" > "$ARMADO"
 fi
 if [ "$rc_arm" -ne 0 ]; then
   echo "[vigia] FAILED to prove the channel with '$ARB' (rc=$rc_arm, stderr in $CP_VIGIA_LOG). I am NOT armed." >&2
@@ -569,6 +571,11 @@ join_team() {
   done <<< "$out"
 }
 
+# Under -e: `all` | `owners` | `none`, who is covered by a recorded wait (`orq event espera`).
+coverage() {
+  [ -n "$ORQD" ] && ORQ_DIR="$ORQD" python3 "$ORQ" ball --coverage 2>>"$CP_VIGIA_LOG"
+}
+
 # Interval between readings. It exists as a variable only so the smoke test can run the whole
 # loop in seconds; in normal use nobody passes it.
 INTERVALO=${CP_VIGIA_INTERVALO:-60}
@@ -586,6 +593,9 @@ for i in $(seq 1 "$CICLOS"); do
         SESSOES=("${nova[@]}")
         PSEQ=(); NUDGE=(); RHASH=(); RSEQ=(); RAVISO=(); ALARM_FAILS=(); avisou_travado=; avisou_cota=
         echo "[vigia] watching: ${SESSOES[*]}"
+      fi
+      if [ -n "$ARMADO" ] && [ "$(cat "$ARMADO" 2>/dev/null)" != "$ARB" ]; then
+        prove_channel || echo "[vigia] FAILED to prove the channel with the new arbiter '$ARB'; retrying next cycle" >&2
       fi
     else
       echo "[vigia] orq ball failed; keeping: ${SESSOES[*]}" >&2
@@ -745,7 +755,8 @@ for i in $(seq 1 "$CICLOS"); do
       if [ "$mtime_ev" -lt "$mtime" ]; then parado=$eventos; mtime=$mtime_ev; fi
     fi
     idade=$(( $(date +%s) - mtime ))
-    if [ "$idade" -ge 3600 ] && [ "$diario_avisado" -lt "$(( idade / 3600 ))" ]; then
+    # Every owner and the arbiter on a recorded wait: no event is due before its deadline.
+    if [ "$idade" -ge 3600 ] && [ "$diario_avisado" -lt "$(( idade / 3600 ))" ] && [ "$(coverage)" != all ]; then
       if deliver_alarm trail "[vigia] The trail ($parado) has gone $(( idade / 60 ))min without a write, with the group active. The journal and eventos.jsonl are written AT the event — if reports/merges happened in this window, they are outside the trail." "trail alarm"; then
         diario_avisado=$(( idade / 3600 ))
         echo "[vigia] trail stalled for $(( idade / 60 ))min ($parado)"
@@ -783,16 +794,12 @@ for i in $(seq 1 "$CICLOS"); do
   if [ "$quieto" -eq 1 ]; then parados=$((parados+1)); else parados=0; fi
 
   if [ "$parados" -ge "$LIMITE" ]; then
+    case "$(coverage)" in all|owners) parados=0 ;; esac   # they wait on a recorded deadline
+  fi
+  if [ "$parados" -ge "$LIMITE" ]; then
     msg="[vigia] Nobody has had the ball for ${LIMITE} min: $resumo (minute $i). If you fell (an API error), this is what brings you back. Check whether someone delivered while you were out — a report stuck in the queue and a stalled verdict are the two ways the pipeline locks up with nobody noticing."
     echo "$msg"
-    if deliver_alarm nobody "$msg" "nobody-has-the-ball alarm"; then
-      avisos=$((avisos+1))
-      parados=0
-      if [ "$avisos" -ge 20 ]; then
-        echo "20 warnings without unblocking; shutting the watchdog down"
-        exit 0
-      fi
-    fi
+    deliver_alarm nobody "$msg" "nobody-has-the-ball alarm" && parados=0
   fi
 done
 echo "1440min over; last state: ${resumo:-}"

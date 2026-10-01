@@ -14,6 +14,9 @@ Read at step 7 of `executor.md`, when a REPROVA arrives.
 
 Stop, report to the arbiter and wait instead, when:
 
+- the REPROVA carries `--reincide`, or a `[decisao]` you sent decides this correction (scope,
+  recipe, how to run it): go on only with the arbiter's answer; a deadline you announced decides
+  nothing. A context ceiling notice is not such a decision: keep working;
 - the recipe does not match the code (symbol missing, bug does not reproduce there, text
   arrived cut in half); the scope stays as it was, nothing is improvised;
 - the recipe breaks something else — report with the evidence;
