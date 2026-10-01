@@ -1683,7 +1683,7 @@ impl Hangar {
         // O fundo pertence à janela; a tela vazia nunca o cobre com uma superfície opaca. O compositor fica um pouco acima do meio.
         div().id("new-chat").size_full().overflow_y_scroll().flex().flex_col()
             .child(motion::settle_down(div(), settle).my_auto().pb(rems(4.)).w_full().flex_shrink_0().flex().flex_col()
-                .child(landing_column(self.render_home_usage(cx).max_w(px(560.)).mx_auto()).mb_6())
+                .child(landing_column(self.render_home_usage(cx)).mb_6())
                 .child(landing_column(popup::anchor(top, super::landing::TOP)))
                 .child(composer)
                 .child(landing_column(div().flex().flex_col().gap_1().child(popup::anchor(bottom, super::landing::BOTTOM))

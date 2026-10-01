@@ -129,12 +129,19 @@ impl Hangar {
                 Button::new(SharedString::from(format!("home-usage-{}", period.key()))).ghost().small()
                     .selected(state.period == period).label(period.label())
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        if this.home_usage.period != period { this.home_usage.period = period; this.load_home_usage(cx); cx.notify(); }
+                        // Período novo: os números do anterior ficariam errados na tela enquanto carrega.
+                        if this.home_usage.period != period {
+                            this.home_usage.period = period;
+                            this.home_usage.report.reset();
+                            this.load_home_usage(cx);
+                            cx.notify();
+                        }
                     }))
             })));
-        let mut card = div().w_full().max_w(rems(36.)).mx_auto().flex().flex_col().gap_3().p_3().rounded_lg()
+        let mut card = div().w_full().flex().flex_col().gap_3().p_3().rounded_lg()
             .border_1().border_color(theme::border()).child(header);
-        if state.report.loading {
+        // A recarga de cada minuto mantém o resumo na tela; "carregando" só sem nada para mostrar.
+        if state.report.loading && state.report.value.is_none() {
             let text = state.warming.map_or_else(|| tr("loading"), |(read, total)|
                 web_with("home_usage_warming", &[("read", read.to_string()), ("total", total.to_string())]));
             return card.child(div().id("home-usage-loading").role(Role::Status).text_sm().text_color(theme::muted()).child(text));
@@ -195,12 +202,13 @@ fn activity_calendar(report: &Summary) -> Div {
     let max = report.days.values().copied().fold(1., f64::max);
     let mut grid = div().id("home-usage-calendar").overflow_x_scroll().flex().gap_1();
     for week in 0..weeks {
-        grid = grid.child(div().flex().flex_col().gap_1().children((0..7).map(|weekday| {
+        // A semana cresce até ocupar a largura do compositor; muitas semanas rolam de lado.
+        grid = grid.child(div().flex_1().min_w(px(12.)).max_w(px(48.)).flex().flex_col().gap_1().children((0..7).map(|weekday| {
             let day = first + chrono::Duration::days((week * 7 + weekday) as i64);
             let value = report.days.get(&day).copied().unwrap_or(0.);
             let visible = day >= start && day <= end;
             let tip = web_with("home_usage_day", &[("date", day.format("%d/%m/%Y").to_string()), ("tokens", dec(value, 0))]);
-            div().id(SharedString::from(format!("home-day-{day}"))).size_3().flex_shrink_0().rounded_sm()
+            div().id(SharedString::from(format!("home-day-{day}"))).w_full().h(px(14.)).flex_shrink_0().rounded_sm()
                 .bg(if value > 0. { theme::accent().opacity(0.3 + 0.7 * (value / max) as f32) } else { theme::inset() })
                 .when(!visible, |el| el.opacity(0.))
                 .aria_label(tip.clone())
