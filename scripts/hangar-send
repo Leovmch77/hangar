@@ -647,7 +647,11 @@ else
             echo "entregue -> $target (par externo)"
             exit 0
         fi
-        if [[ $ext_code != 404 || "$ext_out" != *erro_par_inexistente* ]]; then
+        # Backend sem a rota (mais antigo): 404 {"detail":"Not Found"} sem "code", ou 405. Também
+        # cai no peers.json, senão todo envio a máquina própria quebra até o backend atualizar.
+        if [[ $ext_code == 405 || ( $ext_code == 404 && ( "$ext_out" == *erro_par_inexistente* || "$ext_out" != *'"code"'* ) ) ]]; then
+            :
+        else
             echo "erro HTTP $ext_code: $ext_out" >&2
             exit 1
         fi
