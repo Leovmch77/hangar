@@ -6507,5 +6507,7 @@
   "native_par_escolha_sessao": "Escolha a sessão que vai parear.",
   "native_par_aceitar": "Parear",
   "native_par_aceito": "Pareada com {dono} · {sessao}",
-  "native_par_whatsapp": "Vamos parear nossas sessões no Hangar: {link}"
+  "native_par_whatsapp": "Vamos parear nossas sessões no Hangar: {link}",
+  "native_par_sem_sessao": "Nenhuma sessão viva nesta máquina para parear.",
+  "native_par_aceitando": "Pareando…"
 }

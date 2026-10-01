@@ -2,6 +2,7 @@
 use super::*;
 use super::machines::enter_to_focused;
 use crate::api::{PairAccepted, ShareFailure, SharePrereqs};
+use super::share::prerequisite_notice;
 
 /// Só o link `https://host.ts.net:8443/par/CÓDIGO` do Funnel: outro host ou porta nunca recebe o resgate.
 pub(super) fn parse_pair_link(raw: &str) -> Option<String> {
@@ -15,28 +16,12 @@ pub(super) fn parse_pair_link(raw: &str) -> Option<String> {
     if parts.last() == Some(&"") { parts.pop(); }
     let &["par", code] = parts.as_slice() else { return None };
     let code_ok = (1..=64).contains(&code.len()) && code.chars().all(|c| c.is_ascii_alphanumeric());
-    code_ok.then(||format!("https://{host}:8443/par/{code}"))
-}
-
-/// O mesmo aviso do compartilhamento (falta operador, falta Funnel), em texto: o aceite também sobe o túnel.
-fn prerequisite_text(p: &SharePrereqs) -> String {
-    let mut lines = vec![tr_shared("compartilhar_pre_requisito", &[])];
-    lines.extend(p.missing.iter().map(|item| match item.as_str() {
-        "operator" => tr_shared("compartilhar_falta_operador", &[]),
-        "funnel" => tr_shared("compartilhar_falta_funnel", &[]),
-        other => other.to_owned(),
-    }));
-    if !p.fix.is_empty() { lines.push(p.fix.clone()); }
-    lines.join("\n")
+    code_ok.then(|| format!("https://{host}:8443/par/{code}"))
 }
 
 /// Código do convite (usado, vencido, revogado…) tem frase própria; `Hangar::failure` leria todo 410 como "encerrado".
-fn accept_failure(failure: &ShareFailure) -> String {
-    match failure {
-        ShareFailure::Blocked(prereqs) => prerequisite_text(prereqs),
-        ShareFailure::Other(e) if e.detail.starts_with("erro_convite_") => tr_shared(&e.detail, &[]),
-        ShareFailure::Other(e) => Hangar::failure(e),
-    }
+fn accept_failure(error: &Failure) -> String {
+    if error.detail.starts_with("erro_convite_") { tr_shared(&error.detail, &[]) } else { Hangar::failure(error) }
 }
 
 pub(super) struct PairAcceptDialog {
@@ -49,11 +34,14 @@ pub(super) struct PairAcceptDialog {
     sessions: Vec<String>,
     busy: bool,
     error: Option<String>,
+    // O túnel que o aceite sobe ainda não está pronto: o aviso é o mesmo do compartilhar.
+    blocked: Option<SharePrereqs>,
 }
 
 impl PairAcceptDialog {
     fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.busy { return; }
+        self.blocked = None;
         let Some(link) = parse_pair_link(&self.input.read(cx).value()) else {
             self.error = Some(tr_shared("erro_par_link_invalido", &[]));
             cx.notify();
@@ -64,7 +52,7 @@ impl PairAcceptDialog {
             cx.notify();
             return;
         };
-        (self.busy, self.error) = (true, None);
+        (self.busy, self.error, self.blocked) = (true, None, None);
         let (me, api) = (cx.entity().downgrade(), self.api.clone());
         let _ = self.hangar.update(cx, |this, cx| this.accept_pair(me, api, session, link, window, cx));
         cx.notify();
@@ -78,6 +66,9 @@ impl Render for PairAcceptDialog {
             .child(Input::new(&self.input).aria_label(tr("par_campo_aria")));
         if self.fixed.is_none() {
             col = col.child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(tr("par_qual_sessao")));
+            if self.sessions.is_empty() {
+                col = col.child(div().text_sm().text_color(theme::muted()).whitespace_normal().child(tr("par_sem_sessao")));
+            }
             for (i, name) in self.sessions.clone().into_iter().enumerate() {
                 let picked = self.choice.as_deref() == Some(name.as_str());
                 let label = name.clone();
@@ -85,7 +76,9 @@ impl Render for PairAcceptDialog {
                     .on_click(cx.listener(move |this, _, _, cx| { this.choice = Some(name.clone()); cx.notify(); })));
             }
         }
-        col.when_some(self.error.clone(), |el, error| el.child(div().id("par-error").role(Role::Alert).text_sm()
+        col.when(self.busy, |el| el.child(div().id("par-busy").role(Role::Status).text_sm().text_color(theme::muted()).child(tr("par_aceitando"))))
+            .when_some(self.blocked.as_ref(), |el, prereqs| el.child(prerequisite_notice("par-blocked", prereqs, None, None)))
+            .when_some(self.error.clone(), |el, error| el.child(div().id("par-error").role(Role::Alert).text_sm()
                 .text_color(theme::danger()).whitespace_normal().child(error)))
             .child(div().flex().justify_end().child(Button::new("par-aceitar").primary().label(tr("par_aceitar")).disabled(self.busy)
                 .on_click(cx.listener(|this, _, window, cx| this.submit(window, cx)))))
@@ -108,7 +101,7 @@ impl Hangar {
         let sessions = self.sessions.iter().filter(|s| s.state != "dead" && !s.orq()).map(|s| s.name.clone()).collect();
         let fixed = target.map(|t| t.name);
         let input = cx.new(|cx| InputState::new(window, cx).placeholder(tr("par_placeholder")).default_value(link.unwrap_or_default()));
-        let dialog = cx.new(|_| PairAcceptDialog { hangar, api, input: input.clone(), fixed: fixed.clone(), choice: None, sessions, busy: false, error: None });
+        let dialog = cx.new(|_| PairAcceptDialog { hangar, api, input: input.clone(), fixed: fixed.clone(), choice: None, sessions, busy: false, error: None, blocked: None });
         let title = match &fixed { Some(s) => tr_shared("native_par_titulo_sessao", &[("sessao", s)]), None => tr("par_titulo") };
         window.open_dialog(cx, move |d, _, cx| {
             let busy = dialog.read(cx).busy;
@@ -133,7 +126,14 @@ impl Hangar {
                     window.close_all_dialogs(cx);
                     window.push_notification(Notification::success(tr_shared("native_par_aceito", &[("dono", &ok.owner), ("sessao", &ok.session)])), cx);
                 }
-                Err(failure) => { let _ = dialog.update(cx, |d, cx| { (d.busy, d.error) = (false, Some(accept_failure(&failure))); cx.notify(); }); }
+                Err(failure) => { let _ = dialog.update(cx, |d, cx| {
+                    d.busy = false;
+                    match &failure {
+                        ShareFailure::Blocked(prereqs) => (d.error, d.blocked) = (None, Some(prereqs.clone())),
+                        ShareFailure::Other(e) => (d.error, d.blocked) = (Some(accept_failure(e)), None),
+                    }
+                    cx.notify();
+                }); }
             });
         }).detach();
     }

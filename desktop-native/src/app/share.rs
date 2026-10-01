@@ -24,6 +24,33 @@ fn operator_command(p: &SharePrereqs) -> Option<&str> {
     p.missing.iter().any(|m| m == "operator").then(|| p.fix.lines().find(|l| l.contains("--operator=")))?
 }
 
+/// O aviso de pré-requisito do túnel (o que falta e como resolver), igual no compartilhar e no aceite de par. `authorize` é o
+/// botão que só o compartilhar tem; `on_enable` roda depois de abrir a página do Tailscale.
+pub(super) fn prerequisite_notice(id: &'static str, prereqs: &SharePrereqs, authorize: Option<AnyElement>,
+    on_enable: Option<Box<dyn Fn(&ClickEvent, &mut Window, &mut App)>>) -> Stateful<Div> {
+    let fix = &prereqs.fix;
+    let command = operator_command(prereqs).map(str::to_owned);
+    let fix_copy = command.clone().unwrap_or_else(|| fix.clone());
+    let is_url = command.is_none() && fix.starts_with("https://");
+    div().id(id).role(Role::Alert).flex().flex_col().gap_2()
+        .child(div().text_sm().text_color(theme::warning()).whitespace_normal().child(tr_shared("compartilhar_pre_requisito", &[])))
+        .children(prereqs.missing.iter().map(|item| div().text_sm().text_color(theme::warning()).whitespace_normal().child(match item.as_str() {
+            "operator" => tr_shared("compartilhar_falta_operador", &[]),
+            "funnel" => tr_shared("compartilhar_falta_funnel", &[]),
+            other => other.to_owned(),
+        })))
+        .when(!fix.is_empty(), |el| el
+            .child(div().p_2().rounded_md().bg(theme::inset()).font_family(theme::MONO).text_sm().whitespace_normal().child(fix.clone())))
+        .child(div().flex().flex_wrap().gap_2()
+            .children(authorize)
+            .when(!fix_copy.is_empty(), |el| el.child(Button::new(SharedString::from(format!("{id}-fix"))).small()
+                .label(if is_url { tr("share_open_link") } else { tr_shared("compartilhar_copiar", &[]) })
+                .on_click(move |_, _, cx| if is_url { cx.open_url(&fix_copy) } else { cx.write_to_clipboard(ClipboardItem::new_string(fix_copy.clone())) })))
+            .when_some(prereqs.enable_url.clone(), |el, url| el.child(Button::new(SharedString::from(format!("{id}-enable"))).small().primary()
+                .label(tr_shared("compartilhar_liberar_tailscale", &[]))
+                .on_click(move |event, window, cx| { cx.open_url(&url); if let Some(after) = &on_enable { after(event, window, cx); } }))))
+}
+
 #[derive(Debug, PartialEq)]
 enum Authorized { Done, Dismissed, Denied, NoPkexec, Failed(String) }
 
@@ -208,31 +235,13 @@ impl ShareDialog {
                     .into_any_element()
             }
             Ok(Created::Blocked(prereqs)) => {
-                let fix = &prereqs.fix;
-                let command = operator_command(prereqs).map(str::to_owned);
-                let fix_copy = command.clone().unwrap_or_else(|| fix.clone());
-                let is_url = command.is_none() && fix.starts_with("https://");
                 // `pkexec` precisa do agente de senha da sessão gráfica: só aqui, e só com o backend nesta máquina.
-                let can_authorize = command.is_some() && cfg!(target_os = "linux") && self.api.is_loopback();
-                div().id("share-blocked").role(Role::Alert).flex().flex_col().gap_2()
-                    .child(div().text_sm().text_color(theme::warning()).whitespace_normal().child(tr_shared("compartilhar_pre_requisito", &[])))
-                    .children(prereqs.missing.iter().map(|item| div().text_sm().text_color(theme::warning()).whitespace_normal().child(match item.as_str() {
-                        "operator" => tr_shared("compartilhar_falta_operador", &[]),
-                        "funnel" => tr_shared("compartilhar_falta_funnel", &[]),
-                        other => other.to_owned(),
-                    })))
-                    .when(!fix.is_empty(), |el| el
-                        .child(div().p_2().rounded_md().bg(theme::inset()).font_family(theme::MONO).text_sm().whitespace_normal().child(fix.clone())))
-                    .child(div().flex().flex_wrap().gap_2()
-                        .when(can_authorize, |el| el.child(Button::new("share-authorize").small().primary()
-                            .label(tr(if self.authorizing { "share_authorizing" } else { "share_authorize" })).disabled(self.authorizing)
-                            .on_click(cx.listener(|d, _, _, cx| d.authorize(cx)))))
-                        .when(!fix_copy.is_empty(), |el| el.child(Button::new("share-fix").small()
-                            .label(if is_url { tr("share_open_link") } else { tr_shared("compartilhar_copiar", &[]) })
-                            .on_click(move |_, _, cx| if is_url { cx.open_url(&fix_copy) } else { cx.write_to_clipboard(ClipboardItem::new_string(fix_copy.clone())) })))
-                        .when_some(prereqs.enable_url.clone(), |el, url| el.child(Button::new("share-enable").small().primary()
-                            .label(tr_shared("compartilhar_liberar_tailscale", &[]))
-                            .on_click(cx.listener(move |d, _, _, cx| { cx.open_url(&url); d.watch(cx); })))))
+                let can_authorize = operator_command(prereqs).is_some() && cfg!(target_os = "linux") && self.api.is_loopback();
+                let authorize = can_authorize.then(|| Button::new("share-authorize").small().primary()
+                    .label(tr(if self.authorizing { "share_authorizing" } else { "share_authorize" })).disabled(self.authorizing)
+                    .on_click(cx.listener(|d, _, _, cx| d.authorize(cx))).into_any_element());
+                let on_enable: Box<dyn Fn(&ClickEvent, &mut Window, &mut App)> = Box::new(cx.listener(|d, _, _, cx| d.watch(cx)));
+                prerequisite_notice("share-blocked", prereqs, authorize, Some(on_enable))
                     .when_some(self.authorize_error.clone(), |el, error| el.child(div().id("share-authorize-error").role(Role::Alert)
                         .text_sm().text_color(theme::danger()).whitespace_normal().child(error)))
                     .when(self.watching, |el| el.child(div().id("share-watching").role(Role::Status).text_sm().text_color(theme::muted())

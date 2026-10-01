@@ -6507,5 +6507,7 @@
   "native_par_escolha_sessao": "Choose the session to pair.",
   "native_par_aceitar": "Pair",
   "native_par_aceito": "Paired with {dono} · {sessao}",
-  "native_par_whatsapp": "Let's pair our Hangar sessions: {link}"
+  "native_par_whatsapp": "Let's pair our Hangar sessions: {link}",
+  "native_par_sem_sessao": "No live session on this machine to pair.",
+  "native_par_aceitando": "Pairing…"
 }
