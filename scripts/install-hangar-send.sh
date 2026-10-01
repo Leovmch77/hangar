@@ -79,6 +79,10 @@ plugin_dst="$HOME/.claude/skills/hangar"
 case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) msys=1 ;; *) msys= ;; esac
 if [ -L "$plugin_dst" ] && [ "$(realpath "$plugin_dst")" = "$(realpath "$plugin_src")" ]; then
     echo "ok: ~/.claude/skills/hangar -> $plugin_src (plugin, ja linkado)"
+elif [ ! -L "$plugin_dst" ] && [ -e "$plugin_dst" ] \
+        && ! grep -qs '"name": *"hangar"' "$plugin_dst/.claude-plugin/plugin.json"; then
+    # Pasta real só sai quando é cópia antiga do plugin: a de outra pessoa não é nossa para apagar.
+    echo "aviso: ~/.claude/skills/hangar existe e nao e o plugin do Hangar; plugin NAO linkado" >&2
 else
     if [ -L "$plugin_dst" ]; then
         # Só o link sai: `rm -rf` atravessaria a junção e apagaria o destino dela.
