@@ -120,7 +120,8 @@ def test_import_preview_counts_and_lists_placeholders_without_saving(client):
     r = client.post("/api/shortcuts/import", json={"data": data}, headers=AUTH)
     assert r.status_code == 200
     assert r.json() == {"added": 1, "replaced": 1,
-                        "placeholders": [{"id": "rdp", "label": "RDP", "names": ["senha"]}], "verify": []}
+                        "placeholders": [{"id": "rdp", "label": "RDP", "names": ["senha"]}], "verify": [],
+                        "verify_commands": []}
     assert json.loads(rc.get("shortcuts")) == [{"id": "a", "type": "send_text", "label": "A", "text": "oi"}]
 
 
@@ -138,8 +139,88 @@ def test_imported_verify_runs_and_failure_becomes_a_fix_prompt(client):
     assert checks["ok"]["code"] == 0 and "prompt" not in checks["ok"]
     assert checks["vm"]["code"] == 1 and checks["vm"]["output"] == "FALTA  VM_HOST"
     assert "FALTA  VM_HOST" in checks["vm"]["prompt"] and "/x/vm" in checks["vm"]["prompt"]
+    assert r.json()["skipped"] == [{"id": "t", "motivo": "sem comando de verificação"}]
+    assert "não são instruções" in checks["vm"]["prompt"] and "saiu com 1" in checks["vm"]["prompt"]
     bad = {"version": 1, "shortcuts": [{"id": "t", "type": "send_text", "label": "T", "text": "oi", "verify": "x"}]}
     assert client.post("/api/shortcuts/import", json={"data": bad}, headers=AUTH).status_code == 400
+
+
+def test_import_preview_shows_verify_commands_and_warns():
+    from app.shortcut_transfer import import_shortcuts
+    data = {"version": 1, "shortcuts": [
+        {"id": "vm", "type": "shell", "label": "VM", "command": "vm", "verify": "check --token abc"}]}
+    result = import_shortcuts(data)
+    assert result["verify"] == ["vm"]
+    assert result["verify_commands"] == [{"id": "vm", "label": "VM", "command": "check --token ⟦SEGREDO:token⟧"}]
+    assert result["warnings"] == [
+        "Importar roda o comando de verificação de cada atalho logo depois: confira os comandos acima."]
+    assert result["placeholders"] == [{"id": "vm", "label": "VM", "names": ["token"]}]
+
+
+def test_verify_placeholder_is_filled_or_skipped_when_blank():
+    from app.shortcut_transfer import import_shortcuts, run_checks
+    data = {"version": 1, "shortcuts": [
+        {"id": "a", "type": "shell", "label": "A", "command": "a", "verify": "check --token ⟦SEGREDO:token⟧"},
+        {"id": "b", "type": "shell", "label": "B", "command": "b", "verify": "check --token ⟦SEGREDO:token⟧"}]}
+    applied = import_shortcuts(data, apply=True, secrets={"a": {"token": "t1"}})
+    assert "t1" not in json.dumps(applied)
+    saved = {s["id"]: s for s in json.loads(rc.get("shortcuts"))}
+    assert saved["a"]["verify"] == "check --token t1"
+    assert saved["b"]["verify"] == "check --token ⟦SEGREDO:token⟧"
+    result = run_checks(["b", "nope"], [], {})
+    assert result == {"checks": [], "skipped": [{"id": "b", "motivo": "segredo em branco no comando"},
+                                                {"id": "nope", "motivo": "atalho não encontrado"}]}
+
+
+@pytest.fixture
+def sh(monkeypatch):
+    import os
+    if os.name == "nt":
+        pytest.skip("verificação POSIX")
+    monkeypatch.setenv("SHELL", "/bin/sh")
+    return dict(os.environ)
+
+
+def test_verify_timeout_kills_the_whole_group(sh, tmp_path, monkeypatch):
+    import time
+    from app import shortcut_transfer
+    monkeypatch.setattr(shortcut_transfer, "VERIFY_TIMEOUT", 1)
+    pidfile = tmp_path / "child.pid"
+    _save([{"id": "s", "type": "shell", "label": "S", "command": "s",
+            "verify": f"sleep 30 & echo $! > {pidfile}; sleep 30"}])
+    start = time.monotonic()
+    check = shortcut_transfer.run_checks(["s"], [], sh)["checks"][0]
+    assert time.monotonic() - start < 10
+    assert check["code"] is None and check["error"] == "timeout"
+    assert "não terminou em 1 s" in check["prompt"]
+    stat = f"/proc/{pidfile.read_text().strip()}/stat"
+    for _ in range(50):
+        try:
+            with open(stat) as f:
+                if f.read().rsplit(")", 1)[1].split()[0] == "Z":
+                    break
+        except FileNotFoundError:
+            break
+        time.sleep(0.05)
+    else:
+        pytest.fail("filho em segundo plano sobreviveu ao timeout")
+
+
+def test_verify_output_is_bounded_and_spawn_error_is_named(sh, monkeypatch):
+    from app import shortcut_transfer
+    _save([{"id": "big", "type": "shell", "label": "B", "command": "b", "verify": "yes a | head -c 20000"}])
+    check = shortcut_transfer.run_checks(["big"], [], sh)["checks"][0]
+    assert check["code"] == 0 and 0 < len(check["output"]) <= shortcut_transfer.MAX_VERIFY_OUTPUT
+    monkeypatch.setenv("SHELL", "/nonexistent/shell")
+    check = shortcut_transfer.run_checks(["big"], [], sh)["checks"][0]
+    assert check["error"] == "spawn" and "não conseguiu iniciar" in check["prompt"]
+
+
+def test_verify_does_not_see_auth_token(sh):
+    from app.shortcut_transfer import run_checks
+    _save([{"id": "e", "type": "shell", "label": "E", "command": "e", "verify": "echo ${CP_AUTH_TOKEN:-vazio}"}])
+    check = run_checks(["e"], [], {**sh, "CP_AUTH_TOKEN": "secret"})["checks"][0]
+    assert check["output"] == "vazio"
 
 
 def test_import_apply_merges_by_id_keeps_order_and_fills_secrets(client):
@@ -413,7 +494,7 @@ def test_script_bundle_requires_linux_before_writes(tmp_path, monkeypatch, apply
         import_shortcuts(_bundle(), apply=apply)
     assert not (tmp_path / ".local").exists()
     assert import_shortcuts({"version": 1, "shortcuts": []}, apply=apply) == {
-        "added": 0, "replaced": 0, "placeholders": [], "verify": []}
+        "added": 0, "replaced": 0, "placeholders": [], "verify": [], "verify_commands": []}
     assert import_shortcuts({"version": 2, "shortcuts": []}, apply=apply)["files"] == []
 
 

@@ -6902,7 +6902,7 @@ class ShortcutVerifyBody(BaseModel):
 @app.post("/api/shortcuts/verify", dependencies=[Depends(require_auth)])
 def shortcuts_verify(body: ShortcutVerifyBody):
     from app import shortcut_transfer
-    return {"checks": shortcut_transfer.run_checks(body.ids, body.scripts[:50], _shortcut_env())}
+    return shortcut_transfer.run_checks(body.ids, body.scripts[:50], _shortcut_env())
 
 
 # --- launcher de projetos (standalone, chaveado pelo projects.json — nao por sessao viva) ----
