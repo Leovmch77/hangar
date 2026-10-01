@@ -2066,17 +2066,15 @@ async def _kill_unclaimed(name: str) -> None:
 
 @app.post("/api/sessions", dependencies=[Depends(require_auth)], response_model=SessionInfo)
 async def create_session(body: CreateBody):
-    # Aqui, não no _criar_sessao: ele troca o cwd por o da worktree no body, e uma cópia perderia isso.
-    if body.headless is None:
-        body = body.model_copy(update={"headless": not body.read_only and body.provider in ("claude", "codex")
-                                      and bool(runtime_config.get("headless_default"))})
     with _acompanhar_criacao(body.name):
         worktree: dict = {}
         try:
             info = await _criar_sessao(body, worktree)
             if body.branch is not None:
-                info = info.model_copy(update={"cwd": body.cwd, "branch": body.branch,
-                                               "worktree": Path(body.cwd, ".git").is_file()})
+                # O cwd da worktree vem do dict: `_criar_sessao` pode trabalhar numa cópia do body.
+                cwd = worktree.get("cwd", body.cwd)
+                info = info.model_copy(update={"cwd": cwd, "branch": body.branch,
+                                               "worktree": Path(cwd, ".git").is_file()})
             guest = guest_users.current.get()
             if guest is not None:
                 try:
@@ -2109,6 +2107,9 @@ def _allowed_scan_root(path: str) -> Path:
 
 
 async def _criar_sessao(body: CreateBody, worktree: dict):
+    if body.headless is None:
+        body = body.model_copy(update={"headless": not body.read_only and body.provider in ("claude", "codex")
+                                      and bool(runtime_config.get("headless_default"))})
     # Handler async por causa da trava de conta mais abaixo. Todo provider passa pelo MESMO
     # registry.create — o Codex tambem, desde que o lancador unico virou o comando do pane dele.
     # registry.create e SINCRONO e spawna um
@@ -2228,7 +2229,7 @@ async def _criar_sessao(body: CreateBody, worktree: dict):
             raise HTTPException(exc.status, detail=erro("erro_criacao_sessao", exc.detail)) from None
         if created:
             worktree.update(source=source, path=path)
-        body.cwd = path
+        body.cwd = worktree["cwd"] = path
 
     # Janela do modelo escolhido, pra entrar no env do motor (Task 3). O número já está no cache do
     # catálogo do provedor (_engine_models); vir do navegador seria deixar um terceiro escolher uma

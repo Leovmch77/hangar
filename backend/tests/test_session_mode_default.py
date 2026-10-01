@@ -5,6 +5,17 @@ from app import api, runtime_config
 from app.registry import SessionInfo
 
 
+def _sem_pino_do_conftest(monkeypatch):
+    # O conftest força headless_default=False para os outros testes; aqui o padrão é o assunto.
+    original = runtime_config.get
+
+    def get(campo):
+        if campo != "headless_default":
+            return original(campo)
+        return runtime_config._carregar().get(campo, getattr(runtime_config.settings, campo, None))
+    monkeypatch.setattr(runtime_config, "get", get)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("provider", ["claude", "codex", "pi"])
 @pytest.mark.parametrize("default", [False, True])
@@ -12,6 +23,7 @@ from app.registry import SessionInfo
 async def test_default_and_explicit_mode(tmp_path, monkeypatch, provider, default, requested):
     monkeypatch.setattr(runtime_config, "_backend_config_base", lambda: tmp_path)
     monkeypatch.setattr(api.settings, "headless_default", default)
+    _sem_pino_do_conftest(monkeypatch)
     create = Mock(return_value=SessionInfo(name="test-mode", cwd=str(tmp_path), provider=provider))
     monkeypatch.setattr(api.registry, "create", create)
     monkeypatch.setattr(api, "get_adapter", Mock())
@@ -33,6 +45,7 @@ async def test_read_only_requires_terminal_without_overriding_explicit_mode(tmp_
 
     monkeypatch.setattr(runtime_config, "_backend_config_base", lambda: tmp_path)
     monkeypatch.setattr(api.settings, "headless_default", True)
+    _sem_pino_do_conftest(monkeypatch)
     prepare = Mock()
     monkeypatch.setattr(orq_readonly, "prepare", prepare)
     # Uma regressão na recusa nunca pode abrir processo real durante este teste.
