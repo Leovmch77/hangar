@@ -29,6 +29,7 @@
   "sync_config_copiar": "Copiar endereço",
   "sync_config_abrir": "Abrir Hangar sincronizado",
   "convidados_sem_login": "Entre com o seu usuário e senha neste endereço para gerenciar convidados.",
+  "convidados_entrar_nativo": "Entre com o seu usuário e senha da sincronização para gerenciar convidados.",
   "convidados_titulo": "Convidados",
   "convidados_descricao": "Quem você cadastrar aqui entra por este endereço com usuário e senha próprios e só vê os servidores e a pasta que você escolher.",
   "convidados_vazio": "Nenhum convidado cadastrado.",

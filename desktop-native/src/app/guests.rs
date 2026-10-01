@@ -2,6 +2,7 @@
 //! do convidado mora no hub; o acesso, em cada servidor escolhido, criado com o token do dono daquele servidor.
 use super::*;
 use super::sync::{PBKDF2_ITERATIONS, decrypt_json, derive_keys, encrypt_json, random, sync_field};
+use super::settings::Page;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -11,9 +12,17 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub(super) struct GuestServer { server_id: String, guest_id: String, token: String, root: String }
 
 /// O `admin_blob`, cifrado com a chave do dono: a senha fica junto pra editar sem pedi-la de novo.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct GuestAdmin { user: String, password: String, sees_owner: bool, owner_sees: bool, servers: Vec<GuestServer> }
+
+// À mão pra a senha nunca ir parar num log ou numa mensagem de teste.
+impl std::fmt::Debug for GuestAdmin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GuestAdmin").field("user", &self.user).field("sees_owner", &self.sees_owner)
+            .field("owner_sees", &self.owner_sees).field("servers", &self.servers).finish_non_exhaustive()
+    }
+}
 
 /// Servidor da lista do dono, como o cofre guarda. `base_url` vazio é o próprio hub.
 #[derive(Clone, Debug, Deserialize)]
@@ -31,7 +40,8 @@ struct Draft { user: String, password: String, sees_owner: bool, owner_sees: boo
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct ServerFailure { label: String, message: String }
 
-pub(super) struct SaveOutcome { saved: GuestAdmin, errors: Vec<ServerFailure>, hub_failed: bool }
+/// `expired`: o hub recusou o cookie (401); a sessão caiu e a página volta pra entrada.
+pub(super) struct SaveOutcome { saved: GuestAdmin, errors: Vec<ServerFailure>, hub_failed: bool, expired: bool }
 
 /// Sessão do dono no hub: só em memória, some ao sair da página.
 #[derive(Clone)]
@@ -128,22 +138,23 @@ async fn save_guest(ops: &impl GuestOps, owner: &[OwnerServer], draft: &Draft, p
     if let Err(error) = ops.put_hub(&saved, Value::Array(list)).await {
         // Os servidores já mudaram: `saved` volta pro formulário e salvar de novo repete com ele, sem duplicar.
         errors.push(ServerFailure { label: tr_shared("sync_config_titulo", &[]), message: hub_message(&error) });
-        return SaveOutcome { saved, errors, hub_failed: true };
+        return SaveOutcome { saved, errors, hub_failed: true, expired: error.status == Some(401) };
     }
-    SaveOutcome { saved, errors, hub_failed: false }
+    SaveOutcome { saved, errors, hub_failed: false, expired: false }
 }
 
-async fn remove_guest(ops: &impl GuestOps, owner: &[OwnerServer], guest: &GuestAdmin) -> Vec<ServerFailure> {
+/// Devolve as falhas e se o hub recusou o cookie (401).
+async fn remove_guest(ops: &impl GuestOps, owner: &[OwnerServer], guest: &GuestAdmin) -> (Vec<ServerFailure>, bool) {
     let draft = Draft { user: guest.user.clone(), password: guest.password.clone(), sees_owner: guest.sees_owner,
         owner_sees: guest.owner_sees, servers: Vec::new() };
     let out = save_guest(ops, owner, &draft, Some(guest)).await;
     // Só apaga a conta do hub quando todos os servidores largaram o acesso e o hub aceitou a gravação.
     if out.saved.servers.is_empty() && !out.hub_failed {
         if let Err(error) = ops.delete_hub(&guest.user).await {
-            return vec![ServerFailure { label: guest.user.clone(), message: hub_message(&error) }];
+            return (vec![ServerFailure { label: guest.user.clone(), message: hub_message(&error) }], error.status == Some(401));
         }
     }
-    out.errors
+    (out.errors, out.expired)
 }
 
 struct Live { hub: Api, session: Session }
@@ -261,7 +272,7 @@ pub(super) enum GuestsReply {
     LoggedIn(u64, Result<(Session, Result<Vec<GuestAdmin>, Failure>), String>),
     Loaded(u64, Result<Vec<GuestAdmin>, Failure>),
     Saved(u64, SaveOutcome),
-    Removed(u64, Vec<ServerFailure>),
+    Removed(u64, Vec<ServerFailure>, bool),
 }
 
 // Número global: a página zera o estado ao sair, e uma resposta antiga não pode casar com o pedido novo.
@@ -285,7 +296,7 @@ impl Hangar {
     /// Formulário de entrada do dono, criado quando a página mostra a seção e ainda não há sessão.
     pub(super) fn guests_login_form(&mut self, owner: Option<&str>, window: &mut Window, cx: &mut Context<Self>) {
         let guests = &mut self.sync.guests;
-        if guests.login.is_some() || guests.session.is_some() { return; }
+        if guests.login.is_some() || guests.session.is_some() || self.settings != Some(Page::Sync) { return; }
         let owner = owner.unwrap_or_default().to_owned();
         let user = cx.new(|cx| InputState::new(window, cx).default_value(owner));
         let password = cx.new(|cx| InputState::new(window, cx).masked(true));
@@ -387,8 +398,8 @@ impl Hangar {
         let done = self.guests_send_later();
         self.runtime.spawn(async move {
             let live = Live { hub: api, session };
-            let errors = remove_guest(&live, &live.session.servers, &guest).await;
-            done(GuestsReply::Removed(seq, errors)).await
+            let (errors, expired) = remove_guest(&live, &live.session.servers, &guest).await;
+            done(GuestsReply::Removed(seq, errors, expired)).await
         });
         cx.notify();
     }
@@ -398,10 +409,8 @@ impl Hangar {
         let guests = &mut self.sync.guests;
         match result {
             Err(error) if matches!(error.status, Some(401 | 403)) => {
-                (guests.session, guests.list, guests.form) = (None, None, None);
-                guests.login_error = (error.status == Some(403)).then(|| tr_shared("erro_so_dono", &[]));
-                let owner = self.sync_owner();
-                self.guests_login_form(owner.as_deref(), window, cx);
+                self.guests_expired(window, cx);
+                self.sync.guests.login_error = (error.status == Some(403)).then(|| tr_shared("erro_so_dono", &[]));
             }
             result => guests.list = Some(result.map_err(|error| describe(&error))),
         }
@@ -409,7 +418,7 @@ impl Hangar {
 
     pub(super) fn receive_guests(&mut self, reply: GuestsReply, window: &mut Window, cx: &mut Context<Self>) {
         let seq = match &reply {
-            GuestsReply::LoggedIn(seq, _) | GuestsReply::Loaded(seq, _) | GuestsReply::Saved(seq, _) | GuestsReply::Removed(seq, _) => *seq,
+            GuestsReply::LoggedIn(seq, _) | GuestsReply::Loaded(seq, _) | GuestsReply::Saved(seq, _) | GuestsReply::Removed(seq, ..) => *seq,
         };
         if self.sync.guests.waiting != Some(seq) { return; }
         self.sync.guests.waiting = None;
@@ -421,6 +430,11 @@ impl Hangar {
                 self.guests_loaded(list, window, cx);
             }
             GuestsReply::Loaded(_, list) => self.guests_loaded(list, window, cx),
+            GuestsReply::Saved(_, SaveOutcome { errors, expired: true, .. }) | GuestsReply::Removed(_, errors, true) => {
+                // Cookie vencido: sem voltar pra entrada, salvar falharia pra sempre até sair da página.
+                self.guests_expired(window, cx);
+                self.sync.guests.failures = errors;
+            }
             GuestsReply::Saved(_, SaveOutcome { saved, errors, .. }) => {
                 let guests = &mut self.sync.guests;
                 if let Some(Ok(list)) = guests.list.as_mut() {
@@ -433,7 +447,7 @@ impl Hangar {
                 if guests.saved_ok { guests.form = None; }
                 guests.failures = errors;
             }
-            GuestsReply::Removed(_, errors) => {
+            GuestsReply::Removed(_, errors, _) => {
                 self.sync.guests.failures = errors;
                 self.guests_reload(cx);
             }
@@ -441,7 +455,12 @@ impl Hangar {
         cx.notify();
     }
 
-    fn sync_owner(&self) -> Option<String> { self.sync.owner() }
+    fn guests_expired(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let guests = &mut self.sync.guests;
+        (guests.session, guests.list, guests.form, guests.saved_ok) = (None, None, None, false);
+        let owner = self.sync.owner();
+        self.guests_login_form(owner.as_deref(), window, cx);
+    }
 
     pub(super) fn render_guests(&mut self, cx: &mut Context<Self>) -> Div {
         let guests = &self.sync.guests;
@@ -452,7 +471,7 @@ impl Hangar {
         let alert = |id: SharedString, text: String| div().id(id).role(Role::Alert).text_sm().text_color(theme::danger()).whitespace_normal().child(text);
         let Some(session) = &guests.session else {
             let Some(form) = &guests.login else { return section };
-            return section.child(div().text_sm().text_color(theme::muted()).whitespace_normal().child(tr_shared("convidados_sem_login", &[])))
+            return section.child(div().text_sm().text_color(theme::muted()).whitespace_normal().child(tr_shared("convidados_entrar_nativo", &[])))
                 .child(sync_field(tr("login_usuario"), &form.user, busy))
                 .child(sync_field(tr("login_senha"), &form.password, busy))
                 .when_some(guests.login_error.clone(), |el, error| el.child(alert("guests-login-error".into(), error)))
@@ -583,7 +602,7 @@ mod tests {
 
     /// Servidores de mentira: `fail` diz que status cada operação devolve por servidor.
     #[derive(Default)]
-    struct Fake { fail: Vec<(&'static str, &'static str, u16)>, hub_fails: bool, calls: RefCell<Vec<String>>, hub: RefCell<Option<Value>> }
+    struct Fake { fail: Vec<(&'static str, &'static str, u16)>, hub_fails: Option<u16>, calls: RefCell<Vec<String>>, hub: RefCell<Option<Value>> }
 
     impl Fake {
         fn run(&self, op: &str, server: &str) -> Result<(), Failure> {
@@ -603,7 +622,10 @@ mod tests {
         async fn delete(&self, server: &OwnerServer, _: &str) -> Result<(), Failure> { self.run("delete", &server.id) }
         async fn put_hub(&self, _: &GuestAdmin, servers: Value) -> Result<(), Failure> {
             *self.hub.borrow_mut() = Some(servers);
-            if self.hub_fails { Err(Failure::local("network_error")) } else { Ok(()) }
+            match self.hub_fails {
+                Some(status) => Err(Failure { status: Some(status), detail: "boom".into(), retry_after: None, uncertain: false }),
+                None => Ok(()),
+            }
         }
         async fn delete_hub(&self, user: &str) -> Result<(), Failure> { self.run("delete_hub", user) }
     }
@@ -642,24 +664,39 @@ mod tests {
 
     #[test]
     fn save_keeps_entries_it_could_not_touch() {
-        let fake = Fake { fail: vec![("delete", "b", 500)], hub_fails: true, ..Fake::default() };
+        let fake = Fake { fail: vec![("delete", "b", 500)], hub_fails: Some(500), ..Fake::default() };
         let old = prev(vec![entry("a", "/a"), entry("b", "/b"), entry("gone", "/g")]);
         let out = futures::executor::block_on(save_guest(&fake, &owner(), &draft("ana", "12345678", &[]), Some(&old)));
         // a removido; b falhou e fica; "gone" saiu da lista do dono e fica; o hub falhou e vira erro, sem estourar.
         assert_eq!(out.saved.servers, vec![entry("b", "/b"), entry("gone", "/g")]);
-        assert!(out.hub_failed);
+        assert!(out.hub_failed && !out.expired);
         assert_eq!(out.errors.iter().map(|e| e.label.as_str()).collect::<Vec<_>>(), ["B", "gone", tr_shared("sync_config_titulo", &[]).as_str()]);
     }
 
     #[test]
     fn remove_deletes_the_hub_account_only_when_everything_let_go() {
         let fake = Fake { fail: vec![("delete", "a", 404)], ..Fake::default() };
-        let errors = futures::executor::block_on(remove_guest(&fake, &owner(), &prev(vec![entry("a", "/a")])));
-        assert!(errors.is_empty());
+        let (errors, expired) = futures::executor::block_on(remove_guest(&fake, &owner(), &prev(vec![entry("a", "/a")])));
+        assert!(errors.is_empty() && !expired);
         assert!(fake.calls.borrow().contains(&"delete_hub ana".to_string()));
         let fake = Fake { fail: vec![("delete", "a", 500)], ..Fake::default() };
-        let errors = futures::executor::block_on(remove_guest(&fake, &owner(), &prev(vec![entry("a", "/a")])));
+        let (errors, _) = futures::executor::block_on(remove_guest(&fake, &owner(), &prev(vec![entry("a", "/a")])));
         assert_eq!(errors.len(), 1);
         assert!(!fake.calls.borrow().contains(&"delete_hub ana".to_string()));
+    }
+
+    #[test]
+    fn hub_refusing_the_cookie_marks_the_session_expired() {
+        // Sem isso o formulário ficaria aberto e cada Salvar bateria no mesmo 401.
+        let fake = Fake { hub_fails: Some(401), ..Fake::default() };
+        let out = futures::executor::block_on(save_guest(&fake, &owner(), &draft("ana", "12345678", &[("a", "/a")]), None));
+        assert!(out.hub_failed && out.expired);
+        let (_, expired) = futures::executor::block_on(remove_guest(&fake, &owner(), &prev(vec![entry("a", "/a")])));
+        assert!(expired);
+    }
+
+    #[test]
+    fn debug_hides_the_password() {
+        assert!(!format!("{:?}", prev(vec![])).contains("12345678"));
     }
 }

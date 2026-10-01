@@ -29,6 +29,7 @@
   "sync_config_copiar": "Copy address",
   "sync_config_abrir": "Open synced Hangar",
   "convidados_sem_login": "Sign in with your username and password at this address to manage guests.",
+  "convidados_entrar_nativo": "Sign in with your sync username and password to manage guests.",
   "convidados_titulo": "Guests",
   "convidados_descricao": "People you add here sign in at this address with their own username and password and only see the servers and folder you choose.",
   "convidados_vazio": "No guests yet.",
