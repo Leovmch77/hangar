@@ -70,6 +70,8 @@ export class NewChatDraft {
   #modSeq = 0;
   #branchSeq = 0;
   #modelTouched = false;
+  // Só a escolha manual de CONTA desliga a troca automática por cota.
+  #accountPicked = false;
   // Sessão já criada cujo primeiro envio falhou: tentar de novo reenvia nela em vez de criar outra,
   // desde que nenhuma escolha tenha mudado desde então.
   #created: { choices: string; name: string } | null = null;
@@ -116,6 +118,7 @@ export class NewChatDraft {
 
   setConfig(path: string) {
     this.#modelTouched = true;
+    this.#accountPicked = true;
     if (path === this.configDir) return;
     this.configDir = path;
     void this.loadModels();
@@ -123,7 +126,7 @@ export class NewChatDraft {
 
   /** Conta escolhida sem limite e sem escolha manual: troca sozinha pra conta com folga. */
   switchFromExhausted(linha: ContaCota[] | null) {
-    if (this.provider !== 'claude' || this.#modelTouched || this.configsLoading || !this.configDir) return;
+    if (this.provider !== 'claude' || this.#accountPicked || this.configsLoading || !this.configDir) return;
     const atual = linha?.find((c) => c.id === `claude:${this.configDir}`);
     if (!exhaustedWindow(atual)) return;
     const alvo = bestAccountWithQuota(linha, this.configs.map((c) => c.path));
@@ -191,6 +194,7 @@ export class NewChatDraft {
   async loadConfigs() {
     const seq = ++this.#cfgSeq;
     this.#modelTouched = false;
+    this.#accountPicked = false;
     this.configsLoading = true;
     try {
       const list = await listClaudeConfigs();

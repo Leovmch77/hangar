@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import { basename, createSession, pickFolderRoot, providerName, type Provider } from '@hangar/core';
   import HomeUsage from '../components/HomeUsage.svelte';
   import FolderGitPill from '../components/FolderGitPill.svelte';
@@ -28,7 +29,10 @@
   draft.init();
 
   // A pílula de conta mantém o feed vivo; aqui só reage a cada leitura nova.
-  $effect(() => { draft.switchFromExhausted(faixaDeCota(quotaFeed.contas)); });
+  $effect(() => {
+    const linha = faixaDeCota(quotaFeed.contas);
+    untrack(() => draft.switchFromExhausted(linha));
+  });
 
   type Menu = 'machine' | 'folder' | 'branch';
   let menu = $state<Menu | null>(null);

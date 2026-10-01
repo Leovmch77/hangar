@@ -151,8 +151,29 @@ describe('NewChatDraft.switchFromExhausted', () => {
     await flush();
     expect(draft.configDir).toBe('/d');
     expect(core.modelOptions.mock.calls.length).toBeGreaterThan(antes);
+    const depois = core.modelOptions.mock.calls.length;
+    draft.switchFromExhausted([conta('/c', 100, true), conta('/d', 20)]);
+    await flush();
+    expect(draft.configDir).toBe('/d');
+    expect(core.modelOptions.mock.calls.length).toBe(depois);
+  });
+
+  it('escolher só o modelo não desliga a troca', async () => {
+    const draft = await ready();
+    draft.setModel('x');
     draft.switchFromExhausted([conta('/c', 100, true), conta('/d', 20)]);
     expect(draft.configDir).toBe('/d');
+  });
+
+  it('com as contas carregando ou fora do claude não troca', async () => {
+    const draft = await ready();
+    draft.configsLoading = true;
+    draft.switchFromExhausted([conta('/c', 100, true), conta('/d', 20)]);
+    expect(draft.configDir).toBe('/c');
+    draft.configsLoading = false;
+    draft.provider = 'codex';
+    draft.switchFromExhausted([conta('/c', 100, true), conta('/d', 20)]);
+    expect(draft.configDir).toBe('/c');
   });
 
   it('escolha manual não é desfeita', async () => {
