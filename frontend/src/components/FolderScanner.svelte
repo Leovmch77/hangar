@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { getRoots, scanDir } from '@hangar/core';
+  import { getRoots, getRootsForServer, makeDir, scanDir } from '@hangar/core';
+  import type { Server } from '@hangar/core';
   import { relativeTime } from '@hangar/core';
   import type { FsRoot, FsEntry, FsScanError } from '@hangar/core';
   import * as m from '../paraglide/messages';
@@ -16,8 +17,12 @@
     /** Caminho já escolhido (desktop de dois painéis): a linha fica marcada — é ELA que diz qual
      *  pasta o formulário à direita está configurando. */
     selected?: string | null;
+    /** Navega as pastas DESTE servidor em vez do ativo (pasta do convidado em cada máquina). */
+    server?: Server;
+    /** Mostra "Nova pasta" no diretório atual. */
+    canCreate?: boolean;
   }
-  let { onPick, fill = false, selected = null }: Props = $props();
+  let { onPick, fill = false, selected = null, server, canCreate = false }: Props = $props();
 
   const LAST_ROOT_KEY = 'cp:last-root';
 
@@ -34,7 +39,7 @@
   // ── Carrega as raizes (chips) ──────────────────────────────────────────────
   onMount(async () => {
     try {
-      roots = await getRoots();
+      roots = server ? await getRootsForServer(server) : await getRoots();
     } catch {
       rootsError = true;
       rootsLoading = false;
@@ -63,12 +68,35 @@
     path = target;
     scanning = true;
     scanError = null;
-    const res = await scanDir(root, target);
+    const res = await scanDir(root, target, server);
     // descarta respostas obsoletas se o usuario navegou rapido pra outra pasta/raiz
     if (activeRoot?.path !== root || path !== target) return;
     entries = res.entries;
     scanError = res.error ?? null;
     scanning = false;
+  }
+
+  let creating = $state(false);
+  let newName = $state('');
+  let createBusy = $state(false);
+  let createError = $state('');
+
+  async function create(event: SubmitEvent) {
+    event.preventDefault();
+    if (!activeRoot || createBusy || !newName.trim()) return;
+    createBusy = true;
+    createError = '';
+    try {
+      const made = await makeDir(activeRoot.path, path, newName.trim(), server);
+      creating = false;
+      newName = '';
+      onPick(made.path);
+      await scan(path);
+    } catch (e) {
+      createError = m.arquivo_criar_pasta_erro({ erro: e instanceof Error ? e.message : String(e) });
+    } finally {
+      createBusy = false;
+    }
   }
 
   function drill(e: FsEntry) {
@@ -171,6 +199,24 @@
       </button>
     {/if}
 
+    {#if canCreate}
+      {#if creating}
+        <form class="new-folder" onsubmit={create}>
+          <input class="search" bind:value={newName} placeholder={m.arquivo_nova_pasta_nome()}
+            aria-label={m.arquivo_nova_pasta_nome()} autocomplete="off" autocorrect="off"
+            autocapitalize="off" spellcheck={false} disabled={createBusy} />
+          <button class="use-here" type="submit" disabled={createBusy || !newName.trim()} aria-busy={createBusy}>
+            {m.arquivo_criar_pasta()}
+          </button>
+          <button class="use-here" type="button" disabled={createBusy}
+            onclick={() => { creating = false; createError = ''; }}>{m.comum_cancelar()}</button>
+        </form>
+      {:else}
+        <button class="use-here" type="button" onclick={() => (creating = true)}>{m.arquivo_nova_pasta()}</button>
+      {/if}
+      {#if createError}<p class="state-msg create-error" role="alert">{createError}</p>{/if}
+    {/if}
+
     <!-- Coluna de subpastas -->
     <div class="rows" role="list">
       {#if scanning}
@@ -228,6 +274,15 @@
     min-height: 0;
     max-height: none;
   }
+
+  .new-folder {
+    display: flex;
+    gap: var(--space-2);
+    align-items: center;
+  }
+  .new-folder .search { flex: 1; min-width: 0; }
+  .new-folder .use-here { flex-shrink: 0; }
+  .create-error { color: var(--error); }
 
   /* ── Chips de raiz ─────────────────────────────────────────────────────── */
   .chips {

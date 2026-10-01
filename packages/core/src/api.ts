@@ -24,6 +24,7 @@ import type {
   ConfigDirInfo,
   FsRoot,
   FsScanResult,
+  FsEntry,
   FsScanError,
   WorkflowSummary,
   SubagentRun,
@@ -1146,11 +1147,12 @@ export function getRoots(): Promise<FsRoot[]> {
  * renderização (lê `result.error`), em vez de misturar throws com campos. Apenas 401
  * borbulha (problema de auth, não de varredura).
  */
-export async function scanDir(root: string, path?: string): Promise<FsScanResult> {
+export async function scanDir(root: string, path?: string, server?: Server): Promise<FsScanResult> {
   const qs = new URLSearchParams({ root });
   if (path) qs.set('path', path);
+  const url = `/api/fs/scan?${qs.toString()}`;
   try {
-    return await apiFetch<FsScanResult>(`/api/fs/scan?${qs.toString()}`);
+    return await (server ? apiFetchForServer<FsScanResult>(server, url) : apiFetch<FsScanResult>(url));
   } catch (e) {
     if (!(e instanceof Error)) throw e;
     // `.status`, nao parseInt(e.message): ensureOk (api.ts) parava de embutir o status no TEXTO
@@ -1165,6 +1167,12 @@ export async function scanDir(root: string, path?: string): Promise<FsScanResult
     };
     return { entries: [], error: map[status] ?? 'unknown' };
   }
+}
+
+// Cria a subpasta `name` em `path` (default = raiz), sob a mesma allowlist do scan.
+export function makeDir(root: string, path: string | null, name: string, server?: Server): Promise<FsEntry> {
+  const init = { method: 'POST', body: JSON.stringify({ root, path, name }) };
+  return server ? apiFetchForServer<FsEntry>(server, '/api/fs/mkdir', init) : apiFetch<FsEntry>('/api/fs/mkdir', init);
 }
 
 // ── Arquivo: conversas mortas (transcripts sem sessão tmux viva) ──────────────

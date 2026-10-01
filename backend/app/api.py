@@ -31,7 +31,7 @@ from app.send_executor import send_thread as _send_thread
 from app import bastao as bastao_mod   # `bastao` sem sufixo é a ROTA GET, mais abaixo neste arquivo
 from app.bastao import montar as bastao_montar
 from app.commands import comandos_da_cli, list_commands
-from app.fs import FsError, allowed_roots, list_roots, scan_dir
+from app.fs import FsError, allowed_roots, list_roots, make_dir, scan_dir
 from app.model_picker import PickerError
 from app.mensagens import erro
 from app import kimi_models
@@ -8536,6 +8536,20 @@ def fs_scan(root: str, path: str | None = None):
     # a FsError pro status HTTP correspondente.
     try:
         return scan_dir(root, path)
+    except FsError as e:
+        raise HTTPException(e.status, e.detail)
+
+
+class FsMkdirBody(BaseModel):
+    root: str
+    path: str | None = None
+    name: str
+
+
+@app.post("/api/fs/mkdir", dependencies=[Depends(require_auth)])
+def fs_mkdir(body: FsMkdirBody):
+    try:
+        return make_dir(body.root, body.path, body.name)
     except FsError as e:
         raise HTTPException(e.status, e.detail)
 

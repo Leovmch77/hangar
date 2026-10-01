@@ -3,6 +3,8 @@
 use super::*;
 use super::sync::{PBKDF2_ITERATIONS, decrypt_json, derive_keys, encrypt_json, random, sync_field};
 use super::settings::Page;
+use super::create::{Root, Scan, choice, crumbs, scan_of};
+use super::device::Remote;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -157,13 +159,44 @@ async fn remove_guest(ops: &impl GuestOps, owner: &[OwnerServer], guest: &GuestA
     (out.errors, out.expired)
 }
 
+/// Conexão com um servidor do dono, com o token dele; endereço vazio é o próprio hub.
+fn server_api(hub: &Api, server: &OwnerServer) -> Result<Api, Failure> {
+    let identity = hub.identity();
+    Api::new(if server.base_url.is_empty() { &identity } else { &server.base_url }, &server.token)
+}
+
+/// As pastas são as do servidor que está sendo configurado, não as do ativo.
+fn folder_api(hub: Option<&Api>, session: Option<&Session>, id: &str) -> Result<Api, String> {
+    match (hub, session.and_then(|s| s.servers.iter().find(|s| s.id == id))) {
+        (Some(hub), Some(server)) => server_api(hub, server).map_err(|error| Hangar::failure(&error)),
+        _ => Err(tr_shared("convidados_servidor_fora_da_lista", &[])),
+    }
+}
+
+/// `path` dentro de `root` (ou a própria raiz).
+fn inside(root: &str, path: &str) -> bool {
+    path.strip_prefix(root.trim_end_matches('/')).is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+}
+
+/// Onde o seletor abre: na pasta já escolhida, pela raiz mais funda que a contém; sem ela, no topo da primeira raiz.
+fn start_at(roots: &[Root], chosen: &str) -> Option<(Root, String)> {
+    let holder = roots.iter().filter(|r| !chosen.is_empty() && inside(&r.path, chosen)).max_by_key(|r| r.path.len());
+    match holder {
+        Some(root) => Some((root.clone(), chosen.to_owned())),
+        None => roots.first().map(|root| (root.clone(), root.path.clone())),
+    }
+}
+
+// Número global: o seletor é recriado a cada abertura, e a resposta de um anterior não pode casar com o pedido do novo.
+fn begin<T>(remote: &mut Remote<T>) -> u64 {
+    (remote.seq, remote.loading) = (ticket(), true);
+    remote.seq
+}
+
 struct Live { hub: Api, session: Session }
 
 impl Live {
-    fn api(&self, server: &OwnerServer) -> Result<Api, Failure> {
-        let identity = self.hub.identity();
-        Api::new(if server.base_url.is_empty() { &identity } else { &server.base_url }, &server.token)
-    }
+    fn api(&self, server: &OwnerServer) -> Result<Api, Failure> { server_api(&self.hub, server) }
 }
 
 impl GuestOps for Live {
@@ -250,9 +283,32 @@ struct GuestForm {
     password: Entity<InputState>,
     sees_owner: bool,
     owner_sees: bool,
-    // Servidor marcado = tem pasta aqui; a ordem é a da marcação, como no web.
-    roots: Vec<(String, Entity<InputState>)>,
+    // Servidor marcado = tem pasta aqui (vazia até escolher); a ordem é a da marcação, como no web.
+    roots: Vec<(String, String)>,
+    /// O seletor de pasta aberto; um por vez.
+    browser: Option<FolderBrowser>,
     error: Option<String>,
+}
+
+/// Navega pelas pastas de um servidor marcado: raízes → subpastas → escolher, ou criar uma nova na pasta atual.
+struct FolderBrowser {
+    server: String,
+    roots: Remote<Vec<Root>>,
+    root: Option<Root>,
+    dir: String,
+    scan: Remote<Scan>,
+    /// Campo do nome da pasta nova; a assinatura cria no Enter.
+    naming: Option<(Entity<InputState>, Subscription)>,
+    /// Número da criação em voo.
+    making: Option<u64>,
+    make_error: Option<String>,
+}
+
+impl FolderBrowser {
+    fn new(server: String) -> Self {
+        Self { server, roots: Remote::default(), root: None, dir: String::new(), scan: Remote::default(), naming: None, making: None,
+            make_error: None }
+    }
 }
 
 #[derive(Default)]
@@ -296,6 +352,10 @@ pub(super) enum GuestsReply {
     Loaded(u64, Result<Vec<GuestAdmin>, Failure>),
     Saved(u64, SaveOutcome),
     Removed(u64, Vec<ServerFailure>, bool),
+    FolderRoots(u64, Result<Vec<Root>, String>),
+    FolderScan(u64, Result<Scan, String>),
+    /// Caminho da pasta criada.
+    FolderMade(u64, Result<String, String>),
 }
 
 // Número global: a página zera o estado ao sair, e uma resposta antiga não pode casar com o pedido novo.
@@ -364,18 +424,143 @@ impl Hangar {
             cx.new(|cx| InputState::new(window, cx).masked(masked).default_value(value));
         let user = input(guest.as_ref().map(|g| g.user.clone()).unwrap_or_default(), false, window, cx);
         let password = input(guest.as_ref().map(|g| g.password.clone()).unwrap_or_default(), true, window, cx);
-        let roots = guest.iter().flat_map(|g| &g.servers).map(|s| (s.server_id.clone(), input(s.root.clone(), false, window, cx))).collect();
+        let roots = guest.iter().flat_map(|g| &g.servers).map(|s| (s.server_id.clone(), s.root.clone())).collect();
         let guests = &mut self.sync.guests;
         guests.form = Some(GuestForm { sees_owner: guest.as_ref().is_some_and(|g| g.sees_owner),
-            owner_sees: guest.as_ref().is_none_or(|g| g.owner_sees), editing: guest, user, password, roots, error: None });
+            owner_sees: guest.as_ref().is_none_or(|g| g.owner_sees), editing: guest, user, password, roots, browser: None, error: None });
         (guests.failures, guests.saved_ok) = (Vec::new(), false);
         cx.notify();
     }
 
-    fn guests_toggle(&mut self, id: String, on: bool, window: &mut Window, cx: &mut Context<Self>) {
+    fn guests_toggle(&mut self, id: String, on: bool, cx: &mut Context<Self>) {
         let Some(form) = self.sync.guests.form.as_mut() else { return };
-        if !on { form.roots.retain(|(server, _)| *server != id); }
-        else if !form.roots.iter().any(|(server, _)| *server == id) { form.roots.push((id, cx.new(|cx| InputState::new(window, cx)))); }
+        if !on {
+            form.roots.retain(|(server, _)| *server != id);
+            if form.browser.as_ref().is_some_and(|b| b.server == id) { form.browser = None; }
+        } else if !form.roots.iter().any(|(server, _)| *server == id) {
+            form.roots.push((id.clone(), String::new()));
+            // Marcar já abre as pastas dele: sem pasta o servidor não salva.
+            self.guests_browse(id, cx);
+        }
+        cx.notify();
+    }
+
+    fn guests_browse(&mut self, id: String, cx: &mut Context<Self>) {
+        let Some(form) = self.sync.guests.form.as_mut() else { return };
+        form.browser = Some(FolderBrowser::new(id));
+        self.guests_load_roots(cx);
+    }
+
+    fn guests_load_roots(&mut self, cx: &mut Context<Self>) {
+        let done = self.guests_send_later();
+        let guests = &mut self.sync.guests;
+        let Some(browser) = guests.form.as_mut().and_then(|f| f.browser.as_mut()) else { return };
+        let seq = begin(&mut browser.roots);
+        match folder_api(self.api.as_ref(), guests.session.as_ref(), &browser.server) {
+            Err(error) => { browser.roots.finish(seq, Err(error)); }
+            Ok(api) => { self.runtime.spawn(async move {
+                let roots = api.server_read(&["fs", "roots"], &[], 15).await.map_err(|e| Hangar::fetch_failure(&e))
+                    .and_then(|v| serde_json::from_value::<Vec<Root>>(v).map_err(|_| tr("invalid_response")));
+                done(GuestsReply::FolderRoots(seq, roots)).await
+            }); }
+        }
+        cx.notify();
+    }
+
+    fn guests_pick_root(&mut self, root: Root, cx: &mut Context<Self>) {
+        let Some(browser) = self.sync.guests.form.as_mut().and_then(|f| f.browser.as_mut()) else { return };
+        let path = root.path.clone();
+        browser.root = Some(root);
+        self.guests_scan(path, cx);
+    }
+
+    fn guests_scan(&mut self, path: String, cx: &mut Context<Self>) {
+        let done = self.guests_send_later();
+        let guests = &mut self.sync.guests;
+        let Some(browser) = guests.form.as_mut().and_then(|f| f.browser.as_mut()) else { return };
+        let Some(root) = browser.root.as_ref().map(|r| r.path.clone()) else { return };
+        (browser.dir, browser.make_error) = (path.clone(), None);
+        let seq = begin(&mut browser.scan);
+        match folder_api(self.api.as_ref(), guests.session.as_ref(), &browser.server) {
+            Err(error) => { browser.scan.finish(seq, Err(error)); }
+            Ok(api) => { self.runtime.spawn(async move {
+                let query: Vec<(&str, &str)> = if path == root { vec![("root", root.as_str())] } else { vec![("root", root.as_str()), ("path", path.as_str())] };
+                done(GuestsReply::FolderScan(seq, scan_of(api.server_read(&["fs", "scan"], &query, 15).await))).await
+            }); }
+        }
+        cx.notify();
+    }
+
+    fn guests_pick_folder(&mut self, path: String, cx: &mut Context<Self>) {
+        let Some(form) = self.sync.guests.form.as_mut() else { return };
+        let Some(browser) = form.browser.take() else { return };
+        if let Some((_, root)) = form.roots.iter_mut().find(|(id, _)| *id == browser.server) { *root = path; }
+        cx.notify();
+    }
+
+    fn guests_new_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let input = cx.new(|cx| InputState::new(window, cx));
+        let subscription = cx.subscribe_in(&input, window, |this: &mut Hangar, _, event: &InputEvent, _, cx| {
+            if matches!(event, InputEvent::PressEnter { .. }) { this.guests_make_folder(cx); }
+        });
+        input.update(cx, |state, cx| state.focus(window, cx));
+        let Some(browser) = self.sync.guests.form.as_mut().and_then(|f| f.browser.as_mut()) else { return };
+        (browser.naming, browser.make_error) = (Some((input, subscription)), None);
+        cx.notify();
+    }
+
+    fn guests_make_folder(&mut self, cx: &mut Context<Self>) {
+        let done = self.guests_send_later();
+        let guests = &mut self.sync.guests;
+        let Some(browser) = guests.form.as_mut().and_then(|f| f.browser.as_mut()) else { return };
+        let (Some((input, _)), Some(root), None) = (browser.naming.as_ref(), browser.root.as_ref(), browser.making) else { return };
+        let name = input.read(cx).value().trim().to_string();
+        if name.is_empty() { return; }
+        let root = root.path.clone();
+        let path = (browser.dir != root).then(|| browser.dir.clone());
+        let failed = |error: &str| tr_shared("arquivo_criar_pasta_erro", &[("erro", error)]);
+        match folder_api(self.api.as_ref(), guests.session.as_ref(), &browser.server) {
+            Err(error) => browser.make_error = Some(failed(&error)),
+            Ok(api) => {
+                let seq = ticket();
+                (browser.making, browser.make_error) = (Some(seq), None);
+                self.runtime.spawn(async move {
+                    let body = json!({"root": root, "path": path, "name": name});
+                    let made = api.server_send(reqwest::Method::POST, &["fs", "mkdir"], Some(body), 15).await
+                        .map_err(|e| Hangar::fetch_failure(&e))
+                        .and_then(|v| v.get("path").and_then(Value::as_str).map(str::to_owned).ok_or_else(|| tr("invalid_response")));
+                    done(GuestsReply::FolderMade(seq, made)).await
+                });
+            }
+        }
+        cx.notify();
+    }
+
+    /// Respostas do seletor de pasta: não passam pelo `waiting`, que é do Salvar e da lista.
+    fn receive_folder(&mut self, reply: GuestsReply, cx: &mut Context<Self>) {
+        let Some(form) = self.sync.guests.form.as_mut() else { return };
+        let Some(browser) = form.browser.as_mut() else { return };
+        match reply {
+            GuestsReply::FolderRoots(seq, result) => {
+                if !browser.roots.finish(seq, result) { return; }
+                let chosen = form.roots.iter().find(|(id, _)| *id == browser.server).map(|(_, p)| p.as_str()).unwrap_or_default();
+                if let Some((root, dir)) = start_at(browser.roots.ok().map_or(&[][..], Vec::as_slice), chosen) {
+                    browser.root = Some(root);
+                    self.guests_scan(dir, cx);
+                }
+            }
+            GuestsReply::FolderScan(seq, result) => { browser.scan.finish(seq, result); }
+            GuestsReply::FolderMade(seq, result) => {
+                if browser.making != Some(seq) { return; }
+                browser.making = None;
+                match result {
+                    // Entra na pasta nova: "Usar esta pasta" já a escolhe.
+                    Ok(path) => { browser.naming = None; self.guests_scan(path, cx); }
+                    Err(error) => browser.make_error = Some(tr_shared("arquivo_criar_pasta_erro", &[("erro", &error)])),
+                }
+            }
+            _ => {}
+        }
         cx.notify();
     }
 
@@ -386,7 +571,7 @@ impl Hangar {
         if guests.waiting.is_some() { return; }
         let draft = Draft { user: form.user.read(cx).value().trim().to_string(), password: form.password.read(cx).value().to_string(),
             sees_owner: form.sees_owner, owner_sees: form.owner_sees,
-            servers: form.roots.iter().map(|(id, root)| (id.clone(), root.read(cx).value().trim().to_string())).collect() };
+            servers: form.roots.clone() };
         let list = guests.list.as_ref().and_then(|l| l.as_ref().ok()).map_or(&[][..], Vec::as_slice);
         form.error = validate(&draft, form.editing.is_some(), &session.user, list).map(|key| tr_shared(key, &[]));
         if form.error.is_some() { cx.notify(); return; }
@@ -442,6 +627,7 @@ impl Hangar {
     pub(super) fn receive_guests(&mut self, reply: GuestsReply, window: &mut Window, cx: &mut Context<Self>) {
         let seq = match &reply {
             GuestsReply::LoggedIn(seq, _) | GuestsReply::Loaded(seq, _) | GuestsReply::Saved(seq, _) | GuestsReply::Removed(seq, ..) => *seq,
+            GuestsReply::FolderRoots(..) | GuestsReply::FolderScan(..) | GuestsReply::FolderMade(..) => return self.receive_folder(reply, cx),
         };
         if self.sync.guests.waiting != Some(seq) { return; }
         self.sync.guests.waiting = None;
@@ -468,6 +654,7 @@ impl Hangar {
                 self.sync.guests.failures = errors;
                 self.guests_reload(cx);
             }
+            GuestsReply::FolderRoots(..) | GuestsReply::FolderScan(..) | GuestsReply::FolderMade(..) => {}
         }
         cx.notify();
     }
@@ -477,6 +664,107 @@ impl Hangar {
         (guests.session, guests.list, guests.form, guests.saved_ok) = (None, None, None, false);
         let owner = self.sync.owner();
         self.guests_login_form(owner.as_deref(), window, cx);
+    }
+
+    /// A pasta de um servidor marcado: a escolhida (ou o aviso de que falta) e o seletor, quando aberto.
+    fn render_guest_folder(&self, server: &OwnerServer, path: &str, browser: Option<&FolderBrowser>, busy: bool, cx: &mut Context<Self>) -> Stateful<Div> {
+        let id = server.id.clone();
+        let label = tr_shared("convidados_pasta", &[("servidor", &server.label)]);
+        let summary = div().flex().items_center().gap_2()
+            .child(div().flex_1().min_w_0().text_sm().truncate().map(|el| if path.is_empty() {
+                el.text_color(theme::muted()).child(tr_shared("convidados_pasta_nenhuma", &[]))
+            } else { el.font_family(theme::MONO).child(path.to_owned()) }))
+            .when(browser.is_none(), |el| el.child(Button::new(SharedString::from(format!("guests-browse-{}", server.id))).outline().small()
+                .icon(IconName::FolderOpen).disabled(busy)
+                .label(tr_shared(if path.is_empty() { "convidados_escolher_pasta" } else { "convidados_trocar_pasta" }, &[]))
+                .on_click(cx.listener(move |this, _, _, cx| this.guests_browse(id.clone(), cx)))));
+        div().id(SharedString::from(format!("guests-folder-{}", server.id))).role(Role::Group).aria_label(label.clone())
+            .ml(px(24.)).flex().flex_col().gap(px(6.))
+            .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(label))
+            .child(summary)
+            .when_some(browser, |el, browser| el.child(Self::render_folder_browser(browser, path, busy, cx)))
+    }
+
+    fn render_folder_browser(browser: &FolderBrowser, chosen: &str, busy: bool, cx: &mut Context<Self>) -> Div {
+        let muted = |text: String| div().text_sm().text_color(theme::muted()).whitespace_normal().child(text);
+        let loading = |id: &'static str| div().id(id).role(Role::Status).text_sm().text_color(theme::muted()).child(tr_shared("comum_carregando", &[]));
+        let alert = |id: &'static str, text: String| div().id(id).role(Role::Alert).text_sm().text_color(theme::danger()).whitespace_normal().child(text);
+        let retry = |id: &'static str| Button::new(id).outline().small().label(tr_shared("lista_tentar_novamente", &[])).disabled(busy);
+        let frame = div().flex().flex_col().gap_2().p_2().rounded(px(8.)).border_1().border_color(theme::border());
+        let close = Button::new("guests-browse-close").ghost().small().label(tr_shared("comum_cancelar", &[])).disabled(busy)
+            .on_click(cx.listener(|this, _, _, cx| { if let Some(form) = this.sync.guests.form.as_mut() { form.browser = None; } cx.notify(); }));
+        let roots = match browser.roots.value.as_ref() {
+            _ if browser.roots.loading => return frame.child(loading("guests-roots-loading")).child(div().child(close)),
+            None => return frame.child(div().child(close)),
+            Some(Err(error)) => return frame.child(alert("guests-roots-error", format!("{} {error}", tr_shared("arquivo_carregar_raizes_erro", &[]))))
+                .child(div().flex().gap_2().child(retry("guests-roots-retry").on_click(cx.listener(|this, _, _, cx| this.guests_load_roots(cx)))).child(close)),
+            Some(Ok(list)) if list.is_empty() => return frame.child(muted(tr_shared("arquivo_sem_raizes", &[]))).child(div().child(close)),
+            Some(Ok(list)) => list,
+        };
+        let Some(root) = browser.root.as_ref() else { return frame.child(div().child(close)) };
+        let chips = div().id("guests-roots").role(Role::Group).aria_label(tr_shared("arquivo_raizes_aria", &[])).flex().flex_wrap().gap(px(6.))
+            .children(roots.iter().map(|r| {
+                let pick = r.clone();
+                choice(SharedString::from(format!("guests-root-{}", r.path)), r.path == root.path, cx).small().rounded_full()
+                    .label(r.name.clone()).tooltip(r.path.clone()).disabled(busy)
+                    .on_click(cx.listener(move |this, _, _, cx| this.guests_pick_root(pick.clone(), cx)))
+            }));
+        let trail = div().id("guests-crumbs").aria_label(tr_shared("arquivo_caminho_aria", &[])).flex().flex_wrap().items_center().gap(px(2.))
+            .children(crumbs(root, &browser.dir).into_iter().enumerate().map(|(n, (text, path))| div().flex().items_center().gap(px(2.))
+                .when(n > 0, |el| el.child(div().text_color(theme::faint()).text_size(px(12.)).child("/")))
+                .child(Button::new(SharedString::from(format!("guests-crumb-{path}"))).ghost().xsmall().label(text).disabled(busy)
+                    .on_click(cx.listener(move |this, _, _, cx| this.guests_scan(path.clone(), cx))))));
+        let rows = match browser.scan.value.as_ref() {
+            _ if browser.scan.loading => loading("guests-scan-loading").into_any_element(),
+            None => div().into_any_element(),
+            Some(Err(error)) => {
+                let dir = browser.dir.clone();
+                div().flex().flex_col().gap_2().child(alert("guests-scan-error", error.clone()))
+                    .child(div().child(retry("guests-scan-retry").on_click(cx.listener(move |this, _, _, cx| this.guests_scan(dir.clone(), cx)))))
+                    .into_any_element()
+            }
+            Some(Ok(scan)) if scan.error.is_some() => muted(scan.error.clone().unwrap_or_default()).into_any_element(),
+            Some(Ok(scan)) if scan.entries.is_empty() => muted(tr_shared("arquivo_sem_subpastas", &[])).into_any_element(),
+            // ponytail: lista simples com rolagem; pasta com milhares de subpastas pede a lista virtual do `create.rs`.
+            Some(Ok(scan)) => div().id("guests-folders").max_h(px(240.)).overflow_y_scroll().flex().flex_col().gap(px(2.))
+                .children(scan.entries.iter().map(|entry| {
+                    let (pick, open) = (entry.path.clone(), entry.path.clone());
+                    let on = entry.path == chosen;
+                    div().flex().items_center().gap(px(4.))
+                        .child(choice(SharedString::from(format!("guests-pick-{}", entry.path)), on, cx).small().flex_1().min_w_0().justify_start()
+                            .icon(IconName::Folder).label(entry.name.clone()).tooltip(entry.path.clone()).selected(on).disabled(busy)
+                            .on_click(cx.listener(move |this, _, _, cx| this.guests_pick_folder(pick.clone(), cx))))
+                        .child(Button::new(SharedString::from(format!("guests-open-{}", entry.path))).ghost().small().icon(IconName::ChevronRight)
+                            .accessibility_label(tr_shared("arquivo_abrir", &[("nome", &entry.name)])).disabled(busy)
+                            .on_click(cx.listener(move |this, _, _, cx| this.guests_scan(open.clone(), cx))))
+                })).into_any_element(),
+        };
+        let making = browser.making.is_some();
+        let naming = browser.naming.as_ref().map(|(input, _)| {
+            let ready = !input.read(cx).value().trim().is_empty();
+            div().flex().items_center().gap_2()
+                .child(div().flex_1().min_w_0().child(Input::new(input).small().disabled(making || busy).aria_label(tr_shared("arquivo_nova_pasta_nome", &[]))))
+                .child(Button::new("guests-mkdir").primary().small().label(tr_shared("arquivo_criar_pasta", &[])).loading(making)
+                    .disabled(!ready || making || busy).on_click(cx.listener(|this, _, _, cx| this.guests_make_folder(cx))))
+                .child(Button::new("guests-mkdir-cancel").ghost().small().label(tr_shared("comum_cancelar", &[])).disabled(making)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        if let Some(b) = this.sync.guests.form.as_mut().and_then(|f| f.browser.as_mut()) { (b.naming, b.make_error) = (None, None); }
+                        cx.notify();
+                    })))
+        });
+        let dir = browser.dir.clone();
+        let readable = browser.scan.ok().is_some_and(|scan| scan.error.is_none());
+        frame.child(chips).child(trail).child(rows)
+            .children(naming)
+            .when_some(browser.make_error.clone(), |el, error| el.child(alert("guests-mkdir-error", error)))
+            .child(div().flex().flex_wrap().items_center().gap_2()
+                .child(Button::new("guests-use-folder").outline().small().icon(IconName::FolderOpen).label(tr_shared("arquivo_usar_pasta", &[]))
+                    .disabled(busy || !readable).on_click(cx.listener(move |this, _, _, cx| this.guests_pick_folder(dir.clone(), cx))))
+                .when(browser.naming.is_none(), |el| el.child(Button::new("guests-new-folder").ghost().small().icon(IconName::Plus)
+                    .label(tr_shared("arquivo_nova_pasta", &[])).disabled(busy || !readable)
+                    .on_click(cx.listener(|this, _, window, cx| this.guests_new_folder(window, cx)))))
+                .child(div().flex_1())
+                .child(close))
     }
 
     pub(super) fn render_guests(&mut self, cx: &mut Context<Self>) -> Div {
@@ -534,12 +822,13 @@ impl Hangar {
         let mut servers = div().flex().flex_col().gap_2().p_3().rounded(px(8.)).border_1().border_color(theme::border())
             .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(tr_shared("convidados_servidores", &[])));
         for server in &session.servers {
-            let root = form.roots.iter().find(|(id, _)| *id == server.id).map(|(_, input)| input);
+            let root = form.roots.iter().find(|(id, _)| *id == server.id).map(|(_, path)| path.as_str());
             let id = server.id.clone();
+            let browser = form.browser.as_ref().filter(|b| b.server == server.id);
             servers = servers.child(Checkbox::new(SharedString::from(format!("guests-server-{}", server.id))).small()
                 .label(server.label.clone()).checked(root.is_some()).disabled(busy)
-                .on_click(cx.listener(move |this, on: &bool, window, cx| this.guests_toggle(id.clone(), *on, window, cx))))
-                .when_some(root, |el, input| el.child(sync_field(tr_shared("convidados_pasta", &[("servidor", &server.label)]), input, busy)));
+                .on_click(cx.listener(move |this, on: &bool, _, cx| this.guests_toggle(id.clone(), *on, cx))))
+                .when_some(root, |el, path| el.child(self.render_guest_folder(server, path, browser, busy, cx)));
         }
         section.child(div().flex().flex_col().gap_3()
             .child(sync_field(tr("login_usuario"), &form.user, busy || form.editing.is_some()))
@@ -569,7 +858,7 @@ impl Hangar {
 mod tests {
     // Sem glob: o `test` do gpui_kit, que o `super::*` traz, esconderia o `#[test]` da linguagem.
     use super::{Draft, Failure, GuestAdmin, GuestOps, GuestServer, Guests, OwnerServer, SaveOutcome, ServerFailure, STANDARD, decrypt_json, derive_keys, encrypt_json,
-        remove_guest, save_guest, validate};
+        Root, remove_guest, save_guest, start_at, validate};
     use base64::Engine as _;
     use crate::i18n::tr_shared;
     use serde_json::{Value, json};
@@ -726,6 +1015,19 @@ mod tests {
         assert!(!guests.apply_saved(SaveOutcome { saved: saved.clone(), errors: vec![], hub_failed: false, expired: false }));
         assert!(guests.pending.is_none() && guests.saved_ok);
         assert_eq!(guests.list, Some(Ok(vec![saved])));
+    }
+
+    #[test]
+    fn browser_opens_at_the_saved_folder() {
+        let root = |path: &str| Root { name: path.into(), path: path.into() };
+        let roots = [root("/home/ana"), root("/home/ana/pessoal"), root("/srv")];
+        let at = |chosen: &str| start_at(&roots, chosen).map(|(r, dir)| (r.path, dir));
+        // A raiz mais funda que contém a pasta; "/home/anabela" não está dentro de "/home/ana".
+        assert_eq!(at("/home/ana/pessoal/hangar"), Some(("/home/ana/pessoal".into(), "/home/ana/pessoal/hangar".into())));
+        assert_eq!(at("/srv"), Some(("/srv".into(), "/srv".into())));
+        assert_eq!(at("/home/anabela"), Some(("/home/ana".into(), "/home/ana".into())));
+        assert_eq!(at(""), Some(("/home/ana".into(), "/home/ana".into())));
+        assert!(start_at(&[], "/x").is_none());
     }
 
     #[test]

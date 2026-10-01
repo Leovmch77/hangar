@@ -34,19 +34,19 @@ fn provider_name(p: &str) -> &'static str {
 }
 
 #[derive(Clone, Debug, Deserialize)]
-struct Root { name: String, path: String }
+pub(super) struct Root { pub(super) name: String, pub(super) path: String }
 
 #[derive(Clone, Debug, Deserialize)]
-struct Entry {
-    name: String,
-    path: String,
+pub(super) struct Entry {
+    pub(super) name: String,
+    pub(super) path: String,
     #[serde(default)] is_git: bool,
     #[serde(default)] has_claude_md: bool,
     mtime: Option<f64>,
 }
 
 /// Uma pasta lida: as subpastas, ou o motivo de não haver lista (código do backend já em texto).
-pub(super) struct Scan { entries: Vec<Entry>, error: Option<String> }
+pub(super) struct Scan { pub(super) entries: Vec<Entry>, pub(super) error: Option<String> }
 
 #[derive(Clone, Debug, Deserialize)]
 struct Probe { disponivel: bool }
@@ -180,7 +180,7 @@ fn rel_path(root: &str, path: &str) -> String {
 }
 
 /// Migalhas da raiz até a pasta atual: rótulo e caminho de cada nível.
-fn crumbs(root: &Root, path: &str) -> Vec<(String, String)> {
+pub(super) fn crumbs(root: &Root, path: &str) -> Vec<(String, String)> {
     let mut out = vec![(root.name.clone(), root.path.clone())];
     let mut acc = root.path.clone();
     for part in path.strip_prefix(&root.path).unwrap_or_default().split('/').filter(|s| !s.is_empty()) {
@@ -196,7 +196,7 @@ fn shown(query: &str, root: &str, entry: &Entry) -> bool {
 }
 
 /// A leitura de uma pasta: a recusa de fronteira do backend vira o motivo dela, como o `scanDir` do web.
-fn scan_of(result: Result<Value, Failure>) -> Result<Scan, String> {
+pub(super) fn scan_of(result: Result<Value, Failure>) -> Result<Scan, String> {
     let code = match result {
         Ok(value) => {
             let entries = serde_json::from_value(value.get("entries").cloned().unwrap_or_default()).map_err(|_| tr("invalid_response"))?;

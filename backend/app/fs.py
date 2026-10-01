@@ -49,20 +49,10 @@ def list_roots() -> list[FsRoot]:
     return [FsRoot(name=_nome_de_raiz(r), path=str(r)) for r in allowed_roots()]
 
 
-def scan_dir(root: str, path: str | None = None) -> FsScanResult:
-    """Lista os subdiretorios imediatos de `path` (default = `root`).
-
-    Seguranca (espelha o espirito de registry.sanitize_cwd):
-      1. `root` precisa ser EXATAMENTE uma das raizes configuradas (comparado por realpath);
-      2. `path` e realpath-resolvido e precisa ficar CONTIDO na raiz -> '..'/symlink que
-         escapa sao rejeitados;
-      3. nunca lista fora de uma raiz liberada.
-    """
-    roots = allowed_roots()
-
+def _dir_in_root(root: str, path: str | None) -> tuple[Path, Path]:
     # 1) raiz precisa casar exatamente uma da allowlist (por realpath).
     root_real = _real(root)
-    allowed = next((r for r in roots if r == root_real), None)
+    allowed = next((r for r in allowed_roots() if r == root_real), None)
     if allowed is None:
         raise FsError(403, "root not allowed")
 
@@ -76,6 +66,38 @@ def scan_dir(root: str, path: str | None = None) -> FsScanResult:
         raise FsError(404, "path not found")
     if not target.is_dir():
         raise FsError(400, "not a directory")
+    return allowed, target
+
+
+def make_dir(root: str, path: str | None, name: str) -> FsEntry:
+    """Cria a subpasta `name` dentro de `path` (default = `root`), com a mesma fronteira do scan."""
+    _, parent = _dir_in_root(root, path)
+    name = name.strip()
+    # Um componente só: separador, '.'/'..' ou oculta escapariam do pai ou sumiriam do scanner.
+    if not name or name.startswith(".") or "/" in name or os.sep in name or "\\" in name or "\0" in name:
+        raise FsError(400, "invalid folder name")
+    child = parent / name
+    try:
+        child.mkdir()
+    except FileExistsError:
+        raise FsError(409, "folder already exists")
+    except PermissionError:
+        raise FsError(403, "permission denied")
+    except OSError as e:
+        raise FsError(400, f"could not create folder: {e.strerror or e}")
+    return FsEntry(name=name, path=str(child), mtime=child.stat().st_mtime)
+
+
+def scan_dir(root: str, path: str | None = None) -> FsScanResult:
+    """Lista os subdiretorios imediatos de `path` (default = `root`).
+
+    Seguranca (espelha o espirito de registry.sanitize_cwd):
+      1. `root` precisa ser EXATAMENTE uma das raizes configuradas (comparado por realpath);
+      2. `path` e realpath-resolvido e precisa ficar CONTIDO na raiz -> '..'/symlink que
+         escapa sao rejeitados;
+      3. nunca lista fora de uma raiz liberada.
+    """
+    allowed, target = _dir_in_root(root, path)
 
     # 4) varre os filhos imediatos. Pasta valida porem ilegivel -> vazio + erro claro
     #    (nao vaza nada e nao derruba a UI).

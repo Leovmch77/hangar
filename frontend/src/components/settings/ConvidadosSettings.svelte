@@ -4,6 +4,7 @@
   import { listOwnServers } from '../../lib/auth';
   import { listGuests, saveGuest, removeGuest, type GuestAdmin, type ServerFailure } from '../../lib/guests';
   import ConfirmSheet from '../ConfirmSheet.svelte';
+  import FolderScanner from '../FolderScanner.svelte';
   import * as m from '../../paraglide/messages';
 
   let { ownerUser = null }: { ownerUser?: string | null } = $props();
@@ -24,6 +25,8 @@
   let failures = $state<ServerFailure[]>([]);
   let savedOk = $state(false);
   let confirmRemove = $state<GuestAdmin | null>(null);
+  // Servidor com o navegador de pastas aberto (um por vez: cada um faz a própria varredura).
+  let browsing = $state<string | null>(null);
 
   async function load() {
     loading = true;
@@ -44,12 +47,14 @@
     formError = '';
     failures = [];
     savedOk = false;
+    browsing = null;
     formOpen = true;
   }
 
   function toggle(id: string, on: boolean) {
     if (on) roots = { ...roots, [id]: roots[id] ?? '' };
     else { const { [id]: _, ...rest } = roots; roots = rest; }
+    browsing = on && !roots[id] ? id : browsing === id ? null : browsing;
   }
 
   async function submit(event: SubmitEvent) {
@@ -138,8 +143,19 @@
               onchange={(e) => toggle(s.id, e.currentTarget.checked)} /> {s.label}
           </label>
           {#if s.id in roots}
-            <label for="guest-root-{s.id}">{m.convidados_pasta({ servidor: label(s.id) })}</label>
-            <input id="guest-root-{s.id}" bind:value={roots[s.id]} required disabled={saving} />
+            <div class="root">
+              <span class="root-label">{m.convidados_pasta({ servidor: label(s.id) })}</span>
+              <span class="root-path" class:root-path--empty={!roots[s.id]}>{roots[s.id] || m.convidados_pasta_nenhuma()}</span>
+              {#if browsing !== s.id}
+                <button type="button" class="action" disabled={saving} onclick={() => (browsing = s.id)}>
+                  {roots[s.id] ? m.convidados_trocar_pasta() : m.convidados_escolher_pasta()}
+                </button>
+              {:else}
+                <FolderScanner server={s} canCreate selected={roots[s.id] || null}
+                  onPick={(p) => { roots = { ...roots, [s.id]: p }; browsing = null; }} />
+                <button type="button" class="action" onclick={() => (browsing = null)}>{m.comum_cancelar()}</button>
+              {/if}
+            </div>
           {/if}
         {/each}
       </fieldset>
@@ -176,6 +192,10 @@
   legend { color: var(--text-primary); font-size: var(--text-sm); padding: 0 var(--space-1); }
   label { color: var(--text-primary); font-size: var(--text-sm); }
   .check { display: flex; align-items: center; gap: var(--space-2); }
+  .root { display: flex; flex-direction: column; gap: var(--space-2); padding-left: var(--space-5); }
+  .root-label { color: var(--text-secondary); font-size: var(--text-sm); }
+  .root-path { color: var(--text-primary); font-size: var(--text-sm); font-family: var(--font-mono); word-break: break-all; }
+  .root-path--empty { color: var(--text-muted); font-family: inherit; }
   input:not([type="checkbox"]) { width: 100%; box-sizing: border-box; padding: var(--space-3); border: 1px solid var(--border-subtle); border-radius: var(--radius-md); background: var(--surface-inset); color: var(--text-primary); font: inherit; }
   button, .action { padding: var(--space-2) var(--space-3); border: 1px solid var(--border-subtle); border-radius: var(--radius-md); background: var(--surface-raised); color: var(--text-primary); font: inherit; font-size: var(--text-sm); cursor: pointer; }
   .action { align-self: flex-start; }
