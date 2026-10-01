@@ -71,6 +71,26 @@ for skill in "$REPO"/skills/*/; do
     fi
 done
 
+# Plugin do Hangar (mods do Claude Code): pasta com .claude-plugin/plugin.json na pasta de skills
+# carrega em toda sessão. No Git Bash do Windows o `ln -s` copia e devolve 0; a junção acompanha o
+# git pull, a cópia não.
+plugin_dst="$HOME/.claude/skills/hangar"
+if [ -d "$plugin_dst" ] && [ ! -L "$plugin_dst" ]; then
+    rm -rf "$plugin_dst"
+fi
+case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*)
+        if cmd //c mklink /J "$(cygpath -w "$plugin_dst")" "$(cygpath -w "$REPO/plugins/hangar")" >/dev/null 2>&1; then
+            echo "ok: ~/.claude/skills/hangar -> $REPO/plugins/hangar (plugin, juncao)"
+        else
+            cp -r "$REPO/plugins/hangar" "$plugin_dst"
+            echo "ok: ~/.claude/skills/hangar (COPIA do plugin — re-rode apos git pull)"
+        fi ;;
+    *)
+        ln -sfn "$REPO/plugins/hangar" "$plugin_dst"
+        echo "ok: ~/.claude/skills/hangar -> $REPO/plugins/hangar (plugin)" ;;
+esac
+
 # Agentes das skills (ex.: preparar-plano da orquestrar): link no Claude, .toml em cada home do Codex.
 python3 "$REPO/scripts/instalar-agentes.py"
 

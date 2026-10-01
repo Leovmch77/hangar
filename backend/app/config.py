@@ -272,10 +272,9 @@ class Settings(BaseSettings):
     codex_voice_beta: bool = False
     # A preferência salva também é lida pelos instaladores, sem depender do backend em execução.
     claude_statusline_update: bool = True
-    # Portão de ACESSO ANTECIPADO do Claude Code: sem `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1` ele nem
-    # lê plugin de function hook. Nasce desligado, e vale para sessão NOVA — a variável entra no
-    # ambiente do processo quando ele sobe.
-    claude_function_hooks: bool = False
+    # Caminho do plugin do Hangar nas sessões Claude (mods do Claude Code). Nasce ligado; desligado,
+    # toda entrega volta ao caminho de tecla. Vale para sessão NOVA.
+    claude_function_hooks: bool = True
     # Como a sessão nova nasce quando ninguém escolhe o Jev. Default aqui, e não só em
     # `runtime_config.EDITAVEIS`, porque sem ele o campo responde `None` — e um interruptor que
     # nasce sem valor nenhum na tela não sabe dizer se está ligado ou desligado.

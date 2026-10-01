@@ -88,7 +88,7 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
 - **Motor de modelo: `engines.py` é stdlib-only**, é `ANTHROPIC_AUTH_TOKEN` (nunca `_API_KEY`),
   o env entra por `execvpe` dentro do pane (nunca `tmux -e`, que expõe a chave no `cmdline`), e a
   janela é `CLAUDE_CODE_MAX_CONTEXT_TOKENS`.
-- **Function hooks (`plugins/hangar`) são um plus por cima do tmux, nunca no lugar dele.** Fallback
+- **Plugin (`plugins/hangar`) é o caminho principal quando responde e prova a entrega; o tmux é a reserva automática, por sessão, e nunca sai do código.** Fallback
   é por AUSÊNCIA de long-poll vivo; entrega só vale com prova (rascunho confirmado, Enter aceito,
   composer vazio). `classic.*` não chega a plugin de `--plugin-dir`, `$` não atravessa `import`, e
   é um módulo por plugin. Meça no SSE, não em linha de log.

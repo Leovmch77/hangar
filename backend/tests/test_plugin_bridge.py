@@ -1,6 +1,7 @@
 """Ponte do plugin de function hooks: a regra de quem fica com o pedido de permissão e a ida e volta
 da resposta do app. O resto (envio por `fill`) depende de tmux e é conferido no uso real."""
 import asyncio
+import json
 import threading
 from pathlib import Path
 
@@ -68,6 +69,7 @@ def test_resposta_do_app_chega_ao_hook_e_so_vale_com_o_aviso_dele(monkeypatch):
 
 
 def test_portao_desligado_nao_poe_nada_na_sessao_e_ligado_poe_o_plugin(monkeypatch):
+    monkeypatch.setattr(pb, "plugin_in_skills_dir", lambda config_dir=None: False)
     # Desligado, a sessão nasce byte a byte como antes: sem flag, sem env. É a promessa do fallback.
     from app.adapters import get_adapter
     monkeypatch.setattr(pb, "ligado", lambda: False)
@@ -106,3 +108,40 @@ def test_entrega_roda_sob_a_trava_de_envio_da_sessao(monkeypatch):
     pb.entregar("s1", "oi")
     assert visto["travada"] is True
     assert terminal_input._send_lock("s1").locked() is False
+
+
+class _Saida:
+    def __init__(self, stdout: str):
+        self.stdout = stdout
+
+
+def test_versao_do_cli_diz_se_os_mods_vem_ligados(monkeypatch):
+    pb.esquecer_capacidade()
+    monkeypatch.setattr(pb.shutil, "which", lambda n: "/usr/bin/claude")
+    monkeypatch.setattr(pb.subprocess, "run", lambda *a, **k: _Saida("2.1.287 (Claude Code)\n"))
+    assert pb.cli_version() == (2, 1, 287) and pb.mods_by_default()
+    pb.esquecer_capacidade()
+    monkeypatch.setattr(pb.subprocess, "run", lambda *a, **k: _Saida("2.1.286 (Claude Code)\n"))
+    assert not pb.mods_by_default()
+    pb.esquecer_capacidade()
+    monkeypatch.setattr(pb.subprocess, "run", lambda *a, **k: _Saida("lixo"))
+    assert pb.cli_version() is None and not pb.mods_by_default()
+    pb.esquecer_capacidade()
+
+
+def test_plugin_na_pasta_de_skills_da_conta_dispensa_o_plugin_dir(monkeypatch, tmp_path):
+    monkeypatch.setattr(pb, "ligado", lambda: True)
+    assert pb.raizes_dos_plugins(tmp_path) == [str(pb.PLUGIN_SRC)]
+    manifesto = tmp_path / "skills" / "hangar" / ".claude-plugin" / "plugin.json"
+    manifesto.parent.mkdir(parents=True)
+    manifesto.write_text('{"name": "outro"}', encoding="utf-8")
+    assert pb.raizes_dos_plugins(tmp_path) == [str(pb.PLUGIN_SRC)]
+    manifesto.write_text('{"name": "hangar"}', encoding="utf-8")
+    assert pb.raizes_dos_plugins(tmp_path) == []
+
+
+def test_interruptor_desligado_tira_o_plugin_mesmo_com_mods_por_padrao(monkeypatch):
+    from app import runtime_config
+    monkeypatch.setattr(pb, "mods_by_default", lambda: True)
+    monkeypatch.setattr(runtime_config, "get", lambda k: False if k == "claude_function_hooks" else None)
+    assert pb._ligado_de_verdade() is False

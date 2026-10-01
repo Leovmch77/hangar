@@ -17,12 +17,16 @@ ambiente do pane.
 import asyncio
 import hashlib
 import hmac
+import json
 import logging
+import os
+import re
 import secrets
 import shutil
 import subprocess
 import threading
 import time
+from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
@@ -46,6 +50,45 @@ _loop: asyncio.AbstractEventLoop | None = None
 # `--help` custa 0,20 s (medido) e responde direto; o cache evita pagar isso a cada sessão.
 _TTL_CAPACIDADE_S = 600.0
 _capacidade: tuple[float, bool] | None = None
+# Mods ligados por padrão no CLI daqui em diante; a variável do acesso antecipado é ignorada.
+MODS_BY_DEFAULT = (2, 1, 287)
+PLUGIN_SRC = Path(__file__).resolve().parents[2] / "plugins" / "hangar"
+_versao: tuple[float, tuple[int, ...] | None] | None = None
+
+
+def cli_version() -> tuple[int, ...] | None:
+    """`claude --version` como (2, 1, 287); None quando não dá para ler. Em cache, com prazo."""
+    global _versao
+    if _versao is not None and time.monotonic() - _versao[0] < _TTL_CAPACIDADE_S:
+        return _versao[1]
+    exe = shutil.which("claude")
+    versao = None
+    if exe:
+        try:
+            r = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=10,
+                               encoding="utf-8", errors="replace")
+            m = re.match(r"\s*(\d+)\.(\d+)\.(\d+)", r.stdout or "")
+            versao = tuple(int(x) for x in m.groups()) if m else None
+        except (OSError, subprocess.SubprocessError) as e:
+            _log.warning("plugin: `claude --version` falhou: %r", e)
+    _versao = (time.monotonic(), versao)
+    return versao
+
+
+def mods_by_default() -> bool:
+    versao = cli_version()
+    return versao is not None and versao >= MODS_BY_DEFAULT
+
+
+def plugin_in_skills_dir(config_dir: Path | None = None) -> bool:
+    """O plugin está na pasta de skills da conta da sessão (link ou cópia)? Lá o CLI o carrega
+    sozinho em toda sessão."""
+    base = config_dir or Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
+    manifesto = Path(base) / "skills" / "hangar" / ".claude-plugin" / "plugin.json"
+    try:
+        return json.loads(manifesto.read_text(encoding="utf-8")).get("name") == "hangar"
+    except (OSError, ValueError, AttributeError):
+        return False
 
 
 def aceita_plugin_dir() -> bool:
@@ -69,27 +112,32 @@ def aceita_plugin_dir() -> bool:
 
 
 def esquecer_capacidade() -> None:
-    """Descarta a sonda. Quem acabou de atualizar o CLI precisa disto."""
-    global _capacidade
+    """Descarta as sondas do CLI. Quem acabou de atualizar o `claude` precisa disto."""
+    global _capacidade, _versao
     _capacidade = None
+    _versao = None
+
+
+def _ligado_de_verdade() -> bool:
+    from app import runtime_config
+    if not runtime_config.get("claude_function_hooks"):
+        return False
+    return mods_by_default() or aceita_plugin_dir()
 
 
 def ligado() -> bool:
-    """Mesmo interruptor do `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS`: sem function hook
-    na sessão não há plugin para ouvir, e o caminho novo não existe.
+    """O caminho do plugin vale nas sessões Claude desta máquina?
 
-    Com o interruptor ligado ainda é preciso o CLI aceitar `--plugin-dir`; sem isso a sessão
-    sequer nasceria, e a promessa aqui é que o caminho novo degrade para o tmux, nunca quebre."""
-    from app import runtime_config
-    return bool(runtime_config.get("claude_function_hooks")) and aceita_plugin_dir()
+    `claude_function_hooks` é o liga/desliga (nasce ligado). Com ele ligado, vale no CLI com mods por
+    padrão (2.1.287+) ou no anterior que aceita `--plugin-dir` com a variável do acesso antecipado."""
+    return _ligado_de_verdade()
 
 
-def raizes_dos_plugins() -> list[str]:
-    """O plugin do caminho nativo, ou nada com o portão fechado."""
-    if not ligado():
+def raizes_dos_plugins(config_dir: Path | None = None) -> list[str]:
+    """`--plugin-dir` só quando o plugin não está na pasta de skills da conta: lá ele já carrega."""
+    if not ligado() or plugin_in_skills_dir(config_dir):
         return []
-    from pathlib import Path
-    return [str(Path(__file__).resolve().parents[2] / "plugins" / "hangar")]
+    return [str(PLUGIN_SRC)]
 
 
 def env_da_sessao(name: str) -> dict[str, str]:

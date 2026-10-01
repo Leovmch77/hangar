@@ -263,6 +263,8 @@ def test_env_jev_ligado_sem_chave_cadastrada_nao_inventa_variavel():
 def test_function_hooks_desligado_nao_poe_variavel_nenhuma():
     """Sem marcador `off`, ao contrário do Jev: a AUSÊNCIA da variável é o desligado, e é ela que o
     Claude Code lê pra decidir se carrega plugin de function hook."""
+    assert rc.get("claude_function_hooks") is True
+    rc.aplicar({"claude_function_hooks": False})
     assert rc.env_function_hooks() == {}
 
 
