@@ -30,6 +30,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   import OrqPanelSheet from '../components/OrqPanelSheet.svelte';
   import { prefetchOrq, lerCaudaChat, guardarCaudaChat } from '../lib/queries';
   import { sessionsStore } from '../lib/sessionsStore.svelte';
+  import { fitKeyboard } from '../lib/keyboardInset';
   import { textoProblema } from '../lib/problema';
   import { aoAquecer, segurarAquecimento, soltarAquecimento } from '../lib/aquecimento';
   import { capacidades } from '../lib/capacidades.svelte';
@@ -2405,71 +2406,12 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
     document.removeEventListener('visibilitychange', onVisible);
   });
 
-  // Layout teclado-safe: a .chat-screen acompanha a ALTURA da viewport visivel. Quando o
-  // teclado abre, vv.height encolhe -> o container encolhe pra area acima do teclado, com a
-  // NavBar colada no topo e o composer no rodape (ambos flex-shrink:0) e a MessageList (flex:1)
-  // como UNICO scroller. offsetTop compensa o pan do iOS (senao o composer some pro topo).
+  // Layout teclado-safe (ver lib/keyboardInset). Dentro do modal do par a tela NÃO é a viewport: lá
+  // manda a altura do modal. No desktop não há teclado virtual e o fit sobrescreveria o height:100%
+  // que acompanha a pane (que encolhe com o TerminalPanel).
   $effect(() => {
-    const vv = window.visualViewport;
-    if (!vv || !screenEl) return;
-    // Dentro do modal do par a tela NÃO é a viewport: o `fit` fixava height=vv.height (900px medidos)
-    // num modal de 858 e a última linha do composer ficava cortada. Lá quem manda é a altura do
-    // modal (CSS 100%), e o teclado é problema do modal, como já é em qualquer sheet.
-    // Desktop: nao ha teclado virtual, entao este fit nunca precisou rodar aqui — mas RODAVA, e
-    // gravava screenEl.style.height = vv.height (a viewport INTEIRA), sobrepondo o "height: 100%"
-    // que faz a tela acompanhar a pane (que encolhe quando o TerminalPanel abre no rodape do
-    // DesktopShell). Resultado: o composer ficava atras do painel de terminal, clipado pelo
-    // overflow:hidden da pane. Mesma classe de bug do modal do par, mesmo remedio.
-    if (nested || desktop) return;
-    function fit() {
-      if (!screenEl || !vv) return;
-      // Ignora valores transientes (a animacao do teclado reporta alturas minusculas por 1 frame).
-      if (vv.height < 120) return;
-      const h = vv.height + 'px';
-      // offsetTop = quanto o iOS PANEIA a visual viewport ao abrir o teclado (body travado -> e pan
-      // VISUAL). Compensamos via `top` em position:relative (sem transform: nao promove layer com
-      // tiled-backing -> SEM retangulo preto; nao cria containing-block que prenda os sheets fixed).
-      // EXPERIMENTO teclado iOS (#1): o pan (offsetTop) e bugado no iOS 26 (Apple #800125) e deixava o
-      // composer com um vao acima do teclado. Mata o pan (scrollTo 0) e ancora top=0 -> a tela passa a
-      // ser SO a altura visivel (vv.height), com o dock colado no rodape dela = topo do teclado.
-      // Guard: so scrolla se houver scroll REAL. scrollTo a cada evento do viewport (toda tecla)
-      // disparava o dialog "Desfazer" (shake-to-undo) do iOS toda hora.
-      if (window.scrollY !== 0) window.scrollTo(0, 0);
-      if (screenEl.style.height !== h) screenEl.style.height = h;
-      if (screenEl.style.top !== '0px') screenEl.style.top = '0px';
-      if (screenEl.style.transform) screenEl.style.transform = '';
-      // Cola mais o composer no teclado: aberto -> zera o padding-bottom de safe-area (home indicator,
-      // inutil com teclado) que deixava um vao; fechado -> volta a safe-area (fallback do --composer-pb).
-      if (vv.height < window.innerHeight - 100) screenEl.style.setProperty('--composer-pb', 'var(--space-2)');
-      else screenEl.style.removeProperty('--composer-pb');
-    }
-    function onFocusIn() {
-      requestAnimationFrame(fit);
-      setTimeout(fit, 300); // iOS as vezes so estabiliza apos a animacao do teclado
-    }
-    // iOS 26: offsetTop/height as vezes NAO zeram ao fechar o teclado. No blur sem outro campo focado,
-    // forca estado limpo (senao sobra um vao no rodape).
-    function onFocusOut() {
-      setTimeout(() => {
-        if (!screenEl) return;
-        const a = document.activeElement;
-        if (a && (a.tagName === 'TEXTAREA' || a.tagName === 'INPUT')) return;
-        screenEl.style.top = '0px';
-        screenEl.style.height = '';   // volta pro height do CSS (100vh)
-        screenEl.style.transform = '';
-      }, 50);
-    }
-    fit();
-    vv.addEventListener('resize', fit);
-    vv.addEventListener('scroll', fit);
-    screenEl.addEventListener('focusin', onFocusIn);
-    screenEl.addEventListener('focusout', onFocusOut);
-    return () => {
-      vv.removeEventListener('resize', fit);
-      vv.removeEventListener('scroll', fit);
-      screenEl?.removeEventListener('focusin', onFocusIn);
-      screenEl?.removeEventListener('focusout', onFocusOut);
-    };
+    if (!screenEl || nested || desktop) return;
+    return fitKeyboard(screenEl);
   });
 
   // Mede a altura do dock (composer) e expoe via prop pra lista. ResizeObserver dispara SO quando

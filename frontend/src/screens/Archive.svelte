@@ -13,6 +13,7 @@ import { intlLocale } from '../lib/locale';
   import AccountPill from '../components/newchat/AccountPill.svelte';
   import { arquivo, clienteQuery } from '../lib/queries';
   import { takeEntry } from '../lib/conversationList';
+  import { keyboardInset } from '../lib/keyboardInset';
   import type { ChatEvent } from '@hangar/core';
   import { selectServer, listOwnServers, getActiveId, serverColor } from '../lib/auth';
   import ProviderGlyph from '../components/icons/ProviderGlyph.svelte';
@@ -81,7 +82,10 @@ import { intlLocale } from '../lib/locale';
     load();
   }
 
+  // Pastas só são buscadas quando a tela precisa delas (entrada pela lista de conversas não precisa).
+  let foldersLoaded = false;
   async function load() {
+    foldersLoaded = true;
     loading = true;
     error = '';
     try {
@@ -102,18 +106,23 @@ import { intlLocale } from '../lib/locale';
       // carrega as pastas por baixo (pro "voltar" da conversa cair na lista) e abre a conversa direto.
       selectServer(deepLink.serverId);
       activeServerId = deepLink.serverId;   // mantem o seletor coerente ao voltar da conversa
-      load();
       const link = deepLink;
       const known = takeEntry(link.serverId, link.project, link.sessionId);
-      if (known) void openConversation(known);
-      else getArchiveFolder(link.project).then((items) => {
-        if (deepLink !== link || activeServerId !== link.serverId) return;
-        const matches = items.filter((item) => item.session_id === link.sessionId);
-        if (matches.length === 1) void openConversation(matches[0]);
-        else error = matches.length > 1 ? m.arquivo_conversa_conta_ambigua() : m.arquivo_conversa_erro();
-      }).catch(() => {
-        if (deepLink === link && activeServerId === link.serverId) error = m.arquivo_conversa_erro();
-      });
+      if (known) {
+        foldersLoaded = false;
+        loading = false;
+        void openConversation(known);
+      } else {
+        load();
+        getArchiveFolder(link.project).then((items) => {
+          if (deepLink !== link || activeServerId !== link.serverId) return;
+          const matches = items.filter((item) => item.session_id === link.sessionId);
+          if (matches.length === 1) void openConversation(matches[0]);
+          else error = matches.length > 1 ? m.arquivo_conversa_conta_ambigua() : m.arquivo_conversa_erro();
+        }).catch(() => {
+          if (deepLink === link && activeServerId === link.serverId) error = m.arquivo_conversa_erro();
+        });
+      }
     } else {
       load();
     }
@@ -172,6 +181,7 @@ import { intlLocale } from '../lib/locale';
       events = history;
     } catch {
       if (seq !== motorSeq || selected?.session_id !== e.session_id || activeServerId !== server?.id) return;
+      if (!foldersLoaded) void load();   // zera `error`: o aviso vem depois
       error = m.arquivo_conversa_erro();
       selected = null;
     } finally {
@@ -204,12 +214,13 @@ import { intlLocale } from '../lib/locale';
         const err = e as { status?: number; code?: string; envelope?: { sessao?: unknown; params?: { sessao?: unknown } } };
         const live = err.envelope?.sessao ?? err.envelope?.params?.sessao;
         if (err.status === 409 && err.code === 'erro_conversa_viva' && typeof live === 'string' && live) {
-          try { localStorage.setItem(`cp-draft:${live}`, JSON.stringify({ text, jsonl: null })); } catch { /* sem storage */ }
+          mergeDraft(live, text);
           if (deepLink) selectServer(deepLink.serverId);
           window.location.hash = `#/chat/${encodeURIComponent(server.id)}/${encodeURIComponent(live)}`;
           return;
         }
-        resumeError = e instanceof Error ? e.message : m.arquivo_retomar_erro();
+        if (err.status === 409 && err.code === 'erro_conversa_viva') resumeError = m.conversa_ja_aberta_sem_nome();
+        else resumeError = e instanceof Error ? e.message : m.arquivo_retomar_erro();
         return;
       }
       console.error('archive: resume ok, send failed', name, e);
@@ -227,7 +238,29 @@ import { intlLocale } from '../lib/locale';
   // pastas, volta a lista da pasta.
   function backFromConversation() {
     if (deepLink) onBack();
-    else selected = null;
+    else {
+      selected = null;
+      if (!foldersLoaded) void load();
+    }
+  }
+
+  // Rascunho do chat dela: junta ao que já estava lá em vez de sobrescrever. Mesma forma que o Chat lê.
+  function mergeDraft(session: string, text: string) {
+    const key = `cp-draft:${session}`;
+    let prev = '', jsonl: string | null = null;
+    try {
+      const cru = localStorage.getItem(key);
+      if (cru) {
+        try {
+          const d = JSON.parse(cru);
+          if (d && typeof d === 'object' && typeof d.text === 'string') {
+            prev = d.text;
+            jsonl = typeof d.jsonl === 'string' ? d.jsonl : null;
+          } else prev = cru;
+        } catch { prev = cru; }
+      }
+      localStorage.setItem(key, JSON.stringify({ text: prev ? `${prev}\n\n${text}` : text, jsonl }));
+    } catch { /* sem storage */ }
   }
 
   // Nome curto da pasta (ultimo segmento do cwd real; fallback: nome sanitizado do projeto).
@@ -246,7 +279,7 @@ import { intlLocale } from '../lib/locale';
 
 {#if selected}
   {@const sel = selected}
-  <div class="archive-screen" style="--nav-h: 0px">
+  <div class="archive-screen" style="--nav-h: 0px" use:keyboardInset>
     <!-- `preview` (1a msg) só existe no Claude; fora dele o titulo cairia no slice do id e virava
          "session_" pra TODA conversa do Kimi. A ultima msg identifica melhor de qualquer forma. -->
     <NavBar title={sel.preview || sel.ultima || sel.session_id.slice(0, 8)} showBack={true} onBack={backFromConversation} />
@@ -383,6 +416,7 @@ import { intlLocale } from '../lib/locale';
     flex-direction: column;
     height: 100%;
     min-height: 0;
+    position: relative;
     background: var(--bg-base);
   }
 

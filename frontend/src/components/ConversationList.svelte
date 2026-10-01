@@ -25,11 +25,19 @@
     const mine = ++seq;
     // Servidor em espera/offline não é consultado: cada tentativa custaria o teto de 8s da lista inteira.
     const down = new Set(sessionsStore.byServer.filter((b) => b.error).map((b) => b.server.id));
-    const tried = listOwnServers().filter((s) => !down.has(s.id));
+    const own = listOwnServers();
+    const tried = own.filter((s) => !down.has(s.id));
     const results = await Promise.allSettled(tried.map((s) => getArchiveRecentForServer(s)));
     if (mine !== seq) return;
     const next = new Map<string, ArchiveEntry[]>();
     const bad: string[] = [];
+    // Servidor fora do ar entra na linha de falha e mantém a última lista boa.
+    for (const s of own) {
+      if (!down.has(s.id)) continue;
+      bad.push(s.label);
+      const old = closedByServer.get(s.id);
+      if (old) next.set(s.id, old);
+    }
     results.forEach((r, i) => {
       if (r.status === 'fulfilled') next.set(tried[i].id, r.value);
       else {
@@ -58,6 +66,15 @@
     const shrank = [...prevLive].some((k) => !now.has(k));
     prevLive = now;
     if (shrank) untrack(() => void load());
+  });
+
+  // Servidor que voltou ao ar: relê os recentes dele.
+  let prevDown = new Set<string>();
+  $effect(() => {
+    const now = new Set(sessionsStore.byServer.filter((b) => b.error).map((b) => b.server.id));
+    const recovered = [...prevDown].some((id) => !now.has(id));
+    prevDown = now;
+    if (recovered) untrack(() => void load());
   });
 
   function open(row: (typeof rows)[number]) {

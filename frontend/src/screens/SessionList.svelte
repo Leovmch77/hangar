@@ -424,6 +424,15 @@ import * as m from '../paraglide/messages';
     </button>
     <span class="sl-brand"><HangarMark size={18} arcs={2} /> Hangar</span>
     <HangarRunning {onOpenTerminal} />
+    {#if sessionOrganization.mode === 'conversations'}
+      <!-- Sem seleção em lote: a lista de conversas mistura abertas e fechadas. -->
+    {:else}
+    <button type="button" class="sl-icon-btn" onclick={() => { window.location.hash = '#/'; }}
+      aria-label={m.conversas_nova()} title={m.conversas_nova()}>
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+        <path d="M12 5v14M5 12h14"/>
+      </svg>
+    </button>
     <button
       class="sl-icon-btn"
       class:active={model.selectMode}
@@ -435,6 +444,7 @@ import * as m from '../paraglide/messages';
         <path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>
       </svg>
     </button>
+    {/if}
   </header>
 
   <div

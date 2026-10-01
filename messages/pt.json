@@ -6423,5 +6423,6 @@
   "conversa_retomando": "Retomando a conversa…",
   "conversa_conta_sem_cota": "A conta {conta} está sem cota. Escolha outra conta para enviar.",
   "conversa_conta_sem_cota_volta": "A conta {conta} está sem cota; volta em {quando}. Escolha outra conta para enviar.",
-  "conversa_ja_aberta": "Esta conversa já está aberta na sessão {sessao}."
+  "conversa_ja_aberta": "Esta conversa já está aberta na sessão {sessao}.",
+  "conversa_ja_aberta_sem_nome": "Esta conversa já está aberta em outra sessão."
 }

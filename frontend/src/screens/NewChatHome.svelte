@@ -15,6 +15,7 @@
   import { createNewChatDraft } from '../lib/newChatDraft.svelte';
   import { selectServer, getActiveId, listOwnServers } from '../lib/auth';
   import { abrirConfig } from '../lib/configNav';
+  import { keyboardInset } from '../lib/keyboardInset';
   import * as m from '../paraglide/messages';
 
   // Tela inicial do celular: nova conversa no desenho do nativo (`render_new_chat`). Máquina e pasta
@@ -71,7 +72,7 @@
   }
 </script>
 
-<div class="home">
+<div class="home" use:keyboardInset>
   <header class="top">
     <button type="button" class="icon-btn" aria-label={m.newchat_abrir_lista()} onclick={onOpenList}>
       <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
@@ -194,7 +195,7 @@
 
 <style>
   .home {
-    flex: 1; min-height: 0; display: flex; flex-direction: column; background: transparent;
+    flex: 1; min-height: 0; display: flex; flex-direction: column; background: transparent; position: relative;
     padding: env(safe-area-inset-top) var(--space-3) calc(env(safe-area-inset-bottom) + var(--space-3));
   }
   .top { display: flex; justify-content: space-between; align-items: center; min-height: 52px; }

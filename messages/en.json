@@ -6423,5 +6423,6 @@
   "conversa_retomando": "Resuming the conversation…",
   "conversa_conta_sem_cota": "The {conta} account is out of quota. Pick another account to send.",
   "conversa_conta_sem_cota_volta": "The {conta} account is out of quota; it resets in {quando}. Pick another account to send.",
-  "conversa_ja_aberta": "This conversation is already open in session {sessao}."
+  "conversa_ja_aberta": "This conversation is already open in session {sessao}.",
+  "conversa_ja_aberta_sem_nome": "This conversation is already open in another session."
 }
