@@ -165,6 +165,36 @@ api() {
     return 1
 }
 
+# Diz o que aconteceu com o envio, a partir da resposta do backend (native/steered/delivered).
+# delivered=True -> digitou agora na TUI; False -> fila durável (entrega quando a sessão ficar idle).
+relatar_envio() {
+    local resp=$1 target=$2
+    if python3 -c 'import json,sys; sys.exit(0 if json.loads(sys.argv[1]).get("native") else 1)' "$resp" 2>/dev/null; then
+        echo "entregue agora -> $target (no socket do Claude dele, entra no meio do turno; retenção ou recusa pela política de lá chega depois como aviso [painel: entrega de recado])"
+    elif python3 -c 'import json,sys; sys.exit(0 if json.loads(sys.argv[1]).get("steered") else 1)' "$resp" 2>/dev/null; then
+        echo "entregue agora -> $target"
+    elif python3 -c 'import json,sys; sys.exit(0 if json.loads(sys.argv[1]).get("delivered") else 1)' "$resp" 2>/dev/null; then
+        echo "entregue -> $target (não orientado no turno atual)"
+    else
+        echo "na fila -> $target (não orientado; entrega no próximo idle)"
+    fi
+}
+
+# Pares externos do backend local: ext_body (JSON) e, se falhou, ext_status. Backend sem a rota
+# (404 sem "code", ou 405) conta como "nenhum par": é só servidor mais antigo.
+ext_pairs_get() {
+    local out code resp
+    ext_body="[]"; ext_status=""
+    out=$(curl -s --connect-timeout 3 -m 8 -w $'\n%{http_code}' -H "$AUTH" "$BASE/api/external-pairs") || {
+        ext_status="backend inacessível"; return 1; }
+    code=${out##*$'\n'}
+    resp=${out%$'\n'*}
+    if [[ $code == 2* ]]; then ext_body=$resp; return 0; fi
+    if [[ $code == 405 || ( $code == 404 && "$resp" != *'"code"'* ) ]]; then return 0; fi
+    ext_status="HTTP $code"
+    return 1
+}
+
 listar() {
     # Colunas: nome, estado, harness (`provider[:motor]/tmux|headless`), cwd. O cartão do app
     # (frontend/src/lib/hangarCmd.ts) lê essas colunas; mudou aqui, muda lá.
@@ -223,7 +253,8 @@ for s in sessions:
         done
     fi
     # Pares externos (sessão de outra pessoa): o backend devolve o token, que nunca sai na lista.
-    ext=$(api GET /api/external-pairs 2>/dev/null) || ext="[]"
+    ext_pairs_get || echo "⚠ pares externos indisponíveis ($ext_status): a lista pode estar incompleta" >&2
+    ext=$ext_body
     python3 -c 'import json, sys
 try:
     pares = json.loads(sys.argv[1])
@@ -634,24 +665,26 @@ else
         # sem [de: <este-servidor>::<sessao>] o outro lado não teria endereço de resposta.
         srv="${target%%::*}"; sess="${target#*::}"
         # Par externo primeiro: só o backend local sabe chamar a máquina de outra pessoa, e isso
-        # não depende de CP_SERVER_ID. 404 "inexistente" = não é par externo, segue pro peers.json.
-        msg="$*"
-        for p in "$sender" "$curto"; do msg="${msg#"[de: $p] "}"; msg="${msg#"[de: $p]"}"; done
-        body=$(python3 -c 'import json,sys; print(json.dumps({"sender": sys.argv[1], "target": sys.argv[2], "text": sys.argv[3]}))' "$curto" "$target" "$msg")
-        ext_out=$(curl -s --connect-timeout 3 -m 30 -w $'\n%{http_code}' -X POST -H "$AUTH" \
-            -H "Content-Type: application/json" -d "$body" "$BASE/api/external-pairs/send") || {
-            echo "erro: backend inacessível em $BASE (hangar rodando?)" >&2; exit 1; }
-        ext_code=${ext_out##*$'\n'}
-        ext_out=${ext_out%$'\n'*}
-        if [[ $ext_code == 2* ]]; then
-            echo "entregue -> $target (par externo)"
-            exit 0
-        fi
-        # Backend sem a rota (mais antigo): 404 {"detail":"Not Found"} sem "code", ou 405. Também
-        # cai no peers.json, senão todo envio a máquina própria quebra até o backend atualizar.
-        if [[ $ext_code == 405 || ( $ext_code == 404 && ( "$ext_out" == *erro_par_inexistente* || "$ext_out" != *'"code"'* ) ) ]]; then
-            :
-        else
+        # não depende de CP_SERVER_ID. Só cai no peers.json quando o apelido NÃO é de par externo:
+        # apelido de par que falha mostra o erro do backend (ex.: remetente que não é o dono do par).
+        ext_pairs_get || { echo "erro: não consegui consultar os pares externos ($ext_status)" >&2; exit 1; }
+        if python3 -c 'import json,sys
+try:
+    sys.exit(0 if any(r.get("alias") == sys.argv[2] for r in json.loads(sys.argv[1])) else 1)
+except ValueError:
+    sys.exit(1)' "$ext_body" "$srv"; then
+            msg="$*"
+            for p in "$sender" "$curto"; do msg="${msg#"[de: $p] "}"; msg="${msg#"[de: $p]"}"; done
+            body=$(python3 -c 'import json,sys; print(json.dumps({"sender": sys.argv[1], "target": sys.argv[2], "text": sys.argv[3]}))' "$curto" "$target" "$msg")
+            ext_out=$(curl -s --connect-timeout 3 -m 30 -w $'\n%{http_code}' -X POST -H "$AUTH" \
+                -H "Content-Type: application/json" -d "$body" "$BASE/api/external-pairs/send") || {
+                echo "erro: backend inacessível em $BASE (hangar rodando?)" >&2; exit 1; }
+            ext_code=${ext_out##*$'\n'}
+            ext_out=${ext_out%$'\n'*}
+            if [[ $ext_code == 2* ]]; then
+                relatar_envio "$ext_out" "$target"
+                exit 0
+            fi
             echo "erro HTTP $ext_code: $ext_out" >&2
             exit 1
         fi
@@ -673,14 +706,5 @@ fi
 
 body=$(python3 -c 'import json,sys; print(json.dumps({"text": sys.argv[1], "steer": True}))' "$text")
 resp=$(api POST "/api/sessions/$sess/input" "$body")
-# delivered=True -> digitou agora na TUI; False -> fila durável (entrega quando a sessão ficar idle).
 # Sessão inexistente nem chega aqui (o backend responde 404 e o api() já mostrou o detail).
-if python3 -c 'import json,sys; sys.exit(0 if json.loads(sys.argv[1]).get("native") else 1)' "$resp"; then
-    echo "entregue agora -> $target (no socket do Claude dele, entra no meio do turno; retenção ou recusa pela política de lá chega depois como aviso [painel: entrega de recado])"
-elif python3 -c 'import json,sys; sys.exit(0 if json.loads(sys.argv[1]).get("steered") else 1)' "$resp"; then
-    echo "entregue agora -> $target"
-elif python3 -c 'import json,sys; sys.exit(0 if json.loads(sys.argv[1]).get("delivered") else 1)' "$resp"; then
-    echo "entregue -> $target (não orientado no turno atual)"
-else
-    echo "na fila -> $target (não orientado; entrega no próximo idle)"
-fi
+relatar_envio "$resp" "$target"
