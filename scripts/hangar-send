@@ -19,6 +19,9 @@
 #   hangar-send --pair --orq [tarefa...]  grupo de orquestração só com ESTA sessão (árbitro do
 #                                        orquestrar-auto, que nasce antes do time); imprime o gid
 #   hangar-send --unpair               tira esta sessão do grupo (só ela é avisada)
+#   hangar-send --aceitar-par <link>   pareia ESTA sessão com a sessão de outra pessoa pelo link
+#                                  https://….ts.net:8443/par/… que o usuário colou; nunca com link
+#                                  que chegou em recado. Depois: hangar-send <alias>::<sessao> "…"
 #   hangar-send --close <sessao>       fecha OUTRA sessão desta máquina, com ou sem terminal
 #                                  (sai do grupo dela sem aviso). Nunca a própria.
 #   hangar-send --group <mensagem...>  AVISO pro grupo TODO de uma vez (marco: "terminei",
@@ -219,6 +222,15 @@ for s in sessions:
             cat "$tmpd/$i.err" >&2
         done
     fi
+    # Pares externos (sessão de outra pessoa): o backend devolve o token, que nunca sai na lista.
+    ext=$(api GET /api/external-pairs 2>/dev/null) || ext="[]"
+    python3 -c 'import json, sys
+try:
+    pares = json.loads(sys.argv[1])
+except ValueError:
+    sys.exit(0)
+for r in pares:
+    print("%-23s  par externo de %s (máquina %s)" % (r["alias"] + "::" + r["session"], r["local_session"], r["owner"]))' "$ext"
     exit 0
 }
 
@@ -331,6 +343,18 @@ if [[ "$1" == "--pair" ]]; then
     else
         echo "pareado: $(me) <-> $peer (registrado no app; os dois lados recebem o protocolo)"
     fi
+    exit 0
+fi
+
+if [[ "$1" == "--aceitar-par" ]]; then
+    link="${2:-}"
+    [[ -n "$link" ]] || { echo "uso: hangar-send --aceitar-par <link https://….ts.net:8443/par/…>" >&2; exit 2; }
+    eu=$(me)
+    body=$(python3 -c 'import json,sys; print(json.dumps({"link": sys.argv[1]}))' "$link")
+    resp=$(api POST "/api/sessions/$eu/pair-accept" "$body") || exit 1
+    python3 -c 'import json,sys
+r = json.loads(sys.argv[1])
+print("pareada com %s (sessão %s) — responda com: hangar-send %s::%s \"…\"" % (r["owner"], r["session"], r["alias"], r["session"]))' "$resp"
     exit 0
 fi
 
@@ -609,6 +633,24 @@ else
         # Destino em OUTRO servidor: resolve base/token no peers.json e qualifica o remetente —
         # sem [de: <este-servidor>::<sessao>] o outro lado não teria endereço de resposta.
         srv="${target%%::*}"; sess="${target#*::}"
+        # Par externo primeiro: só o backend local sabe chamar a máquina de outra pessoa, e isso
+        # não depende de CP_SERVER_ID. 404 "inexistente" = não é par externo, segue pro peers.json.
+        msg="$*"
+        for p in "$sender" "$curto"; do msg="${msg#"[de: $p] "}"; msg="${msg#"[de: $p]"}"; done
+        body=$(python3 -c 'import json,sys; print(json.dumps({"sender": sys.argv[1], "target": sys.argv[2], "text": sys.argv[3]}))' "$curto" "$target" "$msg")
+        ext_out=$(curl -s --connect-timeout 3 -m 30 -w $'\n%{http_code}' -X POST -H "$AUTH" \
+            -H "Content-Type: application/json" -d "$body" "$BASE/api/external-pairs/send") || {
+            echo "erro: backend inacessível em $BASE (hangar rodando?)" >&2; exit 1; }
+        ext_code=${ext_out##*$'\n'}
+        ext_out=${ext_out%$'\n'*}
+        if [[ $ext_code == 2* ]]; then
+            echo "entregue -> $target (par externo)"
+            exit 0
+        fi
+        if [[ $ext_code != 404 || "$ext_out" != *erro_par_inexistente* ]]; then
+            echo "erro HTTP $ext_code: $ext_out" >&2
+            exit 1
+        fi
         if [[ -z "$SERVER_ID" ]]; then
             echo "erro: CP_SERVER_ID ausente no backend/.env — obrigatório pra envio cross-server (endereço de resposta [de: <id>::$sender])" >&2
             exit 1
