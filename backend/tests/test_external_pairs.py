@@ -58,6 +58,11 @@ def test_apelido_que_virou_peer_depois_fica_ambiguo(monkeypatch):
     ("https://evil.com:8443", None),
     ("https://u@pc-ana.tail.ts.net:8443", None),
     ("https://pc-ana.tail.ts.net:8443/x", None),
+    ("https://evil.com\\.ts.net:8443", None),
+    ("https://a b.ts.net:8443", None),
+    ("https://evil.com%2f.ts.net:8443", None),
+    ("https://.ts.net:8443", None),
+    ("https://pc-ánà.tail.ts.net:8443", None),
 ])
 def test_endereco_so_funnel(addr, ok):
     assert external_pairs.normalize_address(addr) == ok
@@ -78,7 +83,9 @@ def test_owner(owner, ok):
 @pytest.mark.parametrize("nome,ok", [
     ("Y", True), ("api-front.2", True), ("a" * 64, True), ("a" * 65, False), ("", False),
     ("a[b", False), ("a]b", False), ("a::b", False), ("a\nb", False), ("a\x1fb", False),
-    ("a b", False), ("a b", False), ("a\u0085b", False)])
+    ("a b", False), ("a b", False), ("a\u0085b", False),
+    ("a$(x)", False), ("a`id`", False), ("a b", False), ("a/b", False),
+    ('a"; rm -rf ~; "', False)])
 def test_sessao_valida(nome, ok):
     assert external_pairs.valid_session(nome) is ok
 
