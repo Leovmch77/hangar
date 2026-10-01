@@ -20,19 +20,23 @@ node --test site/tests/site.test.mjs
 
 ## Publicar
 
-Uma vez só, antes do primeiro upload (o login da `cf` não serve para upload):
+Uma vez só, antes do primeiro upload: crie o projeto pela API (o `wrangler pages project
+create` atual cai no Workers e pede um subdomínio workers.dev) e faça o login do wrangler (o da
+`cf` não serve para upload):
 
 ```bash
+CLOUDFLARE_ACCOUNT_ID=<id da conta> cf pages create --body '{"name":"hangar-site","production_branch":"main"}'
 npx --yes wrangler login
-npx --yes wrangler pages project create hangar-site --production-branch main
 ```
 
 Depois:
 
 ```bash
-site/deploy.sh          # prévia
+site/deploy.sh          # prévia (preview.<subdomínio>.pages.dev)
 site/deploy.sh main     # produção
 ```
+
+Não troque o `deploy.sh` por wrangler na raiz: ela é workspace npm e o wrangler recusa.
 
 ## Cache
 
