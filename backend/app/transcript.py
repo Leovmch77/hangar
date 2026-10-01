@@ -95,6 +95,47 @@ _TASK_NOTIF_RE = re.compile(r"<task-id>([^<]+)</task-id>")
 _AGENT_MSG_RE = re.compile(r'<agent-message from="([^"]+)"[^>]*>(.*)</agent-message>', re.DOTALL)
 
 
+# Equipe de agentes do Claude Code: recado de colega pro líder, entregue como msg "user" que começa
+# com "Another Claude session sent a message:" e traz um ou mais <teammate-message teammate_id=…>.
+# Não é fala do usuário: recado com conteúdo vira "[de: colega] …" (a bolha de outra sessão que o
+# front já desenha); o aviso JSON de colega ocioso some. O "Teammate @nome finished …" do fim do
+# turno do colega também some.
+_TEAMMATE_INICIO_RE = re.compile(r"(?:Another Claude session sent a message:\s*)?<teammate-message\b")
+_TEAMMATE_BLOCO_RE = re.compile(r'<teammate-message\b([^>]*)>\n?(.*?)\n?</teammate-message>', re.DOTALL)
+_TEAMMATE_FIM_RE = re.compile(r"T?eammate @[\w.-]+ finished\b")
+
+
+def _teammate_textos(texto) -> Optional[list[str]]:
+    """None = não é recado de colega. Lista (talvez vazia) = os recados a mostrar."""
+    if not isinstance(texto, str):
+        return None
+    t = texto.lstrip()
+    if _TEAMMATE_FIM_RE.match(t):
+        return []
+    if not _TEAMMATE_INICIO_RE.match(t):
+        return None
+    out = []
+    for attrs, corpo in _TEAMMATE_BLOCO_RE.findall(t):
+        corpo = corpo.strip()
+        if corpo.startswith("{"):
+            try:
+                if isinstance(json.loads(corpo), dict):
+                    continue  # aviso estruturado (colega ocioso etc.), não recado
+            except ValueError:
+                pass
+        nome = dict(_PEER_ATTR_RE.findall(attrs)).get("teammate_id") or "colega"
+        if corpo:
+            out.append(f"[de: {nome}] {corpo}")
+    return out
+
+
+def _teammate_eventos(texto, id_: str) -> Optional[list[ChatEvent]]:
+    textos = _teammate_textos(texto)
+    if textos is None:
+        return None
+    return [ChatEvent(kind="user_msg", id=_sub_id(id_, k), text=t) for k, t in enumerate(textos)]
+
+
 def _agent_msg(texto, id_: str) -> Optional[list[ChatEvent]]:
     if not isinstance(texto, str) or not (m := _AGENT_MSG_RE.fullmatch(texto.strip())):
         return None
@@ -391,6 +432,9 @@ def parse_obj(obj: dict) -> list[ChatEvent]:
         if (agente := _agent_msg(queued, "queued-agent:" + hashlib.md5(
                 str(queued).encode("utf-8", "replace")).hexdigest()[:8])) is not None:
             return agente
+        if (colega := _teammate_eventos(queued, "queued-teammate:" + hashlib.md5(
+                str(queued).encode("utf-8", "replace")).hexdigest()[:8])) is not None:
+            return colega
         if isinstance(queued, str) and queued.lstrip().startswith("<task-notification>"):
             m = _TASK_NOTIF_RE.search(queued)
             if m:
@@ -469,6 +513,9 @@ def parse_obj(obj: dict) -> list[ChatEvent]:
         # NAO vem com isMeta -> seguem tratados abaixo pelo caminho de sempre.)
         # ANTES do descarte de meta: o recado nativo entre sessoes Claude vem marcado isMeta e sumiria
         # inteiro (ver _peer_msg). E conversa de verdade, nao ruido do harness.
+        origem = obj.get("origin")
+        if isinstance(origem, dict) and (colega := _teammate_eventos(origem.get("body"), uid)) is not None:
+            return colega
         if (peer := _peer_msg(obj)) is not None:
             return [ChatEvent(kind="user_msg", id=uid, text=peer)]
         # O resumo do /compact e gravado como msg de usuario; o terminal mostra so a marca.
@@ -476,10 +523,12 @@ def parse_obj(obj: dict) -> list[ChatEvent]:
             return [ChatEvent(kind="notice", id=uid, text="compacted")]
         if obj.get("isMeta") is True:
             return []
-        if (agente := _agent_msg(content if isinstance(content, str)
-                                 else (_first(content, "text") or {}).get("text")
-                                 if isinstance(content, list) else None, uid)) is not None:
+        primeiro_texto = (content if isinstance(content, str)
+                          else (_first(content, "text") or {}).get("text") if isinstance(content, list) else None)
+        if (agente := _agent_msg(primeiro_texto, uid)) is not None:
             return agente
+        if (colega := _teammate_eventos(primeiro_texto, uid)) is not None:
+            return colega
         if isinstance(content, str):
             if content.lstrip().startswith("<task-notification>"):
                 m = _TASK_NOTIF_RE.search(content)
