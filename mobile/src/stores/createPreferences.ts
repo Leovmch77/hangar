@@ -23,7 +23,7 @@ export function readProject(serverId: string): ProjectSelection | null {
 }
 
 export function rememberProject(serverId: string, selection: ProjectSelection): void {
-  if (!isProjectSelection(selection)) throw new TypeError('Seleção de projeto inválida.');
+  if (!isProjectSelection(selection)) throw new TypeError('invalid project selection');
   const key = `create.project.v1:${serverId}`;
   prefs.set(key, JSON.stringify({ root: selection.root, cwd: selection.cwd }));
 }
