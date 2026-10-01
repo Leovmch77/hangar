@@ -326,7 +326,7 @@ import { intlLocale } from '../lib/locale';
         onsend={sendAndResume}>
         {#snippet below()}
           <div class="account-row">
-            <AccountPill server={activeServerId} provider={sel.provider} {configs} {codexAccounts}
+            <AccountPill server={activeServerId ?? ''} provider={sel.provider} {configs} {codexAccounts}
               selected={selectedAccount} loading={accountsLoading}
               disabled={resuming || sel.provider === 'codex'} blockExhausted bind:blocked={accountBlocked}
               onchange={(id) => (pickedConfig = id)} />
