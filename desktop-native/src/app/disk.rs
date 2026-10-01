@@ -240,6 +240,15 @@ impl Hangar {
         Some((cwd, real))
     }
 
+    /// O arquivo do visor neste disco, para o gerenciador de arquivos do sistema. Sessão de outra máquina: `None`.
+    /// Sem o corte do Unix do `local_cwd`: aqui só se entrega o caminho ao sistema, sem shell nem separador.
+    pub(super) fn file_on_disk(&self, path: &str) -> Option<PathBuf> {
+        self.session_api().filter(Api::is_loopback)?;
+        let cwd = self.selected.as_ref()?.cwd.as_ref()?;
+        let real = self.local_dirs.get(cwd).cloned().flatten()?;
+        cited(&real, path)
+    }
+
     /// Resolve em segundo plano a pasta real das sessões ainda não vistas; até chegar, elas seguem pelo backend.
     pub(super) fn resolve_local_dirs(&mut self, cx: &mut Context<Self>) {
         if !self.api.as_ref().is_some_and(|api| api.is_loopback()) { return; }
