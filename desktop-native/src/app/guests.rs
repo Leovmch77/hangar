@@ -266,6 +266,29 @@ pub(in crate::app) struct Guests {
     form: Option<GuestForm>,
     failures: Vec<ServerFailure>,
     saved_ok: bool,
+    /// Cadastro salvo nos servidores cujo hub recusou o cookie: volta ao formulário depois da nova entrada, pra o próximo
+    /// Salvar só atualizar (sem isso os acessos já criados ficariam órfãos).
+    pending: Option<GuestAdmin>,
+}
+
+impl Guests {
+    /// Aplica o resultado de um Salvar; `true` quando a sessão do hub caiu e a página deve voltar pra entrada.
+    fn apply_saved(&mut self, SaveOutcome { saved, errors, expired, .. }: SaveOutcome) -> bool {
+        self.failures = errors;
+        if expired {
+            self.pending = Some(saved);
+            return true;
+        }
+        if let Some(Ok(list)) = self.list.as_mut() {
+            list.retain(|g| g.user != saved.user);
+            list.push(saved.clone());
+        }
+        // Com falha parcial o formulário fica aberto e salvar de novo repete só o que faltou.
+        if let Some(form) = self.form.as_mut() { form.editing = Some(saved); }
+        self.saved_ok = self.failures.is_empty();
+        if self.saved_ok { self.form = None; }
+        false
+    }
 }
 
 pub(super) enum GuestsReply {
@@ -428,24 +451,18 @@ impl Hangar {
                 let guests = &mut self.sync.guests;
                 (guests.session, guests.login, guests.login_error) = (Some(session), None, None);
                 self.guests_loaded(list, window, cx);
+                if self.sync.guests.session.is_some() && let Some(pending) = self.sync.guests.pending.take() {
+                    let failures = std::mem::take(&mut self.sync.guests.failures);
+                    self.guests_open(Some(pending), window, cx);
+                    self.sync.guests.failures = failures;
+                }
             }
             GuestsReply::Loaded(_, list) => self.guests_loaded(list, window, cx),
-            GuestsReply::Saved(_, SaveOutcome { errors, expired: true, .. }) | GuestsReply::Removed(_, errors, true) => {
-                // Cookie vencido: sem voltar pra entrada, salvar falharia pra sempre até sair da página.
+            // Cookie vencido: sem voltar pra entrada, salvar falharia pra sempre até sair da página.
+            GuestsReply::Saved(_, outcome) => if self.sync.guests.apply_saved(outcome) { self.guests_expired(window, cx); },
+            GuestsReply::Removed(_, errors, true) => {
                 self.guests_expired(window, cx);
                 self.sync.guests.failures = errors;
-            }
-            GuestsReply::Saved(_, SaveOutcome { saved, errors, .. }) => {
-                let guests = &mut self.sync.guests;
-                if let Some(Ok(list)) = guests.list.as_mut() {
-                    list.retain(|g| g.user != saved.user);
-                    list.push(saved.clone());
-                }
-                // Com falha parcial o formulário fica aberto e salvar de novo repete só o que faltou.
-                if let Some(form) = guests.form.as_mut() { form.editing = Some(saved); }
-                guests.saved_ok = errors.is_empty();
-                if guests.saved_ok { guests.form = None; }
-                guests.failures = errors;
             }
             GuestsReply::Removed(_, errors, _) => {
                 self.sync.guests.failures = errors;
@@ -469,6 +486,11 @@ impl Hangar {
             .child(div().text_lg().font_weight(FontWeight::SEMIBOLD).child(tr_shared("convidados_titulo", &[])))
             .child(div().text_sm().text_color(theme::muted()).whitespace_normal().child(tr_shared("convidados_descricao", &[])));
         let alert = |id: SharedString, text: String| div().id(id).role(Role::Alert).text_sm().text_color(theme::danger()).whitespace_normal().child(text);
+        // Antes da entrada também: a queda da sessão no meio de um Salvar não pode sumir calada.
+        for (n, failure) in guests.failures.iter().enumerate() {
+            section = section.child(alert(SharedString::from(format!("guests-failure-{n}")),
+                tr_shared("convidados_falha_servidor", &[("servidor", &failure.label), ("erro", &failure.message)])));
+        }
         let Some(session) = &guests.session else {
             let Some(form) = &guests.login else { return section };
             return section.child(div().text_sm().text_color(theme::muted()).whitespace_normal().child(tr_shared("convidados_entrar_nativo", &[])))
@@ -480,10 +502,6 @@ impl Hangar {
         };
         if guests.saved_ok {
             section = section.child(div().id("guests-saved").role(Role::Status).text_sm().font_weight(FontWeight::SEMIBOLD).child(tr_shared("convidados_salvo", &[])));
-        }
-        for (n, failure) in guests.failures.iter().enumerate() {
-            section = section.child(alert(SharedString::from(format!("guests-failure-{n}")),
-                tr_shared("convidados_falha_servidor", &[("servidor", &failure.label), ("erro", &failure.message)])));
         }
         let list = match &guests.list {
             None => return section.child(div().id("guests-loading").role(Role::Status).text_sm().text_color(theme::muted()).child(tr_shared("comum_carregando", &[]))),
@@ -550,7 +568,7 @@ impl Hangar {
 #[cfg(test)]
 mod tests {
     // Sem glob: o `test` do gpui_kit, que o `super::*` traz, esconderia o `#[test]` da linguagem.
-    use super::{Draft, Failure, GuestAdmin, GuestOps, GuestServer, OwnerServer, STANDARD, decrypt_json, derive_keys, encrypt_json,
+    use super::{Draft, Failure, GuestAdmin, GuestOps, GuestServer, Guests, OwnerServer, SaveOutcome, ServerFailure, STANDARD, decrypt_json, derive_keys, encrypt_json,
         remove_guest, save_guest, validate};
     use base64::Engine as _;
     use crate::i18n::tr_shared;
@@ -693,6 +711,21 @@ mod tests {
         assert!(out.hub_failed && out.expired);
         let (_, expired) = futures::executor::block_on(remove_guest(&fake, &owner(), &prev(vec![entry("a", "/a")])));
         assert!(expired);
+    }
+
+    #[test]
+    fn expired_save_keeps_the_record_for_after_login() {
+        let saved = prev(vec![entry("a", "/a")]);
+        let failure = ServerFailure { label: "hub".into(), message: "401".into() };
+        let mut guests = Guests::default();
+        let outcome = SaveOutcome { saved: saved.clone(), errors: vec![failure.clone()], hub_failed: true, expired: true };
+        assert!(guests.apply_saved(outcome));
+        assert_eq!(guests.pending, Some(saved.clone()));
+        assert_eq!(guests.failures, vec![failure]);
+        let mut guests = Guests { list: Some(Ok(vec![])), ..Guests::default() };
+        assert!(!guests.apply_saved(SaveOutcome { saved: saved.clone(), errors: vec![], hub_failed: false, expired: false }));
+        assert!(guests.pending.is_none() && guests.saved_ok);
+        assert_eq!(guests.list, Some(Ok(vec![saved])));
     }
 
     #[test]
