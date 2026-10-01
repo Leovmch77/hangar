@@ -1,5 +1,7 @@
 <script lang="ts">
-  import { basename, createSession, providerName, type Provider } from '@hangar/core';
+  import { basename, createSession, pickFolderRoot, providerName, type Provider } from '@hangar/core';
+  import HomeUsage from '../components/HomeUsage.svelte';
+  import FolderGitPill from '../components/FolderGitPill.svelte';
   import BottomSheet from '../components/BottomSheet.svelte';
   import FolderScanner from '../components/FolderScanner.svelte';
   import CreateSessionSheet from '../components/CreateSessionSheet.svelte';
@@ -91,7 +93,7 @@
     </div>
   {:else}
     <div class="greeting">
-      <!-- Resumo de uso (Task 7) entra aqui, acima das pílulas. -->
+      {#if draft.serverObj}<HomeUsage server={draft.serverObj} />{/if}
       <h1>{m.native_new_chat_title()}</h1>
     </div>
 
@@ -125,7 +127,10 @@
                 {#snippet icon()}<IconWorktree size={14} />{/snippet}
               </QuietPill>
             {/if}
-            <!-- Pílula de git (Task 7) entra aqui. -->
+            {#if draft.serverObj && draft.cwd}
+              <FolderGitPill server={draft.serverObj} cwd={draft.cwd} disabled={draft.sending}
+                root={draft.roots ? (pickFolderRoot(draft.roots, draft.cwd) ?? undefined) : undefined} />
+            {/if}
             <button type="button" class="more" disabled={draft.sending} onclick={() => (moreOpen = true)}>{m.native_create_more()}</button>
           </div>
         {/snippet}
