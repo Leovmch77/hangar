@@ -107,8 +107,8 @@ export function restoreAttempt(serverId: string): FirstConversationAttempt | nul
   let parsed: unknown;
   try { parsed = JSON.parse(raw); } catch { parsed = null; }
   if (!isAttempt(parsed, serverId)) {
-    console.warn('Tentativa de nova conversa inválida; descartada.');
     prefs.remove(KEY(serverId));
+    setIssue(serverId, { kind: 'local', message: m.nova_conversa_tentativa_invalida() });
     return null;
   }
   const memory = useNewConversation.getState().attempts[serverId];
@@ -226,7 +226,8 @@ export function sendFirstInput(serverId: string, attemptId: string): Promise<voi
     } catch (cause) {
       if (!posted) {
         try { apply(sending, { type: 'send_rejected' }); } catch {
-          // A tentativa durável permanece disponível quando o próprio rollback não pode ser salvo.
+          setIssue(serverId, { kind: 'local', message: m.nova_conversa_resultado_salvar_erro() });
+          return;
         }
         setIssue(serverId, { kind: 'local', message: messageOf(cause) });
         return;

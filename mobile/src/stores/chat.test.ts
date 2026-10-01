@@ -423,6 +423,26 @@ test.each([400, 401, 403, 404, 405, 410])('HTTP %i mantém recusa visível até 
   }
 });
 
+test('reabrir a tela depois de uma recusa tenta o stream de novo', async () => {
+  vi.useFakeTimers();
+  try {
+    historyResponses = [[ev({ id: 'reaberta:1' })]];
+    const chat = chatStore('srv1', 'sess');
+    chat.retain();
+    await vi.advanceTimersByTimeAsync(0);
+    created[0].fail({ type: 'error', xhrStatus: 404 });
+    expect(chat.use.getState().sseRecusado).toBe(true);
+    chat.release();
+    chat.retain();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(chat.use.getState().sseRecusado).toBe(false);
+    expect(created).toHaveLength(2);
+    chat.release();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
 test('loadOlder abortado por reset não marca failed (B4)', async () => {
   historyResponses = [[ev({ id: 'a:1' })]];
   const chat = chatStore('srv1', 'sess');

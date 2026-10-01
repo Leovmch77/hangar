@@ -492,6 +492,8 @@ function criarChatStore(serverId: string, name: string): ChatApi {
       if (refs === 1) {
         alive = true;
         retryDelay = SSE_RETRY_MIN_MS;
+        // Recusa da abertura anterior (sessão morta, 404) não vale para a sessão recriada com o mesmo nome.
+        useChatStore.setState({ sseRecusado: false });
         sincronizar();
       }
     },
@@ -607,7 +609,10 @@ export async function submitConversationDraft(serverId: string, name: string, te
       if (!rejected && error instanceof TypeError) throw new Error(m.chat_envio_incerto(), { cause: error });
       throw error;
     }
-    settle(null);
+    // Entregue: falha local aqui não pode virar "não enviado", senão a pessoa reenvia e duplica.
+    try { settle(null); } catch (cause) {
+      throw new Error(m.nova_conversa_resultado_salvar_erro(), { cause });
+    }
   } finally {
     submitting.delete(key);
     notify();

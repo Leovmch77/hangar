@@ -310,10 +310,9 @@ describe('newConversation', () => {
 
   it('tentativa gravada inválida é descartada com aviso', () => {
     memory.set('create.attempt.v1:server-a', '{"token":"secret"');
-    const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
     expect(restoreAttempt('server-a')).toBeNull();
-    expect(warning).toHaveBeenCalledOnce();
-    expect(String(warning.mock.calls[0][0])).not.toContain('secret');
+    expect(issue()?.kind).toBe('local');
+    expect(issue()?.message).not.toContain('secret');
     expect(memory.has('create.attempt.v1:server-a')).toBe(false);
   });
 });

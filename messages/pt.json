@@ -6333,6 +6333,7 @@
   "nova_conversa_nome_conflito": "Já existe uma sessão chamada {nome} que não bate com esta pasta ou provider. Confira antes de criar outra.",
   "nova_conversa_conferir_erro": "Não consegui conferir a criação: {erro}",
   "nova_conversa_salvar_erro": "Não foi possível guardar a mensagem neste aparelho; nada foi enviado.",
+  "nova_conversa_tentativa_invalida": "Uma tentativa de nova conversa guardada neste aparelho estava em formato inválido e foi descartada. Confira a lista de conversas antes de escrever de novo.",
   "nova_conversa_servidor_ausente": "Esta máquina não está mais na lista; escolha outra.",
   "nova_conversa_envio_recusado": "A conversa foi criada, mas a mensagem foi recusada: {erro}. Você pode enviar novamente nesta mesma conversa.",
   "nova_conversa_envio_incerto": "Não deu para confirmar se a mensagem chegou. Abra a conversa e confira antes de enviar novamente.",
