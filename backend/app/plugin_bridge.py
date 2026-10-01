@@ -28,8 +28,10 @@ import threading
 import time
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
+
+from app.auth import require_loopback
 
 _log = logging.getLogger("hangar.plugin_bridge")
 
@@ -504,6 +506,8 @@ class PullBody(BaseModel):
     token: str
     instance: str = ""
     modos: list[str] = []
+    # Último estado que o plugin viu: o `idle` da largada sai antes de existir ponte.
+    estado: str | None = None
 
 
 class StateBody(BaseModel):
@@ -524,32 +528,36 @@ class WhoamiBody(BaseModel):
     tmux: str | None = None
 
 
-@plugin_router.post("/whoami")
-async def whoami(body: WhoamiBody, request: Request):
+@plugin_router.post("/whoami", dependencies=[Depends(require_loopback)])
+async def whoami(body: WhoamiBody):
     """Sessão aberta fora do Hangar descobre nome e token. Só da própria máquina; pane único resolve,
     o id da sessão do tmux desempata o pane repetido do psmux, e o nome só vale sem pane."""
-    if not request.client or request.client.host not in ("127.0.0.1", "::1"):
-        raise HTTPException(403, detail="whoami só da própria máquina")
     if not secrets.compare_digest(machine_key(), body.chave):
         raise HTTPException(403, detail="chave do plugin invalida")
+    nome, origem = await _whoami(body)
+    _log.info("plugin whoami pane=%s sessao=%s origem=%s", body.pane, nome, origem)
+    return {"sessao": nome, "token": mint(nome), "origem": origem} if nome else {"sessao": None}
+
+
+async def _whoami(body: WhoamiBody) -> tuple[str | None, str]:
+    # O interruptor desliga o caminho inteiro: sessão nenhuma descobre a ponte com ele desligado.
+    if not await asyncio.to_thread(ligado):
+        return None, "desligado"
     if body.tmux:
         meu = await asyncio.to_thread(_socket_do_tmux)
         if meu and body.tmux.split(",")[0] != meu:
             # Outro servidor tmux: o mesmo pane id lá é outra sessão, não uma do Hangar.
-            return {"sessao": None}
+            return None, "outro-socket"
     from app import quem_chama
     if body.pane:
         try:
-            nome, origem = await asyncio.to_thread(quem_chama.resolver, {quem_chama.CAB_PANE: body.pane})
-            return {"sessao": nome, "token": mint(nome), "origem": origem}
+            return await asyncio.to_thread(quem_chama.resolver, {quem_chama.CAB_PANE: body.pane})
         except quem_chama.SessaoDesconhecida:
-            nome = await asyncio.to_thread(_sessao_do_tmux, body.tmux or "")
-            return {"sessao": nome, "token": mint(nome), "origem": "tmux"} if nome else {"sessao": None}
+            return await asyncio.to_thread(_sessao_do_tmux, body.tmux or ""), "tmux"
     try:
-        nome, origem = await asyncio.to_thread(quem_chama.resolver, {quem_chama.CAB_NOME: body.nome or ""})
+        return await asyncio.to_thread(quem_chama.resolver, {quem_chama.CAB_NOME: body.nome or ""})
     except quem_chama.SessaoDesconhecida:
-        return {"sessao": None}
-    return {"sessao": nome, "token": mint(nome), "origem": origem}
+        return None, "nome"
 
 
 @plugin_router.post("/pull")
@@ -566,6 +574,9 @@ async def pull(body: PullBody):
         if dono and dono[0] != body.instance and agora - dono[2] < ESPERA_S + 10:
             raise HTTPException(409, detail="outra instância do plugin já atende esta sessão")
         _donos[body.sessao] = (body.instance, set(body.modos) or {"fill"}, agora)
+        # Só semeia: com entrada do `/state`, quem manda é ela.
+        if body.estado and body.sessao not in _estados:
+            _estados[body.sessao] = (agora, body.estado, None)
     global _loop
     fila: asyncio.Queue = asyncio.Queue()
     with _lock:
@@ -774,7 +785,7 @@ class SubmittedBody(BaseModel):
     ok: bool
 
 
-@plugin_router.post("/submitted")
+@plugin_router.post("/submitted", dependencies=[Depends(require_loopback)])
 async def submitted(body: SubmittedBody):
     """O plugin avisa se o `$.prompt.submit` do modo `user` foi aceito."""
     _confere(body.sessao, body.token)

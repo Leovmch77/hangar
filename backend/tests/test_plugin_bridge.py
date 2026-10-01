@@ -164,20 +164,6 @@ async def _ate(cond):
         await asyncio.sleep(0.01)
 
 
-class _Cliente:
-    def __init__(self, host):
-        self.host = host
-
-
-class _Req:
-    def __init__(self, host):
-        self.client = _Cliente(host)
-
-
-def _req(host):
-    return _Req(host)
-
-
 def _pull(sessao="s1", instance="a", modos=("fill",)):
     return pb.PullBody(sessao=sessao, token=pb.mint(sessao), instance=instance, modos=list(modos))
 
@@ -245,45 +231,78 @@ def test_endereco_da_maquina_e_gravado_sem_o_bearer(tmp_path):
     assert not settings.auth_token or settings.auth_token not in texto
 
 
-def test_whoami_resolve_pelo_pane(monkeypatch):
+@pytest.fixture
+def ligado(monkeypatch):
+    monkeypatch.setattr(pb, "ligado", lambda: True)
+
+
+def test_whoami_resolve_pelo_pane(monkeypatch, ligado):
     from app import quem_chama
     monkeypatch.setattr(quem_chama, "_por_pane", lambda pane: "s1" if pane == "%3" else None)
-    r = asyncio.run(pb.whoami(pb.WhoamiBody(chave=pb.machine_key(), pane="%3"), _req("127.0.0.1")))
+    r = asyncio.run(pb.whoami(pb.WhoamiBody(chave=pb.machine_key(), pane="%3")))
     assert r == {"sessao": "s1", "token": pb.mint("s1"), "origem": "pane"}
 
 
-def test_whoami_nome_so_vale_sem_pane(monkeypatch):
+def test_whoami_com_interruptor_desligado_nao_resolve_nem_pelo_pane(monkeypatch):
+    from app import quem_chama
+    monkeypatch.setattr(pb, "ligado", lambda: False)
+    monkeypatch.setattr(quem_chama, "_por_pane", lambda pane: "s1")
+    assert asyncio.run(pb.whoami(pb.WhoamiBody(chave=pb.machine_key(), pane="%3"))) == {"sessao": None}
+
+
+def test_whoami_nome_so_vale_sem_pane(monkeypatch, ligado):
     from app import quem_chama
     monkeypatch.setattr(quem_chama, "_por_pane", lambda pane: None)
     monkeypatch.setattr(quem_chama, "_por_nome", lambda nome: nome)
-    com_pane = asyncio.run(pb.whoami(pb.WhoamiBody(chave=pb.machine_key(), pane="%0", nome="s1"), _req("127.0.0.1")))
-    sem_pane = asyncio.run(pb.whoami(pb.WhoamiBody(chave=pb.machine_key(), nome="s1"), _req("127.0.0.1")))
+    com_pane = asyncio.run(pb.whoami(pb.WhoamiBody(chave=pb.machine_key(), pane="%0", nome="s1")))
+    sem_pane = asyncio.run(pb.whoami(pb.WhoamiBody(chave=pb.machine_key(), nome="s1")))
     assert com_pane == {"sessao": None} and sem_pane["sessao"] == "s1"
 
 
-def test_whoami_de_outro_servidor_tmux_nao_resolve(monkeypatch):
+def test_whoami_de_outro_servidor_tmux_nao_resolve(monkeypatch, ligado):
     from app import quem_chama
     monkeypatch.setattr(pb, "_socket_do_tmux", lambda: "/tmp/tmux-1000/default")
     monkeypatch.setattr(quem_chama, "_por_pane", lambda pane: "s1")
     corpo = pb.WhoamiBody(chave=pb.machine_key(), pane="%3", tmux="/tmp/tmux-1000/outro,42,0")
-    assert asyncio.run(pb.whoami(corpo, _req("127.0.0.1"))) == {"sessao": None}
+    assert asyncio.run(pb.whoami(corpo)) == {"sessao": None}
 
 
-def test_whoami_sem_socket_conhecido_nao_compara(monkeypatch):
+def test_whoami_sem_socket_conhecido_nao_compara(monkeypatch, ligado):
     from app import quem_chama
     monkeypatch.setattr(pb, "_socket_do_tmux", lambda: None)
     monkeypatch.setattr(quem_chama, "_por_pane", lambda pane: "s1")
     corpo = pb.WhoamiBody(chave=pb.machine_key(), pane="%3", tmux="/tmp/tmux-1000/outro,42,0")
-    assert asyncio.run(pb.whoami(corpo, _req("127.0.0.1")))["sessao"] == "s1"
+    assert asyncio.run(pb.whoami(corpo))["sessao"] == "s1"
 
 
-def test_whoami_recusa_chave_errada_e_cliente_de_fora():
+def test_whoami_recusa_chave_errada(ligado):
     with pytest.raises(HTTPException) as e:
-        asyncio.run(pb.whoami(pb.WhoamiBody(chave="x", pane="%3"), _req("127.0.0.1")))
+        asyncio.run(pb.whoami(pb.WhoamiBody(chave="x", pane="%3")))
     assert e.value.status_code == 403
-    with pytest.raises(HTTPException) as e:
-        asyncio.run(pb.whoami(pb.WhoamiBody(chave=pb.machine_key(), pane="%3"), _req("100.64.0.9")))
-    assert e.value.status_code == 403
+
+
+def test_rotas_novas_do_plugin_recusam_cliente_de_fora(monkeypatch, ligado):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from app import quem_chama
+    monkeypatch.setattr(quem_chama, "_por_pane", lambda pane: "s1")
+    app = FastAPI()
+    app.include_router(pb.plugin_router)
+    corpos = {"/api/plugin/whoami": {"chave": pb.machine_key(), "pane": "%3"},
+              "/api/plugin/submitted": {"sessao": "s1", "token": pb.mint("s1"), "ok": True}}
+    for rota, corpo in corpos.items():
+        assert TestClient(app, client=("100.64.0.9", 5000)).post(rota, json=corpo).status_code == 403, rota
+        assert TestClient(app, client=("127.0.0.1", 5000)).post(rota, json=corpo).status_code == 200, rota
+
+
+def test_pull_semeia_o_estado_so_quando_o_state_nao_disse_nada(monkeypatch):
+    monkeypatch.setattr(pb, "ESPERA_S", 0.2)
+    asyncio.run(pb.pull(pb.PullBody(sessao="s1", token=pb.mint("s1"), instance="a", estado="idle")))
+    assert pb.estado_recente("s1") == ("idle", None)
+    pb.esquecer("s1")
+    asyncio.run(pb.state(pb.StateBody(sessao="s1", token=pb.mint("s1"), estado="working"), None))
+    asyncio.run(pb.pull(pb.PullBody(sessao="s1", token=pb.mint("s1"), instance="a", estado="idle")))
+    assert pb.estado_recente("s1") == ("working", None)
 
 
 def test_modo_user_so_com_dono_que_declarou_sessao_parada_e_texto_simples(monkeypatch):

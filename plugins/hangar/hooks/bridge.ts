@@ -4,7 +4,9 @@
 export type Bridge = { url: string; token: string; sessao: string };
 
 let atual: Bridge | null = null;
-const id = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+// O `idle` da largada sai antes de existir ponte: o `/pull` leva este valor para o backend.
+let ultimoEstado: string | null = null;
+const id =`${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 
 export function setBridge(b: Bridge): void {
   atual = b;
@@ -16,6 +18,14 @@ export function clearBridge(): void {
 
 export function bridge(): Bridge | null {
   return atual;
+}
+
+export function setLastState(estado: string): void {
+  ultimoEstado = estado;
+}
+
+export function lastState(): string | null {
+  return ultimoEstado;
 }
 
 export function instance(): string {

@@ -1,5 +1,5 @@
 import type { EngineInterface, On } from "claude-code";
-import { type Bridge, clearBridge, instance, setBridge } from "./bridge";
+import { type Bridge, clearBridge, instance, lastState, setBridge } from "./bridge";
 
 // A largada divide o `session.start` com o state.ts por MATCHER — dois hooks no
 // mesmo evento sem matcher o engine recusa. O filtro não é enfeite: sem prompt
@@ -68,12 +68,14 @@ async function pull($: EngineInterface, ponte: Bridge) {
     const r = await $.http.fetch(`${ponte.url}/pull`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ sessao: ponte.sessao, token: ponte.token, instance: instance(), modos: ["fill", "user"] }),
+      body: JSON.stringify({
+        sessao: ponte.sessao, token: ponte.token, instance: instance(), modos: ["fill", "user"], estado: lastState(),
+      }),
     });
     // 409 cala os outros hooks; depois dele a ponte só volta com um `/pull` aceito. Erro de rede
-    // ou outro status não tira a ponte de quem já é dono.
+    // ou outro status não tira a ponte de quem já é dono, nem a devolve a quem a perdeu.
     if (r.status === 409) clearBridge();
-    else setBridge(ponte);
+    else if (r.status === 200) setBridge(ponte);
     if (r.status === 200) {
       const { text, modo } = JSON.parse(r.text) as { text?: string | null; modo?: string };
       if (text && modo === "fill") {

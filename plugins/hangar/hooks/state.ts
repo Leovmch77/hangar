@@ -1,9 +1,10 @@
 import type { EngineInterface, On } from "claude-code";
-import { bridge } from "./bridge";
+import { bridge, setLastState } from "./bridge";
 
 // O scanner do engine não segue `$` através de um import: o envio fica aqui, e
 // do bridge.ts vem só o endereço.
 async function send($: EngineInterface, estado: string, extra: Record<string, unknown> = {}) {
+  setLastState(estado);
   const p = bridge();
   if (!p) return;
   try {
