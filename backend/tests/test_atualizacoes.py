@@ -180,16 +180,18 @@ def test_comando_igual_seguido_roda_uma_vez_e_cada_passo_confere_a_prova(passos,
     contador = tmp_path / "n"
     instalar = f"echo x >> {contador}"
     _escreve(passos, "1-a", id="1-a", titulo="A", comando=instalar, prova=str(contador))
-    _escreve(passos, "2-b", id="2-b", titulo="B", comando=instalar, prova=str(contador))
-    _escreve(passos, "3-outro", id="3-outro", titulo="Outro", comando="echo y", prova="docs")
-    _escreve(passos, "4-c", id="4-c", titulo="C", comando=instalar, prova=str(contador))
-    _escreve(passos, "5-d", id="5-d", titulo="D", comando=instalar, prova="nao-existe")
+    _escreve(passos, "2-texto", id="2-texto", titulo="Texto")
+    _escreve(passos, "3-b", id="3-b", titulo="B", comando=instalar, prova=str(contador))
+    _escreve(passos, "4-outro", id="4-outro", titulo="Outro", comando="echo y", prova="docs")
+    _escreve(passos, "5-c", id="5-c", titulo="C", comando=instalar, prova=str(contador))
+    _escreve(passos, "6-d", id="6-d", titulo="D", comando=instalar, prova="nao-existe")
     with pytest.raises(atualizacoes.PassoFalhou) as e:
         atualizacoes.aplicar_pendentes()
-    # 1-a e 2-b juntos; o comando do meio faz 4-c rodar de novo; 5-d não roda, mas a prova dele ainda barra.
-    assert contador.read_text().count("x") == 2
+    # 1-a e 3-b juntos, mesmo com o passo de texto no meio; o comando diferente faz 5-c rodar de novo;
+    # 6-d pularia, mas com a prova faltando roda o comando uma vez antes de falhar.
+    assert contador.read_text().count("x") == 3
     assert "nao-existe" in str(e.value)
-    assert atualizacoes.aplicados() == {"1-a", "2-b", "3-outro", "4-c"}
+    assert atualizacoes.aplicados() == {"1-a", "2-texto", "3-b", "4-outro", "5-c"}
 
 
 def test_rodar_duas_vezes_nao_repete(passos, tmp_path):

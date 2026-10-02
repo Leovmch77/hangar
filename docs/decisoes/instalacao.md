@@ -31,7 +31,8 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
 - **Passo com comando diferente por sistema usa `comando_posix` e `comando_windows`.** `comando`
   continua sendo o fallback comum; qualquer variante que executa algo exige `prova`.
 - **Passos seguidos com o mesmo comando rodam o comando uma vez; a prova de cada um continua
-  conferida.** Só o vizinho imediato: comando diferente no meio faz o repetido rodar de novo. Em
+  conferida**, e a que faltar faz o comando rodar para aquele passo antes de ele falhar. Só o vizinho
+  imediato: comando diferente no meio faz o repetido rodar de novo. Em
   02/10/2026 a DELPHI-02 rodou o `install.ps1 -Update` quatro vezes seguidas (~20 s cada) para
   quatro passos da mesma atualização.
 - **Versão é `VERSION` + número de commits** (`0.1.0.2533`): major.minor.patch à mão no

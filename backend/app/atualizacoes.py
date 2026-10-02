@@ -224,15 +224,22 @@ class PassoFalhou(Exception):
 def aplicar(passo: dict, rodar: bool = True) -> None:
     """Roda um passo e sua prova. Marca no registro só quando a prova passa.
 
-    `rodar=False`: o comando é o mesmo que acabou de rodar para o passo anterior; só a prova é conferida.
+    `rodar=False`: o comando é o mesmo que acabou de rodar para o passo anterior; só a prova é conferida,
+    e se ela faltar o comando roda para este passo antes de concluir que falhou.
     """
-    if passo["comando"] and rodar:
+    def executar() -> None:
         p = _rodar(passo["comando"])
         if p.returncode != 0:
             cauda = "\n".join((p.stderr or p.stdout or "").strip().splitlines()[-8:])
             raise PassoFalhou(passo, cauda or f"saiu com {p.returncode}")
 
+    if passo["comando"] and rodar:
+        executar()
+
     faltando = [c for c in passo["prova"] if not _existe(c)]
+    if faltando and passo["comando"] and not rodar:
+        executar()
+        faltando = [c for c in passo["prova"] if not _existe(c)]
     if faltando:
         # Comando ok e prova falhando é o caso que o registro existe pra pegar: sem isto o
         # passo entraria como aplicado e nunca mais rodaria, com o efeito dele ausente.
