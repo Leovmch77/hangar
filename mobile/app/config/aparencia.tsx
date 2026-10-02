@@ -31,6 +31,7 @@ import {
   type Ferramentas,
   type Fundo,
   type Leitura,
+  type Organizar,
   type Tema,
 } from '../../src/stores/aparencia';
 import * as m from '../../src/paraglide/messages';
@@ -69,6 +70,7 @@ export default function Aparencia() {
   const tarefas = useAparencia((s) => s.tarefas);
   const graficoTabela = useAparencia((s) => s.graficoTabela);
   const destaquePergunta = useAparencia((s) => s.destaquePergunta);
+  const organizar = useAparencia((s) => s.organizar);
   const ap = useAparencia.getState;
 
   const scroll = useRef<ScrollView>(null);
@@ -135,6 +137,10 @@ export default function Aparencia() {
   const DESTAQUES: ReadonlyArray<Option<DestaquePergunta>> = [
     { v: 'accent', label: m.native_settings_ask_highlight_accent() },
     { v: 'amber', label: m.native_settings_ask_highlight_amber() },
+  ];
+  const ORGANIZAR: ReadonlyArray<Option<Organizar>> = [
+    { v: 'sessions', label: m.aparencia_organizar_sessoes_opcao() },
+    { v: 'conversations', label: m.aparencia_organizar_conversas_opcao() },
   ];
   const modo = c.dark ? 'dark' : 'light';
   const accents = c.dark ? ACCENTS_DARK : ACCENTS_LIGHT;
@@ -439,6 +445,14 @@ export default function Aparencia() {
             value={destaquePergunta}
             onChange={(v) => ap().setDestaquePergunta(v)}
             label={m.native_settings_ask_highlight()}
+          />
+        </SettingsRow>
+        <SettingsRow title={m.aparencia_organizar_sessoes()} description={m.aparencia_organizar_dica()}>
+          <Segmented
+            options={ORGANIZAR}
+            value={organizar}
+            onChange={(v) => ap().setOrganizar(v)}
+            label={m.aparencia_organizar_sessoes()}
           />
         </SettingsRow>
       </SectionCard>

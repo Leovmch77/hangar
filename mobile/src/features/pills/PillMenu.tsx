@@ -10,6 +10,8 @@ export interface PillMenuItem {
   id?: string;
   hint?: string;
   selected?: boolean;
+  /** Motivo de não poder escolher (modo só da criação); a linha aparece apagada e sem toque. */
+  unavailable?: string;
 }
 
 interface Props {
@@ -21,15 +23,21 @@ interface Props {
   onRetry?: () => void;
   onSelect: (item: PillMenuItem) => void;
   title?: string;
+  /** Aviso que não impede escolher (troca recusada, leitura que mexeu no modo): fica acima da lista. */
+  notice?: string | null;
+  emptyText?: string;
 }
 
-export function PillMenu({ open, onClose, items, loading, error, onRetry, onSelect, title }: Props) {
+export function PillMenu({ open, onClose, items, loading, error, onRetry, onSelect, title, notice, emptyText }: Props) {
   const { theme } = useUnistyles();
 
   return (
     <Sheet open={open} sizes={['auto']} onDismiss={onClose}>
       <View style={styles.sheet}>
         {title ? <Text style={[styles.title, { color: theme.tokens.text.primary }]}>{title}</Text> : null}
+        {notice && !loading && !error ? (
+          <Text style={[styles.err, { color: theme.tokens.status.error }]} accessibilityRole="alert">{notice}</Text>
+        ) : null}
         {loading ? (
           <View style={styles.center}>
             <ActivityIndicator color={theme.tokens.text.secondary} />
@@ -46,7 +54,7 @@ export function PillMenu({ open, onClose, items, loading, error, onRetry, onSele
           </View>
         ) : items.length === 0 ? (
           <View style={styles.center}>
-            <Text style={[styles.muted, { color: theme.tokens.text.muted }]}>{m.comum_nenhum_modelo()}</Text>
+            <Text style={[styles.muted, { color: theme.tokens.text.muted }]}>{emptyText ?? m.comum_nenhum_modelo()}</Text>
           </View>
         ) : (
           <ScrollView style={styles.list} contentContainerStyle={styles.listContent}>
@@ -54,17 +62,18 @@ export function PillMenu({ open, onClose, items, loading, error, onRetry, onSele
               <Pressable
                 key={`${it.label}-${idx}-${it.hint ?? ''}`}
                 onPress={() => onSelect(it)}
+                disabled={!!it.unavailable}
                 style={[styles.row, it.selected && { backgroundColor: superficie(theme, 0.8) }]}
                 accessibilityRole="button"
-                accessibilityState={{ selected: !!it.selected }}
+                accessibilityState={{ selected: !!it.selected, disabled: !!it.unavailable }}
               >
                 <View style={styles.rowText}>
-                  <Text style={[styles.label, { color: theme.tokens.text.primary }]} numberOfLines={1}>
+                  <Text style={[styles.label, { color: it.unavailable ? theme.tokens.text.muted : theme.tokens.text.primary }]} numberOfLines={1}>
                     {it.label}
                   </Text>
-                  {it.hint ? (
-                    <Text style={[styles.hint, { color: theme.tokens.text.muted }]} numberOfLines={1}>
-                      {it.hint}
+                  {it.hint || it.unavailable ? (
+                    <Text style={[styles.hint, { color: theme.tokens.text.muted }]} numberOfLines={2}>
+                      {it.unavailable ?? it.hint}
                     </Text>
                   ) : null}
                 </View>

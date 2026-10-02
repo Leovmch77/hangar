@@ -1,8 +1,8 @@
 import { memo, useState, type ReactNode } from 'react';
 import { Pressable, Text, View } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
-import { Image } from 'expo-image';
-import { parseImageMessage, parseRealtimeDelegation, uploadUrlNative, fileAuthHeader } from '@hangar/core';
+import { ImageThumb, type MediaItem } from './ImageThumb';
+import { parseImageMessage, parseRealtimeDelegation, transcriptImageUrlNative, uploadUrlNative, fileAuthHeader } from '@hangar/core';
 import * as m from '../paraglide/messages';
 import { BubbleActions } from './BubbleActions';
 import { superficie } from '../theme/superficie';
@@ -10,15 +10,34 @@ import { superficie } from '../theme/superficie';
 // Bolha do usuário: pequena, à direita, no fundo superficie(0.8) — o mesmo degrau da bolha do nativo,
 // e por isso acompanha Transparência e Solidez. Se parseImageMessage(text) não nulo → legenda +
 // miniaturas. As ações (copiar, compartilhar) não ficam à mostra: o toque longo abre a linha embaixo.
-export const UserBubble = memo(function UserBubble({ text, sessionName, ts }: { text: string; sessionName?: string; ts?: number | null }) {
+export const UserBubble = memo(function UserBubble({ text, sessionName, ts, eventId, imageCount = 0 }: {
+  text: string;
+  sessionName?: string;
+  ts?: number | null;
+  eventId?: string;
+  /** Imagens coladas no TERMINAL: vêm do transcript por /transcript-image, não do texto. */
+  imageCount?: number;
+}) {
   const { theme } = useUnistyles();
   const voice = parseRealtimeDelegation(text);
   const [showOriginal, setShowOriginal] = useState(false);
   const [acoes, setAcoes] = useState(false);
   const parsed = parseImageMessage(text);
-  const hasImages = !!parsed && !!sessionName;
-  const caption = hasImages ? parsed!.caption : '';
-  const filenames = hasImages ? parsed!.filenames : [];
+  const doTerminal = imageCount > 0 && !!sessionName && !!eventId;
+  const hasImages = (!!parsed && !!sessionName) || doTerminal;
+  const caption = parsed ? parsed.caption : doTerminal ? text : '';
+  // Como no web: com o caminho escrito pra TODAS as fotos, as últimas `imageCount` já vêm do
+  // transcript, e mostrar as duas fontes duplicava cada imagem.
+  const filenames = !parsed || !sessionName ? []
+    : doTerminal && parsed.marcadores === parsed.filenames.length
+      ? parsed.filenames.slice(0, Math.max(0, parsed.filenames.length - imageCount))
+      : parsed.filenames;
+  const galeria: MediaItem[] = hasImages ? [
+    ...filenames.map((fn): MediaItem => ({ uri: uploadUrlNative(sessionName!, fn), headers: fileAuthHeader(), name: fn, kind: 'image' })),
+    ...(doTerminal ? Array.from({ length: imageCount }, (_, i): MediaItem => ({
+      uri: transcriptImageUrlNative(sessionName!, eventId!, i), headers: fileAuthHeader(), name: m.anexos_imagem_enviada(), kind: 'image',
+    })) : []),
+  ] : [];
   const alternar = () => setAcoes((v) => !v);
 
   // O texto não é `selectable`: no Android a seleção come o toque longo que abre as ações, e copiar
@@ -56,8 +75,8 @@ export const UserBubble = memo(function UserBubble({ text, sessionName, ts }: { 
 
   // Se há imagens válidas, exibe legenda + thumbnails; senão fallback texto cru
   if (hasImages) {
-    // filenames vazios = foto única absorvida como anexo real: mostra só a legenda, ou o texto original
-    if (filenames.length === 0) {
+    // galeria vazia = foto única absorvida como anexo real: mostra só a legenda, ou o texto original
+    if (galeria.length === 0) {
       const display = caption || text;
       return bolha(<Text style={[styles.txt, { color: theme.tokens.text.primary }]}>{display}</Text>, display);
     }
@@ -65,11 +84,7 @@ export const UserBubble = memo(function UserBubble({ text, sessionName, ts }: { 
       <>
         {caption ? <Text style={[styles.txt, { color: theme.tokens.text.primary }]}>{caption}</Text> : null}
         <View style={styles.thumbs}>
-          {filenames.map((fn) => {
-            const uri = uploadUrlNative(sessionName!, fn);
-            const headers = fileAuthHeader();
-            return <Image key={fn} source={{ uri, headers }} style={styles.thumb} contentFit="cover" transition={150} />;
-          })}
+          {galeria.map((g, i) => <ImageThumb key={g.uri} items={galeria} index={i} style={styles.thumb} />)}
         </View>
       </>,
       caption || text,

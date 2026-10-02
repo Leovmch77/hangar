@@ -1,112 +1,67 @@
-import { useMemo, useState } from 'react';
-import { Pressable, Text, View } from 'react-native';
-import { StyleSheet, useUnistyles } from 'react-native-unistyles';
+import { useEffect, useMemo, useState } from 'react';
+import { View } from 'react-native';
+import { StyleSheet } from 'react-native-unistyles';
 import { parseStatusLine } from '@hangar/core';
 import { chatStore } from '../stores/chat';
-import { Sheet } from '../ui/Sheet';
-import { Icon } from '../ui/Icon';
 import { ModelPill } from '../features/pills/ModelPill';
 import { EffortPill } from '../features/pills/EffortPill';
 import { PermissionPill } from '../features/pills/PermissionPill';
-import { settingsLabel, spacedModel } from './usage';
-import { superficie } from '../theme/superficie';
-import * as m from '../paraglide/messages';
+import { CodexPermissionPill } from '../features/pills/CodexPermissionPill';
+import { reconcileChosen, type Chosen } from '../features/pills/pills';
 
 interface Props {
   serverId: string;
   name: string;
+  provider: string | null;
+  headless: boolean;
+  // `/model` e `/effort` abrem o seletor certo: cada pedido novo leva um número maior.
+  openRequest?: { which: 'model' | 'effort'; n: number } | null;
+  // Some da vista sem desmontar: com o Orientar na linha elas viravam "B…", e montadas o
+  // `/model` digitado ainda abre o seletor.
+  hidden?: boolean;
 }
 
-// Botão único do composer: "Opus 5.5 · 1M  high" abre a folha com os três seletores. O anel de
-// contexto e a folha de Uso moram na linha de status, embaixo do composer.
-export function SessionSettingsButton({ serverId, name }: Props) {
-  const { theme } = useUnistyles();
+// Controles da sessão direto na linha do composer, como no PWA: modo (Claude e Codex), modelo,
+// nível e, no Codex, permissão. Antes moravam numa folha de ajustes, a dois toques.
+export function SessionSettingsButton({ serverId, name, provider, headless, openRequest, hidden }: Props) {
   const chat = chatStore(serverId, name);
   const statusLine = chat.use((s) => s.statusLine);
-  const f = useMemo(() => parseStatusLine(statusLine), [statusLine]);
-  const [settingsOpen, setSettingsOpen] = useState(false);
-  // Os seletores montam na primeira abertura: a Permissão lê o modo atual ao montar, e isso não
-  // precisa acontecer a cada conversa aberta.
-  const [settingsMounted, setSettingsMounted] = useState(false);
-  const label = settingsLabel(f?.model, f?.effort);
+  const statusModel = useMemo(() => parseStatusLine(statusLine), [statusLine]);
+  const [chosen, setChosen] = useState<Chosen>({});
+  // Solta o modelo otimista quando a statusline confirma: troca feita no terminal volta a aparecer.
+  useEffect(() => {
+    setChosen((cur) => {
+      const next = reconcileChosen(statusModel, cur);
+      return next.model === cur.model ? cur : next;
+    });
+  }, [statusModel]);
+
+  const isCodex = provider === 'codex';
+  const isClaude = !provider || provider === 'claude';
 
   return (
-    <>
-      {/* A Pressable ocupa a sobra da linha (alvo de toque largo) e o chip visível encosta à direita:
-          só encolhendo, o Android media o texto antes e cortava o rótulo mesmo com espaço livre.
-          A folha é irmã, não filha: aninhada, o leitor de tela trataria tudo como um botão só. */}
-      <Pressable
-        onPress={() => {
-          setSettingsMounted(true);
-          setSettingsOpen(true);
-        }}
-        style={styles.slot}
-        accessibilityRole="button"
-        accessibilityLabel={m.composer_session_settings()}
-        accessibilityValue={{ text: label }}
-        accessibilityHint={m.composer_session_settings_hint()}
-      >
-        {({ pressed }) => (
-          <View style={[styles.chip, { backgroundColor: pressed ? theme.tokens.bg.hover : superficie(theme, 0.6) }]}>
-            <Text style={styles.label} numberOfLines={1}>
-              <Text style={[styles.model, { color: theme.tokens.text.primary }]}>{f?.model ? spacedModel(f.model) : m.composer_modelo()}</Text>
-              {f?.model && f.effort ? <Text style={{ color: theme.tokens.text.muted }}>{`  ${f.effort}`}</Text> : null}
-            </Text>
-            <Icon name="ChevronDown" size={12} color={theme.tokens.text.muted} />
-          </View>
-        )}
-      </Pressable>
-
-      <Sheet open={settingsOpen} onDismiss={() => setSettingsOpen(false)} sizes={['auto']}>
-        <View style={styles.sheet}>
-          <Text style={[styles.title, { color: theme.tokens.text.primary }]} accessibilityRole="header">
-            {m.composer_session_settings()}
-          </Text>
-          {/* Cada linha abre o seletor de sempre por cima desta folha; ao escolher, ela volta. */}
-          {settingsMounted ? (
-            <>
-              <ModelPill serverId={serverId} name={name} />
-              <EffortPill serverId={serverId} name={name} />
-              <PermissionPill serverId={serverId} name={name} />
-            </>
-          ) : null}
-        </View>
-      </Sheet>
-    </>
+    <View style={[styles.cluster, hidden && styles.hidden]} pointerEvents={hidden ? 'none' : 'auto'}
+          accessibilityElementsHidden={hidden} importantForAccessibility={hidden ? 'no-hide-descendants' : 'auto'}>
+      {isClaude || isCodex ? <PermissionPill serverId={serverId} name={name} provider={isCodex ? 'codex' : 'claude'} /> : null}
+      <ModelPill serverId={serverId} name={name} provider={provider} chosen={chosen} onChosen={setChosen}
+                 openSignal={openRequest?.which === 'model' ? openRequest.n : 0} />
+      <EffortPill serverId={serverId} name={name} provider={provider} chosen={chosen} onChosen={setChosen}
+                  openSignal={openRequest?.which === 'effort' ? openRequest.n : 0} />
+      {isCodex ? <CodexPermissionPill name={name} headless={headless} /> : null}
+    </View>
   );
 }
 
 const styles = StyleSheet.create((theme) => ({
-  slot: {
+  // Ocupa a sobra da linha e encosta à direita; quem não cabe encolhe com reticências.
+  hidden: { opacity: 0 },
+  cluster: {
     flex: 1,
-    minWidth: 44,
-    minHeight: 40,
-    alignItems: 'flex-end',
-    justifyContent: 'center',
-  },
-  chip: {
-    maxWidth: '100%',
-    height: 28,
+    minWidth: 0,
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 4,
-    borderRadius: theme.base.radius.xs,
-    paddingHorizontal: theme.base.space[2],
-  },
-  label: {
-    flexShrink: 1,
-    fontSize: theme.base.text.xs,
-  },
-  model: {
-    fontWeight: '600',
-  },
-  sheet: {
-    padding: theme.base.space[3],
+    justifyContent: 'flex-end',
     gap: theme.base.space[1],
-  },
-  title: {
-    fontSize: theme.base.text.base,
-    fontWeight: '600',
-    marginBottom: theme.base.space[2],
+    overflow: 'hidden',
   },
 }));

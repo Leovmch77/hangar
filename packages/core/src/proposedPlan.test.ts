@@ -1,5 +1,17 @@
 import { describe, it, expect } from 'vitest';
-import { proposedPlan, planDisplayText, planTitle } from './proposedPlan';
+import { proposedPlan, planDisplayText, planTitle, pendingProposedPlan, pendingReplyPlan } from './proposedPlan';
+import type { ChatEvent } from './types';
+
+describe('plano à espera de decisão', () => {
+  const ev = (id: string, kind: ChatEvent['kind'], text: string) => ({ id, kind, text }) as ChatEvent;
+  it('vale até a próxima mensagem real; a da fila não conta', () => {
+    const plan = ev('a1', 'assistant_msg', '<proposed_plan>\n# P\n</proposed_plan>');
+    expect(pendingProposedPlan([plan, ev('queued-1', 'user_msg', 'x')])).toEqual({ id: 'a1', plan: '# P' });
+    expect(pendingProposedPlan([plan, ev('u1', 'user_msg', 'x')])).toBeNull();
+    expect(pendingReplyPlan([ev('a0', 'assistant_msg', 'velho'), ev('a2', 'assistant_msg', 'novo')])).toEqual({ id: 'a2', plan: 'novo' });
+    expect(pendingReplyPlan([ev('a0', 'assistant_msg', 'velho'), ev('a2', 'assistant_msg', 'novo')], 'a0')).toEqual({ id: 'a0', plan: 'velho' });
+  });
+});
 
 it('usa o primeiro título real, ignorando cercas e código indentado', () => {
   expect(planTitle('```md\n# Exemplo\n```\n    # Código\n## Título real ###\n# Outro')).toBe('Título real');

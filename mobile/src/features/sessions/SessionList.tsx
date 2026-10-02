@@ -21,6 +21,7 @@ import { HangarMark } from '../../ui/HangarMark';
 import { Icon } from '../../ui/Icon';
 import { toast } from '../../ui/Toast';
 import { SessionRow } from './SessionRow';
+import { ConversationList } from './ConversationList';
 import { splitAttention } from './AttentionStrip';
 import { RenameSheet } from './RenameSheet';
 import * as m from '../../paraglide/messages';
@@ -63,6 +64,7 @@ export function SessionList({ onClose, onOpenServers }: Props) {
   const rows = useSessions((s) => s.rows);
   const loading = useSessions((s) => s.loading);
   const agrupar = useAparencia((s) => s.agrupar);
+  const conversas = useAparencia((s) => s.organizar) === 'conversations';
   const activeId = useServers((s) => s.activeId);
   const byServer = useSessions((s) => s.byServer);
   const [filtro, setFiltro] = useState('');
@@ -218,7 +220,8 @@ export function SessionList({ onClose, onOpenServers }: Props) {
       <Text style={[styles.marca, { color: theme.tokens.text.primary }]} numberOfLines={1} accessibilityRole="header">
         {m.native_brand()}
       </Text>
-      <View style={styles.topoAcoes}>
+      {/* Agrupar não se aplica à lista de conversas, que é só por recência. */}
+      {conversas ? null : <View style={styles.topoAcoes}>
         <MenuView
           onPressAction={({ nativeEvent }) => {
             if (ehGroupBy(nativeEvent.event)) useAparencia.getState().setAgrupar(nativeEvent.event);
@@ -233,7 +236,7 @@ export function SessionList({ onClose, onOpenServers }: Props) {
             <Icon name="ListFilter" size={20} color={theme.tokens.text.secondary} />
           </View>
         </MenuView>
-      </View>
+      </View>}
     </View>
   );
 
@@ -303,7 +306,9 @@ export function SessionList({ onClose, onOpenServers }: Props) {
   let corpo: ReactNode;
   if (!ready) corpo = vazio(null, m.comum_carregando(), false, true);
   else if (servers.length === 0) corpo = vazio(m.lista_nenhum_servidor(), m.lista_pareie_qr());
-  else if (loading && rows.length === 0) corpo = vazio(null, m.lista_carregando(), false, true);
+  else if (conversas) {
+    corpo = <ConversationList header={itemNav('SquarePen', m.native_new_chat_title(), onClose, undefined, true)} onClose={onClose} />;
+  } else if (loading && rows.length === 0) corpo = vazio(null, m.lista_carregando(), false, true);
   else {
     corpo = (
       <SectionList
@@ -373,7 +378,7 @@ export function SessionList({ onClose, onOpenServers }: Props) {
       {/* A gaveta passa por baixo da barra de status e do indicador de início: a margem segura é daqui. */}
       <View style={[styles.painel, { paddingTop: insets.top + 8, paddingBottom: Math.max(insets.bottom, 8) }]}>
         {topo}
-        {campoBusca}
+        {conversas ? null : campoBusca}
         <View style={styles.corpo}>{corpo}</View>
         {rodape}
       </View>

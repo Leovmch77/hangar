@@ -1,3 +1,5 @@
+import type { ChatEvent } from './types';
+
 // Marcadores do protocolo só valem em linhas próprias, fora de exemplos de código.
 function markers(text: string): { start: number; end: number; close: boolean }[] {
   const found: { start: number; end: number; close: boolean }[] = [];
@@ -76,4 +78,31 @@ export function proposedPlan(text: string): string | null {
   if (!close) return null;
   const open = found.find((marker) => !marker.close && marker.start < close.start);
   return text.slice(open?.end ?? 0, close.start).trim() || null;
+}
+
+// Plano que ainda espera decisão: só vale até a próxima mensagem real da pessoa (a da fila não conta).
+export function pendingProposedPlan(events: ChatEvent[]): { id: string; plan: string } | null {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const event = events[i];
+    if (event.kind === 'user_msg' && !event.id.startsWith('queued-')) return null;
+    if (event.kind === 'assistant_msg' && event.text) {
+      const plan = proposedPlan(event.text);
+      if (plan) return { id: event.id, plan };
+    }
+  }
+  return null;
+}
+
+// Claude sem terminal em modo plano: ninguém pergunta "implementar?", então a última resposta do
+// turno é o plano. `anchorId` restringe à resposta em que o arquivo do plano foi descoberto.
+export function pendingReplyPlan(events: ChatEvent[], anchorId: string | null = null): { id: string; plan: string } | null {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const event = events[i];
+    if (event.kind === 'user_msg' && !event.id.startsWith('queued-')) return null;
+    if (event.kind === 'assistant_msg' && event.text && !event.id.startsWith('local-')
+        && (!anchorId || event.id === anchorId)) {
+      return { id: event.id, plan: event.text };
+    }
+  }
+  return null;
 }

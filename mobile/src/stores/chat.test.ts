@@ -324,20 +324,22 @@ test('(f) filaCount conta pending + queued-* e zera quando o real chega', async 
   const p = chat.send('oi tudo bem');
   // eco local já entrou
   expect(chat.use.getState().pending).toHaveLength(1);
-  expect(filaCount(chat.use.getState())).toBe(1);
+  expect(filaCount(chat.use.getState(), 'kimi')).toBe(1);
+  // Claude com terminal não tem como mandar a fila agora: sem contagem, como no PWA.
+  expect(filaCount(chat.use.getState(), 'claude')).toBe(0);
   // sintético queued-* chega com mesmo texto -> pending reconciliado, queued entra
   // restaura fetch falso de history pra não quebrar o SSE trigger, mas mantém send mock
   // o trigger não depende de fetch, só do store
   created[0].trigger('message', JSON.stringify(ev({ id: 'queued-1', text: 'oi tudo bem' })));
   await tick();
   expect(chat.use.getState().pending).toHaveLength(0);
-  expect(filaCount(chat.use.getState())).toBe(1);
+  expect(filaCount(chat.use.getState(), 'kimi')).toBe(1);
   // render queued translúcido: events contém queued-*
   expect(chat.use.getState().events.some((e) => e.id.startsWith('queued-'))).toBe(true);
   // real chega -> queued sai, fila zera
   created[0].trigger('message', JSON.stringify(ev({ id: 'a:10', text: 'oi tudo bem' })));
   await tick();
-  expect(filaCount(chat.use.getState())).toBe(0);
+  expect(filaCount(chat.use.getState(), 'kimi')).toBe(0);
   expect(chat.use.getState().events.some((e) => e.id.startsWith('queued-'))).toBe(false);
   await p;
   vi.stubGlobal('fetch', origFetch as never);

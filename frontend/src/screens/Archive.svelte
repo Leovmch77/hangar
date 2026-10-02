@@ -6,13 +6,12 @@ import { intlLocale } from '../lib/locale';
   import * as m from '../paraglide/messages';
   import {
     getArchiveFolder, getArchiveHistory, archiveImageUrl, resumeArchivedConversation, sendInputForServer,
-    getEngines, listClaudeConfigs, getCodexAccountsForServer,
+    getEngines, listClaudeConfigs, getCodexAccountsForServer, takeEntry,
     type ArchiveFolder, type ArchiveEntry, type Motor, type ConfigDirInfo, type CodexAccount,
   } from '@hangar/core';
   import NewChatComposer from '../components/newchat/NewChatComposer.svelte';
   import AccountPill from '../components/newchat/AccountPill.svelte';
   import { arquivo, clienteQuery } from '../lib/queries';
-  import { takeEntry } from '../lib/conversationList';
   import { keyboardInset } from '../lib/keyboardInset';
   import type { ChatEvent } from '@hangar/core';
   import { selectServer, listOwnServers, getActiveId, serverColor } from '../lib/auth';

@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import * as Haptics from 'expo-haptics';
-import { AccessibilityInfo, ActivityIndicator, AppState, Platform, Pressable, Text, View, type NativeSyntheticEvent, type TextInput, type TextInputKeyPressEventData } from 'react-native';
+import { AccessibilityInfo, ActivityIndicator, Alert, AppState, Platform, Pressable, Text, View, type NativeSyntheticEvent, type TextInput, type TextInputKeyPressEventData } from 'react-native';
 import type { NativeStackNavigationProp } from 'expo-router';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
-import { broadcast, formataErro, uploadFileForServer, transcribeFileForServer, steerSession, podeEnviarSozinho, providerName } from '@hangar/core';
-import type { MotivoFim, Provider, Server } from '@hangar/core';
+import { broadcast, formataErro, uploadFileForServer, transcribeFileForServer, steerSession, podeEnviarSozinho, providerName, sendInputForServer, sideQuestionOf, slashMatches } from '@hangar/core';
+import type { CommandInfo, MotivoFim, Provider, Server } from '@hangar/core';
 import { Glass } from '../ui/Glass';
 import { Icon } from '../ui/Icon';
 import { MultilineInput } from '../ui/MultilineInput';
@@ -20,8 +20,10 @@ import { useNavigation, useRouter } from 'expo-router';
 import { DictationStyleMenu, useDictationStyleLabel } from '../features/ditado/EstiloPill';
 import { useDitado } from '../features/ditado/useDitado';
 import { useDitadoEstiloStore } from '../features/ditado/ditadoEstiloStore';
-import { CommandSheet } from './CommandSheet';
+import { CommandSheet, useSessionCommands } from './CommandSheet';
 import { SessionSettingsButton } from './SessionSettings';
+import { SideQuestionSheet } from './SideQuestionSheet';
+import { SlashSuggest } from './SlashSuggest';
 import { comandoParcial } from './comandoParcial';
 import { superficie } from '../theme/superficie';
 import type { PickedAttachment } from '../ui/attachmentPicker';
@@ -32,9 +34,14 @@ interface Props {
   serverId: string;
   name: string;
   draft?: string;
+  // Texto devolvido pelo Parar/cancelar: entra antes do que já está no campo, nunca no lugar.
+  returned?: { text: string };
+  onReturnedAdopted?: () => void;
   firstInputId?: string;
   firstInputSent?: boolean;
   sessionProvider?: string | null;
+  // Claude/Codex sem terminal: a fila é do processo (dá para orientar) e pergunta pendente só sai pelo Parar.
+  headless?: boolean;
   onStop?: () => void;
   stopping?: boolean;
 }
@@ -83,7 +90,7 @@ function keepRecoverable(serverId: string, name: string, old: ConversationDraft)
   return value;
 }
 
-export function Composer({ serverId, name, draft, firstInputId, firstInputSent = false, sessionProvider, onStop, stopping = false }: Props) {
+export function Composer({ serverId, name, draft, returned, onReturnedAdopted, firstInputId, firstInputSent = false, sessionProvider, headless = false, onStop, stopping = false }: Props) {
   const { theme } = useUnistyles();
   const navigation = useNavigation<NativeStackNavigationProp<Record<string, object | undefined>>>();
   const inputRef = useRef<TextInput>(null);
@@ -118,7 +125,8 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
   });
   const pairPeersKey = pairPeers?.join('\u0000') ?? '';
   const isCodex = provider === 'codex';
-  const filaCount = filaCountOf({ events, pending }, provider);
+  const isClaude = !provider || provider === 'claude';
+  const filaCount = filaCountOf({ events, pending }, provider, headless);
 
   const [sendToPair, setSendToPair] = useState(false);
   useEffect(() => {
@@ -348,9 +356,11 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
   const [attachMenuOpen, setAttachMenuOpen] = useState(false);
   const [styleMenuOpen, setStyleMenuOpen] = useState(false);
   const dictationStyle = useDictationStyleLabel();
-  // null = lista de comandos fechada; string = o que veio depois da `/`.
-  const [cmdFiltro, setCmdFiltro] = useState<string | null>(null);
-  const commandsFromButtonRef = useRef(false);
+  const [commandSheetOpen, setCommandSheetOpen] = useState(false);
+  // `/model` e `/effort` abrem o seletor da linha; o número sobe a cada pedido.
+  const [selectorRequest, setSelectorRequest] = useState<{ which: 'model' | 'effort'; n: number } | null>(null);
+  // null = pergunta lateral fechada; string = a pergunta que veio com o `/btw` (pode ser vazia).
+  const [sideQuestion, setSideQuestion] = useState<string | null>(null);
   // Só é definido quando o app MOVE o cursor (ditado, undo, draft); o onSelectionChange devolve o
   // controle ao campo logo em seguida — preso, ele impediria a pessoa de mexer no cursor.
   const [selection, setSelection] = useState<{ start: number; end: number } | undefined>();
@@ -394,13 +404,11 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
     };
   }, [cancelarAuto]);
 
-  // Atalho `/`: enquanto a linha é só o nome do comando, a lista fica aberta e filtrada.
   const handleChangeText = useCallback(
     (v: string) => {
       textRef.current = v;
       persistText(v);
       setText(v);
-      setCmdFiltro(comandoParcial(v));
       if (undo) limparUndo();
       if (autoN !== null) cancelarAuto();
     },
@@ -417,14 +425,25 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [draft]);
+  // Adota por identidade (o mesmo texto devolvido duas vezes entra as duas); o ref segura a
+  // remontagem dupla do StrictMode antes de o pai limpar.
+  const adoptedReturnedRef = useRef<{ text: string } | undefined>(undefined);
+  useEffect(() => {
+    if (!returned || returned === adoptedReturnedRef.current) return;
+    adoptedReturnedRef.current = returned;
+    const typed = textRef.current.trim() ? textRef.current : '';
+    const next = typed ? `${returned.text}\n\n${typed}` : returned.text;
+    textRef.current = next;
+    setText(next);
+    setSelection({ start: returned.text.length, end: returned.text.length });
+    onReturnedAdopted?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [returned]);
   // Repetir um envio recusado com anexo já enviado gera o mesmo texto: o snapshot não bloqueia.
   const composedText = pendingAttach?.uploadedPath
     ? withAttach(text.trim(), attachInsert(pendingAttach, pendingAttach.uploadedPath)) : text.trim();
   const submissionBlocksSend = !!submission && (isSubmitting(serverId, name) || submission.text.trim() !== composedText);
   const hasContent = text.trim().length > 0 || pendingAttach !== null;
-  const canSend = hasContent && !sending && !uploading && !readBlocked && !submissionBlocksSend;
-  const showStop = !!onStop && state === 'working';
-  const showSend = !showStop || hasContent || sending || uploading || filaCount > 0;
 
   // A primeira mensagem já pode ter chegado antes de esta tela montar: nunca criar outro eco.
   const sendText = useCallback(async (value: string, revision?: number, explicit = false): Promise<void> => {
@@ -464,18 +483,27 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
       ? m.composer_falha_envio() : m.nova_conversa_envio_incerto()));
   }, [serverId, name, firstInputId, draft, chat, persistText]);
 
-  const handleSend = useCallback(async () => {
+  // `steer`: Codex ou Claude sem terminal trabalhando — o texto entra no turno em curso, não na fila.
+  const handleSend = useCallback(async (steer = false) => {
     const trimmed = text.trim();
     const hasAttach = pendingAttach !== null;
     if (!trimmed && !hasAttach) return;
     if (submissionBlocksSend) return;
     if (sendingRef.current || sending || uploading) return;
+    // `/btw` não é mensagem nem entra na fila: abre a pergunta lateral. Só o Claude tem o comando.
+    const btw = !hasAttach && isClaude ? sideQuestionOf(trimmed) : null;
+    if (btw !== null) {
+      if (!persistText('')) return;
+      textRef.current = '';
+      setText('');
+      setSideQuestion(btw);
+      return;
+    }
     if (blockedRef.current || !persistText(textRef.current)) return;
     const sentRevision = draftRef.current!.revision;
     sendingRef.current = true;
     limparUndo();
     cancelarAuto();
-    setCmdFiltro(null);
     setSending(true);
     setError('');
     const stop = () => {
@@ -524,7 +552,14 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
       const snapshot = firstInputId ? readFirstInput(serverId, name) : null;
       const firstDraft = !!snapshot && snapshot.id === firstInputId && firstInputMessage(snapshot).trim() === finalText.trim();
       const sendToPairNow = !firstDraft && sendToPair && !!pairPeers?.length && !finalText.trimStart().startsWith('/');
-      if (sendToPairNow && pairPeers?.length) {
+      if (steer && !firstDraft) {
+        await submitConversationDraft(serverId, name, finalText, async () => {
+          groupPendingId = `pending-steer-${Date.now()}`;
+          chat.use.setState((current) => ({ pending: [...current.pending, { id: groupPendingId!, text: finalText }] }));
+          await steerSession(name, finalText);
+        }, sentRevision);
+        setSteerFeedback('');
+      } else if (sendToPairNow && pairPeers?.length) {
         const recipients = [name, ...pairPeers];
         await submitConversationDraft(serverId, name, finalText, async () => {
           groupPendingId = `pending-group-${Date.now()}`;
@@ -558,7 +593,7 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
       setSending(false);
       sendingRef.current = false;
     }
-  }, [text, sending, uploading, chat, sendText, limparUndo, cancelarAuto, pendingAttach, serverId, name, firstInputId, pairPeers, sendToPair, persistText, persistDraft, origin, submissionBlocksSend]);
+  }, [text, sending, uploading, chat, sendText, limparUndo, cancelarAuto, pendingAttach, serverId, name, firstInputId, pairPeers, sendToPair, persistText, persistDraft, origin, submissionBlocksSend, isClaude]);
 
   // auto-envio: contagem de 3s
   const iniciarAuto = useCallback(
@@ -830,12 +865,10 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
     setError('');
     try {
       const result = await steerSession(name);
-      if (result.queued_ids?.length) {
-        const sent = new Set(result.queued_ids);
-        chat.use.setState(s => ({ events: s.events.map(e => sent.has(e.id) ? { ...e, queued_delivered: true } : e) }));
-      }
-      if (isCodex && chat.use.getState().stateEvent?.state === 'working') {
-        setSteerFeedback((result.confirmed ?? 0) > 0 ? m.codex_orientar_recebido() : m.codex_orientar_sem_envio());
+      chat.applySteer(result);
+      if ((isCodex || headless) && chat.use.getState().stateEvent?.state === 'working') {
+        const sent = result.promoted || (result.confirmed ?? 0) > 0;
+        setSteerFeedback(!sent ? m.codex_orientar_sem_envio() : isCodex ? m.codex_orientar_recebido() : m.headless_orientar_recebido());
       }
     } catch (e) {
       const status = (e as { status?: number } | null)?.status;
@@ -844,13 +877,85 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
       steeringRef.current = false;
       setSteering(false);
     }
-  }, [name, isCodex, chat]);
+  }, [name, isCodex, headless, chat]);
 
   const isKimi = provider === 'kimi';
-  const showSteer = (isKimi || isCodex) && state === 'working' && (filaCount > 0 || steering);
+  // Fila que dá para mandar agora: Kimi (ctrl-s), Codex (turn/steer) e Claude sem terminal (stdin).
+  const queuePromotable = isKimi || isCodex || headless;
+  const showSteer = queuePromotable && state === 'working' && (filaCount > 0 || steering);
   useEffect(() => {
     if (state !== 'working') setSteerFeedback('');
   }, [state]);
+
+  // Gravando ou transcrevendo, o texto do campo ainda vai mudar: enviar agora mandaria a metade.
+  const canSend = hasContent && !sending && !uploading && !readBlocked && !submissionBlocksSend && !gravando && !transcribing;
+  // Sem terminal, pergunta pendente só tem saída pelo Parar (não há pane para mandar Esc).
+  const canInterrupt = state === 'working' || (headless && state === 'awaiting_input');
+  // Campo vazio: o Parar ocupa o lugar do Enviar (como no PC). Com texto ou fila os dois ficam,
+  // porque a mensagem entra na fila.
+  const showStop = !!onStop && canInterrupt;
+  const showSend = !showStop || hasContent || sending || uploading || filaCount > 0;
+  const showSteerText = (isCodex || headless) && state === 'working' && hasContent && !sendToPair;
+
+  const confirmStop = useCallback(() => {
+    Alert.alert(m.composer_interromper_claude(), m.composer_interromper_msg(), [
+      { text: m.comum_cancelar(), style: 'cancel' },
+      { text: m.composer_interromper(), style: 'destructive', onPress: () => {
+        void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+        onStop?.();
+      } },
+    ]);
+  }, [onStop]);
+
+  // ── Comandos: lista da folha e sugestões em linha enquanto a linha é só `/nome` ──
+  const slashQuery = comandoParcial(text);
+  const { commands, error: commandsError, retry: retryCommands } = useSessionCommands(name, provider, commandSheetOpen || slashQuery !== null);
+  const suggestions = useMemo(() => slashMatches(commands ?? [], slashQuery), [commands, slashQuery]);
+
+  const replaceText = useCallback((next: string) => {
+    textRef.current = next;
+    persistText(next);
+    setText(next);
+    setSelection({ start: next.length, end: next.length });
+  }, [persistText]);
+
+  // Preenche `/nome ` para a pessoa digitar o argumento. Texto já escrito (que não é o próprio
+  // comando sendo digitado) fica como argumento, em vez de sumir.
+  const fillCommand = useCallback((cmdName: string) => {
+    const kept = comandoParcial(textRef.current) === null ? textRef.current.trim() : '';
+    replaceText(kept ? `/${cmdName} ${kept}` : `/${cmdName} `);
+  }, [replaceText]);
+
+  // Comando sem argumento sai na hora, como o PWA: sem eco na conversa nem rascunho.
+  const runCommand = useCallback(async (cmd: string) => {
+    if (comandoParcial(textRef.current) !== null) replaceText('');
+    const btw = isClaude ? sideQuestionOf(cmd) : null;
+    if (btw !== null) { setSideQuestion(btw); return; }
+    const server = useServers.getState().servers.find((s) => s.id === origin.serverId);
+    if (!server) { setError(m.chat_servidor_removido()); return; }
+    setError('');
+    try {
+      await sendInputForServer(server, origin.name, cmd);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : m.composer_falha_envio());
+    }
+  }, [replaceText, isClaude, origin]);
+
+  const openSelector = useCallback((which: 'model' | 'effort') => {
+    setSelectorRequest((cur) => ({ which, n: (cur?.n ?? 0) + 1 }));
+  }, []);
+
+  // Sugestão tocada: model/effort abrem o seletor; com argumento, destrutivo ou no Codex preenche
+  // para revisar; o resto envia direto.
+  const handleSuggestPick = useCallback((c: CommandInfo) => {
+    if ((!isCodex || c.source === 'builtin') && (c.name === 'model' || c.name === 'effort')) {
+      replaceText('');
+      openSelector(c.name);
+      return;
+    }
+    if (isCodex || c.argumentHint || c.destructive) { fillCommand(c.name); return; }
+    void runCommand('/' + c.name);
+  }, [isCodex, replaceText, openSelector, fillCommand, runCommand]);
 
   const handleKeyPress = useCallback(
     (ev: NativeSyntheticEvent<TextInputKeyPressEventData>) => {
@@ -911,7 +1016,7 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
 
   return (
     <Glass variant="chrome" style={styles.glass}>
-        {/* A contagem da fila mora no selo do Enviar; aqui fica só a ação de mandar a fila agora. */}
+        {/* Fila esperando o turno: diz quantas e dá a saída de mandar agora (como o chip do PWA). */}
         {showSteer ? (
           <Pressable
             onPress={handleSteer}
@@ -919,10 +1024,17 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
             accessibilityState={{ disabled: steering, busy: steering }}
             style={[styles.steerBtn, { borderColor: theme.tokens.accent.base }]}
             accessibilityLabel={m.composer_fila_aria()}
+            accessibilityHint={m.composer_fila_titulo()}
             accessibilityRole="button"
           >
+            <Icon name="Hourglass" size={13} color={theme.tokens.accent.base} />
+            {!steering ? (
+              <Text style={[styles.steerCount, { color: theme.tokens.text.secondary }]}>
+                {`${m.composer_fila_contagem({ n: filaCount })} ·`}
+              </Text>
+            ) : null}
             <Text style={[styles.steerText, { color: theme.tokens.accent.base }]}>
-              {steering ? m.askq_enviando() : isCodex ? m.codex_orientar() : m.composer_fila_acao()}
+              {steering ? m.askq_enviando() : isCodex || headless ? m.codex_orientar() : m.composer_fila_acao()}
             </Text>
           </Pressable>
         ) : null}
@@ -951,6 +1063,9 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
           <AttachmentPreview attachment={pendingAttach} onRemove={handleRemoveAttach} disabled={sending} />
         ) : null}
 
+        <SlashSuggest matches={suggestions} onPick={handleSuggestPick}
+          error={slashQuery !== null ? commandsError : ''} onRetry={retryCommands} />
+
         {/* Campo em linha própria: dividindo a linha com os botões ele ficava só com a sobra. */}
         <View style={styles.inputWrap}>
           <MultilineInput
@@ -967,14 +1082,11 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
           />
         </View>
 
-        {/* Linha do app de PC: ferramentas pequenas à esquerda, o chip de modelo · nível ocupa a sobra
+        {/* Linha do app de PC: ferramentas pequenas à esquerda, modo · modelo · nível ocupam a sobra
             e Enviar/Parar fecham a linha, sempre à vista. */}
         <View style={styles.row}>
           <Pressable
-            onPress={() => {
-              commandsFromButtonRef.current = true;
-              setCmdFiltro('');
-            }}
+            onPress={() => setCommandSheetOpen(true)}
             disabled={sending || gravando}
             hitSlop={4}
             accessibilityState={{ disabled: sending || gravando }}
@@ -1028,11 +1140,28 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
               : <Icon name="Mic" size={18} color={theme.tokens.text.secondary} />}
           </Pressable>
 
-          <SessionSettingsButton serverId={serverId} name={name} />
+          <SessionSettingsButton serverId={serverId} name={name} provider={provider} headless={headless} openRequest={selectorRequest}
+                                 hidden={showSteerText} />
+
+          {/* Orientar: o texto digitado entra no turno em curso em vez de esperar na fila. */}
+          {showSteerText ? (
+            <Pressable
+              onPress={() => { void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); void handleSend(true); }}
+              disabled={!canSend}
+              hitSlop={{ top: 8, bottom: 8 }}
+              style={({ pressed }) => [styles.steerPill, { borderColor: theme.tokens.accent.base }, (pressed || !canSend) && styles.iconBtnDisabled]}
+              accessibilityRole="button"
+              accessibilityLabel={m.codex_orientar()}
+              accessibilityHint={m.codex_orientar_ajuda()}
+              accessibilityState={{ disabled: !canSend }}
+            >
+              <Text style={[styles.steerText, { color: theme.tokens.accent.base }]}>{m.codex_orientar()}</Text>
+            </Pressable>
+          ) : null}
 
           {showStop ? (
             <Pressable
-              onPress={() => { void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium); onStop?.(); }}
+              onPress={confirmStop}
               disabled={stopping}
               hitSlop={5}
               style={({ pressed }) => [styles.roundBtn, pressed && styles.iconBtnPressed, stopping && styles.iconBtnDisabled]}
@@ -1048,9 +1177,7 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
             </Pressable>
           ) : null}
 
-          {/* Trabalhando e sem nada para mandar, o Parar ocupa o lugar do Enviar (como no PC); com
-              texto ou fila, os dois ficam, porque a mensagem entra na fila. Desabilitado vira círculo
-              de superfície com seta apagada: o claro cheio sumiria no tema claro. */}
+          {/* Desabilitado vira círculo de superfície com seta apagada: o claro cheio sumiria no tema claro. */}
           {showSend ? (
             <Pressable
               onPress={() => { void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); void handleSend(); }}
@@ -1190,23 +1317,21 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
         ) : null}
 
         <CommandSheet
-          open={cmdFiltro !== null}
-          onClose={() => {
-            commandsFromButtonRef.current = false;
-            setCmdFiltro(null);
-          }}
-          name={name}
-          filtro={cmdFiltro ?? ''}
-          onEscolher={(display) => {
-            // Pelo botão, com texto já escrito, o comando entra na frente e o texto fica como argumento.
-            const kept = commandsFromButtonRef.current && comandoParcial(textRef.current) === null ? textRef.current.trim() : '';
-            commandsFromButtonRef.current = false;
-            const novo = kept ? `${display} ${kept}` : `${display} `;
-            setCmdFiltro(null);
-            setText(novo);
-            setSelection({ start: novo.length, end: novo.length });
-          }}
+          open={commandSheetOpen}
+          onClose={() => setCommandSheetOpen(false)}
+          commands={commands}
+          error={commandsError}
+          onRetry={retryCommands}
+          fillOnly={isCodex}
+          onCommand={(cmd) => void runCommand(cmd)}
+          onFill={fillCommand}
+          onOpenModelEffort={openSelector}
         />
+
+        {/* Monta só aberta: o histórico da pergunta lateral é lido a cada abertura. */}
+        {sideQuestion !== null ? (
+          <SideQuestionSheet open name={name} question={sideQuestion} onClose={() => setSideQuestion(null)} />
+        ) : null}
 
         <DictationStyleMenu open={styleMenuOpen} onClose={() => setStyleMenuOpen(false)} />
 
@@ -1234,6 +1359,9 @@ const styles = StyleSheet.create((theme) => ({
   },
   steerBtn: {
     alignSelf: 'flex-start',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
     minWidth: 44,
     minHeight: 44,
     justifyContent: 'center',
@@ -1245,6 +1373,18 @@ const styles = StyleSheet.create((theme) => ({
   steerText: {
     fontSize: theme.base.text.xs,
     fontWeight: '700',
+  },
+  steerCount: {
+    fontSize: theme.base.text.xs,
+    fontWeight: '600',
+  },
+  // Mesmo tamanho das pílulas da linha; o contorno de destaque diz que é ação, não ajuste.
+  steerPill: {
+    height: 28,
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderRadius: theme.base.radius.full,
+    paddingHorizontal: theme.base.space[2],
   },
   pairChip: {
     alignSelf: 'flex-start',

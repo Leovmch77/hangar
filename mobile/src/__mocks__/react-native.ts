@@ -26,6 +26,7 @@ export const Platform = { OS: 'android', select: (x: any) => x.android ?? x.defa
 export const TextInput = (props: any) => React.createElement('textarea', domProps(props));
 export const StyleSheet = { create: (x: any) => x, flatten: (x: any) => x };
 export const Modal = (props: any) => (props.visible === false ? null : React.createElement('div', null, props.children));
+export const Alert = { alert: (..._args: unknown[]) => {} };
 export const AppState = { currentState: 'active', addEventListener: () => ({ remove: () => {} }) };
 export const Keyboard ={ dismiss: () => {}, isVisible: () => false, addListener: () => ({ remove: () => {} }) };
 export const useWindowDimensions = () => ({ width: 390, height: 844, scale: 3, fontScale: 1 });

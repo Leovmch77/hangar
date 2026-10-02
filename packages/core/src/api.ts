@@ -134,6 +134,11 @@ export function uploadUrlNative(name: string, filename: string): string {
   return `${apiEnv().getBaseUrl()}/api/sessions/${encodeURIComponent(name)}/uploads/${encodeURIComponent(filename)}`;
 }
 
+// Par nativo do transcriptImageUrl: o token vai no header (fileAuthHeader), nunca na URL.
+export function transcriptImageUrlNative(name: string, id: string, idx: number): string {
+  return `${apiEnv().getBaseUrl()}/api/sessions/${encodeURIComponent(name)}/transcript-image/${encodeURIComponent(id)}/${idx}`;
+}
+
 // URL do mp3 gerado. `?token` porque <audio> nao manda header Authorization e o front vem de outra
 // origem (PWA servido pela VPS, backend no Tailscale) — cookie tambem nao viaja.
 export function ttsAudioUrl(path: string): string {
@@ -641,6 +646,12 @@ export async function selectOptionForServer(s: Server, name: string, option: num
     body: JSON.stringify({ option }),
   }, s);
   // Mesmo tratamento do sendInputForServer: o erro do picker tambem e renderizado no card.
+  if (!res.ok) throw new Error(`${res.status}: ${await errorDetail(res)}`);
+}
+
+/** submitSelected no servidor da sessão, com o erro legível como o selectOptionForServer. */
+export async function submitSelectedForServer(s: Server, name: string): Promise<void> {
+  const res = await apiFetchRes(`/api/sessions/${encodeURIComponent(name)}/select/submit`, { method: 'POST' }, s);
   if (!res.ok) throw new Error(`${res.status}: ${await errorDetail(res)}`);
 }
 

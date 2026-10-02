@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { AccessibilityInfo, ActivityIndicator, Platform, ScrollView, Text, View } from 'react-native';
 import { StyleSheet } from 'react-native-unistyles';
 import { useLocalSearchParams, useRouter } from 'expo-router';
@@ -23,7 +23,10 @@ import { OptionButtons } from '../../../../src/chat/OptionButtons';
 import { PendingPlan } from '../../../../src/chat/PendingPlan';
 import { SessionProblem } from '../../../../src/chat/SessionProblem';
 import { SessionPickerSheet } from '../../../../src/chat/SessionPickerSheet';
-import { pendingAskFromEvents, askPayloadFromToolUse, fetchSessionsForServer, isOrq, selectOptionForServer, interrupt, recarregarSessao } from '@hangar/core';
+import { SessionsDrawer } from '../../../../src/features/sessions/SessionsDrawer';
+import { ServerSheet } from '../../../../src/features/sessions/ServerSheet';
+import { PlanActions } from '../../../../src/chat/PlanActions';
+import { pendingAskFromEvents, askPayloadFromToolUse, fetchSessionsForServer, isOrq, selectOptionForServer, submitSelectedForServer, interrupt, recarregarSessao, implementCodexPlan, pendingProposedPlan, pendingReplyPlan, setPermissionMode } from '@hangar/core';
 import type { Provider, SessionInfo } from '@hangar/core';
 import * as m from '../../../../src/paraglide/messages';
 
@@ -42,6 +45,7 @@ export default function ChatScreen() {
   const [servidorSumiu, setServidorSumiu] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [serversOpen, setServersOpen] = useState(false);
   // A conversa rola por baixo da caixa do composer: sem conteúdo atrás, o vidro vira caixa chapada.
   const [dockH, setDockH] = useState(0);
   const existe = useServers((s) => s.servers.some((x) => x.id === serverId));
@@ -99,6 +103,9 @@ export default function ChatScreen() {
 
   // draft devolvido pelo cancelar do picker (Task 3)
   const [draft, setDraft] = useState<{ route: string; text: string } | null>(null);
+  // Pendente devolvido pelo Parar/cancelar. Objeto novo a cada devolução: o mesmo texto duas vezes
+  // ainda é adotado; o Composer avisa quando adotou e ele sai daqui.
+  const [returned, setReturned] = useState<{ route: string; value: { text: string } } | null>(null);
   const firstAttempt = useNewConversation((s) => s.attempts[serverId]);
   const firstBusy = useNewConversation((s) => !!s.busy[serverId]);
   const firstIssue = useNewConversation((s) => s.issues[serverId]);
@@ -242,6 +249,14 @@ export default function ChatScreen() {
     try { await selectOptionForServer(target, name, n); }
     catch (e) { optionError(e); }
   };
+  // Escolha múltipla: as marcadas já foram para o terminal, aqui só confirma.
+  const handleSubmitOptions = async () => {
+    if (!optionCurrent()) return;
+    const target = destino();
+    if (!target) return mostrarAviso(m.chat_servidor_removido());
+    try { await submitSelectedForServer(target, name); }
+    catch (e) { optionError(e); }
+  };
   // Resposta que chega depois de a rota trocar de conversa não mexe na conversa nova.
   const rotaAtual = useRef(rota);
   rotaAtual.current = rota;
@@ -256,7 +271,17 @@ export default function ChatScreen() {
     const tok = { rota };
     stopEmVoo.current = tok;
     setStopVivo(tok);
-    void interrupt(name, false, target)
+    // O Claude Code mantém a mensagem enfileirada no campo dele ao interromper: ela volta para o
+    // composer (editável) e o segundo Esc limpa o terminal. Sem pendente, interrupção simples.
+    const cur = chat.use.getState().pending;
+    const last = cur.length ? cur[cur.length - 1] : null;
+    void interrupt(name, !!last, target)
+      .then(() => {
+        if (!last) return;
+        chat.use.setState((live) => ({ pending: live.pending.filter((p) => p.id !== last.id) }));
+        // Só depois do Esc confirmado: com falha a mensagem segue na fila e voltaria em dobro.
+        setReturned({ route: rota, value: { text: last.text } });
+      })
       .catch((e) => {
         if (rotaAtual.current === rota) mostrarAviso(e);
       })
@@ -269,6 +294,8 @@ export default function ChatScreen() {
   // Recarregar (só Claude sem terminal): recicla o processo na mesma conversa pra reler MCP/hooks/
   // settings. O motivo vem do backend no `state`; sem motivo a ação fica só no "⋯".
   const recarregavel = currentSession?.provider === 'claude' && !!(stateEvent?.headless ?? currentSession?.headless);
+  // Só o stream da sessão diz `dead`: aí não há para quem escrever, o composer vira o aviso.
+  const dead = stateEvent?.state === 'dead';
   const [recarregando, setRecarregando] = useState(false);
   const recarregarBloqueado = stateEvent?.state !== 'idle' || recarregando;
   const recarregar = () => {
@@ -282,20 +309,55 @@ export default function ChatScreen() {
     if (!target) return mostrarAviso(m.chat_servidor_removido());
     const cur = chat.use.getState().pending;
     const last = cur.length ? cur[cur.length - 1] : null;
-    // Recupera o texto no toque; um ACK tardio não sobrescreve o que a pessoa digitou depois.
-    if (last) setDraft({ route: rota, text: last.text });
+    // Recupera o texto no toque, somado ao que já estava no campo.
+    if (last) setReturned({ route: rota, value: { text: last.text } });
     try {
       await interrupt(name, !!last, target);
       if (last) chat.use.setState((live) => ({ pending: live.pending.filter((p) => p.id !== last.id) }));
     } catch (e) { optionError(e); }
   };
+  const headless = !!(stateEvent?.headless ?? currentSession?.headless);
+  // Plano à espera de decisão: o do Codex vem marcado na resposta; no Claude sem terminal em modo
+  // plano ninguém pergunta "implementar?", então a última resposta do turno é o plano.
+  const decidablePlan = useMemo(() => {
+    if (provider === 'codex') return pendingProposedPlan(events);
+    if (provider === 'claude' && headless && stateEvent?.claude_permission_mode === 'plan' && stateEvent.state === 'idle') {
+      return pendingReplyPlan(events);
+    }
+    return null;
+  }, [provider, headless, events, stateEvent?.claude_permission_mode, stateEvent?.state]);
+  const implementPlan = async (plan: string) => {
+    const live = chat.use.getState();
+    if (live.stateEvent?.state !== 'idle' || plan !== decidablePlan?.plan) throw new Error(m.chat_plan_indisponivel());
+    if (provider === 'codex') {
+      await implementCodexPlan(name);
+      return;
+    }
+    await setPermissionMode(name, live.stateEvent?.claude_previous_non_plan || 'acceptEdits');
+    try {
+      await chat.send(m.chat_plan_pedido());
+    } catch (err) {
+      // Pedido não saiu: a sessão não pode ficar fora do modo plano sem ter implementado nada.
+      try {
+        await setPermissionMode(name, 'plan');
+      } catch (revertErr) {
+        console.warn('plan: revert to plan mode failed', name, revertErr);
+        throw new Error(m.native_plan_send_failed_stuck({ reason: err instanceof Error ? err.message : String(err) }));
+      }
+      throw err;
+    }
+  };
   // O plano vem antes das ações: a pessoa lê o que vai aprovar. Sem ações, fica só o plano.
   const planPending = stateEvent?.claude_plan_pending;
-  const optionsSlot = showOptions || planPending || aviso ? (
+  const optionsSlot = showOptions || planPending || decidablePlan || aviso ? (
     <View style={styles.slot}>
       {planPending ? <PendingPlan {...planPending} /> : null}
+      {decidablePlan && !planPending ? (
+        <PlanActions key={decidablePlan.id} plan={decidablePlan.plan} onImplement={implementPlan}
+                     disabled={stateEvent?.state !== 'idle' || pending.length > 0} />
+      ) : null}
       {showOptions ? (
-        <OptionButtons key={optionRequest.generation} question={stateEvent!.question!} options={stateEvent!.options!} onSelect={handleSelectOption} onCancel={handleCancelOptions} />
+        <OptionButtons key={optionRequest.generation} question={stateEvent!.question!} options={stateEvent!.options!} onSelect={handleSelectOption} onCancel={handleCancelOptions} onSubmit={handleSubmitOptions} />
       ) : null}
       {aviso ? <Text style={styles.aviso} accessibilityRole="alert">{aviso}</Text> : null}
     </View>
@@ -304,154 +366,177 @@ export default function ChatScreen() {
   const problem = codexPreThread ? currentSession.problema : stateEvent?.problema;
   const problemDetail = codexPreThread ? null : stateEvent?.problema_detalhe;
 
+  // Na gaveta, toda navegação da lista sai deste chat (dismissTo) antes de ela empurrar o destino:
+  // a pilha fica sempre início → um chat, e "Nova conversa" (que só fecha a gaveta) leva ao início.
   return (
-    <Screen>
-      <ChatHeader
-        name={name}
-        state={codexPreThread ? currentSession.state : stateEvent?.state ?? null}
-        onBack={() => {
-          if (router.canGoBack()) router.back();
-          else router.replace('/');
-        }}
-        onMore={() => setMoreOpen(true)}
-        onTitlePress={() => setPickerOpen(true)}
-        chipPlan={planSession ? <PlanChip session={planSession} onPress={() => router.push(`/s/${serverId}/${name}/activity` as never)} /> : null}
-        chipLoop={
-          stateEvent?.loop_status ? (
-            <LoopChip
-              status={stateEvent.loop_status}
-              iter={stateEvent.loop_iter}
-              max={stateEvent.loop_max}
-              onPress={() => router.push(`/s/${serverId}/${name}/loop` as never)}
-            />
-          ) : null
-        }
-      />
-      <MoreSheet open={moreOpen} onClose={() => setMoreOpen(false)} serverId={serverId} name={name} orq={orq}
-                 provider={provider} semTerminal={!!(stateEvent?.headless ?? currentSession?.headless)} temPergunta={!!askPayload}
-                 recarregar={recarregavel ? { bloqueado: recarregarBloqueado, onPress: recarregar } : undefined} />
-      <SessionPickerSheet open={pickerOpen} onClose={() => setPickerOpen(false)} atual={name} />
-      {/* Lista e Composer dentro do mesmo KAV: ambos sobem com o teclado e a lista termina acima do composer */}
-      <KeyboardAvoidingView behavior="padding" automaticOffset style={styles.body}>
-        {stateEvent?.codex_buffering ? (
-          <Text style={styles.notice} accessibilityLiveRegion="polite">{m.chat_codex_buffering()}</Text>
-        ) : null}
-        {handoffError?.route === rota || firstInput && firstInput.phase !== 'sent' && firstIssue ? (
-          <Text style={styles.aviso} accessibilityRole="alert">
-            {handoffError?.route === rota ? handoffError.text : firstIssue?.message}
-          </Text>
-        ) : firstInput?.phase === 'send_unknown' ? (
-          <Text style={styles.aviso} accessibilityRole="alert">{m.nova_conversa_envio_incerto()}</Text>
-        ) : null}
-        {!servidorSumiu && problem ? (
-          <View style={styles.problem}><SessionProblem problem={problem} detail={problemDetail} /></View>
-        ) : null}
-        <View style={[styles.inner, { marginBottom: -Math.max(0, dockH - BORDA_DOCK) }]}>
-          {servidorSumiu ? (
-            <View style={styles.erro}>
-              <Text style={styles.hint}>{m.chat_servidor_removido()}</Text>
-              <Text
-                style={styles.retry}
-                onPress={() => {
-                  if (router.canGoBack()) router.back();
-                  else router.replace('/');
-                }}
-                accessibilityRole="button"
-              >
-                {m.comum_voltar()}
-              </Text>
-            </View>
-          ) : fetchedSession === null ? (
-            <View style={styles.erro}>
-              <Text style={styles.hint}>{m.chat_sessao_encerrada()}</Text>
-              <Text style={styles.retry} onPress={() => router.replace('/')} accessibilityRole="button">
-                {m.chat_voltar_sessoes()}
-              </Text>
-            </View>
-          ) : codexPreThread ? (
-            <View style={styles.erro}>
-              <Text style={styles.hint}>{m.chat_sem_thread_codex()}</Text>
-              {currentSession.startup_steps?.length ? (
-                <ScrollView style={styles.steps} accessibilityLiveRegion="polite">
-                  {currentSession.startup_steps.map((step, index, steps) => (
-                    <Text key={index} style={[styles.step,
-                      index === steps.length - 1 && currentSession.state === 'working' && styles.currentStep]}>
-                      {index + 1}. {step}
-                    </Text>
-                  ))}
-                </ScrollView>
-              ) : (
-              <Text style={styles.hint} accessibilityLiveRegion="polite">
-                {currentSession.label || currentSession.question || m.chat_sem_thread_codex_hint()}
-              </Text>
-              )}
-              <Text style={styles.retry} accessibilityRole="button"
-                onPress={() => router.push(`/s/${serverId}/${name}/terminal` as never)}>
-                {m.chat_abrir_terminal_codex()}
-              </Text>
-            </View>
-          ) : loading && !error ? (
-            <View style={styles.carregando}>
-              <ActivityIndicator />
-              <Text style={styles.hint}>{m.chat_carregando_historico()}</Text>
-            </View>
-          ) : error ? (
-            <View style={styles.erro}>
-              <Text style={styles.hint}>{error}</Text>
-              <Text style={styles.retry} onPress={chat.retry} accessibilityRole="button">
-                {m.lista_tentar_novamente()}
-              </Text>
-            </View>
-          ) : (
-            <MessageList
-              events={events}
-              preview={preview}
-              previewMd={previewMd}
-              previewFull={previewFull}
-              session={currentSession}
-              olderFailed={olderFailed}
-              onLoadOlder={chat.loadOlder}
-              pending={pending}
-              optionsSlot={optionsSlot}
-              sessionName={name}
-              serverId={serverId}
-              bottomInset={dockH}
-            />
-          )}
-        </View>
-        <View onLayout={(e) => setDockH(e.nativeEvent.layout.height)}>
-        {sseRecusado && !servidorSumiu && !codexPreThread ? (
-          <View style={styles.sseRecusado} accessibilityRole="alert">
-            <Text style={styles.sseRecusadoTexto}>{m.chat_sse_recusado()}</Text>
-            <Text style={styles.retry} onPress={chat.retry} accessibilityRole="button">
-              {m.chat_sse_tentar()}
+    <Screen edges={[]}>
+      <SessionsDrawer onClose={() => router.dismissTo('/')} onOpenServers={() => setServersOpen(true)}>
+        <ChatHeader
+          name={name}
+          state={codexPreThread ? currentSession.state : stateEvent?.state ?? null}
+          onBack={() => {
+            if (router.canGoBack()) router.back();
+            else router.replace('/');
+          }}
+          onMore={() => setMoreOpen(true)}
+          onTitlePress={() => setPickerOpen(true)}
+          chipPlan={planSession ? <PlanChip session={planSession} onPress={() => router.push(`/s/${serverId}/${name}/activity` as never)} /> : null}
+          chipLoop={
+            stateEvent?.loop_status ? (
+              <LoopChip
+                status={stateEvent.loop_status}
+                iter={stateEvent.loop_iter}
+                max={stateEvent.loop_max}
+                onPress={() => router.push(`/s/${serverId}/${name}/loop` as never)}
+              />
+            ) : null
+          }
+        />
+        <MoreSheet open={moreOpen} onClose={() => setMoreOpen(false)} serverId={serverId} name={name} orq={orq}
+                   provider={provider} semTerminal={!!(stateEvent?.headless ?? currentSession?.headless)} temPergunta={!!askPayload}
+                   recarregar={recarregavel ? { bloqueado: recarregarBloqueado, onPress: recarregar } : undefined} />
+        <SessionPickerSheet open={pickerOpen} onClose={() => setPickerOpen(false)} atual={name} />
+        {/* Lista e Composer dentro do mesmo KAV: ambos sobem com o teclado e a lista termina acima do composer */}
+        <KeyboardAvoidingView behavior="padding" automaticOffset style={styles.body}>
+          {stateEvent?.codex_buffering ? (
+            <Text style={styles.notice} accessibilityLiveRegion="polite">{m.chat_codex_buffering()}</Text>
+          ) : null}
+          {handoffError?.route === rota || firstInput && firstInput.phase !== 'sent' && firstIssue ? (
+            <Text style={styles.aviso} accessibilityRole="alert">
+              {handoffError?.route === rota ? handoffError.text : firstIssue?.message}
             </Text>
+          ) : firstInput?.phase === 'send_unknown' ? (
+            <Text style={styles.aviso} accessibilityRole="alert">{m.nova_conversa_envio_incerto()}</Text>
+          ) : null}
+          {!servidorSumiu && problem ? (
+            <View style={styles.problem}><SessionProblem problem={problem} detail={problemDetail} /></View>
+          ) : null}
+          <View style={[styles.inner, { marginBottom: -Math.max(0, dockH - BORDA_DOCK) }]}>
+            {servidorSumiu ? (
+              <View style={styles.erro}>
+                <Text style={styles.hint}>{m.chat_servidor_removido()}</Text>
+                <Text
+                  style={styles.retry}
+                  onPress={() => {
+                    if (router.canGoBack()) router.back();
+                    else router.replace('/');
+                  }}
+                  accessibilityRole="button"
+                >
+                  {m.comum_voltar()}
+                </Text>
+              </View>
+            ) : fetchedSession === null ? (
+              <View style={styles.erro}>
+                <Text style={styles.hint}>{m.chat_sessao_encerrada()}</Text>
+                <Text style={styles.retry} onPress={() => router.replace('/')} accessibilityRole="button">
+                  {m.chat_voltar_sessoes()}
+                </Text>
+              </View>
+            ) : codexPreThread ? (
+              <View style={styles.erro}>
+                <Text style={styles.hint}>{m.chat_sem_thread_codex()}</Text>
+                {currentSession.startup_steps?.length ? (
+                  <ScrollView style={styles.steps} accessibilityLiveRegion="polite">
+                    {currentSession.startup_steps.map((step, index, steps) => (
+                      <Text key={index} style={[styles.step,
+                        index === steps.length - 1 && currentSession.state === 'working' && styles.currentStep]}>
+                        {index + 1}. {step}
+                      </Text>
+                    ))}
+                  </ScrollView>
+                ) : (
+                <Text style={styles.hint} accessibilityLiveRegion="polite">
+                  {currentSession.label || currentSession.question || m.chat_sem_thread_codex_hint()}
+                </Text>
+                )}
+                <Text style={styles.retry} accessibilityRole="button"
+                  onPress={() => router.push(`/s/${serverId}/${name}/terminal` as never)}>
+                  {m.chat_abrir_terminal_codex()}
+                </Text>
+              </View>
+            ) : loading && !error ? (
+              <View style={styles.carregando}>
+                <ActivityIndicator />
+                <Text style={styles.hint}>{m.chat_carregando_historico()}</Text>
+              </View>
+            ) : error ? (
+              <View style={styles.erro}>
+                <Text style={styles.hint}>{error}</Text>
+                <Text style={styles.retry} onPress={chat.retry} accessibilityRole="button">
+                  {m.lista_tentar_novamente()}
+                </Text>
+              </View>
+            ) : (
+              <MessageList
+                events={events}
+                preview={preview}
+                previewMd={previewMd}
+                previewFull={previewFull}
+                session={currentSession}
+                olderFailed={olderFailed}
+                onLoadOlder={chat.loadOlder}
+                pending={pending}
+                optionsSlot={optionsSlot}
+                sessionName={name}
+                serverId={serverId}
+                bottomInset={dockH}
+              />
+            )}
           </View>
-        ) : null}
-        {!servidorSumiu && !askOpen && askPayload?.provider === 'codex' ? (
-          <Text style={styles.retry} onPress={() => chat.openAsk(askPayload)} accessibilityRole="button">
-            {m.ask_perguntas()}
-          </Text>
-        ) : null}
-        {!servidorSumiu ? <TuiPill serverId={serverId} name={name} overlay={!!stateEvent?.overlay} login={!!stateEvent?.login} /> : null}
-        {!servidorSumiu && recarregavel ? <RecarregarPill motivo={stateEvent?.recarregar_motivo} bloqueado={recarregarBloqueado} onPress={recarregar} /> : null}
-        {!servidorSumiu && !codexPreThread && fetchedSession !== null
-          ? orq
-            ? <OrqFooter serverId={serverId} arbiter={currentSession?.orq_arbiter} />
-            : (
-              <>
-                <Composer key={rota} serverId={serverId} name={name} draft={draft?.route === rota ? draft.text : undefined}
-                          firstInputId={firstInput?.id} firstInputSent={firstInput?.phase === 'sent'} sessionProvider={provider}
-                          onStop={handleStop} stopping={stopping} />
-              </>
-            )
-          : null}
-        </View>
-        {/* Linha de status do app de PC, colada embaixo da caixa e fora da área que a conversa cobre. */}
-        {!servidorSumiu && !codexPreThread && fetchedSession !== null && !orq
-          ? <ComposerStatusLine key={`status:${rota}`} serverId={serverId} name={name} />
-          : null}
-      </KeyboardAvoidingView>
+          <View onLayout={(e) => setDockH(e.nativeEvent.layout.height)}>
+          {sseRecusado && !servidorSumiu && !codexPreThread ? (
+            <View style={styles.sseRecusado} accessibilityRole="alert">
+              <Text style={styles.sseRecusadoTexto}>{m.chat_sse_recusado()}</Text>
+              <Text style={styles.retry} onPress={chat.retry} accessibilityRole="button">
+                {m.chat_sse_tentar()}
+              </Text>
+            </View>
+          ) : null}
+          {!servidorSumiu && !askOpen && askPayload?.provider === 'codex' ? (
+            <Text style={styles.retry} onPress={() => chat.openAsk(askPayload)} accessibilityRole="button">
+              {m.ask_perguntas()}
+            </Text>
+          ) : null}
+          {!servidorSumiu ? <TuiPill serverId={serverId} name={name} overlay={!!stateEvent?.overlay} login={!!stateEvent?.login} /> : null}
+          {!servidorSumiu && recarregavel ? <RecarregarPill motivo={stateEvent?.recarregar_motivo} bloqueado={recarregarBloqueado} onPress={recarregar} /> : null}
+          {!servidorSumiu && !codexPreThread && fetchedSession !== null
+            ? dead
+              ? (
+                <View style={styles.deadFooter}>
+                  <Text style={styles.deadText}>{m.chat_sessao_encerrada()}</Text>
+                  <Text
+                    style={styles.retry}
+                    onPress={() => {
+                      if (router.canGoBack()) router.back();
+                      else router.replace('/');
+                    }}
+                    accessibilityRole="button"
+                  >
+                    {m.comum_voltar()}
+                  </Text>
+                </View>
+              )
+              : orq
+              ? <OrqFooter serverId={serverId} arbiter={currentSession?.orq_arbiter} />
+              : (
+                <>
+                  <Composer key={rota} serverId={serverId} name={name} draft={draft?.route === rota ? draft.text : undefined}
+                            returned={returned?.route === rota ? returned.value : undefined}
+                            onReturnedAdopted={() => setReturned((cur) => (cur?.route === rota ? null : cur))}
+                            firstInputId={firstInput?.id} firstInputSent={firstInput?.phase === 'sent'} sessionProvider={provider}
+                            headless={headless} onStop={handleStop} stopping={stopping} />
+                </>
+              )
+            : null}
+          </View>
+          {/* Linha de status do app de PC, colada embaixo da caixa e fora da área que a conversa cobre. */}
+          {!servidorSumiu && !codexPreThread && fetchedSession !== null && !orq && !dead
+            ? <ComposerStatusLine key={`status:${rota}`} serverId={serverId} name={name} />
+            : null}
+        </KeyboardAvoidingView>
+      </SessionsDrawer>
+      <ServerSheet open={serversOpen} onFechar={() => setServersOpen(false)} />
     </Screen>
   );
 }
@@ -532,6 +617,17 @@ const styles = StyleSheet.create((theme) => ({
     color: theme.tokens.status.error,
     textAlign: 'center',
     paddingVertical: theme.base.space[1],
+  },
+  deadFooter: {
+    alignItems: 'center',
+    gap: theme.base.space[1],
+    paddingVertical: theme.base.space[3],
+    paddingHorizontal: theme.base.space[4],
+  },
+  deadText: {
+    fontSize: theme.base.text.sm,
+    color: theme.tokens.text.muted,
+    textAlign: 'center',
   },
   notice: {
     fontSize: theme.base.text.sm,

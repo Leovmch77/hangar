@@ -1,7 +1,9 @@
-import { useCallback, useMemo, useRef, type ReactNode } from 'react';
-import { Text, View, useWindowDimensions } from 'react-native';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { Pressable, Text, View, useWindowDimensions, type NativeScrollEvent, type NativeSyntheticEvent } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
-import { LegendList } from '@legendapp/list/react-native';
+import { LegendList, type LegendListRef } from '@legendapp/list/react-native';
+import { Icon } from '../ui/Icon';
+import { superficie } from '../theme/superficie';
 import { UserBubble } from './UserBubble';
 import { AssistantBubble } from './AssistantBubble';
 import { PreviewBubble } from './PreviewBubble';
@@ -37,10 +39,11 @@ interface Props {
   bottomInset?: number;
 }
 
-// Bolha sem texto não vira item nenhum. O tool_result é descartado pelo agruparConversa (entra na
-// linha do tool_use pareado), então aqui sobra só o vazio.
+// Bolha sem texto não vira item nenhum, salvo a de imagem colada no terminal (só `image_count`).
+// O tool_result é descartado pelo agruparConversa (entra na linha do tool_use pareado).
 function visivel(ev: ChatEvent): boolean {
-  if (ev.kind === 'user_msg' || ev.kind === 'assistant_msg') return !!ev.text;
+  if (ev.kind === 'user_msg') return !!ev.text || !!ev.image_count;
+  if (ev.kind === 'assistant_msg') return !!ev.text;
   return true;
 }
 
@@ -131,7 +134,7 @@ export function MessageList({
               </View>
             );
           }
-          return <UserBubble text={ev.text ?? ''} sessionName={sessionName} ts={ev.ts} />;
+          return <UserBubble text={ev.text ?? ''} sessionName={sessionName} ts={ev.ts} eventId={ev.id} imageCount={ev.image_count ?? 0} />;
         }
         if (ev.kind === 'assistant_msg') {
           return <AssistantBubble text={ev.text ?? ''} sessionName={sessionName} serverId={serverId} ts={ev.ts} />;
@@ -157,6 +160,25 @@ export function MessageList({
     }
   }, [resultDe, abrirDetalhe, sessionName, serverId, look, tasks]);
 
+  // "Ir pro fim" (como o web): aparece com mais de uma tela entre o que se vê e o fim. Mensagem que
+  // chega nesse meio-tempo muda o botão pra aviso, senão a conversa anda sem a pessoa saber.
+  const lista = useRef<LegendListRef>(null);
+  const [longeDoFim, setLongeDoFim] = useState(false);
+  const vistoAte = useRef(events.length);
+  useEffect(() => {
+    if (!longeDoFim) vistoAte.current = events.length;
+  }, [longeDoFim, events.length]);
+  const temNovas = longeDoFim && events.length > vistoAte.current;
+  const onScroll = useCallback((e: NativeSyntheticEvent<NativeScrollEvent>) => {
+    const { contentOffset, contentSize, layoutMeasurement } = e.nativeEvent;
+    const falta = contentSize.height - contentOffset.y - layoutMeasurement.height;
+    setLongeDoFim(falta > layoutMeasurement.height);
+  }, []);
+  const irProFim = useCallback(() => {
+    setLongeDoFim(false);
+    void lista.current?.scrollToEnd({ animated: true });
+  }, []);
+
   // Largura da coluna (Aparência › Texto da conversa): abaixo de 100% a conversa estreita no meio.
   const recuo = ((width - 2 * theme.base.space[4]) * (1 - theme.conversa.coluna)) / 2;
   const elevado = hexParaRgb(theme.tokens.bg.elevated);
@@ -171,6 +193,9 @@ export function MessageList({
       />
     ) : null}
     <LegendList
+      ref={lista}
+      onScroll={onScroll}
+      scrollEventThrottle={100}
       data={data}
       keyExtractor={(i) => i.id}
       renderItem={renderItem}
@@ -181,6 +206,8 @@ export function MessageList({
       maintainScrollAtEnd
       maintainVisibleContentPosition
       keyboardShouldPersistTaps="handled"
+      // Sem isto o teclado aberto não tinha como fechar no chat.
+      keyboardDismissMode="on-drag"
       onStartReached={onLoadOlder}
       onStartReachedThreshold={1}
       contentContainerStyle={[styles.content, recuo > 0 && { paddingHorizontal: theme.base.space[4] + recuo }]}
@@ -208,6 +235,17 @@ export function MessageList({
       }
       accessibilityLabel={m.msg_aria_mensagens()}
     />
+    {longeDoFim ? (
+      <Pressable
+        onPress={irProFim}
+        style={[styles.toBottom, { bottom: bottomInset + theme.base.space[3] }, temNovas && { borderColor: theme.tokens.accent.base }]}
+        accessibilityRole="button"
+        accessibilityLabel={temNovas ? m.msg_novas_abaixo() : m.msg_ir_ultima()}
+      >
+        <Icon name="ChevronDown" size={20} color={temNovas ? theme.tokens.accent.base : theme.tokens.text.secondary} />
+        {temNovas ? <View style={[styles.novasDot, { backgroundColor: theme.tokens.accent.base, borderColor: theme.tokens.bg.base }]} /> : null}
+      </Pressable>
+    ) : null}
     <ToolDetailSheet ref={detail} resultOf={resultDe} />
     </View>
   );
@@ -244,5 +282,26 @@ const styles = StyleSheet.create((theme) => ({
   },
   pendingSolid: {
     opacity: 1,
+  },
+  toBottom: {
+    position: 'absolute',
+    right: theme.base.space[4],
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: theme.tokens.border.default,
+    backgroundColor: superficie(theme, 0.9),
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  novasDot: {
+    position: 'absolute',
+    top: -2,
+    right: -2,
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    borderWidth: 2,
   },
 }));
