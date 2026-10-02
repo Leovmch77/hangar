@@ -275,6 +275,34 @@ def test_whoami_sem_socket_conhecido_nao_compara(monkeypatch, ligado):
     assert asyncio.run(pb.whoami(corpo))["sessao"] == "s1"
 
 
+PSMUX_TMUX = "/tmp/psmux-{}/default,59317,0"
+
+
+@pytest.fixture
+def psmux(monkeypatch):
+    import subprocess
+    from app import quem_chama, tmux
+    monkeypatch.setattr(tmux, "_run", lambda args, input=None: subprocess.CompletedProcess(
+        args, 0, stdout="3568 cx-a\n17392 cx-b\n", stderr=""))
+    # `%1` existe em toda sessão do psmux; se o pane fosse consultado, cairia em cx-a.
+    monkeypatch.setattr(quem_chama, "_por_pane", lambda pane: "cx-a")
+    monkeypatch.setattr(quem_chama, "_por_nome", lambda nome: nome if nome == "cx-c" else None)
+
+
+def test_whoami_psmux_resolve_pelo_pid_do_servidor_e_ignora_o_pane(psmux, ligado):
+    corpo = pb.WhoamiBody(chave=pb.machine_key(), pane="%1", tmux=PSMUX_TMUX.format(17392))
+    assert asyncio.run(pb.whoami(corpo)) == {"sessao": "cx-b", "token": pb.mint("cx-b"),
+                                             "origem": "psmux-pid"}
+
+
+def test_whoami_psmux_pid_desconhecido_cai_no_nome(psmux, ligado):
+    def corpo(nome):
+        return pb.WhoamiBody(chave=pb.machine_key(), pane="%1", nome=nome, tmux=PSMUX_TMUX.format(999))
+    assert asyncio.run(pb.whoami(corpo("cx-c")))["sessao"] == "cx-c"
+    assert asyncio.run(pb.whoami(corpo(None))) == {"sessao": None}
+    assert asyncio.run(pb.whoami(corpo("morta"))) == {"sessao": None}
+
+
 def test_whoami_recusa_chave_errada(ligado):
     with pytest.raises(HTTPException) as e:
         asyncio.run(pb.whoami(pb.WhoamiBody(chave="x", pane="%3")))

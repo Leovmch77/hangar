@@ -248,6 +248,22 @@ def _sessao_do_tmux(tmux_env: str) -> str | None:
     return None
 
 
+_PSMUX_PID = re.compile(r"psmux-(\d+)\b")
+
+
+def _sessao_do_psmux(pid: str) -> str | None:
+    """No psmux cada sessão tem servidor próprio, e o pid no `TMUX` é o dele (sobrevive ao rename)."""
+    from app import tmux
+    cp = tmux._run(["tmux", "list-sessions", "-F", "#{pid} #{session_name}"])
+    if cp.returncode != 0:
+        return None
+    for linha in (cp.stdout or "").splitlines():
+        spid, _, nome = linha.strip().partition(" ")
+        if spid == pid:
+            return nome
+    return None
+
+
 def esquecer(name: str) -> None:
     with _lock:
         _waiters.pop(name, None)
@@ -549,8 +565,8 @@ class WhoamiBody(BaseModel):
 
 @plugin_router.post("/whoami", dependencies=[Depends(require_loopback)])
 async def whoami(body: WhoamiBody):
-    """Sessão aberta fora do Hangar descobre nome e token. Só da própria máquina; pane único resolve,
-    o id da sessão do tmux desempata o pane repetido do psmux, e o nome só vale sem pane."""
+    """Sessão aberta fora do Hangar descobre nome e token. Só da própria máquina; no psmux resolve o
+    pid do servidor da sessão (depois o nome); no tmux, pane único, o id da sessão e o nome sem pane."""
     if not secrets.compare_digest(machine_key(), body.chave):
         raise HTTPException(403, detail="chave do plugin invalida")
     nome, origem = await _whoami(body)
@@ -562,12 +578,23 @@ async def _whoami(body: WhoamiBody) -> tuple[str | None, str]:
     # O interruptor desliga o caminho inteiro: sessão nenhuma descobre a ponte com ele desligado.
     if not await asyncio.to_thread(ligado):
         return None, "desligado"
+    from app import quem_chama
+    psmux = _PSMUX_PID.search((body.tmux or "").split(",")[0])
+    if psmux:
+        # Pane fica de fora: no psmux todo pane é `%1`, e com uma sessão só ele casaria com a errada.
+        nome = await asyncio.to_thread(_sessao_do_psmux, psmux.group(1))
+        if nome:
+            return nome, "psmux-pid"
+        # O plugin sempre manda pane, então o `CP_SESSION_NAME` do wrapper só é ouvido aqui.
+        try:
+            return await asyncio.to_thread(quem_chama.resolver, {quem_chama.CAB_NOME: body.nome or ""})
+        except quem_chama.SessaoDesconhecida:
+            return None, "psmux-pid"
     if body.tmux:
         meu = await asyncio.to_thread(_socket_do_tmux)
         if meu and body.tmux.split(",")[0] != meu:
             # Outro servidor tmux: o mesmo pane id lá é outra sessão, não uma do Hangar.
             return None, "outro-socket"
-    from app import quem_chama
     if body.pane:
         try:
             return await asyncio.to_thread(quem_chama.resolver, {quem_chama.CAB_PANE: body.pane})
