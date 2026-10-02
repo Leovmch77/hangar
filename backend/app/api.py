@@ -399,9 +399,6 @@ async def _lifespan(app: FastAPI):
 
     # Primeira varredura na subida já religa o túnel se há convite ativo.
     share_task = asyncio.create_task(share_api.sweep_loop(), name="share-sweep")
-    # Em tarefa: o download dos binários na primeira vez não pode segurar a subida.
-    from app import connect as connect_mod
-    connect_task = asyncio.create_task(connect_mod.start(), name="connect-start")
 
     # Boot-resume dos loops: flags em memoria (tick em voo) morrem no restart; o sidecar e a verdade.
     # Loop ACTIVE cuja sessao existe e esta idle -> reagenda o tick; sessao sumida -> failed.
@@ -463,6 +460,10 @@ async def _lifespan(app: FastAPI):
     app.state.omp_plugin_sync = omp_sync
     await omp_sync.start()
     from app import mcp_server
+    # Em tarefa: o download dos binários na primeira vez não pode segurar a subida. Criada colada no
+    # `try`: falha no meio da subida não pode deixar o frpc e o Caddy sem quem os pare.
+    from app import connect as connect_mod
+    connect_task = asyncio.create_task(connect_mod.start(), name="connect-start")
     try:
         async with mcp_server.lifespan():
             yield

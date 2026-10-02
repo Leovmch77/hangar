@@ -230,14 +230,16 @@ def _kill(pid: int) -> None:
         pass
 
 
-def _kill_leftover(child: _Child) -> None:
-    # No Windows o filho sobrevive à morte do backend; sobrando, ele seguraria a 18443. Só mata se o
-    # executável for exatamente o nosso: pid reaproveitado pode ser qualquer coisa.
+def _kill_leftover(name: str) -> None:
+    # No Windows o filho sobrevive à morte do backend; sobrando, ele seguraria a 18443 e o nome no
+    # frps. Só mata se o executável for um dos nossos (`bin/<versão>/<nome>`, de qualquer versão):
+    # pid reaproveitado pode ser qualquer coisa.
     try:
-        pid = int((folder() / f"{child.name}.pid").read_text())
+        pid = int((folder() / f"{name}.pid").read_text())
     except (OSError, ValueError):
         return
-    if procinfo.pid_vivo(pid) and procinfo._argv(pid)[:1] == [child.argv[0]]:
+    argv0 = procinfo._argv(pid)[:1] if procinfo.pid_vivo(pid) else []
+    if argv0 and Path(argv0[0]).parent.parent == folder() / "bin" and Path(argv0[0]).stem == name:
         _kill(pid)
 
 
@@ -247,7 +249,7 @@ async def _keep(child: _Child) -> None:
         started = time.monotonic()
         try:
             log_dir.mkdir(parents=True, exist_ok=True)
-            _kill_leftover(child)
+            _kill_leftover(child.name)
             extra: dict = {"creationflags": _WINDOWS_FLAGS} if os.name == "nt" else {"start_new_session": True}
             # "ab": num laço de quedas, a causa da anterior continua no arquivo.
             with open(log_dir / f"connect-{child.name}.log", "ab") as out:
@@ -300,6 +302,11 @@ async def start() -> None:
             _error = e.msg
             _log.warning("connect: não liguei (%s)", e.msg)
             return
+        except OSError as e:
+            # Sem isto a tela ficaria em "Subindo…" para sempre, sem erro nenhum.
+            _error = f"erro de disco: {e}"
+            _log.warning("connect: não liguei (%s)", e)
+            return
         _error = None
         _children.clear()
         _children["caddy"] = _Child("caddy", [str(bins["caddy"]), "run", "--config", str(folder() / "Caddyfile"),
@@ -323,6 +330,9 @@ async def forget() -> None:
     global _error
     async with _lock:
         await _stop()
+        # Se a subida falhou antes do supervisor rodar, um filho de antes ainda pode estar publicando.
+        for name in ("frpc", "caddy"):
+            _kill_leftover(name)
         write_state({})
         # O frpc.toml guarda o token: desligado, ele não fica no disco.
         for name in ("frpc.toml", "frpc.pid", "caddy.pid"):

@@ -1005,6 +1005,8 @@ impl Hangar {
         // A lista viva da nova conexão chega pelo stream dela; o cartão da pergunta segue, com a conexão que ele guarda.
         (self.live_terms, self.hangar_open, self.hangar_error) = (Vec::new(), false, None);
         self.sync = sync::Sync::default();
+        // Sem isto, um "Ligar" em voo da conexão anterior deixava a página travada e o código dela montado.
+        self.connect = connect::Connect::default();
         self.shared = shared_config::SharedConfig::default();
         self.controls = controls::Controls::default();
         self.accounts = accounts::Accounts::default();

@@ -159,7 +159,9 @@ def require_auth(request: Request) -> None:
     # tempo) e o encode ainda evita o TypeError do compare_digest com string nao-ASCII.
     if not secrets.compare_digest((token or "").encode(), settings.auth_token.encode()):
         registrar_acesso(ip, mecanismo, "token_invalido" if token else "token_ausente")
-        if not local:
+        # Pedido sem senha não é palpite: pelo Connect (contador único), um robô de varredura que só
+        # visita a URL travaria o dono indefinidamente.
+        if not local and not (ip == CONNECT_PEER and not token):
             _record_fail(ip, now)
         raise HTTPException(status_code=401, detail=erro("erro_nao_autorizado", "unauthorized"))
     # Pelo Connect todos dividem a mesma origem: se o acerto do dono zerasse o contador, o app dele

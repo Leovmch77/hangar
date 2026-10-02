@@ -2,8 +2,9 @@
 from app.config import settings
 
 CONNECT_PORT = 8768
-# Endereço de documentação (RFC 5737): não é loopback nem rede privada, então nenhuma checagem de
-# "acesso local" o aceita, e todo acesso pelo Connect divide um contador de tentativas próprio.
+# Endereço de documentação (RFC 5737): não é loopback, então nenhuma checagem de "acesso local" o
+# aceita, e todo acesso pelo Connect divide um contador de tentativas próprio. Cuidado: o
+# `ipaddress` do Python o classifica como privado — nunca decidir "local" por `is_private`.
 CONNECT_PEER = "192.0.2.1"
 
 
@@ -17,5 +18,7 @@ class ConnectPortGate:
         # aqui ele é trocado por inteiro, então nem o endereço real nem um forjado sobrevivem.
         if scope["type"] in ("http", "websocket") and server[1] == CONNECT_PORT \
                 and settings.port != CONNECT_PORT:
-            scope = {**scope, "client": (CONNECT_PEER, 0)}
+            # O Caddy só fala https com a internet: o esquema sai da porta, não do X-Forwarded-Proto.
+            scheme = "wss" if scope["type"] == "websocket" else "https"
+            scope = {**scope, "client": (CONNECT_PEER, 0), "scheme": scheme}
         await self.app(scope, receive, send)

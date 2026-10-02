@@ -37,6 +37,9 @@ impl Hangar {
         }
     }
 
+    // O código guarda a chave do túnel: fora da página, o campo não fica montado.
+    pub(super) fn connect_page_left(&mut self) { self.connect.code = None; }
+
     pub(super) fn connect_opened(&mut self, cx: &mut Context<Self>) {
         self.connect.error = None;
         self.load_connect(cx);

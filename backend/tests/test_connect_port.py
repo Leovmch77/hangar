@@ -49,6 +49,25 @@ def test_acerto_do_dono_nao_zera_o_contador_do_connect():
     assert c.get("/local", headers={"Authorization": "Bearer secret"}).status_code == 429
 
 
+def test_pedido_sem_senha_nao_trava_o_dono():
+    c = _connect()
+    for _ in range(20):
+        assert c.get("/local").status_code == 401
+    assert c.get("/local", headers={"Authorization": "Bearer secret"}).status_code == 403
+
+
+def test_esquema_sai_da_porta():
+    a = FastAPI()
+
+    @a.get("/esquema")
+    def esquema(request: Request):
+        return {"s": request.url.scheme}
+
+    a.add_middleware(ConnectPortGate)
+    c = TestClient(a, base_url=f"http://127.0.0.1:{CONNECT_PORT}")
+    assert c.get("/esquema").json()["s"] == "https"
+
+
 def test_porta_principal_mantem_o_cliente():
     c = TestClient(_app(), base_url="http://127.0.0.1:8765", client=("127.0.0.1", 5))
     assert c.get("/quem").json()["ip"] == "127.0.0.1"
