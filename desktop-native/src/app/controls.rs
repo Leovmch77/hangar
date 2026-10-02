@@ -667,13 +667,12 @@ impl Hangar {
         Some(div().flex().flex_col().gap(px(2.))
             .child(popup::separator())
             .child(popup::title(tr("new_chat_reasoning"), None))
-            .child(div().id("ctl-efforts").role(Role::Group).aria_label(tr("new_chat_reasoning")).px(px(4.)).pb(px(2.)).flex().flex_wrap().gap(px(4.))
+            // Uma linha só: os níveis dividem a largura e o escolhido aparece pelo realce, sem ícone que alargue o botão.
+            .child(div().id("ctl-efforts").role(Role::Group).aria_label(tr("new_chat_reasoning")).px(px(4.)).pb(px(2.)).flex().gap(px(2.))
                 .children(levels.into_iter().map(|c| {
                     let on = if live { c.label.eq_ignore_ascii_case(now.trim()) } else { c.current };
                     let label = effort_label(&c.label);
-                    Button::new(SharedString::from(format!("ctl-effort-{}", c.label))).small().h(px(32.)).px_3().selected(on).label(label)
-                        .when(on, |button| button.primary().icon(IconName::Check))
-                        .when(!on, |button| button.outline())
+                    Button::new(SharedString::from(format!("ctl-effort-{}", c.label))).ghost().xsmall().flex_1().min_w_0().selected(on).label(label)
                         .disabled(busy || !c.enabled)
                         .on_click(cx.listener(move |this, _, _, cx| {
                             if on { return; }

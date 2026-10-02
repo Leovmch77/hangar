@@ -97,6 +97,18 @@ fn until(reset: Option<f64>, now: f64) -> String {
     if h % 24 != 0 { format!("{}d{}h", h / 24, h % 24) } else { format!("{}d", h / 24) }
 }
 
+/// Conta Claude no seletor do diálogo: a esgotada aparece apagada e não se escolhe.
+#[derive(Clone)]
+pub(in crate::app) struct AccountChoice { choice: ModelChoice, exhausted: bool }
+
+impl SearchableListItem for AccountChoice {
+    type Value = String;
+    fn title(&self) -> SharedString { self.choice.title() }
+    fn value(&self) -> &String { self.choice.value() }
+    fn render(&self, window: &mut Window, cx: &mut App) -> impl IntoElement { self.choice.render(window, cx) }
+    fn disabled(&self) -> bool { self.exhausted }
+}
+
 /// Uma resposta de conta: criar (o POST e a lista relida) ou apagar (nome, caminho, o DELETE e a lista relida).
 pub(in crate::app) enum AccountDone {
     Added(Result<Value, Failure>, Option<Result<Value, Failure>>),
@@ -167,16 +179,45 @@ impl NewSession {
         if self.provider == "claude" && !self.engine.is_empty() { query.push(("engine".into(), self.engine.clone())); }
         if let Some(config) = self.config.clone() { query.push(("config_dir".into(), config)); }
         if self.provider == "codex" { query.push(("codex_account".into(), self.codex_account.clone())); }
-        let key = self.memory_key();
+        let (key, default_key) = (self.memory_key(), self.default_key());
         self.request(cx, move |api, send| Box::pin(async move {
-            let remembered = tokio::task::spawn_blocking(move || crate::appearance::last_model(&key)).await.unwrap_or_default();
+            // O padrão marcado do harness vence a última escolha lembrada.
+            let (remembered, saved) = tokio::task::spawn_blocking(move || {
+                let saved = crate::appearance::harness_default(&default_key);
+                (saved.clone().map(|(m, e, _)| (m, e)).unwrap_or_else(|| crate::appearance::last_model(&key)), saved)
+            }).await.unwrap_or_default();
             let query: Vec<(&str, &str)> = query.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
-            send(CreateReply::Models(seq, api.server_read(&["model-options"], &query, 30).await, remembered)).await
+            send(CreateReply::Models(seq, api.server_read(&["model-options"], &query, 30).await, remembered, saved)).await
         }));
     }
 
-    pub(super) fn receive_models(&mut self, seq: u64, result: Result<Value, Failure>, remembered: (String, String), window: &mut Window,
-        cx: &mut Context<Self>) {
+    /// O padrão do harness não leva a conta: vale para todas. O motor entra porque o catálogo dele é outro.
+    fn default_key(&self) -> String {
+        format!("{}:{}:{}", self.link.api.identity(), self.provider, if self.provider == "claude" { self.engine.as_str() } else { "" })
+    }
+
+    fn current_choice(&self) -> (String, String, String) {
+        let permission = if self.permissions().is_some() { self.permission.clone() } else { String::new() };
+        (self.model.clone(), self.effort.clone(), permission)
+    }
+
+    /// Marcar grava modelo, esforço e permissão de agora como padrão do harness; desmarcar apaga. Marcado = a escolha de agora é o padrão.
+    pub(super) fn render_default_check(&self, cx: &mut Context<Self>) -> Option<Div> {
+        self.models.ok()?;
+        let checked = self.saved_default.as_ref() == Some(&self.current_choice());
+        let label = tr("create_default_for_harness").replace("{harness}", provider_name(self.provider));
+        Some(div().px(px(4.)).child(Checkbox::new("create-default-harness").label(label).checked(checked).disabled(self.creating)
+            .on_change(cx.listener(|this, on: &bool, _, cx| {
+                let value = on.then(|| this.current_choice());
+                this.saved_default = value.clone();
+                let key = this.default_key();
+                this.link.runtime.spawn_blocking(move || crate::appearance::set_harness_default(&key, value));
+                cx.notify();
+            }))))
+    }
+
+    pub(super) fn receive_models(&mut self, seq: u64, result: Result<Value, Failure>, remembered: (String, String),
+        saved: Option<(String, String, String)>, window: &mut Window, cx: &mut Context<Self>) {
         let catalog = result.map_err(|e| Hangar::fetch_failure(&e)).and_then(|v| {
             let mut models: Vec<ModelOption> = serde_json::from_value(v.get("models").cloned().unwrap_or_default()).map_err(|_| tr("invalid_response"))?;
             // O picker do Claude dá o mesmo id (`opus`) às versões antigas: escolher "Opus 4.6" abriria o Opus atual.
@@ -186,6 +227,11 @@ impl NewSession {
             Ok(Catalog { models, reduced: v.get("reduced").and_then(Value::as_bool).unwrap_or(false) })
         });
         if !self.models.finish(seq, catalog) { return; }
+        if let Some(permission) = saved.as_ref().map(|s| s.2.clone()).filter(|p| self.permissions().is_some_and(|list| list.contains(&p.as_str()))) {
+            self.permission = permission;
+            self.build_permission_pick(window, cx);
+        }
+        self.saved_default = saved;
         let (model, effort) = remembered;
         // O lembrado só volta com a lista lida, se ainda estiver nela, e o esforço só se couber no modelo que ficou.
         if self.models.ok().is_some() {
@@ -309,23 +355,33 @@ impl NewSession {
         let effort = (!levels.is_empty()).then(|| div().flex().flex_col().gap(px(2.))
             .child(popup::separator())
             .child(popup::title(tr("new_chat_reasoning"), None))
-            .child(div().id("new-chat-efforts").role(Role::Group).aria_label(tr("new_chat_reasoning")).px(px(4.)).pb(px(2.)).flex().flex_wrap()
-                .gap(px(4.)).children(std::iter::once(String::new()).chain(levels).map(|level| {
+            .child(div().id("new-chat-efforts").role(Role::Group).aria_label(tr("new_chat_reasoning")).px(px(4.)).pb(px(2.)).flex()
+                .gap(px(2.)).children(std::iter::once(String::new()).chain(levels).map(|level| {
                     let label = if level.is_empty() { tr("create_default") } else { level.clone() };
-                    Button::new(SharedString::from(format!("new-chat-effort-{level}"))).ghost().xsmall().selected(self.effort == level).label(label)
+                    Button::new(SharedString::from(format!("new-chat-effort-{level}"))).ghost().xsmall().flex_1().min_w_0().selected(self.effort == level).label(label)
                         .on_click(cx.listener(move |this, _, window, cx| { this.model_choice_touched = true; this.effort = level.clone(); this.build_effort_pick(window, cx); cx.notify(); }))
                 }))));
-        div().p(px(popup::INSET)).flex().flex_col().gap(px(2.)).child(tabs).child(self.menu_search()).child(list).children(effort)
+        let default = self.render_default_check(cx).map(|check| div().flex().flex_col().gap(px(4.)).child(popup::separator()).child(check.py(px(4.))));
+        div().p(px(popup::INSET)).flex().flex_col().gap(px(2.)).child(tabs).child(self.menu_search()).child(list).children(effort).children(default)
     }
 
     pub(super) fn build_config_pick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.configs.ok().is_none() { self.config_pick = None; return; }
-        let choices: Vec<ModelChoice> = self.accounts().map(|c| ModelChoice { id: c.path.clone(), label: c.label.clone(), hint: self.config_hint(c) }).collect();
-        let at = choices.iter().position(|c| Some(&c.id) == self.config.as_ref());
+        // A esgotada fica na lista, apagada; a já escolhida continua clicável (sem outra que sirva, ela fica).
+        let choices: Vec<AccountChoice> = self.accounts().map(|c| AccountChoice {
+            choice: ModelChoice { id: c.path.clone(), label: c.label.clone(), hint: self.config_hint(c) },
+            exhausted: Some(&c.path) != self.config.as_ref() && self.account_exhausted(&c.path),
+        }).collect();
+        let at = choices.iter().position(|c| Some(&c.choice.id) == self.config.as_ref());
         self.config_pick = Some(picker(choices, at, |this, path, window, cx| {
-            this.config = Some(path);
+            (this.config, this.account_touched) = (Some(path), true);
             this.load_models(window, cx);
         }, window, cx));
+    }
+
+    /// Cota lida com a janela de sessão ou de semana cheia e ainda não renovada.
+    pub(super) fn account_exhausted(&self, path: &str) -> bool {
+        self.quota_of(&format!("claude:{path}")).is_some_and(|q| exhausted(q, chrono::Local::now().timestamp() as f64).is_some())
     }
 
     pub(super) fn build_engine_pick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -340,11 +396,11 @@ impl NewSession {
         }, window, cx));
     }
 
-    /// Na tela sem sessão, a conta Claude escolhida sem esgotar a cota troca sozinha pela de mais folga, salvo escolha à mão
-    /// no menu. A conversa fechada não passa por aqui: lá o envio fica bloqueado. `true` quando trocou.
+    /// A conta Claude escolhida com a cota esgotada troca sozinha pela de mais folga, salvo escolha à mão no menu.
+    /// A conversa fechada não passa por aqui: lá o envio fica bloqueado. `true` quando trocou.
     pub(super) fn leave_exhausted_account(&mut self) -> bool {
         // Com o menu de conta aberto, a lista não muda debaixo do clique: fechar ou a próxima cota reavalia.
-        if !self.compact || self.account_touched || self.menu.get() == Some(Menu::Account) || self.reopen_config.is_some() || self.creating || self.account_busy
+        if self.account_touched || self.menu.get() == Some(Menu::Account) || self.reopen_config.is_some() || self.creating || self.account_busy
             || self.provider != "claude" || !self.engine.is_empty() || self.target().is_some() { return false; }
         let accounts: Vec<_> = self.accounts().map(|c| (c.path.as_str(), c.active, self.quota_of(&format!("claude:{}", c.path)))).collect();
         let Some(path) = quota_switch(self.config.as_deref(), &accounts, chrono::Local::now().timestamp() as f64) else { return false };
@@ -389,7 +445,7 @@ impl NewSession {
                 if self.leave_exhausted_account() || stale { self.load_models(window, cx); }
                 self.build_config_pick(window, cx);
             }
-            CreateReply::Models(seq, result, remembered) => self.receive_models(seq, result, remembered, window, cx),
+            CreateReply::Models(seq, result, remembered, saved) => self.receive_models(seq, result, remembered, saved, window, cx),
             CreateReply::Context(seq, result) => {
                 if seq != self.context_seq { return; }
                 self.context_busy = false;

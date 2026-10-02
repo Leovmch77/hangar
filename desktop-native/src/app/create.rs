@@ -11,7 +11,7 @@ use super::accounts::ModelChoice;
 use super::device::Remote;
 use super::machines::{FocusOnClick, enter_to_focused};
 use super::settings::Disclosure;
-use gpui_kit::component::{IndexPath, WindowExt, select::{Select, SelectEvent, SelectState}, searchable_list::SearchableVec};
+use gpui_kit::component::{IndexPath, WindowExt, select::{Select, SelectEvent, SelectState}, searchable_list::{SearchableListItem, SearchableVec}};
 use super::chrome::Skeleton;
 use serde::Deserialize;
 use std::{future::Future, pin::Pin, rc::Rc};
@@ -128,7 +128,8 @@ pub(super) enum CreateReply {
     /// Seleção, o texto do campo, a mensagem que saiu (com os caminhos dos anexos) e a entrega dela.
     CreatedWithInput(u64, u64, String, String, Result<Delivery, Failure>, Result<Opened, String>),
     /// O catálogo de modelos e o último modelo e esforço lembrados para a chave dele.
-    Models(u64, Result<Value, Failure>, (String, String)),
+    /// O catálogo, o modelo e esforço a pré-escolher e o padrão marcado do harness (modelo, esforço, permissão).
+    Models(u64, Result<Value, Failure>, (String, String), Option<(String, String, String)>),
     Engines(u64, Result<Value, Failure>),
     /// A configuração do servidor: modo de sessão e Jev.
     Config(u64, (bool, Result<Option<Value>, Failure>)),
@@ -237,13 +238,14 @@ fn step_text(value: &Value) -> Option<String> {
 }
 
 /// O seletor e a assinatura dele: a lista relida troca os dois juntos, e a assinatura velha sai com o seletor.
-type Picker = (Entity<SelectState<SearchableVec<ModelChoice>>>, Subscription);
+type Picker<T = ModelChoice> = (Entity<SelectState<SearchableVec<T>>>, Subscription);
 
 type Chosen = fn(&mut NewSession, String, &mut Window, &mut Context<NewSession>);
 
-fn picker(choices: Vec<ModelChoice>, at: Option<usize>, chosen: Chosen, window: &mut Window, cx: &mut Context<NewSession>) -> Picker {
+fn picker<T: SearchableListItem<Value = String> + 'static>(choices: Vec<T>, at: Option<usize>, chosen: Chosen, window: &mut Window,
+    cx: &mut Context<NewSession>) -> Picker<T> {
     let state = cx.new(|cx| SelectState::new(SearchableVec::new(choices), at.map(IndexPath::new), window, cx));
-    let subscription = cx.subscribe_in(&state, window, move |this, _, event: &SelectEvent<SearchableVec<ModelChoice>>, window, cx| {
+    let subscription = cx.subscribe_in(&state, window, move |this, _, event: &SelectEvent<SearchableVec<T>>, window, cx| {
         if let SelectEvent::Confirm(Some(id)) = event { chosen(this, id.clone(), window, cx); cx.notify(); }
     });
     (state, subscription)
@@ -308,7 +310,7 @@ pub(in crate::app) struct NewSession {
     providers: Remote<HashMap<String, Probe>>,
     configs: Remote<Vec<ConfigDir>>,
     config: Option<String>,
-    config_pick: Option<Picker>,
+    config_pick: Option<Picker<choices::AccountChoice>>,
     codex: Remote<Vec<CodexAccount>>,
     codex_account: String,
     codex_pick: Option<Picker>,
@@ -335,6 +337,8 @@ pub(in crate::app) struct NewSession {
     account_touched: bool,
     effort: String,
     permission: String,
+    /// O padrão marcado do harness, como foi lido na última leitura do catálogo.
+    saved_default: Option<(String, String, String)>,
     subagent: String,
     engine: String,
     model_pick: Option<Picker>,
@@ -422,7 +426,7 @@ impl NewSession {
             config: None, config_pick: None, codex: Remote::default(), codex_account: String::new(), codex_pick: None, headless: true, headless_owner: None, headless_touched: false, headless_saving: false,
             difference: false, manual_open: false, manual, choosing: false, choose_error: None, create_seq: 0, creating: false, started: None,
             step: String::new(), error: None, clock: None, models: Remote::default(), model: String::new(), model_choice_touched: false, account_touched: false, effort: String::new(),
-            permission: "bypassPermissions".into(), subagent: String::new(), engine: String::new(), model_pick: None, effort_pick: None,
+            permission: "bypassPermissions".into(), saved_default: None, subagent: String::new(), engine: String::new(), model_pick: None, effort_pick: None,
             permission_pick: None, subagent_pick: None, engine_pick: None, engines: Remote::default(), jev: Remote::default(), jev_on: false,
             more: false, omp, quotas: Remote::default(), reopen_config: None, reopen_default: false, asking: false, confirming: false, account_busy: false, account_seq: 0, account_name,
             notice: None, created_path: None, context_seq: 0, context_busy: false, context_on: None, context_want: None, context_error: None,
@@ -1307,6 +1311,7 @@ impl NewSession {
         ];
         let agent = [
             fresh.then(|| self.render_trio()).flatten().map(IntoElement::into_any_element),
+            fresh.then(|| self.render_default_check(cx)).flatten().map(IntoElement::into_any_element),
             (fresh && self.provider == "codex").then(|| self.render_context(cx).into_any_element()),
             self.render_more(cx).map(IntoElement::into_any_element),
         ];
@@ -1558,8 +1563,10 @@ impl NewSession {
                 let rows = self.accounts().filter(|c| wanted(&query, &c.label, "")).map(|c| {
                         let path = c.path.clone();
                         let quota = self.quota_line(format!("new-chat-account-quota-{path}"), &format!("claude:{path}"));
-                        menu_row_with(SharedString::from(format!("new-chat-account-{path}")), Some(&c.path) == self.config.as_ref(), c.label.clone(),
+                        let on = Some(&c.path) == self.config.as_ref();
+                        menu_row_with(SharedString::from(format!("new-chat-account-{path}")), on, c.label.clone(),
                             if c.active { tr("create_current") } else { String::new() }, quota)
+                            .disabled(!on && self.account_exhausted(&c.path))
                             .accessibility_label(Some(self.config_hint(c)).filter(|h| !h.is_empty())
                                 .map_or_else(|| c.label.clone(), |hint| format!("{}, {hint}", c.label)))
                             .on_click(cx.listener(move |this, _, window, cx| {
