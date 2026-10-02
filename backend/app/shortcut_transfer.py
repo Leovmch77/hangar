@@ -9,6 +9,7 @@ fica. Marcador que a pessoa deixou em branco continua no atalho, e o backend rec
 com marcador (ver `has_placeholder`).
 """
 import json
+import logging
 import os
 import re
 import shutil
@@ -20,6 +21,8 @@ from app import runtime_config as rc
 from app.config import _PALAVRAS_DE_SEGREDO
 from app.config_sync_paths import Roots, canonicalize, resolve
 from app import shortcut_scripts
+
+_log = logging.getLogger("hangar.shortcut_transfer")
 
 VERSION = 2
 PLACEHOLDER_RE = re.compile(r"⟦SEGREDO:([A-Za-z0-9_.-]+)⟧")
@@ -397,8 +400,15 @@ def _kill_tree(proc: subprocess.Popen) -> None:
     try:
         if os.name == "nt":
             taskkill = shutil.which("taskkill")
-            if taskkill:
-                subprocess.run([taskkill, "/F", "/T", "/PID", str(proc.pid)], capture_output=True)
+            if not taskkill:
+                _log.warning("verify: taskkill ausente; só o shell %s morre, os filhos podem seguir vivos", proc.pid)
+            else:
+                try:
+                    r = subprocess.run([taskkill, "/F", "/T", "/PID", str(proc.pid)], capture_output=True, timeout=10)
+                    if r.returncode != 0:
+                        _log.warning("verify: taskkill %s saiu com %s", proc.pid, r.returncode)
+                except subprocess.TimeoutExpired:
+                    _log.warning("verify: taskkill %s não terminou em 10 s", proc.pid)
             proc.kill()
         else:
             os.killpg(proc.pid, signal.SIGKILL)

@@ -67,6 +67,7 @@ impl Hangar {
         if self.home_usage.connection != Some(self.connection) {
             self.home_usage.connection = Some(self.connection);
             self.home_usage.report.reset();
+            self.home_usage.hover_day = None;
         }
         let stale = self.home_usage.refreshed_at.is_some_and(|at| at.elapsed() >= Duration::from_secs(60));
         if self.api.is_some() && (self.home_usage.report.value.is_none() || stale) && !self.home_usage.report.loading {
@@ -142,6 +143,8 @@ impl Hangar {
                         if this.home_usage.period != period {
                             this.home_usage.period = period;
                             this.home_usage.report.reset();
+                            // A grade é refeita e o `on_hover(false)` do dia antigo não chega.
+                            this.home_usage.hover_day = None;
                             this.load_home_usage(cx);
                             cx.notify();
                         }
@@ -245,7 +248,7 @@ impl Hangar {
         let shown = self.home_usage.hover_day.filter(|day| *day >= start && *day <= end);
         let line = match shown {
             Some(day) => day_detail(day, report.days.get(&day), report.rate),
-            None => report.days.iter().max_by(|a, b| a.1.tokens.total_cmp(&b.1.tokens))
+            None => report.days.iter().filter(|(_, usage)| usage.tokens > 0.).max_by(|a, b| a.1.tokens.total_cmp(&b.1.tokens))
                 .map(|(day, usage)| tr("home_usage_busiest").replace("{detail}", &day_detail(*day, Some(usage), report.rate)))
                 .unwrap_or_default(),
         };
@@ -254,7 +257,7 @@ impl Hangar {
                 ("start", start.format("%d/%m/%Y").to_string()), ("end", end.format("%d/%m/%Y").to_string())])))
             .child(grid)
             // Altura fixa: trocar de dia não pode empurrar o compositor.
-            .child(div().id("home-usage-day").role(Role::Status).h(px(16.)).text_xs().truncate()
+            .child(div().id("home-usage-day").h(px(16.)).text_xs().truncate()
                 .text_color(if shown.is_some() { theme::text() } else { theme::muted() }).child(line))
     }
 }
