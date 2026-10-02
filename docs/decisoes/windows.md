@@ -9,6 +9,8 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   diz que falha, aqui às vezes "funciona" errado: `%N` endereça a sessão errada, `kill-session`
   com `=` não mata, `rename-session` sobrescreve em vez de recusar, `list-clients` inventa tty,
   `set -g <qualquer coisa>` volta do `show -g`. Endereço é `=<sessão>:<janela>.<pane>`.
+- **No psmux a sessão de quem chama sai do pid no `TMUX` (`/tmp/psmux-<pid>/…`)**, casado com
+  `list-sessions '#{pid}'`: o pane é sempre `%1` e o terceiro campo do `TMUX` é sempre `0`.
 - **Multi-linha vai pelo CLIPBOARD**, porque os buffers do psmux cortam no primeiro `\n`. O
   fallback ramifica pelo **código de retorno**, nunca pelo nome do sistema.
 - **Buffer do psmux é da SESSÃO e ignora `-b`**: sem `-t` o comando fala com outra sessão,
@@ -607,3 +609,40 @@ porque o log não tem hora. O instante do prompt vem do `timestamp` no `.jsonl`.
   mensagem enviada 1,7 s depois da volta da porta foi pelas teclas e entrou uma vez. A seguinte, ~25 s
   depois, já foi pelo plugin, `modo=user`. A mensagem longa enviada logo depois da segunda
   reinstalação, que reinicia o backend e regrava a cópia, também foi pelas teclas.
+
+## Identidade da sessão no psmux, e o envio pelo plugin medido de novo na DELPHI-02
+
+(01/10/2026, psmux 3.3.8, Claude Code 2.1.287, `main` local `d09d030d` levada por bundle sobre
+`27ef48e2`.)
+
+- **Cada sessão do psmux tem servidor próprio.** De dentro do pane, `TMUX` é
+  `/tmp/psmux-<pid>/default,<porta>,0`: o número do caminho é o pid do servidor DAQUELA sessão (pai
+  do shell), o segundo campo é a porta TCP de loopback dele e o terceiro é sempre `0`, nunca o id
+  da sessão. O pane é sempre `%1`, em todas as sessões. `list-sessions -F '#{pid} #{session_name}'`
+  liga pid a sessão, e o pid não muda com `rename-session` (as variáveis `PSMUX_SESSION*` ficam com
+  o nome antigo). `#{socket_path}` é `~\.psmux/default` para todas, nunca igual ao caminho do `TMUX`.
+  No Linux todo `#{pid}` é o mesmo servidor; o prefixo `psmux-` separa os dois casos.
+- `/whoami` com três sessões psmux vivas (pids 24036, 10316, 24828), `claude` digitado num pane aberto
+  à mão (`cx-plugin-d`): `plugin whoami pane=%1 sessao=cx-plugin-d origem=psmux-pid`. Na rodada
+  anterior era `sessao=None`.
+
+| caso | caminho | HTTP `/input` (mediana) | 1ª mensagem |
+|---|---|---|---|
+| antes, `27ef48e2`, sessão do Hangar, 10 msgs | plugin | 519,5 ms | — |
+| rodada anterior, sessão do Hangar, 10 msgs | plugin, `modo=user` | 968 ms | 963 ms |
+| agora, `claude` aberto à mão no psmux (`cx-plugin-d`), 5 msgs | plugin, `modo=user` nas 5 | 502 ms | 1016 ms |
+| agora, sessão do Hangar (`cx-plugin-e`, `--new --terminal`), 10 msgs | plugin, `modo=user` nas 10 | 488 ms | 1031 ms |
+
+(cada prompt contado no `.jsonl`: uma entrada só, em todos)
+
+- O `/input` voltou ao tempo da linha de base porque a prova pelo transcript responde antes do
+  `/submitted` do plugin. Só a 1ª mensagem de cada sessão passa de 1 s.
+- **Junção:** a primeira `install.ps1 -Update` criou `~\.claude\skills\hangar` como `Junction`
+  (`claude plugin list`: `hangar@skills-dir` carregado), mas 65 ms depois apareceu uma cópia em
+  `plugins\hangar\hangar` (22 arquivos, sem link): o `mklink //J` criou a junção e o script ainda
+  caiu no `cp -r`, que copiou para dentro dela. Não deu para ver a saída do script (o `install.ps1`
+  a descarta quando sai 0). A segunda execução saiu 0, manteve a `Junction`, não aninhou de novo,
+  mas recriou a junção (a data de criação mudou), então o ramo `ja linkado` não casa.
+- Reinício do backend no meio de uma resposta longa (`Restart-HangarTask`, porta de volta em 19,2 s):
+  a mensagem seguinte, enviada ~1,7 s depois da volta da porta, já foi pelo plugin (`modo=user`,
+  HTTP 689 ms) e entrou uma vez; a longa também ficou com uma entrada só.
