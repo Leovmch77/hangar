@@ -199,7 +199,8 @@ def test_verify_timeout_kills_the_whole_group(sh, tmp_path, monkeypatch):
             with open(stat) as f:
                 if f.read().rsplit(")", 1)[1].split()[0] == "Z":
                     break
-        except FileNotFoundError:
+        # Reaped between open() and read(): /proc answers ESRCH instead of ENOENT.
+        except (FileNotFoundError, ProcessLookupError):
             break
         time.sleep(0.05)
     else:
