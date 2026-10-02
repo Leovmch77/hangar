@@ -9,4 +9,5 @@ destrutivo: false
 
 No Windows a atualização deixava uma cópia do plugin do Hangar na pasta de skills, que envelhecia
 a cada atualização. Rodar a atualização de novo troca essa cópia por um link para o plugin do
-repositório, que passa a acompanhar cada versão nova.
+repositório, que passa a acompanhar cada versão nova. Com o link já no lugar, a atualização o
+reconhece e não o recria.

@@ -77,7 +77,8 @@ done
 plugin_src="$REPO/plugins/hangar"
 plugin_dst="$HOME/.claude/skills/hangar"
 case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) msys=1 ;; *) msys= ;; esac
-if [ -L "$plugin_dst" ] && [ "$(realpath "$plugin_dst")" = "$(realpath "$plugin_src")" ]; then
+# `-ef` compara o arquivo, não a grafia: no MSYS o REPO pode vir `/C/…` e a junção resolver `/c/…`.
+if [ "$plugin_dst" -ef "$plugin_src" ]; then
     echo "ok: ~/.claude/skills/hangar -> $plugin_src (plugin, ja linkado)"
 elif [ ! -L "$plugin_dst" ] && [ -e "$plugin_dst" ] \
         && ! grep -qs '"name": *"hangar"' "$plugin_dst/.claude-plugin/plugin.json"; then
@@ -93,12 +94,18 @@ else
     if [ -z "$msys" ]; then
         ln -sn "$plugin_src" "$plugin_dst"
         echo "ok: ~/.claude/skills/hangar -> $plugin_src (plugin)"
-    # `//J`: o MSYS converte `/J` em caminho (`J:/`) e o mklink recusa.
-    elif cmd //c mklink //J "$(cygpath -w "$plugin_dst")" "$(cygpath -w "$plugin_src")" >/dev/null 2>&1; then
-        echo "ok: ~/.claude/skills/hangar -> $plugin_src (plugin, juncao)"
     else
-        cp -r "$plugin_src" "$plugin_dst"
-        echo "ok: ~/.claude/skills/hangar (COPIA do plugin — re-rode apos git pull)"
+        # `//J`: o MSYS converte `/J` em caminho (`J:/`) e o mklink recusa. Quem decide é o disco,
+        # não o código de saída; e o `cp -r` só roda sem destino, senão copia para dentro da junção.
+        cmd //c mklink //J "$(cygpath -w "$plugin_dst")" "$(cygpath -w "$plugin_src")" >/dev/null 2>&1 || true
+        if [ -r "$plugin_dst/.claude-plugin/plugin.json" ]; then
+            echo "ok: ~/.claude/skills/hangar -> $plugin_src (plugin, juncao)"
+        elif [ ! -e "$plugin_dst" ] && [ ! -L "$plugin_dst" ]; then
+            cp -r "$plugin_src" "$plugin_dst"
+            echo "ok: ~/.claude/skills/hangar (COPIA do plugin — re-rode apos git pull)"
+        else
+            echo "aviso: ~/.claude/skills/hangar ficou num estado inesperado; plugin NAO linkado" >&2
+        fi
     fi
 fi
 
