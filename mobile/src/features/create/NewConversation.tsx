@@ -60,6 +60,10 @@ type Props = {
 
 // O form remonta ao trocar de máquina: o que já foi digitado e anexado vai junto.
 const carried: { text: string; attachment: PickedAttachment | null } = { text: '', attachment: null };
+export function _resetCarriedForTests(): void {
+  carried.text = '';
+  carried.attachment = null;
+}
 
 // Sem a cópia do app sobra só um arquivo órfão; nada que a pessoa escreveu se perde.
 function dropCopy(uri: string): void {

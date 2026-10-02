@@ -43,6 +43,14 @@ vi.mock('react-native', async (original) => {
   };
 });
 vi.mock('react-native-keyboard-controller', () => ({ KeyboardAvoidingView: ({ children }: { children: ReactNode }) => createElement('div', null, children) }));
+// A folha agora monta a NewConversation, que importa o seletor de anexos.
+vi.mock('expo-image-picker', () => ({}));
+vi.mock('expo-document-picker', () => ({}));
+vi.mock('../../chat/draftAttachments', () => ({ retainDraftAttachment: vi.fn(async (a: unknown) => a), removeDraftAttachment: vi.fn() }));
+vi.mock('../ditado/EstiloPill', () => ({ DictationStyleMenu: () => null, useDictationStyleLabel: () => 'estilo' }));
+vi.mock('../usage/HomeUsageCard', async (original) => ({ ...await original<object>(), HomeUsageCard: () => null }));
+vi.mock('../../ui/AttachSheet', () => ({ AttachSheet: () => null }));
+vi.mock('../ditado/useDitado', () => ({ useDitado: () => ({ gravando: false, rms: 0, iniciar: () => {}, parar: () => {} }) }));
 vi.mock('../../ui/Sheet', () => ({ Sheet: ({ open = false, children, onDismiss }: { open?: boolean; children: ReactNode; onDismiss?: () => void }) => {
   const [retained, setRetained] = useState(open);
   const callback = useRef(onDismiss);
@@ -89,7 +97,9 @@ vi.mock('./CwdPicker', async (original) => {
 });
 vi.mock('../../stores/servers', () => ({
   useServers: Object.assign(
-    (selector: (state: { active: () => typeof server; servers: typeof server[] }) => unknown) => selector({ active: () => calls.target ?? server, servers: [server] }),
+    // A máquina da conversa sai da pílula de máquina, não do servidor ativo: `target` só entra na lista.
+    (selector: (state: { activeId: string; servers: typeof server[] }) => unknown) =>
+      selector({ activeId: server.id, servers: calls.target ? [server, calls.target] : [server] }),
     { getState: () => ({ servers: [server], active: () => server }) },
   ),
 }));
@@ -118,6 +128,8 @@ vi.mock('@hangar/core', async (original) => ({
   getRootsForServer: calls.roots, scanDirForServer: calls.scan, fetchSessionsForServer: calls.sessions,
   probeServerResponse: vi.fn().mockImplementation(async () => new Response('[]')),
   getEnginesForServer: calls.engines,
+  // Sonda de providers da folha nova: sem ela o teste fazia fetch de verdade para b.local.
+  getProvidersForServer: vi.fn().mockResolvedValue({}),
   modelOptions: vi.fn().mockResolvedValue({ models: [], reduced: false }),
   getSessions: vi.fn().mockResolvedValue([]),
   getCodexAccountsForServer: calls.accounts,
@@ -186,10 +198,27 @@ vi.mock('../../paraglide/messages', () => ({
   nova_conversa_resultado_salvar_erro: () => 'nova_conversa_resultado_salvar_erro',
   nova_conversa_envio_recusado: ({ erro }: { erro: string }) => `nova_conversa_envio_recusado:${erro}`,
   nova_conversa_envio_conferir_erro: ({ erro }: { erro: string }) => `nova_conversa_envio_conferir_erro:${erro}`,
+  // Chaves das peças do redesign (caixa de envio, anexo, ditado, uso, menu do chip): devolvem o próprio nome.
+  ...Object.fromEntries((
+    'board_arquivo board_falha_upload board_imagem board_remover_anexo chat_envio_incerto chat_historico_sem_resposta chat_nao_carregou_historico ' +
+    'chat_servidor_removido composer_adicionar_ao_chat composer_adicionar_arquivos composer_anexar_arquivo composer_camera composer_ditado_indisponivel ' +
+    'composer_ditado_interrompido composer_falha_gravacao composer_falha_transcricao composer_fotos composer_gravar_audio composer_mensagem_para ' +
+    'composer_mic_style_hint composer_parar_gravacao composer_sem_acesso_camera composer_sem_acesso_fotos composer_sem_acesso_mic ' +
+    'composer_submission_recover_first composer_transcrevendo_audio composer_transcrever_de_novo composer_transcricao_vazia criar_mais_opcoes ' +
+    'criar_modo_exec criar_modo_exec_headless criar_modo_exec_headless_resumo criar_modo_exec_headless_resumo_codex criar_modo_exec_tmux ' +
+    'criar_modo_exec_tmux_resumo criar_modo_exec_tmux_resumo_codex ctx_anexos_da_sessao ditado_estilo_titulo draft_clear_error draft_invalid ' +
+    'draft_read_error draft_write_error home_usage_30d home_usage_7d home_usage_active_days home_usage_activity home_usage_all home_usage_cost ' +
+    'home_usage_day home_usage_empty home_usage_load_failed home_usage_method home_usage_model_count home_usage_models home_usage_overview ' +
+    'home_usage_partial home_usage_period_unsupported home_usage_sessions home_usage_today home_usage_tokens home_usage_top_model home_usage_warming ' +
+    'home_usage_warming_timeout native_close native_create_codex_account native_create_provider_missing native_loading native_new_chat_machine ' +
+    'native_new_chat_no_accounts nova_conversa_anexo_falhou nova_conversa_candidata nova_conversa_conferir_erro nova_conversa_criando ' +
+    'nova_conversa_nao_encontrada nova_conversa_nome_conflito nova_conversa_so_terminal nova_conversa_tentativa_invalida sync_retry'
+  ).split(' ').map((k) => [k, () => k])),
 }));
 
 import { CreateSessionSheet } from './CreateSessionSheet';
 import { _resetNewConversationForTests } from '../../stores/newConversation';
+import { _resetCarriedForTests } from './NewConversation';
 
 const connected = { id: 'work', credential_id: 'codex:/work', name: 'Trabalho', home: '/work', is_default: false, auth: { method: 'oauth', status: 'connected', email: 'work@example.com', plan: 'Plus' }, sync: { status: 'ready', trust_pending: false, issues: [] } };
 const defaultAccount = { id: 'default', credential_id: 'codex:/default', name: 'Padrão', home: '/default', is_default: true, auth: { method: 'oauth', status: 'connected', email: 'default@example.com', plan: 'Plus' }, sync: { status: 'ready', trust_pending: false, issues: [] } };
@@ -228,6 +257,8 @@ describe('CreateSessionSheet Codex', () => {
     calls.alert.mockReset();
     localStorage.clear();
     _resetNewConversationForTests();
+    // O texto digitado sobrevive à remontagem da tela; entre testes ele não pode vazar.
+    _resetCarriedForTests();
   });
 
   const button = (container: HTMLElement, text: string) =>
@@ -255,7 +286,7 @@ describe('CreateSessionSheet Codex', () => {
     const root = createRoot(container);
     await act(async () => root.render(strict ? createElement(StrictMode, null, createElement(CreateSessionSheet)) : createElement(CreateSessionSheet)));
     await act(async () => Promise.resolve());
-    await act(async () => button(container, 'Claude · criar_padrao')!.click());
+    await act(async () => button(container, 'criar_mais_opcoes')!.click());
     await act(async () => [...container.querySelectorAll('button')].find((button) => button.textContent === 'Codex')!.click());
     await act(async () => Promise.resolve());
     return { container, root };
@@ -267,23 +298,23 @@ describe('CreateSessionSheet Codex', () => {
     const container = document.createElement('div'); const root = createRoot(container);
     await act(async () => root.render(createElement(CreateSessionSheet)));
     await act(async () => type(container, 'primeira mensagem'));
-    expect(button(container, 'Servidor B · /repo')).toBeTruthy();
-    await act(async () => button(container, 'Servidor B · /repo')!.click());
+    expect(button(container, 'native_new_chat_folder: repo')).toBeTruthy();
+    await act(async () => button(container, 'criar_mais_opcoes')!.click());
     calls.scan.mockResolvedValue({ entries: [{ name: 'Child', path: '/repo/child', is_git: true, has_claude_md: false }] });
     await act(async () => button(container, 'criar_outra_pasta')!.click());
-    await act(async () => button(container, 'Repo')!.click());
+    // A raiz lembrada já abre ativa; tocar nela agora escolhe a própria raiz, então desce direto na linha.
     await act(async () => [...container.querySelectorAll('button')].find((button) => button.textContent?.includes('Child'))!.click());
     await act(async () => button(container, 'fechar-folha')!.click());
     await flushDismiss();
-    await act(async () => button(container, 'Claude · criar_padrao')!.click());
+    await act(async () => button(container, 'criar_mais_opcoes')!.click());
     await act(async () => button(container, 'Codex')!.click());
     await act(async () => button(container, 'Trabalho')!.click());
     await act(async () => button(container, 'Sol')!.click());
     await act(async () => button(container, 'high')!.click());
     await act(async () => button(container, 'fechar-folha')!.click());
     await flushDismiss();
-    expect(button(container, 'Servidor B · /repo/child')).toBeTruthy();
-    expect(button(container, 'Codex · Sol · high')).toBeTruthy();
+    expect(button(container, 'native_new_chat_folder: child')).toBeTruthy();
+    expect(button(container, 'composer_modelo · Codex: Sol · high')).toBeTruthy();
     expect(container.textContent).toContain('Sol · high');
     expect((container.querySelector('textarea[aria-label="nova_conversa_placeholder"]') as HTMLTextAreaElement).value).toBe('primeira mensagem');
     await act(async () => button(container, 'nova_conversa_enviar')!.click());
@@ -308,14 +339,16 @@ describe('CreateSessionSheet Codex', () => {
     await act(async () => type(container, 'primeira mensagem'));
     expect(container.querySelector('[data-testid="options-sheet"]')).toBeNull();
     expect(calls.pickerActive).toBe(1);
-    expect(container.textContent).toContain('carregando');
+    // Carregando agora é esqueleto, sem texto: nada escolhível enquanto as raízes não chegam.
+    expect(button(container, 'native_create_use_folder')).toBeUndefined();
+    expect(button(container, 'Repo')).toBeUndefined();
     expect(button(container, 'nova_conversa_enviar')!.disabled).toBe(true);
     await act(async () => roots.resolve([{ name: 'Missing', path: '/missing' }, { name: 'Repo', path: '/repo' }]));
     expect(calls.scan).toHaveBeenCalledWith(server, '/missing', '/missing', expect.any(AbortSignal));
     expect(calls.scan).toHaveBeenCalledWith(server, '/repo', '/repo', expect.any(AbortSignal));
     expect(localStorage.getItem('create.project.v1:server-b')).toBeNull();
     await act(async () => scan.resolve({ entries: [] }));
-    expect(button(container, 'Servidor B · /repo')).toBeTruthy();
+    expect(button(container, 'native_new_chat_folder: repo')).toBeTruthy();
     expect((container.querySelector('textarea[aria-label="nova_conversa_placeholder"]') as HTMLTextAreaElement).value).toBe('primeira mensagem');
     expect(button(container, 'nova_conversa_enviar')!.disabled).toBe(false);
     expect(localStorage.getItem('create.project.v1:server-b')).toBe('{"root":"/repo","cwd":"/repo"}');
@@ -336,7 +369,7 @@ describe('CreateSessionSheet Codex', () => {
     expect(calls.pickerActive).toBe(picked ? 0 : 1);
     const initialSignal = calls.roots.mock.calls[0][1] as AbortSignal;
     if (!picked) expect(initialSignal.aborted).toBe(false);
-    await act(async () => button(container, 'Claude · criar_padrao')!.click());
+    await act(async () => button(container, 'criar_mais_opcoes')!.click());
     const sheet = container.querySelector('[data-testid="options-sheet"]')!;
     expect(sheet).toBeTruthy();
     expect(sheet.querySelectorAll('[data-testid="cwd-picker"]').length).toBe(picked ? 0 : 1);
@@ -356,7 +389,7 @@ describe('CreateSessionSheet Codex', () => {
     if (closing === 'controlado') {
       expect(sheet.querySelector('[data-testid="cwd-picker"]')).toBeNull();
       expect(button(sheet as HTMLElement, 'criar_outra_pasta')).toBeUndefined();
-      if (picked) expect(button(container, 'Servidor B · /repo')).toBeTruthy();
+      if (picked) expect(button(container, 'native_new_chat_folder: repo')).toBeTruthy();
       else expect(container.querySelectorAll('[data-testid="cwd-picker"]').length).toBe(1);
     } else if (!picked) {
       expect(sheet.querySelector('[data-testid="cwd-picker"]')).toBeTruthy();
@@ -395,7 +428,7 @@ describe('CreateSessionSheet Codex', () => {
     await act(async () => type(container, 'antes da folha'));
     expect(container.textContent).toContain(message);
     expect(container.querySelector('[data-testid="options-sheet"]')).toBeNull();
-    await act(async () => button(container, 'Claude · criar_padrao')!.click());
+    await act(async () => button(container, 'criar_mais_opcoes')!.click());
     await act(async () => button(container, 'nova_conversa_opcoes_fechar')!.click());
     await flushDismiss();
     await act(async () => type(container, 'depois da folha'));
@@ -415,7 +448,7 @@ describe('CreateSessionSheet Codex', () => {
     await act(async () => button(container, 'fechar-folha')!.click());
     await flushDismiss();
     expect(container.textContent).toContain('conta_recusada');
-    expect(button(container, 'Servidor B · /repo')).toBeTruthy();
+    expect(button(container, 'native_new_chat_folder: repo')).toBeTruthy();
     await act(async () => type(container, 'texto corrigido'));
     expect((container.querySelector('textarea[aria-label="nova_conversa_placeholder"]') as HTMLTextAreaElement).value).toBe('texto corrigido');
     expect(button(container, 'nova_conversa_enviar')!.disabled).toBe(true);
@@ -438,7 +471,7 @@ describe('CreateSessionSheet Codex', () => {
     const { container, root } = await renderSheet();
     calls.scan.mockResolvedValue({ entries: [{ name: 'Child', path: '/repo/child', is_git: true, has_claude_md: false }] });
     await act(async () => button(container, 'criar_outra_pasta')!.click());
-    await act(async () => [...container.querySelectorAll('button')].find((button) => button.textContent === 'Repo')!.click());
+    // A raiz lembrada já abre ativa; tocar nela agora escolhe a própria raiz, então desce direto na linha.
     await act(async () => [...container.querySelectorAll('button')].find((button) => button.textContent?.includes('Child'))!.click());
     expect(container.textContent).toContain('/repo/child');
     expect(localStorage.getItem('create.project.v1:server-b')).toBe('{"root":"/repo","cwd":"/repo/child"}');
@@ -494,7 +527,8 @@ describe('CreateSessionSheet Codex', () => {
     calls.target = { id: 'server-c', label: 'Servidor C', baseUrl: 'https://c.local', token: 'token-c' };
     calls.roots.mockResolvedValue([{ name: 'Other', path: '/other' }]);
     await act(async () => root.render(createElement(CreateSessionSheet)));
-    await act(async () => button(container, 'Claude · criar_padrao')!.click());
+    await act(async () => button(container, 'Servidor C')!.click());
+    await act(async () => button(container, 'criar_mais_opcoes')!.click());
     await act(async () => { scan.resolve({ entries: [] }); configs.resolve([{ path: '/old', label: 'Conta antiga', active: true }]); models.resolve({ models: [{ id: 'old', name: 'Modelo antigo' }], reduced: false }); });
     expect(container.textContent).toContain('/other');
     expect(container.textContent).not.toContain('/repo');
@@ -553,7 +587,8 @@ describe('CreateSessionSheet Codex', () => {
     root.unmount();
   });
 
-  it.each([[], [{ kind: 'assistant_msg', id: 'a1', text: 'só resposta' }]])(
+  // Cada linha da tabela é a lista de argumentos: o histórico vai embrulhado num array a mais.
+  it.each([[[]], [[{ kind: 'assistant_msg', id: 'a1', text: 'só resposta' }]]])(
     'Conferir sem user_msg mostra vazio; falha posterior continua visível (%j)', async (events) => {
       calls.send.mockRejectedValueOnce(new TypeError('offline'));
       calls.history.mockResolvedValueOnce(events).mockRejectedValueOnce(new Error('consulta indisponível'));
@@ -634,8 +669,9 @@ describe('CreateSessionSheet Codex', () => {
     const { container, root } = await renderSheet();
     await act(async () => [...container.querySelectorAll('button')].find((button) => button.textContent === 'Trabalho')!.click());
     await act(async () => Promise.resolve());
+    // A conversa antiga escolhida no menu da caixa já começa a retomada.
     await act(async () => [...container.querySelectorAll('button')].find((button) => button.textContent === 'última mensagem')!.click());
-    await act(async () => [...container.querySelectorAll('button')].find((button) => button.textContent === 'criar_retomar_acao')!.click());
+    expect(calls.resume).toHaveBeenCalledOnce();
     await act(async () => [...container.querySelectorAll('button')].find((button) => button.textContent === 'Padrão')!.click());
     await act(async () => type(container, 'oi'));
     expect(button(container, 'nova_conversa_enviar')!.disabled).toBe(false);
@@ -650,7 +686,7 @@ describe('CreateSessionSheet Codex', () => {
     calls.resume.mockReturnValue(pending.promise);
     const { container, root } = await renderSheet();
     await act(async () => [...container.querySelectorAll('button')].find((button) => button.textContent === 'última mensagem')!.click());
-    await act(async () => [...container.querySelectorAll('button')].find((button) => button.textContent === 'criar_retomar_acao')!.click());
+    expect(calls.resume).toHaveBeenCalledOnce();
     root.unmount();
     await act(async () => pending.resolve({ name: 'retomada', state: 'idle' }));
     expect(calls.replace).not.toHaveBeenCalled();

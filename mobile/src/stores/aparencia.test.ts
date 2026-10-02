@@ -8,12 +8,13 @@ import '@hangar/core';
 import 'react-native';
 import '../theme/aplicarMaterial';
 
-const mem = new Map<string, string | number>();
+const mem = new Map<string, string | number | boolean>();
 vi.mock('react-native-mmkv', () => ({
   createMMKV: () => ({
     getString: (k: string) => mem.get(k) as string | undefined,
     getNumber: (k: string) => mem.get(k) as number | undefined,
-    set: (k: string, v: string | number) => void mem.set(k, v),
+    getBoolean: (k: string) => mem.get(k) as boolean | undefined,
+    set: (k: string, v: string | number | boolean) => void mem.set(k, v),
     remove: (k: string) => void mem.delete(k),
   }),
 }));
@@ -157,6 +158,9 @@ describe('aparencia', () => {
     await useAparencia.getState().setImagemUri(null);
     expect(useAparencia.getState().imagemUri).toBeNull();
     expect(useAparencia.getState().fundo).toBe('flat');
+    // A gravação entra no mesmo lote do material, no tick seguinte.
+    await tick();
     expect(mem.has('aparencia.imagemUri')).toBe(false);
+    expect(mem.get('aparencia.fundo')).toBe('flat');
   });
 });

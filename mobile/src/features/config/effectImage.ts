@@ -64,7 +64,7 @@ const CACHE_VERSION = 'v2';
 
 /** Variante com efeito no cache (as da foto atual, como o CACHE de effects.rs); a de outras fotos sai. */
 async function render(source: string, effect: BackgroundEffect, light: boolean): Promise<string> {
-  if (!effectSourceOk) throw new Error('worker:no source');
+  if (!effectSourceOk) throw new Error('worker-no-source');
   const base = `${(source.split('/').pop() ?? 'wallpaper').replace(/\.[^.]*$/, '')}-${CACHE_VERSION}-`;
   const dir = cacheDir();
   dir.create({ idempotent: true, intermediates: true });
@@ -76,8 +76,8 @@ async function render(source: string, effect: BackgroundEffect, light: boolean):
   const data = await input.base64();
   const reply = await requestRender(data, mimeOf(data), effect, light);
   // Foto P3 que saiu em sRGB (canvas P3 indisponível ou PNG sem perfil) perde o gamut: fica no log.
-  if (reply.source !== reply.colorSpace) console.warn('Background: efeito em', reply.colorSpace, 'para foto', reply.source);
-  if (__DEV__) console.log('Background: efeito pronto', effect, reply.colorSpace, reply.ms);
+  if (reply.source !== reply.colorSpace) console.warn('background-effect-colorspace', { space: reply.colorSpace, source: reply.source });
+  if (__DEV__) console.log('background-effect-ready', { effect, space: reply.colorSpace, ms: reply.ms });
   target.write(reply.png!, { encoding: 'base64' });
   return target.uri;
 }
@@ -110,7 +110,7 @@ export async function syncBackgroundEffect(source: string | null, effect: Backgr
     if (id === ticket) set({ efeitoImagem: { fonte: source, efeito: effect, claro, uri }, efeitoProcessando: false });
   } catch (e) {
     if (id !== ticket) return;
-    console.warn('Background: efeito não aplicado', effect, source, e);
+    console.warn('background-effect-failed', { effect, source }, e);
     set({ efeitoProcessando: false });
     useAparencia.getState().setEfeito('none');
     const code = e instanceof Error ? e.message : '';
@@ -124,7 +124,7 @@ export async function syncBackgroundEffect(source: string | null, effect: Backgr
 
 /** A variante pronta não abriu: apaga, volta para sem efeito e avisa (escolher de novo refaz). */
 export function failBackgroundEffect(uri: string, error: unknown) {
-  console.warn('Background: variante com efeito não abriu', uri, error);
+  console.warn('background-effect-variant-unreadable', uri, error);
   const file = new File(uri);
   if (file.exists) file.delete();
   useAparencia.setState({ efeitoImagem: null });

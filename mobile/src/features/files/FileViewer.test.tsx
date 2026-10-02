@@ -1,10 +1,11 @@
 /**
  * @vitest-environment happy-dom
  */
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 import React, { act } from 'react';
 import { createRoot } from 'react-dom/client';
 import { configureApi } from '@hangar/core';
+import { Platform } from 'react-native';
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -97,6 +98,10 @@ describe('FileViewer — erros de documento', () => {
   });
 
   it('PDF sem texto (binário) abre o leitor com o token do servidor da sessão', async () => {
+    // O leitor de PDF no WebView é do iOS; o Android mostra o aviso de sem leitor.
+    const os = Platform.OS;
+    Platform.OS = 'ios';
+    onTestFinished(() => { Platform.OS = os; });
     const container = document.createElement('div');
     document.body.appendChild(container);
     const root = createRoot(container);

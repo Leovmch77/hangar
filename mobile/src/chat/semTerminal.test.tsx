@@ -76,6 +76,14 @@ vi.mock('../ui/Sheet', () => ({ Sheet: ({ children, onDidPresent, onDismiss }: {
   sheetEvents.dismissed = onDismiss;
   return createElement('div', null, children);
 } }));
+const panelEvents = vi.hoisted(() => ({ dismissed: undefined as (() => void) | undefined }));
+vi.mock('../ui/AnchoredPanel', () => ({ AnchoredPanel: ({ open, onDismissed, children }: { open: boolean; onDismissed?: () => void; children: ReactNode }) => {
+  panelEvents.dismissed = onDismissed;
+  return open ? createElement('div', null, children) : null;
+} }));
+// A folha de anexo também é um Sheet; fora daqui para o `sheetEvents` seguir preso à folha de opções.
+vi.mock('../ui/AttachSheet', () => ({ AttachSheet: () => null }));
+vi.mock('../features/usage/HomeUsageCard', () => ({ HomeUsageCard: () => null, TextTabs: () => null }));
 vi.mock('../features/sessions/StatePill', () => ({ StatePill: () => null }));
 vi.mock('./ContextRing', () => ({ ContextRing: () => null }));
 // Cada chave devolve o próprio nome, como nos outros testes de componente do app.
@@ -88,7 +96,13 @@ vi.mock('../paraglide/messages', () => Object.fromEntries(
     .concat(' draft_read_error draft_invalid draft_write_error draft_clear_error composer_draft_previous composer_draft_recover composer_draft_discard composer_draft_read_again')
     .concat(' sessao_nova nova_conversa_placeholder nova_conversa_sem_destino nova_conversa_opcoes nova_conversa_opcoes_fechar nova_conversa_destino_hint nova_conversa_config_hint nova_conversa_enviar criar_criando')
     .concat(' composer_mensagem_para comandos_titulo native_new_chat_title native_empty_chat_hint')
-    .concat(' uso_titulo uso_vazio uso_secao_cota uso_secao_conversa uso_secao_numeros uso_statusline uso_custo uso_tempo_sessao uso_linha_projeto uso_reset composer_modelo ctx_contexto stats_faixa_aria').split(' ').map((k) => [k, () => k]),
+    .concat(' uso_titulo uso_vazio uso_secao_cota uso_secao_conversa uso_secao_numeros uso_statusline uso_custo uso_tempo_sessao uso_linha_projeto uso_reset composer_modelo ctx_contexto stats_faixa_aria')
+    // Telas do redesign (Nova conversa, folha de anexo, lista de tarefas, uso na inicial).
+    .concat(' ask_perguntas chat_abrir_terminal_codex chat_carregando_historico chat_codex_buffering chat_historico_antigo chat_sem_historico_anterior chat_sem_thread_codex chat_sem_thread_codex_hint chat_sessao_encerrada chat_sse_recusado chat_sse_tentar composer_adicionar_ao_chat composer_adicionar_arquivos composer_camera composer_fotos composer_sem_acesso_camera comum_falha_envio_opcao comum_voltar criar_retomar ctx_anexos_da_sessao')
+    .concat(' home_usage_30d home_usage_7d home_usage_active_days home_usage_activity home_usage_all home_usage_cost home_usage_day home_usage_empty home_usage_load_failed home_usage_method home_usage_model_count home_usage_models home_usage_overview home_usage_partial home_usage_period_unsupported home_usage_sessions home_usage_today home_usage_tokens home_usage_top_model home_usage_warming home_usage_warming_timeout lista_tentar_novamente')
+    .concat(' native_action_uncertain native_ask_fallback native_close native_dictation_active native_dictation_cancel native_dictation_level native_loading native_new_chat_folder native_tasks_all_done native_tasks_completed native_tasks_expand native_tasks_in_progress native_tasks_left native_tasks_left_1 native_tasks_minimize native_tasks_pending native_tasks_untitled native_thinking native_tools_failed native_tools_failed_1 native_tree_thoughts')
+    .concat(' new_conversation_no_received_messages new_conversation_received_messages notice_compacted notice_hook_prompt notice_interrupted notice_skill_loaded nova_conversa_abrir nova_conversa_adotar nova_conversa_conferir nova_conversa_descartar nova_conversa_guardada nova_conversa_reenviar')
+    .concat(' stats_cache stats_chamadas stats_chamadas_1 stats_io stats_llm stats_toks stats_tools stats_ttft stats_turnos stats_turnos_1 sync_retry uso_janela_30d uso_janela_5h uso_janela_7d').split(' ').map((k) => [k, () => k]),
 ));
 
 // Rascunho em memória no lugar do MMKV; cada teste começa sem nada guardado.
@@ -114,6 +128,7 @@ const sessionsState = vi.hoisted(() => ({ rows: [] as { serverId: string; name: 
 // Composer isolado: sem picker, pills, ditado nem store real — só o que decide o botão Parar.
 const composerChat = vi.hoisted(() => ({ state: 'idle' as string, send: vi.fn(async (_text: string) => {}) }));
 vi.mock('expo-image-picker', () => ({}));
+vi.mock('@react-native-menu/menu', () => ({ MenuView: ({ children }: { children: ReactNode }) => createElement('div', null, children) }));
 vi.mock('expo-document-picker', () => ({}));
 vi.mock('./draftAttachments', () => ({
   retainDraftAttachment: vi.fn(async (attachment: import('../stores/drafts').DraftAttachment) => attachment),
@@ -217,6 +232,8 @@ async function render(el: ReturnType<typeof createElement>) {
   await act(async () => root.render(el));
   return { container, root };
 }
+const button = (container: HTMLElement, label: string) => [...container.querySelectorAll('button, [role="button"]')]
+  .find((el) => el.textContent === label || el.getAttribute('aria-label') === label) as HTMLElement | undefined;
 
 const header = { name: 'g1-orq', state: null, onBack: () => {}, onMore: () => {}, onTitlePress: () => {} };
 const sheet = { open: true, onClose: () => {}, serverId: 's1', name: 'g1-orq' };
@@ -258,42 +275,63 @@ describe('terminal escondido', () => {
   });
 
   it('"⋯" de sessão comum continua listando Terminal, resposta e anexos', async () => {
-    const { container, root } = await render(createElement(MoreSheet, sheet));
+    const { container, root } = await render(createElement(MoreSheet, { ...sheet, temPergunta: true }));
     expect(container.querySelector('[aria-label="term_titulo"]')).not.toBeNull();
     expect(container.querySelector('[aria-label="askq_sua_resposta"]')).not.toBeNull();
     expect(container.querySelector('[aria-label="ctx_anexos"]')).not.toBeNull();
     expect(container.querySelector('[aria-label="par_titulo"]')).not.toBeNull();
     act(() => root.unmount());
   });
+
+  it('"⋯" sem pergunta pendente não oferece "Sua resposta"; sem pane não oferece Terminal', async () => {
+    const { container, root } = await render(createElement(MoreSheet, { ...sheet, semTerminal: true }));
+    expect(container.querySelector('[aria-label="askq_sua_resposta"]')).toBeNull();
+    expect(container.querySelector('[aria-label="term_titulo"]')).toBeNull();
+    expect(container.querySelector('[aria-label="ctx_anexos"]')).not.toBeNull();
+    act(() => root.unmount());
+  });
 });
 
-it('opções da Nova conversa recebem foco e devolvem ao seletor que abriu, preservando o rascunho', async () => {
+// A tela de verdade (CreateSessionSheet) entrega as pílulas; aqui bastam botões que chamam os ganchos.
+let folderOpener: HTMLButtonElement | null = null;
+const newConversationProps = (server: object) => ({
+  server: server as never,
+  destination: null, destinationPending: false, providerLabel: 'Codex',
+  folderPanel: () => createElement('div', null, 'painel-pastas'),
+  topPills: (openFolder: (opener: never) => void) => createElement('button', {
+    ref: (el: HTMLButtonElement | null) => { folderOpener = el; },
+    onClick: () => openFolder(folderOpener as never),
+  }, 'repo'),
+  bottomPills: null,
+  providerChip: (openOptions: () => void) => createElement('button', { onClick: openOptions }, 'Codex'),
+  resume: null, notices: null, options: null,
+  body: { cwd: '/repo', provider: 'codex' as const }, blocked: false,
+});
+
+it('opções e pasta da Nova conversa recebem foco e devolvem ao seletor que abriu, preservando o rascunho', async () => {
   firstInput.attempt = null;
   vi.mocked(AccessibilityInfo.sendAccessibilityEvent).mockClear();
-  const { container, root } = await render(createElement(NewConversation, {
-    server: { id: 's1' } as never,
-    destination: null, destinationPending: false, folderLabel: 'repo', destinationLabel: 'srv · /repo',
-    providerLabel: 'Codex', settingsLabel: 'Codex', statusLabel: '', notices: null, options: null,
-    body: { cwd: '/repo', provider: 'codex' }, blocked: false,
-  }));
+  const { container, root } = await render(createElement(NewConversation, newConversationProps({ id: 's1' })));
   const field = container.querySelector('textarea')!;
   act(() => {
     field.value = 'primeira mensagem';
     field.dispatchEvent(new Event('input', { bubbles: true }));
   });
-  const opener = [...container.querySelectorAll('button')].find((b) => b.textContent === 'Codex')!;
-  expect(opener.title).toBe('nova_conversa_config_hint');
-  act(() => opener.click());
-  expect(opener.getAttribute('aria-expanded')).toBe('true');
+  // "Mais opções" vem do menu nativo do chip: a folha foca o Fechar ao abrir.
+  act(() => button(container, 'Codex')!.click());
   expect(AccessibilityInfo.sendAccessibilityEvent).not.toHaveBeenCalled();
   act(() => sheetEvents.presented?.());
-  const close = [...container.querySelectorAll('button')].find((b) => b.textContent === 'nova_conversa_opcoes_fechar')!;
+  const close = button(container, 'nova_conversa_opcoes_fechar')!;
   expect(AccessibilityInfo.sendAccessibilityEvent).toHaveBeenLastCalledWith(close, 'focus');
   act(() => close.click());
-  expect(AccessibilityInfo.sendAccessibilityEvent).toHaveBeenCalledTimes(1);
   act(() => sheetEvents.dismissed?.());
+  expect(AccessibilityInfo.sendAccessibilityEvent).toHaveBeenCalledTimes(1);
+  // O painel de pasta devolve o foco à pílula que o abriu.
+  const opener = button(container, 'repo')!;
+  act(() => opener.click());
+  expect(container.textContent).toContain('painel-pastas');
+  act(() => panelEvents.dismissed?.());
   expect(AccessibilityInfo.sendAccessibilityEvent).toHaveBeenLastCalledWith(opener, 'focus');
-  expect(opener.getAttribute('aria-expanded')).toBe('false');
   expect(field.value).toBe('primeira mensagem');
   act(() => root.unmount());
 });
@@ -510,18 +548,14 @@ describe('primeiro envio incerto com os stores reais', () => {
     expect(container.querySelector('textarea')!.value).toBe('');
     act(() => root.unmount());
 
-    const creation = await render(createElement(NewConversation, {
-      server: { id: 's1', label: 'S1', baseUrl: 'http://s1', token: 'fixture' },
-      destination: null, destinationPending: false, folderLabel: 'repo', destinationLabel: 'S1 · /repo',
-      providerLabel: 'Codex', settingsLabel: 'Codex', statusLabel: '',
-      notices: null, options: null, body: { cwd: '/repo', provider: 'codex' }, blocked: false,
-    }));
+    const creation = await render(createElement(NewConversation,
+      newConversationProps({ id: 's1', label: 'S1', baseUrl: 'http://s1', token: 'fixture' })));
     act(() => {
       const field = creation.container.querySelector('textarea')!;
       Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(field, 'outra conversa');
       field.dispatchEvent(new Event('input', { bubbles: true }));
     });
-    expect(button(creation.container, 'nova_conversa_enviar')!.disabled).toBe(false);
+    expect((button(creation.container, 'nova_conversa_enviar') as HTMLButtonElement).disabled).toBe(false);
     expect(realFirstInput.send).toHaveBeenCalledTimes(1);
     act(() => creation.root.unmount());
   });
@@ -613,8 +647,6 @@ describe('rascunho guardado no Composer', () => {
     const raw = storage.memory.get(`draft.v1:${serverId}::${name}`);
     return raw ? JSON.parse(raw) as { text: string; revision: number; transcript: string | null } : null;
   };
-  const button = (container: HTMLElement, label: string) => [...container.querySelectorAll('button, [role="button"]')]
-    .find((el) => el.textContent === label || el.getAttribute('aria-label') === label) as HTMLElement | undefined;
 
   it.each(['sending', 'unknown', 'rejected'])('reabre upload confirmado com input %s sem reenviar; Recuperar devolve só o texto', async (status) => {
     composerChat.send.mockClear();
