@@ -484,9 +484,9 @@ impl Hangar {
         self.settings_ui.search.read(cx).focus_handle(cx).is_focused(window)
     }
 
-    /// Ctrl+F com a página aberta leva ao campo de busca.
+    /// Ctrl+F com a página aberta leva ao campo de busca dela; fora dela, busca na conversa aberta.
     pub(super) fn focus_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.settings.is_none() || self.settings_ui.live { return; }
+        if self.settings.is_none() || self.settings_ui.live { self.open_find(window, cx); return; }
         self.settings_ui.search.update(cx, |input, cx| input.focus(window, cx));
     }
 

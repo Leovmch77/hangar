@@ -66,6 +66,7 @@ mod connect;
 mod guests;
 mod shared_config;
 mod tree;
+mod find;
 mod costs;
 mod stats;
 mod search;
@@ -504,6 +505,7 @@ pub struct Hangar {
     panes: panes::Panes,
     files: files::Files,
     tree: tree::Tree,
+    find: find::Find,
     dossier: Option<Entity<baton::Dossier>>,
     /// Quando vimos o turno começar ao vivo; a sessão aberta já trabalhando conta do último envio.
     turn_seen: Option<Instant>,
@@ -722,7 +724,7 @@ impl Hangar {
             costs: Default::default(), usage_stats: Default::default(), search: Default::default(), topbar: Default::default(), computer: computer::Computer::default(), new_session: None, sidebar,
             terminal: None, terminal_serial: 0,
             system_notifications: SystemNotifications::default(),
-            act: activity::ActivityState::new(cx), files: files::Files::new(window, cx), tree: tree::Tree::new(window, cx), ctl_search: controls::search_field(window, cx), panes, dossier: None, turn_seen: None, sent_until: None,
+            act: activity::ActivityState::new(cx), files: files::Files::new(window, cx), tree: tree::Tree::new(window, cx), find: find::Find::new(window, cx), ctl_search: controls::search_field(window, cx), panes, dossier: None, turn_seen: None, sent_until: None,
             new_chat: None, new_chat_focus: cx.focus_handle().tab_stop(true),
             new_chat_folders: Default::default(), landing: None, opening: None, side_seen: None, side_slide: None, arrived: HashMap::new(), tree_parts: HashSet::new(), part_arrived: HashMap::new(), tree_folds: HashMap::new(), tree_motion: false, active_token: String::new(), ready_sessions: None,
             servers: known_servers, remote: HashMap::new(), remote_tasks: Vec::new(), remote_gen: 0, servers_rev: 0, invite_ended: HashSet::new(), pending_open: None, pending_remote: None,
@@ -1160,8 +1162,19 @@ impl Hangar {
 
     /// Mais 400 eventos para trás: pelo botão ou pela rolagem que chega ao topo.
     pub(crate) fn load_older(&mut self, cx: &mut Context<Self>) {
+        // Zero é o histórico inteiro, já carregado pela busca.
+        if self.history_limit == 0 { return; }
         self.history_limit = self.history_limit.saturating_add(400);
         self.etag = None;
+        self.load_history(cx);
+    }
+
+    /// O transcript inteiro (`limit=0`): a busca na conversa vale também para o que não foi carregado.
+    pub(super) fn load_all(&mut self, cx: &mut Context<Self>) {
+        if self.history_limit == 0 { return; }
+        // Pedido em voo com o limite velho seria descartado na chegada: cancela e pede de novo.
+        if let Some(task) = self.history_task.take() { task.abort(); }
+        (self.history_limit, self.etag) = (0, None);
         self.load_history(cx);
     }
 
@@ -1356,7 +1369,7 @@ impl Hangar {
                     Ok(history) => {
                         self.etag = history.etag;
                         if let Some(events) = history.events {
-                            self.has_older = events.len() >= limit;
+                            self.has_older = limit > 0 && events.len() >= limit;
                             self.chat.merge_history(events);
                             api::open_trace(|| "history merged".into());
                             if self.chat.preview.text.is_empty() {
@@ -5152,7 +5165,8 @@ impl Hangar {
                         }).flex_1().min_h_0())
                         .child(self.wheel_layer(cx))
                         .children(self.render_rail(cx))
-                        .when(self.follow_detached(), |el| el.child(self.render_jump_pill(cx))));
+                        .when(self.follow_detached(), |el| el.child(self.render_jump_pill(cx)))
+                        .children(self.render_find(cx)));
                     self.schedule_scroll(window, cx);
                 }
             }
