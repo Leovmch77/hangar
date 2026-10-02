@@ -30,6 +30,10 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   `frontend/` entra no `.gitignore` — sobra não ignorada vira "mudança local" e desliga o dist do CI.
 - **Passo com comando diferente por sistema usa `comando_posix` e `comando_windows`.** `comando`
   continua sendo o fallback comum; qualquer variante que executa algo exige `prova`.
+- **Passos seguidos com o mesmo comando rodam o comando uma vez; a prova de cada um continua
+  conferida.** Só o vizinho imediato: comando diferente no meio faz o repetido rodar de novo. Em
+  02/10/2026 a DELPHI-02 rodou o `install.ps1 -Update` quatro vezes seguidas (~20 s cada) para
+  quatro passos da mesma atualização.
 - **Versão é `VERSION` + número de commits** (`0.1.0.2533`): major.minor.patch à mão no
   arquivo da raiz, build calculado — nunca tag de release nem commit do CI.
 - **Reiniciar o backend**: sem `--reload`; mate `-9` o pid da porta e suba destacado. No Linux é

@@ -221,9 +221,12 @@ class PassoFalhou(Exception):
         self.motivo = motivo
 
 
-def aplicar(passo: dict) -> None:
-    """Roda um passo e sua prova. Marca no registro só quando a prova passa."""
-    if passo["comando"]:
+def aplicar(passo: dict, rodar: bool = True) -> None:
+    """Roda um passo e sua prova. Marca no registro só quando a prova passa.
+
+    `rodar=False`: o comando é o mesmo que acabou de rodar para o passo anterior; só a prova é conferida.
+    """
+    if passo["comando"] and rodar:
         p = _rodar(passo["comando"])
         if p.returncode != 0:
             cauda = "\n".join((p.stderr or p.stdout or "").strip().splitlines()[-8:])
@@ -244,9 +247,14 @@ def aplicar_pendentes(incluir_destrutivos: bool = True) -> list[str]:
 
     Para no primeiro erro de propósito: passo de versão costuma depender do anterior, e seguir em
     frente deixaria a máquina num estado que ninguém desenhou.
+
+    Comando igual ao do passo imediatamente anterior não roda de novo (vários passos pedem o
+    instalador inteiro). Só o vizinho: um comando diferente no meio pode ter mudado o estado.
     """
     feitos = []
+    anterior = None
     for passo in pendentes(incluir_destrutivos):
-        aplicar(passo)
+        aplicar(passo, rodar=not passo["comando"] or passo["comando"] != anterior)
+        anterior = passo["comando"] or anterior
         feitos.append(passo["id"])
     return feitos

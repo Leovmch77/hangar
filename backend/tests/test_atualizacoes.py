@@ -175,6 +175,23 @@ def test_para_no_primeiro_erro(passos, tmp_path):
     assert not depois.exists()
 
 
+def test_comando_igual_seguido_roda_uma_vez_e_cada_passo_confere_a_prova(passos, tmp_path):
+    """Quatro passos pedindo o instalador inteiro rodavam o instalador quatro vezes."""
+    contador = tmp_path / "n"
+    instalar = f"echo x >> {contador}"
+    _escreve(passos, "1-a", id="1-a", titulo="A", comando=instalar, prova=str(contador))
+    _escreve(passos, "2-b", id="2-b", titulo="B", comando=instalar, prova=str(contador))
+    _escreve(passos, "3-outro", id="3-outro", titulo="Outro", comando="echo y", prova="docs")
+    _escreve(passos, "4-c", id="4-c", titulo="C", comando=instalar, prova=str(contador))
+    _escreve(passos, "5-d", id="5-d", titulo="D", comando=instalar, prova="nao-existe")
+    with pytest.raises(atualizacoes.PassoFalhou) as e:
+        atualizacoes.aplicar_pendentes()
+    # 1-a e 2-b juntos; o comando do meio faz 4-c rodar de novo; 5-d não roda, mas a prova dele ainda barra.
+    assert contador.read_text().count("x") == 2
+    assert "nao-existe" in str(e.value)
+    assert atualizacoes.aplicados() == {"1-a", "2-b", "3-outro", "4-c"}
+
+
 def test_rodar_duas_vezes_nao_repete(passos, tmp_path):
     contador = tmp_path / "n"
     _escreve(passos, "um", id="um", titulo="Um",
