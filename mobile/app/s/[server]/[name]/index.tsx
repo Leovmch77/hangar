@@ -103,6 +103,9 @@ export default function ChatScreen() {
 
   // draft devolvido pelo cancelar do picker (Task 3)
   const [draft, setDraft] = useState<{ route: string; text: string } | null>(null);
+  // Pendente devolvido pelo Parar/cancelar. Objeto novo a cada devolução: o mesmo texto duas vezes
+  // ainda é adotado; o Composer avisa quando adotou e ele sai daqui.
+  const [returned, setReturned] = useState<{ route: string; value: { text: string } } | null>(null);
   const firstAttempt = useNewConversation((s) => s.attempts[serverId]);
   const firstBusy = useNewConversation((s) => !!s.busy[serverId]);
   const firstIssue = useNewConversation((s) => s.issues[serverId]);
@@ -272,10 +275,12 @@ export default function ChatScreen() {
     // composer (editável) e o segundo Esc limpa o terminal. Sem pendente, interrupção simples.
     const cur = chat.use.getState().pending;
     const last = cur.length ? cur[cur.length - 1] : null;
-    if (last) setDraft({ route: rota, text: last.text });
     void interrupt(name, !!last, target)
       .then(() => {
-        if (last) chat.use.setState((live) => ({ pending: live.pending.filter((p) => p.id !== last.id) }));
+        if (!last) return;
+        chat.use.setState((live) => ({ pending: live.pending.filter((p) => p.id !== last.id) }));
+        // Só depois do Esc confirmado: com falha a mensagem segue na fila e voltaria em dobro.
+        setReturned({ route: rota, value: { text: last.text } });
       })
       .catch((e) => {
         if (rotaAtual.current === rota) mostrarAviso(e);
@@ -304,8 +309,8 @@ export default function ChatScreen() {
     if (!target) return mostrarAviso(m.chat_servidor_removido());
     const cur = chat.use.getState().pending;
     const last = cur.length ? cur[cur.length - 1] : null;
-    // Recupera o texto no toque; um ACK tardio não sobrescreve o que a pessoa digitou depois.
-    if (last) setDraft({ route: rota, text: last.text });
+    // Recupera o texto no toque, somado ao que já estava no campo.
+    if (last) setReturned({ route: rota, value: { text: last.text } });
     try {
       await interrupt(name, !!last, target);
       if (last) chat.use.setState((live) => ({ pending: live.pending.filter((p) => p.id !== last.id) }));
@@ -333,7 +338,12 @@ export default function ChatScreen() {
       await chat.send(m.chat_plan_pedido());
     } catch (err) {
       // Pedido não saiu: a sessão não pode ficar fora do modo plano sem ter implementado nada.
-      await setPermissionMode(name, 'plan').catch(() => {});
+      try {
+        await setPermissionMode(name, 'plan');
+      } catch (revertErr) {
+        console.warn('plan: revert to plan mode failed', name, revertErr);
+        throw new Error(m.native_plan_send_failed_stuck({ reason: err instanceof Error ? err.message : String(err) }));
+      }
       throw err;
     }
   };
@@ -512,6 +522,8 @@ export default function ChatScreen() {
               : (
                 <>
                   <Composer key={rota} serverId={serverId} name={name} draft={draft?.route === rota ? draft.text : undefined}
+                            returned={returned?.route === rota ? returned.value : undefined}
+                            onReturnedAdopted={() => setReturned((cur) => (cur?.route === rota ? null : cur))}
                             firstInputId={firstInput?.id} firstInputSent={firstInput?.phase === 'sent'} sessionProvider={provider}
                             headless={headless} onStop={handleStop} stopping={stopping} />
                 </>

@@ -141,6 +141,8 @@ export const AssistantBubble = memo(function AssistantBubble({
       if (podeAbrirArquivo) abrirArquivo(arquivo.path);
       return;
     }
+    // O link vem do texto do modelo: esquema de app (tel:, intent:, deep link) não abre por toque.
+    if (!/^(https?|mailto):/i.test(url)) return;
     Linking.openURL(url).catch((e: unknown) => toast.erro(e instanceof Error ? e.message : String(e)));
   }, [abrirArquivo, podeAbrirArquivo]);
   // Arquivo de CÓDIGO citado na prosa (o parseFilePaths acima só pega mídia/pdf/html, que viram

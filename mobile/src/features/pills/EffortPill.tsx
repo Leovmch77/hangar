@@ -40,8 +40,10 @@ export function EffortPill({ serverId, name, provider, chosen, onChosen, openSig
   // Haiku não usa esforço (o picker responde "Effort not supported"): pílula ausente, não inútil.
   const hidden = isClaude && semEsforco(labels.model);
 
+  // Escondida (Haiku) o pedido de abrir é descartado: guardado, a folha abriria vazia quando a pílula voltasse.
   useEffect(() => {
-    if (openSignal) setOpen(true);
+    if (openSignal && !hidden) setOpen(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [openSignal]);
 
   const load = useCallback(async () => {

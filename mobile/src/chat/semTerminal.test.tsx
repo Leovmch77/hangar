@@ -740,6 +740,19 @@ describe('rascunho guardado no Composer', () => {
     act(() => root.unmount());
   });
 
+  it('texto devolvido pelo Parar entra antes do digitado, e o mesmo texto devolvido de novo entra de novo', async () => {
+    const adopted = vi.fn();
+    const { container, root } = await render(createElement(Composer, { ...props, onReturnedAdopted: adopted }));
+    type(container, 'digitado');
+    await act(async () => root.render(createElement(Composer, { ...props, returned: { text: 'pendente' }, onReturnedAdopted: adopted })));
+    expect(container.querySelector('textarea')!.value).toBe('pendente\n\ndigitado');
+    await act(async () => root.render(createElement(Composer, { ...props, returned: { text: 'pendente' }, onReturnedAdopted: adopted })));
+    expect(container.querySelector('textarea')!.value).toBe('pendente\n\npendente\n\ndigitado');
+    expect(adopted).toHaveBeenCalledTimes(2);
+    expect(stored('s1', 'sess')?.text).toBe('pendente\n\npendente\n\ndigitado');
+    act(() => root.unmount());
+  });
+
   it('primeiro jsonl associa o rascunho provisório sem tratar como sessão recriada', async () => {
     sessionsState.rows = [{ serverId: 's1', name: 'sess', jsonl: null }];
     const { container, root } = await render(createElement(Composer, props));

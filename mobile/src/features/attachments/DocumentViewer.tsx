@@ -24,6 +24,14 @@ export function DocumentViewer({ doc, onClose }: { doc: DocumentItem | null; onC
   const [carregando, setCarregando] = useState(true);
   const [erro, setErro] = useState('');
   const [compartilhando, setCompartilhando] = useState(false);
+  // Zera no render em que o documento troca: no `onShow` do Modal o WebView já podia ter disparado
+  // o `onLoad`, e o "Carregando" ficava preso.
+  const [shownUri, setShownUri] = useState(doc?.uri);
+  if (doc?.uri !== shownUri) {
+    setShownUri(doc?.uri);
+    setCarregando(true);
+    setErro('');
+  }
 
   const compartilhar = async () => {
     if (!doc) return;
@@ -44,7 +52,6 @@ export function DocumentViewer({ doc, onClose }: { doc: DocumentItem | null; onC
       visible={!!doc}
       animationType="slide"
       onRequestClose={onClose}
-      onShow={() => { setCarregando(true); setErro(''); }}
     >
       {doc ? (
         <View style={[styles.root, { paddingTop: insets.top, paddingBottom: insets.bottom, backgroundColor: theme.tokens.bg.base }]}>

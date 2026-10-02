@@ -34,6 +34,9 @@ interface Props {
   serverId: string;
   name: string;
   draft?: string;
+  // Texto devolvido pelo Parar/cancelar: entra antes do que já está no campo, nunca no lugar.
+  returned?: { text: string };
+  onReturnedAdopted?: () => void;
   firstInputId?: string;
   firstInputSent?: boolean;
   sessionProvider?: string | null;
@@ -87,7 +90,7 @@ function keepRecoverable(serverId: string, name: string, old: ConversationDraft)
   return value;
 }
 
-export function Composer({ serverId, name, draft, firstInputId, firstInputSent = false, sessionProvider, headless = false, onStop, stopping = false }: Props) {
+export function Composer({ serverId, name, draft, returned, onReturnedAdopted, firstInputId, firstInputSent = false, sessionProvider, headless = false, onStop, stopping = false }: Props) {
   const { theme } = useUnistyles();
   const navigation = useNavigation<NativeStackNavigationProp<Record<string, object | undefined>>>();
   const inputRef = useRef<TextInput>(null);
@@ -422,6 +425,20 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [draft]);
+  // Adota por identidade (o mesmo texto devolvido duas vezes entra as duas); o ref segura a
+  // remontagem dupla do StrictMode antes de o pai limpar.
+  const adoptedReturnedRef = useRef<{ text: string } | undefined>(undefined);
+  useEffect(() => {
+    if (!returned || returned === adoptedReturnedRef.current) return;
+    adoptedReturnedRef.current = returned;
+    const typed = textRef.current.trim() ? textRef.current : '';
+    const next = typed ? `${returned.text}\n\n${typed}` : returned.text;
+    textRef.current = next;
+    setText(next);
+    setSelection({ start: returned.text.length, end: returned.text.length });
+    onReturnedAdopted?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [returned]);
   // Repetir um envio recusado com anexo já enviado gera o mesmo texto: o snapshot não bloqueia.
   const composedText = pendingAttach?.uploadedPath
     ? withAttach(text.trim(), attachInsert(pendingAttach, pendingAttach.uploadedPath)) : text.trim();
@@ -1046,7 +1063,8 @@ export function Composer({ serverId, name, draft, firstInputId, firstInputSent =
           <AttachmentPreview attachment={pendingAttach} onRemove={handleRemoveAttach} disabled={sending} />
         ) : null}
 
-        <SlashSuggest matches={suggestions} onPick={handleSuggestPick} />
+        <SlashSuggest matches={suggestions} onPick={handleSuggestPick}
+          error={slashQuery !== null ? commandsError : ''} onRetry={retryCommands} />
 
         {/* Campo em linha própria: dividindo a linha com os botões ele ficava só com a sobra. */}
         <View style={styles.inputWrap}>

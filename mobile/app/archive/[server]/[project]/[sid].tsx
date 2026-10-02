@@ -80,6 +80,7 @@ export default function ArchivedConversation() {
   const [codexAccounts, setCodexAccounts] = useState<CodexAccount[]>([]);
   const [cotas, setCotas] = useState<CotaContaResumo[]>([]);
   const [accountsLoading, setAccountsLoading] = useState(false);
+  const [accountsError, setAccountsError] = useState('');
   // null = não mexeu: vale a conta dona da conversa.
   const [pickedConfig, setPickedConfig] = useState<string | null>(null);
   const gen = useRef(0);
@@ -104,6 +105,7 @@ export default function ArchivedConversation() {
     setConfigs([]);
     setCodexAccounts([]);
     setCotas([]);
+    setAccountsError('');
     if (e.provider === 'claude' || e.provider === 'codex') {
       setAccountsLoading(true);
       const accounts: Promise<ConfigDirInfo[] | CodexAccount[]> = e.provider === 'claude'
@@ -114,16 +116,22 @@ export default function ArchivedConversation() {
           if (e.provider === 'claude') setConfigs(list as ConfigDirInfo[]);
           else setCodexAccounts(list as CodexAccount[]);
         })
-        .catch(() => { /* sem lista: sem escolha, retomar segue na conta de origem */ })
+        // Sem lista não há escolha e retomar segue na conta de origem; o aviso explica o "Padrão" travado.
+        .catch((err: unknown) => {
+          console.warn('archive: accounts list failed', e.provider, err);
+          if (g === gen.current) setAccountsError(m.native_accounts_failed({ reason: err instanceof Error ? err.message : String(err) }));
+        })
         .finally(() => { if (g === gen.current) setAccountsLoading(false); });
     } else setAccountsLoading(false);
     if (e.provider === 'claude') {
       // Best-effort: sem motores não há seletor; sem cota não há trava. Retomar continua funcionando.
-      getEnginesForServer(server).then((r) => { if (g === gen.current) setMotores(r.motores); }).catch(() => {});
+      getEnginesForServer(server)
+        .then((r) => { if (g === gen.current) setMotores(r.motores); })
+        .catch((err: unknown) => console.warn('archive: engines list failed', err));
       probeServerResponse(server, '/api/cotas')
         .then((r) => (r.ok ? (r.json() as Promise<CotaContaResumo[]>) : []))
         .then((cs) => { if (g === gen.current) setCotas(cs); })
-        .catch(() => {});
+        .catch((err: unknown) => console.warn('archive: quota read failed', err));
     }
     try {
       const history = await getArchiveHistory(e.project, e.session_id, undefined, e.config_dir, e.provider, e.codex_account, server);
@@ -220,7 +228,8 @@ export default function ArchivedConversation() {
     } finally {
       setResuming(false);
     }
-    if (name) router.replace(`/s/${srv.id}/${name}` as never);
+    // Quem saiu da tela durante o resume não é levado para a sessão nova.
+    if (name && g === gen.current) router.replace(`/s/${srv.id}/${name}` as never);
   };
 
   const title = entry ? (entry.preview || entry.ultima || entry.session_id.slice(0, 8)) : sid.slice(0, 8);
@@ -255,7 +264,7 @@ export default function ArchivedConversation() {
 
   const claudeLabel = configs.find((c) => c.path === selectedAccount)?.label ?? m.criar_padrao();
   const codexLabel = codexAccounts.find((a) => a.id === selectedAccount)?.name ?? m.criar_padrao();
-  const note = blockedNow ?? resumeError;
+  const note = blockedNow ?? (resumeError || accountsError);
 
   return (
     <Screen>

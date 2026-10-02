@@ -180,13 +180,19 @@ function VideoPage({ uri, headers, name }: { uri: string; headers?: Record<strin
       </View>
     );
   }
+  // Só a cópia baixada pelo app lê arquivo local; URL vinda do texto do assistente fica em http(s),
+  // senão o WebView repassaria outro esquema ao sistema.
+  const local = comToken;
+  if (!local && !/^https?:\/\//i.test(src)) {
+    return <Text style={styles.videoMsg} accessibilityRole="alert">{m.visor_nao_carregou()}</Text>;
+  }
   return (
     <WebView
       source={{ uri: src }}
       style={styles.video}
-      originWhitelist={['*']}
-      allowFileAccess
-      allowingReadAccessToURL={src.startsWith('file:') ? src.slice(0, src.lastIndexOf('/') + 1) : undefined}
+      originWhitelist={local ? ['file://*'] : ['http://*', 'https://*']}
+      allowFileAccess={local}
+      allowingReadAccessToURL={local ? src.slice(0, src.lastIndexOf('/') + 1) : undefined}
       allowsInlineMediaPlayback
       allowsFullscreenVideo
       mediaPlaybackRequiresUserAction={false}
