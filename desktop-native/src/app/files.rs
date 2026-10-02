@@ -126,12 +126,29 @@ impl Files {
     }
 }
 
-async fn read_file(api: Api, name: String, mut path: String, candidates: Vec<String>, local: Option<PathBuf>) -> Result<Content, Failure> {
+async fn read_file(api: Api, name: String, mut path: String, candidates: Vec<String>, local: Option<PathBuf>, here: bool) -> Result<Content, Failure> {
     // Servidor nesta máquina (a árvore já provou): caminho da raiz sai do disco, com as mesmas travas.
     if let Some(root) = local.filter(|root| !path.starts_with('/') && root.join(&path).exists()) {
         return tokio::task::spawn_blocking(move || super::tree::read_local(&root, &path).map(|read|
             Content { path, text: read.text, truncated: read.truncated, digest: read.digest, external: false }))
             .await.unwrap_or_else(|_| Err(Failure::local("invalid_response")));
+    }
+    // Citado fora da raiz, com o servidor nesta máquina: também do disco, o próprio caminho ou o primeiro candidato que existe.
+    // A rota de arquivo citado fica para a sessão de fora.
+    let outside = |path: &str| path.strip_prefix("~/").and_then(|rest| Some(PathBuf::from(std::env::var_os("HOME")?).join(rest)))
+        .or_else(|| path.starts_with('/').then(|| PathBuf::from(path)))
+        .filter(|file| file.is_file() && !file.components().any(|c| c.as_os_str() == ".git"));
+    let found = if here { std::iter::once(&path).chain(&candidates).find_map(|p| outside(p).map(|file| (p.clone(), file))) } else { None };
+    // O caminho como foi citado vai no conteúdo: é ele que a rota de gravação confere no transcript.
+    if let Some((cited, file)) = found {
+        path = cited;
+        let (Some(folder), Some(file_name)) = (file.parent().map(std::path::Path::to_path_buf), file.file_name().map(|n| n.to_string_lossy().into_owned()))
+            else { return Err(Failure::local("file_missing")) };
+        return tokio::task::spawn_blocking(move || {
+            let folder = std::fs::canonicalize(&folder).map_err(|_| Failure::local("file_missing"))?;
+            super::tree::read_local(&folder, &file_name).map(|read|
+                Content { path, text: read.text, truncated: read.truncated, digest: read.digest, external: true })
+        }).await.unwrap_or_else(|_| Err(Failure::local("invalid_response")));
     }
     let mut resolved = api.act(&name, &["files", "resolver"], Some(json!({"caminhos": [&path]})), false, 30).await?;
     if resolved.get("ok").and_then(|v| v.get(&path)).is_none() && !candidates.is_empty() {
@@ -198,22 +215,44 @@ impl Hangar {
             });
         }
         if is_picture { return; }
+        // Outros lugares onde o mesmo nome aparece na conversa, se o caminho citado não existir (nome solto, caminho
+        // abreviado com "…"): absolutos que terminam nele, inclusive com espaço, e o nome ou o relativo dentro das pastas
+        // dos `cd`. A leitura tenta o citado primeiro.
         let mut candidates = Vec::new();
-        if !path.contains('/') {
-            fn collect(value: &Value, name: &str, out: &mut Vec<String>) {
+        {
+            fn collect(value: &Value, name: &str, out: &mut Vec<String>, dirs: &mut Vec<String>, relatives: &mut Vec<String>) {
                 match value {
-                    Value::String(text) => for reference in composer::code_references(text) {
-                        if reference.path.ends_with(&format!("/{name}")) && !out.contains(&reference.path) { out.push(reference.path); }
-                    },
-                    Value::Array(items) => for item in items { collect(item, name, out); },
-                    Value::Object(items) => for item in items.values() { collect(item, name, out); },
+                    Value::String(text) => {
+                        let tail = format!("/{name}");
+                        for reference in composer::code_references(text) {
+                            if !reference.path.ends_with(&tail) { continue; }
+                            let list = if reference.path.starts_with(['/', '~']) { &mut *out } else { &mut *relatives };
+                            if !list.contains(&reference.path) { list.push(reference.path); }
+                        }
+                        for path in composer::spaced_paths(text, &tail) { if !out.contains(&path) { out.push(path); } }
+                        for dir in composer::cd_dirs(text) { if !dirs.contains(&dir) { dirs.push(dir); } }
+                    }
+                    Value::Array(items) => for item in items { collect(item, name, out, dirs, relatives); },
+                    Value::Object(items) => for item in items.values() { collect(item, name, out, dirs, relatives); },
                     _ => {},
                 }
             }
-            for event in &self.chat.events { collect(&json!([event.text, event.tool_input, event.result]), &path, &mut candidates); }
+            let name = composer::basename(&path).to_owned();
+            let (mut dirs, mut relatives) = (Vec::new(), vec![name.clone()]);
+            for event in self.chat.events.iter().rev() {
+                collect(&json!([event.text, event.tool_input, event.result]), &name, &mut candidates, &mut dirs, &mut relatives);
+            }
+            candidates.retain(|c| *c != path);
+            for dir in &dirs {
+                for relative in &relatives { candidates.push(format!("{dir}/{relative}")); }
+            }
+            // ponytail: teto fixo; sessão de fora confere todos no backend, um a um.
+            candidates.truncate(60);
         }
         self.runtime.spawn(async move {
-            let result = read_file(api, key.name, path, candidates, local).await;
+            // Servidor nesta máquina: o disco daqui é o da sessão, mesmo com a aba Arquivos nunca aberta.
+            let here = local.is_some() || api.is_loopback();
+            let result = read_file(api, key.name, path, candidates, local, here).await;
             let _ = tx.send(Envelope { connection, selection, payload: Payload::FileView(FileReply::Read(id, result)) }).await;
         });
     }

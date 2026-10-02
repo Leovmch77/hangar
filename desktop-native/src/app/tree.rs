@@ -1,6 +1,7 @@
 //! Árvore de arquivos da sessão no painel direito, no molde do `files/` do Zeron (MIT, ver `LICENSE-ZERON`):
 //! busca por nome no topo, pastas com seta, ícone por tipo, o nome na cor do estado no git e o clique abrindo o arquivo
 //! no visor. Servidor nesta máquina lê o disco e acompanha as mudanças com um vigia; servidor de fora, pelas rotas.
+mod cited;
 mod source;
 
 use super::*;
@@ -48,6 +49,7 @@ pub(super) struct Tree {
     watched: HashSet<PathBuf>,
     watch_error: bool,
     _watch_task: Option<Task<()>>,
+    cited: cited::CitedView,
 }
 
 impl Tree {
@@ -60,7 +62,7 @@ impl Tree {
         Self { open: false, owner: None, generation: 0, source: None, picking: None, dirs: HashMap::new(), expanded: HashSet::new(),
             selected: None, reveal: None, rows: Vec::new(), scroll: UniformListScrollHandle::new(), focus: cx.focus_handle(), search,
             query: String::new(), results: None, active: 0, search_task: None, reloading: false, reload_again: false,
-            watcher: None, watched: HashSet::new(), watch_error: false, _watch_task: None }
+            watcher: None, watched: HashSet::new(), watch_error: false, _watch_task: None, cited: Default::default() }
     }
 
     /// Linhas à vista: a raiz e, dentro de cada pasta aberta, o que ela tem, com a linha de estado quando falta conteúdo.
@@ -131,6 +133,7 @@ impl Hangar {
         tree.generation += 1;
         (tree.watcher, tree._watch_task, tree.search_task) = (None, None, None);
         tree.watched.clear();
+        tree.cited.reset();
         (tree.source, tree.picking, tree.reloading, tree.reload_again, tree.watch_error) = (None, None, false, false, false);
         tree.dirs.clear();
         tree.expanded.clear();
@@ -415,7 +418,17 @@ impl Hangar {
     /// O corpo do painel no modo Arquivos: busca, e embaixo a árvore ou os resultados.
     pub(super) fn render_tree(&mut self, cx: &mut Context<Self>) -> AnyElement {
         self.tree_sync(cx);
-        let searching = !self.tree.query.is_empty();
+        let cited_on = self.tree.cited.on;
+        let cited_label = match self.cited_count() {
+            Some(n) => super::costs::web_with("arq_vista_citados", &[("n", n.to_string())]),
+            None => super::costs::web_with("arq_vista_citados", &[("n", "…".to_owned())]),
+        };
+        let views = div().flex().gap(px(4.)).px_3().pt_1().pb(px(10.))
+            .child(Button::new("tree-view-tree").ghost().small().selected(!cited_on).label(activity::web("arq_vista_arvore"))
+                .on_click(cx.listener(|this, _, _, cx| this.cited_toggle(false, cx))))
+            .child(Button::new("tree-view-cited").ghost().small().selected(cited_on).label(cited_label)
+                .on_click(cx.listener(|this, _, _, cx| this.cited_toggle(true, cx))));
+        let searching = !self.tree.query.is_empty() && !cited_on;
         let search = div().flex().items_center().gap_1().px_3().pb_2()
             .child(div().id("tree-search").flex_1().min_w_0()
                 .capture_action(cx.listener(|this, _: &MoveUp, _, cx| this.tree_step_result(-1, cx)))
@@ -425,7 +438,7 @@ impl Hangar {
                     this.tree.search.update(cx, |input, cx| input.set_value("", window, cx));
                 }))
                 .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                    if event.keystroke.key == "enter" && !this.tree.query.is_empty() { this.tree_open_result(this.tree.active, window, cx); }
+                    if event.keystroke.key == "enter" && !this.tree.query.is_empty() && !this.tree.cited.on { this.tree_open_result(this.tree.active, window, cx); }
                 }))
                 .child(Input::new(&self.tree.search).small().cleanable(true).aria_label(activity::web("arq_buscar"))
                     .prefix(chrome::small_icon(IconName::Search, 14., theme::faint()))))
@@ -434,9 +447,11 @@ impl Hangar {
                 .on_click(cx.listener(|this, _, _, cx| this.tree_collapse_all(cx))))
             .child(chrome::icon_button("tree-reload", IconName::RefreshCw, activity::web("arq_recarregar"), cx)
                 .disabled(self.tree.source.is_none())
-                .on_click(cx.listener(|this, _, _, cx| this.tree_reload(cx))));
+                .on_click(cx.listener(|this, _, _, cx| { this.tree.cited.reset(); this.tree_reload(cx); })));
         let note = |text: String, color: Hsla| div().px_4().py_2().text_xs().text_color(color).child(text).into_any_element();
-        let body = if searching {
+        let body = if cited_on {
+            self.render_cited(cx)
+        } else if searching {
             match &self.tree.results {
                 None => note(activity::web("arq_carregando"), theme::muted()),
                 Some(Err(reason)) => note(reason.clone(), theme::warning()),
@@ -465,6 +480,7 @@ impl Hangar {
             None => None,
         };
         div().size_full().flex().flex_col().pt_1()
+            .child(views)
             .child(search)
             .child(body)
             .when_some(live, |el, (text, color)| el.child(div().flex_shrink_0().px_4().py(px(6.)).border_t_1().border_color(theme::border())

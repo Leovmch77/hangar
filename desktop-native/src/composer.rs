@@ -194,6 +194,15 @@ pub fn code_references(text: &str) -> Vec<CodeReference> {
     let mut consumed = 0;
     for (start, ch) in text.char_indices() {
         if start < consumed { continue; }
+        // Absoluto entre aspas pode ter espaço ("/home/x/Área de trabalho/a.sql"); sem espaço, a regra de baixo já pega.
+        if matches!(ch, '"' | '\'') && let Some(len) = text[start + 1..].find(ch) {
+            let path = &text[start + 1..start + 1 + len];
+            if (path.starts_with('/') || path.starts_with("~/")) && path.contains(' ') && !path.contains(['\n', '\t']) && code_path(path, true) {
+                out.push(CodeReference { path: path.to_owned(), line: None, start: start + 1, end: start + 1 + len });
+                consumed = start + 1 + len;
+                continue;
+            }
+        }
         let previous = text[..start].chars().next_back();
         let absolute = ch == '/' || (ch == '~' && text[start..].starts_with("~/"));
         let word = |c: char| c.is_ascii_alphanumeric() || "_.-".contains(c);
@@ -211,6 +220,43 @@ pub fn code_references(text: &str) -> Vec<CodeReference> {
                 break;
             }
             if next.is_whitespace() || "\"'`)]".contains(next) { break; }
+        }
+    }
+    out
+}
+
+/// Caminhos absolutos sem aspas que terminam em `tail` e têm espaço no meio ("/home/j/Área de trabalho/x.sql"): o
+/// leitor normal corta no espaço. Um candidato por começo possível na linha, do mais longo ao mais curto; quem confere
+/// qual existe é o disco ou o backend.
+pub fn spaced_paths(text: &str, tail: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    if tail.is_empty() { return out; }
+    for (at, _) in text.match_indices(tail) {
+        let end = at + tail.len();
+        let line_start = text[..at].rfind('\n').map_or(0, |n| n + 1);
+        for (start, ch) in text[line_start..at].char_indices().map(|(ix, c)| (line_start + ix, c)) {
+            let opens = ch == '/' || (ch == '~' && text[start..].starts_with("~/"));
+            let previous = text[..start].chars().next_back();
+            if !opens || previous.is_some_and(|c| !c.is_whitespace() && !"\"'(=`".contains(c)) { continue; }
+            let path = &text[start..end];
+            if path.contains(' ') && !out.iter().any(|p: &String| p == path) { out.push(path.to_owned()); }
+        }
+    }
+    out
+}
+
+/// Pastas absolutas dos `cd` de um comando (`cd "/a b/c" && …`, `cd /x;`): caminho relativo citado depois dele é dali.
+pub fn cd_dirs(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for (at, _) in text.match_indices("cd ") {
+        if text[..at].chars().next_back().is_some_and(|c| c.is_alphanumeric() || c == '_') { continue; }
+        let rest = text[at + 3..].trim_start();
+        let dir = match rest.chars().next() {
+            Some(quote @ ('"' | '\'')) => rest[1..].find(quote).map(|end| &rest[1..1 + end]),
+            _ => Some(rest.split(|c: char| c.is_whitespace() || ";&|)".contains(c)).next().unwrap_or("")),
+        };
+        if let Some(dir) = dir.map(|d| d.trim_end_matches('/')).filter(|d| (d.starts_with('/') || d.starts_with("~/")) && !d.contains('\n')) {
+            if !out.iter().any(|d2: &String| d2 == dir) { out.push(dir.to_owned()); }
         }
     }
     out
@@ -391,6 +437,19 @@ mod tests {
         assert!(citation_markdown("[nota] veja [arquivo](src/a.ts)").starts_with("[nota] veja [a.ts]"));
         let fenced = "````rust\n```\n/tmp/a.rs\n````\n";
         assert_eq!(citation_markdown(fenced), fenced);
+    }
+
+    #[test]
+    fn quoted_absolute_path_keeps_its_spaces() {
+        let refs = code_references("scp -q \"/home/j/Área de trabalho/ddl/02-x.sql\" vm:C:/temp && cat '~/a b/c.rs'");
+        assert_eq!(refs.iter().map(|r| r.path.as_str()).collect::<Vec<_>>(), ["/home/j/Área de trabalho/ddl/02-x.sql", "~/a b/c.rs"]);
+        assert!(code_references("diz \"olá mundo\" e 'it is'").is_empty());
+        let found = "ok\n/home/j/Área de trabalho/ddl/02-x.sql\n";
+        assert_eq!(spaced_paths(found, "/02-x.sql"), ["/home/j/Área de trabalho/ddl/02-x.sql"]);
+        assert_eq!(spaced_paths(found, "trabalho/ddl/02-x.sql"), ["/home/j/Área de trabalho/ddl/02-x.sql"]);
+        assert!(spaced_paths("/a/b/02-x.sql", "/02-x.sql").is_empty());
+        assert_eq!(cd_dirs("cd \"/home/j/Área de trabalho/P\" && sed x ../a.pas; cd /tmp/x/; abcd /no; cd rel"),
+            ["/home/j/Área de trabalho/P", "/tmp/x"]);
     }
 
     fn command(name: &str) -> CommandInfo { CommandInfo { name: name.into(), ..Default::default() } }
