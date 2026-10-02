@@ -5490,9 +5490,10 @@ impl Render for Hangar {
                     cx.stop_propagation();
                     return;
                 }
-                // Foco no cartão da pergunta (resposta digitada) ou em lugar nenhum: o Esc a cancela como no campo. Outros
-                // campos (renomear, endereço) têm o Esc deles.
-                let in_ask = window.focused(cx).is_none_or(|focus| this.ask_form.inputs.iter().any(|input| input.focus_handle(cx) == focus));
+                // Foco na resposta digitada, na raiz (clique numa opção ou no vazio devolve o foco a ela) ou em lugar nenhum:
+                // o Esc cancela a pergunta como no campo. Outros campos (renomear, endereço) têm o Esc deles.
+                let in_ask = window.focused(cx).is_none_or(|focus| focus == this.root_focus
+                    || this.ask_form.inputs.iter().any(|input| input.focus_handle(cx) == focus));
                 if this.chat.ask.is_some() && in_ask {
                     if this.confirm.take().is_some() { this.confirm_no_ask = false; cx.notify(); } else { this.request_stop(window, cx); }
                     cx.stop_propagation();
