@@ -93,7 +93,8 @@ else
     if [ -z "$msys" ]; then
         ln -sn "$plugin_src" "$plugin_dst"
         echo "ok: ~/.claude/skills/hangar -> $plugin_src (plugin)"
-    elif cmd //c mklink /J "$(cygpath -w "$plugin_dst")" "$(cygpath -w "$plugin_src")" >/dev/null 2>&1; then
+    # `//J`: o MSYS converte `/J` em caminho (`J:/`) e o mklink recusa.
+    elif cmd //c mklink //J "$(cygpath -w "$plugin_dst")" "$(cygpath -w "$plugin_src")" >/dev/null 2>&1; then
         echo "ok: ~/.claude/skills/hangar -> $plugin_src (plugin, juncao)"
     else
         cp -r "$plugin_src" "$plugin_dst"
