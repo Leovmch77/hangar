@@ -157,7 +157,7 @@ describe('SessionTabs — expandir sob override do Board/Canvas (round 7)', () =
 describe('SessionTabs — filete de progresso do plano (round 2)', () => {
   function comPlano(pct: number, complete: boolean) {
     vi.mocked(planBadge).mockReturnValue({
-      pct, complete, label: '', title: `Plano ${pct}%`,
+      pct, complete, label: '', text: '', title: `Plano ${pct}%`,
     });
   }
 
