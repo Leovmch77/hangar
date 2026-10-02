@@ -23,8 +23,8 @@ function Atualiza-Path {
     $registro = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' +
                 [Environment]::GetEnvironmentVariable('Path', 'User')
     # O winget e um alias de app em WindowsApps; sem essa pasta no PATH ele "nao existe".
-    $aliases = Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps'
-    if (Test-Path $aliases) { $registro += ';' + $aliases }
+    $aliases = "$env:LOCALAPPDATA\Microsoft\WindowsApps"
+    if ($env:LOCALAPPDATA -and (Test-Path $aliases)) { $registro += ';' + $aliases }
     $tudo = ($env:Path + ';' + [Environment]::ExpandEnvironmentVariables($registro)) -split ';' |
             Where-Object { $_ } | Select-Object -Unique
     $env:Path = $tudo -join ';'
