@@ -23,7 +23,7 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from app import atomico, log_paths, procinfo
+from app import atomico, connect_port, log_paths, procinfo
 from app.connect_port import CONNECT_PORT
 
 _log = logging.getLogger(__name__)
@@ -226,8 +226,28 @@ def _kill(pid: int) -> None:
         return
     try:
         os.killpg(pid, signal.SIGTERM)          # start_new_session: o grupo tem o pid do filho
-    except (ProcessLookupError, PermissionError):
+    except ProcessLookupError:
         pass
+
+
+def _kill_logged(pid: int, name: str) -> None:
+    # Falha ao matar não pode derrubar o supervisor calada: o outro filho ficaria sem dono.
+    try:
+        _kill(pid)
+    except (OSError, subprocess.SubprocessError):
+        _log.exception("connect: não consegui encerrar %s (pid %s)", name, pid)
+
+
+async def _reap(proc: asyncio.subprocess.Process, name: str) -> None:
+    _kill_logged(proc.pid, name)
+    try:
+        await asyncio.wait_for(proc.wait(), 5)
+    except asyncio.TimeoutError:
+        _log.warning("connect: %s não saiu em 5 s; forçando", name)
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
 
 
 def _kill_leftover(name: str) -> None:
@@ -240,7 +260,7 @@ def _kill_leftover(name: str) -> None:
         return
     argv0 = procinfo._argv(pid)[:1] if procinfo.pid_vivo(pid) else []
     if argv0 and Path(argv0[0]).parent.parent == folder() / "bin" and Path(argv0[0]).stem == name:
-        _kill(pid)
+        _kill_logged(pid, name)
 
 
 async def _keep(child: _Child) -> None:
@@ -253,18 +273,24 @@ async def _keep(child: _Child) -> None:
             extra: dict = {"creationflags": _WINDOWS_FLAGS} if os.name == "nt" else {"start_new_session": True}
             # "ab": num laço de quedas, a causa da anterior continua no arquivo.
             with open(log_dir / f"connect-{child.name}.log", "ab") as out:
-                child.proc = await asyncio.create_subprocess_exec(
+                spawn = asyncio.ensure_future(asyncio.create_subprocess_exec(
                     *child.argv, stdin=asyncio.subprocess.DEVNULL, stdout=out,
-                    stderr=asyncio.subprocess.STDOUT, **extra)
+                    stderr=asyncio.subprocess.STDOUT, **extra))
+                try:
+                    child.proc = await asyncio.shield(spawn)
+                except asyncio.CancelledError:
+                    # Cancelado bem no nascimento: o processo existe, mas ainda sem pid gravado.
+                    child.proc = await spawn
+                    raise
             (folder() / f"{child.name}.pid").write_text(str(child.proc.pid))
             child.last_exit = await child.proc.wait()
         except Exception:
             _log.exception("connect: %s não subiu", child.name)
             child.last_exit = None
         finally:
-            if child.proc is not None and child.proc.returncode is None:
-                _kill(child.proc.pid)
-            child.proc = None
+            proc, child.proc = child.proc, None
+            if proc is not None and proc.returncode is None:
+                await _reap(proc, child.name)
         if time.monotonic() - started >= _HEALTHY:
             child.restarts = 0
         wait = _WAITS[min(child.restarts, len(_WAITS) - 1)]
@@ -293,6 +319,10 @@ async def start() -> None:
         state = read_state()
         if not state.get("enabled"):
             return
+        if connect_port.unavailable:
+            _error = connect_port.unavailable
+            _log.warning("connect: não liguei (%s)", _error)
+            return
         try:
             code = parse_code(state.get("code", ""))
             bins = await asyncio.to_thread(binaries)
@@ -302,10 +332,11 @@ async def start() -> None:
             _error = e.msg
             _log.warning("connect: não liguei (%s)", e.msg)
             return
-        except OSError as e:
-            # Sem isto a tela ficaria em "Subindo…" para sempre, sem erro nenhum.
-            _error = f"erro de disco: {e}"
-            _log.warning("connect: não liguei (%s)", e)
+        except Exception as e:
+            # Disco, download cortado (IncompleteRead não é OSError) ou o que for: sem isto a tela
+            # ficaria em "Subindo…" para sempre, sem erro nenhum.
+            _error = f"não liguei: {e}"
+            _log.exception("connect: não liguei")
             return
         _error = None
         _children.clear()
@@ -329,11 +360,12 @@ def save(text: str) -> None:
 async def forget() -> None:
     global _error
     async with _lock:
+        # Desligado primeiro no disco: se parar os filhos falhar, o próximo boot não religa.
+        write_state({})
         await _stop()
         # Se a subida falhou antes do supervisor rodar, um filho de antes ainda pode estar publicando.
         for name in ("frpc", "caddy"):
             _kill_leftover(name)
-        write_state({})
         # O frpc.toml guarda o token: desligado, ele não fica no disco.
         for name in ("frpc.toml", "frpc.pid", "caddy.pid"):
             (folder() / name).unlink(missing_ok=True)
@@ -349,9 +381,17 @@ def status() -> dict:
             host = parse_code(state["code"]).host
         except ConnectError:
             pass
+    children = list(_children.items())          # a lista muda no loop; isto roda em thread
+    error = _error
+    if error is None and _task is not None and _task.done() and not _task.cancelled() and _task.exception():
+        error = f"o supervisor parou: {_task.exception()}"
+    if error is None:
+        falling = [f"{n} caiu {c.restarts} vezes (saída {c.last_exit})" for n, c in children if c.restarts >= 3]
+        if falling:
+            error = "; ".join(falling) + "; veja connect-<nome>.log na pasta de logs do Hangar"
     return {
         "configured": bool(state.get("code")), "enabled": bool(state.get("enabled")),
-        "host": host, "url": f"https://{host}" if host else None, "error": _error,
+        "host": host, "url": f"https://{host}" if host else None, "error": error,
         "processes": {n: {"running": c.proc is not None and c.proc.returncode is None,
-                          "restarts": c.restarts, "last_exit": c.last_exit} for n, c in _children.items()},
+                          "restarts": c.restarts, "last_exit": c.last_exit} for n, c in children},
     }

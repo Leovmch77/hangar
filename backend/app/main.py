@@ -161,14 +161,19 @@ def _guest_socket() -> socket.socket | None:
 
 def _connect_socket() -> socket.socket | None:
     # Só loopback: quem fala aqui é o Caddy desta máquina, nunca a rede.
+    from app import connect_port
     if settings.port == CONNECT_PORT:
-        print(f"[hangar] AVISO: CP_PORT={settings.port} é a porta do Connect; o Connect fica desligado")
-        return None
-    try:
-        return _tcp_socket("127.0.0.1", CONNECT_PORT)
-    except OSError as e:
-        print(f"[hangar] AVISO: porta do Connect {CONNECT_PORT} indisponível ({e}); o Connect fica desligado")
-        return None
+        connect_port.unavailable = f"CP_PORT={settings.port} é a porta do Connect"
+    else:
+        try:
+            sock = _tcp_socket("127.0.0.1", CONNECT_PORT)
+        except OSError as e:
+            connect_port.unavailable = f"porta do Connect {CONNECT_PORT} indisponível ({e})"
+        else:
+            connect_port.unavailable = None
+            return sock
+    print(f"[hangar] AVISO: {connect_port.unavailable}; o Connect fica desligado")
+    return None
 
 
 def main():

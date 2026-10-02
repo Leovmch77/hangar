@@ -104,7 +104,7 @@ function syncCookie(token: string | null): void {
   // funcionando e o app PARECE são — só o SSE volta 401, e a lista de sessões fica vazia.
   // Em https o nome leva `__Host-`: o navegador não deixa outra máquina do mesmo site gravar um igual.
   // Secure só em https: em http de LAN o navegador recusaria o cookie inteiro.
-  const https = location.protocol === 'https:';
+  const https = window.location.protocol === 'https:';
   const name = https ? '__Host-cp_token' : 'cp_token';
   const secure = https ? '; Secure' : '';
   if (token) document.cookie = `${name}=${token}; path=/; SameSite=Lax; Max-Age=31536000${secure}`;

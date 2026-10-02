@@ -83,7 +83,8 @@ impl Hangar {
                         self.connect.status.loading = false;
                         self.connect.status.value = Some(Ok(status));
                     }
-                    Err(error) => self.connect.error = Some(error),
+                    // O PUT pode ter estourado o prazo com o servidor já ligado: relê em vez de supor.
+                    Err(error) => { self.connect.error = Some(error); self.load_connect(cx); }
                 }
             }
         }

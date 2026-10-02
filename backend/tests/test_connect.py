@@ -129,6 +129,17 @@ def test_rotas(_api):
     assert chamadas == ["start"]
 
 
+def test_sem_porta_do_connect_nao_liga(tmp_path, monkeypatch):
+    import asyncio
+    monkeypatch.setattr(connect, "folder", lambda: tmp_path)
+    monkeypatch.setattr(connect, "_error", None)
+    monkeypatch.setattr(connect.connect_port, "unavailable", "porta do Connect 8768 indisponível")
+    connect.write_state({"code": _codigo(), "enabled": True})
+    asyncio.run(connect.start())
+    assert connect.status()["error"] == "porta do Connect 8768 indisponível"
+    assert connect.status()["processes"] == {}
+
+
 def test_hash_errado_nao_grava(_plataforma, monkeypatch):
     monkeypatch.setitem(connect._FRP_SHA256, ("linux", "amd64"), "0" * 64)
     with pytest.raises(connect.ConnectError):

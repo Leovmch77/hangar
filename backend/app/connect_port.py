@@ -6,6 +6,9 @@ CONNECT_PORT = 8768
 # aceita, e todo acesso pelo Connect divide um contador de tentativas próprio. Cuidado: o
 # `ipaddress` do Python o classifica como privado — nunca decidir "local" por `is_private`.
 CONNECT_PEER = "192.0.2.1"
+# Preenchido pelo main ao abrir os sockets. Sem a porta, ligar o Connect publicaria um endereço que
+# só devolve 502 (ou entregaria a internet a quem estiver nela): o connect.py recusa com este motivo.
+unavailable: str | None = "o backend subiu sem a porta do Connect"
 
 
 class ConnectPortGate:
