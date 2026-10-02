@@ -227,7 +227,9 @@ impl NewSession {
             Ok(Catalog { models, reduced: v.get("reduced").and_then(Value::as_bool).unwrap_or(false) })
         });
         if !self.models.finish(seq, catalog) { return; }
-        if let Some(permission) = saved.as_ref().map(|s| s.2.clone()).filter(|p| self.permissions().is_some_and(|list| list.contains(&p.as_str()))) {
+        // Permissão escolhida à mão nesta tela fica; "" é a opção "Padrão" do seletor.
+        if let Some(permission) = saved.as_ref().map(|s| s.2.clone()).filter(|p| !self.permission_touched
+            && self.permissions().is_some_and(|list| p.is_empty() || list.contains(&p.as_str()))) {
             self.permission = permission;
             self.build_permission_pick(window, cx);
         }
@@ -293,7 +295,7 @@ impl NewSession {
         let choices: Vec<ModelChoice> = std::iter::once(ModelChoice { id: String::new(), label: tr("create_permission_default"), hint: String::new() })
             .chain(modes.iter().map(|m| ModelChoice { id: (*m).into(), label: (*m).into(), hint: String::new() })).collect();
         let at = Self::pick_at(&choices, &self.permission);
-        self.permission_pick = Some(picker(choices, at, |this, id, _, _| this.permission = id, window, cx));
+        self.permission_pick = Some(picker(choices, at, |this, id, _, _| (this.permission, this.permission_touched) = (id, true), window, cx));
     }
 
     /// A conta Claude com a cota de cada uma na dica ("atual · 5h 42% · 7d 18%").
@@ -352,13 +354,17 @@ impl NewSession {
             }
         };
         let levels = self.levels();
+        // "Padrão" mais até 4 níveis numa linha; mais que isso quebra linha em vez de cortar o rótulo.
+        let many = levels.len() > 4;
         let effort = (!levels.is_empty()).then(|| div().flex().flex_col().gap(px(2.))
             .child(popup::separator())
             .child(popup::title(tr("new_chat_reasoning"), None))
             .child(div().id("new-chat-efforts").role(Role::Group).aria_label(tr("new_chat_reasoning")).px(px(4.)).pb(px(2.)).flex()
+                .when(many, |el| el.flex_wrap())
                 .gap(px(2.)).children(std::iter::once(String::new()).chain(levels).map(|level| {
                     let label = if level.is_empty() { tr("create_default") } else { level.clone() };
-                    Button::new(SharedString::from(format!("new-chat-effort-{level}"))).ghost().xsmall().flex_1().min_w_0().selected(self.effort == level).label(label)
+                    Button::new(SharedString::from(format!("new-chat-effort-{level}"))).ghost().xsmall().when(!many, |b| b.flex_1().min_w_0())
+                        .selected(self.effort == level).label(label)
                         .on_click(cx.listener(move |this, _, window, cx| { this.model_choice_touched = true; this.effort = level.clone(); this.build_effort_pick(window, cx); cx.notify(); }))
                 }))));
         let default = self.render_default_check(cx).map(|check| div().flex().flex_col().gap(px(4.)).child(popup::separator()).child(check.py(px(4.))));

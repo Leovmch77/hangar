@@ -107,6 +107,11 @@ impl Tree {
     }
 }
 
+/// A pasta do usuário, para os caminhos com `~/`; no Windows não há `HOME`.
+pub(super) fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from)
+}
+
 /// As pastas acima de um caminho relativo, da raiz para dentro: `a/b/c.md` dá `a` e `a/b`.
 fn parent_dirs(path: &str) -> Vec<String> {
     path.match_indices('/').map(|(ix, _)| path[..ix].to_owned()).filter(|dir| !dir.is_empty()).collect()

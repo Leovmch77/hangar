@@ -22,6 +22,8 @@ pub(super) struct Find {
     /// Quadros que ainda esperam o texto do achado ativo aparecer para trazê-lo à vista; a linha recém-rolada só
     /// ganha texto no quadro seguinte. Achado em ferramenta, que não tem texto pintável, esgota e para.
     reveal: u8,
+    /// O texto pesquisável de cada evento, em minúsculas: montado uma vez, não a cada tecla.
+    texts: HashMap<String, String>,
 }
 
 impl Find {
@@ -31,14 +33,31 @@ impl Find {
             if matches!(event, InputEvent::Change) { this.find_changed(cx); }
         }).detach();
         Self { open: false, input, query: String::new(), hits: Vec::new(), active: 0, row: None, searched: 0, back: None,
-            painted: HashMap::new(), reveal: 0 }
+            painted: HashMap::new(), reveal: 0, texts: HashMap::new() }
+    }
+
+    /// Outra conversa: fecha e esquece o que era da anterior.
+    pub(super) fn reset(&mut self) {
+        (self.open, self.row, self.hits, self.searched) = (false, None, Vec::new(), 0);
+        self.texts.clear();
     }
 }
 
-/// O que a busca lê de um evento: o texto, a entrada da ferramenta e o resultado.
+/// O que a busca lê de um evento: o texto, os valores da entrada da ferramenta (sem as chaves do JSON) e o resultado.
 fn haystack(event: &ChatEvent) -> String {
-    let input = event.tool_input.as_ref().map(|v| v.to_string()).unwrap_or_default();
-    [event.text.as_deref().unwrap_or(""), &input, event.result.as_deref().unwrap_or("")].join("\n").to_lowercase()
+    fn values(value: &Value, out: &mut Vec<String>) {
+        match value {
+            Value::String(text) => out.push(text.clone()),
+            Value::Array(items) => for item in items { values(item, out); },
+            Value::Object(items) => for item in items.values() { values(item, out); },
+            Value::Null => {},
+            other => out.push(other.to_string()),
+        }
+    }
+    let mut parts = vec![event.text.clone().unwrap_or_default()];
+    if let Some(input) = &event.tool_input { values(input, &mut parts); }
+    parts.push(event.result.clone().unwrap_or_default());
+    parts.join("\n").to_lowercase()
 }
 
 /// Onde `needle` (já em minúsculas) aparece em `text`, sem diferenciar maiúsculas, em bytes de `text`.
@@ -76,24 +95,30 @@ impl Hangar {
     pub(super) fn open_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.selected.as_ref().is_some_and(|s| s.readable()) { return; }
         if !self.find.open { (self.find.open, self.find.back) = (true, window.focused(cx)); }
-        if self.has_older { self.load_all(cx); }
+        // Não depende do "Carregar anteriores" aparecer: na primeira página ele ainda está escondido.
+        if self.history_limit != 0 { self.load_all(cx); }
         self.find.input.update(cx, |input, cx| input.focus(window, cx));
         self.redraw(Area::Conversation, cx);
     }
 
     fn close_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         (self.find.open, self.find.row) = (false, None);
+        self.find.texts.clear();
         if let Some(back) = self.find.back.take() { back.focus(window, cx); }
         self.redraw(Area::Conversation, cx);
     }
 
     fn find_run(&mut self) {
         let query = self.find.query.to_lowercase();
+        let current = self.find.hits.get(self.find.active).cloned();
         self.find.searched = self.chat.events.len();
+        let (events, texts) = (&self.chat.events, &mut self.find.texts);
         self.find.hits = if query.is_empty() { Vec::new() } else {
-            self.chat.events.iter().filter(|e| haystack(e).contains(&query)).map(|e| e.id.clone()).collect()
+            events.iter().filter(|e| texts.entry(e.id.clone()).or_insert_with(|| haystack(e)).contains(&query)).map(|e| e.id.clone()).collect()
         };
-        self.find.active = self.find.active.min(self.find.hits.len().saturating_sub(1));
+        // O histórico antigo que chega entra na frente: o achado ativo continua o mesmo, só muda de número.
+        let kept = current.and_then(|id| self.find.hits.iter().position(|h| *h == id));
+        self.find.active = kept.unwrap_or(self.find.active).min(self.find.hits.len().saturating_sub(1));
     }
 
     fn find_changed(&mut self, cx: &mut Context<Self>) {

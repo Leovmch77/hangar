@@ -401,7 +401,10 @@ pub fn set_harness_default(key: &str, value: Option<(String, String, String)>) {
     let file = dir.join("harness-defaults.json");
     let mut saved: HashMap<String, (String, String, String)> = std::fs::read(&file).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
     match value { Some(value) => { saved.insert(key.to_owned(), value); } None => { saved.remove(key); } }
-    if let Ok(bytes) = serde_json::to_vec(&saved) && let Err(error) = std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(file, bytes)) {
+    // Temporário e troca: quem lê no meio da gravação vê o arquivo velho inteiro, nunca um pela metade.
+    let tmp = dir.join("harness-defaults.json.tmp");
+    if let Ok(bytes) = serde_json::to_vec(&saved)
+        && let Err(error) = std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&tmp, bytes)).and_then(|_| std::fs::rename(&tmp, &file)) {
         eprintln!("padrão do harness não gravou: {error}");
     }
 }

@@ -135,8 +135,10 @@ async fn read_file(api: Api, name: String, mut path: String, candidates: Vec<Str
     }
     // Citado fora da raiz, com o servidor nesta máquina: também do disco, o próprio caminho ou o primeiro candidato que existe.
     // A rota de arquivo citado fica para a sessão de fora.
-    let outside = |path: &str| path.strip_prefix("~/").and_then(|rest| Some(PathBuf::from(std::env::var_os("HOME")?).join(rest)))
-        .or_else(|| path.starts_with('/').then(|| PathBuf::from(path)))
+    // Resolvido inteiro antes de olhar `.git`: symlink não escapa da regra, e o arquivo lido é o de verdade.
+    let outside = |path: &str| path.strip_prefix("~/").and_then(|rest| Some(super::tree::home_dir()?.join(rest)))
+        .or_else(|| std::path::Path::new(path).is_absolute().then(|| PathBuf::from(path)))
+        .and_then(|file| std::fs::canonicalize(file).ok())
         .filter(|file| file.is_file() && !file.components().any(|c| c.as_os_str() == ".git"));
     let found = if here { std::iter::once(&path).chain(&candidates).find_map(|p| outside(p).map(|file| (p.clone(), file))) } else { None };
     // O caminho como foi citado vai no conteúdo: é ele que a rota de gravação confere no transcript.
@@ -243,15 +245,19 @@ impl Hangar {
                 collect(&json!([event.text, event.tool_input, event.result]), &name, &mut candidates, &mut dirs, &mut relatives);
             }
             candidates.retain(|c| *c != path);
+            // Os absolutos não podem tomar o teto inteiro: as pastas dos `cd` também precisam de vez.
+            candidates.truncate(30);
             for dir in &dirs {
                 for relative in &relatives { candidates.push(format!("{dir}/{relative}")); }
             }
             // ponytail: teto fixo; sessão de fora confere todos no backend, um a um.
             candidates.truncate(60);
         }
+        let cwd = self.selected.as_ref().and_then(|s| s.cwd.clone());
         self.runtime.spawn(async move {
-            // Servidor nesta máquina: o disco daqui é o da sessão, mesmo com a aba Arquivos nunca aberta.
-            let here = local.is_some() || api.is_loopback();
+            // Servidor nesta máquina, mesmo com a aba Arquivos nunca aberta: loopback e a pasta da sessão existe aqui.
+            // Túnel para outra máquina também é loopback, e a pasta dela não existe neste disco.
+            let here = local.is_some() || (api.is_loopback() && cwd.is_some_and(|cwd| std::path::Path::new(&cwd).is_dir()));
             let result = read_file(api, key.name, path, candidates, local, here).await;
             let _ = tx.send(Envelope { connection, selection, payload: Payload::FileView(FileReply::Read(id, result)) }).await;
         });

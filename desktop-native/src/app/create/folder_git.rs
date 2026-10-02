@@ -176,8 +176,8 @@ impl NewSession {
                             self.git_name.update(cx, |input, cx| input.set_value("", window, cx));
                             self.git.base = String::new();
                         }
-                        // A branch e as remotas mudaram: a pílula de branch e a lista releem.
-                        self.load_branches(cx);
+                        // A branch e as remotas mudaram: a pílula de branch e a lista releem, sem esvaziar o menu aberto.
+                        self.refresh_branches(cx);
                         self.git.note = Some(GitNote::Done(done));
                     }
                     Ok(Err(_)) => self.git.note = Some(GitNote::Failed(tr("invalid_response"))),
@@ -296,7 +296,7 @@ impl NewSession {
         self.menu.set(None);
         let weak = cx.entity().downgrade();
         crate::app::git::open_folder_git(path.clone().into(), basename(&path).to_owned(), self.link.runtime.clone(),
-            move |_, cx| { let _ = weak.update(cx, |this, cx| this.load_branches(cx)); }, window, cx);
+            move |_, cx| { let _ = weak.update(cx, |this, cx| this.refresh_branches(cx)); }, window, cx);
         cx.notify();
     }
 

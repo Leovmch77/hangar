@@ -21,6 +21,12 @@ impl Out {
     fn fail(&self, fallback: &str) -> String { Some(self.stderr.trim()).filter(|s| !s.is_empty()).unwrap_or(fallback).to_owned() }
 }
 
+/// A raiz do repositório: o `status` dá caminhos a partir dela, e o descarte por caminho só acerta rodando dali.
+pub(super) fn toplevel(cwd: &Path) -> Option<std::path::PathBuf> {
+    let out = run(cwd, &["rev-parse", "--show-toplevel"]).ok().filter(|out| out.code == 0)?;
+    Some(std::path::PathBuf::from(out.stdout.trim())).filter(|p| !p.as_os_str().is_empty())
+}
+
 fn run(cwd: &Path, args: &[&str]) -> Result<Out, Refusal> {
     let mut command = Command::new("git");
     // App de janela no Windows: sem isto cada git abre um console piscando.

@@ -667,18 +667,24 @@ impl Hangar {
         Some(div().flex().flex_col().gap(px(2.))
             .child(popup::separator())
             .child(popup::title(tr("new_chat_reasoning"), None))
-            // Uma linha só: os níveis dividem a largura e o escolhido aparece pelo realce, sem ícone que alargue o botão.
-            .child(div().id("ctl-efforts").role(Role::Group).aria_label(tr("new_chat_reasoning")).px(px(4.)).pb(px(2.)).flex().gap(px(2.))
+            // Até 5 níveis numa linha, dividindo a largura; mais que isso quebram linha sem cortar o rótulo. O escolhido
+            // aparece pelo realce, sem ícone que alargue o botão.
+            .child({
+                let many = levels.len() > 5;
+                div().id("ctl-efforts").role(Role::Group).aria_label(tr("new_chat_reasoning")).px(px(4.)).pb(px(2.)).flex().gap(px(2.))
+                .when(many, |el| el.flex_wrap())
                 .children(levels.into_iter().map(|c| {
                     let on = if live { c.label.eq_ignore_ascii_case(now.trim()) } else { c.current };
                     let label = effort_label(&c.label);
-                    Button::new(SharedString::from(format!("ctl-effort-{}", c.label))).ghost().xsmall().flex_1().min_w_0().selected(on).label(label)
+                    Button::new(SharedString::from(format!("ctl-effort-{}", c.label))).ghost().xsmall().when(!many, |b| b.flex_1().min_w_0())
+                        .selected(on).label(label)
                         .disabled(busy || !c.enabled)
                         .on_click(cx.listener(move |this, _, _, cx| {
                             if on { return; }
                             this.apply_ctl(Ctl::Effort, c.path.clone(), c.body.clone(), c.label.clone(), cx);
                         }))
-                })))
+                }))
+            })
             .into_any_element())
     }
 

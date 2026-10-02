@@ -339,6 +339,8 @@ pub(in crate::app) struct NewSession {
     permission: String,
     /// O padrão marcado do harness, como foi lido na última leitura do catálogo.
     saved_default: Option<(String, String, String)>,
+    /// Permissão escolhida à mão: o padrão do harness não a troca quando o catálogo é relido.
+    permission_touched: bool,
     subagent: String,
     engine: String,
     model_pick: Option<Picker>,
@@ -426,7 +428,7 @@ impl NewSession {
             config: None, config_pick: None, codex: Remote::default(), codex_account: String::new(), codex_pick: None, headless: true, headless_owner: None, headless_touched: false, headless_saving: false,
             difference: false, manual_open: false, manual, choosing: false, choose_error: None, create_seq: 0, creating: false, started: None,
             step: String::new(), error: None, clock: None, models: Remote::default(), model: String::new(), model_choice_touched: false, account_touched: false, effort: String::new(),
-            permission: "bypassPermissions".into(), saved_default: None, subagent: String::new(), engine: String::new(), model_pick: None, effort_pick: None,
+            permission: "bypassPermissions".into(), saved_default: None, permission_touched: false, subagent: String::new(), engine: String::new(), model_pick: None, effort_pick: None,
             permission_pick: None, subagent_pick: None, engine_pick: None, engines: Remote::default(), jev: Remote::default(), jev_on: false,
             more: false, omp, quotas: Remote::default(), reopen_config: None, reopen_default: false, asking: false, confirming: false, account_busy: false, account_seq: 0, account_name,
             notice: None, created_path: None, context_seq: 0, context_busy: false, context_on: None, context_want: None, context_error: None,
@@ -658,6 +660,7 @@ impl NewSession {
         if provider == self.provider || self.creating { return; }
         (self.provider, self.error) = (provider, None);
         self.permission = match provider { "codex" => "Full Access".into(), "claude" => "bypassPermissions".into(), _ => String::new() };
+        self.permission_touched = false;
         if provider == "codex" { self.load_codex(cx); self.load_context(cx); } else { self.drop_context(); self.drop_codex(); }
         self.load_models(window, cx);
         // A tela sem sessão não retoma conversa antiga: o arquivo da pasta não serve a ela.
@@ -693,13 +696,19 @@ impl NewSession {
             && self.codex.ok().and_then(|list| list.iter().find(|a| a.id == self.codex_account)).is_some_and(|a| a.auth.status == "connected"))
     }
 
-    fn load_branches(&mut self, cx: &mut Context<Self>) {
+    fn load_branches(&mut self, cx: &mut Context<Self>) { self.read_branches(true, cx); }
+
+    /// Releitura da mesma pasta (depois de trocar a branch, ao fechar o gerenciador): a lista e a escolha ficam até a
+    /// resposta chegar, sem o menu esvaziar no meio.
+    pub(super) fn refresh_branches(&mut self, cx: &mut Context<Self>) { self.read_branches(false, cx); }
+
+    fn read_branches(&mut self, fresh: bool, cx: &mut Context<Self>) {
         if self.creating { return; }
         if !self.compact { return; }
         let (Some(root), Some(path)) = (self.root.as_ref(), self.picked.clone()) else { return };
         let root = root.path.clone();
         let seq = self.checkout.start();
-        (self.checkout.value, self.branch) = (None, String::new());
+        if fresh { (self.checkout.value, self.branch) = (None, String::new()); }
         self.request(cx, move |api, send| Box::pin(async move {
             let result = api.server_read(&["fs", "branches"], &[("root", root.as_str()), ("path", path.as_str())], 30).await;
             send(CreateReply::Branches(seq, checkout_of(result))).await;

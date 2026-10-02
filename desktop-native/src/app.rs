@@ -1086,6 +1086,8 @@ impl Hangar {
         self.etag = None;
         self.has_older = false;
         self.rich.clear();
+        // A busca era da conversa anterior.
+        self.find.reset();
         self.row_ids.clear();
         self.list_state.reset(0);
         self.follow_reset();

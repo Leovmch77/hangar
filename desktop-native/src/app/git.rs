@@ -1146,7 +1146,9 @@ fn show_dialog(panel: Entity<GitPanel>, closed: impl Fn(&mut Window, &mut App) +
 /// O mesmo diálogo para uma pasta desta máquina ainda sem sessão; `closed` relê quem abriu.
 pub(super) fn open_folder_git(cwd: std::path::PathBuf, title: String, runtime: Arc<Runtime>, closed: impl Fn(&mut Window, &mut App) + 'static,
     window: &mut Window, cx: &mut App) {
-    let panel = cx.new(|cx| GitPanel::new(Source::Local(Arc::new(cwd)), runtime, title.clone(), title, None, window, cx));
+    // Pasta escolhida pode ser subpasta do repositório.
+    let root = local::toplevel(&cwd).unwrap_or(cwd);
+    let panel = cx.new(|cx| GitPanel::new(Source::Local(Arc::new(root)), runtime, title.clone(), title, None, window, cx));
     panel.update(cx, |panel, cx| panel.load(window, cx));
     show_dialog(panel, closed, window, cx);
 }

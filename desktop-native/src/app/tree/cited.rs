@@ -28,13 +28,13 @@ impl CitedView {
 /// só arquivo comum, fora de `.git`.
 fn resolve_local(root: &Path, paths: Vec<String>, dirs: Vec<String>) -> Vec<Cited> {
     let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
-    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let home = home_dir();
     let usable = |p: PathBuf| std::fs::canonicalize(p).ok().filter(|p| p.is_file() && !p.components().any(|c| c.as_os_str() == ".git"));
     let mut seen = HashSet::new();
     paths.into_iter().filter_map(|raw| {
         let real = match raw.strip_prefix("~/") {
             Some(rest) => usable(home.as_ref()?.join(rest)),
-            None if raw.starts_with('/') => usable(PathBuf::from(&raw)),
+            None if Path::new(&raw).is_absolute() => usable(PathBuf::from(&raw)),
             None => std::iter::once(root.clone()).chain(dirs.iter().map(PathBuf::from)).find_map(|dir| usable(dir.join(&raw))),
         }?;
         let relative = real.strip_prefix(&root).ok().map(|p| p.to_string_lossy().into_owned());
@@ -51,7 +51,9 @@ impl Hangar {
                 Value::String(text) => {
                     for reference in composer::code_references(text) {
                         // Pedaço relativo pode ser o fim de um absoluto com espaço que o leitor cortou ("…/Área de trabalho/x.sql").
-                        let whole = if reference.path.starts_with(['/', '~']) { Vec::new() } else { composer::spaced_paths(text, &reference.path) };
+                        // Só quando o pedaço vem logo depois de um espaço: é o único jeito de o leitor ter cortado ali.
+                        let cut = !reference.path.starts_with(['/', '~']) && text[..reference.start].ends_with(' ');
+                        let whole = if cut { composer::spaced_paths(text, &reference.path) } else { Vec::new() };
                         for path in whole.into_iter().chain(std::iter::once(reference.path)) {
                             if !out.contains(&path) { out.push(path); }
                         }
@@ -156,8 +158,8 @@ impl Hangar {
 
 /// `/home/<usuário>/x` vira `~/x`, como a pasta mostrada no web.
 fn abbreviate(path: &str) -> String {
-    match std::env::var("HOME") {
-        Ok(home) if path.starts_with(&format!("{home}/")) => format!("~{}", &path[home.len()..]),
+    match home_dir().map(|h| h.to_string_lossy().into_owned()) {
+        Some(home) if path.starts_with(&format!("{home}/")) => format!("~{}", &path[home.len()..]),
         _ => path.to_owned(),
     }
 }
