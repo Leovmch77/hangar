@@ -62,12 +62,32 @@ fn sibling(exe: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(name)
 }
 
+/// Onde guardar o binário atual durante a troca.
+#[cfg(unix)]
+fn old_path(exe: &Path) -> PathBuf { sibling(exe, ".old") }
+
+/// No Windows, um `.old` que ainda é a imagem de um processo vivo (versão anterior que não saiu) não pode ser apagado,
+/// e renomear o app por cima dele dá "acesso negado". Os restos saem quando dá; o que ficou preso cede o nome.
+#[cfg(windows)]
+fn old_path(exe: &Path) -> PathBuf {
+    let prefix = format!("{}.old", exe.file_name().unwrap_or_default().to_string_lossy());
+    if let Some(entries) = exe.parent().and_then(|dir| std::fs::read_dir(dir).ok()) {
+        for entry in entries.flatten().filter(|entry| entry.file_name().to_string_lossy().starts_with(&prefix)) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+    let old = sibling(exe, ".old");
+    if !old.exists() { return old; }
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis());
+    sibling(exe, &format!(".old-{stamp}"))
+}
+
 /// Confere o sha256 e troca o binário em disco. Devolve o caminho do anterior guardado, ou a frase da falha.
 fn swap(exe: &Path, bytes: &[u8], sha256: &str) -> Result<PathBuf, String> {
     use std::io::Write;
     if sha256_hex(bytes) != sha256 { return Err(tr("app_update_bad_sha")); }
     let fail = |e: std::io::Error| tr("app_update_swap_failed").replace("{reason}", &e.to_string());
-    let (new, old) = (sibling(exe, ".new"), sibling(exe, ".old"));
+    let (new, old) = (sibling(exe, ".new"), old_path(exe));
     let mut file = std::fs::File::create(&new).map_err(fail)?;
     file.write_all(bytes).and_then(|_| file.sync_all()).map_err(fail)?;
     drop(file);
@@ -80,7 +100,6 @@ fn swap(exe: &Path, bytes: &[u8], sha256: &str) -> Result<PathBuf, String> {
     }
     // No Windows o executável em uso não pode ser sobrescrito, mas pode ser renomeado.
     #[cfg(windows)] {
-        let _ = std::fs::remove_file(&old);
         std::fs::rename(exe, &old).map_err(fail)?;
         if let Err(error) = std::fs::rename(&new, exe) {
             // Sem desfazer, o caminho do app fica vazio: essa falha não pode sair como "nada foi trocado".
