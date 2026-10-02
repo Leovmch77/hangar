@@ -11,6 +11,11 @@ node_modules
 dist
 dist-ssr
 *.local
+# Sobras do atualizador: o dist anterior guardado para o rollback e o dist do CI em transito. Sem
+# ignorar, uma atualizacao que para no meio deixa o checkout "com mudanca local" e a seguinte
+# descarta o dist do CI para compilar aqui.
+.dist-velho/
+.dist-baixado.*
 
 # Editor directories and files
 .vscode/*

@@ -120,6 +120,34 @@ function Restart-HangarTask([string]$name, [int]$port, [string]$directory) {
     }
 }
 
+# Para o front SEM subir de novo, para o `npm ci` do atualizador: ele apaga o node_modules antes de
+# reinstalar, e o Windows nao deixa apagar binario nativo mapeado em processo vivo. Quem sobe a
+# tarefa depois e o Restart-HangarTasks.
+function Stop-HangarFrontend([string]$raiz) {
+    if (-not (Get-ScheduledTask -TaskName 'hangar-frontend' -ErrorAction SilentlyContinue)) { return }
+    $mutex = New-Object Threading.Mutex($false, 'Local\HangarRestart-hangar-frontend')
+    $locked = $false
+    try {
+        try { $locked = $mutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $locked = $true }
+        if (-not $locked) { throw 'Outra recuperacao de hangar-frontend esta em andamento' }
+        $rows = Get-HangarProcessTable
+        foreach ($candidate in @(Get-HangarTaskProcesses $rows 'hangar-frontend' (Join-Path $raiz 'frontend'))) {
+            $process = Get-Process -Id $candidate.ProcessId -ErrorAction SilentlyContinue
+            if (-not $process) { continue }
+            # Mesma conferencia de identidade do Restart-HangarTask.
+            if (-not $candidate.CreationDate -or
+                [Math]::Abs(($process.StartTime.ToUniversalTime() - $candidate.CreationDate.ToUniversalTime()).Ticks) -ge [TimeSpan]::TicksPerMillisecond) {
+                throw "Identidade do processo $($candidate.ProcessId) mudou; parada cancelada"
+            }
+            Stop-Process -InputObject $process -Force -ErrorAction Stop
+            if (-not $process.WaitForExit(5000)) { throw "Processo $($candidate.ProcessId) nao encerrou" }
+        }
+    } finally {
+        if ($locked) { $mutex.ReleaseMutex() }
+        $mutex.Dispose()
+    }
+}
+
 # Reinicio das tarefas pelo atualizador, sem o instalador. Mesmo mutex do install.ps1 e da vigia:
 # os tres controlam a parada das mesmas tarefas e nao podem se sobrepor.
 function Restart-HangarTasks([string]$raiz, [int]$portaBack, [int]$portaFront) {

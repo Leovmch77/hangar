@@ -26,6 +26,8 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   Wrapper/tarefa/statusline só chegam por passo em `docs/atualizacoes/` — o pre-commit e o CI
   recusam commit em `install.*`/`scripts/`/`hooks/` sem passo (`HANGAR_SEM_PASSO=1` é o escape).
   Falha do instalador vai pra tela pela marca `##HANGAR-FALHA##`, nunca pela cauda.
+- **No Windows, `npm ci` na raiz só com o front parado**, e pasta que o atualizador cria dentro de
+  `frontend/` entra no `.gitignore` — sobra não ignorada vira "mudança local" e desliga o dist do CI.
 - **Passo com comando diferente por sistema usa `comando_posix` e `comando_windows`.** `comando`
   continua sendo o fallback comum; qualquer variante que executa algo exige `prova`.
 - **Versão é `VERSION` + número de commits** (`0.1.0.2533`): major.minor.patch à mão no
@@ -186,6 +188,36 @@ processo velho seguia na porta com o código novo no disco. E o modal mostrava a
   - **Falha do instalador chega à tela pela marca `##HANGAR-FALHA##`** (irmã da `##HANGAR-AVISO##`),
     impressa por `Falha`/`Pare` no `.ps1` e por `fail` no `.sh`; a cauda de 12 linhas é só o
     fallback sem marca.
+
+## No Windows o `npm ci` do botão derruba o front antes, e as sobras do dist são ignoradas pelo git
+
+(`atualizar._stop_windows_front`, `Stop-HangarFrontend` do `windows-tasks.ps1`,
+`frontend/.gitignore`, 01/10/2026.) Três defeitos encadeados deixaram uma máquina Windows sem
+conseguir atualizar, nem pelo botão nem pelo instalador:
+  - **O `_preparar` rodava `npm ci` com a tarefa `hangar-frontend` de pé.** O `vite preview` dela
+    mapeia `node_modules\@rolldown\binding-win32-x64-msvc\rolldown-binding.win32-x64-msvc.node`, e
+    o `npm ci` morria em `EPERM ... unlink` (errno -4048) depois de apagar o resto — `node_modules`
+    sem `.bin`, front vivo só da imagem em memória. Como a marca `package-lock.sha` só é gravada no
+    sucesso, toda tentativa repetia o `npm ci` e a mesma falha (12:25, 12:59 e 13:28). O
+    `install.ps1` já derrubava o front antes do `npm ci` desde 08/08/2026; o caminho do botão,
+    criado depois, não. Hoje o motor para os processos da tarefa antes, o `_reiniciar` a sobe, e
+    na falha do `npm ci` a tarefa é iniciada de volta.
+  - **`frontend/.dist-velho` não era ignorada pelo git.** Ela só sai no sucesso; a falha acima a
+    deixou no disco, e `git status --porcelain -- frontend packages` passou a devolver
+    `?? frontend/.dist-velho/`. Os dois gates leram isso como "frontend editado", descartaram o
+    dist do CI e foram compilar local. `.dist-velho/` e `.dist-baixado.*` estão no
+    `frontend/.gitignore`.
+  - **O lock da raiz só tinha o `@rollup/rollup-linux-x64-gnu`** (gerado no Linux, bug 4828 do
+    npm). O `vite build` passa — o Vite usa rolldown —, mas a etapa do service worker
+    (`workbox-build`, que usa o rollup) morria em `Cannot find module
+    @rollup/rollup-win32-x64-msvc`. A entrada do pacote win32 foi acrescentada à mão no lock.
+    Quem regenerar o lock no Linux confere se ela continua lá.
+  - **O passo desta mudança para o front, e é `destrutivo: true` só para não rodar na subida.**
+    O motor carrega o `atualizar.py` antes do `git pull`, então a atualização que ENTREGA este
+    conserto ainda roda o `_preparar` antigo — e como ela também muda o lock, cairia no mesmo
+    `EPERM`. Os passos rodam depois do pull e antes do `npm ci`: o comando Windows do passo chama
+    `Stop-HangarFrontend`, e o `_reiniciar` sobe a tarefa. Na subida do backend ninguém a subiria
+    de volta, por isso o passo espera o botão.
 
 ## Passo com comando por sistema (14/09/2026)
 

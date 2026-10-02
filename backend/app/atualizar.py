@@ -583,12 +583,35 @@ def _preparar(topologia: str, *, dist: bool = True) -> None:
         npm = shutil.which("npm")
         if not npm:
             raise RuntimeError("package-lock.json mudou e nao achei o npm pra instalar as dependencias")
+        if topologia == "windows":
+            _stop_windows_front()
         p = _rodar([npm, "ci", "--workspace=@hangar/core", "--workspace=frontend"], cwd=REPO, timeout=900)
         if p.returncode != 0:
+            if topologia == "windows":
+                # O `_reiniciar` não chega a rodar nesta falha; sem isto o front ficaria parado.
+                _rodar(["powershell", "-NoProfile", "-Command",
+                        "Start-ScheduledTask -TaskName hangar-frontend -ErrorAction SilentlyContinue"],
+                       timeout=30)
             raise RuntimeError(f"as dependencias do front nao instalaram: {_cauda(p, 6)}")
     if atual:
         marca.parent.mkdir(parents=True, exist_ok=True)
         marca.write_text(atual, encoding="utf-8")
+
+
+def _stop_windows_front() -> None:
+    """Derruba o `vite preview` da tarefa `hangar-frontend` antes do `npm ci`.
+
+    O `npm ci` apaga o `node_modules` antes de reinstalar, e o Windows não deixa apagar binário
+    nativo mapeado em processo vivo: com o front de pé ele morre em `EPERM ... unlink` e deixa o
+    `node_modules` pela metade. Quem sobe a tarefa de novo é o `_reiniciar`.
+    """
+    helper = str(REPO / "scripts" / "windows-tasks.ps1").replace("'", "''")
+    raiz = str(REPO).replace("'", "''")
+    p = _rodar(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+                f". '{helper}'; Stop-HangarFrontend '{raiz}'"], timeout=60)
+    if p.returncode != 0:
+        # Segue: sem front de pé o `npm ci` passa, e com ele de pé a falha do `npm ci` diz o motivo.
+        _log.warning("nao consegui parar o front antes do npm ci: %s", _cauda(p, 4))
 
 
 def _reaplicar(topologia: str) -> None:

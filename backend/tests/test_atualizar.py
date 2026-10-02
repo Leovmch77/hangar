@@ -356,7 +356,8 @@ def test_aviso_do_instalador_chega_no_estado(repo, monkeypatch):
         "a janela nativa (Electron) ficou com dependencias desatualizadas"]
 
 
-def _preparo_gravado(repo, monkeypatch, *, lock_igual: bool, node_modules: bool):
+def _preparo_gravado(repo, monkeypatch, *, lock_igual: bool, node_modules: bool,
+                     topologia: str = "systemd"):
     chamadas = []
     class P:
         returncode = 0
@@ -373,7 +374,7 @@ def _preparo_gravado(repo, monkeypatch, *, lock_igual: bool, node_modules: bool)
     marca.parent.mkdir(parents=True, exist_ok=True)
     marca.write_text(atualizar._hash_arquivo(repo / "package-lock.json") if lock_igual else "outro",
                      encoding="utf-8")
-    atualizar._preparar("systemd")
+    atualizar._preparar(topologia)
     return [" ".join(c) for c in chamadas]
 
 
@@ -388,9 +389,19 @@ def test_preparar_sincroniza_o_uv_e_nao_chama_o_instalador(repo, monkeypatch):
 def test_preparar_roda_npm_ci_so_quando_o_lock_mudou(repo, monkeypatch):
     cmds = _preparo_gravado(repo, monkeypatch, lock_igual=False, node_modules=True)
     assert any("npm ci" in c for c in cmds)
+    assert not any("Stop-HangarFrontend" in c for c in cmds)
     # E grava o hash: a próxima não repete.
     assert (atualizar._base() / "package-lock.sha").read_text() == \
         atualizar._hash_arquivo(repo / "package-lock.json")
+
+
+def test_prepare_stops_windows_front_before_npm_ci(repo, monkeypatch):
+    """No Windows o `vite preview` da tarefa segura o binário nativo do `node_modules`, e o
+    `npm ci` morre em EPERM deixando a pasta pela metade. O front cai ANTES."""
+    cmds = _preparo_gravado(repo, monkeypatch, lock_igual=False, node_modules=True,
+                            topologia="windows")
+    parar = next(i for i, c in enumerate(cmds) if "Stop-HangarFrontend" in c)
+    assert parar < next(i for i, c in enumerate(cmds) if "npm ci" in c)
 
 
 def test_preparar_sem_marca_assume_o_node_modules_do_instalador(repo, monkeypatch):
