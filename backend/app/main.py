@@ -21,6 +21,7 @@ from app import migracao_sidecars, orq_politica, resilient_accept
 from app.hook_state import hook_state
 from app.pi_inbox import escrever_endpoint
 from app.share_tunnel import GUEST_PORT, port_clash
+from app.connect_port import CONNECT_PORT
 
 LOOPBACK = {"127.0.0.1", "localhost", "::1"}
 
@@ -158,6 +159,18 @@ def _guest_socket() -> socket.socket | None:
         return None
 
 
+def _connect_socket() -> socket.socket | None:
+    # Só loopback: quem fala aqui é o Caddy desta máquina, nunca a rede.
+    if settings.port == CONNECT_PORT:
+        print(f"[hangar] AVISO: CP_PORT={settings.port} é a porta do Connect; o Connect fica desligado")
+        return None
+    try:
+        return _tcp_socket("127.0.0.1", CONNECT_PORT)
+    except OSError as e:
+        print(f"[hangar] AVISO: porta do Connect {CONNECT_PORT} indisponível ({e}); o Connect fica desligado")
+        return None
+
+
 def main():
     bind = resolve_bind_ip(settings)
     _saida_utf8()   # antes de qualquer print: o QR abaixo quebra em cp1252
@@ -223,9 +236,9 @@ def main():
     except OSError as e:
         print(f"[hangar] ERRO: porta {settings.port} indisponível ({e})", file=sys.stderr)
         sys.exit(1)
-    guest = _guest_socket()
+    extras = [s for s in (_guest_socket(), _connect_socket()) if s]
     server = uvicorn.Server(config)
-    server.run(sockets=[main_sock] + ([guest] if guest else []))
+    server.run(sockets=[main_sock] + extras)
     if not server.started:
         sys.exit(3)                              # mesmo código do uvicorn.run: o systemd reinicia
 

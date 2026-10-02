@@ -82,6 +82,7 @@ from app import runtime_config
 from app import share_api, share_guest_api, share_store
 from app.share_guest_api import guest_safe
 from app.guest_user_gate import GuestUserGate
+from app.connect_port import ConnectPortGate
 from app import guest_users, guest_users_api
 from app.share_gate import GUEST_TOKEN_KEY, ShareGate, guest_of
 from app.share_life import session_life
@@ -606,6 +607,9 @@ app.add_middleware(
 )
 # JSON e assets grandes cruzam LAN/VPN; o Starlette exclui `text/event-stream`, sem segurar o SSE.
 app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=5)
+# Por fora de tudo (o último registrado é o mais externo): os porteiros e o CORS já veem o cliente
+# trocado de quem chegou pela porta do Connect.
+app.add_middleware(ConnectPortGate)
 app.include_router(sync_admin_router)
 app.include_router(sync_router)
 app.include_router(guest_users_api.router)

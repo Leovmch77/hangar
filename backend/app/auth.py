@@ -5,6 +5,7 @@ import time
 
 from fastapi import Request, HTTPException
 from app.config import settings
+from app.connect_port import CONNECT_PEER
 from app.mensagens import erro
 from app import diag
 
@@ -145,7 +146,10 @@ def require_auth(request: Request) -> None:
         if not local:
             _record_fail(ip, now)
         raise HTTPException(status_code=401, detail=erro("erro_nao_autorizado", "unauthorized"))
-    _fails.pop(ip, None)  # acerto limpa a origem na hora
+    # Pelo Connect todos dividem a mesma origem: se o acerto do dono zerasse o contador, o app dele
+    # (que acerta a cada poucos segundos) daria ao atacante 7 palpites novos a cada acerto.
+    if ip != CONNECT_PEER:
+        _fails.pop(ip, None)  # acerto limpa a origem na hora
     registrar_acesso(ip, mecanismo, None)
 
 
