@@ -399,6 +399,9 @@ async def _lifespan(app: FastAPI):
 
     # Primeira varredura na subida já religa o túnel se há convite ativo.
     share_task = asyncio.create_task(share_api.sweep_loop(), name="share-sweep")
+    # Em tarefa: o download dos binários na primeira vez não pode segurar a subida.
+    from app import connect as connect_mod
+    connect_task = asyncio.create_task(connect_mod.start(), name="connect-start")
 
     # Boot-resume dos loops: flags em memoria (tick em voo) morrem no restart; o sidecar e a verdade.
     # Loop ACTIVE cuja sessao existe e esta idle -> reagenda o tick; sessao sumida -> failed.
@@ -465,6 +468,9 @@ async def _lifespan(app: FastAPI):
             yield
     finally:
         diag.registrar("backend.encerrando")
+        connect_task.cancel()
+        await asyncio.gather(connect_task, return_exceptions=True)
+        await connect_mod.stop()
         costs_sources.cancelar_aquecimento()
         # Claude sem terminal fica vivo no cano: só fecha a conexão; o próximo backend religa.
         get_adapter(CLAUDE_HEADLESS).desligar_todas()
@@ -7385,6 +7391,34 @@ def computer_control_models(body: ComputerControlModelsBody):
     from app import computer_control as cc
     return {"models": _computer_control_call(cc.list_models, body.llm_url, body.llm_key,
                                              body.use_saved_key, body.use_cliproxy_key)}
+
+
+class ConnectBody(_StrictBody):
+    code: str = Field(min_length=1, max_length=4096)
+
+
+@app.get("/api/connect", dependencies=[Depends(require_auth)])
+def connect_get():
+    from app import connect
+    return connect.status()
+
+
+@app.put("/api/connect", dependencies=[Depends(require_auth)])
+async def connect_put(body: ConnectBody):
+    from app import connect
+    try:
+        connect.save(body.code)
+    except connect.ConnectError as e:
+        raise HTTPException(e.status, detail=erro(e.code, e.msg)) from None
+    await connect.start()
+    return connect.status()
+
+
+@app.delete("/api/connect", dependencies=[Depends(require_auth)])
+async def connect_delete():
+    from app import connect
+    await connect.forget()
+    return connect.status()
 
 
 # ── Busca de conteudo cross-session: grep (rg) em todos os transcripts (vivos + arquivados) ──

@@ -96,6 +96,39 @@ def test_binarios_baixa_uma_vez(_plataforma):
     assert len(_plataforma) == 2
 
 
+@pytest.fixture
+def _api(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    from app import api
+    from app.config import settings
+    settings.auth_token = "secret"
+    monkeypatch.setattr(connect, "folder", lambda: tmp_path)
+    chamadas = []
+
+    async def start():
+        chamadas.append("start")
+
+    async def stop():
+        chamadas.append("stop")
+
+    monkeypatch.setattr(connect, "start", start)
+    monkeypatch.setattr(connect, "stop", stop)
+    c = TestClient(api.app, client=("10.0.0.7", 1))
+    c.headers["Authorization"] = "Bearer secret"
+    return c, chamadas
+
+
+def test_rotas(_api):
+    c, chamadas = _api
+    assert c.get("/api/connect").json()["configured"] is False
+    r = c.put("/api/connect", json={"code": _codigo()})
+    assert r.status_code == 200 and r.json()["url"] == "https://notebook.jeffersonfelizardo.hangar.dev.br"
+    assert "token" not in json.dumps(r.json())
+    assert c.put("/api/connect", json={"code": "lixo"}).status_code == 400
+    assert c.delete("/api/connect").json()["configured"] is False
+    assert chamadas == ["start"]
+
+
 def test_hash_errado_nao_grava(_plataforma, monkeypatch):
     monkeypatch.setitem(connect._FRP_SHA256, ("linux", "amd64"), "0" * 64)
     with pytest.raises(connect.ConnectError):

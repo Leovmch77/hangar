@@ -1,15 +1,21 @@
 """Hangar Connect neste PC: código de ligação, configs do frpc e do Caddy, binários e os dois processos."""
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import hashlib
 import io
 import json
+import logging
 import os
 import platform
 import re
+import shutil
+import signal
+import subprocess
 import tarfile
+import time
 import urllib.error
 import urllib.request
 import uuid
@@ -17,8 +23,10 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from app import atomico
+from app import atomico, log_paths, procinfo
 from app.connect_port import CONNECT_PORT
+
+_log = logging.getLogger(__name__)
 
 CADDY_PORT = 18443
 # fullmatch, não ^…$: o `$` do Python aceita um \n no fim, que quebraria o TOML.
@@ -185,3 +193,155 @@ def binaries() -> dict[str, Path]:
             atomico.substituir(tmp, dest)
         out[name] = dest
     return out
+
+
+_WINDOWS_FLAGS = 0x00000200 | 0x08000000   # CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW
+_WAITS = (1, 2, 5, 10, 30)
+_HEALTHY = 60.0
+
+
+@dataclass
+class _Child:
+    name: str
+    argv: list[str]
+    proc: asyncio.subprocess.Process | None = None
+    restarts: int = 0
+    last_exit: int | None = None
+
+
+_children: dict[str, _Child] = {}
+_task: asyncio.Task | None = None
+_error: str | None = None
+# A subida do backend e um PUT da tela podem chegar juntos: sem fila, nasceriam dois de cada.
+_lock = asyncio.Lock()
+
+
+def _kill(pid: int) -> None:
+    if os.name == "nt":
+        exe = shutil.which("taskkill")
+        if exe:
+            # 128 = já morreu; qualquer outro código só vai ao log, quem decide é o pid_vivo.
+            subprocess.run([exe, "/T", "/F", "/PID", str(pid)], capture_output=True, timeout=10,
+                           encoding="utf-8", errors="replace")
+        return
+    try:
+        os.killpg(pid, signal.SIGTERM)          # start_new_session: o grupo tem o pid do filho
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+def _kill_leftover(child: _Child) -> None:
+    # No Windows o filho sobrevive à morte do backend; sobrando, ele seguraria a 18443. Só mata se o
+    # executável for exatamente o nosso: pid reaproveitado pode ser qualquer coisa.
+    try:
+        pid = int((folder() / f"{child.name}.pid").read_text())
+    except (OSError, ValueError):
+        return
+    if procinfo.pid_vivo(pid) and procinfo._argv(pid)[:1] == [child.argv[0]]:
+        _kill(pid)
+
+
+async def _keep(child: _Child) -> None:
+    log_dir = log_paths.base()
+    while True:
+        started = time.monotonic()
+        try:
+            log_dir.mkdir(parents=True, exist_ok=True)
+            _kill_leftover(child)
+            extra: dict = {"creationflags": _WINDOWS_FLAGS} if os.name == "nt" else {"start_new_session": True}
+            # "ab": num laço de quedas, a causa da anterior continua no arquivo.
+            with open(log_dir / f"connect-{child.name}.log", "ab") as out:
+                child.proc = await asyncio.create_subprocess_exec(
+                    *child.argv, stdin=asyncio.subprocess.DEVNULL, stdout=out,
+                    stderr=asyncio.subprocess.STDOUT, **extra)
+            (folder() / f"{child.name}.pid").write_text(str(child.proc.pid))
+            child.last_exit = await child.proc.wait()
+        except Exception:
+            _log.exception("connect: %s não subiu", child.name)
+            child.last_exit = None
+        finally:
+            if child.proc is not None and child.proc.returncode is None:
+                _kill(child.proc.pid)
+            child.proc = None
+        if time.monotonic() - started >= _HEALTHY:
+            child.restarts = 0
+        wait = _WAITS[min(child.restarts, len(_WAITS) - 1)]
+        child.restarts += 1
+        _log.warning("connect: %s saiu com %s; volta em %ss", child.name, child.last_exit, wait)
+        await asyncio.sleep(wait)
+
+
+async def _stop() -> None:
+    global _task
+    if _task is not None:
+        _task.cancel()
+        await asyncio.gather(_task, return_exceptions=True)
+        _task = None
+
+
+async def stop() -> None:
+    async with _lock:
+        await _stop()
+
+
+async def start() -> None:
+    global _task, _error
+    async with _lock:
+        await _stop()
+        state = read_state()
+        if not state.get("enabled"):
+            return
+        try:
+            code = parse_code(state.get("code", ""))
+            bins = await asyncio.to_thread(binaries)
+            _write_private(folder() / "frpc.toml", render_frpc(code).encode())
+            _write_private(folder() / "Caddyfile", render_caddyfile(code, folder() / "caddy").encode())
+        except ConnectError as e:
+            _error = e.msg
+            _log.warning("connect: não liguei (%s)", e.msg)
+            return
+        _error = None
+        _children.clear()
+        _children["caddy"] = _Child("caddy", [str(bins["caddy"]), "run", "--config", str(folder() / "Caddyfile"),
+                                              "--adapter", "caddyfile"])
+        _children["frpc"] = _Child("frpc", [str(bins["frpc"]), "-c", str(folder() / "frpc.toml")])
+
+        async def run() -> None:
+            async with asyncio.TaskGroup() as group:
+                for child in _children.values():
+                    group.create_task(_keep(child), name=f"connect-{child.name}")
+
+        _task = asyncio.create_task(run(), name="connect")
+
+
+def save(text: str) -> None:
+    parse_code(text)
+    write_state({"code": text.strip(), "enabled": True})
+
+
+async def forget() -> None:
+    global _error
+    async with _lock:
+        await _stop()
+        write_state({})
+        # O frpc.toml guarda o token: desligado, ele não fica no disco.
+        for name in ("frpc.toml", "frpc.pid", "caddy.pid"):
+            (folder() / name).unlink(missing_ok=True)
+        _children.clear()
+        _error = None
+
+
+def status() -> dict:
+    state = read_state()
+    host = None
+    if state.get("code"):
+        try:
+            host = parse_code(state["code"]).host
+        except ConnectError:
+            pass
+    return {
+        "configured": bool(state.get("code")), "enabled": bool(state.get("enabled")),
+        "host": host, "url": f"https://{host}" if host else None, "error": _error,
+        "processes": {n: {"running": c.proc is not None and c.proc.returncode is None,
+                          "restarts": c.restarts, "last_exit": c.last_exit} for n, c in _children.items()},
+    }
