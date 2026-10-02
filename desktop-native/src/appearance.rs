@@ -395,18 +395,22 @@ pub fn harness_default(key: &str) -> Option<(String, String, String)> {
     saved.get(key).cloned()
 }
 
-/// `None` desmarca o padrão do harness.
-pub fn set_harness_default(key: &str, value: Option<(String, String, String)>) {
-    let Some(dir) = dir() else { return };
+/// `None` desmarca o padrão do harness. Arquivo ilegível não é tratado como vazio: gravar por cima apagaria o padrão
+/// dos outros harnesses e servidores.
+pub fn set_harness_default(key: &str, value: Option<(String, String, String)>) -> Result<(), String> {
+    let dir = dir().ok_or_else(|| "sem pasta de configuração".to_owned())?;
     let file = dir.join("harness-defaults.json");
-    let mut saved: HashMap<String, (String, String, String)> = std::fs::read(&file).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    let mut saved: HashMap<String, (String, String, String)> = match std::fs::read(&file) {
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|error| format!("{}: {error}", file.display()))?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => HashMap::new(),
+        Err(error) => return Err(format!("{}: {error}", file.display())),
+    };
     match value { Some(value) => { saved.insert(key.to_owned(), value); } None => { saved.remove(key); } }
     // Temporário e troca: quem lê no meio da gravação vê o arquivo velho inteiro, nunca um pela metade.
     let tmp = dir.join("harness-defaults.json.tmp");
-    if let Ok(bytes) = serde_json::to_vec(&saved)
-        && let Err(error) = std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&tmp, bytes)).and_then(|_| std::fs::rename(&tmp, &file)) {
-        eprintln!("padrão do harness não gravou: {error}");
-    }
+    let bytes = serde_json::to_vec(&saved).map_err(|error| error.to_string())?;
+    std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&tmp, bytes)).and_then(|_| std::fs::rename(&tmp, &file))
+        .map_err(|error| format!("{}: {error}", file.display()))
 }
 
 /// Escolha em "Padrão" apaga a lembrança, como o `removeItem` do web.

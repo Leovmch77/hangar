@@ -209,9 +209,11 @@ impl NewSession {
         Some(div().px(px(4.)).child(Checkbox::new("create-default-harness").label(label).checked(checked).disabled(self.creating)
             .on_change(cx.listener(|this, on: &bool, _, cx| {
                 let value = on.then(|| this.current_choice());
-                this.saved_default = value.clone();
-                let key = this.default_key();
-                this.link.runtime.spawn_blocking(move || crate::appearance::set_harness_default(&key, value));
+                // Na hora, num arquivo pequeno: o check só fica marcado se gravou, e duas gravações seguidas não se cruzam.
+                match crate::appearance::set_harness_default(&this.default_key(), value.clone()) {
+                    Ok(()) => this.saved_default = value,
+                    Err(error) => this.error = Some(tr("create_default_failed").replace("{erro}", &error)),
+                }
                 cx.notify();
             }))))
     }

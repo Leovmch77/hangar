@@ -293,6 +293,12 @@ impl NewSession {
     /// O gerenciador de git da sessão aberta, para a pasta escolhida; só com o servidor nesta máquina, onde o git roda no disco.
     fn open_changes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(path) = self.picked.clone() else { return };
+        // Túnel para outra máquina também é loopback: o git rodaria (e descartaria) num disco que não é o da pasta.
+        if !std::path::Path::new(&path).is_dir() {
+            self.git.note = Some(GitNote::Failed(tr("folder_git_not_local")));
+            cx.notify();
+            return;
+        }
         self.menu.set(None);
         let weak = cx.entity().downgrade();
         crate::app::git::open_folder_git(path.clone().into(), basename(&path).to_owned(), self.link.runtime.clone(),

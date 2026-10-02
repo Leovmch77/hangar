@@ -140,6 +140,8 @@ impl Hangar {
     }
 
     fn find_go(&mut self, cx: &mut Context<Self>) {
+        // Achado sem linha visível não deixa o realce no achado anterior.
+        self.find.row = None;
         let Some(id) = self.find.hits.get(self.find.active) else { return };
         let Some(ix) = self.chat.events.iter().position(|e| &e.id == id) else { return };
         let Some(row) = self.items.iter().position(|item| covers(item, ix)) else { return };

@@ -6231,6 +6231,8 @@
   "native_folder_git_created": "Branch {branch} criada.",
   "native_folder_git_dirty": "{n} arquivo(s) com alteração não commitada. Commite, guarde ou descarte antes de fazer pull ou trocar de branch.",
   "native_folder_git_open_changes": "Ver alterações",
+  "native_folder_git_not_local": "Essa pasta não está neste computador; o gerenciador de Git só abre pastas daqui.",
+  "native_create_default_failed": "O padrão não foi salvo: {erro}",
   "native_folder_git_diverged": "A branch divergiu de {upstream} ({ahead} à frente, {behind} atrás). O pull só avança; resolva no terminal.",
   "native_folder_git_no_upstream_pull": "A branch atual não acompanha uma branch remota: não há de onde fazer pull.",
   "native_folder_git_not_repo": "Esta pasta não é um repositório Git.",

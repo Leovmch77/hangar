@@ -89,10 +89,13 @@ impl Hangar {
             if let Some(root) = local {
                 return tokio::task::spawn_blocking(move || resolve_local(&root, paths, dirs)).await.map_err(|_| Failure::local("invalid_response"));
             }
-            api.act(&name, &["files", "resolver"], Some(json!({"caminhos": paths.clone()})), false, 30).await.map(|value| {
+            let value = api.act(&name, &["files", "resolver"], Some(json!({"caminhos": paths.clone()})), false, 30).await?;
+            // Resposta sem o mapa `ok` não é "nada citado": é resposta que o app não entende.
+            let found = value.get("ok").filter(|ok| ok.is_object()).ok_or_else(|| Failure::local("invalid_response"))?;
+            Ok({
                 let mut seen = HashSet::new();
                 paths.into_iter().filter_map(|raw| {
-                    let entry = value.get("ok")?.get(&raw)?;
+                    let entry = found.get(&raw)?;
                     let real = entry.get("real").and_then(Value::as_str).unwrap_or(&raw).to_owned();
                     let relative = entry.get("relativo").and_then(Value::as_str).map(str::to_owned);
                     seen.insert(real.clone()).then_some(Cited { raw, real, relative })
@@ -100,7 +103,8 @@ impl Hangar {
             })
         });
         cx.spawn(async move |this, cx| {
-            let Ok(result) = job.await else { return };
+            // Tarefa que morreu vira erro na vista, não "carregando" para sempre.
+            let result = job.await.unwrap_or_else(|_| Err(Failure::local("invalid_response")));
             let _ = this.update(cx, |this, cx| {
                 if this.tree.cited.read_for != Some(stamp) { return; }
                 this.tree.cited.list = Some(result.map_err(|error| Self::fetch_failure(&error)));

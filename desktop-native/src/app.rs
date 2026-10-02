@@ -1400,6 +1400,9 @@ impl Hangar {
                         }
                     }
                     Err(error) => {
+                        // O histórico inteiro (busca) falhou: volta à janela normal, e a busca e o "Carregar anteriores"
+                        // podem pedir de novo em vez de ficarem presos ao que já veio.
+                        if limit == 0 { (self.history_limit, self.has_older) = (HISTORY_PAGE, true); }
                         if error.status == Some(404) {
                             if let Some(api) = self.session_api() {
                                 let tx = self.tx.clone();

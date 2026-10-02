@@ -6231,6 +6231,8 @@
   "native_folder_git_created": "Branch {branch} created.",
   "native_folder_git_dirty": "{n} file(s) with uncommitted changes. Commit, stash or discard them before pulling or switching branch.",
   "native_folder_git_open_changes": "View changes",
+  "native_folder_git_not_local": "This folder is not on this computer; the Git manager only opens folders here.",
+  "native_create_default_failed": "The default was not saved: {erro}",
   "native_folder_git_diverged": "The branch has diverged from {upstream} ({ahead} ahead, {behind} behind). Pull only fast-forwards; resolve it in the terminal.",
   "native_folder_git_no_upstream_pull": "The current branch doesn't track a remote branch, so there is nothing to pull from.",
   "native_folder_git_not_repo": "This folder is not a Git repository.",
