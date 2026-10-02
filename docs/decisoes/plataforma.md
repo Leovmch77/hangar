@@ -973,3 +973,32 @@ Conferências desta alteração: revisão estática independente, sintaxe Python
 seleção readonly de candidatos reais. Regressões foram escritas, não executadas. Fluxos do
 app, compilação e fechamento real ainda não conferidos; mudanças estão na worktree
 `/home/jefferson/Projetos/hangar-orq-team-context`, não instaladas no serviço ativo.
+
+## Connect: a porta dele nunca é local
+
+O Hangar Connect publica a máquina em `<maquina>.<conta>.hangar.dev.br`: o traefik da VPS repassa
+por SNI sem abrir o TLS, o `frpc` traz os bytes até o Caddy local, que abre o TLS e encaminha para
+o backend. Medido em 2026-10-02, antes da porta própria: o Caddy fala de `127.0.0.1`, então
+`/api/desktop/palette` (só-local) respondia **200** pela internet, inclusive com
+`X-Forwarded-For` forjado — todo acesso de fora valia como o dono na máquina, sem limite de
+tentativas. Com a porta `127.0.0.1:8768` e o `ConnectPortGate` trocando o cliente por
+`192.0.2.1` (RFC 5737) por fora de todos os middlewares, a mesma chamada passou a **403**.
+
+A decisão é pela porta do socket, como a do convidado (8766): o `proxy_headers` do uvicorn vale
+para todos os sockets do processo, então cabeçalho nunca serve para decidir. O limite de
+tentativas pelo Connect é o bloqueio de sempre (8 erros / 30 s) num contador próprio; atraso por
+tentativa não serve (o atacante abre conexões em paralelo, ver `auth.py`). O acerto do dono pelo
+Connect não zera esse contador: o app dele acerta a cada poucos segundos e daria ao atacante 7
+palpites novos a cada acerto. Custo aceito: quem martelar a senha trava o acesso pelo Connect por
+30 s; LAN e Tailscale seguem livres.
+
+## Cookie de login só lê
+
+Todas as máquinas do Connect e o `app.hangar.dev.br` são o mesmo site para o navegador: a página
+servida por uma máquina dispara pedidos a outra levando o cookie dela (`SameSite=Lax` não
+separa subdomínios) e consegue gravar cookie com `Domain=hangar.dev.br`. Um segundo domínio não
+resolveria — as máquinas seguiriam no mesmo site entre si. Por isso o `cp_token` só autoriza
+`GET`/`HEAD` (ação exige a senha no cabeçalho ou na query, que outra página não tem), e em https
+só vale o `__Host-cp_token`, que outra máquina não consegue gravar; o PWA grava o prefixado e
+apaga o antigo. O sync recusa ação com `Sec-Fetch-Site: same-site`/`cross-site`. O `cp_sync`
+mantém o nome por ora: o `hub()` do app nativo só guarda `Set-Cookie` começando com `cp_sync=`.

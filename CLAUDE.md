@@ -397,6 +397,11 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
   etapas, códigos e origem da falha. Texto de conversa, credenciais e saídas brutas ficam fora
   dele. O shell Electron também escreve lá (`privado/shell.log`): lançado pelo `.desktop`, o
   console dele vai pro `/dev/null`. Detalhes e compatibilidade em [plataforma.md](docs/decisoes/plataforma.md#diário-de-uso-causa-e-contexto-no-arquivo-exportado).
+- **Hangar Connect entra por `127.0.0.1:8768`, e nada que chega por ela é local.** O
+  `ConnectPortGate` troca o cliente por `192.0.2.1` antes de qualquer checagem; nunca decidir
+  "local" por cabeçalho. Cookie de login só autoriza `GET`/`HEAD` e, em https, só o
+  `__Host-cp_token`: máquinas do Connect dividem o mesmo site. Evidência em
+  [plataforma.md](docs/decisoes/plataforma.md#connect-a-porta-dele-nunca-é-local).
 
 ## tmux + Claude Code truecolor
 
