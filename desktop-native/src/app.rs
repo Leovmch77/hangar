@@ -2205,7 +2205,9 @@ impl Hangar {
     fn can_interrupt(&self) -> bool {
         let (provider, headless) = self.provider();
         // O orquestrador não tem turno para parar: o Esc e o botão de parar não se oferecem.
-        provider != "orq" && self.chat_online && (self.chat.state.state == "working" || headless && self.chat.state.state == "awaiting_input")
+        // Pergunta aberta tem turno esperando: interromper a cancela, como o Esc na TUI.
+        provider != "orq" && self.chat_online
+            && (self.chat.state.state == "working" || headless && self.chat.state.state == "awaiting_input" || self.chat.ask.is_some())
     }
 
     fn request_stop(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -5485,6 +5487,12 @@ impl Render for Hangar {
                 }
                 if this.settings.is_some() {
                     this.close_settings(window, cx);
+                    cx.stop_propagation();
+                    return;
+                }
+                // Foco no cartão da pergunta (resposta digitada, opção): o Esc a cancela como no campo.
+                if this.chat.ask.is_some() && !this.composer.read(cx).focus_handle(cx).is_focused(window) {
+                    this.request_stop(window, cx);
                     cx.stop_propagation();
                 }
             }))
