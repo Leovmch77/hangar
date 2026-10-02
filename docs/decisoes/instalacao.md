@@ -36,6 +36,9 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   `systemctl --user restart`.
 - **Criar sessão embrulha o tmux em escopo transiente do systemd, sob sonda** — um gerenciador que
   recusa escopo transiente derrubava toda criação de sessão.
+- **O bloco do MCP `hangar` no `config.toml` do Codex é reconhecido pela TABELA, não só pelos
+  marcadores.** O app desktop reescreve o arquivo sem comentários; quem só procura `# >>> hangar`
+  anexa de novo, e o TOML com chave duplicada derruba o ChatGPT e o Codex juntos.
 
 ## Restarting the backend.
 
@@ -385,3 +388,20 @@ Outras correções medidas em 10/09: com Tailscale publicado o firewall nem é p
   (npm ci com lock gerado no Linux). No Linux, `--check`/`-SoChecar` e `hangar-doctor` chamam
   `uv run --no-sync`; no Windows, `-SoChecar` (`install.ps1`) e o `hangar-doctor.cmd` chamam o
   `python.exe` do venv direto, sem `uv` — o mesmo efeito, nada é sincronizado.
+
+## O bloco do MCP `hangar` no Codex é reconhecido pela tabela, não só pelos marcadores (30/09/2026)
+
+`scripts/registrar-mcp.py` gravava `[mcp_servers.hangar]` entre `# >>> hangar: mcp` e
+`# <<< hangar: mcp` e, ao rodar de novo, só procurava os marcadores: sem eles, anexava o bloco no
+fim. Medido no Windows com o app desktop do Codex (26.928) logado: ao trocar modelo, ativar
+plugin ou logar, o app reescreve o `config.toml` inteiro a partir do modelo interno dele — sem
+comentários e com `http_headers` em subtabela (`[mcp_servers.hangar.http_headers]`). O servidor
+continua lá, os marcadores não. No `-Update` seguinte o registrador anexou de novo e o arquivo
+ficou com `[mcp_servers.hangar]` duas vezes: o Codex loga `Invalid configuration; using defaults
+… duplicate key`, descarta o config inteiro, e o app cai em "Não foi possível carregar as
+configurações da organização" — parecia rede, era parse. Aconteceu duas vezes no mesmo dia; na
+primeira, o bloco em subtabelas foi tomado por "escrito à mão" e apagado, e o ciclo voltou.
+Agora o registrador remove o bloco marcado, confere pelo `tomllib` se o app já gravou o servidor
+com a mesma URL e o mesmo token (nada a fazer) e, senão, tira toda seção `[mcp_servers.hangar…]`
+antes de anexar o bloco marcado — idempotente contra a reescrita do app e autocorretivo num
+arquivo já duplicado. Teste em `scripts/test_registrar_mcp.py`.

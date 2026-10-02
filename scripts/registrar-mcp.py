@@ -48,6 +48,36 @@ def claude(url: str, helper: str) -> None:
         print(f"ok: MCP hangar em {arq}")
 
 
+MARKED_BLOCK = re.compile(re.escape(INICIO) + r".*?" + re.escape(FIM) + r"\n?", re.S)
+# Seções `[mcp_servers.hangar]` e `[mcp_servers.hangar.*]` fora dos marcadores, cada uma até a
+# próxima seção. O app desktop do Codex reescreve o config.toml inteiro sem comentários e com os
+# headers em subtabelas: os marcadores somem, mas o servidor continua lá.
+UNMARKED_HANGAR = re.compile(r"^\[mcp_servers\.hangar(?:\.[^\]]*)?\][^\n]*\n(?:(?!\[)[^\n]*\n?)*", re.M)
+
+
+def codex_has_hangar(texto: str, url: str, token: str) -> bool:
+    """O config já registra o MCP `hangar` com esta URL e este token, em qualquer formato TOML."""
+    try:
+        import tomllib
+    except ModuleNotFoundError:
+        return False
+    try:
+        servidor = tomllib.loads(texto).get("mcp_servers", {}).get("hangar")
+    except tomllib.TOMLDecodeError:
+        return False
+    return (isinstance(servidor, dict) and servidor.get("url") == url
+            and servidor.get("http_headers", {}).get("Authorization") == f"Bearer {token}")
+
+
+def codex_config(texto: str, bloco: str, url: str, token: str) -> str:
+    """Config.toml com um único `[mcp_servers.hangar]`: o do app, se já bater, senão o bloco marcado."""
+    sem_marcado = MARKED_BLOCK.sub("", texto)
+    if sem_marcado == texto and codex_has_hangar(texto, url, token):
+        return texto
+    base = UNMARKED_HANGAR.sub("", sem_marcado).rstrip("\n")
+    return (base + "\n\n" if base else "") + bloco
+
+
 def codex(url: str, token: str) -> None:
     bloco = "\n".join([
         INICIO,
@@ -62,8 +92,7 @@ def codex(url: str, token: str) -> None:
             continue
         arq = home / "config.toml"
         texto = arq.read_text(encoding="utf-8") if arq.exists() else ""
-        padrao = re.compile(re.escape(INICIO) + r".*?" + re.escape(FIM) + r"\n?", re.S)
-        novo = padrao.sub(lambda _: bloco, texto) if padrao.search(texto) else texto.rstrip("\n") + "\n\n" + bloco
+        novo = codex_config(texto, bloco, url, token)
         if novo == texto:
             continue
         tmp = arq.with_name(arq.name + ".hangar-novo")
