@@ -474,11 +474,51 @@ def test_dono_recusado_volta_quando_a_conversa_converge(monkeypatch):
 def test_conversa_acompanhada_so_vale_com_vinculo_certo(monkeypatch):
     # Palpite por mtime (tracked=False) não identifica conversa: aceitá-lo devolveria o risco.
     from app import api, tmux
-    monkeypatch.setattr(tmux, "list_panes_active", lambda: [{"name": "s1", "cwd": "/w"}])
+    monkeypatch.setattr(tmux, "list_panes_all", lambda: {"s1": [{"name": "s1", "cwd": "/w",
+                                                                 "pid": None, "active": True}]})
     resolucao = {"v": ("/c/projects/-w/abc.jsonl", True)}
-    monkeypatch.setattr(api.registry, "resolve_tracked", lambda name, cwd: resolucao["v"])
+    monkeypatch.setattr(api.registry, "resolve_tracked",
+                        lambda name, cwd: resolucao["v"] if cwd == "/w" else (None, False))
     assert _REAL_TRACKED("s1") == "abc"
     resolucao["v"] = ("/c/projects/-w/abc.jsonl", False)
     assert _REAL_TRACKED("s1") is None
     resolucao["v"] = (None, False)
     assert _REAL_TRACKED("s1") is None
+
+
+def test_cwd_da_conversa_vem_do_pane_do_agente_e_nao_do_split_ativo(monkeypatch):
+    # No Windows a pasta do projeto sai do cwd: um shell ativo noutra pasta apontaria outro transcript.
+    from app import agentpane, api, tmux
+    monkeypatch.setattr(tmux, "list_panes_all", lambda: {"s1": [
+        {"name": "s1", "cwd": "/outra", "pid": 1, "active": True},
+        {"name": "s1", "cwd": "/w", "pid": 2, "active": False}]})
+    monkeypatch.setattr(agentpane, "_pane_do_agente", lambda pid, children: pid == 2)
+    monkeypatch.setattr(api.registry, "resolve_tracked",
+                        lambda name, cwd: ("/c/projects/-w/abc.jsonl", True) if cwd == "/w" else (None, False))
+    assert _REAL_TRACKED("s1") == "abc"
+
+
+def test_recusado_com_o_dono_esperando_nao_mexe_no_dono(monkeypatch):
+    monkeypatch.setattr(pb, "ESPERA_S", 0.2)
+
+    async def cena():
+        dono = asyncio.create_task(pb.pull(_pull(instance="a")))
+        await asyncio.wait_for(_ate(lambda: pb.aguardando("s1")), 5)
+        antes = pb._donos["s1"]
+        with pytest.raises(HTTPException) as e:
+            await pb.pull(_pull(instance="b", session_id="outra-conversa"))
+        assert e.value.status_code == 409
+        assert pb.aguardando("s1") and pb._donos["s1"] == antes
+        await dono
+
+    asyncio.run(cena())
+
+
+def test_recusa_loga_uma_vez_por_instancia_mesmo_com_o_dono_puxando(monkeypatch, caplog):
+    monkeypatch.setattr(pb, "ESPERA_S", 0.05)
+    caplog.set_level("INFO", logger="hangar.plugin_bridge")
+    for _ in range(3):
+        asyncio.run(pb.pull(_pull(instance="a")))
+        with pytest.raises(HTTPException):
+            asyncio.run(pb.pull(_pull(instance="b", session_id="outra-conversa")))
+    assert sum("pull recusado" in r.getMessage() for r in caplog.records) == 1

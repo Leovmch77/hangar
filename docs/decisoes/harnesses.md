@@ -95,6 +95,8 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
 - **Pedido de permissão só fica com o plugin com alguém no app E ninguém no terminal**: `tool.check`
   roda antes do diálogo, e segurar esconde o pedido de quem olha o terminal. Na dúvida (tmux mudo,
   Windows), não segura.
+- **A ponte do plugin só atende a conversa que o Hangar acompanha na sessão** (a mesma do chat e
+  das teclas): outro `claude` na sessão recebe 409 e a entrega não passa por ele.
 - **Steer no Claude é só pelo botão**: `ctrl+x ctrl+s` INTERROMPE o turno em curso. Colado num
   recado (`steer:true`), abortaria o trabalho da sessão que recebe — o automático é só do Kimi.
 - **Modo de permissão troca COM a sessão trabalhando** — é tecla, não texto. O guard de "está
@@ -1247,15 +1249,25 @@ diálogo de confiança e morte continuam sendo do pane.
 `session_id` (`$.session.id()`, relido a cada poll) e só aceitam quando ele é igual ao uuid do
 transcript que o `registry.resolve_tracked` dá como certo (`tracked=True`); diferente, desconhecido
 ou ausente → `/whoami` responde `{"sessao": None}` e `/pull` responde 409, que o plugin trata como
-perder o dono (larga a ponte, tenta de novo em 30 s). Por quê: pane, ambiente herdado e pid do psmux
+perder o dono (larga a ponte, tenta de novo em 30 s). A regra real: a entrega pelo plugin vai para a
+conversa que o Hangar está acompanhando na sessão (a mesma do chat e das teclas); um segundo `claude`
+que não é essa conversa é recusado. Por quê: pane, ambiente herdado e pid do psmux
 valem para QUALQUER `claude` aberto na sessão — um split herda `HANGAR_PLUGIN_*` do tmux — e, sem o
-dono batendo (backend reiniciado), o segundo processo tomava a fila. Medido com um `claude` num split
-de `cx-uuid`: o split recebeu 409 `uuid-diferente`, a mensagem foi para o original pelo plugin; depois
+dono batendo (backend reiniciado), o segundo processo tomava a fila. Não é "o primeiro `claude`
+sempre ganha": `tracked_session_id` segue `tmux.pane_pid` → `agentpane.resolve_target`, que prefere
+o pane do agente ATIVO. Medido em `cx-uuid2`: split DESTACADO (`-d`) rodando `claude` + backend
+reiniciado → o split recebeu 409 e a mensagem entrou no original pelo plugin; split ATIVO com
+`claude` digitado pelo wrapper (`--session-id` próprio) → o `RESOLVE` trocou para a conversa do split
+em ~3 s, o original passou a receber 409, a mensagem do `/input` entrou no split pelo plugin e o
+`/history` mostrou essa mesma conversa — chat, teclas e plugin concordam. Antes, com `cx-uuid`: o
+split recebeu 409 `uuid-diferente`, a mensagem foi para o original pelo plugin; depois
 do `/clear` o Claude grava o jsonl novo na hora, o marcador do `state_hook` virou o vínculo em ~1 s e
 a mensagem seguinte entrou uma vez só na conversa nova, ainda pelo plugin. Plugin antigo (sem
 `session_id`) fica na tecla até a sessão reabrir. No Windows não há marcador (`/proc`): o vínculo é o
 `--session-id` do cmdline e, depois de um `/clear`, o jsonl mais novo da pasta — com outra sessão no
-mesmo cwd ele não segue o `/clear`, e aquela sessão fica na tecla até reabrir.
+mesmo cwd ele não segue o `/clear`, e aquela sessão fica na tecla até reabrir. O cwd dessa busca
+sai do pane do agente (o mesmo do `list()`), não do pane ativo. `/whoami` com `{"sessao": None}`
+é repetido em 2, 10 e 30 s e para: o marcador do `state_hook` pode chegar depois da largada.
 
 ### Mods no 2.1.287 medidos (01/10/2026)
 

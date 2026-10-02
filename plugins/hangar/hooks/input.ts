@@ -35,7 +35,11 @@ export function registerInput(on: On) {
   });
 }
 
-async function discover($: EngineInterface) {
+// `{sessao: null}` nem sempre é definitivo: o marcador do state hook ou o vínculo da conversa podem
+// chegar depois da largada. Tenta de novo poucas vezes e para.
+const DISCOVER_RETRY_MS = [2000, 10000, 30000];
+
+async function discover($: EngineInterface, attempt = 0) {
   try {
     // USERPROFILE antes: no Git Bash do Windows o HOME vem como /c/Users/...
     const home = (await $.env.get("USERPROFILE")) ?? (await $.env.get("HOME"));
@@ -54,7 +58,11 @@ async function discover($: EngineInterface) {
     });
     if (r.status !== 200) return;
     const { sessao, token } = JSON.parse(r.text) as { sessao: string | null; token?: string };
-    if (!sessao || !token) return;
+    if (!sessao || !token) {
+      const wait = DISCOVER_RETRY_MS[attempt];
+      if (sessao === null && wait !== undefined) $.clock.after(wait, () => void discover($, attempt + 1));
+      return;
+    }
     // Otimista pelo mesmo motivo do `session.start`.
     setBridge({ url, token, sessao });
     void pull($, { url, token, sessao });

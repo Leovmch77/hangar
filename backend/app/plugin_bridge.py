@@ -276,7 +276,8 @@ def esquecer(name: str) -> None:
         _confirmacoes.pop(name, None)
         _preenchido.pop(name, None)
     _eventos.pop(name, None)
-    _recusas.pop(name, None)
+    for chave in [c for c in list(_recusas) if c[0] == name]:
+        _recusas.pop(chave, None)
 
 
 def _confere(name: str, token: str) -> None:
@@ -547,7 +548,12 @@ def tracked_session_id(name: str) -> str | None:
     """O uuid da conversa que o Hangar acompanha nesta sessão; None quando o vínculo é só palpite."""
     from app import tmux
     from app.api import registry
-    cwd = next((p["cwd"] for p in tmux.list_panes_active() if p["name"] == name), "")
+    from app.procinfo import _proc_children_map
+    from app.registry import SessionRegistry
+    # cwd do pane do agente, como no `list()`: no Windows a pasta do projeto sai dele, e um split
+    # ativo noutra pasta apontaria para outro transcript.
+    panes = tmux.list_panes_all().get(name)
+    cwd = SessionRegistry._agent_pane(panes, _proc_children_map())["cwd"] if panes else ""
     jsonl, tracked = registry.resolve_tracked(name, cwd)
     return Path(jsonl).stem if jsonl and tracked else None
 
@@ -565,8 +571,9 @@ def _conversation_mismatch(name: str, session_id: str | None) -> str | None:
     return None if atual == session_id else "uuid-diferente"
 
 
-# Última recusa logada por sessão: o plugin recusado volta a cada 30 s, e o log só registra a mudança.
-_recusas: dict[str, str] = {}
+# Última recusa logada por (sessão, instância): o plugin recusado volta a cada 30 s e o log só registra
+# a mudança. Por instância porque os pulls aceitos do dono não podem apagar a marca do recusado.
+_recusas: dict[tuple[str, str], str] = {}
 
 
 class PullBody(BaseModel):
@@ -657,12 +664,13 @@ async def pull(body: PullBody):
     """
     _confere(body.sessao, body.token)
     recusa = await asyncio.to_thread(_conversation_mismatch, body.sessao, body.session_id)
-    marca = f"{body.instance}:{recusa}"
-    if _recusas.get(body.sessao) != marca:
-        _recusas[body.sessao] = marca
-        if recusa:
-            _log.info("plugin pull recusado sessao=%s instance=%s uuid=%s origem=%s",
-                      body.sessao, body.instance, body.session_id, recusa)
+    chave = (body.sessao, body.instance)
+    if not recusa:
+        _recusas.pop(chave, None)
+    elif _recusas.get(chave) != recusa:
+        _recusas[chave] = recusa
+        _log.info("plugin pull recusado sessao=%s instance=%s uuid=%s origem=%s",
+                  body.sessao, body.instance, body.session_id, recusa)
     if recusa:
         # 409 como o de dono: o plugin larga a ponte e tenta de novo depois — após um `/clear` os
         # dois ids voltam a bater e o dono se recupera sozinho.
