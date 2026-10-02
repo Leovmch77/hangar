@@ -1,8 +1,9 @@
 //! Atualização do próprio app pela release fixa `native-latest`, reescrita pelo CI a cada push na main.
 //! Lê só o manifesto (pelo endereço de download, que não gasta a cota da API do GitHub), ao abrir e a cada 6 h.
 //! Atualizar baixa o binário da plataforma, confere o sha256 do manifesto e troca o arquivo guardando o anterior em
-//! `<exe>.old`. O processo velho continua de pé até o novo gravar o próprio pid em `<exe>.alive`: se ele morrer ou
-//! não der sinal a tempo, o anterior volta para o lugar e este processo segue aberto. Nunca fica sem app.
+//! `<exe>.old` (no Windows, `<exe>.old-<horário>` se o `.old` ainda estiver preso). O processo velho continua de pé
+//! até o novo gravar o próprio pid em `<exe>.alive`: se ele morrer ou não der sinal a tempo, o anterior volta para o
+//! lugar e este processo segue aberto. Nunca fica sem app.
 use crate::{api::{Api, Failure}, i18n::tr, theme};
 use gpui_kit::{assets::IconName, component::{button::*, notification::Notification, *}, *};
 use serde::Deserialize;
@@ -70,14 +71,18 @@ fn old_path(exe: &Path) -> PathBuf { sibling(exe, ".old") }
 /// e renomear o app por cima dele dá "acesso negado". Os restos saem quando dá; o que ficou preso cede o nome.
 #[cfg(windows)]
 fn old_path(exe: &Path) -> PathBuf {
-    let prefix = format!("{}.old", exe.file_name().unwrap_or_default().to_string_lossy());
+    // O NTFS não diferencia maiúsculas: o nome do `current_exe` pode vir com outra caixa que a do disco.
+    let prefix = format!("{}.old", exe.file_name().unwrap_or_default().to_string_lossy()).to_lowercase();
     if let Some(entries) = exe.parent().and_then(|dir| std::fs::read_dir(dir).ok()) {
-        for entry in entries.flatten().filter(|entry| entry.file_name().to_string_lossy().starts_with(&prefix)) {
-            let _ = std::fs::remove_file(entry.path());
+        for entry in entries.flatten().filter(|entry| entry.file_name().to_string_lossy().to_lowercase().starts_with(&prefix)) {
+            if let Err(error) = std::fs::remove_file(entry.path()) {
+                eprintln!("resto da atualização anterior preso em {}: {error}", entry.path().display());
+            }
         }
     }
     let old = sibling(exe, ".old");
-    if !old.exists() { return old; }
+    // Arquivo que nega até a leitura (apagado mas ainda aberto) também ocupa o nome.
+    if matches!(old.try_exists(), Ok(false)) { return old; }
     let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis());
     sibling(exe, &format!(".old-{stamp}"))
 }
