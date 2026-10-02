@@ -36,6 +36,8 @@ Authorization = "Bearer {TOKEN}"
 
 [mcp_servers.hangar.env_http_headers]
 X-Hangar-Key = "CP_SESSION_KEY"
+X-Hangar-Pane = "TMUX_PANE"
+X-Hangar-Session = "CP_SESSION_NAME"
 
 [mcp_servers.node_repl]
 args = []
@@ -48,40 +50,47 @@ def _hangar(texto: str) -> dict:
 
 
 def test_arquivo_vazio_recebe_o_bloco():
-    novo = rm.codex_config("", BLOCO, URL, TOKEN)
+    novo = rm.codex_config("", BLOCO)
     assert novo == BLOCO
     assert _hangar(novo)["url"] == URL
 
 
 def test_bloco_marcado_ja_correto_nao_muda():
     texto = 'model = "gpt-5"\n\n' + BLOCO
-    assert rm.codex_config(texto, BLOCO, URL, TOKEN) == texto
+    assert rm.codex_config(texto, BLOCO) == texto
 
 
 def test_formato_do_app_com_mesmo_token_nao_muda():
-    assert rm.codex_config(APP_FORMAT, BLOCO, URL, TOKEN) == APP_FORMAT
+    assert rm.codex_config(APP_FORMAT, BLOCO) == APP_FORMAT
 
 
 def test_formato_do_app_com_token_antigo_e_substituido():
     velho = APP_FORMAT.replace(TOKEN, "antigo")
-    novo = rm.codex_config(velho, BLOCO, URL, TOKEN)
+    novo = rm.codex_config(velho, BLOCO)
     assert novo.count("[mcp_servers.hangar]") == 1
     assert "antigo" not in novo
     assert _hangar(novo)["http_headers"]["Authorization"] == f"Bearer {TOKEN}"
     assert tomllib.loads(novo)["mcp_servers"]["node_repl"] == {"args": []}
 
 
+def test_formato_do_app_sem_headers_de_identidade_e_substituido():
+    sem_pane = APP_FORMAT.replace('X-Hangar-Pane = "TMUX_PANE"\n', "")
+    novo = rm.codex_config(sem_pane, BLOCO)
+    assert novo.count("[mcp_servers.hangar]") == 1
+    assert _hangar(novo)["env_http_headers"]["X-Hangar-Pane"] == "TMUX_PANE"
+
+
 def test_duplicata_app_mais_marcado_e_reparada():
     quebrado = APP_FORMAT + "\n" + BLOCO
-    novo = rm.codex_config(quebrado, BLOCO, URL, TOKEN)
+    novo = rm.codex_config(quebrado, BLOCO)
     assert novo.count("[mcp_servers.hangar]") == 1
     assert _hangar(novo)["url"] == URL
-    assert rm.codex_config(novo, BLOCO, URL, TOKEN) == novo
+    assert rm.codex_config(novo, BLOCO) == novo
 
 
 def test_crlf_do_app_nao_atrapalha():
     texto = APP_FORMAT.replace("\n", "\r\n")
-    assert rm.codex_config(texto, BLOCO, URL, TOKEN) == texto
-    reparado = rm.codex_config(texto.replace(TOKEN, "antigo"), BLOCO, URL, TOKEN)
+    assert rm.codex_config(texto, BLOCO) == texto
+    reparado = rm.codex_config(texto.replace(TOKEN, "antigo"), BLOCO)
     assert reparado.count("[mcp_servers.hangar]") == 1
     assert _hangar(reparado)["url"] == URL
