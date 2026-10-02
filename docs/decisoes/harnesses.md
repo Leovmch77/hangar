@@ -88,13 +88,15 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
 - **Motor de modelo: `engines.py` é stdlib-only**, é `ANTHROPIC_AUTH_TOKEN` (nunca `_API_KEY`),
   o env entra por `execvpe` dentro do pane (nunca `tmux -e`, que expõe a chave no `cmdline`), e a
   janela é `CLAUDE_CODE_MAX_CONTEXT_TOKENS`.
-- **Function hooks (`plugins/hangar`) são um plus por cima do tmux, nunca no lugar dele.** Fallback
+- **Plugin (`plugins/hangar`) é o caminho principal quando responde e prova a entrega; o tmux é a reserva automática, por sessão, e nunca sai do código.** Fallback
   é por AUSÊNCIA de long-poll vivo; entrega só vale com prova (rascunho confirmado, Enter aceito,
   composer vazio). `classic.*` não chega a plugin de `--plugin-dir`, `$` não atravessa `import`, e
   é um módulo por plugin. Meça no SSE, não em linha de log.
 - **Pedido de permissão só fica com o plugin com alguém no app E ninguém no terminal**: `tool.check`
   roda antes do diálogo, e segurar esconde o pedido de quem olha o terminal. Na dúvida (tmux mudo,
   Windows), não segura.
+- **A ponte do plugin só atende a conversa que o Hangar acompanha na sessão** (a mesma do chat e
+  das teclas): outro `claude` na sessão recebe 409 e a entrega não passa por ele.
 - **Steer no Claude é só pelo botão**: `ctrl+x ctrl+s` INTERROMPE o turno em curso. Colado num
   recado (`steer:true`), abortaria o trabalho da sessão que recebe — o automático é só do Kimi.
 - **Modo de permissão troca COM a sessão trabalhando** — é tecla, não texto. O guard de "está
@@ -1242,6 +1244,53 @@ atravessa `import` — cada arquivo lê o ambiente e chama `$.http.fetch` sozinh
 
 O `capture-pane` a 0,75 s não foi reduzido: menu de permissão fora da regra acima, `/model`,
 diálogo de confiança e morte continuam sendo do pane.
+
+**A ponte só atende a conversa que o Hangar acompanha (01/10/2026).** `/whoami` e `/pull` recebem
+`session_id` (`$.session.id()`, relido a cada poll) e só aceitam quando ele é igual ao uuid do
+transcript que o `registry.resolve_tracked` dá como certo (`tracked=True`); diferente, desconhecido
+ou ausente → `/whoami` responde `{"sessao": None}` e `/pull` responde 409, que o plugin trata como
+perder o dono (larga a ponte, tenta de novo em 30 s). A regra real: a entrega pelo plugin vai para a
+conversa que o Hangar está acompanhando na sessão (a mesma do chat e das teclas); um segundo `claude`
+que não é essa conversa é recusado. Por quê: pane, ambiente herdado e pid do psmux
+valem para QUALQUER `claude` aberto na sessão — um split herda `HANGAR_PLUGIN_*` do tmux — e, sem o
+dono batendo (backend reiniciado), o segundo processo tomava a fila. Não é "o primeiro `claude`
+sempre ganha": `tracked_session_id` segue `tmux.pane_pid` → `agentpane.resolve_target`, que prefere
+o pane do agente ATIVO. Medido em `cx-uuid2`: split DESTACADO (`-d`) rodando `claude` + backend
+reiniciado → o split recebeu 409 e a mensagem entrou no original pelo plugin; split ATIVO com
+`claude` digitado pelo wrapper (`--session-id` próprio) → o `RESOLVE` trocou para a conversa do split
+em ~3 s, o original passou a receber 409, a mensagem do `/input` entrou no split pelo plugin e o
+`/history` mostrou essa mesma conversa — chat, teclas e plugin concordam. Antes, com `cx-uuid`: o
+split recebeu 409 `uuid-diferente`, a mensagem foi para o original pelo plugin; depois
+do `/clear` o Claude grava o jsonl novo na hora, o marcador do `state_hook` virou o vínculo em ~1 s e
+a mensagem seguinte entrou uma vez só na conversa nova, ainda pelo plugin. Plugin antigo (sem
+`session_id`) fica na tecla até a sessão reabrir. No Windows não há marcador (`/proc`): o vínculo é o
+`--session-id` do cmdline e, depois de um `/clear`, o jsonl mais novo da pasta — com outra sessão no
+mesmo cwd ele não segue o `/clear`, e aquela sessão fica na tecla até reabrir. O cwd dessa busca
+sai do pane do agente (o mesmo do `list()`), não do pane ativo. `/whoami` com `{"sessao": None}`
+é repetido em 2, 10 e 30 s e para: o marcador do `state_hook` pode chegar depois da largada.
+
+### Mods no 2.1.287 medidos (01/10/2026)
+
+Claude Code 2.1.287 (G), mod descartável `hangar-exp` (hooks `session.start`, `turn.start`,
+`turn.step`, `turn.complete`, `classic.Notification`) avisando um ouvinte local; sessão de teste
+com terminal criada por `hangar-send --new`, conta `~/.claude-200-01`, que já nasce com
+`--plugin-dir plugins/hangar` (outro nome, convive sem conflito).
+
+| | o que foi medido |
+|---|---|
+| A — pasta de skills | link `~/.claude/skills/hangar-exp` → `claude plugin list` mostra `hangar-exp@skills-dir`, `Scope: user`, `Status: ✔ loaded`. Na sessão o mod rodou de verdade: `session.start` chegou do pane `%15` sem flag nenhuma para ele |
+| B — pasta de skills + `--plugin-dir` do mesmo nome | carrega UM só: `hangar-exp@inline` `✔ loaded`, e a cópia da pasta de skills sai com erro registrado — `✘ Not loaded — the name "hangar-exp" is already taken by a session-only plugin (--plugin-dir / --plugin-url), which takes precedence`. No `--json` ela vem com `enabled: false` e `errors: [...]` (`generic-error`). Não há carga dupla. O erro só foi visto no `plugin list`/`--json`; não foi conferido se aparece no terminal de uma sessão interativa |
+| B2 — outra conta | `CLAUDE_CONFIG_DIR=~/.claude-claude-200-2` também lista `hangar-exp@skills-dir` `✔ loaded` (path `~/.claude-claude-200-2/skills/hangar-exp`): a `skills` das contas é link para `~/.claude/skills` |
+| C1 — `submit({asUser})` parado | a promessa resolve em 0,63 s, logo depois dos hooks de `UserPromptSubmit`, antes do `turn.start`. No jsonl é `type: "user"` comum, sem `isMeta` e sem moldura: `"message":{"role":"user","content":"EXP-PARADO: responda só OK"},"origin":{"kind":"plugin","name":"hangar-exp","asUser":true},"promptSource":"system","turnOrigin":"system","queuePriority":"later"`. O digitado vem `"origin":{"kind":"human"},"promptSource":"typed"`. O terminal mostra `› Prompt from the hangar-exp plugin` acima do texto; o `/history` do Hangar mostra a bolha de usuário normal |
+| C2 — `submit({asUser})` com turno rodando | entra na fila na hora (`queue-operation enqueue` às 21:42:41,822 UTC) mas a promessa só resolve 10,07 s depois, quando o turno em curso acabou e o texto abriu o PRÓPRIO turno: fim do turno 2 (marcador `idle`) 21:42:50,577 → entrada `user` 51,122 → promessa 51,887 → `turn.start` 51,927. Não injeta no meio do turno |
+| C3 — hooks de configuração | `UserPromptSubmit` dispara para o texto do mod (anexo `hook_additional_context` de `UserPromptSubmit` logo após as duas entradas `user` do mod) e o marcador do `state_hook` vai a `working` (21:42:51,250, 0,67 s depois do `idle` do turno anterior) |
+| D — `classic.Notification` | não chega a plugin carregado pela pasta de skills: o `Notification` dos settings disparou (marcador `awaiting_input` 60,3 s após o `idle`) e o hook do mod não rodou em 182 s parado. Mesmo resultado do `--plugin-dir` em 18/09 |
+| E — primeiro texto × sidecar de prévia | `turn.step` vê o primeiro trecho de texto antes da primeira escrita de `.hangar-preview/<uuid>.json`: +112 ms, +131 ms e +39 ms nos três turnos medidos |
+| F — `$.session.usage()` no `turn.complete` | `{startedAt, context:{tokens,window,percent}, rateLimits:[{kind:"five_hour"/"seven_day", percentUsed, resetsAt}], cost:{usd}}`. Bate com o sidecar da statusline do mesmo instante (`84918` tokens × `85k`; `0,887` × `$0.89`; 5h 84 %, 7d 74 % iguais). Não traz modelo nem esforço; o sidecar traz (`model`, `effort`) |
+
+Fora do mod: pelo `/input` do app, `!echo oi` chegou ao modelo como texto (`promptSource:"typed"`,
+o modelo rodou o Bash sozinho), não como modo bash; e `@README.md resuma…` enviado com o turno
+rodando foi absorvido nele (`queue-operation remove`, `reason: absorbed_mid_turn`).
 
 ## O `wire.jsonl` do Kimi não é um transcript bem-comportado
 

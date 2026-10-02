@@ -8,7 +8,7 @@ import sys
 import time
 import traceback
 from pathlib import Path
-from app import atomico, diag, guest_users, plugin_bridge
+from app import atomico, diag, guest_users, plugin_bridge, share_store
 from app.adapters import CLAUDE_HEADLESS, chave_de, get_adapter
 from app.adapters.preview_push import PushPreviewSource, fonte_ferramenta, fonte_pensamento
 from app.difusor import Difusor
@@ -562,15 +562,15 @@ def invalidate_recent_list() -> None:
     _list_invalidated_at = time.monotonic()
 
 
-async def list_events(ping_secs: float = 8.0, only=None, viewer=None):
+async def list_events(ping_secs: float = 8.0, only=None, viewer=None, token=None):
     """SSE da LISTA de sessoes. Conexao = PRIORIDADE ABSOLUTA, zero trabalho: um reader que so LE o
     snapshot compartilhado (produzido pelo _ListRefresher unico) e emite quando a versao muda, + um
     ping em timer FIXO por conexao (incondicional). Refresher travado nao afeta a conexao — o ping
     segue e o front ve a lista velha (stale > desconectado).
 
     `only` = conexao de convidado: ve so a sessao compartilhada, nao recebe os pedidos de navegador
-    do dono (`nav`) e nao conta como app do dono aberto. Aceita o nome ou o registro do convite
-    (`.session`): renomear a sessao muda o registro, e o stream aberto tem que acompanhar.
+    do dono (`nav`) e nao conta como app do dono aberto. Aceita o nome ou o `Guest` do token:
+    renomear a sessao muda o registro, e o stream aberto tem que acompanhar (`token` o relê).
     `viewer` = convidado com login proprio (ou None = dono): a lista passa pelo mesmo filtro da
     rota `/api/sessions`."""
     queue: asyncio.Queue = asyncio.Queue()
@@ -596,9 +596,13 @@ async def list_events(ping_secs: float = 8.0, only=None, viewer=None):
             if data is not None:
                 try:
                     if only is not None:
-                        data = json.dumps([guest_safe(x) for x in json.loads(data)
-                                           if x.get("name") == (only if isinstance(only, str)
-                                                                else only.session)], ensure_ascii=False)
+                        # `only` em str é só o nome (usos internos). Com `token`, o registro é
+                        # relido a cada envio: sessão ligada ao token depois da abertura aparece.
+                        guest = None if isinstance(only, str) else (
+                            (token and share_store.lookup_token(token)) or only)
+                        sees = (lambda n: n == only) if guest is None else guest.sees
+                        data = json.dumps([guest_safe(x, guest) for x in json.loads(data)
+                                           if sees(x.get("name"))], ensure_ascii=False)
                     if guest_users.has_claims() or viewer is not None:
                         itens = await asyncio.to_thread(guest_users.filter_visible, viewer,
                                                         json.loads(data), lambda x: x.get("name"))

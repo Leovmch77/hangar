@@ -15,6 +15,9 @@ from app.config import settings
 SHARED = share_store.Share(
     id="s1", session="cc", life="L1", created_at=0.0, code_expires_at=0.0, code_hash="c",
     token_hash="t", device="Pixel", redeemed_at=1.0, revoked_at=None)
+PAR = share_store.Share(
+    id="p1", session="yy", life="L2", created_at=0.0, code_expires_at=0.0, code_hash="",
+    token_hash="t", device=None, redeemed_at=1.0, revoked_at=None, kind="pair")
 GUEST = {"Authorization": "Bearer g"}
 # Simula `share_store.revoke(...)` no meio de um stream: o próximo lookup devolve o revogado.
 STATE = {"revoked": False, "unsure": False}
@@ -23,14 +26,14 @@ STATE = {"revoked": False, "unsure": False}
 def _lookup(t):
     if t != "g":
         return None
-    return dataclasses.replace(SHARED, revoked_at=2.0) if STATE["revoked"] else SHARED
+    return share_store.Guest([dataclasses.replace(SHARED, revoked_at=2.0) if STATE["revoked"] else SHARED])
 
 
 def _life(name):
     # `unsure` simula o tmux que parou de responder no meio: a vida some, a ausência não é confirmada.
-    if name != "cc" or STATE["unsure"]:
+    if name not in ("cc", "dd", "yy") or STATE["unsure"]:
         return None
-    return "L1"
+    return {"yy": "L2"}.get(name, "L1")
 
 
 @pytest.fixture(autouse=True)
@@ -102,7 +105,7 @@ def _app():
     @a.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
     def qualquer(path: str, request: Request):
         g = share_gate.guest_of(request)
-        return {"path": path, "guest": g.session if g else None}
+        return {"path": path, "guest": ",".join(sorted(g.sessions())) if g else None}
 
     a.add_middleware(share_gate.ShareGate)
     a.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -156,6 +159,32 @@ def test_rotas_globais_do_chat_passam():
     assert c.get("/api/model-options", headers=GUEST).status_code == 200
     assert c.post("/api/pensamento/pt", headers=GUEST).status_code == 200
     assert c.get("/api/tts/audio/abc", headers=GUEST).status_code == 200
+
+
+def test_token_com_duas_sessoes_alcanca_as_duas(monkeypatch):
+    outra = dataclasses.replace(SHARED, id="s2", session="dd")
+    monkeypatch.setattr(share_store, "lookup_token",
+                        lambda t: share_store.Guest([SHARED, outra]) if t == "g" else None)
+    c = _guest_client()
+    assert c.get("/api/sessions/cc/history", headers=GUEST).status_code == 200
+    assert c.get("/api/sessions/dd/history", headers=GUEST).status_code == 200
+    assert c.get("/api/sessions/ee/history", headers=GUEST).status_code == 403
+
+
+def test_sessao_de_par_so_le(monkeypatch):
+    monkeypatch.setattr(share_store, "lookup_token",
+                        lambda t: share_store.Guest([SHARED, PAR]) if t == "g" else None)
+    c = _guest_client()
+    assert c.get("/api/sessions/yy/history", headers=GUEST).status_code == 200
+    assert c.post("/api/sessions/yy/input", headers=GUEST, json={"text": "x"}).status_code == 403
+    assert c.get("/api/sessions/yy/file?path=/etc/passwd", headers=GUEST).status_code == 403
+    assert c.post("/api/sessions/cc/input", headers=GUEST, json={"text": "x"}).status_code == 200
+
+
+@pytest.mark.parametrize("acao", ["pair-invite", "pair-accept"])
+def test_convidado_nao_cria_nem_aceita_par(acao):
+    c = _guest_client()
+    assert c.post(f"/api/sessions/cc/{acao}", headers=GUEST, json={}).status_code == 403
 
 
 def test_convidado_nao_fecha_a_sessao_do_dono():
@@ -356,3 +385,36 @@ def test_socket_principal_nao_e_herdado_por_processos_filhos():
 
 def test_guest_of_sem_scope_devolve_none():
     assert share_gate.guest_of(object()) is None
+
+
+@pytest.mark.parametrize("path,esperado", [
+    ("/api/sessions/yy/uploads/foto.png", 200), ("/api/sessions/yy/uploads", 403),
+    ("/api/sessions/yy/runners", 403), ("/api/sessions/yy/project-shortcuts", 403),
+    ("/api/sessions/yy/shortcut-terminals", 403), ("/api/sessions/yy/transcript-image", 200)])
+def test_par_le_so_o_que_esta_na_lista(monkeypatch, path, esperado):
+    monkeypatch.setattr(share_store, "lookup_token",
+                        lambda t: share_store.Guest([PAR]) if t == "g" else None)
+    assert _guest_client().get(path, headers=GUEST).status_code == esperado
+
+
+def test_path_session_so_tira_term_do_terminal():
+    assert share_gate.path_session("/api/sessions/term-cc/term") == "cc"
+    assert share_gate.path_session("/api/sessions/term-cc/history") == "term-cc"
+    assert share_gate.path_session("/api/sessions/term-cc") == "term-cc"
+    assert share_gate.path_session("/api/sessions/cc/history") == "cc"
+
+
+def test_sessao_compartilhada_e_pareada_no_mesmo_token_passa_como_convite(monkeypatch):
+    copia_do_par = dataclasses.replace(PAR, id="p2", session="cc", life="L1", created_at=5.0, parent_id="p1")
+    monkeypatch.setattr(share_store, "lookup_token",
+                        lambda t: share_store.Guest([SHARED, copia_do_par]) if t == "g" else None)
+    r = _guest_client().post("/api/sessions/cc/input", headers=GUEST, json={"text": "x"})
+    assert r.status_code == 200
+
+
+@pytest.mark.parametrize("path", ["/api/engines", "/api/model-options", "/api/harness/codex/opcoes",
+                                  "/api/tts/audio/abc"])
+def test_token_so_de_par_nao_alcanca_rotas_globais(monkeypatch, path):
+    monkeypatch.setattr(share_store, "lookup_token",
+                        lambda t: share_store.Guest([PAR]) if t == "g" else None)
+    assert _guest_client().get(path, headers=GUEST).status_code == 403

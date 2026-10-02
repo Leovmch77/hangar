@@ -14,21 +14,27 @@ pub(super) struct HomeUsage {
     warming: Option<(u64, u64)>,
     tries: u32,
     refreshed_at: Option<Instant>,
+    /// Dia sob o mouse no gráfico: a linha abaixo dele mostra o uso desse dia.
+    hover_day: Option<NaiveDate>,
 }
 
+/// O uso de um dia no gráfico de atividade.
+#[derive(Clone, Copy, Default)]
+struct DayUse { tokens: f64, cost: f64, sessions: f64 }
+
 #[derive(Clone, Copy, Default, PartialEq)]
-enum Period { #[default] All, Month, Week }
+enum Period { #[default] All, Month, Week, Day }
 
 impl Period {
-    fn key(self) -> &'static str { match self { Self::All => "all", Self::Month => "30d", Self::Week => "7d" } }
-    fn label(self) -> String { web(match self { Self::All => "home_usage_all", Self::Month => "home_usage_30d", Self::Week => "home_usage_7d" }) }
+    fn key(self) -> &'static str { match self { Self::All => "all", Self::Month => "30d", Self::Week => "7d", Self::Day => "1d" } }
+    fn label(self) -> String { web(match self { Self::All => "home_usage_all", Self::Month => "home_usage_30d", Self::Week => "home_usage_7d", Self::Day => "home_usage_1d" }) }
 }
 
 struct Summary {
     totals: Bucket,
     models: Vec<Bucket>,
     active_days: usize,
-    days: BTreeMap<NaiveDate, f64>,
+    days: BTreeMap<NaiveDate, DayUse>,
     rate: Option<f64>,
     partial_cost: bool,
 }
@@ -43,12 +49,15 @@ impl Summary {
         let mut models = report.by_model;
         models.retain(|b| b.raw() > 0.);
         models.sort_by(|a, b| b.raw().total_cmp(&a.raw()).then(a.key.cmp(&b.key)));
-        let mut days: BTreeMap<NaiveDate, f64> = BTreeMap::new();
+        let mut days: BTreeMap<NaiveDate, DayUse> = BTreeMap::new();
         for bucket in report.by_day {
             let day = NaiveDate::parse_from_str(&bucket.key, "%Y-%m-%d").map_err(|_| tr("invalid_response"))?;
-            *days.entry(day).or_default() += bucket.raw();
+            let entry = days.entry(day).or_default();
+            entry.tokens += bucket.raw();
+            entry.cost += bucket.cost;
+            entry.sessions += bucket.sessions;
         }
-        let active_days = days.values().filter(|n| **n > 0.).count();
+        let active_days = days.values().filter(|d| d.tokens > 0.).count();
         Ok(Self { totals: report.totals, models, active_days, days, rate: report.usd_brl, partial_cost: !report.sem_tarifa.is_empty() })
     }
 }
@@ -58,6 +67,7 @@ impl Hangar {
         if self.home_usage.connection != Some(self.connection) {
             self.home_usage.connection = Some(self.connection);
             self.home_usage.report.reset();
+            self.home_usage.hover_day = None;
         }
         let stale = self.home_usage.refreshed_at.is_some_and(|at| at.elapsed() >= Duration::from_secs(60));
         if self.api.is_some() && (self.home_usage.report.value.is_none() || stale) && !self.home_usage.report.loading {
@@ -125,16 +135,25 @@ impl Hangar {
                 Button::new(key).ghost().small().selected(state.models == models).label(web(key))
                     .on_click(cx.listener(move |this, _, _, cx| { this.home_usage.models = models; cx.notify(); }))
             })))
-            .child(div().flex().gap_1().children([Period::All, Period::Month, Period::Week].map(|period| {
+            .child(div().flex().gap_1().children([Period::All, Period::Month, Period::Week, Period::Day].map(|period| {
                 Button::new(SharedString::from(format!("home-usage-{}", period.key()))).ghost().small()
                     .selected(state.period == period).label(period.label())
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        if this.home_usage.period != period { this.home_usage.period = period; this.load_home_usage(cx); cx.notify(); }
+                        // Período novo: os números do anterior ficariam errados na tela enquanto carrega.
+                        if this.home_usage.period != period {
+                            this.home_usage.period = period;
+                            this.home_usage.report.reset();
+                            // A grade é refeita e o `on_hover(false)` do dia antigo não chega.
+                            this.home_usage.hover_day = None;
+                            this.load_home_usage(cx);
+                            cx.notify();
+                        }
                     }))
             })));
-        let mut card = div().w_full().max_w(rems(36.)).mx_auto().flex().flex_col().gap_3().p_3().rounded_lg()
+        let mut card = div().w_full().flex().flex_col().gap_3().p_3().rounded_lg()
             .border_1().border_color(theme::border()).child(header);
-        if state.report.loading {
+        // A recarga de cada minuto mantém o resumo na tela; "carregando" só sem nada para mostrar.
+        if state.report.loading && state.report.value.is_none() {
             let text = state.warming.map_or_else(|| tr("loading"), |(read, total)|
                 web_with("home_usage_warming", &[("read", read.to_string()), ("total", total.to_string())]));
             return card.child(div().id("home-usage-loading").role(Role::Status).text_sm().text_color(theme::muted()).child(text));
@@ -176,7 +195,7 @@ impl Hangar {
                         .child(div().id(SharedString::from(format!("home-{key}"))).text_sm().font_weight(FontWeight::MEDIUM)
                             .truncate().child(value.clone()).tooltip({ let value = value.clone(); move |w, cx| gpui_kit::component::tooltip::Tooltip::new(value.clone()).build(w, cx) })))));
             }
-            card = card.child(activity_calendar(report));
+            card = card.child(self.activity_calendar(report, cx));
         }
         card.child(div().text_xs().text_color(if report.partial_cost { theme::warning() } else { theme::muted() })
             .child(web(if report.partial_cost { "home_usage_partial" } else { "home_usage_method" })))
@@ -184,33 +203,63 @@ impl Hangar {
 }
 
 // A data vem do histórico: o cliente não desloca os dias agregados no fuso do servidor.
-fn calendar_bounds(days: &BTreeMap<NaiveDate, f64>) -> Option<(NaiveDate, NaiveDate)> {
+fn calendar_bounds<V>(days: &BTreeMap<NaiveDate, V>) -> Option<(NaiveDate, NaiveDate)> {
     Some((*days.first_key_value()?.0, *days.last_key_value()?.0))
 }
 
-fn activity_calendar(report: &Summary) -> Div {
-    let Some((start, end)) = calendar_bounds(&report.days) else { return div(); };
-    let first = start - chrono::Duration::days(start.weekday().num_days_from_monday() as i64);
-    let weeks = ((end - first).num_days() / 7 + 1) as usize;
-    let max = report.days.values().copied().fold(1., f64::max);
-    let mut grid = div().id("home-usage-calendar").overflow_x_scroll().flex().gap_1();
-    for week in 0..weeks {
-        grid = grid.child(div().flex().flex_col().gap_1().children((0..7).map(|weekday| {
-            let day = first + chrono::Duration::days((week * 7 + weekday) as i64);
-            let value = report.days.get(&day).copied().unwrap_or(0.);
-            let visible = day >= start && day <= end;
-            let tip = web_with("home_usage_day", &[("date", day.format("%d/%m/%Y").to_string()), ("tokens", dec(value, 0))]);
-            div().id(SharedString::from(format!("home-day-{day}"))).size_3().flex_shrink_0().rounded_sm()
-                .bg(if value > 0. { theme::accent().opacity(0.3 + 0.7 * (value / max) as f32) } else { theme::inset() })
-                .when(!visible, |el| el.opacity(0.))
-                .aria_label(tip.clone())
-                .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(w, cx))
-        })));
+/// "06/08/2026 · 28,9 Mi tokens · R$ 12,30 · 14 sessões", ou o dia sem uso.
+fn day_detail(day: NaiveDate, usage: Option<&DayUse>, rate: Option<f64>) -> String {
+    let date = day.format("%d/%m/%Y").to_string();
+    match usage.filter(|u| u.tokens > 0.) {
+        Some(u) => tr("home_usage_day_detail").replace("{date}", &date).replace("{tokens}", &tok(u.tokens))
+            .replace("{cost}", &money2(u.cost, rate)).replace("{sessions}", &dec(u.sessions, 0)),
+        None => tr("home_usage_day_empty").replace("{date}", &date),
     }
-    div().flex().flex_col().gap_2()
-        .child(div().text_xs().text_color(theme::muted()).child(web_with("home_usage_activity", &[
-            ("start", start.format("%d/%m/%Y").to_string()), ("end", end.format("%d/%m/%Y").to_string())])))
-        .child(grid)
+}
+
+impl Hangar {
+    /// Um quadrado por dia, semanas em colunas (segunda em cima). A linha de baixo mostra o dia sob o
+    /// mouse na hora e, sem mouse, o dia de mais uso: dica flutuante demorava e saía fora do tema.
+    fn activity_calendar(&self, report: &Summary, cx: &mut Context<Self>) -> Div {
+        let Some((start, end)) = calendar_bounds(&report.days) else { return div(); };
+        let first = start - chrono::Duration::days(start.weekday().num_days_from_monday() as i64);
+        let weeks = ((end - first).num_days() / 7 + 1) as usize;
+        let max = report.days.values().map(|d| d.tokens).fold(1., f64::max);
+        let mut grid = div().id("home-usage-calendar").overflow_x_scroll().flex().gap_1();
+        for week in 0..weeks {
+            grid = grid.child(div().flex().flex_col().gap_1().children((0..7).map(|weekday| {
+                let day = first + chrono::Duration::days((week * 7 + weekday) as i64);
+                let usage = report.days.get(&day);
+                let value = usage.map_or(0., |d| d.tokens);
+                let visible = day >= start && day <= end;
+                let hovered = self.home_usage.hover_day == Some(day);
+                div().id(SharedString::from(format!("home-day-{day}"))).size_3().flex_shrink_0().rounded_sm()
+                    .bg(if value > 0. { theme::accent().opacity(0.3 + 0.7 * (value / max) as f32) } else { theme::inset() })
+                    .when(hovered, |el| el.border_1().border_color(theme::text()))
+                    .when(!visible, |el| el.opacity(0.))
+                    .aria_label(day_detail(day, usage, report.rate))
+                    .when(visible, |el| el.on_hover(cx.listener(move |this, inside: &bool, _, cx| {
+                        if *inside { this.home_usage.hover_day = Some(day); }
+                        else if this.home_usage.hover_day == Some(day) { this.home_usage.hover_day = None; }
+                        cx.notify();
+                    })))
+            })));
+        }
+        let shown = self.home_usage.hover_day.filter(|day| *day >= start && *day <= end);
+        let line = match shown {
+            Some(day) => day_detail(day, report.days.get(&day), report.rate),
+            None => report.days.iter().filter(|(_, usage)| usage.tokens > 0.).max_by(|a, b| a.1.tokens.total_cmp(&b.1.tokens))
+                .map(|(day, usage)| tr("home_usage_busiest").replace("{detail}", &day_detail(*day, Some(usage), report.rate)))
+                .unwrap_or_default(),
+        };
+        div().flex().flex_col().gap_2()
+            .child(div().text_xs().text_color(theme::muted()).child(web_with("home_usage_activity", &[
+                ("start", start.format("%d/%m/%Y").to_string()), ("end", end.format("%d/%m/%Y").to_string())])))
+            .child(grid)
+            // Altura fixa: trocar de dia não pode empurrar o compositor.
+            .child(div().id("home-usage-day").h(px(16.)).text_xs().truncate()
+                .text_color(if shown.is_some() { theme::text() } else { theme::muted() }).child(line))
+    }
 }
 
 #[cfg(test)]
@@ -227,10 +276,12 @@ mod tests {
         assert_eq!(summary.totals.raw(), 10.);
         assert_eq!(summary.models[0].key, "popular");
         assert_eq!(summary.active_days, 2);
+        let dia = summary.days[&NaiveDate::from_ymd_opt(2026, 9, 28).unwrap()];
+        assert_eq!(dia.tokens, 15.);
         assert!(summary.partial_cost);
         assert_eq!(calendar_bounds(&summary.days).unwrap().0.to_string(), "2026-09-28");
         assert_eq!(calendar_bounds(&summary.days).unwrap().1.to_string(), "2026-09-30");
         assert!(Summary::parse(value, Period::Month).is_err());
-        assert!(calendar_bounds(&BTreeMap::new()).is_none());
+        assert!(calendar_bounds(&BTreeMap::<NaiveDate, DayUse>::new()).is_none());
     }
 }

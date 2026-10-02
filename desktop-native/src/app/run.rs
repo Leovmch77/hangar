@@ -274,6 +274,7 @@ impl Hangar {
 
     /// O botão já nasce aceso quando há um run vivo no projeto, como o web ao abrir a conversa.
     pub(super) fn load_run_state(&mut self) {
+        if self.open_read_only() { return; }
         let (Some(api), Some(key)) = (self.session_api(), self.selected_key()) else { return };
         let (connection, tx) = (self.connection, self.tx.clone());
         self.runtime.spawn(async move {

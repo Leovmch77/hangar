@@ -159,7 +159,7 @@ async def revoke_share(name: str, share_id: str):
 
 
 def _revoke_all(name: str) -> int:
-    n = share_store.revoke_session(name)
+    n = share_store.revoke_session(name, kind="share")   # o botão não derruba um par
     sync_tunnel()
     return n
 

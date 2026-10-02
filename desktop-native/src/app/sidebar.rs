@@ -432,6 +432,7 @@ impl Hangar {
         for t in rows { self.sidebar.remote_focus.entry(t).or_insert_with(|| cx.focus_handle().tab_stop(true)); }
         self.refresh_group_ask();
         self.refresh_group_sheet(window, cx);
+        self.external_pairs_changed(cx);
         if self.sidebar.hover.as_ref().is_some_and(|t| !alive(self, t)) { self.hide_preview(); }
         // Só se o foco ainda está onde o renomear o deixou: gesto novo nesse meio-tempo vence.
         if let Some(new) = self.sidebar.focus_tab.clone().filter(|t| alive(self, t)) {
@@ -534,9 +535,11 @@ impl Hangar {
         self.sidebar.menu_seq += 1;
         let seq = self.sidebar.menu_seq;
         // Branches só onde o menu mostra o git (pasta num repositório); como o silenciar, lidas a cada abertura do menu.
-        let git = self.target_session(&target).is_some_and(has_git);
+        // A sessão da outra pessoa num par não tem esses itens: o servidor dela recusaria as leituras.
+        let read_only = self.target_session(&target).is_some_and(SessionInfo::read_only);
+        let git = !read_only && self.target_session(&target).is_some_and(has_git);
         // Convite não tem Silenciar: as preferências de aviso são do servidor inteiro, fora do convite (web: `if (invite) return`).
-        let mute = !self.invite_target(&target);
+        let mute = !read_only && !self.invite_target(&target);
         let Some(api) = self.machine_api(&target.server) else {
             let failed = self.machine_error(&target.server);
             self.sidebar.menu = Some(MenuRead { target, seq, mute: Mute::Failed(failed.clone()), branches: git.then_some(Branches::Failed(failed)) });
@@ -1077,6 +1080,12 @@ fn fill_menu(menu: PopupMenu, hangar: &WeakEntity<Hangar>, target: &Target, sess
     };
     let invite = access.invite;
     let cwd = session.cwd.clone().filter(|c| !c.is_empty());
+    // A sessão da outra pessoa num par: o servidor dela recusa tudo que não é ler.
+    if session.read_only() {
+        return menu_style(menu).min_w(px(240.)).label(session.name.clone())
+            .when_some(cwd, |menu, cwd| menu.item(PopupMenuItem::new(tr("sidebar_copy_cwd"))
+                .on_click(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(cwd.clone())))));
+    }
     // No convite o item de fechar vira "Parar de acompanhar": sai só deste aparelho, nunca fecha a sessão do dono. Com o convite
     // como servidor ativo ele não sai daqui (a troca de ativo é das configurações).
     let close = if invite {
@@ -1118,7 +1127,8 @@ fn fill_menu(menu: PopupMenu, hangar: &WeakEntity<Hangar>, target: &Target, sess
     menu_style(menu).min_w(px(240.)).label(session.name.clone())
         .item(item(tr("sidebar_rename"), |this, target, window, cx| this.start_session_rename(target, window, cx)))
         .when(!invite, |menu| menu.item(mute_item(hangar, target, mute))
-            .item(item(tr_shared("compartilhar_menu", &[]), |this, target, window, cx| this.open_share_dialog(target, window, cx))))
+            .item(item(tr_shared("compartilhar_menu", &[]), |this, target, window, cx| this.open_share_dialog(target, window, cx)))
+            .item(item(tr("par_menu"), |this, target, window, cx| this.open_pair_accept_dialog(Some(target), None, window, cx))))
         .when_some(cwd, |menu, cwd| menu
             .item(PopupMenuItem::new(tr("sidebar_copy_cwd")).on_click(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(cwd.clone()))))
             .when(!invite, |menu| menu.item(item(tr("sidebar_open_editor"), |this, target, _, cx| this.write(target, Write::Editor, cx)))))

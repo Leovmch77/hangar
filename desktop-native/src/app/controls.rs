@@ -224,6 +224,7 @@ impl Hangar {
     // Catálogo lido no gesto de abrir. O ciclo do Claude com terminal e a permissão do Codex com
     // terminal mexem na TUI para ler: esses só com um segundo clique explícito.
     pub(super) fn open_ctl(&mut self, ctl: Ctl, probe: bool, cx: &mut Context<Self>) {
+        if self.open_read_only() { return; }
         let (Some(api), Some(key)) = (self.session_api(), self.selected_key()) else { return; };
         if !probe && self.controls.open.as_ref().is_some_and(|o| o.key == key && o.ctl == ctl) { self.controls.open = None; cx.notify(); return; }
         self.command_panel = false;
@@ -263,6 +264,7 @@ impl Hangar {
     /// Alt+Shift+P e Shift+Tab no campo do Claude, como o web: o próximo modo do ciclo que a sessão aceita. Ciclo ainda
     /// não lido é lido com a sonda, como a pílula, e o modo é aplicado quando a leitura chega.
     pub(super) fn cycle_permission(&mut self, cx: &mut Context<Self>) {
+        if self.open_read_only() { return; }
         let (Some(api), Some(key)) = (self.session_api(), self.selected_key()) else { return; };
         if self.provider().0 != "claude" || self.controls.busy.contains_key(&key) || self.controls.cycle_after_read.is_some() { return; }
         let known = self.controls.known.get(&(key.clone(), Ctl::Mode)).cloned();

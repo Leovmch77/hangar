@@ -727,8 +727,73 @@ responder ou o túnel fora na hora do resgate (o código não é gasto).
 
 Revogar corta SSE e WebSocket abertos em cerca de 5 s (WebSocket fecha com 4410). O convidado
 nunca conta como o app aberto do dono (o dono continua recebendo push) e a lista dele esconde o
-nome das outras sessões (campos `pair`/`then`). O nativo guarda um convite por endereço de dono
-(o mais novo vence; endereço que já é servidor próprio recusa o resgate).
+nome das outras sessões (campos `pair`/`then`). O nativo guarda uma entrada por endereço de dono
+e resgata cada convite novo mandando o token que já tem: o backend acrescenta a sessão a esse
+token (01/10/2026, pedido do usuário; antes o mais novo substituía o anterior). Endereço que já é
+servidor próprio recusa o resgate. PWA e app Expo seguem com um convite por endereço.
+
+## Par externo: sessões de pessoas diferentes
+
+(01/10/2026, pedido do usuário.) Duas pessoas, cada uma no seu Hangar e na sua tailnet, pareiam
+uma sessão de cada lado: as sessões trocam recados, cada pessoa só LÊ a sessão do outro no app
+nativo. Transporte é Tailscale Funnel nos dois lados (8766 em `:8443`, como no compartilhamento);
+a ponte na VPS (`app.hangar.dev.br`) ficou para depois, assim como PWA e app Expo.
+
+**Um token de convidado cobre várias sessões.** Vários `Share` dividem o mesmo `token_hash`;
+`POST /api/guest/redeem` aceita `token` e, se ele ainda vale, a sessão nova entra nele. O porteiro
+guarda o conjunto de sessões do token, cada uma com o seu `kind`, e a lista e o SSE da lista
+filtram por esse conjunto, relido a cada pedido. Revogar tira só aquela sessão. `attach` copia os
+registros do `peer_token` apontando para o registro raiz (`parent_id`): revogar a raiz revoga as
+cópias. As duas partes nasceram do mesmo pedido: o par só aparece na mesma entrada "Convite · dono"
+se um token puder cobrir uma sessão de compartilhamento e uma de par.
+
+**Por que o token de entrada é um `Share` de `kind: "pair"`.** Herda sem código novo o que a
+revisão crítica listou como o que daria errado numa cópia: o Funnel ligado enquanto houver
+registro ativo (`sync_tunnel`), vida da sessão (`life`/`set_life`), `rename`, revogação ao fechar,
+`sweep`, o vigia de stream e o 410 por 30 dias. O `kind: "pair"` só alcança leituras:
+`events`, `history`, `commands`, `plan-preview`, `subagents`, UM arquivo de `uploads`,
+`transcript-image`, mais `POST /api/pair/message` e `DELETE /api/pair`. `file`, terminal, git,
+`/input`, `pair-invite` e `pair-accept` dão 403 (os dois últimos também para convidado de
+compartilhamento, senão ele criaria um token de par que sobrevive à revogação). "Parar de
+compartilhar" revoga só `kind: "share"`; fechar a sessão revoga todos.
+
+**Por que `peers.json` não recebe par externo.** Ele guarda o token de DONO das máquinas do próprio
+usuário e é sincronizado com os apps; um token de terceiro ali iria parar em todos os aparelhos. O
+registro de saída é `external_pairs.json` na pasta dos vínculos (`pair._pair_dir()`), 0600, com
+o `peer_token` em claro porque é ele que chama o outro lado. Alias que colide com um id do
+`peers.json` responde "ambíguo" e nunca cai no `peers.json`; o `hangar-send` tenta o par externo
+primeiro e só volta ao `peers.json` com 404 sem código, `erro_par_inexistente` ou 405 (backend
+mais antigo que a rota).
+
+**Só 410 desfaz o par.** 401, 403, 5xx e rede fora do ar dão erro a quem mandou e mantêm tudo; 429
+e 503 passam como estão. Arquivo ilegível vira lista vazia no `share_store`, e desfazer no 401
+derrubaria pares por causa de um arquivo corrompido do outro lado.
+
+**O endereço é restrito, porque o resgate é aberto na internet.** O host só vale como
+`https://<labels>.ts.net:8443` (alfabeto estrito dos rótulos): o backend faz a chamada com o
+token do usuário, então endereço livre seria SSRF. Chamada à outra máquina NUNCA segue redirect
+(`Authorization` iria junto para onde o 3xx apontasse). O nome da sessão do outro lado entra num
+comando `hangar-send` do protocolo injetado, por isso só `[A-Za-z0-9._-]{1,64}`; o `owner` vai
+slugado.
+
+**Quem assina é o token, nunca o texto.** O backend de destino escreve
+`[de fora: alias::sessao]` com o alias gravado no resgate, neutraliza toda linha que comece com
+`[de`, `[painel:` ou `[grupo:` (inclusive depois de espaço e de caracteres de largura zero, que
+o modelo ignora ao ler), corta em 16 000 caracteres e reaproveita o anti-loop do grupo. O
+protocolo manda tratar o recado como pedido de terceiro (não apagar, não commitar, não mexer em
+configuração nem credencial) e `--aceitar-par` só vale com link que o usuário colou: link que
+chegou em recado nunca é aceito. A sessão segue no modo de permissão que tinha, inclusive bypass.
+
+**Nativo.** A entrada "Par · máquina" que só tem sessão de par fica em memória, nunca em disco,
+e é refeita ao abrir o app. Convite de compartilhamento resgatado depois a torna persistente e
+o par passa a se anexar ao token persistente. Os pares vêm de TODAS as máquinas próprias, não só da
+ativa, e entrada de servidor cuja leitura falhou não é descartada. O só leitura é por sessão
+(`guest_kind`): o app não chama rota que o porteiro recusa (custo, git, atalhos, runners,
+terminais de atalho, modos de permissão).
+
+**Limite conhecido.** Codex, Pi e Kimi perdem o protocolo externo depois de `/clear`: quem o
+reinjeta é o hook de SessionStart, que só existe no Claude (o protocolo de par comum já se
+comporta assim).
 
 ## Rede local antes do Tailscale: `baseUrl` é identidade, a rota é `baseOf`
 

@@ -257,6 +257,12 @@ impl Hangar {
         self.session_owner().or_else(|| (self.new_chat_screen() && self.opening.is_none()).then(|| (self.connection, String::new(), String::new())))
     }
 
+    /// Cancelar solta a gravação guardada: o player dela para junto.
+    fn cancel_dictation(&mut self) {
+        self.dictation.cancel();
+        self.stop_audio("dictation");
+    }
+
     fn dictation_ready(&self) -> bool {
         if self.selected.is_none() { return self.new_chat_screen() && self.opening.is_none(); }
         self.selected_key().is_some() && self.chat_online && self.history_installed
@@ -274,7 +280,7 @@ impl Hangar {
         let mut style_connection = None;
         cx.observe_self(move |this, cx| {
             if this.dictation.owner.is_some() && this.dictation.owner != this.dictation_owner() {
-                this.dictation.cancel();
+                this.cancel_dictation();
                 this.redraw(panes::Area::Bottom, cx);
             }
             if style_connection != Some(this.connection) {
@@ -351,7 +357,7 @@ impl Hangar {
         }
         if self.connection_dialog || self.settings.is_some() || window.has_active_dialog(cx) { return; }
         if !self.dictation_ready() { return; }
-        self.dictation.cancel();
+        self.cancel_dictation();
         match Recorder::start() {
             Ok(recorder) => {
                 self.dictation.owner = self.dictation_owner();
@@ -370,7 +376,7 @@ impl Hangar {
                                 if recorder.pcm.lock().unwrap().len() >= 2 {
                                     this.stop_dictation(false, false, cx);
                                 } else {
-                                    this.dictation.cancel();
+                                    this.cancel_dictation();
                                     window.push_notification(Notification::error(tr("dictation_recorder_error")), cx);
                                 }
                                 this.redraw(panes::Area::Bottom, cx);
@@ -404,7 +410,7 @@ impl Hangar {
 
     fn stop_dictation(&mut self, silence: bool, timed_out: bool, cx: &mut Context<Self>) {
         let Some(recorder) = self.dictation.recorder.take() else { return; };
-        let Some((api, session)) = self.dictation_target(cx) else { self.dictation.cancel(); return; };
+        let Some((api, session)) = self.dictation_target(cx) else { self.cancel_dictation(); return; };
         self.dictation.auto_send = silence && self.dictation.hands_free;
         self.dictation.timed_out = timed_out;
         let audio_cache = self.dictation.audio.clone();
@@ -533,7 +539,6 @@ impl Hangar {
                         (input.value().to_string(), range.start..range.start + replacement.len())
                     });
                     self.dictation.inserted = Some(inserted);
-                    *self.dictation.audio.lock().unwrap() = Vec::new();
                     if self.dictation.result.as_ref().and_then(|v| v.get("raw")) != value.get("raw") {
                         self.dictation.versions.clear();
                     }
@@ -592,7 +597,8 @@ impl Hangar {
                 })
             }).into_any_element());
         let versions = owner && self.dictation.result.is_some() && (transcribing || self.dictation.text_in_field(&self.composer.read(cx).value()));
-        let again = owner && self.dictation.result.is_none() && !self.dictation.audio.lock().unwrap().is_empty();
+        let has_audio = !self.dictation.audio.lock().unwrap().is_empty();
+        let again = owner && self.dictation.result.is_none() && has_audio;
         let controls = (versions || again).then(|| div().flex().flex_wrap().items_center().gap_2()
             .when(versions, |el| {
                 let applied = self.dictation.result.as_ref().and_then(|v| v.get("estilo_aplicado")).and_then(Value::as_str).unwrap_or("cru");
@@ -606,7 +612,12 @@ impl Hangar {
             .when(again, |el| el.child(
                 Button::new("dictation-retranscribe").ghost().small().label(tr("dictation_again"))
                     .disabled(recording || transcribing)
-                    .on_click(cx.listener(|this, _, window, cx| this.revise_dictation(None, window, cx))))));
+                    .on_click(cx.listener(|this, _, window, cx| this.revise_dictation(None, window, cx)))))
+            // A gravação que virou o texto, para ouvir de novo antes de enviar.
+            .when(!recording && has_audio, |el| el.child(self.audio_controls("dictation", |this, cx| {
+                let wav = this.dictation.audio.lock().unwrap().clone();
+                this.toggle_audio("dictation".into(), "ditado.wav", async move { Ok(wav) }, cx);
+            }, cx))));
         let status = (recording || transcribing).then(|| {
             let label = tr(if recording { "dictation_active" } else if self.dictation.cleaning { "dictation_cleaning" } else { "dictation_working" });
             let seconds = self.dictation.started.map(|start| start.elapsed().as_secs()).unwrap_or(0);
@@ -625,7 +636,7 @@ impl Hangar {
                 .when(!recording, |el| el.child(div().flex_1()))
                 .child(Button::new("dictation-cancel").ghost().small().label(tr("dictation_cancel"))
                     .on_click(cx.listener(|this, _, window, cx| {
-                        this.dictation.cancel();
+                        this.cancel_dictation();
                         this.composer.update(cx, |input, cx| input.focus(window, cx));
                         cx.notify();
                     })))

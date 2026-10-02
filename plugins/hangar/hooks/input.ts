@@ -1,4 +1,5 @@
 import type { EngineInterface, On } from "claude-code";
+import { type Bridge, clearBridge, instance, lastState, setBridge } from "./bridge";
 
 // A largada divide o `session.start` com o state.ts por MATCHER — dois hooks no
 // mesmo evento sem matcher o engine recusa. O filtro não é enfeite: sem prompt
@@ -7,15 +8,15 @@ const REARM_MS = 50;
 // Sem o long-poll a espera cairia num `$.clock.sleep`, o único `$` que CONSOME
 // o orçamento de 10 s do hook; a chamada HTTP em voo não consome nada.
 const BACKOFF_MS = 2000;
-
-type Ponte = { url: string; token: string; sessao: string };
+const BACKOFF_DONO_MS = 30000;
 
 /** Entrada sem `tmux send-keys` digitando: o backend segura a resposta até ter
  *  texto na fila e diz COMO entregar.
  *
  *  `fill` põe o rascunho no composer e o Hangar manda só o Enter — a mensagem
  *  chega como a fala do usuário. `submit` entrega inteiro por `$.prompt.submit`,
- *  sem tecla nenhuma, ao custo da moldura de "prompt de plugin". */
+ *  sem tecla nenhuma, ao custo da moldura de "prompt de plugin". `user` é o
+ *  `submit` com `asUser`: sem tecla e sem moldura, só com a sessão parada. */
 export function registerInput(on: On) {
   on("session.start", { isInteractive: true }, async ($, e, next) => {
     const url = await $.env.get("HANGAR_PLUGIN_URL");
@@ -24,20 +25,69 @@ export function registerInput(on: On) {
     // chave da fila lá, e não o uuid do transcript.
     const sessao = await $.env.get("CP_SESSION_NAME");
     if (url && token && sessao) {
+      // Otimista: o dono não pode ficar mudo até o 1º long-poll voltar; o 409 do 2º processo é imediato.
+      setBridge({ url, token, sessao });
       $.clock.after(REARM_MS, () => void pull($, { url, token, sessao }));
+    } else {
+      $.clock.after(REARM_MS, () => void discover($));
     }
     return next(e);
   });
 }
 
-async function pull($: EngineInterface, ponte: Ponte) {
+// `{sessao: null}` nem sempre é definitivo: o marcador do state hook ou o vínculo da conversa podem
+// chegar depois da largada. Tenta de novo poucas vezes e para.
+const DISCOVER_RETRY_MS = [2000, 10000, 30000];
+
+async function discover($: EngineInterface, attempt = 0) {
+  try {
+    // USERPROFILE antes: no Git Bash do Windows o HOME vem como /c/Users/...
+    const home = (await $.env.get("USERPROFILE")) ?? (await $.env.get("HOME"));
+    if (!home) return;
+    const { url, chave } = JSON.parse(await $.fs.read(`${home}/.hangar/plugin.json`)) as { url: string; chave: string };
+    const r = await $.http.fetch(`${url}/whoami`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        chave,
+        pane: await $.env.get("TMUX_PANE"),
+        nome: await $.env.get("CP_SESSION_NAME"),
+        tmux: await $.env.get("TMUX"),
+        session_id: await $.session.id(),
+      }),
+    });
+    if (r.status !== 200) return;
+    const { sessao, token } = JSON.parse(r.text) as { sessao: string | null; token?: string };
+    if (!sessao || !token) {
+      const wait = DISCOVER_RETRY_MS[attempt];
+      if (sessao === null && wait !== undefined) $.clock.after(wait, () => void discover($, attempt + 1));
+      return;
+    }
+    // Otimista pelo mesmo motivo do `session.start`.
+    setBridge({ url, token, sessao });
+    void pull($, { url, token, sessao });
+  } catch {
+    // Sem arquivo, backend fora ou resposta estranha: o plugin fica parado e o tmux segue.
+  }
+}
+
+async function pull($: EngineInterface, ponte: Bridge) {
   let espera = REARM_MS;
   try {
     const r = await $.http.fetch(`${ponte.url}/pull`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ sessao: ponte.sessao, token: ponte.token }),
+      // A conversa vai a cada poll: o `/clear` troca o id sem `session.start`, e o backend só
+      // entrega à conversa que ele acompanha (um segundo `claude` no mesmo pane recebe 409).
+      body: JSON.stringify({
+        sessao: ponte.sessao, token: ponte.token, instance: instance(), modos: ["fill", "user"], estado: lastState(),
+        session_id: await $.session.id(),
+      }),
     });
+    // 409 cala os outros hooks; depois dele a ponte só volta com um `/pull` aceito. Erro de rede
+    // ou outro status não tira a ponte de quem já é dono, nem a devolve a quem a perdeu.
+    if (r.status === 409) clearBridge();
+    else if (r.status === 200) setBridge(ponte);
     if (r.status === 200) {
       const { text, modo } = JSON.parse(r.text) as { text?: string | null; modo?: string };
       if (text && modo === "fill") {
@@ -54,13 +104,26 @@ async function pull($: EngineInterface, ponte: Ponte) {
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ sessao: ponte.sessao, token: ponte.token, ok: isFilled }),
         });
+      } else if (text && modo === "user") {
+        let ok = false;
+        try {
+          await $.prompt.submit({ text, asUser: true });
+          ok = true;
+        } catch (err) {
+          $.ui.log(`hangar: prompt.submit falhou: ${String(err)}`, { to: "debug" });
+        }
+        await $.http.fetch(`${ponte.url}/submitted`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ sessao: ponte.sessao, token: ponte.token, ok }),
+        });
       } else if (text) {
         await $.prompt.submit({ text });
       }
     } else {
       // 403 é token de outra vida da sessão: insistir de 50 ms bateria no
-      // backend para sempre.
-      espera = BACKOFF_MS;
+      // backend para sempre. 409 é outra instância dona da sessão: espera mais.
+      espera = r.status === 409 ? BACKOFF_DONO_MS : BACKOFF_MS;
     }
   } catch {
     espera = BACKOFF_MS;

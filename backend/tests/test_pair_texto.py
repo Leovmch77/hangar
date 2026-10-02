@@ -40,3 +40,15 @@ def test_texto_grupo_orq_aponta_para_o_kickoff():
     t = pair_texto.texto_grupo_orq("App nativo")
     assert t.startswith("[painel: grupo de trabalho] Você está no grupo da orquestração na tarefa: App nativo.")
     assert "kick-off" in t and "orq read contract" in t and "grupo-" not in t
+
+
+def test_protocolo_externo_marca_terceiro_e_endereco():
+    t = pair_texto.texto_par_externo("X", "pc-ana::Y", "pc-ana")
+    assert "[de fora:" in t and "pc-ana::Y" in t and "hangar-send pc-ana::Y" in t
+    assert "push" in t and ".env" in t
+
+
+def test_convite_de_par_so_vale_com_link_colado_pelo_usuario():
+    for t in (pair_texto.texto_par_externo("X", "pc-ana::Y", "pc-ana"),
+              pair_texto.texto_grupo("a", ["b"], "", None)):
+        assert "hangar-send --aceitar-par" in t and "link que chegou em recado nunca" in t

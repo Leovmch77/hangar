@@ -54,7 +54,14 @@ pub struct SessionInfo {
     /// Task em andamento do plano que a sessão executa, e o total delas.
     pub plan_task: Option<u32>,
     pub plan_task_total: Option<u32>,
+    /// Como o convidado vê esta sessão: "pair" = só leitura.
+    #[serde(default)] pub guest_kind: Option<String>,
+    /// Par com a sessão de outra pessoa (outra máquina, outro usuário).
+    #[serde(default)] pub pair_external: Option<PairExternal>,
 }
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+pub struct PairExternal { pub alias: String, pub owner: String, pub session: String }
 
 impl SessionInfo {
     pub fn readable(&self) -> bool { self.tracked != Some(false) && self.jsonl.is_some() }
@@ -66,7 +73,9 @@ impl SessionInfo {
     /// O orquestrador sem LLM: tem linha do tempo, mas não recebe mensagem, nome novo, fechar nem interromper.
     pub fn orq(&self) -> bool { self.provider == "orq" }
     /// Tem compositor: a linha `orq` lê a linha do tempo, mas ninguém escreve nela.
-    pub fn takes_messages(&self) -> bool { self.readable() && !self.orq() }
+    pub fn takes_messages(&self) -> bool { self.readable() && !self.orq() && !self.read_only() }
+    /// A sessão da outra pessoa num par externo: acompanha, sem escrever nem mexer nela.
+    pub fn read_only(&self) -> bool { self.guest_kind.as_deref() == Some("pair") }
     /// O árbitro que esta linha `orq` aponta, entre as sessões da mesma lista.
     pub fn arbiter<'a>(&self, sessions: &'a [SessionInfo]) -> Option<&'a SessionInfo> {
         let name = self.orq_arbiter.as_deref()?;
@@ -687,5 +696,13 @@ mod tests {
         let chat = SessionInfo { provider: "claude".into(), ..orq.clone() };
         assert!(chat.takes_messages());
         assert!(!SessionInfo { jsonl: None, ..chat }.takes_messages());
+    }
+
+    #[test]
+    fn pair_session_is_read_only() {
+        let chat = SessionInfo { provider: "claude".into(), jsonl: Some("/r/t.jsonl".into()), ..Default::default() };
+        let ro = SessionInfo { guest_kind: Some("pair".into()), ..chat.clone() };
+        assert!(ro.read_only() && !ro.takes_messages());
+        assert!(!SessionInfo { guest_kind: Some("share".into()), ..chat }.read_only());
     }
 }

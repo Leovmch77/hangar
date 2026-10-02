@@ -340,7 +340,7 @@ impl Hangar {
 
     // Custo do Codex: só com o painel visível e a sessão aberta; troca de sessão cancela a leitura em curso.
     fn sync_cost(&mut self, visible: bool) {
-        let want = self.selected_key().filter(|_| visible && self.provider().0 == "codex" && self.chat_online);
+        let want = self.selected_key().filter(|_| visible && self.provider().0 == "codex" && self.chat_online && !self.open_read_only());
         if self.side.cost_task.as_ref().map(|(key, _)| key) == want.as_ref() { return; }
         self.side.stop_cost();
         let (Some(key), Some(api)) = (want, self.session_api()) else { return; };
@@ -358,6 +358,7 @@ impl Hangar {
     }
 
     pub(super) fn load_files(&mut self, cx: &mut Context<Self>) {
+        if self.open_read_only() { return; }
         let (Some(api), Some(key)) = (self.session_api(), self.selected_key()) else { return; };
         self.side.files = Some((key.clone(), None));
         self.side.diff = None;
@@ -371,6 +372,7 @@ impl Hangar {
 
     /// Atalhos do projeto da sessão aberta: lidos ao escolher a sessão e ao abrir a página Atalhos.
     pub(super) fn load_project_shortcuts(&mut self) {
+        if self.open_read_only() { return; }
         let (Some(api), Some(key)) = (self.session_api(), self.selected_key()) else { return; };
         let project = &mut self.side.project;
         if project.owner.as_ref() != Some(&key) { project.reset(); project.owner = Some(key.clone()); }
@@ -384,6 +386,7 @@ impl Hangar {
 
     // POST só de leitura: o backend confere que o caminho está na lista de alterados.
     fn open_diff(&mut self, path: String, cx: &mut Context<Self>) {
+        if self.open_read_only() { return; }
         let (Some(api), Some(key)) = (self.session_api(), self.selected_key()) else { return; };
         if self.side.diff.as_ref().is_some_and(|(owner, current, _)| owner == &key && current == &path) { self.side.diff = None; cx.notify(); return; }
         self.side.diff = Some((key.clone(), path.clone(), None));
@@ -1000,7 +1003,9 @@ impl Hangar {
                 .when_some(self.loop_text(), |el, text| el.child(div().truncate().text_xs().text_color(theme::accent()).child(text))));
         }
         if readable {
-            let motive = self.chat.state.recarregar_motivo.clone().filter(|_| self.provider().1 && self.provider().0 == "claude");
+            // Na sessão da outra pessoa só se lê: recarregar, arquivos e atalhos são recusados pelo servidor dela.
+            let read_only = session.read_only();
+            let motive = self.chat.state.recarregar_motivo.clone().filter(|_| !read_only && self.provider().1 && self.provider().0 == "claude");
             let mut notices = Vec::new();
             if let Some(motive) = motive {
                 let reloading = self.selected_key().is_some_and(|key| self.side.reloading.contains(&key));
@@ -1013,8 +1018,8 @@ impl Hangar {
             notices.extend(self.render_ctx_warning(status.as_ref(), cx));
             content = content.child(section(self.render_context(status.as_ref(), width, cx)))
                 .when(!notices.is_empty(), |el| el.child(div().px_4().py_3().border_b_1().border_color(theme::border()).flex().flex_col().gap_2().children(notices)));
-            if let Some(project) = self.render_project(status.as_ref(), cx) { content = content.child(section(project)); }
-            if let Some(actions) = self.render_shortcuts(readable, width, cx) { content = content.child(div().px(px(SIDE_PAD)).py(px(14.)).child(actions)); }
+            if !read_only && let Some(project) = self.render_project(status.as_ref(), cx) { content = content.child(section(project)); }
+            if !read_only && let Some(actions) = self.render_shortcuts(readable, width, cx) { content = content.child(div().px(px(SIDE_PAD)).py(px(14.)).child(actions)); }
         }
         let queued = if readable { self.queued_count() } else { 0 };
         let orq_body = if orq && tab == Some(SideTab::Context) { self.render_orq_panel(cx) } else { div().into_any_element() };

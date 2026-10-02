@@ -32,14 +32,18 @@ text-align:center;border:1px solid #888;background:transparent;color:inherit;tex
 
 
 # Campos da lista que citam OUTRAS sessões do dono (pareamento e encadeamento).
-_OTHER_SESSIONS = {"pair_peers": None, "pair_task": None, "pair_gid": None, "then_target": None}
+_OTHER_SESSIONS = {"pair_peers": None, "pair_external": None,"pair_task": None, "pair_gid": None, "then_target": None}
 
 
-def guest_safe(info):
-    """Cópia da linha da lista sem os nomes de outras sessões; aceita SessionInfo ou dict do SSE."""
+def guest_safe(info, guest=None):
+    """Cópia da linha da lista sem os nomes de outras sessões; aceita SessionInfo ou dict do SSE.
+
+    Com `guest`, a linha também diz de que tipo é o acesso a ela (`guest_kind`)."""
     if isinstance(info, dict):
-        return {**info, **_OTHER_SESSIONS}
-    return info.model_copy(update=_OTHER_SESSIONS)
+        extra = {} if guest is None else {"guest_kind": guest.kind_of(info.get("name"))}
+        return {**info, **_OTHER_SESSIONS, **extra}
+    extra = {} if guest is None else {"guest_kind": guest.kind_of(info.name)}
+    return info.model_copy(update=_OTHER_SESSIONS | extra)
 
 
 def _owner() -> str:
@@ -49,6 +53,8 @@ def _owner() -> str:
 class RedeemBody(BaseModel):
     code: str
     device: str = ""
+    # Token que o cliente já tem para esta máquina: a sessão nova entra nele.
+    token: str = ""
 
 
 def _local_host(request: Request) -> str | None:
@@ -100,7 +106,7 @@ def redeem(body: RedeemBody, request: Request):
         raise HTTPException(503, detail=erro("erro_sessao_indisponivel",
                                              "a sessão compartilhada está indisponível por instantes"))
     try:
-        share, token = share_store.redeem(body.code, body.device)
+        share, token = share_store.redeem(body.code, body.device, token=body.token or None)
     except share_store.ShareError as e:
         code, msg = _REASONS[e.reason]
         raise HTTPException(404 if e.reason == "unknown" else 410,

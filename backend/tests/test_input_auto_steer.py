@@ -262,12 +262,19 @@ async def test_kimi_sem_promocao_mantem_recado(isolated, monkeypatch, promoted):
     assert not queue.load()[0].get("confirmed")
 
 
+def _relatar_envio(source: str) -> str:
+    """A função que imprime o resultado do envio: os recortes abaixo começam depois dela."""
+    inicio = source.index("relatar_envio() {")
+    return source[inicio:source.index("\n}\n", inicio) + 3]
+
+
 @pytest.mark.parametrize("steered,delivered,expected", [
     (True, True, "entregue agora"), (False, True, "não orientado"), (False, False, "na fila"),
 ])
 def test_cli_1a1_pede_steer_e_exibe_resultado(tmp_path, steered, delivered, expected):
     source = (Path(__file__).parents[2] / "scripts/hangar-send").read_text()
-    tail = source[source.index('msg="$*"'):]
+    # O `msg="$*"` com 4 espaços é o do envio normal; o mais indentado é o do par externo.
+    tail = source[source.index('\n    msg="$*"') + 1:]
     # O recorte começa dentro do ramo do envio normal (o outro é o aviso de painel) e leva o `fi` dele.
     program = '''set -e
 sender=origem
@@ -275,7 +282,7 @@ target=dest
 sess=dest
 set -- "recado"
 api() { printf '%s' "$3" > "$BODY_FILE"; printf '%s' "$RESPONSE"; }
-if true; then
+''' + _relatar_envio(source) + '''if true; then
 ''' + tail
     body_file = tmp_path / "body.json"
     result = subprocess.run(["bash", "-c", program], env={**os.environ,
@@ -294,7 +301,7 @@ def test_cli_claude_nativo_entrega_pelo_backend_sem_recusar(tmp_path):
 set -- destino recado
 api() { printf '%s\\n' "$1 $2" "$3" > "$BODY_FILE"; printf '%s' '{"ok": true, "delivered": true, "steered": true, "native": true}'; }
 me() { echo origem; }
-''' + tail
+''' + _relatar_envio(source) + tail
     body_file = tmp_path / "body.txt"
     result = subprocess.run(["bash", "-c", program], env={**os.environ, "BODY_FILE": str(body_file)},
                             capture_output=True, text=True)

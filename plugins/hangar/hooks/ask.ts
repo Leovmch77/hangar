@@ -1,6 +1,6 @@
 import type { EngineInterface, On } from "claude-code";
+import { type Bridge as Ponte, bridge } from "./bridge";
 
-type Ponte = { url: string; token: string; sessao: string };
 type DoApp = { answers?: Record<string, string> | null; deny?: string | null };
 
 /** Pergunta de múltipla escolha respondida pelo app SEM tecla no terminal.
@@ -11,11 +11,8 @@ type DoApp = { answers?: Record<string, string> | null; deny?: string | null };
  *  ar) sobra só o terminal, como antes. */
 export function registerAsk(on: On) {
   on("tool.call", { tool: "AskUserQuestion" }, async ($, e, next) => {
-    const url = await $.env.get("HANGAR_PLUGIN_URL");
-    const token = await $.env.get("HANGAR_PLUGIN_TOKEN");
-    const sessao = await $.env.get("CP_SESSION_NAME");
-    if (!url || !token || !sessao) return next(e);
-    const ponte: Ponte = { url, token, sessao };
+    const ponte = bridge();
+    if (!ponte) return next(e);
     const id = e.tool_use_id ?? "";
     const questions = e.questions;
 

@@ -32,7 +32,7 @@ def test_redeem_e_de_uso_unico():
     _, code = share_store.create("proj", "t:100", now=1000.0)
     s, token = share_store.redeem(code, "notebook do fulano", now=1001.0)
     assert s.device == "notebook do fulano" and s.redeemed_at == 1001.0
-    assert share_store.by_token(token).id == s.id
+    assert share_store.lookup_token(token).share_for("proj").id == s.id
     with pytest.raises(ShareError) as e:
         share_store.redeem(code, "outro", now=1002.0)
     assert e.value.reason == "used"
@@ -58,8 +58,9 @@ def test_revogar_derruba_token_mas_lookup_ainda_ve():
     _, token = share_store.redeem(code, "x", now=1001.0)
     assert share_store.revoke(s.id) is True
     assert share_store.revoke(s.id) is False
-    assert share_store.by_token(token) is None
-    assert share_store.lookup_token(token).revoked_at is not None
+    guest = share_store.lookup_token(token)
+    assert not guest.sees("proj")
+    assert guest.share_for("proj").revoked_at is not None
     with pytest.raises(ShareError) as e:
         share_store.peek(code, now=1002.0)
     assert e.value.reason == "revoked"
@@ -88,7 +89,7 @@ def test_sweep_revoga_sessao_que_mudou_de_vida():
     share_store.create("b", "t:2", now=1000.0)
     n = share_store.sweep(lambda session, life: session == "b", now=1002.0)
     assert n == 1
-    assert share_store.by_token(token) is None
+    assert not share_store.lookup_token(token).sees("a")
     assert share_store.active_sessions(now=1002.0) == {"b"}
 
 
@@ -102,13 +103,16 @@ def test_persistencia_entre_recargas():
     s, code = share_store.create("a", "t:1", now=1000.0)
     _, token = share_store.redeem(code, "x", now=1001.0)
     share_store._reset()
-    assert share_store.by_token(token).id == s.id
+    assert share_store.lookup_token(token).share_for("a").id == s.id
 
 
 def test_arquivo_corrompido_nao_derruba(tmp_path):
     (tmp_path / "shares.json").write_text("{nao e json")
     share_store._reset()
     assert share_store.has_active() is False
+    # Vai pro lado, senão o próximo save o apagaria.
+    share_store.create("a", "t:1")
+    assert [p.read_text() for p in tmp_path.glob("shares.json.bad-*")] == ["{nao e json"]
 
 
 def test_set_life():
@@ -198,3 +202,114 @@ def test_recently_ended_so_dentro_da_janela():
     revogado = share_store._load()[s.id].revoked_at
     assert share_store.recently_ended(120.0, now=revogado + 119) is True
     assert share_store.recently_ended(120.0, now=revogado + 121) is False
+
+
+def test_redeem_com_token_existente_reaproveita_o_token():
+    a, ca = share_store.create("proj-a", "t:1", now=1000.0)
+    b, cb = share_store.create("proj-b", "t:2", now=1000.0)
+    _, tok = share_store.redeem(ca, "Pixel", now=1001.0)
+    _, tok2 = share_store.redeem(cb, "Pixel", now=1002.0, token=tok)
+    assert tok2 == tok
+    guest = share_store.lookup_token(tok)
+    assert guest.sessions() == {"proj-a", "proj-b"}
+
+
+def test_redeem_com_token_revogado_gera_token_novo():
+    a, ca = share_store.create("proj-a", "t:1", now=1000.0)
+    b, cb = share_store.create("proj-b", "t:2", now=1000.0)
+    _, tok = share_store.redeem(ca, "Pixel", now=1001.0)
+    share_store.revoke(a.id)
+    _, tok2 = share_store.redeem(cb, "Pixel", now=1002.0, token=tok)
+    assert tok2 != tok
+    assert share_store.lookup_token(tok2).sessions() == {"proj-b"}
+
+
+def test_revogar_um_convite_mantem_a_outra_sessao_do_token():
+    a, ca = share_store.create("proj-a", "t:1", now=1000.0)
+    b, cb = share_store.create("proj-b", "t:2", now=1000.0)
+    _, tok = share_store.redeem(ca, "Pixel", now=1001.0)
+    share_store.redeem(cb, "Pixel", now=1002.0, token=tok)
+    share_store.revoke(a.id)
+    guest = share_store.lookup_token(tok)
+    assert guest.sessions() == {"proj-b"}
+    assert guest.share_for("proj-a").revoked_at is not None
+
+
+def test_mesma_sessao_convidada_duas_vezes_sobrevive_a_um_revoke():
+    a, ca = share_store.create("proj", "t:1", now=1000.0)
+    b, cb = share_store.create("proj", "t:1", now=1000.5)
+    _, tok = share_store.redeem(ca, "Pixel", now=1001.0)
+    share_store.redeem(cb, "Pixel", now=1002.0, token=tok)
+    share_store.revoke(a.id)
+    assert share_store.lookup_token(tok).sees("proj")
+
+
+def test_codigo_de_par_nao_resgata_como_convite_e_vice_versa():
+    _, cp = share_store.create("proj", "t:1", now=1000.0, kind="pair")
+    _, cs = share_store.create("proj", "t:1", now=1000.0)
+    with pytest.raises(ShareError) as e:
+        share_store.peek(cp, now=1001.0)
+    assert e.value.reason == "unknown"
+    with pytest.raises(ShareError):
+        share_store.peek(cs, now=1001.0, kind="pair")
+
+
+def test_attach_liga_as_sessoes_do_outro_token_e_revogar_o_pai_revoga_o_filho():
+    pai, tok_par = share_store.create_redeemed("proj-y", "t:9", kind="pair", now=1000.0)
+    _, c = share_store.create("proj-z", "t:3", now=1000.0)
+    _, tok = share_store.redeem(c, "Pixel", now=1001.0)
+    assert share_store.attach(tok, tok_par, now=1002.0) == 1
+    guest = share_store.lookup_token(tok)
+    assert guest.sessions() == {"proj-y", "proj-z"}
+    assert guest.kind_of("proj-y") == "pair" and guest.kind_of("proj-z") == "share"
+    assert guest.pair_share() is None  # filho ligado não fala pelo par
+    share_store.revoke(pai.id)
+    assert share_store.lookup_token(tok).sessions() == {"proj-z"}
+
+
+def test_attach_exige_os_dois_tokens_validos():
+    _, c = share_store.create("proj-z", "t:3", now=1000.0)
+    _, tok = share_store.redeem(c, "Pixel", now=1001.0)
+    assert share_store.attach(tok, "nao-existe", now=1002.0) == 0
+    assert share_store.attach("nao-existe", tok, now=1002.0) == 0
+
+
+def test_lista_do_dialogo_e_marca_compartilhada_ignoram_par():
+    share_store.create("proj", "t:1", now=1000.0, kind="pair")
+    assert share_store.list_for("proj", now=1001.0) == []
+    assert share_store.active_sessions(now=1001.0) == set()
+
+
+def test_attach_em_cadeia_aponta_para_a_raiz_e_revogar_a_raiz_derruba_tudo():
+    pai, tok_p = share_store.create_redeemed("proj-y", "t:9", kind="pair", now=1000.0)
+    _, c1 = share_store.create("proj-z", "t:3", now=1000.0)
+    _, tok_t = share_store.redeem(c1, "Pixel", now=1001.0)
+    _, c2 = share_store.create("proj-w", "t:4", now=1000.0)
+    _, tok_t2 = share_store.redeem(c2, "PC", now=1001.0)
+    assert share_store.attach(tok_t, tok_p, now=1002.0) == 1
+    assert share_store.attach(tok_t2, tok_t, now=1003.0) == 2
+    assert share_store.attach(tok_t2, tok_t, now=1004.0) == 0  # sem duplicar
+    copia = share_store.lookup_token(tok_t2).share_for("proj-y")
+    assert copia.parent_id == pai.id
+    share_store.revoke(pai.id)
+    assert share_store.lookup_token(tok_t2).sessions() == {"proj-w", "proj-z"}
+    assert share_store.lookup_token(tok_t).sessions() == {"proj-z"}
+
+
+def test_revoke_session_filtra_por_tipo():
+    share_store.create("a", "t:1", now=1000.0)
+    par, token = share_store.create_redeemed("a", "t:1", kind="pair", now=1000.0)
+    assert share_store.revoke_session("a", kind="share") == 1
+    assert share_store.lookup_token(token).share_for("a").revoked_at is None
+    assert share_store.revoke_session("a") == 1
+    assert share_store.lookup_token(token).share_for("a").revoked_at is not None
+
+
+def test_sessao_compartilhada_e_pareada_no_mesmo_token_resolve_para_o_convite():
+    _, c = share_store.create("proj", "t:1", now=1000.0)
+    _, tok = share_store.redeem(c, "Pixel", now=1001.0)
+    _, tok_par = share_store.create_redeemed("proj", "t:1", kind="pair", now=1002.0)
+    assert share_store.attach(tok, tok_par, now=1003.0) == 1
+    guest = share_store.lookup_token(tok)
+    # A cópia do par é mais nova, mas o convite de verdade vence.
+    assert guest.kind_of("proj") == "share"

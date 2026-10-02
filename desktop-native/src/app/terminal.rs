@@ -213,13 +213,13 @@ pub(super) fn hangar_failure(error: &Failure) -> String {
 
 /// O botão de terminal do cabeçalho: sessão sem pane só tem terminal quando um atalho abriu um; o orquestrador não tem nenhum.
 pub(super) fn terminal_offered(session: &SessionInfo, shortcut_terms: bool) -> bool {
-    !session.orq() && (!session.headless || shortcut_terms)
+    !session.orq() && !session.read_only() && (!session.headless || shortcut_terms)
 }
 
 impl Hangar {
     pub(super) fn toggle_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.terminal.is_some() { self.close_terminal(true, window, cx); return; }
-        if self.selected.as_ref().is_some_and(SessionInfo::orq) { return; }
+        if self.selected.as_ref().is_some_and(|s| s.orq() || s.read_only()) { return; }
         let Some((session, headless)) = self.selected.as_ref().map(|s| (s.name.clone(), s.headless)) else { return; };
         self.terminal_serial += 1;
         self.terminal = Some(Panel::new(self.terminal_serial, session.clone(), self.open_server(), headless, cx));
@@ -327,6 +327,7 @@ impl Hangar {
 
     /// Terminais de atalho da sessão `name`, lidos do backend. A resposta atualiza a lista e as abas do painel.
     pub(super) fn refresh_shortcut_terms(&mut self, name: &str) {
+        if self.open_read_only() { return; }
         let Some(api) = self.session_api() else { return; };
         let (connection, tx, name) = (self.connection, self.tx.clone(), name.to_owned());
         self.runtime.spawn(async move {
@@ -340,6 +341,7 @@ impl Hangar {
         let now = std::time::Instant::now();
         if self.side.shortcut_recheck.get(name).is_some_and(|at| now.duration_since(*at) < std::time::Duration::from_secs(5)) { return; }
         self.side.shortcut_recheck.insert(name.to_owned(), now);
+        if self.open_read_only() { return; }
         let Some(api) = self.session_api() else { return; };
         let (connection, tx, name) = (self.connection, self.tx.clone(), name.to_owned());
         self.runtime.spawn(async move {
@@ -872,6 +874,8 @@ mod tests {
         assert!(!terminal_offered(&orq, false) && !terminal_offered(&orq, true), "nem com terminal de atalho");
         let pane = SessionInfo { provider: "claude".into(), ..Default::default() };
         assert!(terminal_offered(&pane, false));
+        let paired = SessionInfo { guest_kind: Some("pair".into()), ..pane.clone() };
+        assert!(!terminal_offered(&paired, true), "a sessão da outra pessoa não tem terminal");
         let headless = SessionInfo { headless: true, ..pane };
         assert!(!terminal_offered(&headless, false) && terminal_offered(&headless, true));
     }

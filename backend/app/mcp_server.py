@@ -23,7 +23,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
 
 from app import auth as auth_mod
-from app import navshell, peers, quem_chama
+from app import external_pairs, navshell, peers, quem_chama
 from app.config import settings
 
 mcp = MCPServer("hangar")
@@ -118,6 +118,19 @@ async def send(ctx: Context, alvo: str, texto: str, tmux: bool = False) -> dict[
     servidor = rf"(?:{re.escape(settings.server_id)}::)?" if settings.server_id else ""
     texto = re.sub(rf"^\s*\[de:\s*{servidor}{re.escape(eu)}\]\s*", "", texto)
     if peers.is_remote(alvo):
+        if external_pairs.ambiguous(peers.split_addr(alvo)[0]):
+            raise ToolError(f"'{alvo}': o nome é ao mesmo tempo uma máquina tua e um par externo; "
+                            "renomeie a máquina no peers.json")
+        rec = external_pairs.by_address(alvo)
+        if rec is not None:
+            from app import external_pair_api
+            if rec.local_session != eu:
+                raise ToolError(f"'{alvo}' é par externo de '{rec.local_session}', não desta sessão")
+            try:
+                resp = await external_pair_api.send_external(rec, texto)
+            except HTTPException as e:
+                raise ToolError(_detalhe(e)) from e
+            return {"alvo": alvo, **resp}
         srv, sess = peers.split_addr(alvo)
         if not settings.server_id:
             raise ToolError("CP_SERVER_ID ausente no backend/.env — obrigatório pra envio cross-server")

@@ -44,9 +44,12 @@ class PeerError(Exception):
     e sido processada no peer, só a resposta se perdeu; o estado remoto fica INCERTO (o caller
     compensa). transport=False: o peer respondeu !2xx (rejeitou limpo, não comitou)."""
 
-    def __init__(self, msg: str, transport: bool = False):
+    def __init__(self, msg: str, transport: bool = False, status: int | None = None, detail=None):
         super().__init__(msg)
         self.transport = transport
+        self.status = status
+        # `detail` do corpo da resposta (dict do envelope ou string), sem o prefixo da mensagem.
+        self.detail = detail
 
 
 def is_remote(name: str) -> bool:
@@ -386,38 +389,84 @@ def peer_cfg(server_id: str) -> tuple[str, str] | None:
     return p["base_url"].rstrip("/"), p["token"]
 
 
+class _SemRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None   # o urllib repassaria o Authorization ao destino do 3xx
+
+
+_opener_sem_redirect = urllib.request.build_opener(_SemRedirect)
+
+
 @diag.rastrear("peer.chamar")
 def call(server_id: str, method: str, path: str, body: dict | None = None, timeout: int = 8):
     """POST/DELETE num backend peer. Devolve (status, json|None). Levanta PeerError em qualquer
     falha (peer desconhecido, inacessível, ou !2xx) com o detail real do backend remoto — sem isto,
     quem chama (o iniciador) não teria como reportar por que o pareamento não fechou."""
-    inicio = time.monotonic()
-    etapa = method if method in {"GET", "POST", "PUT", "PATCH", "DELETE"} else "outro"
     cfg = peer_cfg(server_id)
     if not cfg:
+        etapa = method if method in {"GET", "POST", "PUT", "PATCH", "DELETE"} else "outro"
         diag.registrar("peer.recusado", "erro", etapa=etapa, detalhe="configuracao_ausente_ou_incompleta")
         raise PeerError(f"servidor '{server_id}' não está em peers.json (ou sem base_url/token)")
     base, token = cfg
+    return call_url(base, token, method, path, body, timeout, label=server_id, follow_redirects=True)
+
+
+_MAX_CORPO = 1 << 20
+
+
+def _ler_corpo(r, prazo: float, truncar: bool = False) -> bytes:
+    """Lê até 1 MiB dentro do prazo TOTAL: o timeout do socket só vale por leitura, e um servidor
+    que pinga um byte por vez seguraria a thread pra sempre."""
+    partes, total = [], 0
+    while True:
+        if time.monotonic() > prazo:
+            raise TimeoutError("prazo total da chamada estourou")
+        parte = r.read1(65536)
+        if not parte:
+            return b"".join(partes)
+        total += len(parte)
+        if total > _MAX_CORPO:
+            if truncar:
+                return b"".join(partes + [parte])[:_MAX_CORPO]
+            raise PeerError("resposta maior que 1 MiB", transport=True)
+        partes.append(parte)
+
+
+def call_url(base: str, token: str | None, method: str, path: str, body: dict | None = None,
+             timeout: int = 8, label: str = "", follow_redirects: bool = False):
+    """Chamada HTTP a um backend por endereço. Sem `token`, não manda Authorization. Endereço que
+    outra pessoa entregou não segue redirect (o 3xx vira PeerError com `status`)."""
+    inicio = time.monotonic()
+    etapa = method if method in {"GET", "POST", "PUT", "PATCH", "DELETE"} else "outro"
+    label = label or base
     data = json.dumps(body).encode() if body is not None else None
-    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    headers = {"Content-Type": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
     if correlation := diag.req_atual.get():
         headers["X-Hangar-Req"] = correlation
     req = urllib.request.Request(base + path, data=data, method=method, headers=headers)
+    prazo = inicio + timeout * 2
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        abrir = urllib.request.urlopen if follow_redirects else _opener_sem_redirect.open
+        with abrir(req, timeout=timeout) as r:
             status = r.status
-            raw = r.read().decode()
+            raw = _ler_corpo(r, prazo).decode(errors="replace")
     except urllib.error.HTTPError as e:
         diag.registrar("peer.falhou", "erro", etapa=etapa, codigo=str(e.code),
                        detalhe="http_recusado", erro_tipo=type(e).__name__,
                        ms=int((time.monotonic() - inicio) * 1000))
         # Peer respondeu !2xx — rejeitou de forma limpa, NÃO comitou. transport=False.
-        raw = e.read().decode(errors="replace")
+        try:
+            raw = _ler_corpo(e, prazo, truncar=True).decode(errors="replace")
+        except (OSError, TimeoutError):
+            raw = ""
         try:
             detail = json.loads(raw).get("detail", raw)
-        except (json.JSONDecodeError, ValueError, AttributeError):
+        except (ValueError, RecursionError, AttributeError):
             detail = raw
-        raise PeerError(f"{server_id} respondeu HTTP {e.code}: {detail}", transport=False)
+        raise PeerError(f"{label} respondeu HTTP {e.code}: {detail}", transport=False, status=e.code,
+                        detail=detail)
     except (urllib.error.URLError, http.client.IncompleteRead, OSError, TimeoutError) as e:
         causa = e.reason if isinstance(e, urllib.error.URLError) and isinstance(e.reason, BaseException) else e
         diag.registrar("peer.falhou", "erro", etapa=etapa, detalhe="transporte_resultado_incerto",
@@ -425,17 +474,17 @@ def call(server_id: str, method: str, path: str, body: dict | None = None, timeo
                        winerror=getattr(causa, "winerror", None),
                        ms=int((time.monotonic() - inicio) * 1000))
         # Falha de rede/leitura truncada — pode ter chegado no peer. Estado remoto INCERTO.
-        raise PeerError(f"{server_id} inacessível: {e}", transport=True)
+        raise PeerError(f"{label} inacessível: {e}", transport=True)
     try:
         resultado = json.loads(raw) if raw.strip() else None
-    except (json.JSONDecodeError, ValueError) as e:
+    except (ValueError, RecursionError, UnicodeError) as e:
         diag.registrar("peer.falhou", "erro", etapa=etapa, codigo=str(status),
                        detalhe="resposta_json_ilegivel", erro_tipo=type(e).__name__,
                        ms=int((time.monotonic() - inicio) * 1000))
         # 2xx com corpo ilegível (proxy retornando HTML em 200, leitura truncada): sem este catch a
         # exceção escapava crua, não virava PeerError, e o rollback do caller (que só pega PeerError)
         # NUNCA rodava — sidecar local comitava com estado remoto incerto. transport=True.
-        raise PeerError(f"{server_id} respondeu corpo ilegível: {e}", transport=True)
+        raise PeerError(f"{label} respondeu corpo ilegível: {e}", transport=True)
     diag.registrar("peer.respondeu", etapa=etapa, codigo=str(status),
                    ms=int((time.monotonic() - inicio) * 1000))
     return status, resultado

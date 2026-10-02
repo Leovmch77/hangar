@@ -17,15 +17,21 @@ ambiente do pane.
 import asyncio
 import hashlib
 import hmac
+import json
 import logging
+import os
+import re
 import secrets
 import shutil
 import subprocess
 import threading
 import time
+from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
+
+from app.auth import require_loopback
 
 _log = logging.getLogger("hangar.plugin_bridge")
 
@@ -39,6 +45,16 @@ _lock = threading.Lock()
 _waiters: dict[str, asyncio.Queue] = {}
 _loop: asyncio.AbstractEventLoop | None = None
 
+# Dono do long-poll por sessão: (instância, modos declarados, última batida). Um segundo `claude` com
+# o mesmo nome ou pane não pode tomar a fila do primeiro.
+_donos: dict[str, tuple[str, set[str], float]] = {}
+
+
+def declared_modes(name: str) -> set[str]:
+    with _lock:
+        dono = _donos.get(name)
+    return set(dono[1]) if dono else set()
+
 
 # Capacidade do CLI, não versão: o número seria um palpite sobre qual release ganhou a flag, e
 # quem derruba a sessão é a flag desconhecida — `claude --plugin-dir` inexistente sai com erro e o
@@ -46,6 +62,45 @@ _loop: asyncio.AbstractEventLoop | None = None
 # `--help` custa 0,20 s (medido) e responde direto; o cache evita pagar isso a cada sessão.
 _TTL_CAPACIDADE_S = 600.0
 _capacidade: tuple[float, bool] | None = None
+# Mods ligados por padrão no CLI daqui em diante; a variável do acesso antecipado é ignorada.
+MODS_BY_DEFAULT = (2, 1, 287)
+PLUGIN_SRC = Path(__file__).resolve().parents[2] / "plugins" / "hangar"
+_versao: tuple[float, tuple[int, ...] | None] | None = None
+
+
+def cli_version() -> tuple[int, ...] | None:
+    """`claude --version` como (2, 1, 287); None quando não dá para ler. Em cache, com prazo."""
+    global _versao
+    if _versao is not None and time.monotonic() - _versao[0] < _TTL_CAPACIDADE_S:
+        return _versao[1]
+    exe = shutil.which("claude")
+    versao = None
+    if exe:
+        try:
+            r = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=10,
+                               encoding="utf-8", errors="replace")
+            m = re.match(r"\s*(\d+)\.(\d+)\.(\d+)", r.stdout or "")
+            versao = tuple(int(x) for x in m.groups()) if m else None
+        except (OSError, subprocess.SubprocessError) as e:
+            _log.warning("plugin: `claude --version` falhou: %r", e)
+    _versao = (time.monotonic(), versao)
+    return versao
+
+
+def mods_by_default() -> bool:
+    versao = cli_version()
+    return versao is not None and versao >= MODS_BY_DEFAULT
+
+
+def plugin_in_skills_dir(config_dir: Path | None = None) -> bool:
+    """O plugin está na pasta de skills da conta da sessão (link ou cópia)? Lá o CLI o carrega
+    sozinho em toda sessão."""
+    base = config_dir or Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
+    manifesto = Path(base) / "skills" / "hangar" / ".claude-plugin" / "plugin.json"
+    try:
+        return json.loads(manifesto.read_text(encoding="utf-8")).get("name") == "hangar"
+    except (OSError, ValueError, AttributeError):
+        return False
 
 
 def aceita_plugin_dir() -> bool:
@@ -69,27 +124,37 @@ def aceita_plugin_dir() -> bool:
 
 
 def esquecer_capacidade() -> None:
-    """Descarta a sonda. Quem acabou de atualizar o CLI precisa disto."""
-    global _capacidade
+    """Descarta as sondas do CLI. Quem acabou de atualizar o `claude` precisa disto."""
+    global _capacidade, _versao
     _capacidade = None
+    _versao = None
+
+
+def _ligado_de_verdade() -> bool:
+    from app import runtime_config
+    if not runtime_config.get("claude_function_hooks"):
+        return False
+    return mods_by_default() or aceita_plugin_dir()
 
 
 def ligado() -> bool:
-    """Mesmo interruptor do `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS`: sem function hook
-    na sessão não há plugin para ouvir, e o caminho novo não existe.
+    """O caminho do plugin vale nas sessões Claude desta máquina?
 
-    Com o interruptor ligado ainda é preciso o CLI aceitar `--plugin-dir`; sem isso a sessão
-    sequer nasceria, e a promessa aqui é que o caminho novo degrade para o tmux, nunca quebre."""
-    from app import runtime_config
-    return bool(runtime_config.get("claude_function_hooks")) and aceita_plugin_dir()
+    `claude_function_hooks` é o liga/desliga (nasce ligado). Com ele ligado, vale no CLI com mods por
+    padrão (2.1.287+) ou no anterior que aceita `--plugin-dir` com a variável do acesso antecipado."""
+    return _ligado_de_verdade()
 
 
-def raizes_dos_plugins() -> list[str]:
-    """O plugin do caminho nativo, ou nada com o portão fechado."""
+def raizes_dos_plugins(config_dir: Path | None = None) -> list[str]:
+    """`--plugin-dir` só quando o plugin não está na pasta de skills da conta: lá ele já carrega.
+
+    A pasta de skills só foi medida carregando plugin no CLI com mods por padrão; no anterior,
+    `--plugin-dir` continua sendo o único caminho."""
     if not ligado():
         return []
-    from pathlib import Path
-    return [str(Path(__file__).resolve().parents[2] / "plugins" / "hangar")]
+    if plugin_in_skills_dir(config_dir) and mods_by_default():
+        return []
+    return [str(PLUGIN_SRC)]
 
 
 def env_da_sessao(name: str) -> dict[str, str]:
@@ -122,9 +187,87 @@ def mint(name: str) -> str:
     return hmac.new(segredo, f"plugin:{name}".encode(), hashlib.sha256).hexdigest()[:32]
 
 
+def machine_key() -> str:
+    """Chave desta máquina para o `/whoami`: derivada como o `mint`, e só abre aquela rota."""
+    from app.config import settings
+    segredo = (settings.auth_token or "hangar").encode()
+    return hmac.new(segredo, b"plugin:machine", hashlib.sha256).hexdigest()[:32]
+
+
+def machine_file(home: Path | None = None) -> Path:
+    return (home or Path.home()) / ".hangar" / "plugin.json"
+
+
+def _publish_address(home: Path | None = None) -> None:
+    """Onde o plugin acha a ponte: sessão aberta fora do Hangar não recebe `HANGAR_PLUGIN_*`."""
+    from app.config import settings
+    alvo = machine_file(home)
+    alvo.parent.mkdir(parents=True, exist_ok=True)
+    tmp = alvo.with_name(alvo.name + ".tmp")
+    tmp.write_text(json.dumps({"url": f"http://127.0.0.1:{settings.port}/api/plugin",
+                               "chave": machine_key()}), encoding="utf-8")
+    try:
+        tmp.chmod(0o600)
+    except OSError:
+        pass
+    tmp.replace(alvo)
+
+
+# O conftest troca `publish_address`; o teste chega na implementação por `_publish_address`.
+publish_address = _publish_address
+
+
+def _socket_do_tmux() -> str | None:
+    """Socket do servidor tmux do Hangar, ou None quando não dá para saber (aí não se compara)."""
+    # No psmux `#{socket_path}` nunca é igual ao caminho do `TMUX` (medido): a comparação lá
+    # recusaria toda sessão.
+    if os.name == "nt":
+        return None
+    from app import tmux
+    cp = tmux._run(["tmux", "list-sessions", "-F", "#{socket_path}"])
+    if cp.returncode != 0:
+        return None
+    caminho = next(iter((cp.stdout or "").splitlines()), "").strip()
+    return caminho if caminho and "#{" not in caminho else None
+
+
+def _sessao_do_tmux(tmux_env: str) -> str | None:
+    """`TMUX` é `socket,pid,id` no tmux: o id é o da sessão (`$N`), que dá o nome dela."""
+    partes = (tmux_env or "").split(",")
+    if len(partes) < 3 or not partes[2].strip():
+        return None
+    from app import tmux
+    cp = tmux._run(["tmux", "list-sessions", "-F", "#{session_id} #{session_name}"])
+    if cp.returncode != 0:
+        return None
+    alvo = "$" + partes[2].strip().lstrip("$")
+    for linha in (cp.stdout or "").splitlines():
+        sid, _, nome = linha.partition(" ")
+        if sid == alvo:
+            return nome
+    return None
+
+
+_PSMUX_PID = re.compile(r"psmux-(\d+)\b")
+
+
+def _sessao_do_psmux(pid: str) -> str | None:
+    """No psmux cada sessão tem servidor próprio, e o pid no `TMUX` é o dele (sobrevive ao rename)."""
+    from app import tmux
+    cp = tmux._run(["tmux", "list-sessions", "-F", "#{pid} #{session_name}"])
+    if cp.returncode != 0:
+        return None
+    for linha in (cp.stdout or "").splitlines():
+        spid, _, nome = linha.strip().partition(" ")
+        if spid == pid:
+            return nome
+    return None
+
+
 def esquecer(name: str) -> None:
     with _lock:
         _waiters.pop(name, None)
+        _donos.pop(name, None)
         _estados.pop(name, None)
         _perguntas.pop(name, None)
         _batidas.pop(name, None)
@@ -133,6 +276,8 @@ def esquecer(name: str) -> None:
         _confirmacoes.pop(name, None)
         _preenchido.pop(name, None)
     _eventos.pop(name, None)
+    for chave in [c for c in list(_recusas) if c[0] == name]:
+        _recusas.pop(chave, None)
 
 
 def _confere(name: str, token: str) -> None:
@@ -159,6 +304,62 @@ def aguardando(name: str) -> bool:
 #    Enter pelo tmux. A origem vira a do usuário, sem moldura, e o `send-keys`
 #    deixa de digitar o texto — a parte que hoje fatia, espera e às vezes corta.
 MODO_PADRAO = "fill"
+
+# `user`: `$.prompt.submit({text, asUser: true})` entra como fala da pessoa, sem tecla nenhuma. Só com
+# a sessão parada (no turno a promessa espera o fim), só se o plugin dono declarou o modo (plugin
+# velho trataria como `submit` com moldura) e só com texto que o modo não estraga: `@arquivo` não é
+# expandido, `!` é modo bash digitado e `/` é menu da TUI.
+_MENCAO = re.compile(r"(^|\s)@\S")
+PROVA_TRANSCRIPT_S = 10.0
+# Sem confirmação nem prova (transcript ilegível ou texto repetido): nem entregue, nem livre p/ tecla.
+INCERTO = "incerto"
+
+
+def choose_mode(name: str, text: str) -> str:
+    recente = estado_recente(name)
+    if (mods_by_default() and "user" in declared_modes(name) and recente is not None
+            and recente[0] == "idle" and not _MENCAO.search(text)
+            and not text.lstrip().startswith(("!", "/"))):
+        return "user"
+    return MODO_PADRAO
+
+
+def _linhas_do_usuario(jsonl: str | None) -> set[str] | None:
+    if not jsonl:
+        return None
+    from app import pqueue
+    return pqueue.committed_user_lines(jsonl)
+
+
+def _prova_user(aviso: threading.Event, texto: str, jsonl: str | None, antes: set[str] | None):
+    """Entrega `user`: vale o que vier primeiro, o aviso do plugin (que só chega depois dos hooks
+    do UserPromptSubmit) ou o texto no transcript. Devolve "aviso", True (transcript), False ou
+    `INCERTO`."""
+    alvo = texto.strip()
+    inicio = time.monotonic()
+    limite = inicio + CONFIRMA_S + PROVA_TRANSCRIPT_S
+    # A conferência é por conjunto: texto que já estava lá não prova esta entrega. Sem a foto de
+    # antes, o transcript só vale depois do prazo do aviso, como era.
+    repetido = antes is not None and alvo in antes
+    transcript_desde = inicio + (CONFIRMA_S if antes is None else 0.0)
+    lido: set[str] | None = None
+    while True:
+        agora = time.monotonic()
+        if not repetido and agora >= transcript_desde:
+            lido = _linhas_do_usuario(jsonl)
+            if lido is not None and alvo in lido:
+                return True
+        if aviso.wait(max(0.0, min(0.15, limite - agora))):
+            return "aviso"
+        if time.monotonic() >= limite:
+            # Repetido e legível também é incerto: o texto está lá, mas pode ser o de antes.
+            if repetido or lido is None:
+                return INCERTO
+            # O texto pode ter chegado durante a última espera: sem reler, seria digitado de novo.
+            lido = _linhas_do_usuario(jsonl)
+            if lido is None:
+                return INCERTO
+            return alvo in lido
 
 # Teto da espera pelo aviso de que o rascunho entrou. Passou disso, o Enter NÃO
 # é enviado: apertar Enter num composer que não recebeu o texto submete o que
@@ -269,8 +470,9 @@ def estado_recente(name: str) -> tuple[str, str | None] | None:
     return estado, motivo
 
 
-def entregar(name: str, texto: str, modo: str = MODO_PADRAO) -> bool:
-    """Passa o texto ao long-poll da sessão. False = ninguém ouvindo (usa o pane).
+def entregar(name: str, texto: str, modo: str = MODO_PADRAO, jsonl: str | None = None):
+    """Passa o texto ao long-poll da sessão. True = entregue; False = ninguém entregou (use o pane);
+    `INCERTO` = pode ter entrado e não dá para provar (não digite; a reconciliação decide).
 
     Chamado de dentro do `drain`/`_send_one`, que rodam em thread: o Queue é do
     loop do FastAPI, então a entrega atravessa por `call_soon_threadsafe`.
@@ -281,27 +483,40 @@ def entregar(name: str, texto: str, modo: str = MODO_PADRAO) -> bool:
     """
     from app import terminal_input
     with terminal_input._send_lock(name):
-        return _entregar(name, texto, modo)
+        return _entregar(name, texto, modo, jsonl)
 
 
-def _entregar(name: str, texto: str, modo: str) -> bool:
+def _entregar(name: str, texto: str, modo: str, jsonl: str | None = None):
     with _lock:
         fila = _waiters.get(name)
         loop = _loop
     if fila is None or loop is None:
         return False
     aviso = threading.Event()
-    if modo == "fill":
+    if modo in ("fill", "user"):
         with _lock:
             _confirmacoes[name] = aviso
             _preenchido.pop(name, None)
+    # A foto sai ANTES de o plugin receber o texto: depois, não dá para separar o novo do repetido.
+    antes = _linhas_do_usuario(jsonl) if modo == "user" else None
     try:
         loop.call_soon_threadsafe(fila.put_nowait, {"text": texto, "modo": modo})
     except RuntimeError:
         # Loop morrendo (shutdown): não é entrega, e o caller tem o pane.
         return False
-    if modo != "fill":
+    if modo not in ("fill", "user"):
         return True
+    if modo == "user":
+        prova = _prova_user(aviso, texto, jsonl, antes)
+        with _lock:
+            ok = _preenchido.pop(name, False)
+            _confirmacoes.pop(name, None)
+        if prova == "aviso":
+            return ok
+        if prova is not True:
+            _log.warning("plugin %s: envio sem confirmação nem prova no transcript — resultado=%s",
+                         name, prova)
+        return prova
     confirmou = aviso.wait(CONFIRMA_S)
     with _lock:
         ok = _preenchido.pop(name, False)
@@ -329,9 +544,47 @@ def _entregar(name: str, texto: str, modo: str) -> bool:
     return True
 
 
+def tracked_session_id(name: str) -> str | None:
+    """O uuid da conversa que o Hangar acompanha nesta sessão; None quando o vínculo é só palpite."""
+    from app import tmux
+    from app.api import registry
+    from app.procinfo import _proc_children_map
+    from app.registry import SessionRegistry
+    # cwd do pane do agente, como no `list()`: no Windows a pasta do projeto sai dele, e um split
+    # ativo noutra pasta apontaria para outro transcript.
+    panes = tmux.list_panes_all().get(name)
+    cwd = SessionRegistry._agent_pane(panes, _proc_children_map())["cwd"] if panes else ""
+    jsonl, tracked = registry.resolve_tracked(name, cwd)
+    return Path(jsonl).stem if jsonl and tracked else None
+
+
+def _conversation_mismatch(name: str, session_id: str | None) -> str | None:
+    """None quando quem chama é a conversa que o Hangar acompanha; senão o motivo da recusa.
+
+    Pane, ambiente herdado e pid do psmux valem para QUALQUER `claude` aberto na sessão (split, janela
+    nova); só a conversa separa o dono de um segundo processo. Plugin velho não manda o id e cai na tecla."""
+    if not session_id:
+        return "uuid-ausente"
+    atual = tracked_session_id(name)
+    if atual is None:
+        return "uuid-desconhecido"
+    return None if atual == session_id else "uuid-diferente"
+
+
+# Última recusa logada por (sessão, instância): o plugin recusado volta a cada 30 s e o log só registra
+# a mudança. Por instância porque os pulls aceitos do dono não podem apagar a marca do recusado.
+_recusas: dict[tuple[str, str], str] = {}
+
+
 class PullBody(BaseModel):
     sessao: str
     token: str
+    instance: str = ""
+    modos: list[str] = []
+    # Último estado que o plugin viu: o `idle` da largada sai antes de existir ponte.
+    estado: str | None = None
+    # `$.session.id()` do plugin: a conversa que ele atende.
+    session_id: str | None = None
 
 
 class StateBody(BaseModel):
@@ -345,6 +598,63 @@ class StateBody(BaseModel):
     origin: str | None = None
 
 
+class WhoamiBody(BaseModel):
+    chave: str
+    pane: str | None = None
+    nome: str | None = None
+    tmux: str | None = None
+    session_id: str | None = None
+
+
+@plugin_router.post("/whoami", dependencies=[Depends(require_loopback)])
+async def whoami(body: WhoamiBody):
+    """Sessão aberta fora do Hangar descobre nome e token. Só da própria máquina; no psmux resolve o
+    pid do servidor da sessão (depois o nome); no tmux, pane único, o id da sessão e o nome sem pane."""
+    if not secrets.compare_digest(machine_key(), body.chave):
+        raise HTTPException(403, detail="chave do plugin invalida")
+    nome, origem = await _whoami(body)
+    if nome:
+        recusa = await asyncio.to_thread(_conversation_mismatch, nome, body.session_id)
+        if recusa:
+            _log.info("plugin whoami recusado pane=%s sessao=%s uuid=%s origem=%s",
+                      body.pane, nome, body.session_id, recusa)
+            return {"sessao": None}
+    _log.info("plugin whoami pane=%s sessao=%s origem=%s", body.pane, nome, origem)
+    return {"sessao": nome, "token": mint(nome), "origem": origem} if nome else {"sessao": None}
+
+
+async def _whoami(body: WhoamiBody) -> tuple[str | None, str]:
+    # O interruptor desliga o caminho inteiro: sessão nenhuma descobre a ponte com ele desligado.
+    if not await asyncio.to_thread(ligado):
+        return None, "desligado"
+    from app import quem_chama
+    psmux = _PSMUX_PID.search((body.tmux or "").split(",")[0])
+    if psmux:
+        # Pane fica de fora: no psmux todo pane é `%1`, e com uma sessão só ele casaria com a errada.
+        nome = await asyncio.to_thread(_sessao_do_psmux, psmux.group(1))
+        if nome:
+            return nome, "psmux-pid"
+        # O plugin sempre manda pane, então o `CP_SESSION_NAME` do wrapper só é ouvido aqui.
+        try:
+            return await asyncio.to_thread(quem_chama.resolver, {quem_chama.CAB_NOME: body.nome or ""})
+        except quem_chama.SessaoDesconhecida:
+            return None, "psmux-pid"
+    if body.tmux:
+        meu = await asyncio.to_thread(_socket_do_tmux)
+        if meu and body.tmux.split(",")[0] != meu:
+            # Outro servidor tmux: o mesmo pane id lá é outra sessão, não uma do Hangar.
+            return None, "outro-socket"
+    if body.pane:
+        try:
+            return await asyncio.to_thread(quem_chama.resolver, {quem_chama.CAB_PANE: body.pane})
+        except quem_chama.SessaoDesconhecida:
+            return await asyncio.to_thread(_sessao_do_tmux, body.tmux or ""), "tmux"
+    try:
+        return await asyncio.to_thread(quem_chama.resolver, {quem_chama.CAB_NOME: body.nome or ""})
+    except quem_chama.SessaoDesconhecida:
+        return None, "nome"
+
+
 @plugin_router.post("/pull")
 async def pull(body: PullBody):
     """Long-poll do plugin. Sempre 200: com o texto, ou `{"text": null}` quando a janela fecha vazia.
@@ -353,6 +663,27 @@ async def pull(body: PullBody):
     app. O token por sessão é a credencial daqui.
     """
     _confere(body.sessao, body.token)
+    recusa = await asyncio.to_thread(_conversation_mismatch, body.sessao, body.session_id)
+    chave = (body.sessao, body.instance)
+    if not recusa:
+        _recusas.pop(chave, None)
+    elif _recusas.get(chave) != recusa:
+        _recusas[chave] = recusa
+        _log.info("plugin pull recusado sessao=%s instance=%s uuid=%s origem=%s",
+                  body.sessao, body.instance, body.session_id, recusa)
+    if recusa:
+        # 409 como o de dono: o plugin larga a ponte e tenta de novo depois — após um `/clear` os
+        # dois ids voltam a bater e o dono se recupera sozinho.
+        raise HTTPException(409, detail=f"conversa nao e a que o Hangar acompanha ({recusa})")
+    agora = time.monotonic()
+    with _lock:
+        dono = _donos.get(body.sessao)
+        if dono and dono[0] != body.instance and agora - dono[2] < ESPERA_S + 10:
+            raise HTTPException(409, detail="outra instância do plugin já atende esta sessão")
+        _donos[body.sessao] = (body.instance, set(body.modos) or {"fill"}, agora)
+        # Só semeia: com entrada do `/state`, quem manda é ela.
+        if body.estado and body.sessao not in _estados:
+            _estados[body.sessao] = (agora, body.estado, None)
     global _loop
     fila: asyncio.Queue = asyncio.Queue()
     with _lock:
@@ -365,6 +696,10 @@ async def pull(body: PullBody):
         return {"text": None}
     finally:
         with _lock:
+            # Só renova o próprio dono: um `esquecer` ou outra instância no meio não é desfeito.
+            dono = _donos.get(body.sessao)
+            if dono and dono[0] == body.instance:
+                _donos[body.sessao] = (dono[0], dono[1], time.monotonic())
             _batidas[body.sessao] = time.monotonic()
             if _waiters.get(body.sessao) is fila:
                 del _waiters[body.sessao]
@@ -542,6 +877,24 @@ async def filled(body: FilledBody):
     """O plugin avisa que o rascunho entrou (ou não) no composer.
 
     É o que libera o Enter: sem esse aviso o Hangar não aperta tecla nenhuma."""
+    _confere(body.sessao, body.token)
+    with _lock:
+        aviso = _confirmacoes.get(body.sessao)
+        _preenchido[body.sessao] = body.ok
+    if aviso is not None:
+        aviso.set()
+    return {"ok": True}
+
+
+class SubmittedBody(BaseModel):
+    sessao: str
+    token: str
+    ok: bool
+
+
+@plugin_router.post("/submitted", dependencies=[Depends(require_loopback)])
+async def submitted(body: SubmittedBody):
+    """O plugin avisa se o `$.prompt.submit` do modo `user` foi aceito."""
     _confere(body.sessao, body.token)
     with _lock:
         aviso = _confirmacoes.get(body.sessao)

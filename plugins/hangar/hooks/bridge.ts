@@ -1,0 +1,33 @@
+// A ponte da sessão, gravada só pelo input.ts e apagada quando o backend recusa a instância (409).
+// Os outros arquivos leem SÓ daqui: um `claude -p` filho ou um segundo `claude` no mesmo pane
+// herda o ambiente e não pode falar pela sessão.
+export type Bridge = { url: string; token: string; sessao: string };
+
+let atual: Bridge | null = null;
+// O `idle` da largada sai antes de existir ponte: o `/pull` leva este valor para o backend.
+let ultimoEstado: string | null = null;
+const id =`${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+
+export function setBridge(b: Bridge): void {
+  atual = b;
+}
+
+export function clearBridge(): void {
+  atual = null;
+}
+
+export function bridge(): Bridge | null {
+  return atual;
+}
+
+export function setLastState(estado: string): void {
+  ultimoEstado = estado;
+}
+
+export function lastState(): string | null {
+  return ultimoEstado;
+}
+
+export function instance(): string {
+  return id;
+}

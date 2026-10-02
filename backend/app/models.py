@@ -141,6 +141,8 @@ class SessionInfo(BaseModel):
     limit_reset: Optional[str] = None
     # Sessão com convite ativo (link pendente ou convidado dentro): selo 🔗 nas listas.
     shared: bool = False
+    # Só na lista do convidado: "share" (conversa) ou "pair" (só leitura); None para o dono.
+    guest_kind: Optional[str] = None
     # Nome do convidado que criou a sessão; None = dono do servidor.
     owner: Optional[str] = None
     # Feature #12 (encadeamento de sessao): nome da sessao ALVO se esta sessao tem um vinculo 'then'
@@ -154,6 +156,8 @@ class SessionInfo(BaseModel):
     # Pareamento ativo (feature "trabalhando juntas"): os OUTROS membros do grupo, ou None.
     # Grupo de 2 = lista de 1 (o antigo 1:1 é caso particular). Badge/chip na UI.
     pair_peers: Optional[list[str]] = None
+    # Par de OUTRA pessoa (Funnel): {alias, owner, session}; o nativo desenha o selo "externo".
+    pair_external: Optional[dict] = None
     pair_gid: Optional[str] = None   # id estável do grupo — cluster da lista agrupa por ele
     pair_task: Optional[str] = None  # rótulo do grupo (ex: ABC-1234) pro header do cluster
     # Só na linha do orquestrador sem LLM (provider "orq"): a sessão do árbitro atual, para onde

@@ -56,11 +56,43 @@ class Share:
     revoked_at: float | None = None
     # Convite pela rede local: não liga o Funnel.
     local: bool = False
+    # "pair": quem tem o token só lê a sessão e manda recado pelo par.
+    kind: str = "share"
+    # Registro criado pelo attach: some junto com o registro de origem.
+    parent_id: str | None = None
 
     def active(self, now: float) -> bool:
         if self.revoked_at is not None:
             return False
         return self.redeemed_at is not None or now <= self.code_expires_at
+
+
+@dataclass
+class Guest:
+    """Tudo o que um token de convidado alcança: um registro por sessão."""
+    shares: list[Share]
+
+    def share_for(self, session: str) -> Share | None:
+        cand = [s for s in self.shares if s.session == session]
+        live = [s for s in cand if s.revoked_at is None]
+        # Só revogado: devolve mesmo assim, para o porteiro dizer "encerrado" e não "fora do convite".
+        pool = live or cand
+        # Sessão compartilhada E pareada sob o mesmo token: o convite vence a cópia do par.
+        return max(pool, key=lambda s: (s.kind == "share", s.created_at)) if pool else None
+
+    def sessions(self) -> set[str]:
+        return {s.session for s in self.shares if s.revoked_at is None}
+
+    def sees(self, name: str) -> bool:
+        return name in self.sessions()
+
+    def kind_of(self, name: str) -> str | None:
+        s = self.share_for(name)
+        return s.kind if s else None
+
+    def pair_share(self) -> Share | None:
+        return next((s for s in self.shares
+                     if s.kind == "pair" and s.parent_id is None and s.revoked_at is None), None)
 
 
 def _path() -> Path:
@@ -92,9 +124,18 @@ def _load() -> dict[str, Share]:
                 _state = {}
             except (OSError, ValueError, TypeError, KeyError) as e:
                 # Arquivo ilegível vira "nenhum convite": perde acessos, mas não derruba o backend.
+                # Vai pro lado, senão o próximo _save o apagaria de vez.
                 _log.warning("[share] %s ilegivel, comecando vazio: %s", _path(), e)
+                _quarentena(_path())
                 _state = {}
         return _state
+
+
+def _quarentena(arq: Path) -> None:
+    try:
+        arq.rename(arq.with_name(f"{arq.name}.bad-{int(time.time())}"))
+    except OSError as e:
+        _log.warning("[share] nao consegui guardar %s ilegivel: %s", arq.name, e)
 
 
 def _save() -> None:
@@ -115,23 +156,25 @@ def _save() -> None:
         raise
 
 
-def create(session: str, life: str, now: float | None = None, local: bool = False) -> tuple[Share, str]:
+def create(session: str, life: str, now: float | None = None, local: bool = False,
+           kind: str = "share") -> tuple[Share, str]:
     now = time.time() if now is None else now
     code = base64.b32encode(secrets.token_bytes(16)).decode().rstrip("=")
     s = Share(id=secrets.token_hex(8), session=session, life=life, created_at=now,
-              code_expires_at=now + CODE_TTL, code_hash=_hash(code), local=local)
+              code_expires_at=now + CODE_TTL, code_hash=_hash(code), local=local, kind=kind)
     with _lock:
         _load()[s.id] = s
         _save()
     return s, code
 
 
-def peek(code: str, now: float | None = None) -> Share:
+def peek(code: str, now: float | None = None, kind: str = "share") -> Share:
     now = time.time() if now is None else now
     h = _hash(_norm_code(code))
     with _lock:
         s = next((x for x in _load().values() if x.code_hash == h), None)
-    if s is None:
+    # Código de par não abre como convite (e vice-versa): quem o recebe nem fica sabendo que existe.
+    if s is None or s.kind != kind:
         raise ShareError("unknown")
     if s.revoked_at is not None:
         raise ShareError("revoked")
@@ -142,52 +185,99 @@ def peek(code: str, now: float | None = None) -> Share:
     return s
 
 
-def redeem(code: str, device: str, now: float | None = None) -> tuple[Share, str]:
+def redeem(code: str, device: str, now: float | None = None, token: str | None = None,
+           kind: str = "share") -> tuple[Share, str]:
     now = time.time() if now is None else now
     with _lock:
-        s = peek(code, now)
-        token = secrets.token_urlsafe(32)
-        s.token_hash = _hash(token)
+        s = peek(code, now, kind=kind)
+        h = _hash(token) if token else None
+        # Token que já vale aqui leva a sessão nova junto: o nativo guarda um token por máquina.
+        if h is None or not any(x.token_hash == h and x.revoked_at is None for x in _load().values()):
+            token = secrets.token_urlsafe(32)
+            h = _hash(token)
+        s.token_hash = h
         s.device = (device or "").strip()[:80] or None
         s.redeemed_at = now
         _save()
     return s, token
 
 
-def lookup_token(token: str) -> Share | None:
+def create_redeemed(session: str, life: str, kind: str = "pair",
+                    now: float | None = None) -> tuple[Share, str]:
+    """Registro já resgatado, sem código: o token sai direto para quem o criou."""
+    now = time.time() if now is None else now
+    token = secrets.token_urlsafe(32)
+    s = Share(id=secrets.token_hex(8), session=session, life=life, created_at=now,
+              code_expires_at=now, code_hash="", token_hash=_hash(token), redeemed_at=now, kind=kind)
+    with _lock:
+        _load()[s.id] = s
+        _save()
+    return s, token
+
+
+def lookup_token(token: str) -> Guest | None:
     if not token:
         return None
     h = _hash(token)
     with _lock:
-        return next((x for x in _load().values() if x.token_hash == h), None)
+        shares = [x for x in _load().values() if x.token_hash == h]
+    return Guest(shares) if shares else None
 
 
-def by_token(token: str) -> Share | None:
-    s = lookup_token(token)
-    return s if s is not None and s.revoked_at is None else None
+def attach(holder_token: str, other_token: str, now: float | None = None) -> int:
+    """Liga ao token `holder` as sessões vivas do token `other`; devolve quantas ligou."""
+    now = time.time() if now is None else now
+    holder, other = lookup_token(holder_token), lookup_token(other_token)
+    if holder is None or other is None or not holder.sessions() or not other.sessions():
+        return 0
+    h = _hash(holder_token)
+    with _lock:
+        estado = _load()
+        # A cópia aponta sempre para a RAIZ: revogar o registro original derruba toda a cadeia.
+        feitos = {x.parent_id for x in estado.values() if x.token_hash == h and x.parent_id}
+        novos = []
+        for s in other.shares:
+            raiz = s.parent_id or s.id
+            if s.revoked_at is not None or raiz in feitos:
+                continue
+            feitos.add(raiz)
+            novos.append(Share(id=secrets.token_hex(8), session=s.session, life=s.life, created_at=now,
+                               code_expires_at=now, code_hash="", token_hash=h, redeemed_at=now,
+                               kind=s.kind, parent_id=raiz))
+        for n in novos:
+            estado[n.id] = n
+        if novos:
+            _save()
+    return len(novos)
 
 
 def list_for(session: str, now: float | None = None) -> list[Share]:
     now = time.time() if now is None else now
     with _lock:
-        return sorted((x for x in _load().values() if x.session == session and x.active(now)),
+        return sorted((x for x in _load().values()
+                       if x.session == session and x.kind == "share" and x.active(now)),
                       key=lambda x: x.created_at)
 
 
 def revoke(share_id: str) -> bool:
     with _lock:
-        s = _load().get(share_id)
+        estado = _load()
+        s = estado.get(share_id)
         if s is None or s.revoked_at is not None:
             return False
-        s.revoked_at = time.time()
+        now = time.time()
+        for x in estado.values():
+            if (x.id == share_id or x.parent_id == share_id) and x.revoked_at is None:
+                x.revoked_at = now
         _save()
         return True
 
 
-def revoke_session(session: str) -> int:
+def revoke_session(session: str, kind: str | None = None) -> int:
     now = time.time()
     with _lock:
-        alvo = [x for x in _load().values() if x.session == session and x.revoked_at is None]
+        alvo = [x for x in _load().values() if x.session == session and x.revoked_at is None
+                and (kind is None or x.kind == kind)]
         for x in alvo:
             x.revoked_at = now
         if alvo:
@@ -238,7 +328,7 @@ def recently_ended(window: float, now: float | None = None, internet_only: bool 
 def active_sessions(now: float | None = None) -> set[str]:
     now = time.time() if now is None else now
     with _lock:
-        return {x.session for x in _load().values() if x.active(now)}
+        return {x.session for x in _load().values() if x.kind == "share" and x.active(now)}
 
 
 def sweep(alive: Callable[[str, str], bool], now: float | None = None) -> int:

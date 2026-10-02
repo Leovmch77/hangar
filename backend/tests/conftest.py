@@ -92,6 +92,19 @@ def _sem_sessoes_sem_terminal_reais(tmp_path_factory):
 
 
 @pytest.fixture(scope="session", autouse=True)
+def _sem_endereco_do_plugin_real():
+    # O `_lifespan` grava ~/.hangar/plugin.json; sem isto o TestClient trocaria o arquivo da máquina
+    # pela config do teste e as sessões vivas do plugin falariam com um backend que não existe.
+    from app import plugin_bridge
+    original = plugin_bridge.publish_address
+    plugin_bridge.publish_address = lambda home=None: None
+    try:
+        yield
+    finally:
+        plugin_bridge.publish_address = original
+
+
+@pytest.fixture(scope="session", autouse=True)
 def _sem_compartilhamento_real(tmp_path_factory):
     # O lifespan (`with TestClient(app)`) sobe a varredura de convites. Com os sidecars apontando
     # pra pasta vazia acima, ela veria toda sessão viva da máquina como morta, revogaria os

@@ -190,7 +190,7 @@ impl Area {
     /// Tamanhos oferecidos, como o arquivo os grava: texto em % de 14 px, código em meio pixel, terminal em px.
     fn sizes(self) -> Vec<u16> {
         match self {
-            Area::Text => (11..=20).map(|px| (px as f32 * 100. / 14.).round() as u16).collect(),
+            Area::Text => (9..=20).map(|px| (px as f32 * 100. / 14.).round() as u16).collect(),
             Area::Code => (20..=36).collect(),
             Area::Terminal => (8..=24).collect(),
         }
@@ -198,6 +198,15 @@ impl Area {
 
     fn px(self, stored: u16) -> f32 {
         match self { Area::Text => 14. * stored as f32 / 100., Area::Code => stored as f32 / 2., Area::Terminal => stored as f32 }
+    }
+
+    /// O tamanho digitado em "Personalizado", preso na faixa que o arquivo aceita (`Appearance::clamped`).
+    fn stored(self, px: f32) -> u16 {
+        match self {
+            Area::Text => (px.clamp(7., 21.) * 100. / 14.).round() as u16,
+            Area::Code => (px.clamp(8., 24.) * 2.).round() as u16,
+            Area::Terminal => px.clamp(8., 24.).round() as u16,
+        }
     }
 
     fn size(self, a: &Appearance) -> u16 {
@@ -237,16 +246,31 @@ impl Area {
         (SearchableVec::new(items), IndexPath::new(at))
     }
 
-    /// Lista de tamanhos com o mais perto do gravado marcado: um valor antigo do deslizante pode cair entre dois.
-    fn size_items(self) -> (Vec<SizeChoice>, IndexPath) {
+    /// Lista de tamanhos e, no fim, "Personalizado": marcado quando o gravado não está na lista (aí leva o valor no
+    /// rótulo) ou quando a pessoa acabou de escolhê-lo.
+    fn size_items(self, custom_open: bool) -> (Vec<SizeChoice>, IndexPath) {
         let (sizes, stored) = (self.sizes(), self.size(&appearance::get()));
-        let at = sizes.iter().enumerate().min_by_key(|(_, s)| s.abs_diff(stored)).map_or(0, |(n, _)| n);
-        (sizes.into_iter().map(|value| SizeChoice { label: px_label(self.px(value)).into(), value }).collect(), IndexPath::new(at))
+        let exact = sizes.iter().position(|s| *s == stored);
+        let custom = SizeChoice { label: match exact { Some(_) => tr("settings_size_custom"), None => px_label(self.px(stored)) }.into(), value: CUSTOM_SIZE };
+        let at = exact.filter(|_| !custom_open).unwrap_or(sizes.len());
+        let mut items: Vec<SizeChoice> = sizes.into_iter().map(|value| SizeChoice { label: px_label(self.px(value)).into(), value }).collect();
+        items.push(custom);
+        (items, IndexPath::new(at))
+    }
+
+    /// O campo de "Personalizado" aparece com ele escolhido ou com um valor gravado fora da lista.
+    fn custom_shown(self, custom_open: bool) -> bool {
+        custom_open || !self.sizes().contains(&self.size(&appearance::get()))
     }
 }
 
 /// "12,5 px": meio pixel é o passo mais fino que as listas oferecem.
-fn px_label(px: f32) -> String { format!("{} px", ((px * 2.).round() / 2.).to_string().replace('.', &tr("decimal"))) }
+fn px_label(px: f32) -> String { format!("{} px", px_number(px)) }
+
+fn px_number(px: f32) -> String { ((px * 2.).round() / 2.).to_string().replace('.', &tr("decimal")) }
+
+/// Valor do item "Personalizado": nenhum tamanho gravado vale 0.
+const CUSTOM_SIZE: u16 = 0;
 
 #[derive(Clone)]
 struct SizeChoice { label: SharedString, value: u16 }
@@ -266,6 +290,9 @@ pub(super) struct SettingsUi {
     /// Fontes instaladas, lidas uma vez ao abrir o app.
     fonts: Vec<SharedString>,
     type_picks: Vec<(Area, FontPick, SizePick)>,
+    /// Campo do tamanho personalizado de cada área e as áreas em que ele foi escolhido na lista.
+    custom_sizes: Vec<(Area, Entity<InputState>)>,
+    custom_open: Vec<Area>,
     /// Cor livre de Destaque e de Tinta.
     accent_picker: Entity<ColorPickerState>,
     tint_picker: Entity<ColorPickerState>,
@@ -320,6 +347,7 @@ impl SettingsUi {
         }
         let fonts: Vec<SharedString> = window.text_system().all_font_names().into_iter().map(SharedString::from).collect();
         let mut type_picks = Vec::new();
+        let mut custom_sizes = Vec::new();
         for area in Area::ALL {
             let (items, at) = area.font_items(&fonts, window, cx);
             let font = cx.new(|cx| SelectState::new(items, Some(at), window, cx).searchable(true));
@@ -329,15 +357,42 @@ impl SettingsUi {
                 area.set_font(&mut next, family);
                 this.apply_appearance(next, true, cx);
             }));
-            let (items, at) = area.size_items();
+            let (items, at) = area.size_items(false);
             let size = cx.new(|cx| SelectState::new(items, Some(at), window, cx));
-            subscriptions.push(cx.subscribe_in(&size, window, move |this: &mut Hangar, _, event: &SelectEvent<Vec<SizeChoice>>, _, cx| {
+            let custom = cx.new(|cx| InputState::new(window, cx).placeholder("px")
+                .default_value(px_number(area.px(area.size(&appearance::get())))));
+            subscriptions.push(cx.subscribe_in(&size, window, move |this: &mut Hangar, _, event: &SelectEvent<Vec<SizeChoice>>, window, cx| {
                 let SelectEvent::Confirm(Some(value)) = event else { return };
+                this.settings_ui.custom_open.retain(|a| *a != area);
+                if *value == CUSTOM_SIZE {
+                    this.settings_ui.custom_open.push(area);
+                    if let Some((_, input)) = this.settings_ui.custom_sizes.iter().find(|(a, _)| *a == area) {
+                        input.update(cx, |input, cx| input.focus(window, cx));
+                    }
+                    cx.notify();
+                    return;
+                }
                 let mut next = appearance::get();
                 area.set_size(&mut next, *value);
                 this.apply_appearance(next, true, cx);
+                this.sync_type_picks(window, cx);
+            }));
+            subscriptions.push(cx.subscribe_in(&custom, window, move |this: &mut Hangar, input, event: &InputEvent, window, cx| {
+                if !matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur) { return; }
+                let typed = input.read(cx).value().trim().replace(',', ".");
+                // O gravado é mais fino que o meio pixel à vista: sair do campo sem mudar o número não pode arredondá-lo.
+                let shown = (area.px(area.size(&appearance::get())) * 2.).round() / 2.;
+                if let Some(px) = typed.trim_end_matches("px").trim().parse::<f32>().ok().filter(|px| px.is_finite() && *px != shown) {
+                    let mut next = appearance::get();
+                    area.set_size(&mut next, area.stored(px));
+                    this.apply_appearance(next, true, cx);
+                }
+                // Valor que caiu num da lista volta a aparecer como item dela; fora dela o campo continua à vista.
+                this.settings_ui.custom_open.retain(|a| *a != area);
+                this.sync_type_picks(window, cx);
             }));
             type_picks.push((area, font, size));
+            custom_sizes.push((area, custom));
         }
         let mut picker = |which: Custom, cx: &mut Context<Hangar>| {
             let colors = *current.colors(theme::is_dark());
@@ -370,7 +425,7 @@ impl SettingsUi {
             InputEvent::PressEnter { .. } => this.search_go(None, cx),
             _ => {}
         }));
-        Self { sliders, fonts, type_picks,
+        Self { sliders, fonts, type_picks, custom_sizes, custom_open: Vec::new(),
             accent_picker, tint_picker, search, found: Vec::new(), pick: 0, hit: None, scroll: ScrollHandle::new(),
             reveal: Rc::new(Cell::new(false)), jump: None, preview: None, live: false, drag: None, blur_hint: false, _subscriptions: subscriptions }
     }
@@ -602,8 +657,12 @@ impl Hangar {
         for (area, font, size) in self.settings_ui.type_picks.clone() {
             let (items, at) = area.font_items(&self.settings_ui.fonts, window, cx);
             font.update(cx, |select, cx| { select.set_items(items, window, cx); select.set_selected_index(Some(at), window, cx); });
-            let (items, at) = area.size_items();
+            let (items, at) = area.size_items(self.settings_ui.custom_open.contains(&area));
             size.update(cx, |select, cx| { select.set_items(items, window, cx); select.set_selected_index(Some(at), window, cx); });
+        }
+        for (area, input) in self.settings_ui.custom_sizes.clone() {
+            let text = px_number(area.px(area.size(&appearance::get())));
+            input.update(cx, |input, cx| input.set_value(text, window, cx));
         }
     }
 

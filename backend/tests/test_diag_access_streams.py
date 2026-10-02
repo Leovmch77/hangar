@@ -76,8 +76,9 @@ def test_peer_liga_requisicao_e_preserva_causa_sem_body(diario, monkeypatch, res
         if resultado == "transporte":
             raise urllib.error.URLError(TimeoutError(SECRET))
         response = MagicMock()
-        response.__enter__.return_value = SimpleNamespace(
-            status=200, read=lambda: (SECRET if resultado == "json" else json.dumps({"token": SECRET})).encode())
+        # O peers.py lê em pedaços (`read1`) para respeitar o prazo total da chamada.
+        corpo = io.BytesIO((SECRET if resultado == "json" else json.dumps({"token": SECRET})).encode())
+        response.__enter__.return_value = SimpleNamespace(status=200, read=corpo.read, read1=corpo.read1)
         return response
 
     monkeypatch.setattr(peers.urllib.request, "urlopen", abrir)

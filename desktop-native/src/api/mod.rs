@@ -71,6 +71,12 @@ fn failure_detail(body: Option<Value>, status: u16) -> String {
                     .map(|(k, v)| (k.clone(), v.as_str().map_or_else(|| v.to_string(), str::to_owned))).collect()).unwrap_or_default();
                 if let Some(message) = crate::i18n::tr_web(code, &params) { return Some(message); }
             }
+            // Par externo: a frase do web pelo código; o `detalhe` de uma recusa vem nos parâmetros.
+            if let Some(code) = fields.get("code").and_then(Value::as_str).filter(|code| code.starts_with("erro_par_")) {
+                let params = fields.get("params").and_then(Value::as_object).map(|p| p.iter()
+                    .map(|(k, v)| (k.clone(), v.as_str().map_or_else(|| v.to_string(), str::to_owned))).collect()).unwrap_or_default();
+                if let Some(message) = crate::i18n::tr_web(code, &params) { return Some(message); }
+            }
             if let Some(code) = fields.get("code").and_then(Value::as_str).filter(|code| code.starts_with("erro_run_code_")) {
                 let params = fields.get("params").and_then(Value::as_object).map(|p| p.iter()
                     .map(|(k, v)| (k.clone(), v.as_str().map_or_else(|| v.to_string(), str::to_owned))).collect()).unwrap_or_default();
@@ -283,8 +289,23 @@ impl Api {
     }
 
     pub async fn share_create(&self, name: &str) -> Result<ShareCreated, ShareFailure> {
-        let r = self.client.post(self.endpoint(Some(name), Some("share"))).timeout(Duration::from_secs(60)).send().await
-            .map_err(|_| ShareFailure::Other(Failure::transport(true)))?;
+        self.post_with_prerequisites(name, "share", None).await
+    }
+
+    /// Mesmo túnel e mesmos pré-requisitos do compartilhamento: o 409 devolve o que falta.
+    pub async fn create_pair_invite(&self, name: &str) -> Result<PairInvite, ShareFailure> {
+        self.post_with_prerequisites(name, "pair-invite", None).await
+    }
+
+    pub async fn accept_pair(&self, name: &str, link: &str) -> Result<PairAccepted, ShareFailure> {
+        self.post_with_prerequisites(name, "pair-accept", Some(json!({"link": link}))).await
+    }
+
+    // Rota que sobe o Funnel: 409 de pré-requisito vira `Blocked`, e o resto segue como falha comum.
+    async fn post_with_prerequisites<T: serde::de::DeserializeOwned>(&self, name: &str, action: &str, body: Option<Value>) -> Result<T, ShareFailure> {
+        let mut req = self.client.post(self.endpoint(Some(name), Some(action))).timeout(Duration::from_secs(60));
+        if let Some(body) = body { req = req.json(&body); }
+        let r = req.send().await.map_err(|_| ShareFailure::Other(Failure::transport(true)))?;
         if r.status() == StatusCode::CONFLICT {
             let body = r.json::<Value>().await.unwrap_or(Value::Null);
             if let Some(prereqs) = share_blocked(&body) { return Err(ShareFailure::Blocked(prereqs)); }
@@ -561,6 +582,12 @@ pub enum Resumed { New(SessionInfo), Live(String) }
 #[derive(Clone, Debug, serde::Deserialize)]
 pub struct ShareCreated { pub link: String, pub expires_at: f64 }
 
+/// O convite de par tem a mesma forma do de compartilhamento: link e validade.
+pub type PairInvite = ShareCreated;
+
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct PairAccepted { pub alias: String, pub owner: String, pub session: String }
+
 #[derive(Clone, Debug, serde::Deserialize)]
 pub struct ShareEntry { pub id: String, pub device: Option<String>, pub created_at: f64, pub redeemed_at: Option<f64>, pub expires_at: f64, pub pending: bool }
 
@@ -588,15 +615,41 @@ pub fn share_blocked(body: &Value) -> Option<SharePrereqs> {
 #[derive(Clone, Debug, serde::Deserialize)]
 pub struct Redeemed { pub token: String, pub session: String, pub owner: String, pub address: String }
 
-/// Resgate do convite: sem token (quem chega ainda não tem um) e sem seguir redirecionamento.
-pub async fn redeem_invite(address: &str, code: &str, device: &str) -> Result<Redeemed, Failure> {
+/// Resgate do convite, sem seguir redirecionamento. O `token` é o que o app já tem para a máquina: com ele o convite novo
+/// entra no mesmo token em vez de trocar de sessão.
+pub async fn redeem_invite(address: &str, code: &str, device: &str, token: Option<&str>) -> Result<Redeemed, Failure> {
     let mut url = Url::parse(address).map_err(|_| Failure::local("invalid_url"))?;
     url.path_segments_mut().map_err(|_| Failure::local("invalid_url"))?.pop_if_empty().extend(["api", "guest", "redeem"]);
     let client = Client::builder().connect_timeout(Duration::from_secs(10)).redirect(reqwest::redirect::Policy::none())
         .build().map_err(|_| Failure::local("network_error"))?;
-    let r = client.post(url).json(&json!({"code": code, "device": device})).timeout(Duration::from_secs(20)).send().await
+    let mut body = json!({"code": code, "device": device});
+    if let Some(token) = token { body["token"] = json!(token); }
+    let r = client.post(url).json(&body).timeout(Duration::from_secs(20)).send().await
         .map_err(|_| Failure::transport(true))?;
     Api::checked(r, true).await?.json().await.map_err(|_| Failure::local("invalid_response"))
+}
+
+#[derive(Clone, serde::Deserialize, PartialEq)]
+pub struct ExternalPairDto { pub local_session: String, pub alias: String, pub owner: String, pub session: String, pub address: String, pub token: String }
+
+// O token é credencial: fica fora de qualquer log.
+impl std::fmt::Debug for ExternalPairDto {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExternalPairDto").field("alias", &self.alias).field("session", &self.session).field("address", &self.address)
+            .field("token", &"***").finish_non_exhaustive()
+    }
+}
+
+impl Api {
+    /// Pares externos das sessões deste servidor (só o dono lê).
+    pub async fn external_pairs(&self) -> Result<Vec<ExternalPairDto>, Failure> {
+        serde_json::from_value(self.server_read(&["external-pairs"], &[], 15).await?).map_err(|_| Failure::local("invalid_response"))
+    }
+}
+
+/// Liga a sessão pareada ao token de convite que este app já tem para a máquina dela.
+pub async fn attach_guest(address: &str, holder: &str, other: &str) -> Result<(), Failure> {
+    Api::new(address, holder)?.server_send(reqwest::Method::POST, &["guest", "attach"], Some(json!({"token": other})), 15).await.map(|_| ())
 }
 
 #[cfg(test)]
@@ -616,6 +669,14 @@ mod tests {
         assert!(pasta != "pasta nao existe: /x" && pasta.contains("pasta nao existe: /x"), "{pasta}");
         let items = failure_detail(Some(json!({"detail": {"code": "erro_project_shortcuts", "params": {}, "msg": "item 1 (shell) com pasta vazia"}})), 400);
         assert!(items != "item 1 (shell) com pasta vazia" && items.contains("item 1 (shell) com pasta vazia"), "{items}");
+    }
+
+    #[test]
+    fn external_pair_errors_use_the_web_sentence_with_the_refusal_detail() {
+        let refused = failure_detail(Some(json!({"detail": {"code": "erro_par_recusado", "params": {"detalhe": "convite vencido"}, "msg": "x"}})), 400);
+        assert!(refused != "erro_par_recusado" && refused.contains("convite vencido"), "{refused}");
+        let down = failure_detail(Some(json!({"detail": {"code": "erro_par_fora_do_ar", "params": {}, "msg": "raw"}})), 502);
+        assert!(down != "raw" && down != "erro_par_fora_do_ar", "{down}");
     }
 
     #[test]

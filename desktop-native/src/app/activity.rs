@@ -668,10 +668,12 @@ impl Hangar {
     /// A aba lembrada, se esta sessão tem o que mostrar nela; senão, Contexto (a escolha fica para a próxima sessão).
     pub(super) fn side_tab(&self) -> SideTab {
         let readable = self.selected.as_ref().is_some_and(|s| s.readable());
+        // Arquivos e git da sessão da outra pessoa são recusados pelo servidor dela.
+        let own = readable && !self.open_read_only();
         match appearance::get().side_tab {
-            SideTab::Files if readable => SideTab::Files,
+            SideTab::Files if own => SideTab::Files,
             SideTab::Activity if self.has_activity() => SideTab::Activity,
-            SideTab::Git if readable && self.selected.as_ref().is_some_and(super::sidebar::has_git) => SideTab::Git,
+            SideTab::Git if own && self.selected.as_ref().is_some_and(super::sidebar::has_git) => SideTab::Git,
             // Lembrada de outra execução ou fechada no ×, a aba só volta depois que o navegador for aberto de novo.
             SideTab::Browser if self.side.browser_open => SideTab::Browser,
             _ => SideTab::Context,

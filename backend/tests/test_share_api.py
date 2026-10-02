@@ -143,15 +143,21 @@ def test_prereqs_sem_tailscale_e_409_de_pre_requisito(cli, monkeypatch):
     assert r.json()["detail"]["params"] == {"missing": [], "fix": "tailscale nao encontrado"}
 
 
+def _guest(session: str):
+    return share_store.Guest([share_store.Share(
+        id="s", session=session, life="L", created_at=0.0, code_expires_at=0.0, code_hash="",
+        token_hash="t", redeemed_at=1.0)])
+
+
 def test_prereqs_fora_da_porta_do_convidado():
     from app.share_gate import guest_allowed
-    assert guest_allowed("GET", "/api/share/prereqs", "proj") is False
+    assert guest_allowed("GET", "/api/share/prereqs", _guest("proj")) is False
 
 
 def test_convidado_nao_fecha_a_sessao_do_dono():
     from app.share_gate import guest_allowed
-    assert guest_allowed("DELETE", "/api/sessions/proj", "proj") is False
-    assert guest_allowed("GET", "/api/sessions/proj", "proj") is True
+    assert guest_allowed("DELETE", "/api/sessions/proj", _guest("proj")) is False
+    assert guest_allowed("GET", "/api/sessions/proj", _guest("proj")) is True
 
 
 def test_fechar_sessao_revoga(cli, syncs, monkeypatch):
@@ -269,3 +275,19 @@ def test_funnel_fica_ligado_na_carencia_e_cai_depois(syncs):
     share_store._load()[s.id].revoked_at -= share_api.ENDED_GRACE + 1
     share_api.sync_tunnel()
     assert syncs[-1] is False
+
+
+def test_so_par_ativo_mantem_o_funnel(monkeypatch):
+    chamadas = []
+    monkeypatch.setattr(share_api.share_tunnel, "sync", lambda ativo: chamadas.append(ativo))
+    share_store.create_redeemed("proj", "t:1", kind="pair")
+    share_api.sync_tunnel()
+    assert chamadas == [True]
+
+
+def test_encerrar_todos_nao_derruba_o_par(cli, syncs):
+    _, token = share_store.create_redeemed("proj", "t:1", kind="pair")
+    cli.post("/api/sessions/proj/share", headers=AUTH)
+    r = cli.delete("/api/sessions/proj/share", headers=AUTH)
+    assert r.json() == {"ok": True, "revoked": 1}
+    assert share_store.lookup_token(token).share_for("proj").revoked_at is None

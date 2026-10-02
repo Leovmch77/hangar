@@ -3,6 +3,7 @@
 mod api;
 mod app;
 mod appearance;
+mod audio;
 mod browser;
 mod cards;
 mod chat;

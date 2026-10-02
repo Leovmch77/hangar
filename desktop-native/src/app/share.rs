@@ -17,11 +17,38 @@ pub(super) fn when_label(epoch: f64) -> String {
         .unwrap_or_default()
 }
 
-enum Created { Link(ShareCreated), Blocked(SharePrereqs) }
+enum Created { Link(ShareCreated), Pair(ShareCreated), Blocked(SharePrereqs) }
 
 /// Só a linha do comando: colar o `fix` inteiro num terminal rodaria também a frase do Funnel.
 fn operator_command(p: &SharePrereqs) -> Option<&str> {
     p.missing.iter().any(|m| m == "operator").then(|| p.fix.lines().find(|l| l.contains("--operator=")))?
+}
+
+/// O aviso de pré-requisito do túnel (o que falta e como resolver), igual no compartilhar e no aceite de par. `authorize` é o
+/// botão que só o compartilhar tem; `on_enable` roda depois de abrir a página do Tailscale.
+pub(super) fn prerequisite_notice(id: &'static str, prereqs: &SharePrereqs, authorize: Option<AnyElement>,
+    on_enable: Option<Box<dyn Fn(&ClickEvent, &mut Window, &mut App)>>) -> Stateful<Div> {
+    let fix = &prereqs.fix;
+    let command = operator_command(prereqs).map(str::to_owned);
+    let fix_copy = command.clone().unwrap_or_else(|| fix.clone());
+    let is_url = command.is_none() && fix.starts_with("https://");
+    div().id(id).role(Role::Alert).flex().flex_col().gap_2()
+        .child(div().text_sm().text_color(theme::warning()).whitespace_normal().child(tr_shared("compartilhar_pre_requisito", &[])))
+        .children(prereqs.missing.iter().map(|item| div().text_sm().text_color(theme::warning()).whitespace_normal().child(match item.as_str() {
+            "operator" => tr_shared("compartilhar_falta_operador", &[]),
+            "funnel" => tr_shared("compartilhar_falta_funnel", &[]),
+            other => other.to_owned(),
+        })))
+        .when(!fix.is_empty(), |el| el
+            .child(div().p_2().rounded_md().bg(theme::inset()).font_family(theme::MONO).text_sm().whitespace_normal().child(fix.clone())))
+        .child(div().flex().flex_wrap().gap_2()
+            .children(authorize)
+            .when(!fix_copy.is_empty(), |el| el.child(Button::new(SharedString::from(format!("{id}-fix"))).small()
+                .label(if is_url { tr("share_open_link") } else { tr_shared("compartilhar_copiar", &[]) })
+                .on_click(move |_, _, cx| if is_url { cx.open_url(&fix_copy) } else { cx.write_to_clipboard(ClipboardItem::new_string(fix_copy.clone())) })))
+            .when_some(prereqs.enable_url.clone(), |el, url| el.child(Button::new(SharedString::from(format!("{id}-enable"))).small().primary()
+                .label(tr_shared("compartilhar_liberar_tailscale", &[]))
+                .on_click(move |event, window, cx| { cx.open_url(&url); if let Some(after) = &on_enable { after(event, window, cx); } }))))
 }
 
 #[derive(Debug, PartialEq)]
@@ -99,13 +126,15 @@ impl ShareDialog {
         cx.notify();
     }
 
-    fn create(&mut self, cx: &mut Context<Self>) {
+    /// `pair` gera o convite de par em vez do de compartilhamento: mesma rota de túnel, mesmos pré-requisitos.
+    fn create(&mut self, pair: bool, cx: &mut Context<Self>) {
         if self.busy { return; }
         (self.busy, self.copied, self.created, self.authorize_error) = (true, false, None, None);
         let name = self.name.clone();
         self.call(move |api| async move {
-            let result = match api.share_create(&name).await {
-                Ok(link) => Ok(Created::Link(link)),
+            let made = if pair { api.create_pair_invite(&name).await.map(Created::Pair) } else { api.share_create(&name).await.map(Created::Link) };
+            let result = match made {
+                Ok(created) => Ok(created),
                 Err(ShareFailure::Blocked(prereqs)) => Ok(Created::Blocked(prereqs)),
                 Err(ShareFailure::Other(e)) => Err(Hangar::failure(&e)),
             };
@@ -121,8 +150,8 @@ impl ShareDialog {
             let all = id.is_none();
             let result = api.share_revoke(&name, id.as_deref()).await.map_err(|e| Hangar::failure(&e));
             move |d: &mut ShareDialog| match result {
-                // Encerrar todos invalida também o link recém-gerado que ainda está na tela.
-                Ok(()) => if all { d.created = None; },
+                // Encerrar todos invalida o link recém-gerado na tela; o convite de par segue valendo no backend.
+                Ok(()) => if all && matches!(d.created, Some(Ok(Created::Link(_)))) { d.created = None; },
                 Err(e) => d.revoke_error = Some(e),
             }
         }, cx);
@@ -190,8 +219,9 @@ impl ShareDialog {
 
     fn render_created(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         Some(match self.created.as_ref()? {
-            Ok(Created::Link(c)) => {
-                let (copy, send) = (c.link.clone(), whatsapp_url(&tr_shared("compartilhar_whatsapp_texto", &[("link", &c.link)])));
+            Ok(Created::Link(c) | Created::Pair(c)) => {
+                let key = if matches!(self.created, Some(Ok(Created::Pair(_)))) { "native_par_whatsapp" } else { "compartilhar_whatsapp_texto" };
+                let (copy, send) = (c.link.clone(), whatsapp_url(&tr_shared(key, &[("link", &c.link)])));
                 div().flex().flex_col().gap_2()
                     .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(theme::muted()).child(tr_shared("compartilhar_link_novo", &[])))
                     .child(div().p_2().rounded_md().bg(theme::inset()).font_family(theme::MONO).text_sm().whitespace_normal().child(c.link.clone()))
@@ -205,31 +235,13 @@ impl ShareDialog {
                     .into_any_element()
             }
             Ok(Created::Blocked(prereqs)) => {
-                let fix = &prereqs.fix;
-                let command = operator_command(prereqs).map(str::to_owned);
-                let fix_copy = command.clone().unwrap_or_else(|| fix.clone());
-                let is_url = command.is_none() && fix.starts_with("https://");
                 // `pkexec` precisa do agente de senha da sessão gráfica: só aqui, e só com o backend nesta máquina.
-                let can_authorize = command.is_some() && cfg!(target_os = "linux") && self.api.is_loopback();
-                div().id("share-blocked").role(Role::Alert).flex().flex_col().gap_2()
-                    .child(div().text_sm().text_color(theme::warning()).whitespace_normal().child(tr_shared("compartilhar_pre_requisito", &[])))
-                    .children(prereqs.missing.iter().map(|item| div().text_sm().text_color(theme::warning()).whitespace_normal().child(match item.as_str() {
-                        "operator" => tr_shared("compartilhar_falta_operador", &[]),
-                        "funnel" => tr_shared("compartilhar_falta_funnel", &[]),
-                        other => other.to_owned(),
-                    })))
-                    .when(!fix.is_empty(), |el| el
-                        .child(div().p_2().rounded_md().bg(theme::inset()).font_family(theme::MONO).text_sm().whitespace_normal().child(fix.clone())))
-                    .child(div().flex().flex_wrap().gap_2()
-                        .when(can_authorize, |el| el.child(Button::new("share-authorize").small().primary()
-                            .label(tr(if self.authorizing { "share_authorizing" } else { "share_authorize" })).disabled(self.authorizing)
-                            .on_click(cx.listener(|d, _, _, cx| d.authorize(cx)))))
-                        .when(!fix_copy.is_empty(), |el| el.child(Button::new("share-fix").small()
-                            .label(if is_url { tr("share_open_link") } else { tr_shared("compartilhar_copiar", &[]) })
-                            .on_click(move |_, _, cx| if is_url { cx.open_url(&fix_copy) } else { cx.write_to_clipboard(ClipboardItem::new_string(fix_copy.clone())) })))
-                        .when_some(prereqs.enable_url.clone(), |el, url| el.child(Button::new("share-enable").small().primary()
-                            .label(tr_shared("compartilhar_liberar_tailscale", &[]))
-                            .on_click(cx.listener(move |d, _, _, cx| { cx.open_url(&url); d.watch(cx); })))))
+                let can_authorize = operator_command(prereqs).is_some() && cfg!(target_os = "linux") && self.api.is_loopback();
+                let authorize = can_authorize.then(|| Button::new("share-authorize").small().primary()
+                    .label(tr(if self.authorizing { "share_authorizing" } else { "share_authorize" })).disabled(self.authorizing)
+                    .on_click(cx.listener(|d, _, _, cx| d.authorize(cx))).into_any_element());
+                let on_enable: Box<dyn Fn(&ClickEvent, &mut Window, &mut App)> = Box::new(cx.listener(|d, _, _, cx| d.watch(cx)));
+                prerequisite_notice("share-blocked", prereqs, authorize, Some(on_enable))
                     .when_some(self.authorize_error.clone(), |el, error| el.child(div().id("share-authorize-error").role(Role::Alert)
                         .text_sm().text_color(theme::danger()).whitespace_normal().child(error)))
                     .when(self.watching, |el| el.child(div().id("share-watching").role(Role::Status).text_sm().text_color(theme::muted())
@@ -269,13 +281,17 @@ impl Render for ShareDialog {
             })).into_any_element(),
         };
         let any = self.list.ok().is_some_and(|l| !l.is_empty());
-        let link_shown = matches!(self.created, Some(Ok(Created::Link(_))));
+        let link_shown = matches!(self.created, Some(Ok(Created::Link(_) | Created::Pair(_))));
         div().flex().flex_col().gap_3()
             .child(div().p_2().rounded_md().bg(theme::accent_dim()).text_sm().whitespace_normal().child(tr_shared("compartilhar_aviso_confianca", &[])))
             .children(self.render_created(cx))
-            .when(!link_shown, |el| el.child(Button::new("share-create").primary()
-                .label(tr_shared(if self.busy { "compartilhar_gerando" } else { "compartilhar_gerar" }, &[])).disabled(self.busy || self.watching)
-                .on_click(cx.listener(|d, _, _, cx| d.create(cx)))))
+            .when(!link_shown, |el| el.child(div().flex().flex_wrap().gap_2()
+                .child(Button::new("share-create").primary()
+                    .label(tr_shared(if self.busy { "compartilhar_gerando" } else { "compartilhar_gerar" }, &[])).disabled(self.busy || self.watching)
+                    .on_click(cx.listener(|d, _, _, cx| d.create(false, cx))))
+                .child(Button::new("share-create-pair")
+                    .label(tr("par_convidar")).disabled(self.busy || self.watching)
+                    .on_click(cx.listener(|d, _, _, cx| d.create(true, cx))))))
             .child(chrome::section_label(tr_shared("compartilhar_quem_entrou", &[])))
             .child(list)
             .when_some(self.revoke_error.clone(), |el, error| el.child(div().id("share-revoke-error").role(Role::Alert).text_sm()

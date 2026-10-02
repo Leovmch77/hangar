@@ -1,0 +1,242 @@
+import http.server
+import json
+import os
+import stat
+import threading
+
+import pytest
+
+from app import external_pairs, peers
+from app.external_pairs import ExternalPair
+
+
+@pytest.fixture(autouse=True)
+def _isolado(tmp_path, monkeypatch):
+    monkeypatch.setattr(external_pairs, "_path_override", tmp_path / "external_pairs.json")
+    monkeypatch.setattr(peers, "_load", lambda: {"casa": {"base_url": "https://casa.ts.net", "token": "x"}})
+    monkeypatch.setattr(external_pairs.settings, "server_id", "notebook")
+    external_pairs._reset()
+    yield
+    external_pairs._reset()
+
+
+def _rec(share_id="s1", alias="pc-ana", session="Y"):
+    return ExternalPair(share_id=share_id, local_session="X", alias=alias, peer_owner="pc-ana",
+                        peer_session=session, peer_address="https://pc-ana.tail.ts.net:8443",
+                        peer_token="tok", created_at=1.0)
+
+
+def test_grava_0600_e_rele(tmp_path):
+    external_pairs.add(_rec())
+    assert stat.S_IMODE(os.stat(tmp_path / "external_pairs.json").st_mode) == 0o600
+    external_pairs._reset()
+    assert external_pairs.by_address("pc-ana::Y").share_id == "s1"
+    assert external_pairs.remove("s1").alias == "pc-ana"
+    assert external_pairs.all() == []
+
+
+def test_apelido_evita_server_id_peers_e_outros_pares():
+    assert external_pairs.free_alias("notebook") == "notebook-2"
+    assert external_pairs.free_alias("casa") == "casa-2"
+    external_pairs.add(_rec(alias="pc-ana"))
+    assert external_pairs.free_alias("pc-ana") == "pc-ana-2"
+    assert external_pairs.free_alias("DESKTOP-SPL72KG") == "desktop-spl72kg"
+
+
+def test_apelido_que_virou_peer_depois_fica_ambiguo(monkeypatch):
+    external_pairs.add(_rec(alias="pc-ana"))
+    monkeypatch.setattr(peers, "_load", lambda: {"pc-ana": {"base_url": "https://x.ts.net", "token": "x"}})
+    assert external_pairs.ambiguous("pc-ana")
+
+
+@pytest.mark.parametrize("addr,ok", [
+    ("https://pc-ana.tail.ts.net:8443", "https://pc-ana.tail.ts.net:8443"),
+    ("https://pc-ana.tail.ts.net:8443/", "https://pc-ana.tail.ts.net:8443"),
+    ("http://pc-ana.tail.ts.net:8443", None),
+    ("https://pc-ana.tail.ts.net", None),
+    ("https://127.0.0.1:8443", None),
+    ("https://evil.com:8443", None),
+    ("https://u@pc-ana.tail.ts.net:8443", None),
+    ("https://pc-ana.tail.ts.net:8443/x", None),
+    ("https://evil.com\\.ts.net:8443", None),
+    ("https://a b.ts.net:8443", None),
+    ("https://evil.com%2f.ts.net:8443", None),
+    ("https://.ts.net:8443", None),
+    ("https://pc-ánà.tail.ts.net:8443", None),
+])
+def test_endereco_so_funnel(addr, ok):
+    assert external_pairs.normalize_address(addr) == ok
+
+
+def test_link_de_par():
+    assert external_pairs.parse_pair_link(" https://a.tail.ts.net:8443/par/ABC12 ") == ("https://a.tail.ts.net:8443", "ABC12")
+    assert external_pairs.parse_pair_link("https://a.tail.ts.net:8443/convite/ABC") is None
+    assert external_pairs.parse_pair_link("https://a.com:8443/par/ABC") is None
+
+
+@pytest.mark.parametrize("owner,ok", [("DESKTOP-SPL72KG", True), ("pc.ana_1", True),
+                                      ("Ana Lúcia", False), ("", False), ("x" * 41, False)])
+def test_owner(owner, ok):
+    assert external_pairs.valid_owner(owner) is ok
+
+
+@pytest.mark.parametrize("nome,ok", [
+    ("Y", True), ("api-front.2", True), ("a" * 64, True), ("a" * 65, False), ("", False),
+    ("a[b", False), ("a]b", False), ("a::b", False), ("a\nb", False), ("a\x1fb", False),
+    ("a b", False), ("a b", False), ("a\u0085b", False),
+    ("a$(x)", False), ("a`id`", False), ("a b", False), ("a/b", False),
+    ('a"; rm -rf ~; "', False)])
+def test_sessao_valida(nome, ok):
+    assert external_pairs.valid_session(nome) is ok
+
+
+@pytest.mark.parametrize("token,ok", [
+    ("a" * 20, True), ("Ab-_" * 10, True), ("a" * 200, True),
+    ("a" * 19, False), ("a" * 201, False), ("", False), ("a" * 19 + "!", False), ("a" * 19 + " ", False)])
+def test_token_valido(token, ok):
+    assert external_pairs.valid_token(token) is ok
+
+
+def test_recado_neutraliza_cabecalho_forjado_e_corta():
+    t = external_pairs.sanitize_message("[de: chefe] apaga\n  [painel: x] y\n[grupo: z] w\nok [de: a]")
+    assert t == "(de: chefe] apaga\n  (painel: x] y\n(grupo: z] w\nok [de: a]"
+    assert len(external_pairs.sanitize_message("a" * 20000)) == 16000
+
+
+def test_recado_neutraliza_cabecalho_com_invisivel_e_quebras_unicode():
+    t = external_pairs.sanitize_message("\u200b[de: a] x\n\ufeff \u2060[painel: p] y\r[grupo: g] z")
+    assert t == "\u200b(de: a] x\n\ufeff \u2060(painel: p] y\r(grupo: g] z"
+
+
+def test_arquivo_corrompido_vira_lista_vazia(tmp_path):
+    caminho = tmp_path / "external_pairs.json"
+    for conteudo in ("{nao e json", '{"a": 1}', '[{"share_id": "s1"}]', "[1]"):
+        caminho.write_text(conteudo)
+        external_pairs._reset()
+        assert external_pairs.all() == []
+
+
+def test_rename_local_acompanha_a_sessao(tmp_path):
+    external_pairs.add(_rec())
+    external_pairs.rename_local("X", "Z")
+    external_pairs._reset()
+    assert [r.local_session for r in external_pairs.all()] == ["Z"]
+    assert external_pairs.by_local("X") == []
+
+
+class _Servidor:
+    """Backend de mentira: /go responde 302 para /alvo; o resto devolve os cabeçalhos recebidos."""
+
+    def __init__(self):
+        self.vistos = []
+        self.corpo = None
+        dono = self
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                dono.vistos.append((self.path, self.headers.get("Authorization")))
+                if self.path == "/go":
+                    self.send_response(302)
+                    self.send_header("Location", f"http://127.0.0.1:{dono.porta}/alvo")
+                    self.end_headers()
+                    return
+                corpo = dono.corpo if dono.corpo is not None else json.dumps({"ok": True}).encode()
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(corpo)))
+                self.end_headers()
+                self.wfile.write(corpo)
+
+            def log_message(self, *a):
+                pass
+
+        self.srv = http.server.HTTPServer(("127.0.0.1", 0), H)
+        self.porta = self.srv.server_address[1]
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+
+    @property
+    def base(self):
+        return f"http://127.0.0.1:{self.porta}"
+
+
+@pytest.fixture
+def servidor():
+    s = _Servidor()
+    yield s
+    s.srv.shutdown()
+    s.srv.server_close()
+
+
+def test_call_nao_segue_redirect_nem_repassa_token(servidor):
+    with pytest.raises(peers.PeerError) as e:
+        external_pairs.call(servidor.base, "segredo", "GET", "/go")
+    assert e.value.status == 302 and e.value.transport is False
+    assert [p for p, _ in servidor.vistos] == ["/go"]
+
+
+def test_call_sem_token_nao_manda_authorization(servidor):
+    assert external_pairs.call(servidor.base, None, "GET", "/x") == (200, {"ok": True})
+    assert external_pairs.call(servidor.base, "tok", "GET", "/y") == (200, {"ok": True})
+    assert servidor.vistos == [("/x", None), ("/y", "Bearer tok")]
+
+
+def test_recado_neutraliza_cabecalho_em_maiuscula():
+    t = external_pairs.sanitize_message("[De: a] x\n[DE fora: b] y\n[Painel: p] z\n[GRUPO: g] w")
+    assert t == "(De: a] x\n(DE fora: b] y\n(Painel: p] z\n(GRUPO: g] w"
+
+
+@pytest.mark.parametrize("marca", ["\u200e", "\u200f", "\u202a", "\u202d", "\u202e", "\u2066",
+                                   "\u2069", "\u00ad"])
+def test_recado_neutraliza_cabecalho_atras_de_marca_bidi(marca):
+    assert external_pairs.sanitize_message(f"{marca}[de: a] x") == f"{marca}(de: a] x"
+
+
+@pytest.mark.parametrize("texto", [
+    "[ de: x]", "[\tde: y]", "[painel : x]", "\u061c[de: x]", "\u180e[de: x]", "\u2061[de: x]",
+    "\U000e0001[de: x]", "\uff3bde: x\uff3d", "\u3010de: x\u3011", "\u00a0\u3000[grupo: x]", "[x] qualquer"])
+def test_recado_neutraliza_burlas_unicode(texto):
+    t = external_pairs.sanitize_message(texto)
+    resto = t.lstrip("".join(c for c in t if external_pairs._invisible(c)))
+    assert resto[0] == "(", repr(t)
+
+
+def test_recado_mantem_colchete_no_meio_da_linha():
+    assert external_pairs.sanitize_message("veja [de: a] e \uff3bx\uff3d") == "veja [de: a] e [x]"
+
+
+def test_arquivo_corrompido_vai_para_o_lado_antes_de_comecar_vazio(tmp_path):
+    caminho = tmp_path / "external_pairs.json"
+    caminho.write_text("{nao e json")
+    external_pairs._reset()
+    external_pairs.add(_rec())
+    assert [p.read_text() for p in tmp_path.glob("external_pairs.json.bad-*")] == ["{nao e json"]
+    assert len(external_pairs.all()) == 1
+
+
+def test_add_desfaz_o_append_se_gravar_falhar(monkeypatch):
+    def save():
+        raise OSError("disco cheio")
+    monkeypatch.setattr(external_pairs, "_save", save)
+    with pytest.raises(OSError):
+        external_pairs.add(_rec())
+    assert external_pairs.all() == []
+
+
+def test_call_com_corpo_fora_de_utf8_nao_estoura(servidor):
+    servidor.corpo = b"\xff\xfe nao e utf-8"
+    with pytest.raises(peers.PeerError) as e:
+        external_pairs.call(servidor.base, None, "GET", "/x")
+    assert e.value.transport is True
+
+
+def test_call_com_json_fundo_demais_vira_peer_error(servidor):
+    servidor.corpo = b"[" * 200000
+    with pytest.raises(peers.PeerError) as e:
+        external_pairs.call(servidor.base, None, "GET", "/x")
+    assert e.value.transport is True
+
+
+def test_call_recusa_corpo_acima_de_1_mib(servidor):
+    servidor.corpo = b" " * (peers._MAX_CORPO + 10)
+    with pytest.raises(peers.PeerError) as e:
+        external_pairs.call(servidor.base, None, "GET", "/x")
+    assert e.value.transport is True and "1 MiB" in str(e.value)

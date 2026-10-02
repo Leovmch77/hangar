@@ -18,6 +18,8 @@ from app.share_life import session_life
 from app.share_tunnel import GUEST_PORT, port_clash
 
 GUEST_SCOPE_KEY = "hangar_guest"
+# Token cru: o stream da lista relê o registro a cada envio, para enxergar sessão ligada depois.
+GUEST_TOKEN_KEY = "hangar_guest_token"
 
 _LIST_ROUTES = {("GET", "/api/sessions"), ("GET", "/api/sessions/events")}
 _GLOBAL_ROUTES = {
@@ -33,7 +35,12 @@ _GLOBAL_PREFIXES = (("GET", "/api/tts/audio/"),)
 # Alcançam outra sessão do dono ou abrem janela na tela dele; `share` deixaria o convidado
 # criar e revogar convites.
 _BLOCKED = {"pair", "pair-remote", "unpair-remote", "group-message", "then", "orq", "bastao",
-            "open-terminal", "open-editor", "nav", "share"}
+            "open-terminal", "open-editor", "nav", "share", "pair-invite", "pair-accept"}
+# Leituras do chat do nativo: quem só vê a sessão pareada não alcança arquivo, terminal nem git.
+_PAIR_READ = {"", "events", "history", "commands", "plan-preview", "subagents", "uploads",
+              "transcript-image"}
+_PAIR_ROUTES = {("POST", "/api/pair/message"), ("DELETE", "/api/pair")}
+_ANY_GUEST_ROUTES = {("POST", "/api/guest/attach")}
 
 # ponytail: cache de 2 s por nome; cada consulta de vida é um fork do tmux, e o chat faz vários
 # pedidos por segundo. Revogar continua valendo na hora (o registro é lido a cada pedido).
@@ -51,19 +58,42 @@ def guest_of(obj):
     return scope.get(GUEST_SCOPE_KEY) if scope else None
 
 
-def guest_allowed(method: str, path: str, session: str) -> bool:
-    if (method, path) in _LIST_ROUTES or (method, path) in _GLOBAL_ROUTES:
+def path_session(path: str) -> str | None:
+    """Sessão que a rota nomeia (o terminal `term-X` conta como X); None para rota que não é de sessão."""
+    parts = path.split("/")
+    if len(parts) < 4 or parts[1:3] != ["api", "sessions"] or parts[3] == "events":
+        return None
+    name = parts[3]
+    # O terminal é `term-X/term`; sessão cujo nome começa com "term-" não vira outra.
+    if name.startswith("term-") and parts[4:] == ["term"]:
+        return name[len("term-"):]
+    return name
+
+
+def guest_allowed(method: str, path: str, guest: share_store.Guest) -> bool:
+    if (method, path) in _LIST_ROUTES or (method, path) in _ANY_GUEST_ROUTES:
         return True
-    if any(method == m and path.startswith(p) for m, p in _GLOBAL_PREFIXES):
-        return True
+    if (method, path) in _PAIR_ROUTES:
+        return guest.pair_share() is not None
+    if (method, path) in _GLOBAL_ROUTES or any(method == m and path.startswith(p)
+                                               for m, p in _GLOBAL_PREFIXES):
+        # Token só de par não alcança nem as globais de leitura.
+        return any(s.kind == "share" and s.revoked_at is None for s in guest.shares)
     parts = path.split("/")
     if len(parts) < 4 or parts[1:3] != ["api", "sessions"]:
         return False
     name, rest = parts[3], parts[4:]
-    if name == f"term-{session}":
-        return rest == ["term"]
-    if name != session:
+    session = path_session(path)
+    share = guest.share_for(session) if session else None
+    if share is None:
         return False
+    if share.kind == "pair":
+        head = rest[0] if rest else ""
+        # Anexo é um arquivo só; a listagem de uploads fica fechada.
+        return (method == "GET" and not name.startswith("term-") and head in _PAIR_READ
+                and (head != "uploads" or len(rest) == 2))
+    if name.startswith("term-"):
+        return rest == ["term"]
     # Fechar mata a sessão do dono; o convidado só para de acompanhar do lado dele.
     if not rest:
         return method != "DELETE"
@@ -97,10 +127,21 @@ def _verdict(share) -> str:
     return _OK if life == share.life else _ENDED
 
 
-def _still_valid(token: str) -> bool:
+def _guest_verdict(guest: share_store.Guest, session: str | None) -> str:
+    if session is not None:
+        share = guest.share_for(session)
+        return _ENDED if share is None else _verdict(share)
+    # Rota sem sessão (lista, globais): vale enquanto QUALQUER registro do token vale.
+    verdicts = {_verdict(s) for s in guest.shares}
+    if _OK in verdicts:
+        return _OK
+    return _UNSURE if _UNSURE in verdicts else _ENDED
+
+
+def _still_valid(token: str, session: str | None) -> bool:
     # Só um fim de verdade cancela o stream; "não sei" o mantém aberto.
-    share = share_store.lookup_token(token)
-    return share is not None and _verdict(share) != _ENDED
+    guest = share_store.lookup_token(token)
+    return guest is not None and _guest_verdict(guest, session) != _ENDED
 
 
 def _token(scope) -> str:
@@ -113,8 +154,8 @@ def _token(scope) -> str:
 
 
 def _is_open(method: str, path: str) -> bool:
-    return method == "OPTIONS" or path.startswith("/convite/") or (
-        method == "POST" and path == "/api/guest/redeem")
+    return method == "OPTIONS" or path.startswith(("/convite/", "/par/")) or (
+        method == "POST" and path in ("/api/guest/redeem", "/api/pair/redeem"))
 
 
 async def _deny(scope, receive, send, status: int, code: str, msg: str,
@@ -193,11 +234,16 @@ class ShareGate:
             await self.app(scope, receive, send)
             return
         token = _token(scope)
-        share = share_store.lookup_token(token) if token else None
-        if share is None:
+        guest = share_store.lookup_token(token) if token else None
+        if guest is None:
             await _deny(scope, receive, send, 401, "erro_nao_autorizado", "unauthorized")
             return
-        verdict = await asyncio.to_thread(_verdict, share)
+        session = path_session(path)
+        if session is not None and guest.share_for(session) is None:
+            await _deny(scope, receive, send, 403, "erro_fora_do_convite",
+                        "fora da sessao compartilhada")
+            return
+        verdict = await asyncio.to_thread(_guest_verdict, guest, session)
         if verdict == _ENDED:
             await _deny(scope, receive, send, 410, "erro_convite_encerrado",
                         "compartilhamento encerrado")
@@ -206,15 +252,13 @@ class ShareGate:
             await _deny(scope, receive, send, 503, "erro_sessao_indisponivel",
                         "sessao indisponivel por instantes", {"Retry-After": "5"})
             return
-        if not guest_allowed(method, path, share.session):
+        if not guest_allowed(method, path, guest):
             await _deny(scope, receive, send, 403, "erro_fora_do_convite",
                         "fora da sessao compartilhada")
             return
-        scope[GUEST_SCOPE_KEY] = share
+        scope[GUEST_SCOPE_KEY] = guest
+        scope[GUEST_TOKEN_KEY] = token
         if _is_long(scope, path):
-            await self._watched(scope, receive, send, token)
+            await watch(self.app, scope, receive, send, lambda: _still_valid(token, session))
         else:
             await self.app(scope, receive, send)
-
-    async def _watched(self, scope, receive, send, token: str) -> None:
-        await watch(self.app, scope, receive, send, lambda: _still_valid(token))

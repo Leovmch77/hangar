@@ -26,6 +26,7 @@ from sse_starlette.sse import EventSourceResponse
 from app import (agentes_sync, atomico, atualizacoes, atualizar, btw, diag, harness_api,
                  loop_monitor, pensamento_pt, permission_mode, plugin_bridge, procinfo, quem_chama, tmux,
                  uds_messaging)
+from app import external_pair_api, external_pairs
 from app.auth import require_auth, require_loopback
 from app.send_executor import send_thread as _send_thread
 from app import bastao as bastao_mod   # `bastao` sem sufixo é a ROTA GET, mais abaixo neste arquivo
@@ -82,7 +83,7 @@ from app import share_api, share_guest_api, share_store
 from app.share_guest_api import guest_safe
 from app.guest_user_gate import GuestUserGate
 from app import guest_users, guest_users_api
-from app.share_gate import ShareGate, guest_of
+from app.share_gate import GUEST_TOKEN_KEY, ShareGate, guest_of
 from app.share_life import session_life
 from app import tts
 from app.tts_text import preparar as tts_preparar
@@ -302,6 +303,11 @@ async def _lifespan(app: FastAPI):
     # sockets do Claude; sem ele o recibo de retenção/recusa não tem pra onde voltar.
     if uds_messaging.INBOX.ligar(_ao_recibo_nativo):
         _log.info("inbox nativo ligado em %s", uds_messaging.INBOX.path)
+    try:
+        plugin_bridge.publish_address()
+    except OSError:
+        _log.warning("plugin: endereço da ponte não gravado; sessão de terminal fica no tmux",
+                     exc_info=True)
     # Claude sem terminal: o processo vive num cano fora do backend e sobrevive ao restart. Só
     # morre aqui o cano cuja sessão foi encerrada enquanto o backend estava fora; nos outros o
     # backend religa e recupera o que estava em aberto (turno, permissão pendente).
@@ -617,6 +623,7 @@ app.include_router(plugin_bridge.plugin_router)
 app.include_router(config_sync_api.config_sync_router)
 app.include_router(share_api.router)
 app.include_router(share_guest_api.router)
+app.include_router(external_pair_api.router)
 registry = SessionRegistry()
 registry_mod.apos_saida_codex = _codex_lease_released
 registry_mod.apos_renomear_codex = _codex_lease_renamed
@@ -1763,21 +1770,21 @@ async def list_sessions(request: Request):
     decorated = recent_list(2.0)
     if decorated is not None:
         if guest is not None:
-            decorated = [i for i in decorated if i.name == guest.session]
+            decorated = [i for i in decorated if guest.sees(i.name)]
         # Mesmo recorte do caminho sem cache: convidado com login próprio só vê o que lhe cabe.
         if viewer is not None or guest_users.has_claims():
             decorated = await asyncio.to_thread(guest_users.filter_visible, viewer, decorated,
                                                 lambda i: i.name)
-        return decorated if guest is None else [guest_safe(i) for i in decorated]
+        return decorated if guest is None else [guest_safe(i, guest) for i in decorated]
     snap = await asyncio.to_thread(_guardar_snap)
     # Convidado ve so a sessao compartilhada; o filtro fica depois do snapshot para nao tocar no cache.
     if guest is not None:
-        snap = [i for i in snap if i.name == guest.session]
+        snap = [i for i in snap if guest.sees(i.name)]
     if viewer is not None or guest_users.has_claims():
         snap = await asyncio.to_thread(guest_users.filter_visible, viewer, snap, lambda i: i.name)
     decorated = await registry.list_with_state([i.model_copy() for i in snap])
     # O pareamento e o encadeamento são decorados acima e citam outras sessões do dono.
-    return decorated if guest is None else [guest_safe(i) for i in decorated]
+    return decorated if guest is None else [guest_safe(i, guest) for i in decorated]
 
 
 @app.post("/api/diag", dependencies=[Depends(require_auth)])
@@ -2625,6 +2632,7 @@ def _rename_session(name: str, body: RenameBody):
         _invalidate_lists()
         forget_frame(name)
         share_store.rename(name, new)
+        external_pairs.rename_local(name, new)
         _rename_guest_claim(name, new)
         return {"ok": True, "name": new}
     if not tmux.has_session(name):
@@ -2651,6 +2659,7 @@ def _rename_session(name: str, body: RenameBody):
     _codex_lease_rename_finished(new)
     registry.rename(name, new)  # migra o cache name->jsonl (senao serve transcript errado pos-rename)
     share_store.rename(name, new)
+    external_pairs.rename_local(name, new)
     _rename_guest_claim(name, new)
     from app.pqueue import PromptQueue
     try:
@@ -3318,8 +3327,10 @@ async def subagent_detail(name: str, agent_id: str, events: int = 0):
 async def sessions_events(request: Request):
     from app.sse import list_events
     guest = guest_of(request)
-    return EventSourceResponse(list_events(only=guest, viewer=guest_users.current.get()),
-                               send_timeout=30)
+    return EventSourceResponse(
+        list_events(only=guest, viewer=guest_users.current.get(),
+                    token=request.scope.get(GUEST_TOKEN_KEY)),
+        send_timeout=30)
 
 
 @app.get("/api/sessions/{name}/events", dependencies=[Depends(require_auth)])
@@ -3455,6 +3466,18 @@ def _ao_recibo_nativo(mid: str, estado: str, detalhe: str) -> None:
     fut.add_done_callback(_feito)
 
 
+def _jsonl_atual(name: str) -> str | None:
+    """O transcript para onde o nome resolve AGORA (não o do cache da lista: depois de um `/clear`
+    a prova leria o transcript velho e autorizaria digitar de novo)."""
+    try:
+        from app import tmux as _tmux
+        _cwd = next((p["cwd"] for p in _tmux.list_panes_active() if p["name"] == name), "")
+        return registry.resolve_tracked(name, _cwd)[0] or None
+    except Exception:
+        _log.exception("jsonl da sessao %s nao resolvido para a prova do plugin", name)
+        return None
+
+
 def _send_one(name: str, text: str, track_entry: bool = False) -> dict:
     """Sequencia UNICA de envio de prompt: send_prompt + registro na fila duravel + confirmacao/drain.
     Usada pelo /input (uma sessao) e pelo /broadcast (loop por N sessoes) — o broadcast NAO reimplementa
@@ -3536,12 +3559,18 @@ def _send_one(name: str, text: str, track_entry: bool = False) -> dict:
     nativo = _enviar_nativo(name, text) if provider == "claude" and not stripped.startswith("/") else None
     if nativo:
         _log.info("SEND name=%s pelo socket nativo msg_id=%s text=%r", name, nativo, text[:80])
-    pelo_plugin = (not nativo and provider == "claude" and not stripped.startswith("/")
-                   and plugin_bridge.aguardando(name)
-                   and terminal_input.deliverable(name)
-                   and plugin_bridge.entregar(name, text))
+    entrega_plugin = False
+    if (not nativo and provider == "claude" and not stripped.startswith("/")
+            and plugin_bridge.aguardando(name)
+            and terminal_input.deliverable(name)):
+        modo = plugin_bridge.choose_mode(name, text)
+        entrega_plugin = plugin_bridge.entregar(name, text, modo,
+                                                _jsonl_atual(name) if modo == "user" else None)
+    # INCERTO conta como entregue para não digitar por cima; a reconciliação decide depois.
+    pelo_plugin = entrega_plugin is True or entrega_plugin == plugin_bridge.INCERTO
     if pelo_plugin:
-        _log.info("SEND name=%s pelo plugin (sem tecla) text=%r", name, text[:80])
+        _log.info("SEND name=%s pelo plugin (sem tecla) modo=%s resultado=%s text=%r",
+                  name, modo, entrega_plugin, text[:80])
     try:
         result = "sent" if (nativo or pelo_plugin) else terminal.send_prompt(
             name, text, provider, pane_id=pane_id,
@@ -4637,6 +4666,26 @@ async def _avisar_saida(name: str, expeers: list[str]) -> list[dict]:
     errs: list[dict] = []
     for p in expeers:
         if not peers.is_remote(p):
+            continue
+        # O sidecar de `name` prova que o par é dele: a busca é pela sessão, não só pelo endereço.
+        rec = next((r for r in external_pairs.by_local(name) if r.address == p), None)
+        if rec is not None:
+            if external_pairs.ambiguous(rec.alias):
+                # Só o aviso ao outro lado é pulado (o alias também é máquina tua); a limpeza local vale.
+                errs.append({"sessao": p, "erro": erro(
+                    "erro_par_endereco_ambiguo",
+                    f"'{rec.alias}' é ao mesmo tempo máquina tua e par externo", peer=p)})
+            else:
+                try:
+                    await asyncio.to_thread(external_pairs.call, rec.peer_address, rec.peer_token,
+                                            "DELETE", "/api/pair")
+                except (peers.PeerError, ValueError) as ex:
+                    if getattr(ex, "status", None) != 410:
+                        # Texto do outro lado vai rotulado: a tela não deve tomá-lo por mensagem do app.
+                        texto = (external_pair_api._REMOTE_LABEL if getattr(ex, "status", None) else "") + str(ex)[:300]
+                        errs.append({"sessao": p, "erro": erro("erro_peer_nao_avisado", texto, peer=p)})
+            await external_pair_api._guarded_async("remover o registro", external_pairs.remove, rec.share_id)
+            await external_pair_api._guarded_async("revogar o convite", share_store.revoke, rec.share_id)
             continue
         if not settings.server_id:
             errs.append({"sessao": p,
@@ -6865,6 +6914,18 @@ def shortcuts_import(body: ShortcutImportBody):
         return shortcut_transfer.import_shortcuts(body.data, apply=body.apply, secrets=body.secrets)
     except ValueError as e:
         raise HTTPException(400, detail=erro("erro_shortcut_import_invalido", str(e), motivo=str(e)))
+
+
+class ShortcutVerifyBody(BaseModel):
+    ids: list[str]
+    # Caminhos dos scripts instalados pela importação, citados no pedido de correção.
+    scripts: list[str] = Field(default_factory=list)
+
+
+@app.post("/api/shortcuts/verify", dependencies=[Depends(require_auth)])
+def shortcuts_verify(body: ShortcutVerifyBody):
+    from app import shortcut_transfer
+    return shortcut_transfer.run_checks(body.ids, body.scripts[:50], _shortcut_env())
 
 
 # --- launcher de projetos (standalone, chaveado pelo projects.json — nao por sessao viva) ----

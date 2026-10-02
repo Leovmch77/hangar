@@ -283,6 +283,9 @@ def validate_shortcut_item(item: Any, where: str) -> None:
     for flag in ("hangar_home", "answer_in_app"):
         if item.get(flag) is not None and (kind != "shell" or not isinstance(item[flag], bool)):
             raise ValueError(f"{where} tem {flag} invalido (so em atalho shell, verdadeiro ou falso)")
+    if item.get("verify") is not None and (kind != "shell" or not isinstance(item["verify"], str)
+                                           or not item["verify"].strip()):
+        raise ValueError(f"{where} tem verify invalido (so em atalho shell, um comando)")
     if kind in ("send_text", "shell") and (
         not isinstance(item.get("label"), str) or not item["label"].strip()
     ):

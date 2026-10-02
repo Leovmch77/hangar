@@ -206,8 +206,11 @@ def test_panel_route_without_a_live_run_is_404(root, monkeypatch):
 
 
 def test_panel_route_is_closed_to_shared_session_guests():
-    from app import share_gate
-    assert share_gate.guest_allowed("GET", "/api/sessions/g1-orq/orq/panel", "g1-orq") is False
+    from app import share_gate, share_store
+    guest = share_store.Guest([share_store.Share(
+        id="s", session="g1-orq", life="L", created_at=0.0, code_expires_at=0.0, code_hash="",
+        token_hash="t", redeemed_at=1.0)])
+    assert share_gate.guest_allowed("GET", "/api/sessions/g1-orq/orq/panel", guest) is False
 
 
 def test_a_parecer_cited_in_the_timeline_opens_through_the_file_route(root, tmp_path, monkeypatch):

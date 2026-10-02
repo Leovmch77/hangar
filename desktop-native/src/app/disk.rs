@@ -103,6 +103,15 @@ fn cited(cwd: &Path, path: &str) -> Option<PathBuf> {
     (real.is_file() && !real.components().any(|part| part.as_os_str() == ".git")).then_some(real)
 }
 
+/// `canonicalize` no Windows devolve `\\?\C:\...`, que o Explorer e outros programas não abrem.
+fn plain_path(text: &str) -> String {
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") { return format!(r"\\{rest}"); }
+    match text.strip_prefix(r"\\?\") {
+        Some(rest) if rest.as_bytes().get(1) == Some(&b':') => rest.to_owned(),
+        _ => text.to_owned(),
+    }
+}
+
 /// `get_transcript_image`: a `index`-ésima imagem base64 da linha do evento `id`. Só a linha que contém o id vira JSON.
 fn transcript_image(jsonl: &Path, id: &str, index: usize) -> Option<Vec<u8>> {
     use std::io::BufRead;
@@ -240,6 +249,23 @@ impl Hangar {
         Some((cwd, real))
     }
 
+    /// A sessão aberta é desta máquina e a pasta dela já foi resolvida. Sem tocar no disco: roda a cada quadro.
+    pub(super) fn session_on_disk(&self) -> bool {
+        self.session_api().is_some_and(|api| api.is_loopback())
+            && self.selected.as_ref().and_then(|s| s.cwd.as_ref()).is_some_and(|cwd| matches!(self.local_dirs.get(cwd), Some(Some(_))))
+    }
+
+    /// O arquivo do visor neste disco, para o gerenciador de arquivos do sistema. Sessão de outra máquina: `None`.
+    /// Sem o corte do Unix do `local_cwd`: aqui só se entrega o caminho ao sistema, sem shell nem separador.
+    /// Toca no disco: só no clique, nunca no render.
+    pub(super) fn file_on_disk(&self, path: &str) -> Option<PathBuf> {
+        self.session_api().filter(Api::is_loopback)?;
+        let cwd = self.selected.as_ref()?.cwd.as_ref()?;
+        let real = self.local_dirs.get(cwd).cloned().flatten()?;
+        let real = cited(&real, path)?;
+        Some(real.to_str().map_or_else(|| real.clone(), |text| PathBuf::from(plain_path(text))))
+    }
+
     /// Resolve em segundo plano a pasta real das sessões ainda não vistas; até chegar, elas seguem pelo backend.
     pub(super) fn resolve_local_dirs(&mut self, cx: &mut Context<Self>) {
         if !self.api.as_ref().is_some_and(|api| api.is_loopback()) { return; }
@@ -281,8 +307,17 @@ impl Hangar {
 
 #[cfg(test)]
 mod tests {
-    use super::{cited, resolve, safe_ext, session_id, slug, transcript_image, uploads_dir};
+    use super::{cited, plain_path, resolve, safe_ext, session_id, slug, transcript_image, uploads_dir};
     use std::path::Path;
+
+    #[test]
+    fn verbatim_windows_prefix_is_dropped_for_the_system() {
+        assert_eq!(plain_path(r"\\?\C:\Users\a\x.wav"), r"C:\Users\a\x.wav");
+        assert_eq!(plain_path(r"\\?\UNC\server\share\x.wav"), r"\\server\share\x.wav");
+        // Volume sem letra só abre no formato verbatim; caminho do Unix passa igual.
+        assert_eq!(plain_path(r"\\?\Volume{abc}\x.wav"), r"\\?\Volume{abc}\x.wav");
+        assert_eq!(plain_path("/home/u/x.wav"), "/home/u/x.wav");
+    }
 
     #[cfg(unix)]
     #[test]

@@ -548,12 +548,14 @@ impl Hangar {
     }
 
     /// Tira de vez as entradas deste aparelho de uma máquina.
-    fn forget_entries(&mut self, entry_ids: &[String]) {
+    fn forget_entries(&mut self, entry_ids: &[String], cx: &mut Context<Self>) {
         self.servers.retain(|s| !entry_ids.contains(&s.id));
         for id in entry_ids { self.machines.ids.remove(id); self.machines.reasons.remove(id); }
         self.servers_rev += 1;
         self.persist_servers();
         self.start_remote_lists();
+        // A entrada que levava um par externo some: o par volta na entrada só dele.
+        self.apply_external_pairs(cx);
     }
 
     /// Máquina que só o servidor conhecia: usa o token que ele guarda para os recados, testa, e respondendo ela entra neste
@@ -650,7 +652,7 @@ impl Hangar {
                 // Só deste aparelho: sai na hora. O painel só deixa a máquina se era ela que estava aberta.
                 None => {
                     let _ = this.update(cx, |this, cx| {
-                        this.forget_entries(&entries);
+                        this.forget_entries(&entries, cx);
                         if this.machines.peer_open.as_deref() == Some(open_key.as_str()) { this.machines.peer_open = None; }
                         cx.notify();
                     });
@@ -972,7 +974,7 @@ impl Hangar {
                 self.machines.adopting = None;
                 match result {
                     Ok(token) => {
-                        self.merge_servers(vec![ServerEntry { id: servers::new_id(), label: peer_id.clone(), address: url.clone(), token, disabled: false, invite: false, lan: None }], cx);
+                        self.merge_servers(vec![ServerEntry { id: servers::new_id(), label: peer_id.clone(), address: url.clone(), token, disabled: false, invite: false, lan: None, ephemeral: false }], cx);
                         // O nome já foi conferido no teste: a linha casa com o registro sem esperar outra leitura.
                         if let Some(entry) = self.servers.iter().find(|s| servers::norm(&s.address) == servers::norm(&url)) {
                             self.machines.ids.insert(entry.id.clone(), Some(peer_id.clone()));
@@ -999,7 +1001,7 @@ impl Hangar {
                         if write == PeerWrite::Removed {
                             m.checks.remove(&id);
                             m.far_failed = far_failed;
-                            if !entries.is_empty() { self.forget_entries(&entries); }
+                            if !entries.is_empty() { self.forget_entries(&entries, cx); }
                             let m = &mut self.machines;
                             // A máquina aberta saiu (por onde for): o painel volta a este servidor, e a chave velha não reabre
                             // sozinha se ela voltar à lista.
@@ -1865,7 +1867,7 @@ mod tests {
     }
 
     fn entry(id: &str, address: &str, disabled: bool) -> ServerEntry {
-        ServerEntry { id: id.into(), label: id.into(), address: address.into(), token: "t".into(), disabled, invite: false, lan: None }
+        ServerEntry { id: id.into(), label: id.into(), address: address.into(), token: "t".into(), disabled, invite: false, lan: None, ephemeral: false }
     }
     fn peer(id: &str, url: &str, enabled: bool) -> Peer { Peer { id: id.into(), url: url.into(), enabled } }
     fn check(going: &str, back: Option<Back>) -> Check {
