@@ -1243,6 +1243,20 @@ atravessa `import` — cada arquivo lê o ambiente e chama `$.http.fetch` sozinh
 O `capture-pane` a 0,75 s não foi reduzido: menu de permissão fora da regra acima, `/model`,
 diálogo de confiança e morte continuam sendo do pane.
 
+**A ponte só atende a conversa que o Hangar acompanha (01/10/2026).** `/whoami` e `/pull` recebem
+`session_id` (`$.session.id()`, relido a cada poll) e só aceitam quando ele é igual ao uuid do
+transcript que o `registry.resolve_tracked` dá como certo (`tracked=True`); diferente, desconhecido
+ou ausente → `/whoami` responde `{"sessao": None}` e `/pull` responde 409, que o plugin trata como
+perder o dono (larga a ponte, tenta de novo em 30 s). Por quê: pane, ambiente herdado e pid do psmux
+valem para QUALQUER `claude` aberto na sessão — um split herda `HANGAR_PLUGIN_*` do tmux — e, sem o
+dono batendo (backend reiniciado), o segundo processo tomava a fila. Medido com um `claude` num split
+de `cx-uuid`: o split recebeu 409 `uuid-diferente`, a mensagem foi para o original pelo plugin; depois
+do `/clear` o Claude grava o jsonl novo na hora, o marcador do `state_hook` virou o vínculo em ~1 s e
+a mensagem seguinte entrou uma vez só na conversa nova, ainda pelo plugin. Plugin antigo (sem
+`session_id`) fica na tecla até a sessão reabrir. No Windows não há marcador (`/proc`): o vínculo é o
+`--session-id` do cmdline e, depois de um `/clear`, o jsonl mais novo da pasta — com outra sessão no
+mesmo cwd ele não segue o `/clear`, e aquela sessão fica na tecla até reabrir.
+
 ### Mods no 2.1.287 medidos (01/10/2026)
 
 Claude Code 2.1.287 (G), mod descartável `hangar-exp` (hooks `session.start`, `turn.start`,

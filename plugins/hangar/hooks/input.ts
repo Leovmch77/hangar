@@ -49,6 +49,7 @@ async function discover($: EngineInterface) {
         pane: await $.env.get("TMUX_PANE"),
         nome: await $.env.get("CP_SESSION_NAME"),
         tmux: await $.env.get("TMUX"),
+        session_id: await $.session.id(),
       }),
     });
     if (r.status !== 200) return;
@@ -68,8 +69,11 @@ async function pull($: EngineInterface, ponte: Bridge) {
     const r = await $.http.fetch(`${ponte.url}/pull`, {
       method: "POST",
       headers: { "content-type": "application/json" },
+      // A conversa vai a cada poll: o `/clear` troca o id sem `session.start`, e o backend só
+      // entrega à conversa que ele acompanha (um segundo `claude` no mesmo pane recebe 409).
       body: JSON.stringify({
         sessao: ponte.sessao, token: ponte.token, instance: instance(), modos: ["fill", "user"], estado: lastState(),
+        session_id: await $.session.id(),
       }),
     });
     // 409 cala os outros hooks; depois dele a ponte só volta com um `/pull` aceito. Erro de rede

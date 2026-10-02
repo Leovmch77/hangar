@@ -11,11 +11,17 @@ from fastapi import HTTPException
 from app import plugin_bridge as pb
 
 
+# Conversa que o Hangar acompanha em toda sessão dos testes; o plugin certo manda este id.
+UUID = "0b6e5c1a-1111-4222-8333-444455556666"
+_REAL_TRACKED = pb.tracked_session_id
+
+
 @pytest.fixture(autouse=True)
-def _limpa():
+def _limpa(monkeypatch):
+    monkeypatch.setattr(pb, "tracked_session_id", lambda name: UUID)
     yield
     for d in (pb._perguntas, pb._waiters, pb._estados, pb._batidas, pb._eventos, pb._fechadas,
-              pb._donos):
+              pb._donos, pb._recusas):
         d.clear()
     pb._apps_abertos = 0
 
@@ -164,8 +170,9 @@ async def _ate(cond):
         await asyncio.sleep(0.01)
 
 
-def _pull(sessao="s1", instance="a", modos=("fill",)):
-    return pb.PullBody(sessao=sessao, token=pb.mint(sessao), instance=instance, modos=list(modos))
+def _pull(sessao="s1", instance="a", modos=("fill",), session_id=UUID):
+    return pb.PullBody(sessao=sessao, token=pb.mint(sessao), instance=instance, modos=list(modos),
+                       session_id=session_id)
 
 
 def test_segunda_instancia_com_dono_vivo_recebe_409(monkeypatch):
@@ -239,7 +246,7 @@ def ligado(monkeypatch):
 def test_whoami_resolve_pelo_pane(monkeypatch, ligado):
     from app import quem_chama
     monkeypatch.setattr(quem_chama, "_por_pane", lambda pane: "s1" if pane == "%3" else None)
-    r = asyncio.run(pb.whoami(pb.WhoamiBody(chave=pb.machine_key(), pane="%3")))
+    r = asyncio.run(pb.whoami(pb.WhoamiBody(chave=pb.machine_key(), pane="%3", session_id=UUID)))
     assert r == {"sessao": "s1", "token": pb.mint("s1"), "origem": "pane"}
 
 
@@ -255,7 +262,7 @@ def test_whoami_nome_so_vale_sem_pane(monkeypatch, ligado):
     monkeypatch.setattr(quem_chama, "_por_pane", lambda pane: None)
     monkeypatch.setattr(quem_chama, "_por_nome", lambda nome: nome)
     com_pane = asyncio.run(pb.whoami(pb.WhoamiBody(chave=pb.machine_key(), pane="%0", nome="s1")))
-    sem_pane = asyncio.run(pb.whoami(pb.WhoamiBody(chave=pb.machine_key(), nome="s1")))
+    sem_pane = asyncio.run(pb.whoami(pb.WhoamiBody(chave=pb.machine_key(), nome="s1", session_id=UUID)))
     assert com_pane == {"sessao": None} and sem_pane["sessao"] == "s1"
 
 
@@ -271,7 +278,8 @@ def test_whoami_sem_socket_conhecido_nao_compara(monkeypatch, ligado):
     from app import quem_chama
     monkeypatch.setattr(pb, "_socket_do_tmux", lambda: None)
     monkeypatch.setattr(quem_chama, "_por_pane", lambda pane: "s1")
-    corpo = pb.WhoamiBody(chave=pb.machine_key(), pane="%3", tmux="/tmp/tmux-1000/outro,42,0")
+    corpo = pb.WhoamiBody(chave=pb.machine_key(), pane="%3", tmux="/tmp/tmux-1000/outro,42,0",
+                          session_id=UUID)
     assert asyncio.run(pb.whoami(corpo))["sessao"] == "s1"
 
 
@@ -290,14 +298,16 @@ def psmux(monkeypatch):
 
 
 def test_whoami_psmux_resolve_pelo_pid_do_servidor_e_ignora_o_pane(psmux, ligado):
-    corpo = pb.WhoamiBody(chave=pb.machine_key(), pane="%1", tmux=PSMUX_TMUX.format(17392))
+    corpo = pb.WhoamiBody(chave=pb.machine_key(), pane="%1", tmux=PSMUX_TMUX.format(17392),
+                          session_id=UUID)
     assert asyncio.run(pb.whoami(corpo)) == {"sessao": "cx-b", "token": pb.mint("cx-b"),
                                              "origem": "psmux-pid"}
 
 
 def test_whoami_psmux_pid_desconhecido_cai_no_nome(psmux, ligado):
     def corpo(nome):
-        return pb.WhoamiBody(chave=pb.machine_key(), pane="%1", nome=nome, tmux=PSMUX_TMUX.format(999))
+        return pb.WhoamiBody(chave=pb.machine_key(), pane="%1", nome=nome, tmux=PSMUX_TMUX.format(999),
+                             session_id=UUID)
     assert asyncio.run(pb.whoami(corpo("cx-c")))["sessao"] == "cx-c"
     assert asyncio.run(pb.whoami(corpo(None))) == {"sessao": None}
     assert asyncio.run(pb.whoami(corpo("morta"))) == {"sessao": None}
@@ -316,7 +326,7 @@ def test_rotas_novas_do_plugin_recusam_cliente_de_fora(monkeypatch, ligado):
     monkeypatch.setattr(quem_chama, "_por_pane", lambda pane: "s1")
     app = FastAPI()
     app.include_router(pb.plugin_router)
-    corpos = {"/api/plugin/whoami": {"chave": pb.machine_key(), "pane": "%3"},
+    corpos = {"/api/plugin/whoami": {"chave": pb.machine_key(), "pane": "%3", "session_id": UUID},
               "/api/plugin/submitted": {"sessao": "s1", "token": pb.mint("s1"), "ok": True}}
     for rota, corpo in corpos.items():
         assert TestClient(app, client=("100.64.0.9", 5000)).post(rota, json=corpo).status_code == 403, rota
@@ -325,11 +335,13 @@ def test_rotas_novas_do_plugin_recusam_cliente_de_fora(monkeypatch, ligado):
 
 def test_pull_semeia_o_estado_so_quando_o_state_nao_disse_nada(monkeypatch):
     monkeypatch.setattr(pb, "ESPERA_S", 0.2)
-    asyncio.run(pb.pull(pb.PullBody(sessao="s1", token=pb.mint("s1"), instance="a", estado="idle")))
+    asyncio.run(pb.pull(pb.PullBody(sessao="s1", token=pb.mint("s1"), instance="a", estado="idle",
+                                    session_id=UUID)))
     assert pb.estado_recente("s1") == ("idle", None)
     pb.esquecer("s1")
     asyncio.run(pb.state(pb.StateBody(sessao="s1", token=pb.mint("s1"), estado="working"), None))
-    asyncio.run(pb.pull(pb.PullBody(sessao="s1", token=pb.mint("s1"), instance="a", estado="idle")))
+    asyncio.run(pb.pull(pb.PullBody(sessao="s1", token=pb.mint("s1"), instance="a", estado="idle",
+                                    session_id=UUID)))
     assert pb.estado_recente("s1") == ("working", None)
 
 
@@ -364,7 +376,7 @@ def _entrega_user(monkeypatch, confirma: bool | None, no_transcript: set[str] | 
 
     async def cena():
         pull = asyncio.create_task(pb.pull(pb.PullBody(sessao="s1", token=pb.mint("s1"), instance="a",
-                                                       modos=["fill", "user"])))
+                                                       modos=["fill", "user"], session_id=UUID)))
         await asyncio.wait_for(_ate(lambda: pb.aguardando("s1")), 5)
         entrega = asyncio.create_task(asyncio.to_thread(pb._entregar, "s1", "oi", "user", "/x.jsonl"))
         assert (await asyncio.wait_for(pull, 5)) == {"text": "oi", "modo": "user"}
@@ -417,3 +429,56 @@ def test_modo_user_texto_igual_a_um_anterior_nao_prova_a_entrega(monkeypatch):
     # O transcript é conferido por conjunto: o "oi" de antes não diz que este chegou.
     assert _entrega_user(monkeypatch, None, {"oi"}, antes={"oi"}) is pb.INCERTO
     assert _entrega_user(monkeypatch, True, {"oi"}, antes={"oi"}) is True
+
+
+def test_whoami_so_entrega_a_ponte_a_conversa_que_o_hangar_acompanha(monkeypatch, ligado):
+    # Um segundo `claude` num split resolve para a mesma sessão pelo pane; só a conversa o separa.
+    from app import quem_chama
+    monkeypatch.setattr(quem_chama, "_por_pane", lambda pane: "s1")
+
+    def pergunta(session_id):
+        return asyncio.run(pb.whoami(pb.WhoamiBody(chave=pb.machine_key(), pane="%3",
+                                                   session_id=session_id)))
+    assert pergunta(UUID)["sessao"] == "s1"
+    assert pergunta("outra-conversa") == {"sessao": None}
+    assert pergunta(None) == {"sessao": None}
+    monkeypatch.setattr(pb, "tracked_session_id", lambda name: None)
+    assert pergunta(UUID) == {"sessao": None}
+
+
+@pytest.mark.parametrize("enviado,acompanhado,motivo", [
+    ("outra-conversa", UUID, "uuid-diferente"),
+    (UUID, None, "uuid-desconhecido"),
+    (None, UUID, "uuid-ausente"),
+])
+def test_pull_de_outra_conversa_recebe_409_e_nao_vira_dono(monkeypatch, enviado, acompanhado, motivo):
+    monkeypatch.setattr(pb, "ESPERA_S", 0.2)
+    monkeypatch.setattr(pb, "tracked_session_id", lambda name: acompanhado)
+    with pytest.raises(HTTPException) as e:
+        asyncio.run(pb.pull(_pull(session_id=enviado)))
+    assert e.value.status_code == 409 and motivo in e.value.detail
+    assert "s1" not in pb._donos and not pb.aguardando("s1")
+
+
+def test_dono_recusado_volta_quando_a_conversa_converge(monkeypatch):
+    # Depois do `/clear` o plugin manda o id novo antes de o Hangar segui-lo: recusa, e não para sempre.
+    monkeypatch.setattr(pb, "ESPERA_S", 0.2)
+    monkeypatch.setattr(pb, "tracked_session_id", lambda name: UUID)
+    with pytest.raises(HTTPException):
+        asyncio.run(pb.pull(_pull(session_id="nova")))
+    monkeypatch.setattr(pb, "tracked_session_id", lambda name: "nova")
+    asyncio.run(pb.pull(_pull(session_id="nova")))
+    assert pb._donos["s1"][0] == "a"
+
+
+def test_conversa_acompanhada_so_vale_com_vinculo_certo(monkeypatch):
+    # Palpite por mtime (tracked=False) não identifica conversa: aceitá-lo devolveria o risco.
+    from app import api, tmux
+    monkeypatch.setattr(tmux, "list_panes_active", lambda: [{"name": "s1", "cwd": "/w"}])
+    resolucao = {"v": ("/c/projects/-w/abc.jsonl", True)}
+    monkeypatch.setattr(api.registry, "resolve_tracked", lambda name, cwd: resolucao["v"])
+    assert _REAL_TRACKED("s1") == "abc"
+    resolucao["v"] = ("/c/projects/-w/abc.jsonl", False)
+    assert _REAL_TRACKED("s1") is None
+    resolucao["v"] = (None, False)
+    assert _REAL_TRACKED("s1") is None

@@ -276,6 +276,7 @@ def esquecer(name: str) -> None:
         _confirmacoes.pop(name, None)
         _preenchido.pop(name, None)
     _eventos.pop(name, None)
+    _recusas.pop(name, None)
 
 
 def _confere(name: str, token: str) -> None:
@@ -542,6 +543,32 @@ def _entregar(name: str, texto: str, modo: str, jsonl: str | None = None):
     return True
 
 
+def tracked_session_id(name: str) -> str | None:
+    """O uuid da conversa que o Hangar acompanha nesta sessão; None quando o vínculo é só palpite."""
+    from app import tmux
+    from app.api import registry
+    cwd = next((p["cwd"] for p in tmux.list_panes_active() if p["name"] == name), "")
+    jsonl, tracked = registry.resolve_tracked(name, cwd)
+    return Path(jsonl).stem if jsonl and tracked else None
+
+
+def _conversation_mismatch(name: str, session_id: str | None) -> str | None:
+    """None quando quem chama é a conversa que o Hangar acompanha; senão o motivo da recusa.
+
+    Pane, ambiente herdado e pid do psmux valem para QUALQUER `claude` aberto na sessão (split, janela
+    nova); só a conversa separa o dono de um segundo processo. Plugin velho não manda o id e cai na tecla."""
+    if not session_id:
+        return "uuid-ausente"
+    atual = tracked_session_id(name)
+    if atual is None:
+        return "uuid-desconhecido"
+    return None if atual == session_id else "uuid-diferente"
+
+
+# Última recusa logada por sessão: o plugin recusado volta a cada 30 s, e o log só registra a mudança.
+_recusas: dict[str, str] = {}
+
+
 class PullBody(BaseModel):
     sessao: str
     token: str
@@ -549,6 +576,8 @@ class PullBody(BaseModel):
     modos: list[str] = []
     # Último estado que o plugin viu: o `idle` da largada sai antes de existir ponte.
     estado: str | None = None
+    # `$.session.id()` do plugin: a conversa que ele atende.
+    session_id: str | None = None
 
 
 class StateBody(BaseModel):
@@ -567,6 +596,7 @@ class WhoamiBody(BaseModel):
     pane: str | None = None
     nome: str | None = None
     tmux: str | None = None
+    session_id: str | None = None
 
 
 @plugin_router.post("/whoami", dependencies=[Depends(require_loopback)])
@@ -576,6 +606,12 @@ async def whoami(body: WhoamiBody):
     if not secrets.compare_digest(machine_key(), body.chave):
         raise HTTPException(403, detail="chave do plugin invalida")
     nome, origem = await _whoami(body)
+    if nome:
+        recusa = await asyncio.to_thread(_conversation_mismatch, nome, body.session_id)
+        if recusa:
+            _log.info("plugin whoami recusado pane=%s sessao=%s uuid=%s origem=%s",
+                      body.pane, nome, body.session_id, recusa)
+            return {"sessao": None}
     _log.info("plugin whoami pane=%s sessao=%s origem=%s", body.pane, nome, origem)
     return {"sessao": nome, "token": mint(nome), "origem": origem} if nome else {"sessao": None}
 
@@ -620,6 +656,17 @@ async def pull(body: PullBody):
     app. O token por sessão é a credencial daqui.
     """
     _confere(body.sessao, body.token)
+    recusa = await asyncio.to_thread(_conversation_mismatch, body.sessao, body.session_id)
+    marca = f"{body.instance}:{recusa}"
+    if _recusas.get(body.sessao) != marca:
+        _recusas[body.sessao] = marca
+        if recusa:
+            _log.info("plugin pull recusado sessao=%s instance=%s uuid=%s origem=%s",
+                      body.sessao, body.instance, body.session_id, recusa)
+    if recusa:
+        # 409 como o de dono: o plugin larga a ponte e tenta de novo depois — após um `/clear` os
+        # dois ids voltam a bater e o dono se recupera sozinho.
+        raise HTTPException(409, detail=f"conversa nao e a que o Hangar acompanha ({recusa})")
     agora = time.monotonic()
     with _lock:
         dono = _donos.get(body.sessao)
