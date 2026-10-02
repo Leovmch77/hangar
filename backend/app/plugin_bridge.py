@@ -31,6 +31,7 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
+from app import atomico
 from app.auth import require_loopback
 
 _log = logging.getLogger("hangar.plugin_bridge")
@@ -210,7 +211,7 @@ def _publish_address(home: Path | None = None) -> None:
         tmp.chmod(0o600)
     except OSError:
         pass
-    tmp.replace(alvo)
+    atomico.substituir(tmp, alvo)
 
 
 # O conftest troca `publish_address`; o teste chega na implementação por `_publish_address`.
