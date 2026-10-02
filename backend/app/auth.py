@@ -72,6 +72,18 @@ def registrar_acesso(ip: str, mecanismo: str, motivo: str | None, *, dominio: st
 # IP real chega via X-Forwarded-For, que o uvicorn resolve por CP_FORWARDED_ALLOW_IPS.
 _LOOPBACK = {"127.0.0.1", "::1", "localhost"}
 
+COOKIE = "cp_token"
+COOKIE_HOST = "__Host-cp_token"
+# O cookie vai junto em qualquer pedido do mesmo site — inclusive vindo da página de OUTRA máquina
+# do mesmo domínio. Por isso ele só serve para ler; quem age manda a senha que a página escreveu.
+_COOKIE_METODOS = ("GET", "HEAD")
+
+
+def cookie_token(cookies, https: bool) -> str | None:
+    """O `__Host-` só pode ter vindo de uma página https deste host, então vale sempre que estiver lá.
+    O `cp_token` sem prefixo outra máquina do mesmo site consegue gravar: em https ele é ignorado."""
+    return cookies.get(COOKIE_HOST) or (None if https else cookies.get(COOKIE))
+
 
 def _blocked(ip: str, now: float) -> bool:
     hits = _fails.get(ip)
@@ -126,9 +138,13 @@ def require_auth(request: Request) -> None:
         # A SSE (EventSource) nao consegue mandar header Authorization; cross-origin (multi-PC) o
         # cookie tb nao vai (SameSite) -> sobra o ?token= na URL. Aceitar a query e o que faltava
         # (era 401 em /events?token=...). Ordem: header -> query -> cookie (same-origin).
-        token = request.query_params.get("token") or request.cookies.get("cp_token")
-        mecanismo = ("query" if request.query_params.get("token") else
-                     "cookie" if request.cookies.get("cp_token") else "ausente")
+        query = request.query_params.get("token")
+        cookie = cookie_token(request.cookies, request.url.scheme in ("https", "wss"))
+        # `codex_voice` chama isto com um WebSocket, que não tem método: o aperto de mão é leitura.
+        if cookie and getattr(request, "method", "GET") not in _COOKIE_METODOS:
+            cookie = None
+        token = query or cookie
+        mecanismo = "query" if query else "cookie" if cookie else "ausente"
     ip = request.client.host if request.client else "?"
     local = ip in _LOOPBACK
     now = time.time()

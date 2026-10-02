@@ -102,8 +102,15 @@ function syncCookie(token: string | null): void {
   // Max-Age de 1 ano DE PROPÓSITO: sem ele o cookie é de sessão e morre quando o navegador fecha.
   // O token continua no localStorage, então as chamadas REST (que mandam Authorization) seguem
   // funcionando e o app PARECE são — só o SSE volta 401, e a lista de sessões fica vazia.
-  if (token) document.cookie = `cp_token=${token}; path=/; SameSite=Lax; Max-Age=31536000`;
-  else document.cookie = 'cp_token=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT';
+  // Em https o nome leva `__Host-`: o navegador não deixa outra máquina do mesmo site gravar um igual.
+  // Secure só em https: em http de LAN o navegador recusaria o cookie inteiro.
+  const https = location.protocol === 'https:';
+  const name = https ? '__Host-cp_token' : 'cp_token';
+  const secure = https ? '; Secure' : '';
+  if (token) document.cookie = `${name}=${token}; path=/; SameSite=Lax; Max-Age=31536000${secure}`;
+  else document.cookie = `${name}=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT${secure}`;
+  // O `cp_token` de antes do prefixo ficaria um ano no navegador sem servir para nada.
+  if (https) document.cookie = 'cp_token=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT';
 }
 
 // Cookie é por HOST (localhost e 127.0.0.1 são hosts diferentes) e morria ao fechar o navegador.

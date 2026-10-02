@@ -8,7 +8,7 @@ import secrets
 from http.cookies import CookieError, SimpleCookie
 from urllib.parse import parse_qs
 
-from app import guest_users, share_gate
+from app import auth as auth_mod, guest_users, share_gate
 from app.config import settings
 from app.share_tunnel import GUEST_PORT, port_clash
 
@@ -68,7 +68,12 @@ def _token(scope) -> str:
         jar.load(headers.get(b"cookie", b"").decode("latin-1"))
     except CookieError:
         return ""
-    return jar["cp_token"].value if "cp_token" in jar else ""
+    if scope["type"] == "http" and scope.get("method") not in auth_mod._COOKIE_METODOS:
+        return ""
+    if auth_mod.COOKIE_HOST in jar:
+        return jar[auth_mod.COOKIE_HOST].value
+    https = scope.get("scheme") in ("https", "wss")
+    return jar[auth_mod.COOKIE].value if not https and auth_mod.COOKIE in jar else ""
 
 
 class GuestUserGate:

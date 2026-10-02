@@ -143,6 +143,10 @@ def _set_session_cookie(response: Response, user: str, request: Request, gen: st
 
 
 def require_session(request: Request, response: Response) -> str:
+    # Máquinas do Connect dividem o site com o hub: ação vinda de outra página do site é recusada.
+    # O app nativo não manda Sec-Fetch-Site, e a página do próprio hub manda same-origin.
+    if request.method not in ("GET", "HEAD") and request.headers.get("sec-fetch-site") in ("same-site", "cross-site"):
+        raise HTTPException(status_code=403, detail=erro("erro_nao_autorizado", "unauthorized"))
     cookie = request.cookies.get(COOKIE_NAME)
     session = verify_session(cookie)
     ip = request.client.host if request.client else "?"
