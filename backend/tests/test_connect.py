@@ -53,3 +53,51 @@ def test_estado_ida_e_volta(tmp_path, monkeypatch):
     assert connect.read_state() == {}
     connect.write_state({"code": "x", "enabled": True})
     assert connect.read_state() == {"code": "x", "enabled": True}
+
+
+import hashlib
+import io
+import tarfile
+
+
+def _tar(membro: str, conteudo: bytes) -> bytes:
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as t:
+        info = tarfile.TarInfo(membro)
+        info.size = len(conteudo)
+        t.addfile(info, io.BytesIO(conteudo))
+    return buf.getvalue()
+
+
+@pytest.fixture
+def _plataforma(tmp_path, monkeypatch):
+    monkeypatch.setattr(connect, "folder", lambda: tmp_path)
+    monkeypatch.setattr(connect, "_platform", lambda: ("linux", "amd64"))
+    pacotes = {
+        "frp": _tar("frp_0.71.0_linux_amd64/frpc", b"FRPC"),
+        "caddy": _tar("caddy", b"CADDY"),
+    }
+    monkeypatch.setitem(connect._FRP_SHA256, ("linux", "amd64"), hashlib.sha256(pacotes["frp"]).hexdigest())
+    monkeypatch.setitem(connect._CADDY_SHA512, ("linux", "amd64"), hashlib.sha512(pacotes["caddy"]).hexdigest())
+    baixados = []
+
+    def baixar(url):
+        baixados.append(url)
+        return pacotes["frp" if "fatedier" in url else "caddy"]
+
+    monkeypatch.setattr(connect, "_download", baixar)
+    return baixados
+
+
+def test_binarios_baixa_uma_vez(_plataforma):
+    bins = connect.binaries()
+    assert bins["frpc"].read_bytes() == b"FRPC" and bins["caddy"].read_bytes() == b"CADDY"
+    connect.binaries()
+    assert len(_plataforma) == 2
+
+
+def test_hash_errado_nao_grava(_plataforma, monkeypatch):
+    monkeypatch.setitem(connect._FRP_SHA256, ("linux", "amd64"), "0" * 64)
+    with pytest.raises(connect.ConnectError):
+        connect.binaries()
+    assert not list((connect.folder() / "bin").rglob("frpc"))
