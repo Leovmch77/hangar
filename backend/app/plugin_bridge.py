@@ -219,8 +219,8 @@ publish_address = _publish_address
 
 def _socket_do_tmux() -> str | None:
     """Socket do servidor tmux do Hangar, ou None quando não dá para saber (aí não se compara)."""
-    # ponytail: no Windows o formato do `TMUX` do psmux não foi medido; comparar lá arriscaria
-    # recusar toda sessão. Medir e ligar quando for preciso.
+    # No psmux `#{socket_path}` nunca é igual ao caminho do `TMUX` (medido): a comparação lá
+    # recusaria toda sessão.
     if os.name == "nt":
         return None
     from app import tmux
@@ -232,7 +232,7 @@ def _socket_do_tmux() -> str | None:
 
 
 def _sessao_do_tmux(tmux_env: str) -> str | None:
-    """`TMUX` é `socket,pid,id`: no psmux o pane se repete entre sessões, o id da sessão não."""
+    """`TMUX` é `socket,pid,id` no tmux: o id é o da sessão (`$N`), que dá o nome dela."""
     partes = (tmux_env or "").split(",")
     if len(partes) < 3 or not partes[2].strip():
         return None
@@ -309,7 +309,7 @@ MODO_PADRAO = "fill"
 # expandido, `!` é modo bash digitado e `/` é menu da TUI.
 _MENCAO = re.compile(r"(^|\s)@\S")
 PROVA_TRANSCRIPT_S = 10.0
-# Sem confirmação e sem transcript legível: nem entregue, nem livre para digitar.
+# Sem confirmação nem prova (transcript ilegível ou texto repetido): nem entregue, nem livre p/ tecla.
 INCERTO = "incerto"
 
 
@@ -351,7 +351,13 @@ def _prova_user(aviso: threading.Event, texto: str, jsonl: str | None, antes: se
             return "aviso"
         if time.monotonic() >= limite:
             # Repetido e legível também é incerto: o texto está lá, mas pode ser o de antes.
-            return INCERTO if (repetido or lido is None) else False
+            if repetido or lido is None:
+                return INCERTO
+            # O texto pode ter chegado durante a última espera: sem reler, seria digitado de novo.
+            lido = _linhas_do_usuario(jsonl)
+            if lido is None:
+                return INCERTO
+            return alvo in lido
 
 # Teto da espera pelo aviso de que o rascunho entrou. Passou disso, o Enter NÃO
 # é enviado: apertar Enter num composer que não recebeu o texto submete o que

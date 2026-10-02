@@ -352,7 +352,7 @@ def test_modo_user_so_com_dono_que_declarou_sessao_parada_e_texto_simples(monkey
 
 
 def _entrega_user(monkeypatch, confirma: bool | None, no_transcript: set[str] | None,
-                  antes: set[str] | None = frozenset(), confirma_s: float = 0.3):
+                  antes: set[str] | None = frozenset(), confirma_s: float = 0.3, leitura=None):
     monkeypatch.setattr(pb, "CONFIRMA_S", confirma_s)
     monkeypatch.setattr(pb, "PROVA_TRANSCRIPT_S", 0.3)
     from app import pqueue, tmux
@@ -360,7 +360,7 @@ def _entrega_user(monkeypatch, confirma: bool | None, no_transcript: set[str] | 
     # A primeira leitura é a foto de antes da entrega; as seguintes, o transcript depois dela.
     leituras = iter([antes])
     monkeypatch.setattr(pqueue, "committed_user_lines",
-                        lambda jsonl, provider="claude": next(leituras, no_transcript))
+                        leitura or (lambda jsonl, provider="claude": next(leituras, no_transcript)))
 
     async def cena():
         pull = asyncio.create_task(pb.pull(pb.PullBody(sessao="s1", token=pb.mint("s1"), instance="a",
@@ -396,6 +396,21 @@ def test_modo_user_texto_no_transcript_responde_antes_da_confirmacao(monkeypatch
     inicio = time.monotonic()
     assert _entrega_user(monkeypatch, None, {"oi"}, confirma_s=30.0) is True
     assert time.monotonic() - inicio < 2.0
+
+
+def test_modo_user_texto_que_chega_no_fim_do_prazo_nao_volta_pra_tecla(monkeypatch):
+    # O texto só aparece depois da última leitura do laço: sem a releitura no prazo, iria pra tecla.
+    import time
+    from app import pqueue
+    prazo = []
+
+    def leitura(jsonl, provider="claude"):
+        if not prazo:
+            prazo.append(time.monotonic() + pb.CONFIRMA_S + pb.PROVA_TRANSCRIPT_S)
+            return set()
+        return {"oi"} if time.monotonic() >= prazo[0] else set()
+
+    assert _entrega_user(monkeypatch, None, set(), leitura=leitura) is True
 
 
 def test_modo_user_texto_igual_a_um_anterior_nao_prova_a_entrega(monkeypatch):
