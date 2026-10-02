@@ -306,22 +306,36 @@ def choose_mode(name: str, text: str) -> str:
     return MODO_PADRAO
 
 
-def _no_transcript(jsonl: str | None, texto: str) -> bool | None:
-    """O texto já é fala do usuário no transcript? None = não deu para ler (não autoriza digitar)."""
+def _linhas_do_usuario(jsonl: str | None) -> set[str] | None:
     if not jsonl:
         return None
     from app import pqueue
-    limite = time.monotonic() + PROVA_TRANSCRIPT_S
+    return pqueue.committed_user_lines(jsonl)
+
+
+def _prova_user(aviso: threading.Event, texto: str, jsonl: str | None, antes: set[str] | None):
+    """Entrega `user`: vale o que vier primeiro, o aviso do plugin (que só chega depois dos hooks
+    do UserPromptSubmit) ou o texto no transcript. Devolve "aviso", True (transcript), False ou
+    `INCERTO`."""
     alvo = texto.strip()
+    inicio = time.monotonic()
+    limite = inicio + CONFIRMA_S + PROVA_TRANSCRIPT_S
+    # A conferência é por conjunto: texto que já estava lá não prova esta entrega. Sem a foto de
+    # antes, o transcript só vale depois do prazo do aviso, como era.
+    repetido = antes is not None and alvo in antes
+    transcript_desde = inicio + (CONFIRMA_S if antes is None else 0.0)
+    lido: set[str] | None = None
     while True:
-        linhas = pqueue.committed_user_lines(jsonl)
-        if linhas is None:
-            return None
-        if alvo in linhas:
-            return True
+        agora = time.monotonic()
+        if not repetido and agora >= transcript_desde:
+            lido = _linhas_do_usuario(jsonl)
+            if lido is not None and alvo in lido:
+                return True
+        if aviso.wait(max(0.0, min(0.15, limite - agora))):
+            return "aviso"
         if time.monotonic() >= limite:
-            return False
-        time.sleep(0.25)
+            # Repetido e legível também é incerto: o texto está lá, mas pode ser o de antes.
+            return INCERTO if (repetido or lido is None) else False
 
 # Teto da espera pelo aviso de que o rascunho entrou. Passou disso, o Enter NÃO
 # é enviado: apertar Enter num composer que não recebeu o texto submete o que
@@ -459,6 +473,8 @@ def _entregar(name: str, texto: str, modo: str, jsonl: str | None = None):
         with _lock:
             _confirmacoes[name] = aviso
             _preenchido.pop(name, None)
+    # A foto sai ANTES de o plugin receber o texto: depois, não dá para separar o novo do repetido.
+    antes = _linhas_do_usuario(jsonl) if modo == "user" else None
     try:
         loop.call_soon_threadsafe(fila.put_nowait, {"text": texto, "modo": modo})
     except RuntimeError:
@@ -466,18 +482,21 @@ def _entregar(name: str, texto: str, modo: str, jsonl: str | None = None):
         return False
     if modo not in ("fill", "user"):
         return True
+    if modo == "user":
+        prova = _prova_user(aviso, texto, jsonl, antes)
+        with _lock:
+            ok = _preenchido.pop(name, False)
+            _confirmacoes.pop(name, None)
+        if prova == "aviso":
+            return ok
+        if prova is not True:
+            _log.warning("plugin %s: envio sem confirmação nem prova no transcript — resultado=%s",
+                         name, prova)
+        return prova
     confirmou = aviso.wait(CONFIRMA_S)
     with _lock:
         ok = _preenchido.pop(name, False)
         _confirmacoes.pop(name, None)
-    if modo == "user":
-        if confirmou:
-            return ok
-        _log.warning("plugin %s: envio sem confirmação em %.0fs — conferindo o transcript", name, CONFIRMA_S)
-        prova = _no_transcript(jsonl, texto)
-        if prova is None:
-            return INCERTO
-        return prova
     if not confirmou:
         _log.warning("plugin %s: rascunho sem confirmação em %.0fs — sem Enter", name, CONFIRMA_S)
     from app import terminal_input, tmux

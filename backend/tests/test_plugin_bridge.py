@@ -323,12 +323,16 @@ def test_modo_user_so_com_dono_que_declarou_sessao_parada_e_texto_simples(monkey
     assert pb.choose_mode("s1", "oi") == "fill"
 
 
-def _entrega_user(monkeypatch, confirma: bool | None, no_transcript: set[str] | None):
-    monkeypatch.setattr(pb, "CONFIRMA_S", 0.3)
+def _entrega_user(monkeypatch, confirma: bool | None, no_transcript: set[str] | None,
+                  antes: set[str] | None = frozenset(), confirma_s: float = 0.3):
+    monkeypatch.setattr(pb, "CONFIRMA_S", confirma_s)
     monkeypatch.setattr(pb, "PROVA_TRANSCRIPT_S", 0.3)
     from app import pqueue, tmux
     monkeypatch.setattr(tmux, "send_keys", lambda *a, **k: pytest.fail("modo user não aperta tecla"))
-    monkeypatch.setattr(pqueue, "committed_user_lines", lambda jsonl, provider="claude": no_transcript)
+    # A primeira leitura é a foto de antes da entrega; as seguintes, o transcript depois dela.
+    leituras = iter([antes])
+    monkeypatch.setattr(pqueue, "committed_user_lines",
+                        lambda jsonl, provider="claude": next(leituras, no_transcript))
 
     async def cena():
         pull = asyncio.create_task(pb.pull(pb.PullBody(sessao="s1", token=pb.mint("s1"), instance="a",
@@ -357,3 +361,16 @@ def test_modo_user_sem_confirmacao_e_fora_do_transcript_volta_pro_tmux(monkeypat
 
 def test_modo_user_sem_confirmacao_e_transcript_ilegivel_nao_volta_pra_tecla(monkeypatch):
     assert _entrega_user(monkeypatch, None, None) is pb.INCERTO
+
+
+def test_modo_user_texto_no_transcript_responde_antes_da_confirmacao(monkeypatch):
+    import time
+    inicio = time.monotonic()
+    assert _entrega_user(monkeypatch, None, {"oi"}, confirma_s=30.0) is True
+    assert time.monotonic() - inicio < 2.0
+
+
+def test_modo_user_texto_igual_a_um_anterior_nao_prova_a_entrega(monkeypatch):
+    # O transcript é conferido por conjunto: o "oi" de antes não diz que este chegou.
+    assert _entrega_user(monkeypatch, None, {"oi"}, antes={"oi"}) is pb.INCERTO
+    assert _entrega_user(monkeypatch, True, {"oi"}, antes={"oi"}) is True
