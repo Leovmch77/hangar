@@ -566,3 +566,44 @@ This is how `test_script_ao_lado_do_projeto_nao_e_acusado_de_inexistente`
   files opened with share mode `None`). The fix is `rmtree(..., onexc=...)` that clears the attribute
   and retries only on `PermissionError`; anything else still surfaces. Claude accounts are not
   affected: their `plugins/` is a symlink to the shared folder, so no git clone lives inside them.
+
+## Envio pelo plugin no Windows: tempos e o que não funcionou na DELPHI-02
+
+(01/10/2026, Claude Code 2.1.287, psmux, `main` local `a78cc533` levada por bundle sobre
+`27ef48e2`.) Mensagens `responda só: ok N` por `POST /api/sessions/<nome>/input` no backend da
+VM. O pedido e a linha `SEND` foram carimbados no relógio da VM, por um leitor do log a cada 5 ms,
+porque o log não tem hora. O instante do prompt vem do `timestamp` no `.jsonl`.
+
+| caso | caminho | pedido → `SEND` | pedido → prompt no transcript | HTTP `/input` |
+|---|---|---|---|---|
+| antes, `27ef48e2`, sessão do Hangar, 10 msgs | plugin | 383,5 ms | 124 ms | 519,5 ms |
+| depois, sessão do Hangar (`--new --terminal`), 10 msgs | plugin, `modo=user` nas 10, inclusive a 1ª | 913 ms | 146 ms | 968 ms |
+| depois, `claude` digitado num psmux aberto à mão, 5 msgs | teclas | 754 ms | 390 ms | 751 ms |
+
+(medianas; todas as mensagens entraram uma vez só)
+
+- A linha de base já ia pelo plugin, então a comparação é plugin antigo contra plugin novo. O
+  prompt chega ao transcript praticamente no mesmo tempo (124 → 146 ms). O `/input` ficou ~450 ms
+  mais lento porque, no `modo=user`, o backend espera o `/submitted` do plugin, e ele só sai quando
+  o `$.prompt.submit` termina, ~750 ms depois de o prompt já estar no transcript. Contra as
+  teclas, o plugin põe o prompt no transcript 2,7× mais rápido, mas responde o HTTP mais tarde.
+- **`/whoami` não acha sessão aberta fora do Hangar no psmux.** Log:
+  `plugin whoami pane=%1 sessao=None origem=tmux`. No psmux todo pane é `%1` (três sessões vivas,
+  as três `%1`), e o `TMUX` é `/tmp/psmux-37148/default,55189,0`: o terceiro campo é `0`, não o
+  id da sessão (`$92`). O `_sessao_do_tmux` procura `$0` e não acha. A sessão fica sem plugin e
+  recebe pelas teclas.
+- **O plugin foi copiado, não ligado por junção.** O `install-hangar-send.sh` chama
+  `cmd //c mklink /J`; o Git Bash converte o `/J` solto em `J:/` (`cmd //c echo /J` imprime `J:/`),
+  o `mklink` responde `Invalid switch` e o script cai no `cp -r`. Com `//J` a junção nasce
+  (testado numa pasta temporária). O `install.ps1` descarta a saída do script quando ele sai 0, por
+  isso o `-Update` não mostra o `COPIA do plugin`. O `claude plugin list` carrega `hangar@skills-dir`
+  da cópia. Cada reinstalação regrava a pasta, e a sessão aberta recarrega o mod
+  (`hooks.json changed — reloaded`).
+- Segunda execução do `install.ps1 -Update`: termina com 0 e não cria `plugins\hangar\hangar`. Continua
+  em `COPIA do plugin`, nunca em `ja linkado`.
+- `~/.hangar/plugin.json` só tem `url` e `chave`; o bearer do `backend\.env` aparece nele 0 vezes. A
+  outra conta da VM (`.claude-claude-200-5`) tem `skills` como symlink para `~\.claude\skills`.
+- Reinício do backend no meio de uma resposta (`Restart-HangarTask`, porta de volta em 19,4 s): a
+  mensagem enviada 1,7 s depois da volta da porta foi pelas teclas e entrou uma vez. A seguinte, ~25 s
+  depois, já foi pelo plugin, `modo=user`. A mensagem longa enviada logo depois da segunda
+  reinstalação, que reinicia o backend e regrava a cópia, também foi pelas teclas.
