@@ -22,6 +22,8 @@ export type Leitura = 'auto' | 'none' | 'text' | 'sheet';
 /** Como a chamada de ferramenta aparece na conversa (ToolLook do Rust). */
 export type Ferramentas = 'classic' | 'chips' | 'tree';
 export type DestaquePergunta = 'accent' | 'amber';
+/** Gaveta da tela inicial: sessões agrupadas ou conversas (vivas e fechadas) por recência. */
+export type Organizar = 'sessions' | 'conversations';
 const TEMAS: Tema[] = ['system', 'light', 'dark'];
 const FUNDOS: Fundo[] = ['flat', 'texture', 'aurora', 'image'];
 const IDIOMAS: Idioma[] = ['system', 'pt', 'en'];
@@ -30,10 +32,12 @@ const LEITURAS: Leitura[] = ['auto', 'none', 'text', 'sheet'];
 const FERRAMENTAS: Ferramentas[] = ['classic', 'chips', 'tree'];
 const DESTAQUES: DestaquePergunta[] = ['accent', 'amber'];
 const AGRUPAR: GroupBy[] = ['none', 'server', 'project'];
+const ORGANIZAR: Organizar[] = ['sessions', 'conversations'];
 const K = 'aparencia.tema';
 const K_IDIOMA = 'aparencia.idioma';
 const K_PENSAMENTO = 'aparencia.pensamentoTools';
 const K_AGRUPAR = 'lista.agrupar';
+const K_ORGANIZAR = 'lista.organizar';
 const K_FUNDO = 'aparencia.fundo';
 const K_IMAGEM = 'aparencia.imagemUri';
 const K_PANEL = 'aparencia.panelAlpha';
@@ -167,6 +171,8 @@ interface Aparencia {
   setPensamentoTools: (v: PensamentoTools) => void;
   agrupar: GroupBy;
   setAgrupar: (v: GroupBy) => void;
+  organizar: Organizar;
+  setOrganizar: (v: Organizar) => void;
   fundo: Fundo;
   setFundo: (v: Fundo) => void;
   imagemUri: string | null;
@@ -257,6 +263,8 @@ export const useAparencia = create<Aparencia>((set, get) => {
     setPensamentoTools: (v) => { prefs.set(K_PENSAMENTO, v); set({ pensamentoTools: v }); },
     agrupar: lerAgrupar(),
     setAgrupar: (v) => { prefs.set(K_AGRUPAR, v); set({ agrupar: v }); },
+    organizar: lerOpcao(K_ORGANIZAR, ORGANIZAR, 'sessions'),
+    setOrganizar: (v) => { prefs.set(K_ORGANIZAR, v); set({ organizar: v }); },
     fundo: lerFundo(),
     // Passa pelo tema: com a Leitura Automática, imagem atrás liga o contraste do Texto.
     setFundo: (v) => material({ fundo: v }, () => prefs.set(K_FUNDO, v)),

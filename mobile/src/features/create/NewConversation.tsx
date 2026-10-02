@@ -56,6 +56,8 @@ type Props = {
   // null enquanto falta destino ou conta; o texto continua editável.
   body: NewConversationInput['body'] | null;
   blocked: boolean;
+  // Distância fixa do topo da janela até a tela; sem ela o recuo do teclado é medido na janela.
+  keyboardOffset?: number;
 };
 
 // O form remonta ao trocar de máquina: o que já foi digitado e anexado vai junto.
@@ -130,7 +132,7 @@ function SendButton({ ready, busy, onPress }: { ready: boolean; busy: boolean; o
 
 export function NewConversation({
   server, destination, destinationPending, providerLabel, folderPanel,
-  topPills, bottomPills, providerChip, resume, notices, options, body, blocked,
+  topPills, bottomPills, providerChip, resume, notices, options, body, blocked, keyboardOffset,
 }: Props) {
   const router = useRouter();
   const { theme } = useUnistyles();
@@ -324,7 +326,8 @@ export function NewConversation({
 
   return (
     <View style={styles.root}>
-      <KeyboardAvoidingView behavior="padding" automaticOffset style={styles.keyboard}>
+      <KeyboardAvoidingView behavior="padding" automaticOffset={keyboardOffset === undefined}
+                            keyboardVerticalOffset={keyboardOffset} style={styles.keyboard}>
       <ScrollView style={styles.states} contentContainerStyle={styles.scroll} keyboardShouldPersistTaps="handled">
         {!reduced && !showPicker && !pending ? <HomeIntroMark epoch={intro.epoch} /> : null}
         {showPicker ? destination : null}

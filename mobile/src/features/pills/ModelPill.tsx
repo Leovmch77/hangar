@@ -1,19 +1,23 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { parseStatusLine, getModelOptions, getPiModels, getKimiModels, getCodexModels, setModelEffort, setPiModel, setKimiModel, setCodexModel } from '@hangar/core';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { parseStatusLine, getModelOptions, getPiModels, getKimiModels, getCodexModels, setModelEffort, setEngineModel, setPiModel, setKimiModel, setCodexModel } from '@hangar/core';
+import type { CodexModelsResponse } from '@hangar/core';
 import { chatStore } from '../../stores/chat';
-import { useSessions } from '../../stores/sessions';
 import * as m from '../../paraglide/messages';
 import { PillMenu, type PillMenuItem } from './PillMenu';
-import { pillLabels, reconcileChosen } from './pills';
-import { SettingRow } from './SettingRow';
+import { pillLabels, type Chosen } from './pills';
+import { RowPill } from './RowPill';
 import { spacedModel } from '../../chat/usage';
 
 interface Props {
   serverId: string;
   name: string;
+  provider: string | null;
+  chosen: Chosen;
+  onChosen: (next: Chosen) => void;
+  // Cada incremento abre o seletor (`/model` digitado ou escolhido na lista de comandos).
+  openSignal?: number;
 }
 
-// Linha "Modelo" da folha de ajustes do composer; o anel de contexto mora no botão que abre a folha.
 // A statusline escreve "Opus5.5·1M" e a lista do Claude, "Opus 5.5": compara sem espaço, pontuação
 // e o sufixo de contexto, senão o modelo atual nunca aparece marcado.
 const semEnfeite = (s: string) => s.split('·')[0].toLowerCase().replace(/[^a-z0-9]/g, '');
@@ -21,165 +25,153 @@ function mesmoModelo(nome: string, statusModel: string | null | undefined): bool
   return !!statusModel && semEnfeite(nome) === semEnfeite(statusModel);
 }
 
-export function ModelPill({ serverId, name }: Props) {
+type Catalog =
+  | { kind: 'codex'; data: CodexModelsResponse }
+  | { kind: 'claude' | 'engine'; names: Map<string, string> }
+  | { kind: 'other' };
+
+export function ModelPill({ serverId, name, provider, chosen, onChosen, openSignal = 0 }: Props) {
   const chat = chatStore(serverId, name);
   const statusLine = chat.use((s) => s.statusLine);
   const statusFields = useMemo(() => parseStatusLine(statusLine), [statusLine]);
-  const provider = useSessions((s) => {
-    const r = s.rows.find((x) => x.name === name);
-    // multi-server: tenta também por serverId quando houver
-    const byServer = s.byServerRecord?.[serverId];
-    if (byServer) {
-      const hit = byServer.find((x) => x.name === name);
-      if (hit?.provider) return hit.provider;
-    }
-    return (r?.provider ?? null) as string | null;
-  });
 
   const isCodex = provider === 'codex';
-  const isPi = provider === 'pi';
+  // omp é o fork do Pi: mesmo seletor, mesmos endpoints.
+  const isPi = provider === 'pi' || provider === 'omp';
   const isKimi = provider === 'kimi';
 
-  const [chosenModel, setChosenModel] = useState<string | null>(null);
   const [tempError, setTempError] = useState<string | null>(null);
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [items, setItems] = useState<PillMenuItem[]>([]);
+  const catalog = useRef<Catalog>({ kind: 'other' });
 
-  const display = useMemo(() => {
-    if (tempError) return tempError;
-    const model = pillLabels(statusFields, { model: chosenModel }).model;
-    return model ? spacedModel(model) : '—';
-  }, [statusFields, chosenModel, tempError]);
-
-  // reconcilia quando statusline confirma
   useEffect(() => {
-    const rec = reconcileChosen(statusFields, { model: chosenModel });
-    if (rec.model !== chosenModel) setChosenModel(rec.model ?? null);
-  }, [statusFields?.model]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (openSignal) setOpen(true);
+  }, [openSignal]);
+
+  const flash = useCallback((msg: string) => {
+    setTempError(msg);
+    setTimeout(() => setTempError(null), 8000);
+  }, []);
+
+  const model = pillLabels(statusFields, chosen).model;
+  const display = tempError ?? (model ? spacedModel(model) : m.composer_modelo());
 
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
+    setNotice(null);
+    const current = chosen.model ?? statusFields?.model;
     try {
       if (isCodex) {
         const res = await getCodexModels(name);
-        setItems(
-          res.models.map((mo) => ({
-            label: mo.displayName ?? mo.model,
-            hint: mo.description ?? undefined,
-            selected: (mo.model === (chosenModel ?? statusFields?.model)),
-            // guarda id no label? usamos label como chave mas precisamos do id real no select
-            // truque: hint guarda description, então usamos um mapa separado — mas pra manter simples,
-            // o label do Codex é único o suficiente; o id real é mapeado na hora do select via lookup
-          })),
-        );
-        // guarda models crus para lookup no select: re-busca no select em vez de guardar
+        catalog.current = { kind: 'codex', data: res };
+        setItems(res.models.map((mo) => ({
+          id: mo.model, label: mo.displayName ?? mo.model, hint: mo.description ?? undefined,
+          selected: mo.model === (chosen.model ?? res.current.model),
+        })));
       } else if (isPi) {
         const res = await getPiModels(name);
-        setItems(
-          res.models.map((mo) => ({
-            label: mo.name ?? mo.id,
-            hint: `${mo.provider}/${mo.id}`,
-            selected: (mo.name ?? mo.id) === (chosenModel ?? statusFields?.model),
-          })),
-        );
+        setItems(res.models.map((mo) => ({
+          label: mo.name ?? mo.id, hint: `${mo.provider}/${mo.id}`, selected: (mo.name ?? mo.id) === current,
+        })));
       } else if (isKimi) {
         const res = await getKimiModels(name);
-        setItems(
-          res.models.map((mo) => ({
-            label: mo.name,
-            hint: mo.alias,
-            selected: mo.name === (chosenModel ?? statusFields?.model),
-          })),
-        );
+        setItems(res.models.map((mo) => ({ id: mo.alias, label: mo.name, hint: mo.alias, selected: mo.name === current })));
       } else {
         const res = await getModelOptions(name);
-        setItems(
-          res.models.map((mo) => ({
-            label: mo.name ?? mo.id,
-            hint: mo.desc ?? undefined,
-            selected: chosenModel ? mo.id === chosenModel : mesmoModelo(mo.name ?? mo.id, statusFields?.model),
-          })),
-        );
+        catalog.current = { kind: res.kind, names: new Map(res.models.map((mo) => [mo.id, mo.name ?? mo.id])) };
+        setItems(res.models.map((mo) => ({
+          id: mo.id, label: mo.name ?? mo.id, hint: mo.desc ?? undefined,
+          selected: chosen.model ? (mo.name ?? mo.id) === chosen.model || mo.id === chosen.model : mesmoModelo(mo.name ?? mo.id, current),
+        })));
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setLoading(false);
     }
-  }, [name, isCodex, isPi, isKimi, chosenModel, statusFields?.model]);
+  }, [name, isCodex, isPi, isKimi, chosen.model, statusFields?.model]);
 
   useEffect(() => {
     if (open) void load();
-  }, [open, load]);
+    // Só ao abrir: recarregar a cada statusline nova piscaria a lista aberta.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
 
   const handleSelect = useCallback(
     async (it: PillMenuItem) => {
+      const id = it.id ?? it.label;
+      let closedEarly = false;
       try {
-        if (isCodex) {
-          // precisa mapear label -> model id
-          const res = await getCodexModels(name);
-          const hit = res.models.find((mo) => (mo.displayName ?? mo.model) === it.label) ?? res.models[0];
-          const target = hit?.model ?? it.label;
-          await setCodexModel(name, target);
-          setChosenModel(target);
+        const cat = catalog.current;
+        if (isCodex && cat.kind === 'codex') {
+          // Trocar de modelo leva o nível padrão do NOVO: o antigo pode nem existir na lista dele.
+          const md = cat.data.models.find((x) => x.model === id);
+          const effort = id === cat.data.current.model
+            ? (cat.data.current.effort ?? md?.defaultEffort ?? null)
+            : (md?.defaultEffort ?? md?.efforts[0]?.value ?? null);
+          await setCodexModel(name, id, effort);
+          onChosen({ model: id, effort });
           setOpen(false);
         } else if (isPi) {
-          // hint é provider/id
           const alias = it.hint ?? it.label;
           const slash = alias.indexOf('/');
-          const prov = slash >= 0 ? alias.slice(0, slash) : undefined;
-          const modelId = slash >= 0 ? alias.slice(slash + 1) : alias;
-          const res = await setPiModel(name, { provider: prov, model: modelId });
-          const newModel = res.current?.name ?? res.current?.id ?? modelId;
-          setChosenModel(newModel);
+          const res = await setPiModel(name, { provider: slash >= 0 ? alias.slice(0, slash) : undefined, model: slash >= 0 ? alias.slice(slash + 1) : alias });
+          onChosen({ ...chosen, model: res.current?.name ?? res.current?.id ?? it.label, effort: res.thinking ?? chosen.effort });
           setOpen(false);
         } else if (isKimi) {
-          const alias = it.hint ?? it.label;
-          const res = await setKimiModel(name, { model: alias });
-          if (res.current?.name) setChosenModel(res.current.name);
-          else setChosenModel(it.label);
+          const res = await setKimiModel(name, { model: id });
+          onChosen({ ...chosen, model: res.current?.name ?? it.label });
           setOpen(false);
-        } else {
-          // Claude: it.label maps to model id via lookup — busca de novo
-          const resList = await getModelOptions(name);
-          const hit = resList.models.find((mo) => (mo.name ?? mo.id) === it.label);
-          const targetId = hit?.id ?? it.label;
-          const res = await setModelEffort(name, { model: targetId, scope: 'session' });
-          if (res?.pending_confirm) {
-            setOpen(false);
+        } else if (cat.kind === 'engine') {
+          // Sessão de motor: o id do provedor é o rótulo, e a troca vale só nesta sessão.
+          const res = await setEngineModel(name, { model: id, effort: chosen.effort ?? statusFields?.effort ?? undefined });
+          onChosen({ ...chosen, model: res.model });
+          if (res.effort_error) {
+            setNotice(m.modelo_trocado_esforco_nao({ erro: res.effort_error }));
             return;
           }
-          if (targetId === 'default') setChosenModel(null);
-          else setChosenModel(targetId.charAt(0).toUpperCase() + targetId.slice(1));
           setOpen(false);
+        } else {
+          // Fecha antes da resposta: a troca pode abrir uma confirmação na conversa, que a folha taparia.
+          closedEarly = true;
+          setOpen(false);
+          const res = await setModelEffort(name, { model: id, scope: 'session' });
+          if (res?.pending_confirm) return;
+          const label = cat.kind === 'claude' ? cat.names.get(id) : undefined;
+          onChosen({
+            ...chosen,
+            model: id === 'default' ? null : label?.replace(/\s*\(1M context\)/i, '·1M').trim() || id.charAt(0).toUpperCase() + id.slice(1),
+          });
         }
       } catch (e) {
         const status = (e as { status?: number }).status;
         const msg = e instanceof Error ? e.message : String(e);
-        if (status === 409) {
-          setTempError(msg || m.composer_sessao_trabalhando());
+        if (status === 409 || closedEarly) {
           setOpen(false);
-          setTimeout(() => setTempError(null), 8000);
+          flash(msg || m.composer_sessao_trabalhando());
         } else {
-          setError(msg);
+          setNotice(msg);
         }
       }
     },
-    [name, isCodex, isPi, isKimi],
+    [name, isCodex, isPi, isKimi, chosen, onChosen, statusFields?.effort, flash],
   );
 
   return (
     <>
-      <SettingRow label={m.composer_modelo()} value={display} onPress={() => setOpen(true)} />
+      <RowPill label={m.composer_modelo()} value={display} onPress={() => setOpen(true)} shrink={3} />
       <PillMenu
         open={open}
         onClose={() => setOpen(false)}
         items={items}
         loading={loading}
         error={error}
+        notice={notice}
         onRetry={() => void load()}
         onSelect={handleSelect}
         title={m.composer_modelo()}

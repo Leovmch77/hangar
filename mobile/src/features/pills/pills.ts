@@ -1,5 +1,9 @@
 import type { StatusFields } from '@hangar/core';
 
+// Escolha otimista da linha do composer: vale até a statusline confirmar (modelo) ou para sempre
+// (nível, que não tem leitura de volta confiável).
+export type Chosen = { model?: string | null; effort?: string | null };
+
 // rótulo que a pílula mostra: escolhido otimista prevalece sobre o que veio da statusline
 export function pillLabels(
   f: StatusFields | null,
@@ -18,7 +22,9 @@ export function reconcileChosen(
   chosen: { model?: string | null; effort?: string | null },
 ): { model?: string | null; effort?: string | null } {
   if (!f?.model || !chosen.model) return chosen;
-  if (f.model.toLowerCase().includes(chosen.model.toLowerCase())) {
+  // Pela primeira palavra: a lista diz "Opus 5.5·1M" e a statusline, "Opus5.5·1M".
+  const word = chosen.model.toLowerCase().split(/[\s·[(]/)[0];
+  if (word && f.model.toLowerCase().includes(word)) {
     return { ...chosen, model: null };
   }
   return chosen;

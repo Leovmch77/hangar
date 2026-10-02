@@ -13,12 +13,21 @@ interface Props {
   options: string[];
   onSelect: (n: number) => void | Promise<void>;
   onCancel: () => void | Promise<void>;
+  /** Envia as opções marcadas (só múltipla escolha). Ausente = sem botão de enviar. */
+  onSubmit?: () => void | Promise<void>;
 }
 
-export function OptionButtons({ question, options, onSelect, onCancel }: Props) {
+// MÚLTIPLA ESCOLHA: o TUI desenha a caixinha antes do rótulo ("[ ] Alfa", "[✔] Alfa"), e só por ela
+// dá pra saber. Marcar e enviar são ações diferentes: o toque alterna, quem envia é o botão.
+const CAIXA = /^\[(.?)\]\s*/;
+const marcada = (o: string) => /^\[[^\s\]]\]/.test(o);
+
+export function OptionButtons({ question, options, onSelect, onCancel, onSubmit }: Props) {
   const { theme } = useUnistyles();
   const permission = isPermission(options);
   const kinds = options.map((o) => kindOf(o));
+  const multipla = options.some((o) => CAIXA.test(o));
+  const marcadas = options.filter(marcada).length;
   const locked = useRef(false);
   const mounted = useRef(true);
   const [busy, setBusy] = useState(false);
@@ -73,7 +82,7 @@ export function OptionButtons({ question, options, onSelect, onCancel }: Props) 
               key={i}
               onPress={() => void run(() => onSelect(i + 1))}
               disabled={busy}
-              accessibilityState={{ disabled: busy, busy }}
+              accessibilityState={{ disabled: busy, busy, checked: multipla ? marcada(opt) : undefined }}
               style={[
                 styles.btn,
                 { backgroundColor: superficie(theme, 0.8), borderColor: theme.tokens.border.default },
@@ -94,6 +103,15 @@ export function OptionButtons({ question, options, onSelect, onCancel }: Props) 
               >
                 {i + 1}.
               </Text>
+              {multipla ? (
+                <View
+                  style={[styles.caixa, { borderColor: theme.tokens.border.default }, marcada(opt) && { backgroundColor: theme.tokens.accent.base, borderColor: theme.tokens.accent.base }]}
+                  accessibilityElementsHidden
+                  importantForAccessibility="no-hide-descendants"
+                >
+                  {marcada(opt) ? <Icon name="Check" size={12} color="#fff" /> : null}
+                </View>
+              ) : null}
               <Text
                 style={[
                   styles.optTxt,
@@ -103,11 +121,23 @@ export function OptionButtons({ question, options, onSelect, onCancel }: Props) 
                   isDeny && { color: theme.tokens.status.error },
                 ]}
               >
-                {opt}
+                {multipla ? opt.replace(CAIXA, '') : opt}
               </Text>
             </Pressable>
           );
         })}
+        {multipla && onSubmit ? (
+          <Pressable
+            onPress={() => void run(onSubmit)}
+            disabled={busy || marcadas === 0}
+            accessibilityState={{ disabled: busy || marcadas === 0, busy }}
+            style={[styles.btn, { backgroundColor: theme.tokens.accent.base, borderColor: theme.tokens.accent.base }, marcadas === 0 && styles.off]}
+            accessibilityRole="button"
+          >
+            <Icon name="Send" size={14} color="#fff" />
+            <Text style={[styles.optTxt, { color: '#fff' }]}>{m.opcoes_enviar_marcadas({ n: marcadas })}</Text>
+          </Pressable>
+        ) : null}
         <Pressable
           onPress={() => void run(onCancel)}
           disabled={busy}
@@ -178,5 +208,16 @@ const styles = StyleSheet.create((theme) => ({
   optTxt: {
     fontSize: theme.base.text.base,
     flex: 1,
+  },
+  caixa: {
+    width: 18,
+    height: 18,
+    borderRadius: 4,
+    borderWidth: 1.5,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  off: {
+    opacity: 0.45,
   },
 }));

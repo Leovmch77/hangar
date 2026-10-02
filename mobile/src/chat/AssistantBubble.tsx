@@ -1,12 +1,16 @@
-import { memo, useEffect, useMemo, useState } from 'react';
-import { Platform, Pressable, View, Text } from 'react-native';
+import { memo, useCallback, useEffect, useMemo, useState } from 'react';
+import { Linking, Platform, Pressable, View, Text } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import type { UnistylesThemes } from 'react-native-unistyles';
-import { Image } from 'expo-image';
+import { ImageThumb, type MediaItem } from './ImageThumb';
+import { AudioChip } from './AudioChip';
+import { DocumentViewer, type DocumentItem } from '../features/attachments/DocumentViewer';
+import { canShareFile, shareFile } from '../features/attachments/mediaCache';
+import { toast } from '../ui/Toast';
 import { EnrichedMarkdownText } from 'react-native-enriched-markdown';
 import type { MarkdownStyle } from 'react-native-enriched-markdown';
 import { useRouter } from 'expo-router';
-import { fileUrlNative, fileAuthHeader, fileKind, lerTabelaMarkdown, parseCodePaths, parseFilePaths, proposedPlan, planDisplayText } from '@hangar/core';
+import { fileUrlNative, fileAuthHeader, fileKind, lerTabelaMarkdown, linkCodeReferences, parseCodePaths, parseFileLink, parseFilePaths, parseMediaUrls, proposedPlan, planDisplayText } from '@hangar/core';
 import * as m from '../paraglide/messages';
 import { TableChart } from './TableChart';
 import { ArquivoChip } from './ArquivoChip';
@@ -108,8 +112,37 @@ export const AssistantBubble = memo(function AssistantBubble({
   const proposed = useMemo(() => proposedPlan(text), [text]);
   const display = useMemo(() => planDisplayText(text), [text]);
   const md = useMemo(() => mkMarkdownStyle(theme), [theme]);
-  const refs = useMemo(() => parseFilePaths(text), [text]);
-  const hasRefs = refs.length > 0 && !!sessionName;
+  // Anexos: mídia/pdf/html citados por caminho (precisam da sessão) + mídia remota por URL, que o
+  // web desenha igual. Imagem e vídeo da mensagem formam UMA galeria no visor.
+  const atts = useMemo(() => {
+    const local = sessionName
+      ? parseFilePaths(text).map((r) => ({ ...r, uri: fileUrlNative(sessionName, r.path), headers: fileAuthHeader() as Record<string, string> | undefined }))
+      : [];
+    const remota = parseMediaUrls(text).map((r) => ({ ...r, uri: r.url!, headers: undefined }));
+    return [...local, ...remota];
+  }, [text, sessionName]);
+  const galeria = useMemo<MediaItem[]>(
+    () => atts.flatMap((a) => (a.kind === 'image' || a.kind === 'video' ? [{ uri: a.uri, headers: a.headers, name: a.name, kind: a.kind }] : [])),
+    [atts],
+  );
+  const [doc, setDoc] = useState<DocumentItem | null>(null);
+  const abrirArquivo = useCallback(
+    (path: string) => router.push(`/s/${serverId}/${sessionName}/files?path=${encodeURIComponent(path)}` as never),
+    [router, serverId, sessionName],
+  );
+  const podeAbrirArquivo = !!sessionName && !!serverId;
+  // Citação `caminho:linha` vira link no markdown (a lib só devolve toque em link); o toque abre a
+  // aba Arquivos. URL de verdade sai pro sistema.
+  const markdown = useMemo(() => (podeAbrirArquivo ? linkCodeReferences(display) : display), [display, podeAbrirArquivo]);
+  const onLinkPress = useCallback(({ url }: { url: string }) => {
+    const arquivo = parseFileLink(url);
+    // ponytail: a aba Arquivos ainda não rola até a linha; o arquivo abre no topo.
+    if (arquivo) {
+      if (podeAbrirArquivo) abrirArquivo(arquivo.path);
+      return;
+    }
+    Linking.openURL(url).catch((e: unknown) => toast.erro(e instanceof Error ? e.message : String(e)));
+  }, [abrirArquivo, podeAbrirArquivo]);
   // Arquivo de CÓDIGO citado na prosa (o parseFilePaths acima só pega mídia/pdf/html, que viram
   // miniatura). Só vira chip quando dá pra abrir na aba Arquivos. O `fileKind` tira a mídia daqui:
   // com extensão aberta no absoluto o `parseCodePaths` casa `.png` e o arquivo saía nos dois.
@@ -127,7 +160,7 @@ export const AssistantBubble = memo(function AssistantBubble({
   return (
     <View style={styles.wrap}>
       {proposed ? <Text style={styles.planLabel}>{m.chat_plan_proposto()}</Text> : null}
-      <EnrichedMarkdownText markdown={display} markdownStyle={md} flavor="github" />
+      <EnrichedMarkdownText markdown={markdown} markdownStyle={md} flavor="github" onLinkPress={onLinkPress} />
       {grafico && tabelas.length > 0 ? (
         <View style={styles.tableBlock}>
           <Pressable
@@ -161,34 +194,49 @@ export const AssistantBubble = memo(function AssistantBubble({
             : null}
         </View>
       ) : null}
-      {hasRefs ? (
+      {atts.length > 0 ? (
         <View style={styles.atts}>
-          {refs.map((r) => {
-            const isImg = r.kind === 'image';
-            const uri = r.url ?? fileUrlNative(sessionName!, r.path);
-            const headers = r.url ? undefined : fileAuthHeader();
-            if (isImg) {
-              return <Image key={r.path} source={{ uri, headers }} style={styles.thumb} contentFit="cover" transition={150} />;
+          {atts.map((r) => {
+            if (r.kind === 'image' || r.kind === 'video') {
+              const i = galeria.findIndex((g) => g.uri === r.uri);
+              return <ImageThumb key={r.path} items={galeria} index={i} style={styles.thumb} />;
             }
-            const icon: IconName = r.kind === 'pdf' ? 'FileText' : r.kind === 'html' ? 'Globe' : r.kind === 'audio' ? 'Music' : 'Paperclip';
+            if (r.kind === 'audio') return <AudioChip key={r.path} uri={r.uri} headers={r.headers} name={r.name} />;
+            const kind = r.kind;
+            // Documento sem visor (zip, docx…): no web é o link de baixar; aqui a folha do sistema.
+            const onPress = kind === 'pdf' || kind === 'html'
+              ? () => setDoc({ uri: r.uri, headers: r.headers, name: r.name, kind })
+              : canShareFile
+                ? () => { shareFile(r.uri, r.headers, r.name).catch((e: unknown) => toast.erro(e instanceof Error ? e.message : String(e))); }
+                : undefined;
+            const icon: IconName = kind === 'pdf' ? 'FileText' : kind === 'html' ? 'Globe' : 'Paperclip';
             return (
-              <View key={r.path} style={[styles.chip, { backgroundColor: superficie(theme), borderColor: theme.tokens.border.subtle }]}>
+              <Pressable
+                key={r.path}
+                onPress={onPress}
+                disabled={!onPress}
+                style={[styles.chip, { backgroundColor: superficie(theme), borderColor: theme.tokens.border.subtle }]}
+                accessibilityRole="button"
+                accessibilityLabel={kind === 'document' ? m.anexos_baixar({ nome: r.name }) : m.anexos_visualizar({ nome: r.name })}
+              >
                 <Icon name={icon} size={14} color={theme.tokens.text.secondary} />
                 <Text style={[styles.chipName, { color: theme.tokens.text.primary }]} numberOfLines={1}>
                   {r.name}
                 </Text>
-              </View>
+                {onPress ? <Icon name={kind === 'document' ? 'Download' : 'ChevronRight'} size={14} color={theme.tokens.text.muted} /> : null}
+              </Pressable>
             );
           })}
         </View>
       ) : null}
+      <DocumentViewer doc={doc} onClose={() => setDoc(null)} />
       {hasCodigos ? (
         <View style={styles.atts}>
           {codigos.map((p) => (
             <ArquivoChip
               key={p}
               caminho={p}
-              onPress={() => router.push(`/s/${serverId}/${sessionName}/files?path=${encodeURIComponent(p)}` as never)}
+              onPress={() => abrirArquivo(p)}
             />
           ))}
         </View>

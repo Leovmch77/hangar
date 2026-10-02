@@ -2,6 +2,7 @@
 // `parseFilePaths` de `format.ts` de propósito: aquele alimenta o chat (só mídia/html/pdf viram
 // preview) e não pode ganhar extensão de código sem mudar o que a bolha desenha.
 import type { ChatEvent } from './types';
+import { fileKind } from './format';
 
 // Lista FECHADA no RELATIVO: regex aberta ("qualquer extensão") casa `repo.git` em URL e some com
 // `config.py` solto em prosa — os dois lados errados.
@@ -58,7 +59,82 @@ export function parseCodeReferences(text: string): CodeReference[] {
     .filter((ref, i, all) => i === 0 || ref.start >= all[i - 1].end);
 }
 
-export type Origem = 'Read' | 'Edit' | 'Write' | 'MultiEdit' | 'NotebookEdit' | 'Bash' | 'tool' | 'voce' | 'citado';
+// Citação de arquivo no markdown NATIVO: a lib desenha o texto e só devolve o toque em link, então
+// a citação vira link `hangar-file:` (o par do chip do markdown.ts do web). Mídia, html e pdf ficam
+// de fora: a bolha já desenha anexo pra eles.
+const FILE_LINK = 'hangar-file:';
+const LINE_SUFFIX = /:(\d+)(?::\d+)?$/;
+
+export function fileLinkUrl(path: string, line: number | null): string {
+  return FILE_LINK + encodeURIComponent(path) + (line ? `#L${line}` : '');
+}
+
+/** Destino de um link tocado que é arquivo: o `hangar-file:` acima ou o caminho cru de
+ *  `[x](src/a.ts:12)`. null = URL de verdade (http, mailto…) ou âncora. */
+export function parseFileLink(url: string): { path: string; line: number | null } | null {
+  if (url.startsWith(FILE_LINK)) {
+    const [p, frag = ''] = url.slice(FILE_LINK.length).split('#');
+    const n = Number(frag.slice(1));
+    return { path: decodeURIComponent(p), line: frag.startsWith('L') && Number.isSafeInteger(n) && n > 0 ? n : null };
+  }
+  let raw = url.replace(/^file:\/\//i, '');
+  if (!raw || raw.startsWith('#') || raw.startsWith('?')) return null;
+  if (/^[a-z][a-z\d+.-]*:/i.test(raw) && !LINE_SUFFIX.test(raw)) return null;
+  try { raw = decodeURI(raw); } catch { /* fica o cru */ }
+  const suffix = LINE_SUFFIX.exec(raw);
+  const n = suffix ? Number(suffix[1]) : 0;
+  return { path: suffix ? raw.slice(0, suffix.index) : raw, line: Number.isSafeInteger(n) && n > 0 ? n : null };
+}
+
+// Mesmas recusas do `reference` do markdown.ts: código inline só vira link se for INTEIRO um caminho.
+function codeRef(code: string): { path: string; line: number | null } | null {
+  if (/\s/.test(code) && !code.startsWith('/') && !code.startsWith('~/')) return null;
+  if (/^\.[^./:]+(?::\d+(?::\d+)?)?$/.test(code) && code !== '.env') return null;
+  if (/^[a-z][a-z\d+.-]*:/i.test(code) && !LINE_SUFFIX.test(code)) return null;
+  const candidate = (code.startsWith('/') || code.startsWith('~/') ? '' : '/') + code.replace(/ /g, '%20');
+  const ref = parseCodeReferences(candidate)[0];
+  if (!ref || ref.start !== 0 || ref.end !== candidate.length) return null;
+  return { path: code.slice(0, code.length - (ref.end - ref.path.length)), line: ref.line };
+}
+
+function linkProse(text: string): string {
+  let s = text;
+  for (const ref of parseCodeReferences(text).reverse()) {
+    if (fileKind(ref.path)) continue;
+    s = `${s.slice(0, ref.start)}[${s.slice(ref.start, ref.end)}](${fileLinkUrl(ref.path, ref.line)})${s.slice(ref.end)}`;
+  }
+  return s;
+}
+
+// Código inline, link markdown e URL ficam protegidos: só o código que é caminho vira link.
+const PROTEGIDO = /`([^`]+)`|\[[^\]]*\]\([^)]*\)|https?:\/\/[^\s<]+/g;
+
+function linkLine(line: string): string {
+  let out = '';
+  let last = 0;
+  for (const mt of line.matchAll(PROTEGIDO)) {
+    out += linkProse(line.slice(last, mt.index));
+    const ref = mt[1] !== undefined ? codeRef(mt[1]) : null;
+    out += ref && !fileKind(ref.path) ? `[${mt[0]}](${fileLinkUrl(ref.path, ref.line)})` : mt[0];
+    last = mt.index + mt[0].length;
+  }
+  return out + linkProse(line.slice(last));
+}
+
+export function linkCodeReferences(md: string): string {
+  let fence: string | null = null;
+  return md.split('\n').map((line) => {
+    const f = /^\s{0,3}(`{3,}|~{3,})/.exec(line);
+    if (fence !== null) {
+      if (f && f[1][0] === fence[0] && f[1].length >= fence.length) fence = null;
+      return line;
+    }
+    if (f) { fence = f[1]; return line; }
+    return linkLine(line);
+  }).join('\n');
+}
+
+export type Origem ='Read' | 'Edit' | 'Write' | 'MultiEdit' | 'NotebookEdit' | 'Bash' | 'tool' | 'voce' | 'citado';
 const _TOOLS = new Set(['Read', 'Edit', 'Write', 'MultiEdit', 'NotebookEdit', 'Bash']);
 
 export interface Citado {

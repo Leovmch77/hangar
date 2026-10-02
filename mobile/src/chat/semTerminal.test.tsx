@@ -58,6 +58,9 @@ vi.mock('../stores/servers', () => {
   return { useServers: Object.assign((select: (s: typeof state) => unknown) => select(state), { getState: () => state }) };
 });
 vi.mock('../ui/Screen', () => ({ Screen: ({ children }: { children: ReactNode }) => createElement('div', null, children) }));
+// A gaveta puxa o gesture-handler nativo, que o vitest não carrega; aqui só o conteúdo importa.
+vi.mock('../features/sessions/SessionsDrawer', () => ({ SessionsDrawer: ({ children }: { children: ReactNode }) => createElement('div', null, children) }));
+vi.mock('../features/sessions/ServerSheet', () => ({ ServerSheet: () => null }));
 vi.mock('react-native-keyboard-controller', () => ({ KeyboardAvoidingView: ({ children }: { children: ReactNode }) => createElement('div', null, children) }));
 vi.mock('./LoopChip', () => ({ LoopChip: () => null }));
 vi.mock('../features/plan/PlanChip', () => ({ PlanChip: () => null }));
@@ -91,6 +94,7 @@ vi.mock('../paraglide/messages', () => Object.fromEntries(
   ('arq_aba askq_sua_resposta bastao_dossie_sub bastao_dossie_titulo chat_voltar_sessoes codex_limites_titulo ctx_anexos ctx_atividade ctx_grupo ctx_limites ctx_repositorio ctx_terminal modo_so_ociosa more_fotos_videos_arquivos more_tarefas_agentes navbar_mais_acoes par_titulo recarregar_sessao recarregar_sessao_detalhe sessao_trocar_de term_titulo '
     + 'askq_enviando board_arquivo board_imagem board_remover_anexo codex_orientar composer_anexar_arquivo composer_desfazer_limpeza composer_ditado_limpo composer_enviando_cancelar composer_enviar_mensagem composer_fila_acao composer_fila_aria composer_fila_contagem composer_gravando_audio composer_gravar_audio composer_mandando_grupo composer_mandar_grupo composer_mandar_tambem composer_mensagem composer_parar composer_parar_gravacao composer_pro_grupo composer_pros_dois composer_sessao_trabalhando composer_transcrevendo_audio composer_transcrever_de_novo')
     .concat(' composer_mic_style_hint composer_dictation_style composer_session_settings composer_session_settings_hint ditado_estilo_titulo uso_aria')
+    .concat(' composer_interromper_claude composer_interromper_msg composer_interromper comum_cancelar')
     .concat(' permissao_pedido comum_cancelar msg_aria_mensagens chat_plan_proposto composer_falha_envio nova_conversa_envio_incerto nova_conversa_resultado_salvar_erro nova_conversa_salvar_erro')
     .concat(' askq_enviando board_falha_envio board_falha_upload chat_chegou_mas chat_envio_incerto chat_nao_chegou_em chat_servidor_removido codex_orientar_recebido codex_orientar_sem_envio composer_ditado_anterior composer_ditado_aplicado composer_ditado_indisponivel composer_ditado_interrompido composer_ditado_recuperavel composer_draft_read_again composer_draft_recover_attach_busy composer_falha_gravacao composer_falha_transcricao composer_fila_erro composer_sem_acesso_fotos composer_sem_acesso_mic composer_submission_check composer_submission_rejected composer_submission_sending composer_transcrever_de_novo composer_transcricao_vazia')
     .concat(' draft_read_error draft_invalid draft_write_error draft_clear_error composer_draft_previous composer_draft_recover composer_draft_discard composer_draft_read_again')
@@ -150,7 +154,12 @@ vi.mock('../features/ditado/useDitado', () => ({ useDitado: (callbacks: { onFim:
   return { gravando: false, rms: 0, iniciar: () => {}, parar: () => {} };
 } }));
 vi.mock('../features/ditado/ditadoEstiloStore', () => ({ useDitadoEstiloStore: { getState: () => ({ pronto: false }) } }));
-vi.mock('./CommandSheet', () => ({ CommandSheet: () => null }));
+vi.mock('./CommandSheet', () => ({
+  CommandSheet: () => null,
+  useSessionCommands: () => ({ commands: [], error: '', retry: () => {} }),
+}));
+vi.mock('./SlashSuggest', () => ({ SlashSuggest: () => null }));
+vi.mock('./SideQuestionSheet', () => ({ SideQuestionSheet: () => null }));
 vi.mock('../stores/sessions', () => ({
   useSessions: Object.assign((sel: (s: unknown) => unknown) => sel(sessionsState), { getState: () => sessionsState }),
 }));
@@ -192,6 +201,12 @@ vi.mock('../stores/newConversation', async (original) => {
 const bubbleTexts = vi.hoisted(() => [] as string[]);
 vi.mock('./AssistantBubble', () => ({ AssistantBubble: ({ text }: { text: string }) => { bubbleTexts.push(text); return null; } }));
 vi.mock('./UserBubble', () => ({ UserBubble: () => null }));
+// Anexos da bolha puxam módulos nativos (gesture-handler, expo-audio, expo-file-system) que o node não carrega.
+vi.mock('./ImageThumb', () => ({ ImageThumb: () => null }));
+vi.mock('./AudioChip', () => ({ AudioChip: () => null }));
+vi.mock('../features/attachments/DocumentViewer', () => ({ DocumentViewer: () => null }));
+vi.mock('../features/attachments/mediaCache', () => ({ canShareFile: false, shareFile: async () => {} }));
+vi.mock('../ui/Toast', () => ({ toast: { ok: () => {}, erro: () => {} } }));
 vi.mock('./PreviewBubble', () => ({ PreviewBubble: () => null }));
 vi.mock('./ThinkingBlock', () => ({ ThinkingBlock: () => null }));
 vi.mock('./tools/ToolCard', () => ({ ToolCard: () => null }));
@@ -224,7 +239,7 @@ import ChatScreen from '../../app/s/[server]/[name]/index';
 import CreateRoute from '../../app/create';
 import { NewConversation } from '../features/create/NewConversation';
 import { _resetNewConversationForTests, recoverAttempt, restoreAttempt, useNewConversation } from '../stores/newConversation';
-import { AccessibilityInfo } from 'react-native';
+import { AccessibilityInfo, Alert } from 'react-native';
 
 async function render(el: ReturnType<typeof createElement>) {
   const container = document.createElement('div');
@@ -347,15 +362,20 @@ describe('Parar no Composer', () => {
     act(() => root.unmount());
   });
 
-  it('trabalhando sem texto: Parar no lugar do envio, e o toque chama onStop', async () => {
+  it('trabalhando sem texto: Parar no lugar do envio, pede confirmação e só então chama onStop', async () => {
     composerChat.state = 'working';
     const onStop = vi.fn();
+    const alert = vi.spyOn(Alert, 'alert');
     const { container, root } = await render(createElement(Composer, { ...props, onStop }));
     const parar = container.querySelector<HTMLButtonElement>('[aria-label="composer_parar"]');
     expect(parar).not.toBeNull();
     expect(container.querySelector('[aria-label="composer_enviar_mensagem"]')).toBeNull();
     act(() => parar!.click());
+    expect(onStop).not.toHaveBeenCalled();
+    const buttons = alert.mock.calls[0][2] as { style?: string; onPress?: () => void }[];
+    act(() => buttons.find((b) => b.style === 'destructive')!.onPress!());
     expect(onStop).toHaveBeenCalledTimes(1);
+    alert.mockRestore();
     act(() => root.unmount());
   });
 

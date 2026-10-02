@@ -65,9 +65,10 @@ export interface ChatState {
 }
 
 // Quantas bolhas estão "na fila" (translúcidas): ecos locais + sintéticos queued-* da fila durável.
-// Extraído pra não duplicar a regra entre Composer (chip) e teste (file: chat.ts é a fonte).
-export function filaCount(state: Pick<ChatState, 'events' | 'pending'>, provider?: string | null): number {
-  return state.pending.length + queuedMessages(state.events, provider).length;
+// Só conta onde a fila pode ser mandada agora (Kimi, Codex, Claude sem terminal), como no PWA.
+export function filaCount(state: Pick<ChatState, 'events' | 'pending'>, provider?: string | null, headless = false): number {
+  if (provider !== 'kimi' && provider !== 'codex' && !headless) return 0;
+  return state.pending.length + queuedMessages(state.events, provider, headless).length;
 }
 
 export interface ChatApi {
@@ -84,6 +85,8 @@ export interface ChatApi {
   openAsk: (payload: AskQuestionPayload, piId?: string | null) => void;
   closeAsk: () => void;
   markAskDismissed: () => void;
+  // Resposta do "mandar agora": marca as entregues e, com a fila já baixada, tira as bolhas na hora.
+  applySteer: (result: { promoted?: boolean; queued_ids?: string[] }) => void;
 }
 
 // Estado do app visto pelos stores que ainda vão nascer: o layout liga antes da primeira tela.
@@ -549,6 +552,16 @@ function criarChatStore(serverId: string, name: string): ChatApi {
     markAskDismissed() {
       const { askPiId } = useChatStore.getState();
       useChatStore.setState({ askOpen: false, askPayload: null, ...(askPiId ? { askPiDismissed: askPiId, askPiId: null } : {}) });
+    },
+    // O user_msg real só chega no fim do turno: sem tirar as "queued-" aqui, o chip seguia aceso
+    // sobre uma fila que já foi.
+    applySteer(result) {
+      const sent = new Set(result.queued_ids ?? []);
+      let events = useChatStore.getState().events;
+      if (sent.size) events = events.map((e) => (sent.has(e.id) ? { ...e, queued_delivered: true } : e));
+      if (result.promoted) events = events.filter((e) => !(e.kind === 'user_msg' && e.id.startsWith('queued-')));
+      rebuildIndex(events);
+      useChatStore.setState({ events });
     },
     async send(text: string, draftRevision?: number) {
       const trimmed = text.trim();

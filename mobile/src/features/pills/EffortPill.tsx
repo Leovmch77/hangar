@@ -1,146 +1,135 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { parseStatusLine, getPiModels, getKimiModels, getCodexModels, setModelEffort, setPiModel, setKimiModel, setCodexModel } from '@hangar/core';
 import { chatStore } from '../../stores/chat';
-import { useSessions } from '../../stores/sessions';
 import * as m from '../../paraglide/messages';
 import { PillMenu, type PillMenuItem } from './PillMenu';
-import { pillLabels, semEsforco } from './pills';
-import { SettingRow } from './SettingRow';
+import { pillLabels, semEsforco, type Chosen } from './pills';
+import { RowPill } from './RowPill';
 
 const CLAUDE_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max', 'ultracode'];
 
 interface Props {
   serverId: string;
   name: string;
+  provider: string | null;
+  chosen: Chosen;
+  onChosen: (next: Chosen) => void;
+  openSignal?: number;
 }
 
-export function EffortPill({ serverId, name }: Props) {
+export function EffortPill({ serverId, name, provider, chosen, onChosen, openSignal = 0 }: Props) {
   const chat = chatStore(serverId, name);
   const statusLine = chat.use((s) => s.statusLine);
   const statusFields = useMemo(() => parseStatusLine(statusLine), [statusLine]);
-  const provider = useSessions((s) => {
-    const r = s.rows.find((x) => x.name === name);
-    const byServer = s.byServerRecord?.[serverId];
-    if (byServer) {
-      const hit = byServer.find((x) => x.name === name);
-      if (hit?.provider) return hit.provider;
-    }
-    return (r?.provider ?? null) as string | null;
-  });
 
   const isCodex = provider === 'codex';
-  const isPi = provider === 'pi';
+  const isPi = provider === 'pi' || provider === 'omp';
   const isKimi = provider === 'kimi';
   const isClaude = !isCodex && !isPi && !isKimi;
 
-  const [chosenEffort, setChosenEffort] = useState<string | null>(null);
   const [tempError, setTempError] = useState<string | null>(null);
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [items, setItems] = useState<PillMenuItem[]>([]);
+  // Modelo do Codex a que os níveis pertencem: o POST exige o modelo junto.
+  const codexModel = useRef<string | null>(null);
 
-  // haiku não tem esforço — esconde (retorno condicional após todos os hooks, seguro)
-  const modelLabel = pillLabels(statusFields, {}).model;
+  const labels = pillLabels(statusFields, chosen);
+  // Haiku não usa esforço (o picker responde "Effort not supported"): pílula ausente, não inútil.
+  const hidden = isClaude && semEsforco(labels.model);
 
-  const display = useMemo(() => {
-    if (tempError) return tempError;
-    return pillLabels(statusFields, { effort: chosenEffort }).effort ?? '—';
-  }, [statusFields, chosenEffort, tempError]);
+  useEffect(() => {
+    if (openSignal) setOpen(true);
+  }, [openSignal]);
 
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
+    setNotice(null);
+    const current = labels.effort;
+    const mark = (lv: string) => ({ label: lv, selected: lv === current });
     try {
       if (isPi) {
         const res = await getPiModels(name);
-        const levels = res.levels ?? [];
-        setItems(levels.map((lv) => ({ label: lv, selected: lv === (chosenEffort ?? statusFields?.effort) })));
+        setItems((res.levels ?? []).map(mark));
       } else if (isKimi) {
         const res = await getKimiModels(name);
-        const curName = statusFields?.model ?? '';
-        const entry = res.models.find((mo) => mo.name.toLowerCase() === curName.toLowerCase());
-        const levels = entry?.efforts ?? [];
-        setItems(levels.map((lv) => ({ label: lv, selected: lv === (chosenEffort ?? statusFields?.effort) })));
+        const curName = (labels.model ?? '').toLowerCase();
+        const entry = res.models.find((mo) => mo.name.toLowerCase() === curName);
+        setItems((entry?.efforts ?? []).map(mark));
       } else if (isCodex) {
+        // Os níveis são do modelo ATUAL; sem modelo conhecido não há o que oferecer (cair no primeiro
+        // do catálogo trocaria o modelo calado).
         const res = await getCodexModels(name);
-        // pega esforços do modelo atual
-        const cur = res.current.model;
-        const hit = res.models.find((mo) => mo.model === cur);
-        const levels = hit?.efforts.map((e) => e.value) ?? [];
-        const effective = levels.length ? levels : res.models.flatMap((mo) => mo.efforts.map((e) => e.value));
-        // dedup
-        const uniq = [...new Set(effective)];
-        setItems(uniq.map((lv) => ({ label: lv, selected: lv === (chosenEffort ?? statusFields?.effort) })));
+        codexModel.current = res.current.model ?? null;
+        const line = res.models.find((mo) => mo.model === codexModel.current);
+        const active = chosen.effort ?? res.current.effort ?? line?.defaultEffort ?? null;
+        setItems((line?.efforts ?? []).map((e) => ({ label: e.value, hint: e.description ?? undefined, selected: e.value === active })));
       } else {
-        setItems(CLAUDE_EFFORTS.map((lv) => ({ label: lv, selected: lv === (chosenEffort ?? statusFields?.effort) })));
+        setItems(CLAUDE_EFFORTS.map(mark));
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setLoading(false);
     }
-  }, [name, isPi, isKimi, isCodex, chosenEffort, statusFields?.effort, statusFields?.model]);
+  }, [name, isPi, isKimi, isCodex, labels.effort, labels.model, chosen.effort]);
 
   useEffect(() => {
-    if (open && !(isClaude && semEsforco(modelLabel))) void load();
-  }, [open, load, isClaude, modelLabel]);
+    if (open && !hidden) void load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
 
   const handleSelect = useCallback(
     async (it: PillMenuItem) => {
       try {
         if (isPi) {
           const res = await setPiModel(name, { effort: it.label });
-          // Pi clampa: pinta o que voltou
-          if (res.thinking) setChosenEffort(res.thinking);
-          else setChosenEffort(it.label);
-          setOpen(false);
+          // Pi ajusta ao que o modelo suporta: pinta o que voltou.
+          onChosen({ ...chosen, effort: res.thinking ?? it.label });
         } else if (isKimi) {
           const res = await setKimiModel(name, { effort: it.label });
-          if (res.effort) setChosenEffort(res.effort);
-          else setChosenEffort(it.label);
-          setOpen(false);
+          onChosen({ ...chosen, effort: res.effort ?? it.label });
         } else if (isCodex) {
-          const codex = await getCodexModels(name);
-          const curModel = codex.current.model ?? codex.models[0]?.model ?? '';
-          await setCodexModel(name, curModel, it.label);
-          setChosenEffort(it.label);
-          setOpen(false);
+          if (!codexModel.current) return;
+          await setCodexModel(name, codexModel.current, it.label);
+          onChosen({ ...chosen, effort: it.label });
         } else {
           const res = await setModelEffort(name, { effort: it.label, scope: 'session' });
-          if (res?.pending_confirm) {
-            setOpen(false);
-            return;
-          }
-          setChosenEffort(it.label);
-          setOpen(false);
+          // Confirmação aberta no terminal: o nível só vale se a pessoa aceitar lá.
+          if (!res?.pending_confirm) onChosen({ ...chosen, effort: it.label });
         }
+        setOpen(false);
       } catch (e) {
         const status = (e as { status?: number }).status;
         const msg = e instanceof Error ? e.message : String(e);
         if (status === 409) {
-          setTempError(msg || m.composer_sessao_trabalhando());
           setOpen(false);
+          setTempError(msg || m.composer_sessao_trabalhando());
           setTimeout(() => setTempError(null), 8000);
         } else {
-          setError(msg);
+          setNotice(msg);
         }
       }
     },
-    [name, isPi, isKimi, isCodex],
+    [name, isPi, isKimi, isCodex, chosen, onChosen],
   );
 
-  if (isClaude && semEsforco(modelLabel)) return null;
+  if (hidden) return null;
 
   return (
     <>
-      <SettingRow label={m.composer_nivel()} value={display} onPress={() => setOpen(true)} />
+      <RowPill label={m.composer_esforco_raciocinio()} value={tempError ?? labels.effort ?? m.composer_nivel()} onPress={() => setOpen(true)} />
       <PillMenu
         open={open}
         onClose={() => setOpen(false)}
         items={items}
         loading={loading}
         error={error}
+        notice={notice}
+        emptyText={m.modelo_sem_niveis()}
         onRetry={() => void load()}
         onSelect={handleSelect}
         title={m.composer_nivel()}

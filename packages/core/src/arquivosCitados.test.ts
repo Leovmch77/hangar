@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { acumularCitados, caminhosCitadosPorNome, estadoVazio, parseCodePaths } from './arquivosCitados';
+import { acumularCitados, caminhosCitadosPorNome, estadoVazio, fileLinkUrl, linkCodeReferences, parseCodePaths, parseFileLink } from './arquivosCitados';
 import type { ChatEvent } from './types';
 
 const CWD = '/home/jefferson/Projetos/hangar';
@@ -76,5 +76,32 @@ describe('acumularCitados', () => {
     expect(b.porCru.get(`${CWD}/backend/app/api.py`)!.origens).toEqual({ Read: 1, Edit: 1 });
     expect(a.porCru.size).toBe(1); // o estado antigo não foi mutado
     expect(b.porCru.size).toBe(5);
+  });
+});
+
+describe('linkCodeReferences / parseFileLink', () => {
+  it('citação na prosa e no código vira link de arquivo; mídia, URL e bloco de código ficam', () => {
+    const md = linkCodeReferences([
+      'veja src/app.ts:12 e `backend/app/api.py`',
+      'foto /tmp/x.png, site https://a.dev/b/c.ts e `npm run x`',
+      '```',
+      'src/app.ts:3',
+      '```',
+    ].join('\n'));
+    expect(md.split('\n')).toEqual([
+      'veja [src/app.ts:12](hangar-file:src%2Fapp.ts#L12) e [`backend/app/api.py`](hangar-file:backend%2Fapp%2Fapi.py)',
+      'foto /tmp/x.png, site https://a.dev/b/c.ts e `npm run x`',
+      '```',
+      'src/app.ts:3',
+      '```',
+    ]);
+  });
+
+  it('lê o link gerado e o caminho cru de [x](a/b.ts:4); URL de verdade não é arquivo', () => {
+    expect(parseFileLink(fileLinkUrl('src/a b.ts', 7))).toEqual({ path: 'src/a b.ts', line: 7 });
+    expect(parseFileLink('docs/x.md:4')).toEqual({ path: 'docs/x.md', line: 4 });
+    expect(parseFileLink('file:///etc/hosts')).toEqual({ path: '/etc/hosts', line: null });
+    expect(parseFileLink('https://a.dev')).toBeNull();
+    expect(parseFileLink('#topo')).toBeNull();
   });
 });

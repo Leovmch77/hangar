@@ -60,7 +60,7 @@ function MenuSelect({
   );
 }
 
-export function CreateSessionSheet({ onClose }: { onClose?: () => void }) {
+export function CreateSessionSheet({ onClose, keyboardOffset }: { onClose?: () => void; keyboardOffset?: number }) {
   const servers = useServers((s) => s.servers);
   const activeId = useServers((s) => s.activeId);
   // A máquina escolhida na pílula vale só para onde a conversa nasce; o servidor ativo é das Configurações.
@@ -70,12 +70,12 @@ export function CreateSessionSheet({ onClose }: { onClose?: () => void }) {
     rememberMachine(id);
     setMachine(id);
   }, []);
-  return target ? <CreateSessionForm key={`${target.id}:${target.baseUrl}`} active={target} machines={servers} onPickMachine={pickMachine} onClose={onClose} />
+  return target ? <CreateSessionForm key={`${target.id}:${target.baseUrl}`} active={target} machines={servers} onPickMachine={pickMachine} onClose={onClose} keyboardOffset={keyboardOffset} />
     : <Text accessibilityRole="alert">{m.servidor_nao_existe()}</Text>;
 }
 
-function CreateSessionForm({ active, machines, onPickMachine }: {
-  active: Server; machines: Server[]; onPickMachine: (id: string) => void; onClose?: () => void;
+function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset }: {
+  active: Server; machines: Server[]; onPickMachine: (id: string) => void; onClose?: () => void; keyboardOffset?: number;
 }) {
   const router = useRouter();
   // O form remonta por máquina: estas são as escolhas guardadas para ela.
@@ -797,6 +797,7 @@ function CreateSessionForm({ active, machines, onPickMachine }: {
       options={options}
       body={body}
       blocked={contextBusy || retomando || !!retomavel || (!!picked && !codexReady)}
+      keyboardOffset={keyboardOffset}
     />
   );
 }

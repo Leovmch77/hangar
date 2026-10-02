@@ -1,4 +1,4 @@
-import type { ArchiveEntry } from '@hangar/core';
+import type { ArchiveEntry } from './api';
 
 export interface LiveInput {
   serverId: string;

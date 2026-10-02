@@ -2,10 +2,9 @@
   import { onMount, untrack } from 'svelte';
   import * as m from '../paraglide/messages';
   import ProviderGlyph from './icons/ProviderGlyph.svelte';
-  import { getArchiveRecentForServer, relativeTime, type ArchiveEntry } from '@hangar/core';
+  import { getArchiveRecentForServer, relativeTime, mergeConversations, rememberEntry, type ArchiveEntry } from '@hangar/core';
   import { listOwnServers } from '../lib/auth';
   import { sessionsStore } from '../lib/sessionsStore.svelte';
-  import { mergeConversations, rememberEntry } from '../lib/conversationList';
 
   interface Props {
     onNavigateToChat: (serverId: string, name: string) => void;
