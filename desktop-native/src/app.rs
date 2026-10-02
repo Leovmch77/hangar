@@ -62,6 +62,7 @@ mod sidebar;
 mod subagent;
 mod dictation;
 mod sync;
+mod connect;
 mod guests;
 mod shared_config;
 mod tree;
@@ -187,6 +188,7 @@ enum Payload {
     // Notificações e Anexos: rascunho do servidor e horas silenciosas da conexão atual.
     ServerConfig(server_config::ServerConfigReply),
     Sync(sync::SyncReply),
+    Connect(connect::ConnectReply),
     // Configuração compartilhada: fala com várias máquinas, cada uma pelo token dela.
     SharedConfig(shared_config::SharedConfigReply),
     // Máquinas: identificador, alcance e reinício do servidor conectado.
@@ -481,6 +483,7 @@ pub struct Hangar {
     harness: harness::Harnesses,
     server_config: server_config::ServerConfig,
     sync: sync::Sync,
+    connect: connect::Connect,
     shared: shared_config::SharedConfig,
     machines: machines::Machines,
     // Custos e Estatísticas de uso: página própria por cima da janela, fora das Configurações.
@@ -715,7 +718,7 @@ impl Hangar {
             desktop_note: None,
             palette_seq: 0, backdrop_seq: 0, backdrop_pending: false, backdrop: None, backdrop_note: None, backdrop_busy: None, grain: crate::media::grain(),
             device: device::Device::default(), accounts: accounts::Accounts::default(), orchestration: orchestration::Orchestration::default(), orq_history: None, orq_history_serial: 0, home_usage: Default::default(), recents: Default::default(), reopen: None, shortcuts: shortcuts::Shortcuts::default(),
-            server_config: server_config::ServerConfig::default(), harness: harness::Harnesses::default(), sync: sync::Sync::default(), shared: shared_config::SharedConfig::default(), machines: machines::Machines::default(),
+            server_config: server_config::ServerConfig::default(), harness: harness::Harnesses::default(), sync: sync::Sync::default(), connect: connect::Connect::default(), shared: shared_config::SharedConfig::default(), machines: machines::Machines::default(),
             costs: Default::default(), usage_stats: Default::default(), search: Default::default(), topbar: Default::default(), computer: computer::Computer::default(), new_session: None, sidebar,
             terminal: None, terminal_serial: 0,
             system_notifications: SystemNotifications::default(),
@@ -1455,6 +1458,7 @@ impl Hangar {
                 self.receive_server_config(reply, window, cx); return;
             }
             Payload::Sync(reply) => { self.receive_sync(reply, window, cx); return; }
+            Payload::Connect(reply) => { self.receive_connect(reply, window, cx); return; }
             Payload::SharedConfig(reply) => { self.receive_shared_config(reply, cx); return; }
             Payload::Machines(reply) => { self.receive_machines(reply, window, cx); return; }
             Payload::Computer(reply) => { self.receive_computer(reply, window, cx); return; }

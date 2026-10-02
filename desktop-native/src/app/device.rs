@@ -173,6 +173,7 @@ impl Hangar {
             Page::Servers => { self.machines_opened(cx); self.server_config_opened(page, cx); }
             Page::Windows => self.computer_opened(cx),
             Page::Sync => self.sync_opened(cx),
+            Page::Connect => self.connect_opened(cx),
             Page::SharedConfig => self.shared_config_opened(cx),
             _ => {}
         }
