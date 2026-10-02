@@ -127,7 +127,8 @@ impl Hangar {
                 let viewport = window.viewport_size().height;
                 let (above, below) = anchor_bounds(menu.anchor()).map(|t| (t.top(), viewport - t.bottom())).unwrap_or_default();
                 // Acima só com espaço para a lista de pastas; janela baixa abre para baixo, por cima do compositor.
-                let up = menu.above() && (above >= px(360.) || above >= below);
+                // Os de baixo do compositor sobem quando falta altura embaixo.
+                let up = if menu.above() { above >= px(360.) || above >= below } else { below < px(360.) && above > below };
                 let room = if up { above } else { below } - px(16.);
                 if up { placement = Placement::Top; }
                 (menu.anchor().to_owned(), if menu.above() { Align::End } else { Align::Start }, true,

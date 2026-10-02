@@ -137,7 +137,7 @@ impl NewSession {
     }
 
     /// Troca pedida na lista ou criação que troca: pasta suja recusa antes de pedir; sessões na pasta pedem confirmação.
-    fn git_switch(&mut self, action: GitAction, branch: String, cx: &mut Context<Self>) {
+    pub(super) fn git_switch(&mut self, action: GitAction, branch: String, cx: &mut Context<Self>) {
         let Some(git) = self.git.status.ok() else { return };
         let switching = action == GitAction::Switch || self.git.checkout;
         if switching && git.dirty > 0 { self.git.note = Some(GitNote::Refused("dirty")); }
@@ -223,7 +223,7 @@ impl NewSession {
         };
         if !git.repo { return frame(div().p(px(8.)).child(muted(tr("folder_git_not_repo"))).into_any_element()); }
         let busy = self.git.busy;
-        let locked = busy.is_some() || self.creating;
+        let locked = self.git_locked();
         let now = chrono::Local::now().timestamp() as f64;
         let folder = self.picked.as_deref().map(basename).unwrap_or_default().to_owned();
         let head = div().px(px(8.)).pt(px(4.)).flex().flex_col().gap(px(2.))
@@ -242,6 +242,24 @@ impl NewSession {
                 .map(|b| if git.behind.unwrap_or(0) > 0 && !pull_blocked { b.primary() } else { b.outline() })
                 .loading(busy == Some(GitAction::Pull)).disabled(locked || pull_blocked)
                 .on_click(cx.listener(|this, _, _, cx| this.git_act(GitAction::Pull, String::new(), false, cx))));
+        let tabs = div().px(px(4.)).flex().gap_1()
+            .child(Button::new("new-chat-git-tab-switch").ghost().xsmall().selected(!self.git.create_tab).label(tr("folder_git_switch_tab"))
+                .on_click(cx.listener(|this, _, _, cx| { this.git.create_tab = false; cx.notify(); })))
+            .child(Button::new("new-chat-git-tab-create").ghost().xsmall().selected(self.git.create_tab).label(tr("folder_git_create_tab"))
+                .on_click(cx.listener(|this, _, _, cx| { this.git.create_tab = true; cx.notify(); })));
+        let body = if self.git.create_tab { self.render_git_create(&git, locked, cx) } else { self.render_git_switch(&git, locked, cx) };
+        frame(div().flex().flex_col().gap(px(8.))
+            .child(head).child(actions).children(self.git_feedback(cx))
+            .child(popup::separator()).child(tabs).child(body)
+            .into_any_element())
+    }
+
+    pub(super) fn git_locked(&self) -> bool { self.git.busy.is_some() || self.creating }
+
+    /// A recusa, falha ou aviso da última ação e a confirmação pendente; servem ao menu do Git e ao de branch.
+    pub(super) fn git_feedback(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let Some(git) = self.git.status.ok().cloned() else { return Vec::new() };
+        let locked = self.git_locked();
         // A razão do bloqueio fica à vista, não só no botão apagado.
         let standing = if git.dirty > 0 { Some("dirty") } else if git.diverged() { Some("diverged") } else { None };
         let note = match (&self.git.note, standing) {
@@ -252,7 +270,10 @@ impl NewSession {
             (None, None) => None,
         };
         let note = note.map(|(text, color)| div().id("new-chat-git-note").role(Role::Alert).px(px(8.)).text_xs()
-            .whitespace_normal().text_color(color).child(text));
+            .whitespace_normal().text_color(color).child(text).into_any_element());
+        let changes = (git.dirty > 0 && self.link.api.is_loopback()).then(|| div().px(px(8.)).child(Button::new("new-chat-git-changes")
+            .outline().small().icon(IconName::List).label(tr("folder_git_open_changes")).disabled(locked)
+            .on_click(cx.listener(|this, _, window, cx| this.open_changes(window, cx)))).into_any_element());
         let confirm = self.git.confirm.clone().map(|(action, branch)| {
             let target = branch.clone();
             div().id("new-chat-git-confirm").role(Role::Alert).mx(px(8.)).p(px(8.)).rounded(px(6.)).border_1().border_color(theme::warning())
@@ -264,17 +285,19 @@ impl NewSession {
                         .on_click(cx.listener(move |this, _, _, cx| this.git_act(action, branch.clone(), true, cx))))
                     .child(Button::new("new-chat-git-confirm-cancel").small().ghost().label(tr("cancel"))
                         .on_click(cx.listener(|this, _, _, cx| { this.git.confirm = None; cx.notify(); }))))
+                .into_any_element()
         });
-        let tabs = div().px(px(4.)).flex().gap_1()
-            .child(Button::new("new-chat-git-tab-switch").ghost().xsmall().selected(!self.git.create_tab).label(tr("folder_git_switch_tab"))
-                .on_click(cx.listener(|this, _, _, cx| { this.git.create_tab = false; cx.notify(); })))
-            .child(Button::new("new-chat-git-tab-create").ghost().xsmall().selected(self.git.create_tab).label(tr("folder_git_create_tab"))
-                .on_click(cx.listener(|this, _, _, cx| { this.git.create_tab = true; cx.notify(); })));
-        let body = if self.git.create_tab { self.render_git_create(&git, locked, cx) } else { self.render_git_switch(&git, locked, cx) };
-        frame(div().flex().flex_col().gap(px(8.))
-            .child(head).child(actions).children(note).children(confirm)
-            .child(popup::separator()).child(tabs).child(body)
-            .into_any_element())
+        note.into_iter().chain(changes).chain(confirm).collect()
+    }
+
+    /// O gerenciador de git da sessão aberta, para a pasta escolhida; só com o servidor nesta máquina, onde o git roda no disco.
+    fn open_changes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(path) = self.picked.clone() else { return };
+        self.menu.set(None);
+        let weak = cx.entity().downgrade();
+        crate::app::git::open_folder_git(path.clone().into(), basename(&path).to_owned(), self.link.runtime.clone(),
+            move |_, cx| { let _ = weak.update(cx, |this, cx| this.load_branches(cx)); }, window, cx);
+        cx.notify();
     }
 
     /// As branches locais e as remotas sem local, filtradas pela busca; `pick` diz o que o clique faz.

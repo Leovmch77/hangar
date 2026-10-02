@@ -296,6 +296,8 @@ pub(in crate::app) struct NewSession {
     picked: Option<String>,
     checkout: Remote<Option<Checkout>>,
     branch: String,
+    /// Escolher branch cria worktree; desligado, troca a branch da própria pasta.
+    worktree: bool,
     /// O gerenciador de git da pasta (tela sem sessão) e o nome da branch nova dele.
     git: folder_git::GitPanel,
     git_name: Entity<InputState>,
@@ -415,7 +417,7 @@ impl NewSession {
         Self {
             link, compact: false, menu: Default::default(), menu_query, servers: Remote::default(),
             roots: Remote::default(), root: None, dir: String::new(), scan: Remote::default(), folders: Vec::new(), query, picked: None,
-            checkout: Remote::default(), branch: String::new(), git: Default::default(), git_name,
+            checkout: Remote::default(), branch: String::new(), worktree: false, git: Default::default(), git_name,
             sessions: Remote::default(), same_folder: false, name, provider: "claude", providers: Remote::default(), configs: Remote::default(),
             config: None, config_pick: None, codex: Remote::default(), codex_account: String::new(), codex_pick: None, headless: true, headless_owner: None, headless_touched: false, headless_saving: false,
             difference: false, manual_open: false, manual, choosing: false, choose_error: None, create_seq: 0, creating: false, started: None,
@@ -1574,25 +1576,42 @@ impl NewSession {
                 let Some(Some(checkout)) = self.checkout.ok() else { return div().into_any_element() };
                 let current = checkout.current.as_ref().map(|branch| format!("{} · {branch}", tr("create_checkout_current")))
                     .unwrap_or_else(|| tr("create_checkout_current"));
+                let worktree = self.worktree;
+                let hint = if worktree { tr("create_checkout_worktree") } else { String::new() };
                 let choices = std::iter::once((String::new(), current, String::new()))
                     .chain(checkout.branches.iter().chain(&checkout.remotes).filter(|b| checkout.current.as_ref() != Some(*b))
-                        .map(|b| (b.clone(), b.clone(), tr("create_checkout_worktree"))));
+                        .map(|b| (b.clone(), b.clone(), hint.clone())));
+                let locked = !worktree && self.git_locked();
                 let rows = choices.filter(|(_, label, hint)| wanted(&query, label, hint)).map(|(id, label, hint)| {
                     let on = self.branch == id;
-                    menu_row(SharedString::from(format!("new-chat-branch-{id}")), on, label, hint)
+                    menu_row(SharedString::from(format!("new-chat-branch-{id}")), on, label, hint).disabled(locked)
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            this.menu.set(None);
-                            if !this.creating { this.branch = id.clone(); }
+                            if this.creating { return; }
+                            // Sem worktree a troca é na pasta: o menu fica aberto para mostrar a recusa ou o resultado.
+                            if this.worktree || id.is_empty() { this.menu.set(None); this.branch = id.clone(); }
+                            else { this.git_switch(folder_git::GitAction::Switch, id.clone(), cx); }
                             cx.notify();
                         }))
                         .into_any_element()
                 }).collect();
-                let worktree = !self.branch.is_empty();
+                let help = match (worktree, self.branch.is_empty()) {
+                    (true, false) => "create_checkout_worktree_help",
+                    (true, true) => "create_checkout_pick_worktree_help",
+                    (false, _) => "create_checkout_switch_help",
+                };
                 div().child(Self::menu_list("new-chat-branch-list", rows))
                     .child(popup::separator())
+                    .child(div().px(px(8.)).pt(px(4.)).child(Checkbox::new("new-chat-branch-worktree").label(tr("create_checkout_use_worktree"))
+                        .checked(worktree).disabled(self.creating)
+                        .on_change(cx.listener(|this, checked: &bool, _, cx| {
+                            this.worktree = *checked;
+                            if !*checked { this.branch.clear(); }
+                            cx.notify();
+                        }))))
                     .child(div().px(px(8.)).py(px(4.)).flex().flex_col().gap(px(2.)).text_xs().text_color(theme::muted()).whitespace_normal()
-                        .child(tr(if worktree { "create_checkout_worktree_help" } else { "create_checkout_current_help" }))
-                        .when(checkout.dirty, |el| el.child(tr("create_checkout_dirty"))))
+                        .child(tr(help))
+                        .when(worktree && checkout.dirty, |el| el.child(tr("create_checkout_dirty"))))
+                    .when(!worktree, |el| el.children(self.git_feedback(cx)))
                     .into_any_element()
             }
         };

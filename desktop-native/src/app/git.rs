@@ -367,7 +367,8 @@ impl GitPanel {
     fn read_patches(&mut self, files: Vec<(String, String)>, window: &mut Window, cx: &mut Context<Self>) {
         self.round += 1;
         let round = self.round;
-        let folded: HashSet<String> = self.work.files.iter().filter(|e| e.folded).map(|e| e.path.clone()).collect();
+        // Arquivo chega dobrado; só fica aberto o que a pessoa abriu.
+        let open: HashSet<String> = self.work.files.iter().filter(|e| !e.folded).map(|e| e.path.clone()).collect();
         // Arquivo que some e volta (commitado, trocado de branch) conta como novo e entra marcado.
         let current: HashSet<String> = files.iter().map(|(p, _)| p.clone()).collect();
         self.chosen.extend(current.difference(&self.seen).cloned().collect::<Vec<_>>());
@@ -376,7 +377,7 @@ impl GitPanel {
         self.work.files = files.into_iter().map(|(path, code)| {
             let mut patch = Remote::default();
             patch.start();
-            Entry { folded: folded.contains(&path), path, code, patch }
+            Entry { folded: !open.contains(&path), path, code, patch }
         }).collect();
         self.work.reset();
         for (index, path) in self.work.files.iter().map(|e| e.path.clone()).enumerate() {
@@ -480,6 +481,35 @@ impl GitPanel {
                 Err(error) => this.error = Some(failure(&error)),
             }
             // Falhou ou não, o disco pode ter mudado: a lista relê.
+            this.load(window, cx);
+        });
+        cx.notify();
+    }
+
+    fn ask_discard_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let paths: Vec<String> = self.work.files.iter().map(|e| e.path.clone()).collect();
+        if paths.is_empty() { return; }
+        let weak = cx.entity().downgrade();
+        chrome::confirm_alert(window, cx, tr("git_discard_all_title").replace("{n}", &paths.len().to_string()), tr("git_discard_all_body"),
+            tr("git_discard_ok"), ButtonVariant::Danger, move |window, cx| {
+                let _ = weak.update(cx, |this, cx| this.discard_all(paths.clone(), window, cx));
+                true
+            });
+    }
+
+    /// Um descarte por arquivo, pela mesma rota do botão da linha; o que falhar aparece com o caminho.
+    fn discard_all(&mut self, paths: Vec<String>, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.start("discard-all".into()) { return; }
+        let source = self.source.clone();
+        self.spawn(async move {
+            let mut failed = Vec::new();
+            for path in paths {
+                if let Err(error) = source.call(Op::Discard(path.clone())).await { failed.push(format!("{path}: {}", failure(&error))); }
+            }
+            failed
+        }, window, cx, |this, failed, window, cx| {
+            this.busy = None;
+            if failed.is_empty() { this.output = Some(tr("git_discarded_all")); } else { this.error = Some(failed.join("\n")); }
             this.load(window, cx);
         });
         cx.notify();
@@ -788,7 +818,10 @@ impl GitPanel {
                     .child(Button::new("git-pick-all").ghost().xsmall().label(tr("git_all"))
                         .on_click(cx.listener(move |this, _, _, cx| { this.chosen = all.iter().cloned().collect(); cx.notify(); })))
                     .child(Button::new("git-pick-none").ghost().xsmall().label(tr("git_none"))
-                        .on_click(cx.listener(|this, _, _, cx| { this.chosen.clear(); cx.notify(); }))))
+                        .on_click(cx.listener(|this, _, _, cx| { this.chosen.clear(); cx.notify(); })))
+                    .child(Button::new("git-discard-all").ghost().xsmall().icon(IconName::Undo2).label(tr("git_discard_all"))
+                        .text_color(theme::danger()).loading(self.busy.as_deref() == Some("discard-all")).disabled(self.busy.is_some())
+                        .on_click(cx.listener(|this, _, window, cx| this.ask_discard_all(window, cx)))))
                 .child(self.diff_list(true, cx))
                 .into_any_element()
         };
@@ -1084,12 +1117,8 @@ impl Hangar {
         let Some(panel) = self.new_git_panel(None, window, cx) else { return };
         if pane != Pane::Changes { panel.update(cx, |panel, cx| panel.set_pane(pane, window, cx)); }
         let side = self.side.git.as_ref().map(|(_, panel)| panel.downgrade());
-        window.open_dialog(cx, move |dialog, window, _| {
-            let width = (f32::from(window.viewport_size().width) * 0.92).min(MAX_W);
-            let side = side.clone();
-            popup::dialog(dialog).w(px(width)).margin_top(px(24.)).on_ok(super::machines::enter_to_focused).child(panel.clone())
-                .on_close(move |_, window, cx| { if let Some(side) = side.as_ref() { let _ = side.update(cx, |panel, cx| panel.load(window, cx)); } })
-        });
+        show_dialog(panel, move |window, cx| { if let Some(side) = side.as_ref() { let _ = side.update(cx, |panel, cx| panel.load(window, cx)); } },
+            window, cx);
     }
 
     /// O painel da aba Git desta sessão, criado na primeira vez que a aba aparece.
@@ -1102,6 +1131,24 @@ impl Hangar {
         self.side.git = Some((owner, panel.clone()));
         Some(panel)
     }
+}
+
+fn show_dialog(panel: Entity<GitPanel>, closed: impl Fn(&mut Window, &mut App) + 'static, window: &mut Window, cx: &mut App) {
+    let closed = Rc::new(closed);
+    window.open_dialog(cx, move |dialog, window, _| {
+        let width = (f32::from(window.viewport_size().width) * 0.92).min(MAX_W);
+        let closed = closed.clone();
+        popup::dialog(dialog).w(px(width)).margin_top(px(24.)).on_ok(super::machines::enter_to_focused).child(panel.clone())
+            .on_close(move |_, window, cx| closed(window, cx))
+    });
+}
+
+/// O mesmo diálogo para uma pasta desta máquina ainda sem sessão; `closed` relê quem abriu.
+pub(super) fn open_folder_git(cwd: std::path::PathBuf, title: String, runtime: Arc<Runtime>, closed: impl Fn(&mut Window, &mut App) + 'static,
+    window: &mut Window, cx: &mut App) {
+    let panel = cx.new(|cx| GitPanel::new(Source::Local(Arc::new(cwd)), runtime, title.clone(), title, None, window, cx));
+    panel.update(cx, |panel, cx| panel.load(window, cx));
+    show_dialog(panel, closed, window, cx);
 }
 
 #[cfg(test)]
