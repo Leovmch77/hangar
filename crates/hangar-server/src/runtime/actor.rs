@@ -213,7 +213,7 @@ pub struct RuntimeEngine {
 impl RuntimeEngine {
     pub fn new(provider:&str,metadata:Value,generation:u64,clock:ClockSample) -> Result<Self,RuntimeError> {
         let core = match provider { "claude"=>Core::Claude(ClaudeEngine::new(metadata,generation,clock)),
-            "codex"=>Core::Codex(CodexEngine::new(metadata,generation,clock)),_=>return Err(failure("provider")) };
+            "codex"=>Core::Codex(CodexEngine::new_checked(metadata,generation,clock)?),_=>return Err(failure("provider")) };
         Ok(Self { interactions:None,write_sources:Default::default(),async_guards:Default::default(),core,launch:None,policy:None,publisher:None,revision:Arc::new(AtomicU64::new(0)),mods:None,mods_life:0,live:None,lifecycle:None })
     }
     /// O ator sobe o processo de novo quando ele cai, e reinicia/troca o sandbox (só Codex).

@@ -9,12 +9,12 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 /// `PERMISSION_POLICIES` do `lancador.py`: (nome na tela, approval_policy, sandbox_mode).
-const MODES:[(&str,&str,&str);3] = [
+static MODES:[(&str,&str,&str);3] = [
     ("Ask for approval","on-request","read-only"),
     ("Approve for me","on-request","workspace-write"),
     ("Full Access","never","danger-full-access"),
 ];
-/// `MODO_PADRAO`: também o destino do modo desconhecido, como no `politica` de hoje.
+/// `MODO_PADRAO`: o que a abertura grava (`null`) quando ninguém escolheu modo.
 const DEFAULT_MODE:usize = 2;
 
 const JEV_MARK:&str = "HANGAR_JEV";
@@ -32,14 +32,23 @@ pub struct Launch { pub program:Vec<String>, pub env:BTreeMap<String,String> }
 
 fn refused(code:&str,message:&str) -> RuntimeError { RuntimeError::new(code,message) }
 
-/// `politica`: vazio ou desconhecido cai no padrão.
-fn policy(meta:&Value) -> Result<(&'static str,&'static str),RuntimeError> {
+/// Modo gravado no sidecar sem terminal. Ausente é o padrão que a abertura escolheu; texto fora da
+/// lista é sidecar estragado e recusa: adivinhar aqui poderia abrir a sessão em Full Access.
+pub fn stored_mode(meta:&Value) -> Result<&'static str,RuntimeError> { stored(meta).map(|&(name,..)|name) }
+
+fn stored(meta:&Value) -> Result<&'static (&'static str,&'static str,&'static str),RuntimeError> {
     let wanted = match &meta["permission_mode"] {
-        Value::Null=>String::new(),
-        Value::String(mode)=>mode.trim().to_lowercase(),
+        Value::Null=>return Ok(&MODES[DEFAULT_MODE]),
+        Value::String(mode)=>mode.trim(),
         _=>return Err(refused("launch_permission_mode","modo de permissão do sidecar não é texto")),
     };
-    let &(_,approval,sandbox) = MODES.iter().find(|(name,..)|name.to_lowercase() == wanted).unwrap_or(&MODES[DEFAULT_MODE]);
+    MODES.iter().find(|(name,..)|name.eq_ignore_ascii_case(wanted)).ok_or_else(||refused("launch_permission_mode",
+        &format!("modo de permissão desconhecido no sidecar: {wanted:?}; a sessão não foi aberta")))
+}
+
+/// `politica` sobre o modo gravado.
+fn policy(meta:&Value) -> Result<(&'static str,&'static str),RuntimeError> {
+    let &(_,approval,sandbox) = stored(meta)?;
     Ok((approval,sandbox))
 }
 
@@ -150,13 +159,26 @@ mod tests {
         let meta = json!({"permission_mode":"approve for me ","tool_output_token_limit":9,"service_tier":"fast"});
         assert_eq!(argv(&meta).unwrap(),["codex","app-server","--stdio","-c","sandbox_mode=\"workspace-write\"","-c","approval_policy=\"on-request\"",
             "-c","tool_output_token_limit=9","-c","service_tier=\"fast\""]);
-        // Sem modo ou modo desconhecido: o padrão de hoje.
-        for meta in [json!({}),json!({"permission_mode":"turbo"}),json!({"permission_mode":null,"service_tier":null})] {
+        // Sem modo: o padrão que a abertura gravou.
+        for meta in [json!({}),json!({"permission_mode":null,"service_tier":null})] {
             assert_eq!(argv(&meta).unwrap(),["codex","app-server","--stdio","-c","sandbox_mode=\"danger-full-access\"","-c","approval_policy=\"never\""]);
         }
         for bad in [json!({"tool_output_token_limit":0}),json!({"tool_output_token_limit":-1}),json!({"tool_output_token_limit":1.5}),
             json!({"tool_output_token_limit":true}),json!({"permission_mode":3})] {
             assert!(argv(&bad).is_err(),"{bad}");
+        }
+    }
+
+    #[test]
+    fn unknown_stored_mode_refuses_instead_of_full_access() {
+        for mode in ["turbo",""," ","Full","full-access","danger-full-access"] {
+            let refused = argv(&json!({"permission_mode":mode})).unwrap_err();
+            assert_eq!(refused.code,"launch_permission_mode","{mode:?}");
+        }
+        for (mode,sandbox,approval) in [("Ask for approval","read-only","on-request"),(" APPROVE FOR ME","workspace-write","on-request"),
+            ("full access","danger-full-access","never")] {
+            assert_eq!(argv(&json!({"permission_mode":mode})).unwrap()[3..7],
+                ["-c".to_owned(),format!("sandbox_mode=\"{sandbox}\""),"-c".to_owned(),format!("approval_policy=\"{approval}\"")],"{mode:?}");
         }
     }
 

@@ -1052,6 +1052,30 @@ fn terminal_permission_mode_is_unknown_never_full_access() {
 }
 
 #[test]
+fn headless_unknown_stored_mode_refuses_never_full_access() {
+    for mode in [json!("turbo"),json!(""),json!("full-access"),json!(3)] {
+        let refused = Engine::new_checked(json!({"name":"s","thread_id":"t1","headless":true,"cwd":"/p","permission_mode":mode.clone()}),1,clock(10.0)).err().unwrap();
+        assert_eq!(refused.code,"launch_permission_mode","{mode}");
+        // Mesmo sem a porta de entrada, o motor nunca guarda Full Access para texto desconhecido.
+        let engine = Engine::new(json!({"name":"s","thread_id":"t1","headless":true,"permission_mode":mode.clone()}),1,clock(10.0));
+        assert!(engine.control_view()["permission_mode"].is_null(),"{mode}");
+    }
+    for (mode,shown) in [(Value::Null,"Full Access"),(json!(" approve for me"),"Approve for me"),(json!("Ask for approval"),"Ask for approval")] {
+        let engine = Engine::new_checked(json!({"name":"s","thread_id":"t1","headless":true,"cwd":"/p","permission_mode":mode}),1,clock(10.0)).unwrap();
+        assert_eq!(engine.control_view()["permission_mode"],shown);
+    }
+    // Com terminal o sidecar guarda a abertura, não o modo de agora: não é conferido aqui.
+    assert!(Engine::new_checked(json!({"name":"s","thread_id":"t1","headless":false,"permission_mode":"turbo"}),1,clock(10.0)).is_ok());
+}
+
+#[test]
+fn headless_unknown_stored_mode_bootstraps_without_full_access() {
+    let (_,sent) = bootstrapped(json!({"name":"s","thread_id":"t1","headless":true,"cwd":"/p","permission_mode":"turbo"}));
+    let params = find_method(&sent,"thread/resume")["params"].clone();
+    assert_eq!((params["sandbox"].clone(),params["approvalPolicy"].clone()),(json!("read-only"),json!("on-request")));
+}
+
+#[test]
 fn missing_model_provider_retries_resume_with_openai() {
     let (mut engine,sent) = bootstrapped(json!({"name":"s","thread_id":"t1","headless":true,"cwd":"/p"}));
     let resume = find_method(&sent,"thread/resume");
