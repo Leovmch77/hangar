@@ -197,6 +197,17 @@ def estado_para_tela() -> dict:
     return estado()
 
 
+_BACKEND_PID_ENV = "HANGAR_UPDATE_BACKEND_PID"
+
+
+def _launching_backend() -> int | None:
+    """O backend que lançou este motor; motor rodado à mão não tem, e não conta como reiniciado."""
+    try:
+        return int(os.environ.get(_BACKEND_PID_ENV, ""))
+    except ValueError:
+        return None
+
+
 def _restarted_into_target(atual: dict) -> bool:
     """O motor morreu no reinício que ele mesmo pediu e o reinício valeu: quem responde é outro
     backend e o disco está no commit da atualização. Sem escopo próprio do systemd (gerenciador que
@@ -205,7 +216,11 @@ def _restarted_into_target(atual: dict) -> bool:
     para = atual.get("commit_para")
     if atual.get("etapa") != "reiniciar" or not isinstance(backend, int) or backend == os.getpid() or not para:
         return False
-    return _git("rev-parse", "HEAD", timeout=30).stdout.strip() == para
+    try:
+        return _git("rev-parse", "HEAD", timeout=30).stdout.strip() == para
+    except (OSError, subprocess.SubprocessError):
+        _log.warning("commit do disco ilegivel; a atualizacao interrompida fica como falha", exc_info=True)
+        return False
 
 
 def estado() -> dict:
@@ -926,10 +941,12 @@ def _porta_do_front() -> int:
 
 def _reiniciar(topologia: str, porta: int = 8765) -> None:
     if topologia == "systemd":
+        # O backend por último: o reinício dele começa assim que pedido e, sem escopo próprio, leva
+        # junto este processo e o `systemctl`, que ainda nem teria pedido o do frontend.
         unidades = ["hangar-backend.service"]
         if _rodar(["systemctl", "--user", "list-unit-files", "hangar-frontend.service"],
                   timeout=15).returncode == 0:
-            unidades.append("hangar-frontend.service")
+            unidades.insert(0, "hangar-frontend.service")
         p = _rodar(["systemctl", "--user", "restart", *unidades], timeout=120)
         if p.returncode != 0:
             raise RuntimeError(f"nao consegui reiniciar o servidor: {_cauda(p)}")
@@ -990,7 +1007,7 @@ def _executar(porta: int) -> dict:
     # estado. Zerando depois, todo esse trabalho ia pro lixo e a etapa de checagem nunca aparecia
     # no terminalzinho, mesmo tendo sido registrada.
     _escrever(fase="rodando", ok=None, erro=None, resgate=None, voltou=None, no_ar=None,
-              commit_de="", commit_para=None, pid=os.getpid(),
+              commit_de="", commit_para=None, pid=os.getpid(), backend_pid=_launching_backend(),
               reiniciar_manual=False, shell_mudou=False, log=[], avisos=[])
     pre = checar()
     de = pre.get("commit", "")
@@ -1275,11 +1292,12 @@ def iniciar(porta: int = 8765, *, expected_branch: str | None = None) -> dict:
     # o que importa pra saber se a atualização morreu, mora no lock.
     # `pid=None`: `_escrever` mescla, e o pid da atualização ANTERIOR (morto) faria o
     # `estado_para_tela` declarar esta recém-lançada como abandonada no primeiro poll.
-    _escrever(fase="rodando", ok=None, erro=None, pid=None, backend_pid=os.getpid(),
+    _escrever(fase="rodando", ok=None, erro=None, pid=None,
               passo=0, total=len(ETAPAS), texto="Começando")
     proc = subprocess.Popen(
         args, cwd=str(REPO / "backend"),
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        env={**os.environ, _BACKEND_PID_ENV: str(os.getpid())},
         **extra,
     )
     # O lock nasceu com o pid do BACKEND, que é quem tinha de vencer a corrida do `O_EXCL`. Agora

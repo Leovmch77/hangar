@@ -1549,3 +1549,19 @@ def test_motor_morto_no_reinicio_sem_servidor_novo_ou_commit_novo_e_falha(repo):
     atualizar._escrever(fase="rodando", etapa="reiniciar", passo=5, total=5, pid=999999,
                         backend_pid=_os.getpid() + 1, commit_para="0" * 40, ok=None, erro=None)
     assert atualizar.estado_para_tela()["ok"] is False
+
+
+def test_reinicio_pede_o_frontend_antes_do_backend(monkeypatch):
+    # O reinício do backend leva junto o motor e o `systemctl`: o frontend tem de ter sido pedido antes.
+    pedidos = []
+    monkeypatch.setattr(atualizar, "_rodar", lambda args, **kw: pedidos.append(args)
+                        or subprocess.CompletedProcess(args, 0, "", ""))
+    atualizar._reiniciar("systemd")
+    assert pedidos[-1][-2:] == ["hangar-frontend.service", "hangar-backend.service"]
+
+
+def test_motor_rodado_a_mao_nao_herda_o_backend_de_outra_rodada(monkeypatch):
+    monkeypatch.delenv(atualizar._BACKEND_PID_ENV, raising=False)
+    assert atualizar._launching_backend() is None
+    monkeypatch.setenv(atualizar._BACKEND_PID_ENV, "4321")
+    assert atualizar._launching_backend() == 4321
