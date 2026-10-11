@@ -39,4 +39,6 @@ test("notificação de tarefa de fundo", () => {
   const text =
     "<task-notification>\n<task-id>bx1</task-id>\n<output-file>/t</output-file>\n<status>completed</status>\n</task-notification>";
   expect(parseNotifications(text)).toEqual([{ id: "bx1", status: "completed" }]);
+  const semStatus = "<task-notification><task-id>a</task-id></task-notification>";
+  expect(parseNotifications(semStatus + text)).toEqual([{ id: "bx1", status: "completed" }]);
 });

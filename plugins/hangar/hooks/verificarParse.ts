@@ -74,7 +74,10 @@ export function formatDuration(ms: number): string {
 // Notificação de tarefa de fundo: <task-id>…</task-id> … <status>…</status>, uma ou mais.
 export function parseNotifications(text: string): { id: string; status: string }[] {
   const out: { id: string; status: string }[] = [];
-  for (const m of text.matchAll(/<task-id>([^<]+)<\/task-id>[\s\S]*?<status>([^<]+)<\/status>/g)) {
+  // Uma notificação por vez: sem isto, uma sem <status> levaria o status da seguinte.
+  for (const envelope of text.matchAll(/<task-notification>([\s\S]*?)<\/task-notification>/g)) {
+    const m = /<task-id>([^<]+)<\/task-id>[\s\S]*?<status>([^<]+)<\/status>/.exec(envelope[1] ?? "");
+    if (!m) continue;
     out.push({ id: (m[1] ?? "").trim(), status: (m[2] ?? "").trim() });
   }
   return out;
