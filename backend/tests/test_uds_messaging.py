@@ -110,3 +110,20 @@ def test_classe_modo_usa_o_jsonl_do_alvo_que_o_chamador_ja_tem(tmp_path, monkeyp
     monkeypatch.setattr(api.permission_mode, "modo_da_conta", lambda cfg: "manual")
     assert api._classe_modo("rem", "alvo", None, str(p)) == "bypass"
     assert resolvidos == ["rem"]
+
+
+@pytest.mark.parametrize("modo_codex, conta, esperado", [
+    ("Full Access", "manual", "bypass"),
+    ("Ask for approval", "bypassPermissions", "prompting"),
+    ("Approve for me", "bypassPermissions", "prompting"),
+])
+def test_classe_modo_de_remetente_codex(monkeypatch, modo_codex, conta, esperado):
+    # Codex com identidade no shell assina o recado: a classe é a dele, não a do alvo.
+    from app import api
+    from app.adapters.codex import sessions as codex_sessions
+
+    monkeypatch.setattr(api.headless_sessions, "load", lambda n: None)
+    monkeypatch.setattr(codex_sessions, "load", lambda n: {"permission_mode": modo_codex} if n == "cx" else None)
+    monkeypatch.setattr(api, "_jsonl_atual", lambda n: None)
+    monkeypatch.setattr(api.permission_mode, "modo_da_conta", lambda cfg: conta)
+    assert api._classe_modo("cx", "alvo", None) == esperado

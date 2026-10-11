@@ -4345,6 +4345,12 @@ def _classe_modo(remetente: str, alvo: str, cfg_alvo: Optional[str],
         m = headless_sessions.load(n)
         if m and m.get("permission_mode"):
             return str(m["permission_mode"])
+        from app.adapters.codex import sessions as codex_sessions
+        from app.adapters.codex.lancador import PERMISSION_POLICIES
+        policy = PERMISSION_POLICIES.get(str((codex_sessions.load(n) or {}).get("permission_mode")))
+        if policy is not None:
+            # Só o Codex que nunca pede aprovação equivale ao bypass do Claude.
+            return "bypassPermissions" if policy[0] == "never" else "default"
         return permission_mode.session_non_plan_mode(jsonl or _jsonl_atual(n))
     # Rótulo de aviso do app ([painel: …]) não é sessão; resolvê-lo só gastaria chamadas ao tmux.
     modo_remetente = _modo(remetente) if sanitize_session_name(remetente) == remetente else None
