@@ -24,14 +24,16 @@ fn home_with_cached_quota(expires_ms:f64) -> (tempfile::TempDir,AccountService,s
         json!({"claudeAiOauth":{"accessToken":"t","expiresAt":expires_ms}}).to_string()).unwrap();
     // O mesmo caminho do catálogo: no Windows o `canonicalize` cru leva o prefixo `\\?\`.
     let id = format!("claude:{}",hangar_server::accounts::catalog::resolved(&claude).to_string_lossy());
-    std::fs::create_dir_all(home.path().join(".hangar")).unwrap();
-    std::fs::write(home.path().join(".hangar/cotas-cache.json"), json!({id:{"gravado_em":now(),"cota":{"estado":"lida",
-        "janelas":[{"rotulo":"5h","pct":42,"reset_ts":null,"por_modelo":false},{"rotulo":"Fable","pct":9,"reset_ts":null,"por_modelo":true}]}}})
-        .to_string()).unwrap();
     let service = AccountService::new(AccountEnvironment::from_map([
         ("HOME".into(),home.path().to_string_lossy().into_owned()),
         ("USERPROFILE".into(),home.path().to_string_lossy().into_owned()),
     ].into()));
+    // No Windows o cache mora em `AppData/Local`, não em `~/.hangar`.
+    let cache = service.quota_path();
+    std::fs::create_dir_all(cache.parent().unwrap()).unwrap();
+    std::fs::write(cache, json!({id:{"gravado_em":now(),"cota":{"estado":"lida",
+        "janelas":[{"rotulo":"5h","pct":42,"reset_ts":null,"por_modelo":false},{"rotulo":"Fable","pct":9,"reset_ts":null,"por_modelo":true}]}}})
+        .to_string()).unwrap();
     (home,service,claude)
 }
 
