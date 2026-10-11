@@ -368,7 +368,6 @@ def _worker() -> None:
     from fastapi.responses import JSONResponse
     from fastapi.testclient import TestClient
     from app import api, codex_contas_login, credenciais, account_bridge, dictation_bridge
-    import psutil
     from types import SimpleNamespace
     from app import internal_api, runtime_coordinator
 
@@ -438,6 +437,13 @@ def _worker() -> None:
             with patch.object(account_bridge, "terminal_instances", side_effect=RuntimeError("snapshot indisponível")):
                 return original_publish(*args, **kwargs)
         return original_publish(*args, **kwargs)
+
+    def launcher_usage(key):
+        """Dublê da varredura do Rust: o lançador vivo que nomeia a conta no `--codex-home`."""
+        from app.account_lifecycle import AccountKey
+        pids = [child.pid for child in children if child.poll() is None and "--codex-home" in child.args
+                and AccountKey.new(key.provider, Path(child.args[child.args.index("--codex-home") + 1])) == key]
+        return account_bridge.UsageFacts(complete=True, pids=pids)
 
     def create_at_barrier(name, cwd, config_dir, **kwargs):
         from app.models import SessionInfo
@@ -631,9 +637,8 @@ def _worker() -> None:
         from app import account_bridge, account_lifecycle
         from app.account_lifecycle import AccountKey
         from app.adapters.codex import sessions
-        import psutil
-        live = [psutil.Process(child.pid) for child in children if child.poll() is None]
-        facts = account_bridge.inspect_processes(AccountKey.new("codex", root / ".codex-alpha"), processes=live)
+        live = [child for child in children if child.poll() is None]
+        facts = launcher_usage(AccountKey.new("codex", root / ".codex-alpha"))
         instances = account_bridge.terminal_instances() if live else {}
         births = [json.loads(path.read_text(encoding="utf-8"))
                   for path in (account_lifecycle.default_lock_root() / "births").glob("*.json")]
@@ -780,8 +785,7 @@ def _worker() -> None:
             patch.object(api.registry, "_rename_rust"), \
             patch.object(account_bridge, "terminal_instances", side_effect=lambda: dict(mux) if any(
                 child.poll() is None for child in children) else {}), \
-            patch.object(account_bridge, "system_processes", side_effect=lambda: [
-                psutil.Process(child.pid) for child in children if child.poll() is None]), \
+            patch.object(account_bridge, "request_processes", side_effect=launcher_usage), \
             patch.object(dictation_bridge, "request", side_effect=catalog_transport), \
             patch("subprocess.Popen", side_effect=deny_external), \
             patch("socket.create_connection", side_effect=private_connection), TestClient(app, client=("127.0.0.1", 32123)) as client:

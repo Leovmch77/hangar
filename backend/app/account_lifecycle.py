@@ -158,8 +158,8 @@ def retire_terminal_birth(path: Path) -> bool:
                      and AccountKey.new("codex", Path(meta["codex_home"])) == key)
             if not bound:
                 return False
-            facts = account_bridge.inspect_processes(key)
-            if not facts.complete or meta["app_pid"] not in facts.pids:
+            facts = account_bridge.request_processes(key)
+            if facts is None or not facts.complete or meta["app_pid"] not in facts.pids:
                 return False
             # O vínculo lido por nome só vale enquanto esse nome ainda identifica a mesma instância.
             if account_bridge.terminal_instances().get(current_name) != instance:

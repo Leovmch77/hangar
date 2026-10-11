@@ -300,7 +300,9 @@ fn model_names<'a>(list: &'a [Credential], engines: &'a HashMap<String, Engine>)
 /// Em que grupo a credencial entra; `None` é a cópia que o app gravou no Kimi de um modelo já listado.
 fn group_of(c: &Credential, models: &HashSet<&str>) -> Option<Group> {
     if c.id.strip_prefix("kimi:").is_some_and(|name| models.contains(name)) { return None; }
-    if c.auth() == "oauth" || (c.kind == "codex" && c.auth() == "none") { return Some(Group::Subscriptions); }
+    // Conta Codex do app é assinatura mesmo com o login ilegível (prazo, CLI fora do ar): só a chave de API sai.
+    let codex_subscription = c.kind == "codex" && (c.auth() == "none" || (c.codex_account.is_some() && c.auth() != "api_key"));
+    if c.auth() == "oauth" || codex_subscription { return Some(Group::Subscriptions); }
     if c.engine_name().is_some_and(|name| models.contains(name)) { return Some(Group::Models); }
     Some(Group::Others)
 }
@@ -1351,5 +1353,14 @@ mod tests {
         assert_eq!(build_row(&codex("none", "idle", false), &HashMap::new(), false, 0.).codex, Some(("b".into(), false)));
         assert_eq!(build_row(&codex("oauth", "idle", true), &HashMap::new(), false, 0.).codex, Some(("b".into(), true)));
         assert_eq!(build_row(&codex("oauth", "ready", true), &HashMap::new(), false, 0.).codex, None);
+    }
+
+    #[test]
+    fn codex_account_whose_login_could_not_be_read_stays_a_subscription() {
+        // Leitura que falhou (prazo, CLI fora do ar) não faz da conta do app uma chave de outro agente.
+        let codex = credential(json!({"id": "codex:/h/.codex-old", "tipo": "codex", "nome": "old", "codex_account": "old",
+            "auth_method": "unknown", "codex_sync": "partial", "login": {"estado": "indisponivel", "loggedIn": null}}));
+        let (list, engines) = ([codex], HashMap::new());
+        assert!(group_of(&list[0], &model_names(&list, &engines)) == Some(Group::Subscriptions));
     }
 }

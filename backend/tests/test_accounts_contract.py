@@ -477,3 +477,31 @@ def test_rust_claude_logout_remains_allowed_with_live_session(tmp_path):
     finally:
         server.close()
         reference.close()
+
+
+def test_python_asks_rust_which_processes_use_an_account(tmp_path, monkeypatch):
+    """O nascimento de sessão Codex do Python se aposenta com os processos que o Rust varre."""
+    import subprocess
+    import sys
+    from accounts_contract import RustCodex
+    from app import account_bridge
+    from app.account_lifecycle import AccountKey
+    reference = PythonReference(tmp_path / "home")
+    server = RustCodex(reference)
+    account = reference.root / ".codex-alpha"
+    environment = isolated_environment(reference.root)
+    environment["CODEX_HOME"] = str(account)
+    child = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.readline()", "--", "codex"],
+                             env=environment, stdin=subprocess.PIPE)
+    try:
+        address = server.request("GET", "/__hangar_server/health").json()["terminal_address"]
+        monkeypatch.setattr(account_bridge, "owner_mode", lambda: "rust")
+        account_bridge.configure_preparation(address, "contract-internal")
+        facts = account_bridge.request_processes(AccountKey.new("codex", account))
+        assert facts is not None and facts.complete, facts
+        assert child.pid in facts.pids and child.pid in facts.holders
+    finally:
+        account_bridge.configure_preparation(None, None)
+        child.communicate(b"\n", timeout=10)
+        server.close()
+        reference.close()

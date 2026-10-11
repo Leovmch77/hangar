@@ -85,6 +85,11 @@ fn uses(procs: &dyn ProcessView, pid: i64, key: &AccountKey, home: &Path) -> Res
     if !pertinent {
         return Ok(false);
     }
+    // Quem cobre o ambiente com o título é app Chromium/Electron (o Claude Desktop se chama `claude`);
+    // nenhum CLI de conta faz isso.
+    if procs.environ_erased(pid) {
+        return Ok(false);
+    }
     let mut value = procs.env_var(pid, variable(key.provider))?.map(|v| v.to_string_lossy().into_owned());
     if key.provider == Provider::Codex {
         for (index, argument) in argv.iter().enumerate() {
@@ -294,6 +299,14 @@ pub(crate) async fn terminal_instances() -> Result<Instances, ()> {
 }
 
 impl AccountService {
+    /// Só os processos da máquina: o nascimento de sessão Codex do Python se aposenta com eles.
+    pub(crate) async fn process_usage(&self, key: &AccountKey) -> UsageFacts {
+        let (key, home) = (key.clone(), self.env.home.clone());
+        tokio::task::spawn_blocking(move || inspect_processes(&crate::list::procs::SystemProcs::whole_machine(), &key, &home))
+            .await
+            .unwrap_or_default()
+    }
+
     /// Fatos desta máquina somados aos do runtime Rust. Runtime ausente deixa os fatos
     /// incompletos: nunca prova que a conta está livre.
     pub(crate) async fn usage(
@@ -310,7 +323,7 @@ impl AccountService {
             }
             let (service, owned, handle) = (self.clone(), key.clone(), tokio::runtime::Handle::current());
             facts = tokio::task::spawn_blocking(move || {
-                let procs = crate::list::procs::SystemProcs::default();
+                let procs = crate::list::procs::SystemProcs::whole_machine();
                 let fixture = service.env.terminal_fixture.clone();
                 local_usage(&service, &owned, &procs, &mut || match &fixture {
                     Some(fixture) => fixture().and_then(|stdout| parse_instances(&stdout)),
@@ -349,6 +362,8 @@ mod tests {
         env: Option<HashMap<String, String>>,
         starts: Vec<f64>,
         gone: bool,
+        /// Título escrito por cima do ambiente (Chromium/Electron).
+        erased: bool,
     }
 
     #[derive(Default)]
@@ -382,6 +397,7 @@ mod tests {
             starts.get(*read - 1).or(starts.last()).copied()
         }
         fn name(&self, pid: i64) -> io::Result<String> { Ok(self.get(pid)?.name.clone()) }
+        fn environ_erased(&self, pid: i64) -> bool { self.get(pid).is_ok_and(|p| p.erased) }
     }
 
     fn proc(name: &str, argv: &[&str], env: &[(&str, &Path)]) -> Proc {
@@ -391,6 +407,7 @@ mod tests {
             env: Some(env.iter().map(|(k, v)| ((*k).to_owned(), v.to_string_lossy().into_owned())).collect()),
             starts: vec![1.0],
             gone: false,
+            erased: false,
         }
     }
 
@@ -439,6 +456,23 @@ mod tests {
         let facts = inspect_processes(&Fake::with(vec![(71, codex)]), &key, tmp.path());
         assert!(facts.complete && facts.pids == [71]);
         assert_eq!(facts.ensure_unused(), Err("account_in_use"));
+    }
+
+    #[test]
+    fn electron_app_named_claude_with_its_environment_overwritten_is_not_a_client() {
+        // O Claude Desktop (Electron) se chama `claude`, junta o argv numa linha e escreve o título por
+        // cima do ambiente: sem variável lida, ele passaria por cliente da conta Claude padrão.
+        let tmp = tempfile::tempdir().unwrap();
+        let default = AccountKey::new(Provider::Claude, &tmp.path().join(".claude")).unwrap();
+        let desktop = |argv: &str| Proc { erased: true, ..proc("claude", &[argv], &[]) };
+        let fake = Fake::with(vec![
+            (90, desktop("/usr/lib/claude-desktop-bin/claude --ozone-platform=wayland")),
+            (91, desktop("/usr/lib/claude-desktop-bin/claude --type=zygote --no-sandbox")),
+            (92, proc("claude", &["claude", "--session-id", "x"], &[])),
+        ]);
+        let facts = inspect_processes(&fake, &default, tmp.path());
+        assert!(facts.complete);
+        assert_eq!(facts.pids, [92], "só o CLI usa a conta padrão");
     }
 
     #[test]

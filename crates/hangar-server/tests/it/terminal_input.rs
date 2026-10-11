@@ -221,6 +221,9 @@ async fn terminal_input_native_process_io_writes_envelope_and_missing_socket_is_
  let dir=tempfile::tempdir().unwrap();let path=dir.path().join("native.sock");let listener=tokio::net::UnixListener::bind(&path).unwrap();let native=NativeMessage {socket:path,origin:"uds:/inbox".into(),sender:"peer".into(),mode:"bypass".into(),message_id:Some("uuid-message".into())};
  let peer=tokio::spawn(async move{use tokio::io::AsyncReadExt;let (mut socket,_)=listener.accept().await.unwrap();let mut bytes=Vec::new();socket.read_to_end(&mut bytes).await.unwrap();bytes});
  assert_eq!(ProcessIo::default().socket(&native,b"envelope\n".to_vec()).await.unwrap(),WriteOutcome::Written);assert_eq!(peer.await.unwrap(),b"envelope\n");
+ // Socket ausente de fato: o ouvinte fechado ainda aceita conexão enquanto um `fork` de outro teste
+ // da suíte segura o descritor dele até o `exec`.
+ std::fs::remove_file(&native.socket).unwrap();
  assert_eq!(ProcessIo::default().socket(&native,b"envelope\n".to_vec()).await.unwrap(),WriteOutcome::NotWritten);
 }
 #[tokio::test]

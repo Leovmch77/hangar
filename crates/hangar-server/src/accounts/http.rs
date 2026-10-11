@@ -452,6 +452,17 @@ pub async fn private(
     let Ok(bytes) = axum::body::to_bytes(request.into_body(), 16384).await else {
         return StatusCode::BAD_REQUEST.into_response();
     };
+    // Processos que usam a conta: o nascimento de sessão Codex do Python só se aposenta com eles.
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct ProcessesInput { processes: AccountKey }
+    if let Ok(body) = serde_json::from_slice::<ProcessesInput>(&bytes) {
+        // Remonta pela `new`: a chave desserializada crua não passa pela canonicalização.
+        let Ok(key) = AccountKey::new(body.processes.provider, &body.processes.canonical_home) else {
+            return StatusCode::BAD_REQUEST.into_response();
+        };
+        return Json(json!(state.accounts.process_usage(&key).await)).into_response();
+    }
     #[derive(serde::Deserialize)]
     #[serde(deny_unknown_fields)]
     struct ResetInput { reset_account_id:String, credit_id:Option<String>, idempotency_key:String }
