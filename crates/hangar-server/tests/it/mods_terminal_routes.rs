@@ -32,7 +32,7 @@ async fn terminal_app() -> (Arc<Fake>, std::net::SocketAddr, Mods, Arc<FakePane>
     let (python, upstream) = spawn_fake().await;
     let state = AppState::new(config(upstream, "127.0.0.1"));
     let mods = state.mods.clone();
-    let _ = state.state.runtime.set(Arc::new(registry(&mods)));
+    let _ = state.state.runtime.set(registry(&mods));
     let server = spawn_state(state).await;
     let pane = Arc::new(FakePane::new(&mods, "t", "tmux-01-tres-paineis-150"));
     let life = mods.new_life();
@@ -95,8 +95,9 @@ fn target(dir: &std::path::Path, mux: &str) -> TerminalTarget {
         metadata: hangar_server::terminal_facts::TerminalMetadata { config_dir:dir.into(),agent_pid:std::process::id(),agent_birth:hangar_server::terminal_facts::agent_birth(std::process::id()).unwrap(),legacy_import_after:None,fingerprint:"fixture".into(),origin:"uds:fixture".into() } }
 }
 
-fn registry(mods: &Mods) -> RuntimeRegistry {
-    RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(), "secret-test".into(), "instance-test".into()).with_mods(mods.clone())
+// Ligado aos hubs como o servidor monta: abrir o terminal exige o ciclo de vida.
+fn registry(mods: &Mods) -> Arc<RuntimeRegistry> {
+    crate::runtime_open::with_hubs(RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(), "secret-test".into(), "instance-test".into()).with_mods(mods.clone()))
 }
 
 #[tokio::test]

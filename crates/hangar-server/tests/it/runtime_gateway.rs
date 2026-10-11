@@ -108,7 +108,7 @@ async fn opened(dir:&std::path::Path) -> (Arc<RuntimeRegistry>,serde_json::Value
         let mut raw = String::new();
         while reader.read_line(&mut raw).await.unwrap_or(0) > 0 { raw.clear(); }
     });
-    let registry = crate::runtime_open::with_hubs(RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(),"secret-test".into(),"instance-test".into()).with_processes(Arc::new(crate::runtime_open::RecipeProcesses)));
+    let registry = crate::runtime_open::with_hubs(RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(),"secret-test".into(),"instance-test".into()).with_processes(Arc::new(crate::runtime_open::RecipeProcesses("sid-1"))));
     let target = RuntimeTarget { key:"key".into(),generation:1,name:"session".into(),provider:"claude".into(),
         metadata:json!({"name":"session","headless":true,"session_id":"sid-1","initialized":true}),
         binding:CanoBinding { pid:42,escuta:format!("tcp:{address}"),token:"secret-test".into(),versao:2 },
@@ -172,7 +172,7 @@ async fn one_bad_message_from_the_cli_does_not_end_the_actor() {
         let mut raw = String::new();
         while reader.read_line(&mut raw).await.unwrap_or(0) > 0 { raw.clear(); }
     });
-    let registry = crate::runtime_open::with_hubs(RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(),"secret-test".into(),"instance-test".into()).with_processes(Arc::new(crate::runtime_open::RecipeProcesses)));
+    let registry = crate::runtime_open::with_hubs(RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(),"secret-test".into(),"instance-test".into()).with_processes(Arc::new(crate::runtime_open::RecipeProcesses("sid-1"))));
     let target = RuntimeTarget { key:"key".into(),generation:1,name:"session".into(),provider:"claude".into(),
         metadata:json!({"name":"session","headless":true,"session_id":"sid-1","initialized":true}),
         binding:CanoBinding { pid:42,escuta:format!("tcp:{address}"),token:"secret-test".into(),versao:2 },

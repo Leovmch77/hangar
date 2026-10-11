@@ -127,6 +127,9 @@ mod tests {
         for bad in [&br#"{"terminal":1}"#[..], br#"{"terminal":true,"x":1}"#, b"[]", b"{}"] {
             assert_eq!(terminal_field(&headers, bad), None);
         }
-        assert_eq!(terminal_field(&axum::http::HeaderMap::new(), br#"{"terminal":true}"#), None);
+        // Como o FastAPI: sem `Content-Type` o corpo é JSON; outro tipo não é.
+        assert_eq!(terminal_field(&axum::http::HeaderMap::new(), br#"{"terminal":true}"#), Some(true));
+        headers.insert(axum::http::header::CONTENT_TYPE, "text/plain".parse().unwrap());
+        assert_eq!(terminal_field(&headers, br#"{"terminal":true}"#), None);
     }
 }

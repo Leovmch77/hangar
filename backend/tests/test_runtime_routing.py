@@ -8,6 +8,8 @@ from app import api, runtime_coordinator, sse
 
 class Owner:
     instance = "runtime"
+    # Sem hangar-server de pé: nenhuma ponte do Rust entra no caminho (Codex com terminal, pergunta do Claude).
+    mode = "python"
 
     def __init__(self, disposition="accepted", terminal=True):
         self.calls = []

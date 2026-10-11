@@ -23,7 +23,9 @@ _TARGETED = {"prepare", "bind_dispatch", "begin_dispatch", "finish", "late_rpc_r
 # Ações cujo resultado é a operação inteira. Mesmo conjunto de `OPERATION_RECEIPTS` em queue.rs.
 _OPERATION_RECEIPTS = {"prepare", "bind_dispatch", "begin_dispatch", "mark_writing", "finish", "late_rpc_resolution"}
 _RECEIPT_METADATA = {"native", "message_id", "native_status", "cleanup", "code", "stage",
-                     "preserve_binding", "queued", "already_confirmed", "disposition", "draft"}
+                     "preserve_binding", "queued", "already_confirmed", "disposition", "draft",
+                     # A repetição da reabertura em bypass só se reconhece por estes campos.
+                     "reopened", "mode", "current", "previous_non_plan"}
 
 
 def configure(coordinator):

@@ -2350,7 +2350,8 @@ mod tests {
         for sender in pending.responses.drain(..) {assert!(sender.send(Ok(answer.clone())).is_ok());}
         assert!(receive_first.await.unwrap().unwrap()==answer);assert!(receive_second.await.unwrap().unwrap()==answer);
         assert_eq!(store.state().operations["live"].wire_attempts.len(),1);
-        assert!(current_stored_reply(&command,store.state(),false).unwrap()==Some(answer));
+        // Operação final gravada guarda só os metadados da resposta (`queue::slim`), não a lista de modelos.
+        assert!(current_stored_reply(&command,store.state(),false).unwrap()==Some(RuntimeReply {payload:Value::Null,..answer}));
     }
     #[test]
     fn durable_reopen_result_overrides_initial_rejection_without_replaying_unknown() {
@@ -2364,10 +2365,11 @@ mod tests {
         let accepted=RuntimeReply {operation_id:"mode".into(),disposition:Disposition::Accepted,payload:json!({"reopened":true,"mode":"bypassPermissions"})};
         store.exec(5,"finished-reopen",clock,Action::Finish {id:"mode".into(),status:Status::Accepted,result:serde_json::to_value(&accepted).unwrap()}).unwrap();
         assert_eq!(current_stored_reply(&command,&initial,false).unwrap().unwrap().disposition,Disposition::Rejected);
-        assert_eq!(current_stored_reply(&command,store.state(),false).unwrap(),Some(accepted));
+        assert_eq!(current_stored_reply(&command,store.state(),false).unwrap(),Some(accepted.clone()));
         let changed=RuntimeCommand {payload:json!({"mode":"manual"}),..command.clone()};assert_eq!(current_stored_reply(&changed,store.state(),false).unwrap_err().code,"operation_reused");
+        // A fila não rebaixa resultado final a incerto: o desfecho tardio não reabre a resposta gravada.
         store.exec(5,"uncertain",clock,Action::Finish {id:"mode".into(),status:Status::Unknown,result:json!({})}).unwrap();
-        assert_eq!(current_stored_reply(&command,store.state(),false).unwrap().unwrap().disposition,Disposition::Unknown);
+        assert_eq!(current_stored_reply(&command,store.state(),false).unwrap(),Some(accepted));
     }
     #[test]
     fn ready_requires_same_operation_life_digest_and_successful_persistence() {

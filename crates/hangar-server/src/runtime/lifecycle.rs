@@ -34,7 +34,6 @@ pub(super) struct HeadlessOperation {
     pub cancelled:std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 pub struct ClosedIngress {gates:super::ingress::IngressGates,name:String}
-pub(crate) async fn hold_ingress(gates:&super::ingress::IngressGates,name:&str)->Result<ClosedIngress,RuntimeError> {ClosedIngress::acquire(gates,name).await}
 impl ClosedIngress {
     pub async fn acquire(gates:&super::ingress::IngressGates,name:&str)->Result<Self,RuntimeError> {
         gates.close(name,Duration::from_secs(60)).await.map_err(|_|failure("lifecycle_ingress_busy"))?;
@@ -298,6 +297,9 @@ mod tests {
         let dir=tempfile::tempdir().unwrap();
         let binding=InteractionBinding {key:"A".into(),conversation:"sid".into(),generation:4};
         let mut state=State::new("A",4,"session",vec![json!({"id":"input","text":"pending","ts":1.0,"delivered":true,"confirmed":false})]);
+        // A trava aponta para uma escrita incerta que existe; sem ela, a trava sairia na primeira `Finish`.
+        state.operations.insert("input".into(),serde_json::from_value(json!({"id":"input","entry_id":"input","status":"unknown","result":{},"wire_attempts":{},
+            "payload":{"kind":"input","payload":{"text":"pending","_terminal_generation":4}},"dispatch_cursor":{"conversation":"sid"}})).unwrap());
         state.runtime_state["terminal_write_barrier"]=json!({"operation_id":"input","conversation":"sid","generation":4});
         let mut store=Store::open(&dir.path().join("state.json"),dir.path(),state).unwrap();
         let clock=ClockSample {monotonic_s:0.0,epoch_s:1000.0};

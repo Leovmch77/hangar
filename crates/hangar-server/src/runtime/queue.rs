@@ -16,7 +16,9 @@ const VERSION: u32 = 2;
 /// de uma fase. Mesmo valor de `_RECENT_CALLS` em runtime_queue.py.
 const RECENT_CALLS: u64 = 256;
 const RECEIPT_METADATA: &[&str] = &["native", "message_id", "native_status", "cleanup", "code", "stage",
-    "preserve_binding", "queued", "already_confirmed", "disposition", "draft"];
+    "preserve_binding", "queued", "already_confirmed", "disposition", "draft",
+    // A repetição da reabertura em bypass só se reconhece por estes campos (`reopen_claude`).
+    "reopened", "mode", "current", "previous_non_plan"];
 /// Ações cujo resultado é a operação inteira. Mesmo conjunto de `_OPERATION_RECEIPTS` em runtime_queue.py.
 const OPERATION_RECEIPTS: &[&str] = &["prepare", "bind_dispatch", "begin_dispatch", "mark_writing", "finish", "late_rpc_resolution"];
 

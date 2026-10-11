@@ -140,7 +140,7 @@ async fn policy() -> std::net::SocketAddr {
 }
 
 pub(crate) async fn registry() -> Arc<RuntimeRegistry> {
-    Arc::new(RuntimeRegistry::new(policy().await, "secret-test".into(), "instance-test".into()))
+    Arc::new(RuntimeRegistry::new(policy().await, "secret-test".into(), "instance-test".into()).with_processes(Arc::new(crate::runtime_open::RecipeProcesses("sid-1"))))
 }
 
 async fn open_headless(registry: &RuntimeRegistry, dir: &Path, name: &str, outcome: &'static str) {

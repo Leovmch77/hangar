@@ -45,7 +45,8 @@ pub(crate) struct Ctx {
     pub(crate) st: Arc<AppState>,
     pub(crate) name: String,
     pub(crate) target: WriteTarget,
-    pub(crate) pass: IngressPass,
+    // Só segura a porta: o `Drop` a solta quando a escrita termina.
+    pub(crate) _pass: IngressPass,
     parts: Parts,
 }
 
@@ -95,7 +96,7 @@ pub(crate) async fn admit(st: &Arc<AppState>, peer: SocketAddr, req: Request, ro
     let shaped = table::body_ok(route, &bytes);
     match route_write(&runtime, &name, route, st.write_gate_wait).await {
         Write::Rust(_, _) if !shaped => Err(invalid_body(&parts.headers)),
-        Write::Rust(pass_in, target) => Ok((Ctx { st: st.clone(), name, target, pass: pass_in, parts }, bytes)),
+        Write::Rust(pass_in, target) => Ok((Ctx { st: st.clone(), name, target, _pass: pass_in, parts }, bytes)),
         Write::Python => Err(forward_whole(st, parts, bytes, &fwd).await),
         Write::Busy => {
             let mut response = json_response(StatusCode::CONFLICT, busy_body());

@@ -91,7 +91,8 @@ async fn policy() -> std::net::SocketAddr {
     address
 }
 
-pub(crate) struct RecipeProcesses;
+/// Cano 42 com o `claude` 43 da conversa dada (`--session-id`).
+pub(crate) struct RecipeProcesses(pub &'static str);
 impl hangar_server::list::procs::ProcessView for RecipeProcesses {
     fn children(&self,_:Duration)->std::io::Result<Arc<hangar_server::list::procs::ChildrenMap>> {Ok(Arc::new(std::collections::HashMap::from([(42,vec![43])]))) }
     fn argv(&self,_:i64)->Vec<String> {vec![]}
@@ -99,7 +100,7 @@ impl hangar_server::list::procs::ProcessView for RecipeProcesses {
     fn env_var(&self,_:i64,_:&str)->std::io::Result<Option<std::ffi::OsString>> {Ok(None)}
     fn start_time(&self,_:i64)->Option<f64> {Some(1000.0)}
     fn recipe(&self,pid:i64)->std::io::Result<hangar_server::list::procs::ProcessRecipe> {
-        let argv=match pid {42=>vec!["hangar-cano".into()],43=>vec!["claude".into(),"--session-id".into(),"sid-1".into()],_=>return Err(std::io::ErrorKind::NotFound.into())};
+        let argv=match pid {42=>vec!["hangar-cano".into()],43=>vec!["claude".into(),"--session-id".into(),self.0.into()],_=>return Err(std::io::ErrorKind::NotFound.into())};
         Ok(hangar_server::list::procs::ProcessRecipe {pid,birth:1000.0,executable:if pid==42 {"/fixture/hangar-cano".into()} else {"/fixture/claude".into()},cwd:std::env::temp_dir(),argv,environ:vec!["HOME=/fixture".into()],cgroup:None})
     }
 }
@@ -112,7 +113,7 @@ pub(crate) fn with_hubs(registry:RuntimeRegistry)->Arc<RuntimeRegistry> {
 pub(crate) async fn registry() -> Arc<RuntimeRegistry> { registry_with(|registry|registry).await }
 /// O ajuste entra antes do `Arc`: depois de ligado aos hubs o registro não muda mais.
 pub(crate) async fn registry_with(adjust:impl FnOnce(RuntimeRegistry)->RuntimeRegistry) -> Arc<RuntimeRegistry> {
-    with_hubs(adjust(RuntimeRegistry::new(policy().await,"secret-test".into(),"instance-test".into()).with_processes(Arc::new(RecipeProcesses))))
+    with_hubs(adjust(RuntimeRegistry::new(policy().await,"secret-test".into(),"instance-test".into()).with_processes(Arc::new(RecipeProcesses("sid-1")))))
 }
 
 /// App-server do Codex falso, em WebSocket de loopback: conta as conexões, guarda os quadros de cada

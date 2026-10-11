@@ -40,7 +40,7 @@ async fn world(swallow: &'static [&'static str]) -> World {
     python.set_info(info_json("claude-headless", &transcript));
     let state = AppState::new(config(upstream, "127.0.0.1"));
     let mods = state.mods.clone();
-    let registry = Arc::new(registry(&mods));
+    let registry = registry(&mods);
     let _ = state.state.runtime.set(registry.clone());
     let server = spawn_state(state).await;
     let (escuta, seen, cano) = vitrine_cano(swallow).await;

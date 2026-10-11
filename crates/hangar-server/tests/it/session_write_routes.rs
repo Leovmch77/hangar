@@ -92,7 +92,7 @@ pub(crate) async fn open_entry_with(registry: &RuntimeRegistry, dir: &std::path:
 }
 
 async fn registry() -> Arc<RuntimeRegistry> {
-    Arc::new(RuntimeRegistry::new(policy().await, "secret-test".into(), "instance-test".into()))
+    crate::runtime_open::with_hubs(RuntimeRegistry::new(policy().await, "secret-test".into(), "instance-test".into()).with_processes(Arc::new(crate::runtime_open::RecipeProcesses("sid-1"))))
 }
 
 /// Servidor com o runtime ligado (como `serve_until_with_state` faz) e o Python falso.

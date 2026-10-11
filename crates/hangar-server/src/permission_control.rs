@@ -732,7 +732,8 @@ mod tests {
             let mut out = String::from("history\n\n  Update Model Permissions\n\n");
             for (i, name) in NAMES.iter().enumerate() {
                 let label = if i == tui.mode { format!("{name} (current)") } else { (*name).to_owned() };
-                out.push_str(&format!("{}{}. {label:<23}{}\n", if i == tui.cursor { "› " } else { "  " }, i + 1, descriptions[i]));
+                // Como a TUI: a coluna da descrição fica a dois espaços do rótulo mais longo, `(current)` incluído.
+                out.push_str(&format!("{}{}. {label:<26}  {}\n", if i == tui.cursor { "› " } else { "  " }, i + 1, descriptions[i]));
             }
             if !tui.half_drawn { out.push_str("\n  Press enter to confirm or esc to go back\n"); }
             out

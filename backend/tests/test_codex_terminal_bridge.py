@@ -20,6 +20,11 @@ def _owner(monkeypatch, mode="rust", terminal=True):
     return owner
 
 
+def _provider(monkeypatch, **providers):
+    from types import SimpleNamespace
+    monkeypatch.setattr(api_mod, "_cached_info_sync", lambda name: SimpleNamespace(provider=providers[name]))
+
+
 def test_the_bridge_is_called_one_way_and_421_means_not_ours(monkeypatch):
     seen = []
 
@@ -253,6 +258,7 @@ def test_claude_question_reaches_the_rust_whole_and_421_leaves_it_to_python(monk
 @pytest.mark.parametrize("route", ["answer", "select", "select/submit"])
 def test_claude_question_from_guest_or_connect_goes_to_the_rust(monkeypatch, route):
     calls = []
+    _provider(monkeypatch, ct="claude")
     monkeypatch.setattr(runtime_coordinator, "rust_codex_terminal", lambda *args: None)
     monkeypatch.setattr(runtime_coordinator, "rust_claude", lambda *args: calls.append(args) or (200, b'{"ok": true}'))
     body = b'{"option": 1, "interaction_id": "perm:t1"}'
@@ -269,6 +275,7 @@ def test_claude_bridge_down_is_a_visible_503_without_local_answer(monkeypatch):
     import json
     import socket
     _owner(monkeypatch)
+    _provider(monkeypatch, ct="claude")
     monkeypatch.setattr(runtime_coordinator, "rust_codex_terminal", lambda *args: None)
     monkeypatch.setattr(api_mod.plugin_bridge, "responder_pergunta",
                         lambda *args: (_ for _ in ()).throw(AssertionError("o Python respondeu a pergunta")))
@@ -281,6 +288,20 @@ def test_claude_bridge_down_is_a_visible_503_without_local_answer(monkeypatch):
             asyncio.run(api_mod._codex_rust_port("ct", _request(GUEST_PORT, "/api/sessions/ct/select", body=b'{"option": 1}')))
         assert reply.value.args[0] == 503
         assert json.loads(reply.value.args[1])["detail"]["code"] == "claude_bridge_failed"
+
+
+@pytest.mark.parametrize("route", ["answer", "select", "select/submit"])
+def test_guest_question_to_pi_does_not_wait_for_the_claude_bridge(monkeypatch, route):
+    import json
+    _owner(monkeypatch, mode="pending")
+    _provider(monkeypatch, pi="pi", ct="claude")
+    monkeypatch.setattr(list_bridge, "endpoint", lambda: None)
+    monkeypatch.setattr(api_mod.codex_sessions, "exists", lambda name: False)
+    # Pi pela 8766 com a ponte ainda sem endereço: a rota Python segue.
+    asyncio.run(api_mod._codex_rust_port("pi", _request(GUEST_PORT, f"/api/sessions/pi/{route}", body=b'{"option": 1}')))
+    with pytest.raises(api_mod._RustReply) as reply:
+        asyncio.run(api_mod._codex_rust_port("ct", _request(GUEST_PORT, f"/api/sessions/ct/{route}", body=b'{"option": 1}')))
+    assert reply.value.args[0] == 503 and json.loads(reply.value.args[1])["detail"]["code"] == "claude_bridge_failed"
 
 
 def test_question_bodies_keep_the_interaction_id():

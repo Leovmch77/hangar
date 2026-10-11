@@ -257,7 +257,7 @@ def test_kill_session_in_rust_mode_shows_the_leave_warning_once(monkeypatch, cli
     pair.PairLink("a").set(["srv::x"], "", "g1", {})
     _rust(monkeypatch, reply={"ex_peers": ["srv::x"], "warnings": [_NOT_NOTIFIED]})
     monkeypatch.setattr(api, "_recusa_orq", lambda n: None)
-    monkeypatch.setattr(api.registry, "kill", lambda n: registry.SessionRegistry._clear_pair(n))
+    monkeypatch.setattr(api.registry, "kill", lambda n, closed_by_rust=False: registry.SessionRegistry._clear_pair(n))
     monkeypatch.setattr(api, "_invalidate_lists", lambda: None)
     monkeypatch.setattr(api.share_store, "revoke_session", lambda n: False)
 

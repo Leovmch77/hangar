@@ -1794,8 +1794,7 @@ mod terminal_async {
         if !rollout.exists() { std::fs::write(&rollout,"").unwrap(); }
         let (cano,server,push,starts) = terminal_cano_with(rollout,json!([])).await;
         let handle = terminal_actor(dir,cano,Arc::new(InteractionStore::default())).await;
-        view_until(&handle,"assinada e livre para turno",|v|v["subscribed"] == true && v["deliverable"] == true).await;
-        (handle,server,push,starts)
+        view_until(&handle,"assinada e livre para turno",|v|v["subscribed"] == true && v["deliverable"] == true).await;        (handle,server,push,starts)
     }
 
     fn ordinary() -> Action {

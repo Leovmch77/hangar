@@ -61,13 +61,19 @@ fn pending_plan_rules() {
 
 #[test]
 fn question_validates_current_request() {
-    let mut engine = engine(json!({"name":"session","initialized":true}));
+    use hangar_server::interactions::{InteractionBinding, InteractionKind, InteractionStore, native_target};
+    let mut engine = engine(json!({"name":"session","session_id":"sid","initialized":true}));
+    let store = std::sync::Arc::new(InteractionStore::default());
+    engine.set_interactions("key".into(),store.clone()).unwrap();
     line(&mut engine,json!({"type":"control_request","request_id":1,"request":{
         "subtype":"can_use_tool","tool_name":"AskUserQuestion","input":{"questions":[{
         "question":"Qual opção?","header":"Opção","multiSelect":true,
         "options":[{"label":"A","description":"Primeira"},{"label":"B","description":"Segunda"}]}]}}}),10.0);
-    assert!(engine.command(command(OperationKind::AnswerQuestions,json!({"request_id":"1","answers":[]})),clock(10.0)).is_err());
-    let effects = engine.command(command(OperationKind::AnswerQuestions,json!({"request_id":1,"answers":[{"kind":"option","indices":[0,1]}]})),clock(10.0)).unwrap();
+    // A resposta leva a identidade da pergunta exibida, como o app manda.
+    let binding = InteractionBinding { key:"key".into(),conversation:"sid".into(),generation:1 };
+    let shown = store.observe(&binding,&native_target(InteractionKind::Question,"sid",&json!(1)),Some(engine.view()["question"].clone())).unwrap().unwrap();
+    assert!(engine.command(command(OperationKind::AnswerQuestions,json!({"request_id":"1","answers":[],"interaction_id":shown})),clock(10.0)).is_err());
+    let effects = engine.command(command(OperationKind::AnswerQuestions,json!({"request_id":1,"answers":[{"kind":"option","indices":[0,1]}],"interaction_id":shown})),clock(10.0)).unwrap();
     assert_eq!(writes(&effects)[0]["response"]["response"]["updatedInput"]["answers"]["Qual opção?"],"A, B");
 }
 

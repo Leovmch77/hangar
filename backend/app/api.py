@@ -519,7 +519,9 @@ async def _codex_rust_port(name: str, request: Request):
         reply = None
         if codex_sessions.exists(name):
             reply = await asyncio.to_thread(runtime_coordinator.rust_codex_terminal, name, route, request.method, body)
-        if reply is None and route in {"answer", "select", "select/submit"}:
+        # Idem para a ponte do Claude: mesmo critério de provedor das rotas (`info.provider`).
+        if reply is None and route in {"answer", "select", "select/submit"} \
+                and getattr(await _cached_info(name), "provider", "claude") == "claude":
             reply = await asyncio.to_thread(runtime_coordinator.rust_claude, name, route, request.method, body)
         if reply:
             raise _RustReply(*reply)

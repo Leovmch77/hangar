@@ -397,8 +397,15 @@ impl RuntimeRegistry {
         if entries.iter().any(|(other,entry)|other != &key && entry.name == name) { return Err(unavailable()); }
         let entry = entries.get(&key).filter(|entry|entry.name == name && entry.generation == generation).ok_or_else(unavailable)?;
         if matches!(entry.handle,EntryHandle::Terminal {..}) || snapshot["key"] != key || snapshot["generation"] != generation || !snapshot["error"].is_null() { return Err(unavailable()); }
-        let conversation = snapshot["view"]["conversation"].as_str().filter(|s|!s.is_empty()).ok_or_else(unavailable)?;
-        Ok(InteractionBinding { key,conversation:conversation.into(),generation })
+        // Logo depois de abrir a vista durável ainda não tem a conversa; o canal ao vivo, semeado pelo ator
+        // antes da primeira resposta, tem o vínculo da mesma vida.
+        let conversation = match snapshot["view"]["conversation"].as_str().filter(|s|!s.is_empty()) {
+            Some(conversation) => conversation.to_owned(),
+            None => entry.live.borrow().clone().and_then(|live|live.binding.clone())
+                .filter(|binding|binding.key == key && binding.generation == generation && !binding.conversation.is_empty())
+                .map(|binding|binding.conversation).ok_or_else(unavailable)?,
+        };
+        Ok(InteractionBinding { key,conversation,generation })
     }
 
     #[doc(hidden)]
