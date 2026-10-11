@@ -915,6 +915,8 @@ impl Hangar {
         }
         // O clique sai depois desta atualização: o botão clicado atualiza o Hangar, e por dentro dela o GPUI derruba o app.
         let (this, id) = (cx.entity().downgrade(), id.to_owned());
+        // Sem o `ok=` correspondente, a janela caiu antes do clique.
+        crate::voice::log(format!("click_screen deferred call={call}"));
         window.defer(cx, move |window, cx| {
             let result = window.a11y_click(&id, cx);
             crate::voice::log(format!("click_screen ok={}", result.is_ok()));
@@ -922,8 +924,9 @@ impl Hangar {
                 Ok(()) => (true, format!("Cliquei em «{name}». Para ver o resultado, leia a tela de novo.")),
                 Err(code) => (false, reason(&id, code)),
             };
-            // Hangar fechado entre o pedido e o clique: não há a quem responder.
-            let _ = this.update(cx, |hangar, cx| { hangar.voice_reply(call, ok, text); cx.notify(); });
+            if this.update(cx, |hangar, cx| { hangar.voice_reply(call, ok, text); cx.notify(); }).is_err() {
+                crate::voice::log(format!("click_screen call={call} reply lost: app gone"));
+            }
         });
     }
 
