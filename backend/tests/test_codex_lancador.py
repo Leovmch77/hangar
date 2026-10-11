@@ -261,6 +261,8 @@ def test_lancador_grava_sidecar_completo_e_mata_o_servidor_na_saida(tmp_path):
     assert meta["thread_id"] == "thread-falso"
     assert meta["rollout_path"] == env["FAKE_ROLLOUT"]
     assert meta["cwd"] == str(cwd)
+    # Quem esta sessao criar herda o modo dela; sem o campo, a nova caia no padrao da conta.
+    assert meta["permission_mode"] == "Full Access"
     # O par que existe por causa deste ticket: endereco E dono. Porta de loopback e reciclada, entao
     # o endpoint sozinho nao prova que o servidor do outro lado ainda e o desta sessao.
     assert meta["endpoint"].startswith("ws://127.0.0.1:")

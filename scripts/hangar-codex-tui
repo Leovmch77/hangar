@@ -718,7 +718,8 @@ def main() -> int:
                 update_runtime(headless=False, cano=None, launching=False,
                                       endpoint=endpoint, app_pid=servidor.pid, launcher_pid=os.getpid(),
                                       model=args.model, effort=args.effort, rollout_path=rollout,
-                                      tool_output_token_limit=args.tool_output_token_limit, **resumed_metadata,
+                                      tool_output_token_limit=args.tool_output_token_limit,
+                                      **{"permission_mode": resumed_mode, **resumed_metadata},
                                       **({"service_tier": args.service_tier} if args.service_tier is not None else {}))
             else:
                 codex_sessions.save(args.name, thread_id, rollout, cwd,
@@ -727,7 +728,7 @@ def main() -> int:
                                 codex_home=str(codex_home),
                                 codex_account=args.codex_account,
                                 tool_output_token_limit=args.tool_output_token_limit,
-                                service_tier=args.service_tier)
+                                service_tier=args.service_tier, permission_mode=resumed_mode)
         elif thread_id != previous_thread and thread is not None:
             if args.transfer_id:
                 from app.conversation_transfer import load_transfer, TransferPhase
