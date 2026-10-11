@@ -301,20 +301,31 @@ impl AccountService {
         runtime: Option<&crate::runtime::gateway::RuntimeRegistry>,
         key: &AccountKey,
     ) -> UsageFacts {
-        let (service, owned, handle) = (self.clone(), key.clone(), tokio::runtime::Handle::current());
-        let mut facts = tokio::task::spawn_blocking(move || {
-            let procs = crate::list::procs::SystemProcs::default();
-            let fixture = service.env.terminal_fixture.clone();
-            local_usage(&service, &owned, &procs, &mut || match &fixture {
-                Some(fixture) => fixture().and_then(|stdout| parse_instances(&stdout)),
-                None => handle.block_on(terminal_instances()),
+        // Processo nascendo (no Windows o argv ainda vazio) deixa uma leitura incompleta à toa: relê
+        // um instante depois. Uma leitura completa posterior prova o mesmo que qualquer outra.
+        let mut facts = UsageFacts::default();
+        for attempt in 0..3 {
+            if attempt > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            }
+            let (service, owned, handle) = (self.clone(), key.clone(), tokio::runtime::Handle::current());
+            facts = tokio::task::spawn_blocking(move || {
+                let procs = crate::list::procs::SystemProcs::default();
+                let fixture = service.env.terminal_fixture.clone();
+                local_usage(&service, &owned, &procs, &mut || match &fixture {
+                    Some(fixture) => fixture().and_then(|stdout| parse_instances(&stdout)),
+                    None => handle.block_on(terminal_instances()),
+                })
             })
-        })
-        .await
-        .unwrap_or_else(|_| {
-            tracing::warn!(code = "account_usage_task_failed", "leitura de uso da conta não terminou");
-            UsageFacts::default()
-        });
+            .await
+            .unwrap_or_else(|_| {
+                tracing::warn!(code = "account_usage_task_failed", "leitura de uso da conta não terminou");
+                UsageFacts::default()
+            });
+            if facts.complete || !facts.sessions.is_empty() {
+                break;
+            }
+        }
         facts.merge(match runtime {
             Some(runtime) => runtime.account_usage(key).await,
             None => UsageFacts::default(),
