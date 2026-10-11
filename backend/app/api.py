@@ -10224,16 +10224,9 @@ async def model_options(name: str):
             modelos = await hl.list_models(name)
             meta = headless_sessions.load(name) or {}
             atual = hl.escolhas(name)[0] or meta.get("model")
+            models = await asyncio.to_thread(claude_models.para_tela, modelos, atual)
         except Exception as e:
             raise HTTPException(503, detail=erro("erro_modelos_indisponiveis", f"não consegui listar os modelos: {e}"))
-        try:
-            models = await asyncio.to_thread(claude_models.para_tela, modelos, atual)
-        except claude_models.ClaudeIndisponivel as e:
-            # Sem o Rust a lista do processo continua valendo: só os ids, marcada como reduzida.
-            _log.warning("formatação dos modelos claude falhou sessao=%s: %s", name, e)
-            return {"kind": "claude", "engine": None, "effort": meta.get("effort"), "reduced": True,
-                    "models": [{"id": m["value"]} for m in modelos
-                               if isinstance(m, dict) and isinstance(m.get("value"), str) and m["value"]]}
         return {"kind": "claude", "engine": None, "effort": meta.get("effort"),
                 "models": models}
     # Conta Anthropic: le o picker de verdade. Abre e fecha um overlay — nao vai pro scrollback,
@@ -10344,12 +10337,10 @@ async def model_options_sem_sessao(provider: str = "claude", engine: str = "",
         try:
             models = await asyncio.to_thread(claude_models.para_tela, crus)
         except claude_models.ClaudeIndisponivel as error:
-            # Mesma reserva do catálogo que falhou: os aliases abrem a sessão, sem cache.
-            _log.warning("formatação dos modelos claude sem sessao falhou config_dir=%s: %s", chave, error)
-        else:
-            resp = {"kind": "claude", "engine": None, "models": models}
-            _models_cache_put(chave, resp)
-            return {**resp, "reduced": False}
+            raise HTTPException(503, detail=erro("erro_modelos_indisponiveis", str(error))) from None
+        resp = {"kind": "claude", "engine": None, "models": models}
+        _models_cache_put(chave, resp)
+        return {**resp, "reduced": False}
     return {"kind": "claude", "reduced": True,
             "models": [{"id": a} for a in ("opus", "fable", "sonnet", "haiku")]}
 
