@@ -22,7 +22,7 @@ pub fn is_local(kind: &str) -> bool {
 }
 
 /// `None` = o serviço não é local. `meta["provider"]` escolhe Claude ou Codex; `quota` é o
-/// `{"windows":[…]}` do `GET /internal/quota` (só Claude).
+/// `{"windows":[…]}` do módulo de contas (só Claude).
 pub fn run(kind: &str, payload: &Value, meta: &Value, quota: Option<&Value>) -> Option<Result<Value, RuntimeError>> {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |elapsed| elapsed.as_secs_f64());
     run_at(kind, payload, meta, quota, now)

@@ -284,7 +284,7 @@ impl AccountService {
                         let id = source["id"].as_str().unwrap_or("");
                         let (mut value, signature) = if let Some((provider, account)) = account {
                             service
-                                .read_quota(provider, &account, &client, &bridge)
+                                .read_quota(provider, &account, &client, Some(&bridge))
                                 .await
                         } else {
                             (
@@ -360,12 +360,76 @@ impl AccountService {
         Ok(json!(output))
     }
 
+    /// Janelas da conta Claude de `config_dir` (vazio = a padrão) para a linha de status, sem as por
+    /// modelo. Só o cache em disco e a API da Anthropic: nenhuma chamada ao Python. Token vencido sai
+    /// sem janelas até o ciclo de renovação de fundo trocá-lo.
+    pub async fn claude_windows(&self, config_dir: &str) -> Result<Vec<Value>, &'static str> {
+        let wanted = if config_dir.is_empty() {
+            None
+        } else {
+            Some(AccountKey::new(Provider::Claude, std::path::Path::new(config_dir)).map_err(|_| "quota_account")?)
+        };
+        let (path, account) = self
+            .claude_accounts()
+            .map_err(|_| "quota_catalog")?
+            .into_iter()
+            .filter(|(_, account)| {
+                account.is_default
+                    || crate::accounts::storage::real_file(
+                        &account.home.join(crate::accounts::storage::CLAUDE_MARKER),
+                    )
+            })
+            .find(|(_, account)| match &wanted {
+                None => account.is_default,
+                Some(key) => AccountKey::new(Provider::Claude, &account.home).ok().as_ref() == Some(key),
+            })
+            .and_then(|(row, account)| Some((row["path"].as_str()?.to_owned(), account)))
+            .ok_or("quota_account")?;
+        let id = format!("claude:{path}");
+        let signature = std::fs::read(account.home.join(".credentials.json"))
+            .ok()
+            .map(|bytes| json!(ring::digest::digest(&ring::digest::SHA256, &bytes).as_ref()))
+            .unwrap_or(Value::Null);
+        let stale = {
+            let mut held = self.quotas.cache.lock().await;
+            let cache = held.get_or_insert_with(|| cache::QuotaCache::load(&self.quota_path()));
+            if cache.credential_changed(&id, &signature) {
+                cache.remove(&id);
+            }
+            cache.set_credential(&id, signature);
+            cache.needs_refresh(&id, now(), false)
+        };
+        // Com a listagem já lendo a rede, ela grava o cache: a linha usa o que já houver.
+        if stale && let Ok(_refresh) = self.quotas.refresh.try_lock() {
+            let client = external_client(Duration::from_secs(8)).map_err(|_| "quota_client")?;
+            let (value, signature) = self.read_quota(Provider::Claude, &account, &client, None).await;
+            let mut held = self.quotas.cache.lock().await;
+            let cache = held.get_or_insert_with(|| cache::QuotaCache::load(&self.quota_path()));
+            if value["motivo"] == "credencial-alterada" {
+                cache.remove(&id);
+            }
+            cache.update(&id, value, now());
+            if let Some(signature) = signature {
+                cache.set_credential(&id, signature);
+            }
+            if cache.save(&self.quota_path()).is_err() {
+                tracing::warn!(code = "quota_cache_write_failed", "cache de cotas não gravado");
+            }
+        }
+        let held = self.quotas.cache.lock().await;
+        let quota = held.as_ref().and_then(|cache| cache.get(&id)).unwrap_or(Value::Null);
+        Ok(quota["janelas"]
+            .as_array()
+            .map(|windows| windows.iter().filter(|w| w["por_modelo"] != true).cloned().collect())
+            .unwrap_or_default())
+    }
+
     async fn read_quota(
         &self,
         provider: Provider,
         account: &Account,
         client: &reqwest::Client,
-        bridge: &AccountsBridge,
+        bridge: Option<&AccountsBridge>,
     ) -> (Value, Option<Value>) {
         let Ok(key) = AccountKey::new(provider, &account.home) else {
             return (
@@ -407,7 +471,10 @@ impl AccountService {
         let value = match provider {
             Provider::Claude => {
                 let value = claude::read(client, &account.home, now()).await;
-                if value["estado"] == "expirada" {
+                // Sem ponte, quem pede não renova: a renovação ainda passa pela janela de login do Python.
+                if value["estado"] == "expirada"
+                    && let Some(bridge) = bridge
+                {
                     drop(guard);
                     if let Err(reason) = self
                         .refresh_claude(

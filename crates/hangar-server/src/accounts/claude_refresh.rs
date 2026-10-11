@@ -94,7 +94,7 @@ impl AccountService {
             .map_err(|_| "sessao-viva")?;
         self.validate_claude(&account, &key)
             .map_err(|_| "renovacao-falhou")?;
-        self.usage(&bridge, runtime.as_deref(), &key)
+        self.usage(runtime.as_deref(), &key)
             .await
             .ensure_unused()
             .map_err(|_| "sessao-viva")?;
@@ -274,8 +274,6 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn native_cli_renews_only_when_account_is_unused() {
-        use super::super::http::Json;
-        
         let temp = tempfile::tempdir().unwrap();
         let account_home = temp.path().join(".claude-test");
         let bin = temp.path().join("bin");
@@ -285,17 +283,17 @@ mod tests {
         fs::write(account_home.join(".credentials.json"), old.to_string()).unwrap();
         let cli = bin.join("claude");
         crate::write_test_executable(&cli, b"#!/bin/sh\nprintf '%s' '{\"claudeAiOauth\":{\"accessToken\":\"after\",\"refreshToken\":\"refresh\",\"expiresAt\":20000000000000}}' > \"$CLAUDE_CONFIG_DIR/.credentials.json\"\n");
-        let busy = Arc::new(std::sync::atomic::AtomicBool::new(true));
-        let flag = busy.clone();
+        // Uso de verdade: sidecar de sessão sem terminal na conta. Os fatos nunca vêm do Python.
+        let sidecars = temp.path().join(".hangar/claude-headless");
+        fs::create_dir_all(&sidecars).unwrap();
+        fs::write(sidecars.join("busy.json"), json!({"name":"busy","config_dir":account_home}).to_string()).unwrap();
+        let python_facts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = python_facts.clone();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let app=axum::Router::new().route("/internal/accounts/facts",axum::routing::post(move |body:bytes::Bytes| {
-            let flag=flag.clone();
-            async move {
-                let body:Value=serde_json::from_slice(&body).unwrap();
-                Json(json!([{"key":body["keys"][0],"facts":{"complete":true,
-                    "sessions":if flag.load(std::sync::atomic::Ordering::SeqCst) {vec!["busy"]} else {vec![]},"pids":[]}}]))
-            }
+        let app=axum::Router::new().route("/internal/accounts/facts",axum::routing::post(move || {
+            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async { axum::http::StatusCode::INTERNAL_SERVER_ERROR }
         }));
         let server = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
@@ -328,7 +326,7 @@ mod tests {
             .unwrap(),
             old
         );
-        busy.store(false, std::sync::atomic::Ordering::SeqCst);
+        fs::remove_file(sidecars.join("busy.json")).unwrap();
         assert_eq!(
             service
                 .refresh_claude(&account, bridge, Some(runtime), true)
@@ -343,6 +341,7 @@ mod tests {
                 .try_acquire(&key, GuardMode::Exclusive)
                 .is_ok()
         );
+        assert_eq!(python_facts.load(std::sync::atomic::Ordering::SeqCst), 0, "fatos de uso pedidos ao Python");
         server.abort();
     }
 }

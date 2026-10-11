@@ -161,10 +161,6 @@ def inspect_processes(key: AccountKey, *, processes=None, process_factory=None) 
     return facts
 
 
-def terminal_sessions() -> set[str]:
-    return set(terminal_instances())
-
-
 def terminal_instances() -> dict[str, str]:
     from app import tmux
     result = tmux._run(["tmux", "list-sessions", "-F",
@@ -187,64 +183,6 @@ def terminal_instances() -> dict[str, str]:
         return {}
     raise RuntimeError("account_mux_unknown")
 
-
-def inspect_usage(key: AccountKey) -> UsageFacts:
-    """Inclui sidecars sem filho iniciado: o nascimento adiado ainda usa a conta."""
-    from app.adapters.claude_headless import sessions as headless_sessions
-    from app.adapters.codex import sessions as codex_sessions
-
-    facts = inspect_processes(key)
-    try:
-        from app import account_lifecycle
-        births = account_lifecycle.default_lock_root() / "births"
-        if births.exists():
-            instances = None
-            for path in births.iterdir():
-                if path.suffix != ".json":
-                    continue
-                pending = json.loads(path.read_text(encoding="utf-8"))
-                owner = AccountKey.new(pending["provider"], Path(pending["canonical_home"]))
-                if not pending.get("name") or "instance" not in pending:
-                    raise ValueError("registro de nascimento incompleto")
-                if owner != key:
-                    continue
-                if instances is None:
-                    instances = terminal_instances()
-                if pending["instance"] is None:
-                    # Sem identidade, ausência do nome pode ser apenas um rename.
-                    facts.complete = False
-                else:
-                    facts.sessions.extend(name for name, instance in instances.items()
-                                          if instance == pending["instance"])
-        directory = (codex_sessions if key.provider == Provider.CODEX else headless_sessions)._dir()
-        rows = []
-        if directory.exists():
-            for path in directory.iterdir():
-                if path.suffix == ".json":
-                    row = json.loads(path.read_text(encoding="utf-8"))
-                    if not isinstance(row, dict) or not row.get("name"):
-                        raise ValueError("sidecar de sessão incompleto")
-                    rows.append(row)
-        terminals = None
-        for row in rows:
-            home = row.get("codex_home") if key.provider == Provider.CODEX else row.get("config_dir")
-            if not home and key.provider == Provider.CODEX:
-                from app import codex_contas
-                home = str(codex_contas.resolve_account(row.get("codex_account") or "default").home)
-            home = home or str(Path.home() / ".claude")
-            if AccountKey.new(key.provider, Path(home)) == key:
-                if key.provider == Provider.CODEX and not row.get("headless") and not row.get("launching"):
-                    if terminals is None:
-                        terminals = terminal_sessions()
-                    if row["name"] not in terminals:
-                        continue
-                facts.sessions.append(row["name"])
-    except Exception:  # noqa: BLE001 — um leitor parcial não pode autorizar exclusão.
-        facts.complete = False
-    facts.pids = sorted(set(facts.pids))
-    facts.sessions = sorted(set(facts.sessions))
-    facts.holders = sorted(set(facts.holders))
-    return facts
 
 class PreparationJobs:
     """Trabalhos de configuração que continuam protegidos quando o chamador desaparece."""
