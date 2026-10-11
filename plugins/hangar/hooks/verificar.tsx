@@ -59,8 +59,13 @@ function liveShells(list: BackgroundShell[], now: number): BackgroundShell[] {
 
 function runVerdict(run: VerificarRun): { text: string; tone: "ok" | "bad" | "dim" } {
   if (run.isAlive) return { text: run.isQueued ? "na fila (outra verificação nesta máquina)" : "rodando", tone: "dim" };
-  // Rodada cancelada pode gravar "fim 0" com passos que nunca terminaram.
-  if (run.rc === undefined || run.steps.some((s) => s.state === "rodando")) {
+  // Rodada cancelada pode gravar "fim 0" com passos que nunca terminaram ou nem começaram; o plano
+  // gravado já traz só os passos que faltam, então "fim 0" com pendente não é sucesso.
+  if (
+    run.rc === undefined ||
+    run.steps.some((s) => s.state === "rodando") ||
+    (run.rc === 0 && run.steps.some((s) => s.state === "pendente"))
+  ) {
     return { text: "interrompida", tone: "bad" };
   }
   return run.rc === 0 ? { text: "ok", tone: "ok" } : { text: "FALHOU", tone: "bad" };
@@ -81,9 +86,10 @@ async function tick($: EngineInterface) {
     const now = await $.clock.now();
     const runs = await scanRuns($, now);
     const prev = await read($, board);
-    const sh = liveShells(await read($, shells), now);
-    // Sem nada para mostrar, não redesenha a cada tique.
-    if (runs.length === 0 && prev.runs.length === 0 && sh.length === 0) return;
+    const list = await read($, shells);
+    // Sem nada para mostrar agora nem no último desenho, não redesenha a cada tique. O desenho filtra
+    // os shells pelo `now` gravado: sem gravar o novo, um shell vencido ficaria na faixa.
+    if (runs.length === 0 && prev.runs.length === 0 && liveShells(list, now).length === 0 && liveShells(list, prev.now).length === 0) return;
     await update($, board, () => ({ now, runs }));
     await update($, shells, (list) => list.filter((s) => now - s.startedAt < FORGET_SHELL_MS));
   } finally {
