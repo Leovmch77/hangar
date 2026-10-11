@@ -100,18 +100,21 @@
   let memory = $state<{ state: 'loading' | 'error' | 'ok'; items: VoiceMemory[] }>({ state: 'loading', items: [] });
   // Resposta de um servidor que já não é o mostrado não vale.
   let memoryFor = '';
+  // Leitura mais velha que outra leitura ou que um apagar não repinta a lista.
+  let memoryGen = 0;
   let forgetFailed = $state(false);
   async function loadMemory() {
     if (!target) return;
     const key = memoryFor = target.id;
+    const gen = ++memoryGen;
     forgetFailed = false;
     memory = { state: 'loading', items: [] };
     try {
       const items = await listVoiceMemory(target);
-      if (memoryFor === key) memory = { state: 'ok', items };
+      if (memoryFor === key && memoryGen === gen) memory = { state: 'ok', items };
     } catch (e) {
       console.warn('live voice: memory unreadable', e);
-      if (memoryFor === key) memory = { state: 'error', items: [] };
+      if (memoryFor === key && memoryGen === gen) memory = { state: 'error', items: [] };
     }
   }
   // Recarrega ao abrir os ajustes e quando o servidor mostrado muda com eles abertos.
@@ -124,6 +127,7 @@
     // A lista é de outro servidor: apagar aqui atingiria a máquina errada.
     if (!target || memoryFor !== target.id) return;
     const key = target.id;
+    memoryGen++;
     forgetFailed = false;
     const gone = () => { if (memoryFor === key) memory = { state: 'ok', items: memory.items.filter(e => e.id !== id) }; };
     try {
