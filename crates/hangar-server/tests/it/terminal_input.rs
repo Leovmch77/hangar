@@ -41,6 +41,9 @@ fn terminal_input_composer_proof() {
  assert_eq!(ComposerSnapshot::parse(&screen("/clear [a #1]")).unwrap().proves("/clear",&empty),Proof::Unreadable);
  let draft=ComposerSnapshot::parse(&screen("/clear [nota]")).unwrap();
  assert_eq!(draft.proves("/clear",&draft),Proof::Unreadable);
+ assert_eq!(ComposerSnapshot::parse(&screen("/compact <a #1>")).unwrap().proves("/compact",&empty),Proof::Unreadable);
+ let draft=ComposerSnapshot::parse(&screen("/compact <nota>")).unwrap();
+ assert_eq!(draft.proves("/compact",&draft),Proof::Unreadable);
 }
 #[test]
 fn terminal_input_composer_below_long_agent_panel() {
