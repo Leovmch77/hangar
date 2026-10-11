@@ -1,4 +1,5 @@
 """Ponte da lista: erro levanta, nunca vira lista vazia."""
+import asyncio
 import json
 import socket
 import threading
@@ -96,7 +97,10 @@ async def test_list_bridge_on_the_loop_is_logged_once_and_still_runs(bridge, mon
     for _ in range(2):
         list_bridge.invalidate()
     assert logged == [("lista.ponte_no_laco", "list.invalidate")]
-    assert len(bridge["requests"]) == 2
+    list_bridge.invalidate()
+    await asyncio.to_thread(list_bridge.invalidate)
+    assert logged == [("lista.ponte_no_laco", "list.invalidate")] * 2
+    assert len(bridge["requests"]) == 4
 
 
 def test_dirs_env_has_every_folder():

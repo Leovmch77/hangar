@@ -64,7 +64,7 @@ async def _shadow(infos: list[SessionInfo], pane_pids: dict[str, int]) -> dict:
     served = sse.recent_list(_SHADOW_MAX_AGE)
     by_name = {i.name: i for i in served or ()}
     others = [by_name[i.name] for i in infos if i.provider in _OTHERS and i.name in by_name]
-    out = await asyncio.to_thread(_files, infos, [], pane_pids)
+    out = await internal_thread(_files, infos, [], pane_pids)
     out["states"] = {i.name: {f: getattr(i, f) for f in (*_STATE_FIELDS, "conta")} for i in others}
     # `nav_vivos` grava ao vencer marcador; a sombra não serve navegador.
     out["nav"] = {}

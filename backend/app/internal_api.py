@@ -474,7 +474,7 @@ async def state_service(name: str, request: Request) -> dict:
 @router.get("/migration/status")
 async def migration_status() -> dict:
     from app import migration_status
-    return await asyncio.to_thread(migration_status.facts)
+    return await internal_thread(migration_status.facts)
 
 
 @router.get("/sessions/{name}/uploads-facts")

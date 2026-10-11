@@ -62,7 +62,7 @@ def dirs_env() -> str:
     }, ensure_ascii=False)
 
 
-_on_loop_seen: set[tuple[str, str]] = set()
+_on_loop_seen: set[tuple[str, tuple]] = set()
 
 
 def _warn_if_on_loop(operation: str) -> None:
@@ -72,13 +72,23 @@ def _warn_if_on_loop(operation: str) -> None:
         asyncio.get_running_loop()
     except RuntimeError:
         return
-    from app import diag, loop_monitor
-    where = loop_monitor.compact_stack(sys._getframe(2))
-    if (operation, where) in _on_loop_seen:
-        return
-    _on_loop_seen.add((operation, where))
-    _log.warning("list bridge on the event loop op=%s at %s", operation, where)
-    diag.registrar("lista.ponte_no_laco", "aviso", codigo=operation, pilha=where)
+    try:
+        caller = sys._getframe(2)
+        # Chave barata primeiro: o texto da pilha lê o disco, e só a primeira vez de cada ponto precisa dele.
+        frame, key = caller, []
+        while frame is not None and len(key) < 8:
+            key.append((frame.f_code, frame.f_lineno))
+            frame = frame.f_back
+        if (operation, tuple(key)) in _on_loop_seen:
+            return
+        _on_loop_seen.add((operation, tuple(key)))
+        from app import diag, loop_monitor
+        where = loop_monitor.compact_stack(caller)
+        _log.warning("list bridge on the event loop op=%s at %s", operation, where)
+        diag.registrar("lista.ponte_no_laco", "aviso", codigo=operation, pilha=where)
+    except Exception:
+        # O aviso nunca muda o resultado da chamada que ele descreve.
+        _log.debug("aviso de ponte no laço falhou op=%s", operation, exc_info=True)
 
 
 def _request(operation: str, arguments: dict, timeout: float = _TIMEOUT, report: bool = True):
