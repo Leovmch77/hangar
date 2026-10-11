@@ -35,6 +35,11 @@ test("fila sem passo iniciado e fim com código", () => {
   expect(parseRun("a-1", "lixo")).toBe(undefined);
 });
 
+test("dono da rodada: a sessão do Hangar que chamou", () => {
+  expect(parseRun("a-1", "1 plano a linux=rust windows= vm=\n1 dono pm-x.2")?.owner).toBe("pm-x.2");
+  expect(parseRun("a-1", "1 plano a linux=rust windows= vm=")?.owner).toBe(undefined);
+});
+
 test("notificação de tarefa de fundo", () => {
   const text =
     "<task-notification>\n<task-id>bx1</task-id>\n<output-file>/t</output-file>\n<status>completed</status>\n</task-notification>";

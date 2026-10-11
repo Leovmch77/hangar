@@ -7,9 +7,9 @@ tier("prepend");
 const DIR = "/estado/hangar-verificacao/andamento";
 
 /** Sessão com um arquivo de andamento `abc123-4242`; `alive` diz se o pid 4242 existe. Devolve a faixa desenhada. */
-async function band($: Engine, on: On, run: string, alive: boolean, opened: string[] = []): Promise<string> {
+async function band($: Engine, on: On, run: string, alive: boolean, opened: string[] = [], session = ""): Promise<string> {
   const clock = mock.clock(on, { now: 130_000 });
-  const env: Record<string, string> = { XDG_STATE_HOME: "/estado", HOME: "/home/x" };
+  const env: Record<string, string> = { XDG_STATE_HOME: "/estado", HOME: "/home/x", CP_SESSION_NAME: session };
   on("env.get", ($, e) => ({ value: env[e.name] }));
   on("session.start", ($, e) => ({ cwd: e.cwd }));
   on("session.cwd", () => ({ value: "/tmp" }));
@@ -46,4 +46,14 @@ test("a faixa acima do prompt mostra o verificar-local em andamento e o /andamen
 test("fim 0 com passo que nem começou é rodada interrompida, não ok", async ($, on) => {
   const text = await band($, on, "100 plano abc123 linux=rust windows= vm=\n101 fim 0", false);
   expect(text).toContain("interrompida");
+});
+
+test("a rodada só aparece na sessão que chamou", async ($, on) => {
+  const run = "100 plano abc123 linux=rust windows= vm=\n100 dono pm-a\n101 >> linux: rust…";
+  expect(await band($, on, run, true, [], "pm-a")).toContain("abc123");
+});
+
+test("rodada de outra sessão não aparece", async ($, on) => {
+  const run = "100 plano abc123 linux=rust windows= vm=\n100 dono pm-a\n101 >> linux: rust…";
+  expect(await band($, on, run, true, [], "pm-b")).not.toContain("abc123");
 });

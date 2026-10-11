@@ -4,6 +4,7 @@ export type ParsedRun = Omit<VerificarRun, "isAlive">;
 
 // Formato gravado pelo scripts/verificar-local em <estado>/hangar-verificacao/andamento/<sha>-<pid>:
 //   <epoch> plano <sha> linux=a,b windows=c vm=<host>
+//   <epoch> dono <sessão do Hangar que chamou>
 //   <epoch> fila
 //   <epoch> >> linux: rust…
 //   <epoch> << linux: rust 178s ok|FALHOU
@@ -30,6 +31,11 @@ export function parseRun(id: string, text: string): ParsedRun | undefined {
       continue;
     }
     if (!run) continue;
+    const owner = /^dono (.+)$/.exec(rest);
+    if (owner) {
+      run.owner = owner[1];
+      continue;
+    }
     if (rest === "fila") {
       run.isQueued = true;
       continue;

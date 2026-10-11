@@ -13,6 +13,7 @@ export type VerificarRun = {
   id: string;
   sha: string;
   vm: string;
+  owner?: string;
   startedAt: number;
   isQueued: boolean;
   isAlive: boolean;

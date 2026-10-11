@@ -29,11 +29,13 @@ async function tail($: EngineInterface, path: string): Promise<string[]> {
 async function scanRuns($: EngineInterface, now: number): Promise<VerificarRun[]> {
   const dir = await stateDir($);
   const entries = await $.fs.list(`${dir}/andamento`).catch(() => []);
+  const me = (await $.env.get("CP_SESSION_NAME")) ?? "";
   const runs: VerificarRun[] = [];
   for (const f of entries) {
     if (f.kind !== "file" || now - f.mtimeMs > 24 * 3600_000) continue;
     const parsed = parseRun(f.name, await $.fs.read(`${dir}/andamento/${f.name}`).catch(() => ""));
-    if (!parsed) continue;
+    // Só a sessão que chamou acompanha a rodada; sem nome (fora do Hangar), só as sem dono.
+    if (!parsed || (parsed.owner ?? "") !== me) continue;
     const pid = f.name.split("-").pop() ?? "";
     const isAlive = parsed.rc === undefined && (await $.fs.exists(`/proc/${pid}`));
     if (!isAlive && now - (parsed.endedAt ?? f.mtimeMs) > KEEP_RUN_MS) continue;
@@ -158,6 +160,8 @@ export function registerVerificar(on: On) {
     const sh = liveShells(await read($, shells), now);
     if (runs.length === 0 && sh.length === 0) return next(e);
     const { Box, Text } = $.ui.resolve(e);
+    // A faixa é dividida com os outros mods: responder sem `next` os esconde.
+    const below = await next(e).catch(() => null);
 
     return (
       <Box flexDirection="column">
@@ -203,6 +207,7 @@ export function registerVerificar(on: On) {
           </Box>
         ))}
         {sh.length > 3 && <Text dimColor>+{sh.length - 3} em segundo plano · /andamento</Text>}
+        {below}
       </Box>
     );
   });
