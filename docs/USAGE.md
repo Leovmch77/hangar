@@ -280,10 +280,6 @@ válido (Let's Encrypt) → escaneie o QR / preencha o token → **Adicionar à 
   outros formatos usam o FFmpeg configurado ou encontrado no PATH. Falta de arquivo ou conversor
   aparece como erro. Só há reserva externa se você a acrescentar à lista. A transcrição requer
   o `hangar-server` Rust; o modo Python não contém um segundo motor.
-- **Conversa por voz com Codex (Beta):** nasce desligada. Ative em **Configurações → Harnesses →
-  Codex → Opções → Conversa por voz**. O botão **Voz · Beta** aparece nas sessões Codex daquele
-  servidor. A escolha vale só para esse servidor; desligar durante uma chamada encerra o microfone
-  e a conexão. A voz escolhida fica salva neste navegador.
 - **Organização do ditado no desktop nativo:** em **Configurações → Voz → Organização do texto**,
   escolha **Sem organização** (padrão), **Harness da conversa** ou **API externa**. Sem organização
   entrega o texto da transcrição e dispensa um serviço de organização. No harness, escolha o modelo
@@ -296,12 +292,32 @@ válido (Let's Encrypt) → escaneie o QR / preencha o token → **Adicionar à 
   invenção e perda de conteúdo. Frase com menos de cinco palavras ou começando com `/` é preservada.
   Falha de serviço, modelo indisponível ou saída recusada conserva o cru com aviso, sem recorrer a
   outra conta. Os botões de versão permitem recuperar **Cru** e mudar o estilo sem repetir o STT.
-  Áudio anexado como arquivo continua sem organização.
+  Áudio anexado como arquivo continua sem organização. No celular (PWA e app), a escolha de estilo
+  só aparece com a organização ligada no servidor; desligada, o campo avisa que o texto vai cru.
 - **Referência de grafia opcional:** com organização ligada, **Usar as três últimas mensagens**
   envia somente texto de usuário e assistente da conversa de destino, em ordem, limitado a 2.000
   caracteres por mensagem. Nasce desligado. Serve para conferir nomes e termos, sem completar a
   fala com conteúdo do diálogo; ferramentas e pensamento ficam fora. Ao trocar o estilo, o app
   reutiliza a referência capturada na primeira organização.
+- **Voz ao vivo (Beta):** uma conversa falada com um assistente que lê e acompanha as sessões,
+  troca de sessão pela fala, manda pedidos a elas e, no modo **Planejar**, monta um plano antes de
+  mandar. Nasce desligada: ative em **Configurações → Harnesses → Codex → Opções → Conversa por
+  voz**, em cada servidor onde quiser usar. Precisa do `codex` instalado e logado nesse servidor; a
+  conversa gasta a conta Codex dele.
+  - **No PC (app nativo):** a pílula da voz fica na barra de cima. Ela atende também os pedidos de
+    tela (trocar de sessão, ler a tela, clicar, abrir telas do Hangar).
+  - **No celular (PWA):** o botão de microfone **Voz ao vivo** aparece no topo da lista de sessões e
+    da conversa quando o servidor ativo tem a voz ligada. Um toque começa a conversa nesse servidor;
+    com ela aberta, outro toque abre o painel (silenciar, modo **Direto**/**Planejar**, ajustes,
+    **Servidor da voz**, **Encerrar**). No celular a voz só troca de sessão; ler a tela e clicar
+    ficam para o PC.
+  - **Ajustes** (conta Codex, voz, modelo, esforço e velocidade de cada modo) ficam salvos no
+    servidor e valem para qualquer aparelho.
+  - **Uma conversa por servidor.** Abrir a voz em outro aparelho passa a conversa para ele; o
+    anterior mostra "A conversa passou para outro aparelho." Se o aparelho sair (app fechado, rede
+    caiu), reabrir em até 2 minutos retoma a mesma conversa do assistente; depois disso ela termina.
+  - O áudio vai direto do aparelho ao serviço de voz da OpenAI; o servidor só conduz a conversa. Só o dono usa a voz:
+    num servidor aberto por convite o botão não aparece. O app Expo ainda não tem a voz.
 - **Ditado mãos-livres:** chave **Enviar transcrição automaticamente** em Configurações → Voz,
   guardada **só neste aparelho** (não vai
   pro servidor; se você ligar no celular, o desktop continua sem). Com ela ligada, um toque no 🎤
