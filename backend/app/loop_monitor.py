@@ -14,14 +14,21 @@ import time
 import traceback
 from collections import Counter
 
-from app import diag
+from app import diag, internal_pool
 
 _log = logging.getLogger("hangar.loop_monitor")
+# asyncio nomeia `asyncio_N`; o uvloop, que o uvicorn usa quando instalado, `ThreadPoolExecutor-N_M`.
+_DEFAULT_PREFIXES = ("asyncio_", "ThreadPoolExecutor-")
+# (nome no log, executor — None é o padrão do laço —, prefixo das threads dele)
+_POOLS = (("padrao", None, _DEFAULT_PREFIXES),
+          ("interno", internal_pool.executor, ("hangar-internal",)))
 
 TICK_S = 1.0
 LOOP_LAG_WARN_S = 1.0
 POOL_PROBE_EVERY_S = 5.0
 POOL_WAIT_WARN_S = 2.0
+# Pool travado de vez nunca devolve a sonda: o aviso não espera por ela além disto.
+POOL_STUCK_S = 30.0
 LOOP_STALL_S = 5.0
 _MIN_GAP_S = 10.0   # no máximo uma linha de cada tipo nesse intervalo; o pior valor vai junto
 
@@ -44,13 +51,12 @@ def compact_stack(frame, limit: int = 6) -> str:
     return " < ".join(_frame_label(f) for f in chosen[:limit])
 
 
-def _busy_pool_threads() -> list[str]:
-    """Onde cada thread do pool padrão do asyncio está agora (as ociosas ficam no `queue.get`)."""
+def _busy_pool_threads(prefixes: tuple[str, ...] = _DEFAULT_PREFIXES) -> list[str]:
+    """Onde cada thread do pool está agora (as ociosas ficam no `queue.get`)."""
     frames = sys._current_frames()
     labels = []
     for t in threading.enumerate():
-        # asyncio nomeia `asyncio_N`; o uvloop, que o uvicorn usa quando instalado, `ThreadPoolExecutor-N_M`.
-        if not t.name.startswith(("asyncio_", "ThreadPoolExecutor-")):
+        if not t.name.startswith(prefixes):
             continue
         frame = frames.get(t.ident)
         if frame is None:
@@ -63,8 +69,7 @@ def _busy_pool_threads() -> list[str]:
     return labels
 
 
-def _queue_size(loop: asyncio.AbstractEventLoop) -> int:
-    executor = getattr(loop, "_default_executor", None)
+def _queue_size(executor) -> int:
     queue = getattr(executor, "_work_queue", None)
     try:
         return queue.qsize() if queue is not None else -1
@@ -93,8 +98,8 @@ class _Monitor:
         self.loop_thread: int | None = None
         self.stop = threading.Event()
         self.lag = _Throttle()
-        self.pool = _Throttle()
-        self.probe_running = False
+        self.pools = {name: _Throttle() for name, _, _ in _POOLS}
+        self.probing: set[str] = set()
 
     def watch_thread(self) -> None:
         reported = False
@@ -112,31 +117,40 @@ class _Monitor:
             diag.registrar("loop.travado", "erro", ms=int(stale * 1000), pilha=stack,
                            **diag.recursos())
 
-    async def probe_pool(self, loop: asyncio.AbstractEventLoop) -> None:
-        self.probe_running = True
+    async def probe_pool(self, loop: asyncio.AbstractEventLoop, name: str, executor,
+                         prefixes: tuple[str, ...]) -> None:
+        self.probing.add(name)
         try:
             sent = time.monotonic()
-            probe = loop.run_in_executor(None, time.monotonic)
+            probe = loop.run_in_executor(executor, time.monotonic)
             done, _ = await asyncio.wait({probe}, timeout=POOL_WAIT_WARN_S)
             if done:
                 return
             # A foto sai enquanto a sonda ainda está na fila: depois dela, a fila já andou.
-            queued = _queue_size(loop)
-            busy = _busy_pool_threads()
-            wait = await probe - sent
-            worst = self.pool.offer(int(wait * 1000))
-            if worst is None:
-                return
-            top = Counter(busy).most_common(3)
-            summary = "; ".join(f"{n}x {label}" for label, n in top)
-            _log.warning("pool padrao esperou %.1fs (fila=%d, ocupadas=%d): %s",
-                         wait, queued, len(busy), summary)
-            diag.registrar("pool.espera", "aviso", espera_ms=worst, quantidade=queued,
-                           detalhe=summary or None, threads_backend=threading.active_count())
+            queued = _queue_size(executor or getattr(loop, "_default_executor", None))
+            busy = _busy_pool_threads(prefixes)
+            done, _ = await asyncio.wait({probe}, timeout=POOL_STUCK_S)
+            wait = (probe.result() if done else time.monotonic()) - sent
+            worst = self.pools[name].offer(int(wait * 1000))
+            if worst is not None:
+                top = Counter(busy).most_common(3)
+                summary = "; ".join(f"{n}x {label}" for label, n in top)
+                _log.warning("pool %s esperou %.1fs%s (fila=%d, ocupadas=%d): %s", name, wait,
+                             "" if done else " e segue sem resposta", queued, len(busy), summary)
+                diag.registrar("pool.espera", "aviso", codigo=name, espera_ms=worst, quantidade=queued,
+                               detalhe=summary or None, threads_backend=threading.active_count())
+            if not done:
+                # Fica em `probing` até a sonda rodar: sonda nova num pool travado só alongaria a fila.
+                wait = await probe - sent
+                worst = self.pools[name].offer(int(wait * 1000))
+                if worst is not None:
+                    _log.warning("pool %s voltou a responder depois de %.1fs", name, wait)
+                    diag.registrar("pool.espera", "aviso", codigo=name, espera_ms=worst,
+                                   threads_backend=threading.active_count())
         except Exception:
-            _log.debug("sonda do pool falhou", exc_info=True)
+            _log.debug("sonda do pool %s falhou", name, exc_info=True)
         finally:
-            self.probe_running = False
+            self.probing.discard(name)
 
     async def run(self) -> None:
         loop = asyncio.get_running_loop()
@@ -156,11 +170,14 @@ class _Monitor:
                     worst = self.lag.offer(int(lag * 1000))
                     if worst is not None:
                         diag.registrar("loop.atraso", "aviso", ms=worst)
-                if self.heartbeat >= next_probe and not self.probe_running:
+                if self.heartbeat >= next_probe:
                     next_probe = self.heartbeat + POOL_PROBE_EVERY_S
-                    task = asyncio.create_task(self.probe_pool(loop))
-                    probes.add(task)
-                    task.add_done_callback(probes.discard)
+                    for name, executor, prefixes in _POOLS:
+                        if name in self.probing:
+                            continue
+                        task = asyncio.create_task(self.probe_pool(loop, name, executor, prefixes))
+                        probes.add(task)
+                        task.add_done_callback(probes.discard)
         finally:
             self.stop.set()
             for task in probes:

@@ -32,6 +32,7 @@ from app import (agentes_sync, atomico, atualizacoes, atualizar, btw, diag, harn
 from app import external_pair_api, external_pairs, groups_bridge, internal_api, list_bridge, migration_status, update_channel
 from app.auth import require_auth, require_loopback
 from app.send_executor import send_thread as _send_thread
+from app.internal_pool import internal_thread
 from app import bastao as bastao_mod   # `bastao` sem sufixo é a ROTA GET, mais abaixo neste arquivo
 from app.bastao import montar as bastao_montar
 from app.commands import comandos_da_cli, list_commands, sem_os_desligados
@@ -214,13 +215,14 @@ def _resolve_codex_account(account_id: str | None):
         raise HTTPException(exc.status, detail=erro(exc.code, "conta Codex inválida", **exc.params)) from None
 
 
-def _codex_require_idle_preparation(account, service) -> None:
+async def _codex_require_idle_preparation(account, service) -> None:
     if account.is_default:
         return
     if service is None:
         raise HTTPException(503, detail=erro("codex_account_service_unavailable",
                                              "serviço de contas Codex indisponível"))
-    status = service.preparation_status(account)
+    # HTTP síncrono ao Rust: no laço, congelaria o backend inteiro até o prazo da ponte.
+    status = await asyncio.to_thread(service.preparation_status, account)
     if status.get("status") != "ready":
         _log.warning("conta Codex %s com sincronização %s; pendências: %s",
                      account.id, status.get("status"),
@@ -700,7 +702,6 @@ app.include_router(share_guest_api.router)
 app.include_router(external_pair_api.router)
 app.include_router(migration_status.router)
 app.include_router(internal_api.router)
-app.include_router(internal_api.ping_router)
 registry = SessionRegistry()
 registry_mod.apos_saida_codex = _codex_lease_released
 registry_mod.apos_renomear_codex = _codex_lease_renamed
@@ -2400,7 +2401,7 @@ async def _create_session_owned(body: CreateBody, worktree: dict):
             except ValueError as exc:
                 raise HTTPException(400, detail=erro("erro_criacao_sessao", str(exc))) from None
         if body.codex_account is not None:
-            _codex_require_idle_preparation(codex_account_obj, codex_service)
+            await _codex_require_idle_preparation(codex_account_obj, codex_service)
     if body.config_dir is not None and body.config_dir not in {c.path for c in list_config_dirs()}:
         raise HTTPException(400, detail=erro("erro_config_dir_invalido", "config_dir invalido"))
     # Mesma guarda do config_dir. Codex nao usa spawn_command/tmux desse jeito, entao motor + codex e
@@ -5724,7 +5725,8 @@ async def orq_group_set(name: str, body: OrqGroupBody):
 async def _orq_associate(associate, name: str, gid: str, mtime: float) -> dict:
     """Resposta e erros da associação, iguais na rota pública e na interna do Rust."""
     try:
-        context = await asyncio.to_thread(associate, name, gid, mtime)
+        # O Rust chama pela rota interna segurando o lock de grupo: fora do pool padrão.
+        context = await internal_thread(associate, name, gid, mtime)
     except orq_md.Conflito:
         raise HTTPException(409, detail=erro("erro_orq_arquivo_mudou",
                                              "o time mudou desde a leitura — recarregue"))
@@ -5734,7 +5736,7 @@ async def _orq_associate(associate, name: str, gid: str, mtime: float) -> dict:
         raise HTTPException(409, detail=erro("erro_orq_arquivo_mudou", str(e)))
     return {"ok": True, "gid": context.gid, "grouped": context.grouped,
             "session_prefix": context.session_prefix, "arquivo": str(context.path),
-            "mtime": (await asyncio.to_thread(orq_md.ler_arquivo, context.path))[1]}
+            "mtime": (await internal_thread(orq_md.ler_arquivo, context.path))[1]}
 
 
 class ComecarBody(_StrictBody):
@@ -6573,7 +6575,7 @@ async def set_codex_service_tier(name: str, body: CodexServiceTierBody):
         model, _ = await asyncio.to_thread(_engine_fast_selection, name)
         if not info or not await asyncio.to_thread(cliproxy.supports_fast, info.engine, model):
             raise HTTPException(400, detail=erro("erro_fast_indisponivel", "Fast exige GPT no CLIProxyAPI local"))
-        _recusa_se_painel_aberto(name)
+        await asyncio.to_thread(_recusa_se_painel_aberto, name)
         operation = asyncio.create_task(_durante_troca(name, _trocar_conta(name, None, service_tier=body.service_tier)))
         try:
             return await asyncio.shield(operation)
@@ -10304,7 +10306,7 @@ async def model_options_sem_sessao(provider: str = "claude", engine: str = "",
         return {"kind": "kimi", "reduced": False, "models": cat["models"], "default": cat["default"]}
     if provider == "codex":
         account = _resolve_codex_account(codex_account or None)
-        _codex_require_idle_preparation(account, _codex_service())
+        await _codex_require_idle_preparation(account, _codex_service())
         # Nem config no disco (o ~/.codex/config.toml guarda o modelo escolhido, nunca a lista) nem
         # `codex --list-models`: a fonte e o `model/list` de um app-server efemero em stdio, a MESMA
         # que a folha da sessao viva usa. Ver app/codex_models.py.
