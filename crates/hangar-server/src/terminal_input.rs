@@ -221,7 +221,8 @@ impl ComposerSnapshot {
         let rules: Vec<_> = lines.iter().enumerate().filter(|(_, s)| s.matches('─').count() >= 20).map(|(n, _)| n).collect();
         let bottom = *rules.last()?;
         let top = *rules.get(rules.len().checked_sub(2)?)?;
-        if lines.len() - bottom > 8 || bottom - top > 15 { return None; }
+        // Mensagem longa colada cresce o composer; acima disto as réguas já não são as dele.
+        if lines.len() - bottom > 8 || bottom - top > 40 { return None; }
         let content = lines[top+1..bottom].iter().map(|s| s.trim().strip_prefix('❯').unwrap_or(s.trim()).trim()).collect::<Vec<_>>().join("\n");
         let placeholders = PLACEHOLDER.captures_iter(&content).map(|c| format!("{}:{}", &c[1], &c[2])).collect();
         Some(Self { content, placeholders, stashed: stash_held(screen) })
@@ -603,6 +604,20 @@ impl TerminalDriver {
         }
         false
     }
+    /// Depois do `Filled`: o plugin já confirmou o que pôs no campo. A tela só desmente quando dá para
+    /// lê-la; composer ilegível (mensagem longa demais para o desenho) não segura o Enter.
+    async fn prove_filled(&self, text: &str, before: &ComposerSnapshot) -> bool {
+        for _ in 0..self.limits.proof_attempts.max(1) {
+            self.settle().await;
+            match self.snapshot().await {
+                Ok(now) if now.proves(text, before) == Proof::Present => return true,
+                Ok(_) => {}
+                Err(e) if e.code == "composer_unreadable" => return true,
+                Err(_) => return false,
+            }
+        }
+        false
+    }
     async fn cleanup_owned(&self, text: &str, before: &ComposerSnapshot) -> bool {
         let Ok(mut now) = self.snapshot().await else { return false; };
         if !now.owned(text, before) { return false; }
@@ -721,7 +736,7 @@ impl TerminalDriver {
                 Ok(PluginReply::Unavailable | PluginReply::NotWritten) => refresh_guard = true,
                 Ok(PluginReply::Accepted) if mode == PluginMode::User => return DeliveryResult::new(Disposition::Accepted, DeliveryStage::Plugin, "plugin_accepted"),
                 Ok(PluginReply::Filled) if mode == PluginMode::Fill => {
-                    if self.prove_input(text, &before).await { return self.submit(text, &before, draft).await; }
+                    if self.prove_filled(text, &before).await { return self.submit(text, &before, draft).await; }
                     return self.partial(text, &before, DeliveryStage::InputProof).await;
                 }
                 _ => return DeliveryResult::new(Disposition::Unknown, DeliveryStage::Plugin, "plugin_uncertain"),

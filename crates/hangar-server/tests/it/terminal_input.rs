@@ -130,6 +130,23 @@ async fn terminal_input_plugin_fill_proves_then_enters() {
  assert_eq!(s.published.lock().unwrap()[0].mode,PluginMode::Fill);assert_eq!(io.writes().len(),1);
 }
 #[tokio::test]
+async fn terminal_input_plugin_fill_enters_when_long_message_makes_composer_unreadable() {
+ let tall=screen(&(0..45).map(|i| format!("linha {i} da mensagem longa")).collect::<Vec<_>>().join("\n"));
+ assert!(ComposerSnapshot::parse(&tall).is_none(),"composer alto demais para ler");
+ let text=(0..45).map(|i| format!("linha {i} da mensagem longa")).collect::<Vec<_>>().join("\n");
+ let io=Arc::new(FakeIo::new(vec![screen(""),tall,screen("")]));let s=Arc::new(Services::new());
+ s.facts.lock().unwrap().plugin_live=true;*s.reply.lock().unwrap()=PluginReply::Filled;
+ let r=driver(io.clone(),s.clone()).prompt(&text,"id").await;
+ assert_eq!(r.disposition,Disposition::Accepted,"o Filled do plugin basta");
+ assert_eq!(s.published.lock().unwrap()[0].mode,PluginMode::Fill);assert_eq!(io.writes().len(),1,"só o Enter");
+}
+#[test]
+fn terminal_input_composer_of_a_long_message_still_reads() {
+ let text=(0..20).map(|i| format!("linha {i} da mensagem longa")).collect::<Vec<_>>().join("\n");
+ let now=ComposerSnapshot::parse(&screen(&text)).expect("vinte linhas ainda são o composer");
+ assert_eq!(now.proves(&text,&ComposerSnapshot::parse(&screen("")).unwrap()),Proof::Present);
+}
+#[tokio::test]
 async fn terminal_input_plugin_user_requires_capability_idle_and_safe_text() {
  let io=Arc::new(FakeIo::new(vec![screen("")]));let s=Arc::new(Services::new());s.facts.lock().unwrap().plugin_live=true;s.facts.lock().unwrap().plugin_user=true;*s.reply.lock().unwrap()=PluginReply::Accepted;
  assert_eq!(driver(io.clone(),s.clone()).prompt("hello","id").await.disposition,Disposition::Accepted);assert_eq!(s.published.lock().unwrap()[0].mode,PluginMode::User);assert!(io.writes().is_empty());
