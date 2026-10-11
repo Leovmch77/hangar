@@ -116,6 +116,7 @@ pub async fn private(
             }
         };
         if operation == "catalog" {
+            let fresh = value["fresh"].as_bool().unwrap_or(false);
             let request: OrganizationRequest = match serde_json::from_value(value) {
                 Ok(request) => request,
                 Err(_) => return failure(400, "dictation_request_invalid", "Destino inválido."),
@@ -126,7 +127,7 @@ pub async fn private(
             };
             return match state
                 .dictation_models
-                .get_context(&state.accounts, &state.dictation_slots, &context, false)
+                .get_context(&state.accounts, &state.dictation_slots, &context, fresh)
                 .await
             {
                 Ok((models, _)) => response(

@@ -299,8 +299,8 @@ impl Api {
         Self::transcribed(self.client.post(self.transcribe_url_with_options(Some(name),Some(filename),true,style,options))).await
     }
 
-    pub async fn dictation_models(&self,session:&str)->Result<Value,Failure> {
-        let response=self.client.get(self.server_url(&["dictation","models"],&[("session",session)]))
+    pub async fn dictation_models(&self,session:&str,fresh:bool)->Result<Value,Failure> {
+        let response=self.client.get(self.server_url(&["dictation","models"],&[("session",session),("fresh",if fresh{"true"}else{"false"})]))
             .timeout(Duration::from_secs(60)).send().await.map_err(|_|Failure::transport(false))?;
         Self::checked(response,false).await?.json().await.map_err(|_|Failure::local("invalid_response"))
     }

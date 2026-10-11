@@ -859,7 +859,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
       setRevising(version);
       setError('');
       try {
-        const r = await relimparDitado(current.raw, version, { ...server });
+        const r = await relimparDitado(current.raw, version, { ...server }, { session: origin.name });
         next = r.text.trim();
         if (!next) { setError(m.composer_transcricao_vazia()); return; }
         // A limpeza pode desistir e devolver o cru: marca o que o servidor aplicou, não o botão.

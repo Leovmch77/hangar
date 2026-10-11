@@ -1196,7 +1196,7 @@ describe('ditado entregue à conversa de origem', () => {
     expect(selected()).toEqual(['composer_ditado_cru']);
     const limpar = estilosDitado().find((e) => e.valor === 'limpar')!.rotulo;
     await act(async () => button(container, limpar)!.click());
-    expect(realFirstInput.relimpar).toHaveBeenCalledExactlyOnceWith('texto cru', 'limpar', { id: 's1' });
+    expect(realFirstInput.relimpar).toHaveBeenCalledExactlyOnceWith('texto cru', 'limpar', { id: 's1' }, { session: 'sess' });
     expect(container.querySelector('textarea')!.value).toBe('antes texto limpo');
     expect(selected()).toEqual([limpar]);
     // Texto ditado intacto: as versões ficam, mas a troca recusa para não perder a edição.

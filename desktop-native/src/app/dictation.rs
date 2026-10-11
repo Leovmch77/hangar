@@ -1078,11 +1078,12 @@ impl Hangar {
         let owner = here && self.dictation.owner.is_some();
         let style = self.dictation.style(self.connection).unwrap_or("prosa");
         // Só para o desenho: sem seleção lida o microfone já está desligado (`dictation_ready`).
-        let options=if recording||in_flight {self.dictation.snapshot.clone()}else{None}.or_else(||self.dictation_options(cx)).unwrap_or_default();
-        let organized=options.mode!="none";
+        let options=if recording||in_flight {self.dictation.snapshot.clone()}else{None}.or_else(||self.dictation_options(cx));
+        // Sem preferências lidas não há modo conhecido: nenhuma das duas pílulas aparece.
+        let organized=options.map(|options|options.mode!="none");
         let entity = cx.entity().downgrade();
         // Gravando, some: trocar no meio não muda nada (o backend lê o estilo no fim) e o espaço é do botão de parar.
-        let pill = (!recording&&organized).then(|| chrome::pill_button("dictation-style", cx).pl(px(10.)).gap(px(6.))
+        let pill = (!recording&&organized==Some(true)).then(|| chrome::pill_button("dictation-style", cx).pl(px(10.)).gap(px(6.))
             .tooltip(tr("dictation_style")).accessibility_label(format!("{}: {}", tr("dictation_style"), style_label(style)))
             .disabled(in_flight || !readable)
             .child(div().text_xs().text_color(theme::muted()).child(style_label(style)))
@@ -1098,7 +1099,7 @@ impl Hangar {
                         let _ = entity.update(cx, |this, cx| this.set_dictation_style(next, cx));
                     }))
                 })
-            }).into_any_element()).or_else(||(!recording&&!organized).then(||chrome::pill_button("dictation-no-organization",cx)
+            }).into_any_element()).or_else(||(!recording&&organized==Some(false)).then(||chrome::pill_button("dictation-no-organization",cx)
                 .child(tr("voice_organization_none")).tooltip(tr("voice_organization_none_hint")).disabled(in_flight)
                 .on_click(cx.listener(|this,_,window,cx|this.open_settings(settings::Page::Voice,window,cx))).into_any_element()));
         let versions = owner && self.dictation.snapshot.as_ref().is_some_and(|options|options.mode!="none") && self.dictation.file_name.is_none() && self.dictation.result.is_some()

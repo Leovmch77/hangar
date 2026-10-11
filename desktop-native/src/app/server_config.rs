@@ -801,7 +801,7 @@ impl Hangar {
         cx.notify();
     }
 
-    fn load_dictation_models(&mut self,cx:&mut Context<Self>) {
+    fn load_dictation_models(&mut self,fresh:bool,cx:&mut Context<Self>) {
         if self.server_config.organization_mode()!="harness"||self.server_config.dictation_catalog.loading{return;}
         let Some(api)=self.session_api() else{return;};
         let Some(session)=self.selected.as_ref() else {
@@ -813,7 +813,7 @@ impl Hangar {
         let seq=self.server_config.dictation_catalog.start();
         self.server_config.dictation_catalog_target=Some(target.clone());
         let done=self.server_config_send_later();
-        self.runtime.spawn(async move{done(ServerConfigReply::DictationModels(seq,target,api.dictation_models(&name).await)).await;});
+        self.runtime.spawn(async move{done(ServerConfigReply::DictationModels(seq,target,api.dictation_models(&name,fresh).await)).await;});
         cx.notify();
     }
 
@@ -869,7 +869,7 @@ impl Hangar {
                     s.follow_readers();
                     self.fill_config_inputs(window, cx);
                     self.load_dictation_style(cx);
-                    self.load_dictation_models(cx);
+                    self.load_dictation_models(false,cx);
                 }
             }
             ServerConfigReply::Saved(seq, sent, result) => {
@@ -1534,7 +1534,7 @@ impl Hangar {
         let selected=modes.iter().position(|mode|*mode==self.server_config.organization_mode()).unwrap_or(0);
         let available=if self.server_config.fields.contains_key("dictation_organization_mode"){3}else{0};
         settings_box().p_4().child(segments_with_hints("voice-organization-mode",&labels,&hints,selected,available,false,tr("settings_next_version"),
-            move|this,index,_,cx|{this.server_config.stage("dictation_organization_mode",json!(modes[index]));this.load_dictation_models(cx);cx.notify();},cx))
+            move|this,index,_,cx|{this.server_config.stage("dictation_organization_mode",json!(modes[index]));this.load_dictation_models(false,cx);cx.notify();},cx))
     }
 
     fn harness_model_rows(&self,cx:&mut Context<Self>)->Div {
@@ -1564,7 +1564,7 @@ impl Hangar {
             .when_some(state.dictation_catalog.value.as_ref().and_then(|value|value.as_ref().err()).cloned(),|el,error|el.child(div().id("voice-models-error").role(Role::Alert).text_sm().text_color(theme::warning()).whitespace_normal().child(error)))
             .when(catalog.is_some_and(|catalog|catalog["models"].as_array().is_some_and(Vec::is_empty)),|el|el.child(tr("voice_models_empty")))
             .child(Button::new("voice-models-refresh").ghost().small().label(tr("voice_models_refresh")).disabled(state.dictation_catalog.loading)
-                .on_click(cx.listener(|this,_,_,cx|this.load_dictation_models(cx))))
+                .on_click(cx.listener(|this,_,_,cx|this.load_dictation_models(true,cx))))
     }
 
     /// Serviços de transcrição em ordem: o primeiro transcreve, e quem falha ou fica sem cota passa a vez. Servidor cuja

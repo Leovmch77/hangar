@@ -7593,11 +7593,11 @@ async def relimpar_ditado(body: RelimparBody, request: Request):
 
 
 @app.get("/api/dictation/models", dependencies=[Depends(require_auth)])
-async def dictation_models(request: Request, session: str):
+async def dictation_models(request: Request, session: str, fresh: bool = False):
     if _convidado(request) or request.scope.get("server", (None, None))[1] == 8768:
         raise HTTPException(403, "O catálogo de organização é exclusivo do dono.")
     try:
-        return await asyncio.to_thread(dictation_bridge.request, "catalog", {"session": session})
+        return await asyncio.to_thread(dictation_bridge.request, "catalog", {"session": session, "fresh": fresh})
     except dictation_bridge.BridgeError as error:
         raise HTTPException(error.status, detail={"code": error.code, "msg": error.detail}) from None
 
