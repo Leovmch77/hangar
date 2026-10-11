@@ -127,3 +127,21 @@ def test_classe_modo_de_remetente_codex(monkeypatch, modo_codex, conta, esperado
     monkeypatch.setattr(api, "_jsonl_atual", lambda n: None)
     monkeypatch.setattr(api.permission_mode, "modo_da_conta", lambda cfg: conta)
     assert api._classe_modo("cx", "alvo", None) == esperado
+
+
+def test_aviso_do_painel_para_sessao_recem_criada_usa_o_modo_da_abertura(tmp_path, monkeypatch):
+    # Aviso do painel logo depois da criação: o alvo ainda não gravou transcript nem foi visto no
+    # pane. Valia o padrão da conta (`auto` noutra máquina) e o Claude retinha o aviso.
+    from collections import OrderedDict
+    from pathlib import Path
+
+    from app import api
+    monkeypatch.setattr(api.headless_sessions, "load", lambda n: None)
+    monkeypatch.setattr(api.permission_mode, "_ultimos_nao_plan", OrderedDict())
+    monkeypatch.setattr(api.permission_mode, "modo_da_conta", lambda cfg: "auto")
+    nova = str(tmp_path / "sid-nova.jsonl")
+    api.permission_mode.remember_launch_mode("sid-nova", "bypassPermissions")
+    assert api._classe_modo("grupo de trabalho", "nova", None, nova) == "bypass"
+    # Com o transcript gravado, vale o que o CLI registrou depois da abertura.
+    Path(nova).write_text(json.dumps({"type": "user", "permissionMode": "auto"}) + "\n")
+    assert api._classe_modo("grupo de trabalho", "nova", None, nova) == "prompting"

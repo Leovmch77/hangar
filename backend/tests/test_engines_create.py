@@ -575,3 +575,14 @@ def test_resume_de_motor_removido_descarta_a_escolha_no_fallback(tmp_path, monke
     info = r.resume("s", sid)
     assert visto["command"] == f"claude --resume {sid}"
     assert info.engine is None
+
+
+def test_terminal_claude_remembers_its_launch_mode_until_the_transcript_has_one(tmp_path, monkeypatch):
+    import re
+
+    from app import permission_mode
+    seen = {}
+    info = _reg(tmp_path, monkeypatch, seen).create("par", str(tmp_path), permission_mode="bypassPermissions")
+    sid = re.search(r"--session-id[ =']+([0-9a-f-]{36})", seen["command"]).group(1)
+    assert info.name == "par"
+    assert permission_mode.session_non_plan_mode(str(tmp_path / f"{sid}.jsonl")) == "bypassPermissions"

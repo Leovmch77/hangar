@@ -114,6 +114,20 @@ def ultimo_nao_plan(name: str, padrao: str = "manual") -> str:
         return _ultimos_nao_plan.get(name, padrao)
 
 
+# Modo da abertura de cada sessão de terminal: o transcript só o grava na primeira fala.
+_launch_modes: OrderedDict[str, str] = OrderedDict()
+
+
+def remember_launch_mode(session_id: str, mode: str) -> None:
+    if mode == "plan":
+        return
+    with _mem_lock:
+        _launch_modes[session_id] = mode
+        _launch_modes.move_to_end(session_id)
+        if len(_launch_modes) > 200:
+            _launch_modes.popitem(last=False)
+
+
 def known_non_plan(name: str) -> str | None:
     """Só devolve a base observada nesta sessão, sem assumir a configuração da conta."""
     with _mem_lock:
@@ -164,7 +178,11 @@ def session_non_plan_mode(jsonl: str | None) -> str | None:
     basta, porque existe apenas para sessão com monitor aberto desde o último restart."""
     if not jsonl:
         return None
-    return known_non_plan(Path(jsonl).stem) or transcript_non_plan_mode(jsonl)
+    sid = Path(jsonl).stem
+    # A abertura é o último recurso: o que foi visto ou gravado depois dela vale mais.
+    with _mem_lock:
+        launched = _launch_modes.get(sid)
+    return known_non_plan(sid) or transcript_non_plan_mode(jsonl) or launched
 
 
 def observar_pane(name: str, pane: str, sessao: str | None = None) -> str | None:

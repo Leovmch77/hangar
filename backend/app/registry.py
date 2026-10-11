@@ -2393,6 +2393,8 @@ class SessionRegistry:
                 extra["perfil"] = omp_profile
             cmd = tmux.join_cmd(get_adapter(provider).spawn_command(
                 cwd, sid, model, effort, permission_mode, **extra))
+            if provider == "claude" and permission_mode:
+                modo_permissao.remember_launch_mode(sid, permission_mode)
         if engine:
             # `hangar-engine --exec` aplica o env DENTRO do pane (os.execvpe). Não usamos `tmux -e` porque
             # a key ficaria em /proc/<pid>/cmdline, legível por qualquer usuário da máquina. Depois do
