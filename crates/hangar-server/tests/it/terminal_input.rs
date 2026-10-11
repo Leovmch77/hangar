@@ -35,6 +35,8 @@ fn terminal_input_composer_proof() {
  assert!(ComposerSnapshot::parse("no composer").is_none());
  let empty=ComposerSnapshot::parse(&screen("")).unwrap();
  assert_eq!(ComposerSnapshot::parse(&screen("/clear │ [name]")).unwrap().proves("/clear",&empty),Proof::Present);
+ assert_eq!(ComposerSnapshot::parse(&screen("/compact <optional custom summarization instructions>")).unwrap().proves("/compact",&empty),Proof::Present);
+ assert_eq!(ComposerSnapshot::parse(&screen("/compact <a> <b>")).unwrap().proves("/compact",&empty),Proof::Unreadable);
  assert_eq!(ComposerSnapshot::parse(&screen("/clear [x] [name]")).unwrap().proves("/clear",&empty),Proof::Unreadable);
  assert_eq!(ComposerSnapshot::parse(&screen("/clear [a #1]")).unwrap().proves("/clear",&empty),Proof::Unreadable);
  let draft=ComposerSnapshot::parse(&screen("/clear [nota]")).unwrap();
