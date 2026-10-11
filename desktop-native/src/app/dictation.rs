@@ -306,6 +306,8 @@ pub(super) struct Dictation {
     inserted: Option<(String, std::ops::Range<usize>)>,
     cleaning: bool,
     error: Option<String>,
+    /// O texto exato que a falha de leitura da configuração pôs em `error`: só ele é limpo quando a leitura deixa de valer.
+    config_error: Option<String>,
     /// Erro que veio com o resultado (falha, texto vazio, rascunho mudado): é da sessão de destino e só aparece com ela
     /// aberta. `error` fica para os desta tela (estilo, envio automático).
     result_error: Option<String>,
@@ -322,6 +324,10 @@ struct SendIntent { owner: Option<SessionOwner>, draft: String, attachments: Vec
 enum SendPreparation { Ready, Stop, Wait }
 
 impl Dictation {
+    fn clear_config_error(&mut self) {
+        if let Some(shown) = self.config_error.take() && self.error.as_ref() == Some(&shown) { self.error = None; }
+    }
+
     fn prepare_send(&mut self, owner: Option<SessionOwner>, draft: String, attachments: Vec<String>,
         steer: bool, recording: bool, transcribing: bool) -> SendPreparation {
         if !recording && !transcribing { return SendPreparation::Ready; }
@@ -603,10 +609,7 @@ impl Hangar {
                 style_connection = current;
                 this.dictation.style_task = None;
                 // Sem alvo ninguém relê a configuração: a falha da sessão anterior não pode ficar na faixa.
-                let failed = tr("dictation_config_failed");
-                if identity.is_none() && this.dictation.error.as_deref().is_some_and(|e| e.starts_with(failed.as_str())) {
-                    this.dictation.error = None;
-                }
+                if identity.is_none() { this.dictation.clear_config_error(); }
             }
             if identity.is_some() && !this.dictation.organization.as_ref().is_some_and(|(owner,_)|Some(owner)==identity.as_ref()) && this.dictation.style_task.is_none() {
                 this.load_dictation_style(cx);
@@ -644,10 +647,8 @@ impl Hangar {
                         .map_err(|mode| unknown.replace("{mode}", &mode))) {
                     Ok((value, selection)) => {
                         this.dictation.organization=Some((identity,selection));
-                        let loading = tr("dictation_config_loading");
-                        if this.dictation.error.as_deref().is_some_and(|e| e.starts_with(failed.as_str()) || e == loading) {
-                            this.dictation.error = None;
-                        }
+                        this.dictation.clear_config_error();
+                        if this.dictation.error.as_deref() == Some(tr("dictation_config_loading").as_str()) { this.dictation.error = None; }
                         if let Some(style) = STYLES.into_iter().find(|style| value.pointer("/campos/ditado_estilo/valor").and_then(Value::as_str) == Some(*style)) {
                             this.dictation.style = Some((connection, style));
                         }
@@ -656,7 +657,9 @@ impl Hangar {
                     }
                     Err(error) => error,
                 };
-                this.dictation.error=Some(format!("{failed} ({error})"));
+                let shown = format!("{failed} ({error})");
+                this.dictation.error = Some(shown.clone());
+                this.dictation.config_error = Some(shown);
                 // Nova leitura só depois de uma pausa: limpar a tarefa na hora faria o observador reler a cada redesenho.
                 this.dictation.style_task = Some(cx.spawn(async move |this, cx| {
                     cx.background_executor().timer(Duration::from_secs(15)).await;
