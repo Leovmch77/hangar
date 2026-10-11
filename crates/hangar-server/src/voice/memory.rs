@@ -48,9 +48,18 @@ fn read(path: &Path) -> Result<File, ReadFail> {
 
 pub fn load(path: &Path) -> Option<Vec<Entry>> { read(path).ok().map(|f| f.entries) }
 
-fn clean(text: &str) -> String {
-    let one: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    one.chars().take(MAX_CHARS).collect()
+fn one_line(text: &str) -> String { text.split_whitespace().collect::<Vec<_>>().join(" ") }
+
+fn clean(text: &str) -> String { one_line(text).chars().take(MAX_CHARS).collect() }
+
+/// Resposta do `remember` ao organizador: o corte em `MAX_CHARS` aparece, para ele regravar mais curto em vez de afirmar
+/// o que não ficou guardado.
+pub fn saved_reply(entry: &Entry, said: &str) -> String {
+    let id = &entry.id;
+    if one_line(said).chars().count() <= MAX_CHARS { return format!("Guardado como {id}; já vale nesta conversa."); }
+    let kept: Vec<char> = entry.text.chars().collect();
+    let tail: String = kept[kept.len().saturating_sub(40)..].iter().collect();
+    format!("Guardado como {id}, cortado em {MAX_CHARS} caracteres: «…{tail}». Se faltou o essencial, regrave mais curto com replaces {id}.")
 }
 
 fn same(a: &str, b: &str) -> bool { super::organizer::squash(a) == super::organizer::squash(b) }
@@ -205,6 +214,11 @@ mod tests {
         let e = remember(&p, Kind::Referencia, &long, None, day("2026-10-01")).unwrap();
         assert!(!e.text.contains('\n'));
         assert!(e.text.chars().count() <= MAX_CHARS);
+        let reply = saved_reply(&e, &long);
+        assert!(reply.contains("cortado em 240 caracteres") && reply.contains(&format!("replaces {}", e.id)), "{reply}");
+        assert!(reply.contains(&"x".repeat(40)) && !reply.contains("linha 1"), "mostra onde cortou: {reply}");
+        let short = remember(&p, Kind::Pessoa, "Desenvolvedor", None, day("2026-10-01")).unwrap();
+        assert_eq!(saved_reply(&short, "  Desenvolvedor "), format!("Guardado como {}; já vale nesta conversa.", short.id));
     }
 
     #[test]

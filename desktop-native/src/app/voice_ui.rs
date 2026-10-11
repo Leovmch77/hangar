@@ -192,6 +192,8 @@ pub(super) struct VoiceUi {
     pub(super) memory_error: Option<String>,
     /// Número da última leitura pedida; resposta de leitura mais velha (ou anterior a um apagar) é descartada.
     pub(super) memory_seq: u64,
+    /// Contador `memory` do retrato da chamada: muda quando a voz grava ou apaga uma memória.
+    pub(super) memory_rev: Option<u64>,
     /// Aparelho com chamada viva no servidor, lido com a trava: conectar daqui assume a conversa.
     pub(super) busy: Option<String>,
     pub(super) accounts: Vec<CodexAccount>,
@@ -947,6 +949,9 @@ impl Hangar {
         self.voice.thought = text(&state["thought"]).unwrap_or_default();
         self.voice.action = parse_action(&state["action"]);
         self.voice.followed = state["followed"].as_array().into_iter().flatten().filter_map(|f| text(&f["name"])).collect();
+        // Com a lista à mostra, a gravação da voz aparece na hora; fechada, ela é relida ao abrir.
+        let rev = state["memory"].as_u64();
+        if rev != std::mem::replace(&mut self.voice.memory_rev, rev) && self.voice.open && self.voice.settings_open { self.refresh_voice_memory(); }
     }
 
     pub(super) fn receive_voice(&mut self, generation: u64, event: VoiceEvent, window: &mut Window, cx: &mut Context<Self>) {

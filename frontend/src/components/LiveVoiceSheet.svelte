@@ -103,18 +103,22 @@
   // Leitura mais velha que outra leitura ou que um apagar não repinta a lista.
   let memoryGen = 0;
   let forgetFailed = $state(false);
-  async function loadMemory() {
+  // `silent`: releitura pedida pelo contador da voz; a lista fica na tela (sem piscar, sem perder a rolagem nem o aviso de falha).
+  async function loadMemory(silent = false) {
     if (!target) return;
     const key = memoryFor = target.id;
     const gen = ++memoryGen;
-    forgetFailed = false;
-    memory = { state: 'loading', items: [] };
+    if (!silent) {
+      forgetFailed = false;
+      memory = { state: 'loading', items: [] };
+    }
     try {
       const items = await listVoiceMemory(target);
       if (memoryFor === key && memoryGen === gen) memory = { state: 'ok', items };
     } catch (e) {
       console.warn('live voice: memory unreadable', e);
-      if (memoryFor === key && memoryGen === gen) memory = { state: 'error', items: [] };
+      // Releitura em segundo plano que falha não some com a lista que já estava na tela.
+      if (memoryFor === key && memoryGen === gen && !(silent && memory.state === 'ok')) memory = { state: 'error', items: [] };
     }
   }
   // Recarrega ao abrir os ajustes e quando o servidor mostrado muda com eles abertos.
@@ -122,6 +126,18 @@
   $effect(() => {
     const id = target?.id;
     if (settingsOpen && id) untrack(() => { void loadMemory(); });
+  });
+  // A voz gravou ou apagou uma memória: relê em silêncio. O fim da chamada (o contador volta a `undefined`) também relê, de
+  // propósito: a última gravação pode ter chegado depois do último retrato.
+  const memoryRev = $derived(inCall ? liveVoiceStore.state?.memory : undefined);
+  let seenRev: number | undefined;
+  $effect(() => {
+    const rev = memoryRev;
+    untrack(() => {
+      const changed = rev !== seenRev;
+      seenRev = rev;
+      if (changed && settingsOpen && target) void loadMemory(true);
+    });
   });
   async function drop(id: string) {
     // A lista é de outro servidor: apagar aqui atingiria a máquina errada.

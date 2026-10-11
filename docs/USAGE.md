@@ -316,14 +316,28 @@ válido (Let's Encrypt) → escaneie o QR / preencha o token → **Adicionar à 
   - **Uma conversa por servidor.** Abrir a voz em outro aparelho passa a conversa para ele; o
     anterior mostra "A conversa passou para outro aparelho." Se o aparelho sair (app fechado, rede
     caiu), reabrir em até 2 minutos retoma a mesma conversa do assistente; depois disso ela termina.
+  - **Peça silêncio até voltar.** "Vou sair uns minutos, não me avisa nada até eu voltar": as respostas
+    das sessões ficam guardadas, nada é falado e o trabalho continua. O silêncio não acaba sozinho; quando
+    você disser "voltei" ou "me dá o resumo", ela resume o que chegou, uma resposta por vez.
   - **O que a voz lembra.** Ela guarda poucos fatos entre uma conversa e outra (quem você é, como
     gosta de ser respondido, onde ficam seus projetos) e começa cada conversa já sabendo disso. Na
-    primeira conversa ela pede licença para ler seu `~/.claude/CLAUDE.md` e seus `~/.codex/AGENTS*.md`
-    e guarda só o essencial; nunca senha, token ou IP. Só grava ou apaga num turno em que você falou. Para ver ou apagar,
-    abra os ajustes da voz e procure **O que a voz lembra**. A lista fica no arquivo
+    primeira conversa, logo ao conectar, ela se apresenta e pede licença para ler, só leitura, seu
+    `~/.claude/CLAUDE.md` e seus `~/.codex/AGENTS*.md`, e pergunta o que você faz e como prefere as
+    respostas. Depois de ler, ela conta o que entendeu ("Entendi que você … — confere?") e pergunta
+    como você quer usar a voz (acompanhar sessões, mandar pedidos, planejar); só guarda depois que você
+    confirmar ou corrigir, e nunca senha, token ou IP. Em seguida pede outra licença para
+    olhar só os nomes das suas pastas principais (o primeiro nível de `~/Projetos`, por exemplo) e
+    propõe poucas referências, como "`~/Projetos/hangar` parece ser o Hangar — confere?", guardadas só
+    depois do seu sim; não lê código nem arquivos ocultos. Se você recusar algum dos dois, ela guarda isso e não pergunta de novo. Essa lista é a
+    memória da voz; a memória do próprio Codex não entra nela. Só grava ou apaga num turno em que você falou. O que você
+    pede vale desde já e manda no jeito padrão dela (por exemplo, "ao entrar numa sessão, me resume o que ela fez"
+    faz a troca de sessão resumir sem perguntar), menos nas confirmações de segurança. Cada memória tem até 240
+    caracteres; se passar, ela avisa que cortou. Para ver ou apagar,
+    abra os ajustes da voz e procure **O que a voz lembra**; com a lista aberta durante a conversa, o que a voz grava
+    ou apaga aparece na hora. A lista fica no arquivo
     `~/.hangar/voz/memoria.json`, no servidor, mas o texto dela segue para o provedor do assistente
     (a OpenAI, pelo Codex) a cada conversa. Na primeira conversa, o conteúdo dos arquivos que ela
-    lê (`~/.claude/CLAUDE.md`, os `AGENTS*.md`) também vai para esse provedor.
+    lê (`~/.claude/CLAUDE.md`, os `AGENTS*.md`, os nomes de pasta) também vai para esse provedor.
   - O áudio vai direto do aparelho ao serviço de voz da OpenAI; o servidor só conduz a conversa. Só o dono usa a voz:
     num servidor aberto por convite o botão não aparece. O app Expo ainda não tem a voz.
 - **Ditado mãos-livres:** chave **Enviar transcrição automaticamente** em Configurações → Voz,

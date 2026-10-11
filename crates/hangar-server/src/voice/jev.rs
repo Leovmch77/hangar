@@ -9,10 +9,11 @@ pub const OPENROUTER_URL: &str = "https://openrouter.ai/api/alpha/decisions";
 pub const OPENROUTER_MODEL: &str = "~typesafe/jev-latest";
 
 const TIMEOUT: Duration = Duration::from_secs(3);
-/// Certeza mínima para o app agir sozinho ou mudar a trava de envio.
+/// Troca e ação de tela fazem o que a pessoa pediu e se desfazem com outra fala. Acima destes limites o Jev age sozinho
+/// quando a fala confirma com palavras (verbo de troca e nome, ou sim à oferta da voz); sem elas, a troca exige `SURE` na
+/// intenção e no destino ("vai pro voz" veio com destino 0,89 e 0,63). Envio com `SURE` nos dois só vira atalho ao
+/// organizador; abaixo disso, ou com erro, o Jev cala e quem decide é o organizador.
 pub const SURE: f64 = 0.9;
-/// Troca e ação de tela fazem o que a pessoa pediu e se desfazem com outra fala; a trava de troca ainda confere que a
-/// fala pediu. Com 0,9 o Jev deixava passar demais ("vai pro voz" veio com destino 0,89 e 0,63).
 pub const SWITCH_INTENT: f64 = 0.7;
 pub const SESSION_SURE: f64 = 0.65;
 pub const ACTION_SURE: f64 = 0.7;
@@ -122,20 +123,23 @@ pub fn session_label(name: &str, machine: &str, on_screen: bool) -> String {
 /// `recent`: as últimas falas da conversa (o "isso" depois de "qual das duas?" só se entende com elas).
 pub fn questions(utterance: &str, recent: &str, on_screen: Option<&str>, sessions: &[String], actions: &[String]) -> (String, Value) {
     let screen = on_screen.map(|name| format!("Sessão na tela agora: {name}. ")).unwrap_or_default();
-    let recent: String = recent.chars().rev().take(800).collect::<Vec<_>>().into_iter().rev().collect();
+    let recent: String = recent.chars().rev().take(1500).collect::<Vec<_>>().into_iter().rev().collect();
     let recent = if recent.trim().is_empty() { String::new() } else { format!("Conversa recente:\n{}\n", recent.trim()) };
     let state = format!("{screen}{recent}Fala do usuário ao assistente de voz do Hangar (app que controla sessões de trabalho Claude/Codex em várias máquinas): \"{utterance}\"");
     let questions = json!({
-        "intent": {"type": "choice", "instructions": "O que o usuário quer com esta fala? 'vai pra', 'volta pra', 'abre a', 'troca pra' seguidos de um nome de sessão é trocar de sessão.", "criteria": {
+        "intent": {"type": "choice", "instructions": "O que o usuário quer com esta fala, lida junto com a conversa recente? 'vai pra', 'volta pra', \
+            'abre a', 'troca pra' seguidos de um nome de sessão é trocar de sessão. 'Pode', 'sim' ou 'manda' depois de a voz oferecer mandar \
+            algo para uma sessão é mandar; depois de oferecer abrir uma sessão, é trocar.", "criteria": {
             "switch": "trocar a sessão aberta na tela para outra sessão",
             "screen": "abrir, fechar ou mostrar algo na tela do Hangar (configurações, terminal, painel, custos)",
-            "send": "mandar um trabalho para a sessão executar",
+            "send": "mandar um trabalho, mensagem, pergunta ou aviso para uma sessão",
             "talk": "conversar, perguntar, analisar ou planejar junto com o assistente",
             "hold": "pedir para esperar ou não mandar ainda",
             "none": "fala incompleta, hesitação ou ruído"}},
-        "session": {"type": "choice", "instructions": "Se ele quer trocar de sessão, para qual destas? Ele costuma dizer só um pedaço do nome \
-            ('voz' é voz-entendimento, 'api' é pm18920-api) e a transcrição pode separar ou errar letras ('P-Workstation' é PWorkStation, \
-            'seção' é sessão). A máquina não precisa ser dita: a sessão pode estar em qualquer uma.", "criteria": criteria(sessions, 's')},
+        "session": {"type": "choice", "instructions": "Para qual destas sessões a fala aponta: a que ele quer abrir na tela ou a que deve receber \
+            o pedido? Ele costuma dizer só um pedaço do nome ('voz' é voz-entendimento, 'api' é pm18920-api) ou indicar pela conversa ('manda \
+            pra ela', 'pode' a uma oferta da voz), e a transcrição pode separar ou errar letras ('P-Workstation' é PWorkStation, 'seção' é \
+            sessão). A máquina não precisa ser dita: a sessão pode estar em qualquer uma.", "criteria": criteria(sessions, 's')},
         "action": {"type": "choice", "instructions": "Se ele quer uma ação na tela do Hangar, qual destas?", "criteria": criteria(actions, 'a')},
     });
     (state, questions)
