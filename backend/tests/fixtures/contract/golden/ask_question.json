@@ -834,6 +834,72 @@
   }
  },
  {
+  "name": "pane_multi_prose_above",
+  "pane": "\u25cf Propostas, na ordem de valor:\n  1. Regras de escrita de skill: um bloco curto em Conven\u00e7\u00f5es.\n     - gatilhos e crit\u00e9rio de pronto\n  2. Corrigir o que est\u00e1 errado:\n     - tabela de skills e testes\n  3. Enxugar: levar o detalhe para docs/.\n\n  Qual aplico?\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u2190  \u2610 CLAUDE.md  \u2714 Submit  \u2192\n\nQuais melhorias do CLAUDE.md eu aplico?\n\n\u276f 1. [ ] Regras de escrita de skill\n       Bloco curto em Conven\u00e7\u00f5es das Skills.\n  2. [ ] Corrigir tabela e testes\n       Tabela atualizada e testes num la\u00e7o.\n  3. [ ] Enxugar para docs/\n       Credenciais e mods em docs/.\n  4. [ ] Type something\n     Submit\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n  5. Chat about this\n\nEnter to select \u00b7 \u2191/\u2193 to navigate \u00b7 Esc to cancel\n",
+  "state": "awaiting_input",
+  "options": [
+   "[ ] Regras de escrita de skill",
+   "[ ] Corrigir tabela e testes",
+   "[ ] Enxugar para docs/",
+   "[ ] Type something",
+   "Chat about this"
+  ],
+  "sidecar": {
+   "tool_input": {
+    "questions": [
+     {
+      "header": "CLAUDE.md",
+      "question": "Quais melhorias do CLAUDE.md eu aplico?",
+      "multiSelect": true,
+      "options": [
+       {
+        "label": "Regras de escrita de skill",
+        "description": "sobre Regras de escrita de skill",
+        "preview": ""
+       },
+       {
+        "label": "Corrigir tabela e testes",
+        "description": "sobre Corrigir tabela e testes",
+        "preview": ""
+       },
+       {
+        "label": "Enxugar para docs/",
+        "description": "sobre Enxugar para docs/",
+        "preview": ""
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "expected": {
+   "questions": [
+    {
+     "header": "CLAUDE.md",
+     "question": "Quais melhorias do CLAUDE.md eu aplico?",
+     "multiSelect": true,
+     "options": [
+      {
+       "label": "Regras de escrita de skill",
+       "description": "sobre Regras de escrita de skill",
+       "preview": ""
+      },
+      {
+       "label": "Corrigir tabela e testes",
+       "description": "sobre Corrigir tabela e testes",
+       "preview": ""
+      },
+      {
+       "label": "Enxugar para docs/",
+       "description": "sobre Enxugar para docs/",
+       "preview": ""
+      }
+     ]
+    }
+   ]
+  }
+ },
+ {
   "name": "no_sidecar",
   "state": "awaiting_input",
   "options": [

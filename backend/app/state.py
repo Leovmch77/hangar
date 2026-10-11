@@ -105,7 +105,7 @@ def _question(lines: list[str]) -> Optional[str]:
         # Tirar a moldura dos DOIS lados: no omp a pergunta vem dentro do box
         # (`│ Qual cor...?      │`) e sem isso as bordas entrariam no texto que o app mostra.
         s = line.strip().strip("│").strip()
-        if not s or _RULE_RE.match(line) or _SO_MOLDURA_RE.match(line) or s[:1] in "☐☑":
+        if not s or _RULE_RE.match(line) or _SO_MOLDURA_RE.match(line) or s.lstrip("←").lstrip()[:1] in "☐☑":
             continue
         found = s
     return found
@@ -258,9 +258,11 @@ def _menu_block(lines: list[str]) -> Optional[tuple[int, int]]:
     # LISTA NUMERADA EM PROSA da mensagem do assistente — ela vive acima do chip e, sem essa
     # ancora, "1. ... 2. ..." da prosa entrariam como opcoes falsas. A pergunta fica entre o chip
     # e as opcoes (com linha em branco no meio), entao continua dentro da regiao.
+    # Na multipla escolha o chip vem depois de uma seta: "←  ☐ ... ✔ Submit  →".
     top = 0
     for i in range(cursor - 1, -1, -1):
         s = lines[i].lstrip()
+        s = s[1:].lstrip() if s.startswith("←") else s
         if _is_boundary(lines[i]) or (bool(s) and s[0] in "☐☑"):
             top = i + 1
             break
@@ -269,6 +271,11 @@ def _menu_block(lines: list[str]) -> Optional[tuple[int, int]]:
         if _FOOTER_RE.search(lines[i]) or _is_boundary(lines[i]):
             bot = i
             break
+    # Menu de verdade some com o composer: rodape com regua embaixo e um menu desenhado no TEXTO do
+    # composer (recado colado), e tocar nele mandaria teclas para o prompt.
+    if (not pi_cursor and bot < len(lines) and _FOOTER_RE.search(lines[bot])
+            and any(_RULE_RE.match(ln) for ln in lines[bot + 1:])):
+        return None
     return (top, bot)
 
 

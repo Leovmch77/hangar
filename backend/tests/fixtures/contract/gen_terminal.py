@@ -107,6 +107,8 @@ def main():
         "todo": "● Resposta\n○ Todos (1/2)\nfora",
         "draft": "✻ Worked for 1s\n────────────\n❯ 1. pode editar 2. mostre a data\n────────────",
         "preview_numbered": "☐ Escolha\nQual?\n❯ 1. ação 🐍          ┌───────────\n  2. outra             │ 1. exemplo 2. segundo\nEnter to select",
+        "menu_in_composer": "✶ Pouncing… (15s)\n────────────\n❯ recado colado com a captura:\n  Quais cores?\n  ❯ 1. [ ] Alfa\n    2. [ ] Bravo\n  Enter to select · ↑/↓ to navigate · Esc to cancel\n────────────\n  ⏵⏵ bypass",
+        "multi_prose_above": "● Propostas:\n  1. Regras: um bloco.\n  2. Corrigir: a tabela.\n────────────\n←  ☐ Teste  ✔ Submit  →\n\nQual aplico?\n\n❯ 1. [ ] Regras\n  2. [ ] Corrigir\n  3. [ ] Type something\n     Submit\n────────────\n  4. Chat about this\n\nEnter to select · ↑/↓ to navigate · Esc to cancel",
         "login": "Choose the text style\n\n\n",
         "quoted_login": "● /oauth/authorize\n────────────\n❯\n────────────\n⏵⏵ bypass",
         "overlay_padded": "painel\nEsc to cancel\n" + "\n" * 20,

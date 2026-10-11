@@ -728,6 +728,45 @@
     }
   },
   {
+    "name": "menu_in_composer",
+    "pane": "✶ Pouncing… (15s)\n────────────\n❯ recado colado com a captura:\n  Quais cores?\n  ❯ 1. [ ] Alfa\n    2. [ ] Bravo\n  Enter to select · ↑/↓ to navigate · Esc to cancel\n────────────\n  ⏵⏵ bypass",
+    "expected": {
+      "state": "working",
+      "label": "Pouncing… (15s)",
+      "question": null,
+      "options": null,
+      "spinner": "✶ Pouncing… (15s)",
+      "status_line": "  ⏵⏵ bypass",
+      "overlay": true,
+      "login": false,
+      "limit_reset": null,
+      "preview": "",
+      "codex_menu": null
+    }
+  },
+  {
+    "name": "multi_prose_above",
+    "pane": "● Propostas:\n  1. Regras: um bloco.\n  2. Corrigir: a tabela.\n────────────\n←  ☐ Teste  ✔ Submit  →\n\nQual aplico?\n\n❯ 1. [ ] Regras\n  2. [ ] Corrigir\n  3. [ ] Type something\n     Submit\n────────────\n  4. Chat about this\n\nEnter to select · ↑/↓ to navigate · Esc to cancel",
+    "expected": {
+      "state": "awaiting_input",
+      "label": null,
+      "question": "Qual aplico?",
+      "options": [
+        "[ ] Regras",
+        "[ ] Corrigir",
+        "[ ] Type something",
+        "Chat about this"
+      ],
+      "spinner": null,
+      "status_line": "  4. Chat about this\nEnter to select · ↑/↓ to navigate · Esc to cancel",
+      "overlay": true,
+      "login": false,
+      "limit_reset": null,
+      "preview": "",
+      "codex_menu": null
+    }
+  },
+  {
     "name": "login",
     "pane": "Choose the text style\n\n\n",
     "expected": {
