@@ -7888,5 +7888,13 @@
   "live_voice_status_thinking": "Pensando…",
   "live_voice_status_searching": "Pesquisando…",
   "live_voice_status_working": "Trabalhando…",
+  "live_voice_memory_title": "O que a voz lembra",
+  "live_voice_memory_empty": "Nada ainda. A voz vai aprendendo enquanto vocês conversam.",
+  "live_voice_memory_error": "Não consegui ler a memória da voz.",
+  "live_voice_memory_forget": "Esquecer: {text}",
+  "live_voice_memory_kind_pessoa": "Você",
+  "live_voice_memory_kind_preferencia": "Preferência",
+  "live_voice_memory_kind_referencia": "Referência",
+  "live_voice_memory_kind_projeto": "Projeto",
   "folder_branches_load_failed": "Não foi possível carregar as branches."
 }

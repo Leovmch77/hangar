@@ -7888,5 +7888,13 @@
   "live_voice_status_thinking": "Thinking…",
   "live_voice_status_searching": "Searching…",
   "live_voice_status_working": "Working…",
+  "live_voice_memory_title": "What the voice remembers",
+  "live_voice_memory_empty": "Nothing yet. The voice learns as you talk.",
+  "live_voice_memory_error": "Couldn't read the voice memory.",
+  "live_voice_memory_forget": "Forget: {text}",
+  "live_voice_memory_kind_pessoa": "You",
+  "live_voice_memory_kind_preferencia": "Preference",
+  "live_voice_memory_kind_referencia": "Reference",
+  "live_voice_memory_kind_projeto": "Project",
   "folder_branches_load_failed": "Couldn't load the branches."
 }

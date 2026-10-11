@@ -187,11 +187,24 @@ function stop() {
   else phase = 'idle';
 }
 
-async function settingsRequest(server: Server, init?: RequestInit): Promise<{ settings: LiveVoiceSettings } & Partial<LiveVoiceSettingsReply>> {
-  const res = await probeServerResponse(server, '/api/voice/settings', init);
+async function voiceRequest(server: Server, path: string, init?: RequestInit) {
+  const res = await probeServerResponse(server, path, init);
   const body = await res.json().catch(() => ({}));
   if (!res.ok) throw Object.assign(new Error(body?.error_code ?? `http_${res.status}`), { code: body?.error_code ?? 'failed' });
   return body;
+}
+
+const settingsRequest = (server: Server, init?: RequestInit): Promise<{ settings: LiveVoiceSettings } & Partial<LiveVoiceSettingsReply>> =>
+  voiceRequest(server, '/api/voice/settings', init);
+
+export type VoiceMemory = { id: string; kind: 'pessoa' | 'preferencia' | 'referencia' | 'projeto'; text: string; learned: string; confirmed: string };
+
+export async function listVoiceMemory(server: Server): Promise<VoiceMemory[]> {
+  return (await voiceRequest(server, '/api/voice/memory')).entries ?? [];
+}
+
+export async function forgetVoiceMemory(server: Server, id: string): Promise<void> {
+  await voiceRequest(server, `/api/voice/memory/${encodeURIComponent(id)}`, { method: 'DELETE' });
 }
 
 /** Uma leitura por servidor; `force` relê (o painel abre com o retrato atual). */
