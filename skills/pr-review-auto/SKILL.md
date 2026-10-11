@@ -7,8 +7,8 @@ description: Automatic CodeRabbit follow-up for a GitHub PR of the current repo 
 
 Invoking this skill authorizes, for the named PR only: fixing code on the PR branch, committing,
 pushing to that branch, replying to and resolving CodeRabbit threads, and **merging when ready**
-when §5 allows it. It does not authorize: force push, rebase, `--admin`, closing the PR, pushing
-to `main`, deleting the branch. CodeRabbit already reviews on GitHub: never run the `coderabbit` CLI.
+when §5 allows it. It does not authorize: force push, rebase, `--admin` outside §5, closing the
+PR, pushing to `main`, deleting the branch. CodeRabbit already reviews on GitHub: never run the `coderabbit` CLI.
 
 `SKILL_DIR` is this skill's base directory. `<repo>` is `gh repo view --json nameWithOwner -q
 .nameWithOwner` run in the PR's tree; `<main tree>` is the first line of `git worktree list`.
@@ -104,11 +104,12 @@ you, including ones the user wrote by hand under the same GitHub account.
 
 1. `python3 SKILL_DIR/scripts/pr_watch.py <N> --once` → `ready: true` and the same `head`.
    Otherwise keep watching.
-2. Merge only if `viewer_permission` is `ADMIN` (the repo owner merges into `main`). Anything else
-   (`WRITE`, `MAINTAIN`, …): do not merge even if GitHub would allow it — stop the Monitor, tell
-   the user the PR is ready and waits for an admin's merge, and stop.
-3. `gh pr merge <N> --merge --match-head-commit <head>` (merge commit, the repo's convention;
-   keep the branch). The head check refuses the merge if someone pushed after step 1.
+2. `main` requires one approval, and nobody else approves: only an admin merges, bypassing it.
+   `viewer_permission` not `ADMIN` (`WRITE`, `MAINTAIN`, …) → do not merge: stop the Monitor,
+   tell the user the PR is ready and waits for an admin's approval or merge, and stop.
+3. `ADMIN` → `gh pr merge <N> --merge --admin --match-head-commit <head>` (merge commit, the
+   repo's convention; keep the branch). The head check refuses the merge if someone pushed
+   after step 1.
 4. Stop the Monitor with **TaskStop**.
 5. Align the shared checkout: in `<main tree>`, on `main` with a clean tree,
    `git fetch origin && git merge --ff-only origin/main`. Not fast-forward or dirty → just say so.
