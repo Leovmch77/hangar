@@ -557,8 +557,8 @@ impl Hangar {
         let (server, connection, tx) = (self.active_key(), self.connection, self.tx.clone());
         self.runtime.spawn(async move {
             let list = api.server_read(&["voice", "memory"], &[], 8).await
-                .map(|v| v["entries"].as_array().cloned().unwrap_or_default())
-                .map_err(|e| e.code.unwrap_or_else(|| "memory_unreadable".into()));
+                .map_err(|e| e.code.unwrap_or_else(|| "memory_unreadable".into()))
+                .and_then(|v| v["entries"].as_array().cloned().ok_or_else(|| "invalid_response".to_owned()));
             let _ = tx.send(Envelope { connection, selection: None, payload: Payload::VoiceMemory(server, list) }).await;
         });
     }
