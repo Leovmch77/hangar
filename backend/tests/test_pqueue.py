@@ -1009,6 +1009,16 @@ def test_transcript_start_ts_none_quando_nao_da_pra_ler(tmp_path):
     assert pqueue._transcript_start_ts(str(vazio)) == 0.0   # legivel e sem ts continua 0.0
 
 
+def test_transcript_que_ainda_nao_nasceu_e_nao_sei_sem_aviso(tmp_path, caplog):
+    # Sessão recém-criada: o Claude/Codex só grava o arquivo no primeiro prompt. Não é falha de
+    # leitura, e o aviso a cada abertura enchia o log; quem chama já trata o None como "não sei".
+    caplog.set_level("DEBUG", logger="hangar.pqueue")
+    assert pqueue._transcript_start_ts(str(tmp_path / "ainda-nao.jsonl")) is None
+    assert [r for r in caplog.records if r.levelname == "WARNING"] == []
+    assert pqueue._transcript_start_ts(str(tmp_path)) is None
+    assert [r.levelname for r in caplog.records].count("WARNING") == 1
+
+
 def test_confirm_nao_decide_com_inicio_de_transcript_ilegivel(tmp_path, monkeypatch, caplog):
     # Mesmo cenario do requeue legitimo, mas com a SEGUNDA leitura do transcript falhando. Sem o
     # guard, min_ts=0.0 desliga a poda por idade e o reconcile decide com meia informacao.

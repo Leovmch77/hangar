@@ -276,6 +276,10 @@ def _transcript_start_ts(jsonl: str) -> float | None:
                 ts = _ts_of_line(line)
                 if ts > 0:
                     return ts
+    except FileNotFoundError:
+        # Sessão recém-criada: o arquivo nasce no primeiro prompt. Continua "não sei".
+        _log.debug("transcript ainda não existe %s", jsonl)
+        return None
     except OSError as e:
         _log.warning("nao deu pra ler o inicio do transcript %s: %s", jsonl, e)
         return None
