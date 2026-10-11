@@ -184,11 +184,28 @@ def estado_para_tela() -> dict:
         # motor, uns segundos depois — o tempo de o Python carregar. Sem esta guarda, o polling da
         # tela (2s) declararia morta toda atualização recém-lançada.
         return atual
+    if _restarted_into_target(atual):
+        _log.info("atualizacao concluida pelo backend novo: o motor %s morreu no reinicio que pediu", dono)
+        _dist_velho_apagar()
+        _escrever(fase="pronto", ok=True, texto="Atualizado")
+        _soltar_a_vez()
+        return estado()
     _log.warning("atualizacao abandonada: o processo %s nao existe mais", dono)
     _escrever(fase="pronto", ok=False, voltou=False, no_ar=True,
               erro="a atualizacao foi interrompida — o processo que a executava nao existe mais")
     _soltar_a_vez()
     return estado()
+
+
+def _restarted_into_target(atual: dict) -> bool:
+    """O motor morreu no reinício que ele mesmo pediu e o reinício valeu: quem responde é outro
+    backend e o disco está no commit da atualização. Sem escopo próprio do systemd (gerenciador que
+    recusa unidade transiente), o motor mora no cgroup do backend e o restart o leva junto."""
+    backend = atual.get("backend_pid")
+    para = atual.get("commit_para")
+    if atual.get("etapa") != "reiniciar" or not isinstance(backend, int) or backend == os.getpid() or not para:
+        return False
+    return _git("rev-parse", "HEAD", timeout=30).stdout.strip() == para
 
 
 def estado() -> dict:
@@ -1258,7 +1275,7 @@ def iniciar(porta: int = 8765, *, expected_branch: str | None = None) -> dict:
     # o que importa pra saber se a atualização morreu, mora no lock.
     # `pid=None`: `_escrever` mescla, e o pid da atualização ANTERIOR (morto) faria o
     # `estado_para_tela` declarar esta recém-lançada como abandonada no primeiro poll.
-    _escrever(fase="rodando", ok=None, erro=None, pid=None,
+    _escrever(fase="rodando", ok=None, erro=None, pid=None, backend_pid=os.getpid(),
               passo=0, total=len(ETAPAS), texto="Começando")
     proc = subprocess.Popen(
         args, cwd=str(REPO / "backend"),

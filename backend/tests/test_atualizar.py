@@ -1524,3 +1524,28 @@ def test_merge_que_muda_o_contrato_conta_pelo_primeiro_pai(repo, rust):
     final = atualizar.executar()
     assert _rev(repo, "HEAD") == rust["topo"] and final["avisos"]
 
+
+
+def test_motor_morto_pelo_proprio_reinicio_conclui_quando_o_servidor_e_o_novo(repo):
+    """Sem escopo próprio do systemd (o gerenciador do usuário recusa unidade transiente), o motor
+    nasce no cgroup do backend e o restart que ele dispara o mata antes de gravar "pronto". Quem
+    responde depois é o backend novo, com o disco no commit da atualização: isso é sucesso."""
+    import os as _os
+    head = atualizar._git("rev-parse", "HEAD").stdout.strip()
+    atualizar._escrever(fase="rodando", etapa="reiniciar", passo=5, total=5, pid=999999,
+                        backend_pid=_os.getpid() + 1, commit_para=head)
+    d = atualizar.estado_para_tela()
+    assert (d["fase"], d["ok"]) == ("pronto", True)
+
+
+def test_motor_morto_no_reinicio_sem_servidor_novo_ou_commit_novo_e_falha(repo):
+    import os as _os
+    head = atualizar._git("rev-parse", "HEAD").stdout.strip()
+    # O backend que responde é o mesmo de antes: o restart não aconteceu.
+    atualizar._escrever(fase="rodando", etapa="reiniciar", passo=5, total=5, pid=999999,
+                        backend_pid=_os.getpid(), commit_para=head)
+    assert atualizar.estado_para_tela()["ok"] is False
+    # Servidor novo, mas o disco não está no commit da atualização.
+    atualizar._escrever(fase="rodando", etapa="reiniciar", passo=5, total=5, pid=999999,
+                        backend_pid=_os.getpid() + 1, commit_para="0" * 40, ok=None, erro=None)
+    assert atualizar.estado_para_tela()["ok"] is False
