@@ -327,7 +327,7 @@ export function clusterByPair<T extends PairFields>(sessions: T[]): PairRow<T>[]
 // terceiro). Devolve remetente + texto sem o prefixo + scope; null = msg
 // normal do usuário. Só APRESENTAÇÃO: o texto guardado em events/pending fica intacto (dedup do
 // Chat compara o cru).
-const _PEER_RE = /^\[(de fora|de|grupo|painel):\s*([^\]]+)\]\s*/;
+const _PEER_RE = /^\[(de|grupo|painel)( fora)?:\s*([^\]]+)\]\s*/;
 
 // Só apresentação: o envelope original continua no histórico e na deduplicação.
 export function parseRealtimeDelegation(text: string): { input: string; transcript: string } | null {
@@ -336,11 +336,12 @@ export function parseRealtimeDelegation(text: string): { input: string; transcri
 }
 
 export type PeerScope = 'peer' | 'group' | 'panel' | 'external';
-const _SCOPES: Record<string, PeerScope> = { de: 'peer', 'de fora': 'external', grupo: 'group', painel: 'panel' };
+const _SCOPES: Record<string, PeerScope> = { de: 'peer', grupo: 'group', painel: 'panel' };
 export function parsePeerMessage(text: string): { from: string; text: string; scope: PeerScope } | null {
   const m = _PEER_RE.exec(text);
-  if (!m) return null;
-  return { from: m[2].trim(), text: text.slice(m[0].length), scope: _SCOPES[m[1]] };
+  // Só "de" tem a forma "de fora" (par externo); "[grupo fora: …]" não existe.
+  if (!m || (m[2] && m[1] !== 'de')) return null;
+  return { from: m[3].trim(), text: text.slice(m[0].length), scope: m[2] ? 'external' : _SCOPES[m[1]] };
 }
 
 // Canal do recado: uma sessão que manda aviso de máquina abre o texto com "[vigia] ...", "[ALERTA]
