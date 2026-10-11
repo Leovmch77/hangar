@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ponytail: hook minimo — le o JSON do PreToolUse no stdin e grava o payload do AskUserQuestion
-# num sidecar por session_id. SEM stdout (o bug conhecido do PreToolUse + AskUserQuestion mora
+# num sidecar por session_id; no PostToolUse/PostToolUseFailure apaga o da mesma chamada. SEM stdout (o bug conhecido do PreToolUse + AskUserQuestion mora
 # em conflito de stdout/stdin -> nada de imprimir). Falha em silencio (nunca trava o prompt).
 import json
 import os
@@ -16,7 +16,14 @@ try:
     d = os.path.join(base, ".hangar-askq")
     os.makedirs(d, exist_ok=True)
     sid = o.get("session_id") or "unknown"
-    with open(os.path.join(d, sid + ".json"), "w", encoding="utf-8") as fh:
+    path = os.path.join(d, sid + ".json")
+    if o.get("hook_event_name") in ("PostToolUse", "PostToolUseFailure"):
+        # Respondida ou recusada no terminal: some só a mesma pergunta, nunca uma mais nova.
+        with open(path, encoding="utf-8") as fh:
+            if json.load(fh).get("tool_use_id") == o.get("tool_use_id"):
+                os.remove(path)
+        sys.exit(0)
+    with open(path, "w", encoding="utf-8") as fh:
         fh.write(raw)
 except Exception:
     pass
