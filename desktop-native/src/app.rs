@@ -251,6 +251,7 @@ enum Payload {
     Voice(u64, crate::voice::VoiceEvent),
     // `GET /api/voice/settings` do servidor ativo (a chave dele; `None` = leitura falhou) e as contas Codex de lá.
     VoiceGate(String, Option<Value>, Option<Vec<voice_ui::CodexAccount>>),
+    VoiceMemory(String, Result<Vec<Value>, String>),
     // Catálogo de modelos do organizador para a conta escolhida, com o número do pedido.
     VoiceModels(u64, Result<Vec<voice_ui::OrganizerModel>, String>),
     // "No PC" / "Fora" de uma máquina do dono: a chave dela, se foi a troca pedida no botão e a resposta.
@@ -1454,6 +1455,7 @@ impl Hangar {
             // A chamada é deste computador: a troca de servidor não a derruba, só a geração dela decide.
             Payload::Voice(generation, event) => { self.receive_voice(generation, event, window, cx); return; }
             Payload::VoiceGate(server, body, accounts) => { self.receive_voice_gate(server, body, accounts, window, cx); return; }
+            Payload::VoiceMemory(server, list) => { self.receive_voice_memory(server, list, cx); return; }
             Payload::VoiceModels(seq, result) => { self.receive_organizer_models(seq, result, window, cx); return; }
             Payload::Files(key, owner, generation, files) => { self.receive_files(key, owner, generation, files, cx); cx.notify(); return; }
             Payload::UploadStep(key, id, result) => { let key = self.delivery.current(key); self.receive_upload(key, id, result); cx.notify(); return; }
@@ -1779,7 +1781,7 @@ impl Hangar {
             Payload::Sent(..) | Payload::Interrupted(..) | Payload::Acted(..) | Payload::Files(..) | Payload::UploadStep(..)
                 | Payload::UploadsDone(..) | Payload::Saved(..) | Payload::ConnectionNotSaved(..) | Payload::Reply(..) | Payload::HeadlessPlan(..)
                 | Payload::AppearanceSaved(..) | Payload::Backdrop(..) | Payload::BackdropPicked(..) | Payload::BackdropRemoved(..)
-                | Payload::Remote(..) | Payload::Lan(..) | Payload::Presence(..) | Payload::Voice(..) | Payload::VoiceGate(..) | Payload::VoiceModels(..) => unreachable!(),
+                | Payload::Remote(..) | Payload::Lan(..) | Payload::Presence(..) | Payload::Voice(..) | Payload::VoiceGate(..) | Payload::VoiceMemory(..) | Payload::VoiceModels(..) => unreachable!(),
         }
         // Lista que trocou ou tirou a sessão aberta refaz a conversa.
         if rows || self.selection != selection { self.sync_rows(cx); }
