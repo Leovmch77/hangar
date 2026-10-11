@@ -2353,7 +2353,6 @@ mod tests {
         assert_eq!(spoken_input("texto solto"), "texto solto");
     }
 
-    #[test]
     fn chat(kind: &str, text: &str) -> hangar_api::chat::ChatEvent {
         let mut e = json!({"id": "x", "kind": kind});
         if kind == "tool_use" { e["tool_name"] = json!(text) } else { e["text"] = json!(text) }
