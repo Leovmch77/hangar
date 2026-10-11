@@ -311,6 +311,14 @@ válido (Let's Encrypt) → escaneie o QR / preencha o token → **Adicionar à 
     com ela aberta, outro toque abre o painel (silenciar, modo **Direto**/**Planejar**, ajustes,
     **Servidor da voz**, **Encerrar**). No celular a voz só troca de sessão; ler a tela e clicar
     ficam para o PC.
+  - **O que mais ela faz pela fala:** reabre a conversa que você fechou sem querer ("reabre a
+    auditoria-migracao", "reabre a última que eu fechei"), que volta com o nome que tinha e abre na
+    tela; diz o que você fechou e acha conversa pelo assunto; lista as pastas onde dá para abrir sessão
+    e abre sessão nova com o agente, modelo, conta ou modo que você disser; roda os atalhos do Hangar
+    ("abre a VM"); diz quais máquinas estão respondendo; interrompe uma sessão. Fechar e interromper
+    sessão, atalho marcado para confirmar, atalho de comando do repositório e comando que apaga ou
+    publica algo sempre esperam o seu "sim" falado. Ela usa os botões
+    da tela só quando não há outro jeito.
   - **Ajustes** (conta Codex, voz, modelo, esforço e velocidade de cada modo) ficam salvos no
     servidor e valem para qualquer aparelho.
   - **Uma conversa por servidor.** Abrir a voz em outro aparelho passa a conversa para ele; o

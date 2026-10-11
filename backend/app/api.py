@@ -26,7 +26,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, StrictBool, model_validator
 from sse_starlette.sse import EventSourceResponse
-from app import (agentes_sync, atomico, atualizacoes, atualizar, btw, diag, harness_api,
+from app import (agentes_sync, atomico, atualizacoes, atualizar, btw, closed_names, diag, harness_api,
                  loop_monitor, pensamento_pt, permission_mode, plugin_bridge, procinfo, quem_chama, tmux,
                  uds_messaging)
 from app import external_pair_api, external_pairs, groups_bridge, internal_api, list_bridge, migration_status, update_channel
@@ -2664,6 +2664,15 @@ async def _create_session_owned(body: CreateBody, worktree: dict):
         raise HTTPException(409, detail=erro(code, str(e)))
 
 
+def _jsonl_of_session(name: str) -> str | None:
+    try:
+        return next((s.jsonl for s in registry.list() if s.name == name and s.jsonl), None)
+    except Exception:
+        # A lista falhar não impede fechar; só a conversa fica sem o nome no arquivo.
+        _log.warning("transcript of %s not found before close", name, exc_info=True)
+        return None
+
+
 @app.delete("/api/sessions/{name}", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
 async def kill_session(name: str, by: str | None = None):
     # 500 quando a sessao SOBREVIVE ao kill — mesmo padrao do /rename logo abaixo, que ja confere e
@@ -2674,12 +2683,21 @@ async def kill_session(name: str, by: str | None = None):
     await asyncio.to_thread(_recusa_orq, name)
     # No modo Rust a saída do grupo (dentro do kill) já avisa as outras máquinas e o par externo.
     link = None if groups_bridge.rust_owns_groups() else await asyncio.to_thread(lambda: PairLink(name).get())
+    jsonl = await asyncio.to_thread(_jsonl_of_session, name)
     try:
         errs = await asyncio.to_thread(registry.kill, name) or []
     except KillFailed as e:
         raise HTTPException(500, str(e))
     finally:
         await asyncio.to_thread(_invalidate_lists)
+    if jsonl:
+        try:
+            await asyncio.to_thread(closed_names.record, jsonl, name)
+        except OSError:
+            # Fechar já aconteceu; sem o nome, a conversa só não volta pelo nome antigo.
+            _log.warning("closed name not recorded for %s", name, exc_info=True)
+    else:
+        _log.info("closed name not recorded for %s: no transcript", name)
     plugin_bridge.esquecer(name)
     forget_frame(name)
     if await asyncio.to_thread(share_store.revoke_session, name):
@@ -8922,6 +8940,8 @@ class ResumeArchivedBody(_StrictBody):
     # `kimi --session`); Codex nao tem via de resume aqui e e recusado logo abaixo.
     provider: str = "claude"
     codex_account: str | None = None
+    # Nome com que a sessão volta (o que ela tinha ao fechar); ocupado ganha -2, -3. Omitido: o da pasta.
+    name: str | None = None
 
 
 def _sessao_com_transcript(jsonl: Path) -> str | None:
@@ -9048,7 +9068,7 @@ def resume_archived(project: str, session_id: str, body: ResumeArchivedBody = Re
             model_args.validar(body.provider, body.model, None)
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from None
-    base = sanitize_session_name(Path(cwd).name) or "sessao"
+    base = sanitize_session_name(body.name or Path(cwd).name) or "sessao"
     name, i = base, 2
     # As MESMAS fontes que a criacao normal consulta (registry.create). Olhando so o tmux, um nome
     # ja usado por uma sessao Codex ou sem terminal passava por aqui e o conflito estourava la

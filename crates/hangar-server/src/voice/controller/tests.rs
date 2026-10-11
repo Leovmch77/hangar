@@ -13,12 +13,53 @@ fn js(v: Value) -> axum::response::Response { ([(CONTENT_TYPE, "application/json
 #[derive(Default)]
 struct Api { sessions: Value, history: HashMap<String, Value>, inputs: Vec<(String, String)>, started: usize, deleted: Vec<String>, input_delay: Duration,
     /// Respostas do Jev falso; sem elas ele responde erro e nada age. `jev_asked`: o que ele recebeu.
-    jev: Option<Value>, jev_asked: Vec<Value> }
+    jev: Option<Value>, jev_asked: Vec<Value>,
+    /// Arquivo de conversas (`/api/archive/recent`), busca e retomadas `(project/id, corpo)`.
+    recent: Value, search: Value, resumed: Vec<(String, Value)>,
+    /// `campos.shortcuts.valor` do `/api/config` e os atalhos de comando rodados `(sessão, corpo)`.
+    shortcuts: String, shells: Vec<(String, Value)>,
+    /// Resposta de `project-shortcuts`; `Null` = projeto `/p/hangar` sem atalhos, `"falha"` = 500.
+    project: Value,
+    interrupted: Vec<String>, created: Vec<Value> }
 type Shared = Arc<Mutex<Api>>;
 
 async fn fake_api(api: Shared) -> SocketAddr {
     let app = Router::new()
-        .route("/api/sessions", get(|State(api): State<Shared>| async move { js(api.lock().unwrap().sessions.clone()) }))
+        .route("/api/sessions", get(|State(api): State<Shared>| async move { js(api.lock().unwrap().sessions.clone()) })
+            .post(|State(api): State<Shared>, body: String| async move {
+                let body: Value = serde_json::from_str(&body).unwrap();
+                let name = body["name"].clone();
+                api.lock().unwrap().created.push(body);
+                js(json!({"name": name}))
+            }))
+        .route("/api/archive/recent", get(|State(api): State<Shared>| async move { js(api.lock().unwrap().recent.clone()) }))
+        .route("/api/archive/{p}/{id}/resume", post(|State(api): State<Shared>, Path((p, id)): Path<(String, String)>, body: String| async move {
+            let body: Value = serde_json::from_str(&body).unwrap();
+            let name = body["name"].as_str().unwrap_or("hangar-2").to_owned();
+            api.lock().unwrap().resumed.push((format!("{p}/{id}"), body));
+            js(json!({"name": name, "cwd": "/p/hangar"}))
+        }))
+        .route("/api/search", get(|State(api): State<Shared>| async move { js(api.lock().unwrap().search.clone()) }))
+        .route("/api/fs/roots", get(|| async { js(json!([{"name": "Projetos", "path": "/p"}])) }))
+        .route("/api/fs/scan", get(|| async { js(json!({"entries": [{"name": "hangar", "path": "/p/hangar"}, {"name": "loja", "path": "/p/loja"}], "error": null})) }))
+        .route("/api/config", get(|State(api): State<Shared>| async move {
+            js(json!({"campos": {"shortcuts": {"valor": api.lock().unwrap().shortcuts.clone()}}}))
+        }))
+        .route("/api/sessions/{n}/project-shortcuts", get(|State(api): State<Shared>| async move {
+            match api.lock().unwrap().project.clone() {
+                Value::Null => js(json!({"key": "/p/hangar", "items": []})),
+                Value::String(_) => (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "").into_response(),
+                project => js(project),
+            }
+        }))
+        .route("/api/sessions/{n}/shortcut-shell", post(|State(api): State<Shared>, Path(n): Path<String>, body: String| async move {
+            api.lock().unwrap().shells.push((n, serde_json::from_str(&body).unwrap()));
+            js(json!({"ok": true, "terminal": {"id": "t1", "label": "VM", "alive": true}}))
+        }))
+        .route("/api/sessions/{n}/interrupt", post(|State(api): State<Shared>, Path(n): Path<String>| async move {
+            api.lock().unwrap().interrupted.push(n);
+            js(json!({"ok": true}))
+        }))
         .route("/api/sessions/{n}", delete(|State(api): State<Shared>, Path(n): Path<String>| async move {
             api.lock().unwrap().deleted.push(n);
             js(json!({}))
@@ -90,7 +131,8 @@ async fn launch_seeded(caps: &[&str], peers: Option<Value>, audio_grace: Duratio
     let (spawn, seen, push) = fake_app_server();
     let (tx, events) = async_channel::unbounded();
     let options = CallOptions { voice: None, context: "ctx".into(), cwd: None, target: "hangar".into(), organizer: ModeModels::default(),
-        tools: tools_for(&caps), handoff_same_thread: true, voice_dir: dir.path().join("voz"), audio_grace };
+        tools: tools_for(&caps), handoff_same_thread: true, voice_dir: dir.path().join("voz"), audio_grace,
+        hangar_mcp: Some(json!({"enabled": true, "url": format!("http://{addr}/mcp/"), "http_headers": {"X-Hangar-Voice": "n.sig"}})) };
     let voice = Voice::start(options, spawn, tx);
     let (link, device) = DeviceLink::channel(caps, Some(Screen { server: String::new(), name: "hangar".into() }));
     let gate = GateSource { home: dir.path().to_path_buf(), claude_dir: dir.path().to_path_buf(), every: Duration::from_secs(5) };
@@ -817,4 +859,219 @@ async fn session_closed_in_the_app_stops_being_the_conversation_target() {
     push_tool(&rig.push, "s1", "send_to_session", json!({"request": "rodar os testes do backend"}), "turn-1");
     assert_eq!(rig.reply("s1").await["success"], false);
     assert!(rig.api.lock().unwrap().inputs.is_empty());
+}
+
+fn closed_rows() -> Value {
+    json!([{"project": "-p-hangar", "session_id": "u2", "cwd": "/p/hangar", "name": "auditoria-migracao", "mtime": 1_760_000_200.0,
+            "preview": "começo", "ultima": "migração auditada", "live": false, "provider": "claude"},
+        {"project": "-p-loja", "session_id": "u1", "cwd": "/p/loja", "mtime": 1_760_000_100.0, "preview": "loja nova", "ultima": "", "live": false},
+        {"project": "-p-web", "session_id": "u0", "cwd": "/p/web", "name": "web", "mtime": 1_760_000_000.0, "preview": "", "ultima": "", "live": true}])
+}
+
+/// O caso real: "fechei sem querer a auditoria-migracao, reabre" virou clique em "Buscar conversas". Agora a conversa volta
+/// pela rota do arquivo, com o nome antigo, e a tela troca para ela.
+#[tokio::test]
+async fn reopen_by_old_name_resumes_and_switches_the_screen() {
+    let mut rig = rig(&["switch_session"], None).await;
+    rig.api.lock().unwrap().recent = closed_rows();
+    push_tool(&rig.push, "o0", "reopen_conversation", json!({"name": "auditoria migracao"}), "turn-sem-fala");
+    let unspoken = rig.reply("o0").await;
+    assert!(unspoken["success"] == false && text(&unspoken).contains("Só a pedido falado"), "{unspoken}");
+    push_speech(&rig.push, "turn-1", "fechei sem querer a auditoria-migracao, reabre");
+    push_tool(&rig.push, "o1", "reopen_conversation", json!({"name": "auditoria migracao"}), "turn-1");
+    let (call, name, args) = rig.tool().await;
+    assert_eq!((name.as_str(), args["name"].as_str()), ("switch_session", Some("auditoria-migracao")));
+    rig.answer(call, true, "ok");
+    let reply = rig.reply("o1").await;
+    assert_eq!(reply["success"], true, "{reply}");
+    assert!(text(&reply).starts_with("Conversa reaberta como sessão auditoria-migracao") && text(&reply).contains("preferências da memória"), "{reply}");
+    let resumed = rig.api.lock().unwrap().resumed.clone();
+    assert_eq!(resumed, vec![("-p-hangar/u2".to_owned(), json!({"provider": "claude", "name": "auditoria-migracao"}))]);
+}
+
+#[tokio::test]
+async fn reopen_by_id_and_ambiguous_folder_never_guesses() {
+    let mut rig = rig(&[], None).await;
+    let mut rows = closed_rows();
+    rows.as_array_mut().unwrap().push(json!({"project": "-p-loja", "session_id": "u9", "cwd": "/p/loja", "mtime": 1.0, "preview": "", "ultima": "outra", "live": false}));
+    rig.api.lock().unwrap().recent = rows;
+    push_speech(&rig.push, "turn-1", "reabre a da loja");
+    push_tool(&rig.push, "o1", "reopen_conversation", json!({"name": "loja"}), "turn-1");
+    let ambiguous = rig.reply("o1").await;
+    assert!(ambiguous["success"] == false && text(&ambiguous).contains("id -p-loja/u1") && text(&ambiguous).contains("id -p-loja/u9"), "{ambiguous}");
+    push_speech(&rig.push, "turn-2", "a primeira");
+    push_tool(&rig.push, "o2", "reopen_conversation", json!({"id": "-p-loja/u1"}), "turn-2");
+    let reopened = rig.reply("o2").await;
+    assert_eq!(reopened["success"], true, "{reopened}");
+    assert!(text(&reopened).contains("não a abre na tela"), "aparelho sem troca de tela: {reopened}");
+    assert_eq!(rig.api.lock().unwrap().resumed, vec![("-p-loja/u1".to_owned(), json!({"provider": "claude"}))], "sem nome antigo, o da pasta");
+}
+
+#[tokio::test]
+async fn recent_conversations_lists_closed_newest_first_and_searches() {
+    let mut rig = rig(&[], None).await;
+    {
+        let mut api = rig.api.lock().unwrap();
+        api.recent = closed_rows();
+        api.search = json!([{"project": "-p-x", "session_id": "u7", "cwd": "/p/x", "line": "falamos do deploy na VPS", "live": false},
+            {"project": "-p-web", "session_id": "u0", "cwd": "/p/web", "session_name": "web", "line": "deploy", "live": true},
+            {"project": "-p-y", "cwd": "/p/y", "line": "deploy sem id", "live": false}]);
+    }
+    push_tool(&rig.push, "r1", "recent_conversations", json!({}), "turn-sem-fala");
+    let all = rig.reply("r1").await;
+    assert_eq!(all["success"], true, "ler não precisa de fala: {all}");
+    let lines: Vec<&str> = text(&all).lines().collect();
+    assert_eq!(lines.len(), 2, "a viva fica de fora: {lines:?}");
+    assert!(lines[0].starts_with("- auditoria-migracao (pasta hangar") && lines[0].contains("id -p-hangar/u2"), "{lines:?}");
+    assert!(lines[1].starts_with("- loja (pasta loja"), "sem nome, a pasta: {lines:?}");
+    push_tool(&rig.push, "r2", "recent_conversations", json!({"query": "auditoria"}), "turn-sem-fala");
+    assert_eq!(text(&rig.reply("r2").await).lines().count(), 1);
+    push_tool(&rig.push, "r3", "recent_conversations", json!({"query": "deploy"}), "turn-sem-fala");
+    let searched = rig.reply("r3").await;
+    assert!(text(&searched).contains("id -p-x/u7") && !text(&searched).contains("-p-web") && !text(&searched).contains("-p-y"),
+        "busca no texto, sem as vivas nem trecho sem id: {searched}");
+    // Resposta torta da busca é erro, não "nenhuma conversa fala disso".
+    rig.api.lock().unwrap().search = json!({"detail": "x"});
+    push_tool(&rig.push, "r4", "recent_conversations", json!({"query": "deploy"}), "turn-sem-fala");
+    let odd = rig.reply("r4").await;
+    assert!(odd["success"] == false && text(&odd).contains("formato inesperado"), "{odd}");
+}
+
+#[tokio::test]
+async fn list_folders_names_the_roots_and_their_folders() {
+    let mut rig = rig(&[], None).await;
+    push_tool(&rig.push, "f1", "list_folders", json!({}), "turn-sem-fala");
+    let reply = rig.reply("f1").await;
+    assert_eq!(reply["success"], true);
+    assert!(text(&reply).contains("- Projetos: /p") && text(&reply).contains("- hangar: /p/hangar") && text(&reply).contains("- loja: /p/loja"), "{reply}");
+}
+
+/// "Abre a VM": o atalho de comando No Hangar roda pelo backend, como o clique no app.
+#[tokio::test]
+async fn run_shortcut_opens_the_vm_like_the_app_button() {
+    let mut rig = rig(&[], None).await;
+    rig.api.lock().unwrap().shortcuts = json!([
+        {"id": "vm", "type": "shell", "label": "VM", "command": "xfreerdp /v:delphi-02", "runs_in": "hangar"},
+        {"id": "ok", "type": "send_text", "label": "Continuar", "text": "pode continuar"},
+        {"id": "term", "type": "internal", "action": "terminal"}]).to_string();
+    push_tool(&rig.push, "l1", "list_shortcuts", json!({}), "turn-sem-fala");
+    let listed = rig.reply("l1").await;
+    assert!(text(&listed).contains("- VM: roda no Hangar") && text(&listed).contains("- Continuar: manda à sessão"), "{listed}");
+    push_tool(&rig.push, "v0", "run_shortcut", json!({"name": "VM"}), "turn-sem-fala");
+    assert_eq!(rig.reply("v0").await["success"], false, "rodar atalho é ação: precisa de fala");
+    push_speech(&rig.push, "turn-1", "abre a VM");
+    push_tool(&rig.push, "v1", "run_shortcut", json!({"name": "vm"}), "turn-1");
+    let ran = rig.reply("v1").await;
+    assert_eq!(ran["success"], true, "{ran}");
+    assert_eq!(rig.api.lock().unwrap().shells, vec![("hangar".to_owned(),
+        json!({"command": "xfreerdp /v:delphi-02", "label": "VM", "ask": true, "key": "global:vm", "runs_in": "hangar", "home": true}))]);
+    push_speech(&rig.push, "turn-2", "abre o terminal");
+    push_tool(&rig.push, "v2", "run_shortcut", json!({"name": "terminal"}), "turn-2");
+    assert!(text(&rig.reply("v2").await).contains("hangar_action"), "ação de tela vai pela ferramenta de tela");
+    // Atalho de texto não manda nada daqui: volta o texto para send_to_session, que guarda o modo Planejar e as travas.
+    push_speech(&rig.push, "turn-3", "roda o continuar");
+    push_tool(&rig.push, "v3", "run_shortcut", json!({"name": "continuar"}), "turn-3");
+    let handed = rig.reply("v3").await;
+    assert!(handed["success"] == true && text(&handed).contains("send_to_session") && text(&handed).contains("pode continuar"), "{handed}");
+    assert!(rig.api.lock().unwrap().inputs.is_empty(), "nada foi à sessão");
+}
+
+/// Atalho que o app confirma antes e comando definido pelo repositório: o sim falado numa fala seguinte.
+#[tokio::test]
+async fn run_shortcut_asks_the_yes_for_confirm_and_project_commands() {
+    let mut rig = rig(&[], None).await;
+    {
+        let mut api = rig.api.lock().unwrap();
+        api.shortcuts = json!([{"id": "rb", "type": "shell", "label": "Reboot", "command": "sudo reboot", "runs_in": "hangar", "confirm": true}]).to_string();
+        api.project = json!({"key": "/p/hangar", "items": [{"id": "dp", "type": "shell", "label": "Deploy", "command": "./deploy.sh"}]});
+    }
+    push_speech(&rig.push, "turn-1", "roda o reboot");
+    push_tool(&rig.push, "c1", "run_shortcut", json!({"name": "reboot", "confirmed": true}), "turn-1");
+    let armed = rig.reply("c1").await;
+    assert!(text(&armed).starts_with("Nada rodou.") && text(&armed).contains("sudo reboot"), "o sim no mesmo turno não vale: {armed}");
+    push_speech(&rig.push, "turn-2", "sim");
+    push_tool(&rig.push, "c2", "run_shortcut", json!({"name": "reboot", "confirmed": true}), "turn-2");
+    assert_eq!(rig.reply("c2").await["success"], true);
+    assert_eq!(rig.api.lock().unwrap().shells.len(), 1);
+    push_speech(&rig.push, "turn-3", "roda o deplo");
+    push_tool(&rig.push, "c3", "run_shortcut", json!({"name": "deplo"}), "turn-3");
+    assert!(text(&rig.reply("c3").await).starts_with("Não achei atalho"), "o do projeto só pelo nome inteiro");
+    push_tool(&rig.push, "c4", "run_shortcut", json!({"name": "deploy"}), "turn-3");
+    let armed = rig.reply("c4").await;
+    assert!(text(&armed).contains("definido pelo repositório"), "{armed}");
+    push_speech(&rig.push, "turn-4", "pode");
+    push_tool(&rig.push, "c5", "run_shortcut", json!({"name": "deploy", "confirmed": true}), "turn-4");
+    assert_eq!(rig.reply("c5").await["success"], true);
+    let shells = rig.api.lock().unwrap().shells.clone();
+    assert_eq!(shells[1].1["key"], "project:/p/hangar:dp");
+}
+
+#[tokio::test]
+async fn unreadable_project_shortcuts_are_said_not_hidden() {
+    let mut rig = rig(&[], None).await;
+    rig.api.lock().unwrap().project = json!("falha");
+    push_tool(&rig.push, "p1", "list_shortcuts", json!({}), "turn-sem-fala");
+    assert!(text(&rig.reply("p1").await).contains("atalhos do projeto da sessão não puderam ser lidos"));
+    push_speech(&rig.push, "turn-1", "roda o deploy");
+    push_tool(&rig.push, "p2", "run_shortcut", json!({"name": "deploy"}), "turn-1");
+    let reply = rig.reply("p2").await;
+    assert!(text(&reply).starts_with("Não achei atalho") && text(&reply).contains("não puderam ser lidos"), "{reply}");
+}
+
+#[tokio::test]
+async fn list_machines_says_who_answers() {
+    let mut rig = rig(&[], Some(json!({"vps": {"base_url": "http://127.0.0.1:9", "token": "x"}}))).await;
+    push_tool(&rig.push, "m1", "list_machines", json!({}), "turn-sem-fala");
+    let reply = rig.reply("m1").await;
+    assert!(text(&reply).contains("- casa (esta, onde a voz roda): responde, 2 sessão(ões)") && text(&reply).contains("- vps: sem resposta"), "{reply}");
+}
+
+#[tokio::test]
+async fn interrupt_session_asks_then_interrupts() {
+    let mut rig = rig(&[], None).await;
+    push_speech(&rig.push, "turn-1", "para a web");
+    push_tool(&rig.push, "i1", "interrupt_session", json!({"name": "web"}), "turn-1");
+    assert!(text(&rig.reply("i1").await).starts_with("Nada foi interrompido."));
+    assert!(rig.api.lock().unwrap().interrupted.is_empty());
+    push_speech(&rig.push, "turn-2", "sim, pode parar");
+    push_tool(&rig.push, "i2", "interrupt_session", json!({"name": "web", "confirmed": true}), "turn-2");
+    assert_eq!(text(&rig.reply("i2").await), "Sessão web interrompida.");
+    assert_eq!(rig.api.lock().unwrap().interrupted, vec!["web".to_owned()]);
+}
+
+#[tokio::test]
+async fn open_session_passes_what_the_user_said_and_keeps_bypass_as_the_default() {
+    let mut rig = rig(&[], None).await;
+    push_speech(&rig.push, "turn-1", "abre uma sessão kimi na pasta x e outra claude em modo plano");
+    push_tool(&rig.push, "n1", "open_session", json!({"folder": "/p/x", "name": "x-kimi", "provider": "kimi", "model": "k2"}), "turn-1");
+    assert_eq!(rig.reply("n1").await["success"], true);
+    push_tool(&rig.push, "n2", "open_session", json!({"folder": "/p/x", "name": "x-plano", "permission": "plan", "headless": true,
+        "account": "/h/.claude-b"}), "turn-1");
+    assert_eq!(rig.reply("n2").await["success"], true);
+    push_tool(&rig.push, "n3", "open_session", json!({"folder": "/p/x", "name": "x-claude"}), "turn-1");
+    assert_eq!(rig.reply("n3").await["success"], true);
+    let created = rig.api.lock().unwrap().created.clone();
+    assert_eq!(created[0]["provider"], "kimi");
+    assert_eq!(created[0]["model"], "k2");
+    assert!(created[0].get("permission_mode").is_none(), "{}", created[0]);
+    assert_eq!((created[1]["permission_mode"].as_str(), created[1]["headless"].as_bool(), created[1]["config_dir"].as_str()),
+        (Some("plan"), Some(true), Some("/h/.claude-b")));
+    assert_eq!(created[2]["permission_mode"], "bypassPermissions");
+}
+
+/// O MCP `hangar` entra na thread com a identidade da chamada; o pedido do Codex para usar a ferramenta só passa em turno
+/// com fala do usuário.
+#[tokio::test]
+async fn hangar_mcp_is_on_and_its_approval_follows_speech() {
+    let mut rig = rig(&[], None).await;
+    let start = rig.wait("thread/start", |m| m["method"] == "thread/start").await;
+    assert_eq!(start["params"]["config"]["mcp_servers"]["hangar"]["http_headers"]["X-Hangar-Voice"], "n.sig");
+    assert_eq!(start["params"]["config"]["mcp_servers"]["hangar"]["enabled_tools"], json!(["who_am_i", "sessions"]));
+    let ask = |id: &str, turn: &str| json!({"id": id, "method": "mcpServer/elicitation/request", "params": {"serverName": "hangar",
+        "threadId": "t1", "turnId": turn, "mode": "form", "message": "Allow?", "requestedSchema": {"type": "object", "properties": {}}}});
+    rig.push.send(ask("e0", "turn-sem-fala")).unwrap();
+    assert_eq!(rig.reply("e0").await["action"], "decline");
+    push_speech(&rig.push, "turn-1", "manda um recado pra web");
+    rig.push.send(ask("e1", "turn-1")).unwrap();
+    assert_eq!(rig.reply("e1").await["action"], "accept");
 }

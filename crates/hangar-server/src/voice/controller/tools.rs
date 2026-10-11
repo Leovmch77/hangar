@@ -20,7 +20,7 @@ pub(super) struct JevAsked {
 
 type Rows = [(String, SessionRow)];
 
-fn folder_name(path: &str) -> &str { path.trim_end_matches(['/', '\\']).rsplit(['/', '\\']).next().unwrap_or_default() }
+pub(super) fn folder_name(path: &str) -> &str { path.trim_end_matches(['/', '\\']).rsplit(['/', '\\']).next().unwrap_or_default() }
 
 impl Controller {
     /// A lista fresca de todas as máquinas, lida fora do laço; a ferramenta continua em `on_rows`.
@@ -49,6 +49,8 @@ impl Controller {
                 Err(why) => self.voice.session_answer(format!("O plano não foi enviado nem perdido; continua guardado. {why} \
                     Para reenviar, diga para qual sessão mandar e chame finish_plan de novo com session.")),
             },
+            Want::Interrupt { call, name, confirmed, turn } => self.interrupt(call, &rows, &unreachable, &name, confirmed, &turn),
+            Want::Machines(call) => self.list_machines(call, &rows, &unreachable),
         }
         self.rows = rows;
         self.rows_changed(&unreachable);
@@ -93,7 +95,7 @@ impl Controller {
     }
 
     /// Ambíguo ou ausente volta como texto para o organizador; nunca um palpite.
-    fn resolve(&self, tool: &str, rows: &Rows, unreachable: &[String], spoken: &str) -> Result<usize, String> {
+    pub(super) fn resolve(&self, tool: &str, rows: &Rows, unreachable: &[String], spoken: &str) -> Result<usize, String> {
         let narrow = matches!(tool, "follow_session" | "unfollow_session").then_some(false);
         match self.resolve_match(rows, spoken, narrow) {
             SessionMatch::One(i) => { log(format!("{tool} one")); Ok(i) }
@@ -410,19 +412,23 @@ impl Controller {
                 (created, None) => (created, None),
             };
             match created {
-                Ok(name) => { let _ = ctx.done.send(Done::Opened { call, machine, name, sent }); }
+                Ok(name) => { let _ = ctx.done.send(Done::Opened { call, machine, name, sent, reopened: false }); }
                 Err(text) => { log("open_session failed"); ctx.fail(call, "open_session", text); }
             }
         });
     }
 
-    pub(super) fn opened(&mut self, call: CallId, machine: String, name: String, sent: Option<Result<Delivery, String>>) {
-        log(format!("open_session created request={}", sent.is_some()));
+    pub(super) fn opened(&mut self, call: CallId, machine: String, name: String, sent: Option<Result<Delivery, String>>, reopened: bool) {
+        log(format!("open_session created request={} reopened={reopened}", sent.is_some()));
         let key = (machine, name.clone());
         if sent.is_some() { self.watched.insert(key.clone()); }
         if self.can("switch_session") {
             let args = self.switch_args(&key);
-            self.send_tool("switch_session", args, Forwarded::Opened { call, name, sent });
+            self.send_tool("switch_session", args, Forwarded::Opened { call, name, sent, reopened });
+            return;
+        }
+        if reopened {
+            self.voice.reply(call, tool_reply(format!("Conversa reaberta como sessão {name}; este aparelho não a abre na tela pela voz."), true));
             return;
         }
         let note = match &sent {
@@ -576,7 +582,7 @@ fn grouped(ctx: &Ctx, call: CallId, code: &'static str, fallback: &str, result: 
 }
 
 /// Máquina falada → chave; sem máquina, este servidor.
-fn pick_machine(machines: &Machines, spoken: Option<&str>) -> Result<String, String> {
+pub(super) fn pick_machine(machines: &Machines, spoken: Option<&str>) -> Result<String, String> {
     let Some(spoken) = spoken else { return Ok(HERE.to_owned()) };
     let keys: Vec<String> = std::iter::once(HERE.to_owned()).chain(machines.peers.enabled_ids()).collect();
     let labels: Vec<String> = keys.iter().map(|k| machines.label(k)).collect();
@@ -592,6 +598,12 @@ fn pick_machine(machines: &Machines, spoken: Option<&str>) -> Result<String, Str
 /// Nome falado → pasta, entre as raízes da máquina e as subpastas delas.
 async fn folder(machines: &Machines, machine: &str, spoken: &str) -> Result<String, String> {
     if looks_like_path(spoken) { return Ok(spoken.to_owned()); }
+    let (folders, unread) = folders(machines, machine).await?;
+    pick_folder(spoken, &folders, unread)
+}
+
+/// `(nome, caminho)` das raízes e das subpastas delas (a lista da tela de criação) e quantas raízes não deu para ler.
+pub(super) async fn folders(machines: &Machines, machine: &str) -> Result<(Vec<(String, String)>, usize), String> {
     let roots = machines.call(machine, reqwest::Method::GET, "/api/fs/roots", None).await?;
     let pair = |v: &Value| Some((v["name"].as_str()?.to_owned(), v["path"].as_str()?.to_owned()));
     let roots: Vec<(String, String)> = roots.as_array().ok_or("Resposta inválida das pastas.")?.iter().filter_map(pair).collect();
@@ -604,13 +616,12 @@ async fn folder(machines: &Machines, machine: &str, spoken: &str) -> Result<Stri
             _ => unread += 1,
         }
     }
-    pick_folder(spoken, &folders, unread)
+    Ok((folders, unread))
 }
 
-/// Cria a sessão; devolve o nome com que ela nasceu.
-// ponytail: modelo e esforço ficam com o padrão do servidor, que é o que o catálogo dá sem escolha lembrada (o servidor
-// não guarda o último modelo do aparelho).
-async fn create(machines: &Machines, machine: &str, request: &OpenRequest) -> Result<String, String> {
+/// Cria a sessão; devolve o nome com que ela nasceu. O que o usuário não disse fica com o padrão do servidor, como a tela de
+/// criação sem toque; o Claude sem modo dito nasce em `bypassPermissions`, o padrão do app.
+pub(super) async fn create(machines: &Machines, machine: &str, request: &OpenRequest) -> Result<String, String> {
     let cwd = folder(machines, machine, &request.folder).await?;
     let name = match &request.name {
         Some(name) => name.clone(),
@@ -620,8 +631,19 @@ async fn create(machines: &Machines, machine: &str, request: &OpenRequest) -> Re
             unique_name(folder_name(&cwd), &taken)
         }
     };
-    let mut body = json!({"name": name, "cwd": cwd, "provider": request.provider, "model": null, "effort": null});
-    if request.provider == "claude" { body["permission_mode"] = json!("bypassPermissions"); }
+    let mut body = json!({"name": name, "cwd": cwd, "provider": request.provider, "model": request.model, "effort": request.effort});
+    if let Some(engine) = &request.engine { body["engine"] = json!(engine); }
+    if let Some(headless) = request.headless { body["headless"] = json!(headless); }
+    match (&request.account, request.provider) {
+        (Some(account), "codex") => body["codex_account"] = json!(account),
+        (Some(account), _) => body["config_dir"] = json!(account),
+        (None, _) => {}
+    }
+    match (&request.permission, request.provider) {
+        (Some(mode), _) => body["permission_mode"] = json!(mode),
+        (None, "claude") => body["permission_mode"] = json!("bypassPermissions"),
+        (None, _) => {}
+    }
     let created = machines.call(machine, reqwest::Method::POST, "/api/sessions", Some(body)).await?;
     Ok(created["name"].as_str().filter(|n| !n.is_empty()).map_or(name, str::to_owned))
 }

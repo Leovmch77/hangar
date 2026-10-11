@@ -459,7 +459,13 @@ pub(super) fn action_text(action: &OrganizerAction) -> String {
             "read_screen" => tr("voice_tool_read_screen"),
             "click_screen" => tr("voice_tool_click_screen"),
             "observe_system" => tr("voice_tool_observe_system"),
-            "edit_files" => tr("voice_tool_edit_files"),
+            "interrupt_session" => tr("voice_tool_interrupt_session"),
+            "recent_conversations" => tr("voice_tool_recent_conversations"),
+            "reopen_conversation" => tr("voice_tool_reopen_conversation"),
+            "list_folders" => tr("voice_tool_list_folders"),
+            "list_shortcuts" => tr("voice_tool_list_shortcuts"),
+            "run_shortcut" => tr("voice_tool_run_shortcut"),
+            "list_machines" => tr("voice_tool_list_machines"),
             "follow_session" | "unfollow_session" => tr("voice_tool_follow_session"),
             other => tr("voice_tool_other").replace("{tool}", other),
         },
@@ -1640,6 +1646,10 @@ mod tests {
     fn action_text_names_tools_searches_and_commands() {
         assert_eq!(action_text(&OrganizerAction::Tool("switch_session".into())), tr("voice_tool_switch_session"));
         assert_ne!(tr("voice_tool_switch_session"), "voice_tool_switch_session", "chave traduzida");
+        for tool in ["interrupt_session", "recent_conversations", "reopen_conversation", "list_folders", "list_shortcuts", "run_shortcut", "list_machines"] {
+            let text = action_text(&OrganizerAction::Tool(tool.into()));
+            assert!(!text.contains(tool) && !text.contains("voice_tool_"), "{tool}: {text}");
+        }
         assert!(action_text(&OrganizerAction::Tool("novo_tool".into())).contains("novo_tool"));
         assert!(action_text(&OrganizerAction::Search("gpui animation".into())).contains("gpui animation"));
         assert_eq!(action_text(&OrganizerAction::Search(" ".into())), tr("voice_action_search"));

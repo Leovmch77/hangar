@@ -65,11 +65,29 @@ def _cabecalhos(ctx: Context) -> dict[str, str]:
     return dict(req.headers) if req is not None else {}
 
 
-async def _eu(ctx: Context) -> str:
+VOICE_REFUSED = ("recusado: a assistente de voz não é uma sessão e não tem grupo, navegador nem conversa "
+                 "própria; esta tool é de sessão")
+VOICE_CLOSE_REFUSED = ("recusado: a voz fecha sessão pela própria ferramenta close_session, que pede o sim "
+                       "falado do usuário")
+# A voz só age a partir da fala do usuário, e essa trava mora nas ferramentas próprias dela.
+VOICE_ACT_REFUSED = ("recusado: pela voz, mandar e criar sessão vão pelas ferramentas próprias "
+                     "(send_to_session, open_session), que conferem a fala do usuário")
+
+
+async def _caller(ctx: Context) -> tuple[str, bool]:
+    """`(nome, é a voz)`; nada resolvido é erro, nunca um chamador padrão."""
     try:
-        nome, _ = await asyncio.to_thread(quem_chama.resolver, _cabecalhos(ctx))
+        nome, origem = await asyncio.to_thread(quem_chama.resolver, _cabecalhos(ctx))
     except quem_chama.SessaoDesconhecida as e:
         raise ToolError(f"sessao_desconhecida: {e}") from e
+    return nome, origem == quem_chama.VOICE
+
+
+async def _eu(ctx: Context) -> str:
+    """A sessão que chama. A voz não é sessão: as tools que dependem da própria sessão a recusam."""
+    nome, voice = await _caller(ctx)
+    if voice:
+        raise ToolError(VOICE_REFUSED)
     return nome
 
 
@@ -85,6 +103,8 @@ async def who_am_i(ctx: Context) -> dict[str, str]:
         nome, origem = await asyncio.to_thread(quem_chama.resolver, _cabecalhos(ctx))
     except quem_chama.SessaoDesconhecida as e:
         raise ToolError(f"sessao_desconhecida: {e}") from e
+    if origem == quem_chama.VOICE:
+        return {"name": nome, "origem": origem, "kind": "voice", "label": "assistente de voz do Hangar"}
     return {"name": nome, "origem": origem}
 
 
@@ -110,8 +130,11 @@ async def sessions(ctx: Context) -> list[dict[str, Any]]:
                       "ou o pedido, sem saudação nem apresentação (o cabeçalho já diz quem manda).")
 async def send(ctx: Context, alvo: str, texto: str, tmux: bool = False) -> dict[str, Any]:
     from app import api
-    eu = await _eu(ctx)
-    if alvo == eu or (settings.server_id and alvo == f"{settings.server_id}::{eu}"):
+    eu, voice = await _caller(ctx)
+    if voice:
+        raise ToolError(VOICE_ACT_REFUSED)
+    # A voz não é sessão: recado dela para uma sessão chamada "voz" não volta para ela mesma.
+    if not voice and (alvo == eu or (settings.server_id and alvo == f"{settings.server_id}::{eu}")):
         raise ToolError(f"recusado: '{alvo}' é esta sessão — o recado voltaria pra você. "
                         "Quem é quem: tool `sessions` (campo `voce`).")
     # Modelo que escreve "[de: eu] …" por conta própria não ganha o prefixo em dobro — com ou sem o
@@ -125,6 +148,8 @@ async def send(ctx: Context, alvo: str, texto: str, tmux: bool = False) -> dict[
         rec = external_pairs.by_address(alvo)
         if rec is not None:
             from app import external_pair_api
+            if voice:
+                raise ToolError(f"'{alvo}' é par externo de '{rec.local_session}'; a voz não fala com par externo")
             if rec.local_session != eu:
                 raise ToolError(f"'{alvo}' é par externo de '{rec.local_session}', não desta sessão")
             try:
@@ -216,7 +241,9 @@ async def new_session(ctx: Context, nome: str, cwd: str, provider: str | None = 
                       branch: str | None = None, new_branch: bool = False, base: str | None = None,
                       codex_account: str | None = None, subagent_model: str | None = None) -> dict[str, Any]:
     from app import api
-    eu = await _eu(ctx)
+    eu, voice = await _caller(ctx)
+    if voice:
+        raise ToolError(VOICE_ACT_REFUSED)
     if provider is None:
         provider = await api._default_session_provider(conta, engine)
     if headless and provider not in ("claude", "codex"):
@@ -228,7 +255,8 @@ async def new_session(ctx: Context, nome: str, cwd: str, provider: str | None = 
             name=nome, cwd=cwd, provider=provider, engine=engine, model=model, effort=effort,
             permission_mode=permissao, headless=headless, read_only=read_only,
             config_dir=conta, jev=jev, service_tier=service_tier, branch=branch or None, new_branch=new_branch,
-            base=base or None, codex_account=codex_account, subagent_model=subagent_model, creator=eu))
+            # A voz não tem conta nem modo para herdar: o omitido fica com o padrão do servidor.
+            base=base or None, codex_account=codex_account, subagent_model=subagent_model, creator=None if voice else eu))
     except HTTPException as e:
         raise ToolError(_detalhe(e)) from e
     return {"name": info.name, "cwd": info.cwd, "provider": info.provider, "headless": info.headless,
@@ -242,9 +270,11 @@ async def new_session(ctx: Context, nome: str, cwd: str, provider: str | None = 
                       "sessão que você abriu e que já terminou o trabalho.")
 async def close_session(ctx: Context, alvo: str) -> dict[str, Any]:
     from app import api
+    eu, voice = await _caller(ctx)
+    if voice:
+        raise ToolError(VOICE_CLOSE_REFUSED)
     if peers.is_remote(alvo):
         raise ToolError("close_session só fecha sessão desta máquina")
-    eu = await _eu(ctx)
     if alvo == eu:
         raise ToolError(f"recusado: '{alvo}' é esta sessão — peça pra outra fechar")
     # O DELETE responde ok pra nome que não existe: nome errado não pode virar "fechada".

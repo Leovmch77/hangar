@@ -1,4 +1,5 @@
 import json
+import os
 import time
 from pathlib import Path
 import pytest
@@ -2054,6 +2055,16 @@ def test_resume_archived_route_suffixes_on_name_collision(api_client):
                                   resume_session_id=_SID, engine=None)
 
 
+def test_resume_archived_route_volta_com_o_nome_pedido(api_client):
+    with patch("app.api.archive_cwd", return_value="/home/u/my-proj"), \
+         patch.object(tmux, "has_session", return_value=False), \
+         patch("app.api.registry.create",
+               return_value=SessionInfo(name="auditoria-migracao", cwd="/home/u/my-proj")) as create:
+        r = api_client.post(f"/api/archive/-home-u-my-proj/{_SID}/resume", json={"name": "auditoria-migracao"}, headers=_h())
+    assert r.status_code == 200
+    assert create.call_args.args[0] == "auditoria-migracao"
+
+
 def test_resume_archived_route_422_when_cwd_missing(api_client):
     with patch("app.api.archive_cwd", return_value=None):
         r = api_client.post(f"/api/archive/-home-u-my-proj/{_SID}/resume", headers=_h())
@@ -3801,6 +3812,18 @@ def test_kill_nao_avisa_companheiros_que_ficaram(api_client):
     assert r.status_code == 200 and r.json() == {"ok": True, "warning": None}
     kill.assert_called_once_with("a")
     assert entregues == {}
+
+
+def test_kill_guarda_o_nome_para_o_arquivo(api_client, monkeypatch, tmp_path):
+    from app import closed_names
+    monkeypatch.setattr(closed_names, "_path_override", tmp_path / "closed.json")
+    jsonl = tmp_path / f"{_SID}.jsonl"
+    with patch("app.api.PairLink.get", return_value=None), \
+         patch("app.api.registry.list", return_value=[SessionInfo(name="auditoria-migracao", cwd="/p", jsonl=str(jsonl))]), \
+         patch("app.api.registry.kill"):
+        r = api_client.delete("/api/sessions/auditoria-migracao", headers=_h())
+    assert r.status_code == 200
+    assert closed_names.names() == {os.path.realpath(jsonl): "auditoria-migracao"}
 
 
 def test_kill_sem_grupo_nao_avisa(api_client):

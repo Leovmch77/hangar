@@ -512,21 +512,46 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
 - **Voz: modo Planejar:** nada vai à sessão até o fim; `finish_plan`, `ask_session` e `set_mode` só
   saem de fala do usuário, `finish_plan` em dois passos, e o envio só sai após silêncio do
   microfone. A leitura fora do projeto fica liberada (mesmo acesso da sessão). Medição em "Voz: modo Planejar".
-- **Voz: o organizador só grava na própria pasta, salvo edição pedida:**
-  - **Normal:** `workspace-write`, com cwd em `~/.hangar/voz/arquivos` (fixa, nunca apagada) e sem raízes
-    extras. O código da sessão é lido pelo caminho completo que a nota de contexto leva.
-  - **Edição:** o `edit_files` só passa com pedido falado de edição ("edita…", "altera…", "corrige você…")
-    ou com o sim a uma confirmação noutro turno (`Consent::edit`). Vale para qualquer arquivo desta máquina,
-    do projeto ou de fora dele (ex.: `~/.local/bin/delphi-vm`).
-  - **Como abre:** com o pedido, `thread/settings/update` põe `dangerFullAccess` (o acesso de uma sessão
-    normal; `workspaceWrite` com `writableRoots` exigiria adivinhar os caminhos pela fala) e cwd no projeto
-    da sessão na tela, ou na pasta pessoal. Isso vale do turno seguinte em diante, então o app abre um turno
-    só para a edição.
-  - **Como fecha:** no fim desse turno, volta a `workspace-write` na pasta própria; se a volta falhar, a
-    tela avisa.
-  - **Limite:** sem shell no Windows a edição é recusada.
-  - Modelo e esforço vêm dos ajustes da voz em `~/.hangar/voz/config.json` (padrão: modelo do
-    config do Codex, esforço `low`).
+- **Voz: o organizador tem o acesso de uma sessão.** `danger-full-access` com cwd em
+  `~/.hangar/voz/arquivos` (fixa, nunca apagada), que só guarda rascunhos; ele lê e edita qualquer
+  arquivo pelo caminho completo. Destrutivo pede o sim falado: o servidor só vê o que o próprio Codex
+  marca como perigoso (`approval_decision`), o resto depende da regra do prompt. Modelo e esforço vêm
+  de `~/.hangar/voz/config.json` (padrão: modelo do config do Codex, esforço `low`).
+- **Voz: o Hangar se usa por ferramentas, a tela é o último recurso.** Ordem do prompt: ferramenta
+  própria, depois o shell; `click_screen` só quando nada disso cobre e nunca para
+  buscar, reabrir ou criar conversa, nem para atalho. Ferramentas (`controller/assist.rs`, pela mesma
+  API dos apps via `Machines::call`): `recent_conversations` (fechadas com o nome que tinham; com
+  `query` filtra e, sem acerto, usa `/api/search`), `reopen_conversation` (nome falado ou id; o nome
+  da sessão vence a pasta, o mesmo nome fechado várias vezes fica com o mais novo, ambíguo volta com
+  as opções; volta com o nome antigo e a tela troca para ela com a nota `after_switch`),
+  `list_folders`, `list_shortcuts` + `run_shortcut` (comando pelo `shortcut-shell`, como o botão do
+  app, com a chave dos apps `global:<id>` / `project:<repositório>:<id>`; atalho com `confirm` e
+  comando definido pelo repositório pedem o sim em dois turnos; o do projeto só casa pelo nome inteiro;
+  texto não sai daqui, volta para o organizador mandar por `send_to_session`, que guarda o Planejar e
+  as travas do envio; atalhos do projeto ilegíveis são ditos, nunca "não achei"; ação de tela fica com
+  `hangar_action`), `list_machines` e
+  `interrupt_session` (dois turnos, como fechar). `open_session` aceita os cinco providers, modelo,
+  esforço, conta, motor, modo e sem terminal; sem modo dito, o Claude nasce em `bypassPermissions`.
+  Reabrir, rodar atalho e interromper só saem de fala do usuário e nunca de fala repetida; ler não
+  pede fala. Motivo em "Voz: assistente do Hangar, não só do envio".
+- **Voz: o arquivo guarda o nome da sessão fechada.** `DELETE /api/sessions/{name}` grava
+  `transcript → nome` em `closed-sessions.json` (até 500, no config base do backend); o
+  `ArchiveEntry` sai com `name` (vazio para o fechado antes do registro) e o resume aceita `name`
+  (ocupado ganha `-2`). Falha ao gravar não impede fechar; arquivo ilegível vai para `.bad` (nome
+  livre, `.bad.2`…) antes da gravação nova.
+- **Voz: o MCP `hangar` entra com a identidade da voz.** `thread_config` desliga os outros MCP e os
+  plugins (custo de catálogo a cada turno) e põe `mcp_servers.hangar` com a URL da 8765 e, em
+  `http_headers`, o bearer do dono e `X-Hangar-Voice: <nonce>.<hmac>` (HMAC-SHA256 do segredo interno,
+  nonce novo por chamada). Só leitura: `enabled_tools = ["who_am_i", "sessions"]` (lista de permitidas
+  por servidor do Codex), porque o MCP não passa pela trava da fala nem do sim; mandar, abrir, fechar e
+  interromper vão pelas ferramentas próprias. O prompt só cita o MCP quando a entrada existe (a
+  assinatura pode falhar). Nada disso vai ao ambiente nem ao prompt. O Python
+  (`quem_chama.resolver`) confere a assinatura antes dos outros cabeçalhos: válida é `("voz", "voz")`,
+  inválida é erro (o motivo vai ao log, o valor do cabeçalho não). O Python segue recusando por conta
+  própria o que a voz chamar além disso: `send` assina `[de: voz]`, `new_session` não herda nada,
+  `close_session` é recusado, e `group`/`pair`/`unpair`/`browser*`/`html_render` são recusados;
+  `who_am_i` diz `kind: voice`. A aprovação de ferramenta MCP que o
+  Codex pedir (`mcpServer/elicitation/request` do `hangar`) passa só em turno com fala do usuário.
 - **Voz: o organizador conversa; quem decide o envio é ele:** `send_to_session` sai sempre que o
   organizador chama a partir de um turno com fala do usuário, sem conferir verbo, "sim" ou nome da sessão
   na fala. Ficam a espera de 1,5 s ("segura" cancela), a recusa de pedido curto e a da mesma sessão duas
@@ -544,8 +569,8 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   paráfrase) e as finais ouvidas até 15 s depois da delegação desse turno que não repetem a fala
   anterior; na dúvida não é sim.
 - **Voz: turno de fala repetida nunca age.** A fala que a voz encaminha de novo num turno novo marca o
-  turno: envio, plano, pergunta, trocar, abrir, fechar, agrupar, ação de tela, `computer`, memória e o
-  sim a destrutivo voltam "Fala repetida; já tratada." A repetição dentro do turno original não marca.
+  turno: envio, plano, pergunta, trocar, abrir, reabrir, fechar, interromper, agrupar, atalho, ação de
+  tela, `computer`, memória e o sim a destrutivo voltam "Fala repetida; já tratada." A repetição dentro do turno original não marca.
 - **Voz: silêncio pedido vale até ele voltar.** `quiet` (só de turno com fala do usuário) guarda os
   resultados das sessões sem resumo nem fala; nada é descartado e o trabalho segue. Nunca acaba pelo
   tempo: `quiet` com `on: false`, na volta pedida por ele, solta os guardados para o resumo, um por vez.
@@ -570,7 +595,8 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
 - **Voz: o organizador roda sem aprovação visual.** `thread/start` com `danger-full-access` e
   `approvalPolicy: "on-request"`: comando comum roda sem pedido. Todo pedido de aprovação que ainda vier
   (`item/commandExecution|fileChange|permissions/requestApproval`, `execCommandApproval`,
-  `applyPatchApproval`, `mcpServer/elicitation/request`) é respondido na hora pelo servidor; o
+  `applyPatchApproval`, `mcpServer/elicitation/request`, este aceito só para o `hangar` em turno com
+  fala) é respondido na hora pelo servidor; o
   destrutivo que chega como pedido passa por `approval_decision` e só sai com o sim falado, e o prompt
   manda o organizador perguntar antes de qualquer destrutivo. Nenhum texto manda o usuário ao app.
   Não usar `untrusted` (cada comando vira "aprove no app" falado) nem `never` (o perigoso fica recusado
@@ -3379,6 +3405,26 @@ começava sem saber quem fala. O organizador agora guarda poucos fatos e abre a 
   mN." (14:28:17, 14:30:15).
 - **Painel parado.** O `read_screen` de 14:29:03, já depois do m3 (14:28:17), mostrava as duas
   entradas antigas: o arquivo estava certo, os clientes só reliam ao abrir os ajustes.
+
+## Voz: assistente do Hangar, não só do envio (11/10/2026)
+
+- **O caso.** "Fechei sem querer a auditoria-migracao, reabre": nenhuma ferramenta reabria conversa. O
+  prompt mandava clicar em "botão que não está em hangar_actions", o organizador clicou "Buscar conversas"
+  e o nativo caiu (o crash do clique foi tratado à parte, em `9595e485d`/`3233629ef`).
+- **Sobra do desenho de 10/09.** O organizador nasceu (`d813ee06c`) como consolidador de pedido dentro de
+  uma sessão Codex: shell, MCP e plugins desligados. Shell e acesso total voltaram depois; MCP, plugins e
+  o catálogo de ferramentas ficaram no tamanho de então, sem medição que justificasse cada chave. O
+  `hangar` no `config.toml` da conta era desligado junto com os outros, e o app-server da voz nasce com
+  ambiente limpo, então nenhum cabeçalho de identidade casaria uma sessão mesmo ligado.
+- **Nome perdido.** O `ArchiveEntry` não guardava o nome da sessão e o resume voltava com o nome da pasta:
+  "auditoria-migracao" só casaria se fosse o nome da pasta. Daí o registro no fechamento.
+- **Identidade por assinatura, não por valor fixo.** O portão do `/mcp` é só bearer + loopback; um
+  cabeçalho fixo "sou a voz" serviria a qualquer sessão local. A assinatura com o segredo interno (que
+  nasce a cada subida do hangar-server e só ele e o Python têm) dispensa rota nova de ponte. Limite
+  aceito: não há conferência de chamada viva; a assinatura vale até o hangar-server reiniciar, e quem a
+  copiar já roda como o mesmo usuário que lê o token do dono.
+- **Não verificado.** Se o Codex pede aprovação para ferramenta MCP com `on-request` e em que formato; o
+  servidor aceita o pedido do `hangar` com `content: {}` em turno com fala.
 
 ## Hook que falha: nem bloqueia, nem some (19/09/2026)
 

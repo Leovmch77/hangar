@@ -42,6 +42,8 @@ pub enum VoiceEvent {
     PairSessions(CallId, String, String), UnpairSession(CallId, String),
     /// Acompanhar: as respostas da sessão são faladas mesmo fora da tela.
     FollowSession(CallId, String), UnfollowSession(CallId, String),
+    /// Arquivo, pastas, atalhos, máquinas e interromper; `turn` separa o pedido do sim.
+    Assist { call: CallId, assist: organizer::Assist, turn: String },
     /// Modelo, esforço e velocidade que a thread do organizador usa de fato.
     Organizer(Effective),
     /// Uma linha dos bastidores: o que chegou ao organizador e o que ele respondeu (só tela, nunca diário).
@@ -77,7 +79,9 @@ fn backstage_input(text: &str) -> Backstage {
 pub struct CallOptions { pub voice: Option<String>, pub context: String, pub cwd: Option<PathBuf>, pub target: String, pub organizer: ModeModels,
     pub tools: Value, pub handoff_same_thread: bool, pub voice_dir: PathBuf,
     /// Quanto a chamada espera uma oferta nova depois que o áudio cai: o mesmo prazo do hub para o aparelho que sai.
-    pub audio_grace: Duration }
+    pub audio_grace: Duration,
+    /// Entrada do MCP `hangar` com a identidade desta chamada; `None` deixa o MCP desligado.
+    pub hangar_mcp: Option<Value> }
 
 /// Sobe o app-server: o filho de verdade em produção, um falso nos testes.
 pub type Spawn = Box<dyn FnOnce() -> futures_util::future::BoxFuture<'static, Result<(Rpc, async_channel::Receiver<Incoming>), RpcError>> + Send>;
@@ -218,7 +222,8 @@ async fn run_call(options: CallOptions, spawn: Spawn, events: &async_channel::Se
         None => { log("memory unreadable"); (organizer::memory_note("", true), false) }
     };
     log(format!("memory onboarding={onboarding}"));
-    let start = organizer_start(&config, &own, options.cwd.as_deref(), &options.context, &applied, options.tools.clone(), &note);
+    let start = organizer_start(&config, &own, options.cwd.as_deref(), &options.context, &applied, options.tools.clone(), &note,
+        options.hangar_mcp.as_ref());
     log(format!("organizer model={} effort={} tier={}", if applied.model.is_some() { "chosen" } else { "config" }, applied.effort,
         applied.tier.as_deref().unwrap_or("config")));
     // A conta lida em paralelo, com prazo curto: falhar só deixa os limites ocultos até a primeira atualização.
@@ -470,6 +475,14 @@ async fn run_call(options: CallOptions, spawn: Spawn, events: &async_channel::Se
                             let _ = rpc.respond(id, tool_reply("Só a pedido falado do usuário.", false)).await;
                             "refused-not-spoken"
                         }
+                        ToolCall::Assist(assist) if assist.acts() && !spoken.allows(&params) => {
+                            let _ = rpc.respond(id, tool_reply("Só a pedido falado do usuário.", false)).await;
+                            "refused-not-spoken"
+                        }
+                        ToolCall::Assist(assist) if assist.acts() && params["turnId"].as_str().is_some_and(|t| repeated.contains(t)) => {
+                            let _ = rpc.respond(id, tool_reply("Fala repetida; já tratada.", false)).await;
+                            "refused-repeated"
+                        }
                         ToolCall::Send { .. } | ToolCall::FinishPlan { .. } | ToolCall::AskSession(_) | ToolCall::SwitchSession(_)
                             | ToolCall::OpenSession(_) | ToolCall::CloseSession { .. } | ToolCall::PairSessions(..) | ToolCall::UnpairSession(_)
                             | ToolCall::HangarAction { .. } | ToolCall::Computer(_) | ToolCall::ClickScreen { .. }
@@ -626,6 +639,11 @@ async fn run_call(options: CallOptions, spawn: Spawn, events: &async_channel::Se
                         }
                         ToolCall::FollowSession(name) => { let _ = events.send(VoiceEvent::FollowSession(CallId(id), name)).await; "follow" }
                         ToolCall::UnfollowSession(name) => { let _ = events.send(VoiceEvent::UnfollowSession(CallId(id), name)).await; "unfollow" }
+                        ToolCall::Assist(assist) => {
+                            let turn = params["turnId"].as_str().unwrap_or_default().to_owned();
+                            let _ = events.send(VoiceEvent::Assist { call: CallId(id), assist, turn }).await;
+                            "assist"
+                        }
                         ToolCall::Quiet(on) => {
                             let held = results.held();
                             let next = results.set_quiet(on);
@@ -732,10 +750,16 @@ async fn run_call(options: CallOptions, spawn: Spawn, events: &async_channel::Se
                     log("legacy patch approval accepted=true");
                     let _ = rpc.respond(id, json!({"decision": "approved"})).await;
                 }
-                // Os MCP do usuário ficam desligados na thread; formulário que ainda vier não tem quem preencha.
-                Ok(Incoming::Request { id, method, .. }) if method == "mcpServer/elicitation/request" => {
-                    log("mcp elicitation declined");
-                    let _ = rpc.respond(id, json!({"action": "decline", "content": null, "_meta": null})).await;
+                // Só o MCP `hangar` fica ligado, e ele não pede formulário: o que vier dele é o Codex pedindo para usar a
+                // ferramenta. Vale como as outras ações: só em turno com fala do usuário que não seja repetida. O resto não
+                // tem quem preencha.
+                Ok(Incoming::Request { id, method, params }) if method == "mcpServer/elicitation/request" => {
+                    let accept = params["serverName"] == "hangar" && params["mode"] != "url" && spoken.allows(&params)
+                        && !params["turnId"].as_str().is_some_and(|t| repeated.contains(t));
+                    log(format!("mcp elicitation hangar={} accepted={accept}", params["serverName"] == "hangar"));
+                    let reply = if accept { json!({"action": "accept", "content": {}, "_meta": null}) }
+                        else { json!({"action": "decline", "content": null, "_meta": null}) };
+                    let _ = rpc.respond(id, reply).await;
                 }
                 Ok(Incoming::Request { id, method, .. }) => { log(format!("request {method} answered empty")); let _ = rpc.respond(id, json!({})).await; }
                 Ok(Incoming::Notification { method, params }) => {
@@ -1058,7 +1082,7 @@ mod tests {
         // Nunca o HOME real: a chamada cria a pasta própria e os planos aqui.
         let voice_dir = std::env::temp_dir().join(format!("hangar-voice-call-{}", std::process::id()));
         CallOptions { voice: None, context: "ctx".into(), cwd: None, target: "hangar".into(), organizer: ModeModels::default(), tools, handoff_same_thread: true, voice_dir,
-            audio_grace: Duration::from_secs(600) }
+            audio_grace: Duration::from_secs(600), hangar_mcp: None }
     }
 
     async fn next_answer(events: &async_channel::Receiver<VoiceEvent>) -> (u64, String) {

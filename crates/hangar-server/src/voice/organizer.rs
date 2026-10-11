@@ -21,7 +21,8 @@ O que você consegue fazer, em qualquer modo: ler a conversa da sessão na tela 
 falou ou respondeu); usar esta máquina pelo shell com acesso completo: ler e editar arquivos (do projeto ou de fora dele,
 pelo caminho completo), rodar comandos e ver os processos; ler a tela do Hangar com read_screen; pesquisar na internet;
 acompanhar sessões; observar e medir a máquina também com observe_system (processos, CPU e memória numa amostra, inclusive
-o Hangar rodando). 'O que a sessão está falando/fazendo' é a conversa dela: use read_session,
+o Hangar rodando); reabrir conversas fechadas, rodar atalhos do Hangar (como abrir a VM), ver as pastas onde abrir sessão
+e as máquinas. 'O que a sessão está falando/fazendo' é a conversa dela: use read_session,
 nunca diga que não consegue ler a tela.
 Quando o usuário pedir a você para editar, rodar ou conferir algo nesta máquina, faça direto pelo shell e diga numa frase
 o que mudou ou o que viu.
@@ -43,7 +44,7 @@ De quem é o pedido, antes de qualquer ação:
   de falar daquela sessão), chame send_to_session na hora com o pedido inteiro e a session, sem pedir confirmação nem o nome.
 - Na dúvida, pergunte numa frase: 'faço isso com você aqui ou mando para a sessão?', ou para qual sessão vai. Pergunte só
   quando não estiver claro; nunca mande trabalho sem essa intenção.
-Use read_session antes de enviar, para o pedido casar com o que a sessão está fazendo.
+Use read_session antes de enviar só quando o pedido depende do que a sessão está fazendo.
 Se o usuário disser 'espera', 'não manda ainda', 'segura' ou equivalente, chame hold_request com o
 pedido montado até ali; continue montando com ele e só envie quando ele liberar ('pode mandar', 'manda').
 'Não manda ainda' controla você e não entra no texto do pedido.
@@ -89,19 +90,30 @@ Quando o usuário quiser trocar, ir ou voltar para outra sessão, chame switch_s
 só um pedaço ('abre a grupos' é a sessão grupos-rust-plano), ou o que a conversa deixa claro ('volta ali', 'vai nela', 'pode' a
 uma oferta sua). Não peça para ele repetir o nome nem a frase; pergunte só se houver mais de uma sessão possível. Na dúvida
 sobre os nomes, chame list_sessions antes.
-O Hangar se controla pelas próprias ferramentas: abrir configurações, nova sessão, painel lateral, terminal, custos e o
-resto da tela é hangar_action (veja os ids com hangar_actions); sessões são as ferramentas de sessão.
+O Hangar se controla pelas suas ferramentas, primeiro e na hora: aja quando a intenção e o alvo estão claros e pergunte só se
+houver mais de um alvo possível.
+- Sessões: list_sessions (nome, máquina, estado, pasta), switch_session(name), open_session(folder; e, se ele disser, name,
+  provider claude/codex/pi/omp/kimi, model, effort, account, engine, permission, headless, server, request), close_session e
+  interrupt_session (os dois pedem o sim falado), pair_sessions e unpair_session (agrupam e desagrupam), follow_session.
+- Sessão fechada ('fechei sem querer a X, reabre', 'volta aquela conversa', 'reabre a última que eu fechei'):
+  reopen_conversation com o nome falado, ou com o id que recent_conversations mostrou; ela volta com o nome antigo e abre na
+  tela. 'O que eu fechei', 'acha a conversa sobre Y': recent_conversations (query opcional).
+- Pastas onde dá para abrir sessão: list_folders. Atalhos do Hangar ('abre a VM', 'roda o atalho X'): run_shortcut(name);
+  list_shortcuts mostra quais há. Máquinas e se respondem: list_machines.
+- Configurações, nova sessão, painel lateral, terminal, custos e o resto da tela é hangar_action (veja os ids com hangar_actions).
+Sem ferramenta própria para a intenção, use o shell.
 Para ler ou explicar qualquer coisa na tela do Hangar use read_screen (abra a tela antes com hangar_action se preciso);
-nunca use computer para ler o Hangar. Botão ou aba que read_screen mostrou e que não está em hangar_actions: click_screen com o id dele.
+nunca use computer para ler o Hangar. click_screen é o último recurso: só quando nenhuma ferramenta nem o shell
+cobrem a intenção e read_screen mostrou o botão; nunca para buscar, reabrir ou criar conversa, nem para atalho.
 computer é SÓ para programas que não são o Hangar ('abre o Bloco de Notas e digita…'); nunca use computer para clicar
 no Hangar. Diga ao usuário que vai demorar e fale o resultado (concluído ou parou com o motivo).
-open_session só quando ele pedir sessão NOVA ou falar em pasta ('abre uma sessão nova na pasta hangar'); pair_sessions e
-unpair_session agrupam e desagrupam.
+open_session só quando ele pedir sessão NOVA ou falar em pasta ('abre uma sessão nova na pasta hangar'); sessão que ele
+fechou volta por reopen_conversation, nunca por open_session.
 Abrir sessão e descrever o trabalho dela (na mesma fala ou na seguinte) é UMA intenção: chame open_session com request = o trabalho
 inteiro como o usuário ditou (objetivo, restrições, detalhes; não resuma tirando detalhes). Nunca encerre o turno só abrindo quando
 houve trabalho ditado. Se o trabalho chegar numa fala logo depois de abrir, mande com send_to_session à sessão nova sem esperar ele pedir de novo. Nome ambíguo volta com as opções: pergunte qual, nunca escolha por conta própria.
-Fechar sessão é irreversível: chame close_session sem confirmed, pergunte ao usuário e só chame com confirmed true
-depois de um sim explícito dele.
+Fechar e interromper sessão pedem o sim: chame close_session ou interrupt_session sem confirmed, pergunte ao usuário e só
+chame com confirmed true depois de um sim explícito dele.
 Entradas que começam por [NOTA DO HANGAR] vêm do app, não do usuário (troca de sessão ou de modo, ação que o app já fez):
 siga-as e nunca as repita em voz alta, nem caminhos de pasta e regras que elas tragam.
 Tudo o que você escreve vira fala, inclusive mensagens no meio do turno: não anuncie ferramentas nem passos, escreva só a resposta.
@@ -116,7 +128,8 @@ Codex) em vários projetos. Fale português brasileiro, com calma, direta e curt
 
 Por trás de você trabalha o organizador (Codex). Ele consegue: ler a conversa de qualquer sessão (o que ela fez, está
 fazendo, falou e respondeu); ler a tela do Hangar; ler e editar arquivos e rodar comandos nesta máquina; pesquisar na internet; conversar, analisar e
-planejar com o usuário; mandar pedidos para a sessão; trocar, abrir, fechar, agrupar e acompanhar sessões.
+planejar com o usuário; mandar pedidos para a sessão; trocar, abrir, fechar, interromper, agrupar e acompanhar sessões;
+reabrir conversas fechadas; rodar atalhos do Hangar (como abrir a VM); ver as pastas onde abrir sessão e as máquinas.
 
 Escuta
 - Deixe o usuário terminar a ideia. Pausa para pensar não é o fim da fala: continue ouvindo.
@@ -131,7 +144,7 @@ Quando encaminhar ao organizador
 - Pedido de análise, opinião ou planejamento ('o que você acha', 'me ajuda a planejar', 'lê você o código') também vai ao
   organizador: é conversa com o assistente, não trabalho para a sessão.
 - Correção ou complemento do que está em andamento, e 'espera', 'segura', 'não manda ainda': encaminhe.
-- Trocar, abrir, fechar e parear sessão sempre vão ao organizador, mesmo quando parecer simples.
+- Trocar, abrir, reabrir, fechar e parear sessão e rodar atalhos sempre vão ao organizador, mesmo quando parecer simples.
 - Pedido de silêncio até ele voltar ('não me avisa nada até eu voltar') e a volta ('voltei', 'me dá o resumo'): encaminhe.
 - Encaminhe cada fala uma vez só.
 
@@ -177,11 +190,35 @@ pub fn tools() -> Value {
             json!({"name": {"type": "string"}})),
         tool("list_sessions", "Lista as sessões de todas as máquinas: nome, máquina, provider, estado, pasta e qual está na tela.", json!({})),
         tool_with("open_session", "Cria uma sessão nova na pasta falada (nome ou caminho) e a abre na tela. Pasta ambígua volta com as opções. \
-            Com request, o trabalho ditado para ela é enviado assim que ela abre.",
-            json!({"folder": {"type": "string"}, "name": {"type": "string"}, "provider": {"type": "string", "enum": ["claude", "codex"]},
-                "server": {"type": "string"}, "request": {"type": "string"}}), &["folder"]),
+            Com request, o trabalho ditado para ela é enviado assim que ela abre. O resto só quando o usuário disser: model, effort, \
+            account (caminho do config dir para claude/pi/omp, id da conta para codex), engine (motor do Claude), permission (modo do \
+            Claude; sem ele, bypassPermissions) e headless (sem terminal, claude ou codex).",
+            json!({"folder": {"type": "string"}, "name": {"type": "string"},
+                "provider": {"type": "string", "enum": ["claude", "codex", "pi", "omp", "kimi"]},
+                "server": {"type": "string"}, "request": {"type": "string"}, "model": {"type": "string"}, "effort": {"type": "string"},
+                "account": {"type": "string"}, "engine": {"type": "string"},
+                "permission": {"type": "string", "enum": ["bypassPermissions", "acceptEdits", "auto", "manual", "dontAsk", "plan"]},
+                "headless": {"type": "boolean"}}), &["folder"]),
         tool_with("close_session", "Fecha uma sessão. Sem confirmed só prepara; depois do sim explícito do usuário, chame de novo com confirmed true.",
             json!({"name": {"type": "string"}, "confirmed": {"type": "boolean"}}), &["name"]),
+        tool_with("interrupt_session", "Interrompe o que a sessão está fazendo agora (como o botão parar). Sem confirmed só prepara; depois \
+            do sim explícito do usuário, chame de novo com confirmed true.",
+            json!({"name": {"type": "string"}, "confirmed": {"type": "boolean"}}), &["name"]),
+        tool_with("recent_conversations", "Conversas fechadas, da mais nova: nome que a sessão tinha, pasta, quando, máquina e o id para \
+            reopen_conversation. query filtra pelo nome, pasta ou assunto (e procura no texto das conversas se nada casar).",
+            json!({"query": {"type": "string"}, "server": {"type": "string"}}), &[]),
+        tool_with("reopen_conversation", "Reabre uma conversa fechada e a abre na tela, com o nome que ela tinha. name: o nome falado \
+            (ou pedaço); id: o que recent_conversations mostrou. Nome ambíguo volta com as opções.",
+            json!({"name": {"type": "string"}, "id": {"type": "string"}, "server": {"type": "string"}}), &[]),
+        tool_with("list_folders", "Pastas onde dá para abrir sessão (as raízes e as subpastas delas), com o caminho.",
+            json!({"server": {"type": "string"}}), &[]),
+        tool_with("list_shortcuts", "Atalhos do Hangar (os globais e os do projeto da sessão da conversa): nome e o que fazem.",
+            json!({"server": {"type": "string"}}), &[]),
+        tool_with("run_shortcut", "Roda um atalho do Hangar pelo nome (ex.: 'VM' abre a VM); comando roda no terminal do atalho. Atalho \
+            que pede confirmação volta sem rodar: pergunte ao usuário e, depois do sim explícito, chame de novo com confirmed true. \
+            Atalho de texto volta com o texto para você mandar por send_to_session.",
+            json!({"name": {"type": "string"}, "server": {"type": "string"}, "confirmed": {"type": "boolean"}}), &["name"]),
+        tool("list_machines", "Máquinas do Hangar (esta e as ligadas a ela), se respondem e quantas sessões têm.", json!({})),
         tool("pair_sessions", "Agrupa duas sessões da mesma máquina para trabalharem juntas.", json!({"a": {"type": "string"}, "b": {"type": "string"}})),
         tool("unpair_session", "Tira a sessão do grupo dela; as outras seguem juntas.", json!({"name": {"type": "string"}})),
         tool("follow_session", "Acompanha a sessão: cada resposta dela chega como [RESULTADO DA SESSÃO], mesmo fora da tela, enquanto a voz estiver ligada.",
@@ -287,10 +324,14 @@ pub fn memory_note(block: &str, has_entries: bool) -> String {
 /// `on-request` e acesso completo ele só pede para o que ele mesmo marca como perigoso, e o laço da chamada segura esse até
 /// o sim falado (`approval_decision`); `never` recusaria esse de vez, nem com o sim. cwd na pasta própria; o código da sessão
 /// vai pelo caminho completo que a nota leva. Sem `"environments": []`: com ele o Codex não oferece o shell.
-pub fn organizer_start(config: &Value, own: &Path, session: Option<&Path>, context: &str, pair: &ModeModel, tools: Value, memory: &str) -> Value {
+pub fn organizer_start(config: &Value, own: &Path, session: Option<&Path>, context: &str, pair: &ModeModel, tools: Value, memory: &str,
+    hangar: Option<&Value>) -> Value {
+    // Sem a entrada (assinatura falhou), o prompt não promete o MCP.
+    let mcp = if hangar.is_some() { HANGAR_MCP_NOTE } else { "" };
     let mut start = json!({"ephemeral": true, "cwd": own, "sandbox": "danger-full-access", "approvalPolicy": "on-request",
-        "baseInstructions": ORGANIZER_PROMPT, "developerInstructions": format!("{}\n\n{memory}\n\n{context}", code_note(session, own)),
-        "config": thread_config(config, &pair.effort), "dynamicTools": tools});
+        "baseInstructions": ORGANIZER_PROMPT,
+        "developerInstructions": format!("{}{mcp}\n\n{memory}\n\n{context}", code_note(session, own)),
+        "config": thread_config(config, &pair.effort, hangar), "dynamicTools": tools});
     if let Some(model) = pair.model.as_deref().or_else(|| config["model"].as_str()) { start["model"] = json!(model); }
     if let Some(tier) = &pair.tier { start["serviceTier"] = json!(tier); }
     start
@@ -338,7 +379,8 @@ pub fn settings_update(thread: &str, from: &ModeModel, to: &ModeModel, default_m
     (update.as_object().is_some_and(|o| o.len() > 1)).then_some(update)
 }
 
-pub fn thread_config(config: &Value, effort: &str) -> Value {
+/// `hangar`: a entrada do MCP `hangar` com a identidade da voz (`SelfApi::voice_mcp`); `None` o deixa desligado como os outros.
+pub fn thread_config(config: &Value, effort: &str, hangar: Option<&Value>) -> Value {
     // `agents.enabled`: o catálogo dos modelos novos liga o `spawn_agent` mesmo com `features.multi_agent` desligado, e numa thread
     // efêmera ele falha sempre (o filho copia o histórico gravado, que ela não tem).
     // `features.memories`: o resumo de memória do Codex da conta não é a memória da voz e fazia a primeira conversa parecer conhecida.
@@ -346,14 +388,27 @@ pub fn thread_config(config: &Value, effort: &str) -> Value {
         "features.hooks": false, "features.multi_agent": false, "features.js_repl": false, "features.memories": false,
         "features.apply_patch_freeform": false, "web_search": "live", "project_doc_max_bytes": 0,
         "model_reasoning_effort": effort, "model_reasoning_summary": "concise"});
-    // `mcp_servers: {}` não desliga os do usuário: só o nome com enabled=false desliga.
+    // `mcp_servers: {}` não desliga os do usuário: só o nome com enabled=false desliga. Os outros MCP e os plugins ficam fora
+    // por custo: o catálogo deles entra em todo turno de voz.
     for key in ["mcp_servers", "plugins"] {
         let off: serde_json::Map<String, Value> = config[key].as_object()
             .map(|o| o.keys().map(|name| (name.clone(), json!({"enabled": false}))).collect()).unwrap_or_default();
         result[key] = Value::Object(off);
     }
+    if let Some(entry) = hangar {
+        let mut entry = entry.clone();
+        // Só leitura: o MCP não passa pelas travas da fala nem do sim; mandar, abrir, fechar e interromper vão pelas
+        // ferramentas próprias. `enabled_tools` é a lista de permitidas por servidor do Codex.
+        entry["enabled_tools"] = json!(HANGAR_MCP_TOOLS);
+        result["mcp_servers"]["hangar"] = entry;
+    }
     result
 }
+
+/// As tools do MCP `hangar` que a voz enxerga.
+pub const HANGAR_MCP_TOOLS: [&str; 2] = ["who_am_i", "sessions"];
+const HANGAR_MCP_NOTE: &str = "\n\nO MCP hangar só lê: sessions lista as sessões desta máquina e who_am_i diz quem chama. \
+    Mandar, abrir, fechar e interromper vão sempre pelas suas ferramentas.";
 
 /// O que o organizador faz agora; só vai à tela, nunca ao diário.
 #[derive(Clone, PartialEq, Debug)]
@@ -363,7 +418,7 @@ pub enum OrganizerAction { Tool(String), Search(String), Command(String) }
 pub fn organizer_action(method: &str, item: &Value) -> Option<Option<OrganizerAction>> {
     let text = |key: &str| item[key].as_str().unwrap_or_default().to_owned();
     let action = match item["type"].as_str()? {
-        "dynamicToolCall" => OrganizerAction::Tool(text("tool")),
+        "dynamicToolCall" | "mcpToolCall" => OrganizerAction::Tool(text("tool")),
         "webSearch" => OrganizerAction::Search(text("query")),
         "commandExecution" => OrganizerAction::Command(text("command")),
         _ => return None,
@@ -395,12 +450,35 @@ pub enum ToolCall {
     HangarActions, HangarAction { id: String, arg: Option<String> }, Computer(String),
     ClickScreen { id: String, confirmed: bool }, Observe(super::observe::Request),
     ReadScreen(Option<String>),
+    /// Ferramentas do Hangar que a tela resolve pela API (`controller/assist.rs`).
+    Assist(Assist),
 }
 
+/// Arquivo de conversas, pastas, atalhos, máquinas e interromper; `server` é a máquina falada.
 #[derive(Debug, PartialEq)]
+pub enum Assist {
+    RecentConversations { query: Option<String>, server: Option<String> },
+    ReopenConversation { name: Option<String>, id: Option<String>, server: Option<String> },
+    ListFolders { server: Option<String> },
+    ListShortcuts { server: Option<String> },
+    /// `confirmed`: o sim falado para atalho que o app confirma antes ou que o repositório definiu.
+    RunShortcut { name: String, server: Option<String>, confirmed: bool },
+    ListMachines,
+    InterruptSession { name: String, confirmed: bool },
+}
+
+impl Assist {
+    /// Muda algo: só de turno com fala do usuário, e nunca de fala repetida.
+    pub fn acts(&self) -> bool { matches!(self, Self::ReopenConversation { .. } | Self::RunShortcut { .. } | Self::InterruptSession { .. }) }
+}
+
+#[derive(Debug, PartialEq, Default)]
 pub struct OpenRequest { pub folder: String, pub name: Option<String>, pub provider: &'static str, pub server: Option<String>,
     /// Trabalho ditado junto com o pedido de abrir: vai à sessão nova no mesmo passo.
-    pub request: Option<String> }
+    pub request: Option<String>,
+    /// `None` = o padrão do servidor, como a tela de criação sem toque.
+    pub model: Option<String>, pub effort: Option<String>, pub account: Option<String>, pub engine: Option<String>,
+    pub permission: Option<String>, pub headless: Option<bool> }
 
 pub fn parse_tool(params: &Value) -> ToolCall {
     let name = params["tool"].as_str().unwrap_or_default();
@@ -422,10 +500,27 @@ pub fn parse_tool(params: &Value) -> ToolCall {
         "switch_session" => arg("name").map_or_else(unknown, ToolCall::SwitchSession),
         "list_sessions" => ToolCall::ListSessions,
         "open_session" => {
-            let provider = match arg("provider").as_deref() { None | Some("claude") => "claude", Some("codex") => "codex", Some(_) => return unknown() };
-            arg("folder").map_or_else(unknown, |folder| ToolCall::OpenSession(OpenRequest { folder, name: arg("name"), provider, server: arg("server"), request: arg("request") }))
+            let provider = match arg("provider").as_deref() {
+                None | Some("claude") => "claude", Some("codex") => "codex", Some("pi") => "pi", Some("omp") => "omp", Some("kimi") => "kimi",
+                Some(_) => return unknown(),
+            };
+            arg("folder").map_or_else(unknown, |folder| ToolCall::OpenSession(OpenRequest { folder, name: arg("name"), provider, server: arg("server"),
+                request: arg("request"), model: arg("model"), effort: arg("effort"), account: arg("account"), engine: arg("engine"),
+                permission: arg("permission"), headless: params["arguments"]["headless"].as_bool() }))
         }
         "close_session" => arg("name").map_or_else(unknown, |name| ToolCall::CloseSession { name, confirmed: params["arguments"]["confirmed"] == true }),
+        "interrupt_session" => arg("name").map_or_else(unknown, |name|
+            ToolCall::Assist(Assist::InterruptSession { name, confirmed: params["arguments"]["confirmed"] == true })),
+        "recent_conversations" => ToolCall::Assist(Assist::RecentConversations { query: arg("query"), server: arg("server") }),
+        "reopen_conversation" => match (arg("name"), arg("id")) {
+            (None, None) => unknown(),
+            (name, id) => ToolCall::Assist(Assist::ReopenConversation { name, id, server: arg("server") }),
+        },
+        "list_folders" => ToolCall::Assist(Assist::ListFolders { server: arg("server") }),
+        "list_shortcuts" => ToolCall::Assist(Assist::ListShortcuts { server: arg("server") }),
+        "run_shortcut" => arg("name").map_or_else(unknown, |name| ToolCall::Assist(Assist::RunShortcut { name, server: arg("server"),
+            confirmed: params["arguments"]["confirmed"] == true })),
+        "list_machines" => ToolCall::Assist(Assist::ListMachines),
         "pair_sessions" => match (arg("a"), arg("b")) { (Some(a), Some(b)) => ToolCall::PairSessions(a, b), _ => unknown() },
         "unpair_session" => arg("name").map_or_else(unknown, ToolCall::UnpairSession),
         "follow_session" => arg("name").map_or_else(unknown, ToolCall::FollowSession),
@@ -1295,21 +1390,21 @@ mod tests {
 
     #[test]
     fn organizer_thread_leaves_codex_memory_off() {
-        assert_eq!(thread_config(&json!({}), DEFAULT_EFFORT)["features.memories"], json!(false));
+        assert_eq!(thread_config(&json!({}), DEFAULT_EFFORT, None)["features.memories"], json!(false));
     }
 
     #[test]
     fn start_carries_the_memory_note() {
         let own = Path::new("/h/.hangar/voz/arquivos");
-        let start = organizer_start(&json!({}), own, None, "", &ModeModel::default(), tools(), "- [m1] pessoa Dev");
+        let start = organizer_start(&json!({}), own, None, "", &ModeModel::default(), tools(), "- [m1] pessoa Dev", None);
         assert!(start["developerInstructions"].as_str().unwrap().contains("- [m1] pessoa Dev"));
     }
 
 
     #[test]
-    fn announces_twenty_six_tools() {
+    fn announces_thirty_three_tools() {
         let tools = tools();
-        assert_eq!(tools.as_array().unwrap().len(), 26);
+        assert_eq!(tools.as_array().unwrap().len(), 33);
         assert!(matches!(parse_tool(&json!({"tool": "edit_files", "arguments": {"request": "x"}})), ToolCall::Unknown(_)));
         assert!(ORGANIZER_PROMPT.contains("do projeto ou de fora dele"));
         let observe = tools.as_array().unwrap().iter().find(|t| t["name"] == "observe_system").unwrap();
@@ -1333,13 +1428,31 @@ mod tests {
         let call = |tool: &str, args: Value| parse_tool(&json!({"tool": tool, "arguments": args}));
         assert!(matches!(call("list_sessions", json!({})), ToolCall::ListSessions));
         assert!(matches!(call("open_session", json!({"folder": "hangar"})),
-            ToolCall::OpenSession(r) if r == OpenRequest { folder: "hangar".into(), name: None, provider: "claude", server: None, request: None }));
+            ToolCall::OpenSession(r) if r == OpenRequest { folder: "hangar".into(), provider: "claude", ..OpenRequest::default() }));
+        assert!(matches!(call("open_session", json!({"folder": "x", "provider": "kimi", "model": "k2", "effort": "high", "account": "/h/.claude-b",
+            "engine": "gpt", "permission": "plan", "headless": true})),
+            ToolCall::OpenSession(r) if r.provider == "kimi" && r.model.as_deref() == Some("k2") && r.effort.as_deref() == Some("high")
+                && r.account.as_deref() == Some("/h/.claude-b") && r.engine.as_deref() == Some("gpt") && r.permission.as_deref() == Some("plan")
+                && r.headless == Some(true)));
         assert!(matches!(call("open_session", json!({"folder": "hangar", "request": "Criar a tela de login com Google e testes"})),
             ToolCall::OpenSession(r) if r.request.as_deref() == Some("Criar a tela de login com Google e testes")));
         assert!(matches!(call("open_session", json!({"folder": "hangar", "request": "  "})), ToolCall::OpenSession(r) if r.request.is_none()));
         assert!(matches!(call("open_session", json!({"folder": "/p/x", "name": "x2", "provider": "codex", "server": "casa"})),
             ToolCall::OpenSession(r) if r.provider == "codex" && r.name.as_deref() == Some("x2") && r.server.as_deref() == Some("casa")));
-        assert!(matches!(call("open_session", json!({"folder": "x", "provider": "pi"})), ToolCall::Unknown(_)));
+        assert!(matches!(call("open_session", json!({"folder": "x", "provider": "pi"})), ToolCall::OpenSession(r) if r.provider == "pi"));
+        assert!(matches!(call("open_session", json!({"folder": "x", "provider": "gemini"})), ToolCall::Unknown(_)));
+        assert!(matches!(call("interrupt_session", json!({"name": "web"})),
+            ToolCall::Assist(Assist::InterruptSession { confirmed: false, .. })));
+        assert!(matches!(call("recent_conversations", json!({})), ToolCall::Assist(Assist::RecentConversations { query: None, server: None })));
+        assert!(matches!(call("reopen_conversation", json!({"name": "auditoria"})),
+            ToolCall::Assist(a @ Assist::ReopenConversation { .. }) if a.acts()));
+        assert!(matches!(call("reopen_conversation", json!({})), ToolCall::Unknown(_)), "sem nome nem id");
+        assert!(matches!(call("run_shortcut", json!({"name": "VM"})), ToolCall::Assist(Assist::RunShortcut { confirmed: false, .. })));
+        assert!(matches!(call("run_shortcut", json!({"name": "VM", "confirmed": true})), ToolCall::Assist(Assist::RunShortcut { confirmed: true, .. })));
+        assert!(matches!(call("run_shortcut", json!({})), ToolCall::Unknown(_)));
+        assert!(matches!(call("list_folders", json!({})), ToolCall::Assist(a) if !a.acts()), "ler não precisa de fala");
+        assert!(matches!(call("list_shortcuts", json!({})), ToolCall::Assist(Assist::ListShortcuts { .. })));
+        assert!(matches!(call("list_machines", json!({})), ToolCall::Assist(Assist::ListMachines)));
         assert!(matches!(call("open_session", json!({"folder": " "})), ToolCall::Unknown(_)));
         assert!(matches!(call("close_session", json!({"name": "a"})), ToolCall::CloseSession { confirmed: false, .. }));
         assert!(matches!(call("close_session", json!({"name": "a", "confirmed": true})), ToolCall::CloseSession { confirmed: true, .. }));
@@ -1395,6 +1508,14 @@ mod tests {
         assert!(ORGANIZER_PROMPT.contains("computer é SÓ para programas que não são o Hangar"));
         assert!(ORGANIZER_PROMPT.contains("nunca use computer para clicar\nno Hangar"));
         assert!(ORGANIZER_PROMPT.contains("é hangar_action (veja os ids com hangar_actions)"));
+        assert!(ORGANIZER_PROMPT.contains("click_screen é o último recurso") && ORGANIZER_PROMPT.contains("nunca para buscar, reabrir ou criar conversa"));
+        for tool in ["reopen_conversation", "recent_conversations", "list_folders", "run_shortcut", "list_shortcuts", "list_machines",
+            "interrupt_session"] {
+            assert!(ORGANIZER_PROMPT.contains(tool), "{tool}");
+        }
+        // O MCP só aparece com a entrada dele, e só como leitura.
+        assert!(!ORGANIZER_PROMPT.contains("MCP") && !ORGANIZER_PROMPT.contains("new_session"));
+        assert!(ORGANIZER_PROMPT.contains("nunca abra credenciais"));
     }
 
     #[test]
@@ -1533,7 +1654,7 @@ mod tests {
         let (own, session) = (Path::new("/h/.hangar/voz/arquivos"), Path::new("/p/a"));
         let config = json!({"model": "gpt-config"});
         let chosen = ModeModel { model: Some("gpt-x".into()), effort: "medium".into(), tier: Some(TIER_FAST.into()) };
-        let start = organizer_start(&config, own, Some(session), "ctx", &chosen, tools(), "");
+        let start = organizer_start(&config, own, Some(session), "ctx", &chosen, tools(), "", None);
         assert_eq!(start["sandbox"], json!("danger-full-access"));
         assert_eq!(start["approvalPolicy"], json!("on-request"), "comando comum roda sem pedido de aprovação; o perigoso espera o sim falado");
         assert_eq!(start["cwd"], json!(own));
@@ -1544,10 +1665,10 @@ mod tests {
         let developer = start["developerInstructions"].as_str().unwrap();
         assert!(developer.contains("/p/a") && developer.ends_with("ctx"));
         // Sem escolha: o modelo e a velocidade do config.toml.
-        let plain = organizer_start(&config, own, None, "", &ModeModel::default(), tools(), "");
+        let plain = organizer_start(&config, own, None, "", &ModeModel::default(), tools(), "", None);
         assert_eq!(plain["model"], json!("gpt-config"));
         assert!(plain.get("serviceTier").is_none(), "sem escolha a conta decide");
-        assert!(organizer_start(&json!({}), own, None, "", &ModeModel::default(), tools(), "").get("model").is_none());
+        assert!(organizer_start(&json!({}), own, None, "", &ModeModel::default(), tools(), "", None).get("model").is_none());
         let effective = Effective::from_start(&json!({"model": "gpt-x", "reasoningEffort": "medium", "serviceTier": "priority"}));
         assert_eq!(effective, Effective { model: Some("gpt-x".into()), effort: Some("medium".into()), tier: Some("priority".into()) });
     }
@@ -1684,7 +1805,8 @@ mod tests {
 
     #[test]
     fn voice_prompt_delegates_session_actions_and_waits_for_confirmation() {
-        assert!(VOICE_PROMPT.contains("Trocar, abrir, fechar e parear sessão sempre vão ao organizador"));
+        assert!(VOICE_PROMPT.contains("Trocar, abrir, reabrir, fechar e parear sessão e rodar atalhos sempre vão ao organizador"));
+        assert!(VOICE_PROMPT.contains("reabrir conversas fechadas") && VOICE_PROMPT.contains("abrir a VM"));
         assert!(VOICE_PROMPT.contains("Nunca diga que enviou, trocou, abriu ou terminou antes de o organizador\n  confirmar"));
         assert!(VOICE_PROMPT.contains("Não anuncie em que sessão está"));
     }
@@ -2007,7 +2129,7 @@ mod tests {
         assert_eq!(reasoning_delta("item/reasoning/summaryTextDelta", &json!({"delta": "Lendo"})).as_deref(), Some("Lendo"));
         assert_eq!(reasoning_delta("item/reasoning/summaryPartAdded", &json!({})).as_deref(), Some("\n"));
         assert_eq!(reasoning_delta("item/reasoning/textDelta", &json!({"delta": "cru"})), None, "só o resumo aparece");
-        assert_eq!(thread_config(&json!({}), DEFAULT_EFFORT)["model_reasoning_summary"], json!("concise"));
+        assert_eq!(thread_config(&json!({}), DEFAULT_EFFORT, None)["model_reasoning_summary"], json!("concise"));
     }
 
     #[test]
@@ -2109,11 +2231,30 @@ mod tests {
 
     #[test]
     fn config_disables_mcp_by_name() {
-        let config = thread_config(&json!({"mcp_servers": {"hangar": {}, "cloudflare": {}}, "plugins": {"ecc": {}}}), DEFAULT_EFFORT);
-        assert_eq!(config["mcp_servers"]["hangar"], json!({"enabled": false}));
+        let user = json!({"mcp_servers": {"hangar": {}, "cloudflare": {}}, "plugins": {"ecc": {}}});
+        let config = thread_config(&user, DEFAULT_EFFORT, None);
+        assert_eq!(config["mcp_servers"]["hangar"], json!({"enabled": false}), "sem a entrada da voz, o hangar fica desligado");
         assert_eq!(config["plugins"]["ecc"], json!({"enabled": false}));
         assert_eq!(config["features.shell_tool"], json!(true));
         assert_eq!(config["web_search"], json!("live"));
+        // Com a entrada da voz: só o hangar liga, com o cabeçalho; os outros e os plugins continuam fora.
+        let entry = json!({"enabled": true, "url": "http://127.0.0.1:8765/mcp/",
+            "http_headers": {"Authorization": "Bearer t", "X-Hangar-Voice": "n.sig"}});
+        let mut expected = entry.clone();
+        expected["enabled_tools"] = json!(["who_am_i", "sessions"]);
+        let config = thread_config(&user, DEFAULT_EFFORT, Some(&entry));
+        assert_eq!(config["mcp_servers"]["hangar"], expected, "só as tools de leitura: send/new_session não passam pelas travas da fala");
+        assert_eq!(config["mcp_servers"]["cloudflare"], json!({"enabled": false}));
+        assert_eq!(config["plugins"]["ecc"], json!({"enabled": false}));
+        let start = organizer_start(&user, Path::new("/o"), None, "", &ModeModel::default(), tools(), "", Some(&entry));
+        assert_eq!(start["config"]["mcp_servers"]["hangar"]["http_headers"]["X-Hangar-Voice"], "n.sig");
+        let developer = start["developerInstructions"].as_str().unwrap();
+        assert!(!developer.contains("Bearer"), "o token não vai ao que o modelo lê");
+        assert!(developer.contains("MCP hangar só lê"));
+        let without = organizer_start(&user, Path::new("/o"), None, "", &ModeModel::default(), tools(), "", None);
+        assert!(!without["developerInstructions"].as_str().unwrap().contains("MCP"), "sem a entrada, nada de prometer o MCP");
+        // Conta sem o hangar registrado: a entrada da voz basta.
+        assert_eq!(thread_config(&json!({}), DEFAULT_EFFORT, Some(&entry))["mcp_servers"]["hangar"], expected);
     }
 
     #[test]
