@@ -118,7 +118,10 @@ async def listar_endpoint(request: Request, forcar: bool = False) -> list[Creden
         if sync != "running":
             try:
                 async with asyncio.timeout(3):
-                    auth = await service.read_auth(account, refresh=forcar)
+                    # Ler de novo sobe o `codex`; fora do botão atualizar vale o último login
+                    # conhecido, que o Rust renova em segundo plano.
+                    auth = await (service.read_auth(account, refresh=True) if forcar
+                                  else service.read_auth_rapido(account))
             except TimeoutError:
                 _log.warning("leitura de autenticação Codex excedeu o prazo: %s", account.id)
         return {"id": account.id, "auth": auth or dict(UNAVAILABLE_AUTH),

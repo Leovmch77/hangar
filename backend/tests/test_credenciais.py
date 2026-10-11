@@ -248,3 +248,20 @@ def test_cookie_gravado_responde_ok_mesmo_sem_a_ponte_de_cotas(casa, monkeypatch
     monkeypatch.setattr(account_bridge, "request_quotas", sem_ponte)
     resposta = credenciais.definir_cookie(credenciais.CookieBody(id="chave:opencode", workspace_id="w", auth_cookie="c"))
     assert resposta == {"id": "chave:opencode", "cookie_definido": True}
+
+
+@pytest.mark.asyncio
+async def test_lista_comum_usa_o_login_conhecido_sem_subir_o_codex(casa, monkeypatch):
+    # A lista é aberta a toda hora (Contas, criar sessão): a leitura que sobe o `codex` fica com o
+    # botão atualizar; sem ele, vale o último login conhecido, renovado em segundo plano pelo Rust.
+    _monta(monkeypatch)
+    account = codex_contas.Account("default", casa / ".codex", True)
+    monkeypatch.setattr(codex_contas, "list_accounts", lambda: [account])
+    slow = AsyncMock(side_effect=AssertionError("leitura lenta na lista comum"))
+    fast = AsyncMock(return_value={"method": "oauth", "status": "connected", "email": None, "plan": None})
+    service = SimpleNamespace(preparation_status_async=AsyncMock(return_value={"status": "ready"}),
+                              read_auth=slow, read_auth_rapido=fast)
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(codex_contas_login=service)))
+    rows = await credenciais.listar_endpoint(request, forcar=False)
+    fast.assert_awaited_once_with(account)
+    assert rows[0].auth_method == "oauth"
