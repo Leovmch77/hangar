@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict
 from sse_starlette.sse import EventSourceResponse
 
 from app import diag
+from app.internal_pool import internal_thread
 from app.mensagens import erro
 from app.models import session_key
 from app.sse import merged_events
@@ -31,7 +32,8 @@ def set_secret(value: str | None) -> None:
     _secret = value or None
 
 
-def require_internal(request: Request) -> None:
+async def require_internal(request: Request) -> None:
+    # No laço, sem thread: um pool cheio não pode impedir o Rust de entrar nas rotas que liberam o pool.
     # 404 em toda recusa: quem não é o hangar-server não descobre que a rota existe. O segredo nasce
     # a cada subida e o repasse do hangar-server manda o IP real no X-Forwarded-For, então quem
     # chega de fora pela porta pública cai no IP antes do segredo.
@@ -69,16 +71,12 @@ def info_payload(name: str, provider: str, jsonl: str | None) -> dict:
 
 
 router = APIRouter(prefix="/internal", dependencies=[Depends(require_internal)], include_in_schema=False)
-# Fora do `router`: a dependência síncrona dele roda no pool de threads, e um pool cheio com o laço
-# são faria o vigia do Rust religar o serviço à toa. Aqui a checagem corre no próprio laço.
-ping_router = APIRouter(prefix="/internal", include_in_schema=False)
 _policy_calls = {}
 
 
-@ping_router.get("/ping")
-async def ping(request: Request) -> dict:
+@router.get("/ping")
+async def ping() -> dict:
     """Sem resposta, o laço do Python está parado (vigia do Rust)."""
-    require_internal(request)
     return {"ok": True}
 
 
@@ -119,32 +117,6 @@ async def quota_facts(request: Request):
         raise HTTPException(400) from None
     return await asyncio.get_running_loop().run_in_executor(
         _quota_facts_pool, cotas.quota_facts, body["action"], body["ids"])
-
-
-@router.post("/accounts/facts")
-async def account_facts(request: Request):
-    from dataclasses import asdict
-    from pathlib import Path
-    from app import account_bridge
-    from app.account_lifecycle import AccountKey
-    _, _, raw = await _instance_body(request, 64 * 1024)
-    try:
-        body = json.loads(raw)
-        if not isinstance(body, dict) or set(body) != {"keys"} or not isinstance(body["keys"], list) or len(body["keys"]) > 128:
-            raise ValueError("pedido de fatos inválido")
-        keys = []
-        for item in body["keys"]:
-            if not isinstance(item, dict) or set(item) != {"provider", "canonical_home"}:
-                raise ValueError("chave inválida")
-            if not isinstance(item["canonical_home"], str) or not Path(item["canonical_home"]).is_absolute():
-                raise ValueError("caminho inválido")
-            key = AccountKey.new(item["provider"], Path(item["canonical_home"]))
-            keys.append((item, key))
-    except (TypeError, ValueError, OSError):
-        raise HTTPException(400) from None
-    def inspect():
-        return [{"key": raw_key, "facts": asdict(account_bridge.inspect_usage(key))} for raw_key, key in keys]
-    return await asyncio.to_thread(inspect)
 
 
 @router.post("/accounts/codex-invalidate")
@@ -192,7 +164,7 @@ async def claude_window(request: Request):
     _, _, raw = await _instance_body(request, 16 * 1024)
     try:
         body = json.loads(raw)
-        return await asyncio.to_thread(account_bridge.claude_windows.run, body)
+        return await internal_thread(account_bridge.claude_windows.run, body)
     except (KeyError, TypeError, ValueError, OSError, RuntimeError):
         raise HTTPException(409, detail={"code": "account_claude_window_rejected"}) from None
 
@@ -236,7 +208,7 @@ async def runtime_policy(request: Request):
                 or operation["payload"].get("payload") != body["payload"]):
             raise RuntimeError("serviço sem tentativa registrada")
 
-    await asyncio.to_thread(validate)
+    await internal_thread(validate)
     key = (instance, body["key"], body["generation"], body["phase_id"])
     if key not in _policy_calls:
         metadata = copy.deepcopy(slot.binding.meta)
@@ -246,7 +218,7 @@ async def runtime_policy(request: Request):
                         state_path=str(slot.binding.state_path),
                         operation_id=body["request_id"] if isinstance(body["request_id"], str) else body["phase_id"], validate=validate)
         async def perform():
-            await asyncio.to_thread(validate)
+            await internal_thread(validate)
             with slot.guard:
                 slot.active += 1
             try:
@@ -351,16 +323,6 @@ async def list_demote(request: Request) -> dict:
     return {"ok": True}
 
 
-@router.get("/quota")
-async def quota(config_dir: str = "") -> dict:
-    """Janelas de cota da conta para a linha de status que o ator Rust monta; vazio = `~/.claude`."""
-    from pathlib import Path
-    from app import runtime_policy
-    if len(config_dir) > 4096 or (config_dir and not Path(config_dir).is_absolute()):
-        raise HTTPException(400)
-    return {"windows": await asyncio.to_thread(runtime_policy.quota_windows, config_dir)}
-
-
 @router.get("/workspace/context")
 async def workspace_context(name: str | None = None) -> dict:
     """Só metadados; o consumidor privado não consulta novamente este registro."""
@@ -448,7 +410,7 @@ async def plugin_interrupted(name: str, body: _PluginInterrupted) -> dict:
 async def state_facts_snapshot(name: str) -> dict:
     """Retrato dos fatos do estado (`state_facts`); registra o interesse do Rust nesta sessão."""
     from app import state_facts
-    return await asyncio.to_thread(state_facts.snapshot, name)
+    return await internal_thread(state_facts.snapshot, name)
 
 
 _STATE_SERVICES = {"permission.observe", "session.dead", "session.deliverable"}
@@ -476,7 +438,7 @@ async def state_service(name: str, request: Request) -> dict:
 @router.get("/migration/status")
 async def migration_status() -> dict:
     from app import migration_status
-    return await asyncio.to_thread(migration_status.facts)
+    return await internal_thread(migration_status.facts)
 
 
 @router.get("/sessions/{name}/uploads-facts")
@@ -528,7 +490,15 @@ def transcription_config():
         legacy = {"id": "legacy", "kind": "openai", "api_key": key,
                   "base_url": runtime_config.get("transcription_base_url") or "",
                   "model": runtime_config.get("transcription_model") or ""}
-    return {"providers": providers, "legacy": legacy,
+    organization = {"dictation_include_recent_messages": bool(runtime_config.get("dictation_include_recent_messages")),
+                    **{field: runtime_config.get(field) or "" for field in (
+                        "dictation_organization_mode", "dictation_claude_model", "dictation_codex_model", "ditado_estilo",
+                        "llm_base_url", "llm_api_key", "llm_model", "llm_reasoning_effort",
+                        "llm_briefing_base_url", "llm_briefing_api_key", "llm_briefing_model")}}
+    if organization["dictation_organization_mode"] != "external_api":
+        # A chave da API externa só sai quando é ela que organiza; os campos ficam vazios pro Rust.
+        organization.update(llm_base_url="", llm_api_key="", llm_briefing_base_url="", llm_briefing_api_key="")
+    return {"providers": providers, "legacy": legacy, "organization": organization,
             "user_vocabulary": runtime_config.get("ditado_vocabulario") or "",
             "state_path": str(Path.home() / ".hangar" / "transcription-wait.json")}
 
@@ -581,7 +551,7 @@ class _OrqAssociate(_OrqPromote):
 @router.post("/orq/group-phase")
 async def orq_group_phase(body: _OrqGid) -> dict:
     from app.adapters.orq import runs
-    return {"phase": await asyncio.to_thread(runs.group_phase, body.gid)}
+    return {"phase": await internal_thread(runs.group_phase, body.gid)}
 
 
 @router.post("/orq/promote")
@@ -589,7 +559,7 @@ async def orq_promote(body: _OrqPromote) -> dict:
     """O que o `pair.join_group` faz quando um grupo `orq` nasce, com os mesmos erros da rota `/pair`."""
     from app import orq_context, orq_md
     try:
-        await asyncio.to_thread(orq_context.promote, body.name, body.gid)
+        await internal_thread(orq_context.promote, body.name, body.gid)
     except orq_context.IdentityUnavailable:
         # Sem identidade não houve configuração pela API para promover.
         logging.getLogger(__name__).warning("pair: sem identidade para promover o grupo %s", body.gid)
@@ -602,7 +572,7 @@ async def orq_promote(body: _OrqPromote) -> dict:
 async def orq_is_orchestrator(body: _OrqNames) -> dict:
     """Os nomes que são a linha do orquestrador: a recusa `_recusa_orq` das rotas de par."""
     from app.adapters.orq import runs
-    return {"names": await asyncio.to_thread(lambda: [n for n in body.names if runs.find(n)])}
+    return {"names": await internal_thread(lambda: [n for n in body.names if runs.find(n)])}
 
 
 @router.post("/orq/associate")
@@ -629,7 +599,7 @@ async def external_pairs_end(body: _ExternalEnd) -> dict:
 @router.get("/costs/scopes")
 async def costs_scopes() -> dict:
     from app import costs_sources
-    return await asyncio.to_thread(costs_sources.scopes_for_rust)
+    return await internal_thread(costs_sources.scopes_for_rust)
 
 
 @router.get("/sessions/{name}/side-events")

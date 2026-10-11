@@ -239,15 +239,16 @@ impl NativeProcess {
         self.client.notify("initialized", json!({})).await
     }
     pub async fn read(&mut self) -> Result<Value, hangar_codex::client::ClientError> {
-        self.client
-            .request::<Value>(
-                ClientRequest::AccountRead(GetAccountParams {
-                    refresh_token: false,
-                }),
-                Duration::from_secs(30),
-            )
-            .await
-            .map(|v| auth_public(&v))
+        read_reply(
+            self.client
+                .request::<Value>(
+                    ClientRequest::AccountRead(GetAccountParams {
+                        refresh_token: false,
+                    }),
+                    Duration::from_secs(30),
+                )
+                .await,
+        )
     }
     pub async fn close(&mut self) {
         if self.closed {
@@ -258,6 +259,26 @@ impl NativeProcess {
         let _ = self.child.wait().await;
         self.closed = true;
     }
+}
+
+/// O servidor recusar o login guardado (revogado, vencido) é conta desconectada, que pede Entrar;
+/// as outras falhas de leitura continuam "não sei".
+fn read_reply(
+    reply: Result<Value, hangar_codex::client::ClientError>,
+) -> Result<Value, hangar_codex::client::ClientError> {
+    match reply {
+        Ok(value) => Ok(auth_public(&value)),
+        Err(hangar_codex::client::ClientError::Rpc { message, .. }) if login_refused(&message) => {
+            Ok(super::catalog::disconnected_auth())
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// O Codex não tem código próprio para isso: a recusa chega como erro interno citando o 401.
+fn login_refused(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    message.contains("unauthorized") || message.contains("(401)")
 }
 
 pub fn auth_public(result: &Value) -> Value {
@@ -496,5 +517,27 @@ mod cache_tests {
         // Credencial trocada: nada conhecido para esta identidade, a leitura é esperada.
         std::fs::write(account.home.join("auth.json"), b"{}").unwrap();
         assert_ne!(service.read_codex_auth_fast(&account).await, connected);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::read_reply;
+    use hangar_codex::client::ClientError;
+    use serde_json::json;
+
+    #[test]
+    fn a_login_the_server_refuses_is_a_disconnected_account() {
+        // Login revogado: o `account/read` do Codex responde erro interno citando o 401.
+        let refused = Err(ClientError::Rpc { code: -32603, message: "workspace routing discovery unauthorized (401)".into() });
+        assert_eq!(read_reply(refused).unwrap(), json!({"method":"none","status":"disconnected","email":null,"plan":null}));
+    }
+
+    #[test]
+    fn other_read_failures_stay_unknown() {
+        let failed = Err(ClientError::Rpc { code: -32603, message: "error sending request".into() });
+        assert!(read_reply(failed).is_err());
+        assert!(read_reply(Err(ClientError::Timeout)).is_err());
+        assert_eq!(read_reply(Ok(json!({"account": {"type": "chatgpt", "email": "a@b.c", "planType": "pro"}}))).unwrap()["status"], "connected");
     }
 }

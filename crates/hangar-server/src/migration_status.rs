@@ -27,7 +27,7 @@ pub const AREAS: [&str; 22] = [
 ];
 
 /// Trabalho que o Python pede ao Rust por trás (porta privada e canal do runtime).
-pub const PRIVATE: [&str; 7] = ["send_headless", "send_terminal", "terminal_observe", "workspace_bridge", "list_bridge", "pages_bridge", "transcription_bridge"];
+pub const PRIVATE: [&str; 8] = ["send_headless", "send_terminal", "terminal_observe", "workspace_bridge", "list_bridge", "pages_bridge", "transcription_bridge", "dictation_bridge"];
 
 const WINDOW_MINUTES: u64 = 10;
 const FACTS_TIMEOUT: Duration = Duration::from_secs(5);
@@ -100,7 +100,7 @@ pub fn rust_route(method: &Method, path: &str) -> bool {
     if crate::accounts::http::matches(method, path) { return true; }
     if *method == Method::GET {
         if matches!(path, "/api/sessions" | "/api/sessions/events" | "/api/costs" | "/api/cotacao" | "/api/uso" | "/api/migration/status" | "/api/presence"
-            | "/api/voice" | "/api/voice/settings") {
+            | "/api/voice" | "/api/voice/settings" | "/api/voice/memory") {
             return true;
         }
         let tail = path.strip_prefix("/api/sessions/").and_then(|r| r.split_once('/')).map(|(_, t)| t);
@@ -113,6 +113,9 @@ pub fn rust_route(method: &Method, path: &str) -> bool {
         }
     }
     if *method == Method::PUT && path == "/api/voice/settings" {
+        return true;
+    }
+    if *method == Method::DELETE && path.starts_with("/api/voice/memory/") {
         return true;
     }
     // Interface dos mods: o Rust atende as sessões dele e repassa as outras (os contadores mostram).
@@ -223,6 +226,7 @@ pub async fn count_bridge(req: Request, next: Next) -> Response {
         "/__hangar_server/list" => "list_bridge",
         "/__hangar_server/pages" => "pages_bridge",
         path if path.starts_with("/__hangar_server/transcription/") => "transcription_bridge",
+        path if path.starts_with("/__hangar_server/dictation/") => "dictation_bridge",
         _ => "",
     };
     count_private(key);

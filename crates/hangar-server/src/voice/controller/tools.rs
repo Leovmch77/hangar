@@ -2,12 +2,12 @@
 use super::{Controller, Ctx, Done, Forwarded, Key, Want, watch};
 use crate::voice::call::CallId;
 use crate::voice::machines::{HERE, Machines};
-use crate::voice::organizer::{OpenRequest, SEND_DUPLICATE, SWITCH_REFUSED, confirmed_switch_target, mentions_session, session_context,
-    switch_requested, tool_reply};
-use crate::voice::rules::{JEV_SWITCH_ECHO, Listed, SessionMatch, TALKED_WINDOW, can_leave, can_pair, conversation_pairs, jev_action_choice,
-    jev_switch_choice, looks_like_path, machine_aliases, match_qualified, match_session, narrow_by_context, offer_summary, pick_folder,
+use crate::voice::organizer::{OpenRequest, SEND_DUPLICATE, confirmed_switch_target, mentions_session, session_context, switch_asked, switch_confirmed,
+    tool_reply};
+use crate::voice::rules::{JEV_SWITCH_ECHO, Listed, after_switch, SessionMatch, TALKED_WINDOW, can_leave, can_pair, conversation_pairs, jev_action_choice,
+    jev_send_choice, jev_switch_choice, looks_like_path, machine_aliases, match_qualified, match_session, narrow_by_context, pick_folder,
     question_text, send_reply, sessions_text, unique_name, Delivery};
-use crate::voice::{SendVerdict, computer, jev, log, observe};
+use crate::voice::{computer, jev, log, observe};
 use hangar_api::session::SessionRow;
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use serde_json::{Value, json};
@@ -20,7 +20,7 @@ pub(super) struct JevAsked {
 
 type Rows = [(String, SessionRow)];
 
-fn folder_name(path: &str) -> &str { path.trim_end_matches(['/', '\\']).rsplit(['/', '\\']).next().unwrap_or_default() }
+pub(super) fn folder_name(path: &str) -> &str { path.trim_end_matches(['/', '\\']).rsplit(['/', '\\']).next().unwrap_or_default() }
 
 impl Controller {
     /// A lista fresca de todas as máquinas, lida fora do laço; a ferramenta continua em `on_rows`.
@@ -35,7 +35,7 @@ impl Controller {
     pub(super) fn on_rows(&mut self, rows: Vec<(String, SessionRow)>, unreachable: Vec<String>, want: Want) {
         match want {
             Want::List(call) => self.list(call, &rows, &unreachable),
-            Want::Switch { call, name, said, recent } => self.switch(call, &rows, &unreachable, &name, &said, &recent),
+            Want::Switch { call, name } => self.switch(call, &rows, &unreachable, &name),
             Want::Close { call, name, confirmed, turn } => self.close(call, &rows, &unreachable, &name, confirmed, &turn),
             Want::Pair(call, a, b) => self.pair(call, &rows, &unreachable, &a, &b),
             Want::Unpair(call, name) => self.unpair(call, &rows, &unreachable, &name),
@@ -49,8 +49,11 @@ impl Controller {
                 Err(why) => self.voice.session_answer(format!("O plano não foi enviado nem perdido; continua guardado. {why} \
                     Para reenviar, diga para qual sessão mandar e chame finish_plan de novo com session.")),
             },
+            Want::Interrupt { call, name, confirmed, turn } => self.interrupt(call, &rows, &unreachable, &name, confirmed, &turn),
+            Want::Machines(call) => self.list_machines(call, &rows, &unreachable),
         }
         self.rows = rows;
+        self.rows_changed(&unreachable);
     }
 
     /// Nome falado (com ou sem a máquina) → índice em `rows`. Com `narrow`, várias se desempatam pelo contexto e pela raiz da
@@ -92,7 +95,7 @@ impl Controller {
     }
 
     /// Ambíguo ou ausente volta como texto para o organizador; nunca um palpite.
-    fn resolve(&self, tool: &str, rows: &Rows, unreachable: &[String], spoken: &str) -> Result<usize, String> {
+    pub(super) fn resolve(&self, tool: &str, rows: &Rows, unreachable: &[String], spoken: &str) -> Result<usize, String> {
         let narrow = matches!(tool, "follow_session" | "unfollow_session").then_some(false);
         match self.resolve_match(rows, spoken, narrow) {
             SessionMatch::One(i) => { log(format!("{tool} one")); Ok(i) }
@@ -122,17 +125,14 @@ impl Controller {
         json!({"server": key.0, "base_url": base_url, "name": key.1})
     }
 
-    /// `said`: a fala do turno; sem pedido de troca para essa sessão, nada muda (o pedido segue para a sessão da tela).
-    fn switch(&mut self, call: CallId, rows: &Rows, unreachable: &[String], spoken: &str, said: &str, recent: &str) {
+    /// Trocar de tela não é destrutivo: o turno já tem fala do usuário (a chamada recusa antes, sem ela), então o nome que
+    /// resolve para uma sessão só troca. Ambíguo volta com as opções.
+    fn switch(&mut self, call: CallId, rows: &Rows, unreachable: &[String], spoken: &str) {
         let now = Instant::now();
         let key = match self.resolve_match(rows, spoken, Some(true)) {
             SessionMatch::One(i) => { log("switch_session one"); (rows[i].0.clone(), rows[i].1.name.clone()) }
             SessionMatch::Many(found) => {
                 log(format!("switch_session many({})", found.len()));
-                // Pedido de troca de verdade, só que ambíguo: a resposta à pergunta "qual?" vale sem repetir o verbo.
-                if found.iter().any(|&i| switch_requested(said, recent, &rows[i].1.name)) {
-                    self.switch_offer.offer(found.iter().map(|&i| (rows[i].0.clone(), rows[i].1.name.clone())).collect(), now);
-                }
                 self.voice.reply(call, tool_reply(self.ambiguous(rows, &found), false));
                 return;
             }
@@ -146,12 +146,9 @@ impl Controller {
             let by_jev = self.jev_switched.as_ref()
                 .is_some_and(|(m, n, at)| *m == key.0 && *n == key.1 && now.saturating_duration_since(*at) < JEV_SWITCH_ECHO);
             log(format!("switch_session result=already jev={by_jev}"));
-            let text = if by_jev { "O Hangar já trocou para essa sessão a pedido do usuário e já avisou por voz. Termine sem escrever nada." }
-                else { "Já estou nessa sessão." };
+            let text = if by_jev { format!("O Hangar já trocou para essa sessão a pedido do usuário e já avisou por voz; não repita a troca. {}",
+                    after_switch(&key.1)) } else { "Já estou nessa sessão.".to_owned() };
             self.voice.reply(call, tool_reply(text, true));
-        } else if !switch_requested(said, recent, &key.1) && !self.switch_offer.take(&key.0, &key.1, now) {
-            log("switch_session refused not asked");
-            self.voice.reply(call, tool_reply(format!("{SWITCH_REFUSED}."), false));
         } else if !self.can("switch_session") {
             log("switch_session refused: device lacks it");
             self.voice.reply(call, tool_reply("Este aparelho não troca de sessão pela voz.", false));
@@ -168,15 +165,10 @@ impl Controller {
             self.voice.reply(call, tool_reply(text, false));
             return;
         }
-        let name = key.1.clone();
-        let offer = offer_summary(&mut self.talked, key, Instant::now());
-        log(format!("switch_session result=switched offer={offer}"));
-        self.voice.reply(call, tool_reply(if offer {
-            format!("Sessão {name} aberta; a troca já foi anunciada, não repita. Pergunte numa frase curta se ele quer um resumo \
-                do que a sessão fez por último; só se ele disser que sim, leia com read_session e resuma em até três frases.")
-        } else {
-            format!("Sessão {name} aberta; a troca já foi anunciada, não repita. Você falou dela há pouco: não ofereça resumo.")
-        }, true));
+        log("switch_session result=switched");
+        let text = format!("Sessão {} aberta; a troca já foi anunciada, não repita. {}", key.1, after_switch(&key.1));
+        self.talked.insert(key, Instant::now());
+        self.voice.reply(call, tool_reply(text, true));
     }
 
     /// Fechar em duas chamadas (`ConfirmGate`): a primeira só arma e pede a confirmação.
@@ -264,13 +256,13 @@ impl Controller {
         self.dirty = true;
     }
 
-    /// Destino nomeado vale pela sessão escolhida, não pela tela; sem nome, a da tela neste instante.
+    /// Destino nomeado vale pela sessão escolhida, não pela tela; sem nome, a da tela neste instante (vazia: a última).
     pub(super) fn send(&mut self, call: CallId, request: String, session: Option<String>, turn: String) {
         match session {
             Some(name) => self.lookup(Want::Send { call, request, name, turn }),
-            None => match self.screen_key() {
+            None => match self.talk_key() {
                 Some(key) => self.send_to(call, key, request, turn),
-                None => self.voice.reply(call, tool_reply("Nenhuma sessão aberta na tela; nada foi enviado.", false)),
+                None => self.voice.reply(call, tool_reply("Nenhuma sessão na tela nem antes dela nesta conversa; nada foi enviado.", false)),
             },
         }
     }
@@ -298,11 +290,11 @@ impl Controller {
         });
     }
 
-    /// Pergunta curta do organizador à sessão da tela; a resposta volta pela vigia (`ask_intercept`).
+    /// Pergunta curta do organizador à sessão da conversa (`talk_key`); a resposta volta pela vigia (`ask_intercept`).
     pub(super) fn ask(&mut self, question: String) {
         if self.pending_question.is_some() { self.voice.session_answer("Já há uma pergunta aguardando a sessão.".into()); return; }
-        let Some(key) = self.screen_key() else {
-            self.voice.session_answer("Nenhuma sessão aberta na tela; a pergunta não foi enviada.".into());
+        let Some(key) = self.talk_key() else {
+            self.voice.session_answer("Nenhuma sessão na tela nem antes dela nesta conversa; a pergunta não foi enviada.".into());
             return;
         };
         let text = question_text(&question);
@@ -343,16 +335,18 @@ impl Controller {
         });
     }
 
+    /// A sessão da tela; com a tela vazia, a última que esteve nela (a conversa continua sobre ela).
     pub(super) fn read_session(&mut self, call: CallId) {
-        let Some(key) = self.screen_key() else {
-            self.voice.reply(call, tool_reply(session_context("", &[]), true));
+        let on_screen = self.screen_key().is_some();
+        let Some(key) = self.talk_key() else {
+            self.voice.reply(call, tool_reply("Nenhuma sessão na tela nem antes dela nesta conversa; não há o que ler.", false));
             return;
         };
         self.talked.insert(key.clone(), Instant::now());
         let ctx = self.ctx();
         tokio::spawn(async move {
             match ctx.machines.history(&key.0, &key.1, 60).await {
-                Ok(events) => ctx.voice.reply(call, tool_reply(session_context(&key.1, &conversation_pairs(&events)), true)),
+                Ok(events) => ctx.voice.reply(call, tool_reply(session_context(&key.1, on_screen, &conversation_pairs(&events)), true)),
                 Err(error) => ctx.fail(call, "read_session", format!("Não consegui ler a sessão {}: {error}", key.1)),
             }
         });
@@ -418,19 +412,23 @@ impl Controller {
                 (created, None) => (created, None),
             };
             match created {
-                Ok(name) => { let _ = ctx.done.send(Done::Opened { call, machine, name, sent }); }
+                Ok(name) => { let _ = ctx.done.send(Done::Opened { call, machine, name, sent, reopened: false }); }
                 Err(text) => { log("open_session failed"); ctx.fail(call, "open_session", text); }
             }
         });
     }
 
-    pub(super) fn opened(&mut self, call: CallId, machine: String, name: String, sent: Option<Result<Delivery, String>>) {
-        log(format!("open_session created request={}", sent.is_some()));
+    pub(super) fn opened(&mut self, call: CallId, machine: String, name: String, sent: Option<Result<Delivery, String>>, reopened: bool) {
+        log(format!("open_session created request={} reopened={reopened}", sent.is_some()));
         let key = (machine, name.clone());
         if sent.is_some() { self.watched.insert(key.clone()); }
         if self.can("switch_session") {
             let args = self.switch_args(&key);
-            self.send_tool("switch_session", args, Forwarded::Opened { call, name, sent });
+            self.send_tool("switch_session", args, Forwarded::Opened { call, name, sent, reopened });
+            return;
+        }
+        if reopened {
+            self.voice.reply(call, tool_reply(format!("Conversa reaberta como sessão {name}; este aparelho não a abre na tela pela voz."), true));
             return;
         }
         let note = match &sent {
@@ -443,7 +441,8 @@ impl Controller {
     }
 
     /// Pergunta ao Jev o que a fala pede, com as sessões e as ações de tela de agora; roda em paralelo ao organizador.
-    pub(super) fn jev_ask(&mut self, turn: String, speech: String, recent: String) {
+    /// `before`: a fala e o trecho anteriores, só como contexto; a oferta da voz que vale é a deste trecho (`recent`).
+    pub(super) fn jev_ask(&mut self, turn: String, speech: String, recent: String, before: &str) {
         let Some(config) = self.jev.clone() else { return };
         let open = self.screen_key();
         // Todas as máquinas: a pessoa diz só o nome, e a sessão pode estar em outro servidor.
@@ -458,7 +457,8 @@ impl Controller {
             }).collect()
         } else { Vec::new() };
         let action_texts: Vec<String> = catalog.iter().map(|(_, label, description)| format!("{label}: {description}")).collect();
-        let (state, questions) = jev::questions(&speech, &recent, open.as_ref().map(|(_, n)| n.as_str()), &labels, &action_texts);
+        let context = format!("{}\n{recent}", before.trim());
+        let (state, questions) = jev::questions(&speech, &context, open.as_ref().map(|(_, n)| n.as_str()), &labels, &action_texts);
         // Só contagens: o texto da fala nunca vai ao diário.
         log(format!("jev asked words={} recent_lines={} sessions={} actions={}", speech.split_whitespace().count(), recent.lines().count(),
             sessions.len(), catalog.len()));
@@ -472,7 +472,7 @@ impl Controller {
     }
 
     /// Só certeza alta age. Troca e ação de tela vão ao aparelho; quando ele confirma, a voz fala e o organizador recebe a
-    /// nota no mesmo turno. O veredito de envio vai à trava da chamada.
+    /// nota no mesmo turno.
     pub(super) fn on_jev(&mut self, asked: JevAsked, result: Result<jev::Decision, String>) {
         let ms = asked.started.elapsed().as_millis();
         let decision = match result {
@@ -482,10 +482,6 @@ impl Controller {
         let intent = decision.intent.clone();
         log(format!("jev intent={:?} p={:.2} session_p={:.2} action_p={:.2} ms={ms}", intent.as_ref().map(|(i, _)| i),
             intent.as_ref().map_or(0., |(_, p)| *p), decision.session.map_or(0., |(_, p)| p), decision.action.map_or(0., |(_, p)| p)));
-        let sure = |what: jev::Intent| intent.as_ref().is_some_and(|(i, p)| *i == what && *p >= jev::SURE);
-        let verdict = if sure(jev::Intent::Send) { SendVerdict::Send }
-            else if sure(jev::Intent::Talk) || sure(jev::Intent::Hold) || sure(jev::Intent::Noise) { SendVerdict::Block }
-            else { SendVerdict::Unsure };
         // 'Volta pra lá' não tem nome: com a intenção de troca firme, o destino é o que a voz acabou de oferecer.
         let names: Vec<&str> = asked.sessions.iter().map(|(_, n)| n.as_str()).collect();
         let choice = match jev_switch_choice(&decision) {
@@ -496,8 +492,12 @@ impl Controller {
             Ok(at) => match asked.sessions.get(at).cloned() {
                 None => log("jev skip reason=no-session"),
                 Some(key) => {
+                    // Com verbo e nome na fala, ou o sim à oferta da voz, os limites de troca bastam; sem essa palavra, só
+                    // certeza alta (`SURE`) na intenção e no destino troca sozinha.
+                    let worded = switch_asked(&asked.speech, &key.1) || switch_confirmed(&asked.recent, &key.1);
+                    let sure = intent.as_ref().is_some_and(|(_, p)| *p >= jev::SURE) && decision.session.is_some_and(|(s, p)| s == at && p >= jev::SURE);
                     let reason = if self.screen_key().as_ref() == Some(&key) { Some("on-screen") }
-                        else if !switch_requested(&asked.speech, &asked.recent, &key.1) { Some("not-asked") }
+                        else if !worded && !sure { Some("unsure-unworded") }
                         else if !self.rows.iter().any(|(m, s)| *m == key.0 && s.name == key.1) { Some("gone") }
                         else if !self.can("switch_session") { Some("no-device") }
                         else { None };
@@ -506,17 +506,27 @@ impl Controller {
                         None => {
                             let machine = self.machines.label(&key.0);
                             let args = self.switch_args(&key);
-                            self.send_tool("switch_session", args, Forwarded::JevSwitch { turn: asked.turn, verdict, key, machine });
+                            self.send_tool("switch_session", args, Forwarded::JevSwitch { turn: asked.turn, key, machine });
                             return;
                         }
                     }
                 }
             },
+            // Envio certo vira só um atalho no turno: quem envia continua sendo o organizador.
+            Err("not-switch") if let Some(key) = jev_send_choice(&decision).and_then(|at| asked.sessions.get(at)) => {
+                let name = &key.1;
+                let twin = asked.sessions.iter().filter(|(_, n)| n == name).count() > 1;
+                let session = if twin { format!("{}::{name}", self.machines.label(&key.0)) } else { name.clone() };
+                log(format!("jev act=send-shortcut twin={twin}"));
+                let note = format!("Atalho: o usuário quer mandar para a sessão {name}. Se é isso que a fala pede, chame send_to_session \
+                    com session \"{session}\" e o pedido inteiro, sem perguntar o nome nem pedir confirmação.");
+                self.voice.jev_verdict(asked.turn.clone(), None, Some(note));
+            }
             Err("not-switch") => match jev_action_choice(&decision) {
                 Ok(at) => match (asked.actions.get(at), asked.action_labels.get(at)) {
                     (Some(id), Some(label)) => {
                         self.send_tool("hangar_action", json!({"id": id, "arg": null}),
-                            Forwarded::JevAction { turn: asked.turn, verdict, label: label.clone() });
+                            Forwarded::JevAction { turn: asked.turn, label: label.clone() });
                         return;
                     }
                     _ => log("jev skip reason=screen-gone"),
@@ -526,42 +536,33 @@ impl Controller {
             },
             Err(reason) => log(format!("jev skip reason={reason}")),
         }
-        self.voice.jev_verdict(asked.turn, verdict, None, None);
     }
 
-    pub(super) fn jev_switched(&mut self, turn: String, verdict: SendVerdict, key: Key, machine: String, ok: bool) {
+    pub(super) fn jev_switched(&mut self, turn: String, key: Key, machine: String, ok: bool) {
         if !ok {
             log("jev act=switch refused by device");
-            self.voice.jev_verdict(turn, verdict, None, None);
             return;
         }
         let name = key.1.clone();
         self.jev_switched = Some((key.0.clone(), key.1.clone(), Instant::now()));
-        let offer = offer_summary(&mut self.talked, key, Instant::now());
-        log(format!("jev act=switched offer={offer}"));
-        let (speech, note) = if offer {
-            (format!("Pronto, abri a {name}. Quer um resumo do que ela fez por último?"),
-                format!("O Hangar já trocou a tela para a sessão {name} (máquina {machine}) a pedido do usuário, e a voz já \
-                    perguntou se ele quer um resumo. Não chame switch_session e termine sem escrever nada; se ele disser \
-                    que sim, leia com read_session e resuma em até três frases."))
-        } else {
-            (format!("Pronto, abri a {name}."),
-                format!("O Hangar já trocou a tela para a sessão {name} (máquina {machine}) a pedido do usuário e já confirmou \
-                    por voz. Não chame switch_session e termine sem escrever nada."))
-        };
-        self.voice.jev_verdict(turn, verdict, Some(speech), Some(note));
+        self.talked.insert(key, Instant::now());
+        log("jev act=switched");
+        // A voz só diz o fato; o que vem depois (o resto da fala, ou o resumo que a memória pede) é do organizador.
+        let note = format!("O Hangar já trocou a tela para a sessão {name} (máquina {machine}) a pedido do usuário e já disse que \
+            abriu; não chame switch_session nem repita a troca. {}", after_switch(&name));
+        self.voice.jev_verdict(turn, Some(format!("Abri a {name}.")), Some(note));
     }
 
-    pub(super) fn jev_acted(&mut self, turn: String, verdict: SendVerdict, label: String, ok: bool, text: String) {
+    pub(super) fn jev_acted(&mut self, turn: String, label: String, ok: bool, text: String) {
         log(format!("jev act=screen ok={ok}"));
         let (speech, note) = if ok {
             (Some(format!("Pronto. {text}")), format!("O Hangar já fez na tela, a pedido do usuário: {label}. {text} Já confirmou \
-                por voz. Não repita a ação; se faltar um passo (uma seção, um botão), complete com as ferramentas de tela; senão \
-                termine sem escrever nada."))
+                por voz. Não repita a ação; se faltar um passo (uma seção, um botão), complete com as ferramentas de tela; se a \
+                fala pediu mais alguma coisa, faça agora; senão termine sem escrever nada."))
         } else {
             (None, format!("O Hangar tentou na tela, a pedido do usuário, {label}, mas não deu: {text}"))
         };
-        self.voice.jev_verdict(turn, verdict, speech, Some(note));
+        self.voice.jev_verdict(turn, speech, Some(note));
     }
 }
 
@@ -581,7 +582,7 @@ fn grouped(ctx: &Ctx, call: CallId, code: &'static str, fallback: &str, result: 
 }
 
 /// Máquina falada → chave; sem máquina, este servidor.
-fn pick_machine(machines: &Machines, spoken: Option<&str>) -> Result<String, String> {
+pub(super) fn pick_machine(machines: &Machines, spoken: Option<&str>) -> Result<String, String> {
     let Some(spoken) = spoken else { return Ok(HERE.to_owned()) };
     let keys: Vec<String> = std::iter::once(HERE.to_owned()).chain(machines.peers.enabled_ids()).collect();
     let labels: Vec<String> = keys.iter().map(|k| machines.label(k)).collect();
@@ -597,6 +598,12 @@ fn pick_machine(machines: &Machines, spoken: Option<&str>) -> Result<String, Str
 /// Nome falado → pasta, entre as raízes da máquina e as subpastas delas.
 async fn folder(machines: &Machines, machine: &str, spoken: &str) -> Result<String, String> {
     if looks_like_path(spoken) { return Ok(spoken.to_owned()); }
+    let (folders, unread) = folders(machines, machine).await?;
+    pick_folder(spoken, &folders, unread)
+}
+
+/// `(nome, caminho)` das raízes e das subpastas delas (a lista da tela de criação) e quantas raízes não deu para ler.
+pub(super) async fn folders(machines: &Machines, machine: &str) -> Result<(Vec<(String, String)>, usize), String> {
     let roots = machines.call(machine, reqwest::Method::GET, "/api/fs/roots", None).await?;
     let pair = |v: &Value| Some((v["name"].as_str()?.to_owned(), v["path"].as_str()?.to_owned()));
     let roots: Vec<(String, String)> = roots.as_array().ok_or("Resposta inválida das pastas.")?.iter().filter_map(pair).collect();
@@ -609,13 +616,12 @@ async fn folder(machines: &Machines, machine: &str, spoken: &str) -> Result<Stri
             _ => unread += 1,
         }
     }
-    pick_folder(spoken, &folders, unread)
+    Ok((folders, unread))
 }
 
-/// Cria a sessão; devolve o nome com que ela nasceu.
-// ponytail: modelo e esforço ficam com o padrão do servidor, que é o que o catálogo dá sem escolha lembrada (o servidor
-// não guarda o último modelo do aparelho).
-async fn create(machines: &Machines, machine: &str, request: &OpenRequest) -> Result<String, String> {
+/// Cria a sessão; devolve o nome com que ela nasceu. O que o usuário não disse fica com o padrão do servidor, como a tela de
+/// criação sem toque; o Claude sem modo dito nasce em `bypassPermissions`, o padrão do app.
+pub(super) async fn create(machines: &Machines, machine: &str, request: &OpenRequest) -> Result<String, String> {
     let cwd = folder(machines, machine, &request.folder).await?;
     let name = match &request.name {
         Some(name) => name.clone(),
@@ -625,8 +631,19 @@ async fn create(machines: &Machines, machine: &str, request: &OpenRequest) -> Re
             unique_name(folder_name(&cwd), &taken)
         }
     };
-    let mut body = json!({"name": name, "cwd": cwd, "provider": request.provider, "model": null, "effort": null});
-    if request.provider == "claude" { body["permission_mode"] = json!("bypassPermissions"); }
+    let mut body = json!({"name": name, "cwd": cwd, "provider": request.provider, "model": request.model, "effort": request.effort});
+    if let Some(engine) = &request.engine { body["engine"] = json!(engine); }
+    if let Some(headless) = request.headless { body["headless"] = json!(headless); }
+    match (&request.account, request.provider) {
+        (Some(account), "codex") => body["codex_account"] = json!(account),
+        (Some(account), _) => body["config_dir"] = json!(account),
+        (None, _) => {}
+    }
+    match (&request.permission, request.provider) {
+        (Some(mode), _) => body["permission_mode"] = json!(mode),
+        (None, "claude") => body["permission_mode"] = json!("bypassPermissions"),
+        (None, _) => {}
+    }
     let created = machines.call(machine, reqwest::Method::POST, "/api/sessions", Some(body)).await?;
     Ok(created["name"].as_str().filter(|n| !n.is_empty()).map_or(name, str::to_owned))
 }

@@ -280,6 +280,25 @@ válido (Let's Encrypt) → escaneie o QR / preencha o token → **Adicionar à 
   outros formatos usam o FFmpeg configurado ou encontrado no PATH. Falta de arquivo ou conversor
   aparece como erro. Só há reserva externa se você a acrescentar à lista. A transcrição requer
   o `hangar-server` Rust; o modo Python não contém um segundo motor.
+- **Organização do ditado no desktop nativo:** em **Configurações → Voz → Organização do texto**,
+  escolha **Sem organização** (padrão), **Harness da conversa** ou **API externa**. Sem organização
+  entrega o texto da transcrição e dispensa um serviço de organização. No harness, escolha o modelo
+  disponível na conta da conversa aberta; Claude e Codex têm preferências separadas. A chamada é
+  independente da conversa principal; o Hangar fornece transcrição e prompt de estilo. Claude usa
+  a autenticação original da conta de destino, inclusive a assinatura por login OAuth, e seu SDK
+  acrescenta metadados de ambiente e identificação da conta. O histórico e as instruções globais
+  ou do projeto ficam fora da chamada.
+  Com organização ligada, **Só limpar**, **Reorganizar** e **Briefing** mantêm as travas contra
+  invenção e perda de conteúdo. Frase com menos de cinco palavras ou começando com `/` é preservada.
+  Falha de serviço, modelo indisponível ou saída recusada conserva o cru com aviso, sem recorrer a
+  outra conta. Os botões de versão permitem recuperar **Cru** e mudar o estilo sem repetir o STT.
+  Áudio anexado como arquivo continua sem organização. No celular (PWA e app), a escolha de estilo
+  só aparece com a organização ligada no servidor; desligada, o campo avisa que o texto vai cru.
+- **Referência de grafia opcional:** com organização ligada, **Usar as três últimas mensagens**
+  envia somente texto de usuário e assistente da conversa de destino, em ordem, limitado a 2.000
+  caracteres por mensagem. Nasce desligado. Serve para conferir nomes e termos, sem completar a
+  fala com conteúdo do diálogo; ferramentas e pensamento ficam fora. Ao trocar o estilo, o app
+  reutiliza a referência capturada na primeira organização.
 - **Voz ao vivo (Beta):** uma conversa falada com um assistente que lê e acompanha as sessões,
   troca de sessão pela fala, manda pedidos a elas e, no modo **Planejar**, monta um plano antes de
   mandar. Nasce desligada: ative em **Configurações → Harnesses → Codex → Opções → Conversa por
@@ -292,22 +311,43 @@ válido (Let's Encrypt) → escaneie o QR / preencha o token → **Adicionar à 
     com ela aberta, outro toque abre o painel (silenciar, modo **Direto**/**Planejar**, ajustes,
     **Servidor da voz**, **Encerrar**). No celular a voz só troca de sessão; ler a tela e clicar
     ficam para o PC.
+  - **O que mais ela faz pela fala:** reabre a conversa que você fechou sem querer ("reabre a
+    auditoria-migracao", "reabre a última que eu fechei"), que volta com o nome que tinha e abre na
+    tela; diz o que você fechou e acha conversa pelo assunto; lista as pastas onde dá para abrir sessão
+    e abre sessão nova com o agente, modelo, conta ou modo que você disser; roda os atalhos do Hangar
+    ("abre a VM"); diz quais máquinas estão respondendo; interrompe uma sessão. Fechar e interromper
+    sessão, atalho marcado para confirmar, atalho de comando do repositório e comando que apaga ou
+    publica algo sempre esperam o seu "sim" falado. Ela usa os botões
+    da tela só quando não há outro jeito.
   - **Ajustes** (conta Codex, voz, modelo, esforço e velocidade de cada modo) ficam salvos no
     servidor e valem para qualquer aparelho.
   - **Uma conversa por servidor.** Abrir a voz em outro aparelho passa a conversa para ele; o
     anterior mostra "A conversa passou para outro aparelho." Se o aparelho sair (app fechado, rede
     caiu), reabrir em até 2 minutos retoma a mesma conversa do assistente; depois disso ela termina.
+  - **Peça silêncio até voltar.** "Vou sair uns minutos, não me avisa nada até eu voltar": as respostas
+    das sessões ficam guardadas, nada é falado e o trabalho continua. O silêncio não acaba sozinho; quando
+    você disser "voltei" ou "me dá o resumo", ela resume o que chegou, uma resposta por vez.
+  - **O que a voz lembra.** Ela guarda poucos fatos entre uma conversa e outra (quem você é, como
+    gosta de ser respondido, onde ficam seus projetos) e começa cada conversa já sabendo disso. Na
+    primeira conversa, logo ao conectar, ela se apresenta e pede licença para ler, só leitura, seu
+    `~/.claude/CLAUDE.md` e seus `~/.codex/AGENTS*.md`, e pergunta o que você faz e como prefere as
+    respostas. Depois de ler, ela conta o que entendeu ("Entendi que você … — confere?") e pergunta
+    como você quer usar a voz (acompanhar sessões, mandar pedidos, planejar); só guarda depois que você
+    confirmar ou corrigir, e nunca senha, token ou IP. Em seguida pede outra licença para
+    olhar só os nomes das suas pastas principais (o primeiro nível de `~/Projetos`, por exemplo) e
+    propõe poucas referências, como "`~/Projetos/hangar` parece ser o Hangar — confere?", guardadas só
+    depois do seu sim; não lê código nem arquivos ocultos. Se você recusar algum dos dois, ela guarda isso e não pergunta de novo. Essa lista é a
+    memória da voz; a memória do próprio Codex não entra nela. Só grava ou apaga num turno em que você falou. O que você
+    pede vale desde já e manda no jeito padrão dela (por exemplo, "ao entrar numa sessão, me resume o que ela fez"
+    faz a troca de sessão resumir sem perguntar), menos nas confirmações de segurança. Cada memória tem até 240
+    caracteres; se passar, ela avisa que cortou. Para ver ou apagar,
+    abra os ajustes da voz e procure **O que a voz lembra**; com a lista aberta durante a conversa, o que a voz grava
+    ou apaga aparece na hora. A lista fica no arquivo
+    `~/.hangar/voz/memoria.json`, no servidor, mas o texto dela segue para o provedor do assistente
+    (a OpenAI, pelo Codex) a cada conversa. Na primeira conversa, o conteúdo dos arquivos que ela
+    lê (`~/.claude/CLAUDE.md`, os `AGENTS*.md`, os nomes de pasta) também vai para esse provedor.
   - O áudio vai direto do aparelho ao serviço de voz da OpenAI; o servidor só conduz a conversa. Só o dono usa a voz:
     num servidor aberto por convite o botão não aparece. O app Expo ainda não tem a voz.
-- **Limpeza do ditado:** o texto gravado pelo microfone passa por um modelo que aplica a correção
-  que você falou em voz alta — dizer "usa o postgres, não, o redis" vira "Usa o Redis." —, tira
-  hesitação ("é... tipo assim...") e pontua. Preserva nome de arquivo, caminho, comando, sigla e
-  número exatamente como foram ditados; não resume nem reescreve o estilo. Não mexe em texto que
-  começa com `/` (senão `/clear` viraria comando quebrado) nem em frase com menos de 5 palavras. Se
-  a limpeza falhar ou sair errada (resumir demais, ou "responder" em vez de limpar), fica o texto
-  cru e aparece um aviso explicando o motivo; o botão **↩ original** ao lado do campo repõe o texto
-  exatamente como saiu da transcrição. Vale só pra gravação pelo microfone — áudio anexado como
-  arquivo não passa por essa limpeza.
 - **Ditado mãos-livres:** chave **Enviar transcrição automaticamente** em Configurações → Voz,
   guardada **só neste aparelho** (não vai
   pro servidor; se você ligar no celular, o desktop continua sem). Com ela ligada, um toque no 🎤
@@ -324,13 +364,11 @@ válido (Let's Encrypt) → escaneie o QR / preencha o token → **Adicionar à 
   enviar e outro mais grave quando não deu pra enviar, pra dar pra saber sem olhar pra tela.
 - **Se estiver ouvindo uma resposta em voz** e você tocar o 🎤, a leitura para sozinha antes da
   gravação começar — sem isso o microfone captaria a própria voz do app.
-- **Provedor da limpeza e da leitura em voz:** por padrão usa a Groq (`openai/gpt-oss-120b`).
-  Pra apontar pra outro serviço compatível com a API da OpenAI, abra Configurações → Voz →
-  **Organização do texto** → **Usar outro serviço para organizar** e preencha **Endpoint da
-  organização**, **Chave da organização** e **Modelo da organização** (o Briefing pode ter um
-  modelo só dele). Fora do padrão essa chave é **obrigatória** (a chave da transcrição não é
-  reaproveitada pra outro host, de propósito). Com o endpoint vazio (padrão), ela não é usada em
-  nada — vale a **Chave da transcrição**, desde que a transcrição também use o serviço padrão.
+- **API externa para organizar:** selecione esse modo e preencha **Endpoint da organização**,
+  **Chave da organização** e **Modelo da organização**. Endpoint e modelo vazios usam o serviço
+  padrão compatível com OpenAI; a chave de organização é própria, inclusive no padrão. O Briefing
+  pode ter endpoint, chave e modelo próprios. Configuração antiga de LLM não liga a organização
+  automaticamente. A leitura em voz continua sendo uma capacidade configurada separadamente.
 - **Furar a fila (só Kimi):** mensagem mandada com a sessão trabalhando fica na fila **do Kimi** —
   ele processa quando o turno atual acabar. Enquanto houver fila, a fileira de cima do composer
   mostra **⏳ N na fila · mandar agora**; tocar manda o `ctrl-s` do Kimi e a fila **inteira** entra no

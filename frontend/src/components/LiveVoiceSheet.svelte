@@ -1,6 +1,7 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import BottomSheet from './BottomSheet.svelte';
-  import { liveVoiceStore, type LiveVoiceSettings } from '../lib/liveVoiceStore.svelte';
+  import { liveVoiceStore, listVoiceMemory, forgetVoiceMemory, type LiveVoiceSettings, type VoiceMemory } from '../lib/liveVoiceStore.svelte';
   import { renderMarkdown } from '../lib/markdown';
   import { listarCredenciais, modelOptionsForServer, type Credencial, type ModelOption } from '@hangar/core';
   import * as m from '../paraglide/messages';
@@ -90,6 +91,75 @@
     const list = chosen ? chosen.efforts ?? []
       : models.reduce<string[] | null>((acc, x) => acc === null ? [...x.efforts ?? []] : acc.filter(e => x.efforts?.includes(e)), null) ?? [];
     return list.includes(current) ? list : [current, ...list];
+  }
+
+  const KIND: Record<VoiceMemory['kind'], () => string> = {
+    pessoa: m.live_voice_memory_kind_pessoa, preferencia: m.live_voice_memory_kind_preferencia,
+    referencia: m.live_voice_memory_kind_referencia, projeto: m.live_voice_memory_kind_projeto,
+  };
+  let memory = $state<{ state: 'loading' | 'error' | 'ok'; items: VoiceMemory[] }>({ state: 'loading', items: [] });
+  // Resposta de um servidor que já não é o mostrado não vale.
+  let memoryFor = '';
+  // Leitura mais velha que outra leitura ou que um apagar não repinta a lista.
+  let memoryGen = 0;
+  let forgetFailed = $state(false);
+  // `silent`: releitura pedida pelo contador da voz; a lista fica na tela (sem piscar, sem perder a rolagem nem o aviso de falha).
+  async function loadMemory(silent = false) {
+    if (!target) return;
+    const key = memoryFor = target.id;
+    const gen = ++memoryGen;
+    if (!silent) {
+      forgetFailed = false;
+      memory = { state: 'loading', items: [] };
+    }
+    try {
+      const items = await listVoiceMemory(target);
+      if (memoryFor === key && memoryGen === gen) memory = { state: 'ok', items };
+    } catch (e) {
+      console.warn('live voice: memory unreadable', e);
+      // Releitura em segundo plano que falha não some com a lista que já estava na tela.
+      if (memoryFor === key && memoryGen === gen && !(silent && memory.state === 'ok')) memory = { state: 'error', items: [] };
+    }
+  }
+  // Recarrega ao abrir os ajustes e quando o servidor mostrado muda com eles abertos.
+  let settingsOpen = $state(false);
+  $effect(() => {
+    const id = target?.id;
+    if (settingsOpen && id) untrack(() => { void loadMemory(); });
+  });
+  // A voz gravou ou apagou uma memória: relê em silêncio. O fim da chamada (o contador volta a `undefined`) também relê, de
+  // propósito: a última gravação pode ter chegado depois do último retrato.
+  const memoryRev = $derived(inCall ? liveVoiceStore.state?.memory : undefined);
+  let seenRev: number | undefined;
+  $effect(() => {
+    const rev = memoryRev;
+    untrack(() => {
+      const changed = rev !== seenRev;
+      seenRev = rev;
+      if (changed && settingsOpen && target) void loadMemory(true);
+    });
+  });
+  async function drop(id: string) {
+    // A lista é de outro servidor: apagar aqui atingiria a máquina errada.
+    if (!target || memoryFor !== target.id) return;
+    const key = target.id;
+    const gen = ++memoryGen;
+    forgetFailed = false;
+    const gone = () => {
+      if (memoryFor !== key) return;
+      // Leitura iniciada durante o apagar pode trazer a entrada de volta: relê depois dele.
+      if (memoryGen !== gen) return void loadMemory();
+      memory = { state: 'ok', items: memory.items.filter(e => e.id !== id) };
+    };
+    try {
+      await forgetVoiceMemory(target, id);
+      gone();
+    } catch (e) {
+      // Já apagada por outro aparelho: a linha só sai.
+      if ((e as { code?: string }).code === 'memory_unknown') return gone();
+      console.warn('live voice: memory not forgotten', e);
+      if (memoryFor === key) forgetFailed = true;
+    }
   }
 
   let saving = $state(false);
@@ -231,7 +301,7 @@
     {/if}
 
     {#if reply}
-      <details class="lv-settings">
+      <details class="lv-settings" bind:open={settingsOpen}>
         <summary class="lv-label">{m.live_voice_settings()}</summary>
         {#key formKey}
         <label class="lv-field">
@@ -285,6 +355,27 @@
         {/each}
         {/key}
         {#if saveError}<p class="lv-error" role="alert">{saveError}</p>{/if}
+        <section class="lv-memory">
+          <h3 class="lv-label">{m.live_voice_memory_title()}</h3>
+          {#if memory.state === 'loading'}<p class="lv-muted" role="status">{m.comum_carregando()}</p>
+          {:else}
+            {#if memory.state === 'error'}<p class="lv-detail" role="alert">{m.live_voice_memory_error()}</p>{/if}
+            {#if forgetFailed}<p class="lv-detail" role="alert">{m.live_voice_memory_forget_failed()}</p>{/if}
+            {#if memory.items.length === 0}
+              {#if memory.state === 'ok'}<p class="lv-muted">{m.live_voice_memory_empty()}</p>{/if}
+            {:else}
+              <ul class="lv-lines">
+                {#each memory.items as e (e.id)}
+                  <li class="lv-mem">
+                    <span class="lv-mem-text"><span class="lv-mem-kind">{(KIND[e.kind] ?? (() => e.kind))()}</span> {e.text}
+                      {#if e.kind === 'projeto'}<span class="lv-muted"> · {e.confirmed}</span>{/if}</span>
+                    <button type="button" class="lv-mem-del" aria-label={m.live_voice_memory_forget({ text: e.text })} onclick={() => drop(e.id)}>✕</button>
+                  </li>
+                {/each}
+              </ul>
+            {/if}
+          {/if}
+        </section>
       </details>
     {/if}
   </div>
@@ -351,6 +442,12 @@
 
   .lv-settings { border-top: 1px solid var(--border-subtle); padding-top: var(--space-3); display: flex; flex-direction: column; gap: var(--space-3); }
   .lv-settings summary { cursor: pointer; padding: var(--space-1) 0; }
+  .lv-memory { display: flex; flex-direction: column; gap: var(--space-2); }
+  .lv-memory h3 { margin: 0; }
+  .lv-mem { display: flex; align-items: center; gap: var(--space-2); font-size: var(--text-sm); color: var(--text-secondary); word-break: break-word; }
+  .lv-mem-text { flex: 1; min-width: 0; }
+  .lv-mem-kind { color: var(--text-primary); font-weight: 600; }
+  .lv-mem-del { flex: none; min-width: 32px; min-height: 32px; background: transparent; color: var(--text-secondary); }
   .lv-mode { border: none; margin: var(--space-2) 0 0; padding: 0; display: flex; flex-direction: column; gap: var(--space-2); }
   .lv-field { display: flex; flex-direction: column; gap: 4px; margin-top: var(--space-2); font-size: var(--text-sm); color: var(--text-secondary); }
   .lv-field select { width: 100%; }

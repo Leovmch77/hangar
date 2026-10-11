@@ -1,9 +1,9 @@
 //! A chamada de voz: o organizador e a conversa falada rodam aqui; o WebRTC é do aparelho, que manda a oferta e o nível do
 //! microfone e recebe a resposta SDP.
-use super::{SendVerdict, log, observe, organizer, usage};
-use super::organizer::{Effective, FinishStep, MIC_VOICE_LEVEL, Mode, ModeModel, ModeModels, Planner, REPEAT_NOTE, REPEAT_WINDOW, Results, SEND_UNCONFIRMED, SpeechHold,
-    ConfirmGate, Consent, SendConsent, SendGate, SpokenTurns, ToolCall, finish_request, parse_tool, repeated_handoff, send_allowed, settings_update, spoken_input, tool_reply,
-    organizer_start, user_speech, ORGANIZER_PROMPT, VOICE_PROMPT};
+use super::{log, observe, organizer, usage};
+use super::organizer::{Effective, FinishStep, MIC_VOICE_LEVEL, Mode, ModeModel, ModeModels, Planner, REPEAT_NOTE, REPEAT_WINDOW, Results, SpeechHold,
+    ConfirmGate, SendGate, SpokenTurns, ToolCall, finish_request, parse_tool, repeated_handoff, send_allowed, settings_update, spoken_input, tool_reply,
+    organizer_start, ORGANIZER_PROMPT};
 use super::rpc::{Incoming, Rpc, RpcError, handshake};
 use serde_json::{Value, json};
 use std::{collections::VecDeque, path::PathBuf, sync::{Arc, atomic::{AtomicBool, Ordering}}, time::{Duration, Instant}};
@@ -26,8 +26,8 @@ pub enum VoiceEvent {
     /// `turn`: a fala que pediu. A tela não manda duas vezes à mesma sessão no mesmo turno.
     Send { call: CallId, request: String, session: Option<String>, turn: String },
     Mode(Mode), Plan { path: PathBuf, markdown: String }, AskSession(String), SendPlan { session: String, text: String },
-    /// Nome pedido e a fala do turno: a tela só troca quando a fala pede essa sessão.
-    SwitchSession { call: CallId, name: String, spoken: String, recent: String },
+    /// Nome pedido pelo organizador num turno com fala do usuário; nome ambíguo volta com as opções.
+    SwitchSession { call: CallId, name: String },
     /// Ações da tela do Hangar (catálogo e execução) e o `computer` para os outros programas.
     HangarActions(CallId), HangarAction { call: CallId, id: String, arg: Option<String> }, Computer(CallId, String),
     /// Leitura da tela do Hangar pela árvore de acessibilidade; `None` = a tela escolhe a área.
@@ -42,6 +42,8 @@ pub enum VoiceEvent {
     PairSessions(CallId, String, String), UnpairSession(CallId, String),
     /// Acompanhar: as respostas da sessão são faladas mesmo fora da tela.
     FollowSession(CallId, String), UnfollowSession(CallId, String),
+    /// Arquivo, pastas, atalhos, máquinas e interromper; `turn` separa o pedido do sim.
+    Assist { call: CallId, assist: organizer::Assist, turn: String },
     /// Modelo, esforço e velocidade que a thread do organizador usa de fato.
     Organizer(Effective),
     /// Uma linha dos bastidores: o que chegou ao organizador e o que ele respondeu (só tela, nunca diário).
@@ -54,6 +56,8 @@ pub enum VoiceEvent {
     AccountLimits { five_hour: usage::RateWindow, seven_day: usage::RateWindow },
     /// Só para a tela: pedaço do resumo do raciocínio, a ação em curso e o fim do turno, que limpa os dois.
     Thought(String), Action(Option<organizer::OrganizerAction>), TurnDone,
+    /// `remember`/`forget` gravaram: o painel "O que a voz lembra" aberto relê a lista.
+    MemoryChanged,
 }
 #[derive(Debug, Clone, PartialEq)]
 pub enum Backstage { Heard(String), Result(String), Answer(String) }
@@ -77,13 +81,15 @@ pub struct CallOptions { pub voice: Option<String>, pub context: String, pub cwd
     /// Quanto a chamada espera uma oferta nova depois que o áudio cai: o mesmo prazo do hub para o aparelho que sai.
     pub audio_grace: Duration,
     /// Quanto um comando do organizador pode rodar antes de o turno ser interrompido (`COMMAND_LIMIT` em produção).
-    pub command_limit: Duration }
+    pub command_limit: Duration,
+    /// Entrada do MCP `hangar` com a identidade desta chamada; `None` deixa o MCP desligado.
+    pub hangar_mcp: Option<Value> }
 
 /// Sobe o app-server: o filho de verdade em produção, um falso nos testes.
 pub type Spawn = Box<dyn FnOnce() -> futures_util::future::BoxFuture<'static, Result<(Rpc, async_channel::Receiver<Incoming>), RpcError>> + Send>;
 
 enum Command { Retarget(String, String, Option<PathBuf>), Result(String, String), Reply(Value, Value), SetMode(Mode), Models(ModeModels), Answer(String), PlanDelivered,
-    Sessions(Vec<String>), Jev { turn: String, verdict: SendVerdict, speech: Option<String>, note: Option<String> },
+    Sessions(Vec<String>), Jev { turn: String, speech: Option<String>, note: Option<String> },
     /// Número da oferta, SDP e a nota da sessão na tela do aparelho que ofereceu.
     Offer(u64, String, String), Live, Level(f32), Detached }
 
@@ -119,10 +125,9 @@ impl Voice {
     pub fn plan_delivered(&self) { let _ = self.commands.send(Command::PlanDelivered); }
     /// Nomes das sessões que a busca enxerga: o `set_mode` recusa quando a fala cita uma delas.
     pub fn set_sessions(&self, names: Vec<String>) { let _ = self.commands.send(Command::Sessions(names)); }
-    /// Veredito do Jev sobre a fala do turno. Quando a tela já agiu (trocou, abriu): `speech` a voz fala na hora e `note`
-    /// diz ao organizador que não repita nem fale.
-    pub fn jev_verdict(&self, turn: String, verdict: SendVerdict, speech: Option<String>, note: Option<String>) {
-        let _ = self.commands.send(Command::Jev { turn, verdict, speech, note });
+    /// A tela já agiu pelo Jev (trocou, abriu): `speech` a voz fala na hora e `note` diz ao organizador que não repita nem fale.
+    pub fn jev_verdict(&self, turn: String, speech: Option<String>, note: Option<String>) {
+        let _ = self.commands.send(Command::Jev { turn, speech, note });
     }
     pub fn stop(&self) {
         self.stopped.store(true, Ordering::Relaxed);
@@ -218,7 +223,17 @@ async fn run_call(options: CallOptions, spawn: Spawn, events: &async_channel::Se
     }
     let mut models = options.organizer.clone();
     let mut applied = models.direct.clone();
-    let start = organizer_start(&config, &own, options.cwd.as_deref(), &options.context, &applied, options.tools.clone());
+    let memory_file = super::memory::memory_path(&options.voice_dir);
+    // Ilegível: abre sem memória e sem convite de perfil; a tela mostra o erro. Vazia (sem arquivo ou sem entrada): a voz
+    // convida ao conectar, porque o organizador só fala depois de a pessoa falar.
+    let (note, onboarding) = match super::memory::load(&memory_file) {
+        Some(entries) => (organizer::memory_note(
+            &super::memory::prompt_block(&entries, chrono::Local::now().date_naive()), !entries.is_empty()), entries.is_empty()),
+        None => { log("memory unreadable"); (organizer::memory_note("", true), false) }
+    };
+    log(format!("memory onboarding={onboarding}"));
+    let start = organizer_start(&config, &own, options.cwd.as_deref(), &options.context, &applied, options.tools.clone(), &note,
+        options.hangar_mcp.as_ref());
     log(format!("organizer model={} effort={} tier={}", if applied.model.is_some() { "chosen" } else { "config" }, applied.effort,
         applied.tier.as_deref().unwrap_or("config")));
     // A conta lida em paralelo, com prazo curto: falhar só deixa os limites ocultos até a primeira atualização.
@@ -260,7 +275,7 @@ async fn run_call(options: CallOptions, spawn: Spawn, events: &async_channel::Se
             None => return Err(failed("device offer")(VoiceFailure::Closed)),
         }
     };
-    let mut realtime = json!({"threadId": thread, "version": "v3", "outputModality": "audio", "prompt": VOICE_PROMPT,
+    let mut realtime = json!({"threadId": thread, "version": "v3", "outputModality": "audio", "prompt": organizer::voice_prompt(onboarding),
         // O aviso curto de que ouviu sai da própria voz; o resumo do raciocínio deixa a voz saber o que o organizador faz.
         "includeStartupContext": false, "delegationAckFiller": true, "backendReasoningStatus": true, "clientManagedHandoffs": false,
         "realtimeStartInstructions": ORGANIZER_PROMPT, "initialItems": [{"role": "developer", "text": options.context}]});
@@ -317,15 +332,22 @@ async fn run_call(options: CallOptions, spawn: Spawn, events: &async_channel::Se
     let mut pending_context: Option<String> = None;
     let mut context_failures = 0u32;
     let mut session_names: Vec<String> = Vec::new();
-    let mut consent = Consent::send();
     // Comando destrutivo do organizador recusado à espera do sim falado.
     let mut command_gate: ConfirmGate<String> = ConfirmGate::default();
     // Última fala repassada (para reconhecer a repetida) e os itens de fala já tratados.
     let mut last_input: Option<(String, Instant)> = None;
     let mut seen_items: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Turno da última fala encaminhada e o que o usuário falou depois dela sem nova delegação: o envio desse turno não sai
+    // sem essa continuação.
+    let mut delegated: Option<(String, Instant)> = None;
+    let mut continuation: Vec<String> = Vec::new();
+    // A continuação passou do teto e perdeu o começo: o envio volta pedindo confirmação, não sai com o pedido cortado.
+    let mut continuation_cut = false;
+    // Turnos abertos por uma fala repetida: ela já foi tratada no turno original, então nada que age sai deles.
+    let mut repeated: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Turno cuja fala seguiu em transcrição depois da delegação, e desde quando: o envio dele espera a final.
+    let mut speaking: Option<(String, Instant)> = None;
     let mut out = Speech::default();
-    // Envio recusado por falta de pedido: se a fala seguinte o completar, o organizador é avisado para tentar de novo.
-    let mut refused_send: Option<Instant> = None;
     // Comandos do organizador em curso, por item: turno e prazo (um turno pode rodar mais de um).
     let mut running_commands: std::collections::HashMap<String, (String, Instant)> = std::collections::HashMap::new();
     let outcome = loop {
@@ -356,8 +378,9 @@ async fn run_call(options: CallOptions, spawn: Spawn, events: &async_channel::Se
             if out.away { out.park(text, "held"); } else { append_speech(&rpc, &thread, &text, "held").await; }
         }
         // No Planejar nada sai pelo gate; ao entrar nele o envio pendente já foi cancelado.
-        if planner.mode == Mode::Direct && let Some(((id, session, turn), request)) = gate.due(Instant::now()) {
-            consent.used();
+        let held = speaking.as_ref().filter(|(_, since)| since.elapsed() < organizer::STILL_SPEAKING_CAP).map(|(t, _)| t.clone());
+        if planner.mode == Mode::Direct
+            && let Some(((id, session, turn), request)) = gate.due_except(Instant::now(), |(_, _, t)| held.as_ref() == Some(t)) {
             log(format!("gate sent words={} named={}", request.split_whitespace().count(), session.is_some()));
             let _ = events.send(VoiceEvent::Draft(None)).await;
             let _ = events.send(VoiceEvent::Send { call: CallId(id), request, session, turn }).await;
@@ -377,7 +400,8 @@ async fn run_call(options: CallOptions, spawn: Spawn, events: &async_channel::Se
                     // A voz V3 nunca fala primeiro: sem isto a pessoa não tem prova de que o alto-falante funciona.
                     if !greeted {
                         greeted = true;
-                        let spoke = rpc.request("thread/realtime/appendSpeech", json!({"threadId": thread, "text": "Conectado. Pode falar."})).await;
+                        let spoke = rpc.request("thread/realtime/appendSpeech",
+                            json!({"threadId": thread, "text": organizer::greeting(onboarding)})).await;
                         log(format!("greeting appendSpeech ok={}", spoke.is_ok()));
                     }
                     // O que a voz ia falar durante a troca sai agora, na ordem; ela nunca fala primeiro, então se perderia.
@@ -429,16 +453,8 @@ async fn run_call(options: CallOptions, spawn: Spawn, events: &async_channel::Se
                     let _ = apply_models(&rpc, &thread, &mut applied, &models, planner.mode, &defaults, &mut effective, events).await;
                 }
                 Some(Command::PlanDelivered) => planner.delivered(),
-                Some(Command::Jev { turn, verdict, speech, note }) => {
-                    consent.jev(&turn, verdict, Instant::now());
-                    // O Jev pode responder depois que o pedido entrou na espera: o bloqueio vale para ele também.
-                    if verdict == SendVerdict::Block {
-                        for ((old, ..), _) in gate.take_where(|_, (_, _, t)| *t == turn) {
-                            log("gate cancelled: jev blocked the turn");
-                            let _ = rpc.respond(old, tool_reply("Cancelado: o pedido foi entendido como conversa; nada foi enviado.", false)).await;
-                        }
-                    }
-                    log(format!("jev verdict={verdict:?} note={} speech={}", note.is_some(), speech.is_some()));
+                Some(Command::Jev { turn, speech, note }) => {
+                    log(format!("jev acted note={} speech={}", note.is_some(), speech.is_some()));
                     if let Some(text) = speech { speak(&rpc, &thread, &mut out, text, "jev").await; }
                     // A tela já agiu: o organizador sabe no mesmo turno e não repete a ação.
                     if let Some(note) = note {
@@ -450,7 +466,7 @@ async fn run_call(options: CallOptions, spawn: Spawn, events: &async_channel::Se
                 }
                 Some(Command::Sessions(names)) => { log(format!("sessions known count={}", names.len())); session_names = names; }
                 Some(Command::Answer(text)) => {
-                    log(format!("session answer bytes={}", text.len()));
+                    log(format!("session answer bytes={} quiet={}", text.len(), results.quiet()));
                     if let Some(input) = results.push(String::new(), text) { start_summary(&rpc, &thread, input, &mut results, &mut out, organizer_busy).await; }
                 }
                 Some(Command::Retarget(name, context, cwd)) => {
@@ -468,7 +484,7 @@ async fn run_call(options: CallOptions, spawn: Spawn, events: &async_channel::Se
                     context_failures = 0;
                 }
                 Some(Command::Result(session, text)) => {
-                    log(format!("session result bytes={}", text.len()));
+                    log(format!("session result bytes={} quiet={}", text.len(), results.quiet()));
                     if let Some(input) = results.push(session, text) { start_summary(&rpc, &thread, input, &mut results, &mut out, organizer_busy).await; }
                 }
                 None => break Ok(()),
@@ -486,9 +502,26 @@ async fn run_call(options: CallOptions, spawn: Spawn, events: &async_channel::Se
                         ToolCall::FinishPlan { .. } | ToolCall::AskSession(_) | ToolCall::SetMode(_) | ToolCall::SwitchSession(_)
                             | ToolCall::OpenSession(_) | ToolCall::CloseSession { .. } | ToolCall::PairSessions(..) | ToolCall::UnpairSession(_)
                             | ToolCall::HangarAction { .. } | ToolCall::Computer(_) | ToolCall::ClickScreen { .. }
+                            | ToolCall::Remember { .. } | ToolCall::Forget(_) | ToolCall::Quiet(_)
                             if !spoken.allows(&params) => {
                             let _ = rpc.respond(id, tool_reply("Só a pedido falado do usuário.", false)).await;
                             "refused-not-spoken"
+                        }
+                        ToolCall::Assist(assist) if assist.acts() && !spoken.allows(&params) => {
+                            let _ = rpc.respond(id, tool_reply("Só a pedido falado do usuário.", false)).await;
+                            "refused-not-spoken"
+                        }
+                        ToolCall::Assist(assist) if assist.acts() && params["turnId"].as_str().is_some_and(|t| repeated.contains(t)) => {
+                            let _ = rpc.respond(id, tool_reply("Fala repetida; já tratada.", false)).await;
+                            "refused-repeated"
+                        }
+                        ToolCall::Send { .. } | ToolCall::FinishPlan { .. } | ToolCall::AskSession(_) | ToolCall::SwitchSession(_)
+                            | ToolCall::OpenSession(_) | ToolCall::CloseSession { .. } | ToolCall::PairSessions(..) | ToolCall::UnpairSession(_)
+                            | ToolCall::HangarAction { .. } | ToolCall::Computer(_) | ToolCall::ClickScreen { .. }
+                            | ToolCall::Remember { .. } | ToolCall::Forget(_)
+                            if params["turnId"].as_str().is_some_and(|t| repeated.contains(t)) => {
+                            let _ = rpc.respond(id, tool_reply("Fala repetida; já tratada.", false)).await;
+                            "refused-repeated"
                         }
                         ToolCall::Send { .. } | ToolCall::Hold(_) if !send_allowed(planner.mode) => {
                             let _ = rpc.respond(id, tool_reply("Modo Planejar: nada vai à sessão até finish_plan.", false)).await;
@@ -578,12 +611,7 @@ async fn run_call(options: CallOptions, spawn: Spawn, events: &async_channel::Se
                             }
                         }
                         // A resposta vem da tela (`Voice::reply`), depois de resolver o nome.
-                        ToolCall::SwitchSession(name) => {
-                            let recent = spoken.recent(&params).unwrap_or_default().to_owned();
-                            let spoken = spoken.text(&params).unwrap_or_default().to_owned();
-                            let _ = events.send(VoiceEvent::SwitchSession { call: CallId(id), name, spoken, recent }).await;
-                            "switch"
-                        }
+                        ToolCall::SwitchSession(name) => { let _ = events.send(VoiceEvent::SwitchSession { call: CallId(id), name }).await; "switch" }
                         ToolCall::HangarActions => { let _ = events.send(VoiceEvent::HangarActions(CallId(id))).await; "hangar-actions" }
                         ToolCall::HangarAction { id: action, arg } => { let _ = events.send(VoiceEvent::HangarAction { call: CallId(id), id: action, arg }).await; "hangar-action" }
                         ToolCall::ReadScreen(area) => { let _ = events.send(VoiceEvent::ReadScreen(CallId(id), area)).await; "read-screen" }
@@ -603,8 +631,65 @@ async fn run_call(options: CallOptions, spawn: Spawn, events: &async_channel::Se
                         }
                         ToolCall::PairSessions(a, b) => { let _ = events.send(VoiceEvent::PairSessions(CallId(id), a, b)).await; "pair" }
                         ToolCall::UnpairSession(name) => { let _ = events.send(VoiceEvent::UnpairSession(CallId(id), name)).await; "unpair" }
+                        ToolCall::Remember { kind, text, replaces } => {
+                            let today = chrono::Local::now().date_naive();
+                            // I/O de arquivo fora do worker da chamada (a trava é compartilhada com a rota DELETE).
+                            let (file, said) = (memory_file.clone(), text.clone());
+                            let done = tokio::task::spawn_blocking(move || super::memory::remember(&file, kind, &text, replaces.as_deref(), today)).await
+                                .inspect_err(|e| log(format!("memory task failed op=remember panic={}", e.is_panic()))).ok();
+                            match done {
+                                None => { let _ = rpc.respond(id, tool_reply("Não consegui gravar a memória.", false)).await; "memory-io" }
+                                Some(Ok(entry)) => {
+                                    let _ = rpc.respond(id, tool_reply(super::memory::saved_reply(&entry, &said), true)).await;
+                                    let _ = events.send(VoiceEvent::MemoryChanged).await;
+                                    "remembered"
+                                }
+                                Some(Err(super::memory::Refusal::Full(list))) => {
+                                    let ids: Vec<String> = list.iter().map(|e| format!("{} {}", e.id, e.text)).collect();
+                                    let _ = rpc.respond(id, tool_reply(format!("Memória cheia ({}). Substitua uma com replaces ou apague com forget:\n{}",
+                                        super::memory::MAX_ENTRIES, ids.join("\n")), false)).await;
+                                    "memory-full"
+                                }
+                                Some(Err(super::memory::Refusal::Unknown(missing))) => { let _ = rpc.respond(id, tool_reply(format!("Não existe memória {missing}."), false)).await; "memory-unknown" }
+                                Some(Err(super::memory::Refusal::Empty)) => { let _ = rpc.respond(id, tool_reply("Memória vazia não é guardada.", false)).await; "memory-empty" }
+                                Some(Err(super::memory::Refusal::Io(why))) => { let _ = rpc.respond(id, tool_reply(format!("Não consegui gravar a memória: {why}"), false)).await; "memory-io" }
+                            }
+                        }
+                        ToolCall::Forget(memory) => {
+                            let file = memory_file.clone();
+                            let done = tokio::task::spawn_blocking(move || super::memory::forget(&file, &memory)).await
+                                .inspect_err(|e| log(format!("memory task failed op=forget panic={}", e.is_panic()))).ok();
+                            match done {
+                                Some(Ok(true)) => {
+                                    let _ = rpc.respond(id, tool_reply("Apagado; já não vale nesta conversa.", true)).await;
+                                    let _ = events.send(VoiceEvent::MemoryChanged).await;
+                                    "forgot"
+                                }
+                                Some(Ok(false)) => { let _ = rpc.respond(id, tool_reply("Essa memória não existe.", false)).await; "forget-unknown" }
+                                Some(Err(_)) | None => { let _ = rpc.respond(id, tool_reply("Não consegui ler a memória para apagar.", false)).await; "memory-io" }
+                            }
+                        }
                         ToolCall::FollowSession(name) => { let _ = events.send(VoiceEvent::FollowSession(CallId(id), name)).await; "follow" }
                         ToolCall::UnfollowSession(name) => { let _ = events.send(VoiceEvent::UnfollowSession(CallId(id), name)).await; "unfollow" }
+                        ToolCall::Assist(assist) => {
+                            let turn = params["turnId"].as_str().unwrap_or_default().to_owned();
+                            let _ = events.send(VoiceEvent::Assist { call: CallId(id), assist, turn }).await;
+                            "assist"
+                        }
+                        ToolCall::Quiet(on) => {
+                            let held = results.held();
+                            let next = results.set_quiet(on);
+                            log(format!("quiet on={on} held={held}"));
+                            let reply = match (on, held) {
+                                (true, _) => "Silêncio ligado: os resultados das sessões ficam guardados e nada é falado até o usuário pedir.".to_owned(),
+                                (false, 0) => "Silêncio desligado; nenhum resultado chegou enquanto isso.".to_owned(),
+                                (false, n) => format!("Silêncio desligado; {n} resultado(s) guardado(s) chegam a seguir, um por vez, para você \
+                                    resumir. Não resuma antes deles."),
+                            };
+                            let _ = rpc.respond(id, tool_reply(reply, true)).await;
+                            if let Some(input) = next { start_summary(&rpc, &thread, input, &mut results, &mut out, organizer_busy).await; }
+                            if on { "quiet-on" } else { "quiet-off" }
+                        }
                         ToolCall::SetMode(_) if let Some(name) = organizer::mode_word_session(spoken.text(&params).unwrap_or_default(), &session_names) => {
                             let reply = format!("'{name}' é o nome de uma sessão, não o modo; use switch_session para ir até ela.");
                             let _ = rpc.respond(id, tool_reply(reply, false)).await;
@@ -616,35 +701,22 @@ async fn run_call(options: CallOptions, spawn: Spawn, events: &async_channel::Se
                             let _ = rpc.respond(id, tool_reply(note, true)).await;
                             "mode-set"
                         }
+                        ToolCall::Send { .. } if !continuation.is_empty() && delegated.as_ref().map(|(t, _)| t.as_str()) == params["turnId"].as_str() => {
+                            log(format!("send held: user kept talking parts={}", continuation.len()));
+                            let note = organizer::continuation_note(&std::mem::take(&mut continuation), std::mem::take(&mut continuation_cut));
+                            let replied = rpc.respond(id, tool_reply(note, false)).await;
+                            if replied.is_err() { log("continuation reply failed"); }
+                            "held-continuation"
+                        }
                         ToolCall::Send { request, session } => {
                             let turn = params["turnId"].as_str().unwrap_or_default().to_owned();
                             let to = session.clone().unwrap_or_default();
-                            let said = spoken.text(&params).unwrap_or_default().to_owned();
-                            let recent = spoken.recent(&params).unwrap_or_default().to_owned();
-                            let named = session.as_deref().is_some_and(|name| organizer::send_target_authorized(&said, &recent, name, &target, &session_names));
-                            // Pedido que ainda espera para o mesmo destino: o novo é correção dele, não envio a mais.
-                            let verdict = if gate.waiting_for(&to) { SendConsent::Granted } else { consent.check_to(&turn, &to, named, Instant::now()) };
-                            match verdict {
-                                SendConsent::Granted => match gate.offer((id, session, turn.clone()), &to, request, Instant::now()) {
-                                    Err(((id, ..), why)) => {
-                                        // Nada saiu: o reenvio completo no mesmo turno não pode virar "já enviado".
-                                        consent.release(&turn, &to);
-                                        let _ = rpc.respond(id, tool_reply(why, false)).await;
-                                        "refused-short"
-                                    }
-                                    Ok(Some(((old, ..), _))) => { let _ = rpc.respond(old, tool_reply("Substituído por um pedido mais recente; nada foi enviado.", false)).await; "offered-superseded" }
-                                    Ok(None) => "offered",
-                                },
-                                refused => {
-                                    // Só contagens: o texto da fala nunca vai ao diário.
-                                    let (verbs, directed, sessions) = organizer::send_signals(&said, &session_names);
-                                    log(format!("send refused why={refused:?} words={} send_verbs={verbs} directed={directed} sessions_named={sessions} named_target={named}",
-                                        said.split_whitespace().count()));
-                                    let reply = match refused { SendConsent::Duplicate => organizer::SEND_DUPLICATE, SendConsent::NotNamed => organizer::SEND_NOT_NAMED, _ => SEND_UNCONFIRMED };
-                                    if refused == SendConsent::Unconfirmed { refused_send = Some(Instant::now()); }
-                                    let _ = rpc.respond(id, tool_reply(reply, false)).await;
-                                    match refused { SendConsent::Duplicate => "refused-duplicate", SendConsent::NotNamed => "refused-not-named", _ => "refused-unconfirmed" }
-                                }
+                            // O organizador já entendeu a intenção e o destino pela conversa: sem trava de palavras. A repetição
+                            // para a mesma sessão no turno o controlador recusa (`sent_turn`); a que ainda espera é correção.
+                            match gate.offer((id, session, turn), &to, request, Instant::now()) {
+                                Err(((id, ..), why)) => { let _ = rpc.respond(id, tool_reply(why, false)).await; "refused-short" }
+                                Ok(Some(((old, ..), _))) => { let _ = rpc.respond(old, tool_reply("Substituído por um pedido mais recente; nada foi enviado.", false)).await; "offered-superseded" }
+                                Ok(None) => "offered",
                             }
                         }
                         ToolCall::Hold(request) => {
@@ -679,7 +751,10 @@ async fn run_call(options: CallOptions, spawn: Spawn, events: &async_channel::Se
                 Ok(Incoming::Request { id, method, params }) if method == "item/commandExecution/requestApproval" => {
                     let command = params["command"].as_str();
                     let destructive = command.is_none_or(organizer::destructive);
-                    let ok = organizer::approval_decision(command, spoken.text(&params),&mut command_gate,
+                    // Só fala certamente deste turno confirma: a final velha que abre o trecho seguinte não é um sim, e o turno
+                    // de uma fala repetida não tem fala nova.
+                    let said = spoken.sure_text(&params).filter(|_| !params["turnId"].as_str().is_some_and(|t| repeated.contains(t)));
+                    let ok = organizer::approval_decision(command, said.as_deref(), &mut command_gate,
                         params["turnId"].as_str().unwrap_or_default(), Instant::now());
                     // Só o desfecho: o texto do comando é conversa e não vai ao diário.
                     log(format!("command approval destructive={destructive} accepted={ok}"));
@@ -693,6 +768,30 @@ async fn run_call(options: CallOptions, spawn: Spawn, events: &async_channel::Se
                 Ok(Incoming::Request { id, method, params }) if method == "item/permissions/requestApproval" => {
                     log("permissions approval accepted=true scope=turn");
                     let _ = rpc.respond(id, json!({"permissions": params["permissions"], "scope": "turn"})).await;
+                }
+                // Os pedidos antigos do Codex também têm resposta na hora: nenhum fica esperando um clique que não existe.
+                Ok(Incoming::Request { id, method, params }) if method == "execCommandApproval" => {
+                    let command = params["command"].as_array().and_then(|parts| argv_line(parts));
+                    let said = spoken.sure_text(&params).filter(|_| !params["turnId"].as_str().is_some_and(|t| repeated.contains(t)));
+                    let ok = organizer::approval_decision(command.as_deref(), said.as_deref(), &mut command_gate,
+                        params["turnId"].as_str().unwrap_or_default(), Instant::now());
+                    log(format!("legacy command approval accepted={ok}"));
+                    let _ = rpc.respond(id, json!({"decision": if ok { "approved" } else { "denied" }})).await;
+                }
+                Ok(Incoming::Request { id, method, .. }) if method == "applyPatchApproval" => {
+                    log("legacy patch approval accepted=true");
+                    let _ = rpc.respond(id, json!({"decision": "approved"})).await;
+                }
+                // Só o MCP `hangar` fica ligado, e ele não pede formulário: o que vier dele é o Codex pedindo para usar a
+                // ferramenta. Vale como as outras ações: só em turno com fala do usuário que não seja repetida. O resto não
+                // tem quem preencha.
+                Ok(Incoming::Request { id, method, params }) if method == "mcpServer/elicitation/request" => {
+                    let accept = params["serverName"] == "hangar" && params["mode"] != "url" && spoken.allows(&params)
+                        && !params["turnId"].as_str().is_some_and(|t| repeated.contains(t));
+                    log(format!("mcp elicitation hangar={} accepted={accept}", params["serverName"] == "hangar"));
+                    let reply = if accept { json!({"action": "accept", "content": {}, "_meta": null}) }
+                        else { json!({"action": "decline", "content": null, "_meta": null}) };
+                    let _ = rpc.respond(id, reply).await;
                 }
                 Ok(Incoming::Request { id, method, .. }) => { log(format!("request {method} answered empty")); let _ = rpc.respond(id, json!({})).await; }
                 Ok(Incoming::Notification { method, params }) => {
@@ -714,7 +813,8 @@ async fn run_call(options: CallOptions, spawn: Spawn, events: &async_channel::Se
                     if method == "item/started" || method == "item/completed" { spoken.item_started(&params); }
                     // Cada fala uma vez: o started pode vir sem texto e o completed repete o item.
                     let text = organizer::user_message_text(&params).filter(|t| !t.trim().is_empty());
-                    let item_key = params["item"]["id"].as_str().filter(|id| !id.is_empty()).map(str::to_owned).or_else(|| text.clone()).unwrap_or_default();
+                    let item_key = params["item"]["id"].as_str().filter(|id| !id.is_empty()).map(str::to_owned)
+                        .or_else(|| text.as_ref().map(|t| format!("{}\n{t}", params["turnId"].as_str().unwrap_or_default()))).unwrap_or_default();
                     if (method == "item/started" || method == "item/completed")
                         && let Some(text) = text.clone()
                         && !organizer::from_hangar(&text) && !seen_items.contains(&item_key) {
@@ -727,18 +827,22 @@ async fn run_call(options: CallOptions, spawn: Spawn, events: &async_channel::Se
                         let repeat = last_input.as_ref().is_some_and(|(prev, at)| now.saturating_duration_since(*at) < REPEAT_WINDOW && repeated_handoff(prev, &input));
                         log(format!("handoff repeat={repeat}"));
                         if repeat {
-                            let steer = json!({"threadId": thread, "expectedTurnId": params["turnId"], "input": [{"type": "text", "text": REPEAT_NOTE}]});
+                            // No mesmo turno da original não há o que marcar; noutro, nada que age sai dele.
+                            if let Some(turn) = params["turnId"].as_str() && delegated.as_ref().is_none_or(|(d, _)| d != turn) {
+                                if repeated.len() >= 64 { repeated.clear(); }
+                                repeated.insert(turn.to_owned());
+                            }
+                            let steer =json!({"threadId": thread, "expectedTurnId": params["turnId"], "input": [{"type": "text", "text": REPEAT_NOTE}]});
                             let steered = rpc.request("turn/steer", steer).await;
                             log(format!("repeat note steered ok={}", steered.is_ok()));
                         } else {
-                            // Só fala nova vale como pedido de envio: a repetida reabriria um pedido já usado.
-                            let speech = user_speech(&text);
-                            let asked = consent.heard(&speech, &session_names, now);
-                            if asked && refused_send.take().is_some_and(|at| now.saturating_duration_since(at) < organizer::CONFIRM_WINDOW) {
-                                log("send completed by next speech");
-                                let note = organizer::SEND_COMPLETED_NOTE.to_owned();
-                                pending_context = Some(match pending_context.take() { Some(old) => format!("{old}\n{note}"), None => note });
-                            }
+                            // Só fala nova vai ao Jev: a repetida já foi tratada. A fala do turno é a separada em SpokenTurns.
+                            let speech = spoken.text(&params).unwrap_or_default().to_owned();
+                            // O trecho desta delegação já traz o que veio antes dela.
+                            delegated = params["turnId"].as_str().map(|t| (t.to_owned(), now));
+                            continuation.clear();
+                            continuation_cut = false;
+                            speaking = None;
                             if let Some(turn) = params["turnId"].as_str() {
                                 let recent = organizer::transcript_delta(&text).to_owned();
                                 let _ = events.send(VoiceEvent::Heard { turn: turn.to_owned(), speech, recent }).await;
@@ -805,7 +909,46 @@ async fn run_call(options: CallOptions, spawn: Spawn, events: &async_channel::Se
                     }
                     match method.as_str() {
                         "turn/started" => { organizer_busy = true; results.turn_started(); }
+                        // A fala que seguiu depois da delegação: o envio desse turno espera a final (com teto).
+                        "thread/realtime/transcript/delta" if params["role"] == "user" => {
+                            if speaking.is_none() && let Some((turn, at)) = &delegated && at.elapsed() >= organizer::CONTINUATION_AFTER {
+                                log("user still speaking after the delegation");
+                                speaking = Some((turn.clone(), Instant::now()));
+                            }
+                        }
+                        // Fala que fechou depois da delegação sem ser só a final dela: o envio desse turno não sai sem ela.
+                        "thread/realtime/transcript/done" if params["role"] == "user" => {
+                            speaking = None;
+                            let heard = params["text"].as_str().unwrap_or_default().trim();
+                            // Toda final ouvida: no trecho seguinte ela é fala velha, nunca a fala daquele turno.
+                            if !heard.is_empty() { spoken.heard_late(heard, Instant::now()); }
+                            if let Some((turn, at)) = delegated.clone() && !heard.is_empty() {
+                                if at.elapsed() < organizer::CONTINUATION_AFTER { log("late final ignored reason=early"); }
+                                else if organizer::same_utterance(spoken.text_of(&turn).unwrap_or_default(), heard) { log("late final ignored reason=same"); }
+                                else {
+                                    // Passou do teto: ficam os últimos trechos e o envio volta avisando do corte.
+                                    if continuation.len() >= organizer::CONTINUATION_CAP {
+                                        continuation.remove(0);
+                                        continuation_cut = true;
+                                        log("continuation truncated: cap");
+                                    }
+                                    continuation.push(heard.to_owned());
+                                    let waiting = gate.take_where(|_, (_, _, t)| *t == turn);
+                                    log(format!("user kept talking parts={} pending={}", continuation.len(), waiting.len()));
+                                    if !waiting.is_empty() {
+                                        let note = organizer::continuation_note(&std::mem::take(&mut continuation), std::mem::take(&mut continuation_cut));
+                                        for ((old, ..), _) in waiting {
+                                            if rpc.respond(old, tool_reply(note.clone(), false)).await.is_err() { log("continuation reply failed"); }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         "turn/completed" => {
+                            if params["turn"]["id"].as_str().is_some_and(|t| delegated.as_ref().is_some_and(|(d, _)| d == t)) {
+                                delegated = None; continuation.clear(); continuation_cut = false; speaking = None;
+                            }
+                            if let Some(turn) = params["turn"]["id"].as_str() { repeated.remove(turn); }
                             organizer_busy = false;
                             let _ = events.send(VoiceEvent::TurnDone).await;
                             spoken.turn_completed(&params);
@@ -859,8 +1002,20 @@ async fn run_call(options: CallOptions, spawn: Spawn, events: &async_channel::Se
     let (held, bytes) = out.hold.pending();
     if held > 0 { log(format!("held speech dropped at call end count={held} bytes={bytes}")); }
     if !out.parked.is_empty() { log(format!("parked speech dropped at call end count={}", out.parked.len())); }
+    if results.held() > 0 { log(format!("session results unspoken at call end count={} quiet={}", results.held(), results.quiet())); }
     let _ = rpc.request("thread/realtime/stop", json!({"threadId": thread})).await;
     outcome
+}
+
+/// argv do pedido antigo de aprovação → linha que `destructive` lê: argumento com espaço ou aspas vai entre aspas, senão
+/// `bash -lc "git push"` vira palavras soltas. Com os dois tipos de aspas não há como citar sem escape: sem linha, o comando
+/// conta como destrutivo.
+fn argv_line(parts: &[Value]) -> Option<String> {
+    parts.iter().map(|part| {
+        let arg = part.as_str()?;
+        if !arg.is_empty() && !arg.chars().any(|c| c.is_whitespace() || c == '"' || c == '\'') { return Some(arg.to_owned()); }
+        if !arg.contains('"') { Some(format!("\"{arg}\"")) } else if !arg.contains('\'') { Some(format!("'{arg}'")) } else { None }
+    }).collect::<Option<Vec<_>>>().map(|words| words.join(" "))
 }
 
 async fn send_limits(events: &async_channel::Sender<VoiceEvent>, limits: Option<(usage::RateWindow, usage::RateWindow)>) {
@@ -970,7 +1125,7 @@ mod tests {
         // Nunca o HOME real: a chamada cria a pasta própria e os planos aqui.
         let voice_dir = std::env::temp_dir().join(format!("hangar-voice-call-{}", std::process::id()));
         CallOptions { voice: None, context: "ctx".into(), cwd: None, target: "hangar".into(), organizer: ModeModels::default(), tools, handoff_same_thread: true, voice_dir,
-            audio_grace: Duration::from_secs(600), command_limit: COMMAND_LIMIT }
+            audio_grace: Duration::from_secs(600), hangar_mcp: None, command_limit: COMMAND_LIMIT }
     }
 
     async fn next_answer(events: &async_channel::Receiver<VoiceEvent>) -> (u64, String) {
@@ -1079,7 +1234,7 @@ mod tests {
         next_answer(&events).await;
         voice.live();
         voice.detached();
-        voice.jev_verdict("turn-1".into(), SendVerdict::Unsure, Some("resposta guardada".into()), None);
+        voice.jev_verdict("turn-1".into(), Some("resposta guardada".into()), None);
         let spoke = |m: &Value| m["method"] == "thread/realtime/appendSpeech" && m["params"]["text"] == "resposta guardada";
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert!(!std::iter::from_fn(|| seen.try_recv().ok()).any(|m| spoke(&m)), "sem aparelho, nada vai à voz");
@@ -1103,7 +1258,7 @@ mod tests {
         next_answer(&events).await;
         voice.live();
         // Com o aparelho presente, a fala sai na hora em vez de ficar guardada para o próximo.
-        voice.jev_verdict("turn-1".into(), SendVerdict::Unsure, Some("falada já".into()), None);
+        voice.jev_verdict("turn-1".into(), Some("falada já".into()), None);
         loop { let m = seen.recv().await.unwrap(); if m["method"] == "thread/realtime/appendSpeech" && m["params"]["text"] == "falada já" { break; } }
     }
 
@@ -1120,7 +1275,7 @@ mod tests {
         push.send(json!({"method": "thread/realtime/closed", "params": {"threadId": "t1", "reason": "peer_gone"}})).unwrap();
         audio_lost(&events).await;
         // Sem aparelho, a fala espera o próximo.
-        voice.jev_verdict("turn-1".into(), SendVerdict::Unsure, Some("guardada".into()), None);
+        voice.jev_verdict("turn-1".into(), Some("guardada".into()), None);
         voice.detached();
         voice.offer(2, "v=0 offer B".into(), "ctx".into());
         assert_eq!(next_answer(&events).await, (2, "v=0 answer 2".into()));
@@ -1224,6 +1379,17 @@ mod tests {
         }
     }
 
+    async fn until(seen: &mut tokio::sync::mpsc::UnboundedReceiver<Value>, what: &str, pred: impl Fn(&Value) -> bool) -> Value {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            match tokio::time::timeout_at(deadline, seen.recv()).await {
+                Ok(Some(m)) if pred(&m) => return m,
+                Ok(Some(_)) => {}
+                _ => panic!("não chegou: {what}"),
+            }
+        }
+    }
+
     /// O fim de outro turno não tira o comando da vigia; interrupção recusada não vira "parei o comando".
     #[tokio::test]
     async fn other_turn_ending_keeps_watching_and_a_refused_interrupt_says_nothing() {
@@ -1264,6 +1430,90 @@ mod tests {
         assert!(!std::iter::from_fn(|| seen.try_recv().ok()).any(|m| m["method"] == "turn/interrupt"));
     }
 
+    /// Fala do usuário diferente do `input` da voz: a fala separada é a fala certa do turno.
+    fn delegation(push: &tokio::sync::mpsc::UnboundedSender<Value>, turn: &str, said: &str) {
+        let text = format!("<realtime_delegation>\n<input>pedido {turn}</input>\n<transcript_delta>user: {said}\nuser: pedido {turn}</transcript_delta>\n</realtime_delegation>");
+        let _ = push.send(json!({"method": "item/started", "params": {"threadId": "t1", "turnId": turn,
+            "item": {"type": "userMessage", "id": format!("item-{turn}"), "content": [{"type": "text", "text": text}]}}}));
+    }
+
+    fn approval(push: &tokio::sync::mpsc::UnboundedSender<Value>, id: &str, turn: &str, command: &str) {
+        let _ = push.send(json!({"id": id, "method": "item/commandExecution/requestApproval", "params": {"threadId": "t1", "turnId": turn,
+            "itemId": format!("cmd-{id}"), "startedAtMs": 0, "command": command}}));
+    }
+
+    /// O caso real: `hangar-send --help` pediu aprovação e a voz mandou o usuário aprovar no app. O organizador nasce sem
+    /// pedido de aprovação para o comum; o que ainda vier é respondido na hora, e o destrutivo só passa com o sim falado.
+    #[tokio::test]
+    async fn approvals_are_answered_at_once_and_destructive_waits_for_the_spoken_yes() {
+        let (spawn, mut seen, push) = fake_app_server();
+        let (tx, events) = async_channel::unbounded();
+        let voice = Voice::start(options(json!([])), spawn, tx);
+        voice.offer(1, "v=0 offer A".into(), "ctx".into());
+        let start = until(&mut seen, "thread/start", |m| m["method"] == "thread/start").await;
+        assert_eq!(start["params"]["approvalPolicy"], "on-request");
+        assert_eq!(start["params"]["sandbox"], "danger-full-access");
+        next_answer(&events).await;
+        voice.live();
+        let decision = |id: &'static str| move |m: &Value| m["id"] == id && m.get("result").is_some();
+        approval(&push, "a1", "turn-0", "hangar-send --help");
+        assert_eq!(until(&mut seen, "a1", decision("a1")).await["result"]["decision"], "accept", "comando comum passa sem fala");
+        let _ = push.send(json!({"id": "f1", "method": "item/fileChange/requestApproval", "params": {"threadId": "t1", "turnId": "turn-0", "itemId": "p1"}}));
+        assert_eq!(until(&mut seen, "f1", decision("f1")).await["result"]["decision"], "accept");
+        delegation(&push, "turn-1", "apaga o arquivo a");
+        approval(&push, "a2", "turn-1", "rm a");
+        assert_eq!(until(&mut seen, "a2", decision("a2")).await["result"]["decision"], "decline", "o destrutivo espera o sim");
+        delegation(&push, "turn-2", "sim, pode apagar");
+        approval(&push, "a3", "turn-2", "rm a");
+        assert_eq!(until(&mut seen, "a3", decision("a3")).await["result"]["decision"], "accept", "o sim falado libera o mesmo comando");
+    }
+
+    #[test]
+    fn legacy_argv_keeps_quoted_arguments_whole() {
+        let line = argv_line(&[json!("bash"), json!("-lc"), json!("git push")]).unwrap();
+        assert_eq!(line, "bash -lc \"git push\"");
+        assert!(organizer::destructive(&line));
+        assert_eq!(argv_line(&[json!("echo"), json!("diz \"oi\"")]).as_deref(), Some("echo 'diz \"oi\"'"));
+        assert!(!organizer::destructive("echo 'diz \"oi\"'"));
+        assert_eq!(argv_line(&[json!("echo"), json!("it's \"x\"")]), None, "sem como citar: conta como destrutivo");
+        assert_eq!(argv_line(&[json!("ls"), json!(1)]), None);
+    }
+
+    fn quiet(push: &tokio::sync::mpsc::UnboundedSender<Value>, id: &str, turn: &str, on: bool) {
+        let _ = push.send(json!({"id": id, "method": "item/tool/call", "params": {"tool": "quiet", "arguments": {"on": on}, "turnId": turn, "threadId": "t1"}}));
+    }
+
+    /// O caso real: ele pediu silêncio até voltar e dois resultados foram anunciados mesmo assim. Em silêncio o resultado fica
+    /// guardado; só a volta pedida por ele o solta para o resumo.
+    #[tokio::test]
+    async fn quiet_holds_session_results_until_the_user_comes_back() {
+        let (spawn, mut seen, push) = fake_app_server();
+        let (tx, events) = async_channel::unbounded();
+        let voice = Voice::start(options(json!([])), spawn, tx);
+        voice.offer(1, "v=0 offer A".into(), "ctx".into());
+        next_answer(&events).await;
+        voice.live();
+        let reply = |id: &'static str| move |m: &Value| m["id"] == id && m.get("result").is_some();
+        quiet(&push, "q0", "turn-sem-fala", true);
+        assert_eq!(until(&mut seen, "q0", reply("q0")).await["result"]["success"], false, "sem fala do usuário não silencia");
+        delegation(&push, "turn-1", "vou sair dez minutos, não me avisa nada até eu voltar");
+        quiet(&push, "q1", "turn-1", true);
+        assert_eq!(until(&mut seen, "q1", reply("q1")).await["result"]["success"], true);
+        voice.session_result("auditoria".into(), "migração conferida".into());
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        let summary = |m: &Value| m["method"] == "turn/start"
+            && m["params"]["input"][0]["text"].as_str().is_some_and(|t| t.starts_with("[RESULTADO DA SESSÃO auditoria]"));
+        let quiet_log: Vec<Value> = std::iter::from_fn(|| seen.try_recv().ok()).collect();
+        assert!(!quiet_log.iter().any(summary), "em silêncio nada vira resumo");
+        assert!(!quiet_log.iter().any(|m| m["method"] == "thread/realtime/appendSpeech"
+            && m["params"]["text"].as_str().is_some_and(|t| t.contains("migração"))), "nem fala");
+        delegation(&push, "turn-2", "voltei, me dá o resumo");
+        quiet(&push, "q2", "turn-2", false);
+        let off = until(&mut seen, "q2", reply("q2")).await;
+        assert!(off["result"]["contentItems"][0]["text"].as_str().unwrap().contains("1 resultado"), "{off}");
+        until(&mut seen, "resumo do guardado", summary).await;
+    }
+
     #[tokio::test]
     async fn commands_before_the_offer_are_kept() {
         let (spawn, mut seen, _push) = fake_app_server();
@@ -1274,5 +1524,56 @@ mod tests {
         next_answer(&events).await;
         loop { if let VoiceEvent::Mode(Mode::Plan) = events.recv().await.unwrap() { break; } }
         loop { let m = seen.recv().await.unwrap(); if m["method"] == "thread/realtime/appendSpeech" { assert_eq!(m["params"]["text"], "Modo planejar."); break; } }
+    }
+
+    /// Conecta com a memória que `prepare` deixa na pasta e devolve (instruções do organizador, prompt da voz, primeira fala).
+    async fn connect_with_memory(prepare: impl FnOnce(&std::path::Path)) -> (String, String, String) {
+        let dir = tempfile::tempdir().unwrap();
+        prepare(&crate::voice::memory::memory_path(dir.path()));
+        let (spawn, mut seen, _push) = fake_app_server();
+        let (tx, events) = async_channel::unbounded();
+        let mut opts = options(json!([]));
+        opts.voice_dir = dir.path().to_path_buf();
+        let voice = Voice::start(opts, spawn, tx);
+        voice.offer(1, "v=0".into(), "ctx".into());
+        next_answer(&events).await;
+        voice.live();
+        let (mut developer, mut prompt) = (String::new(), String::new());
+        loop {
+            let m = seen.recv().await.unwrap();
+            match m["method"].as_str() {
+                Some("thread/start") => developer = m["params"]["developerInstructions"].as_str().unwrap().to_owned(),
+                Some("thread/realtime/start") => prompt = m["params"]["prompt"].as_str().unwrap().to_owned(),
+                Some("thread/realtime/appendSpeech") => return (developer, prompt, m["params"]["text"].as_str().unwrap().to_owned()),
+                _ => {}
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_memory_invites_at_connect() {
+        let (developer, prompt, first) = connect_with_memory(|_| {}).await;
+        assert_eq!(first, organizer::ONBOARDING_GREETING, "a voz convida antes de a pessoa falar");
+        assert!(prompt.contains("Primeira conversa"), "a resposta ao convite vai ao organizador");
+        assert!(developer.contains("Passo 1") && developer.contains("Passo 2") && developer.contains("só leitura")
+            && developer.contains("credencial") && developer.contains("MEMORY_SUMMARY") && !developer.contains("pausa natural"), "{developer}");
+    }
+
+    #[tokio::test]
+    async fn stored_memory_connects_without_invite() {
+        let (developer, prompt, first) = connect_with_memory(|file| {
+            crate::voice::memory::remember(file, crate::voice::memory::Kind::Pessoa, "Desenvolvedor", None,
+                chrono::Local::now().date_naive()).unwrap();
+        }).await;
+        assert_eq!(first, "Conectado. Pode falar.");
+        assert!(!prompt.contains("Primeira conversa") && !developer.contains("Passo 1"));
+        assert!(developer.contains("Desenvolvedor"), "{developer}");
+    }
+
+    #[tokio::test]
+    async fn unreadable_memory_connects_without_invite() {
+        let (developer, prompt, first) = connect_with_memory(|file| std::fs::write(file, b"{not json").unwrap()).await;
+        assert_eq!(first, "Conectado. Pode falar.");
+        assert!(!prompt.contains("Primeira conversa") && !developer.contains("Passo 1"));
     }
 }

@@ -57,3 +57,29 @@ def test_rota_whoami(mundo):
     r = c.get("/api/whoami", headers=h)
     assert r.status_code == 404 and r.json()["detail"]["code"] == "erro_sessao_desconhecida"
     assert c.get("/api/whoami").status_code == 401
+
+
+def _voice_signature(secret: str, nonce: str = "0a1b") -> str:
+    # Mesma conta do Rust (`voice::machines::voice_signature`).
+    import hashlib
+    import hmac
+    return f"{nonce}." + hmac.new(secret.encode(), f"hangar-voice:{nonce}".encode(), hashlib.sha256).hexdigest()
+
+
+def test_voz_assinada_vence_os_cabecalhos_de_sessao(mundo, monkeypatch):
+    from app import internal_api
+    monkeypatch.setattr(internal_api, "_secret", "s3")
+    assert quem_chama.resolver({"X-Hangar-Voice": _voice_signature("s3"), "X-Hangar-Pane": "%7"}) == ("voz", "voz")
+
+
+def test_voz_com_assinatura_errada_ou_sem_segredo_nao_cai_na_sessao(mundo, monkeypatch):
+    from app import internal_api
+    monkeypatch.setattr(internal_api, "_secret", "s3")
+    # Caractere fora do ASCII (o cabeçalho chega como latin-1) é recusa, não TypeError.
+    for value in (_voice_signature("outro"), "sem-ponto", "0a1b.", ".abc", "0a1b.é" + "0" * 63, "ñ.\udcff"):
+        with pytest.raises(quem_chama.SessaoDesconhecida):
+            quem_chama.resolver({"X-Hangar-Voice": value, "X-Hangar-Pane": "%7"})
+    # Sem o hangar-server de pé não há segredo, e nenhuma assinatura vale.
+    monkeypatch.setattr(internal_api, "_secret", None)
+    with pytest.raises(quem_chama.SessaoDesconhecida):
+        quem_chama.resolver({"X-Hangar-Voice": _voice_signature("s3")})

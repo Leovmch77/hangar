@@ -73,7 +73,7 @@ class _RustSettings(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    do_GET = do_PUT = _handle
+    do_GET = do_PUT = do_DELETE = _handle
 
     def log_message(self, format, *args):
         pass
@@ -178,6 +178,18 @@ def test_settings_get_and_put_reach_rust_for_owner_only(rust_settings, monkeypat
     _as_logged_guest(monkeypatch)
     assert _client().get("/api/voice/settings").status_code == 403
     assert _client().put("/api/voice/settings", content=body).status_code == 403
+    assert len(_RustSettings.seen) == 2
+
+
+def test_memory_get_and_delete_reach_rust_for_owner_only(rust_settings, monkeypatch):
+    headers = {"Authorization": f"Bearer {TOKEN}"}
+    assert _client().get("/api/voice/memory", headers=headers).json() == {"from": "rust", "method": "GET"}
+    assert _client().delete("/api/voice/memory/m1", headers=headers).json() == {"from": "rust", "method": "DELETE"}
+    assert [(s["method"], s["path"]) for s in _RustSettings.seen] == [
+        ("GET", "/__hangar_server/voice/memory"), ("DELETE", "/__hangar_server/voice/memory/m1")]
+    _as_logged_guest(monkeypatch)
+    assert _client().get("/api/voice/memory").status_code == 403
+    assert _client().delete("/api/voice/memory/m1").status_code == 403
     assert len(_RustSettings.seen) == 2
 
 

@@ -35,10 +35,15 @@ fn terminal_input_composer_proof() {
  assert!(ComposerSnapshot::parse("no composer").is_none());
  let empty=ComposerSnapshot::parse(&screen("")).unwrap();
  assert_eq!(ComposerSnapshot::parse(&screen("/clear │ [name]")).unwrap().proves("/clear",&empty),Proof::Present);
+ assert_eq!(ComposerSnapshot::parse(&screen("/compact <optional custom summarization instructions>")).unwrap().proves("/compact",&empty),Proof::Present);
+ assert_eq!(ComposerSnapshot::parse(&screen("/compact <a> <b>")).unwrap().proves("/compact",&empty),Proof::Unreadable);
  assert_eq!(ComposerSnapshot::parse(&screen("/clear [x] [name]")).unwrap().proves("/clear",&empty),Proof::Unreadable);
  assert_eq!(ComposerSnapshot::parse(&screen("/clear [a #1]")).unwrap().proves("/clear",&empty),Proof::Unreadable);
  let draft=ComposerSnapshot::parse(&screen("/clear [nota]")).unwrap();
  assert_eq!(draft.proves("/clear",&draft),Proof::Unreadable);
+ assert_eq!(ComposerSnapshot::parse(&screen("/compact <a #1>")).unwrap().proves("/compact",&empty),Proof::Unreadable);
+ let draft=ComposerSnapshot::parse(&screen("/compact <nota>")).unwrap();
+ assert_eq!(draft.proves("/compact",&draft),Proof::Unreadable);
 }
 #[test]
 fn terminal_input_composer_below_long_agent_panel() {
@@ -221,6 +226,9 @@ async fn terminal_input_native_process_io_writes_envelope_and_missing_socket_is_
  let dir=tempfile::tempdir().unwrap();let path=dir.path().join("native.sock");let listener=tokio::net::UnixListener::bind(&path).unwrap();let native=NativeMessage {socket:path,origin:"uds:/inbox".into(),sender:"peer".into(),mode:"bypass".into(),message_id:Some("uuid-message".into())};
  let peer=tokio::spawn(async move{use tokio::io::AsyncReadExt;let (mut socket,_)=listener.accept().await.unwrap();let mut bytes=Vec::new();socket.read_to_end(&mut bytes).await.unwrap();bytes});
  assert_eq!(ProcessIo::default().socket(&native,b"envelope\n".to_vec()).await.unwrap(),WriteOutcome::Written);assert_eq!(peer.await.unwrap(),b"envelope\n");
+ // Socket ausente de fato: o ouvinte fechado ainda aceita conexão enquanto um `fork` de outro teste
+ // da suíte segura o descritor dele até o `exec`.
+ std::fs::remove_file(&native.socket).unwrap();
  assert_eq!(ProcessIo::default().socket(&native,b"envelope\n".to_vec()).await.unwrap(),WriteOutcome::NotWritten);
 }
 #[tokio::test]

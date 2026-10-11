@@ -24,67 +24,33 @@ const READY_BUDGET:Duration=Duration::from_secs(120);
 /// pedidos da sessão, então um pedido sem teto prenderia os seguintes.
 const MODS_CALL_LIMIT:Duration=Duration::from_secs(crate::mods::surface::APP_CALL_MAX_S as u64 + 1);
 
-/// A cota do Claude muda devagar: uma consulta ao Python por conta a cada 5 minutos basta.
-const QUOTA_TTL:Duration=Duration::from_secs(300);
-const QUOTA_ACCOUNTS:usize=16;
-/// Python fora do ar: sem isto cada linha de status esperaria o prazo inteiro de novo.
-const QUOTA_DOWN_TTL:Duration=Duration::from_secs(30);
-
 #[derive(Clone)]
 pub struct PolicyClient {
     upstream:std::net::SocketAddr,
     secret:String,
     instance:String,
     http:crate::proxy::HttpClient,
-    /// `config_dir` -> (quando veio, `{"windows":[…]}`).
-    quota:Arc<std::sync::Mutex<BTreeMap<String,(Instant,Value)>>>,
-    /// `config_dir` -> quando a consulta não chegou ao Python (transporte ou prazo).
-    quota_down:Arc<std::sync::Mutex<BTreeMap<String,(Instant,())>>>,
+    /// Dono das cotas; sem ele a linha de status sai sem janelas.
+    accounts:Option<crate::accounts::AccountService>,
     diag:crate::diag::DiagClient,
     /// (primeira espera, teto) da repetição enquanto o Python não está pronto.
     ready_retry:(Duration,Duration),
 }
 
-/// Guarda no mapa limitado a `QUOTA_ACCOUNTS`, tirando a entrada mais antiga para caber a nova.
-fn remember<T>(cache:&std::sync::Mutex<BTreeMap<String,(Instant,T)>>,config_dir:&str,value:T) {
-    let Ok(mut cache) = cache.lock() else { return };
-    if !cache.contains_key(config_dir) && cache.len() >= QUOTA_ACCOUNTS {
-        if let Some(oldest) = cache.iter().min_by_key(|(_,(at,_))|*at).map(|(dir,_)|dir.clone()) { cache.remove(&oldest); }
-    }
-    cache.insert(config_dir.to_owned(),(Instant::now(),value));
-}
-
 impl PolicyClient {
     pub fn new(upstream:std::net::SocketAddr,secret:String,instance:String) -> Self {
         Self { upstream,diag:crate::diag::DiagClient::new(upstream,secret.clone()),secret,instance,http:crate::proxy::client(),
-            quota:Default::default(),quota_down:Default::default(),ready_retry:(READY_FIRST_WAIT,READY_BUDGET) }
+            accounts:None,ready_retry:(READY_FIRST_WAIT,READY_BUDGET) }
     }
     pub fn with_ready_retry(mut self,first_wait:Duration,budget:Duration) -> Self { self.ready_retry = (first_wait,budget); self }
-    /// Janelas de cota da conta, só quando vai formatar. Falha formata sem janelas e deixa o cache
-    /// anterior como está; o log leva o código, nunca o dado.
+    pub fn with_accounts(mut self,accounts:crate::accounts::AccountService) -> Self { self.accounts = Some(accounts); self }
+    /// Janelas de cota da conta, só quando vai formatar, lidas do módulo de contas (cache dele). Falha
+    /// formata sem janelas; o log leva o código, nunca o dado.
     pub async fn quota_windows(&self,key:&str,config_dir:&str) -> Option<Value> {
-        let cached = self.quota.lock().ok().and_then(|cache|cache.get(config_dir).cloned());
-        if let Some((at,value)) = &cached { if at.elapsed() < QUOTA_TTL { return Some(value.clone()); } }
-        let down = self.quota_down.lock().ok().and_then(|down|down.get(config_dir).map(|(at,_)|at.elapsed() < QUOTA_DOWN_TTL));
-        if down == Some(true) { return None; }
-        let query = form_urlencoded::Serializer::new(String::new()).append_pair("config_dir",config_dir).finish();
-        let fetched = tokio::time::timeout(POLICY_TIMEOUT,async {
-            let request = axum::http::Request::get(format!("http://{}/internal/quota?{query}",self.upstream))
-                .header("x-hangar-internal",&self.secret).body(axum::body::Body::empty()).map_err(|_|"quota_request")?;
-            let response = self.http.request(request).await.map_err(|_|"quota_transport")?;
-            if !response.status().is_success() { return Err("quota_refused"); }
-            let bytes = axum::body::to_bytes(axum::body::Body::new(response.into_body()),MAX_ENVELOPE).await.map_err(|_|"quota_limit")?;
-            let value:Value = serde_json::from_slice(&bytes).map_err(|_|"quota_json")?;
-            if value["windows"].is_array() { Ok(value) } else { Err("quota_shape") }
-        }).await.unwrap_or(Err("quota_timeout"));
-        match fetched {
-            Ok(value) => {
-                if let Ok(mut down) = self.quota_down.lock() { down.remove(config_dir); }
-                remember(&self.quota,config_dir,value.clone());
-                Some(value)
-            }
+        let accounts = self.accounts.as_ref()?;
+        match accounts.claude_windows(config_dir).await {
+            Ok(windows) => Some(json!({"windows":windows})),
             Err(code) => {
-                if matches!(code,"quota_transport" | "quota_timeout") { remember(&self.quota_down,config_dir,()); }
                 if crate::warn_limit::allow(Some(key),code) { tracing::warn!(key=%key,code=%code,"cota do Claude indisponível; a linha sai sem janelas"); }
                 None
             }

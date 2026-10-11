@@ -320,3 +320,47 @@ async def test_html_render_takes_html_or_url_never_both(identidade, monkeypatch)
         assert (await s.call_tool("html_render", {"url": url, "html": "<p></p>", "title": "t"})).is_error
         assert (await s.call_tool("html_render", {"title": "t"})).is_error
     assert sent == [{"session": sent[0]["session"], "title": "t", "draft": False, "url": url}]
+
+
+@pytest.fixture
+def voz(monkeypatch):
+    monkeypatch.setattr(quem_chama, "resolver",
+                        lambda h: (quem_chama.VOICE, quem_chama.VOICE) if h.get("x-hangar-voice") == "ok" else
+                        (_ for _ in ()).throw(quem_chama.SessaoDesconhecida(quem_chama.DICA)))
+
+
+async def test_voz_se_identifica_e_so_le_pelo_mcp(voz, monkeypatch):
+    from app import api
+    from app.models import CreatedSessionInfo
+    enviados, criadores, fechadas = [], [], []
+
+    async def input_prompt(name, body):
+        enviados.append((name, body.text))
+        return {"delivered": True}
+
+    async def create_session(body):
+        criadores.append(body.creator)
+        return CreatedSessionInfo(name=body.name, cwd=body.cwd)
+
+    async def kill_session(name, by=None):
+        fechadas.append(name); return {"ok": True, "warning": None}
+
+    monkeypatch.setattr(api, "input_prompt", input_prompt)
+    monkeypatch.setattr(api, "create_session", create_session)
+    monkeypatch.setattr(api, "kill_session", kill_session)
+    async with sessao_mcp({"X-Hangar-Voice": "ok"}) as s:
+        res = await s.call_tool("who_am_i", {})
+        assert res.structured_content == {"name": "voz", "origem": "voz", "kind": "voice",
+                                          "label": "assistente de voz do Hangar"}
+        for tool, args in (("send", {"alvo": "web", "texto": "terminei"}),
+                           ("new_session", {"nome": "n", "cwd": "/tmp", "provider": "codex"})):
+            res = await s.call_tool(tool, args)
+            assert res.is_error and "send_to_session" in res.content[0].text, tool
+        res = await s.call_tool("close_session", {"alvo": "web"})
+        assert res.is_error and "close_session" in res.content[0].text and "sim" in res.content[0].text
+        for tool, args in (("group", {"texto": "x"}), ("pair", {"alvo": "web"}), ("unpair", {}),
+                           ("browser_open", {"url": "http://x"}), ("browser", {"verbo": "snapshot"}),
+                           ("browser_batch", {"passos": []}), ("html_render", {"title": "t", "html": "<p>x</p>"})):
+            res = await s.call_tool(tool, args)
+            assert res.is_error and "assistente de voz" in res.content[0].text, tool
+    assert enviados == [] and criadores == [] and fechadas == [], "pelo MCP a voz só lê"

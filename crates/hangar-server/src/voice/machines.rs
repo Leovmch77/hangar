@@ -30,13 +30,38 @@ impl SelfApi {
         let status = resp.status();
         let value: Value = resp.bytes().await.ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(Value::Null);
         if status.is_success() { return Ok(value); }
+        // `detail.msg` é o formato `erro()` do Python (código, parâmetros e frase).
         let text = value["detail"]["message"].as_str()
+            .or_else(|| value["detail"]["msg"].as_str())
             .or_else(|| value["detail"].as_str())
             .or_else(|| value["message"].as_str())
             .map(str::to_owned)
             .unwrap_or_else(|| format!("O servidor recusou ({status})."));
         Err(CallError { certain: true, text })
     }
+
+    /// Entrada do MCP `hangar` na config da thread do organizador: o bearer do dono e a assinatura da chamada vão só aqui,
+    /// nunca no ambiente nem no prompt que o modelo lê. `None` quando o sistema não deu bytes aleatórios.
+    /// As tools liberadas ficam em `organizer::thread_config`.
+    pub fn voice_mcp(&self, internal_secret: &str) -> Option<Value> {
+        Some(json!({"enabled": true, "url": format!("{}/mcp/", self.base),
+            "http_headers": {"Authorization": format!("Bearer {}", self.token), VOICE_HEADER: voice_signature(internal_secret)?}}))
+    }
+}
+
+/// Cabeçalho que identifica a assistente de voz no MCP (`backend/app/quem_chama.py`).
+pub const VOICE_HEADER: &str = "X-Hangar-Voice";
+
+/// `<nonce>.<hmac>`: nonce novo a cada chamada e HMAC-SHA256 dele com o segredo interno, que só este servidor e o Python
+/// conhecem; o Python confere sem pedir nada ao Rust.
+pub fn voice_signature(secret: &str) -> Option<String> {
+    use ring::{hmac, rand::SecureRandom};
+    let mut nonce = [0u8; 16];
+    ring::rand::SystemRandom::new().fill(&mut nonce).ok()?;
+    let hex = |bytes: &[u8]| bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
+    let nonce = hex(&nonce);
+    let tag = hmac::sign(&hmac::Key::new(hmac::HMAC_SHA256, secret.as_bytes()), format!("hangar-voice:{nonce}").as_bytes());
+    Some(format!("{nonce}.{}", hex(tag.as_ref())))
 }
 
 /// `certain`: o outro lado respondeu e recusou, nada foi gravado; senão (rede, prazo, resposta ilegível) pode ter chegado.
@@ -162,6 +187,23 @@ mod tests {
         assert_eq!(m.label(HERE), "casa");
         let unnamed = Machines { own_label: String::new(), ..m };
         assert_eq!(unnamed.label(HERE), "este servidor", "sem id, a fala ainda nomeia a máquina");
+    }
+
+    #[test]
+    fn voice_mcp_carries_bearer_and_a_fresh_signature() {
+        let api = SelfApi::new("127.0.0.1:8765".parse().unwrap(), "tok");
+        let (a, b) = (api.voice_mcp("segredo").unwrap(), api.voice_mcp("segredo").unwrap());
+        assert_eq!(a["url"], "http://127.0.0.1:8765/mcp/");
+        assert_eq!(a["enabled"], true);
+        assert_eq!(a["http_headers"]["Authorization"], "Bearer tok");
+        let signature = a["http_headers"][VOICE_HEADER].as_str().unwrap();
+        assert_ne!(signature, b["http_headers"][VOICE_HEADER].as_str().unwrap(), "uma por chamada");
+        let (nonce, tag) = signature.split_once('.').unwrap();
+        assert_eq!((nonce.len(), tag.len()), (32, 64));
+        // Mesma conta do Python: HMAC-SHA256(segredo, "hangar-voice:" + nonce) em hex.
+        let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, b"segredo");
+        let expected: String = ring::hmac::sign(&key, format!("hangar-voice:{nonce}").as_bytes()).as_ref().iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(tag, expected);
     }
 
     #[tokio::test]

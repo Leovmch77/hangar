@@ -73,14 +73,14 @@ pub(super) async fn watcher(machines: Arc<Machines>, backoff: Backoff, done: mps
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tick.tick().await;
-        let (rows, _) = read_rows(&machines, &backoff).await;
+        let (rows, unreachable) = read_rows(&machines, &backoff).await;
         let fired = edges.update(&rows);
-        if done.send(Done::Watch { rows, fired }).is_err() { break; }
+        if done.send(Done::Watch { rows, unreachable, fired }).is_err() { break; }
     }
 }
 
 impl Controller {
-    pub(super) fn on_watch(&mut self, rows: Vec<(String, SessionRow)>, fired: Vec<(Key, SessionRow)>) {
+    pub(super) fn on_watch(&mut self, rows: Vec<(String, SessionRow)>, unreachable: &[String], fired: Vec<(Key, SessionRow)>) {
         // A chamada conhece os nomes para o `set_mode` não confundir sessão com modo.
         let names: Vec<String> = rows.iter().map(|(_, r)| r.name.clone()).collect();
         if names != self.session_names {
@@ -88,6 +88,7 @@ impl Controller {
             self.session_names = names;
         }
         self.rows = rows;
+        self.rows_changed(unreachable);
         let screen = self.screen_key();
         for (key, row) in fired {
             let asked = self.watched.remove(&key);

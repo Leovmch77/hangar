@@ -145,7 +145,7 @@ export function NewConversation({
   const [attachMenuOpen, setAttachMenuOpen] = useState(false);
   const [styleMenuOpen, setStyleMenuOpen] = useState(false);
   const [focused, setFocused] = useState(false);
-  const dictationStyle = useDictationStyleLabel();
+  const dictationStyle = useDictationStyleLabel(server);
   const [sheet, setSheet] = useState<'folder' | 'options' | null>(null);
   const closeOptionsRef = useRef<View>(null);
   const sheetOpener = useRef<View | null>(null);
@@ -490,7 +490,7 @@ export function NewConversation({
         {folderPanel(closeSheet)}
       </AnchoredPanel>
 
-      <DictationStyleMenu open={styleMenuOpen} onClose={() => setStyleMenuOpen(false)} />
+      <DictationStyleMenu open={styleMenuOpen} onClose={() => setStyleMenuOpen(false)} server={server} />
       <AttachSheet
         open={attachMenuOpen}
         onClose={() => setAttachMenuOpen(false)}

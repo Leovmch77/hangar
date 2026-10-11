@@ -1872,7 +1872,7 @@ pelo Rust, com e sem terminal. Decisões:
   `/select`, o Rust é a referência (`unknown` não é "não convergiu"), e o Python foi alinhado a
   ele; só `no_pending_permission` vira "nenhum pedido pendente", o resto segue 503 com o motivo.
 - **Preparo do prompt, linha de status e catálogo de skills rodam no Rust.** Falha da linha de
-  status continua cosmética (não derruba a sessão); `/internal/quota` usa só o cache do Rust.
+  status continua cosmética (não derruba a sessão); a cota vem do módulo de contas do Rust.
 
 **Perda conhecida.** Com o Python na frente, um envio que ficou sem resposta porque o Rust caiu
 era repetido com o mesmo `operation_id` no Rust novo (`_repeat_after_crash`,
@@ -1925,6 +1925,45 @@ segue como antes. Desenho: [desenho.md](../migracao-rust/parte6-grupos/desenho.m
   antes): a saúde ganhou `groups`, e o filho recebe `HANGAR_SERVER_ID`, `HANGAR_PEERS_FILE` e
   `HANGAR_PAIR_ARCHIVE`.
 
+## Organização opcional do ditado no Rust
+
+Decisão e prova da issue 146 (10/10/2026): organização nasce em `none`, inclusive quando já há
+credenciais antigas de LLM. `harness` usa a conta da conversa de destino, com modelo de organização
+separado para Claude e Codex; `external_api` usa somente endpoint, chave e modelo próprios.
+Transcrição, narração e organização continuam capacidades separadas.
+
+O organizador, os prompts, as travas de conteúdo e os produtores de catálogo Claude/Codex moram em
+`crates/hangar-server/src/dictation/`. A porta privada recebe JSON autenticado, com limite de corpo;
+o protocolo interno passou a 52 nos dois lados. Python conserva autenticação, upload, configuração
+e transporte. Saíram o motor de ditado de `narrar.py` e a reserva `_via_claude`, inclusive do cliente
+externo compartilhado; narração, sugestão e tradução continuam usando esse cliente sem reserva.
+O parser/cache da TUI existente é outro consumidor e não organiza ditado.
+
+O nativo guarda modo, estilo, modelo, conta e geração antes da gravação. Revisão reaproveita o cru
+sem repetir STT; conta ou conversa recriada é recusada. Falha de organização conserva o texto exato
+obtido no STT e devolve aviso com código. A autenticação da conta fica protegida pela trava
+compartilhada até terminar a árvore auxiliar, inclusive no cancelamento. None não consulta catálogo,
+LLM nem histórico. Um modelo não escolhido no snapshot não passa a herdar uma escolha posterior.
+
+`dictation_include_recent_messages` nasce `false`. Quando ligado, o Rust lê o transcript estruturado
+da conversa de destino, seleciona as três últimas mensagens de usuário/assistente e limita cada uma
+a 2.000 caracteres Unicode. Ferramentas e pensamento ficam fora. O prompt cita esses dados somente
+como referência de grafia, sem seguir instruções nem completar a fala. A primeira organização
+devolve a referência congelada; as revisões reutilizam esse snapshot e as travas de honestidade.
+
+Provas: testes de configuração antiga, identidade, geração, conta, catálogo, travas, falhas e
+cancelamento; janela isolada do nativo com seleção dos modos, opção de referência salva, pedido com
+destino/geração e recuperação pela versão Cru. Fala sintética em português passou pelo whisper.cpp
+instalado: None preservou exatamente o STT sem chamada de organização; API externa fez somente as
+três chamadas solicitadas. A resposta da API nessa prova era sintética; os casos de transformação
+e rejeição foram conferidos pelo corpus portado e pelos testes do motor Rust.
+
+O isolamento dos CLIs foi conferido no pedido HTTP emitido pelos executáveis reais, usando o
+construtor Rust e um provedor local, conforme [a prova dos harnesses](harnesses.md#organização-mínima-do-ditado).
+Claude preserva a autenticação original da conta, inclusive assinatura OAuth; não abre login nem usa outra conta.
+O SDK acrescenta contexto interno de ambiente e identificação da conta, descrito na prova dos
+harnesses; não confundir esse overhead com histórico ou instruções do projeto.
+
 ## Migrar é migrar o caminho inteiro
 
 Medido em 11/10/2026. Contas e cotas passaram ao Rust em 08/10 (`279b303db`), mas a linha de status
@@ -1939,8 +1978,41 @@ contava threads `asyncio_N` e o uvloop nomeia `ThreadPoolExecutor-N_M` (mostrava
 
 - **Remédio imediato** (`c8e4bef1e`, PR #148): `/internal/accounts/quotas` roda num pool próprio
   (`quota-facts`, 4) e o monitor reconhece as threads do uvloop.
-- **Remédio de fundo:** o ator lê a cota do módulo de contas do próprio Rust e o
-  `/internal/quota` sai do Python.
+- **Remédio de fundo** (protocolo 54): o ator lê a cota em `AccountService::claude_windows`
+  (cache em disco das contas, e a API da Anthropic quando vencido) e o `/internal/quota` saiu do
+  Python. Token vencido nesse caminho não renova: a linha sai sem janelas até o ciclo de
+  renovação de fundo trocá-lo, porque a renovação ainda abre a janela de login pelo Python.
 - **Regra:** ao migrar uma responsabilidade, a mesma tarefa procura e apaga os chamadores que
   sobraram nos dois lados. Uma ponte que vai e volta entre os processos no mesmo pedido é bug de
   desenho, não detalhe de desempenho.
+
+## Processos que usam uma conta: o Claude Desktop não é cliente
+
+Medido em 11/10/2026. O Claude Desktop (app da Anthropic, Electron) se chama `claude`, junta o argv
+numa linha e escreve o título por cima da área do ambiente: o `/proc/<pid>/environ` dele tem 3120
+bytes, todos zero ou, quando o título transborda do argv, o resto da própria linha de comando. Na varredura Python, ambiente sem entrada contava como "não sei", e com o app aberto
+excluir, renomear e entrar numa conta Codex recusavam sempre com `account_usage_unknown`. Na
+varredura do Rust (`accounts/usage.rs`) a variável lida dali sai ausente, e o app passava por
+cliente da conta Claude padrão (`~/.claude`), o que segura a renovação e a exclusão dela.
+
+- **Processo sem a variável cujo ambiente foi coberto pelo título não cai na conta padrão**
+  (`ProcessView::environ_erased`: bytes em que tudo o que não é zero aparece na linha de comando).
+  Um ambiente de verdade tem entradas que o argv não tem (`PATH`, `HOME`), e nenhum CLI de conta
+  reescreve o título por cima dele. A regra só decide no ramo da conta padrão: com a variável lida,
+  ela não entra. Exigir "nenhuma entrada `NOME=valor`" deixava passar o título transbordado, que
+  traz `=`.
+- **A varredura usa um leitor sem o teto de cache da lista** (`SystemProcs::whole_machine`): ela
+  passa por todos os processos da máquina, e o teto de 256 despejava entradas e anotava
+  "cache da lista cheio" no diário a cada varredura.
+- **A varredura Python saiu.** O `retire_terminal_birth` do adaptador Codex pergunta ao Rust se o
+  `app_pid` da sessão usa a conta (`{"process_uses": chave, "pid": n}` em
+  `/__hangar_server/accounts`), sem varrer a máquina: a pergunta se repete a cada 1 s por sessão
+  até aposentar, e um processo alheio ilegível não pode segurá-la. Sem o Rust, o nascimento não se
+  aposenta e a pergunta se repete. Contrato interno 55.
+
+A conta Codex com login revogado aparecia em "Outros agentes", sem Entrar. O `account/read` do Codex
+responde erro interno (`-32603`) com a mensagem citando `unauthorized (401)`, e o leitor do Rust
+juntava isso às falhas sem resposta (`method: unknown`). Agora a recusa do login vira conta
+desconectada (`method: none`), que os dois clientes já mostram com Entrar; prazo, CLI ausente e
+outras falhas continuam `unknown`. No nativo, a conta Codex do app fica em Assinaturas mesmo com o
+login `unknown`: "Outros agentes" é o grupo das chaves de API.

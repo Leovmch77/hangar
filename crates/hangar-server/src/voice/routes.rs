@@ -132,6 +132,42 @@ pub async fn private_settings(State(st): State<Arc<AppState>>, ConnectInfo(peer)
     settings_reply(&st, req, home, claude_dir).await
 }
 
+pub async fn memory_route(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
+    let (fwd, owner) = crate::routes::gate(&st, peer, &req);
+    if !owner { return crate::routes::pass(&st, req, &fwd).await; }
+    let headers = req.headers().clone();
+    let mut resp = memory_reply(&st, req, "/api/voice/memory").await;
+    crate::routes::cors(&headers, resp.headers_mut());
+    resp
+}
+
+/// Ponte do Connect para a memória: mesma resposta do dono, sem CORS (quem lê é o Python).
+pub async fn private_memory(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
+    if !crate::workspace_routes::private_ok(&st, peer, req.headers()) { return StatusCode::NOT_FOUND.into_response(); }
+    memory_reply(&st, req, "/__hangar_server/voice/memory").await
+}
+
+async fn memory_reply(st: &AppState, req: Request, base: &str) -> Response {
+    let file = super::memory::memory_path(&settings::voice_dir(st.voice.home()));
+    let id = req.uri().path().strip_prefix(base).and_then(|rest| rest.strip_prefix('/')).filter(|s| !s.is_empty()).map(str::to_owned);
+    match (req.method().clone(), id) {
+        (Method::GET, None) => match tokio::task::spawn_blocking(move || super::memory::load(&file)).await {
+            Ok(Some(entries)) => json_response(StatusCode::OK, json!({"entries": entries})),
+            Ok(None) => { super::log("voice memory read failed code=memory_unreadable"); refuse(StatusCode::INTERNAL_SERVER_ERROR, "memory_unreadable") }
+            Err(_) => { super::log("voice memory read task failed code=memory_task_failed"); refuse(StatusCode::INTERNAL_SERVER_ERROR, "memory_task_failed") }
+        },
+        (Method::DELETE, Some(id)) => match tokio::task::spawn_blocking(move || super::memory::forget(&file, &id)).await {
+            Ok(Ok(true)) => json_response(StatusCode::OK, json!({"ok": true})),
+            Ok(Ok(false)) => refuse(StatusCode::NOT_FOUND, "memory_unknown"),
+            Ok(Err(why)) => { super::log(format!("voice memory delete failed code=memory_io kind={}", refusal_kind(&why))); refuse(StatusCode::INTERNAL_SERVER_ERROR, "memory_io") }
+            Err(_) => { super::log("voice memory delete task failed code=memory_task_failed"); refuse(StatusCode::INTERNAL_SERVER_ERROR, "memory_task_failed") }
+        },
+        _ => refuse(StatusCode::METHOD_NOT_ALLOWED, "method_not_allowed"),
+    }
+}
+
+fn refusal_kind(why: &super::memory::Refusal) -> &str { if let super::memory::Refusal::Io(k) = why { k } else { "other" } }
+
 fn refuse(status: StatusCode, code: &str) -> Response { json_response(status, json!({"error_code": code})) }
 
 async fn settings_reply(st: &AppState, req: Request, home: PathBuf, claude_dir: PathBuf) -> Response {

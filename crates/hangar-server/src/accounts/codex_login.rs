@@ -156,7 +156,6 @@ impl AccountService {
     pub async fn start_codex_login(
         &self,
         account: &Account,
-        bridge: super::bridge::AccountsBridge,
         runtime: Option<Arc<crate::runtime::gateway::RuntimeRegistry>>,
         invalidator: CodexInvalidator,
     ) -> Result<Value, AccountError> {
@@ -164,7 +163,7 @@ impl AccountService {
         let (service, account) = (self.clone(), account.clone());
         tokio::spawn(async move {
             service
-                .start_codex_login_owned(account, bridge, runtime, invalidator)
+                .start_codex_login_owned(account, runtime, invalidator)
                 .await
         })
         .await
@@ -173,7 +172,6 @@ impl AccountService {
     async fn start_codex_login_owned(
         &self,
         account: Account,
-        bridge: super::bridge::AccountsBridge,
         runtime: Option<Arc<crate::runtime::gateway::RuntimeRegistry>>,
         invalidator: CodexInvalidator,
     ) -> Result<Value, AccountError> {
@@ -199,7 +197,7 @@ impl AccountService {
             return Err(AccountError::io());
         }
         validate_storage(&current)?;
-        let facts = self.usage(&bridge, runtime.as_deref(), &key).await;
+        let facts = self.usage(runtime.as_deref(), &key).await;
         facts.ensure_unused().map_err(|code| {
             AccountError::codex(
                 409,
@@ -374,7 +372,6 @@ impl AccountService {
     pub async fn sign_out_codex(
         &self,
         account: &Account,
-        bridge: super::bridge::AccountsBridge,
         runtime: Option<Arc<crate::runtime::gateway::RuntimeRegistry>>,
         invalidator: CodexInvalidator,
     ) -> Result<Value, AccountError> {
@@ -382,7 +379,7 @@ impl AccountService {
         let (service, account) = (self.clone(), account.clone());
         tokio::spawn(async move {
             service
-                .sign_out_codex_owned(account, bridge, runtime, invalidator)
+                .sign_out_codex_owned(account, runtime, invalidator)
                 .await
         })
         .await
@@ -391,7 +388,6 @@ impl AccountService {
     async fn sign_out_codex_owned(
         &self,
         account: Account,
-        bridge: super::bridge::AccountsBridge,
         runtime: Option<Arc<crate::runtime::gateway::RuntimeRegistry>>,
         invalidator: CodexInvalidator,
     ) -> Result<Value, AccountError> {
@@ -415,7 +411,7 @@ impl AccountService {
         if AccountKey::new(Provider::Codex, &current.home).ok().as_ref() != Some(&key) {
             return Err(AccountError::io());
         }
-        self.usage(&bridge, runtime.as_deref(), &key)
+        self.usage(runtime.as_deref(), &key)
             .await
             .ensure_unused()
             .map_err(|_| in_use())?;

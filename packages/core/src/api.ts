@@ -2431,18 +2431,21 @@ export async function transcribeUploaded(
 /**
  * Aplica outro estilo ao texto CRU de um ditado já transcrito. Não reenvia o áudio: a Whisper já
  * rodou e devolveu o cru em `raw`, então trocar de estilo custa só a limpeza (~1-16s conforme o
- * provedor, contra isso MAIS a transcrição inteira). Sem `name` porque a limpeza não lê nada da
- * sessão. `aviso` não-nulo = a limpeza desistiu e voltou o cru, mesmo contrato do transcribeFile.
+ * provedor, contra isso MAIS a transcrição inteira). `session` diz a conversa de destino: no modo
+ * `harness` é dela a conta que organiza, e sem ela o servidor volta o cru com aviso.
+ * `aviso` não-nulo = a limpeza desistiu e voltou o cru, mesmo contrato do transcribeFile.
  */
 export async function relimparDitado(
   texto: string,
   estilo: string,
   server?: Server | null,
+  target?: { session?: string; generation?: string },
 ): Promise<{ text: string; aviso?: string | null; estilo_aplicado?: string }> {
   // Na máquina que transcreveu: a limpeza usa a chave e o estilo configurados nela.
   return sessionFetch<{ text: string; aviso?: string | null; estilo_aplicado?: string }>(server, '/api/ditado/relimpar', {
     method: 'POST',
-    body: JSON.stringify({ texto, estilo }),
+    // JSON.stringify omite as chaves undefined: o corpo antigo continua igual sem `target`.
+    body: JSON.stringify({ texto, estilo, session: target?.session, generation: target?.generation }),
     // Mesmo motivo do teto do transcribeFile, sem a parcela da Whisper: o briefing pode gastar 120s
     // no servidor (narrar._TRAVAS_POR_ESTILO) e abortar antes disso perderia a limpeza já em curso.
     signal: AbortSignal.timeout(180_000),

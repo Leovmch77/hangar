@@ -1,6 +1,7 @@
 """Contratos públicos de contas; executar somente em VM ou CI isolado."""
 
 import json
+from pathlib import Path
 import pytest
 
 from accounts_contract import PythonReference, assert_rust_ownership, isolated_environment, normalize
@@ -70,13 +71,13 @@ def test_codex_success_waits_for_identity_and_owns_http(tmp_path):
             assert time.monotonic() < deadline, "sucesso não iniciou confirmação de identidade"
         assert server.request("GET", "/api/codex-contas/alpha/login").json()["status"] == "waiting"
         account = reference.root / ".codex-alpha"
-        assert reference.request("POST", "/__contract__/codex-model-cache").json()["cached"]
+        assert reference.request("POST", "/__contract__/codex-model-invalidation").json()["homes"] == []
         (account / "identity.json").write_text(json.dumps({
             "type": "chatgpt", "email": "fixture@example.test", "planType": "plus",
         }), encoding="utf-8")
         final = server.wait_status("alpha", "completed")
         assert final == {**attempt, "status": "completed"}
-        assert not reference.request("GET", "/__contract__/codex-model-cache").json()["cached"], "login concluído invalida o catálogo de modelos"
+        assert [Path(home) for home in reference.request("GET", "/__contract__/codex-model-invalidation").json()["homes"]] == [account], "login concluído encaminha a invalidação ao Rust"
         catalog = server.request("GET", "/api/codex-contas").json()
         assert next(row for row in catalog if row["id"] == "alpha")["auth"] == {
             "method": "oauth", "status": "connected", "email": "fixture@example.test", "plan": "plus",
@@ -354,11 +355,11 @@ def test_codex_birth_blocks_login_before_and_after_restart(tmp_path):
         reference.close()
 
 def test_codex_uncertain_usage_refuses_login_without_cli(tmp_path):
-    from accounts_contract import RustCodex
+    from accounts_contract import RustCodex, publish_unknown_birth
     reference = PythonReference(tmp_path / "home")
     server = RustCodex(reference)
     try:
-        reference.request("POST", "/__contract__/runtime-instance", {"instance": "obsolete"})
+        publish_unknown_birth(reference.root, reference.root / ".codex-alpha")
         response = server.request("POST", "/api/codex-contas/alpha/login")
         assert response.status_code == 409
         assert response.json()["detail"]["code"] == "account_usage_unknown"
@@ -388,14 +389,14 @@ def test_codex_cache_callback_requires_secret_instance_and_valid_key(tmp_path):
             return response.status
     try:
         key = {"key": {"provider": "codex", "canonical_home": str(reference.root / ".codex-alpha")}}
-        reference.request("POST", "/__contract__/codex-model-cache")
+        reference.request("POST", "/__contract__/codex-model-invalidation")
         assert invalidate(key, secret="wrong") == 404
         assert invalidate(key, instance="old") == 404
-        assert reference.request("GET", "/__contract__/codex-model-cache").json()["cached"]
+        assert reference.request("GET", "/__contract__/codex-model-invalidation").json()["homes"] == []
         assert invalidate({"key": {"provider": "codex", "canonical_home": "relative"}}) == 400
         assert invalidate({**key, "token": "synthetic"}) == 400
         assert invalidate(key) == 200
-        assert not reference.request("GET", "/__contract__/codex-model-cache").json()["cached"]
+        assert [Path(home) for home in reference.request("GET", "/__contract__/codex-model-invalidation").json()["homes"]] == [reference.root / ".codex-alpha"]
     finally:
         reference.close()
 
@@ -474,5 +475,33 @@ def test_rust_claude_logout_remains_allowed_with_live_session(tmp_path):
         assert not (account / ".credentials.json").exists()
         assert_rust_ownership(reference.calls())
     finally:
+        server.close()
+        reference.close()
+
+
+def test_python_asks_rust_whether_a_process_uses_an_account(tmp_path, monkeypatch):
+    """O nascimento de sessão Codex do Python se aposenta quando o Rust confirma o app-server dele."""
+    import subprocess
+    import sys
+    from accounts_contract import RustCodex
+    from app import account_bridge
+    from app.account_lifecycle import AccountKey
+    reference = PythonReference(tmp_path / "home")
+    server = RustCodex(reference)
+    account = reference.root / ".codex-alpha"
+    environment = isolated_environment(reference.root)
+    environment["CODEX_HOME"] = str(account)
+    child = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.readline()", "--", "codex"],
+                             env=environment, stdin=subprocess.PIPE)
+    try:
+        address = server.request("GET", "/__hangar_server/health").json()["terminal_address"]
+        monkeypatch.setattr(account_bridge, "owner_mode", lambda: "rust")
+        account_bridge.configure_preparation(address, "contract-internal")
+        key = AccountKey.new("codex", account)
+        assert account_bridge.request_process_uses(key, child.pid) is True
+        assert account_bridge.request_process_uses(AccountKey.new("codex", reference.root / ".codex"), child.pid) is False
+    finally:
+        account_bridge.configure_preparation(None, None)
+        child.communicate(b"\n", timeout=10)
         server.close()
         reference.close()

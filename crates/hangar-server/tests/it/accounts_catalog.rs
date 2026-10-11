@@ -6,6 +6,23 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
+/// O multiplexador das sondas é o falso da referência Python (`GET /__contract__/mux`), nunca o
+/// tmux real da máquina. Resposta diferente de 200 é multiplexador sem resposta.
+pub(crate) fn reference_mux(upstream: String) -> hangar_server::accounts::environment::TerminalFixture {
+    Arc::new(move || {
+        use std::io::{Read, Write};
+        let mut stream = std::net::TcpStream::connect(&upstream).map_err(|_| ())?;
+        stream.write_all(b"GET /__contract__/mux HTTP/1.0\r\nHost: reference\r\n\r\n").map_err(|_| ())?;
+        let mut raw = String::new();
+        stream.read_to_string(&mut raw).map_err(|_| ())?;
+        let (head, body) = raw.split_once("\r\n\r\n").ok_or(())?;
+        if head.split(' ').nth(1) != Some("200") {
+            return Err(());
+        }
+        serde_json::from_str::<String>(body).map_err(|_| ())
+    })
+}
+
 #[tokio::test]
 async fn owner_catalog_is_not_a_python_proxy() {
     let hits = Arc::new(AtomicUsize::new(0));
@@ -527,7 +544,7 @@ async fn http_probe_process() {
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let state = AppState::new(Config {
+    let mut state = AppState::new(Config {
         listen: addr,
         upstream: upstream.parse().unwrap(),
         internal_secret: "contract-internal".into(),
@@ -535,6 +552,7 @@ async fn http_probe_process() {
         log_path: None,
         trusted: TrustedHosts::parse("127.0.0.1"),
     });
+    state.accounts.env.terminal_fixture = Some(reference_mux(upstream));
     println!("ACCOUNT_HTTP:{addr}");
     use std::io::Write;
     std::io::stdout().flush().unwrap();

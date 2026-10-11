@@ -194,9 +194,10 @@ pub struct ComposerSnapshot { pub content: String, pub placeholders: BTreeSet<St
 static PLACEHOLDER: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\[(Pasted text|Image) #(\d+)").unwrap());
 static CURSOR: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?m)^\s*[❯›]\s*(\d+)\.\s").unwrap());
 static AGENT_ROW: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\s*(?:❯\s+)?[●◯]\s+(\S+)").unwrap());
-// Dica de argumento que o Claude desenha depois de um comando com barra completo (`/clear │ [name]`).
+// Dica de argumento que o Claude desenha depois de um comando com barra completo (`/clear │ [name]`,
+// `/compact <optional custom summarization instructions>`). Em alguns temas ela não vem esmaecida.
 // Sem `#`: anexo (`[Image #1]`) nunca passa por dica.
-static ARG_HINT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\[[^\[\]#]*\]$").unwrap());
+static ARG_HINT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(?:\[[^\[\]#]*\]|<[^<>#]*>)$").unwrap());
 static NEXT_BUFFER: AtomicU64 = AtomicU64::new(0);
 fn compact(text: &str) -> String { text.chars().filter(|c| !c.is_whitespace() && !"│┃║".contains(*c)).collect() }
 /// O Claude marca `› stashed` na linha de dicas acima do composer enquanto guarda um rascunho.

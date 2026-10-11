@@ -2,7 +2,7 @@
 use super::organizer::{family_root, name_tokens, squash, tool_reply, word_fits};
 use hangar_api::session::SessionRow;
 use serde_json::Value;
-use std::{collections::{HashMap, HashSet}, time::Duration};
+use std::{collections::HashSet, time::Duration};
 
 /// Ferramentas que dependem da tela do aparelho dono da chamada.
 pub const SCREEN_TOOLS: [&str; 5] = ["switch_session", "hangar_actions", "hangar_action", "read_screen", "click_screen"];
@@ -28,14 +28,15 @@ impl PairResult {
 /// Quanto tempo o `switch_session` do organizador para a sessão que o Jev acabou de abrir conta como eco da mesma fala.
 pub const JEV_SWITCH_ECHO: Duration = Duration::from_secs(20);
 
-/// Quanto tempo depois de falar de uma sessão a troca por voz não oferece resumo dela de novo.
+/// Quanto tempo uma sessão de que a voz falou (ou para a qual trocou) conta como contexto para desempatar um nome falado.
 pub const TALKED_WINDOW: Duration = Duration::from_secs(15 * 60);
 
-/// Troca por voz oferece resumo? Só se a voz não falou dessa sessão há pouco; oferecer conta como ter falado.
-pub fn offer_summary(talked: &mut HashMap<(String, String), std::time::Instant>, session: (String, String), now: std::time::Instant) -> bool {
-    let recent = talked.get(&session).is_some_and(|at| now.saturating_duration_since(*at) < TALKED_WINDOW);
-    if !recent { talked.insert(session, now); }
-    !recent
+/// Nota ao organizador depois de uma troca. O servidor não pergunta nem resume: a fala pode ter pedido mais (enviar,
+/// perguntar), e o que fazer ao só entrar é preferência do usuário, que o organizador tem na memória.
+pub fn after_switch(name: &str) -> String {
+    format!("A tela agora é a sessão {name}. Faça o resto do pedido desta fala agora (envio, pergunta); se ela só pediu para \
+        entrar, siga as preferências da memória: com preferência de resumo automático, resuma o que a sessão fez, o estado e o \
+        que ela precisa do usuário, sem perguntar e sem recitar hashes; sem preferência, diga em uma frase e ofereça mais detalhe.")
 }
 
 /// Troca que o Jev pode fazer sozinho: a sessão escolhida, ou o motivo de não agir (vai ao diário como código).
@@ -58,6 +59,14 @@ pub fn jev_action_choice(decision: &super::jev::Decision) -> Result<usize, &'sta
         _ => return Err("not-screen"),
     }
     match decision.action { Some((at, p)) if p >= ACTION_SURE => Ok(at), Some(_) => Err("low-action"), None => Err("no-action") }
+}
+
+/// Destino de um envio que o Jev reconhece com certeza alta na intenção e na sessão. Só vira atalho ao organizador: nunca
+/// envia nem recusa nada.
+pub fn jev_send_choice(decision: &super::jev::Decision) -> Option<usize> {
+    use super::jev::{Intent, SURE};
+    if !matches!(&decision.intent, Some((Intent::Send, p)) if *p >= SURE) { return None; }
+    decision.session.filter(|(_, p)| *p >= SURE).map(|(at, _)| at)
 }
 
 /// Uma linha do `list_sessions`.
@@ -184,24 +193,6 @@ pub fn match_qualified(spoken: &str, names: &[&str], machines: &[Vec<String>], o
         SessionMatch::One(at) => SessionMatch::One(on_machine[at]),
         SessionMatch::Many(found) => SessionMatch::Many(found.into_iter().map(|at| on_machine[at]).collect()),
         SessionMatch::None => SessionMatch::None,
-    }
-}
-
-/// Pergunta "qual das duas?" depois de um pedido de troca: o "isso"/"a do PC" seguinte não repete o verbo de trocar,
-/// e vale só para uma das sessões oferecidas, por um minuto.
-#[derive(Default)]
-pub struct SwitchOffer { offered: Vec<(String, String)>, at: Option<std::time::Instant> }
-
-const SWITCH_OFFER_WINDOW: Duration = Duration::from_secs(60);
-
-impl SwitchOffer {
-    pub fn offer(&mut self, candidates: Vec<(String, String)>, now: std::time::Instant) { (self.offered, self.at) = (candidates, Some(now)); }
-    /// `true` consome a oferta.
-    pub fn take(&mut self, key: &str, name: &str, now: std::time::Instant) -> bool {
-        let fresh = self.at.is_some_and(|at| now.saturating_duration_since(at) < SWITCH_OFFER_WINDOW);
-        let ok = fresh && self.offered.iter().any(|(k, n)| k == key && n == name);
-        if ok { *self = Self::default(); }
-        ok
     }
 }
 
@@ -472,26 +463,11 @@ mod tests {
     }
 
     #[test]
-    fn switch_offer_takes_the_yes_for_an_offered_session_only() {
-        let now = std::time::Instant::now();
-        let mut offer = SwitchOffer::default();
-        assert!(!offer.take("pc", "hangar", now), "sem pergunta, nada vale");
-        offer.offer(vec![("notebook".into(), "hangar".into()), ("pc".into(), "hangar".into())], now);
-        assert!(!offer.take("pc", "outra", now), "só as oferecidas");
-        assert!(offer.take("pc", "hangar", now + Duration::from_secs(5)), "o 'isso' depois da pergunta");
-        assert!(!offer.take("notebook", "hangar", now + Duration::from_secs(6)), "usada, acabou");
-        offer.offer(vec![("pc".into(), "hangar".into())], now);
-        assert!(!offer.take("pc", "hangar", now + SWITCH_OFFER_WINDOW), "fora da janela não vale");
-    }
-
-    #[test]
-    fn switch_offers_a_summary_unless_the_voice_talked_about_it_recently() {
-        let (mut talked, now) = (HashMap::new(), std::time::Instant::now());
-        let pc = ("delphi-02".to_owned(), "PWorkStation".to_owned());
-        assert!(offer_summary(&mut talked, pc.clone(), now), "primeira vez: pergunta");
-        assert!(!offer_summary(&mut talked, pc.clone(), now + Duration::from_secs(60)), "vai e volta: não pergunta de novo");
-        assert!(offer_summary(&mut talked, ("notebook".into(), "voz".into()), now), "outra sessão: pergunta");
-        assert!(offer_summary(&mut talked, pc, now + TALKED_WINDOW), "passado o tempo, pergunta de novo");
+    fn after_switch_does_the_rest_of_the_speech_and_defers_to_memory() {
+        let note = after_switch("voz-memoria");
+        assert!(note.contains("sessão voz-memoria") && note.contains("Faça o resto do pedido desta fala agora"), "{note}");
+        assert!(note.contains("preferências da memória") && note.contains("sem perguntar"), "{note}");
+        assert!(!note.contains("termine sem escrever") && !note.contains("Quer um resumo"), "a troca não encerra o turno: {note}");
     }
 
     #[test]
@@ -510,6 +486,10 @@ mod tests {
         assert_eq!(jev_action_choice(&d(Intent::Screen, 0.95, None, Some((10, 0.6)))), Err("low-action"));
         assert_eq!(jev_action_choice(&d(Intent::Screen, 0.6, None, Some((10, 0.99)))), Err("low-intent"), "ação de tela exige as duas certezas");
         assert_eq!(jev_action_choice(&d(Intent::Screen, 0.75, None, Some((10, 0.72)))), Ok(10));
+        assert_eq!(jev_send_choice(&d(Intent::Send, 0.95, Some((3, 0.92)), None)), Some(3));
+        assert_eq!(jev_send_choice(&d(Intent::Send, 0.85, Some((3, 0.99)), None)), None, "envio incerto fica com o organizador");
+        assert_eq!(jev_send_choice(&d(Intent::Send, 0.99, Some((3, 0.7)), None)), None);
+        assert_eq!(jev_send_choice(&d(Intent::Switch, 0.99, Some((3, 0.99)), None)), None);
     }
 
     #[test]

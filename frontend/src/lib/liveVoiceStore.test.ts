@@ -124,3 +124,37 @@ describe('liveVoiceStore', () => {
     expect(call.start).toHaveBeenCalledTimes(2);
   });
 });
+
+describe('voice memory', () => {
+  const res = (body: string, status = 200) => new Response(body, { status });
+
+  it('lists and deletes with the owner token', async () => {
+    const { probeServerResponse } = await import('@hangar/core');
+    const probe = vi.mocked(probeServerResponse);
+    probe.mockResolvedValueOnce(res('{"entries":[{"id":"m1","kind":"pessoa","text":"Dev","learned":"2026-10-01","confirmed":"2026-10-01"}]}'));
+    probe.mockResolvedValueOnce(res('{"ok":true}'));
+    await store();
+    const { listVoiceMemory, forgetVoiceMemory } = await import('./liveVoiceStore.svelte');
+    expect((await listVoiceMemory(home))[0].text).toBe('Dev');
+    await forgetVoiceMemory(home, 'm1');
+    expect(probe.mock.calls[0][1]).toBe('/api/voice/memory');
+    expect(probe.mock.calls[1][1]).toBe('/api/voice/memory/m1');
+    expect(probe.mock.calls[1][2]?.method).toBe('DELETE');
+  });
+
+  it('a reply without entries is an error, not an empty list', async () => {
+    const { probeServerResponse } = await import('@hangar/core');
+    vi.mocked(probeServerResponse).mockResolvedValueOnce(res('{}'));
+    await store();
+    const { listVoiceMemory } = await import('./liveVoiceStore.svelte');
+    await expect(listVoiceMemory(home)).rejects.toThrow('invalid_response');
+  });
+
+  it('a delete refused by the server throws its code', async () => {
+    const { probeServerResponse } = await import('@hangar/core');
+    vi.mocked(probeServerResponse).mockResolvedValueOnce(res('{"error_code":"memory_unknown"}', 404));
+    await store();
+    const { forgetVoiceMemory } = await import('./liveVoiceStore.svelte');
+    await expect(forgetVoiceMemory(home, 'm9')).rejects.toThrow('memory_unknown');
+  });
+});

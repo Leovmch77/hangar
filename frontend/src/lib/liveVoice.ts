@@ -22,6 +22,8 @@ export interface LiveVoiceState {
   followed: { server: string; name: string }[];
   server: string;
   client: string;
+  /** Sobe a cada gravação da memória na chamada; servidor antigo não manda. */
+  memory?: number;
 }
 
 export interface LiveVoiceHandlers {

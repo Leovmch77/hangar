@@ -56,3 +56,25 @@ async fn beta_off_by_default_and_guest_token_refused() {
     // Quem não é dono segue ao Python (o falso responde texto a qualquer rota): nunca recebe a configuração.
     assert_eq!(get(addr, "outro-token").await.1, Value::Null);
 }
+
+#[tokio::test]
+async fn memory_is_listed_and_deleted_by_the_owner_only() {
+    let home = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(home.path().join(".hangar/voz")).unwrap();
+    std::fs::write(home.path().join(".hangar/voz/memoria.json"),
+        r#"{"next":1,"entries":[{"id":"m1","kind":"pessoa","text":"Dev","learned":"2026-10-01","confirmed":"2026-10-01"}]}"#).unwrap();
+    std::fs::create_dir_all(home.path().join(".claude")).unwrap();
+    let addr = crate::voice_support::server(home.path()).await;
+    let (status, body) = read(fake::client().get(format!("http://{addr}/api/voice/memory")).bearer_auth(fake::OWNER).send().await.unwrap()).await;
+    assert_eq!(status, 200);
+    assert_eq!(body["entries"][0]["text"], "Dev");
+    let (_, body) = read(fake::client().get(format!("http://{addr}/api/voice/memory")).bearer_auth("convidado").send().await.unwrap()).await;
+    assert!(body["entries"].is_null(), "quem não é dono segue ao Python");
+    let (status, _) = read(fake::client().delete(format!("http://{addr}/api/voice/memory/m1")).bearer_auth(fake::OWNER).send().await.unwrap()).await;
+    assert_eq!(status, 200);
+    let (status, body) = read(fake::client().delete(format!("http://{addr}/api/voice/memory/m1")).bearer_auth(fake::OWNER).send().await.unwrap()).await;
+    assert_eq!((status, body["error_code"].as_str()), (404, Some("memory_unknown")));
+    std::fs::write(home.path().join(".hangar/voz/memoria.json"), "{ cortado").unwrap();
+    let (status, body) = read(fake::client().get(format!("http://{addr}/api/voice/memory")).bearer_auth(fake::OWNER).send().await.unwrap()).await;
+    assert_eq!((status, body["error_code"].as_str()), (500, Some("memory_unreadable")));
+}

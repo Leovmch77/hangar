@@ -35,7 +35,10 @@ const COMMENT_EVERY: Duration = Duration::from_secs(15);
 const SEND_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub struct AppState {
-    pub transcription: Arc<crate::transcription::service::TranscriptionService>,
+    pub dictation_models: Arc<crate::dictation::catalog::Models>,
+    /// Vagas para processos e chamadas de organização do ditado (catálogo sem cache e execução).
+    pub dictation_slots: Arc<tokio::sync::Semaphore>,
+    pub transcription:Arc<crate::transcription::service::TranscriptionService>,
     pub transcription_slots: Arc<tokio::sync::Semaphore>,
     pub accounts: crate::accounts::AccountService,
     pub cfg: Config,
@@ -116,6 +119,8 @@ impl AppState {
         AppState { accounts: crate::accounts::AccountService::new(crate::accounts::environment::AccountEnvironment::capture()), groups, peers: Arc::new(crate::groups::peers_from_env()), auth: Auth::new(&cfg.auth_token), http, side, cfg, terminal, terminal_address: None, diag,
             workspace_slots: Arc::new(tokio::sync::Semaphore::new(4)),
             transcription: Arc::default(),
+            dictation_models: Arc::default(),
+            dictation_slots: Arc::new(tokio::sync::Semaphore::new(4)),
             transcription_slots: Arc::new(tokio::sync::Semaphore::new(4)),
             workspace_read_slots: Arc::new(tokio::sync::Semaphore::new(8)),
             workspace_meta_slots: Arc::new(tokio::sync::Semaphore::new(4)),
@@ -246,6 +251,7 @@ pub fn terminal_router(state: Arc<AppState>) -> Router {
         .route("/__hangar_server/terminal", axum::routing::post(crate::terminal_routes::terminal))
         .route("/__hangar_server/workspace", axum::routing::post(crate::workspace_routes::private))
         .route("/__hangar_server/transcription/{operation}", axum::routing::post(crate::transcription::routes::private))
+        .route("/__hangar_server/dictation/{operation}", axum::routing::post(crate::dictation::routes::private))
         .route("/__hangar_server/claude/customizations", axum::routing::post(crate::claude_customizations::private))
         .route("/__hangar_server/list", axum::routing::post(crate::list::bridge::private))
         .route("/__hangar_server/accounts", axum::routing::post(crate::accounts::http::private))
@@ -258,6 +264,8 @@ pub fn terminal_router(state: Arc<AppState>) -> Router {
         .route("/__hangar_server/presence", axum::routing::get(crate::presence::private))
         .route("/__hangar_server/mods/{name}/{op}", axum::routing::post(crate::mods::routes::bridge))
         .route("/__hangar_server/voice/settings", axum::routing::any(crate::voice::routes::private_settings))
+        .route("/__hangar_server/voice/memory", axum::routing::any(crate::voice::routes::private_memory))
+        .route("/__hangar_server/voice/memory/{id}", axum::routing::any(crate::voice::routes::private_memory))
         .layer(axum::middleware::from_fn(crate::migration_status::count_bridge));
     // Painel, canal do estado e voz ficam fora da contagem: conexões longas, não chamadas da ponte.
     router.route("/__hangar_server/term", get(crate::term::private_ws))
@@ -274,6 +282,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/__hangar_server/terminal", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
         .route("/__hangar_server/workspace", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
         .route("/__hangar_server/transcription/{operation}", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
+        .route("/__hangar_server/dictation/{operation}", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
         .route("/__hangar_server/claude/customizations", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
         .route("/__hangar_server/list", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
         .route("/__hangar_server/accounts", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
@@ -289,6 +298,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/__hangar_server/state/{name}/events", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
         .route("/__hangar_server/voice", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
         .route("/__hangar_server/voice/settings", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
+        .route("/__hangar_server/voice/memory", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
+        .route("/__hangar_server/voice/memory/{id}", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
         // Outro método nessas rotas (preflight OPTIONS, HEAD) segue ao Python.
         .route("/api/sessions", get(crate::list::hub::list).fallback(pass_any))
         .route("/api/sessions/events", get(crate::list::hub::events).fallback(pass_any))
@@ -338,6 +349,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/voice/settings", get(crate::voice::routes::settings_route).fallback(pass_any))
         // Mesmo caminho: o axum junta o PUT à rota de cima (um repasse só, o dela).
         .route("/api/voice/settings", axum::routing::put(crate::voice::routes::settings_route))
+        .route("/api/voice/memory", get(crate::voice::routes::memory_route).fallback(pass_any))
+        .route("/api/voice/memory/{id}", axum::routing::delete(crate::voice::routes::memory_route).fallback(pass_any))
         // Grupos (`/pair`, `/group-message`, `/pair/contract`, `/pair-remote`, `/unpair-remote`).
         .merge(crate::groups::routes::router())
         .fallback(pass_any)

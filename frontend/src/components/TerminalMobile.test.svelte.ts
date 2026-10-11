@@ -64,6 +64,9 @@ beforeEach(() => {
   vi.spyOn(api, 'fetchSessionsForServer').mockResolvedValue(
     [{ name: 's', state: 'idle', jsonl: '/j/s.jsonl' }] as never,
   );
+  // Sem rede de verdade: o erro de DNS da lista de atalhos abria uma segunda faixa `.tx-caiu`
+  // antes da que o teste lê.
+  vi.spyOn(api, 'listShortcutTerminals').mockResolvedValue([]);
 });
 
 afterEach(() => {

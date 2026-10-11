@@ -199,6 +199,8 @@ impl RuntimeRegistry {
     pub fn with_respawn_base(mut self,base:Duration) -> Self { self.respawn_base = base; self }
     /// Interface dos mods: sessão Claude sem terminal aberta aqui vira superfície remota e publica no `Mods`.
     pub fn with_mods(mut self,mods:crate::mods::state::Mods) -> Self { self.mods = Some(mods); self }
+    /// A linha de status do ator lê a cota direto do módulo de contas.
+    pub fn with_accounts(mut self,accounts:crate::accounts::AccountService) -> Self { self.policy = self.policy.with_accounts(accounts); self }
     pub fn ingress(&self) -> &super::ingress::IngressGates { &self.ingress }
     pub fn subscribe(&self) -> broadcast::Receiver<RuntimeEvent> { self.events.subscribe() }
     /// Último valor da sessão `name` para o feed do hub; `None` enquanto ela não está aberta aqui.

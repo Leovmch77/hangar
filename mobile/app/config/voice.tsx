@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Linking, Text, View } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { MenuView } from '@react-native-menu/menu';
-import { listarVozesTts, parseTranscriptionProviders, saldoTts, type TtsVoz } from '@hangar/core';
+import { dictationOrganizationOf, listarVozesTts, parseTranscriptionProviders, saldoTts, type TtsVoz } from '@hangar/core';
 import { BlockHead, Box, Chip, ConfigRow, Disclosure, Muted, RowShell, ScopeChips, ServerConfigPage } from '../../src/features/config/ServerConfigParts';
 import { Pill } from '../../src/features/config/PageHeader';
 import { Segmented } from '../../src/features/config/Segmented';
@@ -131,7 +131,9 @@ function StyleRow({ cfg }: { cfg: ServerConfig }) {
   const hint = STYLES.find((s) => s.v === current)?.hint();
   return (
     <RowShell icon="Type" title={m.native_voice_style()} chips={<ScopeChips cfg={cfg} k="ditado_estilo" />} help={m.native_voice_style_help()}>
-      {'ditado_estilo' in cfg.fields ? (
+      {dictationOrganizationOf(cfg.fields) === 'off' ? (
+        <Muted>{m.ditado_organizacao_desligada()}</Muted>
+      ) : 'ditado_estilo' in cfg.fields ? (
         <>
           <Segmented options={STYLES.map((s) => ({ v: s.v, label: s.label(), aria: `${s.label()}. ${s.hint()}` }))}
             value={current} label={m.native_voice_style()} onChange={(v) => cfg.stage('ditado_estilo', v)} />

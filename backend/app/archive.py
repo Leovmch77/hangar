@@ -17,7 +17,7 @@ from pydantic import BaseModel
 from app.config import list_config_dirs, settings
 from app.models import ChatEvent
 from app.transcript import parse_obj
-from app import codex_contas
+from app import closed_names, codex_contas
 
 _log = logging.getLogger("hangar.archive")
 
@@ -53,6 +53,9 @@ class ArchiveEntry(BaseModel):
     provider: str = "claude"
     codex_home: Optional[str] = None
     codex_account: Optional[str] = None
+    # Nome que a sessão tinha no Hangar ao ser fechada (closed_names); conversa fechada antes do
+    # registro existir fica sem nome.
+    name: Optional[str] = None
 
 
 def _head_info(jsonl: Path, max_lines: int = 60) -> tuple[str, Optional[str]]:
@@ -311,8 +314,11 @@ def list_folders(config_dir: Optional[str] = None) -> list[ArchiveFolder]:
 def list_conversations(project: str, live_realpaths: set[str], cap: int = 100,
                        config_dir: Optional[str] = None,
                        codex_account: str | None = None,
-                       provider: str | None = None) -> list[ArchiveEntry]:
-    """Nivel 2: conversas de UMA pasta, em TODAS as contas (ou so na pedida), mais recentes
+                       provider: str | None = None,
+                       closed: dict[str, str] | None = None) -> list[ArchiveEntry]:
+    """`closed`: os nomes de `closed_names.names()` já lidos (o `list_recent` lê uma vez só).
+
+    Nivel 2: conversas de UMA pasta, em TODAS as contas (ou so na pedida), mais recentes
     primeiro. O preview abre cada arquivo -> o teto limita o custo por request; ele vale pro
     resultado JUNTO, senao 4 contas custariam 4x o teto. FileNotFoundError so quando a pasta nao
     existe em conta nenhuma."""
@@ -345,12 +351,15 @@ def list_conversations(project: str, live_realpaths: set[str], cap: int = 100,
         linhas = []
     out: list[ArchiveEntry] = []
     heads = _heads() if linhas else {}
+    if closed is None:
+        closed = closed_names.names() if linhas or outras else {}
     for mt, f, cfg, rotulo in linhas[:cap]:
         preview, cwd = heads.get(str(f)) or _head_info(f)
+        real = os.path.realpath(str(f))
         out.append(ArchiveEntry(
             project=project, cwd=cwd, session_id=f.stem, mtime=mt,
             preview=preview, ultima=_tail_info(f), config_dir=cfg, conta=rotulo,
-            live=os.path.realpath(str(f)) in live_realpaths,
+            live=real in live_realpaths, name=closed.get(real),
         ))
     outras_com_origem: list[tuple[object, object | None]] = []
     for c in outras:
@@ -370,6 +379,7 @@ def list_conversations(project: str, live_realpaths: set[str], cap: int = 100,
             live=os.path.realpath(str(c.path)) in live_realpaths,
             codex_home=c.codex_home if c.provider == "codex" else None,
             codex_account=owner.id if owner is not None else None,
+            name=closed.get(os.path.realpath(str(c.path))),
         ))
     out.sort(key=lambda e: e.mtime, reverse=True)
     return out[:cap]
@@ -394,9 +404,10 @@ def list_recent(live_realpaths: set[str], cap: int = 40) -> list[ArchiveEntry]:
     for _mt, proj in heapq.nlargest(cap, candidatas, key=lambda t: t[0]):
         por_pasta[proj] = por_pasta.get(proj, 0) + 1
     out: list[ArchiveEntry] = []
+    closed = closed_names.names() if por_pasta else {}
     for proj, k in por_pasta.items():
         try:
-            out += list_conversations(proj, live_realpaths, cap=k)
+            out += list_conversations(proj, live_realpaths, cap=k, closed=closed)
         except (ValueError, FileNotFoundError):
             continue
     out.sort(key=lambda e: e.mtime, reverse=True)

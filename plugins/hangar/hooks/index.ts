@@ -7,6 +7,7 @@ import { registerRate } from "./rate";
 import { registerState } from "./state";
 import { registerSuggest } from "./suggest";
 import { registerUi } from "./ui";
+import { registerVerificar } from "./verificar";
 
 // Um módulo por plugin é regra do engine (`hooks.json` recusa um segundo em
 // `modules`), então a divisão por assunto é por ARQUIVO, composta aqui. Dois
@@ -22,4 +23,6 @@ export const register: Register = (on) => {
   registerUi(on);
   // Depois do `ui.ts`: o painel do `/btw` fica por dentro da cadeia que ele espelha no app.
   registerBtw(on);
+  // Também depois do `ui.ts`, para a faixa e o painel do /andamento chegarem ao app.
+  registerVerificar(on);
 };
