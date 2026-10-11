@@ -352,3 +352,32 @@ def test_busy_pool_threads_sees_uvloop_default_executor_threads():
             assert len(_busy_pool_threads()) == 1
         finally:
             release.set()
+
+
+@pytest.mark.asyncio
+async def test_stuck_pool_is_reported_before_the_probe_runs(monkeypatch):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    from app import diag, loop_monitor
+    monkeypatch.setattr(loop_monitor, "POOL_WAIT_WARN_S", 0.05)
+    monkeypatch.setattr(loop_monitor, "POOL_STUCK_S", 0.1)
+    logged = []
+    monkeypatch.setattr(diag, "registrar", lambda evento, nivel, **campos: logged.append((evento, campos.get("codigo"))))
+    release, started = threading.Event(), threading.Event()
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="travado") as pool:
+        pool.submit(lambda: (started.set(), release.wait(5)))
+        assert started.wait(5)
+        monitor = loop_monitor._Monitor()
+        monitor.pools["travado"] = loop_monitor._Throttle()
+        task = asyncio.create_task(monitor.probe_pool(asyncio.get_running_loop(), "travado", pool, ("travado",)))
+        try:
+            for _ in range(200):
+                if logged:
+                    break
+                await asyncio.sleep(0.01)
+            assert logged == [("pool.espera", "travado")]
+            assert "travado" in monitor.probing
+        finally:
+            release.set()
+        await task
+    assert "travado" not in monitor.probing

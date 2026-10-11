@@ -27,6 +27,8 @@ TICK_S = 1.0
 LOOP_LAG_WARN_S = 1.0
 POOL_PROBE_EVERY_S = 5.0
 POOL_WAIT_WARN_S = 2.0
+# Pool travado de vez nunca devolve a sonda: o aviso não espera por ela além disto.
+POOL_STUCK_S = 30.0
 LOOP_STALL_S = 5.0
 _MIN_GAP_S = 10.0   # no máximo uma linha de cada tipo nesse intervalo; o pior valor vai junto
 
@@ -127,16 +129,19 @@ class _Monitor:
             # A foto sai enquanto a sonda ainda está na fila: depois dela, a fila já andou.
             queued = _queue_size(executor or getattr(loop, "_default_executor", None))
             busy = _busy_pool_threads(prefixes)
-            wait = await probe - sent
+            done, _ = await asyncio.wait({probe}, timeout=POOL_STUCK_S)
+            wait = (probe.result() if done else time.monotonic()) - sent
             worst = self.pools[name].offer(int(wait * 1000))
-            if worst is None:
-                return
-            top = Counter(busy).most_common(3)
-            summary = "; ".join(f"{n}x {label}" for label, n in top)
-            _log.warning("pool %s esperou %.1fs (fila=%d, ocupadas=%d): %s",
-                         name, wait, queued, len(busy), summary)
-            diag.registrar("pool.espera", "aviso", codigo=name, espera_ms=worst, quantidade=queued,
-                           detalhe=summary or None, threads_backend=threading.active_count())
+            if worst is not None:
+                top = Counter(busy).most_common(3)
+                summary = "; ".join(f"{n}x {label}" for label, n in top)
+                _log.warning("pool %s esperou %.1fs%s (fila=%d, ocupadas=%d): %s", name, wait,
+                             "" if done else " e segue sem resposta", queued, len(busy), summary)
+                diag.registrar("pool.espera", "aviso", codigo=name, espera_ms=worst, quantidade=queued,
+                               detalhe=summary or None, threads_backend=threading.active_count())
+            if not done:
+                # Fica em `probing` até a sonda rodar: sonda nova num pool travado só alongaria a fila.
+                await probe
         except Exception:
             _log.debug("sonda do pool %s falhou", name, exc_info=True)
         finally:
