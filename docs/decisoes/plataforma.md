@@ -1924,3 +1924,23 @@ segue como antes. Desenho: [desenho.md](../migracao-rust/parte6-grupos/desenho.m
 - **Contrato interno 40** (`RUST_SERVER_PROTOCOL` e `INTERNAL_PROTOCOL`; o 39 é o da 5B, juntada
   antes): a saúde ganhou `groups`, e o filho recebe `HANGAR_SERVER_ID`, `HANGAR_PEERS_FILE` e
   `HANGAR_PAIR_ARCHIVE`.
+
+## Migrar é migrar o caminho inteiro
+
+Medido em 11/10/2026. Contas e cotas passaram ao Rust em 08/10 (`279b303db`), mas a linha de status
+das sessões Claude continuou pedindo a cota ao Python: o ator do Rust chama `GET /internal/quota`,
+o Python (`runtime_policy.quota_windows`, num `to_thread` do pool padrão) pergunta ao módulo de
+contas do Rust (`account_bridge.request_quotas`), e esse chama de volta o Python em
+`POST /internal/accounts/quotas`, também no pool padrão. Na subida todas as sessões pedem cota
+juntas, as 16 threads ficam presas esperando a si mesmas, o Rust desiste em 10 s e repete, e tudo
+que usa o pool (fatos da lista, política do runtime, dados da sessão) trava junto: sessões somem
+do celular e o `hangar-send` responde "backend inacessível". O `loop_monitor` não via, porque só
+contava threads `asyncio_N` e o uvloop nomeia `ThreadPoolExecutor-N_M` (mostrava `ocupadas=0`).
+
+- **Remédio imediato** (`c8e4bef1e`, PR #148): `/internal/accounts/quotas` roda num pool próprio
+  (`quota-facts`, 4) e o monitor reconhece as threads do uvloop.
+- **Remédio de fundo:** o ator lê a cota do módulo de contas do próprio Rust e o
+  `/internal/quota` sai do Python.
+- **Regra:** ao migrar uma responsabilidade, a mesma tarefa procura e apaga os chamadores que
+  sobraram nos dois lados. Uma ponte que vai e volta entre os processos no mesmo pedido é bug de
+  desenho, não detalhe de desempenho.
