@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import BottomSheet from './BottomSheet.svelte';
   import { liveVoiceStore, listVoiceMemory, forgetVoiceMemory, type LiveVoiceSettings, type VoiceMemory } from '../lib/liveVoiceStore.svelte';
   import { renderMarkdown } from '../lib/markdown';
@@ -111,8 +112,15 @@
       if (memoryFor === key) memory = { state: 'error', items: [] };
     }
   }
+  // Recarrega ao abrir os ajustes e quando o servidor mostrado muda com eles abertos.
+  let settingsOpen = $state(false);
+  $effect(() => {
+    const id = target?.id;
+    if (settingsOpen && id) untrack(() => { void loadMemory(); });
+  });
   async function drop(id: string) {
-    if (!target) return;
+    // A lista é de outro servidor: apagar aqui atingiria a máquina errada.
+    if (!target || memoryFor !== target.id) return;
     const key = target.id;
     try {
       await forgetVoiceMemory(target, id);
@@ -262,7 +270,7 @@
     {/if}
 
     {#if reply}
-      <details class="lv-settings" ontoggle={e => { if (e.currentTarget.open) void loadMemory(); }}>
+      <details class="lv-settings" bind:open={settingsOpen}>
         <summary class="lv-label">{m.live_voice_settings()}</summary>
         {#key formKey}
         <label class="lv-field">
