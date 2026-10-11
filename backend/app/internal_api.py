@@ -528,7 +528,15 @@ def transcription_config():
         legacy = {"id": "legacy", "kind": "openai", "api_key": key,
                   "base_url": runtime_config.get("transcription_base_url") or "",
                   "model": runtime_config.get("transcription_model") or ""}
-    return {"providers": providers, "legacy": legacy,
+    organization = {"dictation_include_recent_messages": bool(runtime_config.get("dictation_include_recent_messages")),
+                    **{field: runtime_config.get(field) or "" for field in (
+                        "dictation_organization_mode", "dictation_claude_model", "dictation_codex_model", "ditado_estilo",
+                        "llm_base_url", "llm_api_key", "llm_model", "llm_reasoning_effort",
+                        "llm_briefing_base_url", "llm_briefing_api_key", "llm_briefing_model")}}
+    if organization["dictation_organization_mode"] != "external_api":
+        # A chave da API externa só sai quando é ela que organiza; os campos ficam vazios pro Rust.
+        organization.update(llm_base_url="", llm_api_key="", llm_briefing_base_url="", llm_briefing_api_key="")
+    return {"providers": providers, "legacy": legacy, "organization": organization,
             "user_vocabulary": runtime_config.get("ditado_vocabulario") or "",
             "state_path": str(Path.home() / ".hangar" / "transcription-wait.json")}
 

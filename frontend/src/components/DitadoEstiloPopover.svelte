@@ -4,16 +4,21 @@
   // modal, junta ele ao microfone, no mesmo estilo". Escolher o estilo do ditado é do mesmo
   // tamanho que escolher o esforço: um toque, uma lista curta, sem cobrir a tela.
   import Popover from './Popover.svelte';
-  import { ditadoEstilo } from '../lib/ditadoEstilo.svelte';
-  import { estilosDitado, type EstiloDitado } from '@hangar/core';
+  import { ditadoEstilo, organizacaoDitado } from '../lib/ditadoEstilo.svelte';
+  import { estilosDitado, type EstiloDitado, type Server } from '@hangar/core';
   import * as m from '../paraglide/messages';
 
   interface Props {
     open: boolean;
     anchor: HTMLElement | null;
     onClose: () => void;
+    /** Máquina de onde o ditado sai; nulo = o servidor ativo. */
+    server?: Server | null;
   }
-  let { open, anchor, onClose }: Props = $props();
+  let { open, anchor, onClose, server = null }: Props = $props();
+
+  // Organização desligada nessa máquina: todo estilo volta cru, então a lista dá lugar ao aviso.
+  const desligada = $derived(organizacaoDitado.de(server) === 'off');
 
   let err = $state<string | null>(null);
   let aplicando = $state<EstiloDitado | null>(null);
@@ -28,6 +33,7 @@
       // troca feita noutra aba/aparelho nunca aparecia aqui. Falha de leitura fica calada (o store
       // trata) — o que importa e nao mentir quando da certo.
       void ditadoEstilo.revalidar();
+      void organizacaoDitado.carregar(server);
     }
   });
 
@@ -50,6 +56,9 @@
 </script>
 
 <Popover {open} {anchor} {onClose} width={230} ariaLabel={m.ditado_estilo_titulo()}>
+  {#if desligada}
+    <p class="aviso" role="status">{m.ditado_organizacao_desligada()}</p>
+  {:else}
   {#if err}
     <p class="err" role="alert">{err}</p>
   {/if}
@@ -81,6 +90,7 @@
     {/each}
   </ul>
   <p class="dica">{m.ditado_estilo_dica()}</p>
+  {/if}
 </Popover>
 
 <style>
@@ -104,6 +114,8 @@
 
   .nome { flex: 1; }
   .tick { flex: none; color: var(--accent); }
+
+  .aviso { font-size: var(--text-sm); color: var(--text-secondary); margin: 0; padding: 10px; }
 
   .dica {
     font-size: var(--text-xs); color: var(--text-muted);

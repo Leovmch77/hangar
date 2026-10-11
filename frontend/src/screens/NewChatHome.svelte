@@ -143,7 +143,7 @@
           {/if}
         {/snippet}
         {#snippet leading()}
-          <NewChatAttach disabled={draft.sending} onFiles={(files) => (draft.attachments = [...draft.attachments, ...files])} />
+          <NewChatAttach disabled={draft.sending} server={draft.serverObj} onFiles={(files) => (draft.attachments = [...draft.attachments, ...files])} />
           <NewChatMic server={draft.serverObj} disabled={draft.sending}
             onText={(t) => (text = text.trim() ? `${text.trimEnd()} ${t}` : t)} onError={(msg) => (draft.sendError = msg)} />
         {/snippet}

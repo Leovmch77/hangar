@@ -1,12 +1,13 @@
 <script lang="ts">
   import BottomSheet from '../BottomSheet.svelte';
   import DitadoEstiloPopover from '../DitadoEstiloPopover.svelte';
+  import type { Server } from '@hangar/core';
   import * as m from '../../paraglide/messages';
 
   // "+" do campo do início (decisão 7 do desenho): câmera, fotos, arquivo e estilo do ditado. Os
   // arquivos ficam com quem chama e sobem na sessão nova, depois de criá-la.
-  interface Props { disabled?: boolean; onFiles: (files: File[]) => void }
-  let { disabled = false, onFiles }: Props = $props();
+  interface Props { disabled?: boolean; server?: Server | null; onFiles: (files: File[]) => void }
+  let { disabled = false, server = null, onFiles }: Props = $props();
 
   let open = $state(false);
   let styleOpen = $state(false);
@@ -47,7 +48,7 @@
   </ul>
 </BottomSheet>
 
-<DitadoEstiloPopover open={styleOpen} anchor={styleAnchor} onClose={() => { styleOpen = false; open = false; }} />
+<DitadoEstiloPopover open={styleOpen} anchor={styleAnchor} {server} onClose={() => { styleOpen = false; open = false; }} />
 
 <style>
   .plus {
