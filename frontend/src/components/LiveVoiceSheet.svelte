@@ -100,9 +100,11 @@
   let memory = $state<{ state: 'loading' | 'error' | 'ok'; items: VoiceMemory[] }>({ state: 'loading', items: [] });
   // Resposta de um servidor que já não é o mostrado não vale.
   let memoryFor = '';
+  let forgetFailed = $state(false);
   async function loadMemory() {
     if (!target) return;
     const key = memoryFor = target.id;
+    forgetFailed = false;
     memory = { state: 'loading', items: [] };
     try {
       const items = await listVoiceMemory(target);
@@ -122,12 +124,16 @@
     // A lista é de outro servidor: apagar aqui atingiria a máquina errada.
     if (!target || memoryFor !== target.id) return;
     const key = target.id;
+    forgetFailed = false;
+    const gone = () => { if (memoryFor === key) memory = { state: 'ok', items: memory.items.filter(e => e.id !== id) }; };
     try {
       await forgetVoiceMemory(target, id);
-      if (memoryFor === key) memory = { state: 'ok', items: memory.items.filter(e => e.id !== id) };
+      gone();
     } catch (e) {
+      // Já apagada por outro aparelho: a linha só sai.
+      if ((e as { code?: string }).code === 'memory_unknown') return gone();
       console.warn('live voice: memory not forgotten', e);
-      if (memoryFor === key) memory = { state: 'error', items: memory.items };
+      if (memoryFor === key) forgetFailed = true;
     }
   }
 
@@ -329,6 +335,7 @@
           {#if memory.state === 'loading'}<p class="lv-muted" role="status">{m.comum_carregando()}</p>
           {:else}
             {#if memory.state === 'error'}<p class="lv-detail" role="alert">{m.live_voice_memory_error()}</p>{/if}
+            {#if forgetFailed}<p class="lv-detail" role="alert">{m.live_voice_memory_forget_failed()}</p>{/if}
             {#if memory.items.length === 0}
               {#if memory.state === 'ok'}<p class="lv-muted">{m.live_voice_memory_empty()}</p>{/if}
             {:else}
