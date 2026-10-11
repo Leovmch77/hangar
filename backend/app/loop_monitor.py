@@ -141,7 +141,12 @@ class _Monitor:
                                detalhe=summary or None, threads_backend=threading.active_count())
             if not done:
                 # Fica em `probing` até a sonda rodar: sonda nova num pool travado só alongaria a fila.
-                await probe
+                wait = await probe - sent
+                worst = self.pools[name].offer(int(wait * 1000))
+                if worst is not None:
+                    _log.warning("pool %s voltou a responder depois de %.1fs", name, wait)
+                    diag.registrar("pool.espera", "aviso", codigo=name, espera_ms=worst,
+                                   threads_backend=threading.active_count())
         except Exception:
             _log.debug("sonda do pool %s falhou", name, exc_info=True)
         finally:

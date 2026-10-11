@@ -379,5 +379,5 @@ async def test_stuck_pool_is_reported_before_the_probe_runs(monkeypatch):
             assert "travado" in monitor.probing
         finally:
             release.set()
-        await task
+            await task
     assert "travado" not in monitor.probing
