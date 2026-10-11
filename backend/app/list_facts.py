@@ -8,6 +8,7 @@ import asyncio
 import logging
 
 from app import guest_users, plugin_bridge, registry, runtime_config, share_store, sse
+from app.internal_pool import internal_thread
 from app.models import SessionInfo
 
 _log = logging.getLogger("hangar.list")
@@ -42,7 +43,7 @@ async def compute(rows: list[dict], owner_clients: int, pane_pids: dict[str, int
         # O código de hoje, só sobre as linhas que o Rust não classifica.
         await sse._list_registry.list_with_state(others, state_only=True)
     # Tudo o que lê disco numa ida só ao threadpool.
-    out = await asyncio.to_thread(_files, infos, others, pane_pids)
+    out = await internal_thread(_files, infos, others, pane_pids)
     # No laço: `nav_pendente`/`nav_confirmar` mexem no mesmo mapa daqui, sem trava.
     out["nav"] = dict(sse.nav_vivos())
     loop = asyncio.get_running_loop()

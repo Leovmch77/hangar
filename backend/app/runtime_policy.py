@@ -9,6 +9,7 @@ import uuid
 from pathlib import Path
 
 from app import diag
+from app.internal_pool import internal_thread
 
 _PATCH = {
     "claude": {"session_id", "cwd", "model", "effort", "permission_mode", "previous_non_plan", "context_window", "problema", "cano"},
@@ -22,7 +23,7 @@ _quota_cache = {}
 
 
 async def execute(kind: str, payload: dict, metadata: dict) -> dict:
-    task = asyncio.create_task(asyncio.to_thread(run, kind, payload, metadata))
+    task = asyncio.create_task(internal_thread(run, kind, payload, metadata))
     try:
         data = await asyncio.shield(task)
         return {"ok": True, "data": data}
@@ -126,7 +127,7 @@ async def state_service(kind: str, name: str, payload: dict) -> dict:
         if info is None or info.provider != "claude" or info.headless or not info.jsonl:
             raise ValueError("sessão Claude com terminal não encontrada")
         return {"sent": await get_adapter("claude").drain(name, info.jsonl)}
-    return await asyncio.to_thread(state_service_sync, kind, name, payload)
+    return await internal_thread(state_service_sync, kind, name, payload)
 
 
 def _sessions(provider):

@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict
 from sse_starlette.sse import EventSourceResponse
 
 from app import diag
+from app.internal_pool import internal_thread
 from app.mensagens import erro
 from app.models import session_key
 from app.sse import merged_events
@@ -31,7 +32,8 @@ def set_secret(value: str | None) -> None:
     _secret = value or None
 
 
-def require_internal(request: Request) -> None:
+async def require_internal(request: Request) -> None:
+    # No laço, sem thread: um pool cheio não pode impedir o Rust de entrar nas rotas que liberam o pool.
     # 404 em toda recusa: quem não é o hangar-server não descobre que a rota existe. O segredo nasce
     # a cada subida e o repasse do hangar-server manda o IP real no X-Forwarded-For, então quem
     # chega de fora pela porta pública cai no IP antes do segredo.
@@ -69,16 +71,12 @@ def info_payload(name: str, provider: str, jsonl: str | None) -> dict:
 
 
 router = APIRouter(prefix="/internal", dependencies=[Depends(require_internal)], include_in_schema=False)
-# Fora do `router`: a dependência síncrona dele roda no pool de threads, e um pool cheio com o laço
-# são faria o vigia do Rust religar o serviço à toa. Aqui a checagem corre no próprio laço.
-ping_router = APIRouter(prefix="/internal", include_in_schema=False)
 _policy_calls = {}
 
 
-@ping_router.get("/ping")
-async def ping(request: Request) -> dict:
+@router.get("/ping")
+async def ping() -> dict:
     """Sem resposta, o laço do Python está parado (vigia do Rust)."""
-    require_internal(request)
     return {"ok": True}
 
 
@@ -192,7 +190,7 @@ async def claude_window(request: Request):
     _, _, raw = await _instance_body(request, 16 * 1024)
     try:
         body = json.loads(raw)
-        return await asyncio.to_thread(account_bridge.claude_windows.run, body)
+        return await internal_thread(account_bridge.claude_windows.run, body)
     except (KeyError, TypeError, ValueError, OSError, RuntimeError):
         raise HTTPException(409, detail={"code": "account_claude_window_rejected"}) from None
 
@@ -236,7 +234,7 @@ async def runtime_policy(request: Request):
                 or operation["payload"].get("payload") != body["payload"]):
             raise RuntimeError("serviço sem tentativa registrada")
 
-    await asyncio.to_thread(validate)
+    await internal_thread(validate)
     key = (instance, body["key"], body["generation"], body["phase_id"])
     if key not in _policy_calls:
         metadata = copy.deepcopy(slot.binding.meta)
@@ -246,7 +244,7 @@ async def runtime_policy(request: Request):
                         state_path=str(slot.binding.state_path),
                         operation_id=body["request_id"] if isinstance(body["request_id"], str) else body["phase_id"], validate=validate)
         async def perform():
-            await asyncio.to_thread(validate)
+            await internal_thread(validate)
             with slot.guard:
                 slot.active += 1
             try:
@@ -448,7 +446,7 @@ async def plugin_interrupted(name: str, body: _PluginInterrupted) -> dict:
 async def state_facts_snapshot(name: str) -> dict:
     """Retrato dos fatos do estado (`state_facts`); registra o interesse do Rust nesta sessão."""
     from app import state_facts
-    return await asyncio.to_thread(state_facts.snapshot, name)
+    return await internal_thread(state_facts.snapshot, name)
 
 
 _STATE_SERVICES = {"permission.observe", "session.dead", "session.deliverable"}
@@ -581,7 +579,7 @@ class _OrqAssociate(_OrqPromote):
 @router.post("/orq/group-phase")
 async def orq_group_phase(body: _OrqGid) -> dict:
     from app.adapters.orq import runs
-    return {"phase": await asyncio.to_thread(runs.group_phase, body.gid)}
+    return {"phase": await internal_thread(runs.group_phase, body.gid)}
 
 
 @router.post("/orq/promote")
@@ -589,7 +587,7 @@ async def orq_promote(body: _OrqPromote) -> dict:
     """O que o `pair.join_group` faz quando um grupo `orq` nasce, com os mesmos erros da rota `/pair`."""
     from app import orq_context, orq_md
     try:
-        await asyncio.to_thread(orq_context.promote, body.name, body.gid)
+        await internal_thread(orq_context.promote, body.name, body.gid)
     except orq_context.IdentityUnavailable:
         # Sem identidade não houve configuração pela API para promover.
         logging.getLogger(__name__).warning("pair: sem identidade para promover o grupo %s", body.gid)
@@ -602,7 +600,7 @@ async def orq_promote(body: _OrqPromote) -> dict:
 async def orq_is_orchestrator(body: _OrqNames) -> dict:
     """Os nomes que são a linha do orquestrador: a recusa `_recusa_orq` das rotas de par."""
     from app.adapters.orq import runs
-    return {"names": await asyncio.to_thread(lambda: [n for n in body.names if runs.find(n)])}
+    return {"names": await internal_thread(lambda: [n for n in body.names if runs.find(n)])}
 
 
 @router.post("/orq/associate")
@@ -629,7 +627,7 @@ async def external_pairs_end(body: _ExternalEnd) -> dict:
 @router.get("/costs/scopes")
 async def costs_scopes() -> dict:
     from app import costs_sources
-    return await asyncio.to_thread(costs_sources.scopes_for_rust)
+    return await internal_thread(costs_sources.scopes_for_rust)
 
 
 @router.get("/sessions/{name}/side-events")
