@@ -172,6 +172,27 @@ def test_terminal_normal_refusal_does_not_retry_or_change_owner(monkeypatch, tmp
         owner.close_python_leases()
 
 
+def test_terminal_maintenance_error_still_hands_input_to_rust(monkeypatch, tmp_path):
+    # Recado que passa pelo Python (grupo, par, MCP) com o terminal em erro de manutenção: o Rust
+    # guarda a linha na fila durável; recusar aqui perdia o recado.
+    gateway = Gateway('terminal_facts', 0)
+    owner, slot, effects, records = setup(monkeypatch, tmp_path, gateway)
+
+    async def flow():
+        assert await _to_rust(owner,'session')
+        await owner.refresh_snapshot('session')
+        assert slot.view['error'] == 'terminal_facts' and not slot.cache_valid
+        result = await owner.op('session', {'kind': 'submit', 'text': 'peer-message'}, 'root')
+        assert result['disposition'] == 'accepted'
+        assert gateway.attempts == ['root'] and slot.phase == Phase.Rust
+        assert 'close' not in [kind for kind, _ in gateway.events_log]
+    try:
+        asyncio.run(flow())
+    finally:
+        gateway.close()
+        owner.close_python_leases()
+
+
 def test_terminal_private_snapshot_is_accepted_without_public_state(monkeypatch, tmp_path):
     gateway = Gateway('runtime_lease', 0)
     owner, slot, _, _ = setup(monkeypatch, tmp_path, gateway)
