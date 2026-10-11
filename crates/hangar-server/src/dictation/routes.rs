@@ -24,33 +24,47 @@ fn failure(status: u16, code: &str, detail: &str) -> Response {
     )
 }
 
+/// A causa vai ao diário (nunca o corpo, que leva chaves); quem chama só preserva o cru.
 async fn configuration(state: &AppState) -> Result<OrganizationConfig, ()> {
+    let failed = |cause: &str, status: Option<u16>| {
+        tracing::warn!(
+            code = "dictation_rust_unavailable",
+            cause,
+            status,
+            "configuração da organização do ditado indisponível"
+        );
+    };
     let request = axum::http::Request::get(format!(
         "http://{}/internal/transcription/config",
         state.cfg.upstream
     ))
     .header("x-hangar-internal", &state.cfg.internal_secret)
     .body(Body::empty())
-    .map_err(|_| ())?;
+    .map_err(|_| failed("request", None))?;
     tokio::time::timeout(Duration::from_secs(5), async {
-        let response = state.http.request(request).await.map_err(|_| ())?;
-        if !response.status().is_success() {
-            return Err(());
+        let response = state
+            .http
+            .request(request)
+            .await
+            .map_err(|_| failed("network", None))?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(failed("status", Some(status.as_u16())));
         }
         let bytes = to_bytes(Body::new(response.into_body()), 1024 * 1024)
             .await
-            .map_err(|_| ())?;
-        let value: Value = serde_json::from_slice(&bytes).map_err(|_| ())?;
-        serde_json::from_value(
-            value
-                .get("organization")
-                .cloned()
-                .unwrap_or_else(|| json!({})),
-        )
-        .map_err(|_| ())
+            .map_err(|_| failed("too_large_or_body", Some(status.as_u16())))?;
+        let value: Value =
+            serde_json::from_slice(&bytes).map_err(|_| failed("invalid_json", None))?;
+        // Sem o objeto, assumir "desligado" esconderia um Python incompatível; campos vazios valem.
+        let organization = value
+            .get("organization")
+            .cloned()
+            .ok_or_else(|| failed("organization_missing", None))?;
+        serde_json::from_value(organization).map_err(|_| failed("organization_invalid", None))
     })
     .await
-    .map_err(|_| ())?
+    .map_err(|_| failed("timeout", None))?
 }
 
 pub async fn private(
@@ -112,7 +126,7 @@ pub async fn private(
             };
             return match state
                 .dictation_models
-                .get_context(&state.accounts, &context, false)
+                .get_context(&state.accounts, &state.dictation_slots, &context, false)
                 .await
             {
                 Ok((models, _)) => response(
@@ -167,6 +181,7 @@ pub async fn private(
                 .dictation_models
                 .get(
                     &state.accounts,
+                    &state.dictation_slots,
                     provider,
                     &home,
                     value["fresh"].as_bool().unwrap_or(false),
@@ -232,7 +247,7 @@ pub async fn private(
                 200,
             );
         }
-        Ok(Err(_)) => {
+        Ok(Err(())) => {
             return response(
                 json!({"ok":true,"result":OrganizationResult::original(request.raw, request.mode.unwrap_or_default())
             .failed("dictation_rust_unavailable","A configuração de organização está indisponível; foi mantida a transcrição original.")}),

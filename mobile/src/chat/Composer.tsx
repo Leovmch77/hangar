@@ -18,6 +18,7 @@ import { useServers } from '../stores/servers';
 import { removeDraftAttachment, retainDraftAttachment } from './draftAttachments';
 import { useNavigation, useRouter } from 'expo-router';
 import { DictationStyleMenu, useDictationStyleLabel } from '../features/ditado/EstiloPill';
+import { useDictationOrganization } from '../features/ditado/dictationOrganization';
 import { useDitado } from '../features/ditado/useDitado';
 import { useDitadoEstiloStore } from '../features/ditado/ditadoEstiloStore';
 import { DictationError, dictationAudio, runDictation, uploadName, type DictationSource } from '../features/ditado/dictationRun';
@@ -387,7 +388,10 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
   const [attachMenuOpen, setAttachMenuOpen] = useState(false);
   const [focado, setFocado] = useState(false);
   const [styleMenuOpen, setStyleMenuOpen] = useState(false);
-  const dictationStyle = useDictationStyleLabel();
+  const styleServer = useServers((s) => s.servers.find((x) => x.id === origin.serverId));
+  const dictationStyle = useDictationStyleLabel(styleServer);
+  // Organização desligada na máquina da sessão: todo estilo volta cru, então a barra não oferece versões.
+  const organizationOff = useDictationOrganization(styleServer) === 'off';
   const [commandSheetOpen, setCommandSheetOpen] = useState(false);
   // `/model` e `/effort` abrem a folha do chip da sessão; o número sobe a cada pedido.
   const [selectorRequest, setSelectorRequest] = useState<{ which: 'model' | 'effort'; n: number } | null>(null);
@@ -1003,7 +1007,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
   const barIntact = !!bar && (revising !== null || dictatedInField(bar, text));
   // O aviso do ditado (limpeza do registro falhou) já traz o mesmo áudio: um player só.
   const barPlayer = bar && barIntact && !gravando && !dictationPlayer ? dictationAudio(originServer, origin.name, null, bar.serverPath) : null;
-  const barVersions = barIntact && !!bar?.raw;
+  const barVersions = barIntact && !!bar?.raw && !organizationOff;
   // Gravando ou transcrevendo, o texto do campo ainda vai mudar: enviar agora mandaria a metade.
   // Transcrição desta tela ou de uma montagem anterior da mesma conversa ainda no ar.
   const busyVoice = transcribing || dictation?.status === 'pending';
@@ -1477,7 +1481,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
           <SideQuestionSheet open name={name} question={sideQuestion} onClose={() => setSideQuestion(null)} />
         ) : null}
 
-        <DictationStyleMenu open={styleMenuOpen} onClose={() => setStyleMenuOpen(false)} />
+        <DictationStyleMenu open={styleMenuOpen} onClose={() => setStyleMenuOpen(false)} server={styleServer} />
 
         <AttachSheet
           open={attachMenuOpen}

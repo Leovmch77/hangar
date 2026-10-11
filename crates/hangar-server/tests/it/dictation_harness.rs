@@ -29,7 +29,9 @@ async fn attempt_with_context(
         provider, oauth, model, generation, include, snapshot, locked, None,
     )
     .await
+    .0
 }
+/// Resultado e o registro do que o CLI de fixture recebeu (argv, ambiente, prompt de sistema).
 async fn attempt_with_budget(
     provider: &str,
     oauth: bool,
@@ -39,7 +41,7 @@ async fn attempt_with_budget(
     snapshot: Option<Value>,
     locked: bool,
     budget: Option<Duration>,
-) -> Value {
+) -> (Value, Value) {
     let root = tempfile::tempdir().unwrap();
     let bin = root.path().join("bin");
     std::fs::create_dir(&bin).unwrap();
@@ -209,7 +211,7 @@ async fn attempt_with_budget(
             "a organização não pode começar depois do prazo"
         );
         python.abort();
-        return serde_json::to_value(result).unwrap();
+        return (serde_json::to_value(result).unwrap(), Value::Null);
     }
     let app = hangar_server::routes::terminal_router(state);
     let server = tokio::spawn(async move {
@@ -222,13 +224,20 @@ async fn attempt_with_budget(
     });
     let response=reqwest::Client::new().post(format!("http://{address}/__hangar_server/dictation/organize"))
         .header("x-hangar-internal","harness-secret").header("content-type","application/json")
-        .body(json!({"session":"destination","generation":generation,"raw":"  Hoje vamos conferir o ditado completo.\n","style":"limpar","model":if model==Some(""){json!("")}else{Value::Null},"include_recent_messages":include,"recent_messages":snapshot}).to_string()).send().await.unwrap();
+        .body(json!({"session":"destination","generation":generation,"raw":"  Hoje vamos conferir o ditado completo.\n","style":"limpar","model":if model==Some(""){json!("")}else{Value::Null},"include_recent_messages":include,"recent_messages":snapshot,"harness_allowed":true}).to_string()).send().await.unwrap();
     let status = response.status();
     let data = response.bytes().await.unwrap();
     server.abort();
     python.abort();
     assert_eq!(status, 200);
-    serde_json::from_slice::<Value>(&data).unwrap()["result"].clone()
+    let record = std::fs::read(account.join("fixture-record.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or(Value::Null);
+    (
+        serde_json::from_slice::<Value>(&data).unwrap()["result"].clone(),
+        record,
+    )
 }
 
 #[tokio::test]
@@ -245,9 +254,24 @@ async fn dictation_harness_uses_destination_account_and_its_separate_model() {
 }
 #[tokio::test]
 async fn dictation_harness_oauth_claude_uses_safe_mode_and_destination_subscription() {
-    let result = attempt("claude", true, None, "k:original").await;
+    let (result, record) =
+        attempt_with_budget("claude", true, None, "k:original", false, None, false, None).await;
     assert_eq!(result["text"], "Hoje vamos conferir o ditado completo.");
     assert!(result["organization_code"].is_null(), "{result}");
+    assert_eq!(
+        record["anthropic_api_key"], false,
+        "chave de API trocaria a assinatura: {record}"
+    );
+    assert!(
+        record["config_dir"]
+            .as_str()
+            .is_some_and(|dir| dir.ends_with("claude-a")),
+        "pasta da conta de destino ausente: {record}"
+    );
+    assert_eq!(record["credentials_present"], true, "{record}");
+    let args = record["args"].as_array().unwrap();
+    assert!(args.iter().any(|a| a == "--safe-mode"));
+    assert!(!args.iter().any(|a| a == "--system-prompt"));
 }
 #[tokio::test]
 async fn dictation_harness_refuses_recreated_destination_and_unavailable_model() {
@@ -264,7 +288,17 @@ async fn dictation_recent_messages_are_opt_in_bounded_and_frozen_for_revision() 
         off["recent_messages"].is_null(),
         "sem opção não há histórico"
     );
-    let on = attempt_with_context("claude", false, None, "k:original", true, None, false).await;
+    let (on, record) =
+        attempt_with_budget("claude", false, None, "k:original", true, None, false, None).await;
+    let prompt = record["system_prompt"].as_str().unwrap_or_default();
+    assert!(
+        prompt.contains("O projeto usa PostgreSQL") && prompt.contains("O serviço se chama Hangar"),
+        "as referências não chegaram ao prompt de sistema do CLI: {record}"
+    );
+    assert!(
+        !record["args"].to_string().contains("PostgreSQL"),
+        "referências da conversa no argv"
+    );
     let references = on["recent_messages"]
         .as_array()
         .expect("referências solicitadas ausentes");
@@ -329,7 +363,8 @@ async fn dictation_deadline_includes_waiting_for_the_catalog_and_preserves_raw()
         false,
         Some(Duration::from_millis(500)),
     )
-    .await;
+    .await
+    .0;
     assert_eq!(
         result["organization_code"],
         "dictation_organization_timeout"

@@ -85,11 +85,8 @@ pub struct OrganizationRequest {
     pub account: Option<String>,
     pub include_recent_messages: Option<bool>,
     pub recent_messages: Option<Vec<ReferenceMessage>>,
-    #[serde(default = "allow_harness")]
+    // Fecha por padrão: pedido sem a autorização explícita do dono não usa a conta do harness.
     pub harness_allowed: bool,
-}
-fn allow_harness() -> bool {
-    true
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

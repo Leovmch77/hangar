@@ -59,7 +59,7 @@ import { cachePrazo } from '../lib/cachePrazo';
   import ConfirmSheet from './ConfirmSheet.svelte';
   import { skipChatConfirmations, rememberSkipChatConfirmations } from '../lib/confirmActions';
   import DitadoEstiloPopover from './DitadoEstiloPopover.svelte';
-  import { ditadoEstilo } from '../lib/ditadoEstilo.svelte';
+  import { ditadoEstilo, organizacaoDitado } from '../lib/ditadoEstilo.svelte';
   import { estilosDitado, type EstiloDitado } from '@hangar/core';
   import { desktop } from '../lib/desktop.svelte';
   import { getCommands, setModelEffort, uploadFile, uploadUrl, listUploads, relimparDitado, getCodexModels, getCodexPermissions, getPiModels, getKimiModels, getPermissionModes, setPermissionMode, type ModelEffortBody } from '@hangar/core';
@@ -205,10 +205,14 @@ import { cachePrazo } from '../lib/cachePrazo';
   // mais de uma tela (chat e peek do quadro) e cada uma pediria a config por conta própria.
   let estiloAberto = $state(false);
   let estiloPillEl = $state<HTMLElement | null>(null);
-  const rotuloEstilo = $derived(
-    estilosDitado().find((e) => e.valor === ditadoEstilo.valor)?.rotulo ?? m.composer_ditado_pill(),
+  // Organização desligada na máquina da sessão: todo estilo volta cru, então a pill diz isso e a
+  // barra do ditado não oferece versões.
+  const organizacaoOff = $derived(organizacaoDitado.de(sessionServer()) === 'off');
+  const rotuloEstilo = $derived(organizacaoOff ? m.ditado_organizacao_desligada_rotulo()
+    : estilosDitado().find((e) => e.valor === ditadoEstilo.valor)?.rotulo ?? m.composer_ditado_pill(),
   );
   $effect(() => { void ditadoEstilo.carregar(); });
+  $effect(() => { void organizacaoDitado.carregar(sessionServer()); });
 
   $effect(() => {
     const sn = sessionName;
@@ -2316,6 +2320,7 @@ import { cachePrazo } from '../lib/cachePrazo';
         <audio class="ditado-audio" src={ditado.url} controls preload="metadata"
                aria-label={m.composer_ditado_ouvir()}
                onerror={() => (recError = m.composer_ditado_audio_indisponivel())}></audio>
+        {#if !organizacaoOff}
         <div class="ditado-versoes" role="group" aria-label={m.composer_ditado_versao()}>
           {#each versoesDitado() as v (v.valor)}
             <button
@@ -2328,6 +2333,7 @@ import { cachePrazo } from '../lib/cachePrazo';
             >{relimpando === v.valor ? m.composer_ditado_trocando() : v.rotulo}</button>
           {/each}
         </div>
+        {/if}
         <!-- Fechar a barra. Virou obrigatorio quando ela passou a sobreviver a trocar de sessao e a
              recarregar o app: antes ela morria sozinha, agora fica ate o envio — e quem desistiu do
              ditado nao tinha como tirar o player da frente. Nao mexe no texto que ja esta no campo. -->
@@ -2762,6 +2768,7 @@ import { cachePrazo } from '../lib/cachePrazo';
   <DitadoEstiloPopover
     open={estiloAberto}
     anchor={ehMobile ? plusBtnEl : estiloPillEl}
+    server={sessionServer()}
     onClose={() => (estiloAberto = false)}
   />
 

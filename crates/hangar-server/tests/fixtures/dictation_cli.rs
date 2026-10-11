@@ -35,6 +35,13 @@ fn main() {
             std::thread::park();
         }
     }
+    if args.iter().any(|arg| arg == "--exit-empty") {
+        return;
+    }
+    if args.iter().any(|arg| arg == "--exit-failure") {
+        println!("{}", json!({"type":"result","result":"parcial","is_error":false}));
+        std::process::exit(3);
+    }
     for key in [
         "CP_AUTH_TOKEN",
         "HANGAR_INTERNAL_SECRET",
@@ -77,9 +84,52 @@ fn main() {
         use std::io::Read;
         io::stdin().read_to_string(&mut input).unwrap();
         let text = input.trim();
+        let overrides: Vec<&str> = args
+            .windows(2)
+            .filter(|pair| pair[0] == "-c")
+            .map(|pair| pair[1].as_str())
+            .collect();
+        let system_prompt = if args.iter().any(|a| a == "exec") {
+            overrides
+                .iter()
+                .find_map(|o| o.strip_prefix("model_instructions_file="))
+                .and_then(|path| serde_json::from_str::<String>(path).ok())
+        } else {
+            value_of(&args, "--system-prompt-file").cloned()
+        }
+        .and_then(|path| std::fs::read_to_string(path).ok());
+        // O teste confere o que o CLI recebeu de fato, não só o resultado.
+        std::fs::write(
+            std::path::Path::new(&root).join("fixture-record.json"),
+            json!({
+                "args": args,
+                "anthropic_api_key": std::env::var_os("ANTHROPIC_API_KEY").is_some(),
+                "config_dir": std::env::var("CLAUDE_CONFIG_DIR").ok(),
+                "credentials_present": std::path::Path::new(&root).join(".credentials.json").exists(),
+                "system_prompt": system_prompt,
+                "stdin": text,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        if system_prompt.is_none() {
+            eprintln!("prompt de sistema ausente");
+            std::process::exit(8);
+        }
         if args.iter().any(|a| a == "exec") {
             for flag in ["--ignore-user-config", "--ephemeral", "--sandbox"] {
                 if !args.iter().any(|a| a == flag) {
+                    std::process::exit(8);
+                }
+            }
+            for prefix in [
+                "history.persistence=\"none\"",
+                "cli_auth_credentials_store=",
+                "log_dir=",
+                "sqlite_home=",
+            ] {
+                if !overrides.iter().any(|o| o.starts_with(prefix)) {
+                    eprintln!("override ausente: {prefix}");
                     std::process::exit(8);
                 }
             }
@@ -102,12 +152,20 @@ fn main() {
                     std::process::exit(8);
                 }
             }
+            if !claude_isolated(&args) || args.iter().any(|a| a == "--system-prompt") {
+                eprintln!("isolamento ausente ou prompt no argv");
+                std::process::exit(8);
+            }
             println!(
                 "{}",
                 json!({"type":"result","result":text,"is_error":false})
             );
         }
         return;
+    }
+    if args.iter().any(|a| a == "--input-format") && !claude_isolated(&args) {
+        eprintln!("catálogo sem isolamento");
+        std::process::exit(8);
     }
     for line in io::stdin().lock().lines() {
         let value: Value = serde_json::from_str(&line.unwrap()).unwrap();
@@ -146,4 +204,16 @@ fn main() {
         }
         io::stdout().flush().unwrap();
     }
+}
+
+fn value_of<'a>(args: &'a [String], flag: &str) -> Option<&'a String> {
+    args.iter()
+        .position(|a| a == flag)
+        .and_then(|i| args.get(i + 1))
+}
+
+/// Sem fontes de configuração e sem MCP além do vazio declarado.
+fn claude_isolated(args: &[String]) -> bool {
+    args.iter().any(|a| a == "--strict-mcp-config")
+        && value_of(args, "--setting-sources").is_some_and(|v| v.is_empty())
 }

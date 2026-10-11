@@ -62,12 +62,12 @@ EDITAVEIS: dict[str, type] = {
     "llm_model": str,      # nome do modelo (vazio = o padrao)
     # reasoning_effort mandado ao provedor. Vazio = campo AUSENTE do payload (o de sempre) — nem
     # todo provedor conhece a chave, e mandar pra quem nao conhece e 400. Serve pra DESLIGAR o
-    # raciocinio ("none") num modelo que raciocina: a limpeza do ditado tem timeout de 8s e um
-    # modelo pensando estoura isso. Ver narrar._esforco_raciocinio.
+    # raciocinio ("none") num modelo que raciocina: a organização do ditado tem prazo e um
+    # modelo pensando estoura isso. Ver crates/hangar-server/src/dictation/service.rs.
     "llm_reasoning_effort": str,
     # Provedor SO do estilo "briefing" do ditado. Vazio = usa o mesmo do resto. Existe porque
     # limpar/prosa querem rapidez (a pessoa espera o texto no campo) e o briefing quer o modelo que
-    # estrutura melhor, que costuma ser mais lento. Ver narrar._provedor(perfil="briefing").
+    # estrutura melhor, que costuma ser mais lento. Ver crates/hangar-server/src/dictation/service.rs.
     "llm_briefing_base_url": str,
     "llm_briefing_api_key": str,
     "llm_briefing_model": str,

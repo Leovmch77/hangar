@@ -1,4 +1,6 @@
-import { getConfig, patchConfig, type EstiloDitado, ehEstilo } from '@hangar/core';
+import { SvelteMap } from 'svelte/reactivity';
+import { getConfig, patchConfig, type EstiloDitado, ehEstilo, fetchDictationOrganization,
+  type DictationOrganization, type Server } from '@hangar/core';
 
 // Estilo do ditado, vivendo perto do microfone e nao enterrado nas Configuracoes: a decisao "isto
 // aqui e um comando rapido" ou "isto e um pedido inteiro" muda ANTES de falar, e ninguem abre modal
@@ -98,5 +100,22 @@ export const ditadoEstilo = {
     carregado = false;
     carregando = null;
     escritas = 0;
+    organizacoes.clear();
+  },
+};
+
+// Modo de organização por servidor (chave = id; '' = o ativo). Desligado, o servidor devolve o cru
+// em todo estilo: a tela esconde o seletor em vez de oferecer uma escolha que não faz nada.
+const organizacoes = new SvelteMap<string, DictationOrganization>();
+
+export const organizacaoDitado = {
+  de(s: Server | null | undefined): DictationOrganization {
+    return organizacoes.get(s?.id ?? '') ?? 'unknown';
+  },
+  /** Relê sempre: o modo é trocado no app desktop, e a tela não pode seguir com o de horas atrás. */
+  async carregar(s: Server | null | undefined): Promise<void> {
+    const v = await fetchDictationOrganization(s);
+    // Falha de leitura não apaga um modo já conhecido.
+    if (v !== 'unknown' || !organizacoes.has(s?.id ?? '')) organizacoes.set(s?.id ?? '', v);
   },
 };

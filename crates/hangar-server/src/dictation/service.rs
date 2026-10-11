@@ -116,6 +116,31 @@ async fn organize_before_deadline(
             );
         }
     };
+    let Ok(_slot) = state.dictation_slots.clone().try_acquire_owned() else {
+        return original.failed("dictation_busy", super::harness::detail("dictation_busy"));
+    };
+    // Só a causa e o status vão ao diário: nunca a chave nem a transcrição.
+    let failed = |original: OrganizationResult, code: &str, status: Option<u16>| {
+        tracing::warn!(code, status, "API externa de organização do ditado falhou");
+        let detail = match code {
+            "dictation_api_auth_rejected" => {
+                "A API de organização recusou a chave configurada; foi mantida a transcrição original."
+            }
+            "dictation_api_rate_limited" => {
+                "A API de organização atingiu o limite de uso; foi mantida a transcrição original."
+            }
+            "dictation_api_unavailable" => {
+                "A API de organização respondeu com erro; foi mantida a transcrição original."
+            }
+            "dictation_api_unreachable" => {
+                "Não foi possível conectar à API de organização; foi mantida a transcrição original."
+            }
+            _ => {
+                "A API de organização não devolveu texto válido; foi mantida a transcrição original."
+            }
+        };
+        original.failed(code, detail)
+    };
     let response = client
         .post(format!(
             "{}/chat/completions",
@@ -128,41 +153,43 @@ async fn organize_before_deadline(
         .timeout(deadline.saturating_duration_since(tokio::time::Instant::now()))
         .send()
         .await;
-    let output = match response {
-        Ok(response) if response.status().is_success() => {
-            match tokio::time::timeout_at(deadline, response.bytes()).await {
-                Ok(Ok(bytes)) if bytes.len() <= 1024 * 1024 => {
-                    serde_json::from_slice::<Value>(&bytes)
-                        .ok()
-                        .and_then(|value| {
-                            value
-                                .pointer("/choices/0/message/content")
-                                .and_then(Value::as_str)
-                                .map(str::to_owned)
-                        })
-                }
-                Err(_) => {
-                    return original.failed(
-                        "dictation_organization_timeout",
-                        super::harness::detail("dictation_organization_timeout"),
-                    );
-                }
-                _ => None,
-            }
-        }
+    let response = match response {
+        Ok(response) => response,
         Err(error) if error.is_timeout() => {
             return original.failed(
                 "dictation_organization_timeout",
                 "A organização excedeu o prazo; foi mantida a transcrição original.",
             );
         }
-        _ => None,
+        Err(_) => return failed(original, "dictation_api_unreachable", None),
+    };
+    let status = response.status().as_u16();
+    match status {
+        200..=299 => {}
+        401 | 403 => return failed(original, "dictation_api_auth_rejected", Some(status)),
+        429 => return failed(original, "dictation_api_rate_limited", Some(status)),
+        _ => return failed(original, "dictation_api_unavailable", Some(status)),
+    }
+    let output = match tokio::time::timeout_at(deadline, response.bytes()).await {
+        Ok(Ok(bytes)) if bytes.len() <= 1024 * 1024 => serde_json::from_slice::<Value>(&bytes)
+            .ok()
+            .and_then(|value| {
+                value
+                    .pointer("/choices/0/message/content")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            }),
+        Ok(Err(_)) => return failed(original, "dictation_api_unreachable", Some(status)),
+        Ok(Ok(_)) => None,
+        Err(_) => {
+            return original.failed(
+                "dictation_organization_timeout",
+                super::harness::detail("dictation_organization_timeout"),
+            );
+        }
     };
     let Some(output) = output else {
-        return original.failed(
-            "dictation_organization_failed",
-            "A API de organização não devolveu texto válido; foi mantida a transcrição original.",
-        );
+        return failed(original, "dictation_api_invalid_response", Some(status));
     };
     let output = guards::normalized(&output);
     if let Err(detail) = guards::validate(raw, &output, style) {

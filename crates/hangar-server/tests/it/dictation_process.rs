@@ -75,4 +75,20 @@ async fn dictation_spawn_failure_and_empty_nonzero_output_are_errors() {
         .await,
         Err("dictation_cli_missing")
     );
+    for flag in ["--exit-empty", "--exit-failure"] {
+        let mut command =
+            tokio::process::Command::new(env!("CARGO_BIN_EXE_hangar-dictation-fixture"));
+        command.arg(flag);
+        assert_eq!(
+            hangar_server::dictation::process::limited_output(
+                command,
+                tempfile::tempdir().unwrap(),
+                "",
+                Duration::from_secs(5)
+            )
+            .await,
+            Err("dictation_organization_failed"),
+            "{flag} foi aceito como resposta"
+        );
+    }
 }

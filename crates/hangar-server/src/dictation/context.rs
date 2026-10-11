@@ -19,12 +19,22 @@ pub struct Context {
     pub jsonl: Option<PathBuf>,
 }
 
-fn read_json(path: &Path) -> Value {
-    std::fs::read(path)
-        .ok()
-        .filter(|bytes| bytes.len() <= 1024 * 1024)
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        .unwrap_or(Value::Null)
+/// Arquivo ausente é `Null`; ilegível, grande demais ou corrompido vira `code`, porque perder
+/// a autenticação calado faria a organização rodar com outra credencial.
+fn read_json(path: &Path, code: &'static str) -> Result<Value, &'static str> {
+    let failed = |cause: &str| {
+        tracing::warn!(code, file = %path.display(), cause, "arquivo da conta de organização do ditado inválido");
+        code
+    };
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Value::Null),
+        Err(_) => return Err(failed("unreadable")),
+    };
+    if bytes.len() > 1024 * 1024 {
+        return Err(failed("too_large"));
+    }
+    serde_json::from_slice(&bytes).map_err(|_| failed("invalid_json"))
 }
 
 pub fn account(
@@ -75,7 +85,7 @@ pub fn account(
     );
     let mut settings = json!({});
     if provider == "claude" {
-        let stored = read_json(&home.join("settings.json"));
+        let stored = read_json(&home.join("settings.json"), "dictation_settings_unreadable")?;
         for key in [
             "ANTHROPIC_API_KEY",
             "ANTHROPIC_BASE_URL",
@@ -147,14 +157,18 @@ pub async fn resolve(
     if request.account.is_some() && request.account != row.conta {
         return Err("dictation_target_changed");
     }
+    // Conta declarada que não se resolve nunca cai na conta padrão: seria outra assinatura.
     let home = if row.provider == "codex" {
-        row.codex_home
-            .as_ref()
-            .map(PathBuf::from)
-            .unwrap_or_else(|| state.accounts.env.codex_default.clone())
+        match (&row.codex_home, &row.conta) {
+            (Some(home), _) => PathBuf::from(home),
+            (None, None) => state.accounts.env.codex_default.clone(),
+            (None, Some(_)) => return Err("dictation_harness_unsupported"),
+        }
+    } else if row.engine.is_some() || row.conta.is_none() {
+        state.accounts.env.claude_base.clone()
     } else {
         crate::list::context::config_dir_of(row.conta.as_deref())
-            .unwrap_or_else(|| state.accounts.env.claude_base.clone())
+            .ok_or("dictation_harness_unsupported")?
     };
     let mut context = account(&row.provider, &home, &state.accounts.env)?;
     context.generation = generation;
@@ -168,7 +182,7 @@ pub async fn resolve(
             .get("CP_ENGINES_FILE")
             .map(PathBuf::from)
             .unwrap_or_else(|| state.accounts.env.home.join(".claude/engines.json"));
-        let engines = read_json(&source);
+        let engines = read_json(&source, "dictation_engines_unreadable")?;
         let data = engines
             .get(engine)
             .filter(|e| e.is_object())
@@ -191,7 +205,7 @@ pub async fn resolve(
                 .and_then(|id| id.strip_prefix("codex:"))
                 .map(PathBuf::from)
                 .ok_or("dictation_harness_unsupported")?;
-            let auth = read_json(&home.join("auth.json"));
+            let auth = read_json(&home.join("auth.json"), "dictation_account_auth_unreadable")?;
             let id = auth["tokens"]["account_id"]
                 .as_str()
                 .ok_or("dictation_organization_failed")?;
@@ -210,7 +224,8 @@ pub async fn resolve(
                 {
                     return Err("dictation_organization_failed");
                 }
-                let credential = read_json(&file.path());
+                let credential =
+                    read_json(&file.path(), "dictation_proxy_credential_unreadable")?;
                 if credential["type"] == "codex"
                     && credential["account_id"].as_str() == Some(id)
                     && credential["disabled"].as_bool() != Some(true)

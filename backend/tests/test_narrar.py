@@ -10,12 +10,9 @@ from app.narrar import NarrarError
 def _config_isolada(monkeypatch, tmp_path):
     """Toda a suite le config de um diretorio VAZIO, nunca do ~/.claude da maquina.
 
-    Sem isto, `limpar_ditado` -> `estilo_efetivo` -> `estilo_ditado` -> `runtime_config.get`
-    abria o runtime-config.json de PRODUCAO desta maquina, e as travas testadas eram as do estilo
-    que estivesse salvo ali. Os testes de guarda passavam porque o valor no disco era `prosa`, igual
-    ao padrao — coincidencia de ambiente, nao algo que a suite fixa: trocando pra `limpar` (que sobe
-    a cobertura de 0.60 pra 0.80), um deles passava a ser rejeitado por OUTRO motivo e a assercao
-    quebrava. Mesmo isolamento que test_runtime_config.py ja fazia."""
+    Sem isto, `narrar._provedor` -> `runtime_config.get` abria o runtime-config.json de PRODUCAO
+    desta maquina, e o resultado dependia do que estivesse salvo ali. Mesmo isolamento que
+    test_runtime_config.py ja fazia."""
     monkeypatch.setattr(runtime_config, "_backend_config_base", lambda: str(tmp_path))
 
 

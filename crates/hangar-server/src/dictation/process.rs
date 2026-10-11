@@ -169,9 +169,10 @@ pub async fn limited_output_guarded(
         .await
         .unwrap_or(Err("dictation_organization_timeout"));
     let status = process.stop().await;
-    if outcome.is_ok() && !status.is_some_and(|s| s.success()) {
-        Err("dictation_organization_failed")
-    } else {
-        outcome
+    match outcome {
+        Ok(_) if !status.is_some_and(|s| s.success()) => Err("dictation_organization_failed"),
+        // Saída vazia com sucesso não é resposta; nenhum chamador tem o que interpretar.
+        Ok(bytes) if bytes.is_empty() => Err("dictation_organization_failed"),
+        outcome => outcome,
     }
 }

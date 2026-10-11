@@ -23,13 +23,15 @@ struct OrganizationSelection {
     include_recent_messages: bool,
 }
 impl OrganizationSelection {
-    fn read(value:&Value)->Self {
+    /// Modo desconhecido volta como `Err(modo)`: tratá-lo como "none" mandaria o ditado sem organizar calado.
+    fn read(value:&Value)->Result<Self,String> {
         let field=|key:&str|value["campos"][key]["valor"].as_str().unwrap_or("").to_owned();
         let mode=field("dictation_organization_mode");
-        Self{mode:if matches!(mode.as_str(),"harness"|"external_api"){mode}else{"none".into()},
+        if !matches!(mode.as_str(),""|"none"|"harness"|"external_api") { return Err(mode); }
+        Ok(Self{mode:if mode.is_empty(){"none".into()}else{mode},
             claude_model:field("dictation_claude_model"),codex_model:field("dictation_codex_model"),
             include_recent_messages:value["campos"]["dictation_include_recent_messages"]["valor"].as_bool().unwrap_or(false),
-            supported:value["campos"].get("dictation_organization_mode").is_some()}
+            supported:value["campos"].get("dictation_organization_mode").is_some()})
     }
     fn options(&self,session:Option<&SessionInfo>)->api::DictationOptions {
         api::DictationOptions{mode:if self.mode.is_empty(){"none".into()}else{self.mode.clone()},
@@ -622,23 +624,37 @@ impl Hangar {
         let (connection, writes) = (self.connection, self.dictation.style_writes);
         let job = self.runtime.spawn(async move { api.config().await });
         self.dictation.style_task = Some(cx.spawn(async move |this, cx| {
-            let result = job.await;
+            let result = job.await.unwrap_or_else(|_| Err(Failure::local("invalid_response")));
             let _ = this.update(cx, |this, cx| {
-                if this.connection != connection || this.dictation.style_writes != writes { return; }
+                if this.connection != connection { return; }
                 if this.dictation_target(cx).is_none_or(|(api,_)|api.identity()!=identity){return;}
-                if let Ok(Ok(value)) = result {
-                    this.dictation.organization=Some((identity,OrganizationSelection::read(&value)));
-                    if this.dictation.error.as_deref() == Some(tr("dictation_config_failed").as_str()) {
-                        this.dictation.error = None;
-                    }
-                    if let Some(style) = STYLES.into_iter().find(|style| value.pointer("/campos/ditado_estilo/valor").and_then(Value::as_str) == Some(*style)) {
-                        this.dictation.style = Some((connection, style));
+                // Gravação de estilo no meio: a leitura pode estar velha; a tarefa sai e o observador relê.
+                if this.dictation.style_writes != writes { this.dictation.style_task = None; cx.notify(); return; }
+                let failed = tr("dictation_config_failed");
+                let unknown = tr("dictation_organization_unknown");
+                let error = match result.map_err(|error| Self::failure(&error))
+                    .and_then(|value| OrganizationSelection::read(&value).map(|selection| (value, selection))
+                        .map_err(|mode| unknown.replace("{mode}", &mode))) {
+                    Ok((value, selection)) => {
+                        this.dictation.organization=Some((identity,selection));
+                        if this.dictation.error.as_deref().is_some_and(|e| e.starts_with(failed.as_str())) {
+                            this.dictation.error = None;
+                        }
+                        if let Some(style) = STYLES.into_iter().find(|style| value.pointer("/campos/ditado_estilo/valor").and_then(Value::as_str) == Some(*style)) {
+                            this.dictation.style = Some((connection, style));
+                        }
                         cx.notify();
+                        return;
                     }
-                    cx.notify();
-                } else {
-                    this.dictation.error=Some(tr("dictation_config_failed"));cx.notify();
-                }
+                    Err(error) => error,
+                };
+                this.dictation.error=Some(format!("{failed} ({error})"));
+                // Nova leitura só depois de uma pausa: limpar a tarefa na hora faria o observador reler a cada redesenho.
+                this.dictation.style_task = Some(cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(Duration::from_secs(15)).await;
+                    let _ = this.update(cx, |this, cx| { this.dictation.style_task = None; cx.notify(); });
+                }));
+                cx.notify();
             });
         }));
     }
@@ -670,10 +686,11 @@ impl Hangar {
         cx.notify();
     }
 
-    fn dictation_options(&self, cx: &App)->api::DictationOptions {
+    /// `None` sem a seleção lida desta máquina: quem grava recusa em vez de mandar sem organizar.
+    fn dictation_options(&self, cx: &App)->Option<api::DictationOptions> {
         let identity=self.dictation_target(cx).map(|(api,_)|api.identity());
         self.dictation.organization.as_ref().filter(|(owner,_)|Some(owner)==identity.as_ref())
-            .map(|(_,selection)|selection.options(self.selected.as_ref())).unwrap_or_default()
+            .map(|(_,selection)|selection.options(self.selected.as_ref()))
     }
 
     pub(super) fn toggle_dictation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -688,8 +705,13 @@ impl Hangar {
         }
         if self.connection_dialog || self.settings.is_some() || window.has_active_dialog(cx) { return; }
         if !self.dictation_ready(cx) { return; }
+        let Some(options) = self.dictation_options(cx) else {
+            self.dictation.error = Some(tr("dictation_config_failed"));
+            cx.notify();
+            return;
+        };
         self.cancel_dictation();
-        self.dictation.snapshot=Some(self.dictation_options(cx));
+        self.dictation.snapshot=Some(options);
         self.dictation.snapshot_style=self.dictation.style(self.connection);
         match Recorder::start() {
             Ok(recorder) => {
@@ -769,8 +791,9 @@ impl Hangar {
     /// nada desce nem sobe de novo.
     pub(super) fn dictate_upload(&mut self, filename: String, cx: &mut Context<Self>) -> Result<(), String> {
         let target = self.dictation.saved_audio_target(self.dictation_ready(cx), self.open_dictation_target(), &filename)?;
+        let options = self.dictation_options(cx).ok_or_else(|| tr("dictation_config_failed"))?;
         self.cancel_dictation();
-        self.dictation.snapshot=Some(self.dictation_options(cx));
+        self.dictation.snapshot=Some(options);
         self.dictation.snapshot_style=self.dictation.style(self.connection);
         self.dictation.owner = self.dictation_owner(cx);
         self.dictation.file_name = Some(filename.clone());
@@ -1052,7 +1075,8 @@ impl Hangar {
             .on_click(cx.listener(|this, _, window, cx| this.toggle_dictation(window, cx)));
         let owner = here && self.dictation.owner.is_some();
         let style = self.dictation.style(self.connection).unwrap_or("prosa");
-        let options=if recording||in_flight {self.dictation.snapshot.clone().unwrap_or_else(||self.dictation_options(cx))}else{self.dictation_options(cx)};
+        // Só para o desenho: sem seleção lida o microfone já está desligado (`dictation_ready`).
+        let options=if recording||in_flight {self.dictation.snapshot.clone()}else{None}.or_else(||self.dictation_options(cx)).unwrap_or_default();
         let organized=options.mode!="none";
         let entity = cx.entity().downgrade();
         // Gravando, some: trocar no meio não muda nada (o backend lê o estilo no fim) e o espaço é do botão de parar.
@@ -1478,15 +1502,23 @@ mod tests {
     }
 
     #[test]
+    fn organization_unknown_mode_is_an_error_not_none() {
+        let read=|mode:&str|super::OrganizationSelection::read(&serde_json::json!({"campos":{"dictation_organization_mode":{"valor":mode}}}));
+        assert_eq!(read("future_mode").err().as_deref(),Some("future_mode"));
+        assert_eq!(read("").unwrap().mode,"none");
+        assert_eq!(read("external_api").unwrap().mode,"external_api");
+    }
+
+    #[test]
     fn dictation_snapshot_keeps_an_unselected_model_and_the_original_destination() {
         let first=super::OrganizationSelection::read(&serde_json::json!({"campos":{
             "dictation_organization_mode":{"valor":"harness"},
             "dictation_claude_model":{"valor":""},
-            "dictation_include_recent_messages":{"valor":true}}}));
+            "dictation_include_recent_messages":{"valor":true}}})).unwrap();
         let mut destination=session("destination","k:first","first.jsonl");
         destination.provider="claude".into();destination.conta=Some("first-account".into());
         let mut dictation=Dictation::default();dictation.snapshot=Some(first.options(Some(&destination)));
-        let later=super::OrganizationSelection::read(&serde_json::json!({"campos":{"dictation_organization_mode":{"valor":"none"}}}));
+        let later=super::OrganizationSelection::read(&serde_json::json!({"campos":{"dictation_organization_mode":{"valor":"none"}}})).unwrap();
         destination.lifecycle_id=Some("k:second".into());destination.conta=Some("second-account".into());
         let snapshot=dictation.snapshot.as_ref().unwrap();
         assert_eq!(snapshot.model.as_deref(),Some(""),"nenhum modelo é uma escolha congelada, não herança futura");

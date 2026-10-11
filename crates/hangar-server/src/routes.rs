@@ -36,7 +36,9 @@ const SEND_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub struct AppState {
     pub dictation_models: Arc<crate::dictation::catalog::Models>,
-    pub transcription: Arc<crate::transcription::service::TranscriptionService>,
+    /// Vagas para processos e chamadas de organização do ditado (catálogo sem cache e execução).
+    pub dictation_slots: Arc<tokio::sync::Semaphore>,
+    pub transcription:Arc<crate::transcription::service::TranscriptionService>,
     pub transcription_slots: Arc<tokio::sync::Semaphore>,
     pub accounts: crate::accounts::AccountService,
     pub cfg: Config,
@@ -118,6 +120,7 @@ impl AppState {
             workspace_slots: Arc::new(tokio::sync::Semaphore::new(4)),
             transcription: Arc::default(),
             dictation_models: Arc::default(),
+            dictation_slots: Arc::new(tokio::sync::Semaphore::new(4)),
             transcription_slots: Arc::new(tokio::sync::Semaphore::new(4)),
             workspace_read_slots: Arc::new(tokio::sync::Semaphore::new(8)),
             workspace_meta_slots: Arc::new(tokio::sync::Semaphore::new(4)),

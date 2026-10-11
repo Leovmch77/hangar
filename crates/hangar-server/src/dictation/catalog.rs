@@ -25,20 +25,57 @@ pub struct Models {
     codex_endpoint: Option<String>,
 }
 
+/// Identidade da conta, não o arquivo inteiro: a renovação de token reescreve `auth.json` e
+/// `.credentials.json` durante a consulta e não pode passar por troca de conta.
 fn signature(home: &Path) -> Vec<Option<Vec<u8>>> {
     [
         "auth.json",
         "config.toml",
         "settings.json",
         ".credentials.json",
+        ".claude.json",
     ]
     .iter()
     .map(|file| {
-        std::fs::read(home.join(file)).ok().map(|bytes| {
-            ring::digest::digest(&ring::digest::SHA256, &bytes)
+        let bytes = std::fs::read(home.join(file)).ok()?;
+        let identity = match *file {
+            "auth.json" => serde_json::from_slice::<Value>(&bytes).ok().map(|mut value| {
+                if let Some(tokens) = value.get_mut("tokens").and_then(Value::as_object_mut) {
+                    for volatile in ["access_token", "refresh_token", "id_token"] {
+                        tokens.remove(volatile);
+                    }
+                }
+                if let Some(value) = value.as_object_mut() {
+                    value.remove("last_refresh");
+                }
+                value.to_string().into_bytes()
+            }),
+            ".credentials.json" => serde_json::from_slice::<Value>(&bytes).ok().map(|mut value| {
+                if let Some(oauth) = value
+                    .get_mut("claudeAiOauth")
+                    .and_then(Value::as_object_mut)
+                {
+                    for volatile in ["accessToken", "refreshToken", "expiresAt"] {
+                        oauth.remove(volatile);
+                    }
+                }
+                value.to_string().into_bytes()
+            }),
+            // Reescrito a todo momento pelo CLI; só a conta logada importa.
+            ".claude.json" => Some(
+                serde_json::from_slice::<Value>(&bytes)
+                    .map(|value| value["oauthAccount"]["accountUuid"].to_string())
+                    .unwrap_or_default()
+                    .into_bytes(),
+            ),
+            _ => None,
+        }
+        .unwrap_or(bytes);
+        Some(
+            ring::digest::digest(&ring::digest::SHA256, &identity)
                 .as_ref()
-                .to_vec()
-        })
+                .to_vec(),
+        )
     })
     .collect()
 }
@@ -127,16 +164,18 @@ impl Models {
     pub async fn get(
         &self,
         service: &AccountService,
+        slots: &tokio::sync::Semaphore,
         provider: &str,
         home: &Path,
         fresh: bool,
     ) -> Result<(Vec<Value>, Vec<Value>), &'static str> {
         let context = context::account(provider, home, &service.env)?;
-        self.get_context(service, &context, fresh).await
+        self.get_context(service, slots, &context, fresh).await
     }
     pub async fn get_context(
         &self,
         service: &AccountService,
+        slots: &tokio::sync::Semaphore,
         context: &context::Context,
         fresh: bool,
     ) -> Result<(Vec<Value>, Vec<Value>), &'static str> {
@@ -186,6 +225,8 @@ impl Models {
         {
             return Ok((row.models.clone(), row.raw.clone()));
         }
+        // Só a consulta real ocupa vaga; o cache continua respondendo com as vagas cheias.
+        let _slot = slots.try_acquire().map_err(|_| "dictation_busy")?;
         let (models, raw, version) = if provider == "claude" {
             let raw = if context.engine.is_some() {
                 engine_models(context).await?
@@ -216,7 +257,7 @@ impl Models {
             .await
             {
                 Ok(Some(raw)) => {
-                    let data = codex_http_models(&raw)?;
+                    let data = codex_http_models(&raw);
                     (
                         parse("codex", &json!({"data":data}), None)
                             .map_err(|_| "dictation_catalog_unavailable")?,
@@ -234,8 +275,20 @@ impl Models {
                     }
                     return Err("dictation_catalog_rate_limited");
                 }
-                _ => {
-                    let data = codex(service, context, account_guard.clone()).await?;
+                other => {
+                    let data = match codex(service, context, account_guard.clone()).await {
+                        Ok(data) => data,
+                        Err(code) => {
+                            if let Err(http) = other {
+                                tracing::warn!(
+                                    code,
+                                    http,
+                                    "catálogo do ditado: o HTTP falhou antes e o app-server também"
+                                );
+                            }
+                            return Err(code);
+                        }
+                    };
                     (
                         parse("codex", &data, None).map_err(|_| "dictation_catalog_unavailable")?,
                         Vec::new(),
@@ -337,7 +390,14 @@ impl Models {
                     #[cfg(test)]
                     self.codex_endpoint.as_deref(),
                 )
-                .await?
+                .await
+                .map_err(|code| {
+                    if code == HTTP_FAILED {
+                        "session_transfer_model_capacity_unknown"
+                    } else {
+                        code
+                    }
+                })?
                 .ok_or("session_transfer_model_capacity_unknown")?
             }
         };
@@ -423,7 +483,14 @@ async fn version(
         Duration::from_secs(10),
         Some(guard),
     )
-    .await?;
+    .await
+    .map_err(|code| {
+        if code == "dictation_organization_timeout" {
+            "dictation_catalog_timeout"
+        } else {
+            code
+        }
+    })?;
     let text = std::str::from_utf8(&output).map_err(|_| "dictation_catalog_unavailable")?;
     text.split_whitespace()
         .last()
@@ -474,7 +541,7 @@ async fn claude(
         process.write(&format!("{}\n",json!({"type":"control_request","request_id":"catalog-models","request":{"subtype":"list_models"}}))).await?;
         let data=process.response(&json!("catalog-models"),true).await?;
         data["models"].as_array().cloned().filter(|rows|!rows.is_empty()).ok_or("dictation_catalog_unavailable")
-    }).await.unwrap_or(Err("dictation_organization_timeout"));
+    }).await.unwrap_or(Err("dictation_catalog_timeout"));
     process.stop().await;
     outcome
 }
@@ -511,7 +578,7 @@ async fn codex(
             cursor=data["nextCursor"].clone();if cursor.is_null(){return Ok(json!({"data":rows}));}
         }
         Err("dictation_catalog_unavailable")
-    }).await.unwrap_or(Err("dictation_organization_timeout"));
+    }).await.unwrap_or(Err("dictation_catalog_timeout"));
     process.stop().await;
     outcome
 }
@@ -616,31 +683,59 @@ async fn codex_http(
         .await
     {
         Ok(response) => response,
-        Err(_) => return Ok(None),
+        Err(error) => {
+            let cause = if error.is_timeout() {
+                "timeout"
+            } else if error.is_connect() {
+                "connect"
+            } else {
+                "transport"
+            };
+            return Err(http_failed(cause, None));
+        }
     };
-    if response.status().as_u16() == 429 {
+    let status = response.status().as_u16();
+    if status == 429 {
         return Err("dictation_catalog_rate_limited");
     }
     if !response.status().is_success() {
-        return Ok(None);
+        return Err(http_failed("status", Some(status)));
     }
-    let value = response
+    let bytes = response
         .bytes()
         .await
+        .map_err(|_| http_failed("body", Some(status)))?;
+    if bytes.len() > 4 * 1024 * 1024 {
+        return Err(http_failed("too_large", Some(status)));
+    }
+    serde_json::from_slice::<Value>(&bytes)
         .ok()
-        .filter(|bytes| bytes.len() <= 4 * 1024 * 1024)
-        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
-    Ok(value.and_then(|v| v["models"].as_array().cloned()))
+        .and_then(|v| v["models"].as_array().cloned())
+        .map(Some)
+        .ok_or_else(|| http_failed("invalid_response", Some(status)))
 }
 
-fn codex_http_models(raw: &[Value]) -> Result<Vec<Value>, &'static str> {
+/// Código interno: quem chama cai no app-server, então a causa fica no diário.
+const HTTP_FAILED: &str = "dictation_catalog_http_failed";
+fn http_failed(cause: &str, status: Option<u16>) -> &'static str {
+    tracing::warn!(
+        code = HTTP_FAILED,
+        cause,
+        status,
+        "catálogo HTTP do Codex falhou"
+    );
+    HTTP_FAILED
+}
+
+/// Modelo sem `supported_reasoning_levels` entra sem nível de esforço selecionável.
+fn codex_http_models(raw: &[Value]) -> Vec<Value> {
     let mut raw = raw.to_vec();
     raw.sort_by_key(|m| m["priority"].as_i64().unwrap_or(i64::MAX));
     raw.into_iter().filter(|m|m.is_object()).map(|m| {
-        let levels=m["supported_reasoning_levels"].as_array().ok_or("dictation_catalog_unavailable")?;
-        Ok(json!({"model":m["slug"],"displayName":m["display_name"],"description":m["description"],"hidden":m["visibility"]!="list",
+        let levels=m["supported_reasoning_levels"].as_array().map(Vec::as_slice).unwrap_or_default();
+        json!({"model":m["slug"],"displayName":m["display_name"],"description":m["description"],"hidden":m["visibility"]!="list",
             "supportedReasoningEfforts":levels.iter().map(|level|json!({"reasoningEffort":level["effort"]})).collect::<Vec<_>>(),
-            "defaultReasoningEffort":m["default_reasoning_level"],"serviceTiers":m["service_tiers"],"defaultServiceTier":m["default_service_tier"],"additionalSpeedTiers":m["additional_speed_tiers"]}))
+            "defaultReasoningEffort":m["default_reasoning_level"],"serviceTiers":m["service_tiers"],"defaultServiceTier":m["default_service_tier"],"additionalSpeedTiers":m["additional_speed_tiers"]})
     }).collect()
 }
 
@@ -820,7 +915,7 @@ mod concurrency_tests {
         second_release.send(()).unwrap();
         assert_eq!(
             models
-                .get_context(&service, &second, false)
+                .get_context(&service, &tokio::sync::Semaphore::new(4), &second, false)
                 .await
                 .unwrap()
                 .0[0]["id"],
@@ -837,12 +932,12 @@ mod concurrency_tests {
         let pending = tokio::spawn({
             let models = models.clone();
             let service = service.clone();
-            async move { models.get_context(&service, &first, false).await }
+            async move { models.get_context(&service, &tokio::sync::Semaphore::new(4), &first, false).await }
         });
         first_seen.await.unwrap();
         let cached = tokio::time::timeout(
             Duration::from_secs(1),
-            models.get_context(&service, &second, false),
+            models.get_context(&service, &tokio::sync::Semaphore::new(4), &second, false),
         )
         .await;
         first_release.send(()).unwrap();
@@ -885,7 +980,7 @@ mod concurrency_tests {
             let models = models.clone();
             let service = service.clone();
             let context = context.clone();
-            async move { models.get_context(&service, &context, false).await }
+            async move { models.get_context(&service, &tokio::sync::Semaphore::new(4), &context, false).await }
         });
         seen.await.unwrap();
         models.invalidate(Some(&context.home));
@@ -908,7 +1003,7 @@ mod concurrency_tests {
         );
         assert_eq!(
             models
-                .get_context(&service, &context, false)
+                .get_context(&service, &tokio::sync::Semaphore::new(4), &context, false)
                 .await
                 .unwrap()
                 .0[0]["id"],

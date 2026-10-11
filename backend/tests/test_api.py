@@ -1705,7 +1705,7 @@ def test_transcribe_route_sem_chave_da_503(api_client, monkeypatch, tmp_path):
 
 def test_transcribe_sem_limpar_nao_chama_a_limpeza(api_client, monkeypatch, tmp_path):
     # Audio ANEXADO (arquivo de dez minutos) passa por esta mesma rota e nao pode pagar limpeza:
-    # sem `limpar=1` na query, `narrar.limpar_ditado` nem e chamada, e a resposta e a de sempre.
+    # sem `limpar=1` na query, `dictation_bridge.organize` nem e chamada, e a resposta e a de sempre.
     info = SessionInfo(name="cc", cwd=str(tmp_path))
     monkeypatch.setattr(api_mod.registry, "list", lambda: [info])
     monkeypatch.setattr(api_mod, "transcribe_with_provider",
@@ -1803,7 +1803,7 @@ def test_transcribe_com_limpar_devolve_o_cru_junto(api_client, monkeypatch, tmp_
 
 
 def test_transcribe_marca_o_estilo_efetivo_e_nao_o_pedido(api_client, monkeypatch, tmp_path):
-    # Rebaixamento silencioso do briefing em ditado curto (narrar._MIN_PALAVRAS_BRIEFING): o texto
+    # Rebaixamento silencioso do briefing em ditado curto (`DictationStyle::effective` no Rust): o texto
     # volta em prosa, e a barra do ditado tem que marcar prosa. Sem este campo o front so teria o
     # estilo PEDIDO, e o botao "Briefing" ficaria aceso num texto que nunca foi briefing.
     info = SessionInfo(name="cc", cwd=str(tmp_path))

@@ -42,6 +42,24 @@ pub fn detail(code: &str) -> &'static str {
         "dictation_cli_incompatible" => {
             "Esta versão do CLI não oferece o isolamento exigido para organizar o ditado; a transcrição foi preservada."
         }
+        "dictation_catalog_timeout" => {
+            "O catálogo da conta demorou demais para responder; a transcrição foi preservada."
+        }
+        "dictation_busy" => {
+            "As vagas de organização do ditado estão ocupadas; a transcrição foi preservada. Tente novamente."
+        }
+        "dictation_settings_unreadable" => {
+            "O settings.json da conta não pôde ser lido; a transcrição foi preservada."
+        }
+        "dictation_engines_unreadable" => {
+            "O engines.json não pôde ser lido; a transcrição foi preservada."
+        }
+        "dictation_account_auth_unreadable" => {
+            "O auth.json da conta do motor não pôde ser lido; a transcrição foi preservada."
+        }
+        "dictation_proxy_credential_unreadable" => {
+            "Uma credencial do CLIProxyAPI não pôde ser lida; a transcrição foi preservada."
+        }
         _ => "Não foi possível organizar pelo harness da conversa; a transcrição foi preservada.",
     }
 }
@@ -95,7 +113,7 @@ async fn organize_before_deadline(
     }
     let models = match state
         .dictation_models
-        .get_context(&state.accounts, &context, false)
+        .get_context(&state.accounts, &state.dictation_slots, &context, false)
         .await
     {
         Ok((models, _)) => models,
@@ -182,6 +200,12 @@ async fn run_with_budget(
     if tokio::time::Instant::now() >= deadline {
         return Err("dictation_organization_timeout");
     }
+    // Recusa em vez de enfileirar, como a transcrição: o prazo da tentativa já está correndo.
+    let _slot = state
+        .dictation_slots
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| "dictation_busy")?;
     let guard = std::sync::Arc::new(account_guard(state, context)?);
     let (command, directory) = build_command(state, context, model, style, references)?;
     let budget = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -243,6 +267,8 @@ pub fn build_command(
                 "--tools",
                 "",
                 "--disable-slash-commands",
+                "--setting-sources",
+                "",
                 "--strict-mcp-config",
                 "--mcp-config",
                 r#"{"mcpServers":{}}"#,
@@ -250,13 +276,14 @@ pub fn build_command(
                 "json",
                 "--model",
                 model,
-                "--system-prompt",
-            ])
-            .arg(prompts::with_references(style, references));
+            ]);
+        // As referências da conversa ficam fora do argv, que qualquer usuário lê no `ps`.
+        let prompt = directory.path().join("system-prompt.txt");
+        private_file(&prompt, &prompts::with_references(style, references))?;
+        command.arg("--system-prompt-file").arg(prompt);
         if !context.settings.as_object().is_none_or(|m| m.is_empty()) {
             let file = directory.path().join("auth-settings.json");
-            std::fs::write(&file, context.settings.to_string())
-                .map_err(|_| "dictation_organization_failed")?;
+            private_file(&file, &context.settings.to_string())?;
             command.arg("--settings").arg(file);
         }
         environment.insert("CLAUDE_CODE_DISABLE_BUNDLED_SKILLS".into(), "1".into());
@@ -277,8 +304,7 @@ pub fn build_command(
         ]);
         catalog::codex_overrides(&mut command);
         let file = directory.path().join("instructions.txt");
-        std::fs::write(&file, prompts::with_references(style, references))
-            .map_err(|_| "dictation_organization_failed")?;
+        private_file(&file, &prompts::with_references(style, references))?;
         command.arg("-c").arg(format!(
             "model_instructions_file={}",
             json!(file.to_string_lossy())
@@ -300,6 +326,14 @@ pub fn build_command(
                 .and_then(toml::Value::as_str)
                 .filter(|p| *p != "openai")
             {
+                // O nome entra como chave TOML no `-c`; fora deste alfabeto mudaria a chave.
+                if provider.is_empty()
+                    || !provider
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+                {
+                    return Err("dictation_harness_unsupported");
+                }
                 let settings = stored
                     .get("model_providers")
                     .and_then(|providers| providers.get(provider))
@@ -308,6 +342,13 @@ pub fn build_command(
                     .arg("-c")
                     .arg(format!("model_provider={}", json!(provider)));
                 let settings = settings.as_table().ok_or("dictation_harness_unsupported")?;
+                // Cabeçalhos e parâmetros não são repassados; sem eles o provedor recusaria calado.
+                if ["query_params", "http_headers", "env_http_headers"]
+                    .iter()
+                    .any(|key| settings.contains_key(*key))
+                {
+                    return Err("dictation_harness_unsupported");
+                }
                 for (key, value) in settings {
                     // Credenciais literais permanecem em memória, nunca no argv.
                     if key == "experimental_bearer_token" {
@@ -398,6 +439,19 @@ fn parse_output(bytes: &[u8], claude: bool) -> Result<String, &'static str> {
     output
         .filter(|_| completed)
         .ok_or("dictation_organization_failed")
+}
+
+/// Arquivo só do dono do processo: leva prompt com a conversa ou a autenticação da conta.
+fn private_file(path: &std::path::Path, contents: &str) -> Result<(), &'static str> {
+    use std::io::Write;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    options
+        .open(path)
+        .and_then(|mut file| file.write_all(contents.as_bytes()))
+        .map_err(|_| "dictation_organization_failed")
 }
 
 fn provider_config(

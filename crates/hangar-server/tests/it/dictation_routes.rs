@@ -118,8 +118,101 @@ async fn dictation_external_preserves_raw_when_provider_returns_no_text() {
     )
     .await;
     assert_eq!(result["text"], "  Hoje vamos conferir o ditado completo.\n");
-    assert_eq!(result["organization_code"], "dictation_organization_failed");
+    assert_eq!(result["organization_code"], "dictation_api_invalid_response");
     assert_eq!(hits, 1, "a tentativa foi repetida em outro serviço");
+}
+
+#[tokio::test]
+async fn dictation_external_names_the_api_failure_instead_of_invalid_text() {
+    for (status, code) in [
+        (401, "dictation_api_auth_rejected"),
+        (429, "dictation_api_rate_limited"),
+        (503, "dictation_api_unavailable"),
+    ] {
+        let (llm, llm_task) = serve(Router::new().route(
+            "/v1/chat/completions",
+            post(move || async move {
+                (
+                    axum::http::StatusCode::from_u16(status).unwrap(),
+                    "{}".to_owned(),
+                )
+            }),
+        ))
+        .await;
+        let result = organize_against(&format!("http://{llm}/v1"), "external_api", raw_text()).await;
+        llm_task.abort();
+        assert_eq!(result["organization_code"], code, "status {status}: {result}");
+        assert_eq!(result["text"], raw_text());
+    }
+}
+
+#[tokio::test]
+async fn dictation_missing_organization_config_is_an_error_not_mode_none() {
+    let (upstream, upstream_task) = serve(Router::new().route(
+        "/internal/transcription/config",
+        get(|| async { ([("content-type", "application/json")], "{\"providers\":[]}") }),
+    ))
+    .await;
+    let result = post_organize(upstream, json!({"raw":raw_text(),"style":"limpar"})).await;
+    upstream_task.abort();
+    assert_eq!(result["organization_code"], "dictation_rust_unavailable", "{result}");
+    assert_eq!(result["text"], raw_text());
+}
+
+fn raw_text() -> &'static str {
+    "  Hoje vamos conferir o ditado completo.\n"
+}
+
+async fn organize_against(base_url: &str, mode: &str, raw: &str) -> Value {
+    let config = json!({"organization": {"dictation_organization_mode": mode,
+        "llm_base_url":base_url, "llm_api_key":"fixture-key", "llm_model":"fixture-model",
+        "ditado_estilo":"limpar"}});
+    let (upstream, upstream_task) = serve(Router::new().route(
+        "/internal/transcription/config",
+        get(move || {
+            let config = config.clone();
+            async move { ([("content-type", "application/json")], config.to_string()) }
+        }),
+    ))
+    .await;
+    let result = post_organize(upstream, json!({"raw":raw,"style":"limpar"})).await;
+    upstream_task.abort();
+    result
+}
+
+async fn post_organize(upstream: std::net::SocketAddr, body: Value) -> Value {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let state = AppState::new(Config {
+        listen: addr,
+        upstream,
+        internal_secret: "dictation-secret".into(),
+        auth_token: "fixture-owner".into(),
+        log_path: None,
+        trusted: TrustedHosts::parse("127.0.0.1"),
+    });
+    let router = hangar_server::routes::terminal_router(Arc::new(state));
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+    let response = reqwest::Client::new()
+        .post(format!("http://{addr}/__hangar_server/dictation/organize"))
+        .header("x-hangar-internal", "dictation-secret")
+        .header("content-type", "application/json")
+        .body(body.to_string())
+        .send()
+        .await
+        .unwrap();
+    let status = response.status();
+    let text = response.text().await.unwrap();
+    server.abort();
+    assert_eq!(status, 200, "organização não respondeu: {text}");
+    serde_json::from_str::<Value>(&text).unwrap()["result"].clone()
 }
 
 #[tokio::test]
