@@ -56,8 +56,15 @@ async fn rig(caps: &[&str], peers: Option<Value>) -> Rig {
 /// O controlador de pé, antes da primeira oferta.
 async fn launch(caps: &[&str], peers: Option<Value>) -> Rig { launch_with(caps, peers, Duration::from_secs(600)).await }
 
-async fn launch_with(caps: &[&str], peers: Option<Value>, audio_grace: Duration) -> Rig {
+async fn launch_with(caps: &[&str], peers: Option<Value>, audio_grace: Duration) -> Rig { launch_seeded(caps, peers, audio_grace, None).await }
+
+/// `memory`: conteúdo do `memoria.json`, gravado antes de a chamada abrir.
+async fn launch_seeded(caps: &[&str], peers: Option<Value>, audio_grace: Duration, memory: Option<&str>) -> Rig {
     let dir = tempfile::tempdir().unwrap();
+    if let Some(body) = memory {
+        std::fs::create_dir_all(dir.path().join("voz")).unwrap();
+        std::fs::write(dir.path().join("voz").join("memoria.json"), body).unwrap();
+    }
     std::fs::write(dir.path().join("runtime-config.json"), r#"{"codex_voice_beta": true}"#).unwrap();
     let peers_path = peers.map(|p| { let path = dir.path().join("peers.json"); std::fs::write(&path, p.to_string()).unwrap(); path });
     let api: Shared = Arc::new(Mutex::new(Api {
@@ -350,6 +357,15 @@ async fn state_snapshot_reaches_device_coalesced() {
     }
     assert!(states <= 2, "{states} retratos em 150 ms");
     rig.state("pensamento inteiro", |s| s["thought"] == "xxxxxxxxxx").await;
+}
+
+#[tokio::test]
+async fn stored_memory_reaches_the_organizer_thread_start() {
+    let body = r#"{"next":1,"entries":[{"id":"m1","kind":"preferencia","text":"Prefere respostas curtas","learned":"2026-10-01","confirmed":"2026-10-01"}]}"#;
+    let mut rig = launch_seeded(&[], None, Duration::from_secs(600), Some(body)).await;
+    let start = rig.wait("thread/start", |m| m["method"] == "thread/start").await;
+    let dev = start["params"]["developerInstructions"].as_str().unwrap();
+    assert!(dev.contains("[m1]") && dev.contains("Prefere respostas curtas"), "{dev}");
 }
 
 #[tokio::test]

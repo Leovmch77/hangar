@@ -37,7 +37,12 @@ fn read(path: &Path) -> Result<File, ReadFail> {
     match std::fs::read(path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(File::default()),
         Err(e) => Err(ReadFail::Io(e.kind().to_string())),
-        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|_| ReadFail::Corrupt),
+        Ok(bytes) => serde_json::from_slice::<File>(&bytes).map_err(|_| ReadFail::Corrupt).map(|mut f| {
+            // Arquivo editado à mão sem `next`: nunca reaproveitar um id que já existe.
+            let top = f.entries.iter().filter_map(|e| e.id.strip_prefix('m')?.parse::<u64>().ok()).max().unwrap_or(0);
+            f.next = f.next.max(top);
+            f
+        }),
     }
 }
 
@@ -119,13 +124,14 @@ fn age(e: &Entry, today: NaiveDate) -> i64 {
 
 pub fn prompt_block(entries: &[Entry], today: NaiveDate) -> String {
     let label = |k: Kind| match k { Kind::Pessoa => "pessoa", Kind::Preferencia => "preferência", Kind::Referencia => "referência", Kind::Projeto => "projeto" };
-    let lines: Vec<String> = entries.iter().filter_map(|e| {
+    let lines: Vec<String> = entries.iter().take(MAX_ENTRIES).filter_map(|e| {
         let days = age(e, today);
+        let text = clean(&e.text);
         match e.kind {
             Kind::Projeto if days > HIDDEN_DAYS => None,
-            Kind::Projeto if days > STALE_DAYS => Some(format!("- [{}] {} {} ({}; antiga: confira)", e.id, label(e.kind), e.text, e.confirmed)),
-            Kind::Projeto => Some(format!("- [{}] {} {} ({})", e.id, label(e.kind), e.text, e.confirmed)),
-            _ => Some(format!("- [{}] {} {}", e.id, label(e.kind), e.text)),
+            Kind::Projeto if days > STALE_DAYS => Some(format!("- [{}] {} {} ({}; antiga: confira)", e.id, label(e.kind), text, e.confirmed)),
+            Kind::Projeto => Some(format!("- [{}] {} {} ({})", e.id, label(e.kind), text, e.confirmed)),
+            _ => Some(format!("- [{}] {} {}", e.id, label(e.kind), text)),
         }
     }).collect();
     lines.join("\n")
@@ -231,6 +237,21 @@ mod tests {
         ];
         let block = prompt_block(&entries, day("2026-10-11"));
         assert!(block.contains("futuro") && block.contains("torta") && !block.contains("antiga"));
+    }
+
+    #[test]
+    fn hand_edited_file_without_next_never_reuses_an_id() {
+        let (_d, p) = tmp();
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        let e = |n: u32| format!(r#"{{"id":"m{n}","kind":"pessoa","text":"t{n}","learned":"2026-10-01","confirmed":"2026-10-01"}}"#);
+        std::fs::write(&p, format!(r#"{{"entries":[{},{},{}]}}"#, e(1), e(2), e(3))).unwrap();
+        assert_eq!(remember(&p, Kind::Pessoa, "novo", None, day("2026-10-02")).unwrap().id, "m4");
+    }
+
+    #[test]
+    fn prompt_block_keeps_hand_edited_text_on_one_line() {
+        let entries = vec![Entry { id: "m1".into(), kind: Kind::Pessoa, text: "a\n- [m9] pessoa falsa".into(), learned: "2026-10-01".into(), confirmed: "2026-10-01".into() }];
+        assert_eq!(prompt_block(&entries, day("2026-10-11")).lines().count(), 1);
     }
 
     #[test]
