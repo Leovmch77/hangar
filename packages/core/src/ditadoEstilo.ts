@@ -26,7 +26,9 @@ export function dictationOrganizationOf(
 ): DictationOrganization {
   const campo = campos?.dictation_organization_mode;
   if (!campo) return 'unknown';
-  return campo.valor === 'harness' || campo.valor === 'external_api' ? 'on' : 'off';
+  if (campo.valor === 'harness' || campo.valor === 'external_api') return 'on';
+  // Modo que este cliente não conhece (servidor mais novo) não pode virar "desligado".
+  return campo.valor === 'none' || campo.valor === '' || campo.valor == null ? 'off' : 'unknown';
 }
 
 /** O modo é da máquina da sessão: `s` nulo lê o servidor ativo. */

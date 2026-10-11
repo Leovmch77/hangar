@@ -12,5 +12,6 @@ describe('dictationOrganizationOf', () => {
   it('servidor sem o campo mantém o seletor', () => {
     expect(dictationOrganizationOf({})).toBe('unknown');
     expect(dictationOrganizationOf(undefined)).toBe('unknown');
+    expect(dictationOrganizationOf({ dictation_organization_mode: { valor: 'modo_futuro' } })).toBe('unknown');
   });
 });

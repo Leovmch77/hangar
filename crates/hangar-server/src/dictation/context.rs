@@ -164,8 +164,12 @@ pub async fn resolve(
             (None, None) => state.accounts.env.codex_default.clone(),
             (None, Some(_)) => return Err("dictation_harness_unsupported"),
         }
-    } else if row.engine.is_some() || row.conta.is_none() {
+    } else if row.conta.is_none() {
         state.accounts.env.claude_base.clone()
+    } else if row.engine.is_some() {
+        // Motor roda no `~/.claude` base; a conta só vale quando aponta para uma pasta.
+        crate::list::context::config_dir_of(row.conta.as_deref())
+            .unwrap_or_else(|| state.accounts.env.claude_base.clone())
     } else {
         crate::list::context::config_dir_of(row.conta.as_deref())
             .ok_or("dictation_harness_unsupported")?

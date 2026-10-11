@@ -62,12 +62,10 @@ fn signature(home: &Path) -> Vec<Option<Vec<u8>>> {
                 value.to_string().into_bytes()
             }),
             // Reescrito a todo momento pelo CLI; só a conta logada importa.
-            ".claude.json" => Some(
-                serde_json::from_slice::<Value>(&bytes)
-                    .map(|value| value["oauthAccount"]["accountUuid"].to_string())
-                    .unwrap_or_default()
-                    .into_bytes(),
-            ),
+            // JSON inválido conta pelo arquivo inteiro: dois corrompidos não viram a mesma conta.
+            ".claude.json" => serde_json::from_slice::<Value>(&bytes)
+                .ok()
+                .map(|value| value["oauthAccount"]["accountUuid"].to_string().into_bytes()),
             _ => None,
         }
         .unwrap_or(bytes);
@@ -732,7 +730,10 @@ fn codex_http_models(raw: &[Value]) -> Vec<Value> {
     let mut raw = raw.to_vec();
     raw.sort_by_key(|m| m["priority"].as_i64().unwrap_or(i64::MAX));
     raw.into_iter().filter(|m|m.is_object()).map(|m| {
-        let levels=m["supported_reasoning_levels"].as_array().map(Vec::as_slice).unwrap_or_default();
+        let levels = m["supported_reasoning_levels"].as_array().map(Vec::as_slice).unwrap_or_else(|| {
+            tracing::warn!(model = %m["slug"], "catálogo HTTP do Codex sem supported_reasoning_levels");
+            &[]
+        });
         json!({"model":m["slug"],"displayName":m["display_name"],"description":m["description"],"hidden":m["visibility"]!="list",
             "supportedReasoningEfforts":levels.iter().map(|level|json!({"reasoningEffort":level["effort"]})).collect::<Vec<_>>(),
             "defaultReasoningEffort":m["default_reasoning_level"],"serviceTiers":m["service_tiers"],"defaultServiceTier":m["default_service_tier"],"additionalSpeedTiers":m["additional_speed_tiers"]})

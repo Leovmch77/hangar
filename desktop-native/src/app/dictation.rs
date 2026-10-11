@@ -637,7 +637,8 @@ impl Hangar {
                         .map_err(|mode| unknown.replace("{mode}", &mode))) {
                     Ok((value, selection)) => {
                         this.dictation.organization=Some((identity,selection));
-                        if this.dictation.error.as_deref().is_some_and(|e| e.starts_with(failed.as_str())) {
+                        let loading = tr("dictation_config_loading");
+                        if this.dictation.error.as_deref().is_some_and(|e| e.starts_with(failed.as_str()) || e == loading) {
                             this.dictation.error = None;
                         }
                         if let Some(style) = STYLES.into_iter().find(|style| value.pointer("/campos/ditado_estilo/valor").and_then(Value::as_str) == Some(*style)) {
@@ -706,7 +707,8 @@ impl Hangar {
         if self.connection_dialog || self.settings.is_some() || window.has_active_dialog(cx) { return; }
         if !self.dictation_ready(cx) { return; }
         let Some(options) = self.dictation_options(cx) else {
-            self.dictation.error = Some(tr("dictation_config_failed"));
+            // Sem preferências desta máquina ainda: falha anterior já está no aviso, com a causa.
+            if self.dictation.error.is_none() { self.dictation.error = Some(tr("dictation_config_loading")); }
             cx.notify();
             return;
         };
@@ -791,7 +793,7 @@ impl Hangar {
     /// nada desce nem sobe de novo.
     pub(super) fn dictate_upload(&mut self, filename: String, cx: &mut Context<Self>) -> Result<(), String> {
         let target = self.dictation.saved_audio_target(self.dictation_ready(cx), self.open_dictation_target(), &filename)?;
-        let options = self.dictation_options(cx).ok_or_else(|| tr("dictation_config_failed"))?;
+        let options = self.dictation_options(cx).ok_or_else(|| self.dictation.error.clone().unwrap_or_else(|| tr("dictation_config_loading")))?;
         self.cancel_dictation();
         self.dictation.snapshot=Some(options);
         self.dictation.snapshot_style=self.dictation.style(self.connection);
