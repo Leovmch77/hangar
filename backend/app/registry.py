@@ -1014,9 +1014,9 @@ class KillFailed(Exception):
     """A sessao continuou de pe depois do kill. Existe pra a rota DELETE reportar em vez de responder
     {"ok": true} e a UI sumir com um card de sessao que segue viva (ver SessionRegistry.kill)."""
 
-    def __init__(self, name: str):
+    def __init__(self, name: str, detail: dict | None = None):
         super().__init__(f"a sessao '{name}' continua de pe depois do kill-session")
-        self.name = name
+        self.name, self.detail = name, detail
 
 
 def _rename_pair_python(old: str, new: str) -> None:
@@ -3148,11 +3148,19 @@ class SessionRegistry:
         if tmux.is_hidden(alvo) and not tmux.kill_session(alvo):
             _log.debug("kill: shell escondido de %r nao saiu (pode nao existir)", name)
 
-    def kill(self, name: str) -> list[dict]:
+    def kill(self, name: str, *, closed_by_rust: bool = False) -> list[dict]:
         """Devolve os avisos de saída do grupo que o Rust não entregou (vazio no modo Python, onde a
-        rota avisa depois)."""
+        rota avisa depois). `closed_by_rust`: o Rust já encerrou a sessão (pane, app-server, sidecar,
+        fila, grupo) e repassou; só as lojas daqui, sem nenhuma chamada de volta a ele."""
         from app.conversation_transfer import require_available
         require_available(name)
+        if closed_by_rust:
+            shortcut_terminals.close_all(name)
+            self._forget_local(name)
+            ThenLink(name).clear()
+            if apos_saida_codex:
+                apos_saida_codex(name)
+            return []
 
         # Levanta KillFailed quando a sessao SOBREVIVE. Antes o retorno do tmux era descartado e a
         # limpeza duravel (cache, fila, then, pareamento) rodava do mesmo jeito: o card sumia da UI, o
@@ -3183,9 +3191,13 @@ class SessionRegistry:
             # tentado: falhando ele (o caso que esta funcao existe pra pegar), a excecao dizia "nao
             # consegui encerrar" com a TUI ja sem servidor — sinal trocado, e a sessao que sobrou na
             # tela nao fala mais com ninguem. Agora falha antes de qualquer estrago.
-            if not (codex_sessions.load(name) or {}).get("headless") and not tmux.kill_session(name):
+            # Codex com terminal do Rust: quem encerra (pane, app-server, sidecar, fila) é ele; as lojas daqui seguem abaixo.
+            from app.runtime_coordinator import rust_codex_terminal
+            if (rust := rust_codex_terminal(name, "kill")) is not None and rust[0] != 200:
+                raise KillFailed(name, json.loads(rust[1]).get("detail"))
+            if rust is None and not (codex_sessions.load(name) or {}).get("headless") and not tmux.kill_session(name):
                 raise KillFailed(name)
-            get_adapter("codex").close_sync(name)
+            get_adapter("codex").close_sync(name) if rust is None else get_adapter("codex").forget_memory(name)
             self._kill_hidden_shell(name)
             shortcut_terminals.close_all(name)
             codex_sessions.delete(name)

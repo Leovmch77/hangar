@@ -558,6 +558,20 @@ mod tests {
         assert!(!got.iter().any(|(_,_,data)| data.to_string().contains("ask:a")));
     }
 
+    struct RecipeProcesses {sid:std::sync::Mutex<String>,config:std::path::PathBuf}
+    impl crate::list::procs::ProcessView for RecipeProcesses {
+        fn children(&self,_:Duration)->std::io::Result<Arc<crate::list::procs::ChildrenMap>> {Ok(Arc::new(std::collections::HashMap::from([(42,vec![43])]))) }
+        fn argv(&self,_:i64)->Vec<String> {vec![]}
+        fn cwd(&self,_:i64)->Option<std::path::PathBuf> {Some(self.config.clone())}
+        fn env_var(&self,_:i64,_:&str)->std::io::Result<Option<std::ffi::OsString>> {Ok(None)}
+        fn start_time(&self,_:i64)->Option<f64> {Some(1000.0)}
+        fn recipe(&self,pid:i64)->std::io::Result<crate::list::procs::ProcessRecipe> {
+            let argv=match pid {42=>vec!["hangar-cano".into()],43=>vec!["claude".into(),"--session-id".into(),self.sid.lock().unwrap().clone().into()],_=>return Err(std::io::ErrorKind::NotFound.into())};
+            Ok(crate::list::procs::ProcessRecipe {pid,birth:1000.0,executable:if pid==42 {"/fixture/hangar-cano".into()} else {"/fixture/claude".into()},cwd:self.config.clone(),argv,
+                environ:vec![format!("HOME={}",self.config.display()).into(),format!("CLAUDE_CONFIG_DIR={}",self.config.display()).into()],cgroup:None})
+        }
+    }
+
     #[tokio::test]
     async fn refresh_a_rebind_b_discards_a_and_then_real_refresh_publishes_only_b() {
         use crate::runtime::protocol::{CanoBinding, RuntimeTarget};
@@ -571,13 +585,21 @@ mod tests {
         let external = Arc::new(crate::state::facts::FactsStore::default());
         let interactions = Arc::new(crate::interactions::InteractionStore::default());
         let plugin = Arc::new(crate::plugin::Store::new(interactions.clone()));
+        let processes=Arc::new(RecipeProcesses {sid:std::sync::Mutex::new("sid".into()),config:f._dir.path().into()});
         let registry = Arc::new(crate::runtime::gateway::RuntimeRegistry::new(py.addr, "test".into(), "feed-race".into())
-            .with_interactions(interactions).with_plugin(plugin.clone()));
+            .with_interactions(interactions).with_plugin(plugin.clone()).with_processes(processes.clone()));
+        registry.bind_hubs(f.ctx.hubs.downgrade());
         let queues = tempfile::tempdir().unwrap();
         let mut feed = RuntimeFeed::new(&f.lease.hub, Some(registry.live("s")), f.published.clone(), Some(feed_facts(&py,&external))).with_registry(Some(registry.clone()));
         let mut servers = Vec::new();
         for (conversation, generation) in [("sid", 1), ("sid-b", 2)] {
-            if generation == 2 { registry.close("feed-key", 1).await.unwrap(); }
+            if generation == 2 {
+                registry.close("feed-key", 1).await.unwrap();
+                let _lease=crate::runtime::queue::acquire_lease(&queues.path().join("feed.lock")).unwrap();
+                let mut store=crate::runtime::queue::Store::open(&queues.path().join("queue.json"),&queues.path().join("projection"),crate::runtime::queue::State::new("feed-key",1,"s",vec![])).unwrap();
+                store.exec(1,"fixture-new-life",crate::runtime::protocol::ClockSample {monotonic_s:0.0,epoch_s:1.0},crate::runtime::queue::Action::AdvanceLifecycle {generation:2,state:json!({})}).unwrap();
+            }
+            *processes.sid.lock().unwrap()=conversation.into();
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let address = listener.local_addr().unwrap();
             servers.push(tokio::spawn(async move {

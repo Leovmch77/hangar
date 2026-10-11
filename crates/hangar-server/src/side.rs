@@ -763,13 +763,14 @@ async fn side_once(hub: &Arc<Hub>, attempt: &mut u32) -> SideEnd {
         };
         match ev.event.as_str() {
             "info" => {
-                let info = match serde_json::from_str::<InternalInfo>(&ev.data) {
+                let mut info = match serde_json::from_str::<InternalInfo>(&ev.data) {
                     Ok(i) => i,
                     Err(e) => {
                         tracing::warn!(session = %hub.name, line = e.line(), column = e.column(), "info interna inválida");
                         return SideEnd::Retry;
                     }
                 };
+                if let Some(runtime)=hub.ctx.runtime.get() && let Some(local)=runtime.claude_info(&hub.name).await {info=local;}
                 remember_info(&hub.ctx.infos, &hub.name, Some(info.clone()));
                 if first {
                     // Conexão nova manda a fila inteira de novo: o retrato anterior sai.
@@ -1049,6 +1050,19 @@ impl Hubs {
         if let Some(hub) = hub {
             hub.set_runtime_owned(owned);
         }
+    }
+
+    pub(crate) fn rebind_claude(&self,name:&str,key:&str,jsonl:PathBuf,queue:PathBuf)->Result<(),crate::runtime::protocol::RuntimeError> {
+        self.rebind_claude_info(name,InternalInfo {provider:"claude".into(),jsonl:Some(jsonl),session_key:key.into(),history:serde_json::json!({"queue":queue}),headless:false})
+    }
+    pub(crate) fn rebind_claude_info(&self,name:&str,info:InternalInfo)->Result<(),crate::runtime::protocol::RuntimeError> {
+        let binding=Binding::from_info(&info).filter(|b|matches!(b.provider,Provider::Claude|Provider::ClaudeHeadless)).ok_or_else(||crate::runtime::protocol::RuntimeError::new("lifecycle_hub_binding","vínculo do hub inválido"))?;
+        let hub=self.0.lock().map_err(|_|crate::runtime::protocol::RuntimeError::new("lifecycle_hub_unavailable","hub da sessão indisponível"))?.get(name).map(|(hub,_)|hub.clone());
+        if let Some(hub)=hub {
+            remember_info(&hub.ctx.infos,name,Some(info));
+            hub.rebind(binding);
+        }
+        Ok(())
     }
 
     fn evict(&self, name: &str, hub: &Arc<Hub>) {
@@ -1402,7 +1416,8 @@ mod tests {
             terminal: crate::terminal_input::TerminalBinding { name: "cx-proof".into(), pane: "%7".into(), conversation: "thread-1".into(),
                 generation: 1, created: 1, mux_argv: vec!["tmux".into()], windows: false, clipboard_lock_path: None },
             metadata: serde_json::json!({"key": "codex-key", "codex_home": dir.path().join("codex-home")}),
-            transcript: None, lease_path: dir.path().join("lock"), state_path: dir.path().join("state"), projection_dir: dir.path().join("projection") };
+            transcript: None, lease_path: dir.path().join("lock"), state_path: dir.path().join("state"), projection_dir: dir.path().join("projection"),
+            sidecar_dir: None };
         registry.open_codex_terminal(target).await.unwrap();
         assert!(lease.hub.runtime_feed(), "ator adotado aberto: o estado sai do feed");
         assert_eq!(lease.hub.owned_events(), &FEED_EVENTS[..]);

@@ -104,7 +104,10 @@ pub async fn serve_until_with_state(
         let registry = std::sync::Arc::new(runtime::gateway::RuntimeRegistry::new(cfg.upstream,
             cfg.internal_secret.clone(),instance.clone()).with_mods(state.mods.clone())
             .with_interactions(state.interactions.clone()).with_plugin(state.plugin.clone())
-            .with_terminal_states(state.list.published.clone()).with_terms(state.term.clone()));
+            .with_terminal_states(state.list.published.clone()).with_terms(state.term.clone())
+            .with_permissions(state.state.permissions.clone()));
+        registry.bind_lifecycle();
+        state.state.lifecycle.set(registry.clone()).map_err(|_|std::io::Error::other("state_lifecycle_already_bound"))?;
         runtime_registry=Some(registry.clone());
         state.list.set_runtime(registry.clone());
         state.list.set_plugin_runtime(registry.clone());
@@ -118,6 +121,17 @@ pub async fn serve_until_with_state(
         refresh_loop=Some(accounts::claude_refresh::start(state.accounts.clone(),quota_bridge,registry.clone()));
         let _watchdog = std::env::home_dir().map(|home| AbortOnDrop(tokio::spawn(
             watchdog::run(state.http.clone(), cfg.upstream, cfg.internal_secret.clone(), home))));
+        // A vigia do Codex com terminal só existe quando a tabela entrega essas sessões ao Rust.
+        let _codex_watch = match state.list.env().dirs.clone() {
+            Some(dirs) if session_write::table::CODEX_TERMINAL_OWNED => {
+                let watcher = std::sync::Arc::new(runtime::codex_terminal::Watcher::new(runtime::codex_terminal::WatchConfig {
+                    home: dirs.home.clone(), queue_dir: dirs.claude.join(".hangar-queue"),
+                    mux: list::mux::Mux::default(), mux_program: state.list.env().capture_program.clone() }));
+                registry.bind_watcher(watcher.clone());
+                Some(AbortOnDrop(tokio::spawn(watcher.run(registry.clone()))))
+            }
+            _ => None,
+        };
         println!("{}",runtime::gateway::startup_line(INTERNAL_PROTOCOL,&instance,port));
         let gateway = runtime::gateway::serve(private,registry.clone(),cfg.internal_secret.clone(),instance,INTERNAL_PROTOCOL);
         let result = tokio::select! {

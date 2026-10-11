@@ -91,7 +91,27 @@ async fn policy() -> std::net::SocketAddr {
     address
 }
 
-pub(crate) async fn registry() -> RuntimeRegistry { RuntimeRegistry::new(policy().await,"secret-test".into(),"instance-test".into()) }
+pub(crate) struct RecipeProcesses;
+impl hangar_server::list::procs::ProcessView for RecipeProcesses {
+    fn children(&self,_:Duration)->std::io::Result<Arc<hangar_server::list::procs::ChildrenMap>> {Ok(Arc::new(std::collections::HashMap::from([(42,vec![43])]))) }
+    fn argv(&self,_:i64)->Vec<String> {vec![]}
+    fn cwd(&self,_:i64)->Option<std::path::PathBuf> {Some(std::env::temp_dir())}
+    fn env_var(&self,_:i64,_:&str)->std::io::Result<Option<std::ffi::OsString>> {Ok(None)}
+    fn start_time(&self,_:i64)->Option<f64> {Some(1000.0)}
+    fn recipe(&self,pid:i64)->std::io::Result<hangar_server::list::procs::ProcessRecipe> {
+        let argv=match pid {42=>vec!["hangar-cano".into()],43=>vec!["claude".into(),"--session-id".into(),"sid-1".into()],_=>return Err(std::io::ErrorKind::NotFound.into())};
+        Ok(hangar_server::list::procs::ProcessRecipe {pid,birth:1000.0,executable:if pid==42 {"/fixture/hangar-cano".into()} else {"/fixture/claude".into()},cwd:std::env::temp_dir(),argv,environ:vec!["HOME=/fixture".into()],cgroup:None})
+    }
+}
+pub(crate) fn with_hubs(registry:RuntimeRegistry)->Arc<RuntimeRegistry> {
+    let registry=Arc::new(registry);let hubs=hangar_server::side::Hubs::default();registry.bind_lifecycle();registry.bind_hubs(hubs.downgrade());
+    let mut events=registry.subscribe();
+    tokio::spawn(async move {let _hubs=hubs;while events.recv().await.is_ok() {}});
+    registry
+}
+pub(crate) async fn registry() -> Arc<RuntimeRegistry> {
+    with_hubs(RuntimeRegistry::new(policy().await,"secret-test".into(),"instance-test".into()).with_processes(Arc::new(RecipeProcesses)))
+}
 
 /// App-server do Codex falso, em WebSocket de loopback: conta as conexões, guarda os quadros de cada
 /// uma e derruba a que o teste pedir. `initialize` responde; `thread/resume` diz que ainda não há
@@ -180,7 +200,8 @@ pub(crate) fn codex_terminal_target(dir:&std::path::Path,endpoint:&str,app_pid:u
         terminal:hangar_server::terminal_input::TerminalBinding { name:"cx-proof".into(),pane:"%7".into(),conversation:"thread-1".into(),
             generation:1,created:1,mux_argv:vec!["tmux".into()],windows:false,clipboard_lock_path:None },
         metadata:json!({"key":"codex-key","thread_id":"thread-1","endpoint":endpoint,"app_pid":app_pid,"cwd":dir,"codex_home":dir.join("codex-home")}),
-        transcript:None,lease_path:dir.join("codex-key.lock"),state_path:dir.join("codex-key.queue-state.json"),projection_dir:dir.join("projection") }
+        transcript:None,lease_path:dir.join("codex-key.lock"),state_path:dir.join("codex-key.queue-state.json"),projection_dir:dir.join("projection"),
+        sidecar_dir:None }
 }
 
 #[cfg(unix)]
@@ -204,7 +225,7 @@ async fn codex_terminal_is_adopted_without_rollout_and_sends_before_subscribing(
     let view = registry.handle("codex-key",1).await.unwrap().view().await.unwrap();
     assert_eq!(view["headless"],false,"o estado terminal não sai como sem terminal");
     assert_eq!(view["public_state"]["headless"],false);
-    // Encerrar com kill não é do Rust; fechar solta a posse e deixa o processo vivo.
+    // Sem a vigia ligada, encerrar recusa; fechar solta a posse e deixa o processo vivo.
     assert_eq!(registry.close_with_kill("codex-key",1).await.unwrap_err().code,"close_kill");
     assert_eq!(registry.close("codex-key",1).await.unwrap()["closed"],true);
     assert!(child.try_wait().unwrap().is_none(),"o app-server adotado segue vivo");

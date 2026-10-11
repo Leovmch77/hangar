@@ -210,6 +210,8 @@ pub enum Action {
     Recover,
     EnsureProjection,
     SetRuntimeState { state:Value },
+    /// Sob a mesma lease, depois de parar o ator antigo. Não devolve entradas incertas à fila.
+    AdvanceLifecycle { generation:u64, state:Value },
     ReplaceRows { rows:Vec<Value> },
 }
 
@@ -243,6 +245,27 @@ pub fn acquire_lease(path: &Path) -> io::Result<Arc<File>> {
     file.try_lock().map_err(io::Error::from)?;
     Ok(Arc::new(file))
 }
+/// TUI e app-server que a vigia adotou nesta fila: outra TUI com a mesma chave é outra sessão.
+pub const CODEX_LIFE: &str = "codex_life";
+
+/// Apaga a fila de uma sessão encerrada (o estado e, com `projection`, a projeção por nome). Chamar
+/// com a trava; ausente é nada a apagar.
+pub fn discard(state_path: &Path, projection_dir: &Path, projection: bool) -> io::Result<()> {
+    let bytes = match std::fs::read(state_path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let ignore_missing = |result: io::Result<()>| match result {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
+        _ => Ok(()),
+    };
+    if projection && let Ok((state, _)) = State::load(&bytes) {
+        ignore_missing(std::fs::remove_file(projection_dir.join(format!("{}.jsonl", sanitize(&state.name)))))?;
+    }
+    ignore_missing(std::fs::remove_file(state_path))
+}
+
 fn row_id(row: &Value) -> &str { row["id"].as_str().unwrap_or("") }
 fn is_false(value:&bool)->bool {!*value}
 fn current(row: &Value, min_ts: f64) -> bool {
@@ -309,10 +332,15 @@ impl Store {
 
     pub fn exec(&mut self, generation: u64, call_id: &str, clock: ClockSample, action: Action) -> io::Result<Value> {
         self.unfence()?;
-        if generation != self.state.generation { return Err(invalid("geração da fila mudou")); }
         if call_id.is_empty() { return Err(invalid("operação da fila sem identificador")); }
         let receipt_id = format!("{CALL_PREFIX}{call_id}");
         let payload = receipt_payload(serde_json::to_value(&action)?);
+        if generation != self.state.generation {
+            let same_advance=matches!(&action,Action::AdvanceLifecycle {generation:next,..}
+                if generation.checked_add(1)==Some(*next) && *next==self.state.generation)
+                && self.state.operations.get(&receipt_id).is_some_and(|receipt|receipt.payload==payload);
+            if !same_advance { return Err(invalid("geração da fila mudou")); }
+        }
         if let Some(previous) = self.state.operations.get(&receipt_id) {
             if receipt_payload(previous.payload.clone()) != payload { return Err(invalid("identificador reutilizado com outra operação")); }
             let result = previous.result.clone();
@@ -797,9 +825,38 @@ fn apply(state: &mut State, action: Action, clock: ClockSample, call_id: &str) -
         Action::SetRuntimeState { state: runtime_state } => {
             if !runtime_state.is_object() { return Err(invalid("estado privado inválido")); }
             let barrier=state.runtime_state["terminal_write_barrier"].clone();
+            let life=state.runtime_state[CODEX_LIFE].clone();
             state.runtime_state = runtime_state;
             if !barrier.is_null() {state.runtime_state["terminal_write_barrier"]=barrier;}
+            // A vida da adoção é da vigia, não da vista que o ator grava.
+            if !life.is_null() {state.runtime_state[CODEX_LIFE]=life;}
             Value::Null
+        }
+        Action::AdvanceLifecycle { generation, state:next } => {
+            let advanced=generation!=state.generation;
+            if advanced && state.generation.checked_add(1)!=Some(generation) || !next.is_object() {return Err(invalid("avanço de vida inválido"));}
+            let mut patch=next.as_object().unwrap().clone();
+            if let Some(reset)=patch.remove("conversation_reset") {
+                let previous=reset["previous"].as_str().filter(|sid|!sid.is_empty()).ok_or_else(||invalid("conversa anterior inválida"))?;
+                let next=reset["next"].as_str().filter(|sid|!sid.is_empty()).ok_or_else(||invalid("conversa nova inválida"))?;
+                if !advanced || previous==next || reset.as_object().is_none_or(|o|o.len()!=2)
+                    || state.runtime_state["view"]["conversation"]!=previous || patch.get("metadata").and_then(|metadata|metadata["session_id"].as_str())!=Some(next) {return Err(invalid("troca de conversa inválida"));}
+                state.rows.clear();
+            }
+            let barrier=state.runtime_state["terminal_write_barrier"].clone();
+            if patch.get("terminal_write_barrier").is_some_and(|b|b!=&barrier) {return Err(invalid("avanço removeria uma entrega incerta"));}
+            if let Some(name)=patch.remove("name") {
+                let name=name.as_str().filter(|n|!n.is_empty()).ok_or_else(||invalid("nome vazio na fila"))?;
+                if state.name!=name {state.runtime_state["_queue_previous_name"]=json!(state.name);state.name=name.into();}
+            }
+            let runtime=state.runtime_state.as_object_mut().ok_or_else(||invalid("estado privado inválido"))?;
+            if advanced {
+                for key in ["view","channels","preview","thinking","tool","alive","working","deliverable","error","terminal_lifecycle"] {runtime.remove(key);}
+            }
+            runtime.extend(patch);
+            if !barrier.is_null() {state.runtime_state["terminal_write_barrier"]=barrier;}
+            state.generation=generation;
+            json!({"generation":generation})
         }
         Action::ReplaceRows { rows } => {
             if state.rows.iter().any(|r| protected.contains(row_id(r)) && !rows.contains(r)) {
@@ -1017,5 +1074,59 @@ impl QueueActor {
     pub async fn shutdown(self) -> io::Result<()> {
         self.sender.send(QueueMessage::Stop).await.map_err(|_|invalid("fila já encerrada"))?;
         self.task.await.map_err(|_|invalid("persistência da fila interrompida"))
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+    #[test]
+    fn sid_commit_clears_a_and_advances_b_in_one_store_write() {
+        let dir=tempfile::tempdir().unwrap();
+        let mut initial=State::new("key",4,"session",vec![json!({"id":"a","text":"only-a","delivered":false,"ts":1.0})]);
+        initial.runtime_state["view"]=json!({"conversation":"sid-a","deliverable":true});
+        let mut store=Store::open(&dir.path().join("state.json"),dir.path(),initial).unwrap();
+        let clock=ClockSample {monotonic_s:0.0,epoch_s:10.0};
+        let action=||Action::AdvanceLifecycle {generation:5,state:json!({"conversation_reset":{"previous":"sid-a","next":"sid-b"},"metadata":{"key":"key","session_id":"sid-b"}})};
+        store.exec(4,"sid-commit",clock,action()).unwrap();
+        assert_eq!(store.state().generation,5);assert!(store.state().rows.is_empty());
+        assert_eq!(store.state().runtime_state["metadata"]["session_id"],"sid-b");
+        assert!(store.state().runtime_state["view"].is_null());
+        assert!(store.state().runtime_state.get("conversation_reset").is_none());
+        assert!(store.exec(4,"old-claim",clock,Action::Claim {min_ts:0.0,limit:None,entry_id:None}).is_err());
+        assert!(store.exec(5,"b-claim",clock,Action::Claim {min_ts:0.0,limit:None,entry_id:None}).unwrap().as_array().unwrap().is_empty());
+        assert_eq!(store.exec(4,"sid-commit",clock,action()).unwrap(),json!({"generation":5}));
+    }
+    #[test]
+    fn advance_preserves_unknown_and_only_repeats_the_same_transition() {
+        let dir=tempfile::tempdir().unwrap();
+        let mut initial=State::new("key",4,"session",vec![json!({"id":"row","text":"pending","delivered":true,"confirmed":false,"desistiu":false,"ts":1000.0})]);
+        let mut unknown=Operation::new("input",json!({"kind":"input"}),Some("row".into()));
+        unknown.status=Status::Unknown;
+        initial.operations.insert("input".into(),unknown);
+        initial.runtime_state["terminal_write_barrier"]=json!({"conversation":"sid","generation":4,"operation_id":"input"});
+        initial.runtime_state["view"]=json!({"working":true});
+        let before=initial.runtime_state["terminal_write_barrier"].clone();
+        let mut store=Store::open(&dir.path().join("state.json"),dir.path(),initial).unwrap();
+        let clock=ClockSample {monotonic_s:0.0,epoch_s:1000.0};
+        assert_eq!(store.exec(4,"same-life",clock,Action::AdvanceLifecycle {generation:4,state:json!({"name":"renamed","metadata":{"setting":true}})}).unwrap(),json!({"generation":4}));
+        assert_eq!(store.state().name,"renamed");
+        assert_eq!(store.state().runtime_state["_queue_previous_name"],"session");
+        assert_eq!(store.state().runtime_state["view"],json!({"working":true}));
+        assert!(store.state().runtime_state.get("name").is_none());
+        let advance=||Action::AdvanceLifecycle {generation:5,state:json!({"terminal_lifecycle":{"conversation":"sid"}})};
+        assert_eq!(store.exec(4,"advance",clock,advance()).unwrap(),json!({"generation":5}));
+        assert_eq!(store.exec(4,"advance",clock,advance()).unwrap(),json!({"generation":5}));
+        assert!(store.exec(4,"another",clock,advance()).is_err());
+        assert!(store.exec(4,"advance",clock,Action::AdvanceLifecycle {generation:5,state:json!({"other":true})}).is_err());
+        assert!(store.exec(5,"skip",clock,Action::AdvanceLifecycle {generation:7,state:json!({})}).is_err());
+        assert_eq!(store.state().runtime_state["terminal_write_barrier"],before);
+        assert!(store.state().runtime_state["view"].is_null());
+        assert_eq!(store.state().runtime_state["metadata"],json!({"setting":true}));
+        assert_eq!(store.state().name,"renamed");
+        assert_eq!(store.state().operations["input"].status,Status::Unknown);
+        assert_eq!(store.state().rows.len(),1);
+        assert!(store.exec(5,"erase",clock,Action::AdvanceLifecycle {generation:6,state:json!({"terminal_write_barrier":null})}).is_err());
+        assert!(store.exec(5,"claim",clock,Action::Claim {min_ts:0.0,limit:None,entry_id:None}).unwrap().as_array().unwrap().is_empty());
     }
 }

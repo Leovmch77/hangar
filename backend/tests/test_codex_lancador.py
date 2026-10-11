@@ -704,6 +704,49 @@ def test_launcher_resume_uses_imported_account_policy_identity_and_explicit_over
 
 
 @pytest.mark.skipif(os.name != "posix", reason="binário falso POSIX")
+@pytest.mark.parametrize("permission_mode", ["Ask for approval", None])
+def test_relaunch_of_own_session_completes_from_the_sidecar_and_refuses_unknown_mode(tmp_path, permission_mode):
+    # O relançamento pelo Rust passa só --cwd/--resume e a chave da sessão.
+    cwd = tmp_path / "project"
+    cwd.mkdir()
+    env = _ambiente(tmp_path, cwd)
+    env["FAKE_TUI_SLEEP"] = "3"
+    env["FAKE_SERVER_OUT"] = str(tmp_path / "server-argv.json")
+    env["FAKE_SEM_THREAD"] = "1"
+    env["CP_SESSION_KEY"] = "same-key"
+    thread_id = "01a052d1-3e59-7441-9ed3-6bbd9e2704fc"
+    home = tmp_path / "codex-work"
+    rollout = home / "sessions" / "2026" / "10" / "03" / f"rollout-example-{thread_id}.jsonl"
+    rollout.parent.mkdir(parents=True)
+    rollout.write_text("{}\n")
+    sidecar = _sidecar(env, "sess")
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    meta = {"name": "sess", "thread_id": thread_id, "rollout_path": env["FAKE_ROLLOUT"], "cwd": str(cwd),
+            "codex_home": str(home), "codex_account": "work", "key": "same-key", "headless": False,
+            "tool_output_token_limit": 144000, "model": "native-model", "effort": "high",
+            "service_tier": "priority", "permission_mode": permission_mode}
+    sidecar.write_text(json.dumps(meta))
+    argv = [sys.executable, str(_LANCADOR), "--name", "sess", "--cwd", str(cwd), "--resume", thread_id]
+    if permission_mode is None:
+        result = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=15)
+        assert result.returncode != 0 and "modo de permissão da sessão desconhecido" in result.stderr
+        assert not Path(env["FAKE_SERVER_OUT"]).exists(), "nunca cai no Full Access do padrão"
+        return
+    proc = subprocess.Popen(argv, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        assert _espera(lambda: sidecar.exists() and json.loads(sidecar.read_text()).get("tui_pid"))
+        saved = json.loads(sidecar.read_text())
+        assert (saved["model"], saved["effort"], saved["service_tier"]) == ("native-model", "high", "priority")
+        assert (saved["codex_home"], saved["codex_account"]) == (str(home), "work")
+        server_args = json.loads((tmp_path / "server-argv.json").read_text())
+        assert "tool_output_token_limit=144000" in server_args
+        assert 'approval_policy="on-request"' in server_args and 'sandbox_mode="read-only"' in server_args
+        assert any("project_doc_max_bytes" in arg for arg in server_args), "não herda os pulos da importação"
+    finally:
+        proc.wait(timeout=20)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="binário falso POSIX")
 @pytest.mark.parametrize("field,value", [("key", None), ("permission_mode", "unknown"), ("codex_home", "relative")])
 def test_imported_resume_rejects_invalid_metadata_before_opening_server(tmp_path, field, value):
     cwd = tmp_path / "project"

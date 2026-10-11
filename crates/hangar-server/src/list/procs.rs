@@ -12,6 +12,23 @@ pub type ChildrenMap = HashMap<i64, Vec<i64>>;
 /// Acima da cadência do poll da lista (1,5 s): abaixo dela cada tique varreria de novo.
 pub const CHILDREN_TTL: Duration = Duration::from_secs(3);
 
+/// Receita efêmera: nunca serializar nem imprimir argv/ambiente em diário.
+#[derive(Clone, PartialEq)]
+pub struct ProcessRecipe {
+    pub pid:i64,
+    pub birth:f64,
+    pub executable:PathBuf,
+    pub cwd:PathBuf,
+    pub argv:Vec<OsString>,
+    pub environ:Vec<OsString>,
+    pub cgroup:Option<Vec<u8>>,
+}
+impl std::fmt::Debug for ProcessRecipe {
+    fn fmt(&self,f:&mut std::fmt::Formatter<'_>)->std::fmt::Result {
+        f.debug_struct("ProcessRecipe").field("pid",&self.pid).field("birth",&self.birth).finish_non_exhaustive()
+    }
+}
+
 /// O que a lista precisa saber de um processo. Processo que morreu ou é de outro dono responde
 /// vazio/`None`; só a varredura inteira falhar é erro. E/S bloqueante: em contexto async, chamar
 /// por `spawn_blocking`.
@@ -33,7 +50,15 @@ pub trait ProcessView: Send + Sync {
     /// Destinos dos descritores abertos.
     fn fds(&self, pid: i64) -> Vec<PathBuf> { self.fds_checked(pid).unwrap_or_default() }
     fn fds_checked(&self, pid: i64) -> io::Result<Vec<PathBuf>> { Ok(self.fds(pid)) }
+    /// Leitura fresca completa; leitores sem essa prova não podem relançar um processo.
+    fn recipe(&self, _pid:i64)->io::Result<ProcessRecipe> { Err(io::ErrorKind::Unsupported.into()) }
 }
+
+#[derive(Debug)]
+struct ProcessExited;
+impl std::fmt::Display for ProcessExited {fn fmt(&self,f:&mut std::fmt::Formatter<'_>)->std::fmt::Result {f.write_str("processo terminou")}}
+impl std::error::Error for ProcessExited {}
+pub fn exited(error:&io::Error)->bool {error.get_ref().is_some_and(|cause|cause.is::<ProcessExited>())}
 
 /// Processo que morreu entre a varredura e a leitura: não é falha, é corrida.
 pub fn vanished(error: &io::Error) -> bool {
@@ -167,6 +192,29 @@ mod linux {
             let map = Arc::new(self.scan()?);
             *cache = Some((Instant::now(), map.clone()));
             Ok(map)
+        }
+
+        fn recipe(&self,pid:i64)->io::Result<ProcessRecipe> {
+            use std::os::unix::ffi::OsStringExt;
+            let unreadable=||io::Error::new(io::ErrorKind::PermissionDenied,"receita do processo ilegível");
+            let stat=std::fs::read(self.path(pid,"stat"))?;
+            let birth=self.start_time(pid).ok_or_else(unreadable)?;
+            let end=stat.iter().rposition(|b|*b==b')').ok_or_else(unreadable)?;
+            if stat[end+1..].split(|b|b.is_ascii_whitespace()).find(|s|!s.is_empty())==Some(b"Z".as_slice()) {
+                return Err(io::Error::new(io::ErrorKind::NotFound,ProcessExited));
+            }
+            let split=|mut raw:Vec<u8>| {
+                if raw.last()==Some(&0) { raw.pop(); }
+                raw.split(|b|*b==0).map(|s|OsString::from_vec(s.to_vec())).collect::<Vec<_>>()
+            };
+            let argv=std::fs::read(self.path(pid,"cmdline"))?;
+            let environ=std::fs::read(self.path(pid,"environ"))?;
+            if argv.is_empty() || environ.is_empty() { return Err(unreadable()); }
+            let recipe=ProcessRecipe {pid,birth,executable:std::fs::read_link(self.path(pid,"exe"))?,
+                cwd:std::fs::read_link(self.path(pid,"cwd"))?,argv:split(argv),environ:split(environ),
+                cgroup:Some(std::fs::read(self.path(pid,"cgroup"))?)};
+            if self.start_time(pid)!=Some(birth) { return Err(io::Error::other("identidade do processo mudou")); }
+            Ok(recipe)
         }
 
         fn argv_checked(&self, pid: i64) -> io::Result<Vec<String>> {
@@ -312,6 +360,29 @@ mod other {
             }
         }
 
+        fn recipe(&self,pid:i64)->io::Result<ProcessRecipe> {
+            let pid=Pid::from_u32(u32::try_from(pid).map_err(|_|io::ErrorKind::InvalidInput)?);
+            // Retrato próprio: ausência no cache da lista não prova ausência de um relançamento.
+            let mut system=System::new();
+            let kind=ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always).with_exe(UpdateKind::Always)
+                .with_environ(UpdateKind::Always).with_cwd(UpdateKind::Always);
+            system.refresh_processes_specifics(ProcessesToUpdate::Some(&[pid]),true,kind);
+            let p=system.process(pid).ok_or(io::ErrorKind::NotFound)?;
+            let unreadable=||io::Error::new(io::ErrorKind::PermissionDenied,"receita do processo ilegível");
+            if p.cmd().is_empty() || p.environ().is_empty() || p.start_time()==0 { return Err(unreadable()); }
+            #[cfg(windows)] let birth=crate::terminal_facts::agent_birth(pid.as_u32()).ok_or_else(unreadable)?;
+            #[cfg(not(windows))] let birth=p.start_time() as f64;
+            let recipe=ProcessRecipe {pid:as_i64(pid),birth,
+                executable:p.exe().filter(|p|!p.as_os_str().is_empty()).ok_or_else(unreadable)?.to_owned(),
+                cwd:p.cwd().filter(|p|!p.as_os_str().is_empty()).ok_or_else(unreadable)?.to_owned(),
+                argv:p.cmd().to_vec(),environ:p.environ().to_vec(),cgroup:None};
+            system.refresh_processes_specifics(ProcessesToUpdate::Some(&[pid]),true,ProcessRefreshKind::nothing());
+            #[cfg(windows)] let current_birth=crate::terminal_facts::agent_birth(pid.as_u32());
+            #[cfg(not(windows))] let current_birth=system.process(pid).map(|p|p.start_time() as f64);
+            if current_birth!=Some(recipe.birth) {return Err(io::Error::other("identidade do processo mudou"));}
+            Ok(recipe)
+        }
+
         /// Sumido do retrato é `NotFound` (corrida); vivo com argv vazio é o que o `sysinfo` devolve
         /// quando não consegue ler (outro dono, processo protegido).
         fn argv_checked(&self, pid: i64) -> io::Result<Vec<String>> {
@@ -446,6 +517,38 @@ mod tests {
         add(root.path(), 11, 10, "node (x)", &["/usr/bin/node", "claude", "--session-id", "abc"]);
         add(root.path(), 12, 10, "tmux", &["tmux"]);
         root
+    }
+
+    #[test]
+    fn absent_pid_and_definite_exit_are_not_unreadable_environment() {
+        let root=fake_proc();let procs=ProcFs::with_root(root.path());
+        assert_eq!(procs.recipe(99).unwrap_err().kind(),io::ErrorKind::NotFound);
+        let path=root.path().join("11/stat");
+        let stat=fs::read_to_string(&path).unwrap().replace(") S ",") Z ");fs::write(path,stat).unwrap();
+        assert!(exited(&procs.recipe(11).unwrap_err()));
+        assert!(crate::runtime::lifecycle::process_absent(&procs,11,1005.0).unwrap());
+    }
+    #[test]
+    fn recipe_preserves_os_bytes_and_refuses_unreadable_environment() {
+        use std::os::unix::ffi::OsStrExt;
+        let root = fake_proc();
+        let dir = root.path().join("11");
+        fs::write(dir.join("cmdline"), b"/usr/bin/claude\0--settings\0/x/\xff.json\0\0").unwrap();
+        fs::write(dir.join("environ"), b"A=\xff\0EMPTY=\0").unwrap();
+        std::os::unix::fs::symlink("/usr/bin/claude", dir.join("exe")).unwrap();
+        std::os::unix::fs::symlink("/work/dir", dir.join("cwd")).unwrap();
+        fs::write(dir.join("cgroup"), b"0::/user.slice/session.scope\n").unwrap();
+        let procs = ProcFs::with_root(root.path());
+        let recipe = procs.recipe(11).unwrap();
+        assert_eq!(recipe.argv[2].as_bytes(), b"/x/\xff.json");
+        assert_eq!(recipe.argv[3].as_bytes(), b"");
+        assert_eq!(recipe.environ[0].as_bytes(), b"A=\xff");
+        assert_eq!(recipe.birth, 1005.0);
+        assert_eq!(recipe.cgroup.as_deref(), Some(b"0::/user.slice/session.scope\n".as_slice()));
+        fs::write(dir.join("environ"), b"").unwrap();
+        assert_eq!(procs.recipe(11).unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        fs::remove_file(dir.join("environ")).unwrap();
+        assert!(procs.recipe(11).is_err());
     }
 
     #[test]

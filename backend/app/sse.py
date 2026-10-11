@@ -743,7 +743,7 @@ def _estado_do_rust(provider: str, name: str) -> bool:
         return True
     if provider == CLAUDE_HEADLESS:
         return owner.rust_owns("claude", True)
-    return _codex_headless(name) and owner.rust_owns("codex", True)
+    return owner.rust_owns("codex", _codex_headless(name))
 
 
 async def _estado_do_rust_async(provider: str, name: str) -> bool:

@@ -373,6 +373,11 @@ impl ClaudeEngine {
         Ok(effects)
     }
 
+    pub(super) fn advance_generation(&mut self,generation:u64)->Result<(),RuntimeError> {
+        if self.generation.checked_add(1)!=Some(generation) {return Err(error("geração da conversa mudou"));}
+        self.generation=generation;
+        self.bind_interactions(self.metadata["session_id"].as_str().unwrap_or(""))
+    }
     pub fn set_interactions(&mut self,key:String,store:Arc<InteractionStore>) -> Result<(),RuntimeError> {
         self.interactions = Some((key,store));
         self.bind_interactions(self.metadata["session_id"].as_str().unwrap_or(""))
@@ -615,7 +620,7 @@ impl ClaudeEngine {
                             }
                             "set_permission_mode" => {
                                 let selected = result["mode"].as_str().or_else(||waiter.payload["mode"].as_str());
-                                if let Some(selected) = selected { self.set_mode(selected,effects); }
+                                if let Some(selected) = selected { self.set_mode(selected,Some(waiter.operation_id.clone()),effects); }
                             }
                             "set_model" => {
                                 self.model = string(&waiter.payload["model"]);
@@ -633,20 +638,26 @@ impl ClaudeEngine {
                                 payload:json!({"phase_resolved":true,"applied":false,"remaining_phase":"effort"}) });
                         }
                     } else {
+                        if waiter.subtype=="set_permission_mode" && waiter.timed_out {
+                            effects.push(Effect::Reply {operation_id:waiter.operation_id,disposition:Disposition::Unknown,
+                                payload:json!({"error":"permission_response_after_timeout","uncertain":true})});
+                            self.changed(effects,true);
+                            return Ok(());
+                        }
                         if waiter.subtype == "initialize" {
                             self.initializing = false; self.initialized = false; self.init_warning = None;
                             self.state.problema = Some("headless_nao_subiu".into());
                             self.state.problema_detalhe = Some(response["error"].as_str().unwrap_or("initialize recusado").chars().take(300).collect());
                         }
                         effects.push(Effect::Reply { operation_id:waiter.operation_id,disposition:Disposition::Rejected,
-                            payload:json!({"error":response["error"]}) });
+                            payload:json!({"error":response["error"],"permission_boot_rejected":waiter.subtype=="set_permission_mode" && waiter.payload["mode"]=="bypassPermissions"}) });
                     }
                     self.changed(effects,true);
                 }
             }
             "system" => {
                 if event["subtype"] == "init" && let Some(sid) = event["session_id"].as_str() {
-                    self.bind_interactions(sid)?;
+                    if self.metadata["session_id"].as_str()==Some(sid) {self.bind_interactions(sid)?;}
                 }
                 self.on_system(&event,effects);
             },
@@ -791,11 +802,11 @@ impl ClaudeEngine {
         Ok(())
     }
 
-    fn set_mode(&mut self,selected:&str,effects:&mut Vec<Effect>) {
+    fn set_mode(&mut self,selected:&str,operation_id:Option<String>,effects:&mut Vec<Effect>) {
         let selected = mode(selected);
         if selected != "plan" { self.previous_non_plan = Some(selected.clone()); }
         self.permission_mode = Some(selected);
-        self.policy("session.patch_meta",json!({"permission_mode":self.permission_mode,"previous_non_plan":self.previous_non_plan}),effects);
+        effects.push(Effect::PersistClaude {operation_id,patch:json!({"permission_mode":self.permission_mode,"previous_non_plan":self.previous_non_plan})});
     }
 
     fn on_system(&mut self,event:&Value,effects:&mut Vec<Effect>) {
@@ -808,7 +819,7 @@ impl ClaudeEngine {
         }
         if let Some(selected) = event["permissionMode"].as_str() {
             let restore = self.restore_plan.clone();
-            self.set_mode(selected,effects);
+            self.set_mode(selected,None,effects);
             if selected != "plan" {
                 if let Some((base,id)) = restore {
                     self.restore_plan = None;
@@ -822,7 +833,7 @@ impl ClaudeEngine {
                     if self.metadata["session_id"].as_str() != Some(sid) {
                         if self.metadata["session_id"].is_string() { self.reset_conversation(effects); }
                         self.metadata["session_id"] = json!(sid); self.clear_streams(effects);
-                        self.policy("session.patch_meta",json!({"session_id":sid}),effects);
+                        effects.push(Effect::PersistClaude {operation_id:None,patch:json!({"session_id":sid,"permission_mode":self.permission_mode,"previous_non_plan":self.previous_non_plan})});
                     }
                 }
                 if let Some(model) = event["model"].as_str() { self.model = Some(model.into()); }

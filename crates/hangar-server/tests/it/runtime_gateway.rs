@@ -92,7 +92,7 @@ async fn terminal_runtime_gateway_opens_without_cano_and_fences_generation() {
 }
 
 /// Registro com um cano Claude falso que só aceita entradas; a política aponta para uma porta fechada.
-async fn opened(dir:&std::path::Path) -> (RuntimeRegistry,serde_json::Value,tokio::task::JoinHandle<()>) {
+async fn opened(dir:&std::path::Path) -> (Arc<RuntimeRegistry>,serde_json::Value,tokio::task::JoinHandle<()>) {
     use hangar_server::runtime::protocol::*;
     use serde_json::json;
     use tokio::io::{AsyncBufReadExt,AsyncWriteExt,BufReader};
@@ -108,7 +108,7 @@ async fn opened(dir:&std::path::Path) -> (RuntimeRegistry,serde_json::Value,toki
         let mut raw = String::new();
         while reader.read_line(&mut raw).await.unwrap_or(0) > 0 { raw.clear(); }
     });
-    let registry = RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(),"secret-test".into(),"instance-test".into());
+    let registry = crate::runtime_open::with_hubs(RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(),"secret-test".into(),"instance-test".into()).with_processes(Arc::new(crate::runtime_open::RecipeProcesses)));
     let target = RuntimeTarget { key:"key".into(),generation:1,name:"session".into(),provider:"claude".into(),
         metadata:json!({"name":"session","headless":true,"session_id":"sid-1","initialized":true}),
         binding:CanoBinding { pid:42,escuta:format!("tcp:{address}"),token:"secret-test".into(),versao:2 },
@@ -172,7 +172,7 @@ async fn one_bad_message_from_the_cli_does_not_end_the_actor() {
         let mut raw = String::new();
         while reader.read_line(&mut raw).await.unwrap_or(0) > 0 { raw.clear(); }
     });
-    let registry = RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(),"secret-test".into(),"instance-test".into());
+    let registry = crate::runtime_open::with_hubs(RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(),"secret-test".into(),"instance-test".into()).with_processes(Arc::new(crate::runtime_open::RecipeProcesses)));
     let target = RuntimeTarget { key:"key".into(),generation:1,name:"session".into(),provider:"claude".into(),
         metadata:json!({"name":"session","headless":true,"session_id":"sid-1","initialized":true}),
         binding:CanoBinding { pid:42,escuta:format!("tcp:{address}"),token:"secret-test".into(),versao:2 },
@@ -234,7 +234,14 @@ async fn codex_cano_without_version_reopens_without_launch() {
     let server=tokio::spawn(gateway::serve(listener,registry.clone(),"secret-test".into(),"instance-test".into(),hangar_server::INTERNAL_PROTOCOL));
     let meta=json!({"name":"cx","key":"key","headless":true,"thread_id":"thread-1",
         "cano":{"pid":42,"escuta":format!("tcp:{cano_address}"),"token":"secret-test","ts":1.0}});
-    let descriptor=json!({"name":"cx","key":"key","provider":"codex","headless":true,"meta":meta,"jsonl":dir.path().join("rollout.jsonl"),"projection_dir":dir.path().join("projection"),"state_path":dir.path().join("state"),"lock_path":dir.path().join("lease"),"generation":1});
+    std::fs::write(dir.path().join("cx.json"),meta.to_string()).unwrap();
+    // Codex sem terminal sempre vem com a pasta do sidecar (`_open_codex`); sem ela o gateway recusa.
+    let descriptor=json!({"name":"cx","key":"key","provider":"codex","headless":true,"meta":meta,"jsonl":dir.path().join("rollout.jsonl"),"projection_dir":dir.path().join("projection"),"state_path":dir.path().join("state"),"lock_path":dir.path().join("lease"),"generation":1,"sidecar_dir":dir.path()});
+    let mut bare=descriptor.clone(); bare.as_object_mut().unwrap().remove("sidecar_dir");
+    let refused=reqwest::Client::new().post(format!("http://{address}/runtime/op")).header("x-hangar-internal","secret-test").header("x-hangar-runtime-instance","instance-test").header("content-type","application/json")
+        .body(json!({"protocol":hangar_server::INTERNAL_PROTOCOL,"instance":"instance-test","key":"key","generation":1,"operation_id":"op-bare","clock":{"monotonic_s":0.0,"epoch_s":0.0},
+            "command":{"kind":"open","descriptor":bare}}).to_string()).send().await.unwrap();
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&refused.text().await.unwrap()).unwrap()["error_code"],"launch_sidecar_dir");
     let response=reqwest::Client::new().post(format!("http://{address}/runtime/op")).header("x-hangar-internal","secret-test").header("x-hangar-runtime-instance","instance-test").header("content-type","application/json")
         .body(json!({"protocol":hangar_server::INTERNAL_PROTOCOL,"instance":"instance-test","key":"key","generation":1,"operation_id":"op","clock":{"monotonic_s":0.0,"epoch_s":0.0},
             "command":{"kind":"open","descriptor":descriptor}}).to_string()).send().await.unwrap();
@@ -244,57 +251,28 @@ async fn codex_cano_without_version_reopens_without_launch() {
     server.abort(); cano.abort();
 }
 
-/// O descritor que o Python manda ao abrir o Codex com terminal: o `meta` do contrato dentro dos campos
-/// de fila, trava e projeção de sempre. Rollout ausente (`jsonl` vazio) é válido.
-#[cfg(unix)]
-fn codex_terminal_descriptor(dir:&std::path::Path,endpoint:&str,app_pid:u32) -> serde_json::Value {
-    serde_json::json!({"name":"cx-proof","key":"codex-key","provider":"codex","headless":false,
-        // `cano: null` como no sidecar real do Codex com terminal.
-        "meta":{"key":"codex-key","thread_id":"thread-1","endpoint":endpoint,"app_pid":app_pid,"codex_home":dir.join("codex-home"),"cano":null,
-            "terminal":{"name":"cx-proof","pane":"%7","conversation":"thread-1","generation":1,"created":1,"mux_argv":["tmux"],"windows":false,"clipboard_lock_path":null}},
-        "jsonl":"","projection_dir":dir.join("projection"),"state_path":dir.join("state"),"lock_path":dir.join("lease"),"generation":1})
-}
-
+/// O Codex com terminal não abre pelo gateway: quem o adota é a vigia do Rust (`runtime_codex_watch`).
 #[cfg(unix)]
 #[tokio::test]
-async fn codex_terminal_admission_over_the_gateway() {
+async fn codex_terminal_never_opens_over_the_gateway() {
     use serde_json::{Value,json};
     let dir=tempfile::tempdir().unwrap();
     let app=crate::runtime_open::fake_app_server(true).await;
     let mut child=crate::runtime_open::app_server_process(&app.endpoint);
     let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap(); let address=listener.local_addr().unwrap();
-    let registry=Arc::new(crate::runtime_open::registry().await);
+    let registry=crate::runtime_open::registry().await;
     let server=tokio::spawn(gateway::serve(listener,registry.clone(),"secret-test".into(),"instance-test".into(),hangar_server::INTERNAL_PROTOCOL));
-    let client=reqwest::Client::new();
-    let open=|key:&str,descriptor:Value,launch:Option<bool>| {
-        let mut command=json!({"kind":"open","descriptor":descriptor});
-        if let Some(launch)=launch { command["launch"]=json!(launch); }
-        client.post(format!("http://{address}/runtime/op")).header("x-hangar-internal","secret-test").header("x-hangar-runtime-instance","instance-test")
-            .header("content-type","application/json").body(json!({"protocol":hangar_server::INTERNAL_PROTOCOL,"instance":"instance-test","key":key,"generation":1,
-                "operation_id":"open","clock":{"monotonic_s":0.0,"epoch_s":0.0},"command":command}).to_string()).send()
-    };
-    let refused=|response:reqwest::Response| async move {
-        assert_eq!(response.status(),503);
-        serde_json::from_str::<Value>(&response.text().await.unwrap()).unwrap()["error_code"].as_str().unwrap().to_owned()
-    };
-    let valid=codex_terminal_descriptor(dir.path(),&app.endpoint,child.id());
-    let changed=|change:&dyn Fn(&mut Value)| { let mut descriptor=valid.clone(); change(&mut descriptor); descriptor };
-    assert_eq!(refused(open("codex-key",valid.clone(),Some(true)).await.unwrap()).await,"open_launch");
-    assert_eq!(refused(open("codex-key",changed(&|d|d["meta"]["endpoint"]=json!("ws://192.168.0.10:43210")),None).await.unwrap()).await,"codex_endpoint");
-    assert_eq!(refused(open("codex-key",changed(&|d|d["meta"]["app_pid"]=json!(std::process::id())),None).await.unwrap()).await,"codex_app_pid");
-    assert_eq!(refused(open("codex-key",changed(&|d|{ d["meta"]["thread_id"]=json!(""); }),None).await.unwrap()).await,"codex_thread");
-    assert_eq!(refused(open("codex-key",changed(&|d|d["meta"]["key"]=json!("other")),None).await.unwrap()).await,"descriptor_binding");
-    assert_eq!(refused(open("other",valid.clone(),None).await.unwrap()).await,"runtime_binding");
-    assert_eq!(app.connections.load(std::sync::atomic::Ordering::SeqCst),0,"nada conectou antes da admissão");
-    // `launch:false` explícito também abre.
-    let response=open("codex-key",valid.clone(),Some(false)).await.unwrap();
-    let status=response.status(); let text=response.text().await.unwrap();
-    assert!(status.is_success(),"{status} {text}");
-    let value:Value=serde_json::from_str(&text).unwrap();
-    assert_eq!(value["result"]["opened"],true);
-    app.wait_method(1,"initialize").await;
-    registry.close("codex-key",1).await.unwrap();
-    assert!(child.try_wait().unwrap().is_none(),"fechar não mata o app-server adotado");
+    let descriptor=json!({"name":"cx-proof","key":"codex-key","provider":"codex","headless":false,
+        "meta":{"key":"codex-key","thread_id":"thread-1","endpoint":app.endpoint.clone(),"app_pid":child.id(),"codex_home":dir.path().join("codex-home"),"cano":null,
+            "terminal":{"name":"cx-proof","pane":"%7","conversation":"thread-1","generation":1,"created":1,"mux_argv":["tmux"],"windows":false,"clipboard_lock_path":null}},
+        "jsonl":"","projection_dir":dir.path().join("projection"),"state_path":dir.path().join("state"),"lock_path":dir.path().join("lease"),"generation":1});
+    let response=reqwest::Client::new().post(format!("http://{address}/runtime/op")).header("x-hangar-internal","secret-test").header("x-hangar-runtime-instance","instance-test")
+        .header("content-type","application/json").body(json!({"protocol":hangar_server::INTERNAL_PROTOCOL,"instance":"instance-test","key":"codex-key","generation":1,
+            "operation_id":"open","clock":{"monotonic_s":0.0,"epoch_s":0.0},"command":{"kind":"open","descriptor":descriptor}}).to_string()).send().await.unwrap();
+    assert_eq!(response.status(),503);
+    assert_eq!(serde_json::from_str::<Value>(&response.text().await.unwrap()).unwrap()["error_code"],"descriptor_provider");
+    assert_eq!(app.connections.load(std::sync::atomic::Ordering::SeqCst),0,"nada conectou");
+    assert!(!registry.owns_codex_terminal("cx-proof"));
     server.abort();
     child.kill().unwrap(); child.wait().unwrap();
 }

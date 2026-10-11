@@ -99,6 +99,8 @@ pub enum Effect {
     Write { frame: Value, operation_id: Option<String> },
     Publish { channel: String, data: Value },
     Policy { kind: String, request_id: RequestId, payload: Value },
+    /// Sidecar Claude e vínculo da conversa: gravados localmente sob a lease da fila.
+    PersistClaude { operation_id:Option<String>, patch:Value },
     Reply { operation_id: String, disposition: Disposition, payload: Value },
     WakeQueue,
     /// A CLI consumiu um comando local (`/clear`, `/cost`…), que não vira linha `user` no transcript.

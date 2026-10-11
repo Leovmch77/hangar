@@ -8,9 +8,12 @@
 //! Repasse nunca acontece com o passe na mão: o `freeze` do Python fecha a porta e esperaria o
 //! nosso próprio passe.
 pub mod answer;
+pub mod bridge;
 pub mod codex;
 pub mod control;
 pub mod input;
+pub mod permissions;
+pub mod relaunch;
 pub mod table;
 
 use std::net::SocketAddr;
@@ -74,7 +77,7 @@ pub(crate) fn session_name(path: &str) -> Option<String> {
     percent_decode_str(raw).decode_utf8().ok().map(|n| n.into_owned())
 }
 
-async fn forward_whole(st: &AppState, parts: Parts, bytes: Bytes, fwd: &Forward) -> Response {
+pub(crate) async fn forward_whole(st: &AppState, parts: Parts, bytes: Bytes, fwd: &Forward) -> Response {
     pass(st, Request::from_parts(parts, Body::from(bytes)), fwd).await
 }
 
@@ -100,6 +103,11 @@ pub(crate) async fn admit(st: &Arc<AppState>, peer: SocketAddr, req: Request, ro
             cors(&parts.headers, response.headers_mut());
             Err(response)
         }
+        Write::Failed(error) => {
+            let mut response = detail(StatusCode::SERVICE_UNAVAILABLE, &error.code, &error.message, json!({}));
+            cors(&parts.headers, response.headers_mut());
+            Err(response)
+        }
     }
 }
 
@@ -110,19 +118,33 @@ pub(crate) fn too_large(headers: &axum::http::HeaderMap) -> Response {
     response
 }
 
-/// Quem atende uma escrita de corpo já aceito.
-pub(crate) enum Write { Rust(IngressPass, WriteTarget), Python, Busy }
+/// Quem atende uma escrita de corpo já aceito. `Failed`: o Codex com terminal do Rust não pôde ser
+/// atendido, e a escrita nunca cai no Python.
+pub(crate) enum Write { Rust(IngressPass, WriteTarget), Python, Busy, Failed(crate::runtime::protocol::RuntimeError) }
 
-/// Porta, entrada e tabela, nessa ordem. O passe só volta com `Rust`: repasse nunca o segura.
+/// Porta, entrada e tabela, nessa ordem. O passe só volta com `Rust`: repasse nunca o segura. Sem
+/// entrada, o Codex com terminal do Rust é adotado na hora (`adopt_now`) e a entrada procurada de novo.
 pub(crate) async fn route_write(runtime: &RuntimeRegistry, name: &str, route: WriteRoute, wait: Duration) -> Write {
-    match enter_then_find(runtime, name, wait).await {
-        Err(GateClosed) => Write::Busy,
-        Ok(None) => Write::Python,
-        Ok(Some((pass_in, target))) => {
-            let rust = Provider::from_str(&target.provider).is_some_and(|p| decide(route, p, target.terminal, target.healthy) == Owner::Rust);
-            if rust { Write::Rust(pass_in, target) } else { Write::Python }
-        }
+    use crate::runtime::protocol::RuntimeError;
+    let (pass_in, target) = match enter_then_find(runtime, name, wait).await {
+        Err(GateClosed) => return Write::Busy,
+        Ok(Some(found)) => found,
+        Ok(None) => match runtime.adopt_now(name).await {
+            None => return Write::Python,
+            Some(Err(error)) => return Write::Failed(error),
+            Some(Ok(())) => match enter_then_find(runtime, name, wait).await {
+                Err(GateClosed) => return Write::Busy,
+                Ok(Some(found)) => found,
+                Ok(None) => return Write::Failed(RuntimeError::new("codex_terminal_unadopted", "o Codex com terminal foi adotado e fechou em seguida")),
+            },
+        },
+    };
+    let provider = Provider::from_str(&target.provider);
+    if table::CODEX_TERMINAL_OWNED && provider == Some(Provider::Codex) && target.terminal && !target.healthy {
+        return Write::Failed(RuntimeError::new("codex_terminal_unhealthy", "a sessão Codex com terminal está com problema no Rust; tente de novo em instantes"));
     }
+    let rust = provider.is_some_and(|p| decide(route, p, target.terminal, target.healthy) == Owner::Rust);
+    if rust { Write::Rust(pass_in, target) } else { Write::Python }
 }
 
 pub(crate) fn busy_body() -> Value { detail_body("session_transfer_busy", BUSY_MSG, json!({})) }

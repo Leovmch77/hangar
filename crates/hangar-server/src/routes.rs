@@ -153,6 +153,7 @@ impl AppState {
     /// `info` da sessão com cache curto: várias telas abrindo juntas viram uma consulta só. Só o
     /// `/events` usa, porque o primeiro `info` da conexão interna corrige um valor velho com `reset`.
     pub(crate) async fn info(&self, name: &str) -> Result<Option<InternalInfo>, InfoFailed> {
+        if let Some(runtime)=self.state.runtime.get() && let Some(info)=runtime.claude_info(name).await {return Ok(Some(info));}
         if let Some((at, v)) = self.side.infos.lock().unwrap().get(name) {
             if at.elapsed() < INFO_TTL {
                 return Ok(v.clone());
@@ -264,6 +265,7 @@ pub fn terminal_router(state: Arc<AppState>) -> Router {
         .route("/__hangar_server/accounts/public", axum::routing::any(crate::accounts::http::private_public))
         .route("/__hangar_server/pages", axum::routing::post(crate::pages::routes::publish_bridge))
         .route("/__hangar_server/groups", axum::routing::post(crate::groups::bridge::private))
+        .route("/__hangar_server/codex/{*rest}", axum::routing::any(crate::session_write::bridge::codex))
         .route("/__hangar_server/presence", axum::routing::get(crate::presence::private))
         .route("/__hangar_server/mods/{name}/{op}", axum::routing::post(crate::mods::routes::bridge))
         .layer(axum::middleware::from_fn(crate::migration_status::count_bridge));
@@ -290,6 +292,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/__hangar_server/accounts/public", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
         .route("/__hangar_server/pages", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
         .route("/__hangar_server/groups", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
+        .route("/__hangar_server/codex/{*rest}", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
         .route("/__hangar_server/presence", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
         .route("/__hangar_server/mods/{name}/{op}", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
         .route("/__hangar_server/term", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
@@ -310,6 +313,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/sessions/{name}/pages/{id}/shot", get(crate::pages::routes::shot).fallback(pass_any))
         // Escritas Claude: o Rust decide por pedido e repassa o que não é dele (corpo intacto).
         .route("/api/sessions/{name}/input", axum::routing::post(crate::session_write::input::input).fallback(pass_any))
+        // Encerrar: o Codex com terminal do Rust encerra aqui e só então segue ao Python, marcado.
+        .route("/api/sessions/{name}", axum::routing::delete(crate::session_write::bridge::delete).fallback(pass_any))
+        // Broadcast do dono: o alvo Codex com terminal do Rust recebe aqui; o resto segue ao Python.
+        .route("/api/broadcast", axum::routing::post(crate::session_write::input::broadcast).fallback(pass_any))
         .route("/api/sessions/{name}/steer", axum::routing::post(crate::session_write::input::steer).fallback(pass_any))
         .route("/api/sessions/{name}/interrupt", axum::routing::post(crate::session_write::control::interrupt).fallback(pass_any))
         .route("/api/sessions/{name}/select", axum::routing::post(crate::session_write::control::select).fallback(pass_any))
@@ -318,6 +325,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/sessions/{name}/keys", axum::routing::post(crate::session_write::control::keys).fallback(pass_any))
         .route("/api/sessions/{name}/term-input", axum::routing::post(crate::session_write::control::term_input).fallback(pass_any))
         .route("/api/sessions/{name}/queue/{entry_id}", axum::routing::delete(crate::session_write::control::queue_remove).fallback(pass_any))
+        .route("/api/sessions/{name}/permission-modes", get(crate::session_write::permissions::modes).fallback(pass_any))
+        .route("/api/sessions/{name}/permission-mode", axum::routing::post(crate::session_write::permissions::set_mode).fallback(pass_any))
         // Rotas só do Codex: o Rust atende a sessão sem terminal dele; o resto segue ao Python.
         .route("/api/sessions/{name}/models", get(crate::session_write::codex::models).fallback(pass_any))
         .route("/api/sessions/{name}/model", axum::routing::post(crate::session_write::codex::model).fallback(pass_any))
@@ -329,6 +338,9 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/sessions/{name}/codex-permissions", get(crate::session_write::codex::permissions).fallback(pass_any))
         // Mesmo caminho: o axum junta o POST à rota de cima (um repasse só, o dela).
         .route("/api/sessions/{name}/codex-permissions", axum::routing::post(crate::session_write::codex::set_permission))
+        // Relançar o Codex do Rust (troca de modo e reinício) é dele do começo ao fim; o resto segue ao Python.
+        .route("/api/sessions/{name}/modo-execucao", axum::routing::post(crate::session_write::relaunch::mode).fallback(pass_any))
+        .route("/api/sessions/{name}/recarregar", axum::routing::post(crate::session_write::relaunch::reload).fallback(pass_any))
         .route("/api/sessions/{name}/cost", get(crate::costs_routes::session_cost).fallback(pass_any))
         .route("/api/costs", get(crate::costs_routes::costs).fallback(pass_any))
         .route("/api/cotacao", get(crate::costs_routes::cotacao).fallback(pass_any))
@@ -389,12 +401,16 @@ async fn health(State(st): State<Arc<AppState>>, headers: HeaderMap) -> Response
 /// Quem pede e se é o dono, resolvidos uma vez por pedido.
 pub(crate) fn gate(st: &AppState, peer: SocketAddr, req: &Request) -> (Forward, bool) {
     let (client_ip, https) = st.cfg.trusted.resolve(peer.ip(), req.headers());
+    // A ponte privada do Codex com terminal recebe o pedido já autenticado pela porta do Python.
+    if req.extensions().get::<crate::session_write::bridge::BridgedOwner>().is_some() { return (Forward { client_ip, https }, true); }
     let token = auth::presented_token(req.headers(), req.uri().query(), req.method(), https);
     let owner = st.auth.is_owner(&client_ip, token.as_deref());
     (Forward { client_ip, https }, owner)
 }
 
 pub(crate) async fn pass(st: &AppState, req: Request, fwd: &Forward) -> Response {
+    // Pedido da ponte do Codex com terminal nunca volta ao Python: ele trata o que o Rust não atende.
+    if req.extensions().get::<crate::session_write::bridge::BridgedOwner>().is_some() { return StatusCode::MISDIRECTED_REQUEST.into_response(); }
     let upgrade = req.headers().contains_key(header::UPGRADE);
     let mut resp = proxy::forward(&st.http, st.cfg.upstream, req, fwd).await;
     resp.extensions_mut().insert(crate::migration_status::Forwarded);
@@ -501,8 +517,13 @@ async fn history(
     };
     // Sem o cache: sessão recriada com o mesmo nome dentro do TTL devolveria a conversa morta, e
     // nada a corrigiria depois (o `/events` só a corrige com `reset` por estar ligado ao hub).
-    let Ok(info) = fetch_info(&st.http, st.cfg.upstream, &st.cfg.internal_secret, &name).await else {
-        return route_failed(&st, req.headers(), "rust.history_failed", &name, "internal_info", INFO_REASON);
+    let local=match st.state.runtime.get() {Some(runtime)=>runtime.claude_info(&name).await,None=>None};
+    let info=match local {
+        Some(info)=>Some(info),
+        None=>match fetch_info(&st.http, st.cfg.upstream, &st.cfg.internal_secret, &name).await {
+            Ok(info)=>info,
+            Err(_)=>return route_failed(&st, req.headers(), "rust.history_failed", &name, "internal_info", INFO_REASON),
+        },
     };
     if info.is_some() { remember_info(&st.side.infos, &name, info.clone()); }
     // Sessão inexistente ou provedor fora do Rust: o Python é o dono.

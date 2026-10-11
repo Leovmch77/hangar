@@ -509,3 +509,24 @@ async fn select_submit_without_a_terminal_goes_to_python() {
     assert_eq!(send(server, "POST", "s/select/submit", "").await, (200, "from-python".into()));
     assert_eq!(python.hits_to("/api/sessions/s/select/submit"), 1);
 }
+
+/// `/compact` do Codex com terminal servido pelo motor: o mesmo corpo do `_send_managed` do Python.
+#[test]
+fn codex_terminal_compact_answers_like_the_python_send() {
+    use hangar_server::session_write::codex::compact_answer;
+    let reply = |disposition: Disposition, payload: Value| -> Result<RuntimeReply, RuntimeError> {
+        Ok(RuntimeReply { operation_id: OP.into(), disposition, payload })
+    };
+    assert_eq!(compact_answer(&reply(Disposition::Accepted, json!({}))),
+        (StatusCode::OK, json!({"ok": true, "delivered": true, "steered": false, "native": false})));
+    assert_eq!(compact_answer(&reply(Disposition::Deferred, json!({}))).1["delivered"], false);
+    let refused = |sent: Result<RuntimeReply, RuntimeError>, msg: &str| {
+        let (status, body) = compact_answer(&sent);
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["detail"], json!({"code": "erro_envio_falhou", "params": {"erro": msg}, "msg": msg}));
+    };
+    refused(Err(RuntimeError::new("codex_command", "espere o Codex terminar")), "espere o Codex terminar");
+    refused(reply(Disposition::Unknown, json!({})), "resultado incerto; entrada conservada sem reenvio");
+    refused(reply(Disposition::Rejected, json!({"error": "recusado"})), "recusado");
+    refused(reply(Disposition::Rejected, json!({})), "entrada recusada pelo runtime");
+}

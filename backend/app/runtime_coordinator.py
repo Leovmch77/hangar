@@ -13,7 +13,7 @@ import re
 import threading
 import time
 import uuid
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import asynccontextmanager, contextmanager, suppress
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -48,13 +48,48 @@ def expect_rust(expected=True):
     _initial_mode = "pending" if expected else "python"
 
 
-def refuse_python_client(name, provider="claude", *, spawn=False):
-    """Com o Rust esperado ou dono, as sessões sem terminal que ele anuncia são dele: cliente Python
-    no cano é defeito. Exceção: a passagem para terminal (`python_client_released`) religa no cano
+def refuse_python_client(name, provider="claude", *, spawn=False, headless=True):
+    """Com o Rust esperado ou dono, as sessões que ele anuncia no modo `headless` são dele: cliente Python
+    nelas é defeito. Exceção: a passagem para terminal (`python_client_released`) religa no cano
     que o Rust soltou, mas nunca sobe outro (`spawn`)."""
-    if (_current is not None and _current.mode in {"pending", "rust"} and _current.rust_owns(provider, True)
+    if (_current is not None and _current.mode in {"pending", "rust"} and _current.rust_owns(provider, headless)
             and (spawn or name not in _current.python_client_released)):
-        raise RuntimeError(f"cliente Python bloqueado em {name}: o Rust é o dono das sessões sem terminal")
+        raise RuntimeError(f"cliente Python bloqueado em {name}: o Rust é o dono desta sessão")
+
+
+def rust_owns_codex_terminal():
+    return _current is not None and _current.mode != "python" and _current.rust_owns("codex", False)
+
+
+def rust_codex_terminal(name, route, method="POST", body=b""):
+    """Repasse num sentido, à ponte do Rust, do que entra pelo Python para um Codex com terminal dele
+    (escrita, encerrar, troca de modo). `(status, corpo)`; `None` = não é dele (421), e o Python segue."""
+    from app import list_bridge
+    endpoint = list_bridge.endpoint()
+    if endpoint is None or not rust_owns_codex_terminal():
+        return None
+    import urllib.error, urllib.parse, urllib.request
+    req = urllib.request.Request(f"http://{endpoint[0]}/__hangar_server/codex/{urllib.parse.quote(name, safe='')}/{route}",
+        data=body or None, headers={"content-type": "application/json", "x-hangar-internal": endpoint[1]}, method=method)
+    status, raw = 503, b""
+    try:
+        with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req, timeout=90) as response:
+            status, raw = response.status, response.read()
+    except urllib.error.HTTPError as exc:
+        if exc.code == 421:
+            return None
+        status = exc.code
+        with suppress(OSError):
+            raw = exc.read()
+    except OSError:  # conexão recusada e prazo (TimeoutError) também são OSError
+        pass
+    with suppress(ValueError):
+        body = json.loads(raw)
+        if isinstance(body, dict) and (status < 300 or isinstance(body.get("detail"), dict)):
+            return status, raw
+    # Ponte fora, prazo ou corpo sem o envelope do Rust: falha com código, nunca exceção crua.
+    return max(status, 502), json.dumps({"detail": {"code": "codex_bridge_failed", "params": {},
+        "msg": "O Rust não respondeu ao repasse; tente de novo."}}).encode()
 
 
 class Phase(Enum):
@@ -268,7 +303,7 @@ class RuntimeCoordinator:
         # Sessões cuja recusa de fundo por cache inválido já foi ao diário nesta sequência.
         self._cache_invalid_logged: set[str] = set()
         # Antes da saúde do Rust vale o que se espera dele; depois, o que ele anuncia.
-        self._owns = {("claude", True), ("claude", False)}
+        self._owns = {("claude", True), ("claude", False), ("codex", True), ("codex", False)}
         self.python_client_released = set()     # nomes em passagem de Codex sem terminal para terminal
 
     def rust_owns(self, provider, headless):
@@ -412,7 +447,6 @@ class RuntimeCoordinator:
         """`launch`: quem chama pode subir o processo (envio, acordar); leitura e parada nunca sobem."""
         if self.legacy is None:
             return self.managed_runtime(name)
-        # Só espera o desfecho do Rust quem ele atende no modo da própria sessão: Codex com terminal é do Python.
         if provider == "claude" or self.rust_owns(provider, bool(await asyncio.to_thread(_codex_mode, name))):
             await self.await_mode()
         async with self.registration_locks.setdefault(name, asyncio.Lock()):

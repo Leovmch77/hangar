@@ -1015,6 +1015,18 @@ fn permission_mode_matches_case_insensitively_like_python() {
 }
 
 #[test]
+fn terminal_permission_mode_is_unknown_never_full_access() {
+    // Sem modo no sidecar (terminal comum) e com o da abertura (import): a TUI pode ter mudado depois.
+    for metadata in [json!({"name":"s","thread_id":"t1","headless":false,"cwd":"/p"}),
+                     json!({"name":"s","thread_id":"t1","headless":false,"cwd":"/p","permission_mode":"Full Access"})] {
+        let engine = Engine::new(metadata,1,clock(10.0));
+        assert!(engine.control_view()["permission_mode"].is_null(),"{}",engine.control_view()["permission_mode"]);
+    }
+    let headless = Engine::new(json!({"name":"s","thread_id":"t1","headless":true,"cwd":"/p"}),1,clock(10.0));
+    assert_eq!(headless.control_view()["permission_mode"],"Full Access","sem terminal segue o padrão de hoje");
+}
+
+#[test]
 fn missing_model_provider_retries_resume_with_openai() {
     let (mut engine,sent) = bootstrapped(json!({"name":"s","thread_id":"t1","headless":true,"cwd":"/p"}));
     let resume = find_method(&sent,"thread/resume");
@@ -1773,4 +1785,142 @@ fn conversation_terminal_reserved_answer_from_another_generation_is_refused() {
     let refused = engine.command(Engine::async_answer_command(&reservation,"thread-1",2),clock(14.0)).unwrap();
     assert!(frames(&refused).is_empty());
     assert_eq!(reply_of(&refused,&reservation.operation_id).map(|(d,_)|d),Some(Disposition::Rejected));
+}
+
+// ── Controles do Codex com terminal pelo app-server adotado ─────────────────────────────────────
+
+/// Terminal conectado e assinado (a assinatura colou), com modelo e esforço conhecidos.
+fn modeled_terminal() -> Engine {
+    let mut engine = Engine::new(json!({"name":"session","thread_id":"thread-1","headless":false,"cwd":"/work",
+        "model":"gpt-6","effort":"medium","permission_mode":"Ask for approval"}),1,clock(10.0));
+    let resume = resume_of(&connect(&mut engine));
+    line(&mut engine,json!({"id":resume["id"],"result":{"thread":{"id":"thread-1","path":"/r/one.jsonl","status":{"type":"idle"},"turns":[]}}}),12.0);
+    assert_eq!(engine.control_view()["subscribed"],true);
+    engine
+}
+fn op(id:&str,kind:OperationKind,payload:Value) -> RuntimeCommand { RuntimeCommand { operation_id:id.into(),kind,payload } }
+fn accepted_payload(effects:&[Effect],id:&str) -> Option<Value> {
+    effects.iter().find_map(|e|match e { Effect::Reply { operation_id,disposition:Disposition::Accepted,payload } if operation_id == id=>Some(payload.clone()),_=>None })
+}
+/// Nada da tabela sem terminal nem de relançamento: só o pedido do próprio controle.
+fn terminal_safe(effects:&[Effect]) {
+    assert!(!effects.iter().any(|e|matches!(e,Effect::Respawn { .. })));
+    for frame in frames(effects) {
+        assert_ne!(frame["method"],"thread/start");
+        assert!(frame["params"].get("approvalPolicy").is_none() && frame["params"].get("sandbox").is_none(),"{frame}");
+    }
+}
+
+#[test]
+fn conversation_terminal_read_controls_run_over_the_adopted_app_server() {
+    let mut engine = modeled_terminal();
+    for (id,kind,payload,method) in [
+        ("models",OperationKind::ListModels,json!({}),"model/list"),
+        ("skills",OperationKind::ListSkills,json!({}),"skills/list"),
+        ("limits",OperationKind::ReadRateLimits,json!({}),"account/rateLimits/read"),
+        ("settings",OperationKind::ReadSettings,json!({"include_turns":false}),"thread/read"),
+    ] {
+        let effects = engine.command(op(id,kind,payload),clock(13.0)).unwrap();
+        terminal_safe(&effects);
+        let request = frames(&effects)[0].clone();
+        assert_eq!(request["method"],method);
+        if method == "skills/list" { assert_eq!(request["params"]["cwds"],json!(["/work"])); }
+        if method == "thread/read" { assert_eq!(request["params"]["threadId"],"thread-1"); }
+    }
+    let settings = frames(&engine.command(op("again",OperationKind::ReadSettings,json!({})),clock(13.5)).unwrap())[0].clone();
+    let effects = line(&mut engine,json!({"id":settings["id"],"result":{"thread":{"id":"thread-1","status":{"type":"idle"},"turns":[]}}}),13.6);
+    let current = accepted_payload(&effects,"again").unwrap();
+    assert_eq!(current["model"],"gpt-6"); assert_eq!(current["effort"],"medium");
+}
+
+#[test]
+fn conversation_terminal_model_and_mode_change_the_tui_thread_without_permissions() {
+    let mut engine = modeled_terminal();
+    let effects = engine.command(op("model",OperationKind::SetModel,json!({"model":"gpt-6-mini","effort":"high"})),clock(13.0)).unwrap();
+    terminal_safe(&effects);
+    let update = frames(&effects)[0].clone();
+    assert_eq!(update["method"],"thread/settings/update");
+    assert_eq!(update["params"]["threadId"],"thread-1");
+    assert_eq!(update["params"]["model"],"gpt-6-mini"); assert_eq!(update["params"]["effort"],"high");
+    line(&mut engine,json!({"id":update["id"],"result":{}}),13.1);
+    assert_eq!(engine.control_view()["model"],"gpt-6-mini"); assert_eq!(engine.control_view()["effort"],"high");
+
+    let read = frames(&engine.command(op("mode",OperationKind::SetMode,json!({"mode":"plan"})),clock(14.0)).unwrap())[0].clone();
+    assert_eq!(read["method"],"thread/read");
+    let effects = line(&mut engine,json!({"id":read["id"],"result":{"thread":{"id":"thread-1","status":{"type":"idle"},"turns":[]}}}),14.1);
+    terminal_safe(&effects);
+    let update = frames(&effects)[0].clone();
+    assert_eq!(update["method"],"thread/settings/update");
+    assert_eq!(update["params"]["collaborationMode"]["mode"],"plan");
+    assert_eq!(update["params"]["collaborationMode"]["settings"]["model"],"gpt-6-mini");
+    let done = line(&mut engine,json!({"id":update["id"],"result":{}}),14.2);
+    assert_eq!(accepted_payload(&done,"mode").unwrap()["mode"],"plan");
+    assert_eq!(engine.view()["codex_mode"],"plan");
+}
+
+#[test]
+fn conversation_terminal_fast_uses_the_same_confirmation_and_keeps_the_subscription() {
+    let mut engine = modeled_terminal();
+    let effects = engine.command(op("op-1",OperationKind::SetServiceTier,json!({"service_tier":"default"})),clock(13.0)).unwrap();
+    terminal_safe(&effects);
+    let update = frames(&effects)[0].clone();
+    assert_eq!(update["params"],json!({"threadId":"thread-1","serviceTier":"default"}));
+    line(&mut engine,json!({"id":update["id"],"result":{}}),13.1);
+    let verify = frames(&tier_notification(&mut engine,"thread-1",json!("default"),13.2))[0].clone();
+    // A conferência é um `thread/resume` só com a thread: não reenvia aprovação nem sandbox.
+    assert_eq!(verify["method"],"thread/resume"); assert_eq!(verify["params"],json!({"threadId":"thread-1"}));
+    assert!(tier_accepted(&line(&mut engine,json!({"id":verify["id"],"result":{"thread":{"id":"thread-1"},"serviceTier":"default"}}),13.3)));
+    assert_eq!(engine.control_view()["subscribed"],true);
+    assert_eq!(engine.view()["codex_service_tier"],"default");
+}
+
+#[test]
+fn conversation_terminal_compact_waits_for_the_subscription_and_fast_does_not() {
+    // Conectado sem assinatura: o fim da compactação não chegaria.
+    let mut engine = terminal();
+    connect(&mut engine);
+    let refused = engine.command(op("op-1",OperationKind::Compact,json!({})),clock(12.0)).err().unwrap();
+    assert_eq!(refused.code,"codex_command");
+    // Fast antes do 1º turno: sem rollout, a conferência aceita o aviso da própria thread.
+    let effects = engine.command(op("op-1",OperationKind::SetServiceTier,json!({"service_tier":"default"})),clock(12.0)).unwrap();
+    terminal_safe(&effects);
+    let update = frames(&effects)[0].clone();
+    assert_eq!(update["params"],json!({"threadId":"thread-1","serviceTier":"default"}));
+    line(&mut engine,json!({"id":update["id"],"result":{}}),12.1);
+    let verify = frames(&tier_notification(&mut engine,"thread-1",json!("default"),12.2))[0].clone();
+    assert_eq!(verify["method"],"thread/resume");
+    let missing = json!({"id":verify["id"],"error":{"code":-32600,"message":"no rollout found for thread id thread-1"}});
+    assert!(tier_accepted(&line(&mut engine,missing,12.3)));
+    assert_eq!(engine.view()["codex_service_tier"],"default");
+    // Outro erro na conferência continua sendo recusa.
+    let effects = engine.command(op("op-2",OperationKind::SetServiceTier,json!({"service_tier":"priority"})),clock(13.0)).unwrap();
+    let catalog = frames(&effects)[0].clone();
+    assert_eq!(catalog["method"],"model/list");
+    let refused = line(&mut engine,json!({"id":catalog["id"],"error":{"code":-1,"message":"boom"}}),13.1);
+    assert!(refused.iter().any(|e|matches!(e,Effect::Reply { operation_id,disposition:Disposition::Rejected,.. } if operation_id == "op-2")));
+    let mut engine = modeled_terminal();
+    let effects = engine.command(op("compact",OperationKind::Compact,json!({})),clock(13.0)).unwrap();
+    terminal_safe(&effects);
+    let start = frames(&effects)[0].clone();
+    assert_eq!(start["method"],"thread/compact/start"); assert_eq!(start["params"]["threadId"],"thread-1");
+    line(&mut engine,json!({"id":start["id"],"result":{}}),13.1);
+    assert_eq!(engine.view()["label"],"Compactando…");
+    assert_eq!(engine.control_view()["deliverable"],false);
+}
+
+#[test]
+fn conversation_terminal_relaunch_controls_are_refused_with_a_code() {
+    use hangar_server::runtime::codex::{TERMINAL_RELAUNCH,TERMINAL_UNSUPPORTED};
+    let mut engine = modeled_terminal();
+    for kind in [OperationKind::Restart,OperationKind::Reload,OperationKind::SetPermissionMode,OperationKind::OpenTerminal] {
+        let refused = engine.command(op("op-1",kind,json!({"mode":"Full Access"})),clock(13.0)).err().unwrap();
+        assert_eq!(refused.code,TERMINAL_RELAUNCH,"{kind:?}");
+    }
+    for kind in [OperationKind::Commands,OperationKind::Cwd,OperationKind::Detach,OperationKind::VoiceOpen,OperationKind::SteerQueue] {
+        let refused = engine.command(op("op-1",kind,json!({})),clock(13.0)).err().unwrap();
+        assert_eq!(refused.code,TERMINAL_UNSUPPORTED,"{kind:?}");
+    }
+    // Processo caído não vira relançamento: o app-server com terminal não é do Hangar.
+    line(&mut engine,json!({"type":"cano_saiu"}),14.0);
+    assert_eq!(engine.command(op("op-1",OperationKind::Restart,json!({})),clock(14.5)).err().unwrap().code,TERMINAL_RELAUNCH);
 }

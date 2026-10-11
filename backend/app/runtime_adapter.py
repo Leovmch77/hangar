@@ -237,7 +237,7 @@ class LegacyBridge:
             from app.runtime_terminal import resolve_binding
             previous = self.coordinator.slots.get(meta["key"])
             return resolve_binding(name, previous.binding if previous else None)
-        if not headless and not state_path.exists():
+        if not headless and (not state_path.exists() or self.coordinator.mode != "python" and self.coordinator.rust_owns("codex", False)):
             return None
         path = self.adapters[provider].transcript_path_de(meta) if provider == "claude" else meta.get("rollout_path") or ""
         if provider == "codex" and not path and meta.get("thread_id"):

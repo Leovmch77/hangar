@@ -175,6 +175,18 @@ pub fn control_step_answer(sent: &Result<RuntimeReply, RuntimeError>) -> Result<
     }
 }
 
+/// O desfecho do escritor de pane do Codex com terminal, com as mesmas respostas do `control_step_answer`.
+pub fn pane_step_answer(result: &crate::terminal_input::DeliveryResult) -> Result<(), Answer> {
+    use crate::terminal_input::Disposition as Pane;
+    match (result.disposition, result.code.as_str()) {
+        (Pane::Accepted, _) => Ok(()),
+        (Pane::Rejected, "key_not_allowed") => Err((StatusCode::BAD_REQUEST, json!({"detail": "tecla não permitida"}))),
+        (Pane::Rejected, "invalid_text") => Err((StatusCode::BAD_REQUEST, json!({"detail": "texto inválido para terminal"}))),
+        (Pane::Deferred, _) => Err(control_failed(MSG_CONTROL_DEFERRED)),
+        _ => Err(control_failed(MSG_CONTROL_UNCONFIRMED)),
+    }
+}
+
 pub fn interrupt_terminal_answer(sent: &Result<RuntimeReply, RuntimeError>) -> Answer {
     control_step_answer(sent).map_or_else(|refused| refused, |()| ok())
 }
@@ -335,6 +347,8 @@ pub async fn select_submit(State(st): State<Arc<AppState>>, ConnectInfo(peer): C
     };
     let Some(supplied) = parse_submit(&bytes).filter(|_| bytes.is_empty() || json_content_type(ctx.headers())) else { return relay(ctx, bytes).await };
     let expected = match expected(&ctx, supplied.as_deref()).await { Ok(expected) => expected, Err(failed) => return answer(&ctx, failed) };
+    // A TUI do Codex não tem a aba Submit do Claude: a pergunta dele se responde pelo `/answer`.
+    if matches!(ctx.target.handle, EntryHandle::CodexTerminal { .. }) { return answer(&ctx, interaction_failure(InteractionError::Changed)); }
     // Sem pane não há aba Submit para dirigir: quem responde, como hoje, é o Python.
     let EntryHandle::Terminal { handle, .. } = &ctx.target.handle else { return relay(ctx, bytes).await };
     if expected.target.kind != crate::interactions::InteractionKind::Menu { return answer(&ctx, interaction_failure(InteractionError::Changed)); }
@@ -379,9 +393,15 @@ pub async fn keys(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInf
         Ok(admitted) => admitted,
         Err(response) => return response,
     };
-    let (EntryHandle::Terminal { handle, .. }, Some(key)) = (&ctx.target.handle, parse_key(&bytes).filter(|_| json_content_type(ctx.headers()))) else { return relay(ctx, bytes).await };
-    let result = control_step_answer(&handle.control(random_hex(16), "navigation_key".into(), json!({"key": key})).await).map_or_else(|refused| refused, |()| ok());
-    answer(&ctx, result)
+    let Some(key) = parse_key(&bytes).filter(|_| json_content_type(ctx.headers())) else { return relay(ctx, bytes).await };
+    if matches!(ctx.target.handle, EntryHandle::Headless(_)) { return relay(ctx, bytes).await; }
+    let result = match &ctx.target.handle {
+        EntryHandle::Terminal { handle, .. } => control_step_answer(&handle.control(random_hex(16), "navigation_key".into(), json!({"key": key})).await),
+        // Codex com terminal: o pane é do Rust também, pelo mesmo escritor de teclas.
+        EntryHandle::CodexTerminal { target, cell, .. } => pane_step_answer(&crate::runtime::codex_terminal::pane_driver(&target.terminal, cell.pane_serial(), None).key(&key, false).await),
+        EntryHandle::Headless(_) => unreachable!("relayed above"),
+    };
+    answer(&ctx, result.map_or_else(|refused| refused, |()| ok()))
 }
 
 pub async fn term_input(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
@@ -389,13 +409,23 @@ pub async fn term_input(State(st): State<Arc<AppState>>, ConnectInfo(peer): Conn
         Ok(admitted) => admitted,
         Err(response) => return response,
     };
-    let (EntryHandle::Terminal { handle, .. }, Some((text, key))) = (&ctx.target.handle, parse_term_input(&bytes).filter(|_| json_content_type(ctx.headers()))) else { return relay(ctx, bytes).await };
+    let Some((text, key)) = parse_term_input(&bytes).filter(|_| json_content_type(ctx.headers())) else { return relay(ctx, bytes).await };
+    if matches!(ctx.target.handle, EntryHandle::Headless(_)) { return relay(ctx, bytes).await; }
     let result = match term_input_steps(text.as_deref(), key.as_deref()) {
         Err(refused) => refused,
         Ok(steps) => {
             let mut done = ok();
             for (control, payload) in steps {
-                if let Err(refused) = control_step_answer(&handle.control(random_hex(16), control.into(), payload).await) { done = refused; break; }
+                let step = match &ctx.target.handle {
+                    EntryHandle::Terminal { handle, .. } => control_step_answer(&handle.control(random_hex(16), control.into(), payload).await),
+                    EntryHandle::CodexTerminal { target, cell, .. } => {
+                        let driver = crate::runtime::codex_terminal::pane_driver(&target.terminal, cell.pane_serial(), None);
+                        pane_step_answer(&if control == "terminal_input" { driver.text(payload["text"].as_str().unwrap_or("")).await }
+                            else { driver.key(payload["key"].as_str().unwrap_or(""), true).await })
+                    }
+                    EntryHandle::Headless(_) => unreachable!("relayed above"),
+                };
+                if let Err(refused) = step { done = refused; break; }
             }
             done
         }

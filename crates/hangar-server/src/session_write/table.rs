@@ -23,10 +23,14 @@ pub enum WriteRoute {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Owner { Rust, Python }
 
-/// Entrada doente sempre vai ao Python (ele relança e responde como hoje). O Codex com terminal
-/// ainda é todo dele.
+/// O Codex com terminal é do Rust: vigia, escrita e ciclo de vida. Só vira com os controles do motor
+/// terminal e as permissões prontos; é o que a saúde anuncia e o que liga a vigia.
+pub const CODEX_TERMINAL_OWNED: bool = false;
+
+/// Entrada doente vai ao Python (ele relança e responde como hoje), menos o Codex com terminal do Rust,
+/// que `route_write` recusa com código.
 pub fn decide(route: WriteRoute, provider: Provider, terminal: bool, healthy: bool) -> Owner {
-    if !healthy || provider == Provider::Codex && terminal { return Owner::Python; }
+    if !healthy || provider == Provider::Codex && terminal && !CODEX_TERMINAL_OWNED { return Owner::Python; }
     match route {
         WriteRoute::CodexControl if provider != Provider::Codex => Owner::Python,
         // Teclas cruas e a aba Submit só existem num pane: sem terminal quem responde é o Python, como hoje.

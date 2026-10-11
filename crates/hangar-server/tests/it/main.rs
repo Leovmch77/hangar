@@ -168,6 +168,8 @@ mod runtime_actor;
 mod runtime_cano;
 mod runtime_claude;
 mod runtime_codex;
+#[cfg(unix)]
+mod runtime_codex_watch;
 mod runtime_contract;
 mod runtime_gateway;
 mod runtime_ingress;

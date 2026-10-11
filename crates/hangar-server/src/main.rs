@@ -8,6 +8,15 @@ fn main() {
 
 #[tokio::main]
 async fn run() {
+    let args:Vec<_>=std::env::args_os().collect();
+    match hangar_server::runtime::claude_relaunch::helper_args(&args) {
+        Ok(Some(endpoint))=> {
+            let code=hangar_server::runtime::claude_relaunch::helper(endpoint).await.unwrap_or(126);
+            std::process::exit(code);
+        },
+        Err(_)=>std::process::exit(126),
+        Ok(None)=>{},
+    }
     let cfg = match hangar_server::config::Config::from_env() {
         Ok(cfg) => cfg,
         Err(e) => {

@@ -3,6 +3,10 @@ pub mod protocol;
 pub mod cano;
 pub mod websocket;
 pub mod codex_terminal;
+pub mod codex_sidecar;
+pub mod codex_launch;
+pub mod codex_pane;
+pub mod codex_relaunch;
 pub mod queue;
 pub mod receipt;
 pub mod claude;
@@ -13,6 +17,8 @@ pub mod ingress;
 pub mod terminal;
 pub mod local_policy;
 pub mod process;
+pub mod claude_relaunch;
+pub mod lifecycle;
 
 #[derive(Default)]
 pub(crate) struct LiveBuffer {

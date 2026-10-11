@@ -481,7 +481,7 @@ pub fn has_codex_sidecar(name: &str, dirs: &Dirs) -> bool {
     dirs.home.join(".hangar").join("codex-sessions").join(format!("{}.json", sanitize_session_name(name))).exists()
 }
 
-type Sidecars = Arc<Vec<(String, Map<String, Value>)>>;
+pub(crate) type Sidecars = Arc<Vec<(String, Map<String, Value>)>>;
 
 /// Uma leitura por versão da pasta: o Python grava sidecar por `rename`, então pasta igual é
 /// sidecar igual. Os tortos ficam junto, para voltarem ao diário a cada rodada.
@@ -490,7 +490,7 @@ static SIDECARS: LazyLock<std::sync::Mutex<Capped<PathBuf, (SystemTime, Sidecars
 
 /// Sidecars de uma pasta em ordem de nome, com o nome do arquivo; ilegível ou não-objeto fica de
 /// fora, como no Python, mas vai ao diário: a sessão viva dele sumiria da lista calada.
-fn sidecars(dir: &Path, kind: &'static str, problems: &mut Problems) -> Sidecars {
+pub(crate) fn sidecars(dir: &Path, kind: &'static str, problems: &mut Problems) -> Sidecars {
     let stamp = match dir.metadata().and_then(|m| m.modified()) {
         Ok(stamp) => stamp,
         Err(error) => {

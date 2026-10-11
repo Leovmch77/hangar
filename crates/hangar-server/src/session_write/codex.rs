@@ -1,7 +1,9 @@
 //! Rotas só do Codex (`/models`, `/model`, `/service-tier`, `/codex/mode`, `/limits`, `/question/skip`,
-//! `/commands`, `/codex-permissions`) da sessão Codex sem terminal, com o corpo e o código da rota
-//! Python no modo `python` (`api.py`). Codex com terminal e o que não é sessão Codex do Rust seguem ao
-//! Python antes da porta: a lista de comandos do Claude não pode esperar uma troca de agente.
+//! `/commands`, `/codex-permissions`) da sessão Codex do Rust, com o corpo e o código da rota
+//! Python no modo `python` (`api.py`). Com terminal valem as mesmas rotas quando a tabela entrega o
+//! modo ao Rust; lá `/codex-permissions` dirige o seletor da TUI (`permission_control::codex`). O que
+//! não é sessão Codex do Rust segue ao Python antes da porta: a lista de comandos do Claude não pode
+//! esperar uma troca de agente.
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -13,9 +15,11 @@ use axum::response::Response;
 use serde_json::{Map, Value, json};
 
 use super::input::{MSG_CODEX_CONTROL, answer, codex_control, json_content_type};
-use super::{Ctx, WriteRoute, admit, detail_body, enter_then_find, json_response, relay, session_name};
+use super::{Ctx, Owner, Provider, WriteRoute, admit, decide, detail_body, enter_then_find, json_response, relay, session_name};
 use crate::mods::state::random_hex;
+use crate::permission_control::PermissionAction;
 use crate::routes::{AppState, cors, gate, pass};
+use crate::runtime::gateway::EntryHandle;
 use crate::runtime::protocol::{Disposition, OperationKind, RuntimeCommand, RuntimeError, RuntimeReply};
 
 type Answer = (StatusCode, Value);
@@ -114,6 +118,27 @@ pub fn commands_answer(sent: &Result<RuntimeReply, RuntimeError>) -> Answer {
     (StatusCode::OK, Value::Array(commands))
 }
 
+const MSG_COMPACT_ARGS: &str = "O /compact do Codex não aceita argumentos.";
+
+/// `/compact` pelo `/input`, com o corpo do `_send_managed` do Python: aceito é entregue, adiado é
+/// ok sem entrega, o resto é 400 `erro_envio_falhou` com o motivo.
+pub fn compact_answer(sent: &Result<RuntimeReply, RuntimeError>) -> Answer {
+    let failed = |msg: &str| (StatusCode::BAD_REQUEST, detail_body("erro_envio_falhou", msg, json!({"erro": msg})));
+    match sent {
+        Ok(reply) if matches!(reply.disposition, Disposition::Accepted | Disposition::Deferred) => (StatusCode::OK,
+            json!({"ok": true, "delivered": reply.disposition == Disposition::Accepted, "steered": false, "native": false})),
+        Ok(reply) if reply.disposition == Disposition::Unknown => failed("resultado incerto; entrada conservada sem reenvio"),
+        Ok(reply) => failed(reply.payload["error"].as_str().filter(|e| !e.is_empty()).unwrap_or("entrada recusada pelo runtime")),
+        Err(error) => failed(&error.message),
+    }
+}
+
+/// O `/compact` do Codex com terminal é controle do motor (`thread/compact/start`), nunca texto na fila.
+pub(super) async fn compact(target: &crate::runtime::gateway::WriteTarget, text: &str) -> Answer {
+    if text.trim() != "/compact" { return compact_answer(&Err(RuntimeError::new("codex_command", MSG_COMPACT_ARGS))); }
+    compact_answer(&target.handle.command(RuntimeCommand { operation_id: random_hex(16), kind: OperationKind::Compact, payload: json!({}) }).await)
+}
+
 /// `modos_para_tela`: o mesmo formato do picker da TUI.
 pub fn permission_modes(current: Option<&str>) -> Value {
     let current = current.unwrap_or(DEFAULT_PERMISSION_MODE);
@@ -158,14 +183,20 @@ fn literal(fields: &Map<String, Value>, key: &str, values: &[&str]) -> Option<St
 
 // ── rotas ───────────────────────────────────────────────────────────────────────────────────────
 
+/// Sessão Codex que a tabela entrega ao Rust nesta rota.
 async fn ours(st: &AppState, name: Option<&str>) -> bool {
     match (st.state.runtime.get(), name) {
-        (Some(runtime), Some(name)) => runtime.writable(name).await.is_some_and(|t| t.provider == "codex" && !t.terminal),
+        (Some(runtime), Some(name)) => runtime.writable(name).await.is_some_and(|t| codex_owned(&t.provider, t.terminal)),
         _ => false,
     }
 }
 
-/// Só a sessão Codex sem terminal do Rust passa pela porta; o resto vai ao Python como chegou.
+/// A saúde fica com a admissão; aqui só provedor e modo, pela mesma tabela que anuncia a posse.
+fn codex_owned(provider: &str, terminal: bool) -> bool {
+    provider == "codex" && decide(WriteRoute::CodexControl, Provider::Codex, terminal, true) == Owner::Rust
+}
+
+/// Só a sessão Codex do Rust passa pela porta; o resto vai ao Python como chegou.
 async fn admit_codex(st: &Arc<AppState>, peer: SocketAddr, req: Request) -> Result<(Ctx, Bytes), Response> {
     if !ours(st, session_name(req.uri().path()).as_deref()).await {
         let (fwd, _) = gate(st, peer, &req);
@@ -235,7 +266,7 @@ pub async fn limits(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
     let (Some(runtime), Some(name), true) = (st.state.runtime.get(), name, owner) else { return pass(&st, req, &fwd).await };
     if !ours(&st, Some(&name)).await { return pass(&st, req, &fwd).await; }
     let sent = match enter_then_find(runtime, &name, Duration::ZERO).await {
-        Ok(Some((_held, target))) if target.provider == "codex" && !target.terminal =>
+        Ok(Some((_held, target))) if codex_owned(&target.provider, target.terminal) =>
             target.handle.command(RuntimeCommand { operation_id: random_hex(16), kind: OperationKind::ReadRateLimits, payload: json!({}) }).await,
         _ => Err(RuntimeError::new("session_transfer_busy", "porta de entrada fechada")),
     };
@@ -263,6 +294,10 @@ pub async fn commands(State(st): State<Arc<AppState>>, ConnectInfo(peer): Connec
 
 pub async fn permissions(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
     let (ctx, _) = admitted!(st, peer, req);
+    if matches!(ctx.target.handle, EntryHandle::CodexTerminal { .. }) {
+        let result = terminal_permission(&ctx, PermissionAction::Read { probe: false }).await;
+        return answer(&ctx, result);
+    }
     // O modo do motor, que vale com o processo caído; a vista publicada só chega depois de gravada e
     // logo após abrir ou trocar o modo ainda traria o anterior.
     let result = match ctx.target.handle.view().await {
@@ -275,7 +310,48 @@ pub async fn permissions(State(st): State<Arc<AppState>>, ConnectInfo(peer): Con
 pub async fn set_permission(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
     let (ctx, bytes) = admitted!(st, peer, req);
     let Some(body) = object(&bytes, ctx.headers()).and_then(|f| strings(&f, "mode", None)) else { return relay(ctx, bytes).await };
+    if matches!(ctx.target.handle, EntryHandle::CodexTerminal { .. }) {
+        let mode = body["mode"].as_str().unwrap_or_default().to_owned();
+        let result = terminal_permission(&ctx, PermissionAction::Set { mode }).await;
+        return answer(&ctx, result);
+    }
     let sent = run(&ctx, OperationKind::SetPermissionMode, json!({"mode": body["mode"]})).await;
     log_outcome(&ctx.name, "permission", &sent, "troca de permissão do Codex não aceita");
     answer(&ctx, permission_answer(&sent))
+}
+
+const MSG_PERMISSION_BUSY: &str = "a sessão está trabalhando — espere ela terminar";
+
+/// Corpo e código do `api.py` para o seletor da TUI: modo desconhecido é 400, o resto do seletor 409.
+pub fn terminal_permission_answer(sent: &Result<Value, RuntimeError>) -> Answer {
+    match sent {
+        Ok(value) => (StatusCode::OK, value.clone()),
+        Err(error) if error.code == "terminal_panel_open" => super::control::panel_open_refusal(),
+        Err(error) if error.code == "erro_modo_desconhecido" => (StatusCode::BAD_REQUEST, detail_body("erro_permissao_picker", &error.message, json!({}))),
+        Err(error) => (StatusCode::CONFLICT, detail_body("erro_permissao_picker", &error.message, json!({}))),
+    }
+}
+
+/// Seletor do `/permissions` no pane, na trava da vida que `/keys` e `/term-input` também usam. Turno em
+/// voo recusa antes de tocar no pane: o `/permissions` digitado viraria mensagem enfileirada.
+///
+/// Ordem das travas: passe da porta de entrada (`admitted!`, nunca fechada daqui) → retenção de turnos
+/// do ator (`hold_turns`) → trava do pane. O ator não toma a trava do pane, e a retenção vale a
+/// sequência inteira: a fila e as respostas reservadas não abrem `turn/start` no meio do seletor.
+async fn terminal_permission(ctx: &Ctx, action: PermissionAction) -> Answer {
+    let EntryHandle::CodexTerminal { target, cell, handle } = &ctx.target.handle else { return refused() };
+    if ctx.st.term.is_active(&ctx.name) { return super::control::panel_open_refusal(); }
+    // Ator caído não despacha nada: segue sem retenção e a leitura do pane decide, como antes.
+    let _turns = match handle.hold_turns().await {
+        Ok(hold) => Some(hold),
+        Err(error) if error.code == crate::runtime::actor::TURN_HOLD_BUSY =>
+            return (StatusCode::CONFLICT, detail_body("erro_permissao_ocupada", MSG_PERMISSION_BUSY, json!({}))),
+        Err(_) => None,
+    };
+    let driver = crate::runtime::codex_terminal::pane_driver(&target.terminal, cell.pane_serial(), Some(ctx.st.term.clone()));
+    let sent = crate::permission_control::codex(&driver, action).await;
+    if let Err(error) = &sent && crate::warn_limit::allow(Some(&ctx.name), &format!("codex_permission:{}", error.code)) {
+        tracing::warn!(session = %ctx.name, code = %error.code, message = %error.message, "seletor de permissões do Codex falhou");
+    }
+    terminal_permission_answer(&sent)
 }

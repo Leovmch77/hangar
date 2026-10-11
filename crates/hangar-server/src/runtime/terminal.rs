@@ -22,9 +22,9 @@ pub type ModsAnchor=Arc<std::sync::Mutex<Option<String>>>;
 /// com uma entrada esperando e o foco num painel ou na faixa de um mod há mais que isso, sem clique em curso,
 /// o executor devolve o teclado ao prompt e escreve. `clear_wait`: quanto a trava do `/clear` espera a
 /// conversa nova antes de conferir se ele foi aplicado.
-pub struct TerminalOptions { pub interactions:Option<Arc<InteractionStore>>,pub plugin:Option<Arc<crate::plugin::Store>>,pub mode_facts:Option<crate::terminal_facts::ModeReader>,pub terms:Option<Arc<crate::term::Terms>>,pub io:Arc<dyn TerminalIo>,pub limits:InputLimits,pub tick:Duration,pub stall_notice:Duration,pub anchor:ModsAnchor,pub focus_return:Duration,pub clear_wait:Duration }
+pub struct TerminalOptions { pub lifecycle:Option<std::sync::Weak<super::gateway::RuntimeRegistry>>,pub permissions:Option<Arc<std::sync::Mutex<crate::state::permission::PermissionMemory>>>,pub interactions:Option<Arc<InteractionStore>>,pub plugin:Option<Arc<crate::plugin::Store>>,pub mode_facts:Option<crate::terminal_facts::ModeReader>,pub terms:Option<Arc<crate::term::Terms>>,pub io:Arc<dyn TerminalIo>,pub limits:InputLimits,pub tick:Duration,pub stall_notice:Duration,pub anchor:ModsAnchor,pub focus_return:Duration,pub clear_wait:Duration }
 impl Default for TerminalOptions {
-    fn default()->Self {Self {interactions:None,plugin:None,mode_facts:None,terms:None,io:Arc::new(input::ProcessIo::default()),limits:InputLimits::default(),tick:Duration::from_secs(1),stall_notice:Duration::from_secs(30),
+    fn default()->Self {Self {lifecycle:None,permissions:None,interactions:None,plugin:None,mode_facts:None,terms:None,io:Arc::new(input::ProcessIo::default()),limits:InputLimits::default(),tick:Duration::from_secs(1),stall_notice:Duration::from_secs(30),
         anchor:ModsAnchor::default(),focus_return:FOCUS_RETURN,clear_wait:CLEAR_APPLY_WAIT}}
 }
 /// Quanto uma linha espera, desde a primeira vez que viu o foco num mod, antes de o executor devolver o
@@ -55,6 +55,7 @@ fn delivery(id:&str,result:DeliveryResult)->RuntimeReply {
 enum Message {
     Command {id:String,kind:String,payload:Value,response:oneshot::Sender<Result<RuntimeReply,RuntimeError>>},
     Queue {id:String,action:Action,response:oneshot::Sender<Result<Value,RuntimeError>>},
+    Lifecycle {id:String,action:Action,response:oneshot::Sender<Result<Value,RuntimeError>>},
     /// Operação de mod; `start_by`: depois disso ela não age (C1).
     Pane {op:PaneOp,start_by:std::time::Instant,response:oneshot::Sender<Result<PaneReply,RuntimeError>>},
     Snapshot(oneshot::Sender<Result<Value,RuntimeError>>),Drain(oneshot::Sender<Result<Value,RuntimeError>>),
@@ -78,6 +79,13 @@ impl TerminalHandle {
     pub async fn queue(&self,id:String,action:Action)->Result<Value,RuntimeError> {
         if self.closed.load(Ordering::Acquire) {return Err(error("runtime_stopping"));}
         let (response,receive)=oneshot::channel(); self.sender.send(Message::Queue {id,action,response}).await.map_err(|_|error("runtime_closed"))?;
+        receive.await.map_err(|_|error("runtime_closed"))?
+    }
+    pub(super) async fn lifecycle(&self,id:String,action:Action)->Result<Value,RuntimeError> {
+        if self.closed.load(Ordering::Acquire) {return Err(error("runtime_stopping"));}
+        if !matches!(&action,Action::Prepare {..}|Action::BeginDispatch {..}|Action::Finish {..}) {return Err(error("lifecycle_action"));}
+        let (response,receive)=oneshot::channel();
+        self.sender.send(Message::Lifecycle {id,action,response}).await.map_err(|_|error("runtime_closed"))?;
         receive.await.map_err(|_|error("runtime_closed"))?
     }
     /// Operação de mod no pane: entra na fila deste ator (serial com a entrada), fora do diário.
@@ -188,6 +196,7 @@ struct Executor {
     /// Linha cujo foco no rodapé o Esc não devolveu, e quantas vezes: como a devolução dos mods, o Esc
     /// tem teto e não vira laço de teclas.
     footer_misses:Option<(String,u32)>,
+    reconciliation:Option<tokio::task::JoinHandle<Result<Value,RuntimeError>>>,
 }
 struct Stall {row:String,code:String,since:tokio::time::Instant,wait:Duration,next:tokio::time::Instant,surfaced:bool}
 /// Teto da espera entre tentativas: o composer que esvazia é visto na hora, e o resto (tela
@@ -255,12 +264,25 @@ impl TerminalActor {
         let receipt=ReceiptIndex::new("claude",&target.binding.conversation);
         let (sender,receiver)=mpsc::channel(64); let closed=Arc::new(AtomicBool::new(false)); let anchor=options.anchor.clone();
         let local=Arc::new(crate::terminal_facts::LocalTerminalFacts::new(options.io.clone(),options.plugin.clone(),options.mode_facts.clone()));
-        let executor=Executor {target,queue:Arc::new(queue),local,options,events,revision,sequence,receipt,deliverable:false,last_error:None,uncertain:vec![],unprovable:false,loan:None,stall:None,hold:None,hold_checked:false,focus_refused:false,parked:VecDeque::new(),away:None,clear_watch:None,clear_notice:None,footer_misses:None};
+        let executor=Executor {target,queue:Arc::new(queue),local,options,events,revision,sequence,receipt,deliverable:false,last_error:None,uncertain:vec![],unprovable:false,loan:None,stall:None,hold:None,hold_checked:false,focus_refused:false,parked:VecDeque::new(),away:None,clear_watch:None,clear_notice:None,footer_misses:None,reconciliation:None};
         let task=tokio::spawn(executor.run(receiver,closed.clone()));
         TerminalHandle {sender,closed,task:Arc::new(Mutex::new(Some(task))),stopped:Arc::new(Mutex::new(None)),anchor}
     }
 }
 impl Executor {
+    async fn reconcile_life(&mut self)->Result<(),RuntimeError> {
+        if self.reconciliation.as_ref().is_some_and(|task|task.is_finished()) {
+            let result=self.reconciliation.take().unwrap().await.map_err(|_|error("lifecycle_panic"))?;
+            result?;
+            if self.last_error.as_deref().is_some_and(|code|code.starts_with("lifecycle_") || code=="state_lifecycle_unbound") {self.last_error=None;self.publish().await?;}
+        }
+        if self.reconciliation.is_none() {
+            let registry=self.options.lifecycle.as_ref().and_then(std::sync::Weak::upgrade).ok_or_else(||error("state_lifecycle_unbound"))?;
+            let target=self.target.clone();
+            self.reconciliation=Some(tokio::spawn(async move {registry.reconcile_claude(&target.name,&target.key,&target.binding.conversation,target.generation).await}));
+        }
+        Ok(())
+    }
     /// Prazo vencido: o Rust retoma o teclado sem esperar devolução.
     fn loaned(&mut self)->bool {
         if self.loan.as_ref().is_some_and(|(_,deadline,_)|tokio::time::Instant::now()>=*deadline) {
@@ -366,11 +388,12 @@ impl Executor {
                 let message=tokio::select! {biased;
                     message=receiver.recv()=>message,
                     _=tokio::time::sleep_until(release_at.unwrap_or_else(tokio::time::Instant::now)),if release_at.is_some()=>continue,
-                    _=timer.tick(),if !closed.load(Ordering::Acquire) && (self.last_error.is_none() || self.last_error.as_deref()==Some("terminal_facts") || self.reconciling() || self.clear_watch.is_some() || self.clear_notice.is_some())=>{
+                    _=timer.tick(),if !closed.load(Ordering::Acquire) && (self.last_error.is_none() || self.last_error.as_deref()==Some("terminal_facts") || self.reconciling() || self.clear_watch.is_some() || self.clear_notice.is_some() || self.options.lifecycle.is_some())=>{
                         if self.clear_notice.is_some_and(|until|tokio::time::Instant::now()>=until) {self.clear_notice=None; self.publish().await?;}
                         // Clique de mod em curso, ou o que ele guardou ainda por sair: a fila não entrega nem
                         // reconcilia no pane antes disso (C6).
                         if self.held() || !self.parked.is_empty() {continue;}
+                        if (self.options.lifecycle.is_some() || self.clear_watch.is_some()) && let Err(failure)=self.reconcile_life().await {self.enter_error(failure).await?;}
                         // O `/clear` incerto depois do Enter deixa o erro de entrega incerta: a trava ainda vence.
                         if self.last_error.as_deref()==Some("terminal_facts") {
                             match self.drain_once(None).await {
@@ -407,6 +430,10 @@ impl Executor {
                         action=>self.queue.exec(self.target.generation,&id,sample(),action).await.map_err(|_|error("queue_io")),
                     };
                     if result.is_ok(){self.publish().await?;} let _=response.send(result);
+                },
+                Some(Message::Lifecycle {id,action,response})=> {
+                    let result=self.queue.exec(self.target.generation,&id,sample(),action).await.map_err(|_|error("queue_io"));
+                    let _=response.send(result);
                 },
                 Some(Message::Pane {op,start_by,response})=>{
                     // Esperou na caixa além do ponto de partida: não age (C1). O soltar é a exceção: uma limpeza
@@ -681,8 +708,72 @@ impl Executor {
         }
     }
 
+    async fn permission(&mut self,id:&str,kind:&str,payload:Value)->Result<RuntimeReply,RuntimeError> {
+        use crate::permission_control::{self,PermissionAction};
+        let memory=self.options.permissions.clone().ok_or_else(||error("permission_store_unbound"))?;
+        let original=json!({"operation_id":id,"kind":kind,"payload":payload});
+        let state=self.queue.snapshot().await.map_err(|_|error("queue_io"))?;
+        if state.generation!=self.target.generation {return Err(error("runtime_generation"));}
+        if let Some(old)=state.operations.get(id) {
+            if old.payload!=original {return Err(error("operation_payload"));}
+            return serde_json::from_value(old.result.clone()).or_else(|_|Ok(reply(id,Disposition::Unknown,json!({"error_code":"recovered_operation","uncertain":true}))));
+        }
+        if self.loaned() || self.held() || self.cleared(&state) {return Err(error("permission_control_busy"));}
+        let services=self.services(id,id,"");
+        let driver=TerminalDriver::new(self.target.binding.clone(),services,self.options.io.clone(),self.options.limits.clone());
+        let tracking=self.target.binding.conversation.clone();
+        let captured_revision=memory.lock().map_err(|_|error("permission_store_poisoned"))?.revision(&tracking);
+        let initial=permission_control::claude(&driver,PermissionAction::Read {probe:false}).await?;
+        let current=initial["current"].as_str().ok_or_else(||error("erro_permissao_leitura"))?;
+        memory.lock().map_err(|_|error("permission_store_poisoned"))?.observe_capture(&tracking,current,captured_revision).map_err(error)?;
+        let action=if kind=="set_permission_mode" {PermissionAction::Set {mode:payload["mode"].as_str().ok_or_else(||error("erro_permissao_invalida"))?.into()}}
+            else {PermissionAction::Read {probe:payload["probe"].as_bool().unwrap_or(false)}};
+        self.action(Action::Prepare {id:id.into(),payload:original,entry_id:None}).await?;
+        self.action(Action::BeginDispatch {id:id.into(),wire_id:format!("permission:{}:{id}",self.target.generation),staged:false}).await?;
+        if !memory.lock().map_err(|_|error("permission_store_poisoned"))?.begin(&tracking) {return Err(error("permission_snapshot_absent"));}
+        let controlled=permission_control::claude(&driver,action).await;
+        let (mut value,disposition)=match controlled {
+            Ok(value)=> {
+                let disposition=if value["uncertain"]==true || value["current"].is_null() {Disposition::Unknown}
+                    else if value["requires_reopen"]==true {Disposition::Deferred}
+                    else if value["ok"]==true {Disposition::Accepted} else {Disposition::Rejected};
+                (value,disposition)
+            },
+            Err(failure)=>(json!({"ok":false,"current":null,"error_code":failure.code,"uncertain":true}),Disposition::Unknown),
+        };
+        {
+            let mut memory=memory.lock().map_err(|_|error("permission_store_poisoned"))?;
+            if disposition==Disposition::Unknown {
+                memory.finish_unknown(&tracking);
+            } else if let Some(mode)=value["current"].as_str() {
+                let view=memory.finish(&tracking,mode);
+                value["previous_non_plan"]=json!(view.previous_non_plan);
+            }
+        }
+        let result=reply(id,disposition,value);
+        self.action(Action::Finish {id:id.into(),status:status(disposition),result:serde_json::to_value(&result).unwrap()}).await?;
+        if disposition==Disposition::Unknown {
+            self.unprovable=true;self.enter_error(error("permission_result_unknown")).await?;
+        } else {
+            if self.last_error.as_deref()==Some("permission_result_unknown") {self.last_error=None;self.unprovable=false;}
+            self.publish().await?;
+        }
+        Ok(result)
+    }
+
     async fn execute(&mut self,id:&str,kind:&str,payload:Value,entry:Option<String>)->Result<RuntimeReply,RuntimeError> {
         if id.is_empty() || id.starts_with("call::") || id.starts_with("terminal-") {return Err(error("operation_id"));}
+        if kind=="lifecycle_guard" {
+            if self.loaned() || self.held() || self.last_error.is_some() || !self.uncertain.is_empty() || self.unprovable {return Err(error("lifecycle_busy"));}
+            let state=self.queue.snapshot().await.map_err(|_|error("queue_io"))?;
+            if self.cleared(&state) || state.terminal_write_blocked(&self.target.binding.conversation) {return Err(error("lifecycle_uncertain"));}
+            let services=self.services(id,id,"");
+            services.permission_guard(&self.target.binding).await.map_err(|e|error(e.0))?;
+            let facts=services.facts(&self.target.binding).await.map_err(|e|error(e.0))?;
+            if facts.binding!=self.target.binding || !facts.idle || facts.open_question {return Err(error("lifecycle_busy"));}
+            return Ok(reply(id,Disposition::Accepted,json!({"idle":true,"conversation":self.target.binding.conversation})));
+        }
+        if matches!(kind,"permission_modes"|"set_permission_mode") {return self.permission(id,kind,payload).await;}
         validate(kind,&payload)?;
         let requested=json!({"operation_id":id,"kind":kind,"payload":payload});
         let mut original=requested.clone();

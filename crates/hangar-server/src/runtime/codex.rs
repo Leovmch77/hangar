@@ -167,7 +167,8 @@ pub struct Engine {
     mode:Option<String>,
     service_tier:Option<String>,
     service_tier_pending:Option<ServiceTierChange>,
-    permission_mode:String,
+    /// None = modo efetivo desconhecido (Codex com terminal: o `/permissions` da TUI muda sem avisar o motor).
+    permission_mode:Option<String>,
     token_usage:Value,
     rate_limits:Value,
     preview:LiveBuffer,
@@ -203,6 +204,22 @@ pub struct Engine {
 }
 
 fn error(message:&str) -> RuntimeError { RuntimeError::new("codex_command",message) }
+
+/// Recusa com terminal do que só existe relançando o app-server (reinício, sandbox/permissão, troca de modo de abertura).
+pub const TERMINAL_RELAUNCH:&str = "codex_terminal_relaunch";
+/// Recusa com terminal do que está fora do catálogo fechado.
+pub const TERMINAL_UNSUPPORTED:&str = "codex_terminal_unsupported";
+
+fn relaunches(kind:OperationKind) -> bool {
+    matches!(kind,OperationKind::Restart | OperationKind::Reload | OperationKind::SetPermissionMode | OperationKind::OpenTerminal)
+}
+
+/// O que o Codex com terminal executa pelo app-server adotado; nada de proxy de método arbitrário.
+fn terminal_operation(kind:OperationKind) -> bool {
+    type K = OperationKind;
+    matches!(kind,K::Input | K::Steer | K::Interrupt | K::Select | K::AnswerQuestions | K::SkipQuestion | K::DispatchAsyncAnswer
+        | K::Compact | K::ListModels | K::ListSkills | K::ReadRateLimits | K::ReadSettings | K::SetModel | K::SetEffort | K::SetServiceTier | K::SetMode)
+}
 fn string(value:&Value) -> Option<String> { value.as_str().map(str::to_owned) }
 fn service_tier(value:&Value) -> Option<String> {
     if value.is_null() { Some("default".into()) }
@@ -410,7 +427,8 @@ impl Engine {
                 status_line:string(&metadata["status_line"]),..StateEvent::default() },state_revision:metadata["state_revision"].as_u64().unwrap_or(0),settings_revision:metadata["settings_revision"].as_u64().unwrap_or(0),
             model:string(&metadata["model"]),effort:string(&metadata["effort"]),mode:string(&metadata["mode"]),
             service_tier:metadata.get("service_tier").and_then(service_tier),service_tier_pending:None,
-            permission_mode:stored_mode(metadata["name"].as_str().unwrap_or(""),metadata["permission_mode"].as_str().unwrap_or("Full Access")).into(),token_usage:Value::Null,rate_limits:Value::Null,
+            // Com terminal o sidecar guarda a abertura, não o modo de agora: desconhecido nunca vira Full Access.
+            permission_mode:headless.then(||stored_mode(metadata["name"].as_str().unwrap_or(""),metadata["permission_mode"].as_str().unwrap_or("Full Access")).into()),token_usage:Value::Null,rate_limits:Value::Null,
             preview:LiveBuffer::default(),response_started:false,first_response_start:None,compacting:false,
             running_commands:BTreeMap::new(),thinking:LiveBuffer::default(),was_working:metadata["in_progress"] == true,
             rpc:BTreeMap::new(),server_requests:Vec::new(),
@@ -698,6 +716,13 @@ impl Engine {
             return;
         }
         if !self.service_tier_pending.as_ref().is_some_and(|pending|next["parent"] == pending.operation_id) { return; }
+        // Thread sem turno ainda não tem rollout: vale o aviso da própria thread (o `service_tier` que ele gravou), como no Python.
+        let no_rollout = next["kind"] == "service_tier_confirm" && line["error"]["message"].as_str().is_some_and(missing_rollout);
+        let synthesized;
+        let line = if no_rollout {
+            synthesized = json!({"result":{"thread":{"id":self.thread_id},"serviceTier":self.service_tier}});
+            &synthesized
+        } else { line };
         if rpc.operation_id != next["parent"].as_str().unwrap_or("") {
             effects.push(Effect::Reply { operation_id:rpc.operation_id.clone(),
                 disposition:if line["error"].is_null() { Disposition::Accepted } else { Disposition::Rejected },
@@ -964,9 +989,12 @@ impl Engine {
         if let Some(text) = self.thinking.clear() { self.publish_on("thinking",text,effects); }
     }
 
+    /// Modo para lançar/retomar sem terminal (sempre conhecido ali); desconhecido cai no mais restrito, nunca em Full Access.
+    fn launch_mode(&self) -> &str { self.permission_mode.as_deref().unwrap_or("Ask for approval") }
+
     fn bootstrap_start(&self) -> ClientRequest {
         ClientRequest::ThreadStart(wire::ThreadStartParams { cwd:string(&self.metadata["cwd"]),model:self.model.clone(),
-            approval_policy:Some(approval(&self.permission_mode).into()),sandbox:Some(sandbox(&self.permission_mode).into()),
+            approval_policy:Some(approval(self.launch_mode()).into()),sandbox:Some(sandbox(self.launch_mode()).into()),
             service_tier:self.service_tier.clone() })
     }
 
@@ -1091,12 +1119,15 @@ impl Engine {
         if self.headless && matches!(command.kind,OperationKind::Restart | OperationKind::Reload) {
             return Ok(vec![Effect::Respawn { operation_id:command.operation_id,reason:"restart".into(),patch:Value::Null,reply:json!({}) }]);
         }
+        // O processo com terminal é da TUI: o que depende de relançá-lo nunca sai daqui.
+        if !self.headless && relaunches(command.kind) {
+            return Err(RuntimeError::new(TERMINAL_RELAUNCH,"o Codex com terminal não é relançado pelo Hangar; faça isso na TUI"));
+        }
         if !self.alive { return Err(error("runtime sem terminal indisponível")); }
-        // Com terminal só passa o que tem execução terminal completa; o resto continua com a TUI.
-        // Orientar e interromper vão pelo app-server como no adapter Python, sem nada da tabela sem terminal.
-        if !self.headless && !matches!(command.kind,OperationKind::Input | OperationKind::Steer | OperationKind::Interrupt
-            | OperationKind::Select | OperationKind::AnswerQuestions | OperationKind::SkipQuestion | OperationKind::DispatchAsyncAnswer) {
-            return Err(error("operação ainda não atendida no Codex com terminal"));
+        // Catálogo fechado do terminal: as mesmas transformações do sem terminal, sem a tabela de
+        // aprovação/sandbox dele (já ausente nos ramos abaixo quando `headless` é falso).
+        if !self.headless && !terminal_operation(command.kind) {
+            return Err(RuntimeError::new(TERMINAL_UNSUPPORTED,"operação não atendida no Codex com terminal"));
         }
         let id = command.operation_id;
         let payload = command.payload;
@@ -1118,7 +1149,7 @@ impl Engine {
                 // aprovação e resumo são da TUI: reenviar a tabela do sem-terminal sobrescreveria o `/permissions` dela.
                 let headless = self.headless;
                 let request = ClientRequest::TurnStart(wire::TurnStartParams { thread_id:self.thread_id.clone(),
-                    approval_policy:headless.then(||approval(&self.permission_mode).into()),summary:headless.then(||"detailed".into()),
+                    approval_policy:headless.then(||approval(self.launch_mode()).into()),summary:headless.then(||"detailed".into()),
                     input:input_of(&payload,text) });
                 self.send(id,request,None,&mut effects);
             }
@@ -1145,7 +1176,8 @@ impl Engine {
                 }
             }
             OperationKind::Compact => {
-                if !self.idle() { return Err(error("espere o Codex terminar e responda às perguntas antes de compactar")); }
+                // Sem assinatura o fim da compactação não chega e a sessão ficaria "Compactando…".
+                if !self.idle() || !self.headless && !self.subscribed { return Err(error("espere o Codex terminar e responda às perguntas antes de compactar")); }
                 self.send(id,ClientRequest::ThreadCompactStart(wire::ThreadCompactStartParams { thread_id:self.thread_id.clone() }),None,&mut effects);
             }
             OperationKind::ListModels => self.send(id,ClientRequest::ModelList(Default::default()),None,&mut effects),
@@ -1163,7 +1195,9 @@ impl Engine {
                 let tier = payload["service_tier"].as_str().filter(|tier|["priority","default"].contains(tier))
                     .ok_or_else(||error("Escolha Fast inválida"))?;
                 if !payload.as_object().is_some_and(|fields|fields.len() == 1) { return Err(error("Escolha Fast inválida")); }
-                if !self.ready || self.thread_id.is_empty() { return Err(error("Sessão Codex indisponível")); }
+                // Com terminal basta a conexão: antes do 1º turno a assinatura não cola, e a confirmação vem do aviso da thread.
+                let usable = if self.headless { self.ready } else { self.connected };
+                if !usable || self.thread_id.is_empty() { return Err(error("Sessão Codex indisponível")); }
                 if self.service_tier_pending.is_some() { return Err(error("Uma escolha Fast ainda está aguardando confirmação")); }
                 // Sem mudança o Codex não avisa nada e a espera só estouraria o prazo; None ainda não foi lido.
                 if self.service_tier.as_deref() == Some(tier) {
@@ -1293,7 +1327,7 @@ impl Engine {
                 let mode = *MODES.iter().find(|mode|mode.eq_ignore_ascii_case(wanted)).ok_or_else(||RuntimeError::new("erro_modo_desconhecido",
                     &format!("modo desconhecido: {wanted} (os modos são: {})",MODES.join(", "))))?;
                 // O `approvalPolicy` vale no próximo turno; o sandbox só muda subindo o processo de novo.
-                if sandbox(mode) != sandbox(&self.permission_mode) {
+                if sandbox(mode) != sandbox(self.launch_mode()) {
                     if !self.ready { return Err(error("não foi possível confirmar o estado do turno; permissão mantida")); }
                     if self.in_progress || !self.server_requests.is_empty() {
                         return Err(RuntimeError::new("erro_permissao_ocupada","a sessão está trabalhando; mudar o sandbox reiniciaria o Codex — espere ela terminar"));
@@ -1302,7 +1336,7 @@ impl Engine {
                     return Ok(vec![Effect::Respawn { operation_id:id,reason:"permission".into(),
                         patch:json!({"permission_mode":mode}),reply:json!({"current":mode}) }]);
                 }
-                self.permission_mode = mode.into();
+                self.permission_mode = Some(mode.into());
                 self.policy("session.patch_meta",json!({"permission_mode":mode}),&mut effects);
                 effects.push(Effect::Reply { operation_id:id,disposition:Disposition::Accepted,payload:json!({"current":mode}) });
             }
@@ -1634,7 +1668,7 @@ impl Engine {
                     let request = if self.reconnect && !self.thread_id.is_empty() {
                         if self.fresh_process {
                             ClientRequest::ThreadResume(wire::ThreadResumeParams { thread_id:self.thread_id.clone(),cwd:string(&self.metadata["cwd"]),
-                                approval_policy:Some(approval(&self.permission_mode).into()),sandbox:Some(sandbox(&self.permission_mode).into()),
+                                approval_policy:Some(approval(self.launch_mode()).into()),sandbox:Some(sandbox(self.launch_mode()).into()),
                                 service_tier:self.service_tier.clone(),model_provider:None })
                         } else { ClientRequest::ThreadResume(wire::ThreadResumeParams { thread_id:self.thread_id.clone(),..Default::default() }) }
                     } else { self.bootstrap_start() };

@@ -49,6 +49,21 @@ impl MuxProcess {
         self.output(&["has-session", "-t", &format!("={name}")]).await.ok().map(|out| out.status.success())
     }
 
+    /// `kill-session` confirmado pelo `has-session`: o psmux às vezes responde 0 e não derruba.
+    /// `Some(true)` = a sessão saiu; `None` = o multiplexador não respondeu. No psmux o `=` não vale no
+    /// `kill-session` e o nome cru já é exato (`tmux.alvo_de_kill`).
+    pub async fn kill_session(&self, name: &str) -> Option<bool> {
+        let target = if cfg!(windows) { name.to_owned() } else { format!("={name}") };
+        let _ = self.output(&["kill-session", "-t", &target]).await;
+        self.has_session(name).await.map(|alive| !alive)
+    }
+
+    /// Sessão marcada `@cp_hidden`: o shell `term-<nome>` que o app abriu.
+    pub async fn is_hidden(&self, name: &str) -> bool {
+        self.output(&["show-options", "-v", "-t", &format!("={name}:"), "@cp_hidden"]).await
+            .is_ok_and(|out| out.status.success() && String::from_utf8_lossy(&out.stdout).trim() == "1")
+    }
+
     /// Captura que, recusada ou vazia, separa a sessão que sumiu da que falhou: o psmux aceita
     /// comando que não executa, e o vazio de uma sessão morta não pode virar pane parado.
     pub async fn capture_checked(&self, name: &str, target: &str) -> Result<String, &'static str> {

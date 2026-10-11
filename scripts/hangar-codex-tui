@@ -580,9 +580,16 @@ def main() -> int:
     if existing and existing.get("thread_id") == args.resume:
         if args.tool_output_token_limit is None:
             args.tool_output_token_limit = existing.get("tool_output_token_limit")
-        if existing.get("transfer_id"):
-            args.model = args.model if args.model is not None else existing.get("model")
-            args.effort = args.effort if args.effort is not None else existing.get("effort")
+        # Relançar a própria sessão (o Rust passa só --cwd/--resume e a chave): o resto vem do sidecar.
+        own = bool(args.resume and existing.get("key") and existing["key"] == os.environ.get("CP_SESSION_KEY"))
+        fields = ("model", "effort") if existing.get("transfer_id") or own else ()
+        for field in fields + (("service_tier", "codex_home", "codex_account") if own else ()):
+            setattr(args, field, getattr(args, field) if getattr(args, field) is not None else existing.get(field))
+        if own and args.approval_policy is None and args.sandbox is None:
+            # Sem modo conhecido não relança: o padrão do lançador é Full Access.
+            if existing.get("permission_mode") not in PERMISSION_POLICIES:
+                ap.error("modo de permissão da sessão desconhecido; nenhuma sessão foi aberta")
+            args.approval_policy, args.sandbox = PERMISSION_POLICIES[existing["permission_mode"]]
     args.codex_account = args.codex_account if args.codex_account is not None else "default"
     cwd = os.path.abspath(args.cwd or os.getcwd())
     selected_home = (Path(args.codex_home).expanduser().absolute()

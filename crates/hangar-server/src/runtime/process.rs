@@ -172,7 +172,7 @@ fn scope_prefix() -> &'static [&'static str] {
 }
 
 /// O executável pelo PATH do ambiente da sessão (PATHEXT no Windows: o `hangar-engine` é `.CMD`).
-fn resolve_program(name: &str, env: &[(String, String)]) -> Option<PathBuf> {
+pub(crate) fn resolve_program(name: &str, env: &[(String, String)]) -> Option<PathBuf> {
     let path = Path::new(name);
     if path.components().count() > 1 { return path.is_file().then(|| path.to_path_buf()); }
     let var = |k: &str| env.iter().find(|(n, _)| n.eq_ignore_ascii_case(k)).map(|(_, v)| v.as_str());
@@ -217,19 +217,73 @@ pub async fn spawn(spec: &LaunchSpec) -> Result<Cano, ProcessError> {
     let program = spec.program.first().ok_or_else(|| ProcessError::Spawn("comando vazio".into()))?;
     let exe = resolve_program(program, &spec.env)
         .ok_or_else(|| ProcessError::Spawn(format!("binário não encontrado: {program}")))?;
+    let program=std::iter::once(exe.into_os_string()).chain(spec.program[1..].iter().map(std::ffi::OsString::from)).collect();
+    let env=spec.env.iter().map(|(k,v)|(k.into(),v.into())).collect();
+    spawn_recipe(PreparedRecipe {bin,prefix:prefix.iter().map(Into::into).collect(),program,env,cwd:spec.cwd.clone(),key:spec.key.clone(),sidecar_dir:spec.sidecar_dir.clone(),extra:spec.cano_extra.clone()}).await
+}
+
+pub(crate) fn scope_command()->Result<Vec<std::ffi::OsString>,ProcessError> {
+    #[cfg(unix)] let prefix=scope_prefix();
+    #[cfg(not(unix))] let prefix:&[&str]=&[];
+    #[cfg(target_os="linux")]
+    if Path::new("/run/systemd/system").exists() && prefix.is_empty() {return Err(ProcessError::Spawn("escopo da sessão indisponível; origem conservada".into()));}
+    Ok(prefix.iter().map(Into::into).collect())
+}
+
+/// Prévia privada de uma receita provada; ambiente só em memória, nunca no diário.
+pub struct PreparedRecipe {bin:PathBuf,prefix:Vec<std::ffi::OsString>,program:Vec<std::ffi::OsString>,env:Vec<(std::ffi::OsString,std::ffi::OsString)>,cwd:PathBuf,key:String,sidecar_dir:PathBuf,extra:Map<String,Value>}
+pub fn prepare_recipe(recipe:&crate::list::procs::ProcessRecipe,key:&str,sidecar_dir:&Path,extra:Map<String,Value>)->Result<PreparedRecipe,ProcessError> {
+    if recipe.argv.is_empty() || recipe.environ.is_empty() || !recipe.executable.is_file()
+        || recipe.argv.iter().any(|arg|arg.as_encoded_bytes().contains(&0)) {return Err(ProcessError::Spawn("receita incompleta".into()));}
+    let bin=cano_binary()?;
+    let prefix=scope_command()?;
+    let mut env=Vec::new();
+    for entry in &recipe.environ {
+        let bytes=entry.as_encoded_bytes();
+        if bytes.contains(&0) {return Err(ProcessError::Spawn("ambiente ilegível".into()));}
+        let at=bytes.iter().enumerate().find(|(i,b)|*i>0 && **b==b'=').map(|(i,_)|i).ok_or_else(||ProcessError::Spawn("ambiente ilegível".into()))?;
+        // SAFETY: o ambiente foi lido como OsString nativo; o corte é no `=` ASCII.
+        let key=unsafe {std::ffi::OsStr::from_encoded_bytes_unchecked(&bytes[..at])};
+        let value=unsafe {std::ffi::OsStr::from_encoded_bytes_unchecked(&bytes[at+1..])};
+        if ["HANGAR_INTERNAL_SECRET","HANGAR_RUNTIME_INSTANCE","CP_AUTH_TOKEN"].contains(&key.to_str().unwrap_or("")) {continue;}
+        env.push((key.to_owned(),value.to_owned()));
+    }
+    let program=std::iter::once(recipe.executable.as_os_str().to_owned()).chain(recipe.argv[1..].iter().cloned()).collect();
+    Ok(PreparedRecipe {bin,prefix,program,env,cwd:recipe.cwd.clone(),key:key.into(),sidecar_dir:sidecar_dir.to_owned(),extra})
+}
+/// Mantém settings privados vivos até a vida nova assumir; falha encerra só o cano lançado aqui.
+pub struct RelaunchGuard {cano:Cano,key:String,dir:PathBuf,settings:std::sync::Arc<super::claude_relaunch::Recipe>,armed:bool}
+impl RelaunchGuard {
+    pub fn new(cano:&Cano,key:&str,dir:&Path,settings:std::sync::Arc<super::claude_relaunch::Recipe>)->Self {Self {cano:cano.clone(),key:key.into(),dir:dir.into(),settings,armed:true}}
+    pub fn disarm(&mut self) {self.armed=false;}
+}
+impl Drop for RelaunchGuard {
+    fn drop(&mut self) {
+        if !self.armed {return;}
+        let (cano,key,dir,settings)=(self.cano.clone(),self.key.clone(),self.dir.clone(),self.settings.clone());
+        tokio::spawn(async move {
+            if let Err(error)=kill(&cano,&key,&dir).await {
+                tracing::warn!(key,code=error.code(),"cano sem confirmação não foi encerrado; settings privados conservados");
+                while liveness(cano.pid,&key)==Liveness::Ours && cano.extra.get("process_birth").and_then(Value::as_f64).is_some_and(|birth|crate::terminal_facts::agent_birth(cano.pid)==Some(birth)) {tokio::time::sleep(Duration::from_secs(1)).await;}
+            }
+            drop(settings);
+        });
+    }
+}
+
+pub async fn spawn_recipe(spec:PreparedRecipe)->Result<Cano,ProcessError> {
     let escuta = new_listen(&spec.key, &spec.sidecar_dir);
     let token = crate::mods::state::random_hex(16);
     let log = spec.sidecar_dir.join(format!("cano-{}.log", key16(&spec.key)));
-    let mut argv: Vec<std::ffi::OsString> = prefix.iter().map(Into::into).collect();
-    argv.push(bin.into());
+    let mut argv=spec.prefix.clone();
+    argv.push(spec.bin.into_os_string());
     for (flag, value) in [("--escuta", std::ffi::OsStr::new(&escuta)), ("--log", log.as_os_str()),
                           ("--cwd", spec.cwd.as_os_str()), ("--token", std::ffi::OsStr::new(&token))] {
         argv.push(flag.into());
         argv.push(value.to_owned());
     }
     argv.push("--".into());
-    argv.push(exe.into());
-    argv.extend(spec.program[1..].iter().map(Into::into));
+    argv.extend(spec.program.iter().cloned());
     let mut cmd = tokio::process::Command::new(&argv[0]);
     cmd.args(&argv[1..]).current_dir(&spec.cwd).env_clear().envs(spec.env.iter().map(|(k, v)| (k, v)))
         .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
@@ -240,10 +294,19 @@ pub async fn spawn(spec: &LaunchSpec) -> Result<Cano, ProcessError> {
     cmd.creation_flags(0x0000_0200 | 0x0800_0000); // CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW
     let mut child = cmd.spawn().map_err(|e| ProcessError::Spawn(format!("não subiu: {}", e.kind())))?;
     let pid = child.id().ok_or_else(|| ProcessError::Spawn("saiu ao nascer".into()))?;
+    let birth=match crate::terminal_facts::agent_birth(pid) {
+        Some(birth)=>birth,
+        None=> {
+            child.kill().await.map_err(|_|ProcessError::StillAlive)?;
+            child.wait().await.map_err(|_|ProcessError::StillAlive)?;
+            return Err(ProcessError::Spawn("nascimento do cano não comprovado".into()));
+        },
+    };
     // Só para não deixar zumbi.
     tokio::spawn(async move { let _ = child.wait().await; });
     let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64());
-    let mut cano = Cano { pid, escuta, token, ts, versao: 2, extra: spec.cano_extra.clone() };
+    let mut extra=spec.extra.clone();extra.insert("process_birth".into(),serde_json::json!(birth));
+    let mut cano = Cano { pid, escuta, token, ts, versao: 2, extra };
     let binding = super::protocol::CanoBinding { pid, escuta: cano.escuta.clone(), token: cano.token.clone(), versao: 2 };
     match super::cano::connect(&binding).await {
         Ok(connection) => { cano.versao = connection.snapshot.versao; Ok(cano) }
@@ -264,6 +327,9 @@ pub async fn kill(cano: &Cano, key: &str, sidecar_dir: &Path) -> Result<(), Proc
     let (pid, key_owned) = (cano.pid, key.to_owned());
     let state = tokio::task::spawn_blocking(move || identify(pid, &key_owned)).await
         .map_err(|_| ProcessError::StillAlive)?;
+    if state==Liveness::Ours && cano.extra.get("process_birth").and_then(Value::as_f64).is_some_and(|birth|crate::terminal_facts::agent_birth(pid)!=Some(birth)) {
+        return Err(ProcessError::StillAlive);
+    }
     match state {
         Liveness::Dead => {}
         Liveness::Foreign => tracing::warn!(pid, "pid do cano não é mais o cano da sessão; não matei"),
@@ -285,6 +351,24 @@ pub async fn kill(cano: &Cano, key: &str, sidecar_dir: &Path) -> Result<(), Proc
 fn probe_alive(pid: u32) -> bool { probe(pid).is_some_and(|(argv, _)| !argv.is_empty()) }
 #[cfg(not(target_os = "linux"))]
 fn probe_alive(pid: u32) -> bool { probe(pid).is_some() }
+
+/// Encerra o app-server adotado do Codex com terminal. No Unix só o pid: ele mora no grupo do pane, e
+/// `killpg` levaria a TUI junto. No Windows a árvore, que pega o `cmd.exe` do `codex.cmd`.
+pub fn terminate(pid: u32) -> Result<(), ProcessError> {
+    if pid <= 1 { return Err(ProcessError::StillAlive); }
+    terminate_one(pid)
+}
+
+#[cfg(unix)]
+fn terminate_one(pid: u32) -> Result<(), ProcessError> {
+    // SAFETY: sinal num pid conferido por quem chama; erro lido logo depois.
+    if unsafe { libc::kill(pid as i32, libc::SIGTERM) } == 0 { return Ok(()); }
+    let error = std::io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::ESRCH) { Ok(()) } else { Err(ProcessError::StillAlive) }
+}
+
+#[cfg(windows)]
+fn terminate_one(pid: u32) -> Result<(), ProcessError> { signal_group(pid) }
 
 #[cfg(unix)]
 fn signal_group(pid: u32) -> Result<(), ProcessError> {
