@@ -138,6 +138,7 @@ fn failure_kind(failure: &VoiceFailure) -> String {
 
 /// Comando que espera (`--watch`, `tail -f`) prende o turno do organizador e a voz fica sem resposta: passou disto, interrompe.
 pub const COMMAND_LIMIT: Duration = Duration::from_secs(60);
+const INTERRUPT_WAIT: Duration = Duration::from_secs(3);
 const COMMAND_LIMIT_NOTE: &str = "O comando demorou mais de 60 s e foi interrompido; não use comando que espera — consulte uma vez e responda.";
 const COMMAND_LIMIT_SPEECH: &str = "Parei o comando porque estava demorando demais.";
 /// Interrupção recusada: nova tentativa enquanto o comando seguir rodando.
@@ -338,9 +339,11 @@ async fn run_call(options: CallOptions, spawn: Spawn, events: &async_channel::Se
         let now = Instant::now();
         if let Some(turn) = running_commands.values().find(|(_, at)| now >= *at).map(|(turn, _)| turn.clone()) {
             // Só o código: o texto do comando é conversa e não vai ao diário.
-            let interrupted = rpc.request("turn/interrupt", json!({"threadId": thread, "turnId": turn})).await;
-            log(format!("command too long: turn interrupted ok={}", interrupted.is_ok()));
-            if interrupted.is_ok() {
+            // Prazo curto: esperar aqui para o laço inteiro, e recusa só adia a nova tentativa.
+            let interrupted = tokio::time::timeout(INTERRUPT_WAIT,
+                rpc.request("turn/interrupt", json!({"threadId": thread, "turnId": turn}))).await.is_ok_and(|r| r.is_ok());
+            log(format!("command too long: turn interrupted ok={interrupted}"));
+            if interrupted {
                 running_commands.retain(|_, (t, _)| *t != turn);
                 pending_context = Some(match pending_context.take() { Some(old) => format!("{old}\n{COMMAND_LIMIT_NOTE}"), None => COMMAND_LIMIT_NOTE.to_owned() });
                 speak(&rpc, &thread, &mut out, COMMAND_LIMIT_SPEECH.to_owned(), "command limit").await;
@@ -359,9 +362,12 @@ async fn run_call(options: CallOptions, spawn: Spawn, events: &async_channel::Se
             let _ = events.send(VoiceEvent::Draft(None)).await;
             let _ = events.send(VoiceEvent::Send { call: CallId(id), request, session, turn }).await;
         }
+        // Comando parado não manda evento nenhum: sem este despertar, o prazo dele nunca seria conferido.
+        let command_due = running_commands.values().map(|(_, at)| *at).min();
         tokio::select! {
             // Comandos antes das notificações: a passagem ou a queda do aparelho já valem quando chega o fim da conversa anterior.
             biased;
+            _ = tokio::time::sleep_until(tokio::time::Instant::from_std(command_due.unwrap_or_else(Instant::now))), if command_due.is_some() => {}
             command = async { match early.pop_front() { Some(command) => Some(command), None => inbox.recv().await } } => match command {
                 Some(Command::Live) => {
                     log("phase Live");
