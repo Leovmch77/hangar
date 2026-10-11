@@ -19,12 +19,15 @@ try:
     path = os.path.join(d, sid + ".json")
     if o.get("hook_event_name") in ("PostToolUse", "PostToolUseFailure"):
         # Respondida ou recusada no terminal: some só a mesma pergunta, nunca uma mais nova.
+        # Sem id é de versão antiga do Claude Code, e anterior a esta chamada.
         with open(path, encoding="utf-8") as fh:
-            if json.load(fh).get("tool_use_id") == o.get("tool_use_id"):
+            if json.load(fh).get("tool_use_id") in (o.get("tool_use_id"), None):
                 os.remove(path)
         sys.exit(0)
-    with open(path, "w", encoding="utf-8") as fh:
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
         fh.write(raw)
+    os.replace(tmp, path)
 except Exception:
     pass
 sys.exit(0)

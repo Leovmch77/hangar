@@ -1017,6 +1017,9 @@ def test_transcript_que_ainda_nao_nasceu_e_nao_sei_sem_aviso(tmp_path, caplog):
     assert [r for r in caplog.records if r.levelname == "WARNING"] == []
     assert pqueue._transcript_start_ts(str(tmp_path)) is None
     assert [r.levelname for r in caplog.records].count("WARNING") == 1
+    # Pasta do projeto ausente é caminho errado (conta trocada), não sessão nascendo.
+    assert pqueue._transcript_start_ts(str(tmp_path / "outra-conta" / "x.jsonl")) is None
+    assert [r.levelname for r in caplog.records].count("WARNING") == 2
 
 
 def test_confirm_nao_decide_com_inicio_de_transcript_ilegivel(tmp_path, monkeypatch, caplog):

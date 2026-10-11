@@ -277,8 +277,12 @@ def _transcript_start_ts(jsonl: str) -> float | None:
                 if ts > 0:
                     return ts
     except FileNotFoundError:
-        # Sessão recém-criada: o arquivo nasce no primeiro prompt. Continua "não sei".
-        _log.debug("transcript ainda não existe %s", jsonl)
+        # Pasta do projeto existe: sessão recém-criada, o arquivo nasce no primeiro prompt. Pasta
+        # ausente é caminho errado (conta trocada), e esse aparece.
+        if os.path.isdir(os.path.dirname(jsonl)):
+            _log.debug("transcript ainda não existe %s", jsonl)
+        else:
+            _log.warning("nao deu pra ler o inicio do transcript %s: pasta ausente", jsonl)
         return None
     except OSError as e:
         _log.warning("nao deu pra ler o inicio do transcript %s: %s", jsonl, e)

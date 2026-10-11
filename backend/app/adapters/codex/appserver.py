@@ -86,7 +86,8 @@ class AppServerClient:
         env = self._environment(codex_home, session_name=session_name, session_key=session_key)
         self._proc = await asyncio.create_subprocess_exec(
             self._codex_bin, "app-server", "--stdio",
-            *tool_output_override(tool_output_token_limit), *identity_override(env),
+            *tool_output_override(tool_output_token_limit),
+            *(identity_override(env) if session_name is not None or session_key is not None else ()),
             env=env, cwd=cwd,
             stderr=asyncio.subprocess.DEVNULL if tool_output_token_limit is not None else None,
             stdin=asyncio.subprocess.PIPE,
@@ -138,7 +139,8 @@ class AppServerClient:
         env = self._environment(codex_home, session_name=session_name, session_key=session_key)
         self._proc = await asyncio.create_subprocess_exec(
             self._codex_bin, "app-server", "--listen", self._endpoint,
-            *tool_output_override(tool_output_token_limit), *identity_override(env),
+            *tool_output_override(tool_output_token_limit),
+            *(identity_override(env) if session_name is not None or session_key is not None else ()),
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
             env=env,

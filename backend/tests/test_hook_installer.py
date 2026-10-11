@@ -312,6 +312,10 @@ def test_pergunta_encerrada_no_terminal_apaga_so_a_propria(tmp_path):
         assert sidecar.exists()
         assert _run_hook(tmp_path, {**pergunta, "hook_event_name": evento}).returncode == 0
         assert not sidecar.exists(), evento
+    # Sidecar de versão antiga do Claude Code, sem id: o fim desta chamada também o tira.
+    sidecar.write_text(json.dumps({"tool_name": "AskUserQuestion", "session_id": "abc"}), encoding="utf-8")
+    _run_hook(tmp_path, {**pergunta, "hook_event_name": "PostToolUse"})
+    assert not sidecar.exists()
 
 
 def test_fim_da_pergunta_tambem_e_instalado(tmp_path):
