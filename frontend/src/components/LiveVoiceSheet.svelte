@@ -127,9 +127,14 @@
     // A lista é de outro servidor: apagar aqui atingiria a máquina errada.
     if (!target || memoryFor !== target.id) return;
     const key = target.id;
-    memoryGen++;
+    const gen = ++memoryGen;
     forgetFailed = false;
-    const gone = () => { if (memoryFor === key) memory = { state: 'ok', items: memory.items.filter(e => e.id !== id) }; };
+    const gone = () => {
+      if (memoryFor !== key) return;
+      // Leitura iniciada durante o apagar pode trazer a entrada de volta: relê depois dele.
+      if (memoryGen !== gen) return void loadMemory();
+      memory = { state: 'ok', items: memory.items.filter(e => e.id !== id) };
+    };
     try {
       await forgetVoiceMemory(target, id);
       gone();
