@@ -37,6 +37,9 @@ concurrency:
 
 jobs:
   build:
+    # Nas branches este job só testa (sem COMPILA): o nome diz isso, para ninguém procurar o build de release
+    # que não roda ali. O `name` não enxerga o `env`, por isso repete a condição do COMPILA.
+    name: ${{ (github.ref_name == 'main' || github.ref_name == 'beta' || github.event_name == 'workflow_dispatch') && 'build' || 'testes' }} (${{ matrix.os }}, ${{ matrix.platform }})
     strategy:
       fail-fast: false
       matrix:
