@@ -80,6 +80,8 @@ pub struct CallOptions { pub voice: Option<String>, pub context: String, pub cwd
     pub tools: Value, pub handoff_same_thread: bool, pub voice_dir: PathBuf,
     /// Quanto a chamada espera uma oferta nova depois que o áudio cai: o mesmo prazo do hub para o aparelho que sai.
     pub audio_grace: Duration,
+    /// Quanto um comando do organizador pode rodar antes de o turno ser interrompido (`COMMAND_LIMIT` em produção).
+    pub command_limit: Duration,
     /// Entrada do MCP `hangar` com a identidade desta chamada; `None` deixa o MCP desligado.
     pub hangar_mcp: Option<Value> }
 
@@ -138,6 +140,14 @@ impl Voice {
 fn failure_kind(failure: &VoiceFailure) -> String {
     match failure { VoiceFailure::Realtime(_) => "Realtime".to_owned(), other => format!("{other:?}") }
 }
+
+/// Comando que espera (`--watch`, `tail -f`) prende o turno do organizador e a voz fica sem resposta: passou disto, interrompe.
+pub const COMMAND_LIMIT: Duration = Duration::from_secs(60);
+const INTERRUPT_WAIT: Duration = Duration::from_secs(3);
+const COMMAND_LIMIT_NOTE: &str = "O comando demorou mais de 60 s e foi interrompido; não use comando que espera — consulte uma vez e responda.";
+const COMMAND_LIMIT_SPEECH: &str = "Parei o comando porque estava demorando demais.";
+/// Interrupção recusada: nova tentativa enquanto o comando seguir rodando.
+const COMMAND_RETRY: Duration = Duration::from_secs(5);
 
 /// Quanto uma oferta espera a resposta SDP.
 const ANSWER_WAIT: Duration = Duration::from_secs(20);
@@ -302,6 +312,7 @@ async fn run_call(options: CallOptions, spawn: Spawn, events: &async_channel::Se
     // Áudio caído sem aparelho que ofereça de novo: o erro pode não ter derrubado o WebRTC, e aí nada mais acabaria a chamada.
     let mut audio_lost: Option<Instant> = None;
     let audio_grace = options.audio_grace;
+    let command_limit = options.command_limit;
     let mut last_offer = offer_seq;
     let mut answering: Option<Instant> = None;
     let mut waiting_offer: Option<(u64, String, String)> = None;
@@ -337,6 +348,8 @@ async fn run_call(options: CallOptions, spawn: Spawn, events: &async_channel::Se
     // Turno cuja fala seguiu em transcrição depois da delegação, e desde quando: o envio dele espera a final.
     let mut speaking: Option<(String, Instant)> = None;
     let mut out = Speech::default();
+    // Comandos do organizador em curso, por item: turno e prazo (um turno pode rodar mais de um).
+    let mut running_commands: std::collections::HashMap<String, (String, Instant)> = std::collections::HashMap::new();
     let outcome = loop {
         if audio_lost.is_some_and(|at| Instant::now() >= at) {
             break Err(failed("audio lost: no new offer")(VoiceFailure::AudioLostEnded));
@@ -344,6 +357,22 @@ async fn run_call(options: CallOptions, spawn: Spawn, events: &async_channel::Se
         if answering.is_some_and(|at| Instant::now() >= at) {
             log("handoff sdp answer timed out");
             next_offer(&mut answering, &mut waiting_offer, &mut early);
+        }
+        let now = Instant::now();
+        if let Some(turn) = running_commands.values().find(|(_, at)| now >= *at).map(|(turn, _)| turn.clone()) {
+            // Só o código: o texto do comando é conversa e não vai ao diário.
+            // Prazo curto: esperar aqui para o laço inteiro, e recusa só adia a nova tentativa.
+            let interrupted = tokio::time::timeout(INTERRUPT_WAIT,
+                rpc.request("turn/interrupt", json!({"threadId": thread, "turnId": turn}))).await.is_ok_and(|r| r.is_ok());
+            log(format!("command too long: turn interrupted ok={interrupted}"));
+            if interrupted {
+                running_commands.retain(|_, (t, _)| *t != turn);
+                pending_context = Some(match pending_context.take() { Some(old) => format!("{old}\n{COMMAND_LIMIT_NOTE}"), None => COMMAND_LIMIT_NOTE.to_owned() });
+                speak(&rpc, &thread, &mut out, COMMAND_LIMIT_SPEECH.to_owned(), "command limit").await;
+            } else {
+                // Recusado (o turno pode ter acabado agora): sem dizer que parou; tenta de novo se ainda estiver rodando.
+                for (t, at) in running_commands.values_mut() { if *t == turn { *at = now + COMMAND_RETRY; } }
+            }
         }
         for text in out.hold.due(Instant::now()) {
             if out.away { out.park(text, "held"); } else { append_speech(&rpc, &thread, &text, "held").await; }
@@ -356,9 +385,12 @@ async fn run_call(options: CallOptions, spawn: Spawn, events: &async_channel::Se
             let _ = events.send(VoiceEvent::Draft(None)).await;
             let _ = events.send(VoiceEvent::Send { call: CallId(id), request, session, turn }).await;
         }
+        // Comando parado não manda evento nenhum: sem este despertar, o prazo dele nunca seria conferido.
+        let command_due = running_commands.values().map(|(_, at)| *at).min();
         tokio::select! {
             // Comandos antes das notificações: a passagem ou a queda do aparelho já valem quando chega o fim da conversa anterior.
             biased;
+            _ = tokio::time::sleep_until(tokio::time::Instant::from_std(command_due.unwrap_or_else(Instant::now))), if command_due.is_some() => {}
             command = async { match early.pop_front() { Some(command) => Some(command), None => inbox.recv().await } } => match command {
                 Some(Command::Live) => {
                     log("phase Live");
@@ -850,6 +882,17 @@ async fn run_call(options: CallOptions, spawn: Spawn, events: &async_channel::Se
                     if let Some(action) = organizer::organizer_action(&method, &params["item"]) { let _ = events.send(VoiceEvent::Action(action)).await; }
                     if let Some(delta) = organizer::reasoning_delta(&method, &params) { let _ = events.send(VoiceEvent::Thought(delta)).await; }
                     let kind = params["item"]["type"].as_str().unwrap_or_default();
+                    let item_id = params["item"]["id"].as_str().unwrap_or_default();
+                    match method.as_str() {
+                        "item/started" if kind == "commandExecution" && !item_id.is_empty() => {
+                            if let Some(turn) = params["turnId"].as_str().filter(|t| !t.is_empty()) {
+                                running_commands.insert(item_id.to_owned(), (turn.to_owned(), Instant::now() + command_limit));
+                            }
+                        }
+                        "item/completed" => { running_commands.remove(item_id); }
+                        "turn/completed" => if let Some(done) = params["turn"]["id"].as_str() { running_commands.retain(|_, (t, _)| t != done); },
+                        _ => {}
+                    }
                     let next = match method.as_str() {
                         // O turno só entra em SpokenTurns quando o userMessage chega, depois do turn/started.
                         "item/started" | "item/completed" if params["item"]["type"] == "userMessage" && (method == "item/started" || organizer_busy) && spoken.allows(&params) => Some(Activity::Thinking),
@@ -1082,7 +1125,7 @@ mod tests {
         // Nunca o HOME real: a chamada cria a pasta própria e os planos aqui.
         let voice_dir = std::env::temp_dir().join(format!("hangar-voice-call-{}", std::process::id()));
         CallOptions { voice: None, context: "ctx".into(), cwd: None, target: "hangar".into(), organizer: ModeModels::default(), tools, handoff_same_thread: true, voice_dir,
-            audio_grace: Duration::from_secs(600), hangar_mcp: None }
+            audio_grace: Duration::from_secs(600), hangar_mcp: None, command_limit: COMMAND_LIMIT }
     }
 
     async fn next_answer(events: &async_channel::Receiver<VoiceEvent>) -> (u64, String) {
@@ -1305,6 +1348,37 @@ mod tests {
         }
     }
 
+    fn command(push: &tokio::sync::mpsc::UnboundedSender<Value>, method: &str, id: &str) {
+        push.send(json!({"method": method, "params": {"threadId": "t1", "turnId": "turn-1", "item": {"type": "commandExecution", "id": id}}})).unwrap();
+    }
+
+    /// `gh pr checks --watch` prendia o turno: passado o limite, o turno cai, a voz avisa e a próxima fala leva a nota.
+    #[tokio::test]
+    async fn command_past_the_limit_interrupts_the_turn_and_explains() {
+        let (spawn, mut seen, push) = fake_app_server();
+        let (tx, events) = async_channel::unbounded();
+        let voice = Voice::start(CallOptions { command_limit: Duration::from_millis(300), ..options(json!([])) }, spawn, tx);
+        voice.offer(1, "v=0 offer A".into(), "ctx".into());
+        next_answer(&events).await;
+        voice.live();
+        command(&push, "item/started", "cmd-1");
+        let (mut interrupted, mut spoke) = (false, false);
+        while !(interrupted && spoke) {
+            let m = tokio::time::timeout(Duration::from_secs(5), seen.recv()).await.expect("prazo").unwrap();
+            if m["method"] == "turn/interrupt" { assert_eq!(m["params"], json!({"threadId": "t1", "turnId": "turn-1"})); interrupted = true; }
+            if m["method"] == "thread/realtime/appendSpeech" && m["params"]["text"] == COMMAND_LIMIT_SPEECH { spoke = true; }
+        }
+        push.send(json!({"method": "turn/completed", "params": {"threadId": "t1", "turn": {"id": "turn-1", "status": "interrupted"}}})).unwrap();
+        crate::voice::test_support::push_speech(&push, "turn-2", "e o PR?");
+        loop {
+            let m = tokio::time::timeout(Duration::from_secs(5), seen.recv()).await.expect("prazo").unwrap();
+            if m["method"] == "turn/steer" && m["params"]["expectedTurnId"] == "turn-2" {
+                assert!(m["params"]["input"][0]["text"].as_str().unwrap().contains(COMMAND_LIMIT_NOTE));
+                break;
+            }
+        }
+    }
+
     async fn until(seen: &mut tokio::sync::mpsc::UnboundedReceiver<Value>, what: &str, pred: impl Fn(&Value) -> bool) -> Value {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         loop {
@@ -1314,6 +1388,46 @@ mod tests {
                 _ => panic!("não chegou: {what}"),
             }
         }
+    }
+
+    /// O fim de outro turno não tira o comando da vigia; interrupção recusada não vira "parei o comando".
+    #[tokio::test]
+    async fn other_turn_ending_keeps_watching_and_a_refused_interrupt_says_nothing() {
+        let (spawn, mut seen, push) = fake_app_server();
+        let (tx, events) = async_channel::unbounded();
+        let voice = Voice::start(CallOptions { command_limit: Duration::from_millis(300), ..options(json!([])) }, spawn, tx);
+        voice.offer(1, "v=0 offer A".into(), "ctx".into());
+        next_answer(&events).await;
+        voice.live();
+        command(&push, "item/started", "cmd-1");
+        push.send(json!({"method": "turn/completed", "params": {"threadId": "t1", "turn": {"id": "turn-0", "status": "completed"}}})).unwrap();
+        let (mut interrupted, mut spoke) = (false, false);
+        while !(interrupted && spoke) {
+            let m = tokio::time::timeout(Duration::from_secs(5), seen.recv()).await.expect("prazo").unwrap();
+            if m["method"] == "turn/interrupt" { assert_eq!(m["params"]["turnId"], "turn-1"); interrupted = true; }
+            if m["method"] == "thread/realtime/appendSpeech" && m["params"]["text"] == COMMAND_LIMIT_SPEECH { spoke = true; }
+        }
+        push.send(json!({"method": "item/started", "params": {"threadId": "t1", "turnId": "turn-gone",
+            "item": {"type": "commandExecution", "id": "cmd-2"}}})).unwrap();
+        tokio::time::sleep(Duration::from_millis(900)).await;
+        let spoken = std::iter::from_fn(|| seen.try_recv().ok())
+            .filter(|m| m["method"] == "thread/realtime/appendSpeech" && m["params"]["text"] == COMMAND_LIMIT_SPEECH).count();
+        assert_eq!(spoken, 0, "o aviso do turn-1 já saiu antes; o do turn-gone recusado não sai");
+    }
+
+    #[tokio::test]
+    async fn command_that_completes_in_time_is_not_interrupted() {
+        let (spawn, mut seen, push) = fake_app_server();
+        let (tx, events) = async_channel::unbounded();
+        let voice = Voice::start(CallOptions { command_limit: Duration::from_millis(300), ..options(json!([])) }, spawn, tx);
+        voice.offer(1, "v=0 offer A".into(), "ctx".into());
+        next_answer(&events).await;
+        voice.live();
+        command(&push, "item/started", "cmd-1");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        command(&push, "item/completed", "cmd-1");
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        assert!(!std::iter::from_fn(|| seen.try_recv().ok()).any(|m| m["method"] == "turn/interrupt"));
     }
 
     /// Fala do usuário diferente do `input` da voz: a fala separada é a fala certa do turno.

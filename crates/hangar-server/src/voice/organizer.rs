@@ -26,6 +26,10 @@ e as máquinas. 'O que a sessão está falando/fazendo' é a conversa dela: use 
 nunca diga que não consegue ler a tela.
 Quando o usuário pedir a você para editar, rodar ou conferir algo nesta máquina, faça direto pelo shell e diga numa frase
 o que mudou ou o que viu.
+Nunca rode comando que espera: --watch, tail -f, watch, sleep de mais de alguns segundos, servidor em primeiro plano ou
+programa interativo. Enquanto o comando roda você não responde, e o Hangar interrompe o que passar de 60 s. Consulte uma vez
+e responda; para acompanhar uma sessão use follow_session; o que demora (CI, um PR) confira uma vez agora e diga ao usuário
+para perguntar de novo mais tarde.
 Comandos destrutivos (apagar, sobrescrever histórico do git, parar processos ou serviços, publicar, push): antes de rodar,
 diga ao usuário numa frase exatamente o que vai ser feito e pergunte; só depois do sim falado dele rode o comando. Se o
 Hangar recusar um comando, faça o mesmo: pergunte e, depois do sim, rode de novo o mesmo comando, idêntico. A confirmação
@@ -1407,6 +1411,8 @@ mod tests {
         assert_eq!(tools.as_array().unwrap().len(), 33);
         assert!(matches!(parse_tool(&json!({"tool": "edit_files", "arguments": {"request": "x"}})), ToolCall::Unknown(_)));
         assert!(ORGANIZER_PROMPT.contains("do projeto ou de fora dele"));
+        assert!(ORGANIZER_PROMPT.contains("Nunca rode comando que espera: --watch, tail -f, watch"));
+        assert!(ORGANIZER_PROMPT.contains("confira uma vez agora e diga ao usuário\npara perguntar de novo mais tarde"));
         let observe = tools.as_array().unwrap().iter().find(|t| t["name"] == "observe_system").unwrap();
         assert_eq!(observe["inputSchema"]["required"], json!([]), "tudo opcional");
         let finish = tools.as_array().unwrap().iter().find(|t| t["name"] == "finish_plan").unwrap();

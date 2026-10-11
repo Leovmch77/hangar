@@ -132,7 +132,8 @@ async fn launch_seeded(caps: &[&str], peers: Option<Value>, audio_grace: Duratio
     let (tx, events) = async_channel::unbounded();
     let options = CallOptions { voice: None, context: "ctx".into(), cwd: None, target: "hangar".into(), organizer: ModeModels::default(),
         tools: tools_for(&caps), handoff_same_thread: true, voice_dir: dir.path().join("voz"), audio_grace,
-        hangar_mcp: Some(json!({"enabled": true, "url": format!("http://{addr}/mcp/"), "http_headers": {"X-Hangar-Voice": "n.sig"}})) };
+        hangar_mcp: Some(json!({"enabled": true, "url": format!("http://{addr}/mcp/"), "http_headers": {"X-Hangar-Voice": "n.sig"}})),
+        command_limit: crate::voice::call::COMMAND_LIMIT };
     let voice = Voice::start(options, spawn, tx);
     let (link, device) = DeviceLink::channel(caps, Some(Screen { server: String::new(), name: "hangar".into() }));
     let gate = GateSource { home: dir.path().to_path_buf(), claude_dir: dir.path().to_path_buf(), every: Duration::from_secs(5) };
