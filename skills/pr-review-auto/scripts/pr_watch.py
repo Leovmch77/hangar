@@ -16,7 +16,7 @@ from pathlib import Path
 
 QUERY = """
 query($o:String!,$r:String!,$n:Int!){viewer{login}
- repository(owner:$o,name:$r){pullRequest(number:$n){
+ repository(owner:$o,name:$r){viewerPermission pullRequest(number:$n){
   state isDraft mergeable headRefOid url
   reviewThreads(first:100){totalCount nodes{id isResolved isOutdated path line
    root:comments(first:1){nodes{databaseId}}
@@ -56,9 +56,11 @@ def fetch(owner, repo, number):
         raise RuntimeError(out.stderr.strip()[:300])
     if data.get("errors"):
         raise RuntimeError(str(data["errors"])[:300])
-    pr = (data["data"].get("repository") or {}).get("pullRequest")
+    repository = data["data"].get("repository") or {}
+    pr = repository.get("pullRequest")
     if pr is None:
         raise Fatal(f"PR {number} not found in {owner}/{repo}")
+    pr["viewerPermission"] = repository.get("viewerPermission")
     return data["data"]["viewer"]["login"], pr
 
 
@@ -107,6 +109,7 @@ def snapshot(me, pr):
     return {
         "head": head, "state": pr["state"], "draft": pr["isDraft"], "mergeable": pr["mergeable"],
         "coderabbit": coderabbit, "threads": threads, "me": me,
+        "viewer_permission": pr.get("viewerPermission"),
         "reviews_on_head": reviews, "bot_comments": bot_comments[-3:],
         "failed": sorted({n for n, s in checks if s not in OK and s not in PENDING}),
         "pending": sorted({n for n, s in checks if s in PENDING}), "url": pr["url"],
@@ -218,7 +221,7 @@ def watch(a, owner, repo):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("pr", type=int)
-    ap.add_argument("--repo", default="jeffer1312/hangar")
+    ap.add_argument("--repo", help="owner/name; default: the GitHub repo of the current directory")
     ap.add_argument("--interval", type=int, default=60)
     ap.add_argument("--stable", type=int, default=90)
     ap.add_argument("--window", type=int, default=29 * 60)
@@ -226,6 +229,12 @@ def main():
     ap.add_argument("--reset", action="store_true", help="forget the saved state and emit the current snapshot")
     ap.add_argument("--once", action="store_true", help="print the current snapshot and exit")
     a = ap.parse_args()
+    if not a.repo:
+        out = subprocess.run(["gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
+                             capture_output=True, text=True, timeout=60)
+        if out.returncode != 0:
+            raise Fatal(f"no --repo and the current directory has no GitHub repo: {out.stderr.strip()[:200]}")
+        a.repo = out.stdout.strip()
     owner, _, repo = a.repo.partition("/")
     if not owner or not repo:
         raise Fatal(f"--repo must be owner/name, got {a.repo!r}")

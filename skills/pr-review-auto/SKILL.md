@@ -1,16 +1,18 @@
 ---
 name: pr-review-auto
-description: Automatic CodeRabbit follow-up for a Hangar GitHub PR (jeffer1312/hangar) — watches the PR by events (no model polling), fixes or answers every CodeRabbit thread and nitpick, fixes CI failures caused by the PR, and merges when the PR is stable and green. Use when the user or a sibling session asks to look at CodeRabbit on a Hangar PR, to follow a PR until it is ready, or to merge it once ready ("/pr-review-auto 154", "olha o CodeRabbit do PR", "vê se o PR tá pronto e mescla", "acompanha o PR e faz o merge"). Not for GitLab MRs, not a local code review.
+description: Automatic CodeRabbit follow-up for a GitHub PR of the current repo (made for Hangar) — watches the PR by events (no model polling), fixes or answers every CodeRabbit thread and nitpick, fixes CI failures caused by the PR, and merges when the PR is stable and green, if the GitHub user may merge. Use when the user or a sibling session asks to look at CodeRabbit on a PR, to follow a PR until it is ready, or to merge it once ready ("/pr-review-auto 154", "olha o CodeRabbit do PR", "vê se o PR tá pronto e mescla", "acompanha o PR e faz o merge"). Not for GitLab MRs, not a local code review.
 ---
 
 # PR review auto (Hangar, GitHub)
 
 Invoking this skill authorizes, for the named PR only: fixing code on the PR branch, committing,
-pushing to that branch, replying to and resolving CodeRabbit threads, and **merging when ready**.
-It does not authorize: force push, rebase, `--admin`, closing the PR, pushing to `main`,
-deleting the branch. CodeRabbit already reviews on GitHub: never run the `coderabbit` CLI.
+pushing to that branch, replying to and resolving CodeRabbit threads, and **merging when ready**
+when §5 allows it. It does not authorize: force push, rebase, `--admin`, closing the PR, pushing
+to `main`, deleting the branch. CodeRabbit already reviews on GitHub: never run the `coderabbit` CLI.
 
-`SKILL_DIR` is this skill's base directory. All user-facing text in pt-BR.
+`SKILL_DIR` is this skill's base directory. `<repo>` is `gh repo view --json nameWithOwner -q
+.nameWithOwner` run in the PR's tree; `<main tree>` is the first line of `git worktree list`.
+All user-facing text in the user's language.
 
 ## 1. Pick the PR and the tree
 
@@ -57,14 +59,14 @@ After arming, **end the turn**. No sleeps, no CronCreate, no periodic status mes
 A `change` carries the full snapshot. Handle, in this order:
 
 - **`threads`** whose `last_by` is not you: read the whole thread
-  (`gh api repos/jeffer1312/hangar/pulls/<N>/comments` or the `url`), check it against the
+  (`gh api repos/<repo>/pulls/<N>/comments` or the `url`), check it against the
   current code. Fix every valid point, small ones included. Reject only what is factually wrong
   or out of scope, with **one** reply in the thread, `@coderabbitai` + evidence, then resolve it
   (an unresolved thread blocks `ready` forever).
 - **`replies_in_resolved_threads`**: CodeRabbit answered in a thread already resolved. Agreement
   needs nothing; a new objection is treated like an open thread.
 - **`reviews_on_head` with `nitpicks: true`**: read the review body
-  (`gh api repos/jeffer1312/hangar/pulls/<N>/reviews/<id>`) and treat each nitpick the same way.
+  (`gh api repos/<repo>/pulls/<N>/reviews/<id>`) and treat each nitpick the same way.
   Skipped nitpicks get one top-level `@coderabbitai` comment saying which and why.
 - **`bot_comments`** that answer you: read; a new technical objection needs analysis, agreement
   needs nothing.
@@ -75,7 +77,7 @@ A `change` carries the full snapshot. Handle, in this order:
   commit.
 - Pending CI only, or a new `head` you just pushed: nothing to do.
 
-Keep a log at `~/.cache/hangar-pr-watch/jeffer1312_hangar_<N>.log.md`: thread/review id,
+Keep a log at `~/.cache/hangar-pr-watch/<owner>_<name>_<N>.log.md`: thread/review id,
 decision, fix commit, reply sent. Read it after a context compaction; never reply twice to the
 same point.
 
@@ -85,10 +87,10 @@ same point.
    (`fix(scope): …`), never the branch name.
 2. Push to the PR branch. The review hook blocks the first push: run the stack reviewer once on
    the round's diff, apply what holds, push again — fixes from the reviewer are not reviewed again.
-   Push with `HANGAR_SEM_VERIFICACAO=1 git push` (the user's standing choice for this skill): do
+   Push with `HANGAR_SEM_VERIFICACAO=1 git push` (the maintainer's choice for this skill): do
    not run `scripts/verificar-local`; the PR's CI is the gate, and §5 only merges on green CI.
 3. For each fixed thread reply once:
-   `gh api repos/jeffer1312/hangar/pulls/<N>/comments/<root_comment_id>/replies -f body="@coderabbitai Corrigido em <sha>. <what changed>."`
+   `gh api repos/<repo>/pulls/<N>/comments/<root_comment_id>/replies -f body="@coderabbitai Corrigido em <sha>. <what changed>."`
    then resolve it:
    `gh api graphql -f query='mutation($t:ID!){resolveReviewThread(input:{threadId:$t}){thread{isResolved}}}' -F t=<thread_id>`.
    A later bot reply in that thread arrives in `replies_in_resolved_threads`.
@@ -102,12 +104,15 @@ you, including ones the user wrote by hand under the same GitHub account.
 
 1. `python3 SKILL_DIR/scripts/pr_watch.py <N> --once` → `ready: true` and the same `head`.
    Otherwise keep watching.
-2. `gh pr merge <N> --merge --match-head-commit <head>` (merge commit, the repo's convention;
+2. Merge only if `viewer_permission` is `ADMIN` (the repo owner merges into `main`). Anything else
+   (`WRITE`, `MAINTAIN`, …): do not merge even if GitHub would allow it — stop the Monitor, tell
+   the user the PR is ready and waits for an admin's merge, and stop.
+3. `gh pr merge <N> --merge --match-head-commit <head>` (merge commit, the repo's convention;
    keep the branch). The head check refuses the merge if someone pushed after step 1.
-3. Stop the Monitor with **TaskStop**.
-4. Align the shared checkout: in `~/Projetos/hangar`, on `main` with a clean tree,
+4. Stop the Monitor with **TaskStop**.
+5. Align the shared checkout: in `<main tree>`, on `main` with a clean tree,
    `git fetch origin && git merge --ff-only origin/main`. Not fast-forward or dirty → just say so.
-5. Report in pt-BR: PR, merge commit, what was fixed vs. answered, the main CI run
+6. Report: PR, merge commit, what was fixed vs. answered, the main CI run
    (`gh run list --branch main -L 1`).
 
 User says stop → TaskStop, no resume.
