@@ -297,6 +297,13 @@ válido (Let's Encrypt) → escaneie o QR / preencha o token → **Adicionar à 
   - **Uma conversa por servidor.** Abrir a voz em outro aparelho passa a conversa para ele; o
     anterior mostra "A conversa passou para outro aparelho." Se o aparelho sair (app fechado, rede
     caiu), reabrir em até 2 minutos retoma a mesma conversa do assistente; depois disso ela termina.
+  - **O que a voz lembra.** Ela guarda poucos fatos entre uma conversa e outra (quem você é, como
+    gosta de ser respondido, onde ficam seus projetos) e começa cada conversa já sabendo disso. Na
+    primeira conversa ela pede licença para ler seu `~/.claude/CLAUDE.md` e seus `~/.codex/AGENTS*.md`
+    e guarda só o essencial; nunca senha, token ou IP. Só grava quando você fala. Para ver ou apagar,
+    abra os ajustes da voz e procure **O que a voz lembra**. A lista fica no arquivo
+    `~/.hangar/voz/memoria.json`, no servidor, mas o texto dela segue para o provedor do assistente
+    (a OpenAI, pelo Codex) a cada conversa.
   - O áudio vai direto do aparelho ao serviço de voz da OpenAI; o servidor só conduz a conversa. Só o dono usa a voz:
     num servidor aberto por convite o botão não aparece. O app Expo ainda não tem a voz.
 - **Limpeza do ditado:** o texto gravado pelo microfone passa por um modelo que aplica a correção
