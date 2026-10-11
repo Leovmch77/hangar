@@ -585,6 +585,8 @@ impl Hangar {
 
     /// Para onde vai o áudio: a sessão aberta, ou a máquina escolhida nos chips da tela sem sessão, sem sessão ainda.
     fn dictation_target(&self, cx: &App) -> Option<(Api, Option<String>)> {
+        // Sessão aberta pela porta de convidado: lá a configuração e a transcrição são fora do convite (403).
+        if self.selected.as_ref().is_some_and(|s| s.guest_kind.is_some()) { return None; }
         match self.selected_key() {
             Some(key) => Some((self.session_api()?, Some(key.name))),
             None => Some((self.new_chat_api(cx)?, None)),
