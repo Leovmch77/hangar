@@ -6520,6 +6520,16 @@ async def server_voice_settings(request: Request):
     return await voicesock.forward_settings(request)
 
 
+@app.api_route("/api/voice/memory", methods=["GET"], dependencies=[Depends(require_auth)])
+@app.api_route("/api/voice/memory/{memory_id}", methods=["DELETE"], dependencies=[Depends(require_auth)])
+async def server_voice_memory(request: Request, memory_id: str | None = None):
+    from app import voicesock
+    if voicesock.is_guest(request):
+        raise HTTPException(403, detail=erro("voice_owner_only", "Só o dono usa a voz do servidor."))
+    target = "/__hangar_server/voice/memory" + (f"/{urllib.parse.quote(memory_id, safe='')}" if memory_id else "")
+    return await voicesock.forward_settings(request, target)
+
+
 class CodexModelBody(_StrictBody):
     model: str
     effort: str | None = None
