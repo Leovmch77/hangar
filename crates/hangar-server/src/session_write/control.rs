@@ -380,7 +380,16 @@ pub async fn queue_remove(State(st): State<Arc<AppState>>, ConnectInfo(peer): Co
     let path = ctx.parts.uri.path().to_owned();
     let segments: Vec<&str> = path.trim_start_matches("/api/sessions/").split('/').collect();
     let Some(entry_id) = (segments.len() == 3 && segments[1] == "queue").then(|| percent_decode_str(segments[2]).decode_utf8().ok()).flatten().filter(|id| !id.is_empty()) else { return relay(ctx, bytes).await };
-    let removed = ctx.target.handle.queue(random_hex(16), Action::Remove { entry_id: entry_id.into_owned() }).await;
+    let entry_id = entry_id.into_owned();
+    let mut removed = ctx.target.handle.queue(random_hex(16), Action::Remove { entry_id: entry_id.clone() }).await;
+    // A entrega incerta não sai por `Remove` (segura a escrita): descartar é desistir dela e então tirá-la.
+    if matches!(removed, Ok(ref done) if *done != json!(true)) {
+        let given = ctx.target.handle.queue(random_hex(16), Action::GiveUp { entry_id: entry_id.clone() }).await;
+        removed = match given {
+            Ok(done) if done == json!(true) => ctx.target.handle.queue(random_hex(16), Action::Remove { entry_id }).await,
+            other => other,
+        };
+    }
     answer(&ctx, queue_answer(&removed))
 }
 

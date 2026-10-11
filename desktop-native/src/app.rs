@@ -2869,7 +2869,8 @@ impl Hangar {
             Action::Answer | Action::Skip => self.chat.ask.as_ref().map(|ask| ask.fingerprint.clone()),
             Action::Select(_) | Action::Submit => Some(select_snapshot(&self.chat.state)),
             Action::Implement => self.codex_plan().map(|(_, plan)| plan),
-            Action::Discard(id) => self.chat.events.iter().any(|e| e.id == format!("queued-{id}") && e.desistiu == Some(true)).then(|| id.clone()),
+            Action::Discard(id) => self.chat.events.iter().any(|e| e.id == format!("queued-{id}")
+                && (e.desistiu == Some(true) || holds_queue(e, self.chat.state.problema.as_deref()))).then(|| id.clone()),
             Action::Cancel | Action::Steer => Some(String::new()),
         }
     }
@@ -4511,6 +4512,10 @@ impl Hangar {
             }
             // Só entrada desistida sai da fila; o backend recusa descartar o que ainda está por entregar.
             if event.desistiu == Some(true) { discard = event.id.strip_prefix("queued-").map(str::to_owned); }
+            else if holds_queue(event, self.chat.state.problema.as_deref()) {
+                notes.push(tr("delivery_unproved"));
+                discard = event.id.strip_prefix("queued-").map(str::to_owned);
+            }
             else if event.queued() { notes.push(tr(if event.queued_delivered == Some(true) { "delivering" } else { "queued" })); }
             if event.is_error == Some(true) { notes.push(tr("tool_error")); }
             (label, (!notes.is_empty()).then(|| notes.join(" · ")), event.kind == "user_msg", event.is_error == Some(true))
@@ -5632,6 +5637,11 @@ fn prepare_detail(full: String) -> Prepared {
     let (shown, clipped) = conversation::clip(&full, DETAIL_MAX);
     let fenced = conversation::fenced(shown);
     Prepared::Detail { fenced, total, clipped, full: full.into() }
+}
+
+/// A bolha entregue sem prova que segura a fila: o servidor aceita descartá-la (desiste e tira).
+fn holds_queue(event: &ChatEvent, problem: Option<&str>) -> bool {
+    problem == Some("terminal_input_delivery_unproved") && event.queued() && event.queued_delivered == Some(true) && event.desistiu != Some(true)
 }
 
 fn prepare_message(event: &ChatEvent, dead: &HashSet<String>) -> Prepared {

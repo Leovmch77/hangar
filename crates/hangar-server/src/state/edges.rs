@@ -9,7 +9,9 @@ pub struct RuntimeView { pub error: Option<String>, pub message: Option<String>,
 
 /// `runtime_adapter.runtime_problem`: `(código, detalhe)` do runtime para o `problema` do estado.
 pub fn runtime_problem(view: &RuntimeView) -> Option<(String, String)> {
-    if let Some(code) = view.error.as_deref().filter(|c| !c.is_empty()) {
+    // A entrega incerta tem frase própria (o que fazer), não o erro genérico do runtime.
+    let unproved = view.input_stalled.as_deref() == Some("delivery_unproved");
+    if let Some(code) = view.error.as_deref().filter(|c| !c.is_empty() && !(unproved && *c == "terminal_delivery_unknown")) {
         let text = match view.message.as_deref().filter(|m| !m.is_empty()) {
             Some(message) => format!("{code}: {message}"),
             None => code.to_owned(),
@@ -21,6 +23,7 @@ pub fn runtime_problem(view: &RuntimeView) -> Option<(String, String)> {
         "composer_busy" => "terminal_input_composer_busy",
         "composer_unreadable" => "terminal_input_composer_unreadable",
         "capture_failed" | "capture_utf8" => "terminal_input_capture_failed",
+        "delivery_unproved" => "terminal_input_delivery_unproved",
         _ => "terminal_input_stalled",
     };
     Some((code.into(), stalled.chars().take(60).collect()))

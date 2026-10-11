@@ -186,6 +186,7 @@ pub enum Action {
     Claim { min_ts:f64, limit:Option<usize>, entry_id:Option<String> },
     SetDelivered { entry_id:String, value:bool, steered:bool },
     Abandon { entry_id:String },
+    GiveUp { entry_id:String },
     BumpAttempts { entry_id:String },
     EntryDelivered { entry_id:String },
     Confirm { entry_ids:Vec<String> },
@@ -600,6 +601,27 @@ fn apply(state: &mut State, action: Action, clock: ClockSample, call_id: &str) -
                 row["delivered"] = json!(true); row["desistiu"] = json!(true); row["desistiu_ts"] = json!(clock.epoch_s);
             }
             Value::Null
+        }
+        // A pessoa desiste da entrega que nunca se provou: sem isto a trava de escrita espera para sempre.
+        // Nada é reenviado; a linha vira "não chegou" e a fila volta a andar.
+        Action::GiveUp { entry_id } => {
+            let ids: Vec<String> = state.operations.iter().filter(|(key, op)| !key.starts_with(CALL_PREFIX)
+                && op.entry_id.as_deref() == Some(entry_id.as_str()) && holds_terminal_write(op, &Value::Null))
+                .map(|(key, _)| key.clone()).collect();
+            for id in &ids {
+                let op = state.operations.get_mut(id).unwrap();
+                let stage = op.result["payload"]["stage"].clone();
+                op.status = Status::Rejected;
+                op.result = json!({"operation_id":id,"disposition":"rejected","payload":{"code":"delivery_given_up","stage":stage,"cleanup":"not_needed"}});
+                op.terminal_finalized = true;
+            }
+            if !ids.is_empty() {
+                if let Some(row) = state.rows.iter_mut().find(|r| row_id(r) == entry_id && r["confirmed"] != true) {
+                    row["delivered"] = json!(true); row["desistiu"] = json!(true); row["desistiu_ts"] = json!(clock.epoch_s);
+                }
+                release_terminal_write_barrier(state);
+            }
+            json!(!ids.is_empty())
         }
         Action::BumpAttempts { entry_id } => {
             if let Some(row) = state.rows.iter_mut().find(|r| row_id(r) == entry_id && !protected.contains(&entry_id)) {

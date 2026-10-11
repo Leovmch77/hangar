@@ -632,6 +632,14 @@
                   <pre>{ev.hook_error}</pre>
                 </div>
               {/if}
+            {:else if stateEvent?.problema === 'terminal_input_delivery_unproved' && ev.queued_delivered && ev.id.startsWith('queued-')}
+              <!-- Entregue sem prova: segura a fila até a pessoa descartar ou o prazo do servidor vencer. -->
+              <div class="queued-perdida">
+                <p role="status">{m.msg_entrega_sem_prova()}</p>
+                {#if onDescartarFila}
+                  <button type="button" class="queued-descartar" onclick={() => onDescartarFila(ev.id.slice('queued-'.length))}>{m.msg_descartar_perdida()}</button>
+                {/if}
+              </div>
             {/if}
           </div>
         {:else if sub}

@@ -19,11 +19,12 @@ pub type ModsAnchor=Arc<std::sync::Mutex<Option<String>>>;
 /// `stall_notice`: entrega adiada sem escrita por mais que isso aparece na vista e no log. `focus_return`:
 /// com uma entrada esperando e o foco num painel ou na faixa de um mod há mais que isso, sem clique em curso,
 /// o executor devolve o teclado ao prompt e escreve. `clear_wait`: quanto a trava do `/clear` espera a
-/// conversa nova antes de conferir se ele foi aplicado.
-pub struct TerminalOptions { pub io:Arc<dyn TerminalIo>,pub limits:InputLimits,pub tick:Duration,pub stall_notice:Duration,pub anchor:ModsAnchor,pub focus_return:Duration,pub clear_wait:Duration }
+/// conversa nova antes de conferir se ele foi aplicado. `give_up_after`: quanto a entrega incerta espera a
+/// prova antes de ser desistida sozinha (com o Claude parado).
+pub struct TerminalOptions { pub io:Arc<dyn TerminalIo>,pub limits:InputLimits,pub tick:Duration,pub stall_notice:Duration,pub anchor:ModsAnchor,pub focus_return:Duration,pub clear_wait:Duration,pub give_up_after:Duration }
 impl Default for TerminalOptions {
     fn default()->Self {Self {io:Arc::new(input::ProcessIo::default()),limits:InputLimits::default(),tick:Duration::from_secs(1),stall_notice:Duration::from_secs(30),
-        anchor:ModsAnchor::default(),focus_return:FOCUS_RETURN,clear_wait:CLEAR_APPLY_WAIT}}
+        anchor:ModsAnchor::default(),focus_return:FOCUS_RETURN,clear_wait:CLEAR_APPLY_WAIT,give_up_after:GIVE_UP_AFTER}}
 }
 /// Quanto uma linha espera, desde a primeira vez que viu o foco num mod, antes de o executor devolver o
 /// teclado ao prompt. Cobre quem acabou de levar o foco a um painel no terminal, sem deixar a mensagem do
@@ -160,6 +161,8 @@ struct Executor {
     /// Entradas com linha na fila cuja entrega ficou incerta nesta vida do ator: o transcript ainda
     /// pode prová-las. Incerteza sem linha (tecla, seleção) não tem prova e só sai na reabertura.
     uncertain:Vec<String>,unprovable:bool,
+    /// Dona da trava de escrita e quando ela foi vista pela primeira vez nesta vida do ator (o prazo de desistir).
+    uncertain_since:Option<(String,tokio::time::Instant)>,
     /// Teclado emprestado ao Python (administração que digita no pane): id, prazo e o pedido que o abriu.
     loan:Option<(String,tokio::time::Instant,String)>,
     /// Linha da fila que o terminal recusa sem escrever (composer ocupado, tela ilegível): espera
@@ -198,6 +201,8 @@ fn stalled_code(result:&RuntimeReply)->Option<&str> {
 const MAX_LOAN_S:u64=120;
 /// O `clear_wait` padrão: o transcript novo do `/clear` nasce em menos de um segundo.
 const CLEAR_APPLY_WAIT:Duration=Duration::from_secs(10);
+/// O `give_up_after` padrão: a prova chega em segundos; minutos sem ela, com o Claude parado, é perda.
+const GIVE_UP_AFTER:Duration=Duration::from_secs(180);
 /// Quanto o aviso de `/clear` não aplicado fica na vista.
 const CLEAR_NOTICE:Duration=Duration::from_secs(60);
 /// Até quando um transcript novo começado por `/clear` segura a trava esperando o Python trocar o
@@ -248,7 +253,7 @@ impl TerminalActor {
         let sequence=Arc::new(AtomicU64::new(queue.initial_state().next_seq.max(previous.max(queue.initial_state().operations.len() as u64).saturating_add(1))));
         let receipt=ReceiptIndex::new("claude",&target.binding.conversation);
         let (sender,receiver)=mpsc::channel(64); let closed=Arc::new(AtomicBool::new(false)); let anchor=options.anchor.clone();
-        let executor=Executor {target,queue:Arc::new(queue),policy,options,events,revision,sequence,receipt,deliverable:false,last_error:None,uncertain:vec![],unprovable:false,loan:None,stall:None,hold:None,hold_checked:false,focus_refused:false,parked:VecDeque::new(),away:None,clear_watch:None,clear_notice:None,footer_misses:None};
+        let executor=Executor {target,queue:Arc::new(queue),policy,options,events,revision,sequence,receipt,deliverable:false,last_error:None,uncertain:vec![],unprovable:false,uncertain_since:None,loan:None,stall:None,hold:None,hold_checked:false,focus_refused:false,parked:VecDeque::new(),away:None,clear_watch:None,clear_notice:None,footer_misses:None};
         let task=tokio::spawn(executor.run(receiver,closed.clone()));
         TerminalHandle {sender,closed,task:Arc::new(Mutex::new(Some(task))),stopped:Arc::new(Mutex::new(None)),anchor}
     }
@@ -302,7 +307,8 @@ impl Executor {
         if state.generation!=self.target.generation{return Err(error("runtime_generation"));}
         Ok(json!({"key":self.target.key,"generation":self.target.generation,"revision":self.revision.load(Ordering::Acquire),
             "view":{"terminal":true,"conversation":self.target.binding.conversation,"deliverable":self.deliverable && !self.cleared(&state),"preserve_binding":state.runtime_state["preserve_binding"],"clear_barrier":state.runtime_state["clear_barrier"],
-                "input_stalled":self.stall.as_ref().filter(|s|s.surfaced).map(|s|s.code.clone()).or_else(||self.clear_notice.map(|_|"clear_not_applied".into()))},"channels":{},"error":self.last_error}))
+                "input_stalled":self.stall.as_ref().filter(|s|s.surfaced).map(|s|s.code.clone()).or_else(||self.clear_notice.map(|_|"clear_not_applied".into()))
+                    .or_else(||state.terminal_write_blocked(&self.target.binding.conversation).then(||"delivery_unproved".to_owned()))},"channels":{},"error":self.last_error}))
     }
     async fn publish(&self)->Result<(),RuntimeError> {
         self.revision.fetch_add(1,Ordering::AcqRel);
@@ -356,6 +362,7 @@ impl Executor {
                         // Clique de mod em curso, ou o que ele guardou ainda por sair: a fila não entrega nem
                         // reconcilia no pane antes disso (C6).
                         if self.held() || !self.parked.is_empty() {continue;}
+                        self.expire_uncertain().await?;
                         // O `/clear` incerto depois do Enter deixa o erro de entrega incerta: a trava ainda vence.
                         if self.last_error.is_some() {self.expire_clear().await; if self.reconciling() {self.reconcile_uncertain().await?;} continue;}
                         let result=async {self.confirm_rows().await?;self.drain_once(None).await?;Ok::<_,RuntimeError>(())}.await;
@@ -382,6 +389,11 @@ impl Executor {
                     let result=match action {
                         Action::Finish {id,status,result}=>self.native_receipt(&id,status,result).await,
                         Action::Claim {..}|Action::SetDelivered {value:false,..}|Action::BumpAttempts {..}|Action::Reconcile {..}|Action::ReplaceRows {..}|Action::Prepare {..}|Action::BeginDispatch {..}|Action::MarkWriting {..}|Action::BindDispatch {..}|Action::Recover|Action::Confirm {..}|Action::ConfirmOccurrence {..}|Action::ConfirmLegacy {..}|Action::SetRuntimeState {..}|Action::LateRpcResolution {..}=>Err(error("terminal_queue_action")),
+                        action@Action::GiveUp {..}=>{
+                            let result=self.queue.exec(self.target.generation,&id,sample(),action).await.map_err(|_|error("queue_io"));
+                            if result.as_ref().is_ok_and(|given|*given==json!(true)) {self.release_uncertain().await?;}
+                            result
+                        },
                         action=>self.queue.exec(self.target.generation,&id,sample(),action).await.map_err(|_|error("queue_io")),
                     };
                     if result.is_ok(){self.publish().await?;} let _=response.send(result);
@@ -842,6 +854,37 @@ impl Executor {
             }
         }
         if count>0{self.publish().await?;}Ok(json!({"confirmed":count}))
+    }
+    /// A entrega incerta que segue sem prova depois do prazo, com o Claude parado, é desistida sozinha:
+    /// parado, o que ele tivesse guardado já teria virado conversa. Nada é reenviado.
+    async fn expire_uncertain(&mut self)->Result<(),RuntimeError> {
+        let Ok(state)=self.queue.snapshot().await else {return Ok(())};
+        let owner=state.runtime_state["terminal_write_barrier"]["operation_id"].as_str().map(str::to_owned);
+        let Some(entry)=owner.as_deref().and_then(|id|state.operations.get(id)).and_then(|op|op.entry_id.clone()) else {self.uncertain_since=None; return Ok(())};
+        let now=tokio::time::Instant::now();
+        let since=match &self.uncertain_since {Some((seen,at)) if *seen==entry=>*at, _=>{self.uncertain_since=Some((entry,now)); return Ok(())}};
+        if now.duration_since(since)<self.options.give_up_after {return Ok(());}
+        match self.services("maintenance","maintenance","").facts(&self.target.binding).await {
+            Ok(facts) if facts.binding==self.target.binding && facts.idle=>{},
+            _=>return Ok(()),
+        }
+        // Última chance da prova antes de desistir.
+        if self.confirm_rows().await.is_err() {return Ok(());}
+        let id=format!("give_up:{entry}:{}",self.sequence.fetch_add(1,Ordering::Relaxed));
+        if self.queue.exec(self.target.generation,&id,sample(),Action::GiveUp {entry_id:entry.clone()}).await.map_err(|_|error("queue_io"))?!=json!(true) {return Ok(());}
+        tracing::warn!(key=%self.target.key,session=%self.target.name,code="delivery_given_up",entry=%entry,
+            waited_s=now.duration_since(since).as_secs(),"entrega incerta sem prova no prazo: desistida, sem reenviar; a fila segue");
+        self.uncertain_since=None;
+        self.release_uncertain().await?;
+        self.publish().await
+    }
+    /// Depois de uma desistência: a memória da entrega incerta só sai quando o disco não segura mais a escrita.
+    async fn release_uncertain(&mut self)->Result<(),RuntimeError> {
+        let state=self.queue.snapshot().await.map_err(|_|error("queue_io"))?;
+        if state.terminal_write_blocked(&self.target.binding.conversation) {return Ok(());}
+        self.uncertain.clear(); self.unprovable=false;
+        if self.last_error.as_deref()==Some("terminal_delivery_unknown") {self.last_error=None;}
+        Ok(())
     }
     fn reconciling(&self)->bool {
         self.last_error.as_deref()==Some("terminal_delivery_unknown") && !self.unprovable && !self.uncertain.is_empty()

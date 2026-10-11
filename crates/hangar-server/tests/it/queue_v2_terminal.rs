@@ -255,3 +255,31 @@ fn terminal_recover_requeues_only_attempts_that_never_started_writing() {
         }
     }
 }
+
+#[test]
+fn giving_up_an_uncertain_input_passes_the_barrier_on_and_lifts_it_after_the_last() {
+    use hangar_server::runtime::receipt::ReceiptIndex;
+    let dir=tempfile::tempdir().unwrap();let path=dir.path().join("state");
+    let cursor=ReceiptIndex::new("claude","sid").capture(&dir.path().join("sid.jsonl")).unwrap();
+    let mut store=Store::open(&path,dir.path(),State::new("key",1,"session",vec![])).unwrap();
+    for text in ["A","B"] {
+        store.exec(1,&format!("append:{text}"),clock(),Action::Append {text:text.into(),delivered:false,ts:None,pre_transcript:false,entry_id:Some(text.into())}).unwrap();
+        store.exec(1,&format!("prepare:{text}"),clock(),Action::Prepare {id:text.into(),payload:json!({"kind":"input","payload":{"text":text,"_terminal_generation":1}}),entry_id:Some(text.into())}).unwrap();
+        store.exec(1,&format!("cursor:{text}"),clock(),Action::BindDispatch {id:text.into(),cursor:serde_json::to_value(&cursor).unwrap()}).unwrap();
+        store.exec(1,&format!("dispatch:{text}"),clock(),Action::BeginDispatch {id:text.into(),wire_id:format!("terminal:1:{text}"),staged:false}).unwrap();
+        store.exec(1,&format!("finish:{text}"),clock(),Action::Finish {id:text.into(),status:Status::Unknown,
+            result:json!({"operation_id":text,"disposition":"unknown","payload":{"cleanup":"unproved","stage":"input_proof"}})}).unwrap();
+    }
+    // Incerta não sai pelo descarte comum.
+    assert_eq!(store.exec(1,"remove:A:early",clock(),Action::Remove {entry_id:"A".into()}).unwrap(),false);
+    assert_eq!(store.exec(1,"give_up:A",clock(),Action::GiveUp {entry_id:"A".into()}).unwrap(),true);
+    let row=store.state().rows.iter().find(|row|row["id"]=="A").unwrap().clone();
+    assert_eq!((row["delivered"].clone(),row["desistiu"].clone()),(json!(true),json!(true)),"vira 'não chegou', sem reenviar");
+    assert_eq!(store.state().runtime_state["terminal_write_barrier"]["operation_id"],"B","a trava passa para a outra incerta");
+    assert_eq!(store.exec(1,"remove:A",clock(),Action::Remove {entry_id:"A".into()}).unwrap(),true);
+    assert_eq!(store.exec(1,"give_up:B",clock(),Action::GiveUp {entry_id:"B".into()}).unwrap(),true);
+    assert!(!store.state().terminal_write_blocked("sid"));
+    assert_eq!(store.exec(1,"give_up:B:again",clock(),Action::GiveUp {entry_id:"B".into()}).unwrap(),false,"nada incerto: não age");
+    drop(store);let store=Store::open(&path,dir.path(),State::new("key",1,"session",vec![])).unwrap();
+    assert!(!store.state().terminal_write_blocked("sid"),"a desistência sobrevive à reabertura");
+}
