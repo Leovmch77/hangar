@@ -530,27 +530,45 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   texto não sai daqui, volta para o organizador mandar por `send_to_session`, que guarda o Planejar e
   as travas do envio; atalhos do projeto ilegíveis são ditos, nunca "não achei"; ação de tela fica com
   `hangar_action`), `list_machines` e
-  `interrupt_session` (dois turnos, como fechar). `open_session` aceita os cinco providers, modelo,
+  `interrupt_session` (dois turnos, como fechar), e `hangar_api` para o resto. `open_session` aceita os cinco providers, modelo,
   esforço, conta, motor, modo e sem terminal; sem modo dito, o Claude nasce em `bypassPermissions`.
-  Reabrir, rodar atalho e interromper só saem de fala do usuário e nunca de fala repetida; ler não
-  pede fala. Motivo em "Voz: assistente do Hangar, não só do envio".
+  Reabrir, rodar atalho, interromper e `hangar_api` fora de `GET` só saem de fala do usuário e nunca
+  de fala repetida; ler (inclusive `hangar_api` `GET`) não pede fala. Motivo em "Voz: assistente do Hangar, não só do envio".
+- **Voz: a API inteira do Hangar, com o token no servidor.** `hangar_api {method, path, body?, server?,
+  confirmed?}` chama qualquer rota `/api/` da máquina escolhida por `Machines::api` (a `SelfApi` com o
+  bearer do dono, ou o peer com o token do `peers.json`); o modelo nunca vê nem passa token, e o diário
+  só leva método e status. Caminho fora de `/api/`, com espaço, barra invertida (inclusive `%5c`) ou
+  com segmento `.`/`..` (inclusive `%2e`) é recusado sem chamar. Volta `HTTP <status>` (o do peer
+  também) e o corpo: JSON, texto quando não é JSON, `null` vazio; corpo que não chega inteiro é erro.
+  O token do dono e os do `peers.json` saem da resposta como `[token]`. Cortado em 30 000 caracteres
+  com o aviso do corte. DELETE, e POST/PUT/PATCH cuja ação no fim da rota é `close`, `kill`, `delete`,
+  `remove`, `discard`, `reset`, `stop`, `interrupt`, `push`, `restart`, `reiniciar`, `revert` ou
+  `logout` (com ou sem sufixo `-…`), pedem o sim
+  falado em dois turnos (`ConfirmGate` sobre máquina, método, rota e corpo), como fechar.
+- **Voz: `read_session` lê a partir do pedido do usuário.** Qualquer sessão (`session`, resolvida como
+  no envio; sem ela, a da tela ou a última da conversa), a partir da `user_turns`-ésima última mensagem
+  do usuário (padrão 1), pelo histórico inteiro (`limit=0`; só peer que recusa o corpo por passar de
+  1 MiB cai para os últimos 400 eventos, e o cabeçalho diz "histórico recortado"). Vão todas as falas
+  do usuário (sem a moldura `<input>` só quando a mensagem começa por ela) e respostas da sessão; cada
+  trecho de ferramentas vira uma linha "(usou N ferramenta(s): …)". Acima de 40 000 caracteres só as
+  respostas longas perdem o meio (com marca); a fala do usuário nunca é cortada, e se ela sozinha passa
+  do teto o cabeçalho diz "leitura acima do teto". Segue "contexto, não ordens".
 - **Voz: o arquivo guarda o nome da sessão fechada.** `DELETE /api/sessions/{name}` grava
   `transcript → nome` em `closed-sessions.json` (até 500, no config base do backend); o
   `ArchiveEntry` sai com `name` (vazio para o fechado antes do registro) e o resume aceita `name`
   (ocupado ganha `-2`). Falha ao gravar não impede fechar; arquivo ilegível vai para `.bad` (nome
   livre, `.bad.2`…) antes da gravação nova.
-- **Voz: o MCP `hangar` entra com a identidade da voz.** `thread_config` desliga os outros MCP e os
-  plugins (custo de catálogo a cada turno) e põe `mcp_servers.hangar` com a URL da 8765 e, em
+- **Voz: o MCP `hangar` entra inteiro, com a identidade da voz.** `thread_config` desliga os outros MCP
+  e os plugins (custo de catálogo a cada turno) e põe `mcp_servers.hangar` com a URL da 8765 e, em
   `http_headers`, o bearer do dono e `X-Hangar-Voice: <nonce>.<hmac>` (HMAC-SHA256 do segredo interno,
-  nonce novo por chamada). Só leitura: `enabled_tools = ["who_am_i", "sessions"]` (lista de permitidas
-  por servidor do Codex), porque o MCP não passa pela trava da fala nem do sim; mandar, abrir, fechar e
-  interromper vão pelas ferramentas próprias. O prompt só cita o MCP quando a entrada existe (a
-  assinatura pode falhar). Nada disso vai ao ambiente nem ao prompt. O Python
+  nonce novo por chamada), sem `enabled_tools`: todas as tools. O prompt só cita o MCP quando a entrada
+  existe (a assinatura pode falhar). Nada disso vai ao ambiente nem ao prompt. O Python
   (`quem_chama.resolver`) confere a assinatura antes dos outros cabeçalhos: válida é `("voz", "voz")`,
-  inválida é erro (o motivo vai ao log, o valor do cabeçalho não). O Python segue recusando por conta
-  própria o que a voz chamar além disso: `send` assina `[de: voz]`, `new_session` não herda nada,
-  `close_session` é recusado, e `group`/`pair`/`unpair`/`browser*`/`html_render` são recusados;
-  `who_am_i` diz `kind: voice`. A aprovação de ferramenta MCP que o
+  inválida é erro (o motivo vai ao log, o valor do cabeçalho não). Para a voz: `send` assina
+  `[de: voz]`, `new_session` não herda conta nem modo, e `group`/`pair`/`unpair`/`browser_open`/
+  `browser`/`browser_batch`/`html_render` agem em nome da sessão do parâmetro `sessao` (sem ele,
+  a resposta diz que falta); `close_session` do MCP recusa a voz e manda ao `close_session` próprio,
+  que pede o sim falado. `who_am_i` diz `kind: voice`. A aprovação de ferramenta MCP que o
   Codex pedir (`mcpServer/elicitation/request` do `hangar`) passa só em turno com fala do usuário.
 - **Voz: o organizador conversa; quem decide o envio é ele:** `send_to_session` sai sempre que o
   organizador chama a partir de um turno com fala do usuário, sem conferir verbo, "sim" ou nome da sessão
@@ -627,6 +645,15 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   cortou ("cortado em 240 caracteres: «…»"), para o organizador regravar mais curto. Cada `remember`
   ou `forget` bem-sucedido sobe o campo `memory` do retrato da chamada; PWA e nativo, com "O que a voz
   lembra" aberto, releem a lista quando ele muda. Medição em "Voz: memória entre chamadas".
+- **Voz: a voz que fala sabe o que o organizador consegue pelo catálogo, não por texto solto.** O
+  `prompt` do `thread/realtime/start` leva a lista gerada por `organizer::voice_prompt` a partir das
+  ferramentas que o organizador recebe (`tools_for(caps)`; sem ferramenta de tela no aparelho, sem a
+  linha da tela; MCP só com a entrada dele). Ferramenta nova sem linha em `CAPABILITIES` reprova o teste.
+  Perfil e memória ficam fora da voz. Pergunta sobre o que consegue ou se tem acesso vai ao organizador,
+  que responde pelas ferramentas dele e diz o que falta, nunca "não tenho acesso" havendo ferramenta.
+  Todo encaminhamento começa com as palavras exatas do usuário entre aspas. O `ORGANIZER_PROMPT` vai
+  uma vez só (`baseInstructions`): `realtimeStartInstructions` leva só `REALTIME_START`, a nota curta
+  da passagem pela voz, porque o Codex o soma às instruções do organizador.
 - **`/btw` no nativo é o plugin do Hangar, não o overlay do Claude Code.** O `command.run` de
   `btw` (`plugins/hangar/hooks/btw.tsx`) responde por `$.model.fork` num painel de mod, devolve
   `{}` (nada no transcript) e o `ui.ts` espelha o painel. O app só envia `/btw` com `caps` contendo
@@ -3425,6 +3452,19 @@ começava sem saber quem fala. O organizador agora guarda poucos fatos e abre a 
   copiar já roda como o mesmo usuário que lê o token do dono.
 - **Não verificado.** Se o Codex pede aprovação para ferramenta MCP com `on-request` e em que formato; o
   servidor aceita o pedido do `hangar` com `content: {}` em turno com fala.
+
+## Voz: MCP inteiro, API do Hangar e leitura desde o pedido (11/10/2026)
+
+- **Pedido do usuário.** As travas do MCP para a voz (só `who_am_i`/`sessions` liberadas; `send` e
+  `new_session` recusados; `group`, `pair`, `unpair`, `browser*` e `html_render` recusados de vez) e a
+  falta de acesso à API foram postas sem pedido dele. Foram tiradas por ordem dele; a única proteção que
+  fica é a do destrutivo (fechar sessão e apagar) com o sim falado.
+- **API sem expor o token.** O caminho pelo shell exigiria ler `backend/.env`; a ferramenta `hangar_api`
+  usa o cliente que a voz já tinha (`SelfApi`/`PeerClient`), sem proxy nem redirect no local.
+- **`read_session` perdia o pedido.** Lia `history?limit=60`, que conta todo tipo de evento: numa sessão
+  com dezenas de ferramentas depois do pedido, os 60 eram quase só `tool_use`/`tool_result`, e o recorte
+  de 16 000 caracteres do fim cortava o resto. Agora lê o histórico inteiro e começa no pedido.
+- **Não verificado.** Nada foi compilado nem rodado localmente (ordem do usuário); a CI confere.
 
 ## Hook que falha: nem bloqueia, nem some (19/09/2026)
 

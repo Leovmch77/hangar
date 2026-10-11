@@ -11,6 +11,8 @@ use crate::transcript::py::py_str;
 const READ_TIMEOUT: Duration = Duration::from_secs(8);
 const TOTAL_TIMEOUT: Duration = Duration::from_secs(16);
 const MAX_BODY: usize = 1 << 20;
+/// Texto do erro de sucesso acima de `MAX_BODY`; quem lê pode pedir menos.
+pub const TOO_LARGE: &str = "resposta maior que 1 MiB";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PeerCfg { pub base_url: String, pub token: String }
@@ -31,6 +33,11 @@ impl PeerBook {
         let entry = all.get(server)?.as_object()?;
         let field = |k: &str| entry.get(k).and_then(Value::as_str).filter(|v| !v.is_empty());
         Some(PeerCfg { base_url: field("base_url")?.trim_end_matches('/').to_owned(), token: field("token")?.to_owned() })
+    }
+
+    /// Todos os tokens do `peers.json`, para tirá-los do que volta ao modelo.
+    pub fn tokens(&self) -> Vec<String> {
+        self.load().values().filter_map(|v| v["token"].as_str()).filter(|t| !t.is_empty()).map(str::to_owned).collect()
     }
 
     /// Peers da varredura: com endereço e token, sem `enabled: false`.
@@ -102,6 +109,12 @@ impl PeerClient {
 
     pub fn enabled_ids(&self) -> Vec<String> { self.book.enabled_ids() }
 
+    /// Os tokens de peer conhecidos (leitura de arquivo, fora do executor).
+    pub async fn tokens(&self) -> Vec<String> {
+        let book = self.book.clone();
+        tokio::task::spawn_blocking(move || book.tokens()).await.unwrap_or_default()
+    }
+
     /// Endereço do peer no `peers.json` (o aparelho abre a sessão de lá por ele); nunca o token.
     pub fn base_url(&self, server: &str) -> Option<String> { self.book.get(server).map(|c| c.base_url) }
 
@@ -109,6 +122,12 @@ impl PeerClient {
     /// segue redirect como o Python. O `reqwest` tira o `Authorization` quando o redirect troca de
     /// host, porta ou esquema (`redirect::remove_sensitive_headers`), e o `urllib` não tirava.
     pub async fn call(&self, server: &str, method: reqwest::Method, path: &str, body: Option<&Value>) -> Result<Option<Value>, PeerError> {
+        self.call_status(server, method, path, body).await.map(|(_, v)| v)
+    }
+
+    /// Como `call`, com o status 2xx exato.
+    pub async fn call_status(&self, server: &str, method: reqwest::Method, path: &str, body: Option<&Value>)
+        -> Result<(u16, Option<Value>), PeerError> {
         let book = self.book.clone();
         let key = server.to_owned();
         let cfg = tokio::task::spawn_blocking(move || book.get(&key)).await.ok().flatten().ok_or(PeerError::Unknown)?;
@@ -134,7 +153,7 @@ impl PeerClient {
                     if raw.len() > MAX_BODY {
                         // A recusa ainda se lê pelo primeiro 1 MiB; o sucesso grande é incerto.
                         if !status.is_success() { raw.truncate(MAX_BODY); break; }
-                        return Err(PeerError::Transport("resposta maior que 1 MiB".into()));
+                        return Err(PeerError::Transport(TOO_LARGE.into()));
                     }
                 }
                 Ok(None) => break,
@@ -150,8 +169,8 @@ impl PeerClient {
             };
             return Err(PeerError::Refused { status: status.as_u16(), detail });
         }
-        if text.trim().is_empty() { return Ok(None); }
-        serde_json::from_str(&text).map(Some).map_err(|e| PeerError::Transport(format!("{server} respondeu corpo ilegível: {e}")))
+        if text.trim().is_empty() { return Ok((status.as_u16(), None)); }
+        serde_json::from_str(&text).map(|v| (status.as_u16(), Some(v))).map_err(|e| PeerError::Transport(format!("{server} respondeu corpo ilegível: {e}")))
     }
 }
 

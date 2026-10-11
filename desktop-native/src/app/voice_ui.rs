@@ -466,6 +466,7 @@ pub(super) fn action_text(action: &OrganizerAction) -> String {
             "list_shortcuts" => tr("voice_tool_list_shortcuts"),
             "run_shortcut" => tr("voice_tool_run_shortcut"),
             "list_machines" => tr("voice_tool_list_machines"),
+            "hangar_api" => tr("voice_tool_hangar_api"),
             "follow_session" | "unfollow_session" => tr("voice_tool_follow_session"),
             other => tr("voice_tool_other").replace("{tool}", other),
         },
@@ -1646,7 +1647,8 @@ mod tests {
     fn action_text_names_tools_searches_and_commands() {
         assert_eq!(action_text(&OrganizerAction::Tool("switch_session".into())), tr("voice_tool_switch_session"));
         assert_ne!(tr("voice_tool_switch_session"), "voice_tool_switch_session", "chave traduzida");
-        for tool in ["interrupt_session", "recent_conversations", "reopen_conversation", "list_folders", "list_shortcuts", "run_shortcut", "list_machines"] {
+        for tool in ["interrupt_session", "recent_conversations", "reopen_conversation", "list_folders", "list_shortcuts", "run_shortcut", "list_machines",
+            "hangar_api"] {
             let text = action_text(&OrganizerAction::Tool(tool.into()));
             assert!(!text.contains(tool) && !text.contains("voice_tool_"), "{tool}: {text}");
         }

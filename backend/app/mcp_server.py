@@ -65,13 +65,12 @@ def _cabecalhos(ctx: Context) -> dict[str, str]:
     return dict(req.headers) if req is not None else {}
 
 
-VOICE_REFUSED = ("recusado: a assistente de voz não é uma sessão e não tem grupo, navegador nem conversa "
-                 "própria; esta tool é de sessão")
 VOICE_CLOSE_REFUSED = ("recusado: a voz fecha sessão pela própria ferramenta close_session, que pede o sim "
                        "falado do usuário")
-# A voz só age a partir da fala do usuário, e essa trava mora nas ferramentas próprias dela.
-VOICE_ACT_REFUSED = ("recusado: pela voz, mandar e criar sessão vão pelas ferramentas próprias "
-                     "(send_to_session, open_session), que conferem a fala do usuário")
+VOICE_NEEDS_SESSION = ("a assistente de voz não é uma sessão: passe `sessao` com o nome da sessão em nome de "
+                       "quem agir (tool `sessions`)")
+_SESSAO_DESC = (" `sessao`: só para a assistente de voz, que não é sessão: a sessão em nome de quem agir; "
+                "quem é sessão age sempre como ela mesma.")
 
 
 async def _caller(ctx: Context) -> tuple[str, bool]:
@@ -83,12 +82,14 @@ async def _caller(ctx: Context) -> tuple[str, bool]:
     return nome, origem == quem_chama.VOICE
 
 
-async def _eu(ctx: Context) -> str:
-    """A sessão que chama. A voz não é sessão: as tools que dependem da própria sessão a recusam."""
+async def _eu(ctx: Context, sessao: str = "") -> str:
+    """A sessão em nome de quem a tool age. A voz não tem grupo, navegador nem conversa: diz qual sessão."""
     nome, voice = await _caller(ctx)
-    if voice:
-        raise ToolError(VOICE_REFUSED)
-    return nome
+    if not voice:
+        return nome
+    if not sessao.strip():
+        raise ToolError(VOICE_NEEDS_SESSION)
+    return sessao.strip()
 
 
 def _detalhe(e: HTTPException) -> str:
@@ -114,7 +115,8 @@ async def who_am_i(ctx: Context) -> dict[str, str]:
 async def sessions(ctx: Context) -> list[dict[str, Any]]:
     from app import api
     try:
-        eu = await _eu(ctx)
+        nome, voice = await _caller(ctx)
+        eu = None if voice else nome
     except ToolError:
         eu = None
     infos = await api.list_sessions(ctx.request_context.request)
@@ -131,8 +133,6 @@ async def sessions(ctx: Context) -> list[dict[str, Any]]:
 async def send(ctx: Context, alvo: str, texto: str, tmux: bool = False) -> dict[str, Any]:
     from app import api
     eu, voice = await _caller(ctx)
-    if voice:
-        raise ToolError(VOICE_ACT_REFUSED)
     # A voz não é sessão: recado dela para uma sessão chamada "voz" não volta para ela mesma.
     if not voice and (alvo == eu or (settings.server_id and alvo == f"{settings.server_id}::{eu}")):
         raise ToolError(f"recusado: '{alvo}' é esta sessão — o recado voltaria pra você. "
@@ -148,8 +148,6 @@ async def send(ctx: Context, alvo: str, texto: str, tmux: bool = False) -> dict[
         rec = external_pairs.by_address(alvo)
         if rec is not None:
             from app import external_pair_api
-            if voice:
-                raise ToolError(f"'{alvo}' é par externo de '{rec.local_session}'; a voz não fala com par externo")
             if rec.local_session != eu:
                 raise ToolError(f"'{alvo}' é par externo de '{rec.local_session}', não desta sessão")
             try:
@@ -178,10 +176,10 @@ async def send(ctx: Context, alvo: str, texto: str, tmux: bool = False) -> dict[
 @mcp.tool(description="Aviso pro grupo de pareamento desta sessão, como `hangar-send --group <msg>`: "
                       "chega como `[grupo: <você>]` nos demais. Marco, não conversa: NUNCA responda um "
                       "`[grupo: …]` com isto. O backend escolhe o transporte pra cada membro. Uma "
-                      "frase direta, sem saudação: cada membro paga o texto como prompt.")
-async def group(ctx: Context, texto: str, tmux: bool = False) -> dict[str, Any]:
+                      "frase direta, sem saudação: cada membro paga o texto como prompt." + _SESSAO_DESC)
+async def group(ctx: Context, texto: str, tmux: bool = False, sessao: str = "") -> dict[str, Any]:
     from app import api
-    eu = await _eu(ctx)
+    eu = await _eu(ctx, sessao)
     try:
         return await api.group_message(eu, api.GroupMsgBody(text=texto, forcar_tmux=tmux))
     except HTTPException as e:
@@ -193,11 +191,12 @@ async def group(ctx: Context, texto: str, tmux: bool = False) -> dict[str, Any]:
                       "`servidor::sessao`. `tarefa` é o título do grupo na lista: chave + assunto "
                       "numa linha (ex: `ABC-1234 Tela de login`); o combinado vai por `send`. "
                       "Só quando o usuário pedir pareamento. `orq`: grupo de orquestração (skill "
-                      "orquestrar), como `--pair --orq`; com `alvo` vazio o grupo tem só esta sessão.")
+                      "orquestrar), como `--pair --orq`; com `alvo` vazio o grupo tem só esta sessão."
+                      + _SESSAO_DESC)
 async def pair(ctx: Context, alvo: str = "", tarefa: str = "", substituir_tarefa: bool = False,
-               orq: bool = False) -> dict[str, Any]:
+               orq: bool = False, sessao: str = "") -> dict[str, Any]:
     from app import api
-    eu = await _eu(ctx)
+    eu = await _eu(ctx, sessao)
     try:
         return await api.pair_session(eu, api.PairBody(peer=alvo, task=tarefa, replace_task=substituir_tarefa,
                                                        orq=orq))
@@ -205,10 +204,10 @@ async def pair(ctx: Context, alvo: str = "", tarefa: str = "", substituir_tarefa
         raise ToolError(_detalhe(e)) from e
 
 
-@mcp.tool(description="Desfaz o pareamento desta sessão (`hangar-send --unpair`).")
-async def unpair(ctx: Context) -> dict[str, Any]:
+@mcp.tool(description="Desfaz o pareamento desta sessão (`hangar-send --unpair`)." + _SESSAO_DESC)
+async def unpair(ctx: Context, sessao: str = "") -> dict[str, Any]:
     from app import api
-    eu = await _eu(ctx)
+    eu = await _eu(ctx, sessao)
     try:
         return await api.unpair_session(eu)
     except HTTPException as e:
@@ -242,8 +241,6 @@ async def new_session(ctx: Context, nome: str, cwd: str, provider: str | None = 
                       codex_account: str | None = None, subagent_model: str | None = None) -> dict[str, Any]:
     from app import api
     eu, voice = await _caller(ctx)
-    if voice:
-        raise ToolError(VOICE_ACT_REFUSED)
     if provider is None:
         provider = await api._default_session_provider(conta, engine)
     if headless and provider not in ("claude", "codex"):
@@ -321,10 +318,11 @@ async def _verbo_nav(sessao: str, verbo: str, args: list[str], aba: int | None) 
 @mcp.tool(description="Abre o navegador embutido desta sessão no app desktop do Hangar, como "
                       "`hangar-preview open <url>`. No app nativo (Windows e Linux) o painel Navegador "
                       "não monta sozinho: diga que a página está aberta no navegador da sessão, nunca "
-                      "que apareceu na tela do usuário. Só no Electron antigo o painel monta sozinho.")
-async def browser_open(ctx: Context, url: str) -> dict[str, Any]:
+                      "que apareceu na tela do usuário. Só no Electron antigo o painel monta sozinho."
+                      + _SESSAO_DESC)
+async def browser_open(ctx: Context, url: str, sessao: str = "") -> dict[str, Any]:
     from app import api
-    eu = await _eu(ctx)
+    eu = await _eu(ctx, sessao)
     try:
         await api.abrir_nav_sessao(eu, api.NavBody(url=url))
     except HTTPException as e:
@@ -358,13 +356,14 @@ _HTML_RENDER = (
     "height (80-2000) só para limitar a moldura e deixar o resto rolar dentro dela.")
 
 
-@mcp.tool(description=_HTML_RENDER)
+@mcp.tool(description=_HTML_RENDER + _SESSAO_DESC)
 async def html_render(ctx: Context, title: str, html: str | None = None, url: str | None = None,
-                      height: int | None = None, draft: bool = False, own_theme: bool = False) -> dict[str, Any]:
+                      height: int | None = None, draft: bool = False, own_theme: bool = False,
+                      sessao: str = "") -> dict[str, Any]:
     from app import pages_bridge
     if (html is None) == (url is None):
         raise ToolError("erro_pagina_html_ou_url: passe html ou url, nunca os dois")
-    eu = await _eu(ctx)
+    eu = await _eu(ctx, sessao)
     payload: dict[str, Any] = {"session": eu, "title": title, "draft": draft}
     if url is not None:
         payload["url"] = url
@@ -388,17 +387,18 @@ async def html_render(ctx: Context, title: str, html: str | None = None, url: st
                       "do PNG), tema <claro|escuro|sistema>, layout [mobile|desktop|<largura> <altura>], "
                       "close. Só no Electron antigo: tab-list, tab-new <url>, tab-switch <id>, "
                       "tab-close [id] e `aba` (age numa aba sem trocar a que o usuário vê); o app "
-                      "nativo tem um navegador por sessão, sem abas.")
-async def browser(ctx: Context, verbo: str, args: list[str | int] | None = None, aba: int | None = None) -> str:
-    eu = await _eu(ctx)
+                      "nativo tem um navegador por sessão, sem abas." + _SESSAO_DESC)
+async def browser(ctx: Context, verbo: str, args: list[str | int] | None = None, aba: int | None = None,
+                  sessao: str = "") -> str:
+    eu = await _eu(ctx, sessao)
     async with _travas_nav.setdefault(eu, asyncio.Lock()):
         return await _verbo_nav(eu, verbo, [str(a) for a in args or []], aba)
 
 
 @mcp.tool(description="Vários verbos do navegador em sequência, como `hangar-preview batch`: para no "
-                      "primeiro que falhar e diz em qual. Cada passo é {verbo, args?, aba?}.")
-async def browser_batch(ctx: Context, passos: list[dict[str, Any]]) -> dict[str, Any]:
-    eu = await _eu(ctx)
+                      "primeiro que falhar e diz em qual. Cada passo é {verbo, args?, aba?}." + _SESSAO_DESC)
+async def browser_batch(ctx: Context, passos: list[dict[str, Any]], sessao: str = "") -> dict[str, Any]:
+    eu = await _eu(ctx, sessao)
     feitos: list[str] = []
     async with _travas_nav.setdefault(eu, asyncio.Lock()):
         for i, p in enumerate(passos):

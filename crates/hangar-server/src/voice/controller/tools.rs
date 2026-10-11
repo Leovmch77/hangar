@@ -1,10 +1,11 @@
 //! Ferramentas de sessão e o Jev: o nome falado vira sessão pela lista fresca e a ação roda numa tarefa.
 use super::{Controller, Ctx, Done, Forwarded, Key, Want, watch};
 use crate::voice::call::CallId;
+use crate::groups::peers::TOO_LARGE;
 use crate::voice::machines::{HERE, Machines};
 use crate::voice::organizer::{OpenRequest, SEND_DUPLICATE, confirmed_switch_target, mentions_session, session_context, switch_asked, switch_confirmed,
     tool_reply};
-use crate::voice::rules::{JEV_SWITCH_ECHO, Listed, after_switch, SessionMatch, TALKED_WINDOW, can_leave, can_pair, conversation_pairs, jev_action_choice,
+use crate::voice::rules::{JEV_SWITCH_ECHO, Listed, after_switch, SessionMatch, TALKED_WINDOW, can_leave, can_pair, jev_action_choice,
     jev_send_choice, jev_switch_choice, looks_like_path, machine_aliases, match_qualified, match_session, narrow_by_context, pick_folder,
     question_text, send_reply, sessions_text, unique_name, Delivery};
 use crate::voice::{computer, jev, log, observe};
@@ -19,6 +20,9 @@ pub(super) struct JevAsked {
 }
 
 type Rows = [(String, SessionRow)];
+
+/// Eventos lidos de um peer quando o histórico inteiro não cabe na resposta dele.
+const PEER_HISTORY: usize = 400;
 
 pub(super) fn folder_name(path: &str) -> &str { path.trim_end_matches(['/', '\\']).rsplit(['/', '\\']).next().unwrap_or_default() }
 
@@ -51,6 +55,15 @@ impl Controller {
             },
             Want::Interrupt { call, name, confirmed, turn } => self.interrupt(call, &rows, &unreachable, &name, confirmed, &turn),
             Want::Machines(call) => self.list_machines(call, &rows, &unreachable),
+            Want::Read { call, name, user_turns } => match self.resolve("read_session", &rows, &unreachable, &name) {
+                Ok(i) => {
+                    let key = (rows[i].0.clone(), rows[i].1.name.clone());
+                    let head = if self.screen_key().as_ref() == Some(&key) { format!("Sessão na tela: {}.", key.1) }
+                        else { format!("Sessão {} em {} (fora da tela).", key.1, self.machines.label(&key.0)) };
+                    self.read_key(call, key, head, user_turns);
+                }
+                Err(text) => self.voice.reply(call, tool_reply(text, false)),
+            },
         }
         self.rows = rows;
         self.rows_changed(&unreachable);
@@ -335,18 +348,35 @@ impl Controller {
         });
     }
 
-    /// A sessão da tela; com a tela vazia, a última que esteve nela (a conversa continua sobre ela).
-    pub(super) fn read_session(&mut self, call: CallId) {
+    /// A sessão nomeada (pela lista fresca, como o envio); sem nome, a da tela, e com a tela vazia a última que esteve nela.
+    pub(super) fn read_session(&mut self, call: CallId, session: Option<String>, user_turns: usize) {
+        if let Some(name) = session { self.lookup(Want::Read { call, name, user_turns }); return; }
         let on_screen = self.screen_key().is_some();
         let Some(key) = self.talk_key() else {
             self.voice.reply(call, tool_reply("Nenhuma sessão na tela nem antes dela nesta conversa; não há o que ler.", false));
             return;
         };
+        let head = if on_screen { format!("Sessão na tela: {}.", key.1) } else { format!("Nenhuma sessão na tela; a conversa é sobre a sessão {}.", key.1) };
+        self.read_key(call, key, head, user_turns);
+    }
+
+    /// O histórico inteiro: o pedido do usuário costuma ficar longe do fim, atrás das ferramentas.
+    fn read_key(&mut self, call: CallId, key: Key, head: String, user_turns: usize) {
         self.talked.insert(key.clone(), Instant::now());
         let ctx = self.ctx();
         tokio::spawn(async move {
-            match ctx.machines.history(&key.0, &key.1, 60).await {
-                Ok(events) => ctx.voice.reply(call, tool_reply(session_context(&key.1, on_screen, &conversation_pairs(&events)), true)),
+            let mut read = ctx.machines.history(&key.0, &key.1, 0).await;
+            let mut head = head;
+            let mut cut = false;
+            if let Err(error) = &read { log(format!("read_session first read failed: {error}")); }
+            // O cliente de peer recusa corpo acima de 1 MiB: conversa longa de outra máquina cai para um recorte grande.
+            if key.0 != HERE && matches!(&read, Err(error) if error == TOO_LARGE) {
+                read = ctx.machines.history(&key.0, &key.1, PEER_HISTORY).await;
+                head = format!("{head} (histórico recortado nos últimos {PEER_HISTORY} eventos)");
+                cut = true;
+            }
+            match read {
+                Ok(events) => ctx.voice.reply(call, tool_reply(session_context(&head, &events, user_turns, cut), true)),
                 Err(error) => ctx.fail(call, "read_session", format!("Não consegui ler a sessão {}: {error}", key.1)),
             }
         });

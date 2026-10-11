@@ -196,11 +196,6 @@ pub fn match_qualified(spoken: &str, names: &[&str], machines: &[Vec<String>], o
     }
 }
 
-pub fn conversation_pairs(events: &[hangar_api::chat::ChatEvent]) -> Vec<(String, String)> {
-    events.iter().filter(|e| matches!(e.kind.as_str(), "user_msg" | "assistant_msg") && e.text.as_deref().is_some_and(|t| !t.trim().is_empty()))
-        .map(|e| (e.kind.as_str().to_owned(), e.text.clone().unwrap_or_default())).collect()
-}
-
 /// `(id, kind, text)` → `(id da última resposta, respostas depois da última fala do usuário)`.
 pub fn last_reply(events: &[(String, String, String)]) -> Option<(String, String)> {
     let start = events.iter().rposition(|(_, kind, _)| kind == "user_msg").map(|i| i + 1).unwrap_or(0);

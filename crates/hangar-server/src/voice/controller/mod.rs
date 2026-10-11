@@ -93,6 +93,7 @@ enum Want {
     Plan { name: String, text: String },
     Interrupt { call: CallId, name: String, confirmed: bool, turn: String },
     Machines(CallId),
+    Read { call: CallId, name: String, user_turns: usize },
 }
 
 enum Done {
@@ -150,6 +151,8 @@ pub struct Controller {
     interrupt_gate: ConfirmGate<Key>,
     /// `(máquina, chave do atalho)`; o atalho só se resolve na tarefa de rede, por isso compartilhado.
     shortcut_gate: Arc<Mutex<ConfirmGate<Key>>>,
+    /// `hangar_api` destrutiva: a mesma máquina, método, rota e corpo.
+    api_gate: ConfirmGate<String>,
     closing: bool,
     /// A última sessão real da tela: com a tela vazia, a conversa continua sobre ela.
     last_screen: Option<Screen>,
@@ -187,7 +190,7 @@ impl Controller {
         let target = device.screen();
         Self { voice, machines, jev, device, gate, diag, done, done_rx: Some(done_rx), backoff: Arc::default(), client: String::new(),
             actions: Vec::new(), rows: Vec::new(), followed: HashSet::new(), watched: HashSet::new(), talked: HashMap::new(), jev_switched: None,
-            close_gate: ConfirmGate::default(), interrupt_gate: ConfirmGate::default(), shortcut_gate: Arc::default(), closing: false, last_screen: target.clone(), sent_turn: None, pending_question: None,
+            close_gate: ConfirmGate::default(), interrupt_gate: ConfirmGate::default(), shortcut_gate: Arc::default(), api_gate: ConfirmGate::default(), closing: false, last_screen: target.clone(), sent_turn: None, pending_question: None,
             spoken: HashSet::new(), heard_recent: String::new(), session_names: Vec::new(), target, plan_key: None, computer: None, detached: false, last_failure: None, forwarded: HashMap::new(),
             next_tool: 0, owner_epoch: 0, next_offer: 0, latest_offer: None, snap: Snapshot { phase: "connecting", ..Snapshot::default() }, sent_state: None, sent_at: None, dirty: true }
     }
@@ -315,7 +318,7 @@ impl Controller {
                 self.snap.backstage.push_back(line);
             }
             VoiceEvent::Answer(seq, sdp) => self.answer(seq, sdp),
-            VoiceEvent::ReadSession(call) => self.read_session(call),
+            VoiceEvent::ReadSession { call, session, user_turns } => self.read_session(call, session, user_turns),
             VoiceEvent::Send { call, request, session, turn } => self.send(call, request, session, turn),
             VoiceEvent::AskSession(question) => self.ask(question),
             VoiceEvent::SendPlan { session, text } => self.send_plan(session, text),

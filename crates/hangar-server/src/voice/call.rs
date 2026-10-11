@@ -3,7 +3,7 @@
 use super::{log, observe, organizer, usage};
 use super::organizer::{Effective, FinishStep, MIC_VOICE_LEVEL, Mode, ModeModel, ModeModels, Planner, REPEAT_NOTE, REPEAT_WINDOW, Results, SpeechHold,
     ConfirmGate, SendGate, SpokenTurns, ToolCall, finish_request, parse_tool, repeated_handoff, send_allowed, settings_update, spoken_input, tool_reply,
-    organizer_start, ORGANIZER_PROMPT};
+    organizer_start};
 use super::rpc::{Incoming, Rpc, RpcError, handshake};
 use serde_json::{Value, json};
 use std::{collections::VecDeque, path::PathBuf, sync::{Arc, atomic::{AtomicBool, Ordering}}, time::{Duration, Instant}};
@@ -20,7 +20,9 @@ pub enum VoiceFailure { Microphone, Speaker, AppServer, Realtime(String), Networ
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum Activity { #[default] Idle, Thinking, Searching, Working }
 pub enum VoiceEvent {
-    Phase(Phase), Draft(Option<String>), Activity(Activity), ReadSession(CallId), Failed(VoiceFailure),
+    Phase(Phase), Draft(Option<String>), Activity(Activity), Failed(VoiceFailure),
+    /// `session`: nome falado (sem ele, a da tela); `user_turns`: de qual pedido do usuário começar, contando do fim.
+    ReadSession { call: CallId, session: Option<String>, user_turns: usize },
     /// Resposta SDP à oferta `seq` (a primeira e a de cada passagem).
     Answer(u64, String),
     /// `turn`: a fala que pediu. A tela não manda duas vezes à mesma sessão no mesmo turno.
@@ -275,10 +277,10 @@ async fn run_call(options: CallOptions, spawn: Spawn, events: &async_channel::Se
             None => return Err(failed("device offer")(VoiceFailure::Closed)),
         }
     };
-    let mut realtime = json!({"threadId": thread, "version": "v3", "outputModality": "audio", "prompt": organizer::voice_prompt(onboarding),
+    let mut realtime = json!({"threadId": thread, "version": "v3", "outputModality": "audio", "prompt": organizer::voice_prompt(onboarding, &options.tools, options.hangar_mcp.is_some()),
         // O aviso curto de que ouviu sai da própria voz; o resumo do raciocínio deixa a voz saber o que o organizador faz.
         "includeStartupContext": false, "delegationAckFiller": true, "backendReasoningStatus": true, "clientManagedHandoffs": false,
-        "realtimeStartInstructions": ORGANIZER_PROMPT, "initialItems": [{"role": "developer", "text": options.context}]});
+        "realtimeStartInstructions": organizer::REALTIME_START, "initialItems": [{"role": "developer", "text": options.context}]});
     if let Some(voice) = &options.voice { realtime["voice"] = json!(voice); }
     let realtime_start = realtime.clone();
     realtime["transport"] = json!({"type": "webrtc", "sdp": &offer_sdp});
@@ -494,7 +496,10 @@ async fn run_call(options: CallOptions, spawn: Spawn, events: &async_channel::Se
                     let tool = params["tool"].as_str().unwrap_or("?").to_owned();
                     let _ = events.send(VoiceEvent::Action(Some(organizer::OrganizerAction::Tool(tool.clone())))).await;
                     let outcome = match parse_tool(&params) {
-                        ToolCall::ReadSession => { let _ = events.send(VoiceEvent::ReadSession(CallId(id))).await; "read" }
+                        ToolCall::ReadSession { session, user_turns } => {
+                            let _ = events.send(VoiceEvent::ReadSession { call: CallId(id), session, user_turns }).await;
+                            "read"
+                        }
                         ToolCall::Send { .. } | ToolCall::Hold(_) if !spoken.allows(&params) => {
                             let _ = rpc.respond(id, tool_reply("Pedido recusado: só uma fala do usuário pode gerar envio.", false)).await;
                             "refused-not-spoken"
@@ -1157,6 +1162,10 @@ mod tests {
         let start = start.unwrap();
         assert_eq!(start["params"]["transport"]["sdp"], "v=0 offer A");
         assert_eq!(start["params"]["includeStartupContext"], false);
+        // O ORGANIZER_PROMPT já é a base do organizador: aqui vai só a nota curta da passagem pela voz.
+        assert_eq!(start["params"]["realtimeStartInstructions"], organizer::REALTIME_START);
+        assert_ne!(start["params"]["realtimeStartInstructions"], organizer::ORGANIZER_PROMPT);
+        assert!(start["params"]["prompt"].as_str().unwrap().contains("O que o organizador consegue nesta conversa"));
     }
 
     #[tokio::test]

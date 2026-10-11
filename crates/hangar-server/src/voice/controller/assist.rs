@@ -173,7 +173,7 @@ impl Controller {
         log(format!("assist {}", match &assist {
             Assist::RecentConversations { .. } => "recent", Assist::ReopenConversation { .. } => "reopen", Assist::ListFolders { .. } => "folders",
             Assist::ListShortcuts { .. } => "shortcuts", Assist::RunShortcut { .. } => "run-shortcut", Assist::ListMachines => "machines",
-            Assist::InterruptSession { .. } => "interrupt",
+            Assist::InterruptSession { .. } => "interrupt", Assist::HangarApi { .. } => "api",
         }));
         match assist {
             Assist::ListMachines => self.lookup(Want::Machines(call)),
@@ -199,7 +199,45 @@ impl Controller {
                 let ask = RunAsk { spoken: name, server, session, any, confirmed, turn, gate: self.shortcut_gate.clone() };
                 tokio::spawn(run_shortcut(ctx, call, ask));
             }
+            Assist::HangarApi { method, path, body, server, confirmed } => self.hangar_api(call, ApiAsk { method, path, body, server, confirmed }, &turn),
         }
+    }
+
+    /// Qualquer rota `/api/` com o token do dono, que nunca sai daqui. A destrutiva pede o sim em duas chamadas, como fechar.
+    fn hangar_api(&mut self, call: CallId, ask: ApiAsk, turn: &str) {
+        let ApiAsk { method, path, body, server, confirmed } = ask;
+        let method = match method.as_str() {
+            "GET" => reqwest::Method::GET, "POST" => reqwest::Method::POST, "PUT" => reqwest::Method::PUT,
+            "PATCH" => reqwest::Method::PATCH, "DELETE" => reqwest::Method::DELETE,
+            _ => { self.voice.reply(call, tool_reply("method deve ser GET, POST, PUT, PATCH ou DELETE.", false)); return; }
+        };
+        if let Err(text) = api_path(&path) { log("hangar_api refused path"); self.voice.reply(call, tool_reply(text, false)); return; }
+        let machine = match pick_machine(&self.machines, server.as_deref()) {
+            Ok(machine) => machine,
+            Err(text) => { self.voice.reply(call, tool_reply(text, false)); return; }
+        };
+        let destructive = api_destructive(&method, &path);
+        if destructive {
+            let target = format!("{machine} {method} {path} {}", body.as_ref().map(Value::to_string).unwrap_or_default());
+            if !self.api_gate.check(target, confirmed, turn, Instant::now()) {
+                log("hangar_api armed");
+                self.voice.reply(call, tool_reply(format!("Nada foi feito. Confirme com o usuário, dizendo o que isso faz: {method} {path} em {}? \
+                    Só depois de um sim explícito, chame hangar_api de novo com o mesmo pedido e confirmed true.", self.machines.label(&machine)), true));
+                return;
+            }
+        }
+        // Só o método no diário: a rota pode levar nome de sessão ou texto.
+        log(format!("hangar_api {method} destructive={destructive}"));
+        let ctx = self.ctx();
+        tokio::spawn(async move {
+            match ctx.machines.api(&machine, method, &path, body).await {
+                Ok((status, value)) => {
+                    log(format!("hangar_api status={status}"));
+                    ctx.voice.reply(call, tool_reply(api_text(status, &value), (200..300).contains(&status)));
+                }
+                Err(text) => ctx.fail(call, "hangar_api", format!("A chamada não teve resposta: {text}")),
+            }
+        });
     }
 
     /// A sessão da conversa, se for da máquina falada (sem máquina, desta).
@@ -372,6 +410,42 @@ async fn list_shortcuts(ctx: Ctx, call: CallId, server: Option<String>, session:
     }
 }
 
+/// O que `hangar_api` leva da chamada.
+pub(super) struct ApiAsk { pub method: String, pub path: String, pub body: Option<Value>, pub server: Option<String>, pub confirmed: bool }
+
+/// Teto, em caracteres, da resposta da API que volta ao organizador.
+const API_CAP: usize = 30_000;
+
+/// Só rotas `/api/`, sem segmento `.`/`..` (nem codificado) nem barra invertida: a URL normaliza e sairia de `/api/`.
+pub(super) fn api_path(path: &str) -> Result<(), String> {
+    let route = path.split(['?', '#']).next().unwrap_or_default();
+    let escapes = route.to_lowercase().contains("%2e") || route.split('/').any(|s| s == "." || s == "..")
+        || path.contains('\\') || path.to_lowercase().contains("%5c");
+    if !path.starts_with("/api/") || escapes || path.chars().any(char::is_whitespace) {
+        return Err("Só rotas que começam por /api/ (ex.: /api/sessions), sem espaço, barra invertida nem . ou .. no caminho; nada foi chamado.".into());
+    }
+    Ok(())
+}
+
+/// DELETE, e a ação no fim da rota que fecha, mata, apaga, descarta, para, interrompe, publica, reinicia, reverte ou desloga.
+pub(super) fn api_destructive(method: &reqwest::Method, path: &str) -> bool {
+    if *method == reqwest::Method::DELETE { return true; }
+    if *method == reqwest::Method::GET { return false; }
+    let last = path.split(['?', '#']).next().unwrap_or_default().trim_end_matches('/').rsplit('/').next().unwrap_or_default().to_lowercase();
+    ["close", "kill", "delete", "remove", "discard", "reset", "stop", "interrupt", "push", "restart", "reiniciar",
+        "revert", "logout"].iter()
+        .any(|w| last == *w || last.starts_with(&format!("{w}-")))
+}
+
+/// Status e corpo; o corpo longo é cortado e a resposta diz que foi.
+pub(super) fn api_text(status: u16, value: &Value) -> String {
+    let body = value.to_string();
+    let total = body.chars().count();
+    if total <= API_CAP { return format!("HTTP {status}\n{body}"); }
+    format!("HTTP {status} (resposta cortada: {API_CAP} de {total} caracteres; peça menos, com filtro ou limit)\n{}",
+        body.chars().take(API_CAP).collect::<String>())
+}
+
 /// O que `run_shortcut` leva da chamada: a sessão da conversa nesta máquina (`session`), qualquer sessão dela (`any`,
 /// endereço do atalho "No Hangar") e a trava do sim.
 pub(super) struct RunAsk { pub spoken: String, pub server: Option<String>, pub session: Option<String>, pub any: Option<String>,
@@ -448,6 +522,29 @@ mod tests {
 
     fn closed(name: Option<&str>, cwd: &str, id: &str) -> Closed {
         Closed { project: "-p".into(), session_id: id.into(), cwd: Some(cwd.into()), name: name.map(str::to_owned), ..Closed::default() }
+    }
+
+    #[test]
+    fn api_only_under_api_and_destructive_by_method_or_action() {
+        assert!(api_path("/api/sessions").is_ok() && api_path("/api/search?q=a b").is_err(), "espaço na rota");
+        for bad in ["/mcp/", "api/sessions", "/api/../mcp/", "/api/%2E%2E/internal", "http://x/api/sessions", "/api/..\\mcp/",
+            "/api/x\\y", "/api/%5c..%5cmcp", "/api/%5C..", "/api/x?q=a%5Cb"] { assert!(api_path(bad).is_err(), "{bad}"); }
+        let (get, post, delete) = (reqwest::Method::GET, reqwest::Method::POST, reqwest::Method::DELETE);
+        assert!(api_destructive(&delete, "/api/sessions/web"));
+        for path in ["/api/worktrees/delete", "/api/worktrees/delete-merged", "/api/hangar-terminals/t1/close", "/api/sessions/x/git/push",
+            "/api/sessions/x/interrupt?clear=false", "/api/atualizacao/reiniciar", "/api/x/restart", "/api/x/git/revert", "/api/auth/logout"] {
+            assert!(api_destructive(&post, path), "{path}");
+        }
+        assert!(!api_destructive(&post, "/api/sessions/close-x/input"), "só a ação no fim conta, não o nome da sessão");
+        assert!(!api_destructive(&get, "/api/worktrees/delete") && !api_destructive(&post, "/api/archive/p/i/resume"));
+    }
+
+    #[test]
+    fn api_text_cuts_long_bodies_and_says_so() {
+        assert_eq!(api_text(200, &json!({"ok": true})), "HTTP 200\n{\"ok\":true}");
+        let long = api_text(200, &json!("x".repeat(40_000)));
+        assert!(long.starts_with("HTTP 200 (resposta cortada: 30000 de 40002 caracteres"), "{}", &long[..80]);
+        assert!(long.chars().count() < 30_200);
     }
 
     #[test]

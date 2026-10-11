@@ -1,6 +1,6 @@
 //! Onde a voz age: este servidor pela própria API HTTP (as mesmas rotas que os apps usam) e os peers.
 use super::rules::{Delivery, PairResult};
-use crate::groups::peers::PeerClient;
+use crate::groups::peers::{PeerClient, PeerError};
 use hangar_api::{chat::ChatEvent, session::SessionRow};
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use serde_json::{Value, json};
@@ -21,14 +21,36 @@ impl SelfApi {
         Self { base: format!("http://{addr}"), token: token.to_owned(), http }
     }
 
-    async fn call(&self, method: reqwest::Method, path: &str, body: Option<Value>) -> Result<Value, CallError> {
+    async fn send(&self, method: reqwest::Method, path: &str, body: Option<Value>) -> Result<reqwest::Response, CallError> {
         let mut req = self.http.request(method, format!("{}{path}", self.base)).bearer_auth(&self.token);
         if let Some(body) = body {
             req = req.header(reqwest::header::CONTENT_TYPE, "application/json").body(body.to_string());
         }
-        let resp = req.send().await.map_err(|_| CallError { certain: false, text: "O servidor não respondeu.".to_owned() })?;
+        req.send().await.map_err(|_| CallError { certain: false, text: "O servidor não respondeu.".to_owned() })
+    }
+
+    /// Status e corpo JSON; corpo ilegível vira `Null`. Só a falta de resposta é erro.
+    async fn raw(&self, method: reqwest::Method, path: &str, body: Option<Value>) -> Result<(reqwest::StatusCode, Value), CallError> {
+        let resp = self.send(method, path, body).await?;
         let status = resp.status();
         let value: Value = resp.bytes().await.ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(Value::Null);
+        Ok((status, value))
+    }
+
+    /// Status e corpo como vieram: vazio é `Null`, não JSON vira texto; corpo que não chegou inteiro é erro.
+    async fn raw_body(&self, method: reqwest::Method, path: &str, body: Option<Value>) -> Result<(reqwest::StatusCode, Value), CallError> {
+        let resp = self.send(method, path, body).await?;
+        let status = resp.status();
+        let bytes = resp.bytes().await
+            .map_err(|_| CallError { certain: false, text: format!("O servidor respondeu {status}, mas o corpo não chegou inteiro.") })?;
+        let value = if bytes.iter().all(u8::is_ascii_whitespace) { Value::Null } else {
+            serde_json::from_slice(&bytes).unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&bytes).into_owned()))
+        };
+        Ok((status, value))
+    }
+
+    async fn call(&self, method: reqwest::Method, path: &str, body: Option<Value>) -> Result<Value, CallError> {
+        let (status, value) = self.raw(method, path, body).await?;
         if status.is_success() { return Ok(value); }
         // `detail.msg` é o formato `erro()` do Python (código, parâmetros e frase).
         let text = value["detail"]["message"].as_str()
@@ -73,6 +95,22 @@ pub struct Machines { pub own: SelfApi, pub peers: Arc<PeerClient>, pub own_labe
 
 fn enc(name: &str) -> String { utf8_percent_encode(name, NON_ALPHANUMERIC).to_string() }
 
+fn redact_str(text: &str, tokens: &[String]) -> String {
+    tokens.iter().fold(text.to_owned(), |text, token| text.replace(token.as_str(), "[token]"))
+}
+
+/// Troca cada token por `[token]` em todo texto e chave do JSON.
+fn redact(value: &mut Value, tokens: &[String]) {
+    match value {
+        Value::String(text) => *text = redact_str(text, tokens),
+        Value::Array(items) => items.iter_mut().for_each(|v| redact(v, tokens)),
+        Value::Object(map) => {
+            *map = std::mem::take(map).into_iter().map(|(k, mut v)| { redact(&mut v, tokens); (redact_str(&k, tokens), v) }).collect();
+        }
+        _ => {}
+    }
+}
+
 impl Machines {
     pub async fn call(&self, machine: &str, method: reqwest::Method, path: &str, body: Option<Value>) -> Result<Value, String> {
         self.call_checked(machine, method, path, body).await.map_err(|e| e.text)
@@ -82,6 +120,27 @@ impl Machines {
         if machine == HERE { return self.own.call(method, path, body).await; }
         self.peers.call(machine, method, path, body.as_ref()).await.map(|v| v.unwrap_or(Value::Null))
             .map_err(|e| CallError { certain: !e.is_transport(), text: e.text(machine) })
+    }
+
+    /// `(status, corpo)` da rota, recusa incluída, para a `hangar_api` da voz. Os tokens (do dono e dos peers) saem do
+    /// que volta como `[token]`: uma rota pode devolver link com `?token=`.
+    pub async fn api(&self, machine: &str, method: reqwest::Method, path: &str, body: Option<Value>) -> Result<(u16, Value), String> {
+        let got = if machine == HERE {
+            self.own.raw_body(method, path, body).await.map(|(s, v)| (s.as_u16(), v)).map_err(|e| e.text)
+        } else {
+            match self.peers.call_status(machine, method, path, body.as_ref()).await {
+                Ok((status, value)) => Ok((status, value.unwrap_or(Value::Null))),
+                Err(PeerError::Refused { status, detail }) => Ok((status, json!({"detail": detail}))),
+                Err(e) => Err(e.text(machine)),
+            }
+        };
+        let mut tokens = self.peers.tokens().await;
+        tokens.push(self.own.token.clone());
+        tokens.retain(|t| !t.is_empty());
+        match got {
+            Ok((status, mut value)) => { redact(&mut value, &tokens); Ok((status, value)) }
+            Err(text) => Err(redact_str(&text, &tokens)),
+        }
     }
 
     /// Nome falado da máquina.
@@ -204,6 +263,26 @@ mod tests {
         let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, b"segredo");
         let expected: String = ring::hmac::sign(&key, format!("hangar-voice:{nonce}").as_bytes()).as_ref().iter().map(|b| format!("{b:02x}")).collect();
         assert_eq!(tag, expected);
+    }
+
+    #[tokio::test]
+    async fn api_hides_tokens_and_keeps_text_and_empty_bodies() {
+        let app = Router::new()
+            .route("/api/link", get(|| async { js(json!({"url": "http://x/?token=dono-123", "peer": ["vps segredo-peer"]})) }))
+            .route("/api/texto", get(|| async { "texto puro" }))
+            .route("/api/vazio", post(|| async { "" }));
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+        let dir = tempfile::tempdir().unwrap();
+        let book = dir.path().join("peers.json");
+        std::fs::write(&book, json!({"vps": {"base_url": "http://127.0.0.1:9", "token": "segredo-peer"}}).to_string()).unwrap();
+        let m = Machines { own: SelfApi::new(addr, "dono-123"), peers: Arc::new(PeerClient::new(PeerBook::new(Some(book)))), own_label: "casa".into() };
+        let (status, body) = m.api(HERE, reqwest::Method::GET, "/api/link", None).await.unwrap();
+        assert_eq!(status, 200);
+        assert_eq!(body, json!({"url": "http://x/?token=[token]", "peer": ["vps [token]"]}));
+        assert_eq!(m.api(HERE, reqwest::Method::GET, "/api/texto", None).await.unwrap().1, json!("texto puro"));
+        assert_eq!(m.api(HERE, reqwest::Method::POST, "/api/vazio", None).await.unwrap().1, Value::Null);
     }
 
     #[tokio::test]

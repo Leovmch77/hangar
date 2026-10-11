@@ -315,9 +315,13 @@ válido (Let's Encrypt) → escaneie o QR / preencha o token → **Adicionar à 
     auditoria-migracao", "reabre a última que eu fechei"), que volta com o nome que tinha e abre na
     tela; diz o que você fechou e acha conversa pelo assunto; lista as pastas onde dá para abrir sessão
     e abre sessão nova com o agente, modelo, conta ou modo que você disser; roda os atalhos do Hangar
-    ("abre a VM"); diz quais máquinas estão respondendo; interrompe uma sessão. Fechar e interromper
-    sessão, atalho marcado para confirmar, atalho de comando do repositório e comando que apaga ou
-    publica algo sempre esperam o seu "sim" falado. Ela usa os botões
+    ("abre a VM"); diz quais máquinas estão respondendo; interrompe uma sessão. Explica o que uma
+    sessão fez a partir do seu pedido a ela ("o que a web fez com o que eu pedi?"), mesmo fora da tela
+    e mesmo depois de muitas ferramentas, e volta a pedidos anteriores se você quiser. Usa também o
+    resto do Hangar (qualquer rota da API, em qualquer máquina, e as ferramentas do MCP `hangar`:
+    recado, sessão nova, grupo, navegador da sessão, página na conversa), sem nunca ver o token. Fechar
+    e interromper sessão, apagar, parar ou publicar pela API, atalho marcado para confirmar, atalho de
+    comando do repositório e comando que apaga ou publica algo sempre esperam o seu "sim" falado. Ela usa os botões
     da tela só quando não há outro jeito.
   - **Ajustes** (conta Codex, voz, modelo, esforço e velocidade de cada modo) ficam salvos no
     servidor e valem para qualquer aparelho.

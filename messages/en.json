@@ -7880,6 +7880,7 @@
   "native_voice_tool_list_shortcuts": "Reading the shortcuts",
   "native_voice_tool_run_shortcut": "Running the shortcut",
   "native_voice_tool_list_machines": "Checking the machines",
+  "native_voice_tool_hangar_api": "Using the Hangar API",
   "native_voice_tool_follow_session": "Updating followed sessions",
   "native_voice_organizer_tier": "Organizer speed",
   "native_voice_tier_account": "Account's",
