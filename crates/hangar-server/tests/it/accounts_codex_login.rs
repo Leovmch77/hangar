@@ -281,7 +281,11 @@ async fn native_secondary_writer_retains_ownership(start: bool) {
     let request = tokio::spawn(operation(service.clone()));
     let arrived = tokio::task::spawn_blocking(move || entered.recv_timeout(Duration::from_secs(20))).await.unwrap();
     if start { let started = request.await.unwrap(); assert!(started.is_ok(), "{started:?}"); }
-    else if arrived.is_err() { panic!("a propagação não chegou à barreira: {:?}", request.await); }
+    else if arrived.is_err() {
+        if request.is_finished() { panic!("a propagação terminou sem chegar à barreira: {:?}", request.await); }
+        request.abort();
+        panic!("a propagação não chegou à barreira em 20 s");
+    }
     else { request.abort(); let _ = request.await; }
     let held = arrived.is_ok() && service.locks.try_acquire(&key, GuardMode::Exclusive).is_err();
     // Sem a guarda presa, um segundo writer entraria na mesma barreira: a asserção de posse decide.
