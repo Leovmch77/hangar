@@ -200,7 +200,9 @@ const settingsRequest = (server: Server, init?: RequestInit): Promise<{ settings
 export type VoiceMemory = { id: string; kind: 'pessoa' | 'preferencia' | 'referencia' | 'projeto'; text: string; learned: string; confirmed: string };
 
 export async function listVoiceMemory(server: Server): Promise<VoiceMemory[]> {
-  return (await voiceRequest(server, '/api/voice/memory')).entries ?? [];
+  const body = await voiceRequest(server, '/api/voice/memory');
+  if (!Array.isArray(body.entries)) throw Object.assign(new Error('invalid_response'), { code: 'invalid_response' });
+  return body.entries;
 }
 
 export async function forgetVoiceMemory(server: Server, id: string): Promise<void> {

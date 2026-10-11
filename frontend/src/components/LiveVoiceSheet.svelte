@@ -342,7 +342,7 @@
               <ul class="lv-lines">
                 {#each memory.items as e (e.id)}
                   <li class="lv-mem">
-                    <span class="lv-mem-text"><span class="lv-mem-kind">{KIND[e.kind]()}</span> {e.text}
+                    <span class="lv-mem-text"><span class="lv-mem-kind">{(KIND[e.kind] ?? (() => e.kind))()}</span> {e.text}
                       {#if e.kind === 'projeto'}<span class="lv-muted"> · {e.confirmed}</span>{/if}</span>
                     <button type="button" class="lv-mem-del" aria-label={m.live_voice_memory_forget({ text: e.text })} onclick={() => drop(e.id)}>✕</button>
                   </li>

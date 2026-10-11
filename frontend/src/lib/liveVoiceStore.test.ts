@@ -142,6 +142,14 @@ describe('voice memory', () => {
     expect(probe.mock.calls[1][2]?.method).toBe('DELETE');
   });
 
+  it('a reply without entries is an error, not an empty list', async () => {
+    const { probeServerResponse } = await import('@hangar/core');
+    vi.mocked(probeServerResponse).mockResolvedValueOnce(res('{}'));
+    await store();
+    const { listVoiceMemory } = await import('./liveVoiceStore.svelte');
+    await expect(listVoiceMemory(home)).rejects.toThrow('invalid_response');
+  });
+
   it('a delete refused by the server throws its code', async () => {
     const { probeServerResponse } = await import('@hangar/core');
     vi.mocked(probeServerResponse).mockResolvedValueOnce(res('{"error_code":"memory_unknown"}', 404));
