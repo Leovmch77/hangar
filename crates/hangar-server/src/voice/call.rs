@@ -140,6 +140,8 @@ fn failure_kind(failure: &VoiceFailure) -> String {
 pub const COMMAND_LIMIT: Duration = Duration::from_secs(60);
 const COMMAND_LIMIT_NOTE: &str = "O comando demorou mais de 60 s e foi interrompido; não use comando que espera — consulte uma vez e responda.";
 const COMMAND_LIMIT_SPEECH: &str = "Parei o comando porque estava demorando demais.";
+/// Interrupção recusada: nova tentativa enquanto o comando seguir rodando.
+const COMMAND_RETRY: Duration = Duration::from_secs(5);
 
 /// Quanto uma oferta espera a resposta SDP.
 const ANSWER_WAIT: Duration = Duration::from_secs(20);
@@ -323,8 +325,8 @@ async fn run_call(options: CallOptions, spawn: Spawn, events: &async_channel::Se
     let mut out = Speech::default();
     // Envio recusado por falta de pedido: se a fala seguinte o completar, o organizador é avisado para tentar de novo.
     let mut refused_send: Option<Instant> = None;
-    // Comando do organizador em curso: item, turno e o prazo dele.
-    let mut running_command: Option<(String, String, Instant)> = None;
+    // Comandos do organizador em curso, por item: turno e prazo (um turno pode rodar mais de um).
+    let mut running_commands: std::collections::HashMap<String, (String, Instant)> = std::collections::HashMap::new();
     let outcome = loop {
         if audio_lost.is_some_and(|at| Instant::now() >= at) {
             break Err(failed("audio lost: no new offer")(VoiceFailure::AudioLostEnded));
@@ -333,12 +335,19 @@ async fn run_call(options: CallOptions, spawn: Spawn, events: &async_channel::Se
             log("handoff sdp answer timed out");
             next_offer(&mut answering, &mut waiting_offer, &mut early);
         }
-        if running_command.as_ref().is_some_and(|(_, _, at)| Instant::now() >= *at) && let Some((_, turn, _)) = running_command.take() {
+        let now = Instant::now();
+        if let Some(turn) = running_commands.values().find(|(_, at)| now >= *at).map(|(turn, _)| turn.clone()) {
             // Só o código: o texto do comando é conversa e não vai ao diário.
             let interrupted = rpc.request("turn/interrupt", json!({"threadId": thread, "turnId": turn})).await;
             log(format!("command too long: turn interrupted ok={}", interrupted.is_ok()));
-            pending_context = Some(match pending_context.take() { Some(old) => format!("{old}\n{COMMAND_LIMIT_NOTE}"), None => COMMAND_LIMIT_NOTE.to_owned() });
-            speak(&rpc, &thread, &mut out, COMMAND_LIMIT_SPEECH.to_owned(), "command limit").await;
+            if interrupted.is_ok() {
+                running_commands.retain(|_, (t, _)| *t != turn);
+                pending_context = Some(match pending_context.take() { Some(old) => format!("{old}\n{COMMAND_LIMIT_NOTE}"), None => COMMAND_LIMIT_NOTE.to_owned() });
+                speak(&rpc, &thread, &mut out, COMMAND_LIMIT_SPEECH.to_owned(), "command limit").await;
+            } else {
+                // Recusado (o turno pode ter acabado agora): sem dizer que parou; tenta de novo se ainda estiver rodando.
+                for (t, at) in running_commands.values_mut() { if *t == turn { *at = now + COMMAND_RETRY; } }
+            }
         }
         for text in out.hold.due(Instant::now()) {
             if out.away { out.park(text, "held"); } else { append_speech(&rpc, &thread, &text, "held").await; }
@@ -765,10 +774,13 @@ async fn run_call(options: CallOptions, spawn: Spawn, events: &async_channel::Se
                     let kind = params["item"]["type"].as_str().unwrap_or_default();
                     let item_id = params["item"]["id"].as_str().unwrap_or_default();
                     match method.as_str() {
-                        "item/started" if kind == "commandExecution" => running_command = Some((item_id.to_owned(),
-                            params["turnId"].as_str().unwrap_or_default().to_owned(), Instant::now() + command_limit)),
-                        "item/completed" if running_command.as_ref().is_some_and(|(id, ..)| id == item_id) => running_command = None,
-                        "turn/completed" => running_command = None,
+                        "item/started" if kind == "commandExecution" && !item_id.is_empty() => {
+                            if let Some(turn) = params["turnId"].as_str().filter(|t| !t.is_empty()) {
+                                running_commands.insert(item_id.to_owned(), (turn.to_owned(), Instant::now() + command_limit));
+                            }
+                        }
+                        "item/completed" => { running_commands.remove(item_id); }
+                        "turn/completed" => if let Some(done) = params["turn"]["id"].as_str() { running_commands.retain(|_, (t, _)| t != done); },
                         _ => {}
                     }
                     let next = match method.as_str() {
@@ -1204,6 +1216,31 @@ mod tests {
                 break;
             }
         }
+    }
+
+    /// O fim de outro turno não tira o comando da vigia; interrupção recusada não vira "parei o comando".
+    #[tokio::test]
+    async fn other_turn_ending_keeps_watching_and_a_refused_interrupt_says_nothing() {
+        let (spawn, mut seen, push) = fake_app_server();
+        let (tx, events) = async_channel::unbounded();
+        let voice = Voice::start(CallOptions { command_limit: Duration::from_millis(300), ..options(json!([])) }, spawn, tx);
+        voice.offer(1, "v=0 offer A".into(), "ctx".into());
+        next_answer(&events).await;
+        voice.live();
+        command(&push, "item/started", "cmd-1");
+        push.send(json!({"method": "turn/completed", "params": {"threadId": "t1", "turn": {"id": "turn-0", "status": "completed"}}})).unwrap();
+        let (mut interrupted, mut spoke) = (false, false);
+        while !(interrupted && spoke) {
+            let m = tokio::time::timeout(Duration::from_secs(5), seen.recv()).await.expect("prazo").unwrap();
+            if m["method"] == "turn/interrupt" { assert_eq!(m["params"]["turnId"], "turn-1"); interrupted = true; }
+            if m["method"] == "thread/realtime/appendSpeech" && m["params"]["text"] == COMMAND_LIMIT_SPEECH { spoke = true; }
+        }
+        push.send(json!({"method": "item/started", "params": {"threadId": "t1", "turnId": "turn-gone",
+            "item": {"type": "commandExecution", "id": "cmd-2"}}})).unwrap();
+        tokio::time::sleep(Duration::from_millis(900)).await;
+        let spoken = std::iter::from_fn(|| seen.try_recv().ok())
+            .filter(|m| m["method"] == "thread/realtime/appendSpeech" && m["params"]["text"] == COMMAND_LIMIT_SPEECH).count();
+        assert_eq!(spoken, 0, "o aviso do turn-1 já saiu antes; o do turn-gone recusado não sai");
     }
 
     #[tokio::test]

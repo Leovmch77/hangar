@@ -35,6 +35,11 @@ pub fn fake_app_server() -> (Spawn, tokio::sync::mpsc::UnboundedReceiver<Value>,
                     tokio::spawn(async move { let _ = w.lock().await.write_all(format!("{}\n", json!({"method": "thread/realtime/sdp", "params": {"threadId": "t1", "sdp": sdp}})).as_bytes()).await; });
                     json!({})
                 }
+                // Interrupção de um turno que já acabou: o app-server recusa.
+                Some("turn/interrupt") if msg["params"]["turnId"] == "turn-gone" => {
+                    let _ = write.lock().await.write_all(format!("{}\n", json!({"id": msg["id"], "error": {"code": -32600, "message": "no active turn"}})).as_bytes()).await;
+                    continue;
+                }
                 Some(_) => json!({}),
                 None => continue,
             };
