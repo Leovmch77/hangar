@@ -141,7 +141,7 @@ impl VoiceHub {
         let context = if name.is_empty() { "Nenhuma sessão aberta na tela.".to_owned() } else { format!("A sessão na tela agora é {name}.") };
         let options = CallOptions { voice: chosen.voice.filter(|v| VOICES.contains(&v.as_str())), context, cwd: None, target: name,
             organizer: chosen.organizer, tools: tools_for(&caps), handoff_same_thread: true, voice_dir: settings::voice_dir(&self.home),
-            audio_grace: self.grace };
+            audio_grace: self.grace, command_limit: super::call::COMMAND_LIMIT };
         let (events_tx, events) = async_channel::unbounded();
         let voice = Voice::start(options, spawn, events_tx);
         // Sem id fica vazio: o aparelho mostra o nome que ele mesmo dá a este servidor.
