@@ -138,9 +138,9 @@ impl LocalTerminalFacts {
         let (native, question) = tokio::task::spawn_blocking(move || {
             let native = native_record(&files.metadata, &files.binding.conversation)?;
             let question = match plugin_store {
-                Some(store) => crate::state::ask::observe_terminal(store.interactions(), &Self::binding(&files), &files.transcript, &question_frame),
-                None => crate::state::ask::read_pending(&files.transcript),
-            }.map_err(|_| ServiceError("terminal_question_unavailable"))?.is_some();
+                Some(store) => crate::state::ask::check_terminal(store.interactions(), &Self::binding(&files), &files.transcript, &question_frame),
+                None => crate::state::ask::read_pending(&files.transcript).map(|question| question.is_some()),
+            }.map_err(|code| ServiceError(crate::state::ask::failure_code(&code)))?;
             Ok::<_, ServiceError>((native, question))
         }).await.map_err(|_| ServiceError("terminal_files_unavailable"))??;
         let plugin = self.plugin_facts(target)?;
@@ -391,6 +391,15 @@ mod tests {
         std::fs::write(dir.path().join("settings.json"),"invalid").unwrap();assert!(account_mode(dir.path()).is_err());
         assert_eq!(input::plugin_answer_body(&json!([{"question":"A"}]),&json!([{"kind":"text","value":" primeira "}])).unwrap(),json!({"answers":{"A":"primeira"}}));
         assert!(input::plugin_answer_body(&json!([{"question":"A"}]),&json!([{"kind":"chat"}])).unwrap()["deny"].is_string());
+        // Rótulo não prova a opção: índice fora da pergunta ou rótulo trocado não chega ao plugin.
+        let ab=json!([{"question":"Q","options":[{"label":"A"},{"label":"B"}]}]);
+        for invalid in [json!({"kind":"option","indices":[99],"labels":["C"]}),json!({"kind":"option","indices":[2],"labels":["B"]}),
+            json!({"kind":"option","indices":[0],"labels":["C"]}),json!({"kind":"option","indices":[0],"labels":["B"]}),
+            json!({"kind":"option","indices":[0,1],"labels":["B","A"]}),json!({"kind":"option","labels":["A"]})] {
+            assert_eq!(input::plugin_answer_body(&ab,&json!([invalid])).unwrap_err().0,"terminal_answer_invalid","{invalid}");
+        }
+        assert_eq!(input::plugin_answer_body(&ab,&json!([{"kind":"option","indices":[1],"labels":["B"]}])).unwrap(),json!({"answers":{"Q":"B"}}));
+        assert_eq!(input::plugin_answer_body(&ab,&json!([{"kind":"option","indices":[0,1],"labels":["A","B"]}])).unwrap(),json!({"answers":{"Q":"A, B"}}));
         assert!(plugin_current(&json!({"owner_instance":"rs-owner"}),1.0));assert!(!plugin_current(&json!({"owner_instance":"rs-owner"}),1.001));
     }
 }

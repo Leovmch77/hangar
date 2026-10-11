@@ -257,6 +257,39 @@ async fn terminal_input_submit_selected_requires_final_proof() {
  assert_eq!(driver(io,Arc::new(Services::new())).submit_selected().await.disposition,Disposition::Unknown);
 }
 #[tokio::test]
+async fn terminal_input_guarded_submit_of_menu_without_sidecar_concludes_and_stale_menu_is_refused() {
+ use hangar_server::interactions::{InteractionBinding, InteractionKind, InteractionStore, InteractionTarget};
+ let multi="Question\n❯ 1. [✔] first\n  2. [ ] second\nEsc to cancel · to navigate";
+ let other="Outra\n❯ 1. [ ] x\n  2. [ ] y\nEsc to cancel · to navigate";
+ let review="Review your answers\n→ first\n❯ 1. Submit answers\nEsc to cancel";
+ let tmp=tempfile::tempdir().unwrap();let jsonl=tmp.path().join("projects/p/uuid.jsonl");
+ let menu=InteractionTarget {kind:InteractionKind::Menu,request_key:"terminal:menu".into()};
+ // Identidade como o `observe_menu` publica: sem sidecar, sem revisão.
+ let observed=|generation:u64,pane:&str| {
+  let store=Arc::new(InteractionStore::default());let life=InteractionBinding {key:"k".into(),conversation:"uuid".into(),generation};
+  store.bind(&life).unwrap();let id=store.observe(&life,&menu,Some(interaction_semantic(pane,None).unwrap())).unwrap().unwrap();
+  let expected=store.expected(&life,Some(&id)).unwrap();(store,expected)
+ };
+ let run=|store:Arc<InteractionStore>,screens:Vec<String>| {let io=Arc::new(FakeIo::new(screens));(io.clone(),driver(io,Arc::new(Services::new())).with_interactions(store).with_interaction_source(jsonl.clone()))};
+ let (store,expected)=observed(1,multi);
+ let (io,d)=run(store,vec![multi.into(),multi.into(),review.into(),screen("")]);
+ let r=d.guarded_submit_selected(&expected).await;
+ assert_eq!((r.disposition,r.code.as_str()),(Disposition::Accepted,"control_submitted"));
+ assert_eq!(io.writes().iter().map(|w|w.args.last().unwrap().as_str()).collect::<Vec<_>>(),["Right","Enter"]);
+ // Menu que mudou e vida antiga continuam recusados, sem tecla nenhuma.
+ for (generation,pane) in [(1,other),(2,multi)] {
+  let (store,expected)=observed(generation,pane);
+  let (io,d)=run(store,vec![multi.into()]);
+  let r=d.guarded_submit_selected(&expected).await;
+  assert_eq!((r.disposition,r.code.as_str()),(Disposition::Rejected,"erro_interacao_desatualizada"));assert!(io.writes().is_empty());
+ }
+ // Pergunta com sidecar não usa o envio do menu.
+ let (store,mut expected)=observed(1,multi);expected.target.kind=InteractionKind::Question;expected.source_revision=Some("r".into());
+ let (io,d)=run(store,vec![multi.into()]);
+ let r=d.guarded_submit_selected(&expected).await;
+ assert_eq!((r.disposition,r.code.as_str()),(Disposition::Rejected,"erro_interacao_indisponivel"));assert!(io.writes().is_empty());
+}
+#[tokio::test]
 async fn terminal_input_answer_review_enter_requires_final_proof() {
  let review="Review your answers\n→ first\n❯ 1. Submit answers\nEsc to cancel";
  let io=Arc::new(FakeIo::new(vec![picker(),review.into(),review.into()]));

@@ -33,11 +33,14 @@ fn is_tui_extra(label: &str) -> bool { TUI_EXTRAS.contains(&without_box(label).t
 
 /// O sidecar responde à pergunta que o pane mostra agora? Só em `awaiting_input`.
 pub fn matches(state: &StateEvent, payload: &AskQuestion) -> bool {
+    payload.questions.first().is_some_and(|first| matches_item(state, payload, first, true))
+}
+
+fn matches_item(state: &StateEvent, payload: &AskQuestion, item: &AskQuestionItem, log: bool) -> bool {
     if state.state != "awaiting_input" {
         return false;
     }
-    let Some(first) = payload.questions.first() else { return false };
-    let first: BTreeSet<&str> = first.options.iter().map(|o| o.label.as_str()).collect();
+    let first: BTreeSet<&str> = item.options.iter().map(|o| o.label.as_str()).collect();
     let pane: BTreeSet<&str> = state.options.iter().flatten().filter(|o| !is_tui_extra(o)).map(|o| without_box(o)).collect();
     if first.is_empty() || pane.is_empty() {
         return false;
@@ -55,7 +58,7 @@ pub fn matches(state: &StateEvent, payload: &AskQuestion) -> bool {
     };
     // Degradar para os botões do pane é silencioso na tela: a frequência no diário é o sinal de
     // que o TUI mudou o texto das linhas dele.
-    if !ok && crate::warn_limit::allow(Some(&state.session), reason) {
+    if !ok && log && crate::warn_limit::allow(Some(&state.session), reason) {
         tracing::info!(session = state.session.as_str(), code = reason, sidecar = first.len(), pane = pane.len(), "askq: menu não casa, fica com os botões do pane");
     }
     ok
@@ -131,8 +134,15 @@ fn file_stamp(metadata: &std::fs::Metadata) -> Result<String, String> {
     Ok(stamp)
 }
 
+/// Aba de envio do formulário: o cursor vivo (o último da tela) está em "Submit answers".
+fn submit_tab(pane: &str) -> bool {
+    pane.lines().filter(|line| line.trim_start().starts_with(['❯', '›'])).last().is_some_and(|line| line.contains("Submit answers"))
+}
+
 pub fn observe_menu(interactions: &crate::interactions::InteractionStore,
     binding: &crate::interactions::InteractionBinding, jsonl: &Path, pane: &str) -> Result<Option<String>, String> {
+    // A aba de envio é o mesmo menu sendo enviado: retratá-la trocaria o ID que o envio confere.
+    if submit_tab(pane) { return Ok(None); }
     let target = crate::interactions::InteractionTarget { kind: crate::interactions::InteractionKind::Menu, request_key: "terminal:menu".into() };
     let analysis = crate::terminal_state::analyze(pane);
     let semantic = if analysis.state == "awaiting_input" && read_revision(jsonl)?.is_none() {
@@ -160,6 +170,35 @@ pub fn observe_terminal(interactions: &crate::interactions::InteractionStore,
     question.interaction_id = interactions.observe_revision(binding, &target, Some(semantic), Some(revision))
         .map_err(|e| e.code().to_owned())?;
     Ok(Some(question))
+}
+
+/// Conferência dos fatos do executor. A etapa seguinte do mesmo formulário (e a revisão final) não
+/// é outro formulário: aceita sem republicar, porque o retrato novo trocaria o ID que está sendo
+/// respondido. A identidade continua sendo provada pela revisão do sidecar no executor.
+pub fn check_terminal(interactions: &crate::interactions::InteractionStore,
+    binding: &crate::interactions::InteractionBinding, jsonl: &Path, pane: &str) -> Result<bool, String> {
+    if let Some((question, revision)) = read_revision(jsonl)? {
+        let analysis = crate::terminal_state::analyze(pane);
+        let event = StateEvent { state: analysis.state, question: analysis.question, options: analysis.options, ..Default::default() };
+        // Texto da pergunta junto: com opções iguais às da primeira, só ele separa as etapas.
+        let later = question.questions.iter().skip(1)
+            .any(|item| event.question.as_deref() == Some(item.question.as_str()) && matches_item(&event, &question, item, false));
+        if later || submit_tab(pane) {
+            if read_revision(jsonl)?.map(|(_, current)| current) != Some(revision) { return Err("askq_changed_during_read".into()); }
+            return Ok(true);
+        }
+    }
+    observe_terminal(interactions, binding, jsonl, pane).map(|question| question.is_some())
+}
+
+/// Código estático da falha da pergunta, para a causa chegar ao resultado da entrega.
+pub fn failure_code(code: &str) -> &'static str {
+    const KNOWN: [&str; 7] = ["askq_pane_mismatch", "askq_changed_during_read", "askq_malformed", "askq_path",
+        "askq_consumed_lock", "askq_revision_missing", "askq_unreadable"];
+    let base = code.split(':').next().unwrap_or(code);
+    KNOWN.into_iter().find(|known| *known == base)
+        .or_else(|| crate::interactions::InteractionError::from_code(code).map(|error| error.code()))
+        .unwrap_or("terminal_question_unavailable")
 }
 
 #[cfg(test)]
@@ -216,6 +255,65 @@ mod tests {
                 .map(|p| serde_json::to_value(p).unwrap());
             assert_eq!(event.unwrap_or(Value::Null), row["expected"], "{name}");
         }
+    }
+
+    const STEP_ONE: &str = "   Cor?\n\n ❯ 1. Azul\n   2. Verde\n   3. Type something.\n   4. Chat about this\n";
+    const STEP_TWO: &str = "   Pasta?\n\n ❯ 1. A\n   2. B\n   3. Type something.\n   4. Chat about this\n";
+    const SUBMIT: &str = "Review your answers\n → Azul\n → A\n\n ❯ 1. Submit answers\n   2. Cancel\n";
+    const OTHER: &str = "   Outra?\n\n ❯ 1. X\n   2. Y\n";
+
+    fn bound_store() -> (crate::interactions::InteractionStore, crate::interactions::InteractionBinding) {
+        let store = crate::interactions::InteractionStore::default();
+        let binding = crate::interactions::InteractionBinding { key: "k".into(), conversation: "sid".into(), generation: 1 };
+        store.bind(&binding).unwrap();
+        (store, binding)
+    }
+
+    #[test]
+    fn later_step_of_the_same_form_keeps_the_published_id_and_replacement_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let jsonl = tmp.path().join("projects/p/sid.jsonl");
+        let path = sidecar_path(&jsonl).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, r#"{"tool_input":{"questions":[
+            {"question":"Cor?","header":"Cor","multiSelect":false,"options":[{"label":"Azul"},{"label":"Verde"}]},
+            {"question":"Pasta?","header":"Pasta","multiSelect":false,"options":[{"label":"A"},{"label":"B"}]}]}}"#).unwrap();
+        let (store, binding) = bound_store();
+        let published = observe_terminal(&store, &binding, &jsonl, STEP_ONE).unwrap().unwrap().interaction_id.unwrap();
+        let expected = store.expected(&binding, Some(&published)).unwrap();
+        // A segunda etapa e a aba de envio são o mesmo formulário: passam sem trocar o ID respondido.
+        for pane in [STEP_ONE, STEP_TWO, SUBMIT] {
+            assert_eq!(check_terminal(&store, &binding, &jsonl, pane), Ok(true));
+            assert_eq!(store.expected(&binding, Some(&published)).unwrap(), expected);
+        }
+        // A publicação continua presa à primeira etapa.
+        assert_eq!(observe_terminal(&store, &binding, &jsonl, STEP_TWO).unwrap_err(), "askq_pane_mismatch");
+        // Pergunta fora do formulário segue recusada, e a causa chega inteira ao executor.
+        let refused = check_terminal(&store, &binding, &jsonl, OTHER).unwrap_err();
+        assert_eq!(failure_code(&refused), "askq_pane_mismatch");
+        assert_eq!(failure_code("askq_unreadable:PermissionDenied"), "askq_unreadable");
+        assert_eq!(failure_code("algo_novo"), "terminal_question_unavailable");
+        // Troca real A→B: B é outro formulário, com outra revisão e outro ID; o de A deixa de valer.
+        std::fs::write(&path, r#"{"tool_input":{"questions":[
+            {"question":"Pasta?","header":"Pasta","multiSelect":false,"options":[{"label":"A"},{"label":"B"}]}]}}"#).unwrap();
+        assert_ne!(read_revision(&jsonl).unwrap().map(|(_, revision)| revision), expected.source_revision);
+        let replaced = observe_terminal(&store, &binding, &jsonl, STEP_TWO).unwrap().unwrap().interaction_id.unwrap();
+        assert_ne!(replaced, published);
+        assert!(store.expected(&binding, Some(&published)).is_err());
+    }
+
+    #[test]
+    fn menu_without_sidecar_keeps_its_identity_on_the_submit_tab() {
+        let tmp = tempfile::tempdir().unwrap();
+        let jsonl = tmp.path().join("projects/p/sid.jsonl");
+        let (store, binding) = bound_store();
+        let menu = "   Quais?\n\n ❯ 1. [ ] Alfa\n   2. [x] Bravo\n";
+        let id = observe_menu(&store, &binding, &jsonl, menu).unwrap().unwrap();
+        let expected = store.expected(&binding, Some(&id)).unwrap();
+        assert_eq!((expected.target.kind.clone(), expected.source_revision.clone()), (crate::interactions::InteractionKind::Menu, None));
+        assert_eq!(observe_menu(&store, &binding, &jsonl, SUBMIT), Ok(None));
+        assert_eq!(store.expected(&binding, Some(&id)).unwrap(), expected);
+        assert_ne!(observe_menu(&store, &binding, &jsonl, OTHER).unwrap().unwrap(), id);
     }
 
     #[test]

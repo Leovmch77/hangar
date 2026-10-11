@@ -437,7 +437,11 @@ impl TerminalDriver {
     }
     async fn raw(&self, args: Vec<String>, stdin: Vec<u8>) -> Result<CommandOutput, IoFailure> { self.io.command(self.request(args, stdin)?).await }
     async fn facts(&self) -> Result<InputFacts, IoFailure> {
-        let facts = self.services.facts(&self.binding).await.map_err(|_| IoFailure { code: "facts_unavailable", may_have_written: false })?;
+        // Falha da pergunta conserva a causa; o resto continua sendo "terminal indisponível".
+        let facts = self.services.facts(&self.binding).await.map_err(|error| IoFailure {
+            code: if error.0.starts_with("askq_") || InteractionError::from_code(error.0).is_some() { error.0 } else { "facts_unavailable" },
+            may_have_written: false,
+        })?;
         if facts.binding != self.binding || self.binding.name.is_empty() || self.binding.conversation.is_empty()
             || self.binding.mux_argv.is_empty() || (self.binding.windows && !self.binding.pane.starts_with(&format!("={}:", self.binding.name))) {
             return Err(IoFailure { code: "stale_binding", may_have_written: false });
@@ -1035,7 +1039,11 @@ impl TerminalDriver {
     }
     pub async fn guarded_submit_selected(&self, expected: &ExpectedInteraction) -> DeliveryResult {
         let _serial = self.serial.lock().await;
-        if expected.source_revision.is_none() { return Self::interaction_failure(InteractionError::Unavailable, false); }
+        // Contrato da rota: só o menu do pane, que nasce sem sidecar e sem revisão; o `check_source`
+        // prova que o sidecar continua ausente. Pergunta com sidecar responde por `answer_questions`.
+        if expected.target.kind != InteractionKind::Menu || expected.source_revision.is_some() {
+            return Self::interaction_failure(InteractionError::Unavailable, false);
+        }
         if let Err(error) = self.check_interaction(expected).await { return Self::interaction_failure(error, false); }
         self.submit_selected_inner(Some(expected)).await
     }
@@ -1246,12 +1254,16 @@ pub(crate) fn plugin_answer_body(questions: &Value, answers: &Value) -> Result<V
             Some("chat") => { chat.push(title);continue; }
             Some("text") => answer["value"].as_str().unwrap_or("").trim().to_owned(),
             Some("option") => {
-                let labels = answer["labels"].as_array().filter(|labels| !labels.is_empty());
-                let labels = if let Some(labels) = labels { labels.iter().map(|label| label.as_str().ok_or_else(invalid)).collect::<Result<Vec<_>, _>>()? }
-                else {
-                    let options = question["options"].as_array().ok_or_else(invalid)?;
-                    answer["indices"].as_array().ok_or_else(invalid)?.iter().map(|index| index.as_u64().and_then(|index| options.get(index as usize)).and_then(|option| option["label"].as_str()).ok_or_else(invalid)).collect::<Result<Vec<_>, _>>()?
-                };labels.join(", ")
+                // Os índices escolhem a opção; rótulos enviados só confirmam, nunca substituem.
+                let options = question["options"].as_array().ok_or_else(invalid)?;
+                let chosen = answer["indices"].as_array().ok_or_else(invalid)?.iter()
+                    .map(|index| index.as_u64().and_then(|index| options.get(usize::try_from(index).ok()?)).and_then(|option| option["label"].as_str()).ok_or_else(invalid))
+                    .collect::<Result<Vec<_>, _>>()?;
+                if let Some(labels) = answer["labels"].as_array().filter(|labels| !labels.is_empty())
+                    && labels.iter().map(Value::as_str).ne(chosen.iter().map(|label| Some(*label))) {
+                    return Err(invalid());
+                }
+                chosen.join(", ")
             }
             _ => return Err(invalid()),
         };
