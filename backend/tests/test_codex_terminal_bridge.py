@@ -199,3 +199,74 @@ def test_published_terminal_with_the_rust_owner_is_left_to_the_watcher(monkeypat
     asyncio.run(adapter.publish_imported(SimpleNamespace(name="cx", id="tid")))
     assert closed == [True], "o cliente da conferência sai"
     assert "cx" not in adapter._sessions and "cx" not in adapter._adoptions
+
+
+def test_claude_question_reaches_the_rust_whole_and_421_leaves_it_to_python(monkeypatch):
+    seen = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            seen.append((self.path, self.headers.get("x-hangar-internal"), self.rfile.read(int(self.headers.get("content-length") or 0))))
+            status, body = (421, b"") if "/py/" in self.path else (409, b'{"detail": {"code": "erro_interacao_desatualizada"}}')
+            self.send_response(status)
+            self.send_header("content-length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    body = b'{"answers": [], "interaction_id": "ask:7"}'
+    try:
+        monkeypatch.setattr(list_bridge, "endpoint", lambda: (f"127.0.0.1:{server.server_port}", "s"))
+        owner = _owner(monkeypatch)
+        assert runtime_coordinator.rust_claude("ct", "answer", body=body) == (409, b'{"detail": {"code": "erro_interacao_desatualizada"}}'), \
+            "status e corpo do Rust voltam como vieram"
+        assert seen == [("/__hangar_server/claude/ct/answer", "s", body)], "corpo e interaction_id intactos"
+        assert runtime_coordinator.rust_claude("py", "select") is None, "421: o Rust não atende, segue o caminho de hoje"
+        owner.mode = "python"
+        assert runtime_coordinator.rust_claude("ct", "answer", body=body) is None
+        assert len(seen) == 2
+    finally:
+        server.shutdown()
+
+
+@pytest.mark.parametrize("route", ["answer", "select", "select/submit"])
+def test_claude_question_from_guest_or_connect_goes_to_the_rust(monkeypatch, route):
+    calls = []
+    monkeypatch.setattr(runtime_coordinator, "rust_codex_terminal", lambda *args: None)
+    monkeypatch.setattr(runtime_coordinator, "rust_claude", lambda *args: calls.append(args) or (200, b'{"ok": true}'))
+    body = b'{"option": 1, "interaction_id": "perm:t1"}'
+    for port in (GUEST_PORT, api_mod.CONNECT_PORT):
+        with pytest.raises(api_mod._RustReply) as reply:
+            asyncio.run(api_mod._codex_rust_port("ct", _request(port, f"/api/sessions/ct/{route}", body=body)))
+        assert reply.value.args == (200, b'{"ok": true}')
+    assert calls == [("ct", route, "POST", body)] * 2
+    asyncio.run(api_mod._codex_rust_port("ct", _request(GUEST_PORT, "/api/sessions/ct/keys")))
+    assert len(calls) == 2, "fora da pergunta o Claude não vai a esta ponte"
+
+
+def test_claude_bridge_down_is_a_visible_503_without_local_answer(monkeypatch):
+    import json
+    import socket
+    _owner(monkeypatch)
+    monkeypatch.setattr(runtime_coordinator, "rust_codex_terminal", lambda *args: None)
+    monkeypatch.setattr(api_mod.plugin_bridge, "responder_pergunta",
+                        lambda *args: (_ for _ in ()).throw(AssertionError("o Python respondeu a pergunta")))
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        closed = probe.getsockname()[1]
+    for endpoint in ((f"127.0.0.1:{closed}", "s"), None):
+        monkeypatch.setattr(list_bridge, "endpoint", lambda endpoint=endpoint: endpoint)
+        with pytest.raises(api_mod._RustReply) as reply:
+            asyncio.run(api_mod._codex_rust_port("ct", _request(GUEST_PORT, "/api/sessions/ct/select", body=b'{"option": 1}')))
+        assert reply.value.args[0] == 503
+        assert json.loads(reply.value.args[1])["detail"]["code"] == "claude_bridge_failed"
+
+
+def test_question_bodies_keep_the_interaction_id():
+    assert api_mod.SelectBody(option=1, interaction_id="perm:t1").interaction_id == "perm:t1"
+    assert api_mod.AnswerBody(answers=[], interaction_id="ask:1").interaction_id == "ask:1"
+    assert api_mod.SkipQuestionBody(request_id="r", interaction_id="ask:2").interaction_id == "ask:2"

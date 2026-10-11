@@ -75,6 +75,23 @@ def test_unreadable_rollout_preserves_queue(tmp_path, monkeypatch):
     assert queue.path.read_bytes() == before
 
 
+def test_rust_owned_codex_queue_is_never_written_by_python(tmp_path, monkeypatch):
+    # A projeção é do Rust: com ele dono do Codex com terminal, o Python não confirma nem reconcilia.
+    from types import SimpleNamespace
+    from app import runtime_coordinator
+    monkeypatch.setattr(pqueue, "_queue_dir", lambda: tmp_path)
+    queue = pqueue.PromptQueue("codex-queue")
+    queue.append("[de: outra] orientação", delivered=True)
+    path = tmp_path / "rollout.jsonl"
+    path.write_text(json.dumps({"type": "response_item", "payload": {"type": "message", "role": "user", "id": "real",
+        "content": [{"type": "input_text", "text": "[de: outra] orientação"}]}}) + "\n")
+    before = queue.path.read_bytes()
+    owner = SimpleNamespace(mode="rust", managed_runtime=lambda name: False, rust_owns=lambda provider, headless: True)
+    monkeypatch.setattr(runtime_coordinator, "_current", owner)
+    sse._confirm_codex_queue("codex-queue", str(path))
+    assert queue.path.read_bytes() == before
+
+
 async def test_api_reserves_uncertain_codex_send_before_rpc_and_never_replays(tmp_path, monkeypatch):
     from app import api
     from app.adapters.codex.adapter import CodexAdapter

@@ -48,12 +48,10 @@ def expect_rust(expected=True):
     _initial_mode = "pending" if expected else "python"
 
 
-def refuse_python_client(name, provider="claude", *, spawn=False, headless=True):
+def refuse_python_client(name, provider="claude", *, headless=True):
     """Com o Rust esperado ou dono, as sessões que ele anuncia no modo `headless` são dele: cliente Python
-    nelas é defeito. Exceção: a passagem para terminal (`python_client_released`) religa no cano
-    que o Rust soltou, mas nunca sobe outro (`spawn`)."""
-    if (_current is not None and _current.mode in {"pending", "rust"} and _current.rust_owns(provider, headless)
-            and (spawn or name not in _current.python_client_released)):
+    nelas é defeito, inclusive para relançar (o relançamento é do Rust)."""
+    if _current is not None and _current.mode in {"pending", "rust"} and _current.rust_owns(provider, headless):
         raise RuntimeError(f"cliente Python bloqueado em {name}: o Rust é o dono desta sessão")
 
 
@@ -65,30 +63,44 @@ def rust_codex_terminal(name, route, method="POST", body=b""):
     """Repasse num sentido, à ponte do Rust, do que entra pelo Python para um Codex com terminal dele
     (escrita, encerrar, troca de modo). `(status, corpo)`; `None` = não é dele (421), e o Python segue."""
     from app import list_bridge
-    endpoint = list_bridge.endpoint()
-    if endpoint is None or not rust_owns_codex_terminal():
+    if list_bridge.endpoint() is None or not rust_owns_codex_terminal():
         return None
+    return _rust_bridge("codex", name, route, method, body)
+
+
+def rust_claude(name, route, method="POST", body=b""):
+    """O mesmo repasse para a pergunta do Claude que entra pelo convite ou pelo Connect. Com o Rust de pé
+    ou esperado, ponte fora é falha com código (503), nunca o Python respondendo; `None` só no 421."""
+    if _current is None or _current.mode == "python":
+        return None
+    return _rust_bridge("claude", name, route, method, body)
+
+
+def _rust_bridge(provider, name, route, method, body):
+    from app import list_bridge
     import urllib.error, urllib.parse, urllib.request
-    req = urllib.request.Request(f"http://{endpoint[0]}/__hangar_server/codex/{urllib.parse.quote(name, safe='')}/{route}",
-        data=body or None, headers={"content-type": "application/json", "x-hangar-internal": endpoint[1]}, method=method)
+    endpoint = list_bridge.endpoint()
     status, raw = 503, b""
-    try:
-        with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req, timeout=90) as response:
-            status, raw = response.status, response.read()
-    except urllib.error.HTTPError as exc:
-        if exc.code == 421:
-            return None
-        status = exc.code
-        with suppress(OSError):
-            raw = exc.read()
-    except OSError:  # conexão recusada e prazo (TimeoutError) também são OSError
-        pass
+    if endpoint is not None:
+        req = urllib.request.Request(f"http://{endpoint[0]}/__hangar_server/{provider}/{urllib.parse.quote(name, safe='')}/{route}",
+            data=body or None, headers={"content-type": "application/json", "x-hangar-internal": endpoint[1]}, method=method)
+        try:
+            with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req, timeout=90) as response:
+                status, raw = response.status, response.read()
+        except urllib.error.HTTPError as exc:
+            if exc.code == 421:
+                return None
+            status = exc.code
+            with suppress(OSError):
+                raw = exc.read()
+        except OSError:  # conexão recusada e prazo (TimeoutError) também são OSError
+            pass
     with suppress(ValueError):
         body = json.loads(raw)
         if isinstance(body, dict) and (status < 300 or isinstance(body.get("detail"), dict)):
             return status, raw
     # Ponte fora, prazo ou corpo sem o envelope do Rust: falha com código, nunca exceção crua.
-    return max(status, 502), json.dumps({"detail": {"code": "codex_bridge_failed", "params": {},
+    return max(status, 502), json.dumps({"detail": {"code": f"{provider}_bridge_failed", "params": {},
         "msg": "O Rust não respondeu ao repasse; tente de novo."}}).encode()
 
 
@@ -304,7 +316,6 @@ class RuntimeCoordinator:
         self._cache_invalid_logged: set[str] = set()
         # Antes da saúde do Rust vale o que se espera dele; depois, o que ele anuncia.
         self._owns = {("claude", True), ("claude", False), ("codex", True), ("codex", False)}
-        self.python_client_released = set()     # nomes em passagem de Codex sem terminal para terminal
 
     def rust_owns(self, provider, headless):
         return (provider, headless) in self._owns
@@ -588,8 +599,8 @@ class RuntimeCoordinator:
 
     async def ensure_open(self, name, *, engine_models=None, wait_initialized=False):
         """Sessão sem terminal aberta no Rust, que é o único cliente do cano. Claude: o Python lança
-        o processo e grava o sidecar; Codex: o Rust sobe o processo e o Python só calcula o ambiente
-        (`launch_env`). Serializado por nome com o `prepare_session`."""
+        o processo e grava o sidecar; Codex: o Rust sobe o processo, com ambiente e sidecar montados
+        por ele. Serializado por nome com o `prepare_session`."""
         if self.legacy is None or self.transport is None:
             raise RuntimeError("runtime Rust indisponível")
         provider = (self.slot(name).binding.provider if self.managed_queue(name)
@@ -669,7 +680,7 @@ class RuntimeCoordinator:
 
     async def _open_codex(self, name, *, launch):
         """Codex sem terminal: quem sobe o processo é o Rust (`launch`, só se o gravado não for dele);
-        o Python calcula o ambiente e grava o arquivo da sessão quando o Rust pede, pelas políticas."""
+        ambiente e arquivo da sessão também são dele (`codex_launch.rs`, `codex_sidecar.rs`)."""
         from app import diag
         from app.adapters.codex import sessions as codex_sessions
         from app.rust_server import RustOpError
@@ -1029,18 +1040,18 @@ class RuntimeCoordinator:
 
     def _rebind(self, slot, conversation):
         key = slot.binding.key
-        if key in self.rebindings and not self.rebindings[key].done():
+        # Thread nova do Codex é do Rust (sidecar e vida dele): só o Claude religa por aqui.
+        if slot.binding.provider != "claude" or key in self.rebindings and not self.rebindings[key].done():
             return
         async def rebind():
             async def changed():
                 return None
             from app import diag
             from app.runtime_policy import _sessions
-            field = "session_id" if slot.binding.provider == "claude" else "thread_id"
             # Religar relê o arquivo da sessão: antes de a conversa chegar nele, a vida nova nasceria sem
             # ela e abriria outra. A vista volta quando o patch grava, e aí religa.
-            current = await asyncio.to_thread(_sessions(slot.binding.provider).load, slot.binding.name)
-            if (current or {}).get(field) != conversation:
+            current = await asyncio.to_thread(_sessions().load, slot.binding.name)
+            if (current or {}).get("session_id") != conversation:
                 return
             # Conversa que muda a cada vida religaria sem parar: teto de 3 religações por minuto.
             now = time.monotonic()
@@ -2021,22 +2032,5 @@ class RuntimeCoordinator:
                 if (self.slot(name).change or {}).get("killed"):
                     return adapter.forget_memory(name, preserve_preview=params.get("preserve_preview", False))
                 return await asyncio.to_thread(original, adapter, name, **params)
-        if method == "open_terminal" and binding.provider == "codex" and binding.headless and self.rust_owns("codex", True):
-            async def action():
-                # Codex com terminal é do Python até a 5C: fechada no Rust sem matar, a troca religa o
-                # cliente Python no mesmo cano para conferir a ociosidade e passar a conversa ao pane.
-                self.python_client_released.add(name)
-                try:
-                    return await original(adapter, name, **params)
-                except BaseException:
-                    # Recusada (ocupada, pergunta aberta…) com o cliente religado: só a ligação fecha,
-                    # e a reabertura devolve a sessão ao Rust no mesmo processo.
-                    try:
-                        await adapter.release_client(name)
-                    except Exception:
-                        _log.warning("release_client falhou name=%s; segue a recusa original", name, exc_info=True)
-                    raise
-                finally:
-                    self.python_client_released.discard(name)
         return await self.change(name, action, new_name=params.get("new") if method == "rename" else None,
             advance=method != "rename", remove=False, reopen=not stopped, stopped=stopped, kill=kill)

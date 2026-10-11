@@ -10,10 +10,9 @@ from pathlib import Path
 
 from app import diag
 
+# O sidecar do Codex é gravado pelo Rust (`codex_sidecar.rs`); aqui só o do Claude.
 _PATCH = {
     "claude": {"session_id", "cwd", "model", "effort", "permission_mode", "previous_non_plan", "context_window", "problema", "cano"},
-    "codex": {"thread_id", "rollout_path", "cwd", "model", "effort", "mode", "service_tier", "skipped_async_questions", "problema", "cano",
-              "permission_mode"},
 }
 _unknown_guard = threading.Lock()
 _mutation_locks = {}
@@ -94,67 +93,9 @@ def demote_awaiting(sids: list[str]) -> None:
         hook_state.hook_state.demote_awaiting(sid)
 
 
-def state_service_sync(kind: str, name: str, payload: dict) -> dict:
-    """Serviços que o `Monitor` do Rust pede por nome de sessão (não por posse de ator)."""
-    if kind == "permission.observe":
-        from app import permission_mode
-        sid, mode = payload.get("sid"), payload.get("mode")
-        if not isinstance(sid, str) or not sid or mode not in permission_mode.ORDEM_CANONICA:
-            raise ValueError("observação de permissão inválida")
-        # A memória é por session-id; a operação controlada, pelo nome da sessão.
-        mode, previous = permission_mode.observar_ou_confirmado(sid, mode, sessao=name)
-        return {"mode": mode, "previous_non_plan": previous}
-    if kind == "session.dead":
-        from app import plugin_bridge
-        from app.adapters.claude_headless.sessions import em_troca
-        from app.state import forget_frame
-        # Conferido na hora: a troca de conta mata o tmux antes de o fato chegar ao Rust.
-        if em_troca(name):
-            return {"result": "em_troca"}
-        plugin_bridge.esquecer(name)
-        forget_frame(name)
-        return {"result": "ok"}
-    raise ValueError("serviço não permitido")
-
-
-async def state_service(kind: str, name: str, payload: dict) -> dict:
-    if kind == "session.deliverable":
-        # O drain do adapter passa pelo `prepare_session`, que abre o executor se ele não existe.
-        from app import api
-        from app.adapters import get_adapter
-        info = await api._cached_info(name)
-        if info is None or info.provider != "claude" or info.headless or not info.jsonl:
-            raise ValueError("sessão Claude com terminal não encontrada")
-        return {"sent": await get_adapter("claude").drain(name, info.jsonl)}
-    return await asyncio.to_thread(state_service_sync, kind, name, payload)
-
-
-def _sessions(provider):
-    if provider == "claude":
-        from app.adapters.claude_headless import sessions
-    else:
-        from app.adapters.codex import sessions
+def _sessions():
+    from app.adapters.claude_headless import sessions
     return sessions
-
-
-def launch_env(metadata: dict) -> dict:
-    """Comando e ambiente do processo que o Rust sobe dentro do cano. O ambiente é segredo: vai na
-    resposta e em nenhum outro lugar."""
-    if metadata["provider"] != "codex":
-        raise ValueError("subida pelo Rust ainda só para o Codex")
-    import shutil
-    from app.adapters.codex import sem_terminal, sessions
-    # O registro em memória não vê o que o Rust gravou depois de abrir (modo trocado): vale o arquivo.
-    current = sessions.load(metadata["name"])
-    if current and current.get("key") == metadata["key"]:
-        metadata = {**metadata, **current}
-    env = sem_terminal._ambiente(metadata)
-    program = sem_terminal.argv(metadata)
-    # O PATH da sessão decide, como no `subir`; no Windows o `which` acha o `.cmd` pelo PATHEXT.
-    resolved = shutil.which(program[0], path=env.get("PATH"))
-    if resolved is None:
-        return {"error": "codex_ausente"}
-    return {"program": [resolved, *program[1:]], "env": env, "cano_extra": {}}
 
 
 def clear_cano(payload: dict, metadata: dict) -> dict:
@@ -165,7 +106,7 @@ def clear_cano(payload: dict, metadata: dict) -> dict:
     validate = metadata.get("validate")
     if validate is None:
         raise RuntimeError("alteração sem confirmação de posse")
-    sessions = _sessions(metadata["provider"])
+    sessions = _sessions()
     with _unknown_guard:
         lock = _mutation_locks.setdefault(metadata["key"], threading.Lock())
     with lock:
@@ -182,6 +123,7 @@ def run(kind: str, payload: dict, metadata: dict) -> dict:
     provider = metadata.get("provider")
     if provider not in _PATCH:
         raise ValueError("provedor fora do runtime")
+    # Só a reserva Python do terminal (`runtime_terminal._service`, modo `python`) pede estes; o Rust não.
     if kind in {"terminal_facts", "terminal_publish", "terminal_plugin_control"}:
         if provider != "claude" or not metadata.get("terminal"):
             raise ValueError("serviço terminal fora do vínculo Claude")
@@ -190,8 +132,6 @@ def run(kind: str, payload: dict, metadata: dict) -> dict:
             "terminal_plugin_control":runtime_terminal.plugin_control}[kind](payload, metadata)
     if kind == "native_message":
         return native_message(payload, metadata)
-    if kind == "launch_env":
-        return launch_env(metadata)
     if kind == "session.clear_cano":
         return clear_cano(payload, metadata)
     if kind == "session.patch_meta":
@@ -210,14 +150,10 @@ def run(kind: str, payload: dict, metadata: dict) -> dict:
                 source = "conversation" if key == "session_id" else key
                 if source in view and view[source] != value:
                     return {"updated": False, "stale": True}
-            sessions = _sessions(provider)
+            sessions = _sessions()
             current = sessions.load(metadata["name"])
             if not current or current.get("key") != metadata["key"]:
                 raise RuntimeError("sidecar de outra vida")
-            # Fast é da conversa: o sidecar já em outra thread não herda a escolha da anterior.
-            if ("service_tier" in payload and "thread_id" not in payload and view.get("thread_id")
-                    and current.get("thread_id") != view["thread_id"]):
-                return {"updated": False, "stale": True}
             updated = sessions.update(metadata["name"], **payload)
             if updated is None:
                 raise RuntimeError("sidecar desapareceu durante a alteração")

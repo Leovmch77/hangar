@@ -508,12 +508,16 @@ class _RustReply(Exception):
 
 async def _codex_rust_port(name: str, request: Request):
     """Escrita que entrou pelo convite ou pelo Connect num Codex com terminal do Rust: a autenticação foi a
-    desta porta, e o pedido vai inteiro à ponte dele, num sentido só. Fora disso não faz nada."""
+    desta porta, e o pedido vai inteiro à ponte dele, num sentido só. A pergunta do Claude vai do mesmo
+    jeito à ponte do Claude. Fora disso (421 do Rust) não faz nada."""
     from app.share_tunnel import GUEST_PORT
     port = (request.scope.get("server") or (None, None))[1]
     if port in (GUEST_PORT, CONNECT_PORT) and port != settings.port:
-        route = request.url.path.split("/", 4)[4] + (f"?{request.url.query}" if request.url.query else "")
-        if (reply := await asyncio.to_thread(runtime_coordinator.rust_codex_terminal, name, route, request.method, await request.body())):
+        route, body = request.url.path.split("/", 4)[4] + (f"?{request.url.query}" if request.url.query else ""), await request.body()
+        reply = await asyncio.to_thread(runtime_coordinator.rust_codex_terminal, name, route, request.method, body)
+        if reply is None and route in {"answer", "select", "select/submit"}:
+            reply = await asyncio.to_thread(runtime_coordinator.rust_claude, name, route, request.method, body)
+        if reply:
             raise _RustReply(*reply)
 
 
@@ -1962,6 +1966,7 @@ class BroadcastBody(_StrictBody):
 
 class SelectBody(_StrictBody):
     option: int = Field(ge=1, le=50)  # picker 1-based; teto evita loop de fork tmux (DoS)
+    interaction_id: str | None = None    # do cliente; quem confere é o Rust
 
 
 class BtwBody(_StrictBody):
@@ -9422,6 +9427,7 @@ class AnswerItem(_StrictBody):
 class AnswerBody(_StrictBody):
     answers: list[AnswerItem]
     request_id: int | str | None = None
+    interaction_id: str | None = None
 
 
 def _askq_fallback_text(answers: list[dict], jsonl: str | None) -> str:
@@ -9517,6 +9523,7 @@ def _pi_answer_fallback_text(a: dict) -> str:
 
 class SkipQuestionBody(_StrictBody):
     request_id: str
+    interaction_id: str | None = None
 
 
 @app.post("/api/sessions/{name}/question/skip", dependencies=[Depends(require_auth), Depends(_transfer_guard), Depends(_codex_rust_port)])

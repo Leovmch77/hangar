@@ -7,7 +7,7 @@ linhas, nunca troca a lista pela do Python."""
 import asyncio
 import logging
 
-from app import guest_users, plugin_bridge, registry, runtime_config, share_store, sse
+from app import guest_users, registry, runtime_config, share_store, sse
 from app.models import SessionInfo
 
 _log = logging.getLogger("hangar.list")
@@ -34,7 +34,6 @@ async def compute(rows: list[dict], owner_clients: int, pane_pids: dict[str, int
     infos = [SessionInfo.model_validate(r) for r in rows]
     if shadow:
         return await _shadow(infos, pane_pids)
-    plugin_bridge.app_remoto(owner_clients)
     others = [i for i in infos if i.provider in _OTHERS]
     if others:
         # O código de hoje, só sobre as linhas que o Rust não classifica.
@@ -101,7 +100,8 @@ def _files(infos: list[SessionInfo], others: list[SessionInfo], pane_pids: dict[
         "owners": owners,
         "hidden": hidden,
         "problems": _problems(infos),
-        "held": _held(infos),
+        # A pergunta segurada pelo plugin é do Store do Rust; o campo fica vazio pelo contrato.
+        "held": {},
         "stall_seconds": float(runtime_config.get("stall_seconds")),
     }
 
@@ -159,17 +159,6 @@ def _access(names: set[str]) -> tuple[list[str], dict[str, str], list[str]]:
     owners = {n: o for n in names if (o := guest_users.owner_name(n))}
     hidden = sorted(n for n in names if not guest_users.visible_to(None, n))
     return shared, owners, hidden
-
-
-def _held(infos: list[SessionInfo]) -> dict[str, dict]:
-    """Pergunta que o hook do plugin segura agora, das linhas Claude com terminal. A permissão
-    segurada para o app não desenha cartão no pane e o registro nativo segue `busy`: sem isto a
-    lista diria `working`."""
-    out = {}
-    for info in infos:
-        if info.provider == "claude" and not info.headless and (q := plugin_bridge.pergunta_pendente(info.name)):
-            out[info.name] = q
-    return out
 
 
 def _problems(infos: list[SessionInfo]) -> dict[str, str]:

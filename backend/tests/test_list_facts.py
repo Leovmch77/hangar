@@ -93,20 +93,6 @@ def test_facts_transfer_overrides_by_name(monkeypatch):
     assert sorted(out["frozen"]) == ["nova", "troca"]
 
 
-def test_facts_owner_count_drives_app_presence(monkeypatch):
-    clock = [1000.0]
-    monkeypatch.setattr(plugin_bridge.time, "monotonic", lambda: clock[0])
-    monkeypatch.setattr(plugin_bridge, "_apps_abertos", 0)
-    _compute([], owner_clients=2)
-    assert plugin_bridge.app_presente()
-    _compute([], owner_clients=0)
-    assert not plugin_bridge.app_presente()
-    _compute([], owner_clients=1)
-    # O Rust parou de perguntar (caiu, ou o Python reassumiu): a contagem dele vence sozinha.
-    clock[0] += plugin_bridge._APP_REMOTO_TTL_S + 1
-    assert not plugin_bridge.app_presente()
-
-
 def test_facts_nav_expired_not_returned(monkeypatch, tmp_path):
     monkeypatch.setattr(sse, "_nav_arquivo", lambda: tmp_path / "pendentes.json")
     sse._NAV_MARCADORES.clear()
@@ -205,16 +191,16 @@ def test_orq_failure_goes_as_a_fact_not_an_empty_list(monkeypatch):
     assert list_facts._files([], [], {})["orq_error"] is None
 
 
-def test_facts_held_question_for_claude_terminal(monkeypatch):
-    # A permissão que o hook segura para o app não desenha cartão no pane: a lista só a vê por aqui.
-    held = {"ct": {"id": "perm:t1", "questions": [], "tool": "Bash", "resumo": "ls"}}
-    pending = {**held, "ch": held["ct"], "cx": held["ct"]}
-    monkeypatch.setattr(plugin_bridge, "pergunta_pendente", lambda name: pending.get(name))
+def test_facts_never_read_or_feed_the_python_plugin(monkeypatch):
+    # Pergunta segurada e presença do app são do plugin no Rust: os fatos não consultam o do Python.
+    def refuse(*args):
+        raise AssertionError("plugin do Python consultado")
+    monkeypatch.setattr(plugin_bridge, "pergunta_pendente", refuse)
+    monkeypatch.setattr(plugin_bridge, "app_remoto", refuse)
 
     async def keep(infos, state_only=False):
         return infos
 
     monkeypatch.setattr(sse._list_registry, "list_with_state", keep)
-    out = _compute([_row("ct"), _row("ch", headless=True), _row("cx", "codex"), _row("ok")])
-    # Sem terminal e outros provedores têm o próprio caminho da pergunta.
-    assert out["held"] == held
+    out = _compute([_row("ct"), _row("ch", headless=True), _row("cx", "codex")], owner_clients=2)
+    assert out["held"] == {}, "o campo segue no contrato, vazio"

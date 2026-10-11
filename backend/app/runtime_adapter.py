@@ -246,9 +246,9 @@ class LegacyBridge:
             current = sessions.load(name)
             if path and current and current.get("key") == meta["key"] and current.get("thread_id") == meta["thread_id"]:
                 meta = sessions.update(name, rollout_path=path) or meta
-        generation = (self.coordinator.slots[meta["key"]].binding.generation
-            if meta["key"] in self.coordinator.slots else
-            json.loads(state_path.read_bytes())["generation"] if state_path.exists() else 1)
+        slot = self.coordinator.slots.get(meta["key"])     # relançado pelo Rust, a geração nova está só no arquivo
+        generation = (json.loads(state_path.read_bytes())["generation"] if state_path.exists()
+            and (slot is None or self.coordinator.mode != "python") else slot.binding.generation if slot else 1)
         return runtime_coordinator.Binding(name, meta["key"], provider, headless, meta, path,
             directory, state_path, directory / "runtime" / (meta["key"] + ".lock"), generation)
 

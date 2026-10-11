@@ -701,6 +701,8 @@ def _confirm_codex_queue(name: str, jsonl: str) -> None:
         except runtime_coordinator.TransferInProgress:
             pass        # posse passando ao Rust: a confirmação fica para a próxima rodada, o stream segue
         return
+    if runtime_coordinator.rust_owns_codex_terminal():
+        return      # fila e confirmação do Codex são do Rust (projeção dele): o Python nunca grava nela
     queue = PromptQueue(name)
     if not any(r.get("delivered") and not r.get("confirmed") for r in queue.load()):
         return
