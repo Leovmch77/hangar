@@ -22,7 +22,8 @@ fn home_with_cached_quota(expires_ms:f64) -> (tempfile::TempDir,AccountService,s
     std::fs::create_dir_all(&claude).unwrap();
     std::fs::write(claude.join(".credentials.json"),
         json!({"claudeAiOauth":{"accessToken":"t","expiresAt":expires_ms}}).to_string()).unwrap();
-    let id = format!("claude:{}",std::fs::canonicalize(&claude).unwrap().to_string_lossy());
+    // O mesmo caminho do catálogo: no Windows o `canonicalize` cru leva o prefixo `\\?\`.
+    let id = format!("claude:{}",hangar_server::accounts::catalog::resolved(&claude).to_string_lossy());
     std::fs::create_dir_all(home.path().join(".hangar")).unwrap();
     std::fs::write(home.path().join(".hangar/cotas-cache.json"), json!({id:{"gravado_em":now(),"cota":{"estado":"lida",
         "janelas":[{"rotulo":"5h","pct":42,"reset_ts":null,"por_modelo":false},{"rotulo":"Fable","pct":9,"reset_ts":null,"por_modelo":true}]}}})
