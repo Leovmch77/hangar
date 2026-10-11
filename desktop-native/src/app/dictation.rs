@@ -602,6 +602,11 @@ impl Hangar {
             if style_connection != current {
                 style_connection = current;
                 this.dictation.style_task = None;
+                // Sem alvo ninguém relê a configuração: a falha da sessão anterior não pode ficar na faixa.
+                let failed = tr("dictation_config_failed");
+                if identity.is_none() && this.dictation.error.as_deref().is_some_and(|e| e.starts_with(failed.as_str())) {
+                    this.dictation.error = None;
+                }
             }
             if identity.is_some() && !this.dictation.organization.as_ref().is_some_and(|(owner,_)|Some(owner)==identity.as_ref()) && this.dictation.style_task.is_none() {
                 this.load_dictation_style(cx);
