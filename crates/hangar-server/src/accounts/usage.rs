@@ -298,6 +298,24 @@ pub(crate) async fn terminal_instances() -> Result<Instances, ()> {
     if out.status.code() == Some(1) && absent { Ok(Instances::new()) } else { Err(()) }
 }
 
+/// Processo nascendo ou saindo (no Windows argv e ambiente ficam ilegíveis por um instante, que
+/// sob carga passa de meio segundo) deixa uma leitura incompleta à toa: relê até o prazo. Uma
+/// leitura completa posterior prova o mesmo que qualquer outra.
+async fn reread_incomplete<F, Fut>(mut read: F) -> UsageFacts
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = UsageFacts>,
+{
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let facts = read().await;
+        if facts.complete || !facts.sessions.is_empty() || tokio::time::Instant::now() >= deadline {
+            return facts;
+        }
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    }
+}
+
 impl AccountService {
     /// Se um processo usa a conta (`None` = não dá para saber): o nascimento de sessão Codex do
     /// Python se aposenta quando o app-server dele usa a conta, sem varrer a máquina inteira.
@@ -320,31 +338,25 @@ impl AccountService {
         runtime: Option<&crate::runtime::gateway::RuntimeRegistry>,
         key: &AccountKey,
     ) -> UsageFacts {
-        // Processo nascendo (no Windows o argv ainda vazio) deixa uma leitura incompleta à toa: relê
-        // um instante depois. Uma leitura completa posterior prova o mesmo que qualquer outra.
-        let mut facts = UsageFacts::default();
-        for attempt in 0..3 {
-            if attempt > 0 {
-                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-            }
+        let mut facts = reread_incomplete(|| {
             let (service, owned, handle) = (self.clone(), key.clone(), tokio::runtime::Handle::current());
-            facts = tokio::task::spawn_blocking(move || {
-                let procs = crate::list::procs::SystemProcs::whole_machine();
-                let fixture = service.env.terminal_fixture.clone();
-                local_usage(&service, &owned, &procs, &mut || match &fixture {
-                    Some(fixture) => fixture().and_then(|stdout| parse_instances(&stdout)),
-                    None => handle.block_on(terminal_instances()),
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    let procs = crate::list::procs::SystemProcs::whole_machine();
+                    let fixture = service.env.terminal_fixture.clone();
+                    local_usage(&service, &owned, &procs, &mut || match &fixture {
+                        Some(fixture) => fixture().and_then(|stdout| parse_instances(&stdout)),
+                        None => handle.block_on(terminal_instances()),
+                    })
                 })
-            })
-            .await
-            .unwrap_or_else(|_| {
-                tracing::warn!(code = "account_usage_task_failed", "leitura de uso da conta não terminou");
-                UsageFacts::default()
-            });
-            if facts.complete || !facts.sessions.is_empty() {
-                break;
+                .await
+                .unwrap_or_else(|_| {
+                    tracing::warn!(code = "account_usage_task_failed", "leitura de uso da conta não terminou");
+                    UsageFacts::default()
+                })
             }
-        }
+        })
+        .await;
         facts.merge(match runtime {
             Some(runtime) => runtime.account_usage(key).await,
             None => UsageFacts::default(),
@@ -462,6 +474,26 @@ mod tests {
         let facts = inspect_processes(&Fake::with(vec![(71, codex)]), &key, tmp.path());
         assert!(facts.complete && facts.pids == [71]);
         assert_eq!(facts.ensure_unused(), Err("account_in_use"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_process_unreadable_for_a_moment_is_read_again_until_the_deadline() {
+        // No Windows o `sysinfo` não lê argv nem ambiente de quem está nascendo ou saindo; sob carga
+        // isso passa de meio segundo.
+        let reads = std::cell::Cell::new(0);
+        let incomplete = UsageFacts::default();
+        let started = tokio::time::Instant::now();
+        let facts = reread_incomplete(|| {
+            reads.set(reads.get() + 1);
+            let next = if reads.get() < 8 { incomplete.clone() } else { UsageFacts { complete: true, ..Default::default() } };
+            async move { next }
+        })
+        .await;
+        assert!(facts.complete, "leu {} vezes em {:?}", reads.get(), started.elapsed());
+        // O que nunca se completa termina no prazo, sem reler para sempre.
+        let started = tokio::time::Instant::now();
+        assert!(!reread_incomplete(|| async { UsageFacts::default() }).await.complete);
+        assert!(started.elapsed() <= Duration::from_secs(3));
     }
 
     #[test]
