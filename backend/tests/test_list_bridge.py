@@ -86,6 +86,19 @@ def test_list_bridge_off_or_down_raises():
         list_bridge.configure(None, None)
 
 
+@pytest.mark.asyncio
+async def test_list_bridge_on_the_loop_is_logged_once_and_still_runs(bridge, monkeypatch):
+    from app import diag
+    logged = []
+    monkeypatch.setattr(diag, "registrar", lambda evento, nivel, **campos: logged.append((evento, campos["codigo"])))
+    monkeypatch.setattr(list_bridge, "_on_loop_seen", set())
+    bridge["reply"] = {"ok": True, "result": None}
+    for _ in range(2):
+        list_bridge.invalidate()
+    assert logged == [("lista.ponte_no_laco", "list.invalidate")]
+    assert len(bridge["requests"]) == 2
+
+
 def test_dirs_env_has_every_folder():
     assert set(json.loads(list_bridge.dirs_env())) == {
         "home", "claude", "codex_home", "pi_sessions", "omp_config", "omp_agent", "kimi_home"}

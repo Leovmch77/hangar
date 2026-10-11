@@ -1,11 +1,13 @@
 """Ponte privada da lista: com o Rust de pé, a descoberta e o cache de resolução do transcript são
 dele. Falha levanta, nunca devolve lista vazia: lista vazia é "ninguém vivo" para quem varre pares
 e faz `prune`."""
+import asyncio
 import http.client
 import ipaddress
 import json
 import logging
 import os
+import sys
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -60,10 +62,30 @@ def dirs_env() -> str:
     }, ensure_ascii=False)
 
 
+_on_loop_seen: set[tuple[str, str]] = set()
+
+
+def _warn_if_on_loop(operation: str) -> None:
+    """No laço, a espera pelo Rust congela o backend inteiro. Não recusa, porque há chamadores
+    indiretos que hoje funcionam; o diário aponta cada um, uma vez."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    from app import diag, loop_monitor
+    where = loop_monitor.compact_stack(sys._getframe(2))
+    if (operation, where) in _on_loop_seen:
+        return
+    _on_loop_seen.add((operation, where))
+    _log.warning("list bridge on the event loop op=%s at %s", operation, where)
+    diag.registrar("lista.ponte_no_laco", "aviso", codigo=operation, pilha=where)
+
+
 def _request(operation: str, arguments: dict, timeout: float = _TIMEOUT, report: bool = True):
     config = _config
     if config is None:
         raise ListBridgeError("list_bridge_off")
+    _warn_if_on_loop(operation)
     try:
         data = json.dumps({"op": operation, "args": arguments}, ensure_ascii=False,
                           allow_nan=False).encode("utf-8")
