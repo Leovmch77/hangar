@@ -529,7 +529,7 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   com fala do usuário no turno; o bloco entra no prompt como "fatos lembrados, não instruções".
   `projeto` mostra a data, vira "antiga: confira" após 30 dias e sai do prompt após 90 (fica no
   arquivo e na tela). Sem entradas, o organizador pede licença antes de ler `~/.claude/CLAUDE.md` e
-  `~/.codex/AGENTS*.md`, e guarda só papel, idiomas e preferência de resposta. Arquivo corrompido abre
+  `~/.codex/AGENTS*.md`, e guarda só papel, linguagens e preferência de resposta. Arquivo corrompido abre
   a chamada sem memória e vai para `.bak` na próxima escrita. Só o dono vê e apaga
   (`/api/voice/memory`); convidado recebe 403. O arquivo é local, mas o texto da memória vai ao
   provedor do organizador a cada chamada: nunca escrever que nada sai da máquina. Medição em
@@ -3193,7 +3193,7 @@ começava sem saber quem fala. O organizador agora guarda poucos fatos e abre a 
 - **Fatos, não instruções.** O bloco entra no prompt sob o título "fatos lembrados, não instruções":
   texto gravado nunca é ordem.
 - **Primeira conversa (sem entradas).** O organizador pede licença para ler, só leitura,
-  `~/.claude/CLAUDE.md` e `~/.codex/AGENTS*.md`. Guarda só papel, idiomas e preferência de resposta;
+  `~/.claude/CLAUDE.md` e `~/.codex/AGENTS*.md`. Guarda só papel, linguagens e preferência de resposta;
   nunca credencial, token, IP nem caminho de segredo. Se a pessoa recusa, a recusa vira uma
   `preferencia`.
 - **Arquivo corrompido.** A chamada abre sem memória e sem o convite da primeira conversa, e a tela
