@@ -1501,7 +1501,7 @@ impl RuntimeRegistry {
             let data=match &entry.handle {
                 EntryHandle::Terminal {target,..} if target.key==*key && target.generation==entry.generation=>{
                     match self.terminal_states.as_ref().and_then(|states|states.get(&entry.name,Some(&target.binding.conversation))) {
-                        Some(state)=>json!({"key":key,"generation":entry.generation,"error":state.problema,"view":{"alive":state.state!="dead","conversation":target.binding.conversation,"headless":false,"public_state":state}}),
+                        Some(state)=>json!({"key":key,"generation":entry.generation,"error":state.problema,"view":{"alive":state.state!="dead","conversation":target.binding.conversation,"headless":false,"public_state":&*state}}),
                         None=>unavailable(),
                     }
                 },
@@ -1793,7 +1793,7 @@ mod tests {
                 let ack=json!({"type":"cano_input_ack","operation_id":envelope["operation_id"],"outcome":"written"});socket.get_mut().write_all(format!("{ack}\n").as_bytes()).await.unwrap();}
         });
         let meta=json!({"key":"key","name":name,"session_id":"a","headless":true,"initialized":true,"config_dir":dir.path(),"permission_mode":"manual","previous_non_plan":"manual","cano":{"pid":42,"escuta":format!("tcp:{address}"),"token":"fixture","versao":2}});
-        let sidecar_path=super::lifecycle::claude_sidecar_dir().unwrap().join(format!("{name}.json"));std::fs::create_dir_all(sidecar_path.parent().unwrap()).unwrap();assert!(!sidecar_path.exists());std::fs::write(&sidecar_path,serde_json::to_vec(&meta).unwrap()).unwrap();let _sidecar=OwnSidecar(sidecar_path);
+        let sidecar_path=crate::runtime::lifecycle::claude_sidecar_dir().unwrap().join(format!("{name}.json"));std::fs::create_dir_all(sidecar_path.parent().unwrap()).unwrap();assert!(!sidecar_path.exists());std::fs::write(&sidecar_path,serde_json::to_vec(&meta).unwrap()).unwrap();let _sidecar=OwnSidecar(sidecar_path);
         let target=RuntimeTarget {key:"key".into(),generation:1,name:name.clone(),provider:"claude".into(),metadata:meta,binding:CanoBinding {pid:42,escuta:format!("tcp:{address}"),token:"fixture".into(),versao:2},lease_path:dir.path().join("lease"),state_path:dir.path().join("state"),projection_dir:dir.path().join("projection"),transcript:dir.path().join("a.jsonl"),created:0.0};std::fs::write(&target.transcript,b"").unwrap();
         let held_lease=acquire_lease(&target.lease_path).unwrap();let mut initial=QueueState::new("key",1,&name,vec![json!({"id":"a-row","text":"only-a","ts":1.0,"delivered":false})]);initial.runtime_state["view"]=json!({"conversation":"a","initialized":true});Store::open(&target.state_path,&target.projection_dir,initial).unwrap();drop(held_lease);
         let registry=Arc::new(RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(),"fixture".into(),"instance".into()).with_processes(Arc::new(SidRecipeProcesses {dir:dir.path().into()})).with_interactions(Arc::default()));let hubs=crate::side::Hubs::default();registry.bind_lifecycle();registry.bind_hubs(hubs.downgrade());
@@ -1970,7 +1970,7 @@ mod tests {
         assert_eq!(launch_policy(&policy,&target,dir.path(),"session.patch_meta",json!({"model":"x"})).await.unwrap()["stale"],true,"a vista do arquivo da fila vale");
         assert_eq!(launch_policy(&policy,&target,dir.path(),"session.clear_cano",json!({"pid":7})).await.unwrap(),json!({"cleared":true}));
         // Sem `codex` no PATH injetado a subida falha no processo, nunca numa política do Python.
-        let failed = launch_if_needed(&policy,&mut target,dir.path()).await.unwrap_err();
+        let failed = launch_if_needed(&policy,&mut target,dir.path()).await.err().expect("a subida sem codex precisa falhar");
         assert!(!failed.code.starts_with("policy_"),"{}",failed.code);
         let claude = RuntimeTarget { provider:"claude".into(),..target };
         assert!(launch_policy(&policy,&claude,dir.path(),"session.patch_meta",json!({"model":"m"})).await.unwrap_err().code.starts_with("policy_"),

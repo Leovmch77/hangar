@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use fake::*;
+use hangar_server::interactions::{InteractionBinding, InteractionKind, InteractionStore, native_target};
 use hangar_server::routes::AppState;
 use hangar_server::runtime::gateway::RuntimeRegistry;
 use hangar_server::runtime::protocol::{CanoBinding, RuntimeError, RuntimeTarget};
@@ -117,15 +118,26 @@ async fn call(server: std::net::SocketAddr, case: &Value, token: &str) -> (u16, 
     (status, serde_json::from_str(&text).unwrap_or(Value::String(text)))
 }
 
+/// ID que a pergunta assíncrona da sessão recebe ao ser exibida (o `<shown>` do golden).
+fn show(store: &InteractionStore, case: &Value) -> Value {
+    let request = &case["session"]["async"][0];
+    let binding = InteractionBinding { key: "k".into(), conversation: "thread-1".into(), generation: 1 };
+    let shown = json!({"request_id": request, "questions": [{"question": "?"}]});
+    json!(store.observe(&binding, &native_target(InteractionKind::Question, "thread-1", request), Some(shown)).unwrap().unwrap())
+}
+
 #[tokio::test]
 async fn headless_codex_routes_match_the_python_golden() {
-    // `/question/skip` exige a identidade da pergunta exibida, que o Python nunca pediu: caso próprio abaixo.
-    for case in golden().iter().filter(|c| c["relay"].is_null() && c["fault"].is_null() && c["route"] != "question/skip") {
+    for case in golden().iter().filter(|c| c["relay"].is_null() && c["fault"].is_null()) {
         let dir = tempfile::tempdir().unwrap();
-        let registry = Arc::new(RuntimeRegistry::new(policy().await, "secret-test".into(), "instance-test".into()));
+        let store = Arc::new(InteractionStore::default());
+        let registry = RuntimeRegistry::new(policy().await, "secret-test".into(), "instance-test".into());
+        let registry = Arc::new(if case["route"] == "question/skip" { registry.with_interactions(store.clone()) } else { registry });
         open(&registry, dir.path(), case).await;
         let (python, server) = serve(registry.clone()).await;
-        let (status, body) = call(server, case, OWNER).await;
+        let mut sent = case.clone();
+        if sent["body"]["interaction_id"] == "<shown>" { sent["body"]["interaction_id"] = show(&store, case); }
+        let (status, body) = call(server, &sent, OWNER).await;
         assert_eq!(python.hits_to(&format!("/api/sessions/s/{}", case["route"].as_str().unwrap())), 0, "{}: foi ao Python", case["name"]);
         assert_eq!((status, &body), (case["expect"]["status"].as_u64().unwrap() as u16, &case["expect"]["body"]), "{}", case["name"]);
         registry.close("k", 1).await.unwrap();
@@ -136,7 +148,6 @@ async fn headless_codex_routes_match_the_python_golden() {
 /// `interaction_id`) é aceito e o ID chega ao motor; sem ele, 409 com o código de identidade.
 #[tokio::test]
 async fn skip_route_accepts_and_forwards_the_displayed_interaction_id() {
-    use hangar_server::interactions::{InteractionBinding, InteractionKind, InteractionStore, native_target};
     let case = golden().into_iter().find(|c| c["name"] == "skip_async").unwrap();
     let request = case["body"]["request_id"].as_str().unwrap().to_owned();
     let dir = tempfile::tempdir().unwrap();
@@ -144,7 +155,9 @@ async fn skip_route_accepts_and_forwards_the_displayed_interaction_id() {
     let registry = Arc::new(RuntimeRegistry::new(policy().await, "secret-test".into(), "instance-test".into()).with_interactions(store.clone()));
     open(&registry, dir.path(), &case).await;
     let (python, server) = serve(registry).await;
-    let missing = call(server, &case, OWNER).await;
+    let mut bare = case.clone();
+    bare["body"] = json!({"request_id": request});
+    let missing = call(server, &bare, OWNER).await;
     assert_eq!((missing.0, missing.1["detail"]["code"].as_str()), (409, Some("erro_interacao_sem_identidade")));
     let binding = InteractionBinding { key: "k".into(), conversation: "thread-1".into(), generation: 1 };
     let shown = json!({"request_id": request, "questions": [{"question": "?"}]});
@@ -180,7 +193,7 @@ async fn guest_reaches_python_and_bodies_the_route_refuses_are_a_rust_422() {
         let (status, reply) = call(server, &refused, OWNER).await;
         assert_eq!((status, reply["detail"]["code"].as_str()), (422, Some("erro_corpo_invalido")), "{body}");
     }
-    assert_eq!(python.hits_to("/api/sessions/s/model") + python.hits_to("/api/sessions/s/service-tier"), 0);
+    assert_eq!(python.hits_to("/api/sessions/s/model") + python.hits_to("/api/sessions/s/service-tier"), 1, "só o convidado foi ao Python");
 }
 
 /// Falhas do ator que o cano falso não produz: a função de resposta com o erro do caso dá o mesmo corpo.

@@ -5,8 +5,8 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Instant;
 
-use axum::{Json, Router, extract::{ConnectInfo, DefaultBodyLimit, State}, http::{HeaderMap, StatusCode}, response::{IntoResponse, Response}, routing::post};
-use serde::Deserialize;
+use axum::{Router, body::Bytes, extract::{ConnectInfo, DefaultBodyLimit, FromRequest, Request, State}, http::{HeaderMap, StatusCode}, response::{IntoResponse, Response}, routing::post};
+use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 
 use crate::auth::{TrustedHosts, is_loopback};
@@ -97,6 +97,19 @@ struct StateBody {
 struct Suggest { texto: String, mostrada: bool }
 #[derive(Deserialize)]
 struct Rate { tokens: u64, seconds: f64, session_id: String }
+
+/// O workspace não liga a feature `json` do axum; corpo que não desserializa é `plugin_body_invalid`.
+struct Json<T>(T);
+impl<S: Send + Sync, T: DeserializeOwned> FromRequest<S> for Json<T> {
+    type Rejection = Response;
+    async fn from_request(req: Request, state: &S) -> Result<Self, Response> {
+        let bytes = Bytes::from_request(req, state).await.map_err(IntoResponse::into_response)?;
+        serde_json::from_slice(&bytes).map(Json).map_err(|_| fail(ServiceError("plugin_body_invalid")))
+    }
+}
+impl IntoResponse for Json<Value> {
+    fn into_response(self) -> Response { crate::session_write::json_response(StatusCode::OK, self.0) }
+}
 
 fn ok() -> Response { Json(json!({"ok":true})).into_response() }
 fn fail(error: ServiceError) -> Response {

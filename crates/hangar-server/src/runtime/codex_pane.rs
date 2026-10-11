@@ -185,11 +185,11 @@ mod tests {
         let bin = home.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
         let path = bin.to_string_lossy().into_owned();
-        assert_eq!(launch_recipe(&base(home.path(),&path),&meta()).unwrap_err().code,"codex_launcher_missing");
+        assert_eq!(launch_recipe(&base(home.path(),&path),&meta()).err().unwrap().code,"codex_launcher_missing");
         for exe in [LAUNCHER,"codex"] {
             std::fs::write(bin.join(exe),"#!/bin/sh\n").unwrap();
             std::fs::set_permissions(bin.join(exe),std::fs::Permissions::from_mode(0o755)).unwrap();
-            if exe == LAUNCHER { assert_eq!(launch_recipe(&base(home.path(),&path),&meta()).unwrap_err().code,"codex_cli_missing"); }
+            if exe == LAUNCHER { assert_eq!(launch_recipe(&base(home.path(),&path),&meta()).err().unwrap().code,"codex_cli_missing"); }
         }
         let recipe = launch_recipe(&base(home.path(),&path),&meta()).unwrap();
         assert_eq!(recipe.executable,bin.join(LAUNCHER));

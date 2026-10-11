@@ -7,6 +7,7 @@ impl Services { fn new() -> Self { Self { facts: Mutex::new(InputFacts { binding
 impl TerminalServices for Services {
  fn facts<'a>(&'a self, _: &'a TerminalBinding) -> ServiceFuture<'a, InputFacts> { Box::pin(async { Ok(self.facts.lock().unwrap().clone()) }) }
  fn publish<'a>(&'a self, _: &'a TerminalBinding, r: PluginRequest) -> ServiceFuture<'a, PluginReply> { Box::pin(async move { self.published.lock().unwrap().push(r); Ok(self.reply.lock().unwrap().clone()) }) }
+ fn permission_guard<'a>(&'a self, _: &'a TerminalBinding) -> ServiceFuture<'a, ()> { Box::pin(async { Ok(()) }) }
 }
 struct FakeIo { screens: Mutex<VecDeque<String>>, calls: Mutex<Vec<CommandRequest>>, socket: Mutex<WriteOutcome>, envelope: Mutex<Vec<u8>>, fail: Mutex<Option<String>>, formats: Mutex<String>, clients: Mutex<String>, attached: Mutex<String> }
 impl FakeIo {
@@ -330,6 +331,7 @@ async fn terminal_input_plugin_no_write_rechecks_all_guards_without_erasing_new_
  impl TerminalServices for Gate {
   fn facts<'a>(&'a self,b:&'a TerminalBinding)->ServiceFuture<'a,InputFacts>{self.inner.facts(b)}
   fn publish<'a>(&'a self,b:&'a TerminalBinding,r:PluginRequest)->ServiceFuture<'a,PluginReply>{Box::pin(async move{self.entered.notify_one();self.resume.notified().await;self.inner.publish(b,r).await})}
+  fn permission_guard<'a>(&'a self,b:&'a TerminalBinding)->ServiceFuture<'a,()>{self.inner.permission_guard(b)}
  }
  for reply in [PluginReply::Unavailable,PluginReply::NotWritten] {for change in ["question","ready","overlay","draft"] {
   let s=Arc::new(Gate {inner:Services::new(),entered:tokio::sync::Notify::new(),resume:tokio::sync::Notify::new()});s.inner.facts.lock().unwrap().plugin_live=true;*s.inner.reply.lock().unwrap()=reply.clone();

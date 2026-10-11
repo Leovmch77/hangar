@@ -99,6 +99,7 @@ mod tmux {
     impl TerminalServices for Facts {
         fn facts<'a>(&'a self, _: &'a TerminalBinding) -> ServiceFuture<'a, InputFacts> { Box::pin(async { Err(ServiceError("sem fatos")) }) }
         fn publish<'a>(&'a self, _: &'a TerminalBinding, _: PluginRequest) -> ServiceFuture<'a, PluginReply> { Box::pin(async { Ok(PluginReply::Unavailable) }) }
+        fn permission_guard<'a>(&'a self, _: &'a TerminalBinding) -> ServiceFuture<'a, ()> { Box::pin(async { Ok(()) }) }
     }
 
     /// O pane de verdade, sem o executor: só para o vigia, que lê e redimensiona.

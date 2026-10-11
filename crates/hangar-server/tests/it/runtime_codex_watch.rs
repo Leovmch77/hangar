@@ -241,12 +241,12 @@ async fn another_tui_with_an_inherited_key_gets_a_fresh_queue() {
 }
 
 /// Registro com o ambiente do Codex na pasta do teste: conta padrão em `<home>/.codex`, PATH só com `bin/`.
-async fn relaunch_registry(fx:&Fixture) -> RuntimeRegistry {
+async fn relaunch_registry(fx:&Fixture) -> Arc<RuntimeRegistry> {
     let bin = fx.root.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
     let map = [("HOME",fx.home.to_string_lossy().into_owned()),("PATH",bin.to_string_lossy().into_owned())]
         .into_iter().map(|(k,v)|(k.to_owned(),v)).collect();
-    registry().await.with_codex_environment(AccountEnvironment::from_map(map))
+    crate::runtime_open::registry_with(|registry|registry.with_codex_environment(AccountEnvironment::from_map(map))).await
 }
 
 /// Sidecar adotável com o rollout no disco e a conta padrão do ambiente do teste.
@@ -563,7 +563,7 @@ async fn to_headless_brings_up_the_headless_with_the_read_mode_restores_plan_and
 
 #[tokio::test]
 async fn relaunch_routes_go_to_python_when_the_session_is_not_a_codex_of_the_rust() {
-    let (python, server) = serve_owner(Arc::new(registry().await)).await;
+    let (python, server) = serve_owner(registry().await).await;
     for (route, body) in [("modo-execucao", json!({"terminal": true})), ("recarregar", json!({}))] {
         crate::fake::client().post(format!("http://{server}/api/sessions/claude-x/{route}"))
             .header("authorization", format!("Bearer {}", crate::fake::OWNER)).header("content-type", "application/json")
@@ -588,7 +588,7 @@ async fn the_hand_over_route_is_gone() {
     let (mut app,mut tui) = (app_server_process(&server_app.endpoint),tui());
     fx.put_sidecar("cx-proof",fx.meta("cx-proof",&server_app.endpoint,Some(app.id()),&tui));
     fx.panes(&["cx-proof"]);
-    let registry = Arc::new(registry().await);
+    let registry = registry().await;
     let watcher = fx.watcher();
     registry.bind_watcher(watcher.clone());
     watcher.round(&registry).await;
@@ -650,7 +650,7 @@ async fn owner_delete_kills_in_rust_then_forwards_marked_to_python() {
     let (mut app,mut tui) = (app_server_process(&server_app.endpoint),tui());
     fx.put_sidecar("cx-proof",fx.meta("cx-proof",&server_app.endpoint,Some(app.id()),&tui));
     fx.panes(&["cx-proof"]);
-    let registry = Arc::new(registry().await);
+    let registry = registry().await;
     let watcher = fx.watcher();
     registry.bind_watcher(watcher.clone());
     watcher.round(&registry).await;
@@ -686,7 +686,7 @@ async fn owner_delete_that_fails_in_rust_answers_its_code_and_never_reaches_pyth
         fx.panes.display()));
     let watcher = Arc::new(Watcher::new(WatchConfig { home:fx.home.clone(),queue_dir:fx.queue.clone(),
         mux:Mux::with_program(&survivor,Duration::from_secs(5)),mux_program:survivor.clone().into_os_string() }));
-    let registry = Arc::new(registry().await);
+    let registry = registry().await;
     registry.bind_watcher(watcher.clone());
     watcher.round(&registry).await;
     let (python, server) = serve_owner(registry.clone()).await;
@@ -833,7 +833,7 @@ async fn owner_broadcast_answers_the_rust_code_for_a_codex_terminal_it_cannot_ad
     let (mut app,mut tui) = (app_server_process(&server_app.endpoint),tui());
     // Sidecar pronto e nenhum pane: a adoção na hora falha com o código do Rust.
     fx.put_sidecar("cx-proof",fx.meta("cx-proof",&server_app.endpoint,Some(app.id()),&tui));
-    let registry = Arc::new(registry().await);
+    let registry = registry().await;
     registry.bind_watcher(fx.watcher());
     let (python, server) = serve_owner(registry.clone()).await;
     let response = crate::fake::client().post(format!("http://{server}/api/broadcast"))

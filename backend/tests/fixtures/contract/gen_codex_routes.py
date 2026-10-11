@@ -60,9 +60,18 @@ BASE = {"model": "gpt-5", "effort": "high", "service_tier": "default", "mode": "
         "permission_mode": "Full Access", "busy": False, "async": []}
 
 
-def case(name, method, route, body=None, rpc=None, relay=None, fault=None, **session):
+def case(name, method, route, body=None, rpc=None, relay=None, fault=None, rust=None, **session):
     return {"name": name, "method": method, "route": route, "body": body, "rpc": rpc or {},
-            "session": {**BASE, **session}, "relay": relay, "fault": fault}
+            "session": {**BASE, **session}, "relay": relay, "fault": fault, "rust": rust}
+
+
+# `interaction_id` da pergunta exibida: o Python nunca o conferiu, então a resposta desses casos é o
+# contrato do Rust, escrita aqui. `<shown>` vira, no teste Rust, o ID que a pergunta assíncrona recebeu.
+SHOWN = "<shown>"
+CHANGED = {"status": 409, "body": {"detail": {"code": "erro_interacao_desatualizada", "params": {},
+                                              "msg": "Essa pergunta mudou ou já foi encerrada. Confira a pergunta atual."}}}
+MISSING = {"status": 409, "body": {"detail": {"code": "erro_interacao_sem_identidade", "params": {},
+                                              "msg": "Atualize o app ou recarregue a página antes de responder."}}}
 
 
 CASES = [
@@ -85,8 +94,12 @@ CASES = [
     case("limits_ok", "GET", "limits", rpc={"account/rateLimits/read": {"result": LIMITS}}),
     case("limits_without_windows", "GET", "limits", rpc={"account/rateLimits/read": {"result": {"rateLimits": {"limitId": "codex"}}}}),
     case("limits_refused", "GET", "limits", rpc={"account/rateLimits/read": ERR}),
-    case("skip_async", "POST", "question/skip", {"request_id": "async:thread-1:i1:0"}, **{"async": ["async:thread-1:i1:0"]}),
-    case("skip_unknown", "POST", "question/skip", {"request_id": "async:outra"}, **{"async": ["async:thread-1:i1:0"]}),
+    case("skip_async", "POST", "question/skip", {"request_id": "async:thread-1:i1:0", "interaction_id": SHOWN},
+         **{"async": ["async:thread-1:i1:0"]}),
+    case("skip_unknown", "POST", "question/skip", {"request_id": "async:outra", "interaction_id": SHOWN},
+         rust=CHANGED, **{"async": ["async:thread-1:i1:0"]}),
+    case("skip_without_id", "POST", "question/skip", {"request_id": "async:thread-1:i1:0"},
+         rust=MISSING, **{"async": ["async:thread-1:i1:0"]}),
     case("commands_ok", "GET", "commands", rpc={"skills/list": {"result": SKILLS}}),
     case("commands_refused", "GET", "commands", rpc={"skills/list": ERR}),
     case("permissions_list", "GET", "codex-permissions", permission_mode="Approve for me"),
@@ -203,11 +216,12 @@ def rows() -> list:
     async def main():
         out = []
         for c in CASES:
+            row = {k: v for k, v in c.items() if k != "rust"}
             if c["relay"] == "terminal":
                 # Com terminal a rota Python dirige a TUI; o golden só registra que o Rust não a atende.
-                out.append({**c, "expect": None})
+                out.append({**row, "expect": None})
                 continue
-            out.append({**c, "expect": await run(c)})
+            out.append({**row, "expect": c["rust"] or await run(c)})
         return out
 
     return asyncio.run(main())

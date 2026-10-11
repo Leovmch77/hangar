@@ -2508,7 +2508,7 @@ mod tests {
         // Ator vivo que não lê a caixa: o pedido do app não pode pendurar o registro da sessão.
         let (sender,_inbox) = mpsc::channel(1);
         let handle = RuntimeHandle { sender,task:Arc::new(Mutex::new(None)),closed:Arc::new(AtomicBool::new(false)),
-            events:broadcast::channel(1).0,stopped:Arc::new(Mutex::new(None)),key:"key".into() };
+            events:broadcast::channel(1).0,stopped:Arc::new(Mutex::new(None)),key:"key".into(),generation:1 };
         let call = || ModsCall::Show { site:"p".into() };
         let soon = || Instant::now() + Duration::from_millis(50);
         let first = tokio::time::timeout(Duration::from_secs(2),handle.mods(call(),soon())).await.unwrap();
@@ -2540,7 +2540,7 @@ mod tests {
         let mods = crate::mods::state::Mods::default();
         let (sender,_inbox) = mpsc::channel(1);
         let link = RuntimeHandle { sender,task:Arc::new(Mutex::new(None)),closed:Arc::new(AtomicBool::new(false)),
-            events:broadcast::channel(1).0,stopped:Arc::new(Mutex::new(None)),key:"key".into() };
+            events:broadcast::channel(1).0,stopped:Arc::new(Mutex::new(None)),key:"key".into(),generation:1 };
         mods.attach("session",1,Arc::new(link));
         let band = json!({"above":{"type":"Button","key":"k"},"panes":[],"shown_id":null,"columns":110,"source":"surface"});
         let ui = |mods:&crate::mods::state::Mods| mods.replay("session").into_iter().find(|(event,_)|*event == "plugin_ui")

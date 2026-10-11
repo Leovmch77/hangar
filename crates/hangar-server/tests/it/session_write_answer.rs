@@ -160,6 +160,7 @@ impl TerminalServices for Services {
     fn publish<'a>(&'a self,_:&'a TerminalBinding,_:PluginRequest) -> ServiceFuture<'a,PluginReply> {
         Box::pin(async { Ok(PluginReply::Unavailable) })
     }
+    fn permission_guard<'a>(&'a self,_:&'a TerminalBinding) -> ServiceFuture<'a,()> { Box::pin(async { Ok(()) }) }
 }
 struct PaneIo { screen:Mutex<String>, writes:Mutex<Vec<CommandRequest>>, replacement:Mutex<Option<(PathBuf,Vec<u8>,String)>> }
 impl PaneIo {
@@ -267,6 +268,7 @@ async fn chat_guard_survives_journal_buffer_and_clipboard_preparation() {
                 plugin_live:false,plugin_user:false,clipboard_available:true,native:None }) })
         }
         fn publish<'a>(&'a self,_:&'a TerminalBinding,_:PluginRequest) -> ServiceFuture<'a,PluginReply> { Box::pin(async { panic!("publicação sem guarda") }) }
+        fn permission_guard<'a>(&'a self,_:&'a TerminalBinding) -> ServiceFuture<'a,()> { Box::pin(async { Ok(()) }) }
         fn writing<'a>(&'a self) -> ServiceFuture<'a,()> { Box::pin(async move { if self.stage == "journal" { self.replace(); } Ok(()) }) }
     }
     impl TerminalIo for Prepared {

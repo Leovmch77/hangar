@@ -510,11 +510,15 @@ async def _codex_rust_port(name: str, request: Request):
     """Escrita que entrou pelo convite ou pelo Connect num Codex com terminal do Rust: a autenticação foi a
     desta porta, e o pedido vai inteiro à ponte dele, num sentido só. A pergunta do Claude vai do mesmo
     jeito à ponte do Claude. Fora disso (421 do Rust) não faz nada."""
+    from app import runtime_coordinator
     from app.share_tunnel import GUEST_PORT
     port = (request.scope.get("server") or (None, None))[1]
     if port in (GUEST_PORT, CONNECT_PORT) and port != settings.port:
         route, body = request.url.path.split("/", 4)[4] + (f"?{request.url.query}" if request.url.query else ""), await request.body()
-        reply = await asyncio.to_thread(runtime_coordinator.rust_codex_terminal, name, route, request.method, body)
+        # Só Codex consulta a ponte dele: com a ponte ainda sem endereço, Pi/omp/Kimi levariam o 503 dela.
+        reply = None
+        if codex_sessions.exists(name):
+            reply = await asyncio.to_thread(runtime_coordinator.rust_codex_terminal, name, route, request.method, body)
         if reply is None and route in {"answer", "select", "select/submit"}:
             reply = await asyncio.to_thread(runtime_coordinator.rust_claude, name, route, request.method, body)
         if reply:
@@ -4718,6 +4722,7 @@ def _pane_info(name: str) -> tuple[str, str | None]:
 
 async def _send_one_codex(name: str, text: str, *, track_entry: bool = False) -> dict:
     # Codex com terminal do Rust (broadcast, grupo, par, MCP): o envio vai à ponte dele, num sentido só.
+    from app import runtime_coordinator
     if rust := await asyncio.to_thread(runtime_coordinator.rust_codex_terminal, name, "input", "POST", json.dumps({"text": text}).encode()):
         reply = json.loads(rust[1] or b"{}")
         return reply if rust[0] < 300 else {"ok": False, "error": reply.get("detail"), "delivered": False}

@@ -76,7 +76,7 @@ impl ReservedAsyncAnswer {
     }
 }
 
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeCommand {
     pub operation_id: String,
@@ -93,7 +93,7 @@ pub enum EngineInput {
     Tick,
 }
 
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Effect {
     Write { frame: Value, operation_id: Option<String> },
@@ -134,7 +134,7 @@ impl DiagEvent {
     }
 }
 
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeReply {
     pub operation_id: String,

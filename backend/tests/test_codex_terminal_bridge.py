@@ -140,6 +140,7 @@ def _request(port, path="/api/sessions/cx/keys", query=b"", body=b'{"key":"Up"}'
 
 def test_writes_entering_the_guest_or_connect_port_are_forwarded_whole(monkeypatch):
     calls = []
+    monkeypatch.setattr(api_mod.codex_sessions, "exists", lambda name: name == "cx")
     monkeypatch.setattr(runtime_coordinator, "rust_codex_terminal", lambda *args: calls.append(args) or (202, b"{}"))
     with pytest.raises(api_mod._RustReply) as reply:
         asyncio.run(api_mod._codex_rust_port("cx", _request(GUEST_PORT)))
@@ -154,6 +155,18 @@ def test_writes_entering_the_guest_or_connect_port_are_forwarded_whole(monkeypat
     # Não é Codex com terminal do Rust: a rota do Python segue.
     monkeypatch.setattr(runtime_coordinator, "rust_codex_terminal", lambda *args: None)
     asyncio.run(api_mod._codex_rust_port("cx", _request(GUEST_PORT)))
+
+
+def test_guest_write_to_pi_does_not_wait_for_the_codex_bridge(monkeypatch):
+    import json
+    _owner(monkeypatch, mode="pending")
+    monkeypatch.setattr(list_bridge, "endpoint", lambda: None)
+    monkeypatch.setattr(api_mod.codex_sessions, "exists", lambda name: name == "cx")
+    # Pi pela 8766 com a ponte ainda sem endereço: a rota Python segue.
+    asyncio.run(api_mod._codex_rust_port("pi", _request(GUEST_PORT, "/api/sessions/pi/keys")))
+    with pytest.raises(api_mod._RustReply) as reply:
+        asyncio.run(api_mod._codex_rust_port("cx", _request(GUEST_PORT)))
+    assert reply.value.args[0] == 503 and json.loads(reply.value.args[1])["detail"]["code"] == "codex_bridge_failed"
 
 
 def test_relaunch_routes_entering_the_guest_or_connect_port_go_to_the_rust():

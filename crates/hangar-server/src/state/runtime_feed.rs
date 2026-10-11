@@ -580,7 +580,7 @@ mod tests {
         let boot = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let py = FakePython { addr:boot.local_addr().unwrap(), hits:Arc::default(), snapshots:Arc::default() };
         let boot_server = tokio::spawn(async move {
-            axum::serve(boot, axum::Router::new().fallback(|| async { axum::Json(json!({"ok":true,"data":{}})) })).await.unwrap();
+            axum::serve(boot, axum::Router::new().fallback(|| async { crate::session_write::json_response(axum::http::StatusCode::OK, json!({"ok":true,"data":{}})) })).await.unwrap();
         });
         let external = Arc::new(crate::state::facts::FactsStore::default());
         let interactions = Arc::new(crate::interactions::InteractionStore::default());

@@ -347,7 +347,7 @@ impl Handoff {
         use tokio::io::{AsyncReadExt,AsyncWriteExt};
         let expected_pid=u32::try_from(expected.pid).map_err(|_|io::ErrorKind::InvalidData)?;
         if procs.recipe(expected.pid)?!=*expected || expected.executable!=std::env::current_exe()?
-            || expected.argv.len()!=3 || expected.argv[1]!=RELAUNCH_FLAG || expected.argv[2]!=self.endpoint {
+            || expected.argv.len()!=3 || expected.argv[1]!=RELAUNCH_FLAG || expected.argv[2]!=*self.endpoint {
             return Err(io::ErrorKind::PermissionDenied.into());
         }
         let server=self.server.take().ok_or(io::ErrorKind::NotConnected)?;
