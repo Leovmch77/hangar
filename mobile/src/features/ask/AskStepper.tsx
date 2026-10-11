@@ -10,12 +10,18 @@ import { superficie } from '../../theme/superficie';
 
 interface Props {
   payload: AskQuestionPayload;
-  onSubmit: (answers: AnswerItem[]) => Promise<void>;
-  onClose?: () => void;
+  onSubmit: (answers: AnswerItem[], payload: AskQuestionPayload) => Promise<void>;
+  onClose?: (payload: AskQuestionPayload) => void;
 }
 
-export function AskStepper({ payload, onSubmit, onClose }: Props) {
+export function AskStepper(props: Props) {
+  const key = JSON.stringify([props.payload.interaction_id, props.payload.request_id, props.payload.questions]);
+  return <AskStepperContent key={key} {...props} />;
+}
+
+function AskStepperContent({ payload, onSubmit, onClose }: Props) {
   const { theme } = useUnistyles();
+  const displayed = { ...payload };
   const questions = payload.questions ?? [];
 
   const [step, setStep] = useState(0);
@@ -74,7 +80,7 @@ export function AskStepper({ payload, onSubmit, onClose }: Props) {
     setSending(true);
     setError('');
     try {
-      await onSubmit(buildAnswers(questions, picks));
+      await onSubmit(buildAnswers(questions, picks), payload);
     } catch (e) {
       setError(e instanceof Error ? e.message : m.askq_erro_envio());
     } finally {
@@ -141,7 +147,7 @@ export function AskStepper({ payload, onSubmit, onClose }: Props) {
         >
           <Text style={styles.primaryTxt}>{sending ? m.askq_enviando() : m.lista_enviar()}</Text>
         </Pressable>
-        <Pressable onPress={onClose} style={styles.ghostBtn} accessibilityRole="button">
+        <Pressable onPress={() => onClose?.(displayed)} style={styles.ghostBtn} accessibilityRole="button">
           <Text style={[styles.ghostTxt, { color: theme.tokens.text.secondary }]}>{m.comum_cancelar()}</Text>
         </Pressable>
       </ScrollView>
@@ -277,7 +283,7 @@ export function AskStepper({ payload, onSubmit, onClose }: Props) {
             </Pressable>
             <Pressable
               onPress={() => {
-                if (q.options.length === 0) onClose?.();
+                if (q.options.length === 0) onClose?.(displayed);
                 else { setTextOpen(false); setTextValue(''); }
               }}
               style={styles.ghostBtn}

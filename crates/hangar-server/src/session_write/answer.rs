@@ -1,13 +1,7 @@
-//! `/answer` de sessão Claude (resposta ao AskUserQuestion), com a mesma resposta do Python (`api.answer`,
-//! `runtime_terminal.answer_sync`). Com terminal, "Conversar sobre isso" fecha a pergunta (`interrupt`)
-//! e manda as respostas como texto (`input`) pelo próprio ator, sem emprestar o teclado ao Python.
-//! Divergências deliberadas, espelhadas no Python: falha do runtime é 502 `erro_envio_falhou`; texto do
-//! "Conversar" não confirmado é 502 `erro_envio_falhou`; o ator sem terminal que recusa a resposta
-//! (`claude_command`) é 409 `erro_codex_resposta_invalida`.
-use std::future::Future;
+//! Resposta ao retrato identificado do AskUserQuestion. "Conversar" é um único controle serial
+//! do dono: conferir a pergunta, fechar e entregar o texto, com um recibo só.
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 use axum::body::Bytes;
 use axum::extract::{ConnectInfo, Request, State};
@@ -15,25 +9,18 @@ use axum::http::StatusCode;
 use axum::response::Response;
 use serde_json::{Value, json};
 
-use super::control::{control_step_answer, panel_open_refusal, plugin_down, plugin_pending};
+use super::control::{expected, interaction_failure, interaction_result, panel_open_refusal};
+use crate::interactions::{ExpectedInteraction, InteractionError, InteractionKind};
 use super::input::{MSG_CONTROL_DEFERRED, MSG_CONTROL_UNCONFIRMED, answer as respond, json_content_type, runtime_failed};
 use super::{Ctx, WriteRoute, admit, detail_body, relay};
 use crate::mods::state::random_hex;
 use crate::routes::AppState;
 use crate::runtime::gateway::EntryHandle;
 use crate::runtime::protocol::{Disposition, OperationKind, RuntimeCommand, RuntimeError, RuntimeReply};
-use crate::runtime::terminal::{TerminalHandle, TerminalTarget};
-use crate::state::ask;
-use crate::state::capture::PaneCapture;
+use crate::runtime::terminal::TerminalHandle;
 
 type Answer = (StatusCode, Value);
 
-/// Quanto esperar o picker sumir do pane depois do Esc, antes de digitar o texto.
-const PICKER_CLOSE_WAIT: Duration = Duration::from_secs(3);
-const PICKER_POLL: Duration = Duration::from_millis(100);
-
-const MSG_CHAT_EMPTY: &str = "resposta sem texto para conversar";
-const MSG_CHANGED: &str = "a pergunta mudou; resposta conservada";
 const MSG_CHAT_UNCONFIRMED: &str = "a pergunta foi fechada, mas a resposta por texto não foi confirmada — confira na sessão antes de responder de novo";
 const MSG_HEADLESS_INVALID: &str = "A pergunta mudou ou não aceita essas respostas. Confira as opções e tente novamente.";
 const MSG_HEADLESS_SEND: &str = "Não foi possível enviar a resposta.";
@@ -68,6 +55,7 @@ pub struct Body {
     answers: Vec<Item>,
     /// `null`, texto ou inteiro: o `int | str | None` do `AnswerBody`.
     request_id: Value,
+    interaction_id: Option<String>,
 }
 
 impl Body {
@@ -99,7 +87,7 @@ fn parse_item(value: &Value) -> Option<Item> {
 pub fn parse_body(bytes: &Bytes) -> Option<Body> {
     let value: Value = serde_json::from_slice(bytes).ok()?;
     let object = value.as_object()?;
-    if object.keys().any(|k| k != "answers" && k != "request_id") { return None; }
+    if object.keys().any(|k| k != "answers" && k != "request_id" && k != "interaction_id") { return None; }
     let answers = object.get("answers")?.as_array()?.iter().map(parse_item).collect::<Option<Vec<_>>>()?;
     let request_id = match object.get("request_id") {
         None | Some(Value::Null) => Value::Null,
@@ -107,7 +95,8 @@ pub fn parse_body(bytes: &Bytes) -> Option<Body> {
         Some(v) if v.as_i64().is_some() => v.clone(),
         Some(_) => return None,
     };
-    Some(Body { answers, request_id })
+    let interaction_id = optional(object.get("interaction_id"), |v| v.as_str().map(str::to_owned))?;
+    Some(Body { answers, request_id, interaction_id })
 }
 
 fn refused(msg: &str) -> Answer { (StatusCode::CONFLICT, detail_body("erro_sem_resposta", msg, json!({}))) }
@@ -184,11 +173,6 @@ fn validate_control(items: &[Item], request_id: &Value) -> Result<(), String> {
     Ok(())
 }
 
-/// `x or y` do Python sobre o `request_id`: nulo, vazio e zero são falsos.
-fn truthy(value: &Value) -> bool {
-    match value { Value::Null => false, Value::String(s) => !s.is_empty(), Value::Number(n) => n.as_i64() != Some(0), _ => true }
-}
-
 pub enum Plan {
     /// O controle `answer_questions` com este corpo.
     Control(Value),
@@ -196,26 +180,23 @@ pub enum Plan {
     Chat,
 }
 
-/// A decisão do Python antes de tocar no pane, na ordem dele: painel, validação, identidade da
-/// pergunta, e só então o caminho do chat ou o controle.
-pub fn terminal_plan(body: &Body, pending: Option<&Value>, panel_open: bool) -> Result<Plan, Answer> {
-    if pending.is_none() && panel_open { return Err(panel_open_refusal()); }
-    validate(&body.answers).map_err(|msg| refused(&msg))?;
-    let request_id = if truthy(&body.request_id) { body.request_id.clone() } else { pending.map_or(Value::Null, |p| p["id"].clone()) };
-    let mut payload = json!({"answers": body.answers_json()});
-    match pending {
-        Some(held) => {
-            let id = held["id"].as_str().map_or_else(|| held["id"].to_string(), str::to_owned);
-            let same = request_id.as_str().is_some_and(|r| r == id || r == id.strip_prefix("ask:").unwrap_or(&id));
-            if truthy(&request_id) && !same { return Err(refused(MSG_CHANGED)); }
-            payload["request_id"] = json!(if id.starts_with("ask:") || id.starts_with("perm:") { id } else { format!("ask:{id}") });
-        }
-        None => {
-            if body.answers.iter().any(|a| a.kind == "chat") { return Ok(Plan::Chat); }
-            if truthy(&request_id) { payload["request_id"] = request_id.clone(); }
-        }
+pub fn terminal_plan(body: &Body, expected: &ExpectedInteraction, panel_open: bool) -> Result<Plan, Answer> {
+    if body.interaction_id.as_deref().is_none_or(str::is_empty) { return Err(interaction_failure(InteractionError::Missing)); }
+    if body.interaction_id.as_deref() != Some(expected.interaction_id.as_str()) || expected.target.kind != InteractionKind::Question {
+        return Err(interaction_failure(InteractionError::Changed));
     }
-    validate_control(&body.answers, payload.get("request_id").unwrap_or(&Value::Null)).map_err(|msg| refused(&msg))?;
+    let plugin = expected.target.request_key.starts_with("plugin:");
+    if !plugin && panel_open { return Err(panel_open_refusal()); }
+    validate(&body.answers).map_err(|msg| refused(&msg))?;
+    if !body.request_id.is_null() {
+        let same = if let Some(id) = expected.target.request_key.strip_prefix("plugin:") { body.request_id.as_str() == Some(id) }
+            else { expected.native_id(Some(&body.request_id)).is_ok() };
+        if !same { return Err(interaction_failure(InteractionError::Changed)); }
+    }
+    let mut payload = json!({"answers": body.answers_json(), "interaction_id": body.interaction_id});
+    if !body.request_id.is_null() { payload["request_id"] = body.request_id.clone(); }
+    validate_control(&body.answers, &body.request_id).map_err(|msg| refused(&msg))?;
+    if !plugin && body.answers.iter().any(|a| a.kind == "chat") { return Ok(Plan::Chat); }
     Ok(Plan::Control(payload))
 }
 
@@ -249,9 +230,8 @@ pub fn chat_text(answers: &[Value], questions: &[String]) -> String {
     lines.join("\n")
 }
 
-pub fn chat_refusal(text: &str) -> Option<Answer> { text.is_empty().then(|| refused(MSG_CHAT_EMPTY)) }
-
 pub fn control_answer(sent: &Result<RuntimeReply, RuntimeError>) -> Answer {
+    if let Some(failed) = interaction_result(sent) { return failed; }
     let reply = match sent {
         Ok(reply) => reply,
         Err(error) => return runtime_failed(error),
@@ -259,28 +239,17 @@ pub fn control_answer(sent: &Result<RuntimeReply, RuntimeError>) -> Answer {
     match reply.disposition {
         Disposition::Accepted => success(),
         Disposition::Deferred => refused(MSG_CONTROL_DEFERRED),
-        _ => refused(MSG_CONTROL_UNCONFIRMED),
-    }
-}
-
-/// O texto entrou ou ficou na fila (`deferred`, sai quando o terminal ficar livre); o resto não foi confirmado.
-pub fn chat_submit_answer(sent: &Result<RuntimeReply, RuntimeError>) -> Answer {
-    match sent {
-        Err(error) => runtime_failed(error),
-        Ok(reply) if matches!(reply.disposition, Disposition::Accepted | Disposition::Deferred) => success(),
-        // 502, não 409: o app trata 409 como "nada digitado", e aqui a pergunta já fechou e o texto pode ter entrado.
-        Ok(_) => (StatusCode::BAD_GATEWAY, detail_body("erro_envio_falhou", MSG_CHAT_UNCONFIRMED, json!({"erro": MSG_CHAT_UNCONFIRMED}))),
+        Disposition::Unknown => (StatusCode::CONFLICT, detail_body("erro_sem_confirmacao_resposta", MSG_CHAT_UNCONFIRMED, json!({}))),
+        Disposition::Rejected => refused(MSG_CONTROL_UNCONFIRMED),
     }
 }
 
 /// O corpo do `answer_questions` sem terminal: o ator confere a pergunta pendente e monta a resposta.
-pub fn headless_command(body: &Body) -> Value { json!({"request_id": body.request_id, "answers": body.answers_json()}) }
-
-/// O ator exige o id da pergunta; sem ele quem decide é o Python, que não confere.
-pub fn relays_headless(body: &Body) -> bool { body.request_id.is_null() }
+pub fn headless_command(body: &Body) -> Value { json!({"request_id": body.request_id, "answers": body.answers_json(), "interaction_id": body.interaction_id}) }
 
 /// No Codex a recusa do ator (`codex_command`) é falha de envio, como no Python, com a frase do Codex.
 pub fn headless_answer(codex: bool, sent: &Result<RuntimeReply, RuntimeError>) -> Answer {
+    if let Some(failed) = interaction_result(sent) { return failed; }
     let invalid = || (StatusCode::CONFLICT, detail_body("erro_codex_resposta_invalida", MSG_HEADLESS_INVALID, json!({})));
     let unsent = || (StatusCode::SERVICE_UNAVAILABLE, detail_body("erro_codex_resposta_envio",
         if codex { MSG_CODEX_SEND } else { MSG_HEADLESS_SEND }, json!({})));
@@ -290,76 +259,21 @@ pub fn headless_answer(codex: bool, sent: &Result<RuntimeReply, RuntimeError>) -
         Ok(reply) => match reply.disposition {
             Disposition::Accepted => success(),
             Disposition::Rejected | Disposition::Deferred => invalid(),
-            Disposition::Unknown => unsent(),
+            Disposition::Unknown => (StatusCode::CONFLICT, detail_body("erro_sem_confirmacao_resposta", MSG_CHAT_UNCONFIRMED, json!({}))),
         },
     }
 }
 
-/// Espera o menu sair do pane. `read` devolve se o rodapé ainda aparece; `None` (captura que falhou)
-/// não segura o texto. Estourou o prazo: devolve `false` e quem chama envia assim mesmo.
-pub async fn wait_footer_gone<F, Fut>(mut read: F, limit: Duration, poll: Duration) -> bool
-where F: FnMut() -> Fut, Fut: Future<Output = Option<bool>> {
-    let start = Instant::now();
-    loop {
-        if read().await != Some(true) { return true; }
-        if start.elapsed() >= limit { return false; }
-        tokio::time::sleep(poll).await;
-    }
-}
-
-async fn picker_closed(ctx: &Ctx, target: &TerminalTarget) -> bool {
-    // Consumidor só desta espera: o `monitor:` da sessão divide o observador e não pode ser solto aqui.
-    let capture = PaneCapture::with_consumer(ctx.st.terminal.clone(), format!("answer:{}:{}", ctx.name, random_hex(8)),
-        ctx.st.list.env().capture_program.clone(), &ctx.name, &target.binding.conversation, target.binding.pane.clone());
-    let gone = wait_footer_gone(|| async {
-        match capture.capture().await {
-            Ok(frame) => Some(crate::terminal_state::footer_visible(&frame.text)),
-            Err(failed) => {
-                tracing::warn!(session = %ctx.name, code = %failed.code, "answer: captura do pane falhou; o texto segue sem esperar o menu fechar");
-                None
-            }
-        }
-    }, PICKER_CLOSE_WAIT, PICKER_POLL).await;
-    capture.release().await;
-    gone
-}
-
-/// As perguntas do sidecar, na ordem; ausente ou quebrado é "sem perguntas", como no Python.
-async fn sidecar_questions(target: &TerminalTarget) -> Vec<String> {
-    let jsonl = target.transcript.clone();
-    tokio::task::spawn_blocking(move || match ask::read_pending(&jsonl) {
-        Ok(Some(pending)) => pending.questions.into_iter().map(|q| q.question).collect(),
-        _ => Vec::new(),
-    }).await.unwrap_or_default()
-}
-
-async fn chat(ctx: &Ctx, body: &Body, target: &TerminalTarget, handle: &TerminalHandle) -> Answer {
-    let text = chat_text(&body.answers_json(), &sidecar_questions(target).await);
-    if let Some(empty) = chat_refusal(&text) { return empty; }
-    // O Esc fecha a pergunta inteira; o texto só entra quando o menu saiu, senão a TUI o engole.
-    if let Err(not_closed) = control_step_answer(&handle.control(random_hex(16), "interrupt".into(), json!({})).await) { return not_closed; }
-    if !picker_closed(ctx, target).await {
-        tracing::warn!(session = %ctx.name, "answer: o menu não fechou em 3 s depois do Esc; enviando o texto assim mesmo");
-    }
-    let command = RuntimeCommand { operation_id: random_hex(16), kind: OperationKind::Input, payload: json!({"text": text, "pre_transcript": false}) };
-    chat_submit_answer(&handle.command(command).await)
-}
-
-async fn terminal(ctx: &Ctx, body: &Body, target: &TerminalTarget, handle: &TerminalHandle) -> Answer {
-    let pending = match plugin_pending(ctx).await {
-        Ok(pending) => pending,
-        Err(()) => return plugin_down("erro_sem_resposta"),
-    };
-    let done = match terminal_plan(body, pending.as_ref(), ctx.st.term.is_active(&ctx.name)) {
-        Err(refusal) => return refusal,
+async fn terminal(ctx: &Ctx, body: &Body, expected: &ExpectedInteraction, handle: &TerminalHandle) -> Answer {
+    match terminal_plan(body, expected, ctx.st.term.is_active(&ctx.name)) {
+        Err(refusal) => refusal,
         Ok(Plan::Control(payload)) => control_answer(&handle.control(random_hex(16), "answer_questions".into(), payload).await),
-        Ok(Plan::Chat) => chat(ctx, body, target, handle).await,
-    };
-    if done.0 == StatusCode::OK && let Some(sidecar) = ask::sidecar_path(&target.transcript) {
-        // Pergunta respondida: o sidecar não pode reabri-la na tela. Ausente é o caso normal.
-        let _ = tokio::fs::remove_file(sidecar).await;
+        Ok(Plan::Chat) => {
+            let mut payload = json!({"answers":body.answers_json(), "interaction_id":body.interaction_id});
+            if !body.request_id.is_null() { payload["request_id"] = body.request_id.clone(); }
+            control_answer(&handle.control(random_hex(16), "answer_chat".into(), payload).await)
+        }
     }
-    done
 }
 
 pub async fn answer(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
@@ -368,10 +282,9 @@ pub async fn answer(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
         Err(response) => return response,
     };
     let Some(body) = parse_body(&bytes).filter(|_| json_content_type(ctx.headers())) else { return relay(ctx, bytes).await };
+    let expected = match expected(&ctx, body.interaction_id.as_deref()).await { Ok(expected) => expected, Err(failed) => return respond(&ctx, failed) };
     let result = match &ctx.target.handle {
-        EntryHandle::Terminal { target, handle } => terminal(&ctx, &body, target, handle).await,
-        // Sem pergunta pendente de referência, o Python decide o que `request_id` ausente significa.
-        _ if relays_headless(&body) => return relay(ctx, bytes).await,
+        EntryHandle::Terminal { handle, .. } => terminal(&ctx, &body, &expected, handle).await,
         headless => {
             let sent = headless.command(RuntimeCommand { operation_id: random_hex(16), kind: OperationKind::AnswerQuestions, payload: headless_command(&body) }).await;
             let codex = ctx.target.provider == "codex";

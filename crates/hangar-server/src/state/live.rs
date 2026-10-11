@@ -1,5 +1,5 @@
-//! Fonte de produção do `Monitor`: o hub da sessão (época, conversa, publicação), a captura pelo
-//! pool, os fatos do Python (retrato e empurrão), os arquivos da sessão e o ator de entrada.
+//! Fontes Rust do Monitor: vínculo do runtime, Store do plugin, arquivos e captura compartilhada.
+//! Fatos externos só decoram os recursos que permanecem fora deste recorte.
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
@@ -15,7 +15,7 @@ use tokio::sync::Notify;
 use super::agent_pane::AgentPanes;
 use super::capture::{MuxProcess, PaneCapture};
 use super::edges::RuntimeView;
-use super::facts::{Dead, FactsStore, SNAPSHOT_REFRESH, StateFactsClient};
+use super::facts::{Dead, FactsStore, StateFactsClient};
 use super::monitor::{CaptureFailed, FileFacts, Frame, LoopInfo, Monitor, RoundFacts, Sources, wall_now};
 use super::preview::{HookFile, HookFiles};
 use crate::list::bridge::{ListBridge, pid_alive};
@@ -117,15 +117,23 @@ pub struct StateEnv {
     pub diag: crate::diag::DiagClient,
     /// Ligado na subida, quando o servidor tem o runtime (ator de entrada das sessões).
     pub runtime: OnceLock<Arc<RuntimeRegistry>>,
+    pub permissions: super::permission::PermissionStore,
+    /// Ligação obrigatória da unidade lifecycle; ausência nunca significa limpeza aceita.
+    pub lifecycle: Arc<OnceLock<Arc<dyn Lifecycle>>>,
     agents: AgentPanes,
     hooks: Mutex<Hooks>,
+}
+
+pub trait Lifecycle: Send + Sync {
+    fn dead<'a>(&'a self, name: &'a str, key: &'a str, conversation: &'a str, generation: u64)
+        -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Dead, String>> + Send + 'a>>;
 }
 
 impl StateEnv {
     pub fn new(pool: TerminalPool, list: Arc<ListBridge>, client: StateFactsClient, diag: crate::diag::DiagClient) -> Self {
         let mut hooks = HookStates::default();
         hooks.set_demoted(list.demoted.clone());
-        Self { pool, list, client, diag, runtime: OnceLock::new(), agents: AgentPanes::default(), hooks: Mutex::new(Hooks::new(hooks)) }
+        Self { pool, list, client, diag, runtime: OnceLock::new(), permissions: Arc::default(), lifecycle: Arc::default(), agents: AgentPanes::default(), hooks: Mutex::new(Hooks::new(hooks)) }
     }
 
     fn facts(&self) -> &FactsStore { &self.list.state_facts }
@@ -137,10 +145,11 @@ impl StateEnv {
 /// por hub de Claude ou Codex sem terminal.
 pub fn spawner(env: Arc<StateEnv>) -> SpawnMonitor {
     Arc::new(move |hub: &Arc<Hub>| {
-        if hub.binding().is_some_and(|b| b.runtime_feed()) {
+        // Sem terminal, ou Codex com terminal cujo ator é do Rust: o feed do runtime.
+        if hub.runtime_feed() {
             let live = env.runtime.get().map(|registry| registry.live(&hub.name));
             let facts = super::runtime_feed::FeedFacts { store: env.list.state_facts.clone(), client: env.client.clone(), diag: env.diag.clone() };
-            let feed = super::runtime_feed::RuntimeFeed::new(hub, live, env.list.published.clone(), Some(facts));
+            let feed = super::runtime_feed::RuntimeFeed::new(hub, live, env.list.published.clone(), Some(facts)).with_registry(env.runtime.get().cloned()).with_lifecycle(env.lifecycle.clone());
             let diag = env.diag.clone();
             return tokio::spawn(super::runtime_feed::guarded(Arc::downgrade(hub), feed.run(), move |name| {
                 diag.report("rust.state_feed_failed", name, "state_feed_panic", "o estado da sessão sem terminal caiu; volta com o próximo assinante");
@@ -170,9 +179,6 @@ pub(crate) fn next_owner() -> u64 { NEXT_OWNER.fetch_add(1, Ordering::Relaxed) }
 
 struct CaptureSlot { generation: u64, target: String, capture: Arc<PaneCapture> }
 
-#[derive(Default)]
-struct Snapshot { at: Option<Instant>, error: Option<String> }
-
 pub struct LiveSources {
     env: Arc<StateEnv>,
     hub: Weak<Hub>,
@@ -183,7 +189,7 @@ pub struct LiveSources {
     runtime_view: Arc<Mutex<RuntimeView>>,
     runtime_task: Option<tokio::task::AbortHandle>,
     capture: tokio::sync::Mutex<Option<CaptureSlot>>,
-    snapshot: Mutex<Snapshot>,
+    last_frame: Mutex<Option<(u64, crate::interactions::InteractionBinding, super::permission::MemoryRevision, Frame)>>,
     hook_files: Arc<Mutex<HookFiles>>,
     /// Dono da entrada deste `Monitor` no mapa que a lista lê (`Published`).
     owner: u64,
@@ -195,10 +201,10 @@ impl LiveSources {
         let wake = env.facts().watch(&name);
         let (runtime_wake, runtime_view) = (Arc::new(Notify::new()), Arc::new(Mutex::new(RuntimeView::default())));
         let runtime_task = env.runtime.get().map(|registry| {
-            tokio::spawn(watch_runtime(registry.clone(), name.clone(), runtime_view.clone(), runtime_wake.clone())).abort_handle()
+            tokio::spawn(watch_runtime(registry.clone(), name.clone(), runtime_view.clone(), runtime_wake.clone(), wake.clone())).abort_handle()
         });
         Self { hub_wake: hub.wake(), hub: Arc::downgrade(hub), name, wake, runtime_wake, runtime_view, runtime_task, env,
-            capture: tokio::sync::Mutex::new(None), snapshot: Mutex::default(), hook_files: Arc::default(),
+            capture: tokio::sync::Mutex::new(None), last_frame: Mutex::default(), hook_files: Arc::default(),
             owner: next_owner() }
     }
 
@@ -206,6 +212,10 @@ impl LiveSources {
 
     /// Pane do agente (cache de 60 s); sem resposta da descoberta, `=nome:` sem guardar.
     async fn target(&self) -> String {
+        if let Some(registry) = self.env.runtime.get()
+            && let Ok(Some(target)) = registry.terminal_target(&self.name).await {
+            return target.binding.pane;
+        }
         let fallback = || format!("={}:", self.name);
         if let Some(t) = self.env.agents.cached(&self.name, Instant::now()) {
             return t.unwrap_or_else(fallback);
@@ -269,50 +279,103 @@ impl Sources for LiveSources {
     fn hub_wake(&self) -> Arc<Notify> { self.hub_wake.clone() }
 
     async fn facts(&self) -> RoundFacts {
-        let store = self.env.facts();
-        let due = {
-            let s = self.snapshot.lock().unwrap();
-            s.error.is_some() || s.at.is_none_or(|at| at.elapsed() >= SNAPSHOT_REFRESH)
-        } || store.needs_snapshot(&self.name);
-        if due {
-            let result = self.env.client.snapshot(&self.name).await;
-            let mut s = self.snapshot.lock().unwrap();
-            match result {
-                Ok(facts) => {
-                    store.snapshot(&self.name, facts, Instant::now());
-                    *s = Snapshot { at: Some(Instant::now()), error: None };
+        // Só largura/âncora de mods permanecem externos; pergunta, modo e vida não vêm desse retrato.
+        let external = self.env.facts().get(&self.name);
+        let mut facts = RoundFacts {
+            body_columns: external.as_ref().and_then(|r| r.facts.body_columns),
+            band_anchor: external.as_ref().and_then(|r| r.facts.band_anchor.clone()),
+            ..Default::default()
+        };
+        let local = match self.env.runtime.get() {
+            Some(registry) => super::facts::plugin_reading(registry, &self.name).await,
+            None => Err("plugin_runtime_absent".into()),
+        };
+        match local {
+            Ok(reading) => {
+                let binding = reading.binding;
+                facts.permission_op = match self.env.permissions.lock() {
+                    Ok(memory) => {
+                        facts.permission_revision = Some(memory.revision(&binding.conversation));
+                        facts.permission_uncertain = memory.is_uncertain(&binding.conversation);
+                        memory.active(&binding.conversation)
+                    },
+                    Err(_) => { facts.unavailable = Some("permission_store_unavailable".into()); false },
+                };
+                facts.binding = Some(binding);
+                match reading.facts {
+                    Ok(local) => {
+                        facts.alive = local.alive();
+                        facts.plugin_state = local.state();
+                        facts.questions = local.questions;
+                        facts.suggestion = Some(local.suggestion);
+                    }
+                    Err(code) => facts.unavailable = Some(code),
                 }
-                Err(code) => {
-                    drop(s);
-                    self.report("rust.state_facts_failed", &code, "estado: retrato dos fatos do Python não veio");
-                    s = self.snapshot.lock().unwrap();
-                    s.error = Some(code);
+            }
+            Err(code) => facts.unavailable = Some(code),
+        }
+        if let (Some(binding), Some(registry), Some(jsonl)) = (facts.binding.clone(), self.env.runtime.get(), self.hub.upgrade().and_then(|h| h.jsonl())) {
+            let frame = self.last_frame.lock().ok().and_then(|slot| slot.as_ref().filter(|(epoch, life, _, _)| *epoch == self.epoch() && life == &binding).map(|(_, _, _, frame)| frame.text.clone()));
+            if let Some(pane) = frame {
+                match registry.plugin() {
+                    Ok(store) => {
+                        let (store, life) = (store.clone(), binding.clone());
+                        match tokio::task::spawn_blocking(move || super::ask::observe_menu(store.interactions(), &life, &jsonl, &pane)).await {
+                            Ok(Ok(id)) => facts.native_selector = id,
+                            Ok(Err(code)) => facts.unavailable = Some(code),
+                            Err(_) => facts.unavailable = Some("askq_task_failed".into()),
+                        }
+                    }
+                    Err(error) => facts.unavailable = Some(error.code),
+                }
+                if registry.interaction_binding_readonly(&self.name).await.ok().as_ref() != Some(&binding) {
+                    facts = RoundFacts { unavailable: Some("erro_interacao_desatualizada".into()), ..Default::default() };
                 }
             }
         }
-        let error = self.snapshot.lock().unwrap().error.clone();
-        let received = store.get(&self.name);
-        // Retrato que nunca chegou é problema, nunca estado inventado de fatos vazios.
-        let unavailable = error.or_else(|| received.is_none().then(|| "state_facts_missing".to_owned()));
-        RoundFacts::from_received(received.as_ref(), Instant::now(), unavailable)
+        facts
     }
 
-    async fn capture(&self) -> Result<Frame, CaptureFailed> { self.pane().await.capture().await }
+    async fn capture(&self) -> Result<Frame, CaptureFailed> {
+        let epoch = self.epoch();
+        *self.last_frame.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        let registry = self.env.runtime.get().ok_or_else(|| CaptureFailed { code: "state_runtime_unbound".into(), attempt: None })?;
+        let binding = registry.interaction_binding_readonly(&self.name).await.map_err(|e| CaptureFailed { code: e.code, attempt: None })?;
+        if self.sid().as_deref() != Some(binding.conversation.as_str()) { return Err(CaptureFailed { code: "state_binding_changed".into(), attempt: None }); }
+        let revision = self.env.permissions.lock().map_err(|_| CaptureFailed { code: "permission_store_unavailable".into(), attempt: None })?
+            .revision(&binding.conversation);
+        let captured = self.pane().await.capture().await;
+        if self.epoch() != epoch || registry.interaction_binding_readonly(&self.name).await.ok().as_ref() != Some(&binding) {
+            return Err(CaptureFailed { code: "state_binding_changed".into(), attempt: None });
+        }
+        *self.last_frame.lock().unwrap_or_else(|e| e.into_inner()) = captured.as_ref().ok().map(|frame| (epoch, binding.clone(), revision, frame.clone()));
+        captured
+    }
 
     async fn has_session(&self) -> Option<bool> {
         MuxProcess::new(self.env.program(), super::capture::TIMEOUT).has_session(&self.name).await
     }
 
     async fn dead(&self) -> Result<Dead, String> {
-        let dead = self.env.client.dead(&self.name).await;
-        if matches!(dead, Ok(Dead::Ok)) {
-            self.env.agents.forget(&self.name);
-        }
+        let lifecycle = self.env.lifecycle.get().ok_or("state_lifecycle_unbound")?;
+        let registry = self.env.runtime.get().ok_or("plugin_runtime_absent")?;
+        let binding = registry.interaction_binding_readonly(&self.name).await.map_err(|e| e.code)?;
+        let dead = lifecycle.dead(&self.name, &binding.key, &binding.conversation, binding.generation).await;
+        if matches!(dead, Ok(Dead::Ok)) { self.env.agents.forget(&self.name); }
         dead
     }
 
     async fn observe_permission(&self, key: &str, mode: &str) -> Result<(String, String), String> {
-        self.env.client.observe_permission(&self.name, key, mode).await
+        let registry = self.env.runtime.get().ok_or("state_runtime_unbound")?;
+        let binding = registry.interaction_binding_readonly(&self.name).await.map_err(|e| e.code)?;
+        if binding.conversation != key || self.sid().as_deref() != Some(key) { return Err("permission_binding_changed".into()); }
+        let revision = self.last_frame.lock().map_err(|_| "permission_frame_unavailable")?.as_ref()
+            .filter(|(epoch, life, _, _)| *epoch == self.epoch() && life == &binding).map(|(_, _, revision, _)| *revision)
+            .ok_or("permission_binding_changed")?;
+        let mut memory = self.env.permissions.lock().map_err(|_| "permission_store_unavailable")?;
+        memory.observe_capture(key, mode, revision).map_err(str::to_owned)?;
+        let view = memory.confirmed(key).map_err(str::to_owned)?.ok_or("permission_mode_missing")?;
+        Ok((view.current, view.previous_non_plan))
     }
 
     async fn files(&self, sid: Option<&str>) -> FileFacts {
@@ -367,27 +430,43 @@ impl Sources for LiveSources {
     }
 
     async fn ask_payload(&self) -> Result<Option<AskQuestion>, String> {
-        let Some(jsonl) = self.hub.upgrade().and_then(|h| h.jsonl()) else { return Ok(None) };
-        match tokio::time::timeout(ASK_TIMEOUT, tokio::task::spawn_blocking(move || super::ask::read_pending(&jsonl))).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err("askq_task_failed".to_owned()),
-            Err(_) => Err("askq_timeout".to_owned()),
+        let epoch = self.epoch();
+        let registry = self.env.runtime.get().ok_or("plugin_runtime_absent")?;
+        let binding = registry.interaction_binding_readonly(&self.name).await.map_err(|e| e.code)?;
+        let pane = self.last_frame.lock().map_err(|_| "askq_frame_unavailable")?.as_ref()
+            .filter(|(generation, life, _, _)| *generation == epoch && life == &binding).map(|(_, _, _, frame)| frame.text.clone()).ok_or("askq_frame_unavailable")?;
+        let store = registry.plugin().map_err(|e| e.code)?.clone();
+        let Some(jsonl) = self.hub.upgrade().and_then(|h| h.jsonl()) else { return Err("askq_transcript_missing".into()) };
+        let (path, life) = (jsonl.clone(), binding.clone());
+        let read = tokio::time::timeout(ASK_TIMEOUT, tokio::task::spawn_blocking(move || {
+            super::ask::observe_terminal(store.interactions(), &life, &path, &pane)
+        })).await;
+        let payload = match read {
+            Ok(Ok(result)) => result?,
+            Ok(Err(_)) => return Err("askq_task_failed".into()),
+            Err(_) => return Err("askq_timeout".into()),
+        };
+        if self.epoch() != epoch || registry.interaction_binding_readonly(&self.name).await.map_err(|e| e.code)? != binding
+            || self.hub.upgrade().and_then(|h| h.jsonl()).as_ref() != Some(&jsonl) {
+            return Err("erro_interacao_desatualizada".into());
         }
+        Ok(payload)
     }
 
     fn deliverable(&self) {
-        let (client, name, diag) = (self.env.client.clone(), self.name.clone(), self.env.diag.clone());
+        let Some(registry) = self.env.runtime.get().cloned() else {
+            self.report("rust.state_deliver_failed", "state_runtime_unbound", "a entrega não tem runtime ligado");
+            return;
+        };
+        let (name, diag) = (self.name.clone(), self.env.diag.clone());
         tokio::spawn(async move {
-            if let Err(code) = client.deliverable(&name).await
-                && crate::warn_limit::allow(Some(&name), "rust.state_deliver_failed")
-            {
-                tracing::warn!(session = name.as_str(), code = code.as_str(), "estado: session.deliverable falhou");
-                diag.report("rust.state_deliver_failed", &name, &code, "a entrega da fila pedida pelo estado falhou");
+            if let Err(error) = registry.drain(&name).await {
+                diag.report("rust.state_deliver_failed", &name, &error.code, "a drenagem direta da fila falhou");
             }
         });
     }
 
-    async fn preview_capture(&self) -> Option<Result<Frame, CaptureFailed>> { Some(self.capture().await) }
+    async fn preview_capture(&self) -> Option<Result<Frame, CaptureFailed>> { Some(self.pane().await.capture().await) }
 
     async fn preview_files(&self, stem: &str) -> Vec<HookFile> {
         let (list, files, stem) = (self.env.list.clone(), self.hook_files.clone(), stem.to_owned());
@@ -448,8 +527,9 @@ fn read_files(env: &StateEnv, name: &str, sid: Option<&str>) -> Result<FileFacts
 }
 
 /// Segue o ator de entrada terminal da sessão: erro e escritor parado viram o problema do estado.
-async fn watch_runtime(registry: Arc<RuntimeRegistry>, name: String, view: Arc<Mutex<RuntimeView>>, wake: Arc<Notify>) {
+async fn watch_runtime(registry: Arc<RuntimeRegistry>, name: String, view: Arc<Mutex<RuntimeView>>, wake: Arc<Notify>, plugin_wake: Arc<Notify>) {
     let mut rx = registry.subscribe();
+    let mut plugin = registry.plugin().ok().map(|store| store.subscribe());
     let mut keys: HashMap<String, bool> = HashMap::new();
     let set = |next: RuntimeView| {
         let mut v = view.lock().unwrap_or_else(|e| e.into_inner());
@@ -467,20 +547,32 @@ async fn watch_runtime(registry: Arc<RuntimeRegistry>, name: String, view: Arc<M
         RuntimeView { error, message, input_stalled: data["view"]["input_stalled"].as_str().map(str::to_owned) }
     };
     let current = || view.lock().unwrap_or_else(|e| e.into_inner()).clone();
-    if let Some((key, data)) = registry.terminal_view(&name).await {
-        keys.insert(key, true);
-        set(from_snapshot(&data, &current()));
+    let live = registry.live(&name);
+    if let Some(state) = live.borrow().as_ref() {
+        set(RuntimeView { error: state.error.as_ref().map(|(code, _)| code.clone()),
+            message: state.error.as_ref().map(|(_, message)| message.clone()), ..Default::default() });
     }
     loop {
-        let event = match rx.recv().await {
+        let incoming = tokio::select! {
+            event = rx.recv() => event,
+            event = async { match plugin.as_mut() { Some(rx) => rx.recv().await, None => std::future::pending().await } } => {
+                match event {
+                    Ok(key) if registry.interaction_binding_readonly(&name).await.is_ok_and(|binding| binding.key == key) => plugin_wake.notify_waiters(),
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => plugin_wake.notify_waiters(),
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => { plugin = None; plugin_wake.notify_waiters(); },
+                    _ => {},
+                }
+                continue;
+            }
+        };
+        let event = match incoming {
             Ok(event) => event,
             Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                match registry.terminal_view(&name).await {
-                    Some((key, data)) => {
-                        keys.insert(key, true);
-                        set(from_snapshot(&data, &current()));
-                    }
-                    None => set(RuntimeView::default()),
+                let state = live.borrow().clone();
+                match state {
+                    Some(state) => set(RuntimeView { error: state.error.as_ref().map(|(code, _)| code.clone()),
+                        message: state.error.as_ref().map(|(_, message)| message.clone()), ..Default::default() }),
+                    None => set(RuntimeView { error: Some("state_runtime_unavailable".into()), ..Default::default() }),
                 }
                 continue;
             }
@@ -522,6 +614,15 @@ async fn watch_runtime(registry: Arc<RuntimeRegistry>, name: String, view: Arc<M
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn live_sources_do_not_call_migrated_http_policies() {
+        let source = include_str!("live.rs").split("#[cfg(test)]").next().unwrap();
+        for call in ["client.snapshot(", "client.dead(", "client.observe_permission(", "client.deliverable(", "registry.terminal_view("] {
+            assert!(!source.contains(call), "fonte migrada não pode chamar {call}");
+        }
+        assert!(source.contains("registry.drain(&name)"));
+    }
 
     #[test]
     fn marker_write_is_seen_on_the_next_read_without_rereading_idle_dirs() {

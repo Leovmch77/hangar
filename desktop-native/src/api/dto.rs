@@ -66,6 +66,7 @@ pub struct SessionInfo {
     pub tracked: Option<bool>,
     pub question: Option<String>,
     pub options: Option<Vec<String>>,
+    #[serde(default)] pub interaction_id: Option<String>,
     /// Perguntas esperando resposta fora do terminal (as assíncronas do Codex); a aba mostra "? N".
     #[serde(default)] pub pending_questions: u32,
     pub problema: Option<String>,
@@ -543,6 +544,7 @@ pub struct AskPayload {
     pub provider: Option<String>,
     // Valor cru: o Codex recusa id com outro tipo JSON (número × texto).
     pub request_id: Option<Value>,
+    #[serde(default)] pub interaction_id: Option<String>,
     #[serde(default)] pub is_async: bool,
     #[serde(default)] pub questions: Vec<AskItem>,
 }

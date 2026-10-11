@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { selectOption } from '@hangar/core';
-  import { getActiveId, selectServer } from '../lib/auth';
+  import { selectOptionForServer } from '@hangar/core';
+  import { listServers } from '../lib/auth';
   import { attentionFeed, pedeMarcacao } from '@hangar/core';
   import type { AggSession } from '@hangar/core';
   import * as m from '../paraglide/messages';
@@ -17,7 +17,8 @@
   // continua aberta. Nesses casos a tira não oferece atalho nenhum — ela abre a sessão, que é onde
   // dá pra marcar tudo e confirmar.
   const respostaRapida = $derived(!!first?.options?.length && !pedeMarcacao(first.options));
-  let busy = $state(false);
+  let busy = $state.raw<AggSession | null>(null);
+  const requestKey = (s: AggSession | null) => JSON.stringify([s?.serverId, s?.name, s?.interaction_id]);
   // Recusa do backend ao responder daqui. O `catch {}` de antes dizia "o SSE agregado mantém o
   // estado correto" — e não mantém: a opção segue pendente, a sessão segue em awaiting e o botão
   // fica morto. Esta é a tira do DESKTOP, justo a view onde o painel de terminal existe, e o caso
@@ -25,21 +26,21 @@
   let erro = $state('');
   let erroTimer: ReturnType<typeof setTimeout> | undefined;
 
-  async function pick(option: number) {
-    if (!first || busy) return;
-    busy = true;
+  async function pick(option: number, displayed: AggSession) {
+    if (requestKey(busy) === requestKey(displayed)) return;
+    busy = displayed;
     clearTimeout(erroTimer);
     erro = '';
-    const prev = getActiveId();
-    selectServer(first.serverId);
     try {
-      await selectOption(first.name, option);
+      const target = listServers().find((server) => server.id === displayed.serverId);
+      if (!target) throw new Error(m.chat_servidor_removido());
+      await selectOptionForServer(target, displayed.name, option, displayed.interaction_id);
     } catch (e) {
+      if (requestKey(first) !== requestKey(displayed)) return;
       erro = e instanceof Error ? e.message : m.comum_falha_envio_opcao();
       erroTimer = setTimeout(() => (erro = ''), 8000);  // aviso, não estado: some sozinho
     } finally {
-      if (prev && prev !== first.serverId) selectServer(prev);
-      busy = false;
+      if (busy === displayed) busy = null;
     }
   }
 </script>
@@ -56,11 +57,13 @@
     </button>
 
     {#if respostaRapida && first.options}
-      <div class="quick-options" aria-label={m.atencao_respostas_rapidas()}>
-        {#each first.options.slice(0, 2) as option, i}
-          <button type="button" disabled={busy} onclick={() => pick(i + 1)}>{option}</button>
-        {/each}
-      </div>
+      {#each [{ ...first }] as displayed (requestKey(displayed))}
+        <div class="quick-options" aria-label={m.atencao_respostas_rapidas()}>
+          {#each first.options.slice(0, 2) as option, i}
+            <button type="button" disabled={requestKey(busy) === requestKey(displayed)} onclick={() => pick(i + 1, displayed)}>{option}</button>
+          {/each}
+        </div>
+      {/each}
     {/if}
 
     {#if feed.length > 1}

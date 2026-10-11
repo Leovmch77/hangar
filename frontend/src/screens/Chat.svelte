@@ -1370,10 +1370,11 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
     // Mesma pergunta e mesmas opções: NÃO troca a referência, senão o cartão remonta a cada poll e
     // perde o passo em que a pessoa está.
     const atual = codexPayload?.questions[0];
-    if (atual && atual.question === pergunta
+    if (atual && codexPayload?.interaction_id === codexEntrada?.interaction_id && atual.question === pergunta
         && atual.options.length === opts.length
         && atual.options.every((o, i) => o.label === opts[i].label)) return;
     codexPayload = {
+      interaction_id: codexEntrada?.interaction_id,
       questions: [{
         header: m.chat_sem_thread_codex_header(),
         question: pergunta,
@@ -1383,9 +1384,9 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
     };
   });
   // O cartão devolve índices; o /select conta a partir de 1, como o picker do terminal.
-  async function responderCodex(answers: AnswerItem[]) {
+  async function responderCodex(answers: AnswerItem[], displayed: AskQuestionPayload) {
     const a = answers[0];
-    if (a?.kind === 'option' && a.indices.length) await handleSelect(a.indices[0] + 1);
+    if (a?.kind === 'option' && a.indices.length) await handleSelect(a.indices[0] + 1, displayed.interaction_id);
   }
   // Nascimento da sessao kimi: o hook grava o ticket ~1s apos o 1o prompt e o poll da lista traz
   // tracked=true — carrega history e conecta o SSE (que o guard de kimiPreNascimento no connectSSE
@@ -1553,14 +1554,21 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
     askOpen = false;
   }
   // Pergunta assíncrona do Codex não tem descarte nativo: sem isto ela volta a cada recarga.
-  function cancelAsk() {
-    const id = askPayload?.request_id;
-    if (!askPayload?.is_async || typeof id !== 'string') { closeAsk(); return; }
-    closeAsk();
-    skipQuestion(sessionName, id, sessionServer())
-      .then(() => { if (askPayload?.request_id === id) askPayload = null; })
+  function cancelAsk(displayed: AskQuestionPayload) {
+    const id = displayed.request_id;
+    const interactionId = displayed.interaction_id;
+    const current = () => askPayload?.request_id === id && askPayload?.interaction_id === interactionId
+      && askPayload?.questions === displayed.questions;
+    if (!displayed.is_async || typeof id !== 'string') { if (current()) closeAsk(); return; }
+    if (current()) closeAsk();
+    skipQuestion(sessionName, id, interactionId, sessionServer())
+      .then((result) => {
+        if (!current()) return;
+        if (!result.ok) throw new Error(m.native_action_uncertain());
+        askPayload = null;
+      })
       .catch((err) => {
-        if (askPayload?.request_id !== id) return;
+        if (!current()) return;
         askOpen = true;
         mostrarAviso(err);
       });
@@ -2273,7 +2281,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
         // resposta de algo ja respondido. Pergunta de Pi/Kimi tem dono proprio (o $effect do
         // `pendingPiQuestion`, que fecha pelo tool_result) e o estado do pane dela nao segue essa
         // regra -> so o caso do Claude, que abre pelo evento SSE.
-        if (askOpen && !askPiId && askPayload?.provider !== 'codex' && stateEvent?.state !== 'awaiting_input') askOpen = false;
+        if (askOpen && !askPiId && askPayload?.interaction_id == null && askPayload?.provider !== 'codex' && stateEvent?.state !== 'awaiting_input') askOpen = false;
       } catch (err) {
         quadroFalhou('state');
         // Mesmo motivo do handler de `preview` logo abaixo: engolir aqui congela a prévia na tela
@@ -2297,8 +2305,9 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
         const next = JSON.parse(e.data) as AskQuestionPayload | null;
         if (!next) { askPayload = null; askOpen = false; return; }
         // O retrato de reconexão não pode apagar escolhas nem reabrir uma pergunta dispensada.
-        if (next.provider === 'codex' && askPayload?.provider === 'codex'
-            && next.request_id === askPayload.request_id) return;
+        if (askPayload && next.interaction_id === askPayload.interaction_id
+            && next.request_id === askPayload.request_id
+            && (next.interaction_id != null || (next.provider === 'codex' && askPayload.provider === 'codex'))) return;
         askPayload = next;
         askOpen = true;
       } catch { quadroFalhou('ask_question'); }
@@ -3036,37 +3045,39 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
 
   // Trava de um envio por vez (mesma do BoardCard): o /select agora le o cursor do picker, corrige
   // e so entao da Enter — dois toques rapidos leriam a mesma tela e se atropelariam no meio.
-  let selBusy = $state(false);
+  let selBusy = $state.raw<{ interactionId: string | null | undefined } | null>(null);
 
-  async function handleSelect(option: number) {
-    if (selBusy) return;
-    selBusy = true;
+  async function handleSelect(option: number, interactionId: string | null | undefined) {
+    if (selBusy && selBusy.interactionId === interactionId) return;
+    const request = { interactionId };
+    selBusy = request;
     clearTimeout(avisoErrTimer);
     avisoErr = '';
     try {
-      await selectOption(sessionName, option, sessionServer());
+      await selectOption(sessionName, option, interactionId, sessionServer());
     } catch (err) {
       console.error('selectOption error:', err);
-      mostrarAviso(err);
+      if ((codexPreThread ? codexPayload?.interaction_id : stateEvent?.interaction_id) === interactionId) mostrarAviso(err);
     } finally {
-      selBusy = false;
+      if (selBusy === request) selBusy = null;
     }
   }
 
   // Múltipla escolha: enviar o que já foi marcado. Toque em opção só ALTERNA ali (ver
   // terminal_input.submeter_multipla) — sem isto dava pra marcar e não dava pra enviar.
-  async function handleSubmitSelected() {
-    if (selBusy) return;
-    selBusy = true;
+  async function handleSubmitSelected(interactionId: string | null | undefined) {
+    if (selBusy && selBusy.interactionId === interactionId) return;
+    const request = { interactionId };
+    selBusy = request;
     clearTimeout(avisoErrTimer);
     avisoErr = '';
     try {
-      await submitSelected(sessionName, sessionServer());
+      await submitSelected(sessionName, interactionId, sessionServer());
     } catch (err) {
       console.error('submitSelected error:', err);
-      mostrarAviso(err);
+      if (stateEvent?.interaction_id === interactionId) mostrarAviso(err);
     } finally {
-      selBusy = false;
+      if (selBusy === request) selBusy = null;
     }
   }
 
@@ -3101,12 +3112,16 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   }
 
   // 409 (mismatch de verificação, ou painel de terminal aberto) ou erro inesperado.
-  async function handleAnswer(answers: AnswerItem[]) {
-    const requestId = askPayload?.request_id;
-    const native = askPayload?.provider === 'codex';
+  async function handleAnswer(answers: AnswerItem[], displayed: AskQuestionPayload) {
+    const requestId = displayed.request_id;
+    const interactionId = displayed.interaction_id;
+    const native = displayed.provider === 'codex' || interactionId != null;
+    const current = () => askPayload?.request_id === requestId && askPayload?.interaction_id === interactionId
+      && askPayload?.questions === displayed.questions;
     try {
-      const r = await answerQuestions(sessionName, answers, requestId, sessionServer());
-      if (native && askPayload?.request_id !== requestId) return;
+      const r = await answerQuestions(sessionName, answers, requestId, interactionId, sessionServer());
+      if (!current()) return;
+      if (!r.ok) throw new Error(m.native_action_uncertain());
       // Pergunta do Pi respondida com sucesso: o tool_result ainda demora ~1s pra aterrissar no
       // transcript — sem marcar a dispensa aqui, o sheet REABRIA nessa janela (pergunta ainda
       // pendente + askOpen false).
@@ -3117,6 +3132,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
       // vermelho ficava sem legenda e parecia que a resposta tinha se perdido.
       if (r?.fallback) mostrarAviso(m.askq_enviada_como_texto());
     } catch (err) {
+      if (!current()) return;
       // O protocolo nativo permite tentar de novo sem perder o rascunho da resposta.
       if (native) throw err;
       if (askPiId) { askPiDismissed = askPiId; askPiId = null; }

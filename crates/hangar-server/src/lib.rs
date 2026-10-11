@@ -11,10 +11,12 @@ pub mod costs_routes;
 pub mod costs_failure;
 pub mod diag;
 pub mod groups;
+pub mod interactions;
 pub mod list;
 pub mod migration_status;
 pub mod mods;
 pub mod pages;
+pub mod plugin;
 pub mod proxy;
 pub mod query;
 mod plugin_listener;
@@ -28,6 +30,8 @@ pub mod term;
 pub mod terminal_state;
 pub mod terminal_control;
 pub mod terminal_input;
+pub mod permission_control;
+pub mod terminal_facts;
 mod terminal_process;
 pub mod terminal_routes;
 pub mod transcript;
@@ -98,10 +102,16 @@ pub async fn serve_until_with_state(
         let private = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let port = private.local_addr()?.port();
         let registry = std::sync::Arc::new(runtime::gateway::RuntimeRegistry::new(cfg.upstream,
-            cfg.internal_secret.clone(),instance.clone()).with_mods(state.mods.clone()));
+            cfg.internal_secret.clone(),instance.clone()).with_mods(state.mods.clone())
+            .with_interactions(state.interactions.clone()).with_plugin(state.plugin.clone())
+            .with_terminal_states(state.list.published.clone()).with_terms(state.term.clone()));
         runtime_registry=Some(registry.clone());
         state.list.set_runtime(registry.clone());
+        state.list.set_plugin_runtime(registry.clone());
         let _ = state.state.runtime.set(registry.clone());
+        // O hub do chat pergunta ao registro quem é dono do Codex com terminal, e o registro o avisa na troca.
+        registry.bind_hubs(state.side.hubs.downgrade());
+        let _ = state.side.runtime.set(registry.clone());
         let _ = state.accounts.quotas.runtime.set(registry.clone());
         let quota_bridge=accounts::bridge::AccountsBridge::new(cfg.upstream,cfg.internal_secret.clone(),instance.clone())
             .map_err(std::io::Error::other)?;

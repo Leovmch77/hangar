@@ -200,7 +200,8 @@ async fn terminal_entry_goes_to_python() {
     std::fs::write(&transcript, "").unwrap();
     registry.open_terminal(TerminalTarget { key: "k-s".into(), generation: 1, name: "s".into(), binding,
         lease_path: dir.path().join("s.lease"), state_path: dir.path().join("s.state"), projection_dir: dir.path().join("s.projection"),
-        transcript, created: 0.0, plugin_key: None }).await.unwrap();
+        transcript, created: 0.0, plugin_key: None,
+        metadata: hangar_server::terminal_facts::TerminalMetadata { config_dir:dir.path().into(),agent_pid:std::process::id(),agent_birth:hangar_server::terminal_facts::agent_birth(std::process::id()).unwrap(),legacy_import_after:None,fingerprint:"fixture".into(),origin:"uds:fixture".into() } }).await.unwrap();
     assert!(registry.writable("s").await.unwrap().terminal);
     // A porta fechada prova que o desvio vem antes dela: o Python responde sem esperar.
     registry.ingress().close("s", Duration::from_secs(1)).await.unwrap();

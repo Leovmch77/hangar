@@ -140,7 +140,8 @@ async fn open_terminal(registry: &RuntimeRegistry, dir: &Path, name: &str) {
     let transcript = dir.join(format!("{name}.jsonl"));
     std::fs::write(&transcript, "").unwrap();
     registry.open_terminal(TerminalTarget { key: format!("k-{name}"), generation: 1, name: name.into(), binding,
-        lease_path: dir.join(format!("{name}.lease")), state_path, projection_dir, transcript, created: 0.0, plugin_key: None }).await.unwrap();
+        lease_path: dir.join(format!("{name}.lease")), state_path, projection_dir, transcript, created: 0.0, plugin_key: None,
+        metadata: hangar_server::terminal_facts::TerminalMetadata { config_dir:dir.into(),agent_pid:std::process::id(),agent_birth:hangar_server::terminal_facts::agent_birth(std::process::id()).unwrap(),legacy_import_after:None,fingerprint:"fixture".into(),origin:"uds:fixture".into() } }).await.unwrap();
     let target = registry.writable(name).await.unwrap();
     assert!(target.terminal && target.healthy, "entrada de terminal saudável");
 }

@@ -35,6 +35,7 @@ const COMMENT_EVERY: Duration = Duration::from_secs(15);
 const SEND_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub struct AppState {
+    pub interactions: Arc<crate::interactions::InteractionStore>,
     pub transcription: Arc<crate::transcription::service::TranscriptionService>,
     pub transcription_slots: Arc<tokio::sync::Semaphore>,
     pub accounts: crate::accounts::AccountService,
@@ -62,6 +63,7 @@ pub struct AppState {
     pub state: Arc<crate::state::live::StateEnv>,
     /// Interface dos mods das sessões sem terminal do Rust: o ator publica, as rotas consultam.
     pub mods: crate::mods::state::Mods,
+    pub plugin: Arc<crate::plugin::Store>,
     /// Páginas HTML publicadas pelas sessões (`~/.hangar/paginas`); o teste troca por uma pasta temporária.
     pub pages: Arc<crate::pages::store::Store>,
     /// Onde está o Chromium do servidor, perguntado a cada medição; o teste força "ausente".
@@ -75,6 +77,12 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// Ligação concreta das fontes; a montagem das nove rotas pertence ao corte conjunto.
+    pub fn plugin_route_state(self: &Arc<Self>) -> Arc<crate::plugin::routes::RouteState> {
+        Arc::new(crate::plugin::routes::RouteState { store: self.plugin.clone(), secret: self.cfg.auth_token.clone(),
+            trusted: self.cfg.trusted.clone(), sources: Arc::new(crate::plugin::sources::NativeSources::new(self)) })
+    }
+
     pub fn new(cfg: Config) -> AppState {
         Self::with_terminal_pool(cfg, crate::terminal_control::TerminalPool::new())
     }
@@ -92,6 +100,8 @@ impl AppState {
                       costs: Arc<crate::costs::collect::Collector>, fx: Arc<crate::costs::fx::Fx>) -> AppState {
         let http = proxy::client();
         let mods = crate::mods::state::Mods::default();
+        let interactions = Arc::new(crate::interactions::InteractionStore::default());
+        let plugin = Arc::new(crate::plugin::Store::new(interactions.clone()));
         let mut side = SideCtx {
             upstream: cfg.upstream,
             secret: cfg.internal_secret.clone(),
@@ -101,6 +111,7 @@ impl AppState {
             infos: Default::default(),
             monitors: None,
             mods: mods.clone(),
+            runtime: Default::default(),
         };
         mods.bind_hubs(side.hubs.downgrade());
         let diag = crate::diag::DiagClient::new(cfg.upstream, cfg.internal_secret.clone());
@@ -108,11 +119,13 @@ impl AppState {
         let list = Arc::new(crate::list::bridge::ListBridge::new(crate::list::bridge::ListEnv::from_env(), facts));
         let state = Arc::new(crate::state::live::StateEnv::new(terminal.clone(), list.clone(),
             crate::state::facts::StateFactsClient::new(cfg.upstream, cfg.internal_secret.clone()), diag.clone()));
+        list.set_permissions(state.permissions.clone());
         side.monitors = Some(crate::state::live::spawner(state.clone()));
         let groups = crate::groups::from_env(list.env().dirs.as_ref(),
             Arc::new(crate::groups::orq::PythonOrq::new(cfg.upstream, cfg.internal_secret.clone(), http.clone())), list.clone());
         AppState { accounts: crate::accounts::AccountService::new(crate::accounts::environment::AccountEnvironment::capture()), groups, peers: Arc::new(crate::groups::peers_from_env()), auth: Auth::new(&cfg.auth_token), http, side, cfg, terminal, terminal_address: None, diag,
             workspace_slots: Arc::new(tokio::sync::Semaphore::new(4)),
+            interactions, plugin,
             transcription: Arc::default(),
             transcription_slots: Arc::new(tokio::sync::Semaphore::new(4)),
             workspace_read_slots: Arc::new(tokio::sync::Semaphore::new(8)),
@@ -770,6 +783,7 @@ mod tests {
             infos: Default::default(),
             monitors: None,
             mods: Default::default(),
+            runtime: Default::default(),
         };
         let jsonl = dir.join("t.jsonl");
         std::fs::write(&jsonl, "").unwrap();

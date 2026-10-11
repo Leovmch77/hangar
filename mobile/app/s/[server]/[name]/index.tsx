@@ -217,7 +217,7 @@ export default function ChatScreen() {
 
   // quem responde: OptionButtons quando awaiting_input com question/options e sem stepper aberto
   const showOptions = !!(!askOpen && stateEvent?.state === 'awaiting_input' && stateEvent.question && stateEvent.options?.length);
-  const optionKey = JSON.stringify([serverId, name, showOptions, stateEvent?.question, stateEvent?.options]);
+  const optionKey = JSON.stringify([serverId, name, showOptions, stateEvent?.interaction_id ?? [stateEvent?.question, stateEvent?.options]]);
   const optionScope = useRef({ key: optionKey, generation: 0 });
   if (optionScope.current.key !== optionKey) {
     optionScope.current = { key: optionKey, generation: optionScope.current.generation + 1 };
@@ -229,7 +229,7 @@ export default function ChatScreen() {
     return JSON.stringify([
       serverId, name, !live.askOpen && live.stateEvent?.state === 'awaiting_input'
         && !!live.stateEvent.question && !!live.stateEvent.options?.length,
-      live.stateEvent?.question, live.stateEvent?.options,
+      live.stateEvent?.interaction_id ?? [live.stateEvent?.question, live.stateEvent?.options],
     ]);
   };
   const optionCurrent = () => optionsMounted.current && optionScope.current === optionRequest && liveOptionKey() === optionKey;
@@ -250,19 +250,19 @@ export default function ChatScreen() {
   };
   // Cada ação copia o servidor da rota no toque: removido vira aviso, nunca cai no ativo.
   const destino = () => useServers.getState().servers.find((s) => s.id === serverId);
-  const handleSelectOption = async (n: number) => {
+  const handleSelectOption = async (n: number, interactionId: string | null | undefined) => {
     if (!optionCurrent()) return;
     const target = destino();
     if (!target) return mostrarAviso(m.chat_servidor_removido());
-    try { await selectOptionForServer(target, name, n); }
+    try { await selectOptionForServer(target, name, n, interactionId); }
     catch (e) { optionError(e); }
   };
   // Escolha múltipla: as marcadas já foram para o terminal, aqui só confirma.
-  const handleSubmitOptions = async () => {
+  const handleSubmitOptions = async (interactionId: string | null | undefined) => {
     if (!optionCurrent()) return;
     const target = destino();
     if (!target) return mostrarAviso(m.chat_servidor_removido());
-    try { await submitSelectedForServer(target, name); }
+    try { await submitSelectedForServer(target, name, interactionId); }
     catch (e) { optionError(e); }
   };
   // Resposta que chega depois de a rota trocar de conversa não mexe na conversa nova.
@@ -365,7 +365,7 @@ export default function ChatScreen() {
                      disabled={stateEvent?.state !== 'idle' || pending.length > 0} />
       ) : null}
       {showOptions ? (
-        <OptionButtons key={optionRequest.generation} question={stateEvent!.question!} options={stateEvent!.options!} onSelect={handleSelectOption} onCancel={handleCancelOptions} onSubmit={handleSubmitOptions} />
+        <OptionButtons key={optionRequest.generation} question={stateEvent!.question!} options={stateEvent!.options!} interactionId={stateEvent!.interaction_id} onSelect={handleSelectOption} onCancel={handleCancelOptions} onSubmit={handleSubmitOptions} />
       ) : null}
       {aviso ? <Text style={styles.aviso} accessibilityRole="alert">{aviso}</Text> : null}
     </View>

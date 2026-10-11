@@ -33,6 +33,108 @@ const MAX_BODY: usize = 1 << 20;
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 pub struct PluginState { pub state: String, pub reason: Option<String>, pub age_ms: u64 }
 
+/// Leitura do Store compartilhado; o vínculo vem do dono, nunca do pedido ou do poll.
+#[derive(Clone, Debug, Deserialize)]
+pub struct PluginFacts {
+    pub plugin_state: Option<PluginState>,
+    pub waiter_open: bool,
+    pub heartbeat_age_ms: Option<u64>,
+    pub question: Option<Value>,
+    pub questions: Vec<Value>,
+    pub suggestion: String,
+}
+
+impl PluginFacts {
+    pub fn alive(&self) -> bool {
+        self.waiter_open || self.heartbeat_age_ms.is_some_and(|age| Duration::from_millis(age) < ALIVE)
+    }
+
+    pub fn state(&self) -> Option<String> {
+        self.plugin_state.as_ref().filter(|state| self.waiter_open || Duration::from_millis(state.age_ms) <= PLUGIN_STATE)
+            .map(|state| state.state.clone())
+    }
+}
+
+#[derive(Clone)]
+pub struct PluginReading {
+    pub binding: crate::interactions::InteractionBinding,
+    pub facts: Result<PluginFacts, String>,
+}
+
+pub async fn plugin_reading(registry: &crate::runtime::gateway::RuntimeRegistry, name: &str) -> Result<PluginReading, String> {
+    let binding = registry.interaction_binding_readonly(name).await.map_err(|error| error.code)?;
+    let facts = registry.plugin().map_err(|error| error.code.clone()).and_then(|store| {
+        store.facts(&binding, Instant::now()).map_err(|error| error.0.to_owned())
+    }).and_then(|facts| serde_json::from_value(facts).map_err(|_| "plugin_facts_invalid".into()));
+    let current = registry.interaction_binding_readonly(name).await.map_err(|error| error.code)?;
+    if current != binding { return Err("erro_interacao_desatualizada".into()); }
+    Ok(PluginReading { binding, facts })
+}
+
+pub fn plugin_surfaces(questions: &[Value]) -> Result<(Option<&Value>, Option<&Value>), String> {
+    let (mut selector, mut form) = (None, None);
+    for question in questions {
+        let id = question["id"].as_str().filter(|id| !id.is_empty()).ok_or("plugin_question_invalid")?;
+        question["interaction_id"].as_str().filter(|id| !id.is_empty()).ok_or("plugin_question_invalid")?;
+        let surface = if id.starts_with("perm:") { &mut selector } else {
+            if question["questions"].as_array().is_none_or(Vec::is_empty) { return Err("plugin_question_invalid".into()); }
+            &mut form
+        };
+        if surface.replace(question).is_some() { return Err("erro_interacao_indisponivel".into()); }
+    }
+    Ok((selector, form))
+}
+
+/// As superfícies são independentes: erro no seletor não retira o formulário confirmado.
+pub fn project_plugin_state(state: &mut hangar_api::state::StateEvent, questions: &[Value]) -> Result<(), String> {
+    let (selectors, forms): (Vec<_>, Vec<_>) = questions.iter().cloned()
+        .partition(|question| question["id"].as_str().is_some_and(|id| id.starts_with("perm:")));
+    let mut error = None;
+    match plugin_surfaces(&forms) {
+        Ok((_, Some(question))) => {
+            if state.codex_question.as_ref().is_some_and(|current| current.get("interaction_id") != question.get("interaction_id")) {
+                error = Some("erro_interacao_indisponivel".to_owned());
+            } else {
+                let mut payload = question.as_object().cloned().ok_or("plugin_question_invalid")?;
+                payload.insert("request_id".into(), question["id"].clone());
+                payload.insert("provider".into(), json!("claude"));
+                state.codex_question = Some(payload);
+                state.state = "awaiting_input".into();
+            }
+        }
+        Err(code) => error = Some(code),
+        _ => {},
+    }
+    match plugin_surfaces(&selectors) {
+        Ok((Some(question), _)) => {
+            let shown = crate::terminal_state::held_question(question).ok_or("plugin_question_invalid")?;
+            if state.interaction_id.as_deref().is_some_and(|id| Some(id) != question["interaction_id"].as_str())
+                || state.question.is_some() && (state.question != shown.question || state.options.as_ref() != Some(&shown.options)) {
+                error = Some("erro_interacao_indisponivel".into());
+            } else {
+                state.state = "awaiting_input".into();
+                state.label = None;
+                state.question = shown.question;
+                state.options = Some(shown.options);
+                state.interaction_id = question["interaction_id"].as_str().map(str::to_owned);
+            }
+        }
+        Err(code) => error = Some(code),
+        _ => {},
+    }
+    error.map_or(Ok(()), Err)
+}
+
+pub fn preserve_cards(state: &mut hangar_api::state::StateEvent, previous: &hangar_api::state::StateEvent) {
+    if state.codex_question.is_none() { state.codex_question = previous.codex_question.clone(); }
+    if state.interaction_id.is_none() && previous.interaction_id.is_some() {
+        state.interaction_id = previous.interaction_id.clone();
+        state.question = previous.question.clone();
+        state.options = previous.options.clone();
+    }
+    if state.codex_question.is_some() || state.interaction_id.is_some() { state.state = "awaiting_input".into(); }
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 pub struct Question {
     pub id: String,
@@ -302,6 +404,23 @@ mod tests {
         store.snapshot("s", facts(4), now);
         assert!(!store.needs_snapshot("s"));
         assert_eq!(store.push("s", facts(5), now), Push::Accepted { gap: false });
+    }
+
+    #[test]
+    fn selector_conflict_does_not_discard_an_independent_form() {
+        let mut state = hangar_api::state::StateEvent { state: "awaiting_input".into(),
+            question: Some("Menu do terminal".into()), ..Default::default() };
+        let questions = vec![json!({"id":"perm:a","interaction_id":"selector-a","questions":[],"tool":"Bash","resumo":"cmd"}),
+            json!({"id":"ask:b","interaction_id":"form-b","questions":[{"question":"Pasta?","options":[]}]})];
+        assert!(project_plugin_state(&mut state, &questions).is_err());
+        assert_eq!(state.codex_question.as_ref().unwrap()["interaction_id"], "form-b");
+        assert!(state.interaction_id.is_none());
+    }
+
+    #[test]
+    fn same_surface_ambiguity_is_not_an_empty_question() {
+        let questions = vec![json!({"id":"perm:a","interaction_id":"a"}), json!({"id":"perm:b","interaction_id":"b"})];
+        assert_eq!(plugin_surfaces(&questions).unwrap_err(), "erro_interacao_indisponivel");
     }
 
     #[test]

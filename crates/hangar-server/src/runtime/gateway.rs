@@ -1,4 +1,5 @@
 use super::{actor::{LaunchConfig,PolicyClient,RuntimeActor,RuntimeEngine,RuntimeHandle},cano,process,protocol::*,queue::{Action,QueueActor,State as QueueState,Store,acquire_lease}};
+use super::codex_terminal::{Adoption,AdoptionCell,CodexTerminalTarget};
 use axum::{Router,body::to_bytes,extract::{ConnectInfo,State,Request},http::StatusCode,
     middleware::{self,Next},response::{IntoResponse,Response,sse::{Event,KeepAlive,Sse}},routing::{get,post}};
 use serde::Deserialize;
@@ -12,20 +13,28 @@ use std::time::{Duration,SystemTime,UNIX_EPOCH};
 use subtle::ConstantTimeEq;
 use tokio::sync::{broadcast,Mutex};
 
+/// `Headless`: ator sem terminal (cano). `Terminal`: entrada terminal do Claude. `CodexTerminal`: o mesmo
+/// ator do Codex, sobre o WebSocket do app-server adotado, com a TUI no pane.
 #[derive(Clone)]
-pub(crate) enum EntryHandle { Headless(RuntimeHandle), Terminal {target:super::terminal::TerminalTarget,handle:super::terminal::TerminalHandle} }
-impl EntryHandle {
-    pub(crate) async fn snapshot(&self)->Result<Value,RuntimeError> {match self {Self::Headless(h)=>h.snapshot().await,Self::Terminal {handle,..}=>handle.snapshot().await}}
-    /// Só o ator sem terminal tem motor próprio; o de terminal não é sessão Codex.
-    pub(crate) async fn view(&self)->Result<Value,RuntimeError> {match self {Self::Headless(h)=>h.view().await,Self::Terminal {..}=>Err(failure("runtime_terminal"))}}
-    pub(crate) async fn stop(&self)->Result<(),RuntimeError> {match self {Self::Headless(h)=>h.stop().await,Self::Terminal {handle,..}=>handle.stop().await}}
-    pub(crate) async fn command(&self,command:RuntimeCommand)->Result<RuntimeReply,RuntimeError> {match self {Self::Headless(h)=>h.command(command).await,Self::Terminal {handle,..}=>handle.command(command).await}}
-    pub(crate) async fn queue(&self,id:String,action:Action)->Result<Value,RuntimeError> {match self {Self::Headless(h)=>h.queue(id,action).await,Self::Terminal {handle,..}=>handle.queue(id,action).await}}
-    pub(crate) async fn drain(&self)->Result<Value,RuntimeError> {match self {Self::Headless(h)=>h.drain().await,Self::Terminal {handle,..}=>handle.drain().await}}
-    pub(crate) async fn confirm(&self)->Result<Value,RuntimeError> {match self {Self::Headless(h)=>h.confirm().await,Self::Terminal {handle,..}=>handle.confirm().await}}
-    pub(crate) async fn ensure_projection(&self)->Result<Value,RuntimeError> {match self {Self::Headless(h)=>h.ensure_projection().await,Self::Terminal {handle,..}=>handle.ensure_projection().await}}
+pub(crate) enum EntryHandle {
+    Headless(RuntimeHandle),
+    Terminal {target:super::terminal::TerminalTarget,handle:super::terminal::TerminalHandle},
+    CodexTerminal {target:Box<CodexTerminalTarget>,handle:RuntimeHandle,cell:AdoptionCell},
 }
-struct Entry { generation:u64,handle:EntryHandle,lease_path:std::path::PathBuf,name:String,mods_life:u64,provider:String,account_key:Option<crate::accounts::AccountKey> }
+impl EntryHandle {
+    pub(crate) async fn snapshot(&self)->Result<Value,RuntimeError> {match self {Self::Headless(h) | Self::CodexTerminal {handle:h,..}=>h.snapshot().await,Self::Terminal {handle,..}=>handle.snapshot().await}}
+    /// Só o ator do Codex/sem terminal tem motor próprio; o de terminal do Claude não é sessão Codex.
+    pub(crate) async fn view(&self)->Result<Value,RuntimeError> {match self {Self::Headless(h) | Self::CodexTerminal {handle:h,..}=>h.view().await,Self::Terminal {..}=>Err(failure("runtime_terminal"))}}
+    pub(crate) async fn stop(&self)->Result<(),RuntimeError> {match self {Self::Headless(h) | Self::CodexTerminal {handle:h,..}=>h.stop().await,Self::Terminal {handle,..}=>handle.stop().await}}
+    pub(crate) async fn command(&self,command:RuntimeCommand)->Result<RuntimeReply,RuntimeError> {match self {Self::Headless(h) | Self::CodexTerminal {handle:h,..}=>h.command(command).await,Self::Terminal {handle,..}=>handle.command(command).await}}
+    pub(crate) async fn queue(&self,id:String,action:Action)->Result<Value,RuntimeError> {match self {Self::Headless(h) | Self::CodexTerminal {handle:h,..}=>h.queue(id,action).await,Self::Terminal {handle,..}=>handle.queue(id,action).await}}
+    pub(crate) async fn drain(&self)->Result<Value,RuntimeError> {match self {Self::Headless(h) | Self::CodexTerminal {handle:h,..}=>h.drain().await,Self::Terminal {handle,..}=>handle.drain().await}}
+    pub(crate) async fn confirm(&self)->Result<Value,RuntimeError> {match self {Self::Headless(h) | Self::CodexTerminal {handle:h,..}=>h.confirm().await,Self::Terminal {handle,..}=>handle.confirm().await}}
+    pub(crate) async fn ensure_projection(&self)->Result<Value,RuntimeError> {match self {Self::Headless(h) | Self::CodexTerminal {handle:h,..}=>h.ensure_projection().await,Self::Terminal {handle,..}=>handle.ensure_projection().await}}
+    /// Pane presente: entrada terminal do Claude ou Codex com TUI.
+    pub(crate) fn has_terminal(&self) -> bool { !matches!(self,Self::Headless(_)) }
+}
+struct Entry { generation:u64,handle:EntryHandle,lease_path:std::path::PathBuf,name:String,mods_life:u64,provider:String,account_key:Option<crate::accounts::AccountKey>,mode_source:crate::terminal_facts::ModeSource,live:LiveSender }
 
 async fn runtime_account_guard(provider: &str, metadata: &Value) -> Result<crate::accounts::AccountGuard, RuntimeError> {
     use crate::accounts::{AccountKey, AccountLocks, GuardMode, Provider};
@@ -49,18 +58,26 @@ pub struct WriteTarget { pub key:String,pub generation:u64,pub provider:String,p
 /// Prazo do fechamento da porta: abaixo do `OP_TIMEOUT_S` (75 s) do transporte no Python.
 const INGRESS_CLOSE_WAIT:Duration = Duration::from_secs(60);
 pub struct RuntimeRegistry {
-    entries:Mutex<BTreeMap<String,Entry>>,
+    interactions:Option<Arc<crate::interactions::InteractionStore>>,
+    entries:Arc<Mutex<BTreeMap<String,Entry>>>,
+    terminal_states:Option<Arc<crate::state::published::Published>>,
+    terms:Option<Arc<crate::term::Terms>>,
     events:broadcast::Sender<RuntimeEvent>,
     policy:PolicyClient,
     instance:String,
     lifecycle:Mutex<BTreeMap<String,Arc<Mutex<()>>>>,
     revisions:Mutex<BTreeMap<String,Arc<AtomicU64>>>,
     mods:Option<crate::mods::state::Mods>,
+    plugin:Option<Arc<crate::plugin::Store>>,
     ingress:super::ingress::IngressGates,
     /// Primeira espera da religação do processo que cai (dobra a cada subida seguida).
     respawn_base:Duration,
     /// Último valor da sessão sem terminal por nome, para o feed do hub (`live`).
     live:std::sync::Mutex<BTreeMap<String,LiveSender>>,
+    /// Nome → (chave, geração) do ator do Codex com terminal aberto aqui: o estado deles é do Rust.
+    codex_owned:std::sync::Mutex<BTreeMap<String,(String,u64)>>,
+    /// Hubs do chat, avisados quando essa posse muda.
+    hubs:std::sync::OnceLock<crate::side::WeakHubs>,
 }
 
 /// A trava pode demorar a soltar: as tarefas de E/S de um ator que saiu, ou o `LockFileEx` de um
@@ -192,13 +209,150 @@ async fn attach_terminal_mods(mods:&crate::mods::state::Mods,target:&super::term
 
 impl RuntimeRegistry {
     pub fn new(upstream:SocketAddr,secret:String,instance:String) -> Self {
-        Self { entries:Mutex::new(BTreeMap::new()),events:broadcast::channel(1024).0,
-            policy:PolicyClient::new(upstream,secret,instance.clone()),instance,lifecycle:Mutex::new(BTreeMap::new()),revisions:Mutex::new(BTreeMap::new()),mods:None,ingress:Default::default(),
-            respawn_base:Duration::from_secs(5),live:Default::default() }
+        Self { interactions:None,entries:Arc::new(Mutex::new(BTreeMap::new())),terminal_states:None,terms:None,events:broadcast::channel(1024).0,
+            policy:PolicyClient::new(upstream,secret,instance.clone()),instance,lifecycle:Mutex::new(BTreeMap::new()),revisions:Mutex::new(BTreeMap::new()),mods:None,plugin:None,ingress:Default::default(),
+            respawn_base:Duration::from_secs(5),live:Default::default(),codex_owned:Default::default(),hubs:std::sync::OnceLock::new() }
     }
+    /// Liga os hubs do chat: abrir e fechar o ator do Codex com terminal troca o dono do estado neles.
+    pub fn bind_hubs(&self,hubs:crate::side::WeakHubs) { let _ = self.hubs.set(hubs); }
+    /// O ator do Codex com terminal desta sessão está aberto aqui: o Rust publica o estado dela.
+    pub fn owns_codex_terminal(&self,name:&str) -> bool { self.codex_owned.lock().unwrap_or_else(|e|e.into_inner()).contains_key(name) }
+    /// Posse pela entrada (chave e geração), não só pelo nome: fechar uma vida antiga não desmarca a viva de mesmo nome.
+    fn mark_codex_owner(&self,name:&str,key:&str,generation:u64,owned:bool) {
+        let changed = {
+            let mut map = self.codex_owned.lock().unwrap_or_else(|e|e.into_inner());
+            let life = (key.to_owned(),generation);
+            if owned { map.insert(name.to_owned(),life); true }
+            else if map.get(name) == Some(&life) { map.remove(name); true }
+            else { false }
+        };
+        if !changed { return; }
+        if let Some(hubs) = self.hubs.get().and_then(crate::side::WeakHubs::upgrade) { hubs.set_runtime_owned(name,owned); }
+    }
+    pub fn with_interactions(mut self,store:Arc<crate::interactions::InteractionStore>) -> Self { self.interactions = Some(store); self }
+
+    pub async fn interaction_binding(&self,name:&str) -> Result<crate::interactions::InteractionBinding,RuntimeError> {
+        use crate::interactions::{InteractionBinding,InteractionError,runtime_error};
+        let unavailable = ||runtime_error(InteractionError::Unavailable);
+        let (key,generation,handle) = {
+            let entries = self.entries.lock().await;
+            let mut matches = entries.iter().filter(|(_,entry)|entry.name == name);
+            let (key,entry) = matches.next().ok_or_else(unavailable)?;
+            if matches.next().is_some() { return Err(unavailable()); }
+            if let EntryHandle::Terminal { target,.. } = &entry.handle {
+                if target.key != *key || target.generation != entry.generation || target.binding.conversation.is_empty() { return Err(unavailable()); }
+                return Ok(InteractionBinding { key:key.clone(),conversation:target.binding.conversation.clone(),generation:entry.generation });
+            }
+            (key.clone(),entry.generation,entry.handle.clone())
+        };
+        let snapshot = handle.snapshot().await.map_err(|_|unavailable())?;
+        let entries = self.entries.lock().await;
+        if entries.iter().any(|(other,entry)|other != &key && entry.name == name) { return Err(unavailable()); }
+        let entry = entries.get(&key).filter(|entry|entry.name == name && entry.generation == generation).ok_or_else(unavailable)?;
+        if matches!(entry.handle,EntryHandle::Terminal {..}) || snapshot["key"] != key || snapshot["generation"] != generation || !snapshot["error"].is_null() { return Err(unavailable()); }
+        let conversation = snapshot["view"]["conversation"].as_str().filter(|s|!s.is_empty()).ok_or_else(unavailable)?;
+        Ok(InteractionBinding { key,conversation:conversation.into(),generation })
+    }
+
     pub fn with_respawn_base(mut self,base:Duration) -> Self { self.respawn_base = base; self }
     /// Interface dos mods: sessão Claude sem terminal aberta aqui vira superfície remota e publica no `Mods`.
     pub fn with_mods(mut self,mods:crate::mods::state::Mods) -> Self { self.mods = Some(mods); self }
+    pub fn with_plugin(mut self, plugin:Arc<crate::plugin::Store>) -> Self { self.plugin = Some(plugin); self }
+    pub fn with_terminal_states(mut self, states:Arc<crate::state::published::Published>) -> Self { self.terminal_states=Some(states);self }
+    pub fn with_terms(mut self, terms:Arc<crate::term::Terms>) -> Self {self.terms=Some(terms);self}
+    fn terminal_mode_reader(&self) -> crate::terminal_facts::ModeReader {
+        let (entries,published,permissions)=(Arc::downgrade(&self.entries),self.terminal_states.clone(),self.permissions.clone());
+        Arc::new(move |name| {
+            let (entries,published,permissions)=(entries.clone(),published.clone(),permissions.clone());
+            Box::pin(async move {
+                let entries=entries.upgrade().ok_or(crate::terminal_input::ServiceError("terminal_mode_unavailable"))?;
+                let (mut source,terminal,live)={
+                    let entries=entries.lock().await;
+                    let mut matches=entries.iter().filter(|(_,entry)|entry.name==name && entry.provider=="claude");
+                    let Some((key,entry))=matches.next() else {return Ok(None)};
+                    if matches.next().is_some() {return Err(crate::terminal_input::ServiceError("terminal_mode_ambiguous"));}
+                    if entry.mode_source.binding.key!=*key || entry.mode_source.binding.generation!=entry.generation || entry.mode_source.binding.conversation.is_empty() {
+                        return Err(crate::terminal_input::ServiceError("terminal_mode_binding_changed"));
+                    }
+                    (entry.mode_source.clone(),matches!(&entry.handle,EntryHandle::Terminal {..}),entry.live.clone())
+                };
+                if !terminal {
+                    let current=live.borrow().clone().filter(|state|state.error.is_none()).ok_or(crate::terminal_input::ServiceError("terminal_mode_unavailable"))?;
+                    if current.binding.as_ref()!=Some(&source.binding) {return Err(crate::terminal_input::ServiceError("terminal_mode_binding_changed"));}
+                }
+                let confirmed=match &permissions {
+                    Some(memory)=>memory.lock().map_err(|_|crate::terminal_input::ServiceError("terminal_mode_unavailable"))?
+                        .confirmed(&source.binding.conversation).map_err(crate::terminal_input::ServiceError)?,
+                    None=>return Err(crate::terminal_input::ServiceError("terminal_mode_unavailable")),
+                };
+                if let Some(mode)=confirmed.clone() {
+                    source.confirmed=Some(if mode.current=="plan" {mode.previous_non_plan} else {mode.current});
+                } else if terminal {
+                    if let Some(state)=published.as_ref().and_then(|published|published.get(&name,Some(&source.binding.conversation))) {
+                        if state.problema.is_some() {return Err(crate::terminal_input::ServiceError("terminal_mode_unavailable"));}
+                        source.confirmed=state.claude_permission_mode.clone().filter(|mode|!mode.is_empty() && mode!="plan")
+                            .or_else(||state.claude_previous_non_plan.clone().filter(|mode|!mode.is_empty() && mode!="plan"));
+                    }
+                } else {
+                    let current=live.borrow().clone().filter(|state|state.error.is_none()).ok_or(crate::terminal_input::ServiceError("terminal_mode_unavailable"))?;
+                    let binding=current.binding.as_ref().filter(|binding|binding.key==source.binding.key && binding.generation==source.binding.generation && !binding.conversation.is_empty()).ok_or(crate::terminal_input::ServiceError("terminal_mode_binding_changed"))?;
+                    if binding.conversation!=source.binding.conversation {return Err(crate::terminal_input::ServiceError("terminal_mode_binding_changed"));}
+                    source.confirmed=current.public_state["claude_permission_mode"].as_str().filter(|mode|!mode.is_empty() && *mode!="plan")
+                        .or_else(||current.public_state["claude_previous_non_plan"].as_str().filter(|mode|!mode.is_empty() && *mode!="plan"))
+                        .map(str::to_owned).or(source.confirmed);
+                }
+                let entries=entries.lock().await;
+                if !entries.get(&source.binding.key).is_some_and(|entry|entry.name==name && entry.generation==source.binding.generation && entry.mode_source.binding==source.binding && entry.mode_source.transcript==source.transcript) {
+                    return Err(crate::terminal_input::ServiceError("terminal_mode_binding_changed"));
+                }
+                if !terminal && live.borrow().as_ref().and_then(|state|state.binding.as_ref())!=Some(&source.binding) {return Err(crate::terminal_input::ServiceError("terminal_mode_binding_changed"));}
+                let fresh=permissions.as_ref().ok_or(crate::terminal_input::ServiceError("terminal_mode_unavailable"))?
+                    .lock().map_err(|_|crate::terminal_input::ServiceError("terminal_mode_unavailable"))?
+                    .confirmed(&source.binding.conversation).map_err(crate::terminal_input::ServiceError)?;
+                if fresh!=confirmed {return Err(crate::terminal_input::ServiceError("terminal_mode_binding_changed"));}
+                Ok(Some(source))
+            })
+        })
+    }
+    /// Vínculo e metadados do terminal, sem enviar um pedido ao ator ocupado.
+    pub async fn terminal_target(&self,name:&str)->Result<Option<super::terminal::TerminalTarget>,RuntimeError> {
+        let entries=self.entries.lock().await;let mut matches=entries.iter().filter(|(_,entry)|entry.name==name);
+        let Some((key,entry))=matches.next() else {return Ok(None)};
+        if matches.next().is_some() {return Err(failure("runtime_binding"));}
+        match &entry.handle {
+            EntryHandle::Terminal {target,..} if target.key==*key && target.generation==entry.generation && target.binding.generation==entry.generation && target.binding.name==name=>Ok(Some(target.clone())),
+            EntryHandle::Terminal {..}=>Err(failure("runtime_binding")),_=>Ok(None),
+        }
+    }
+    pub async fn interaction_binding_readonly(&self,name:&str)->Result<crate::interactions::InteractionBinding,RuntimeError> {
+        let entries=self.entries.lock().await;let mut matches=entries.iter().filter(|(_,entry)|entry.name==name);
+        let (key,entry)=matches.next().ok_or_else(||failure("runtime_binding"))?;
+        if matches.next().is_some() {return Err(failure("runtime_binding"));}
+        if let EntryHandle::Terminal {target,..}=&entry.handle {
+            if target.key!=*key || target.generation!=entry.generation || target.binding.generation!=entry.generation || target.binding.name!=name || target.binding.conversation.is_empty() {return Err(failure("runtime_binding"));}
+            return Ok(crate::terminal_facts::LocalTerminalFacts::binding(target));
+        }
+        let live=entry.live.borrow().clone().filter(|state|state.error.is_none()).ok_or_else(||failure("runtime_binding"))?;
+        let binding=live.binding.clone().filter(|binding|binding.key==*key && binding.generation==entry.generation && !binding.conversation.is_empty()).ok_or_else(||failure("runtime_binding"))?;
+        Ok(binding)
+    }
+    pub async fn drain(&self,name:&str)->Result<Value,RuntimeError> {
+        let handle={
+            let entries=self.entries.lock().await;let mut matches=entries.values().filter(|entry|entry.name==name);
+            let entry=matches.next().ok_or_else(||failure("runtime_binding"))?;
+            if matches.next().is_some() {return Err(failure("runtime_binding"));}entry.handle.clone()
+        };handle.drain().await
+    }
+    pub fn plugin(&self) -> Result<&Arc<crate::plugin::Store>,RuntimeError> {
+        self.plugin.as_ref().ok_or_else(||failure("plugin_store_unavailable"))
+    }
+    async fn bind_plugin(&self,name:&str) -> Result<(),RuntimeError> {
+        if let Some(plugin) = &self.plugin {
+            let binding = self.interaction_binding(name).await?;
+            plugin.bind(&binding).map_err(|error|failure(error.0))?;
+        }
+        Ok(())
+    }
     pub fn ingress(&self) -> &super::ingress::IngressGates { &self.ingress }
     pub fn subscribe(&self) -> broadcast::Receiver<RuntimeEvent> { self.events.subscribe() }
     /// Último valor da sessão `name` para o feed do hub; `None` enquanto ela não está aberta aqui.
@@ -212,7 +366,7 @@ impl RuntimeRegistry {
         map.entry(name.to_owned()).or_insert_with(||tokio::sync::watch::channel(None).0).clone()
     }
     pub async fn handle(&self,key:&str,generation:u64) -> Result<RuntimeHandle,RuntimeError> {
-        match self.entry(key,generation).await? {EntryHandle::Headless(handle)=>Ok(handle),_=>Err(failure("runtime_provider"))}
+        match self.entry(key,generation).await? {EntryHandle::Headless(handle) | EntryHandle::CodexTerminal {handle,..}=>Ok(handle),_=>Err(failure("runtime_provider"))}
     }
     async fn entry(&self,key:&str,generation:u64)->Result<EntryHandle,RuntimeError> {
         self.entries.lock().await.get(key).filter(|entry|entry.generation==generation)
@@ -285,6 +439,7 @@ impl RuntimeRegistry {
         let revision = self.revisions.lock().await.entry(target.key.clone()).or_insert_with(||Arc::new(AtomicU64::new(0))).clone();
         let mut engine = RuntimeEngine::new(&target.provider,metadata,target.generation,ClockSample { monotonic_s:0.0,epoch_s })?
             .with_policy(self.policy.clone()).with_publisher(self.events.clone()).with_revision(revision);
+        if let Some(store) = &self.interactions { engine = engine.with_interactions(target.key.clone(),store.clone())?; }
         engine.set_fresh_process(fresh);
         if let Some(sidecar_dir) = &managed { engine = engine.with_launch(LaunchConfig { sidecar_dir:sidecar_dir.clone(),backoff:self.respawn_base }); }
         if let Some(mods) = &self.mods { engine = engine.with_mods(mods.clone()); }
@@ -300,7 +455,9 @@ impl RuntimeRegistry {
             }
         });
         self.entries.lock().await.insert(target.key.clone(),Entry { generation:target.generation,handle:EntryHandle::Headless(handle.clone()),
-            lease_path:target.lease_path.clone(),name:target.name.clone(),mods_life:life,provider:target.provider.clone(),account_key:Some(account_guard.key.clone()) });
+            lease_path:target.lease_path.clone(),name:target.name.clone(),mods_life:life,provider:target.provider.clone(),account_key:Some(account_guard.key.clone()),
+            mode_source:crate::terminal_facts::ModeSource {binding:crate::interactions::InteractionBinding {key:target.key.clone(),generation:target.generation,conversation:target.metadata[if target.provider=="claude" {"session_id"} else {"thread_id"}].as_str().unwrap_or("").into()},transcript:target.transcript.clone(),confirmed:target.metadata["permission_mode"].as_str().filter(|mode|*mode!="plan").map(str::to_owned)},
+            live:self.live_sender(&target.name) });
         handle
         };
         let snapshot = match handle.snapshot().await {
@@ -317,6 +474,85 @@ impl RuntimeRegistry {
                 return Err(error);
             }
         };
+        if target.provider == "claude" { self.bind_plugin(&target.name).await?; }
+        Ok(json!({"opened":true,"instance":self.instance,"key":target.key,"generation":target.generation,"state":snapshot}))
+    }
+    /// Adota o app-server do Codex com terminal: confere endereço local, conversa e pid, abre a fila sob a
+    /// trava e liga o ator ao WebSocket. O processo segue do ciclo de vida que o abriu: nada sobe nem morre aqui.
+    pub async fn open_codex_terminal(&self,target:CodexTerminalTarget) -> Result<Value,RuntimeError> {
+        let name = target.name.clone();
+        let result = self.open_codex_terminal_attempt(target).await;
+        if let Err(error) = &result && !["runtime_generation","runtime_provider"].contains(&error.code.as_str()) {
+            super::actor::mark_live_error(&self.live_sender(&name),&error.code,&error.message);
+        }
+        result
+    }
+    async fn open_codex_terminal_attempt(&self,target:CodexTerminalTarget) -> Result<Value,RuntimeError> {
+        let barrier = self.barrier(&target.key).await;
+        let _guard = barrier.lock().await;
+        let existing = self.entries.lock().await.get(&target.key).map(|entry|(entry.generation,entry.handle.clone()));
+        let handle = match existing {
+            Some((generation,EntryHandle::CodexTerminal { target:old,handle,.. })) if generation == target.generation && old.same_life(&target)=>{
+                // Mesma vida, mas o app-server pode ter morrido: responder `opened` com um ator desconectado para
+                // sempre esconderia isso. Quem fecha e adota a vida nova é o ciclo de vida.
+                super::codex_terminal::verify(&target).await?;
+                handle
+            },
+            Some(_)=>return Err(failure("runtime_generation")),
+            None=>{
+                super::codex_terminal::verify(&target).await?;
+                let account_guard = runtime_account_guard("codex",&target.metadata).await?;
+                let lease = wait_lease(&target.lease_path).await?;
+                let store = open_store(&target.state_path,&target.projection_dir,&target.key,target.generation,&target.name,lease.clone()).await?;
+                let runtime = target.runtime_target();
+                let mut metadata = runtime.metadata.clone();
+                if let Some(fields) = store.state().runtime_state["view"].as_object() {
+                    if fields.get("conversation").is_some_and(|conversation|conversation == &metadata["thread_id"]) {
+                        for (key,value) in fields { if key != "public_state" && key != "headless" { metadata[key] = value.clone(); } }
+                    }
+                }
+                let queue = QueueActor::start(store,lease);
+                let connection = match super::websocket::WebSocketConnection::connect(&target.endpoint).await {
+                    Ok(connection)=>connection,
+                    Err(error)=>{
+                        if let Err(stop) = queue.shutdown().await {
+                            tracing::warn!(key=%target.key,code=%error.code,stop=?stop.kind(),"fila não fechou depois da falha ao conectar no app-server");
+                        }
+                        return Err(error);
+                    }
+                };
+                let epoch_s = SystemTime::now().duration_since(UNIX_EPOCH).map(|d|d.as_secs_f64()).unwrap_or(0.0);
+                let revision = self.revisions.lock().await.entry(target.key.clone()).or_insert_with(||Arc::new(AtomicU64::new(0))).clone();
+                let mut engine = RuntimeEngine::new("codex",metadata,target.generation,ClockSample { monotonic_s:0.0,epoch_s })?
+                    .with_policy(self.policy.clone()).with_publisher(self.events.clone()).with_revision(revision);
+                if let Some(store) = &self.interactions { engine = engine.with_interactions(target.key.clone(),store.clone())?; }
+                engine = engine.with_live(self.live_sender(&target.name));
+                let cell = AdoptionCell::new(&target.endpoint,target.app_pid);
+                let adoption = Adoption { endpoint:target.endpoint.clone(),app_pid:target.app_pid,cell:cell.clone() };
+                let handle = RuntimeActor::spawn_adopted(runtime,queue,connection,engine,adoption);
+                self.entries.lock().await.insert(target.key.clone(),Entry { generation:target.generation,
+                    handle:EntryHandle::CodexTerminal { target:Box::new(target.clone()),handle:handle.clone(),cell },
+                    lease_path:target.lease_path.clone(),name:target.name.clone(),mods_life:0,provider:"codex".into(),account_key:Some(account_guard.key.clone()),
+                    mode_source:crate::terminal_facts::ModeSource {binding:crate::interactions::InteractionBinding {key:target.key.clone(),generation:target.generation,conversation:target.thread_id.clone()},transcript:target.transcript.clone().unwrap_or_default(),confirmed:None},
+                    live:self.live_sender(&target.name) });
+                // O estado passa a sair do feed do runtime; o pane segue presente.
+                self.mark_codex_owner(&target.name,&target.key,target.generation,true);
+                handle
+            }
+        };
+        let snapshot = match handle.snapshot().await {
+            Ok(snapshot) if snapshot["error"].is_null()=>snapshot,
+            result=>{
+                let error = match result {
+                    Err(error)=>error,
+                    Ok(snapshot)=>snapshot["error"].as_str().map_or_else(||failure("runtime_closed"),|code|RuntimeError::new(code,"ator do runtime terminou ao abrir")),
+                };
+                if let Err(close) = self.close_locked(&target.key,target.generation,false).await {
+                    tracing::warn!(key=%target.key,code=%close.code,"sessão não fechou depois de abrir com erro");
+                }
+                return Err(error);
+            }
+        };
         Ok(json!({"opened":true,"instance":self.instance,"key":target.key,"generation":target.generation,"state":snapshot}))
     }
     pub async fn open_terminal(&self,target:super::terminal::TerminalTarget)->Result<Value,RuntimeError> {
@@ -324,7 +560,7 @@ impl RuntimeRegistry {
         let existing=self.entries.lock().await.get(&target.key).map(|e|(e.generation,e.handle.clone(),e.mods_life));
         let handle=match existing {
             Some((generation,EntryHandle::Terminal {target:old,handle},life)) if generation==target.generation && old.binding==target.binding
-                && old.transcript==target.transcript && old.state_path==target.state_path && old.projection_dir==target.projection_dir && old.lease_path==target.lease_path=>{
+                && old.metadata==target.metadata && old.transcript==target.transcript && old.state_path==target.state_path && old.projection_dir==target.projection_dir && old.lease_path==target.lease_path=>{
                 // Reabertura da mesma vida: se o nome saiu do `Mods`, a sessão volta a ser ligada, na vida da
                 // entrada, que é a que o `close` esquece. Nome com outra vida fica com ela: é uma sessão mais
                 // nova e viva, e tomá-lo a deixaria sem dono e sem o nome de nascimento.
@@ -338,8 +574,12 @@ impl RuntimeRegistry {
                 let lease=wait_lease(&target.lease_path).await?;
                 let store=open_store(&target.state_path,&target.projection_dir,&target.key,target.generation,&target.name,lease.clone()).await?;
                 let revision=self.revisions.lock().await.entry(target.key.clone()).or_insert_with(||Arc::new(AtomicU64::new(0))).clone();
+                if let Some(interactions) = &self.interactions {
+                    interactions.bind(&crate::interactions::InteractionBinding { key:target.key.clone(),conversation:target.binding.conversation.clone(),generation:target.generation })
+                        .map_err(crate::interactions::runtime_error)?;
+                }
                 // A âncora nasce com o executor, que a lê, e passa ao elo pelo `handle`, também na reabertura.
-                let options=super::terminal::TerminalOptions {anchor:super::terminal::ModsAnchor::default(),..Default::default()};
+                let options=super::terminal::TerminalOptions {interactions:self.interactions.clone(),plugin:self.plugin.clone(),mode_facts:Some(self.terminal_mode_reader()),terms:self.terms.clone(),anchor:super::terminal::ModsAnchor::default(),..Default::default()};
                 let handle=super::terminal::TerminalActor::spawn(target.clone(),QueueActor::start(store,lease),self.policy.clone(),options,self.events.clone(),revision);
                 // A vida no `Mods` é única no servidor (`new_life`).
                 let life=match &self.mods {
@@ -350,10 +590,12 @@ impl RuntimeRegistry {
                     },
                     None=>0,
                 };
-                self.entries.lock().await.insert(target.key.clone(),Entry {generation:target.generation,handle:EntryHandle::Terminal {target:target.clone(),handle:handle.clone()},lease_path:target.lease_path.clone(),name:target.name.clone(),mods_life:life,provider:"claude".into(),account_key:None});handle
+                self.entries.lock().await.insert(target.key.clone(),Entry {generation:target.generation,handle:EntryHandle::Terminal {target:target.clone(),handle:handle.clone()},lease_path:target.lease_path.clone(),name:target.name.clone(),mods_life:life,provider:"claude".into(),account_key:None,
+                    mode_source:crate::terminal_facts::ModeSource {binding:crate::terminal_facts::LocalTerminalFacts::binding(&target),transcript:target.transcript.clone(),confirmed:None},live:self.live_sender(&target.name)});handle
             }
         };
         let snapshot=handle.snapshot().await?;
+        self.bind_plugin(&target.name).await?;
         Ok(json!({"opened":true,"instance":self.instance,"key":target.key,"generation":target.generation,"state":snapshot}))
     }
     /// Fecha a sessão no Rust: o ator para e solta a trava; o cano segue vivo.
@@ -375,9 +617,17 @@ impl RuntimeRegistry {
             Some(entry) if entry.generation == generation=>(entry.handle.clone(),entry.lease_path.clone(),entry.name.clone(),entry.mods_life),
             _=>return Err(failure("runtime_generation")),
         };
+        if kill && matches!(&handle,EntryHandle::Terminal {..}) { return Err(failure("close_kill")); }
+        if let Some(plugin) = &self.plugin { plugin.forget(key).map_err(|error|failure(error.0))?; }
         let stopped = match (&handle,kill) {
             (EntryHandle::Headless(handle),true)=>handle.stop_killing().await,
-            (EntryHandle::Terminal {..},true)=>return Err(failure("close_kill")),
+            // O app-server adotado não é do Rust: encerrar é do ciclo de vida que o abriu.
+            (EntryHandle::Terminal {..} | EntryHandle::CodexTerminal {..},true)=>return Err(failure("close_kill")),
+            (EntryHandle::CodexTerminal { cell,handle,.. },false)=>{
+                // A reconexão em voo para antes de a posse sair daqui.
+                cell.revoke();
+                handle.stop().await
+            },
             _=>handle.stop().await,
         };
         if let Err(error) = stopped {
@@ -392,6 +642,7 @@ impl RuntimeRegistry {
                 // O ator parou e soltou a trava: a sessão saiu daqui, só o processo não morreu. Responder
                 // erro deixava o Python achando que ela seguia aqui; `killed: false` e quem pediu decide.
                 tracing::warn!(key,code=%error.code,"sessão fechada sem encerrar o processo");
+                if let Some(store) = &self.interactions { store.forget(key).map_err(crate::interactions::runtime_error)?; }
                 self.entries.lock().await.remove(key);
                 self.clear_live(&name).await;
                 if let Some(mods) = &self.mods { mods.forget(&name,life); }
@@ -399,7 +650,10 @@ impl RuntimeRegistry {
             }
             tracing::warn!(key,code=%error.code,"ator do runtime já tinha terminado; sessão liberada");
         }
+        if let Some(store) = &self.interactions { store.forget(key).map_err(crate::interactions::runtime_error)?; }
         self.entries.lock().await.remove(key);
+        // Codex com terminal fora do Rust: o hub devolve o estado à observação do Python.
+        if matches!(handle,EntryHandle::CodexTerminal {..}) { self.mark_codex_owner(&name,key,generation,false); }
         self.clear_live(&name).await;
         // A sessão saiu do Rust: os apps perdem a faixa e os pedidos voltam a não ter dono (S9). Com ou sem
         // terminal, esquece só esta vida: outra sessão que tenha tomado o nome (outra vida) fica.
@@ -442,7 +696,7 @@ impl RuntimeRegistry {
         // Nome repetido é defeito de quem abriu a entrada; a escrita vai para a geração mais nova.
         let (key,generation,provider,handle) = self.entries.lock().await.iter().filter(|(_,e)|e.name==name).max_by_key(|(_,e)|e.generation)
             .map(|(key,e)|(key.clone(),e.generation,e.provider.clone(),e.handle.clone()))?;
-        let terminal = matches!(&handle,EntryHandle::Terminal {..});
+        let terminal = handle.has_terminal();
         let healthy = match tokio::time::timeout(Duration::from_secs(1),handle.snapshot()).await {
             Ok(Ok(view))=>healthy(terminal,&view),
             _=>false,
@@ -452,11 +706,11 @@ impl RuntimeRegistry {
     /// A entrada mais nova do nome é de terminal? Sem retrato: serve a decisão que vem antes da porta.
     pub async fn is_terminal(&self,name:&str) -> bool {
         self.entries.lock().await.values().filter(|e|e.name==name).max_by_key(|e|e.generation)
-            .is_some_and(|e|matches!(e.handle,EntryHandle::Terminal {..}))
+            .is_some_and(|e|e.handle.has_terminal())
     }
     /// Sessão do ator de entrada terminal de chave `key`.
     pub async fn terminal_name(&self,key:&str) -> Option<String> {
-        match &self.entries.lock().await.get(key)?.handle { EntryHandle::Terminal {target,..}=>Some(target.name.clone()), EntryHandle::Headless(_)=>None }
+        match &self.entries.lock().await.get(key)?.handle { EntryHandle::Terminal {target,..}=>Some(target.name.clone()), _=>None }
     }
     /// Leitura pura: quem exclui já pode segurar exclusividade.
     pub async fn account_usage(&self, key: &crate::accounts::AccountKey) -> crate::accounts::UsageFacts {
@@ -491,6 +745,27 @@ impl RuntimeRegistry {
             (key,data)
         });
         futures_util::future::join_all(asks).await.into_iter().collect()
+    }
+    pub async fn list_snapshots_readonly(&self) -> BTreeMap<String,Value> {
+        let entries=self.entries.lock().await;
+        entries.iter().map(|(key,entry)| {
+            let unavailable=||json!({"key":key,"generation":entry.generation,"error":"runtime_live_unavailable"});
+            let data=match &entry.handle {
+                EntryHandle::Terminal {target,..} if target.key==*key && target.generation==entry.generation=>{
+                    match self.terminal_states.as_ref().and_then(|states|states.get(&entry.name,Some(&target.binding.conversation))) {
+                        Some(state)=>json!({"key":key,"generation":entry.generation,"error":state.problema,"view":{"alive":state.state!="dead","conversation":target.binding.conversation,"headless":false,"public_state":state}}),
+                        None=>unavailable(),
+                    }
+                },
+                EntryHandle::Terminal {..}=>unavailable(),
+                _=>match entry.live.borrow().clone() {
+                    Some(live) if live.binding.as_ref().is_some_and(|binding|binding.key==*key && binding.generation==entry.generation && !binding.conversation.is_empty()) && live.public_state["state"].is_string()=>{
+                        json!({"key":key,"generation":entry.generation,"error":live.error.as_ref().map(|error|&error.0),"view":{"alive":live.public_state["state"]!="dead","conversation":live.binding.as_ref().map(|binding|&binding.conversation),"headless":matches!(entry.handle,EntryHandle::Headless(_)),"public_state":live.public_state}})
+                    },
+                    _=>unavailable(),
+                },
+            };(key.clone(),data)
+        }).collect()
     }
     pub async fn shutdown(&self) -> Result<(),RuntimeError> {
         let entries:Vec<_> = self.entries.lock().await.iter().map(|(key,entry)|(key.clone(),entry.generation)).collect();
@@ -597,7 +872,15 @@ async fn dispatch(registry:&RuntimeRegistry,envelope:&Envelope) -> Result<Value,
     if kind == "open" {
         // `launch`: quem abre pode subir o processo (só sem terminal, e só se o gravado não for nosso).
         let launch = match &command["launch"] { Value::Null=>false, value=>value.as_bool().ok_or_else(||failure("open_launch"))? };
-        return match descriptor(&command["descriptor"],launch)? {
+        let mut value=command["descriptor"].clone();
+        if value["provider"]=="claude" && value["headless"]==false {
+            let parsed:Descriptor=serde_json::from_value(value.clone()).map_err(|_|failure("descriptor_shape"))?;
+            let binding=terminal_binding(&parsed)?;
+            let metadata=crate::terminal_facts::TerminalMetadata::resolve(&parsed.meta,&binding,std::path::Path::new(&parsed.jsonl)).await.map_err(|error|failure(error.0))?;
+            value["meta"]["config_dir"]=json!(metadata.config_dir);value["meta"]["agent_pid"]=json!(metadata.agent_pid);
+            value["meta"]["agent_birth"]=json!(metadata.agent_birth);value["meta"]["fingerprint"]=json!(metadata.fingerprint);value["meta"]["message_origin"]=json!(metadata.origin);
+        }
+        return match descriptor(&value,launch)? {
             Target::Headless(target,sidecar_dir) if launch=>{
                 if target.key!=envelope.key || target.generation!=envelope.generation{return Err(failure("runtime_binding"));}
                 let sidecar_dir = sidecar_dir.filter(|dir|!dir.as_os_str().is_empty()).ok_or_else(||failure("launch_sidecar_dir"))?;
@@ -617,6 +900,12 @@ async fn dispatch(registry:&RuntimeRegistry,envelope:&Envelope) -> Result<Value,
                 if target.key!=envelope.key || target.generation!=envelope.generation{return Err(failure("runtime_binding"));}
                 registry.open_terminal(target).await
             }
+            // Codex com terminal só adota: subir o app-server é do ciclo de vida do Python.
+            Target::CodexTerminal(_) if launch=>Err(failure("open_launch")),
+            Target::CodexTerminal(target)=>{
+                if target.key!=envelope.key || target.generation!=envelope.generation{return Err(failure("runtime_binding"));}
+                registry.open_codex_terminal(*target).await
+            }
         };
     }
     if kind == "close" {
@@ -630,7 +919,7 @@ async fn dispatch(registry:&RuntimeRegistry,envelope:&Envelope) -> Result<Value,
             crate::migration_status::count_private(if matches!(&handle,EntryHandle::Terminal {..}) {"send_terminal"} else {"send_headless"});
             if matches!(&handle,EntryHandle::Terminal {..}) && (command.get("steer").is_some_and(|value|!value.is_boolean())
                 || command.get("pre_transcript").is_some_and(|value|!value.is_boolean())) {return Err(failure("terminal_payload"));}
-            let kind = if command["steer"] == true && matches!(&handle,EntryHandle::Headless(_)) { OperationKind::Steer } else { OperationKind::Input };
+            let kind = if command["steer"] == true && !matches!(&handle,EntryHandle::Terminal {..}) { OperationKind::Steer } else { OperationKind::Input };
             let reply = handle.command(RuntimeCommand { operation_id:envelope.operation_id.clone(),kind,
                 payload:json!({"text":command["text"],"pre_transcript":command["pre_transcript"].as_bool().unwrap_or(false)}) }).await?;
             serde_json::to_value(reply).map_err(|_|failure("reply_json"))
@@ -664,18 +953,50 @@ struct Descriptor {
 }
 
 /// Sem terminal leva a pasta do arquivo da sessão (`sidecar_dir`), que só o `open` com `launch` usa.
-enum Target {Headless(RuntimeTarget,Option<std::path::PathBuf>),Terminal(super::terminal::TerminalTarget)}
+/// O Codex com terminal leva endereço, pid e thread do app-server adotado, nunca um cano.
+enum Target {Headless(RuntimeTarget,Option<std::path::PathBuf>),Terminal(super::terminal::TerminalTarget),CodexTerminal(Box<CodexTerminalTarget>)}
+
+/// Vínculo do pane, igual para Claude e Codex com terminal.
+fn terminal_binding(descriptor:&Descriptor) -> Result<crate::terminal_input::TerminalBinding,RuntimeError> {
+    let binding:crate::terminal_input::TerminalBinding=serde_json::from_value(descriptor.meta["terminal"].clone()).map_err(|_|failure("terminal_binding"))?;
+    if binding.generation!=descriptor.generation || binding.name!=descriptor.name || binding.conversation.is_empty() || binding.mux_argv.is_empty()
+        || binding.mux_argv.iter().any(|v|v.contains('\0'))
+        || (!binding.windows && (!binding.pane.starts_with('%') || binding.pane[1..].parse::<u64>().is_err()))
+        || (binding.windows && !binding.pane.starts_with(&format!("={}:",binding.name))) {return Err(failure("terminal_binding"));}
+    Ok(binding)
+}
+
+/// Codex com terminal: conversa do pane igual à thread, endereço de loopback literal e pid informado. Rollout
+/// ausente (`jsonl` vazio) é válido; quem prova o pid é a abertura.
+fn codex_terminal_descriptor(descriptor:Descriptor) -> Result<CodexTerminalTarget,RuntimeError> {
+    let terminal = terminal_binding(&descriptor)?;
+    let thread_id = descriptor.meta["thread_id"].as_str().unwrap_or("").to_owned();
+    if thread_id.is_empty() { return Err(RuntimeError::new("codex_thread","Codex com terminal sem conversa identificada")); }
+    if terminal.conversation != thread_id { return Err(failure("terminal_binding")); }
+    let endpoint = descriptor.meta["endpoint"].as_str().ok_or_else(||RuntimeError::new("codex_endpoint","endereço do app-server ausente"))?.to_owned();
+    super::codex_terminal::loopback_endpoint(&endpoint)?;
+    let app_pid = descriptor.meta["app_pid"].as_u64().and_then(|pid|u32::try_from(pid).ok()).filter(|pid|*pid != 0)
+        .ok_or_else(||RuntimeError::new("codex_app_pid","pid do app-server ausente ou inválido"))?;
+    Ok(CodexTerminalTarget { key:descriptor.key,generation:descriptor.generation,name:descriptor.name,endpoint,app_pid,thread_id,terminal,
+        transcript:(!descriptor.jsonl.is_empty()).then(||descriptor.jsonl.into()),metadata:descriptor.meta,
+        lease_path:descriptor.lock_path,state_path:descriptor.state_path,projection_dir:descriptor.projection_dir })
+}
+
 fn descriptor(value:&Value,launch:bool) -> Result<Target,RuntimeError> {
     let descriptor:Descriptor = serde_json::from_value(value.clone()).map_err(|_|failure("descriptor_shape"))?;
     if descriptor.meta["key"] != descriptor.key || descriptor.key.is_empty() { return Err(failure("descriptor_binding")); }
     if !descriptor.headless {
-        if descriptor.provider!="claude" || descriptor.meta.get("cano").is_some(){return Err(failure("descriptor_provider"));}
-        let binding:crate::terminal_input::TerminalBinding=serde_json::from_value(descriptor.meta["terminal"].clone()).map_err(|_|failure("terminal_binding"))?;
-        if binding.generation!=descriptor.generation || binding.name!=descriptor.name || binding.conversation.is_empty() || binding.mux_argv.is_empty()
-            || binding.mux_argv.iter().any(|v|v.contains('\0')) || descriptor.jsonl.is_empty()
-            || (!binding.windows && (!binding.pane.starts_with('%') || binding.pane[1..].parse::<u64>().is_err()))
-            || (binding.windows && !binding.pane.starts_with(&format!("={}:",binding.name))) {return Err(failure("terminal_binding"));}
-        return Ok(Target::Terminal(super::terminal::TerminalTarget {key:descriptor.key,generation:descriptor.generation,name:descriptor.name,
+        // O sidecar do Codex com terminal grava `"cano": null`: ausente ou nulo é "sem cano"; um cano de verdade não vale aqui.
+        if descriptor.provider == "codex" {
+            if !descriptor.meta["cano"].is_null() { return Err(failure("descriptor_provider")); }
+            return codex_terminal_descriptor(descriptor).map(|target|Target::CodexTerminal(Box::new(target)));
+        }
+        if descriptor.meta.get("cano").is_some(){return Err(failure("descriptor_provider"));}
+        if descriptor.provider!="claude" {return Err(failure("descriptor_provider"));}
+        let binding = terminal_binding(&descriptor)?;
+        if descriptor.jsonl.is_empty() {return Err(failure("terminal_binding"));}
+        let metadata=crate::terminal_facts::TerminalMetadata::from_descriptor(&descriptor.meta).map_err(|error|failure(error.0))?;
+        return Ok(Target::Terminal(super::terminal::TerminalTarget {metadata,key:descriptor.key,generation:descriptor.generation,name:descriptor.name,
             created:descriptor.meta["created"].as_f64().unwrap_or(binding.created as f64),binding,
             plugin_key:descriptor.meta["plugin_key"].as_str().filter(|key|!key.is_empty()).map(str::to_owned),
             lease_path:descriptor.lock_path,state_path:descriptor.state_path,projection_dir:descriptor.projection_dir,transcript:descriptor.jsonl.into()}));
@@ -740,6 +1061,60 @@ mod tests {
         let mut headless = value;
         headless["headless"] = json!(true);
         assert!(descriptor(&headless,false).is_ok());
+    }
+
+    fn codex_terminal_value() -> Value {
+        json!({"name":"cx-proof","key":"codex-key","provider":"codex","headless":false,
+            "meta":{"key":"codex-key","thread_id":"thread-1","endpoint":"ws://127.0.0.1:43210","app_pid":12345,
+                "terminal":{"name":"cx-proof","pane":"%7","conversation":"thread-1","generation":1,"created":1,"mux_argv":["tmux"],"windows":false,"clipboard_lock_path":null}},
+            "jsonl":"","projection_dir":"projection","state_path":"state","lock_path":"lock","generation":1})
+    }
+
+    #[test]
+    fn codex_terminal_descriptor_is_its_own_target_and_needs_no_rollout() {
+        let Ok(Target::CodexTerminal(target)) = descriptor(&codex_terminal_value(),false) else { panic!("descritor do Codex com terminal") };
+        assert_eq!((target.endpoint.as_str(),target.app_pid,target.thread_id.as_str()),("ws://127.0.0.1:43210",12345,"thread-1"));
+        assert!(target.transcript.is_none(),"rollout ausente é válido");
+        let runtime = target.runtime_target();
+        assert_eq!((runtime.binding.pid,runtime.binding.escuta.as_str()),(0,""),"endereço e pid não viram cano");
+        assert_eq!(runtime.metadata["headless"],false);
+    }
+
+    #[test]
+    fn codex_terminal_descriptor_refusals_have_codes() {
+        let refused = |change:&dyn Fn(&mut Value)| { let mut value = codex_terminal_value(); change(&mut value); descriptor(&value,false).err().map(|e|e.code) };
+        assert_eq!(refused(&|v|v["meta"]["endpoint"] = json!("ws://10.1.2.3:43210")).as_deref(),Some("codex_endpoint"));
+        assert_eq!(refused(&|v|v["meta"]["endpoint"] = json!("ws://localhost:43210")).as_deref(),Some("codex_endpoint"));
+        assert_eq!(refused(&|v|v["meta"]["thread_id"] = json!("")).as_deref(),Some("codex_thread"));
+        assert_eq!(refused(&|v|v["meta"]["app_pid"] = json!(0)).as_deref(),Some("codex_app_pid"));
+        assert_eq!(refused(&|v|v["meta"]["key"] = json!("other-key")).as_deref(),Some("descriptor_binding"));
+        assert_eq!(refused(&|v|v["meta"]["terminal"]["conversation"] = json!("thread-2")).as_deref(),Some("terminal_binding"));
+        assert_eq!(refused(&|v|v["meta"]["cano"] = json!({"pid":1})).as_deref(),Some("descriptor_provider"));
+    }
+
+    #[test]
+    fn closing_an_old_life_does_not_unmark_the_live_owner_of_the_same_name() {
+        let registry = RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(),"test".into(),"instance".into());
+        registry.mark_codex_owner("cx","old-key",1,true);
+        registry.mark_codex_owner("cx","new-key",1,true);
+        registry.mark_codex_owner("cx","old-key",1,false);
+        assert!(registry.owns_codex_terminal("cx"),"a vida nova segue dona do estado");
+        registry.mark_codex_owner("cx","new-key",2,false);
+        assert!(registry.owns_codex_terminal("cx"),"outra geração da mesma chave também não desmarca");
+        registry.mark_codex_owner("cx","new-key",1,false);
+        assert!(!registry.owns_codex_terminal("cx"));
+    }
+
+    #[test]
+    fn codex_terminal_sidecar_with_null_cano_is_accepted() {
+        // Forma do sidecar real do Codex com terminal: `cano` nulo e os campos de sempre.
+        let mut value = codex_terminal_value();
+        for (key,field) in [("cano",Value::Null),("headless",json!(false)),("name",json!("cx-proof")),("cwd",json!("/work")),("created",json!(1.5))] {
+            value["meta"][key] = field;
+        }
+        let Ok(Target::CodexTerminal(target)) = descriptor(&value,false) else { panic!("cano nulo é ausência de cano") };
+        assert_eq!(target.runtime_target().created,1.5);
+        assert_eq!(target.runtime_target().binding.pid,0);
     }
 
     #[test]

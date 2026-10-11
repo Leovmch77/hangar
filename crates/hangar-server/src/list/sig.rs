@@ -78,7 +78,7 @@ pub fn list_sig<'a>(rows: impl IntoIterator<Item = &'a SessionRow>) -> String {
                 i.name, i.cwd, i.branch, i.git_cwd, i.worktree_gone, i.git_dirty,
                 i.git_ahead, i.git_behind, i.git_added, i.git_removed,
                 i.state, i.tracked, i.headless, i.jsonl, i.question, i.stalled, i.limited,
-                i.lifecycle_id, i.transfer_id, i.transfer_phase,
+                i.lifecycle_id, i.transfer_id, i.transfer_phase, i.interaction_id,
                 i.last_reply, i.last_reply_at, i.pending_questions,
                 i.limit_reset, i.then_target, status_sig(i.status_line.as_deref()),
                 context_sig(i.context.as_ref()), i.model, label, i.startup_steps,
@@ -96,6 +96,14 @@ pub fn list_sig<'a>(rows: impl IntoIterator<Item = &'a SessionRow>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replacing_identical_question_changes_signature_when_interaction_id_changes() {
+        let mut row: SessionRow = serde_json::from_value(json!({"name":"s","interaction_id":"a"})).unwrap();
+        let first = list_sig(&[row.clone()]);
+        row.interaction_id = Some("b".into());
+        assert_ne!(first, list_sig(&[row]));
+    }
 
     /// Valores tirados do `sse._status_sig` do Python.
     #[test]

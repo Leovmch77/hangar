@@ -62,6 +62,9 @@ vi.mock('@hangar/core', async (original) => ({
   broadcast: vi.fn().mockResolvedValue({}),
   implementCodexPlan: vi.fn().mockResolvedValue(undefined),
   answerQuestions: vi.fn().mockResolvedValue({ ok: true }),
+  selectOption: vi.fn().mockResolvedValue(undefined),
+  submitSelected: vi.fn().mockResolvedValue(undefined),
+  skipQuestion: vi.fn().mockResolvedValue({ ok: true }),
   openEventStream: vi.fn(() => ({
     onmessage: null, onerror: null, close: vi.fn(), readyState: 1,
     addEventListener: (type: string, handler: (event: MessageEvent) => void) => sse.handlers.set(type, handler),
@@ -251,12 +254,76 @@ it('envia respostas de várias perguntas pelo request_id e conserva o formulári
   expect(api.answerQuestions).toHaveBeenLastCalledWith('codex-flow', [
     expect.objectContaining({ question_id: 'destino', kind: 'option', indices: [0] }),
     expect.objectContaining({ question_id: 'nome', kind: 'text', value: 'João' }),
-  ], 0, expect.objectContaining({ id: 'codex-flow' }));
+  ], 0, undefined, expect.objectContaining({ id: 'codex-flow' }));
   expect(document.body.textContent).toContain('Conexão interrompida');
   expect(document.body.textContent).toContain('João');
   document.querySelector<HTMLButtonElement>('.ask-card .primary-btn')!.click(); await flush();
   expect(api.answerQuestions).toHaveBeenCalledTimes(2);
   expect(document.querySelector('.ask-card')).toBeNull();
+});
+
+it.each([true, false])('ACK de A não fecha B com mesmo request_id e perguntas, desktop=%s', async desktop => {
+  await montar(desktop);
+  const first: api.AskQuestionPayload = { provider: 'codex', request_id: 0, interaction_id: 'form-a', questions: [{
+    id: 'choice', header: 'Escolha', question: 'Qual?', multiSelect: false, options: [{ label: 'Primeira', description: '' }],
+  }] };
+  let finish!: (value: { ok: boolean }) => void;
+  vi.mocked(api.answerQuestions).mockReturnValueOnce(new Promise(resolve => { finish = resolve; }));
+  await emit('ask_question', first);
+  document.querySelector<HTMLButtonElement>('.option-btn')!.click(); await flush();
+  document.querySelector<HTMLButtonElement>('.review-list + .primary-btn')!.click(); await flush();
+  expect(api.answerQuestions).toHaveBeenLastCalledWith('codex-flow', expect.any(Array), 0, 'form-a', expect.objectContaining({ id: 'codex-flow' }));
+  const second = { ...first, interaction_id: 'form-b' };
+  await emit('ask_question', second);
+  expect(document.querySelector('.review-list')).toBeNull();
+  finish({ ok: true }); await flush();
+  expect(document.body.textContent).toContain('Qual?');
+  document.querySelector<HTMLButtonElement>('.option-btn')!.click(); await flush();
+  document.querySelector<HTMLButtonElement>('.review-list + .primary-btn')!.click(); await flush();
+  expect(api.answerQuestions).toHaveBeenLastCalledWith('codex-flow', expect.any(Array), 0, 'form-b', expect.objectContaining({ id: 'codex-flow' }));
+});
+
+it.each(['accepted', 'rejected', 'unknown'])('descarte PWA envia A exibida e preserva B no retorno %s', async outcome => {
+  await montar(false);
+  const first: api.AskQuestionPayload = { provider: 'codex', is_async: true,
+    request_id: 'same-native-id', interaction_id: 'form-a', questions: [{
+      id: 'choice', header: 'Escolha', question: 'Qual?', multiSelect: false,
+      options: [{ label: 'Primeira', description: '' }],
+    }] };
+  let finish!: (value: { ok: boolean }) => void;
+  let fail!: (error: Error) => void;
+  vi.mocked(api.skipQuestion).mockReturnValueOnce(new Promise((resolve, reject) => { finish = resolve; fail = reject; }));
+  await emit('ask_question', first);
+  document.querySelector<HTMLButtonElement>('.option-btn')!.click(); await flush();
+  document.querySelector<HTMLButtonElement>('.review-list ~ .ghost-btn')!.click(); await flush();
+  expect(api.skipQuestion).toHaveBeenLastCalledWith('codex-flow', 'same-native-id', 'form-a', expect.objectContaining({ id: 'codex-flow' }));
+  await emit('ask_question', { ...first, interaction_id: 'form-b' });
+  if (outcome === 'rejected') fail(new Error('erro-antigo'));
+  else finish({ ok: outcome === 'accepted' });
+  await flush();
+  expect(document.body.textContent).toContain('Qual?');
+  expect(document.body.textContent).not.toContain('erro-antigo');
+  document.querySelector<HTMLButtonElement>('.option-btn')!.click(); await flush();
+  document.querySelector<HTMLButtonElement>('.review-list ~ .ghost-btn')!.click(); await flush();
+  expect(api.skipQuestion).toHaveBeenLastCalledWith('codex-flow', 'same-native-id', 'form-b', expect.objectContaining({ id: 'codex-flow' }));
+});
+
+it('aprovação simultânea não empresta identidade ao formulário Claude', async () => {
+  harness.provider = 'claude';
+  await montarClaude();
+  const state = { session: 'codex-flow', state: 'awaiting_input', question: 'Permitir?', options: ['Sim'], interaction_id: 'approval-a' };
+  await emit('state', state);
+  await emit('ask_question', { interaction_id: 'form-a', questions: [{
+    header: 'Escolha', question: 'Qual?', multiSelect: false, options: [{ label: 'Primeira', description: '' }],
+  }] });
+  document.querySelector<HTMLButtonElement>('.ask-card .option-btn')!.click(); await flush();
+  await emit('state', { ...state, state: 'working' });
+  expect(document.querySelector('.ask-card .review-list')).not.toBeNull();
+  await emit('state', state);
+  document.querySelector<HTMLButtonElement>('.ask-card .primary-btn')!.click(); await flush();
+  expect(api.answerQuestions).toHaveBeenLastCalledWith('codex-flow', expect.any(Array), undefined, 'form-a', expect.objectContaining({ id: 'codex-flow' }));
+  document.querySelector<HTMLButtonElement>('.options-wrap .option-btn')!.click(); await flush();
+  expect(api.selectOption).toHaveBeenLastCalledWith('codex-flow', 1, 'approval-a', expect.objectContaining({ id: 'codex-flow' }));
 });
 
 it('aprovar o plano envia uma única vez à sessão atual mesmo com mandar pros dois ligado', async () => {

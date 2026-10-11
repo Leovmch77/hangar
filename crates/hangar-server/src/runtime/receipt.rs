@@ -101,9 +101,19 @@ impl ReceiptIndex {
         Self { provider:provider.into(),conversation:conversation.into(),identity:None,tail:Vec::new(),occurrences:Vec::new(),scan_offset:0,meta_conversation:None }
     }
 
+    /// Troca de conversa (a TUI adotou outra thread): o que foi lido e os cursores antigos não provam nada nela.
+    pub fn rebind(&mut self, conversation: &str) {
+        if self.conversation == conversation { return; }
+        *self = Self::new(&self.provider,conversation);
+    }
+
+    /// Caminho vazio = rollout ainda não existe (thread sem turno): ausência comprovada, sem abrir nada.
+    /// Caminho que existe e não é arquivo é inválido, nunca ausência.
     pub fn capture(&self, path: &Path) -> io::Result<DispatchCursor> {
-        let (identity, data, offset) = match File::open(path) {
+        let opened = if path.as_os_str().is_empty() { Err(io::ErrorKind::NotFound.into()) } else { File::open(path) };
+        let (identity, data, offset) = match opened {
             Ok(mut file) => {
+                if !file.metadata()?.is_file() { return Err(io::Error::new(io::ErrorKind::InvalidInput,"transcript não é arquivo")); }
                 let id = identity(&file)?;
                 let offset = file.seek(SeekFrom::End(0))?;
                 let data = bytes_before(&mut file,offset)?.unwrap_or_default();
@@ -119,7 +129,8 @@ impl ReceiptIndex {
 
     /// Lê só o que foi acrescentado desde a última vez; troca de arquivo ou reescrita relê do início.
     pub fn scan(&mut self, path: &Path) -> io::Result<&[Occurrence]> {
-        let mut file = match File::open(path) {
+        let opened = if path.as_os_str().is_empty() { Err(io::ErrorKind::NotFound.into()) } else { File::open(path) };
+        let mut file = match opened {
             Ok(file) => file,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 self.tail.clear(); self.identity = None; self.occurrences.clear(); self.scan_offset = 0; self.meta_conversation = None;

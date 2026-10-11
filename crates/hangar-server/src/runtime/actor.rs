@@ -1,4 +1,4 @@
-use super::{cano::{CanoConnection,IoEvent,WireFrame},claude::ClaudeEngine,codex::Engine as CodexEngine,local_policy,
+use super::{cano::{CanoConnection,IoEvent,WireFrame},websocket::WebSocketConnection,claude::ClaudeEngine,codex::Engine as CodexEngine,local_policy,
     protocol::*,queue::{Action,QueueActor,Status},receipt::ReceiptIndex};
 use crate::mods::model::{ModsCall,ModsError,SurfaceEffect};
 use serde_json::{Value,json};
@@ -175,7 +175,21 @@ const RESPAWN_MAX:u8 = 3;
 
 struct Relaunched { target:RuntimeTarget, spawned:bool, connection:CanoConnection, patch:Value }
 
+/// Transporte do ator. Só o cano é de processo que o Rust sobe, religa e mata; o WebSocket fala com
+/// o app-server adotado, que sobrevive ao ator.
+pub enum RuntimeConnection { Cano(CanoConnection), WebSocket(WebSocketConnection) }
+
+impl From<CanoConnection> for RuntimeConnection { fn from(connection:CanoConnection) -> Self { Self::Cano(connection) } }
+impl From<WebSocketConnection> for RuntimeConnection { fn from(connection:WebSocketConnection) -> Self { Self::WebSocket(connection) } }
+
+type WriteSources = BTreeMap<String,(crate::interactions::ExpectedInteraction,Option<crate::interactions::ExpectedInteraction>,Arc<futures_util::task::AtomicWaker>)>;
+/// Resposta reservada em escrita: operação → (pergunta, ainda aberta, quem acordar).
+type AsyncGuards = BTreeMap<String,(String,Arc<AtomicBool>,Arc<futures_util::task::AtomicWaker>)>;
+
 pub struct RuntimeEngine {
+    interactions:Option<(String,Arc<crate::interactions::InteractionStore>)>,
+    write_sources:Arc<std::sync::Mutex<WriteSources>>,
+    async_guards:Arc<std::sync::Mutex<AsyncGuards>>,
     core:Core,
     launch:Option<LaunchConfig>,
     policy:Option<PolicyClient>,
@@ -192,7 +206,7 @@ impl RuntimeEngine {
     pub fn new(provider:&str,metadata:Value,generation:u64,clock:ClockSample) -> Result<Self,RuntimeError> {
         let core = match provider { "claude"=>Core::Claude(ClaudeEngine::new(metadata,generation,clock)),
             "codex"=>Core::Codex(CodexEngine::new(metadata,generation,clock)),_=>return Err(failure("provider")) };
-        Ok(Self { core,launch:None,policy:None,publisher:None,revision:Arc::new(AtomicU64::new(0)),mods:None,mods_life:0,live:None })
+        Ok(Self { interactions:None,write_sources:Default::default(),async_guards:Default::default(),core,launch:None,policy:None,publisher:None,revision:Arc::new(AtomicU64::new(0)),mods:None,mods_life:0,live:None })
     }
     /// O ator sobe o processo de novo quando ele cai, e reinicia/troca o sandbox (só Codex).
     pub fn with_launch(mut self,launch:LaunchConfig) -> Self { if matches!(self.core,Core::Codex(_)) { self.launch = Some(launch); } self }
@@ -200,12 +214,24 @@ impl RuntimeEngine {
     fn renewed(&self,metadata:Value,generation:u64,clock:ClockSample) -> Result<Self,RuntimeError> {
         let provider = match self.core { Core::Claude(_)=>"claude",Core::Codex(_)=>"codex" };
         let mut next = Self::new(provider,metadata,generation,clock)?;
+        if let Some((key,store)) = &self.interactions {
+            store.forget(key).map_err(crate::interactions::runtime_error)?;
+            next = next.with_interactions(key.clone(),store.clone())?;
+        }
         (next.launch,next.policy,next.publisher,next.revision,next.live) = (self.launch.clone(),self.policy.clone(),self.publisher.clone(),self.revision.clone(),self.live.clone());
         Ok(next)
     }
     fn problem(&self) -> Option<String> { match &self.core { Core::Codex(core)=>core.problem().map(str::to_owned),Core::Claude(_)=>None } }
     fn set_problem(&mut self,code:&str,detail:Option<String>) -> Vec<Effect> {
         match &mut self.core { Core::Codex(core)=>core.set_problem(code,detail),Core::Claude(_)=>Vec::new() }
+    }
+    pub fn with_interactions(mut self,key:String,store:Arc<crate::interactions::InteractionStore>) -> Result<Self,RuntimeError> {
+        match &mut self.core {
+            Core::Claude(core)=>core.set_interactions(key.clone(),store.clone()),
+            Core::Codex(core)=>core.set_interactions(key.clone(),store.clone()),
+        }?;
+        self.interactions = Some((key,store));
+        Ok(self)
     }
     pub fn with_policy(mut self,policy:PolicyClient) -> Self { self.policy = Some(policy); self }
     pub fn with_publisher(mut self,publisher:broadcast::Sender<RuntimeEvent>) -> Self { self.publisher = Some(publisher); self }
@@ -234,18 +260,83 @@ impl RuntimeEngine {
             let mut view = core.control_view(); view["public_state"] = core.view(); view["conversation"] = view["thread_id"].clone(); view
         } }
     }
+    fn refresh_write_sources(core:&Core,sources:&mut WriteSources,guards:&AsyncGuards) {
+        for (expected,current,waker) in sources.values_mut() {
+            let next = match core { Core::Claude(core)=>core.interaction_source(expected),Core::Codex(core)=>core.interaction_source(expected) };
+            if *current != next { *current = next; waker.wake(); }
+        }
+        if let Core::Codex(core) = core {
+            for (request_id,open,waker) in guards.values() {
+                let now = core.async_question_pending(request_id);
+                if open.swap(now,Ordering::AcqRel) != now { waker.wake(); }
+            }
+        }
+    }
     fn apply(&mut self,input:EngineInput,clock:ClockSample) -> Result<Vec<Effect>,RuntimeError> {
-        match &mut self.core { Core::Claude(core)=>core.apply(input,clock),Core::Codex(core)=>core.apply(input,clock) }
+        let mut sources = self.write_sources.lock().map_err(|_|crate::interactions::runtime_error(crate::interactions::InteractionError::Unavailable))?;
+        let guards = self.async_guards.lock().map_err(|_|crate::interactions::runtime_error(crate::interactions::InteractionError::Unavailable))?;
+        let result = match &mut self.core { Core::Claude(core)=>core.apply(input,clock),Core::Codex(core)=>core.apply(input,clock) };
+        Self::refresh_write_sources(&self.core,&mut sources,&guards);
+        result
     }
     fn command(&mut self,command:RuntimeCommand,clock:ClockSample) -> Result<Vec<Effect>,RuntimeError> {
-        match &mut self.core { Core::Claude(core)=>core.command(command,clock),Core::Codex(core)=>core.command(command,clock) }
+        let mut sources = self.write_sources.lock().map_err(|_|crate::interactions::runtime_error(crate::interactions::InteractionError::Unavailable))?;
+        let guards = self.async_guards.lock().map_err(|_|crate::interactions::runtime_error(crate::interactions::InteractionError::Unavailable))?;
+        let result = match &mut self.core { Core::Claude(core)=>core.command(command,clock),Core::Codex(core)=>core.command(command,clock) };
+        Self::refresh_write_sources(&self.core,&mut sources,&guards);
+        result
     }
     fn hydrate(&mut self,snapshot:CanoSnapshot) -> Result<Vec<Effect>,RuntimeError> {
-        match &mut self.core { Core::Claude(core)=>core.hydrate(snapshot),Core::Codex(core)=>core.hydrate(snapshot) }
+        let mut sources = self.write_sources.lock().map_err(|_|crate::interactions::runtime_error(crate::interactions::InteractionError::Unavailable))?;
+        let guards = self.async_guards.lock().map_err(|_|crate::interactions::runtime_error(crate::interactions::InteractionError::Unavailable))?;
+        let result = match &mut self.core { Core::Claude(core)=>core.hydrate(snapshot),Core::Codex(core)=>core.hydrate(snapshot) };
+        Self::refresh_write_sources(&self.core,&mut sources,&guards);
+        result
+    }
+    /// Só o WebSocket adotado caiu (Codex com terminal): a fila segura até reconectar.
+    fn transport_lost(&mut self,detail:&str,handed:&BTreeSet<String>) -> Result<Vec<Effect>,RuntimeError> {
+        let mut sources = self.write_sources.lock().map_err(|_|crate::interactions::runtime_error(crate::interactions::InteractionError::Unavailable))?;
+        let guards = self.async_guards.lock().map_err(|_|crate::interactions::runtime_error(crate::interactions::InteractionError::Unavailable))?;
+        let effects = match &mut self.core { Core::Codex(core)=>core.transport_lost(detail,handed),Core::Claude(_)=>Vec::new() };
+        Self::refresh_write_sources(&self.core,&mut sources,&guards);
+        Ok(effects)
+    }
+    fn interaction_guard(&self,id:&str) -> Result<Option<hangar_codex::client::RawWriteGuard>,RuntimeError> {
+        use crate::interactions::{InteractionError,runtime_error};
+        // Resposta reservada: o id gravado pode ser de outra vida, então a guarda confere só que a pergunta segue aberta.
+        if let Core::Codex(core) = &self.core && let Some(request_id) = core.reserved_question(id) {
+            let open = Arc::new(AtomicBool::new(core.async_question_pending(&request_id)));
+            let waker = Arc::new(futures_util::task::AtomicWaker::new());
+            self.async_guards.lock().map_err(|_|runtime_error(InteractionError::Unavailable))?.insert(id.into(),(request_id,open.clone(),waker.clone()));
+            return Ok(Some(Arc::new(move |waiting| {
+                waker.register(waiting);
+                if open.load(Ordering::Acquire) { Ok(()) } else { Err(InteractionError::Changed.code().to_owned()) }
+            })));
+        }
+        let expected = match &self.core { Core::Claude(core)=>core.write_interaction(id),Core::Codex(core)=>core.write_interaction(id) };
+        let Some(expected) = expected.cloned() else { return Ok(None); };
+        let (_,store) = self.interactions.as_ref().ok_or_else(||runtime_error(InteractionError::Unavailable))?;
+        let current = match &self.core { Core::Claude(core)=>core.interaction_source(&expected),Core::Codex(core)=>core.interaction_source(&expected) };
+        let waker = Arc::new(futures_util::task::AtomicWaker::new());
+        self.write_sources.lock().map_err(|_|runtime_error(InteractionError::Unavailable))?.insert(id.into(),(expected.clone(),current,waker.clone()));
+        let (sources,store,id) = (self.write_sources.clone(),store.clone(),id.to_owned());
+        Ok(Some(Arc::new(move |waiting| {
+            waker.register(waiting);
+            let check = || {
+                let sources = sources.lock().map_err(|_|InteractionError::Unavailable)?;
+                let current = sources.get(&id).and_then(|(_,current,_)|current.as_ref()).ok_or(InteractionError::Changed)?;
+                if current != &expected || store.expected(&expected.binding,Some(&expected.interaction_id))? != expected { return Err(InteractionError::Changed); }
+                Ok(())
+            };
+            check().map_err(|error:InteractionError|error.code().to_owned())
+        })))
     }
     fn deadline(&self) -> Option<f64> { match &self.core { Core::Claude(core)=>core.next_deadline(),Core::Codex(core)=>core.next_deadline() } }
     fn initialize(&mut self,id:String) -> Result<Vec<Effect>,RuntimeError> {
         match &mut self.core { Core::Claude(core)=>core.start_initialize(id),Core::Codex(core)=>core.bootstrap(true,id) }
+    }
+    fn interaction_write_error(&self,id:&str) -> Option<RuntimeError> {
+        match &self.core { Core::Claude(core)=>core.interaction_write_error(id),Core::Codex(core)=>core.interaction_write_error(id) }
     }
     fn write_is_current(&self,id:&str) -> bool { match &self.core { Core::Claude(core)=>core.write_is_current(id),Core::Codex(core)=>core.write_is_current(id) } }
     fn forget_policy(&mut self,id:&RequestId) { match &mut self.core { Core::Claude(core)=>core.forget_policy(id),Core::Codex(core)=>core.forget_policy(id) } }
@@ -253,7 +344,29 @@ impl RuntimeEngine {
         match &mut self.core { Core::Claude(_)=>vec![Effect::Reply { operation_id:id.into(),disposition:Disposition::Accepted,payload:json!({"confirmed":true}) }],
             Core::Codex(core)=>core.confirm_input(id) }
     }
+    /// Entrada reservada que o drain pode reivindicar sozinha (só Codex com terminal).
+    fn ready_async_answer_entry(&self) -> Option<String> {
+        match &self.core { Core::Codex(core)=>core.ready_async_answer_entry(),Core::Claude(_)=>None }
+    }
+    fn settle_async_answer(&mut self,entry_id:&str,reserved:bool) -> Vec<Effect> {
+        match &mut self.core { Core::Codex(core)=>core.settle_async_answer(entry_id,reserved),Core::Claude(_)=>Vec::new() }
+    }
+    fn uncertain_async_answer(&mut self,entry_id:&str) {
+        if let Core::Codex(core) = &mut self.core { core.uncertain_async_answer(entry_id); }
+    }
     fn restore(&mut self,state:&super::queue::State) {
+        // Reservas antes das fases: a resposta tardia de um `turn/start` restaurado precisa achar a dela.
+        if let Core::Codex(core) = &mut self.core {
+            for op in state.rows.iter().filter_map(|row|row["id"].as_str().and_then(|id|state.operations.get(id)))
+                .filter(|op|op.payload["kind"] == "dispatch_async_answer") {
+                if let Ok(reservation) = serde_json::from_value::<ReservedAsyncAnswer>(op.payload["payload"].clone()) {
+                    // Gravada em outra geração (ou sem ela): a vida não se prova, então fica incerta e nunca sai.
+                    let proven = op.payload["payload"]["generation"].as_u64() == Some(state.generation);
+                    let status = if proven || matches!(op.status,Status::Accepted | Status::Confirmed | Status::Rejected) { op.status } else { Status::Unknown };
+                    core.restore_async_answer(reservation,op.payload["payload"]["thread_id"].as_str().unwrap_or(""),status,maybe_written(state,op) || !proven);
+                }
+            }
+        }
         for phase in state.operations.values().filter(|phase|recover_phase(state,phase)) {
             if let Some(id) = phase.payload["logical_id"].as_str() {
                 match &mut self.core {
@@ -427,12 +540,12 @@ impl Pending {
 }
 
 #[derive(Clone)]
-struct Attempt { logical_id:String,phase_id:String,frame:Value,order:u64 }
+struct Attempt { logical_id:String,phase_id:String,frame:Value,order:u64,epoch:u64 }
 
 enum Job {
     Root { id:String,result:Result<Option<RuntimeReply>,RuntimeError> },
     Write { wire:String,result:Result<(),RuntimeError> },
-    Ack { logical_id:String,outcome:WriteOutcome,result:Result<(),RuntimeError> },
+    Ack { logical_id:String,outcome:WriteOutcome,guard_error:Option<RuntimeError>,result:Result<(),RuntimeError> },
     Finished { reply:RuntimeReply,result:Result<(),RuntimeError> },
     Policy { request_id:RequestId,kind:String,phase_id:String,conversation:Option<Value>,result:Result<Value,RuntimeError> },
     PreparedInput { id:String,result:Result<Value,RuntimeError> },
@@ -444,6 +557,8 @@ enum Job {
     Confirmed { response:Option<oneshot::Sender<Result<Value,RuntimeError>>>,result:Result<(Vec<String>,usize),RuntimeError> },
     Steered { id:String,result:Result<Vec<String>,RuntimeError> },
     NativeInput { id:String,result:Result<Value,RuntimeError> },
+    /// `persisted`: o que o disco tem depois da gravação (None = nem a leitura respondeu).
+    Reserved { operation_id:String,reservation:ReservedAsyncAnswer,result:Result<(),RuntimeError>,persisted:Option<bool> },
 }
 
 fn unique() -> String {
@@ -454,15 +569,27 @@ fn unique() -> String {
 pub struct RuntimeActor;
 
 impl RuntimeActor {
-    pub fn spawn(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,engine:RuntimeEngine) -> RuntimeHandle {
+    pub fn spawn(target:RuntimeTarget,queue:QueueActor,connection:impl Into<RuntimeConnection>,engine:RuntimeEngine) -> RuntimeHandle {
         Self::spawn_with(target,queue,connection,engine,|_|{})
     }
 
     /// Como `spawn`, mas `before` recebe o handle antes de a tarefa do ator existir: o que ele registrar
     /// (o dono no `Mods`) já está lá quando o ator dá o primeiro passo. Pedidos que chegarem nesse meio
     /// esperam na caixa.
-    pub fn spawn_with(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,engine:RuntimeEngine,
+    pub fn spawn_with(target:RuntimeTarget,queue:QueueActor,connection:impl Into<RuntimeConnection>,engine:RuntimeEngine,
         before:impl FnOnce(&RuntimeHandle)) -> RuntimeHandle {
+        Self::start(target,queue,connection.into(),engine,before,None)
+    }
+
+    /// Codex com terminal: o WebSocket do app-server adotado. A queda do socket reconecta ao mesmo
+    /// processo (revalidado em `adoption`), sem religar, subir nem matar nada.
+    pub fn spawn_adopted(target:RuntimeTarget,queue:QueueActor,connection:WebSocketConnection,engine:RuntimeEngine,
+        adoption:super::codex_terminal::Adoption) -> RuntimeHandle {
+        Self::start(target,queue,RuntimeConnection::WebSocket(connection),engine,|_|{},Some(adoption))
+    }
+
+    fn start(target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnection,engine:RuntimeEngine,
+        before:impl FnOnce(&RuntimeHandle),adoption:Option<super::codex_terminal::Adoption>) -> RuntimeHandle {
         let (sender,receiver) = mpsc::channel(64);
         let events = engine.publisher.clone().unwrap_or_else(||broadcast::channel(256).0);
         let closed = Arc::new(AtomicBool::new(false));
@@ -475,7 +602,7 @@ impl RuntimeActor {
         let slot = handle.task.clone();
         let mut slot = slot.try_lock().expect("slot da tarefa recém-criado");
         before(&handle);
-        let run = run(target,queue,connection,engine,receiver,sender,closed,events);
+        let run = run(target,queue,connection,engine,receiver,sender,closed,events,adoption);
         *slot = Some(tokio::spawn(async move {
             let mut guard = ClearOnDrop { mods,name,life };
             let mut panic = LivePanicMark(live);
@@ -527,13 +654,24 @@ impl Drop for ClearOnDrop {
     }
 }
 
-async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut engine:RuntimeEngine,
-    mut receiver:mpsc::Receiver<Message>,internal:mpsc::Sender<Message>,closed:Arc<AtomicBool>,events:broadcast::Sender<RuntimeEvent>) -> Result<(),RuntimeError> {
+#[allow(clippy::too_many_arguments)]
+async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnection,mut engine:RuntimeEngine,
+    mut receiver:mpsc::Receiver<Message>,internal:mpsc::Sender<Message>,closed:Arc<AtomicBool>,events:broadcast::Sender<RuntimeEvent>,
+    adoption:Option<super::codex_terminal::Adoption>) -> Result<(),RuntimeError> {
     let start = Instant::now();
     let initial = queue.initial_state().clone();
     engine.restore(&initial);
-    let snapshot = connection.snapshot.clone();
-    let mut io = connection.start(target.generation,128).hold_lease(queue.lease());
+    // Socket novo nunca herda `connected`/`subscribed` da vista salva: inicializa e assina de novo.
+    let adopted = matches!(connection,RuntimeConnection::WebSocket(_));
+    let (snapshot,io) = match connection {
+        RuntimeConnection::Cano(connection) => (Some(connection.snapshot.clone()),connection.start(target.generation,128)),
+        RuntimeConnection::WebSocket(connection) => {
+            // Sem `launch`, religar e matar recusam: o app-server adotado não é do ator.
+            engine.launch = None;
+            (None,connection.start(target.generation,128))
+        }
+    };
+    let mut io = io.hold_lease(queue.lease());
     let queue = Arc::new(queue);
     let mut jobs = JoinSet::new();
     let mut roots:BTreeMap<String,Pending> = BTreeMap::new();
@@ -541,7 +679,13 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:CanoConnection
     let mut arrival = 0u64;
     let mut attempts:BTreeMap<String,Attempt> = initial.operations.values().filter(|phase|recover_phase(&initial,phase))
         .filter_map(|phase|Some((phase.id.clone(),Attempt { logical_id:phase.payload["logical_id"].as_str()?.into(),
-            phase_id:phase.id.clone(),frame:phase.payload["frame"].clone(),order:0 }))).collect();
+            phase_id:phase.id.clone(),frame:phase.payload["frame"].clone(),order:0,epoch:0 }))).collect();
+    // Época local do transporte adotado: sobe na queda e na reconexão, e escrita preparada em outra época
+    // não sai no socket novo.
+    let mut transport_epoch = 0u64;
+    let mut reconnect = super::codex_terminal::Reconnect::default();
+    // Operações cujo quadro foi entregue ao transporte desta época: na queda, só estas podem ter saído.
+    let mut handed:BTreeSet<String> = BTreeSet::new();
     let mut effects:VecDeque<Effect> = VecDeque::new();
     let mut revision = Revision { value:engine.revision.load(Ordering::Acquire),counter:engine.revision.clone() };
     let mut state_version = 0u64;
@@ -552,7 +696,9 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:CanoConnection
     let mut confirming = false;
     let mut channels:BTreeMap<String,Value> = ["preview","thinking","tool"].into_iter().map(|channel|
         (channel.into(),json!({"session":target.name,"text":"","md":true,"full":true,"vivo":true}))).collect();
-    let mut live = LiveOut { sender:engine.live.clone(),state:LiveState { public_state:engine.view()["public_state"].clone(),..Default::default() } };
+    let mut live = LiveOut { sender:engine.live.clone(),state:LiveState {
+        binding:engine.view()["conversation"].as_str().filter(|conversation|!conversation.is_empty()).map(|conversation|crate::interactions::InteractionBinding {key:target.key.clone(),generation:target.generation,conversation:conversation.into()}),
+        public_state:engine.view()["public_state"].clone(),..Default::default() } };
     live.send();
     let receipt = Arc::new(std::sync::Mutex::new(ReceiptIndex::new(&target.provider,engine.view()["conversation"].as_str().unwrap_or(""))));
     let mut sequence = initial.operations.keys().filter_map(|id|id.rsplit(':').next()?.parse::<u64>().ok()).max().unwrap_or(0);
@@ -569,8 +715,9 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:CanoConnection
     let mut mods_token = 0u64;
     let mut ui_writes = 0u64;
     let mut respawn = Respawn::default();
-    effects.extend(engine.hydrate(snapshot)?);
-    if engine.view()["initialized"] != true || target.provider == "codex" && engine.view()["ready"] != true {
+    // O snapshot é do cano; no WebSocket o estado vem do próprio app-server depois de conectar.
+    if let Some(snapshot) = snapshot { effects.extend(engine.hydrate(snapshot)?); }
+    if adopted || engine.view()["initialized"] != true || target.provider == "codex" && engine.view()["ready"] != true {
         let id = format!("bootstrap:{}:{}",target.key,target.generation);
         queue.exec(target.generation,&format!("prepare:{id}"),clock(start),Action::Prepare { id:id.clone(),payload:json!({"kind":"bootstrap"}),entry_id:None }).await.map_err(io_failure)?;
         effects.extend(engine.initialize(id)?);
@@ -648,7 +795,7 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:CanoConnection
                     write_order += 1;
                     let logical_id = operation_id.unwrap_or_else(||format!("system:{}:{sequence}",target.generation));
                     let wire = format!("wire:{logical_id}:{sequence}");
-                    let attempt = Attempt { logical_id:logical_id.clone(),phase_id:wire.clone(),frame:frame.clone(),order:write_order };
+                    let attempt = Attempt { logical_id:logical_id.clone(),phase_id:wire.clone(),frame:frame.clone(),order:write_order,epoch:transport_epoch };
                     attempts.insert(wire.clone(),attempt.clone());
                     let queue = queue.clone(); let target = target.clone(); let view = engine.view(); let sample = clock(start);
                     let state_gate = state_gate.clone(); let state_version = state_version;
@@ -702,6 +849,8 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:CanoConnection
                     });
                 }
                 Effect::Reply { operation_id,disposition,payload } => {
+                    // Operação com desfecho deixa de contar como "pode ter saído" numa queda futura.
+                    handed.remove(&operation_id);
                     let reply = RuntimeReply { operation_id:operation_id.clone(),disposition,payload };
                     let queue = queue.clone(); let generation = target.generation; let sample = clock(start);
                     let related:Vec<_> = attempts.values().filter(|attempt|attempt.logical_id == operation_id).cloned().collect();
@@ -786,7 +935,7 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:CanoConnection
                         ui_writes += 1;
                         // Canal próprio e pequeno: o que não cabe é descartado e a superfície pede de novo no prazo.
                         let until = until.map(|until|tokio::time::Instant::from_std(start + Duration::from_secs_f64(until.max(0.0))));
-                        let frame = WireFrame { operation_id:format!("ui:{}:{ui_writes}",target.generation),frame,ephemeral:true,until };
+                        let frame = WireFrame { operation_id:format!("ui:{}:{ui_writes}",target.generation),frame,ephemeral:true,until,guard:None };
                         if io.try_send(frame).is_err() && crate::warn_limit::allow(Some(&target.key),"ui_write") {
                             tracing::warn!(key=%target.key,session=%target.name,"pedido da interface dos mods descartado com o canal do cano cheio");
                         }
@@ -802,6 +951,21 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:CanoConnection
                     if let Some(policy) = &engine.policy { policy.diag.report(event.event(),session,&code,event.reason()); }
                 }
                 Effect::Stop { .. } => { closed.store(true,Ordering::Release); },
+                Effect::ReserveAsyncAnswer { operation_id,reservation,command } => {
+                    let queue = queue.clone(); let generation = target.generation; let sample = clock(start);
+                    jobs.spawn(async move {
+                        // Entrada e operação na mesma gravação; o id da chamada é o da entrada, então repetir não abre outra.
+                        let action = Action::ReserveAsyncAnswer { entry_id:reservation.entry_id.clone(),text:reservation.text.clone(),
+                            payload:serde_json::to_value(&command).unwrap_or_default() };
+                        let result = queue.exec(generation,&format!("reserve:{}",reservation.entry_id),sample,action).await.map(|_|()).map_err(io_failure);
+                        // Erro da fila não prova que nada foi gravado: o desfecho segue o que o disco tem.
+                        let persisted = match &result {
+                            Ok(()) => Some(true),
+                            Err(_) => queue.snapshot().await.ok().map(|state|state.operations.contains_key(&reservation.entry_id)),
+                        };
+                        Job::Reserved { operation_id,reservation,result,persisted }
+                    });
+                }
                 Effect::Respawn { operation_id,reason,patch,reply } => {
                     if respawn.task.is_some() {
                         fail_root(&mut roots,&operation_id,RuntimeError::new("erro_codex_reiniciando","o Codex já está subindo de novo; tente em instantes"));
@@ -829,24 +993,52 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:CanoConnection
             let attempt = attempts.get(&wire).unwrap();
             let ended = roots.iter().any(|(id,root)|(attempt.logical_id == *id || attempt.logical_id.starts_with(&format!("{id}:")))
                 && (root.cancelled || root.timed_out));
-            if result.is_err() || ended || !engine.write_is_current(&attempt.logical_id) {
-                effects.extend(engine.apply(EngineInput::WriteAck { operation_id:attempt.logical_id.clone(),outcome:WriteOutcome::NotWritten },clock(start))?);
+            let interaction_error = engine.interaction_write_error(&attempt.logical_id);
+            let stale_transport = attempt.epoch != transport_epoch;
+            if result.is_err() || ended || stale_transport || interaction_error.is_some() || !engine.write_is_current(&attempt.logical_id) {
+                let mut acknowledgements = engine.apply(EngineInput::WriteAck { operation_id:attempt.logical_id.clone(),outcome:WriteOutcome::NotWritten },clock(start))?;
+                if let Some(failure) = interaction_error {
+                    for effect in &mut acknowledgements {
+                        if let Effect::Reply { operation_id,payload,.. } = effect && operation_id == &attempt.logical_id {
+                            // A resposta terminal continua dizendo que a decisão não foi confirmada.
+                            let confirmed = payload.get("decision_confirmed").cloned();
+                            *payload = json!({"code":failure.code,"error":failure.message,"write_outcome":"not_written"});
+                            if let Some(confirmed) = confirmed { payload["decision_confirmed"] = confirmed; }
+                        }
+                    }
+                }
+                effects.extend(acknowledgements);
                 if let Err(failure) = result { enter_error(&mut error,&target,failure); }
-            } else if io.try_send(WireFrame { operation_id:wire,frame:attempt.frame.clone(),ephemeral:false,until:None }).is_err() {
+            } else if io.try_send(WireFrame { operation_id:wire,frame:attempt.frame.clone(),ephemeral:false,until:None,guard:engine.interaction_guard(&attempt.logical_id)? }).is_err() {
                 effects.extend(engine.apply(EngineInput::WriteAck { operation_id:attempt.logical_id.clone(),outcome:WriteOutcome::NotWritten },clock(start))?);
+            } else {
+                handed.insert(attempt.logical_id.clone());
             }
         }
-        if drain_requested && !drain_active && !closed.load(Ordering::Acquire) && engine.view()["deliverable"] == true
+        // Pergunta assíncrona pendente barra mensagem comum (`deliverable`), mas não a resposta reservada a ela.
+        let deliverable = engine.view()["deliverable"] == true;
+        let reserved = if deliverable { None } else { engine.ready_async_answer_entry() };
+        if drain_requested && !drain_active && !closed.load(Ordering::Acquire) && (deliverable || reserved.is_some())
             && !roots.values().any(|root|root.preparing && matches!(root.command.kind,OperationKind::Input | OperationKind::Steer)) {
             drain_requested = false; drain_active = true;
             let queue = queue.clone(); let target = target.clone(); let sample = clock(start);
             jobs.spawn(async move {
                 let result = async {
                     let claimed = queue.exec(target.generation,&format!("claim:{}",unique()),sample,
-                        Action::Claim { min_ts:target.created,limit:Some(1),entry_id:None }).await.map_err(io_failure)?;
+                        Action::Claim { min_ts:target.created,limit:Some(1),entry_id:reserved.clone() }).await.map_err(io_failure)?;
                     let state = queue.snapshot().await.map_err(io_failure)?;
+                    let mut claimed = claimed.as_array().ok_or_else(||failure("queue_shape"))?.clone();
+                    // Reivindicada numa vida que parou antes de despachar: operação preparada e sem tentativa
+                    // prova que nada foi escrito, então a mesma entrada segue.
+                    if let Some(entry) = reserved.as_deref().filter(|_|claimed.is_empty()) {
+                        let row = state.rows.iter().find(|row|row["id"] == entry);
+                        let unsent = state.operations.get(entry).is_some_and(|op|op.status == Status::Prepared && !maybe_written(&state,op));
+                        if let Some(row) = row.filter(|row|unsent && row["delivered"] == true && row["confirmed"] != true && row["desistiu"] != true) {
+                            claimed.push(row.clone());
+                        }
+                    }
                     let mut commands = Vec::new();
-                    for row in claimed.as_array().ok_or_else(||failure("queue_shape"))? {
+                    for row in &claimed {
                         let id = row["id"].as_str().ok_or_else(||failure("queue_entry"))?;
                         let command = state.operations.get(id).and_then(|op|serde_json::from_value::<RuntimeCommand>(op.payload.clone()).ok())
                             .unwrap_or_else(||RuntimeCommand { operation_id:id.into(),kind:OperationKind::Input,
@@ -858,7 +1050,7 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:CanoConnection
                 Job::Drained(result)
             });
         }
-        let deadline = engine.deadline().into_iter().chain(respawn.next_at).chain(roots.values().filter(|root|root.result.is_none() && !root.timed_out).map(|root|root.deadline))
+        let deadline = engine.deadline().into_iter().chain(respawn.next_at).chain(reconnect.next_at).chain(roots.values().filter(|root|root.result.is_none() && !root.timed_out).map(|root|root.deadline))
             .min_by(f64::total_cmp).map(|seconds|start + Duration::from_secs_f64(seconds.max(0.0)))
             .unwrap_or_else(||Instant::now()+Duration::from_secs(3600));
         tokio::select! {
@@ -867,6 +1059,11 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:CanoConnection
                 match message {
                     Message::Command { command,response,from_queue } => {
                         let id = command.operation_id.clone();
+                        // Só a entrada reservada que a própria fila devolveu vira esse despacho.
+                        if command.kind == OperationKind::DispatchAsyncAnswer && !from_queue {
+                            let _ = response.send(Err(RuntimeError::new("operation_internal","operação interna do runtime")));
+                            continue;
+                        }
                         if from_queue && roots.get(&id).is_some_and(|pending|pending.result.as_ref().is_some_and(|reply|reply.disposition == Disposition::Deferred)) {
                             roots.remove(&id);
                         }
@@ -915,9 +1112,14 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:CanoConnection
                                             delivered:false,ts:None,pre_transcript:command.payload["pre_transcript"] == true,entry_id:Some(entry_id.into()) }).await.map_err(io_failure)?;
                                     }
                                 }
+                                // A reservada já existe com a própria entrada: a mesma intenção, nunca outra.
+                                let entry_id = match command.kind {
+                                    OperationKind::Input | OperationKind::Steer => Some(command.payload["entry_id"].as_str().unwrap_or(&id).to_owned()),
+                                    OperationKind::DispatchAsyncAnswer => command.payload["entry_id"].as_str().map(str::to_owned),
+                                    _ => None,
+                                };
                                 let prepared = queue.exec(target.generation,&format!("prepare:{id}:{}",unique()),sample,Action::Prepare { id:id.clone(),payload:serde_json::to_value(&command).unwrap(),
-                                    entry_id:matches!(command.kind,OperationKind::Input | OperationKind::Steer)
-                                        .then(||command.payload["entry_id"].as_str().unwrap_or(&id).into()) }).await.map_err(io_failure)?;
+                                    entry_id }).await.map_err(io_failure)?;
                                 Ok(stored_reply(&id,&prepared))
                             }.await;
                             *preparation.0.lock().await += 1;
@@ -929,6 +1131,11 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:CanoConnection
                         effects.extend(take_mods(&mut engine,&mut mods_waiters,&mut mods_token,call,deadline,response,clock(start)));
                     }
                     Message::Queue { call_id,action,response } => {
+                        // A reserva nasce só da resposta conferida pelo motor, nunca de fora.
+                        if matches!(action,Action::ReserveAsyncAnswer { .. }) {
+                            let _ = response.send(Err(RuntimeError::new("operation_internal","operação interna do runtime")));
+                            continue;
+                        }
                         let queue = queue.clone(); let generation = target.generation; let sample = clock(start);
                         let wake = matches!(&action,Action::Append { delivered:false,.. });
                         jobs.spawn(async move {
@@ -944,7 +1151,8 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:CanoConnection
                     }
                     Message::View(response) => { let _ = response.send(engine.view()); }
                     Message::Drain(response) => {
-                        if engine.view()["deliverable"] != true && !drain_active {
+                        // Resposta reservada apta sai mesmo com a fila comum barrada pela pergunta.
+                        if !drain_has_work(engine.view()["deliverable"] == true,engine.ready_async_answer_entry().is_some(),drain_active) {
                             let _ = response.send(Ok(json!({"sent":0})));
                         } else {
                             drain_requested = true;
@@ -952,11 +1160,13 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:CanoConnection
                         }
                     }
                     Message::Confirm(response) => {
-                        let job = confirm_inputs(queue.clone(),receipt.clone(),target.transcript.clone(),target.generation,clock(start));
+                        let view = engine.view();
+                        let job = confirm_inputs(queue.clone(),receipt.clone(),transcript_of(&target,&view),receipt_conversation(&target,&view),target.generation,clock(start));
                         jobs.spawn(async move { Job::Confirmed { response:Some(response),result:job.await } });
                     }
                     Message::Stop { response,kill } => {
                         closed.store(true,Ordering::Release);
+                        reconnect.cancel();
                         finish_respawn(&mut respawn,&mut target).await;
                         jobs.abort_all();
                         while jobs.join_next().await.is_some() {}
@@ -975,6 +1185,18 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:CanoConnection
                 }
             }
             event = io.events.recv(), if io_open => {
+                // App-server adotado: a queda é só do socket de controle, nunca do processo. Sem religar
+                // nem matar, uma reconexão por vez ao mesmo processo, com a fila segura até lá.
+                if adoption.is_some() && matches!(event, None | Some(IoEvent::End { .. })) {
+                    io_open = false;
+                    std::mem::replace(&mut io,super::codex_terminal::closed_io()).stop().await;
+                    transport_epoch += 1;
+                    reconnect.cancel();
+                    tracing::warn!(key=%target.key,session=%target.name,"conexão de controle do Codex com terminal caiu; reconectando ao mesmo app-server");
+                    effects.extend(engine.transport_lost("a conexão de controle caiu; reconectando ao mesmo app-server",&std::mem::take(&mut handed))?);
+                    reconnect.schedule(clock(start).monotonic_s);
+                    continue;
+                }
                 match event {
                     // Erro de UMA mensagem segue (como o leitor Python); só o erro de leitura encerra.
                     Some(IoEvent::Line(line)) => match engine.apply(EngineInput::Line(line),clock(start)) {
@@ -983,7 +1205,12 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:CanoConnection
                             tracing::warn!(key=%target.key,session=%target.name,reason=%failure.message,"mensagem da CLI ignorada");
                         },
                     },
-                    Some(IoEvent::WriteAck { operation_id,outcome }) => {
+                    Some(event @ (IoEvent::WriteAck { .. } | IoEvent::WriteGuardAck { .. })) => {
+                        let (operation_id,outcome,guard_error) = match event {
+                            IoEvent::WriteAck { operation_id,outcome } => (operation_id,outcome,None),
+                            IoEvent::WriteGuardAck { operation_id,outcome,error } => (operation_id,outcome,Some(error)),
+                            _ => unreachable!(),
+                        };
                         if let Some(attempt) = attempts.get(&operation_id) {
                             let logical_id = attempt.logical_id.clone();
                             let queue = queue.clone(); let generation = target.generation; let sample = clock(start);
@@ -994,9 +1221,17 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:CanoConnection
                                   queue.exec(generation,&format!("ack:{operation_id}:{}",unique()),sample,Action::Finish {
                                     id:operation_id,status:match outcome { WriteOutcome::Written=>Status::Accepted,
                                         WriteOutcome::NotWritten=>Status::Rejected,WriteOutcome::Unknown=>Status::Unknown },
-                                    result:json!({"write_outcome":outcome}) }).await.map(|_|()).map_err(io_failure)
+                                    result:{
+                                        let mut receipt = json!({"write_outcome":outcome});
+                                        if let Some(error) = &guard_error {
+                                            receipt["operation_id"] = json!(logical_id);
+                                            receipt["code"] = json!(if outcome == WriteOutcome::Unknown { "erro_sem_confirmacao_resposta" } else { error.code.as_str() });
+                                            if outcome == WriteOutcome::Unknown { receipt["source_code"] = json!(error.code); }
+                                        }
+                                        receipt
+                                    } }).await.map(|_|()).map_err(io_failure)
                                 }.await;
-                                Job::Ack { logical_id,outcome,result }
+                                Job::Ack { logical_id,outcome,guard_error,result }
                             });
                         }
                     }
@@ -1071,6 +1306,47 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:CanoConnection
                             effects.extend(engine.set_problem("codex_headless_nao_subiu",Some(failure.message)));
                             effects.extend(after_exit(&mut respawn,&mut engine,&target,clock(start).monotonic_s,closed.load(Ordering::Acquire)));
                         }
+                    }
+                }
+            }
+            attempt = async { reconnect.task.as_mut().unwrap().await }, if reconnect.task.is_some() => {
+                use super::codex_terminal::Attempt as Reconnection;
+                reconnect.task = None;
+                let attempt = attempt.unwrap_or_else(|_|Reconnection::Retry(failure("reconnect_panic")));
+                match attempt {
+                    // Tentativa de outra época (queda nova, parada) não vale: o socket dela fecha ao sair daqui.
+                    Reconnection::Connected(connection) if reconnect.epoch == transport_epoch && !closed.load(Ordering::Acquire) => {
+                        transport_epoch += 1;
+                        io = connection.start(target.generation,128).hold_lease(queue.lease());
+                        io_open = true;
+                        reconnect.connected();
+                        tracing::info!(key=%target.key,session=%target.name,"Codex com terminal reconectado; assinando a mesma conversa");
+                        // Mesma thread, inicializada e assinada de novo; conectado e assinado voltam separados.
+                        let id = format!("bootstrap:{}:{}:{}",target.key,target.generation,unique());
+                        match queue.exec(target.generation,&format!("prepare:{id}"),clock(start),Action::Prepare { id:id.clone(),payload:json!({"kind":"bootstrap"}),entry_id:None }).await {
+                            Ok(_)=>effects.extend(engine.initialize(id)?),
+                            Err(failure)=>enter_error(&mut error,&target,io_failure(failure)),
+                        }
+                        // A fila e os recibos se acertam com o transcript antes de qualquer entrega nova.
+                        if !confirming {
+                            confirming = true;
+                            let view = engine.view();
+                            let job = confirm_inputs(queue.clone(),receipt.clone(),transcript_of(&target,&view),receipt_conversation(&target,&view),target.generation,clock(start));
+                            jobs.spawn(async move { Job::Confirmed { response:None,result:job.await } });
+                        }
+                        drain_requested = true;
+                    }
+                    Reconnection::Connected(_) => {},
+                    Reconnection::Retry(failure) => {
+                        if crate::warn_limit::allow(Some(&target.key),"codex_terminal_reconnect") {
+                            tracing::warn!(key=%target.key,session=%target.name,code=%failure.code,"reconexão ao app-server do Codex falhou; tentando de novo");
+                        }
+                        effects.extend(engine.set_problem(super::codex_terminal::DISCONNECTED,Some(format!("reconectando ({})",failure.code))));
+                        reconnect.schedule(clock(start).monotonic_s);
+                    }
+                    Reconnection::Gone(failure) => {
+                        tracing::warn!(key=%target.key,session=%target.name,code=%failure.code,"app-server do Codex com terminal saiu ou mudou; aguardando o ciclo de vida da sessão");
+                        effects.extend(engine.set_problem(super::codex_terminal::DISCONNECTED,Some(failure.message)));
                     }
                 }
             }
@@ -1152,9 +1428,26 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:CanoConnection
                         let attempt = attempts.get(&wire).unwrap();
                         prepared_writes.insert(attempt.order,(wire,result));
                     }
-                    Job::Ack { logical_id,outcome,result } => {
+                    Job::Ack { logical_id,outcome,guard_error,result } => {
                         match result {
-                            Ok(())=>effects.extend(engine.apply(EngineInput::WriteAck { operation_id:logical_id,outcome },clock(start))?),
+                            Ok(())=>{
+                                let mut next = engine.apply(EngineInput::WriteAck { operation_id:logical_id.clone(),outcome },clock(start))?;
+                                if let Some(failure) = guard_error {
+                                    for effect in &mut next {
+                                        if let Effect::Reply { operation_id,payload,.. } = effect && operation_id == &logical_id {
+                                            // A resposta terminal continua dizendo que a decisão não foi confirmada.
+                                            let confirmed = payload.get("decision_confirmed").cloned();
+                                            *payload = if outcome == WriteOutcome::NotWritten {
+                                                json!({"code":failure.code,"error":failure.message,"write_outcome":"not_written"})
+                                            } else { json!({"code":"erro_sem_confirmacao_resposta","source_code":failure.code,"write_outcome":"unknown"}) };
+                                            if let Some(confirmed) = confirmed { payload["decision_confirmed"] = confirmed; }
+                                        }
+                                    }
+                                }
+                                effects.extend(next);
+                                engine.write_sources.lock().map_err(|_|failure("interaction_sources"))?.remove(&logical_id);
+                                engine.async_guards.lock().map_err(|_|failure("interaction_sources"))?.remove(&logical_id);
+                            },
                             Err(failure)=>{
                                 fail_root(&mut roots,&logical_id,failure.clone());
                                 publish(&events,&target,&mut revision,"problem",json!({"error_code":failure.code,"message":failure.message}));
@@ -1174,10 +1467,16 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:CanoConnection
                             pending.preparing = false;
                             pending.result = Some(reply.clone());
                             for response in pending.responses.drain(..) { let _ = response.send(Ok(reply.clone())); }
-                            if reply.disposition == Disposition::Deferred && matches!(pending.command.kind,OperationKind::Input | OperationKind::Steer) {
+                            if reply.disposition == Disposition::Deferred && matches!(pending.command.kind,OperationKind::Input | OperationKind::Steer | OperationKind::DispatchAsyncAnswer) {
                                 let queue = queue.clone(); let id = reply.operation_id.clone(); let generation = target.generation; let sample = clock(start);
                                 jobs.spawn(async move { Job::Saved(queue.exec(generation,&format!("unclaim:{}",unique()),sample,
                                     Action::SetDelivered { entry_id:id,value:false,steered:false }).await.map(|_|()).map_err(io_failure)) });
+                            }
+                            // Reserva recusada (pergunta encerrada, outra conversa, turno recusado): a entrada não volta a sair.
+                            if reply.disposition == Disposition::Rejected && pending.command.kind == OperationKind::DispatchAsyncAnswer {
+                                let queue = queue.clone(); let id = reply.operation_id.clone(); let generation = target.generation; let sample = clock(start);
+                                jobs.spawn(async move { Job::Saved(queue.exec(generation,&format!("async-abandon:{}",unique()),sample,
+                                    Action::Abandon { entry_id:id }).await.map(|_|()).map_err(io_failure)) });
                             }
                           }
                         }
@@ -1240,13 +1539,16 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:CanoConnection
                                 let state = view["public_state"]["state"].as_str().unwrap_or("").to_owned();
                                 if state == "idle" && last_state != "idle" && !confirming {
                                     confirming = true;
-                                    let job = confirm_inputs(queue.clone(),receipt.clone(),target.transcript.clone(),target.generation,clock(start));
+                                    let job = confirm_inputs(queue.clone(),receipt.clone(),transcript_of(&target,&view),receipt_conversation(&target,&view),target.generation,clock(start));
                                     jobs.spawn(async move { Job::Confirmed { response:None,result:job.await } });
                                 }
                                 last_state = state;
                                 // Vista igual à publicada não sai: cada aparelho redesenharia a tela à toa.
                                 if view != durable_view {
-                                    live.update(|state|state.public_state = view["public_state"].clone());
+                                    live.update(|state| {
+                                        state.binding=view["conversation"].as_str().filter(|conversation|!conversation.is_empty()).map(|conversation|crate::interactions::InteractionBinding {key:target.key.clone(),generation:target.generation,conversation:conversation.into()});
+                                        state.public_state = view["public_state"].clone();
+                                    });
                                     durable_view = view.clone();
                                     publish(&events,&target,&mut revision,"view",view.clone());
                                     publish(&events,&target,&mut revision,"state",view["public_state"].clone());
@@ -1289,7 +1591,7 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:CanoConnection
                     }
                     Job::DrainFinished(result) => {
                         drain_active = false;
-                        let count = result.as_ref().map(|reply|usize::from(reply.disposition == Disposition::Accepted));
+                        let count = result.as_ref().map(drained_count);
                         for waiter in drain_waiters.drain(..) {
                             let _ = waiter.send(count.clone().map(|sent|json!({"sent":sent})).map_err(Clone::clone));
                         }
@@ -1317,6 +1619,29 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:CanoConnection
                         };
                         effects.push_back(Effect::Reply { operation_id:id,disposition,payload });
                     }
+                    Job::Reserved { operation_id,reservation,result,persisted } => {
+                        if let Err(failure) = &result {
+                            tracing::warn!(key=%target.key,session=%target.name,code=%failure.code,persisted=?persisted,"gravação da resposta reservada falhou");
+                        }
+                        match persisted {
+                            // Gravada (mesmo com erro depois): ela sai na vez dela, então quem respondeu recebe o
+                            // resultado incerto de reservada, nunca um erro que esconde uma entrega futura.
+                            Some(true) => {
+                                effects.extend(engine.settle_async_answer(&reservation.entry_id,true));
+                                effects.push_back(Effect::Reply { operation_id,disposition:Disposition::Unknown,payload:reservation.reply_payload() });
+                            }
+                            Some(false) => {
+                                effects.extend(engine.settle_async_answer(&reservation.entry_id,false));
+                                fail_root(&mut roots,&operation_id,result.err().unwrap_or_else(||failure("reserve_lost")));
+                            }
+                            // Sem saber o que ficou no disco: nada sai nesta vida, a retomada decide pela operação gravada.
+                            None => {
+                                engine.uncertain_async_answer(&reservation.entry_id);
+                                effects.push_back(Effect::Reply { operation_id,disposition:Disposition::Unknown,
+                                    payload:json!({"entry_id":reservation.entry_id,"decision_confirmed":false}) });
+                            }
+                        }
+                    }
                     Job::NativeInput { id,result } => {
                         match result {
                             Ok(result) if result["outcome"] == "not_written" => {
@@ -1343,13 +1668,19 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:CanoConnection
                         // Sem escrita começada a entrada não chegou à CLI: volta para a fila em vez de ficar incerta.
                         let prefix = format!("{id}:");
                         let written = native.contains(id) || attempts.values().any(|attempt|attempt.logical_id == *id || attempt.logical_id.starts_with(&prefix));
-                        let unsent = !written && matches!(pending.command.kind,OperationKind::Input | OperationKind::Steer);
+                        let unsent = !written && matches!(pending.command.kind,OperationKind::Input | OperationKind::Steer | OperationKind::DispatchAsyncAnswer);
                         if crate::warn_limit::allow(Some(&target.key),"deadline") {
                             tracing::warn!(key=%target.key,session=%target.name,operation=%id,unsent,"operação sem resposta em 30 s");
                         }
                         effects.push_back(Effect::Reply { operation_id:id.clone(),disposition:if unsent { Disposition::Deferred } else { Disposition::Unknown },
                             payload:json!({"error":"operação sem resposta"}) });
                     }
+                }
+                if let Some(adoption) = &adoption && reconnect.task.is_none() && reconnect.next_at.is_some_and(|at|sample.monotonic_s >= at) {
+                    reconnect.next_at = None;
+                    reconnect.epoch = transport_epoch;
+                    let adoption = adoption.clone();
+                    reconnect.task = Some(tokio::spawn(async move { super::codex_terminal::reconnect(&adoption).await }));
                 }
                 if respawn.task.is_none() && respawn.next_at.is_some_and(|at|sample.monotonic_s >= at) {
                     respawn.next_at = None;
@@ -1363,6 +1694,7 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:CanoConnection
         }
     }
     closed.store(true,Ordering::Release);
+    reconnect.cancel();
     finish_respawn(&mut respawn,&mut target).await;
     jobs.abort_all(); while jobs.join_next().await.is_some() {}
     io.stop().await;
@@ -1446,12 +1778,14 @@ async fn kill_process(engine:&RuntimeEngine,target:&RuntimeTarget) -> Result<(),
 /// Prova cada entrada despachada e ainda não confirmada contra o transcript, a partir do cursor do
 /// despacho. Uma leitura do transcript por rodada; o estado só é relido depois de uma confirmação.
 /// Devolve as operações confirmadas e quantas entradas legadas saíram junto.
-async fn confirm_inputs(queue:Arc<QueueActor>,receipt:Arc<std::sync::Mutex<ReceiptIndex>>,path:std::path::PathBuf,
+async fn confirm_inputs(queue:Arc<QueueActor>,receipt:Arc<std::sync::Mutex<ReceiptIndex>>,path:std::path::PathBuf,conversation:Option<String>,
     generation:u64,sample:ClockSample) -> Result<(Vec<String>,usize),RuntimeError> {
+    // Conversa trocada pela TUI: cursores e leitura da anterior não provam entrega na nova.
+    if let Some(conversation) = conversation { receipt.lock().map_err(|_|failure("receipt_panic"))?.rebind(&conversation); }
     let mut state = queue.snapshot().await.map_err(io_failure)?;
     let confirmed_rows:std::collections::BTreeSet<&str> = state.rows.iter().filter(|r|r["confirmed"] == true).filter_map(|r|r["id"].as_str()).collect();
     let candidates:Vec<(String,String,super::receipt::DispatchCursor)> = state.operations.iter()
-        .filter(|(_,op)|op.status != Status::Confirmed && matches!(op.payload["kind"].as_str(),Some("input" | "steer")))
+        .filter(|(_,op)|op.status != Status::Confirmed && matches!(op.payload["kind"].as_str(),Some("input" | "steer" | "dispatch_async_answer")))
         .filter_map(|(id,op)|Some((id.clone(),op.entry_id.clone()?,serde_json::from_value(op.dispatch_cursor.clone()).ok()?)))
         .filter(|(_,entry,_)|!confirmed_rows.contains(entry.as_str())).collect();
     let mut confirmed = Vec::new();
@@ -1489,8 +1823,22 @@ async fn confirm_inputs(queue:Arc<QueueActor>,receipt:Arc<std::sync::Mutex<Recei
     Ok((confirmed,legacy))
 }
 
+/// Codex com terminal aprende o rollout depois de conectar (thread sem turno não tem arquivo) e segue a
+/// thread que a TUI adotar; caminho vazio é ausência, e o recibo não o abre.
+fn transcript_of(target:&RuntimeTarget,view:&Value) -> std::path::PathBuf {
+    match view["rollout_path"].as_str().filter(|path|!path.is_empty()) {
+        Some(path) if target.provider == "codex" && view["headless"] == false => path.into(),
+        _ => target.transcript.clone(),
+    }
+}
+
+/// Só o Codex com terminal troca de conversa sob o mesmo ator; os demais mantêm o recibo da abertura.
+fn receipt_conversation(target:&RuntimeTarget,view:&Value) -> Option<String> {
+    (target.provider == "codex" && view["headless"] == false).then(||view["conversation"].as_str().unwrap_or("").to_owned())
+}
+
 async fn capture_cursor(target:&RuntimeTarget,view:&Value) -> Result<Value,RuntimeError> {
-    let path = target.transcript.clone(); let provider = target.provider.clone(); let conversation = view["conversation"].as_str().unwrap_or("").to_owned();
+    let path = transcript_of(target,view); let provider = target.provider.clone(); let conversation = view["conversation"].as_str().unwrap_or("").to_owned();
     tokio::task::spawn_blocking(move ||ReceiptIndex::new(&provider,&conversation).capture(&path))
         .await.map_err(|_|failure("cursor_job"))?.map_err(io_failure).and_then(|cursor|serde_json::to_value(cursor).map_err(|_|failure("cursor_json")))
 }
@@ -1513,7 +1861,7 @@ struct SavedView { version:u64, durable:Option<Value>, latest:Value }
 /// Campos que mudam a cada evento e que ninguém relê do disco: o motor parte de `in_progress:false`
 /// e o estado público é recalculado. O contador sai da comparação porque a escrita no fio salva a
 /// vista inteira (`force`) antes de usar um ID novo.
-const VOLATILE_VIEW:[&str;9] = ["public_state","alive","iniciando","in_progress","pending","question","deliverable","runtime_counter","turn_id"];
+const VOLATILE_VIEW:[&str;11] = ["public_state","alive","iniciando","in_progress","pending","question","deliverable","runtime_counter","turn_id","connected","subscribed"];
 
 fn durable_part(view:&Value) -> Value {
     let mut durable = view.clone();
@@ -1547,9 +1895,26 @@ fn stored_reply(id:&str,prepared:&Value) -> Option<RuntimeReply> {
         .or_else(||Some(RuntimeReply { operation_id:id.into(),disposition,payload:Value::Null }))
 }
 
+/// Quem pediu o drain espera quando há o que sair: fila comum entregável, resposta reservada apta ou drain em curso.
+fn drain_has_work(deliverable:bool,reserved_ready:bool,active:bool) -> bool { deliverable || reserved_ready || active }
+
+/// Entrada que saiu no drain. A reservada despachada conta também quando o desfecho é incerto: ela foi ao
+/// fio e nunca volta, então dizer `sent:0` esconderia uma entrega.
+fn drained_count(reply:&RuntimeReply) -> usize {
+    let dispatched_reservation = reply.disposition == Disposition::Unknown && reply.operation_id.starts_with("async-answer:");
+    usize::from(reply.disposition == Disposition::Accepted || dispatched_reservation)
+}
+
 fn status(disposition:Disposition) -> Status {
     match disposition { Disposition::Accepted=>Status::Accepted,Disposition::Deferred=>Status::Deferred,
         Disposition::Rejected=>Status::Rejected,Disposition::Unknown=>Status::Unknown }
+}
+
+/// Alguma tentativa pode ter chegado ao fio? Não conta a que a recuperação marcou como não escrita nem a
+/// de fase recusada ou devolvida sem escrita: contá-las deixaria incerta, para sempre, uma resposta que nunca saiu.
+fn maybe_written(state:&super::queue::State,op:&super::queue::Operation) -> bool {
+    op.wire_attempts.iter().any(|(wire,attempt)|attempt["status"] != "not_written"
+        && state.operations.get(wire).is_none_or(|phase|!matches!(phase.status,Status::Rejected | Status::Deferred)))
 }
 
 fn recover_phase(state:&super::queue::State,phase:&super::queue::Operation) -> bool {
@@ -1564,7 +1929,7 @@ fn recover_phase(state:&super::queue::State,phase:&super::queue::Operation) -> b
 fn defer_unwritten(roots:&mut BTreeMap<String,Pending>,attempts:&BTreeMap<String,Attempt>,native:&BTreeSet<String>,id:&str,error:RuntimeError,effects:&mut VecDeque<Effect>) {
     let prefix = format!("{id}:");
     let written = native.contains(id) || attempts.values().any(|attempt|attempt.logical_id == id || attempt.logical_id.starts_with(&prefix));
-    let input = roots.get(id).is_some_and(|pending|matches!(pending.command.kind,OperationKind::Input | OperationKind::Steer));
+    let input = roots.get(id).is_some_and(|pending|matches!(pending.command.kind,OperationKind::Input | OperationKind::Steer | OperationKind::DispatchAsyncAnswer));
     if written || !input { return fail_root(roots,id,error); }
     let Some(pending) = roots.get_mut(id) else { return };
     if crate::warn_limit::allow(Some(id),&error.code) {
@@ -1639,6 +2004,67 @@ fn take_mods(engine:&mut RuntimeEngine,waiters:&mut ModsWaiters,token:&mut u64,c
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn queued_interaction_guard_reads_the_live_owner_after_preparation() {
+        use crate::interactions::{InteractionBinding,InteractionKind,InteractionStore,native_target};
+        let clock = ClockSample { monotonic_s:1.0,epoch_s:1.0 };
+        let store = Arc::new(InteractionStore::default());
+        let mut engine = RuntimeEngine::new("claude",json!({"name":"s","session_id":"sid","initialized":true}),1,clock).unwrap()
+            .with_interactions("key".into(),store.clone()).unwrap();
+        let request = json!({"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"A"}});
+        engine.apply(EngineInput::Line(json!({"type":"control_request","request_id":0,"request":request})),clock).unwrap();
+        let binding = InteractionBinding { key:"key".into(),conversation:"sid".into(),generation:1 };
+        let target = native_target(InteractionKind::Approval,"sid",&json!(0));
+        let token = store.observe(&binding,&target,Some(request)).unwrap().unwrap();
+        engine.command(RuntimeCommand { operation_id:"choose".into(),kind:OperationKind::Select,payload:json!({"option":1,"interaction_id":token}) },clock).unwrap();
+        let guard = engine.interaction_guard("choose").unwrap().unwrap();
+        assert!(guard(futures_util::task::noop_waker_ref()).is_ok());
+        // O Store/poll ainda mostram A; a pendência do dono já virou B enquanto o frame espera.
+        engine.apply(EngineInput::Line(json!({"type":"control_request","request_id":0,"request":{
+            "subtype":"can_use_tool","tool_name":"Bash","input":{"command":"B"}}})),clock).unwrap();
+        assert_eq!(guard(futures_util::task::noop_waker_ref()).unwrap_err(),"erro_interacao_desatualizada");
+        assert!(store.expected(&binding,Some(&token)).is_ok());
+    }
+
+    #[test]
+    fn reserved_answer_guard_reads_the_real_question_right_before_the_bytes() {
+        use crate::interactions::{InteractionBinding,InteractionKind,InteractionStore,native_target};
+        const QUESTION:&str = "async:thread-1:q1:0";
+        let clock = ClockSample { monotonic_s:1.0,epoch_s:1.0 };
+        let store = Arc::new(InteractionStore::default());
+        let mut engine = RuntimeEngine::new("codex",json!({"name":"s","thread_id":"thread-1","headless":false,"cwd":"/work"}),1,clock).unwrap()
+            .with_interactions("key".into(),store.clone()).unwrap();
+        let write = |effects:&[Effect],method:&str| effects.iter().find_map(|e|match e { Effect::Write { frame,.. } if frame["method"] == method=>Some(frame.clone()),_=>None }).unwrap();
+        let initialize = write(&engine.initialize("boot".into()).unwrap(),"initialize");
+        let resume = write(&engine.apply(EngineInput::Line(json!({"id":initialize["id"],"result":{}})),clock).unwrap(),"thread/resume");
+        engine.apply(EngineInput::Line(json!({"id":resume["id"],"result":{"thread":{"id":"thread-1","path":"/r/one.jsonl","status":{"type":"idle"},
+            "turns":[{"id":"t0","status":"completed","items":[{"id":"q1","type":"agentMessage","delivery":"async","questions":[{"title":"Qual pasta?","options":["A","B"]}]}]}]}}})),clock).unwrap();
+        let question = engine.view()["async_questions"][0][1].clone();
+        let binding = InteractionBinding { key:"key".into(),conversation:"thread-1".into(),generation:1 };
+        let token = store.observe(&binding,&native_target(InteractionKind::Question,"thread-1",&json!(QUESTION)),Some(question)).unwrap().unwrap();
+        let reserved = engine.command(RuntimeCommand { operation_id:"answer".into(),kind:OperationKind::AnswerQuestions,
+            payload:json!({"request_id":QUESTION,"interaction_id":token,"answers":[{"question_id":"answer","kind":"option","indices":[0]}]}) },clock).unwrap();
+        let (reservation,command) = reserved.iter().find_map(|e|match e { Effect::ReserveAsyncAnswer { reservation,command,.. }=>Some((reservation.clone(),command.clone())),_=>None }).unwrap();
+        engine.settle_async_answer(&reservation.entry_id,true);
+        write(&engine.command(command,clock).unwrap(),"turn/start");
+        let guard = engine.interaction_guard(&reservation.operation_id).unwrap().expect("a reservada leva guarda até o escritor");
+        assert!(guard(futures_util::task::noop_waker_ref()).is_ok());
+        // A TUI troca de conversa depois da preparação e antes dos bytes: a pergunta real deixou de estar aberta.
+        engine.apply(EngineInput::Line(json!({"method":"thread/started","params":{"thread":{"id":"thread-2","path":"/r/two.jsonl","cwd":"/work","source":"cli"}}})),clock).unwrap();
+        assert_eq!(guard(futures_util::task::noop_waker_ref()).unwrap_err(),"erro_interacao_desatualizada");
+    }
+
+    #[test]
+    fn drain_waits_for_an_eligible_reservation_and_counts_a_dispatched_one() {
+        assert!(drain_has_work(false,true,false),"reserva apta com a fila comum barrada");
+        assert!(!drain_has_work(false,false,false));
+        let reply = |id:&str,disposition| RuntimeReply { operation_id:id.into(),disposition,payload:Value::Null };
+        assert_eq!(drained_count(&reply("async-answer:1:3",Disposition::Unknown)),1,"reservada despachada nunca vira sent:0");
+        assert_eq!(drained_count(&reply("async-answer:1:3",Disposition::Accepted)),1);
+        assert_eq!(drained_count(&reply("entry",Disposition::Unknown)),0);
+        assert_eq!(drained_count(&reply("async-answer:1:3",Disposition::Deferred)),0);
+    }
 
     /// Python falso da política: cada conexão leva a próxima resposta do roteiro (`None` derruba a conexão).
     async fn scripted_policy(script:Vec<Option<(u16,Value)>>) -> (std::net::SocketAddr,Arc<AtomicU64>) {

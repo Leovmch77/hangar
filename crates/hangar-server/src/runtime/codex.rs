@@ -4,6 +4,9 @@ use hangar_codex::proto::{self as wire,ClientRequest};
 use serde::Deserialize;
 use serde_json::{Value,json};
 use std::collections::{BTreeMap,BTreeSet};
+use std::sync::Arc;
+use crate::interactions::{ExpectedInteraction,InteractionBinding,InteractionError,InteractionKind,InteractionStore,native_target,runtime_error};
+use super::queue::Status;
 
 struct Rpc {
     operation_id:String,
@@ -28,6 +31,7 @@ struct ServiceTierChange {
 }
 
 struct Wire {
+    interaction:Option<ExpectedInteraction>,
     request_id:Option<RequestId>,
     server_request:Option<RequestId>,
     server_epoch:Option<u64>,
@@ -43,6 +47,18 @@ struct Voice {
     answering:BTreeSet<RequestId>,
     unsubscribed:bool,
 }
+
+#[derive(Clone,Copy,Debug,PartialEq,Eq)]
+enum ReservationState {
+    /// A gravação na fila ainda não voltou.
+    Reserving,
+    Reserved,
+    Dispatching,
+    /// Pode ter sido escrita: nunca sai de novo.
+    Uncertain,
+}
+
+struct Reservation { reservation:ReservedAsyncAnswer, state:ReservationState }
 
 #[derive(Default)]
 struct AsyncQuestions {
@@ -119,6 +135,7 @@ impl AsyncQuestions {
 }
 
 pub struct Engine {
+    interactions:Option<(String,Arc<InteractionStore>)>,
     metadata:Value,
     generation:u64,
     clock:ClockSample,
@@ -127,6 +144,16 @@ pub struct Engine {
     alive:bool,
     initialized:bool,
     ready:bool,
+    /// Terminal: inicializado na conexão com a thread da TUI; o primeiro turno já pode sair.
+    connected:bool,
+    /// Terminal: o `thread/resume` colou e os eventos da thread chegam. Sem terminal `ready` cobre os dois.
+    subscribed:bool,
+    /// Próxima tentativa de assinar (relógio monotônico); só a ausência do rollout agenda outra.
+    subscribe_due:Option<f64>,
+    subscribe_wait:f64,
+    /// Terminal: quando o último `turn/start` foi aceito. Sem assinatura não chega `turn/completed`.
+    in_progress_since:Option<f64>,
+    rollout_path:Option<String>,
     reconnect:bool,
     fresh_process:bool,
     thread_id:String,
@@ -156,6 +183,9 @@ pub struct Engine {
     server_requests:Vec<(RequestId,Value)>,
     request_epochs:BTreeMap<RequestId,u64>,
     answering:BTreeSet<RequestId>,
+    /// Terminal: pedidos que a conexão que caiu levou sem resolução. Sem token respondível; só seguram
+    /// o aviso de "responda na TUI" até voltarem, serem resolvidos ou o turno acabar.
+    lost_requests:BTreeSet<RequestId>,
     wires:BTreeMap<String,Wire>,
     policies:BTreeMap<RequestId,String>,
     last_format_request:Option<RequestId>,
@@ -163,6 +193,8 @@ pub struct Engine {
     /// Formatos tortos já mandados ao Python: falha sistemática não vira um aviso por linha.
     reported_formats:BTreeSet<String>,
     async_questions:AsyncQuestions,
+    /// Terminal: respostas assíncronas reservadas na fila, na ordem em que entraram.
+    reservations:Vec<Reservation>,
     voices:BTreeMap<String,Voice>,
     voice_wires:BTreeMap<String,(String,RequestId,u64)>,
     skill_preparations:BTreeMap<RequestId,RuntimeCommand>,
@@ -207,6 +239,24 @@ fn decode_code(method:&str) -> String {
 /// Texto de entrada da pessoa: a lista que o `prepare_prompt` montou, ou só o texto.
 fn input_of(payload:&Value,text:&str) -> Vec<Value> {
     payload["input"].as_array().cloned().unwrap_or_else(||vec![json!({"type":"text","text":text})])
+}
+
+/// Espera crescente da assinatura enquanto a thread não tem rollout, a mesma do adapter Python.
+const SUBSCRIBE_RETRY_BASE:f64 = 1.0;
+const SUBSCRIBE_RETRY_MAX:f64 = 10.0;
+
+/// Teto do turno numa sessão terminal não assinada, o `UNSUBSCRIBED_TURN_TTL` do adapter Python.
+const UNSUBSCRIBED_TURN_TTL:f64 = 300.0;
+
+/// Thread sem turno ainda não tem rollout: o `resume` a recusa até o primeiro turno gravar o arquivo.
+fn missing_rollout(message:&str) -> bool { message.contains("no rollout found") }
+
+/// Thread principal aberta pela TUI, como `sessions.primary_thread` do Python: subagente e outra pasta não trocam o vínculo.
+fn primary_thread(thread:&Value,cwd:Option<&str>) -> bool {
+    cwd.is_some() && thread["cwd"].as_str() == cwd && matches!(thread["source"].as_str(),Some("cli" | "vscode"))
+        && thread["parentThreadId"].as_str().is_none_or(str::is_empty) && thread["threadSource"] != "subagent"
+        && thread["canAcceptDirectInput"] != false
+        && thread["id"].as_str().is_some_and(|id|!id.is_empty()) && thread["path"].as_str().is_some_and(|path|!path.is_empty())
 }
 
 fn retry_problem(problem:Option<&str>) -> bool { matches!(problem,Some("codex_sem_conexao" | "codex_limite_uso")) }
@@ -349,10 +399,14 @@ impl Engine {
         let voices = metadata["voice_calls"].as_array().map(|calls|calls.iter().filter_map(|call|
             Some((call["call_id"].as_str()?.into(),Voice { thread_id:string(&call["thread_id"]),starting:call["starting"] == true,
                 unsubscribed:call["unsubscribed"] == true,closed:true,..Voice::default() }))).collect()).unwrap_or_default();
-        Self { generation,clock,counter:metadata["runtime_counter"].as_u64().unwrap_or(0),headless:metadata["headless"] != false,
-            alive:true,initialized:metadata["initialized"] == true,ready:metadata["ready"] == true,reconnect:false,fresh_process:false,
+        let headless = metadata["headless"] != false;
+        let subscribed = !headless && metadata["subscribed"] == true;
+        Self { interactions:None,generation,clock,counter:metadata["runtime_counter"].as_u64().unwrap_or(0),headless,
+            alive:true,initialized:metadata["initialized"] == true,ready:if headless { metadata["ready"] == true } else { subscribed },
+            connected:!headless && metadata["connected"] == true,subscribed,subscribe_due:None,subscribe_wait:SUBSCRIBE_RETRY_BASE,in_progress_since:None,
+            rollout_path:string(&metadata["rollout_path"]),reconnect:false,fresh_process:false,
             thread_id:metadata["thread_id"].as_str().unwrap_or("").into(),turn_id:None,in_progress:false,
-            state:StateEvent { session:metadata["name"].as_str().unwrap_or("").into(),state:"idle".into(),headless:true,
+            state:StateEvent { session:metadata["name"].as_str().unwrap_or("").into(),state:"idle".into(),headless,
                 status_line:string(&metadata["status_line"]),..StateEvent::default() },state_revision:metadata["state_revision"].as_u64().unwrap_or(0),settings_revision:metadata["settings_revision"].as_u64().unwrap_or(0),
             model:string(&metadata["model"]),effort:string(&metadata["effort"]),mode:string(&metadata["mode"]),
             service_tier:metadata.get("service_tier").and_then(service_tier),service_tier_pending:None,
@@ -360,7 +414,7 @@ impl Engine {
             preview:LiveBuffer::default(),response_started:false,first_response_start:None,compacting:false,
             running_commands:BTreeMap::new(),thinking:LiveBuffer::default(),was_working:metadata["in_progress"] == true,
             rpc:BTreeMap::new(),server_requests:Vec::new(),
-            request_epochs:BTreeMap::new(),answering:BTreeSet::new(),wires:BTreeMap::new(),policies:BTreeMap::new(),last_format_request:None,format_gate:FormatGate::default(),reported_formats:BTreeSet::new(),async_questions,voices,voice_wires:BTreeMap::new(),skill_preparations:BTreeMap::new(),early_voice:BTreeMap::new(),early_voice_bytes:0,metadata }
+            request_epochs:BTreeMap::new(),answering:BTreeSet::new(),lost_requests:BTreeSet::new(),wires:BTreeMap::new(),policies:BTreeMap::new(),last_format_request:None,format_gate:FormatGate::default(),reported_formats:BTreeSet::new(),async_questions,reservations:Vec::new(),voices,voice_wires:BTreeMap::new(),skill_preparations:BTreeMap::new(),early_voice:BTreeMap::new(),early_voice_bytes:0,metadata }
     }
 
     pub fn view(&self) -> Value {
@@ -374,6 +428,14 @@ impl Engine {
         state.codex_service_tier = self.service_tier.clone();
         state.label = self.compacting.then(||"Compactando…".into());
         state.question = None; state.options = None;
+        // Pedido que só a TUI atende (ou que a conexão que caiu levou) segura a fila: a sessão não pode
+        // parecer ociosa enquanto ele espera.
+        if !self.headless && self.alive && pending_approval.is_none() && self.blocking_question().is_none() && state.codex_question.is_none()
+            && (!self.server_requests.is_empty() || !self.lost_requests.is_empty()) {
+            state.state = "awaiting_input".into();
+            state.question = Some("O Codex pediu algo que só o terminal responde; responda na TUI.".into());
+            return serde_json::to_value(state).unwrap();
+        }
         if let Some((_,request)) = pending_approval {
             let place = |path:Option<String>|path.map_or(String::new(),|p|format!(" em {p}"));
             // Fora do formato os detalhes saem da linha crua: aprovar às cegas não é opção.
@@ -412,6 +474,7 @@ impl Engine {
 
     pub fn control_view(&self) -> Value {
         json!({"alive":self.alive,"initialized":self.initialized,"ready":self.ready,"in_progress":self.in_progress,
+            "headless":self.headless,"connected":self.connected,"subscribed":self.subscribed,"rollout_path":self.rollout_path,
             "thread_id":self.thread_id,"turn_id":self.turn_id,"model":self.model,"effort":self.effort,"mode":self.mode,"service_tier":self.service_tier,
             "permission_mode":self.permission_mode,"token_usage":self.token_usage,"rate_limits":self.rate_limits,
             "runtime_counter":self.counter,"state_revision":self.state_revision,"settings_revision":self.settings_revision,"deliverable":self.deliverable(),"pending":self.server_requests.iter()
@@ -425,6 +488,10 @@ impl Engine {
 
     fn blocking_question(&self) -> Option<Value> {
         let (id,request) = self.server_requests.iter().find(|(_,r)|r["method"] == "item/tool/requestUserInput" || form_fields(r).is_some())?;
+        Self::question_for(id,request)
+    }
+
+    fn question_for(id:&RequestId,request:&Value) -> Option<Value> {
         if let Some(fields) = form_fields(request) {
             return Some(json!({"provider":"codex","request_id":id,"questions":fields.iter().map(field_question).collect::<Vec<_>>()}));
         }
@@ -443,10 +510,75 @@ impl Engine {
         Some(json!({"provider":"codex","request_id":id,"questions":questions}))
     }
 
-    fn deliverable(&self) -> bool { self.alive && self.ready && !self.in_progress && self.server_requests.is_empty() && self.async_questions.pending.is_empty()
-        && self.skill_preparations.is_empty()
-        && !self.rpc.values().any(|rpc|!voice_rpc(rpc) && (matches!(rpc.method.as_str(),"turn/start" | "turn/steer" | "thread/compact/start")
-            || rpc.continuation.as_ref().is_some_and(|next|next["kind"] == "skill_lookup"))) }
+    /// Terminal envia conectado, antes de assinar: o rollout que a assinatura exige nasce desse primeiro turno.
+    fn sendable(&self) -> bool { if self.headless { self.ready } else { self.initialized && self.connected && !self.thread_id.is_empty() } }
+
+    fn deliverable(&self) -> bool { self.async_dispatch_ready() && self.async_questions.pending.is_empty() }
+
+    /// Tudo o que segura um turno novo, menos as perguntas assíncronas: a resposta reservada de uma
+    /// delas não pode esperar a si mesma.
+    fn async_dispatch_ready(&self) -> bool {
+        self.alive && self.sendable() && !self.in_progress && self.server_requests.is_empty() && self.lost_requests.is_empty() && self.skill_preparations.is_empty()
+            && !self.rpc.values().any(|rpc|!voice_rpc(rpc) && (matches!(rpc.method.as_str(),"turn/start" | "turn/steer" | "thread/compact/start")
+                || rpc.continuation.as_ref().is_some_and(|next|next["kind"] == "skill_lookup")))
+    }
+
+    fn async_pending(&self,request_id:&str) -> bool { self.async_questions.pending.iter().any(|(id,_)|id == request_id) }
+
+    /// Só a primeira reserva apta, pela ordem da fila; mensagem comum continua barrada pelo `deliverable`.
+    pub fn ready_async_answer_entry(&self) -> Option<String> {
+        if self.headless || !self.async_dispatch_ready() { return None; }
+        self.reservations.iter().find(|r|r.state == ReservationState::Reserved && self.async_pending(&r.reservation.request_id))
+            .map(|r|r.reservation.entry_id.clone())
+    }
+
+    /// Comando que a fila guarda junto da entrada reservada; o ator o devolve tal qual ao reivindicá-la.
+    pub fn async_answer_command(reservation:&ReservedAsyncAnswer,thread_id:&str,generation:u64) -> RuntimeCommand {
+        let mut payload = serde_json::to_value(reservation).unwrap_or_default();
+        payload["thread_id"] = json!(thread_id); payload["generation"] = json!(generation);
+        RuntimeCommand { operation_id:reservation.operation_id.clone(),kind:OperationKind::DispatchAsyncAnswer,payload }
+    }
+
+    /// Resultado da gravação da reserva: sem ela gravada, a reserva some e a pergunta segue aberta.
+    pub fn settle_async_answer(&mut self,entry_id:&str,reserved:bool) -> Vec<Effect> {
+        let Some(index) = self.reservations.iter().position(|r|r.reservation.entry_id == entry_id && r.state == ReservationState::Reserving) else { return Vec::new() };
+        if reserved { self.reservations[index].state = ReservationState::Reserved; vec![Effect::WakeQueue] }
+        else { self.reservations.remove(index); Vec::new() }
+    }
+
+    /// Gravação da reserva sem desfecho conhecido: não sai nesta vida; a repetição recebe a mesma entrada.
+    pub fn uncertain_async_answer(&mut self,entry_id:&str) {
+        if let Some(r) = self.reservations.iter_mut().find(|r|r.reservation.entry_id == entry_id && r.state == ReservationState::Reserving) {
+            r.state = ReservationState::Uncertain;
+        }
+    }
+
+    /// Retomada: a reserva volta do estado da operação persistida. Só a nunca despachada (ou devolvida
+    /// sem escrita) pode sair; a que pode ter sido escrita fica incerta, e a aceita fecha a pergunta.
+    pub fn restore_async_answer(&mut self,reservation:ReservedAsyncAnswer,thread_id:&str,status:Status,written:bool) {
+        if self.headless || thread_id != self.thread_id || self.reservations.iter().any(|r|r.reservation.request_id == reservation.request_id) { return; }
+        let state = match status {
+            Status::Prepared if !written => ReservationState::Reserved,
+            Status::Deferred => ReservationState::Reserved,
+            Status::Prepared | Status::Dispatching | Status::Unknown => ReservationState::Uncertain,
+            Status::Accepted | Status::Confirmed => { self.async_questions.record_answer(&reservation.request_id,&reservation.text); return; }
+            Status::Rejected => return,
+        };
+        self.reservations.push(Reservation { reservation,state });
+    }
+
+    fn set_reservation(&mut self,entry_id:&str,state:ReservationState) {
+        if let Some(r) = self.reservations.iter_mut().find(|r|r.reservation.entry_id == entry_id) { r.state = state; }
+    }
+
+    /// Protocolo ou recibo comprovou a entrada: a pergunta respondida sai, e só ela.
+    fn finish_reservation(&mut self,entry_id:&str) {
+        if let Some(index) = self.reservations.iter().position(|r|r.reservation.entry_id == entry_id) {
+            let done = self.reservations.remove(index).reservation;
+            self.async_questions.record_answer(&done.request_id,&done.text);
+        }
+    }
+
     fn idle(&self) -> bool { self.deliverable() && !self.rpc.values().any(|rpc|!voice_rpc(rpc)) && self.answering.is_empty() && self.async_questions.pending.is_empty() }
 
     pub fn forget_policy(&mut self,request_id:&RequestId) {
@@ -506,7 +638,7 @@ impl Engine {
         if method == "thread/read" && params["includeTurns"] == true { self.async_questions.during_load = Some(Vec::new()); }
         self.rpc.insert(request_id.clone(),Rpc { operation_id:operation_id.clone(),method:method.into(),params:params.clone(),
             deadline:self.clock.monotonic_s+30.0,timed_out:false,continuation,state_revision:self.state_revision,settings_revision:self.settings_revision });
-        self.wires.insert(operation_id.clone(),Wire { request_id:Some(request_id.clone()),server_request:None,server_epoch:None,final_result:false });
+        self.wires.insert(operation_id.clone(),Wire { interaction:None,request_id:Some(request_id.clone()),server_request:None,server_epoch:None,final_result:false });
         effects.push(Effect::Write { operation_id:Some(operation_id),frame:json!({"jsonrpc":"2.0","id":request_id,"method":method,"params":params}) });
     }
 
@@ -615,19 +747,26 @@ impl Engine {
         let Ok(request_id) = serde_json::from_value::<RequestId>(frame["id"].clone()) else { return };
         let Some(method) = frame["method"].as_str() else {
             if frame.get("result").is_some() || frame.get("error").is_some() {
-                self.wires.insert(operation_id,Wire { request_id:None,server_request:Some(request_id),server_epoch:None,final_result:false });
+                self.wires.insert(operation_id,Wire { interaction:None,request_id:None,server_request:Some(request_id),server_epoch:None,final_result:false });
             }
             return;
         };
         if self.rpc.contains_key(&request_id) { return; }
         let voice_call = self.voices.iter().find(|(_,voice)|voice.thread_id.as_deref().is_some_and(|thread|frame["params"]["threadId"] == thread))
             .map(|(call_id,_)|call_id.clone()).or_else(||(method == "thread/start" && frame["params"]["ephemeral"] == true).then(||"orphan".into()));
-        let continuation = if method == "thread/settings/update" && frame["params"].get("serviceTier").is_some() {
+        // Assinatura do terminal volta como assinatura: nunca cai no `thread/resume` do sem-terminal (que grava `patch_meta`).
+        let reserved = self.reservations.iter().find(|r|r.reservation.operation_id == operation_id).map(|r|r.reservation.clone());
+        let continuation = if !self.headless && method == "thread/resume" && subscribe_operation(&operation_id) {
+            Some(json!({"kind":"subscribe"}))
+        } else if let Some(reserved) = reserved.filter(|_|!self.headless && method == "turn/start") {
+            // A resposta tardia ainda fecha a reserva certa, nunca outra pergunta.
+            Some(json!({"kind":"async_answer","reserved":true,"request_id":reserved.request_id,"text":reserved.text,"entry_id":reserved.entry_id}))
+        } else if method == "thread/settings/update" && frame["params"].get("serviceTier").is_some() {
             Some(json!({"kind":"service_tier_recovered"}))
         } else { voice_call.map(|call_id|json!({"kind":"voice","call_id":call_id})) };
         self.rpc.insert(request_id.clone(),Rpc { operation_id:operation_id.clone(),method:method.into(),params:frame["params"].clone(),
             deadline:self.clock.monotonic_s,timed_out:true,continuation,state_revision,settings_revision });
-        self.wires.insert(operation_id,Wire { request_id:Some(request_id),server_request:None,server_epoch:None,final_result:false });
+        self.wires.insert(operation_id,Wire { interaction:None,request_id:Some(request_id),server_request:None,server_epoch:None,final_result:false });
     }
 
     pub fn restore_voice_scope(&mut self,operation_id:&str,call_id:&str) {
@@ -650,17 +789,146 @@ impl Engine {
         effects
     }
 
+    /// Terminal: só o WebSocket de controle caiu; TUI e app-server seguem vivos. A fila fica segura até
+    /// reconectar, e o que era desta conexão encerra sem resposta inventada: RPC em voo vira incerto (nunca
+    /// reenviado) e pedido que o servidor não reapresentar não ganha token respondível.
+    /// `handed`: operações cujo quadro já foi entregue ao socket que caiu. As outras nunca saíram: viram
+    /// `NotWritten` (o mesmo desfecho de uma escrita recusada), não incertas.
+    pub fn transport_lost(&mut self,detail:&str,handed:&BTreeSet<String>) -> Vec<Effect> {
+        let mut effects = Vec::new();
+        if self.headless { return effects; }
+        let unsent:Vec<String> = self.rpc.values().filter(|rpc|!rpc.timed_out && !handed.contains(&rpc.operation_id)).map(|rpc|rpc.operation_id.clone()).collect();
+        for operation_id in unsent {
+            match self.apply_input(EngineInput::WriteAck { operation_id,outcome:WriteOutcome::NotWritten },self.clock) {
+                Ok(next) => effects.extend(next),
+                Err(failure) => tracing::warn!(session=%self.state.session,code=%failure.code,"escrita não enviada sem desfecho na queda"),
+            }
+        }
+        self.connected = false; self.subscribed = false; self.ready = false; self.subscribe_due = None;
+        self.clear_preview(&mut effects);
+        self.lost_requests.extend(self.server_requests.iter().map(|(id,_)|id.clone()));
+        self.server_requests.clear(); self.answering.clear(); self.request_epochs.clear();
+        self.finish_service_tier(Disposition::Unknown,json!({"error":"O Codex desconectou antes de confirmar Fast"}),&mut effects);
+        let mut uncertain = Vec::new();
+        for (_,rpc) in std::mem::take(&mut self.rpc) {
+            uncertain.extend(reserved_entry(&rpc));
+            if let Some(wire) = self.wires.get_mut(&rpc.operation_id) { wire.final_result = true; }
+            if rpc.timed_out { continue; }
+            effects.push(Effect::Reply { operation_id:rpc.operation_id.clone(),disposition:Disposition::Unknown,payload:json!({"error":"a conexão com o Codex caiu"}) });
+            if let Some(parent) = rpc.continuation.as_ref().and_then(|next|next["parent"].as_str()) {
+                effects.push(Effect::Reply { operation_id:parent.into(),disposition:Disposition::Unknown,payload:json!({"error":"a conexão com o Codex caiu"}) });
+            }
+        }
+        for entry in uncertain { self.set_reservation(&entry,ReservationState::Uncertain); }
+        self.state.problema = Some(super::codex_terminal::DISCONNECTED.into());
+        self.state.problema_detalhe = Some(detail.chars().take(300).collect());
+        self.changed(&mut effects,false);
+        effects
+    }
+
     pub fn bootstrap(&mut self,reconnect:bool,operation_id:String) -> Result<Vec<Effect>,RuntimeError> {
-        if !self.headless { return Err(error("Codex com terminal conserva o adapter existente")); }
+        // Terminal adota a thread que a TUI abriu: nunca cria conversa nem sobe outro processo.
+        if !self.headless && self.thread_id.is_empty() { return Err(error("Codex com terminal sem conversa identificada")); }
         self.reconnect = reconnect;
         self.ready = false;
+        self.connected = false; self.subscribed = false; self.subscribe_due = None; self.subscribe_wait = SUBSCRIBE_RETRY_BASE;
         let mut effects = Vec::new();
         let request = ClientRequest::Initialize(wire::InitializeParams {
             client_info:wire::ClientInfo { name:"hangar".into(),title:None,version:"0.1.0".into() },
             capabilities:Some(wire::InitializeCapabilities { experimental_api:true }) });
-        self.send(format!("{operation_id}:initialize"),request,Some(json!({"kind":"bootstrap","parent":operation_id})),&mut effects);
+        let kind = if self.headless { "bootstrap" } else { "terminal_bootstrap" };
+        self.send(format!("{operation_id}:initialize"),request,Some(json!({"kind":kind,"parent":operation_id})),&mut effects);
+        self.stamp_turn();
         self.changed(&mut effects,true);
         Ok(effects)
+    }
+
+    /// Assinar só com `threadId` (e `cwd` fora de transferência): aprovação e sandbox são da TUI.
+    fn subscribe(&mut self,effects:&mut Vec<Effect>) {
+        self.subscribe_due = None;
+        if self.headless || !self.connected || self.subscribed
+            || self.rpc.values().any(|rpc|subscribe_rpc(rpc) && !rpc.timed_out && rpc.params["threadId"] == self.thread_id.as_str()) { return; }
+        let transfer = self.metadata["transfer_id"].as_str().is_some_and(|id|!id.is_empty());
+        let request = ClientRequest::ThreadResume(wire::ThreadResumeParams { thread_id:self.thread_id.clone(),
+            cwd:if transfer { None } else { string(&self.metadata["cwd"]) },..Default::default() });
+        self.counter += 1;
+        self.send(format!("subscribe:{}:{}",self.generation,self.counter),request,Some(json!({"kind":"subscribe"})),effects);
+    }
+
+    fn schedule_subscribe(&mut self) {
+        if self.headless || !self.connected || self.subscribed { return; }
+        self.subscribe_due = Some(self.clock.monotonic_s + self.subscribe_wait);
+        self.subscribe_wait = (self.subscribe_wait * 1.5).min(SUBSCRIBE_RETRY_MAX);
+    }
+
+    fn subscription_failed(&mut self,detail:&str,effects:&mut Vec<Effect>) {
+        self.subscribe_due = None;
+        tracing::warn!(session = %self.metadata["name"].as_str().unwrap_or("-"), reason = %detail, "o Codex recusou assinar a thread da TUI");
+        effects.push(Effect::Diag { event:DiagEvent::CodexBootstrap,code:"thread/resume".into() });
+        self.state.problema = Some("codex_conversa_nao_abriu".into());
+        self.state.problema_detalhe = Some(detail.chars().take(300).collect());
+    }
+
+    /// Só `no rollout found` é "ainda não": thread inválida, recusa e falha de protocolo ficam visíveis e param.
+    fn subscribe_reply(&mut self,rpc:&Rpc,line:&Value,effects:&mut Vec<Effect>) {
+        let failed = !line["error"].is_null();
+        effects.push(Effect::Reply { operation_id:rpc.operation_id.clone(),
+            disposition:if failed { Disposition::Rejected } else { Disposition::Accepted },
+            payload:if failed { json!({"error":line["error"]}) } else { json!({"subscribed":true}) } });
+        // Resposta de uma conexão ou thread que já não é a atual não muda o vínculo.
+        if self.headless || !self.connected || self.subscribed || rpc.params["threadId"] != self.thread_id.as_str() { return; }
+        if failed {
+            let message = line["error"]["message"].as_str().unwrap_or("");
+            if missing_rollout(message) { self.schedule_subscribe(); } else { self.subscription_failed(message,effects); }
+            self.changed(effects,false);
+            return;
+        }
+        let result = line.get("result").cloned().unwrap_or_else(||json!({}));
+        let response:wire::ThreadResumeResponse = self.decode_reply(&rpc.method,&result,effects);
+        self.subscribed = true; self.ready = true; self.subscribe_due = None; self.subscribe_wait = SUBSCRIBE_RETRY_BASE;
+        if self.state.problema.as_deref() == Some("codex_conversa_nao_abriu") { self.state.problema = None; self.state.problema_detalhe = None; }
+        if let Some(path) = response.thread.path.clone().filter(|path|!path.is_empty()) { self.rollout_path = Some(path); }
+        if rpc.settings_revision == self.settings_revision {
+            self.model = self.model.clone().or(response.model.clone());
+            self.effort = self.effort.clone().or(response.reasoning_effort.clone());
+        }
+        self.restore_thread(&response.thread,rpc);
+        self.async_questions.hydrate(&self.thread_id,&result["thread"]);
+        self.changed(effects,true);
+        effects.push(Effect::WakeQueue);
+    }
+
+    /// A TUI abriu outra conversa principal: o vínculo a segue, e pedidos, perguntas e turno da anterior perdem a validade.
+    fn thread_started(&mut self,params:&Value,effects:&mut Vec<Effect>) {
+        let thread = &params["thread"];
+        let Some(id) = thread["id"].as_str().filter(|id|*id != self.thread_id) else { return };
+        if !primary_thread(thread,self.metadata["cwd"].as_str()) { return; }
+        let previous = std::mem::replace(&mut self.thread_id,id.to_owned());
+        // O vínculo das identidades segue a conversa principal: as da anterior deixam de valer.
+        if let Err(failure) = self.bind_interactions() {
+            tracing::warn!(session=%self.state.session,code=%failure.code,"identidades não religadas à conversa nova da TUI");
+        }
+        self.rollout_path = string(&thread["path"]);
+        self.clear_preview(effects);
+        self.in_progress = false; self.turn_id = None; self.compacting = false; self.state_revision += 1;
+        self.first_response_start = None; self.response_started = false; self.state.codex_buffering = false;
+        self.running_commands.clear();
+        // Pedido de subagente não é da conversa anterior: continua pendente.
+        let stale:Vec<RequestId> = self.server_requests.iter().filter(|(_,request)|request["params"]["threadId"] == previous.as_str())
+            .map(|(id,_)|id.clone()).collect();
+        for id in &stale { self.answering.remove(id); self.request_epochs.remove(id); }
+        self.lost_requests.clear();
+        self.server_requests.retain(|(id,_)|!stale.contains(id));
+        let skipped = std::mem::take(&mut self.async_questions.skipped);
+        self.async_questions = AsyncQuestions { resolved:skipped.clone(),skipped,..AsyncQuestions::default() };
+        // Reserva da conversa anterior não vira turno na nova: a entrada dela é recusada ao ser reivindicada.
+        self.reservations.clear();
+        self.state.problema = None; self.state.problema_detalhe = None;
+        // A conversa nova também nasce sem rollout: assina de novo, e o envio segue liberado pela mesma conexão.
+        self.subscribed = false; self.ready = false; self.subscribe_wait = SUBSCRIBE_RETRY_BASE;
+        self.policy("session.patch_meta",json!({"thread_id":self.thread_id,"rollout_path":self.rollout_path}),effects);
+        self.subscribe(effects);
+        self.changed(effects,true);
     }
 
     pub fn hydrate(&mut self,snapshot:CanoSnapshot) -> Result<Vec<Effect>,RuntimeError> {
@@ -756,13 +1024,80 @@ impl Engine {
         (!processes.is_empty()).then(||json!({"kind":"terminate_after","processes":processes}))
     }
 
+    pub fn write_interaction(&self,id:&str) -> Option<&ExpectedInteraction> { self.wires.get(id)?.interaction.as_ref() }
+
+    pub fn interaction_source(&self,expected:&ExpectedInteraction) -> Option<ExpectedInteraction> {
+        let native = expected.native_id(None).ok()?;
+        let (semantic,thread,revision) = if let Some(native) = native.as_str().filter(|id|id.starts_with("async:")) {
+            let (_,question) = self.async_questions.pending.iter().find(|(id,_)|id == native)?;
+            (question.clone(),self.thread_id.as_str(),None)
+        } else {
+            let (id,request) = self.server_requests.iter().find(|(id,_)|json!(id) == native)?;
+            (request.clone(),request["params"]["threadId"].as_str()?,Some(self.request_epochs.get(id)?.to_string()))
+        };
+        let (key,_) = self.interactions.as_ref()?;
+        Some(ExpectedInteraction { binding:InteractionBinding { key:key.clone(),conversation:self.thread_id.clone(),generation:self.generation },
+            target:native_target(expected.target.kind.clone(),thread,&native),interaction_id:expected.interaction_id.clone(),
+            semantic,source_revision:revision })
+    }
+
+    pub fn interaction_write_error(&self,id:&str) -> Option<RuntimeError> {
+        let expected = self.wires.get(id)?.interaction.as_ref()?;
+        let check = || -> Result<(),RuntimeError> {
+            if self.expected(&json!({"interaction_id":expected.interaction_id}))? != *expected { return Err(runtime_error(InteractionError::Changed)); }
+            let native = expected.native_id(None).map_err(runtime_error)?;
+            if let Some(native) = native.as_str().filter(|id|id.starts_with("async:")) {
+                let (_,question) = self.async_questions.pending.iter().find(|(id,_)|id == native).ok_or_else(||runtime_error(InteractionError::Changed))?;
+                return expected.check(&native_target(InteractionKind::Question,&self.thread_id,&json!(native)),question,None).map_err(runtime_error);
+            }
+            let (id,request) = self.server_requests.iter().find(|(id,_)|json!(id) == native).ok_or_else(||runtime_error(InteractionError::Changed))?;
+            let thread = request["params"]["threadId"].as_str().filter(|id|!id.is_empty()).ok_or_else(||runtime_error(InteractionError::Unavailable))?;
+            let revision = self.request_epochs.get(id).ok_or_else(||runtime_error(InteractionError::Changed))?.to_string();
+            expected.check(&native_target(expected.target.kind.clone(),thread,&native),request,Some(&revision)).map_err(runtime_error)
+        };
+        check().err()
+    }
+
+    pub fn set_interactions(&mut self,key:String,store:Arc<InteractionStore>) -> Result<(),RuntimeError> {
+        self.interactions = Some((key,store));
+        self.bind_interactions()
+    }
+
+    fn bind_interactions(&self) -> Result<(),RuntimeError> {
+        if !self.thread_id.is_empty() && let Some((key,store)) = &self.interactions {
+            store.bind(&InteractionBinding { key:key.clone(),conversation:self.thread_id.clone(),generation:self.generation }).map_err(runtime_error)?;
+        }
+        Ok(())
+    }
+
+    fn expected(&self,payload:&Value) -> Result<ExpectedInteraction,RuntimeError> {
+        let supplied = payload["interaction_id"].as_str().filter(|id|!id.is_empty()).ok_or_else(||runtime_error(InteractionError::Missing))?;
+        let (key,store) = self.interactions.as_ref().filter(|_|!self.thread_id.is_empty()).ok_or_else(||runtime_error(InteractionError::Unavailable))?;
+        store.expected(&InteractionBinding { key:key.clone(),conversation:self.thread_id.clone(),generation:self.generation },Some(supplied)).map_err(runtime_error)
+    }
+
+    pub fn request_revision(&self,id:&RequestId) -> Option<String> { self.request_epochs.get(id).map(u64::to_string) }
+
+    fn check_request(&self,expected:&ExpectedInteraction,kind:InteractionKind,id:&RequestId,request:&Value) -> Result<(),RuntimeError> {
+        if self.answering.contains(id) { return Err(runtime_error(InteractionError::Changed)); }
+        let revision = self.request_epochs.get(id).ok_or_else(||runtime_error(InteractionError::Unavailable))?.to_string();
+        let thread = request["params"]["threadId"].as_str().filter(|id|!id.is_empty()).ok_or_else(||runtime_error(InteractionError::Unavailable))?;
+        expected.check(&native_target(kind,thread,&json!(id)),request,Some(&revision)).map_err(runtime_error)
+    }
+
     pub fn command(&mut self,command:RuntimeCommand,clock:ClockSample) -> Result<Vec<Effect>,RuntimeError> {
         self.clock = clock;
         // Reiniciar é a saída de um turno que nunca fecha e de um processo caído: vale trabalhando e morto.
         if self.headless && matches!(command.kind,OperationKind::Restart | OperationKind::Reload) {
             return Ok(vec![Effect::Respawn { operation_id:command.operation_id,reason:"restart".into(),patch:Value::Null,reply:json!({}) }]);
         }
-        if !self.headless || !self.alive { return Err(error("runtime sem terminal indisponível")); }
+        if !self.alive { return Err(error("runtime sem terminal indisponível")); }
+        // Com terminal só passa o que tem execução terminal completa; o resto continua com a TUI.
+        // Orientar e interromper vão pelo app-server como no adapter Python, sem nada da tabela sem terminal.
+        if !self.headless && !matches!(command.kind,OperationKind::Input | OperationKind::Steer | OperationKind::Interrupt
+            | OperationKind::Select | OperationKind::AnswerQuestions | OperationKind::SkipQuestion | OperationKind::DispatchAsyncAnswer) {
+            return Err(error("operação ainda não atendida no Codex com terminal"));
+        }
         let id = command.operation_id;
         let payload = command.payload;
         let mut effects = Vec::new();
@@ -779,9 +1114,12 @@ impl Engine {
                     return Ok(effects);
                 }
                 let text = payload["text"].as_str().ok_or_else(||error("mensagem sem texto"))?;
-                // Sem `summary` o pensamento sai cifrado no rollout e não há o que mostrar.
+                // Sem `summary` o pensamento sai cifrado no rollout e não há o que mostrar. Com terminal
+                // aprovação e resumo são da TUI: reenviar a tabela do sem-terminal sobrescreveria o `/permissions` dela.
+                let headless = self.headless;
                 let request = ClientRequest::TurnStart(wire::TurnStartParams { thread_id:self.thread_id.clone(),
-                    approval_policy:Some(approval(&self.permission_mode).into()),summary:Some("detailed".into()),input:input_of(&payload,text) });
+                    approval_policy:headless.then(||approval(&self.permission_mode).into()),summary:headless.then(||"detailed".into()),
+                    input:input_of(&payload,text) });
                 self.send(id,request,None,&mut effects);
             }
             OperationKind::Steer => {
@@ -842,8 +1180,11 @@ impl Engine {
                 self.send(format!("{id}:settings"),self.thread_read(false),Some(json!({"kind":"set_mode","parent":id,"mode":mode})),&mut effects);
             }
             OperationKind::Select => {
-                let (request_id,request) = self.server_requests.iter().find(|(id,request)|!self.answering.contains(id) && is_card(request))
-                    .cloned().ok_or_else(||RuntimeError::new("no_pending_permission","nenhuma aprovação pendente"))?;
+                let expected = self.expected(&payload)?;
+                let (request_id,request) = self.server_requests.iter().find(|(id,request)|is_card(request)
+                    && request["params"]["threadId"].as_str().is_some_and(|thread| native_target(InteractionKind::Approval,thread,&json!(id)) == expected.target))
+                    .cloned().ok_or_else(||runtime_error(InteractionError::Changed))?;
+                self.check_request(&expected,InteractionKind::Approval,&request_id,&request)?;
                 let option = payload["option"].as_u64().ok_or_else(||error("opção inválida"))?;
                 let invalid = || error("opção inválida");
                 let result = match request["method"].as_str().unwrap_or("") {
@@ -859,44 +1200,93 @@ impl Engine {
                     ELICITATION => match option { 1=>json!({"action":"accept"}),2=>json!({"action":"cancel"}),_=>return Err(invalid()) },
                     _ => json!({"decision":match option { 1=>"accept",2=>"decline",3 if !unreadable_command(&request)=>"acceptForSession",_=>return Err(invalid()) }}),
                 };
-                self.answer(id,request_id,result,None,&mut effects)?;
+                self.answer(id.clone(),request_id,result,None,&mut effects)?;
+                self.wires.get_mut(&id).unwrap().interaction = Some(expected);
             }
             OperationKind::AnswerQuestions => {
-                let request_id:RequestId = serde_json::from_value(payload["request_id"].clone()).map_err(|_|error("ID da resposta inválido"))?;
+                let expected = self.expected(&payload)?;
+                let request_id:RequestId = serde_json::from_value(expected.native_id(payload.get("request_id")).map_err(runtime_error)?)
+                    .map_err(|_|runtime_error(InteractionError::Changed))?;
                 if let RequestId::String(request) = &request_id {
                     if request.starts_with("async:") {
                         let question = self.async_questions.pending.iter().find(|(key,_)|key == request).map(|(_,q)|q.clone()).ok_or_else(||error("a pergunta já foi respondida ou pertence a outra conversa"))?;
+                        expected.check(&native_target(InteractionKind::Question,&self.thread_id,&json!(request_id)),&question,None).map_err(runtime_error)?;
                         let response = question_response(&question,&payload["answers"])?;
                         let answer = response["answers"]["answer"]["answers"][0].as_str().unwrap_or("");
                         let text = format!("> {}\n\n{answer}",question["questions"][0]["question"].as_str().unwrap_or(""));
+                        if !self.headless {
+                            // Com terminal a resposta vira entrada reservada na fila: sai quando nada segura um turno novo.
+                            if let Some(existing) = self.reservations.iter().find(|r|r.reservation.request_id == *request) {
+                                if existing.state == ReservationState::Reserving { return Err(error("a resposta anterior ainda está sendo registrada")); }
+                                return Ok(vec![Effect::Reply { operation_id:id,disposition:Disposition::Unknown,payload:existing.reservation.reply_payload() }]);
+                            }
+                            self.counter += 1;
+                            let entry_id = format!("async-answer:{}:{}",self.generation,self.counter);
+                            let reservation = ReservedAsyncAnswer { request_id:request.clone(),interaction_id:expected.interaction_id.clone(),
+                                entry_id:entry_id.clone(),operation_id:entry_id,text };
+                            let command = Self::async_answer_command(&reservation,&self.thread_id,self.generation);
+                            self.reservations.push(Reservation { reservation:reservation.clone(),state:ReservationState::Reserving });
+                            effects.push(Effect::ReserveAsyncAnswer { operation_id:id,reservation,command });
+                            self.changed(&mut effects,false);
+                            return Ok(effects);
+                        }
                         let next = json!({"kind":"async_answer","request_id":request,"text":text});
                         let request = ClientRequest::TurnStart(wire::TurnStartParams { thread_id:self.thread_id.clone(),
                             approval_policy:None,summary:None,input:vec![json!({"type":"text","text":text})] });
-                        self.send(id,request,Some(next),&mut effects);
+                        self.send(id.clone(),request,Some(next),&mut effects);
+                        self.wires.get_mut(&id).unwrap().interaction = Some(expected);
                         self.changed(&mut effects,true);
                         return Ok(effects);
                     }
                 }
-                let question = self.blocking_question().ok_or_else(||error("a pergunta já foi respondida ou cancelada"))?;
-                if question["request_id"] != serde_json::to_value(&request_id).unwrap() { return Err(error("a pergunta mudou")); }
+                let (_,request) = self.server_requests.iter().find(|(key,_)|key == &request_id)
+                    .ok_or_else(||runtime_error(InteractionError::Changed))?;
+                self.check_request(&expected,InteractionKind::Question,&request_id,request)?;
+                let question = Self::question_for(&request_id,request).ok_or_else(||runtime_error(InteractionError::Changed))?;
                 let mut response = question_response(&question,&payload["answers"])?;
                 if let Some(fields) = self.server_requests.iter().find(|(key,_)|key == &request_id).and_then(|(_,r)|form_fields(r)) {
                     response = json!({"action":"accept","content":form_content(&fields,&response)?});
                 }
-                self.answer(id,request_id,response,None,&mut effects)?;
+                self.answer(id.clone(),request_id,response,None,&mut effects)?;
+                self.wires.get_mut(&id).unwrap().interaction = Some(expected);
             }
             OperationKind::SkipQuestion => {
-                let form = serde_json::from_value::<RequestId>(payload["request_id"].clone()).ok()
-                    .filter(|rid|self.server_requests.iter().any(|(key,r)|key == rid && form_fields(r).is_some()));
-                if let Some(request_id) = form {
-                    self.answer(id,request_id,json!({"action":"cancel"}),None,&mut effects)?;
+                let expected = self.expected(&payload)?;
+                let request_id:RequestId = serde_json::from_value(expected.native_id(payload.get("request_id")).map_err(runtime_error)?)
+                    .map_err(|_|runtime_error(InteractionError::Changed))?;
+                if let Some((_,request)) = self.server_requests.iter().find(|(key,request)|key == &request_id && form_fields(request).is_some()) {
+                    self.check_request(&expected,InteractionKind::Question,&request_id,request)?;
+                    self.answer(id.clone(),request_id,json!({"action":"cancel"}),None,&mut effects)?;
+                    self.wires.get_mut(&id).unwrap().interaction = Some(expected);
                 } else {
-                    let request = payload["request_id"].as_str().ok_or_else(||error("ID da pergunta inválido"))?;
-                    if !self.async_questions.pending.iter().any(|(id,_)|id == request) { return Err(error("a pergunta já foi respondida ou pertence a outra conversa")); }
-                    self.async_questions.skipped.insert(request.into()); self.async_questions.resolve(request);
+                    let RequestId::String(request) = request_id else { return Err(runtime_error(InteractionError::Changed)); };
+                    let (_,question) = self.async_questions.pending.iter().find(|(key,_)|key == &request).ok_or_else(||runtime_error(InteractionError::Changed))?;
+                    expected.check(&native_target(InteractionKind::Question,&self.thread_id,&json!(request)),question,None).map_err(runtime_error)?;
+                    // Sem escrita nativa: validação e retirada ficam na mesma rodada do dono.
+                    self.async_questions.skipped.insert(request.clone()); self.async_questions.resolve(&request);
                     self.policy("session.patch_meta",json!({"skipped_async_questions":self.async_questions.skipped}),&mut effects);
                     effects.push(Effect::Reply { operation_id:id,disposition:Disposition::Accepted,payload:json!({}) });
                 }
+            }
+            OperationKind::DispatchAsyncAnswer => {
+                if self.headless { return Err(error("operação interna do Codex com terminal")); }
+                let supplied:ReservedAsyncAnswer = serde_json::from_value(payload.clone()).map_err(|_|error("reserva de resposta inválida"))?;
+                let found = self.reservations.iter().position(|r|r.reservation == supplied);
+                let usable = found.filter(|&index|self.reservations[index].state == ReservationState::Reserved && id == supplied.operation_id
+                    && payload["thread_id"] == self.thread_id.as_str() && payload["generation"].as_u64() == Some(self.generation)
+                    && self.async_pending(&supplied.request_id));
+                let Some(_) = usable else {
+                    // Pergunta encerrada, outra conversa ou reserva desconhecida: a entrada sai da fila sem turno.
+                    if let Some(index) = found.filter(|&index|self.reservations[index].state == ReservationState::Reserved) { self.reservations.remove(index); }
+                    return Ok(vec![Effect::Reply { operation_id:id,disposition:Disposition::Rejected,
+                        payload:json!({"error":"a pergunta já foi respondida ou pertence a outra conversa","reservation":"invalid"}) }]);
+                };
+                if !self.async_dispatch_ready() { return Ok(vec![Effect::Reply { operation_id:id,disposition:Disposition::Deferred,payload:json!({}) }]); }
+                self.set_reservation(&supplied.entry_id,ReservationState::Dispatching);
+                let next = json!({"kind":"async_answer","reserved":true,"request_id":supplied.request_id,"text":supplied.text,"entry_id":supplied.entry_id});
+                let request = ClientRequest::TurnStart(wire::TurnStartParams { thread_id:self.thread_id.clone(),
+                    approval_policy:None,summary:None,input:vec![json!({"type":"text","text":supplied.text})] });
+                self.send(id,request,Some(next),&mut effects);
             }
             OperationKind::SetPermissionMode => {
                 let wanted = payload["mode"].as_str().unwrap_or("").trim();
@@ -930,7 +1320,7 @@ impl Engine {
 
     fn answer(&mut self,operation_id:String,request_id:RequestId,result:Value,rpc_error:Option<Value>,effects:&mut Vec<Effect>) -> Result<(),RuntimeError> {
         if !self.answering.insert(request_id.clone()) { return Err(error("pedido já está sendo respondido")); }
-        self.wires.insert(operation_id.clone(),Wire { request_id:None,server_request:Some(request_id.clone()),
+        self.wires.insert(operation_id.clone(),Wire { interaction:None,request_id:None,server_request:Some(request_id.clone()),
             server_epoch:self.request_epochs.get(&request_id).copied(),final_result:false });
         let frame = if let Some(error) = rpc_error { json!({"jsonrpc":"2.0","id":request_id,"error":error}) }
             else { json!({"jsonrpc":"2.0","id":request_id,"result":result}) };
@@ -939,6 +1329,19 @@ impl Engine {
     }
 
     pub fn apply(&mut self,input:EngineInput,clock:ClockSample) -> Result<Vec<Effect>,RuntimeError> {
+        let result = self.apply_input(input,clock);
+        self.stamp_turn();
+        result
+    }
+
+    /// Como o Python ao ver `working` vindo do stream ou da retomada: turno sem início conhecido conta
+    /// a partir de agora, senão seguraria o envio para sempre (ou expiraria na hora).
+    fn stamp_turn(&mut self) {
+        if !self.in_progress { self.in_progress_since = None; }
+        else if !self.headless && self.in_progress_since.is_none() { self.in_progress_since = Some(self.clock.monotonic_s); }
+    }
+
+    fn apply_input(&mut self,input:EngineInput,clock:ClockSample) -> Result<Vec<Effect>,RuntimeError> {
         self.clock = clock;
         let mut effects = Vec::new();
         self.expire_service_tier(&mut effects);
@@ -948,6 +1351,9 @@ impl Engine {
                 else if line.get("id").is_some() { self.reply(line,&mut effects)?; }
                 else if line["type"] == "cano_saiu" {
                     self.alive = false; self.in_progress = false; self.ready = false; self.clear_preview(&mut effects);
+                    self.connected = false; self.subscribed = false; self.subscribe_due = None;
+                    // Fim da vida da conexão terminal: resposta tardia a pedido desta vida não é transplantada.
+                    if !self.headless { self.server_requests.clear(); self.answering.clear(); self.request_epochs.clear(); }
                     self.finish_service_tier(Disposition::Unknown,json!({"error":"O Codex desconectou antes de confirmar Fast"}),&mut effects);
                     self.state.problema = Some("headless_caiu".into()); self.changed(&mut effects,true);
                 }
@@ -973,32 +1379,76 @@ impl Engine {
                     let server_epoch = wire.server_epoch;
                     let request_id = wire.request_id.clone();
                     wire.final_result = outcome != WriteOutcome::Unknown;
+                    let answered = server.is_some();
                     if let Some(id) = server {
-                        if outcome == WriteOutcome::Written && self.request_epochs.get(&id).copied() == server_epoch {
+                        if outcome == WriteOutcome::NotWritten && self.request_epochs.get(&id).copied() == server_epoch { self.answering.remove(&id); }
+                        // Com terminal a escrita não decide nada: a TUI pode ter respondido antes, e o pedido só sai no `serverRequest/resolved`.
+                        if self.headless && outcome == WriteOutcome::Written && self.request_epochs.get(&id).copied() == server_epoch {
                             let notice = self.server_requests.iter().find(|(key,_)|key == &id).and_then(|(_,request)|unsupported_notice(request));
                             self.server_requests.retain(|(key,_)|key != &id); self.answering.remove(&id); self.request_epochs.remove(&id);
                             if let Some(text) = notice { self.policy("local_output",json!({"text":text}),&mut effects); }
                         }
                     }
+                    let reserved = request_id.as_ref().and_then(|id|self.rpc.get(id)).and_then(reserved_entry);
                     if outcome == WriteOutcome::NotWritten {
-                        if let Some(id) = request_id { self.rpc.remove(&id); }
+                        // Assinatura que nem saiu tenta de novo na espera crescente, senão a sessão ficaria surda calada.
+                        if let Some(id) = request_id { if self.rpc.remove(&id).is_some_and(|rpc|subscribe_rpc(&rpc)) { self.schedule_subscribe(); } }
                     }
-                    effects.push(Effect::Reply { operation_id,disposition:match outcome { WriteOutcome::Written=>Disposition::Accepted,
-                        WriteOutcome::NotWritten=>Disposition::Rejected,WriteOutcome::Unknown=>Disposition::Unknown },payload:json!({"write_outcome":outcome}) });
+                    let disposition = if answered {
+                        match (outcome,self.headless) {
+                            (WriteOutcome::NotWritten,_) => Disposition::Rejected,
+                            (WriteOutcome::Unknown,_) => Disposition::Unknown,
+                            (WriteOutcome::Written,false) => Disposition::Unknown,
+                            (WriteOutcome::Written,true) => Disposition::Accepted,
+                        }
+                    } else {
+                        match outcome { WriteOutcome::Written=>Disposition::Accepted,
+                            // Reserva que não saiu volta à fila pela mesma operação; a pergunta é conferida de novo.
+                            WriteOutcome::NotWritten if reserved.is_some() => Disposition::Deferred,
+                            WriteOutcome::NotWritten=>Disposition::Rejected,WriteOutcome::Unknown=>Disposition::Unknown }
+                    };
+                    if let Some(entry) = &reserved {
+                        self.set_reservation(entry,if outcome == WriteOutcome::NotWritten { ReservationState::Reserved } else { ReservationState::Uncertain });
+                    }
+                    let mut payload = json!({"write_outcome":outcome});
+                    if answered && !self.headless { payload["decision_confirmed"] = json!(false); }
+                    effects.push(Effect::Reply { operation_id,disposition,payload });
                     self.changed(&mut effects,true);
                 }
             }
             EngineInput::Tick => {
                 if let Some(text) = self.preview.tick(clock.monotonic_s) { self.publish(text,&mut effects); }
                 if let Some(text) = self.thinking.tick(clock.monotonic_s) { self.publish_on("thinking",text,&mut effects); }
+                let mut subscribe_lost = false;
+                let mut uncertain = Vec::new();
                 for rpc in self.rpc.values_mut() {
                     if !rpc.timed_out && clock.monotonic_s >= rpc.deadline {
                         rpc.timed_out = true;
+                        subscribe_lost |= subscribe_rpc(rpc) && rpc.params["threadId"] == self.thread_id.as_str();
+                        uncertain.extend(reserved_entry(rpc));
                         effects.push(Effect::Reply { operation_id:rpc.operation_id.clone(),disposition:Disposition::Unknown,payload:json!({"error":"RPC sem resposta"}) });
                         if let Some(parent) = rpc.continuation.as_ref().and_then(|next|next["parent"].as_str()) {
                             effects.push(Effect::Reply { operation_id:parent.into(),disposition:Disposition::Unknown,payload:json!({"error":"preparação sem resposta"}) });
                         }
                     }
+                }
+                for entry in uncertain { self.set_reservation(&entry,ReservationState::Uncertain); }
+                // Assinatura sem resposta é falha de protocolo, não "ainda sem rollout": aparece em vez de ficar ociosa.
+                if subscribe_lost && !self.subscribed {
+                    self.subscription_failed("thread/resume sem resposta",&mut effects);
+                    self.changed(&mut effects,false);
+                }
+                if self.subscribe_due.is_some_and(|due|clock.monotonic_s >= due) {
+                    self.subscribe(&mut effects);
+                    self.changed(&mut effects,false);
+                }
+                // Como o Python: só libera o envio, sem dar o turno por concluído nem reenviar; `>=` evita prazo que nunca vence.
+                if self.unsubscribed_turn_due().is_some_and(|due|clock.monotonic_s >= due) {
+                    tracing::warn!(session = %self.metadata["name"].as_str().unwrap_or("-"),
+                        "codex: turno sem confirmação há 300s numa sessão NÃO assinada — liberando envio (sem rastreio de turno)");
+                    self.in_progress = false; self.in_progress_since = None; self.lost_requests.clear();
+                    self.changed(&mut effects,true);
+                    effects.push(Effect::WakeQueue);
                 }
             }
             EngineInput::PolicyResult { request_id,payload } => {
@@ -1032,6 +1482,7 @@ impl Engine {
             self.changed(effects,false);
             return Ok(());
         }
+        if subscribe_rpc(&rpc) { self.subscribe_reply(&rpc,&line,effects); return Ok(()); }
         if !line["error"].is_null() && !already_initialized {
             if rpc.method == "thread/backgroundTerminals/terminate" {
                 let text = format!("O comando do turno interrompido não foi encerrado ({}): {}",
@@ -1044,6 +1495,8 @@ impl Engine {
                 }
                 self.release_early_voice(effects)?;
             }
+            // Turno recusado pelo Codex: a reserva acaba e a pergunta continua aberta para outra resposta.
+            if let Some(entry) = reserved_entry(&rpc) { self.reservations.retain(|r|r.reservation.entry_id != entry); }
             let message = line["error"]["message"].as_str().unwrap_or("");
             if self.bootstrap_fallback(&rpc,message,effects) { return Ok(()); }
             let transfer = self.metadata["transfer_id"].as_str().is_some_and(|id|!id.is_empty());
@@ -1058,7 +1511,7 @@ impl Engine {
                 return Ok(());
             }
             // Subida recusada: a sessão nunca fica pronta, então a recusa aparece com o motivo em vez de ficar ociosa.
-            if let Some(parent) = rpc.continuation.as_ref().filter(|next|matches!(next["kind"].as_str(),Some("bootstrap" | "bootstrap_thread" | "bootstrap_ready")))
+            if let Some(parent) = rpc.continuation.as_ref().filter(|next|matches!(next["kind"].as_str(),Some("bootstrap" | "terminal_bootstrap" | "bootstrap_thread" | "bootstrap_ready")))
                 .and_then(|next|next["parent"].as_str()) {
                 tracing::warn!(session = %self.metadata["name"].as_str().unwrap_or("-"), method = %rpc.method, reason = %message, "o Codex recusou abrir a conversa");
                 effects.push(Effect::Diag { event:DiagEvent::CodexBootstrap,code:rpc.method.clone() });
@@ -1114,7 +1567,10 @@ impl Engine {
                 if !response.thread.id.is_empty() && response.thread.id != self.thread_id {
                     self.finish_service_tier(Disposition::Unknown,json!({"error":"A conversa mudou antes de confirmar Fast"}),effects);
                     self.clear_preview(effects); self.thread_id = response.thread.id.clone();
+                    self.bind_interactions()?;
                 }
+                // A vista leva o rollout: o Python recusa como velho o patch que difere dela.
+                self.rollout_path = response.thread.path.clone();
                 let mut patch = json!({"thread_id":self.thread_id,"rollout_path":response.thread.path});
                 if rpc.settings_revision == self.settings_revision {
                     self.model = response.model.clone().or(self.model.clone());
@@ -1129,9 +1585,12 @@ impl Engine {
                 self.policy("session.patch_meta",patch,effects);
             }
             "turn/start" => {
+                // Mesmo tardia (prazo vencido), a aceitação comprova a entrada reservada.
+                if let Some(entry) = reserved_entry(&rpc) { self.finish_reservation(&entry); }
                 if rpc.state_revision == self.state_revision {
                     let response:wire::TurnStartResponse = self.decode_reply(&rpc.method,&result,effects);
                     self.turn_id = Some(response.turn.id).filter(|id|!id.is_empty()); self.in_progress = true; self.state_revision += 1;
+                    if !self.headless { self.in_progress_since = Some(self.clock.monotonic_s); }
                 }
             }
             "thread/compact/start" => {
@@ -1169,7 +1628,7 @@ impl Engine {
                 Some("bootstrap") if rpc.method == "initialize" => {
                     let parent = next["parent"].as_str().unwrap_or("");
                     let notification = format!("{parent}:initialized");
-                    self.wires.insert(notification.clone(),Wire { request_id:None,server_request:None,server_epoch:None,final_result:false });
+                    self.wires.insert(notification.clone(),Wire { interaction:None,request_id:None,server_request:None,server_epoch:None,final_result:false });
                     effects.push(Effect::Write { operation_id:Some(notification),
                         frame:json!({"jsonrpc":"2.0","method":"initialized","params":{}}) });
                     let request = if self.reconnect && !self.thread_id.is_empty() {
@@ -1180,6 +1639,19 @@ impl Engine {
                         } else { ClientRequest::ThreadResume(wire::ThreadResumeParams { thread_id:self.thread_id.clone(),..Default::default() }) }
                     } else { self.bootstrap_start() };
                     self.send(format!("{parent}:thread"),request,Some(json!({"kind":"bootstrap_thread","parent":parent})),effects);
+                }
+                Some("terminal_bootstrap") if rpc.method == "initialize" => {
+                    let parent = next["parent"].as_str().unwrap_or("");
+                    let notification = format!("{parent}:initialized");
+                    self.wires.insert(notification.clone(),Wire { interaction:None,request_id:None,server_request:None,server_epoch:None,final_result:false });
+                    effects.push(Effect::Write { operation_id:Some(notification),
+                        frame:json!({"jsonrpc":"2.0","method":"initialized","params":{}}) });
+                    // Conectado já envia: a assinatura corre ao lado e não segura o primeiro turno.
+                    self.connected = true;
+                    if self.state.problema.as_deref() == Some(super::codex_terminal::DISCONNECTED) { self.state.problema = None; self.state.problema_detalhe = None; }
+                    effects.push(Effect::Reply { operation_id:parent.into(),disposition:Disposition::Accepted,payload:json!({"connected":true,"subscribed":false}) });
+                    effects.push(Effect::WakeQueue);
+                    self.subscribe(effects);
                 }
                 Some("bootstrap_thread") => self.thread_opened(next["parent"].as_str().unwrap_or(""),effects),
                 Some("bootstrap_ready") => {
@@ -1219,7 +1691,7 @@ impl Engine {
                         self.state.problema = Some("codex_turno_cortado".into()); self.state.problema_detalhe = None;
                     }
                 }
-                Some("async_answer") => self.async_questions.record_answer(next["request_id"].as_str().unwrap_or(""),next["text"].as_str().unwrap_or("")),
+                Some("async_answer") if next["reserved"] != true => self.async_questions.record_answer(next["request_id"].as_str().unwrap_or(""),next["text"].as_str().unwrap_or("")),
                 Some("skill_lookup") => {
                     let command:RuntimeCommand = serde_json::from_value(next["command"].clone()).map_err(|_|error("preparação de skill inválida"))?;
                     self.counter += 1;
@@ -1319,7 +1791,7 @@ impl Engine {
                     let (_,epoch) = voice.requests.get(&request_id).ok_or_else(||error("pedido de voz já encerrado"))?;
                     if !voice.answering.insert(request_id.clone()) { return Err(error("resposta de voz já enviada")); }
                     self.voice_wires.insert(id.clone(),(call_id,request_id.clone(),*epoch));
-                    self.wires.insert(id.clone(),Wire { request_id:None,server_request:None,server_epoch:None,final_result:false });
+                    self.wires.insert(id.clone(),Wire { interaction:None,request_id:None,server_request:None,server_epoch:None,final_result:false });
                     let frame = if payload.get("error").is_some_and(|error|!error.is_null()) { json!({"id":request_id,"error":payload["error"]}) }
                         else { json!({"id":request_id,"result":payload["result"]}) };
                     effects.push(Effect::Write { operation_id:Some(id),frame });
@@ -1370,7 +1842,7 @@ impl Engine {
                 if let Some(id) = line.get("id") {
                     let id:RequestId = serde_json::from_value(id.clone()).map_err(|_|error("ID do organizador inválido"))?;
                     let operation_id = format!("voice-ended:{}:{}",self.generation,epoch);
-                    self.wires.insert(operation_id.clone(),Wire { request_id:None,server_request:None,server_epoch:None,final_result:false });
+                    self.wires.insert(operation_id.clone(),Wire { interaction:None,request_id:None,server_request:None,server_epoch:None,final_result:false });
                     effects.push(Effect::Write { operation_id:Some(operation_id),frame:json!({"id":id,"error":{"code":-32000,"message":"chamada encerrada"}}) });
                 }
                 return Ok(());
@@ -1408,6 +1880,8 @@ impl Engine {
             self.counter += 1;
             self.request_epochs.insert(request_id.clone(),self.counter);
             self.answering.remove(&request_id);
+            // Reapresentado pela conexão nova: volta a ser pedido mostrável, com identidade nova.
+            self.lost_requests.remove(&request_id);
             if let Some((_,request)) = self.server_requests.iter_mut().find(|(id,_)|id == &request_id) { *request = line.clone(); }
             else { self.server_requests.push((request_id.clone(),line.clone())); }
             // Avisa aqui, uma vez por pedido: a tela relê o pedido a cada estado.
@@ -1416,7 +1890,14 @@ impl Engine {
                 effects.push(Effect::Diag { event:DiagEvent::CodexDecode,code:decode_code(&failure.method) });
             }
             let operation_id = format!("server:{}:{}",self.generation,self.counter);
-            if method == "currentTime/read" {
+            if !self.headless {
+                // Com terminal a TUI também recebe o pedido: o Hangar não responde sozinho nem recusa. Do que
+                // ele não mostra, só o método vai ao log, nunca os parâmetros.
+                if !is_card(&line) && method != "item/tool/requestUserInput" && form_fields(&line).is_none()
+                    && crate::warn_limit::allow(Some(&self.state.session),&format!("codex_tui_request:{}",decode_code(method))) {
+                    tracing::info!(session=%self.state.session,method,"pedido do Codex fica com a TUI");
+                }
+            } else if method == "currentTime/read" {
                 self.answer(operation_id,request_id,json!({"currentTimeAt":self.clock.epoch_s as i64}),None,effects)?;
             } else if method == ELICITATION {
                 if !is_url_elicitation(&line) && form_fields(&line).is_none() {
@@ -1431,6 +1912,7 @@ impl Engine {
             }
             self.changed(effects,true); return Ok(());
         }
+        if method == "thread/started" && !self.headless { self.thread_started(params,effects); return Ok(()); }
         let mut from_raw = false;
         let notification = match wire::ServerNotification::decode(method,params) {
             Ok(notification) => notification,
@@ -1448,9 +1930,13 @@ impl Engine {
         match notification {
             N::ServerRequestResolved(n) => {
                 let request_id = n.request_id.ok_or_else(||error("ID de resolução inválido"))?;
-                let notice = self.server_requests.iter().find(|(key,_)|key == &request_id).and_then(|(_,request)|unsupported_notice(request));
+                // Com terminal ninguém aqui recusou: o aviso de recusa é só do sem-terminal.
+                let notice = self.server_requests.iter().find(|(key,_)|key == &request_id).filter(|_|self.headless).and_then(|(_,request)|unsupported_notice(request));
                 if let Some(text) = notice { self.policy("local_output",json!({"text":text}),effects); }
+                // Encerra só a pendência indicada; a resolução não diz quem respondeu nem o quê.
                 self.server_requests.retain(|(id,_)|id != &request_id); self.answering.remove(&request_id); self.request_epochs.remove(&request_id);
+                self.lost_requests.remove(&request_id);
+                if self.ready_async_answer_entry().is_some() { effects.push(Effect::WakeQueue); }
             }
             N::TurnStarted(n) => {
                 self.in_progress = true; self.turn_id = Some(n.turn.id).filter(|id|!id.is_empty()); self.state_revision += 1;
@@ -1458,10 +1944,12 @@ impl Engine {
                 self.response_started = false; self.state.codex_buffering = false; self.clear_preview(effects);
                 self.state.problema = None; self.state.problema_detalhe = None;
                 self.running_commands.clear();
+                self.lost_requests.clear();
             }
             N::TurnCompleted(n) => {
                 if !n.turn.id.is_empty() && self.turn_id.as_deref().is_some_and(|current|current != n.turn.id) { return Ok(()); }
                 self.in_progress = false; self.turn_id = None; self.state_revision += 1; self.compacting = false;
+                self.lost_requests.clear();
                 self.first_response_start = None;
                 self.state.codex_buffering = false; self.response_started = false; self.clear_preview(effects);
                 self.server_requests.clear(); self.answering.clear(); self.request_epochs.clear();
@@ -1590,7 +2078,13 @@ impl Engine {
 
     pub fn next_deadline(&self) -> Option<f64> {
         self.preview.deadline().into_iter().chain(self.thinking.deadline()).chain(self.rpc.values().filter(|rpc|!rpc.timed_out).map(|rpc|rpc.deadline))
-            .chain(self.service_tier_pending.as_ref().map(|pending|pending.deadline)).min_by(f64::total_cmp)
+            .chain(self.service_tier_pending.as_ref().map(|pending|pending.deadline)).chain(self.subscribe_due).chain(self.unsubscribed_turn_due()).min_by(f64::total_cmp)
+    }
+
+    /// Só vale sem assinatura: assinada, quem fecha o turno é o `turn/completed`.
+    fn unsubscribed_turn_due(&self) -> Option<f64> {
+        if self.headless || self.subscribed || !self.in_progress { return None; }
+        self.in_progress_since.map(|since|since + UNSUBSCRIBED_TURN_TTL)
     }
 
     pub fn confirm_input(&mut self,operation_id:&str) -> Vec<Effect> {
@@ -1598,16 +2092,48 @@ impl Engine {
             && ["turn/start","turn/steer"].contains(&rpc.method.as_str())).map(|(id,_)|id.clone()).collect();
         for id in ids { self.rpc.remove(&id); }
         if let Some(wire) = self.wires.get_mut(operation_id) { wire.final_result = true; }
-        vec![Effect::Reply { operation_id:operation_id.into(),disposition:Disposition::Accepted,payload:json!({"confirmed":true}) }]
+        let mut effects = vec![Effect::Reply { operation_id:operation_id.into(),disposition:Disposition::Accepted,payload:json!({"confirmed":true}) }];
+        // O recibo no transcript prova a resposta reservada, inclusive a que ficou incerta.
+        if let Some(entry) = self.reservations.iter().find(|r|r.reservation.operation_id == operation_id).map(|r|r.reservation.entry_id.clone()) {
+            self.finish_reservation(&entry);
+            effects.push(Effect::StateChanged);
+        }
+        effects
     }
+
+    /// Pergunta da resposta reservada que esta operação escreve; a guarda do escritor só confere se ela segue aberta.
+    pub fn reserved_question(&self,operation_id:&str) -> Option<String> {
+        self.rpc.values().find(|rpc|rpc.operation_id == operation_id).and_then(|rpc|rpc.continuation.as_ref())
+            .filter(|next|next["kind"] == "async_answer" && next["reserved"] == true)
+            .and_then(|next|next["request_id"].as_str()).map(str::to_owned)
+    }
+
+    pub fn async_question_pending(&self,request_id:&str) -> bool { self.async_pending(request_id) }
 
     pub fn write_is_current(&self,operation_id:&str) -> bool {
         self.wires.get(operation_id).is_none_or(|wire|(wire.request_id.is_none() || !wire.final_result)
-            && wire.server_request.as_ref().is_none_or(|id|self.request_epochs.get(id).copied() == wire.server_epoch))
+            && wire.server_request.as_ref().is_none_or(|id|self.request_epochs.get(id).copied() == wire.server_epoch)
+            // Resposta reservada só sai enquanto a pergunta dela continua aberta.
+            && wire.request_id.as_ref().and_then(|id|self.rpc.get(id)).and_then(|rpc|rpc.continuation.as_ref())
+                .filter(|next|next["kind"] == "async_answer" && next["reserved"] == true)
+                .is_none_or(|next|next["request_id"].as_str().is_some_and(|id|self.async_pending(id))))
     }
 }
 
 fn voice_rpc(rpc:&Rpc) -> bool { rpc.continuation.as_ref().is_some_and(|next|next["kind"] == "voice") }
+fn subscribe_rpc(rpc:&Rpc) -> bool { rpc.continuation.as_ref().is_some_and(|next|next["kind"] == "subscribe") }
+fn reserved_entry(rpc:&Rpc) -> Option<String> {
+    rpc.continuation.as_ref().filter(|next|next["kind"] == "async_answer" && next["reserved"] == true)
+        .and_then(|next|next["entry_id"].as_str()).map(str::to_owned)
+}
+
+/// O id da operação é o marcador gravado na fila: `subscribe:<geração>:<n>`, formato que só `subscribe` produz.
+/// Registro anterior a ele não tem esse id e continua sendo restaurado como antes.
+fn subscribe_operation(operation_id:&str) -> bool {
+    let mut parts = operation_id.split(':');
+    parts.next() == Some("subscribe") && parts.next().is_some_and(|n|n.parse::<u64>().is_ok())
+        && parts.next().is_some_and(|n|n.parse::<u64>().is_ok()) && parts.next().is_none()
+}
 
 fn question_response(question:&Value,answers:&Value) -> Result<Value,RuntimeError> {
     let questions = question["questions"].as_array().ok_or_else(||error("perguntas inválidas"))?;

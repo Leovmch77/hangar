@@ -11,8 +11,9 @@ import { answerQuestions, skipQuestion } from '@hangar/core';
 import type { AnswerItem, AskQuestionPayload } from '@hangar/core';
 import * as m from '../../../../src/paraglide/messages';
 
-const askKey = (payload: AskQuestionPayload) => payload.request_id != null
-  ? `id:${String(payload.request_id)}` : `q:${JSON.stringify(payload.questions)}`;
+const askKey = (payload: AskQuestionPayload) => JSON.stringify([
+  payload.interaction_id, payload.request_id, payload.request_id == null ? payload.questions : null,
+]);
 
 export default function AskSheet() {
   const router = useRouter();
@@ -96,16 +97,17 @@ export default function AskSheet() {
   }
 
   // Cancelar explícito, não o gesto de voltar: pergunta assíncrona do Codex só some pelo backend.
-  const handleCancel = () => {
-    if (!current() || inFlight.current === request) return;
-    const id = payload.request_id;
-    if (!payload.is_async || typeof id !== 'string') { chat.closeAsk(); return; }
+  const handleCancel = (displayed: AskQuestionPayload) => {
+    if (!current() || askKey(displayed) !== request.key || inFlight.current === request) return;
+    const id = displayed.request_id;
+    const interactionId = displayed.interaction_id;
+    if (!displayed.is_async || typeof id !== 'string') { chat.closeAsk(); return; }
     const target = useServers.getState().servers.find((s) => s.id === serverId);
     if (!target) { setRouteError(m.chat_servidor_removido()); return; }
     inFlight.current = request;
     setPendingRequest(request);
     setRouteError('');
-    skipQuestion(sessionName, id, target)
+    skipQuestion(sessionName, id, interactionId, target)
       .then((result) => {
         if (!sameRequest()) return;
         if (result.ok) chat.closeAsk();
@@ -125,16 +127,16 @@ export default function AskSheet() {
     if (mounted.current) setPendingRequest(null);
   }
 
-  const handleSubmit = async (answers: AnswerItem[]) => {
+  const handleSubmit = async (answers: AnswerItem[], displayed: AskQuestionPayload) => {
     if (!current() || inFlight.current === request) return;
     const target = useServers.getState().servers.find((s) => s.id === serverId);
     if (!target) { setRouteError(m.chat_servidor_removido()); return; }
     inFlight.current = request;
     setPendingRequest(request);
     setRouteError('');
-    const requestId = payload.request_id;
+    const requestId = displayed.request_id;
     try {
-      const result = await answerQuestions(sessionName, answers, requestId, target);
+      const result = await answerQuestions(sessionName, answers, requestId, displayed.interaction_id, target);
       if (!sameRequest()) return;
       if (!result.ok) { setRouteError(m.native_action_uncertain()); return; }
       if (result.fallback) navegando.current = true;
@@ -145,7 +147,7 @@ export default function AskSheet() {
       const msg = actionError(e);
       setRouteError(msg);
       const status = (e as { status?: number })?.status;
-      if (payload.provider !== 'codex' && status !== 409) {
+      if (displayed.provider !== 'codex' && displayed.interaction_id == null && status !== 409) {
         navegando.current = true;
         chat.markAskDismissed();
         router.replace(`/s/${serverId}/${sessionName}/terminal?aviso=${encodeURIComponent(msg)}` as never);

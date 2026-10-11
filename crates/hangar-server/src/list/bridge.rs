@@ -208,6 +208,10 @@ pub struct ListBridge {
     pub demoted: Arc<crate::state::demote::Demoted>,
     /// Último estado de cada `Monitor` vivo: a lista o lê em vez de capturar o pane.
     pub published: Arc<crate::state::published::Published>,
+    plugin_runtime: std::sync::OnceLock<Arc<crate::runtime::gateway::RuntimeRegistry>>,
+    plugin_projection: Mutex<HashMap<String, (crate::interactions::InteractionBinding, hangar_api::state::StateEvent)>>,
+    #[cfg(test)]
+    test_plugins: Mutex<Option<BTreeMap<String, Result<crate::state::facts::PluginReading, String>>>>,
     /// Transcripts da última rodada do dono, para a limpeza das páginas; `None` = rodada incerta.
     live_jsonl: Mutex<Option<(Instant, HashSet<String>)>>,
 }
@@ -231,10 +235,13 @@ impl ListBridge {
             discovery: tokio::sync::Mutex::new(None),
             snapshot: tokio::sync::Mutex::new(None), git_running: Arc::default(),
             git_slots: Arc::new(tokio::sync::Semaphore::new(GIT_SLOTS)), epoch: AtomicU64::new(0),
-            state_facts: Arc::default(), demoted, published: Arc::default(), live_jsonl: Mutex::default() }
+            state_facts: Arc::default(), demoted, published: Arc::default(), live_jsonl: Mutex::default(),
+            plugin_runtime: std::sync::OnceLock::new(), plugin_projection: Mutex::default(),
+            #[cfg(test)] test_plugins: Mutex::default(),
+        }
     }
 
-    /// Rebaixamentos da rodada: valem já aqui (lista e `Monitor`), e os session ids vão ao Python.
+    /// Rebaixamentos da rodada valem no cache Rust da lista e do Monitor.
     fn demote(&self, effects: Vec<Effect>) -> Vec<String> {
         effects.into_iter().map(|Effect::DemoteAwaiting { sid, ts }| {
             self.demoted.demote(&sid, ts);
@@ -247,6 +254,68 @@ impl ListBridge {
         if self.runtime.set(runtime).is_err() {
             tracing::warn!(code = "list_runtime_twice", "lista: retrato do runtime já ligado; o segundo fica de fora");
             self.facts.diag.report("rust.list_failed", "", "list_runtime_twice", "retrato do runtime ligado duas vezes; vale o primeiro");
+        }
+    }
+
+    pub fn set_plugin_runtime(&self, runtime: Arc<crate::runtime::gateway::RuntimeRegistry>) {
+        self.caches.classify.apply({ let runtime = runtime.clone(); move |c| c.classifier.set_plugin_runtime(runtime) });
+        if self.plugin_runtime.set(runtime).is_err() {
+            self.facts.diag.report("rust.list_failed", "", "list_plugin_runtime_twice", "fonte do plugin já ligada");
+        }
+    }
+
+    pub fn set_permissions(&self, permissions: crate::state::permission::PermissionStore) {
+        self.caches.classify.apply(move |c| c.classifier.set_permissions(permissions));
+    }
+
+    pub fn owner_clients(&self) -> u32 { self.owner_clients.load(Ordering::Relaxed) }
+
+    async fn plugin_facts(&self, rows: &[SessionRow]) -> BTreeMap<String, Result<crate::state::facts::PluginReading, String>> {
+        #[cfg(test)]
+        if let Some(readings) = lock(&self.test_plugins).clone() { return readings; }
+        let jobs = rows.iter().filter(|row| row.provider == "claude").map(|row| async {
+            let read = match self.plugin_runtime.get() {
+                Some(runtime) => crate::state::facts::plugin_reading(runtime, &row.name).await,
+                None => Err("list_plugin_source_absent".into()),
+            };
+            (row.name.clone(), read)
+        });
+        futures_util::future::join_all(jobs).await.into_iter().collect()
+    }
+
+    fn project_plugins(&self, rows: &mut [SessionRow], plugins: &BTreeMap<String, Result<crate::state::facts::PluginReading, String>>) {
+        let mut previous = lock(&self.plugin_projection);
+        for row in rows.iter_mut().filter(|row| row.provider == "claude") {
+            let Some(reading) = plugins.get(&row.name) else { previous.remove(&row.name); continue };
+            let reading = match reading {
+                Ok(reading) => reading,
+                Err(code) => { previous.remove(&row.name); row.problema = Some(code.clone()); continue },
+            };
+            if previous.get(&row.name).is_some_and(|(binding, _)| binding != &reading.binding) { previous.remove(&row.name); }
+            let mut state = hangar_api::state::StateEvent { state: row.state.clone(), label: row.label.clone(), question: row.question.clone(),
+                options: row.options.clone(), interaction_id: row.interaction_id.clone(), ..Default::default() };
+            let projection = reading.facts.as_ref().map_err(Clone::clone).and_then(|local| {
+                crate::state::facts::project_plugin_state(&mut state, &local.questions)?;
+                if let Some(code) = row.problema.as_deref().filter(|code| *code == "list_capture_failed" || code.starts_with("askq_")) {
+                    return Err(code.to_owned());
+                }
+                Ok(())
+            });
+            if let Err(code) = projection {
+                if let Some((binding, trusted)) = previous.get(&row.name).filter(|(binding, _)| binding == &reading.binding) {
+                    let _ = binding;
+                    crate::state::facts::preserve_cards(&mut state, trusted);
+                }
+                row.problema = Some(code);
+            }
+            if reading.facts.is_ok() { previous.insert(row.name.clone(), (reading.binding.clone(), state.clone())); }
+            row.state = state.state;
+            row.label = state.label;
+            row.question = state.question.or_else(|| state.codex_question.as_ref()
+                .and_then(|question| question["questions"][0]["question"].as_str().map(str::to_owned)));
+            row.options = state.options;
+            row.interaction_id = state.interaction_id;
+            if let Ok(local) = &reading.facts { row.pending_questions = row.pending_questions.max(local.questions.len().min(u32::MAX as usize) as u32); }
         }
     }
 
@@ -270,6 +339,12 @@ impl ListBridge {
     pub fn state_dirs_blocking(&self) -> Result<(Arc<Vec<PathBuf>>, Dirs), ListError> {
         let dirs = self.dirs()?;
         Ok((self.caches.config_dirs(&dirs), dirs))
+    }
+
+    pub fn invalidate_context(&self, name: &str) {
+        let name = name.to_owned();
+        self.caches.decor.apply(move |decor| decor.context.forget(&name));
+        self.invalidate();
     }
 
     /// Pane do agente da sessão (`agent_pane::resolve`) pela descoberta compartilhada da lista.
@@ -382,8 +457,11 @@ impl ListBridge {
                 if rows.is_empty() {
                     return None;
                 }
+                let held = BTreeMap::new();
+                let mut problems = inp.facts.problems.clone();
+                for row in rows.iter().filter(|row| row.provider == "claude") { problems.remove(&row.name); }
                 let facts = Facts { hooks, alive: &alive, config_dirs: &config_dirs, headless: inp.headless.as_ref(),
-                    problems: &inp.facts.problems, stall_seconds: inp.facts.stall_seconds, held: &inp.facts.held,
+                    problems: &problems, stall_seconds: inp.facts.stall_seconds, held: &held,
                     monitors: &published };
                 let effects = handle.block_on(classifier.classify_some(&mut rows, &facts, &io));
                 Some((rows, effects))
@@ -394,11 +472,10 @@ impl ListBridge {
         }).await.map_err(|e| joined(e, "rodada parcial interrompida"))?;
         self.flush_notes();
         let Some((mut changed, effects)) = done else { return Ok(Partial::Unchanged) };
+        let plugins = self.plugin_facts(&changed).await;
+        self.project_plugins(&mut changed, &plugins);
         list_facts::mark_stale(&mut changed, &snap.facts, snap.facts_ok);
-        let demote = self.demote(effects);
-        if !demote.is_empty() {
-            self.facts.demote(demote);
-        }
+        self.demote(effects);
         let mut rows = (*snap.rows).clone();
         for new in changed {
             if let Some(row) = rows.iter_mut().find(|r| r.name == new.name) { *row = new; }
@@ -425,10 +502,28 @@ impl ListBridge {
         // Um ator lento não soma o prazo dele ao dos fatos.
         let runtime = async { match self.runtime.get() { Some(r) => Some(r.snapshots().await), None => None } };
         let pane_pids = pi_pane_pids(&rows, &panes);
-        let (fetched, runtime) = tokio::join!(client.fetch(&rows, input.owner_clients, &pane_pids, input.shadow), runtime);
+        let (fetched, runtime, plugins) = tokio::join!(client.fetch(&rows, input.owner_clients, &pane_pids, input.shadow), runtime, self.plugin_facts(&rows));
         let (mut rows, aside) = list_facts::apply((*rows).clone(), &fetched.facts, fetched.ok);
+        let mut targets = pane_targets(&panes, &agent_pids, &children);
+        if let Some(registry) = self.plugin_runtime.get() {
+            for row in rows.iter_mut().filter(|row| row.provider == "claude") {
+                if let Some(Ok(reading)) = plugins.get(&row.name) {
+                    row.lifecycle_id = Some(reading.binding.key.clone());
+                    match registry.terminal_target(&row.name).await {
+                        Ok(Some(target)) if target.key == reading.binding.key && target.generation == reading.binding.generation
+                            && target.binding.conversation == reading.binding.conversation => {
+                            row.jsonl = Some(target.transcript.to_string_lossy().into_owned());
+                            targets.insert(row.name.clone(), target.binding.pane);
+                        }
+                        Err(error) => row.problema = Some(error.code),
+                        Ok(Some(_)) => row.problema = Some("erro_interacao_desatualizada".into()),
+                        _ => {},
+                    }
+                }
+            }
+        }
         let (env, caches) = (self.env.clone(), self.caches.clone());
-        let inputs = Arc::new(RoundInputs { targets: Arc::new(pane_targets(&panes, &agent_pids, &children)),
+        let inputs = Arc::new(RoundInputs { targets: Arc::new(targets),
             headless: runtime.map(|by_key| headless_by_name(&rows, by_key)), facts: fetched.facts.clone(), agent_pids });
         // Só o hub acorda por arquivo: sem lista do dono aberta, ninguém usaria a cópia.
         let keep = input.owner_clients > 0 && !input.shadow;
@@ -443,11 +538,14 @@ impl ListBridge {
             let alive = |pid: i64| pid_alive(&*env.procs, pid);
             let io = MuxCapture::new(env.capture_program.clone(), CAPTURE_TIMEOUT, inp.targets.clone());
             let pre: Vec<SessionRow> = if keep { rows.iter().filter(|r| r.provider == "claude").cloned().collect() } else { Vec::new() };
+            let held = BTreeMap::new();
+            let mut problems = inp.facts.problems.clone();
+            for row in rows.iter().filter(|row| row.provider == "claude") { problems.remove(&row.name); }
             let effects = caches.classify.with(|Classify { classifier, hooks }| {
                 hooks.refresh(&config_dirs);
                 let facts = Facts { hooks, alive: &alive, config_dirs: &config_dirs,
-                    headless: inp.headless.as_ref(), problems: &inp.facts.problems, stall_seconds: inp.facts.stall_seconds,
-                    held: &inp.facts.held, monitors: &published };
+                    headless: inp.headless.as_ref(), problems: &problems, stall_seconds: inp.facts.stall_seconds,
+                    held: &held, monitors: &published };
                 handle.block_on(classifier.classify(&mut rows, &facts, &io))
             });
             let git_dirs = decorate(&env, &caches, &dirs, &config_dirs, &inp, &mut rows, io.wall(), io.mono(), true);
@@ -455,13 +553,9 @@ impl ListBridge {
         }).await.map_err(|e| joined(e, "produção interrompida"))?;
         self.flush_notes();
         self.refresh_git(git_dirs);
-        if !input.shadow {
-            let demote = self.demote(effects);
-            if !demote.is_empty() {
-                self.facts.demote(demote);
-            }
-        }
+        if !input.shadow { self.demote(effects); }
         let mut rows = rows;
+        self.project_plugins(&mut rows, &plugins);
         rows.extend(aside);
         list_facts::mark_stale(&mut rows, &fetched.facts, fetched.ok);
         if !input.shadow {
@@ -571,6 +665,7 @@ impl ListBridge {
 
     /// `_forget`: nome reusado por outra sessão não herda nada da morta. Não espera, como `seed`.
     pub fn forget(&self, name: &str) {
+        lock(&self.plugin_projection).remove(name);
         let c = &self.caches;
         let n = name.to_owned();
         c.resolver.apply({ let n = n.clone(); move |r| r.forget(&n) });
@@ -580,6 +675,9 @@ impl ListBridge {
 
     /// Não espera, como `seed`.
     pub fn rename(&self, old: &str, new: &str) {
+        let mut projected = lock(&self.plugin_projection);
+        projected.remove(old); projected.remove(new);
+        drop(projected);
         let c = &self.caches;
         let (o, n) = (old.to_owned(), new.to_owned());
         c.resolver.apply({ let (o, n) = (o.clone(), n.clone()); move |r| r.rename(&o, &n) });
@@ -645,11 +743,12 @@ fn run_discovery(panes: &[Pane], procs: &dyn ProcessView, children: &ChildrenMap
     (found.rows, found.agent_pids, found.problems)
 }
 
-/// Retrato do runtime (por chave) no nome de cada linha Claude sem terminal: a linha leva a chave na
-/// vida (`k:<chave>`). Linha sem chave fica fora, como sessão parada.
+/// Retrato do runtime (por chave) no nome de cada linha Claude sem terminal e de cada linha Codex: a
+/// linha leva a chave na vida (`k:<chave>`). Linha sem chave fica fora, como sessão parada. Codex com
+/// terminal só entra quando o Rust tem o ator dela: quem publica é o dono, não a presença do pane.
 fn headless_by_name(rows: &[SessionRow], by_key: BTreeMap<String, Value>) -> BTreeMap<String, Value> {
     let mut by_key = by_key;
-    rows.iter().filter(|r| r.headless && (r.provider == "claude" || r.provider == "codex")).filter_map(|r| {
+    rows.iter().filter(|r| r.provider == "codex" || (r.headless && r.provider == "claude")).filter_map(|r| {
         let key = r.lifecycle_id.as_deref()?.strip_prefix("k:")?;
         Some((r.name.clone(), by_key.remove(key)?))
     }).collect()
@@ -895,13 +994,44 @@ pub async fn private(State(st): State<Arc<AppState>>, ConnectInfo(peer): Connect
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn real_round_rebuilds_rows_and_keeps_only_same_life_projection_on_error() {
+        use crate::interactions::InteractionBinding;
+        use crate::state::facts::{PluginFacts, PluginReading};
+        let tmp = tempfile::tempdir().unwrap();
+        let dirs = Dirs { home: tmp.path().into(), claude: tmp.path().join(".claude"), codex_home: tmp.path().join(".codex"),
+            pi_sessions: tmp.path().join("pi"), omp_config: tmp.path().join("omp"), omp_agent: tmp.path().join("omp/agent"), kimi_home: tmp.path().join("kimi") };
+        let bridge = ListBridge::new(ListEnv { mux: Mux::default(), capture_program: "missing-test-mux".into(),
+            procs: Arc::new(procs::SystemProcs::default()), dirs: Some(dirs) }, FactsClient::new("127.0.0.1:9".parse().unwrap(), "s".into()));
+        let row = || serde_json::from_value::<SessionRow>(json!({"name":"s","provider":"claude","headless":true,"lifecycle_id":"k"})).unwrap();
+        *bridge.discovery.lock().await = Some(Discovery { at: Instant::now(), wall: wall_now(), epoch: 0, fresh: true,
+            rows: Arc::new(vec![row()]), agent_pids: Arc::default(), panes: Arc::default(), children: Arc::default() });
+        let binding = InteractionBinding { key: "k".into(), conversation: "sid".into(), generation: 1 };
+        let local = PluginFacts { plugin_state: None, waiter_open: true, heartbeat_age_ms: Some(0), question: None,
+            questions: vec![json!({"id":"perm:a","interaction_id":"a","questions":[],"tool":"Bash","resumo":"cmd"})], suggestion: "".into() };
+        let reading = |life: InteractionBinding, facts| BTreeMap::from([("s".into(), Ok(PluginReading { binding: life, facts }))]);
+        *lock(&bridge.test_plugins) = Some(reading(binding.clone(), Ok(local.clone())));
+        let first = bridge.produce_round(&ProduceFacts::default()).await.unwrap().0;
+        assert_eq!(first.rows[0].interaction_id.as_deref(), Some("a"));
+        let mut ambiguous = local;
+        ambiguous.questions.push(json!({"id":"perm:b","interaction_id":"b","questions":[],"tool":"Bash","resumo":"cmd"}));
+        *lock(&bridge.test_plugins) = Some(reading(binding.clone(), Ok(ambiguous)));
+        let rebuilt = bridge.produce_round(&ProduceFacts::default()).await.unwrap().0;
+        assert_eq!(rebuilt.rows[0].interaction_id.as_deref(), Some("a"));
+        assert_eq!(rebuilt.rows[0].problema.as_deref(), Some("erro_interacao_indisponivel"));
+        *lock(&bridge.test_plugins) = Some(reading(InteractionBinding { generation: 2, ..binding }, Err("plugin_store_unavailable".into())));
+        let next = bridge.produce_round(&ProduceFacts::default()).await.unwrap().0;
+        assert!(next.rows[0].interaction_id.is_none(), "rodada nova não herda cartão da geração anterior");
+    }
+
     #[test]
     fn runtime_view_reaches_codex_headless_rows() {
         let row = |name: &str, provider: &str, headless: bool| -> SessionRow { serde_json::from_value(serde_json::json!({
             "name": name, "provider": provider, "headless": headless, "lifecycle_id": format!("k:{name}")})).unwrap() };
-        let rows = [row("cl", "claude", true), row("cx", "codex", true), row("tui", "codex", false)];
-        let by_key = ["cl", "cx", "tui"].map(|k| (k.to_owned(), Value::Null)).into_iter().collect();
-        assert_eq!(headless_by_name(&rows, by_key).into_keys().collect::<Vec<_>>(), ["cl", "cx"]);
+        let rows = [row("cl", "claude", true), row("cx", "codex", true), row("tui", "codex", false), row("ct", "claude", false), row("py", "codex", false)];
+        // `tui` tem ator no Rust (chave no retrato): ele publica. `py` segue com o Python; Claude com terminal tem o `Monitor`.
+        let by_key = ["cl", "cx", "tui", "ct"].map(|k| (k.to_owned(), Value::Null)).into_iter().collect();
+        assert_eq!(headless_by_name(&rows, by_key).into_keys().collect::<Vec<_>>(), ["cl", "cx", "tui"]);
     }
 
     #[test]

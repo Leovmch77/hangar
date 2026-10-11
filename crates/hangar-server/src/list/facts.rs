@@ -277,11 +277,12 @@ pub fn apply(rows: Vec<SessionRow>, facts: &ListFacts, ok: bool) -> (Vec<Session
     let mut work = Vec::with_capacity(rows.len());
     let mut aside = Vec::new();
     for row in rows {
-        let row = overrides.remove(row.name.as_str()).cloned().unwrap_or(row);
-        if facts.frozen.contains(&row.name) { aside.push(row) } else { work.push(row) }
+        let external = overrides.remove(row.name.as_str());
+        let row = if row.provider == "claude" { row } else { external.cloned().unwrap_or(row) };
+        if row.provider != "claude" && facts.frozen.contains(&row.name) { aside.push(row) } else { work.push(row) }
     }
     // Linha que a transferência cria (a sessão de origem já saiu da descoberta).
-    for row in facts.overrides.iter().filter(|r| overrides.contains_key(r.name.as_str())) {
+    for row in facts.overrides.iter().filter(|r| r.provider != "claude" && overrides.contains_key(r.name.as_str())) {
         if facts.frozen.contains(&row.name) { aside.push(row.clone()) } else { work.push(row.clone()) }
     }
     aside.extend(facts.orq.iter().cloned());
@@ -408,6 +409,20 @@ mod tests {
         assert_eq!(names, [("orq-1", Some(ORQ_UNAVAILABLE))]);
         assert!(second.facts.hidden.contains("orq-1"), "escondida continua escondida");
         assert_eq!(diary(&seen, "rust.list_orq_unavailable").await["codigo"], "orq_unreadable");
+    }
+
+    #[test]
+    fn external_overrides_and_frozen_flags_do_not_decide_claude_life_or_question() {
+        let row = |provider: &str, id: &str| serde_json::from_value::<SessionRow>(json!({"name":"s","provider":provider,"interaction_id":id})).unwrap();
+        let facts = ListFacts { overrides: vec![row("claude", "old-python")], frozen: HashSet::from(["s".into()]),
+            unknown: false, ..Default::default() };
+        let (work, aside) = apply(vec![row("claude", "rust")], &facts, true);
+        assert!(aside.is_empty());
+        assert_eq!(work[0].interaction_id.as_deref(), Some("rust"));
+        let facts = ListFacts { overrides: vec![row("pi", "pi")], frozen: HashSet::from(["s".into()]), unknown: false, ..Default::default() };
+        let (work, aside) = apply(vec![row("pi", "")], &facts, true);
+        assert!(work.is_empty());
+        assert_eq!(aside[0].interaction_id.as_deref(), Some("pi"));
     }
 
     #[test]

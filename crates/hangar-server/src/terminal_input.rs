@@ -1,5 +1,7 @@
 //! Escritor Claude terminal; a fila e a política pertencem ao executor do runtime.
 use regex::Regex;
+use crate::interactions::{ExpectedInteraction, InteractionError, InteractionKind, InteractionStore};
+use serde_json::{Value, json};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, future::Future, path::PathBuf, pin::Pin, sync::{Arc, LazyLock, atomic::{AtomicU64, Ordering}}, time::Duration};
 use tokio::{io::{AsyncReadExt, AsyncWriteExt}, process::Command, sync::Mutex, time::timeout};
@@ -56,6 +58,8 @@ pub enum PluginReply { Unavailable, NotWritten, Filled, Accepted, Unknown }
 pub trait TerminalServices: Send + Sync {
     fn facts<'a>(&'a self, binding: &'a TerminalBinding) -> ServiceFuture<'a, InputFacts>;
     fn publish<'a>(&'a self, binding: &'a TerminalBinding, request: PluginRequest) -> ServiceFuture<'a, PluginReply>;
+    /// Recusa painel real ou reserva incompatível; não recusa só porque o turno está trabalhando.
+    fn permission_guard<'a>(&'a self, binding: &'a TerminalBinding) -> ServiceFuture<'a, ()>;
     /// Grava no diário que a escrita vai começar: antes disso, cair não deixa a entrega incerta.
     fn writing<'a>(&'a self) -> ServiceFuture<'a, ()> { Box::pin(async { Ok(()) }) }
 }
@@ -315,19 +319,113 @@ impl PaneFormats {
 /// As teclas da reserva por teclado (T5): uma por chamada, e só os dois acordes medidos juntos.
 const MODS_KEYS: [&[&str]; 4] = [&["C-x", "Tab"], &["Tab"], &["Enter"], &["C-x", "x"]];
 
+/// Retrato comparável do menu: mover cursor e marcar caixas não troca a pergunta.
+pub fn interaction_pane(screen: &str) -> Result<Value, InteractionError> {
+    let analysis = crate::terminal_state::analyze(screen);
+    let options = analysis.options.filter(|options| !options.is_empty()).ok_or(InteractionError::Unavailable)?;
+    if analysis.state != "awaiting_input" { return Err(InteractionError::Changed); }
+    Ok(json!({"question": analysis.question, "options": options.iter().map(|label| {
+        let label = label.trim();
+        if let Some(rest) = label.strip_prefix('[').and_then(|s| s.split_once(']')).map(|(_, rest)| rest) { rest.trim() } else { label }
+    }).collect::<Vec<_>>()}))
+}
+
+pub fn interaction_semantic(screen: &str, question: Option<&hangar_api::ask::AskQuestion>) -> Result<Value, InteractionError> {
+    Ok(json!({"source":"terminal", "pane":interaction_pane(screen)?, "questions":question.map(|q| &q.questions)}))
+}
+
+#[derive(Clone, Copy)]
+struct GuardedText<'a> {
+    expected: &'a ExpectedInteraction,
+    closed: bool,
+    pane: Option<&'a Value>,
+    input: Option<(&'a str, &'a ComposerSnapshot)>,
+    allow_owned: bool,
+}
+type TextGuard<'a> = Option<GuardedText<'a>>;
+
 pub struct TerminalDriver {
+    interactions: Option<Arc<InteractionStore>>,
+    interaction_source: Option<PathBuf>,
     binding: TerminalBinding,
     services: Arc<dyn TerminalServices>,
     io: Arc<dyn TerminalIo>,
     limits: InputLimits,
-    serial: Mutex<()>,
+    /// Compartilhável: drivers de vida curta do mesmo pane (Codex com terminal) se enfileiram aqui.
+    serial: Arc<Mutex<()>>,
     /// A identidade do pane já foi conferida por quem criou o driver: as operações de mod não a refazem.
     pane_checked: bool,
     /// Sem o Esc que devolve o foco do rodapé ao composer: a linha já tentou o bastante.
     footer_kept: bool,
 }
+/// Sequência inteira na mesma trava da entrada, sem reentrar pelos métodos públicos do driver.
+pub(crate) struct PermissionSequence<'a> {
+    driver: &'a TerminalDriver,
+    _serial: tokio::sync::MutexGuard<'a, ()>,
+}
+impl PermissionSequence<'_> {
+    /// Guarda e prova de vida, sem a política de menu: o seletor do Codex é ele mesmo um menu.
+    pub(crate) async fn screen(&self) -> Result<String, IoFailure> {
+        let driver = self.driver;
+        driver.services.permission_guard(&driver.binding).await
+            .map_err(|e| IoFailure { code: e.0, may_have_written: false })?;
+        // Uma reserva de mod não pode dispensar a prova de vida nesta sequência.
+        if driver.pane_checked { return Err(IoFailure { code: "permission_unverified_driver", may_have_written: false }); }
+        driver.capture_inner().await
+    }
+    pub(crate) async fn copy_mode(&self) -> Result<bool, IoFailure> { Ok(self.driver.mods_formats().await?.in_mode) }
+    /// A tela sem o texto esmaecido (a sugestão do composer vazio), para conferir o rascunho.
+    pub(crate) async fn typed_screen(&self) -> Result<String, IoFailure> { Ok(self.driver.composer_capture().await?.1) }
+    pub(crate) async fn press(&self, key: &str) -> Result<(), IoFailure> {
+        let driver = self.driver;
+        driver.services.permission_guard(&driver.binding).await
+            .map_err(|e| IoFailure { code: e.0, may_have_written: false })?;
+        driver.key_inner(key).await
+    }
+    pub(crate) async fn type_text(&self, text: &str) -> Result<(), IoFailure> {
+        let driver = self.driver;
+        driver.services.permission_guard(&driver.binding).await
+            .map_err(|e| IoFailure { code: e.0, may_have_written: false })?;
+        driver.literal(text).await
+    }
+    /// Sem guarda: fechar o que esta sequência abriu não pode depender do painel continuar fechado.
+    pub(crate) async fn escape(&self) -> Result<(), IoFailure> { self.driver.key_inner("Escape").await }
+    pub(crate) async fn capture(&self) -> Result<String, IoFailure> {
+        let screen = self.screen().await?;
+        let analysis = crate::terminal_state::analyze(&screen);
+        if analysis.overlay || analysis.options.is_some() {
+            return Err(IoFailure { code: "permission_menu_open", may_have_written: false });
+        }
+        if self.copy_mode().await? {
+            return Err(IoFailure { code: "permission_copy_mode", may_have_written: false });
+        }
+        Ok(screen)
+    }
+    pub(crate) async fn next(&self, expected: &str, deadline: tokio::time::Instant) -> Result<(), IoFailure> {
+        let screen = tokio::time::timeout_at(deadline, self.capture()).await
+            .map_err(|_| IoFailure { code: "permission_probe_timeout", may_have_written: false })??;
+        if crate::state::permission::parse_permission_mode(&screen) != Some(expected) {
+            return Err(IoFailure { code: "permission_mode_changed", may_have_written: false });
+        }
+        let driver = self.driver;
+        tokio::time::timeout_at(deadline, driver.services.permission_guard(&driver.binding)).await
+            .map_err(|_| IoFailure { code: "permission_probe_timeout", may_have_written: false })?
+            .map_err(|e| IoFailure { code: e.0, may_have_written: false })?;
+        if tokio::time::Instant::now() >= deadline {
+            return Err(IoFailure { code: "permission_probe_timeout", may_have_written: false });
+        }
+        tokio::time::timeout_at(deadline, driver.pane_effect(vec!["send-keys".into(), "-t".into(), driver.binding.pane.clone(), "BTab".into()])).await
+            .map_err(|_| IoFailure { code: "permission_key_timeout", may_have_written: true })?
+    }
+}
 impl TerminalDriver {
-    pub fn new(binding: TerminalBinding, services: Arc<dyn TerminalServices>, io: Arc<dyn TerminalIo>, limits: InputLimits) -> Self { Self { binding, services, io, limits, serial: Mutex::new(()), pane_checked: false, footer_kept: false } }
+    pub(crate) async fn permission_sequence(&self) -> PermissionSequence<'_> {
+        PermissionSequence { driver: self, _serial: self.serial.lock().await }
+    }
+    pub fn new(binding: TerminalBinding, services: Arc<dyn TerminalServices>, io: Arc<dyn TerminalIo>, limits: InputLimits) -> Self { Self { interactions: None, interaction_source: None, binding, services, io, limits, serial: Arc::new(Mutex::new(())), pane_checked: false, footer_kept: false } }
+    pub fn with_serial(mut self, serial: Arc<Mutex<()>>) -> Self { self.serial = serial; self }
+    pub fn with_interactions(mut self, store: Arc<InteractionStore>) -> Self { self.interactions = Some(store); self }
+    pub fn with_interaction_source(mut self, transcript: PathBuf) -> Self { self.interaction_source = Some(transcript); self }
     /// Driver para as operações de um clique de mod cujo pane já teve a identidade conferida na mesma
     /// reserva (`PaneOp::Hold`): sem a conferência, cada operação é um processo do multiplexador a menos.
     pub fn pane_checked(mut self) -> Self { self.pane_checked = true; self }
@@ -366,7 +464,32 @@ impl TerminalDriver {
         Ok(())
     }
     async fn effect(&self, args: Vec<String>, stdin: Vec<u8>) -> Result<(), IoFailure> {
+        self.effect_guarded(args, stdin, None).await
+    }
+    async fn check_text_guard(&self, guard: TextGuard<'_>) -> Result<(), IoFailure> {
+        let Some(guard) = guard else { return Ok(()); };
+        let failure = |error: InteractionError| IoFailure { code: error.code(), may_have_written: false };
+        self.check_source(guard.expected, guard.closed).map_err(failure)?;
+        if guard.closed {
+            let facts = self.verify().await?;
+            let (screen, typed) = self.composer_capture().await?;
+            let composer = Self::composer(&screen, &typed)?;
+            let owned = guard.allow_owned && guard.input.is_some_and(|(text,before)| composer.owned(text,before)
+                || !composer.content.is_empty() && (compact(text).starts_with(&compact(&composer.content))
+                    || self.binding.windows && text.starts_with('-') && format!("x{}",compact(text)).starts_with(&compact(&composer.content))));
+            if !facts.ready || facts.open_question || crate::terminal_state::analyze(&screen).state == "awaiting_input"
+                || crate::terminal_state::footer_visible(&screen) || !composer.is_empty() && !owned {
+                return Err(failure(InteractionError::Changed));
+            }
+        } else if let Some(pane) = guard.pane {
+            let screen = self.capture_inner().await?;
+            if interaction_pane(&screen).map_err(failure)? != *pane { return Err(failure(InteractionError::Changed)); }
+        }
+        self.check_source(guard.expected, guard.closed).map_err(failure)
+    }
+    async fn effect_guarded(&self, args: Vec<String>, stdin: Vec<u8>, guard: TextGuard<'_>) -> Result<(), IoFailure> {
         self.verify().await?;
+        self.check_text_guard(guard).await?;
         let output = self.raw(args, stdin).await?;
         if !output.success { return Err(IoFailure { code: "mux_effect_failed", may_have_written: true }); }
         Ok(())
@@ -392,6 +515,14 @@ impl TerminalDriver {
         Ok((unstyle(&styled, true), unstyle(&styled, false)))
     }
     pub async fn capture(&self) -> Result<String, IoFailure> { let _serial = self.serial.lock().await; self.capture_inner().await }
+    /// Uma captura sem chamar os serviços que ela própria alimenta.
+    pub(crate) async fn facts_screen(&self) -> Result<String, IoFailure> {
+        self.verify_pane().await?;
+        let (screen, _) = self.composer_capture_unverified().await?;
+        if self.binding.windows && screen.contains('\u{fffd}') { return Err(IoFailure { code:"capture_utf8",may_have_written:false }); }
+        self.verify_pane().await?;
+        Ok(screen)
+    }
     /// Efeito de mod no pane: confere só a identidade do pane (sem os fatos do Python, que pesam e não
     /// mudam um clique de mouse) e não entra no diário da fila.
     async fn pane_effect(&self, args: Vec<String>) -> Result<(), IoFailure> {
@@ -467,19 +598,21 @@ impl TerminalDriver {
         Self::composer(&screen, &typed).is_ok_and(|draft| draft.is_empty())
     }
     async fn settle(&self) { tokio::time::sleep(self.limits.settle).await; }
-    async fn key_inner(&self, key: &str) -> Result<(), IoFailure> {
+    async fn key_inner(&self, key: &str) -> Result<(), IoFailure> { self.key_guarded(key, None).await }
+    async fn key_guarded(&self, key: &str, guard: TextGuard<'_>) -> Result<(), IoFailure> {
         let mut args = vec!["send-keys".into(), "-t".into(), self.binding.pane.clone()];
         if key == "Enter" && !self.binding.windows { args.extend(["-l".into(), "--".into(), "\r".into()]); }
         else if key == "Escape" && self.binding.windows { args.extend(["-l".into(), "--".into(), "\u{1b}[27;1;27;1;0;1_\u{1b}[27;1;27;0;0;1_".into()]); }
         else { args.push(key.into()); }
-        self.effect(args, vec![]).await
+        self.effect_guarded(args, vec![], guard).await
     }
-    async fn literal(&self, text: &str) -> Result<(), IoFailure> {
+    async fn literal(&self, text: &str) -> Result<(), IoFailure> { self.literal_guarded(text, None).await }
+    async fn literal_guarded(&self, text: &str, mut guard: TextGuard<'_>) -> Result<(), IoFailure> {
         if text.is_empty() { return Ok(()); }
         if !self.binding.windows {
             // O tmux lê o ponto e vírgula final como separador mesmo depois de --.
             let text = text.strip_suffix(';').map_or_else(|| text.to_string(), |s| format!("{s}\\;"));
-            return self.effect(vec!["send-keys".into(), "-t".into(), self.binding.pane.clone(), "-l".into(), "--".into(), text], vec![]).await;
+            return self.effect_guarded(vec!["send-keys".into(), "-t".into(), self.binding.pane.clone(), "-l".into(), "--".into(), text], vec![], guard).await;
         }
         let placeholder = text.starts_with('-');
         let text = if placeholder { format!("x{text}") } else { text.into() };
@@ -489,33 +622,35 @@ impl TerminalDriver {
             let mut end = (start + 512).min(chars.len());
             while end < chars.len() && chars[end] == '-' && end-start < 700 { end += 1; }
             let part: String = chars[start..end].iter().collect();
-            self.effect(vec!["send-keys".into(), "-t".into(), self.binding.pane.clone(), "-l".into(), "--".into(), part], vec![]).await
+            self.effect_guarded(vec!["send-keys".into(), "-t".into(), self.binding.pane.clone(), "-l".into(), "--".into(), part], vec![], guard).await
                 .map_err(|mut e| { e.may_have_written |= start > 0; e })?;
             start = end;
+            if let Some(guard) = guard.as_mut() { guard.allow_owned = true; }
             if start < chars.len() { tokio::time::sleep(self.limits.slash_settle).await; }
         }
         if placeholder {
-            self.key_inner("Home").await.map_err(|mut e| { e.may_have_written = true; e })?;
-            self.key_inner("DC").await.map_err(|mut e| { e.may_have_written = true; e })?;
+            self.key_guarded("Home", guard).await.map_err(|mut e| { e.may_have_written = true; e })?;
+            self.key_guarded("DC", guard).await.map_err(|mut e| { e.may_have_written = true; e })?;
             if self.capture_inner().await.map_err(|mut e| { e.may_have_written = true; e })?.contains(&text) {
                 return Err(IoFailure { code: "placeholder_unremoved", may_have_written: true });
             }
         }
         Ok(())
     }
-    async fn paste(&self, text: &str, id: &str) -> Result<(), IoFailure> {
+    async fn paste(&self, text: &str, id: &str) -> Result<(), IoFailure> { self.paste_guarded(text, id, None).await }
+    async fn paste_guarded(&self, text: &str, id: &str, guard: TextGuard<'_>) -> Result<(), IoFailure> {
         let buffer = format!("hangar-{}-{}-{}", std::process::id(), NEXT_BUFFER.fetch_add(1, Ordering::Relaxed),
             id.chars().filter(|c| c.is_ascii_alphanumeric()).take(64).collect::<String>());
         self.verify().await?;
         let load = self.raw(vec!["load-buffer".into(), "-b".into(), buffer.clone(), "-".into()], text.as_bytes().to_vec()).await?;
         if !load.success { return Err(IoFailure { code: "buffer_failed", may_have_written: false }); }
-        self.effect(vec!["paste-buffer".into(), "-t".into(), self.binding.pane.clone(), "-b".into(), buffer, "-p".into(), "-d".into()], vec![]).await
+        self.effect_guarded(vec!["paste-buffer".into(), "-t".into(), self.binding.pane.clone(), "-b".into(), buffer, "-p".into(), "-d".into()], vec![], guard).await
     }
-    async fn clipboard(&self, text: &str) -> Result<(), IoFailure> {
+    async fn clipboard_guarded(&self, text: &str, guard: TextGuard<'_>) -> Result<(), IoFailure> {
         if !self.verify().await?.clipboard_available { return Err(IoFailure { code: "clipboard_unavailable", may_have_written: false }); }
         let output = self.io.command(CommandRequest { program: "powershell.exe".into(), args: vec!["-NoProfile".into(), "-NonInteractive".into(), "-Command".into(), "[Console]::InputEncoding=[Text.UTF8Encoding]::new($false); $text=[Console]::In.ReadToEnd(); Set-Clipboard -Value $text; if ((Get-Clipboard -Raw) -cne $text) { exit 1 }".into()], stdin: text.as_bytes().to_vec() }).await?;
         if !output.success { return Err(IoFailure { code: "clipboard_failed", may_have_written: false }); }
-        self.key_inner("M-v").await
+        self.key_guarded("M-v", guard).await
     }
     async fn clipboard_lock(&self) -> Result<Option<std::fs::File>, IoFailure> {
         if !self.binding.windows { return Ok(None); }
@@ -616,6 +751,7 @@ impl TerminalDriver {
         false
     }
     fn failed(error: IoFailure, stage: DeliveryStage) -> DeliveryResult {
+        if let Some(interaction) = InteractionError::from_code(error.code) { return Self::interaction_failure(interaction, error.may_have_written); }
         DeliveryResult::new(if error.may_have_written { Disposition::Unknown } else { Disposition::Deferred }, stage, error.code)
     }
     async fn partial(&self, text: &str, before: &ComposerSnapshot, stage: DeliveryStage) -> DeliveryResult {
@@ -624,11 +760,13 @@ impl TerminalDriver {
         result.cleanup = if cleaned { Cleanup::Proved } else { Cleanup::Unproved };
         result
     }
-    async fn submit(&self, text: &str, before: &ComposerSnapshot, draft: Option<&ComposerSnapshot>) -> DeliveryResult {
+    async fn submit(&self, text: &str, before: &ComposerSnapshot, draft: Option<&ComposerSnapshot>, expected: Option<&ExpectedInteraction>) -> DeliveryResult {
         if !self.verify().await.is_ok_and(|facts| !facts.open_question) {
             return DeliveryResult::new(Disposition::Unknown, DeliveryStage::Submit, "submission_blocked");
         }
-        if let Err(error) = self.key_inner("Enter").await { return DeliveryResult::new(Disposition::Unknown, DeliveryStage::Submit, error.code); }
+        if let Err(error) = self.key_guarded("Enter", expected.map(|expected| GuardedText { expected,closed:true,pane:None,input:Some((text,before)),allow_owned:true })).await {
+            return DeliveryResult::new(Disposition::Unknown, DeliveryStage::Submit, if expected.is_some() { "erro_sem_confirmacao_resposta" } else { error.code });
+        }
         let mut slash_selected = false;
         let clear = text.split_whitespace().next() == Some("/clear");
         let mut last_error = None;
@@ -698,20 +836,22 @@ impl TerminalDriver {
             other => other,
         };
         let draft = match draft { Ok(d) => d, Err(e) => return Self::failed(e, DeliveryStage::Composer) };
-        if draft.is_empty() { return self.deliver(text, id, draft, None).await; }
+        if draft.is_empty() { return self.deliver(text, id, draft, None, None).await; }
         // O guardado tem uma vaga só: ocupado, o Ctrl+S jogaria fora o que já estava nele.
         if draft.stashed { return DeliveryResult::new(Disposition::Deferred, DeliveryStage::Composer, "composer_busy"); }
         let mut result = match self.stash_draft(&draft).await {
-            Ok(before) => self.deliver(text, id, before, Some(&draft)).await,
+            Ok(before) => self.deliver(text, id, before, Some(&draft), None).await,
             Err(e) => Self::failed(e, DeliveryStage::Composer),
         };
         result.draft = Some(self.settle_draft(&draft, result.disposition).await);
         result
     }
-    async fn deliver(&self, text: &str, id: &str, mut before: ComposerSnapshot, draft: Option<&ComposerSnapshot>) -> DeliveryResult {
+    async fn deliver(&self, text: &str, id: &str, mut before: ComposerSnapshot, draft: Option<&ComposerSnapshot>, expected: Option<&ExpectedInteraction>) -> DeliveryResult {
         let facts = match self.verify().await { Ok(f) => f, Err(e) => return Self::failed(e, DeliveryStage::Identity) };
+        if facts.open_question || !facts.ready { return DeliveryResult::new(Disposition::Deferred, DeliveryStage::Ready, "input_unavailable"); }
         let mut refresh_guard = false;
-        if facts.plugin_live && !text.trim_start().starts_with('/') {
+        // Conversar guardado fica no composer: a publicação geral não carrega a interação.
+        if expected.is_none() && facts.plugin_live && !text.trim_start().starts_with('/') {
             // Com algo guardado, o envio vai pelo composer: só ele devolve o guardado.
             let mode = if user_mode(&facts, text, before.stashed) { PluginMode::User } else { PluginMode::Fill };
             let request = PluginRequest { id: id.into(), text: text.into(), mode: mode.clone() };
@@ -720,7 +860,7 @@ impl TerminalDriver {
                 Ok(PluginReply::Unavailable | PluginReply::NotWritten) => refresh_guard = true,
                 Ok(PluginReply::Accepted) if mode == PluginMode::User => return DeliveryResult::new(Disposition::Accepted, DeliveryStage::Plugin, "plugin_accepted"),
                 Ok(PluginReply::Filled) if mode == PluginMode::Fill => {
-                    if self.prove_input(text, &before).await { return self.submit(text, &before, draft).await; }
+                    if self.prove_input(text, &before).await { return self.submit(text, &before, draft, expected).await; }
                     return self.partial(text, &before, DeliveryStage::InputProof).await;
                 }
                 _ => return DeliveryResult::new(Disposition::Unknown, DeliveryStage::Plugin, "plugin_uncertain"),
@@ -732,16 +872,19 @@ impl TerminalDriver {
             before = match self.refresh_input_guard().await { Ok(b) => b, Err(e) => return Self::failed(e, DeliveryStage::Composer) };
         }
         if self.services.writing().await.is_err() { return DeliveryResult::new(Disposition::Deferred, DeliveryStage::Write, "write_journal"); }
-        let write = if use_clipboard { self.clipboard(text).await }
-            else if text.contains('\n') { self.paste(text, id).await } else { self.literal(text).await };
+        let guard = expected.map(|expected| GuardedText { expected,closed:true,pane:None,input:Some((text,&before)),allow_owned:false });
+        let write = if use_clipboard { self.clipboard_guarded(text, guard).await }
+            else if text.contains('\n') { self.paste_guarded(text, id, guard).await } else { self.literal_guarded(text, guard).await };
         if let Err(e) = write {
             if !e.may_have_written { return Self::failed(e, DeliveryStage::Write); }
+            if expected.is_some() { return DeliveryResult::new(Disposition::Unknown, DeliveryStage::Write, "erro_sem_confirmacao_resposta"); }
             return self.partial(text, &before, DeliveryStage::Write).await;
         }
         let delay = if text.trim_start().starts_with('/') { self.limits.slash_settle }
             else if text.contains('\n') { self.limits.multiline_settle } else { self.limits.literal_settle };
         tokio::time::sleep(delay).await;
-        if self.prove_input(text, &before).await { drop(clipboard); return self.submit(text, &before, draft).await; }
+        if self.prove_input(text, &before).await { drop(clipboard); return self.submit(text, &before, draft, expected).await; }
+        if expected.is_some() { return DeliveryResult::new(Disposition::Unknown, DeliveryStage::InputProof, "erro_sem_confirmacao_resposta"); }
         self.partial(text, &before, DeliveryStage::InputProof).await
     }
     pub async fn key(&self, key: &str, interactive: bool) -> DeliveryResult {
@@ -784,8 +927,9 @@ impl TerminalDriver {
         for key in ["C-x", "C-s"] { if let Err(e) = self.key_inner(key).await { return DeliveryResult::new(Disposition::Unknown, DeliveryStage::Steer, e.code); } }
         DeliveryResult::new(Disposition::Accepted, DeliveryStage::Steer, "steered")
     }
-    async fn navigate(&self, target: usize, mut screen: String, require_cursor: bool) -> Result<String, IoFailure> {
+    async fn navigate(&self, target: usize, mut screen: String, require_cursor: bool, expected: Option<&ExpectedInteraction>) -> Result<(String, bool), IoFailure> {
         let mut effects = false;
+        let original = expected.map(|_| interaction_pane(&screen)).transpose().map_err(|error| IoFailure { code:error.code(), may_have_written:false })?;
         let mut row = cursor(&screen).or_else(|| unnumbered_cursor(&screen));
         if row.is_none() && require_cursor { return Err(IoFailure { code: "cursor_unreadable", may_have_written: false }); }
         if row.is_none() {
@@ -794,12 +938,19 @@ impl TerminalDriver {
                 effects = true;
                 self.settle().await;
             }
-            return self.capture_inner().await.map_err(|mut e| { e.may_have_written |= effects; e });
+            return self.capture_inner().await.map(|screen| (screen, effects)).map_err(|mut e| { e.may_have_written |= effects; e });
         }
         for _ in 0..4 {
             let current = row.ok_or(IoFailure { code: "cursor_lost", may_have_written: effects })?;
-            if current == target { return Ok(screen); }
+            if current == target { return Ok((screen, effects)); }
             for _ in 0..target.abs_diff(current) {
+                if let Some(expected) = expected {
+                    self.check_source(expected, false).map_err(|error| IoFailure { code:error.code(), may_have_written:effects })?;
+                    let fresh = self.capture_inner().await.map_err(|mut error| { error.may_have_written |= effects; error })?;
+                    if interaction_pane(&fresh).ok().as_ref() != original.as_ref() {
+                        return Err(IoFailure { code:InteractionError::Changed.code(), may_have_written:effects });
+                    }
+                }
                 self.key_inner(if current < target { "Down" } else { "Up" }).await.map_err(|mut e| { e.may_have_written |= effects; e })?;
                 effects = true;
                 self.settle().await;
@@ -809,11 +960,70 @@ impl TerminalDriver {
         }
         Err(IoFailure { code: "cursor_drift", may_have_written: effects })
     }
-    pub async fn select(&self, option: usize, require_cursor: bool) -> DeliveryResult {
-        if option == 0 || option > 100 { return DeliveryResult::new(Disposition::Rejected, DeliveryStage::Validate, "invalid_option"); }
+    fn interaction_failure(error: InteractionError, written: bool) -> DeliveryResult {
+        DeliveryResult::new(if written { Disposition::Unknown } else { Disposition::Rejected }, DeliveryStage::Identity, error.code())
+    }
+
+    fn check_source(&self, expected: &ExpectedInteraction, closed: bool) -> Result<(), InteractionError> {
+        let store = self.interactions.as_ref().ok_or(InteractionError::Unavailable)?;
+        if closed { store.check_after_close(expected)?; }
+        else if store.expected(&expected.binding, Some(&expected.interaction_id))? != *expected { return Err(InteractionError::Changed); }
+        if expected.binding.conversation != self.binding.conversation || expected.binding.generation != self.binding.generation {
+            return Err(InteractionError::Changed);
+        }
+        if expected.semantic["source"] != "terminal" { return Err(InteractionError::Unavailable); }
+        if let Some(revision) = &expected.source_revision {
+            let path = self.interaction_source.as_ref().ok_or(InteractionError::Unavailable)?;
+            match crate::state::ask::read_revision(path).map_err(|_| InteractionError::Unavailable)? {
+                Some((question, current)) if current == *revision && json!(question.questions) == expected.semantic["questions"] => {},
+                None if closed => {},
+                _ => return Err(InteractionError::Changed),
+            }
+        } else {
+            if expected.target.kind != InteractionKind::Menu { return Err(InteractionError::Unavailable); }
+            if let Some(path) = &self.interaction_source {
+                if crate::state::ask::read_revision(path).map_err(|_| InteractionError::Unavailable)?.is_some() { return Err(InteractionError::Changed); }
+            }
+        }
+        Ok(())
+    }
+
+    async fn check_interaction(&self, expected: &ExpectedInteraction) -> Result<String, InteractionError> {
+        self.check_source(expected, false)?;
+        let screen = self.capture_inner().await.map_err(|_| InteractionError::Unavailable)?;
+        if interaction_pane(&screen)? != expected.semantic["pane"] { return Err(InteractionError::Changed); }
+        self.check_source(expected, false)?;
+        Ok(screen)
+    }
+
+    pub async fn guarded_select(&self, expected: &ExpectedInteraction, option: usize, require_cursor: bool) -> DeliveryResult {
         let _serial = self.serial.lock().await;
-        let screen = match self.capture_inner().await { Ok(s) => s, Err(e) => return Self::failed(e, DeliveryStage::Select) };
-        let screen = match self.navigate(option, screen, require_cursor).await { Ok(s) => s, Err(e) => return Self::failed(e, DeliveryStage::Select) };
+        if option == 0 || expected.semantic["pane"]["options"].as_array().is_none_or(|options| option > options.len()) {
+            return Self::interaction_failure(InteractionError::Changed, false);
+        }
+        if let Err(error) = self.check_interaction(expected).await { return Self::interaction_failure(error, false); }
+        self.select_inner(option, require_cursor, Some(expected)).await
+    }
+
+    pub async fn select(&self, option: usize, require_cursor: bool) -> DeliveryResult {
+        let _serial = self.serial.lock().await;
+        self.select_inner(option, require_cursor, None).await
+    }
+
+    async fn select_inner(&self, option: usize, require_cursor: bool, expected: Option<&ExpectedInteraction>) -> DeliveryResult {
+        if option == 0 || option > 100 { return DeliveryResult::new(Disposition::Rejected, DeliveryStage::Validate, "invalid_option"); }
+        let screen = match expected {
+            Some(expected) => match self.check_interaction(expected).await { Ok(screen) => screen, Err(error) => return Self::interaction_failure(error, false) },
+            None => match self.capture_inner().await { Ok(s) => s, Err(e) => return Self::failed(e, DeliveryStage::Select) },
+        };
+        let (screen, moved) = match self.navigate(option, screen, require_cursor, expected).await { Ok(s) => s, Err(e) => return Self::failed(e, DeliveryStage::Select) };
+        let screen = if let Some(expected) = expected {
+            match self.check_interaction(expected).await {
+                Ok(current) if cursor(&current).or_else(|| unnumbered_cursor(&current)) == Some(option) => current,
+                Ok(_) => return Self::interaction_failure(InteractionError::Changed, moved),
+                Err(error) => return Self::interaction_failure(error, moved),
+            }
+        } else { screen };
         let multiple = screen.lines().any(|line| line.contains("[ ]") || line.contains("[✔]"));
         if let Err(e) = self.key_inner(if multiple { "Space" } else { "Enter" }).await { return DeliveryResult::new(Disposition::Unknown, DeliveryStage::Select, e.code); }
         self.settle().await;
@@ -823,13 +1033,31 @@ impl TerminalDriver {
         } else if (live_picker(&after) || unnumbered_cursor(&after).is_some()) && option_labels(&screen) == option_labels(&after) { return DeliveryResult::new(Disposition::Unknown, DeliveryStage::Select, "picker_still_open"); }
         DeliveryResult::new(Disposition::Accepted, DeliveryStage::Select, "selected")
     }
+    pub async fn guarded_submit_selected(&self, expected: &ExpectedInteraction) -> DeliveryResult {
+        let _serial = self.serial.lock().await;
+        if expected.source_revision.is_none() { return Self::interaction_failure(InteractionError::Unavailable, false); }
+        if let Err(error) = self.check_interaction(expected).await { return Self::interaction_failure(error, false); }
+        self.submit_selected_inner(Some(expected)).await
+    }
+
     pub async fn submit_selected(&self) -> DeliveryResult {
         let _serial = self.serial.lock().await;
+        self.submit_selected_inner(None).await
+    }
+
+    async fn submit_selected_inner(&self, expected: Option<&ExpectedInteraction>) -> DeliveryResult {
         let screen = match self.capture_inner().await { Ok(s) => s, Err(e) => return Self::failed(e, DeliveryStage::Select) };
+        if let Some(expected) = expected {
+            if interaction_pane(&screen).ok().as_ref() != Some(&expected.semantic["pane"]) { return Self::interaction_failure(InteractionError::Changed, false); }
+            if let Err(error) = self.check_source(expected, false) { return Self::interaction_failure(error, false); }
+        }
         if !live_picker(&screen) || !screen.lines().any(|l| l.contains("[ ]") || l.contains("[✔]")) { return DeliveryResult::new(Disposition::Deferred, DeliveryStage::Select, "multiple_picker_missing"); }
         if let Err(e) = self.key_inner("Right").await { return Self::failed(e, DeliveryStage::Select); }
         self.settle().await;
         if !self.capture_inner().await.is_ok_and(|s| s.contains("Submit answers")) { return DeliveryResult::new(Disposition::Unknown, DeliveryStage::Select, "submit_tab_missing"); }
+        if let Some(expected) = expected {
+            if let Err(error) = self.check_source(expected, false) { return Self::interaction_failure(error, true); }
+        }
         if let Err(e) = self.key_inner("Enter").await { return DeliveryResult::new(Disposition::Unknown, DeliveryStage::Select, e.code); }
         self.prove_control_submission(DeliveryStage::Select).await
     }
@@ -845,24 +1073,116 @@ impl TerminalDriver {
         }
         DeliveryResult::new(Disposition::Unknown, stage, "control_submission_unproved")
     }
-    pub async fn answer(&self, answers: &[QuestionAnswer]) -> DeliveryResult {
-        if answers.is_empty() || answers.iter().any(|a| !a.valid()) { return DeliveryResult::new(Disposition::Rejected, DeliveryStage::Validate, "invalid_answer"); }
+    pub async fn guarded_answer_chat(&self, expected: &ExpectedInteraction, answers: &[QuestionAnswer], operation_id: &str) -> DeliveryResult {
         let _serial = self.serial.lock().await;
+        if expected.target.kind != InteractionKind::Question || expected.source_revision.is_none() {
+            return Self::interaction_failure(InteractionError::Unavailable, false);
+        }
+        if answers.is_empty() || answers.iter().any(|a| !a.valid()) { return DeliveryResult::new(Disposition::Rejected, DeliveryStage::Validate, "invalid_answer"); }
+        let questions: Vec<String> = expected.semantic["questions"].as_array().into_iter().flatten()
+            .map(|q| q["question"].as_str().unwrap_or("").to_string()).collect();
+        let values: Vec<Value> = answers.iter().map(|a| json!(a)).collect();
+        let text = crate::session_write::answer::chat_text(&values, &questions);
+        if text.is_empty() { return self.answer_inner(answers, Some(expected)).await; }
+        if let Err(error) = self.check_interaction(expected).await { return Self::interaction_failure(error, false); }
+        if let Err(error) = self.key_inner("Escape").await { return Self::failed(error, DeliveryStage::Answer); }
+        for _ in 0..self.limits.proof_attempts.max(1) {
+            self.settle().await;
+            if let Err(error) = self.check_source(expected, true) { return Self::interaction_failure(error, true); }
+            let (screen, typed) = match self.composer_capture().await {
+                Ok(capture) => capture,
+                Err(error) => return DeliveryResult::new(Disposition::Unknown, DeliveryStage::Answer, error.code),
+            };
+            if crate::terminal_state::footer_visible(&screen) || overlay(&screen) { continue; }
+            let before = match Self::composer(&screen, &typed) {
+                Ok(before) if before.is_empty() => before,
+                _ => continue,
+            };
+            if !self.verify().await.is_ok_and(|facts| facts.ready && !facts.open_question) { continue; }
+            if let Err(error) = self.check_source(expected, true) { return Self::interaction_failure(error, true); }
+            let mut result = self.deliver(&text, operation_id, before, None, Some(expected)).await;
+            if result.disposition != Disposition::Accepted {
+                result.disposition = Disposition::Unknown;
+                result.code = "erro_sem_confirmacao_resposta".into();
+            }
+            return result;
+        }
+        DeliveryResult::new(Disposition::Unknown, DeliveryStage::Answer, "answer_chat_close_unproved")
+    }
+
+    pub async fn guarded_answer(&self, expected: &ExpectedInteraction, answers: &[QuestionAnswer]) -> DeliveryResult {
+        let _serial = self.serial.lock().await;
+        if expected.source_revision.is_none() || expected.target.kind != InteractionKind::Question { return Self::interaction_failure(InteractionError::Unavailable, false); }
+        if expected.semantic["questions"].as_array().is_none_or(|questions| questions.len() != answers.len()) { return Self::interaction_failure(InteractionError::Changed, false); }
+        if let Err(error) = self.check_interaction(expected).await { return Self::interaction_failure(error, false); }
+        self.answer_inner(answers, Some(expected)).await
+    }
+
+    pub async fn answer(&self, answers: &[QuestionAnswer]) -> DeliveryResult {
+        let _serial = self.serial.lock().await;
+        self.answer_inner(answers, None).await
+    }
+
+    async fn answer_inner(&self, answers: &[QuestionAnswer], expected: Option<&ExpectedInteraction>) -> DeliveryResult {
+        if answers.is_empty() || answers.iter().any(|a| !a.valid()) { return DeliveryResult::new(Disposition::Rejected, DeliveryStage::Validate, "invalid_answer"); }
         let mut effects = false;
-        for answer in answers {
+        for (index, answer) in answers.iter().enumerate() {
+            if let Some(expected) = expected {
+                if let Err(error) = self.check_source(expected, false) { return Self::interaction_failure(error, effects); }
+                let Some(question) = expected.semantic["questions"].get(index) else { return Self::interaction_failure(InteractionError::Changed, effects); };
+                let labels: Vec<_> = question["options"].as_array().into_iter().flatten().filter_map(|o| o["label"].as_str()).collect();
+                if answer.kind == AnswerKind::Option && (answer.indices.iter().any(|i| *i >= labels.len())
+                    || answer.indices.iter().map(|i| labels[*i]).collect::<Vec<_>>() != answer.labels.iter().map(String::as_str).collect::<Vec<_>>()) {
+                    return Self::interaction_failure(InteractionError::Changed, effects);
+                }
+            }
             let screen = match self.capture_inner().await { Ok(s) if live_picker(&s) => s, _ => return DeliveryResult::new(if effects { Disposition::Unknown } else { Disposition::Deferred }, DeliveryStage::Answer, "picker_missing") };
+            if let Some(expected) = expected {
+                let pane = match interaction_pane(&screen) { Ok(pane) => pane, Err(error) => return Self::interaction_failure(error, effects) };
+                let question = &expected.semantic["questions"][index];
+                let options: Vec<_> = pane["options"].as_array().into_iter().flatten().filter(|v| !matches!(v.as_str().unwrap_or("").trim_end_matches('.'), "Type something" | "Chat about this")).cloned().collect();
+                let wanted: Vec<_> = question["options"].as_array().into_iter().flatten().map(|o| o["label"].clone()).collect();
+                if options != wanted || (index == 0 && pane != expected.semantic["pane"])
+                    || (index > 0 && pane["question"] != question["question"]) { return Self::interaction_failure(InteractionError::Changed, effects); }
+            }
             let mut screen = screen;
             for target in answer.targets() {
-                if let Err(e) = self.navigate(target, screen, true).await {
-                    return DeliveryResult::new(if effects || e.may_have_written { Disposition::Unknown } else { Disposition::Deferred }, DeliveryStage::Answer, e.code);
+                let (selected, moved) = match self.navigate(target, screen, true, expected).await {
+                    Ok(selected) => selected,
+                    Err(mut error) => { error.may_have_written |= effects; return Self::failed(error, DeliveryStage::Answer); },
+                };
+                effects |= moved;
+                if let Some(expected) = expected {
+                    if let Err(error) = self.check_source(expected, false) { return Self::interaction_failure(error, effects); }
+                    let fresh = match self.capture_inner().await { Ok(fresh) => fresh, Err(error) => return Self::failed(IoFailure { may_have_written:effects, ..error }, DeliveryStage::Answer) };
+                    if interaction_pane(&fresh).ok() != interaction_pane(&selected).ok() || cursor(&fresh) != Some(target) {
+                        return Self::interaction_failure(InteractionError::Changed, effects);
+                    }
                 }
+                let text_pane = if answer.kind == AnswerKind::Text && expected.is_some() {
+                    let pane = match interaction_pane(&selected) { Ok(pane) => pane, Err(error) => return Self::interaction_failure(error, effects) };
+                    if pane["options"].get(target - 1).and_then(Value::as_str).is_none_or(|label|label.trim_end_matches('.') != "Type something") {
+                        return Self::interaction_failure(InteractionError::Changed, effects);
+                    }
+                    Some(pane)
+                } else { None };
                 effects = true;
                 if let Err(e) = self.key_inner(if answer.kind == AnswerKind::Option && answer.multi { "Space" } else { "Enter" }).await { return DeliveryResult::new(Disposition::Unknown, DeliveryStage::Answer, e.code); }
                 self.settle().await;
                 if answer.kind == AnswerKind::Text {
-                    if let Err(e) = self.literal(answer.value.as_deref().unwrap()).await { return DeliveryResult::new(Disposition::Unknown, DeliveryStage::Answer, e.code); }
+                    let pane = if let Some(expected) = expected {
+                        if let Err(error) = self.check_source(expected, false) { return Self::interaction_failure(error, true); }
+                        let fresh = match self.capture_inner().await { Ok(screen) => screen, Err(error) => return DeliveryResult::new(Disposition::Unknown, DeliveryStage::Answer, error.code) };
+                        let pane = match interaction_pane(&fresh) { Ok(pane) => pane, Err(error) => return Self::interaction_failure(error, true) };
+                        if Some(&pane) != text_pane.as_ref() {
+                            return Self::interaction_failure(InteractionError::Changed, true);
+                        }
+                        text_pane
+                    } else { None };
+                    let guard = expected.map(|expected| GuardedText { expected,closed:false,pane:pane.as_ref(),input:None,allow_owned:false });
+                    if let Err(e) = self.literal_guarded(answer.value.as_deref().unwrap(), guard).await { return DeliveryResult::new(Disposition::Unknown, DeliveryStage::Answer, e.code); }
                     self.settle().await;
-                    if let Err(e) = self.key_inner("Enter").await { return DeliveryResult::new(Disposition::Unknown, DeliveryStage::Answer, e.code); }
+                    if let Err(e) = self.key_guarded("Enter", guard).await { return DeliveryResult::new(Disposition::Unknown, DeliveryStage::Answer, e.code); }
                 }
                 screen = match self.capture_inner().await { Ok(s) => s, Err(e) => return DeliveryResult::new(Disposition::Unknown, DeliveryStage::Answer, e.code) };
             }
@@ -876,6 +1196,9 @@ impl TerminalDriver {
             let Ok(screen) = self.capture_inner().await else { continue; };
             if screen.contains("Submit answers") {
                 if !review_matches(&screen, answers) { continue; }
+                if let Some(expected) = expected {
+                    if let Err(error) = self.check_source(expected, false) { return Self::interaction_failure(error, true); }
+                }
                 if let Err(e) = self.key_inner("Enter").await { return DeliveryResult::new(Disposition::Unknown, DeliveryStage::Answer, e.code); }
                 return self.prove_control_submission(DeliveryStage::Answer).await;
             }
@@ -899,11 +1222,47 @@ pub fn presses_keys(facts: &InputFacts, text: &str) -> bool {
     !(facts.plugin_live && !slash && user_mode(facts, text, false))
 }
 
-fn recognized_message(text: &str) -> Option<&str> {
-    let closing = text.find(']')?;
-    let prefix = text.get(1..closing)?;
-    if !text.starts_with('[') || !["de:", "grupo:", "painel:"].iter().any(|p| prefix.starts_with(p)) { return None; }
-    Some(text[closing+1..].trim_start())
+pub(crate) fn message_prefix(text: &str) -> Option<(&str, &str)> {
+    let rest = text.strip_prefix('[')?;
+    let (prefix, body) = rest.split_once(']')?;
+    let sender = ["de:", "grupo:", "painel:"].iter().find_map(|kind| prefix.strip_prefix(kind))?.trim();
+    if sender.is_empty() { return None; }
+    Some((sender, body.trim_start()))
+}
+fn recognized_message(text: &str) -> Option<&str> { message_prefix(text).map(|(_, body)| body) }
+pub(crate) fn input_state(screen: &str) -> (bool, bool) {
+    let state = crate::terminal_state::analyze(screen);
+    (ComposerSnapshot::parse(screen).is_some() && !state.overlay && state.state != "awaiting_input", state.state == "idle")
+}
+/// Corpo completo do hook, sem envolver outra vez as respostas.
+pub(crate) fn plugin_answer_body(questions: &Value, answers: &Value) -> Result<Value, ServiceError> {
+    let invalid = || ServiceError("terminal_answer_invalid");
+    let questions = questions.as_array().ok_or_else(invalid)?;
+    let answers = answers.as_array().filter(|answers| answers.len() == questions.len()).ok_or_else(invalid)?;
+    let mut response = serde_json::Map::new();let mut answered = Vec::new();let mut chat = Vec::new();
+    for (question, answer) in questions.iter().zip(answers) {
+        let title = question["question"].as_str().ok_or_else(invalid)?;
+        let text = match answer["kind"].as_str() {
+            Some("chat") => { chat.push(title);continue; }
+            Some("text") => answer["value"].as_str().unwrap_or("").trim().to_owned(),
+            Some("option") => {
+                let labels = answer["labels"].as_array().filter(|labels| !labels.is_empty());
+                let labels = if let Some(labels) = labels { labels.iter().map(|label| label.as_str().ok_or_else(invalid)).collect::<Result<Vec<_>, _>>()? }
+                else {
+                    let options = question["options"].as_array().ok_or_else(invalid)?;
+                    answer["indices"].as_array().ok_or_else(invalid)?.iter().map(|index| index.as_u64().and_then(|index| options.get(index as usize)).and_then(|option| option["label"].as_str()).ok_or_else(invalid)).collect::<Result<Vec<_>, _>>()?
+                };labels.join(", ")
+            }
+            _ => return Err(invalid()),
+        };
+        if text.is_empty() { return Err(invalid()); }
+        answered.push(format!("- {title} → {text}"));response.insert(title.into(), json!(text));
+    }
+    if chat.is_empty() { return Ok(json!({"answers":response})); }
+    let mut lines = if chat.len() == 1 { vec![format!("Sobre «{}» ele prefere conversar antes de responder.", chat[0])] }
+        else { let mut lines = vec!["Sobre estas perguntas ele prefere conversar antes de responder:".into()];lines.extend(chat.iter().map(|title| format!("- {title}")));lines };
+    if !answered.is_empty() { lines.push("Ele já respondeu:".into());lines.extend(answered); }
+    lines.push("Não repita a pergunta: responda em texto e aguarde a mensagem dele.".into());Ok(json!({"deny":lines.join("\n")}))
 }
 fn escape_attribute(text: &str) -> String { text.replace('&', "&amp;").replace('"', "&quot;").replace('<', "&lt;").replace('>', "&gt;") }
 fn native_envelope(descriptor: &NativeMessage, text: &str, id: &str) -> Vec<u8> {

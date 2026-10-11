@@ -168,3 +168,175 @@ async fn writer_dying_closes_incoming() {
     let next = tokio::time::timeout(Duration::from_secs(2),incoming.recv()).await.expect("leitor seguiu vivo sem escritor");
     assert!(next.is_none());
 }
+
+async fn raw_listener() -> (tokio::net::TcpListener,String) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}",listener.local_addr().unwrap());
+    (listener,url)
+}
+
+/// Enfileira um quadro e devolve o recibo; `None` = a fila já estava fechada.
+async fn raw_send(raw:&RawWebSocket,text:String) -> Option<Result<(),ClientError>> {
+    let (receipt,written) = tokio::sync::oneshot::channel();
+    raw.outgoing.send(RawWrite { text,receipt,guard:None }).await.ok()?;
+    // Recibo solto sem conclusão (queda com o quadro na fila) também não é escrita.
+    Some(tokio::time::timeout(Duration::from_secs(5),written).await.expect("recibo sem desfecho").unwrap_or(Err(ClientError::Closed)))
+}
+
+#[tokio::test]
+async fn raw_websocket_refuses_wss_before_opening_a_connection() {
+    let (listener,url) = raw_listener().await;
+    let wss = url.replacen("ws://","wss://",1);
+    assert!(matches!(connect_raw_ws(&wss).await,Err(ClientError::Io(_))),"wss aceito por um transporte sem TLS");
+    assert!(matches!(Client::connect_ws(&wss).await,Err(ClientError::Io(_))),"connect_ws aceitou wss");
+    assert!(tokio::time::timeout(Duration::from_millis(200),listener.accept()).await.is_err(),"conexão aberta antes da recusa");
+}
+
+#[tokio::test]
+async fn raw_websocket_keeps_engine_id_and_receipts_after_the_send() {
+    use futures_util::{SinkExt,StreamExt};
+    let (listener,url) = raw_listener().await;
+    let (seen_tx,seen) = tokio::sync::oneshot::channel::<String>();
+    let server = tokio::spawn(async move {
+        let (stream,_) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+        let text = ws.next().await.unwrap().unwrap().to_text().unwrap().to_owned();
+        let msg:Value = serde_json::from_str(&text).unwrap();
+        let _ = seen_tx.send(text);
+        ws.send(tokio_tungstenite::tungstenite::Message::text(json!({"id":msg["id"],"result":{}}).to_string())).await.unwrap();
+        assert!(tokio::time::timeout(Duration::from_millis(200),listener.accept()).await.is_err(),"segunda conexão aberta");
+        // Exatamente um quadro: depois dele só o fechamento de quem soltou o transporte.
+        while let Some(Ok(message)) = ws.next().await { assert!(message.is_close(),"quadro extra no socket"); }
+    });
+    let mut raw = connect_raw_ws(&url).await.unwrap();
+    let frame = json!({"jsonrpc":"2.0","id":"hangar:3:op-9","method":"turn/start","params":{}}).to_string();
+    assert!(matches!(raw_send(&raw,frame.clone()).await,Some(Ok(()))));
+    assert_eq!(seen.await.unwrap(),frame,"quadro alterado no caminho");
+    let reply:Value = serde_json::from_str(&tokio::time::timeout(Duration::from_secs(5),raw.incoming.recv()).await.unwrap().unwrap()).unwrap();
+    assert_eq!(reply["id"],"hangar:3:op-9","resposta consumida ou alterada pelo transporte");
+    drop(raw);
+    tokio::time::timeout(Duration::from_secs(5),server).await.expect("soltar o transporte não fechou a conexão").unwrap();
+}
+
+#[tokio::test]
+async fn raw_websocket_closed_before_enqueue_never_receipts_ok() {
+    let (listener,url) = raw_listener().await;
+    tokio::spawn(async move {
+        let (stream,_) = listener.accept().await.unwrap();
+        drop(tokio_tungstenite::accept_async(stream).await.unwrap());
+    });
+    let mut raw = connect_raw_ws(&url).await.unwrap();
+    assert!(tokio::time::timeout(Duration::from_secs(5),raw.incoming.recv()).await.unwrap().is_none());
+    assert!(!matches!(raw_send(&raw,"{\"id\":\"hangar:1:x\"}".into()).await,Some(Ok(()))));
+}
+
+#[tokio::test]
+async fn raw_websocket_closed_after_enqueue_keeps_the_write_receipt() {
+    use futures_util::StreamExt;
+    let (listener,url) = raw_listener().await;
+    tokio::spawn(async move {
+        let (stream,_) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+        let _ = ws.next().await;
+        drop(ws);
+    });
+    let mut raw = connect_raw_ws(&url).await.unwrap();
+    // A escrita saiu; a falta de resposta é assunto do motor, não do recibo.
+    assert!(matches!(raw_send(&raw,"{\"id\":\"hangar:2:y\"}".into()).await,Some(Ok(()))));
+    assert!(tokio::time::timeout(Duration::from_secs(5),raw.incoming.recv()).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn raw_websocket_guard_refusal_after_frame_preparation_is_not_written() {
+    use futures_util::StreamExt;
+    let (listener,url) = raw_listener().await;
+    let server = tokio::spawn(async move {
+        let (stream,_) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+        while let Some(Ok(message)) = ws.next().await { assert!(!message.is_text(),"resposta recusada chegou ao app-server"); }
+    });
+    let raw = connect_raw_ws(&url).await.unwrap();
+    let (receipt,written) = tokio::sync::oneshot::channel();
+    assert!(raw.outgoing.send(RawWrite { text:"{\"id\":0,\"result\":{}}".into(),receipt,
+        guard:Some(std::sync::Arc::new(|_|Err("erro_interacao_desatualizada".into()))) }).await.is_ok());
+    let result = tokio::time::timeout(Duration::from_secs(5),written).await.unwrap().unwrap();
+    assert!(matches!(result,Err(ClientError::NotWritten { code }) if code == "erro_interacao_desatualizada"));
+    drop(raw);
+    tokio::time::timeout(Duration::from_secs(5),server).await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn dropping_a_raw_websocket_stuck_in_a_send_frees_the_socket() {
+    use tokio::io::AsyncReadExt;
+    let (listener,url) = raw_listener().await;
+    let (dropped_tx,dropped) = tokio::sync::oneshot::channel::<()>();
+    let server = tokio::spawn(async move {
+        let (stream,_) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+        // App-server vivo que não lê: o `send` do cliente para com os buffers cheios.
+        dropped.await.unwrap();
+        // Passa da folga do fechamento antes de ler: o `send` não pode destravar por esta leitura.
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        // Solto o transporte, o socket do cliente fecha: a leitura chega ao fim (ou ao reset), não fica pendurada.
+        let mut buffer = vec![0u8;1 << 16];
+        loop {
+            match ws.get_mut().read(&mut buffer).await { Ok(0) | Err(_) => return, Ok(_) => {} }
+        }
+    });
+    let raw = connect_raw_ws(&url).await.unwrap();
+    let (receipt,written) = tokio::sync::oneshot::channel();
+    assert!(raw.outgoing.send(RawWrite { text:"a".repeat(15 << 20),receipt,guard:None }).await.is_ok());
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    drop(raw);
+    dropped_tx.send(()).unwrap();
+    // Escrita cortada no meio: o recibo é solto sem conclusão (incerto), nunca `Ok`.
+    let receipt = tokio::time::timeout(Duration::from_secs(10),written).await.expect("escritor preso não foi abortado");
+    assert!(!matches!(receipt,Ok(Ok(()))));
+    tokio::time::timeout(Duration::from_secs(30),server).await.expect("socket do cliente seguiu aberto").unwrap();
+}
+
+#[tokio::test]
+async fn abort_now_frees_a_stuck_socket_before_any_reconnect_could_start() {
+    use tokio::io::AsyncReadExt;
+    let (listener,url) = raw_listener().await;
+    let (aborted_tx,aborted) = tokio::sync::oneshot::channel::<std::time::Instant>();
+    let server = tokio::spawn(async move {
+        let (stream,_) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+        let at = aborted.await.unwrap();
+        // Só lê depois do aborto: a leitura não pode destravar o `send` antes dele.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let mut buffer = vec![0u8;1 << 16];
+        loop {
+            match ws.get_mut().read(&mut buffer).await { Ok(0) | Err(_) => break, Ok(_) => {} }
+        }
+        at.elapsed()
+    });
+    let RawWebSocket { incoming:_incoming,outgoing,tasks } = connect_raw_ws(&url).await.unwrap();
+    let (receipt,written) = tokio::sync::oneshot::channel();
+    assert!(outgoing.send(RawWrite { text:"a".repeat(15 << 20),receipt,guard:None }).await.is_ok());
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    tasks.abort_now();
+    aborted_tx.send(std::time::Instant::now()).unwrap();
+    assert!(!matches!(tokio::time::timeout(Duration::from_secs(5),written).await.expect("recibo preso"),Ok(Ok(()))));
+    let closed_after = tokio::time::timeout(Duration::from_secs(10),server).await.expect("socket seguiu aberto").unwrap();
+    // A primeira reconexão do runtime espera 1 s: o socket antigo já fechou bem antes.
+    assert!(closed_after < Duration::from_millis(900),"socket fechou só em {closed_after:?}");
+}
+
+#[tokio::test]
+async fn raw_websocket_closed_during_the_write_is_not_ok() {
+    use tokio::io::AsyncReadExt;
+    let (listener,url) = raw_listener().await;
+    tokio::spawn(async move {
+        let (stream,_) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+        // Lê o começo do quadro e derruba o TCP com o resto ainda saindo.
+        let mut start = [0u8;1024];
+        let _ = ws.get_mut().read(&mut start).await;
+        drop(ws);
+    });
+    let mut raw = connect_raw_ws(&url).await.unwrap();
+    assert!(!matches!(raw_send(&raw,"a".repeat(12 << 20)).await,Some(Ok(()))));
+    assert!(tokio::time::timeout(Duration::from_secs(5),raw.incoming.recv()).await.unwrap().is_none());
+}

@@ -20,6 +20,7 @@ use super::input::{
 };
 use super::{Ctx, WriteRoute, admit, detail_body, relay};
 use crate::mods::state::random_hex;
+use crate::interactions::{ExpectedInteraction, InteractionError};
 use crate::routes::AppState;
 use crate::runtime::gateway::EntryHandle;
 use crate::runtime::protocol::{Disposition, OperationKind, RuntimeCommand, RuntimeError, RuntimeReply};
@@ -36,7 +37,7 @@ const MSG_CODEX_NO_TURN: &str = "Não há turno Codex ativo para interromper.";
 const MSG_PERM_OPTION: &str = "opção fora do pedido de permissão";
 const MSG_PANEL_OPEN: &str = "Terminal aberto nesta sessao. Feche o painel pra responder por aqui.";
 const MSG_NOT_SENT: &str = "não consegui responder pelo terminal — opção NÃO enviada";
-const MSG_UNCONFIRMED_ANSWER: &str = "resposta enviada, mas nao deu pra confirmar a tempo — confira na sessao antes de responder de novo";
+pub(super) const MSG_UNCONFIRMED_ANSWER: &str = "resposta enviada, mas nao deu pra confirmar a tempo — confira na sessao antes de responder de novo";
 const MSG_NOT_MARKED: &str = "não consegui marcar essa opção no terminal — tente de novo";
 const MSG_NOT_SUBMITTED: &str = "não consegui enviar as opções marcadas — tente de novo";
 const MSG_NO_PERMISSION: &str = "nenhum pedido de permissão pendente";
@@ -45,6 +46,27 @@ const MSG_PLUGIN_DOWN: &str = "não consegui conferir a pergunta pendente — na
 
 fn ok() -> Answer { (StatusCode::OK, json!({"ok": true})) }
 
+pub(super) fn interaction_failure(error: InteractionError) -> Answer {
+    (error.status(), detail_body(error.code(), error.message(), json!({})))
+}
+
+pub(super) fn interaction_result(sent: &Result<RuntimeReply, RuntimeError>) -> Option<Answer> {
+    let code = match sent {
+        Err(error) => error.code.as_str(),
+        Ok(reply) if reply.disposition == Disposition::Rejected => payload_code(reply)?,
+        _ => return None,
+    };
+    InteractionError::from_code(code).map(interaction_failure)
+}
+
+pub(super) async fn expected(ctx: &Ctx, supplied: Option<&str>) -> Result<ExpectedInteraction, Answer> {
+    if supplied.is_none_or(str::is_empty) { return Err(interaction_failure(InteractionError::Missing)); }
+    let runtime = ctx.st.state.runtime.get().ok_or_else(|| interaction_failure(InteractionError::Unavailable))?;
+    let binding = runtime.interaction_binding(&ctx.name).await.map_err(|_| interaction_failure(InteractionError::Unavailable))?;
+    if binding.key != ctx.target.key || binding.generation != ctx.target.generation { return Err(interaction_failure(InteractionError::Changed)); }
+    ctx.st.interactions.expected(&binding, supplied).map_err(interaction_failure)
+}
+
 fn failure(code: &str, msg: &str, params: Value) -> Answer { (StatusCode::CONFLICT, detail_body(code, msg, params)) }
 
 /// O painel de terminal anexado trunca o pane: quem conta linha nele escolheria errado.
@@ -52,25 +74,16 @@ pub fn panel_open_refusal() -> Answer { failure("erro_terminal_aberto", MSG_PANE
 
 // ── /select ─────────────────────────────────────────────────────────────────────────────────────
 
-/// O que o Python decide antes do ator: o controle a enviar, ou a recusa pronta. A pergunta que o
-/// plugin segura (`pending`) manda no `request_id`; permissão `perm:` só tem as opções 1 e 2.
-pub fn select_plan(pending: Option<&Value>, option: u64, panel_open: bool) -> Result<Value, Answer> {
-    let mut payload = json!({"option": option});
-    let held = pending.map(|p| p["id"].as_str().map_or_else(|| p["id"].to_string(), str::to_owned));
-    let permission = held.as_deref().is_some_and(|id| id.starts_with("perm:"));
-    if let Some(id) = &held {
-        payload["request_id"] = json!(id);
-        if permission && !matches!(option, 1 | 2) { return Err(failure("erro_opcao_nao_convergiu", MSG_PERM_OPTION, json!({}))); }
-    }
-    if !permission {
-        // `ask:` pode acabar no teclado da TUI: vale a trava do painel e o cursor tem de ser lido.
-        if panel_open { return Err(panel_open_refusal()); }
-        if held.is_some() { payload["require_cursor"] = json!(true); }
-    }
-    Ok(payload)
+pub fn select_plan(expected: &ExpectedInteraction, option: u64, panel_open: bool) -> Result<Value, Answer> {
+    if expected.target.kind == crate::interactions::InteractionKind::Question { return Err(interaction_failure(InteractionError::Changed)); }
+    let permission = expected.target.request_key.starts_with("plugin:perm:");
+    if permission && !matches!(option, 1 | 2) { return Err(failure("erro_opcao_nao_convergiu", MSG_PERM_OPTION, json!({}))); }
+    if !permission && panel_open { return Err(panel_open_refusal()); }
+    Ok(json!({"option": option, "interaction_id": expected.interaction_id}))
 }
 
 pub fn select_terminal_answer(sent: &Result<RuntimeReply, RuntimeError>) -> (Answer, Diary) {
+    if let Some(failed) = interaction_result(sent) { return (failed, None); }
     let reply = match sent {
         Ok(reply) => reply,
         // Antes da entrega: nada chegou ao pane.
@@ -89,6 +102,7 @@ pub fn select_terminal_answer(sent: &Result<RuntimeReply, RuntimeError>) -> (Ans
 
 /// Sem terminal a opção responde ao pedido de permissão em aberto (1 permite, 2 nega).
 pub fn select_headless_answer(sent: &Result<RuntimeReply, RuntimeError>) -> Answer {
+    if let Some(failed) = interaction_result(sent) { return failed; }
     let not_answered = |msg: &str| (StatusCode::SERVICE_UNAVAILABLE, detail_body("erro_opcao_nao_convergiu", &format!("não consegui responder: {msg}"), json!({})));
     match sent {
         // O ator recusa a opção sem permissão em aberto com este código (não como resposta).
@@ -96,25 +110,41 @@ pub fn select_headless_answer(sent: &Result<RuntimeReply, RuntimeError>) -> Answ
         Err(error) => not_answered(&error.to_string()),
         Ok(reply) => match reply.disposition {
             Disposition::Accepted => ok(),
-            Disposition::Unknown => not_answered("resultado incerto; a operação foi conservada sem reenvio"),
+            Disposition::Unknown => failure("erro_sem_confirmacao_resposta", MSG_UNCONFIRMED_ANSWER, json!({})),
             Disposition::Rejected => not_answered(reply.payload["error"].as_str().filter(|e| !e.is_empty()).unwrap_or(MSG_STEER_REFUSED)),
             Disposition::Deferred => not_answered(MSG_STEER_REFUSED),
         },
     }
 }
 
-/// Corpo do `SelectBody`: só `option`, inteiro de 1 a 50. O resto (texto "1", decimal, campo a mais)
-/// é a conversão e o 422 do FastAPI, que recebe o pedido intacto.
-fn parse_option(bytes: &Bytes) -> Option<u64> {
+/// Formas normalizáveis e inválidas seguem intactas ao FastAPI, inclusive o ID recebido.
+fn parse_option(bytes: &Bytes) -> Option<(u64, Option<String>)> {
     let object = serde_json::from_slice::<Value>(bytes).ok()?;
     let object = object.as_object()?;
-    if object.len() != 1 { return None; }
-    object.get("option")?.as_u64().filter(|n| (1..=50).contains(n))
+    if object.keys().any(|key| key != "option" && key != "interaction_id") { return None; }
+    let supplied = match object.get("interaction_id") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(id)) => Some(id.clone()),
+        _ => return None,
+    };
+    Some((object.get("option")?.as_u64().filter(|n| (1..=50).contains(n))?, supplied))
+}
+
+fn parse_submit(bytes: &Bytes) -> Option<Option<String>> {
+    let object = if bytes.is_empty() { json!({}) } else { serde_json::from_slice::<Value>(bytes).ok()? };
+    let object = object.as_object()?;
+    if object.keys().any(|key| key != "interaction_id") { return None; }
+    match object.get("interaction_id") {
+        None | Some(Value::Null) => Some(None),
+        Some(Value::String(id)) => Some(Some(id.clone())),
+        _ => None,
+    }
 }
 
 // ── /select/submit ──────────────────────────────────────────────────────────────────────────────
 
 pub fn submit_answer(sent: &Result<RuntimeReply, RuntimeError>) -> (Answer, Diary) {
+    if let Some(failed) = interaction_result(sent) { return (failed, None); }
     let reply = match sent {
         Ok(reply) => reply,
         Err(error) => return (runtime_failed(error), None),
@@ -122,7 +152,7 @@ pub fn submit_answer(sent: &Result<RuntimeReply, RuntimeError>) -> (Answer, Diar
     match reply.disposition {
         Disposition::Accepted => (ok(), None),
         Disposition::Deferred => (control_failed(MSG_CONTROL_DEFERRED), None),
-        Disposition::Unknown => (control_failed(MSG_CONTROL_UNCONFIRMED), None),
+        Disposition::Unknown => (failure("erro_sem_confirmacao_resposta", MSG_UNCONFIRMED_ANSWER, json!({})), None),
         Disposition::Rejected => {
             let code = payload_code(reply).unwrap_or("rejected");
             (failure("erro_opcao_nao_convergiu", MSG_NOT_SUBMITTED, json!({"detalhe": code})), Some(("opcao.envio_falhou", diary_code(code))))
@@ -280,21 +310,20 @@ pub async fn select(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
         Ok(admitted) => admitted,
         Err(response) => return response,
     };
-    let Some(option) = parse_option(&bytes).filter(|_| json_content_type(ctx.headers())) else { return relay(ctx, bytes).await };
+    let Some((option, supplied)) = parse_option(&bytes).filter(|_| json_content_type(ctx.headers())) else { return relay(ctx, bytes).await };
+    let expected = match expected(&ctx, supplied.as_deref()).await { Ok(expected) => expected, Err(failed) => return answer(&ctx, failed) };
     let operation_id = random_hex(16);
     let result = match &ctx.target.handle {
-        EntryHandle::Terminal { handle, .. } => match plugin_pending(&ctx).await {
-            Err(()) => plugin_down("erro_opcao_nao_convergiu"),
-            Ok(pending) => match select_plan(pending.as_ref(), option, st.term.is_active(&ctx.name)) {
-                Err(refused) => refused,
-                Ok(payload) => {
-                    let (answered, diary) = select_terminal_answer(&handle.control(operation_id, "select".into(), payload).await);
-                    report(&ctx, diary);
-                    answered
-                }
-            },
+        EntryHandle::Terminal { handle, .. } => match select_plan(&expected, option, st.term.is_active(&ctx.name)) {
+            Err(refused) => refused,
+            Ok(payload) => {
+                let (answered, diary) = select_terminal_answer(&handle.control(operation_id, "select".into(), payload).await);
+                report(&ctx, diary);
+                answered
+            }
         },
-        headless => select_headless_answer(&headless.command(RuntimeCommand { operation_id, kind: OperationKind::Select, payload: json!({"option": option}) }).await),
+        headless => select_headless_answer(&headless.command(RuntimeCommand { operation_id, kind: OperationKind::Select,
+            payload: json!({"option": option, "interaction_id": supplied}) }).await),
     };
     answer(&ctx, result)
 }
@@ -304,10 +333,13 @@ pub async fn select_submit(State(st): State<Arc<AppState>>, ConnectInfo(peer): C
         Ok(admitted) => admitted,
         Err(response) => return response,
     };
+    let Some(supplied) = parse_submit(&bytes).filter(|_| bytes.is_empty() || json_content_type(ctx.headers())) else { return relay(ctx, bytes).await };
+    let expected = match expected(&ctx, supplied.as_deref()).await { Ok(expected) => expected, Err(failed) => return answer(&ctx, failed) };
     // Sem pane não há aba Submit para dirigir: quem responde, como hoje, é o Python.
     let EntryHandle::Terminal { handle, .. } = &ctx.target.handle else { return relay(ctx, bytes).await };
+    if expected.target.kind != crate::interactions::InteractionKind::Menu { return answer(&ctx, interaction_failure(InteractionError::Changed)); }
     let result = if st.term.is_active(&ctx.name) { panel_open_refusal() } else {
-        let (answered, diary) = submit_answer(&handle.control(random_hex(16), "submit_selected".into(), json!({})).await);
+        let (answered, diary) = submit_answer(&handle.control(random_hex(16), "submit_selected".into(), json!({"interaction_id": supplied})).await);
         report(&ctx, diary);
         answered
     };

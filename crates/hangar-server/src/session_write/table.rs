@@ -58,8 +58,8 @@ pub(crate) fn body_ok(route: WriteRoute, body: &Bytes) -> bool {
     let object = || serde_json::from_slice::<serde_json::Value>(body).is_ok_and(|v| v.is_object());
     match route {
         Input | Select | Answer | Keys | TermInput => object(),
-        Steer => body.is_empty() || object(),
-        Interrupt | SelectSubmit | QueueRemove | CodexControl => true,
+        Steer | SelectSubmit => body.is_empty() || object(),
+        Interrupt | QueueRemove | CodexControl => true,
     }
 }
 

@@ -51,6 +51,7 @@ pub trait CaptureSource: Sync {
     fn pause(&self, d: Duration) -> impl Future<Output = ()> + Send;
     fn wall(&self) -> f64;
     fn mono(&self) -> f64;
+    fn target(&self, _name: &str) -> Option<String> { None }
 }
 
 /// O que a rodada pede a quem é dono do registro (o Python, a partir da Fase B).
@@ -82,6 +83,8 @@ pub struct Facts<'a> {
 /// Caches que atravessam rodadas.
 #[derive(Default)]
 pub struct Classifier {
+    plugin_runtime: Option<std::sync::Arc<crate::runtime::gateway::RuntimeRegistry>>,
+    permissions: Option<crate::state::permission::PermissionStore>,
     idle_checked: BTreeMap<String, f64>,
     status: BTreeMap<String, (f64, Option<String>)>,
     label: BTreeMap<String, Option<String>>,
@@ -130,7 +133,10 @@ fn headless_state(row: &mut SessionRow, retrato: Option<&BTreeMap<String, Value>
     row.label = text("label");
     row.question = text("question");
     row.options = state["options"].as_array().map(|o| o.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect());
+    row.interaction_id = text("interaction_id");
     row.status_line = text("status_line");
+    // O problema da vista (queda do socket, falha do runtime) aparece também na lista.
+    if row.problema.is_none() { row.problema = text("problema"); }
     if let Some(q) = state["codex_question"].as_object() {
         row.state = "awaiting_input".into();
         row.question = q["questions"][0]["question"].as_str().map(str::to_owned);
@@ -144,6 +150,7 @@ fn from_monitor(row: &mut SessionRow, ev: &StateEvent) {
     row.label.clone_from(&ev.label);
     row.question.clone_from(&ev.question);
     row.options.clone_from(&ev.options);
+    row.interaction_id.clone_from(&ev.interaction_id);
     row.status_line.clone_from(&ev.status_line);
     row.limit_reset.clone_from(&ev.limit_reset);
     row.limited = ev.limited;
@@ -158,6 +165,25 @@ fn apply(row: &mut SessionRow, a: &PaneAnalysis) {
 }
 
 impl Classifier {
+    pub fn set_plugin_runtime(&mut self, runtime: std::sync::Arc<crate::runtime::gateway::RuntimeRegistry>) { self.plugin_runtime = Some(runtime); }
+
+    pub fn set_permissions(&mut self, permissions: crate::state::permission::PermissionStore) { self.permissions = Some(permissions); }
+
+    async fn observe_permission(&self, name: &str, pane: &str, expected: Option<&crate::interactions::InteractionBinding>, revision: Option<crate::state::permission::MemoryRevision>) {
+        let (Some(runtime), Some(memory), Some(mode)) = (&self.plugin_runtime, &self.permissions, crate::state::permission::parse_permission_mode(pane)) else { return };
+        match runtime.interaction_binding_readonly(name).await {
+            Ok(binding) if expected == Some(&binding) => match memory.lock() {
+                Ok(mut memory) => match revision.ok_or("permission_frame_unavailable").and_then(|revision| memory.observe_capture(&binding.conversation, mode, revision)) {
+                    Ok(_) => {},
+                    Err(code) => super::facts::note("rust.list_permission_failed", name, code.into(), "captura de permissão recusada"),
+                },
+                Err(_) => super::facts::note("rust.list_permission_failed", name, "permission_store_unavailable".into(), "memória de permissão indisponível"),
+            },
+            Err(error) => super::facts::note("rust.list_permission_failed", name, error.code, "vínculo de permissão não confirmado"),
+            Ok(_) => super::facts::note("rust.list_permission_failed", name, "permission_binding_changed".into(), "captura pertence a outra vida"),
+        }
+    }
+
     /// Caches expostos para o contrato com o Python comparar tique a tique.
     pub fn idle_checked(&self) -> &BTreeMap<String, f64> { &self.idle_checked }
     pub fn status_cache(&self) -> &BTreeMap<String, (f64, Option<String>)> { &self.status }
@@ -210,9 +236,12 @@ impl Classifier {
         // Linhas com `Monitor` vivo: nenhuma captura, nem a da statusline nem a do limite.
         let mut watched = HashSet::new();
         for (i, row) in rows.iter_mut().enumerate() {
+            // Codex com terminal cujo ator está no Rust: o pane só diz que a TUI existe; quem publica é o ator.
+            let rust_codex_terminal = row.provider == "codex" && !row.headless
+                && facts.headless.is_some_and(|r| r.contains_key(&row.name));
             // Codex sem terminal com chat aberto: o feed do hub e o chat dizem o mesmo; sem ele, vale o
             // fato do Python (o mesmo espelho da vista do Rust). Contagem, conta e atividade seguem dos fatos.
-            if row.provider == "codex" && row.headless
+            if row.provider == "codex" && (row.headless || rust_codex_terminal)
                 && let Some(ev) = facts.monitors.get(&row.name, sid(row).as_deref())
             {
                 from_monitor(row, &ev);
@@ -220,6 +249,11 @@ impl Classifier {
                     row.state = "awaiting_input".into();
                     row.question = q.get("questions").and_then(|qs| qs[0]["question"].as_str()).map(str::to_owned);
                 }
+                continue;
+            }
+            // Sem feed, o estado sai da vista do ator: o Python perdeu o cliente e o fato dele ficou para trás.
+            if rust_codex_terminal {
+                headless_state(row, facts.headless, None);
                 continue;
             }
             // Sem feed, a linha de status sai da vista do ator, a mesma do chat: a do fato vem do
@@ -271,6 +305,16 @@ impl Classifier {
         }
 
         if !pending.is_empty() {
+            let mut capture_bindings = BTreeMap::new();
+            if let Some(runtime) = &self.plugin_runtime {
+                for &i in &pending { capture_bindings.insert(rows[i].name.clone(), runtime.interaction_binding_readonly(&rows[i].name).await); }
+            }
+            let mut permission_revisions = BTreeMap::new();
+            if let Some(memory) = &self.permissions && let Ok(memory) = memory.lock() {
+                for (name, binding) in &capture_bindings {
+                    if let Ok(binding) = binding { permission_revisions.insert(name.clone(), memory.revision(&binding.conversation)); }
+                }
+            }
             let frames = capture_all(io, pending.iter().map(|&i| rows[i].name.as_str()).collect()).await;
             let mut analyses: Vec<Option<PaneAnalysis>> = frames.iter().map(|f| f.as_ref().ok().map(|t| analyze(t))).collect();
             let spinning: Vec<usize> = (0..pending.len())
@@ -303,6 +347,24 @@ impl Classifier {
                     continue;
                 };
                 apply(row, a);
+                if let Ok(pane) = &frames[k] { self.observe_permission(&row.name, pane, capture_bindings.get(&row.name).and_then(|result| result.as_ref().ok()), permission_revisions.get(&row.name).copied()).await; }
+                if let Some(runtime) = &self.plugin_runtime {
+                    let observed = async {
+                        let binding = runtime.interaction_binding_readonly(&row.name).await.map_err(|e| e.code)?;
+                        if capture_bindings.get(&row.name).and_then(|result| result.as_ref().ok()) != Some(&binding) { return Err("erro_interacao_desatualizada".into()); }
+                        let target = runtime.terminal_target(&row.name).await.map_err(|e| e.code)?.ok_or("terminal_target_missing")?;
+                        if io.target(&row.name).as_deref() != Some(target.binding.pane.as_str()) { return Err("terminal_capture_target_changed".into()); }
+                        let jsonl = row.jsonl.as_deref().map(Path::new).ok_or("askq_transcript_missing")?;
+                        let pane = frames[k].as_ref().map_err(|_| "list_capture_failed")?;
+                        let store = runtime.plugin().map_err(|e| e.code)?;
+                        let question = crate::state::ask::observe_terminal(store.interactions(), &binding, jsonl, pane)?;
+                        let menu = crate::state::ask::observe_menu(store.interactions(), &binding, jsonl, pane)?;
+                        if runtime.interaction_binding_readonly(&row.name).await.map_err(|e| e.code)? != binding { return Err("erro_interacao_desatualizada".into()); }
+                        if question.is_some() { row.pending_questions = row.pending_questions.max(1); }
+                        Ok::<_, String>(menu)
+                    }.await;
+                    match observed { Ok(id) => row.interaction_id = id, Err(code) => row.problema = Some(code) }
+                }
                 match row.last_activity {
                     Some(t) if a.state == "idle" => { self.idle_checked.insert(row.name.clone(), t); }
                     _ => { self.idle_checked.remove(&row.name); }
@@ -359,8 +421,12 @@ impl Classifier {
         stale.sort_by(|a, b| age(&self.status, a).total_cmp(&age(&self.status, b)));
         stale.truncate(STATUS_BUDGET);
         for name in stale {
+            let binding = match &self.plugin_runtime { Some(runtime) => runtime.interaction_binding_readonly(&name).await.ok(), None => None };
+            let revision = self.permissions.as_ref().and_then(|memory| memory.lock().ok())
+                .and_then(|memory| binding.as_ref().map(|binding| memory.revision(&binding.conversation)));
             match io.capture(&name).await {
                 Ok(text) => {
+                    self.observe_permission(&name, &text, binding.as_ref(), revision).await;
                     let a = analyze(&text);
                     let now = io.mono();
                     self.status.insert(name.clone(), (now, a.status_line.clone()));
@@ -458,6 +524,7 @@ impl MuxCapture {
 }
 
 impl CaptureSource for MuxCapture {
+    fn target(&self, name: &str) -> Option<String> { self.targets.get(name).cloned() }
     fn capture(&self, name: &str) -> impl Future<Output = Result<String, CaptureFailed>> + Send {
         let target = self.targets.get(name).cloned().unwrap_or_else(|| format!("={name}:"));
         let (mux, name) = (self.mux.clone(), name.to_owned());
@@ -670,6 +737,35 @@ mod tests {
         let broken = BTreeMap::from([("s".to_owned(), serde_json::json!({"error": "cano_exited", "view": {"alive": true}}))]);
         run(&mut row, &dirs, &io, Some(&broken)).await;
         assert_eq!((row.state.as_str(), row.problema.as_deref()), ("working", Some("list_runtime_unavailable")));
+    }
+
+    #[tokio::test]
+    async fn codex_terminal_owned_by_rust_reads_the_actor_not_the_python_fact() {
+        let row = || -> SessionRow { serde_json::from_value(serde_json::json!({"name": "cx", "provider": "codex", "headless": false,
+            "state": "idle", "jsonl": "/x/rollout-abc.jsonl"})).unwrap() };
+        let hooks = HookStates::default();
+        let problems = BTreeMap::new();
+        let io = Fixed { frame: Ok(String::new()), wall: 1000.0, calls: Mutex::new(0) };
+        let owned = BTreeMap::from([("cx".to_owned(), serde_json::json!({"error": null, "view": {"alive": true, "headless": false,
+            "public_state": {"state": "working", "label": null, "question": null, "options": null, "status_line": "gpt-5", "headless": false}}}))]);
+        let (held, monitors, empty) = (BTreeMap::new(), Published::default(), BTreeMap::new());
+        let facts = Facts { hooks: &hooks, alive: &|_| false, config_dirs: &[], headless: Some(&owned),
+                            problems: &problems, stall_seconds: 1e12, held: &held, monitors: &monitors };
+        let mut rust = row();
+        Classifier::default().classify(std::slice::from_mut(&mut rust), &facts, &io).await;
+        assert_eq!((rust.state.as_str(), rust.status_line.as_deref()), ("working", Some("gpt-5")));
+        // A queda do socket chega à lista pelo problema da vista.
+        let dropped = BTreeMap::from([("cx".to_owned(), serde_json::json!({"error": null, "view": {"alive": true, "headless": false,
+            "public_state": {"state": "idle", "problema": "runtime_falhou", "problema_detalhe": "a conexão de controle caiu", "headless": false}}}))]);
+        let mut lost = row();
+        Classifier::default().classify(std::slice::from_mut(&mut lost), &Facts { headless: Some(&dropped), ..facts }, &io).await;
+        assert_eq!(lost.problema.as_deref(), Some("runtime_falhou"));
+        // Sem ator no Rust, o pane continua sendo do Python: o fato dele vale.
+        let facts = Facts { headless: Some(&empty), ..facts };
+        let mut python = row();
+        Classifier::default().classify(std::slice::from_mut(&mut python), &facts, &io).await;
+        assert_eq!(python.state, "idle");
+        assert_eq!(*io.calls.lock().unwrap(), 0, "Codex nunca é raspado");
     }
 
     #[tokio::test]

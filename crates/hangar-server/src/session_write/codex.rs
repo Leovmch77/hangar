@@ -92,6 +92,9 @@ pub fn skip_answer(sent: &Result<RuntimeReply, RuntimeError>) -> Answer {
     let invalid = || (StatusCode::CONFLICT, detail_body("erro_codex_resposta_invalida", MSG_INVALID_ANSWER, json!({})));
     match sent {
         Ok(reply) if reply.disposition == Disposition::Accepted => (StatusCode::OK, json!({"ok": true})),
+        // Com terminal o cancelamento escrito não prova quem decidiu: resultado incerto, como em /answer e /select.
+        Ok(reply) if reply.disposition == Disposition::Unknown && reply.payload["decision_confirmed"] == false =>
+            (StatusCode::CONFLICT, detail_body("erro_sem_confirmacao_resposta", super::control::MSG_UNCONFIRMED_ANSWER, json!({}))),
         Ok(reply) if reply.disposition == Disposition::Rejected => invalid(),
         Err(error) if error.code == "codex_command" => invalid(),
         _ => (StatusCode::SERVICE_UNAVAILABLE, detail_body("erro_codex_resposta_envio", MSG_ANSWER_UNSENT, json!({}))),

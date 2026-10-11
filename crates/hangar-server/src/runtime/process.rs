@@ -105,6 +105,9 @@ fn identify(pid: u32, key: &str) -> Liveness {
 /// Pelo pid E pela identidade: número reaproveitado depois de reiniciar a máquina é `Foreign`.
 pub fn liveness(pid: u32, key: &str) -> Liveness { identify(pid, key) }
 
+/// Argv do processo vivo (vazio quando ilegível); `None` sem processo.
+pub fn argv(pid: u32) -> Option<Vec<String>> { probe(pid).map(|(argv, _)| argv) }
+
 static FOUND: OnceLock<PathBuf> = OnceLock::new();
 
 /// Fixa o binário do cano antes da primeira busca, sem variável de ambiente: os testes de integração

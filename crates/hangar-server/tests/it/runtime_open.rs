@@ -91,7 +91,154 @@ async fn policy() -> std::net::SocketAddr {
     address
 }
 
-async fn registry() -> RuntimeRegistry { RuntimeRegistry::new(policy().await,"secret-test".into(),"instance-test".into()) }
+pub(crate) async fn registry() -> RuntimeRegistry { RuntimeRegistry::new(policy().await,"secret-test".into(),"instance-test".into()) }
+
+/// App-server do Codex falso, em WebSocket de loopback: conta as conexões, guarda os quadros de cada
+/// uma e derruba a que o teste pedir. `initialize` responde; `thread/resume` diz que ainda não há
+/// rollout; `turn/start` só responde com `answer_turns`.
+#[cfg(unix)]
+pub(crate) struct FakeAppServer {
+    pub endpoint:String,
+    pub connections:Arc<AtomicUsize>,
+    frames:Arc<std::sync::Mutex<Vec<(usize,Value)>>>,
+    drop_connection:tokio::sync::watch::Sender<usize>,
+    task:tokio::task::JoinHandle<()>,
+}
+
+#[cfg(unix)]
+impl Drop for FakeAppServer { fn drop(&mut self) { self.task.abort(); } }
+
+#[cfg(unix)]
+impl FakeAppServer {
+    pub fn frames_of(&self,connection:usize) -> Vec<Value> {
+        self.frames.lock().unwrap().iter().filter(|(n,_)|*n == connection).map(|(_,frame)|frame.clone()).collect()
+    }
+    pub async fn wait_method(&self,connection:usize,method:&str) -> Value {
+        tokio::time::timeout(Duration::from_secs(10),async {
+            loop {
+                if let Some(frame) = self.frames_of(connection).into_iter().find(|f|f["method"] == method) { return frame; }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }).await.unwrap_or_else(|_|panic!("conexão {connection} sem {method}"))
+    }
+    /// Derruba só o WebSocket `connection` (1 = o primeiro); o processo falso segue vivo.
+    pub fn drop_connection(&self,connection:usize) { self.drop_connection.send_replace(connection); }
+}
+
+#[cfg(unix)]
+pub(crate) async fn fake_app_server(answer_turns:bool) -> FakeAppServer {
+    use futures_util::{SinkExt,StreamExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("ws://{}",listener.local_addr().unwrap());
+    let connections = Arc::new(AtomicUsize::new(0));
+    let frames:Arc<std::sync::Mutex<Vec<(usize,Value)>>> = Arc::default();
+    let (drop_connection,_) = tokio::sync::watch::channel(0usize);
+    let (counter,seen,dropper) = (connections.clone(),frames.clone(),drop_connection.clone());
+    let task = tokio::spawn(async move {
+        loop {
+            let Ok((stream,_)) = listener.accept().await else { return };
+            let Ok(mut ws) = tokio_tungstenite::accept_async(stream).await else { continue };
+            let index = counter.fetch_add(1,Ordering::SeqCst) + 1;
+            let (seen,mut dropped) = (seen.clone(),dropper.subscribe());
+            tokio::spawn(async move {
+                loop {
+                    let message = tokio::select! {
+                        message = ws.next() => message,
+                        _ = dropped.wait_for(|n|*n == index) => return,
+                    };
+                    let Some(Ok(message)) = message else { return };
+                    let Ok(text) = message.to_text() else { continue };
+                    let Ok(frame) = serde_json::from_str::<Value>(text) else { continue };
+                    seen.lock().unwrap().push((index,frame.clone()));
+                    let reply = match frame["method"].as_str() {
+                        Some("initialize") => Some(json!({"id":frame["id"],"result":{"userAgent":"fake"}})),
+                        Some("thread/resume") => Some(json!({"id":frame["id"],"error":{"code":-32600,"message":"no rollout found for thread id thread-1"}})),
+                        Some("turn/start") if answer_turns => Some(json!({"id":frame["id"],"result":{"turn":{"id":"turn-1","status":"inProgress","items":[]}}})),
+                        _ => None,
+                    };
+                    if let Some(reply) = reply {
+                        if ws.send(tokio_tungstenite::tungstenite::Message::text(reply.to_string())).await.is_err() { return; }
+                    }
+                }
+            });
+        }
+    });
+    FakeAppServer { endpoint,connections,frames,drop_connection,task }
+}
+
+/// Processo cujo argv é o de um app-server deste endereço (`sh -c '…' app-server <endpoint>`): prova o pid
+/// sem app-server de verdade. Dois comandos no `-c`: o shell não troca a própria imagem pelo `sleep`.
+#[cfg(unix)]
+pub(crate) fn app_server_process(endpoint:&str) -> std::process::Child {
+    std::process::Command::new("sh").args(["-c","sleep 120; true","app-server",endpoint]).spawn().unwrap()
+}
+
+#[cfg(unix)]
+pub(crate) fn codex_terminal_target(dir:&std::path::Path,endpoint:&str,app_pid:u32) -> hangar_server::runtime::codex_terminal::CodexTerminalTarget {
+    hangar_server::runtime::codex_terminal::CodexTerminalTarget { key:"codex-key".into(),generation:1,name:"cx-proof".into(),
+        endpoint:endpoint.into(),app_pid,thread_id:"thread-1".into(),
+        terminal:hangar_server::terminal_input::TerminalBinding { name:"cx-proof".into(),pane:"%7".into(),conversation:"thread-1".into(),
+            generation:1,created:1,mux_argv:vec!["tmux".into()],windows:false,clipboard_lock_path:None },
+        metadata:json!({"key":"codex-key","thread_id":"thread-1","endpoint":endpoint,"app_pid":app_pid,"cwd":dir,"codex_home":dir.join("codex-home")}),
+        transcript:None,lease_path:dir.join("codex-key.lock"),state_path:dir.join("codex-key.queue-state.json"),projection_dir:dir.join("projection") }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn codex_terminal_is_adopted_without_rollout_and_sends_before_subscribing() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = fake_app_server(true).await;
+    let mut child = app_server_process(&server.endpoint);
+    let registry = registry().await;
+    let opened = registry.open_codex_terminal(codex_terminal_target(dir.path(),&server.endpoint,child.id())).await.unwrap();
+    assert_eq!(opened["opened"],true);
+    server.wait_method(1,"initialize").await;
+    server.wait_method(1,"thread/resume").await;
+    let handle = registry.handle("codex-key",1).await.unwrap();
+    let sent = tokio::spawn(async move { handle.command(RuntimeCommand { operation_id:"msg".into(),kind:OperationKind::Input,
+        payload:json!({"text":"Olá","entry_id":"msg"}) }).await });
+    // Conectado já envia: o primeiro turno é o que cria o rollout que a assinatura exige.
+    let start = server.wait_method(1,"turn/start").await;
+    assert_eq!(start["params"]["threadId"],"thread-1");
+    assert_ne!(sent.await.unwrap().unwrap().disposition,Disposition::Rejected);
+    let view = registry.handle("codex-key",1).await.unwrap().view().await.unwrap();
+    assert_eq!(view["headless"],false,"o estado terminal não sai como sem terminal");
+    assert_eq!(view["public_state"]["headless"],false);
+    // Encerrar com kill não é do Rust; fechar solta a posse e deixa o processo vivo.
+    assert_eq!(registry.close_with_kill("codex-key",1).await.unwrap_err().code,"close_kill");
+    assert_eq!(registry.close("codex-key",1).await.unwrap()["closed"],true);
+    assert!(child.try_wait().unwrap().is_none(),"o app-server adotado segue vivo");
+    assert_eq!(server.connections.load(Ordering::SeqCst),1,"um cliente só");
+    drop(crate::lease_when_free(&dir.path().join("codex-key.lock")));
+    child.kill().unwrap(); child.wait().unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn codex_terminal_admission_proves_the_pid_and_fences_another_life() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = fake_app_server(true).await;
+    let mut child = app_server_process(&server.endpoint);
+    let registry = registry().await;
+    // Pid vivo que não é o app-server deste endereço: recusado antes de pegar a trava e de conectar.
+    let error = registry.open_codex_terminal(codex_terminal_target(dir.path(),&server.endpoint,std::process::id())).await.unwrap_err();
+    assert_eq!(error.code,"codex_app_pid");
+    assert_eq!(server.connections.load(Ordering::SeqCst),0);
+    drop(crate::lease_when_free(&dir.path().join("codex-key.lock")));
+    let target = codex_terminal_target(dir.path(),&server.endpoint,child.id());
+    registry.open_codex_terminal(target.clone()).await.unwrap();
+    // A mesma vida reabre sem outro cliente; outra (endereço trocado na mesma geração) é recusada.
+    registry.open_codex_terminal(target.clone()).await.unwrap();
+    let other = hangar_server::runtime::codex_terminal::CodexTerminalTarget { endpoint:"ws://127.0.0.1:1".into(),..target };
+    assert_eq!(registry.open_codex_terminal(other).await.unwrap_err().code,"runtime_generation");
+    server.wait_method(1,"initialize").await;
+    assert_eq!(server.connections.load(Ordering::SeqCst),1);
+    // O app-server morreu: reabrir a mesma vida responde o erro, não `opened` com um ator desconectado.
+    child.kill().unwrap(); child.wait().unwrap();
+    let again = codex_terminal_target(dir.path(),&server.endpoint,child.id());
+    assert_eq!(registry.open_codex_terminal(again).await.unwrap_err().code,"codex_app_pid");
+    registry.close("codex-key",1).await.unwrap();
+}
 
 fn clock() -> ClockSample { ClockSample { monotonic_s:0.0,epoch_s:1_800_000_000.0 } }
 

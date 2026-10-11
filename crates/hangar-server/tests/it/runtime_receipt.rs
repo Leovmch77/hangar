@@ -188,6 +188,40 @@ fn codex_rollout_of_another_conversation_does_not_confirm() {
 }
 
 #[test]
+fn codex_identified_thread_without_rollout_is_proven_absence_confirmed_by_content() {
+    // Thread da TUI sem turno: o caminho do rollout ainda não existe; nada é aberto e o cursor vale como anterior ao arquivo.
+    let dir=tempfile::tempdir().unwrap(); let path=dir.path().join("rollout.jsonl");
+    let empty=std::path::Path::new("");
+    let mut index=ReceiptIndex::new("codex","thread-1");
+    let cursor=index.capture(empty).unwrap();
+    assert!(cursor.file_identity.is_none() && cursor.offset == 0 && cursor.absent_since.is_some());
+    assert!(index.scan(empty).unwrap().is_empty());
+    assert!(index.match_after(empty,&cursor,&json!({"text":"um"}),&BTreeMap::new()).unwrap().is_none());
+    codex_rollout(&path,Some("thread-1"));
+    index.scan(&path).unwrap();
+    let row=json!({"text":"um"});
+    let proof=index.match_after(&path,&cursor,&row,&BTreeMap::new()).unwrap().expect("rollout que surgiu confirma pelo conteúdo");
+    assert!(proof.validates(&cursor,&row));
+}
+
+#[test]
+fn codex_invalid_rollout_path_is_an_error_not_absence() {
+    let dir=tempfile::tempdir().unwrap();
+    assert!(ReceiptIndex::new("codex","thread-1").capture(dir.path()).is_err());
+}
+
+#[test]
+fn codex_rebound_conversation_drops_old_cursors() {
+    let dir=tempfile::tempdir().unwrap(); let path=dir.path().join("rollout.jsonl");
+    let mut index=ReceiptIndex::new("codex","thread-1"); let cursor=index.capture(&path).unwrap();
+    codex_rollout(&path,Some("thread-1"));
+    index.scan(&path).unwrap();
+    index.rebind("thread-2");
+    index.scan(&path).unwrap();
+    assert!(index.match_after(&path,&cursor,&json!({"text":"um"}),&BTreeMap::new()).unwrap().is_none());
+}
+
+#[test]
 fn codex_rollout_without_session_meta_falls_back_to_the_cursor_without_file() {
     let dir=tempfile::tempdir().unwrap(); let path=dir.path().join("rollout.jsonl");
     let mut index=ReceiptIndex::new("codex","thread-1"); let cursor=index.capture(&path).unwrap();

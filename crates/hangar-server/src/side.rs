@@ -162,6 +162,8 @@ pub struct SideCtx {
     pub monitors: Option<SpawnMonitor>,
     /// Faixa e avisos que o Rust publica nas sessões sem terminal dele (interface dos mods).
     pub mods: crate::mods::state::Mods,
+    /// Registro do runtime, quando ligado: diz se o ator do Codex com terminal é do Rust (dono do estado).
+    pub runtime: Arc<std::sync::OnceLock<Arc<crate::runtime::gateway::RuntimeRegistry>>>,
 }
 
 #[derive(Default)]
@@ -276,6 +278,9 @@ pub struct Hub {
     wake: Arc<Notify>,
     /// Vezes que a troca vazou (o Python mandou um dos quatro para sessão do Rust) e foi registrada.
     pub(crate) python_leaks: AtomicU32,
+    /// O ator do Codex com terminal desta sessão é do Rust: o feed publica o estado. O pane continua no
+    /// `Binding` (`headless: false`); dono é outra coisa.
+    runtime_owned: std::sync::atomic::AtomicBool,
 }
 
 /// O que um aparelho recebe ao entrar: cauda + retrato, e o canal para o resto. `ui`: a versão do
@@ -307,6 +312,7 @@ impl From<Bytes> for Queued {
 impl Hub {
     fn start(name: &str, binding: Binding, ctx: SideCtx) -> Arc<Hub> {
         let (tx, _) = broadcast::channel(CHANNEL);
+        let owned = ctx.runtime.get().is_some_and(|registry| registry.owns_codex_terminal(name));
         let hub = Arc::new_cyclic(|weak| {
             let tail = FileTail::spawn(
                 binding.jsonl.clone(),
@@ -328,6 +334,7 @@ impl Hub {
                 committed: Mutex::new(None),
                 wake: Arc::new(Notify::new()),
                 python_leaks: AtomicU32::new(0),
+                runtime_owned: std::sync::atomic::AtomicBool::new(owned),
             }
         });
         hub.ensure_monitor();
@@ -340,7 +347,7 @@ impl Hub {
     /// morta, pânico) volta quando alguém religa ou assina de novo.
     fn ensure_monitor(self: &Arc<Self>) {
         let Some(spawn) = self.ctx.monitors.clone() else { return };
-        let wanted = self.bound.lock().unwrap().as_ref().and_then(|b| b.binding.state_events().map(|e| (e, b.binding.provider)));
+        let wanted = self.bound.lock().unwrap().as_ref().and_then(|b| self.owner_events(&b.binding).map(|e| (e, b.binding.provider)));
         let mut slot = self.monitor.lock().unwrap();
         // Dono que acabou conta como ausente.
         let alive = slot.as_ref().filter(|(m, _, _)| !m.is_finished()).map(|(_, _, key)| *key);
@@ -374,7 +381,34 @@ impl Hub {
 
     /// Os eventos do estado que esta ligação tem no Rust, para o canal privado.
     fn state_events(&self) -> &'static [&'static str] {
-        self.bound.lock().unwrap().as_ref().and_then(|b| b.binding.state_events()).unwrap_or(&STATE_EVENTS)
+        self.bound.lock().unwrap().as_ref().and_then(|b| self.owner_events(&b.binding)).unwrap_or(&STATE_EVENTS)
+    }
+
+    /// Eventos que o Rust publica nesta ligação: os do `Binding`, ou os do feed quando o ator do Codex com
+    /// terminal é do Rust (o registro avisa o hub na abertura e no fechamento).
+    fn owner_events(&self, binding: &Binding) -> Option<&'static [&'static str]> {
+        binding.state_events().or_else(|| self.codex_terminal_owned(binding).then_some(&FEED_EVENTS[..]))
+    }
+
+    fn codex_terminal_owned(&self, binding: &Binding) -> bool {
+        binding.provider == Provider::Codex && !binding.headless && self.runtime_owned.load(Ordering::Acquire)
+    }
+
+    /// O estado sai do feed do runtime: sem terminal pelo `Binding`, Codex com terminal pelo dono.
+    pub fn runtime_feed(&self) -> bool {
+        self.bound.lock().unwrap().as_ref().is_some_and(|b| b.binding.runtime_feed() || self.codex_terminal_owned(&b.binding))
+    }
+
+    /// O registro abriu ou fechou o ator do Codex com terminal desta sessão: troca o dono do estado.
+    pub(crate) fn set_runtime_owned(self: &Arc<Self>, owned: bool) {
+        if self.runtime_owned.swap(owned, Ordering::AcqRel) != owned {
+            self.ensure_monitor();
+            self.wake.notify_one();
+        }
+    }
+
+    pub(crate) fn source_binding(&self) -> Option<(u64, Binding)> {
+        self.bound.lock().unwrap().as_ref().map(|bound| (bound.generation, bound.binding.clone()))
     }
 
     /// A ligação atual: o feed escolhe por ela.
@@ -416,6 +450,18 @@ impl Hub {
             return false;
         }
         self.deliver(event, data);
+        true
+    }
+
+    pub(crate) fn publish_own_bound(&self, expected: &(u64, Binding), event: &str, data: &str) -> bool {
+        self.publish_own_bound_with(expected, event, data, || {})
+    }
+
+    pub(crate) fn publish_own_bound_with(&self, expected: &(u64, Binding), event: &str, data: &str, published: impl FnOnce()) -> bool {
+        let bound = self.bound.lock().unwrap();
+        let Some(bound) = bound.as_ref().filter(|bound| bound.generation == expected.0 && bound.binding == expected.1) else { return false };
+        self.deliver_bound(event, data, bound.binding.provider == Provider::Claude);
+        published();
         true
     }
 
@@ -509,9 +555,13 @@ impl Hub {
     /// Quadro de evento para os aparelhos: entra no retrato e sai pelo canal, salvo quando é igual
     /// ao último do mesmo tipo (o aparelho já o tem). Serve ao Python (side-events) e ao Rust (mods).
     fn deliver(&self, event: &str, data: &str) {
+        let pane_question = self.bound.lock().unwrap().as_ref().is_some_and(|b| b.binding.provider == Provider::Claude);
+        self.deliver_bound(event, data, pane_question);
+    }
+
+    fn deliver_bound(&self, event: &str, data: &str, pane_question: bool) {
         let frame = sse_frame(event, data, None);
         // Retrato antes do envio: quem assina entre os dois recebe repetido, nunca nada.
-        let pane_question = self.bound.lock().unwrap().as_ref().is_some_and(|b| b.binding.provider == Provider::Claude);
         let mut cache = self.cache.lock().unwrap();
         // Pergunta repetida é pergunta nova: o aparelho já fechou a anterior.
         let repeated = event != "ask_question"
@@ -738,6 +788,7 @@ async fn side_once(hub: &Arc<Hub>, attempt: &mut u32) -> SideEnd {
                 }
             }
             "ping" => {}
+            "stats" => overlay_plugin_rate(hub, &ev.data).await,
             event => {
                 // Sessão sem terminal atendida pelo Rust: faixa e avisos vêm dele (dono único). Um
                 // `plugin_ui` velho do Python (sessão que mudou de modo) não pode sobrescrevê-los.
@@ -748,6 +799,39 @@ async fn side_once(hub: &Arc<Hub>, attempt: &mut u32) -> SideEnd {
             }
         }
     }
+}
+
+async fn overlay_plugin_rate(hub: &Arc<Hub>, data: &str) {
+    let Some(runtime) = hub.ctx.runtime.get() else { hub.deliver("stats", data); return };
+    let Some(binding) = hub.binding().filter(|binding| binding.provider == Provider::Claude) else {
+        hub.deliver("stats", data); return;
+    };
+    let generation = hub.generation();
+    let Ok(mut stats) = serde_json::from_str::<serde_json::Value>(data) else {
+        tracing::warn!(session = %hub.name, code = "plugin_stats_invalid", "estatísticas da sessão não são JSON");
+        return;
+    };
+    let reading = runtime.interaction_binding_readonly(&hub.name).await;
+    match reading {
+        Ok(life) if life.conversation == binding.key => {
+            let (path, conversation) = (binding.jsonl.clone(), life.conversation.clone());
+            let ts = match tokio::task::spawn_blocking(move || crate::plugin::sources::last_call_ts(&path, &conversation)).await {
+                Ok(ts) => ts,
+                Err(_) => { tracing::warn!(session = %hub.name, code = "plugin_rate_transcript_failed", "taxa: relógio do transcript indisponível"); None },
+            };
+            if hub.generation() != generation || runtime.interaction_binding_readonly(&hub.name).await.ok().as_ref() != Some(&life) { return; }
+            hub.ctx.hubs.plugin_rates().overlay(&life, ts, &mut stats);
+        }
+        _ => {
+            if let Some(stats) = stats.as_object_mut() {
+                if stats.remove("tok_s_exact") == Some(serde_json::json!(true)) { stats.remove("tok_s_now"); stats.remove("tok_s_recent"); }
+            }
+            if crate::warn_limit::allow(Some(&hub.name), "plugin_rate_binding_unavailable") {
+                tracing::warn!(session = %hub.name, code = "plugin_rate_binding_unavailable", "taxa: vínculo não confirmado; mantém os demais dados");
+            }
+        }
+    }
+    if hub.generation() == generation { hub.deliver("stats", &stats.to_string()); }
 }
 
 /// Evento da conexão interna (fora `info` e `ping`). Com o dono do estado vivo, os eventos dele
@@ -839,8 +923,10 @@ pub async fn private_events(
         st.diag.report("rust.state_channel_failed", &name, "internal_info", "o backend não devolveu os dados da sessão");
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
-    // Só Claude (com ou sem terminal) e Codex sem terminal têm o estado aqui; o resto o Python observa.
-    let Some(binding) = info.as_ref().and_then(Binding::from_info).filter(|b| b.state_events().is_some()) else {
+    // Só Claude (com ou sem terminal), Codex sem terminal e Codex com terminal de ator no Rust têm o estado
+    // aqui; o resto o Python observa.
+    let owned = |b: &Binding| b.provider == Provider::Codex && st.side.runtime.get().is_some_and(|r| r.owns_codex_terminal(&name));
+    let Some(binding) = info.as_ref().and_then(Binding::from_info).filter(|b| b.state_events().is_some() || owned(b)) else {
         return StatusCode::NOT_FOUND.into_response();
     };
     let lease = st.side.hubs.acquire(&name, binding, &st.side);
@@ -901,15 +987,15 @@ type HubMap = Mutex<HashMap<String, (Arc<Hub>, usize)>>;
 
 /// Hubs vivos por nome de sessão, com a contagem de aparelhos.
 #[derive(Clone, Default)]
-pub struct Hubs(Arc<HubMap>);
+pub struct Hubs(Arc<HubMap>, Arc<crate::plugin::sources::RateStore>);
 
 /// O mapa de hubs sem segurá-lo vivo: o `Mods` entrega por aqui sem formar ciclo com o `SideCtx`.
 #[derive(Clone)]
-pub struct WeakHubs(Weak<HubMap>);
+pub struct WeakHubs(Weak<HubMap>, Weak<crate::plugin::sources::RateStore>);
 
 impl WeakHubs {
     pub fn upgrade(&self) -> Option<Hubs> {
-        self.0.upgrade().map(Hubs)
+        Some(Hubs(self.0.upgrade()?, self.1.upgrade()?))
     }
 }
 
@@ -919,6 +1005,9 @@ pub struct Lease {
 }
 
 impl Hubs {
+    pub fn plugin_rates(&self) -> Arc<crate::plugin::sources::RateStore> { self.1.clone() }
+    pub fn app_present(&self) -> bool { self.0.lock().unwrap_or_else(|e| e.into_inner()).values().any(|(_, n)| *n > 0) }
+
     pub fn acquire(&self, name: &str, binding: Binding, ctx: &SideCtx) -> Lease {
         let mut map = self.0.lock().unwrap();
         let hub = match map.get_mut(name) {
@@ -941,7 +1030,7 @@ impl Hubs {
     }
 
     pub fn downgrade(&self) -> WeakHubs {
-        WeakHubs(Arc::downgrade(&self.0))
+        WeakHubs(Arc::downgrade(&self.0), Arc::downgrade(&self.1))
     }
 
     /// Evento do próprio Rust (interface dos mods) para o hub da sessão. Sem aparelho não há hub, e o
@@ -950,6 +1039,15 @@ impl Hubs {
         let hub = self.0.lock().unwrap().get(name).map(|(hub, _)| hub.clone());
         if let Some(hub) = hub {
             hub.deliver(event, data);
+        }
+    }
+
+    /// Aviso do registro: o ator do Codex com terminal de `name` abriu (`true`) ou fechou. Sem aparelho não
+    /// há hub; o que nascer depois pergunta ao registro.
+    pub(crate) fn set_runtime_owned(&self, name: &str, owned: bool) {
+        let hub = self.0.lock().unwrap().get(name).map(|(hub, _)| hub.clone());
+        if let Some(hub) = hub {
+            hub.set_runtime_owned(owned);
         }
     }
 
@@ -990,6 +1088,7 @@ pub(crate) fn test_ctx() -> SideCtx {
         infos: InfoCache::default(),
         monitors: None,
         mods: Default::default(),
+        runtime: Default::default(),
     }
 }
 
@@ -1019,6 +1118,31 @@ pub(crate) fn fake_monitors(pane: &'static str) -> (SpawnMonitor, Arc<std::sync:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn stamped_publication_cannot_write_to_rebound_conversation() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = test_ctx();
+        let binding = |sid: &str| Binding {provider:Provider::ClaudeHeadless,jsonl:dir.path().join(format!("{sid}.jsonl")),key:sid.into(),headless:true};
+        let a = ctx.hubs.acquire("stamped", binding("a"), &ctx);
+        let old = a.hub.source_binding().unwrap();
+        let mut reopened = binding("a");
+        reopened.jsonl = dir.path().join("another-account/a.jsonl");
+        let b = ctx.hubs.acquire("stamped", reopened, &ctx);
+        let fresh = b.hub.source_binding().unwrap();
+        assert_eq!(old.1.key, fresh.1.key);
+        assert_ne!(old.0, fresh.0);
+        let published = crate::state::published::Published::default();
+        published.set(1, "stamped", Some("a".into()), Arc::new(hangar_api::state::StateEvent {state:"working".into(), ..Default::default()}));
+        assert!(!b.hub.publish_own_bound_with(&old, "state", r#"{"state":"idle"}"#,
+            || published.set(1, "stamped", Some("a".into()), Arc::new(hangar_api::state::StateEvent {state:"idle".into(), ..Default::default()}))));
+        assert_eq!(published.get("stamped",Some("a")).unwrap().state,"working");
+        assert!(!b.hub.publish_own_bound(&old, "ask_question", r#"{"interaction_id":"a"}"#));
+        assert!(b.hub.publish_own_bound(&fresh, "ask_question", r#"{"interaction_id":"b"}"#));
+        let cached = b.hub.cache.lock().unwrap().replay();
+        assert!(!cached.iter().any(|frame| String::from_utf8_lossy(frame).contains("\"interaction_id\":\"a\"")));
+        assert!(cached.iter().any(|frame| String::from_utf8_lossy(frame).contains("\"interaction_id\":\"b\"")));
+    }
 
     #[test]
     fn cache_keeps_last_value_and_queue_by_id_without_nav() {
@@ -1247,6 +1371,48 @@ mod tests {
             tokio::spawn(std::future::pending())
         });
         (spawn, count)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn adopted_codex_terminal_moves_the_hub_to_the_runtime_feed_and_back() {
+        use crate::runtime::codex_terminal::CodexTerminalTarget;
+        use crate::runtime::gateway::RuntimeRegistry;
+        let dir = tempfile::tempdir().unwrap();
+        // App-server falso: aceita o WebSocket e segura a conexão; o pid é um processo com argv de app-server.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((stream, _)) = listener.accept().await {
+                if let Ok(ws) = tokio_tungstenite::accept_async(stream).await { held.push(ws); }
+            }
+        });
+        let mut child = std::process::Command::new("sh").args(["-c", "sleep 120; true", "app-server", &endpoint]).spawn().unwrap();
+        let (spawn, count) = fake_feeds();
+        let ctx = SideCtx { monitors: Some(spawn), ..idle_ctx() };
+        let registry = Arc::new(RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(), "s".into(), "i".into()));
+        registry.bind_hubs(ctx.hubs.downgrade());
+        let _ = ctx.runtime.set(registry.clone());
+        let binding = Binding { provider: Provider::Codex, jsonl: dir.path().join("rollout.jsonl"), key: "thread-1".into(), headless: false };
+        let lease = ctx.hubs.acquire("cx-proof", binding, &ctx);
+        assert!(!lease.hub.runtime_feed() && lease.hub.owned_events().is_empty(), "sem ator no Rust, o Python observa");
+        let target = CodexTerminalTarget { key: "codex-key".into(), generation: 1, name: "cx-proof".into(), endpoint: endpoint.clone(),
+            app_pid: child.id(), thread_id: "thread-1".into(),
+            terminal: crate::terminal_input::TerminalBinding { name: "cx-proof".into(), pane: "%7".into(), conversation: "thread-1".into(),
+                generation: 1, created: 1, mux_argv: vec!["tmux".into()], windows: false, clipboard_lock_path: None },
+            metadata: serde_json::json!({"key": "codex-key", "codex_home": dir.path().join("codex-home")}),
+            transcript: None, lease_path: dir.path().join("lock"), state_path: dir.path().join("state"), projection_dir: dir.path().join("projection") };
+        registry.open_codex_terminal(target).await.unwrap();
+        assert!(lease.hub.runtime_feed(), "ator adotado aberto: o estado sai do feed");
+        assert_eq!(lease.hub.owned_events(), &FEED_EVENTS[..]);
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+        assert!(!lease.hub.binding().unwrap().headless, "o pane continua no binding");
+        registry.close("codex-key", 1).await.unwrap();
+        assert!(!lease.hub.runtime_feed() && lease.hub.owned_events().is_empty(), "fechado, o estado volta ao Python");
+        child.kill().unwrap();
+        child.wait().unwrap();
+        server.abort();
     }
 
     #[tokio::test]

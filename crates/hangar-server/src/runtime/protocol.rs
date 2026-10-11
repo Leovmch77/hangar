@@ -54,6 +54,26 @@ pub enum OperationKind {
     SetPermissionMode, Compact, ListModels, ListSkills, ReadRateLimits, ReadSettings,
     SetMode, SkipQuestion, Restart, OpenTerminal, Reload, Commands, Cwd, Detach,
     VoiceOpen, VoiceRpc, VoiceRespond, VoiceClose,
+    /// Interna: só o ator a cria, a partir da entrada reservada que a fila devolveu.
+    DispatchAsyncAnswer,
+}
+
+/// Resposta a uma pergunta assíncrona do Codex com terminal, já formada e guardada na fila como
+/// entrada própria até sair como `turn/start`. `operation_id` é o da operação persistida (igual à entrada).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ReservedAsyncAnswer {
+    pub request_id: String,
+    pub interaction_id: String,
+    pub entry_id: String,
+    pub operation_id: String,
+    pub text: String,
+}
+
+impl ReservedAsyncAnswer {
+    /// Reservada não é entregue: quem respondeu recebe o resultado incerto, nunca "permitido".
+    pub fn reply_payload(&self) -> Value {
+        serde_json::json!({"reserved":true,"entry_id":self.entry_id,"decision_confirmed":false})
+    }
 }
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
@@ -92,6 +112,9 @@ pub enum Effect {
     /// O processo da sessão sobe de novo na mesma conversa (reiniciar, trocar o sandbox). Quem sobe é
     /// o ator; `patch` vai ao arquivo da sessão antes de pedir o comando novo ao Python.
     Respawn { operation_id: String, reason: String, patch: Value, reply: Value },
+    /// Grava na fila, numa atualização só, a entrada e a operação `DispatchAsyncAnswer`; quem
+    /// respondeu (`operation_id`) só recebe a resposta depois de gravada.
+    ReserveAsyncAnswer { operation_id: String, reservation: ReservedAsyncAnswer, command: RuntimeCommand },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -121,6 +144,7 @@ pub struct RuntimeReply {
 /// só por aqui, fora do `events`, e o feed do hub a publica coalescida.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct LiveState {
+    pub binding: Option<crate::interactions::InteractionBinding>,
     pub public_state: Value,
     pub preview: String,
     pub thinking: String,

@@ -620,6 +620,31 @@ test('pergunta Codex mantém identidade na reconexão e fecha na resolução', a
   expect(chat.use.getState().askPayload).toBeNull();
 });
 
+test.each(['codex', undefined])('interaction_id distingue formulários idênticos na reconexão (%s)', async (provider) => {
+  historyResponses = [[]];
+  const chat = chatStore('srv1', 'sess');
+  chat.retain();
+  await tick();
+  const first = { provider, request_id: 0, interaction_id: 'form-a', questions: [
+    { id: 'choice', header: 'H', question: 'Q?', multiSelect: false, options: [{ label: 'A' }] },
+  ] };
+  created[0].trigger('state', JSON.stringify({ session: 'sess', state: 'awaiting_input', interaction_id: 'approval-a', question: 'Permitir?', options: ['Sim'] }));
+  created[0].trigger('ask_question', JSON.stringify(first));
+  const original = chat.use.getState().askPayload;
+  chat.closeAsk();
+  created[0].trigger('ask_question', JSON.stringify(first));
+  expect(chat.use.getState().askPayload).toBe(original);
+  expect(chat.use.getState().askOpen).toBe(false);
+  const second = { ...first, interaction_id: 'form-b' };
+  created[0].trigger('ask_question', JSON.stringify(second));
+  expect(chat.use.getState().askOpen).toBe(true);
+  expect(chat.use.getState().askPayload).toEqual(second);
+  expect(chat.use.getState().askPayload?.questions).toEqual(original?.questions);
+  created[0].trigger('ask_question', 'null');
+  expect(chat.use.getState().askOpen).toBe(false);
+  expect(chat.use.getState().stateEvent?.interaction_id).toBe('approval-a');
+});
+
 test('preview md flag espelha no store', async () => {
   historyResponses = [[]];
   const chat = chatStore('srv1', 'sess');

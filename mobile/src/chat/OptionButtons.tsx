@@ -11,10 +11,11 @@ import { useAparencia } from '../stores/aparencia';
 interface Props {
   question: string;
   options: string[];
-  onSelect: (n: number) => void | Promise<void>;
+  interactionId?: string | null;
+  onSelect: (n: number, interactionId: string | null | undefined) => void | Promise<void>;
   onCancel: () => void | Promise<void>;
   /** Envia as opções marcadas (só múltipla escolha). Ausente = sem botão de enviar. */
-  onSubmit?: () => void | Promise<void>;
+  onSubmit?: (interactionId: string | null | undefined) => void | Promise<void>;
 }
 
 // MÚLTIPLA ESCOLHA: o TUI desenha a caixinha antes do rótulo ("[ ] Alfa", "[✔] Alfa"), e só por ela
@@ -22,7 +23,11 @@ interface Props {
 const CAIXA = /^\[(.?)\]\s*/;
 const marcada = (o: string) => /^\[[^\s\]]\]/.test(o);
 
-export function OptionButtons({ question, options, onSelect, onCancel, onSubmit }: Props) {
+export function OptionButtons(props: Props) {
+  return <OptionButtonsContent key={props.interactionId} {...props} />;
+}
+
+function OptionButtonsContent({ question, options, interactionId, onSelect, onCancel, onSubmit }: Props) {
   const { theme } = useUnistyles();
   const permission = isPermission(options);
   const kinds = options.map((o) => kindOf(o));
@@ -89,7 +94,7 @@ export function OptionButtons({ question, options, onSelect, onCancel, onSubmit 
           return (
             <Pressable
               key={i}
-              onPress={() => void run(() => onSelect(i + 1))}
+              onPress={() => void run(() => onSelect(i + 1, interactionId))}
               disabled={busy}
               accessibilityState={{ disabled: busy, busy, checked: multipla ? marcada(opt) : undefined }}
               style={[
@@ -137,7 +142,7 @@ export function OptionButtons({ question, options, onSelect, onCancel, onSubmit 
         })}
         {multipla && onSubmit ? (
           <Pressable
-            onPress={() => void run(onSubmit)}
+            onPress={() => void run(() => onSubmit(interactionId))}
             disabled={busy || marcadas === 0}
             accessibilityState={{ disabled: busy || marcadas === 0, busy }}
             style={[styles.btn, { backgroundColor: theme.tokens.accent.base, borderColor: theme.tokens.accent.base }, marcadas === 0 && styles.off]}

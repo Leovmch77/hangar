@@ -196,6 +196,8 @@ pub enum Action {
     Clear,
     Rename { name:String },
     Prepare { id:String, payload:Value, entry_id:Option<String> },
+    /// Resposta assíncrona reservada: a entrada e a operação de mesmo id nascem juntas, ou nenhuma.
+    ReserveAsyncAnswer { entry_id:String, text:String, payload:Value },
     BindDispatch { id:String, cursor:Value },
     /// `staged`: o despacho começou sem efeito no terminal; `MarkWriting` avisa antes da primeira
     /// escrita. Interrompida antes disso, a tentativa volta à fila em vez de ficar incerta.
@@ -321,7 +323,8 @@ impl Store {
         if readonly { self.ensure_projection()?; }
         let target = match &action {
             Action::Prepare { id, .. } | Action::BindDispatch { id, .. } | Action::BeginDispatch { id, .. } | Action::MarkWriting { id, .. }
-            | Action::Finish { id, .. } | Action::LateRpcResolution { id, .. } | Action::ConfirmOccurrence { id, .. } => Some(id.clone()),
+            | Action::Finish { id, .. } | Action::LateRpcResolution { id, .. } | Action::ConfirmOccurrence { id, .. }
+            | Action::ReserveAsyncAnswer { entry_id:id, .. } => Some(id.clone()),
             _ => None,
         };
         let targeted = target.is_some();
@@ -655,6 +658,16 @@ fn apply(state: &mut State, action: Action, clock: ClockSample, call_id: &str) -
             }
             if let Some(entry)=state.operations[&id].entry_id.clone().filter(|entry|entry_was_materialized(state,entry)) {mark_materialized(state,&entry);}
             serde_json::to_value(&state.operations[&id])?
+        }
+        Action::ReserveAsyncAnswer { entry_id, text, payload } => {
+            if entry_id.is_empty() || entry_id.starts_with(CALL_PREFIX) { return Err(invalid("identificador reservado")); }
+            if let Some(old) = state.operations.get(&entry_id) {
+                if old.payload != payload || old.entry_id.as_deref() != Some(entry_id.as_str()) { return Err(invalid("intenção da operação mudou")); }
+            } else {
+                append_row(state,json!({"id":entry_id,"text":text,"ts":clock.epoch_s,"delivered":false}))?;
+                state.operations.insert(entry_id.clone(),Operation::new(&entry_id,payload,Some(entry_id.clone())));
+            }
+            serde_json::to_value(&state.operations[&entry_id])?
         }
         Action::BindDispatch { id, cursor } => {
             let op = state.operations.get_mut(&id).ok_or_else(||invalid("operação não preparada"))?;

@@ -4,12 +4,13 @@
   interface Props {
     question: string;
     options: string[];
-    onSelect: (index: number) => void;
+    interactionId?: string | null;
+    onSelect: (index: number, interactionId: string | null | undefined) => void;
     onCancel: () => void;
     /** Envia as opções já marcadas (só múltipla escolha). Ausente = sem botão de enviar. */
-    onSubmit?: () => void;
+    onSubmit?: (interactionId: string | null | undefined) => void;
   }
-  let { question, options, onSelect, onCancel, onSubmit }: Props = $props();
+  let { question, options, interactionId, onSelect, onCancel, onSubmit }: Props = $props();
 
   // MÚLTIPLA ESCOLHA: o TUI desenha a caixinha antes do rótulo ("[ ] Alfa", "[✔] Alfa"), e é só
   // por ela que dá pra saber — o pane não diz de outro jeito. Aqui marcar e enviar são ações
@@ -27,6 +28,7 @@
   const isPermission = $derived(isPermissionFn(options));
 </script>
 
+{#each [{ interactionId, onSelect, onSubmit }] as displayed (displayed.interactionId)}
 <div class="options-wrap">
   {#if isPermission}
     <span class="perm-chip">{m.permissao_pedido()}</span>
@@ -43,7 +45,7 @@
         class:option-btn--always={isPermission && kinds[i] === 'always'}
         class:option-btn--deny={isPermission && kinds[i] === 'deny'}
         style="animation-delay: {i * 40}ms"
-        onclick={() => onSelect(i + 1)}
+        onclick={() => displayed.onSelect(i + 1, displayed.interactionId)}
         aria-pressed={multipla ? marcada(opt) : undefined}
       >
         <span class="opt-num">{i + 1}.</span>
@@ -61,7 +63,7 @@
       <button
         class="option-btn option-btn--enviar"
         style="animation-delay: {options.length * 40}ms"
-        onclick={onSubmit}
+        onclick={() => displayed.onSubmit?.(displayed.interactionId)}
         disabled={marcadas === 0}
       >
         <span class="opt-num">➤</span>
@@ -78,6 +80,7 @@
     </button>
   </div>
 </div>
+{/each}
 
 <style>
   /* Mesmo material do cartão nativo (AskQuestionCard): os dois desenham a MESMA coisa — uma

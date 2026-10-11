@@ -19,6 +19,46 @@ async function render(question: string) {
   return { container, root };
 }
 
+describe('OptionButtons: identidade exibida', () => {
+  it('B idêntica não herda bloqueio nem erro da resposta atrasada de A', async () => {
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    let rejectFirst!: (error: Error) => void;
+    const onSelect = vi.fn()
+      .mockImplementationOnce(() => new Promise<void>((_resolve, reject) => { rejectFirst = reject; }))
+      .mockResolvedValue(undefined);
+    const props = { question: 'Permitir?', options: ['Sim'], onSelect, onCancel: vi.fn() };
+    await act(async () => root.render(createElement(OptionButtons, { ...props, interactionId: 'interaction-a' })));
+    await act(async () => container.querySelector('button')!.click());
+    expect(onSelect).toHaveBeenLastCalledWith(1, 'interaction-a');
+    await act(async () => root.render(createElement(OptionButtons, { ...props, interactionId: 'interaction-b' })));
+    await act(async () => rejectFirst(new Error('erro-antigo')));
+    expect(container.textContent).not.toContain('erro-antigo');
+    expect(container.querySelector('button')!.disabled).toBe(false);
+    await act(async () => container.querySelector('button')!.click());
+    expect(onSelect).toHaveBeenLastCalledWith(1, 'interaction-b');
+    act(() => root.unmount());
+  });
+
+  it('marcar e enviar conservam o token mesmo com opções atualizadas', async () => {
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    const onSelect = vi.fn(); const onSubmit = vi.fn();
+    const props = { question: 'Escolha', interactionId: 'multi-a', onSelect, onSubmit, onCancel: vi.fn() };
+    await act(async () => root.render(createElement(OptionButtons, { ...props, options: ['[ ] Alfa'] })));
+    await act(async () => container.querySelector('button')!.click());
+    await act(async () => root.render(createElement(OptionButtons, { ...props, options: ['[✔] Alfa'] })));
+    const send = [...container.querySelectorAll('button')].find((b) => b.textContent === 'enviar')!;
+    await act(async () => send.click());
+    expect(onSelect).toHaveBeenCalledWith(1, 'multi-a');
+    expect(onSubmit).toHaveBeenCalledWith('multi-a');
+    await act(async () => root.render(createElement(OptionButtons, { ...props, interactionId: undefined, options: ['Sim'] })));
+    await act(async () => container.querySelector('button')!.click());
+    expect(onSelect).toHaveBeenLastCalledWith(1, undefined);
+    act(() => root.unmount());
+  });
+});
+
 describe('OptionButtons: links na pergunta', () => {
   it('URL na pergunta abre fora do app com Linking.openURL', async () => {
     const open = vi.spyOn(Linking, 'openURL');

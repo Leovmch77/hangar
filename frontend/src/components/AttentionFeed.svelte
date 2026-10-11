@@ -21,6 +21,8 @@
 
   const feed = $derived(attentionFeed(sessions));
   const keyOf = (s: AggSession) => `${s.serverId}::${s.name}`;
+  const requestKey = (s: AggSession) => JSON.stringify([keyOf(s), s.interaction_id]);
+  const current = (s: AggSession) => feed.some((entry) => requestKey(entry) === requestKey(s));
 
   let expandedKey = $state<string | null>(null); // entry com OptionButtons aberto (só um por vez)
   // Recusa do backend ao responder daqui. O `catch {}` de antes dizia "SSE de sessions corrige a
@@ -52,46 +54,50 @@
   // fechar no primeiro toque numa lista que o outro componente desenhava como múltipla.
   const ehMultipla = (s: AggSession) => (s.options ?? []).some((o) => /^\[.?\]\s*/.test(o));
 
-  async function pick(s: AggSession, option: number) {
+  async function pick(s: AggSession, option: number, interactionId: string | null | undefined) {
     const k = keyOf(s);
-    if (ocupada === k) return;
-    ocupada = k;
-    if (!ehMultipla(s)) expandedKey = null;
+    const request = requestKey(s);
+    if (ocupada === request) return;
+    ocupada = request;
+    if (current(s) && expandedKey === k && !ehMultipla(s)) expandedKey = null;
     clearTimeout(erroTimer);
     erro = null;
     const prev = getActiveId(); // salva antes de mirar o server dono (api.ts lê o ativo a cada chamada)
     selectServer(s.serverId);
     try {
-      await selectOption(s.name, option);
+      await selectOption(s.name, option, interactionId);
     } catch (e) {
+      if (!current(s)) return;
       // Reabre as opções: a pergunta continua de pé, e fechar o picker junto com o erro deixaria o
       // usuário sem nada pra tocar depois de ler o aviso.
       expandedKey = k;
       erro = { key: k, msg: e instanceof Error ? e.message : m.comum_falha_envio_opcao() };
       erroTimer = setTimeout(() => (erro = null), 8000);  // aviso, não estado: some sozinho
     } finally {
-      ocupada = null;
+      if (ocupada === request) ocupada = null;
       if (prev && prev !== s.serverId) selectServer(prev); // restaura pra o chat aberto ficar no server dele
     }
   }
 
   /** Envia o que já está marcado na múltipla escolha. Mesmo vaivém de servidor do `pick`. */
-  async function enviarMarcadas(s: AggSession) {
+  async function enviarMarcadas(s: AggSession, interactionId: string | null | undefined) {
     const k = keyOf(s);
-    if (ocupada === k) return;
-    ocupada = k;
+    const request = requestKey(s);
+    if (ocupada === request) return;
+    ocupada = request;
     clearTimeout(erroTimer);
     erro = null;
     const prev = getActiveId();
     selectServer(s.serverId);
     try {
-      await submitSelected(s.name);
-      expandedKey = null;
+      await submitSelected(s.name, interactionId);
+      if (current(s) && expandedKey === k) expandedKey = null;
     } catch (e) {
+      if (!current(s)) return;
       erro = { key: k, msg: e instanceof Error ? e.message : m.comum_falha_envio_opcao() };
       erroTimer = setTimeout(() => (erro = null), 8000);
     } finally {
-      ocupada = null;
+      if (ocupada === request) ocupada = null;
       if (prev && prev !== s.serverId) selectServer(prev);
     }
   }
@@ -125,13 +131,16 @@
           <p class="attn-err" role="status">{erro.msg}</p>
         {/if}
         {#if open && s.options?.length}
-          <OptionButtons
-            question={s.question ?? ''}
-            options={s.options}
-            onSelect={(i) => pick(s, i)}
-            onSubmit={() => enviarMarcadas(s)}
-            onCancel={() => (expandedKey = null)}
-          />
+          {#each [{ ...s }] as displayed (displayed.interaction_id)}
+            <OptionButtons
+              question={s.question ?? ''}
+              options={s.options}
+              interactionId={displayed.interaction_id}
+              onSelect={(i, id) => pick(displayed, i, id)}
+              onSubmit={(id) => enviarMarcadas(displayed, id)}
+              onCancel={() => (expandedKey = null)}
+            />
+          {/each}
         {/if}
       </div>
     {/each}

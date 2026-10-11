@@ -14,8 +14,8 @@
   interface Props {
     open: boolean;
     payload: AskQuestionPayload | null;
-    onSubmit: (answers: AnswerItem[]) => Promise<void>;
-    onClose: () => void;
+    onSubmit: (answers: AnswerItem[], payload: AskQuestionPayload) => Promise<void>;
+    onClose: (payload: AskQuestionPayload) => void;
     /** "Digitar resposta" e "Conversar sobre isso". Falso quando a pergunta não vem da ferramenta
      *  AskUserQuestion e sim de um seletor de TUI, onde só as opções existem: as duas saídas
      *  mandariam texto por um caminho que aquela sessão não tem, e falhariam calado. */
@@ -31,12 +31,13 @@
   let error = $state('');
 
   const questions = $derived(payload?.questions ?? []);
+  const requestKey = $derived(JSON.stringify([payload?.interaction_id, payload?.request_id, questions]));
 
   // Reseta tudo ao abrir; lê payload dentro de untrack p/ não reativar no mid-flow
   $effect(() => {
     if (!open) return;
     // Uma nova solicitação pode chegar sem desmontar o formulário anterior.
-    void payload?.request_id;
+    void requestKey;
     untrack(() => {
       step = 0;
       picks = (payload?.questions ?? []).map(() => ({ kind: 'option' as const, indices: [] }));
@@ -104,15 +105,14 @@
     });
   }
 
-  async function submit() {
-    sending = true;
-    error = '';
+  async function submit(answers: AnswerItem[], displayed: AskQuestionPayload, key: string) {
+    if (requestKey === key) { sending = true; error = ''; }
     try {
-      await onSubmit(buildAnswers());
+      await onSubmit(answers, displayed);
     } catch (e) {
-      error = e instanceof Error ? e.message : m.askq_erro_envio();
+      if (requestKey === key) error = e instanceof Error ? e.message : m.askq_erro_envio();
     } finally {
-      sending = false;
+      if (requestKey === key) sending = false;
     }
   }
 
@@ -132,6 +132,9 @@
   const selectedIndices = $derived(currentPick?.kind === 'option' ? currentPick.indices : []);
 </script>
 
+{#each [{ key: requestKey, payload: payload ? { ...payload } : null }] as snapshot (snapshot.key)}
+{@const displayedKey = snapshot.key}
+{@const displayed = snapshot.payload}
 {#if step < questions.length}
   {@const q = questions[step]}
 
@@ -196,7 +199,7 @@
       <div class="text-actions">
         <button class="primary-btn" onclick={confirmText} disabled={!textValue.trim()}>{m.comum_confirmar()}</button>
         <button class="ghost-btn" onclick={() => {
-          if (q.options.length === 0) onClose();
+          if (q.options.length === 0) { if (displayed) onClose(displayed); }
           else { textOpen = false; textValue = ''; }
         }}>{m.comum_cancelar()}</button>
       </div>
@@ -210,7 +213,8 @@
     </div>
   {/if}
 
-{:else if questions.length > 0}
+{:else if questions.length > 0 && displayed}
+  {@const answers = buildAnswers()}
   <!-- Revisão das respostas antes de enviar -->
   <!-- Escolha única avança sozinha ao tocar: sem esta volta, um toque errado na ÚLTIMA pergunta
        (ou na única) só tinha saída pelo cancelar, que descarta tudo. -->
@@ -234,11 +238,12 @@
     <p class="error-msg" role="alert">{error}</p>
   {/if}
 
-  <button class="primary-btn" onclick={submit} disabled={sending}>
+  <button class="primary-btn" onclick={() => submit(answers, displayed, displayedKey)} disabled={sending}>
     {sending ? m.askq_enviando() : m.lista_enviar()}
   </button>
-  <button class="ghost-btn" onclick={onClose}>{m.comum_cancelar()}</button>
+  <button class="ghost-btn" onclick={() => onClose(displayed)}>{m.comum_cancelar()}</button>
 {/if}
+{/each}
 
 <style>
   .step-nav {

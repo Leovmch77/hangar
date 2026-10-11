@@ -1,5 +1,7 @@
 use super::{LiveBuffer, protocol::*};
 use crate::mods::{model::{ModsCall,ModsError,SurfaceEffect,missing},surface::Surface};
+use crate::interactions::{ExpectedInteraction,InteractionBinding,InteractionError,InteractionKind,InteractionStore,native_target,runtime_error};
+use std::sync::Arc;
 use hangar_api::state::StateEvent;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
@@ -13,12 +15,14 @@ struct Waiter {
 }
 
 struct Wire {
+    interaction: Option<ExpectedInteraction>,
     kind: String,
     request_id: Option<RequestId>,
     final_result: bool,
 }
 
 pub struct ClaudeEngine {
+    interactions: Option<(String, Arc<InteractionStore>)>,
     metadata: Value,
     generation: u64,
     clock: ClockSample,
@@ -89,7 +93,7 @@ impl ClaudeEngine {
         if let Some(intent) = effort_intent.as_mut() {
             if intent["status"] == "dispatching" { intent["status"] = json!("unknown"); }
         }
-        let mut engine = Self { generation,clock,counter:metadata["runtime_counter"].as_u64().unwrap_or(0),alive:true,
+        let mut engine = Self { interactions:None,generation,clock,counter:metadata["runtime_counter"].as_u64().unwrap_or(0),alive:true,
             initialized:metadata["initialized"] == true,initializing:metadata["initialized"] != true,
             init_warning:None,in_progress:false,state,model:string(&metadata["model"]),effort:string(&metadata["effort"]),
             permission_mode,previous_non_plan,restore_plan:None,pending:Vec::new(),question:None,
@@ -105,10 +109,41 @@ impl ClaudeEngine {
                 let (Some(operation_id),Some(subtype)) = (control["operation_id"].as_str(),control["subtype"].as_str()) else { continue };
                 engine.waiters.insert(request_id.clone(),Waiter { operation_id:operation_id.into(),subtype:subtype.into(),
                     payload:control["payload"].clone(),deadline:clock.monotonic_s,timed_out:true });
-                engine.wires.insert(operation_id.into(),Wire { kind:"control".into(),request_id:Some(request_id),final_result:false });
+                engine.wires.insert(operation_id.into(),Wire { interaction:None,kind:"control".into(),request_id:Some(request_id),final_result:false });
             }
         }
         engine
+    }
+
+    pub fn write_interaction(&self,id:&str) -> Option<&ExpectedInteraction> { self.wires.get(id)?.interaction.as_ref() }
+
+    pub fn interaction_source(&self,expected:&ExpectedInteraction) -> Option<ExpectedInteraction> {
+        let native = expected.native_id(None).ok()?;
+        let request = match expected.target.kind {
+            InteractionKind::Approval => self.pending.iter().find(|(id,_)|json!(id) == native).map(|(_,request)|request),
+            InteractionKind::Question => self.question.as_ref().filter(|question|question["request_id"] == native),
+            _ => None,
+        }?;
+        let (key,_) = self.interactions.as_ref()?;
+        let conversation = self.metadata["session_id"].as_str()?;
+        Some(ExpectedInteraction { binding:InteractionBinding { key:key.clone(),conversation:conversation.into(),generation:self.generation },
+            target:native_target(expected.target.kind.clone(),conversation,&native),interaction_id:expected.interaction_id.clone(),
+            semantic:request.clone(),source_revision:None })
+    }
+
+    pub fn interaction_write_error(&self,id:&str) -> Option<RuntimeError> {
+        let expected = self.wires.get(id)?.interaction.as_ref()?;
+        let check = || -> Result<(),RuntimeError> {
+            if self.expected(&json!({"interaction_id":expected.interaction_id}))? != *expected { return Err(runtime_error(InteractionError::Changed)); }
+            let native = expected.native_id(None).map_err(runtime_error)?;
+            let request = match expected.target.kind {
+                InteractionKind::Approval => self.pending.iter().find(|(id,_)|json!(id) == native).map(|(_,request)|request),
+                InteractionKind::Question => self.question.as_ref().filter(|q|q["request_id"] == native),
+                _ => None,
+            }.ok_or_else(||runtime_error(InteractionError::Changed))?;
+            expected.check(&expected.target,request,None).map_err(runtime_error)
+        };
+        check().err()
     }
 
     pub fn write_is_current(&self,id:&str) -> bool { !self.retired_writes.contains(id) }
@@ -264,7 +299,7 @@ impl ClaudeEngine {
         request.insert("subtype".into(),json!(subtype));
         self.waiters.insert(request_id.clone(),Waiter { operation_id:operation_id.clone(),subtype:subtype.into(),
             payload:payload.clone(),deadline:self.clock.monotonic_s + if subtype == "initialize" { 180.0 } else { 15.0 },timed_out:false });
-        self.wires.insert(operation_id.clone(),Wire { kind:"control".into(),request_id:Some(request_id.clone()),final_result:false });
+        self.wires.insert(operation_id.clone(),Wire { interaction:None,kind:"control".into(),request_id:Some(request_id.clone()),final_result:false });
         effects.push(Effect::Write { frame:json!({"type":"control_request","request_id":request_id,"request":request}),operation_id:Some(operation_id) });
     }
 
@@ -277,7 +312,7 @@ impl ClaudeEngine {
                 Some("user")=>"input",
                 _=>return,
             };
-            self.wires.insert(operation_id,Wire { kind:kind.into(),request_id:None,final_result:false });
+            self.wires.insert(operation_id,Wire { interaction:None,kind:kind.into(),request_id:None,final_result:false });
             return;
         }
         let (Ok(request_id),Some(subtype)) = (serde_json::from_value::<RequestId>(frame["request_id"].clone()),frame["request"]["subtype"].as_str()) else { return };
@@ -286,11 +321,11 @@ impl ClaudeEngine {
         if let Some(fields) = payload.as_object_mut() { fields.remove("subtype"); }
         self.waiters.insert(request_id.clone(),Waiter { operation_id:operation_id.clone(),subtype:subtype.into(),payload,
             deadline:self.clock.monotonic_s,timed_out:true });
-        self.wires.insert(operation_id,Wire { kind:"control".into(),request_id:Some(request_id),final_result:false });
+        self.wires.insert(operation_id,Wire { interaction:None,kind:"control".into(),request_id:Some(request_id),final_result:false });
     }
 
     fn answer(&mut self,operation_id:String,request_id:RequestId,body:Value,effects:&mut Vec<Effect>) {
-        self.wires.insert(operation_id.clone(),Wire { kind:"answer".into(),request_id:Some(request_id.clone()),final_result:false });
+        self.wires.insert(operation_id.clone(),Wire { interaction:None,kind:"answer".into(),request_id:Some(request_id.clone()),final_result:false });
         effects.push(Effect::Write { frame:json!({"type":"control_response","response":{
             "subtype":"success","request_id":request_id,"response":body}}),operation_id:Some(operation_id) });
     }
@@ -338,6 +373,25 @@ impl ClaudeEngine {
         Ok(effects)
     }
 
+    pub fn set_interactions(&mut self,key:String,store:Arc<InteractionStore>) -> Result<(),RuntimeError> {
+        self.interactions = Some((key,store));
+        self.bind_interactions(self.metadata["session_id"].as_str().unwrap_or(""))
+    }
+
+    fn bind_interactions(&self,conversation:&str) -> Result<(),RuntimeError> {
+        if !conversation.is_empty() && let Some((key,store)) = &self.interactions {
+            store.bind(&InteractionBinding { key:key.clone(),conversation:conversation.into(),generation:self.generation }).map_err(runtime_error)?;
+        }
+        Ok(())
+    }
+
+    fn expected(&self,payload:&Value) -> Result<ExpectedInteraction,RuntimeError> {
+        let supplied = payload["interaction_id"].as_str().filter(|id|!id.is_empty()).ok_or_else(||runtime_error(InteractionError::Missing))?;
+        let (key,store) = self.interactions.as_ref().ok_or_else(||runtime_error(InteractionError::Unavailable))?;
+        let conversation = self.metadata["session_id"].as_str().filter(|id|!id.is_empty()).ok_or_else(||runtime_error(InteractionError::Unavailable))?;
+        store.expected(&InteractionBinding { key:key.clone(),conversation:conversation.into(),generation:self.generation },Some(supplied)).map_err(runtime_error)
+    }
+
     pub fn command(&mut self,command:RuntimeCommand,clock:ClockSample) -> Result<Vec<Effect>,RuntimeError> {
         self.clock = clock;
         if !self.alive { return Err(error("processo não está vivo")); }
@@ -351,7 +405,7 @@ impl ClaudeEngine {
                 }
                 let text = payload["text"].as_str().ok_or_else(||error("mensagem sem texto"))?;
                 if text.trim_start().starts_with('/') { self.slash_input = Some(text.trim().to_owned()); }
-                self.wires.insert(operation_id.clone(),Wire { kind:"input".into(),request_id:None,final_result:false });
+                self.wires.insert(operation_id.clone(),Wire { interaction:None,kind:"input".into(),request_id:None,final_result:false });
                 if !self.in_progress {
                     self.active_input = Some(operation_id.clone());
                     self.start_turn();
@@ -372,7 +426,11 @@ impl ClaudeEngine {
                 self.clear_streams(&mut effects);
             }
             OperationKind::Select => {
-                let (id,request) = self.pending.first().cloned().ok_or_else(||RuntimeError::new("no_pending_permission","nenhuma permissão pendente"))?;
+                let expected = self.expected(&payload)?;
+                let (id,request) = self.pending.iter().find(|(id,_)|native_target(InteractionKind::Approval,&expected.binding.conversation,&json!(id)) == expected.target)
+                    .cloned().ok_or_else(||runtime_error(InteractionError::Changed))?;
+                expected.check(&native_target(InteractionKind::Approval,&expected.binding.conversation,&json!(id)),&request,None).map_err(runtime_error)?;
+                if self.wires.values().any(|wire|wire.kind == "answer" && wire.request_id.as_ref() == Some(&id) && !wire.final_result) { return Err(runtime_error(InteractionError::Changed)); }
                 let option = payload["option"].as_u64().filter(|n| (1..=3).contains(n)).ok_or_else(||error("opção inválida"))?;
                 let suggestions:Vec<_> = request["permission_suggestions"].as_array().map(|rules|rules.iter().filter(|v|v.is_object()).cloned().collect()).unwrap_or_default();
                 let allow = option == 1 || option == 3 && !suggestions.is_empty();
@@ -384,16 +442,20 @@ impl ClaudeEngine {
                     self.restore_plan = self.previous_non_plan.as_ref().filter(|mode|mode.as_str() != "manual")
                         .map(|mode|(mode.clone(),operation_id.clone()));
                 }
-                self.answer(operation_id,id,body,&mut effects);
+                self.answer(operation_id.clone(),id,body,&mut effects);
+                self.wires.get_mut(&operation_id).unwrap().interaction = Some(expected);
             }
             OperationKind::AnswerQuestions | OperationKind::SkipQuestion => {
-                let question = self.question.as_ref().ok_or_else(||error("nenhuma pergunta pendente"))?;
-                let request_id:RequestId = serde_json::from_value(question["request_id"].clone()).map_err(|_|error("ID da pergunta inválido"))?;
-                let supplied:RequestId = serde_json::from_value(payload["request_id"].clone()).map_err(|_|error("ID da resposta inválido"))?;
-                if supplied != request_id { return Err(error("a pergunta mudou")); }
+                let expected = self.expected(&payload)?;
+                let question = self.question.as_ref().ok_or_else(||runtime_error(InteractionError::Changed))?;
+                let request_id:RequestId = serde_json::from_value(expected.native_id(payload.get("request_id")).map_err(runtime_error)?)
+                    .map_err(|_|runtime_error(InteractionError::Changed))?;
+                expected.check(&native_target(InteractionKind::Question,&expected.binding.conversation,&json!(request_id)),question,None).map_err(runtime_error)?;
+                if self.wires.values().any(|wire|wire.kind == "answer" && wire.request_id.as_ref() == Some(&request_id) && !wire.final_result) { return Err(runtime_error(InteractionError::Changed)); }
                 let body = if command.kind == OperationKind::SkipQuestion { json!({"behavior":"deny","message":"O usuário prefere conversar antes de responder."}) }
                     else { answer_body(question,&payload["answers"])? };
-                self.answer(operation_id,request_id,body,&mut effects);
+                self.answer(operation_id.clone(),request_id,body,&mut effects);
+                self.wires.get_mut(&operation_id).unwrap().interaction = Some(expected);
             }
             OperationKind::SetPermissionMode => {
                 let requested = payload["mode"].as_str().ok_or_else(||error("modo não informado"))?;
@@ -423,7 +485,7 @@ impl ClaudeEngine {
     }
 
     fn local_command(&mut self,operation_id:String,text:&str,effects:&mut Vec<Effect>) {
-        self.wires.insert(operation_id.clone(),Wire { kind:if text.starts_with("/effort ") { "effort" } else { "local" }.into(),request_id:None,final_result:false });
+        self.wires.insert(operation_id.clone(),Wire { interaction:None,kind:if text.starts_with("/effort ") { "effort" } else { "local" }.into(),request_id:None,final_result:false });
         self.start_turn();
         effects.push(Effect::Write { operation_id:Some(operation_id),frame:json!({"type":"user","session_id":"","parent_tool_use_id":null,
             "message":{"role":"user","content":[{"type":"text","text":text}]}}) });
@@ -492,9 +554,15 @@ impl ClaudeEngine {
         let disposition = match outcome { WriteOutcome::Written => Disposition::Accepted,
             WriteOutcome::NotWritten => Disposition::Rejected,WriteOutcome::Unknown => Disposition::Unknown };
         wire.final_result = outcome != WriteOutcome::Unknown;
+        let interaction = wire.interaction.clone();
         if kind == "answer" && outcome == WriteOutcome::Written {
-            self.pending.retain(|(id,_)|Some(id) != request_id.as_ref());
-            if self.question.as_ref().and_then(|q|serde_json::from_value::<RequestId>(q["request_id"].clone()).ok()) == request_id { self.question = None; }
+            self.pending.retain(|(id,request)|Some(id) != request_id.as_ref()
+                || interaction.as_ref().is_some_and(|expected|expected.target.kind != InteractionKind::Approval || expected.semantic != *request));
+            if self.question.as_ref().is_some_and(|question|
+                serde_json::from_value::<RequestId>(question["request_id"].clone()).ok() == request_id
+                    && interaction.as_ref().is_none_or(|expected|expected.target.kind == InteractionKind::Question && expected.semantic == *question)) {
+                self.question = None;
+            }
         }
         if kind == "input" && self.active_input.as_deref() == Some(operation_id.as_str()) && outcome == WriteOutcome::NotWritten {
             self.active_input = None; self.in_progress = false; self.turn_start = None; self.label_deadline = None;
@@ -576,7 +644,12 @@ impl ClaudeEngine {
                     self.changed(effects,true);
                 }
             }
-            "system" => self.on_system(&event,effects),
+            "system" => {
+                if event["subtype"] == "init" && let Some(sid) = event["session_id"].as_str() {
+                    self.bind_interactions(sid)?;
+                }
+                self.on_system(&event,effects);
+            },
             "stream_event" => self.on_stream(&event["event"],effects),
             "command_lifecycle" if event["state"] == "started" => { if !self.in_progress { self.start_turn(); self.changed(effects,true); } }
             "assistant" => {

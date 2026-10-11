@@ -82,6 +82,8 @@ pub struct SessionRow {
     pub pending_questions: u32,
     #[serde(default)]
     pub options: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interaction_id: Option<String>,
     #[serde(default)]
     pub stalled: bool,
     #[serde(default)]

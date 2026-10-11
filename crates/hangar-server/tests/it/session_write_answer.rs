@@ -1,508 +1,504 @@
-//! `/answer` servido pelo Rust: o corpo e o código de cada resposta vêm do golden que o Python gera
-//! (`gen_golden.py`); o resto prova a rota inteira com um tmux falso e o plugin falso do Python.
-use crate::fake;
-
-use std::path::Path;
-use std::sync::Arc;
-use std::time::Duration;
-
+//! Identidade no ingresso, no dono nativo e no primeiro efeito do formulário terminal.
+use crate::fake::*;
+use std::{path::{Path, PathBuf}, sync::{Arc, Mutex}, time::Duration};
 use axum::http::StatusCode;
-use fake::*;
+use hangar_server::interactions::{ExpectedInteraction, InteractionBinding, InteractionError, InteractionKind, native_target};
 use hangar_server::routes::AppState;
-use hangar_server::runtime::gateway::RuntimeRegistry;
-use hangar_server::runtime::protocol::{CanoBinding, RuntimeError, RuntimeReply, RuntimeTarget};
-#[cfg(unix)]
-use hangar_server::runtime::terminal::TerminalTarget;
+use hangar_server::runtime::{gateway::RuntimeRegistry, protocol::{CanoBinding, RuntimeError, RuntimeReply, RuntimeTarget}};
 use hangar_server::session_write::answer::*;
-use hangar_server::session_write::control::control_step_answer;
-#[cfg(unix)]
-use hangar_server::terminal_input::TerminalBinding;
+use hangar_server::state::ask;
+use hangar_server::terminal_input::*;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-const OP: &str = "OP";
-
-fn golden(name: &str) -> Vec<Value> {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../backend/tests/fixtures/contract/session_write").join(name);
-    serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+fn binding() -> InteractionBinding { InteractionBinding { key:"k-s".into(), conversation:"sid".into(), generation:1 } }
+fn expected(kind: InteractionKind) -> ExpectedInteraction {
+    ExpectedInteraction { binding:binding(), target:native_target(kind,"sid",&json!(0)), interaction_id:"shown-a".into(), semantic:json!({}), source_revision:None }
 }
-
-/// A resposta do ator no golden: `{disposition,payload}` ou `!erro: codigo: mensagem`.
-fn reply(v: &Value) -> Result<RuntimeReply, RuntimeError> {
-    if let Some(text) = v.as_str() {
-        let (code, message) = text.trim_start_matches("!erro: ").split_once(": ").unwrap();
-        return Err(RuntimeError::new(code, message));
-    }
-    Ok(RuntimeReply { operation_id: OP.into(), disposition: serde_json::from_value(v["disposition"].clone()).unwrap(), payload: v["payload"].clone() })
-}
-
-/// O `detalhe` e o `erro` são o texto da falha de cada lado.
-fn plain(mut body: Value) -> Value {
-    if let Some(params) = body.pointer_mut("/detail/params").and_then(Value::as_object_mut) { params.remove("detalhe"); }
-    body
-}
-
-fn check(name: &str, got: (StatusCode, Value), case: &Value) {
-    let want = (case["expect"]["status"].as_u64().unwrap() as u16, plain(case["expect"]["body"].clone()));
-    assert_eq!((got.0.as_u16(), plain(got.1)), want, "{name}");
-}
-
-fn body_of(case: &Value) -> Vec<u8> {
-    json!({"answers": case["answers"], "request_id": case["request_id"]}).to_string().into_bytes()
-}
+fn body(value: Value) -> Body { parse_body(&value.to_string().into()).unwrap() }
+fn option() -> Value { json!({"kind":"option","indices":[0],"labels":["first"]}) }
 
 #[test]
-fn chat_text_matches_the_python_golden() {
-    let rows = golden("askq_chat_text.json");
+fn chat_text_keeps_the_python_golden() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../backend/tests/fixtures/contract/session_write/askq_chat_text.json");
+    let rows: Vec<Value> = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
     assert!(rows.len() >= 12);
     for row in rows {
-        let questions: Vec<String> = row["questions"].as_array().map(|q| q.iter().map(|q| q.as_str().unwrap().to_owned()).collect()).unwrap_or_default();
-        let answers = row["answers"].as_array().unwrap();
-        assert_eq!(chat_text(answers, &questions), row["expect"].as_str().unwrap(), "{}", row["name"]);
+        let questions: Vec<String> = row["questions"].as_array().into_iter().flatten().map(|q|q.as_str().unwrap().into()).collect();
+        assert_eq!(chat_text(row["answers"].as_array().unwrap(), &questions), row["expect"].as_str().unwrap(), "{}", row["name"]);
     }
 }
 
 #[test]
-fn terminal_answers_match_the_python_golden() {
-    let mut seen = 0;
-    for case in golden("answer.json").into_iter().filter(|c| c["terminal"] == true) {
-        seen += 1;
-        let name = case["name"].as_str().unwrap();
-        let body = parse_body(&body_of(&case).into()).unwrap_or_else(|| panic!("{name}: o corpo é válido"));
-        let pending = (!case["pending"].is_null()).then(|| case["pending"].clone());
-        let sent = case["sent"].as_array().unwrap();
-        let plan = match terminal_plan(&body, pending.as_ref(), case["panel_open"].as_bool().unwrap()) {
-            Err(refused) => { check(name, refused, &case); assert!(sent.is_empty(), "{name}: nada vai ao ator"); continue; }
-            Ok(plan) => plan,
-        };
-        let done = match plan {
-            Plan::Control(payload) => {
-                assert_eq!(json!({"control": "answer_questions", "payload": payload}), sent[0], "{name}: o controle que o ator recebe");
-                control_answer(&reply(&case["reply"]))
-            }
-            Plan::Chat => {
-                let questions: Vec<String> = case["sidecar"].as_array().map(|q| q.iter().map(|q| q.as_str().unwrap().to_owned()).collect()).unwrap_or_default();
-                let text = chat_text(&body.answers_json(), &questions);
-                match chat_refusal(&text) {
-                    Some(refused) => refused,
-                    None => match control_step_answer(&reply(&case["interrupt_reply"])) {
-                        // O Esc não foi aceito: nada é digitado.
-                        Err(not_closed) => {
-                            assert_eq!(sent, &[json!({"control": "interrupt", "payload": {}})], "{name}: só o Esc");
-                            not_closed
-                        }
-                        Ok(()) => {
-                            assert_eq!(sent, &[json!({"control": "interrupt", "payload": {}}), json!({"submit": text})], "{name}: Esc e depois o texto");
-                            chat_submit_answer(&reply(&case["submit_reply"]))
-                        }
-                    },
-                }
-            }
-        };
-        assert_eq!(case["cleared"].as_bool().unwrap(), done.0 == StatusCode::OK, "{name}: sidecar");
-        check(name, done, &case);
-    }
-    assert!(seen >= 40);
+fn terminal_plan_never_supplies_a_missing_public_id_from_the_pending_question() {
+    let expected = expected(InteractionKind::Question);
+    let missing = body(json!({"answers":[option()],"request_id":0}));
+    let failed = terminal_plan(&missing, &expected, false).err().unwrap();
+    assert_eq!((failed.0, failed.1["detail"]["code"].as_str()), (StatusCode::CONFLICT, Some("erro_interacao_sem_identidade")));
+    let old = body(json!({"answers":[option()],"interaction_id":"old"}));
+    assert_eq!(terminal_plan(&old,&expected,false).err().unwrap().1["detail"]["code"], "erro_interacao_desatualizada");
+    let current = body(json!({"answers":[option()],"interaction_id":"shown-a"}));
+    let Plan::Control(payload) = terminal_plan(&current,&expected,false).unwrap() else { panic!("controle") };
+    assert_eq!(payload["interaction_id"], "shown-a");
+    assert!(payload.get("request_id").is_none());
+    let mut wrong_kind = expected.clone();
+    wrong_kind.target.kind = InteractionKind::Approval;
+    assert_eq!(terminal_plan(&current,&wrong_kind,false).err().unwrap().1["detail"]["code"], "erro_interacao_desatualizada");
+    assert_eq!(terminal_plan(&current,&expected,true).err().unwrap().1["detail"]["code"], "erro_terminal_aberto");
 }
 
 #[test]
-fn headless_answers_match_the_python_golden() {
-    let mut seen = 0;
-    for case in golden("answer.json").into_iter().filter(|c| c["terminal"] == false) {
-        seen += 1;
-        let name = case["name"].as_str().unwrap();
-        let body = parse_body(&body_of(&case).into()).unwrap();
-        // Sem id o Rust não responde: repassa ao Python (que aceita, como o golden mostra).
-        if relays_headless(&body) {
-            assert!(case["request_id"].is_null() && case["expect"]["status"] == 200, "{name}: só o pedido sem id é repassado");
-            continue;
+fn bodies_preserve_identity_and_native_zero_and_relay_only_normalization() {
+    for invalid in [
+        json!({"answers":[],"interaction_id":0}), json!({"answers":[],"interaction_id":true}),
+        json!({"answers":[],"interaction_id":[],"request_id":0}), json!({"answers":[],"extra":1}),
+        json!({"answers":[{"kind":"option","indices":["0"]}],"interaction_id":"old"}),
+        json!({"answers":[],"request_id":1.5}), json!({"answers":[],"request_id":true}),
+    ] { assert!(parse_body(&invalid.to_string().into()).is_none(), "{invalid}"); }
+    let supplied = body(json!({"answers":[option()],"request_id":0,"interaction_id":"shown-a"}));
+    assert_eq!(headless_command(&supplied)["request_id"], 0);
+    assert_eq!(headless_command(&supplied)["interaction_id"], "shown-a");
+    let wrong_native = body(json!({"answers":[option()],"request_id":"0","interaction_id":"shown-a"}));
+    assert_eq!(terminal_plan(&wrong_native,&expected(InteractionKind::Question),false).err().unwrap().1["detail"]["code"], "erro_interacao_desatualizada");
+}
+
+#[test]
+fn interaction_errors_keep_codes_and_unknown_never_becomes_success_or_not_sent() {
+    for error in [InteractionError::Missing, InteractionError::Changed, InteractionError::Unavailable] {
+        let failed = Err(RuntimeError::new(error.code(),error.message()));
+        for answer in [control_answer(&failed), headless_answer(false,&failed), headless_answer(true,&failed)] {
+            assert_eq!(answer.0, error.status());
+            assert_eq!(answer.1["detail"]["code"], error.code());
         }
-        assert!(!case["request_id"].is_null(), "{name}");
-        let command = headless_command(&body);
-        // O Python manda `indices: null` nas respostas que não são de opção; o ator lê igual.
-        let mut want = case["sent"][0]["payload"].clone();
-        for answer in want["answers"].as_array_mut().unwrap() { if answer["indices"].is_null() { answer["indices"] = json!([]); } }
-        assert_eq!(command, want, "{name}: o controle que o ator recebe");
-        check(name, headless_answer(case["provider"] == "codex", &reply(&case["reply"])), &case);
     }
-    assert!(seen >= 6);
+    let unknown = Ok(RuntimeReply { operation_id:"same-operation".into(), disposition:hangar_server::runtime::protocol::Disposition::Unknown, payload:json!({}) });
+    for answer in [control_answer(&unknown),headless_answer(false,&unknown),headless_answer(true,&unknown)] {
+        assert_eq!(answer.1["detail"]["code"], "erro_sem_confirmacao_resposta");
+        assert_ne!(answer.0,StatusCode::OK);
+    }
 }
 
 #[test]
-fn bodies_python_would_coerce_or_refuse_are_not_parsed() {
-    let bad = [
-        json!({"answers": [{"kind": "option", "indices": ["1"], "labels": ["A"]}]}),
-        json!({"answers": [{"kind": "option", "indices": [1], "labels": ["A"], "x": 1}]}),
-        json!({"answers": [{"kind": "option", "indices": [1], "labels": ["A"], "multi": "true"}]}),
-        json!({"answers": [{"kind": "text", "value": 5, "type_index": 1}]}),
-        json!({"answers": [{"kind": "text", "value": "a", "type_index": 1.5}]}),
-        json!({"answers": [{"labels": ["A"]}]}),
-        json!({"answers": [{"kind": "chat", "chat_index": 1, "labels": null}]}),
-        json!({"answers": [], "request_id": 1.5}),
-        json!({"answers": [], "request_id": true}),
-        json!({"answers": [], "request_id": [1]}),
-        json!({"answers": [], "extra": 1}),
-        json!({"answers": {}}),
-        json!({}),
-    ];
-    for body in bad { assert!(parse_body(&body.to_string().into()).is_none(), "{body}"); }
-    let good = json!({"answers": [{"kind": "chat", "chat_index": 1, "question_id": null, "value": null, "indices": null, "multi": false, "labels": [], "type_index": null}], "request_id": 7});
-    assert!(parse_body(&good.to_string().into()).is_some());
+fn codex_terminal_written_or_reserved_answer_is_uncertain_over_http() {
+    use hangar_server::runtime::protocol::Disposition;
+    use hangar_server::session_write::{codex::skip_answer, control::select_headless_answer};
+    let reply = |payload:Value| -> Result<RuntimeReply,RuntimeError> { Ok(RuntimeReply { operation_id:"op".into(), disposition:Disposition::Unknown, payload }) };
+    let written = reply(json!({"write_outcome":"written","decision_confirmed":false}));
+    let reserved = reply(json!({"reserved":true,"entry_id":"async-answer:1:2","decision_confirmed":false}));
+    for answer in [headless_answer(true,&written),select_headless_answer(&written),skip_answer(&written),headless_answer(true,&reserved)] {
+        assert_eq!(answer.0, StatusCode::CONFLICT);
+        assert_eq!(answer.1["detail"]["code"], "erro_sem_confirmacao_resposta");
+    }
 }
 
-// ── a espera do rodapé ──────────────────────────────────────────────────────────────────────────
-
-#[tokio::test]
-async fn the_wait_ends_when_the_footer_is_gone_and_gives_up_at_the_limit() {
-    use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
-    let reads = AtomicUsize::new(0);
-    let gone = wait_footer_gone(|| async { Some(reads.fetch_add(1, SeqCst) < 2) }, Duration::from_secs(5), Duration::from_millis(1)).await;
-    assert_eq!((gone, reads.load(SeqCst)), (true, 3), "três leituras: duas com o rodapé, uma sem");
-    let stuck = wait_footer_gone(|| async { Some(true) }, Duration::from_millis(50), Duration::from_millis(5)).await;
-    assert!(!stuck, "o rodapé que não sai estoura o prazo e quem chama envia assim mesmo");
-    assert!(wait_footer_gone(|| async { None }, Duration::from_secs(5), Duration::from_millis(1)).await, "captura que falha não segura o texto");
-}
-
-// ── a rota inteira ──────────────────────────────────────────────────────────────────────────────
-
-async fn cano(sink: Arc<std::sync::Mutex<Vec<Value>>>) -> String {
+async fn cano(sink: Arc<Mutex<Vec<Value>>>) -> String {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (read,mut write) = tokio::io::split(stream);
+        let mut reader = BufReader::new(read);
+        let mut header = String::new();
+        reader.read_line(&mut header).await.unwrap();
+        assert_eq!(header,"secret-test\n");
+        let snapshot = json!({"type":"cano_snapshot","versao":2,"pid":42,"init":null,"aberto":false,
+            "pendentes":[],"ultimo_result":null,"rate_limit":null,"stderr_tail":[],"saiu":null,"inflight":{}});
+        write.write_all(format!("{snapshot}\n").as_bytes()).await.unwrap();
         loop {
-            let Ok((stream, _)) = listener.accept().await else { return };
-            let sink = sink.clone();
-            tokio::spawn(async move {
-                let (read, mut write) = tokio::io::split(stream);
-                let mut reader = BufReader::new(read);
-                let mut header = String::new();
-                if reader.read_line(&mut header).await.is_err() || header != "secret-test\n" { return; }
-                let snapshot = json!({"type":"cano_snapshot","versao":2,"pid":42,"init":null,"aberto":false,
-                    "pendentes":[],"ultimo_result":null,"rate_limit":null,"stderr_tail":[],"saiu":null,"inflight":{}});
-                write.write_all(format!("{snapshot}\n").as_bytes()).await.unwrap();
-                loop {
-                    let mut raw = String::new();
-                    if reader.read_line(&mut raw).await.unwrap_or(0) == 0 { return; }
-                    let envelope: Value = serde_json::from_str(&raw).unwrap();
-                    sink.lock().unwrap().push(envelope.clone());
-                    let ack = json!({"type":"cano_input_ack","operation_id":envelope["operation_id"],"outcome":"written"});
-                    let _ = write.write_all(format!("{ack}\n").as_bytes()).await;
-                }
-            });
+            let mut raw = String::new();
+            if reader.read_line(&mut raw).await.unwrap_or(0) == 0 { break; }
+            let envelope: Value = serde_json::from_str(&raw).unwrap();
+            sink.lock().unwrap().push(envelope.clone());
+            let ack = json!({"type":"cano_input_ack","operation_id":envelope["operation_id"],"outcome":"written"});
+            if write.write_all(format!("{ack}\n").as_bytes()).await.is_err() { break; }
         }
     });
     format!("tcp:{address}")
 }
 
-/// `calls` conta os controles que chegaram ao serviço de plugin do Python (a pergunta segurada vai por ele).
-async fn policy(calls: Arc<std::sync::atomic::AtomicUsize>) -> std::net::SocketAddr {
-    use tokio::io::AsyncReadExt;
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        loop {
-            let Ok((stream, _)) = listener.accept().await else { return };
-            let calls = calls.clone();
-            tokio::spawn(async move {
-                let mut reader = BufReader::new(stream);
-                loop {
-                    let mut length = 0usize;
-                    loop {
-                        let mut line = String::new();
-                        if reader.read_line(&mut line).await.unwrap_or(0) == 0 { return; }
-                        if line == "\r\n" { break; }
-                        if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") { length = value.trim().parse().unwrap(); }
+#[tokio::test]
+async fn missing_old_and_wrong_native_answers_write_nothing_and_never_relay() {
+    let dir = tempfile::tempdir().unwrap();
+    let sink = Arc::new(Mutex::new(Vec::new()));
+    let (python, upstream) = spawn_fake().await;
+    let state = AppState::new(config(upstream,"127.0.0.1"));
+    let store = state.interactions.clone();
+    let registry = Arc::new(RuntimeRegistry::new(upstream,"secret-test".into(),"instance-test".into()).with_interactions(store.clone()));
+    registry.open(RuntimeTarget { key:"k-s".into(),generation:1,name:"s".into(),provider:"claude".into(),
+        metadata:json!({"name":"s","headless":true,"session_id":"sid","initialized":true}),
+        binding:CanoBinding { pid:42,escuta:cano(sink.clone()).await,token:"secret-test".into(),versao:2 },
+        lease_path:dir.path().join("lease"),state_path:dir.path().join("state"),projection_dir:dir.path().join("projection"),
+        transcript:dir.path().join("s.jsonl"),created:0.0 }).await.unwrap();
+    state.state.runtime.set(registry.clone()).ok().unwrap();
+    let old = store.observe(&binding(),&native_target(InteractionKind::Question,"sid",&json!(0)),Some(json!({"question":"A"}))).unwrap().unwrap();
+    store.observe(&binding(),&native_target(InteractionKind::Question,"sid",&json!(0)),Some(json!({"question":"B"}))).unwrap();
+    let server = spawn_state(state).await;
+    for (payload,code) in [(json!({"answers":[option()]}),"erro_interacao_sem_identidade"),
+        (json!({"answers":[option()],"request_id":0,"interaction_id":old}),"erro_interacao_desatualizada")] {
+        let response = client().post(format!("http://{server}/api/sessions/s/answer"))
+            .header("authorization",format!("Bearer {OWNER}")).header("content-type","application/json").body(payload.to_string()).send().await.unwrap();
+        assert_eq!(response.status().as_u16(),409);
+        let body: Value = serde_json::from_str(&response.text().await.unwrap()).unwrap();
+        assert_eq!(body["detail"]["code"],code);
+    }
+    assert_eq!(python.hits_to("/api/sessions/s/answer"),0);
+    assert!(!sink.lock().unwrap().iter().any(|v|v["frame"].as_str().is_some_and(|frame|frame.contains("control_response"))));
+    registry.close("k-s",1).await.unwrap();
+}
+
+fn terminal_binding() -> TerminalBinding {
+    TerminalBinding { name:"test".into(),pane:"%7".into(),conversation:"sid".into(),generation:1,created:17,
+        mux_argv:vec!["fake".into()],windows:false,clipboard_lock_path:None }
+}
+fn picker(title: &str) -> String { format!("{title}\n❯ 1. first\n  2. second\nEsc to cancel · to navigate") }
+struct Services;
+impl TerminalServices for Services {
+    fn facts<'a>(&'a self,binding:&'a TerminalBinding) -> ServiceFuture<'a,InputFacts> {
+        Box::pin(async move { Ok(InputFacts { binding:binding.clone(),ready:true,idle:true,open_question:false,
+            plugin_live:false,plugin_user:false,clipboard_available:false,native:None }) })
+    }
+    fn publish<'a>(&'a self,_:&'a TerminalBinding,_:PluginRequest) -> ServiceFuture<'a,PluginReply> {
+        Box::pin(async { Ok(PluginReply::Unavailable) })
+    }
+}
+struct PaneIo { screen:Mutex<String>, writes:Mutex<Vec<CommandRequest>>, replacement:Mutex<Option<(PathBuf,Vec<u8>,String)>> }
+impl PaneIo {
+    fn new(screen:String) -> Self { Self { screen:Mutex::new(screen),writes:Mutex::new(vec![]),replacement:Mutex::new(None) } }
+}
+impl TerminalIo for PaneIo {
+    fn command<'a>(&'a self,request:CommandRequest) -> IoFuture<'a,CommandOutput> {
+        Box::pin(async move {
+            let stdout = if request.args.iter().any(|s|s == "display-message") { b"test\t%7\t17\n".to_vec() }
+                else if request.args.iter().any(|s|s == "capture-pane") { self.screen.lock().unwrap().as_bytes().to_vec() }
+                else {
+                    self.writes.lock().unwrap().push(request);
+                    if let Some((path,bytes,screen)) = self.replacement.lock().unwrap().take() {
+                        std::fs::write(path,bytes).unwrap(); *self.screen.lock().unwrap() = screen;
                     }
-                    let mut body = vec![0; length];
-                    reader.read_exact(&mut body).await.unwrap();
-                    let request: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
-                    let data = match request["kind"].as_str() {
-                        Some("terminal_facts") => json!({"binding": request["payload"]["binding"], "ready": true, "idle": true,
-                            "open_question": false, "plugin_live": false, "plugin_user": false, "native": null}),
-                        Some("terminal_plugin_control") => {
-                            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                            json!({"disposition": "accepted"})
-                        }
-                        _ => json!({}),
-                    };
-                    let reply = json!({"ok":true,"data":data}).to_string();
-                    let response = format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{reply}", reply.len());
-                    reader.get_mut().write_all(response.as_bytes()).await.unwrap();
-                }
-            });
-        }
-    });
-    address
+                    vec![]
+                };
+            Ok(CommandOutput { success:true,stdout })
+        })
+    }
+    fn socket<'a>(&'a self,_:&'a NativeMessage,_:Vec<u8>) -> IoFuture<'a,WriteOutcome> { Box::pin(async { Ok(WriteOutcome::NotWritten) }) }
 }
-
-async fn registry_counting() -> (Arc<RuntimeRegistry>, Arc<std::sync::atomic::AtomicUsize>) {
-    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    (Arc::new(RuntimeRegistry::new(policy(calls.clone()).await, "secret-test".into(), "instance-test".into())), calls)
+fn driver(io:Arc<PaneIo>,jsonl:PathBuf,expected:&mut ExpectedInteraction) -> TerminalDriver {
+    let store = Arc::new(hangar_server::interactions::InteractionStore::default());
+    store.bind(&expected.binding).unwrap();
+    expected.interaction_id = store.observe_revision(&expected.binding,&expected.target,Some(expected.semantic.clone()),expected.source_revision.clone()).unwrap().unwrap();
+    TerminalDriver::new(terminal_binding(),Arc::new(Services),io,InputLimits { settle:Duration::ZERO,
+        literal_settle:Duration::ZERO,multiline_settle:Duration::ZERO,slash_settle:Duration::ZERO,
+        proof_attempts:2,ready_attempts:2,cleanup_attempts:2 }).with_interaction_source(jsonl).with_interactions(store)
 }
-
-async fn open_headless(registry: &RuntimeRegistry, dir: &Path, name: &str) {
-    let sink = Arc::new(std::sync::Mutex::new(Vec::new()));
-    registry.open(RuntimeTarget { key: format!("k-{name}"), generation: 1, name: name.into(), provider: "claude".into(),
-        metadata: json!({"name": name, "headless": true, "session_id": "sid-1", "initialized": true}),
-        binding: CanoBinding { pid: 42, escuta: cano(sink).await, token: "secret-test".into(), versao: 2 },
-        lease_path: dir.join(format!("{name}.lock")), state_path: dir.join(format!("{name}.queue-state.json")),
-        projection_dir: dir.join(format!("{name}-projection")), transcript: dir.join(format!("{name}.jsonl")), created: 0.0 }).await.unwrap();
-}
-
-/// tmux falso: aceita tudo e anota cada chamada com o texto que ela leva.
-#[cfg(unix)]
-fn fake_tmux(dir: &Path, name: &str, pane: &str) -> (String, std::path::PathBuf) {
-    
-    let (script, log) = (dir.join("tmux"), dir.join("tmux.log"));
-    crate::write_executable(&script, format!(
-        "#!/bin/sh\nif [ \"$1\" = display-message ]; then printf '{name}\\t{}\\t1\\n'; exit 0; fi\necho \"$@\" >> '{}'\n", pane.replace('%', "%%"), log.display()));
-    (script.to_str().unwrap().to_owned(), log)
-}
-
-#[cfg(unix)]
-fn log_lines(log: &Path) -> Vec<String> {
-    std::fs::read_to_string(log).unwrap_or_default().lines().map(str::to_owned).collect()
-}
-
-#[cfg(unix)]
-fn keys_sent(log: &Path) -> usize { log_lines(log).iter().filter(|l| l.contains("send-keys")).count() }
-
-/// Entrada com terminal; a transcrição mora em `<conta>/projects/p/<name>.jsonl`, de onde sai o sidecar.
-#[cfg(unix)]
-async fn open_terminal(registry: &RuntimeRegistry, config: &Path, name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
-    open_terminal_on(registry, config, name, "%1").await
-}
-
-#[cfg(unix)]
-async fn open_terminal_on(registry: &RuntimeRegistry, config: &Path, name: &str, pane: &str) -> (std::path::PathBuf, std::path::PathBuf) {
-    let dir = config.join("projects/p");
-    std::fs::create_dir_all(&dir).unwrap();
-    let (tmux, log) = fake_tmux(config, name, pane);
-    let binding = TerminalBinding { name: name.into(), pane: pane.into(), conversation: "sid".into(), generation: 1, created: 1,
-        mux_argv: vec![tmux], windows: false, clipboard_lock_path: None };
-    let transcript = dir.join(format!("{name}.jsonl"));
-    std::fs::write(&transcript, "").unwrap();
-    registry.open_terminal(TerminalTarget { key: format!("k-{name}"), generation: 1, name: name.into(), binding,
-        lease_path: dir.join(format!("{name}.lease")), state_path: dir.join(format!("{name}.state")), projection_dir: dir.join(format!("{name}.projection")),
-        transcript: transcript.clone(), created: 0.0, plugin_key: None }).await.unwrap();
-    assert!(registry.writable(name).await.unwrap().healthy);
-    (log, transcript)
-}
-
-#[cfg(unix)]
-fn write_sidecar(config: &Path, name: &str) -> std::path::PathBuf {
-    let path = config.join(".hangar-askq").join(format!("{name}.json"));
+fn sidecar(jsonl:&Path, title:&str) -> PathBuf {
+    let path = ask::sidecar_path(jsonl).unwrap();
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(&path, json!({"tool_input": {"questions": [
-        {"header": "h", "question": "Cor?", "multiSelect": false, "options": [{"label": "A"}]},
-        {"header": "h", "question": "Tamanho?", "multiSelect": false, "options": [{"label": "G"}]}]}}).to_string()).unwrap();
+    std::fs::write(&path,json!({"tool_input":{"questions":[
+        {"header":"h","question":title,"multiSelect":false,"options":[{"label":"first"},{"label":"second"}]},
+        {"header":"h2","question":"Other","multiSelect":false,"options":[{"label":"first"},{"label":"second"}]}]}}).to_string()).unwrap();
     path
 }
-
-async fn serve(registry: Arc<RuntimeRegistry>) -> (Arc<Fake>, std::net::SocketAddr) {
-    serve_with(registry, hangar_server::terminal_control::TerminalPool::new(), None).await
+fn terminal_expected(jsonl:&Path,title:&str) -> ExpectedInteraction {
+    let (question,revision) = ask::read_revision(jsonl).unwrap().unwrap();
+    ExpectedInteraction { semantic:interaction_semantic(&picker(title),Some(&question)).unwrap(),source_revision:Some(revision),..expected(InteractionKind::Question) }
 }
-
-/// `panel`: a sessão com painel de terminal aberto na tela.
-async fn serve_with(registry: Arc<RuntimeRegistry>, pool: hangar_server::terminal_control::TerminalPool, panel: Option<&str>) -> (Arc<Fake>, std::net::SocketAddr) {
-    let (python, upstream) = spawn_fake().await;
-    let mut state = AppState::with_terminal_pool(config(upstream, "127.0.0.1"), pool);
-    state.write_gate_wait = Duration::from_secs(5);
-    assert!(state.state.runtime.set(registry).is_ok());
-    if let Some(name) = panel { state.term.mark_open_for_test(name, &state.diag).await; }
-    (python, spawn_state(state).await)
-}
-
-async fn answer(server: std::net::SocketAddr, name: &str, body: &Value) -> (u16, Value) {
-    let response = client().post(format!("http://{server}/api/sessions/{name}/answer"))
-        .header("content-type", "application/json").header("authorization", format!("Bearer {OWNER}"))
-        .body(body.to_string()).send().await.unwrap();
-    let status = response.status().as_u16();
-    let text = response.text().await.unwrap();
-    (status, serde_json::from_str(&text).unwrap_or(Value::String(text)))
-}
-
-const OPT: fn() -> Value = || json!({"kind": "option", "indices": [0], "labels": ["A"]});
-const CHAT: fn() -> Value = || json!({"kind": "chat", "chat_index": 1});
-
-#[cfg(unix)]
-#[tokio::test]
-async fn chat_answer_interrupts_then_submits_and_never_borrows_the_keyboard() {
-    let (config, (registry, counter)) = (tempfile::tempdir().unwrap(), registry_counting().await);
-    let (log, _) = open_terminal(&registry, config.path(), "t").await;
-    let sidecar = write_sidecar(config.path(), "t");
-    let (python, server) = serve(registry.clone()).await;
-    let (status, body) = answer(server, "t", &json!({"answers": [OPT(), CHAT()]})).await;
-    assert_eq!((status, body), (200, json!({"ok": true, "fallback": false})));
-    let lines = log_lines(&log);
-    let escape = lines.iter().position(|l| l.contains("send-keys") && l.contains("Escape")).expect("o Esc chegou ao pane");
-    // O pane falso não tem composer: o texto fica na fila durável do ator (`deferred`) e sai quando o terminal ficar livre.
-    let queued = std::fs::read_to_string(config.path().join("projects/p/t.state")).unwrap();
-    assert!(queued.contains("Sobre «Tamanho?» prefiro conversar antes de responder"), "o texto está na fila do ator: {queued}");
-    let view = registry.terminal_view("t").await.unwrap().1.to_string();
-    assert!(lines[escape..].iter().any(|l| l.starts_with("capture-pane")), "esperou o menu sair pelo pane depois do Esc: {lines:?}");
-    assert!(!view.contains("keyboard_loan"), "o teclado não foi emprestado: {view}");
-    assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 0, "a pergunta do plugin não foi consultada pelo ator");
-    assert!(!sidecar.exists(), "o sidecar da pergunta fechada saiu");
-    assert_eq!(python.hits_to("/api/sessions/t/answer"), 0);
-    assert_eq!(python.plugin_gets(), 1, "só a leitura da pergunta pendente foi ao Python");
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn chat_answer_with_nothing_to_preserve_is_409_and_presses_nothing() {
-    let (config, (registry, _)) = (tempfile::tempdir().unwrap(), registry_counting().await);
-    let (log, _) = open_terminal(&registry, config.path(), "t").await;
-    let (_, server) = serve(registry).await;
-    let before = keys_sent(&log);
-    let (status, body) = answer(server, "t", &json!({"answers": [CHAT()]})).await;
-    assert_eq!((status, body["detail"]["code"].as_str(), body["detail"]["msg"].as_str()),
-        (409, Some("erro_sem_resposta"), Some("resposta sem texto para conversar")), "{body}");
-    assert_eq!(keys_sent(&log), before);
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn held_question_is_answered_through_the_actor_and_clears_the_sidecar() {
-    let (config, (registry, counter)) = (tempfile::tempdir().unwrap(), registry_counting().await);
-    open_terminal(&registry, config.path(), "t").await;
-    let sidecar = write_sidecar(config.path(), "t");
-    let (python, server) = serve(registry).await;
-    python.set_plugin_pending(json!({"id": "ask:1", "questions": []}));
-    let (status, body) = answer(server, "t", &json!({"answers": [OPT()], "request_id": "ask:1"})).await;
-    assert_eq!((status, body), (200, json!({"ok": true, "fallback": false})));
-    assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 1, "o controle chegou ao ator, que o entregou ao plugin");
-    assert!(!sidecar.exists());
-    assert_eq!(python.hits_to("/api/sessions/t/answer"), 0);
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn a_changed_question_is_409_and_the_actor_receives_nothing() {
-    let (config, (registry, counter)) = (tempfile::tempdir().unwrap(), registry_counting().await);
-    let (log, _) = open_terminal(&registry, config.path(), "t").await;
-    let sidecar = write_sidecar(config.path(), "t");
-    let (python, server) = serve(registry).await;
-    python.set_plugin_pending(json!({"id": "ask:2", "questions": []}));
-    let before = keys_sent(&log);
-    let (status, body) = answer(server, "t", &json!({"answers": [OPT()], "request_id": "ask:1"})).await;
-    assert_eq!((status, body["detail"]["code"].as_str(), body["detail"]["msg"].as_str()),
-        (409, Some("erro_sem_resposta"), Some("a pergunta mudou; resposta conservada")), "{body}");
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    assert_eq!((keys_sent(&log), counter.load(std::sync::atomic::Ordering::SeqCst)), (before, 0));
-    assert!(sidecar.exists(), "pergunta não respondida segue valendo");
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn a_plugin_lookup_that_fails_is_a_503_with_a_code_and_sends_nothing() {
-    let (config, (registry, _)) = (tempfile::tempdir().unwrap(), registry_counting().await);
-    let (log, _) = open_terminal(&registry, config.path(), "t").await;
-    let (python, server) = serve(registry).await;
-    python.fail_plugin(Some(StatusCode::INTERNAL_SERVER_ERROR));
-    let before = keys_sent(&log);
-    let (status, body) = answer(server, "t", &json!({"answers": [OPT(), CHAT()]})).await;
-    assert_eq!((status, body["detail"]["code"].as_str(), body["detail"]["params"]["detalhe"].as_str()),
-        (503, Some("erro_sem_resposta"), Some("plugin_unavailable")), "{body}");
-    assert_eq!(python.hits_to("/api/sessions/t/answer"), 0);
-    assert_eq!(keys_sent(&log), before);
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn bodies_python_would_coerce_or_refuse_reach_python() {
-    let (config, (registry, _)) = (tempfile::tempdir().unwrap(), registry_counting().await);
-    open_terminal(&registry, config.path(), "t").await;
-    let (python, server) = serve(registry).await;
-    for body in [json!({"answers": [{"kind": "option", "indices": ["0"], "labels": ["A"]}]}), json!({"answers": [OPT()], "x": 1}),
-        json!({"answers": [OPT()], "request_id": 1.5})] {
-        assert_eq!(answer(server, "t", &body).await, (200, "from-python".into()), "{body}");
-    }
-    assert_eq!(python.hits_to("/api/sessions/t/answer"), 3);
+fn answers() -> Vec<QuestionAnswer> {
+    serde_json::from_value(json!([option(),{"kind":"chat","chat_index":3}])).unwrap()
 }
 
 #[tokio::test]
-async fn headless_without_a_pending_question_is_a_409_with_a_code_and_never_a_forward() {
-    let (dir, (registry, _)) = (tempfile::tempdir().unwrap(), registry_counting().await);
-    open_headless(&registry, dir.path(), "s").await;
-    let (python, server) = serve(registry).await;
-    let (status, body) = answer(server, "s", &json!({"answers": [OPT()], "request_id": "r1"})).await;
-    assert_eq!((status, body["detail"]["code"].as_str()), (409, Some("erro_codex_resposta_invalida")), "{body}");
-    assert_eq!(python.hits_to("/api/sessions/s/answer"), 0);
-}
-
-#[tokio::test]
-async fn headless_without_a_request_id_goes_to_python() {
-    let (dir, (registry, _)) = (tempfile::tempdir().unwrap(), registry_counting().await);
-    open_headless(&registry, dir.path(), "s").await;
-    let (python, server) = serve(registry).await;
-    assert_eq!(answer(server, "s", &json!({"answers": [OPT()]})).await, (200, "from-python".into()));
-    assert_eq!(python.hits_to("/api/sessions/s/answer"), 1);
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn an_open_terminal_panel_refuses_the_answer_when_no_question_is_held() {
-    let (config, (registry, counter)) = (tempfile::tempdir().unwrap(), registry_counting().await);
-    let (log, _) = open_terminal(&registry, config.path(), "t").await;
-    let sidecar = write_sidecar(config.path(), "t");
-    let (python, server) = serve_with(registry, hangar_server::terminal_control::TerminalPool::new(), Some("t")).await;
-    let before = keys_sent(&log);
-    let (status, body) = answer(server, "t", &json!({"answers": [OPT(), CHAT()]})).await;
-    assert_eq!((status, body["detail"]["code"].as_str()), (409, Some("erro_terminal_aberto")), "{body}");
-    assert_eq!((keys_sent(&log), counter.load(std::sync::atomic::Ordering::SeqCst)), (before, 0), "nada chegou ao ator");
-    assert!(sidecar.exists());
-    assert_eq!(python.hits_to("/api/sessions/t/answer"), 0);
-    // Com a pergunta segurada pelo plugin a resposta entra sem teclado, então o painel não a impede.
-    python.set_plugin_pending(json!({"id": "ask:1", "questions": []}));
-    assert_eq!(answer(server, "t", &json!({"answers": [OPT()]})).await.0, 200);
-}
-
-/// O Esc que fecha a pergunta e a espera do menu usam o observador do pane; o do `Monitor` da sessão
-/// (`monitor:<nome>`) divide esse observador e tem de sobreviver à resposta.
-#[cfg(unix)]
-#[tokio::test]
-async fn the_footer_wait_never_releases_the_live_monitor_observer() {
-    use hangar_server::terminal_control::{CaptureRequest, Limits, TerminalPool};
+async fn fresh_pane_b_refuses_a_before_any_key_even_with_old_sidecar_and_monitor() {
     let dir = tempfile::tempdir().unwrap();
-    let label = format!("hangar-answer-{}", dir.path().file_name().unwrap().to_string_lossy());
-    let _server = IsolatedTmux(label.clone());
-    let tmux = |args: &[&str]| {
-        let out = std::process::Command::new("tmux").arg("-u").arg("-L").arg(&label).args(args).output().unwrap();
-        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-        String::from_utf8(out.stdout).unwrap()
-    };
-    tmux(&["-f", "/dev/null", "new-session", "-d", "-s", "t", "-x", "120", "-y", "30", "cat"]);
-    let socket = std::path::PathBuf::from(tmux(&["display-message", "-p", "#{socket_path}"]).trim());
-    let pane = tmux(&["display-message", "-p", "-t", "=t:", "#{pane_id}"]).trim().to_owned();
-    let pool = TerminalPool::with_program("tmux", Some(socket), Limits::default());
-    let monitor = CaptureRequest { consumer: "monitor:t".into(), name: "t".into(), provider: "claude".into(), binding: "sid".into(),
-        target: pane.clone(), started: 0.0, lines: 200, colors: false, join: false };
-    pool.capture(monitor.clone()).await.unwrap();
-    let clients = || tmux(&["list-clients", "-F", "#{client_pid}"]);
-    let before = clients();
-    assert_eq!(before.lines().count(), 1, "um cliente de controle do monitor");
-
-    let (config, (registry, _)) = (tempfile::tempdir().unwrap(), registry_counting().await);
-    open_terminal_on(&registry, config.path(), "t", &pane).await;
-    write_sidecar(config.path(), "t");
-    let (_, server) = serve_with(registry, pool.clone(), None).await;
-    assert_eq!(answer(server, "t", &json!({"answers": [OPT(), CHAT()]})).await.0, 200);
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    assert_eq!(clients(), before, "o observador do monitor segue o mesmo");
-    pool.capture(monitor).await.unwrap();
+    let jsonl = dir.path().join("projects/p/sid.jsonl");
+    sidecar(&jsonl,"Question A");
+    let mut expected = terminal_expected(&jsonl,"Question A");
+    let io = Arc::new(PaneIo::new(picker("Question B")));
+    let result = driver(io.clone(),jsonl,&mut expected).guarded_answer(&expected,&answers()).await;
+    assert_eq!(result.disposition,Disposition::Rejected);
+    assert_eq!(result.code,InteractionError::Changed.code());
+    assert!(io.writes.lock().unwrap().is_empty());
 }
 
-/// Derruba o servidor tmux isolado (só o `-L` do teste, nunca o padrão) mesmo quando uma asserção falha.
-#[cfg(unix)]
-struct IsolatedTmux(String);
-#[cfg(unix)]
-impl Drop for IsolatedTmux {
-    fn drop(&mut self) {
-        let tmux = |args: &[&str]| std::process::Command::new("tmux").arg("-L").arg(&self.0).args(args).output().ok();
-        let socket = tmux(&["display-message", "-p", "#{socket_path}"]).filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned()).filter(|s| !s.is_empty());
-        tmux(&["kill-server"]);
-        if let Some(socket) = socket { let _ = std::fs::remove_file(socket); }
+#[tokio::test]
+async fn chat_b_during_closure_stays_on_disk_and_receives_no_text() {
+    let dir = tempfile::tempdir().unwrap();
+    let jsonl = dir.path().join("projects/p/sid.jsonl");
+    let path = sidecar(&jsonl,"Question A");
+    let mut expected = terminal_expected(&jsonl,"Question A");
+    let a = std::fs::read(&path).unwrap();
+    sidecar(&jsonl,"Question B");
+    let b = std::fs::read(&path).unwrap();
+    std::fs::write(&path,a).unwrap();
+    let io = Arc::new(PaneIo::new(picker("Question A")));
+    *io.replacement.lock().unwrap() = Some((path.clone(),b.clone(),picker("Question B")));
+    let result = driver(io.clone(),jsonl.clone(),&mut expected).guarded_answer_chat(&expected,&answers(),"same-operation").await;
+    assert_eq!(result.disposition,Disposition::Unknown);
+    assert_eq!(io.writes.lock().unwrap().len(),1,"só o Esc de A, sem colagem nem Enter para B");
+    assert_eq!(std::fs::read(&path).unwrap(),b);
+    ask::consume_revision(&jsonl,expected.source_revision.as_deref().unwrap()).unwrap();
+    assert_eq!(ask::read_pending(&jsonl).unwrap().unwrap().questions[0].question,"Question B");
+}
+
+#[tokio::test]
+async fn chat_timeout_or_unreadable_pane_never_sends_the_text() {
+    for after in [picker("Question A"),String::new()] {
+        let dir = tempfile::tempdir().unwrap();
+        let jsonl = dir.path().join("projects/p/sid.jsonl");
+        let path = sidecar(&jsonl,"Question A");
+        let mut expected = terminal_expected(&jsonl,"Question A");
+        let io = Arc::new(PaneIo::new(picker("Question A")));
+        *io.replacement.lock().unwrap() = Some((path.clone(),std::fs::read(path).unwrap(),after));
+        let result = driver(io.clone(),jsonl,&mut expected).guarded_answer_chat(&expected,&answers(),"one-operation").await;
+        assert_eq!(result.disposition,Disposition::Unknown);
+        assert_eq!(io.writes.lock().unwrap().len(),1);
     }
+}
+
+#[tokio::test]
+async fn chat_guard_survives_journal_buffer_and_clipboard_preparation() {
+    struct Prepared { io:PaneIo, jsonl:PathBuf, stage:&'static str }
+    fn empty_composer() -> String { format!("conversation\n{}\n❯ \n{}\n⏵⏵ bypass permissions", "─".repeat(30), "─".repeat(30)) }
+    impl Prepared {
+        fn replace(&self) { sidecar(&self.jsonl,"Question B"); *self.io.screen.lock().unwrap() = picker("Question B"); }
+    }
+    impl TerminalServices for Prepared {
+        fn facts<'a>(&'a self,binding:&'a TerminalBinding) -> ServiceFuture<'a,InputFacts> {
+            Box::pin(async move { Ok(InputFacts { binding:binding.clone(),ready:true,idle:true,open_question:false,
+                plugin_live:false,plugin_user:false,clipboard_available:true,native:None }) })
+        }
+        fn publish<'a>(&'a self,_:&'a TerminalBinding,_:PluginRequest) -> ServiceFuture<'a,PluginReply> { Box::pin(async { panic!("publicação sem guarda") }) }
+        fn writing<'a>(&'a self) -> ServiceFuture<'a,()> { Box::pin(async move { if self.stage == "journal" { self.replace(); } Ok(()) }) }
+    }
+    impl TerminalIo for Prepared {
+        fn command<'a>(&'a self,request:CommandRequest) -> IoFuture<'a,CommandOutput> {
+            Box::pin(async move {
+                if request.args.iter().any(|arg|arg == "Escape" || arg == "\u{1b}[27;1;27;1;0;1_\u{1b}[27;1;27;0;0;1_") {
+                    self.io.writes.lock().unwrap().push(request);
+                    *self.io.screen.lock().unwrap() = empty_composer();
+                    return Ok(CommandOutput { success:true,stdout:vec![] });
+                }
+                let preparation = self.stage == "buffer" && request.args.iter().any(|arg|arg == "load-buffer")
+                    || self.stage == "clipboard" && request.program == "powershell.exe";
+                let result = self.io.command(request).await;
+                if preparation { self.replace(); }
+                result
+            })
+        }
+        fn socket<'a>(&'a self,_:&'a NativeMessage,_:Vec<u8>) -> IoFuture<'a,WriteOutcome> { Box::pin(async { Ok(WriteOutcome::NotWritten) }) }
+    }
+    for stage in ["journal","buffer","clipboard"] {
+        let dir = tempfile::tempdir().unwrap();
+        let jsonl = dir.path().join("projects/p/sid.jsonl");
+        sidecar(&jsonl,"Question A");
+        let mut expected = terminal_expected(&jsonl,"Question A");
+        let store = Arc::new(hangar_server::interactions::InteractionStore::default());
+        store.bind(&expected.binding).unwrap();
+        expected.interaction_id = store.observe_revision(&expected.binding,&expected.target,Some(expected.semantic.clone()),expected.source_revision.clone()).unwrap().unwrap();
+        let io = Arc::new(Prepared { io:PaneIo::new(picker("Question A")),jsonl:jsonl.clone(),stage });
+        let mut binding = terminal_binding();
+        if stage == "clipboard" { binding.windows = true; binding.pane = "=test:0.0".into(); binding.clipboard_lock_path = Some(dir.path().join("clip.lock")); }
+        let driver = TerminalDriver::new(binding,io.clone(),io.clone(),InputLimits { settle:Duration::ZERO,literal_settle:Duration::ZERO,
+            multiline_settle:Duration::ZERO,slash_settle:Duration::ZERO,proof_attempts:2,ready_attempts:2,cleanup_attempts:2 })
+            .with_interaction_source(jsonl.clone()).with_interactions(store);
+        let result = driver.guarded_answer_chat(&expected,&answers(),"op-a").await;
+        assert_eq!(result.disposition,Disposition::Unknown,"{stage}");
+        assert_eq!(result.code,"erro_sem_confirmacao_resposta","{stage}");
+        let writes = io.io.writes.lock().unwrap();
+        assert_eq!(writes.iter().filter(|request|request.args.iter().any(|arg|arg == "send-keys")).count(),1,"só Escape: {stage}");
+        if stage == "clipboard" {
+            let preparation = writes.iter().find(|request|request.program == "powershell.exe").expect("não percorreu preparo do clipboard");
+            assert!(preparation.stdin.contains(&b'\n'),"multilinha real no PowerShell");
+        }
+        if stage == "buffer" { assert!(writes.iter().any(|request|request.args.iter().any(|arg|arg == "load-buffer")),"não percorreu preparo do buffer"); }
+        assert!(!writes.iter().any(|request|request.args.iter().any(|arg|arg == "paste-buffer" || arg == "M-v")),"{stage}");
+        assert_eq!(ask::read_pending(&jsonl).unwrap().unwrap().questions[0].question,"Question B");
+    }
+}
+
+#[tokio::test]
+async fn guarded_text_keeps_a_across_editor_open_and_rejects_same_title_b() {
+    use std::sync::atomic::{AtomicBool,AtomicUsize,Ordering};
+    struct EditorIo {
+        cursor:Mutex<usize>, opened:AtomicBool, submitted:AtomicBool,
+        captures:AtomicUsize, changed:AtomicBool, writes:Mutex<Vec<CommandRequest>>, change:&'static str,
+    }
+    impl EditorIo {
+        fn pane(&self) -> String {
+            if self.submitted.load(Ordering::Acquire) { return "conversation".into(); }
+            let opened = self.opened.load(Ordering::Acquire);
+            if opened {
+                let capture = self.captures.fetch_add(1,Ordering::AcqRel);
+                if self.change == "after_open" && capture == 0 || self.change == "before_text" && capture == 1
+                    || self.change == "unreadable" { self.changed.store(true,Ordering::Release); }
+            }
+            if self.change == "unreadable" && self.changed.load(Ordering::Acquire) { return String::new(); }
+            let labels = if self.changed.load(Ordering::Acquire) { ["allow","deny","Type something."] } else { ["first","second","Type something."] };
+            let cursor = *self.cursor.lock().unwrap();
+            let options = labels.iter().enumerate().map(|(index,label)|format!("{} {}. {label}",if index + 1 == cursor { "❯" } else { " " },index + 1)).collect::<Vec<_>>().join("\n");
+            format!("Question A\n{options}\n{}",if opened { "Text editor\nEnter to submit · Esc to cancel" } else { "Esc to cancel · to navigate" })
+        }
+    }
+    impl TerminalIo for EditorIo {
+        fn command<'a>(&'a self,request:CommandRequest) -> IoFuture<'a,CommandOutput> {
+            Box::pin(async move {
+                let stdout = if request.args.iter().any(|arg|arg == "display-message") { b"test\t%7\t17\n".to_vec() }
+                    else if request.args.iter().any(|arg|arg == "capture-pane") { self.pane().into_bytes() }
+                    else {
+                        match request.args.last().map(String::as_str) {
+                            Some("Down") => *self.cursor.lock().unwrap() += 1,
+                            Some("\r") => if self.opened.swap(true,Ordering::AcqRel) { self.submitted.store(true,Ordering::Release); },
+                            Some("custom answer") => assert!(self.opened.load(Ordering::Acquire)),
+                            other => panic!("efeito inesperado: {other:?}"),
+                        }
+                        self.writes.lock().unwrap().push(request);
+                        vec![]
+                    };
+                Ok(CommandOutput { success:true,stdout })
+            })
+        }
+        fn socket<'a>(&'a self,_:&'a NativeMessage,_:Vec<u8>) -> IoFuture<'a,WriteOutcome> { Box::pin(async { Ok(WriteOutcome::NotWritten) }) }
+    }
+    for change in ["none","after_open","before_text","unreadable"] {
+        let dir = tempfile::tempdir().unwrap();
+        let jsonl = dir.path().join("projects/p/sid.jsonl");
+        let path = sidecar(&jsonl,"Question A");
+        std::fs::write(&path,json!({"tool_input":{"questions":[{"header":"h","question":"Question A","options":[{"label":"first"},{"label":"second"}]}]}}).to_string()).unwrap();
+        let io = Arc::new(EditorIo { cursor:Mutex::new(1),opened:AtomicBool::new(false),submitted:AtomicBool::new(false),
+            captures:AtomicUsize::new(0),changed:AtomicBool::new(false),writes:Mutex::new(vec![]),change });
+        let (question,revision) = ask::read_revision(&jsonl).unwrap().unwrap();
+        let mut expected = ExpectedInteraction { semantic:interaction_semantic(&io.pane(),Some(&question)).unwrap(),source_revision:Some(revision),..expected(InteractionKind::Question) };
+        let store = Arc::new(hangar_server::interactions::InteractionStore::default());
+        store.bind(&expected.binding).unwrap();
+        expected.interaction_id = store.observe_revision(&expected.binding,&expected.target,Some(expected.semantic.clone()),expected.source_revision.clone()).unwrap().unwrap();
+        let driver = TerminalDriver::new(terminal_binding(),Arc::new(Services),io.clone(),InputLimits { settle:Duration::ZERO,literal_settle:Duration::ZERO,
+            multiline_settle:Duration::ZERO,slash_settle:Duration::ZERO,proof_attempts:2,ready_attempts:2,cleanup_attempts:2 })
+            .with_interaction_source(jsonl.clone()).with_interactions(store.clone());
+        let answers:Vec<QuestionAnswer> = serde_json::from_value(json!([{"kind":"text","value":"custom answer","type_index":2}])).unwrap();
+        let result = driver.guarded_answer(&expected,&answers).await;
+        let writes = io.writes.lock().unwrap();
+        let keys = writes.iter().map(|request|request.args.last().unwrap().as_str()).collect::<Vec<_>>();
+        if change == "none" {
+            assert_eq!(result.disposition,Disposition::Accepted);
+            assert_eq!(keys,vec!["Down","Down","\r","custom answer","\r"]);
+        } else {
+            assert_eq!(result.disposition,Disposition::Unknown,"{change}");
+            assert_eq!(keys,vec!["Down","Down","\r"],"nenhum texto/Enter depois da espera: {change}");
+            if change != "unreadable" { assert_eq!(result.code,InteractionError::Changed.code()); }
+        }
+        assert_eq!(ask::read_pending(&jsonl).unwrap().unwrap().questions[0].question,"Question A");
+        assert_eq!(store.expected(&expected.binding,Some(&expected.interaction_id)).unwrap(),expected,"Store antigo não prova o pane novo");
+    }
+}
+
+#[tokio::test]
+async fn native_chat_without_previous_answers_keeps_the_native_option() {
+    let dir = tempfile::tempdir().unwrap();
+    let jsonl = dir.path().join("projects/p/sid.jsonl");
+    let path = sidecar(&jsonl,"Question A");
+    std::fs::write(&path,json!({"tool_input":{"questions":[{"header":"h","question":"Question A","options":[]}]}}).to_string()).unwrap();
+    let screen = "Question A\n❯ 1. Chat about this\nEsc to cancel · to navigate".to_owned();
+    let (question,revision) = ask::read_revision(&jsonl).unwrap().unwrap();
+    let mut expected = ExpectedInteraction { semantic:interaction_semantic(&screen,Some(&question)).unwrap(),source_revision:Some(revision),..expected(InteractionKind::Question) };
+    let io = Arc::new(PaneIo::new(screen));
+    *io.replacement.lock().unwrap() = Some((path.clone(),std::fs::read(path).unwrap(),"conversation".into()));
+    let answers:Vec<QuestionAnswer> = serde_json::from_value(json!([{"kind":"chat","chat_index":0}])).unwrap();
+    let result = driver(io.clone(),jsonl,&mut expected).guarded_answer_chat(&expected,&answers,"op-chat").await;
+    assert_eq!(result.disposition,Disposition::Accepted);
+    let writes = io.writes.lock().unwrap();
+    assert_eq!(writes.len(),1);
+    assert_eq!(writes[0].args.last().unwrap(),"\r");
+}
+
+#[test]
+fn consuming_a_keeps_b_and_hook_removal_discards_consumption() {
+    let dir = tempfile::tempdir().unwrap();
+    let jsonl = dir.path().join("projects/p/sid.jsonl");
+    let path = sidecar(&jsonl,"A");
+    let (_,a) = ask::read_revision(&jsonl).unwrap().unwrap();
+    let bytes = std::fs::read(&path).unwrap();
+    sidecar(&jsonl,"B");
+    ask::consume_revision(&jsonl,&a).unwrap();
+    assert_eq!(ask::read_pending(&jsonl).unwrap().unwrap().questions[0].question,"B");
+    std::fs::remove_file(&path).unwrap();
+    assert!(ask::read_pending(&jsonl).unwrap().is_none());
+    std::fs::write(path,bytes).unwrap();
+    assert!(ask::read_pending(&jsonl).unwrap().is_some());
+}
+
+#[test]
+fn claude_select_targets_second_request_and_rechecks_before_the_wire_write() {
+    use hangar_server::runtime::{claude::ClaudeEngine,protocol::{ClockSample,EngineInput,OperationKind,RuntimeCommand,Effect}};
+    let clock = ClockSample {monotonic_s:1.0,epoch_s:1.0};
+    let mut engine = ClaudeEngine::new(json!({"name":"s","session_id":"sid","initialized":true}),1,clock);
+    let store = Arc::new(hangar_server::interactions::InteractionStore::default());
+    engine.set_interactions("k-s".into(),store.clone()).unwrap();
+    let first = json!({"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"first"}});
+    let second = json!({"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"second"}});
+    for (id,request) in [(json!("first"),first),(json!(0),second.clone())] {
+        engine.apply(EngineInput::Line(json!({"type":"control_request","request_id":id,"request":request})),clock).unwrap();
+    }
+    let token = store.observe(&binding(),&native_target(InteractionKind::Approval,"sid",&json!(0)),Some(second)).unwrap().unwrap();
+    let effects = engine.command(RuntimeCommand {operation_id:"choose-zero".into(),kind:OperationKind::Select,
+        payload:json!({"option":1,"interaction_id":token})},clock).unwrap();
+    assert!(effects.iter().any(|effect|matches!(effect,Effect::Write {frame,..} if frame["response"]["request_id"] == 0)));
+    assert!(engine.interaction_write_error("choose-zero").is_none());
+    // A fonte ainda conserva A; a pendência real já mudou antes de o diário liberar a escrita.
+    engine.apply(EngineInput::Line(json!({"type":"control_request","request_id":0,
+        "request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"replacement"}}})),clock).unwrap();
+    assert_eq!(engine.interaction_write_error("choose-zero").unwrap().code,InteractionError::Changed.code());
+}
+
+#[test]
+fn codex_native_zero_keeps_question_and_approval_independent_and_checks_revision() {
+    use hangar_server::runtime::{codex::Engine,protocol::{ClockSample,EngineInput,OperationKind,RuntimeCommand,Effect}};
+    let clock = ClockSample {monotonic_s:1.0,epoch_s:1.0};
+    let mut engine = Engine::new(json!({"name":"s","thread_id":"sid","initialized":true,"ready":true}),1,clock);
+    let store = Arc::new(hangar_server::interactions::InteractionStore::default());
+    engine.set_interactions("k-s".into(),store.clone()).unwrap();
+    let approval = json!({"id":"approval","method":"item/commandExecution/requestApproval","params":{"threadId":"sid","command":"pwd"}});
+    engine.apply(EngineInput::Line(approval),clock).unwrap();
+    let question = json!({"id":0,"method":"item/tool/requestUserInput","params":{"threadId":"sid","questions":[
+        {"id":"q","header":"h","question":"Choose","options":[{"label":"first","description":""}]}]}});
+    engine.apply(EngineInput::Line(question.clone()),clock).unwrap();
+    let revision = engine.request_revision(&serde_json::from_value(json!(0)).unwrap()).unwrap();
+    let token = store.observe_revision(&binding(),&native_target(InteractionKind::Question,"sid",&json!(0)),Some(question.clone()),Some(revision)).unwrap().unwrap();
+    let command = |native| RuntimeCommand {operation_id:"answer-zero".into(),kind:OperationKind::AnswerQuestions,
+        payload:json!({"interaction_id":token,"request_id":native,"answers":[{"kind":"option","question_id":"q","indices":[0]}]})};
+    assert_eq!(engine.command(command(json!("0")),clock).unwrap_err().code,InteractionError::Changed.code());
+    let effects = engine.command(command(json!(0)),clock).unwrap();
+    assert!(effects.iter().any(|effect|matches!(effect,Effect::Write {frame,..} if frame["id"] == 0)));
+    assert!(engine.control_view()["pending"].as_array().unwrap().iter().any(|p|p["request_id"] == "approval"));
+    assert!(engine.interaction_write_error("answer-zero").is_none());
+    let mut replacement = question;
+    replacement["params"]["questions"][0]["question"] = json!("Replacement");
+    engine.apply(EngineInput::Line(replacement),clock).unwrap();
+    assert_eq!(engine.interaction_write_error("answer-zero").unwrap().code,InteractionError::Changed.code());
+}
+
+#[test]
+fn skip_question_requires_the_displayed_interaction_and_exact_native_target() {
+    use hangar_server::runtime::{codex::Engine,protocol::{ClockSample,EngineInput,OperationKind,RuntimeCommand,Effect}};
+    let clock = ClockSample {monotonic_s:1.0,epoch_s:1.0};
+    let mut engine = Engine::new(json!({"name":"s","thread_id":"sid","initialized":true,"ready":true}),1,clock);
+    let store = Arc::new(hangar_server::interactions::InteractionStore::default());
+    engine.set_interactions("k-s".into(),store.clone()).unwrap();
+    let request = json!({"id":0,"method":"mcpServer/elicitation/request","params":{"threadId":"sid","serverName":"db","mode":"form","message":"Name?",
+        "requestedSchema":{"type":"object","properties":{"name":{"type":"string"}}}}});
+    engine.apply(EngineInput::Line(request.clone()),clock).unwrap();
+    let target = native_target(InteractionKind::Question,"sid",&json!(0));
+    let revision = engine.request_revision(&serde_json::from_value(json!(0)).unwrap()).unwrap();
+    let old = store.observe_revision(&binding(),&target,Some(request.clone()),Some(revision.clone())).unwrap().unwrap();
+    let mut b = request.clone(); b["params"]["message"] = json!("Name B?");
+    let current = store.observe_revision(&binding(),&target,Some(b.clone()),Some(revision)).unwrap().unwrap();
+    for (interaction_id,request_id,code) in [(Value::Null,json!(0),"erro_interacao_sem_identidade"),
+        (json!(old),json!(0),"erro_interacao_desatualizada"),(json!(current),json!("0"),"erro_interacao_desatualizada")] {
+        let command = RuntimeCommand {operation_id:"skip".into(),kind:OperationKind::SkipQuestion,payload:json!({"request_id":request_id,"interaction_id":interaction_id})};
+        assert_eq!(engine.command(command,clock).unwrap_err().code,code);
+    }
+    // Volta ao retrato real de A para provar a seleção atual sem completar o ID pelo pedido.
+    let current = store.observe_revision(&binding(),&target,Some(request),Some(engine.request_revision(&serde_json::from_value(json!(0)).unwrap()).unwrap())).unwrap().unwrap();
+    let effects = engine.command(RuntimeCommand {operation_id:"skip-current".into(),kind:OperationKind::SkipQuestion,
+        payload:json!({"request_id":0,"interaction_id":current})},clock).unwrap();
+    assert!(effects.iter().any(|effect|matches!(effect,Effect::Write {frame,..} if frame["id"] == 0 && frame["result"]["action"] == "cancel")));
+    assert!(engine.interaction_write_error("skip-current").is_none());
 }

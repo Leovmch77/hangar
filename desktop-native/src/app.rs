@@ -178,7 +178,7 @@ enum Payload {
     // Mensagem entregue e o texto do campo que a originou (com anexo os dois diferem).
     Sent(SessionKey, String, String, Result<Delivery, Failure>),
     Interrupted(SessionKey, Result<(), Failure>),
-    Acted(SessionKey, Action, Result<serde_json::Value, Failure>),
+    Acted(SessionKey, Action, String, Result<serde_json::Value, Failure>),
     Files(SessionKey, Option<SessionOwner>, u64, Vec<Result<Picked, String>>),
     // `None` marca o início do envio daquele anexo.
     UploadStep(SessionKey, u64, Option<Result<Uploaded, Failure>>),
@@ -388,6 +388,16 @@ struct PluginFailure;
 // Formulário da pergunta atual; refeito quando a pergunta (identidade + conteúdo) muda.
 #[derive(Default)]
 struct AskForm { fingerprint: String, picks: Vec<Pick>, typing: Vec<bool>, inputs: Vec<Entity<InputState>>, _changes: Vec<Subscription>, tab: usize }
+
+impl AskForm {
+    fn finish_answer(&mut self, ask: &mut Option<Ask>, snapshot: &str) {
+        // Envio com identidade não prova resolução; só a publicação do servidor encerra o cartão.
+        if ask.as_ref().is_some_and(|ask| ask.fingerprint == snapshot && ask.payload.interaction_id.is_none()) {
+            *ask = None;
+            *self = Self::default();
+        }
+    }
+}
 
 #[derive(Clone, Copy)]
 enum Live { Thinking, Tool }
@@ -1500,8 +1510,8 @@ impl Hangar {
                 cx.notify();
                 return;
             }
-            Payload::Acted(key, action, result) => {
-                self.receive_acted(key, action, result, window, cx);
+            Payload::Acted(key, action, snapshot, result) => {
+                self.receive_acted(key, action, snapshot, result, window, cx);
                 self.sync_rows(cx);
                 cx.notify();
                 return;
@@ -2915,24 +2925,25 @@ impl Hangar {
             Action::Answer => match self.answer_body(cx) { Some(body) => Some(body), None => return },
             Action::Skip => match self.chat.ask.as_ref().and_then(|ask| ask.payload.request_id.clone()) {
                 Some(id) => Some(json!({"request_id": id})), None => return },
-            Action::Select(option) => Some(json!({"option": option})),
+            Action::Select(option) => match select_body(&snapshot, Some(*option)) { Some(body) => Some(body), None => return },
+            Action::Submit => match select_body(&snapshot, None) { Some(body) => Some(body), None => return },
             _ => None,
         };
         let tool = (action == Action::Answer).then(|| self.chat.ask.as_ref().and_then(|ask| ask.tool_use_id.clone())).flatten();
-        if !self.flight.begin(key.clone(), action.clone(), snapshot) { return; }
+        if !self.flight.begin(key.clone(), action.clone(), snapshot.clone()) { return; }
         if let Some(tool) = tool { self.answering.insert(key.clone(), tool); }
         self.action_feedback.remove(&key);
         let (connection, selection, tx) = (self.connection, self.selection, self.tx.clone());
         self.runtime.spawn(async move {
             let result = if action == Action::Cancel { api.interrupt(&session.name, false).await.map(|_| Value::Null) }
                 else { api.act(&session.name, &action.path(), body, matches!(action, Action::Discard(_)), action.seconds()).await };
-            let _ = tx.send(Envelope { connection, selection: Some(selection), payload: Payload::Acted(key, action, result) }).await;
+            let _ = tx.send(Envelope { connection, selection: Some(selection), payload: Payload::Acted(key, action, snapshot, result) }).await;
         });
         cx.notify();
     }
 
-    fn receive_acted(&mut self, key: SessionKey, action: Action, result: Result<Value, Failure>, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(snapshot) = self.flight.finish(&key, &action) else { return; };
+    fn receive_acted(&mut self, key: SessionKey, action: Action, snapshot: String, result: Result<Value, Failure>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(snapshot) = self.flight.finish(&key, &action, &snapshot) else { return; };
         let answering = if action == Action::Answer { self.answering.remove(&key) } else { None };
         let current = self.selected_key().as_ref() == Some(&key);
         let note = match result {
@@ -2950,10 +2961,7 @@ impl Hangar {
                 Action::Answer => {
                     // O `tool_result` chega depois; sem a marca a pergunta do transcript reabriria nesse meio-tempo.
                     if let Some(tool) = answering { self.answered_tools.insert((key.clone(), tool)); }
-                    if current && self.chat.ask.as_ref().is_some_and(|ask| ask.fingerprint == snapshot) {
-                        self.chat.ask = None;
-                        self.ask_form = AskForm::default();
-                    }
+                    if current { self.ask_form.finish_answer(&mut self.chat.ask, &snapshot); }
                     (tr(if value.get("fallback").and_then(Value::as_bool) == Some(true) { "ask_fallback" } else { "ask_sent" }), false)
                 }
                 Action::Skip => {
@@ -5549,7 +5557,15 @@ fn save_connection(address: &str, token: &str, servers: &[servers::ServerEntry])
 /// Fração da altura da janela que um painel de mod acima da faixa pode ocupar.
 const PLUGIN_PANE_MAX_SHARE: f32 = 0.45;
 
-fn select_snapshot(state: &SessionState) -> String { json!([state.question, state.options]).to_string() }
+fn select_snapshot(state: &SessionState) -> String { json!([state.question, state.options, state.interaction_id]).to_string() }
+
+fn select_body(snapshot: &str, option: Option<usize>) -> Option<Value> {
+    let (_, _, interaction_id): (Option<String>, Option<Vec<String>>, Option<String>) = serde_json::from_str(snapshot).ok()?;
+    let mut body = json!({});
+    if let Some(option) = option { body["option"] = json!(option); }
+    if let Some(id) = interaction_id { body["interaction_id"] = json!(id); }
+    Some(body)
+}
 
 fn display_body(event: &ChatEvent) -> String {
     match event.kind.as_str() {
@@ -6710,6 +6726,68 @@ mod tests {
                               worktree_path: Some("/r/hangar-x".into()), ..Default::default() };
         assert_eq!(super::worktree_label(&s).as_deref(), Some("hangar-x"));
         assert_eq!(super::worktree_label(&SessionInfo { name: "a".into(), ..Default::default() }), None);
+    }
+
+    #[test]
+    fn conversation_select_snapshot_and_envelopes_keep_the_displayed_id() {
+        use super::{select_body, select_snapshot, SessionState};
+        let a = SessionState { question: Some("Qual?".into()), options: Some(vec!["[ ] A".into()]),
+            interaction_id: Some("interaction-a".into()), ..Default::default() };
+        let mut b = a.clone();
+        b.interaction_id = Some("interaction-b".into());
+        let displayed = select_snapshot(&a);
+        assert_ne!(displayed, select_snapshot(&b));
+        assert_eq!(select_body(&displayed, Some(1)), Some(serde_json::json!({"option":1, "interaction_id":"interaction-a"})));
+        assert_eq!(select_body(&displayed, None), Some(serde_json::json!({"interaction_id":"interaction-a"})));
+        b.options = Some(vec!["[✔] A".into()]);
+        assert_eq!(select_body(&select_snapshot(&b), None).unwrap()["interaction_id"], "interaction-b");
+        b.interaction_id = None;
+        assert_eq!(select_body(&select_snapshot(&b), Some(1)), Some(serde_json::json!({"option":1})));
+        assert_eq!(select_body(&select_snapshot(&b), None), Some(serde_json::json!({})));
+        assert!(select_body("invalid", Some(1)).is_none());
+    }
+
+    #[test]
+    fn conversation_form_and_options_use_independent_interaction_ids() {
+        use super::{interaction, select_body, select_snapshot, Ask, Pick, SessionInfo, SessionState};
+        let raw = serde_json::json!({"name":"n", "question":"Qual?", "options":["A"], "interaction_id":"options-id"});
+        let session: SessionInfo = serde_json::from_value(raw.clone()).unwrap();
+        let state: SessionState = serde_json::from_value(raw).unwrap();
+        assert_eq!(session.interaction_id, state.interaction_id);
+        let raw = serde_json::json!({"request_id":9, "interaction_id":"form-id",
+            "questions":[{"question":"Qual?", "options":[{"label":"A"}]}]});
+        let ask = Ask::new(serde_json::from_value(raw.clone()).unwrap(), &raw);
+        let form_body = interaction::answer_body(&ask, &[Pick::Options(vec![0])]).unwrap();
+        assert_eq!(form_body["interaction_id"], "form-id");
+        assert_eq!(form_body["request_id"], 9);
+        assert_eq!(select_body(&select_snapshot(&state), Some(1)).unwrap()["interaction_id"], "options-id");
+        let legacy: SessionInfo = serde_json::from_value(serde_json::json!({"name":"n"})).unwrap();
+        assert!(legacy.interaction_id.is_none());
+    }
+
+    #[test]
+    fn conversation_late_answer_keeps_the_new_form_and_waits_for_resolution() {
+        use super::{Ask, AskForm, Pick};
+        let raw = serde_json::json!({"interaction_id":"interaction-a", "questions":[{"question":"Qual?"}]});
+        let a = Ask::new(serde_json::from_value(raw.clone()).unwrap(), &raw);
+        let mut raw_b = raw.clone();
+        raw_b["interaction_id"] = serde_json::json!("interaction-b");
+        let b = Ask::new(serde_json::from_value(raw_b.clone()).unwrap(), &raw_b);
+        let mut ask = Some(b.clone());
+        let mut form = AskForm { fingerprint: b.fingerprint.clone(), picks: vec![Pick::Text("B".into())], ..Default::default() };
+        form.finish_answer(&mut ask, &a.fingerprint);
+        assert_eq!(ask, Some(b.clone()));
+        assert_eq!(form.fingerprint, b.fingerprint);
+        assert_eq!(form.picks, vec![Pick::Text("B".into())]);
+        form.finish_answer(&mut ask, &b.fingerprint);
+        assert_eq!(ask, Some(b));
+        assert_eq!(form.picks, vec![Pick::Text("B".into())]);
+        let legacy = serde_json::json!({"questions":[{"question":"Qual?"}]});
+        let legacy = Ask::new(serde_json::from_value(legacy.clone()).unwrap(), &legacy);
+        ask = Some(legacy.clone());
+        form.finish_answer(&mut ask, &legacy.fingerprint);
+        assert!(ask.is_none());
+        assert!(form.picks.is_empty());
     }
 
     #[test]

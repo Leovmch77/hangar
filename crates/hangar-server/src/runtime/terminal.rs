@@ -1,7 +1,8 @@
 //! Executor terminal serial; diário, posse e confirmação são os mesmos da fila.
-use super::{actor::PolicyClient,protocol::{ClockSample,Disposition,RequestId,RuntimeCommand,RuntimeError,RuntimeEvent,RuntimeReply},queue::{Action,QueueActor,Status},receipt::{DispatchCursor,ReceiptIndex}};
+use super::{actor::PolicyClient,protocol::{ClockSample,Disposition,RuntimeCommand,RuntimeError,RuntimeEvent,RuntimeReply},queue::{Action,QueueActor,Status},receipt::{DispatchCursor,ReceiptIndex}};
 use crate::terminal_input::{self as input,TerminalBinding,TerminalDriver,TerminalIo,TerminalServices,InputFacts,InputLimits,PluginRequest,PluginReply,ServiceFuture,ServiceError,DeliveryResult,QuestionAnswer,AnswerKind};
 use crate::mods::click::{Pane,PaneFuture,PaneOp,PaneReply};
+use crate::interactions::{ExpectedInteraction,InteractionBinding,InteractionError,InteractionStore,runtime_error};
 use serde_json::{Value,json};
 use std::{collections::VecDeque,path::PathBuf,sync::{Arc,atomic::{AtomicBool,AtomicU64,Ordering}},time::{Duration,SystemTime,UNIX_EPOCH}};
 use tokio::sync::{Mutex,mpsc,oneshot,broadcast};
@@ -12,6 +13,7 @@ pub struct TerminalTarget {
     pub lease_path:PathBuf,pub state_path:PathBuf,pub projection_dir:PathBuf,pub transcript:PathBuf,pub created:f64,
     /// A chave do token da ponte que o processo recebeu no lançamento (`plugin_key` do vínculo).
     pub plugin_key:Option<String>,
+    pub metadata:crate::terminal_facts::TerminalMetadata,
 }
 /// A âncora da faixa dos mods (`mods::tree::anchor`, o começo do primeiro texto dela): o elo do `Mods` a
 /// escreve a cada `/ui` do plugin, e o executor a lê para reconhecer na tela a faixa inteira focada.
@@ -20,9 +22,9 @@ pub type ModsAnchor=Arc<std::sync::Mutex<Option<String>>>;
 /// com uma entrada esperando e o foco num painel ou na faixa de um mod há mais que isso, sem clique em curso,
 /// o executor devolve o teclado ao prompt e escreve. `clear_wait`: quanto a trava do `/clear` espera a
 /// conversa nova antes de conferir se ele foi aplicado.
-pub struct TerminalOptions { pub io:Arc<dyn TerminalIo>,pub limits:InputLimits,pub tick:Duration,pub stall_notice:Duration,pub anchor:ModsAnchor,pub focus_return:Duration,pub clear_wait:Duration }
+pub struct TerminalOptions { pub interactions:Option<Arc<InteractionStore>>,pub plugin:Option<Arc<crate::plugin::Store>>,pub mode_facts:Option<crate::terminal_facts::ModeReader>,pub terms:Option<Arc<crate::term::Terms>>,pub io:Arc<dyn TerminalIo>,pub limits:InputLimits,pub tick:Duration,pub stall_notice:Duration,pub anchor:ModsAnchor,pub focus_return:Duration,pub clear_wait:Duration }
 impl Default for TerminalOptions {
-    fn default()->Self {Self {io:Arc::new(input::ProcessIo::default()),limits:InputLimits::default(),tick:Duration::from_secs(1),stall_notice:Duration::from_secs(30),
+    fn default()->Self {Self {interactions:None,plugin:None,mode_facts:None,terms:None,io:Arc::new(input::ProcessIo::default()),limits:InputLimits::default(),tick:Duration::from_secs(1),stall_notice:Duration::from_secs(30),
         anchor:ModsAnchor::default(),focus_return:FOCUS_RETURN,clear_wait:CLEAR_APPLY_WAIT}}
 }
 /// Quanto uma linha espera, desde a primeira vez que viu o foco num mod, antes de o executor devolver o
@@ -110,36 +112,41 @@ impl Pane for TerminalHandle {
 }
 
 /// O clique de mod não lê os fatos do Python: confere só a identidade do pane.
-struct NoFacts;
+pub(crate) struct NoFacts;
 impl TerminalServices for NoFacts {
+    fn permission_guard<'a>(&'a self,_:&'a TerminalBinding)->ServiceFuture<'a,()> {Box::pin(async {Err(ServiceError("terminal_permission_guard_unavailable"))})}
     fn facts<'a>(&'a self,_:&'a TerminalBinding)->ServiceFuture<'a,InputFacts> {Box::pin(async {Err(ServiceError("mods_no_facts"))})}
     fn publish<'a>(&'a self,_:&'a TerminalBinding,_:PluginRequest)->ServiceFuture<'a,PluginReply> {Box::pin(async {Err(ServiceError("mods_no_publish"))})}
 }
 
 struct Services {
-    target:TerminalTarget,queue:Arc<QueueActor>,policy:PolicyClient,root:String,attempt:String,text:String,sequence:Arc<AtomicU64>,
+    target:TerminalTarget,queue:Arc<QueueActor>,local:Arc<crate::terminal_facts::LocalTerminalFacts>,terms:Option<Arc<crate::term::Terms>>,root:String,attempt:String,text:String,sequence:Arc<AtomicU64>,
 }
 impl Services {
     async fn action(&self,label:&str,action:Action)->Result<Value,RuntimeError> {
         let seq=self.sequence.fetch_add(1,Ordering::Relaxed);
         self.queue.exec(self.target.generation,&format!("terminal:{label}:{seq}"),sample(),action).await.map_err(|_|error("queue_io"))
     }
-    async fn call(&self,kind:&str,request_id:RequestId,payload:Value)->Result<Value,RuntimeError> {
-        let phase=format!("terminal-policy:{}:{}:{}",self.target.generation,self.attempt,self.sequence.fetch_add(1,Ordering::Relaxed));
-        self.action("policy-prepare",Action::Prepare {id:phase.clone(),payload:json!({"kind":kind,"request_id":request_id,"payload":payload}),entry_id:None}).await?;
-        self.action("policy-dispatch",Action::BeginDispatch {id:phase.clone(),wire_id:phase.clone(),staged:false}).await?;
-        let result=self.policy.run_for(&self.target.key,self.target.generation,kind,&request_id,payload,&phase).await;
-        self.action("policy-finish",Action::Finish {id:phase,status:if result.is_ok(){Status::Accepted}else{Status::Unknown},result:result.clone().unwrap_or_else(|e|json!({"error_code":e.code}))}).await?;
-        result
-    }
 }
 impl TerminalServices for Services {
+    fn permission_guard<'a>(&'a self,binding:&'a TerminalBinding)->ServiceFuture<'a,()> {Box::pin(async move {
+        let terms=self.terms.as_ref().ok_or(ServiceError("terminal_permission_guard_unavailable"))?;
+        if terms.is_active(&self.target.name) {return Err(ServiceError("terminal_panel_active"));}
+        self.local.check(&self.target,binding).await?;
+        let driver=TerminalDriver::new(binding.clone(),Arc::new(NoFacts),self.local.io_for_guard(),InputLimits::default());
+        driver.facts_screen().await.map_err(|error|ServiceError(error.code))?;
+        if terms.is_active(&self.target.name) {return Err(ServiceError("terminal_panel_active"));}
+        Ok(())
+    })}
     fn facts<'a>(&'a self,binding:&'a TerminalBinding)->ServiceFuture<'a,InputFacts> {Box::pin(async move {
-        // Leitura sem efeito: fora do diário, que regravaria o estado inteiro com fsync três vezes.
-        let phase=format!("terminal-facts:{}:{}:{}",self.target.generation,self.attempt,self.sequence.fetch_add(1,Ordering::Relaxed));
-        let value=self.policy.run_for(&self.target.key,self.target.generation,"terminal_facts",&RequestId::String(self.root.clone()),
-            json!({"binding":binding,"operation_id":self.root,"text":self.text}),&phase).await.map_err(|_|ServiceError("terminal_facts"))?;
-        serde_json::from_value(value).map_err(|_|ServiceError("terminal_facts_shape"))
+        let mut facts=self.local.read(&self.target,binding,&self.text).await.map_err(|failure| {
+            if crate::warn_limit::allow(Some(&self.target.key),"terminal_local_facts") {
+                tracing::warn!(key=%self.target.key,session=%self.target.name,code=failure.0,"fatos locais indisponíveis; a entrada espera sem escrever");
+            }
+            failure
+        })?;
+        if let Some(native)=&mut facts.native {native.message_id=Some(crate::terminal_facts::message_id(&self.target.key,&self.root));}
+        Ok(facts)
     })}
     fn writing<'a>(&'a self)->ServiceFuture<'a,()> {Box::pin(async move {
         self.action("writing",Action::MarkWriting {id:self.attempt.clone(),wire_id:format!("terminal:{}:{}",self.target.generation,self.attempt)}).await
@@ -149,13 +156,12 @@ impl TerminalServices for Services {
             })
     })}
     fn publish<'a>(&'a self,binding:&'a TerminalBinding,request:PluginRequest)->ServiceFuture<'a,PluginReply> {Box::pin(async move {
-        let value=self.call("terminal_publish",RequestId::String(self.root.clone()),json!({"binding":binding,"operation_id":self.root,"publication":request,"generation":self.target.generation})).await.map_err(|_|ServiceError("terminal_publish"))?;
-        serde_json::from_value(value).map_err(|_|ServiceError("terminal_publish_shape"))
+        self.local.publish(&self.target,binding,request).await
     })}
 }
 
 struct Executor {
-    target:TerminalTarget,queue:Arc<QueueActor>,policy:PolicyClient,options:TerminalOptions,
+    target:TerminalTarget,queue:Arc<QueueActor>,local:Arc<crate::terminal_facts::LocalTerminalFacts>,options:TerminalOptions,
     events:broadcast::Sender<RuntimeEvent>,revision:Arc<AtomicU64>,sequence:Arc<AtomicU64>,receipt:ReceiptIndex,deliverable:bool,last_error:Option<String>,
     /// Entradas com linha na fila cuja entrega ficou incerta nesta vida do ator: o transcript ainda
     /// pode prová-las. Incerteza sem linha (tecla, seleção) não tem prova e só sai na reabertura.
@@ -242,13 +248,14 @@ fn clear_on_disk(transcript:&std::path::Path,since:f64)->Result<bool,std::io::Er
 pub(crate) const MAX_MODS_HOLD:Duration=Duration::from_secs(10);
 pub struct TerminalActor;
 impl TerminalActor {
-    pub fn spawn(target:TerminalTarget,queue:QueueActor,policy:PolicyClient,options:TerminalOptions,events:broadcast::Sender<RuntimeEvent>,revision:Arc<AtomicU64>)->TerminalHandle {
+    pub fn spawn(target:TerminalTarget,queue:QueueActor,_policy:PolicyClient,options:TerminalOptions,events:broadcast::Sender<RuntimeEvent>,revision:Arc<AtomicU64>)->TerminalHandle {
         let previous=queue.initial_state().operations.keys().filter(|id|id.starts_with("call::terminal:") || id.starts_with("terminal-policy:") || id.starts_with("queue:"))
             .filter_map(|id|id.rsplit(':').next()?.parse::<u64>().ok()).max().unwrap_or(0);
         let sequence=Arc::new(AtomicU64::new(queue.initial_state().next_seq.max(previous.max(queue.initial_state().operations.len() as u64).saturating_add(1))));
         let receipt=ReceiptIndex::new("claude",&target.binding.conversation);
         let (sender,receiver)=mpsc::channel(64); let closed=Arc::new(AtomicBool::new(false)); let anchor=options.anchor.clone();
-        let executor=Executor {target,queue:Arc::new(queue),policy,options,events,revision,sequence,receipt,deliverable:false,last_error:None,uncertain:vec![],unprovable:false,loan:None,stall:None,hold:None,hold_checked:false,focus_refused:false,parked:VecDeque::new(),away:None,clear_watch:None,clear_notice:None,footer_misses:None};
+        let local=Arc::new(crate::terminal_facts::LocalTerminalFacts::new(options.io.clone(),options.plugin.clone(),options.mode_facts.clone()));
+        let executor=Executor {target,queue:Arc::new(queue),local,options,events,revision,sequence,receipt,deliverable:false,last_error:None,uncertain:vec![],unprovable:false,loan:None,stall:None,hold:None,hold_checked:false,focus_refused:false,parked:VecDeque::new(),away:None,clear_watch:None,clear_notice:None,footer_misses:None};
         let task=tokio::spawn(executor.run(receiver,closed.clone()));
         TerminalHandle {sender,closed,task:Arc::new(Mutex::new(Some(task))),stopped:Arc::new(Mutex::new(None)),anchor}
     }
@@ -295,7 +302,7 @@ impl Executor {
         state.runtime_state["clear_barrier"]["generation"]==self.target.generation
             && state.runtime_state["clear_barrier"]["conversation"]==self.target.binding.conversation
     }
-    fn services(&self,root:&str,attempt:&str,text:&str)->Arc<Services> {Arc::new(Services {target:self.target.clone(),queue:self.queue.clone(),policy:self.policy.clone(),root:root.into(),attempt:attempt.into(),text:text.into(),sequence:self.sequence.clone()})}
+    fn services(&self,root:&str,attempt:&str,text:&str)->Arc<Services> {Arc::new(Services {target:self.target.clone(),queue:self.queue.clone(),local:self.local.clone(),terms:self.options.terms.clone(),root:root.into(),attempt:attempt.into(),text:text.into(),sequence:self.sequence.clone()})}
     async fn action(&self,action:Action)->Result<Value,RuntimeError> {self.services("maintenance","maintenance","").action("queue",action).await}
     async fn snapshot(&self)->Result<Value,RuntimeError> {
         let state=self.queue.snapshot().await.map_err(|_|error("queue_io"))?;
@@ -327,6 +334,14 @@ impl Executor {
     async fn run(mut self,mut receiver:mpsc::Receiver<Message>,closed:Arc<AtomicBool>)->Result<(),RuntimeError> {
         self.action(Action::Recover).await?; self.action(Action::EnsureProjection).await?;
         let recovered=self.queue.snapshot().await.map_err(|_|error("queue_io"))?;
+        let binding=json!({"key":self.target.key,"conversation":self.target.binding.conversation,"generation":self.target.generation});
+        for operation in recovered.operations.values() {
+            if operation.result["payload"]["interaction_binding"]==binding {
+                if let Some(revision)=operation.result["payload"]["consumed_source_revision"].as_str() {
+                    crate::state::ask::consume_revision(&self.target.transcript,revision).map_err(|_|error("askq_consumption_unavailable"))?;
+                }
+            }
+        }
         // O `/clear` que não virou conversa nova (recusado pela saída da trava) ou que parou antes do
         // Enter não ergue a trava de novo.
         if let Some(clear)=recovered.operations.values().find(|op|op.payload["kind"]=="input" && op.payload["payload"]["text"].as_str().is_some_and(is_clear)
@@ -351,12 +366,19 @@ impl Executor {
                 let message=tokio::select! {biased;
                     message=receiver.recv()=>message,
                     _=tokio::time::sleep_until(release_at.unwrap_or_else(tokio::time::Instant::now)),if release_at.is_some()=>continue,
-                    _=timer.tick(),if !closed.load(Ordering::Acquire) && (self.last_error.is_none() || self.reconciling() || self.clear_watch.is_some() || self.clear_notice.is_some())=>{
+                    _=timer.tick(),if !closed.load(Ordering::Acquire) && (self.last_error.is_none() || self.last_error.as_deref()==Some("terminal_facts") || self.reconciling() || self.clear_watch.is_some() || self.clear_notice.is_some())=>{
                         if self.clear_notice.is_some_and(|until|tokio::time::Instant::now()>=until) {self.clear_notice=None; self.publish().await?;}
                         // Clique de mod em curso, ou o que ele guardou ainda por sair: a fila não entrega nem
                         // reconcilia no pane antes disso (C6).
                         if self.held() || !self.parked.is_empty() {continue;}
                         // O `/clear` incerto depois do Enter deixa o erro de entrega incerta: a trava ainda vence.
+                        if self.last_error.as_deref()==Some("terminal_facts") {
+                            match self.drain_once(None).await {
+                                Ok(value) if value["keyboard_loan"]!=true && value["preserve_binding"]!=true=>self.clear_maintenance_error("terminal_facts").await?,
+                                Ok(_)=>{},Err(failure)=>self.enter_error(failure).await?,
+                            }
+                            continue;
+                        }
                         if self.last_error.is_some() {self.expire_clear().await; if self.reconciling() {self.reconcile_uncertain().await?;} continue;}
                         let result=async {self.confirm_rows().await?;self.drain_once(None).await?;Ok::<_,RuntimeError>(())}.await;
                         if let Err(failure)=result {self.enter_error(failure).await?;}
@@ -519,7 +541,17 @@ impl Executor {
     async fn plugin_return(&self,root:&str)->bool {
         let id=format!("{}:{}:focus:{}",self.target.key,self.target.generation,self.sequence.fetch_add(1,Ordering::Relaxed));
         let request=PluginRequest {id:id.clone(),text:String::new(),mode:input::PluginMode::Focus};
-        match self.services(root,&id,"").publish(&self.target.binding,request).await {
+        let services=self.services(root,&id,"");
+        let result=async {
+            services.action("focus-prepare",Action::Prepare {id:id.clone(),payload:json!({"kind":"focus"}),entry_id:None}).await?;
+            services.action("focus-dispatch",Action::BeginDispatch {id:id.clone(),wire_id:format!("terminal:{}:{id}",self.target.generation),staged:true}).await?;
+            services.writing().await.map_err(|failure|error(failure.0))?;
+            let reply=services.publish(&self.target.binding,request).await;
+            let status=match &reply {Ok(PluginReply::Filled|PluginReply::Accepted)=>Status::Accepted,Ok(PluginReply::Unavailable|PluginReply::NotWritten)=>Status::Deferred,_=>Status::Unknown};
+            services.action("focus-finish",Action::Finish {id:id.clone(),status,result:reply.as_ref().map(|reply|json!(reply)).unwrap_or_else(|failure|json!({"error_code":failure.0}))}).await?;
+            reply.map_err(|failure|error(failure.0))
+        }.await;
+        match result {
             Ok(PluginReply::Filled)=>true,
             reply=>{
                 tracing::debug!(key=%self.target.key,session=%self.target.name,reply=?reply,"o plugin não devolveu o foco; segue o ctrl+x tab");
@@ -624,6 +656,31 @@ impl Executor {
             PaneOp::ReturnFocus=>PaneReply::Done,
         })
     }
+    fn expected(&self,payload:&Value)->Result<ExpectedInteraction,RuntimeError> {
+        let supplied=payload["interaction_id"].as_str().filter(|id|!id.is_empty()).ok_or_else(||runtime_error(InteractionError::Missing))?;
+        let store=self.options.interactions.as_ref().ok_or_else(||runtime_error(InteractionError::Unavailable))?;
+        store.expected(&InteractionBinding {key:self.target.key.clone(),conversation:self.target.binding.conversation.clone(),generation:self.target.generation},Some(supplied)).map_err(runtime_error)
+    }
+
+    async fn plugin_control(&self,kind:&str,payload:&Value,expected:&ExpectedInteraction,publication:&str,services:&Services)->DeliveryResult {
+        let result=|disposition,code:&str|DeliveryResult {disposition,stage:input::DeliveryStage::Answer,cleanup:input::Cleanup::NotNeeded,native:false,message_id:None,code:code.into(),draft:None};
+        let question=match self.local.plugin_question(&self.target,expected).await {Ok(question)=>question,Err(error)=>return result(input::Disposition::Rejected,error.0)};
+        let body=if kind=="select" && question.id.starts_with("perm:") {
+            match payload["option"].as_u64() {Some(option @ (1|2))=>json!({"permitir":option==1}),_=>return result(input::Disposition::Rejected,"terminal_permission_option")}
+        } else if matches!(kind,"answer_questions"|"answer_chat") && expected.target.kind==crate::interactions::InteractionKind::Question {
+            match input::plugin_answer_body(&question.questions,&payload["answers"]) {Ok(body)=>body,Err(error)=>return result(input::Disposition::Rejected,error.0)}
+        } else {return result(input::Disposition::Rejected,InteractionError::Changed.code());};
+        let Some(store)=&self.options.plugin else {return result(input::Disposition::Rejected,InteractionError::Unavailable.code());};
+        if services.writing().await.is_err() {return result(input::Disposition::Deferred,"write_journal");}
+        let receipt=crate::plugin::Receipt {publication_id:publication.into(),generation:self.target.generation,session_id:self.target.binding.conversation.clone()};
+        match store.answer(&expected.binding,&question.id,&expected.interaction_id,body,Some(receipt)).await {
+            Ok(PluginReply::Accepted)=>result(input::Disposition::Accepted,"plugin_answered"),
+            Ok(PluginReply::NotWritten|PluginReply::Unavailable)=>result(input::Disposition::Deferred,"plugin_not_written"),
+            Ok(_)=>result(input::Disposition::Unknown,"plugin_control_uncertain"),
+            Err(error)=>result(input::Disposition::Rejected,error.0),
+        }
+    }
+
     async fn execute(&mut self,id:&str,kind:&str,payload:Value,entry:Option<String>)->Result<RuntimeReply,RuntimeError> {
         if id.is_empty() || id.starts_with("call::") || id.starts_with("terminal-") {return Err(error("operation_id"));}
         validate(kind,&payload)?;
@@ -641,6 +698,25 @@ impl Executor {
                 return Ok(reply(id,Disposition::Deferred,json!({"code":"prepared_before_dispatch","queued":old.entry_id.is_some(),"cleanup":"not_needed"})));
             }
             return Ok(reply(id,Disposition::Unknown,json!({"code":"recovered_operation"})));
+        }
+        let expected=if matches!(kind,"select"|"submit_selected"|"answer_questions"|"answer_chat") {Some(self.expected(&payload)?)}else{None};
+        if let Some(expected)=&expected {
+            let question=matches!(kind,"answer_questions"|"answer_chat");
+            if (question && expected.target.kind!=crate::interactions::InteractionKind::Question)
+                || (!question && expected.target.kind==crate::interactions::InteractionKind::Question) {
+                return Err(runtime_error(InteractionError::Changed));
+            }
+            if let Some(request_id)=expected.target.request_key.strip_prefix("plugin:").filter(|_|expected.semantic["source"]!="terminal") {
+                if kind=="submit_selected" {return Err(runtime_error(InteractionError::Unavailable));}
+                if payload.get("request_id").filter(|value|!value.is_null()).is_some_and(|value|value.as_str()!=Some(request_id)) {return Err(runtime_error(InteractionError::Changed));}
+                self.local.plugin_question(&self.target,expected).await.map_err(|error|RuntimeError::new(error.0,"pergunta do plugin não conferida"))?;
+            } else {
+                if expected.semantic["source"]!="terminal" {return Err(runtime_error(InteractionError::Unavailable));}
+                if let Some(request_id)=payload.get("request_id").filter(|value|!value.is_null()) {
+                    let target=crate::interactions::native_target(expected.target.kind.clone(),&expected.binding.conversation,request_id);
+                    if target!=expected.target {return Err(runtime_error(InteractionError::Changed));}
+                }
+            }
         }
         if self.cleared(&state) && !self.expire_clear().await {return Err(error("runtime_clear_barrier"));}
         let text=payload["text"].as_str().unwrap_or("");
@@ -674,7 +750,8 @@ impl Executor {
         // Antes da escrita: o transcript novo do `/clear` nasce logo depois do Enter.
         let dispatched_at=sample().epoch_s;
         let services=self.services(root,id,text);
-        let mut driver=TerminalDriver::new(self.target.binding.clone(),services.clone(),self.options.io.clone(),self.options.limits.clone());
+        let mut driver=TerminalDriver::new(self.target.binding.clone(),services.clone(),self.options.io.clone(),self.options.limits.clone()).with_interaction_source(self.target.transcript.clone());
+        if let Some(store)=&self.options.interactions {driver=driver.with_interactions(store.clone());}
         if self.footer_misses.as_ref().is_some_and(|(row,misses)|row==root && *misses>=FOCUS_RETURN_TRIES) {driver=driver.footer_kept();}
         let facts=if prompt {Some(services.facts(&self.target.binding).await)}else{None};
         let current=facts.as_ref().is_none_or(|result|result.as_ref().is_ok_and(|facts|facts.binding==self.target.binding));
@@ -689,18 +766,12 @@ impl Executor {
                 // A entrada só escreve depois do `writing` do escritor; antes disso, cair não a deixa incerta.
                 self.action(Action::BeginDispatch {id:id.into(),wire_id:format!("terminal:{}:{id}",self.target.generation),staged:kind=="input"}).await?;
                 let publication=format!("{}:{}:{id}",self.target.key,self.target.generation);
-                let held=payload["request_id"].as_str().filter(|s|s.starts_with("perm:")||s.starts_with("ask:"));
-                let plugin=if matches!(kind,"select"|"answer_questions") {
-                    if let Some(request)=held {
-                        Some(services.call("terminal_plugin_control",RequestId::String(request.into()),json!({"binding":self.target.binding,"operation_id":root,"control":kind,"payload":payload,"publication_id":publication,"generation":self.target.generation})).await)
-                    }else{None}
-                }else{None};
-                match plugin {
-                    Some(Ok(value)) if value["disposition"]!="unavailable"=> {
-                        let disposition=match value["disposition"].as_str(){Some("accepted")=>Disposition::Accepted,Some("rejected")=>Disposition::Rejected,_=>Disposition::Unknown}; reply(id,disposition,value)
-                    },
-                    Some(Err(_))=>reply(id,Disposition::Unknown,json!({"code":"plugin_control_uncertain"})),
-                    _=>delivery(id,match kind {
+                let interrupted=if kind=="interrupt" {match &self.options.plugin {
+                    Some(store)=>store.pending_all(&crate::terminal_facts::LocalTerminalFacts::binding(&self.target),std::time::Instant::now()).map_err(|failure|error(failure.0))?,None=>vec![],
+                }} else {vec![]};
+                let mut delivered=if let Some(expected)=expected.as_ref().filter(|expected|expected.target.request_key.starts_with("plugin:") && expected.semantic["source"]!="terminal") {
+                    self.plugin_control(kind,&payload,expected,&publication,&services).await
+                } else {match kind {
                         // Foco fora do prompt: adia sem escrever, como o `overlay`; a linha volta à fila e
                         // o próximo tique tenta de novo.
                         // Só quando a entrega vai apertar tecla: o modo `User` e a nativa não passam pelo teclado,
@@ -714,14 +785,39 @@ impl Executor {
                         "key"|"navigation_key"=>driver.key(payload["key"].as_str().unwrap(),false).await,
                         "interactive_key"=>driver.key(payload["key"].as_str().unwrap(),true).await,
                         "terminal_input"=>driver.text(text).await,
-                        "select"=>driver.select(payload["option"].as_u64().unwrap() as usize,payload["require_cursor"].as_bool().unwrap_or(true)).await,
-                        "answer_questions"=>driver.answer(&serde_json::from_value::<Vec<QuestionAnswer>>(payload["answers"].clone()).unwrap()).await,
-                        "submit_selected"=>driver.submit_selected().await,
+                        "select"=>driver.guarded_select(expected.as_ref().unwrap(),payload["option"].as_u64().unwrap() as usize,true).await,
+                        "answer_questions"=>driver.guarded_answer(expected.as_ref().unwrap(),&serde_json::from_value::<Vec<QuestionAnswer>>(payload["answers"].clone()).unwrap()).await,
+                        "answer_chat"=>driver.guarded_answer_chat(expected.as_ref().unwrap(),&serde_json::from_value::<Vec<QuestionAnswer>>(payload["answers"].clone()).unwrap(),&publication).await,
+                        "submit_selected"=>driver.guarded_submit_selected(expected.as_ref().unwrap()).await,
                         "interrupt"=>driver.interrupt(payload["clear"].as_bool().unwrap_or(false)).await,
                         _=>unreachable!(),
-                    })
+                    }};
+                if delivered.disposition==input::Disposition::Accepted && !interrupted.is_empty() && let Some(store)=&self.options.plugin {
+                    let binding=crate::terminal_facts::LocalTerminalFacts::binding(&self.target);
+                    let notice=(|| {
+                        let current=store.pending_all(&binding,std::time::Instant::now())?;
+                        for question in &interrupted {
+                            if current.iter().any(|pending|pending.id==question.id && pending.interaction_id==question.interaction_id) {store.interrupt(&binding,&question.id)?;}
+                        }
+                        Ok::<_,ServiceError>(())
+                    })();
+                    if let Err(failure)=notice {delivered.disposition=input::Disposition::Unknown;delivered.code=failure.0.into();}
                 }
+                delivery(id,delivered)
             };
+        if let Some(expected)=&expected {
+            result.payload["interaction_id"]=json!(expected.interaction_id);
+            result.payload["interaction_binding"]=json!({"key":expected.binding.key,"conversation":expected.binding.conversation,"generation":expected.binding.generation});
+            if result.disposition==Disposition::Accepted && matches!(kind,"answer_questions"|"answer_chat"|"submit_selected") {
+                if let Some(revision)=&expected.source_revision {
+                    result.payload["consumed_source_revision"]=json!(revision);
+                    if crate::state::ask::consume_revision(&self.target.transcript,revision).is_err() {
+                        result.disposition=Disposition::Unknown;
+                        result.payload["code"]=json!("askq_consumption_unconfirmed");
+                    }
+                }
+            }
+        }
         // Só o desfecho: o texto do rascunho nunca sai do terminal; antes de
         // qualquer `?`, para a falha do diário não calar o aviso.
         if let Some(draft)=result.payload["draft"].as_str().filter(|draft|*draft!="returned") {
@@ -964,7 +1060,7 @@ fn is_clear(text:&str)->bool {text.split_whitespace().next()==Some("/clear")}
 fn validate(kind:&str,payload:&Value)->Result<(),RuntimeError> {
     let fields:&[&str]=match kind {
         "input"=>&["text","pre_transcript"],"steer"=>&[],"key"|"navigation_key"|"interactive_key"=>&["key"],"terminal_input"=>&["text"],
-        "select"=>&["option","require_cursor","request_id"],"answer_questions"=>&["answers","request_id"],"interrupt"=>&["clear"],"submit_selected"=>&[],"steer_queue"=>&["entry_id"],_=>return Err(error("terminal_control")),
+        "select"=>&["option","require_cursor","request_id","interaction_id"],"answer_questions"|"answer_chat"=>&["answers","request_id","interaction_id"],"interrupt"=>&["clear"],"submit_selected"=>&["interaction_id"],"steer_queue"=>&["entry_id"],_=>return Err(error("terminal_control")),
     };
     if !payload.as_object().is_some_and(|p|p.keys().all(|k|fields.contains(&k.as_str()))){return Err(error("terminal_payload"));}
     let valid=match kind {
@@ -972,12 +1068,12 @@ fn validate(kind:&str,payload:&Value)->Result<(),RuntimeError> {
         "terminal_input"=>payload["text"].as_str().is_some_and(safe_characters),
         "key"|"navigation_key"|"interactive_key"=>payload["key"].is_string(),
         "select"=>payload["option"].as_u64().is_some_and(|v|v>0 && v<=100) && payload.get("require_cursor").is_none_or(Value::is_boolean) && payload.get("request_id").is_none_or(Value::is_string),
-        "answer_questions"=>serde_json::from_value::<Vec<QuestionAnswer>>(payload["answers"].clone()).is_ok_and(|answers|!answers.is_empty() && answers.iter().all(|a|match a.kind {
+        "answer_questions"|"answer_chat"=>serde_json::from_value::<Vec<QuestionAnswer>>(payload["answers"].clone()).is_ok_and(|answers|!answers.is_empty() && answers.iter().all(|a|match a.kind {
             AnswerKind::Option=>!a.indices.is_empty() && a.indices.iter().all(|i|*i<100) && (a.multi||a.indices.len()==1) && !a.labels.is_empty(),
             AnswerKind::Text=>a.type_index.is_some_and(|i|i<100) && a.value.as_ref().is_some_and(|v|valid_text(v)&&!v.contains('\n')),
             AnswerKind::Chat=>a.chat_index.is_some_and(|i|i<100),
         })) && payload.get("request_id").is_none_or(Value::is_string),
         "interrupt"=>payload.get("clear").is_none_or(Value::is_boolean),"steer_queue"=>payload.get("entry_id").is_none_or(Value::is_string),_=>true,
     };
-    if !valid{return Err(error("terminal_payload"));}Ok(())
+    if !valid || payload.get("interaction_id").is_some_and(|id|!id.is_null() && !id.is_string()) {return Err(error("terminal_payload"));}Ok(())
 }

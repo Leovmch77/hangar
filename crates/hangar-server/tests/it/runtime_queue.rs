@@ -485,3 +485,34 @@ fn write_failure_heals_on_next_operation_once_disk_is_writable() {
     store.exec(1, "after", clock(), append()).expect("disco destravado: a fila volta sem ação de reparo");
     assert_eq!(store.state().rows.len(), 1, "a entrada que falhou não ficou");
 }
+
+#[test]
+fn reserved_async_answer_is_one_atomic_entry_claimed_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = Store::open(&dir.path().join("state"),&dir.path().join("projection"),State::new("key",1,"session",vec![])).unwrap();
+    store.exec(1,"ordinary",clock(),Action::Append { text:"comum".into(),delivered:false,ts:None,pre_transcript:false,entry_id:Some("ordinary".into()) }).unwrap();
+    let entry = "async-answer:1:5";
+    let payload = json!({"operation_id":entry,"kind":"dispatch_async_answer","payload":{"entry_id":entry,"operation_id":entry,
+        "request_id":"async:thread-1:q1:0","interaction_id":"i","text":"> P\n\nA","thread_id":"thread-1","generation":1}});
+    let reserve = |store:&mut Store,call:&str,payload:serde_json::Value| store.exec(1,call,clock(),
+        Action::ReserveAsyncAnswer { entry_id:entry.into(),text:"> P\n\nA".into(),payload });
+    let first = reserve(&mut store,&format!("reserve:{entry}"),payload.clone()).unwrap();
+    assert_eq!(first["entry_id"],entry);
+    assert_eq!(first["status"],"prepared");
+    let row = store.state().rows.iter().find(|row|row["id"] == entry).unwrap().clone();
+    assert_eq!((row["text"].as_str(),row["delivered"].as_bool()),(Some("> P\n\nA"),Some(false)));
+    // Repetir (a mesma chamada ou outra com a mesma intenção) não abre outra entrada; intenção diferente é recusada.
+    reserve(&mut store,&format!("reserve:{entry}"),payload.clone()).unwrap();
+    reserve(&mut store,"again",payload.clone()).unwrap();
+    assert_eq!(store.state().rows.iter().filter(|row|row["id"] == entry).count(),1);
+    assert!(reserve(&mut store,"changed",json!({"kind":"other"})).is_err());
+    // A reivindicação dirigida tira só a reservada, mesmo atrás da comum.
+    let claimed = store.exec(1,"claim",clock(),Action::Claim { min_ts:0.0,limit:Some(1),entry_id:Some(entry.into()) }).unwrap();
+    assert_eq!(claimed.as_array().unwrap().len(),1);
+    assert_eq!(claimed[0]["id"],entry);
+    assert_eq!(store.state().rows.iter().find(|row|row["id"] == "ordinary").unwrap()["delivered"],false);
+    // O ator prepara a mesma operação com a entrada dela: nada muda.
+    let prepared = store.exec(1,"prepare",clock(),Action::Prepare { id:entry.into(),payload:payload.clone(),entry_id:Some(entry.into()) }).unwrap();
+    assert_eq!(prepared["status"],"prepared");
+    assert!(store.exec(1,"prepare-other",clock(),Action::Prepare { id:entry.into(),payload,entry_id:None }).is_err());
+}

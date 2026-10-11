@@ -727,18 +727,21 @@ export async function sendInputForServer(s: Server, name: string, text: string):
 // Responde uma opção do picker (awaiting_input) direto do card. Mesma convenção de índice do
 // selectOption por-servidor-ativo (api.ts): option é 1-BASED (1 = primeira opção) — o backend
 // valida ge=1 e traduz pra (option-1)×Down + Enter no tmux.
-export async function selectOptionForServer(s: Server, name: string, option: number): Promise<void> {
+export async function selectOptionForServer(s: Server, name: string, option: number, interactionId: string | null | undefined): Promise<void> {
   const res = await apiFetchRes(`/api/sessions/${encodeURIComponent(name)}/select`, {
     method: 'POST',
-    body: JSON.stringify({ option }),
+    body: JSON.stringify({ option, ...(interactionId == null ? {} : { interaction_id: interactionId }) }),
   }, s);
   // Mesmo tratamento do sendInputForServer: o erro do picker tambem e renderizado no card.
   if (!res.ok) throw new Error(`${res.status}: ${await errorDetail(res)}`);
 }
 
 /** submitSelected no servidor da sessão, com o erro legível como o selectOptionForServer. */
-export async function submitSelectedForServer(s: Server, name: string): Promise<void> {
-  const res = await apiFetchRes(`/api/sessions/${encodeURIComponent(name)}/select/submit`, { method: 'POST' }, s);
+export async function submitSelectedForServer(s: Server, name: string, interactionId: string | null | undefined): Promise<void> {
+  const res = await apiFetchRes(`/api/sessions/${encodeURIComponent(name)}/select/submit`, {
+    method: 'POST',
+    body: JSON.stringify(interactionId == null ? {} : { interaction_id: interactionId }),
+  }, s);
   if (!res.ok) throw new Error(`${res.status}: ${await errorDetail(res)}`);
 }
 
@@ -2418,18 +2421,19 @@ export async function relimparDitado(
   });
 }
 
-export async function selectOption(name: string, option: number, server?: Server | null): Promise<void> {
+export async function selectOption(name: string, option: number, interactionId: string | null | undefined, server?: Server | null): Promise<void> {
   await sessionFetch<{ ok: boolean }>(server, `/api/sessions/${encodeURIComponent(name)}/select`, {
     method: 'POST',
-    body: JSON.stringify({ option }),
+    body: JSON.stringify({ option, ...(interactionId == null ? {} : { interaction_id: interactionId }) }),
   });
 }
 
 /** Múltipla escolha: envia o que já está marcado. Marcar (selectOption) e enviar são ações
  *  diferentes ali — ver terminal_input.submeter_multipla. */
-export async function submitSelected(name: string, server?: Server | null): Promise<void> {
+export async function submitSelected(name: string, interactionId: string | null | undefined, server?: Server | null): Promise<void> {
   await sessionFetch<{ ok: boolean }>(server, `/api/sessions/${encodeURIComponent(name)}/select/submit`, {
     method: 'POST',
+    body: JSON.stringify(interactionId == null ? {} : { interaction_id: interactionId }),
   });
 }
 
@@ -2661,10 +2665,10 @@ export function getSessionPlanPreview(name: string, content = true, server?: Ser
   return sessionFetch(server, `/api/sessions/${encodeURIComponent(name)}/plan-preview?content=${content}`);
 }
 
-export async function answerQuestions(name: string, answers: AnswerItem[], requestId?: string | number, server?: Server): Promise<{ ok: boolean; fallback?: boolean }> {
+export async function answerQuestions(name: string, answers: AnswerItem[], requestId: string | number | undefined, interactionId: string | null | undefined, server?: Server): Promise<{ ok: boolean; fallback?: boolean }> {
   const path = `/api/sessions/${encodeURIComponent(name)}/answer`;
   const init = {
-    method: 'POST', body: JSON.stringify({ answers, ...(requestId !== undefined ? { request_id: requestId } : {}) }),
+    method: 'POST', body: JSON.stringify({ answers, ...(requestId !== undefined ? { request_id: requestId } : {}), ...(interactionId == null ? {} : { interaction_id: interactionId }) }),
   };
   if (!server) return apiFetch(path, init);
   const res = await apiFetchRes(path, init, server);
@@ -2672,10 +2676,10 @@ export async function answerQuestions(name: string, answers: AnswerItem[], reque
   return res.json() as Promise<{ ok: boolean; fallback?: boolean }>;
 }
 
-export async function skipQuestion(name: string, requestId: string, server?: Server): Promise<{ ok: boolean }> {
+export async function skipQuestion(name: string, requestId: string, interactionId: string | null | undefined, server?: Server): Promise<{ ok: boolean }> {
   const path = `/api/sessions/${encodeURIComponent(name)}/question/skip`;
   const init = {
-    method: 'POST', body: JSON.stringify({ request_id: requestId }),
+    method: 'POST', body: JSON.stringify({ request_id: requestId, ...(interactionId == null ? {} : { interaction_id: interactionId }) }),
   };
   if (!server) return apiFetch(path, init);
   const res = await apiFetchRes(path, init, server);
