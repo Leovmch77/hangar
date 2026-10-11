@@ -84,7 +84,7 @@ fn group_active(group:i32)->io::Result<bool> {
     for entry in std::fs::read_dir("/proc")? {
         let entry=entry?;if entry.file_name().to_string_lossy().parse::<u32>().is_err(){continue;}
         let value=match std::fs::read(entry.path().join("stat")) {
-            Ok(value)=>value,Err(error) if error.kind()==io::ErrorKind::NotFound=>continue,Err(error)=>return Err(error),
+            Ok(value)=>value,Err(error) if crate::list::procs::vanished(&error)=>continue,Err(error)=>return Err(error),
         };
         let end=value.iter().rposition(|byte|*byte==b')').ok_or_else(||io::Error::other("identidade do auxiliar ilegível"))?;
         let tail=std::str::from_utf8(&value[end+1..]).map_err(|_|io::Error::other("grupo auxiliar ilegível"))?;
