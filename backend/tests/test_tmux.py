@@ -579,7 +579,7 @@ def test_scope_lost_after_startup_creates_without_it(monkeypatch):
 
     monkeypatch.setattr(tmux, "RUN", run)
     assert tmux.new_session("s", "/tmp", "claude --session-id x") is True
-    assert calls[-1][:2] == ["tmux", "new-session"]
+    assert calls[0][0] == "systemd-run" and calls[-1][:2] == ["tmux", "new-session"]
     assert tmux._scope_usavel is False
 
 
@@ -598,6 +598,24 @@ def test_scope_still_working_keeps_the_tmux_refusal(monkeypatch):
     monkeypatch.setattr(tmux, "RUN", run)
     assert tmux.new_session("s", "/tmp", "claude --session-id x") is False
     assert not any(c[:2] == ["tmux", "new-session"] for c in calls)
+    assert sum(c[-1] == "true" for c in calls) == 1 and tmux._scope_usavel is True
+
+
+@pytest.mark.skipif(os.name != "posix", reason="systemd-run so existe no POSIX; no Windows _scope_prefix devolve [] sempre")
+def test_scope_timeout_is_not_retried(monkeypatch):
+    # Sem resposta, o comando pode ter rodado dentro do escopo: repetir criaria a sessão duas vezes.
+    monkeypatch.setenv("XDG_RUNTIME_DIR", "/run/user/1000")
+    monkeypatch.setattr(tmux.shutil, "which", lambda _: "/usr/bin/systemd-run")
+    monkeypatch.setattr(tmux, "_scope_usavel", True)
+    calls = []
+
+    def run(args, **k):
+        calls.append(args)
+        return subprocess.CompletedProcess(args, tmux.RC_INDISPONIVEL, "", "")
+
+    monkeypatch.setattr(tmux, "RUN", run)
+    assert tmux.new_session("s", "/tmp", "claude --session-id x") is False
+    assert len(calls) == 1 and tmux._scope_usavel is True
 
 
 def test_new_session_passes_wayland_display_from_env(monkeypatch):
