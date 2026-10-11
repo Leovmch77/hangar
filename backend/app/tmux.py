@@ -80,6 +80,12 @@ def _scope_probe() -> bool:
     return _scope_usavel
 
 
+def _scope_reprobe() -> bool:
+    global _scope_usavel
+    _scope_usavel = None
+    return _scope_probe()
+
+
 def _scope_prefix() -> list[str]:
     # Spawn the tmux SERVER in its OWN transient systemd scope so it does NOT inherit the
     # backend service's cgroup. Without this, `systemctl restart hangar-backend`
@@ -174,6 +180,11 @@ def _run(args: list[str], input: bytes | None = None) -> subprocess.CompletedPro
                 retry_args = [*args[:2], "-c", "", *args[2:]]
                 cp = RUN(retry_args, capture_output=True, text=True, encoding="utf-8", errors="replace",
                          timeout=5)
+        if cp.returncode != 0 and _scope_usavel is True and args[:len(_SCOPE)] == _SCOPE and not _scope_reprobe():
+            # O gerenciador do usuário pode parar de criar escopo no meio do dia; a sonda da subida
+            # já não vale, e sem o escopo o comando roda igual.
+            diag.registrar("mux.scope_perdido", "aviso")
+            return _run(args[len(_SCOPE):], input)
         return cp
     except (subprocess.TimeoutExpired, OSError) as exc:
         failure = exc

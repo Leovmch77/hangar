@@ -565,6 +565,41 @@ def test_scope_prefix_wraps_when_systemd_available(monkeypatch):
     assert tmux._scope_prefix()[:3] == ["systemd-run", "--user", "--scope"]
 
 
+@pytest.mark.skipif(os.name != "posix", reason="systemd-run so existe no POSIX; no Windows _scope_prefix devolve [] sempre")
+def test_scope_lost_after_startup_creates_without_it(monkeypatch):
+    # A sonda passou na subida; horas depois o gerenciador recusa o scope e toda criação falhava.
+    monkeypatch.setenv("XDG_RUNTIME_DIR", "/run/user/1000")
+    monkeypatch.setattr(tmux.shutil, "which", lambda _: "/usr/bin/systemd-run")
+    monkeypatch.setattr(tmux, "_scope_usavel", True)
+    calls = []
+
+    def run(args, **k):
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 1 if args[0] == "systemd-run" else 0, "", "")
+
+    monkeypatch.setattr(tmux, "RUN", run)
+    assert tmux.new_session("s", "/tmp", "claude --session-id x") is True
+    assert calls[-1][:2] == ["tmux", "new-session"]
+    assert tmux._scope_usavel is False
+
+
+@pytest.mark.skipif(os.name != "posix", reason="systemd-run so existe no POSIX; no Windows _scope_prefix devolve [] sempre")
+def test_scope_still_working_keeps_the_tmux_refusal(monkeypatch):
+    # Nome repetido: o tmux recusa com o scope funcionando, e não há segunda tentativa sem ele.
+    monkeypatch.setenv("XDG_RUNTIME_DIR", "/run/user/1000")
+    monkeypatch.setattr(tmux.shutil, "which", lambda _: "/usr/bin/systemd-run")
+    monkeypatch.setattr(tmux, "_scope_usavel", True)
+    calls = []
+
+    def run(args, **k):
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0 if args[-1] == "true" else 1, "", "duplicate session: s")
+
+    monkeypatch.setattr(tmux, "RUN", run)
+    assert tmux.new_session("s", "/tmp", "claude --session-id x") is False
+    assert not any(c[:2] == ["tmux", "new-session"] for c in calls)
+
+
 def test_new_session_passes_wayland_display_from_env(monkeypatch):
     monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-7")
     captured = {}
