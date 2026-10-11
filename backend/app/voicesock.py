@@ -130,15 +130,15 @@ async def voice_ws(ws: WebSocket) -> None:
             await ws.close(code=code, reason=reason)
 
 
-async def forward_settings(request: Request) -> Response:
-    """Leva o `GET`/`PUT` do dono à rota privada do Rust e devolve a resposta como veio."""
+async def forward_settings(request: Request, target: str = "/__hangar_server/voice/settings") -> Response:
+    """Leva o `GET`/`PUT`/`DELETE` do dono à rota privada do Rust e devolve a resposta como veio."""
     endpoint = list_bridge.endpoint()
     if endpoint is None:
         return JSONResponse({"error_code": UNAVAILABLE}, status_code=503)
     address, secret = endpoint
     body = await request.body()
     forwarded = urllib.request.Request(
-        f"http://{address}/__hangar_server/voice/settings", data=body or None, method=request.method,
+        f"http://{address}{target}", data=body or None, method=request.method,
         headers={"content-type": request.headers.get("content-type", "application/json"),
                  "x-hangar-internal": secret})
 

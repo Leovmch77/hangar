@@ -100,7 +100,7 @@ pub fn rust_route(method: &Method, path: &str) -> bool {
     if crate::accounts::http::matches(method, path) { return true; }
     if *method == Method::GET {
         if matches!(path, "/api/sessions" | "/api/sessions/events" | "/api/costs" | "/api/cotacao" | "/api/uso" | "/api/migration/status" | "/api/presence"
-            | "/api/voice" | "/api/voice/settings") {
+            | "/api/voice" | "/api/voice/settings" | "/api/voice/memory") {
             return true;
         }
         let tail = path.strip_prefix("/api/sessions/").and_then(|r| r.split_once('/')).map(|(_, t)| t);
@@ -113,6 +113,9 @@ pub fn rust_route(method: &Method, path: &str) -> bool {
         }
     }
     if *method == Method::PUT && path == "/api/voice/settings" {
+        return true;
+    }
+    if *method == Method::DELETE && path.starts_with("/api/voice/memory/") {
         return true;
     }
     // Interface dos mods: o Rust atende as sessões dele e repassa as outras (os contadores mostram).

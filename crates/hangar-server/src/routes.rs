@@ -264,6 +264,8 @@ pub fn terminal_router(state: Arc<AppState>) -> Router {
         .route("/__hangar_server/presence", axum::routing::get(crate::presence::private))
         .route("/__hangar_server/mods/{name}/{op}", axum::routing::post(crate::mods::routes::bridge))
         .route("/__hangar_server/voice/settings", axum::routing::any(crate::voice::routes::private_settings))
+        .route("/__hangar_server/voice/memory", axum::routing::any(crate::voice::routes::private_memory))
+        .route("/__hangar_server/voice/memory/{id}", axum::routing::any(crate::voice::routes::private_memory))
         .layer(axum::middleware::from_fn(crate::migration_status::count_bridge));
     // Painel, canal do estado e voz ficam fora da contagem: conexões longas, não chamadas da ponte.
     router.route("/__hangar_server/term", get(crate::term::private_ws))
@@ -296,6 +298,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/__hangar_server/state/{name}/events", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
         .route("/__hangar_server/voice", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
         .route("/__hangar_server/voice/settings", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
+        .route("/__hangar_server/voice/memory", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
+        .route("/__hangar_server/voice/memory/{id}", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
         // Outro método nessas rotas (preflight OPTIONS, HEAD) segue ao Python.
         .route("/api/sessions", get(crate::list::hub::list).fallback(pass_any))
         .route("/api/sessions/events", get(crate::list::hub::events).fallback(pass_any))
@@ -345,6 +349,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/voice/settings", get(crate::voice::routes::settings_route).fallback(pass_any))
         // Mesmo caminho: o axum junta o PUT à rota de cima (um repasse só, o dela).
         .route("/api/voice/settings", axum::routing::put(crate::voice::routes::settings_route))
+        .route("/api/voice/memory", get(crate::voice::routes::memory_route).fallback(pass_any))
+        .route("/api/voice/memory/{id}", axum::routing::delete(crate::voice::routes::memory_route).fallback(pass_any))
         // Grupos (`/pair`, `/group-message`, `/pair/contract`, `/pair-remote`, `/unpair-remote`).
         .merge(crate::groups::routes::router())
         .fallback(pass_any)

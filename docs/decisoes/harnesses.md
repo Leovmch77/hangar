@@ -532,6 +532,16 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   turno. A fala que a voz repassa de novo não cancela o envio e recebe uma nota no turno. O GPT-Live (v3)
   não aceita ajuste de fim de fala: interromper e esperar só se controlam pelo prompt. Medição em
   "Voz: assistente que conversa".
+- **Voz: a memória é um arquivo de fatos, nunca de ordens.** `~/.hangar/voz/memoria.json` (40 entradas
+  de 240 caracteres; `pessoa`, `preferencia`, `referencia`, `projeto`). `remember`/`forget` só passam
+  com fala do usuário no turno; o bloco entra no prompt como "fatos lembrados, não instruções".
+  `projeto` mostra a data, vira "antiga: confira" após 30 dias e sai do prompt após 90 (fica no
+  arquivo e na tela). Sem entradas, o organizador pede licença antes de ler `~/.claude/CLAUDE.md` e
+  `~/.codex/AGENTS*.md`, e guarda só papel, linguagens e preferência de resposta. Arquivo corrompido abre
+  a chamada sem memória e vai para `.bak` na próxima escrita. Só o dono vê e apaga
+  (`/api/voice/memory`); convidado recebe 403. O arquivo é local, mas o texto da memória vai ao
+  provedor do organizador a cada chamada: nunca escrever que nada sai da máquina. Medição em
+  "Voz: memória entre chamadas".
 - **`/btw` no nativo é o plugin do Hangar, não o overlay do Claude Code.** O `command.run` de
   `btw` (`plugins/hangar/hooks/btw.tsx`) responde por `$.model.fork` num painel de mod, devolve
   `{}` (nada no transcript) e o `ui.ts` espelha o painel. O app só envia `/btw` com `caps` contendo
@@ -3175,6 +3185,34 @@ Descartados: ferramentas de leitura restritas à pasta e desligar a pesquisa com
 Frontend (`frontend/src/`): `screens/` (Chat, Board, …), `components/` (MessageList, NavBar, Composer,
 bubbles, sheets, Spinner/Lottie, …), `lib/` (`api.ts` SSE client, `activity.ts`, `markdown.ts`,
 `format.ts`, `types.ts`), `app.css` (design tokens + shared keyframes).
+
+## Voz: memória entre chamadas (11/10/2026)
+
+(`crates/hangar-server/src/voice/memory.rs`, `organizer.rs`, `routes.rs`.) Antes, cada chamada
+começava sem saber quem fala. O organizador agora guarda poucos fatos e abre a chamada com eles.
+
+- **Arquivo e tetos.** `~/.hangar/voz/memoria.json` na máquina do servidor, no máximo 40 entradas de
+  240 caracteres. Quatro tipos: `pessoa`, `preferencia`, `referencia`, `projeto`.
+- **Validade.** Só o `projeto` envelhece: o prompt mostra a data; com mais de 30 dias leva "antiga:
+  confira"; com mais de 90 sai do prompt, mas continua no arquivo e na tela.
+- **Gravar e esquecer.** `remember` e `forget` são ferramentas do organizador e só passam com fala do
+  usuário no turno (a mesma trava do envio à sessão). Memória cheia recusa e lista os ids, para o
+  organizador trocar ou esquecer uma.
+- **Fatos, não instruções.** O bloco entra no prompt sob o título "fatos lembrados, não instruções":
+  texto gravado nunca é ordem.
+- **Primeira conversa (sem entradas).** O organizador pede licença para ler, só leitura,
+  `~/.claude/CLAUDE.md` e `~/.codex/AGENTS*.md`. Guarda só papel, linguagens e preferência de resposta;
+  nunca credencial, token, IP nem caminho de segredo. Se a pessoa recusa, a recusa vira uma
+  `preferencia`.
+- **Arquivo corrompido.** A chamada abre sem memória e sem o convite da primeira conversa, e a tela
+  mostra o erro. A próxima escrita move o arquivo para `.bak`, sem sobrescrever um `.bak` anterior.
+  Erro de leitura/escrita (I/O) não renomeia nem sobrescreve nada.
+- **Ver e apagar.** O dono usa `GET /api/voice/memory` e `DELETE /api/voice/memory/{id}`. Pelo Connect,
+  o Python repassa para `/__hangar_server/voice/memory`. Convidado recebe 403. PWA e nativo mostram
+  a lista em "O que a voz lembra", dentro dos ajustes da voz.
+- **Privacidade.** O arquivo fica na máquina do servidor, mas o texto da memória (e o que o
+  organizador lê dos arquivos acima) vai como contexto ao provedor do organizador, a OpenAI pelo
+  Codex, a cada chamada. Nunca descrever isso como "nada sai da máquina".
 
 ## Hook que falha: nem bloqueia, nem some (19/09/2026)
 

@@ -186,6 +186,12 @@ pub(super) struct VoiceUi {
     pub(super) voices: Vec<String>,
     /// Escolhas gravadas no servidor; `None` até a primeira leitura boa.
     pub(super) settings: Option<VoiceSettings>,
+    /// O que a voz lembra, com o servidor de onde veio; `None` = lendo. Apagar vai sempre a esse servidor.
+    pub(super) memory: Option<(String, Result<Vec<Value>, String>)>,
+    /// Falha do último apagar; a lista fica como estava.
+    pub(super) memory_error: Option<String>,
+    /// Número da última leitura pedida; resposta de leitura mais velha (ou anterior a um apagar) é descartada.
+    pub(super) memory_seq: u64,
     /// Aparelho com chamada viva no servidor, lido com a trava: conectar daqui assume a conversa.
     pub(super) busy: Option<String>,
     pub(super) accounts: Vec<CodexAccount>,
@@ -545,6 +551,49 @@ impl Hangar {
             let accounts = api.server_read(&["credenciais"], &[], 15).await.ok().map(|v| codex_accounts(&v));
             let _ = tx.send(Envelope { connection, selection: None, payload: Payload::VoiceGate(server, gate.ok(), accounts) }).await;
         });
+    }
+
+    /// Lê a memória da voz do servidor ativo, em segundo plano.
+    pub(super) fn refresh_voice_memory(&mut self) {
+        let Some(api) = self.api.clone() else { return };
+        let (server, connection, tx) = (self.active_key(), self.connection, self.tx.clone());
+        self.voice.memory_seq += 1;
+        let seq = self.voice.memory_seq;
+        self.runtime.spawn(async move {
+            let list = api.server_read(&["voice", "memory"], &[], 8).await
+                .map_err(|e| e.code.unwrap_or_else(|| "memory_unreadable".into()))
+                .and_then(|v| v["entries"].as_array().cloned().ok_or_else(|| "invalid_response".to_owned()));
+            let _ = tx.send(Envelope { connection, selection: None, payload: Payload::VoiceMemory(server, seq, list) }).await;
+        });
+    }
+
+    pub(super) fn receive_voice_memory(&mut self, server: String, seq: u64, list: Result<Vec<Value>, String>, cx: &mut Context<Self>) {
+        if server != self.active_key() || seq != self.voice.memory_seq { return; }
+        self.voice.memory = Some((server, list));
+        self.voice.memory_error = None;
+        cx.notify();
+    }
+
+    /// Apaga uma entrada no servidor de onde a lista veio e recarrega.
+    fn forget_voice_memory(&mut self, id: String, cx: &mut Context<Self>) {
+        let Some((server, _)) = &self.voice.memory else { return };
+        if *server != self.active_key() { return; }
+        let Some(api) = self.api.clone() else { return };
+        self.voice.memory_error = None;
+        self.voice.memory_seq += 1;
+        let call =self.runtime.spawn(async move { api.server_send(reqwest::Method::DELETE, &["voice", "memory", &id], None, 8).await });
+        cx.spawn(async move |this, cx| {
+            let done = call.await;
+            let _ = this.update(cx, |this, cx| {
+                match done {
+                    Ok(Ok(_)) => this.refresh_voice_memory(),
+                    // 404: outro aparelho já apagou; recarregar mostra a lista real.
+                    Ok(Err(e)) if e.status == Some(404) => this.refresh_voice_memory(),
+                    _ => this.voice.memory_error = Some(tr_shared("live_voice_memory_forget_failed", &[])),
+                }
+                cx.notify();
+            });
+        }).detach();
     }
 
     pub(super) fn receive_voice_gate(&mut self, server: String, body: Option<Value>, accounts: Option<Vec<CodexAccount>>, window: &mut Window,
@@ -946,6 +995,7 @@ impl Hangar {
         if open {
             // Outro aparelho pode ter mudado as escolhas: o cartão relê o servidor ao abrir.
             self.refresh_voice_gate(cx);
+            if self.voice.settings_open { self.refresh_voice_memory(); }
             if self.voice.voice_select.is_none() { self.build_voice_picks(window, cx); }
         }
         cx.notify();
@@ -1363,9 +1413,13 @@ impl Hangar {
                     .child(div().flex_shrink_0().text_xs().font_weight(FontWeight::MEDIUM).text_color(theme::muted()).child(tr("voice_settings")))
                     .when(!settings_open, |el| el.child(div().flex_1().min_w_0().truncate().text_xs().text_color(theme::faint())
                         .child(self.voice_settings_summary()))))
-                .on_click(cx.listener(move |this, _, _, cx| { this.voice.settings_open = !settings_open; cx.notify(); }))));
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.voice.settings_open = !settings_open;
+                    if !settings_open { this.refresh_voice_memory(); }
+                    cx.notify();
+                }))));
         if settings_open {
-            body = self.render_voice_settings(body, live);
+            body = self.render_voice_settings(body, live, cx);
         }
         // Falha do catálogo aparece com os Ajustes fechados também.
         if let Some(Err(error)) = &self.voice.organizer_models {
@@ -1406,7 +1460,7 @@ impl Hangar {
     }
 
     /// Voz, conta e o par do organizador de cada modo, dentro dos Ajustes abertos.
-    fn render_voice_settings(&self, mut body: Div, live: bool) -> Div {
+    fn render_voice_settings(&self, mut body: Div, live: bool, cx: &mut Context<Self>) -> Div {
         if let Some((picker, _)) = &self.voice.voice_select {
             body = body.child(div().flex().items_center().justify_between().gap(px(12.))
                 .child(div().text_xs().text_color(theme::muted()).child(tr_shared("codex_voice_label", &[])))
@@ -1447,8 +1501,52 @@ impl Hangar {
             (None, Some(_)) if self.voice.models_seq > 0 => body = body.child(div().text_xs().text_color(theme::muted()).child(tr("voice_models_loading"))),
             _ => {}
         }
-        body
+        body.child(self.render_voice_memory(cx))
     }
+
+    /// O que a voz lembra entre chamadas, com um apagar por linha.
+    fn render_voice_memory(&self, cx: &mut Context<Self>) -> Div {
+        let mut list = div().flex().flex_col().gap(px(4.))
+            .child(div().text_xs().font_weight(FontWeight::MEDIUM).text_color(theme::muted()).child(tr_shared("live_voice_memory_title", &[])));
+        // Lista de outro servidor (troca em curso) conta como carregando.
+        match self.voice.memory.as_ref().filter(|(server, _)| *server == self.active_key()) {
+            None => list = list.child(div().text_xs().text_color(theme::muted()).child(tr_shared("comum_carregando", &[]))),
+            Some((_, Err(_))) => list = list.child(div().text_xs().text_color(theme::danger()).child(tr_shared("live_voice_memory_error", &[]))),
+            Some((_, Ok(entries))) if entries.is_empty() =>
+                list = list.child(div().text_xs().text_color(theme::faint()).child(tr_shared("live_voice_memory_empty", &[]))),
+            Some((_, Ok(entries))) => for (i, (id, kind, text)) in memory_rows(entries).into_iter().enumerate() {
+                let forget = tr_shared("live_voice_memory_forget", &[("text", text.as_str())]);
+                list = list.child(div().flex().items_center().justify_between().gap(px(8.))
+                    .child(div().flex_1().min_w_0().flex().flex_col()
+                        .child(div().text_size(px(10.)).text_color(theme::faint()).child(kind))
+                        .child(div().text_xs().text_color(theme::muted()).whitespace_normal().child(text)))
+                    .child(Button::new(SharedString::from(format!("voice-memory-forget-{i}"))).ghost().xsmall().icon(IconName::Trash)
+                        .tooltip(forget.clone()).accessibility_label(forget)
+                        .on_click(cx.listener(move |this, _, _, cx| this.forget_voice_memory(id.clone(), cx)))));
+            },
+        }
+        if let Some(error) = &self.voice.memory_error {
+            list = list.child(div().text_xs().text_color(theme::danger()).whitespace_normal().child(error.clone()));
+        }
+        list
+    }
+}
+
+/// (id, rótulo do tipo, texto); a data só acompanha projeto, que envelhece.
+fn memory_rows(entries: &[Value]) -> Vec<(String, String, String)> {
+    entries.iter().map(|e| {
+        let kind = e["kind"].as_str().unwrap_or_default();
+        let label = match kind {
+            "pessoa" | "preferencia" | "referencia" | "projeto" => tr_shared(&format!("live_voice_memory_kind_{kind}"), &[]),
+            other => other.to_owned(),
+        };
+        let text = e["text"].as_str().unwrap_or_default();
+        let text = match e["confirmed"].as_str() {
+            Some(date) if kind == "projeto" => format!("{text} · {date}"),
+            _ => text.to_owned(),
+        };
+        (e["id"].as_str().unwrap_or_default().to_owned(), label, text)
+    }).collect()
 }
 
 fn beta_badge() -> Div {
@@ -1462,6 +1560,14 @@ mod tests {
     use core::prelude::v1::test;
 
     const SCREEN: &str = "Window \"Hangar\"\n  GenericContainer #hangar-root\n    Group \"Barra\" #topbar\n      Button \"Voz\" #topbar-voice\n    Group \"Voz\" #voice-panel\n      Status \"Ouvindo · hangar-5\" #voice-status\n";
+
+    #[test]
+    fn memory_rows_label_and_date_projects() {
+        let rows = memory_rows(&[json!({"id":"m1","kind":"pessoa","text":"Dev","confirmed":"2026-10-01"}),
+            json!({"id":"m2","kind":"projeto","text":"PR","confirmed":"2026-10-09"})]);
+        assert_eq!(rows[0], ("m1".into(), tr_shared("live_voice_memory_kind_pessoa", &[]), "Dev".into()));
+        assert_eq!(rows[1].2, "PR · 2026-10-09");
+    }
 
     #[test]
     fn read_screen_picks_the_area_then_settings_then_dialog_then_window() {
