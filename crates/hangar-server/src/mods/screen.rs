@@ -290,12 +290,19 @@ fn find_band(grid: &[Vec<Cell>], text: &[String], prompt: Option<usize>, boxed: 
     if let Some(r) = (first.max(prompt.saturating_sub(3))..prompt).find(|&r| text[r].contains(COLLAPSED_TEXT)) {
         return (Some(Region { rows: (r, r + 1), lo, hi }), "collapsed", Some(r));
     }
-    if let Some(r) = (first.max(prompt.saturating_sub(MAX_BAND_ROWS))..prompt).find(|&r| SHRUNK.is_match(text[r].trim_start())) {
-        return (Some(Region { rows: (r, r + 1), lo, hi }), "shrunk", None);
-    }
-    let Some(anchor) = anchor.filter(|a| !a.is_empty() && !survey) else { return (None, "absent", None) };
     let lower = first.max(prompt.saturating_sub(MAX_BAND_ROWS));
-    match (lower..prompt).rev().find(|&r| text_of(&grid[r][lo..hi.min(grid[r].len())]).contains(anchor)) {
+    let anchor = anchor.filter(|a| !a.is_empty() && !survey);
+    let anchor_row = |end: usize| anchor.and_then(|a| (lower..end).rev().find(|&r| text_of(&grid[r][lo..hi.min(grid[r].len())]).contains(a)));
+    if let Some(r) = (lower..prompt).find(|&r| SHRUNK.is_match(text[r].trim_start())) {
+        // Cortada embaixo pela altura: o começo segue na tela e clicável. Sem a âncora acima, ela sumiu
+        // (atrás do painel em caixa) e só sobra a linha do `↓ N more`.
+        return match anchor_row(r) {
+            Some(row) => (Some(Region { rows: (row, r), lo, hi }), "partial", None),
+            None => (Some(Region { rows: (r, r + 1), lo, hi }), "shrunk", None),
+        };
+    }
+    if anchor.is_none() { return (None, "absent", None) }
+    match anchor_row(prompt) {
         Some(row) => (Some(Region { rows: (row, prompt), lo, hi }), "full", None),
         None => (None, "absent", None),
     }
@@ -390,4 +397,24 @@ pub fn find_label(text: &[String], label: &str, rows: Range<usize>, lo: usize, h
 /// O rótulo só dentro da região: rótulos se repetem entre a faixa, os títulos e o corpo ((t)).
 pub fn find_in(screen: &Screen, label: &str, region: &Region) -> Vec<(usize, usize)> {
     find_label(&screen.text, label, region.rows.0..region.rows.1, region.lo, Some(region.hi))
+}
+
+#[cfg(test)]
+mod partial_band {
+    #[test]
+    fn band_cut_by_the_terminal_keeps_its_visible_rows() {
+        // A faixa aberta passou da altura que o Claude Code dá: o cabeçalho e o começo ficam na tela, o
+        // resto vira `↓ N more`. O que está visível continua clicável.
+        let (cols, rows) = (100usize, 12usize);
+        let mut lines = vec![String::new(); rows];
+        lines[2] = format!("\u{25be} \x1b[1m\u{2387} main\x1b[0m \u{25cf}6 \u{2713}8{}[-]", " ".repeat(80));
+        lines[3] = "  \u{25cb} \u{25b8} Server bacf0ae      [ abrir Server ]".into();
+        lines[4] = "  \u{25cf} \u{25b8} CI bacf0ae          [ abrir CI ]".into();
+        lines[5] = "\u{2193} 3 more".into();
+        lines[7] = "\u{2500}".repeat(cols);
+        lines[8] = "\u{276f} ".into();
+        lines[9] = "\u{2500}".repeat(cols);
+        let s = super::read_screen(&lines.join("\n"), cols, rows, &[], Some("\u{2387} main"));
+        assert_eq!((s.band_state, s.band.as_ref().map(|b| b.rows)), ("partial", Some((2, 5))));
+    }
 }
