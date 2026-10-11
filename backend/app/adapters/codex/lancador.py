@@ -94,6 +94,21 @@ def service_tier_override(service_tier: str | None) -> list[str]:
     return ["-c", f"service_tier={json.dumps(service_tier)}"]
 
 
+IDENTITY_VARS = ("CP_SESSION_NAME", "CP_SESSION_KEY", "HANGAR_CANO_KEY", "TMUX", "TMUX_PANE")
+
+
+def identity_override(env) -> list[str]:
+    """A identidade da sessão no shell dos comandos do Codex: `shell_environment_policy.inherit`
+    diferente de `all` tira do comando o que o app-server herdou, e o `hangar-send` assinava `cli`.
+    O `set` vale com qualquer `inherit` e soma ao `set` do usuário."""
+    import json
+    out: list[str] = []
+    for name in IDENTITY_VARS:
+        if env.get(name):
+            out += ["-c", f"shell_environment_policy.set.{name}={json.dumps(env[name])}"]
+    return out
+
+
 def tool_output_override(limit: int | None, *, launcher: bool = False) -> list[str]:
     if limit is None:
         return []

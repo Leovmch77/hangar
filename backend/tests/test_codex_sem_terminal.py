@@ -199,6 +199,28 @@ def test_ambiente_identifica_a_sessao_headless_para_os_scripts(ambiente, monkeyp
     assert "TMUX" not in env and "TMUX_PANE" not in env
 
 
+def test_identidade_chega_ao_shell_do_codex_com_inherit_core(ambiente, tmp_path):
+    import shutil, subprocess
+    falso = str(ambiente / "bin")
+    codex = shutil.which("codex", path=os.pathsep.join(
+        d for d in os.environ["PATH"].split(os.pathsep) if d != falso))
+    if codex is None:
+        pytest.skip("codex ausente: a prova roda o binário real")
+    meta = _sidecar("cx-shell", ambiente)
+    argv = sem_terminal.argv(meta)
+    identidade = [x for flag, valor in zip(argv, argv[1:])
+                  if flag == "-c" and valor.startswith("shell_environment_policy.") for x in (flag, valor)]
+    home = tmp_path / "codex-home"
+    home.mkdir()
+    (home / "config.toml").write_text('[shell_environment_policy]\ninherit = "core"\nset = { DO_USUARIO = "fica" }\n')
+    env = {"PATH": os.environ["PATH"], "HOME": os.environ["HOME"], "CODEX_HOME": str(home),
+           "CP_SESSION_NAME": "vazaria-se-herdado"}
+    out = subprocess.run([codex, "sandbox", *identidade, "--", "sh", "-c",
+                          'echo "$CP_SESSION_NAME|$CP_SESSION_KEY|$HANGAR_CANO_KEY|$DO_USUARIO"'],
+                         env=env, capture_output=True, text=True, timeout=60)
+    assert out.stdout.strip().splitlines()[-1] == f"cx-shell|{meta['key']}|{meta['key']}|fica"
+
+
 def test_api_le_permissao_headless_durante_o_turno(ambiente, monkeypatch):
     _sidecar("cx-permissao", ambiente)
 

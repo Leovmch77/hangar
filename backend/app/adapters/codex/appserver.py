@@ -18,7 +18,7 @@ from typing import AsyncIterator
 import websockets
 
 from app import codex_contas
-from app.adapters.codex.lancador import tool_output_override
+from app.adapters.codex.lancador import identity_override, tool_output_override
 
 logger = logging.getLogger(__name__)
 
@@ -86,7 +86,7 @@ class AppServerClient:
         env = self._environment(codex_home, session_name=session_name, session_key=session_key)
         self._proc = await asyncio.create_subprocess_exec(
             self._codex_bin, "app-server", "--stdio",
-            *tool_output_override(tool_output_token_limit),
+            *tool_output_override(tool_output_token_limit), *identity_override(env),
             env=env, cwd=cwd,
             stderr=asyncio.subprocess.DEVNULL if tool_output_token_limit is not None else None,
             stdin=asyncio.subprocess.PIPE,
@@ -135,12 +135,13 @@ class AppServerClient:
         poderiam encher durante uma sessao longa.
         """
         self._endpoint = endpoint or self._free_loopback_endpoint()
+        env = self._environment(codex_home, session_name=session_name, session_key=session_key)
         self._proc = await asyncio.create_subprocess_exec(
             self._codex_bin, "app-server", "--listen", self._endpoint,
-            *tool_output_override(tool_output_token_limit),
+            *tool_output_override(tool_output_token_limit), *identity_override(env),
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
-            env=self._environment(codex_home, session_name=session_name, session_key=session_key),
+            env=env,
         )
         last_error: Exception | None = None
         for _ in range(50):

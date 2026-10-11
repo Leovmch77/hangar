@@ -526,7 +526,7 @@ def main() -> int:
     sys.path.insert(0, str(_REPO / "backend"))
     from app.adapters.codex import sessions as codex_sessions
     from app.adapters.codex.lancador import (APPROVAL, NO_UPDATE_CHECK, SANDBOX, PERMISSION_POLICIES,
-                                            service_tier_override, tool_output_override)
+                                            identity_override, service_tier_override, tool_output_override)
     launch_key = None
     def runtime():
         live = codex_sessions.load(args.name)
@@ -696,7 +696,7 @@ def main() -> int:
                 [_codex(), "app-server", "--listen", endpoint, *instruction_overrides,
                  "-c", f'sandbox_mode="{sandbox}"', "-c", f'approval_policy="{approval}"',
                  *tool_output_override(args.tool_output_token_limit),
-                 *service_tier_override(selected_service_tier())],
+                 *service_tier_override(selected_service_tier()), *identity_override(os.environ)],
                 stdout=subprocess.DEVNULL, stderr=erros, cwd=cwd,
             )
         except (OSError, SystemExit) as exc:
