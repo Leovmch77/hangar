@@ -4374,7 +4374,11 @@ def _classe_modo(remetente: str, alvo: str, cfg_alvo: Optional[str],
         return permission_mode.session_non_plan_mode(jsonl or _jsonl_atual(n))
     # Rótulo de aviso do app ([painel: …]) não é sessão; resolvê-lo só gastaria chamadas ao tmux.
     modo_remetente = _modo(remetente) if sanitize_session_name(remetente) == remetente else None
-    modo = modo_remetente or _modo(alvo, jsonl_alvo) or permission_mode.modo_da_conta(cfg_alvo)
+    modo = modo_remetente or _modo(alvo, jsonl_alvo)
+    if not modo:
+        modo = permission_mode.modo_da_conta(cfg_alvo)
+        # Errado, faz o receptor reter o recado: precisa aparecer.
+        _log.info("from-mode de %s para %s sem modo da sessão; vale o da conta (%s)", remetente, alvo, modo)
     return "bypass" if "bypass" in modo.lower() else "prompting"
 
 

@@ -119,6 +119,7 @@ _launch_modes: OrderedDict[str, str] = OrderedDict()
 
 
 def remember_launch_mode(session_id: str, mode: str) -> None:
+    # `plan` não diz a classe: o Claude Code conta plan vindo de bypass como bypass.
     if mode == "plan":
         return
     with _mem_lock:
