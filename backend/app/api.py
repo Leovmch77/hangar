@@ -2172,6 +2172,19 @@ async def _kill_unclaimed(name: str) -> None:
         await asyncio.to_thread(_invalidate_lists)
 
 
+def _codex_as_claude_mode(name: str) -> str | None:
+    """Modo do Claude equivalente ao da sessão Codex `name` (None se não for Codex)."""
+    from app.adapters.codex import sessions as codex_sessions
+    from app.adapters.codex.lancador import PERMISSION_POLICIES
+    policy = PERMISSION_POLICIES.get(str((codex_sessions.load(name) or {}).get("permission_mode")))
+    if policy is None:
+        return None
+    approval, sandbox = policy
+    if approval == "never":
+        return "bypassPermissions"
+    return "acceptEdits" if sandbox == "workspace-write" else "manual"
+
+
 def _creator_permission_mode(name: str, jsonl: str | None) -> str | None:
     """Modo fora de `plan` da sessão Claude `name`, no nome que o `--permission-mode` aceita."""
     meta = headless_sessions.load(name)
@@ -2199,7 +2212,9 @@ async def _inherit_from_creator(body: CreateBody) -> tuple[CreateBody, str | Non
     avisos: list[str] = []
     account_source = None
     # Perfil do omp já define a conta.
-    if body.config_dir is None and body.provider in ("claude", "pi", "omp") and not body.omp_profile:
+    # Codex não tem conta Claude: a nova fica na padrão, como quando a criadora não é identificada.
+    if (body.config_dir is None and body.provider in ("claude", "pi", "omp") and not body.omp_profile
+            and info.provider != "codex"):
         cfg, confiavel = await asyncio.to_thread(_caller_config_dir, info.name)
         if not confiavel:
             # Criar assim nasceria na conta padrão, calado: gasta a cota de quem ninguém escolheu.
@@ -2211,8 +2226,9 @@ async def _inherit_from_creator(body: CreateBody) -> tuple[CreateBody, str | Non
             update["config_dir"] = str(cfg)
     if body.headless is None and body.provider in ("claude", "codex") and not body.read_only:
         update["headless"] = bool(info.headless)
-    if body.permission_mode is None and body.provider == "claude" and info.provider == "claude":
-        modo = await asyncio.to_thread(_creator_permission_mode, info.name, info.jsonl)
+    if body.permission_mode is None and body.provider == "claude" and info.provider in ("claude", "codex"):
+        modo = await (asyncio.to_thread(_codex_as_claude_mode, info.name) if info.provider == "codex"
+                      else asyncio.to_thread(_creator_permission_mode, info.name, info.jsonl))
         if modo:
             update["permission_mode"] = modo
         else:
@@ -4345,12 +4361,8 @@ def _classe_modo(remetente: str, alvo: str, cfg_alvo: Optional[str],
         m = headless_sessions.load(n)
         if m and m.get("permission_mode"):
             return str(m["permission_mode"])
-        from app.adapters.codex import sessions as codex_sessions
-        from app.adapters.codex.lancador import PERMISSION_POLICIES
-        policy = PERMISSION_POLICIES.get(str((codex_sessions.load(n) or {}).get("permission_mode")))
-        if policy is not None:
-            # Só o Codex que nunca pede aprovação equivale ao bypass do Claude.
-            return "bypassPermissions" if policy[0] == "never" else "default"
+        if (codex := _codex_as_claude_mode(n)) is not None:
+            return codex
         return permission_mode.session_non_plan_mode(jsonl or _jsonl_atual(n))
     # Rótulo de aviso do app ([painel: …]) não é sessão; resolvê-lo só gastaria chamadas ao tmux.
     modo_remetente = _modo(remetente) if sanitize_session_name(remetente) == remetente else None

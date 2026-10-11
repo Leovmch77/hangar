@@ -101,3 +101,16 @@ async def test_criadora_ausente_ou_modo_ilegivel_avisa(criadora):
     criadora["modo"] = None
     body, _, avisos = await api._inherit_from_creator(_body())
     assert body.permission_mode is None and "modo de permissão" in avisos[0]
+
+
+@pytest.mark.parametrize("modo_codex, esperado", [
+    ("Full Access", "bypassPermissions"), ("Approve for me", "acceptEdits"), ("Ask for approval", "manual")])
+async def test_claude_criada_por_codex_herda_o_modo_equivalente(criadora, monkeypatch, modo_codex, esperado):
+    from app.adapters.codex import sessions as codex_sessions
+    criadora["info"] = SessionInfo(name="mae", provider="codex", headless=True)
+    criadora["modo"] = None
+    # Codex não tem conta Claude: a nova fica na conta padrão, sem recusa por conta ilegível.
+    criadora["conta"] = (None, False)
+    monkeypatch.setattr(codex_sessions, "load", lambda n: {"permission_mode": modo_codex} if n == "mae" else None)
+    body, origem, avisos = await api._inherit_from_creator(_body())
+    assert (body.permission_mode, body.config_dir, origem, avisos) == (esperado, None, None, [])
