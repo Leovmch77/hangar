@@ -650,9 +650,12 @@ mkdir -p "$ESTADO/logs" "$ESTADO/andamento"
 find "$ESTADO/andamento" -type f -mtime +1 -delete 2>/dev/null
 # Um arquivo por rodada (o pid separa duas do mesmo commit): plano, fila, cada passo e o fim.
 ANDAMENTO="$ESTADO/andamento/${sha:0:10}-$$"
-printf '%(%s)T plano %s linux=%s windows=%s vm=%s\n' -1 "${sha:0:10}" "${plano_lin// /,}" "${plano_win// /,}" "$VM" > "$ANDAMENTO"
-# A faixa do plugin só aparece na sessão que chamou: ela compara este nome com o dela.
-[[ -n "${CP_SESSION_NAME:-}" ]] && printf '%(%s)T dono %s\n' -1 "$CP_SESSION_NAME" >> "$ANDAMENTO"
+# A faixa do plugin só aparece na sessão que chamou (`dono`); plano e dono saem numa escrita só,
+# senão um tique do plugin entre as duas leria a rodada sem dono.
+{
+    printf '%(%s)T plano %s linux=%s windows=%s vm=%s\n' -1 "${sha:0:10}" "${plano_lin// /,}" "${plano_win// /,}" "$VM"
+    [[ -n "${CP_SESSION_NAME:-}" ]] && printf '%(%s)T dono %s\n' -1 "$CP_SESSION_NAME"
+} > "$ANDAMENTO"
 [[ -d "$FIXO/.git" ]] || { mkdir -p "$(dirname "$FIXO")" && git clone -q --no-checkout "$ORIGEM" "$FIXO"; } || erro "não consegui criar $FIXO"
 
 rc_lin=0 rc_win=0

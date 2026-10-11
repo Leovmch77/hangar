@@ -52,13 +52,17 @@ After arming, **end the turn**. No sleeps, no CronCreate, no periodic status mes
 | `closed` | PR merged/closed by someone: report it, stop. |
 | `query_failed` | Warn once; the script retries by itself. |
 | `query_recovered` | Re-read with `--once` and carry on. |
+| `crashed` / `state_reset` | `crashed`: the watch died — tell the user the `error` and stop. `state_reset`: the snapshot that follows is a replay; skip what the log says is done. |
 
 A `change` carries the full snapshot. Handle, in this order:
 
 - **`threads`** whose `last_by` is not you: read the whole thread
   (`gh api repos/jeffer1312/hangar/pulls/<N>/comments` or the `url`), check it against the
   current code. Fix every valid point, small ones included. Reject only what is factually wrong
-  or out of scope, with **one** reply in the thread, `@coderabbitai` + evidence.
+  or out of scope, with **one** reply in the thread, `@coderabbitai` + evidence, then resolve it
+  (an unresolved thread blocks `ready` forever).
+- **`replies_in_resolved_threads`**: CodeRabbit answered in a thread already resolved. Agreement
+  needs nothing; a new objection is treated like an open thread.
 - **`reviews_on_head` with `nitpicks: true`**: read the review body
   (`gh api repos/jeffer1312/hangar/pulls/<N>/reviews/<id>`) and treat each nitpick the same way.
   Skipped nitpicks get one top-level `@coderabbitai` comment saying which and why.
@@ -87,17 +91,19 @@ same point.
    `gh api repos/jeffer1312/hangar/pulls/<N>/comments/<root_comment_id>/replies -f body="@coderabbitai Corrigido em <sha>. <what changed>."`
    then resolve it:
    `gh api graphql -f query='mutation($t:ID!){resolveReviewThread(input:{threadId:$t}){thread{isResolved}}}' -F t=<thread_id>`.
-   A later objection in that thread arrives as a new `change`.
+   A later bot reply in that thread arrives in `replies_in_resolved_threads`.
 
 ## 5. Ready → merge
 
 `ready` means: PR open, not draft, mergeable, CodeRabbit status `SUCCESS` on the head, no
 unresolved thread, every check terminal and none failed, unchanged for 90 s. The script does not
-know about nitpicks: confirm every nitpick in the log was handled.
+know about nitpicks: confirm every nitpick in the log was handled. Your own notes never wake
+you, including ones the user wrote by hand under the same GitHub account.
 
 1. `python3 SKILL_DIR/scripts/pr_watch.py <N> --once` → `ready: true` and the same `head`.
    Otherwise keep watching.
-2. `gh pr merge <N> --merge` (merge commit, the repo's convention; keep the branch).
+2. `gh pr merge <N> --merge --match-head-commit <head>` (merge commit, the repo's convention;
+   keep the branch). The head check refuses the merge if someone pushed after step 1.
 3. Stop the Monitor with **TaskStop**.
 4. Align the shared checkout: in `~/Projetos/hangar`, on `main` with a clean tree,
    `git fetch origin && git merge --ff-only origin/main`. Not fast-forward or dirty → just say so.

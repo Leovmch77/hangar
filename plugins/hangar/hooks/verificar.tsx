@@ -29,7 +29,7 @@ async function tail($: EngineInterface, path: string): Promise<string[]> {
 async function scanRuns($: EngineInterface, now: number): Promise<VerificarRun[]> {
   const dir = await stateDir($);
   const entries = await $.fs.list(`${dir}/andamento`).catch(() => []);
-  const me = (await $.env.get("CP_SESSION_NAME")) ?? "";
+  const me = (await $.env.get("CP_SESSION_NAME").catch(() => undefined)) ?? "";
   const runs: VerificarRun[] = [];
   for (const f of entries) {
     if (f.kind !== "file" || now - f.mtimeMs > 24 * 3600_000) continue;
