@@ -183,6 +183,20 @@ impl InteractionStore {
         Ok(Some(id))
     }
 
+    /// A identidade vigente de um alvo, sem observar nem trocar nada.
+    pub fn current(&self, binding: &InteractionBinding, target: &InteractionTarget) -> Result<Option<ExpectedInteraction>, InteractionError> {
+        let state = self.state.lock().map_err(|_| InteractionError::Unavailable)?;
+        match state.bindings.get(&binding.key) {
+            Some(current) if current == binding => {},
+            Some(_) => return Err(InteractionError::Changed),
+            None => return Err(InteractionError::Unavailable),
+        }
+        Ok(state.entries.get(&(binding.key.clone(), target.clone())).map(|entry| ExpectedInteraction {
+            binding: entry.binding.clone(), target: entry.target.clone(), interaction_id: entry.id.clone(),
+            semantic: entry.semantic.clone(), source_revision: entry.source_revision.clone(),
+        }))
+    }
+
     pub fn validate(
         &self,
         binding: &InteractionBinding,

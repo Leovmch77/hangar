@@ -151,7 +151,8 @@ pub fn observe_menu(interactions: &crate::interactions::InteractionStore,
     interactions.observe(binding, &target, semantic).map_err(|e| e.code().to_owned())
 }
 
-/// Mesmo quadro e semântica que o escritor reconfere antes do primeiro efeito.
+/// Mesmo quadro e semântica que o escritor reconfere antes do primeiro efeito. Única regra para a
+/// publicação (lista e monitor) e para os fatos do executor.
 pub fn observe_terminal(interactions: &crate::interactions::InteractionStore,
     binding: &crate::interactions::InteractionBinding, jsonl: &Path, pane: &str) -> Result<Option<AskQuestion>, String> {
     let target = crate::interactions::InteractionTarget { kind: crate::interactions::InteractionKind::Question, request_key: "terminal:askq".into() };
@@ -160,35 +161,30 @@ pub fn observe_terminal(interactions: &crate::interactions::InteractionStore,
         interactions.observe_revision(binding, &target, None, None).map_err(|e| e.code().to_owned())?;
         return Ok(None);
     };
-    let event = hangar_api::state::StateEvent {
-        state: "awaiting_input".into(), question: crate::terminal_state::analyze(pane).question,
-        options: crate::terminal_state::analyze(pane).options, ..Default::default()
-    };
+    let analysis = crate::terminal_state::analyze(pane);
+    let submit = submit_tab(pane);
+    // Sem menu na tela a pergunta não está aberta: o hook nunca apaga o sidecar respondido.
+    if analysis.state != "awaiting_input" && !submit { return Ok(None); }
+    let event = StateEvent { state: analysis.state, question: analysis.question, options: analysis.options, ..Default::default() };
+    // Texto da pergunta junto: com opções iguais às da primeira, só ele separa as etapas.
+    let later = submit || question.questions.iter().skip(1)
+        .any(|item| event.question.as_deref() == Some(item.question.as_str()) && matches_item(&event, &question, item, false));
+    if later {
+        // Etapa seguinte (ou envio) do formulário já publicado: o mesmo ID, sem retratar de novo,
+        // porque o retrato desta etapa trocaria o ID que está sendo respondido.
+        let published = interactions.current(binding, &target).map_err(|e| e.code().to_owned())?
+            .filter(|published| published.source_revision.as_deref() == Some(revision.as_str()))
+            .ok_or("askq_pane_mismatch")?;
+        if read_revision(jsonl)?.as_ref().map(|(_, current)| current) != Some(&revision) { return Err("askq_changed_during_read".into()); }
+        question.interaction_id = Some(published.interaction_id);
+        return Ok(Some(question));
+    }
     if !matches(&event, &question) { return Err("askq_pane_mismatch".into()); }
     let semantic = crate::terminal_input::interaction_semantic(pane, Some(&question)).map_err(|e| e.code().to_owned())?;
     if read_revision(jsonl)?.as_ref().map(|(_, current)| current) != Some(&revision) { return Err("askq_changed_during_read".into()); }
     question.interaction_id = interactions.observe_revision(binding, &target, Some(semantic), Some(revision))
         .map_err(|e| e.code().to_owned())?;
     Ok(Some(question))
-}
-
-/// Conferência dos fatos do executor. A etapa seguinte do mesmo formulário (e a revisão final) não
-/// é outro formulário: aceita sem republicar, porque o retrato novo trocaria o ID que está sendo
-/// respondido. A identidade continua sendo provada pela revisão do sidecar no executor.
-pub fn check_terminal(interactions: &crate::interactions::InteractionStore,
-    binding: &crate::interactions::InteractionBinding, jsonl: &Path, pane: &str) -> Result<bool, String> {
-    if let Some((question, revision)) = read_revision(jsonl)? {
-        let analysis = crate::terminal_state::analyze(pane);
-        let event = StateEvent { state: analysis.state, question: analysis.question, options: analysis.options, ..Default::default() };
-        // Texto da pergunta junto: com opções iguais às da primeira, só ele separa as etapas.
-        let later = question.questions.iter().skip(1)
-            .any(|item| event.question.as_deref() == Some(item.question.as_str()) && matches_item(&event, &question, item, false));
-        if later || submit_tab(pane) {
-            if read_revision(jsonl)?.map(|(_, current)| current) != Some(revision) { return Err("askq_changed_during_read".into()); }
-            return Ok(true);
-        }
-    }
-    observe_terminal(interactions, binding, jsonl, pane).map(|question| question.is_some())
 }
 
 /// Código estático da falha da pergunta, para a causa chegar ao resultado da entrega.
@@ -281,15 +277,21 @@ mod tests {
         let (store, binding) = bound_store();
         let published = observe_terminal(&store, &binding, &jsonl, STEP_ONE).unwrap().unwrap().interaction_id.unwrap();
         let expected = store.expected(&binding, Some(&published)).unwrap();
-        // A segunda etapa e a aba de envio são o mesmo formulário: passam sem trocar o ID respondido.
+        // Segunda etapa e aba de envio são o mesmo formulário: lista, monitor e executor recebem a
+        // pergunta com o mesmo ID, e o registro não muda.
         for pane in [STEP_ONE, STEP_TWO, SUBMIT] {
-            assert_eq!(check_terminal(&store, &binding, &jsonl, pane), Ok(true));
+            let seen = observe_terminal(&store, &binding, &jsonl, pane).unwrap().unwrap();
+            assert_eq!((seen.interaction_id.as_deref(), seen.questions.len()), (Some(published.as_str()), 2));
             assert_eq!(store.expected(&binding, Some(&published)).unwrap(), expected);
         }
-        // A publicação continua presa à primeira etapa.
-        assert_eq!(observe_terminal(&store, &binding, &jsonl, STEP_TWO).unwrap_err(), "askq_pane_mismatch");
+        // Pergunta fechada (composer de volta, sidecar ainda no disco): nada aberto, registro intacto.
+        assert_eq!(observe_terminal(&store, &binding, &jsonl, "────────────────\n❯ \n────────────────\n"), Ok(None));
+        assert_eq!(store.expected(&binding, Some(&published)).unwrap(), expected);
+        // Etapa 2 sem a primeira ter sido publicada não ganha identidade.
+        let (fresh, fresh_binding) = bound_store();
+        assert_eq!(observe_terminal(&fresh, &fresh_binding, &jsonl, STEP_TWO).unwrap_err(), "askq_pane_mismatch");
         // Pergunta fora do formulário segue recusada, e a causa chega inteira ao executor.
-        let refused = check_terminal(&store, &binding, &jsonl, OTHER).unwrap_err();
+        let refused = observe_terminal(&store, &binding, &jsonl, OTHER).unwrap_err();
         assert_eq!(failure_code(&refused), "askq_pane_mismatch");
         assert_eq!(failure_code("askq_unreadable:PermissionDenied"), "askq_unreadable");
         assert_eq!(failure_code("algo_novo"), "terminal_question_unavailable");

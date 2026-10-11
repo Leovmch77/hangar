@@ -275,7 +275,7 @@ async fn terminal_input_guarded_submit_of_menu_without_sidecar_concludes_and_sta
  let (io,d)=run(store,vec![multi.into(),multi.into(),review.into(),screen("")]);
  let r=d.guarded_submit_selected(&expected).await;
  assert_eq!((r.disposition,r.code.as_str()),(Disposition::Accepted,"control_submitted"));
- assert_eq!(io.writes().iter().map(|w|w.args.last().unwrap().as_str()).collect::<Vec<_>>(),["Right","Enter"]);
+ assert_eq!(io.writes().iter().map(|w|w.args.last().unwrap().as_str()).collect::<Vec<_>>(),["Right","\r"]);
  // Menu que mudou e vida antiga continuam recusados, sem tecla nenhuma.
  for (generation,pane) in [(1,other),(2,multi)] {
   let (store,expected)=observed(generation,pane);

@@ -138,7 +138,7 @@ impl LocalTerminalFacts {
         let (native, question) = tokio::task::spawn_blocking(move || {
             let native = native_record(&files.metadata, &files.binding.conversation)?;
             let question = match plugin_store {
-                Some(store) => crate::state::ask::check_terminal(store.interactions(), &Self::binding(&files), &files.transcript, &question_frame),
+                Some(store) => crate::state::ask::observe_terminal(store.interactions(), &Self::binding(&files), &files.transcript, &question_frame).map(|question| question.is_some()),
                 None => crate::state::ask::read_pending(&files.transcript).map(|question| question.is_some()),
             }.map_err(|code| ServiceError(crate::state::ask::failure_code(&code)))?;
             Ok::<_, ServiceError>((native, question))
@@ -367,6 +367,80 @@ mod tests {
         assert!(!local.read(&target,&target.binding,"").await.unwrap().idle);target.metadata.legacy_import_after=Some(now+1.0);
         std::fs::write(dir.path().join(".hangar-state/sid.json"),json!({"state":"idle","ts":now+2.0}).to_string()).unwrap();assert!(local.read(&target,&target.binding,"").await.unwrap().idle);
         drop(poll);plugin.forget("key").unwrap();assert!(local.read(&target,&target.binding,"").await.is_err());
+    }
+    /// Pane que troca de tela a cada Enter enviado, como o formulário do TUI.
+    struct FormIo { screens: Vec<String>, at: Mutex<usize>, keys: Mutex<Vec<String>> }
+    impl TerminalIo for FormIo {
+        fn command<'a>(&'a self, request: CommandRequest) -> IoFuture<'a, CommandOutput> { Box::pin(async move {
+            let stdout = match request.args[0].as_str() {
+                "capture-pane" => self.screens[*self.at.lock().unwrap()].clone().into_bytes(),
+                "display-message" if request.args.last().is_some_and(|arg| arg.starts_with("#{pane_pid}\t")) => format!("{}\tsession\t%1\t1\n", std::process::id()).into_bytes(),
+                "display-message" => b"session\t%1\t1\n".to_vec(),
+                "send-keys" => {
+                    let key = request.args.last().unwrap().clone();
+                    if key == "\r" { let mut at = self.at.lock().unwrap(); *at = (*at + 1).min(self.screens.len() - 1); }
+                    self.keys.lock().unwrap().push(key);
+                    Vec::new()
+                }
+                other => panic!("comando inesperado: {other}"),
+            };
+            Ok(CommandOutput { success: true, stdout })
+        }) }
+        fn socket<'a>(&'a self, _: &'a NativeMessage, _: Vec<u8>) -> IoFuture<'a, WriteOutcome> { Box::pin(async { panic!("resposta não usa o socket") }) }
+    }
+    /// Os fatos de verdade (`LocalTerminalFacts::read`) atrás do executor, como no runtime.
+    struct FormFacts { local: LocalTerminalFacts, target: TerminalTarget }
+    impl input::TerminalServices for FormFacts {
+        fn facts<'a>(&'a self, binding: &'a TerminalBinding) -> input::ServiceFuture<'a, InputFacts> { Box::pin(self.local.read(&self.target, binding, "")) }
+        fn publish<'a>(&'a self, _: &'a TerminalBinding, _: PluginRequest) -> input::ServiceFuture<'a, PluginReply> { Box::pin(async { panic!("resposta pelo pane não publica no plugin") }) }
+        fn permission_guard<'a>(&'a self, _: &'a TerminalBinding) -> input::ServiceFuture<'a, ()> { Box::pin(async { Ok(()) }) }
+    }
+    #[tokio::test]
+    async fn two_question_form_concludes_through_local_facts_and_replacement_is_refused() {
+        let dir=tempfile::tempdir().unwrap();let target=target(dir.path());let binding=LocalTerminalFacts::binding(&target);
+        std::fs::create_dir(dir.path().join("sessions")).unwrap();
+        std::fs::write(dir.path().join("sessions").join(format!("{}.json",target.metadata.agent_pid)),json!({"pid":target.metadata.agent_pid,"sessionId":"sid","status":"idle"}).to_string()).unwrap();
+        let sidecar=crate::state::ask::sidecar_path(&target.transcript).unwrap();std::fs::create_dir_all(sidecar.parent().unwrap()).unwrap();
+        let cor=json!({"question":"Cor?","header":"Cor","multiSelect":false,"options":[{"label":"Azul"},{"label":"Verde"}]});
+        let pasta=json!({"question":"Pasta?","header":"Pasta","multiSelect":false,"options":[{"label":"A"},{"label":"B"}]});
+        let form_a=json!({"tool_input":{"questions":[cor,pasta.clone()]}}).to_string();let form_b=json!({"tool_input":{"questions":[pasta]}}).to_string();
+        let foot="\nEnter to select · ↑/↓ to navigate · Esc to cancel\n";
+        let step_one=format!("   Cor?\n\n ❯ 1. Azul\n   2. Verde\n   3. Type something.\n   4. Chat about this\n{foot}");
+        let step_two=format!("   Pasta?\n\n ❯ 1. A\n   2. B\n   3. Type something.\n   4. Chat about this\n{foot}");
+        let review="Review your answers\n\n → Azul\n → A\n\n ❯ 1. Submit answers\n   2. Cancel\n\nEsc to cancel\n".to_string();
+        let closed="────────────────────────────────\n❯ \n────────────────────────────────\n".to_string();
+        let other=format!("   Outra?\n\n ❯ 1. X\n   2. Y\n{foot}");
+        let answers:Vec<input::QuestionAnswer>=serde_json::from_value(json!([{"kind":"option","indices":[0],"labels":["Azul"]},{"kind":"option","indices":[0],"labels":["A"]}])).unwrap();
+        let limits=InputLimits {settle:Duration::ZERO,literal_settle:Duration::ZERO,multiline_settle:Duration::ZERO,slash_settle:Duration::ZERO,proof_attempts:2,ready_attempts:2,cleanup_attempts:2};
+        // Formulário A publicado na primeira etapa, como a lista e o monitor fazem.
+        let run=|screens:Vec<String>| {
+            std::fs::write(&sidecar,&form_a).unwrap();
+            let interactions=Arc::new(crate::interactions::InteractionStore::default());let plugin=Arc::new(Store::new(interactions.clone()));
+            interactions.bind(&binding).unwrap();plugin.bind(&binding).unwrap();
+            let id=crate::state::ask::observe_terminal(&interactions,&binding,&target.transcript,&step_one).unwrap().unwrap().interaction_id.unwrap();
+            let expected=interactions.expected(&binding,Some(&id)).unwrap();
+            let io=Arc::new(FormIo {screens,at:Mutex::new(0),keys:Mutex::new(Vec::new())});
+            let facts=Arc::new(FormFacts {local:LocalTerminalFacts::new(io.clone(),Some(plugin),None),target:target.clone()});
+            let driver=TerminalDriver::new(target.binding.clone(),facts,io.clone(),limits.clone()).with_interactions(interactions.clone()).with_interaction_source(target.transcript.clone());
+            (interactions,expected,io,driver)
+        };
+        // Etapa 1 → etapa 2 → revisão → composer: conclui com o ID publicado na etapa 1.
+        let (interactions,expected,io,driver)=run(vec![step_one.clone(),step_two.clone(),review,closed]);
+        let result=driver.guarded_answer(&expected,&answers).await;
+        assert_eq!((result.disposition,result.code.as_str()),(input::Disposition::Accepted,"control_submitted"));
+        assert_eq!(*io.keys.lock().unwrap(),["\r","\r","\r"]);
+        assert_eq!(interactions.expected(&binding,Some(&expected.interaction_id)).unwrap(),expected);
+        // Menu fora do formulário: a causa chega inteira pela leitura dos fatos e nada é teclado.
+        let (_,expected,io,driver)=run(vec![other]);
+        assert_eq!(driver.capture().await.unwrap_err().code,"askq_pane_mismatch");
+        assert_eq!(driver.guarded_answer(&expected,&answers).await.disposition,input::Disposition::Rejected);
+        assert!(io.keys.lock().unwrap().is_empty());
+        // Troca real A→B na etapa 2: o ID de A não responde B.
+        let (_,expected,io,driver)=run(vec![step_two]);
+        std::fs::write(&sidecar,&form_b).unwrap();
+        let result=driver.guarded_answer(&expected,&answers).await;
+        assert_eq!((result.disposition,result.code.as_str()),(input::Disposition::Rejected,crate::interactions::InteractionError::Changed.code()));
+        assert!(io.keys.lock().unwrap().is_empty());
     }
     #[tokio::test]
     async fn sender_mode_and_target_life_are_checked_without_actor_calls() {
