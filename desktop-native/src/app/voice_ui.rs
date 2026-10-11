@@ -190,6 +190,8 @@ pub(super) struct VoiceUi {
     pub(super) memory: Option<(String, Result<Vec<Value>, String>)>,
     /// Falha do último apagar; a lista fica como estava.
     pub(super) memory_error: Option<String>,
+    /// Número da última leitura pedida; resposta de leitura mais velha (ou anterior a um apagar) é descartada.
+    pub(super) memory_seq: u64,
     /// Aparelho com chamada viva no servidor, lido com a trava: conectar daqui assume a conversa.
     pub(super) busy: Option<String>,
     pub(super) accounts: Vec<CodexAccount>,
@@ -555,16 +557,18 @@ impl Hangar {
     pub(super) fn refresh_voice_memory(&mut self) {
         let Some(api) = self.api.clone() else { return };
         let (server, connection, tx) = (self.active_key(), self.connection, self.tx.clone());
+        self.voice.memory_seq += 1;
+        let seq = self.voice.memory_seq;
         self.runtime.spawn(async move {
             let list = api.server_read(&["voice", "memory"], &[], 8).await
                 .map_err(|e| e.code.unwrap_or_else(|| "memory_unreadable".into()))
                 .and_then(|v| v["entries"].as_array().cloned().ok_or_else(|| "invalid_response".to_owned()));
-            let _ = tx.send(Envelope { connection, selection: None, payload: Payload::VoiceMemory(server, list) }).await;
+            let _ = tx.send(Envelope { connection, selection: None, payload: Payload::VoiceMemory(server, seq, list) }).await;
         });
     }
 
-    pub(super) fn receive_voice_memory(&mut self, server: String, list: Result<Vec<Value>, String>, cx: &mut Context<Self>) {
-        if server != self.active_key() { return; }
+    pub(super) fn receive_voice_memory(&mut self, server: String, seq: u64, list: Result<Vec<Value>, String>, cx: &mut Context<Self>) {
+        if server != self.active_key() || seq != self.voice.memory_seq { return; }
         self.voice.memory = Some((server, list));
         self.voice.memory_error = None;
         cx.notify();
@@ -576,7 +580,8 @@ impl Hangar {
         if *server != self.active_key() { return; }
         let Some(api) = self.api.clone() else { return };
         self.voice.memory_error = None;
-        let call = self.runtime.spawn(async move { api.server_send(reqwest::Method::DELETE, &["voice", "memory", &id], None, 8).await });
+        self.voice.memory_seq += 1;
+        let call =self.runtime.spawn(async move { api.server_send(reqwest::Method::DELETE, &["voice", "memory", &id], None, 8).await });
         cx.spawn(async move |this, cx| {
             let done = call.await;
             let _ = this.update(cx, |this, cx| {
