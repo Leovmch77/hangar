@@ -10,18 +10,18 @@ use tokio::time::Instant;
 
 use crate::runtime::protocol::LiveReceiver;
 use crate::side::Hub;
-use crate::state::facts::{FactsStore, SNAPSHOT_REFRESH, StateFactsClient};
+use crate::state::facts::{FactsStore, SNAPSHOT_REFRESH};
 use crate::state::published::Published;
 
 /// Mesma janela da lista: rajada de deltas vira uma publicação.
 pub const COALESCE: Duration = Duration::from_millis(150);
-/// Retrato que falhou: tenta de novo sem martelar o Python.
+/// Leitura do plugin que falhou: tenta de novo sem martelar o Store.
 const RETRY: Duration = if cfg!(test) { Duration::from_millis(300) } else { Duration::from_secs(5) };
 
-/// De onde o feed do Claude lê a sugestão do plugin: os fatos que o Python empurra, com o interesse
-/// renovado como o `Monitor` faz.
+/// Ligação do feed do Claude aos fatos: a leitura vem do `plugin::Store` do Rust; `store` só acorda o feed
+/// quando a ponte da lista recebe um empurrão.
 #[derive(Clone)]
-pub struct FeedFacts { pub store: Arc<FactsStore>, pub client: StateFactsClient, pub diag: crate::diag::DiagClient }
+pub struct FeedFacts { pub store: Arc<FactsStore>, pub diag: crate::diag::DiagClient }
 
 struct Watching { src: FeedFacts, at: Option<Instant>, error: Option<String> }
 
@@ -915,7 +915,6 @@ mod tests {
     fn feed_facts(py: &FakePython, store: &Arc<crate::state::facts::FactsStore>) -> FeedFacts {
         FeedFacts {
             store: store.clone(),
-            client: crate::state::facts::StateFactsClient::new(py.addr, "s".into()),
             diag: crate::diag::DiagClient::new(py.addr, "s".into()),
         }
     }

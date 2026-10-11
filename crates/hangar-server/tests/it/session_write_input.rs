@@ -139,7 +139,7 @@ async fn policy() -> std::net::SocketAddr {
     address
 }
 
-async fn registry() -> Arc<RuntimeRegistry> {
+pub(crate) async fn registry() -> Arc<RuntimeRegistry> {
     Arc::new(RuntimeRegistry::new(policy().await, "secret-test".into(), "instance-test".into()))
 }
 
@@ -153,7 +153,7 @@ async fn open_headless(registry: &RuntimeRegistry, dir: &Path, name: &str, outco
 
 /// Entrada com terminal e uma linha parada na fila, cujos fatos o Python falso não sabe dar: a
 /// manutenção falha e o retrato dela passa a dizer `terminal_facts` (o vínculo não se confirma).
-async fn open_sick_terminal(registry: &RuntimeRegistry, dir: &Path, name: &str) {
+pub(crate) async fn open_sick_terminal(registry: &RuntimeRegistry, dir: &Path, name: &str) {
     let (state_path, projection_dir) = (dir.join(format!("{name}.state")), dir.join(format!("{name}.projection")));
     let mut store = Store::open(&state_path, &projection_dir, State::new(&format!("k-{name}"), 1, name, vec![])).unwrap();
     let clock = ClockSample { monotonic_s: 0.0, epoch_s: 1.0 };
@@ -235,19 +235,19 @@ async fn headless_input_the_cano_refused_is_a_400() {
 }
 
 #[tokio::test]
-async fn bodies_python_would_refuse_still_reach_python() {
+async fn bodies_the_route_refuses_are_a_rust_422_never_python() {
     let (dir, registry) = (tempfile::tempdir().unwrap(), registry().await);
     open_headless(&registry, dir.path(), "s", "written").await;
     let (python, server) = serve(registry, Duration::from_secs(5)).await;
     for body in [r#"{"text":"oi","extra":1}"#, r#"{"steer":true}"#, r#"{"text":5}"#, r#"{"text":"oi","steer":"sim"}"#] {
-        assert_eq!(post(server, "s", "input", body).await, (200, "from-python".into()), "{body}");
-        assert_eq!(python.last_body(), body.as_bytes());
+        let (status, reply) = post(server, "s", "input", body).await;
+        assert_eq!((status, reply["detail"]["code"].as_str()), (422, Some("erro_corpo_invalido")), "{body}");
     }
-    // Sem `application/json` o FastAPI não lê o corpo como JSON: quem recusa é ele.
+    // Sem `application/json` o corpo não é lido como JSON: a recusa também é daqui.
     let response = client().post(format!("http://{server}/api/sessions/s/input")).header("content-type", "text/plain")
         .header("authorization", format!("Bearer {OWNER}")).body(r#"{"text":"oi"}"#).send().await.unwrap();
-    assert_eq!(response.text().await.unwrap(), "from-python");
-    assert_eq!(python.hits_to("/api/sessions/s/input"), 5);
+    assert_eq!(response.status().as_u16(), 422);
+    assert_eq!(python.hits_to("/api/sessions/s/input"), 0);
 }
 
 #[tokio::test]
@@ -284,18 +284,19 @@ async fn headless_steer_of_the_queue_without_a_turn_is_409_erro_sem_turno() {
 }
 
 #[tokio::test]
-async fn steer_with_a_body_python_would_refuse_reaches_python() {
+async fn steer_with_a_body_the_route_refuses_is_a_rust_422() {
     let (dir, registry) = (tempfile::tempdir().unwrap(), registry().await);
     open_headless(&registry, dir.path(), "s", "written").await;
     let (python, server) = serve(registry, Duration::from_secs(5)).await;
     for body in [r#"{}"#, r#"{"text":"a","x":1}"#] {
-        assert_eq!(post(server, "s", "steer", body).await, (200, "from-python".into()), "{body}");
+        let (status, reply) = post(server, "s", "steer", body).await;
+        assert_eq!((status, reply["detail"]["code"].as_str()), (422, Some("erro_corpo_invalido")), "{body}");
     }
-    assert_eq!(python.hits_to("/api/sessions/s/steer"), 2);
+    assert_eq!(python.hits_to("/api/sessions/s/steer"), 0);
 }
 
 #[tokio::test]
-async fn unhealthy_terminal_entry_sends_input_to_python() {
+async fn unhealthy_terminal_entry_is_a_rust_error_never_python() {
     let (dir, registry) = (tempfile::tempdir().unwrap(), registry().await);
     open_sick_terminal(&registry, dir.path(), "t").await;
     let target = registry.writable("t").await.unwrap();
@@ -303,29 +304,35 @@ async fn unhealthy_terminal_entry_sends_input_to_python() {
     let snapshot = registry.snapshots().await.unwrap().into_iter().find(|e| e.key == "k-t").unwrap();
     assert_eq!(snapshot.data["error"], "terminal_facts", "doente pelo motivo do vínculo, não por outro");
     let (python, server) = serve(registry, Duration::from_secs(5)).await;
-    assert_eq!(post(server, "t", "input", r#"{"text":"oi"}"#).await, (200, "from-python".into()));
-    assert_eq!(python.hits_to("/api/sessions/t/input"), 1);
+    let (status, reply) = post(server, "t", "input", r#"{"text":"oi"}"#).await;
+    assert_eq!((status, reply["detail"]["code"].as_str()), (503, Some("runtime_unhealthy")));
+    assert_eq!(python.hits_to("/api/sessions/t/input"), 0, "o Python não relança nem responde pela entrada doente");
 }
 
 #[tokio::test]
-async fn clear_on_a_terminal_session_is_forwarded_before_the_gate() {
-    let (dir, registry) = (tempfile::tempdir().unwrap(), registry().await);
-    open_sick_terminal(&registry, dir.path(), "t").await;
+#[cfg(unix)]
+async fn clear_on_a_terminal_session_goes_to_the_rust_actor_never_python() {
+    let (dir, interactions) = (tempfile::tempdir().unwrap(), Arc::new(hangar_server::interactions::InteractionStore::default()));
+    let (registry, _plugin) = crate::session_write_control::registry_with_plugin(&interactions).await;
+    let log = crate::session_write_control::open_terminal(&registry, dir.path(), "t").await;
     open_headless(&registry, dir.path(), "h", "written").await;
     for name in ["t", "h"] { registry.ingress().close(name, Duration::from_secs(1)).await.unwrap(); }
-    let (python, server) = serve(registry, Duration::from_millis(100)).await;
-    // Terminal: o /clear segue ao Python com a porta fechada, sem esperá-la nem responder 409.
-    assert_eq!(post(server, "t", "input", r#"{"text":"  /clear tudo"}"#).await, (200, "from-python".into()));
-    assert_eq!(python.hits_to("/api/sessions/t/input"), 1);
-    // Texto comum e /clear de sessão sem terminal esperam a porta, que segue fechada: 409.
-    assert_eq!(post(server, "t", "input", r#"{"text":"oi"}"#).await.0, 409);
-    assert_eq!(post(server, "h", "input", r#"{"text":"/clear"}"#).await.0, 409);
-    assert_eq!(python.hits_to("/api/sessions/h/input"), 0);
+    let (python, server) = serve(registry.clone(), Duration::from_millis(100)).await;
+    // Porta fechada: o /clear espera como qualquer texto, com e sem terminal; nenhum atalho ao Python.
+    for name in ["t", "h"] {
+        assert_eq!(post(server, name, "input", r#"{"text":"  /clear tudo"}"#).await.0, 409, "{name}");
+    }
+    // Porta aberta: o ator do terminal digita o /clear (a barreira e a conversa nova são dele).
+    registry.ingress().open("t");
+    let (status, reply) = post(server, "t", "input", r#"{"text":"/clear"}"#).await;
+    assert_ne!(reply, Value::String("from-python".into()), "{status}");
+    assert!(std::fs::read_to_string(&log).unwrap_or_default().contains("/clear"), "o /clear chegou ao pane pelo ator");
+    assert_eq!(python.hits_to("/api/sessions/t/input") + python.hits_to("/api/sessions/h/input"), 0, "nada passa pelo Python");
 }
 
 #[test]
-fn codex_compact_goes_to_the_python_control() {
-    // O Python manda `/compact` do Codex como controle (e recusa argumento com 400); texto nunca vira turno.
-    assert!(relays_codex_input("codex", "/compact") && relays_codex_input("codex", "  /compact agora"));
-    assert!(!relays_codex_input("claude", "/compact") && !relays_codex_input("codex", "oi /compact"));
+fn codex_compact_is_a_control_of_the_engine() {
+    // `/compact` do Codex é controle do motor (argumento é recusado com 400); texto nunca vira turno.
+    assert!(is_codex_compact("codex", "/compact") && is_codex_compact("codex", "  /compact agora"));
+    assert!(!is_codex_compact("claude", "/compact") && !is_codex_compact("codex", "oi /compact"));
 }

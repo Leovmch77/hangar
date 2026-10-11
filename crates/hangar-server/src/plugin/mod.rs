@@ -1,4 +1,4 @@
-//! Memória da ponte Claude; o corte das rotas públicas é separado dos consumidores.
+//! Memória e rotas da ponte do plugin do Claude.
 pub mod routes;
 pub mod sources;
 mod store;

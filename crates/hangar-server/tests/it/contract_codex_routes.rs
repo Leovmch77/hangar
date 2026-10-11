@@ -143,20 +143,20 @@ async fn sessions_the_rust_does_not_own_reach_python_intact() {
 }
 
 #[tokio::test]
-async fn guest_and_bodies_fastapi_refuses_reach_python() {
+async fn guest_reaches_python_and_bodies_the_route_refuses_are_a_rust_422() {
     let dir = tempfile::tempdir().unwrap();
     let registry = Arc::new(RuntimeRegistry::new(policy().await, "secret-test".into(), "instance-test".into()));
     let case = golden().into_iter().find(|c| c["name"] == "model_ok").unwrap();
     open(&registry, dir.path(), &case).await;
     let (python, server) = serve(registry).await;
     assert_eq!(call(server, &case, "token-errado").await.1, Value::String("from-python".into()), "convidado segue ao Python");
-    for body in [json!({"model": "gpt-5", "x": 1}), json!({"model": 5}), json!({"effort": "low"})] {
-        let refused = json!({"name": "corpo", "method": "POST", "route": "model", "body": body});
-        assert_eq!(call(server, &refused, OWNER).await.1, Value::String("from-python".into()), "{body}");
-        assert_eq!(python.last_body(), body.to_string().as_bytes());
+    let tier = json!({"service_tier": "turbo"});
+    for (route, body) in [("model", json!({"model": "gpt-5", "x": 1})), ("model", json!({"model": 5})), ("model", json!({"effort": "low"})), ("service-tier", tier)] {
+        let refused = json!({"name": "corpo", "method": "POST", "route": route, "body": body});
+        let (status, reply) = call(server, &refused, OWNER).await;
+        assert_eq!((status, reply["detail"]["code"].as_str()), (422, Some("erro_corpo_invalido")), "{body}");
     }
-    let tier = json!({"name": "tier", "method": "POST", "route": "service-tier", "body": {"service_tier": "turbo"}});
-    assert_eq!(call(server, &tier, OWNER).await.1, Value::String("from-python".into()));
+    assert_eq!(python.hits_to("/api/sessions/s/model") + python.hits_to("/api/sessions/s/service-tier"), 0);
 }
 
 /// Falhas do ator que o cano falso não produz: a função de resposta com o erro do caso dá o mesmo corpo.

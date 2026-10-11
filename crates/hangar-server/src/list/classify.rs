@@ -16,7 +16,7 @@ use super::capped::SESSION_CAP;
 use super::facts_files::{self, HookStates};
 use crate::state::capture::MuxProcess;
 use crate::state::published::Published;
-use crate::terminal_state::{analyze, held_question, PaneAnalysis};
+use crate::terminal_state::{analyze, PaneAnalysis};
 use hangar_api::state::StateEvent;
 
 /// Escrita no transcript até 1 s depois do idle é o resumo pós-Stop, não turno novo.
@@ -74,8 +74,6 @@ pub struct Facts<'a> {
     /// Código de problema do runtime, por nome.
     pub problems: &'a BTreeMap<String, String>,
     pub stall_seconds: f64,
-    /// Pergunta que o hook do plugin segura agora (`plugin_bridge.pergunta_pendente`), por nome.
-    pub held: &'a BTreeMap<String, Value>,
     /// Último estado de cada `Monitor` vivo.
     pub monitors: &'a Published,
 }
@@ -383,19 +381,11 @@ impl Classifier {
             }
         }
 
-        // Pergunta que o pane não mostra: a permissão que o hook do plugin segura para o app (a TUI
-        // não desenha cartão e o registro nativo segue `busy`), ou o menu que rolou para fora e o
-        // marcador não carrega.
+        // Pergunta que o pane não mostra: o menu que rolou para fora e o marcador não carrega. A
+        // permissão que o hook do plugin segura vem do `plugin::Store` depois daqui (`ListBridge::project_plugins`).
         for row in rows.iter_mut() {
             if row.provider != "claude" || row.headless || row.state == "awaiting_input"
                 || row.options.as_ref().is_some_and(|o| !o.is_empty()) || watched.contains(&row.name) {
-                continue;
-            }
-            if let Some(q) = facts.held.get(&row.name).and_then(held_question) {
-                row.state = "awaiting_input".into();
-                row.label = None;
-                row.question = q.question;
-                row.options = Some(q.options);
                 continue;
             }
             if row.jsonl.is_none() {
@@ -569,24 +559,29 @@ mod tests {
     async fn run(row: &mut SessionRow, dirs: &[PathBuf], io: &Fixed, headless: Option<&BTreeMap<String, Value>>) -> Vec<Effect> {
         let hooks = HookStates::load(dirs);
         let facts = Facts { hooks: &hooks, alive: &|_| false, config_dirs: dirs, headless,
-                            problems: &BTreeMap::new(), stall_seconds: 300.0, held: &BTreeMap::new(), monitors: &Published::default() };
+                            problems: &BTreeMap::new(), stall_seconds: 300.0, monitors: &Published::default() };
         Classifier::default().classify(std::slice::from_mut(row), &facts, io).await
     }
 
     #[tokio::test]
     async fn permission_card_after_bash_is_awaiting() {
         // Com o app aberto, o hook do plugin segura a permissão do Bash: a TUI não desenha cartão,
-        // o registro nativo fica `busy` e o marcador `working`. Só a pergunta segurada diz que espera.
+        // o registro nativo fica `busy` e o marcador `working`. Só a pergunta segurada no `plugin::Store`
+        // diz que espera, e ela entra depois da classificação, como em `ListBridge::project_plugins`.
         let (_d, dirs, mut row) = setup("working", 990.0);
         let io = Fixed { frame: Ok(IDLE.into()), wall: 1000.0, calls: Mutex::new(0) };
         let hooks = HookStates::load(&dirs);
-        let held = BTreeMap::from([("s".to_owned(), serde_json::json!({"id": "perm:t1", "questions": [], "tool": "Bash", "resumo": "ls"}))]);
         let facts = Facts { hooks: &hooks, alive: &|_| false, config_dirs: &dirs, headless: Some(&BTreeMap::new()),
-                            problems: &BTreeMap::new(), stall_seconds: 300.0, held: &held, monitors: &Published::default() };
+                            problems: &BTreeMap::new(), stall_seconds: 300.0, monitors: &Published::default() };
         Classifier::default().classify(std::slice::from_mut(&mut row), &facts, &io).await;
-        assert_eq!((row.state.as_str(), row.question.as_deref()), ("awaiting_input", Some("Bash: ls")));
-        assert_eq!(row.options, Some(vec!["Yes".into(), "No".into()]));
-        assert_eq!(row.label, None);
+        assert_eq!(row.state, "working", "a classificação não inventa a pergunta segurada");
+        let mut state = hangar_api::state::StateEvent { state: row.state.clone(), label: row.label.clone(), question: row.question.clone(),
+            options: row.options.clone(), interaction_id: row.interaction_id.clone(), ..Default::default() };
+        let held = [serde_json::json!({"id": "perm:t1", "interaction_id": "shown", "questions": [], "tool": "Bash", "resumo": "ls"})];
+        crate::state::facts::project_plugin_state(&mut state, &held).unwrap();
+        assert_eq!((state.state.as_str(), state.question.as_deref(), state.interaction_id.as_deref()), ("awaiting_input", Some("Bash: ls"), Some("shown")));
+        assert_eq!(state.options, Some(vec!["Yes".into(), "No".into()]));
+        assert_eq!(state.label, None);
         // Sem pergunta segurada, o marcador responde como antes.
         let mut row2 = setup("working", 990.0).2;
         row2.jsonl = row.jsonl.clone();
@@ -606,7 +601,7 @@ mod tests {
             options: Some(vec!["Yes".into(), "No".into()]), status_line: Some("🤖 Haiku".into()),
             limited: true, limit_reset: Some("9:10pm".into()), ..Default::default() }));
         let facts = Facts { hooks: &hooks, alive: &|_| false, config_dirs: &dirs, headless: Some(&BTreeMap::new()),
-                            problems: &BTreeMap::new(), stall_seconds: 300.0, held: &BTreeMap::new(), monitors: &monitors };
+                            problems: &BTreeMap::new(), stall_seconds: 300.0, monitors: &monitors };
         let effects = Classifier::default().classify(std::slice::from_mut(&mut row), &facts, &io).await;
         assert_eq!(*io.calls.lock().unwrap(), 0, "nenhuma captura com o Monitor vivo");
         assert_eq!(effects, vec![], "o Monitor não rebaixa o registro nativo pela lista");
@@ -663,7 +658,7 @@ mod tests {
             let hooks = HookStates::load(&dirs);
             let (headless, problems) = (BTreeMap::new(), BTreeMap::new());
             let facts = Facts { hooks: &hooks, alive: &|_| false, config_dirs: &dirs, headless: Some(&headless),
-                                problems: &problems, stall_seconds: 1e12, held: &BTreeMap::new(), monitors: &Published::default() };
+                                problems: &problems, stall_seconds: 1e12, monitors: &Published::default() };
             let mut c = Classifier::default();
             let io = Fixed { frame: Ok(frame.clone()), wall: 1e9, calls: Mutex::new(0) };
             let n = 200;
@@ -698,7 +693,7 @@ mod tests {
         let hooks = HookStates::default();
         let (headless, problems) = (BTreeMap::new(), BTreeMap::new());
         let facts = Facts { hooks: &hooks, alive: &|_| false, config_dirs: &[], headless: Some(&headless),
-                            problems: &problems, stall_seconds: 300.0, held: &BTreeMap::new(), monitors: &Published::default() };
+                            problems: &problems, stall_seconds: 300.0, monitors: &Published::default() };
         let io = Slow { now: Mutex::new(0), peak: Mutex::new(0) };
         Classifier::default().classify(&mut rows, &facts, &io).await;
         assert!(rows.iter().all(|r| r.state == "idle"));
@@ -711,7 +706,7 @@ mod tests {
         let hooks = HookStates::default();
         let (headless, problems) = (BTreeMap::new(), BTreeMap::new());
         let facts = Facts { hooks: &hooks, alive: &|_| false, config_dirs: &[], headless: Some(&headless),
-                            problems: &problems, stall_seconds: 300.0, held: &BTreeMap::new(), monitors: &Published::default() };
+                            problems: &problems, stall_seconds: 300.0, monitors: &Published::default() };
         let io = MuxCapture::new("tmux", Duration::from_secs(1), Default::default());
         send(Classifier::default().classify(&mut [], &facts, &io));
     }
@@ -748,9 +743,9 @@ mod tests {
         let io = Fixed { frame: Ok(String::new()), wall: 1000.0, calls: Mutex::new(0) };
         let owned = BTreeMap::from([("cx".to_owned(), serde_json::json!({"error": null, "view": {"alive": true, "headless": false,
             "public_state": {"state": "working", "label": null, "question": null, "options": null, "status_line": "gpt-5", "headless": false}}}))]);
-        let (held, monitors, empty) = (BTreeMap::new(), Published::default(), BTreeMap::new());
+        let (monitors, empty) = (Published::default(), BTreeMap::new());
         let facts = Facts { hooks: &hooks, alive: &|_| false, config_dirs: &[], headless: Some(&owned),
-                            problems: &problems, stall_seconds: 1e12, held: &held, monitors: &monitors };
+                            problems: &problems, stall_seconds: 1e12, monitors: &monitors };
         let mut rust = row();
         Classifier::default().classify(std::slice::from_mut(&mut rust), &facts, &io).await;
         assert_eq!((rust.state.as_str(), rust.status_line.as_deref()), ("working", Some("gpt-5")));
@@ -778,7 +773,7 @@ mod tests {
         let monitors = Published::default();
         let io = Fixed { frame: Ok(String::new()), wall: 1000.0, calls: Mutex::new(0) };
         let facts = Facts { hooks: &hooks, alive: &|_| false, config_dirs: &[], headless: Some(&headless),
-                            problems: &problems, stall_seconds: 1e12, held: &BTreeMap::new(), monitors: &monitors };
+                            problems: &problems, stall_seconds: 1e12, monitors: &monitors };
         let mut without = row();
         Classifier::default().classify(std::slice::from_mut(&mut without), &facts, &io).await;
         assert_eq!(without.state, "idle", "sem chat aberto vale o fato do Python");
@@ -809,7 +804,7 @@ mod tests {
         for line in ["🤖 gpt-6-luna (medium) │ 💬 46k/95 46k/828k", "🤖 gpt-6-luna (medium) │ 💬 50k/5 50k/828k"] {
             let headless = view(line);
             let facts = Facts { hooks: &hooks, alive: &|_| false, config_dirs: &[], headless: Some(&headless),
-                                problems: &problems, stall_seconds: 1e12, held: &BTreeMap::new(), monitors: &monitors };
+                                problems: &problems, stall_seconds: 1e12, monitors: &monitors };
             let mut r = row();
             classifier.classify(std::slice::from_mut(&mut r), &facts, &io).await;
             assert_eq!(r.status_line.as_deref(), Some(line));
@@ -817,7 +812,7 @@ mod tests {
         // Ator parado: fica o fato do Python.
         let stopped = BTreeMap::from([("cx".to_owned(), serde_json::json!({"error": null, "view": {"alive": false}}))]);
         let facts = Facts { hooks: &hooks, alive: &|_| false, config_dirs: &[], headless: Some(&stopped),
-                            problems: &problems, stall_seconds: 1e12, held: &BTreeMap::new(), monitors: &monitors };
+                            problems: &problems, stall_seconds: 1e12, monitors: &monitors };
         let mut r = row();
         classifier.classify(std::slice::from_mut(&mut r), &facts, &io).await;
         assert_eq!(r.status_line.as_deref(), Some("🤖 gpt-6.1-sol (high) │ 💬 46k/95 46k/828k"));
@@ -841,7 +836,7 @@ mod tests {
         let hooks = HookStates::load(&dirs);
         let problems = BTreeMap::from([("s".to_owned(), "cano_exited".to_owned())]);
         let facts = Facts { hooks: &hooks, alive: &|_| false, config_dirs: &dirs, headless: None,
-                            problems: &problems, stall_seconds: 300.0, held: &BTreeMap::new(), monitors: &Published::default() };
+                            problems: &problems, stall_seconds: 300.0, monitors: &Published::default() };
         Classifier::default().classify(std::slice::from_mut(&mut row), &facts, &io).await;
         assert_eq!(row.problema.as_deref(), Some(RUNTIME_ABSENT));
     }

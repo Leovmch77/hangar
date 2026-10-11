@@ -12,7 +12,7 @@ use axum::response::Response;
 use serde_json::{Value, json};
 
 use super::input::json_content_type;
-use super::{BODY_LIMIT, busy_body, forward_whole, json_response, session_name, too_large};
+use super::{BODY_LIMIT, busy_body, forward_whole, invalid_body, json_response, session_name, too_large};
 use crate::routes::{AppState, cors, gate, pass};
 use crate::runtime::protocol::RuntimeError;
 
@@ -24,7 +24,7 @@ async fn detached(work: impl Future<Output = Outcome> + Send + 'static) -> Outco
     tokio::spawn(work).await.unwrap_or_else(|_| Some(Err(RuntimeError::new("relaunch_job", "a troca foi interrompida"))))
 }
 
-/// `ModoExecucaoBody`: só `terminal`, booleano estrito. O resto é o 422 do FastAPI, pelo repasse.
+/// `ModoExecucaoBody`: só `terminal`, booleano estrito.
 fn terminal_field(headers: &axum::http::HeaderMap, bytes: &[u8]) -> Option<bool> {
     if !json_content_type(headers) { return None; }
     match serde_json::from_slice::<Value>(bytes).ok()? {
@@ -58,12 +58,15 @@ pub fn reload_refusal(error: &RuntimeError) -> (StatusCode, Value) {
 pub async fn mode(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
     let (fwd, owner) = gate(&st, peer, &req);
     let runtime = st.state.runtime.get().cloned();
-    // Relançar é da vigia, que só existe com o Codex com terminal entregue ao Rust.
-    let (Some(runtime), true, Some(name), true) = (runtime, owner, session_name(req.uri().path()), super::table::CODEX_TERMINAL_OWNED)
+    let (Some(runtime), true, Some(name)) = (runtime, owner, session_name(req.uri().path()))
         else { return pass(&st, req, &fwd).await };
     let (parts, body) = req.into_parts();
     let Ok(bytes) = to_bytes(body, BODY_LIMIT).await else { return too_large(&parts.headers) };
-    let Some(terminal) = terminal_field(&parts.headers, &bytes) else { return forward_whole(&st, parts, bytes, &fwd).await };
+    let Some(terminal) = terminal_field(&parts.headers, &bytes) else {
+        // Corpo torto de Codex do Rust é recusado aqui; o de outra sessão segue ao Python.
+        if runtime.owns_codex_terminal(&name) || runtime.owns_codex_headless(&name).await { return invalid_body(&parts.headers); }
+        return forward_whole(&st, parts, bytes, &fwd).await;
+    };
     let panels = Some(st.term.clone());
     let outcome = detached(async move { runtime.relaunch_codex(&name, terminal, panels).await }).await;
     let (status, body) = match outcome {
@@ -81,7 +84,7 @@ pub async fn mode(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInf
 pub async fn reload(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
     let (fwd, owner) = gate(&st, peer, &req);
     let runtime = st.state.runtime.get().cloned();
-    let (Some(runtime), true, Some(name), true) = (runtime, owner, session_name(req.uri().path()), super::table::CODEX_TERMINAL_OWNED)
+    let (Some(runtime), true, Some(name)) = (runtime, owner, session_name(req.uri().path()))
         else { return pass(&st, req, &fwd).await };
     let outcome = detached(async move { runtime.restart_codex(&name).await }).await;
     let (status, body) = match outcome {

@@ -15,7 +15,7 @@ use tokio::sync::Notify;
 use super::agent_pane::AgentPanes;
 use super::capture::{MuxProcess, PaneCapture};
 use super::edges::RuntimeView;
-use super::facts::{Dead, FactsStore, StateFactsClient};
+use super::facts::{Dead, FactsStore};
 use super::monitor::{CaptureFailed, FileFacts, Frame, LoopInfo, Monitor, RoundFacts, Sources, wall_now};
 use super::preview::{HookFile, HookFiles};
 use crate::list::bridge::{ListBridge, pid_alive};
@@ -113,7 +113,6 @@ impl Hooks {
 pub struct StateEnv {
     pub pool: TerminalPool,
     pub list: Arc<ListBridge>,
-    pub client: StateFactsClient,
     pub diag: crate::diag::DiagClient,
     /// Ligado na subida, quando o servidor tem o runtime (ator de entrada das sessões).
     pub runtime: OnceLock<Arc<RuntimeRegistry>>,
@@ -130,10 +129,10 @@ pub trait Lifecycle: Send + Sync {
 }
 
 impl StateEnv {
-    pub fn new(pool: TerminalPool, list: Arc<ListBridge>, client: StateFactsClient, diag: crate::diag::DiagClient) -> Self {
+    pub fn new(pool: TerminalPool, list: Arc<ListBridge>, diag: crate::diag::DiagClient) -> Self {
         let mut hooks = HookStates::default();
         hooks.set_demoted(list.demoted.clone());
-        Self { pool, list, client, diag, runtime: OnceLock::new(), permissions: Arc::default(), lifecycle: Arc::default(), agents: AgentPanes::default(), hooks: Mutex::new(Hooks::new(hooks)) }
+        Self { pool, list, diag, runtime: OnceLock::new(), permissions: Arc::default(), lifecycle: Arc::default(), agents: AgentPanes::default(), hooks: Mutex::new(Hooks::new(hooks)) }
     }
 
     fn facts(&self) -> &FactsStore { &self.list.state_facts }
@@ -148,7 +147,7 @@ pub fn spawner(env: Arc<StateEnv>) -> SpawnMonitor {
         // Sem terminal, ou Codex com terminal cujo ator é do Rust: o feed do runtime.
         if hub.runtime_feed() {
             let live = env.runtime.get().map(|registry| registry.live(&hub.name));
-            let facts = super::runtime_feed::FeedFacts { store: env.list.state_facts.clone(), client: env.client.clone(), diag: env.diag.clone() };
+            let facts = super::runtime_feed::FeedFacts { store: env.list.state_facts.clone(), diag: env.diag.clone() };
             let feed = super::runtime_feed::RuntimeFeed::new(hub, live, env.list.published.clone(), Some(facts)).with_registry(env.runtime.get().cloned()).with_lifecycle(env.lifecycle.clone());
             let diag = env.diag.clone();
             return tokio::spawn(super::runtime_feed::guarded(Arc::downgrade(hub), feed.run(), move |name| {

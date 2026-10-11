@@ -1,16 +1,10 @@
-//! Fatos do estado que continuam do Python (`state_facts.py`): o que o plugin anunciou, troca de
-//! conta em curso e operação de permissão controlada. Chegam por empurrão (`state.facts` na ponte
-//! da lista) só para sessões cujo retrato o Rust leu (`GET /internal/sessions/{name}/state-facts`),
-//! o que registra o interesse no Python por 30 s. As validades vêm como idade em ms e são aplicadas
-//! aqui com o relógio do Rust. Também o cliente dos serviços que o `Monitor` pede ao Python.
+//! Fatos do estado: a leitura do plugin no `plugin::Store` do Rust (`plugin_reading`) e a memória dos
+//! fatos que a ponte da lista ainda aceita por empurrão (`state.facts`). Nenhuma chamada ao Python:
+//! o retrato e os serviços que o `Monitor` pedia a ele são do Rust.
 use std::collections::HashMap;
-use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use axum::body::Body;
-use http_body_util::BodyExt;
-use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -22,13 +16,8 @@ pub const PLUGIN_STATE: Duration = Duration::from_secs(90);
 pub const QUESTION: Duration = Duration::from_secs(35);
 /// Releitura do retrato: abaixo dos 30 s em que o interesse vence no Python.
 pub const SNAPSHOT_REFRESH: Duration = Duration::from_secs(25);
-pub const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(1);
-pub const SERVICE_TIMEOUT: Duration = Duration::from_secs(2);
-/// O drain pode abrir o executor (`prepare_session`) antes de entregar.
-pub const DELIVER_TIMEOUT: Duration = Duration::from_secs(30);
 /// `problema` do estado quando o retrato não veio: fica o último valor, nunca estado inventado.
 pub const UNAVAILABLE: &str = "state_facts_unavailable";
-const MAX_BODY: usize = 1 << 20;
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 pub struct PluginState { pub state: String, pub reason: Option<String>, pub age_ms: u64 }
@@ -278,90 +267,9 @@ impl FactsStore {
 #[derive(Debug, PartialEq, Eq)]
 pub enum Dead { Ok, InTransfer }
 
-/// Retrato e serviços pedidos ao Python; `Err` é o código que vai ao diário e ao `problema`,
-/// nunca o corpo nem a mensagem do serde.
-#[derive(Clone)]
-pub struct StateFactsClient { upstream: SocketAddr, secret: String, http: crate::proxy::HttpClient }
-
-impl StateFactsClient {
-    pub fn new(upstream: SocketAddr, secret: String) -> Self {
-        Self { upstream, secret, http: crate::proxy::client() }
-    }
-
-    fn url(&self, name: &str, tail: &str) -> String {
-        format!("http://{}/internal/sessions/{}/{tail}", self.upstream, utf8_percent_encode(name, NON_ALPHANUMERIC))
-    }
-
-    async fn call(&self, req: axum::http::Request<Body>, timeout: Duration, prefix: &str) -> Result<Vec<u8>, String> {
-        let work = async {
-            let resp = self.http.request(req).await
-                .map_err(|e| format!("{prefix}_{}", if e.is_connect() { "connect" } else { "unreachable" }))?;
-            if !resp.status().is_success() {
-                return Err(format!("{prefix}_status:{}", resp.status().as_u16()));
-            }
-            let body = http_body_util::Limited::new(resp.into_body(), MAX_BODY).collect().await
-                .map_err(|_| format!("{prefix}_body"))?;
-            Ok(body.to_bytes().to_vec())
-        };
-        tokio::time::timeout(timeout, work).await.map_err(|_| format!("{prefix}_timeout"))?
-    }
-
-    /// Lê o retrato e renova o interesse da sessão no Python.
-    pub async fn snapshot(&self, name: &str) -> Result<StateFacts, String> {
-        let req = axum::http::Request::get(self.url(name, "state-facts")).header("x-hangar-internal", &self.secret)
-            .body(Body::empty()).map_err(|_| "state_facts_request".to_owned())?;
-        let bytes = self.call(req, SNAPSHOT_TIMEOUT, "state_facts").await?;
-        serde_json::from_slice(&bytes).map_err(|e| format!("state_facts_invalid:{:?}", e.classify()))
-    }
-
-    async fn service(&self, name: &str, kind: &str, payload: Value, timeout: Duration) -> Result<Value, String> {
-        let body = json!({"kind": kind, "payload": payload}).to_string();
-        let req = axum::http::Request::post(self.url(name, "state-service")).header("x-hangar-internal", &self.secret)
-            .header("content-type", "application/json").body(Body::from(body))
-            .map_err(|_| "state_service_request".to_owned())?;
-        let bytes = self.call(req, timeout, "state_service").await?;
-        let v: Value = serde_json::from_slice(&bytes).map_err(|e| format!("state_service_invalid:{:?}", e.classify()))?;
-        match v["ok"].as_bool() {
-            Some(true) => Ok(v["data"].clone()),
-            // O tipo vai ao `problema` e ao diário: só identificador curto, nunca texto livre.
-            Some(false) => Err(format!("state_service_failed:{}", v["error_type"].as_str()
-                .filter(|t| !t.is_empty() && t.len() <= 40 && t.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
-                .unwrap_or("unknown"))),
-            None => Err("state_service_invalid:ok".to_owned()),
-        }
-    }
-
-    /// `permission.observe`: a memória do modo é do Python, por session-id; devolve
-    /// `(modo, previous_non_plan)`.
-    pub async fn observe_permission(&self, name: &str, sid: &str, mode: &str) -> Result<(String, String), String> {
-        let v = self.service(name, "permission.observe", json!({"sid": sid, "mode": mode}), SERVICE_TIMEOUT).await?;
-        match (v["mode"].as_str(), v["previous_non_plan"].as_str()) {
-            (Some(m), Some(p)) => Ok((m.to_owned(), p.to_owned())),
-            _ => Err("state_service_invalid:permission".to_owned()),
-        }
-    }
-
-    /// `session.dead`: o Python confere a troca na hora e só com `Ok` esquece o plugin e o quadro.
-    pub async fn dead(&self, name: &str) -> Result<Dead, String> {
-        let v = self.service(name, "session.dead", json!({}), SERVICE_TIMEOUT).await?;
-        match v["result"].as_str() {
-            Some("ok") => Ok(Dead::Ok),
-            Some("em_troca") => Ok(Dead::InTransfer),
-            _ => Err("state_service_invalid:dead".to_owned()),
-        }
-    }
-
-    /// `session.deliverable`: o `adapter.drain` do Python; devolve quantas saíram.
-    pub async fn deliverable(&self, name: &str) -> Result<u64, String> {
-        let v = self.service(name, "session.deliverable", json!({}), DELIVER_TIMEOUT).await?;
-        v["sent"].as_u64().ok_or_else(|| "state_service_invalid:deliverable".to_owned())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     fn facts(seq: u64) -> StateFacts {
         StateFacts { seq, plugin_state: Some(PluginState { state: "working".into(), reason: None, age_ms: 80_000 }),
@@ -443,31 +351,5 @@ mod tests {
         tokio::task::yield_now().await;
         store.push("s", facts(1), Instant::now());
         tokio::time::timeout(Duration::from_secs(2), waiting).await.expect("não acordou").unwrap();
-    }
-
-    /// Python de mentira que responde sempre o mesmo status e corpo.
-    async fn python(status: u16, body: &'static str) -> SocketAddr {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            while let Ok((mut s, _)) = listener.accept().await {
-                let mut buf = [0u8; 4096];
-                let _ = s.read(&mut buf).await;
-                let _ = s.write_all(format!("HTTP/1.1 {status} X\r\ncontent-length: {}\r\n\r\n{body}", body.len()).as_bytes()).await;
-            }
-        });
-        addr
-    }
-
-    #[tokio::test]
-    async fn snapshot_failure_is_error() {
-        let down = StateFactsClient::new(python(503, "x").await, "s".into());
-        assert_eq!(down.snapshot("s").await.unwrap_err(), "state_facts_status:503");
-        let partial = StateFactsClient::new(python(200, r#"{"seq":1}"#).await, "s".into());
-        assert!(partial.snapshot("s").await.unwrap_err().starts_with("state_facts_invalid:"), "campo faltando não vira vazio");
-        let refused = StateFactsClient::new("127.0.0.1:9".parse().unwrap(), "s".into());
-        assert!(refused.snapshot("s").await.is_err());
-        let failed = StateFactsClient::new(python(200, r#"{"ok":false,"error_type":"ValueError"}"#).await, "s".into());
-        assert_eq!(failed.dead("s").await.unwrap_err(), "state_service_failed:ValueError");
     }
 }

@@ -123,6 +123,7 @@ mod contract_list;
 mod contract_pyjson;
 mod contract_tail;
 mod contract_terminal;
+mod conversation_contract;
 mod conversations;
 mod costs_fast_paths;
 mod costs_fx;

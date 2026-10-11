@@ -457,12 +457,10 @@ impl ListBridge {
                 if rows.is_empty() {
                     return None;
                 }
-                let held = BTreeMap::new();
                 let mut problems = inp.facts.problems.clone();
                 for row in rows.iter().filter(|row| row.provider == "claude") { problems.remove(&row.name); }
                 let facts = Facts { hooks, alive: &alive, config_dirs: &config_dirs, headless: inp.headless.as_ref(),
-                    problems: &problems, stall_seconds: inp.facts.stall_seconds, held: &held,
-                    monitors: &published };
+                    problems: &problems, stall_seconds: inp.facts.stall_seconds, monitors: &published };
                 let effects = handle.block_on(classifier.classify_some(&mut rows, &facts, &io));
                 Some((rows, effects))
             });
@@ -538,14 +536,13 @@ impl ListBridge {
             let alive = |pid: i64| pid_alive(&*env.procs, pid);
             let io = MuxCapture::new(env.capture_program.clone(), CAPTURE_TIMEOUT, inp.targets.clone());
             let pre: Vec<SessionRow> = if keep { rows.iter().filter(|r| r.provider == "claude").cloned().collect() } else { Vec::new() };
-            let held = BTreeMap::new();
             let mut problems = inp.facts.problems.clone();
             for row in rows.iter().filter(|row| row.provider == "claude") { problems.remove(&row.name); }
             let effects = caches.classify.with(|Classify { classifier, hooks }| {
                 hooks.refresh(&config_dirs);
                 let facts = Facts { hooks, alive: &alive, config_dirs: &config_dirs,
                     headless: inp.headless.as_ref(), problems: &problems, stall_seconds: inp.facts.stall_seconds,
-                    held: &held, monitors: &published };
+                    monitors: &published };
                 handle.block_on(classifier.classify(&mut rows, &facts, &io))
             });
             let git_dirs = decorate(&env, &caches, &dirs, &config_dirs, &inp, &mut rows, io.wall(), io.mono(), true);
@@ -1022,6 +1019,31 @@ mod tests {
         *lock(&bridge.test_plugins) = Some(reading(InteractionBinding { generation: 2, ..binding }, Err("plugin_store_unavailable".into())));
         let next = bridge.produce_round(&ProduceFacts::default()).await.unwrap().0;
         assert!(next.rows[0].interaction_id.is_none(), "rodada nova não herda cartão da geração anterior");
+    }
+
+    /// A permissão que o plugin segura num Claude com terminal sai do `plugin::Store` do Rust, sem fato do
+    /// Python (o desta ponte nem responde): o pane não desenha cartão e a lista ainda mostra a pergunta.
+    #[tokio::test]
+    async fn held_permission_of_a_terminal_claude_comes_from_the_rust_store() {
+        use crate::interactions::InteractionBinding;
+        use crate::state::facts::{PluginFacts, PluginReading};
+        let tmp = tempfile::tempdir().unwrap();
+        let dirs = Dirs { home: tmp.path().into(), claude: tmp.path().join(".claude"), codex_home: tmp.path().join(".codex"),
+            pi_sessions: tmp.path().join("pi"), omp_config: tmp.path().join("omp"), omp_agent: tmp.path().join("omp/agent"), kimi_home: tmp.path().join("kimi") };
+        let bridge = ListBridge::new(ListEnv { mux: Mux::default(), capture_program: "missing-test-mux".into(),
+            procs: Arc::new(procs::SystemProcs::default()), dirs: Some(dirs) }, FactsClient::new("127.0.0.1:9".parse().unwrap(), "s".into()));
+        let row = serde_json::from_value::<SessionRow>(json!({"name":"t","provider":"claude","headless":false,"lifecycle_id":"k"})).unwrap();
+        *bridge.discovery.lock().await = Some(Discovery { at: Instant::now(), wall: wall_now(), epoch: 0, fresh: true,
+            rows: Arc::new(vec![row]), agent_pids: Arc::default(), panes: Arc::default(), children: Arc::default() });
+        let binding = InteractionBinding { key: "k".into(), conversation: "sid".into(), generation: 1 };
+        let local = PluginFacts { plugin_state: None, waiter_open: true, heartbeat_age_ms: Some(0), question: None,
+            questions: vec![json!({"id":"perm:a","interaction_id":"shown-a","questions":[],"tool":"Bash","resumo":"ls"})], suggestion: "".into() };
+        *lock(&bridge.test_plugins) = Some(BTreeMap::from([("t".into(), Ok(PluginReading { binding, facts: Ok(local) }))]));
+        let produced = bridge.produce_round(&ProduceFacts::default()).await.unwrap().0;
+        let row = &produced.rows[0];
+        assert_eq!((row.state.as_str(), row.question.as_deref(), row.interaction_id.as_deref()),
+            ("awaiting_input", Some("Bash: ls"), Some("shown-a")));
+        assert_eq!(row.options.as_deref(), Some(&["Yes".to_owned(), "No".to_owned()][..]));
     }
 
     #[test]

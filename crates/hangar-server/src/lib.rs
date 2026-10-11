@@ -43,7 +43,7 @@ mod warn_limit;
 
 /// Versão do contrato com o Python (rotas `/internal`, eventos do side-events, ambiente). O
 /// Python (`RUST_SERVER_PROTOCOL`) recusa um binário de outra versão e atende sozinho.
-pub const INTERNAL_PROTOCOL: u32 = 51;
+pub const INTERNAL_PROTOCOL: u32 = 52;
 
 /// Todo socket TCP do servidor, aceito ou aberto. Sem isso o Nagle segura o último pedaço de uma
 /// resposta em pedaços até o ACK atrasado do outro lado; o asyncio do Python já liga sozinho.
@@ -121,9 +121,9 @@ pub async fn serve_until_with_state(
         refresh_loop=Some(accounts::claude_refresh::start(state.accounts.clone(),quota_bridge,registry.clone()));
         let _watchdog = std::env::home_dir().map(|home| AbortOnDrop(tokio::spawn(
             watchdog::run(state.http.clone(), cfg.upstream, cfg.internal_secret.clone(), home))));
-        // A vigia do Codex com terminal só existe quando a tabela entrega essas sessões ao Rust.
+        // A vigia do Codex com terminal precisa das pastas da lista (sidecars e fila).
         let _codex_watch = match state.list.env().dirs.clone() {
-            Some(dirs) if session_write::table::CODEX_TERMINAL_OWNED => {
+            Some(dirs) => {
                 let watcher = std::sync::Arc::new(runtime::codex_terminal::Watcher::new(runtime::codex_terminal::WatchConfig {
                     home: dirs.home.clone(), queue_dir: dirs.claude.join(".hangar-queue"),
                     mux: list::mux::Mux::default(), mux_program: state.list.env().capture_program.clone() }));

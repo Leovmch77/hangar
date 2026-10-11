@@ -245,7 +245,7 @@ async fn registry_counting() -> (Arc<RuntimeRegistry>, Arc<std::sync::atomic::At
     (Arc::new(RuntimeRegistry::new(policy(calls.clone()).await, "secret-test".into(), "instance-test".into())), calls)
 }
 
-async fn open_headless(registry: &RuntimeRegistry, dir: &Path, name: &str) -> Arc<std::sync::Mutex<Vec<Value>>> {
+pub(crate) async fn open_headless(registry: &RuntimeRegistry, dir: &Path, name: &str) -> Arc<std::sync::Mutex<Vec<Value>>> {
     let sink = Arc::new(std::sync::Mutex::new(Vec::new()));
     registry.open(RuntimeTarget { key: format!("k-{name}"), generation: 1, name: name.into(), provider: "claude".into(),
         metadata: json!({"name": name, "headless": true, "session_id": "sid-1", "initialized": true}),
@@ -266,13 +266,13 @@ fn fake_tmux(dir: &Path, name: &str) -> (String, std::path::PathBuf) {
 }
 
 #[cfg(unix)]
-fn keys_sent(log: &Path) -> usize {
+pub(crate) fn keys_sent(log: &Path) -> usize {
     std::fs::read_to_string(log).unwrap_or_default().lines().filter(|l| l.contains("send-keys")).count()
 }
 
 /// Entrada com terminal sobre o tmux falso: o que chega ao ator vira `send-keys` no registro.
 #[cfg(unix)]
-async fn open_terminal(registry: &RuntimeRegistry, dir: &Path, name: &str) -> std::path::PathBuf {
+pub(crate) async fn open_terminal(registry: &RuntimeRegistry, dir: &Path, name: &str) -> std::path::PathBuf {
     let (tmux, log) = fake_tmux(dir, name);
     open_terminal_with(registry, dir, name, vec![tmux]).await;
     log
@@ -300,7 +300,7 @@ async fn serve(registry: Arc<RuntimeRegistry>) -> (Arc<Fake>, std::net::SocketAd
     serve_with_interactions(registry,Arc::new(InteractionStore::default())).await
 }
 
-async fn serve_with_interactions(registry: Arc<RuntimeRegistry>, interactions: Arc<InteractionStore>) -> (Arc<Fake>, std::net::SocketAddr) {
+pub(crate) async fn serve_with_interactions(registry: Arc<RuntimeRegistry>, interactions: Arc<InteractionStore>) -> (Arc<Fake>, std::net::SocketAddr) {
     let (python, upstream) = spawn_fake().await;
     let mut state = AppState::new(config(upstream, "127.0.0.1"));
     state.interactions = interactions;
@@ -309,7 +309,7 @@ async fn serve_with_interactions(registry: Arc<RuntimeRegistry>, interactions: A
     (python, spawn_state(state).await)
 }
 
-async fn send(server: std::net::SocketAddr, method: &str, path: &str, body: &str) -> (u16, Value) {
+pub(crate) async fn send(server: std::net::SocketAddr, method: &str, path: &str, body: &str) -> (u16, Value) {
     let url = format!("http://{server}/api/sessions/{path}");
     let request = match method { "DELETE" => client().delete(url), _ => client().post(url) };
     let response = request.header("content-type", "application/json").header("authorization", format!("Bearer {OWNER}"))
@@ -342,29 +342,30 @@ async fn headless_select_without_identity_is_409_and_never_reaches_the_writer() 
 }
 
 #[tokio::test]
-async fn select_with_a_body_python_would_refuse_reaches_python() {
+async fn select_with_a_body_the_route_refuses_is_a_rust_422() {
     let (dir, registry) = (tempfile::tempdir().unwrap(), registry().await);
     let sink = open_headless(&registry, dir.path(), "s").await;
     let (python, server) = serve(registry).await;
     for body in [r#"{"option":"1","interaction_id":"old"}"#, r#"{"option":0}"#, r#"{"option":51}"#,
         r#"{"option":1,"interaction_id":"old","x":1}"#, r#"{"option":1.5}"#] {
-        assert_eq!(send(server, "POST", "s/select", body).await, (200, "from-python".into()), "{body}");
-        assert_eq!(python.last_body(),body.as_bytes(),"repasse não troca nem completa o ID");
+        let (status, reply) = send(server, "POST", "s/select", body).await;
+        assert_eq!((status, reply["detail"]["code"].as_str()), (422, Some("erro_corpo_invalido")), "{body}");
     }
     let (status,body) = send(server,"POST","s/select",r#"{"option":1,"interaction_id":"old"}"#).await;
     assert_eq!((status,body["detail"]["code"].as_str()),(409,Some("erro_interacao_desatualizada")));
-    assert_eq!(python.hits_to("/api/sessions/s/select"), 5);
+    assert_eq!(python.hits_to("/api/sessions/s/select"), 0, "nunca ao Python normalizar");
     assert!(!sink.lock().unwrap().iter().any(|event|event.to_string().contains("control_response")));
 }
 
 #[tokio::test]
-async fn interrupt_with_a_clear_python_cannot_parse_reaches_python() {
+async fn interrupt_with_a_clear_the_route_cannot_parse_is_a_rust_422() {
     let (dir, registry) = (tempfile::tempdir().unwrap(), registry().await);
     open_headless(&registry, dir.path(), "s").await;
     let (python, server) = serve(registry).await;
-    assert_eq!(send(server, "POST", "s/interrupt?clear=talvez", "").await, (200, "from-python".into()));
+    let (status, body) = send(server, "POST", "s/interrupt?clear=talvez", "").await;
+    assert_eq!((status, body["detail"]["code"].as_str()), (422, Some("erro_corpo_invalido")));
     assert_ne!(send(server, "POST", "s/interrupt?clear=1", "").await.1, json!("from-python"));
-    assert_eq!(python.hits_to("/api/sessions/s/interrupt"), 1, "só o valor que o FastAPI recusa vai a ele");
+    assert_eq!(python.hits_to("/api/sessions/s/interrupt"), 0);
 }
 
 #[tokio::test]
@@ -433,57 +434,89 @@ async fn submit_and_select_reject_stale_ids_without_any_writer_command() {
     assert_eq!(keys_sent(&log), before);
 }
 
+/// Registro com o `plugin::Store` do Rust ligado, como o servidor monta: a pergunta segurada é dele.
+pub(crate) async fn registry_with_plugin(interactions: &Arc<InteractionStore>) -> (Arc<RuntimeRegistry>, Arc<hangar_server::plugin::Store>) {
+    let plugin = Arc::new(hangar_server::plugin::Store::new(interactions.clone()));
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let registry = RuntimeRegistry::new(policy(calls).await, "secret-test".into(), "instance-test".into())
+        .with_interactions(interactions.clone()).with_plugin(plugin.clone());
+    (Arc::new(registry), plugin)
+}
+
+fn held_question() -> hangar_server::plugin::Ask {
+    hangar_server::plugin::Ask { id: "ask:9".into(), questions: Some(vec![json!({"question": "Pasta?", "options": [{"label": "a"}]})]),
+        tool: None, janela_ms: None, summary: None }
+}
+
 #[cfg(unix)]
 #[tokio::test]
-async fn interrupt_whose_plugin_lookup_fails_never_presses_escape() {
-    let (dir, registry) = (tempfile::tempdir().unwrap(), registry().await);
+async fn an_accepted_escape_closes_the_question_in_the_rust_store_without_asking_python() {
+    let (dir, interactions) = (tempfile::tempdir().unwrap(), Arc::new(InteractionStore::default()));
+    let (registry, plugin) = registry_with_plugin(&interactions).await;
     let log = open_terminal(&registry, dir.path(), "t").await;
-    let (python, server) = serve(registry).await;
+    let binding = registry.interaction_binding("t").await.unwrap();
+    let (python, server) = serve_with_interactions(registry, interactions).await;
+    // O Python que ainda soubesse de uma pergunta seria ignorado: a consulta a ele saiu.
     python.fail_plugin(Some(StatusCode::INTERNAL_SERVER_ERROR));
+    let gate = hangar_server::plugin::PermissionGate { app_present: true, terminal_attached: false, mode_without_dialog: false };
+    let poll = plugin.begin_ask(&binding, held_question(), gate, std::time::Instant::now()).unwrap();
+    let before = keys_sent(&log);
+    let (hook, interrupted) = tokio::join!(poll.wait(), send(server, "POST", "t/interrupt", ""));
+    assert_eq!(interrupted, (200, json!({"ok": true})));
+    assert!(keys_sent(&log) > before, "o Esc chegou ao pane");
+    assert_eq!(hook, json!({"answers": null}), "o hook do plugin soube pelo Store do Rust");
+    assert!(plugin.pending_all(&binding, std::time::Instant::now()).unwrap().is_empty());
+    assert_eq!((python.plugin_gets(), python.plugin_posts().len()), (0, 0), "nada pergunta ao Python");
+    assert_eq!(python.hits_to("/api/sessions/t/interrupt"), 0);
+}
+
+/// Sem ler a pergunta segurada no Store, nenhum Esc: o erro aparece na resposta, e o Python não é a reserva.
+#[cfg(unix)]
+#[tokio::test]
+async fn interrupt_whose_store_read_fails_never_presses_escape() {
+    let (dir, interactions) = (tempfile::tempdir().unwrap(), Arc::new(InteractionStore::default()));
+    let (registry, plugin) = registry_with_plugin(&interactions).await;
+    let log = open_terminal(&registry, dir.path(), "t").await;
+    let binding = registry.interaction_binding("t").await.unwrap();
+    // A sessão sai do Store: `pending_all` recusa a leitura antes do Esc.
+    plugin.forget(&binding.key).unwrap();
+    let (python, server) = serve_with_interactions(registry, interactions).await;
     let before = keys_sent(&log);
     let (status, body) = send(server, "POST", "t/interrupt", "").await;
-    assert_eq!((status, body["detail"]["code"].as_str()), (503, Some("erro_envio_falhou")), "{body}");
-    assert!(python.plugin_posts().is_empty());
-    assert_eq!(python.hits_to("/api/sessions/t/interrupt"), 0);
+    assert_ne!(status, 200, "{body}");
+    assert!(body["detail"]["code"].as_str().is_some_and(|code| !code.is_empty()), "erro com código: {body}");
     assert_eq!(keys_sent(&log), before, "sem ler a pergunta, nenhum Esc");
+    assert_eq!((python.plugin_gets(), python.hits_to("/api/sessions/t/interrupt")), (0, 0));
+}
+
+#[tokio::test]
+async fn interrupt_the_terminal_refused_keeps_the_question_open() {
+    let (dir, interactions) = (tempfile::tempdir().unwrap(), Arc::new(InteractionStore::default()));
+    let (registry, plugin) = registry_with_plugin(&interactions).await;
+    open_terminal_without_tmux(&registry, dir.path(), "t").await;
+    let binding = registry.interaction_binding("t").await.unwrap();
+    let (python, server) = serve_with_interactions(registry, interactions).await;
+    let gate = hangar_server::plugin::PermissionGate { app_present: true, terminal_attached: false, mode_without_dialog: false };
+    let _poll = plugin.begin_ask(&binding, held_question(), gate, std::time::Instant::now()).unwrap();
+    let (status, _) = send(server, "POST", "t/interrupt", "").await;
+    assert_ne!(status, 200, "sem tmux o Esc não sai");
+    assert_eq!(plugin.pending_all(&binding, std::time::Instant::now()).unwrap().len(), 1, "pergunta não interrompida segue valendo");
+    assert_eq!(python.plugin_gets(), 0);
 }
 
 #[cfg(unix)]
 #[tokio::test]
-async fn an_accepted_escape_tells_the_plugin_which_question_it_closed() {
+async fn terminal_keys_and_term_input_with_bodies_the_route_refuses_are_a_rust_422() {
     let (dir, registry) = (tempfile::tempdir().unwrap(), registry().await);
     let log = open_terminal(&registry, dir.path(), "t").await;
     let (python, server) = serve(registry).await;
-    python.set_plugin_pending(json!({"id": "ask:9", "questions": []}));
     let before = keys_sent(&log);
-    assert_eq!(send(server, "POST", "t/interrupt", "").await, (200, json!({"ok": true})));
-    assert!(keys_sent(&log) > before, "o Esc chegou ao pane");
-    assert_eq!(python.plugin_posts(), vec![json!({"interrupted": "ask:9"})]);
-    assert_eq!(python.hits_to("/api/sessions/t/interrupt"), 0);
-}
-
-#[tokio::test]
-async fn interrupt_the_terminal_refused_does_not_tell_the_plugin() {
-    let (dir, registry) = (tempfile::tempdir().unwrap(), registry().await);
-    open_terminal_without_tmux(&registry, dir.path(), "t").await;
-    let (python, server) = serve(registry).await;
-    python.set_plugin_pending(json!({"id": "ask:9", "questions": []}));
-    let (status, _) = send(server, "POST", "t/interrupt", "").await;
-    assert_ne!(status, 200, "sem tmux o Esc não sai");
-    assert_eq!(python.plugin_gets(), 1);
-    assert!(python.plugin_posts().is_empty(), "pergunta não interrompida segue valendo");
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn terminal_keys_and_term_input_with_bodies_python_would_refuse_reach_python() {
-    let (dir, registry) = (tempfile::tempdir().unwrap(), registry().await);
-    open_terminal(&registry, dir.path(), "t").await;
-    let (python, server) = serve(registry).await;
     for (route, body) in [("keys", r#"{"key":5}"#), ("keys", r#"{}"#), ("term-input", r#"{"text":5}"#), ("term-input", r#"{"x":1}"#)] {
-        assert_eq!(send(server, "POST", &format!("t/{route}"), body).await, (200, "from-python".into()), "{route} {body}");
+        let (status, reply) = send(server, "POST", &format!("t/{route}"), body).await;
+        assert_eq!((status, reply["detail"]["code"].as_str()), (422, Some("erro_corpo_invalido")), "{route} {body}");
     }
-    assert_eq!(python.hits_to("/api/sessions/t/keys") + python.hits_to("/api/sessions/t/term-input"), 4);
+    assert_eq!(python.hits_to("/api/sessions/t/keys") + python.hits_to("/api/sessions/t/term-input"), 0);
+    assert_eq!(keys_sent(&log), before);
 }
 
 #[cfg(unix)]

@@ -15,7 +15,7 @@ use axum::response::Response;
 use serde_json::{Map, Value, json};
 
 use super::input::{MSG_CODEX_CONTROL, answer, codex_control, json_content_type};
-use super::{Ctx, Owner, Provider, WriteRoute, admit, decide, detail_body, enter_then_find, json_response, relay, session_name};
+use super::{Ctx, Owner, Provider, WriteRoute, admit, decide, detail_body, enter_then_find, invalid_body, json_response, session_name};
 use crate::mods::state::random_hex;
 use crate::permission_control::PermissionAction;
 use crate::routes::{AppState, cors, gate, pass};
@@ -161,7 +161,7 @@ pub fn permission_answer(sent: &Result<RuntimeReply, RuntimeError>) -> Answer {
     }
 }
 
-// ── corpos de pedido: o modelo estrito do FastAPI; o resto é o 422 dele, pelo repasse ──────────
+// ── corpos de pedido: o modelo estrito do FastAPI; o resto é `erro_corpo_invalido` daqui ───────
 
 fn object(bytes: &Bytes, headers: &axum::http::HeaderMap) -> Option<Map<String, Value>> {
     if !json_content_type(headers) { return None; }
@@ -193,7 +193,7 @@ async fn ours(st: &AppState, name: Option<&str>) -> bool {
 
 /// A saúde fica com a admissão; aqui só provedor e modo, pela mesma tabela que anuncia a posse.
 fn codex_owned(provider: &str, terminal: bool) -> bool {
-    provider == "codex" && decide(WriteRoute::CodexControl, Provider::Codex, terminal, true) == Owner::Rust
+    provider == "codex" && decide(WriteRoute::CodexControl, Provider::Codex, terminal) == Owner::Rust
 }
 
 /// Só a sessão Codex do Rust passa pela porta; o resto vai ao Python como chegou.
@@ -202,7 +202,7 @@ async fn admit_codex(st: &Arc<AppState>, peer: SocketAddr, req: Request) -> Resu
         let (fwd, _) = gate(st, peer, &req);
         return Err(pass(st, req, &fwd).await);
     }
-    admit(st, peer, req, WriteRoute::CodexControl, |_| false).await
+    admit(st, peer, req, WriteRoute::CodexControl).await
 }
 
 async fn run(ctx: &Ctx, kind: OperationKind, payload: Value) -> Result<RuntimeReply, RuntimeError> {
@@ -235,7 +235,7 @@ pub async fn models(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
 
 pub async fn model(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
     let (ctx, bytes) = admitted!(st, peer, req);
-    let Some(body) = object(&bytes, ctx.headers()).and_then(|f| strings(&f, "model", Some("effort"))) else { return relay(ctx, bytes).await };
+    let Some(body) = object(&bytes, ctx.headers()).and_then(|f| strings(&f, "model", Some("effort"))) else { return invalid_body(ctx.headers()) };
     let payload = json!({"model": body["model"], "effort": body.get("effort").cloned().unwrap_or(Value::Null)});
     let sent = run(&ctx, OperationKind::SetModel, payload).await;
     log_outcome(&ctx.name, "model", &sent, "troca de modelo do Codex não aceita; a rota responde 409 erro_codex_controle");
@@ -244,7 +244,7 @@ pub async fn model(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectIn
 
 pub async fn service_tier(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
     let (ctx, bytes) = admitted!(st, peer, req);
-    let Some(tier) = object(&bytes, ctx.headers()).and_then(|f| literal(&f, "service_tier", &["default", "priority"])) else { return relay(ctx, bytes).await };
+    let Some(tier) = object(&bytes, ctx.headers()).and_then(|f| literal(&f, "service_tier", &["default", "priority"])) else { return invalid_body(ctx.headers()) };
     let sent = run(&ctx, OperationKind::SetServiceTier, json!({"service_tier": tier})).await;
     log_outcome(&ctx.name, "service_tier", &sent, "troca de service tier do Codex não aceita; a rota responde 409 erro_codex_controle");
     answer(&ctx, service_tier_answer(&tier, &sent))
@@ -252,7 +252,7 @@ pub async fn service_tier(State(st): State<Arc<AppState>>, ConnectInfo(peer): Co
 
 pub async fn mode(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
     let (ctx, bytes) = admitted!(st, peer, req);
-    let Some(mode) = object(&bytes, ctx.headers()).and_then(|f| literal(&f, "mode", &["default", "plan"])) else { return relay(ctx, bytes).await };
+    let Some(mode) = object(&bytes, ctx.headers()).and_then(|f| literal(&f, "mode", &["default", "plan"])) else { return invalid_body(ctx.headers()) };
     let sent = run(&ctx, OperationKind::SetMode, json!({"mode": mode})).await;
     log_outcome(&ctx.name, "mode", &sent, "troca de modo do Codex não aceita; a rota responde 409 erro_codex_controle");
     answer(&ctx, mode_answer(&sent))
@@ -279,7 +279,7 @@ pub async fn limits(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
 
 pub async fn skip_question(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
     let (ctx, bytes) = admitted!(st, peer, req);
-    let Some(body) = object(&bytes, ctx.headers()).and_then(|f| strings(&f, "request_id", None)) else { return relay(ctx, bytes).await };
+    let Some(body) = object(&bytes, ctx.headers()).and_then(|f| strings(&f, "request_id", None)) else { return invalid_body(ctx.headers()) };
     let sent = run(&ctx, OperationKind::SkipQuestion, json!({"request_id": body["request_id"]})).await;
     log_outcome(&ctx.name, "question_skip", &sent, "pular pergunta do Codex não confirmado");
     answer(&ctx, skip_answer(&sent))
@@ -309,7 +309,7 @@ pub async fn permissions(State(st): State<Arc<AppState>>, ConnectInfo(peer): Con
 
 pub async fn set_permission(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
     let (ctx, bytes) = admitted!(st, peer, req);
-    let Some(body) = object(&bytes, ctx.headers()).and_then(|f| strings(&f, "mode", None)) else { return relay(ctx, bytes).await };
+    let Some(body) = object(&bytes, ctx.headers()).and_then(|f| strings(&f, "mode", None)) else { return invalid_body(ctx.headers()) };
     if matches!(ctx.target.handle, EntryHandle::CodexTerminal { .. }) {
         let mode = body["mode"].as_str().unwrap_or_default().to_owned();
         let result = terminal_permission(&ctx, PermissionAction::Set { mode }).await;

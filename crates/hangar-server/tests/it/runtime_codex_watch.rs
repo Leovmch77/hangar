@@ -14,11 +14,11 @@ use std::process::Child;
 use std::sync::Arc;
 use std::time::{Duration,Instant};
 
-struct Fixture { _dir:tempfile::TempDir, home:PathBuf, queue:PathBuf, panes:PathBuf, tmux:PathBuf, root:PathBuf }
+pub(crate) struct Fixture { _dir:tempfile::TempDir, home:PathBuf, queue:PathBuf, panes:PathBuf, tmux:PathBuf, root:PathBuf }
 
 /// `list-panes` lê o arquivo (com `.down` ao lado, o multiplexador não responde); `has-session` procura o
 /// nome nele e `kill-session` o tira.
-fn fixture() -> Fixture {
+pub(crate) fn fixture() -> Fixture {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().to_owned();
     let (home,queue,panes,tmux) = (root.join("home"),root.join("claude").join(".hangar-queue"),root.join("panes"),root.join("fake-tmux"));
@@ -33,7 +33,7 @@ fn fixture() -> Fixture {
 }
 
 impl Fixture {
-    fn watcher(&self) -> Arc<Watcher> {
+    pub(crate) fn watcher(&self) -> Arc<Watcher> {
         Arc::new(Watcher::new(WatchConfig { home:self.home.clone(),queue_dir:self.queue.clone(),
             mux:Mux::with_program(&self.tmux,Duration::from_secs(5)),mux_program:self.tmux.clone().into_os_string() })
             .with_death_after(DEATH_AFTER))
@@ -41,14 +41,14 @@ impl Fixture {
     fn sidecar_dir(&self) -> PathBuf { self.home.join(".hangar").join("codex-sessions") }
     fn sidecar_path(&self,name:&str) -> PathBuf { self.sidecar_dir().join(format!("{name}.json")) }
     /// Grava por rename, como o Python: a pasta muda e a leitura em cache da lista vê a versão nova.
-    fn put_sidecar(&self,name:&str,meta:Value) {
+    pub(crate) fn put_sidecar(&self,name:&str,meta:Value) {
         std::fs::create_dir_all(self.sidecar_dir()).unwrap();
         let tmp = self.sidecar_dir().join(format!("{name}.tmp"));
         std::fs::write(&tmp,meta.to_string()).unwrap();
         std::fs::rename(tmp,self.sidecar_path(name)).unwrap();
     }
     fn sidecar(&self,name:&str) -> Option<Value> { std::fs::read(self.sidecar_path(name)).ok().map(|raw|serde_json::from_slice(&raw).unwrap()) }
-    fn panes(&self,names:&[&str]) {
+    pub(crate) fn panes(&self,names:&[&str]) {
         let lines:String = names.iter().map(|name|format!("{name}\t1\t4242\t/w\t%7\t\tcodex\t1700000000\t0\t0\n")).collect();
         std::fs::write(&self.panes,lines).unwrap();
     }
@@ -59,7 +59,7 @@ impl Fixture {
     }
     fn queue_json(&self,key:&str) -> Value { serde_json::from_slice(&std::fs::read(self.queue_state(key)).unwrap()).unwrap() }
     fn queue_state(&self,key:&str) -> PathBuf { self.queue.join("runtime").join(format!("{key}.json")) }
-    fn meta(&self,name:&str,endpoint:&str,app_pid:Option<u32>,tui:&Child) -> Value {
+    pub(crate) fn meta(&self,name:&str,endpoint:&str,app_pid:Option<u32>,tui:&Child) -> Value {
         json!({"name":name,"provider":"codex","thread_id":"thread-1","rollout_path":null,"cwd":self.root,"model":null,"effort":null,
             "endpoint":endpoint,"app_pid":app_pid,"tui_pid":tui.id(),"codex_home":self.root.join("codex-home")})
     }
@@ -69,7 +69,7 @@ impl Fixture {
 const DEATH_AFTER:Duration = Duration::from_millis(300);
 const CLOCK:ClockSample = ClockSample { monotonic_s:0.0,epoch_s:1000.0 };
 
-fn tui() -> Child { std::process::Command::new("sh").args(["-c","sleep 120; true","codex-tui"]).spawn().unwrap() }
+pub(crate) fn tui() -> Child { std::process::Command::new("sh").args(["-c","sleep 120; true","codex-tui"]).spawn().unwrap() }
 
 fn exited(child:&mut Child) -> bool {
     let deadline = Instant::now() + Duration::from_secs(3);
@@ -80,7 +80,7 @@ fn exited(child:&mut Child) -> bool {
     false
 }
 
-fn finish(children:&mut [&mut Child]) { for child in children { let _ = child.kill(); let _ = child.wait(); } }
+pub(crate) fn finish(children:&mut [&mut Child]) { for child in children { let _ = child.kill(); let _ = child.wait(); } }
 
 fn key_of(meta:&Value) -> String { meta["key"].as_str().expect("chave gravada na adoção").to_owned() }
 
@@ -582,7 +582,6 @@ async fn relaunch_routes_go_to_python_when_the_session_is_not_a_codex_of_the_rus
 }
 
 #[tokio::test]
-#[ignore = "depende do anúncio (CODEX_TERMINAL_OWNED): com a posse desligada a ponte responde 421 antes de olhar a rota"]
 async fn the_hand_over_route_is_gone() {
     let fx = fixture();
     let server_app = fake_app_server(true).await;
@@ -630,7 +629,7 @@ async fn kill_by_name_closes_a_life_the_rust_has_not_adopted_yet() {
 }
 
 /// Servidor com o registro (e a vigia ligada nele), diante de um Python falso.
-async fn serve_owner(registry: Arc<hangar_server::runtime::gateway::RuntimeRegistry>) -> (Arc<crate::fake::Fake>, std::net::SocketAddr) {
+pub(crate) async fn serve_owner(registry: Arc<hangar_server::runtime::gateway::RuntimeRegistry>) -> (Arc<crate::fake::Fake>, std::net::SocketAddr) {
     let (python, upstream) = crate::fake::spawn_fake().await;
     let state = hangar_server::routes::AppState::new(crate::fake::config(upstream, "127.0.0.1"));
     assert!(state.state.runtime.set(registry).is_ok());
@@ -861,7 +860,11 @@ async fn clear_of_a_codex_terminal_of_the_rust_stays_in_the_rust() {
     let registry = registry().await;
     fx.watcher().round(&registry).await;
     assert!(registry.is_terminal("cx-proof").await);
-    assert!(!hangar_server::session_write::input::clear_goes_to_python(&registry,"cx-proof").await,
-        "a fila do Codex com terminal é do Rust: o /clear nunca vai ao Python");
+    let (python, owner) = serve_owner(registry.clone()).await;
+    let response = crate::fake::client().post(format!("http://{owner}/api/sessions/cx-proof/input"))
+        .header("authorization", format!("Bearer {}", crate::fake::OWNER)).header("content-type","application/json")
+        .body(r#"{"text":"/clear"}"#).send().await.unwrap();
+    assert_ne!(response.text().await.unwrap(), "from-python");
+    assert_eq!(python.hits_to("/api/sessions/cx-proof/input"), 0, "a fila do Codex com terminal é do Rust: o /clear nunca vai ao Python");
     finish(&mut [&mut app,&mut tui]);
 }

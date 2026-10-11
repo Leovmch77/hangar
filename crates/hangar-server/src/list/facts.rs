@@ -31,6 +31,10 @@ pub struct RowState {
     pub label: Option<String>,
     pub question: Option<String>,
     pub options: Option<Vec<String>>,
+    /// O ID das `options`, como o Rust o publicou: a projeção só o transporta, e sem ele as opções
+    /// não respondem nada.
+    #[serde(default)]
+    pub interaction_id: Option<String>,
     pub problema: Option<String>,
     pub status_line: Option<String>,
     #[serde(default)]
@@ -68,9 +72,8 @@ pub struct ListFacts {
     /// Escondidas do dono (sessão de convidado que ele não vê).
     pub hidden: HashSet<String>,
     pub problems: BTreeMap<String, String>,
-    /// Pergunta que o hook do plugin segura agora, por nome (`plugin_bridge.pergunta_pendente`):
-    /// a permissão segurada para o app não desenha cartão no pane.
-    pub held: BTreeMap<String, Value>,
+    // A pergunta que o plugin segura não vem mais daqui: a lista a lê do `plugin::Store` do Rust
+    // (`ListBridge::plugin_facts`); um `held` que o Python ainda mande é ignorado.
     pub stall_seconds: f64,
     /// Pedidos de navegador vivos, `{nome: {url, ts}}`, já vencidos pelo Python.
     pub nav: Value,
@@ -88,7 +91,7 @@ pub struct ListFacts {
 impl Default for ListFacts {
     fn default() -> Self {
         Self { states: HashMap::new(), overrides: Vec::new(), frozen: HashSet::new(), orq: Vec::new(),
-            orq_error: None, shared: HashSet::new(), owners: HashMap::new(), hidden: HashSet::new(), problems: BTreeMap::new(), held: BTreeMap::new(),
+            orq_error: None, shared: HashSet::new(), owners: HashMap::new(), hidden: HashSet::new(), problems: BTreeMap::new(),
             stall_seconds: 300.0, nav: Value::Null, shortcuts: None, shadow: None, unknown: true }
     }
 }
@@ -292,6 +295,7 @@ pub fn apply(rows: Vec<SessionRow>, facts: &ListFacts, ok: bool) -> (Vec<Session
             row.label.clone_from(&s.label);
             row.question.clone_from(&s.question);
             row.options.clone_from(&s.options);
+            row.interaction_id.clone_from(&s.interaction_id);
             row.problema.clone_from(&s.problema);
             row.status_line.clone_from(&s.status_line);
             row.pending_questions = s.pending_questions;
@@ -423,6 +427,19 @@ mod tests {
         let (work, aside) = apply(vec![row("pi", "")], &facts, true);
         assert!(work.is_empty());
         assert_eq!(aside[0].interaction_id.as_deref(), Some("pi"));
+    }
+
+    #[test]
+    fn projected_options_keep_their_id_and_a_python_held_question_is_ignored() {
+        let facts: ListFacts = serde_json::from_str(&facts_json(json!([]), Value::Null)
+            .replace(r#""states":{}"#, r#""states":{"cx":{"state":"awaiting_input","label":null,"question":"Rodar?",
+                "options":["Sim","Não"],"interaction_id":"shown-a","problema":null,"status_line":null}}"#)
+            .replace(r#""held":{}"#, r#""held":{"cx":{"id":"perm:velha","questions":[]}}"#)).unwrap();
+        assert_eq!(facts.states["cx"].interaction_id.as_deref(), Some("shown-a"), "o estado substituído chegou");
+        let row = serde_json::from_value::<SessionRow>(json!({"name": "cx", "provider": "codex", "interaction_id": "velho"})).unwrap();
+        let (work, _) = apply(vec![row], &ListFacts { unknown: false, ..facts }, true);
+        assert_eq!((work[0].options.as_ref().map(Vec::len), work[0].interaction_id.as_deref()), (Some(2), Some("shown-a")),
+            "opções sem o ID delas não respondem; ID de outra pergunta também não");
     }
 
     #[test]

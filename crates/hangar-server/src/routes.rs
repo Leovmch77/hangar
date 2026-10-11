@@ -77,7 +77,7 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// Ligação concreta das fontes; a montagem das nove rotas pertence ao corte conjunto.
+    /// Ligação concreta das fontes das nove rotas do plugin.
     pub fn plugin_route_state(self: &Arc<Self>) -> Arc<crate::plugin::routes::RouteState> {
         Arc::new(crate::plugin::routes::RouteState { store: self.plugin.clone(), secret: self.cfg.auth_token.clone(),
             trusted: self.cfg.trusted.clone(), sources: Arc::new(crate::plugin::sources::NativeSources::new(self)) })
@@ -117,8 +117,7 @@ impl AppState {
         let diag = crate::diag::DiagClient::new(cfg.upstream, cfg.internal_secret.clone());
         let facts = crate::list::facts::FactsClient::new(cfg.upstream, cfg.internal_secret.clone());
         let list = Arc::new(crate::list::bridge::ListBridge::new(crate::list::bridge::ListEnv::from_env(), facts));
-        let state = Arc::new(crate::state::live::StateEnv::new(terminal.clone(), list.clone(),
-            crate::state::facts::StateFactsClient::new(cfg.upstream, cfg.internal_secret.clone()), diag.clone()));
+        let state = Arc::new(crate::state::live::StateEnv::new(terminal.clone(), list.clone(), diag.clone()));
         list.set_permissions(state.permissions.clone());
         side.monitors = Some(crate::state::live::spawner(state.clone()));
         let groups = crate::groups::from_env(list.env().dirs.as_ref(),
@@ -266,6 +265,7 @@ pub fn terminal_router(state: Arc<AppState>) -> Router {
         .route("/__hangar_server/pages", axum::routing::post(crate::pages::routes::publish_bridge))
         .route("/__hangar_server/groups", axum::routing::post(crate::groups::bridge::private))
         .route("/__hangar_server/codex/{*rest}", axum::routing::any(crate::session_write::bridge::codex))
+        .route("/__hangar_server/claude/{*rest}", axum::routing::any(crate::session_write::bridge::claude))
         .route("/__hangar_server/presence", axum::routing::get(crate::presence::private))
         .route("/__hangar_server/mods/{name}/{op}", axum::routing::post(crate::mods::routes::bridge))
         .layer(axum::middleware::from_fn(crate::migration_status::count_bridge));
@@ -293,6 +293,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/__hangar_server/pages", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
         .route("/__hangar_server/groups", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
         .route("/__hangar_server/codex/{*rest}", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
+        .route("/__hangar_server/claude/{*rest}", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
         .route("/__hangar_server/presence", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
         .route("/__hangar_server/mods/{name}/{op}", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
         .route("/__hangar_server/term", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
@@ -307,7 +308,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/sessions/{name}/plugin/close", axum::routing::post(crate::mods::routes::close).fallback(pass_any))
         .route("/api/sessions/{name}/plugin/show", axum::routing::post(crate::mods::routes::show).fallback(pass_any))
         .route("/api/sessions/{name}/plugin/input", axum::routing::post(crate::mods::routes::input).fallback(pass_any))
-        .merge(plugin_routes())
+        .merge(plugin_routes(&state))
         // Páginas HTML da conversa: o dono lê no Rust; o convidado segue ao Python.
         .route("/api/sessions/{name}/pages/{id}", get(crate::pages::routes::page).fallback(pass_any))
         .route("/api/sessions/{name}/pages/{id}/shot", get(crate::pages::routes::shot).fallback(pass_any))
@@ -358,8 +359,9 @@ pub fn router(state: Arc<AppState>) -> Router {
         .with_state(state)
 }
 
-fn plugin_routes() -> Router<Arc<AppState>> {
-    let router = Router::new()
+/// A ponte do plugin do Claude (`plugin::routes`) é do Rust inteira; a interface dos mods também.
+fn plugin_routes(state: &Arc<AppState>) -> Router<Arc<AppState>> {
+    Router::new()
         .route("/api/plugin/press-start", axum::routing::post(crate::mods::bridge::press_start).fallback(pass_any))
         .route("/api/plugin/opened", axum::routing::post(crate::mods::bridge::opened).fallback(pass_any))
         .route("/api/plugin/ui", axum::routing::post(crate::mods::bridge::ui).fallback(pass_any))
@@ -368,16 +370,13 @@ fn plugin_routes() -> Router<Arc<AppState>> {
         .route("/api/plugin/copied", axum::routing::post(crate::mods::bridge::copied).fallback(pass_any))
         .route("/api/plugin/focus-target", axum::routing::post(crate::mods::bridge::focus_target).fallback(pass_any))
         .route("/api/plugin/focused", axum::routing::post(crate::mods::bridge::focused).fallback(pass_any))
-        .route("/api/plugin/scroll", axum::routing::post(crate::mods::bridge::scroll).fallback(pass_any));
-    ["whoami", "pull", "suggest", "ask", "ask-fim", "filled", "submitted", "state", "rate"]
-        .into_iter().fold(router, |router, endpoint| {
-            router.route(&format!("/api/plugin/{endpoint}"), axum::routing::any(pass_any))
-        })
+        .route("/api/plugin/scroll", axum::routing::post(crate::mods::bridge::scroll).fallback(pass_any))
+        .merge(crate::plugin::routes::router(state.plugin_route_state()))
 }
 
 fn plugin_router(state: Arc<AppState>) -> Router {
     // A ponte local não expõe o restante da API nem dá acesso às rotas privadas.
-    plugin_routes().fallback(|| async { StatusCode::NOT_FOUND })
+    plugin_routes(&state).fallback(|| async { StatusCode::NOT_FOUND })
         .layer(axum::middleware::from_fn(crate::migration_status::count_public))
         .with_state(state)
 }

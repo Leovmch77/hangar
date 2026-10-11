@@ -1,4 +1,4 @@
-//! Rotas prontas para o corte conjunto; não montadas no roteador público antes dos consumidores.
+//! As nove rotas do plugin do Claude, montadas na porta pública e na ponte local (`routes::plugin_routes`).
 use std::future::Future;
 use std::net::SocketAddr;
 use std::pin::Pin;
@@ -52,7 +52,7 @@ pub struct RouteState {
 }
 
 /// Os modelos Python não têm teto de corpo nessas nove rotas. Não herdar os 16 KiB dos mods.
-pub fn router(state: Arc<RouteState>) -> Router {
+pub fn router<S: Clone + Send + Sync + 'static>(state: Arc<RouteState>) -> Router<S> {
     Router::new()
         .route("/api/plugin/whoami", post(whoami))
         .route("/api/plugin/pull", post(pull))

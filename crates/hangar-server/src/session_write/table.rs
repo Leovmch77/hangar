@@ -16,21 +16,16 @@ impl Provider {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WriteRoute {
     Input, Steer, Interrupt, Select, SelectSubmit, Answer, Keys, TermInput, QueueRemove,
-    /// Rotas só do Codex (`/models`, `/model`, `/limits`, `/commands`…): o Rust só atende o sem terminal.
+    /// Rotas só do Codex (`/models`, `/model`, `/limits`, `/commands`…), com e sem terminal.
     CodexControl,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Owner { Rust, Python }
 
-/// O Codex com terminal é do Rust: vigia, escrita e ciclo de vida. Só vira com os controles do motor
-/// terminal e as permissões prontos; é o que a saúde anuncia e o que liga a vigia.
-pub const CODEX_TERMINAL_OWNED: bool = false;
-
-/// Entrada doente vai ao Python (ele relança e responde como hoje), menos o Codex com terminal do Rust,
-/// que `route_write` recusa com código.
-pub fn decide(route: WriteRoute, provider: Provider, terminal: bool, healthy: bool) -> Owner {
-    if !healthy || provider == Provider::Codex && terminal && !CODEX_TERMINAL_OWNED { return Owner::Python; }
+/// Claude e Codex, com e sem terminal, são do Rust. Entrada doente não muda o dono: `route_write`
+/// recusa com código, e o Python nunca relança nem responde por ela.
+pub fn decide(route: WriteRoute, provider: Provider, terminal: bool) -> Owner {
     match route {
         WriteRoute::CodexControl if provider != Provider::Codex => Owner::Python,
         // Teclas cruas e a aba Submit só existem num pane: sem terminal quem responde é o Python, como hoje.
@@ -49,14 +44,14 @@ pub fn owned_modes() -> Vec<(Provider, bool)> {
     let mut owned = Vec::new();
     for provider in [Provider::Claude, Provider::Codex] {
         for headless in [true, false] {
-            if decide(WriteRoute::Input, provider, !headless, true) == Owner::Rust { owned.push((provider, headless)); }
+            if decide(WriteRoute::Input, provider, !headless) == Owner::Rust { owned.push((provider, headless)); }
         }
     }
     owned
 }
 
-/// O corpo tem a forma mínima que a rota espera? Só a forma: campo a mais ou de tipo errado é do
-/// FastAPI, que o recusa quando o pedido é repassado.
+/// O corpo tem a forma mínima que a rota espera? Só a forma; o modelo estrito cada rota confere.
+/// Sessão do Rust com corpo fora disso recebe `erro_corpo_invalido` daqui, nunca o repasse.
 pub(crate) fn body_ok(route: WriteRoute, body: &Bytes) -> bool {
     use WriteRoute::*;
     let object = || serde_json::from_slice::<serde_json::Value>(body).is_ok_and(|v| v.is_object());
@@ -75,49 +70,33 @@ mod tests {
     const ALL: [WriteRoute; 9] = [Input, Steer, Interrupt, Select, SelectSubmit, Answer, Keys, TermInput, QueueRemove];
 
     #[test]
-    fn healthy_claude_with_a_terminal_is_rust_on_every_route() {
-        for route in ALL { assert_eq!(decide(route, Provider::Claude, true, true), Owner::Rust, "{route:?}"); }
-    }
-
-    #[test]
-    fn healthy_claude_without_a_terminal_is_rust_except_pane_only_routes() {
-        for route in ALL {
-            let want = if matches!(route, Keys | TermInput | SelectSubmit) { Owner::Python } else { Owner::Rust };
-            assert_eq!(decide(route, Provider::Claude, false, true), want, "{route:?}");
+    fn with_a_terminal_every_route_is_rust_for_both_providers() {
+        for provider in [Provider::Claude, Provider::Codex] {
+            for route in ALL { assert_eq!(decide(route, provider, true), Owner::Rust, "{provider:?} {route:?}"); }
         }
     }
 
     #[test]
-    fn unhealthy_entry_goes_to_python() {
-        for route in ALL { for terminal in [true, false] {
-            assert_eq!(decide(route, Provider::Claude, terminal, false), Owner::Python, "{route:?}");
-        } }
-    }
-
-    #[test]
-    fn codex_without_terminal_is_rust() {
-        for route in ALL {
-            let want = if matches!(route, Keys | TermInput | SelectSubmit) { Owner::Python } else { Owner::Rust };
-            assert_eq!(decide(route, Provider::Codex, false, true), want, "{route:?}");
+    fn without_a_terminal_only_the_pane_routes_go_to_python() {
+        for provider in [Provider::Claude, Provider::Codex] {
+            for route in ALL {
+                let want = if matches!(route, Keys | TermInput | SelectSubmit) { Owner::Python } else { Owner::Rust };
+                assert_eq!(decide(route, provider, false), want, "{provider:?} {route:?}");
+            }
         }
     }
 
     #[test]
-    fn codex_with_terminal_is_python() {
-        for route in ALL { assert_eq!(decide(route, Provider::Codex, true, true), Owner::Python, "{route:?}"); }
-    }
-
-    #[test]
-    fn codex_control_is_rust_only_for_healthy_codex_without_terminal() {
-        assert_eq!(decide(CodexControl, Provider::Codex, false, true), Owner::Rust);
-        assert_eq!(decide(CodexControl, Provider::Codex, true, true), Owner::Python);
-        assert_eq!(decide(CodexControl, Provider::Codex, false, false), Owner::Python);
-        for terminal in [true, false] { assert_eq!(decide(CodexControl, Provider::Claude, terminal, true), Owner::Python); }
+    fn codex_control_is_rust_for_codex_in_both_modes_only() {
+        for terminal in [true, false] {
+            assert_eq!(decide(CodexControl, Provider::Codex, terminal), Owner::Rust);
+            assert_eq!(decide(CodexControl, Provider::Claude, terminal), Owner::Python);
+        }
     }
 
     #[test]
     fn owned_modes_come_from_the_table() {
-        assert_eq!(owned_modes(), vec![(Provider::Claude, true), (Provider::Claude, false), (Provider::Codex, true)]);
+        assert_eq!(owned_modes(), vec![(Provider::Claude, true), (Provider::Claude, false), (Provider::Codex, true), (Provider::Codex, false)]);
     }
 
     #[test]

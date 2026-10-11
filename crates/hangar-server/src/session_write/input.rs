@@ -12,7 +12,7 @@ use axum::response::Response;
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use serde_json::{Value, json};
 
-use super::{Ctx, Write, WriteRoute, admit, busy_body, detail_body, json_response, relay, route_write, session_name};
+use super::{Ctx, Write, WriteRoute, admit, busy_body, detail_body, invalid_body, json_response, route_write};
 use crate::mods::state::random_hex;
 use crate::proxy::Forward;
 use crate::routes::{AppState, cors, pass};
@@ -162,8 +162,8 @@ pub fn steer_terminal_done(promoted: bool, confirm: &Result<Value, RuntimeError>
     }
 }
 
-/// O `/compact` do Codex é controle (`thread/compact/start`), não texto: quem decide é o `_send_managed` do Python.
-pub fn relays_codex_input(provider: &str, text: &str) -> bool { provider == "codex" && text.split_whitespace().next() == Some("/compact") }
+/// O `/compact` do Codex é controle do motor (`thread/compact/start`), não texto, com e sem terminal.
+pub fn is_codex_compact(provider: &str, text: &str) -> bool { provider == "codex" && text.split_whitespace().next() == Some("/compact") }
 
 /// Corpo do `InputBody` do FastAPI: só `text` (texto) e `steer` (booleano); o resto é 422 dele.
 fn parse_body(bytes: &Bytes) -> Option<(String, bool)> {
@@ -180,12 +180,6 @@ pub(crate) fn json_content_type(headers: &HeaderMap) -> bool {
     let Ok(text) = value.to_str() else { return false };
     let mime = text.split(';').next().unwrap_or_default().trim().to_ascii_lowercase();
     mime == "application/json" || (mime.starts_with("application/") && mime.ends_with("+json"))
-}
-
-fn is_clear(text: &str) -> bool { text.split_whitespace().next() == Some("/clear") }
-
-fn first_token_is_clear(bytes: &Bytes) -> bool {
-    serde_json::from_slice::<Value>(bytes).ok().is_some_and(|v| v["text"].as_str().is_some_and(is_clear))
 }
 
 pub(super) fn answer(ctx: &Ctx, (status, body): (StatusCode, Value)) -> Response {
@@ -223,25 +217,17 @@ async fn send(st: &AppState, name: &str, target: &WriteTarget, text: &str, steer
     input_answer(&sent, steered)
 }
 
-/// O /clear com terminal esvazia a fila sob `freeze` no Python e segue a ele antes da porta. No Codex com
-/// terminal do Rust a fila é daqui e o /clear é texto do motor, como no `_send_one_codex_locked`.
-pub async fn clear_goes_to_python(runtime: &crate::runtime::gateway::RuntimeRegistry, name: &str) -> bool {
-    runtime.is_terminal(name).await && !runtime.owns_codex_terminal(name)
-}
-
+/// `/clear` é texto como os outros: o ator do terminal levanta a barreira e vigia a conversa nova, e
+/// `reconcile_claude` esvazia a fila e reabre nela; nada passa pelo Python.
 pub async fn input(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
-    let terminal = match (st.state.runtime.get(), session_name(req.uri().path())) {
-        (Some(runtime), Some(name)) => clear_goes_to_python(runtime, &name).await,
-        _ => false,
-    };
-    let (ctx, bytes) = match admit(&st, peer, req, WriteRoute::Input, |body| terminal && first_token_is_clear(body)).await {
+    let (ctx, bytes) = match admit(&st, peer, req, WriteRoute::Input).await {
         Ok(admitted) => admitted,
         Err(response) => return response,
     };
-    let Some((text, steer)) = parse_body(&bytes).filter(|_| json_content_type(ctx.headers())) else { return relay(ctx, bytes).await };
-    if relays_codex_input(&ctx.target.provider, &text) {
-        if ctx.target.terminal { let result = super::codex::compact(&ctx.target, &text).await; return answer(&ctx, result); }
-        return relay(ctx, bytes).await;
+    let Some((text, steer)) = parse_body(&bytes).filter(|_| json_content_type(ctx.headers())) else { return invalid_body(ctx.headers()) };
+    if is_codex_compact(&ctx.target.provider, &text) {
+        let result = super::codex::compact(&ctx.target, &text).await;
+        return answer(&ctx, result);
     }
     let result = send(&ctx.st, &ctx.name, &ctx.target, &text, steer).await;
     answer(&ctx, result)
@@ -263,22 +249,15 @@ pub async fn deliver_text(st: &AppState, name: &str, text: &str) -> Result<(), V
 pub async fn deliver_reply(st: &AppState, name: &str, text: &str) -> (StatusCode, Value) {
     let body = json!({"text": text, "steer": false}).to_string();
     let route = match st.state.runtime.get() {
-        // Mesma ordem do handler: o /clear com terminal segue ao Python antes da porta.
-        Some(runtime) if !(is_clear(text) && clear_goes_to_python(runtime, name).await) =>
-            route_write(runtime, name, WriteRoute::Input, st.write_gate_wait).await,
-        _ => Write::Python,
+        Some(runtime) => route_write(runtime, name, WriteRoute::Input, st.write_gate_wait).await,
+        None => Write::Python,
     };
     match route {
-        // Com terminal o /compact é do motor, como no handler.
-        Write::Rust(held, target) if relays_codex_input(&target.provider, text) && target.terminal => {
+        // O /compact do Codex é do motor, como no handler.
+        Write::Rust(held, target) if is_codex_compact(&target.provider, text) => {
             let result = super::codex::compact(&target, text).await;
             drop(held);
             result
-        }
-        // Sem terminal o /compact do Codex o handler também repassa ao Python, com o passe já solto.
-        Write::Rust(held, target) if relays_codex_input(&target.provider, text) => {
-            drop(held);
-            relay_as_owner(st, name, body).await
         }
         Write::Rust(held, target) => {
             let result = send(st, name, &target, text, false).await;
@@ -301,12 +280,12 @@ fn parse_broadcast(bytes: &Bytes) -> Option<(Vec<String>, String)> {
     (!names.is_empty()).then_some((names, text))
 }
 
-/// `POST /api/broadcast` do dono: o alvo Codex com terminal do Rust recebe aqui, pela entrega do `/input`,
-/// e nunca passa pelo Python; os demais seguem ao Python num pedido só com os nomes deles, e os resultados
-/// se juntam na ordem pedida. Sem alvo do Rust, o pedido vai ao Python como chegou.
+/// `POST /api/broadcast` do dono: o alvo com entrada no Rust (Claude ou Codex) ou Codex com terminal que dá
+/// para adotar recebe aqui, pela entrega do `/input`, e nunca passa pelo Python; os demais seguem ao Python
+/// num pedido só com os nomes deles, e os resultados se juntam na ordem pedida. Sem alvo do Rust, o pedido
+/// vai ao Python como chegou.
 pub async fn broadcast(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
     let (fwd, owner) = crate::routes::gate(&st, peer, &req);
-    // Sem `CODEX_TERMINAL_OWNED` não há vigia (`lib.rs`): nenhum nome é do Rust e tudo vai ao Python inteiro.
     let (Some(runtime), true) = (st.state.runtime.get().cloned(), owner) else { return pass(&st, req, &fwd).await };
     let (parts, body) = req.into_parts();
     let Ok(bytes) = to_bytes(body, super::BODY_LIMIT).await else { return super::too_large(&parts.headers) };
@@ -317,7 +296,7 @@ pub async fn broadcast(State(st): State<Arc<AppState>>, ConnectInfo(peer): Conne
     // Codex com terminal do Rust que não deu para adotar: o código é daqui e o nome nunca vai ao Python.
     let mut refused = serde_json::Map::new();
     for name in &names {
-        if runtime.owns_codex_terminal(name) { ours.insert(name.clone()); continue; }
+        if runtime.has_entry(None, name).await { ours.insert(name.clone()); continue; }
         match runtime.adopt_now(name).await {
             Some(Ok(())) => { ours.insert(name.clone()); }
             Some(Err(error)) => {
@@ -371,13 +350,13 @@ async fn relay_as_owner(st: &AppState, name: &str, body: String) -> (StatusCode,
 }
 
 pub async fn steer(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
-    let (ctx, bytes) = match admit(&st, peer, req, WriteRoute::Steer, |_| false).await {
+    let (ctx, bytes) = match admit(&st, peer, req, WriteRoute::Steer).await {
         Ok(admitted) => admitted,
         Err(response) => return response,
     };
     // Sem corpo = promover a fila; com corpo, o `InputBody` estrito do FastAPI.
     let body = if bytes.is_empty() { Some(None) } else { parse_body(&bytes).map(|(text, _)| Some(text)) };
-    let Some(text) = body.filter(|_| bytes.is_empty() || json_content_type(ctx.headers())) else { return relay(ctx, bytes).await };
+    let Some(text) = body.filter(|_| bytes.is_empty() || json_content_type(ctx.headers())) else { return invalid_body(ctx.headers()) };
     let operation_id = random_hex(16);
     let result = match &ctx.target.handle {
         crate::runtime::gateway::EntryHandle::Terminal { handle, .. } => {

@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 use super::control::{expected, interaction_failure, interaction_result, panel_open_refusal};
 use crate::interactions::{ExpectedInteraction, InteractionError, InteractionKind};
 use super::input::{MSG_CONTROL_DEFERRED, MSG_CONTROL_UNCONFIRMED, answer as respond, json_content_type, runtime_failed};
-use super::{Ctx, WriteRoute, admit, detail_body, relay};
+use super::{Ctx, WriteRoute, admit, detail_body, invalid_body};
 use crate::mods::state::random_hex;
 use crate::routes::AppState;
 use crate::runtime::gateway::EntryHandle;
@@ -83,7 +83,7 @@ fn parse_item(value: &Value) -> Option<Item> {
 }
 
 /// `AnswerBody` estrito. Tipo que o pydantic converte (`"1"`, `1.0`, `"true"`) ou recusa (campo a mais)
-/// não passa daqui: quem decide é o FastAPI, que recebe o pedido intacto.
+/// não passa daqui: a rota recusa com `erro_corpo_invalido`, sem converter nem repassar.
 pub fn parse_body(bytes: &Bytes) -> Option<Body> {
     let value: Value = serde_json::from_slice(bytes).ok()?;
     let object = value.as_object()?;
@@ -277,11 +277,11 @@ async fn terminal(ctx: &Ctx, body: &Body, expected: &ExpectedInteraction, handle
 }
 
 pub async fn answer(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
-    let (ctx, bytes) = match admit(&st, peer, req, WriteRoute::Answer, |_| false).await {
+    let (ctx, bytes) = match admit(&st, peer, req, WriteRoute::Answer).await {
         Ok(admitted) => admitted,
         Err(response) => return response,
     };
-    let Some(body) = parse_body(&bytes).filter(|_| json_content_type(ctx.headers())) else { return relay(ctx, bytes).await };
+    let Some(body) = parse_body(&bytes).filter(|_| json_content_type(ctx.headers())) else { return invalid_body(ctx.headers()) };
     let expected = match expected(&ctx, body.interaction_id.as_deref()).await { Ok(expected) => expected, Err(failed) => return respond(&ctx, failed) };
     let result = match &ctx.target.handle {
         EntryHandle::Terminal { handle, .. } => terminal(&ctx, &body, &expected, handle).await,

@@ -159,18 +159,19 @@ async fn echo(request: axum::extract::Request) -> impl axum::response::IntoRespo
 }
 
 #[tokio::test]
-async fn legacy_bridge_methods_keep_the_path_body_and_loopback_origin() {
+async fn plugin_endpoints_are_rust_and_mods_methods_keep_the_python_path() {
     let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = upstream.local_addr().unwrap();
     let upstream_task = tokio::spawn(async { axum::serve(upstream, axum::Router::new().fallback(echo)).await });
     let mut server = Server::launch(|| AppState::new(config(address, "127.0.0.1"))).await;
-    for endpoint in ["whoami", "pull", "suggest", "ask", "ask-fim", "filled", "submitted", "state", "rate"] {
-        let body = json!({"probe":endpoint}).to_string();
-        let response = http().post(format!("http://{}/api/plugin/{endpoint}?check=1", server.bridge))
-            .header("x-hangar-internal", SECRET).body(body.clone()).send().await.unwrap();
-        assert_eq!(response.status().as_u16(), 200);
-        let received: Value = serde_json::from_str(&response.text().await.unwrap()).unwrap();
-        assert_eq!(received, json!({"path":format!("/api/plugin/{endpoint}?check=1"), "method":"POST", "client_ip":"127.0.0.1", "internal":false, "body":body}));
+    // As nove rotas do plugin são do Rust nas duas portas: pedido sem envelope é recusado aqui, nunca ecoado.
+    for base in [server.bridge, server.public] {
+        for endpoint in ["whoami", "pull", "suggest", "ask", "ask-fim", "filled", "submitted", "state", "rate"] {
+            let response = http().post(format!("http://{base}/api/plugin/{endpoint}?check=1"))
+                .header("x-hangar-internal", SECRET).body(json!({"probe":endpoint}).to_string()).send().await.unwrap();
+            assert!(response.status().is_client_error(), "{endpoint}: {}", response.status());
+            assert!(!response.text().await.unwrap().contains("\"path\""), "{endpoint}: chegou ao Python");
+        }
     }
     let response = http().request(reqwest::Method::OPTIONS, format!("http://{}/api/plugin/ui", server.bridge)).send().await.unwrap();
     assert_eq!(response.status().as_u16(), 200);
@@ -287,7 +288,7 @@ mod held_routes {
         let state = Arc::new(RouteState { store: store.clone(), secret: OWNER.into(), trusted: TrustedHosts::parse("127.0.0.1"), sources: facts.clone() });
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let task = tokio::spawn(async move { axum::serve(listener, plugin::routes::router(state).into_make_service_with_connect_info::<SocketAddr>()).await.unwrap(); });
+        let task = tokio::spawn(async move { axum::serve(listener, plugin::routes::router::<()>(state).into_make_service_with_connect_info::<SocketAddr>()).await.unwrap(); });
         (store, facts, address, Running(task))
     }
     fn envelope() -> Value { json!({"sessao":"original","token":mint_keyed(OWNER,"original","process-key")}) }

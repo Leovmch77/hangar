@@ -1,24 +1,22 @@
 //! `/interrupt`, `/select`, `/select/submit`, `/keys`, `/term-input` e `DELETE …/queue/{id}` de sessão
-//! Claude, com a mesma resposta do Python (`api.py`). Daqui para baixo o Rust é o dono: falha é erro
-//! com código, nunca repasse. A pergunta que o plugin segura ainda mora no Python e vem pela rota
-//! interna temporária `/internal/sessions/{name}/plugin` (sai quando o plugin for do Rust).
+//! Claude e Codex, com a mesma resposta do Python (`api.py`). Daqui para baixo o Rust é o dono: falha é
+//! erro com código, nunca repasse. A pergunta que o plugin segura é do Rust: o ator do terminal a
+//! confere e a fecha no próprio Esc.
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
 
-use axum::body::{Body, Bytes};
+use axum::body::Bytes;
 use axum::extract::{ConnectInfo, Request, State};
 use axum::http::StatusCode;
 use axum::response::Response;
-use http_body_util::BodyExt;
-use percent_encoding::{NON_ALPHANUMERIC, percent_decode_str, utf8_percent_encode};
+use percent_encoding::percent_decode_str;
 use serde_json::{Value, json};
 
 use super::input::{
     Diary, MSG_CODEX_CONTROL, MSG_CONTROL_DEFERRED, MSG_CONTROL_UNCONFIRMED, MSG_STEER_REFUSED, MSG_STEER_UNKNOWN, answer, codex_control,
     control_failed, diary_code, json_content_type, payload_code, runtime_failed, sem_turno,
 };
-use super::{Ctx, WriteRoute, admit, detail_body, relay};
+use super::{Ctx, WriteRoute, admit, detail_body, invalid_body};
 use crate::mods::state::random_hex;
 use crate::interactions::{ExpectedInteraction, InteractionError};
 use crate::routes::AppState;
@@ -27,10 +25,6 @@ use crate::runtime::protocol::{Disposition, OperationKind, RuntimeCommand, Runti
 use crate::runtime::queue::Action;
 
 type Answer = (StatusCode, Value);
-
-/// Pergunta humana e de uma vez só: sem resposta a escrita falha com código, não espera.
-const PLUGIN_TIMEOUT: Duration = Duration::from_secs(5);
-const PLUGIN_BODY_LIMIT: usize = 64 * 1024;
 
 const MSG_NO_TURN: &str = "Não há turno ativo para interromper.";
 const MSG_CODEX_NO_TURN: &str = "Não há turno Codex ativo para interromper.";
@@ -42,7 +36,6 @@ const MSG_NOT_MARKED: &str = "não consegui marcar essa opção no terminal — 
 const MSG_NOT_SUBMITTED: &str = "não consegui enviar as opções marcadas — tente de novo";
 const MSG_NO_PERMISSION: &str = "nenhum pedido de permissão pendente";
 const MSG_NOT_IN_QUEUE: &str = "entrada não está na fila";
-const MSG_PLUGIN_DOWN: &str = "não consegui conferir a pergunta pendente — nada foi enviado";
 
 fn ok() -> Answer { (StatusCode::OK, json!({"ok": true})) }
 
@@ -269,42 +262,6 @@ pub fn queue_answer(removed: &Result<Value, RuntimeError>) -> Answer {
     }
 }
 
-// ── a pergunta do plugin, pela rota interna do Python ───────────────────────────────────────────
-
-fn plugin_request(st: &AppState, name: &str, post: Option<Value>) -> Option<Request> {
-    let url = format!("http://{}/internal/sessions/{}/plugin", st.cfg.upstream, utf8_percent_encode(name, NON_ALPHANUMERIC));
-    let builder = match post { Some(_) => Request::post(url).header("content-type", "application/json"), None => Request::get(url) };
-    builder.header("x-hangar-internal", &st.cfg.internal_secret).body(post.map_or_else(Body::empty, |body| Body::from(body.to_string()))).ok()
-}
-
-async fn plugin_call(st: &AppState, name: &str, post: Option<Value>) -> Option<Value> {
-    let request = plugin_request(st, name, post)?;
-    let response = tokio::time::timeout(PLUGIN_TIMEOUT, st.http.request(request)).await.ok()?.ok()?;
-    if !response.status().is_success() { return None; }
-    let limited = http_body_util::Limited::new(response.into_body(), PLUGIN_BODY_LIMIT);
-    let body = tokio::time::timeout(PLUGIN_TIMEOUT, limited.collect()).await.ok()?.ok()?.to_bytes();
-    serde_json::from_slice(&body).ok()
-}
-
-/// A pergunta que o plugin segura; `Err` quando o Python não respondeu (a escrita não começa).
-pub(super) async fn plugin_pending(ctx: &Ctx) -> Result<Option<Value>, ()> {
-    match plugin_call(&ctx.st, &ctx.name, None).await {
-        // Sem a chave `pending` não é "sem pergunta": é um Python que não entendeu o pedido.
-        Some(body) if body.get("pending").is_some() => Ok(Some(body["pending"].clone()).filter(|p| !p.is_null())),
-        _ => {
-            ctx.st.diag.report("rust.plugin_lookup_failed", &ctx.name, "plugin_lookup", "a pergunta do plugin não foi lida; a escrita não saiu");
-            Err(())
-        }
-    }
-}
-
-/// O Esc já foi dado: falha aqui não desfaz nada, só vai ao diário.
-async fn plugin_interrupted(ctx: &Ctx, id: Option<&str>) {
-    if plugin_call(&ctx.st, &ctx.name, Some(json!({"interrupted": id}))).await.is_none() {
-        ctx.st.diag.report("rust.plugin_notice_failed", &ctx.name, "plugin_notice", "o plugin não soube da interrupção; a pergunta pode seguir aberta");
-    }
-}
-
 // ── rotas ───────────────────────────────────────────────────────────────────────────────────────
 
 fn report(ctx: &Ctx, diary: Diary) {
@@ -313,16 +270,12 @@ fn report(ctx: &Ctx, diary: Diary) {
     ctx.st.diag.report(event, &ctx.name, &code, reason);
 }
 
-pub(super) fn plugin_down(code: &str) -> Answer {
-    (StatusCode::SERVICE_UNAVAILABLE, detail_body(code, MSG_PLUGIN_DOWN, json!({"detalhe": "plugin_unavailable"})))
-}
-
 pub async fn select(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
-    let (ctx, bytes) = match admit(&st, peer, req, WriteRoute::Select, |_| false).await {
+    let (ctx, bytes) = match admit(&st, peer, req, WriteRoute::Select).await {
         Ok(admitted) => admitted,
         Err(response) => return response,
     };
-    let Some((option, supplied)) = parse_option(&bytes).filter(|_| json_content_type(ctx.headers())) else { return relay(ctx, bytes).await };
+    let Some((option, supplied)) = parse_option(&bytes).filter(|_| json_content_type(ctx.headers())) else { return invalid_body(ctx.headers()) };
     let expected = match expected(&ctx, supplied.as_deref()).await { Ok(expected) => expected, Err(failed) => return answer(&ctx, failed) };
     let operation_id = random_hex(16);
     let result = match &ctx.target.handle {
@@ -341,16 +294,15 @@ pub async fn select(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
 }
 
 pub async fn select_submit(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
-    let (ctx, bytes) = match admit(&st, peer, req, WriteRoute::SelectSubmit, |_| false).await {
+    let (ctx, bytes) = match admit(&st, peer, req, WriteRoute::SelectSubmit).await {
         Ok(admitted) => admitted,
         Err(response) => return response,
     };
-    let Some(supplied) = parse_submit(&bytes).filter(|_| bytes.is_empty() || json_content_type(ctx.headers())) else { return relay(ctx, bytes).await };
+    let Some(supplied) = parse_submit(&bytes).filter(|_| bytes.is_empty() || json_content_type(ctx.headers())) else { return invalid_body(ctx.headers()) };
     let expected = match expected(&ctx, supplied.as_deref()).await { Ok(expected) => expected, Err(failed) => return answer(&ctx, failed) };
     // A TUI do Codex não tem a aba Submit do Claude: a pergunta dele se responde pelo `/answer`.
     if matches!(ctx.target.handle, EntryHandle::CodexTerminal { .. }) { return answer(&ctx, interaction_failure(InteractionError::Changed)); }
-    // Sem pane não há aba Submit para dirigir: quem responde, como hoje, é o Python.
-    let EntryHandle::Terminal { handle, .. } = &ctx.target.handle else { return relay(ctx, bytes).await };
+    let EntryHandle::Terminal { handle, .. } = &ctx.target.handle else { unreachable!("a tabela manda o sem terminal ao Python") };
     if expected.target.kind != crate::interactions::InteractionKind::Menu { return answer(&ctx, interaction_failure(InteractionError::Changed)); }
     let result = if st.term.is_active(&ctx.name) { panel_open_refusal() } else {
         let (answered, diary) = submit_answer(&handle.control(random_hex(16), "submit_selected".into(), json!({"interaction_id": supplied})).await);
@@ -362,22 +314,15 @@ pub async fn select_submit(State(st): State<Arc<AppState>>, ConnectInfo(peer): C
 
 pub async fn interrupt(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
     let query = req.uri().query().map(str::to_owned);
-    let (ctx, bytes) = match admit(&st, peer, req, WriteRoute::Interrupt, |_| false).await {
+    let (ctx, _) = match admit(&st, peer, req, WriteRoute::Interrupt).await {
         Ok(admitted) => admitted,
         Err(response) => return response,
     };
-    let Some(clear) = parse_clear(query.as_deref()) else { return relay(ctx, bytes).await };
+    let Some(clear) = parse_clear(query.as_deref()) else { return invalid_body(ctx.headers()) };
     let operation_id = random_hex(16);
     let result = match &ctx.target.handle {
-        EntryHandle::Terminal { handle, .. } => match plugin_pending(&ctx).await {
-            Err(()) => plugin_down("erro_envio_falhou"),
-            Ok(pending) => {
-                let asked = pending.as_ref().and_then(|p| p["id"].as_str()).map(str::to_owned);
-                let interrupted = interrupt_terminal_answer(&handle.control(operation_id, "interrupt".into(), json!({"clear": clear})).await);
-                if interrupted.0 == StatusCode::OK { plugin_interrupted(&ctx, asked.as_deref()).await; }
-                interrupted
-            }
-        },
+        // O ator lê a pergunta do plugin antes do Esc e a fecha só se o Esc saiu.
+        EntryHandle::Terminal { handle, .. } => interrupt_terminal_answer(&handle.control(operation_id, "interrupt".into(), json!({"clear": clear})).await),
         headless => {
             let sent = headless.command(RuntimeCommand { operation_id, kind: OperationKind::Interrupt, payload: json!({}) }).await;
             let codex = ctx.target.provider == "codex";
@@ -389,28 +334,26 @@ pub async fn interrupt(State(st): State<Arc<AppState>>, ConnectInfo(peer): Conne
 }
 
 pub async fn keys(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
-    let (ctx, bytes) = match admit(&st, peer, req, WriteRoute::Keys, |_| false).await {
+    let (ctx, bytes) = match admit(&st, peer, req, WriteRoute::Keys).await {
         Ok(admitted) => admitted,
         Err(response) => return response,
     };
-    let Some(key) = parse_key(&bytes).filter(|_| json_content_type(ctx.headers())) else { return relay(ctx, bytes).await };
-    if matches!(ctx.target.handle, EntryHandle::Headless(_)) { return relay(ctx, bytes).await; }
+    let Some(key) = parse_key(&bytes).filter(|_| json_content_type(ctx.headers())) else { return invalid_body(ctx.headers()) };
     let result = match &ctx.target.handle {
         EntryHandle::Terminal { handle, .. } => control_step_answer(&handle.control(random_hex(16), "navigation_key".into(), json!({"key": key})).await),
         // Codex com terminal: o pane é do Rust também, pelo mesmo escritor de teclas.
         EntryHandle::CodexTerminal { target, cell, .. } => pane_step_answer(&crate::runtime::codex_terminal::pane_driver(&target.terminal, cell.pane_serial(), None).key(&key, false).await),
-        EntryHandle::Headless(_) => unreachable!("relayed above"),
+        EntryHandle::Headless(_) => unreachable!("a tabela manda o sem terminal ao Python"),
     };
     answer(&ctx, result.map_or_else(|refused| refused, |()| ok()))
 }
 
 pub async fn term_input(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
-    let (ctx, bytes) = match admit(&st, peer, req, WriteRoute::TermInput, |_| false).await {
+    let (ctx, bytes) = match admit(&st, peer, req, WriteRoute::TermInput).await {
         Ok(admitted) => admitted,
         Err(response) => return response,
     };
-    let Some((text, key)) = parse_term_input(&bytes).filter(|_| json_content_type(ctx.headers())) else { return relay(ctx, bytes).await };
-    if matches!(ctx.target.handle, EntryHandle::Headless(_)) { return relay(ctx, bytes).await; }
+    let Some((text, key)) = parse_term_input(&bytes).filter(|_| json_content_type(ctx.headers())) else { return invalid_body(ctx.headers()) };
     let result = match term_input_steps(text.as_deref(), key.as_deref()) {
         Err(refused) => refused,
         Ok(steps) => {
@@ -423,7 +366,7 @@ pub async fn term_input(State(st): State<Arc<AppState>>, ConnectInfo(peer): Conn
                         pane_step_answer(&if control == "terminal_input" { driver.text(payload["text"].as_str().unwrap_or("")).await }
                             else { driver.key(payload["key"].as_str().unwrap_or(""), true).await })
                     }
-                    EntryHandle::Headless(_) => unreachable!("relayed above"),
+                    EntryHandle::Headless(_) => unreachable!("a tabela manda o sem terminal ao Python"),
                 };
                 if let Err(refused) = step { done = refused; break; }
             }
@@ -434,14 +377,14 @@ pub async fn term_input(State(st): State<Arc<AppState>>, ConnectInfo(peer): Conn
 }
 
 pub async fn queue_remove(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
-    let (ctx, bytes) = match admit(&st, peer, req, WriteRoute::QueueRemove, |_| false).await {
+    let (ctx, _) = match admit(&st, peer, req, WriteRoute::QueueRemove).await {
         Ok(admitted) => admitted,
         Err(response) => return response,
     };
-    // `/api/sessions/{name}/queue/{id}`: o id é um segmento só; o que sobrar é rota que o FastAPI não casa.
+    // `/api/sessions/{name}/queue/{id}`: o id é um segmento só.
     let path = ctx.parts.uri.path().to_owned();
     let segments: Vec<&str> = path.trim_start_matches("/api/sessions/").split('/').collect();
-    let Some(entry_id) = (segments.len() == 3 && segments[1] == "queue").then(|| percent_decode_str(segments[2]).decode_utf8().ok()).flatten().filter(|id| !id.is_empty()) else { return relay(ctx, bytes).await };
+    let Some(entry_id) = (segments.len() == 3 && segments[1] == "queue").then(|| percent_decode_str(segments[2]).decode_utf8().ok()).flatten().filter(|id| !id.is_empty()) else { return invalid_body(ctx.headers()) };
     let removed = ctx.target.handle.queue(random_hex(16), Action::Remove { entry_id: entry_id.into_owned() }).await;
     answer(&ctx, queue_answer(&removed))
 }

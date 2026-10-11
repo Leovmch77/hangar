@@ -1,12 +1,13 @@
-//! Ponte privada do Codex do Rust (com e sem terminal) para o que entra pelo Python (convidado 8766,
-//! Connect 8768, broadcast, grupo, par, MCP) e para o `DELETE` que ele administra. O Python já autenticou
-//! e só repassa, num sentido: aqui a escrita, a troca de modo e o reinício rodam como os do dono, e o que
-//! o Rust não atende volta como 421, para o Python tratar sozinho (nunca outro repasse ao Rust).
+//! Pontes privadas do Rust para o que entra pelo Python (convidado 8766, Connect 8768, broadcast, grupo,
+//! par, MCP): a do Codex (com e sem terminal), que também recebe o `DELETE` que ele administra, e a das
+//! respostas de pergunta do Claude. O Python já autenticou e só repassa, num sentido: aqui a escrita roda
+//! como a do dono, com o corpo intacto, e o que o Rust não atende volta como 421, para o Python tratar
+//! sozinho (nunca outro repasse ao Rust).
 use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::extract::{ConnectInfo, Request, State};
-use axum::http::{StatusCode, Uri};
+use axum::http::{Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use percent_encoding::{NON_ALPHANUMERIC, percent_decode_str, utf8_percent_encode};
 use serde_json::json;
@@ -19,14 +20,47 @@ pub(crate) struct BridgedOwner;
 
 fn not_ours() -> Response { StatusCode::MISDIRECTED_REQUEST.into_response() }
 
+/// Nome (sem o escape) e rota de `<prefixo><nome>/<rota>`.
+fn split(req: &Request, prefix: &str) -> Option<(String, String)> {
+    let (raw, rest) = req.uri().path().strip_prefix(prefix)?.split_once('/')?;
+    Some((percent_decode_str(raw).decode_utf8().ok()?.into_owned(), rest.to_owned()))
+}
+
+/// Vira o pedido do dono em `/api/sessions/<nome>/<rota>`, com a mesma consulta e sem as credenciais de
+/// quem chegou ao Python.
+fn as_owner(req: &mut Request, name: &str, rest: &str) -> bool {
+    let query = req.uri().query().map(|q| format!("?{q}")).unwrap_or_default();
+    let Ok(uri) = format!("/api/sessions/{}/{rest}{query}", utf8_percent_encode(name, NON_ALPHANUMERIC)).parse::<Uri>() else { return false };
+    *req.uri_mut() = uri;
+    for header in ["x-hangar-internal", "x-forwarded-for", "authorization", "cookie"] { req.headers_mut().remove(header); }
+    req.extensions_mut().insert(BridgedOwner);
+    true
+}
+
+/// `/__hangar_server/claude/<nome>/<rota>`: só `POST` em `answer`, `select` e `select/submit` de sessão
+/// Claude com entrada no Rust, pela mesma rota do dono. Outra rota, método ou sessão: 421.
+pub async fn claude(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, mut req: Request) -> Response {
+    use super::{answer, control};
+    if !crate::workspace_routes::private_ok(&st, peer, req.headers()) { return StatusCode::NOT_FOUND.into_response(); }
+    let Some((name, rest)) = split(&req, "/__hangar_server/claude/") else { return not_ours() };
+    if req.method() != Method::POST || !matches!(rest.as_str(), "answer" | "select" | "select/submit") { return not_ours(); }
+    let Some(runtime) = st.state.runtime.get().cloned() else { return not_ours() };
+    if !runtime.writable(&name).await.is_some_and(|target| target.provider == "claude") { return not_ours(); }
+    if !as_owner(&mut req, &name, &rest) { return not_ours(); }
+    let (s, c) = (State(st), ConnectInfo(peer));
+    match rest.as_str() {
+        "answer" => answer::answer(s, c, req).await,
+        "select" => control::select(s, c, req).await,
+        _ => control::select_submit(s, c, req).await,
+    }
+}
+
 /// `/__hangar_server/codex/<nome>/<rota>`: `kill` (POST) encerra a vida; o resto é a rota de
 /// `/api/sessions/<nome>/<rota>`, com o mesmo método, corpo e consulta.
 pub async fn codex(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, mut req: Request) -> Response {
     if !crate::workspace_routes::private_ok(&st, peer, req.headers()) { return StatusCode::NOT_FOUND.into_response(); }
-    let Some((raw, rest)) = req.uri().path().strip_prefix("/__hangar_server/codex/").and_then(|p| p.split_once('/'))
-        .map(|(name, rest)| (name.to_owned(), rest.to_owned())) else { return not_ours() };
-    let Ok(name) = percent_decode_str(&raw).decode_utf8().map(|n| n.into_owned()) else { return not_ours() };
-    let (Some(runtime), true) = (st.state.runtime.get().cloned(), super::table::CODEX_TERMINAL_OWNED) else { return not_ours() };
+    let Some((name, rest)) = split(&req, "/__hangar_server/codex/") else { return not_ours() };
+    let Some(runtime) = st.state.runtime.get().cloned() else { return not_ours() };
     let method = req.method().as_str().to_owned();
     let outcome = match (method.as_str(), rest.as_str()) {
         ("POST", "kill") => runtime.kill_codex_terminal(&name).await,
@@ -38,11 +72,7 @@ pub async fn codex(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectIn
                     Some(Ok(())) => {}
                 }
             }
-            let query = req.uri().query().map(|q| format!("?{q}")).unwrap_or_default();
-            let Ok(uri) = format!("/api/sessions/{}/{rest}{query}", utf8_percent_encode(&name, NON_ALPHANUMERIC)).parse::<Uri>() else { return not_ours() };
-            *req.uri_mut() = uri;
-            for header in ["x-hangar-internal", "x-forwarded-for", "authorization", "cookie"] { req.headers_mut().remove(header); }
-            req.extensions_mut().insert(BridgedOwner);
+            if !as_owner(&mut req, &name, &rest) { return not_ours(); }
             return dispatch(st, peer, &method, &rest, req).await;
         }
     };
@@ -66,7 +96,7 @@ pub async fn delete(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
     // Só o próprio Rust põe a marca: a que vier de fora sai antes de qualquer decisão.
     req.headers_mut().remove(RUST_CLOSED);
     let name = super::session_name(req.uri().path());
-    // A vigia só existe com o Codex com terminal entregue ao Rust: sem ela, `kill_codex_terminal` é `None`.
+    // Sem vigia (sem as pastas da lista), `kill_codex_terminal` é `None`.
     let (Some(runtime), true, Some(name)) = (st.state.runtime.get().cloned(), owner, name)
         else { return crate::routes::pass(&st, req, &fwd).await };
     match runtime.kill_codex_terminal(&name).await {
