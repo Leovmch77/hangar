@@ -478,6 +478,10 @@ const ERROS: Record<string, (params: Parametros) => string> = {
   erro_drive_sem_fallback: (p) => m.erro_drive_sem_fallback({ erro: String(p.erro) }),
   erro_drive_fallback_falhou: (p) => m.erro_drive_fallback_falhou({ erro: fmtParam(p.erro) }),
   erro_resposta_nao_entregue: () => m.erro_resposta_nao_entregue(),
+  // Resposta sem prova de que é da pergunta exibida (crates/hangar-server/src/interactions.rs).
+  erro_interacao_sem_identidade: () => m.erro_interacao_sem_identidade(),
+  erro_interacao_desatualizada: () => m.erro_interacao_desatualizada(),
+  erro_interacao_indisponivel: () => m.erro_interacao_indisponivel(),
   erro_catalogo_pi_indisponivel: () => m.erro_catalogo_pi_indisponivel(),
   // Mesmo motivo do erro_omp_list_models: codigo proprio pra sessao omp mostrar "feche e reabra"
   // em vez da instrucao do Pi ("reinicie a sessao").

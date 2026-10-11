@@ -128,7 +128,7 @@ export default function AskSheet() {
   }
 
   const handleSubmit = async (answers: AnswerItem[], displayed: AskQuestionPayload) => {
-    if (!current() || inFlight.current === request) return;
+    if (!current() || askKey(displayed) !== request.key || inFlight.current === request) return;
     const target = useServers.getState().servers.find((s) => s.id === serverId);
     if (!target) { setRouteError(m.chat_servidor_removido()); return; }
     inFlight.current = request;

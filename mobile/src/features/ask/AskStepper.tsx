@@ -80,7 +80,7 @@ function AskStepperContent({ payload, onSubmit, onClose }: Props) {
     setSending(true);
     setError('');
     try {
-      await onSubmit(buildAnswers(questions, picks), payload);
+      await onSubmit(buildAnswers(questions, picks), displayed);
     } catch (e) {
       setError(e instanceof Error ? e.message : m.askq_erro_envio());
     } finally {

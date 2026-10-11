@@ -244,6 +244,19 @@ test.each(['review', 'text'])('cancelar Expo guarda o token exibido mesmo com ob
   }));
 });
 
+test('enviar Expo transmite a pergunta exibida mesmo com objeto reutilizado', async () => {
+  const displayed: AskQuestionPayload = { ...payload, request_id: 'same-native-id', interaction_id: 'form-a' };
+  const onSubmit = vi.fn(async () => {});
+  await act(async () => root.render(React.createElement(AskStepper, { payload: displayed, onSubmit })));
+  await click('Primeira');
+  displayed.interaction_id = 'form-b';
+  await click(m.lista_enviar());
+  expect(onSubmit).toHaveBeenLastCalledWith(
+    [expect.objectContaining({ question_id: 'choice', indices: [0] })],
+    expect.objectContaining({ request_id: 'same-native-id', interaction_id: 'form-a' }),
+  );
+});
+
 test.each(['accepted', 'rejected', 'unknown'])('descarte Expo envia A exibida e preserva B no retorno %s', async (outcome) => {
   let finish!: (response: Response) => void;
   vi.stubGlobal('fetch', vi.fn()
