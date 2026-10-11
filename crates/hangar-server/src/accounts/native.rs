@@ -84,7 +84,12 @@ impl AuthCache {
         value: Value,
     ) {
         let mut cache = self.0.lock().unwrap();
-        if *cache.generations.get(key).unwrap_or(&0) == generation {
+        // Leitura que falhou (prazo, processo) não sabe do login: o último bom da mesma credencial fica.
+        let kept = value == unavailable(false)
+            && cache.entries.get(key).is_some_and(|row| {
+                row.signature == signature && row.generation == generation && row.value["status"] != "unavailable"
+            });
+        if !kept && *cache.generations.get(key).unwrap_or(&0) == generation {
             cache.entries.insert(
                 key.clone(),
                 Cached {
@@ -330,10 +335,16 @@ impl AccountService {
             return self.read_codex_auth(account).await;
         };
         if self.codex_auth.0.lock().unwrap().refreshing.insert(key.clone()) {
+            // Solta a marca mesmo se a tarefa cair: presa, a conta nunca mais seria renovada.
+            struct Refreshing(AuthCache, AccountKey);
+            impl Drop for Refreshing {
+                fn drop(&mut self) { self.0.0.lock().unwrap_or_else(|e| e.into_inner()).refreshing.remove(&self.1); }
+            }
             let (service, account) = (self.clone(), account.clone());
+            let guard = Refreshing(self.codex_auth.clone(), key);
             tokio::spawn(async move {
+                let _guard = guard;
                 service.read_codex_auth(&account).await;
-                service.codex_auth.0.lock().unwrap().refreshing.remove(&key);
             });
         }
         value
@@ -470,7 +481,9 @@ mod cache_tests {
         assert_eq!(cache.get(&key, &signature), Some(connected));
         tokio::time::advance(Duration::from_secs(1)).await;
         assert_eq!(cache.get(&key, &signature), None);
-        cache.put(&key, signature.clone(), 0, unavailable(false));
+        cache.invalidate(&key);
+        let generation = cache.generation(&key);
+        cache.put(&key, signature.clone(), generation, unavailable(false));
         tokio::time::advance(Duration::from_secs(19)).await;
         assert!(cache.get(&key, &signature).is_some());
         tokio::time::advance(Duration::from_secs(1)).await;
@@ -482,6 +495,24 @@ mod cache_tests {
             None,
             "consulta anterior à invalidação repovoou o cache"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn failed_read_keeps_the_last_good_login_of_the_same_credential() {
+        let root = tempfile::tempdir().unwrap();
+        let key = AccountKey::new(Provider::Codex, root.path()).unwrap();
+        let signature = vec![None, None];
+        let cache = AuthCache::default();
+        let connected = json!({"status":"connected","email":"fixture@example.test"});
+        cache.put(&key, signature.clone(), 0, connected.clone());
+        // Leitura que estourou o prazo não diz nada do login: a lista não pode piscar "indisponível".
+        cache.put(&key, signature.clone(), 0, unavailable(false));
+        assert_eq!(cache.known(&key, &signature), Some(connected));
+        // CLI ausente e credencial trocada continuam aparecendo.
+        cache.put(&key, signature.clone(), 0, unavailable(true));
+        assert_eq!(cache.known(&key, &signature), Some(unavailable(true)));
+        cache.put(&key, vec![Some(vec![1])], 0, unavailable(false));
+        assert_eq!(cache.known(&key, &vec![Some(vec![1])]), Some(unavailable(false)));
     }
 
     #[tokio::test(start_paused = true)]
