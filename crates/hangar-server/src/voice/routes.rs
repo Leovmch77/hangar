@@ -153,16 +153,20 @@ async fn memory_reply(st: &AppState, req: Request, base: &str) -> Response {
     match (req.method().clone(), id) {
         (Method::GET, None) => match tokio::task::spawn_blocking(move || super::memory::load(&file)).await {
             Ok(Some(entries)) => json_response(StatusCode::OK, json!({"entries": entries})),
-            _ => refuse(StatusCode::INTERNAL_SERVER_ERROR, "memory_unreadable"),
+            Ok(None) => { super::log("voice memory read failed code=memory_unreadable"); refuse(StatusCode::INTERNAL_SERVER_ERROR, "memory_unreadable") }
+            Err(_) => { super::log("voice memory read task failed code=memory_task_failed"); refuse(StatusCode::INTERNAL_SERVER_ERROR, "memory_task_failed") }
         },
         (Method::DELETE, Some(id)) => match tokio::task::spawn_blocking(move || super::memory::forget(&file, &id)).await {
             Ok(Ok(true)) => json_response(StatusCode::OK, json!({"ok": true})),
             Ok(Ok(false)) => refuse(StatusCode::NOT_FOUND, "memory_unknown"),
-            _ => refuse(StatusCode::INTERNAL_SERVER_ERROR, "memory_unreadable"),
+            Ok(Err(why)) => { super::log(format!("voice memory delete failed code=memory_io kind={}", refusal_kind(&why))); refuse(StatusCode::INTERNAL_SERVER_ERROR, "memory_io") }
+            Err(_) => { super::log("voice memory delete task failed code=memory_task_failed"); refuse(StatusCode::INTERNAL_SERVER_ERROR, "memory_task_failed") }
         },
         _ => refuse(StatusCode::METHOD_NOT_ALLOWED, "method_not_allowed"),
     }
 }
+
+fn refusal_kind(why: &super::memory::Refusal) -> &str { if let super::memory::Refusal::Io(k) = why { k } else { "other" } }
 
 fn refuse(status: StatusCode, code: &str) -> Response { json_response(status, json!({"error_code": code})) }
 

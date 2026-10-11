@@ -62,44 +62,48 @@ fn write(path: &Path, file: &File) -> Result<(), Refusal> {
     crate::runtime::queue::atomic_write(path, &bytes).map_err(io)
 }
 
-/// Arquivo corrompido vai para um `.bak` livre antes da primeira gravação: nada escrito à mão some calado.
-fn open_for_write(path: &Path) -> Result<File, Refusal> {
+/// Devolve o arquivo lido e se ele estava corrompido; nada é movido aqui, só `commit` mexe no disco.
+fn open_for_write(path: &Path) -> Result<(File, bool), Refusal> {
     match read(path) {
-        Ok(f) => Ok(f),
+        Ok(f) => Ok((f, false)),
         Err(ReadFail::Io(why)) => Err(Refusal::Io(why)),
-        Err(ReadFail::Corrupt) => {
-            let aside = (0..).map(|n| if n == 0 { path.with_extension("json.bak") } else { path.with_extension(format!("json.{n}.bak")) })
-                .find(|p| !p.exists()).expect("infinite range");
-            std::fs::rename(path, aside).map_err(|e| Refusal::Io(e.kind().to_string()))?;
-            Ok(File::default())
-        }
+        Err(ReadFail::Corrupt) => Ok((File::default(), true)),
     }
+}
+
+/// Grava; se o arquivo estava corrompido, guarda-o num `.bak` livre só agora e o devolve se a gravação falhar.
+fn commit(path: &Path, file: &File, corrupt: bool) -> Result<(), Refusal> {
+    if !corrupt { return write(path, file); }
+    let aside = (0..).map(|n| if n == 0 { path.with_extension("json.bak") } else { path.with_extension(format!("json.{n}.bak")) })
+        .find(|p| !p.exists()).expect("infinite range");
+    std::fs::rename(path, &aside).map_err(|e| Refusal::Io(e.kind().to_string()))?;
+    write(path, file).inspect_err(|_| { let _ = std::fs::rename(&aside, path); })
 }
 
 pub fn remember(path: &Path, kind: Kind, text: &str, replaces: Option<&str>, today: NaiveDate) -> Result<Entry, Refusal> {
     let text = clean(text);
     if text.is_empty() { return Err(Refusal::Empty); }
     let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let mut file = open_for_write(path)?;
+    let (mut file, corrupt) = open_for_write(path)?;
     let date = today.format("%Y-%m-%d").to_string();
     if let Some(id) = replaces {
         let Some(e) = file.entries.iter_mut().find(|e| e.id == id) else { return Err(Refusal::Unknown(id.to_owned())) };
         (e.kind, e.text, e.learned, e.confirmed) = (kind, text, date.clone(), date);
         let out = e.clone();
-        write(path, &file)?;
+        commit(path, &file, corrupt)?;
         return Ok(out);
     }
     if let Some(e) = file.entries.iter_mut().find(|e| same(&e.text, &text)) {
         e.confirmed = date;
         let out = e.clone();
-        write(path, &file)?;
+        commit(path, &file, corrupt)?;
         return Ok(out);
     }
     if file.entries.len() >= MAX_ENTRIES { return Err(Refusal::Full(file.entries)); }
     file.next += 1;
     let entry = Entry { id: format!("m{}", file.next), kind, text, learned: date.clone(), confirmed: date };
     file.entries.push(entry.clone());
-    write(path, &file)?;
+    commit(path, &file, corrupt)?;
     Ok(entry)
 }
 
@@ -216,6 +220,16 @@ mod tests {
         remember(&p, Kind::Pessoa, "Outro", None, day("2026-10-02")).unwrap();
         assert_eq!(std::fs::read_to_string(p.with_extension("json.bak")).unwrap(), "{ cortado", "o primeiro .bak não é sobrescrito");
         assert_eq!(std::fs::read_to_string(p.with_extension("json.1.bak")).unwrap(), "{ de novo");
+    }
+
+    #[test]
+    fn corrupt_file_stays_put_when_the_write_does_not_happen() {
+        let (_d, p) = tmp();
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, "{ cortado").unwrap();
+        assert!(matches!(remember(&p, Kind::Pessoa, "x", Some("m9"), day("2026-10-01")), Err(Refusal::Unknown(_))));
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "{ cortado");
+        assert!(!p.with_extension("json.bak").exists());
     }
 
     #[test]
