@@ -268,6 +268,8 @@ const UNSUBSCRIBED_TURN_TTL:f64 = 300.0;
 /// Thread sem turno ainda não tem rollout: o `resume` a recusa até o primeiro turno gravar o arquivo.
 fn missing_rollout(message:&str) -> bool { message.contains("no rollout found") }
 
+const UNPROVEN_THREAD:&str = "o Codex respondeu sem comprovar a conversa pedida";
+
 /// Thread principal aberta pela TUI, como `sessions.primary_thread` do Python: subagente e outra pasta não trocam o vínculo.
 fn primary_thread(thread:&Value,cwd:Option<&str>) -> bool {
     cwd.is_some() && thread["cwd"].as_str() == cwd && matches!(thread["source"].as_str(),Some("cli" | "vscode"))
@@ -894,22 +896,33 @@ impl Engine {
         self.state.problema_detalhe = Some(detail.chars().take(300).collect());
     }
 
+    /// Abrir conversa só vale comprovado: objeto legível com `thread.id`, e no `resume` exatamente a pedida.
+    /// Sem erro não basta, e o padrão de uma decodificação falha nunca passa.
+    fn opened_thread(&mut self,rpc:&Rpc,line:&Value,effects:&mut Vec<Effect>) -> Option<wire::ThreadStartResponse> {
+        let result = &line["result"];
+        let response:wire::ThreadStartResponse = self.decode_reply(&rpc.method,result,effects);
+        let expected = if rpc.method == "thread/resume" { rpc.params["threadId"].as_str() } else { Some(response.thread.id.as_str()) };
+        (result.is_object() && !response.thread.id.is_empty() && expected == Some(response.thread.id.as_str())).then_some(response)
+    }
+
     /// Só `no rollout found` é "ainda não": thread inválida, recusa e falha de protocolo ficam visíveis e param.
     fn subscribe_reply(&mut self,rpc:&Rpc,line:&Value,effects:&mut Vec<Effect>) {
         let failed = !line["error"].is_null();
+        let result = line.get("result").cloned().unwrap_or(Value::Null);
+        let response = if failed { None } else { self.opened_thread(rpc,line,effects) };
+        let invalid = !failed && response.is_none();
+        let error = if failed { line["error"].clone() } else { json!(UNPROVEN_THREAD) };
         effects.push(Effect::Reply { operation_id:rpc.operation_id.clone(),
-            disposition:if failed { Disposition::Rejected } else { Disposition::Accepted },
-            payload:if failed { json!({"error":line["error"]}) } else { json!({"subscribed":true}) } });
+            disposition:if response.is_some() { Disposition::Accepted } else { Disposition::Rejected },
+            payload:if response.is_some() { json!({"subscribed":true}) } else { json!({"error":error}) } });
         // Resposta de uma conexão ou thread que já não é a atual não muda o vínculo.
         if self.headless || !self.connected || self.subscribed || rpc.params["threadId"] != self.thread_id.as_str() { return; }
-        if failed {
-            let message = line["error"]["message"].as_str().unwrap_or("");
-            if missing_rollout(message) { self.schedule_subscribe(); } else { self.subscription_failed(message,effects); }
+        let Some(response) = response else {
+            let message = if invalid { error.as_str().unwrap_or("") } else { line["error"]["message"].as_str().unwrap_or("") };
+            if !invalid && missing_rollout(message) { self.schedule_subscribe(); } else { self.subscription_failed(message,effects); }
             self.changed(effects,false);
             return;
-        }
-        let result = line.get("result").cloned().unwrap_or_else(||json!({}));
-        let response:wire::ThreadResumeResponse = self.decode_reply(&rpc.method,&result,effects);
+        };
         self.subscribed = true; self.ready = true; self.subscribe_due = None; self.subscribe_wait = SUBSCRIBE_RETRY_BASE;
         if self.state.problema.as_deref() == Some("codex_conversa_nao_abriu") { self.state.problema = None; self.state.problema_detalhe = None; }
         if let Some(path) = response.thread.path.clone().filter(|path|!path.is_empty()) { self.rollout_path = Some(path); }
@@ -1517,6 +1530,12 @@ impl Engine {
             return Ok(());
         }
         if subscribe_rpc(&rpc) { self.subscribe_reply(&rpc,&line,effects); return Ok(()); }
+        // Conversa aberta sem prova segue o caminho da recusa explícita: nunca fica pronta nem acorda a fila.
+        let mut opened = None;
+        let line = if line["error"].is_null() && !voice_rpc(&rpc) && matches!(rpc.method.as_str(),"thread/resume" | "thread/start") {
+            opened = self.opened_thread(&rpc,&line,effects);
+            if opened.is_some() { line } else { json!({"id":line["id"],"error":{"message":UNPROVEN_THREAD}}) }
+        } else { line };
         if !line["error"].is_null() && !already_initialized {
             if rpc.method == "thread/backgroundTerminals/terminate" {
                 let text = format!("O comando do turno interrompido não foi encerrado ({}): {}",
@@ -1597,8 +1616,8 @@ impl Engine {
                 }
             }
             "thread/resume" | "thread/start" => {
-                let response:wire::ThreadStartResponse = self.decode_reply(&rpc.method,&result,effects);
-                if !response.thread.id.is_empty() && response.thread.id != self.thread_id {
+                let Some(response) = opened.take() else { return Err(error(UNPROVEN_THREAD)) };
+                if response.thread.id != self.thread_id {
                     self.finish_service_tier(Disposition::Unknown,json!({"error":"A conversa mudou antes de confirmar Fast"}),effects);
                     self.clear_preview(effects); self.thread_id = response.thread.id.clone();
                     self.bind_interactions()?;

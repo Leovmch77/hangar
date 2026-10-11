@@ -325,6 +325,30 @@ fn conversation_terminal_invalid_thread_is_not_retried_and_shows_problem() {
 }
 
 #[test]
+fn conversation_terminal_unproven_resume_result_is_refused_and_does_not_wake_queue() {
+    for result in [json!({}),json!("thread-1"),json!({"thread":{"id":"thread-2","path":"/r/two.jsonl","status":{"type":"idle"},"turns":[]}})] {
+        let mut engine = terminal();
+        let resume = resume_of(&connect(&mut engine));
+        let effects = line(&mut engine,json!({"id":resume["id"],"result":result}),12.0);
+        assert!(effects.iter().any(|e|matches!(e,Effect::Reply { disposition:Disposition::Rejected,.. })),"{result}");
+        assert!(!effects.iter().any(|e|matches!(e,Effect::Reply { disposition:Disposition::Accepted,.. })),"{result}");
+        assert!(!effects.iter().any(|e|matches!(e,Effect::WakeQueue)),"{result}");
+        let view = engine.control_view();
+        assert_eq!(view["subscribed"],false,"{result}");
+        assert_eq!(view["ready"],false,"{result}");
+        assert!(view["rollout_path"] != "/r/two.jsonl","{result}");
+        assert_eq!(engine.view()["problema"],"codex_conversa_nao_abriu","{result}");
+    }
+    let mut engine = terminal();
+    let resume = resume_of(&connect(&mut engine));
+    let effects = line(&mut engine,json!({"id":resume["id"],"result":{"thread":{"id":"thread-1","path":"/r/one.jsonl","status":{"type":"idle"},"turns":[]}}}),12.0);
+    assert!(effects.iter().any(|e|matches!(e,Effect::Reply { disposition:Disposition::Accepted,.. })));
+    assert!(effects.iter().any(|e|matches!(e,Effect::WakeQueue)));
+    assert_eq!(engine.control_view()["subscribed"],true);
+    assert_eq!(engine.control_view()["ready"],true);
+}
+
+#[test]
 fn conversation_terminal_subscription_without_reply_is_not_silent_idle() {
     let mut engine = terminal();
     connect(&mut engine);
@@ -697,10 +721,11 @@ fn resume_uses_external_tier_and_thread_change_cancels_pending_choice() {
         line(&mut engine,json!({"id":resume["id"],"result":{"thread":{"id":"thread-1","serviceTier":"wrong"},"serviceTier":wire_tier}}),10.1);
         assert_eq!(engine.control_view()["service_tier"],effective);
     }
+    // Conversa nova (`thread/start`): o `resume` que devolve outra conversa é recusado, não troca o vínculo.
     let mut engine = engine(); let update = tier_update(&mut engine,"default");
-    let resume = json!({"id":"hangar:1:50","method":"thread/resume","params":{"threadId":"thread-1"}});
-    engine.restore_rpc("resume".into(),&resume,0,0);
-    let effects = line(&mut engine,json!({"id":resume["id"],"result":{"thread":{"id":"other"},"serviceTier":"priority"}}),10.2);
+    let start = json!({"id":"hangar:1:50","method":"thread/start","params":{}});
+    engine.restore_rpc("start".into(),&start,0,0);
+    let effects = line(&mut engine,json!({"id":start["id"],"result":{"thread":{"id":"other"},"serviceTier":"priority"}}),10.2);
     assert!(effects.iter().any(|effect|matches!(effect,Effect::Reply { operation_id,disposition:Disposition::Unknown,.. } if operation_id == "op-1")));
     assert!(!tier_accepted(&line(&mut engine,json!({"id":update["id"],"result":{}}),10.3)));
 }
@@ -1054,6 +1079,40 @@ fn no_rollout_falls_back_to_thread_start() {
     let resume = find_method(&sent,"thread/resume");
     let effects = line(&mut engine,json!({"id":resume["id"],"error":{"code":-32600,"message":"no rollout found for thread id t1"}}),12.0);
     assert!(frames(&effects).iter().any(|f|f["method"] == "thread/start" && f["params"]["model"] == "gpt-6"));
+}
+
+#[test]
+fn headless_unproven_open_result_is_refused_and_does_not_wake_queue() {
+    // `resume` precisa devolver a conversa pedida; `start`, uma conversa com id.
+    let cases = [
+        (json!({"name":"s","thread_id":"t1","headless":true,"cwd":"/p"}),"thread/resume",json!({})),
+        (json!({"name":"s","thread_id":"t1","headless":true,"cwd":"/p"}),"thread/resume",json!("t1")),
+        (json!({"name":"s","thread_id":"t1","headless":true,"cwd":"/p"}),"thread/resume",json!({"thread":{"id":"t2","path":"/r/two.jsonl"}})),
+        (json!({"name":"s","headless":true,"cwd":"/p"}),"thread/start",json!({})),
+        (json!({"name":"s","headless":true,"cwd":"/p"}),"thread/start",json!("t2")),
+        (json!({"name":"s","headless":true,"cwd":"/p"}),"thread/start",json!({"thread":{"id":"","path":"/r/two.jsonl"}})),
+    ];
+    for (meta,method,result) in cases {
+        let (mut engine,sent) = bootstrapped(meta);
+        let open = find_method(&sent,method);
+        let effects = line(&mut engine,json!({"id":open["id"],"result":result}),12.0);
+        assert!(effects.iter().any(|e|matches!(e,Effect::Reply { operation_id,disposition:Disposition::Rejected,.. } if operation_id == "boot")),"{method} {result}");
+        assert!(!effects.iter().any(|e|matches!(e,Effect::Reply { disposition:Disposition::Accepted,.. })),"{method} {result}");
+        assert!(!effects.iter().any(|e|matches!(e,Effect::WakeQueue)),"{method} {result}");
+        assert_eq!(patches(&effects),0,"{method} {result}");
+        assert_eq!(engine.control_view()["ready"],false,"{method} {result}");
+        assert_eq!(engine.view()["problema"],"codex_conversa_nao_abriu","{method} {result}");
+    }
+    for (meta,method,id) in [(json!({"name":"s","thread_id":"t1","headless":true,"cwd":"/p"}),"thread/resume","t1"),
+        (json!({"name":"s","headless":true,"cwd":"/p"}),"thread/start","t2")] {
+        let (mut engine,sent) = bootstrapped(meta);
+        let open = find_method(&sent,method);
+        let effects = line(&mut engine,json!({"id":open["id"],"result":{"thread":{"id":id,"path":"/r/x.jsonl","status":{"type":"idle"},"turns":[]}}}),12.0);
+        assert!(effects.iter().any(|e|matches!(e,Effect::Reply { operation_id,disposition:Disposition::Accepted,.. } if operation_id == "boot")),"{method}");
+        assert!(effects.iter().any(|e|matches!(e,Effect::WakeQueue)),"{method}");
+        assert_eq!(engine.control_view()["ready"],true,"{method}");
+        assert_eq!(engine.control_view()["thread_id"],id,"{method}");
+    }
 }
 
 #[test]
