@@ -24,6 +24,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.gzip import GZipMiddleware
+from starlette.requests import ClientDisconnect
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, StrictBool, model_validator
 from sse_starlette.sse import EventSourceResponse
 from app import (agentes_sync, atomico, atualizacoes, atualizar, btw, closed_names, diag, harness_api,
@@ -530,6 +531,13 @@ from app.runtime_coordinator import TransferInProgress
 async def _ownership_moving(request: Request, exc: TransferInProgress):
     """Posse passando entre Python e Rust (sessão recém-criada, por exemplo): espera curta, não 500."""
     return JSONResponse(status_code=409, content={"detail":erro("session_transfer_busy", str(exc))})
+
+
+@app.exception_handler(ClientDisconnect)
+async def _client_gone(request: Request, exc: ClientDisconnect):
+    """Quem pediu fechou antes de mandar o corpo (o Rust estoura o prazo dele e desiste): ninguém
+    lê a resposta, e quem desistiu já registrou o próprio prazo."""
+    return Response(status_code=499)
 
 
 @app.exception_handler(GitError)
