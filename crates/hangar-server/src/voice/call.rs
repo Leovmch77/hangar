@@ -581,24 +581,32 @@ async fn run_call(options: CallOptions, spawn: Spawn, events: &async_channel::Se
                         ToolCall::UnpairSession(name) => { let _ = events.send(VoiceEvent::UnpairSession(CallId(id), name)).await; "unpair" }
                         ToolCall::Remember { kind, text, replaces } => {
                             let today = chrono::Local::now().date_naive();
-                            match super::memory::remember(&memory_file, kind, &text, replaces.as_deref(), today) {
-                                Ok(entry) => { let _ = rpc.respond(id, tool_reply(format!("Guardado como {}.", entry.id), true)).await; "remembered" }
-                                Err(super::memory::Refusal::Full(list)) => {
+                            // I/O de arquivo fora do worker da chamada (a trava é compartilhada com a rota DELETE).
+                            let file = memory_file.clone();
+                            let done = tokio::task::spawn_blocking(move || super::memory::remember(&file, kind, &text, replaces.as_deref(), today)).await.ok();
+                            match done {
+                                None => { let _ = rpc.respond(id, tool_reply("Não consegui gravar a memória.", false)).await; "memory-io" }
+                                Some(Ok(entry)) => { let _ = rpc.respond(id, tool_reply(format!("Guardado como {}.", entry.id), true)).await; "remembered" }
+                                Some(Err(super::memory::Refusal::Full(list))) => {
                                     let ids: Vec<String> = list.iter().map(|e| format!("{} {}", e.id, e.text)).collect();
                                     let _ = rpc.respond(id, tool_reply(format!("Memória cheia ({}). Substitua uma com replaces ou apague com forget:\n{}",
                                         super::memory::MAX_ENTRIES, ids.join("\n")), false)).await;
                                     "memory-full"
                                 }
-                                Err(super::memory::Refusal::Unknown(missing)) => { let _ = rpc.respond(id, tool_reply(format!("Não existe memória {missing}."), false)).await; "memory-unknown" }
-                                Err(super::memory::Refusal::Empty) => { let _ = rpc.respond(id, tool_reply("Memória vazia não é guardada.", false)).await; "memory-empty" }
-                                Err(super::memory::Refusal::Io(why)) => { let _ = rpc.respond(id, tool_reply(format!("Não consegui gravar a memória: {why}"), false)).await; "memory-io" }
+                                Some(Err(super::memory::Refusal::Unknown(missing))) => { let _ = rpc.respond(id, tool_reply(format!("Não existe memória {missing}."), false)).await; "memory-unknown" }
+                                Some(Err(super::memory::Refusal::Empty)) => { let _ = rpc.respond(id, tool_reply("Memória vazia não é guardada.", false)).await; "memory-empty" }
+                                Some(Err(super::memory::Refusal::Io(why))) => { let _ = rpc.respond(id, tool_reply(format!("Não consegui gravar a memória: {why}"), false)).await; "memory-io" }
                             }
                         }
-                        ToolCall::Forget(memory) => match super::memory::forget(&memory_file, &memory) {
-                            Ok(true) => { let _ = rpc.respond(id, tool_reply("Apagado.", true)).await; "forgot" }
-                            Ok(false) => { let _ = rpc.respond(id, tool_reply("Essa memória não existe.", false)).await; "forget-unknown" }
-                            Err(_) => { let _ = rpc.respond(id, tool_reply("Não consegui ler a memória para apagar.", false)).await; "memory-io" }
-                        },
+                        ToolCall::Forget(memory) => {
+                            let file = memory_file.clone();
+                            let done = tokio::task::spawn_blocking(move || super::memory::forget(&file, &memory)).await.ok();
+                            match done {
+                                Some(Ok(true)) => { let _ = rpc.respond(id, tool_reply("Apagado.", true)).await; "forgot" }
+                                Some(Ok(false)) => { let _ = rpc.respond(id, tool_reply("Essa memória não existe.", false)).await; "forget-unknown" }
+                                Some(Err(_)) | None => { let _ = rpc.respond(id, tool_reply("Não consegui ler a memória para apagar.", false)).await; "memory-io" }
+                            }
+                        }
                         ToolCall::FollowSession(name) => { let _ = events.send(VoiceEvent::FollowSession(CallId(id), name)).await; "follow" }
                         ToolCall::UnfollowSession(name) => { let _ = events.send(VoiceEvent::UnfollowSession(CallId(id), name)).await; "unfollow" }
                         ToolCall::SetMode(_) if let Some(name) = organizer::mode_word_session(spoken.text(&params).unwrap_or_default(), &session_names) => {
