@@ -1012,6 +1012,7 @@
   "board_peer_grupo": "📣 grupo · {n}",
   "board_peer_de": "📟 de: {n}",
   "board_peer_painel": "⚙ configuração · {n}",
+  "board_peer_fora": "🌐 de fora · {n}",
   "board_carregando": "carregando…",
   "ctx_expandir_contexto": "Expandir contexto",
   "ctx_recolher_contexto": "Recolher contexto",

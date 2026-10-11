@@ -3943,7 +3943,7 @@ impl Hangar {
     /// recado do painel não tem sessão para abrir.
     fn peer_head(&self, row: &str, peer: cards::PeerMessage, cx: &mut Context<Self>) -> AnyElement {
         let name = HashMap::from([("n".to_owned(), peer.from.clone())]);
-        let key = match peer.scope { cards::PeerScope::Peer => "board_peer_de", cards::PeerScope::Group => "board_peer_grupo", cards::PeerScope::Panel => "board_peer_painel" };
+        let key = match peer.scope { cards::PeerScope::Peer => "board_peer_de", cards::PeerScope::Group => "board_peer_grupo", cards::PeerScope::Panel => "board_peer_painel", cards::PeerScope::External => "board_peer_fora" };
         let label = crate::i18n::tr_web(key, &name).unwrap_or_else(|| peer.from.clone());
         // O remetente é da máquina da conversa aberta, não da ativa.
         let server = self.open_server();
@@ -4719,7 +4719,7 @@ fn peer_bubble(content: impl IntoElement, scope: cards::PeerScope) -> Div {
 }
 
 fn peer_tint(scope: cards::PeerScope) -> Hsla {
-    match scope { cards::PeerScope::Peer => theme::accent(), cards::PeerScope::Group => theme::warning(), cards::PeerScope::Panel => theme::muted() }
+    match scope { cards::PeerScope::Peer => theme::accent(), cards::PeerScope::Group => theme::warning(), cards::PeerScope::Panel => theme::muted(), cards::PeerScope::External => theme::danger() }
 }
 
 /// Recado de outra sessão numa mensagem do usuário, lido da legenda (os anexos ficam de fora).

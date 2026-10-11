@@ -539,8 +539,8 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
             <!-- Recado de par ([de: X]/[grupo: X]): mesma linguagem da bolha do chat cheio
                  (chip 📟/📣 + tinta accent), versão compacta — sem isto o card mostrava o
                  prefixo cru como se fosse msg tua. -->
-            <div class="bc-user bc-peer" class:bc-peer-group={peer.scope === 'group'}>
-              <span class="bc-peer-chip">{peer.scope === 'group' ? m.board_peer_grupo({ n: peer.from }) : peer.scope === 'panel' ? m.board_peer_painel({ n: peer.from }) : m.board_peer_de({ n: peer.from })}</span>
+            <div class="bc-user bc-peer" class:bc-peer-group={peer.scope === 'group'} class:bc-peer-external={peer.scope === 'external'}>
+              <span class="bc-peer-chip">{peer.scope === 'group' ? m.board_peer_grupo({ n: peer.from }) : peer.scope === 'panel' ? m.board_peer_painel({ n: peer.from }) : peer.scope === 'external' ? m.board_peer_fora({ n: peer.from }) : m.board_peer_de({ n: peer.from })}</span>
               <!-- Em <p> próprio (padrão do UserBubble): {peer.text} solto como irmão do span
                    herdava o whitespace do template como espaço inicial (pre-wrap o exibe). -->
               <p class="bc-peer-text">{peer.text}</p>
@@ -823,6 +823,8 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
   .bc-peer-text { margin: 0; }
   .bc-peer-group { border-color: color-mix(in srgb, var(--warning) 45%, transparent); }
   .bc-peer-group .bc-peer-chip { color: var(--warning); }
+  .bc-peer-external { border-color: color-mix(in srgb, var(--error) 45%, transparent); }
+  .bc-peer-external .bc-peer-chip { color: var(--error); }
   .bc-typing { color: var(--text-secondary); font-size: var(--text-xs); font-style: italic; }
   /* Pergunta pendente: tinta de fundo no vocabulário awaiting (--pill-input-*) — listra lateral
      é ban; a tinta preenche o bloco e lê melhor com o card estreito. */

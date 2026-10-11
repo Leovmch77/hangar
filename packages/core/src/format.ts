@@ -323,10 +323,11 @@ export function clusterByPair<T extends PairFields>(sessions: T[]): PairRow<T>[]
 
 // Recado de OUTRA sessão Claude (hangar-send): "[de: <sessao>] texto" (1:1) ou "[grupo: <sessao>] texto"
 // (aviso pro grupo) ou "[painel: <tela>] texto" (recado AUTOMÁTICO do app — ex.: o modal de
-// orquestração avisando o árbitro). Devolve remetente + texto sem o prefixo + scope; null = msg
+// orquestração avisando o árbitro) ou "[de fora: <alias::sessao>] texto" (par externo, pedido de
+// terceiro). Devolve remetente + texto sem o prefixo + scope; null = msg
 // normal do usuário. Só APRESENTAÇÃO: o texto guardado em events/pending fica intacto (dedup do
 // Chat compara o cru).
-const _PEER_RE = /^\[(de|grupo|painel):\s*([^\]]+)\]\s*/;
+const _PEER_RE = /^\[(de fora|de|grupo|painel):\s*([^\]]+)\]\s*/;
 
 // Só apresentação: o envelope original continua no histórico e na deduplicação.
 export function parseRealtimeDelegation(text: string): { input: string; transcript: string } | null {
@@ -334,8 +335,8 @@ export function parseRealtimeDelegation(text: string): { input: string; transcri
   return match ? { input: match[1].trim(), transcript: match[2]?.trim() ?? '' } : null;
 }
 
-export type PeerScope = 'peer' | 'group' | 'panel';
-const _SCOPES: Record<string, PeerScope> = { de: 'peer', grupo: 'group', painel: 'panel' };
+export type PeerScope = 'peer' | 'group' | 'panel' | 'external';
+const _SCOPES: Record<string, PeerScope> = { de: 'peer', 'de fora': 'external', grupo: 'group', painel: 'panel' };
 export function parsePeerMessage(text: string): { from: string; text: string; scope: PeerScope } | null {
   const m = _PEER_RE.exec(text);
   if (!m) return null;

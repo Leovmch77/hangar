@@ -31,6 +31,11 @@ it('identifica origem de voz sem confundir com par nem perder o contexto', () =>
     .toBe('Enviar completo');
 });
 
+it('recado de par externo tem escopo próprio', () => {
+  expect(parsePeerMessage('[de fora: pc-ana::api] faz o deploy')).toEqual({ from: 'pc-ana::api', text: 'faz o deploy', scope: 'external' });
+  expect(parsePeerMessage('[de: api] oi')?.scope).toBe('peer');
+});
+
 describe('abbrevNum', () => {
   it('abbreviates millions', () => {
     expect(abbrevNum(3_668_662)).toBe('3.7M');

@@ -1,7 +1,7 @@
 <script lang="ts">
 import { intlLocale } from '../lib/locale';
 import { renderMarkdown } from '../lib/markdown';
-import { parseCanal, parseRealtimeDelegation } from '@hangar/core';
+import { parseCanal, parseRealtimeDelegation, type PeerScope } from '@hangar/core';
 import { abrirVisor } from '../lib/visor';
 import * as m from '../paraglide/messages';
   interface Props {
@@ -9,7 +9,7 @@ import * as m from '../paraglide/messages';
     ts?: number | null;
     animate?: boolean;   // false = bubble de HISTORICO remontada (paginacao/janela): sem fade
     from?: string | null;          // recado de OUTRA sessao (hangar-send): nome da sessao remetente
-    scope?: 'peer' | 'group' | 'panel' | null; // 'group' = aviso pro grupo ([grupo: X]); 'panel' = recado automático do app ([painel: X])
+    scope?: PeerScope | null; // 'group' = aviso pro grupo ([grupo: X]); 'panel' = recado automático do app ([painel: X]); 'external' = par externo ([de fora: X])
     onForward?: (() => void) | null; // abre o picker "encaminhar pra sessao" (botao ↗)
     onOpenPeer?: (() => void) | null; // tap no chip "de: X" -> abre o chat da sessao remetente
     srcs?: string[];               // imagens anexadas (recado de sessao-irma com captura de tela)
@@ -56,13 +56,14 @@ import * as m from '../paraglide/messages';
     class:peer={!!from || !!voice}
     class:group={scope === 'group'}
     class:panel={scope === 'panel'}
+    class:external={scope === 'external'}
   >
     {#if voice}
       <div class="peer-head"><span class="peer-chip">{m.voice_message_origin()}</span></div>
     {:else if from}
-      {@const label = scope === 'group' ? m.board_peer_grupo({ n: from }) : scope === 'panel' ? m.board_peer_painel({ n: from }) : m.board_peer_de({ n: from })}
+      {@const label = scope === 'group' ? m.board_peer_grupo({ n: from }) : scope === 'panel' ? m.board_peer_painel({ n: from }) : scope === 'external' ? m.board_peer_fora({ n: from }) : m.board_peer_de({ n: from })}
       <div class="peer-head">
-        {#if onOpenPeer && scope !== 'panel'}
+        {#if onOpenPeer && scope !== 'panel' && scope !== 'external'}
           <button class="peer-chip peer-chip--link" onclick={onOpenPeer}
                   aria-label={m.user_abrir_chat_de({ n: from })} title={m.user_abrir_chat_de({ n: from })}>{label} ›</button>
         {:else}
@@ -149,6 +150,12 @@ import * as m from '../paraglide/messages';
     border-color: var(--text-muted);
   }
   .bubble.panel .peer-chip { color: var(--text-muted); }
+  /* Recado de par externo ([de fora: X]): pedido de outra pessoa, nunca ordem do dono. */
+  .bubble.external {
+    background: color-mix(in srgb, var(--error) 12%, transparent);
+    border-color: var(--error);
+  }
+  .bubble.external .peer-chip { color: var(--error); }
 
   .peer-head {
     display: flex;
