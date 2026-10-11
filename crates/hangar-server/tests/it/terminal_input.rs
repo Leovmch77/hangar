@@ -133,12 +133,20 @@ async fn terminal_input_plugin_fill_proves_then_enters() {
 async fn terminal_input_plugin_fill_enters_when_long_message_makes_composer_unreadable() {
  let tall=screen(&(0..45).map(|i| format!("linha {i} da mensagem longa")).collect::<Vec<_>>().join("\n"));
  assert!(ComposerSnapshot::parse(&tall).is_none(),"composer alto demais para ler");
+ assert!(ComposerSnapshot::too_tall(&tall) && !ComposerSnapshot::too_tall("um diálogo sem réguas"));
  let text=(0..45).map(|i| format!("linha {i} da mensagem longa")).collect::<Vec<_>>().join("\n");
  let io=Arc::new(FakeIo::new(vec![screen(""),tall,screen("")]));let s=Arc::new(Services::new());
  s.facts.lock().unwrap().plugin_live=true;*s.reply.lock().unwrap()=PluginReply::Filled;
  let r=driver(io.clone(),s.clone()).prompt(&text,"id").await;
  assert_eq!(r.disposition,Disposition::Accepted,"o Filled do plugin basta");
  assert_eq!(s.published.lock().unwrap()[0].mode,PluginMode::Fill);assert_eq!(io.writes().len(),1,"só o Enter");
+}
+#[tokio::test]
+async fn terminal_input_plugin_fill_never_enters_on_a_screen_without_composer() {
+ let io=Arc::new(FakeIo::new(vec![screen(""),"Diálogo qualquer\n❯ Sim\n  Não".into()]));let s=Arc::new(Services::new());
+ s.facts.lock().unwrap().plugin_live=true;*s.reply.lock().unwrap()=PluginReply::Filled;
+ let r=driver(io.clone(),s.clone()).prompt("uma mensagem qualquer","id").await;
+ assert_ne!(r.disposition,Disposition::Accepted);assert!(io.writes().is_empty(),"nenhum Enter");
 }
 #[test]
 fn terminal_input_composer_of_a_long_message_still_reads() {

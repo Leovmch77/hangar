@@ -386,7 +386,14 @@ pub async fn queue_remove(State(st): State<Arc<AppState>>, ConnectInfo(peer): Co
     if matches!(removed, Ok(ref done) if *done != json!(true)) {
         let given = ctx.target.handle.queue(random_hex(16), Action::GiveUp { entry_id: entry_id.clone() }).await;
         removed = match given {
-            Ok(done) if done == json!(true) => ctx.target.handle.queue(random_hex(16), Action::Remove { entry_id }).await,
+            // A desistência já soltou a fila; a linha "não chegou" que sobrar sai num segundo descarte.
+            Ok(done) if done == json!(true) => match ctx.target.handle.queue(random_hex(16), Action::Remove { entry_id }).await {
+                Ok(_) => Ok(json!(true)),
+                Err(failure) => {
+                    tracing::warn!(session = %ctx.name, code = %failure.code, "descarte: entrega desistida, mas a linha não saiu da fila");
+                    Ok(json!(true))
+                }
+            },
             other => other,
         };
     }

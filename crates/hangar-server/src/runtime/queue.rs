@@ -619,8 +619,9 @@ fn apply(state: &mut State, action: Action, clock: ClockSample, call_id: &str) -
                 if let Some(row) = state.rows.iter_mut().find(|r| row_id(r) == entry_id && r["confirmed"] != true) {
                     row["delivered"] = json!(true); row["desistiu"] = json!(true); row["desistiu_ts"] = json!(clock.epoch_s);
                 }
-                release_terminal_write_barrier(state);
             }
+            // Sem incerta desta entrada, a trava pode ter ficado de uma dona que já se resolveu: solta igual.
+            release_terminal_write_barrier(state);
             json!(!ids.is_empty())
         }
         Action::BumpAttempts { entry_id } => {

@@ -274,9 +274,18 @@ def _menu_block(lines: list[str]) -> Optional[tuple[int, int]]:
     # Menu de verdade some com o composer: rodape com regua embaixo e um menu desenhado no TEXTO do
     # composer (recado colado), e tocar nele mandaria teclas para o prompt.
     if (not pi_cursor and bot < len(lines) and _FOOTER_RE.search(lines[bot])
-            and any(_RULE_RE.match(ln) for ln in lines[bot + 1:])):
+            and any(_RULE_RE.match(ln) for ln in lines[bot + 1:]) and _prompt_acima(lines, cursor)):
         return None
     return (top, bot)
+
+
+def _prompt_acima(lines: list[str], cursor: int) -> bool:
+    """Logo abaixo da régua acima do cursor está a linha de prompt do composer (❯ sem número de opção)."""
+    for i in range(cursor - 1, -1, -1):
+        if _RULE_RE.match(lines[i]):
+            nxt = lines[i + 1] if i + 1 < len(lines) else ""
+            return nxt.lstrip().startswith("❯") and not _CURSOR_RE.match(nxt)
+    return False
 
 
 def _live_spinner(pane_text: str) -> Optional[str]:

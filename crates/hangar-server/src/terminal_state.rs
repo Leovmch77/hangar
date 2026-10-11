@@ -199,6 +199,12 @@ fn tab_bar(line: &str) -> bool {
     let line = left(line);
     left(line.strip_prefix('←').unwrap_or(line)).starts_with(['☐', '☑'])
 }
+/// Logo abaixo da régua acima do cursor está a linha de prompt do composer (`❯` sem número de opção).
+fn composer_prompt_above(lines: &[&str], cursor: usize) -> bool {
+    (0..cursor).rev().find(|&i| P.rule.is_match(lines[i]))
+        .and_then(|rule| lines.get(rule + 1))
+        .is_some_and(|line| left(line).starts_with('❯') && !P.cursor.is_match(line))
+}
 fn option(line: &str) -> Option<&str> {
     P.option.captures(line).or_else(|| P.omp_option.captures(line))
         .map(|c| c.get(1).unwrap().as_str())
@@ -231,7 +237,8 @@ fn menu_block(lines: &[&str]) -> Option<(usize, usize)> {
         .unwrap_or(lines.len());
     // Menu de verdade some com o composer: rodapé com régua embaixo é um menu desenhado no TEXTO do
     // composer (recado colado), e tocar nele mandaria teclas para o prompt.
-    if !pi && bottom < lines.len() && P.footer.is_match(lines[bottom]) && lines[bottom + 1..].iter().any(|l| P.rule.is_match(l)) {
+    if !pi && bottom < lines.len() && P.footer.is_match(lines[bottom]) && lines[bottom + 1..].iter().any(|l| P.rule.is_match(l))
+        && composer_prompt_above(lines, cursor) {
         return None;
     }
     Some((top, bottom))

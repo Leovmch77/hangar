@@ -207,7 +207,8 @@ fn stash_held(screen: &str) -> bool {
     rules.len().checked_sub(2).and_then(|n| rules[n].checked_sub(1)).is_some_and(|n| lines[n].contains("› stashed"))
 }
 impl ComposerSnapshot {
-    pub fn parse(screen: &str) -> Option<Self> {
+    /// As linhas da tela e as duas últimas réguas (topo e base do composer), sem conferir tamanho.
+    fn frame(screen: &str) -> Option<(Vec<&str>, usize, usize)> {
         let mut lines: Vec<_> = screen.split('\n').collect();
         while lines.last().is_some_and(|s| s.trim().is_empty()) { lines.pop(); }
         // O painel de agentes ganha uma linha por subagente abaixo do rodapé: fora da conta da distância.
@@ -221,6 +222,14 @@ impl ComposerSnapshot {
         let rules: Vec<_> = lines.iter().enumerate().filter(|(_, s)| s.matches('─').count() >= 20).map(|(n, _)| n).collect();
         let bottom = *rules.last()?;
         let top = *rules.get(rules.len().checked_sub(2)?)?;
+        Some((lines, top, bottom))
+    }
+    /// Composer no pé da tela e mais alto do que a leitura aceita: mensagem longa colada, não outra tela.
+    pub fn too_tall(screen: &str) -> bool {
+        Self::frame(screen).is_some_and(|(lines, top, bottom)| lines.len() - bottom <= 8 && bottom - top > 40)
+    }
+    pub fn parse(screen: &str) -> Option<Self> {
+        let (lines, top, bottom) = Self::frame(screen)?;
         // Mensagem longa colada cresce o composer; acima disto as réguas já não são as dele.
         if lines.len() - bottom > 8 || bottom - top > 40 { return None; }
         let content = lines[top+1..bottom].iter().map(|s| s.trim().strip_prefix('❯').unwrap_or(s.trim()).trim()).collect::<Vec<_>>().join("\n");
@@ -609,10 +618,12 @@ impl TerminalDriver {
     async fn prove_filled(&self, text: &str, before: &ComposerSnapshot) -> bool {
         for _ in 0..self.limits.proof_attempts.max(1) {
             self.settle().await;
-            match self.snapshot().await {
+            let Ok((screen, typed)) = self.composer_capture().await else { return false };
+            match Self::composer(&screen, &typed) {
                 Ok(now) if now.proves(text, before) == Proof::Present => return true,
                 Ok(_) => {}
-                Err(e) if e.code == "composer_unreadable" => return true,
+                // Só o composer comprovadamente alto: tela sem as réguas dele pode ser um diálogo, e o Enter o confirmaria.
+                Err(e) if e.code == "composer_unreadable" && ComposerSnapshot::too_tall(&typed) => return true,
                 Err(_) => return false,
             }
         }

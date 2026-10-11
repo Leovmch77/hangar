@@ -362,7 +362,7 @@ impl Executor {
                         // Clique de mod em curso, ou o que ele guardou ainda por sair: a fila não entrega nem
                         // reconcilia no pane antes disso (C6).
                         if self.held() || !self.parked.is_empty() {continue;}
-                        self.expire_uncertain().await?;
+                        self.expire_uncertain().await;
                         // O `/clear` incerto depois do Enter deixa o erro de entrega incerta: a trava ainda vence.
                         if self.last_error.is_some() {self.expire_clear().await; if self.reconciling() {self.reconcile_uncertain().await?;} continue;}
                         let result=async {self.confirm_rows().await?;self.drain_once(None).await?;Ok::<_,RuntimeError>(())}.await;
@@ -391,7 +391,7 @@ impl Executor {
                         Action::Claim {..}|Action::SetDelivered {value:false,..}|Action::BumpAttempts {..}|Action::Reconcile {..}|Action::ReplaceRows {..}|Action::Prepare {..}|Action::BeginDispatch {..}|Action::MarkWriting {..}|Action::BindDispatch {..}|Action::Recover|Action::Confirm {..}|Action::ConfirmOccurrence {..}|Action::ConfirmLegacy {..}|Action::SetRuntimeState {..}|Action::LateRpcResolution {..}=>Err(error("terminal_queue_action")),
                         action@Action::GiveUp {..}=>{
                             let result=self.queue.exec(self.target.generation,&id,sample(),action).await.map_err(|_|error("queue_io"));
-                            if result.as_ref().is_ok_and(|given|*given==json!(true)) {self.release_uncertain().await?;}
+                            if result.as_ref().is_ok_and(|given|*given==json!(true)) {self.release_uncertain().await;}
                             result
                         },
                         action=>self.queue.exec(self.target.generation,&id,sample(),action).await.map_err(|_|error("queue_io")),
@@ -857,34 +857,52 @@ impl Executor {
     }
     /// A entrega incerta que segue sem prova depois do prazo, com o Claude parado, é desistida sozinha:
     /// parado, o que ele tivesse guardado já teria virado conversa. Nada é reenviado.
-    async fn expire_uncertain(&mut self)->Result<(),RuntimeError> {
-        let Ok(state)=self.queue.snapshot().await else {return Ok(())};
+    async fn expire_uncertain(&mut self) {
+        // Falha aqui adia a desistência para o próximo tique; o executor segue de pé e o diário diz por quê.
+        let skip=|key:&str,code:&str,reason:&str| if crate::warn_limit::allow(Some(key),code) {
+            tracing::warn!(key=%key,code=%code,"{reason}");
+        };
+        let state=match self.queue.snapshot().await {Ok(state)=>state, Err(_)=>{skip(&self.target.key,"give_up_queue_io","prazo da entrega incerta: fila ilegível, tenta no próximo tique"); return}};
         let owner=state.runtime_state["terminal_write_barrier"]["operation_id"].as_str().map(str::to_owned);
-        let Some(entry)=owner.as_deref().and_then(|id|state.operations.get(id)).and_then(|op|op.entry_id.clone()) else {self.uncertain_since=None; return Ok(())};
+        let Some(entry)=owner.as_deref().and_then(|id|state.operations.get(id)).and_then(|op|op.entry_id.clone()) else {self.uncertain_since=None; return};
         let now=tokio::time::Instant::now();
-        let since=match &self.uncertain_since {Some((seen,at)) if *seen==entry=>*at, _=>{self.uncertain_since=Some((entry,now)); return Ok(())}};
-        if now.duration_since(since)<self.options.give_up_after {return Ok(());}
-        match self.services("maintenance","maintenance","").facts(&self.target.binding).await {
+        let since=match &self.uncertain_since {Some((seen,at)) if *seen==entry=>*at, _=>{self.uncertain_since=Some((entry,now)); return}};
+        if now.duration_since(since)<self.options.give_up_after {return;}
+        let services=self.services("maintenance","maintenance","");
+        match services.facts(&self.target.binding).await {
             Ok(facts) if facts.binding==self.target.binding && facts.idle=>{},
-            _=>return Ok(()),
+            Ok(_)=>return,
+            Err(_)=>{skip(&self.target.key,"give_up_facts","prazo da entrega incerta: fatos indisponíveis, sem saber se o Claude parou"); return},
+        }
+        // Texto ainda no composer é a própria entrega parada: desistir deixaria o dono com ele preso no prompt.
+        let driver=TerminalDriver::new(self.target.binding.clone(),services,self.options.io.clone(),self.options.limits.clone());
+        if !driver.composer_free().await {
+            skip(&self.target.key,"give_up_composer_busy","prazo da entrega incerta: o composer tem texto; a desistência fica com o Descartar");
+            return;
         }
         // Última chance da prova antes de desistir.
-        if self.confirm_rows().await.is_err() {return Ok(());}
+        if self.confirm_rows().await.is_err() {skip(&self.target.key,"give_up_receipt","prazo da entrega incerta: transcript ilegível, tenta no próximo tique"); return;}
         let id=format!("give_up:{entry}:{}",self.sequence.fetch_add(1,Ordering::Relaxed));
-        if self.queue.exec(self.target.generation,&id,sample(),Action::GiveUp {entry_id:entry.clone()}).await.map_err(|_|error("queue_io"))?!=json!(true) {return Ok(());}
+        let given=self.queue.exec(self.target.generation,&id,sample(),Action::GiveUp {entry_id:entry.clone()}).await;
+        self.uncertain_since=None;
+        if !matches!(given,Ok(ref done) if *done==json!(true)) {
+            skip(&self.target.key,"give_up_refused","prazo da entrega incerta: a desistência não agiu; o prazo recomeça");
+            return;
+        }
         tracing::warn!(key=%self.target.key,session=%self.target.name,code="delivery_given_up",entry=%entry,
             waited_s=now.duration_since(since).as_secs(),"entrega incerta sem prova no prazo: desistida, sem reenviar; a fila segue");
-        self.uncertain_since=None;
-        self.release_uncertain().await?;
-        self.publish().await
+        self.release_uncertain().await;
+        if let Err(failure)=self.publish().await {tracing::warn!(key=%self.target.key,code=%failure.code,"vista da desistência não publicou");}
     }
     /// Depois de uma desistência: a memória da entrega incerta só sai quando o disco não segura mais a escrita.
-    async fn release_uncertain(&mut self)->Result<(),RuntimeError> {
-        let state=self.queue.snapshot().await.map_err(|_|error("queue_io"))?;
-        if state.terminal_write_blocked(&self.target.binding.conversation) {return Ok(());}
+    async fn release_uncertain(&mut self) {
+        let Ok(state)=self.queue.snapshot().await else {
+            tracing::warn!(key=%self.target.key,code="give_up_queue_io","desistência gravada, mas a fila não releu; o erro de entrega incerta fica até a próxima leitura");
+            return;
+        };
+        if state.terminal_write_blocked(&self.target.binding.conversation) {return;}
         self.uncertain.clear(); self.unprovable=false;
         if self.last_error.as_deref()==Some("terminal_delivery_unknown") {self.last_error=None;}
-        Ok(())
     }
     fn reconciling(&self)->bool {
         self.last_error.as_deref()==Some("terminal_delivery_unknown") && !self.unprovable && !self.uncertain.is_empty()

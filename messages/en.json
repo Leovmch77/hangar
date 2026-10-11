@@ -1000,7 +1000,7 @@
   "problema_terminal_input_composer_unreadable": "The message is waiting: the terminal input box could not be read",
   "problema_terminal_input_capture_failed": "The message is waiting: reading the terminal screen failed",
   "problema_terminal_input_stalled": "The message is waiting: the terminal refuses the delivery",
-  "problema_terminal_input_delivery_unproved": "The queue is stuck: a message could not be confirmed as delivered. Use Discard on it to release the others; otherwise it is given up on its own after a few minutes with the session idle.",
+  "problema_terminal_input_delivery_unproved": "The queue is stuck: a message could not be confirmed as delivered. It holds the others until it is discarded or, with the session idle, given up on its own after a few minutes.",
   "problema_terminal_clear_not_applied": "The /clear was not applied: the conversation did not change. Messages stay in the queue; send /clear again if you still want to clear.",
   "problema_list_capture_failed": "Couldn't read this session's terminal; the state may be stale",
   "problema_list_runtime_unavailable": "This session's runtime didn't respond",
