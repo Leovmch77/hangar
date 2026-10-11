@@ -152,8 +152,9 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   rebaixa. Nunca escrever nesse arquivo.
 - **Permissão segurada para o app não aparece no pane nem no registro nativo: lista e `Monitor`
   leem a pergunta segurada.** Com o app aberto, o hook `perm.ts` segura a permissão: a TUI fica em
-  "running PreToolUse hooks" sem cartão e o registro segue `busy`. O `Monitor` a lê dos fatos
-  empurrados (`question`); a lista, do `held` dos fatos da lista. Ver
+  "running PreToolUse hooks" sem cartão e o registro segue `busy`. `Monitor` e lista a leem do
+  `plugin::Store` do Rust (`state::facts::plugin_reading`); o `held` dos fatos Python da lista
+  vem sempre vazio. Ver
   [cartão de permissão segurado](#cartão-de-permissão-segurado-pelo-hook).
 - **O `wire.jsonl` do Kimi não é bem-comportado**: nem toda escrita é turno (`config.update` com
   a sessão parada), e o main fica mudo quando delega. Quem decide é a fronteira de turno, não o
@@ -169,9 +170,10 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   para invalidar o cache da próxima reconciliação.
 - **Codex sem terminal: o app-server é do CANO, em stdio, e o cano é do Rust.** Com o
   `hangar-server` de pé, o Rust sobe, religa e mata o `hangar-cano` da sessão e conduz a thread;
-  o Python só calcula argv/env (`launch_env` da política) e grava o arquivo da sessão
-  (`session.patch_meta {cano}` / `session.clear_cano {pid}`). O `env` (tokens, `CODEX_HOME`) é
-  pedido ao Python a cada subida e nunca vai a disco nem a log. O cano que sai é religado por
+  argv/env saem de `runtime/codex_launch.rs` e o arquivo da sessão é gravado por
+  `runtime/codex_sidecar.rs`, sem pedir ao Python (`launch_env`/`patch_meta`/`clear_cano` da
+  política Python recusam Codex). O `env` (tokens, `CODEX_HOME`, Jev) é montado a cada subida e
+  nunca vai a disco nem a log. O cano que sai é religado por
   evento (teto de 3 subidas seguidas, espera 5/10/20 s), sem varrer. Reiniciar com turno rodando
   é permitido (destrava turno preso); trocar o sandbox com turno rodando recusa com
   `erro_permissao_ocupada` (409). `initialize` repetido responde "Already initialized" e é
@@ -185,7 +187,20 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   `attestation/generate`, v1 legado, desconhecido) recebe `-32601` + nota, nunca sucesso vazio;
   pedido de thread de subagente nunca é descartado. Um cliente por cano.
   Falha vira erro com código, nunca passagem ao Python; o código Python fica para o modo `python`.
-  Codex com terminal segue no Python até a 5C.
+- **Codex com terminal: o Rust adota o app-server que o lançador criou, sem criar outro.** Abrir
+  continua no Python (lançador `hangar-codex-tui`, app-server e TUI no pane); com o Rust de pé, um
+  ator `runtime/codex_terminal.rs` assume pelo WebSocket de loopback, conferindo identidade do
+  processo, endpoint, chave e geração, e fica com envio, fila, confirmação, `steer`, interrupção,
+  estado/prévia pelo feed, perguntas, aprovações, `/codex-permissions`, controles, pane morto,
+  fechamento e relançamento (`codex_relaunch.rs`: terminal↔sem terminal e `/recarregar`). Um
+  cliente Hangar por sessão além da TUI; o cliente Python é recusado (`refuse_python_client`).
+  Thread sem rollout aceita o primeiro envio antes da assinatura, que é retomada com espera
+  crescente; outro erro de assinatura é visível, nunca outra thread. Reconexão: uma tentativa em
+  voo, 1 s × 1,5 até 10 s, sem matar TUI nem app-server. Entrar na fila do WebSocket não é
+  `Written`. Resposta escrita não prova decisão: `serverRequest/resolved` não diz quem venceu, o
+  cartão fecha sem autoria e o app recebe 409 `erro_sem_confirmacao_resposta`. Pedido sem
+  resposta do app fica para a TUI; nunca recusar automaticamente como no sem terminal. Ver
+  [Codex com terminal no Rust](#codex-com-terminal-no-rust-adoção-e-dono-único).
 - **Processo do cano é um módulo só (`runtime/process.rs`), Claude e Codex.** Subir espera o
   `listen` por 10 s; matar confere a identidade do pid (pid reaproveitado nunca é morto) e apaga
   `cano-<chave16>*` só na pasta da sessão, nunca numa derivada de caminho gravado no arquivo. A
@@ -212,6 +227,9 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   `jev-gateway` saiu: [superado.md](superado.md#o-jev-gateway-como-caminho-da-conversa).
 - **Codex novo nasce em Full Access com ou sem terminal.** No sem-terminal, ausência de
   `permission_mode` também significa `Full Access`; a escolha manual continua valendo quando existe.
+  Texto desconhecido nunca vira Full Access: o sidecar é recusado (`launch_permission_mode`,
+  `codex_launch::stored`) e o pedido de troca também (`erro_modo_desconhecido`). Antes de passar o
+  terminal para sem terminal, o Rust lê o modo real no seletor vivo do `/permissions`.
 - **Scripts dentro de sessão sem terminal se identificam pela `CP_SESSION_KEY`.** Claude procura em
   `~/.hangar/claude-headless/`, Codex em `~/.hangar/codex-sessions/`; tmux só identifica sessões com
   terminal. Rename e `/clear` preservam a chave; `HANGAR_CANO_KEY` cobre sessões Codex já abertas
@@ -515,6 +533,60 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   "Bifurcar" repete o "f" do Claude Code: `$.agent.spawn({ subagentType: "fork" })` e, no fim do
   agente, `$.prompt.submit` leva a resposta à conversa principal. Medição em
   [Pergunta lateral pelo plugin](#pergunta-lateral-btw-pelo-plugin-08102026).
+
+## Codex com terminal no Rust: adoção e dono único
+
+(11/10/2026, branch `Hangar-rust`, contrato interno 52; desenho
+[`2026-10-10-conversation-permissions-rust-design.md`](../superpowers/specs/2026-10-10-conversation-permissions-rust-design.md).)
+Antes, a tabela de escritas entregava o Codex com terminal ao Python, que mantinha um cliente
+WebSocket próprio no app-server do pane. Agora o Rust é o único cliente Hangar dessa sessão, além
+da TUI. A fronteira com o Python está em
+[plataforma.md](plataforma.md#perguntas-permissões-e-ciclo-de-vida-no-rust-fronteira-com-o-python).
+
+- **Adotar, não abrir.** A vigia (`Watcher` em `codex_terminal.rs`) adota pelo sidecar e pelo
+  pane: endpoint de loopback, `app_pid`, chave e geração conferidos antes de conectar. Nada ali sobe
+  app-server; abrir sessão nova segue no lançador Python. A posse é anunciada na saúde
+  (`table::owned_modes` inclui Codex com terminal) e avisada ao hub (`codex_terminal_owned`), que
+  passa a servir o feed do runtime em vez do `Monitor`.
+- **Primeiro envio sem rollout.** Thread recém-criada sem turno não tem rollout e o `thread/resume`
+  responde `no rollout found for thread id`; o primeiro envio vai mesmo assim, depois de conferir
+  conexão e identidade, e a assinatura é retomada com espera crescente. Thread inválida, processo
+  diferente ou falha de protocolo são erro visível; nunca abrir outra thread para contornar.
+- **Recibo real.** O cliente WebSocket de `hangar-codex` podia terminar ao enfileirar a mensagem; a
+  adaptação devolve `NotWritten`, `Written` ou `Unknown` de verdade. Fila local não é escrita.
+- **Disputa app × TUI.** `serverRequest/resolved` traz `requestId` e `threadId`, não quem venceu
+  nem a decisão (`schema/0.161.0.json`). Com terminal, a resposta escrita vira `Disposition::Unknown`
+  (`decision_confirmed: false`) e o app mostra "sem confirmação" (409
+  `erro_sem_confirmacao_resposta`); o cartão fecha no `resolved`. Sem reenvio automático. Pedido
+  que o Hangar não mostra fica com a TUI (diário `codex_tui_request`), em vez do `-32601` do sem
+  terminal: ali a TUI é um participante legítimo.
+- **Permissões pelo seletor vivo.** `GET`/`POST /codex-permissions` leem e dirigem o `/permissions`
+  da TUI, conferem o item sob o cursor e a confirmação extra de Full Access, e releem o modo
+  efetivo. Prazo esgotado esperando a confirmação não prova que o diálogo não vai aparecer.
+  Rascunho no composer nunca recebe o comando por cima: ia ao modelo como
+  `<rascunho>/permissions`.
+- **Relançar a sessão aberta é do Rust (decisão A do usuário).** `codex_relaunch.rs` troca terminal
+  ↔ sem terminal e atende `/recarregar` do começo ao fim, sem devolver a posse ao Python (o
+  `hand-over`/`python_client_released` saiu). Argv vai só com `--cwd`/`--resume` + `CP_SESSION_KEY`
+  e o `hangar-codex-tui` completa pelo sidecar, para não haver segunda cópia do comando do
+  lançador. O ambiente do Jev é montado pelo Rust (`codex_launch::jev_env`), a quarta cópia da regra
+  do destino. Recibo da troca usa `call_id` determinístico (`codex-life:<geração>:<digest>`), para
+  A→B→A não reaproveitar o recibo antigo. Trocar de conta de um Codex aberto não existe e não foi
+  criado; importar do Claude abre um Codex novo e segue na abertura Python.
+- **Modo desconhecido recusa.** O `stored_mode` transformava texto desconhecido em Full Access; agora
+  recusa com código. Ausente segue Full Access, o padrão gravado pela abertura.
+- **`DELETE` do dono (decisão A do usuário).** O Rust encerra pane, ator, app-server, sidecar, fila e
+  a saída do grupo, depois repassa o mesmo pedido ao Python, que faz só a limpeza externa dele e
+  não chama o Rust de volta.
+
+Limites conhecidos (revisão de código, sem prova executada): o problema da queda do socket usa
+`runtime_falhou` com detalhe, não um código próprio; entre `kill_pane` e o fechamento do registro o
+ator ainda aceita escrita de quem já tinha passe; controles adotam só na próxima escrita; a vigia
+pode adotar o terminal que sobrou de uma troca com 500. Pendente de uso real (Task 13, Step 4):
+primeiro envio pelo app antes de qualquer turno, disputa nas duas ordens, `/permissions` com
+rascunho (composer = última linha `›` com sugestão esmaecida), queda e volta do Rust sem matar TUI,
+e DELPHI-02 (psmux, painel aberto, duas sessões com pane `%1`, `app_pid` do shim npm). Nada desta
+entrada foi compilado nem testado ainda.
 
 ## O /clear e o rodapé do Claude Code
 

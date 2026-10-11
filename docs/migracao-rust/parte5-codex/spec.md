@@ -134,6 +134,12 @@ Python.
 
 ### 5C. Codex com terminal no Rust
 
+> Recorte atualizado em 11/10/2026: a conversa, as perguntas, os modos de permissão e o ciclo de
+> vida do Codex com terminal já aberto foram feitos pelo desenho
+> [`2026-10-10-conversation-permissions-rust-design.md`](../../superpowers/specs/2026-10-10-conversation-permissions-rust-design.md);
+> a abertura (lançador e app-server) continua no Python. Regra e limites em
+> [harnesses.md](../../decisoes/harnesses.md#codex-com-terminal-no-rust-adoção-e-dono-único).
+
 - O Rust conecta no app-server do pane pelo WebSocket do sidecar (`endpoint`), confere o
   `app_pid`, manda `initialize` e assina com `thread/resume` em espera crescente (1 s ×1,5 até
   10 s, como hoje) até o rollout existir. Um cliente por sessão.

@@ -119,6 +119,12 @@ Python desse caminho em vez de portar os quatro serviços soltos.
 
 ### C2 Plugin do Claude no Rust
 
+> Recorte atualizado em 11/10/2026: C2, os fatos e serviços de estado da C3 e o modo de permissão
+> da C4 foram feitos pelo desenho
+> [`2026-10-10-conversation-permissions-rust-design.md`](../../superpowers/specs/2026-10-10-conversation-permissions-rust-design.md);
+> o restante da C3/C4 segue como escrito abaixo. Fronteira em
+> [plataforma.md](../../decisoes/plataforma.md#perguntas-permissões-e-ciclo-de-vida-no-rust-fronteira-com-o-python).
+
 - Todas as rotas `/api/plugin/*` que faltam (`whoami`, `pull`, `suggest`, `ask`, `ask-fim`,
   `filled`, `submitted`, `state`, `rate`) e a memória delas no Rust, com o mesmo token
   (`mods/bridge.rs:57`) e os mesmos prazos (25 s, 5 s, 30 s, 35 s, 90 s).
