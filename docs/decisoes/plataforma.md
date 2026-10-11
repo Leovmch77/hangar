@@ -1872,7 +1872,7 @@ pelo Rust, com e sem terminal. Decisões:
   `/select`, o Rust é a referência (`unknown` não é "não convergiu"), e o Python foi alinhado a
   ele; só `no_pending_permission` vira "nenhum pedido pendente", o resto segue 503 com o motivo.
 - **Preparo do prompt, linha de status e catálogo de skills rodam no Rust.** Falha da linha de
-  status continua cosmética (não derruba a sessão); `/internal/quota` usa só o cache do Rust.
+  status continua cosmética (não derruba a sessão); a cota vem do módulo de contas do Rust.
 
 **Perda conhecida.** Com o Python na frente, um envio que ficou sem resposta porque o Rust caiu
 era repetido com o mesmo `operation_id` no Rust novo (`_repeat_after_crash`,
@@ -1978,8 +1978,10 @@ contava threads `asyncio_N` e o uvloop nomeia `ThreadPoolExecutor-N_M` (mostrava
 
 - **Remédio imediato** (`c8e4bef1e`, PR #148): `/internal/accounts/quotas` roda num pool próprio
   (`quota-facts`, 4) e o monitor reconhece as threads do uvloop.
-- **Remédio de fundo:** o ator lê a cota do módulo de contas do próprio Rust e o
-  `/internal/quota` sai do Python.
+- **Remédio de fundo** (protocolo 54): o ator lê a cota em `AccountService::claude_windows`
+  (cache em disco das contas, e a API da Anthropic quando vencido) e o `/internal/quota` saiu do
+  Python. Token vencido nesse caminho não renova: a linha sai sem janelas até o ciclo de
+  renovação de fundo trocá-lo, porque a renovação ainda abre a janela de login pelo Python.
 - **Regra:** ao migrar uma responsabilidade, a mesma tarefa procura e apaga os chamadores que
   sobraram nos dois lados. Uma ponte que vai e volta entre os processos no mesmo pedido é bug de
   desenho, não detalhe de desempenho.

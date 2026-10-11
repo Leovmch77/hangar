@@ -121,32 +121,6 @@ async def quota_facts(request: Request):
         _quota_facts_pool, cotas.quota_facts, body["action"], body["ids"])
 
 
-@router.post("/accounts/facts")
-async def account_facts(request: Request):
-    from dataclasses import asdict
-    from pathlib import Path
-    from app import account_bridge
-    from app.account_lifecycle import AccountKey
-    _, _, raw = await _instance_body(request, 64 * 1024)
-    try:
-        body = json.loads(raw)
-        if not isinstance(body, dict) or set(body) != {"keys"} or not isinstance(body["keys"], list) or len(body["keys"]) > 128:
-            raise ValueError("pedido de fatos inválido")
-        keys = []
-        for item in body["keys"]:
-            if not isinstance(item, dict) or set(item) != {"provider", "canonical_home"}:
-                raise ValueError("chave inválida")
-            if not isinstance(item["canonical_home"], str) or not Path(item["canonical_home"]).is_absolute():
-                raise ValueError("caminho inválido")
-            key = AccountKey.new(item["provider"], Path(item["canonical_home"]))
-            keys.append((item, key))
-    except (TypeError, ValueError, OSError):
-        raise HTTPException(400) from None
-    def inspect():
-        return [{"key": raw_key, "facts": asdict(account_bridge.inspect_usage(key))} for raw_key, key in keys]
-    return await asyncio.to_thread(inspect)
-
-
 @router.post("/accounts/codex-invalidate")
 async def codex_invalidate(request: Request):
     from pathlib import Path
@@ -349,16 +323,6 @@ async def list_demote(request: Request) -> dict:
     # No laço, como o rebaixamento de hoje: o mapa e o registro são mexidos sem trava pelo vigia.
     runtime_policy.demote_awaiting(body["sids"])
     return {"ok": True}
-
-
-@router.get("/quota")
-async def quota(config_dir: str = "") -> dict:
-    """Janelas de cota da conta para a linha de status que o ator Rust monta; vazio = `~/.claude`."""
-    from pathlib import Path
-    from app import runtime_policy
-    if len(config_dir) > 4096 or (config_dir and not Path(config_dir).is_absolute()):
-        raise HTTPException(400)
-    return {"windows": await asyncio.to_thread(runtime_policy.quota_windows, config_dir)}
 
 
 @router.get("/workspace/context")

@@ -101,7 +101,7 @@ pub async fn serve_until_with_state(
         let private = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let port = private.local_addr()?.port();
         let registry = std::sync::Arc::new(runtime::gateway::RuntimeRegistry::new(cfg.upstream,
-            cfg.internal_secret.clone(),instance.clone()).with_mods(state.mods.clone()));
+            cfg.internal_secret.clone(),instance.clone()).with_mods(state.mods.clone()).with_accounts(state.accounts.clone()));
         runtime_registry=Some(registry.clone());
         state.list.set_runtime(registry.clone());
         let _ = state.state.runtime.set(registry.clone());

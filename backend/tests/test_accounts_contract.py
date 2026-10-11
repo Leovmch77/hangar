@@ -355,11 +355,11 @@ def test_codex_birth_blocks_login_before_and_after_restart(tmp_path):
         reference.close()
 
 def test_codex_uncertain_usage_refuses_login_without_cli(tmp_path):
-    from accounts_contract import RustCodex
+    from accounts_contract import RustCodex, publish_unknown_birth
     reference = PythonReference(tmp_path / "home")
     server = RustCodex(reference)
     try:
-        reference.request("POST", "/__contract__/runtime-instance", {"instance": "obsolete"})
+        publish_unknown_birth(reference.root, reference.root / ".codex-alpha")
         response = server.request("POST", "/api/codex-contas/alpha/login")
         assert response.status_code == 409
         assert response.json()["detail"]["code"] == "account_usage_unknown"

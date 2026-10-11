@@ -33,6 +33,8 @@ pub trait ProcessView: Send + Sync {
     /// Destinos dos descritores abertos.
     fn fds(&self, pid: i64) -> Vec<PathBuf> { self.fds_checked(pid).unwrap_or_default() }
     fn fds_checked(&self, pid: i64) -> io::Result<Vec<PathBuf>> { Ok(self.fds(pid)) }
+    /// Nome do executável (`comm` no Linux). Só a varredura de uso de conta pergunta.
+    fn name(&self, _pid: i64) -> io::Result<String> { Err(io::ErrorKind::Unsupported.into()) }
 }
 
 /// Processo que morreu entre a varredura e a leitura: não é falha, é corrida.
@@ -192,6 +194,10 @@ mod linux {
         fn fds_checked(&self, pid: i64) -> io::Result<Vec<PathBuf>> {
             // Um fd fechado entre a listagem e o `readlink` é corrida, não falha.
             Ok(std::fs::read_dir(self.path(pid, "fd"))?.flatten().filter_map(|e| std::fs::read_link(e.path()).ok()).collect())
+        }
+
+        fn name(&self, pid: i64) -> io::Result<String> {
+            Ok(String::from_utf8_lossy(&std::fs::read(self.path(pid, "comm"))?).trim().to_owned())
         }
     }
 }
@@ -356,6 +362,11 @@ mod other {
         /// Fora do Linux o transcript não sai do fd aberto (`procinfo._open_jsonl`): enumerar
         /// handles leva segundos.
         fn fds(&self, _pid: i64) -> Vec<PathBuf> { Vec::new() }
+
+        fn name(&self, pid: i64) -> io::Result<String> {
+            self.with(pid, true, ProcessRefreshKind::nothing(), |p| p.name().to_string_lossy().into_owned())
+                .ok_or_else(|| io::ErrorKind::NotFound.into())
+        }
     }
 
     #[cfg(test)]

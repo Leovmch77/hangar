@@ -344,8 +344,9 @@ def test_legacy_restart_discards_attempt_and_releases_default_account_guard(mana
 
 
 def test_legacy_uncertain_usage_refuses_before_oauth_request(managed_device):
+    from accounts_contract import publish_unknown_birth
     fixture = managed_device
-    fixture.reference.request("POST", "/__contract__/runtime-instance", {"instance": "obsolete"})
+    publish_unknown_birth(fixture.reference.root, fixture.reference.root / ".codex")
     response = fixture.server.request("POST", "/api/credenciais/codex/login")
     assert response.status_code == 409 and response.json()["detail"]["code"] == "account_usage_unknown"
     assert fixture.server.request("GET", "/api/credenciais/codex/login").json() == {"etapa": "idle"}

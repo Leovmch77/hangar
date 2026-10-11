@@ -239,27 +239,6 @@ def test_inherited_variable_holds_account_but_only_the_cli_uses_it(tmp_path):
     assert asdict(facts).get("holders") == [81, 82, 83, 84]
 
 
-def test_pending_headless_birth_counts_before_process_exists(tmp_path, monkeypatch):
-    import json
-    from app import account_bridge
-    from app.account_lifecycle import AccountKey
-    from app.adapters.claude_headless import sessions
-    directory = tmp_path / "sidecars"
-    directory.mkdir()
-    account = tmp_path / ".claude-work"
-    account.mkdir()
-    (directory / "birth.json").write_text(json.dumps({"name": "birth", "session_id": "pending", "config_dir": str(account)}))
-    monkeypatch.setattr(sessions, "_dir", lambda: directory)
-    monkeypatch.setattr(account_bridge, "inspect_processes", lambda key: account_bridge.UsageFacts(complete=True))
-    facts = account_bridge.inspect_usage(AccountKey.new("claude", account))
-    assert facts.complete
-    assert facts.sessions == ["birth"]
-    with pytest.raises(RuntimeError, match="account_in_use"):
-        facts.ensure_unused()
-    (directory / "birth.json").write_text("{")
-    assert not account_bridge.inspect_usage(AccountKey.new("claude", account)).complete
-
-
 @pytest.mark.parametrize("worker_cycle", [False, True])
 def test_claude_preparation_keeps_own_descriptor_after_birth_returns(tmp_path, monkeypatch, rust_probe, worker_cycle):
     from concurrent.futures import ThreadPoolExecutor
@@ -342,35 +321,6 @@ def test_real_external_process_is_usage(tmp_path):
         process.communicate("release\n", timeout=10)
 
 
-def test_private_usage_facts_require_current_instance_and_do_not_relock(tmp_path, monkeypatch):
-    from dataclasses import asdict
-    from types import SimpleNamespace
-    from fastapi import FastAPI
-    from fastapi.testclient import TestClient
-    from app import account_bridge, internal_api, runtime_coordinator
-    from app.account_lifecycle import AccountKey, GuardMode, acquire
-    from app.adapters.claude_headless import sessions
-    directory = tmp_path / "sidecars"
-    directory.mkdir()
-    monkeypatch.setattr(sessions, "_dir", lambda: directory)
-    monkeypatch.setattr(account_bridge, "inspect_processes", lambda key: account_bridge.UsageFacts(complete=True))
-    monkeypatch.setattr(internal_api, "_secret", "internal-test")
-    monkeypatch.setattr(runtime_coordinator, "current", lambda: SimpleNamespace(instance="current"))
-    app = FastAPI()
-    app.include_router(internal_api.router)
-    key = AccountKey.new("claude", tmp_path / "account")
-    payload = {"keys": [{"provider": key.provider.value, "canonical_home": str(key.canonical_home)}]}
-    headers = {"x-hangar-internal": "internal-test", "x-hangar-runtime-instance": "current"}
-    with TestClient(app, client=("127.0.0.1", 1212)) as client:
-        assert client.post("/internal/accounts/facts", json=payload).status_code == 404
-        assert client.post("/internal/accounts/facts", json=payload,
-                           headers={**headers, "x-hangar-runtime-instance": "old"}).status_code == 404
-        with acquire(key, GuardMode.EXCLUSIVE, root=tmp_path / "locks"):
-            response = client.post("/internal/accounts/facts", json=payload, headers=headers)
-        assert response.status_code == 200
-        assert response.json() == [{"key": payload["keys"][0], "facts": {"complete": True, "sessions": [], "pids": [], "holders": []}}]
-
-
 def test_linux_process_reader_does_not_hide_unreadable_environment(tmp_path):
     from app.account_bridge import LinuxProcess, inspect_processes
     from app.account_lifecycle import AccountKey
@@ -422,31 +372,6 @@ async def test_cancelled_cano_birth_still_publishes_its_process(tmp_path, monkey
         with pytest.raises(asyncio.CancelledError):
             await task
     assert sessions.load("birth")["cano"] == {"pid": 17, "escuta": "test"}
-
-
-def test_old_terminal_sidecar_needs_live_or_pending_birth(tmp_path, monkeypatch):
-    import json
-    from app import account_bridge
-    from app.account_lifecycle import AccountKey
-    from app.adapters.codex import sessions
-    monkeypatch.setattr(sessions, "_dir", lambda: tmp_path)
-    monkeypatch.setattr(account_bridge, "inspect_processes", lambda key: account_bridge.UsageFacts(complete=True))
-    sidecar = tmp_path / "old.json"
-    row = {"name": "old", "codex_home": str(tmp_path / "account")}
-    sidecar.write_text(json.dumps(row))
-    key = AccountKey.new("codex", tmp_path / "account")
-    monkeypatch.setattr(account_bridge, "terminal_sessions", lambda: {"old"})
-    assert account_bridge.inspect_usage(key).sessions == ["old"]
-    monkeypatch.setattr(account_bridge, "terminal_sessions", lambda: set())
-    account_bridge.inspect_usage(key).ensure_unused()
-    def unavailable():
-        raise RuntimeError("mux indisponível")
-    monkeypatch.setattr(account_bridge, "terminal_sessions", unavailable)
-    with pytest.raises(RuntimeError, match="account_usage_unknown"):
-        account_bridge.inspect_usage(key).ensure_unused()
-    sidecar.write_text(json.dumps({**row, "launching": True}))
-    facts = account_bridge.inspect_usage(key)
-    assert facts.complete and facts.sessions == ["old"]
 
 
 @pytest.mark.parametrize("cancel", [False, True])
@@ -508,6 +433,7 @@ def test_terminal_pending_birth_retires_after_verified_launcher_binding(tmp_path
 
 
 def test_terminal_pending_identity_and_uncertainty_are_not_absence(tmp_path, monkeypatch):
+    import json
     from app import account_lifecycle, account_bridge
     from app.adapters.codex import sessions
     monkeypatch.setattr(account_lifecycle, "default_lock_root", lambda: tmp_path / "locks")
@@ -518,24 +444,22 @@ def test_terminal_pending_identity_and_uncertainty_are_not_absence(tmp_path, mon
     key = account_lifecycle.AccountKey.new("codex", tmp_path / "account")
     with account_lifecycle.acquire(key) as guard:
         record = account_lifecycle.publish_terminal_birth(guard, "birth", "token")
-    assert account_bridge.inspect_usage(key).sessions == ["birth"]
+    # O leitor do registro é o Rust (accounts/usage.rs): aqui só o que o Python publica para ele.
+    assert json.loads(record.read_text(encoding="utf-8"))["instance"] == "server:old:epoch"
 
     def unavailable():
         raise RuntimeError("multiplexador indisponível")
 
     monkeypatch.setattr(account_bridge, "terminal_instances", unavailable)
-    assert not account_bridge.inspect_usage(key).complete
     assert not account_lifecycle.retire_terminal_birth(record)
     assert record.exists()
     monkeypatch.setattr(account_bridge, "terminal_instances", lambda: {"birth": "server:new:epoch"})
-    account_bridge.inspect_usage(key).ensure_unused()
     assert account_lifecycle.retire_terminal_birth(record)
     assert not record.exists()
 
     with account_lifecycle.acquire(key) as guard:
         record = account_lifecycle.publish_terminal_birth(guard, "birth", "token")
     record.write_text("{", encoding="utf-8")
-    assert not account_bridge.inspect_usage(key).complete
     assert not account_lifecycle.retire_terminal_birth(record)
 
 
@@ -546,7 +470,6 @@ def test_terminal_birth_follows_instance_and_only_retires_verified_binding(tmp_p
     monkeypatch.setattr(sessions, "_dir", lambda: tmp_path / "sidecars")
     instances = {"birth": "server:original:epoch"}
     monkeypatch.setattr(account_bridge, "terminal_instances", lambda: dict(instances))
-    monkeypatch.setattr(account_bridge, "terminal_sessions", lambda: set(instances))
     monkeypatch.setattr(account_bridge, "inspect_processes",
                         lambda key: account_bridge.UsageFacts(complete=True, pids=[123]))
     key = account_lifecycle.AccountKey.new("codex", tmp_path / "account")
@@ -558,7 +481,6 @@ def test_terminal_birth_follows_instance_and_only_retires_verified_binding(tmp_p
                   endpoint="ws://127.0.0.1:1", codex_home=key.canonical_home)
     assert not account_lifecycle.retire_terminal_birth(record)
     assert record.exists()
-    assert "renamed" in account_bridge.inspect_usage(key).sessions
     sessions.save("renamed", "born-thread", "", str(tmp_path), app_pid=123,
                   endpoint="ws://127.0.0.1:1", codex_home=key.canonical_home)
     assert account_lifecycle.retire_terminal_birth(record)
@@ -572,7 +494,6 @@ def test_unknown_terminal_birth_is_not_retired_by_name_absence_or_reuse(tmp_path
     monkeypatch.setattr(sessions, "_dir", lambda: tmp_path / "sidecars")
     instances = {}
     monkeypatch.setattr(account_bridge, "terminal_instances", lambda: dict(instances))
-    monkeypatch.setattr(account_bridge, "terminal_sessions", lambda: set(instances))
     monkeypatch.setattr(account_bridge, "inspect_processes",
                         lambda key: account_bridge.UsageFacts(complete=True, pids=[123]))
     key = account_lifecycle.AccountKey.new("codex", tmp_path / "account")
@@ -583,7 +504,6 @@ def test_unknown_terminal_birth_is_not_retired_by_name_absence_or_reuse(tmp_path
         instances.update(snapshot)
         sessions.save("birth", "other-thread", "", str(tmp_path), app_pid=123,
                       endpoint="ws://127.0.0.1:1", codex_home=key.canonical_home)
-        assert not account_bridge.inspect_usage(key).complete
         assert not account_lifecycle.retire_terminal_birth(record)
         assert record.exists()
 

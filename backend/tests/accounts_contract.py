@@ -51,6 +51,15 @@ _RETIRED_SECONDARY_ROUTES = frozenset({
     "/internal/accounts/device-propagate/close", "/internal/accounts/device-propagate-state"})
 
 
+def publish_unknown_birth(root: Path, home: Path) -> None:
+    """Nascimento de terminal sem identidade do pane: o leitor de uso do Rust não pode provar
+    que a conta está livre."""
+    births = root / ".hangar/account-locks/births"
+    births.mkdir(parents=True, exist_ok=True)
+    (births / "uncertain.json").write_text(json.dumps({
+        "name": "uncertain", "provider": "codex", "canonical_home": str(home), "instance": None}), encoding="utf-8")
+
+
 def assert_rust_ownership(calls: list[dict]) -> None:
     """Confere que nenhum handler de conta Python atendeu ao pedido."""
     forbidden = [call["operation"] for call in calls if call["operation"] not in _BRIDGE_OPERATIONS]
@@ -446,13 +455,14 @@ def _worker() -> None:
                                cwd=root, env=isolated_environment(root), stdin=subprocess.PIPE,
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         children.append(child)
-        mux[name] = str(child.pid)
+        # Identidade no formato do `list-sessions` real: o leitor de uso do Rust valida.
+        mux[name] = f"{child.pid}:${child.pid}:200"
         launcher = barriers.get("launcher_before_publication")
         if launcher:
             def publish():
                 launcher[0].set()
                 if launcher[1].wait(25) and child.poll() is None:
-                    current_name = next((key for key, value in mux.items() if value == str(child.pid)), name)
+                    current_name = next((key for key, value in mux.items() if value == f"{child.pid}:${child.pid}:200"), name)
                     sessions.save(current_name, "thread-born", "", str(cwd), app_pid=child.pid,
                                   endpoint="ws://127.0.0.1:1", codex_home=home,
                                   codex_account=kwargs.get("codex_account", "alpha"))
@@ -565,8 +575,14 @@ def _worker() -> None:
 
     @app.post("/__contract__/reuse-name/{name}")
     def reuse(name: str):
-        mux[name] = "replacement-instance"
+        mux[name] = "1:$1:200"
         return {"ok": True}
+
+    @app.get("/__contract__/mux")
+    def mux_snapshot():
+        """`list-sessions` que as sondas Rust leem no lugar do tmux real."""
+        alive = any(child.poll() is None for child in children)
+        return "".join(f"{name}\t{identity}\n" for name, identity in mux.items()) if alive else ""
 
     def mux_command(arguments, **kwargs):
         if arguments[1] == "display-message" and arguments[-1] == "#{session_created}":
@@ -610,15 +626,22 @@ def _worker() -> None:
 
     @app.get("/__contract__/usage")
     def usage():
-        from app import account_bridge
+        """O que o Python publica para o leitor de uso do Rust (`accounts/usage.rs`): processo com a
+        conta, nascimento com a identidade do pane e sidecar de terminal com a sessão viva."""
+        from app import account_bridge, account_lifecycle
         from app.account_lifecycle import AccountKey
-        from dataclasses import asdict
+        from app.adapters.codex import sessions
         import psutil
-        with patch.object(account_bridge, "system_processes", return_value=[
-                psutil.Process(child.pid) for child in children if child.poll() is None]), \
-                patch.object(account_bridge, "terminal_sessions", return_value={
-                    "birth" for child in children if child.poll() is None}):
-            return asdict(account_bridge.inspect_usage(AccountKey.new("codex", root / ".codex-alpha")))
+        live = [psutil.Process(child.pid) for child in children if child.poll() is None]
+        facts = account_bridge.inspect_processes(AccountKey.new("codex", root / ".codex-alpha"), processes=live)
+        instances = account_bridge.terminal_instances() if live else {}
+        births = [json.loads(path.read_text(encoding="utf-8"))
+                  for path in (account_lifecycle.default_lock_root() / "births").glob("*.json")]
+        rows = [json.loads(path.read_text(encoding="utf-8")) for path in sessions._dir().glob("*.json")]
+        names = {name for name, identity in instances.items() if any(b["instance"] == identity for b in births)}
+        names |= {row["name"] for row in rows if row["name"] in instances}
+        return {"complete": facts.complete and all(b["instance"] is not None for b in births),
+                "sessions": sorted(names), "pids": facts.pids, "holders": facts.holders}
 
     @app.get("/__contract__/published")
     def publication():

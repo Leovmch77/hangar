@@ -4,7 +4,6 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
-import time
 import uuid
 from pathlib import Path
 
@@ -17,8 +16,6 @@ _PATCH = {
 }
 _unknown_guard = threading.Lock()
 _mutation_locks = {}
-_quota_lock = threading.Lock()
-_quota_cache = {}
 
 
 async def execute(kind: str, payload: dict, metadata: dict) -> dict:
@@ -34,31 +31,6 @@ async def execute(kind: str, payload: dict, metadata: dict) -> dict:
     except Exception as exc:
         diag.registrar("runtime.policy_failed", "erro", codigo=type(exc).__name__)
         return {"ok": False, "error_type": type(exc).__name__}
-
-
-def _quota(metadata, fresh=False):
-    from app import cotas
-    root = Path(metadata.get("config_dir") or Path.home() / ".claude").resolve()
-    with _quota_lock:
-        cached = _quota_cache.get(root)
-        if not fresh and cached is not None and time.monotonic() - cached[0] < 300:
-            return cached[1]
-        try:
-            value = next((account.model_dump() for account in cotas.listar_cotas()
-                if account.provedor == "claude" and ":" in account.id
-                and Path(account.id.split(":", 1)[1]).resolve() == root), None)
-        except Exception as exc:
-            diag.registrar("runtime.quota_failed", "erro", codigo=type(exc).__name__)
-            value = cached[1] if cached else None
-        _quota_cache[root] = (time.monotonic(), value)
-        return value
-
-
-def quota_windows(config_dir):
-    """Janelas da conta que o ator Rust põe na linha de status (as por modelo ficam fora).
-    Sem cache de 300 s aqui: o do ator Rust é o único."""
-    quota = _quota({"config_dir": config_dir}, fresh=True)
-    return [window for window in (quota or {}).get("janelas", []) if not window.get("por_modelo")]
 
 
 def native_message(payload, metadata):

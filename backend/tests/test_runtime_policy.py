@@ -49,21 +49,6 @@ def test_native_message_has_journal_before_uds(monkeypatch):
     assert result["outcome"] == "unknown"
 
 
-def test_quota_windows_drops_per_model_windows(tmp_path, monkeypatch):
-    from types import SimpleNamespace
-    from app import cotas
-    runtime_policy._quota_cache.clear()
-    account = SimpleNamespace(provedor="claude", id="claude:" + str(tmp_path), model_dump=lambda: {"janelas": [
-        {"rotulo": "5h", "pct": 42, "reset_ts": None, "por_modelo": False},
-        {"rotulo": "7d", "pct": 9, "reset_ts": None, "por_modelo": True}]})
-    monkeypatch.setattr(cotas, "listar_cotas", lambda: [account])
-    assert runtime_policy.quota_windows(str(tmp_path)) == [{"rotulo": "5h", "pct": 42, "reset_ts": None, "por_modelo": False}]
-    # Sem cache próprio: uma segunda chamada lê de novo.
-    account.model_dump = lambda: {"janelas": [{"rotulo": "5h", "pct": 50, "reset_ts": None}]}
-    assert runtime_policy.quota_windows(str(tmp_path))[0]["pct"] == 50
-    runtime_policy._quota_cache.clear()
-
-
 def _codex_patch(tmp_path, monkeypatch, sidecar_thread):
     import json
     from app.adapters.codex import sessions

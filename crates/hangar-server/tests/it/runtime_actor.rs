@@ -447,13 +447,10 @@ async fn policy_server() -> (std::net::SocketAddr,std::sync::Arc<std::sync::atom
                         if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") { length = value.trim().parse().unwrap(); }
                     }
                     let mut body = vec![0;length]; reader.read_exact(&mut body).await.unwrap();
-                    // GET /internal/quota (sem corpo) não é uma política: responde sem contar.
-                    let reply = if body.is_empty() { json!({"windows":[]}).to_string() } else {
-                        counter.fetch_add(1,std::sync::atomic::Ordering::SeqCst);
-                        let kind = serde_json::from_slice::<Value>(&body).unwrap()["kind"].clone();
-                        let data = if kind == "prepare_prompt" { json!({"content":"Olá","notices":[],"native_candidate":false}) } else { json!({}) };
-                        json!({"ok":true,"data":data}).to_string()
-                    };
+                    counter.fetch_add(1,std::sync::atomic::Ordering::SeqCst);
+                    let kind = serde_json::from_slice::<Value>(&body).unwrap()["kind"].clone();
+                    let data = if kind == "prepare_prompt" { json!({"content":"Olá","notices":[],"native_candidate":false}) } else { json!({}) };
+                    let reply = json!({"ok":true,"data":data}).to_string();
                     let response = format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{reply}",reply.len());
                     reader.get_mut().write_all(response.as_bytes()).await.unwrap();
                 }
