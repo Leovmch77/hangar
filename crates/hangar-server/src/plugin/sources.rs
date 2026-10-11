@@ -217,16 +217,8 @@ impl Sources for NativeSources {
         Box::pin(async move {
             let state = self.state()?;
             let registry = state.state.runtime.get().ok_or(ServiceError("plugin_runtime_absent"))?;
-            let target = registry.terminal_target(&identity.name).await.map_err(|_| ServiceError("plugin_identity_missing"))?
-                .ok_or(ServiceError("plugin_context_source_missing"))?;
             if self.identity(&identity.name).await?.binding != identity.binding { return Err(ServiceError("plugin_conversation_mismatch")); }
-            let path = target.transcript.with_extension("context.json");
-            let content = json!({"used":context.used,"window":context.window}).to_string();
-            tokio::task::spawn_blocking(move || crate::runtime::queue::atomic_write(&path, content.as_bytes()))
-                .await.map_err(|_| ServiceError("plugin_context_write_failed"))?.map_err(|_| ServiceError("plugin_context_write_failed"))?;
-            if self.identity(&identity.name).await?.binding != identity.binding { return Err(ServiceError("plugin_conversation_mismatch")); }
-            state.list.invalidate_context(&identity.name);
-            Ok(())
+            publish_context(registry, &identity.name, &identity.binding, context, || state.list.invalidate_context(&identity.name)).await
         })
     }
     fn rate<'a>(&'a self, identity: &'a Identity, tokens: u64, seconds: f64) -> SourceFuture<'a, ()> {
@@ -236,6 +228,22 @@ impl Sources for NativeSources {
             state.side.hubs.plugin_rates().record(&identity.binding, tokens, seconds, crate::state::monitor::wall_now())
         })
     }
+}
+
+/// Grava a medida no transcript da conversa vigente, com ou sem terminal. A vida é conferida antes e
+/// depois da gravação; a lista só é invalidada quando as duas conferências batem com quem mediu.
+pub(crate) async fn publish_context(registry: &crate::runtime::gateway::RuntimeRegistry, name: &str, binding: &InteractionBinding,
+    context: MeasuredContext, invalidate: impl FnOnce()) -> Result<(), ServiceError> {
+    let current = || async move { registry.context_transcript(name).await.map_err(|_| ServiceError("plugin_context_source_missing")) };
+    let (live, transcript) = current().await?;
+    if live != *binding { return Err(ServiceError("plugin_conversation_mismatch")); }
+    let path = transcript.with_extension("context.json");
+    let content = json!({"used":context.used,"window":context.window}).to_string();
+    tokio::task::spawn_blocking(move || crate::runtime::queue::atomic_write(&path, content.as_bytes()))
+        .await.map_err(|_| ServiceError("plugin_context_write_failed"))?.map_err(|_| ServiceError("plugin_context_write_failed"))?;
+    if current().await? != (live, transcript) { return Err(ServiceError("plugin_conversation_mismatch")); }
+    invalidate();
+    Ok(())
 }
 
 #[cfg(test)]

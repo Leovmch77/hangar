@@ -492,6 +492,27 @@ impl RuntimeRegistry {
         let binding=live.binding.clone().filter(|binding|binding.key==*key && binding.generation==entry.generation && !binding.conversation.is_empty()).ok_or_else(||failure("runtime_binding"))?;
         Ok(binding)
     }
+    /// Transcript da conversa vigente do Claude, conferido sob a mesma trava do vínculo: a medida de
+    /// contexto do plugin nunca cai no arquivo de outra vida nem no metadado do boot.
+    pub async fn context_transcript(&self,name:&str)->Result<(crate::interactions::InteractionBinding,std::path::PathBuf),RuntimeError> {
+        let entries=self.entries.lock().await;let mut matches=entries.iter().filter(|(_,entry)|entry.name==name);
+        let (key,entry)=matches.next().ok_or_else(||failure("runtime_binding"))?;
+        if matches.next().is_some() {return Err(failure("runtime_binding"));}
+        if entry.provider!="claude" {return Err(failure("runtime_provider"));}
+        match &entry.handle {
+            EntryHandle::Terminal {target,..}=> {
+                if target.key!=*key || target.generation!=entry.generation || target.binding.generation!=entry.generation || target.binding.name!=name || target.binding.conversation.is_empty() {return Err(failure("runtime_binding"));}
+                Ok((crate::terminal_facts::LocalTerminalFacts::binding(target),target.transcript.clone()))
+            },
+            EntryHandle::Headless(_)=> {
+                let live=entry.live.borrow().clone().filter(|state|state.error.is_none()).ok_or_else(||failure("runtime_binding"))?;
+                let binding=live.binding.clone().filter(|binding|binding.key==*key && binding.generation==entry.generation && !binding.conversation.is_empty() && entry.mode_source.binding.key==*key).ok_or_else(||failure("runtime_binding"))?;
+                let transcript=entry.mode_source.transcript.with_file_name(format!("{}.jsonl",binding.conversation));
+                Ok((binding,transcript))
+            },
+            EntryHandle::CodexTerminal {..}=>Err(failure("runtime_provider")),
+        }
+    }
     pub async fn drain(&self,name:&str)->Result<Value,RuntimeError> {
         let handle={
             let entries=self.entries.lock().await;let mut matches=entries.values().filter(|entry|entry.name==name);
@@ -1766,6 +1787,13 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(100)).await;let pending=registry.handle("key",1).await.unwrap().snapshot().await.unwrap();assert!(pending["error"].is_null());assert_eq!(pending["view"]["lifecycle_pending"],true);assert_eq!(users.load(std::sync::atomic::Ordering::Relaxed),0);
         drop(open_guard);
         tokio::time::timeout(Duration::from_secs(2),async {loop {if registry.interaction_binding_readonly(&name).await.is_ok_and(|binding|binding.generation==2 && binding.conversation=="b") {break;}tokio::time::sleep(Duration::from_millis(10)).await;}}).await.unwrap();
+        // Sem terminal, a medida segue o vínculo avançado (b, geração 2), não o metadado do boot (a).
+        let (now,transcript)=registry.context_transcript(&name).await.unwrap();assert_eq!((now.generation,now.conversation.as_str()),(2,"b"));assert_eq!(transcript,dir.path().join("b.jsonl"));
+        let measure=||crate::plugin::routes::MeasuredContext {used:7,window:200};
+        let stale=crate::interactions::InteractionBinding {key:"key".into(),conversation:"a".into(),generation:1};
+        assert_eq!(crate::plugin::sources::publish_context(&registry,&name,&stale,measure(),||panic!("vida antiga não invalida")).await.unwrap_err().0,"plugin_conversation_mismatch");
+        crate::plugin::sources::publish_context(&registry,&name,&now,measure(),||{}).await.unwrap();
+        assert_eq!(std::fs::read_to_string(dir.path().join("b.context.json")).unwrap(),r#"{"used":7,"window":200}"#);assert!(!dir.path().join("a.context.json").exists());
         let current=registry.handle("key",2).await.unwrap();let snapshot=current.snapshot().await.unwrap();assert!(snapshot["error"].is_null());assert_eq!(current.queue("load-b".into(),Action::Load).await.unwrap(),json!([]));assert_eq!(users.load(std::sync::atomic::Ordering::Relaxed),0);
         registry.close("key",2).await.unwrap();server.abort();
     }
@@ -1803,6 +1831,19 @@ mod tests {
         assert!(registry.entries.lock().await.contains_key("B"));
         assert_eq!(handle.queue("fixture-load".into(),Action::Load).await.unwrap(),json!([row]));
         assert_eq!(registry.interaction_binding_readonly("same").await.unwrap(),binding);
+        // Medida de contexto: a de A (SID e geração antigos) não toca B; falha de gravação aparece e não invalida a lista.
+        let measure=||crate::plugin::routes::MeasuredContext {used:10,window:100};
+        let invalidated=std::sync::atomic::AtomicUsize::new(0);let count=||{invalidated.fetch_add(1,std::sync::atomic::Ordering::Relaxed);};
+        let old=InteractionBinding {key:"B".into(),conversation:"old-sid".into(),generation:1};
+        assert_eq!(crate::plugin::sources::publish_context(&registry,"same",&old,measure(),count).await.unwrap_err().0,"plugin_conversation_mismatch");
+        let blocked=dir.path().join("new-sid.context.json");std::fs::create_dir_all(blocked.join("keep")).unwrap();
+        assert_eq!(crate::plugin::sources::publish_context(&registry,"same",&binding,measure(),count).await.unwrap_err().0,"plugin_context_write_failed");
+        assert_eq!(invalidated.load(std::sync::atomic::Ordering::Relaxed),0);
+        std::fs::remove_dir_all(&blocked).unwrap();
+        crate::plugin::sources::publish_context(&registry,"same",&binding,measure(),count).await.unwrap();
+        assert_eq!(std::fs::read_to_string(&blocked).unwrap(),r#"{"used":10,"window":100}"#);
+        assert!(!dir.path().join("old-sid.context.json").exists());
+        assert_eq!(invalidated.load(std::sync::atomic::Ordering::Relaxed),1);
         handle.stop().await.unwrap();
     }
 
