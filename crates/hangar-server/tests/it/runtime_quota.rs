@@ -56,7 +56,7 @@ async fn changed_credential_drops_the_old_quota_and_an_expired_token_does_not_re
     // Login trocado e já vencido: a cota da identidade anterior sai, e sem ponte não há renovação.
     std::fs::write(claude.join(".credentials.json"),
         json!({"claudeAiOauth":{"accessToken":"outro","expiresAt":1000.0}}).to_string()).unwrap();
-    assert!(service.claude_windows(&config_dir).await.unwrap().is_empty());
+    assert_eq!(service.claude_windows(&config_dir).await,Err("quota_expired"));
 }
 
 #[tokio::test]

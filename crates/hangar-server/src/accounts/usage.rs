@@ -311,7 +311,10 @@ impl AccountService {
             })
         })
         .await
-        .unwrap_or_default();
+        .unwrap_or_else(|_| {
+            tracing::warn!(code = "account_usage_task_failed", "leitura de uso da conta não terminou");
+            UsageFacts::default()
+        });
         facts.merge(match runtime {
             Some(runtime) => runtime.account_usage(key).await,
             None => UsageFacts::default(),

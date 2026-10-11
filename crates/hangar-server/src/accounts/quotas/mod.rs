@@ -418,6 +418,13 @@ impl AccountService {
         }
         let held = self.quotas.cache.lock().await;
         let quota = held.as_ref().and_then(|cache| cache.get(&id)).unwrap_or(Value::Null);
+        // Leitura que falhou vira código no log do ator, não linha calada sem janelas.
+        match quota["estado"].as_str() {
+            None | Some("lida") => {}
+            Some("expirada") => return Err("quota_expired"),
+            Some("sem_credencial") => return Err("quota_no_credential"),
+            Some(_) => return Err("quota_unavailable"),
+        }
         Ok(quota["janelas"]
             .as_array()
             .map(|windows| windows.iter().filter(|w| w["por_modelo"] != true).cloned().collect())
