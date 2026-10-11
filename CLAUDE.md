@@ -463,6 +463,10 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
   "local" por cabeçalho. Cookie de login só autoriza `GET`/`HEAD` e, em https, só o
   `__Host-cp_token`: máquinas do Connect dividem o mesmo site. Evidência em
   [plataforma.md](docs/decisoes/plataforma.md#connect-a-porta-dele-nunca-é-local).
+- **Backend novo nasce no Rust (`crates/`), não em `backend/app/`.** Rota, ponte, poller ou
+  integração nova vai para o `hangar-server`. O Python só é tocado quando o Rust precisa de um fato
+  ou rota que ainda mora lá, ou nas portas que são dele (8766 do convidado, 8768 do Connect), e
+  nessas ele só repassa ao Rust, num sentido.
 - **Migrar do Python para o Rust é migrar o caminho inteiro.** Antes de dar a migração por feita,
   procure nos dois lados todo chamador da responsabilidade (rotas `/internal/*`, `*_bridge`,
   `to_thread` que esperam o Rust) e apague o que ficou no Python. O Rust nunca pergunta ao Python o
