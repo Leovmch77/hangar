@@ -7891,6 +7891,7 @@
   "live_voice_memory_title": "What the voice remembers",
   "live_voice_memory_empty": "Nothing yet. The voice learns as you talk.",
   "live_voice_memory_error": "Couldn't read the voice memory.",
+  "live_voice_memory_forget_failed": "Couldn't forget that memory.",
   "live_voice_memory_forget": "Forget: {text}",
   "live_voice_memory_kind_pessoa": "You",
   "live_voice_memory_kind_preferencia": "Preference",

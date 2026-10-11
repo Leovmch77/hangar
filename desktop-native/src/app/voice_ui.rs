@@ -566,6 +566,7 @@ impl Hangar {
     pub(super) fn receive_voice_memory(&mut self, server: String, list: Result<Vec<Value>, String>, cx: &mut Context<Self>) {
         if server != self.active_key() { return; }
         self.voice.memory = Some((server, list));
+        self.voice.memory_error = None;
         cx.notify();
     }
 
@@ -581,8 +582,9 @@ impl Hangar {
             let _ = this.update(cx, |this, cx| {
                 match done {
                     Ok(Ok(_)) => this.refresh_voice_memory(),
-                    Ok(Err(e)) => this.voice.memory_error = Some(e.detail),
-                    Err(_) => this.voice.memory_error = Some(tr_shared("live_voice_memory_error", &[])),
+                    // 404: outro aparelho já apagou; recarregar mostra a lista real.
+                    Ok(Err(e)) if e.status == Some(404) => this.refresh_voice_memory(),
+                    _ => this.voice.memory_error = Some(tr_shared("live_voice_memory_forget_failed", &[])),
                 }
                 cx.notify();
             });
@@ -1501,7 +1503,8 @@ impl Hangar {
     fn render_voice_memory(&self, cx: &mut Context<Self>) -> Div {
         let mut list = div().flex().flex_col().gap(px(4.))
             .child(div().text_xs().font_weight(FontWeight::MEDIUM).text_color(theme::muted()).child(tr_shared("live_voice_memory_title", &[])));
-        match &self.voice.memory {
+        // Lista de outro servidor (troca em curso) conta como carregando.
+        match self.voice.memory.as_ref().filter(|(server, _)| *server == self.active_key()) {
             None => list = list.child(div().text_xs().text_color(theme::muted()).child(tr_shared("comum_carregando", &[]))),
             Some((_, Err(_))) => list = list.child(div().text_xs().text_color(theme::danger()).child(tr_shared("live_voice_memory_error", &[]))),
             Some((_, Ok(entries))) if entries.is_empty() =>

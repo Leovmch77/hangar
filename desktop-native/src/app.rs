@@ -1552,6 +1552,7 @@ impl Hangar {
                 self.replace_sessions(sessions, window, cx);
                 // Primeira lista desta conexão: liga a troca de servidor e a abertura do app.
                 self.refresh_voice_gate(cx);
+                if self.voice.open && self.voice.settings_open { self.refresh_voice_memory(); }
                 if let Some(name) = self.pending_open.take()
                     && let Some(session) = self.sessions.iter().find(|s| s.name == name).cloned() {
                     self.select(session, window, cx);
