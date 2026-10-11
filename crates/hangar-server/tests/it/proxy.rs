@@ -33,24 +33,50 @@ async fn health_answers_without_token_and_with_cors() {
     assert!(terminal.starts_with("127.0.0.1:"), "{terminal}");
     // Grupos: o Python só passa a pedir ao Rust quando a saúde diz que ele os atende.
     assert!(v["groups"].is_boolean(), "{v}");
-    assert_eq!(hangar_server::INTERNAL_PROTOCOL, 54);
+    assert_eq!(hangar_server::INTERNAL_PROTOCOL, 55);
 }
 
 #[tokio::test]
 async fn closed_stdin_stops_the_server() {
     let (_fake, up) = spawn_fake().await;
-    let listener = tokio::net::TcpListener::bind("127.0.0.2:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
+    // Porta pública nova a cada tentativa: em paralelo, outro teste pode estar na porta da ponte do
+    // plugin (127.0.0.1 na mesma porta), e aí o servidor sai com `AddrInUse` antes de atender.
+    let mut started = None;
+    for _ in 0..5 {
+        let listener = tokio::net::TcpListener::bind("127.0.0.2:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        // O duplex faz o papel do stdin: soltar a ponta de escrita é o Python morrendo.
+        let (parent, child_stdin) = tokio::io::duplex(64);
+        let server = tokio::spawn(hangar_server::serve_until(
+            listener,
+            config(up, "127.0.0.1"),
+            hangar_server::parent_gone(child_stdin),
+        ));
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let health = loop {
+            if server.is_finished() {
+                break None;
+            }
+            if let Ok(r) = client().get(format!("http://{addr}/__hangar_server/health")).send().await {
+                break Some(r);
+            }
+            assert!(tokio::time::Instant::now() < deadline, "a saúde pública não respondeu em 5 s");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        match health {
+            Some(r) => {
+                assert_eq!(r.status(), 200);
+                started = Some((addr, parent, server));
+                break;
+            }
+            None => {
+                let error = server.await.unwrap().expect_err("o servidor saiu sem erro antes da saúde");
+                assert_eq!(error.kind(), std::io::ErrorKind::AddrInUse, "{error}");
+            }
+        }
+    }
+    let (addr, parent, server) = started.expect("nenhuma porta livre para a ponte");
     let plugin = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, addr.port()));
-    // O duplex faz o papel do stdin: soltar a ponta de escrita é o Python morrendo.
-    let (parent, child_stdin) = tokio::io::duplex(64);
-    let server = tokio::spawn(hangar_server::serve_until(
-        listener,
-        config(up, "127.0.0.1"),
-        hangar_server::parent_gone(child_stdin),
-    ));
-    let r = client().get(format!("http://{addr}/__hangar_server/health")).send().await.unwrap();
-    assert_eq!(r.status(), 200);
     assert_eq!(client().get(format!("http://{plugin}/api/sessions")).send().await.unwrap().status(), 404);
     drop(parent);
     let ended = tokio::time::timeout(Duration::from_secs(5), server).await.expect("parou em 5 s");

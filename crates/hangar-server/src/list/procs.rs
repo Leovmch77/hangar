@@ -35,6 +35,9 @@ pub trait ProcessView: Send + Sync {
     fn fds_checked(&self, pid: i64) -> io::Result<Vec<PathBuf>> { Ok(self.fds(pid)) }
     /// Nome do executável (`comm` no Linux). Só a varredura de uso de conta pergunta.
     fn name(&self, _pid: i64) -> io::Result<String> { Err(io::ErrorKind::Unsupported.into()) }
+    /// Ambiente coberto pelo título que o processo escreveu (Chromium/Electron): só zeros, ou pedaços
+    /// da própria linha de comando. Só a varredura de uso de conta pergunta.
+    fn environ_erased(&self, _pid: i64) -> bool { false }
 }
 
 /// Processo que morreu entre a varredura e a leitura: não é falha, é corrida.
@@ -88,6 +91,14 @@ mod linux {
         pub fn with_root(root: impl Into<PathBuf>) -> Self {
             Self { root: root.into(), cache: Mutex::new(None), btime: std::sync::OnceLock::new(),
                 environ: Mutex::new(crate::list::capped::Capped::new(crate::list::capped::SESSION_CAP)) }
+        }
+
+        /// Para varrer a máquina inteira (uso de conta): o ambiente de cada processo é lido uma vez,
+        /// e o teto da lista despejaria entradas e anotaria o despejo no diário a cada varredura.
+        pub fn whole_machine() -> Self {
+            let procs = Self::default();
+            *procs.environ.lock().unwrap_or_else(|e| e.into_inner()) = crate::list::capped::Capped::new(usize::MAX);
+            procs
         }
 
         fn environ(&self, pid: i64) -> io::Result<Arc<[u8]>> {
@@ -199,6 +210,13 @@ mod linux {
         fn name(&self, pid: i64) -> io::Result<String> {
             Ok(String::from_utf8_lossy(&std::fs::read(self.path(pid, "comm"))?).trim().to_owned())
         }
+
+        fn environ_erased(&self, pid: i64) -> bool {
+            let (Ok(raw), Ok(title)) = (self.environ(pid), std::fs::read(self.path(pid, "cmdline"))) else { return false };
+            // Um ambiente de verdade tem entradas que o argv não tem (`PATH`, `HOME`).
+            !raw.is_empty() && raw.split(|b| *b == 0).filter(|chunk| !chunk.is_empty())
+                .all(|chunk| title.windows(chunk.len()).any(|window| window == chunk))
+        }
     }
 }
 
@@ -228,6 +246,11 @@ mod other {
         state: Mutex<Snapshot>,
         #[cfg(test)]
         pub(super) refreshes: std::sync::atomic::AtomicUsize,
+    }
+
+    impl SysInfo {
+        /// O mesmo leitor: sem cache de ambiente com teto, nada a trocar.
+        pub fn whole_machine() -> Self { Self::default() }
     }
 
     impl Default for SysInfo {
@@ -487,6 +510,25 @@ mod tests {
         assert_eq!(procs.start_time(11), Some(1005.0), "o boot é lido uma vez");
         assert_eq!(procs.argv(99), Vec::<String>::new());
         assert_eq!(procs.start_time(99), None);
+    }
+
+    #[test]
+    fn environ_overwritten_by_the_process_title_is_erased() {
+        let root = fake_proc();
+        let procs = ProcFs::with_root(root.path());
+        fs::write(root.path().join("11/environ"), vec![0u8; 3120]).unwrap();
+        fs::write(root.path().join("12/environ"), b"A=1\0").unwrap();
+        assert!(procs.environ_erased(11), "só zeros: o título foi escrito por cima");
+        assert!(!procs.environ_erased(12));
+        assert!(!procs.environ_erased(10), "ilegível não é apagado");
+        // Título maior que o argv original: o resto dele transborda para a área do ambiente.
+        add(root.path(), 13, 10, "claude", &["/usr/lib/app/claude --type=gpu-process --ozone-platform=wayland --render=x"]);
+        let mut spilled = b"m=wayland --render=x\0".to_vec();
+        spilled.resize(3120, 0);
+        fs::write(root.path().join("13/environ"), spilled).unwrap();
+        assert!(procs.environ_erased(13), "o que há no ambiente é pedaço do título");
+        fs::write(root.path().join("10/environ"), b"").unwrap();
+        assert!(!ProcFs::with_root(root.path()).environ_erased(10), "vazio não é apagado");
     }
 
     #[test]

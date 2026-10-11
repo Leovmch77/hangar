@@ -368,7 +368,7 @@ def _worker() -> None:
     from fastapi.responses import JSONResponse
     from fastapi.testclient import TestClient
     from app import api, codex_contas_login, credenciais, account_bridge, dictation_bridge
-    import psutil
+    from app.account_lifecycle import AccountKey
     from types import SimpleNamespace
     from app import internal_api, runtime_coordinator
 
@@ -438,6 +438,11 @@ def _worker() -> None:
             with patch.object(account_bridge, "terminal_instances", side_effect=RuntimeError("snapshot indisponível")):
                 return original_publish(*args, **kwargs)
         return original_publish(*args, **kwargs)
+
+    def launcher_pids(key):
+        """Dublê da varredura do Rust: o lançador vivo que nomeia a conta no `--codex-home`."""
+        return [child.pid for child in children if child.poll() is None and "--codex-home" in child.args
+                and AccountKey.new(key.provider, Path(child.args[child.args.index("--codex-home") + 1])) == key]
 
     def create_at_barrier(name, cwd, config_dir, **kwargs):
         from app.models import SessionInfo
@@ -629,19 +634,17 @@ def _worker() -> None:
         """O que o Python publica para o leitor de uso do Rust (`accounts/usage.rs`): processo com a
         conta, nascimento com a identidade do pane e sidecar de terminal com a sessão viva."""
         from app import account_bridge, account_lifecycle
-        from app.account_lifecycle import AccountKey
         from app.adapters.codex import sessions
-        import psutil
-        live = [psutil.Process(child.pid) for child in children if child.poll() is None]
-        facts = account_bridge.inspect_processes(AccountKey.new("codex", root / ".codex-alpha"), processes=live)
+        live = [child for child in children if child.poll() is None]
+        pids = launcher_pids(AccountKey.new("codex", root / ".codex-alpha"))
         instances = account_bridge.terminal_instances() if live else {}
         births = [json.loads(path.read_text(encoding="utf-8"))
                   for path in (account_lifecycle.default_lock_root() / "births").glob("*.json")]
         rows = [json.loads(path.read_text(encoding="utf-8")) for path in sessions._dir().glob("*.json")]
         names = {name for name, identity in instances.items() if any(b["instance"] == identity for b in births)}
         names |= {row["name"] for row in rows if row["name"] in instances}
-        return {"complete": facts.complete and all(b["instance"] is not None for b in births),
-                "sessions": sorted(names), "pids": facts.pids, "holders": facts.holders}
+        return {"complete": all(b["instance"] is not None for b in births),
+                "sessions": sorted(names), "pids": pids, "holders": []}
 
     @app.get("/__contract__/published")
     def publication():
@@ -780,8 +783,7 @@ def _worker() -> None:
             patch.object(api.registry, "_rename_rust"), \
             patch.object(account_bridge, "terminal_instances", side_effect=lambda: dict(mux) if any(
                 child.poll() is None for child in children) else {}), \
-            patch.object(account_bridge, "system_processes", side_effect=lambda: [
-                psutil.Process(child.pid) for child in children if child.poll() is None]), \
+            patch.object(account_bridge, "request_process_uses", side_effect=lambda key, pid: pid in launcher_pids(key)), \
             patch.object(dictation_bridge, "request", side_effect=catalog_transport), \
             patch("subprocess.Popen", side_effect=deny_external), \
             patch("socket.create_connection", side_effect=private_connection), TestClient(app, client=("127.0.0.1", 32123)) as client:

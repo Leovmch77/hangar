@@ -1985,3 +1985,34 @@ contava threads `asyncio_N` e o uvloop nomeia `ThreadPoolExecutor-N_M` (mostrava
 - **Regra:** ao migrar uma responsabilidade, a mesma tarefa procura e apaga os chamadores que
   sobraram nos dois lados. Uma ponte que vai e volta entre os processos no mesmo pedido é bug de
   desenho, não detalhe de desempenho.
+
+## Processos que usam uma conta: o Claude Desktop não é cliente
+
+Medido em 11/10/2026. O Claude Desktop (app da Anthropic, Electron) se chama `claude`, junta o argv
+numa linha e escreve o título por cima da área do ambiente: o `/proc/<pid>/environ` dele tem 3120
+bytes, todos zero ou, quando o título transborda do argv, o resto da própria linha de comando. Na varredura Python, ambiente sem entrada contava como "não sei", e com o app aberto
+excluir, renomear e entrar numa conta Codex recusavam sempre com `account_usage_unknown`. Na
+varredura do Rust (`accounts/usage.rs`) a variável lida dali sai ausente, e o app passava por
+cliente da conta Claude padrão (`~/.claude`), o que segura a renovação e a exclusão dela.
+
+- **Processo sem a variável cujo ambiente foi coberto pelo título não cai na conta padrão**
+  (`ProcessView::environ_erased`: bytes em que tudo o que não é zero aparece na linha de comando).
+  Um ambiente de verdade tem entradas que o argv não tem (`PATH`, `HOME`), e nenhum CLI de conta
+  reescreve o título por cima dele. A regra só decide no ramo da conta padrão: com a variável lida,
+  ela não entra. Exigir "nenhuma entrada `NOME=valor`" deixava passar o título transbordado, que
+  traz `=`.
+- **A varredura usa um leitor sem o teto de cache da lista** (`SystemProcs::whole_machine`): ela
+  passa por todos os processos da máquina, e o teto de 256 despejava entradas e anotava
+  "cache da lista cheio" no diário a cada varredura.
+- **A varredura Python saiu.** O `retire_terminal_birth` do adaptador Codex pergunta ao Rust se o
+  `app_pid` da sessão usa a conta (`{"process_uses": chave, "pid": n}` em
+  `/__hangar_server/accounts`), sem varrer a máquina: a pergunta se repete a cada 1 s por sessão
+  até aposentar, e um processo alheio ilegível não pode segurá-la. Sem o Rust, o nascimento não se
+  aposenta e a pergunta se repete. Contrato interno 55.
+
+A conta Codex com login revogado aparecia em "Outros agentes", sem Entrar. O `account/read` do Codex
+responde erro interno (`-32603`) com a mensagem citando `unauthorized (401)`, e o leitor do Rust
+juntava isso às falhas sem resposta (`method: unknown`). Agora a recusa do login vira conta
+desconectada (`method: none`), que os dois clientes já mostram com Entrar; prazo, CLI ausente e
+outras falhas continuam `unknown`. No nativo, a conta Codex do app fica em Assinaturas mesmo com o
+login `unknown`: "Outros agentes" é o grupo das chaves de API.

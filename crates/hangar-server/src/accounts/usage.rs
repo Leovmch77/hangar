@@ -106,6 +106,11 @@ fn uses(procs: &dyn ProcessView, pid: i64, key: &AccountKey, home: &Path) -> Res
             if !expected.contains(&name) && !expected.iter().any(|e| names.contains(*e)) {
                 return Ok(false);
             }
+            // Sem variável porque o título cobriu o ambiente: app Chromium/Electron (o Claude Desktop se
+            // chama `claude`), não CLI de conta.
+            if procs.environ_erased(pid) {
+                return Ok(false);
+            }
             // O padrão é o da casa do processo: o CLI resolve `~` pelo ambiente dele.
             let own = procs.env_var(pid, if cfg!(windows) { "USERPROFILE" } else { "HOME" })?
                 .filter(|h| !h.is_empty()).map(PathBuf::from).unwrap_or_else(|| home.to_owned());
@@ -293,7 +298,39 @@ pub(crate) async fn terminal_instances() -> Result<Instances, ()> {
     if out.status.code() == Some(1) && absent { Ok(Instances::new()) } else { Err(()) }
 }
 
+/// Processo nascendo ou saindo (no Windows argv e ambiente ficam ilegíveis por um instante, que
+/// sob carga passa de meio segundo) deixa uma leitura incompleta à toa: relê até o prazo. Uma
+/// leitura completa posterior prova o mesmo que qualquer outra.
+async fn reread_incomplete<F, Fut>(mut read: F) -> UsageFacts
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = UsageFacts>,
+{
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let facts = read().await;
+        if facts.complete || !facts.sessions.is_empty() || tokio::time::Instant::now() >= deadline {
+            return facts;
+        }
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    }
+}
+
 impl AccountService {
+    /// Se um processo usa a conta (`None` = não dá para saber): o nascimento de sessão Codex do
+    /// Python se aposenta quando o app-server dele usa a conta, sem varrer a máquina inteira.
+    pub(crate) async fn process_uses(&self, key: &AccountKey, pid: u32) -> Option<bool> {
+        let (key, home) = (key.clone(), self.env.home.clone());
+        tokio::task::spawn_blocking(move || match uses(&crate::list::procs::SystemProcs::default(), i64::from(pid), &key, &home) {
+            Ok(uses) => Some(uses),
+            Err(Skip::Gone) => Some(false),
+            Err(Skip::Unknown) => None,
+        })
+        .await
+        .ok()
+        .flatten()
+    }
+
     /// Fatos desta máquina somados aos do runtime Rust. Runtime ausente deixa os fatos
     /// incompletos: nunca prova que a conta está livre.
     pub(crate) async fn usage(
@@ -301,31 +338,25 @@ impl AccountService {
         runtime: Option<&crate::runtime::gateway::RuntimeRegistry>,
         key: &AccountKey,
     ) -> UsageFacts {
-        // Processo nascendo (no Windows o argv ainda vazio) deixa uma leitura incompleta à toa: relê
-        // um instante depois. Uma leitura completa posterior prova o mesmo que qualquer outra.
-        let mut facts = UsageFacts::default();
-        for attempt in 0..3 {
-            if attempt > 0 {
-                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-            }
+        let mut facts = reread_incomplete(|| {
             let (service, owned, handle) = (self.clone(), key.clone(), tokio::runtime::Handle::current());
-            facts = tokio::task::spawn_blocking(move || {
-                let procs = crate::list::procs::SystemProcs::default();
-                let fixture = service.env.terminal_fixture.clone();
-                local_usage(&service, &owned, &procs, &mut || match &fixture {
-                    Some(fixture) => fixture().and_then(|stdout| parse_instances(&stdout)),
-                    None => handle.block_on(terminal_instances()),
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    let procs = crate::list::procs::SystemProcs::whole_machine();
+                    let fixture = service.env.terminal_fixture.clone();
+                    local_usage(&service, &owned, &procs, &mut || match &fixture {
+                        Some(fixture) => fixture().and_then(|stdout| parse_instances(&stdout)),
+                        None => handle.block_on(terminal_instances()),
+                    })
                 })
-            })
-            .await
-            .unwrap_or_else(|_| {
-                tracing::warn!(code = "account_usage_task_failed", "leitura de uso da conta não terminou");
-                UsageFacts::default()
-            });
-            if facts.complete || !facts.sessions.is_empty() {
-                break;
+                .await
+                .unwrap_or_else(|_| {
+                    tracing::warn!(code = "account_usage_task_failed", "leitura de uso da conta não terminou");
+                    UsageFacts::default()
+                })
             }
-        }
+        })
+        .await;
         facts.merge(match runtime {
             Some(runtime) => runtime.account_usage(key).await,
             None => UsageFacts::default(),
@@ -349,6 +380,8 @@ mod tests {
         env: Option<HashMap<String, String>>,
         starts: Vec<f64>,
         gone: bool,
+        /// Título escrito por cima do ambiente (Chromium/Electron).
+        erased: bool,
     }
 
     #[derive(Default)]
@@ -382,6 +415,7 @@ mod tests {
             starts.get(*read - 1).or(starts.last()).copied()
         }
         fn name(&self, pid: i64) -> io::Result<String> { Ok(self.get(pid)?.name.clone()) }
+        fn environ_erased(&self, pid: i64) -> bool { self.get(pid).is_ok_and(|p| p.erased) }
     }
 
     fn proc(name: &str, argv: &[&str], env: &[(&str, &Path)]) -> Proc {
@@ -391,6 +425,7 @@ mod tests {
             env: Some(env.iter().map(|(k, v)| ((*k).to_owned(), v.to_string_lossy().into_owned())).collect()),
             starts: vec![1.0],
             gone: false,
+            erased: false,
         }
     }
 
@@ -439,6 +474,43 @@ mod tests {
         let facts = inspect_processes(&Fake::with(vec![(71, codex)]), &key, tmp.path());
         assert!(facts.complete && facts.pids == [71]);
         assert_eq!(facts.ensure_unused(), Err("account_in_use"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_process_unreadable_for_a_moment_is_read_again_until_the_deadline() {
+        // No Windows o `sysinfo` não lê argv nem ambiente de quem está nascendo ou saindo; sob carga
+        // isso passa de meio segundo.
+        let reads = std::cell::Cell::new(0);
+        let incomplete = UsageFacts::default();
+        let started = tokio::time::Instant::now();
+        let facts = reread_incomplete(|| {
+            reads.set(reads.get() + 1);
+            let next = if reads.get() < 8 { incomplete.clone() } else { UsageFacts { complete: true, ..Default::default() } };
+            async move { next }
+        })
+        .await;
+        assert!(facts.complete, "leu {} vezes em {:?}", reads.get(), started.elapsed());
+        // O que nunca se completa termina no prazo, sem reler para sempre.
+        let started = tokio::time::Instant::now();
+        assert!(!reread_incomplete(|| async { UsageFacts::default() }).await.complete);
+        assert!(started.elapsed() <= Duration::from_secs(3));
+    }
+
+    #[test]
+    fn electron_app_named_claude_with_its_environment_overwritten_is_not_a_client() {
+        // O Claude Desktop (Electron) se chama `claude`, junta o argv numa linha e escreve o título por
+        // cima do ambiente: sem variável lida, ele passaria por cliente da conta Claude padrão.
+        let tmp = tempfile::tempdir().unwrap();
+        let default = AccountKey::new(Provider::Claude, &tmp.path().join(".claude")).unwrap();
+        let desktop = |argv: &str| Proc { erased: true, ..proc("claude", &[argv], &[]) };
+        let fake = Fake::with(vec![
+            (90, desktop("/usr/lib/claude-desktop-bin/claude --ozone-platform=wayland")),
+            (91, desktop("/usr/lib/claude-desktop-bin/claude --type=zygote --no-sandbox")),
+            (92, proc("claude", &["claude", "--session-id", "x"], &[])),
+        ]);
+        let facts = inspect_processes(&fake, &default, tmp.path());
+        assert!(facts.complete);
+        assert_eq!(facts.pids, [92], "só o CLI usa a conta padrão");
     }
 
     #[test]
