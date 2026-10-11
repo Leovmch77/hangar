@@ -817,6 +817,9 @@ publicava `native-<branch>`/`server-<branch>`:
 - **O `check` do nativo usa `cargo build`, não `cargo check`.** O perfil dev otimiza as dependências
   (`opt-level = 3`). O `check` as refazia só em metadados, 373 s a frio, além do `test`. O `build`
   confere o mesmo binário e deixa pronto o que o `test` usa: o `test` caiu de 525 s para 28 s.
+- **Numa branch comum o job do Server se chama `testes`, não `build`.** Ele só roda o `cargo test` e
+  o pytest do runtime; com o nome `build`, quem olhava um PR achava que o build de release tinha
+  voltado (11/10/2026). O id do job continua `build`, e o nome segue a mesma condição do `COMPILA`.
 - **O contrato do cano só roda onde há binário de release** (main, canal, `workflow_dispatch`).
   Numa branch comum ele não roda; quem mexe no `cano.py` confere com o `workflow_dispatch`.
 - **Releases de branch antigas continuam publicadas.** Uma branch que parou de publicar e já tinha
