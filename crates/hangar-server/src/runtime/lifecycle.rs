@@ -178,11 +178,18 @@ pub async fn permission_mode(io:&dyn TerminalIo,binding:&TerminalBinding)->Resul
     crate::state::permission::parse_permission_mode(text).map(str::to_owned).ok_or_else(||failure("relaunch_mode_read"))
 }
 
+/// Pasta dos sidecars do Claude sem terminal. Nos testes da unidade é uma pasta do processo, nunca o
+/// HOME real: a suíte rodada na máquina de uso não pode deixar sessão-fantasma.
+pub(crate) fn claude_sidecar_dir()->Result<std::path::PathBuf,RuntimeError> {
+    let home=if cfg!(test) {Some(std::env::temp_dir().join(format!("hangar-unit-{}",std::process::id())))} else {std::env::home_dir()};
+    home.map(|home|home.join(".hangar/claude-headless")).ok_or_else(||failure("lifecycle_sidecar_path"))
+}
+
 /// O arquivo já existe: esta operação nunca cadastra nem prepara uma conta.
 /// O chamador segura a lease do Store e o portão de revisão do ator.
 pub fn delete_sidecar(target:&super::protocol::RuntimeTarget,conversation:&str)->Result<(),RuntimeError> {
     if target.provider!="claude" || target.name.is_empty() || !target.name.bytes().all(|b|b.is_ascii_alphanumeric() || b"._-".contains(&b)) {return Err(failure("lifecycle_sidecar_path"));}
-    let path=std::env::home_dir().ok_or_else(||failure("lifecycle_sidecar_path"))?.join(".hangar/claude-headless").join(format!("{}.json",target.name));
+    let path=claude_sidecar_dir()?.join(format!("{}.json",target.name));
     let bytes=match std::fs::read(&path) {Ok(bytes)=>bytes,Err(error) if error.kind()==std::io::ErrorKind::NotFound=>return Ok(()),Err(_)=>return Err(failure("lifecycle_sidecar_read"))};
     let value:serde_json::Value=serde_json::from_slice(&bytes).map_err(|_|failure("lifecycle_sidecar_read"))?;
     if value["key"]!=target.key || value["session_id"]!=conversation || value["name"]!=target.name
@@ -194,14 +201,13 @@ pub fn delete_sidecar(target:&super::protocol::RuntimeTarget,conversation:&str)-
 fn sidecar_hash(bytes:&[u8])->String {ring::digest::digest(&ring::digest::SHA256,bytes).as_ref().iter().map(|byte|format!("{byte:02x}")).collect()}
 pub(super) fn sidecar_digest(target:&super::protocol::RuntimeTarget)->Result<String,RuntimeError> {
     if target.provider!="claude" || target.name.is_empty() || !target.name.bytes().all(|b|b.is_ascii_alphanumeric() || b"._-".contains(&b)) {return Err(failure("lifecycle_sidecar_path"));}
-    let path=std::env::home_dir().ok_or_else(||failure("lifecycle_sidecar_path"))?.join(".hangar/claude-headless").join(format!("{}.json",target.name));
+    let path=claude_sidecar_dir()?.join(format!("{}.json",target.name));
     let bytes=std::fs::read(path).map_err(|_|failure("lifecycle_sidecar_read"))?;Ok(sidecar_hash(&bytes))
 }
 pub fn patch_sidecar(target:&super::protocol::RuntimeTarget,patch:&serde_json::Value)->Result<serde_json::Value,RuntimeError> {
     use serde_json::{Value,json};
     if target.provider!="claude" || !target.name.bytes().all(|b|b.is_ascii_alphanumeric() || b"._-".contains(&b)) || target.name.is_empty() {return Err(failure("lifecycle_sidecar_path"));}
-    let home=std::env::home_dir().ok_or_else(||failure("lifecycle_sidecar_path"))?;
-    let path=home.join(".hangar").join("claude-headless").join(format!("{}.json",target.name));
+    let path=claude_sidecar_dir()?.join(format!("{}.json",target.name));
     let bytes=std::fs::read(&path).map_err(|_|failure("lifecycle_sidecar_read"))?;
     let mut meta:Value=serde_json::from_slice(&bytes).map_err(|_|failure("lifecycle_sidecar_read"))?;
     let recorded_pid=if meta["cano"].is_null() {0} else {meta["cano"]["pid"].as_u64().ok_or_else(||failure("lifecycle_sidecar_read"))?};

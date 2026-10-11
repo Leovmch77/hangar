@@ -119,7 +119,8 @@ async fn call(server: std::net::SocketAddr, case: &Value, token: &str) -> (u16, 
 
 #[tokio::test]
 async fn headless_codex_routes_match_the_python_golden() {
-    for case in golden().iter().filter(|c| c["relay"].is_null() && c["fault"].is_null()) {
+    // `/question/skip` exige a identidade da pergunta exibida, que o Python nunca pediu: caso próprio abaixo.
+    for case in golden().iter().filter(|c| c["relay"].is_null() && c["fault"].is_null() && c["route"] != "question/skip") {
         let dir = tempfile::tempdir().unwrap();
         let registry = Arc::new(RuntimeRegistry::new(policy().await, "secret-test".into(), "instance-test".into()));
         open(&registry, dir.path(), case).await;
@@ -129,6 +130,29 @@ async fn headless_codex_routes_match_the_python_golden() {
         assert_eq!((status, &body), (case["expect"]["status"].as_u64().unwrap() as u16, &case["expect"]["body"]), "{}", case["name"]);
         registry.close("k", 1).await.unwrap();
     }
+}
+
+/// Dispensar pergunta assíncrona pela rota de verdade: o corpo dos clientes (`request_id` +
+/// `interaction_id`) é aceito e o ID chega ao motor; sem ele, 409 com o código de identidade.
+#[tokio::test]
+async fn skip_route_accepts_and_forwards_the_displayed_interaction_id() {
+    use hangar_server::interactions::{InteractionBinding, InteractionKind, InteractionStore, native_target};
+    let case = golden().into_iter().find(|c| c["name"] == "skip_async").unwrap();
+    let request = case["body"]["request_id"].as_str().unwrap().to_owned();
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(InteractionStore::default());
+    let registry = Arc::new(RuntimeRegistry::new(policy().await, "secret-test".into(), "instance-test".into()).with_interactions(store.clone()));
+    open(&registry, dir.path(), &case).await;
+    let (python, server) = serve(registry).await;
+    let missing = call(server, &case, OWNER).await;
+    assert_eq!((missing.0, missing.1["detail"]["code"].as_str()), (409, Some("erro_interacao_sem_identidade")));
+    let binding = InteractionBinding { key: "k".into(), conversation: "thread-1".into(), generation: 1 };
+    let shown = json!({"request_id": request, "questions": [{"question": "?"}]});
+    let token = store.observe(&binding, &native_target(InteractionKind::Question, "thread-1", &json!(request)), Some(shown)).unwrap().unwrap();
+    let mut identified = case.clone();
+    identified["body"] = json!({"request_id": request, "interaction_id": token});
+    assert_eq!(call(server, &identified, OWNER).await, (200, json!({"ok": true})));
+    assert_eq!(python.hits_to("/api/sessions/s/question/skip"), 0);
 }
 
 #[tokio::test]

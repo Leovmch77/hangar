@@ -2339,6 +2339,9 @@ class CodexAdapter:
         return False
 
     async def drain(self, name: str, path: str) -> int:
+        from app.runtime_coordinator import rust_owns_codex_terminal
+        if rust_owns_codex_terminal():
+            return 0    # fila e entrega do Codex com terminal são do Rust: o Python nunca grava nela
         sess = self._sessions.get(name)
         async with self.delivery_lock(name):
             from app.conversation_transfer import transfer_active

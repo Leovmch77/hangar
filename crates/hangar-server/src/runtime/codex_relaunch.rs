@@ -224,6 +224,15 @@ fn with_settings(mut meta:Meta,view:&Value,key:&str) -> Meta {
     meta
 }
 
+/// Sidecar do terminal: o lançador não aceita modo nulo, então o padrão da abertura vai gravado;
+/// texto desconhecido recusa aqui, antes de tocar em processo.
+fn terminal_settings(meta:Meta,view:&Value,key:&str) -> Result<Meta,RuntimeError> {
+    let mode = super::codex_launch::stored_mode(&Value::Object(meta.clone()))?;
+    let mut settings = with_settings(meta,view,key);
+    settings.insert("permission_mode".into(),json!(mode));
+    Ok(settings)
+}
+
 /// Plan/default voltam depois da troca; outro modo não existe no sem terminal.
 fn collaboration(view:&Value) -> Option<String> { view["mode"].as_str().filter(|mode|matches!(*mode,"plan" | "default")).map(str::to_owned) }
 
@@ -436,7 +445,7 @@ impl Watcher {
         let (key,generation,handle) = registry.codex_headless(name).await.ok_or_else(gone)?;
         let meta = self.load(name).await.filter(|meta|terminal::text(meta,"key") == Some(key.as_str())).ok_or_else(gone)?;
         let view = self.preconditions(registry,&handle,&meta,true).await?;
-        let settings = with_settings(meta.clone(),&view,&key);
+        let settings = terminal_settings(meta.clone(),&view,&key)?;
         let back = cleared(settings.clone(),true);
         let wanted = cleared(settings,false);
         self.launcher_ready(registry,&wanted).await?;
@@ -632,6 +641,17 @@ mod tests {
         assert_eq!(cleared(settings,false)["headless"],false);
         assert_eq!(collaboration(&json!({"mode":"plan"})).as_deref(),Some("plan"));
         assert_eq!(collaboration(&json!({"mode":"other"})),None);
+    }
+
+    #[test]
+    fn the_terminal_sidecar_records_the_opening_default_and_refuses_an_unknown_mode() {
+        let map = |v:Value|v.as_object().unwrap().clone();
+        let null = terminal_settings(map(json!({"name":"cx","permission_mode":null})),&json!({}),"k").unwrap();
+        assert_eq!(null["permission_mode"],"Full Access","nulo é o padrão da abertura, gravado para o lançador");
+        let kept = terminal_settings(map(json!({"name":"cx","permission_mode":"ask for approval"})),&json!({}),"k").unwrap();
+        assert_eq!(kept["permission_mode"],"Ask for approval");
+        let unknown = terminal_settings(map(json!({"name":"cx","permission_mode":"Read Only"})),&json!({}),"k").unwrap_err();
+        assert_eq!(unknown.code,"launch_permission_mode","desconhecido nunca vira Full Access");
     }
 
     #[test]

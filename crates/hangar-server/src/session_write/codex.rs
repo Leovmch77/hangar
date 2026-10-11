@@ -94,6 +94,8 @@ pub fn limits_answer(sent: &Result<RuntimeReply, RuntimeError>) -> Answer {
 /// `/question/skip`: pergunta que não está mais lá (recusa do motor) é 409; falha de envio é 503.
 pub fn skip_answer(sent: &Result<RuntimeReply, RuntimeError>) -> Answer {
     let invalid = || (StatusCode::CONFLICT, detail_body("erro_codex_resposta_invalida", MSG_INVALID_ANSWER, json!({})));
+    // Identidade ausente, trocada ou ilegível sai com o código próprio, nunca como falha de envio.
+    if let Some(failed) = super::control::interaction_result(sent) { return failed; }
     match sent {
         Ok(reply) if reply.disposition == Disposition::Accepted => (StatusCode::OK, json!({"ok": true})),
         // Com terminal o cancelamento escrito não prova quem decidiu: resultado incerto, como em /answer e /select.
@@ -279,8 +281,9 @@ pub async fn limits(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
 
 pub async fn skip_question(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
     let (ctx, bytes) = admitted!(st, peer, req);
-    let Some(body) = object(&bytes, ctx.headers()).and_then(|f| strings(&f, "request_id", None)) else { return invalid_body(ctx.headers()) };
-    let sent = run(&ctx, OperationKind::SkipQuestion, json!({"request_id": body["request_id"]})).await;
+    let Some(body) = object(&bytes, ctx.headers()).and_then(|f| strings(&f, "request_id", Some("interaction_id"))) else { return invalid_body(ctx.headers()) };
+    // O motor exige o `interaction_id` da pergunta exibida; sem ele responde 409 sem identidade.
+    let sent = run(&ctx, OperationKind::SkipQuestion, json!({"request_id": body["request_id"], "interaction_id": body.get("interaction_id")})).await;
     log_outcome(&ctx.name, "question_skip", &sent, "pular pergunta do Codex não confirmado");
     answer(&ctx, skip_answer(&sent))
 }

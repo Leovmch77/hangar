@@ -58,6 +58,27 @@ describe('AskQuestionStepper: saídas de texto', () => {
     comp.$destroy(); el.remove();
   });
 
+  it('troca A na revisão por B com menos opções sem quebrar a tela', async () => {
+    const el = document.createElement('div'); document.body.appendChild(el);
+    const first = { ...payload, request_id: 'same-native-id', interaction_id: 'interaction-a' };
+    const second: AskQuestionPayload = { ...first, interaction_id: 'interaction-b',
+      questions: [{ ...payload.questions[0], options: [{ label: 'Única', description: '' }] }] };
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    const comp = createClassComponent({ component: AskQuestionStepper, target: el, props: {
+      open: true, payload: first, onSubmit, onClose: vi.fn(),
+    } });
+    await tick();
+    el.querySelectorAll<HTMLButtonElement>('.option-btn')[1].click(); await tick();
+    expect(el.querySelector('.review-list')).not.toBeNull();
+    comp.$set({ payload: second }); await tick(); await tick();
+    expect(el.querySelector('.review-list')).toBeNull();
+    expect(el.querySelectorAll('.option-btn')).toHaveLength(1);
+    el.querySelector<HTMLButtonElement>('.option-btn')!.click(); await tick();
+    el.querySelector<HTMLButtonElement>('.primary-btn')!.click(); await tick();
+    expect(onSubmit).toHaveBeenLastCalledWith([expect.objectContaining({ indices: [0], labels: ['Única'] })], second);
+    comp.$destroy(); el.remove();
+  });
+
   it('troca A por B idêntica e ignora erro e liberação tardios de A', async () => {
     const el = document.createElement('div'); document.body.appendChild(el);
     const first = { ...payload, request_id: 'same-native-id', interaction_id: 'interaction-a' };

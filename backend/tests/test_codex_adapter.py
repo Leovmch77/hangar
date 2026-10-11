@@ -508,6 +508,30 @@ async def test_drain_stops_after_first_delivery_with_two_pending(monkeypatch, tm
     assert sum(1 for e in q.load() if e["delivered"] is False) == 1
 
 
+async def test_drain_never_touches_the_queue_when_rust_owns_the_codex_terminal(monkeypatch, tmp_path):
+    # A fila do Codex com terminal é a mesma projeção que o Store do Rust grava: o drain do Python
+    # (SSE do convidado, `_drenar`) não pode reivindicar nem desfazer nada nela.
+    from app import runtime_coordinator
+    from app.config import settings
+    monkeypatch.setattr(settings, "projects_dir", tmp_path / "projects")
+    from app.pqueue import PromptQueue
+    q = PromptQueue("sess-rustterm")
+    q.append("msg pendente", delivered=False)
+    writes = []
+    monkeypatch.setattr(PromptQueue, "claim_undelivered", lambda self, **kw: writes.append("claim") or [])
+    monkeypatch.setattr(PromptQueue, "set_delivered", lambda self, *a, **kw: writes.append("set"))
+    monkeypatch.setattr(runtime_coordinator, "rust_owns_codex_terminal", lambda: True)
+    adapter = CodexAdapter()
+    adapter.attach("sess-rustterm", _FakeClient([]), "thread-r")
+
+    async def never(name, text):
+        raise AssertionError("o Python não entrega pelo Codex com terminal do Rust")
+    monkeypatch.setattr(adapter, "send_prompt", never)
+    assert await adapter.drain("sess-rustterm", "") == 0
+    assert writes == []
+    assert [e["delivered"] for e in q.load()] == [False]
+
+
 # --- CodexAdapter.transcript_stream (reaproveita TranscriptTailer + parse_rollout_line) ------
 
 async def test_drain_reverts_claim_when_send_prompt_raises(monkeypatch, tmp_path):

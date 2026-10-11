@@ -2923,8 +2923,7 @@ impl Hangar {
         }
         let body = match &action {
             Action::Answer => match self.answer_body(cx) { Some(body) => Some(body), None => return },
-            Action::Skip => match self.chat.ask.as_ref().and_then(|ask| ask.payload.request_id.clone()) {
-                Some(id) => Some(json!({"request_id": id})), None => return },
+            Action::Skip => match self.chat.ask.as_ref().and_then(interaction::skip_body) { Some(body) => Some(body), None => return },
             Action::Select(option) => match select_body(&snapshot, Some(*option)) { Some(body) => Some(body), None => return },
             Action::Submit => match select_body(&snapshot, None) { Some(body) => Some(body), None => return },
             _ => None,

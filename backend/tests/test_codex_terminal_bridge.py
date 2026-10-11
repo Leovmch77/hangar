@@ -88,6 +88,10 @@ def test_bridge_failures_become_a_coded_failure_never_an_exception(monkeypatch):
     monkeypatch.setattr(list_bridge, "endpoint", lambda: (f"127.0.0.1:{closed}", "s"))
     down = runtime_coordinator.rust_codex_terminal("cx", "input", body=b"{}")
     assert down[0] == 503 and code(down) == "codex_bridge_failed", "Rust fora do ar"
+    monkeypatch.setattr(list_bridge, "endpoint", lambda: None)
+    unannounced = runtime_coordinator.rust_codex_terminal("cx", "kill")
+    assert unannounced[0] == 503 and code(unannounced) == "codex_bridge_failed", "ponte sem endereço: o Python não assume"
+    monkeypatch.setattr(list_bridge, "endpoint", lambda: (f"127.0.0.1:{closed}", "s"))
     assert asyncio.run(api_mod._send_one_codex("cx", "oi"))["error"]["code"] == "codex_bridge_failed", \
         "o envio do broadcast/grupo/MCP devolve a falha, sem levantar"
 

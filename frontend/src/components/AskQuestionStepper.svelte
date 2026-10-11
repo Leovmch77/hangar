@@ -214,7 +214,6 @@
   {/if}
 
 {:else if questions.length > 0 && displayed}
-  {@const answers = buildAnswers()}
   <!-- Revisão das respostas antes de enviar -->
   <!-- Escolha única avança sozinha ao tocar: sem esta volta, um toque errado na ÚLTIMA pergunta
        (ou na única) só tinha saída pelo cancelar, que descarta tudo. -->
@@ -238,7 +237,9 @@
     <p class="error-msg" role="alert">{error}</p>
   {/if}
 
-  <button class="primary-btn" onclick={() => submit(answers, displayed, displayedKey)} disabled={sending}>
+  <!-- As respostas saem no clique: na troca A→B o render roda antes de o $effect zerar `picks`, e montar
+       aqui as escolhas de A sobre as opções de B quebrava a tela. -->
+  <button class="primary-btn" onclick={() => submit(buildAnswers(), displayed, displayedKey)} disabled={sending}>
     {sending ? m.askq_enviando() : m.lista_enviar()}
   </button>
   <button class="ghost-btn" onclick={() => onClose(displayed)}>{m.comum_cancelar()}</button>

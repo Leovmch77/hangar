@@ -61,9 +61,9 @@ def rust_owns_codex_terminal():
 
 def rust_codex_terminal(name, route, method="POST", body=b""):
     """Repasse num sentido, à ponte do Rust, do que entra pelo Python para um Codex com terminal dele
-    (escrita, encerrar, troca de modo). `(status, corpo)`; `None` = não é dele (421), e o Python segue."""
-    from app import list_bridge
-    if list_bridge.endpoint() is None or not rust_owns_codex_terminal():
+    (escrita, encerrar, troca de modo). `(status, corpo)`; `None` = não é dele (421), e o Python segue.
+    Com o Rust dono, ponte sem endereço é 503 com código, nunca o Python assumindo."""
+    if not rust_owns_codex_terminal():
         return None
     return _rust_bridge("codex", name, route, method, body)
 

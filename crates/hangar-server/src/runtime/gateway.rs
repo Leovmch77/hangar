@@ -853,7 +853,7 @@ impl RuntimeRegistry {
                 if let Err(error)=&stopped && wait_lease(&target.lease_path).await.is_err() {return Err(error.clone());}
                 let mut cano=process::Cano {pid:target.binding.pid,escuta:target.binding.escuta.clone(),token:target.binding.token.clone(),ts:0.0,versao:target.binding.versao,extra:Default::default()};
                 cano.extra.insert("process_birth".into(),json!(born));
-                let dir=std::env::home_dir().ok_or_else(||failure("lifecycle_sidecar_path"))?.join(".hangar/claude-headless");
+                let dir=super::lifecycle::claude_sidecar_dir()?;
                 process::kill(&cano,key,&dir).await.map_err(|e|RuntimeError::new(e.code(),"o cano da sessão não foi encerrado"))?;
                 if let Some(recipe)=&recipe {let (pid,birth)=recipe.agent_identity();if !super::lifecycle::process_absent(&procs,pid,birth)? {return Err(failure("lifecycle_agent_still_alive"));}}
                 Ok(())
@@ -948,8 +948,10 @@ impl RuntimeRegistry {
         }
     }
     fn forget_claude_rate(&self,binding:&crate::interactions::InteractionBinding)->Result<(),RuntimeError> {
-        let hubs=self.hubs.get().and_then(crate::side::WeakHubs::upgrade).ok_or_else(||failure("lifecycle_hubs_unbound"))?;
-        hubs.plugin_rates().forget_binding(binding);Ok(())
+        let weak=self.hubs.get().ok_or_else(||failure("lifecycle_hubs_unbound"))?;
+        // Hubs já derrubados (encerramento do servidor) levaram as taxas junto: nada a esquecer.
+        if let Some(hubs)=weak.upgrade() {hubs.plugin_rates().forget_binding(binding);}
+        Ok(())
     }
     fn rebind_claude_hub(&self,target:&super::terminal::TerminalTarget)->Result<(),RuntimeError> {
         let hubs=self.hubs.get().and_then(crate::side::WeakHubs::upgrade).ok_or_else(||failure("lifecycle_hubs_unbound"))?;
@@ -1087,15 +1089,19 @@ impl RuntimeRegistry {
         let lease=wait_lease(&target.lease_path).await?;
         let mut store=Store::open(&target.state_path,&target.projection_dir,QueueState::new(key,generation,name,vec![])).map_err(|_|failure("queue_io"))?;
         if store.state().owner_key!=key || store.state().generation!=generation {return Err(failure("runtime_generation"));}
+        // O Claude novo já subiu no destino: a origem morreu antes, então a limpeza não pode matá-lo.
+        let started=std::sync::atomic::AtomicBool::new(false);
         let result=async {
             super::lifecycle::kill_pane(&io,&target.binding,&original,&procs).await?;
             consumed.start().await.map_err(|_|failure("relaunch_start_unknown"))?;
             let mut next=target.clone();next.generation=next_generation;
             next.binding.generation=next.generation;next.binding.pane=staged.clone();
-            let deadline=tokio::time::Instant::now()+Duration::from_secs(10);
+            // `--resume` de conversa longa demora a mostrar o prompt.
+            let deadline=tokio::time::Instant::now()+Duration::from_secs(60);
             let local=crate::terminal_facts::LocalTerminalFacts::new(Arc::new(io.clone()),self.plugin.clone(),Some(self.terminal_mode_reader()));
             let (agent,birth)=loop {
                 if let Ok((agent,birth))=super::lifecycle::launched_agent(&procs,pid,&target.binding.conversation) {
+                    started.store(true,std::sync::atomic::Ordering::Relaxed);
                     next.metadata.agent_pid=u32::try_from(agent).map_err(|_|failure("lifecycle_process_read"))?;
                     next.metadata.agent_birth=birth;
                     if local.check(&next,&next.binding).await.is_ok()
@@ -1123,10 +1129,19 @@ impl RuntimeRegistry {
         }.await;
         if let Err(error)=&result {
             // A vida antiga já não está aberta aqui; a falha nunca confirma modo original nem bypass.
-            super::actor::mark_live_error(&self.live_sender(name),&error.code,&error.message);
+            // Destino com o Claude já de pé fica vivo: é a conversa do usuário e a origem já morreu.
+            let alive=started.load(std::sync::atomic::Ordering::Relaxed);
+            let message=if alive {format!("{} O Claude novo subiu no terminal e ficou aberto, sem dono aqui: confira a sessão.",error.message)} else {error.message.clone()};
+            super::actor::mark_live_error(&self.live_sender(name),&error.code,&message);
             let mut staged_binding=target.binding.clone();staged_binding.pane=staged;
-            if let Err(cleanup)=super::lifecycle::kill_pane(&io,&staged_binding,&helper,&procs).await {
+            let kept=if alive {
+                tracing::warn!(key,session=name,code=%error.code,reason="destino iniciado mantido vivo; settings privados ficam até a saída do helper","ciclo de vida Claude");
+                true
+            } else if let Err(cleanup)=super::lifecycle::kill_pane(&io,&staged_binding,&helper,&procs).await {
                 tracing::warn!(key,session=name,code=%cleanup.code,reason="destino não confirmado não foi encerrado; settings privados ficam até a saída do helper","ciclo de vida Claude");
+                true
+            } else {false};
+            if kept {
                 let retained=recipe.clone();let helper=helper.clone();
                 tokio::spawn(async move {
                     let procs=crate::list::procs::SystemProcs::default();
@@ -1210,7 +1225,7 @@ impl RuntimeRegistry {
         };
         let mut launch=recipe.launch(&binding.conversation,&selected)?;
         recipe.apply_choices(&mut launch,view["model"].as_str(),view["effort"].as_str())?;
-        let sidecar_dir=std::env::home_dir().ok_or_else(||failure("lifecycle_sidecar_path"))?.join(".hangar/claude-headless");
+        let sidecar_dir=super::lifecycle::claude_sidecar_dir()?;
         let extra=target.metadata["cano"].as_object().map(|meta|meta.iter().filter(|(k,_)|!matches!(k.as_str(),"pid"|"escuta"|"token"|"ts"|"versao")).map(|(k,v)|(k.clone(),v.clone())).collect()).unwrap_or_default();
         let prepared=process::prepare_recipe(&launch,key,&sidecar_dir,extra).map_err(|e|RuntimeError::new(e.code(),"não preparei a receita; origem conservada"))?;
         if !from_exit {recipe.verify(&procs)?;}
@@ -1231,7 +1246,7 @@ impl RuntimeRegistry {
         store.exec(current_generation,&format!("{phase}:intent:{attempt}"),ClockSample {monotonic_s:0.0,epoch_s:SystemTime::now().duration_since(UNIX_EPOCH).map_or(0.0,|d|d.as_secs_f64())},Action::AdvanceLifecycle {generation:current_generation,state:json!({"claude_lifecycle_intent":intent})}).map_err(|_|failure("queue_io"))?;
         if let Some(meta)=store.state().runtime_state.get("metadata").filter(|meta|meta["key"]==key) {target.metadata=meta.clone();}
         if target.metadata["session_id"]!=binding.conversation {return Err(failure("lifecycle_conversation"));}
-        let sidecar=std::env::home_dir().ok_or_else(||failure("lifecycle_sidecar_path"))?.join(".hangar/claude-headless").join(format!("{name}.json"));
+        let sidecar=super::lifecycle::claude_sidecar_dir()?.join(format!("{name}.json"));
         let persisted:Value=serde_json::from_slice(&std::fs::read(sidecar).map_err(|_|failure("lifecycle_sidecar_read"))?).map_err(|_|failure("lifecycle_sidecar_read"))?;
         if persisted["key"]!=key || persisted["session_id"]!=binding.conversation {return Err(failure("lifecycle_conversation"));}
         let sidecar_expected_pid=if persisted["cano"].is_null() {0} else {persisted["cano"]["pid"].as_u64().and_then(|pid|u32::try_from(pid).ok()).ok_or_else(||failure("lifecycle_sidecar_read"))?};
@@ -1341,7 +1356,7 @@ impl RuntimeRegistry {
             let closed=closed.ok_or_else(||failure("state_lifecycle_binding_missing"))?;
             if closed.name!=name || !super::lifecycle::matches_life(&closed.binding,key,conversation,generation) {return Ok(Dead::InTransfer);}
             if !super::lifecycle::process_absent(&procs,closed.pid,closed.birth)? {return Ok(Dead::InTransfer);}
-            let sidecar=std::env::home_dir().ok_or_else(||failure("lifecycle_sidecar_path"))?.join(".hangar/claude-headless").join(format!("{name}.json"));
+            let sidecar=super::lifecycle::claude_sidecar_dir()?.join(format!("{name}.json"));
             match std::fs::read(&sidecar) {
                 Ok(bytes)=> {let _:Value=serde_json::from_slice(&bytes).map_err(|_|failure("lifecycle_sidecar_read"))?;return Ok(Dead::InTransfer);},
                 Err(error) if error.kind()==std::io::ErrorKind::NotFound=>{},
@@ -1778,7 +1793,7 @@ mod tests {
                 let ack=json!({"type":"cano_input_ack","operation_id":envelope["operation_id"],"outcome":"written"});socket.get_mut().write_all(format!("{ack}\n").as_bytes()).await.unwrap();}
         });
         let meta=json!({"key":"key","name":name,"session_id":"a","headless":true,"initialized":true,"config_dir":dir.path(),"permission_mode":"manual","previous_non_plan":"manual","cano":{"pid":42,"escuta":format!("tcp:{address}"),"token":"fixture","versao":2}});
-        let sidecar_path=std::env::home_dir().unwrap().join(".hangar/claude-headless").join(format!("{name}.json"));std::fs::create_dir_all(sidecar_path.parent().unwrap()).unwrap();assert!(!sidecar_path.exists());std::fs::write(&sidecar_path,serde_json::to_vec(&meta).unwrap()).unwrap();let _sidecar=OwnSidecar(sidecar_path);
+        let sidecar_path=super::lifecycle::claude_sidecar_dir().unwrap().join(format!("{name}.json"));std::fs::create_dir_all(sidecar_path.parent().unwrap()).unwrap();assert!(!sidecar_path.exists());std::fs::write(&sidecar_path,serde_json::to_vec(&meta).unwrap()).unwrap();let _sidecar=OwnSidecar(sidecar_path);
         let target=RuntimeTarget {key:"key".into(),generation:1,name:name.clone(),provider:"claude".into(),metadata:meta,binding:CanoBinding {pid:42,escuta:format!("tcp:{address}"),token:"fixture".into(),versao:2},lease_path:dir.path().join("lease"),state_path:dir.path().join("state"),projection_dir:dir.path().join("projection"),transcript:dir.path().join("a.jsonl"),created:0.0};std::fs::write(&target.transcript,b"").unwrap();
         let held_lease=acquire_lease(&target.lease_path).unwrap();let mut initial=QueueState::new("key",1,&name,vec![json!({"id":"a-row","text":"only-a","ts":1.0,"delivered":false})]);initial.runtime_state["view"]=json!({"conversation":"a","initialized":true});Store::open(&target.state_path,&target.projection_dir,initial).unwrap();drop(held_lease);
         let registry=Arc::new(RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(),"fixture".into(),"instance".into()).with_processes(Arc::new(SidRecipeProcesses {dir:dir.path().into()})).with_interactions(Arc::default()));let hubs=crate::side::Hubs::default();registry.bind_lifecycle();registry.bind_hubs(hubs.downgrade());
@@ -1845,6 +1860,35 @@ mod tests {
         assert!(!dir.path().join("old-sid.context.json").exists());
         assert_eq!(invalidated.load(std::sync::atomic::Ordering::Relaxed),1);
         handle.stop().await.unwrap();
+    }
+
+    /// No encerramento do servidor os hubs caem antes do registro: `shutdown` fecha TODAS as sessões
+    /// Claude mesmo assim. Hubs nunca ligados continuam erro.
+    #[tokio::test]
+    async fn shutdown_after_hubs_dropped_closes_every_claude_entry() {
+        use crate::interactions::InteractionBinding;
+        use crate::terminal_input::TerminalBinding;
+        let dir=tempfile::tempdir().unwrap();
+        let registry=Arc::new(RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(),"test".into(),"instance".into()));
+        for (key,name) in [("A","a"),("B","b")] {
+            let binding=InteractionBinding {key:key.into(),conversation:format!("{name}-sid"),generation:1};
+            let target=super::super::terminal::TerminalTarget {key:key.into(),generation:1,name:name.into(),
+                binding:TerminalBinding {name:name.into(),pane:"%1".into(),conversation:binding.conversation.clone(),generation:1,created:1,mux_argv:vec!["fixture-mux".into()],windows:false,clipboard_lock_path:None},
+                metadata:crate::terminal_facts::TerminalMetadata {config_dir:dir.path().into(),agent_pid:77,agent_birth:1000.0,legacy_import_after:None,fingerprint:format!("fixture-{name}"),origin:"uds:fixture".into()},
+                state_path:dir.path().join(format!("{key}.json")),lease_path:dir.path().join(format!("{key}.lock")),projection_dir:dir.path().into(),transcript:dir.path().join(format!("{name}.jsonl")),created:1.0,plugin_key:None};
+            std::fs::write(&target.transcript,b"").unwrap();
+            let lease=acquire_lease(&target.lease_path).unwrap();
+            let store=Store::open(&target.state_path,&target.projection_dir,QueueState::new(key,1,name,vec![])).unwrap();
+            let options=super::super::terminal::TerminalOptions {io:Arc::new(NoExternalIo),tick:Duration::from_secs(3600),..Default::default()};
+            let handle=super::super::terminal::TerminalActor::spawn(target.clone(),QueueActor::start(store,lease),registry.policy.clone(),options,registry.events.clone(),Arc::new(AtomicU64::new(0)));
+            registry.entries.lock().await.insert(key.into(),Entry {generation:1,handle:EntryHandle::Terminal {target:target.clone(),handle},lease_path:target.lease_path.clone(),name:name.into(),mods_life:0,provider:"claude".into(),account_key:None,relaunch:None,settings_owner:None,
+                mode_source:crate::terminal_facts::ModeSource {binding,transcript:target.transcript.clone(),confirmed:None},live:registry.live_sender(name),runtime_target:None,cano_birth:None,auto_respawn:None,respawn_inflight:false});
+        }
+        let never=crate::interactions::InteractionBinding {key:"X".into(),conversation:"x".into(),generation:1};
+        assert_eq!(registry.forget_claude_rate(&never).unwrap_err().code,"lifecycle_hubs_unbound");
+        let hubs=crate::side::Hubs::default();registry.bind_hubs(hubs.downgrade());drop(hubs);
+        registry.shutdown().await.unwrap();
+        assert!(registry.entries.lock().await.is_empty(),"nenhuma sessão ficou sem fechar");
     }
 
     #[test]

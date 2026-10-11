@@ -506,7 +506,7 @@ impl ListBridge {
         if let Some(registry) = self.plugin_runtime.get() {
             for row in rows.iter_mut().filter(|row| row.provider == "claude") {
                 if let Some(Ok(reading)) = plugins.get(&row.name) {
-                    row.lifecycle_id = Some(reading.binding.key.clone());
+                    row.lifecycle_id = super::links::session_life(Some(&reading.binding.key), None);
                     match registry.terminal_target(&row.name).await {
                         Ok(Some(target)) if target.key == reading.binding.key && target.generation == reading.binding.generation
                             && target.binding.conversation == reading.binding.conversation => {
@@ -1019,6 +1019,37 @@ mod tests {
         *lock(&bridge.test_plugins) = Some(reading(InteractionBinding { generation: 2, ..binding }, Err("plugin_store_unavailable".into())));
         let next = bridge.produce_round(&ProduceFacts::default()).await.unwrap().0;
         assert!(next.rows[0].interaction_id.is_none(), "rodada nova não herda cartão da geração anterior");
+    }
+
+    /// Com a fonte do plugin ligada, a vida da linha Claude segue `k:<chave>`: sem o prefixo o retrato
+    /// do runtime não acha a linha sem terminal e ela aparece parada.
+    #[tokio::test]
+    async fn plugin_reading_keeps_the_k_life_and_the_runtime_snapshot_of_a_headless_claude() {
+        use crate::interactions::InteractionBinding;
+        use crate::state::facts::{PluginFacts, PluginReading};
+        struct Snapshot;
+        impl HeadlessSource for Snapshot {
+            fn snapshots(&self) -> futures_util::future::BoxFuture<'_, BTreeMap<String, Value>> {
+                Box::pin(async { BTreeMap::from([("k".to_owned(),
+                    json!({"key":"k","generation":1,"error":null,"view":{"alive":true,"headless":true,"public_state":{"state":"working","status_line":"opus"}}}))]) })
+            }
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let dirs = Dirs { home: tmp.path().into(), claude: tmp.path().join(".claude"), codex_home: tmp.path().join(".codex"),
+            pi_sessions: tmp.path().join("pi"), omp_config: tmp.path().join("omp"), omp_agent: tmp.path().join("omp/agent"), kimi_home: tmp.path().join("kimi") };
+        let bridge = ListBridge::new(ListEnv { mux: Mux::default(), capture_program: "missing-test-mux".into(),
+            procs: Arc::new(procs::SystemProcs::default()), dirs: Some(dirs) }, FactsClient::new("127.0.0.1:9".parse().unwrap(), "s".into()));
+        bridge.set_runtime(Arc::new(Snapshot));
+        bridge.set_plugin_runtime(Arc::new(crate::runtime::gateway::RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(), "test".into(), "instance".into())));
+        let row = serde_json::from_value::<SessionRow>(json!({"name":"s","provider":"claude","headless":true,"lifecycle_id":"k:k"})).unwrap();
+        *bridge.discovery.lock().await = Some(Discovery { at: Instant::now(), wall: wall_now(), epoch: 0, fresh: true,
+            rows: Arc::new(vec![row]), agent_pids: Arc::default(), panes: Arc::default(), children: Arc::default() });
+        let local = PluginFacts { plugin_state: None, waiter_open: true, heartbeat_age_ms: Some(0), question: None, questions: vec![], suggestion: "".into() };
+        let binding = InteractionBinding { key: "k".into(), conversation: "sid".into(), generation: 1 };
+        *lock(&bridge.test_plugins) = Some(BTreeMap::from([("s".into(), Ok(PluginReading { binding, facts: Ok(local) }))]));
+        let produced = bridge.produce_round(&ProduceFacts::default()).await.unwrap().0;
+        assert_eq!(produced.rows[0].lifecycle_id.as_deref(), Some("k:k"));
+        assert_eq!(produced.rows[0].status_line.as_deref(), Some("opus"), "o retrato do runtime chega à linha");
     }
 
     /// A permissão que o plugin segura num Claude com terminal sai do `plugin::Store` do Rust, sem fato do

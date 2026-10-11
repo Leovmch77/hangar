@@ -150,6 +150,13 @@ pub fn answer_body(ask: &Ask, picks: &[Pick]) -> Option<Value> {
     Some(body)
 }
 
+/// Corpo do `/question/skip`: o pedido e a identidade da pergunta exibida, que o servidor exige.
+pub fn skip_body(ask: &Ask) -> Option<Value> {
+    let mut body = json!({"request_id": ask.payload.request_id.clone()?});
+    if let Some(id) = &ask.payload.interaction_id { body["interaction_id"] = json!(id); }
+    Some(body)
+}
+
 /// Resposta de uma pergunta; `None` enquanto a escolha não vale.
 pub fn answer(ask: &Ask, item: &AskItem, pick: &Pick) -> Option<Value> {
     let mut answer = match pick {
@@ -465,6 +472,8 @@ mod tests {
         assert_eq!(body["interaction_id"], "interaction-a");
         assert_eq!(body["request_id"], 7);
         assert_eq!(answer_body(&b, &[Pick::Options(vec![0])]).unwrap()["interaction_id"], "interaction-b");
+        assert_eq!(skip_body(&a).unwrap(), json!({"request_id": 7, "interaction_id": "interaction-a"}));
+        assert_eq!(skip_body(&b).unwrap()["interaction_id"], "interaction-b");
     }
 
     #[test]
