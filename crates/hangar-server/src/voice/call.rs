@@ -208,7 +208,14 @@ async fn run_call(options: CallOptions, spawn: Spawn, events: &async_channel::Se
     }
     let mut models = options.organizer.clone();
     let mut applied = models.direct.clone();
-    let start = organizer_start(&config, &own, options.cwd.as_deref(), &options.context, &applied, options.tools.clone());
+    let memory_file = super::memory::memory_path(&options.voice_dir);
+    // Ilegível: abre sem memória e sem convite de perfil; a tela mostra o erro.
+    let note = match super::memory::load(&memory_file) {
+        Some(entries) => organizer::memory_note(
+            &super::memory::prompt_block(&entries, chrono::Local::now().date_naive()), !entries.is_empty()),
+        None => { log("memory unreadable"); organizer::memory_note("", true) }
+    };
+    let start = organizer_start(&config, &own, options.cwd.as_deref(), &options.context, &applied, options.tools.clone(), &note);
     log(format!("organizer model={} effort={} tier={}", if applied.model.is_some() { "chosen" } else { "config" }, applied.effort,
         applied.tier.as_deref().unwrap_or("config")));
     // A conta lida em paralelo, com prazo curto: falhar só deixa os limites ocultos até a primeira atualização.
@@ -454,6 +461,7 @@ async fn run_call(options: CallOptions, spawn: Spawn, events: &async_channel::Se
                         ToolCall::FinishPlan { .. } | ToolCall::AskSession(_) | ToolCall::SetMode(_) | ToolCall::SwitchSession(_)
                             | ToolCall::OpenSession(_) | ToolCall::CloseSession { .. } | ToolCall::PairSessions(..) | ToolCall::UnpairSession(_)
                             | ToolCall::HangarAction { .. } | ToolCall::Computer(_) | ToolCall::ClickScreen { .. }
+                            | ToolCall::Remember { .. } | ToolCall::Forget(_)
                             if !spoken.allows(&params) => {
                             let _ = rpc.respond(id, tool_reply("Só a pedido falado do usuário.", false)).await;
                             "refused-not-spoken"
@@ -571,6 +579,26 @@ async fn run_call(options: CallOptions, spawn: Spawn, events: &async_channel::Se
                         }
                         ToolCall::PairSessions(a, b) => { let _ = events.send(VoiceEvent::PairSessions(CallId(id), a, b)).await; "pair" }
                         ToolCall::UnpairSession(name) => { let _ = events.send(VoiceEvent::UnpairSession(CallId(id), name)).await; "unpair" }
+                        ToolCall::Remember { kind, text, replaces } => {
+                            let today = chrono::Local::now().date_naive();
+                            match super::memory::remember(&memory_file, kind, &text, replaces.as_deref(), today) {
+                                Ok(entry) => { let _ = rpc.respond(id, tool_reply(format!("Guardado como {}.", entry.id), true)).await; "remembered" }
+                                Err(super::memory::Refusal::Full(list)) => {
+                                    let ids: Vec<String> = list.iter().map(|e| format!("{} {}", e.id, e.text)).collect();
+                                    let _ = rpc.respond(id, tool_reply(format!("Memória cheia ({}). Substitua uma com replaces ou apague com forget:\n{}",
+                                        super::memory::MAX_ENTRIES, ids.join("\n")), false)).await;
+                                    "memory-full"
+                                }
+                                Err(super::memory::Refusal::Unknown(missing)) => { let _ = rpc.respond(id, tool_reply(format!("Não existe memória {missing}."), false)).await; "memory-unknown" }
+                                Err(super::memory::Refusal::Empty) => { let _ = rpc.respond(id, tool_reply("Memória vazia não é guardada.", false)).await; "memory-empty" }
+                                Err(super::memory::Refusal::Io(why)) => { let _ = rpc.respond(id, tool_reply(format!("Não consegui gravar a memória: {why}"), false)).await; "memory-io" }
+                            }
+                        }
+                        ToolCall::Forget(memory) => match super::memory::forget(&memory_file, &memory) {
+                            Ok(true) => { let _ = rpc.respond(id, tool_reply("Apagado.", true)).await; "forgot" }
+                            Ok(false) => { let _ = rpc.respond(id, tool_reply("Essa memória não existe.", false)).await; "forget-unknown" }
+                            Err(_) => { let _ = rpc.respond(id, tool_reply("Não consegui ler a memória para apagar.", false)).await; "memory-io" }
+                        },
                         ToolCall::FollowSession(name) => { let _ = events.send(VoiceEvent::FollowSession(CallId(id), name)).await; "follow" }
                         ToolCall::UnfollowSession(name) => { let _ = events.send(VoiceEvent::UnfollowSession(CallId(id), name)).await; "unfollow" }
                         ToolCall::SetMode(_) if let Some(name) = organizer::mode_word_session(spoken.text(&params).unwrap_or_default(), &session_names) => {

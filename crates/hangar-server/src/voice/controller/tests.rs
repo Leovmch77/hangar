@@ -420,3 +420,15 @@ async fn audio_lost_past_the_grace_tells_the_device_and_closes() {
     }
     assert_eq!(error.as_deref(), Some("audio_lost"));
 }
+
+#[tokio::test]
+async fn remember_needs_speech() {
+    let mut rig = rig(&[], None).await;
+    push_tool(&rig.push, "r0", "remember", json!({"kind": "pessoa", "text": "sem fala"}), "turn-0");
+    assert_eq!(rig.reply("r0").await["success"], false, "turno sem fala não grava");
+    push_speech(&rig.push, "turn-1", "lembra que eu prefiro respostas curtas");
+    push_tool(&rig.push, "r1", "remember", json!({"kind": "preferencia", "text": "Prefere respostas curtas"}), "turn-1");
+    let ok = rig.reply("r1").await;
+    assert_eq!(ok["success"], true, "{ok}");
+    assert!(text(&ok).contains("m1"));
+}
