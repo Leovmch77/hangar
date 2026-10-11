@@ -895,7 +895,7 @@ impl Hangar {
     /// Clique pela árvore de acessibilidade, pelo mesmo caminho de um leitor de tela: só o elemento que está de fato sob o
     /// ponto recebe. Botão arriscado arma e pede o sim; o clique sai na chamada seguinte, noutro turno falado.
     fn voice_click(&mut self, call: u64, id: &str, confirmed: bool, turn: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let reason = |code: &str| match code {
+        let reason = |id: &str, code: &str| match code {
             "not-found" | "no-tree" => format!("O id {id} não está na tela agora; leia a tela de novo com read_screen."),
             "ambiguous" => format!("Mais de um elemento tem o id {id}; leia uma área menor e use outro id."),
             "disabled" => format!("O elemento {id} está desabilitado."),
@@ -904,7 +904,7 @@ impl Hangar {
         };
         let label = match window.a11y_target(id) {
             Ok((_, label)) => label,
-            Err(code) => { self.voice_reply(call, false, reason(code)); return; }
+            Err(code) => { self.voice_reply(call, false, reason(id, code)); return; }
         };
         let name = label.clone().unwrap_or_else(|| id.to_owned());
         if risky_click(id, label.as_deref()) && !self.voice.click_gate.check(id.to_owned(), confirmed, turn, std::time::Instant::now()) {
@@ -913,13 +913,18 @@ impl Hangar {
                 do sim explícito, chame click_screen de novo com confirmed true."));
             return;
         }
-        let result = window.a11y_click(id, cx);
-        crate::voice::log(format!("click_screen ok={}", result.is_ok()));
-        match result {
-            Ok(()) => self.voice_reply(call, true, format!("Cliquei em «{name}». Para ver o resultado, leia a tela de novo.")),
-            Err(code) => self.voice_reply(call, false, reason(code)),
-        }
-        cx.notify();
+        // O clique sai depois desta atualização: o botão clicado atualiza o Hangar, e por dentro dela o GPUI derruba o app.
+        let (this, id) = (cx.entity().downgrade(), id.to_owned());
+        window.defer(cx, move |window, cx| {
+            let result = window.a11y_click(&id, cx);
+            crate::voice::log(format!("click_screen ok={}", result.is_ok()));
+            let (ok, text) = match result {
+                Ok(()) => (true, format!("Cliquei em «{name}». Para ver o resultado, leia a tela de novo.")),
+                Err(code) => (false, reason(&id, code)),
+            };
+            // Hangar fechado entre o pedido e o clique: não há a quem responder.
+            let _ = this.update(cx, |hangar, cx| { hangar.voice_reply(call, ok, text); cx.notify(); });
+        });
     }
 
     /// Retrato publicado pelo servidor. A fase fica com o áudio deste aparelho: o servidor pode dizer "ao vivo" antes de o
