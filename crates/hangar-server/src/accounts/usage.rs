@@ -85,11 +85,6 @@ fn uses(procs: &dyn ProcessView, pid: i64, key: &AccountKey, home: &Path) -> Res
     if !pertinent {
         return Ok(false);
     }
-    // Quem cobre o ambiente com o título é app Chromium/Electron (o Claude Desktop se chama `claude`);
-    // nenhum CLI de conta faz isso.
-    if procs.environ_erased(pid) {
-        return Ok(false);
-    }
     let mut value = procs.env_var(pid, variable(key.provider))?.map(|v| v.to_string_lossy().into_owned());
     if key.provider == Provider::Codex {
         for (index, argument) in argv.iter().enumerate() {
@@ -109,6 +104,11 @@ fn uses(procs: &dyn ProcessView, pid: i64, key: &AccountKey, home: &Path) -> Res
             // O ambiente pode conter as duas contas herdadas; só o provider pertinente usa o padrão.
             let expected: &[&str] = if key.provider == Provider::Codex { &["codex"] } else { &["claude", "pi", "omp"] };
             if !expected.contains(&name) && !expected.iter().any(|e| names.contains(*e)) {
+                return Ok(false);
+            }
+            // Sem variável porque o título cobriu o ambiente: app Chromium/Electron (o Claude Desktop se
+            // chama `claude`), não CLI de conta.
+            if procs.environ_erased(pid) {
                 return Ok(false);
             }
             // O padrão é o da casa do processo: o CLI resolve `~` pelo ambiente dele.
@@ -299,12 +299,18 @@ pub(crate) async fn terminal_instances() -> Result<Instances, ()> {
 }
 
 impl AccountService {
-    /// Só os processos da máquina: o nascimento de sessão Codex do Python se aposenta com eles.
-    pub(crate) async fn process_usage(&self, key: &AccountKey) -> UsageFacts {
+    /// Se um processo usa a conta (`None` = não dá para saber): o nascimento de sessão Codex do
+    /// Python se aposenta quando o app-server dele usa a conta, sem varrer a máquina inteira.
+    pub(crate) async fn process_uses(&self, key: &AccountKey, pid: u32) -> Option<bool> {
         let (key, home) = (key.clone(), self.env.home.clone());
-        tokio::task::spawn_blocking(move || inspect_processes(&crate::list::procs::SystemProcs::whole_machine(), &key, &home))
-            .await
-            .unwrap_or_default()
+        tokio::task::spawn_blocking(move || match uses(&crate::list::procs::SystemProcs::default(), i64::from(pid), &key, &home) {
+            Ok(uses) => Some(uses),
+            Err(Skip::Gone) => Some(false),
+            Err(Skip::Unknown) => None,
+        })
+        .await
+        .ok()
+        .flatten()
     }
 
     /// Fatos desta máquina somados aos do runtime Rust. Runtime ausente deixa os fatos

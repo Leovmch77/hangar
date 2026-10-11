@@ -1995,16 +1995,20 @@ excluir, renomear e entrar numa conta Codex recusavam sempre com `account_usage_
 varredura do Rust (`accounts/usage.rs`) a variável lida dali sai ausente, e o app passava por
 cliente da conta Claude padrão (`~/.claude`), o que segura a renovação e a exclusão dela.
 
-- **Ambiente coberto pelo título não é cliente de conta** (`ProcessView::environ_erased`): bytes em
-  que tudo o que não é zero aparece na linha de comando. Um ambiente de verdade tem entradas que o
-  argv não tem (`PATH`, `HOME`), e nenhum CLI de conta reescreve o título por cima dele. A regra
-  anterior ("nenhuma entrada `NOME=valor`") deixava passar o título transbordado, que traz `=`.
+- **Processo sem a variável cujo ambiente foi coberto pelo título não cai na conta padrão**
+  (`ProcessView::environ_erased`: bytes em que tudo o que não é zero aparece na linha de comando).
+  Um ambiente de verdade tem entradas que o argv não tem (`PATH`, `HOME`), e nenhum CLI de conta
+  reescreve o título por cima dele. A regra só decide no ramo da conta padrão: com a variável lida,
+  ela não entra. Exigir "nenhuma entrada `NOME=valor`" deixava passar o título transbordado, que
+  traz `=`.
 - **A varredura usa um leitor sem o teto de cache da lista** (`SystemProcs::whole_machine`): ela
   passa por todos os processos da máquina, e o teto de 256 despejava entradas e anotava
   "cache da lista cheio" no diário a cada varredura.
-- **A varredura Python saiu.** O `retire_terminal_birth` do adaptador Codex pede os processos ao
-  Rust pela ponte privada (`{"processes": chave}` em `/__hangar_server/accounts`); sem o Rust, o
-  nascimento não se aposenta e a releitura de 1 s tenta de novo. Contrato interno 55.
+- **A varredura Python saiu.** O `retire_terminal_birth` do adaptador Codex pergunta ao Rust se o
+  `app_pid` da sessão usa a conta (`{"process_uses": chave, "pid": n}` em
+  `/__hangar_server/accounts`), sem varrer a máquina: a pergunta se repete a cada 1 s por sessão
+  até aposentar, e um processo alheio ilegível não pode segurá-la. Sem o Rust, o nascimento não se
+  aposenta e a pergunta se repete. Contrato interno 55.
 
 A conta Codex com login revogado aparecia em "Outros agentes", sem Entrar. O `account/read` do Codex
 responde erro interno (`-32603`) com a mensagem citando `unauthorized (401)`, e o leitor do Rust

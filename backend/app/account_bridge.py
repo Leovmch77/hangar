@@ -2,7 +2,6 @@
 (processos, nascimentos, sidecars) são lidos no Rust, em `accounts/usage.rs`."""
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from pathlib import Path
 import contextlib
 import json
@@ -13,15 +12,6 @@ import urllib.request
 
 from app.account_lifecycle import AccountKey
 from app.mensagens import erro
-
-
-@dataclass
-class UsageFacts:
-    complete: bool = False
-    sessions: list[str] = field(default_factory=list)
-    pids: list[int] = field(default_factory=list)
-    # Herdeiros da variável da conta (tmux, MCP, shell): não a usam, mas a carregam.
-    holders: list[int] = field(default_factory=list)
 
 
 def terminal_instances() -> dict[str, str]:
@@ -258,20 +248,20 @@ def request_preparation(account, *, prepare=False, force=False, cwd=None):
     except (OSError, ValueError):
         raise codex_contas.AccountError(503, "account_prepare_bridge_unavailable", {}) from None
 
-def request_processes(key: AccountKey) -> UsageFacts | None:
-    """Processos que usam a conta, pela varredura do Rust; None quando ele não responde."""
+
+def request_process_uses(key: AccountKey, pid: int) -> bool | None:
+    """Se o processo usa a conta, pela varredura do Rust; None quando não dá para saber."""
     config = _preparation_transport
     if owner_mode() == "python" or config is None:
         return None
     try:
         result = _post(config, "/__hangar_server/accounts",
-                       {"processes": {"provider": key.provider.value, "canonical_home": str(key.canonical_home)}},
-                       timeout=30, limit=256 * 1024)
-        facts = UsageFacts(**result)
-        if not isinstance(facts.complete, bool) or not all(isinstance(pid, int) for pid in facts.pids):
-            raise ValueError("fatos de processos inválidos")
-        return facts
-    except (OSError, ValueError, TypeError):
+                       {"process_uses": {"provider": key.provider.value, "canonical_home": str(key.canonical_home)},
+                        "pid": pid},
+                       timeout=30, limit=4096)
+        uses = result.get("uses") if isinstance(result, dict) else None
+        return uses if isinstance(uses, bool) else None
+    except (OSError, ValueError):
         return None
 
 

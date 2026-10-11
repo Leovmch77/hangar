@@ -300,8 +300,7 @@ def test_terminal_pending_identity_and_uncertainty_are_not_absence(tmp_path, mon
     from app.adapters.codex import sessions
     monkeypatch.setattr(account_lifecycle, "default_lock_root", lambda: tmp_path / "locks")
     monkeypatch.setattr(sessions, "_dir", lambda: tmp_path / "sidecars")
-    monkeypatch.setattr(account_bridge, "request_processes",
-                        lambda key: account_bridge.UsageFacts(complete=True))
+    monkeypatch.setattr(account_bridge, "request_process_uses", lambda key, pid: False)
     monkeypatch.setattr(account_bridge, "terminal_instances", lambda: {"birth": "server:old:epoch"})
     key = account_lifecycle.AccountKey.new("codex", tmp_path / "account")
     with account_lifecycle.acquire(key) as guard:
@@ -332,8 +331,7 @@ def test_terminal_birth_follows_instance_and_only_retires_verified_binding(tmp_p
     monkeypatch.setattr(sessions, "_dir", lambda: tmp_path / "sidecars")
     instances = {"birth": "server:original:epoch"}
     monkeypatch.setattr(account_bridge, "terminal_instances", lambda: dict(instances))
-    monkeypatch.setattr(account_bridge, "request_processes",
-                        lambda key: account_bridge.UsageFacts(complete=True, pids=[123]))
+    monkeypatch.setattr(account_bridge, "request_process_uses", lambda key, pid: pid == 123)
     key = account_lifecycle.AccountKey.new("codex", tmp_path / "account")
     with account_lifecycle.acquire(key) as guard:
         record = account_lifecycle.publish_terminal_birth(guard, "birth", "token")
@@ -356,8 +354,7 @@ def test_unknown_terminal_birth_is_not_retired_by_name_absence_or_reuse(tmp_path
     monkeypatch.setattr(sessions, "_dir", lambda: tmp_path / "sidecars")
     instances = {}
     monkeypatch.setattr(account_bridge, "terminal_instances", lambda: dict(instances))
-    monkeypatch.setattr(account_bridge, "request_processes",
-                        lambda key: account_bridge.UsageFacts(complete=True, pids=[123]))
+    monkeypatch.setattr(account_bridge, "request_process_uses", lambda key, pid: pid == 123)
     key = account_lifecycle.AccountKey.new("codex", tmp_path / "account")
     with account_lifecycle.acquire(key) as guard:
         record = account_lifecycle.publish_terminal_birth(guard, "birth", "token")
