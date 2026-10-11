@@ -1017,3 +1017,30 @@ def test_versao_publicada_malformada_nao_e_instalada(monkeypatch, tmp_path, caps
     assert not any(c[0] == "install" for c in chamadas)
     err = capsys.readouterr().err
     assert "tenta de novo em 5 min" in err and "\x1b" not in err
+
+
+@pytest.mark.skipif(os.name != "posix", reason="binário falso POSIX")
+def test_retomada_com_par_fora_dos_modos_conserva_o_modo_gravado(tmp_path):
+    # Aprovação e sandbox que não formam um modo do app: não há o que gravar, e o modo que já estava
+    # (de quem a sessão criadora herda) não pode virar nulo.
+    cwd = tmp_path / "project"
+    cwd.mkdir()
+    env = _ambiente(tmp_path, cwd)
+    env["FAKE_TUI_SLEEP"] = "3"
+    thread_id = "same-thread"
+    rollout = Path(env["CODEX_HOME"]) / "sessions" / "2026" / "10" / "03" / f"rollout-example-{thread_id}.jsonl"
+    rollout.parent.mkdir(parents=True)
+    rollout.write_text("{}\n")
+    sidecar = _sidecar(env, "sess")
+    sidecar.parent.mkdir(parents=True)
+    sidecar.write_text(json.dumps({"name": "sess", "thread_id": thread_id, "key": "durable-key", "cwd": str(cwd),
+                                   "rollout_path": str(rollout), "permission_mode": "Ask for approval"}))
+    proc = subprocess.Popen([sys.executable, str(_LANCADOR), "--name", "sess", "--resume", thread_id,
+                             "--approval-policy", "never", "--sandbox", "read-only"],
+                            env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        # `app_pid` só chega pela gravação da retomada (a TUI grava `tui_pid` antes).
+        assert _espera(lambda: sidecar.exists() and json.loads(sidecar.read_text()).get("app_pid"))
+        assert json.loads(sidecar.read_text())["permission_mode"] == "Ask for approval"
+    finally:
+        proc.wait(timeout=20)

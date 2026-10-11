@@ -596,6 +596,11 @@ def main() -> int:
                          if policy == (approval, sandbox)), None)
     if imported_resume and resumed_mode is None:
         ap.error("combinação de aprovação e sandbox não suportada para conversa importada; sessão preservada")
+    # O modo gravado é o que a sessão criada por esta herda; par sem modo do app não apaga o que havia.
+    mode_record = {"permission_mode": resumed_mode} if resumed_mode else {}
+    if resumed_mode is None:
+        print(f"hangar-codex-tui: aprovação {approval} com sandbox {sandbox} não é um modo do app; "
+              "o modo gravado da sessão fica como estava", file=sys.stderr)
     resumed_metadata = ({"codex_home": str(selected_home), "codex_account": args.codex_account,
                          "cwd": cwd, "permission_mode": resumed_mode} if imported_resume else {})
     from app import codex_contas
@@ -719,7 +724,7 @@ def main() -> int:
                                       endpoint=endpoint, app_pid=servidor.pid, launcher_pid=os.getpid(),
                                       model=args.model, effort=args.effort, rollout_path=rollout,
                                       tool_output_token_limit=args.tool_output_token_limit,
-                                      **{"permission_mode": resumed_mode, **resumed_metadata},
+                                      **{**mode_record, **resumed_metadata},
                                       **({"service_tier": args.service_tier} if args.service_tier is not None else {}))
             else:
                 codex_sessions.save(args.name, thread_id, rollout, cwd,
@@ -728,7 +733,7 @@ def main() -> int:
                                 codex_home=str(codex_home),
                                 codex_account=args.codex_account,
                                 tool_output_token_limit=args.tool_output_token_limit,
-                                service_tier=args.service_tier, permission_mode=resumed_mode)
+                                service_tier=args.service_tier, **mode_record)
         elif thread_id != previous_thread and thread is not None:
             if args.transfer_id:
                 from app.conversation_transfer import load_transfer, TransferPhase
