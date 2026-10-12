@@ -6,6 +6,13 @@ use super::*;
 use crate::appearance::SideTab;
 use crate::browser::{Engine, Pointer, model};
 
+/// Tempo estacionada e parada até a WebView do Windows deixar de compor.
+#[cfg(target_os = "windows")]
+const SLEEP_AFTER: std::time::Duration = std::time::Duration::from_secs(10);
+/// Tempo para a WebView acordada voltar a compor antes do verbo.
+#[cfg(target_os = "windows")]
+const WAKE_SETTLE: std::time::Duration = std::time::Duration::from_millis(200);
+
 pub(super) struct BrowserPanel {
     /// `servidor::sessão` dona deste navegador: nome do sidecar que o hangar-preview lê.
     #[cfg_attr(target_os = "macos", allow(dead_code))]
@@ -49,6 +56,9 @@ pub(super) struct BrowserPanel {
     origin: Rc<Cell<Point<Pixels>>>,
     /// Decidido pelo `Hangar` a cada quadro (`browser_visible`).
     shown: bool,
+    /// Conta os pedidos de dormir: só o último, sem uso desde então, esconde a WebView.
+    #[cfg(target_os = "windows")]
+    idle: Cell<u64>,
     /// Último estado do sidecar a gravar (chave, endereço, título).
     #[cfg(not(target_os = "macos"))]
     sidecar: std::sync::Arc<std::sync::Mutex<Option<(String, String, String)>>>,
@@ -80,7 +90,7 @@ impl BrowserPanel {
         ];
         Self { key, #[cfg(not(target_os = "macos"))] controller: None, #[cfg(not(target_os = "macos"))] cdp: None,
             #[cfg(not(target_os = "macos"))] relay: Default::default(), #[cfg(not(target_os = "macos"))] viewer: Rc::default(), #[cfg(target_os = "linux")] frames: Default::default(), engine: None, starting: None, _start: None, events, address, page: model::PageState::default(), invalid: None, #[cfg(not(target_os = "macos"))] cookies_status: None, #[cfg(not(target_os = "macos"))] cookies_confirmed: false, #[cfg(target_os = "linux")] last_fill: None, focus,
-            origin: Rc::default(), shown: false, #[cfg(not(target_os = "macos"))] sidecar: Default::default(), #[cfg(target_os = "linux")] scale: Rc::default(), _drain: drain, _subscriptions: subscriptions }
+            origin: Rc::default(), shown: false, #[cfg(target_os = "windows")] idle: Cell::new(0), #[cfg(not(target_os = "macos"))] sidecar: Default::default(), #[cfg(target_os = "linux")] scale: Rc::default(), _drain: drain, _subscriptions: subscriptions }
     }
 
     fn engine(&self) -> Option<&Rc<Engine>> { self.engine.as_ref()?.as_ref().ok() }
@@ -498,9 +508,38 @@ impl BrowserPanel {
         if !shown && let Some(engine) = self.engine() { engine.hide(); }
         #[cfg(not(target_os = "macos"))]
         if let Some(ctl) = self.controller.clone() { cx.spawn(async move |_, _| ctl.set_hidden(!shown).await).detach(); }
+        #[cfg(target_os = "windows")]
+        if !shown { self.schedule_sleep(cx); }
         #[cfg(target_os = "macos")]
         let _ = cx;
         true
+    }
+
+    /// Alguém vai usar a página (verbo do agente, espectador): acorda a WebView estacionada e recomeça a contagem.
+    /// Devolve se ela estava dormindo.
+    #[cfg(target_os = "windows")]
+    pub(super) fn touch(&self, cx: &mut Context<Self>) -> bool {
+        let woke = self.engine().is_some_and(|engine| engine.wake());
+        self.schedule_sleep(cx);
+        woke
+    }
+
+    /// Escondida, sem verbo do agente e sem espectador por `SLEEP_AFTER`, a WebView para de compor.
+    #[cfg(target_os = "windows")]
+    fn schedule_sleep(&self, cx: &mut Context<Self>) {
+        if self.shown { return; }
+        let turn = self.idle.get() + 1;
+        self.idle.set(turn);
+        let timer = cx.background_executor().timer(SLEEP_AFTER);
+        cx.spawn(async move |this, cx| {
+            timer.await;
+            let _ = this.update(cx, |panel, cx| {
+                if panel.idle.get() != turn || panel.shown { return; }
+                // Um `wait` longo segura a vez do controlador: a página está em uso, tenta de novo depois.
+                if panel.controller.as_ref().is_some_and(|c| c.busy()) || panel.viewer.borrow().is_some() { return panel.schedule_sleep(cx); }
+                if let Some(engine) = panel.engine() { engine.sleep(); }
+            });
+        }).detach();
     }
 
     fn pointer(&self, kind: Pointer, at: Point<Pixels>, clicks: usize) {
@@ -740,7 +779,11 @@ impl Hangar {
             }
             Request::Watch { key, viewer, reply } => {
                 match self.side.browsers.get(&key).cloned() {
-                    Some(b) => b.update(cx, |panel, cx| panel.watch(viewer, reply, cx)),
+                    Some(b) => b.update(cx, |panel, cx| {
+                        #[cfg(target_os = "windows")]
+                        panel.touch(cx);
+                        panel.watch(viewer, reply, cx)
+                    }),
                     None => { let _ = reply.send(Err(missing(&key))); }
                 }
                 return;
@@ -756,7 +799,9 @@ impl Hangar {
             if closed { crate::browser::server::remove_sidecar(&key); self.side.browser_open.remove(&key); cx.notify(); }
             return answer(reply, if closed { "ok: close".into() } else { format!("erro: a sessao {key} nao tem navegador aberto") });
         }
-        let Some(browser) = self.side.browsers.get(&key) else { return answer(reply, missing(&key)) };
+        let Some(browser) = self.side.browsers.get(&key).cloned() else { return answer(reply, missing(&key)) };
+        #[cfg(target_os = "windows")]
+        let woke = browser.update(cx, |panel, cx| panel.touch(cx));
         let panel = browser.read(cx);
         // Página que caiu não responde: sem isto cada verbo esperava o prazo inteiro do controlador.
         if panel.engine().is_some_and(|e| !e.alive()) {
@@ -769,6 +814,12 @@ impl Hangar {
                 None => format!("erro: a sessao {key} nao tem navegador aberto"),
             });
         };
-        cx.spawn(async move |_, _| { let _ = reply.send(ctl.run(&verb, &args).await); }).detach();
+        #[cfg(target_os = "windows")]
+        let settle = woke.then(|| cx.background_executor().timer(WAKE_SETTLE));
+        cx.spawn(async move |_, _| {
+            #[cfg(target_os = "windows")]
+            if let Some(settle) = settle { settle.await; }
+            let _ = reply.send(ctl.run(&verb, &args).await);
+        }).detach();
     }
 }

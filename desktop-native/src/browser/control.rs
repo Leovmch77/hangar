@@ -75,6 +75,10 @@ impl<P: Page> Controller<P> {
             hidden: false, scale: None, navigated: false, navs: 0, enabled: HashSet::new() }) }
     }
 
+    /// Algum verbo segurando a vez agora (um `wait` longo, por exemplo).
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    pub fn busy(&self) -> bool { self.turn.try_lock().is_none() }
+
     /// Aplica o pedido mais novo, não o do nascimento: o painel pode aparecer enquanto os domínios ligam.
     pub async fn start(&self) {
         self.enable_base().await;
