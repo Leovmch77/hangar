@@ -13,6 +13,17 @@ pub struct PageState {
     pub notice: Option<String>,
     /// Sobe a cada aviso novo: o mesmo texto de novo é outro aviso, e o × fecha só o que a pessoa viu.
     pub notice_seq: u32,
+    /// `alert`/`confirm`/`prompt` aberto, esperando o agente (verbo `dialog`) ou a pessoa (caixa do painel).
+    pub dialog: Option<Dialog>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Dialog {
+    /// `alert`, `confirm` ou `prompt`.
+    pub kind: String,
+    pub message: String,
+    /// Texto sugerido do `prompt`.
+    pub default: String,
 }
 
 pub fn loopback(url: &url::Url) -> bool {

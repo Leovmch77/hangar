@@ -26,6 +26,8 @@ pub struct Engine {
     /// CDP que segura os ouvintes do motor (queda); os ouvintes morrem com ele.
     #[cfg(target_os = "windows")]
     _watch: Option<Rc<super::cdp::Cdp>>,
+    #[cfg(target_os = "windows")]
+    pending: PendingDialog,
     /// Escondida de verdade por estar parada (ver `sleep`).
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     asleep: Cell<bool>,
@@ -114,6 +116,8 @@ impl Starter {
         #[cfg(target_os = "windows")]
         let on_native = (state.clone(), events.clone());
         #[cfg(target_os = "windows")]
+        let pending: PendingDialog = Rc::default();
+        #[cfg(target_os = "windows")]
         let watch = {
             use wry::WebViewExtWindows;
             let cdp = Rc::new(super::cdp::Cdp::new(view.webview()));
@@ -121,7 +125,7 @@ impl Starter {
             let listened = cdp.on("Inspector.targetCrashed", move |_| {
                 dead.set(true);
                 let mut page = state.borrow_mut();
-                (page.loading, page.error) = (false, Some(crate::i18n::tr("browser_err_crashed")));
+                (page.loading, page.error, page.dialog) = (false, Some(crate::i18n::tr("browser_err_crashed")), None);
                 send(&events, &page);
             });
             // Navegação dentro do documento (SPA, âncora) não passa pelo `on_page_load`: sem isto a barra e o voltar ficavam
@@ -134,7 +138,7 @@ impl Starter {
                 send(&events, &page);
             });
             if let Err(e) = within { eprintln!("[nav] navegacao dentro da pagina sem ouvinte: {e}"); }
-            watch_native(&view, &on_native.0, &on_native.1);
+            watch_native(&view, &on_native.0, &on_native.1, &pending);
             match listened {
                 Ok(()) => {
                     drop(cdp.call("Page.enable", serde_json::json!({})));
@@ -144,56 +148,67 @@ impl Starter {
                 Err(e) => { eprintln!("[nav] queda da pagina sem ouvinte: {e}"); None }
             }
         };
-        let engine = Engine { view, _context: context, state, events, placed: Cell::new(None), asleep: Cell::new(false), dead, #[cfg(target_os = "windows")] _watch: watch };
+        let engine = Engine { view, _context: context, state, events, placed: Cell::new(None), asleep: Cell::new(false), dead, #[cfg(target_os = "windows")] _watch: watch, #[cfg(target_os = "windows")] pending };
         #[cfg(target_os = "windows")]
         engine.park();
         Ok(engine)
     }
 }
 
+/// Diálogo segurado pelo `GetDeferral` até alguém responder.
+#[cfg(target_os = "windows")]
+type PendingDialog = Rc<RefCell<Option<(webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2ScriptDialogOpeningEventArgs,
+    webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Deferral)>>>;
+
 /// Diálogos e início de navegação pelo próprio WebView2. O diálogo padrão dele é janela modal que ninguém responde
 /// quando é o agente que o dispara: o `click` e todo verbo seguinte esperavam o prazo inteiro. Aqui, como no Linux,
 /// `alert`/`beforeunload` passam, `confirm`/`prompt` são recusados, e a pessoa vê o aviso no painel. O `Started` do
 /// wry só chega com a resposta: sem o `NavigationStarting`, página lenta nunca mostrava o Parar.
 #[cfg(target_os = "windows")]
-fn watch_native(view: &WebView, state: &Rc<RefCell<model::PageState>>, events: &async_channel::Sender<Event>) {
+fn watch_native(view: &WebView, state: &Rc<RefCell<model::PageState>>, events: &async_channel::Sender<Event>, pending: &PendingDialog) {
     use webview2_com::{NavigationStartingEventHandler, ScriptDialogOpeningEventHandler, take_pwstr, Microsoft::Web::WebView2::Win32::{
-        COREWEBVIEW2_SCRIPT_DIALOG_KIND, COREWEBVIEW2_SCRIPT_DIALOG_KIND_ALERT, COREWEBVIEW2_SCRIPT_DIALOG_KIND_BEFOREUNLOAD}};
+        COREWEBVIEW2_SCRIPT_DIALOG_KIND, COREWEBVIEW2_SCRIPT_DIALOG_KIND_ALERT, COREWEBVIEW2_SCRIPT_DIALOG_KIND_BEFOREUNLOAD,
+        COREWEBVIEW2_SCRIPT_DIALOG_KIND_PROMPT}};
     use wry::WebViewExtWindows;
     let core = view.webview();
     // SAFETY: thread da interface, dona do WebView2.
     if let Err(e) = unsafe { core.Settings().and_then(|s| s.SetAreDefaultScriptDialogsEnabled(false)) } {
         eprintln!("[nav] dialogo padrao do WebView2 continua ligado: {}", e.message());
     }
-    let (st, ev) = (state.clone(), events.clone());
+    let (st, ev, held) = (state.clone(), events.clone(), pending.clone());
     let dialogs = ScriptDialogOpeningEventHandler::create(Box::new(move |_, args| {
         let Some(args) = args else { return Ok(()) };
         let mut kind = COREWEBVIEW2_SCRIPT_DIALOG_KIND::default();
-        let mut raw = windows::core::PWSTR::null();
-        // SAFETY: o WebView2 aloca a mensagem; `take_pwstr` a libera.
-        unsafe { args.Kind(&mut kind)?; args.Message(&mut raw)?; }
-        let message: String = take_pwstr(raw).chars().take(200).collect();
-        let accept = kind == COREWEBVIEW2_SCRIPT_DIALOG_KIND_ALERT || kind == COREWEBVIEW2_SCRIPT_DIALOG_KIND_BEFOREUNLOAD;
-        // Sem `Accept`, o diálogo volta recusado assim que o evento termina.
-        if accept { unsafe { args.Accept()?; } }
-        let key = if kind == COREWEBVIEW2_SCRIPT_DIALOG_KIND_ALERT { Some("browser_dialog_alert") }
-            else if kind == COREWEBVIEW2_SCRIPT_DIALOG_KIND_BEFOREUNLOAD { None } else { Some("browser_dialog_refused") };
-        if let Some(key) = key {
-            let mut page = st.borrow_mut();
-            page.notice = Some(crate::i18n::tr(key).replace("{message}", message.trim()));
-            page.notice_seq += 1;
-            send(&ev, &page);
-        }
+        let (mut raw, mut default) = (windows::core::PWSTR::null(), windows::core::PWSTR::null());
+        // SAFETY: o WebView2 aloca as strings; `take_pwstr` as libera.
+        unsafe { args.Kind(&mut kind)?; args.Message(&mut raw)?; args.DefaultText(&mut default)?; }
+        let (message, default) = (take_pwstr(raw).chars().take(500).collect::<String>(), take_pwstr(default));
+        // A navegação não espera ninguém.
+        if kind == COREWEBVIEW2_SCRIPT_DIALOG_KIND_BEFOREUNLOAD { return unsafe { args.Accept() }; }
+        let name = if kind == COREWEBVIEW2_SCRIPT_DIALOG_KIND_ALERT { "alert" } else if kind == COREWEBVIEW2_SCRIPT_DIALOG_KIND_PROMPT { "prompt" } else { "confirm" };
+        // Segura o diálogo aberto até o agente ou a pessoa responder (`answer_dialog`).
+        let deferral = unsafe { args.GetDeferral()? };
+        *held.borrow_mut() = Some((args, deferral));
+        let mut page = st.borrow_mut();
+        page.dialog = Some(model::Dialog { kind: name.into(), message, default });
+        send(&ev, &page);
         Ok(())
     }));
     let (st, ev) = (state.clone(), events.clone());
     let starting = NavigationStartingEventHandler::create(Box::new(move |_, args| {
         // O handler do wry roda antes e cancela endereço bloqueado: aí não há carga para mostrar.
         let mut cancel = windows::core::BOOL::default();
-        if let Some(args) = args { unsafe { args.Cancel(&mut cancel)?; } }
+        let mut uri = windows::core::PWSTR::null();
+        if let Some(args) = &args { unsafe { args.Cancel(&mut cancel)?; args.Uri(&mut uri)?; } }
+        // SAFETY: o WebView2 aloca o endereço; `take_pwstr` o libera.
+        let uri = if uri.is_null() { String::new() } else { take_pwstr(uri) };
         if cancel.as_bool() { return Ok(()); }
         let mut page = st.borrow_mut();
-        if !page.loading { page.loading = true; send(&ev, &page); }
+        // O endereço pedido já na barra: o estado anterior ainda tinha o da página que está saindo.
+        if !uri.is_empty() { page.url = Some(uri); }
+        page.loading = true;
+        page.dialog = None;
+        send(&ev, &page);
         Ok(())
     }));
     let mut token = 0i64;
@@ -234,6 +249,33 @@ impl Engine {
     }
 
     pub fn alive(&self) -> bool { !self.dead.get() }
+
+    /// Responde o diálogo segurado e tira a caixa do painel.
+    #[cfg(target_os = "windows")]
+    pub fn answer_dialog(&self, accept: bool, text: Option<&str>) {
+        let Some((args, deferral)) = self.pending.borrow_mut().take() else { return };
+        // SAFETY: thread da interface; `Complete` solta o diálogo segurado no `GetDeferral`.
+        // `Complete` sempre: sem ele a página fica parada no diálogo, mesmo que o texto ou o aceite tenham falhado.
+        let answered = unsafe {
+            (|| {
+                match text {
+                    // `CoTaskMemPWSTR` de texto vazio é ponteiro nulo, que o WebView2 recusa.
+                    Some("") => args.SetResultText(windows::core::w!(""))?,
+                    Some(text) => { let t = webview2_com::CoTaskMemPWSTR::from(text); args.SetResultText(*t.as_ref().as_pcwstr())? }
+                    None => {}
+                }
+                if accept { args.Accept()?; }
+                Ok::<(), windows::core::Error>(())
+            })()
+        };
+        let completed = unsafe { deferral.Complete() };
+        for e in [answered.err(), completed.err()].into_iter().flatten() { eprintln!("[nav] dialogo respondido com erro: {}", e.message()); }
+        let mut page = self.state.borrow_mut();
+        page.dialog = None;
+        send(&self.events, &page);
+    }
+    #[cfg(not(target_os = "windows"))]
+    pub fn answer_dialog(&self, _accept: bool, _text: Option<&str>) {}
 
     /// Página que caiu volta com `Reload` no mesmo WebView2: o processo da página renasce e o histórico fica.
     pub fn revive(&self) {

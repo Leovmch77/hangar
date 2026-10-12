@@ -59,6 +59,8 @@ pub(super) struct BrowserPanel {
     _start: Option<Task<()>>,
     events: async_channel::Sender<crate::browser::Event>,
     address: Entity<InputState>,
+    /// Resposta do `prompt` da página, na caixa do diálogo.
+    dialog_input: Entity<InputState>,
     page: model::PageState,
     /// Endereço recusado, mostrado embaixo da barra.
     invalid: Option<String>,
@@ -169,6 +171,7 @@ impl BrowserPanel {
     fn new(key: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let (events, received) = async_channel::unbounded();
         let address = cx.new(|cx| InputState::new(window, cx).placeholder(tr("browser_address")));
+        let dialog_input = cx.new(|cx| InputState::new(window, cx));
         let focus = cx.focus_handle();
         let drain = cx.spawn_in(window, async move |this, cx| {
             while let Ok(event) = received.recv().await {
@@ -189,7 +192,7 @@ impl BrowserPanel {
             cx.on_blur(&focus, window, |this, _, _| if let Some(engine) = this.engine() { engine.focus(false) }),
         ];
         Self { key, #[cfg(not(target_os = "macos"))] controller: None, #[cfg(not(target_os = "macos"))] cdp: None,
-            #[cfg(not(target_os = "macos"))] relay: Default::default(), #[cfg(not(target_os = "macos"))] viewer: Rc::default(), #[cfg(target_os = "linux")] frames: Default::default(), #[cfg(not(target_os = "macos"))] import_pending: false, #[cfg(not(target_os = "macos"))] importing: false, #[cfg(not(target_os = "macos"))] import_site: None, #[cfg(not(target_os = "macos"))] login_hint: None, #[cfg(not(target_os = "macos"))] hint_checked: None, #[cfg(not(target_os = "macos"))] login_request: None, #[cfg(not(target_os = "macos"))] login_reply: None, #[cfg(target_os = "linux")] cookie_sources: Vec::new(), engine: None, starting: None, _start: None, events, address, page: model::PageState::default(), invalid: None, #[cfg(not(target_os = "macos"))] cookies_status: None, #[cfg(target_os = "linux")] last_fill: None, focus,
+            #[cfg(not(target_os = "macos"))] relay: Default::default(), #[cfg(not(target_os = "macos"))] viewer: Rc::default(), #[cfg(target_os = "linux")] frames: Default::default(), #[cfg(not(target_os = "macos"))] import_pending: false, #[cfg(not(target_os = "macos"))] importing: false, #[cfg(not(target_os = "macos"))] import_site: None, #[cfg(not(target_os = "macos"))] login_hint: None, #[cfg(not(target_os = "macos"))] hint_checked: None, #[cfg(not(target_os = "macos"))] login_request: None, #[cfg(not(target_os = "macos"))] login_reply: None, #[cfg(target_os = "linux")] cookie_sources: Vec::new(), engine: None, starting: None, _start: None, events, address, dialog_input, page: model::PageState::default(), invalid: None, #[cfg(not(target_os = "macos"))] cookies_status: None, #[cfg(target_os = "linux")] last_fill: None, focus,
             origin: Rc::default(), #[cfg(target_os = "linux")] emulated: None, page_scale: Rc::new(Cell::new(1.)), #[cfg(target_os = "windows")] still: None, #[cfg(target_os = "windows")] released: Vec::new(), #[cfg(target_os = "windows")] cover_gen: 0, #[cfg(target_os = "linux")] page_zoom: (1., 0., 0.), shown: false, local_notice: None, #[cfg(target_os = "linux")] cursor: CursorStyle::Arrow, #[cfg(target_os = "linux")] cursor_probe: (false, None), page_errors: Default::default(), error_count: 0, errors_open: false, shooting: false, copied: false, dismissed_notice: 0, address_stale: false, #[cfg(not(target_os = "macos"))] agent: None, #[cfg(not(target_os = "macos"))] agent_running: 0,
             #[cfg(not(target_os = "macos"))] agent_seq: 0, #[cfg(not(target_os = "macos"))] paused: None, #[cfg(target_os = "windows")] agent_finished_at: None, #[cfg(not(target_os = "macos"))] _activity: None, #[cfg(target_os = "windows")] idle: Cell::new(0), #[cfg(not(target_os = "macos"))] sidecar: Default::default(), #[cfg(target_os = "linux")] scale: Rc::default(), _drain: drain, _subscriptions: subscriptions }
     }
@@ -219,6 +222,14 @@ impl BrowserPanel {
                 self.address_stale = true;
             }
             if page.url != self.page.url { self.local_notice = None; }
+            if page.dialog != self.page.dialog {
+                #[cfg(not(target_os = "macos"))]
+                if let Some(ctl) = &self.controller { ctl.set_dialog(page.dialog.as_ref().map(|d| (d.kind.clone(), d.message.clone(), d.default.clone()))); }
+                if let Some(d) = &page.dialog && d.kind == "prompt" {
+                    let default = d.default.clone();
+                    self.dialog_input.update(cx, |input, cx| input.set_value(default, window, cx));
+                }
+            }
             #[cfg(not(target_os = "macos"))]
             let loaded = self.page.loading && !page.loading;
             #[cfg(target_os = "windows")]
@@ -412,6 +423,13 @@ impl BrowserPanel {
         { self.listen_relay(&cdp); *self.relay.borrow_mut() = Some(cdp.clone()); }
         let (activity, acted) = async_channel::unbounded();
         ctl.on_activity(move |a| { let _ = activity.try_send(a); });
+        let (answer, answers) = async_channel::unbounded::<(bool, Option<String>)>();
+        ctl.on_dialog_answer(move |accept, text| { let _ = answer.try_send((accept, text)); });
+        cx.spawn(async move |this, cx| {
+            while let Ok((accept, text)) = answers.recv().await {
+                if this.update(cx, |this, _| if let Some(engine) = this.engine() { engine.answer_dialog(accept, text.as_deref()) }).is_err() { break; }
+            }
+        }).detach();
         let (error, errors) = async_channel::unbounded();
         ctl.on_page_error(move |e| { let _ = error.try_send(e); });
         (self.page_errors, self.error_count, self.errors_open) = (Default::default(), 0, false);
@@ -721,6 +739,25 @@ impl BrowserPanel {
                 cx.notify();
             });
         }).detach();
+    }
+
+    /// O diálogo da página no painel: a pessoa responde aqui, ou o agente pelo verbo `dialog`.
+    fn render_dialog(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let d = self.page.dialog.as_ref()?;
+        let answer = |accept: bool| cx.listener(move |this: &mut Self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>| {
+            let text = (accept && this.page.dialog.as_ref().is_some_and(|d| d.kind == "prompt")).then(|| this.dialog_input.read(cx).value().to_string());
+            if let Some(engine) = this.engine() { engine.answer_dialog(accept, text.as_deref()); }
+        });
+        let title = tr(if d.kind == "alert" { "browser_dialog_says" } else { "browser_dialog_asks" });
+        Some(div().id("browser-dialog").flex_shrink_0().flex().flex_col().gap_2().px_3().py(px(8.)).role(Role::AlertDialog)
+            .bg(theme::warning().opacity(0.12)).border_b_1().border_color(theme::warning().opacity(0.4))
+            .child(div().text_size(px(11.)).text_color(theme::muted()).child(title))
+            .child(div().text_size(px(13.)).whitespace_normal().child(d.message.clone()))
+            .when(d.kind == "prompt", |el| el.child(Input::new(&self.dialog_input).id("browser-dialog-input").small()))
+            .child(div().flex().justify_end().gap_2()
+                .when(d.kind != "alert", |el| el.child(Button::new("browser-dialog-cancel").outline().small().label(tr("browser_dialog_cancel")).on_click(answer(false))))
+                .child(Button::new("browser-dialog-ok").primary().small().label(tr("browser_dialog_ok")).on_click(answer(true))))
+            .into_any_element())
     }
 
     fn render_errors(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -1417,6 +1454,7 @@ impl Render for BrowserPanel {
                 .flex_shrink_0().px_3().py(px(6.)).role(Role::Status)
                 .text_size(px(11.)).text_color(theme::muted()).whitespace_normal().child(text)));
         }
+        root = root.children(self.render_dialog(cx));
         root = root.children(self.render_errors(cx));
         let notice_line = |id: &'static str, text: String, cx: &mut Context<Self>, close: fn(&mut Self)| div().id(id).flex_shrink_0().flex()
             .items_center().gap_2().px_3().py(px(4.)).border_b_1().border_color(theme::border()).role(Role::Status)
@@ -1568,7 +1606,9 @@ impl Hangar {
             let mine = current.as_deref() == Some(key.as_str());
             let shown = visible && mine;
             #[cfg(target_os = "windows")]
-            for image in browser.update(cx, |panel, _| std::mem::take(&mut panel.released)) { super::release_image(image, window, cx); }
+            if !browser.read(cx).released.is_empty() {
+                for image in browser.update(cx, |panel, _| std::mem::take(&mut panel.released)) { super::release_image(image, window, cx); }
+            }
             if browser.update(cx, |panel, cx| panel.set_shown(shown, covered && mine, cx)) && shown {
                 // O painel é guardado entre quadros: sem um redesenho dele, a página não volta a se posicionar.
                 let id = browser.entity_id();
