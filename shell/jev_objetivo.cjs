@@ -734,9 +734,10 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
         log(`jev-objetivo passo ${passo}: SELECT @${decisao.alvo} ("${decisao.escolhido.nome}") conf=${decisao.confianca.toFixed(2)}`);
         const saida = await executar('eval', [jsDeSelecionar(decisao.escolhido.nome)]);
         if (String(saida).includes(SEM_SELECT)) {
-          if (decisao.arriscado !== null) {
+          if (decisao.arriscado !== null && !permitirRisco) {
             return { feito, sucesso: false, parou: `operacao arriscada (${decisao.arriscado.toFixed(2)}): precisa da ordem do usuario` };
           }
+          if (decisao.arriscado !== null) log(`jev-objetivo passo ${passo}: risco liberado por --permitir-risco (escolha na lista, ${decisao.arriscado.toFixed(2)})`);
           await agir('click', [`@${decisao.alvo}`]);
         }
         else if (String(saida).includes('erro:')) return { feito, sucesso: false, parou: `SELECT falhou: ${saida}` };
