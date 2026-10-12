@@ -77,6 +77,10 @@ pub struct AppState {
     pub peers: Arc<crate::groups::peers::PeerClient>,
     /// Voz ao vivo; o teste troca por um hub com pastas temporárias.
     pub voice: Arc<crate::voice::hub::VoiceHub>,
+    /// Convites e par externo; `None` sem `HANGAR_SHARES_FILE` (o Python segue dono).
+    pub share: Option<Arc<crate::share::ShareState>>,
+    /// A porta do convidado já está escutando; a saúde anuncia.
+    pub guest_bound: std::sync::atomic::AtomicBool,
 }
 
 impl AppState {
@@ -114,6 +118,10 @@ impl AppState {
         let state = Arc::new(crate::state::live::StateEnv::new(terminal.clone(), list.clone(),
             crate::state::facts::StateFactsClient::new(cfg.upstream, cfg.internal_secret.clone()), diag.clone()));
         side.monitors = Some(crate::state::live::spawner(state.clone()));
+        let share = match crate::config::GuestEnv::from_env() {
+            Ok(guest) => crate::share::from_env(guest.shares_file, list.env().dirs.as_ref(), list.env().capture_program.clone()),
+            Err(e) => { tracing::error!("{e}"); None }
+        };
         let groups = crate::groups::from_env(list.env().dirs.as_ref(),
             Arc::new(crate::groups::orq::PythonOrq::new(cfg.upstream, cfg.internal_secret.clone(), http.clone())), list.clone());
         AppState { accounts: crate::accounts::AccountService::new(crate::accounts::environment::AccountEnvironment::capture()), groups, peers: Arc::new(crate::groups::peers_from_env()), auth: Auth::new(&cfg.auth_token), http, side, cfg, terminal, terminal_address: None, diag,
@@ -134,7 +142,8 @@ impl AppState {
             pages: Arc::new(crate::pages::store::Store::new(crate::pages::store::Store::default_root())),
             chromium: crate::pages::chrome::find,
             write_gate_wait: std::time::Duration::from_secs(30),
-            voice: Arc::new(crate::voice::hub::VoiceHub::new()) }
+            voice: Arc::new(crate::voice::hub::VoiceHub::new()),
+            share, guest_bound: Default::default() }
     }
 
     pub(crate) fn skill_origins(&self, repo: &std::path::Path) -> crate::costs::origins::Origins {
@@ -224,7 +233,16 @@ pub async fn serve_with_terminal_pool(listener: TcpListener, cfg: Config, pool: 
     serve_with_state(listener, AppState::with_terminal_pool(cfg, pool)).await
 }
 
-pub async fn serve_with_state(listener: TcpListener, mut state: AppState) -> std::io::Result<()> {
+pub async fn serve_with_state(listener: TcpListener, state: AppState) -> std::io::Result<()> {
+    serve_with_guest(listener, state, None).await
+}
+
+/// `guest`: endereço da porta do convidado. Ocupada não derruba a principal: tenta até soltar.
+pub async fn serve_with_guest(listener: TcpListener, mut state: AppState, guest: Option<SocketAddr>) -> std::io::Result<()> {
+    let guest = guest.filter(|addr| state.share.is_some() || {
+        tracing::error!(listen = %addr, "porta do convidado pedida sem HANGAR_SHARES_FILE: fica fechada");
+        false
+    });
     let plugin = crate::plugin_listener::bind(&listener).await?;
     // Bind LAN específico não recebe tráfego de loopback: a observação tem uma porta própria.
     let private = TcpListener::bind("127.0.0.1:0").await?;
@@ -234,7 +252,14 @@ pub async fn serve_with_state(listener: TcpListener, mut state: AppState) -> std
     // Abortada na saída: a tarefa segura o estado do servidor, que sobreviveria a ele.
     let _group_sweep = crate::groups::sweep::spawn(state.clone()).map(crate::AbortOnDrop);
     let plugin_state = state.clone();
+    let guest_state = state.clone();
     tokio::select! {
+        result = async {
+            match guest {
+                Some(addr) => serve_guest(addr, guest_state).await,
+                None => std::future::pending::<std::io::Result<()>>().await,
+            }
+        } => result,
         result = axum::serve(listener.tap_io(crate::nodelay), router(state.clone()).into_make_service_with_connect_info::<SocketAddr>()) => result,
         result = axum::serve(private.tap_io(crate::nodelay), terminal_router(state).into_make_service_with_connect_info::<SocketAddr>()) => result,
         result = async {
@@ -244,6 +269,58 @@ pub async fn serve_with_state(listener: TcpListener, mut state: AppState) -> std
             }
         } => result,
     }
+}
+
+async fn serve_guest(addr: SocketAddr, state: Arc<AppState>) -> std::io::Result<()> {
+    let listener = bind_guest(addr).await;
+    state.guest_bound.store(true, Ordering::Relaxed);
+    axum::serve(listener, guest_router(state).into_make_service_with_connect_info::<crate::share::gate::GuestConn>()).await
+}
+
+/// O filho anterior pode ainda segurar a porta: tenta para sempre, um aviso por mudança de estado.
+async fn bind_guest(addr: SocketAddr) -> TcpListener {
+    let mut wait = Duration::from_millis(250);
+    let mut failing = false;
+    loop {
+        match guest_socket(addr) {
+            Ok(listener) => {
+                tracing::info!(listen = %addr, "porta do convidado de pé");
+                return listener;
+            }
+            Err(e) => {
+                if !failing {
+                    tracing::warn!(listen = %addr, "porta do convidado indisponível, tentando de novo: {e}");
+                    failing = true;
+                }
+                tokio::time::sleep(wait).await;
+                wait = (wait * 2).min(Duration::from_secs(5));
+            }
+        }
+    }
+}
+
+fn guest_socket(addr: SocketAddr) -> std::io::Result<TcpListener> {
+    let socket = if addr.is_ipv4() { tokio::net::TcpSocket::new_v4()? } else { tokio::net::TcpSocket::new_v6()? };
+    #[cfg(unix)]
+    socket.set_reuseaddr(true)?;
+    // ponytail: o `GuestConn` só casa com `TcpListener` puro (sem `tap_io`); a conexão aceita herda
+    // o TCP_NODELAY do listener. Sistema que não herdar precisa de laço de accept próprio.
+    socket.set_nodelay(true)?;
+    socket.bind(addr)?;
+    socket.listen(1024)
+}
+
+/// Roteador da 8766: tudo passa pelo porteiro, nada pergunta `gate`/`is_owner`.
+pub fn guest_router(state: Arc<AppState>) -> Router {
+    // Mesmo corpo do 404 do FastAPI, que os clientes já tratam.
+    let router = Router::new().fallback(|| async {
+        (StatusCode::NOT_FOUND, [(header::CONTENT_TYPE, "application/json")], r#"{"detail":"Not Found"}"#)
+    });
+    let router = match state.share.clone() {
+        Some(share) => router.layer(axum::middleware::from_fn_with_state(Arc::new(crate::share::gate::Gate::new(share)), crate::share::gate::guard)),
+        None => router,
+    };
+    router.with_state(state)
 }
 
 pub fn terminal_router(state: Arc<AppState>) -> Router {
@@ -394,6 +471,7 @@ async fn health(State(st): State<Arc<AppState>>, headers: HeaderMap) -> Response
         "terminal_panel": true,
         // Sem as pastas da lista não há serviço de grupos: as rotas seguem ao Python, que fica dono.
         "groups": st.groups.is_some(),
+        "guest_port_bound": st.guest_bound.load(Ordering::Relaxed),
         "terminal_address": st.terminal_address.map(|a| a.to_string())}).to_string();
     let mut resp = ([(header::CONTENT_TYPE, "application/json")], body).into_response();
     cors(&headers, resp.headers_mut());

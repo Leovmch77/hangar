@@ -80,6 +80,16 @@ pub async fn serve_until_with_state(
     state: routes::AppState,
     stop: impl std::future::Future<Output = ()>,
 ) -> std::io::Result<()> {
+    serve_until_with_guest(listener, state, None, stop).await
+}
+
+/// `guest`: porta do convidado (`HANGAR_SERVER_GUEST_LISTEN`), ligada sem segurar a principal.
+pub async fn serve_until_with_guest(
+    listener: tokio::net::TcpListener,
+    state: routes::AppState,
+    guest: Option<std::net::SocketAddr>,
+    stop: impl std::future::Future<Output = ()>,
+) -> std::io::Result<()> {
     let cfg = state.cfg.clone();
     let transcription = state.transcription.clone();
     let codex_logins=state.accounts.codex_logins.clone();
@@ -116,14 +126,14 @@ pub async fn serve_until_with_state(
         println!("{}",runtime::gateway::startup_line(INTERNAL_PROTOCOL,&instance,port));
         let gateway = runtime::gateway::serve(private,registry.clone(),cfg.internal_secret.clone(),instance,INTERNAL_PROTOCOL);
         let result = tokio::select! {
-            result = routes::serve_with_state(listener,state) => result,
+            result = routes::serve_with_guest(listener,state,guest) => result,
             result = gateway => result,
             () = stop => Ok(()),
         };
         return result;
     }
     tokio::select! {
-        r = routes::serve_with_state(listener, state) => r,
+        r = routes::serve_with_guest(listener, state, guest) => r,
         () = stop => Ok(()),
     }
     }.await;
