@@ -54,7 +54,7 @@ describe('ShareSessionSheet', () => {
     await settle();
     botao(m.compartilhar_gerar()).click();
     await settle();
-    expect(core.createShare).toHaveBeenCalledWith('s1', false, expect.objectContaining({ id: 'srv-a' }));
+    expect(core.createShare).toHaveBeenCalledWith('s1', false, expect.objectContaining({ id: 'srv-a' }), expect.any(AbortSignal));
     const campo = document.querySelector<HTMLInputElement>(`input[aria-label="${m.compartilhar_link_novo()}"]`)!;
     expect(campo.value).toBe('https://d.ts.net:8443/convite/K7P2');
     const wa = document.querySelector<HTMLAnchorElement>('a[href^="https://wa.me/"]')!;
@@ -219,6 +219,32 @@ describe('ShareSessionSheet', () => {
     botao(m.compartilhar_tentar_de_novo()).click();
     await settle();
     expect(document.body.textContent).toContain(m.compartilhar_vazio());
+    unmount(c);
+  });
+
+  it('link da sessão A que chega depois de trocar para B não aparece em B, e a criação é cancelada', async () => {
+    core.listShares.mockResolvedValue({ shares: [] });
+    let resolver!: (v: unknown) => void;
+    core.createShare.mockReturnValueOnce(new Promise((r) => { resolver = r; }));
+    const props = $state({ open: true, name: 'a' });
+    const el = document.createElement('div');
+    document.body.appendChild(el);
+    const c = mount(ShareSessionSheet, { target: el, props: {
+      get open() { return props.open; }, get name() { return props.name; }, serverId: 'srv-a', onClose: vi.fn() } });
+    await settle();
+    botao(m.compartilhar_gerar()).click();
+    await settle();
+    const signal = core.createShare.mock.calls[0][3] as AbortSignal | undefined;
+    props.name = 'b';
+    await settle();
+    expect(signal?.aborted).toBe(true);
+    resolver({ id: 'x1', link: 'https://d.ts.net:8443/convite/DA-A', expires_at: agora() + 86400 });
+    await settle();
+    expect(document.querySelector(`input[aria-label="${m.compartilhar_link_novo()}"]`)).toBeNull();
+    expect(document.querySelector('a[href^="https://wa.me/"]')).toBeNull();
+    // B começa livre para gerar o próprio link.
+    expect(document.body.textContent).not.toContain(m.share_reach_checking());
+    expect(botao(m.compartilhar_gerar())).toBeTruthy();
     unmount(c);
   });
 });

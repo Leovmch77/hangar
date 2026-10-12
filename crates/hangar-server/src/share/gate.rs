@@ -4,7 +4,6 @@
 //! sessão em bypass já roda comando como o dono.
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use axum::body::Body;
@@ -23,25 +22,22 @@ use super::caller::{Caller, GuestGrant, guest_allowed, path_session};
 use super::life::{Verdict, verdict};
 
 pub const WATCH_EVERY: Duration = Duration::from_secs(5);
-/// Funnel não manda X-Forwarded-For: todo convidado chega de loopback, então o limite é da
-/// conexão, nunca do IP (nem o bloqueio do dono).
-pub const MAX_FAILS: u32 = 8;
 /// Fecha o WebSocket quando o acesso acaba: espelho do HTTP 410, o cliente não reconecta.
 pub const CLOSE_ENDED: u16 = 4410;
 
-/// Dado de cada conexão TCP: a contagem de tokens errados morre com ela.
+/// Dado de cada conexão TCP. Sem limite de tokens errados: atrás do Funnel a conexão é dividida
+/// entre clientes da internet, e o token de 256 bits não se adivinha.
 /// Servir com `into_make_service_with_connect_info::<GuestConn>()` num `TcpListener` puro.
 #[derive(Clone, Debug)]
 pub struct GuestConn {
     pub peer: SocketAddr,
     /// Endereço desta ponta da conexão: decide entre o link do Funnel e o da rede da casa.
     pub local: Option<SocketAddr>,
-    fails: Arc<AtomicU32>,
 }
 
 impl Connected<IncomingStream<'_, TcpListener>> for GuestConn {
     fn connect_info(stream: IncomingStream<'_, TcpListener>) -> Self {
-        Self { peer: *stream.remote_addr(), local: stream.io().local_addr().ok(), fails: Arc::default() }
+        Self { peer: *stream.remote_addr(), local: stream.io().local_addr().ok() }
     }
 }
 
@@ -117,6 +113,29 @@ async fn deny(req: Request, status: StatusCode, code: &str, msg: &str) -> Respon
     resp
 }
 
+/// O preflight que o `CORSMiddleware` do Python (por fora do porteiro) respondia com `*` em origem,
+/// método e cabeçalho, sem credenciais.
+fn preflight(req: &Request) -> Option<Response> {
+    let h = req.headers();
+    if req.method() != Method::OPTIONS || !h.contains_key(header::ORIGIN) || !h.contains_key(header::ACCESS_CONTROL_REQUEST_METHOD) {
+        return None;
+    }
+    let (status, body) = if h.contains_key("access-control-request-private-network") {
+        (StatusCode::BAD_REQUEST, "Disallowed CORS private-network")
+    } else {
+        (StatusCode::OK, "OK")
+    };
+    let mut resp = (status, [(header::CONTENT_TYPE, "text/plain; charset=utf-8")], body).into_response();
+    let out = resp.headers_mut();
+    out.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, HeaderValue::from_static("*"));
+    out.insert(header::ACCESS_CONTROL_ALLOW_METHODS, HeaderValue::from_static("DELETE, GET, HEAD, OPTIONS, PATCH, POST, PUT"));
+    out.insert(header::ACCESS_CONTROL_MAX_AGE, HeaderValue::from_static("600"));
+    if let Some(asked) = h.get(header::ACCESS_CONTROL_REQUEST_HEADERS) {
+        out.insert(header::ACCESS_CONTROL_ALLOW_HEADERS, asked.clone());
+    }
+    Some(resp)
+}
+
 /// Middleware da 8766. Ordem das recusas: 401 → 403 sessão fora → 410/503 → 403 por rota.
 pub async fn guard(State(gate): State<Arc<Gate>>, ConnectInfo(conn): ConnectInfo<GuestConn>, mut req: Request, next: Next) -> Response {
     // Os handlers continuam lendo o par TCP como na 8765.
@@ -128,22 +147,19 @@ pub async fn guard(State(gate): State<Arc<Gate>>, ConnectInfo(conn): ConnectInfo
     req.headers_mut().remove("x-hangar-guest");
     let method = req.method().clone();
     let path = req.uri().path().to_owned();
+    if let Some(resp) = preflight(&req) {
+        return resp;
+    }
     if is_open(&method, &path) {
         return next.run(req).await;
     }
-    // Conexão bloqueada nem avalia o token: a diferença entre 200 e 429 entregaria o palpite certo.
-    if conn.fails.load(Ordering::Relaxed) >= MAX_FAILS {
-        return deny(req, StatusCode::TOO_MANY_REQUESTS, "erro_muitas_tentativas", "muitas tentativas — aguarde").await;
-    }
     let token = token_of(&req);
     let Some(guest) = gate.share.store.lookup_token(&token) else {
-        if !token.is_empty() {
-            conn.fails.fetch_add(1, Ordering::Relaxed);
-        }
         return deny(req, StatusCode::UNAUTHORIZED, "erro_nao_autorizado", "unauthorized").await;
     };
     let session = path_session(&path);
-    if session.as_deref().is_some_and(|s| guest.share_for(s).is_none()) {
+    // `%2F` no nome: o Starlette nunca casava `/` dentro de `{name}`, e o handler leria outra sessão.
+    if session.as_deref().is_some_and(|s| s.contains('/') || guest.share_for(s).is_none()) {
         return deny(req, StatusCode::FORBIDDEN, "erro_fora_do_convite", "fora da sessao compartilhada").await;
     }
     match verdict(&guest, session.as_deref(), &gate.share.lives).await {

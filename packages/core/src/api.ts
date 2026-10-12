@@ -3739,11 +3739,11 @@ export async function applyConfigSyncForServer(s: Server, items: readonly Config
 // Compartilhar sessão (dono). Todas no servidor ATIVO: a Sidebar usa `withServer`.
 /** O link do Funnel só volta depois de abrir de fora (o servidor confere até 3 min); 404/405 =
  * backend sem o Rust (em produção o StaticFiles do Python responde 405 ao POST). */
-export async function createShare(name: string, local = false, server?: Server | null): Promise<ShareCreated> {
+export async function createShare(name: string, local = false, server?: Server | null, signal?: AbortSignal): Promise<ShareCreated> {
   // Espera minutos no servidor; o iOS mata o fetch em segundo plano. Essa queda não é do
   // servidor: não esfria, e a nova tentativa não é barrada por esfriamento.
   const res = await apiFetchRes(`/api/sessions/${encodeURIComponent(name)}/share${local ? '?local=true' : ''}`,
-    { method: 'POST', signal: AbortSignal.timeout(240_000) }, server ?? undefined, true, false);
+    { method: 'POST', signal: comTeto(signal, 240_000) }, server ?? undefined, true, false);
   if (res.status === 404 || res.status === 405) {
     throw Object.assign(new Error(m.share_create_needs_rust()), { status: res.status, code: 'share_create_needs_rust' });
   }

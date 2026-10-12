@@ -552,22 +552,17 @@ async fn send(conn: &mut hyper::client::conn::http1::SendRequest<Body>, token: &
     status
 }
 
+/// Atrás do Funnel a conexão é reaproveitada entre clientes da internet: palpites de um não podem
+/// travar o convidado certo que chega pela mesma conexão.
 #[tokio::test]
-async fn bad_tokens_are_limited_per_connection_ignoring_forwarded_for() {
+async fn bad_tokens_never_lock_the_connection() {
     let h = harness().await;
     let t = h.token("cc", Kind::Share);
     let mut c = one_connection(h.addr).await;
-    for i in 0..8 {
-        // Cada palpite finge outra origem: o porteiro não lê X-Forwarded-For.
+    for i in 0..20 {
         assert_eq!(send(&mut c, &format!("palpite-{i}"), &format!("203.0.113.{i}")).await, 401, "{i}");
     }
-    assert_eq!(send(&mut c, "palpite-9", "198.51.100.1").await, 429);
-    // Bloqueada, a conexão nem avalia o token certo.
-    assert_eq!(send(&mut c, &t, "198.51.100.1").await, 429);
-    // Outra conexão, mesmo 127.0.0.1: começa do zero (nada é guardado por IP).
-    let mut fresh = one_connection(h.addr).await;
-    assert_eq!(send(&mut fresh, &t, "203.0.113.1").await, 200);
-    assert_eq!(send(&mut fresh, "palpite", "203.0.113.1").await, 401);
+    assert_eq!(send(&mut c, &t, "198.51.100.1").await, 200);
 }
 
 #[tokio::test]

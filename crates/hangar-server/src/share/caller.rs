@@ -87,28 +87,27 @@ fn decoded(path: &str) -> std::borrow::Cow<'_, str> {
 }
 
 /// Sessão que a rota nomeia (o terminal `term-X/term` conta como X); `None` fora de sessão.
+/// Decodifica só o segmento, como o `Path` dos handlers: um `%2F` fica dentro do nome.
 pub fn path_session(path: &str) -> Option<String> {
-    session_of(&decoded(path))
-}
-
-/// `path_session` sobre o caminho já decodificado: decodificar duas vezes mudaria um `%2520`.
-fn session_of(path: &str) -> Option<String> {
     let parts: Vec<&str> = path.split('/').collect();
-    if parts.len() < 4 || parts[1..3] != ["api", "sessions"] || parts[3] == "events" {
+    if parts.len() < 4 || parts[1..3] != ["api", "sessions"] {
         return None;
     }
-    let name = parts[3];
+    let name = decoded(parts[3]);
+    if name == "events" {
+        return None;
+    }
     // Sessão cujo nome começa com "term-" não vira outra: só o terminal `term-X/term`.
     if let Some(inner) = name.strip_prefix("term-")
         && parts[4..] == ["term"]
     {
         return Some(inner.into());
     }
-    Some(name.into())
+    Some(name.into_owned())
 }
 
-pub fn guest_allowed(method: &Method, path: &str, grant: &GuestGrant) -> bool {
-    let path = &*decoded(path);
+pub fn guest_allowed(method: &Method, raw: &str, grant: &GuestGrant) -> bool {
+    let path = &*decoded(raw);
     let method = method.as_str();
     if has(LIST_ROUTES, method, path) || has(ANY_GUEST_ROUTES, method, path) {
         return true;
@@ -125,7 +124,7 @@ pub fn guest_allowed(method: &Method, path: &str, grant: &GuestGrant) -> bool {
         return false;
     }
     let (name, rest) = (parts[3], &parts[4..]);
-    let Some(kind) = session_of(path).and_then(|s| grant.sessions.get(&s).copied()) else {
+    let Some(kind) = path_session(raw).and_then(|s| grant.sessions.get(&s).copied()) else {
         return false;
     };
     if kind == Kind::Pair {

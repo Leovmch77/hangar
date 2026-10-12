@@ -53,10 +53,19 @@
     preRequisito = null;
     copiado = false;
     falhaAlcance = null;
+    gerando = false;
+    conferindoAlcance = false;
     void carregar();
-    // Fechar a folha (ou desmontar) para a conferência: ninguém está esperando a resposta.
-    return pararConferencia;
+    // Fechar a folha, desmontar ou trocar de sessão para a conferência e a criação: a mesma folha
+    // serve outra sessão, e o link de uma não pode aparecer na outra.
+    return () => {
+      pararConferencia();
+      controle?.abort();
+      controle = undefined;
+    };
   });
+
+  let controle: AbortController | undefined;
 
   function pararConferencia() {
     clearInterval(timer);
@@ -93,16 +102,26 @@
     comandoCopiado = false;
     falhaAlcance = null;
     conferindoAlcance = !local;
+    const ctl = new AbortController();
+    controle = ctl;
+    const [alvo, servidor] = [name, serverId];
+    const velho = () => ctl.signal.aborted || alvo !== name || servidor !== serverId;
     try {
-      criado = await createShare(name, local, server());
+      const r = await createShare(alvo, local, server(), ctl.signal);
+      if (velho()) return;
+      criado = r;
       void carregar();
     } catch (e) {
+      if (velho()) return;
       if (e instanceof SharePrerequisiteError) preRequisito = { missing: e.missing, fix: e.fix, enable_url: e.enableUrl };
       else if (e instanceof ShareReachError) falhaAlcance = e;
       else erroGerar = msg(e);
     } finally {
-      gerando = false;
-      conferindoAlcance = false;
+      if (controle === ctl) {
+        controle = undefined;
+        gerando = false;
+        conferindoAlcance = false;
+      }
     }
   }
 

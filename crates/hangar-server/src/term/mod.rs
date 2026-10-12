@@ -217,8 +217,10 @@ async fn serve(st: Arc<AppState>, peer: SocketAddr, req: Request, want: Want) ->
     let (client_ip, https) = st.cfg.trusted.resolve(peer.ip(), req.headers());
     let fwd = Forward { client_ip, https, guest: None };
     // Convidado da 8766: o porteiro já conferiu o token e a sessão; terminal só para o convite.
-    let guest = caller(&req).and_then(Caller::grant).map(|g| {
-        crate::share::caller::path_session(req.uri().path()).and_then(|s| g.sessions.get(&s).copied()) == Some(Kind::Share)
+    // Confere o nome que o terminal vai abrir (o do `Path`), não uma releitura da URL.
+    let guest = caller(&req).and_then(Caller::grant).map(|g| match &want {
+        Want::Session { name, .. } => g.sessions.get(name.strip_prefix("term-").unwrap_or(name)) == Some(&Kind::Share),
+        Want::Hangar(_) => false,
     });
     // Só `?token=`, como o termsock: Bearer e cookie não abrem shell.
     let owner = guest.is_none() && auth::query_param(req.uri().query(), "token").filter(|t| !t.is_empty())

@@ -634,3 +634,65 @@ async fn guest_terminal_closes_with_4410_when_revoked() {
     let _ = ws.close(None).await;
     assert_eq!(srv.python.hits_to("/api/sessions/t/term"), 0);
 }
+
+/// O preflight é o do `CORSMiddleware` do Starlette com `*` em tudo e sem credenciais: sem ele o
+/// convidado do PWA (outra origem) não resgata, não manda recado nem escreve.
+#[tokio::test(flavor = "multi_thread")]
+async fn guest_port_answers_the_cors_preflight_like_starlette() {
+    let dir = tempfile::tempdir().unwrap();
+    let srv = plain_srv(dir.path(), |_| {}).await;
+    for (path, method) in [("/api/guest/redeem", "POST"), ("/api/pair/message", "POST"), ("/api/sessions/x/input", "POST")] {
+        let r = client().request(reqwest::Method::OPTIONS, format!("http://{}{path}", srv.guest))
+            .header("origin", "https://app-do-convidado.example")
+            .header("access-control-request-method", method)
+            .header("access-control-request-headers", "authorization, content-type").send().await.unwrap();
+        assert_eq!(r.status(), 200, "{path}");
+        let h = r.headers();
+        assert_eq!(h["access-control-allow-origin"], "*", "{path}");
+        assert_eq!(h["access-control-allow-methods"], "DELETE, GET, HEAD, OPTIONS, PATCH, POST, PUT", "{path}");
+        assert_eq!(h["access-control-allow-headers"], "authorization, content-type", "{path}");
+        assert_eq!(h["access-control-max-age"], "600", "{path}");
+        assert_eq!(h["content-type"], "text/plain; charset=utf-8", "{path}");
+        assert!(!h.contains_key("vary"), "{path}");
+        assert_eq!(r.text().await.unwrap(), "OK", "{path}");
+    }
+    // A única recusa possível com essa configuração.
+    let r = client().request(reqwest::Method::OPTIONS, format!("http://{}/api/guest/redeem", srv.guest))
+        .header("origin", "https://app-do-convidado.example").header("access-control-request-method", "POST")
+        .header("access-control-request-private-network", "true").send().await.unwrap();
+    assert_eq!(r.status(), 400);
+    assert_eq!(r.headers()["access-control-allow-origin"], "*");
+    assert_eq!(r.text().await.unwrap(), "Disallowed CORS private-network");
+    assert_eq!(srv.python.hits_to("/api/sessions/x/input"), 0);
+}
+
+/// O Starlette nunca casava `/` dentro de `{name}`; aqui o `%2F` faria o porteiro conferir `proj` e o
+/// handler servir `proj/x`.
+#[tokio::test(flavor = "multi_thread")]
+async fn encoded_slash_in_the_session_name_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let srv = plain_srv(dir.path(), |_| {}).await;
+    let t = srv.g.token("proj", Kind::Share);
+    srv.g.alive("proj/x");
+    for path in ["/api/sessions/proj%2Fx/files/list?path=", "/api/sessions/proj%2Fx/uploads/a.png",
+        "/api/sessions/proj%2Fx/history", "/api/sessions/term-proj%2Fx/term"] {
+        assert_eq!(get_json(format!("http://{}{path}", srv.guest), &t).await.0, 403, "{path}");
+    }
+    let url = format!("ws://{}/api/sessions/proj%2Fx/term?token={t}", srv.guest);
+    match tokio_tungstenite::connect_async(url).await {
+        Err(tungstenite::Error::Http(r)) => {
+            assert_eq!(r.status(), 403);
+            // Corpo vazio: quem recusou foi o porteiro, não o terminal procurando `proj/x`.
+            assert_eq!(r.body().clone().unwrap_or_default(), Vec::<u8>::new());
+        }
+        other => panic!("esperava recusa no aperto de mão, veio {:?}", other.map(|_| ())),
+    }
+    // Espaço e acento seguem sendo a mesma sessão: passam o porteiro e chegam ao handler de anexos.
+    for name in ["a b", "ação"] {
+        let a = srv.g.token(name, Kind::Share);
+        let seg = percent_encoding::utf8_percent_encode(name, percent_encoding::NON_ALPHANUMERIC);
+        let (status, body) = get_json(format!("http://{}/api/sessions/{seg}/uploads/a.png", srv.guest), &a).await;
+        assert_eq!((status, body["detail"]["code"].as_str()), (503, Some("upload_facts_unavailable")), "{name}");
+    }
+    assert_eq!(srv.python.input_calls(), 0);
+}
