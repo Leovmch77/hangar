@@ -38,6 +38,15 @@ pub(super) struct BrowserPanel {
     /// Login pedido com o motor ainda nascendo: a importação segue quando o CDP dele existir.
     #[cfg(not(target_os = "macos"))]
     import_pending: bool,
+    /// Site escolhido no diálogo: só os cookies dele e dos domínios-pai entram. `None` = todos os sites.
+    #[cfg(not(target_os = "macos"))]
+    import_site: Option<String>,
+    /// Site cuja página mostrou campo de senha: a linha que sugere trazer o login. Nunca importa sozinha.
+    #[cfg(not(target_os = "macos"))]
+    login_hint: Option<String>,
+    /// Último site conferido atrás de campo de senha, para não repetir a cada evento da mesma página.
+    #[cfg(not(target_os = "macos"))]
+    hint_checked: Option<String>,
     /// Perfis com cookies em disco esperando a pessoa escolher de qual trazer.
     #[cfg(target_os = "linux")]
     cookie_sources: Vec<crate::browser::chrome_import::disk::Source>,
@@ -73,7 +82,7 @@ impl BrowserPanel {
             cx.on_blur(&focus, window, |this, _, _| if let Some(engine) = this.engine() { engine.focus(false) }),
         ];
         Self { key, #[cfg(not(target_os = "macos"))] controller: None, #[cfg(not(target_os = "macos"))] cdp: None,
-            #[cfg(not(target_os = "macos"))] relay: Default::default(), #[cfg(not(target_os = "macos"))] viewer: Rc::default(), engine: None, starting: None, _start: None, events, address, page: model::PageState::default(), invalid: None, #[cfg(not(target_os = "macos"))] cookies_status: None, #[cfg(not(target_os = "macos"))] import_pending: false, #[cfg(target_os = "linux")] cookie_sources: Vec::new(), #[cfg(target_os = "linux")] last_fill: None, focus,
+            #[cfg(not(target_os = "macos"))] relay: Default::default(), #[cfg(not(target_os = "macos"))] viewer: Rc::default(), engine: None, starting: None, _start: None, events, address, page: model::PageState::default(), invalid: None, #[cfg(not(target_os = "macos"))] cookies_status: None, #[cfg(not(target_os = "macos"))] import_pending: false, #[cfg(not(target_os = "macos"))] import_site: None, #[cfg(not(target_os = "macos"))] login_hint: None, #[cfg(not(target_os = "macos"))] hint_checked: None, #[cfg(target_os = "linux")] cookie_sources: Vec::new(), #[cfg(target_os = "linux")] last_fill: None, focus,
             origin: Rc::default(), shown: false, _drain: drain, _subscriptions: subscriptions }
     }
 
@@ -91,6 +100,8 @@ impl BrowserPanel {
             crate::browser::server::write_sidecar(&self.key, self.page.url.as_deref().unwrap_or(""), &self.page.title);
             #[cfg(target_os = "linux")]
             self.maybe_autofill(cx);
+            #[cfg(not(target_os = "macos"))]
+            self.maybe_suggest_login(cx);
         }
         cx.notify();
     }
@@ -318,23 +329,67 @@ impl BrowserPanel {
     /// Traz o login do Chrome real do usuário (CDP) para o navegador embutido, SÓ no clique e TUDO de uma vez: cada
     /// conexão ao CDP faz o Chrome perguntar "Permitir a depuração remota?" na tela da pessoa.
     #[cfg(not(target_os = "macos"))]
+    /// Site da página aberta (http/https), sem o `www.`: o que o diálogo oferece.
+    #[cfg(not(target_os = "macos"))]
+    fn page_site(&self) -> Option<String> {
+        let url = url::Url::parse(self.page.url.as_deref()?).ok()?;
+        if !matches!(url.scheme(), "http" | "https") { return None; }
+        let host = url.host_str()?;
+        Some(host.strip_prefix("www.").unwrap_or(host).to_owned())
+    }
+
+    /// Diálogo "Usar meu login do Chrome em <site>": o perfil do navegador embutido é um só para todas as sessões e
+    /// agentes, então a pessoa escolhe o alcance antes de qualquer cookie sair do Chrome.
+    #[cfg(not(target_os = "macos"))]
+    fn ask_chrome_login(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let site = self.page_site();
+        let all = Rc::new(Cell::new(site.is_none()));
+        let (title, help) = match &site {
+            Some(site) => (tr("browser_login_title_site").replace("{site}", site), tr("browser_login_help_site").replace("{site}", site)),
+            None => (tr("browser_login_title_all"), tr("browser_login_help_all")),
+        };
+        let check = site.is_some().then(|| (tr("browser_login_all_sites"), all.clone()));
+        let panel = cx.entity().downgrade();
+        chrome::confirm_alert_with(window, cx, title, help, check, tr("browser_login_ok"), ButtonVariant::Primary, move |window, cx| {
+            let site = if all.get() { None } else { site.clone() };
+            panel.update(cx, |this, cx| {
+                this.import_site = site;
+                this.login_hint = None;
+                this.import_chrome_login(window, cx);
+            }).is_ok()
+        });
+    }
+
+    /// Página https com campo de senha visível: sugere trazer o login, uma vez por site. Só a linha; importar continua
+    /// dependendo do diálogo.
+    #[cfg(not(target_os = "macos"))]
+    fn maybe_suggest_login(&mut self, cx: &mut Context<Self>) {
+        if self.page.loading { return; }
+        let Some(site) = self.page_site() else { return };
+        if self.login_hint.as_ref().is_some_and(|hint| *hint != site) { self.login_hint = None; }
+        if self.hint_checked.as_deref() == Some(site.as_str()) || !self.page.url.as_deref().is_some_and(|u| u.starts_with("https:")) {
+            return;
+        }
+        let Some(cdp) = self.cdp.clone() else { return };
+        self.hint_checked = Some(site.clone());
+        let js = "(() => { const vis = (el) => el.offsetParent !== null && !el.disabled;             const walk = (root) => [...root.querySelectorAll('*')].some((el) => (el.tagName === 'INPUT' && el.type === 'password' && vis(el)) || (el.shadowRoot && walk(el.shadowRoot)));             return walk(document); })()";
+        let params = serde_json::json!({"expression": js, "returnByValue": true});
+        cx.spawn(async move |this, cx| {
+            // SPA desenha o formulário depois do carregamento.
+            for wait in [0u64, 1500, 4000] {
+                if wait > 0 { cx.background_executor().timer(std::time::Duration::from_millis(wait)).await; }
+                if !this.read_with(cx, |this, _| this.page_site().as_deref() == Some(site.as_str())).unwrap_or(false) { return; }
+                if cdp.call("Runtime.evaluate", params.clone()).await.is_ok_and(|v| v["result"]["value"].as_bool() == Some(true)) {
+                    let _ = this.update(cx, |this, cx| { this.login_hint = Some(site.clone()); cx.notify(); });
+                    return;
+                }
+            }
+        }).detach();
+    }
+
+    #[cfg(not(target_os = "macos"))]
     fn import_chrome_login(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         use crate::browser::chrome_import;
-        // O perfil do navegador embutido é um só para todas as sessões e agentes: o 1º clique da vida só avisa, o 2º
-        // traz e guarda que a pessoa já leu.
-        let mut seen = crate::appearance::get();
-        if !seen.chrome_cookies_confirmed {
-            if self.cookies_status.as_deref() != Some(tr("browser_cookies_confirm").as_str()) {
-                self.cookies_status = Some(tr("browser_cookies_confirm"));
-                cx.notify();
-                return;
-            }
-            seen.chrome_cookies_confirmed = true;
-            crate::appearance::set(seen);
-            cx.background_executor().spawn(async {
-                if let Err(e) = crate::appearance::save() { eprintln!("[nav] confirmacao do login nao foi gravada: {e}"); }
-            }).detach();
-        }
         let Some(cdp) = self.cdp.clone() else {
             // Sem página aberta o motor nem existe: o botão o faz nascer e a importação segue quando ele estiver pronto.
             self.import_pending = true;
@@ -408,20 +463,31 @@ impl BrowserPanel {
                 return;
             }
         };
+        let cookies = match &self.import_site {
+            Some(site) => crate::browser::chrome_import::for_site(cookies, site),
+            None => cookies,
+        };
         // 0 cookies não é sucesso: a pessoa vê "nenhum cookie", não "0 trazidos" parecendo que deu certo.
         if cookies.is_empty() {
-            self.cookies_status = Some(tr("browser_cookies_none"));
+            self.cookies_status = Some(match &self.import_site {
+                Some(site) => tr("browser_login_none_site").replace("{site}", site),
+                None => tr("browser_cookies_none"),
+            });
             cx.notify();
             return;
         }
         let count = cookies.len();
+        let site = self.import_site.clone();
         let set = cdp.call("Storage.setCookies", serde_json::json!({"cookies": cookies}));
         cx.spawn(async move |this, cx| {
             let reply = set.await;
             let _ = this.update(cx, |this, cx| {
                 match reply {
                     Ok(_) => {
-                        let done = tr("browser_cookies_ok").replace("{n}", &count.to_string());
+                        let done = match &site {
+                            Some(site) => tr("browser_login_ok_site").replace("{site}", site),
+                            None => tr("browser_cookies_ok"),
+                        }.replace("{n}", &count.to_string());
                         this.cookies_status = Some(done.clone());
                         if let Some(engine) = this.engine() { engine.reload(); }
                         // Sucesso é aviso, não estado: some sozinho. Erro fica até a próxima tentativa.
@@ -566,7 +632,7 @@ impl Render for BrowserPanel {
                     .hover(theme::hover()).active(theme::hover()))
                 .icon(Icon::new(IconName::Key).size(px(14.))).label(tr("browser_cookies_bring"))
                 .h(px(28.)).px(px(8.)).rounded(px(6.)).text_size(px(12.)).flex_shrink_0()
-                .on_click(cx.listener(|this, _, window, cx| this.import_chrome_login(window, cx))));
+                .on_click(cx.listener(|this, _, window, cx| this.ask_chrome_login(window, cx))));
         }
         // Com a página na tela, a falha dela fica numa linha; sem página, `render_page` a mostra no lugar dela.
         let notice = self.invalid.clone().or_else(|| self.page.error.clone().filter(|_| ready && self.page.url.is_some()));
@@ -580,6 +646,17 @@ impl Render for BrowserPanel {
             root = root.when_some(self.cookies_status.clone(), |el, text| el.child(div().id("browser-cookies-status")
                 .flex_shrink_0().px_3().py(px(6.)).role(Role::Status)
                 .text_size(px(11.)).text_color(theme::muted()).whitespace_normal().child(text)));
+        }
+        #[cfg(not(target_os = "macos"))]
+        if let Some(site) = self.login_hint.clone() {
+            root = root.child(div().id("browser-login-hint").flex_shrink_0().flex().items_center().gap_2().px_3().py(px(6.))
+                .border_b_1().border_color(theme::border()).role(Role::Status)
+                .child(div().flex_1().min_w_0().text_size(px(11.)).text_color(theme::muted()).whitespace_normal()
+                    .child(tr("browser_login_hint").replace("{site}", &site)))
+                .child(Button::new("browser-login-hint-use").small().label(tr("browser_login_hint_use"))
+                    .on_click(cx.listener(|this, _, window, cx| this.ask_chrome_login(window, cx))))
+                .child(chrome::icon_button("browser-login-hint-close", IconName::Close, tr("close"), cx)
+                    .on_click(cx.listener(|this, _, _, cx| { this.login_hint = None; cx.notify(); }))));
         }
         #[cfg(target_os = "linux")]
         if !self.cookie_sources.is_empty() {

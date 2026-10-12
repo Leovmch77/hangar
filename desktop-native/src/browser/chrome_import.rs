@@ -205,6 +205,23 @@ pub fn fetch_cookies(port: Option<u16>) -> Result<Vec<Value>, ImportError> {
     Err(last)
 }
 
+/// Só os cookies que a página de `site` recebe: do próprio host e dos domínios-pai (`.github.com` serve
+/// `gist.github.com`). Cookie de outro site, ou de um subdomínio irmão, fica no Chrome.
+pub fn for_site(cookies: Vec<Value>, site: &str) -> Vec<Value> {
+    let site = site.trim_start_matches('.').to_ascii_lowercase();
+    cookies.into_iter().filter(|c| {
+        let (host, domain_cookie) = match c["domain"].as_str() {
+            Some(d) => (d.trim_start_matches('.').to_ascii_lowercase(), true),
+            None => match c["url"].as_str().and_then(|u| url::Url::parse(u).ok()) {
+                Some(u) => (u.host_str().unwrap_or_default().to_ascii_lowercase(), false),
+                None => return false,
+            },
+        };
+        let www = |h: &str| h.strip_prefix("www.").unwrap_or(h).to_owned();
+        www(&host) == www(&site) || (domain_cookie && site.ends_with(&format!(".{host}")))
+    }).collect()
+}
+
 /// Mantém o erro mais informativo: `Failed`/`Headless` vencem o genérico `ChromeClosed`.
 fn keep_specific(current: ImportError, new: ImportError) -> ImportError {
     fn rank(e: &ImportError) -> u8 {
@@ -730,6 +747,18 @@ mod tests {
             cookies.iter().any(|c| c["name"] == "hangar_test" && c["value"] == "abc123"),
             "esperava o cookie de teste hangar_test=abc123; veio: {cookies:?}"
         );
+    }
+
+    #[test]
+    fn site_filter_keeps_the_host_and_its_parent_domains_only() {
+        let c = |domain: &str| json!({"name": "a", "value": "b", "domain": domain});
+        let host_only = |url: &str| json!({"name": "a", "value": "b", "url": url});
+        let kept = for_site(vec![c(".github.com"), c("gist.github.com"), c(".google.com"), c(".hub.com"),
+            host_only("https://github.com/"), host_only("https://api.github.com/"), c("www.github.com")], "github.com");
+        let names: Vec<String> = kept.iter().map(|c| c["domain"].as_str().or(c["url"].as_str()).unwrap().to_owned()).collect();
+        assert_eq!(names, [".github.com", "https://github.com/", "www.github.com"]);
+        let sub = for_site(vec![c(".github.com"), c(".com"), host_only("https://github.com/")], "gist.github.com");
+        assert_eq!(sub.len(), 2, "o pai .github.com entra; o host-only de github.com não; .com é pai e entra");
     }
 
     #[test]
