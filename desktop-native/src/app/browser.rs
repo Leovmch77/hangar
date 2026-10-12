@@ -38,6 +38,9 @@ pub(super) struct BrowserPanel {
     /// Login pedido com o motor ainda nascendo: a importação segue quando o CDP dele existir.
     #[cfg(not(target_os = "macos"))]
     import_pending: bool,
+    /// Cookies sendo buscados (disco ou depuração) até `apply_cookies`: a linha de status não pode sumir no meio.
+    #[cfg(not(target_os = "macos"))]
+    importing: bool,
     /// Site escolhido no diálogo: só os cookies dele e dos domínios-pai entram. `None` = todos os sites.
     #[cfg(not(target_os = "macos"))]
     import_site: Option<String>,
@@ -88,7 +91,7 @@ impl BrowserPanel {
             cx.on_blur(&focus, window, |this, _, _| if let Some(engine) = this.engine() { engine.focus(false) }),
         ];
         Self { key, #[cfg(not(target_os = "macos"))] controller: None, #[cfg(not(target_os = "macos"))] cdp: None,
-            #[cfg(not(target_os = "macos"))] relay: Default::default(), #[cfg(not(target_os = "macos"))] viewer: Rc::default(), engine: None, starting: None, _start: None, events, address, page: model::PageState::default(), invalid: None, #[cfg(not(target_os = "macos"))] cookies_status: None, #[cfg(not(target_os = "macos"))] import_pending: false, #[cfg(not(target_os = "macos"))] import_site: None, #[cfg(not(target_os = "macos"))] login_hint: None, #[cfg(not(target_os = "macos"))] hint_checked: None, #[cfg(not(target_os = "macos"))] login_request: None, #[cfg(not(target_os = "macos"))] login_reply: None, #[cfg(target_os = "linux")] cookie_sources: Vec::new(), #[cfg(target_os = "linux")] last_fill: None, focus,
+            #[cfg(not(target_os = "macos"))] relay: Default::default(), #[cfg(not(target_os = "macos"))] viewer: Rc::default(), engine: None, starting: None, _start: None, events, address, page: model::PageState::default(), invalid: None, #[cfg(not(target_os = "macos"))] cookies_status: None, #[cfg(not(target_os = "macos"))] import_pending: false, #[cfg(not(target_os = "macos"))] importing: false, #[cfg(not(target_os = "macos"))] import_site: None, #[cfg(not(target_os = "macos"))] login_hint: None, #[cfg(not(target_os = "macos"))] hint_checked: None, #[cfg(not(target_os = "macos"))] login_request: None, #[cfg(not(target_os = "macos"))] login_reply: None, #[cfg(target_os = "linux")] cookie_sources: Vec::new(), #[cfg(target_os = "linux")] last_fill: None, focus,
             origin: Rc::default(), shown: false, _drain: drain, _subscriptions: subscriptions }
     }
 
@@ -101,15 +104,7 @@ impl BrowserPanel {
             if !self.address.focus_handle(cx).is_focused(window) && self.address.read(cx).value() != url {
                 self.address.update(cx, |input, cx| input.set_value(url, window, cx));
             }
-            // A linha do login fala do site em que foi pedida: noutro site ela some, salvo no meio de uma importação.
-            #[cfg(not(target_os = "macos"))]
-            let before = self.page_site();
             self.page = page;
-            #[cfg(not(target_os = "macos"))]
-            if before.is_some() && self.page_site().is_some() && before != self.page_site() && !self.import_pending
-                && self.login_reply.is_none() && !self.cookie_sources_waiting() {
-                self.cookies_status = None;
-            }
             #[cfg(not(target_os = "macos"))]
             crate::browser::server::write_sidecar(&self.key, self.page.url.as_deref().unwrap_or(""), &self.page.title);
             #[cfg(target_os = "linux")]
@@ -181,7 +176,19 @@ impl BrowserPanel {
         let text = self.address.read(cx).value().to_string();
         match model::normalize_address(&text) {
             Err(key) => self.invalid = Some(tr(key)),
-            Ok(url) => self.go(url, window, cx),
+            Ok(url) => {
+                // A linha do login fala do site em que foi pedida: some quando a pessoa vai a outro endereço, nunca num
+                // redirect da página nem com importação, pedido do agente ou escolha de perfil ainda abertos.
+                #[cfg(not(target_os = "macos"))]
+                {
+                    #[cfg(target_os = "linux")]
+                    let picking = !self.cookie_sources.is_empty();
+                    #[cfg(not(target_os = "linux"))]
+                    let picking = false;
+                    if !self.importing && !self.import_pending && self.login_reply.is_none() && !picking { self.cookies_status = None; }
+                }
+                self.go(url, window, cx)
+            }
         }
         cx.notify();
     }
@@ -344,18 +351,6 @@ impl BrowserPanel {
         cx.notify();
     }
 
-    /// Traz o login do Chrome real do usuário (CDP) para o navegador embutido, SÓ no clique e TUDO de uma vez: cada
-    /// conexão ao CDP faz o Chrome perguntar "Permitir a depuração remota?" na tela da pessoa.
-    #[cfg(not(target_os = "macos"))]
-    /// Há escolha de perfil na tela, esperando a pessoa.
-    #[cfg(not(target_os = "macos"))]
-    fn cookie_sources_waiting(&self) -> bool {
-        #[cfg(target_os = "linux")]
-        return !self.cookie_sources.is_empty();
-        #[cfg(not(target_os = "linux"))]
-        false
-    }
-
     /// Site da página aberta (http/https), sem o `www.`: o que o diálogo oferece.
     #[cfg(not(target_os = "macos"))]
     fn page_site(&self) -> Option<String> {
@@ -460,6 +455,8 @@ impl BrowserPanel {
         self.import_chrome_login(window, cx);
     }
 
+    /// Traz o login do navegador real do usuário para o navegador embutido, só no clique: no Linux pelo perfil em
+    /// disco; senão pela depuração, onde cada conexão faz o Chrome perguntar "Permitir a depuração remota?".
     #[cfg(not(target_os = "macos"))]
     fn import_chrome_login(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         use crate::browser::chrome_import;
@@ -491,6 +488,7 @@ impl BrowserPanel {
         cx.notify();
         // Plano B pra Chromium/Brave antigos: porta fixa por variável de ambiente.
         let port = std::env::var("HANGAR_CHROME_CDP_PORT").ok().and_then(|v| v.trim().parse().ok());
+        self.importing = true;
         let fetch = cx.background_executor().spawn(async move {
             chrome_import::fetch_cookies(port).map_err(|e| match e {
                 chrome_import::ImportError::ChromeClosed => None,
@@ -516,6 +514,7 @@ impl BrowserPanel {
         };
         self.cookies_status = Some(tr("browser_cookies_reading").replace("{source}", &source.label));
         cx.notify();
+        self.importing = true;
         let fetch = cx.background_executor().spawn(async move {
             crate::browser::chrome_import::disk::read(&source)
                 .map_err(|e| Some(tr(e.status_key()).replace("{e}", e.detail())))
@@ -530,6 +529,7 @@ impl BrowserPanel {
     #[cfg(not(target_os = "macos"))]
     fn apply_cookies(&mut self, result: Result<Vec<serde_json::Value>, Option<String>>,
         cdp: Rc<crate::browser::cdp::Cdp>, cx: &mut Context<Self>) {
+        self.importing = false;
         let cookies = match result {
             Ok(cookies) => cookies,
             Err(None) => {
