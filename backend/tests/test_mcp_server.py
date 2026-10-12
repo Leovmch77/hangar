@@ -398,7 +398,7 @@ async def test_voz_usa_o_mcp_inteiro_e_fecha_so_pelo_sim_falado(voz, monkeypatch
 async def test_browser_goal_so_com_o_jev_da_sessao(identidade, monkeypatch):
     async with sessao_mcp({"X-Hangar-Pane": "%3"}) as s:
         res = await s.call_tool("browser_goal", {"objetivo": "abre a agenda"})
-        assert res.is_error and "Jev está desligado" in res.content[0].text
+        assert res.is_error and "Jev não chegou ligado" in res.content[0].text
     from app import runtime_config
     monkeypatch.setattr(runtime_config, "env_jev", lambda ligado: {"HANGAR_JEV": "on"})
     async with sessao_mcp({"X-Hangar-Pane": "%3", "X-Hangar-Jev": "on"}) as s:

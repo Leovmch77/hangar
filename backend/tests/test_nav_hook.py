@@ -80,3 +80,21 @@ def test_notificacao_de_subagente_nao_recebe_a_dica(tmp_path, monkeypatch, capsy
              prompt="<task-notification>\n<summary>testa a tela do front</summary>")
     carregar().main()
     assert capsys.readouterr().out == ""
+
+
+def test_jev_que_falha_deixa_rastro_e_descansa(tmp_path, monkeypatch):
+    mod = carregar()
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("TYPESAFE_API_KEY", "chave-errada")
+    chamadas = []
+
+    def recusa(req, timeout):
+        chamadas.append(req)
+        raise OSError("401 Unauthorized")
+
+    monkeypatch.setattr(mod.urllib.request, "urlopen", recusa)
+    assert mod._jev_precisa("abre a tela de login") is None
+    assert mod._jev_precisa("abre a tela de login") is None
+    assert len(chamadas) == 1
+    log = (tmp_path / ".hangar" / "logs" / "privado" / "nav_hook-falhas.log").read_text()
+    assert "jev falhou (OSError: 401 Unauthorized)" in log

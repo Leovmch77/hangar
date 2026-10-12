@@ -451,8 +451,10 @@ async def browser_batch(ctx: Context, passos: list[dict[str, Any]], sessao: str 
 
 
 _HANGAR_PREVIEW = Path(__file__).resolve().parents[2] / "scripts" / "hangar-preview"
-JEV_OFF = ("o Jev está desligado nesta sessão: abra uma com `hangar-send --new <nome> <cwd> --jev` (ou marque o Jev "
-           "em \"Mais opções\" ao criar). Sem ele, use browser e browser_batch.")
+JEV_OFF = ("o Jev não chegou ligado nesta chamada: ou a sessão nasceu sem ele (abra uma com "
+           "`hangar-send --new <nome> <cwd> --jev`, ou marque o Jev em \"Mais opções\" ao criar), ou o MCP hangar desta "
+           "conta foi registrado antes do cabeçalho X-Hangar-Jev (rode scripts/registrar-mcp.py e abra a sessão de novo). "
+           "Sem ele, use browser e browser_batch.")
 JEV_UNCONFIGURED = "o Jev não está configurado neste servidor: cadastre a chave em Configurações do servidor > Jev."
 
 

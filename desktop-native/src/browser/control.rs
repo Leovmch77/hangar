@@ -72,6 +72,8 @@ struct State {
     /// Diálogo aberto agora (tipo e texto), lido quando ele fecha.
     dialog: Option<(String, String)>,
     last_network: Instant,
+    /// Endereços (sem a consulta) que a página tenta em laço sem servidor do outro lado: não contam para o `--idle`.
+    noise: HashSet<String>,
     theme: &'static str,
     layout: Layout,
     hidden: bool,
@@ -111,10 +113,21 @@ fn push(list: &mut VecDeque<String>, line: String) {
     if list.len() > LOG_MAX { list.pop_front(); }
 }
 
+impl State {
+    /// Fora da espera do `--idle`: o laço de quem não tem servidor, o overlay de erro do Next em dev e a exportação de
+    /// telemetria (OpenTelemetry), que sai sozinha em intervalo e não muda a tela.
+    fn ignored(&self, url: &str) -> bool {
+        let base = without_query(url);
+        self.noise.contains(base) || base.contains("/__nextjs_") || ["/v1/traces", "/v1/metrics", "/v1/logs"].iter().any(|e| base.ends_with(e))
+    }
+}
+
+fn without_query(url: &str) -> &str { url.split(['?', '#']).next().unwrap_or(url) }
+
 impl<P: Page> Controller<P> {
     pub fn new(page: P, hidden: bool) -> Self {
         Self { page, turn: Mutex::new(()), wanted_hidden: Cell::new(hidden), paused: Cell::new(false), on_activity: RefCell::new(None), on_layout: RefCell::new(None), on_page_error: RefCell::new(None), dialog_open: RefCell::new(None), strip_shown: Cell::new(false), settle: Cell::new(false), dialog_answered: Cell::new(false), dialog_signal: RefCell::new(None), on_dialog_answer: RefCell::new(None), state: RefCell::new(State { refs: HashMap::new(), console: VecDeque::new(),
-            network: VecDeque::new(), inflight: HashSet::new(), requests: HashMap::new(), dialog: None, last_network: Instant::now(), theme: "sistema", layout: Layout::Desktop,
+            network: VecDeque::new(), inflight: HashSet::new(), requests: HashMap::new(), dialog: None, last_network: Instant::now(), noise: HashSet::new(), theme: "sistema", layout: Layout::Desktop,
             hidden: false, scale: None, navigated: false, navs: 0, enabled: HashSet::new() }) }
     }
 
@@ -235,14 +248,15 @@ impl<P: Page> Controller<P> {
                 let id = p["requestId"].as_str().unwrap_or("").to_owned();
                 // Teto contra requisição que nunca termina (stream, socket): o mapa só serve à linha de falha.
                 if s.requests.len() > 500 { s.requests.clear(); }
-                s.requests.insert(id.clone(), (p["request"]["method"].as_str().unwrap_or("GET").to_owned(), p["request"]["url"].as_str().unwrap_or("").to_owned()));
-                s.inflight.insert(id);
+                let url = p["request"]["url"].as_str().unwrap_or("").to_owned();
+                if !s.ignored(&url) { s.inflight.insert(id.clone()); }
+                s.requests.insert(id, (p["request"]["method"].as_str().unwrap_or("GET").to_owned(), url));
             }
             "Network.responseReceived" if p["response"]["url"].as_str().is_some_and(|u| u.starts_with("chrome-extension:")) => {}
             "Network.responseReceived" => {
                 // A resposta encerra a espera do `--idle` mesmo em stream (SSE), que nunca termina de carregar.
                 if let Some(id) = p["requestId"].as_str() { s.inflight.remove(id); }
-                s.last_network = Instant::now();
+                if !s.ignored(p["response"]["url"].as_str().unwrap_or("")) { s.last_network = Instant::now(); }
                 let method = p["requestId"].as_str().and_then(|id| s.requests.get(id)).map_or("GET".to_owned(), |(m, _)| m.clone());
                 push(&mut s.network, format!("{method} {} {}", p["response"]["status"], p["response"]["url"].as_str().unwrap_or("")));
             }
@@ -250,8 +264,10 @@ impl<P: Page> Controller<P> {
             "Network.loadingFailed" => {
                 let id = p["requestId"].as_str().unwrap_or("");
                 s.inflight.remove(id);
-                s.last_network = Instant::now();
                 let (method, url) = s.requests.remove(id).unwrap_or_default();
+                // Conexão recusada = nada escutando (SignalR, HMR sem servidor): a página tenta de novo em laço.
+                if p["errorText"].as_str().is_some_and(|e| e.ends_with("ERR_CONNECTION_REFUSED")) { s.noise.insert(without_query(&url).to_owned()); }
+                if !s.ignored(&url) { s.last_network = Instant::now(); }
                 let reason = p["blockedReason"].as_str().map(|r| format!("bloqueada: {r}"))
                     .unwrap_or_else(|| p["errorText"].as_str().unwrap_or("").to_owned());
                 let canceled = if p["canceled"] == true { " (cancelada)" } else { "" };
@@ -835,6 +851,21 @@ mod tests {
     fn snapshot_lists_refs() {
         let c = ctl(|m, _| Ok(if m == "Accessibility.getFullAXTree" { tree() } else { json!({}) }));
         assert_eq!(text(block_on(c.run("snapshot", &[]))), "- RootWebArea \"x\"\n  - button \"Ok\" [ref=@e1]");
+    }
+
+    #[test]
+    fn idle_ignores_retry_loops_without_a_server_and_next_dev_overlay() {
+        let c = ctl(|_, _| Ok(json!({})));
+        let start = |id: &str, url: &str| c.on_event("Network.requestWillBeSent", &json!({"requestId": id, "request": {"method": "POST", "url": url}}));
+        let hub = "http://localhost:8124/callbackhub/negotiate?negotiateVersion=1";
+        start("1", hub);
+        c.on_event("Network.loadingFailed", &json!({"requestId": "1", "errorText": "net::ERR_CONNECTION_REFUSED"}));
+        start("2", hub);
+        start("3", "http://localhost:3000/__nextjs_original-stack-frames");
+        start("5", "http://localhost:3000/pss/geral/v1/telemetria/otlp/v1/traces");
+        assert!(c.state.borrow().inflight.is_empty());
+        start("4", "http://localhost:3000/api/x");
+        assert_eq!(c.state.borrow().inflight.len(), 1);
     }
 
     #[test]
