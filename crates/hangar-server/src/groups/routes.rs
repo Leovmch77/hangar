@@ -317,7 +317,8 @@ pub(super) async fn group_message(State(st): State<Arc<AppState>>, ConnectInfo(p
     if head.starts_with('/') {
         return asked.refuse(StatusCode::BAD_REQUEST, "erro_group_message_slash", "group-message não suporta slash-commands", json!({}));
     }
-    if head.starts_with("[grupo:") || head.starts_with("[de:") {
+    // `[de fora:` é recado que já atravessou o par: reespalhar faria bate-volta entre máquinas.
+    if head.starts_with("[grupo:") || head.starts_with("[de:") || head.starts_with("[de fora:") {
         return asked.refuse(StatusCode::BAD_REQUEST, "erro_group_message_resposta",
             "aviso de grupo não pode reencaminhar um [grupo:]/[de:] — responda 1:1", json!({}));
     }
@@ -330,8 +331,8 @@ pub(super) async fn group_message(State(st): State<Arc<AppState>>, ConnectInfo(p
             &format!("mais de {STORM_MAX} avisos de grupo em {}s — parece loop; espere ou responda 1:1", STORM_WINDOW.as_secs()),
             json!({"max": STORM_MAX, "janela": STORM_WINDOW.as_secs()}));
     }
-    // Membro de outra máquina falha com "sessão não encontrada", como no Python: aqui ninguém o
-    // procura na lista.
+    // Máquina própria falha com "sessão não encontrada", como no Python: aqui ninguém a procura na
+    // lista. Membro de fora recebe pela chave de saída do próprio par.
     let local: Vec<String> = link.peers.iter().filter(|p| !is_remote(p)).cloned().collect();
     let live = match providers(&asked.st, &local).await {
         Ok(live) => live,
@@ -340,7 +341,10 @@ pub(super) async fn group_message(State(st): State<Arc<AppState>>, ConnectInfo(p
     let text = format!("[grupo: {}] {}", asked.name, body.text);
     let mut failed = Vec::new();
     for p in &link.peers {
-        let sent = if live.contains_key(p) { deliver_text(&asked.st, p, &text).await }
+        let outside = asked.st.share.as_ref().and_then(|s| s.pairs.by_address(p).map(|rec| (s, rec)));
+        let sent = if let Some((share, rec)) = outside {
+            crate::share::pair_routes::notify_outside(&asked.st, share, &crate::share::pair_routes::Direct, &rec, &asked.name, &body.text).await
+        } else if live.contains_key(p) { deliver_text(&asked.st, p, &text).await }
             else { Err(envelope("erro_sessao_inexistente", "sessão não encontrada".into(), json!({}))) };
         if let Err(e) = sent { failed.push(json!({"sessao": p, "erro": e})); }
     }

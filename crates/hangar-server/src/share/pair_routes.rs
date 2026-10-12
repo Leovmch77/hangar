@@ -296,14 +296,19 @@ fn clamp_for_old(other: Option<&Value>, mine: Kind) -> Kind {
     if other.is_none_or(Value::is_null) { Kind::Pair } else { mine }
 }
 
-/// O nível vale para cada sessão daqui do grupo da ponta do par, cada uma com a própria vida.
-async fn grant_group(app: &AppState, share: &ShareState, root_id: &str, name: &str, kind: Kind) -> Result<(), String> {
+/// `name` e os membros daqui do grupo dele.
+async fn group_locals(app: &AppState, name: &str) -> Result<Vec<String>, String> {
     let mut locals = vec![name.to_owned()];
     if let Some(groups) = &app.groups
         && let Some(side) = groups.link(name).await.map_err(|e| e.to_string())? {
         locals.extend(side.peers.into_iter().filter(|p| !p.contains("::") && p != name));
     }
-    for session in locals {
+    Ok(locals)
+}
+
+/// O nível vale para cada sessão daqui do grupo da ponta do par, cada uma com a própria vida.
+async fn grant_group(app: &AppState, share: &ShareState, root_id: &str, name: &str, kind: Kind) -> Result<(), String> {
+    for session in group_locals(app, name).await? {
         // Sem vida conhecida o acesso não teria fim: a sessão fica de fora.
         let Some(life) = share.lives.life(&session, true).await else {
             tracing::warn!(code = "external_pair_grant_skipped", session = %session, "par externo: sessão sem vida, nível não aplicado");
@@ -501,21 +506,49 @@ async fn list_pairs(State(st): St) -> Response {
     json_response(StatusCode::OK, Value::Array(all))
 }
 
-/// Recado de `sender` ao par de fora `target` (`alias::sessao`); também o caminho do MCP.
+fn no_pair() -> Refusal { fail(StatusCode::NOT_FOUND, "erro_par_inexistente", "este par externo não existe", json!({})) }
+
+/// Remetente fora do alfabeto de `valid_session` fica sem `from`: o outro lado recusaria o recado
+/// inteiro, e sem ele o cabeçalho cai na ponta do par.
+fn with_from(mut body: Value, sender: &str) -> Value {
+    if pairs::valid_session(sender) { body["from"] = json!(sender); }
+    body
+}
+
+/// Recado de `sender` ao par de fora `target` (`alias::sessao`); também o caminho do MCP. Vale de
+/// qualquer membro local do grupo para qualquer sessão de fora do grupo do par: `to` diz qual, e o
+/// outro lado confere.
 pub async fn send(app: &AppState, share: &ShareState, remote: &dyn Remote, sender: &str, target: &str, text: &str)
     -> Result<Value, Refusal> {
-    let alias = target.split_once("::").map_or(target, |(a, _)| a);
-    if share.pairs.ambiguous(alias, &app.peers.ids()) {
-        return Err(fail(StatusCode::CONFLICT, "erro_par_endereco_ambiguo",
-            &format!("'{alias}' é ao mesmo tempo máquina tua e par externo"), json!({})));
-    }
-    let Some(rec) = share.pairs.by_address(target).filter(|r| r.local_session == sender) else {
-        return Err(fail(StatusCode::NOT_FOUND, "erro_par_inexistente", "este par externo não existe", json!({})));
+    let (alias, to) = target.split_once("::").unwrap_or((target, ""));
+    if !pairs::valid_session(to) { return Err(no_pair()) }
+    let mates = match &app.groups {
+        Some(groups) => groups.link(sender).await.map_err(|_| groups_unavailable("groups_store_failed"))?.map(|l| l.peers).unwrap_or_default(),
+        None => Vec::new(),
     };
-    let body = json!({"text": text, "session": rec.peer_session});
-    match remote.call(&rec.peer_address, Some(&rec.peer_token), reqwest::Method::POST, "/api/pair/message", Some(&body)).await {
+    let mine: Vec<ExternalPair> = share.pairs.all().into_iter()
+        .filter(|r| r.alias == alias && (r.local_session == sender || mates.contains(&r.address()))).collect();
+    let rec = mine.iter().find(|r| r.address() == target).or(mine.first()).cloned().ok_or_else(no_pair)?;
+    let body = with_from(json!({"text": text, "session": rec.peer_session, "to": to}), sender);
+    post_message(app, share, remote, &rec, &body).await
+}
+
+/// Aviso de grupo de `sender` à máquina de fora do par `rec`, um salto só: lá ele chega aos locais
+/// do grupo e não volta a ser espalhado. `session` fica para o Hangar antigo, que ignora `group`.
+pub async fn notify_outside(app: &AppState, share: &ShareState, remote: &dyn Remote, rec: &ExternalPair, sender: &str, text: &str)
+    -> Result<(), Value> {
+    let body = with_from(json!({"text": text, "group": true, "session": rec.peer_session}), sender);
+    post_message(app, share, remote, rec, &body).await.map(drop).map_err(|(_, detail)| detail)
+}
+
+async fn post_message(app: &AppState, share: &ShareState, remote: &dyn Remote, rec: &ExternalPair, body: &Value) -> Result<Value, Refusal> {
+    if share.pairs.ambiguous(&rec.alias, &app.peers.ids()) {
+        return Err(fail(StatusCode::CONFLICT, "erro_par_endereco_ambiguo",
+            &format!("'{}' é ao mesmo tempo máquina tua e par externo", rec.alias), json!({})));
+    }
+    match remote.call(&rec.peer_address, Some(&rec.peer_token), reqwest::Method::POST, "/api/pair/message", Some(body)).await {
         Err(PeerError::Refused { status: 410, .. }) => {
-            teardown(app, share, &rec, true).await?;
+            teardown(app, share, rec, true).await?;
             Err(fail(StatusCode::GONE, "erro_par_encerrado", "o par foi encerrado do outro lado", json!({})))
         }
         Err(e) => Err(remote_failure(&e, &rec.peer_address)),
@@ -717,14 +750,21 @@ async fn pair_redeem(State(st): St, bytes: Bytes) -> Response {
         "address": format!("https://{my_host}:{FUNNEL_PORT}"), "token": my_token, "level": level_name(given)}))
 }
 
-/// O registro de par do token que fala. Com várias raízes, `session` escolhe; sem ela, só vale a única.
+/// O registro de par do token que fala. Com várias raízes, `session` escolhe (a ponta ou um membro
+/// do grupo com registro filho); sem ela, só vale a única.
 fn pair_of(share: &ShareState, caller: Option<&Caller>, session: Option<&str>) -> Result<Share, Refusal> {
     let outside = || fail(StatusCode::FORBIDDEN, "erro_fora_do_convite", "fora do par", json!({}));
     let Some(Caller::Guest(grant)) = caller else { return Err(outside()) };
     let guest = share.store.lookup_token(&grant.token).ok_or_else(outside)?;
     let roots = guest.pair_shares();
     let picked: Vec<&Share> = match session {
-        Some(s) if roots.len() > 1 => roots.into_iter().filter(|r| r.session == s).collect(),
+        Some(s) if roots.len() > 1 => {
+            let anchors: Vec<&Share> = roots.iter().copied().filter(|r| r.session == s).collect();
+            if !anchors.is_empty() { anchors } else {
+                roots.into_iter().filter(|r| guest.records.iter().any(|c|
+                    c.parent_id.as_deref() == Some(r.id.as_str()) && c.session == s && c.revoked_at.is_none())).collect()
+            }
+        }
         _ => roots,
     };
     match picked[..] {
@@ -736,8 +776,16 @@ fn pair_of(share: &ShareState, caller: Option<&Caller>, session: Option<&str>) -
 
 async fn pair_message(State(st): St, caller: Option<Extension<Caller>>, bytes: Bytes) -> Response {
     let (v, map) = match fields(&bytes, &[("text", true, Some(MAX_MESSAGE))], false) { Ok(v) => v, Err(r) => return r };
+    // `from` é só o nome da sessão de lá; a máquina sai do registro.
+    let from = match map.get("from") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(s)) if pairs::valid_session(s) => Some(s.clone()),
+        Some(_) => return detail(StatusCode::BAD_REQUEST, "erro_par_remetente_invalido", "remetente do recado inválido", json!({})),
+    };
+    let to = map.get("to").filter(|v| !v.is_null());
+    let session = map.get("session").and_then(Value::as_str);
     let share = &st.owner.share;
-    let pair = match pair_of(share, caller.as_deref(), map.get("session").and_then(Value::as_str)) { Ok(s) => s, Err(r) => return respond(r) };
+    let pair = match pair_of(share, caller.as_deref(), session) { Ok(s) => s, Err(r) => return respond(r) };
     let Some(rec) = share.pairs.by_share(&pair.id) else {
         let mut r = detail(StatusCode::SERVICE_UNAVAILABLE, "erro_sessao_indisponivel", "par ainda abrindo", json!({}));
         r.headers_mut().insert(header::RETRY_AFTER, HeaderValue::from_static("5"));
@@ -748,9 +796,35 @@ async fn pair_message(State(st): St, caller: Option<Extension<Caller>>, bytes: B
             &format!("mais de {STORM_MAX} avisos de grupo em {}s — parece loop; espere ou responda 1:1", STORM_WINDOW.as_secs()),
             json!({"max": STORM_MAX, "janela": STORM_WINDOW.as_secs()}));
     }
-    // O cabeçalho sai do registro (carimbado pelo token), nunca do texto que o outro lado mandou.
-    let text = format!("[de fora: {}] {}", rec.address(), pairs::sanitize_message(&v[0]));
-    let (status, reply) = write_input(&st.app, &pair.session, &text, true).await;
+    let locals = match group_locals(&st.app, &pair.session).await {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::warn!(code = "external_pair_group_read_failed", session = %pair.session, error = %e, "par externo: grupo ilegível no recado");
+            return respond(groups_unavailable("groups_store_failed"));
+        }
+    };
+    // Máquina pelo registro (carimbado pelo token), sessão pelo `from` validado; nunca do texto.
+    let text = format!("[de fora: {}::{}] {}", rec.alias, from.as_deref().unwrap_or(&rec.peer_session), pairs::sanitize_message(&v[0]));
+    if map.get("group").and_then(Value::as_bool) == Some(true) {
+        // Um salto: só os locais do grupo do par recebem; nada volta a sair desta máquina.
+        let mut last = (StatusCode::OK, json!({"ok": true}));
+        let mut delivered = false;
+        for session in &locals {
+            let (status, reply) = write_input(&st.app, session, &text, true).await;
+            if status.is_success() { delivered = true; } else {
+                tracing::warn!(code = "external_pair_group_notice_failed", session = %session, status = status.as_u16(), "par externo: aviso de grupo de fora não entregue");
+                last = (status, reply);
+            }
+        }
+        return if delivered { json_response(StatusCode::OK, json!({"ok": true})) } else { json_response(last.0, last.1) };
+    }
+    // `to` = a sessão daqui que a resposta 1:1 nomeia; sem ele, a de `session` se for do grupo.
+    let target = match to {
+        Some(Value::String(t)) if locals.contains(t) => t.clone(),
+        Some(_) => return respond(no_pair()),
+        None => session.filter(|s| locals.iter().any(|l| l == s)).unwrap_or(&pair.session).to_owned(),
+    };
+    let (status, reply) = write_input(&st.app, &target, &text, true).await;
     json_response(status, reply)
 }
 

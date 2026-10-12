@@ -90,7 +90,7 @@ pub(crate) struct Other {
 
 impl Other {
     pub(crate) fn reply(&self, key: &str, status: u16, body: Value) { self.replies.lock().unwrap().insert(key.into(), (status, body)); }
-    fn calls(&self) -> Vec<Value> { self.calls.lock().unwrap().clone() }
+    pub(crate) fn calls(&self) -> Vec<Value> { self.calls.lock().unwrap().clone() }
     pub(crate) fn keys(&self) -> Vec<String> {
         self.calls().iter().map(|c| format!("{} {}", c["method"].as_str().unwrap(), c["path"].as_str().unwrap())).collect()
     }
@@ -875,7 +875,7 @@ async fn owner_send_relays_only_known_primitive_keys_and_names_the_session() {
     let (status, body) = send(&e, json!({})).await;
     assert_eq!((status, body), (200, json!({"ok": true, "native": true})));
     let call = &e.other.calls()[0];
-    assert_eq!(call["body"], json!({"text": "oi", "session": "Y"}));
+    assert_eq!(call["body"], json!({"text": "oi", "session": "Y", "from": "s0", "to": "Y"}));
     assert_eq!(call["auth"], json!(format!("Bearer {}", tok_y())));
 }
 
@@ -1103,4 +1103,84 @@ async fn other_member_leaving_a_mixed_group_never_calls_unpair_remote() {
     assert!(e.other.calls().is_empty());
     assert!(e.share.pairs.by_address("pc-ana::Y").is_some() && !e.revoked(&id));
     assert_eq!(e.sidecar("s0").unwrap()["peers"], json!(["pc-ana::Y"]));
+}
+
+// --- aviso de grupo e resposta 1:1 através do par ---------------------------------------------
+
+/// Aviso de grupo de fora chega a todo local do grupo do par e nada sai de volta; sem `group`
+/// (Hangar antigo do outro lado) vai só à sessão do par.
+#[tokio::test(flavor = "multi_thread")]
+async fn outside_group_notice_reaches_every_local_and_never_goes_back() {
+    let e = env().await;
+    let (_, token) = e.seed_pair("s0", "pc-ana", "Y", &e.other_base);
+    e.group("s0", &["s2", "pc-ana::Y"]);
+    e.group("s2", &["s0", "pc-ana::Y"]);
+    let (status, body) = e.message(&token, json!({"text": "oi", "session": "s0", "from": "Z", "group": true})).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!((e.inputs("s0"), e.inputs("s2"), e.inputs("s1")), (1, 1, 0));
+    assert_eq!(e.last_input()["text"], "[de fora: pc-ana::Z] oi");
+    assert!(e.other.calls().is_empty(), "nenhum POST de volta: {:?}", e.other.keys());
+    assert_eq!(e.message(&token, json!({"text": "só um", "session": "s0"})).await.0, 200);
+    assert_eq!((e.inputs("s0"), e.inputs("s2")), (2, 1));
+    assert_eq!(e.last_input()["text"], "[de fora: pc-ana::Y] só um");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn message_with_invalid_from_is_400() {
+    let e = env().await;
+    let (_, token) = e.seed_pair("s0", "pc-ana", "Y", ADDR);
+    for from in [json!("a b"), json!("[de: x]"), json!(""), json!(5)] {
+        let (status, body) = e.message(&token, json!({"text": "oi", "from": from})).await;
+        assert_eq!(status, 400, "{from}: {body}");
+    }
+    assert_eq!(e.inputs("s0"), 0);
+}
+
+/// `to` escolhe o membro local do grupo do par; fora do grupo, o par não existe para ele.
+#[tokio::test(flavor = "multi_thread")]
+async fn message_to_a_group_member_reaches_only_it() {
+    let e = env().await;
+    let (_, token) = e.seed_pair("s0", "pc-ana", "Y", ADDR);
+    e.group("s0", &["s2", "pc-ana::Y"]);
+    e.group("s2", &["s0", "pc-ana::Y"]);
+    assert_eq!(e.message(&token, json!({"text": "oi", "session": "s0", "to": "s2", "from": "Y2"})).await.0, 200);
+    assert_eq!((e.inputs("s0"), e.inputs("s2")), (0, 1));
+    assert_eq!(e.last_input()["text"], "[de fora: pc-ana::Y2] oi");
+    let (status, body) = e.message(&token, json!({"text": "oi", "to": "s3"})).await;
+    assert_eq!((status, &body["detail"]["code"]), (404, &json!("erro_par_inexistente")));
+    assert_eq!(e.inputs("s3"), 0);
+}
+
+/// Chave com dois pares: `session` com um membro do grupo (registro filho) acha o par certo.
+#[tokio::test(flavor = "multi_thread")]
+async fn message_naming_a_child_session_finds_its_pair() {
+    let e = env().await;
+    let (a, token) = e.seed_pair("s0", "pc-ana", "Y", ADDR);
+    let code = e.pair_code("s2");
+    let (b, _) = e.share.store.redeem(&code, "", Some(&token), Kind::Pair).unwrap();
+    e.share.pairs.add(ExternalPair { share_id: b.id.clone(), local_session: "s2".into(), alias: "pc-bia".into(),
+        peer_owner: "pc-bia".into(), peer_session: "W".into(), peer_address: "https://b.tail.ts.net:8443".into(),
+        peer_token: tok_y(), created_at: 1.0 }).unwrap();
+    e.group("s0", &["s1", "pc-ana::Y"]);
+    e.group("s1", &["s0", "pc-ana::Y"]);
+    e.share.store.grant(&a, "s1", Some("t:1".into()), Kind::Pair).unwrap();
+    let (status, body) = e.message(&token, json!({"text": "oi", "session": "s1"})).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(e.inputs("s1"), 1);
+    assert_eq!(e.last_input()["text"], "[de fora: pc-ana::Y] oi");
+}
+
+/// Resposta 1:1 a um membro de fora que não é a ponta do par (`pc-ana::Y2`), de um membro local
+/// que também não é a ponta: vai pela chave do par, com `to` e `from`.
+#[tokio::test(flavor = "multi_thread")]
+async fn owner_send_to_a_non_anchor_outside_member_from_any_local_member() {
+    let e = env().await;
+    e.seed_pair("s0", "pc-ana", "Y", ADDR);
+    e.group("s0", &["s2", "pc-ana::Y"]);
+    e.group("s2", &["s0", "pc-ana::Y"]);
+    let (status, body) = send(&e, json!({"sender": "s2", "target": "pc-ana::Y2"})).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(e.other.calls()[0]["body"], json!({"text": "oi", "session": "Y", "from": "s2", "to": "Y2"}));
+    let (status, body) = send(&e, json!({"sender": "s3", "target": "pc-ana::Y2"})).await;
+    assert_eq!((status, &body["detail"]["code"]), (404, &json!("erro_par_inexistente")));
 }
