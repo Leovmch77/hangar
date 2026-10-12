@@ -409,7 +409,11 @@ fn listen(
         }
         if model::allowed_request(&url) { return drop(session.call("Fetch.continueRequest", json!({"requestId": id}))); }
         drop(session.call("Fetch.failRequest", json!({"requestId": id, "errorReason": "BlockedByClient"})));
-        if params["frameId"] == m.as_str() { p(&|page| page.error = Some(crate::i18n::tr("browser_blocked").replace("{url}", &url))); }
+        // Bloqueio é aviso, não tela de falha: tentar de novo bloquearia de novo.
+        if params["frameId"] == m.as_str() {
+            let text = crate::i18n::tr("browser_blocked").replace("{url}", &url);
+            p(&|page| { page.notice = Some(text.clone()); page.notice_seq += 1; });
+        }
     });
     // Sem resposta o diálogo trava a página, e no app não há quem o veja: `alert` e `beforeunload` passam, mas
     // `confirm`/`prompt` são recusados, para nada ser confirmado sem alguém ter lido.
@@ -423,7 +427,7 @@ fn listen(
         let key = match kind { "alert" => Some("browser_dialog_alert"), "beforeunload" => None, _ => Some("browser_dialog_refused") };
         if let Some(key) = key {
             let text = crate::i18n::tr(key).replace("{message}", message.trim());
-            p(&|page| page.notice = Some(text.clone()));
+            p(&|page| { page.notice = Some(text.clone()); page.notice_seq += 1; });
         }
         let Some(session) = weak.upgrade() else { return };
         drop(session.call("Page.handleJavaScriptDialog", json!({"accept": accept})));
@@ -433,7 +437,7 @@ fn listen(
     let _ = session.on("Page.downloadWillBegin", move |params| {
         let file = params["suggestedFilename"].as_str().filter(|f| !f.is_empty()).or(params["url"].as_str()).unwrap_or("").to_owned();
         let text = crate::i18n::tr("browser_download_denied").replace("{file}", &file);
-        p(&|page| page.notice = Some(text.clone()));
+        p(&|page| { page.notice = Some(text.clone()); page.notice_seq += 1; });
     });
     let (p, m) = (publish.clone(), main.clone());
     session.watch("Target.targetInfoChanged", move |params| {
@@ -509,8 +513,11 @@ impl Engine {
         let (call, publish, target) = (self.session.call("Page.navigate", json!({"url": url})), self.publish.clone(), url.to_owned());
         self.executor.spawn(async move {
             // Falha de rede: o Chromium mostra a página de erro dele, e a barra o motivo.
+            // ABORTED = a página não saiu do lugar (download, 204, navegação trocada por outra); BLOCKED_BY_CLIENT já
+            // virou aviso no `Fetch.requestPaused`. Nenhum dos dois traz página de erro que limpe o erro depois.
             let error = match call.await {
-                Ok(r) => r["errorText"].as_str().filter(|e| !e.is_empty()).map(|e| crate::browser::model::load_error(e, &target)),
+                Ok(r) => r["errorText"].as_str().filter(|e| !e.is_empty() && !e.ends_with("ERR_ABORTED") && !e.ends_with("ERR_BLOCKED_BY_CLIENT"))
+                    .map(|e| crate::browser::model::load_error(e, &target)),
                 Err(e) => Some(crate::browser::model::load_error(&e, &target)),
             };
             if let Some(error) = error { publish(&|page| { page.loading = false; page.error = Some(error.clone()); }); }

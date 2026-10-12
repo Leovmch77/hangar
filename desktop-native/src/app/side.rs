@@ -976,7 +976,8 @@ impl Hangar {
     }
 
     /// Alguma linha do menu vale para esta sessão; sem nenhuma, o "+" some.
-    fn side_tools(&self) -> bool { self.side_menu_browser() || self.side_menu_terminal() || self.side_menu_git() }
+    /// Sem Chromium a linha Navegador fica (desligada, com o motivo), então ela também segura o "+".
+    fn side_tools(&self) -> bool { self.side_menu_browser() || crate::browser::Engine::available().is_err() || self.side_menu_terminal() || self.side_menu_git() }
 
     /// O menu toma o corpo do painel; sem nenhuma ferramenta para esta sessão, fica a aba lembrada.
     pub(super) fn side_menu_shown(&self) -> bool {

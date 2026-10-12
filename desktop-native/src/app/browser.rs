@@ -64,7 +64,9 @@ pub(super) struct BrowserPanel {
     /// O endereço acabou de ir para a área de transferência: o ícone vira um visto por um instante.
     copied: bool,
     /// Aviso que a pessoa fechou no ×: o motor reenvia o estado inteiro, e o aviso voltaria a cada evento.
-    dismissed_notice: Option<String>,
+    dismissed_notice: u32,
+    /// O agente navegou com a pessoa digitando no endereço: ao sair do campo, a barra volta ao endereço da página.
+    address_stale: bool,
     /// O que o agente está fazendo, enquanto a faixa aparece.
     #[cfg(not(target_os = "macos"))]
     agent: Option<String>,
@@ -82,7 +84,7 @@ pub(super) struct BrowserPanel {
     #[cfg(not(target_os = "macos"))]
     _activity: Option<Task<()>>,
     _drain: Task<()>,
-    _subscriptions: [Subscription; 4],
+    _subscriptions: [Subscription; 5],
 }
 
 impl BrowserPanel {
@@ -101,12 +103,16 @@ impl BrowserPanel {
                 if let InputEvent::PressEnter { .. } = event { this.submit(window, cx); }
             }),
             cx.on_focus(&address_focus, window, |this, _, _| if let Some(engine) = this.engine() { engine.release_focus() }),
+            cx.on_blur(&address_focus, window, |this, window, cx| if std::mem::take(&mut this.address_stale) {
+                let url = this.page.url.clone().unwrap_or_default();
+                this.address.update(cx, |input, cx| input.set_value(url, window, cx));
+            }),
             cx.on_focus(&focus, window, |this, _, _| if let Some(engine) = this.engine() { engine.focus(true) }),
             cx.on_blur(&focus, window, |this, _, _| if let Some(engine) = this.engine() { engine.focus(false) }),
         ];
         Self { key, #[cfg(not(target_os = "macos"))] controller: None, #[cfg(not(target_os = "macos"))] cdp: None,
             #[cfg(not(target_os = "macos"))] relay: Default::default(), #[cfg(not(target_os = "macos"))] viewer: Rc::default(), engine: None, starting: None, _start: None, events, address, page: model::PageState::default(), invalid: None, #[cfg(not(target_os = "macos"))] cookies_status: None, #[cfg(not(target_os = "macos"))] cookies_confirmed: false, #[cfg(target_os = "linux")] last_fill: None, focus,
-            origin: Rc::default(), shown: false, local_notice: None, copied: false, dismissed_notice: None, #[cfg(not(target_os = "macos"))] agent: None, #[cfg(not(target_os = "macos"))] agent_running: 0,
+            origin: Rc::default(), shown: false, local_notice: None, copied: false, dismissed_notice: 0, address_stale: false, #[cfg(not(target_os = "macos"))] agent: None, #[cfg(not(target_os = "macos"))] agent_running: 0,
             #[cfg(not(target_os = "macos"))] agent_seq: 0, #[cfg(not(target_os = "macos"))] paused: None, #[cfg(target_os = "windows")] agent_finished_at: None, #[cfg(not(target_os = "macos"))] _activity: None, _drain: drain, _subscriptions: subscriptions }
     }
 
@@ -118,6 +124,8 @@ impl BrowserPanel {
             let url = page.url.clone().unwrap_or_default();
             if !self.address.focus_handle(cx).is_focused(window) && self.address.read(cx).value() != url {
                 self.address.update(cx, |input, cx| input.set_value(url, window, cx));
+            } else if self.address.focus_handle(cx).is_focused(window) && page.url != self.page.url {
+                self.address_stale = true;
             }
             if page.url != self.page.url { self.local_notice = None; }
             self.page = page;
@@ -217,6 +225,8 @@ impl BrowserPanel {
         // O agente não apaga o endereço que a pessoa está digitando; o `State` da página o atualiza quando ela sair dali.
         if by == By::User || !self.address.focus_handle(cx).is_focused(window) {
             self.address.update(cx, |input, cx| input.set_value(url, window, cx));
+        } else {
+            self.address_stale = true;
         }
         if by == By::User && self.shown { self.focus.focus(window, cx); }
     }
@@ -459,6 +469,8 @@ impl BrowserPanel {
     /// Recarregar e "Tentar de novo": motor caído ou que não nasceu volta a nascer no mesmo endereço (`go` o refaz);
     /// com erro de carga, o endereço que falhou é carregado de novo, porque a página atual é a de erro.
     fn retry(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Fora do macOS o `go` já refaz o motor que falhou; aqui vale para todos.
+        if matches!(&self.engine, Some(Err(_))) { self.engine = None; }
         let dead = !matches!(&self.engine, Some(Ok(e)) if e.alive());
         let url = self.page.url.clone().or_else(|| self.starting.as_ref().map(|(u, _)| u.clone()));
         match (dead || self.page.error.is_some(), url) {
@@ -757,12 +769,14 @@ impl Render for BrowserPanel {
                 .flex_shrink_0().px_3().py(px(6.)).role(Role::Status)
                 .text_size(px(11.)).text_color(theme::muted()).whitespace_normal().child(text)));
         }
-        let notice = self.page.notice.clone().filter(|n| self.dismissed_notice.as_ref() != Some(n)).or_else(|| self.local_notice.clone());
-        root = root.when_some(notice, |el, text| el.child(div().id("browser-page-notice").flex_shrink_0().flex().items_center().gap_2()
-            .px_3().py(px(4.)).border_b_1().border_color(theme::border()).role(Role::Status)
+        let notice_line = |id: &'static str, text: String, cx: &mut Context<Self>, close: fn(&mut Self)| div().id(id).flex_shrink_0().flex()
+            .items_center().gap_2().px_3().py(px(4.)).border_b_1().border_color(theme::border()).role(Role::Status)
             .child(div().flex_1().min_w_0().text_size(px(11.)).text_color(theme::warning()).whitespace_normal().child(text))
-            .child(chrome::icon_button("browser-notice-close", IconName::Close, tr("close"), cx)
-                .on_click(cx.listener(|this, _, _, cx| { this.dismissed_notice = this.page.notice.clone(); this.local_notice = None; cx.notify(); })))));
+            .child(chrome::icon_button(SharedString::from(format!("{id}-close")), IconName::Close, tr("close"), cx)
+                .on_click(cx.listener(move |this, _, _, cx| { close(this); cx.notify(); })));
+        let page_notice = self.page.notice.clone().filter(|_| self.page.notice_seq != self.dismissed_notice);
+        if let Some(text) = page_notice { root = root.child(notice_line("browser-page-notice", text, cx, |this| this.dismissed_notice = this.page.notice_seq)); }
+        if let Some(text) = self.local_notice.clone() { root = root.child(notice_line("browser-local-notice", text, cx, |this| this.local_notice = None)); }
         #[cfg(not(target_os = "macos"))]
         { root = root.children(self.render_agent(cx)); }
         root.child(self.render_page(cx))

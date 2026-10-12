@@ -11,6 +11,8 @@ pub struct PageState {
     pub error: Option<String>,
     /// Aviso do que o navegador fez sozinho (diálogo recusado, download negado); some ao navegar.
     pub notice: Option<String>,
+    /// Sobe a cada aviso novo: o mesmo texto de novo é outro aviso, e o × fecha só o que a pessoa viu.
+    pub notice_seq: u32,
 }
 
 pub fn loopback(url: &url::Url) -> bool {
