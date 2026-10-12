@@ -388,11 +388,6 @@ impl ServerConfig {
     /// Há o que gravar: o rascunho ou o pedido da chave do CLIProxyAPI.
     fn dirty(&self) -> bool { !self.draft.is_empty() || self.cliproxy_key() }
 
-    /// Chave do modelo auxiliar que o "Buscar modelos" pode usar: a digitada, a do CLIProxyAPI ou a guardada.
-    fn aux_key_ready(&self) -> bool {
-        self.cliproxy_key() || self.draft.get("jev_aux_api_key").map(text_of).is_some_and(|t| !t.trim().is_empty()) || self.key_set("jev_aux_api_key")
-    }
-
     /// Valor que a tela mostra: o do rascunho, senão o do servidor.
     fn current(&self, key: &str) -> Value {
         self.draft.get(key).cloned().or_else(|| self.fields.get(key).and_then(|f| f.get("valor")).cloned()).unwrap_or(Value::Null)
@@ -706,6 +701,7 @@ impl Hangar {
         if !self.server_config.saving { self.load_server_config(cx); }
         if page == Page::Notifications && !self.server_config.quiet.saving && !self.quiet_dirty(cx) { self.load_quiet(cx); }
         if page == Page::Voice { self.load_provider_status(cx); }
+        if page == Page::Jev { self.load_jev_extras(cx); }
     }
 
     /// CLIProxyAPI do servidor e o Computer Use ligado: só leitura, fora do rascunho.
@@ -727,16 +723,28 @@ impl Hangar {
         let Some(api) = self.api.clone() else { return };
         let s = &mut self.server_config;
         let url = text_of(&s.current("jev_aux_base_url")).trim().to_owned();
-        if s.aux_models.loading || url.is_empty() || !s.aux_key_ready() { return; }
+        // Sem chave nenhuma também vale: um endereço local (Ollama) lista sem ela.
+        if s.aux_models.loading || url.is_empty() { return; }
         let proxy = s.cliproxy_key();
         let typed = s.draft.get("jev_aux_api_key").map(text_of).filter(|t| !t.trim().is_empty() && !proxy);
-        let body = json!({"base_url": url, "use_saved_key": typed.is_none() && !proxy, "api_key": typed, "use_cliproxy_key": proxy});
+        let saved = typed.is_none() && !proxy && s.key_set("jev_aux_api_key");
+        let body = json!({"base_url": url, "use_saved_key": saved, "api_key": typed, "use_cliproxy_key": proxy});
         let seq = s.aux_models.start();
         let done = self.server_config_send_later();
         self.runtime.spawn(async move {
             done(ServerConfigReply::AuxModels(seq, api.server_send(reqwest::Method::POST, &["jev", "aux", "models"], Some(body), 20).await)).await
         });
         cx.notify();
+    }
+
+    /// Recusa das rotas do auxiliar pela frase do app; o 502 traz a do provedor no `detail`.
+    fn aux_failure(error: &Failure) -> String {
+        match error.code.as_deref() {
+            Some("erro_jev_aux_models") => tr("server_jev_aux_models_failed").replace("{error}", &error.detail),
+            Some("erro_jev_aux_chave_outro_endereco") => tr("server_jev_aux_key_other_address"),
+            Some("erro_jev_aux_precisa_rust") => tr("server_jev_aux_needs_rust"),
+            _ => Self::fetch_failure(error),
+        }
     }
 
     /// Atalho do CLIProxyAPI: endereço dele no campo e a chave do arquivo dele no Salvar; a chave digitada sai.
@@ -764,7 +772,7 @@ impl Hangar {
         s.readers = [false; 2];
         let done = self.server_config_send_later();
         self.runtime.spawn(async move { done(ServerConfigReply::Loaded(seq, api.config().await)).await });
-        self.load_jev_extras(cx);
+        cx.notify();
     }
 
     /// "Carregar vozes da conta": as vozes e o consumo do mês, juntos, como o `carregarVozes` do web.
@@ -1067,7 +1075,7 @@ impl Hangar {
                 self.show_voice(window, cx);
             }
             ServerConfigReply::AuxCliproxy(seq, result) => {
-                let parsed = result.map_err(|e| Self::fetch_failure(&e))
+                let parsed = result.map_err(|e| Self::aux_failure(&e))
                     .and_then(|v| serde_json::from_value::<AuxCliproxy>(v).map_err(|_| tr("invalid_response")));
                 self.server_config.aux_cliproxy.finish(seq, parsed);
             }
@@ -1078,9 +1086,7 @@ impl Hangar {
             }
             ServerConfigReply::AuxModels(seq, result) => {
                 // O 502 traz a frase do provedor no `detail`; a nossa diz o que falhou.
-                let models = result.map_err(|e| if e.code.as_deref() == Some("erro_jev_aux_models") {
-                    tr("server_jev_aux_models_failed").replace("{error}", &e.detail)
-                } else { Self::fetch_failure(&e) }).and_then(|value| {
+                let models = result.map_err(|e| Self::aux_failure(&e)).and_then(|value| {
                     value.get("models").and_then(Value::as_array).ok_or_else(|| tr("invalid_response"))?
                         .iter().map(|m| m.as_str().map(str::to_owned).ok_or_else(|| tr("invalid_response"))).collect()
                 });
@@ -1333,7 +1339,7 @@ impl Hangar {
             div().mt_4().flex().flex_col().items_start().gap(px(10.))
                 .child(div().text_sm().text_color(theme::danger()).whitespace_normal().child(error.clone()))
                 .child(Button::new("server-config-retry").outline().small().label(tr("server_retry"))
-                    .on_click(cx.listener(|this, _, _, cx| this.load_server_config(cx))))
+                    .on_click(cx.listener(move |this, _, _, cx| this.server_config_opened(page, cx))))
         } else if page == Page::Jev {
             self.render_jev(cx)
         } else if page == Page::Voice {
@@ -1461,11 +1467,14 @@ impl Hangar {
                         .on_click(cx.listener(|this, _, window, cx| this.use_aux_cliproxy(window, cx))))))
                     .when(s.cliproxy_key(), |el| el.child(muted(tr("server_jev_aux_cliproxy_pending")))))
             }
+            // Servidor sem o Rust: o atalho e a busca não funcionam, e a página diz por quê.
+            Some(Err(error)) if *error == tr("server_jev_aux_needs_rust") => Some(line().child(div().text_size(px(12.5))
+                .text_color(theme::warning()).whitespace_normal().child(error.clone()))),
             // Servidor sem a rota (mais antigo) ou sem resposta: o atalho só não aparece.
             Some(Err(_)) | None => None,
         };
         let models = &s.aux_models;
-        let can_list = !text_of(&s.current("jev_aux_base_url")).trim().is_empty() && s.aux_key_ready();
+        let can_list = !text_of(&s.current("jev_aux_base_url")).trim().is_empty();
         let mut list = line()
             .child(div().flex().items_center().gap(px(10.))
                 .child(Button::new("jev-aux-list-models").outline().small()
@@ -2363,10 +2372,10 @@ mod tests {
         let mut s = ServerConfig::default();
         s.fields.insert("jev_aux_api_key".into(), json!({"valor": "", "definido": false}));
         s.fields.insert("jev_aux_base_url".into(), json!({"valor": ""}));
-        assert!(!s.dirty() && !s.aux_key_ready());
+        assert!(!s.dirty());
         s.stage("jev_aux_base_url", json!("http://127.0.0.1:8317/v1"));
         s.aux_use_cliproxy = Some("http://127.0.0.1:8317/v1".into());
-        assert!(s.cliproxy_key() && s.aux_key_ready(), "a chave do CLIProxyAPI vai no Salvar e serve para buscar modelos");
+        assert!(s.cliproxy_key() && s.dirty(), "a chave do CLIProxyAPI vai no Salvar");
         s.stage("jev_aux_base_url", json!("https://openrouter.ai/api/v1"));
         assert!(!s.cliproxy_key(), "outro endereço: a chave do CLIProxyAPI não vai junto");
         s.draft.unstage("jev_aux_base_url");
