@@ -1,5 +1,6 @@
 import copy
 import json
+import logging
 import os
 import tempfile
 import threading
@@ -109,6 +110,12 @@ EDITAVEIS: dict[str, type] = {
     "jev_texto_api_key": str,
     "jev_texto_modelo": str,
     "jev_texto_cmd": str,
+    # Modelo auxiliar ÚNICO do Jev (texto e imagem), endpoint compatível com a OpenAI: escreve o
+    # valor de campo no `hangar-preview` e é o modelo do Computer Use. Base sem /chat/completions.
+    "jev_aux_base_url": str,
+    "jev_aux_api_key": str,
+    "jev_aux_modelo": str,
+    "jev_aux_esforco": str,
     # Raizes do seletor de pasta (fs-scanner), no MESMO formato "a,b" do CP_SCAN_ROOTS.
     # Override vale por inteiro (nao soma com o env); vazio = volta ao env. Ver
     # config.resolve_scan_roots, que le daqui primeiro.
@@ -124,7 +131,7 @@ EDITAVEIS: dict[str, type] = {
 # Explícito mesmo quando o nome já casaria com `_PALAVRAS_DE_SEGREDO`: depender do acaso do nome
 # quebra calado no dia em que alguém renomeia o campo.
 SEGREDOS = {"groq_api_key", "elevenlabs_api_key", "llm_api_key", "llm_briefing_api_key",
-            "jev_api_key", "jev_texto_api_key"}
+            "jev_api_key", "jev_texto_api_key", "jev_aux_api_key"}
 
 # Campos lidos pelo Claude ao abrir a sessão: ficam nos arquivos dele para não manter
 # duas cópias que divergem quando a pessoa edita a configuração à mão.
@@ -179,6 +186,8 @@ def get(campo: str) -> Any:
         d = _carregar()
         if campo in d:
             return d[campo]
+        if campo.startswith("jev_aux_") and not any(c in d for c, _ in JEV_AUX):
+            return _jev_aux_legado().get(campo, "")
     return getattr(settings, campo, None)
 
 
@@ -189,9 +198,62 @@ _JEV_TEXTO = (
     ("jev_texto_modelo", "JEV_TEXTO_MODELO"),
     ("jev_texto_cmd", "JEV_TEXTO_CMD"),
 )
+JEV_AUX = (
+    ("jev_aux_base_url", "JEV_AUX_BASE_URL"),
+    ("jev_aux_api_key", "JEV_AUX_API_KEY"),
+    ("jev_aux_modelo", "JEV_AUX_MODELO"),
+    ("jev_aux_esforco", "JEV_AUX_ESFORCO"),
+)
+JEV_AUX_ESFORCOS = ("", "low", "medium", "high")
 # Tudo que o `env_jev` pode pôr além do marcador: quem monta o ambiente tira antes, senão a chave
 # herdada do backend vale numa sessão com o recurso desligado.
-JEV_VARS = ("TYPESAFE_API_KEY", "JEV_ENDPOINT", "JEV_MODEL", *(var for _, var in _JEV_TEXTO))
+JEV_VARS = ("TYPESAFE_API_KEY", "JEV_ENDPOINT", "JEV_MODEL", *(var for _, var in _JEV_TEXTO),
+            *(var for _, var in JEV_AUX))
+
+
+def sem_chat_completions(url: str) -> str:
+    url = (url or "").strip().rstrip("/")
+    return url[: -len("/chat/completions")] if url.endswith("/chat/completions") else url
+
+
+def _jev_aux_legado(estrito: bool = False) -> dict[str, str]:
+    """Auxiliar de antes da configuração única: o `jev_texto_*` do navegador, senão o `LLM_*` do
+    Computer Use. Vale só enquanto nenhum `jev_aux_*` foi gravado."""
+    d = _carregar()
+    base = str(d.get("jev_texto_base_url") or "").strip()
+    if base:
+        return {"jev_aux_base_url": sem_chat_completions(base),
+                "jev_aux_api_key": str(d.get("jev_texto_api_key") or "").strip(),
+                "jev_aux_modelo": str(d.get("jev_texto_modelo") or "").strip(), "jev_aux_esforco": ""}
+    from app import computer_control
+    try:
+        env = (computer_control._known_entry() or {}).get("env") or {}
+    except (OSError, computer_control.ComputerControlError) as e:
+        # Gravar sem ler o legado o perderia de vez: quem grava recusa. Só ler segue, sem derrubar a página.
+        if estrito:
+            raise ValueError(f"jev_aux: não consegui ler o modelo antigo do Computer Use ({e}); tente de novo") from e
+        logging.getLogger(__name__).warning("jev_aux: modelo do Computer Use ilegível: %s", e)
+        return {}
+    if not str(env.get("LLM_PROXY_URL") or "").strip():
+        return {}
+    return {"jev_aux_base_url": sem_chat_completions(str(env["LLM_PROXY_URL"])),
+            "jev_aux_api_key": str(env.get("LLM_PROXY_KEY") or ""),
+            "jev_aux_modelo": str(env.get("LLM_MODEL") or ""),
+            "jev_aux_esforco": str(env.get("LLM_EFFORT") or "")}
+
+
+def migrar_jev_aux() -> None:
+    """Grava o legado como `jev_aux_*` uma vez, para quem lê o arquivo direto (o Rust) ver o mesmo."""
+    if any(c in _carregar() for c, _ in JEV_AUX):
+        return
+    legado = {c: v for c, v in _jev_aux_legado(estrito=True).items() if v}
+    if legado:
+        aplicar(legado)
+
+
+def jev_aux() -> dict[str, str]:
+    """O modelo auxiliar efetivo, com os nomes do runtime-config."""
+    return {campo: str(get(campo) or "").strip() for campo, _ in JEV_AUX}
 
 JEV_TYPESAFE_URL = "https://api.typesafe.ai/v1/systemone"
 JEV_TYPESAFE_MODELO = "jev-latest"
@@ -247,10 +309,13 @@ def env_jev(ligado: bool) -> dict[str, str]:
     if not ligado:
         return env
     env.update(jev_destino_env())
-    for campo, var in _JEV_TEXTO:
+    for campo, var in JEV_AUX:
         valor = str(get(campo) or "").strip()
         if valor:
             env[var] = valor
+    cmd = str(get("jev_texto_cmd") or "").strip()
+    if cmd:
+        env["JEV_TEXTO_CMD"] = cmd
     return env
 
 
@@ -480,7 +545,11 @@ def _coagir(campo: str, valor: Any) -> Any:
                 raise ValueError(f"term_origins: '{entrada}' nao tem endereco (ex: https://app.exemplo.com)")
     if campo == "shortcuts" and texto:
         _validate_shortcuts(texto)
-    if campo in ("transcription_base_url", "llm_base_url", "llm_briefing_base_url", "jev_endpoint") and texto and not (texto.startswith("http://") or texto.startswith("https://")):
+    if campo == "jev_aux_base_url":
+        texto = sem_chat_completions(texto)
+    if campo == "jev_aux_esforco" and texto not in JEV_AUX_ESFORCOS:
+        raise ValueError("jev_aux_esforco: use vazio, low, medium ou high")
+    if campo in ("transcription_base_url", "llm_base_url", "llm_briefing_base_url", "jev_endpoint", "jev_aux_base_url") and texto and not (texto.startswith("http://") or texto.startswith("https://")):
         # Mesmo argumento do editor: antes so o dono da maquina escolhia o endpoint (env), agora o
         # celular escreve. Aceita vazio (volta ao padrao) ou uma URL http(s) de verdade.
         raise ValueError(f"{campo}: use vazio ou uma URL http(s)://")
@@ -500,6 +569,17 @@ def aplicar(mudancas: dict[str, Any], *, remover: set[str] | None = None) -> dic
 def _aplicar_travado(mudancas: dict[str, Any], remover: set[str]) -> dict[str, Any]:
     global _cache
     atual = _carregar()
+    mudancas = dict(mudancas)
+    if mudancas.pop("jev_aux_cliproxy", None) is True:
+        from app import computer_control
+        chaves = computer_control._cliproxy_keys()
+        if not chaves:
+            raise ValueError("jev_aux_cliproxy: o ~/.cli-proxy-api/config.yaml não tem nenhuma api-key")
+        mudancas["jev_aux_api_key"] = chaves[0]
+    tocou_aux = {c for c, _ in JEV_AUX} & (mudancas.keys() | remover)
+    if tocou_aux and not any(c in atual for c, _ in JEV_AUX):
+        # Primeira gravação: o legado vira arquivo, senão o campo que ficou de fora voltaria do legado.
+        atual.update({c: v for c, v in _jev_aux_legado(estrito=True).items() if v})
     for campo in remover:
         if campo in EDITAVEIS:
             atual.pop(campo, None)
@@ -560,7 +640,7 @@ def _aplicar_travado(mudancas: dict[str, Any], remover: set[str]) -> dict[str, A
     except BaseException:
         Path(tmp).unlink(missing_ok=True)
         raise
-    if {"jev_api_key", "jev_endpoint", "jev_model"} & (mudancas.keys() | remover):
+    if tocou_aux or {"jev_api_key", "jev_endpoint", "jev_model"} & (mudancas.keys() | remover):
         from app import computer_control
         try:
             computer_control.sync_jev()
