@@ -12,6 +12,7 @@ const HEAD_MAX: usize = 16 * 1024;
 const BODY_MAX: usize = 128 * 1024;
 /// O verbo mais lento (wait, eval, shot) tem teto de 15 s; este cobre a fila de dois deles.
 const REPLY_SECS: u64 = 45;
+const LOGIN_SECS: u64 = 180;
 
 pub enum Request {
     /// Verbo do `/cmd`, o do hangar-preview.
@@ -234,12 +235,16 @@ async fn answer(bytes: &[u8], requests: &async_channel::Sender<Request>) -> Stri
     let body = match parse_body(bytes) { Ok(b) => b, Err(e) => return e };
     let path = (body.verb == "shot").then(|| body.args.first().cloned()).flatten();
     if body.verb == "shot" && path.is_none() { return "erro: shot precisa de um caminho de arquivo".into(); }
+    let verb_is_login = body.verb == "login";
     let (tx, rx) = oneshot::channel();
     if requests.send(Request::Command { key: body.key, verb: body.verb, args: body.args, tab: body.tab, reply: tx }).await.is_err() {
         return "erro: o app nativo esta fechando".into();
     }
-    match tokio::time::timeout(Duration::from_secs(REPLY_SECS), rx).await {
-        Err(_) => format!("erro: o app nao respondeu em {REPLY_SECS}s"),
+    // `login` espera a pessoa aprovar no painel e, às vezes, escolher o perfil.
+    let secs = if verb_is_login { LOGIN_SECS } else { REPLY_SECS };
+    match tokio::time::timeout(Duration::from_secs(secs), rx).await {
+        Err(_) if verb_is_login => format!("erro: ninguem aprovou o login no painel em {secs}s"),
+        Err(_) => format!("erro: o app nao respondeu em {secs}s"),
         Ok(Err(_)) => "erro: o navegador fechou no meio do comando".into(),
         Ok(Ok(Reply::Text(text))) => text,
         Ok(Ok(Reply::Png(png))) => {

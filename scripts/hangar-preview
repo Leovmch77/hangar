@@ -49,7 +49,7 @@ const CDP = 'http://127.0.0.1:9223';
 const DIR = join(homedir(), '.hangar', 'nav');
 const VERBOS_SERVIDOR = new Set([
   'snapshot', 'click', 'fill', 'type', 'press', 'hover', 'wait', 'eval',
-  'tema', 'layout', 'console', 'network', 'text', 'url', 'shot', 'close',
+  'tema', 'layout', 'console', 'network', 'text', 'url', 'shot', 'close', 'login',
 ]);
 
 function erro(msg, codigo = 1) {

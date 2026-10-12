@@ -47,6 +47,12 @@ pub(super) struct BrowserPanel {
     /// Último site conferido atrás de campo de senha, para não repetir a cada evento da mesma página.
     #[cfg(not(target_os = "macos"))]
     hint_checked: Option<String>,
+    /// Pedido do agente (`hangar-preview login`) esperando a pessoa: site (`None` = todos) e quem responde.
+    #[cfg(not(target_os = "macos"))]
+    login_request: Option<(Option<String>, futures::channel::oneshot::Sender<crate::browser::control::Reply>)>,
+    /// Pedido do agente já aprovado: recebe só a contagem ou o motivo quando a importação termina.
+    #[cfg(not(target_os = "macos"))]
+    login_reply: Option<(Option<String>, futures::channel::oneshot::Sender<crate::browser::control::Reply>)>,
     /// Perfis com cookies em disco esperando a pessoa escolher de qual trazer.
     #[cfg(target_os = "linux")]
     cookie_sources: Vec<crate::browser::chrome_import::disk::Source>,
@@ -82,7 +88,7 @@ impl BrowserPanel {
             cx.on_blur(&focus, window, |this, _, _| if let Some(engine) = this.engine() { engine.focus(false) }),
         ];
         Self { key, #[cfg(not(target_os = "macos"))] controller: None, #[cfg(not(target_os = "macos"))] cdp: None,
-            #[cfg(not(target_os = "macos"))] relay: Default::default(), #[cfg(not(target_os = "macos"))] viewer: Rc::default(), engine: None, starting: None, _start: None, events, address, page: model::PageState::default(), invalid: None, #[cfg(not(target_os = "macos"))] cookies_status: None, #[cfg(not(target_os = "macos"))] import_pending: false, #[cfg(not(target_os = "macos"))] import_site: None, #[cfg(not(target_os = "macos"))] login_hint: None, #[cfg(not(target_os = "macos"))] hint_checked: None, #[cfg(target_os = "linux")] cookie_sources: Vec::new(), #[cfg(target_os = "linux")] last_fill: None, focus,
+            #[cfg(not(target_os = "macos"))] relay: Default::default(), #[cfg(not(target_os = "macos"))] viewer: Rc::default(), engine: None, starting: None, _start: None, events, address, page: model::PageState::default(), invalid: None, #[cfg(not(target_os = "macos"))] cookies_status: None, #[cfg(not(target_os = "macos"))] import_pending: false, #[cfg(not(target_os = "macos"))] import_site: None, #[cfg(not(target_os = "macos"))] login_hint: None, #[cfg(not(target_os = "macos"))] hint_checked: None, #[cfg(not(target_os = "macos"))] login_request: None, #[cfg(not(target_os = "macos"))] login_reply: None, #[cfg(target_os = "linux")] cookie_sources: Vec::new(), #[cfg(target_os = "linux")] last_fill: None, focus,
             origin: Rc::default(), shown: false, _drain: drain, _subscriptions: subscriptions }
     }
 
@@ -387,6 +393,46 @@ impl BrowserPanel {
         }).detach();
     }
 
+    /// Pedido do agente: só a linha desenhada pelo app aprova. Clique do agente cai na página (pela depuração) e o
+    /// celular só vê a página, então nenhum dos dois alcança esta linha.
+    #[cfg(not(target_os = "macos"))]
+    pub(super) fn request_login(&mut self, site: Option<String>, reply: futures::channel::oneshot::Sender<crate::browser::control::Reply>,
+        cx: &mut Context<Self>) {
+        let site = site.or_else(|| self.page_site());
+        if let Some((_, old)) = self.login_request.replace((site, reply)) {
+            let _ = old.send(crate::browser::control::Reply::Text("recusado: outro pedido de login substituiu este".into()));
+        }
+        cx.notify();
+    }
+
+    /// Resposta ao agente: a contagem ou o motivo, nunca valor de cookie.
+    #[cfg(not(target_os = "macos"))]
+    fn finish_login(&mut self, result: Result<usize, String>) {
+        let Some((site, reply)) = self.login_reply.take() else { return };
+        let site = site.unwrap_or_else(|| "todos os sites".into());
+        let text = match result {
+            Ok(n) => format!("ok: {n} cookies para {site}"),
+            Err(e) => format!("erro: login de {site} nao veio: {e}"),
+        };
+        let _ = reply.send(crate::browser::control::Reply::Text(text));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn answer_login_request(&mut self, allow: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((site, reply)) = self.login_request.take() else { return };
+        if !allow {
+            let _ = reply.send(crate::browser::control::Reply::Text("recusado: o usuario nao liberou o login".into()));
+            cx.notify();
+            return;
+        }
+        if let Some((_, old)) = self.login_reply.replace((site.clone(), reply)) {
+            let _ = old.send(crate::browser::control::Reply::Text("erro: outro pedido de login foi aprovado no lugar".into()));
+        }
+        self.import_site = site;
+        self.login_hint = None;
+        self.import_chrome_login(window, cx);
+    }
+
     #[cfg(not(target_os = "macos"))]
     fn import_chrome_login(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         use crate::browser::chrome_import;
@@ -455,9 +501,11 @@ impl BrowserPanel {
             Err(None) => {
                 // Sem depuração ligada, o clique já abre a página do toggle no Chrome — um passo, não dois.
                 self.activate_chrome(cx);
+                self.finish_login(Err("a depuracao remota do Chrome esta desligada; a instrucao para liga-la esta no painel".into()));
                 return;
             }
             Err(Some(text)) => {
+                self.finish_login(Err(text.clone()));
                 self.cookies_status = Some(text);
                 cx.notify();
                 return;
@@ -469,6 +517,7 @@ impl BrowserPanel {
         };
         // 0 cookies não é sucesso: a pessoa vê "nenhum cookie", não "0 trazidos" parecendo que deu certo.
         if cookies.is_empty() {
+            self.finish_login(Ok(0));
             self.cookies_status = Some(match &self.import_site {
                 Some(site) => tr("browser_login_none_site").replace("{site}", site),
                 None => tr("browser_cookies_none"),
@@ -484,6 +533,7 @@ impl BrowserPanel {
             let _ = this.update(cx, |this, cx| {
                 match reply {
                     Ok(_) => {
+                        this.finish_login(Ok(count));
                         let done = match &site {
                             Some(site) => tr("browser_login_ok_site").replace("{site}", site),
                             None => tr("browser_cookies_ok"),
@@ -498,7 +548,10 @@ impl BrowserPanel {
                             });
                         }).detach();
                     }
-                    Err(e) => this.cookies_status = Some(tr("browser_cookies_error").replace("{e}", &e)),
+                    Err(e) => {
+                        this.finish_login(Err(e.clone()));
+                        this.cookies_status = Some(tr("browser_cookies_error").replace("{e}", &e));
+                    }
                 }
                 cx.notify();
             });
@@ -646,6 +699,20 @@ impl Render for BrowserPanel {
             root = root.when_some(self.cookies_status.clone(), |el, text| el.child(div().id("browser-cookies-status")
                 .flex_shrink_0().px_3().py(px(6.)).role(Role::Status)
                 .text_size(px(11.)).text_color(theme::muted()).whitespace_normal().child(text)));
+        }
+        #[cfg(not(target_os = "macos"))]
+        if let Some((site, _)) = &self.login_request {
+            let text = match site {
+                Some(site) => tr("browser_login_agent_site").replace("{site}", site),
+                None => tr("browser_login_agent_all"),
+            };
+            root = root.child(div().id("browser-login-request").flex_shrink_0().flex().items_center().gap_2().px_3().py(px(6.))
+                .border_b_1().border_color(theme::border()).role(Role::Alert)
+                .child(div().flex_1().min_w_0().text_size(px(11.)).text_color(theme::text()).whitespace_normal().child(text))
+                .child(Button::new("browser-login-deny").small().label(tr("browser_login_agent_deny"))
+                    .on_click(cx.listener(|this, _, window, cx| this.answer_login_request(false, window, cx))))
+                .child(Button::new("browser-login-allow").small().primary().label(tr("browser_login_agent_allow"))
+                    .on_click(cx.listener(|this, _, window, cx| this.answer_login_request(true, window, cx)))));
         }
         #[cfg(not(target_os = "macos"))]
         if let Some(site) = self.login_hint.clone() {
@@ -799,6 +866,20 @@ impl Hangar {
             }
         };
         if tab.is_some() { return answer(reply, "erro: o app nativo ainda nao tem abas: e um navegador por sessao".into()); }
+        if verb == "login" {
+            let Some(browser) = self.side.browsers.get(&key).cloned() else { return answer(reply, missing(&key)) };
+            let site = match args.first().map(|a| crate::browser::chrome_import::site_of(a)) {
+                Some(None) => return answer(reply, "erro: login [site]: site invalido (ex.: hangar-preview login github.com)".into()),
+                Some(site) => site,
+                None => None,
+            };
+            browser.update(cx, |panel, cx| panel.request_login(site, reply, cx));
+            // A linha de aprovação fica no painel Navegador da sessão: é ele que aparece quando a pessoa abre a sessão.
+            self.side.browser_open.insert(key.clone());
+            self.side.tabs.insert(key, SideTab::Browser);
+            cx.notify();
+            return;
+        }
         if verb == "close" {
             let closed = self.side.browsers.remove(&key).inspect(|b| b.read(cx).end_viewer()).is_some();
             if closed { crate::browser::server::remove_sidecar(&key); self.side.browser_open.remove(&key); cx.notify(); }

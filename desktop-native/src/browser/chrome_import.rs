@@ -222,6 +222,15 @@ pub fn for_site(cookies: Vec<Value>, site: &str) -> Vec<Value> {
     }).collect()
 }
 
+/// `github.com`, `https://www.github.com/x` -> `github.com`. `None` quando não há host.
+pub fn site_of(text: &str) -> Option<String> {
+    let text = text.trim();
+    let url = url::Url::parse(text).ok().filter(|u| u.has_host())
+        .or_else(|| url::Url::parse(&format!("https://{text}")).ok())?;
+    let host = url.host_str()?.to_ascii_lowercase();
+    (!host.is_empty() && host.contains('.')).then(|| host.strip_prefix("www.").unwrap_or(&host).to_owned())
+}
+
 /// Mantém o erro mais informativo: `Failed`/`Headless` vencem o genérico `ChromeClosed`.
 fn keep_specific(current: ImportError, new: ImportError) -> ImportError {
     fn rank(e: &ImportError) -> u8 {
