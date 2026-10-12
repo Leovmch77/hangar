@@ -1232,7 +1232,21 @@ async fn computer_failure_and_call_end_clear_the_step() {
     let state = rig.state("falha sem etapa", |s| s["error"]["code"] == "computer").await;
     assert!(state["progress"].is_null() && state["activity"] != "working", "{state}");
 
-    let stuck: ComputerRunner = Arc::new(|_, on_step| Box::pin(async move { on_step("lendo a tela".into()); std::future::pending().await }));
+    let (go, gone) = mpsc::unbounded_channel::<()>();
+    let gone = Arc::new(Mutex::new(Some(gone)));
+    let panics: ComputerRunner = Arc::new(move |_, on_step| {
+        let mut gone = gone.lock().unwrap().take().unwrap();
+        Box::pin(async move { on_step("lendo a tela".into()); gone.recv().await; panic!("hcc quebrou") })
+    });
+    let mut rig = rig_computer(panics).await;
+    push_speech(&rig.push, "turn-1", "abre o bloco de notas");
+    push_tool(&rig.push, "c1", "computer", json!({"objective": "abrir o Bloco de Notas"}), "turn-1");
+    rig.state("etapa", |s| s["progress"] == "Lendo a tela").await;
+    go.send(()).unwrap();
+    let state = rig.state("pânico limpa a etapa", |s| s["progress"].is_null()).await;
+    assert_ne!(state["activity"], "working", "{state}");
+
+    let stuck: ComputerRunner =Arc::new(|_, on_step| Box::pin(async move { on_step("lendo a tela".into()); std::future::pending().await }));
     let mut rig = rig_computer(stuck).await;
     push_speech(&rig.push, "turn-1", "abre o bloco de notas");
     push_tool(&rig.push, "c1", "computer", json!({"objective": "abrir o Bloco de Notas"}), "turn-1");

@@ -151,7 +151,7 @@ pub async fn run(objective: String, on_step: Box<dyn Fn(String) + Send + Sync>) 
     match tokio::task::spawn_blocking(launch).await {
         Ok(Ok(launch)) => run_objective(launch, &objective, &*on_step).await,
         Ok(Err(text)) => Err(text),
-        Err(_) => Err("Não consegui preparar o hangar-computer-control.".into()),
+        Err(e) => { super::log(format!("computer launch join failed: {e}")); Err("Não consegui preparar o hangar-computer-control.".into()) }
     }
 }
 
@@ -168,7 +168,8 @@ pub async fn drive_objective(rpc: &Rpc, incoming: &async_channel::Receiver<super
             biased;
             item = incoming.recv(), if open => match item {
                 Ok(super::rpc::Incoming::Notification { method, params }) => if let Some(step) = progress_step(&method, &params) { on_step(step) },
-                Ok(_) => {}
+                Ok(super::rpc::Incoming::Request { method, .. }) => super::log(format!("computer request unanswered method={method}")),
+                Ok(super::rpc::Incoming::Exited) => {}
                 Err(_) => open = false,
             },
             result = &mut call => break result,

@@ -21,7 +21,7 @@ export interface LiveVoiceState {
   action: { kind: 'tool' | 'search' | 'command'; text: string } | null;
   /** Etapa do objetivo em curso no computador; servidor antigo não manda. */
   progress?: string | null;
-  followed:{ server: string; name: string }[];
+  followed: { server: string; name: string }[];
   server: string;
   client: string;
   /** Sobe a cada gravação da memória na chamada; servidor antigo não manda. */

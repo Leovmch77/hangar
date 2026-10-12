@@ -410,10 +410,13 @@ impl Controller {
         let steps = ctx.done.clone();
         let on_step = Box::new(move |step: String| { let _ = steps.send(Done::ComputerStep { run, step }); });
         let running = (self.computer_runner)(objective, on_step);
+        // Pela mesma fila das etapas, o fim chega depois de todas elas; no Drop, sai também se a tarefa entrar em pânico.
+        struct Ended(tokio::sync::mpsc::UnboundedSender<Done>, u64);
+        impl Drop for Ended { fn drop(&mut self) { let _ = self.0.send(Done::ComputerEnded { run: self.1 }); } }
+        let ended = Ended(ctx.done.clone(), run);
         self.computer = Some(tokio::spawn(async move {
             let result = running.await;
-            // Pela mesma fila das etapas: o fim chega depois de todas elas.
-            let _ = ctx.done.send(Done::ComputerEnded { run });
+            drop(ended);
             match result {
                 // "parou: …" é resultado do HCC, não falha do app: volta como está, sem sucesso.
                 Ok(text) => {
