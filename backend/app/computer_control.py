@@ -124,7 +124,10 @@ def _cliproxy_keys() -> list[str]:
     na raiz no antigo (no novo, a raiz é dos provedores). Lido à mão: o backend não tem biblioteca de YAML."""
     try:
         lines = (Path.home() / ".cli-proxy-api" / "config.yaml").read_text(encoding="utf-8").splitlines()
-    except OSError:
+    except FileNotFoundError:
+        return []
+    except (OSError, UnicodeDecodeError) as e:
+        _log.warning("computer-control: ~/.cli-proxy-api/config.yaml ilegível: %s", e)
         return []
     section = ""
     found: dict[str, list[str]] = {}
@@ -139,10 +142,12 @@ def _cliproxy_keys() -> list[str]:
             if not item.strip() or item.lstrip().startswith("#"):
                 continue
             # Item escalar só: `- name: x` é provedor (objeto), não chave de cliente.
-            entry = re.match(r"^(\s*)-\s*['\"]?([^'\"#\s]+)['\"]?\s*(#.*)?$", item)
+            entry = re.match(r"""^(\s*)-\s*(?:"([^"]*)"|'([^']*)'|([^#\s]+))\s*(#.*)?$""", item)
             if not entry or len(entry.group(1)) < len(head.group(1)):
                 break
-            keys.append(entry.group(2))
+            key = next(g for g in entry.groups()[1:4] if g is not None).strip()
+            if key:
+                keys.append(key)
         if keys:
             found.setdefault("access" if head.group(1) else "root", keys)
     # Mesma ordem do Rust (`jev_aux::cliproxy_keys`): `access.api-keys` vence a raiz.
@@ -292,18 +297,21 @@ def _old_llm_file() -> Path:
     return Path.home() / ".hangar" / "computer-use-llm-antigo.json"
 
 
-def _keep_old_llm(env: dict, new: dict[str, str]) -> None:
-    """O modelo do Computer Use que vai ser trocado pelo auxiliar fica guardado, só para o dono."""
+def _keep_old_llm(source: str, env: dict, new: dict[str, str]) -> None:
+    """O modelo do Computer Use que vai ser trocado pelo auxiliar fica guardado, só para o dono, um por
+    arquivo de origem: o de antes da primeira troca; as seguintes já são do auxiliar, no runtime-config."""
     old = {k: str(env[k]) for k in LLM_VARS if env.get(k)}
+    if not old or all(new.get(k, "") == v for k, v in old.items()):
+        return
     kept = _old_llm_file()
-    # Guarda o de antes da primeira troca; as trocas seguintes já são do auxiliar, que mora no runtime-config.
-    if not old or kept.exists() or all(new.get(k, "") == v for k, v in old.items()):
+    previous = _read(kept) if kept.exists() else {}
+    if source in previous:
         return
     kept.parent.mkdir(parents=True, exist_ok=True)
     tmp = kept.with_name(f"{kept.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        json.dump(old, fh, indent=2)
+        json.dump({**previous, source: old}, fh, indent=2)
     atomico.substituir(tmp, kept)
     _log.warning("computer-control: o modelo do Computer Use virou o auxiliar do Jev; o anterior está em %s", kept)
 
@@ -317,7 +325,7 @@ def sync_jev() -> None:
         if entry is not None:
             env = _env_of(entry, str(path))
             if _with_jev(env, jev) != env:
-                _keep_old_llm(env, jev)
+                _keep_old_llm(str(path), env, jev)
                 data = _read(path)
                 data["mcpServers"][NAME] = {**entry, "env": _with_jev(env, jev)}
                 pending.append((path, data))
@@ -325,7 +333,7 @@ def sync_jev() -> None:
     if parked:
         env = _env_of(parked, str(_parked_file()))
         if _with_jev(env, jev) != env:
-            _keep_old_llm(env, jev)
+            _keep_old_llm(str(_parked_file()), env, jev)
             _park({**parked, "env": _with_jev(env, jev)})
     for path, data in pending:
         _write(path, data)

@@ -635,7 +635,7 @@ def test_same_choice_in_both_merges_and_a_replaced_model_is_kept(home):
                             "jev_aux_modelo": "claude-haiku-5-5", "jev_aux_esforco": "low"}
     assert not cc._old_llm_file().exists()   # nada mudou no MCP
     rc.aplicar({"jev_aux_modelo": "claude-sonnet-5-5"})
-    assert json.loads(cc._old_llm_file().read_text())["LLM_MODEL"] == "claude-haiku-5-5"
+    assert json.loads(cc._old_llm_file().read_text())[str(home / ".claude.json")]["LLM_MODEL"] == "claude-haiku-5-5"
     assert _entrada(home / ".claude.json")["env"]["LLM_MODEL"] == "claude-sonnet-5-5"
 
 
@@ -645,3 +645,9 @@ def test_base_url_with_query_keeps_the_query_after_the_path():
     url = "https://x.openai.azure.com/openai/v1/chat/completions?api-version=2024-02-01"
     assert rc.sem_chat_completions(url) == "https://x.openai.azure.com/openai/v1?api-version=2024-02-01"
     assert rc.com_chat_completions(rc.sem_chat_completions(url)) == url
+
+
+def test_cliproxy_keys_quoted_keep_hash_and_spaces(home):
+    (home / ".cli-proxy-api").mkdir()
+    (home / ".cli-proxy-api" / "config.yaml").write_text("access:\n  api-keys:\n    - \"ab#cd\"\n    - 'x y'\n")
+    assert cc._cliproxy_keys() == ["ab#cd", "x y"]

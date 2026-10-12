@@ -156,8 +156,11 @@ async fn list(body: ModelsBody, home: std::path::PathBuf, claude_dir: std::path:
             String::new()
         } else if same_address(&base, &saved_url) {
             saved_key
-        } else {
+        } else if body.use_saved_key {
             return failure(StatusCode::BAD_REQUEST, OTHER_ADDRESS, "digite a chave para este endereço", json!({}));
+        } else {
+            // Sem pedir a salva, outro endereço vai sem chave: há endpoint local que não a pede.
+            String::new()
         }
     } else {
         typed
@@ -252,6 +255,8 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         let bytes = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
         assert!(String::from_utf8_lossy(&bytes).contains(OTHER_ADDRESS));
+        let body = ModelsBody { base_url: "ftp://implicit".into(), api_key: None, use_saved_key: false, use_cliproxy_key: false };
+        assert_eq!(list(body, dir.path().to_path_buf(), dir.path().to_path_buf()).await.status(), StatusCode::BAD_REQUEST);
         let body = ModelsBody { base_url: "https://evil.example/v1".into(), api_key: None, use_saved_key: false, use_cliproxy_key: true };
         assert_eq!(list(body, dir.path().to_path_buf(), dir.path().to_path_buf()).await.status(), StatusCode::BAD_REQUEST);
     }
