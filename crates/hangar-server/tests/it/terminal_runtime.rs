@@ -6,8 +6,8 @@ use std::sync::{Arc,Mutex,atomic::AtomicU64};
 use std::time::Duration;
 use tokio::sync::{broadcast,Notify};
 
-struct Io { native_record:Mutex<Option<(std::path::PathBuf,u32,std::path::PathBuf)>>, idle:Arc<std::sync::atomic::AtomicBool>, ready:Arc<std::sync::atomic::AtomicBool>, native:Arc<std::sync::atomic::AtomicBool>, generation:Arc<AtomicU64>, binding_generation:AtomicU64, capture_error:std::sync::atomic::AtomicBool, calls:Mutex<Vec<CommandRequest>>, text:Mutex<String>, gate:Notify, blocked:std::sync::atomic::AtomicBool, fail_write:std::sync::atomic::AtomicBool, fail_enter:std::sync::atomic::AtomicBool, rotate_enter:std::sync::atomic::AtomicBool, conversation:Arc<Mutex<String>>, socket_calls:Mutex<Vec<Vec<u8>>>, ghost:Mutex<String>, hold_capture:std::sync::atomic::AtomicBool, hold_skip:std::sync::atomic::AtomicUsize, mods_screen:Mutex<Option<String>>, ring_keys:std::sync::atomic::AtomicUsize, ring_returns:std::sync::atomic::AtomicBool, swallow:std::sync::atomic::AtomicBool, footer:std::sync::atomic::AtomicBool }
-impl Io { fn new()->Self { Self { native_record:Default::default(),idle:Arc::new(std::sync::atomic::AtomicBool::new(true)),ready:Arc::new(std::sync::atomic::AtomicBool::new(true)),native:Default::default(),generation:Arc::new(AtomicU64::new(1)),binding_generation:AtomicU64::new(1),capture_error:Default::default(),calls:Mutex::new(vec![]),text:Mutex::new(String::new()),gate:Notify::new(),blocked:std::sync::atomic::AtomicBool::new(false),fail_write:std::sync::atomic::AtomicBool::new(false),fail_enter:std::sync::atomic::AtomicBool::new(false),rotate_enter:std::sync::atomic::AtomicBool::new(false),conversation:Arc::new(Mutex::new("sid".into())),socket_calls:Mutex::new(vec![]),ghost:Mutex::new(String::new()),hold_capture:std::sync::atomic::AtomicBool::new(false),hold_skip:Default::default(),mods_screen:Mutex::new(None),ring_keys:Default::default(),ring_returns:Default::default(),swallow:Default::default(),footer:Default::default() } } }
+struct Io { native_record:Mutex<Option<(std::path::PathBuf,u32,std::path::PathBuf)>>, idle:Arc<std::sync::atomic::AtomicBool>, ready:Arc<std::sync::atomic::AtomicBool>, native:Arc<std::sync::atomic::AtomicBool>, generation:Arc<AtomicU64>, binding_generation:AtomicU64, capture_error:std::sync::atomic::AtomicBool, calls:Mutex<Vec<CommandRequest>>, text:Mutex<String>, gate:Notify, blocked:std::sync::atomic::AtomicBool, fail_write:std::sync::atomic::AtomicBool, fail_enter:std::sync::atomic::AtomicBool, rotate_enter:std::sync::atomic::AtomicBool, conversation:Arc<Mutex<String>>, socket_calls:Mutex<Vec<Vec<u8>>>, ghost:Mutex<String>, hold_capture:std::sync::atomic::AtomicBool, hold_skip:std::sync::atomic::AtomicUsize, mods_screen:Mutex<Option<String>>, ring_keys:std::sync::atomic::AtomicUsize, ring_returns:std::sync::atomic::AtomicBool, swallow:std::sync::atomic::AtomicBool, footer:std::sync::atomic::AtomicBool, panes:Mutex<Vec<String>>, created:AtomicU64, switch_at:Mutex<Option<(usize,&'static str)>> }
+impl Io { fn new()->Self { Self { native_record:Default::default(),idle:Arc::new(std::sync::atomic::AtomicBool::new(true)),ready:Arc::new(std::sync::atomic::AtomicBool::new(true)),native:Default::default(),generation:Arc::new(AtomicU64::new(1)),binding_generation:AtomicU64::new(1),capture_error:Default::default(),calls:Mutex::new(vec![]),text:Mutex::new(String::new()),gate:Notify::new(),blocked:std::sync::atomic::AtomicBool::new(false),fail_write:std::sync::atomic::AtomicBool::new(false),fail_enter:std::sync::atomic::AtomicBool::new(false),rotate_enter:std::sync::atomic::AtomicBool::new(false),conversation:Arc::new(Mutex::new("sid".into())),socket_calls:Mutex::new(vec![]),ghost:Mutex::new(String::new()),hold_capture:std::sync::atomic::AtomicBool::new(false),hold_skip:Default::default(),mods_screen:Mutex::new(None),ring_keys:Default::default(),ring_returns:Default::default(),swallow:Default::default(),footer:Default::default(),panes:Mutex::new(vec![]),created:AtomicU64::new(1),switch_at:Mutex::new(None) } } }
 impl Io {
     fn refresh_record(&self) {
         if let Some((path,pid,socket))=&*self.native_record.lock().unwrap() {
@@ -20,12 +20,21 @@ impl Io {
 impl TerminalIo for Io {
     fn command<'a>(&'a self,r:CommandRequest)->IoFuture<'a,CommandOutput> { Box::pin(async move {
         let cmd=r.args[0].clone();
-        self.calls.lock().unwrap().push(r.clone());
+        let count={let mut calls=self.calls.lock().unwrap();calls.push(r.clone());calls.len()};
+        // `switch_at`: na chamada N, a vida (conversa) ou o pane trocam, e ficam trocados.
+        match *self.switch_at.lock().unwrap() {
+            Some((at,"life")) if at==count=>{self.generation.fetch_add(1,std::sync::atomic::Ordering::AcqRel);},
+            Some((at,"pane")) if at==count=>{self.created.store(2,std::sync::atomic::Ordering::Release);},
+            _=>{},
+        }
         self.refresh_record();
+        let created=self.created.load(std::sync::atomic::Ordering::Acquire);
         let stdout=match cmd.as_str() {
-            "display-message" if r.args.last().is_some_and(|a|a=="#{pane_pid}\t#{session_name}\t#{pane_id}\t#{session_created}")=>format!("{}\tsession\t%1\t1\n",std::process::id()).into_bytes(),
+            "display-message" if r.args.last().is_some_and(|a|a=="#{pane_pid}\t#{session_name}\t#{pane_id}\t#{session_created}")=>format!("{}\tsession\t%1\t{created}\n",std::process::id()).into_bytes(),
             "display-message" if r.args.last().is_some_and(|a|a==MODS_FORMATS)=>b"1|0|0|80|12\n".to_vec(),
-            "display-message"=>b"session\t%1\t1\n".to_vec(),
+            "display-message"=>format!("session\t%1\t{created}\n").into_bytes(),
+            // `panes`: telas em sequência, uma por captura; a última fica.
+            "capture-pane" if !self.panes.lock().unwrap().is_empty()=>{let mut panes=self.panes.lock().unwrap();(if panes.len()>1 {panes.remove(0)} else {panes[0].clone()}).into_bytes()},
             "capture-pane" if self.capture_error.load(std::sync::atomic::Ordering::Acquire)=>return Err(IoFailure {code:"capture_failed",may_have_written:false}),
             "capture-pane" if !self.ready.load(std::sync::atomic::Ordering::Acquire)=>b"loading\n".to_vec(),
             // `hold_skip`: capturas que passam antes de segurar (a leitura dos fatos vem antes do despacho).
@@ -229,6 +238,63 @@ elif mode=='send-keys' and '-l' in sys.argv:
     assert!(grandchild_born,"timeout fired before the grandchild existed; nothing was proved");
     // Saída 0 é o `sleep` do processo alheio que acabou sozinho; outro código é morte por terceiro.
     assert!(unrelated_alive,"processo alheio saiu: {other_exit:?} depois de {other_age:?}");assert!(!old_writer,"auxiliary grandchild wrote after detach released the lease");
+}
+
+/// Teto de chamadas ao multiplexador numa entrega de texto até a primeira tecla, pelo desenho: a vida
+/// (pane e agente) é provada uma vez no começo da entrega (1); cada leitura de fatos relê a tela e
+/// reconfere a vida (2), e são cinco: admissão do executor, prontidão do `prompt`, o composer, a do
+/// `deliver` e a conferência final; o composer captura também a tela dele (1); a guarda de foco dos mods
+/// confere o pane e lê o tamanho e a tela visível (3). 1 + 5×2 + 1 + 3 = 15.
+const PROMPT_MUX_CEILING:usize=15;
+#[tokio::test]
+async fn terminal_runtime_prompt_reads_the_mux_once_per_stage_and_checks_life_last() {
+    let f=Fixture::new().await;let h=f.start();f.io.calls.lock().unwrap().clear();
+    assert_eq!(h.command(f.command("count","fixture-input")).await.unwrap().disposition,hangar_server::runtime::protocol::Disposition::Accepted);
+    let calls=f.io.calls.lock().unwrap().clone();
+    let key=calls.iter().position(|c|c.args[0]=="send-keys").expect("a entrega não escreveu");
+    let seen:Vec<String>=calls[..key].iter().map(|c|format!("{} {}",c.args[0],c.args.last().unwrap())).collect();
+    assert!(key<=PROMPT_MUX_CEILING,"{key} chamadas antes da tecla: {seen:?}");
+    // A conferência final relê a tela e só depois prova a vida, logo antes da tecla.
+    assert_eq!(calls[key-2].args[0],"capture-pane","{seen:?}");
+    assert_eq!(calls[key-1].args.last().unwrap(),"#{pane_pid}\t#{session_name}\t#{pane_id}\t#{session_created}","{seen:?}");
+    h.stop().await.unwrap();
+}
+/// Menu A respondido e a tela passa a B em qualquer captura até a última conferência antes da tecla,
+/// inclusive depois de a vida já provada na entrega: recusa, sem tecla.
+#[tokio::test]
+async fn terminal_runtime_select_refuses_b_shown_after_any_read_before_the_key() {
+    use hangar_server::interactions::{InteractionKind,InteractionTarget};
+    let picker=|title:&str|format!("{title}\n❯ 1. first\n  2. second\nEsc to cancel · to navigate\n");
+    for shown in 0..=5 {
+        let f=Fixture::new().await;let h=f.start();let binding=hangar_server::terminal_facts::LocalTerminalFacts::binding(&f.target);
+        let mut panes=vec![picker("Question A");shown];panes.push(picker("Question B"));*f.io.panes.lock().unwrap()=panes;
+        let target=InteractionTarget {kind:InteractionKind::Menu,request_key:"terminal:menu".into()};
+        let id=f.plugin.interactions().observe_revision(&binding,&target,Some(interaction_semantic(&picker("Question A"),None).unwrap()),None).unwrap().unwrap();
+        f.io.calls.lock().unwrap().clear();
+        let reply=h.control(format!("select-{shown}"),"select".into(),json!({"option":1,"interaction_id":id})).await.unwrap();
+        assert_eq!(reply.disposition,hangar_server::runtime::protocol::Disposition::Rejected,"B na captura {}: {reply:?}",shown+1);
+        assert_eq!(reply.payload["code"],"erro_interacao_desatualizada","{reply:?}");
+        assert!(f.io.calls.lock().unwrap().iter().all(|c|c.args[0]!="send-keys"),"tecla com B na tela (captura {})",shown+1);
+        h.stop().await.unwrap();
+    }
+}
+/// A conversa (vida) ou o pane trocam em qualquer chamada até a última antes da tecla: a entrega não escreve.
+#[tokio::test]
+async fn terminal_runtime_prompt_refuses_life_or_pane_switch_at_any_call_before_the_key() {
+    let clean={
+        let f=Fixture::new().await;let h=f.start();f.io.calls.lock().unwrap().clear();
+        assert_eq!(h.command(f.command("clean","fixture-input")).await.unwrap().disposition,hangar_server::runtime::protocol::Disposition::Accepted);
+        let key=f.io.calls.lock().unwrap().iter().position(|c|c.args[0]=="send-keys").unwrap();h.stop().await.unwrap();key
+    };
+    for kind in ["life","pane"] {
+        for at in 1..=clean {
+            let f=Fixture::new().await;let h=f.start();f.io.calls.lock().unwrap().clear();*f.io.switch_at.lock().unwrap()=Some((at,kind));
+            let reply=h.command(f.command("switched","fixture-input")).await.unwrap();
+            assert_ne!(reply.disposition,hangar_server::runtime::protocol::Disposition::Accepted,"{kind} trocado na chamada {at}");
+            h.stop().await.unwrap();
+            assert!(f.io.calls.lock().unwrap().iter().all(|c|c.args[0]!="send-keys"),"{kind} trocado na chamada {at}: tecla escrita");
+        }
+    }
 }
 
 #[cfg(target_os="linux")]

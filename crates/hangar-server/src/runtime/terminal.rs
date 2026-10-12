@@ -128,7 +128,7 @@ impl TerminalServices for NoFacts {
 }
 
 struct Services {
-    target:TerminalTarget,queue:Arc<QueueActor>,local:Arc<crate::terminal_facts::LocalTerminalFacts>,terms:Option<Arc<crate::term::Terms>>,root:String,attempt:String,text:String,sequence:Arc<AtomicU64>,
+    target:TerminalTarget,queue:Arc<QueueActor>,local:Arc<crate::terminal_facts::LocalTerminalFacts>,terms:Option<Arc<crate::term::Terms>>,root:String,attempt:String,text:String,sequence:Arc<AtomicU64>,life_proved:AtomicBool,
 }
 impl Services {
     async fn action(&self,label:&str,action:Action)->Result<Value,RuntimeError> {
@@ -143,11 +143,16 @@ impl TerminalServices for Services {
         self.local.check(&self.target,binding).await?;
         let driver=TerminalDriver::new(binding.clone(),Arc::new(NoFacts),self.local.io_for_guard(),InputLimits::default());
         driver.facts_screen().await.map_err(|error|ServiceError(error.code))?;
+        self.local.check(&self.target,binding).await?;
         if terms.is_active(&self.target.name) {return Err(ServiceError("terminal_panel_active"));}
         Ok(())
     })}
     fn facts<'a>(&'a self,binding:&'a TerminalBinding)->ServiceFuture<'a,InputFacts> {Box::pin(async move {
-        let mut facts=self.local.read(&self.target,binding,&self.text).await.map_err(|failure| {
+        // Uma entrega, um `Services`: a vida provada numa leitura vale para as seguintes desta entrega,
+        // cada uma reconferindo-a no fim; nada passa para a próxima entrega.
+        let read=if self.life_proved.load(Ordering::Acquire) {self.local.reread(&self.target,binding,&self.text).await} else {self.local.read(&self.target,binding,&self.text).await};
+        self.life_proved.store(read.is_ok(),Ordering::Release);
+        let mut facts=read.map_err(|failure| {
             if crate::warn_limit::allow(Some(&self.target.key),"terminal_local_facts") {
                 tracing::warn!(key=%self.target.key,session=%self.target.name,code=failure.0,"fatos locais indisponíveis; a entrada espera sem escrever");
             }
@@ -166,6 +171,7 @@ impl TerminalServices for Services {
     fn publish<'a>(&'a self,binding:&'a TerminalBinding,request:PluginRequest)->ServiceFuture<'a,PluginReply> {Box::pin(async move {
         self.local.publish(&self.target,binding,request).await
     })}
+    fn facts_check_pane(&self)->bool {true}
 }
 
 struct Executor {
@@ -324,7 +330,7 @@ impl Executor {
         state.runtime_state["clear_barrier"]["generation"]==self.target.generation
             && state.runtime_state["clear_barrier"]["conversation"]==self.target.binding.conversation
     }
-    fn services(&self,root:&str,attempt:&str,text:&str)->Arc<Services> {Arc::new(Services {target:self.target.clone(),queue:self.queue.clone(),local:self.local.clone(),terms:self.options.terms.clone(),root:root.into(),attempt:attempt.into(),text:text.into(),sequence:self.sequence.clone()})}
+    fn services(&self,root:&str,attempt:&str,text:&str)->Arc<Services> {Arc::new(Services {target:self.target.clone(),queue:self.queue.clone(),local:self.local.clone(),terms:self.options.terms.clone(),root:root.into(),attempt:attempt.into(),text:text.into(),sequence:self.sequence.clone(),life_proved:AtomicBool::new(false)})}
     async fn action(&self,action:Action)->Result<Value,RuntimeError> {self.services("maintenance","maintenance","").action("queue",action).await}
     async fn snapshot(&self)->Result<Value,RuntimeError> {
         let state=self.queue.snapshot().await.map_err(|_|error("queue_io"))?;
@@ -491,8 +497,9 @@ impl Executor {
                 return Ok(None);
             }
         };
-        // A tela que não se lê também não seria escrita: a entrada espera, com o motivo.
-        let ansi=driver.mods_screen().await.map_err(|failure|failure.code)?;
+        // A tela que não se lê também não seria escrita: a entrada espera, com o motivo. O pane acabou de
+        // ser conferido com o tamanho, como no `return_focus`; a tecla que vier depois confere de novo.
+        let ansi=driver.pane_checked().mods_screen().await.map_err(|failure|failure.code)?;
         Ok(Some(self.mods_read(&ansi,formats)))
     }
     /// A leitura da tela dos mods num tamanho já conhecido: a tela e se o foco está num mod.

@@ -62,6 +62,8 @@ pub trait TerminalServices: Send + Sync {
     fn permission_guard<'a>(&'a self, binding: &'a TerminalBinding) -> ServiceFuture<'a, ()>;
     /// Grava no diário que a escrita vai começar: antes disso, cair não deixa a entrega incerta.
     fn writing<'a>(&'a self) -> ServiceFuture<'a, ()> { Box::pin(async { Ok(()) }) }
+    /// Os fatos terminam conferindo o mesmo pane do `verify_pane`, depois da tela: o driver não o repete.
+    fn facts_check_pane(&self) -> bool { false }
 }
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -450,7 +452,7 @@ impl TerminalDriver {
     }
     async fn verify(&self) -> Result<InputFacts, IoFailure> {
         let facts = self.facts().await?;
-        self.verify_pane().await?;
+        if !self.services.facts_check_pane() { self.verify_pane().await?; }
         Ok(facts)
     }
     /// Mesmo pane e mesma vida do multiplexador, sem perguntar pela conversa.
@@ -519,12 +521,11 @@ impl TerminalDriver {
         Ok((unstyle(&styled, true), unstyle(&styled, false)))
     }
     pub async fn capture(&self) -> Result<String, IoFailure> { let _serial = self.serial.lock().await; self.capture_inner().await }
-    /// Uma captura sem chamar os serviços que ela própria alimenta.
+    /// Uma captura sem chamar os serviços que ela própria alimenta. Sem conferir o pane: quem chama
+    /// prova a mesma vida depois dela.
     pub(crate) async fn facts_screen(&self) -> Result<String, IoFailure> {
-        self.verify_pane().await?;
         let (screen, _) = self.composer_capture_unverified().await?;
         if self.binding.windows && screen.contains('\u{fffd}') { return Err(IoFailure { code:"capture_utf8",may_have_written:false }); }
-        self.verify_pane().await?;
         Ok(screen)
     }
     /// Efeito de mod no pane: confere só a identidade do pane (sem os fatos do Python, que pesam e não

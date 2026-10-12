@@ -103,7 +103,8 @@ impl LocalTerminalFacts {
     pub fn binding(target: &TerminalTarget) -> InteractionBinding {
         InteractionBinding { key: target.key.clone(), conversation: target.binding.conversation.clone(), generation: target.generation }
     }
-    pub(crate) async fn check(&self, target: &TerminalTarget, binding: &TerminalBinding) -> Result<(), ServiceError> {
+    /// Mesmo pane e mesma vida (agente e conversa); devolve o pid do pane.
+    pub(crate) async fn check(&self, target: &TerminalTarget, binding: &TerminalBinding) -> Result<i64, ServiceError> {
         if binding != &target.binding || binding.generation != target.generation || binding.name != target.name
             || target.metadata.fingerprint.is_empty() || !target.created.is_finite() || target.created < 0.0 {
             return Err(ServiceError("terminal_binding_changed"));
@@ -126,11 +127,19 @@ impl LocalTerminalFacts {
             if native_record(&metadata, &conversation)?.is_none() {
                 current_transcript(&procs, &metadata, &conversation, &transcript)?;
             }
-            Ok(())
+            Ok(pane_pid)
         }).await.map_err(|_| ServiceError("terminal_agent_unavailable"))?
     }
     pub async fn read(&self, target: &TerminalTarget, binding: &TerminalBinding, text: &str) -> Result<InputFacts, ServiceError> {
-        self.check(target, binding).await?;
+        self.read_facts(target, binding, text, true).await
+    }
+    /// Releitura dentro da mesma entrega, com a vida já provada por uma leitura anterior dela: só a
+    /// conferência do fim, que pega a troca de pane ou de vida havida desde então.
+    pub(crate) async fn reread(&self, target: &TerminalTarget, binding: &TerminalBinding, text: &str) -> Result<InputFacts, ServiceError> {
+        self.read_facts(target, binding, text, false).await
+    }
+    async fn read_facts(&self, target: &TerminalTarget, binding: &TerminalBinding, text: &str, lead: bool) -> Result<InputFacts, ServiceError> {
+        if lead { self.check(target, binding).await?; }
         let driver = TerminalDriver::new(binding.clone(), Arc::new(NoFacts), self.io.clone(), InputLimits::default());
         let screen = driver.facts_screen().await.map_err(|error| ServiceError(error.code))?;
         let (ready, mut idle) = input::input_state(&screen);
@@ -153,7 +162,6 @@ impl LocalTerminalFacts {
         }
         let live = current && plugin["waiter_open"] == true;
         let open_question = question || plugin["questions"].as_array().is_some_and(|questions| !questions.is_empty());
-        let clipboard_available = if binding.windows { self.clipboard_available(binding).await? } else { false };
         // Em qualquer SO, como o `_native_socket` do Python: quem não fala o socket (o escritor fora do Unix)
         // responde `NotWritten` e a entrega segue pelo teclado.
         let native = if let Some((sender, _)) = input::message_prefix(text)
@@ -162,7 +170,9 @@ impl LocalTerminalFacts {
             Some(NativeMessage { socket: socket.into(), origin: target.metadata.origin.clone(), sender: sender.into(),
                 mode: self.message_class(target, sender, !text.starts_with("[painel:")).await?, message_id: None })
         } else { None };
-        self.check(target, binding).await?;
+        // A tela e os arquivos lidos acima valem só com a mesma vida conferida depois deles.
+        let pane_pid = self.check(target, binding).await?;
+        let clipboard_available = binding.windows && clipboard_available(pane_pid);
         Ok(InputFacts { binding: binding.clone(), ready, idle, open_question, plugin_live: live, plugin_user: live && has_mode(&plugin, "user"), clipboard_available, native })
     }
     pub fn plugin_facts(&self, target: &TerminalTarget) -> Result<Value, ServiceError> {
@@ -208,14 +218,10 @@ impl LocalTerminalFacts {
         }};
         Ok(if mode.to_ascii_lowercase().contains("bypass") { "bypass" } else { "prompting" }.into())
     }
-    async fn clipboard_available(&self, binding: &TerminalBinding) -> Result<bool, ServiceError> {
-        let (program, prefix) = binding.mux_argv.split_first().ok_or(ServiceError("mux_missing"))?;
-        let args = prefix.iter().cloned().chain(["display-message".into(), "-p".into(), "-t".into(), binding.pane.clone(), "#{pane_pid}".into()]).collect();
-        let output = self.io.command(CommandRequest { program: program.clone(), args, stdin: vec![] }).await.map_err(|error| ServiceError(error.code))?;
-        if !output.success { return Err(ServiceError("terminal_clipboard_session_unavailable")); }
-        let pid = std::str::from_utf8(&output.stdout).ok().and_then(|text| text.trim().parse::<u32>().ok());
-        Ok(pid.and_then(process_session).zip(process_session(std::process::id())).is_some_and(|(theirs, ours)| ours > 0 && ours == theirs))
-    }
+}
+/// O pane na mesma sessão de logon do servidor: só então a área de transferência é a mesma.
+fn clipboard_available(pane_pid: i64) -> bool {
+    u32::try_from(pane_pid).ok().and_then(process_session).zip(process_session(std::process::id())).is_some_and(|(theirs, ours)| ours > 0 && ours == theirs)
 }
 fn read_json(path: &Path, code: &'static str) -> Result<Option<Value>, ServiceError> {
     match std::fs::read(path) { Ok(bytes) => serde_json::from_slice(&bytes).map(Some).map_err(|_| ServiceError(code)), Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None), Err(_) => Err(ServiceError(code)) }
