@@ -2098,6 +2098,29 @@ export function patchConfigForServer(s: Server, mudancas: Record<string, unknown
   return apiFetchForServer(s, '/api/config', { method: 'POST', body: JSON.stringify(mudancas) });
 }
 
+// Modelo auxiliar do Jev (um só, texto e imagem). `null` = servidor ativo.
+export interface JevAuxCliproxy { preset_url: string; running: boolean; has_keys: boolean }
+
+export function getJevAuxCliproxy(s: Server | null): Promise<JevAuxCliproxy> {
+  const path = '/api/jev/aux/cliproxy';
+  return s ? apiFetchForServer(s, path) : apiFetch(path, { signal: AbortSignal.timeout(8000) });
+}
+
+/** Só `base_url` é obrigatório; sem chave nova o servidor usa a salva. */
+export interface JevAuxModelsRequest { base_url: string; api_key?: string | null; use_saved_key?: boolean; use_cliproxy_key?: boolean }
+
+/** Só o que a página do Jev mostra do Computer Use (o celular não tem a tela dele). */
+export function getComputerControlEnabled(s: Server): Promise<{ enabled: boolean }> {
+  return apiFetchForServer(s, '/api/computer-control');
+}
+
+// O provedor pode demorar a listar: teto maior que o padrão.
+export function listJevAuxModels(s: Server | null, request: JevAuxModelsRequest): Promise<{ models: string[] }> {
+  const path = '/api/jev/aux/models';
+  const init = { method: 'POST', body: JSON.stringify(request) };
+  return s ? apiFetchForServer(s, path, init, 30000) : apiFetch(path, { ...init, signal: AbortSignal.timeout(30000) });
+}
+
 // Detalhe do plano em execução (Task/Step, markdown cru). 404 = sem plano ativo, NÃO é erro — o
 // chamador (PlanPanel) trata null como "nada pra mostrar", não como falha. Por isso um fetch cru
 // em vez de apiFetch/apiFetchForServer: as duas lançam pra qualquer !ok, inclusive 404.

@@ -1,8 +1,7 @@
 <script lang="ts">
   import type { Server } from '../../lib/auth';
   // Endereço, não frase: é o mesmo texto em qualquer idioma.
-  const CLIPROXY_RELEASES = 'https://github.com/router-for-me/CLIProxyAPI/releases';
-  import { getComputerControl, saveComputerControl, listComputerControlModels, createComputerControlTarget,
+  import { getComputerControl, saveComputerControl, createComputerControlTarget,
     installComputerControl, testComputerControlHost, getComputerControlWindowsSetup,
     type ComputerControlState, type ComputerControlTarget } from '../../lib/credenciais';
   import EscopoChip from './EscopoChip.svelte';
@@ -20,14 +19,6 @@
   let enabled = $state(false);
   let projectDir = $state('');
   let agentConfig = $state('');
-  let preset = $state<'cliproxy' | 'custom'>('cliproxy');
-  let url = $state('');
-  let model = $state('');
-  let effort = $state('');
-  let newLlmKey = $state('');
-  let models = $state<string[]>([]);
-  let loadingModels = $state(false);
-  let modelsError = $state('');
 
   const targetLabel = (t: ComputerControlTarget) =>
     `${t.name} · ${t.transport === 'local' ? m.computer_control_target_local() : t.host}`;
@@ -136,11 +127,6 @@
     enabled = s.enabled;
     projectDir = s.project_dir;
     agentConfig = s.agent_config;
-    preset = s.llm_url === s.cliproxy.preset_url ? 'cliproxy' : 'custom';
-    url = s.llm_url;
-    model = s.llm_model;
-    effort = s.llm_effort;
-    newLlmKey = '';
   }
 
   async function load() {
@@ -158,23 +144,6 @@
   }
   $effect(() => { void apiTarget; void load(); });
 
-  async function loadModels() {
-    if (!current) return;
-    loadingModels = true;
-    modelsError = '';
-    try {
-      const r = await listComputerControlModels(apiTarget, preset === 'cliproxy'
-        ? { llm_url: current.cliproxy.preset_url, use_cliproxy_key: true }
-        : { llm_url: url, llm_key: newLlmKey || null, use_saved_key: !newLlmKey });
-      models = r.models;
-      if (!r.models.length) modelsError = m.computer_control_models_empty();
-    } catch (e) {
-      modelsError = e instanceof Error ? e.message : String(e);
-    } finally {
-      loadingModels = false;
-    }
-  }
-
   async function save(ev: SubmitEvent) {
     ev.preventDefault();
     if (!current || saving) return;
@@ -187,11 +156,6 @@
         mode: current.mode,
         project_dir: projectDir.trim(),
         agent_config: agentConfig,
-        llm_url: preset === 'cliproxy' ? current.cliproxy.preset_url : url.trim(),
-        llm_model: model.trim(),
-        llm_effort: effort,
-        llm_key: preset === 'custom' ? (newLlmKey || null) : null,
-        use_cliproxy_key: preset === 'cliproxy',
       });
       fill(s);
       savedMessage = s.enabled
@@ -347,59 +311,12 @@
         <button type="button" onclick={onConfigureJev}>{m.jev_open_settings()}</button>
       </div>
 
-      <p class="cc-title cc-sub">{m.computer_control_llm()}</p>
-      <p class="hint">{m.computer_control_llm_hint()}</p>
-      <div class="presets" role="radiogroup" aria-label={m.computer_control_llm()}>
-        <button type="button" role="radio" aria-checked={preset === 'cliproxy'} class:on={preset === 'cliproxy'}
-                disabled={saving || !enabled} onclick={() => { preset = 'cliproxy'; models = []; }}>{m.computer_control_preset_cliproxy()}</button>
-        <button type="button" role="radio" aria-checked={preset === 'custom'} class:on={preset === 'custom'}
-                disabled={saving || !enabled} onclick={() => { preset = 'custom'; models = []; }}>{m.computer_control_preset_custom()}</button>
+      <div class="jev-status">
+        <p class="status">{m.computer_control_llm()}</p>
+        <p class="hint">{current.llm_model
+          ? m.browser_jev_cu_uses_aux({ model: current.llm_model })
+          : m.browser_jev_cu_aux_missing()}</p>
       </div>
-
-      {#if preset === 'cliproxy'}
-        <p class="hint">
-          {!current.cliproxy.installed ? m.computer_control_cliproxy_not_installed()
-            : !current.cliproxy.running ? m.computer_control_cliproxy_stopped()
-            : current.cliproxy.has_keys ? m.computer_control_cliproxy_key_ok() : m.computer_control_cliproxy_no_key()}
-        </p>
-        <details class="help" open={!current.cliproxy.installed || !current.cliproxy.running}>
-          <summary>{m.computer_control_cliproxy_how()}</summary>
-          <ol>
-            <li>{m.computer_control_cliproxy_step_install()} <a href={CLIPROXY_RELEASES} target="_blank" rel="noreferrer">{CLIPROXY_RELEASES.replace('https://', '')}</a></li>
-            <li>{m.computer_control_cliproxy_step_service()}</li>
-            <li>{m.computer_control_cliproxy_step_panel()} <a href="http://127.0.0.1:8317/management.html" target="_blank" rel="noreferrer">http://127.0.0.1:8317/management.html</a></li>
-            <li>{m.computer_control_cliproxy_step_key()}</li>
-          </ol>
-        </details>
-      {:else}
-        <label for="cc-url">{m.computer_control_url()}</label>
-        <input id="cc-url" name="cc-url" autocomplete="off" bind:value={url} placeholder="https://…/v1/chat/completions" disabled={saving || !enabled} spellcheck="false" />
-        <label for="cc-llm-key">{m.computer_control_llm_key()}</label>
-        {#if current.llm_key_set && !current.cliproxy.key_is_cliproxy}
-          <p class="hint">{m.computer_control_key_saved({ tail: current.llm_key_tail })}</p>
-        {/if}
-        <input id="cc-llm-key" name="cc-llm-key" class="secret" bind:value={newLlmKey} placeholder={m.computer_control_replace_key()}
-               autocomplete="off" spellcheck="false" disabled={saving || !enabled} />
-      {/if}
-
-      <label for="cc-model">{m.computer_control_model()}</label>
-      <div class="row">
-        <input id="cc-model" name="cc-model" autocomplete="off" list="cc-models" bind:value={model} disabled={saving || !enabled} spellcheck="false" />
-        <button type="button" onclick={loadModels} disabled={loadingModels || saving || !enabled} aria-busy={loadingModels}>
-          {loadingModels ? m.computer_control_listing() : m.computer_control_list_models()}
-        </button>
-      </div>
-      <datalist id="cc-models">{#each models as id (id)}<option value={id}></option>{/each}</datalist>
-      {#if modelsError}<p class="err" role="alert">{modelsError}</p>
-      {:else if models.length}<p class="hint">{m.computer_control_models_found({ n: String(models.length) })}</p>{/if}
-
-      <label for="cc-effort">{m.computer_control_effort()}</label>
-      <select id="cc-effort" bind:value={effort} disabled={saving || !enabled}>
-        <option value="">{m.computer_control_effort_default()}</option>
-        <option value="low">low</option>
-        <option value="medium">medium</option>
-        <option value="high">high</option>
-      </select>
 
       <button class="action primary" type="submit" disabled={saving || installing || (enabled && (!agentConfig || (current.mode === 'package' && !current.package_exists)))} aria-busy={saving}>
         {saving ? m.computer_control_saving() : m.computer_control_save()}
@@ -419,8 +336,6 @@
     text-transform: uppercase; letter-spacing: var(--label-tracking);
   }
   .jev-status { display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-2); margin-top: var(--space-4); }
-  .cc-sub { margin-top: var(--space-4); }
-  .help ol { margin: 0; padding-left: var(--space-5); color: var(--text-secondary); font-size: var(--text-sm); line-height: 1.5; }
   .hint { color: var(--text-muted); font-size: var(--text-xs); }
   .err { color: var(--error); }
   .status { color: var(--text-primary); font-weight: 600; }
@@ -435,7 +350,6 @@
   .row { display: flex; gap: var(--space-2); }
   .row input, .row select { flex: 1; min-width: 0; }
   .row button { flex-shrink: 0; white-space: nowrap; }
-  .secret { -webkit-text-security: disc; }
   button, .action {
     padding: var(--space-3) var(--space-4); border: 1px solid var(--border-subtle); border-radius: var(--radius-md);
     background: var(--surface-raised); color: var(--text-primary); font: inherit; font-size: var(--text-sm); cursor: pointer;
@@ -462,8 +376,6 @@
   }
   .presets .on { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
   .help summary { cursor: pointer; color: var(--text-secondary); font-size: var(--text-sm); }
-  .help ol { margin-top: var(--space-2); }
-  a { color: var(--accent); overflow-wrap: anywhere; }
-  input:focus-visible, select:focus-visible, button:focus-visible, a:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+  input:focus-visible, select:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
   @container (max-width: 420px) { .row { flex-direction: column; } }
 </style>
