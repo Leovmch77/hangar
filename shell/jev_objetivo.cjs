@@ -540,6 +540,13 @@ async function valorDoCampo({ campo, escolha, cofre, objetivo, feito, escreverTe
   return { valor, origem: 'llm' };
 }
 
+class FalhaDoNavegador extends Error {
+  constructor(verbo, saida) {
+    super(saida);
+    this.verbo = verbo;
+  }
+}
+
 /**
  * Roda o laço até concluir, parar por limiar ou estourar `maxPassos`.
  * `perguntar(estado, perguntas)` fala com o Jev, `executar(verbo, args)` com o navegador e
@@ -550,6 +557,11 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
   let anterior = null;
   let repetidas = 0;
   let esperouCarregar = false;
+  const agir = async (verbo, args) => {
+    const saida = String(await executar(verbo, args));
+    if (saida.startsWith('erro:')) throw new FalhaDoNavegador(verbo, saida);
+    return saida;
+  };
   for (let passo = 1; passo <= maxPassos; passo += 1) {
     const [snapshot, url, texto] = [
       await executar('snapshot', SNAPSHOT_DO_LACO),
@@ -615,57 +627,64 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
       return { feito, sucesso: false, parou: `${decisao.operacao} em @${decisao.alvo} repetiu 3x sem avancar; parei` };
     }
 
-    if (decisao.operacao === 'SELECT') {
-      log(`jev-objetivo passo ${passo}: SELECT @${decisao.alvo} ("${decisao.escolhido.nome}") conf=${decisao.confianca.toFixed(2)}`);
-      const saida = await executar('eval', [jsDeSelecionar(decisao.escolhido.nome)]);
-      if (String(saida).includes(SEM_SELECT)) {
-        if (decisao.arriscado !== null) {
-          return { feito, sucesso: false, parou: `operacao arriscada (${decisao.arriscado.toFixed(2)}): precisa da ordem do usuario` };
+    // Clique ou digitação que o navegador recusou não aconteceu: seguir dali fazia o laço redigitar
+    // o mesmo campo até a trava de repetição, escondendo a frase que dizia o porquê.
+    try {
+      if (decisao.operacao === 'SELECT') {
+        log(`jev-objetivo passo ${passo}: SELECT @${decisao.alvo} ("${decisao.escolhido.nome}") conf=${decisao.confianca.toFixed(2)}`);
+        const saida = await executar('eval', [jsDeSelecionar(decisao.escolhido.nome)]);
+        if (String(saida).includes(SEM_SELECT)) {
+          if (decisao.arriscado !== null) {
+            return { feito, sucesso: false, parou: `operacao arriscada (${decisao.arriscado.toFixed(2)}): precisa da ordem do usuario` };
+          }
+          await agir('click', [`@${decisao.alvo}`]);
         }
-        await executar('click', [`@${decisao.alvo}`]);
-      }
-      else if (String(saida).includes('erro:')) return { feito, sucesso: false, parou: `SELECT falhou: ${saida}` };
-      feito.push(`SELECT "${decisao.escolhido.nome}"`);
-    } else if (decisao.operacao === 'PRESS_ENTER') {
-      log(`jev-objetivo passo ${passo}: PRESS_ENTER`);
-      await executar('press', ['Enter']);
-      feito.push('PRESS_ENTER');
-    } else if (decisao.operacao === 'SCROLL_DOWN') {
-      log(`jev-objetivo passo ${passo}: SCROLL_DOWN`);
-      await executar('press', ['PageDown']);
-      feito.push('SCROLL_DOWN');
-    } else if (decisao.operacao === 'TYPE_TEXT') {
-      const { valor, origem, parou, falta } = await valorDoCampo({
-        campo: decisao.escolhido,
-        escolha: respostas[cabecaDoValor(decisao.alvo)],
-        cofre,
-        objetivo,
-        feito,
-        escreverTexto,
-      });
-      if (parou) return { feito, sucesso: false, parou, falta };
-      const mostrado = ehSegredo(decisao.escolhido.nome) ? '(oculto)' : valor.slice(0, 40);
-      log(`jev-objetivo passo ${passo}: TYPE_TEXT @${decisao.alvo} ("${decisao.escolhido.nome}" <- ${mostrado} via ${origem}) conf=${decisao.confianca.toFixed(2)}`);
-      if (ehEditavel(decisao.escolhido, anotacao.editaveis)) {
-        // O campo de busca do popover nao tem nome acessivel, entao nao tem ref: o caminho e abrir
-        // e digitar no que ganhou foco. Clicar num popover JA aberto o fecharia, dai a conferida.
-        const aberto = await executar('eval', [jsDeEstarAberto(decisao.escolhido.nome)]);
-        if (!String(aberto).includes('true')) {
-          await executar('click', [`@${decisao.alvo}`]);
-          await executar('wait', ['--idle']);
+        else if (String(saida).includes('erro:')) return { feito, sucesso: false, parou: `SELECT falhou: ${saida}` };
+        feito.push(`SELECT "${decisao.escolhido.nome}"`);
+      } else if (decisao.operacao === 'PRESS_ENTER') {
+        log(`jev-objetivo passo ${passo}: PRESS_ENTER`);
+        await agir('press', ['Enter']);
+        feito.push('PRESS_ENTER');
+      } else if (decisao.operacao === 'SCROLL_DOWN') {
+        log(`jev-objetivo passo ${passo}: SCROLL_DOWN`);
+        await agir('press', ['PageDown']);
+        feito.push('SCROLL_DOWN');
+      } else if (decisao.operacao === 'TYPE_TEXT') {
+        const { valor, origem, parou, falta } = await valorDoCampo({
+          campo: decisao.escolhido,
+          escolha: respostas[cabecaDoValor(decisao.alvo)],
+          cofre,
+          objetivo,
+          feito,
+          escreverTexto,
+        });
+        if (parou) return { feito, sucesso: false, parou, falta };
+        const mostrado = ehSegredo(decisao.escolhido.nome) ? '(oculto)' : valor.slice(0, 40);
+        log(`jev-objetivo passo ${passo}: TYPE_TEXT @${decisao.alvo} ("${decisao.escolhido.nome}" <- ${mostrado} via ${origem}) conf=${decisao.confianca.toFixed(2)}`);
+        if (ehEditavel(decisao.escolhido, anotacao.editaveis)) {
+          // O campo de busca do popover nao tem nome acessivel, entao nao tem ref: o caminho e abrir
+          // e digitar no que ganhou foco. Clicar num popover JA aberto o fecharia, dai a conferida.
+          const aberto = await executar('eval', [jsDeEstarAberto(decisao.escolhido.nome)]);
+          if (!String(aberto).includes('true')) {
+            await agir('click', [`@${decisao.alvo}`]);
+            await executar('wait', ['--idle']);
+          }
+          await agir('type', [valor]);
+          // Sem esta espera o ciclo seguinte fotografa a lista ainda vazia e o Jev nao tem no que
+          // mirar; o proprio laco entao re-mirava o campo e a guarda de repeticao o matava.
+          log(`jev-objetivo passo ${passo}: ${await executar('eval', [JS_ESPERAR_OPCOES])}`);
+        } else {
+          await agir('fill', [`@${decisao.alvo}`, valor]);
         }
-        await executar('type', [valor]);
-        // Sem esta espera o ciclo seguinte fotografa a lista ainda vazia e o Jev nao tem no que
-        // mirar; o proprio laco entao re-mirava o campo e a guarda de repeticao o matava.
-        log(`jev-objetivo passo ${passo}: ${await executar('eval', [JS_ESPERAR_OPCOES])}`);
+        feito.push(`TYPE_TEXT "${decisao.escolhido.nome}"`);
       } else {
-        await executar('fill', [`@${decisao.alvo}`, valor]);
+        log(`jev-objetivo passo ${passo}: CLICK @${decisao.alvo} (${rotulo(decisao.escolhido)}) conf=${decisao.confianca.toFixed(2)}`);
+        await agir('click', [`@${decisao.alvo}`]);
+        feito.push(`CLICK ${rotulo(decisao.escolhido)}`);
       }
-      feito.push(`TYPE_TEXT "${decisao.escolhido.nome}"`);
-    } else {
-      log(`jev-objetivo passo ${passo}: CLICK @${decisao.alvo} (${rotulo(decisao.escolhido)}) conf=${decisao.confianca.toFixed(2)}`);
-      await executar('click', [`@${decisao.alvo}`]);
-      feito.push(`CLICK ${rotulo(decisao.escolhido)}`);
+    } catch (err) {
+      if (!(err instanceof FalhaDoNavegador)) throw err;
+      return { feito, sucesso: false, parou: `o navegador falhou no ${err.verbo}: ${err.message}` };
     }
     await executar('wait', ['--idle']);
   }
