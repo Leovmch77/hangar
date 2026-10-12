@@ -2,7 +2,7 @@
 //! o gerou (o backend guarda o hash), então ele aparece uma vez, até fechar o diálogo.
 use super::*;
 use super::device::Remote;
-use crate::api::{ShareCreated, ShareEntry, ShareFailure, SharePrereqs};
+use crate::api::{PairLevel, ShareCreated, ShareEntry, ShareFailure, SharePrereqs};
 
 const WATCH_EVERY: Duration = Duration::from_secs(3);
 const WATCH_FOR: Duration = Duration::from_secs(5 * 60);
@@ -18,7 +18,32 @@ pub(super) fn when_label(epoch: f64) -> String {
 }
 
 /// `Unreachable`: o link do Funnel não abriu de fora no prazo e o servidor já o revogou; gerar de novo é a nova tentativa.
-enum Created { Link(ShareCreated), Pair(ShareCreated), Blocked(SharePrereqs), Unreachable { stage: String, detail: String } }
+enum Created { Link(ShareCreated), Pair(ShareCreated, PairLevel), Blocked(SharePrereqs), Unreachable { stage: String, detail: String } }
+
+/// Nome do nível como a tela mostra.
+pub(super) fn level_label(level: PairLevel) -> String {
+    tr_shared(match level { PairLevel::Full => "pair_level_full", PairLevel::View => "pair_level_view" }, &[])
+}
+
+/// Com acesso completo, as sessões do grupo que já ficam abertas para a outra pessoa; ver e recado não abre nada.
+pub(super) fn opens_line(level: PairLevel, group: &[String]) -> Option<String> {
+    (level == PairLevel::Full && !group.is_empty()).then(|| tr_shared("pair_opens_sessions", &[("sessoes", &group.join(", "))]))
+}
+
+/// Os dois níveis com a explicação de cada; `pick` roda com o escolhido.
+pub(super) fn level_choice<T: 'static>(id: &'static str, title: String, group: &[String], picked: Option<PairLevel>, disabled: bool,
+    pick: impl Fn(&mut T, PairLevel, &mut Context<T>) + Clone + 'static, cx: &mut Context<T>) -> Div {
+    [PairLevel::Full, PairLevel::View].into_iter().fold(div().flex().flex_col().gap_2()
+        .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).whitespace_normal().child(title)), |col, level| {
+        let hint = tr_shared(if level == PairLevel::Full { "pair_level_full_hint" } else { "pair_level_view_hint" }, &[]);
+        let pick = pick.clone();
+        col.child(div().flex().flex_col().gap(px(2.))
+            .child(div().child(Button::new((id, level as usize)).small().when(picked == Some(level), |b| b.primary()).label(level_label(level))
+                .disabled(disabled).on_click(cx.listener(move |this, _, _, cx| pick(this, level, cx)))))
+            .child(div().text_xs().text_color(theme::muted()).whitespace_normal().child(hint))
+            .children(opens_line(level, group).map(|line| div().text_xs().text_color(theme::warning()).whitespace_normal().child(line))))
+    })
+}
 
 /// Só a linha do comando: colar o `fix` inteiro num terminal rodaria também a frase do Funnel.
 fn operator_command(p: &SharePrereqs) -> Option<&str> {
@@ -114,6 +139,10 @@ pub(super) struct ShareDialog {
     watching: bool,
     authorizing: bool,
     authorize_error: Option<String>,
+    /// "Convidar para parear" pedido: o nível é escolhido antes de gerar.
+    choosing_level: bool,
+    /// A sessão e os membros locais do grupo dela, que o acesso completo já abre.
+    group: Vec<String>,
 }
 
 impl ShareDialog {
@@ -127,13 +156,16 @@ impl ShareDialog {
         cx.notify();
     }
 
-    /// `pair` gera o convite de par em vez do de compartilhamento: mesma rota de túnel, mesmos pré-requisitos.
-    fn create(&mut self, pair: bool, cx: &mut Context<Self>) {
+    /// `pair` gera o convite de par com o nível dado em vez do de compartilhamento: mesma rota de túnel, mesmos pré-requisitos.
+    fn create(&mut self, pair: Option<PairLevel>, cx: &mut Context<Self>) {
         if self.busy { return; }
-        (self.busy, self.copied, self.created, self.authorize_error) = (true, false, None, None);
+        (self.busy, self.copied, self.created, self.authorize_error, self.choosing_level) = (true, false, None, None, false);
         let name = self.name.clone();
         self.call(move |api| async move {
-            let made = if pair { api.create_pair_invite(&name).await.map(Created::Pair) } else { api.share_create(&name).await.map(Created::Link) };
+            let made = match pair {
+                Some(level) => api.create_pair_invite(&name, level).await.map(|c| Created::Pair(c, level)),
+                None => api.share_create(&name).await.map(Created::Link),
+            };
             let result = match made {
                 Ok(created) => Ok(created),
                 Err(ShareFailure::Blocked(prereqs)) => Ok(Created::Blocked(prereqs)),
@@ -232,11 +264,14 @@ impl ShareDialog {
                 .child(div().text_sm().text_color(theme::danger()).whitespace_normal().child(super::pair_accept::unreachable_text(stage)))
                 .when(!detail.is_empty(), |el| el.child(div().text_xs().text_color(theme::muted()).whitespace_normal().child(detail.clone())))
                 .into_any_element(),
-            Ok(Created::Link(c) | Created::Pair(c)) => {
-                let key = if matches!(self.created, Some(Ok(Created::Pair(_)))) { "native_par_whatsapp" } else { "compartilhar_whatsapp_texto" };
+            Ok(Created::Link(c) | Created::Pair(c, _)) => {
+                let level = match self.created { Some(Ok(Created::Pair(_, level))) => Some(level), _ => None };
+                let key = if level.is_some() { "native_par_whatsapp" } else { "compartilhar_whatsapp_texto" };
                 let (copy, send) = (c.link.clone(), whatsapp_url(&tr_shared(key, &[("link", &c.link)])));
                 div().flex().flex_col().gap_2()
                     .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(theme::muted()).child(tr_shared("compartilhar_link_novo", &[])))
+                    .children(level.map(|level| div().text_sm().whitespace_normal()
+                        .child(format!("{} · {}", tr_shared("pair_level_title", &[]), level_label(level)))))
                     .child(div().p_2().rounded_md().bg(theme::inset()).font_family(theme::MONO).text_sm().whitespace_normal().child(c.link.clone()))
                     .child(div().text_xs().text_color(theme::muted()).child(tr_shared("compartilhar_vale_ate", &[("quando", &when_label(c.expires_at))])))
                     .child(div().flex().gap_2()
@@ -294,17 +329,21 @@ impl Render for ShareDialog {
             })).into_any_element(),
         };
         let any = self.list.ok().is_some_and(|l| !l.is_empty());
-        let link_shown = matches!(self.created, Some(Ok(Created::Link(_) | Created::Pair(_))));
+        let link_shown = matches!(self.created, Some(Ok(Created::Link(_) | Created::Pair(..))));
+        let choosing = self.choosing_level && !link_shown && !self.busy;
+        let choice = choosing.then(|| level_choice("share-pair-level", tr_shared("pair_level_title", &[]), &self.group, None, self.watching,
+            |d: &mut ShareDialog, level, cx| d.create(Some(level), cx), cx));
         div().flex().flex_col().gap_3()
             .child(div().p_2().rounded_md().bg(theme::accent_dim()).text_sm().whitespace_normal().child(tr_shared("compartilhar_aviso_confianca", &[])))
             .children(self.render_created(cx))
-            .when(!link_shown, |el| el.child(div().flex().flex_wrap().gap_2()
+            .children(choice)
+            .when(!link_shown && !choosing, |el| el.child(div().flex().flex_wrap().gap_2()
                 .child(Button::new("share-create").primary()
                     .label(tr_shared(if self.busy { "compartilhar_gerando" } else { "compartilhar_gerar" }, &[])).disabled(self.busy || self.watching)
-                    .on_click(cx.listener(|d, _, _, cx| d.create(false, cx))))
+                    .on_click(cx.listener(|d, _, _, cx| d.create(None, cx))))
                 .child(Button::new("share-create-pair")
                     .label(tr("par_convidar")).disabled(self.busy || self.watching)
-                    .on_click(cx.listener(|d, _, _, cx| d.create(true, cx))))))
+                    .on_click(cx.listener(|d, _, _, cx| { d.choosing_level = true; cx.notify(); })))))
             .child(chrome::section_label(tr_shared("compartilhar_quem_entrou", &[])))
             .child(list)
             .when_some(self.revoke_error.clone(), |el, error| el.child(div().id("share-revoke-error").role(Role::Alert).text_sm()
@@ -315,15 +354,23 @@ impl Render for ShareDialog {
 }
 
 impl Hangar {
+    /// A sessão e os membros do grupo dela nesta máquina: o que um par com acesso completo passa a abrir.
+    pub(super) fn local_group(&self, target: &super::sidebar::Target) -> Vec<String> {
+        let peers = self.target_session(target).map(|s| s.peers().to_vec()).unwrap_or_default();
+        std::iter::once(target.name.clone()).chain(peers.into_iter().filter(|p| !p.contains("::"))).collect()
+    }
+
     /// O convite nasce na máquina da sessão: é o backend dela que guarda o código e abre a porta do convidado.
     pub(super) fn open_share_dialog(&mut self, target: super::sidebar::Target, window: &mut Window, cx: &mut Context<Self>) {
         let Some(api) = self.machine_api(&target.server) else {
             window.push_notification(Notification::error(self.machine_error(&target.server)), cx);
             return;
         };
+        let group = self.local_group(&target);
         let (runtime, name) = (self.runtime.handle().clone(), target.name);
         let dialog = cx.new(|_| ShareDialog { api, runtime, name: name.clone(), list: Remote::default(), created: None,
-            revoke_error: None, copied: false, busy: false, watch: None, watching: false, authorizing: false, authorize_error: None });
+            revoke_error: None, copied: false, busy: false, watch: None, watching: false, authorizing: false, authorize_error: None,
+            choosing_level: false, group });
         dialog.update(cx, |d, cx| d.reload(cx));
         let title = tr_shared("compartilhar_titulo", &[("nome", &name)]);
         window.open_dialog(cx, move |d, _, _| popup::dialog(d).w(px(560.)).title(title.clone()).child(dialog.clone()));
@@ -351,6 +398,17 @@ mod tests {
         assert!(matches!(share_refusal(409, &blocked), Some(ShareFailure::Blocked(_))));
         assert!(share_refusal(409, &json!({"detail": {"code": "outro"}})).is_none());
         assert!(share_refusal(502, &serde_json::Value::Null).is_none());
+    }
+
+    #[test]
+    fn only_full_access_lists_the_sessions_it_opens() {
+        use super::{opens_line, level_label};
+        use crate::api::PairLevel;
+        let group = ["a".to_owned(), "b".to_owned()];
+        let line = opens_line(PairLevel::Full, &group).expect("acesso completo diz o que abre");
+        assert!(line.contains("a, b") && line != "pair_opens_sessions", "{line}");
+        assert_eq!(opens_line(PairLevel::View, &group), None);
+        assert_ne!(level_label(PairLevel::Full), level_label(PairLevel::View));
     }
 
     #[test]

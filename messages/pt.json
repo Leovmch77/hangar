@@ -7984,5 +7984,6 @@
   "pair_release": "Liberar para {dono}",
   "pair_left_notice": "{dono} saiu do pareamento.",
   "pair_not_transitive": "O grupo não é transitivo: quem está pareado com outra pessoa não alcança as sessões de fora deste grupo.",
-  "pair_opens_sessions": "Ficarão abertas: {sessoes}"
+  "pair_opens_sessions": "Ficarão abertas: {sessoes}",
+  "native_pair_release_failed": "A sessão {sessao} entrou no grupo, mas o acesso completo para {dono} não foi liberado: {erro}"
 }

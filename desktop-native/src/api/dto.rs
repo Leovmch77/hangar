@@ -124,7 +124,13 @@ pub struct SessionInfo {
     #[serde(default)] pub pair_external: Option<PairExternal>,
     /// Todos os pares de fora do grupo, com o nível desta sessão sob cada um.
     #[serde(default)] pub pair_externals: Option<Vec<PairExternalEntry>>,
+    /// Só no app: a linha é a sessão de outra pessoa posta dentro do grupo local; nunca vem do servidor.
+    #[serde(skip)] pub outside: Option<OutsideMark>,
 }
+
+/// A sessão de fora dentro do grupo: `own` é a chave do servidor próprio onde mora o par, e é lá que ele se desfaz.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct OutsideMark { pub own: String, pub alias: String, pub owner: String }
 
 /// `level`: "full" ou "view"; `pending` = o par tem acesso completo e esta sessão espera o "Liberar".
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
@@ -168,6 +174,12 @@ impl SessionInfo {
     pub fn takes_messages(&self) -> bool { self.readable() && !self.orq() && !self.read_only() }
     /// A sessão da outra pessoa num par externo: acompanha, sem escrever nem mexer nela.
     pub fn read_only(&self) -> bool { self.guest_kind.as_deref() == Some("pair") }
+    /// Pares de fora do grupo; servidor sem `pair_externals` manda só o primeiro, sem nível nem endereço (ver e recado).
+    pub fn outside_pairs(&self) -> Vec<PairExternalEntry> {
+        if let Some(all) = &self.pair_externals { return all.clone(); }
+        self.pair_external.iter().map(|p| PairExternalEntry { alias: p.alias.clone(), owner: p.owner.clone(), session: p.session.clone(),
+            level: "view".into(), ..Default::default() }).collect()
+    }
     /// O árbitro que esta linha `orq` aponta, entre as sessões da mesma lista.
     pub fn arbiter<'a>(&self, sessions: &'a [SessionInfo]) -> Option<&'a SessionInfo> {
         let name = self.orq_arbiter.as_deref()?;
@@ -769,6 +781,17 @@ mod tests {
         let ro = SessionInfo { guest_kind: Some("pair".into()), ..chat.clone() };
         assert!(ro.read_only() && !ro.takes_messages());
         assert!(!SessionInfo { guest_kind: Some("share".into()), ..chat }.read_only());
+    }
+
+    #[test]
+    fn outside_pairs_fall_back_to_the_legacy_single_pair_as_view() {
+        use super::{PairExternal, PairExternalEntry};
+        let old = SessionInfo { pair_external: Some(PairExternal { alias: "ana".into(), owner: "Ana".into(), session: "Y".into() }), ..Default::default() };
+        let got = old.outside_pairs();
+        assert_eq!((got.len(), got[0].level.as_str(), got[0].address.as_str(), got[0].pending), (1, "view", "", false));
+        let entry = PairExternalEntry { alias: "bia".into(), level: "full".into(), ..Default::default() };
+        let new = SessionInfo { pair_externals: Some(vec![entry.clone()]), ..old };
+        assert_eq!(new.outside_pairs(), vec![entry], "a lista nova vence o campo antigo");
     }
 
     #[test]

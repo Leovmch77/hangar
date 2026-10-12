@@ -1,7 +1,7 @@
 //! Aceite de convite de par: a sessão que vai parear vem do menu dela ou é escolhida aqui.
 use super::*;
 use super::machines::enter_to_focused;
-use crate::api::{PairAccepted, ShareFailure, SharePrereqs};
+use crate::api::{PairAccepted, PairLevel, ShareFailure, SharePrereqs};
 use super::share::prerequisite_notice;
 
 /// Só o link `https://host.ts.net:8443/par/CÓDIGO` do Funnel: outro host ou porta nunca recebe o resgate.
@@ -24,6 +24,19 @@ pub(super) fn unreachable_text(stage: &str) -> String {
     tr_shared(if stage == "dns" { "share_reach_failed_dns" } else { "share_reach_failed_funnel" }, &[])
 }
 
+/// Antes do aceite só se conhece a máquina do link: ela faz as vezes do dono na pergunta.
+pub(super) fn accept_level_title(raw: &str) -> String {
+    match parse_pair_link(raw).and_then(|link| url::Url::parse(&link).ok()?.host_str()?.split('.').next().map(str::to_owned)) {
+        Some(machine) => tr_shared("pair_accept_level_title", &[("dono", &machine)]),
+        None => tr_shared("pair_level_title", &[]),
+    }
+}
+
+/// Aviso do aceite: o nível que veio do outro lado.
+pub(super) fn received_notice(level: PairLevel, owner: &str) -> String {
+    tr_shared(if level == PairLevel::Full { "pair_level_received_full" } else { "pair_level_received_view" }, &[("dono", owner)])
+}
+
 fn accept_failure(error: &Failure) -> String {
     if error.detail.starts_with("erro_convite_") { tr_shared(&error.detail, &[]) } else { Hangar::failure(error) }
 }
@@ -40,6 +53,10 @@ pub(super) struct PairAcceptDialog {
     error: Option<String>,
     // O túnel que o aceite sobe ainda não está pronto: o aviso é o mesmo do compartilhar.
     blocked: Option<SharePrereqs>,
+    /// O que quem convidou terá aqui; começa no mais fechado.
+    level: PairLevel,
+    /// Cada sessão possível com o grupo local dela: o acesso completo abre todas.
+    groups: Vec<(String, Vec<String>)>,
 }
 
 impl PairAcceptDialog {
@@ -57,8 +74,8 @@ impl PairAcceptDialog {
             return;
         };
         (self.busy, self.error, self.blocked) = (true, None, None);
-        let (me, api) = (cx.entity().downgrade(), self.api.clone());
-        let _ = self.hangar.update(cx, |this, cx| this.accept_pair(me, api, session, link, window, cx));
+        let (me, api, level) = (cx.entity().downgrade(), self.api.clone(), self.level);
+        let _ = self.hangar.update(cx, |this, cx| this.accept_pair(me, api, session, link, level, window, cx));
         cx.notify();
     }
 }
@@ -80,6 +97,11 @@ impl Render for PairAcceptDialog {
                     .on_click(cx.listener(move |this, _, _, cx| { this.choice = Some(name.clone()); cx.notify(); })));
             }
         }
+        let session = self.fixed.clone().or_else(|| self.choice.clone());
+        let group = self.groups.iter().find(|(name, _)| Some(name) == session.as_ref()).map(|(_, g)| g.clone()).unwrap_or_default();
+        let title = accept_level_title(&self.input.read(cx).value());
+        col = col.child(super::share::level_choice("par-nivel", title, &group, Some(self.level), self.busy,
+            |d: &mut PairAcceptDialog, level, cx| { d.level = level; cx.notify(); }, cx));
         col.when(self.busy, |el| el.child(div().id("par-busy").role(Role::Status).text_sm().text_color(theme::muted()).child(tr("par_aceitando"))))
             .when_some(self.blocked.as_ref(), |el, prereqs| el.child(prerequisite_notice("par-blocked", prereqs, None, None)))
             .when_some(self.error.clone(), |el, error| el.child(div().id("par-error").role(Role::Alert).text_sm()
@@ -102,10 +124,19 @@ impl Hangar {
             return;
         };
         let hangar = cx.entity().downgrade();
-        let sessions = self.sessions.iter().filter(|s| s.state != "dead" && !s.orq()).map(|s| s.name.clone()).collect();
+        let sessions: Vec<String> = self.sessions.iter().filter(|s| s.state != "dead" && !s.orq()).map(|s| s.name.clone()).collect();
+        let groups = match &target {
+            Some(t) => vec![(t.name.clone(), self.local_group(t))],
+            None => { let active = self.active_key(); sessions.iter().map(|n| (n.clone(), self.local_group(&super::sidebar::Target::new(&active, n)))).collect() }
+        };
         let fixed = target.map(|t| t.name);
         let input = cx.new(|cx| InputState::new(window, cx).placeholder(tr("par_placeholder")).default_value(link.unwrap_or_default()));
-        let dialog = cx.new(|_| PairAcceptDialog { hangar, api, input: input.clone(), fixed: fixed.clone(), choice: None, sessions, busy: false, error: None, blocked: None });
+        // O título do nível segue o link digitado.
+        let dialog = cx.new(|cx| {
+            cx.observe(&input, |_, _, cx| cx.notify()).detach();
+            PairAcceptDialog { hangar, api, input: input.clone(), fixed: fixed.clone(), choice: None, sessions, busy: false, error: None,
+                blocked: None, level: PairLevel::View, groups }
+        });
         let title = match &fixed { Some(s) => tr_shared("native_par_titulo_sessao", &[("sessao", s)]), None => tr("par_titulo") };
         window.open_dialog(cx, move |d, _, cx| {
             let busy = dialog.read(cx).busy;
@@ -120,16 +151,19 @@ impl Hangar {
         input.update(cx, |input, cx| input.focus(window, cx));
     }
 
-    fn accept_pair(&mut self, dialog: WeakEntity<PairAcceptDialog>, api: Api, session: String, link: String, window: &mut Window, cx: &mut Context<Self>) {
+    #[allow(clippy::too_many_arguments)]
+    fn accept_pair(&mut self, dialog: WeakEntity<PairAcceptDialog>, api: Api, session: String, link: String, level: PairLevel, window: &mut Window,
+        cx: &mut Context<Self>) {
         let (done, result) = tokio::sync::oneshot::channel();
-        self.runtime.spawn(async move { let _ = done.send(api.accept_pair(&session, &link).await); });
+        self.runtime.spawn(async move { let _ = done.send(api.accept_pair(&session, &link, level).await); });
         cx.spawn_in(window, async move |this, cx| {
             let result: Result<PairAccepted, ShareFailure> = result.await.unwrap_or_else(|_| Err(ShareFailure::Other(Failure::local("network_error"))));
             let _ = this.update_in(cx, |this, window, cx| match result {
                 Ok(ok) => {
                     window.close_all_dialogs(cx);
                     window.push_notification(Notification::success(tr_shared("native_par_aceito", &[("dono", &ok.owner), ("sessao", &ok.session)])), cx);
-                    this.refresh_external_pairs(cx);
+                    window.push_notification(Notification::info(received_notice(ok.level, &ok.owner)), cx);
+                    this.refresh_external_pairs(window, cx);
                 }
                 Err(failure) => { let _ = dialog.update(cx, |d, cx| {
                     d.busy = false;
@@ -150,6 +184,15 @@ impl Hangar {
 mod tests {
     use super::*;
     use core::prelude::v1::test;
+
+    #[test]
+    fn level_question_names_the_machine_and_the_notice_the_level() {
+        let named = accept_level_title("https://pc-ana.tail.ts.net:8443/par/ABC12");
+        assert!(named.contains("pc-ana") && !named.contains("tail"), "{named}");
+        assert_eq!(accept_level_title("lixo"), tr_shared("pair_level_title", &[]), "sem link, a pergunta genérica");
+        let (full, view) = (received_notice(PairLevel::Full, "Ana"), received_notice(PairLevel::View, "Ana"));
+        assert!(full.contains("Ana") && view.contains("Ana") && full != view, "{full} / {view}");
+    }
 
     #[test]
     fn pair_link_accepts_funnel_par_links_only() {

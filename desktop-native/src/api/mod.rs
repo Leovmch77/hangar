@@ -432,12 +432,23 @@ impl Api {
     }
 
     /// Mesmo túnel e mesmos pré-requisitos do compartilhamento: o 409 devolve o que falta.
-    pub async fn create_pair_invite(&self, name: &str) -> Result<PairInvite, ShareFailure> {
-        self.post_with_prerequisites(name, "pair-invite", None).await
+    pub async fn create_pair_invite(&self, name: &str, level: PairLevel) -> Result<PairInvite, ShareFailure> {
+        self.post_with_prerequisites(name, "pair-invite", Some(json!({"level": level.wire()}))).await
     }
 
-    pub async fn accept_pair(&self, name: &str, link: &str) -> Result<PairAccepted, ShareFailure> {
-        self.post_with_prerequisites(name, "pair-accept", Some(json!({"link": link}))).await
+    /// `level`: o que quem convidou terá aqui.
+    pub async fn accept_pair(&self, name: &str, link: &str, level: PairLevel) -> Result<PairAccepted, ShareFailure> {
+        self.post_with_prerequisites(name, "pair-accept", Some(json!({"link": link, "level": level.wire()}))).await
+    }
+
+    /// Nível que o par `alias` tem na sessão `name` (o "Liberar" e o pôr no grupo com acesso completo).
+    pub async fn pair_access(&self, name: &str, alias: &str, level: PairLevel) -> Result<(), Failure> {
+        self.act(name, &["pair-access"], Some(json!({"alias": alias, "level": level.wire()})), false, 30).await.map(|_| ())
+    }
+
+    /// Desfaz o par com `alias::session` dos dois lados: "Sair do pareamento" e "Desfazer par".
+    pub async fn leave_external_pair(&self, alias: &str, session: &str) -> Result<(), Failure> {
+        self.server_send_query(reqwest::Method::DELETE, &["external-pairs", alias], &[("session", session)], None, 30).await.map(|_| ())
     }
 
     // Rota que sobe o Funnel: as recusas de `share_refusal` têm tela própria, e o resto segue como falha comum. O
@@ -735,8 +746,17 @@ pub struct ShareCreated { pub link: String, pub expires_at: f64 }
 /// O convite de par tem a mesma forma do de compartilhamento: link e validade.
 pub type PairInvite = ShareCreated;
 
+/// Nível do par: `Full` escreve e tem o terminal; `View` lê e manda recado. Ausente (Hangar antigo) é `View`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PairLevel { Full, #[default] View }
+
+impl PairLevel {
+    pub fn wire(self) -> &'static str { match self { PairLevel::Full => "full", PairLevel::View => "view" } }
+}
+
 #[derive(Clone, Debug, serde::Deserialize)]
-pub struct PairAccepted { pub alias: String, pub owner: String, pub session: String }
+pub struct PairAccepted { pub alias: String, pub owner: String, pub session: String, #[serde(default)] pub level: PairLevel }
 
 #[derive(Clone, Debug, serde::Deserialize)]
 pub struct ShareEntry { pub id: String, pub device: Option<String>, pub created_at: f64, pub redeemed_at: Option<f64>, pub expires_at: f64, pub pending: bool }
@@ -823,6 +843,14 @@ mod tests {
     use super::*;
     // O glob pode trazer o `test` da gpui, que colide com o atributo padrão; o nome explícito vence o glob.
     use core::prelude::v1::test;
+
+    #[test]
+    fn pair_accept_without_level_is_view() {
+        let old: PairAccepted = serde_json::from_value(json!({"ok": true, "alias": "a", "owner": "Ana", "session": "Y"})).unwrap();
+        assert_eq!(old.level, PairLevel::View);
+        let new: PairAccepted = serde_json::from_value(json!({"alias": "a", "owner": "Ana", "session": "Y", "level": "full"})).unwrap();
+        assert_eq!((new.level, new.level.wire()), (PairLevel::Full, "full"));
+    }
 
     #[test]
     fn dictation_client_defaults_to_no_organization_without_loading_any_model() {

@@ -4,9 +4,9 @@
 use super::*;
 use super::activity::web;
 use super::device::Remote;
-use super::grouping::{failed, glyph, web_with};
+use super::grouping::{Grant, failed, full_grants, glyph, pair_and_grant, web_with};
 use super::sidebar::SidebarReply;
-use crate::api::dto::PairResult;
+use crate::api::dto::{PairExternalEntry, PairResult};
 use gpui_kit::component::{WindowExt, checkbox::Checkbox};
 
 /// Cauda do histórico de cada membro lida para a conversa do grupo.
@@ -260,17 +260,25 @@ impl Hangar {
         cx.notify();
     }
 
+    /// As marcadas que entram num grupo com par de fora de acesso completo: ficam abertas para ele ao confirmar.
+    fn sheet_grants(&self) -> Vec<Grant> {
+        let Some(sheet) = self.sidebar.grouping.sheet.as_ref() else { return Vec::new() };
+        let Some(group) = self.live(&sheet.session) else { return Vec::new() };
+        sheet.picked.iter().filter_map(|name| self.live(name)).flat_map(|side| full_grants(group, side)).collect()
+    }
+
     /// Criar grupo e adicionar membro são o mesmo pedido: o servidor une os grupos.
     fn pair_from_sheet(&mut self, cx: &mut Context<Self>) {
         let api = self.sheet_api();
         let tell = self.sidebar_tell();
+        let grants = self.sheet_grants();
         let Some(sheet) = self.sidebar.grouping.sheet.as_mut() else { return };
         if sheet.busy || sheet.picked.is_empty() { return; }
         let Some(api) = api else { sheet.error = Some(tr("connection_failed")); cx.notify(); return };
         let (id, name, picked, task) = (sheet.id, sheet.session.clone(), sheet.picked.clone(), sheet.task.read(cx).value().trim().to_owned());
         (sheet.busy, sheet.error) = (true, None);
         self.runtime.spawn(async move {
-            let result = api.pair(&name, &picked, &task, false).await;
+            let result = pair_and_grant(api, name, picked.clone(), task, false, grants).await;
             tell.send(SidebarReply::Sheet(SheetReply::Paired(id, picked, result))).await;
         });
         cx.notify();
@@ -391,11 +399,29 @@ impl Hangar {
                 .when(state.is_some(), |el| el.child(chrome::icon_button(SharedString::from(format!("group-open-{peer}")), IconName::MessageCircle, tip, cx)
                     .on_click(cx.listener(move |this, _, window, cx| this.open_member(&open, window, cx))))))
         });
+        // Acesso completo pendente de cada membro daqui, com o "Liberar" ao lado.
+        let server = servers::norm(&sheet.server);
+        let pending: Vec<(String, PairExternalEntry)> = std::iter::once(&me).chain(peers.iter()).filter_map(|name| self.live(name))
+            .flat_map(|s| s.outside_pairs().into_iter().filter(|p| p.pending).map(|p| (s.name.clone(), p))).collect();
+        let pending = pending.into_iter().enumerate().fold(div().flex().flex_col().gap(px(2.)), |list, (i, (name, p))| {
+            let (target, alias) = (super::sidebar::Target::new(&server, &name), p.alias.clone());
+            list.child(div().flex().items_center().gap_3().px_2().py(px(6.)).rounded(px(8.)).bg(theme::warning().opacity(0.08))
+                .child(div().flex_1().min_w_0().flex().flex_col()
+                    .child(div().truncate().text_sm().font_weight(FontWeight::MEDIUM).child(name))
+                    .child(div().text_xs().text_color(theme::warning()).child(tr_shared("pair_full_pending", &[]))))
+                .child(Button::new(("group-release", i)).small().label(tr_shared("pair_release", &[("dono", &p.owner)]))
+                    .on_click(cx.listener(move |this, _, window, cx| this.release_pair(target.clone(), alias.clone(), window, cx)))))
+        });
+        let outside = self.live(&me).is_some_and(|s| !s.outside_pairs().is_empty());
+        let notices: Vec<String> = self.sheet_grants().iter().map(|g| tr_shared("pair_full_confirm", &[("sessao", &g.session), ("dono", &g.owner)])).collect();
         let add = if adding {
             let label = if busy { web("par_adicionando") } else if picked.is_empty() { web("par_escolha_sessoes") }
                 else { web_with("par_adicionar_nomes", "nomes", &picked.join(", ")) };
             div().flex().flex_col().gap_2()
                 .child(pick_list(self, "par_adicionar_aria", "par_vazio_fora_grupo", cx))
+                // Confirmar o "Adicionar" com esta frase à vista é o que libera o acesso completo.
+                .when(!notices.is_empty(), |el| el.child(div().p_2().rounded_md().bg(theme::warning().opacity(0.12)).flex().flex_col().gap(px(4.))
+                    .text_sm().whitespace_normal().children(notices)))
                 .child(div().child(Button::new("group-sheet-add").primary().small().label(label).loading(busy).disabled(busy || picked.is_empty())
                     .on_click(cx.listener(|this, _, _, cx| this.pair_from_sheet(cx)))))
         } else {
@@ -433,7 +459,12 @@ impl Hangar {
         };
         div().flex().flex_col().gap_3()
             .child(muted(web("par_membros_hint")))
+            .when(outside, |el| el.child(muted(tr_shared("pair_not_transitive", &[]))))
+            // Esta sessão é a ponta do par: o "Sair do grupo" do rodapé desfaz o par para todos.
+            .children(self.anchored_owners(&super::sidebar::Target::new(&server, &me)).iter()
+                .map(|dono| warn(tr_shared("pair_undo_anchor_body", &[("dono", dono)]))))
             .child(members)
+            .child(pending)
             .child(add)
             .children(contract)
             .child(div().flex().flex_col().gap_2().child(heading(web("par_conversa_titulo"))).child(feed))
