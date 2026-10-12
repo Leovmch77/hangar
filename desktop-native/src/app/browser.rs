@@ -661,7 +661,7 @@ impl BrowserPanel {
         match error {
             Some(line) => {
                 self.error_count += 1;
-                self.page_errors.push_back(line);
+                self.page_errors.push_back(error_text(&line));
                 if self.page_errors.len() > ERRORS_KEPT { self.page_errors.pop_front(); }
             }
             None if self.error_count == 0 => return,
@@ -1247,6 +1247,12 @@ const VIEWPORT: &str = "[visualViewport.scale,visualViewport.offsetLeft,visualVi
 fn viewport_of(v: &serde_json::Value) -> Option<(f32, f32, f32)> {
     let n = |i: usize| v.get(i).and_then(serde_json::Value::as_f64).map(|x| x as f32);
     Some((n(0).filter(|z| *z > 0.)?, n(1)?, n(2)?))
+}
+
+/// Linha do registro do agente (sem acento, com o tipo na frente) como a pessoa lê na lista do selo.
+fn error_text(line: &str) -> String {
+    if let Some(rest) = line.strip_prefix("erro nao tratado: ") { return tr("browser_errors_uncaught").replace("{e}", rest); }
+    ["error: ", "assert: "].iter().find_map(|p| line.strip_prefix(p)).unwrap_or(line).to_owned()
 }
 
 /// "nav-tela está usando o navegador · clicando em “Salvar”". Nome longo de alvo é cortado: a faixa tem uma linha.
