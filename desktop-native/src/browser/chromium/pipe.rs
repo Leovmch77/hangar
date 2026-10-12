@@ -95,20 +95,20 @@ thread_local! {
 
 impl Browser {
     /// O Chromium em uso, ou um novo. Nasce com a escala da janela que abriu o primeiro navegador.
-    pub fn shared(executor: &ForegroundExecutor, scale: f32) -> Result<Rc<Browser>, String> {
+    pub fn shared(executor: &ForegroundExecutor) -> Result<Rc<Browser>, String> {
         if let Some(browser) = Self::current() { return Ok(browser); }
         let bin = launch::find()?;
-        let browser = Self::launch(bin, &Self::profile()?, scale, executor)?;
+        let browser = Self::launch(bin, &Self::profile()?, executor)?;
         SHARED.with(|s| *s.borrow_mut() = Rc::downgrade(&browser));
         Ok(browser)
     }
 
     /// Como `shared`, sem esperar o processo responder: o aperto de mão corre sozinho e `ready` o espera. Para a
     /// interface não congelar enquanto o Chromium nasce.
-    pub fn shared_async(executor: &ForegroundExecutor, background: &BackgroundExecutor, scale: f32) -> Result<Rc<Browser>, String> {
+    pub fn shared_async(executor: &ForegroundExecutor, background: &BackgroundExecutor) -> Result<Rc<Browser>, String> {
         if let Some(browser) = Self::current() { return Ok(browser); }
         let bin = launch::find()?;
-        let browser = Self::spawn(bin, &Self::profile()?, scale, executor)?;
+        let browser = Self::spawn(bin, &Self::profile()?, executor)?;
         let handshake = browser.handshake(bin, background).boxed_local().shared();
         // Corre mesmo sem ninguém esperar: quem só aquece o processo não fica olhando.
         executor.spawn(handshake.clone()).detach();
@@ -159,8 +159,8 @@ impl Browser {
         }
     }
 
-    fn launch(bin: &Path, profile: &Path, scale: f32, executor: &ForegroundExecutor) -> Result<Rc<Browser>, String> {
-        let browser = Self::spawn(bin, profile, scale, executor)?;
+    fn launch(bin: &Path, profile: &Path, executor: &ForegroundExecutor) -> Result<Rc<Browser>, String> {
+        let browser = Self::spawn(bin, profile, executor)?;
         browser.call_blocking(None, "Browser.getVersion", json!({}), Duration::from_secs(10))
             .map_err(|e| format!("o Chromium ({}) nao respondeu: {e}", bin.display()))?;
         // Títulos e endereços das páginas, e janelas abertas por `window.open`.
@@ -173,8 +173,8 @@ impl Browser {
     }
 
     /// Processo, thread de leitura e entrega dos eventos; nenhuma espera pelo CDP.
-    fn spawn(bin: &Path, profile: &Path, scale: f32, executor: &ForegroundExecutor) -> Result<Rc<Browser>, String> {
-        let launched = launch::spawn(bin, profile, scale).map_err(|e| format!("o Chromium ({}) nao abriu: {e}", bin.display()))?;
+    fn spawn(bin: &Path, profile: &Path, executor: &ForegroundExecutor) -> Result<Rc<Browser>, String> {
+        let launched = launch::spawn(bin, profile).map_err(|e| format!("o Chromium ({}) nao abriu: {e}", bin.display()))?;
         let wire = Arc::new(Wire {
             writer: Mutex::new(launched.writer),
             next: AtomicU64::new(1),
@@ -436,7 +436,7 @@ mod tests {
     fn page_mode_png_frames_keep_the_transparent_background() {
         let bin = launch::find().unwrap();
         let profile = std::env::temp_dir().join(format!("hangar-page-proof-{}", std::process::id()));
-        let launched = launch::spawn(bin, &profile, 1.0).unwrap();
+        let launched = launch::spawn(bin, &profile).unwrap();
         let wire = Arc::new(Wire { writer: Mutex::new(launched.writer), next: AtomicU64::new(1), pending: Mutex::default(), sinks: Mutex::default() });
         let (events, _received) = async_channel::unbounded();
         let reading = wire.clone();

@@ -46,6 +46,8 @@ struct State {
     theme: &'static str,
     layout: Layout,
     hidden: bool,
+    /// Escala da janela onde o painel está; `None` onde o motor já desenha na escala certa (WebView2).
+    scale: Option<f32>,
     navigated: bool,
     /// Conta navegações do quadro principal (documento novo ou só o endereço): `goto`/`back`/`reload` esperam mudar.
     navs: u64,
@@ -70,7 +72,7 @@ impl<P: Page> Controller<P> {
     pub fn new(page: P, hidden: bool) -> Self {
         Self { page, turn: Mutex::new(()), wanted_hidden: Cell::new(hidden), state: RefCell::new(State { refs: HashMap::new(), console: VecDeque::new(),
             network: VecDeque::new(), inflight: HashSet::new(), requests: HashMap::new(), dialog: None, last_network: Instant::now(), theme: "sistema", layout: Layout::Desktop,
-            hidden: false, navigated: false, navs: 0, enabled: HashSet::new() }) }
+            hidden: false, scale: None, navigated: false, navs: 0, enabled: HashSet::new() }) }
     }
 
     /// Aplica o pedido mais novo, não o do nascimento: o painel pode aparecer enquanto os domínios ligam.
@@ -92,6 +94,13 @@ impl<P: Page> Controller<P> {
         self.state.borrow_mut().hidden = self.wanted_hidden.get();
         let layout = self.state.borrow().layout;
         if let Err(e) = self.apply_layout(layout).await { eprintln!("[nav] layout nao aplicado: {e}"); }
+    }
+
+    /// O painel apareceu numa janela com esta escala: a página desktop passa a desenhar nela, sem mexer no tamanho.
+    pub async fn set_scale(&self, scale: f32) {
+        let _turn = self.turn.lock().await;
+        let (layout, hidden) = { let mut s = self.state.borrow_mut(); s.scale = Some(scale); (s.layout, s.hidden) };
+        if layout == Layout::Desktop && !hidden && let Err(e) = self.apply_layout(layout).await { eprintln!("[nav] escala nao aplicada: {e}"); }
     }
 
     pub fn on_event(&self, method: &str, p: &Value) {
@@ -459,9 +468,9 @@ impl<P: Page> Controller<P> {
     }
 
     async fn apply_layout(&self, layout: Layout) -> Result<(), String> {
-        let metrics = |w: u32, h: u32, scale: u32, mobile: bool| json!({"width": w, "height": h, "deviceScaleFactor": scale, "mobile": mobile});
+        let metrics = |w: u32, h: u32, scale: f32, mobile: bool| json!({"width": w, "height": h, "deviceScaleFactor": scale, "mobile": mobile});
         if layout == Layout::Mobile {
-            self.page.call("Emulation.setDeviceMetricsOverride", metrics(390, 844, 2, true)).await?;
+            self.page.call("Emulation.setDeviceMetricsOverride", metrics(390, 844, 2., true)).await?;
             self.page.call("Emulation.setTouchEmulationEnabled", json!({"enabled": true, "maxTouchPoints": 5})).await?;
             self.page.call("Emulation.setUserAgentOverride", json!({"userAgent": MOBILE_UA})).await?;
             return Ok(());
@@ -469,9 +478,13 @@ impl<P: Page> Controller<P> {
         self.page.call("Emulation.setTouchEmulationEnabled", json!({"enabled": false})).await?;
         self.page.call("Emulation.setUserAgentOverride", json!({"userAgent": ""})).await?;
         match layout {
-            Layout::Custom(w, h) => self.page.call("Emulation.setDeviceMetricsOverride", metrics(w, h, 1, false)).await?,
-            _ if self.state.borrow().hidden => self.page.call("Emulation.setDeviceMetricsOverride", metrics(HIDDEN_VIEWPORT.0, HIDDEN_VIEWPORT.1, 1, false)).await?,
-            _ => self.page.call("Emulation.clearDeviceMetricsOverride", json!({})).await?,
+            Layout::Custom(w, h) => self.page.call("Emulation.setDeviceMetricsOverride", metrics(w, h, 1., false)).await?,
+            _ if self.state.borrow().hidden => self.page.call("Emulation.setDeviceMetricsOverride", metrics(HIDDEN_VIEWPORT.0, HIDDEN_VIEWPORT.1, 1., false)).await?,
+            // Largura e altura 0 = o tamanho segue a janela; só a escala é emulada.
+            _ => match { let scale = self.state.borrow().scale; scale } {
+                Some(scale) => self.page.call("Emulation.setDeviceMetricsOverride", metrics(0, 0, scale, false)).await?,
+                None => self.page.call("Emulation.clearDeviceMetricsOverride", json!({})).await?,
+            },
         };
         Ok(())
     }
@@ -768,6 +781,16 @@ mod tests {
         assert_eq!(last.map(|(_, p)| (p["width"].clone(), p["height"].clone())), Some((json!(1280), json!(800))));
         block_on(c.set_hidden(false));
         assert_eq!(methods(&c).last().map(String::as_str), Some("Emulation.clearDeviceMetricsOverride"));
+    }
+
+    #[test]
+    fn visible_desktop_draws_at_the_window_scale_and_custom_layout_stays_exact() {
+        let c = ctl(|_, _| Ok(json!({})));
+        block_on(c.set_scale(1.25));
+        let last = |c: &Controller<Fake>| c.page.calls.borrow().iter().rev().find(|(m, _)| m == "Emulation.setDeviceMetricsOverride").cloned().map(|(_, p)| p);
+        assert_eq!(last(&c), Some(json!({"width": 0, "height": 0, "deviceScaleFactor": 1.25, "mobile": false})));
+        block_on(c.run("layout", &s(&["1280", "800"])));
+        assert_eq!(last(&c), Some(json!({"width": 1280, "height": 800, "deviceScaleFactor": 1.0, "mobile": false})));
     }
 
     #[test]

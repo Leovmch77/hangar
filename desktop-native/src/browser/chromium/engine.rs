@@ -210,7 +210,6 @@ impl Surface {
 pub struct Starter {
     executor: ForegroundExecutor,
     background: BackgroundExecutor,
-    scale: f32,
 }
 
 /// Mantém o Chromium compartilhado de pé enquanto existir, para a primeira página não esperar o processo nascer.
@@ -256,13 +255,13 @@ pub struct Engine {
 impl Engine {
     pub fn available() -> Result<(), String> { launch::find().map(|_| ()) }
 
-    pub fn prepare(window: &Window, cx: &App) -> Result<Starter, String> {
-        Ok(Starter { executor: cx.foreground_executor().clone(), background: cx.background_executor().clone(), scale: window.scale_factor() })
+    pub fn prepare(_window: &Window, cx: &App) -> Result<Starter, String> {
+        Ok(Starter { executor: cx.foreground_executor().clone(), background: cx.background_executor().clone() })
     }
 
     /// Sobe o Chromium agora, sem esperar ele responder.
-    pub fn warm(window: &Window, cx: &App) -> Result<Warm, String> {
-        Browser::shared_async(cx.foreground_executor(), cx.background_executor(), window.scale_factor()).map(|browser| Warm { _browser: browser })
+    pub fn warm(_window: &Window, cx: &App) -> Result<Warm, String> {
+        Browser::shared_async(cx.foreground_executor(), cx.background_executor()).map(|browser| Warm { _browser: browser })
     }
 }
 
@@ -270,7 +269,7 @@ impl Starter {
     /// Sobe o Chromium (se ainda não há um) e abre o alvo desta sessão. As respostas chegam pela thread de leitura,
     /// então esperar aqui não trava o pipe; o primeiro navegador espera o processo nascer.
     pub fn start(self, events: async_channel::Sender<Event>) -> Result<Engine, String> {
-        let browser = Browser::shared(&self.executor, self.scale)?;
+        let browser = Browser::shared(&self.executor)?;
         let long = Duration::from_secs(10);
         let created = browser.call_blocking(None, "Target.createTarget", json!({"url": "about:blank", "newWindow": true}), long)?;
         let target = created["targetId"].as_str().ok_or("createTarget sem targetId")?.to_owned();
@@ -328,7 +327,7 @@ impl Starter {
     }
 
     async fn browser(&self) -> Result<Rc<Browser>, String> {
-        let browser = Browser::shared_async(&self.executor, &self.background, self.scale)?;
+        let browser = Browser::shared_async(&self.executor, &self.background)?;
         browser.ready().await?;
         Ok(browser)
     }

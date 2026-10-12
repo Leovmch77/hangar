@@ -46,6 +46,9 @@ pub(super) struct BrowserPanel {
     origin: Rc<Cell<Point<Pixels>>>,
     /// Decidido pelo `Hangar` a cada quadro (`browser_visible`).
     shown: bool,
+    /// Escala da janela já passada ao controlador; 0 = nenhuma ainda.
+    #[cfg(target_os = "linux")]
+    scale: Rc<Cell<f32>>,
     _drain: Task<()>,
     _subscriptions: [Subscription; 4],
 }
@@ -71,7 +74,7 @@ impl BrowserPanel {
         ];
         Self { key, #[cfg(not(target_os = "macos"))] controller: None, #[cfg(not(target_os = "macos"))] cdp: None,
             #[cfg(not(target_os = "macos"))] relay: Default::default(), #[cfg(not(target_os = "macos"))] viewer: Rc::default(), engine: None, starting: None, _start: None, events, address, page: model::PageState::default(), invalid: None, #[cfg(not(target_os = "macos"))] cookies_status: None, #[cfg(not(target_os = "macos"))] cookies_confirmed: false, #[cfg(target_os = "linux")] last_fill: None, focus,
-            origin: Rc::default(), shown: false, _drain: drain, _subscriptions: subscriptions }
+            origin: Rc::default(), shown: false, #[cfg(target_os = "linux")] scale: Rc::default(), _drain: drain, _subscriptions: subscriptions }
     }
 
     fn engine(&self) -> Option<&Rc<Engine>> { self.engine.as_ref()?.as_ref().ok() }
@@ -232,6 +235,8 @@ impl BrowserPanel {
         cx.spawn(async move |_, _| setup.start().await).detach();
         self.controller = Some(ctl);
         self.cdp = Some(cdp);
+        #[cfg(target_os = "linux")]
+        self.scale.set(0.);
     }
 
     /// Entrega ao espectador atual os eventos que a tela remota acompanha.
@@ -459,11 +464,19 @@ impl BrowserPanel {
             return page.role(Role::Alert).child(note(error.clone(), theme::warning())).into_any_element();
         }
         let origin = self.origin.clone();
+        #[cfg(target_os = "linux")]
+        let (ctl, scale) = (self.controller.clone(), self.scale.clone());
         let label = if self.page.title.trim().is_empty() { tr("browser") } else { self.page.title.clone() };
         page.bg(theme::background()).aria_label(label)
-            .when(self.shown, |el| el.child(canvas(|_, _, _| {}, move |bounds, _, window, _| {
+            .when(self.shown, |el| el.child(canvas(|_, _, _| {}, move |bounds, _, window, _cx| {
                 origin.set(bounds.origin);
                 engine.place(bounds, window);
+                // A página desenha na escala desta janela (o Chromium nasce em 1, às vezes com ela escondida).
+                #[cfg(target_os = "linux")]
+                if scale.replace(window.scale_factor()) != window.scale_factor() && let Some(ctl) = ctl.clone() {
+                    let wanted = window.scale_factor();
+                    window.spawn(_cx, async move |_| ctl.set_scale(wanted).await).detach();
+                }
             }).absolute().inset_0()))
             .on_mouse_down(MouseButton::Left, cx.listener(|this, event: &MouseDownEvent, window, cx| {
                 this.focus.focus(window, cx);
