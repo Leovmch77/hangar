@@ -9,7 +9,6 @@ import {
   deleteSession,
   effectiveGroupBy,
   formataErro,
-  leavePair,
   renameSession,
   setPairAccess,
   resumeSession,
@@ -18,7 +17,7 @@ import {
   type Server,
 } from '@hangar/core';
 import { ownServers, useServers } from '../../stores/servers';
-import { markLeavingPair, useSessions } from '../../stores/sessions';
+import { useSessions } from '../../stores/sessions';
 import { useAparencia, ehGroupBy } from '../../stores/aparencia';
 import { HangarMark } from '../../ui/HangarMark';
 import { Icon } from '../../ui/Icon';
@@ -27,6 +26,7 @@ import { SessionRow, type PairAction } from './SessionRow';
 import { placeOutside } from './outsideRows';
 import { PairInviteSheet, type PairTarget } from '../pair/PairInviteSheet';
 import { PairAcceptSheet, type PairAcceptTarget } from '../pair/PairAcceptSheet';
+import { leaveExternal } from '../pair/leaveExternal';
 import { ConversationList } from './ConversationList';
 import { splitAttention } from './AttentionStrip';
 import { RenameSheet } from './RenameSheet';
@@ -176,12 +176,7 @@ export function SessionList({ onClose, onOpenServers }: Props) {
     const own = (id: string) => useServers.getState().servers.find((x) => x.id === id && !x.invite);
     const server = own(s.outside?.localServerId ?? s.serverId);
     if (!server) { toast.erro(m.servidor_nao_existe()); return; }
-    const sair = (alias: string, session: string) => {
-      const desfazer = markLeavingPair(alias, session);
-      leavePair(alias, session, server)
-        .then((r) => { if (!r.ok) desfazer(); })
-        .catch((e: unknown) => { desfazer(); toast.erro(mensagemDe(e)); });
-    };
+    const sair = (alias: string, session: string) => leaveExternal(alias, session, server);
     if (a.kind === 'invite') {
       setConvite({ server, name: s.name, members: (s.pair_peers ?? []).filter((p) => !p.includes('::')) });
     } else if (a.kind === 'accept') {

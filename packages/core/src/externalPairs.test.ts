@@ -168,6 +168,28 @@ describe('createExternalPairSync', () => {
     expect(read).toHaveBeenCalledTimes(3);
   });
 
+  it('attach que falha espera antes de tentar de novo, sem reler a cada lista; o sucesso zera a espera', async () => {
+    let t = 0;
+    const read = vi.fn(async (_s: Server): Promise<ExternalPair[]> => [par()]);
+    const attach = vi.fn(async (_e: Server, _t: string): Promise<unknown> => { throw new Error('401'); });
+    const sync = createExternalPairSync({ read, apply: () => [{ entry: ENTRADA, token: 'tp' }], attach, onLeft: () => {}, now: () => t });
+    const tick = async () => { await sync.refresh([PROPRIO, ENTRADA], (id) => id === PROPRIO.id ? comPar : null); await new Promise((r) => setTimeout(r, 0)); };
+    for (let i = 0; i < 5; i++) await tick();
+    expect(attach).toHaveBeenCalledTimes(1);
+    expect(read.mock.calls.length).toBeLessThanOrEqual(2);
+    t += 2_000; await tick();
+    expect(attach).toHaveBeenCalledTimes(2);
+    // A espera dobra: 2 s depois ainda não tenta.
+    t += 2_000; await tick();
+    expect(attach).toHaveBeenCalledTimes(2);
+    attach.mockResolvedValue({ ok: true });
+    t += 2_000; await tick();
+    expect(attach).toHaveBeenCalledTimes(3);
+    // Ligou: nada mais a tentar.
+    t += 60_000; await tick(); await tick();
+    expect(attach).toHaveBeenCalledTimes(3);
+  });
+
   it('marca de saída feita aqui não vira aviso', async () => {
     const { read, left, sync, tick } = setup();
     await tick();

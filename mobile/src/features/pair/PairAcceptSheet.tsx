@@ -22,17 +22,18 @@ export function PairAcceptSheet({ target, onClose }: { target: PairAcceptTarget 
   const [busy, setBusy] = useState(false);
   const [erro, setErro] = useState('');
   const [feito, setFeito] = useState<PairAccepted | null>(null);
-  const vivo = useRef(true);
+  // Cada abertura (e a desmontagem) vira a época: resposta de tentativa de outra época é ignorada.
+  const epoca = useRef(0);
 
   useEffect(() => {
-    vivo.current = true;
+    epoca.current += 1;
     setLink('');
     setEscolhida(target?.name ?? null);
     setLevel('view');
     setBusy(false);
     setErro('');
     setFeito(null);
-    return () => { vivo.current = false; };
+    return () => { epoca.current += 1; };
     // A lista de sessões muda a cada atualização: só abrir (ou trocar de sessão/máquina) zera o formulário.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [!!target, target?.server.id, target?.name]);
@@ -45,15 +46,16 @@ export function PairAcceptSheet({ target, onClose }: { target: PairAcceptTarget 
 
   const aceitar = async () => {
     if (!pode || !target || !escolhida) return;
+    const minha = epoca.current;
     setBusy(true);
     setErro('');
     try {
       const r = await acceptPair(escolhida, link, level, target.server);
-      if (vivo.current) setFeito(r);
+      if (minha === epoca.current) setFeito(r);
     } catch (e) {
-      if (vivo.current) setErro(mensagemDe(e));
+      if (minha === epoca.current) setErro(mensagemDe(e));
     } finally {
-      if (vivo.current) setBusy(false);
+      if (minha === epoca.current) setBusy(false);
     }
   };
 

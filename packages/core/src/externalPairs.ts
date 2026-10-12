@@ -125,10 +125,16 @@ const READ_RETRY_MAX_MS = 60_000;
  * sem o par ter acabado. Servidor cuja leitura falhou fica com os pares de antes e espera para tentar. */
 export function createExternalPairSync(o: ExternalPairSyncOptions) {
   const now = o.now ?? Date.now;
+  const nextWait = (w: { delay: number } | undefined) => {
+    const delay = Math.min(READ_RETRY_MAX_MS, (w?.delay ?? READ_RETRY_MIN_MS / 2) * 2);
+    return { delay, until: now() + delay };
+  };
   let byServer = new Map<string, ExternalPair[]>();
   const leaving = new Set<string>();
   const attached = new Set<string>();
   const waits = new Map<string, { delay: number; until: number }>();
+  // Espera de attach por `entrada\ntoken`, na mesma régua da leitura: token recusado não é tentado a cada lista.
+  const attachWaits = new Map<string, { delay: number; until: number }>();
   let sig = '';
   let run = 0;
 
@@ -143,7 +149,8 @@ export function createExternalPairSync(o: ExternalPairSyncOptions) {
     }
     const own = servers.filter((s) => seen.has(s.id));
     const ready = (id: string) => (waits.get(id)?.until ?? 0) <= t;
-    return { own, ready, sig: own.map((s) => `${s.id}${ready(s.id) ? '' : '~'}|${seen.get(s.id)}`).sort().join('\n') };
+    const pending = [...attachWaits].map(([k, w]) => `${k}${w.until <= t ? '' : '~'}`).sort();
+    return { own, ready, sig: [...own.map((s) => `${s.id}${ready(s.id) ? '' : '~'}|${seen.get(s.id)}`).sort(), ...pending].join('\n') };
   }
 
   async function refresh(servers: Server[], sessionsOf: (id: string) => readonly SessionInfo[] | null | undefined): Promise<void> {
@@ -153,8 +160,7 @@ export function createExternalPairSync(o: ExternalPairSyncOptions) {
     const mine = ++run;
     const reads = await Promise.all(p.own.map((s) => !p.ready(s.id) ? [s.id, null] as const
       : o.read(s).then((l) => { waits.delete(s.id); return [s.id, l] as const; }, () => {
-        const delay = Math.min(READ_RETRY_MAX_MS, (waits.get(s.id)?.delay ?? READ_RETRY_MIN_MS / 2) * 2);
-        waits.set(s.id, { delay, until: now() + delay });
+        waits.set(s.id, nextWait(waits.get(s.id)));
         return [s.id, null] as const;
       })));
     if (mine !== run) return;
@@ -172,13 +178,15 @@ export function createExternalPairSync(o: ExternalPairSyncOptions) {
     // Par que acabou tira a marca do attach dele: um par novo no mesmo token precisa ligar de novo.
     const live = new Set(all.map((x) => x.token));
     for (const k of attached) if (!live.has(k.split('\n')[1])) attached.delete(k);
+    for (const k of attachWaits.keys()) if (!live.has(k.split('\n')[1])) attachWaits.delete(k);
     for (const a of o.apply(all)) {
       const key = `${a.entry.id}\n${a.token}`;
-      if (attached.has(key)) continue;
+      if (attached.has(key) || (attachWaits.get(key)?.until ?? 0) > now()) continue;
       attached.add(key);
-      o.attach(a.entry, a.token).then(() => o.onAttached?.(a.entry), () => {
+      o.attach(a.entry, a.token).then(() => { attachWaits.delete(key); o.onAttached?.(a.entry); }, () => {
         attached.delete(key);
-        sig = '';   // a próxima lista tenta ligar de novo
+        // A espera entra na marca: vencida, a lista seguinte relê e tenta ligar de novo.
+        attachWaits.set(key, nextWait(attachWaits.get(key)));
       });
     }
   }
@@ -200,6 +208,7 @@ export function createExternalPairSync(o: ExternalPairSyncOptions) {
     reset() {
       byServer = new Map();
       waits.clear();
+      attachWaits.clear();
       sig = '';
       run++;
     },

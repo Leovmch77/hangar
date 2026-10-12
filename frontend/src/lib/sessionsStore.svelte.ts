@@ -112,6 +112,8 @@ function createSessionsStore() {
   // linha: sessão fechada ou lista com problema tiram a linha sem o par ter acabado.
   let pairLeft = $state<{ owner: string; seq: number } | null>(null);
   let pairSeq = 0;
+  // Último aviso já mostrado: fora do $state, a lista que remonta não o mostra de novo.
+  let pairLeftShown = 0;
   // Releitura terminada: quem lê `anchoredPairs` num `$derived` acorda por aqui.
   let pairsTick = $state(0);
   const diagCode = (e: unknown) => (e as { code?: string })?.code ?? 'erro';
@@ -513,6 +515,13 @@ function createSessionsStore() {
     get identities() { return identities; },
     /** Último par que sumiu da lista sem ter sido desfeito aqui: "<dono> saiu do pareamento". */
     get pairLeft() { return pairLeft; },
+    /** O aviso de `pairLeft` uma vez só, mesmo com a lista remontando; lê `pairLeft`, então acorda um `$effect`. */
+    takePairLeft(): string | null {
+      const n = pairLeft;
+      if (!n || n.seq <= pairLeftShown) return null;
+      pairLeftShown = n.seq;
+      return n.owner;
+    },
     /** "Sair"/"Desfazer" feito aqui: o par sumir em seguida não é a outra pessoa saindo. Devolve o
      * desfazer da marca, para quando a saída falhar. */
     markLeavingPair(alias: string, session: string): () => void {

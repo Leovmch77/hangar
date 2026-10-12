@@ -357,6 +357,9 @@ describe('par externo', () => {
     streams.get('lan')!.get('sessions')!({ data: linha([]) });
     await vi.waitFor(() => expect(sessionsStore.pairLeft?.owner).toBe('Ana'));
     await vi.waitFor(() => expect(pares.setEphemeralServers.mock.lastCall![0]).toEqual([]));
+    // A lista remonta ao voltar do chat: o mesmo aviso aparece uma vez só.
+    expect(sessionsStore.takePairLeft()).toBe('Ana');
+    expect(sessionsStore.takePairLeft()).toBeNull();
   });
 
   const doServidor = (token = 'tp', session = 'api') => ({ local_session: 'hangar', alias: 'casa', owner: 'Ana', session,

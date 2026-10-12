@@ -66,6 +66,22 @@ describe('PairAcceptSheet', () => {
     expect(el.textContent).toContain('pair_not_transitive');
   });
 
+  it('resposta atrasada de uma abertura anterior não mexe no formulário novo', async () => {
+    let resolver!: (v: unknown) => void;
+    api.acceptPair.mockReturnValue(new Promise((r) => { resolver = r; }));
+    const el = document.createElement('div');
+    const root = createRoot(el);
+    const render = (name: string) => act(async () => {
+      root.render(createElement(PairAcceptSheet, { target: { server, name, sessions: [sessao('api'), sessao('web')] as never }, onClose: () => {} }));
+    });
+    await render('api');
+    await digitar(el, LINK);
+    await clicar(el, 'native_par_aceitar');
+    await render('web');
+    await act(async () => { resolver({ alias: 'pc-ana', owner: 'Ana', session: 'web', level: 'view' }); });
+    expect(el.textContent).not.toContain('native_par_aceito');
+  });
+
   it('sem sessão viva diz que não há o que parear', async () => {
     const el = await montar(null, [sessao('morta', { state: 'dead' })]);
     expect(el.textContent).toContain('native_par_sem_sessao');

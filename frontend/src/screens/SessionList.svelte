@@ -94,8 +94,8 @@ import * as m from '../paraglide/messages';
   // Par aceito numa sessão própria, viva; a linha de fora e o orquestrador não pareiam.
   const paraParear = $derived(sessions.filter((x) => !x.serverInvite && x.state !== 'dead' && x.provider !== 'orq'));
   $effect(() => {
-    const saiu = sessionsStore.pairLeft;
-    if (saiu) showActionMsg(m.pair_left_notice({ dono: saiu.owner }));
+    const dono = sessionsStore.takePairLeft();
+    if (dono) showActionMsg(m.pair_left_notice({ dono }));
   });
   $effect(() => liveVoiceStore.registerActions({ 'new-session': () => { searchOpen = false; showCreateSheet = true; return true; } }));
   let drawerOpen = $state(false);    // menu lateral (hamburger): navegação + conta

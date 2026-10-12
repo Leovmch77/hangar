@@ -49,11 +49,16 @@ pub async fn notify_exit(st: &AppState, groups: &GroupService, name: &str, ex: &
         } else {
             // Sem as lojas de convite o par externo não tem quem o desfaça; nunca vira máquina própria.
             let (dir, owner, address) = (groups.pair_root().to_path_buf(), name.to_owned(), p.clone());
-            let external = tokio::task::spawn_blocking(move || crate::list::links::external_local_session(&owner, &[address], &dir))
-                .await.unwrap_or(None);
-            if external.is_some() {
-                errs.push(failed(p, "erro_peer_nao_avisado", "share_unavailable".into(), json!({"peer": p})));
-                continue;
+            match tokio::task::spawn_blocking(move || crate::list::links::external_local_session(&owner, &[address], &dir)).await {
+                Ok(None) => {}
+                Ok(Some(_)) => {
+                    errs.push(failed(p, "erro_peer_nao_avisado", "share_unavailable".into(), json!({"peer": p})));
+                    continue;
+                }
+                Err(e) => {
+                    errs.push(failed(p, "erro_par_limpeza_falhou", e.to_string(), json!({"peer": p})));
+                    continue;
+                }
             }
         }
         if groups.server_id().is_empty() {
