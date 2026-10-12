@@ -25,6 +25,14 @@ const SLEEP_AFTER: std::time::Duration = std::time::Duration::from_secs(10);
 #[cfg(target_os = "windows")]
 const WAKE_SETTLE: std::time::Duration = std::time::Duration::from_millis(200);
 
+/// Pedido do painel ao `Hangar`: o print da página vai para o compositor da sessão.
+pub(super) enum PanelEvent { Shot(Vec<u8>) }
+
+impl EventEmitter<PanelEvent> for BrowserPanel {}
+
+/// Erros guardados para a lista do selo; a contagem segue além disso.
+const ERRORS_KEPT: usize = 100;
+
 pub(super) struct BrowserPanel {
     /// `servidor::sessão` dona deste navegador: nome do sidecar que o hangar-preview lê.
     #[cfg_attr(target_os = "macos", allow(dead_code))]
@@ -95,6 +103,12 @@ pub(super) struct BrowserPanel {
     /// Pergunta do cursor em andamento e o último ponto pedido: uma pergunta por vez, sempre do ponto mais novo.
     #[cfg(target_os = "linux")]
     cursor_probe: (bool, Option<Point<Pixels>>),
+    /// Erros da página desde a última navegação (JS não tratado, `console.error`, recurso que falhou), para o selo.
+    page_errors: std::collections::VecDeque<String>,
+    error_count: usize,
+    errors_open: bool,
+    /// O print da página está sendo tirado: o botão fica ocupado.
+    shooting: bool,
     /// O endereço acabou de ir para a área de transferência: o ícone vira um visto por um instante.
     copied: bool,
     /// Aviso que a pessoa fechou no ×: o motor reenvia o estado inteiro, e o aviso voltaria a cada evento.
@@ -155,7 +169,7 @@ impl BrowserPanel {
         ];
         Self { key, #[cfg(not(target_os = "macos"))] controller: None, #[cfg(not(target_os = "macos"))] cdp: None,
             #[cfg(not(target_os = "macos"))] relay: Default::default(), #[cfg(not(target_os = "macos"))] viewer: Rc::default(), #[cfg(target_os = "linux")] frames: Default::default(), engine: None, starting: None, _start: None, events, address, page: model::PageState::default(), invalid: None, #[cfg(not(target_os = "macos"))] cookies_status: None, #[cfg(not(target_os = "macos"))] cookies_confirmed: false, #[cfg(target_os = "linux")] last_fill: None, focus,
-            origin: Rc::default(), #[cfg(target_os = "linux")] emulated: None, page_scale: Rc::new(Cell::new(1.)), #[cfg(target_os = "windows")] still: None, #[cfg(target_os = "windows")] released: Vec::new(), #[cfg(target_os = "windows")] cover_gen: 0, #[cfg(target_os = "linux")] page_zoom: (1., 0., 0.), shown: false, local_notice: None, #[cfg(target_os = "linux")] cursor: CursorStyle::Arrow, #[cfg(target_os = "linux")] cursor_probe: (false, None), copied: false, dismissed_notice: 0, address_stale: false, #[cfg(not(target_os = "macos"))] agent: None, #[cfg(not(target_os = "macos"))] agent_running: 0,
+            origin: Rc::default(), #[cfg(target_os = "linux")] emulated: None, page_scale: Rc::new(Cell::new(1.)), #[cfg(target_os = "windows")] still: None, #[cfg(target_os = "windows")] released: Vec::new(), #[cfg(target_os = "windows")] cover_gen: 0, #[cfg(target_os = "linux")] page_zoom: (1., 0., 0.), shown: false, local_notice: None, #[cfg(target_os = "linux")] cursor: CursorStyle::Arrow, #[cfg(target_os = "linux")] cursor_probe: (false, None), page_errors: Default::default(), error_count: 0, errors_open: false, shooting: false, copied: false, dismissed_notice: 0, address_stale: false, #[cfg(not(target_os = "macos"))] agent: None, #[cfg(not(target_os = "macos"))] agent_running: 0,
             #[cfg(not(target_os = "macos"))] agent_seq: 0, #[cfg(not(target_os = "macos"))] paused: None, #[cfg(target_os = "windows")] agent_finished_at: None, #[cfg(not(target_os = "macos"))] _activity: None, #[cfg(target_os = "windows")] idle: Cell::new(0), #[cfg(not(target_os = "macos"))] sidecar: Default::default(), #[cfg(target_os = "linux")] scale: Rc::default(), _drain: drain, _subscriptions: subscriptions }
     }
 
@@ -355,6 +369,14 @@ impl BrowserPanel {
         { self.listen_relay(&cdp); *self.relay.borrow_mut() = Some(cdp.clone()); }
         let (activity, acted) = async_channel::unbounded();
         ctl.on_activity(move |a| { let _ = activity.try_send(a); });
+        let (error, errors) = async_channel::unbounded();
+        ctl.on_page_error(move |e| { let _ = error.try_send(e); });
+        (self.page_errors, self.error_count, self.errors_open) = (Default::default(), 0, false);
+        cx.spawn(async move |this, cx| {
+            while let Ok(e) = errors.recv().await {
+                if this.update(cx, |this, cx| this.page_error(e, cx)).is_err() { break; }
+            }
+        }).detach();
         #[cfg(target_os = "linux")]
         {
             let (screen, screens) = async_channel::unbounded();
@@ -615,6 +637,57 @@ impl BrowserPanel {
                 Err(e) => eprintln!("[nav] copiar da pagina falhou: {e}"),
             }
         }).detach();
+    }
+
+    fn page_error(&mut self, error: Option<String>, cx: &mut Context<Self>) {
+        match error {
+            Some(line) => {
+                self.error_count += 1;
+                self.page_errors.push_back(line);
+                if self.page_errors.len() > ERRORS_KEPT { self.page_errors.pop_front(); }
+            }
+            None if self.error_count == 0 => return,
+            None => (self.page_errors, self.error_count, self.errors_open) = (Default::default(), 0, false),
+        }
+        cx.notify();
+    }
+
+    /// Print da página em PNG, que o `Hangar` anexa à mensagem da sessão.
+    #[cfg(not(target_os = "macos"))]
+    fn send_shot(&mut self, cx: &mut Context<Self>) {
+        let Some(cdp) = self.cdp.clone().filter(|_| !self.shooting) else { return };
+        self.shooting = true;
+        cx.notify();
+        let shot = cdp.call("Page.captureScreenshot", serde_json::json!({"format": "png"}));
+        cx.spawn(async move |this, cx| {
+            use base64::Engine as _;
+            let bytes = shot.await.and_then(|r| base64::engine::general_purpose::STANDARD
+                .decode(r["data"].as_str().unwrap_or("")).map_err(|e| e.to_string())).and_then(|b| if b.is_empty() { Err("vazio".into()) } else { Ok(b) });
+            let _ = this.update(cx, |this, cx| {
+                this.shooting = false;
+                match bytes {
+                    Ok(bytes) => cx.emit(PanelEvent::Shot(bytes)),
+                    Err(e) => this.local_notice = Some(tr("browser_shot_failed").replace("{e}", &e)),
+                }
+                cx.notify();
+            });
+        }).detach();
+    }
+
+    fn render_errors(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.errors_open || self.error_count == 0 { return None; }
+        let lines = self.page_errors.iter().rev().cloned().collect::<Vec<_>>();
+        Some(div().id("browser-errors").flex_shrink_0().flex().flex_col().border_b_1().border_color(theme::border())
+            .child(div().flex().items_center().gap_2().px_3().py(px(4.))
+                .child(div().flex_1().text_size(px(11.)).text_color(theme::muted()).child(tr("browser_errors_title")))
+                .child(Button::new("browser-errors-clear").ghost().xsmall().label(tr("browser_errors_clear"))
+                    .on_click(cx.listener(|this, _, _, cx| { (this.page_errors, this.error_count, this.errors_open) = (Default::default(), 0, false); cx.notify(); })))
+                .child(chrome::icon_button("browser-errors-close", IconName::Close, tr("close"), cx)
+                    .on_click(cx.listener(|this, _, _, cx| { this.errors_open = false; cx.notify(); }))))
+            .child(div().id("browser-errors-list").max_h(px(160.)).overflow_y_scroll().px_3().pb(px(6.)).flex().flex_col().gap(px(3.))
+                .children(lines.into_iter().map(|line| div().text_size(px(11.)).font_family("monospace").text_color(theme::danger())
+                    .whitespace_normal().child(line))))
+            .into_any_element())
     }
 
     fn copy_address(&mut self, url: Option<String>, cx: &mut Context<Self>) {
@@ -1054,10 +1127,22 @@ impl Render for BrowserPanel {
         #[allow(unused_mut)]
         let mut toolbar = div().id("browser-toolbar").flex_shrink_0().flex().items_center().gap_1().px_2().py(px(6.))
             .border_b_1().border_color(theme::border())
-            .child(back).child(forward).child(reload).child(address).child(copy).child(open_out);
+            .child(back).child(forward).child(reload).child(address)
+            // O selo só aparece com erro: página limpa não ganha um zero na barra.
+            .when(self.error_count > 0, |el| el.child(div().id("browser-errors-badge").flex_shrink_0().flex().items_center().gap_1()
+                .px_2().py(px(2.)).rounded_full().cursor_pointer().bg(theme::danger().opacity(0.15)).border_1().border_color(theme::danger().opacity(0.4))
+                .text_size(px(11.)).text_color(theme::danger()).role(Role::Button)
+                .aria_label(tr("browser_errors_count").replace("{n}", &self.error_count.to_string()))
+                .child(div().size(px(6.)).rounded_full().bg(theme::danger()))
+                .child(if self.error_count == 1 { tr("browser_errors_one") } else { tr("browser_errors_count").replace("{n}", &self.error_count.to_string()) })
+                .on_click(cx.listener(|this, _, _, cx| { this.errors_open = !this.errors_open; cx.notify(); }))))
+            .child(copy).child(open_out);
         // Botão que traz o login do Chrome real do usuário (só onde o motor fala CDP).
         #[cfg(not(target_os = "macos"))]
         {
+            toolbar = toolbar.child(chrome::icon_button("browser-shot", IconName::Image, tr("browser_send_shot"), cx)
+                .disabled(!ready || self.page.url.is_none() || self.shooting)
+                .on_click(cx.listener(|this, _, _, cx| this.send_shot(cx))));
             toolbar = toolbar.child(chrome::icon_button("browser-cookies", IconName::Key, tr("browser_cookies_bring"), cx)
                 .disabled(!ready)
                 .on_click(cx.listener(|this, _, _, cx| this.import_chrome_login(cx))));
@@ -1095,6 +1180,7 @@ impl Render for BrowserPanel {
                 .flex_shrink_0().px_3().py(px(6.)).role(Role::Status)
                 .text_size(px(11.)).text_color(theme::muted()).whitespace_normal().child(text)));
         }
+        root = root.children(self.render_errors(cx));
         let notice_line = |id: &'static str, text: String, cx: &mut Context<Self>, close: fn(&mut Self)| div().id(id).flex_shrink_0().flex()
             .items_center().gap_2().px_3().py(px(4.)).border_b_1().border_color(theme::border()).role(Role::Status)
             .child(div().flex_1().min_w_0().text_size(px(11.)).text_color(theme::warning()).whitespace_normal().child(text))
@@ -1230,7 +1316,19 @@ impl Hangar {
     }
 
     fn browser_for(&mut self, key: String, window: &mut Window, cx: &mut Context<Self>) -> Entity<BrowserPanel> {
-        self.side.browsers.entry(key.clone()).or_insert_with(|| cx.new(|cx| BrowserPanel::new(key, window, cx))).clone()
+        if let Some(browser) = self.side.browsers.get(&key) { return browser.clone(); }
+        let browser = cx.new(|cx| BrowserPanel::new(key.clone(), window, cx));
+        cx.subscribe(&browser, |this, _, event: &PanelEvent, cx| match event { PanelEvent::Shot(bytes) => this.attach_page_shot(bytes.clone(), cx) }).detach();
+        self.side.browsers.insert(key, browser.clone());
+        browser
+    }
+
+    /// O print vai para a mensagem da sessão aberta, como uma imagem colada: o botão só existe com o painel dela à vista.
+    fn attach_page_shot(&mut self, bytes: Vec<u8>, cx: &mut Context<Self>) {
+        let Some(key) = self.composer_key() else { return };
+        let name = format!("pagina-{}.png", self.attach_seq + 1);
+        if let Err(problem) = self.add_attachment(&key, name, bytes) { self.action_feedback.insert(key, (problem, true)); }
+        cx.notify();
     }
 
     /// `hangar-preview open` → backend → evento `nav` na lista. Com a sessão na tela a aba Navegador vem à frente; fora
