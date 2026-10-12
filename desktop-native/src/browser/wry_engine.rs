@@ -198,6 +198,8 @@ fn watch_native(view: &WebView, state: &Rc<RefCell<model::PageState>>, events: &
         let name = if kind == COREWEBVIEW2_SCRIPT_DIALOG_KIND_ALERT { "alert" } else if kind == COREWEBVIEW2_SCRIPT_DIALOG_KIND_PROMPT { "prompt" } else { "confirm" };
         // Segura o diálogo aberto até o agente ou a pessoa responder (`answer_dialog`).
         let deferral = unsafe { args.GetDeferral()? };
+        // Um segundo diálogo (iframe de outro processo) não pode deixar o primeiro preso.
+        release_dialog(&held);
         *held.borrow_mut() = Some((args, deferral));
         let mut page = st.borrow_mut();
         page.dialog = Some(model::Dialog { kind: name.into(), message, default });
@@ -264,8 +266,8 @@ impl Engine {
 
     /// Responde o diálogo segurado e tira a caixa do painel.
     #[cfg(target_os = "windows")]
-    pub fn answer_dialog(&self, accept: bool, text: Option<&str>) {
-        let Some((args, deferral)) = self.pending.borrow_mut().take() else { return };
+    pub fn answer_dialog(&self, accept: bool, text: Option<&str>) -> impl std::future::Future<Output = Result<(), String>> + 'static + use<> {
+        let Some((args, deferral)) = self.pending.borrow_mut().take() else { return std::future::ready(Err("nenhum dialogo aberto na pagina".into())) };
         // SAFETY: thread da interface; `Complete` solta o diálogo segurado no `GetDeferral`.
         // `Complete` sempre: sem ele a página fica parada no diálogo, mesmo que o texto ou o aceite tenham falhado.
         let answered = unsafe {
@@ -281,13 +283,19 @@ impl Engine {
             })()
         };
         let completed = unsafe { deferral.Complete() };
-        for e in [answered.err(), completed.err()].into_iter().flatten() { eprintln!("[nav] dialogo respondido com erro: {}", e.message()); }
         let mut page = self.state.borrow_mut();
         page.dialog = None;
         send(&self.events, &page);
+        // Aceite ou texto que falharam viram recusa na página: quem respondeu tem de saber.
+        std::future::ready(match (answered, completed) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(e), _) | (_, Err(e)) => Err(e.message().to_string()),
+        })
     }
     #[cfg(not(target_os = "windows"))]
-    pub fn answer_dialog(&self, _accept: bool, _text: Option<&str>) {}
+    pub fn answer_dialog(&self, _accept: bool, _text: Option<&str>) -> impl std::future::Future<Output = Result<(), String>> + 'static + use<> {
+        std::future::ready(Err("este sistema nao tem dialogo segurado".to_string()))
+    }
 
     /// Página que caiu volta com `Reload` no mesmo WebView2: o processo da página renasce e o histórico fica.
     pub fn revive(&self) {

@@ -577,10 +577,11 @@ impl Engine {
     pub fn stop(&self) { self.send("Page.stopLoading", json!({})); }
 
     /// Responde o diálogo aberto; o `javascriptDialogClosed` tira a caixa do painel.
-    pub fn answer_dialog(&self, accept: bool, text: Option<&str>) {
+    pub fn answer_dialog(&self, accept: bool, text: Option<&str>) -> impl std::future::Future<Output = Result<(), String>> + 'static + use<> {
         let mut params = json!({"accept": accept});
         if let Some(text) = text { params["promptText"] = text.into(); }
-        self.send("Page.handleJavaScriptDialog", params);
+        let call = self.session.call("Page.handleJavaScriptDialog", params);
+        async move { call.await.map(|_| ()) }
     }
 
     fn history_step(&self, step: i64) {
