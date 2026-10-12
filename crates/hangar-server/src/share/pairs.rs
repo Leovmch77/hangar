@@ -89,10 +89,12 @@ impl PairStore {
 
     pub fn by_local(&self, session: &str) -> Vec<ExternalPair> { self.lock().iter().filter(|r| r.local_session == session).cloned().collect() }
 
-    /// Apelido do dono de fora que não colide com peer, com esta máquina nem com outro par.
-    pub fn free_alias(&self, owner: &str, peers: &HashSet<String>, own_id: &str) -> String {
-        let base = slug(owner);
+    /// Apelido do dono de fora que não colide com peer, com esta máquina nem com outro par. A mesma
+    /// máquina (endereço) mantém o apelido que já tem, mesmo com o dono renomeado.
+    pub fn free_alias(&self, owner: &str, address: &str, peers: &HashSet<String>, own_id: &str) -> String {
         let state = self.lock();
+        if let Some(r) = state.iter().find(|r| r.peer_address == address) { return r.alias.clone(); }
+        let base = slug(owner);
         let taken = |a: &str| peers.contains(a) || a == own_id || state.iter().any(|r| r.alias == a);
         let (mut alias, mut n) = (base.clone(), 2);
         while taken(&alias) {
@@ -100,6 +102,10 @@ impl PairStore {
             n += 1;
         }
         alias
+    }
+
+    pub fn paired_with(&self, address: &str, peer_session: &str) -> bool {
+        self.lock().iter().any(|r| r.peer_address == address && r.peer_session == peer_session)
     }
 
     /// Apelido que virou peer depois do par: `alias::sessao` não diz mais quem é quem.

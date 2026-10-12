@@ -38,11 +38,29 @@ fn alias_avoids_server_id_peers_and_other_pairs() {
     let tmp = tempfile::tempdir().unwrap();
     let s = store(tmp.path());
     let p = peers(&["casa"]);
-    assert_eq!(s.free_alias("notebook", &p, "notebook"), "notebook-2");
-    assert_eq!(s.free_alias("casa", &p, "notebook"), "casa-2");
+    let other = "https://outra.tail.ts.net:8443";
+    assert_eq!(s.free_alias("notebook", other, &p, "notebook"), "notebook-2");
+    assert_eq!(s.free_alias("casa", other, &p, "notebook"), "casa-2");
     s.add(rec("s1", "pc-ana", "Y")).unwrap();
-    assert_eq!(s.free_alias("pc-ana", &p, "notebook"), "pc-ana-2");
-    assert_eq!(s.free_alias("DESKTOP-SPL72KG", &p, "notebook"), "desktop-spl72kg");
+    assert_eq!(s.free_alias("pc-ana", other, &p, "notebook"), "pc-ana-2");
+    assert_eq!(s.free_alias("DESKTOP-SPL72KG", other, &p, "notebook"), "desktop-spl72kg");
+}
+
+#[test]
+fn alias_is_per_machine_address() {
+    let tmp = tempfile::tempdir().unwrap();
+    let s = store(tmp.path());
+    let p = peers(&[]);
+    let mut first = rec("s1", "notebook", "Y");
+    first.peer_address = "https://ana.tail.ts.net:8443".into();
+    s.add(first).unwrap();
+    // Mesma máquina, dono renomeado: o apelido continua o mesmo.
+    assert_eq!(s.free_alias("notebook-novo", "https://ana.tail.ts.net:8443", &p, "eu"), "notebook");
+    // Outra pessoa com máquina de mesmo nome: apelido próprio.
+    assert_eq!(s.free_alias("notebook", "https://bia.tail.ts.net:8443", &p, "eu"), "notebook-2");
+    assert!(s.paired_with("https://ana.tail.ts.net:8443", "Y"));
+    assert!(!s.paired_with("https://ana.tail.ts.net:8443", "Z"));
+    assert!(!s.paired_with("https://bia.tail.ts.net:8443", "Y"));
 }
 
 #[test]

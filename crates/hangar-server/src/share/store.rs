@@ -47,6 +47,9 @@ pub struct Share {
     pub kind: Kind,
     #[serde(default)]
     pub parent_id: Option<String>,
+    /// Nível que o convite de par dará no resgate. No arquivo: reiniciar não pode rebaixá-lo.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub level: Option<Kind>,
 }
 
 
@@ -198,12 +201,21 @@ impl ShareStore {
     }
 
     pub fn create(&self, session: &str, life: Option<String>, kind: Kind, local: bool) -> io::Result<(Share, String)> {
+        self.create_with(session, life, kind, local, None)
+    }
+
+    /// Convite de par com o nível que o resgate dará.
+    pub fn create_pair_invite(&self, session: &str, life: Option<String>, level: Kind) -> io::Result<(Share, String)> {
+        self.create_with(session, life, Kind::Pair, false, Some(level))
+    }
+
+    fn create_with(&self, session: &str, life: Option<String>, kind: Kind, local: bool, level: Option<Kind>) -> io::Result<(Share, String)> {
         let now = self.now();
         let code = new_code();
         let share = Share {
             id: new_id(), session: session.into(), life, created_at: now,
             code_expires_at: now + CODE_TTL, code_hash: hash(&code), token_hash: None, device: None,
-            redeemed_at: None, revoked_at: None, local, kind, parent_id: None,
+            redeemed_at: None, revoked_at: None, local, kind, parent_id: None, level,
         };
         self.insert(share.clone())?;
         Ok((share, code))
@@ -241,7 +253,7 @@ impl ShareStore {
         let share = Share {
             id: new_id(), session: session.into(), life, created_at: now, code_expires_at: now,
             code_hash: String::new(), token_hash: Some(hash(&token)), device: None,
-            redeemed_at: Some(now), revoked_at: None, local: false, kind, parent_id: None,
+            redeemed_at: Some(now), revoked_at: None, local: false, kind, parent_id: None, level: None,
         };
         self.insert(share.clone())?;
         Ok((share, token))
@@ -283,7 +295,7 @@ impl ShareStore {
                 id: new_id(), session: s.session.clone(), life: s.life.clone(), created_at: now,
                 code_expires_at: now, code_hash: String::new(), token_hash: Some(h.token_hash.clone()),
                 device: None, redeemed_at: Some(now), revoked_at: None, local: false, kind: s.kind,
-                parent_id: Some(root),
+                parent_id: Some(root), level: None,
             });
         }
         let count = added.len();
@@ -315,7 +327,7 @@ impl ShareStore {
             let child = Share {
                 id: new_id(), session: session.into(), life, created_at: now, code_expires_at: now,
                 code_hash: String::new(), token_hash: Some(token), device: None, redeemed_at: Some(now),
-                revoked_at: None, local: false, kind, parent_id: Some(root_id.into()),
+                revoked_at: None, local: false, kind, parent_id: Some(root_id.into()), level: None,
             };
             state.insert(child.id.clone(), child);
         }

@@ -224,7 +224,7 @@ async fn env_with(o: Opts) -> Env {
     let reach = if o.reach_fails { reach_dns_fails().await } else { reach_ok().await };
     let owner_state = Arc::new(OwnerShareState { share: share.clone(), owner_port: o.owner_port, bind_ip: "127.0.0.1".into(),
         net: Arc::new(NoNet), reach });
-    let pair_state = Arc::new(PairState { app: app.clone(), owner: owner_state, remote: remote.clone(), invite_levels: Default::default() });
+    let pair_state = Arc::new(PairState { app: app.clone(), owner: owner_state, remote: remote.clone() });
     let owner = format!("http://{}", serve(owner_pair_router(pair_state.clone())).await);
     let guarded = guest_pair_router(pair_state)
         .layer(axum::middleware::from_fn_with_state(Arc::new(Gate::new(share.clone())), guard));
@@ -984,4 +984,54 @@ async fn accept_without_level_is_view() {
     let (status, body) = e.accept("s1").await;
     assert_eq!((status, &body["level"]), (200, &json!("view")), "{body}");
     assert_eq!(e.other.calls()[0]["body"]["level"], "view");
+}
+
+/// O nível mora no registro do convite: um reinício entre o convite e o resgate não o rebaixa.
+#[tokio::test(flavor = "multi_thread")]
+async fn redeem_reads_the_invite_level_from_the_store() {
+    let e = env().await;
+    let (_, code) = e.share.store.create_pair_invite("s0", Some("t:1".into()), Kind::Share).unwrap();
+    let (status, body) = e.redeem(&code, json!({"level": "view"})).await;
+    assert_eq!((status, &body["level"]), (200, &json!("full")), "{body}");
+}
+
+// --- apelido por máquina e par repetido ------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn second_pair_with_the_same_machine_reuses_the_alias_after_owner_rename() {
+    let e = env().await;
+    e.seed_pair("s2", "pc-ana", "Y", ADDR);
+    let code = e.pair_code("s0");
+    let (status, body) = e.redeem(&code, json!({"owner": "pc-ana-novo", "session": "Z"})).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(e.share.pairs.by_local("s0")[0].alias, "pc-ana");
+    // Outra máquina com o mesmo nome do dono ganha apelido próprio.
+    let code = e.pair_code("s1");
+    let (status, body) = e.redeem(&code, json!({"address": "https://b.tail.ts.net:8443"})).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(e.share.pairs.by_local("s1")[0].alias, "pc-ana-2");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn redeem_of_a_repeated_pair_is_409_and_keeps_the_code() {
+    let e = env().await;
+    e.seed_pair("s2", "pc-ana", "Y", ADDR);
+    let code = e.pair_code("s0");
+    let (status, body) = e.redeem(&code, json!({})).await;
+    assert_eq!((status, &body["detail"]["code"]), (409, &json!("erro_par_repetido")), "{body}");
+    assert!(e.share.store.peek(&code, Kind::Pair).is_ok());
+    assert!(e.sidecar("s0").is_none() && e.share.pairs.all().len() == 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn accept_of_a_repeated_pair_is_409_and_undoes_the_other_side() {
+    let e = env().await;
+    let (seeded, _) = e.seed_pair("s2", "pc-ana", "Y", ADDR);
+    e.other.reply("POST /api/pair/redeem", 200, good());
+    let (status, body) = e.accept("s1").await;
+    assert_eq!((status, &body["detail"]["code"]), (409, &json!("erro_par_repetido")), "{body}");
+    assert_eq!(e.other.keys(), ["POST /api/pair/redeem", "DELETE /api/pair"]);
+    assert_eq!(e.share.pairs.all().len(), 1);
+    assert_eq!(e.live(), 1, "só o par antigo segue valendo: {seeded}");
+    assert!(e.sidecar("s1").is_none());
 }

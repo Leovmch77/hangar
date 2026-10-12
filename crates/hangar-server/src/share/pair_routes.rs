@@ -4,8 +4,7 @@
 //!
 //! Uma chave pode ter mais de um par (resgate com token já existente): recado e saída nomeiam a
 //! sessão (`session` no corpo, `?session=` na saída) e só sem ambiguidade a omitem, como o Python.
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use axum::body::Bytes;
 use axum::extract::{Path, RawQuery, State};
@@ -38,6 +37,10 @@ const MSG_PARTIAL: &str = "pareamento desfeito aqui, mas a outra máquina pode c
 const RESP_KEYS: [&str; 5] = ["ok", "delivered", "steered", "native", "queued"];
 const MAX_MESSAGE: usize = 64000;
 
+fn repeated() -> Response {
+    detail(StatusCode::CONFLICT, "erro_par_repetido", "esta sessão já está pareada com essa sessão de fora", json!({}))
+}
+
 pub type Reply = Result<(u16, Option<Value>), PeerError>;
 
 /// A outra máquina; os testes trocam o Funnel de fora por um servidor local.
@@ -60,10 +63,6 @@ pub struct PairState {
     /// Lojas, porta do dono e conferência pela internet, as mesmas do convite comum.
     pub owner: Arc<OwnerShareState>,
     pub remote: Arc<dyn Remote>,
-    /// Nível de cada convite ainda não resgatado. Fora do `shares.json` (Hangar antigo não conhece o
-    /// campo): reiniciar antes do resgate deixa o convite em "ver e recado", o lado seguro.
-    // ponytail: convite vencido sem resgate fica aqui até reiniciar; poucos bytes por convite.
-    pub invite_levels: Mutex<HashMap<String, Kind>>,
 }
 
 type St = State<Arc<PairState>>;
@@ -316,10 +315,9 @@ async fn pair_invite(State(st): St, Path(name): Path<String>, bytes: Bytes) -> R
         return detail(StatusCode::CONFLICT, "erro_compartilhar_porta_do_convite", &msg, json!({"port": GUEST_PORT}));
     }
     let base = match share.ensure_on().await { Ok(b) => b, Err(e) => return prereq_error(e) };
-    let (s, code) = match share.store.create(&name, Some(life), Kind::Pair, false) { Ok(v) => v, Err(e) => return io_failed(e) };
+    let (s, code) = match share.store.create_pair_invite(&name, Some(life), level) { Ok(v) => v, Err(e) => return io_failed(e) };
     // Mesma regra do convite comum: o link só sai depois de abrir pela internet.
     if let Some(refusal) = reach_or_revoke(&st.owner, &base, format!("/par/{code}"), &s.id).await { return refusal }
-    st.invite_levels.lock().unwrap().insert(s.id.clone(), level);
     json_response(StatusCode::OK, json!({"id": s.id, "link": format!("{base}/par/{code}"), "expires_at": s.code_expires_at}))
 }
 
@@ -385,8 +383,16 @@ async fn pair_accept(State(st): St, Path(name): Path<String>, bytes: Bytes) -> R
         return detail(StatusCode::BAD_GATEWAY, "erro_par_resposta_invalida", "resposta do par inválida", json!({}));
     }
     let token = token.unwrap_or_default();
+    // A sessão de fora só se conhece pela resposta: o outro lado já gravou e tem de ser desfeito.
+    if share.pairs.paired_with(&address, session) {
+        guarded("revogar o convite", share.store.revoke(&mine.id));
+        if !undo_remote(remote, &address, token, session).await {
+            return detail(StatusCode::BAD_GATEWAY, "erro_pareamento_desfeito_parcial", MSG_PARTIAL, json!({}));
+        }
+        return repeated();
+    }
     let given = clamp_for_old(resp.get("level"), level);
-    let alias = share.pairs.free_alias(owner, &app.peers.ids(), &server_id(app));
+    let alias = share.pairs.free_alias(owner, &address, &app.peers.ids(), &server_id(app));
     let peer = format!("{alias}::{session}");
     let mut linked = false;
     let done: Result<(), String> = async {
@@ -571,13 +577,14 @@ async fn pair_redeem(State(st): St, bytes: Bytes) -> Response {
         }
     };
     let name = invite.session;
+    if share.pairs.paired_with(&address, session) { return repeated(); }
     // Antes de gastar o código: sessão já agrupada recusa sem queimar o convite.
     match already_grouped(app, &name).await {
         Ok(false) => {}
         Ok(true) => return detail(StatusCode::CONFLICT, "erro_pareamento_mistura_cross", MSG_ALREADY, json!({})),
         Err(r) => return respond(r),
     }
-    let alias = share.pairs.free_alias(owner, &app.peers.ids(), &server_id(app));
+    let alias = share.pairs.free_alias(owner, &address, &app.peers.ids(), &server_id(app));
     let peer = format!("{alias}::{session}");
     if let Err(r) = join_external(app, &name, &peer).await { return respond(r) }
     let undone = || fail(StatusCode::INTERNAL_SERVER_ERROR, "erro_pareamento_desfeito", "pareamento desfeito", json!({"avisos": ""}));
@@ -601,8 +608,7 @@ async fn pair_redeem(State(st): St, bytes: Bytes) -> Response {
         undo_local(app, share, &name, &peer, &redeemed.id).await;
         return respond(undone());
     }
-    let mine = st.invite_levels.lock().unwrap().remove(&invite.id).unwrap_or(Kind::Pair);
-    let given = clamp_for_old(ask.get("level"), mine);
+    let given = clamp_for_old(ask.get("level"), invite.level.unwrap_or(Kind::Pair));
     if let Err(e) = grant_group(app, share, &redeemed.id, &name, given).await {
         tracing::warn!(code = "external_pair_grant_failed", session = %name, error = %e, "par externo: nível não gravado, resgate desfeito");
         undo_local(app, share, &name, &peer, &redeemed.id).await;

@@ -64,7 +64,7 @@ fn share(session: &str, life: &str) -> Share {
     Share {
         id: format!("id-{session}"), session: session.into(), life: Some(life.into()), created_at: 0.0,
         code_expires_at: 0.0, code_hash: "c".into(), token_hash: Some("t".into()), device: None,
-        redeemed_at: Some(1.0), revoked_at: None, local: false, kind: Kind::Share, parent_id: None,
+        redeemed_at: Some(1.0), revoked_at: None, local: false, kind: Kind::Share, parent_id: None, level: None,
     }
 }
 

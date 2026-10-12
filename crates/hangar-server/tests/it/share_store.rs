@@ -597,3 +597,16 @@ fn grant_and_ungrant_reach_copies_held_by_other_tokens() {
     assert!(f.store.ungrant(&root.id, "s").unwrap());
     assert_eq!(f.store.lookup_token(&tok_b).unwrap().sessions(), set(&["z", "dono"]));
 }
+
+#[test]
+fn pair_invite_level_survives_a_restart() {
+    let f = Fixture::new();
+    let (_, code) = f.store.create_pair_invite("s0", life("t:1"), Kind::Share).unwrap();
+    let (plain, _) = f.store.create("s1", life("t:1"), Kind::Pair, false).unwrap();
+    let reopened = f.reopen();
+    assert_eq!(reopened.peek(&code, Kind::Pair).unwrap().level, Some(Kind::Share));
+    assert_eq!(reopened.all().into_iter().find(|s| s.id == plain.id).unwrap().level, None);
+    let raw: serde_json::Value = serde_json::from_slice(&std::fs::read(f.file()).unwrap()).unwrap();
+    let without = raw.as_array().unwrap().iter().filter(|r| r.get("level").is_none()).count();
+    assert_eq!(without, 1, "registro sem nível não ganha a chave");
+}
