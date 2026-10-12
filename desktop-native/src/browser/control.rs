@@ -89,6 +89,7 @@ pub struct Controller<P: Page> {
     paused: Cell<bool>,
     on_activity: RefCell<Option<Box<dyn Fn(Activity)>>>,
     on_layout: RefCell<Option<Box<dyn Fn(Option<(u32, u32)>)>>>,
+    on_page_error: RefCell<Option<Box<dyn Fn(Option<String>)>>>,
 }
 
 fn push(list: &mut VecDeque<String>, line: String) {
@@ -98,7 +99,7 @@ fn push(list: &mut VecDeque<String>, line: String) {
 
 impl<P: Page> Controller<P> {
     pub fn new(page: P, hidden: bool) -> Self {
-        Self { page, turn: Mutex::new(()), wanted_hidden: Cell::new(hidden), paused: Cell::new(false), on_activity: RefCell::new(None), on_layout: RefCell::new(None), state: RefCell::new(State { refs: HashMap::new(), console: VecDeque::new(),
+        Self { page, turn: Mutex::new(()), wanted_hidden: Cell::new(hidden), paused: Cell::new(false), on_activity: RefCell::new(None), on_layout: RefCell::new(None), on_page_error: RefCell::new(None), state: RefCell::new(State { refs: HashMap::new(), console: VecDeque::new(),
             network: VecDeque::new(), inflight: HashSet::new(), requests: HashMap::new(), dialog: None, last_network: Instant::now(), theme: "sistema", layout: Layout::Desktop,
             hidden: false, scale: None, navigated: false, navs: 0, enabled: HashSet::new() }) }
     }
@@ -140,6 +141,9 @@ impl<P: Page> Controller<P> {
     /// Tela emulada (`layout mobile` ou `<l> <a>`), para o painel desenhá-la na proporção certa; `None` = a do painel.
     pub fn on_layout(&self, f: impl Fn(Option<(u32, u32)>) + 'static) { *self.on_layout.borrow_mut() = Some(Box::new(f)); }
 
+    /// Erro da página para o selo do painel (`Some`), ou `None` quando ela navega e a contagem recomeça.
+    pub fn on_page_error(&self, f: impl Fn(Option<String>) + 'static) { *self.on_page_error.borrow_mut() = Some(Box::new(f)); }
+
     fn report(&self, verb: &str, target: Option<String>) {
         if let Some(f) = self.on_activity.borrow().as_ref() { f(Activity { verb: verb.into(), target }); }
     }
@@ -152,6 +156,23 @@ impl<P: Page> Controller<P> {
     }
 
     pub fn on_event(&self, method: &str, p: &Value) {
+        self.log_event(method, p);
+        // Depois do registro, com o estado solto: quem ouve pode pedir algo ao controlador.
+        let error = match method {
+            "Runtime.consoleAPICalled" if matches!(p["type"].as_str(), Some("error" | "assert")) => self.state.borrow().console.back().cloned().map(Some),
+            "Runtime.exceptionThrown" => self.state.borrow().console.back().cloned().map(Some),
+            // A linha do registro não leva o endereço: para a pessoa, "falhou ao carregar" sem saber o quê não ajuda.
+            "Log.entryAdded" if p["entry"]["level"] == "error" => Some(Some(match p["entry"]["url"].as_str().filter(|u| !u.is_empty()) {
+                Some(url) => format!("{} — {url}", p["entry"]["text"].as_str().unwrap_or("")),
+                None => p["entry"]["text"].as_str().unwrap_or("").to_owned(),
+            })),
+            "Page.frameNavigated" if p["frame"]["parentId"].is_null() => Some(None),
+            _ => None,
+        };
+        if let (Some(error), Some(f)) = (error, self.on_page_error.borrow().as_ref()) { f(error); }
+    }
+
+    fn log_event(&self, method: &str, p: &Value) {
         let mut s = self.state.borrow_mut();
         match method {
             "Runtime.consoleAPICalled" => {
