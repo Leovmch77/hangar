@@ -107,14 +107,26 @@
   let modelosErro = $state('');
   let computer = $state<{ enabled: boolean } | null>(null);
   let computerErro = $state('');
+  let cliproxyErro = $state('');
+  // Troca de servidor no meio de uma chamada: a resposta do anterior não pinta esta tela.
+  let geracao = 0;
   $effect(() => {
     if (secao !== 'jev') return;
     const alvo = apiTarget;
+    const g = ++geracao;
     cliproxy = null;
+    cliproxyErro = '';
+    cliproxyMsg = null;
     computer = null;
     computerErro = '';
     modelos = [];
-    getJevAuxCliproxy(alvo).then((c) => { if (alvo === apiTarget) cliproxy = c; }).catch(() => {});
+    modelosErro = '';
+    // 404 é servidor sem o atalho (versão anterior): só aí o atalho some calado.
+    getJevAuxCliproxy(alvo)
+      .then((c) => { if (g === geracao) cliproxy = c; })
+      .catch((e) => {
+        if (g === geracao && (e as { status?: number }).status !== 404) cliproxyErro = e instanceof Error ? e.message : String(e);
+      });
     getComputerControl(alvo)
       .then((c) => { if (alvo === apiTarget) computer = c; })
       .catch((e) => { if (alvo === apiTarget) computerErro = e instanceof Error ? e.message : String(e); });
@@ -126,11 +138,14 @@
     buscando = true;
     modelosErro = '';
     const chave = store.rascunhoDe('jev_aux_api_key').trim();
+    const g = geracao;
     try {
       const r = await listJevAuxModels(store.alvo, { base_url: auxUrl, api_key: chave || null, use_saved_key: !chave });
+      if (g !== geracao) return;
       modelos = r.models;
       if (!r.models.length) modelosErro = m.browser_jev_aux_models_none();
     } catch (e) {
+      if (g !== geracao) return;
       modelos = [];
       modelosErro = e instanceof Error ? e.message : String(e);
     } finally {
@@ -145,13 +160,20 @@
     cliproxyMsg = null;
     const s = store.alvo;
     const mudanca = { jev_aux_cliproxy: true, jev_aux_base_url: cliproxy.preset_url };
+    const g = geracao;
     try {
       await (s ? patchConfigForServer(s, mudanca) : patchConfig(mudanca));
+      if (g !== geracao) return;
       store.desfazerRascunho('jev_aux_base_url');
       store.desfazerRascunho('jev_aux_api_key');
       await store.carregar();
-      cliproxyMsg = { ok: true, texto: m.browser_jev_aux_cliproxy_done() };
+      if (g !== geracao) return;
+      // Gravou, mas a releitura falhou: a tela diz as duas coisas em vez de só "gravado".
+      cliproxyMsg = store.erro
+        ? { ok: false, texto: `${m.browser_jev_aux_cliproxy_done()} ${store.erro}` }
+        : { ok: true, texto: m.browser_jev_aux_cliproxy_done() };
     } catch (e) {
+      if (g !== geracao) return;
       cliproxyMsg = { ok: false, texto: e instanceof Error ? e.message : String(e) };
     } finally {
       cliproxyAplicando = false;
@@ -290,6 +312,8 @@
               </button>
               {#if cliproxyMsg}<p class="aviso" class:erro={!cliproxyMsg.ok} role="status">{cliproxyMsg.texto}</p>{/if}
             </div>
+          {:else if cliproxyErro}
+            <p class="aviso erro" role="alert">{m.browser_jev_aux_cliproxy_error({ e: cliproxyErro })}</p>
           {/if}
           {#each jevCampos(['jev_aux_base_url', 'jev_aux_api_key', 'jev_aux_modelo']) as c (c.chave)}<LinhaConfig campo={c} {store} />{/each}
           <div class="jev-modelos">

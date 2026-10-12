@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Pressable, Text, View } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { getComputerControlEnabled, getJevAuxCliproxy, listJevAuxModels, patchConfigForServer, type JevAuxCliproxy } from '@hangar/core';
@@ -26,18 +26,28 @@ export default function Jev() {
   const [fetching, setFetching] = useState(false);
   const [modelsError, setModelsError] = useState('');
   const [computer, setComputer] = useState<{ enabled: boolean } | { error: string } | null>(null);
+  const [cliproxyError, setCliproxyError] = useState('');
+  // Troca de servidor no meio de uma chamada: a resposta do anterior não pinta esta tela.
+  const gen = useRef(0);
 
   useEffect(() => {
-    let live = true;
+    const g = ++gen.current;
+    const live = () => g === gen.current;
     setCliproxy(null);
+    setCliproxyError('');
+    setCliproxyMsg(null);
     setComputer(null);
     setModels([]);
+    setModelsError('');
     if (!server) return;
-    getJevAuxCliproxy(server).then((r) => { if (live) setCliproxy(r); }).catch(() => {});
+    // 404 é servidor sem o atalho (versão anterior): só aí o atalho some calado.
+    getJevAuxCliproxy(server)
+      .then((r) => { if (live()) setCliproxy(r); })
+      .catch((e: unknown) => { if (live() && (e as { status?: number }).status !== 404) setCliproxyError(message(e)); });
     getComputerControlEnabled(server)
-      .then((r) => { if (live) setComputer({ enabled: !!r.enabled }); })
-      .catch((e: unknown) => { if (live) setComputer({ error: message(e) }); });
-    return () => { live = false; };
+      .then((r) => { if (live()) setComputer({ enabled: !!r.enabled }); })
+      .catch((e: unknown) => { if (live()) setComputer({ error: message(e) }); });
+    return () => { gen.current++; };
   }, [server?.id, server?.baseUrl, server?.token]);
 
   const auxSupported = 'jev_aux_base_url' in cfg.fields;
@@ -47,27 +57,30 @@ export default function Jev() {
   const fetchModels = () => {
     if (!server || fetching || !url) return;
     const key = textOf(cfg.draft.jev_aux_api_key).trim();
+    const g = gen.current;
     setFetching(true);
     setModelsError('');
     listJevAuxModels(server, { base_url: url, api_key: key || null, use_saved_key: !key })
-      .then((r) => { setModels(r.models); if (!r.models.length) setModelsError(m.browser_jev_aux_models_none()); })
-      .catch((e: unknown) => { setModels([]); setModelsError(message(e)); })
+      .then((r) => { if (g !== gen.current) return; setModels(r.models); if (!r.models.length) setModelsError(m.browser_jev_aux_models_none()); })
+      .catch((e: unknown) => { if (g !== gen.current) return; setModels([]); setModelsError(message(e)); })
       .finally(() => setFetching(false));
   };
 
   // Grava na hora, fora do rascunho: a chave do CLIProxyAPI só existe no servidor.
   const useCliproxy = () => {
     if (!server || !cliproxy || applying) return;
+    const g = gen.current;
     setApplying(true);
     setCliproxyMsg(null);
     patchConfigForServer(server, { jev_aux_cliproxy: true, jev_aux_base_url: cliproxy.preset_url })
       .then(() => {
+        if (g !== gen.current) return;
         cfg.unstage('jev_aux_base_url');
         cfg.unstage('jev_aux_api_key');
         cfg.reload();
         setCliproxyMsg({ ok: true, text: m.browser_jev_aux_cliproxy_done() });
       })
-      .catch((e: unknown) => setCliproxyMsg({ ok: false, text: message(e) }))
+      .catch((e: unknown) => { if (g === gen.current) setCliproxyMsg({ ok: false, text: message(e) }); })
       .finally(() => setApplying(false));
   };
 
@@ -105,6 +118,8 @@ export default function Jev() {
                 <Text accessibilityLiveRegion="polite" style={[styles.note, { color: cliproxyMsg.ok ? c.muted : failed }]}>{cliproxyMsg.text}</Text>
               ) : null}
             </View>
+          ) : cliproxyError ? (
+            <Text accessibilityRole="alert" style={[styles.note, { color: failed }]}>{m.browser_jev_aux_cliproxy_error({ e: cliproxyError })}</Text>
           ) : null}
           <Box>
             <ConfigRow cfg={cfg} k="jev_aux_base_url" />

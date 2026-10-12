@@ -210,6 +210,11 @@ export interface ComputerControlRequest {
   mode?: 'package' | 'local';
   project_dir: string;
   agent_config: string;
+  // O servidor novo ignora o modelo igual ao auxiliar; o antigo exige o que já está salvo.
+  llm_url?: string;
+  llm_model?: string;
+  llm_effort?: string;
+  use_cliproxy_key?: boolean;
 }
 
 export function getComputerControl(target: Server | null): Promise<ComputerControlState> {

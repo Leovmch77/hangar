@@ -156,6 +156,10 @@
         mode: current.mode,
         project_dir: projectDir.trim(),
         agent_config: agentConfig,
+        llm_url: current.llm_url,
+        llm_model: current.llm_model,
+        llm_effort: current.llm_effort,
+        use_cliproxy_key: current.cliproxy.key_is_cliproxy,
       });
       fill(s);
       savedMessage = s.enabled
@@ -313,7 +317,9 @@
 
       <div class="jev-status">
         <p class="status">{m.computer_control_llm()}</p>
-        <p class="hint">{current.llm_model
+        <p class="hint">{!current.llm_from_jev_aux
+          ? m.browser_jev_cu_old_server({ model: current.llm_model || '—' })
+          : current.llm_model
           ? m.browser_jev_cu_uses_aux({ model: current.llm_model })
           : m.browser_jev_cu_aux_missing()}</p>
       </div>

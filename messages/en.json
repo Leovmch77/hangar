@@ -7169,6 +7169,8 @@
   "browser_jev_aux_cliproxy_no_key": "CLIProxyAPI is running, but its config.yaml has no api-key.",
   "browser_jev_aux_cliproxy_use": "Use this server's CLIProxyAPI",
   "browser_jev_aux_cliproxy_done": "CLIProxyAPI address and key saved. Now pick the model.",
+  "browser_jev_aux_cliproxy_error": "Couldn't check this server's CLIProxyAPI ({e}).",
+  "browser_jev_cu_old_server": "This server still reads the screen with its own model ({model}). Update its Hangar to use Jev's helper model.",
   "browser_jev_aux_url": "Address",
   "browser_jev_aux_url_help": "OpenAI-compatible base, without /chat/completions. E.g. http://127.0.0.1:8317/v1 or https://openrouter.ai/api/v1.",
   "browser_jev_aux_key": "Key",
