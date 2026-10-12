@@ -345,6 +345,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         // Mesmo caminho: o axum junta o POST à rota de cima (um repasse só, o dela).
         .route("/api/presence", axum::routing::post(crate::presence::route))
         .route("/api/presence/heartbeat", axum::routing::post(crate::presence::route).fallback(pass_any))
+        .route("/api/jev/aux/cliproxy", get(crate::jev_aux::cliproxy).fallback(pass_any))
+        .route("/api/jev/aux/models", axum::routing::post(crate::jev_aux::models).fallback(pass_any))
         .route("/api/voice", get(crate::voice::routes::ws).fallback(pass_any))
         .route("/api/voice/settings", get(crate::voice::routes::settings_route).fallback(pass_any))
         // Mesmo caminho: o axum junta o PUT à rota de cima (um repasse só, o dela).
