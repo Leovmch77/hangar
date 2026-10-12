@@ -9149,18 +9149,12 @@ class ComputerControlBody(_StrictBody):
     mode: Literal["package", "local"] | None = None   # None = mantém o modo atual
     project_dir: str = ""
     agent_config: str = ""
+    # Cliente antigo: o modelo é o auxiliar da página Jev; igual passa, diferente volta erro.
     llm_url: str = ""
     llm_model: str = ""
     llm_effort: str = ""
-    llm_key: str | None = None     # None/vazio = mantém a gravada
-    jev_key: str | None = None     # cliente antigo: vazio passa, chave digitada volta erro (o Jev vem da página dele)
-    use_cliproxy_key: bool = False
-
-
-class ComputerControlModelsBody(_StrictBody):
-    llm_url: str
     llm_key: str | None = None
-    use_saved_key: bool = False
+    jev_key: str | None = None     # cliente antigo: vazio passa, chave digitada volta erro (o Jev vem da página dele)
     use_cliproxy_key: bool = False
 
 
@@ -9220,13 +9214,6 @@ def computer_control_install():
 def computer_control_new_target(body: ComputerControlTargetBody):
     from app import computer_control as cc
     return _computer_control_call(cc.create_target, body.model_dump())
-
-
-@app.post("/api/computer-control/models", dependencies=[Depends(require_auth)])
-def computer_control_models(body: ComputerControlModelsBody):
-    from app import computer_control as cc
-    return {"models": _computer_control_call(cc.list_models, body.llm_url, body.llm_key,
-                                             body.use_saved_key, body.use_cliproxy_key)}
 
 
 class ConnectBody(_StrictBody):
