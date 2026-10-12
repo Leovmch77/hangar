@@ -71,6 +71,8 @@ pub fn args(bin: &Path, profile: &Path, scale: f32) -> Vec<String> {
         "--disable-background-timer-throttling".into(),
         "--disable-renderer-backgrounding".into(),
         "--disable-backgrounding-occluded-windows".into(),
+        // `navigator.webdriver` ligado faz o Google recusar o login ("navegador pode não ser seguro").
+        "--disable-blink-features=AutomationControlled".into(),
     ];
     if !is_shell(bin) { args.insert(0, "--headless".into()); }
     args

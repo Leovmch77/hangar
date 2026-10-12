@@ -14,6 +14,23 @@ pub trait Page {
 
 pub enum Reply { Text(String), Png(Vec<u8>) }
 
+/// Agente do layout de desktop. O Chromium do Linux roda headless e se apresenta como "HeadlessChrome", que Google,
+/// GitHub e afins recusam no login: vira o de um Chrome comum, com as marcas dos client hints, que a troca sem
+/// metadados apagaria. Os outros motores voltam ao próprio agente (`""`).
+fn desktop_agent(version: &Value) -> Value {
+    let agent = version["userAgent"].as_str().unwrap_or_default();
+    if !agent.contains("HeadlessChrome") { return json!({"userAgent": ""}); }
+    let full = version["product"].as_str().unwrap_or_default().rsplit('/').next().unwrap_or_default();
+    let major = full.split('.').next().unwrap_or_default();
+    let brands = |v: &str, filler: &str| json!([{"brand": "Not;A=Brand", "version": filler},
+        {"brand": "Chromium", "version": v}, {"brand": "Google Chrome", "version": v}]);
+    json!({
+        "userAgent": agent.replace("HeadlessChrome", "Chrome"),
+        "userAgentMetadata": {"brands": brands(major, "99"), "fullVersionList": brands(full, "99.0.0.0"), "fullVersion": full,
+            "platform": "Linux", "platformVersion": "", "architecture": "x86", "bitness": "64", "model": "", "mobile": false},
+    })
+}
+
 pub const EVENTS: [&str; 6] = ["Runtime.consoleAPICalled", "Log.entryAdded", "Network.requestWillBeSent",
     "Network.responseReceived", "Network.loadingFailed", "Page.frameNavigated"];
 
@@ -355,7 +372,9 @@ impl<P: Page> Controller<P> {
             return Ok(());
         }
         self.page.call("Emulation.setTouchEmulationEnabled", json!({"enabled": false})).await?;
-        self.page.call("Emulation.setUserAgentOverride", json!({"userAgent": ""})).await?;
+        // Sem troca o Chromium do Linux se apresenta como "HeadlessChrome", e Google, GitHub e afins recusam o login.
+        let version = self.page.call("Browser.getVersion", json!({})).await.unwrap_or_default();
+        self.page.call("Emulation.setUserAgentOverride", desktop_agent(&version)).await?;
         match layout {
             Layout::Custom(w, h) => self.page.call("Emulation.setDeviceMetricsOverride", metrics(w, h, 1, false)).await?,
             _ if self.state.borrow().hidden => self.page.call("Emulation.setDeviceMetricsOverride", metrics(HIDDEN_VIEWPORT.0, HIDDEN_VIEWPORT.1, 1, false)).await?,
