@@ -59,6 +59,33 @@ impl Slot {
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> { m.lock().unwrap_or_else(PoisonError::into_inner) }
 
+/// Só para medir: com `HANGAR_NATIVE_NAV_TRACE` no ambiente, uma linha por segundo no stderr com os quadros que
+/// chegaram, os decodificados (e o tempo médio deles) e as pinturas da página.
+pub mod trace {
+    use std::sync::{OnceLock, atomic::{AtomicU64, Ordering::Relaxed}};
+    pub static ARRIVED: AtomicU64 = AtomicU64::new(0);
+    pub static DECODED: AtomicU64 = AtomicU64::new(0);
+    pub static DECODE_US: AtomicU64 = AtomicU64::new(0);
+    pub static PAINTED: AtomicU64 = AtomicU64::new(0);
+
+    pub fn on() -> bool {
+        static ON: OnceLock<bool> = OnceLock::new();
+        *ON.get_or_init(|| {
+            let on = std::env::var_os("HANGAR_NATIVE_NAV_TRACE").is_some();
+            if on {
+                let _ = std::thread::Builder::new().name("nav-trace".into()).spawn(|| loop {
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                    let (a, d, us, p) = (ARRIVED.swap(0, Relaxed), DECODED.swap(0, Relaxed), DECODE_US.swap(0, Relaxed), PAINTED.swap(0, Relaxed));
+                    eprintln!("nav chegaram={a} decodificados={d} decod_ms={:.1} pinturas={p}", if d > 0 { us as f64 / d as f64 / 1000. } else { 0. });
+                });
+            }
+            on
+        })
+    }
+
+    pub fn add(counter: &AtomicU64, n: u64) { if on() { counter.fetch_add(n, Relaxed); } }
+}
+
 impl Surface {
     fn new(events: async_channel::Sender<Event>, format: image::ImageFormat) -> Arc<Self> {
         let surface = Arc::new(Surface {
@@ -74,6 +101,7 @@ impl Surface {
     /// Na thread de leitura do pipe: guarda e acorda quem decodifica.
     fn frame(&self, mut params: Value) {
         let Some(Value::String(data)) = params.get_mut("data").map(Value::take) else { return };
+        trace::add(&trace::ARRIVED, 1);
         lock(&self.slot).data = Some(data);
         self.wake.notify_one();
     }
@@ -88,8 +116,11 @@ impl Surface {
                     slot = self.wake.wait(slot).unwrap_or_else(PoisonError::into_inner);
                 }
             };
+            let started = std::time::Instant::now();
             match self.upload(&data) {
                 Ok(()) => {
+                    trace::add(&trace::DECODED, 1);
+                    trace::add(&trace::DECODE_US, started.elapsed().as_micros() as u64);
                     lock(&self.slot).unseen = true;
                     let _ = self.events.try_send(Event::Frame);
                 }
@@ -543,6 +574,7 @@ impl Engine {
         }
         // Antes de ler: um quadro que chegue no meio ainda avisa a tela.
         self.surface.seen();
+        trace::add(&trace::PAINTED, 1);
         let device = gpui_wgpu::WgpuContext::shared_device().map(|(device, _)| device);
         let shown = {
             let mut latest = lock(&self.surface.shown);

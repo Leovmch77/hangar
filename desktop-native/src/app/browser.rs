@@ -186,7 +186,11 @@ impl BrowserPanel {
         self._start = Some(cx.spawn_in(window, async move |this, cx| {
             // Corpo da tarefa, fora de `update`: a App não está emprestada, então o laço de mensagens que o WebView2
             // roda até nascer pode executar outras tarefas da GPUI sem pânico.
+            #[cfg(target_os = "linux")]
+            let started = std::time::Instant::now();
             let engine = starter.and_then(|starter| starter.start(events)).map(Rc::new);
+            #[cfg(target_os = "linux")]
+            if crate::browser::trace::on() { eprintln!("nav abertura_bloqueante_ms={:.0}", started.elapsed().as_secs_f64() * 1000.); }
             if let Err(e) = &engine { eprintln!("[nav] motor do navegador falhou: {e}"); }
             // Painel fechado no meio: o motor cai junto com o resultado.
             let _ = this.update_in(cx, |this, window, cx| {
