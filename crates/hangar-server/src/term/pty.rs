@@ -478,14 +478,24 @@ mod gate_tests {
 
     fn settle() { std::thread::sleep(Duration::from_millis(200)); }
 
+    /// Espera o escritor chegar a `want`; o teto só estoura se ele travar.
+    fn written(g: &Gated, want: &str) -> String {
+        let until = Instant::now() + Duration::from_secs(10);
+        loop {
+            let text = g.sink.text();
+            if text == want || Instant::now() >= until { return text; }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
     #[test]
     fn input_waits_for_ready_in_order_and_cursor_reply_passes() {
         let mut g = gated(Duration::from_secs(30), HELD_MAX);
         for b in [&b"ab"[..], b"\x1b[3;7R", b"c\x1b[12;1Rd"] {
             g.tx.blocking_send(Bytes::copy_from_slice(b)).unwrap();
         }
-        settle();
-        assert_eq!(g.sink.text(), "\x1b[3;7R\x1b[12;1R", "antes do sinal só a resposta do cursor passa");
+        // A segunda resposta vem no último quadro: com ela escrita, os três já passaram pelo portão.
+        assert_eq!(written(&g, "\x1b[3;7R\x1b[12;1R"), "\x1b[3;7R\x1b[12;1R", "antes do sinal só a resposta do cursor passa");
         g.ready.store(true, Ordering::Release);
         g.tx.blocking_send(Bytes::from_static(b"e")).unwrap();
         drop(g.tx);
@@ -509,12 +519,12 @@ mod gate_tests {
 
     #[test]
     fn over_the_cap_delivers_without_waiting_and_reports() {
-        let mut g = gated(Duration::from_secs(30), 4);
+        let g = gated(Duration::from_secs(30), 4);
         g.tx.blocking_send(Bytes::from_static(b"123")).unwrap();
         g.tx.blocking_send(Bytes::from_static(b"456")).unwrap();
-        settle();
-        assert_eq!(g.sink.text(), "123456");
-        assert_eq!(g.failed.try_recv(), Ok("input_held_overflow"));
+        assert_eq!(written(&g, "123456"), "123456");
+        // O aviso sai logo depois da escrita.
+        assert_eq!(g.failed.blocking_recv(), Ok("input_held_overflow"));
         drop(g.tx);
         g.writer.join().unwrap();
     }

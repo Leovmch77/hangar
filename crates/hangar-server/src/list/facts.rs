@@ -251,6 +251,9 @@ const MAX_NOTES: usize = 64;
 #[cfg(test)]
 const MAX_NOTES: usize = 100_000;
 static NOTES: LazyLock<Mutex<Vec<Note>>> = LazyLock::new(Default::default);
+/// Nos testes, tudo o que entrou na fila: a rodada da lista de outro teste a esvazia em paralelo.
+#[cfg(test)]
+static NOTED: LazyLock<Mutex<Vec<(String, String)>>> = LazyLock::new(Default::default);
 
 pub fn note(event: &'static str, session: &str, code: String, reason: &'static str) {
     let mut q = NOTES.lock().unwrap_or_else(|e| e.into_inner());
@@ -262,6 +265,8 @@ pub fn note(event: &'static str, session: &str, code: String, reason: &'static s
         return;
     }
     if crate::warn_limit::allow(Some(session), &format!("note:{event}:{code}")) {
+        #[cfg(test)]
+        NOTED.lock().unwrap_or_else(|e| e.into_inner()).push((session.to_owned(), code.clone()));
         q.push(Note { event, session: session.to_owned(), code, reason });
     }
 }
@@ -270,7 +275,7 @@ pub fn take_notes() -> Vec<Note> { std::mem::take(&mut *NOTES.lock().unwrap_or_e
 
 #[cfg(test)]
 pub fn notes_for(session: &str) -> Vec<String> {
-    NOTES.lock().unwrap().iter().filter(|n| n.session == session).map(|n| n.code.clone()).collect()
+    NOTED.lock().unwrap().iter().filter(|(noted, _)| noted == session).map(|(_, code)| code.clone()).collect()
 }
 
 /// Fatos sobre as linhas descobertas. Devolve as que vão à classificação e à decoração e as postas
@@ -335,6 +340,14 @@ mod tests {
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
     type Seen = Arc<Mutex<Vec<(String, Value)>>>;
+
+    /// A rodada da lista esvazia a fila em paralelo aos testes: o que um teste anotou continua visível.
+    #[test]
+    fn a_note_stays_visible_after_the_round_takes_the_queue() {
+        note("list_test", "notes-drained", "list_test_code".into(), "teste");
+        drop(take_notes());
+        assert_eq!(notes_for("notes-drained"), ["list_test_code"]);
+    }
 
     /// Python de mentira: `answer(caminho, n-ésimo pedido dos fatos)` dá (status, corpo); guarda caminho e corpo.
     async fn python(answer: fn(&str, usize) -> (u16, String)) -> (SocketAddr, Seen) {
