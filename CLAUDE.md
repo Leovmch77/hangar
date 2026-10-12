@@ -464,7 +464,9 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
   e `JEV_MODEL`, já resolvidos. Não existe chave do Jev só para o Computer Use. A regra do destino
   (chave `sk-or-` ou endereço do OpenRouter) tem quatro cópias que mudam juntas: `destino_jev`,
   `destination` em `crates/hangar-server/src/voice/jev.rs`, `jev::destination` em
-  `desktop-native/src/app/server_config.rs` e `jev_config` do `orq.py`. Evidência em
+  `desktop-native/src/app/server_config.rs` e `destinoDoJev` em `shell/jev_objetivo.cjs` (só o CLI
+  fora de sessão). Precedência única: runtime-config acima do ambiente. O modelo auxiliar (texto e
+  imagem) também é um só, `jev_aux_*`, lido pelo navegador e pelo Computer Use. Evidência em
   [plataforma.md](docs/decisoes/plataforma.md#uma-configuração-do-jev-para-os-quatro-usos).
 - **Hangar Connect entra por `127.0.0.1:8768`, e nada que chega por ela é local.** O
   `ConnectPortGate` troca o cliente por `192.0.2.1` antes de qualquer checagem; nunca decidir
