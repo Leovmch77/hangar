@@ -26,6 +26,8 @@ const PAPEIS_INTERATIVOS = new Set([
 const MAX_CANDIDATOS = 255;
 const PAPEIS_QUE_ENVIAM = new Set(['button', 'link', 'menuitem']);
 const NENHUM = '_nenhum';
+const SEM_ROTULO = 'campo de texto sem rotulo';
+const semRotulo = (nome) => String(nome).startsWith(SEM_ROTULO);
 // Só as linhas acionáveis, sem o teto de 24 mil caracteres: com o teto, os elementos depois do corte
 // sumiam da lista de alvos e a reconferência da ref dava "sumiu". Quem não conhece os flags os ignora.
 const SNAPSHOT_DO_LACO = ['--refs', '--max', '1000000'];
@@ -88,7 +90,11 @@ function sinonimos(head, candidatos) {
   // Também conta como gêmeo o rótulo que COMEÇA com o outro, palavra inteira: "Editar" no painel e
   // "Editar registro de 12/10/2026 10:39" na lista abrem a mesma edição, e a massa se dividia (0,34
   // contra 0,33). O risco continua julgado sobre o vencedor.
-  const mesmoAto = (a, b) => a === b || b.startsWith(`${a} `) || a.startsWith(`${b} `);
+  // So para botao/link, e o resto nao pode acrescentar outro ato ("Salvar e enviar" nao e "Salvar").
+  const prefixo = (curto, longo) => longo.startsWith(`${curto} `)
+    && !/^(e|and|\+|&)\b/i.test(longo.slice(curto.length + 1));
+  const mesmoAto = (a, b) => a === b
+    || (PAPEIS_QUE_ENVIAM.has(vencedor.papel) && (prefixo(a, b) || prefixo(b, a)));
   const iguais = candidatos.filter((c) => c.papel === vencedor.papel && mesmoAto(c.nome, vencedor.nome));
   if (iguais.length < 2) return null;
   // Sem distribuição não há massa a somar, e somar `{}` daria ZERO — trocando a `confidence` que o
@@ -117,7 +123,7 @@ function parsarSnapshot(texto, max = MAX_CANDIDATOS - 1) {
     if ((!nome || !nome.trim()) && !PAPEIS_DE_TEXTO.has(papel)) continue;
     // Desabilitado não reage ao clique nem aceita texto: como alvo, só gastaria um passo.
     if (/\[ref=@e\d+\](?: \[\w+\])* \[disabled\]/.test(linha)) continue;
-    achados.push({ ref, papel, nome: (nome?.trim() || 'campo de texto sem rotulo').slice(0, 120) });
+    achados.push({ ref, papel, nome: (nome?.trim() || `${SEM_ROTULO} ${ref}`).slice(0, 120) });
     if (achados.length >= max) break;
   }
   return achados;
@@ -320,7 +326,12 @@ const JS_VALORES = `(() => {
     if (!visivel(e)) continue;
     // Editor rich text sem rotulo: mesmo nome que o parsarSnapshot da a ele, e o texto como valor.
     const rico = e.isContentEditable && !/^(INPUT|TEXTAREA)$/.test(e.tagName);
-    if (rico) { const n = nomeDe(e) || 'campo de texto sem rotulo'; fora.valores[n.slice(0, 80)] = String(e.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 400); continue; }
+    if (rico) {
+      const n = nomeDe(e) || 'campo de texto sem rotulo';
+      const t = String(e.innerText || '').replace(/\\s+/g, ' ').trim();
+      fora.valores[n.slice(0, 80)] = ${CHAVE_SECRETA}.test(n) ? (t ? '(oculto)' : '') : t.slice(0, 400);
+      continue;
+    }
     const nome = nomeDe(e);
     if (!nome) continue;
     // aria-checked="false" PRECISA virar false, nao cair no ramo de baixo: um switch do Radix e
@@ -521,8 +532,11 @@ function decidir(respostas, candidatos = [], limiares = LIMIARES) {
     // Sem o head (resposta antiga ou falha), vale o julgamento geral de antes.
     const risco = p ? (gemeos ? candidatos.filter((c) => c.papel === escolhido.papel && c.nome === escolhido.nome)
       .reduce((soma, c) => soma + (p[c.ref] ?? 0), 0) : (p[alvo] ?? 0)) : null;
-    if (risco === null ? ehArriscado : risco >= limiares.arriscadoAlvo) {
-      return { parar: `operacao arriscada (${(risco ?? arriscado).toFixed(2)}): clicar em ${rotulo(escolhido)} precisa da ordem do usuario` };
+    // Contra o "nenhum", nao contra a soma: dois botoes de compra dividiam a massa (0,25 cada) e
+    // nenhum dos dois passava do limiar.
+    const relativo = risco === null ? null : risco / Math.max(risco + (p[NENHUM] ?? 0), 1e-9);
+    if (relativo === null ? ehArriscado : relativo >= limiares.arriscadoAlvo) {
+      return { parar: `operacao arriscada (${(relativo ?? arriscado).toFixed(2)}): clicar em ${rotulo(escolhido)} precisa da ordem do usuario` };
     }
   }
   // SELECT numa listbox ARIA vira clique; quem decide se ele pode acontecer e o laco, que so sabe
@@ -594,13 +608,14 @@ async function valorDoCampo({ campo, escolha, cofre, objetivo, feito, escreverTe
     const nomes = [campo.nome, ...vizinhos.filter((n) => n !== campo.nome && !ehSegredo(n) && !escritos.has(n))];
     let lidos = null;
     if (nomes.length > 1) {
+      const resposta = await escreverTexto(pedidoDeTextos(objetivo, nomes, feito));
       try {
-        lidos = lerTextos(await escreverTexto(pedidoDeTextos(objetivo, nomes, feito)));
+        lidos = lerTextos(resposta);
       } catch {
         lidos = null; // resposta fora de JSON: cai no pedido de um campo só
       }
     }
-    if (lidos) for (const n of nomes) escritos.set(n, String(lidos[n] ?? SEM_VALOR));
+    if (lidos) for (const n of nomes) escritos.set(n, typeof lidos[n] === 'string' ? lidos[n] : SEM_VALOR);
     else escritos.set(campo.nome, await escreverTexto(pedidoDeTexto(objetivo, campo.nome, feito)));
   }
   const valor = String(escritos.get(campo.nome)).trim();
@@ -628,6 +643,7 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
   let repetidas = 0;
   let esperouCarregar = false;
   const escritos = new Map();
+  let urlDosEscritos = '';
   const agir = async (verbo, args) => {
     const saida = String(await executar(verbo, args));
     if (saida.startsWith('erro:')) throw new FalhaDoNavegador(verbo, saida);
@@ -647,6 +663,8 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
       if (String(saida).startsWith('erro:')) return { feito, sucesso: false, parou: `o navegador falhou no ${verbo}: ${saida}` };
     }
     const candidatos = parsarSnapshot(snapshot);
+    // Texto escrito para um campo vale so na pagina em que foi pedido.
+    if (url !== urlDosEscritos) { escritos.clear(); urlDosEscritos = url; }
     // Logo depois de um `open` ou de um clique que navega, a arvore ainda e a da pagina em branco.
     if (!candidatos.length && !esperouCarregar) {
       esperouCarregar = true;
@@ -724,7 +742,7 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
         feito.push('SCROLL_DOWN');
       } else if (decisao.operacao === 'TYPE_TEXT') {
         const vazio = (c) => !Object.entries(anotacao.valores).find(([k]) => normalizar(k) === normalizar(c.nome))?.[1];
-        const vizinhos = candidatos.filter((c) => PAPEIS_DE_TEXTO.has(c.papel) && !ehEditavel(c, anotacao.editaveis) && vazio(c)
+        const vizinhos = candidatos.filter((c) => PAPEIS_DE_TEXTO.has(c.papel) && !semRotulo(c.nome) && !ehEditavel(c, anotacao.editaveis) && vazio(c)
           && !(respostas[cabecaDoValor(c.ref)]?.choice in cofre && forca(respostas[cabecaDoValor(c.ref)]) >= LIMIARES.alvo))
           .map((c) => c.nome);
         const { valor, origem, parou, falta } = await valorDoCampo({
@@ -762,8 +780,12 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
         // e so quando o valor atual difere do pedido.
         const usados = new Set(origem.startsWith('dados.') ? [origem.slice(6)] : []);
         const atual = (c) => Object.entries(anotacao.valores).find(([k]) => normalizar(k) === normalizar(c.nome))?.[1];
-        for (const c of candidatos) {
-          if (c.ref === decisao.alvo || !PAPEIS_DE_TEXTO.has(c.papel) || ehEditavel(c, anotacao.editaveis)) continue;
+        // O fill do alvo pode redesenhar a pagina: so vai junto o campo cuja ref ainda tem o mesmo nome.
+        const extras = candidatos.filter((c) => c.ref !== decisao.alvo && PAPEIS_DE_TEXTO.has(c.papel)
+          && !semRotulo(c.nome) && !ehEditavel(c, anotacao.editaveis));
+        const agora = extras.length ? new Map(parsarSnapshot(await executar('snapshot', SNAPSHOT_DO_LACO)).map((c) => [c.ref, c.nome])) : new Map();
+        for (const c of extras) {
+          if (agora.get(c.ref) !== c.nome) continue;
           const v = respostas[cabecaDoValor(c.ref)];
           const chave = v?.choice;
           // Sem valor de `dados`, o que o modelo de texto ja escreveu para este campo no pedido unico.
@@ -790,14 +812,16 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
         // outra ida ao Jev. So igualdade exata e so um candidato; fora disso o ciclo seguinte decide.
         if (decisao.escolhido.papel === 'combobox' && Object.keys(cofre).length) {
           await executar('wait', ['--idle']);
-          const opcoes = parsarSnapshot(await executar('snapshot', SNAPSHOT_DO_LACO)).filter((c) => c.papel === PAPEL_DE_OPCAO);
+          const arvore = String(await executar('snapshot', SNAPSHOT_DO_LACO));
+          // So lista ARIA aberta (listbox): num <select> nativo as opcoes de TODOS os selects da pagina
+          // estao na arvore, e a igualdade de texto poderia mirar outro campo.
+          const opcoes = /^\s*-\s+listbox\b/m.test(arvore) ? parsarSnapshot(arvore).filter((c) => c.papel === PAPEL_DE_OPCAO) : [];
           const valores = new Set(Object.entries(cofre).filter(([k, v]) => typeof v === 'string' && !ehSegredo(k)).map(([, v]) => normalizar(v)));
           const casadas = opcoes.filter((o) => valores.has(normalizar(o.nome)));
           if (casadas.length === 1) {
             const o = casadas[0];
             log(`jev-objetivo passo ${passo}: SELECT @${o.ref} ("${o.nome}") igual a um valor de dados`);
-            const saida = await executar('eval', [jsDeSelecionar(o.nome)]);
-            if (String(saida).includes(SEM_SELECT)) await agir('click', [`@${o.ref}`]);
+            await agir('click', [`@${o.ref}`]);
             feito.push(`SELECT "${o.nome}"`);
           }
         }
