@@ -9,6 +9,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 import unicodedata
 import urllib.request
 
@@ -124,6 +125,26 @@ JEV_URL = "https://api.typesafe.ai/v1/systemone"
 JEV_OPENROUTER_URL = "https://openrouter.ai/api/alpha/decisions"
 JEV_TIMEOUT_S = 2.0
 JEV_LIMIAR = 0.5
+# Depois de uma falha o Jev descansa: chave errada ou endereço fora fariam cada prompt pagar o teto de espera.
+JEV_PAUSA_S = 300
+
+
+def _registrar(motivo: str) -> None:
+    """Falha aberta (vale a regex), mas não calada: uma linha no log do Hangar. Se nem logar der, engole."""
+    try:
+        root = (os.path.join(os.environ.get("LOCALAPPDATA") or os.path.expanduser("~/AppData/Local"), "hangar")
+                if os.name == "nt" else os.path.expanduser("~/.hangar"))
+        base = os.path.join(root, "logs", "privado")
+        os.makedirs(base, exist_ok=True, mode=0o700)
+        fd = os.open(os.path.join(base, "nav_hook-falhas.log"), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        with os.fdopen(fd, "a", encoding="utf-8") as fh:
+            fh.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {motivo[:300]}\n")
+    except Exception:
+        pass
+
+
+def _pausa_jev() -> str:
+    return os.path.join(_nav_dir(), "_jev_pausa")
 
 
 def _sem_acento(s: str) -> str:
@@ -135,6 +156,11 @@ def _jev_precisa(prompt: str) -> bool | None:
     key = os.environ.get("TYPESAFE_API_KEY")
     if not key:
         return None
+    try:
+        if time.time() - os.path.getmtime(_pausa_jev()) < JEV_PAUSA_S:
+            return None
+    except OSError:
+        pass
     pergunta = {"precisa": {"type": "noul", "instructions": (
         "Will handling this message require opening, looking at, clicking or testing a web page or "
         "an app screen in a browser?")}}
@@ -152,7 +178,14 @@ def _jev_precisa(prompt: str) -> bool | None:
     try:
         with urllib.request.urlopen(req, timeout=JEV_TIMEOUT_S) as r:
             return float(json.load(r)["answers"]["precisa"]["noul"]) >= JEV_LIMIAR
-    except Exception:
+    except Exception as e:
+        _registrar(f"jev falhou ({type(e).__name__}: {e}); regex por {JEV_PAUSA_S}s")
+        try:
+            os.makedirs(_nav_dir(), exist_ok=True)
+            with open(_pausa_jev(), "w"):
+                pass
+        except OSError:
+            pass
         return None
 
 
@@ -197,6 +230,6 @@ def main() -> None:
 if __name__ == "__main__":
     try:
         main()
-    except Exception:
-        pass
+    except Exception as e:
+        _registrar(f"main falhou ({type(e).__name__}: {e})")
     sys.exit(0)
