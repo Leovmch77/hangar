@@ -4631,7 +4631,7 @@
   "native_browser_dialog_cancel": "Cancelar",
   "native_browser_errors_uncaught": "Erro não tratado: {e}",
   "native_browser_dialog_failed": "A página não recebeu a resposta do diálogo: {e}",
-  "native_browser_dialog_replaced": "A página abriu outro diálogo, e o anterior (“{message}”) foi recusado.",
+  "native_browser_dialog_second_refused": "A página abriu outro diálogo (“{message}”) enquanto o anterior esperava resposta, e ele foi recusado.",
   "native_browser_ctl_using": "{session} está usando o navegador",
   "native_browser_ctl_click": "clicando em “{target}”",
   "native_browser_ctl_click_plain": "clicando",
