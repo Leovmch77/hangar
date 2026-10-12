@@ -56,8 +56,10 @@ const ACTING: [&str; 12] = ["click", "fill", "type", "press", "hover", "eval", "
 /// Com diálogo aberto a página não roda script: só estes respondem sem ele.
 const WITH_DIALOG: [&str; 3] = ["url", "estado", "console"];
 pub const PAUSED: &str = "erro: o usuario pausou o navegador; espere ele clicar em Retomar no painel e tente de novo";
-/// Tempo do realce do alvo antes da ação: o bastante para o olho achar, pouco para o agente sentir.
-const MARK_MS: u64 = 350;
+/// Espera da primeira ação depois de a faixa do agente ter sumido: ela volta e encolhe a página, e o alvo tem de ser
+/// medido depois disso. Com a faixa já na tela, nenhuma espera.
+const SETTLE_MS: u64 = 150;
+
 
 struct State {
     refs: HashMap<String, i64>,
@@ -94,6 +96,9 @@ pub struct Controller<P: Page> {
     on_page_error: RefCell<Option<Box<dyn Fn(Option<String>)>>>,
     /// Diálogo aberto na página (tipo, mensagem), vindo do motor pelo painel.
     dialog_open: RefCell<Option<(String, String, String)>>,
+    /// A faixa do agente está na tela (o painel avisa); o verbo que a faz aparecer espera `SETTLE_MS`.
+    strip_shown: Cell<bool>,
+    settle: Cell<bool>,
     /// Resposta mandada, fechamento ainda não visto: o próximo verbo espera um instante por ele.
     dialog_answered: Cell<bool>,
     /// Acorda o verbo em andamento quando um diálogo abre: o clique que o abriu só voltaria depois da resposta.
@@ -108,7 +113,7 @@ fn push(list: &mut VecDeque<String>, line: String) {
 
 impl<P: Page> Controller<P> {
     pub fn new(page: P, hidden: bool) -> Self {
-        Self { page, turn: Mutex::new(()), wanted_hidden: Cell::new(hidden), paused: Cell::new(false), on_activity: RefCell::new(None), on_layout: RefCell::new(None), on_page_error: RefCell::new(None), dialog_open: RefCell::new(None), dialog_answered: Cell::new(false), dialog_signal: RefCell::new(None), on_dialog_answer: RefCell::new(None), state: RefCell::new(State { refs: HashMap::new(), console: VecDeque::new(),
+        Self { page, turn: Mutex::new(()), wanted_hidden: Cell::new(hidden), paused: Cell::new(false), on_activity: RefCell::new(None), on_layout: RefCell::new(None), on_page_error: RefCell::new(None), dialog_open: RefCell::new(None), strip_shown: Cell::new(false), settle: Cell::new(false), dialog_answered: Cell::new(false), dialog_signal: RefCell::new(None), on_dialog_answer: RefCell::new(None), state: RefCell::new(State { refs: HashMap::new(), console: VecDeque::new(),
             network: VecDeque::new(), inflight: HashSet::new(), requests: HashMap::new(), dialog: None, last_network: Instant::now(), theme: "sistema", layout: Layout::Desktop,
             hidden: false, scale: None, navigated: false, navs: 0, enabled: HashSet::new() }) }
     }
@@ -149,6 +154,8 @@ impl<P: Page> Controller<P> {
 
     /// Tela emulada (`layout mobile` ou `<l> <a>`), para o painel desenhá-la na proporção certa; `None` = a do painel.
     pub fn on_layout(&self, f: impl Fn(Option<(u32, u32)>) + 'static) { *self.on_layout.borrow_mut() = Some(Box::new(f)); }
+
+    pub fn set_strip_shown(&self, shown: bool) { self.strip_shown.set(shown); }
 
     /// O motor viu um diálogo abrir (`Some`) ou fechar (`None`).
     /// `(tipo, mensagem, texto sugerido do prompt)`.
@@ -288,7 +295,10 @@ impl<P: Page> Controller<P> {
         *self.dialog_signal.borrow_mut() = Some(signal);
         let arg = |i: usize| args.get(i).map(String::as_str).unwrap_or("");
         // Anuncia antes de medir: a faixa que aparece muda a altura da página. Verbo com ref repete com o nome do alvo.
-        if verb != "estado" { self.report(verb, (verb == "press").then(|| arg(0).to_owned())); }
+        if verb != "estado" {
+            self.settle.set(!self.strip_shown.get());
+            self.report(verb, (verb == "press").then(|| arg(0).to_owned()));
+        }
         let work = async {
         // Com diálogo aberto a página não responde: nada que vá a ela antes do verbo.
         if !open {
@@ -416,9 +426,9 @@ impl<P: Page> Controller<P> {
         Ok((q.len() >= 6).then(|| (((q[0] + q[4]) / 2.).round() as i64, ((q[1] + q[5]) / 2.).round() as i64)))
     }
 
-    /// Anuncia a ação com o nome do alvo e, com a página à vista, realça o alvo antes de agir. O realce é do próprio
-    /// Chromium (fora do DOM): não entra no snapshot nem segura o clique, e no Windows aparece dentro do WebView2.
-    /// Roda antes de `center`: a espera do realce deixa a faixa assentar antes de medir onde clicar.
+    /// Anuncia a ação com o nome do alvo e, com a página à vista, realça o alvo sem esperar: o contorno fica até meio
+    /// segundo depois da ação (o painel o apaga). O realce é do próprio Chromium (fora do DOM): não entra no snapshot
+    /// nem segura o clique, e no Windows aparece dentro do WebView2. Roda antes de `center`.
     async fn mark(&self, verb: &str, r: &str) {
         let Some(id) = self.state.borrow().refs.get(r).copied() else { return };
         let _ = self.page.call("DOM.scrollIntoViewIfNeeded", json!({"backendNodeId": id})).await;
@@ -434,7 +444,8 @@ impl<P: Page> Controller<P> {
                 "highlightConfig": {"borderColor": color(1.), "contentColor": color(0.18), "showInfo": false}})).await
         };
         match shown.await {
-            Ok(_) => self.page.sleep(MARK_MS).await,
+            Ok(_) if self.settle.get() => self.page.sleep(SETTLE_MS).await,
+            Ok(_) => {}
             Err(e) => eprintln!("[nav] realce do alvo falhou: {e}"),
         }
     }
@@ -478,7 +489,6 @@ impl<P: Page> Controller<P> {
             self.page.call("Input.dispatchMouseEvent", base("mousePressed")).await?;
             self.page.call("Input.dispatchMouseEvent", base("mouseReleased")).await.map(|_| ())
         }).await;
-        self.unmark().await;
         let ok = ok?;
         Ok(if ok { format!("ok: click {r}") } else { format!("erro: click {r}: o evento nao chegou na pagina (aba escondida sem quadro) — tire um shot e repita") })
     }
@@ -531,9 +541,7 @@ impl<P: Page> Controller<P> {
         self.mark("hover", r).await;
         if self.paused.get() { self.unmark().await; return Ok(PAUSED.into()); }
         let Some((x, y)) = self.measured(r).await? else { return Ok(format!("erro: ref {r} nao existe (rode snapshot de novo)")) };
-        let moved = self.page.call("Input.dispatchMouseEvent", json!({"type": "mouseMoved", "x": x, "y": y})).await;
-        self.unmark().await;
-        moved?;
+        self.page.call("Input.dispatchMouseEvent", json!({"type": "mouseMoved", "x": x, "y": y})).await?;
         self.frame().await;
         Ok(format!("ok: hover {r}"))
     }
