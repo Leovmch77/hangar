@@ -135,16 +135,23 @@ impl Starter {
             });
             if let Err(e) = within { eprintln!("[nav] navegacao dentro da pagina sem ouvinte: {e}"); }
             // O diálogo é o nativo do WebView2 (a pessoa o responde ali); o agente o vê e responde pelo CDP. Segurar o
-            // diálogo por `GetDeferral` travava a página quando um iframe de outro processo abria o seu.
+            // diálogo por `GetDeferral` travava a página quando um iframe de outro processo abria o seu. Só o
+            // `beforeunload` passa sozinho: sem isso o `goto` do agente parava num "Sair do site?" que ele não vê.
             for (event, open) in [("Page.javascriptDialogOpening", true), ("Page.javascriptDialogClosed", false)] {
-                let (state, events) = (on_native.0.clone(), on_native.1.clone());
+                let (state, events, weak) = (on_native.0.clone(), on_native.1.clone(), Rc::downgrade(&cdp));
                 let listened = cdp.on(event, move |p| {
+                    if open && p["type"].as_str() == Some("beforeunload") {
+                        if let Some(cdp) = weak.upgrade() {
+                            drop(cdp.call("Page.handleJavaScriptDialog", serde_json::json!({"accept": true})));
+                        }
+                        return;
+                    }
                     let mut page = state.borrow_mut();
                     page.dialog = open.then(|| model::Dialog {
                         kind: p["type"].as_str().unwrap_or("").to_owned(),
                         message: p["message"].as_str().unwrap_or("").chars().take(500).collect(),
                         default: p["defaultPrompt"].as_str().unwrap_or("").to_owned(),
-                    }).filter(|d| d.kind != "beforeunload");
+                    });
                     send(&events, &page);
                 });
                 if let Err(e) = listened { eprintln!("[nav] dialogo sem ouvinte ({event}): {e}"); }
