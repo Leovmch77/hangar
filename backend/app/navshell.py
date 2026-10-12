@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -18,7 +19,8 @@ from typing import Any, Optional
 
 _log = logging.getLogger("hangar.navshell")
 
-TETO_S = 20.0
+# O app espera até 45 s pela resposta do navegador (`REPLY_SECS` em `browser/server.rs`).
+TETO_S = 45.0
 
 
 class ShellIndisponivel(RuntimeError):
@@ -42,6 +44,31 @@ def _chave(name: str) -> Optional[str]:
     # O sidecar do app nativo não tem alvo CDP (`targetId` nulo); aqui só a chave importa.
     sc = alvo_da_sessao(name, exige_alvo=False)
     return str(sc.get("chave")) if sc and sc.get("chave") else None
+
+
+def esperar_pronto(name: str, desde_ms: int, teto_s: float = 20.0) -> str:
+    """Espera o navegador que o `open` pediu: sidecar regravado depois do pedido e `url` respondendo.
+    Devolve a URL; levanta `ShellIndisponivel` se não ficar pronto no prazo."""
+    from app.navsock import alvo_da_sessao
+    prazo = time.monotonic() + teto_s
+    ultimo = ""
+    while time.monotonic() < prazo:
+        sc = alvo_da_sessao(name, exige_alvo=False)
+        if sc and int(sc.get("ts") or 0) >= desde_ms:
+            try:
+                texto = verbo(name, "url")
+            except ShellIndisponivel as e:
+                texto = str(e)
+            if texto.startswith("ok:"):
+                valor = texto.removeprefix("ok:").strip()
+                try:
+                    return str(json.loads(valor))
+                except ValueError:
+                    return valor
+            ultimo = texto
+        time.sleep(0.15)
+    detalhe = f" ({ultimo})" if ultimo else ""
+    raise ShellIndisponivel(f"o navegador não ficou pronto em {teto_s:.0f}s{detalhe}; o app desktop está aberto nesta máquina?")
 
 
 def verbo(name: str, verbo: str, args: Optional[list[str]] = None, aba: Optional[int] = None) -> str:

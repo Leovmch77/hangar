@@ -286,7 +286,7 @@ async def close_session(ctx: Context, alvo: str) -> dict[str, Any]:
 
 
 VERBOS_NAV = ("snapshot", "click", "fill", "type", "press", "hover", "wait", "eval", "tema", "layout", "console",
-              "network", "text", "url", "shot", "close", "tab-list", "tab-new", "tab-switch", "tab-close")
+              "network", "text", "url", "shot", "close", "goto", "back", "reload", "tab-list", "tab-new", "tab-switch", "tab-close")
 # Duas chamadas do mesmo turno não podem intercalar `click` e `snapshot`: o CLI serializa por
 # processo, aqui é uma trava por sessão.
 _travas_nav: dict[str, asyncio.Lock] = {}
@@ -323,11 +323,16 @@ async def _verbo_nav(sessao: str, verbo: str, args: list[str], aba: int | None) 
 async def browser_open(ctx: Context, url: str, sessao: str = "") -> dict[str, Any]:
     from app import api
     eu = await _eu(ctx, sessao)
+    desde = int(time.time() * 1000)
     try:
         await api.abrir_nav_sessao(eu, api.NavBody(url=url))
     except HTTPException as e:
         raise ToolError(_detalhe(e)) from e
-    return {"ok": True}
+    try:
+        pronto = await asyncio.to_thread(navshell.esperar_pronto, eu, desde)
+    except navshell.ShellIndisponivel as e:
+        raise ToolError(str(e)) from e
+    return {"ok": True, "url": pronto}
 
 
 _HTML_RENDER = (

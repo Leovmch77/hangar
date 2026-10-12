@@ -14,11 +14,12 @@ pub trait Page {
 
 pub enum Reply { Text(String), Png(Vec<u8>) }
 
-pub const EVENTS: [&str; 6] = ["Runtime.consoleAPICalled", "Log.entryAdded", "Network.requestWillBeSent",
-    "Network.responseReceived", "Network.loadingFailed", "Page.frameNavigated"];
+pub const EVENTS: [&str; 7] = ["Runtime.consoleAPICalled", "Log.entryAdded", "Network.requestWillBeSent",
+    "Network.responseReceived", "Network.loadingFailed", "Page.frameNavigated", "Page.navigatedWithinDocument"];
 
 const LOG_MAX: usize = 200;
 const WAIT_MS: u64 = 15_000;
+const WAIT_MAX_MS: u64 = 40_000;
 const SHOT_MS: u64 = 15_000;
 const POLL_MS: u64 = 120;
 /// Escondida, a página fica sem tamanho; um viewport fixo a mantém desenhando para o `shot`.
@@ -40,6 +41,8 @@ struct State {
     layout: Layout,
     hidden: bool,
     navigated: bool,
+    /// Conta navegações do quadro principal (documento novo ou só o endereço): `goto`/`back`/`reload` esperam mudar.
+    navs: u64,
     enabled: HashSet<&'static str>,
 }
 
@@ -61,7 +64,7 @@ impl<P: Page> Controller<P> {
     pub fn new(page: P, hidden: bool) -> Self {
         Self { page, turn: Mutex::new(()), wanted_hidden: Cell::new(hidden), state: RefCell::new(State { refs: HashMap::new(), console: VecDeque::new(),
             network: VecDeque::new(), inflight: 0, last_network: Instant::now(), theme: "sistema", layout: Layout::Desktop,
-            hidden: false, navigated: false, enabled: HashSet::new() }) }
+            hidden: false, navigated: false, navs: 0, enabled: HashSet::new() }) }
     }
 
     /// Aplica o pedido mais novo, não o do nascimento: o painel pode aparecer enquanto os domínios ligam.
@@ -105,7 +108,8 @@ impl<P: Page> Controller<P> {
             }
             "Network.loadingFailed" => s.inflight = s.inflight.saturating_sub(1),
             // Só o quadro principal: iframe navegando não invalida as refs da página.
-            "Page.frameNavigated" if p["frame"]["parentId"].is_null() => s.navigated = true,
+            "Page.frameNavigated" if p["frame"]["parentId"].is_null() => { s.navigated = true; s.navs += 1; }
+            "Page.navigatedWithinDocument" => s.navs += 1,
             _ => {}
         }
     }
@@ -131,6 +135,9 @@ impl<P: Page> Controller<P> {
             "console" => Ok(Reply::Text(self.console(arg(0) == "--limpar"))),
             "network" => self.network().await.map(Reply::Text),
             "shot" => self.shot().await,
+            "goto" => self.goto(arg(0)).await.map(Reply::Text),
+            "back" => self.back().await.map(Reply::Text),
+            "reload" => self.reload().await.map(Reply::Text),
             "tab-list" | "tab-new" | "tab-switch" | "tab-close" => Ok(Reply::Text("erro: o app nativo ainda nao tem abas: e um navegador por sessao".into())),
             _ => Ok(Reply::Text(format!("erro: verbo desconhecido: {verb}"))),
         };
@@ -291,30 +298,35 @@ impl<P: Page> Controller<P> {
     }
 
     async fn wait(&self, args: &[String]) -> Result<String, String> {
+        let (args, limit) = match split_timeout(args) { Ok(v) => v, Err(e) => return Ok(e) };
         let target = args.first().map(String::as_str).unwrap_or("");
         let joined = args.join(" ");
         if let Some(ms) = target.bytes().all(|b| b.is_ascii_digit()).then(|| target.parse::<u64>().ok()).flatten() {
             self.page.sleep(ms).await;
             return Ok(format!("ok: wait {target}ms"));
         }
-        let needle = args.get(1).map(String::as_str).unwrap_or("");
-        // Alvo torto esperaria 15 s para dar um erro que já se sabe agora.
+        // O resto da linha é o trecho: `wait --text create account` sem aspas também vale.
+        let needle = args.get(1..).map(|rest| rest.join(" ")).unwrap_or_default();
+        // Alvo torto esperaria o prazo inteiro para dar um erro que já se sabe agora.
         let valid = match target {
             "--url" | "--text" => !needle.is_empty(),
             "--idle" => true,
             t => t.len() > 2 && t.starts_with("@e") && t[2..].bytes().all(|b| b.is_ascii_digit()),
         };
-        if !valid { return Ok(format!("erro: wait: alvo invalido: {joined} (use @eN, --url texto, --text texto, --idle ou ms)")); }
+        if !valid { return Ok(format!("erro: wait: alvo invalido: {joined} (use @eN, --url texto, --text texto, --idle ou ms; teto com --timeout ms)")); }
         if target == "--idle" { self.enable("Network").await?; }
+        // O que a pessoa lê como texto inclui o rótulo de botão `<input>`, que o innerText não traz.
+        let text_js = format!("(()=>{{const n={};const t=document.body.innerText+'\\n'+[...document.querySelectorAll('input[type=submit],input[type=button],input[type=reset]')].map(e=>e.value).join('\\n');return t.toLowerCase().includes(n.toLowerCase())}})()",
+            serde_json::to_string(&needle).unwrap_or_default());
         // Conta o tempo das checagens além das pausas: página presa num laço de JS não responde ao
         // evaluate, e sem teto o verbo seguraria a vez de todos os outros.
         let mut waited = 0;
-        while waited < WAIT_MS {
+        while waited < limit {
             let check = async {
                 Ok::<_, String>(match target {
                     t if t.starts_with('@') => { self.snapshot().await?; self.state.borrow().refs.contains_key(t) }
-                    "--url" => self.value("location.href").await?.as_str().is_some_and(|u| u.contains(needle)),
-                    "--text" => self.value("document.body.innerText").await?.as_str().is_some_and(|u| u.contains(needle)),
+                    "--url" => self.value("location.href").await?.as_str().is_some_and(|u| u.contains(needle.as_str())),
+                    "--text" => self.value(&text_js).await?.as_bool() == Some(true),
                     // Rede parada (contador zero e 500 ms sem resposta) e documento completo.
                     "--idle" => {
                         let quiet = { let s = self.state.borrow(); s.inflight == 0 && s.last_network.elapsed().as_millis() > 500 };
@@ -324,13 +336,60 @@ impl<P: Page> Controller<P> {
                 })
             };
             let t0 = Instant::now();
-            let Some(hit) = self.within(WAIT_MS.saturating_sub(waited), check).await else { break };
+            let Some(hit) = self.within(limit.saturating_sub(waited), check).await else { break };
             if hit? { return Ok(format!("ok: wait {joined}")); }
             let spent = t0.elapsed().as_millis() as u64;
             self.page.sleep(POLL_MS).await;
             waited += POLL_MS + spent;
         }
-        Ok(format!("erro: wait {joined} nao aconteceu em {WAIT_MS}ms"))
+        Ok(format!("erro: wait {joined} nao aconteceu em {limit}ms"))
+    }
+
+    /// Navegação pedida por verbo: as refs antigas morrem já, e a resposta só sai com o documento novo carregado.
+    async fn settle(&self, verb: &str, before: u64) -> Result<String, String> {
+        self.state.borrow_mut().refs.clear();
+        let mut waited = 0;
+        while waited < WAIT_MS {
+            let t0 = Instant::now();
+            // Contexto destruído no meio = o documento ainda está trocando; tenta de novo.
+            let ready = self.within(WAIT_MS - waited, self.value("document.readyState")).await;
+            let moved = self.state.borrow().navs != before;
+            if moved && let Some(Ok(v)) = &ready && v.as_str() == Some("complete") {
+                let url = self.value("location.href").await?;
+                return Ok(format!("ok: {verb} {}", url.as_str().unwrap_or("")));
+            }
+            if ready.is_none() { break; }
+            self.page.sleep(POLL_MS).await;
+            waited += POLL_MS + t0.elapsed().as_millis() as u64;
+        }
+        Ok(format!("erro: {verb}: a pagina nao terminou de carregar em {WAIT_MS}ms"))
+    }
+
+    async fn goto(&self, url: &str) -> Result<String, String> {
+        let url = url.trim();
+        if url.is_empty() { return Ok("erro: goto precisa de uma url".into()); }
+        let url = if url.contains("://") { url.to_owned() } else { format!("http://{url}") };
+        let before = self.state.borrow().navs;
+        let r = self.page.call("Page.navigate", json!({"url": url})).await?;
+        if let Some(e) = r["errorText"].as_str().filter(|e| !e.is_empty()) { return Ok(format!("erro: goto {url}: {e}")); }
+        self.settle("goto", before).await
+    }
+
+    async fn back(&self) -> Result<String, String> {
+        let h = self.page.call("Page.getNavigationHistory", json!({})).await?;
+        let index = h["currentIndex"].as_i64().unwrap_or(0);
+        let Some(entry) = usize::try_from(index - 1).ok().and_then(|i| h["entries"].get(i)) else {
+            return Ok("erro: back: nao ha pagina anterior".into());
+        };
+        let before = self.state.borrow().navs;
+        self.page.call("Page.navigateToHistoryEntry", json!({"entryId": entry["id"]})).await?;
+        self.settle("back", before).await
+    }
+
+    async fn reload(&self) -> Result<String, String> {
+        let before = self.state.borrow().navs;
+        self.page.call("Page.reload", json!({})).await?;
+        self.settle("reload", before).await
     }
 
     async fn apply_theme(&self) -> Result<(), String> {
@@ -403,6 +462,15 @@ impl<P: Page> Controller<P> {
         if png.is_empty() { return Ok(Reply::Text("erro: o navegador desta sessao nao produziu quadro — text/snapshot/click funcionam".into())); }
         Ok(Reply::Png(png))
     }
+}
+
+/// Tira `--timeout <ms>` dos argumentos do `wait`. O teto fica abaixo dos 45 s que o servidor espera pela resposta.
+fn split_timeout(args: &[String]) -> Result<(Vec<String>, u64), String> {
+    let Some(i) = args.iter().position(|a| a == "--timeout") else { return Ok((args.to_vec(), WAIT_MS)) };
+    let ms = args.get(i + 1).and_then(|v| v.parse::<u64>().ok()).filter(|ms| (1..=WAIT_MAX_MS).contains(ms))
+        .ok_or_else(|| format!("erro: wait: --timeout precisa de ms entre 1 e {WAIT_MAX_MS}"))?;
+    let rest = args.iter().enumerate().filter(|(j, _)| *j != i && *j != i + 1).map(|(_, a)| a.clone()).collect();
+    Ok((rest, ms))
 }
 
 /// A página de verdade: o CDP do motor (WebView2 no Windows, Chromium sem janela no Linux) e o relógio da GPUI.
@@ -552,7 +620,7 @@ mod tests {
         let c = ctl(|_, _| Ok(json!({})));
         for args in [&["--url"][..], &["--texto", "x"], &["@x1"], &[]] {
             assert_eq!(text(block_on(c.run("wait", &s(args)))),
-                format!("erro: wait: alvo invalido: {} (use @eN, --url texto, --text texto, --idle ou ms)", args.join(" ")));
+                format!("erro: wait: alvo invalido: {} (use @eN, --url texto, --text texto, --idle ou ms; teto com --timeout ms)", args.join(" ")));
         }
         assert!(!methods(&c).contains(&"Runtime.evaluate".to_string()));
     }

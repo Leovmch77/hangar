@@ -10,7 +10,8 @@
 //   hangar-preview type <texto>            digita no elemento com foco
 //   hangar-preview press <tecla>           uma tecla (Enter, Tab, Escape, ...)
 //   hangar-preview hover @eN               passa o mouse sobre a ref
-//   hangar-preview wait <@eN|--url texto|--text texto|--idle|Nms>   espera algo acontecer
+//   hangar-preview wait <@eN|--url texto|--text texto|--idle|Nms> [--timeout ms]   espera algo acontecer
+//   hangar-preview goto <url> | back | reload    navega e espera carregar
 //   hangar-preview eval '<js>'             roda JS na página e imprime o resultado
 //   hangar-preview tema <claro|escuro|sistema>
 //   hangar-preview layout [mobile|desktop|<largura> <altura>]
@@ -47,9 +48,12 @@ import jev from '../shell/jev_objetivo.cjs';
 
 const CDP = 'http://127.0.0.1:9223';
 const DIR = join(homedir(), '.hangar', 'nav');
+const PRONTO_MS = 20_000;
+// Endereço do navegador da sessão, para a frase de reabertura quando o app cai no meio do comando.
+let urlAberta = '';
 const VERBOS_SERVIDOR = new Set([
   'snapshot', 'click', 'fill', 'type', 'press', 'hover', 'wait', 'eval',
-  'tema', 'layout', 'console', 'network', 'text', 'url', 'shot', 'close',
+  'tema', 'layout', 'console', 'network', 'text', 'url', 'shot', 'close', 'goto', 'back', 'reload',
 ]);
 
 function erro(msg, codigo = 1) {
@@ -84,6 +88,10 @@ Identidade: sidecar da sessão no modo sem terminal; tmux no modo com terminal.
   press <tecla>           uma tecla (Enter, Tab, Escape, ...)
   hover @eN               passa o mouse sobre a ref
   wait <alvo>             @eN | --url <trecho> | --text <trecho> | --idle | <ms>
+                          (--text ignora maiúsculas; --timeout <ms> troca o teto de 15 s, até 40 s)
+  goto <url>              navega e só volta com a página carregada
+  back                    volta uma página no histórico
+  reload                  recarrega a página
   eval '<js>'             roda JS na página (expressão ou declarações) e imprime o resultado
   tema <claro|escuro|sistema>
   layout [mobile|desktop|<largura> <altura>]
@@ -194,8 +202,8 @@ function sidecarDa(nome) {
   if (!todos.length) erro('nenhum navegador aberto em nenhuma sessão (abra o seu com: hangar-preview open <url>)');
   if (!nome) erro('não deu para identificar esta sessão — use --sessao <nome>. Vivos:\n' + todos.map((s) => `  ${s.chave}  ${semToken(s.url)}`).join('\n'));
   const achados = todos.filter((s) => s.chave === nome || s.chave.endsWith(`::${nome}`));
-  if (achados.length === 1) return achados[0];
-  if (!achados.length) erro(`a sessão "${nome}" não tem navegador aberto. Vivos:\n` + todos.map((s) => `  ${s.chave}  ${semToken(s.url)}`).join('\n'));
+  if (achados.length === 1) { urlAberta = achados[0].url; return achados[0]; }
+  if (!achados.length) erro(`a sessão "${nome}" não tem navegador aberto (abra com: hangar-preview open <url>). Vivos:\n` + todos.map((s) => `  ${s.chave}  ${semToken(s.url)}`).join('\n'));
   erro(`"${nome}" existe em mais de um servidor — use a chave completa:\n` + achados.map((s) => `  ${s.chave}`).join('\n'));
 }
 
@@ -209,7 +217,7 @@ async function targets() {
 }
 
 // --- cliente do servidor local (Task 5) ---
-const MSG_SHELL_FORA = 'o shell do hangar nao esta no ar (ou e uma versao antiga): abra o app e tente de novo';
+const MSG_SHELL_FORA = 'o app desktop do Hangar nao esta aberto nesta maquina (ou esta reiniciando, como na atualizacao): espere ele voltar e reabra o navegador com: hangar-preview open <url>';
 
 // A porta de loopback do sidecar pode ter sido RECICLADA por outro processo depois que o app
 // fechou (o _srv.json não é apagado na saída — só no will-quit do main.cjs, e sinal/crash ainda
@@ -235,12 +243,19 @@ function srv() {
 // `aba` explícito (o batch manda por linha) vence o flag global.
 async function chamar(chave, verbo, cmdArgs, aba = flags.aba) {
   const { porta, token } = srv();
-  const r = await fetch(`http://127.0.0.1:${porta}/cmd`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ chave, verbo, args: cmdArgs, ...(aba != null ? { aba } : {}) }),
-  });
-  const texto = await r.text();
+  let r, texto;
+  try {
+    r = await fetch(`http://127.0.0.1:${porta}/cmd`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chave, verbo, args: cmdArgs, ...(aba != null ? { aba } : {}) }),
+    });
+    texto = await r.text();
+  } catch (err) {
+    // App fechado ou reiniciado (a atualização reinicia) no meio do comando: frase, não a pilha do Node.
+    const reabrir = urlAberta ? `hangar-preview open ${semToken(urlAberta)}` : 'hangar-preview open <url>';
+    erro(`o app desktop fechou ou reiniciou no meio do comando (${err.cause?.code || err.cause?.message || err.message}). Espere ele voltar e reabra o navegador com: ${reabrir}`);
+  }
   // O servidor local responde SEMPRE 200 (é o texto que carrega erro: ...) — r.ok não basta.
   return { texto, codigo: r.ok && !texto.startsWith('erro:') ? 0 : 1 };
 }
@@ -266,6 +281,7 @@ if (cmd === 'open') {
     token = readFileSync(join(repo, 'backend', '.env'), 'utf8').match(/^CP_AUTH_TOKEN=(.+)$/m)?.[1]?.trim() ?? '';
   } catch { /* sem .env */ }
   if (!token) erro('não achei CP_AUTH_TOKEN no backend/.env do repo');
+  const desde = Date.now();
   const res = await fetch(`http://127.0.0.1:${process.env.PORT || 8765}/api/sessions/${encodeURIComponent(nome)}/nav`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
@@ -273,8 +289,29 @@ if (cmd === 'open') {
   });
   if (res.status === 404) erro(`a sessão "${nome}" não existe no backend`);
   if (!res.ok) erro(`o backend recusou: ${res.status} ${await res.text()}`);
-  console.log(`navegador de "${nome}" abrindo com ${semToken(url)} (com o app desktop aberto ele nasce em segundos, mesmo com a sessão fora da tela; o painel aparece quando o usuário abrir ela)`);
-  process.exit(0);
+  // Volta só com o navegador pronto: o verbo seguinte ao `open` falhava com "nenhum navegador aberto".
+  // Pronto = sidecar regravado depois do pedido (o app grava a cada navegação) e `url` respondendo.
+  const prazo = desde + PRONTO_MS;
+  let ultimo = '';
+  while (Date.now() < prazo) {
+    const sc = lerSidecars().find((s) => s.chave === nome || s.chave.endsWith(`::${nome}`));
+    if (sc && (sc.ts ?? 0) >= desde) {
+      try {
+        const { texto, codigo } = await chamar(sc.chave, 'url', []);
+        if (codigo === 0) {
+          let pronta = texto.replace(/^ok: /, '');
+          try { pronta = JSON.parse(pronta); } catch { /* já é texto cru */ }
+          console.log(`ok: navegador de "${nome}" pronto em ${semToken(pronta)} (o painel só aparece na tela do usuário quando ele abrir esta sessão)`);
+          process.exit(0);
+        }
+        ultimo = texto;
+      } catch (err) {
+        ultimo = err.message;
+      }
+    }
+    await new Promise((r) => setTimeout(r, 150));
+  }
+  erro(`o navegador de "${nome}" nao ficou pronto em ${PRONTO_MS / 1000}s${ultimo ? ` (${semToken(ultimo)})` : ''}. O app desktop está aberto nesta máquina? Veja com: hangar-preview list`);
 }
 
 if (cmd === 'list') {
@@ -285,7 +322,7 @@ if (cmd === 'list') {
     const vivo = s.pid ? pidVivo(s.pid) : vivos.some((t) => (s.targetId && t.id === s.targetId) || t.url === s.url);
     // Sidecar de shell antigo não tem `abas`: vale como uma aba só, e a saída fica idêntica à de hoje.
     const sufixo = Array.isArray(s.abas) && s.abas.length > 1 ? `  (aba ${s.ativa} de ${s.abas.length})` : '';
-    return `${s.chave}  ${semToken(s.url)}  ${vivo ? 'vivo' : 'MORTO (reabra pelo painel)'}${sufixo}`;
+    return `${s.chave}  ${semToken(s.url)}  ${vivo ? 'vivo' : `MORTO (reabra com: hangar-preview open ${semToken(s.url)})`}${sufixo}`;
   });
   console.log(linhas.length ? linhas.join('\n') : 'nenhum navegador registrado');
   process.exit(0);
@@ -467,4 +504,4 @@ if (cmd === 'objetivo') {
   process.exit(resultado.sucesso ? 0 : 1);
 }
 
-erro(`comando desconhecido: ${cmd} (vale open|list|snapshot|click|fill|type|press|hover|wait|eval|tema|layout|console|network|text|url|shot|folha|tab|confere|objetivo|close|batch)`);
+erro(`comando desconhecido: ${cmd} (vale open|list|snapshot|click|fill|type|press|hover|wait|goto|back|reload|eval|tema|layout|console|network|text|url|shot|folha|tab|confere|objetivo|close|batch)`);
