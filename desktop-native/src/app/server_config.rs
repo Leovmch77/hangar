@@ -112,14 +112,14 @@ const FIELDS: [Field; 33] = [
     Field { key: "jev_endpoint", label: "server_jev_endpoint", help: "server_jev_endpoint_help", icon: IconName::Globe, kind: Kind::Text,
         page: Page::Jev },
     Field { key: "jev_model", label: "server_jev_model", help: "server_jev_model_help", icon: IconName::Bot, kind: Kind::Text, page: Page::Jev },
-    Field { key: "jev_texto_base_url", label: "server_jev_text_endpoint", help: "server_jev_text_endpoint_help", icon: IconName::Globe,
+    Field { key: "jev_aux_base_url", label: "server_jev_aux_endpoint", help: "server_jev_aux_endpoint_help", icon: IconName::Globe,
         kind: Kind::Text, page: Page::Jev },
-    Field { key: "jev_texto_api_key", label: "server_jev_text_key", help: "server_jev_text_key_help", icon: IconName::Key, kind: Kind::Secret,
+    Field { key: "jev_aux_api_key", label: "server_jev_aux_key", help: "server_jev_aux_key_help", icon: IconName::Key, kind: Kind::Secret,
         page: Page::Jev },
-    Field { key: "jev_texto_modelo", label: "server_jev_text_model", help: "server_jev_text_model_help", icon: IconName::Bot, kind: Kind::Text,
+    Field { key: "jev_aux_modelo", label: "server_jev_aux_model", help: "server_jev_aux_model_help", icon: IconName::Bot, kind: Kind::Text,
         page: Page::Jev },
-    Field { key: "jev_texto_cmd", label: "server_jev_cmd", help: "server_jev_cmd_help", icon: IconName::SquareTerminal, kind: Kind::Text,
-        page: Page::Jev },
+    Field { key: "jev_aux_esforco", label: "server_jev_aux_effort", help: "server_jev_aux_effort_help", icon: IconName::SlidersHorizontal,
+        kind: Kind::Choice(&["", "low", "medium", "high"], "server_jev_aux_effort_default"), page: Page::Jev },
     // Voz, na ordem do `VozSettings.svelte`; a página as distribui pelas seções dela.
     Field { key: "groq_api_key", label: "voice_groq", help: "voice_groq_help", icon: IconName::Key, kind: Kind::Secret, page: Page::Voice },
     Field { key: "transcription_base_url", label: "voice_transcription_endpoint", help: "voice_transcription_endpoint_help", icon: IconName::Globe,
@@ -200,26 +200,56 @@ pub(super) mod jev {
 mod draft {
     use serde_json::{Map, Value};
 
+    /// Cada chave guarda também o valor do servidor sobre o qual foi mexida: é ele que diz se o rascunho envelheceu.
     #[derive(Default)]
-    pub(super) struct Draft(Map<String, Value>);
+    pub(super) struct Draft(Map<String, Value>, Map<String, Value>);
+
+    fn saved(read: &Map<String, Value>, key: &str) -> Value { read.get(key).and_then(|f| f.get("valor")).cloned().unwrap_or(Value::Null) }
+
+    /// Mesmo valor para a tela: o campo de número manda texto ("900") onde o servidor tem número.
+    fn same(a: &Value, b: &Value) -> bool {
+        a == b || (matches!(a, Value::String(_) | Value::Number(_) | Value::Bool(_)) && matches!(b, Value::String(_) | Value::Number(_) | Value::Bool(_))
+            && super::text_of(a) == super::text_of(b))
+    }
 
     impl Draft {
         /// `read` são os `campos` da última leitura ou gravação boa.
         pub(super) fn stage(&mut self, read: &Map<String, Value>, key: &str, value: Value) -> bool {
             if !read.contains_key(key) { return false; }
+            if !self.1.contains_key(key) { self.1.insert(key.to_owned(), saved(read, key)); }
             self.0.insert(key.to_owned(), value);
             true
         }
+        /// Leitura nova: some a chave igual ao servidor (nada a gravar) e a que foi mexida sobre um valor que o servidor
+        /// já trocou (outra tela gravou depois). Sem isso um rascunho velho escondia o valor salvo. Devolve as do segundo
+        /// caso, que perderam uma edição.
+        pub(super) fn drop_stale(&mut self, read: &Map<String, Value>) -> Vec<String> {
+            let (mut equal, mut replaced) = (Vec::new(), Vec::new());
+            for (key, value) in &self.0 {
+                if !read.contains_key(key.as_str()) { continue; }
+                let now = saved(read, key);
+                if same(value, &now) { equal.push(key.clone()); }
+                else if self.1.get(key.as_str()).is_some_and(|base| !same(base, &now)) { replaced.push(key.clone()); }
+            }
+            for key in equal.iter().chain(&replaced) { self.unstage(key); }
+            replaced
+        }
+        /// Gravação confirmada: o que continua no rascunho passa a valer sobre o valor que ela confirmou.
+        pub(super) fn rebase(&mut self, read: &Map<String, Value>) {
+            for key in self.0.keys() {
+                if read.contains_key(key.as_str()) { self.1.insert(key.clone(), saved(read, key)); }
+            }
+        }
         pub(super) fn get(&self, key: &str) -> Option<&Value> { self.0.get(key) }
         /// "Desfazer": a chave sai do rascunho e a tela volta ao valor do servidor.
-        pub(super) fn unstage(&mut self, key: &str) { self.0.remove(key); }
+        pub(super) fn unstage(&mut self, key: &str) { self.0.remove(key); self.1.remove(key); }
         pub(super) fn contains_key(&self, key: &str) -> bool { self.0.contains_key(key) }
         pub(super) fn is_empty(&self) -> bool { self.0.is_empty() }
         pub(super) fn snapshot(&self) -> Map<String, Value> { self.0.clone() }
         /// Sai só a chave cujo valor ainda é o enviado.
         pub(super) fn settle(&mut self, sent: &Map<String, Value>) {
             for (key, value) in sent {
-                if self.0.get(key) == Some(value) { self.0.remove(key); }
+                if self.0.get(key) == Some(value) { self.unstage(key); }
             }
         }
     }
@@ -256,7 +286,17 @@ pub(in crate::app) struct ServerConfig {
     /// não reabre o que a pessoa fechou.
     open: [bool; 6],
     opened_by_read: bool,
-    jev_advanced: bool,
+    /// CLIProxyAPI do servidor (`GET /api/jev/aux/cliproxy`), relido ao abrir a página do Jev.
+    aux_cliproxy: Remote<AuxCliproxy>,
+    /// "Usar o CLIProxyAPI", com o endereço dele: o Salvar pede ao servidor a chave dele (`jev_aux_cliproxy`), que nunca
+    /// passa pelo app. Vale só enquanto o campo de endereço for esse.
+    aux_use_cliproxy: Option<String>,
+    /// Campos cuja edição saiu porque outra tela gravou por cima depois dela.
+    replaced: Vec<&'static str>,
+    aux_models: Remote<Vec<String>>,
+    aux_models_scroll: ScrollHandle,
+    /// Computer Use ligado no servidor, só para a linha "Onde vale".
+    computer_on: Remote<bool>,
     /// Havia chave da ElevenLabs e comando local no último olhar: a seção de cada um abre quando isso passa a valer.
     readers: [bool; 2],
     /// Vozes da conta e consumo do mês: só lidos no clique, nunca ao abrir a página.
@@ -301,6 +341,9 @@ impl Quiet {
     fn editable(&self) -> bool { self.confirmed && !self.load.loading && !self.saving }
 }
 
+#[derive(Clone, serde::Deserialize)]
+struct AuxCliproxy { preset_url: String, running: bool, has_keys: bool }
+
 pub(super) enum ServerConfigReply {
     Loaded(u64, Result<Value, Failure>),
     /// Número do pedido e o corpo enviado.
@@ -312,6 +355,9 @@ pub(super) enum ServerConfigReply {
     ProviderStatus(u64, Result<Value, Failure>),
     ProviderTest(String, u64, Option<Result<Value, Failure>>),
     DictationModels(u64, String, Result<Value, Failure>),
+    AuxCliproxy(u64, Result<Value, Failure>),
+    AuxModels(u64, Result<Value, Failure>),
+    ComputerOn(u64, Result<Value, Failure>),
 }
 
 impl ServerConfig {
@@ -331,6 +377,20 @@ impl ServerConfig {
         self.dictation_catalog.reset();
         self.dictation_catalog_target = None;
         self.provider_tests.clear();
+        (self.aux_cliproxy, self.aux_models, self.computer_on) = (Remote::default(), Remote::default(), Remote::default());
+    }
+
+    /// A chave do CLIProxyAPI vai no Salvar: escolhida e com o endereço dele ainda no campo.
+    fn cliproxy_key(&self) -> bool {
+        self.aux_use_cliproxy.as_deref().is_some_and(|url| text_of(&self.current("jev_aux_base_url")).trim() == url)
+    }
+
+    /// Há o que gravar: o rascunho ou o pedido da chave do CLIProxyAPI.
+    fn dirty(&self) -> bool { !self.draft.is_empty() || self.cliproxy_key() }
+
+    /// Chave do modelo auxiliar que o "Buscar modelos" pode usar: a digitada, a do CLIProxyAPI ou a guardada.
+    fn aux_key_ready(&self) -> bool {
+        self.cliproxy_key() || self.draft.get("jev_aux_api_key").map(text_of).is_some_and(|t| !t.trim().is_empty()) || self.key_set("jev_aux_api_key")
     }
 
     /// Valor que a tela mostra: o do rascunho, senão o do servidor.
@@ -568,9 +628,6 @@ impl ServerConfig {
             .or_else(|| TUNES.iter().find(|t| label == format!("voice_tune_{}", t.name)).map(|t| t.key))
             .or((label == "voice_voice").then_some("elevenlabs_voice_id"));
         let Some(key) = key else { return };
-        if key.starts_with("jev_texto_") {
-            self.jev_advanced = true;
-        }
         if let Some(n) = SECTIONS.iter().position(|keys| keys.contains(&key)) {
             self.open[n] = true;
             for (child, parent) in PARENTS { if n == child { self.open[parent] = true; } }
@@ -651,6 +708,49 @@ impl Hangar {
         if page == Page::Voice { self.load_provider_status(cx); }
     }
 
+    /// CLIProxyAPI do servidor e o Computer Use ligado: só leitura, fora do rascunho.
+    fn load_jev_extras(&mut self, cx: &mut Context<Self>) {
+        let Some(api) = self.api.clone() else { return };
+        let s = &mut self.server_config;
+        let (proxy, computer) = (s.aux_cliproxy.start(), s.computer_on.start());
+        let (done, done_computer) = (self.server_config_send_later(), self.server_config_send_later());
+        let computer_api = api.clone();
+        self.runtime.spawn(async move { done(ServerConfigReply::AuxCliproxy(proxy, api.server_read(&["jev", "aux", "cliproxy"], &[], 10).await)).await });
+        self.runtime.spawn(async move {
+            done_computer(ServerConfigReply::ComputerOn(computer, computer_api.server_read(&["computer-control"], &[], 10).await)).await
+        });
+        cx.notify();
+    }
+
+    /// "Buscar modelos" do auxiliar, com o endereço e a chave da tela (ou a guardada, ou a do CLIProxyAPI).
+    fn list_aux_models(&mut self, cx: &mut Context<Self>) {
+        let Some(api) = self.api.clone() else { return };
+        let s = &mut self.server_config;
+        let url = text_of(&s.current("jev_aux_base_url")).trim().to_owned();
+        if s.aux_models.loading || url.is_empty() || !s.aux_key_ready() { return; }
+        let proxy = s.cliproxy_key();
+        let typed = s.draft.get("jev_aux_api_key").map(text_of).filter(|t| !t.trim().is_empty() && !proxy);
+        let body = json!({"base_url": url, "use_saved_key": typed.is_none() && !proxy, "api_key": typed, "use_cliproxy_key": proxy});
+        let seq = s.aux_models.start();
+        let done = self.server_config_send_later();
+        self.runtime.spawn(async move {
+            done(ServerConfigReply::AuxModels(seq, api.server_send(reqwest::Method::POST, &["jev", "aux", "models"], Some(body), 20).await)).await
+        });
+        cx.notify();
+    }
+
+    /// Atalho do CLIProxyAPI: endereço dele no campo e a chave do arquivo dele no Salvar; a chave digitada sai.
+    fn use_aux_cliproxy(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(proxy) = self.server_config.aux_cliproxy.ok().cloned() else { return };
+        self.set_jev_text("jev_aux_base_url", &proxy.preset_url, window, cx);
+        let s = &mut self.server_config;
+        s.draft.unstage("jev_aux_api_key");
+        s.aux_use_cliproxy = proxy.has_keys.then(|| proxy.preset_url.clone());
+        s.aux_models.reset();
+        if let Some((_, input)) = s.inputs.iter().find(|(k, _)| *k == "jev_aux_api_key") { input.update(cx, |state, cx| state.set_value("", window, cx)); }
+        cx.notify();
+    }
+
     fn load_server_config(&mut self, cx: &mut Context<Self>) {
         let Some(api) = self.api.clone() else { return };
         let s = &mut self.server_config;
@@ -659,11 +759,12 @@ impl Hangar {
         s.fields.clear();
         (s.read, s.env) = (Map::new(), Vec::new());
         (s.save_error, s.saved) = (None, None);
+        s.replaced.clear();
         // O web remonta a página a cada abertura, e os `$effect` reabrem as seções de quem já tem leitor.
         s.readers = [false; 2];
         let done = self.server_config_send_later();
         self.runtime.spawn(async move { done(ServerConfigReply::Loaded(seq, api.config().await)).await });
-        cx.notify();
+        self.load_jev_extras(cx);
     }
 
     /// "Carregar vozes da conta": as vozes e o consumo do mês, juntos, como o `carregarVozes` do web.
@@ -788,9 +889,10 @@ impl Hangar {
 
     fn save_server_config(&mut self, cx: &mut Context<Self>) {
         let s = &mut self.server_config;
-        if s.saving || s.draft.is_empty() || s.provider_missing_key() { return; }
+        if s.saving || !s.dirty() || s.provider_missing_key() { return; }
         let Some(api) = self.api.clone() else { return };
-        let sent = s.draft.snapshot();
+        let mut sent = s.draft.snapshot();
+        if s.cliproxy_key() { sent.insert("jev_aux_cliproxy".into(), Value::Bool(true)); }
         s.save_seq += 1;
         (s.saving, s.save_error, s.saved) = (true, None, None);
         let (seq, done) = (s.save_seq, self.server_config_send_later());
@@ -861,7 +963,11 @@ impl Hangar {
                 if !self.server_config.load.finish(seq, parsed.map(|_| ())) { return; }
                 if let Some(mut config) = config {
                     let s = &mut self.server_config;
-                    if let Value::Object(campos) = config["campos"].take() { s.replace_fields(campos, false); }
+                    if let Value::Object(campos) = config["campos"].take() {
+                        s.replace_fields(campos, false);
+                        s.replaced = s.draft.drop_stale(&s.fields).iter()
+                            .filter_map(|key| FIELDS.iter().find(|f| f.key == key).map(|f| f.label)).collect();
+                    }
                     if let Value::Object(read) = config["somente_leitura"].take() { s.read = read; }
                     // Ausente num servidor mais antigo: o bloco some.
                     if let Value::Array(env) = config["variaveis_env"].take() { s.env = env; }
@@ -888,6 +994,8 @@ impl Hangar {
                         // A tradução do raciocínio disponível muda com campo editável: a linha só leitura não fica velha.
                         if let Some(read) = read { s.read = read; }
                         s.settle(&sent);
+                        s.draft.rebase(&s.fields);
+                        if sent.contains_key("jev_aux_cliproxy") { s.aux_use_cliproxy = None; }
                         s.follow_readers();
                         s.saved = Some(seq);
                         self.fill_config_inputs(window, cx);
@@ -958,6 +1066,26 @@ impl Hangar {
                 });
                 self.show_voice(window, cx);
             }
+            ServerConfigReply::AuxCliproxy(seq, result) => {
+                let parsed = result.map_err(|e| Self::fetch_failure(&e))
+                    .and_then(|v| serde_json::from_value::<AuxCliproxy>(v).map_err(|_| tr("invalid_response")));
+                self.server_config.aux_cliproxy.finish(seq, parsed);
+            }
+            ServerConfigReply::ComputerOn(seq, result) => {
+                let parsed = result.map_err(|e| Self::fetch_failure(&e))
+                    .and_then(|v| v.get("enabled").and_then(Value::as_bool).ok_or_else(|| tr("invalid_response")));
+                self.server_config.computer_on.finish(seq, parsed);
+            }
+            ServerConfigReply::AuxModels(seq, result) => {
+                // O 502 traz a frase do provedor no `detail`; a nossa diz o que falhou.
+                let models = result.map_err(|e| if e.code.as_deref() == Some("erro_jev_aux_models") {
+                    tr("server_jev_aux_models_failed").replace("{error}", &e.detail)
+                } else { Self::fetch_failure(&e) }).and_then(|value| {
+                    value.get("models").and_then(Value::as_array).ok_or_else(|| tr("invalid_response"))?
+                        .iter().map(|m| m.as_str().map(str::to_owned).ok_or_else(|| tr("invalid_response"))).collect()
+                });
+                self.server_config.aux_models.finish(seq, models);
+            }
             ServerConfigReply::DictationModels(seq,target,result)=>{
                 let current=self.selected.as_ref().zip(self.session_api()).map(|(session,api)|format!("{}|{}|{:?}|{:?}",api.identity(),session.name,session.lifecycle_id,session.conta));
                 if current.as_deref()!=Some(target.as_str()){
@@ -1009,6 +1137,8 @@ impl Hangar {
                         if key == "jev_api_key" {
                             if let Some((openrouter, ..)) = this.server_config.jev_route() { this.follow_jev_provider(openrouter, false, window, cx); }
                         }
+                        if key == "jev_aux_base_url" || key == "jev_aux_api_key" { this.server_config.aux_models.reset(); }
+                        if key == "jev_aux_api_key" && !input.read(cx).value().is_empty() { this.server_config.aux_use_cliproxy = None; }
                         cx.notify();
                     }
                 });
@@ -1126,6 +1256,7 @@ impl Hangar {
 
     fn undo_config(&mut self, key: &'static str, window: &mut Window, cx: &mut Context<Self>) {
         self.server_config.draft.unstage(key);
+        if key == "jev_aux_base_url" || key == "jev_aux_api_key" { self.server_config.aux_models.reset(); }
         self.server_config.follow_readers();
         self.fill_config_inputs(window, cx);
         cx.notify();
@@ -1212,7 +1343,10 @@ impl Hangar {
             div().mt(px(24.)).child(settings_box().children(rows))
                 .when(page == Page::Advanced, |el| el.child(self.render_roots(cx)).children(self.render_read()).children(self.render_env()))
         };
-        div().flex().flex_col().child(top).child(body)
+        let replaced = FIELDS.iter().filter(|f| f.page == page && s.replaced.contains(&f.label)).map(|f| tr(f.label)).collect::<Vec<_>>();
+        let replaced = (!replaced.is_empty()).then(|| div().id("server-config-replaced").role(Role::Status).mt_2().text_size(px(12.5))
+            .text_color(theme::warning()).whitespace_normal().child(tr("server_draft_replaced").replace("{fields}", &replaced.join(", "))));
+        div().flex().flex_col().child(top).children(replaced).child(body)
             .when(page == Page::Notifications && self.api.is_some(), |el| el.child(self.render_quiet(cx)))
             .into_any_element()
     }
@@ -1268,14 +1402,12 @@ impl Hangar {
             .children(input("jev_model").map(|i| Input::new(&i).small().aria_label(tr("server_jev_model"))))
             .children(in_use(&model));
         let config_card = settings_box()
-            .child(card_title(tr("server_jev_config_title"), None))
+            .child(card_title(tr("server_jev_decisions_title"), None))
             .child(self.config_row(field("jev_api_key"), cx))
             .child(self.mark(provider_row, "server_jev_provider"))
             .child(self.mark(url_row, "server_jev_endpoint"))
             .child(self.mark(model_row, "server_jev_model"));
         let summary = route.as_ref().map(|(openrouter, _, model)| chip(format!("{} · {model}", provider(*openrouter)), theme::muted(), theme::raised()));
-        let uses = [("server_jev_use_browser", "server_jev_use_browser_help"), ("server_jev_use_orchestration", "server_jev_use_orchestration_help"),
-            ("server_jev_use_voice", "server_jev_use_voice_help"), ("server_jev_use_computer", "server_jev_use_computer_help")];
         let has_key = route.is_some();
         let status = move || if has_key { chip(tr("server_jev_uses"), theme::accent_text(), theme::accent_dim()) }
             else { chip(tr("server_jev_no_key"), theme::warning(), theme::raised()) };
@@ -1284,27 +1416,90 @@ impl Hangar {
             .child(div().flex().items_center().justify_between().gap(px(8.))
                 .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(tr(name))).child(status()))
             .child(div().text_size(px(12.5)).text_color(theme::muted()).whitespace_normal().child(tr(about)));
-        let computer = cell(uses[3]).child(div().flex().child(Button::new("jev-open-computer").ghost().xsmall().label(tr("server_jev_open_computer"))
-            .icon(IconName::ArrowRight).on_click(cx.listener(|this, _, window, cx| this.open_settings(Page::Windows, window, cx)))));
-        let users_card = settings_box()
-            .child(card_title(tr("server_jev_users_title"), summary))
-            .child(div().px_4().pb(px(14.)).pt(px(6.)).flex().flex_wrap().gap(px(10.))
-                .children(uses[..3].iter().copied().map(cell)).child(computer))
-            .child(self.config_row(field("jev_padrao"), cx));
-        let open = s.jev_advanced;
-        let owner = cx.entity().downgrade();
+        let computer_state = match &s.computer_on.value {
+            _ if s.computer_on.loading => tr("server_jev_computer_checking"),
+            Some(Ok(true)) => tr("server_jev_computer_on"),
+            Some(Ok(false)) => tr("server_jev_computer_off"),
+            Some(Err(error)) => tr("server_jev_computer_failed").replace("{error}", error),
+            None => String::new(),
+        };
+        let computer = cell(("server_jev_use_computer", "server_jev_use_computer_help"))
+            .child(div().id("jev-computer-state").role(Role::Status).text_size(px(12.5)).whitespace_normal().child(computer_state))
+            .child(div().flex().child(Button::new("jev-open-computer").ghost().xsmall().label(tr("server_jev_open_computer"))
+                .icon(IconName::ArrowRight).on_click(cx.listener(|this, _, window, cx| this.open_settings(Page::Windows, window, cx)))));
+        let where_card = settings_box()
+            .child(card_title(tr("server_jev_where_title"), summary))
+            .child(self.config_row(field("jev_padrao"), cx))
+            .child(div().px_4().pb(px(14.)).pt(px(10.)).flex().flex_wrap().gap(px(10.))
+                .child(cell(("server_jev_use_orchestration", "server_jev_use_orchestration_help")))
+                .child(cell(("server_jev_use_voice", "server_jev_use_voice_help")))
+                .child(computer));
         div().mt_4().flex().flex_col().gap_4()
             .child(help(tr("server_jev_intro")))
             .child(config_card)
-            .child(users_card)
-            .child(Disclosure::new("jev-advanced", open, tr("server_jev_text_advanced"), false)
-                .on_change(move |open, cx| { let _ = owner.update(cx, |this, cx| {
-                    this.server_config.jev_advanced = open; cx.notify();
-                }); }))
-            .when(open, |el| el
-                .child(help(tr_shared("jev_text_help", &[])))
-                .child(settings_box().children(["jev_texto_base_url", "jev_texto_api_key", "jev_texto_modelo", "jev_texto_cmd"]
-                    .into_iter().map(|key| self.config_row(field(key), cx)))))
+            .child(self.render_jev_aux(cx))
+            .child(where_card)
+    }
+
+    /// Modelo auxiliar: um só, para texto e imagem, de quem lê a página e a tela (navegador e Computer Use).
+    fn render_jev_aux(&self, cx: &mut Context<Self>) -> Div {
+        let s = &self.server_config;
+        let line = || div().mt(px(-1.)).border_t_1().border_color(theme::border()).px_4().py(px(14.)).flex().flex_col().gap(px(8.));
+        let muted = |text: String| div().text_size(px(12.5)).text_color(theme::muted()).whitespace_normal().child(text);
+        let proxy = match &s.aux_cliproxy.value {
+            _ if s.aux_cliproxy.loading => Some(muted(tr("server_jev_aux_cliproxy_checking"))),
+            Some(Ok(proxy)) => {
+                let using = text_of(&s.current("jev_aux_base_url")).trim() == proxy.preset_url;
+                let text = if !proxy.running { "server_jev_aux_cliproxy_stopped" }
+                    else if !proxy.has_keys { "server_jev_aux_cliproxy_no_key" }
+                    else { "server_jev_aux_cliproxy_found" };
+                Some(line().child(div().flex().items_center().justify_between().gap(px(10.))
+                    .child(div().flex_1().min_w_0().text_size(px(13.)).whitespace_normal().child(tr(text).replace("{url}", &proxy.preset_url)))
+                    .when(proxy.running && proxy.has_keys, |el| el.child(Button::new("jev-aux-cliproxy").outline().small()
+                        .label(tr(if using && s.cliproxy_key() { "server_jev_aux_cliproxy_chosen" } else { "server_jev_aux_cliproxy_use" }))
+                        .selected(using && s.cliproxy_key())
+                        .on_click(cx.listener(|this, _, window, cx| this.use_aux_cliproxy(window, cx))))))
+                    .when(s.cliproxy_key(), |el| el.child(muted(tr("server_jev_aux_cliproxy_pending")))))
+            }
+            // Servidor sem a rota (mais antigo) ou sem resposta: o atalho só não aparece.
+            Some(Err(_)) | None => None,
+        };
+        let models = &s.aux_models;
+        let can_list = !text_of(&s.current("jev_aux_base_url")).trim().is_empty() && s.aux_key_ready();
+        let mut list = line()
+            .child(div().flex().items_center().gap(px(10.))
+                .child(Button::new("jev-aux-list-models").outline().small()
+                    .label(tr(if models.loading { "server_jev_aux_listing" } else { "server_jev_aux_list_models" }))
+                    .loading(models.loading).disabled(models.loading || !can_list)
+                    .on_click(cx.listener(|this, _, _, cx| this.list_aux_models(cx))))
+                .when(!can_list, |el| el.child(muted(tr("server_jev_aux_list_needs")))));
+        list = match &models.value {
+            Some(Ok(found)) if found.is_empty() => list.child(div().id("jev-aux-models-empty").role(Role::Status).text_size(px(12.5))
+                .text_color(theme::warning()).whitespace_normal().child(tr("server_jev_aux_models_empty"))),
+            Some(Ok(found)) => {
+                let chosen = text_of(&s.current("jev_aux_modelo"));
+                list.child(div().id("jev-aux-models-found").role(Role::Status).text_size(px(12.5)).text_color(theme::muted())
+                        .child(tr("server_jev_aux_models_found").replace("{n}", &found.len().to_string())))
+                    .child(scrolled("jev-aux-models", &s.aux_models_scroll, 180., settings_box().children(found.iter().map(|model| {
+                        let pick = model.clone();
+                        Button::new(SharedString::from(format!("jev-aux-model-{model}"))).ghost().small().w_full().label(model.clone())
+                            .selected(*model == chosen)
+                            .on_click(cx.listener(move |this, _, window, cx| { this.set_jev_text("jev_aux_modelo", &pick, window, cx); cx.notify(); }))
+                    }))))
+            }
+            Some(Err(error)) => list.child(div().id("jev-aux-models-error").role(Role::Alert).text_size(px(12.5)).text_color(theme::danger())
+                .whitespace_normal().child(error.clone())),
+            None => list,
+        };
+        settings_box()
+            .child(div().px_4().pt(px(14.)).pb(px(4.)).text_base().font_weight(FontWeight::SEMIBOLD).child(tr("server_jev_aux_title")))
+            .child(div().px_4().pb(px(10.)).child(muted(tr("server_jev_aux_help"))))
+            .children(proxy)
+            .child(self.config_row(field("jev_aux_base_url"), cx))
+            .child(self.config_row(field("jev_aux_api_key"), cx))
+            .child(self.config_row(field("jev_aux_modelo"), cx))
+            .child(list)
+            .child(self.config_row(field("jev_aux_esforco"), cx))
     }
 
     /// Grava um texto do Jev no rascunho e mostra no campo.
@@ -1913,7 +2108,7 @@ impl Hangar {
                 _ => return div().text_sm().text_color(theme::muted()).child(tr("server_loading")),
             }
         }
-        let dirty = !s.draft.is_empty();
+        let dirty = s.dirty();
         let blocked = s.provider_missing_key();
         div().flex().flex_col().gap(px(8.))
             .child(settings_box().child(self.config_row(field("term_origins"), cx)))
@@ -1932,7 +2127,7 @@ impl Hangar {
 
     pub(super) fn server_config_footer(&self, page: Page, cx: &mut Context<Self>) -> Option<Div> {
         let s = &self.server_config;
-        let dirty = !s.draft.is_empty();
+        let dirty = s.dirty();
         let blocked = s.provider_missing_key();
         if !is_server_page(page) || s.load.loading || s.fields.is_empty() || !(dirty || s.saving || s.saved.is_some()) { return None; }
         // O botão fica na mesma coluna de 720px do conteúdo, não na borda da janela.
@@ -1966,30 +2161,23 @@ mod tests {
         assert_eq!(s.secret_mask("jev_api_key").as_deref(), Some("sk-s••••••••abcd"));
         assert!(s.stage("jev_api_key", json!("digitada")));
         assert_eq!(s.input_text("jev_api_key", Kind::Secret), "digitada");
-        s.fields.insert("jev_texto_api_key".into(), json!({"valor": "", "definido": false, "origem": "env"}));
-        assert_eq!(s.secret_mask("jev_texto_api_key"), None);
+        s.fields.insert("jev_aux_api_key".into(), json!({"valor": "", "definido": false, "origem": "env"}));
+        assert_eq!(s.secret_mask("jev_aux_api_key"), None);
     }
 
     #[test]
     fn jev_fields_follow_the_web_order_and_labels() {
         let jev: Vec<(&str, &str)> = super::FIELDS.iter().filter(|f| f.key.starts_with("jev_")).map(|f| (f.key, f.label)).collect();
         assert_eq!(jev, [("jev_api_key", "server_jev_key"), ("jev_padrao", "server_jev_default"), ("jev_endpoint", "server_jev_endpoint"),
-            ("jev_model", "server_jev_model"), ("jev_texto_base_url", "server_jev_text_endpoint"), ("jev_texto_api_key", "server_jev_text_key"),
-            ("jev_texto_modelo", "server_jev_text_model"), ("jev_texto_cmd", "server_jev_cmd")]);
+            ("jev_model", "server_jev_model"), ("jev_aux_base_url", "server_jev_aux_endpoint"), ("jev_aux_api_key", "server_jev_aux_key"),
+            ("jev_aux_modelo", "server_jev_aux_model"), ("jev_aux_esforco", "server_jev_aux_effort")]);
         assert!(super::FIELDS.iter().filter(|f| f.key.starts_with("jev_")).all(|f| f.page == super::Page::Jev));
-        let mut s = ServerConfig::default();
-        s.reveal("server_jev_model");
-        assert!(!s.jev_advanced, "endereço e modelo ficam no cartão principal");
-        s.reveal("server_jev_text_model");
-        assert!(s.jev_advanced, "a busca abre os ajustes avançados do Jev");
         // `reveal` acha o campo pelo rótulo: rótulo repetido abriria a seção errada.
         let labels: std::collections::HashSet<&str> = super::FIELDS.iter().map(|f| f.label).collect();
         assert_eq!(labels.len(), super::FIELDS.len());
         use crate::i18n::{tr, tr_shared};
         assert_eq!(tr("server_jev_endpoint"), tr_shared("config_server_jev_endpoint", &[]));
         assert_eq!(tr("server_jev_model"), tr_shared("config_server_jev_modelo", &[]));
-        assert_eq!(tr("server_jev_text_endpoint"), tr_shared("config_server_jev_texto_endpoint", &[]));
-        assert_eq!(tr("server_jev_text_model"), tr_shared("config_server_jev_texto_modelo", &[]));
     }
 
     #[test]
@@ -2139,6 +2327,52 @@ mod tests {
         s.settle(&sent);
         assert_eq!(s.draft.get("stall_seconds"), Some(&json!("700")));
         assert!(!s.draft.contains_key("notify_dead"));
+    }
+
+    #[test]
+    fn reading_drops_a_draft_the_server_already_moved_past() {
+        let read = |model: &str, stall: i64| {
+            let mut m = Map::new();
+            m.insert("jev_aux_modelo".into(), json!({"valor": model}));
+            m.insert("stall_seconds".into(), json!({"valor": stall}));
+            m
+        };
+        let mut s = ServerConfig::default();
+        s.replace_fields(read("", 900), false);
+        s.stage("jev_aux_modelo", json!(""));
+        s.stage("stall_seconds", json!("700"));
+        assert!(s.draft.drop_stale(&read("gpt-6-luna", 900)) == vec!["jev_aux_modelo".to_owned()],
+            "rascunho vazio feito sobre o vazio some quando o servidor passa a ter valor, e é avisado; o outro fica");
+        assert_eq!(s.draft.get("stall_seconds"), Some(&json!("700")));
+        s.stage("stall_seconds", json!("900"));
+        assert!(s.draft.drop_stale(&read("gpt-6-luna", 900)).is_empty(), "igual ao servidor não perdeu nada");
+        assert!(s.draft.is_empty(), "igual ao servidor (texto contra número) não é rascunho");
+        s.replace_fields(read("gpt-6-luna", 900), false);
+        s.stage("stall_seconds", json!("600"));
+        let sent = s.draft.snapshot();
+        s.stage("stall_seconds", json!("700"));
+        s.replace_fields(read("gpt-6-luna", 600), false);
+        s.settle(&sent);
+        s.draft.rebase(&s.fields);
+        s.draft.drop_stale(&read("gpt-6-luna", 600));
+        assert_eq!(s.draft.get("stall_seconds"), Some(&json!("700")), "mexido durante o Salvar sobrevive à leitura seguinte");
+    }
+
+    #[test]
+    fn cliproxy_key_alone_is_something_to_save() {
+        let mut s = ServerConfig::default();
+        s.fields.insert("jev_aux_api_key".into(), json!({"valor": "", "definido": false}));
+        s.fields.insert("jev_aux_base_url".into(), json!({"valor": ""}));
+        assert!(!s.dirty() && !s.aux_key_ready());
+        s.stage("jev_aux_base_url", json!("http://127.0.0.1:8317/v1"));
+        s.aux_use_cliproxy = Some("http://127.0.0.1:8317/v1".into());
+        assert!(s.cliproxy_key() && s.aux_key_ready(), "a chave do CLIProxyAPI vai no Salvar e serve para buscar modelos");
+        s.stage("jev_aux_base_url", json!("https://openrouter.ai/api/v1"));
+        assert!(!s.cliproxy_key(), "outro endereço: a chave do CLIProxyAPI não vai junto");
+        s.draft.unstage("jev_aux_base_url");
+        assert!(!s.dirty(), "desfeito o endereço, não sobra pedido de chave");
+        s.reconnected("outro".into());
+        assert!(s.aux_use_cliproxy.is_none(), "outro servidor não herda o pedido");
     }
 
     #[test]
