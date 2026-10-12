@@ -101,6 +101,8 @@ impl Starter {
         #[cfg(target_os = "windows")]
         let on_spa = (state.clone(), events.clone());
         #[cfg(target_os = "windows")]
+        let on_native = (state.clone(), events.clone());
+        #[cfg(target_os = "windows")]
         let watch = {
             use wry::WebViewExtWindows;
             let cdp = Rc::new(super::cdp::Cdp::new(view.webview()));
@@ -121,6 +123,7 @@ impl Starter {
                 send(&events, &page);
             });
             if let Err(e) = within { eprintln!("[nav] navegacao dentro da pagina sem ouvinte: {e}"); }
+            watch_native(&view, &on_native.0, &on_native.1);
             match listened {
                 Ok(()) => {
                     drop(cdp.call("Page.enable", serde_json::json!({})));
@@ -134,6 +137,55 @@ impl Starter {
         #[cfg(target_os = "windows")]
         engine.park();
         Ok(engine)
+    }
+}
+
+/// Diálogos e início de navegação pelo próprio WebView2. O diálogo padrão dele é janela modal que ninguém responde
+/// quando é o agente que o dispara: o `click` e todo verbo seguinte esperavam o prazo inteiro. Aqui, como no Linux,
+/// `alert`/`beforeunload` passam, `confirm`/`prompt` são recusados, e a pessoa vê o aviso no painel. O `Started` do
+/// wry só chega com a resposta: sem o `NavigationStarting`, página lenta nunca mostrava o Parar.
+#[cfg(target_os = "windows")]
+fn watch_native(view: &WebView, state: &Rc<RefCell<model::PageState>>, events: &async_channel::Sender<Event>) {
+    use webview2_com::{NavigationStartingEventHandler, ScriptDialogOpeningEventHandler, take_pwstr, Microsoft::Web::WebView2::Win32::{
+        COREWEBVIEW2_SCRIPT_DIALOG_KIND, COREWEBVIEW2_SCRIPT_DIALOG_KIND_ALERT, COREWEBVIEW2_SCRIPT_DIALOG_KIND_BEFOREUNLOAD}};
+    use wry::WebViewExtWindows;
+    let core = view.webview();
+    // SAFETY: thread da interface, dona do WebView2.
+    if let Err(e) = unsafe { core.Settings().and_then(|s| s.SetAreDefaultScriptDialogsEnabled(false)) } {
+        eprintln!("[nav] dialogo padrao do WebView2 continua ligado: {}", e.message());
+    }
+    let (st, ev) = (state.clone(), events.clone());
+    let dialogs = ScriptDialogOpeningEventHandler::create(Box::new(move |_, args| {
+        let Some(args) = args else { return Ok(()) };
+        let mut kind = COREWEBVIEW2_SCRIPT_DIALOG_KIND::default();
+        let mut raw = windows::core::PWSTR::null();
+        // SAFETY: o WebView2 aloca a mensagem; `take_pwstr` a libera.
+        unsafe { args.Kind(&mut kind)?; args.Message(&mut raw)?; }
+        let message: String = take_pwstr(raw).chars().take(200).collect();
+        let accept = kind == COREWEBVIEW2_SCRIPT_DIALOG_KIND_ALERT || kind == COREWEBVIEW2_SCRIPT_DIALOG_KIND_BEFOREUNLOAD;
+        // Sem `Accept`, o diálogo volta recusado assim que o evento termina.
+        if accept { unsafe { args.Accept()?; } }
+        let key = if kind == COREWEBVIEW2_SCRIPT_DIALOG_KIND_ALERT { Some("browser_dialog_alert") }
+            else if kind == COREWEBVIEW2_SCRIPT_DIALOG_KIND_BEFOREUNLOAD { None } else { Some("browser_dialog_refused") };
+        if let Some(key) = key {
+            let mut page = st.borrow_mut();
+            page.notice = Some(crate::i18n::tr(key).replace("{message}", message.trim()));
+            page.notice_seq += 1;
+            send(&ev, &page);
+        }
+        Ok(())
+    }));
+    let (st, ev) = (state.clone(), events.clone());
+    let starting = NavigationStartingEventHandler::create(Box::new(move |_, _| {
+        let mut page = st.borrow_mut();
+        if !page.loading { page.loading = true; send(&ev, &page); }
+        Ok(())
+    }));
+    let mut token = 0i64;
+    // SAFETY: thread da interface; os handlers vivem enquanto o WebView2 os segurar.
+    unsafe {
+        if let Err(e) = core.add_ScriptDialogOpening(&dialogs, &mut token) { eprintln!("[nav] dialogos sem ouvinte: {}", e.message()); }
+        if let Err(e) = core.add_NavigationStarting(&starting, &mut token) { eprintln!("[nav] inicio de navegacao sem ouvinte: {}", e.message()); }
     }
 }
 
@@ -167,6 +219,13 @@ impl Engine {
     }
 
     pub fn alive(&self) -> bool { !self.dead.get() }
+
+    /// Página que caiu volta com `Reload` no mesmo WebView2: o processo da página renasce e o histórico fica.
+    pub fn revive(&self) {
+        self.dead.set(false);
+        { let mut page = self.state.borrow_mut(); page.error = None; send(&self.events, &page); }
+        self.reload();
+    }
 
     /// Voltar/avançar de verdade, lidos do histórico do WebView2 depois de cada carga. Devolve a tarefa: o painel a
     /// roda, porque o motor não tem executor.

@@ -492,6 +492,9 @@ impl BrowserPanel {
     /// Recarregar e "Tentar de novo": motor caído ou que não nasceu volta a nascer no mesmo endereço (`go` o refaz);
     /// com erro de carga, o endereço que falhou é carregado de novo, porque a página atual é a de erro.
     fn retry(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // No Windows a página que caiu volta no mesmo WebView2, sem perder o histórico.
+        #[cfg(target_os = "windows")]
+        if let Some(engine) = self.engine() && !engine.alive() { engine.revive(); return cx.notify(); }
         // Fora do macOS o `go` já refaz o motor que falhou; aqui vale para todos.
         if matches!(&self.engine, Some(Err(_))) { self.engine = None; }
         let dead = !matches!(&self.engine, Some(Ok(e)) if e.alive());
@@ -652,23 +655,32 @@ impl BrowserPanel {
             // diálogo. O teto curto evita que um quadro que não vem segure a página por cima do diálogo.
             let shot = cdp.call("Page.captureScreenshot", serde_json::json!({"format": "jpeg", "quality": 85}));
             cx.spawn(async move |this, cx| {
-                let timer = cx.background_executor().timer(std::time::Duration::from_millis(300));
-                let image = match futures::future::select(std::pin::pin!(shot), std::pin::pin!(timer)).await {
-                    futures::future::Either::Left((Ok(r), _)) => {
-                        use base64::Engine as _;
-                        r["data"].as_str().and_then(|d| base64::engine::general_purpose::STANDARD.decode(d).ok())
-                            .map(|bytes| Arc::new(Image::from_bytes(ImageFormat::Jpeg, bytes)))
-                    }
-                    _ => None,
+                let decode = |r: Result<serde_json::Value, String>| -> Option<Arc<Image>> {
+                    use base64::Engine as _;
+                    r.ok()?["data"].as_str().and_then(|d| base64::engine::general_purpose::STANDARD.decode(d).ok())
+                        .map(|bytes| Arc::new(Image::from_bytes(ImageFormat::Jpeg, bytes)))
                 };
-                let _ = this.update(cx, |this, cx| {
-                    if this.shown { return; }
-                    if let Some(old) = std::mem::replace(&mut this.still, image) { this.released.push(old); }
+                let put = |this: &mut Self, image: Option<Arc<Image>>| if let Some(image) = image && let Some(old) = this.still.replace(image) { this.released.push(old); };
+                let leave = |this: &mut Self, cx: &mut Context<Self>| {
                     if let Some(engine) = this.engine() { engine.hide(); }
                     // Só agora o viewport fixo da página escondida: antes, a captura podia sair já nesse tamanho.
                     if let Some(ctl) = this.controller.clone() { cx.spawn(async move |_, _| ctl.set_hidden(true).await).detach(); }
                     cx.notify();
-                });
+                };
+                let timer = cx.background_executor().timer(std::time::Duration::from_millis(300));
+                match futures::future::select(std::pin::pin!(shot), std::pin::pin!(timer)).await {
+                    futures::future::Either::Left((r, _)) => {
+                        let image = decode(r);
+                        let _ = this.update(cx, |this, cx| if !this.shown { put(this, image); leave(this, cx); });
+                    }
+                    // Quadro lento: a página sai da frente agora, e o quadro entra quando chegar.
+                    futures::future::Either::Right((_, shot)) => {
+                        if this.update(cx, |this, cx| { if !this.shown { leave(this, cx); } !this.shown }).unwrap_or(false) {
+                            let image = decode(shot.await);
+                            let _ = this.update(cx, |this, cx| if !this.shown { put(this, image); cx.notify(); });
+                        }
+                    }
+                }
             }).detach();
         } else if !shown && let Some(engine) = self.engine() { engine.hide(); }
         #[cfg(not(target_os = "windows"))]
@@ -912,7 +924,10 @@ impl Render for BrowserPanel {
                 .on_click(cx.listener(|this, _, _, cx| this.import_chrome_login(cx))));
         }
         // Com a página na tela, a falha dela fica numa linha; sem página, `render_page` a mostra no lugar dela.
-        let notice = self.invalid.clone().or_else(|| self.page.error.clone().filter(|_| !cfg!(target_os = "linux") && ready && self.page.url.is_some()));
+        // A queda vence o endereço recusado: com a página branca, ela é o que explica a tela.
+        let dead = self.engine().is_some_and(|e| !e.alive());
+        let page_error = self.page.error.clone().filter(|_| !cfg!(target_os = "linux") && ready && self.page.url.is_some());
+        let notice = if dead { page_error.clone() } else { self.invalid.clone().or(page_error) };
         #[allow(unused_mut)]
         let mut root = div().size_full().flex().flex_col().key_context("BrowserPanel")
             // Antes da página: atalhos de navegador valem no painel inteiro e não chegam a ela.
@@ -931,8 +946,10 @@ impl Render for BrowserPanel {
                 cx.stop_propagation();
             }))
             .child(toolbar)
-            .when_some(notice, |el, text| el.child(div().id("browser-notice").flex_shrink_0().px_3().py(px(6.)).role(Role::Alert)
-                .text_size(px(11.)).text_color(theme::danger()).whitespace_normal().child(text)));
+            .when_some(notice, |el, text| el.child(div().id("browser-notice").flex_shrink_0().flex().items_center().gap_2().px_3().py(px(6.)).role(Role::Alert)
+                .child(div().flex_1().min_w_0().text_size(px(11.)).text_color(theme::danger()).whitespace_normal().child(text))
+                .when(dead, |el| el.child(Button::new("browser-notice-retry").outline().xsmall().icon(IconName::RotateCw).label(tr("browser_retry"))
+                    .on_click(cx.listener(|this, _, window, cx| this.retry(window, cx)))))));
         #[cfg(not(target_os = "macos"))]
         {
             root = root.when_some(self.cookies_status.clone(), |el, text| el.child(div().id("browser-cookies-status")
