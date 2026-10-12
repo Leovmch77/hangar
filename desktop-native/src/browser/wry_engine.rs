@@ -21,10 +21,22 @@ pub struct Engine {
     events: async_channel::Sender<Event>,
     /// Área onde a janela filha está; `None` = escondida. Evita chamada nativa a cada quadro.
     placed: Cell<Option<Bounds<Pixels>>>,
+    /// A página caiu (`Inspector.targetCrashed`): o painel refaz o motor no próximo `go`.
+    dead: Rc<Cell<bool>>,
+    /// CDP que segura os ouvintes do motor (queda); os ouvintes morrem com ele.
+    #[cfg(target_os = "windows")]
+    _watch: Option<Rc<super::cdp::Cdp>>,
     /// Escondida de verdade por estar parada (ver `sleep`).
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     asleep: Cell<bool>,
 }
+
+/// Clique e tecla de verdade na página vão ao painel, que pausa o agente se ele estiver agindo. Script de
+/// inicialização vale desde o primeiro documento; o binding do CDP chegava tarde para ele.
+const USER_INPUT: &str = "(()=>{const f=e=>{if(e.isTrusted&&window.ipc)window.ipc.postMessage('hangar-user')};addEventListener('pointerdown',f,true);addEventListener('keydown',f,true)})()";
+
+/// Link com `target=_blank` e `window.open` abrem nesta página: o painel é um navegador de uma aba só.
+const SAME_TAB: &str = "(()=>{addEventListener('click',e=>{const a=e.target&&e.target.closest&&e.target.closest('a[target]');if(a&&a.target!=='_self'&&a.target!=='_top'&&a.target!=='_parent')a.target='_self'},true);const o=window.open;window.open=function(u){if(u){location.href=u;return window}return o.apply(this,arguments)}})()";
 
 fn send(events: &async_channel::Sender<Event>, state: &model::PageState) {
     let _ = events.try_send(Event::State(state.clone()));
@@ -56,22 +68,33 @@ impl Starter {
         // Cookies e logins ficam ao lado das configurações do app. O macOS ignora a pasta e usa o armazenamento do app.
         let mut context = WebContext::new(crate::appearance::dir().map(|dir| dir.join("browser")));
         let state = Rc::new(RefCell::new(model::PageState::default()));
-        let (on_load, on_title) = ((state.clone(), events.clone()), (state.clone(), events.clone()));
-        let builder = WebViewBuilder::new_with_web_context(&mut context).with_visible(false);
+        let (on_load, on_title, on_ipc) = ((state.clone(), events.clone()), (state.clone(), events.clone()), events.clone());
+        let builder = WebViewBuilder::new_with_web_context(&mut context).with_visible(false).with_initialization_script(SAME_TAB)
+            .with_initialization_script(USER_INPUT)
+            .with_ipc_handler(move |req| if req.body() == "hangar-user" { let _ = on_ipc.try_send(Event::UserInput); });
         // Estacionada visível fora da tela (ver `park`): nascer com foco roubaria o teclado da janela do app.
+        // O agente dirige a página com o app em segundo plano ou com ela estacionada: sem estes, o WebView2 a dá por
+        // encoberta e congela os timers (eval e url estouravam o prazo até um clique no app). Os três primeiros são os
+        // padrões do wry, que somem quando se passa argumentos. Todo WebView2 desta pasta nasce com os mesmos.
         #[cfg(target_os = "windows")]
-        let builder = builder.with_focused(false);
+        let builder = {
+            use wry::WebViewBuilderExtWindows;
+            builder.with_focused(false).with_additional_browser_args(concat!(
+                "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,CalculateNativeWinOcclusion ",
+                "--disable-background-timer-throttling --disable-renderer-backgrounding --disable-backgrounding-occluded-windows"))
+        };
         let view = builder
             // Bloqueio sem aviso: o handler só recebe a URL e não distingue o quadro principal de um iframe.
             .with_navigation_handler(|url| model::allowed_request(&url))
-            // ponytail: link com target=_blank não abre; carregar na mesma página quando fizer falta.
+            // O que escapar do SAME_TAB (página que abre janela sem ser por link nem `window.open`) não abre.
             .with_new_window_req_handler(|_, _| NewWindowResponse::Deny)
             .with_on_page_load_handler(move |event, url| {
                 let mut page = on_load.0.borrow_mut();
                 page.url = Some(url);
                 page.loading = matches!(event, PageLoadEvent::Started);
                 page.error = None;
-                // O wry não expõe o histórico: depois da primeira página, voltar/avançar ficam sempre ligados.
+                // No Windows o histórico vem do CDP (`history`); no macOS o wry não o expõe, e os dois ficam ligados.
+                #[cfg(not(target_os = "windows"))]
                 if !page.loading {
                     page.can_back = true;
                     page.can_forward = true;
@@ -85,11 +108,94 @@ impl Starter {
             })
             .build_as_child(&self)
             .map_err(|e| e.to_string())?;
-        let engine = Engine { view, _context: context, state, events, placed: Cell::new(None), asleep: Cell::new(false) };
+        let dead = Rc::new(Cell::new(false));
+        #[cfg(target_os = "windows")]
+        let on_spa = (state.clone(), events.clone());
+        #[cfg(target_os = "windows")]
+        let on_native = (state.clone(), events.clone());
+        #[cfg(target_os = "windows")]
+        let watch = {
+            use wry::WebViewExtWindows;
+            let cdp = Rc::new(super::cdp::Cdp::new(view.webview()));
+            let (dead, state, events) = (dead.clone(), state.clone(), events.clone());
+            let listened = cdp.on("Inspector.targetCrashed", move |_| {
+                dead.set(true);
+                let mut page = state.borrow_mut();
+                (page.loading, page.error, page.dialog) = (false, Some(crate::i18n::tr("browser_err_crashed")), None);
+                send(&events, &page);
+            });
+            // Navegação dentro do documento (SPA, âncora) não passa pelo `on_page_load`: sem isto a barra e o voltar ficavam
+            // na página anterior.
+            let (state, events) = (on_spa.0, on_spa.1);
+            let within = cdp.on("Page.navigatedWithinDocument", move |p| {
+                let Some(url) = p["url"].as_str() else { return };
+                let mut page = state.borrow_mut();
+                page.url = Some(url.to_owned());
+                send(&events, &page);
+            });
+            if let Err(e) = within { eprintln!("[nav] navegacao dentro da pagina sem ouvinte: {e}"); }
+            // O diálogo é o nativo do WebView2 (a pessoa o responde ali); o agente o vê e responde pelo CDP. Segurar o
+            // diálogo por `GetDeferral` travava a página quando um iframe de outro processo abria o seu. Só o
+            // `beforeunload` passa sozinho: sem isso o `goto` do agente parava num "Sair do site?" que ele não vê.
+            for (event, open) in [("Page.javascriptDialogOpening", true), ("Page.javascriptDialogClosed", false)] {
+                let (state, events, weak) = (on_native.0.clone(), on_native.1.clone(), Rc::downgrade(&cdp));
+                let listened = cdp.on(event, move |p| {
+                    if open && p["type"].as_str() == Some("beforeunload") {
+                        if let Some(cdp) = weak.upgrade() {
+                            cdp.fire("Page.handleJavaScriptDialog", serde_json::json!({"accept": true}));
+                        }
+                        return;
+                    }
+                    let mut page = state.borrow_mut();
+                    page.dialog = open.then(|| model::Dialog {
+                        kind: p["type"].as_str().unwrap_or("").to_owned(),
+                        message: p["message"].as_str().unwrap_or("").chars().take(500).collect(),
+                        default: p["defaultPrompt"].as_str().unwrap_or("").to_owned(),
+                    });
+                    send(&events, &page);
+                });
+                if let Err(e) = listened { eprintln!("[nav] dialogo sem ouvinte ({event}): {e}"); }
+            }
+            watch_native(&view, &on_native.0, &on_native.1);
+            if let Err(e) = listened { eprintln!("[nav] queda da pagina sem ouvinte: {e}"); }
+            cdp.fire("Page.enable", serde_json::json!({}));
+            cdp.fire("Inspector.enable", serde_json::json!({}));
+            Some(cdp)
+        };
+        let engine = Engine { view, _context: context, state, events, placed: Cell::new(None), asleep: Cell::new(false), dead, #[cfg(target_os = "windows")] _watch: watch };
         #[cfg(target_os = "windows")]
         engine.park();
         Ok(engine)
     }
+}
+
+/// Início de navegação pelo próprio WebView2: o `Started` do wry só chega com a resposta, e sem isto a página lenta
+/// nunca mostrava o Parar nem o endereço pedido.
+#[cfg(target_os = "windows")]
+fn watch_native(view: &WebView, state: &Rc<RefCell<model::PageState>>, events: &async_channel::Sender<Event>) {
+    use webview2_com::{NavigationStartingEventHandler, take_pwstr};
+    use wry::WebViewExtWindows;
+    let core = view.webview();
+    let (st, ev) = (state.clone(), events.clone());
+    let starting = NavigationStartingEventHandler::create(Box::new(move |_, args| {
+        // O handler do wry roda antes e cancela endereço bloqueado: aí não há carga para mostrar.
+        let mut cancel = windows::core::BOOL::default();
+        let mut uri = windows::core::PWSTR::null();
+        if let Some(args) = &args { unsafe { args.Cancel(&mut cancel)?; args.Uri(&mut uri)?; } }
+        // SAFETY: o WebView2 aloca o endereço; `take_pwstr` o libera.
+        let uri = if uri.is_null() { String::new() } else { take_pwstr(uri) };
+        if cancel.as_bool() { return Ok(()); }
+        let mut page = st.borrow_mut();
+        // O endereço pedido já na barra: o estado anterior ainda tinha o da página que está saindo.
+        if !uri.is_empty() { page.url = Some(uri); }
+        page.loading = true;
+        page.dialog = None;
+        send(&ev, &page);
+        Ok(())
+    }));
+    let mut token = 0i64;
+    // SAFETY: thread da interface; o handler vive enquanto o WebView2 o segurar.
+    if let Err(e) = unsafe { core.add_NavigationStarting(&starting, &mut token) } { eprintln!("[nav] inicio de navegacao sem ouvinte: {}", e.message()); }
 }
 
 impl Engine {
@@ -106,6 +212,14 @@ impl Engine {
     pub fn back(&self) { self.report(self.view.evaluate_script("history.back()")); }
     pub fn forward(&self) { self.report(self.view.evaluate_script("history.forward()")); }
     pub fn reload(&self) { self.report(self.view.reload()); }
+    /// `window.stop()` roda no documento atual e não cancela a navegação que ainda não trouxe o novo; no Windows o CDP
+    /// cancela as duas.
+    pub fn stop(&self) {
+        #[cfg(target_os = "windows")]
+        drop(self.cdp().call("Page.stopLoading", serde_json::json!({})));
+        #[cfg(not(target_os = "windows"))]
+        self.report(self.view.evaluate_script("window.stop()"));
+    }
 
     #[cfg(target_os = "windows")]
     pub fn cdp(&self) -> std::rc::Rc<super::cdp::Cdp> {
@@ -113,9 +227,56 @@ impl Engine {
         std::rc::Rc::new(super::cdp::Cdp::new(self.view.webview()))
     }
 
-    /// O WebView2 nasce e morre com o painel.
+    pub fn alive(&self) -> bool { !self.dead.get() }
+
+    /// Responde pelo CDP o diálogo nativo aberto; o `javascriptDialogClosed` tira o estado.
     #[cfg(target_os = "windows")]
-    pub fn alive(&self) -> bool { true }
+    pub fn answer_dialog(&self, accept: bool, text: Option<&str>) -> impl std::future::Future<Output = Result<(), String>> + 'static + use<> {
+        let mut params = serde_json::json!({"accept": accept});
+        if let Some(text) = text { params["promptText"] = text.into(); }
+        let (call, state, events) = (self.cdp().call("Page.handleJavaScriptDialog", params), self.state.clone(), self.events.clone());
+        async move {
+            let result = call.await.map(|_| ());
+            // Sem diálogo na página o `javascriptDialogClosed` se perdeu: o estado ainda o mostraria e travaria os verbos.
+            if result.as_ref().is_err_and(|e| e.contains("No dialog is showing")) {
+                let mut page = state.borrow_mut();
+                page.dialog = None;
+                send(&events, &page);
+            }
+            result
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    pub fn answer_dialog(&self, _accept: bool, _text: Option<&str>) -> impl std::future::Future<Output = Result<(), String>> + 'static + use<> {
+        std::future::ready(Err("este sistema nao tem dialogo segurado".to_string()))
+    }
+
+    /// Página que caiu volta com `Reload` no mesmo WebView2: o processo da página renasce e o histórico fica.
+    pub fn revive(&self) {
+        self.dead.set(false);
+        { let mut page = self.state.borrow_mut(); page.error = None; send(&self.events, &page); }
+        self.reload();
+        // A página nova pode vir sem os domínios ligados na que caiu; sem eles a próxima queda passaria calada.
+        #[cfg(target_os = "windows")]
+        if let Some(cdp) = &self._watch {
+            drop(cdp.call("Page.enable", serde_json::json!({})));
+            drop(cdp.call("Inspector.enable", serde_json::json!({})));
+        }
+    }
+
+    /// Voltar/avançar de verdade, lidos do histórico do WebView2 depois de cada carga. Devolve a tarefa: o painel a
+    /// roda, porque o motor não tem executor.
+    #[cfg(target_os = "windows")]
+    pub fn history(&self) -> impl std::future::Future<Output = ()> + 'static {
+        let (call, state, events) = (self.cdp().call("Page.getNavigationHistory", serde_json::json!({})), self.state.clone(), self.events.clone());
+        async move {
+            let h = match call.await { Ok(h) => h, Err(e) => return eprintln!("[nav] historico nao lido: {e}") };
+            let (index, count) = (h["currentIndex"].as_i64().unwrap_or(0), h["entries"].as_array().map_or(0, Vec::len) as i64);
+            let mut page = state.borrow_mut();
+            (page.can_back, page.can_forward) = (index > 0, index + 1 < count);
+            send(&events, &page);
+        }
+    }
 
     pub fn place(&self, bounds: Bounds<Pixels>, _window: &mut Window) {
         let hidden = self.placed.get().is_none();
@@ -169,6 +330,8 @@ impl Engine {
 
     pub fn pointer(&self, _kind: Pointer, _at: Point<Pixels>, _clicks: usize) {}
     pub fn wheel(&self, _at: Point<Pixels>, _delta: Point<Pixels>) {}
+    pub fn mouse(&self, _kind: Pointer, _button: MouseButton, _at: Point<Pixels>, _clicks: usize, _modifiers: &Modifiers) {}
+    pub fn scroll(&self, _at: Point<Pixels>, _delta: Point<Pixels>, _modifiers: &Modifiers) {}
     pub fn key(&self, _down: bool, _keystroke: &Keystroke) {}
     pub fn insert_text(&self, _text: &str) {}
     /// O WebView nasce sem foco no Windows: sem mover o foco aqui, o que se digita depois do Enter na barra não chega.

@@ -426,8 +426,12 @@ fn listen(
     let _ = session.on("Page.frameNavigated", move |params| {
         let frame = &params["frame"];
         if !frame["parentId"].is_null() { return; }
-        let url = frame["url"].as_str().unwrap_or("").to_owned();
-        p(&|page| { page.url = Some(url.clone()); page.error = None; });
+        // Página de erro do Chromium: o endereço é o que não abriu (`unreachableUrl`), e o erro da carga fica.
+        let failed = frame["unreachableUrl"].as_str().filter(|u| !u.is_empty());
+        let url = failed.unwrap_or(frame["url"].as_str().unwrap_or("")).to_owned();
+        let keep = failed.is_some();
+        // A página de erro de uma navegação bloqueada traz o aviso do bloqueio: ele fica com ela.
+        p(&|page| { page.url = Some(url.clone()); page.dialog = None; if !keep { page.error = None; page.notice = None; } });
         h();
     });
     let (p, h, m) = (publish.clone(), history.clone(), main.clone());
@@ -451,18 +455,33 @@ fn listen(
         }
         if model::allowed_request(&url) { return drop(session.call("Fetch.continueRequest", json!({"requestId": id}))); }
         drop(session.call("Fetch.failRequest", json!({"requestId": id, "errorReason": "BlockedByClient"})));
-        if params["frameId"] == m.as_str() { p(&|page| page.error = Some(crate::i18n::tr("browser_blocked").replace("{url}", &url))); }
+        // Bloqueio é aviso, não tela de falha: tentar de novo bloquearia de novo.
+        if params["frameId"] == m.as_str() {
+            let text = crate::i18n::tr("browser_blocked").replace("{url}", &url);
+            p(&|page| { page.notice = Some(text.clone()); page.notice_seq += 1; });
+        }
     });
-    // Sem resposta o diálogo trava a página, e no app não há quem o veja: `alert` e `beforeunload` passam, mas
-    // `confirm`/`prompt` são recusados, para nada ser confirmado sem alguém ter lido.
-    let weak = Rc::downgrade(session);
+    // O diálogo fica aberto até alguém responder: o agente (verbo `dialog`) ou a pessoa (caixa do painel). Testar
+    // um "Excluir? OK/Cancelar" exige escolher. Só o `beforeunload` passa sozinho: sem isso a navegação travaria.
+    let (weak, p) = (Rc::downgrade(session), publish.clone());
     let _ = session.on("Page.javascriptDialogOpening", move |params| {
-        let kind = params["type"].as_str().unwrap_or("");
-        let accept = matches!(kind, "alert" | "beforeunload");
-        let message: String = params["message"].as_str().unwrap_or("").chars().take(200).collect();
-        eprintln!("[nav] dialogo {kind} {}: {message}", if accept { "aceito" } else { "recusado" });
-        let Some(session) = weak.upgrade() else { return };
-        drop(session.call("Page.handleJavaScriptDialog", json!({"accept": accept})));
+        let kind = params["type"].as_str().unwrap_or("").to_owned();
+        if kind == "beforeunload" {
+            if let Some(session) = weak.upgrade() { drop(session.call("Page.handleJavaScriptDialog", json!({"accept": true}))); }
+            return;
+        }
+        let dialog = model::Dialog { kind, message: params["message"].as_str().unwrap_or("").chars().take(500).collect(),
+            default: params["defaultPrompt"].as_str().unwrap_or("").to_owned() };
+        p(&|page| page.dialog = Some(dialog.clone()));
+    });
+    let p = publish.clone();
+    let _ = session.on("Page.javascriptDialogClosed", move |_| p(&|page| page.dialog = None));
+    // O download é negado no navegador inteiro (`Browser.setDownloadBehavior`); sem aviso o clique parecia não fazer nada.
+    let p = publish.clone();
+    let _ = session.on("Page.downloadWillBegin", move |params| {
+        let file = params["suggestedFilename"].as_str().filter(|f| !f.is_empty()).or(params["url"].as_str()).unwrap_or("").to_owned();
+        let text = crate::i18n::tr("browser_download_denied").replace("{file}", &file);
+        p(&|page| { page.notice = Some(text.clone()); page.notice_seq += 1; });
     });
     let (p, m) = (publish.clone(), main.clone());
     session.watch("Target.targetInfoChanged", move |params| {
@@ -496,7 +515,7 @@ fn listen(
     }
     session.watch("Target.targetDestroyed", move |params| { if let Some(id) = params["targetId"].as_str() { closing.borrow_mut().remove(id); } });
     let p = publish.clone();
-    session.watch(CLOSED, move |_| p(&|page| { page.loading = false; page.error = Some("o Chromium fechou; feche e abra o navegador".into()); }));
+    session.watch(CLOSED, move |_| p(&|page| { page.loading = false; page.dialog = None; page.error = Some(crate::i18n::tr("browser_err_closed")); }));
     // A página caiu com o Chromium vivo: sem isto o painel congela no último quadro, calado.
     let fell: Rc<dyn Fn()> = {
         let (weak, p, dead) = (Rc::downgrade(session), publish.clone(), dead.clone());
@@ -504,7 +523,7 @@ fn listen(
             if dead.replace(true) { return; }
             eprintln!("[nav] a pagina caiu");
             if let Some(session) = weak.upgrade() { session.fail_pending(); }
-            p(&|page| { page.loading = false; page.error = Some("a pagina caiu; abra o endereco de novo".into()); });
+            p(&|page| { page.loading = false; page.dialog = None; page.error = Some(crate::i18n::tr("browser_err_crashed")); });
         })
     };
     let f = fell.clone();
@@ -538,20 +557,32 @@ impl Engine {
     pub fn evaluate(&self, expression: &str) { self.send("Runtime.evaluate", json!({"expression": expression})); }
 
     pub fn load(&self, url: &str) {
-        let (call, publish) = (self.session.call("Page.navigate", json!({"url": url})), self.publish.clone());
+        let (call, publish, target) = (self.session.call("Page.navigate", json!({"url": url})), self.publish.clone(), url.to_owned());
         self.executor.spawn(async move {
             // Falha de rede: o Chromium mostra a página de erro dele, e a barra o motivo.
+            // ABORTED = a página não saiu do lugar (download, 204, navegação trocada por outra); BLOCKED_BY_CLIENT já
+            // virou aviso no `Fetch.requestPaused`. Nenhum dos dois traz página de erro que limpe o erro depois.
             let error = match call.await {
-                Ok(r) => r["errorText"].as_str().filter(|e| !e.is_empty()).map(str::to_owned),
-                Err(e) => Some(e),
+                Ok(r) => r["errorText"].as_str().filter(|e| !e.is_empty() && !e.ends_with("ERR_ABORTED") && !e.ends_with("ERR_BLOCKED_BY_CLIENT"))
+                    .map(|e| crate::browser::model::load_error(e, &target)),
+                Err(e) => Some(crate::browser::model::load_error(&e, &target)),
             };
-            if let Some(error) = error { publish(&|page| page.error = Some(error.clone())); }
+            if let Some(error) = error { publish(&|page| { page.loading = false; page.error = Some(error.clone()); }); }
         }).detach();
     }
 
     pub fn back(&self) { self.history_step(-1); }
     pub fn forward(&self) { self.history_step(1); }
     pub fn reload(&self) { self.send("Page.reload", json!({})); }
+    pub fn stop(&self) { self.send("Page.stopLoading", json!({})); }
+
+    /// Responde o diálogo aberto; o `javascriptDialogClosed` tira a caixa do painel.
+    pub fn answer_dialog(&self, accept: bool, text: Option<&str>) -> impl std::future::Future<Output = Result<(), String>> + 'static + use<> {
+        let mut params = json!({"accept": accept});
+        if let Some(text) = text { params["promptText"] = text.into(); }
+        let call = self.session.call("Page.handleJavaScriptDialog", params);
+        async move { call.await.map(|_| ()) }
+    }
 
     fn history_step(&self, step: i64) {
         let (call, session) = (self.session.call("Page.getNavigationHistory", json!({})), Rc::downgrade(&self.session));
@@ -610,23 +641,33 @@ impl Engine {
         *lock(&self.surface.shown) = None;
     }
 
-    /// `at` relativo à origem da página, em px lógicos. Só o botão esquerdo.
-    pub fn pointer(&self, kind: Pointer, at: Point<Pixels>, clicks: usize) {
+    /// `at` relativo à origem da página, em px lógicos. Botão esquerdo, sem modificador.
+    pub fn pointer(&self, kind: Pointer, at: Point<Pixels>, clicks: usize) { self.mouse(kind, MouseButton::Left, at, clicks, &Modifiers::default()) }
+
+    /// Qualquer botão, com os modificadores. O `clickCount` da soltura repete o do aperto: sem ele o Chromium não
+    /// dispara `dblclick`. Arrasto só se acompanha com o esquerdo.
+    pub fn mouse(&self, kind: Pointer, button: MouseButton, at: Point<Pixels>, clicks: usize, modifiers: &Modifiers) {
         let (x, y) = (f32::from(at.x) as f64, f32::from(at.y) as f64);
-        let (kind, button, clicks) = match kind {
-            Pointer::Down => { self.pressed.set(true); ("mousePressed", "left", clicks.max(1)) }
-            Pointer::Up => { self.pressed.set(false); ("mouseReleased", "left", 1) }
-            Pointer::Move => ("mouseMoved", if self.pressed.get() { "left" } else { "none" }, 0),
+        let (name, bit) = match button { MouseButton::Right => ("right", 2), MouseButton::Middle => ("middle", 4), _ => ("left", 1) };
+        let left = name == "left";
+        let (kind, button, buttons, clicks) = match kind {
+            Pointer::Down => { if left { self.pressed.set(true) } ("mousePressed", name, bit, clicks.max(1)) }
+            Pointer::Up => { if left { self.pressed.set(false) } ("mouseReleased", name, 0, clicks.max(1)) }
+            Pointer::Move if self.pressed.get() => ("mouseMoved", "left", 1, 0),
+            Pointer::Move => ("mouseMoved", "none", 0, 0),
         };
-        let buttons = if self.pressed.get() { 1 } else { 0 };
-        self.send("Input.dispatchMouseEvent", json!({"type": kind, "x": x, "y": y, "button": button, "buttons": buttons, "clickCount": clicks}));
+        self.send("Input.dispatchMouseEvent", json!({"type": kind, "x": x, "y": y, "button": button, "buttons": buttons,
+            "clickCount": clicks, "modifiers": modifier_bits(modifiers)}));
     }
 
     /// `delta` em px lógicos; `delta.y > 0` avança a página. Quem chama já inverteu o sinal da GPUI.
-    pub fn wheel(&self, at: Point<Pixels>, delta: Point<Pixels>) {
+    pub fn wheel(&self, at: Point<Pixels>, delta: Point<Pixels>) { self.scroll(at, delta, &Modifiers::default()) }
+
+    /// Com modificadores: Ctrl+roda é zoom da página e Shift+roda rola de lado.
+    pub fn scroll(&self, at: Point<Pixels>, delta: Point<Pixels>, modifiers: &Modifiers) {
         self.send("Input.dispatchMouseEvent", json!({
             "type": "mouseWheel", "x": f32::from(at.x), "y": f32::from(at.y),
-            "deltaX": f32::from(delta.x), "deltaY": f32::from(delta.y), "button": "none",
+            "deltaX": f32::from(delta.x), "deltaY": f32::from(delta.y), "button": "none", "modifiers": modifier_bits(modifiers),
         }));
     }
 
@@ -693,9 +734,26 @@ impl Drop for Engine {
 
 /// Tecla da GPUI → `Input.dispatchKeyEvent`. Texto digitado vence, para "ç"/"ã" de tecla morta; tecla morta ainda
 /// compondo (sem texto) não vai à página.
+fn modifier_bits(m: &Modifiers) -> u8 {
+    [(m.alt, 1), (m.control, 2), (m.platform, 4), (m.shift, 8)].iter().filter(|(on, _)| *on).fold(0, |a, (_, b)| a | b)
+}
+
+/// `code` e `keyCode` da pontuação como no teclado americano, que é o que o Chromium reporta sem saber a tecla
+/// física: atalho de página que lê `e.code`/`e.keyCode` ("/" para buscar, "-" para diminuir) volta a funcionar.
+fn punctuation(c: char) -> Option<(&'static str, u32)> {
+    Some(match c {
+        ';' | ':' => ("Semicolon", 186), '=' | '+' => ("Equal", 187), ',' | '<' => ("Comma", 188), '-' | '_' => ("Minus", 189),
+        '.' | '>' => ("Period", 190), '/' | '?' => ("Slash", 191), '`' | '~' => ("Backquote", 192), '[' | '{' => ("BracketLeft", 219),
+        '\\' | '|' => ("Backslash", 220), ']' | '}' => ("BracketRight", 221), '\'' | '"' => ("Quote", 222),
+        '!' => ("Digit1", 49), '@' => ("Digit2", 50), '#' => ("Digit3", 51), '$' => ("Digit4", 52), '%' => ("Digit5", 53),
+        '^' => ("Digit6", 54), '&' => ("Digit7", 55), '*' => ("Digit8", 56), '(' => ("Digit9", 57), ')' => ("Digit0", 48),
+        _ => return None,
+    })
+}
+
 fn key_event(down: bool, keystroke: &Keystroke) -> Option<Value> {
     let m = &keystroke.modifiers;
-    let modifiers = [(m.alt, 1), (m.control, 2), (m.platform, 4), (m.shift, 8)].iter().filter(|(on, _)| *on).fold(0, |a, (_, b)| a | b);
+    let modifiers = modifier_bits(m);
     let typed = keystroke.key_char.as_deref().filter(|_| !m.control && !m.alt).and_then(single_char).filter(|c| !c.is_control());
     let named = match keystroke.key.as_str() {
         "enter" => Some("Enter"), "backspace" => Some("Backspace"), "delete" => Some("Delete"), "escape" => Some("Escape"),
@@ -708,14 +766,25 @@ fn key_event(down: bool, keystroke: &Keystroke) -> Option<Value> {
         crate::browser::preview_fmt::key_event(name)
     } else if let Some(c) = typed {
         let text = c.to_string();
-        let vk = if c.is_ascii_alphanumeric() { c.to_ascii_uppercase() as u32 } else if c == ' ' { 32 } else { 0 };
-        json!({"key": text, "text": text, "unmodifiedText": text, "windowsVirtualKeyCode": vk})
+        let upper = c.to_ascii_uppercase();
+        let (code, vk) = match c {
+            _ if upper.is_ascii_alphabetic() => (format!("Key{upper}"), upper as u32),
+            _ if c.is_ascii_digit() => (format!("Digit{c}"), c as u32),
+            ' ' => ("Space".into(), 32),
+            _ => punctuation(c).map_or((String::new(), 0), |(code, vk)| (code.into(), vk)),
+        };
+        json!({"key": text, "code": code, "text": text, "unmodifiedText": text, "windowsVirtualKeyCode": vk})
     } else if m.control || m.alt {
         // Ctrl/Alt + letra: atalho da página (Ctrl+A, Ctrl+Z), sem texto.
         let c = single_char(&keystroke.key)?;
         let upper = c.to_ascii_uppercase();
-        let code = if upper.is_ascii_alphabetic() { format!("Key{upper}") } else if upper.is_ascii_digit() { format!("Digit{upper}") } else { String::new() };
-        json!({"key": c.to_string(), "code": code, "windowsVirtualKeyCode": upper as u32})
+        // O próprio caractere como código virtual erra a pontuação: "." é 46, o Delete, e Ctrl+. apagava a palavra.
+        let (code, vk) = if upper.is_ascii_alphabetic() || upper.is_ascii_digit() {
+            (if upper.is_ascii_alphabetic() { format!("Key{upper}") } else { format!("Digit{upper}") }, upper as u32)
+        } else {
+            punctuation(c).map_or((String::new(), 0), |(code, vk)| (code.into(), vk))
+        };
+        json!({"key": c.to_string(), "code": code, "windowsVirtualKeyCode": vk})
     } else {
         return None;
     };

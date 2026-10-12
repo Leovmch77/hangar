@@ -81,6 +81,8 @@ pub fn args(bin: &Path, profile: &Path) -> Vec<String> {
         // Cookies cifrados com a chave fixa nos dois motores: pelo chaveiro do sistema cada um usa uma chave, e trocar de
         // motor nas configurações deslogaria tudo.
         "--password-store=basic".into(),
+        // `navigator.webdriver` ligado faz o Google recusar o login ("navegador pode não ser seguro").
+        "--disable-blink-features=AutomationControlled".into(),
     ];
     if !is_shell(bin) { args.insert(0, "--headless".into()); }
     args

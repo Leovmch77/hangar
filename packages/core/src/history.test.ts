@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ChatEvent } from './types';
-import { appendTail, hasSeam, mergeHistoryWithLive, mergeHistoryWithLiveRetiring, prependOlder, queuedMessages } from './history';
+import { appendTail, hasSeam, mergeHistoryWithLive, mergeHistoryWithLiveRetiring, prependOlder, queuedMessages, waitsInQueue } from './history';
 
 const ev = (id: string): ChatEvent => ({ kind: 'user_msg', id, text: id });
 const ids = (evs: ChatEvent[] | null) => (evs ?? []).map((e) => e.id);
@@ -13,6 +13,15 @@ it('Codex conta só mensagens ainda não encaminhadas, preservando Kimi e o lega
   expect(ids(queuedMessages(events, 'kimi'))).toEqual(['queued-legado', 'queued-enviada', 'queued-pendente']);
   expect(ids(queuedMessages(events, 'claude', true))).toEqual(['queued-legado', 'queued-pendente']);
   expect(events).toHaveLength(6);
+});
+
+it('sem terminal, a bolha já entregue ao processo não espera na fila; com terminal ainda espera o turno', () => {
+  const entregue: ChatEvent = { ...ev('queued-x'), queued_delivered: true };
+  expect(waitsInQueue(entregue, 'claude', true)).toBe(false);
+  expect(waitsInQueue(entregue, 'codex')).toBe(false);
+  expect(waitsInQueue(entregue, 'claude')).toBe(true);
+  expect(waitsInQueue({ ...ev('queued-y'), queued_delivered: false }, 'claude', true)).toBe(true);
+  expect(waitsInQueue(ev('real'), 'claude')).toBe(false);
 });
 
 describe('prependOlder', () => {

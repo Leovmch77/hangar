@@ -408,7 +408,7 @@ test('(e) user_msg da fila (queued-) sai quando o real chega com o mesmo texto',
   expect(events[0]?.id).toBe('a:9');
 });
 
-test('(f) filaCount conta pending + queued-* e zera quando o real chega', async () => {
+test('(f) filaCount conta só queued-* (o eco em voo não é fila) e zera quando o real chega', async () => {
   historyResponses = [[]];
   const chat = chatStore('srv1', 'sess');
   chat.retain();
@@ -419,9 +419,10 @@ test('(f) filaCount conta pending + queued-* e zera quando o real chega', async 
   const p = chat.send('oi tudo bem');
   // eco local já entrou
   expect(chat.use.getState().pending).toHaveLength(1);
-  expect(filaCount(chat.use.getState(), 'kimi')).toBe(1);
-  // Claude com terminal também conta: o chip manda a fila da TUI com ctrl+x ctrl+s, como no PWA.
-  expect(filaCount(chat.use.getState(), 'claude')).toBe(1);
+  // Sem estado ainda: o eco nasce atenuado, mas o POST em voo não acende o chip.
+  expect(chat.use.getState().pending[0].solid).toBe(false);
+  expect(filaCount(chat.use.getState(), 'kimi')).toBe(0);
+  expect(filaCount(chat.use.getState(), 'claude')).toBe(0);
   // sintético queued-* chega com mesmo texto -> pending reconciliado, queued entra
   // restaura fetch falso de history pra não quebrar o SSE trigger, mas mantém send mock
   // o trigger não depende de fetch, só do store

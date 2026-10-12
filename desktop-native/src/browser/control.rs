@@ -14,6 +14,26 @@ pub trait Page {
 
 pub enum Reply { Text(String), Png(Vec<u8>) }
 
+/// Agente do layout de desktop. O Chromium do Linux roda headless e se apresenta como "HeadlessChrome", que Google,
+/// GitHub e afins recusam no login: vira o de um Chrome comum, com as marcas dos client hints, que a troca sem
+/// metadados apagaria. Os outros motores voltam ao próprio agente (`""`).
+fn desktop_agent(version: &Value) -> Value {
+    let agent = version["userAgent"].as_str().unwrap_or_default();
+    if !agent.contains("HeadlessChrome") { return json!({"userAgent": ""}); }
+    let full = version["product"].as_str().unwrap_or_default().rsplit('/').next().unwrap_or_default();
+    let major = full.split('.').next().unwrap_or_default();
+    let brands = |v: &str, filler: &str| json!([{"brand": "Not;A=Brand", "version": filler},
+        {"brand": "Chromium", "version": v}, {"brand": "Google Chrome", "version": v}]);
+    json!({
+        "userAgent": agent.replace("HeadlessChrome", "Chrome"),
+        "userAgentMetadata": {"brands": brands(major, "99"), "fullVersionList": brands(full, "99.0.0.0"), "fullVersion": full,
+            "platform": "Linux", "platformVersion": "", "architecture": "x86", "bitness": "64", "model": "", "mobile": false},
+    })
+}
+
+/// O que o agente está fazendo agora, para a faixa do painel. `target` é o nome do alvo na árvore da página ou a tecla.
+pub struct Activity { pub verb: String, pub target: Option<String> }
+
 pub const EVENTS: [&str; 12] = ["Runtime.consoleAPICalled", "Runtime.exceptionThrown", "Log.entryAdded", "Network.requestWillBeSent",
     "Network.responseReceived", "Network.loadingFinished", "Network.loadingFailed", "Page.frameNavigated", "Page.navigatedWithinDocument",
     "Page.javascriptDialogOpening", "Page.javascriptDialogClosed", "Page.downloadWillBegin"];
@@ -31,6 +51,15 @@ const FRAME: &str = "new Promise(r=>{requestAnimationFrame(()=>requestAnimationF
 /// '' = dá para digitar; senão, o que está com foco.
 const FOCUS: &str = "(()=>{const a=document.activeElement;if(!a||a===document.body)return 'nada';const t=a.tagName.toLowerCase();const ok=a.isContentEditable||t==='textarea'||(t==='input'&&!/^(button|submit|reset|checkbox|radio|file|image|range|color)$/i.test(a.type||''));return ok?'':t+(a.type?'['+a.type+']':'')})()";
 const PROBE_READ: &str = "(typeof window.__hangarSonda===\"undefined\"?2:window.__hangarSonda)";
+/// Verbos que mudam a página: pausado, só estes são recusados; ler continua livre.
+const ACTING: [&str; 12] = ["click", "fill", "type", "press", "hover", "eval", "layout", "tema", "goto", "back", "reload", "dialog"];
+/// Com diálogo aberto a página não roda script: só estes respondem sem ele.
+const WITH_DIALOG: [&str; 3] = ["url", "estado", "console"];
+pub const PAUSED: &str = "erro: o usuario pausou o navegador; espere ele clicar em Retomar no painel e tente de novo";
+/// Espera da primeira ação depois de a faixa do agente ter sumido: ela volta e encolhe a página, e o alvo tem de ser
+/// medido depois disso. Com a faixa já na tela, nenhuma espera.
+const SETTLE_MS: u64 = 150;
+
 
 struct State {
     refs: HashMap<String, i64>,
@@ -63,6 +92,20 @@ pub struct Controller<P: Page> {
     turn: Mutex<()>,
     /// Último `hidden` pedido: quem pega o `turn` aplica este, não o seu, porque a fila do `turn` não garante ordem.
     wanted_hidden: Cell<bool>,
+    paused: Cell<bool>,
+    on_activity: RefCell<Option<Box<dyn Fn(Activity)>>>,
+    on_layout: RefCell<Option<Box<dyn Fn(Option<(u32, u32)>)>>>,
+    on_page_error: RefCell<Option<Box<dyn Fn(Option<String>)>>>,
+    /// Diálogo aberto na página (tipo, mensagem), vindo do motor pelo painel.
+    dialog_open: RefCell<Option<(String, String, String)>>,
+    /// A faixa do agente está na tela (o painel avisa); o verbo que a faz aparecer espera `SETTLE_MS`.
+    strip_shown: Cell<bool>,
+    settle: Cell<bool>,
+    /// Resposta mandada, fechamento ainda não visto: o próximo verbo espera um instante por ele.
+    dialog_answered: Cell<bool>,
+    /// Acorda o verbo em andamento quando um diálogo abre: o clique que o abriu só voltaria depois da resposta.
+    dialog_signal: RefCell<Option<futures::channel::oneshot::Sender<()>>>,
+    on_dialog_answer: RefCell<Option<Box<dyn Fn(bool, Option<String>, futures::channel::oneshot::Sender<Result<(), String>>)>>>,
 }
 
 fn push(list: &mut VecDeque<String>, line: String) {
@@ -86,7 +129,7 @@ fn without_query(url: &str) -> &str { url.split(['?', '#']).next().unwrap_or(url
 
 impl<P: Page> Controller<P> {
     pub fn new(page: P, hidden: bool) -> Self {
-        Self { page, turn: Mutex::new(()), wanted_hidden: Cell::new(hidden), state: RefCell::new(State { refs: HashMap::new(), console: VecDeque::new(),
+        Self { page, turn: Mutex::new(()), wanted_hidden: Cell::new(hidden), paused: Cell::new(false), on_activity: RefCell::new(None), on_layout: RefCell::new(None), on_page_error: RefCell::new(None), dialog_open: RefCell::new(None), strip_shown: Cell::new(false), settle: Cell::new(false), dialog_answered: Cell::new(false), dialog_signal: RefCell::new(None), on_dialog_answer: RefCell::new(None), state: RefCell::new(State { refs: HashMap::new(), console: VecDeque::new(),
             network: VecDeque::new(), inflight: HashSet::new(), requests: HashMap::new(), dialog: None, last_network: Instant::now(), noise: HashSet::new(), theme: "sistema", layout: Layout::Desktop,
             hidden: false, scale: None, navigated: false, navs: 0, enabled: HashSet::new() }) }
     }
@@ -116,6 +159,71 @@ impl<P: Page> Controller<P> {
         if let Err(e) = self.apply_layout(layout).await { eprintln!("[nav] layout nao aplicado: {e}"); }
     }
 
+    /// A página caiu e voltou no mesmo alvo: os domínios ligados morreram com ela, e o próximo verbo os liga de novo.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    pub fn reset_domains(&self) { self.state.borrow_mut().enabled.clear(); }
+
+    /// Pausado pelo usuário: os verbos de `ACTING` voltam com `PAUSED` até ele retomar.
+    pub fn set_paused(&self, paused: bool) { self.paused.set(paused); }
+
+    pub fn on_activity(&self, f: impl Fn(Activity) + 'static) { *self.on_activity.borrow_mut() = Some(Box::new(f)); }
+
+    /// Tela emulada (`layout mobile` ou `<l> <a>`), para o painel desenhá-la na proporção certa; `None` = a do painel.
+    pub fn on_layout(&self, f: impl Fn(Option<(u32, u32)>) + 'static) { *self.on_layout.borrow_mut() = Some(Box::new(f)); }
+
+    pub fn set_strip_shown(&self, shown: bool) { self.strip_shown.set(shown); }
+
+    /// O motor viu um diálogo abrir (`Some`) ou fechar (`None`).
+    /// `(tipo, mensagem, texto sugerido do prompt)`.
+    pub fn set_dialog(&self, dialog: Option<(String, String, String)>) {
+        let opened = dialog.is_some();
+        *self.dialog_open.borrow_mut() = dialog;
+        self.dialog_answered.set(false);
+        if opened && let Some(signal) = self.dialog_signal.borrow_mut().take() { let _ = signal.send(()); }
+    }
+
+    /// Quem responde o diálogo de verdade (o motor, pelo painel): o verbo `dialog` só repassa.
+    pub fn on_dialog_answer(&self, f: impl Fn(bool, Option<String>, futures::channel::oneshot::Sender<Result<(), String>>) + 'static) {
+        *self.on_dialog_answer.borrow_mut() = Some(Box::new(f));
+    }
+
+    fn dialog_hint(kind: &str) -> &'static str {
+        if kind == "prompt" { "dialog accept <texto> | dialog accept | dialog dismiss" } else if kind == "alert" { "dialog accept" } else { "dialog accept | dialog dismiss" }
+    }
+
+    async fn answer_dialog(&self, args: &[String]) -> String {
+        let Some((kind, _, default)) = self.dialog_open.borrow().clone() else { return "erro: dialog: nenhum dialogo aberto na pagina".into() };
+        let accept = match args.first().map(String::as_str) {
+            Some("accept" | "aceitar" | "ok") => true,
+            Some("dismiss" | "recusar" | "cancel") => false,
+            _ => return format!("erro: dialog: use {}", Self::dialog_hint(&kind)),
+        };
+        // Sem texto, o sugerido pela página, como no OK da caixa do painel.
+        let text = (accept && kind == "prompt").then(|| if args.len() > 1 { args[1..].join(" ") } else { default });
+        // O gancho só põe a resposta no canal do painel: chamá-lo com o empréstimo aberto não reentra.
+        // O diálogo só some com o fechamento visto pelo motor: resposta que falhou deixa ele aberto para outra tentativa.
+        let (done, result) = futures::channel::oneshot::channel();
+        match self.on_dialog_answer.borrow().as_ref() { Some(f) => f(accept, text, done), None => return "erro: dialog: o painel nao respondeu".into() }
+        // O ok só depois de o motor confirmar: aceite que falhou vira recusa na página, e o agente precisa saber.
+        match self.within(5000, result).await {
+            Some(Ok(Ok(()))) => {
+                // Só com a resposta aceita o próximo verbo espera o fechamento; com erro o diálogo segue aberto.
+                self.dialog_answered.set(true);
+                format!("ok: dialog {}", if accept { "accept" } else { "dismiss" })
+            }
+            Some(Ok(Err(e))) => format!("erro: dialog: a pagina nao recebeu a resposta: {e}"),
+            Some(Err(_)) => "erro: dialog: o painel do navegador fechou antes de responder".into(),
+            None => "erro: dialog: o navegador nao confirmou a resposta em 5 s".into(),
+        }
+    }
+
+    /// Erro da página para o selo do painel (`Some`), ou `None` quando ela navega e a contagem recomeça.
+    pub fn on_page_error(&self, f: impl Fn(Option<String>) + 'static) { *self.on_page_error.borrow_mut() = Some(Box::new(f)); }
+
+    fn report(&self, verb: &str, target: Option<String>) {
+        if let Some(f) = self.on_activity.borrow().as_ref() { f(Activity { verb: verb.into(), target }); }
+    }
+
     /// O painel apareceu numa janela com esta escala: a página desktop passa a desenhar nela, sem mexer no tamanho.
     pub async fn set_scale(&self, scale: f32) {
         let _turn = self.turn.lock().await;
@@ -124,6 +232,23 @@ impl<P: Page> Controller<P> {
     }
 
     pub fn on_event(&self, method: &str, p: &Value) {
+        self.log_event(method, p);
+        // Depois do registro, com o estado solto: quem ouve pode pedir algo ao controlador.
+        let error = match method {
+            "Runtime.consoleAPICalled" if matches!(p["type"].as_str(), Some("error" | "assert")) => self.state.borrow().console.back().cloned().map(Some),
+            "Runtime.exceptionThrown" => self.state.borrow().console.back().cloned().map(Some),
+            // A linha do registro não leva o endereço: para a pessoa, "falhou ao carregar" sem saber o quê não ajuda.
+            "Log.entryAdded" if p["entry"]["level"] == "error" => Some(Some(match p["entry"]["url"].as_str().filter(|u| !u.is_empty()) {
+                Some(url) => format!("{} — {url}", p["entry"]["text"].as_str().unwrap_or("")),
+                None => p["entry"]["text"].as_str().unwrap_or("").to_owned(),
+            })),
+            "Page.frameNavigated" if p["frame"]["parentId"].is_null() => Some(None),
+            _ => None,
+        };
+        if let (Some(error), Some(f)) = (error, self.on_page_error.borrow().as_ref()) { f(error); }
+    }
+
+    fn log_event(&self, method: &str, p: &Value) {
         let mut s = self.state.borrow_mut();
         match method {
             "Runtime.consoleAPICalled" => {
@@ -189,11 +314,34 @@ impl<P: Page> Controller<P> {
     }
 
     pub async fn run(&self, verb: &str, args: &[String]) -> Reply {
+        if self.paused.get() && ACTING.contains(&verb) { return Reply::Text(PAUSED.into()); }
+        // Antes da vez: o verbo que segura a vez pode estar parado justamente no diálogo.
+        if verb == "dialog" { return Reply::Text(self.answer_dialog(args).await); }
         let _turn = self.turn.lock().await;
-        self.enable_base().await;
-        self.after_navigation().await;
+        if self.paused.get() && ACTING.contains(&verb) { return Reply::Text(PAUSED.into()); }
+        for _ in 0..20 {
+            if !(self.dialog_answered.get() && self.dialog_open.borrow().is_some()) { break; }
+            self.page.sleep(50).await;
+        }
+        let open = self.dialog_open.borrow().is_some();
+        if let Some((kind, message, _)) = self.dialog_open.borrow().clone() && !WITH_DIALOG.contains(&verb) {
+            return Reply::Text(format!("erro: a pagina esta com um dialogo {kind} aberto: “{message}”. Responda antes: {}", Self::dialog_hint(&kind)));
+        }
+        let (signal, opened) = futures::channel::oneshot::channel();
+        *self.dialog_signal.borrow_mut() = Some(signal);
         let arg = |i: usize| args.get(i).map(String::as_str).unwrap_or("");
-        let result = match verb {
+        // Anuncia antes de medir: a faixa que aparece muda a altura da página. Verbo com ref repete com o nome do alvo.
+        if verb != "estado" {
+            self.settle.set(!self.strip_shown.get());
+            self.report(verb, (verb == "press").then(|| arg(0).to_owned()));
+        }
+        let work = async {
+        // Com diálogo aberto a página não responde: nada que vá a ela antes do verbo.
+        if !open {
+            self.enable_base().await;
+            self.after_navigation().await;
+        }
+        match verb {
             "snapshot" => self.snapshot_verb(args).await.map(Reply::Text),
             "click" => self.click(arg(0)).await.map(Reply::Text),
             "fill" => self.fill(arg(0), arg(1)).await.map(Reply::Text),
@@ -202,7 +350,9 @@ impl<P: Page> Controller<P> {
             "hover" => self.hover(arg(0)).await.map(Reply::Text),
             "wait" => self.wait(args).await.map(Reply::Text),
             "eval" => self.eval(arg(0)).await.map(Reply::Text),
-            "url" => self.eval("location.href").await.map(Reply::Text),
+            // Pelo histórico do navegador, não por JS: responde mesmo com a página presa (diálogo aberto, laço de script).
+            "url" => self.current_url().await.map(Reply::Text),
+            "estado" => Ok(Reply::Text(if self.paused.get() { "pausado".into() } else { "livre".into() })),
             "text" => self.value("document.body.innerText").await.map(|v| Reply::Text(v.as_str().unwrap_or("").to_owned())),
             "tema" => self.theme(arg(0)).await.map(Reply::Text),
             "layout" => self.layout(args).await.map(Reply::Text),
@@ -214,7 +364,19 @@ impl<P: Page> Controller<P> {
             "reload" => self.reload().await.map(Reply::Text),
             "tab-list" | "tab-new" | "tab-switch" | "tab-close" => Ok(Reply::Text("erro: o app nativo ainda nao tem abas: e um navegador por sessao".into())),
             _ => Ok(Reply::Text(format!("erro: verbo desconhecido: {verb}"))),
+        }
         };
+        // Diálogo aberto no meio do verbo (o clique em "Excluir"): a página para até a resposta, e o verbo volta agora.
+        let opened = async { if opened.await.is_err() { std::future::pending::<()>().await } };
+        let result = match select(std::pin::pin!(work), std::pin::pin!(opened)).await {
+            Either::Left((result, _)) => result,
+            Either::Right(_) => {
+                let _ = self.within(500, self.unmark()).await;
+                let (kind, message, _) = self.dialog_open.borrow().clone().unwrap_or_default();
+                Ok(Reply::Text(format!("ok: {verb} parou: a pagina abriu um dialogo {kind}: “{message}”. Responda com: {}", Self::dialog_hint(&kind))))
+            }
+        };
+        self.dialog_signal.borrow_mut().take();
         result.unwrap_or_else(|e| Reply::Text(format!("erro: {e}")))
     }
 
@@ -253,6 +415,15 @@ impl<P: Page> Controller<P> {
     }
 
     /// Árvore inteira (`wait @eN` usa só as refs).
+    async fn current_url(&self) -> Result<String, String> {
+        let h = self.page.call("Page.getNavigationHistory", json!({})).await?;
+        let index = h["currentIndex"].as_u64().unwrap_or(0) as usize;
+        match h["entries"].get(index).and_then(|e| e["url"].as_str()) {
+            Some(url) => Ok(format!("ok: {}", Value::String(url.to_owned()))),
+            None => self.eval("location.href").await,
+        }
+    }
+
     async fn snapshot(&self) -> Result<Vec<String>, String> { self.tree(false).await }
 
     async fn tree(&self, refs_only: bool) -> Result<Vec<String>, String> {
@@ -291,6 +462,41 @@ impl<P: Page> Controller<P> {
         Ok((q.len() >= 6).then(|| (((q[0] + q[4]) / 2.).round() as i64, ((q[1] + q[5]) / 2.).round() as i64)))
     }
 
+    /// Anuncia a ação com o nome do alvo e, com a página à vista, realça o alvo sem esperar: o contorno fica até meio
+    /// segundo depois da ação (o painel o apaga). O realce é do próprio Chromium (fora do DOM): não entra no snapshot
+    /// nem segura o clique, e no Windows aparece dentro do WebView2. Roda antes de `center`.
+    async fn mark(&self, verb: &str, r: &str) {
+        let Some(id) = self.state.borrow().refs.get(r).copied() else { return };
+        let _ = self.page.call("DOM.scrollIntoViewIfNeeded", json!({"backendNodeId": id})).await;
+        let name = self.page.call("Accessibility.getPartialAXTree", json!({"backendNodeId": id, "fetchRelatives": false})).await.ok()
+            .and_then(|t| t["nodes"].as_array()?.iter().find_map(|n| n["name"]["value"].as_str().map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned)));
+        self.report(verb, name);
+        if self.state.borrow().hidden { return; }
+        let color = |a: f64| json!({"r": 124, "g": 135, "b": 232, "a": a});
+        let shown = async {
+            self.enable("DOM").await?;
+            self.enable("Overlay").await?;
+            self.page.call("Overlay.highlightNode", json!({"backendNodeId": id,
+                "highlightConfig": {"borderColor": color(1.), "contentColor": color(0.18), "showInfo": false}})).await
+        };
+        match shown.await {
+            Ok(_) if self.settle.get() => self.page.sleep(SETTLE_MS).await,
+            Ok(_) => {}
+            Err(e) => eprintln!("[nav] realce do alvo falhou: {e}"),
+        }
+    }
+
+    /// `center` depois do realce: sem alvo medido, o realce sai antes de o erro subir.
+    async fn measured(&self, r: &str) -> Result<Option<(i64, i64)>, String> {
+        let c = self.center(r).await;
+        if !matches!(c, Ok(Some(_))) { self.unmark().await; }
+        c
+    }
+
+    async fn unmark(&self) {
+        if self.state.borrow().enabled.contains("Overlay") { let _ = self.page.call("Overlay.hideHighlight", json!({})).await; }
+    }
+
     /// Ouvinte em captura prova que o EVENTO chegou ao documento. `pointerdown` antes de `mousedown`: um
     /// `preventDefault` no primeiro suprime o segundo (combobox do Radix).
     async fn arrived(&self, types: &[&str], fire: impl AsyncFn() -> Result<(), String>) -> Result<bool, String> {
@@ -308,13 +514,18 @@ impl<P: Page> Controller<P> {
         }
     }
 
-    async fn click(&self, r: &str) -> Result<String, String> {
-        let Some((x, y)) = self.center(r).await? else { return Ok(format!("erro: ref {r} nao existe (rode snapshot de novo)")) };
+    async fn click(&self, r: &str) -> Result<String, String> { self.click_as("click", r).await }
+
+    async fn click_as(&self, verb: &str, r: &str) -> Result<String, String> {
+        self.mark(verb, r).await;
+        if self.paused.get() { self.unmark().await; return Ok(PAUSED.into()); }
+        let Some((x, y)) = self.measured(r).await? else { return Ok(format!("erro: ref {r} nao existe (rode snapshot de novo)")) };
         let base = |t: &str| json!({"type": t, "x": x, "y": y, "button": "left", "clickCount": 1});
         let ok = self.arrived(&["pointerdown", "mousedown"], async || {
             self.page.call("Input.dispatchMouseEvent", base("mousePressed")).await?;
             self.page.call("Input.dispatchMouseEvent", base("mouseReleased")).await.map(|_| ())
-        }).await?;
+        }).await;
+        let ok = ok?;
         Ok(if ok { format!("ok: click {r}") } else { format!("erro: click {r}: o evento nao chegou na pagina (aba escondida sem quadro) — tire um shot e repita") })
     }
 
@@ -324,8 +535,10 @@ impl<P: Page> Controller<P> {
     }
 
     async fn fill(&self, r: &str, text: &str) -> Result<String, String> {
-        let clicked = self.click(r).await?;
+        let clicked = self.click_as("fill", r).await?;
         if clicked.starts_with("erro:") { return Ok(clicked); }
+        // Assumir durante o clique: a pessoa pode já estar digitando no campo.
+        if self.paused.get() { return Ok(PAUSED.into()); }
         if let Some(focus) = self.not_editable().await? {
             return Ok(format!("erro: fill {r}: o clique nao deixou um campo de texto com foco (foco em {focus}) — a ref e mesmo um campo? rode snapshot"));
         }
@@ -361,7 +574,9 @@ impl<P: Page> Controller<P> {
     }
 
     async fn hover(&self, r: &str) -> Result<String, String> {
-        let Some((x, y)) = self.center(r).await? else { return Ok(format!("erro: ref {r} nao existe (rode snapshot de novo)")) };
+        self.mark("hover", r).await;
+        if self.paused.get() { self.unmark().await; return Ok(PAUSED.into()); }
+        let Some((x, y)) = self.measured(r).await? else { return Ok(format!("erro: ref {r} nao existe (rode snapshot de novo)")) };
         self.page.call("Input.dispatchMouseEvent", json!({"type": "mouseMoved", "x": x, "y": y})).await?;
         self.frame().await;
         Ok(format!("ok: hover {r}"))
@@ -505,7 +720,12 @@ impl<P: Page> Controller<P> {
             return Ok(());
         }
         self.page.call("Emulation.setTouchEmulationEnabled", json!({"enabled": false})).await?;
-        self.page.call("Emulation.setUserAgentOverride", json!({"userAgent": ""})).await?;
+        // Sem troca o Chromium do Linux se apresenta como "HeadlessChrome", e Google, GitHub e afins recusam o login.
+        let version = self.page.call("Browser.getVersion", json!({})).await.unwrap_or_else(|e| {
+            eprintln!("[nav] Browser.getVersion falhou ({e}): o User-Agent fica o do Chromium sem janela");
+            Default::default()
+        });
+        self.page.call("Emulation.setUserAgentOverride", desktop_agent(&version)).await?;
         match layout {
             Layout::Custom(w, h) => self.page.call("Emulation.setDeviceMetricsOverride", metrics(w, h, 1., false)).await?,
             _ if self.state.borrow().hidden => self.page.call("Emulation.setDeviceMetricsOverride", metrics(HIDDEN_VIEWPORT.0, HIDDEN_VIEWPORT.1, 1., false)).await?,
@@ -529,6 +749,8 @@ impl<P: Page> Controller<P> {
             return Ok(format!("erro: layout {}: {e}", args.join(" ")));
         }
         self.state.borrow_mut().layout = wanted;
+        let screen = match wanted { Layout::Mobile => Some((390, 844)), Layout::Custom(w, h) => Some((w, h)), Layout::Desktop => None };
+        if let Some(f) = self.on_layout.borrow().as_ref() { f(screen); }
         Ok(format!("layout: {}", wanted.label()))
     }
 

@@ -50,7 +50,7 @@ const WAIT:Duration=Duration::from_secs(10);
 /// Processo do teste que morre junto com ele, inclusive quando uma asserção falha antes do fim.
 struct KillOnDrop(std::process::Child);
 impl Drop for KillOnDrop {fn drop(&mut self){let _=self.0.kill();let _=self.0.wait();}}
-struct Fixture { _dir:tempfile::TempDir,target:TerminalTarget,policy:PolicyClient,io:Arc<Io>, mux:Arc<Mutex<Vec<String>>>, idle:Arc<std::sync::atomic::AtomicBool>, ready:Arc<std::sync::atomic::AtomicBool>, generation:Arc<AtomicU64>, native:Arc<std::sync::atomic::AtomicBool>, control:Arc<Mutex<Value>>, unknown:Arc<std::sync::atomic::AtomicBool>, focus_plugin:Arc<std::sync::atomic::AtomicBool>, calls:Arc<Mutex<Vec<Value>>>,server:tokio::task::JoinHandle<()> }
+struct Fixture { _dir:tempfile::TempDir,target:TerminalTarget,policy:PolicyClient,io:Arc<Io>, mux:Arc<Mutex<Vec<String>>>, idle:Arc<std::sync::atomic::AtomicBool>, ready:Arc<std::sync::atomic::AtomicBool>, generation:Arc<AtomicU64>, native:Arc<std::sync::atomic::AtomicBool>, control:Arc<Mutex<Value>>, unknown:Arc<std::sync::atomic::AtomicBool>, focus_plugin:Arc<std::sync::atomic::AtomicBool>, calls:Arc<Mutex<Vec<Value>>>, projection_at_facts:Arc<Mutex<Vec<String>>>,server:tokio::task::JoinHandle<()> }
 impl Fixture {
     async fn new()->Self {
         let dir=tempfile::tempdir().unwrap(); let io=Arc::new(Io::new()); let conversation=io.conversation.clone();
@@ -62,14 +62,16 @@ impl Fixture {
         let idle=Arc::new(std::sync::atomic::AtomicBool::new(true)); let ready=Arc::new(std::sync::atomic::AtomicBool::new(true)); let unknown=Arc::new(std::sync::atomic::AtomicBool::new(false)); let focus_plugin=Arc::new(std::sync::atomic::AtomicBool::new(false)); let calls=Arc::new(Mutex::new(vec![]));
         let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap(); let address=listener.local_addr().unwrap(); let t0=std::time::Instant::now();
         let state_path=target.state_path.clone();
+        let projection_at_facts=Arc::new(Mutex::new(vec![])); let (seen_projection,projection_path)=(projection_at_facts.clone(),target.projection_dir.join("session.jsonl"));
         let (i,r,u,c,g,control_reply,n)=(idle.clone(),ready.clone(),unknown.clone(),calls.clone(),generation.clone(),control.clone(),native.clone());
         let (focus_reply,focus_io)=(focus_plugin.clone(),io.clone());
-        let router=axum::Router::new().route("/internal/runtime/policy",axum::routing::post(move |body:String| {let (i,r,u,c,mut b,path,g,control_reply,n,conversation,mux)=(i.clone(),r.clone(),u.clone(),c.clone(),binding.clone(),state_path.clone(),g.clone(),control_reply.clone(),n.clone(),conversation.clone(),server_mux.clone()); let (focus_reply,focus_io)=(focus_reply.clone(),focus_io.clone()); async move {
+        let router=axum::Router::new().route("/internal/runtime/policy",axum::routing::post(move |body:String| {let (i,r,u,c,mut b,path,g,control_reply,n,conversation,mux)=(i.clone(),r.clone(),u.clone(),c.clone(),binding.clone(),state_path.clone(),g.clone(),control_reply.clone(),n.clone(),conversation.clone(),server_mux.clone()); let (focus_reply,focus_io)=(focus_reply.clone(),focus_io.clone()); let (seen_projection,projection_path)=(seen_projection.clone(),projection_path.clone()); async move {
             let v:Value=serde_json::from_str(&body).unwrap();
             let state:Value=serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
             let phase=&state["operations"][v["phase_id"].as_str().unwrap()];
             // Leitura de fatos não tem efeito: não regrava o diário. As demais políticas, sim.
-            if v["kind"]=="terminal_facts" {assert!(phase.is_null(),"leitura de fatos passou pelo diário");}
+            if v["kind"]=="terminal_facts" {assert!(phase.is_null(),"leitura de fatos passou pelo diário");
+                seen_projection.lock().unwrap().push(std::fs::read_to_string(&projection_path).unwrap_or_default());}
             else {
                 assert_eq!(phase["status"],"dispatching");
                 assert_eq!(phase["payload"],json!({"kind":v["kind"],"request_id":v["request_id"],"payload":v["payload"]}));
@@ -87,7 +89,7 @@ impl Fixture {
             ([("content-type","application/json")],json!({"ok":true,"data":data}).to_string())
         }}));
         let server=tokio::spawn(async move {axum::serve(listener,router).await.unwrap()});
-        Self {_dir:dir,target,policy:PolicyClient::new(address,"test".into(),"instance".into()),io,mux,idle,ready,generation,native,control,unknown,focus_plugin,calls,server}
+        Self {_dir:dir,target,policy:PolicyClient::new(address,"test".into(),"instance".into()),io,mux,idle,ready,generation,native,control,unknown,focus_plugin,calls,projection_at_facts,server}
     }
     fn start(&self)->hangar_server::runtime::terminal::TerminalHandle {
         self.start_with_events(broadcast::channel(128).0)
@@ -1353,5 +1355,76 @@ async fn each_mods_hold_checks_the_pane_again() {
         assert!(matches!(h.pane(PaneOp::Screen,far()).await.unwrap(),PaneReply::Screen(_)));
     }
     assert_eq!(checks()-before,2,"uma conferência por reserva");
+    h.stop().await.unwrap();
+}
+
+fn projection(f:&Fixture)->Vec<Value> {
+    std::fs::read_to_string(f.target.projection_dir.join("session.jsonl")).unwrap_or_default().lines().map(|l|serde_json::from_str(l).unwrap()).collect()
+}
+
+#[tokio::test]
+async fn direct_send_publishes_row_only_once_delivered() {
+    // Em idle a linha não aparece na vista enquanto os fatos são lidos: a primeira versão publicada já vem entregue.
+    let f=Fixture::new().await; let h=f.start();
+    assert_eq!(h.command(f.command("direct","Olá")).await.unwrap().disposition,hangar_server::runtime::protocol::Disposition::Accepted);
+    let seen=f.projection_at_facts.lock().unwrap().clone();
+    // A primeira leitura de fatos é a do `execute`, entre a gravação da linha e o despacho.
+    assert!(!seen.is_empty() && !seen[0].contains("\"direct\""),"vista publicada antes do despacho: {seen:?}");
+    let rows=projection(&f);
+    assert_eq!(rows.len(),1); assert_eq!(rows[0]["id"],"direct"); assert_eq!(rows[0]["delivered"],true);
+    h.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn deferred_send_publishes_queued_row() {
+    let f=Fixture::new().await; f.ready.store(false,std::sync::atomic::Ordering::Release); let h=f.start();
+    assert_eq!(h.command(f.command("wait","Olá")).await.unwrap().disposition,hangar_server::runtime::protocol::Disposition::Deferred);
+    let rows=projection(&f);
+    assert_eq!(rows.len(),1); assert_eq!(rows[0]["id"],"wait"); assert_eq!(rows[0]["delivered"],false);
+    h.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn held_projection_is_restored_on_restart() {
+    // Queda entre a gravação e o despacho: a linha está no diário e a abertura seguinte a publica.
+    let f=Fixture::new().await;
+    let store=Store::open(&f.target.state_path,&f.target.projection_dir,queue::State::new("key",1,"session",vec![])).unwrap();
+    let mut store=store;
+    store.exec_held(1,"held",ClockSample {monotonic_s:0.0,epoch_s:2.0},Action::Append {text:"Olá".into(),delivered:false,ts:None,pre_transcript:false,entry_id:Some("held".into())},true).unwrap();
+    assert!(projection(&f).is_empty());
+    drop(store);
+    Store::open(&f.target.state_path,&f.target.projection_dir,queue::State::new("key",1,"session",vec![])).unwrap();
+    let rows=projection(&f); assert_eq!(rows.len(),1); assert_eq!(rows[0]["delivered"],false);
+}
+
+#[tokio::test]
+async fn new_message_waits_behind_older_deferred_row() {
+    let f=Fixture::new().await; f.ready.store(false,std::sync::atomic::Ordering::Release); let h=f.start();
+    let first=h.command(f.command("A","Primeira")).await.unwrap();
+    assert_eq!(first.disposition,hangar_server::runtime::protocol::Disposition::Deferred); assert!(first.payload["code"].is_null());
+    let second=h.command(f.command("B","Segunda")).await.unwrap();
+    assert_eq!(second.disposition,hangar_server::runtime::protocol::Disposition::Deferred);
+    assert_eq!(second.payload["code"],"queue_ahead"); assert_eq!(second.payload["queued"],true);
+    f.ready.store(true,std::sync::atomic::Ordering::Release);
+    let typed=||->Vec<String> {f.io.calls.lock().unwrap().iter().filter(|r|r.args[0]=="send-keys" && r.args.contains(&"-l".into())).map(|r|r.args.last().unwrap().clone()).collect()};
+    f.wait_for("as duas digitadas",||typed().iter().any(|t|t=="Segunda")).await;
+    let typed=typed();
+    let (a,b)=(typed.iter().position(|t|t=="Primeira").unwrap(),typed.iter().position(|t|t=="Segunda").unwrap());
+    assert!(a<b,"ordem {typed:?}");
+    h.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn delivered_row_confirms_when_transcript_grows_without_waiting_the_tick() {
+    let f=Fixture::new().await;
+    let lease=crate::lease_when_free(&f.target.lease_path);
+    let store=Store::open(&f.target.state_path,&f.target.projection_dir,queue::State::new("key",1,"session",vec![])).unwrap();
+    let options=TerminalOptions {io:f.io.clone(),limits:InputLimits {settle:Duration::ZERO,literal_settle:Duration::ZERO,multiline_settle:Duration::ZERO,slash_settle:Duration::ZERO,proof_attempts:1,ready_attempts:1,cleanup_attempts:1},tick:Duration::from_secs(600),..TerminalOptions::default()};
+    let h=TerminalActor::spawn(f.target.clone(),QueueActor::start(store,lease),f.policy.clone(),options,broadcast::channel(128).0,Arc::new(AtomicU64::new(0)));
+    assert_eq!(h.command(f.command("fast","Olá")).await.unwrap().disposition,hangar_server::runtime::protocol::Disposition::Accepted);
+    std::fs::write(&f.target.transcript,"{\"type\":\"user\",\"uuid\":\"1\",\"message\":{\"content\":\"Olá\"}}\n").unwrap();
+    let start=std::time::Instant::now();
+    f.wait_for("confirmada pelo transcript",||f.state()["rows"][0]["confirmed"]==true).await;
+    assert!(start.elapsed()<Duration::from_secs(2),"confirmação esperou {:?}",start.elapsed());
     h.stop().await.unwrap();
 }

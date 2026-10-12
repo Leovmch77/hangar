@@ -19,6 +19,8 @@ const PUBLISH_POLICY_TIMEOUT:Duration=Duration::from_secs(40);
 const READY_FIRST_WAIT:Duration=Duration::from_secs(1);
 const READY_MAX_WAIT:Duration=Duration::from_secs(16);
 const READY_BUDGET:Duration=Duration::from_secs(120);
+const CONFIRM_POLL:Duration=Duration::from_millis(50);
+const CONFIRM_WINDOW:Duration=Duration::from_secs(30);
 /// Teto de um pedido de app aos mods: o mais longo da superfície (desenho de novo e clique, 6 s) mais
 /// 1 s de folga para o relógio do ator, abaixo dos 8 s em que o app desiste. O registro serializa os
 /// pedidos da sessão, então um pedido sem teto prenderia os seguintes.
@@ -513,6 +515,10 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:CanoConnection
     let mut durable_view = json!({"alive":true,"initialized":false,"ready":false});
     let mut last_state = String::new();
     let mut confirming = false;
+    // Entrada enviada: a confirmação segue o crescimento do transcript (só `stat`) em vez de esperar o idle;
+    // a prova é a mesma do `confirm_inputs`. Prazo para não vigiar uma entrada que nunca chega.
+    let mut confirm_until: Option<Instant> = None;
+    let mut confirm_seen: Option<u64> = None;
     let mut channels:BTreeMap<String,Value> = ["preview","thinking","tool"].into_iter().map(|channel|
         (channel.into(),json!({"session":target.name,"text":"","md":true,"full":true,"vivo":true}))).collect();
     let mut live = LiveOut { sender:engine.live.clone(),state:LiveState { public_state:engine.view()["public_state"].clone(),..Default::default() } };
@@ -832,6 +838,7 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:CanoConnection
                 match message {
                     Message::Command { command,response,from_queue } => {
                         let id = command.operation_id.clone();
+                        if matches!(command.kind,OperationKind::Input) { confirm_until = Some(Instant::now() + CONFIRM_WINDOW); confirm_seen = None; }
                         if from_queue && roots.get(&id).is_some_and(|pending|pending.result.as_ref().is_some_and(|reply|reply.disposition == Disposition::Deferred)) {
                             roots.remove(&id);
                         }
@@ -1267,6 +1274,8 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:CanoConnection
                         if response.is_none() { confirming = false; }
                         match result {
                             Ok((ids,legacy))=>{
+                                // Sem desligar ao confirmar: outra entrada da janela pode esperar a vez dela; o
+                                // prazo encerra a vigília, que só custa um `stat` por volta.
                                 for id in &ids { effects.extend(engine.confirm_input(id)); }
                                 if let Some(response) = response { let _ = response.send(Ok(json!({"confirmed":ids.len() + legacy}))); }
                             }
@@ -1300,6 +1309,16 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:CanoConnection
                             }
                         }
                     }
+                }
+            }
+            _ = tokio::time::sleep(CONFIRM_POLL), if confirm_until.is_some() && !confirming => {
+                if confirm_until.is_some_and(|until|Instant::now() >= until) { confirm_until = None; continue; }
+                let len = std::fs::metadata(&target.transcript).ok().map(|m|m.len());
+                if len != confirm_seen {
+                    confirm_seen = len;
+                    confirming = true;
+                    let job = confirm_inputs(queue.clone(),receipt.clone(),target.transcript.clone(),target.generation,clock(start));
+                    jobs.spawn(async move { Job::Confirmed { response:None,result:job.await } });
                 }
             }
             _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {

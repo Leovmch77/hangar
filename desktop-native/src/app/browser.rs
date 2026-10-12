@@ -6,12 +6,32 @@ use super::*;
 use crate::appearance::SideTab;
 use crate::browser::{Engine, Pointer, model};
 
+/// Por que o agente está parado: o botão Pausar ou a pessoa mexendo na página (Assumir, clique, tecla).
+#[cfg(not(target_os = "macos"))]
+#[derive(Clone, Copy, PartialEq)]
+enum Pause { Asked, TookOver }
+
+/// Faixa "agente no controle": some este tempo depois do último verbo terminar.
+#[cfg(not(target_os = "macos"))]
+const AGENT_LINGER: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Quem pediu a navegação: só a pessoa leva o foco à página e troca o endereço que ela está digitando.
+#[derive(Clone, Copy, PartialEq)]
+pub(super) enum By { User, Agent }
 /// Tempo estacionada e parada até a WebView do Windows deixar de compor.
 #[cfg(target_os = "windows")]
 const SLEEP_AFTER: std::time::Duration = std::time::Duration::from_secs(10);
 /// Tempo para a WebView acordada voltar a compor antes do verbo.
 #[cfg(target_os = "windows")]
 const WAKE_SETTLE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// Pedido do painel ao `Hangar`: o print da página vai para o compositor da sessão.
+pub(super) enum PanelEvent { Shot { key: String, bytes: Vec<u8> } }
+
+impl EventEmitter<PanelEvent> for BrowserPanel {}
+
+/// Erros guardados para a lista do selo; a contagem segue além disso.
+const ERRORS_KEPT: usize = 100;
 
 pub(super) struct BrowserPanel {
     /// `servidor::sessão` dona deste navegador: nome do sidecar que o hangar-preview lê.
@@ -35,27 +55,108 @@ pub(super) struct BrowserPanel {
     /// Nasce na primeira navegação, que tem a janela.
     engine: Option<Result<Rc<Engine>, String>>,
     /// Endereço a abrir quando o motor terminar de nascer; `Some` enquanto ele nasce.
-    starting: Option<String>,
+    starting: Option<(String, By)>,
     _start: Option<Task<()>>,
     events: async_channel::Sender<crate::browser::Event>,
     address: Entity<InputState>,
+    /// Resposta do `prompt` da página, na caixa do diálogo.
+    dialog_input: Entity<InputState>,
     page: model::PageState,
     /// Endereço recusado, mostrado embaixo da barra.
     invalid: Option<String>,
     /// Status da importação do login do Chrome, mostrado embaixo da barra.
     #[cfg(not(target_os = "macos"))]
     cookies_status: Option<String>,
-    /// A pessoa já viu o aviso de que o login importado vale para todas as sessões.
+    /// Login pedido com o motor ainda nascendo: a importação segue quando o CDP dele existir.
     #[cfg(not(target_os = "macos"))]
-    cookies_confirmed: bool,
+    import_pending: bool,
+    /// Cookies sendo buscados (disco ou depuração) até `apply_cookies`: a linha de status não pode sumir no meio.
+    #[cfg(not(target_os = "macos"))]
+    importing: bool,
+    /// Site escolhido no diálogo: só os cookies dele e dos domínios-pai entram. `None` = todos os sites.
+    #[cfg(not(target_os = "macos"))]
+    import_site: Option<String>,
+    /// Site cuja página mostrou campo de senha: a linha que sugere trazer o login. Nunca importa sozinha.
+    #[cfg(not(target_os = "macos"))]
+    login_hint: Option<String>,
+    /// Último site conferido atrás de campo de senha, para não repetir a cada evento da mesma página.
+    #[cfg(not(target_os = "macos"))]
+    hint_checked: Option<String>,
+    /// Pedido do agente (`hangar-preview login`) esperando a pessoa: site (`None` = todos) e quem responde.
+    #[cfg(not(target_os = "macos"))]
+    login_request: Option<(Option<String>, futures::channel::oneshot::Sender<crate::browser::control::Reply>)>,
+    /// Pedido do agente já aprovado: recebe só a contagem ou o motivo quando a importação termina.
+    #[cfg(not(target_os = "macos"))]
+    login_reply: Option<(Option<String>, futures::channel::oneshot::Sender<crate::browser::control::Reply>)>,
+    /// Perfis com cookies em disco esperando a pessoa escolher de qual trazer.
+    #[cfg(target_os = "linux")]
+    cookie_sources: Vec<crate::browser::chrome_import::disk::Source>,
     /// URL cujo login já foi preenchido com as senhas salvas do Chrome, para não repetir a cada evento da mesma página.
     #[cfg(target_os = "linux")]
     last_fill: Option<String>,
     focus: FocusHandle,
     /// Origem da página no último desenho: o ponteiro chega ao motor relativo a ela.
     origin: Rc<Cell<Point<Pixels>>>,
+    /// Tela emulada pelo `layout` do agente (largura, altura em px da página): desenhada encaixada, sem esticar.
+    #[cfg(target_os = "linux")]
+    emulated: Option<(f32, f32)>,
+    /// px da página por px do painel na tela emulada; 1 sem emulação.
+    page_scale: Rc<Cell<f32>>,
+    /// Área visível da página na tela emulada (`visualViewport`: zoom e deslocamento). Página sem `viewport` de celular
+    /// abre afastada, e o `Input` do CDP conta em px do layout. Relida a cada pergunta do cursor.
+    #[cfg(target_os = "linux")]
+    page_zoom: (f32, f32, f32),
     /// Decidido pelo `Hangar` a cada quadro (`browser_visible`).
     shown: bool,
+    /// Último quadro da página, mostrado no lugar dela enquanto um diálogo ou aviso a cobre (Windows: a página nativa
+    /// fica por cima de tudo e precisa sair da frente).
+    #[cfg(target_os = "windows")]
+    still: Option<Arc<Image>>,
+    /// Quadros que saíram da tela: o `Hangar` os tira do cache e do atlas da GPU, que não os soltam sozinhos.
+    #[cfg(target_os = "windows")]
+    released: Vec<Arc<Image>>,
+    /// Sobe a cada vez que o painel é coberto: captura de uma cobertura anterior que chega atrasada é descartada.
+    #[cfg(target_os = "windows")]
+    cover_gen: u32,
+    /// Aviso do próprio painel (preenchimento do login que falhou), ao lado do `notice` que vem da página.
+    local_notice: Option<String>,
+    /// Cursor da página sob o mouse: o Chromium sem janela não avisa quando ele muda, então a página é perguntada.
+    #[cfg(target_os = "linux")]
+    cursor: CursorStyle,
+    /// Pergunta do cursor em andamento e o último ponto pedido: uma pergunta por vez, sempre do ponto mais novo.
+    #[cfg(target_os = "linux")]
+    cursor_probe: (bool, Option<Point<Pixels>>),
+    /// Erros da página desde a última navegação (JS não tratado, `console.error`, recurso que falhou), para o selo.
+    page_errors: std::collections::VecDeque<String>,
+    error_count: usize,
+    errors_open: bool,
+    /// O print da página está sendo tirado: o botão fica ocupado.
+    shooting: bool,
+    /// O endereço acabou de ir para a área de transferência: o ícone vira um visto por um instante.
+    copied: bool,
+    /// Aviso que a pessoa fechou no ×: o motor reenvia o estado inteiro, e o aviso voltaria a cada evento.
+    dismissed_notice: u32,
+    /// O agente navegou com a pessoa digitando no endereço: ao sair do campo, a barra volta ao endereço da página.
+    address_stale: bool,
+    /// O que o agente está fazendo, enquanto a faixa aparece.
+    #[cfg(not(target_os = "macos"))]
+    agent: Option<String>,
+    /// Verbos do agente em andamento; a faixa só começa a sumir com zero.
+    #[cfg(not(target_os = "macos"))]
+    agent_running: u32,
+    /// Muda a cada ação: o sumiço agendado por uma ação velha não apaga a faixa de uma nova.
+    #[cfg(not(target_os = "macos"))]
+    agent_seq: u64,
+    #[cfg(not(target_os = "macos"))]
+    paused: Option<Pause>,
+    /// A sessão dona deste navegador está trabalhando: a faixa fica entre uma ação e outra, sem subir e descer.
+    #[cfg(not(target_os = "macos"))]
+    pub(super) session_working: bool,
+    /// Fim do último verbo: aviso de entrada da página que chega logo depois é eco da entrada sintética do agente.
+    #[cfg(target_os = "windows")]
+    agent_finished_at: Option<std::time::Instant>,
+    #[cfg(not(target_os = "macos"))]
+    _activity: Option<Task<()>>,
     /// Conta os pedidos de dormir: só o último, sem uso desde então, esconde a WebView.
     #[cfg(target_os = "windows")]
     idle: Cell<u64>,
@@ -66,13 +167,14 @@ pub(super) struct BrowserPanel {
     #[cfg(target_os = "linux")]
     scale: Rc<Cell<f32>>,
     _drain: Task<()>,
-    _subscriptions: [Subscription; 4],
+    _subscriptions: [Subscription; 5],
 }
 
 impl BrowserPanel {
     fn new(key: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let (events, received) = async_channel::unbounded();
         let address = cx.new(|cx| InputState::new(window, cx).placeholder(tr("browser_address")));
+        let dialog_input = cx.new(|cx| InputState::new(window, cx));
         let focus = cx.focus_handle();
         let drain = cx.spawn_in(window, async move |this, cx| {
             while let Ok(event) = received.recv().await {
@@ -85,17 +187,24 @@ impl BrowserPanel {
                 if let InputEvent::PressEnter { .. } = event { this.submit(window, cx); }
             }),
             cx.on_focus(&address_focus, window, |this, _, _| if let Some(engine) = this.engine() { engine.release_focus() }),
+            cx.on_blur(&address_focus, window, |this, window, cx| if std::mem::take(&mut this.address_stale) {
+                let url = this.page.url.clone().unwrap_or_default();
+                this.address.update(cx, |input, cx| input.set_value(url, window, cx));
+            }),
             cx.on_focus(&focus, window, |this, _, _| if let Some(engine) = this.engine() { engine.focus(true) }),
             cx.on_blur(&focus, window, |this, _, _| if let Some(engine) = this.engine() { engine.focus(false) }),
         ];
         Self { key, #[cfg(not(target_os = "macos"))] controller: None, #[cfg(not(target_os = "macos"))] cdp: None,
-            #[cfg(not(target_os = "macos"))] relay: Default::default(), #[cfg(not(target_os = "macos"))] viewer: Rc::default(), #[cfg(target_os = "linux")] frames: Default::default(), engine: None, starting: None, _start: None, events, address, page: model::PageState::default(), invalid: None, #[cfg(not(target_os = "macos"))] cookies_status: None, #[cfg(not(target_os = "macos"))] cookies_confirmed: false, #[cfg(target_os = "linux")] last_fill: None, focus,
-            origin: Rc::default(), shown: false, #[cfg(target_os = "windows")] idle: Cell::new(0), #[cfg(not(target_os = "macos"))] sidecar: Default::default(), #[cfg(target_os = "linux")] scale: Rc::default(), _drain: drain, _subscriptions: subscriptions }
+            #[cfg(not(target_os = "macos"))] relay: Default::default(), #[cfg(not(target_os = "macos"))] viewer: Rc::default(), #[cfg(target_os = "linux")] frames: Default::default(), #[cfg(not(target_os = "macos"))] import_pending: false, #[cfg(not(target_os = "macos"))] importing: false, #[cfg(not(target_os = "macos"))] import_site: None, #[cfg(not(target_os = "macos"))] login_hint: None, #[cfg(not(target_os = "macos"))] hint_checked: None, #[cfg(not(target_os = "macos"))] login_request: None, #[cfg(not(target_os = "macos"))] login_reply: None, #[cfg(target_os = "linux")] cookie_sources: Vec::new(), engine: None, starting: None, _start: None, events, address, dialog_input, page: model::PageState::default(), invalid: None, #[cfg(not(target_os = "macos"))] cookies_status: None, #[cfg(target_os = "linux")] last_fill: None, focus,
+            origin: Rc::default(), #[cfg(target_os = "linux")] emulated: None, page_scale: Rc::new(Cell::new(1.)), #[cfg(target_os = "windows")] still: None, #[cfg(target_os = "windows")] released: Vec::new(), #[cfg(target_os = "windows")] cover_gen: 0, #[cfg(target_os = "linux")] page_zoom: (1., 0., 0.), shown: false, local_notice: None, #[cfg(target_os = "linux")] cursor: CursorStyle::Arrow, #[cfg(target_os = "linux")] cursor_probe: (false, None), page_errors: Default::default(), error_count: 0, errors_open: false, shooting: false, copied: false, dismissed_notice: 0, address_stale: false, #[cfg(not(target_os = "macos"))] agent: None, #[cfg(not(target_os = "macos"))] agent_running: 0,
+            #[cfg(not(target_os = "macos"))] agent_seq: 0, #[cfg(not(target_os = "macos"))] paused: None, #[cfg(not(target_os = "macos"))] session_working: false, #[cfg(target_os = "windows")] agent_finished_at: None, #[cfg(not(target_os = "macos"))] _activity: None, #[cfg(target_os = "windows")] idle: Cell::new(0), #[cfg(not(target_os = "macos"))] sidecar: Default::default(), #[cfg(target_os = "linux")] scale: Rc::default(), _drain: drain, _subscriptions: subscriptions }
     }
 
     fn engine(&self) -> Option<&Rc<Engine>> { self.engine.as_ref()?.as_ref().ok() }
 
     fn receive(&mut self, event: crate::browser::Event, window: &mut Window, cx: &mut Context<Self>) {
+        #[cfg(target_os = "windows")]
+        if let crate::browser::Event::UserInput = event { return self.user_input(cx); }
         // Mesma textura com o conteúdo novo: a cópia guardada do painel já a pinta, basta a raiz redesenhar e o quadro
         // ser confirmado depois do desenho. Textura nova (primeiro quadro, outro tamanho) redesenha o painel.
         #[cfg(target_os = "linux")]
@@ -112,12 +221,33 @@ impl BrowserPanel {
             let url = page.url.clone().unwrap_or_default();
             if !self.address.focus_handle(cx).is_focused(window) && self.address.read(cx).value() != url {
                 self.address.update(cx, |input, cx| input.set_value(url, window, cx));
+            } else if self.address.focus_handle(cx).is_focused(window) && page.url != self.page.url {
+                self.address_stale = true;
             }
+            if page.url != self.page.url { self.local_notice = None; }
+            if page.dialog != self.page.dialog {
+                #[cfg(not(target_os = "macos"))]
+                if let Some(ctl) = &self.controller { ctl.set_dialog(page.dialog.as_ref().map(|d| (d.kind.clone(), d.message.clone(), d.default.clone()))); }
+                if let Some(d) = &page.dialog && d.kind == "prompt" {
+                    let default = d.default.clone();
+                    self.dialog_input.update(cx, |input, cx| input.set_value(default, window, cx));
+                }
+            }
+            #[cfg(not(target_os = "macos"))]
+            let loaded = self.page.loading && !page.loading;
+            #[cfg(target_os = "windows")]
+            let moved = !page.loading && page.url != self.page.url;
             self.page = page;
+            #[cfg(target_os = "linux")]
+            if loaded { self.refresh_zoom(cx); }
+            #[cfg(target_os = "windows")]
+            if (loaded || moved) && let Some(engine) = self.engine() { let history = engine.history(); cx.spawn(async move |_, _| history.await).detach(); }
             #[cfg(not(target_os = "macos"))]
             self.save_sidecar(cx);
             #[cfg(target_os = "linux")]
             self.maybe_autofill(cx);
+            #[cfg(not(target_os = "macos"))]
+            self.maybe_suggest_login(cx);
         }
         cx.notify();
     }
@@ -177,6 +307,7 @@ impl BrowserPanel {
                             let class = detail["exception"]["className"].as_str().unwrap_or("?");
                             let text = detail["text"].as_str().unwrap_or("");
                             eprintln!("[nav] autofill: exceção no script da página: {class}: {text}");
+                            let _ = this.update(cx, |this, cx| { this.local_notice = Some(tr("browser_autofill_failed")); cx.notify(); });
                             break;
                         }
                         if v["result"]["value"].as_bool() == Some(true) {
@@ -185,6 +316,7 @@ impl BrowserPanel {
                     }
                     Err(e) => {
                         eprintln!("[nav] autofill: Runtime.evaluate falhou: {e}");
+                        let _ = this.update(cx, |this, cx| { this.local_notice = Some(tr("browser_autofill_failed")); cx.notify(); });
                         break;
                     }
                 }
@@ -196,31 +328,50 @@ impl BrowserPanel {
         let text = self.address.read(cx).value().to_string();
         match model::normalize_address(&text) {
             Err(key) => self.invalid = Some(tr(key)),
-            Ok(url) => self.go(url, window, cx),
+            Ok(url) => {
+                // A linha do login fala do site em que foi pedida: some quando a pessoa vai a outro endereço, nunca num
+                // redirect da página nem com importação, pedido do agente ou escolha de perfil ainda abertos.
+                #[cfg(not(target_os = "macos"))]
+                {
+                    #[cfg(target_os = "linux")]
+                    let picking = !self.cookie_sources.is_empty();
+                    #[cfg(not(target_os = "linux"))]
+                    let picking = false;
+                    if !self.importing && !self.import_pending && self.login_request.is_none() && self.login_reply.is_none() && !picking {
+                        self.cookies_status = None;
+                    }
+                }
+                self.go(url, By::User, window, cx)
+            }
         }
         cx.notify();
     }
 
     /// Navega, ou faz o motor nascer e navega quando ele ficar pronto.
-    pub(super) fn go(&mut self, url: String, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn go(&mut self, url: String, by: By, window: &mut Window, cx: &mut Context<Self>) {
         self.invalid = None;
         // Motor que falhou (ou o Chromium que caiu) volta a ser tentado no próximo `open`.
         #[cfg(not(target_os = "macos"))]
         if matches!(&self.engine, Some(Err(_))) || self.engine().is_some_and(|e| !e.alive()) { self.drop_engine(); }
         if self.engine.is_some() {
-            self.navigate(url, window, cx);
-        } else if self.starting.replace(url).is_none() {
+            self.navigate(url, by, window, cx);
+        } else if self.starting.replace((url, by)).is_none() {
             // Enter repetido enquanto o motor nasce só troca o endereço pendente.
             self.start(window, cx);
         }
     }
 
-    fn navigate(&mut self, url: String, window: &mut Window, cx: &mut Context<Self>) {
+    fn navigate(&mut self, url: String, by: By, window: &mut Window, cx: &mut Context<Self>) {
         let Some(engine) = self.engine() else { return };
         engine.load(&url);
-        self.address.update(cx, |input, cx| input.set_value(url, window, cx));
-        // Aberto pelo agente com o painel fora da tela: o foco fica onde o usuário está digitando.
-        if self.shown { self.focus.focus(window, cx); }
+        // O agente não apaga o endereço que a pessoa está digitando; o `State` da página o atualiza quando ela sair dali.
+        if by == By::User || !self.address.focus_handle(cx).is_focused(window) {
+            if by == By::User { self.address_stale = false; }
+            self.address.update(cx, |input, cx| input.set_value(url, window, cx));
+        } else {
+            self.address_stale = true;
+        }
+        if by == By::User && self.shown { self.focus.focus(window, cx); }
     }
 
     fn start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -238,9 +389,24 @@ impl BrowserPanel {
             // Painel fechado no meio: o motor cai junto com o resultado.
             let _ = this.update_in(cx, |this, window, cx| {
                 this.engine = Some(engine);
+                // O motor novo conta os avisos do zero.
+                this.dismissed_notice = 0;
                 #[cfg(not(target_os = "macos"))]
                 if let Some(Ok(engine)) = &this.engine { let engine = engine.clone(); this.attach(&engine, cx); }
-                if let Some(url) = this.starting.take() { this.navigate(url, window, cx); }
+                // Motor que não nasceu guarda o endereço pedido: é o que "Tentar de novo" volta a abrir.
+                match this.starting.take() {
+                    Some((url, by)) if this.engine().is_some() => this.navigate(url, by, window, cx),
+                    Some((url, _)) => this.page.url = Some(url),
+                    None => {}
+                }
+                #[cfg(not(target_os = "macos"))]
+                if std::mem::take(&mut this.import_pending) {
+                    if this.cdp.is_some() { this.import_chrome_login(window, cx) } else {
+                        let reason = match &this.engine { Some(Err(e)) => e.clone(), _ => "o navegador nao subiu".into() };
+                        this.finish_login(Err(reason.clone()));
+                        this.cookies_status = Some(tr("browser_cookies_error").replace("{e}", &reason));
+                    }
+                }
                 cx.notify();
             });
         }));
@@ -260,6 +426,42 @@ impl BrowserPanel {
         }
         #[cfg(target_os = "windows")]
         { self.listen_relay(&cdp); *self.relay.borrow_mut() = Some(cdp.clone()); }
+        let (activity, acted) = async_channel::unbounded();
+        ctl.on_activity(move |a| { let _ = activity.try_send(a); });
+        let (answer, answers) = async_channel::unbounded::<(bool, Option<String>, futures::channel::oneshot::Sender<Result<(), String>>)>();
+        ctl.on_dialog_answer(move |accept, text, done| { let _ = answer.try_send((accept, text, done)); });
+        cx.spawn(async move |this, cx| {
+            while let Ok((accept, text, done)) = answers.recv().await {
+                let Ok(call) = this.update(cx, |this, _| this.engine().map(|e| e.answer_dialog(accept, text.as_deref()))) else { break };
+                let _ = done.send(match call { Some(call) => call.await, None => Err("o navegador fechou".into()) });
+            }
+        }).detach();
+        let (error, errors) = async_channel::unbounded();
+        ctl.on_page_error(move |e| { let _ = error.try_send(e); });
+        (self.page_errors, self.error_count, self.errors_open) = (Default::default(), 0, false);
+        cx.spawn(async move |this, cx| {
+            while let Ok(e) = errors.recv().await {
+                if this.update(cx, |this, cx| this.page_error(e, cx)).is_err() { break; }
+            }
+        }).detach();
+        #[cfg(target_os = "linux")]
+        {
+            let (screen, screens) = async_channel::unbounded();
+            ctl.on_layout(move |s| { let _ = screen.try_send(s); });
+            self.emulated = None;
+            cx.spawn(async move |this, cx| {
+                while let Ok(s) = screens.recv().await {
+                    if this.update(cx, |this, cx| { this.emulated = s.map(|(w, h)| (w as f32, h as f32)); this.refresh_zoom(cx); cx.notify(); }).is_err() { break; }
+                }
+            }).detach();
+        }
+        // Motor refeito começa sem pausa: a pausa era do motor que caiu.
+        self.paused = None;
+        self._activity = Some(cx.spawn(async move |this, cx| {
+            while let Ok(a) = acted.recv().await {
+                if this.update(cx, |this, cx| this.agent_acted(&a, cx)).is_err() { break; }
+            }
+        }));
         let setup = ctl.clone();
         cx.spawn(async move |_, _| setup.start().await).detach();
         self.controller = Some(ctl);
@@ -390,6 +592,238 @@ impl BrowserPanel {
     #[cfg(not(target_os = "macos"))]
     pub(super) fn controller(&self) -> Option<Rc<crate::browser::control::Controller<crate::browser::control::CdpPage>>> { self.controller.clone() }
 
+    #[cfg(not(target_os = "macos"))]
+    fn set_agent(&mut self, text: Option<String>) {
+        if let Some(ctl) = &self.controller { ctl.set_strip_shown(text.is_some()); }
+        self.agent = text;
+    }
+
+    /// A sessão parou de trabalhar: a faixa vai embora como depois do último verbo.
+    #[cfg(not(target_os = "macos"))]
+    pub(super) fn set_session_working(&mut self, working: bool, cx: &mut Context<Self>) {
+        self.session_working = working;
+        if !working && self.agent_running == 0 && self.agent.is_some() { self.schedule_hide(cx); }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn agent_acted(&mut self, a: &crate::browser::control::Activity, cx: &mut Context<Self>) {
+        self.set_agent(Some(describe_activity(&self.key, a)));
+        self.agent_seq += 1;
+        // A atividade chega por canal: o verbo pode já ter terminado, e aí ninguém mais agendaria o sumiço.
+        if self.agent_running == 0 { self.schedule_hide(cx); }
+        cx.notify();
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    pub(super) fn agent_started(&mut self) { self.agent_running += 1; }
+
+    /// Verbo terminou: sem outro em andamento, a faixa some depois de `AGENT_LINGER`, se nenhuma ação nova chegar.
+    #[cfg(not(target_os = "macos"))]
+    pub(super) fn agent_finished(&mut self, cx: &mut Context<Self>) {
+        self.agent_running = self.agent_running.saturating_sub(1);
+        #[cfg(target_os = "windows")]
+        { self.agent_finished_at = Some(std::time::Instant::now()); }
+        // O realce do alvo fica meio segundo depois da ação, se outra não vier antes: o controlador não espera por ele.
+        if let Some(cdp) = self.cdp.clone() {
+            let seq = self.agent_seq;
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(std::time::Duration::from_millis(500)).await;
+                if this.read_with(cx, |this, _| this.agent_seq == seq && this.agent_running == 0).unwrap_or(false) {
+                    drop(cdp.call("Overlay.hideHighlight", serde_json::json!({})));
+                }
+            }).detach();
+        }
+        if self.agent_running > 0 || self.agent.is_none() { return; }
+        self.schedule_hide(cx);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn schedule_hide(&self, cx: &mut Context<Self>) {
+        let seq = self.agent_seq;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(AGENT_LINGER).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.agent_seq != seq || this.agent_running > 0 { return; }
+                // Sessão ainda trabalhando: a faixa fica, sem a ação que já acabou; some quando a sessão parar.
+                let text = this.session_working.then(|| tr("browser_ctl_using").replace("{session}", this.key.rsplit("::").next().unwrap_or(&this.key)));
+                if this.agent != text { this.set_agent(text); cx.notify(); }
+            });
+        }).detach();
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn pause(&mut self, why: Pause, cx: &mut Context<Self>) {
+        self.paused = Some(why);
+        if let Some(ctl) = &self.controller { ctl.set_paused(true); }
+        cx.notify();
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn resume(&mut self, cx: &mut Context<Self>) {
+        self.paused = None;
+        if let Some(ctl) = &self.controller { ctl.set_paused(false); }
+        cx.notify();
+    }
+
+    /// Clique ou tecla da pessoa na página com o agente agindo: ela assumiu, e o agente para na hora.
+    #[cfg(not(target_os = "macos"))]
+    fn user_input(&mut self, cx: &mut Context<Self>) {
+        #[cfg(target_os = "windows")]
+        if self.agent_running > 0 || self.agent_finished_at.is_some_and(|t| t.elapsed() < std::time::Duration::from_millis(400)) { return; }
+        if self.agent.is_some() && self.paused.is_none() { self.pause(Pause::TookOver, cx); }
+    }
+
+    /// Faixa entre a barra e a página: o agente agindo (Pausar, Assumir) ou parado pela pessoa (Retomar).
+    #[cfg(not(target_os = "macos"))]
+    fn render_agent(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let strip = |id: &'static str, color: Hsla| div().id(id).flex_shrink_0().flex().items_center().gap_2().px_3().py(px(5.))
+            .bg(color.opacity(0.2)).border_b_1().border_color(color.opacity(0.45)).text_size(px(12.)).role(Role::Status)
+            .child(div().size(px(8.)).flex_shrink_0().rounded_full().bg(color));
+        let label = |text: String| div().flex_1().min_w_0().truncate().child(text);
+        if let Some(why) = self.paused {
+            let text = tr(if why == Pause::Asked { "browser_ctl_paused" } else { "browser_ctl_took_over" });
+            return Some(strip("browser-agent-paused", theme::warning()).child(label(text))
+                .child(Button::new("browser-agent-resume").outline().small().label(tr("browser_ctl_resume"))
+                    .on_click(cx.listener(|this, _, _, cx| this.resume(cx))))
+                .into_any_element());
+        }
+        let text = self.agent.clone()?;
+        Some(strip("browser-agent", theme::accent()).child(label(text))
+            .child(Button::new("browser-agent-pause").outline().small().label(tr("browser_ctl_pause"))
+                .on_click(cx.listener(|this, _, _, cx| this.pause(Pause::Asked, cx))))
+            .child(Button::new("browser-agent-take").outline().small().label(tr("browser_ctl_take"))
+                .on_click(cx.listener(|this, _, window, cx| { this.pause(Pause::TookOver, cx); this.focus.focus(window, cx); })))
+            .into_any_element())
+    }
+
+    /// Recarregar e "Tentar de novo": motor caído ou que não nasceu volta a nascer no mesmo endereço (`go` o refaz);
+    /// com erro de carga, o endereço que falhou é carregado de novo, porque a página atual é a de erro.
+    fn retry(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // No Windows a página que caiu volta no mesmo WebView2, sem perder o histórico.
+        #[cfg(target_os = "windows")]
+        if let Some(engine) = self.engine() && !engine.alive() {
+            engine.revive();
+            if let Some(ctl) = &self.controller { ctl.reset_domains(); }
+            return cx.notify();
+        }
+        // Fora do macOS o `go` já refaz o motor que falhou; aqui vale para todos.
+        if matches!(&self.engine, Some(Err(_))) { self.engine = None; }
+        let dead = !matches!(&self.engine, Some(Ok(e)) if e.alive());
+        let url = self.page.url.clone().or_else(|| self.starting.as_ref().map(|(u, _)| u.clone()));
+        match (dead || self.page.error.is_some(), url) {
+            (true, Some(url)) => self.go(url, By::User, window, cx),
+            _ => if let Some(engine) = self.engine() { engine.reload() },
+        }
+        cx.notify();
+    }
+
+    #[cfg(target_os = "linux")]
+    fn copy_selection(&self, cx: &mut Context<Self>) {
+        let Some(cdp) = self.cdp.clone() else { return };
+        const SELECTION: &str = "(()=>{const a=document.activeElement;if(a&&a.type==='password')return '';if(a&&(a.tagName==='INPUT'||a.tagName==='TEXTAREA')&&a.selectionStart!=null)return a.value.slice(a.selectionStart,a.selectionEnd);return String(getSelection())})()";
+        let call = cdp.call("Runtime.evaluate", serde_json::json!({"expression": SELECTION, "returnByValue": true}));
+        cx.spawn(async move |_, cx| {
+            match call.await {
+                Ok(r) => if let Some(text) = r["result"]["value"].as_str().filter(|t| !t.is_empty()) {
+                    let _ = cx.update(|cx| cx.write_to_clipboard(ClipboardItem::new_string(text.to_owned())));
+                },
+                Err(e) => eprintln!("[nav] copiar da pagina falhou: {e}"),
+            }
+        }).detach();
+    }
+
+    fn page_error(&mut self, error: Option<String>, cx: &mut Context<Self>) {
+        match error {
+            Some(line) => {
+                self.error_count += 1;
+                self.page_errors.push_back(error_text(&line));
+                if self.page_errors.len() > ERRORS_KEPT { self.page_errors.pop_front(); }
+            }
+            None if self.error_count == 0 => return,
+            None => (self.page_errors, self.error_count, self.errors_open) = (Default::default(), 0, false),
+        }
+        cx.notify();
+    }
+
+    /// Print da página em PNG, que o `Hangar` anexa à mensagem da sessão.
+    #[cfg(not(target_os = "macos"))]
+    fn send_shot(&mut self, cx: &mut Context<Self>) {
+        let Some(cdp) = self.cdp.clone().filter(|_| !self.shooting) else { return };
+        self.shooting = true;
+        cx.notify();
+        let shot = cdp.call("Page.captureScreenshot", serde_json::json!({"format": "png"}));
+        cx.spawn(async move |this, cx| {
+            use base64::Engine as _;
+            // Página com diálogo aberto ou travada não responde: sem prazo o botão ficava ocupado para sempre.
+            let timer = cx.background_executor().timer(std::time::Duration::from_secs(15));
+            let shot = match futures::future::select(std::pin::pin!(shot), std::pin::pin!(timer)).await {
+                futures::future::Either::Left((r, _)) => r,
+                futures::future::Either::Right(_) => Err(tr("browser_shot_timeout")),
+            };
+            let bytes = shot.and_then(|r| base64::engine::general_purpose::STANDARD
+                .decode(r["data"].as_str().unwrap_or("")).map_err(|e| e.to_string())).and_then(|b| if b.is_empty() { Err("vazio".into()) } else { Ok(b) });
+            let _ = this.update(cx, |this, cx| {
+                this.shooting = false;
+                match bytes {
+                    Ok(bytes) => cx.emit(PanelEvent::Shot { key: this.key.clone(), bytes }),
+                    Err(e) => this.local_notice = Some(tr("browser_shot_failed").replace("{e}", &e)),
+                }
+                cx.notify();
+            });
+        }).detach();
+    }
+
+    /// O diálogo da página no painel: a pessoa responde aqui, ou o agente pelo verbo `dialog`.
+    fn render_dialog(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        // No Windows o diálogo é o nativo do WebView2, na frente da página: a pessoa responde nele.
+        if cfg!(target_os = "windows") { return None; }
+        let d = self.page.dialog.as_ref()?;
+        let answer = |accept: bool| cx.listener(move |this: &mut Self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>| {
+            let text = (accept && this.page.dialog.as_ref().is_some_and(|d| d.kind == "prompt")).then(|| this.dialog_input.read(cx).value().to_string());
+            let Some(call) = this.engine().map(|e| e.answer_dialog(accept, text.as_deref())) else { return };
+            cx.spawn(async move |this, cx| if let Err(e) = call.await {
+                let _ = this.update(cx, |this, cx| { this.local_notice = Some(tr("browser_dialog_failed").replace("{e}", &e)); cx.notify(); });
+            }).detach();
+        });
+        let title = tr(if d.kind == "alert" { "browser_dialog_says" } else { "browser_dialog_asks" });
+        Some(div().id("browser-dialog").flex_shrink_0().flex().flex_col().gap_2().px_3().py(px(8.)).role(Role::AlertDialog)
+            .bg(theme::warning().opacity(0.12)).border_b_1().border_color(theme::warning().opacity(0.4))
+            .child(div().text_size(px(11.)).text_color(theme::muted()).child(title))
+            .child(div().text_size(px(13.)).whitespace_normal().child(d.message.clone()))
+            .when(d.kind == "prompt", |el| el.child(Input::new(&self.dialog_input).id("browser-dialog-input").small()))
+            .child(div().flex().justify_end().gap_2()
+                .when(d.kind != "alert", |el| el.child(Button::new("browser-dialog-cancel").outline().small().label(tr("browser_dialog_cancel")).on_click(answer(false))))
+                .child(Button::new("browser-dialog-ok").primary().small().label(tr("browser_dialog_ok")).on_click(answer(true))))
+            .into_any_element())
+    }
+
+    fn render_errors(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.errors_open || self.error_count == 0 { return None; }
+        let lines = self.page_errors.iter().rev().cloned().collect::<Vec<_>>();
+        Some(div().id("browser-errors").flex_shrink_0().flex().flex_col().border_b_1().border_color(theme::border())
+            .child(div().flex().items_center().gap_2().px_3().py(px(4.))
+                .child(div().flex_1().text_size(px(11.)).text_color(theme::muted()).child(tr("browser_errors_title")))
+                .child(Button::new("browser-errors-clear").ghost().xsmall().label(tr("browser_errors_clear"))
+                    .on_click(cx.listener(|this, _, _, cx| { (this.page_errors, this.error_count, this.errors_open) = (Default::default(), 0, false); cx.notify(); })))
+                .child(chrome::icon_button("browser-errors-close", IconName::Close, tr("close"), cx)
+                    .on_click(cx.listener(|this, _, _, cx| { this.errors_open = false; cx.notify(); }))))
+            .child(div().id("browser-errors-list").max_h(px(160.)).overflow_y_scroll().px_3().pb(px(6.)).flex().flex_col().gap(px(3.))
+                .children(lines.into_iter().map(|line| div().text_size(px(11.)).font_family("monospace").text_color(theme::danger())
+                    .whitespace_normal().child(line))))
+            .into_any_element())
+    }
+
+    fn copy_address(&mut self, url: Option<String>, cx: &mut Context<Self>) {
+        let Some(url) = url else { return };
+        cx.write_to_clipboard(ClipboardItem::new_string(url));
+        self.copied = true;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(std::time::Duration::from_millis(1500)).await;
+            let _ = this.update(cx, |this, cx| { this.copied = false; cx.notify(); });
+        }).detach();
+    }
+
     fn restore_address(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let url = self.page.url.clone().unwrap_or_default();
         self.address.update(cx, |input, cx| input.set_value(url, window, cx));
@@ -398,67 +832,252 @@ impl BrowserPanel {
         cx.notify();
     }
 
-    /// Traz o login do Chrome real do usuário (CDP) para o navegador embutido, SÓ no clique e TUDO de uma vez: cada
-    /// conexão ao CDP faz o Chrome perguntar "Permitir a depuração remota?" na tela da pessoa.
+    /// Site da página aberta (http/https), sem o `www.`: o que o diálogo oferece.
     #[cfg(not(target_os = "macos"))]
-    fn import_chrome_login(&mut self, cx: &mut Context<Self>) {
+    fn page_site(&self) -> Option<String> {
+        let url = url::Url::parse(self.page.url.as_deref()?).ok()?;
+        if !matches!(url.scheme(), "http" | "https") { return None; }
+        let host = url.host_str()?;
+        Some(host.strip_prefix("www.").unwrap_or(host).to_owned())
+    }
+
+    /// Diálogo "Usar meu login do Chrome em <site>": o perfil do navegador embutido é um só para todas as sessões e
+    /// agentes, então a pessoa escolhe o alcance antes de qualquer cookie sair do Chrome.
+    #[cfg(not(target_os = "macos"))]
+    fn ask_chrome_login(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let site = self.page_site();
+        let all = Rc::new(Cell::new(site.is_none()));
+        let (title, help) = match &site {
+            Some(site) => (tr("browser_login_title_site").replace("{site}", site), tr("browser_login_help_site").replace("{site}", site)),
+            None => (tr("browser_login_title_all"), tr("browser_login_help_all")),
+        };
+        let check = site.is_some().then(|| (tr("browser_login_all_sites"), all.clone()));
+        let panel = cx.entity().downgrade();
+        chrome::confirm_alert_with(window, cx, title, help, check, tr("browser_login_ok"), ButtonVariant::Primary, move |window, cx| {
+            let site = if all.get() { None } else { site.clone() };
+            panel.update(cx, |this, cx| {
+                this.import_site = site;
+                this.login_hint = None;
+                this.import_chrome_login(window, cx);
+            }).is_ok()
+        });
+    }
+
+    /// Página https com campo de senha visível: sugere trazer o login, uma vez por site. Só a linha; importar continua
+    /// dependendo do diálogo.
+    #[cfg(not(target_os = "macos"))]
+    fn maybe_suggest_login(&mut self, cx: &mut Context<Self>) {
+        if self.page.loading { return; }
+        let Some(site) = self.page_site() else { return };
+        if self.login_hint.as_ref().is_some_and(|hint| *hint != site) { self.login_hint = None; }
+        if self.hint_checked.as_deref() == Some(site.as_str()) || !self.page.url.as_deref().is_some_and(|u| u.starts_with("https:")) {
+            return;
+        }
+        let Some(cdp) = self.cdp.clone() else { return };
+        self.hint_checked = Some(site.clone());
+        let js = "(() => { const vis = (el) => el.offsetParent !== null && !el.disabled;             const walk = (root) => [...root.querySelectorAll('*')].some((el) => (el.tagName === 'INPUT' && el.type === 'password' && vis(el)) || (el.shadowRoot && walk(el.shadowRoot)));             return walk(document); })()";
+        let params = serde_json::json!({"expression": js, "returnByValue": true});
+        cx.spawn(async move |this, cx| {
+            // SPA desenha o formulário depois do carregamento.
+            for wait in [0u64, 1500, 4000] {
+                if wait > 0 { cx.background_executor().timer(std::time::Duration::from_millis(wait)).await; }
+                if !this.read_with(cx, |this, _| this.page_site().as_deref() == Some(site.as_str())).unwrap_or(false) { return; }
+                if cdp.call("Runtime.evaluate", params.clone()).await.is_ok_and(|v| v["result"]["value"].as_bool() == Some(true)) {
+                    let _ = this.update(cx, |this, cx| { this.login_hint = Some(site.clone()); cx.notify(); });
+                    return;
+                }
+            }
+        }).detach();
+    }
+
+    /// Pedido do agente: só a linha desenhada pelo app aprova. Clique do agente cai na página (pela depuração) e o
+    /// celular só vê a página, então nenhum dos dois alcança esta linha.
+    #[cfg(not(target_os = "macos"))]
+    pub(super) fn request_login(&mut self, site: Option<String>, reply: futures::channel::oneshot::Sender<crate::browser::control::Reply>,
+        cx: &mut Context<Self>) {
+        let site = site.or_else(|| self.page_site());
+        if let Some((_, old)) = self.login_request.replace((site, reply)) {
+            let _ = old.send(crate::browser::control::Reply::Text("erro: outro pedido de login substituiu este".into()));
+        }
+        cx.notify();
+    }
+
+    /// Resposta ao agente: a contagem ou o motivo, nunca valor de cookie.
+    #[cfg(not(target_os = "macos"))]
+    /// `Ok((trazidos, de fora))`.
+    fn finish_login(&mut self, result: Result<(usize, usize), String>) {
+        let Some((site, reply)) = self.login_reply.take() else { return };
+        let site = site.unwrap_or_else(|| "todos os sites".into());
+        let skipped = |n: usize| if n > 0 { format!(" ({n} ficaram de fora)") } else { String::new() };
+        let text = match result {
+            Ok((0, out)) => format!("erro: login de {site} nao veio: nenhum cookie do site no navegador{}", skipped(out)),
+            Ok((n, out)) => format!("ok: {n} cookies para {site}{}", skipped(out)),
+            Err(e) => format!("erro: login de {site} nao veio: {e}"),
+        };
+        let _ = reply.send(crate::browser::control::Reply::Text(text));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn answer_login_request(&mut self, allow: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((site, reply)) = self.login_request.take() else { return };
+        // O agente desistiu (passou o prazo do verbo): aprovar agora traria cookies para ninguém.
+        if reply.is_canceled() {
+            self.cookies_status = Some(tr("browser_login_agent_expired"));
+            cx.notify();
+            return;
+        }
+        if !allow {
+            let _ = reply.send(crate::browser::control::Reply::Text("erro: login recusado pelo usuario".into()));
+            cx.notify();
+            return;
+        }
+        if let Some((_, old)) = self.login_reply.replace((site.clone(), reply)) {
+            let _ = old.send(crate::browser::control::Reply::Text("erro: outro pedido de login foi aprovado no lugar".into()));
+        }
+        self.import_site = site;
+        self.login_hint = None;
+        self.import_chrome_login(window, cx);
+    }
+
+    /// Traz o login do navegador real do usuário para o navegador embutido, só no clique: no Linux pelo perfil em
+    /// disco; senão pela depuração, onde cada conexão faz o Chrome perguntar "Permitir a depuração remota?".
+    #[cfg(not(target_os = "macos"))]
+    fn import_chrome_login(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         use crate::browser::chrome_import;
         let Some(cdp) = self.cdp.clone() else {
+            // Sem página aberta o motor nem existe: o botão o faz nascer e a importação segue quando ele estiver pronto.
+            self.import_pending = true;
             self.cookies_status = Some(tr("browser_cookies_starting"));
+            // `go` refaz o motor que falhou ou caiu.
+            if self.starting.is_none() { self.go("about:blank".into(), By::User, window, cx); }
             cx.notify();
             return;
         };
-        // O perfil do navegador embutido é um só para todas as sessões e agentes: o 1º clique só avisa, o 2º traz.
-        if !self.cookies_confirmed {
-            self.cookies_confirmed = true;
-            self.cookies_status = Some(tr("browser_cookies_confirm"));
-            cx.notify();
-            return;
+        // No Linux o perfil em disco vem primeiro: sem diálogo no navegador da pessoa, e com ele fechado.
+        #[cfg(target_os = "linux")]
+        {
+            let mut sources = chrome_import::disk::sources();
+            if sources.len() == 1 {
+                self.read_disk_cookies(sources.remove(0), cx);
+                return;
+            }
+            if !sources.is_empty() {
+                self.cookie_sources = sources;
+                self.cookies_status = Some(tr("browser_cookies_pick"));
+                cx.notify();
+                return;
+            }
         }
         self.cookies_status = Some(tr("browser_cookies_fetching"));
         cx.notify();
         // Plano B pra Chromium/Brave antigos: porta fixa por variável de ambiente.
         let port = std::env::var("HANGAR_CHROME_CDP_PORT").ok().and_then(|v| v.trim().parse().ok());
-        let fetch = cx.background_executor().spawn(async move { chrome_import::fetch_cookies(port) });
+        self.importing = true;
+        let fetch = cx.background_executor().spawn(async move {
+            chrome_import::fetch_cookies(port).map_err(|e| match e {
+                chrome_import::ImportError::ChromeClosed => None,
+                e => Some(tr(e.status_key()).replace("{e}", e.detail())),
+            })
+        });
         cx.spawn(async move |this, cx| {
             let result = fetch.await;
             let _ = this.update(cx, |this, cx| this.apply_cookies(result, cdp, cx));
         }).detach();
     }
 
+    /// Lê os cookies do perfil escolhido em thread de fundo (cópia do banco e `sqlite3`).
+    #[cfg(target_os = "linux")]
+    fn read_disk_cookies(&mut self, source: crate::browser::chrome_import::disk::Source, cx: &mut Context<Self>) {
+        self.cookie_sources.clear();
+        let Some(cdp) = self.cdp.clone() else {
+            let reason = tr("browser_cookies_starting");
+            self.finish_login(Err(reason.clone()));
+            self.cookies_status = Some(reason);
+            cx.notify();
+            return;
+        };
+        self.cookies_status = Some(tr("browser_cookies_reading").replace("{source}", &source.label));
+        cx.notify();
+        self.importing = true;
+        let fetch = cx.background_executor().spawn(async move {
+            crate::browser::chrome_import::disk::read(&source)
+                .map_err(|e| Some(tr(e.status_key()).replace("{e}", e.detail())))
+        });
+        cx.spawn(async move |this, cx| {
+            let result = fetch.await;
+            let _ = this.update(cx, |this, cx| this.apply_cookies(result, cdp, cx));
+        }).detach();
+    }
+
+    /// `Err(None)` é o Chrome sem depuração ligada; `Err(Some)`, a frase do erro.
     #[cfg(not(target_os = "macos"))]
-    fn apply_cookies(&mut self, result: Result<Vec<serde_json::Value>, crate::browser::chrome_import::ImportError>,
+    fn apply_cookies(&mut self, result: Result<Vec<serde_json::Value>, Option<String>>,
         cdp: Rc<crate::browser::cdp::Cdp>, cx: &mut Context<Self>) {
-        use crate::browser::chrome_import::ImportError;
+        self.importing = false;
         let cookies = match result {
             Ok(cookies) => cookies,
-            Err(e @ ImportError::ChromeClosed) => {
+            Err(None) => {
                 // Sem depuração ligada, o clique já abre a página do toggle no Chrome — um passo, não dois.
-                self.cookies_status = Some(tr(e.status_key()));
                 self.activate_chrome(cx);
-                cx.notify();
+                self.finish_login(Err("a depuracao remota do Chrome esta desligada; a instrucao para liga-la esta no painel".into()));
                 return;
             }
-            Err(e) => {
-                self.cookies_status = Some(tr(e.status_key()).replace("{e}", e.detail()));
+            Err(Some(text)) => {
+                self.finish_login(Err(text.clone()));
+                self.cookies_status = Some(text);
                 cx.notify();
                 return;
             }
         };
-        // 0 cookies não é sucesso: a pessoa vê "nenhum cookie", não "0 trazidos" parecendo que deu certo.
-        if cookies.is_empty() {
-            self.cookies_status = Some(tr("browser_cookies_none"));
+        let mut cookies = match &self.import_site {
+            Some(site) => crate::browser::chrome_import::for_site(cookies, site),
+            None => cookies,
+        };
+        // Cookie do disco que a chave do chaveiro não abriu: conta por site, para o login que faltou não virar "nenhum cookie".
+        let before = cookies.len();
+        cookies.retain(|c| c.get("__locked").is_none());
+        let locked = before - cookies.len();
+        if cookies.is_empty() && locked > 0 {
+            let reason = tr("browser_cookies_keyring");
+            self.finish_login(Err(reason.clone()));
+            self.cookies_status = Some(reason);
             cx.notify();
             return;
         }
-        let count = cookies.len();
-        let set = cdp.call("Storage.setCookies", serde_json::json!({"cookies": cookies}));
+        // 0 cookies não é sucesso: a pessoa vê "nenhum cookie", não "0 trazidos" parecendo que deu certo.
+        if cookies.is_empty() {
+            self.finish_login(Ok((0, locked)));
+            self.cookies_status = Some(match &self.import_site {
+                Some(site) => tr("browser_login_none_site").replace("{site}", site),
+                None => tr("browser_cookies_none"),
+            });
+            cx.notify();
+            return;
+        }
+        let site = self.import_site.clone();
         cx.spawn(async move |this, cx| {
-            let reply = set.await;
+            // O Chromium recusa o lote inteiro por um cookie inválido: aí vai um por um e só os recusados ficam de fora.
+            let total = cookies.len();
+            let reply = match cdp.call("Storage.setCookies", serde_json::json!({"cookies": cookies})).await {
+                Ok(_) => Ok(total),
+                Err(e) => {
+                    let mut written = 0;
+                    for cookie in &cookies {
+                        if cdp.call("Storage.setCookies", serde_json::json!({"cookies": [cookie]})).await.is_ok() { written += 1; }
+                    }
+                    if written > 0 { Ok(written) } else { Err(e) }
+                }
+            };
             let _ = this.update(cx, |this, cx| {
                 match reply {
-                    Ok(_) => {
-                        let done = tr("browser_cookies_ok").replace("{n}", &count.to_string());
+                    Ok(count) => {
+                        this.finish_login(Ok((count, total - count + locked)));
+                        let mut done = match &site {
+                            Some(site) => tr("browser_login_ok_site").replace("{site}", site),
+                            None => tr("browser_cookies_ok"),
+                        }.replace("{n}", &count.to_string());
+                        let skipped = total - count + locked;
+                        if skipped > 0 { done = format!("{done} {}", tr("browser_cookies_partial").replace("{n}", &skipped.to_string())); }
                         this.cookies_status = Some(done.clone());
                         if let Some(engine) = this.engine() { engine.reload(); }
                         // Sucesso é aviso, não estado: some sozinho. Erro fica até a próxima tentativa.
@@ -469,24 +1088,27 @@ impl BrowserPanel {
                             });
                         }).detach();
                     }
-                    Err(e) => this.cookies_status = Some(tr("browser_cookies_error").replace("{e}", &e)),
+                    Err(e) => {
+                        this.finish_login(Err(e.clone()));
+                        this.cookies_status = Some(tr("browser_cookies_error").replace("{e}", &e));
+                    }
                 }
                 cx.notify();
             });
         }).detach();
     }
 
-    /// Abre `chrome://inspect/#remote-debugging` no Chrome do usuário e copia o endereço: o Chrome em execução recusa
+    /// Abre a página da depuração remota no navegador do usuário e copia o endereço: o navegador em execução recusa
     /// `chrome://` vindo da linha de comando, então a instrução manda colar na barra.
     #[cfg(not(target_os = "macos"))]
     fn activate_chrome(&mut self, cx: &mut Context<Self>) {
-        use crate::browser::chrome_import;
-        cx.write_to_clipboard(ClipboardItem::new_string(chrome_import::ACTIVATE_PAGE.to_owned()));
-        self.cookies_status = Some(tr(if chrome_import::open_remote_debug_page() {
-            "browser_cookies_activate"
-        } else {
-            "browser_cookies_no_chrome"
-        }));
+        self.cookies_status = Some(match crate::browser::chrome_import::open_remote_debug_page() {
+            Some(browser) => {
+                cx.write_to_clipboard(ClipboardItem::new_string(browser.page.to_owned()));
+                format!("{} {}", tr("browser_cookies_chrome_off"), tr("browser_cookies_activate")).replace("{browser}", browser.name)
+            }
+            None => tr("browser_cookies_no_chrome"),
+        });
         cx.notify();
     }
 
@@ -502,17 +1124,118 @@ impl BrowserPanel {
 
     /// Diz se mudou. Escondida, a página não se posiciona no desenho e a janela nativa some.
     /// O controlador põe um viewport fixo na página escondida, para ela seguir desenhando para o hangar-preview.
-    fn set_shown(&mut self, shown: bool, cx: &mut Context<Self>) -> bool {
+    fn set_shown(&mut self, shown: bool, covered: bool, cx: &mut Context<Self>) -> bool {
         if self.shown == shown { return false; }
         self.shown = shown;
+        #[cfg(target_os = "windows")]
+        if shown && let Some(old) = self.still.take() { self.released.push(old); }
+        #[cfg(target_os = "windows")]
+        if !shown && covered && let Some(cdp) = self.cdp.clone() {
+            // Coberta, a página só sai da frente com o último quadro pronto: sem ele o painel ficaria vazio atrás do
+            // diálogo. O teto curto evita que um quadro que não vem segure a página por cima do diálogo.
+            let shot = cdp.call("Page.captureScreenshot", serde_json::json!({"format": "jpeg", "quality": 85}));
+            self.cover_gen += 1;
+            let generation = self.cover_gen;
+            cx.spawn(async move |this, cx| {
+                let decode = |r: Result<serde_json::Value, String>| -> Option<Arc<Image>> {
+                    use base64::Engine as _;
+                    r.ok()?["data"].as_str().and_then(|d| base64::engine::general_purpose::STANDARD.decode(d).ok())
+                        .map(|bytes| Arc::new(Image::from_bytes(ImageFormat::Jpeg, bytes)))
+                };
+                let put = |this: &mut Self, image: Option<Arc<Image>>| {
+                    let Some(image) = image else { return };
+                    if this.cover_gen != generation { return this.released.push(image); }
+                    if let Some(old) = this.still.replace(image) { this.released.push(old); }
+                };
+                let leave = |this: &mut Self, cx: &mut Context<Self>| {
+                    if let Some(engine) = this.engine() { engine.hide(); }
+                    // Só agora o viewport fixo da página escondida: antes, a captura podia sair já nesse tamanho.
+                    if let Some(ctl) = this.controller.clone() { cx.spawn(async move |_, _| ctl.set_hidden(true).await).detach(); }
+                    cx.notify();
+                };
+                let timer = cx.background_executor().timer(std::time::Duration::from_millis(300));
+                match futures::future::select(std::pin::pin!(shot), std::pin::pin!(timer)).await {
+                    futures::future::Either::Left((r, _)) => {
+                        let image = decode(r);
+                        let _ = this.update(cx, |this, cx| if !this.shown { put(this, image); leave(this, cx); });
+                    }
+                    // Quadro lento: a página sai da frente agora, e o quadro entra quando chegar.
+                    futures::future::Either::Right((_, shot)) => {
+                        if this.update(cx, |this, cx| { if !this.shown { leave(this, cx); } !this.shown }).unwrap_or(false) {
+                            let image = decode(shot.await);
+                            let _ = this.update(cx, |this, cx| if !this.shown { put(this, image); cx.notify(); });
+                        }
+                    }
+                }
+            }).detach();
+        } else if !shown && let Some(engine) = self.engine() { engine.hide(); }
+        #[cfg(not(target_os = "windows"))]
+        let _ = covered;
+        #[cfg(not(target_os = "windows"))]
         if !shown && let Some(engine) = self.engine() { engine.hide(); }
+        #[cfg(target_os = "windows")]
+        let capturing = !shown && covered && self.cdp.is_some();
+        #[cfg(not(target_os = "windows"))]
+        let capturing = false;
         #[cfg(not(target_os = "macos"))]
-        if let Some(ctl) = self.controller.clone() { cx.spawn(async move |_, _| ctl.set_hidden(!shown).await).detach(); }
+        if !capturing && let Some(ctl) = self.controller.clone() { cx.spawn(async move |_, _| ctl.set_hidden(!shown).await).detach(); }
         #[cfg(target_os = "windows")]
         if !shown { self.schedule_sleep(cx); }
         #[cfg(target_os = "macos")]
         let _ = cx;
         true
+    }
+
+    fn agent_paused(&self) -> bool {
+        #[cfg(not(target_os = "macos"))]
+        { self.paused.is_some() }
+        #[cfg(target_os = "macos")]
+        false
+    }
+
+    fn agent_acting(&self) -> bool {
+        #[cfg(not(target_os = "macos"))]
+        { self.agent.is_some() && self.paused.is_none() }
+        #[cfg(target_os = "macos")]
+        false
+    }
+
+    #[cfg(target_os = "linux")]
+    fn probe_cursor(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) { let p = self.page_point(at); self.probe_again(p, cx); }
+
+    /// `p` já em px da página.
+    #[cfg(target_os = "linux")]
+    fn probe_again(&mut self, p: Point<Pixels>, cx: &mut Context<Self>) {
+        self.cursor_probe.1 = Some(p);
+        if self.cursor_probe.0 { return; }
+        let Some(cdp) = self.cdp.clone() else { return };
+        self.cursor_probe.0 = true;
+        let (x, y) = (f32::from(p.x), f32::from(p.y));
+        // O cursor e a área visível na mesma pergunta: zoom de SPA ou de pinça chega aqui sem esperar uma carga.
+        let js = format!("(()=>{{const k=(()=>{{const e=document.elementFromPoint({x},{y});if(!e)return 'default';const c=getComputedStyle(e).cursor;if(c!=='auto')return c;const t=e.tagName;if(e.isContentEditable||t==='TEXTAREA'||(t==='INPUT'&&!/^(button|submit|reset|checkbox|radio|file|image|range|color)$/i.test(e.type)))return 'text';return 'default'}})();return {{cursor:k,view:{VIEWPORT}}}}})()");
+        let call = cdp.call("Runtime.evaluate", serde_json::json!({"expression": js, "returnByValue": true}));
+        cx.spawn(async move |this, cx| {
+            let value = call.await.ok().map(|r| r["result"]["value"].clone()).unwrap_or_default();
+            let zoom = viewport_of(&value["view"]);
+            let style = match value["cursor"].as_str() {
+                Some("pointer") => CursorStyle::PointingHand,
+                Some("text" | "vertical-text") => CursorStyle::IBeam,
+                Some("crosshair") => CursorStyle::Crosshair,
+                Some("grab") => CursorStyle::OpenHand,
+                Some("grabbing" | "move") => CursorStyle::ClosedHand,
+                Some("ew-resize" | "col-resize") => CursorStyle::ResizeLeftRight,
+                Some("ns-resize" | "row-resize") => CursorStyle::ResizeUpDown,
+                Some("not-allowed" | "no-drop") => CursorStyle::OperationNotAllowed,
+                _ => CursorStyle::Arrow,
+            };
+            let _ = this.update(cx, |this, cx| {
+                this.cursor_probe.0 = false;
+                if let Some(z) = zoom { this.page_zoom = z; }
+                if this.cursor != style { this.cursor = style; cx.notify(); }
+                // O mouse andou durante a pergunta: pergunta de novo pelo ponto novo.
+                if this.cursor_probe.1 != Some(p) && let Some(at) = this.cursor_probe.1 { this.probe_again(at, cx); }
+            });
+        }).detach();
     }
 
     /// Alguém vai usar a página (verbo do agente, espectador): acorda a WebView estacionada e recomeça a contagem.
@@ -542,8 +1265,32 @@ impl BrowserPanel {
         }).detach();
     }
 
-    fn pointer(&self, kind: Pointer, at: Point<Pixels>, clicks: usize) {
-        if let Some(engine) = self.engine() { engine.pointer(kind, at - self.origin.get(), clicks); }
+    /// Ponto do painel em px da página.
+    fn page_point(&self, at: Point<Pixels>) -> Point<Pixels> {
+        #[cfg(target_os = "linux")]
+        let (zoom, ox, oy) = if self.emulated.is_some() && self.page_zoom.0 > 0. { self.page_zoom } else { (1., 0., 0.) };
+        #[cfg(not(target_os = "linux"))]
+        let (zoom, ox, oy) = (1., 0., 0.);
+        let (p, s) = (at - self.origin.get(), self.page_scale.get() / zoom);
+        point(px(ox + f32::from(p.x) * s), px(oy + f32::from(p.y) * s))
+    }
+
+    /// Relido ao trocar de tela emulada e a cada página carregada, um quadro depois: o tamanho emulado chega à página
+    /// depois da resposta do CDP. Sem emulação o zoom não entra na conta.
+    #[cfg(target_os = "linux")]
+    fn refresh_zoom(&mut self, cx: &mut Context<Self>) {
+        if self.emulated.is_none() { self.page_zoom = (1., 0., 0.); return; }
+        let Some(cdp) = self.cdp.clone() else { return };
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(std::time::Duration::from_millis(200)).await;
+            let call = cdp.call("Runtime.evaluate", serde_json::json!({"expression": format!("({VIEWPORT})"), "returnByValue": true}));
+            let zoom = call.await.ok().and_then(|r| viewport_of(&r["result"]["value"]));
+            let _ = this.update(cx, |this, _| if let Some(z) = zoom { this.page_zoom = z });
+        }).detach();
+    }
+
+    fn pointer(&self, kind: Pointer, button: MouseButton, at: Point<Pixels>, clicks: usize, modifiers: &Modifiers) {
+        if let Some(engine) = self.engine() { engine.mouse(kind, button, self.page_point(at), clicks, modifiers); }
     }
 
     fn render_page(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -551,25 +1298,48 @@ impl BrowserPanel {
             .track_focus(&self.focus).key_context("BrowserPage");
         let note = |text: String, color: Hsla| div().size_full().flex().items_center().justify_center().p_4()
             .text_size(px(12.)).text_color(color).text_center().whitespace_normal().child(text);
+        let failure = |text: String, cx: &mut Context<Self>| div().size_full().flex().flex_col().items_center().justify_center().gap_3().p_4()
+            .child(div().text_size(px(12.)).text_color(theme::danger()).text_center().whitespace_normal().child(text))
+            .child(Button::new("browser-retry").outline().small().icon(IconName::RotateCw).label(tr("browser_retry"))
+                .on_click(cx.listener(|this, _, window, cx| this.retry(window, cx))));
         let engine = match &self.engine {
             None if self.starting.is_some() => return page.role(Role::Status).child(note(tr("loading"), theme::muted())).into_any_element(),
             None => return page.child(note(tr("browser_empty"), theme::faint())).into_any_element(),
             Some(Err(error)) => return page.role(Role::Alert)
-                .child(note(tr("browser_failed").replace("{error}", error), theme::warning())).into_any_element(),
+                .child(failure(tr("browser_failed").replace("{error}", error), cx)).into_any_element(),
             Some(Ok(engine)) => engine.clone(),
         };
-        // Sem página nenhuma, o erro da primeira carga é o conteúdo; com página, o motor mostra a dele.
-        if let (None, Some(error)) = (&self.page.url, &self.page.error) {
-            return page.role(Role::Alert).child(note(error.clone(), theme::warning())).into_any_element();
+        // No Linux o erro da carga toma o lugar da página de erro do Chromium (em inglês e sem o botão). No Windows a
+        // página é janela própria e ficaria por cima: lá o erro só vira página quando não há página nenhuma.
+        if let Some(error) = &self.page.error && (cfg!(target_os = "linux") || self.page.url.is_none()) {
+            return page.role(Role::Alert).child(failure(error.clone(), cx)).into_any_element();
         }
-        let origin = self.origin.clone();
+        let (origin, page_scale) = (self.origin.clone(), self.page_scale.clone());
+        #[cfg(target_os = "linux")]
+        let emulated = self.emulated;
+        #[cfg(not(target_os = "linux"))]
+        let emulated: Option<(f32, f32)> = None;
         #[cfg(target_os = "linux")]
         let (ctl, scale) = (self.controller.clone(), self.scale.clone());
         let label = if self.page.title.trim().is_empty() { tr("browser") } else { self.page.title.clone() };
+        #[cfg(target_os = "linux")]
+        let page = page.cursor(self.cursor);
+        #[cfg(target_os = "windows")]
+        let page = page.when_some(self.still.clone().filter(|_| !self.shown), |el, still| el.child(img(still).absolute().inset_0().size_full().object_fit(ObjectFit::Contain)));
         page.bg(theme::background()).aria_label(label)
             .when(self.shown, |el| el.child(canvas(|_, _, _| {}, move |bounds, _, window, _cx| {
-                origin.set(bounds.origin);
-                engine.place(bounds, window);
+                // Tela emulada: encaixada no painel, centrada no topo, e o ponteiro convertido na mesma escala.
+                let placed = match emulated {
+                    Some((w, h)) if w > 0. && h > 0. => {
+                        let (bw, bh) = (f32::from(bounds.size.width), f32::from(bounds.size.height));
+                        let s = (bw / w).min(bh / h);
+                        page_scale.set(1. / s);
+                        Bounds { origin: bounds.origin + point(px((bw - w * s) / 2.), px(0.)), size: size(px(w * s), px(h * s)) }
+                    }
+                    _ => { page_scale.set(1.); bounds }
+                };
+                origin.set(placed.origin);
+                engine.place(placed, window);
                 // A página desenha na escala desta janela (o Chromium nasce em 1, às vezes com ela escondida).
                 #[cfg(target_os = "linux")]
                 if scale.replace(window.scale_factor()) != window.scale_factor() && let Some(ctl) = ctl.clone() {
@@ -577,26 +1347,50 @@ impl BrowserPanel {
                     window.spawn(_cx, async move |_| ctl.set_scale(wanted).await).detach();
                 }
             }).absolute().inset_0()))
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, event: &MouseDownEvent, window, cx| {
+            // Só no Linux a GPUI desenha por cima da página; no Windows ela é janela própria e cobriria o contorno.
+            .when(cfg!(target_os = "linux") && self.agent_acting(), |el| el.child(div().absolute().inset_0().border_2().border_color(theme::accent())))
+            // Os três botões: o direito abre o menu da página, o do meio abre link em outra aba (que vira esta).
+            .on_any_mouse_down(cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                if !matches!(event.button, MouseButton::Left | MouseButton::Right | MouseButton::Middle) { return; }
+                #[cfg(not(target_os = "macos"))]
+                this.user_input(cx);
                 this.focus.focus(window, cx);
-                this.pointer(Pointer::Down, event.position, event.click_count);
+                this.pointer(Pointer::Down, event.button, event.position, event.click_count, &event.modifiers);
             }))
-            .on_mouse_up(MouseButton::Left, cx.listener(|this, event: &MouseUpEvent, _, _| this.pointer(Pointer::Up, event.position, 0)))
+            .on_mouse_up(MouseButton::Left, cx.listener(|this, event: &MouseUpEvent, _, _| this.pointer(Pointer::Up, event.button, event.position, event.click_count, &event.modifiers)))
+            .on_mouse_up(MouseButton::Right, cx.listener(|this, event: &MouseUpEvent, _, _| this.pointer(Pointer::Up, event.button, event.position, event.click_count, &event.modifiers)))
+            .on_mouse_up(MouseButton::Middle, cx.listener(|this, event: &MouseUpEvent, _, _| this.pointer(Pointer::Up, event.button, event.position, event.click_count, &event.modifiers)))
             // Soltar fora da página ainda termina o arrasto começado nela.
-            .on_mouse_up_out(MouseButton::Left, cx.listener(|this, event: &MouseUpEvent, _, _| this.pointer(Pointer::Up, event.position, 0)))
-            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, _| this.pointer(Pointer::Move, event.position, 0)))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(|this, event: &MouseUpEvent, _, _| this.pointer(Pointer::Up, event.button, event.position, event.click_count, &event.modifiers)))
+            .on_mouse_up_out(MouseButton::Right, cx.listener(|this, event: &MouseUpEvent, _, _| this.pointer(Pointer::Up, event.button, event.position, event.click_count, &event.modifiers)))
+            .on_mouse_up_out(MouseButton::Middle, cx.listener(|this, event: &MouseUpEvent, _, _| this.pointer(Pointer::Up, event.button, event.position, event.click_count, &event.modifiers)))
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, _cx| {
+                this.pointer(Pointer::Move, MouseButton::Left, event.position, 0, &event.modifiers);
+                #[cfg(target_os = "linux")]
+                this.probe_cursor(event.position, _cx);
+            }))
             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, _| {
                 let Some(engine) = this.engine() else { return };
-                let delta = event.delta.pixel_delta(px(16.));
+                // A GPUI manda 3 linhas por passo da roda; 17,78 px por linha dá os 53 px do Chrome no Linux.
+                let delta = event.delta.pixel_delta(px(17.78));
                 // A GPUI manda o sinal oposto ao do motor.
-                engine.wheel(event.position - this.origin.get(), point(-delta.x, -delta.y));
+                engine.scroll(this.page_point(event.position), point(-delta.x, -delta.y), &event.modifiers);
             }))
             // A tecla é da página: os atalhos do app (Esc, "/") não comem o que se digita nela.
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                #[cfg(not(target_os = "macos"))]
+                this.user_input(cx);
                 if let Some(engine) = this.engine() {
                     let k = &event.keystroke;
                     // O Chromium sem janela tem área de transferência própria: colar lê a do sistema e digita o texto.
                     let paste = (k.modifiers.control && !k.modifiers.alt && k.key == "v") || (k.modifiers.shift && k.key == "insert");
+                    // E copiar escreve na do sistema. A leitura da seleção sai antes da tecla, que é entregue depois
+                    // dela, na ordem: o Ctrl+X ainda não cortou o texto.
+                    #[cfg(target_os = "linux")]
+                    if (k.modifiers.control && !k.modifiers.alt && !k.modifiers.shift && matches!(k.key.as_str(), "c" | "x"))
+                        || (k.modifiers.control && k.key == "insert") {
+                        this.copy_selection(cx);
+                    }
                     match paste.then(|| cx.read_from_clipboard().and_then(|item| item.text())).flatten() {
                         Some(text) => engine.insert_text(&text),
                         None => engine.key(true, k),
@@ -621,9 +1415,22 @@ impl Render for BrowserPanel {
         let forward = chrome::icon_button("browser-forward", IconName::ArrowRight, tr("browser_forward"), cx)
             .disabled(!ready || !self.page.can_forward)
             .on_click(cx.listener(|this, _, _, _| if let Some(engine) = this.engine() { engine.forward() }));
-        let reload = chrome::icon_button("browser-reload", IconName::RotateCw, tr("browser_reload"), cx)
-            .disabled(!ready || self.page.url.is_none())
-            .on_click(cx.listener(|this, _, _, _| if let Some(engine) = this.engine() { engine.reload() }));
+        // Carregando, o mesmo lugar para a carga, como no Chrome.
+        let reload = if self.page.loading && ready {
+            chrome::icon_button("browser-stop", IconName::Close, tr("browser_stop"), cx)
+                .on_click(cx.listener(|this, _, _, _| if let Some(engine) = this.engine() { engine.stop() }))
+        } else {
+            chrome::icon_button("browser-reload", IconName::RotateCw, tr("browser_reload"), cx)
+                .disabled(!ready || self.page.url.is_none())
+                .on_click(cx.listener(|this, _, window, cx| this.retry(window, cx)))
+        };
+        let url = self.page.url.clone().filter(|u| u.starts_with("http://") || u.starts_with("https://"));
+        let copy = chrome::icon_button("browser-copy", if self.copied { IconName::Check } else { IconName::Copy }, tr("browser_copy"), cx)
+            .disabled(url.is_none())
+            .on_click(cx.listener({ let url = url.clone(); move |this, _, _, cx| this.copy_address(url.clone(), cx) }));
+        let open_out = chrome::icon_button("browser-open-out", IconName::ExternalLink, tr("browser_open_out"), cx)
+            .disabled(url.is_none())
+            .on_click(cx.listener(move |_, _, _, cx| if let Some(url) = &url { cx.open_url(url) }));
         let address = div().flex_1().min_w_0()
             .capture_action(cx.listener(|this, _: &Escape, window, cx| { cx.stop_propagation(); this.restore_address(window, cx); }))
             .child(Input::new(&self.address).id("browser-address").small().aria_label(tr("browser_address"))
@@ -631,29 +1438,155 @@ impl Render for BrowserPanel {
         #[allow(unused_mut)]
         let mut toolbar = div().id("browser-toolbar").flex_shrink_0().flex().items_center().gap_1().px_2().py(px(6.))
             .border_b_1().border_color(theme::border())
-            .child(back).child(forward).child(reload).child(address);
+            .child(back).child(forward).child(reload).child(address)
+            // O selo só aparece com erro: página limpa não ganha um zero na barra.
+            .when(self.error_count > 0, |el| el.child(div().id("browser-errors-badge").flex_shrink_0().flex().items_center().gap_1()
+                .px_2().py(px(2.)).rounded_full().cursor_pointer().bg(theme::danger().opacity(0.15)).border_1().border_color(theme::danger().opacity(0.4))
+                .text_size(px(11.)).text_color(theme::danger()).role(Role::Button)
+                .aria_label(tr("browser_errors_count").replace("{n}", &self.error_count.to_string()))
+                .child(div().size(px(6.)).rounded_full().bg(theme::danger()))
+                .child(if self.error_count == 1 { tr("browser_errors_one") } else { tr("browser_errors_count").replace("{n}", &self.error_count.to_string()) })
+                .on_click(cx.listener(|this, _, _, cx| { this.errors_open = !this.errors_open; cx.notify(); }))))
+            .child(copy).child(open_out);
         // Botão que traz o login do Chrome real do usuário (só onde o motor fala CDP).
         #[cfg(not(target_os = "macos"))]
         {
-            toolbar = toolbar.child(chrome::icon_button("browser-cookies", IconName::Key, tr("browser_cookies_bring"), cx)
-                .disabled(!ready)
-                .on_click(cx.listener(|this, _, _, cx| this.import_chrome_login(cx))));
+            toolbar = toolbar.child(chrome::icon_button("browser-shot", IconName::Image, tr("browser_send_shot"), cx)
+                .disabled(!ready || self.page.url.is_none() || self.shooting)
+                .on_click(cx.listener(|this, _, _, cx| this.send_shot(cx))));
+            toolbar = toolbar.child(Button::new("browser-cookies")
+                .custom(ButtonCustomVariant::new(cx).color(transparent_black()).foreground(theme::muted())
+                    .hover(theme::hover()).active(theme::hover()))
+                .icon(Icon::new(IconName::Key).size(px(14.))).label(tr("browser_cookies_bring"))
+                .h(px(28.)).px(px(8.)).rounded(px(6.)).text_size(px(12.)).flex_shrink_0()
+                .on_click(cx.listener(|this, _, window, cx| this.ask_chrome_login(window, cx))));
         }
         // Com a página na tela, a falha dela fica numa linha; sem página, `render_page` a mostra no lugar dela.
-        let notice = self.invalid.clone().or_else(|| self.page.error.clone().filter(|_| ready && self.page.url.is_some()));
+        // A queda vence o endereço recusado: com a página branca, ela é o que explica a tela.
+        let dead = self.engine().is_some_and(|e| !e.alive());
+        let page_error = self.page.error.clone().filter(|_| !cfg!(target_os = "linux") && ready && self.page.url.is_some());
+        let notice = if dead { page_error.clone() } else { self.invalid.clone().or(page_error) };
         #[allow(unused_mut)]
-        let mut root = div().size_full().flex().flex_col()
+        let mut root = div().size_full().flex().flex_col().key_context("BrowserPanel")
+            // Antes da página: atalhos de navegador valem no painel inteiro e não chegam a ela.
+            .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                let k = &event.keystroke;
+                let (m, page) = (k.modifiers, this.focus.is_focused(window));
+                let only = |alt: bool| m.alt == alt && !m.control && !m.platform && !m.shift;
+                match k.key.as_str() {
+                    "l" if m.secondary() && !m.alt && !m.shift => this.focus_address(window, cx),
+                    "f5" if !m.modified() => this.retry(window, cx),
+                    "r" if m.secondary() && !m.alt && !m.shift => this.retry(window, cx),
+                    "left" if page && only(true) => { if let Some(engine) = this.engine() { engine.back() } }
+                    "right" if page && only(true) => { if let Some(engine) = this.engine() { engine.forward() } }
+                    _ => return,
+                }
+                cx.stop_propagation();
+            }))
             .child(toolbar)
-            .when_some(notice, |el, text| el.child(div().id("browser-notice").flex_shrink_0().px_3().py(px(6.)).role(Role::Alert)
-                .text_size(px(11.)).text_color(theme::danger()).whitespace_normal().child(text)));
+            .when_some(notice, |el, text| el.child(div().id("browser-notice").flex_shrink_0().flex().items_center().gap_2().px_3().py(px(6.)).role(Role::Alert)
+                .child(div().flex_1().min_w_0().text_size(px(11.)).text_color(theme::danger()).whitespace_normal().child(text))
+                .when(dead, |el| el.child(Button::new("browser-notice-retry").outline().xsmall().icon(IconName::RotateCw).label(tr("browser_retry"))
+                    .on_click(cx.listener(|this, _, window, cx| this.retry(window, cx)))))));
         #[cfg(not(target_os = "macos"))]
         {
             root = root.when_some(self.cookies_status.clone(), |el, text| el.child(div().id("browser-cookies-status")
                 .flex_shrink_0().px_3().py(px(6.)).role(Role::Status)
                 .text_size(px(11.)).text_color(theme::muted()).whitespace_normal().child(text)));
         }
+        root = root.children(self.render_dialog(cx));
+        root = root.children(self.render_errors(cx));
+        let notice_line = |id: &'static str, text: String, cx: &mut Context<Self>, close: fn(&mut Self)| div().id(id).flex_shrink_0().flex()
+            .items_center().gap_2().px_3().py(px(4.)).border_b_1().border_color(theme::border()).role(Role::Status)
+            .child(div().flex_1().min_w_0().text_size(px(11.)).text_color(theme::warning()).whitespace_normal().child(text))
+            .child(chrome::icon_button(SharedString::from(format!("{id}-close")), IconName::Close, tr("close"), cx)
+                .on_click(cx.listener(move |this, _, _, cx| { close(this); cx.notify(); })));
+        let page_notice = self.page.notice.clone().filter(|_| self.page.notice_seq != self.dismissed_notice);
+        if let Some(text) = page_notice { root = root.child(notice_line("browser-page-notice", text, cx, |this| this.dismissed_notice = this.page.notice_seq)); }
+        if let Some(text) = self.local_notice.clone() { root = root.child(notice_line("browser-local-notice", text, cx, |this| this.local_notice = None)); }
+        #[cfg(not(target_os = "macos"))]
+        { root = root.children(self.render_agent(cx)); }
+        #[cfg(not(target_os = "macos"))]
+        if let Some((site, _)) = self.login_request.as_ref().filter(|(_, reply)| !reply.is_canceled()) {
+            let text = match site {
+                Some(site) => tr("browser_login_agent_site").replace("{site}", site),
+                None => tr("browser_login_agent_all"),
+            };
+            root = root.child(div().id("browser-login-request").flex_shrink_0().flex().items_center().gap_2().px_3().py(px(6.))
+                .border_b_1().border_color(theme::border()).role(Role::Alert)
+                .child(div().flex_1().min_w_0().text_size(px(11.)).text_color(theme::text()).whitespace_normal().child(text))
+                .child(Button::new("browser-login-deny").small().label(tr("browser_login_agent_deny"))
+                    .on_click(cx.listener(|this, _, window, cx| this.answer_login_request(false, window, cx))))
+                .child(Button::new("browser-login-allow").small().primary().label(tr("browser_login_agent_allow"))
+                    .on_click(cx.listener(|this, _, window, cx| this.answer_login_request(true, window, cx)))));
+        }
+        #[cfg(not(target_os = "macos"))]
+        if let Some(site) = self.login_hint.clone() {
+            root = root.child(div().id("browser-login-hint").flex_shrink_0().flex().items_center().gap_2().px_3().py(px(6.))
+                .border_b_1().border_color(theme::border()).role(Role::Status)
+                .child(div().flex_1().min_w_0().text_size(px(11.)).text_color(theme::muted()).whitespace_normal()
+                    .child(tr("browser_login_hint").replace("{site}", &site)))
+                .child(Button::new("browser-login-hint-use").small().label(tr("browser_login_hint_use"))
+                    .on_click(cx.listener(|this, _, window, cx| this.ask_chrome_login(window, cx))))
+                .child(chrome::icon_button("browser-login-hint-close", IconName::Close, tr("close"), cx)
+                    .on_click(cx.listener(|this, _, _, cx| { this.login_hint = None; cx.notify(); }))));
+        }
+        #[cfg(target_os = "linux")]
+        if !self.cookie_sources.is_empty() {
+            let picks = self.cookie_sources.iter().enumerate().map(|(i, source)| {
+                let source = source.clone();
+                Button::new(("browser-cookie-source", i)).small().label(source.label.clone())
+                    .on_click(cx.listener(move |this, _, _, cx| this.read_disk_cookies(source.clone(), cx)))
+            });
+            root = root.child(div().id("browser-cookie-sources").flex_shrink_0().flex().flex_wrap().gap_1().px_3().pb(px(6.))
+                .children(picks));
+        }
         root.child(self.render_page(cx))
     }
+}
+
+/// Zoom e deslocamento da área visível da página, no formato que `viewport_of` lê.
+#[cfg(target_os = "linux")]
+const VIEWPORT: &str = "[visualViewport.scale,visualViewport.offsetLeft,visualViewport.offsetTop]";
+
+#[cfg(target_os = "linux")]
+fn viewport_of(v: &serde_json::Value) -> Option<(f32, f32, f32)> {
+    let n = |i: usize| v.get(i).and_then(serde_json::Value::as_f64).map(|x| x as f32);
+    Some((n(0).filter(|z| *z > 0.)?, n(1)?, n(2)?))
+}
+
+/// Linha do registro do agente (sem acento, com o tipo na frente) como a pessoa lê na lista do selo.
+fn error_text(line: &str) -> String {
+    if let Some(rest) = line.strip_prefix("erro nao tratado: ") { return tr("browser_errors_uncaught").replace("{e}", rest); }
+    ["error: ", "assert: "].iter().find_map(|p| line.strip_prefix(p)).unwrap_or(line).to_owned()
+}
+
+/// "nav-tela está usando o navegador · clicando em “Salvar”". Nome longo de alvo é cortado: a faixa tem uma linha.
+#[cfg(not(target_os = "macos"))]
+fn describe_activity(key: &str, a: &crate::browser::control::Activity) -> String {
+    let session = key.rsplit("::").next().unwrap_or(key);
+    let target = a.target.as_deref().map(|t| {
+        let t = t.split_whitespace().collect::<Vec<_>>().join(" ");
+        if t.chars().count() > 40 { format!("{}…", t.chars().take(39).collect::<String>()) } else { t }
+    });
+    let (named, plain) = match a.verb.as_str() {
+        "click" => ("browser_ctl_click", "browser_ctl_click_plain"),
+        "fill" => ("browser_ctl_fill", "browser_ctl_fill_plain"),
+        "hover" => ("browser_ctl_hover", "browser_ctl_hover_plain"),
+        "press" => ("browser_ctl_press", "browser_ctl_type"),
+        "type" => ("", "browser_ctl_type"),
+        "snapshot" | "text" | "url" | "console" | "network" => ("", "browser_ctl_read"),
+        "wait" => ("", "browser_ctl_wait"),
+        "shot" => ("", "browser_ctl_shot"),
+        _ => ("", ""),
+    };
+    let using = tr("browser_ctl_using").replace("{session}", session);
+    let doing = match target {
+        Some(t) if !named.is_empty() => tr(named).replace("{target}", &t),
+        _ if !plain.is_empty() => tr(plain),
+        _ => return using,
+    };
+    format!("{using} · {doing}")
 }
 
 impl Hangar {
@@ -672,7 +1605,7 @@ impl Hangar {
     pub(super) fn open_in_browser_panel(&mut self, url: String, window: &mut Window, cx: &mut Context<Self>) {
         let Some(key) = self.browser_key() else { return };
         let browser = self.browser_for(key, window, cx);
-        browser.update(cx, |panel, cx| panel.go(url, window, cx));
+        browser.update(cx, |panel, cx| panel.go(url, By::User, window, cx));
         self.show_browser_tab(window, cx);
     }
 
@@ -691,7 +1624,7 @@ impl Hangar {
         if let Some(key) = self.side_key() { self.side.browser_open.remove(&key); }
         #[cfg(target_os = "linux")]
         { self.side.warm = None; }
-        for browser in self.side.browsers.values().cloned().collect::<Vec<_>>() { browser.update(cx, |panel, cx| { panel.set_shown(false, cx); }); }
+        for browser in self.side.browsers.values().cloned().collect::<Vec<_>>() { browser.update(cx, |panel, cx| { panel.set_shown(false, false, cx); }); }
         if showing { self.choose_side_tab(SideTab::Context, window, cx); } else { cx.notify(); }
     }
 
@@ -701,21 +1634,34 @@ impl Hangar {
     /// a busca, os painéis presos ao compositor e à barra do topo, os diálogos e folhas do kit e as notificações. A aba
     /// fechada no × sai de `side_tab`, então também esconde. No
     /// Linux a página é desenhada pela própria GPUI, e as camadas passam por cima dela sem precisar escondê-la.
-    fn browser_visible(&self, window: &mut Window, cx: &mut App) -> bool {
+    /// `(visível, coberta)`: coberta = estaria à vista, não fosse uma camada por cima.
+    fn browser_visible(&self, window: &mut Window, cx: &mut App) -> (bool, bool) {
         let covered = cfg!(not(target_os = "linux")) && (self.connection_dialog || self.search.open || self.popup_open()
             || window.has_active_dialog(cx) || window.has_active_sheet(cx) || !window.notifications(cx).is_empty());
-        self.side_width(window).is_some() && !self.files_expanded()
+        let in_view = self.side_width(window).is_some() && !self.files_expanded()
             && !self.side_menu_shown() && !self.subagent_tab_open() && self.side_tab() == SideTab::Browser
-            && self.settings.is_none() && self.costs.view.is_none() && self.worktrees.view.is_none() && !covered
+            && self.settings.is_none() && self.costs.view.is_none() && self.worktrees.view.is_none();
+        (in_view && !covered, in_view && covered)
     }
 
     /// A cada quadro da janela, antes das áreas guardadas desenharem.
     pub(super) fn sync_browser(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let visible = self.browser_visible(window, cx);
+        let (visible, covered) = self.browser_visible(window, cx);
         let current = self.browser_key();
         for (key, browser) in self.side.browsers.iter().map(|(k, b)| (k.clone(), b.clone())).collect::<Vec<_>>() {
-            let shown = visible && current.as_deref() == Some(key.as_str());
-            if browser.update(cx, |panel, cx| panel.set_shown(shown, cx)) && shown {
+            let mine = current.as_deref() == Some(key.as_str());
+            #[cfg(not(target_os = "macos"))]
+            {
+                let name = key.rsplit("::").next().unwrap_or(&key);
+                let working = self.sessions.iter().any(|s| s.name == name && s.state == "working");
+                if browser.read(cx).session_working != working { browser.update(cx, |panel, cx| panel.set_session_working(working, cx)); }
+            }
+            let shown = visible && mine;
+            #[cfg(target_os = "windows")]
+            if !browser.read(cx).released.is_empty() {
+                for image in browser.update(cx, |panel, _| std::mem::take(&mut panel.released)) { super::release_image(image, window, cx); }
+            }
+            if browser.update(cx, |panel, cx| panel.set_shown(shown, covered && mine, cx)) && shown {
                 // O painel é guardado entre quadros: sem um redesenho dele, a página não volta a se posicionar.
                 let id = browser.entity_id();
                 window.on_next_frame(move |_, cx| cx.notify(id));
@@ -734,7 +1680,23 @@ impl Hangar {
     }
 
     fn browser_for(&mut self, key: String, window: &mut Window, cx: &mut Context<Self>) -> Entity<BrowserPanel> {
-        self.side.browsers.entry(key.clone()).or_insert_with(|| cx.new(|cx| BrowserPanel::new(key, window, cx))).clone()
+        if let Some(browser) = self.side.browsers.get(&key) { return browser.clone(); }
+        let browser = cx.new(|cx| BrowserPanel::new(key.clone(), window, cx));
+        cx.subscribe(&browser, |this, _, event: &PanelEvent, cx| match event {
+            PanelEvent::Shot { key, bytes } => this.attach_page_shot(key, bytes.clone(), cx),
+        }).detach();
+        self.side.browsers.insert(key, browser.clone());
+        browser
+    }
+
+    /// O print vai para a mensagem da sessão aberta, como uma imagem colada: o botão só existe com o painel dela à vista.
+    /// Se a pessoa trocou de sessão enquanto o print saía, ele não vai para a conversa errada.
+    fn attach_page_shot(&mut self, owner: &str, bytes: Vec<u8>, cx: &mut Context<Self>) {
+        if self.browser_key().as_deref() != Some(owner) { return eprintln!("[nav] print de {owner} descartado: outra sessao aberta"); }
+        let Some(key) = self.composer_key() else { return };
+        let name = format!("pagina-{}.png", self.attach_seq + 1);
+        if let Err(problem) = self.add_attachment(&key, name, bytes) { self.action_feedback.insert(key, (problem, true)); }
+        cx.notify();
     }
 
     /// `hangar-preview open` → backend → evento `nav` na lista. Com a sessão na tela a aba Navegador vem à frente; fora
@@ -748,7 +1710,8 @@ impl Hangar {
         let Some(server) = self.server.as_deref() else { eprintln!("[nav] nav ignorado: sem servidor ativo"); return };
         let key = format!("{}::{name}", super::servers::norm(server));
         let browser = self.browser_for(key.clone(), window, cx);
-        browser.update(cx, |panel, cx| panel.go(url.to_owned(), window, cx));
+        // Pausado pela pessoa, o agente não troca a página dela; o `open` do CLI pergunta o `estado` e devolve o erro.
+        browser.update(cx, |panel, cx| if panel.agent_paused() { eprintln!("[nav] nav ignorado: navegador pausado pelo usuario") } else { panel.go(url.to_owned(), By::Agent, window, cx) });
         if self.browser_key().as_deref() == Some(key.as_str()) { self.show_browser_tab(window, cx); } else {
             self.side.browser_open.insert(key.clone());
             self.side.tabs.insert(key, SideTab::Browser);
@@ -794,6 +1757,20 @@ impl Hangar {
             }
         };
         if tab.is_some() { return answer(reply, "erro: o app nativo ainda nao tem abas: e um navegador por sessao".into()); }
+        if verb == "login" {
+            let Some(browser) = self.side.browsers.get(&key).cloned() else { return answer(reply, missing(&key)) };
+            let site = match args.first().map(|a| crate::browser::chrome_import::site_of(a)) {
+                Some(None) => return answer(reply, "erro: login [site]: site invalido (ex.: hangar-preview login github.com)".into()),
+                Some(site) => site,
+                None => None,
+            };
+            browser.update(cx, |panel, cx| panel.request_login(site, reply, cx));
+            // A linha de aprovação fica no painel Navegador da sessão: é ele que aparece quando a pessoa abre a sessão.
+            self.side.browser_open.insert(key.clone());
+            self.side.tabs.insert(key, SideTab::Browser);
+            cx.notify();
+            return;
+        }
         if verb == "close" {
             let closed = self.side.browsers.remove(&key).inspect(|b| b.read(cx).end_viewer()).is_some();
             if closed { crate::browser::server::remove_sidecar(&key); self.side.browser_open.remove(&key); cx.notify(); }
@@ -814,12 +1791,15 @@ impl Hangar {
                 None => format!("erro: a sessao {key} nao tem navegador aberto"),
             });
         };
+        let browser = browser.downgrade();
+        let _ = browser.update(cx, |panel, _| panel.agent_started());
         #[cfg(target_os = "windows")]
         let settle = woke.then(|| cx.background_executor().timer(WAKE_SETTLE));
-        cx.spawn(async move |_, _| {
+        cx.spawn(async move |_, cx| {
             #[cfg(target_os = "windows")]
             if let Some(settle) = settle { settle.await; }
             let _ = reply.send(ctl.run(&verb, &args).await);
+            let _ = browser.update(cx, |panel, cx| panel.agent_finished(cx));
         }).detach();
     }
 }

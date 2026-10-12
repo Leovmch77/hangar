@@ -121,9 +121,10 @@ struct Services {
     target:TerminalTarget,queue:Arc<QueueActor>,policy:PolicyClient,root:String,attempt:String,text:String,sequence:Arc<AtomicU64>,
 }
 impl Services {
-    async fn action(&self,label:&str,action:Action)->Result<Value,RuntimeError> {
+    async fn action(&self,label:&str,action:Action)->Result<Value,RuntimeError> {self.action_held(label,action,false).await}
+    async fn action_held(&self,label:&str,action:Action,hold:bool)->Result<Value,RuntimeError> {
         let seq=self.sequence.fetch_add(1,Ordering::Relaxed);
-        self.queue.exec(self.target.generation,&format!("terminal:{label}:{seq}"),sample(),action).await.map_err(|_|error("queue_io"))
+        self.queue.exec_held(self.target.generation,&format!("terminal:{label}:{seq}"),sample(),action,hold).await.map_err(|_|error("queue_io"))
     }
     async fn call(&self,kind:&str,request_id:RequestId,payload:Value)->Result<Value,RuntimeError> {
         let phase=format!("terminal-policy:{}:{}:{}",self.target.generation,self.attempt,self.sequence.fetch_add(1,Ordering::Relaxed));
@@ -185,7 +186,14 @@ struct Executor {
     /// Linha cujo foco no rodapé o Esc não devolveu, e quantas vezes: como a devolução dos mods, o Esc
     /// tem teto e não vira laço de teclas.
     footer_misses:Option<(String,u32)>,
+    /// Depois de uma entrega aceita, a confirmação segue o crescimento do transcript em vez de esperar o
+    /// tique; a prova é a mesma (`confirm_rows`). Prazo para não vigiar uma linha que nunca chega.
+    confirm_until:Option<tokio::time::Instant>,
+    confirm_seen:Option<u64>,
 }
+/// Leitura do tamanho do transcript enquanto uma entrega espera confirmação: só `stat`.
+const CONFIRM_POLL:Duration=Duration::from_millis(50);
+const CONFIRM_WINDOW:Duration=Duration::from_secs(30);
 struct Stall {row:String,code:String,since:tokio::time::Instant,wait:Duration,next:tokio::time::Instant,surfaced:bool}
 /// Teto da espera entre tentativas: o composer que esvazia é visto na hora, e o resto (tela
 /// ilegível) não deve atrasar a mensagem muito além disso.
@@ -253,7 +261,7 @@ impl TerminalActor {
         let sequence=Arc::new(AtomicU64::new(queue.initial_state().next_seq.max(previous.max(queue.initial_state().operations.len() as u64).saturating_add(1))));
         let receipt=ReceiptIndex::new("claude",&target.binding.conversation);
         let (sender,receiver)=mpsc::channel(64); let closed=Arc::new(AtomicBool::new(false)); let anchor=options.anchor.clone();
-        let executor=Executor {target,queue:Arc::new(queue),policy,options,events,revision,sequence,receipt,deliverable:false,last_error:None,uncertain:vec![],unprovable:false,uncertain_since:None,loan:None,stall:None,hold:None,hold_checked:false,focus_refused:false,parked:VecDeque::new(),away:None,clear_watch:None,clear_notice:None,footer_misses:None};
+        let executor=Executor {target,queue:Arc::new(queue),policy,options,events,revision,sequence,receipt,deliverable:false,last_error:None,uncertain:vec![],unprovable:false,uncertain_since:None,loan:None,stall:None,hold:None,hold_checked:false,focus_refused:false,parked:VecDeque::new(),away:None,clear_watch:None,clear_notice:None,footer_misses:None,confirm_until:None,confirm_seen:None};
         let task=tokio::spawn(executor.run(receiver,closed.clone()));
         TerminalHandle {sender,closed,task:Arc::new(Mutex::new(Some(task))),stopped:Arc::new(Mutex::new(None)),anchor}
     }
@@ -367,6 +375,16 @@ impl Executor {
                         if self.last_error.is_some() {self.expire_clear().await; if self.reconciling() {self.reconcile_uncertain().await?;} continue;}
                         let result=async {self.confirm_rows().await?;self.drain_once(None).await?;Ok::<_,RuntimeError>(())}.await;
                         if let Err(failure)=result {self.enter_error(failure).await?;}
+                        continue;
+                    }
+                    _=tokio::time::sleep(CONFIRM_POLL),if self.confirm_until.is_some() && !closed.load(Ordering::Acquire) && self.last_error.is_none()=>{
+                        if self.held() || !self.parked.is_empty() {continue;}
+                        if self.confirm_until.is_some_and(|until|tokio::time::Instant::now()>=until) {self.confirm_until=None; continue;}
+                        let len=std::fs::metadata(&self.target.transcript).ok().map(|m|m.len());
+                        if len==self.confirm_seen {continue;}
+                        self.confirm_seen=len;
+                        if let Err(failure)=self.confirm_rows().await {self.enter_error(failure).await?; continue;}
+                        if self.queue.snapshot().await.is_ok_and(|state|!state.rows.iter().any(|r|r["delivered"]==true && r["confirmed"]!=true)) {self.confirm_until=None;}
                         continue;
                     }
                 };
@@ -664,9 +682,12 @@ impl Executor {
         } {
             return Ok(serde_json::from_value(prepared["result"].clone()).unwrap_or_else(|_|reply(id,disposition,Value::Null)));
         }
+        let mut fresh=false;
         if let Some(row)=&row_id {
             if !state.rows.iter().any(|r|r["id"]==*row) {
-                self.action(Action::Append {text:text.into(),delivered:false,ts:None,pre_transcript:payload["pre_transcript"]==true,entry_id:Some(row.clone())}).await?;
+                // Segurada: em idle a linha só aparece já entregue, sem piscar "Na fila"; o adiamento a publica no `Finish`.
+                self.services("maintenance","maintenance","").action_held("queue",Action::Append {text:text.into(),delivered:false,ts:None,pre_transcript:payload["pre_transcript"]==true,entry_id:Some(row.clone())},true).await?;
+                fresh=true;
             }
         }
         if prompt && !is_clear(text) && state.terminal_write_blocked(&self.target.binding.conversation) {
@@ -682,6 +703,12 @@ impl Executor {
             self.action(Action::Finish {id:id.into(),status,result:serde_json::to_value(&result).unwrap()}).await?;
             return Ok(result);
         }
+        // Mensagem nova não passa à frente de outra que ficou adiada: espera na fila e a drenagem entrega na ordem.
+        if fresh && state.pending_ahead(self.target.created) {
+            let result=reply(id,Disposition::Deferred,json!({"code":"queue_ahead","queued":true,"cleanup":"not_needed"}));
+            self.action(Action::Finish {id:id.into(),status:Status::Deferred,result:serde_json::to_value(&result).unwrap()}).await?;
+            return Ok(result);
+        }
         let root=row_id.as_deref().unwrap_or(id);
         // Antes da escrita: o transcript novo do `/clear` nasce logo depois do Enter.
         let dispatched_at=sample().epoch_s;
@@ -694,12 +721,25 @@ impl Executor {
         let mut result=if !current {reply(id,Disposition::Deferred,json!({"code":"terminal_facts","cleanup":"not_needed"}))}
             else if prompt && !slash && !facts.as_ref().is_some_and(|result|result.as_ref().is_ok_and(|f|f.ready && !f.open_question || f.native.is_some())) {reply(id,Disposition::Deferred,json!({"queued":true,"cleanup":"not_needed"}))}
             else {
-                if row_id.is_some() {
-                    let cursor=self.receipt.capture(&self.target.transcript).map_err(|_|error("receipt_cursor"))?;
-                    self.action(Action::BindDispatch {id:id.into(),cursor:serde_json::to_value(cursor).unwrap()}).await?;
-                }
+                let bound=match row_id.is_some() {
+                    true=>match self.receipt.capture(&self.target.transcript) {
+                        Ok(cursor)=>self.action(Action::BindDispatch {id:id.into(),cursor:serde_json::to_value(cursor).unwrap()}).await.map(|_|()),
+                        Err(_)=>Err(error("receipt_cursor")),
+                    },
+                    false=>Ok(()),
+                };
                 // A entrada só escreve depois do `writing` do escritor; antes disso, cair não a deixa incerta.
-                self.action(Action::BeginDispatch {id:id.into(),wire_id:format!("terminal:{}:{id}",self.target.generation),staged:kind=="input"}).await?;
+                let begun=match bound {
+                    Ok(())=>self.action(Action::BeginDispatch {id:id.into(),wire_id:format!("terminal:{}:{id}",self.target.generation),staged:kind=="input"}).await.map(|_|()),
+                    Err(failure)=>Err(failure),
+                };
+                // Falha com a projeção segurada: a linha que ficou na fila precisa aparecer.
+                if let Err(failure)=begun {
+                    if fresh && self.action(Action::EnsureProjection).await.is_err() {
+                        tracing::warn!(key=%self.target.key,session=%self.target.name,code="queue_projection_failed","a linha segurada não voltou à projeção depois da falha da entrega");
+                    }
+                    return Err(failure);
+                }
                 let publication=format!("{}:{}:{id}",self.target.key,self.target.generation);
                 let held=payload["request_id"].as_str().filter(|s|s.starts_with("perm:")||s.starts_with("ask:"));
                 let plugin=if matches!(kind,"select"|"answer_questions") {
@@ -767,6 +807,9 @@ impl Executor {
             if row_id.is_some() {self.uncertain.push(id.into());} else if !clear_raised {self.unprovable=true;}
             self.enter_error(error("terminal_delivery_unknown")).await?;
         }else{self.last_error=None; self.uncertain.clear(); self.unprovable=false; self.publish().await?;}
+        if row_id.is_some() && result.disposition==Disposition::Accepted {
+            self.confirm_until=Some(tokio::time::Instant::now()+CONFIRM_WINDOW); self.confirm_seen=None;
+        }
         Ok(result)
     }
     /// Conta a série de recusas sem escrita; devolve se esta repete o código anterior (sem log novo).

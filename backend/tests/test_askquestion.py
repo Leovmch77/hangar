@@ -1,4 +1,5 @@
 import json
+import time
 from pathlib import Path
 from app import askquestion
 from app.askquestion import read_pending_askq, clear_pending_askq, pergunta_aberta
@@ -273,6 +274,16 @@ def test_janela_que_nao_alcanca_a_pergunta_nao_prende_a_sessao(tmp_path, monkeyp
     assert Path(jsonl).stat().st_size > 256 * 1024  # a janela nao alcanca o inicio
     _aponta(monkeypatch, tmp_path)
     assert pergunta_aberta("sess-123") is None
+
+
+def test_pergunta_sem_a_chamada_no_transcript_expira(tmp_path):
+    # Sidecar que ficou para trás: a chamada dele nunca chegou ao transcript, e responder dá 409.
+    jsonl = str(tmp_path / "t.jsonl")
+    _transcript(jsonl, _resposta("2020-01-01T00:00:00.000Z", "toolu_viva")[:1])
+    agora = time.time()
+    assert not askquestion._respondida_depois(jsonl, 10.0, "toolu_viva"), "chamada no transcript: aberta"
+    assert not askquestion._respondida_depois(jsonl, agora, "toolu_outra"), "na carência: aberta"
+    assert askquestion._respondida_depois(jsonl, 10.0, "toolu_outra"), "sem a chamada depois da carência"
 
 
 def test_transcript_ilegivel_nao_inventa_pergunta(tmp_path, monkeypatch):

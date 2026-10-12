@@ -6,6 +6,7 @@ por subprocess, e um mock de `subprocess.run` testaria o mock, não o comportame
 """
 import json
 import subprocess
+import sys
 from datetime import datetime, timedelta
 
 import pytest
@@ -20,6 +21,18 @@ def _git(repo, *args):
                                "GIT_CONFIG_SYSTEM": "/dev/null", "PATH": "/usr/bin:/bin",
                                "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
                                "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"})
+
+
+def _pid_morto() -> int:
+    """Pid de um processo que já terminou. Número fixo não serve: com pid_max alto, 999999 pode ser
+    um processo vivo da máquina (já foi uma thread do kded6)."""
+    # No Windows o pid volta a ser usado logo: confere que ainda está livre antes de devolver.
+    for _ in range(20):
+        p = subprocess.Popen([sys.executable, "-c", "pass"])
+        p.wait()
+        if not atualizar._vivo(p.pid):
+            return p.pid
+    pytest.fail("nenhum pid livre depois de 20 processos")
 
 
 @pytest.fixture
@@ -325,7 +338,7 @@ def test_pid_morto_nao_bloqueia(repo, monkeypatch):
     """Máquina que desligou no meio de uma atualização não pode ficar travada para sempre."""
     trava = atualizar._base() / "rodando.lock"
     trava.parent.mkdir(parents=True, exist_ok=True)
-    trava.write_text("999999", encoding="utf-8")
+    trava.write_text(str(_pid_morto()), encoding="utf-8")
     lancou = []
     class P:
         pid = 4242
@@ -591,7 +604,7 @@ def test_dono_morto_vira_falha_na_tela(repo):
     Acontece de verdade: no Windows, o `install.ps1 -Update` chegou a matar o processo da própria
     atualização (ele casa o filtro de "instância anterior"), deixando a tela presa pra sempre.
     """
-    atualizar._escrever(fase="rodando", passo=4, total=5, pid=999999)
+    atualizar._escrever(fase="rodando", passo=4, total=5, pid=_pid_morto())
     d = atualizar.estado_para_tela()
     assert d["fase"] == "pronto" and d["ok"] is False
     assert "interrompida" in d["erro"]
@@ -866,7 +879,7 @@ def test_rollback_que_nao_sobe_nao_diz_que_esta_no_ar(repo, monkeypatch):
 def test_lock_de_processo_morto_nao_trava_a_maquina(repo):
     trava = atualizar._base() / "rodando.lock"
     trava.parent.mkdir(parents=True, exist_ok=True)
-    trava.write_text("999999", encoding="utf-8")     # pid que não existe
+    trava.write_text(str(_pid_morto()), encoding="utf-8")
     assert atualizar._tomar_a_vez() is True
 
 
@@ -1532,7 +1545,7 @@ def test_motor_morto_pelo_proprio_reinicio_conclui_quando_o_servidor_e_o_novo(re
     responde depois é o backend novo, com o disco no commit da atualização: isso é sucesso."""
     import os as _os
     head = atualizar._git("rev-parse", "HEAD").stdout.strip()
-    atualizar._escrever(fase="rodando", etapa="reiniciar", passo=5, total=5, pid=999999,
+    atualizar._escrever(fase="rodando", etapa="reiniciar", passo=5, total=5, pid=_pid_morto(),
                         backend_pid=_os.getpid() + 1, commit_para=head)
     d = atualizar.estado_para_tela()
     assert (d["fase"], d["ok"]) == ("pronto", True)
@@ -1542,11 +1555,11 @@ def test_motor_morto_no_reinicio_sem_servidor_novo_ou_commit_novo_e_falha(repo):
     import os as _os
     head = atualizar._git("rev-parse", "HEAD").stdout.strip()
     # O backend que responde é o mesmo de antes: o restart não aconteceu.
-    atualizar._escrever(fase="rodando", etapa="reiniciar", passo=5, total=5, pid=999999,
+    atualizar._escrever(fase="rodando", etapa="reiniciar", passo=5, total=5, pid=_pid_morto(),
                         backend_pid=_os.getpid(), commit_para=head)
     assert atualizar.estado_para_tela()["ok"] is False
     # Servidor novo, mas o disco não está no commit da atualização.
-    atualizar._escrever(fase="rodando", etapa="reiniciar", passo=5, total=5, pid=999999,
+    atualizar._escrever(fase="rodando", etapa="reiniciar", passo=5, total=5, pid=_pid_morto(),
                         backend_pid=_os.getpid() + 1, commit_para="0" * 40, ok=None, erro=None)
     assert atualizar.estado_para_tela()["ok"] is False
 

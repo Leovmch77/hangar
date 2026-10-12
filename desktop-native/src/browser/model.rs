@@ -9,6 +9,21 @@ pub struct PageState {
     pub can_back: bool,
     pub can_forward: bool,
     pub error: Option<String>,
+    /// Aviso do que o navegador fez sozinho (diálogo recusado, download negado); some ao navegar.
+    pub notice: Option<String>,
+    /// Sobe a cada aviso novo: o mesmo texto de novo é outro aviso, e o × fecha só o que a pessoa viu.
+    pub notice_seq: u32,
+    /// `alert`/`confirm`/`prompt` aberto, esperando o agente (verbo `dialog`) ou a pessoa (caixa do painel).
+    pub dialog: Option<Dialog>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Dialog {
+    /// `alert`, `confirm` ou `prompt`.
+    pub kind: String,
+    pub message: String,
+    /// Texto sugerido do `prompt`.
+    pub default: String,
 }
 
 pub fn loopback(url: &url::Url) -> bool {
@@ -18,6 +33,23 @@ pub fn loopback(url: &url::Url) -> bool {
         Some(url::Host::Ipv6(ip)) => IpAddr::V6(ip).is_loopback(),
         None => false,
     }
+}
+
+/// Falha de carga do Chromium (`net::ERR_…`) em frase de gente, com o endereço que não abriu. Código sem frase própria
+/// vai cru dentro da frase genérica: é o que permite procurar o motivo.
+pub fn load_error(raw: &str, url: &str) -> String {
+    let host = url::Url::parse(url).ok().and_then(|u| Some(match u.port() {
+        Some(port) => format!("{}:{port}", u.host_str()?),
+        None => u.host_str()?.to_owned(),
+    })).unwrap_or_else(|| url.to_owned());
+    let key = match raw.trim_start_matches("net::") {
+        "ERR_CONNECTION_REFUSED" => "browser_err_refused",
+        "ERR_NAME_NOT_RESOLVED" => "browser_err_name",
+        "ERR_CONNECTION_TIMED_OUT" | "ERR_TIMED_OUT" => "browser_err_timeout",
+        "ERR_INTERNET_DISCONNECTED" => "browser_err_offline",
+        _ => "browser_err_other",
+    };
+    crate::i18n::tr(key).replace("{host}", &host).replace("{error}", raw)
 }
 
 /// O erro é o sufixo da chave de tradução (`crate::i18n::tr`), para o teste não depender do idioma.
@@ -110,6 +142,10 @@ mod tests {
     fn every_error_key_has_both_translations() {
         let pt: serde_json::Value = serde_json::from_str(include_str!("../../../messages/pt.json")).unwrap();
         let en: serde_json::Value = serde_json::from_str(include_str!("../../../messages/en.json")).unwrap();
+        for key in ["err_refused", "err_name", "err_timeout", "err_offline", "err_other", "err_closed", "err_crashed", "retry"] {
+            let key = format!("native_browser_{key}");
+            assert!(pt[&key].is_string() && en[&key].is_string(), "{key}");
+        }
         for key in ["empty", "invalid_chars", "invalid", "scheme", "credentials"] {
             let key = format!("native_browser_address_{key}");
             assert!(pt[&key].is_string() && en[&key].is_string(), "{key}");

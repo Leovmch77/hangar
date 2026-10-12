@@ -134,7 +134,9 @@ struct Cache {
 type CacheSlot = Arc<Mutex<Option<Cache>>>;
 static CACHE: LazyLock<Mutex<HashMap<(PathBuf, bool), CacheSlot>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
-fn fingerprint(cwd: &Path) -> Option<Vec<u128>> {
+/// Versão de HEAD, índice e refs da branch (local e remotas), por mtime: muda com commit, push,
+/// fetch e `git add`, não com edição de arquivo. `cwd` já resolvido (`real`).
+pub fn fingerprint(cwd: &Path) -> Option<Vec<u128>> {
     let mut dot = cwd.join(".git");
     if dot.is_file() {
         dot = cwd.join(

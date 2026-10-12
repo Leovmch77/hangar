@@ -980,7 +980,8 @@ impl Hangar {
     }
 
     /// Alguma linha do menu vale para esta sessão; sem nenhuma, o "+" some.
-    fn side_tools(&self) -> bool { self.side_menu_browser() || self.side_menu_terminal() || self.side_menu_git() }
+    /// Sem Chromium a linha Navegador fica (desligada, com o motivo), então ela também segura o "+".
+    fn side_tools(&self) -> bool { self.side_menu_browser() || crate::browser::Engine::available().is_err() || self.side_menu_terminal() || self.side_menu_git() }
 
     /// O menu toma o corpo do painel; sem nenhuma ferramenta para esta sessão, fica a aba lembrada.
     pub(super) fn side_menu_shown(&self) -> bool {
@@ -1001,6 +1002,11 @@ impl Hangar {
             .child(div().w_full().max_w(px(280.)).flex().flex_col().gap(px(8.))
                 .when(browser, |el| el.child(row("side-menu-browser", IconName::Globe, tr("browser"), cx)
                     .on_click(cx.listener(|this, _, window, cx| this.open_browser(window, cx)))))
+                // Sem Chrome nem Chromium a linha fica, desligada, e diz o que falta: sumir calada fazia a pessoa procurar.
+                .when_some(crate::browser::Engine::available().err(), |el, error| el
+                    .child(row("side-menu-browser", IconName::Globe, tr("browser"), cx).disabled(true).opacity(0.5))
+                    .child(div().px(px(4.)).text_size(px(11.)).text_color(theme::muted()).whitespace_normal()
+                        .child(if error.starts_with("HANGAR_CHROMIUM") { error } else { tr("browser_unavailable") })))
                 .when(terminal, |el| el.child(row("side-menu-terminal", IconName::SquareTerminal, tr("shortcuts_native_terminal"), cx)
                     .on_click(cx.listener(|this, _, window, cx| this.show_terminal(window, cx)))))
                 .when(git, |el| el
