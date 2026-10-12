@@ -374,21 +374,24 @@ function semJev() {
 // senão, um comando local que lê o pedido como argumento e imprime só o valor.
 const TEXTO_CMD_PADRAO = 'claude -p --model claude-haiku-4-5-20251001';
 
-function escritorDeTexto() {
-  if (process.env.JEV_TEXTO_BASE_URL && process.env.JEV_TEXTO_API_KEY) {
-    const base = process.env.JEV_TEXTO_BASE_URL.replace(/\/$/, '');
-    const modelo = process.env.JEV_TEXTO_MODELO || 'gpt-4o-mini';
+// Lido igual aqui e na checagem de `problemaDoEscritor`: valor com espaço passava numa e quebrava na outra.
+const envTexto = (env, k) => String(env[k] ?? '').trim();
+
+function escritorDeTexto(env = process.env) {
+  if (envTexto(env, 'JEV_TEXTO_BASE_URL') && envTexto(env, 'JEV_TEXTO_API_KEY')) {
+    const base = envTexto(env, 'JEV_TEXTO_BASE_URL').replace(/\/$/, '');
+    const modelo = envTexto(env, 'JEV_TEXTO_MODELO') || 'gpt-4o-mini';
     return async (pedido) => {
       const r = await fetch(`${base}/chat/completions`, {
         method: 'POST',
-        headers: { authorization: `Bearer ${process.env.JEV_TEXTO_API_KEY}`, 'content-type': 'application/json' },
+        headers: { authorization: `Bearer ${envTexto(env, 'JEV_TEXTO_API_KEY')}`, 'content-type': 'application/json' },
         body: JSON.stringify({ model: modelo, messages: [{ role: 'user', content: pedido }], max_tokens: 120, temperature: 0 }),
       });
       if (!r.ok) erro(`o modelo de texto recusou: ${r.status} ${(await r.text()).slice(0, 200)}`);
       return (await r.json()).choices?.[0]?.message?.content ?? '';
     };
   }
-  const cmd = (process.env.JEV_TEXTO_CMD || TEXTO_CMD_PADRAO).split(' ');
+  const cmd = (envTexto(env, 'JEV_TEXTO_CMD') || TEXTO_CMD_PADRAO).split(/\s+/);
   return async (pedido) => {
     try {
       return execFileSync(cmd[0], [...cmd.slice(1), pedido], { encoding: 'utf8', timeout: 60_000 });
@@ -400,7 +403,8 @@ function escritorDeTexto() {
 
 function executavel(nome) {
   if (!nome) return false;
-  const exts = process.platform === 'win32' ? ['', ...(process.env.PATHEXT ?? '.EXE;.CMD;.BAT').split(';')] : [''];
+  // No Windows o execFileSync só roda .exe/.com: um .cmd passaria aqui e falharia no primeiro campo.
+  const exts = process.platform !== 'win32' || /\.(exe|com)$/i.test(nome) ? [''] : ['.exe', '.com'];
   const dirs = /[\\/]/.test(nome) ? [''] : (process.env.PATH ?? '').split(delimiter).filter(Boolean);
   return dirs.some((d) => exts.some((x) => {
     try {
@@ -418,8 +422,8 @@ function executavel(nome) {
  * servidor. Sem isto o erro só aparecia no primeiro campo a digitar, como ENOENT do valor do campo.
  */
 function problemaDoEscritor(env = process.env) {
-  const base = String(env.JEV_TEXTO_BASE_URL ?? '').trim();
-  const chave = String(env.JEV_TEXTO_API_KEY ?? '').trim();
+  const base = envTexto(env, 'JEV_TEXTO_BASE_URL');
+  const chave = envTexto(env, 'JEV_TEXTO_API_KEY');
   const problemas = [];
   if (base) {
     if (base === String(env.JEV_ENDPOINT ?? '').trim() || /\/decisions\/?$|systemone/.test(base)) {
@@ -431,8 +435,8 @@ function problemaDoEscritor(env = process.env) {
       return null;
     }
   }
-  const comando = String(env.JEV_TEXTO_CMD ?? '').trim() || TEXTO_CMD_PADRAO;
-  if (!executavel(comando.split(' ')[0])) {
+  const comando = envTexto(env, 'JEV_TEXTO_CMD') || TEXTO_CMD_PADRAO;
+  if (!executavel(comando.split(/\s+/)[0])) {
     problemas.push(`jev_texto_cmd ("${comando}") nao e um comando instalado; ali vai um comando que`
       + ` recebe o pedido como argumento e imprime so o valor, como "${TEXTO_CMD_PADRAO}"`);
   }
