@@ -118,6 +118,8 @@ impl Surface {
     }
 
     fn decode_loop(&self) {
+        // Buffers da thread, reaproveitados de um quadro para o outro: um quadro do painel tem megabytes.
+        let (mut bytes, mut pixels) = (Vec::new(), Vec::new());
         loop {
             let (data, id) = {
                 let mut slot = lock(&self.slot);
@@ -128,7 +130,7 @@ impl Surface {
                 }
             };
             let started = std::time::Instant::now();
-            match self.upload(&data) {
+            match self.upload(&data, &mut bytes, &mut pixels) {
                 Ok(()) => {
                     trace::add(&trace::DECODED, 1);
                     trace::add(&trace::DECODE_US, started.elapsed().as_micros() as u64);
@@ -156,10 +158,25 @@ impl Surface {
         self.wake.notify_one();
     }
 
-    fn upload(&self, data: &str) -> Result<(), String> {
-        let bytes = base64::engine::general_purpose::STANDARD.decode(data).map_err(|e| e.to_string())?;
-        let pixels = image::load_from_memory_with_format(&bytes, self.format).map_err(|e| e.to_string())?.into_rgba8();
-        let (width, height) = pixels.dimensions();
+    fn upload(&self, data: &str, bytes: &mut Vec<u8>, pixels: &mut Vec<u8>) -> Result<(), String> {
+        bytes.clear();
+        base64::engine::general_purpose::STANDARD.decode_vec(data, bytes).map_err(|e| e.to_string())?;
+        let (width, height) = if self.format == image::ImageFormat::Jpeg {
+            use zune_jpeg::{JpegDecoder, zune_core::{bytestream::ZCursor, colorspace::ColorSpace, options::DecoderOptions}};
+            let options = DecoderOptions::default().jpeg_set_out_colorspace(ColorSpace::RGBA);
+            let mut decoder = JpegDecoder::new_with_options(ZCursor::new(&bytes[..]), options);
+            decoder.decode_headers().map_err(|e| e.to_string())?;
+            let size = decoder.output_buffer_size().ok_or("quadro JPEG sem tamanho")?;
+            pixels.resize(size, 0);
+            decoder.decode_into(pixels).map_err(|e| e.to_string())?;
+            let info = decoder.info().ok_or("quadro JPEG sem cabeçalho")?;
+            (u32::from(info.width), u32::from(info.height))
+        } else {
+            let rgba = image::load_from_memory_with_format(bytes, self.format).map_err(|e| e.to_string())?.into_rgba8();
+            let size = rgba.dimensions();
+            *pixels = rgba.into_raw();
+            size
+        };
         let (device, queue) = gpui_wgpu::WgpuContext::shared_device().ok_or("a GPUI não expôs o device wgpu")?;
         let mut shown = lock(&self.shown);
         // Mesma textura enquanto o tamanho e o device não mudam: a fila do wgpu ordena a escrita depois do último desenho.
@@ -180,7 +197,7 @@ impl Surface {
         };
         queue.write_texture(
             wgpu::TexelCopyTextureInfo { texture: &texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
-            &pixels,
+            pixels,
             wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4 * width), rows_per_image: Some(height) },
             wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
         );
