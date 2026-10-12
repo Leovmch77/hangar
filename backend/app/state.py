@@ -253,6 +253,11 @@ def _menu_block(lines: list[str]) -> Optional[tuple[int, int]]:
         label = _BOX_SPLIT_RE.split(lines[cursor][marca.end():])[0]
         if _MARCADOR_EMBUTIDO_RE.search(label):
             return None
+    # Rascunho numerado em várias linhas: o `❯ N.` é a própria linha de prompt, colada na régua de
+    # cima do composer. Opção de menu de verdade nunca encosta na régua: vem depois do título ou da
+    # pergunta.
+    if not pi_cursor and cursor > 0 and _RULE_RE.match(lines[cursor - 1]):
+        return None
     # Subindo do cursor, o topo do picker e o CHIP header (☐/☑ da AskUserQuestion) ou um boundary
     # (bullet/spinner do menu nativo, que nao tem chip). Parar no chip mantem FORA do bloco uma
     # LISTA NUMERADA EM PROSA da mensagem do assistente — ela vive acima do chip e, sem essa
