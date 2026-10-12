@@ -655,6 +655,8 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
   let repetidas = 0;
   let esperouCarregar = false;
   const escritos = new Map();
+  // Lista+valor ja tentados: valor que nao "pega" nao vira clique na mesma lista a cada passo.
+  const listasTentadas = new Set();
   let reolhou = 0;
   let urlDosEscritos = '';
   const agir = async (verbo, args) => {
@@ -708,16 +710,28 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
     // Lista fechada que o Jev casou com um valor de `dados` e ainda nao mostra esse valor: abre e
     // escolhe a opcao de texto identico. Todas no mesmo ciclo: abrir uma lista renumera as refs, entao
     // a seguinte e reencontrada pelo nome numa leitura nova.
+    // So quando o Jev quer seguir trabalhando: DONE/BLOCKED nao abrem lista nenhuma.
     let preencheuLista = false;
     let refsAtuais = null;
-    for (const c0 of listasFechadas(candidatos, anotacao.editaveis, normalizar(anotacao.lista_aberta))) {
-      const c = refsAtuais ? refsAtuais.find((x) => x.papel === 'combobox' && x.nome === c0.nome) : c0;
-      if (!c) continue;
+    const terminal = TERMINAIS.has(respostas.operacao?.choice);
+    const fechadas = terminal ? [] : listasFechadas(candidatos, anotacao.editaveis, normalizar(anotacao.lista_aberta));
+    const homonimos = (nome) => fechadas.filter((x) => x.nome === nome).length > 1;
+    for (const c0 of fechadas) {
+      // Dois campos com o mesmo rotulo nao se distinguem pelo nome: ficam para o Jev.
+      if (homonimos(c0.nome)) continue;
       const v = respostas[cabecaDoValor(c0.ref)];
       const chave = v?.choice;
       if (!chave || chave === NENHUM || forca(v) < LIMIARES.alvo || typeof cofre[chave] !== 'string' || ehSegredo(chave)) continue;
-      const atualDaLista = Object.entries(anotacao.valores).find(([k]) => normalizar(k) === normalizar(c.nome))?.[1];
+      const tentativa = `${c0.nome}=${cofre[chave]}`;
+      if (listasTentadas.has(tentativa)) continue;
+      const atualDaLista = Object.entries(anotacao.valores).find(([k]) => normalizar(k) === normalizar(c0.nome))?.[1];
       if (normalizar(atualDaLista ?? '') === normalizar(cofre[chave])) continue;
+      // Leitura nova antes do clique: entre o snapshot do ciclo e aqui houve uma ida ao Jev, e a ref
+      // pode ter mudado de elemento.
+      refsAtuais = parsarSnapshot(await executar('snapshot', SNAPSHOT_DO_LACO));
+      const c = refsAtuais.find((x) => x.papel === 'combobox' && x.nome === c0.nome);
+      if (!c) continue;
+      listasTentadas.add(tentativa);
       try {
         await agir('click', [`@${c.ref}`]);
         await executar('wait', ESPERA_ASSENTAR);
@@ -731,10 +745,9 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
           log(`jev-objetivo passo ${passo}: SELECT @${casadas[0].ref} ("${casadas[0].nome}") em ${rotulo(c)} via dados.${chave} conf=${forca(v).toFixed(2)}`);
           await agir('click', [`@${casadas[0].ref}`]);
         }
-        feito.push(`SELECT "${c.nome}"`);
+        feito.push(casadas.length === 1 ? `SELECT "${c.nome}"` : `CLICK ${rotulo(c)}`);
         if (casadas.length !== 1) { preencheuLista = true; break; }
         await executar('wait', ESPERA_ASSENTAR);
-        refsAtuais = parsarSnapshot(await executar('snapshot', SNAPSHOT_DO_LACO));
       } catch (err) {
         if (!(err instanceof FalhaDoNavegador)) throw err;
         return { feito, sucesso: false, parou: `o navegador falhou no ${err.verbo}: ${err.message}` };

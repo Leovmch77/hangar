@@ -23,13 +23,16 @@ def _git(repo, *args):
                                "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"})
 
 
-
 def _pid_morto() -> int:
     """Pid de um processo que já terminou. Número fixo não serve: com pid_max alto, 999999 pode ser
     um processo vivo da máquina (já foi uma thread do kded6)."""
-    p = subprocess.Popen([sys.executable, "-c", "pass"])
-    p.wait()
-    return p.pid
+    # No Windows o pid volta a ser usado logo: confere que ainda está livre antes de devolver.
+    for _ in range(20):
+        p = subprocess.Popen([sys.executable, "-c", "pass"])
+        p.wait()
+        if not atualizar._vivo(p.pid):
+            return p.pid
+    pytest.fail("nenhum pid livre depois de 20 processos")
 
 
 @pytest.fixture
