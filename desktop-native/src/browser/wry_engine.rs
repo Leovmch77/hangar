@@ -142,7 +142,7 @@ impl Starter {
                 let listened = cdp.on(event, move |p| {
                     if open && p["type"].as_str() == Some("beforeunload") {
                         if let Some(cdp) = weak.upgrade() {
-                            drop(cdp.call("Page.handleJavaScriptDialog", serde_json::json!({"accept": true})));
+                            cdp.fire("Page.handleJavaScriptDialog", serde_json::json!({"accept": true}));
                         }
                         return;
                     }
@@ -157,14 +157,10 @@ impl Starter {
                 if let Err(e) = listened { eprintln!("[nav] dialogo sem ouvinte ({event}): {e}"); }
             }
             watch_native(&view, &on_native.0, &on_native.1);
-            match listened {
-                Ok(()) => {
-                    drop(cdp.call("Page.enable", serde_json::json!({})));
-                    drop(cdp.call("Inspector.enable", serde_json::json!({})));
-                    Some(cdp)
-                }
-                Err(e) => { eprintln!("[nav] queda da pagina sem ouvinte: {e}"); None }
-            }
+            if let Err(e) = listened { eprintln!("[nav] queda da pagina sem ouvinte: {e}"); }
+            cdp.fire("Page.enable", serde_json::json!({}));
+            cdp.fire("Inspector.enable", serde_json::json!({}));
+            Some(cdp)
         };
         let engine = Engine { view, _context: context, state, events, placed: Cell::new(None), asleep: Cell::new(false), dead, #[cfg(target_os = "windows")] _watch: watch };
         #[cfg(target_os = "windows")]
@@ -238,8 +234,17 @@ impl Engine {
     pub fn answer_dialog(&self, accept: bool, text: Option<&str>) -> impl std::future::Future<Output = Result<(), String>> + 'static + use<> {
         let mut params = serde_json::json!({"accept": accept});
         if let Some(text) = text { params["promptText"] = text.into(); }
-        let call = self.cdp().call("Page.handleJavaScriptDialog", params);
-        async move { call.await.map(|_| ()) }
+        let (call, state, events) = (self.cdp().call("Page.handleJavaScriptDialog", params), self.state.clone(), self.events.clone());
+        async move {
+            let result = call.await.map(|_| ());
+            // Sem diálogo na página o `javascriptDialogClosed` se perdeu: o estado ainda o mostraria e travaria os verbos.
+            if result.as_ref().is_err_and(|e| e.contains("No dialog is showing")) {
+                let mut page = state.borrow_mut();
+                page.dialog = None;
+                send(&events, &page);
+            }
+            result
+        }
     }
     #[cfg(not(target_os = "windows"))]
     pub fn answer_dialog(&self, _accept: bool, _text: Option<&str>) -> impl std::future::Future<Output = Result<(), String>> + 'static + use<> {
