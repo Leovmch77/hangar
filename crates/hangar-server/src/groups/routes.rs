@@ -39,8 +39,8 @@ pub(super) const MIX_MSG: &str = "pareamento cross-server é 1:1 (uma sessão lo
 const ORQ_MSG: &str = "o orquestrador não recebe mensagens; fale com o árbitro";
 /// `_group_unavailable` do Python.
 const UNAVAILABLE_MSG: &str = "os grupos estão indisponíveis agora";
-const STORM_MAX: usize = 5;
-const STORM_WINDOW: Duration = Duration::from_secs(60);
+pub(crate) const STORM_MAX: usize = 5;
+pub(crate) const STORM_WINDOW: Duration = Duration::from_secs(60);
 
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
@@ -145,7 +145,7 @@ impl Asked {
 
 /// Provedor de cada sessão viva (`registry.list()`): o retrato de até 2 s e, faltando alguém de
 /// `wanted`, uma descoberta nova (como o `_cached_info_sync`).
-pub(super) async fn providers(st: &AppState, wanted: &[String]) -> Result<BTreeMap<String, String>, Value> {
+pub(crate) async fn providers(st: &AppState, wanted: &[String]) -> Result<BTreeMap<String, String>, Value> {
     let failed = |e: crate::list::bridge::ListError| list_unavailable(e.code);
     let rows = st.list.snapshot().await.map_err(failed)?.rows;
     let mut found: BTreeMap<String, String> = rows.iter().map(|r| (r.name.clone(), r.provider.clone())).collect();
@@ -278,7 +278,7 @@ struct GroupMessageBody {
 
 /// `_group_estourou`: 5 avisos por grupo em 60 s; o pedido recusado também conta.
 // ponytail: mapa do processo que só cresce, um gid por grupo, como o `_group_envios` do Python.
-fn storm(gid: &str) -> bool {
+pub(crate) fn storm(gid: &str) -> bool {
     static SENT: LazyLock<Mutex<HashMap<String, Vec<Instant>>>> = LazyLock::new(Mutex::default);
     let now = Instant::now();
     let mut sent = SENT.lock().unwrap_or_else(|e| e.into_inner());

@@ -65,7 +65,7 @@ type St = State<Arc<OwnerShareState>>;
 
 // Pelo `impl Tailscale for Arc<dyn …>` o rustc não prova `Send` no handler do axum ("not general
 // enough"); com `async fn` concreto, como o `tunnel::Real`, prova.
-struct Ts<'a>(&'a Arc<dyn DynTailscale>);
+pub(super) struct Ts<'a>(pub(super) &'a Arc<dyn DynTailscale>);
 
 impl Tailscale for Ts<'_> {
     // `**`: no próprio `Arc` o `DynTailscale` cai no `impl` do `Arc` e chama a si mesmo.
@@ -74,21 +74,32 @@ impl Tailscale for Ts<'_> {
     fn user(&self) -> String { (**self.0).user_dyn() }
 }
 
-fn json_response(status: StatusCode, v: Value) -> Response {
+pub(super) fn json_response(status: StatusCode, v: Value) -> Response {
     (status, [(header::CONTENT_TYPE, "application/json")], v.to_string()).into_response()
 }
 
-fn refused(status: StatusCode, code: &str, msg: &str, params: Value) -> Response {
+pub(super) fn refused(status: StatusCode, code: &str, msg: &str, params: Value) -> Response {
     json_response(status, json!({"detail": {"code": code, "params": params, "msg": msg}}))
 }
 
 // O Python não tratava falha de disco: virava o 500 cru do servidor.
-fn io_failed(e: std::io::Error) -> Response {
+pub(super) fn io_failed(e: std::io::Error) -> Response {
     tracing::warn!(%e, "[share] gravar shares.json falhou");
     (StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error").into_response()
 }
 
-fn prereq_error(e: TunnelError) -> Response {
+/// O link só sai depois de abrir pela internet; falhou, o convite `id` é revogado e a recusa volta.
+pub(super) async fn reach_or_revoke(st: &OwnerShareState, base: &str, path: String, id: &str) -> Option<Response> {
+    let host = base.strip_prefix("https://").and_then(|r| r.rsplit_once(':')).map_or("", |(h, _)| h);
+    let target = InviteLink { host: host.into(), path };
+    let failure = check_until(&st.reach.probe, &target, st.reach.every, st.reach.deadline).await.err()?;
+    if let Err(e) = st.share.store.revoke(id) { return Some(io_failed(e)) }
+    let params = serde_json::to_value(&failure).unwrap_or_default();
+    let msg = format!("o link não abriu pela internet: {}", params["detail"].as_str().unwrap_or(""));
+    Some(refused(StatusCode::CONFLICT, "share_reach_failed", &msg, params))
+}
+
+pub(super) fn prereq_error(e: TunnelError) -> Response {
     let mut params = json!({"missing": e.missing, "fix": e.fix});
     if let Some(url) = e.enable_url {
         params["enable_url"] = url.into();
@@ -163,15 +174,7 @@ async fn create(State(st): St, Path(name): Path<String>, RawQuery(query): RawQue
     }
     let base = match tunnel::ensure_on(&Ts(&share.tailscale)).await { Ok(b) => b, Err(e) => return prereq_error(e) };
     let (s, code) = match share.store.create(&name, Some(life), Kind::Share, false) { Ok(v) => v, Err(e) => return io_failed(e) };
-    let host = base.strip_prefix("https://").and_then(|r| r.rsplit_once(':')).map_or("", |(h, _)| h);
-    let target = InviteLink { host: host.into(), path: format!("/convite/{code}") };
-    // O link só sai depois de abrir pela internet; falhou, o convite não fica valendo.
-    if let Err(failure) = check_until(&st.reach.probe, &target, st.reach.every, st.reach.deadline).await {
-        if let Err(e) = share.store.revoke(&s.id) { return io_failed(e) }
-        let params = serde_json::to_value(&failure).unwrap_or_default();
-        let msg = format!("o link não abriu pela internet: {}", params["detail"].as_str().unwrap_or(""));
-        return refused(StatusCode::CONFLICT, "share_reach_failed", &msg, params);
-    }
+    if let Some(refusal) = reach_or_revoke(&st, &base, format!("/convite/{code}"), &s.id).await { return refusal }
     json_response(StatusCode::OK, json!({"id": s.id, "link": format!("{base}/convite/{code}"), "expires_at": s.code_expires_at}))
 }
 

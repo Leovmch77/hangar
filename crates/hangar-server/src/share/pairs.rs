@@ -132,7 +132,7 @@ fn load(path: &Path) -> Vec<ExternalPair> {
     Vec::new()
 }
 
-fn slug(owner: &str) -> String {
+pub fn slug(owner: &str) -> String {
     let ascii: String = owner.nfkd().filter(char::is_ascii).collect::<String>().to_ascii_lowercase();
     let s = SLUG_RE.replace_all(&ascii, "-").trim_matches('-').to_owned();
     if s.is_empty() { "par".into() } else { s }

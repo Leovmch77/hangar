@@ -109,6 +109,9 @@ impl PeerClient {
 
     pub fn enabled_ids(&self) -> Vec<String> { self.book.enabled_ids() }
 
+    /// Todo nome do `peers.json`, com ou sem endereço: apelido de par externo não pode repetir nenhum.
+    pub fn ids(&self) -> std::collections::HashSet<String> { self.book.load().keys().cloned().collect() }
+
     /// Os tokens de peer conhecidos (leitura de arquivo, fora do executor).
     pub async fn tokens(&self) -> Vec<String> {
         let book = self.book.clone();

@@ -242,33 +242,39 @@ pub async fn input(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectIn
 /// Recado de fora da rota (aviso de grupo): o mesmo `/input` com `steer: false` que o `_enviar` do
 /// Python faz. `Err` = o `detail` da resposta, o envelope `{code, params, msg}`.
 pub async fn deliver_text(st: &AppState, name: &str, text: &str) -> Result<(), Value> {
-    let body = json!({"text": text, "steer": false}).to_string();
-    let route = match st.state.runtime.get() {
-        // Mesma ordem do handler: o /clear com terminal segue ao Python antes da porta.
-        Some(runtime) if !(runtime.is_terminal(name).await && is_clear(text)) =>
-            route_write(runtime, name, WriteRoute::Input, st.write_gate_wait).await,
-        _ => Write::Python,
-    };
-    let (status, reply) = match route {
-        // O /compact do Codex o handler também repassa ao Python, com o passe já solto.
-        Write::Rust(held, target) if relays_codex_input(&target.provider, text) => {
-            drop(held);
-            relay_as_owner(st, name, body).await
-        }
-        Write::Rust(held, target) => {
-            let result = send(st, name, &target, text, false).await;
-            drop(held);
-            result
-        }
-        Write::Busy => (StatusCode::CONFLICT, busy_body()),
-        Write::Python => relay_as_owner(st, name, body).await,
-    };
+    let (status, reply) = write_input(st, name, text, false).await;
     if status.is_success() { return Ok(()); }
     Err(match reply.get("detail") {
         Some(detail) if !detail.is_null() => detail.clone(),
         // O mesmo genérico do `_deliver` do Python para resposta sem o envelope.
         _ => json!({"code": "erro_envio_falhou_desconhecida", "params": {}, "msg": "falha desconhecida no envio"}),
     })
+}
+
+/// O `/input` do dono feito por dentro, com a resposta inteira (o recado do par externo devolve
+/// o que a entrega respondeu).
+pub async fn write_input(st: &AppState, name: &str, text: &str, steer: bool) -> (StatusCode, Value) {
+    let body = json!({"text": text, "steer": steer}).to_string();
+    let route = match st.state.runtime.get() {
+        // Mesma ordem do handler: o /clear com terminal segue ao Python antes da porta.
+        Some(runtime) if !(runtime.is_terminal(name).await && is_clear(text)) =>
+            route_write(runtime, name, WriteRoute::Input, st.write_gate_wait).await,
+        _ => Write::Python,
+    };
+    match route {
+        // O /compact do Codex o handler também repassa ao Python, com o passe já solto.
+        Write::Rust(held, target) if relays_codex_input(&target.provider, text) => {
+            drop(held);
+            relay_as_owner(st, name, body).await
+        }
+        Write::Rust(held, target) => {
+            let result = send(st, name, &target, text, steer).await;
+            drop(held);
+            result
+        }
+        Write::Busy => (StatusCode::CONFLICT, busy_body()),
+        Write::Python => relay_as_owner(st, name, body).await,
+    }
 }
 
 /// O `/input` do Python, pelo mesmo repasse do handler, como o dono local.
