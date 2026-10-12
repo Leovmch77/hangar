@@ -107,10 +107,14 @@ clique que muda a lista já invalida as refs dela). A resposta é sempre
 - `text` — texto visível (`innerText`).
 - `url` — URL atual.
 - `console [--limpar]` — `console.log/warn/error` (objetos com prévia: `{a: 1, b: "x"}`), erros de
-  JS não tratados e promessas recusadas (com arquivo:linha), diálogos (`dialogo confirm recusado:
-  ...`) e downloads recusados. No Linux `confirm`/`prompt` são recusados sozinhos; **no Windows o
-  diálogo abre na tela e trava os verbos seguintes até uma pessoa fechá-lo** — evite clicar no que
-  abre `confirm` ali, ou avise o usuário.
+  JS não tratados e promessas recusadas (com arquivo:linha), diálogos respondidos e downloads
+  recusados.
+- `dialog accept [texto] | dialog dismiss` — responde o `alert`/`confirm`/`prompt` que a página
+  abriu (`texto` é a resposta do `prompt`). O diálogo fica aberto até alguém responder: o verbo que o
+  abriu volta `ok: click — a pagina abriu um dialogo confirm: "...". Responda com: dialog accept |
+  dialog dismiss`, e com ele aberto só `dialog`, `url`, `estado`, `console` e `network` funcionam (os
+  outros voltam `erro: a pagina esta com um dialogo ... aberto`). Leia a pergunta antes de aceitar:
+  `confirm` costuma ser "apagar?", "sair sem salvar?".
 - `network` — `MÉTODO status url` e `MÉTODO FALHOU url: motivo`. A escuta liga na primeira chamada
   de `network` ou `wait --idle`: chame `network` uma vez ANTES da ação cujas requisições quer ver.
 - `shot [arq.png]` — print da viewport; padrão `~/.hangar/nav/shots/<sessao>/<ms>.png`. Com
@@ -136,7 +140,7 @@ linhas. O CLI sai com código 1 quando a resposta começa com `erro:` ou o trans
 ## Pausa do usuário
 
 O usuário pode pausar o navegador pelo painel enquanto o agente o dirige. Pausado, as ações
-(`click`, `fill`, `type`, `press`, `hover`, `eval`, `layout`, `tema`, `goto`, `back`, `reload`) e o
+(`click`, `fill`, `type`, `press`, `hover`, `eval`, `layout`, `tema`, `goto`, `back`, `reload`, `dialog`) e o
 `open` respondem `erro: o usuario pausou o navegador; espere ele clicar em Retomar no painel e
 tente de novo`. A leitura (`snapshot`, `text`, `url`, `console`, `network`, `shot`, `wait`) segue
 normal. Não insista em laço: termine o que dá pra ler, diga ao usuário que está esperando ele

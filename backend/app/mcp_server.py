@@ -296,7 +296,7 @@ async def close_session(ctx: Context, alvo: str) -> dict[str, Any]:
 
 
 VERBOS_NAV = ("snapshot", "click", "fill", "type", "press", "hover", "wait", "eval", "tema", "layout", "console",
-              "network", "text", "url", "shot", "close", "goto", "back", "reload", "login", "estado", "tab-list", "tab-new", "tab-switch", "tab-close")
+              "network", "text", "url", "shot", "close", "goto", "back", "reload", "dialog", "login", "estado", "tab-list", "tab-new", "tab-switch", "tab-close")
 # Duas chamadas do mesmo turno não podem intercalar `click` e `snapshot`: o CLI serializa por
 # processo, aqui é uma trava por sessão.
 _travas_nav: dict[str, asyncio.Lock] = {}
@@ -411,6 +411,8 @@ _BROWSER = (
     "NAVEGAR: goto <url>, back, reload (voltam com a página carregada). "
     "ESPERAR (nunca sleep): wait --idle | --text <t> (ignora maiúsculas) | --url <t> | @eN | <ms>, "
     "teto com --timeout <ms> até 40000. VER: shot (devolve a imagem e o caminho do PNG). "
+    "DIÁLOGO: alert/confirm/prompt ficam abertos e a resposta do verbo avisa; responda com dialog accept [texto] "
+    "ou dialog dismiss antes de outra ação. "
     "tema claro|escuro|sistema, layout mobile|desktop|<l> <a>, close (terminou, feche). "
     "login [site]: pede ao usuário, na tela dele, o login do Chrome para o site (espera até 110 s; "
     "uma chamada por necessidade, nunca em laço). Pausado pelo usuário, as ações voltam erro: espere ele retomar. "

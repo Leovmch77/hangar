@@ -54,7 +54,7 @@ const PAUSADO = 'o usuario pausou o navegador; espere ele clicar em Retomar no p
 let urlAberta = '';
 const VERBOS_SERVIDOR = new Set([
   'snapshot', 'click', 'fill', 'type', 'press', 'hover', 'wait', 'eval',
-  'tema', 'layout', 'console', 'network', 'text', 'url', 'shot', 'close', 'goto', 'back', 'reload', 'login',
+  'tema', 'layout', 'console', 'network', 'text', 'url', 'shot', 'close', 'goto', 'back', 'reload', 'login', 'dialog', 'estado',
 ]);
 
 function erro(msg, codigo = 1) {
@@ -94,6 +94,7 @@ Identidade: sidecar da sessão no modo sem terminal; tmux no modo com terminal.
   goto <url>              navega e só volta com a página carregada
   back                    volta uma página no histórico
   reload                  recarrega a página
+  dialog accept [texto] | dialog dismiss   responde o alert/confirm/prompt que a página abriu
   eval '<js>'             roda JS na página (expressão ou declarações) e imprime o resultado
   tema <claro|escuro|sistema>
   layout [mobile|desktop|<largura> <altura>]
@@ -586,4 +587,4 @@ if (cmd === 'objetivo') {
   process.exit(resultado.sucesso ? 0 : 1);
 }
 
-erro(`comando desconhecido: ${cmd} (vale open|list|snapshot|click|fill|type|press|hover|wait|goto|back|reload|eval|tema|layout|console|network|text|url|shot|folha|tab|confere|objetivo|close|batch)`);
+erro(`comando desconhecido: ${cmd} (vale open|list|snapshot|click|fill|type|press|hover|wait|goto|back|reload|dialog|eval|tema|layout|console|network|text|url|shot|folha|tab|confere|objetivo|close|batch)`);
