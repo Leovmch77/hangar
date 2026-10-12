@@ -505,11 +505,21 @@ if (cmd === 'objetivo') {
     },
   });
   console.log(`\nparou: ${resultado.parou}`);
-  // Onde a página ficou, para quem chamou não precisar de um `url` e um `text` a mais.
-  const urlFinal = (await chamar(chave, 'url', [])).texto.replace(/^ok:\s*/, '').trim();
-  console.log(`url: ${semToken(urlFinal.startsWith('"') ? JSON.parse(urlFinal) : urlFinal)}`);
-  const textoFinal = (await chamar(chave, 'text', [])).texto.replace(/\s+/g, ' ').trim();
-  console.log(`texto: ${semToken(textoFinal.length > 300 ? `${textoFinal.slice(0, 300)}…` : textoFinal)}`);
+  // Onde a página ficou, para quem chamou não precisar de um `url` e um `text` a mais. Falha aqui
+  // vira rótulo, nunca o código de saída: quem decide é `resultado.sucesso`.
+  const leitura = async (verbo) => {
+    try {
+      const { texto, codigo } = await chamar(chave, verbo, []);
+      if (codigo !== 0) return `indisponivel (${semToken(texto.slice(0, 120))})`;
+      const t = texto.replace(/^ok:\s*/, '').trim();
+      return semToken(t.startsWith('"') ? JSON.parse(t) : t);
+    } catch (err) {
+      return `indisponivel (${String(err?.message).slice(0, 120)})`;
+    }
+  };
+  console.log(`url: ${await leitura('url')}`);
+  const textoFinal = (await leitura('text')).replace(/\s+/g, ' ').trim();
+  console.log(`texto: ${textoFinal.length > 300 ? `${textoFinal.slice(0, 300)}…` : textoFinal}`);
   // Linha legível por máquina: quem chamou reinvoca com esse dado em --dados, sem interpretar a
   // frase acima. A página fica onde parou, então a segunda chamada continua dali.
   if (resultado.falta) console.log(`falta-dado: ${resultado.falta}`);
