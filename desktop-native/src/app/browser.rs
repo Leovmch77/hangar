@@ -203,7 +203,7 @@ impl BrowserPanel {
             if page.url != self.page.url { self.local_notice = None; }
             if page.dialog != self.page.dialog {
                 #[cfg(not(target_os = "macos"))]
-                if let Some(ctl) = &self.controller { ctl.set_dialog(page.dialog.as_ref().map(|d| (d.kind.clone(), d.message.clone()))); }
+                if let Some(ctl) = &self.controller { ctl.set_dialog(page.dialog.as_ref().map(|d| (d.kind.clone(), d.message.clone(), d.default.clone()))); }
                 if let Some(d) = &page.dialog && d.kind == "prompt" {
                     let default = d.default.clone();
                     self.dialog_input.update(cx, |input, cx| input.set_value(default, window, cx));
@@ -704,8 +704,6 @@ impl BrowserPanel {
         let answer = |accept: bool| cx.listener(move |this: &mut Self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>| {
             let text = (accept && this.page.dialog.as_ref().is_some_and(|d| d.kind == "prompt")).then(|| this.dialog_input.read(cx).value().to_string());
             if let Some(engine) = this.engine() { engine.answer_dialog(accept, text.as_deref()); }
-            #[cfg(not(target_os = "macos"))]
-            if let Some(ctl) = &this.controller { ctl.set_dialog(None); }
         });
         let title = tr(if d.kind == "alert" { "browser_dialog_says" } else { "browser_dialog_asks" });
         Some(div().id("browser-dialog").flex_shrink_0().flex().flex_col().gap_2().px_3().py(px(8.)).role(Role::AlertDialog)

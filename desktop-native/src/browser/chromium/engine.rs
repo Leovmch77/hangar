@@ -431,7 +431,7 @@ fn listen(
         let url = failed.unwrap_or(frame["url"].as_str().unwrap_or("")).to_owned();
         let keep = failed.is_some();
         // A página de erro de uma navegação bloqueada traz o aviso do bloqueio: ele fica com ela.
-        p(&|page| { page.url = Some(url.clone()); if !keep { page.error = None; page.notice = None; } });
+        p(&|page| { page.url = Some(url.clone()); page.dialog = None; if !keep { page.error = None; page.notice = None; } });
         h();
     });
     let (p, h, m) = (publish.clone(), history.clone(), main.clone());
@@ -515,7 +515,7 @@ fn listen(
     }
     session.watch("Target.targetDestroyed", move |params| { if let Some(id) = params["targetId"].as_str() { closing.borrow_mut().remove(id); } });
     let p = publish.clone();
-    session.watch(CLOSED, move |_| p(&|page| { page.loading = false; page.error = Some(crate::i18n::tr("browser_err_closed")); }));
+    session.watch(CLOSED, move |_| p(&|page| { page.loading = false; page.dialog = None; page.error = Some(crate::i18n::tr("browser_err_closed")); }));
     // A página caiu com o Chromium vivo: sem isto o painel congela no último quadro, calado.
     let fell: Rc<dyn Fn()> = {
         let (weak, p, dead) = (Rc::downgrade(session), publish.clone(), dead.clone());
@@ -523,7 +523,7 @@ fn listen(
             if dead.replace(true) { return; }
             eprintln!("[nav] a pagina caiu");
             if let Some(session) = weak.upgrade() { session.fail_pending(); }
-            p(&|page| { page.loading = false; page.error = Some(crate::i18n::tr("browser_err_crashed")); });
+            p(&|page| { page.loading = false; page.dialog = None; page.error = Some(crate::i18n::tr("browser_err_crashed")); });
         })
     };
     let f = fell.clone();

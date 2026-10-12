@@ -125,7 +125,7 @@ impl Starter {
             let listened = cdp.on("Inspector.targetCrashed", move |_| {
                 dead.set(true);
                 let mut page = state.borrow_mut();
-                (page.loading, page.error) = (false, Some(crate::i18n::tr("browser_err_crashed")));
+                (page.loading, page.error, page.dialog) = (false, Some(crate::i18n::tr("browser_err_crashed")), None);
                 send(&events, &page);
             });
             // Navegação dentro do documento (SPA, âncora) não passa pelo `on_page_load`: sem isto a barra e o voltar ficavam
@@ -207,6 +207,7 @@ fn watch_native(view: &WebView, state: &Rc<RefCell<model::PageState>>, events: &
         // O endereço pedido já na barra: o estado anterior ainda tinha o da página que está saindo.
         if !uri.is_empty() { page.url = Some(uri); }
         page.loading = true;
+        page.dialog = None;
         send(&ev, &page);
         Ok(())
     }));
@@ -254,14 +255,21 @@ impl Engine {
     pub fn answer_dialog(&self, accept: bool, text: Option<&str>) {
         let Some((args, deferral)) = self.pending.borrow_mut().take() else { return };
         // SAFETY: thread da interface; `Complete` solta o diálogo segurado no `GetDeferral`.
-        let done = unsafe {
+        // `Complete` sempre: sem ele a página fica parada no diálogo, mesmo que o texto ou o aceite tenham falhado.
+        let answered = unsafe {
             (|| {
-                if let Some(text) = text { let t = webview2_com::CoTaskMemPWSTR::from(text); args.SetResultText(*t.as_ref().as_pcwstr())?; }
+                match text {
+                    // `CoTaskMemPWSTR` de texto vazio é ponteiro nulo, que o WebView2 recusa.
+                    Some("") => args.SetResultText(windows::core::w!(""))?,
+                    Some(text) => { let t = webview2_com::CoTaskMemPWSTR::from(text); args.SetResultText(*t.as_ref().as_pcwstr())? }
+                    None => {}
+                }
                 if accept { args.Accept()?; }
-                deferral.Complete()
+                Ok::<(), windows::core::Error>(())
             })()
         };
-        if let Err(e) = done { eprintln!("[nav] dialogo nao respondido: {}", e.message()); }
+        let completed = unsafe { deferral.Complete() };
+        for e in [answered.err(), completed.err()].into_iter().flatten() { eprintln!("[nav] dialogo respondido com erro: {}", e.message()); }
         let mut page = self.state.borrow_mut();
         page.dialog = None;
         send(&self.events, &page);
