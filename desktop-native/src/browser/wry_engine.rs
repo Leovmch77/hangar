@@ -99,6 +99,8 @@ impl Starter {
             .map_err(|e| e.to_string())?;
         let dead = Rc::new(Cell::new(false));
         #[cfg(target_os = "windows")]
+        let on_spa = (state.clone(), events.clone());
+        #[cfg(target_os = "windows")]
         let watch = {
             use wry::WebViewExtWindows;
             let cdp = Rc::new(super::cdp::Cdp::new(view.webview()));
@@ -109,8 +111,22 @@ impl Starter {
                 (page.loading, page.error) = (false, Some(crate::i18n::tr("browser_err_crashed")));
                 send(&events, &page);
             });
+            // Navegação dentro do documento (SPA, âncora) não passa pelo `on_page_load`: sem isto a barra e o voltar ficavam
+            // na página anterior.
+            let (state, events) = (on_spa.0, on_spa.1);
+            let within = cdp.on("Page.navigatedWithinDocument", move |p| {
+                let Some(url) = p["url"].as_str() else { return };
+                let mut page = state.borrow_mut();
+                page.url = Some(url.to_owned());
+                send(&events, &page);
+            });
+            if let Err(e) = within { eprintln!("[nav] navegacao dentro da pagina sem ouvinte: {e}"); }
             match listened {
-                Ok(()) => { drop(cdp.call("Inspector.enable", serde_json::json!({}))); Some(cdp) }
+                Ok(()) => {
+                    drop(cdp.call("Page.enable", serde_json::json!({})));
+                    drop(cdp.call("Inspector.enable", serde_json::json!({})));
+                    Some(cdp)
+                }
                 Err(e) => { eprintln!("[nav] queda da pagina sem ouvinte: {e}"); None }
             }
         };
@@ -150,7 +166,6 @@ impl Engine {
         std::rc::Rc::new(super::cdp::Cdp::new(self.view.webview()))
     }
 
-    #[cfg(target_os = "windows")]
     pub fn alive(&self) -> bool { !self.dead.get() }
 
     /// Voltar/avançar de verdade, lidos do histórico do WebView2 depois de cada carga. Devolve a tarefa: o painel a

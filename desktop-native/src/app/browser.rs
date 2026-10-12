@@ -72,6 +72,9 @@ pub(super) struct BrowserPanel {
     /// fica por cima de tudo e precisa sair da frente).
     #[cfg(target_os = "windows")]
     still: Option<Arc<Image>>,
+    /// Quadros que saíram da tela: o `Hangar` os tira do cache e do atlas da GPU, que não os soltam sozinhos.
+    #[cfg(target_os = "windows")]
+    released: Vec<Arc<Image>>,
     /// Aviso do próprio painel (preenchimento do login que falhou), ao lado do `notice` que vem da página.
     local_notice: Option<String>,
     /// Cursor da página sob o mouse: o Chromium sem janela não avisa quando ele muda, então a página é perguntada.
@@ -131,7 +134,7 @@ impl BrowserPanel {
         ];
         Self { key, #[cfg(not(target_os = "macos"))] controller: None, #[cfg(not(target_os = "macos"))] cdp: None,
             #[cfg(not(target_os = "macos"))] relay: Default::default(), #[cfg(not(target_os = "macos"))] viewer: Rc::default(), engine: None, starting: None, _start: None, events, address, page: model::PageState::default(), invalid: None, #[cfg(not(target_os = "macos"))] cookies_status: None, #[cfg(not(target_os = "macos"))] cookies_confirmed: false, #[cfg(target_os = "linux")] last_fill: None, focus,
-            origin: Rc::default(), #[cfg(target_os = "linux")] emulated: None, page_scale: Rc::new(Cell::new(1.)), #[cfg(target_os = "windows")] still: None, #[cfg(target_os = "linux")] page_zoom: (1., 0., 0.), shown: false, local_notice: None, #[cfg(target_os = "linux")] cursor: CursorStyle::Arrow, #[cfg(target_os = "linux")] cursor_probe: (false, None), copied: false, dismissed_notice: 0, address_stale: false, #[cfg(not(target_os = "macos"))] agent: None, #[cfg(not(target_os = "macos"))] agent_running: 0,
+            origin: Rc::default(), #[cfg(target_os = "linux")] emulated: None, page_scale: Rc::new(Cell::new(1.)), #[cfg(target_os = "windows")] still: None, #[cfg(target_os = "windows")] released: Vec::new(), #[cfg(target_os = "linux")] page_zoom: (1., 0., 0.), shown: false, local_notice: None, #[cfg(target_os = "linux")] cursor: CursorStyle::Arrow, #[cfg(target_os = "linux")] cursor_probe: (false, None), copied: false, dismissed_notice: 0, address_stale: false, #[cfg(not(target_os = "macos"))] agent: None, #[cfg(not(target_os = "macos"))] agent_running: 0,
             #[cfg(not(target_os = "macos"))] agent_seq: 0, #[cfg(not(target_os = "macos"))] paused: None, #[cfg(target_os = "windows")] agent_finished_at: None, #[cfg(not(target_os = "macos"))] _activity: None, _drain: drain, _subscriptions: subscriptions }
     }
 
@@ -151,11 +154,13 @@ impl BrowserPanel {
             if page.url != self.page.url { self.local_notice = None; }
             #[cfg(not(target_os = "macos"))]
             let loaded = self.page.loading && !page.loading;
+            #[cfg(target_os = "windows")]
+            let moved = !page.loading && page.url != self.page.url;
             self.page = page;
             #[cfg(target_os = "linux")]
             if loaded { self.refresh_zoom(cx); }
             #[cfg(target_os = "windows")]
-            if loaded && let Some(engine) = self.engine() { let history = engine.history(); cx.spawn(async move |_, _| history.await).detach(); }
+            if (loaded || moved) && let Some(engine) = self.engine() { let history = engine.history(); cx.spawn(async move |_, _| history.await).detach(); }
             #[cfg(not(target_os = "macos"))]
             crate::browser::server::write_sidecar(&self.key, self.page.url.as_deref().unwrap_or(""), &self.page.title);
             #[cfg(target_os = "linux")]
@@ -640,7 +645,7 @@ impl BrowserPanel {
         if self.shown == shown { return false; }
         self.shown = shown;
         #[cfg(target_os = "windows")]
-        if shown { self.still = None; }
+        if shown && let Some(old) = self.still.take() { self.released.push(old); }
         #[cfg(target_os = "windows")]
         if !shown && covered && let Some(cdp) = self.cdp.clone() {
             // Coberta, a página só sai da frente com o último quadro pronto: sem ele o painel ficaria vazio atrás do
@@ -658,8 +663,10 @@ impl BrowserPanel {
                 };
                 let _ = this.update(cx, |this, cx| {
                     if this.shown { return; }
-                    this.still = image;
+                    if let Some(old) = std::mem::replace(&mut this.still, image) { this.released.push(old); }
                     if let Some(engine) = this.engine() { engine.hide(); }
+                    // Só agora o viewport fixo da página escondida: antes, a captura podia sair já nesse tamanho.
+                    if let Some(ctl) = this.controller.clone() { cx.spawn(async move |_, _| ctl.set_hidden(true).await).detach(); }
                     cx.notify();
                 });
             }).detach();
@@ -668,8 +675,12 @@ impl BrowserPanel {
         let _ = covered;
         #[cfg(not(target_os = "windows"))]
         if !shown && let Some(engine) = self.engine() { engine.hide(); }
+        #[cfg(target_os = "windows")]
+        let capturing = !shown && covered && self.cdp.is_some();
+        #[cfg(not(target_os = "windows"))]
+        let capturing = false;
         #[cfg(not(target_os = "macos"))]
-        if let Some(ctl) = self.controller.clone() { cx.spawn(async move |_, _| ctl.set_hidden(!shown).await).detach(); }
+        if !capturing && let Some(ctl) = self.controller.clone() { cx.spawn(async move |_, _| ctl.set_hidden(!shown).await).detach(); }
         #[cfg(target_os = "macos")]
         let _ = cx;
         true
@@ -785,7 +796,7 @@ impl BrowserPanel {
         #[cfg(target_os = "linux")]
         let page = page.cursor(self.cursor);
         #[cfg(target_os = "windows")]
-        let page = page.when_some(self.still.clone().filter(|_| !self.shown), |el, still| el.child(img(still).absolute().inset_0().size_full().object_fit(ObjectFit::Fill)));
+        let page = page.when_some(self.still.clone().filter(|_| !self.shown), |el, still| el.child(img(still).absolute().inset_0().size_full().object_fit(ObjectFit::Contain)));
         page.bg(theme::background()).aria_label(label)
             .when(self.shown, |el| el.child(canvas(|_, _, _| {}, move |bounds, _, window, _| {
                 // Tela emulada: encaixada no painel, centrada no topo, e o ponteiro convertido na mesma escala.
@@ -1038,6 +1049,8 @@ impl Hangar {
         for (key, browser) in self.side.browsers.iter().map(|(k, b)| (k.clone(), b.clone())).collect::<Vec<_>>() {
             let mine = current.as_deref() == Some(key.as_str());
             let shown = visible && mine;
+            #[cfg(target_os = "windows")]
+            for image in browser.update(cx, |panel, _| std::mem::take(&mut panel.released)) { super::release_image(image, window, cx); }
             if browser.update(cx, |panel, cx| panel.set_shown(shown, covered && mine, cx)) && shown {
                 // O painel é guardado entre quadros: sem um redesenho dele, a página não volta a se posicionar.
                 let id = browser.entity_id();
