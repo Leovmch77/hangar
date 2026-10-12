@@ -603,9 +603,10 @@ impl Engine {
     /// A textura mudou desde a última pergunta: um desenho guardado ainda mostraria a antiga.
     pub fn texture_replaced(&self) -> bool { self.surface.replaced.swap(false, Ordering::SeqCst) }
 
-    /// Página fora da tela: sem screencast. O controlador cuida do tamanho dela para o `shot`.
+    /// Página fora da tela: sem screencast e sem a textura na GPU. O controlador cuida do tamanho dela para o `shot`.
     pub fn hide(&self) {
         if self.visible.replace(false) { self.send("Page.stopScreencast", json!({})); }
+        *lock(&self.surface.shown) = None;
     }
 
     /// `at` relativo à origem da página, em px lógicos. Só o botão esquerdo.

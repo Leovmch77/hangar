@@ -480,11 +480,13 @@ impl<P: Page> Controller<P> {
         match layout {
             Layout::Custom(w, h) => self.page.call("Emulation.setDeviceMetricsOverride", metrics(w, h, 1., false)).await?,
             _ if self.state.borrow().hidden => self.page.call("Emulation.setDeviceMetricsOverride", metrics(HIDDEN_VIEWPORT.0, HIDDEN_VIEWPORT.1, 1., false)).await?,
-            // Largura e altura 0 = o tamanho segue a janela; só a escala é emulada.
-            _ => match { let scale = self.state.borrow().scale; scale } {
-                Some(scale) => self.page.call("Emulation.setDeviceMetricsOverride", metrics(0, 0, scale, false)).await?,
-                None => self.page.call("Emulation.clearDeviceMetricsOverride", json!({})).await?,
-            },
+            _ => {
+                self.page.call("Emulation.clearDeviceMetricsOverride", json!({})).await?;
+                // Largura e altura 0 = o tamanho segue a janela; só a escala é emulada. Depois de limpar: sem isso o
+                // 0×0 mantém o tamanho da emulação anterior (a da página escondida).
+                let scale = self.state.borrow().scale;
+                match scale { Some(scale) => self.page.call("Emulation.setDeviceMetricsOverride", metrics(0, 0, scale, false)).await?, None => json!({}) }
+            }
         };
         Ok(())
     }
