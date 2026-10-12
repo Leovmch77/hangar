@@ -134,7 +134,7 @@ impl<P: Page> Controller<P> {
         if self.paused.get() && ACTING.contains(&verb) { return Reply::Text(PAUSED.into()); }
         let arg = |i: usize| args.get(i).map(String::as_str).unwrap_or("");
         // Anuncia antes de medir: a faixa que aparece muda a altura da página. Verbo com ref repete com o nome do alvo.
-        self.report(verb, (verb == "press").then(|| arg(0).to_owned()));
+        if verb != "estado" { self.report(verb, (verb == "press").then(|| arg(0).to_owned())); }
         self.enable_base().await;
         self.after_navigation().await;
         let result = match verb {
@@ -147,6 +147,7 @@ impl<P: Page> Controller<P> {
             "wait" => self.wait(args).await.map(Reply::Text),
             "eval" => self.eval(arg(0)).await.map(Reply::Text),
             "url" => self.eval("location.href").await.map(Reply::Text),
+            "estado" => Ok(Reply::Text(if self.paused.get() { "pausado".into() } else { "livre".into() })),
             "text" => self.value("document.body.innerText").await.map(|v| Reply::Text(v.as_str().unwrap_or("").to_owned())),
             "tema" => self.theme(arg(0)).await.map(Reply::Text),
             "layout" => self.layout(args).await.map(Reply::Text),
@@ -239,6 +240,13 @@ impl<P: Page> Controller<P> {
         }
     }
 
+    /// `center` depois do realce: sem alvo medido, o realce sai antes de o erro subir.
+    async fn measured(&self, r: &str) -> Result<Option<(i64, i64)>, String> {
+        let c = self.center(r).await;
+        if !matches!(c, Ok(Some(_))) { self.unmark().await; }
+        c
+    }
+
     async fn unmark(&self) {
         if self.state.borrow().enabled.contains("Overlay") { let _ = self.page.call("Overlay.hideHighlight", json!({})).await; }
     }
@@ -264,7 +272,8 @@ impl<P: Page> Controller<P> {
 
     async fn click_as(&self, verb: &str, r: &str) -> Result<String, String> {
         self.mark(verb, r).await;
-        let Some((x, y)) = self.center(r).await? else { self.unmark().await; return Ok(format!("erro: ref {r} nao existe (rode snapshot de novo)")) };
+        if self.paused.get() { self.unmark().await; return Ok(PAUSED.into()); }
+        let Some((x, y)) = self.measured(r).await? else { return Ok(format!("erro: ref {r} nao existe (rode snapshot de novo)")) };
         let base = |t: &str| json!({"type": t, "x": x, "y": y, "button": "left", "clickCount": 1});
         let ok = self.arrived(&["pointerdown", "mousedown"], async || {
             self.page.call("Input.dispatchMouseEvent", base("mousePressed")).await?;
@@ -283,6 +292,8 @@ impl<P: Page> Controller<P> {
     async fn fill(&self, r: &str, text: &str) -> Result<String, String> {
         let clicked = self.click_as("fill", r).await?;
         if clicked.starts_with("erro:") { return Ok(clicked); }
+        // Assumir durante o clique: a pessoa pode já estar digitando no campo.
+        if self.paused.get() { return Ok(PAUSED.into()); }
         if let Some(focus) = self.not_editable().await? {
             return Ok(format!("erro: fill {r}: o clique nao deixou um campo de texto com foco (foco em {focus}) — a ref e mesmo um campo? rode snapshot"));
         }
@@ -319,7 +330,8 @@ impl<P: Page> Controller<P> {
 
     async fn hover(&self, r: &str) -> Result<String, String> {
         self.mark("hover", r).await;
-        let Some((x, y)) = self.center(r).await? else { self.unmark().await; return Ok(format!("erro: ref {r} nao existe (rode snapshot de novo)")) };
+        if self.paused.get() { self.unmark().await; return Ok(PAUSED.into()); }
+        let Some((x, y)) = self.measured(r).await? else { return Ok(format!("erro: ref {r} nao existe (rode snapshot de novo)")) };
         let moved = self.page.call("Input.dispatchMouseEvent", json!({"type": "mouseMoved", "x": x, "y": y})).await;
         self.unmark().await;
         moved?;

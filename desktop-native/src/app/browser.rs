@@ -66,6 +66,9 @@ pub(super) struct BrowserPanel {
     agent_seq: u64,
     #[cfg(not(target_os = "macos"))]
     paused: Option<Pause>,
+    /// Fim do último verbo: aviso de entrada da página que chega logo depois é eco da entrada sintética do agente.
+    #[cfg(target_os = "windows")]
+    agent_finished_at: Option<std::time::Instant>,
     #[cfg(not(target_os = "macos"))]
     _activity: Option<Task<()>>,
     _drain: Task<()>,
@@ -94,7 +97,7 @@ impl BrowserPanel {
         Self { key, #[cfg(not(target_os = "macos"))] controller: None, #[cfg(not(target_os = "macos"))] cdp: None,
             #[cfg(not(target_os = "macos"))] relay: Default::default(), #[cfg(not(target_os = "macos"))] viewer: Rc::default(), engine: None, starting: None, _start: None, events, address, page: model::PageState::default(), invalid: None, #[cfg(not(target_os = "macos"))] cookies_status: None, #[cfg(not(target_os = "macos"))] cookies_confirmed: false, #[cfg(target_os = "linux")] last_fill: None, focus,
             origin: Rc::default(), shown: false, #[cfg(not(target_os = "macos"))] agent: None, #[cfg(not(target_os = "macos"))] agent_running: 0,
-            #[cfg(not(target_os = "macos"))] agent_seq: 0, #[cfg(not(target_os = "macos"))] paused: None, #[cfg(not(target_os = "macos"))] _activity: None, _drain: drain, _subscriptions: subscriptions }
+            #[cfg(not(target_os = "macos"))] agent_seq: 0, #[cfg(not(target_os = "macos"))] paused: None, #[cfg(target_os = "windows")] agent_finished_at: None, #[cfg(not(target_os = "macos"))] _activity: None, _drain: drain, _subscriptions: subscriptions }
     }
 
     fn engine(&self) -> Option<&Rc<Engine>> { self.engine.as_ref()?.as_ref().ok() }
@@ -359,6 +362,8 @@ impl BrowserPanel {
     fn agent_acted(&mut self, a: &crate::browser::control::Activity, cx: &mut Context<Self>) {
         self.agent = Some(describe_activity(&self.key, a));
         self.agent_seq += 1;
+        // A atividade chega por canal: o verbo pode já ter terminado, e aí ninguém mais agendaria o sumiço.
+        if self.agent_running == 0 { self.schedule_hide(cx); }
         cx.notify();
     }
 
@@ -369,7 +374,14 @@ impl BrowserPanel {
     #[cfg(not(target_os = "macos"))]
     pub(super) fn agent_finished(&mut self, cx: &mut Context<Self>) {
         self.agent_running = self.agent_running.saturating_sub(1);
+        #[cfg(target_os = "windows")]
+        { self.agent_finished_at = Some(std::time::Instant::now()); }
         if self.agent_running > 0 || self.agent.is_none() { return; }
+        self.schedule_hide(cx);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn schedule_hide(&self, cx: &mut Context<Self>) {
         let seq = self.agent_seq;
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(AGENT_LINGER).await;
@@ -396,7 +408,9 @@ impl BrowserPanel {
     /// Clique ou tecla da pessoa na página com o agente agindo: ela assumiu, e o agente para na hora.
     #[cfg(not(target_os = "macos"))]
     fn user_input(&mut self, cx: &mut Context<Self>) {
-        if self.agent.is_some() && self.paused.is_none() && (cfg!(target_os = "linux") || self.agent_running == 0) { self.pause(Pause::TookOver, cx); }
+        #[cfg(target_os = "windows")]
+        if self.agent_running > 0 || self.agent_finished_at.is_some_and(|t| t.elapsed() < std::time::Duration::from_millis(400)) { return; }
+        if self.agent.is_some() && self.paused.is_none() { self.pause(Pause::TookOver, cx); }
     }
 
     /// Faixa entre a barra e a página: o agente agindo (Pausar, Assumir) ou parado pela pessoa (Retomar).
@@ -543,6 +557,13 @@ impl BrowserPanel {
         #[cfg(target_os = "macos")]
         let _ = cx;
         true
+    }
+
+    fn agent_paused(&self) -> bool {
+        #[cfg(not(target_os = "macos"))]
+        { self.paused.is_some() }
+        #[cfg(target_os = "macos")]
+        false
     }
 
     fn agent_acting(&self) -> bool {
@@ -782,7 +803,8 @@ impl Hangar {
         let Some(server) = self.server.as_deref() else { eprintln!("[nav] nav ignorado: sem servidor ativo"); return };
         let key = format!("{}::{name}", super::servers::norm(server));
         let browser = self.browser_for(key.clone(), window, cx);
-        browser.update(cx, |panel, cx| panel.go(url.to_owned(), window, cx));
+        // Pausado pela pessoa, o agente não troca a página dela; o `open` do CLI pergunta o `estado` e devolve o erro.
+        browser.update(cx, |panel, cx| if panel.agent_paused() { eprintln!("[nav] nav ignorado: navegador pausado pelo usuario") } else { panel.go(url.to_owned(), window, cx) });
         if self.browser_key().as_deref() == Some(key.as_str()) { self.show_browser_tab(window, cx); } else {
             self.side.browser_open.insert(key.clone());
             self.side.tabs.insert(key, SideTab::Browser);
