@@ -1,8 +1,8 @@
 //! Fatos da lista que continuam do Python (`POST /internal/list/facts`): estado dos provedores não
 //! migrados, conta de Kimi/Pi/omp, transferências, orquestrações, acesso, navegador, terminais de
 //! atalho e problemas do runtime. Pergunta só quando a entrada muda ou o último ficou velho, com
-//! prazo de 1 s; sem resposta, fica o último valor, todas as linhas levam
-//! `problema = list_facts_unavailable` e o motivo vai ao diário. A lista nunca passa ao Python.
+//! prazo de 1 s; sem resposta, fica o último valor e o motivo vai ao diário. Passada a carência
+//! (`GRACE`), todas as linhas levam `problema = list_facts_unavailable`. A lista nunca passa ao Python.
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::net::SocketAddr;
@@ -18,6 +18,10 @@ use serde_json::Value;
 /// Prazo da resposta, e idade máxima da última para a mesma entrada.
 pub const FACTS_TIMEOUT: Duration = Duration::from_secs(1);
 pub const FACTS_TTL: Duration = Duration::from_secs(1);
+/// Falha isolada não marca a lista: com resposta boa recente, as linhas seguem limpas até
+/// `GRACE_FAILS` falhas seguidas ou `GRACE` sem resposta boa. Cada falha vai ao diário mesmo assim.
+const GRACE: Duration = Duration::from_secs(5);
+const GRACE_FAILS: u32 = 3;
 const MAX_BODY: usize = 8 << 20;
 pub const UNAVAILABLE: &str = "list_facts_unavailable";
 pub const ORQ_UNAVAILABLE: &str = "list_orq_unavailable";
@@ -98,12 +102,24 @@ struct Request<'a> { rows: &'a [SessionRow], owner_clients: u32, pane_pids: &'a 
 
 pub struct Fetched {
     pub facts: Arc<ListFacts>,
-    /// `false`: o Python não respondeu desta vez; `facts` é o último bom (ou vazio).
+    /// `false`: o Python não respondeu e a carência acabou; `facts` é o último bom (ou vazio).
     pub ok: bool,
+    /// `true` só com resposta desta pergunta (ou do cache dela): quem decide quem morreu não usa
+    /// fatos da carência.
+    pub fresh: bool,
 }
 
 /// `ok = false`: a última pergunta falhou; até `at + FACTS_TTL` o tique não espera o prazo de novo.
-struct Last { key: u64, at: Instant, ok: bool, facts: Arc<ListFacts> }
+struct Last { key: u64, at: Instant, ok: bool, facts: Arc<ListFacts>,
+    /// Falhas seguidas e a hora da última resposta boa, para a carência.
+    fails: u32, good_at: Option<Instant> }
+
+impl Last {
+    fn fetched(&self) -> Fetched {
+        let graced = !self.ok && self.fails < GRACE_FAILS && self.good_at.is_some_and(|t| t.elapsed() < GRACE);
+        Fetched { facts: self.facts.clone(), ok: self.ok || graced, fresh: self.ok }
+    }
+}
 
 pub struct FactsClient {
     upstream: SocketAddr,
@@ -140,7 +156,7 @@ impl FactsClient {
         body.hash(&mut h);
         let key = h.finish();
         if let Some(l) = last.as_ref().filter(|l| l.at.elapsed() < FACTS_TTL && (l.key == key || !l.ok)) {
-            return Fetched { facts: l.facts.clone(), ok: l.ok };
+            return l.fetched();
         }
         match self.ask(body).await {
             Ok(mut facts) => {
@@ -150,9 +166,11 @@ impl FactsClient {
                         keep_orq(&mut facts, prev);
                     }
                 }
-                let facts = Arc::new(facts);
-                *last = Some(Last { key, at: Instant::now(), ok: true, facts: facts.clone() });
-                Fetched { facts, ok: true }
+                let now = Instant::now();
+                let l = Last { key, at: now, ok: true, facts: Arc::new(facts), fails: 0, good_at: Some(now) };
+                let got = l.fetched();
+                *last = Some(l);
+                got
             }
             Err(code) => self.failed(&mut last, code),
         }
@@ -163,9 +181,11 @@ impl FactsClient {
             tracing::warn!(code, "lista: fatos do Python indisponíveis; fica o último valor");
         }
         self.diag.report("rust.list_facts_unavailable", "", &code, "fatos do Python indisponíveis; fica o último valor");
-        let facts = last.as_ref().map_or_else(Arc::default, |l| l.facts.clone());
-        *last = Some(Last { key: 0, at: Instant::now(), ok: false, facts: facts.clone() });
-        Fetched { facts, ok: false }
+        let (facts, fails, good_at) = last.as_ref().map_or_else(|| (Arc::default(), 0, None), |l| (l.facts.clone(), l.fails, l.good_at));
+        let l = Last { key: 0, at: Instant::now(), ok: false, facts, fails: fails + 1, good_at };
+        let got = l.fetched();
+        *last = Some(l);
+        got
     }
 
     /// `Err` é o código que vai ao diário: motivo e status, nunca o corpo nem a mensagem do serde,
@@ -391,6 +411,32 @@ mod tests {
         assert_eq!(diary(&seen, "rust.list_facts_unavailable").await["codigo"], "list_facts_status:503");
         client.demote(vec!["sid".into()]);
         assert_eq!(diary(&seen, "rust.list_demote_failed").await["codigo"], "list_demote_status:503");
+    }
+
+    #[tokio::test]
+    async fn one_failure_after_a_good_answer_does_not_mark_the_list() {
+        let (addr, seen) = python(|path, n| match (path, n) {
+            ("/internal/diag", _) => (200, "{}".into()),
+            (_, 1) => (200, facts_json(json!([]), Value::Null)),
+            _ => (503, "x".into()),
+        }).await;
+        let client = FactsClient::new(addr, "s".into());
+        let first = client.fetch(&[], 1, &BTreeMap::new(), false).await;
+        assert!(first.ok && first.fresh);
+        let second = client.fetch(&[], 2, &BTreeMap::new(), false).await;
+        assert!(second.ok && !second.fresh, "carência: lista limpa, mas não serve para decidir quem morreu");
+        assert_eq!(diary(&seen, "rust.list_facts_unavailable").await["codigo"], "list_facts_status:503");
+    }
+
+    #[test]
+    fn grace_ends_after_three_failures_or_five_seconds() {
+        let last = |fails, good_at| Last { key: 0, at: Instant::now(), ok: false, facts: Arc::default(), fails, good_at };
+        let now = Instant::now();
+        assert!(last(1, Some(now)).fetched().ok);
+        assert!(last(2, Some(now)).fetched().ok);
+        assert!(!last(3, Some(now)).fetched().ok);
+        assert!(!last(1, now.checked_sub(GRACE)).fetched().ok);
+        assert!(!last(1, None).fetched().ok, "sem resposta boa nunca houve carência");
     }
 
     #[tokio::test]

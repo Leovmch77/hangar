@@ -181,7 +181,45 @@ struct Caches {
     classify: Guarded<Classify>,
     /// Último resumo de Git por pasta: a lista não espera o `git status` (`_git_ultimo`).
     git: Mutex<HashMap<String, (Value, Value)>>,
+    /// Quando cada pasta teve o Git relido e com que atividade e versão de refs.
+    git_gate: Mutex<HashMap<String, GitGate>>,
     config_dirs: Mutex<Option<(Instant, Arc<Vec<PathBuf>>)>>,
+}
+
+struct GitGate { at: Instant, activity: u64, fingerprint: Option<Vec<u128>> }
+
+/// Pasta cujo Git a rodada pede, com a atividade que decidiu.
+struct GitDue { dir: String, activity: u64 }
+
+/// Edição de arquivo por fora de uma sessão não toca no índice nem nas refs: só este teto a vê.
+const GIT_IDLE_REFRESH: Duration = Duration::from_secs(30);
+
+/// Relê o Git quando refs/índice mudaram, quando uma sessão da pasta teve atividade (o agente
+/// editando) ou pelo teto. Sem isso cada repositório parado rodava dois `git` a cada 10 s.
+fn git_due(prev: Option<&GitGate>, activity: u64, fingerprint: &Option<Vec<u128>>, now: Instant) -> bool {
+    prev.is_none_or(|g| g.activity != activity || &g.fingerprint != fingerprint
+        || now.saturating_duration_since(g.at) >= GIT_IDLE_REFRESH)
+}
+
+fn git_fingerprint(dir: &str) -> Option<Vec<u128>> {
+    hangar_workspace::git::fingerprint(&hangar_workspace::real(Path::new(dir)))
+}
+
+/// Pastas com Git a reler nesta rodada; a que saiu da lista sai do portão.
+fn git_due_dirs(caches: &Caches, rows: &[SessionRow], now: Instant) -> Vec<GitDue> {
+    let mut activity: HashMap<&str, f64> = HashMap::new();
+    for row in rows {
+        let dir = git_dir(row);
+        if dir.is_empty() { continue; }
+        let a = activity.entry(dir).or_insert(0.0);
+        *a = a.max(row.last_activity.unwrap_or(0.0));
+    }
+    let mut gate = lock(&caches.git_gate);
+    gate.retain(|d, _| activity.contains_key(d.as_str()));
+    activity.into_iter().filter_map(|(dir, a)| {
+        let activity = a.to_bits();
+        git_due(gate.get(dir), activity, &git_fingerprint(dir), now).then(|| GitDue { dir: dir.to_owned(), activity })
+    }).collect()
 }
 
 pub struct ListBridge {
@@ -466,16 +504,16 @@ impl ListBridge {
         list_facts::mark_stale(&mut rows, &fetched.facts, fetched.ok);
         if !input.shadow {
             self.prune_gone(&rows, Instant::now());
-            self.record_live(&rows, fetched.ok);
+            self.record_live(&rows, fetched.fresh);
         }
         let round = keep.then(|| Arc::new(Round { inputs, pre }));
         Ok((Produced { rows: Arc::new(rows), facts: fetched.facts, facts_ok: fetched.ok }, round))
     }
 
-    /// Git em segundo plano, um por pasta: um repositório lento não atrasa o card de ninguém. Não
-    /// roda `git` a cada tique: `git::summary` guarda o resultado por pasta por 3 s.
-    fn refresh_git(&self, dirs: Vec<String>) {
-        for dir in dirs {
+    /// Git em segundo plano, um por pasta: um repositório lento não atrasa o card de ninguém. Só
+    /// as pastas que `git_due` escolheu; `git::summary` ainda guarda o resultado por 3 s.
+    fn refresh_git(&self, dirs: Vec<GitDue>) {
+        for GitDue { dir, activity } in dirs {
             if !lock(&self.git_running).insert(dir.clone()) {
                 continue;
             }
@@ -496,7 +534,10 @@ impl ListBridge {
                     let before = git.remove(&dir).unwrap_or_default();
                     // Consulta que falhou fica com o último número bom, que segue o melhor valor.
                     let keep = |new: Value, old: Value| if new.is_null() { old } else { new };
-                    git.insert(dir, (keep(summary, before.0), keep(diff, before.1)));
+                    git.insert(dir.clone(), (keep(summary, before.0), keep(diff, before.1)));
+                    drop(git);
+                    // Versão lida depois do `git status`, que pode regravar o índice.
+                    lock(&caches.git_gate).insert(dir.clone(), GitGate { at: Instant::now(), activity, fingerprint: git_fingerprint(&dir) });
                     failed
                 }).await;
                 // A pasta no diário pelo nome, sem o caminho inteiro.
@@ -710,7 +751,7 @@ fn apply_git(row: &mut SessionRow, summary: &Value, diff: &Value) {
 /// tem as linhas que reclassificou).
 #[allow(clippy::too_many_arguments)]
 fn decorate(env: &ListEnv, caches: &Caches, dirs: &Dirs, config_dirs: &[PathBuf], inp: &RoundInputs,
-            rows: &mut [SessionRow], wall: f64, mono: f64, whole: bool) -> Vec<String> {
+            rows: &mut [SessionRow], wall: f64, mono: f64, whole: bool) -> Vec<GitDue> {
     caches.decor.with(|d| {
         for row in rows.iter_mut().filter(|r| r.provider == "claude") {
             let pid = inp.agent_pids.get(&row.name).map(|p| i64::from(*p));
@@ -729,17 +770,19 @@ fn decorate(env: &ListEnv, caches: &Caches, dirs: &Dirs, config_dirs: &[PathBuf]
             }
         }
     });
-    let git_dirs: Vec<String> = rows.iter().map(|r| git_dir(r).to_owned()).filter(|d| !d.is_empty()).collect();
     let mut git = lock(&caches.git);
     for row in rows.iter_mut() {
         let (summary, diff) = git.get(git_dir(row)).cloned().unwrap_or_default();
         apply_git(row, &summary, &diff);
     }
-    // Pasta sem sessão sai: o cache não cresce com cada repositório que já passou pela lista.
-    if whole {
-        git.retain(|d, _| git_dirs.contains(d));
+    if !whole {
+        return Vec::new();
     }
-    git_dirs
+    // Pasta sem sessão sai: o cache não cresce com cada repositório que já passou pela lista.
+    let live: HashSet<&str> = rows.iter().map(git_dir).filter(|d| !d.is_empty()).collect();
+    git.retain(|d, _| live.contains(d.as_str()));
+    drop(git);
+    git_due_dirs(caches, rows, Instant::now())
 }
 
 /// `_claude_reading` com o cache de 20 s por (nome, transcript).
@@ -762,9 +805,10 @@ fn decorate_context(cache: &mut ContextCache, row: &mut SessionRow, pid: Option<
             (None, None)
         };
         let account_dir = context::config_dir_of(row.conta.as_deref()).unwrap_or_else(|| dirs.claude.clone());
-        let reading = context::claude_reading(&ReadingInputs { jsonl: Path::new(&jsonl), account_dir: &account_dir,
-            chosen: chosen.as_deref(), opened: opened.as_deref(), declared, engine: row.engine.is_some() });
-        cache.store(&row.name, &jsonl, mono, reading, version)
+        let scan = cache.scan(&row.name, &jsonl, &version);
+        let reading = context::claude_reading_from(&ReadingInputs { jsonl: Path::new(&jsonl), account_dir: &account_dir,
+            chosen: chosen.as_deref(), opened: opened.as_deref(), declared, engine: row.engine.is_some() }, &scan);
+        cache.store_with(&row.name, &jsonl, mono, reading, version, Some(scan))
     } else {
         cache.cached(&row.name, &jsonl)
     };
@@ -894,6 +938,18 @@ pub async fn private(State(st): State<Arc<AppState>>, ConnectInfo(peer): Connect
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn git_reruns_on_ref_change_activity_or_idle_ceiling_only() {
+        let now = Instant::now();
+        let fp = Some(vec![1u128, 2]);
+        let gate = GitGate { at: now, activity: 7, fingerprint: fp.clone() };
+        assert!(git_due(None, 7, &fp, now), "pasta nova");
+        assert!(!git_due(Some(&gate), 7, &fp, now + Duration::from_secs(29)), "parada e sem mudança");
+        assert!(git_due(Some(&gate), 8, &fp, now), "sessão da pasta escreveu");
+        assert!(git_due(Some(&gate), 7, &Some(vec![1, 3]), now), "commit, push ou fetch");
+        assert!(git_due(Some(&gate), 7, &fp, now + GIT_IDLE_REFRESH), "edição por fora aparece no teto");
+    }
 
     #[test]
     fn runtime_view_reaches_codex_headless_rows() {

@@ -8,6 +8,7 @@ import subprocess
 import threading
 import time
 import queue
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -74,8 +75,18 @@ def worktree_paths(main: str) -> list[str]:
     return out
 
 
-_cache: dict[str, tuple[tuple[int, int], object]] = {}
+# Um item por transcript lido; sessão fechada nunca é relida, então o teto descarta a mais antiga.
+_CACHE_MAX = 256
+_cache: OrderedDict[str, tuple[tuple[int, int], object]] = OrderedDict()
 _cache_lock = threading.Lock()
+
+
+def _remember(cache: OrderedDict, path: str, value) -> None:
+    with _cache_lock:
+        cache[path] = value
+        cache.move_to_end(path)
+        while len(cache) > _CACHE_MAX:
+            cache.popitem(last=False)
 
 
 def _cached(path: str, read):
@@ -89,8 +100,7 @@ def _cached(path: str, read):
         if hit and hit[0] == key:
             return hit[1]
     value = read(path)
-    with _cache_lock:
-        _cache[path] = (key, value)
+    _remember(_cache, path, (key, value))
     return value
 
 
@@ -145,34 +155,86 @@ def _tool_paths(block: dict) -> list[tuple[str, bool]]:
     return [(target, False)] if isinstance(target, str) else []
 
 
+_HITS = 20
+
+
+def _scan_claude(lines) -> tuple[str | None, list[tuple[str, bool, str | None]]]:
+    """Varre `lines` (do fim para o começo) atrás do último `cwd` e das chamadas mais recentes."""
+    last: str | None = None
+    hits: list[tuple[str, bool, str | None]] = []
+    for raw in lines:
+        has_tool = b'"tool_use"' in raw
+        # Achado o último `cwd`, só interessa linha com chamada: o resto pode ser imagem de megas.
+        if not has_tool and (last or b'"cwd"' not in raw):
+            continue
+        try:
+            line = json.loads(raw)
+        except ValueError:
+            continue
+        if not isinstance(line, dict):
+            continue
+        cwd = line.get("cwd")
+        cwd = cwd if isinstance(cwd, str) and cwd else None
+        last = last or cwd   # a varredura vem do fim: o primeiro achado é o mais recente
+        content = (line.get("message") or {}).get("content") if has_tool else None
+        for block in reversed(content) if isinstance(content, list) else ():
+            if isinstance(block, dict) and block.get("type") == "tool_use":
+                hits.extend((path, is_cd, cwd) for path, is_cd in _tool_paths(block))
+        if len(hits) >= _HITS:
+            break
+    return last, hits
+
+
+def _complete_end(fh, size: int) -> int | None:
+    """Fim da última linha completa (depois do `\n`); None se a linha aberta passa de `_TAIL`."""
+    start = max(0, size - _TAIL)
+    fh.seek(start)
+    cut = fh.read(size - start).rfind(b"\n")
+    if cut >= 0:
+        return start + cut + 1
+    return 0 if start == 0 else None
+
+
+# path -> (inode, mtime_ns, size, fim da última linha completa, último cwd, chamadas, bytes antes do fim)
+_tails: OrderedDict[str, tuple] = OrderedDict()
+
+
 def _claude_tail(jsonl: str) -> tuple[str | None, list[tuple[str, bool, str | None]]]:
     """(último `cwd`, caminhos citados pelas ferramentas como (caminho, é `cd`?, `cwd` da linha)),
-    do mais recente para o mais antigo. Uma leitura só: o cache é por arquivo."""
-    def read(p: str):
-        last: str | None = None
-        hits: list[tuple[str, bool, str | None]] = []
-        for raw in reversed_lines(p):
-            has_tool = b'"tool_use"' in raw
-            # Achado o último `cwd`, só interessa linha com chamada: o resto pode ser imagem de megas.
-            if not has_tool and (last or b'"cwd"' not in raw):
-                continue
-            try:
-                line = json.loads(raw)
-            except ValueError:
-                continue
-            if not isinstance(line, dict):
-                continue
-            cwd = line.get("cwd")
-            cwd = cwd if isinstance(cwd, str) and cwd else None
-            last = last or cwd   # a varredura vem do fim: o primeiro achado é o mais recente
-            content = (line.get("message") or {}).get("content") if has_tool else None
-            for block in reversed(content) if isinstance(content, list) else ():
-                if isinstance(block, dict) and block.get("type") == "tool_use":
-                    hits.extend((path, is_cd, cwd) for path, is_cd in _tool_paths(block))
-            if len(hits) >= 20:
-                break
-        return last, hits
-    return _cached(jsonl, read) or (None, [])
+    do mais recente para o mais antigo. O transcript só cresce enquanto a sessão trabalha: lê só o
+    trecho novo e junta ao achado anterior, em vez de reler até `_DEEP_TAIL` a cada escrita."""
+    try:
+        st = os.stat(jsonl)
+    except OSError:
+        return None, []
+    with _cache_lock:
+        prev = _tails.get(jsonl)
+    if prev and prev[:3] == (st.st_ino, st.st_mtime_ns, st.st_size):
+        return prev[4], prev[5]
+    try:
+        with open(jsonl, "rb") as fh:
+            end = _complete_end(fh, st.st_size)
+            grow = prev is not None and end is not None and prev[0] == st.st_ino and prev[3] is not None \
+                and prev[3] <= end and end - prev[3] <= _DEEP_TAIL
+            if grow:
+                # Regravado no mesmo inode (`--resume`): o trecho já lido mudou, então relê tudo.
+                fh.seek(max(0, prev[3] - len(prev[6])))
+                grow = fh.read(len(prev[6])) == prev[6]
+            if grow:
+                fresh = fh.read(end - prev[3]).split(b"\n")
+            mark = b""
+            if end:
+                fh.seek(max(0, end - 64))
+                mark = fh.read(end - max(0, end - 64))
+    except OSError:
+        return None, []
+    if grow:
+        last, hits = _scan_claude(reversed(fresh))
+        last, hits = last or prev[4], (hits + prev[5])[:_HITS]
+    else:
+        last, hits = _scan_claude(reversed_lines(jsonl))
+    _remember(_tails, jsonl, (st.st_ino, st.st_mtime_ns, st.st_size, end, last, hits, mark))
+    return last, hits
 
 
 def claude_cwd(jsonl: str) -> str | None:
