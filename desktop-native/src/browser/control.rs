@@ -5,7 +5,7 @@ use std::{cell::{Cell, RefCell}, collections::{HashMap, HashSet, VecDeque}, futu
 use futures::{future::{Either, select}, lock::Mutex};
 use serde_json::{Value, json};
 
-use super::preview_fmt::{Layout, compact_ax, key_event, parse_layout};
+use super::preview_fmt::{Layout, SNAPSHOT_MAX, capped, compact_ax, key_event, parse_layout};
 
 pub trait Page {
     fn call(&self, method: &str, params: Value) -> impl Future<Output = Result<Value, String>>;
@@ -157,7 +157,7 @@ impl<P: Page> Controller<P> {
         self.after_navigation().await;
         let arg = |i: usize| args.get(i).map(String::as_str).unwrap_or("");
         let result = match verb {
-            "snapshot" => self.snapshot().await.map(Reply::Text),
+            "snapshot" => self.snapshot_verb(args).await.map(Reply::Text),
             "click" => self.click(arg(0)).await.map(Reply::Text),
             "fill" => self.fill(arg(0), arg(1)).await.map(Reply::Text),
             "type" => self.type_text(arg(0)).await.map(Reply::Text),
@@ -215,12 +215,28 @@ impl<P: Page> Controller<P> {
         Ok(r["result"]["value"].clone())
     }
 
-    async fn snapshot(&self) -> Result<String, String> {
+    /// Árvore inteira (`wait @eN` usa só as refs).
+    async fn snapshot(&self) -> Result<Vec<String>, String> { self.tree(false).await }
+
+    async fn tree(&self, refs_only: bool) -> Result<Vec<String>, String> {
         self.enable("Accessibility").await?;
         let tree = self.page.call("Accessibility.getFullAXTree", json!({})).await?;
-        let out = compact_ax(tree["nodes"].as_array().map_or(&[][..], Vec::as_slice));
+        let out = compact_ax(tree["nodes"].as_array().map_or(&[][..], Vec::as_slice), refs_only);
         self.state.borrow_mut().refs = out.refs;
-        Ok(out.lines.join("\n"))
+        Ok(out.lines)
+    }
+
+    /// `snapshot [--refs] [--max <caracteres>]`.
+    async fn snapshot_verb(&self, args: &[String]) -> Result<String, String> {
+        let refs_only = args.iter().any(|a| a == "--refs");
+        let max = match args.iter().position(|a| a == "--max") {
+            None => SNAPSHOT_MAX,
+            Some(i) => match args.get(i + 1).and_then(|v| v.parse::<usize>().ok()).filter(|m| *m >= 1000) {
+                Some(m) => m,
+                None => return Ok("erro: snapshot --max precisa de um numero de caracteres (1000 ou mais)".into()),
+            },
+        };
+        Ok(capped(&self.tree(refs_only).await?, max))
     }
 
     /// Ref velha e ref inexistente dão no mesmo lugar: o nó morre em qualquer re-render, e a saída é o mesmo snapshot novo.

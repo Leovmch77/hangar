@@ -4,7 +4,7 @@
 //   hangar-preview open <url>             abre o navegador desta sessão com a url (só no Electron
 //                                          o painel monta sozinho na tela do usuário)
 //   hangar-preview list                    navegadores vivos (chave, url, vivo/morto)
-//   hangar-preview snapshot                árvore de acessibilidade compacta, com refs @eN
+//   hangar-preview snapshot [--refs] [--max n]  árvore de acessibilidade compacta, com refs @eN
 //   hangar-preview click @eN               clica no elemento da ref
 //   hangar-preview fill @eN <texto>        limpa o campo da ref e digita o texto
 //   hangar-preview type <texto>            digita no elemento com foco
@@ -82,7 +82,8 @@ Identidade: sidecar da sessão no modo sem terminal; tmux no modo com terminal.
 
   open <url>              abre o navegador desta sessão com a url
   list                    navegadores vivos (chave, url, vivo/morto)
-  snapshot                árvore de acessibilidade compacta, com refs @eN
+  snapshot [--refs] [--max n]  árvore de acessibilidade com refs @eN e estados ([checked], [disabled]...);
+                          --refs só os acionáveis; corta em 24 mil caracteres com aviso (--max muda)
   click @eN               clica no elemento da ref
   fill @eN <texto>        limpa o campo da ref e digita o texto
   type <texto>            digita no elemento com foco
