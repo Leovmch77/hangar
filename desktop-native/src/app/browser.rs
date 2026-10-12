@@ -746,18 +746,21 @@ impl BrowserPanel {
         cx: &mut Context<Self>) {
         let site = site.or_else(|| self.page_site());
         if let Some((_, old)) = self.login_request.replace((site, reply)) {
-            let _ = old.send(crate::browser::control::Reply::Text("recusado: outro pedido de login substituiu este".into()));
+            let _ = old.send(crate::browser::control::Reply::Text("erro: outro pedido de login substituiu este".into()));
         }
         cx.notify();
     }
 
     /// Resposta ao agente: a contagem ou o motivo, nunca valor de cookie.
     #[cfg(not(target_os = "macos"))]
-    fn finish_login(&mut self, result: Result<usize, String>) {
+    /// `Ok((trazidos, de fora))`.
+    fn finish_login(&mut self, result: Result<(usize, usize), String>) {
         let Some((site, reply)) = self.login_reply.take() else { return };
         let site = site.unwrap_or_else(|| "todos os sites".into());
+        let skipped = |n: usize| if n > 0 { format!(" ({n} ficaram de fora)") } else { String::new() };
         let text = match result {
-            Ok(n) => format!("ok: {n} cookies para {site}"),
+            Ok((0, out)) => format!("erro: login de {site} nao veio: nenhum cookie do site no navegador{}", skipped(out)),
+            Ok((n, out)) => format!("ok: {n} cookies para {site}{}", skipped(out)),
             Err(e) => format!("erro: login de {site} nao veio: {e}"),
         };
         let _ = reply.send(crate::browser::control::Reply::Text(text));
@@ -773,7 +776,7 @@ impl BrowserPanel {
             return;
         }
         if !allow {
-            let _ = reply.send(crate::browser::control::Reply::Text("recusado: o usuario nao liberou o login".into()));
+            let _ = reply.send(crate::browser::control::Reply::Text("erro: login recusado pelo usuario".into()));
             cx.notify();
             return;
         }
@@ -892,7 +895,7 @@ impl BrowserPanel {
         }
         // 0 cookies não é sucesso: a pessoa vê "nenhum cookie", não "0 trazidos" parecendo que deu certo.
         if cookies.is_empty() {
-            self.finish_login(Ok(0));
+            self.finish_login(Ok((0, locked)));
             self.cookies_status = Some(match &self.import_site {
                 Some(site) => tr("browser_login_none_site").replace("{site}", site),
                 None => tr("browser_cookies_none"),
@@ -917,7 +920,7 @@ impl BrowserPanel {
             let _ = this.update(cx, |this, cx| {
                 match reply {
                     Ok(count) => {
-                        this.finish_login(Ok(count));
+                        this.finish_login(Ok((count, total - count + locked)));
                         let mut done = match &site {
                             Some(site) => tr("browser_login_ok_site").replace("{site}", site),
                             None => tr("browser_cookies_ok"),
