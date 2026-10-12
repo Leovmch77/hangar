@@ -126,7 +126,19 @@ export interface SessionInfo {
   shared?: boolean;
   // Nome do convidado que criou a sessão; ausente/null = dono do servidor.
   owner?: string | null;
+  // Linha vista por convite: `share` = acesso completo, `pair` = par externo só leitura.
+  guest_kind?: 'share' | 'pair' | null;
+  // Pares de fora do grupo desta sessão: `pair_externals` é a lista; `pair_external` é só o
+  // primeiro, mantido para cliente antigo. Leia por `pairExternals()`.
+  pair_externals?: PairExternal[] | null;
+  pair_external?: LegacyPairExternal | null;
 }
+
+export type PairLevel = 'full' | 'view';
+// `level`: o que esta sessão dá à de fora; `pending`: o par está em `full` e esta sessão ainda
+// não foi liberada (entrou no grupo por agente).
+export interface PairExternal { alias: string; owner: string; session: string; address: string; level: PairLevel; pending: boolean }
+export type LegacyPairExternal = Pick<PairExternal, 'alias' | 'owner' | 'session'> & Partial<PairExternal>;
 
 // Detalhe do plano (GET /api/sessions/{name}/plan, Task 5): granularidade de Task/Step que o
 // SessionInfo.plan_* não carrega (aquele é o resumo pra chip/barra na lista). 404 = sem plano ativo.
@@ -150,7 +162,11 @@ export interface AggSession extends SessionInfo {
   serverColor: string;
   // A linha veio de um servidor de convite: é a sessão de outra pessoa, compartilhada com você.
   serverInvite?: boolean;
+  // Sessão de fora posta no grupo local por `placeExternalRows`; `serverId` continua o da entrada
+  // do convite (é por ela que a sessão é chamada).
+  outside?: OutsideMark;
 }
+export interface OutsideMark { alias: string; owner: string; localServerId: string; localSession: string }
 
 // Candidato de resume: um transcript <uuid>.jsonl do cwd que a sessão "sem id" poderia retomar.
 export interface ResumeCandidate {

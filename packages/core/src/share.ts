@@ -115,6 +115,17 @@ export function parseInviteLink(text: string): { address: string; code: string }
   return { address: `${esquema}://${hostPorta}`, code };
 }
 
+// Só `https://host.ts.net:8443/par/CÓDIGO` do Funnel (regra do `parse_pair_link` do nativo): outro
+// host ou porta nunca recebe o resgate, que leva o token desta máquina.
+export function parsePairLink(text: string): string | null {
+  let u: URL;
+  try { u = new URL(text.trim()); } catch { return null; }
+  if (u.protocol !== 'https:' || u.username || u.password || u.search || u.hash || text.includes('?') || text.includes('#')) return null;
+  if (!u.hostname.endsWith('.ts.net') || u.hostname.length <= '.ts.net'.length || u.port !== '8443') return null;
+  const m = /^\/par\/([A-Za-z0-9]{1,64})\/?$/.exec(u.pathname);
+  return m ? `https://${u.hostname}:8443/par/${m[1]}` : null;
+}
+
 // Forma mínima do corpo de erro do resgate: envelope `{detail:{params:{reason}}}` ou `{reason}` cru.
 interface InviteBody { detail?: InviteBody; reason?: string; params?: { reason?: string } }
 
