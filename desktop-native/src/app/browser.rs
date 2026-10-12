@@ -1302,7 +1302,9 @@ impl Hangar {
             let mine = current.as_deref() == Some(key.as_str());
             let shown = visible && mine;
             #[cfg(target_os = "windows")]
-            for image in browser.update(cx, |panel, _| std::mem::take(&mut panel.released)) { super::release_image(image, window, cx); }
+            if !browser.read(cx).released.is_empty() {
+                for image in browser.update(cx, |panel, _| std::mem::take(&mut panel.released)) { super::release_image(image, window, cx); }
+            }
             if browser.update(cx, |panel, cx| panel.set_shown(shown, covered && mine, cx)) && shown {
                 // O painel é guardado entre quadros: sem um redesenho dele, a página não volta a se posicionar.
                 let id = browser.entity_id();
