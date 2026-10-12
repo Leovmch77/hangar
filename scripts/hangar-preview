@@ -38,9 +38,9 @@
 // (quem monta o painel na tela) e `list` só lê os sidecares de sessão — os dois têm que funcionar
 // mesmo com o shell fora do ar.
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { accessSync, constants, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { delimiter, dirname, join, resolve } from 'node:path';
 import fmt from '../shell/preview_fmt.cjs';
 import folha from '../shell/folha.cjs';
 import jev from '../shell/jev_objetivo.cjs';
@@ -398,6 +398,47 @@ function escritorDeTexto() {
   };
 }
 
+function executavel(nome) {
+  if (!nome) return false;
+  const exts = process.platform === 'win32' ? ['', ...(process.env.PATHEXT ?? '.EXE;.CMD;.BAT').split(';')] : [''];
+  const dirs = /[\\/]/.test(nome) ? [''] : (process.env.PATH ?? '').split(delimiter).filter(Boolean);
+  return dirs.some((d) => exts.some((x) => {
+    try {
+      const p = d ? join(d, nome + x) : nome + x;
+      accessSync(p, constants.X_OK);
+      return statSync(p).isFile();
+    } catch {
+      return false;
+    }
+  }));
+}
+
+/**
+ * Configuração do escritor que não tem como funcionar, dita pelo nome do campo de Configurações do
+ * servidor. Sem isto o erro só aparecia no primeiro campo a digitar, como ENOENT do valor do campo.
+ */
+function problemaDoEscritor(env = process.env) {
+  const base = String(env.JEV_TEXTO_BASE_URL ?? '').trim();
+  const chave = String(env.JEV_TEXTO_API_KEY ?? '').trim();
+  const problemas = [];
+  if (base) {
+    if (base === String(env.JEV_ENDPOINT ?? '').trim() || /\/decisions\/?$|systemone/.test(base)) {
+      problemas.push(`jev_texto_base_url ("${base}") e o endereco de decisoes do Jev; ali vai um endpoint`
+        + ' compativel com a OpenAI, como https://openrouter.ai/api/v1');
+    } else if (!chave) {
+      problemas.push(`jev_texto_base_url esta preenchido e jev_texto_api_key esta vazio: preencha a chave`);
+    } else {
+      return null;
+    }
+  }
+  const comando = String(env.JEV_TEXTO_CMD ?? '').trim() || TEXTO_CMD_PADRAO;
+  if (!executavel(comando.split(' ')[0])) {
+    problemas.push(`jev_texto_cmd ("${comando}") nao e um comando instalado; ali vai um comando que`
+      + ` recebe o pedido como argumento e imprime so o valor, como "${TEXTO_CMD_PADRAO}"`);
+  }
+  return problemas.length ? problemas.join('; ') : null;
+}
+
 if (cmd === 'confere') {
   const estado = pos.slice(1).join(' ').trim();
   if (!estado) erro('confere precisa do estado: hangar-preview confere "o dialogo fechou e a lista mostra o item novo"');
@@ -438,11 +479,15 @@ if (cmd === 'objetivo') {
     erro('--dados precisa ser um JSON de objeto: --dados \'{"nome":"Jefferson","plano":"Unimed"}\'');
   }
 
+  // Configuração quebrada não impede o laço: clicar e preencher por --dados seguem funcionando, e o
+  // campo que precisaria do escritor para com falta-dado.
+  const problema = problemaDoEscritor();
+  if (problema) console.error(`hangar-preview: aviso: modelo de texto inutilizavel: ${problema}`);
   const resultado = await jev.rodar({
     objetivo,
     dados,
     maxPassos: Number(flags.passos) > 0 ? Number(flags.passos) : 15,
-    escreverTexto: escritorDeTexto(),
+    escreverTexto: problema ? undefined : escritorDeTexto(),
     log: (linha) => console.log(semToken(linha)),
     // Tudo que o navegador devolve vira estado enviado ao Jev: o token não sai da máquina.
     executar: async (verbo, args) => semToken((await chamar(chave, verbo, args)).texto),
