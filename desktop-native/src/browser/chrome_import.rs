@@ -13,8 +13,10 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use ring::rand::{SecureRandom, SystemRandom};
 use serde_json::{Value, json};
 
-pub const ACTIVATE_PAGE: &str = "chrome://inspect/#remote-debugging";
-const IO_TIMEOUT: Duration = Duration::from_secs(15);
+/// Tempo para a pessoa achar e responder o "Permitir a depuração remota?" do Chrome.
+const IO_TIMEOUT: Duration = Duration::from_secs(60);
+/// Falha no handshake antes disto é a conexão caindo (comum na 1ª depois de um tempo parado), não a pessoa respondendo.
+const HUMAN_ANSWER: Duration = Duration::from_secs(2);
 /// Dump de cookies de um perfil antigo passa de 1 MB; teto generoso, só pra barrar resposta absurda.
 const MAX_FRAME: usize = 64 * 1024 * 1024;
 
@@ -23,6 +25,8 @@ pub enum ImportError {
     ChromeClosed,
     /// A porta fixa tem um Chrome de automação, não o do usuário.
     Headless,
+    /// A pessoa recusou o "Permitir a depuração remota?" ou não respondeu a tempo: tentar de novo abriria outro diálogo.
+    Refused,
     /// Falha ao falar CDP.
     Failed(String),
 }
@@ -33,6 +37,7 @@ impl ImportError {
         match self {
             Self::ChromeClosed => "browser_cookies_chrome_off",
             Self::Headless => "browser_cookies_headless",
+            Self::Refused => "browser_cookies_refused",
             Self::Failed(_) => "browser_cookies_error",
         }
     }
@@ -45,26 +50,59 @@ impl ImportError {
     }
 }
 
-/// Raízes de perfil onde o Chrome grava `DevToolsActivePort`, na ordem em que vale procurar.
+/// Um navegador da família Chrome instalado de um jeito: onde fica o perfil (lá o Chrome grava `DevToolsActivePort`),
+/// a página que liga a depuração e como abri-lo.
+pub struct Browser {
+    pub name: &'static str,
+    pub page: &'static str,
+    root: PathBuf,
+    launch: Vec<std::ffi::OsString>,
+}
+
+const CHROME_PAGE: &str = "chrome://inspect/#remote-debugging";
+
+/// Na ordem em que vale procurar e abrir: o primeiro com perfil é o que a pessoa usa.
 /// Este módulo não compila no macOS, então o não-Windows aqui é o Linux.
-fn profile_roots() -> Vec<PathBuf> {
+fn browsers() -> Vec<Browser> {
     let home = dirs_home();
     #[cfg(target_os = "windows")]
     {
         let local = std::env::var_os("LOCALAPPDATA").map(PathBuf::from)
             .unwrap_or_else(|| home.join("AppData").join("Local"));
+        let programs: Vec<PathBuf> = ["ProgramFiles", "ProgramFiles(x86)"].iter()
+            .filter_map(std::env::var_os).map(PathBuf::from).chain([local.clone()]).collect();
+        let exe = |rel: &[&str]| programs.iter().map(|base| rel.iter().fold(base.clone(), |p, part| p.join(part)))
+            .find(|p| p.is_file()).map(|p| vec![p.into_os_string()]).unwrap_or_default();
         vec![
-            local.join("Google").join("Chrome").join("User Data"),
-            local.join("Microsoft").join("Edge").join("User Data"),
+            Browser { name: "Chrome", page: CHROME_PAGE, root: local.join("Google").join("Chrome").join("User Data"),
+                launch: exe(&["Google", "Chrome", "Application", "chrome.exe"]) },
+            Browser { name: "Edge", page: "edge://inspect/#remote-debugging", root: local.join("Microsoft").join("Edge").join("User Data"),
+                launch: exe(&["Microsoft", "Edge", "Application", "msedge.exe"]) },
         ]
     }
     #[cfg(not(target_os = "windows"))]
     {
         let cfg = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).unwrap_or_else(|| home.join(".config"));
+        let bin = |names: &[&str]| names.iter().find(|n| on_path(n)).map(|n| vec![(*n).into()]).unwrap_or_default();
+        let flatpak = |id: &str| {
+            let installed = [PathBuf::from("/var/lib/flatpak/app"), home.join(".local/share/flatpak/app")]
+                .iter().any(|dir| dir.join(id).is_dir());
+            if installed && on_path("flatpak") { vec!["flatpak".into(), "run".into(), id.into()] } else { vec![] }
+        };
+        let var_app = |id: &str, rel: &str| home.join(".var/app").join(id).join("config").join(rel);
+        let b = |name, root, launch| Browser { name, page: CHROME_PAGE, root, launch };
         vec![
-            cfg.join("google-chrome"),
-            cfg.join("chromium"),
-            cfg.join("BraveSoftware").join("Brave-Browser"),
+            b("Chrome", cfg.join("google-chrome"), bin(&["google-chrome-stable", "google-chrome"])),
+            b("Chrome", var_app("com.google.Chrome", "google-chrome"), flatpak("com.google.Chrome")),
+            b("Chrome Beta", cfg.join("google-chrome-beta"), bin(&["google-chrome-beta"])),
+            b("Chrome Dev", cfg.join("google-chrome-unstable"), bin(&["google-chrome-unstable"])),
+            b("Chrome Dev", var_app("com.google.ChromeDev", "google-chrome-unstable"), flatpak("com.google.ChromeDev")),
+            b("Chromium", cfg.join("chromium"), bin(&["chromium", "chromium-browser"])),
+            b("Chromium", home.join("snap/chromium/common/chromium"),
+                if std::path::Path::new("/snap/bin/chromium").is_file() { vec!["/snap/bin/chromium".into()] } else { vec![] }),
+            b("Chromium", var_app("org.chromium.Chromium", "chromium"), flatpak("org.chromium.Chromium")),
+            b("Brave", cfg.join("BraveSoftware").join("Brave-Browser"), bin(&["brave", "brave-browser"])),
+            b("Brave", var_app("com.brave.Browser", "BraveSoftware/Brave-Browser"), flatpak("com.brave.Browser")),
         ]
     }
 }
@@ -114,14 +152,20 @@ fn url_from_port(port: u16) -> Result<Option<String>, ImportError> {
 
 /// Cookie do `Storage.getCookies` -> `CookieParam` do `Storage.setCookies`: só os campos que viajam.
 fn to_param(c: &Value) -> Value {
+    let secure = c["secure"].as_bool().unwrap_or(false);
+    let path = c["path"].as_str().unwrap_or("/");
     let mut o = json!({
         "name": c["name"],
         "value": c["value"],
-        "domain": c["domain"],
-        "path": c.get("path").filter(|v| v.is_string()).cloned().unwrap_or_else(|| json!("/")),
-        "secure": c["secure"].as_bool().unwrap_or(false),
+        "path": path,
+        "secure": secure,
         "httpOnly": c["httpOnly"].as_bool().unwrap_or(false),
     });
+    // Sem o ponto inicial o cookie é só do host: por `url`, senão viraria do domínio e um `__Host-` seria recusado.
+    match c["domain"].as_str() {
+        Some(host) if !host.starts_with('.') => o["url"] = json!(format!("{}://{host}{path}", if secure { "https" } else { "http" })),
+        _ => o["domain"] = c["domain"].clone(),
+    }
     if let Some(s) = c["sameSite"].as_str() {
         o["sameSite"] = json!(s);
     }
@@ -136,7 +180,7 @@ fn to_param(c: &Value) -> Value {
 /// aceita) e depois a porta fixa; cada candidato duas vezes, porque a 1ª conexão depois de um tempo
 /// parado costuma cair e as seguintes respondem.
 pub fn fetch_cookies(port: Option<u16>) -> Result<Vec<Value>, ImportError> {
-    let mut candidates: Vec<String> = profile_roots().iter().filter_map(endpoint_from_profile).collect();
+    let mut candidates: Vec<String> = browsers().iter().filter_map(|b| endpoint_from_profile(&b.root)).collect();
     // Headless na porta fixa não pode mascarar um perfil que funcionaria: fica como erro de reserva, não aborta.
     let mut last = ImportError::ChromeClosed;
     if let Some(p) = port {
@@ -153,6 +197,7 @@ pub fn fetch_cookies(port: Option<u16>) -> Result<Vec<Value>, ImportError> {
                     let cookies = result["cookies"].as_array().into_iter().flatten().map(to_param).collect();
                     return Ok(cookies);
                 }
+                Err(ImportError::Refused) => return Err(ImportError::Refused),
                 Err(e) => {
                     // O erro mais específico vence: um candidato velho (porta morta) não apaga a recusa do Chrome do usuário.
                     last = keep_specific(last, e);
@@ -166,6 +211,32 @@ pub fn fetch_cookies(port: Option<u16>) -> Result<Vec<Value>, ImportError> {
     Err(last)
 }
 
+/// Só os cookies que a página de `site` recebe: do próprio host e dos domínios-pai (`.github.com` serve
+/// `gist.github.com`). Cookie de outro site, ou de um subdomínio irmão, fica no Chrome.
+pub fn for_site(cookies: Vec<Value>, site: &str) -> Vec<Value> {
+    let site = site.trim_start_matches('.').to_ascii_lowercase();
+    cookies.into_iter().filter(|c| {
+        let (host, domain_cookie) = match c["domain"].as_str() {
+            Some(d) => (d.trim_start_matches('.').to_ascii_lowercase(), d.starts_with('.')),
+            None => match c["url"].as_str().and_then(|u| url::Url::parse(u).ok()) {
+                Some(u) => (u.host_str().unwrap_or_default().to_ascii_lowercase(), false),
+                None => return false,
+            },
+        };
+        let www = |h: &str| h.strip_prefix("www.").unwrap_or(h).to_owned();
+        www(&host) == www(&site) || (domain_cookie && site.ends_with(&format!(".{host}")))
+    }).collect()
+}
+
+/// `github.com`, `https://www.github.com/x` -> `github.com`. `None` quando não há host.
+pub fn site_of(text: &str) -> Option<String> {
+    let text = text.trim();
+    let url = url::Url::parse(text).ok().filter(|u| u.has_host())
+        .or_else(|| url::Url::parse(&format!("https://{text}")).ok())?;
+    let host = url.host_str()?.to_ascii_lowercase();
+    (!host.is_empty() && host.contains('.')).then(|| host.strip_prefix("www.").unwrap_or(&host).to_owned())
+}
+
 /// Mantém o erro mais informativo: `Failed`/`Headless` vencem o genérico `ChromeClosed`.
 fn keep_specific(current: ImportError, new: ImportError) -> ImportError {
     fn rank(e: &ImportError) -> u8 {
@@ -173,6 +244,7 @@ fn keep_specific(current: ImportError, new: ImportError) -> ImportError {
             ImportError::ChromeClosed => 0,
             ImportError::Headless => 1,
             ImportError::Failed(_) => 2,
+            ImportError::Refused => 3,
         }
     }
     if rank(&new) >= rank(&current) { new } else { current }
@@ -220,16 +292,24 @@ fn cdp_once(ws: &str, method: &str) -> Result<Value, ImportError> {
     // Só os cabeçalhos: o servidor não manda quadro nenhum antes de a gente mandar o comando.
     let mut head = Vec::new();
     let mut byte = [0u8; 1];
+    let asked = std::time::Instant::now();
     while !head.ends_with(b"\r\n\r\n") {
-        // Timeout aqui é a pessoa demorando a aprovar "Permitir depuração remota?" (ou a conexão caindo), não Chrome off.
-        stream.read_exact(&mut byte).map_err(|_| ImportError::Failed("cdp: sem resposta ao handshake".into()))?;
+        // O Chrome segura o handshake enquanto pergunta "Permitir depuração remota?": falha depois de a pessoa ter tido
+        // tempo de ver o diálogo é a resposta dela (ou o tempo esgotado), e não se tenta de novo.
+        stream.read_exact(&mut byte).map_err(|e| {
+            let waited = matches!(e.kind(), std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock);
+            if waited || asked.elapsed() >= HUMAN_ANSWER { ImportError::Refused } else { ImportError::Failed("cdp: sem resposta ao handshake".into()) }
+        })?;
         head.push(byte[0]);
         if head.len() > 8192 {
             return Err(ImportError::Failed("cdp: handshake sem fim".into()));
         }
     }
     if !head.starts_with(b"HTTP/1.1 101") {
-        return Err(ImportError::Failed("cdp: depuracao recusada ou indisponivel".into()));
+        // 403 é o "não" do diálogo; outra resposta é um serviço qualquer na porta de um `DevToolsActivePort` velho.
+        return Err(if head.starts_with(b"HTTP/1.1 403") { ImportError::Refused } else {
+            ImportError::Failed("cdp: a porta do perfil nao e o Chrome".into())
+        });
     }
 
     let payload = json!({"id": 1, "method": method}).to_string();
@@ -306,34 +386,34 @@ fn read_frame(stream: &mut impl Read) -> Result<(bool, u8, Vec<u8>), ImportError
     Ok((fin, op, data))
 }
 
-/// Abre `chrome://inspect/#remote-debugging` no Chrome do usuário. Não se lança o Chrome direto deste
-/// processo sem fechar os descritores: o filho herdaria o pipe do CDP do Chromium embutido (fd 3 e 4)
-/// e o seguraria depois de o app fechar — por isso o `sh` que fecha todo descritor acima de 2.
-pub fn open_remote_debug_page() -> bool {
+/// Abre o navegador da pessoa (o instalado usado por último) com a página que liga a depuração; o que já está aberto
+/// recusa `chrome://` da linha de comando e mostra uma aba nova, por isso o endereço também vai copiado. `None`
+/// quando nenhum está instalado, para não dizer que abriu o que não existe.
+/// No Linux não se lança o navegador direto deste processo sem fechar os descritores: o filho herdaria o pipe do CDP
+/// do Chromium embutido (fd 3 e 4) e o seguraria depois de o app fechar — por isso o `sh` que fecha todo descritor
+/// acima de 2.
+pub fn open_remote_debug_page() -> Option<Browser> {
     use std::process::{Command, Stdio};
+    let mut found: Vec<Browser> = browsers().into_iter().filter(|b| !b.launch.is_empty()).collect();
+    // O usado por último primeiro: o `Local State` é regravado a cada uso, e quem tem Chrome e Edge pode usar só o Edge.
+    let used = |b: &Browser| std::fs::metadata(b.root.join("Local State")).and_then(|m| m.modified()).ok();
+    found.sort_by_key(|b| std::cmp::Reverse(used(b)));
+    let browser = found.into_iter().next()?;
+    let (program, args) = browser.launch.split_first()?;
     #[cfg(target_os = "windows")]
-    {
-        Command::new("cmd").args(["/c", "start", "", "chrome", ACTIVATE_PAGE])
-            .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().is_ok()
-    }
+    let mut cmd = { let mut cmd = Command::new(program); cmd.args(args).arg(browser.page); cmd };
     #[cfg(not(target_os = "windows"))]
-    {
+    let mut cmd = {
         use std::os::unix::process::CommandExt;
         let fd_close = "for fd in $(seq 3 1023); do eval \"exec $fd>&-\"; done 2>/dev/null; exec \"$0\" \"$@\"";
-        for bin in ["google-chrome-stable", "google-chrome", "chromium", "chromium-browser", "brave"] {
-            if !on_path(bin) {
-                continue;
-            }
-            let spawned = Command::new("sh").args(["-c", fd_close, bin, ACTIVATE_PAGE])
-                .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
-                .process_group(0).spawn();
-            if let Ok(mut child) = spawned {
-                std::thread::spawn(move || { let _ = child.wait(); });
-                return true;
-            }
-        }
-        false
-    }
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", fd_close]).arg(program).args(args).arg(browser.page).process_group(0);
+        cmd
+    };
+    let mut child = cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn()
+        .inspect_err(|e| eprintln!("[cookies] {} nao abriu: {e}", browser.name)).ok()?;
+    std::thread::spawn(move || { let _ = child.wait(); });
+    Some(browser)
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -435,7 +515,7 @@ mod passwords {
 
     /// Pasta 0700 de nome aleatório criada aqui (falha se já existir): sem `XDG_RUNTIME_DIR` a base é o `/tmp`, e um
     /// symlink pré-plantado com nome previsível desviaria a cópia do banco cifrado.
-    fn private_dir() -> std::io::Result<PathBuf> {
+    pub(super) fn private_dir() -> std::io::Result<PathBuf> {
         use std::os::unix::fs::DirBuilderExt;
         let base = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
         let dir = base.join(format!("hangar-ld-{}-{}", std::process::id(), rand_suffix()));
@@ -478,7 +558,7 @@ mod passwords {
 
     /// Chave do chaveiro achada vale pelo processo; sem ela (chaveiro travado, sem `secret-tool`) tenta de novo depois
     /// de 5 min, em vez de pedir a senha do chaveiro a cada página ou desistir até reiniciar o app.
-    fn keys() -> Vec<Vec<u8>> {
+    pub(super) fn keys() -> Vec<Vec<u8>> {
         static KEYS: Mutex<Option<(Option<Instant>, Vec<Vec<u8>>)>> = Mutex::new(None);
         let mut cached = KEYS.lock().unwrap_or_else(|e| e.into_inner());
         if let Some((retry, keys)) = cached.as_ref()
@@ -499,11 +579,23 @@ mod passwords {
     /// diferem, então tenta as duas e fica com a que decifra para texto limpo.
     fn key_candidates() -> Vec<Vec<u8>> {
         let mut keys: Vec<Vec<u8>> = vec![b"peanuts".to_vec()];
-        for app in ["chrome", "chromium"] {
+        for app in ["chrome", "chromium", "brave"] {
             if let Ok(out) = Command::new("secret-tool").args(["lookup", "application", app]).output()
                 && out.status.success() && !out.stdout.is_empty()
             {
                 keys.push(out.stdout);
+            }
+        }
+        // No KDE o Chrome guarda a chave na KWallet, que o `secret-tool` não lê.
+        if std::env::var("XDG_CURRENT_DESKTOP").is_ok_and(|d| d.contains("KDE")) {
+            for (entry, folder) in [("Chrome Safe Storage", "Chrome Keys"), ("Chromium Safe Storage", "Chromium Keys"),
+                ("Brave Safe Storage", "Brave Keys")] {
+                if let Ok(out) = Command::new("kwallet-query").args(["-r", entry, "-f", folder, "kdewallet"]).output()
+                    && out.status.success()
+                {
+                    let key = String::from_utf8_lossy(&out.stdout).trim_end().to_owned();
+                    if !key.is_empty() && !key.starts_with("Failed") { keys.push(key.into_bytes()); }
+                }
             }
         }
         keys.sort();
@@ -514,6 +606,14 @@ mod passwords {
     /// AES-128-CBC v10/v11 do Linux: IV de 16 espaços, chave = PBKDF2(senha, "saltysalt", 1, SHA-1, 16 bytes). Sem o
     /// prefixo de 32 bytes do mac/Windows. `None` quando a chave não decifra para texto limpo.
     fn decrypt(cipher: &[u8], password: &[u8]) -> Option<String> {
+        let plain = decrypt_bytes(cipher, password)?;
+        let text = std::str::from_utf8(&plain).ok()?;
+        // Lixo de controle (exceto espaços) significa chave errada.
+        text.chars().all(|c| !c.is_control() || c.is_whitespace()).then(|| text.to_owned())
+    }
+
+    /// Só a decifração, sem conferir o texto: o valor de cookie novo começa com 32 bytes binários.
+    pub(super) fn decrypt_bytes(cipher: &[u8], password: &[u8]) -> Option<Vec<u8>> {
         if cipher.len() < 3 || (&cipher[..3] != b"v10" && &cipher[..3] != b"v11") {
             return None;
         }
@@ -522,12 +622,10 @@ mod passwords {
         let mut buf = cipher[3..].to_vec();
         let plain = Aes128CbcDec::new((&key).into(), (&[0x20u8; 16]).into())
             .decrypt_padded_mut::<Pkcs7>(&mut buf).ok()?;
-        let text = std::str::from_utf8(plain).ok()?;
-        // Lixo de controle (exceto espaços) significa chave errada.
-        text.chars().all(|c| !c.is_control() || c.is_whitespace()).then(|| text.to_owned())
+        Some(plain.to_vec())
     }
 
-    fn decode_hex(s: &str) -> Option<Vec<u8>> {
+    pub(super) fn decode_hex(s: &str) -> Option<Vec<u8>> {
         // Separador de coluna dentro de um username desloca os campos e a "hex" vira texto arbitrário: sem o guarda,
         // o corte `[i..i+2]` cairia no meio de um char multibyte e derrubaria a thread.
         if !s.is_ascii() || !s.len().is_multiple_of(2) {
@@ -611,6 +709,10 @@ mod passwords {
 #[cfg(target_os = "linux")]
 pub use passwords::{credentials_for, inject_login_js};
 
+#[cfg(target_os = "linux")]
+#[path = "disk_cookies.rs"]
+pub mod disk;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -639,6 +741,8 @@ mod tests {
         assert_eq!(p["secure"], false);
         assert_eq!(p["httpOnly"], false);
         assert!(p.get("sameSite").is_none());
+        assert_eq!(p["url"], "http://x.com/", "sem o ponto inicial o cookie é só do host");
+        assert!(p.get("domain").is_none());
     }
 
     #[test]
@@ -653,7 +757,7 @@ mod tests {
     }
 
     // Integração real: contra um Chrome headful com depuração na porta HANGAR_TEST_CDP_PORT. Rode com
-    // XDG_CONFIG_HOME vazio para `profile_roots` não achar o Chrome do usuário e cair na porta fixa.
+    // XDG_CONFIG_HOME vazio para `browsers` não achar o Chrome do usuário e cair na porta fixa.
     #[test]
     #[ignore = "precisa de um Chrome com depuração em HANGAR_TEST_CDP_PORT"]
     fn fetch_cookies_against_a_live_chrome() {
@@ -667,6 +771,19 @@ mod tests {
             cookies.iter().any(|c| c["name"] == "hangar_test" && c["value"] == "abc123"),
             "esperava o cookie de teste hangar_test=abc123; veio: {cookies:?}"
         );
+    }
+
+    #[test]
+    fn site_filter_keeps_the_host_and_its_parent_domains_only() {
+        let c = |domain: &str| json!({"name": "a", "value": "b", "domain": domain});
+        let host_only = |url: &str| json!({"name": "a", "value": "b", "url": url});
+        let kept = for_site(vec![c(".github.com"), c("gist.github.com"), c(".google.com"), c(".hub.com"),
+            host_only("https://github.com/"), host_only("https://api.github.com/"), c("www.github.com")], "github.com");
+        let names: Vec<String> = kept.iter().map(|c| c["domain"].as_str().or(c["url"].as_str()).unwrap().to_owned()).collect();
+        assert_eq!(names, [".github.com", "https://github.com/", "www.github.com"]);
+        let sub = for_site(vec![c(".github.com"), c(".com"), host_only("https://github.com/")], "gist.github.com");
+        assert_eq!(sub.len(), 2, "o pai .github.com entra; o host-only de github.com não; .com é pai e entra");
+        assert!(for_site(vec![c("github.com")], "gist.github.com").is_empty(), "domínio sem ponto (CDP) é só do host");
     }
 
     #[test]

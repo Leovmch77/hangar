@@ -49,7 +49,7 @@ try {
   const text = readFileSync(outputPath, 'utf8');
 
   assert.equal(result.code, 1);
-  assert.match(text, /shell do hangar nao esta no ar/);
+  assert.match(text, /app desktop do Hangar nao esta aberto/);
   assert.doesNotMatch(text, /fora do tmux/);
   console.log('ok: Codex headless resolve o próprio navegador sem tmux');
 } finally {

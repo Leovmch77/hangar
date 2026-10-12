@@ -38,6 +38,9 @@ pub enum Event {
     /// Mensagem da página da conversa (`window.hangarHost`), JSON cru no formato do MCP Apps.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     Host(String),
+    /// Clique ou tecla da pessoa dentro da página nativa (Windows): a GPUI não os vê.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    UserInput,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
