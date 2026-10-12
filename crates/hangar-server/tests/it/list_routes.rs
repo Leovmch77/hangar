@@ -251,3 +251,56 @@ async fn pair_change_alone_reemits_the_list() {
     assert_eq!(gone[1]["pair_peers"], Value::Null);
 }
 
+
+/// Grupo `s0`+`s1` com dois pares de fora ancorados em `s0`: o de `ana` em acesso completo, o de
+/// `bia` em ver e recado. `s1` entrou depois (agente): ganhou só "ver" do par de `ana`.
+fn two_outside_pairs(srv: &Server) -> (Arc<hangar_server::share::ShareState>, String) {
+    use hangar_server::share::{pairs::ExternalPair, store::Kind};
+    let dirs = srv.list.env().dirs.clone().unwrap();
+    let share = hangar_server::share::from_env(Some(dirs.home.join("shares.json")), Some(&dirs), "tmux".into()).unwrap();
+    let pair = dirs.claude.join(".hangar-pair");
+    std::fs::create_dir_all(&pair).unwrap();
+    let peers = ["s0", "s1", "ana::X", "bia::Y"];
+    for me in ["s0", "s1"] {
+        let others: Vec<&str> = peers.iter().copied().filter(|p| *p != me).collect();
+        std::fs::write(pair.join(format!("{me}.json")), json!({"peers": others, "gid": "g1", "task": "T"}).to_string()).unwrap();
+    }
+    let mut roots = Vec::new();
+    for (alias, session, anchor) in [("ana", "X", Kind::Share), ("bia", "Y", Kind::Pair)] {
+        let (root, _) = share.store.create_redeemed("s0", Some("k:s0".into()), Kind::Pair).unwrap();
+        share.store.grant(&root.id, "s0", Some("k:s0".into()), anchor).unwrap();
+        share.store.grant(&root.id, "s1", Some("k:s1".into()), Kind::Pair).unwrap();
+        share.pairs.add(ExternalPair { share_id: root.id.clone(), local_session: "s0".into(), alias: alias.into(),
+            peer_owner: alias.to_uppercase(), peer_session: session.into(), peer_address: format!("https://{alias}.ts.net:8443"),
+            peer_token: "tok".into(), created_at: 1.0 }).unwrap();
+        roots.push(root.id);
+    }
+    srv.list.set_shares(share.clone());
+    (share, roots.remove(0))
+}
+
+fn outside(alias: &str, session: &str, level: &str, pending: bool) -> Value {
+    json!({"alias": alias, "owner": alias.to_uppercase(), "session": session,
+        "address": format!("https://{alias}.ts.net:8443"), "level": level, "pending": pending})
+}
+
+/// Todo membro local leva todos os pares de fora do grupo, cada um com o nível dele; o membro posto
+/// por agente sob um par em acesso completo fica pendente até o "Liberar", que reemite a lista.
+#[tokio::test(flavor = "multi_thread")]
+async fn rows_carry_every_outside_pair_with_level_and_pending() {
+    let dir = tempfile::tempdir().unwrap();
+    let srv = server(dir.path(), 2).await;
+    let (share, ana) = two_outside_pairs(&srv);
+    let mut es = open(srv.addr).await;
+    let rows: Value = serde_json::from_str(&next_named(&mut es, "sessions").await.data).unwrap();
+    assert_eq!(rows[0]["pair_externals"], json!([outside("ana", "X", "full", false), outside("bia", "Y", "view", false)]));
+    assert_eq!(rows[1]["pair_externals"], json!([outside("ana", "X", "view", true), outside("bia", "Y", "view", false)]));
+    // O campo antigo continua com o primeiro par, no formato de antes.
+    for i in 0..2 {
+        assert_eq!(rows[i]["pair_external"], json!({"alias": "ana", "owner": "ANA", "session": "X"}));
+    }
+    share.store.grant(&ana, "s1", Some("k:s1".into()), hangar_server::share::store::Kind::Share).unwrap();
+    let again: Value = tokio::time::timeout(Duration::from_millis(3500), next_named(&mut es, "sessions")).await
+        .map(|ev| serde_json::from_str(&ev.data).unwrap()).expect("o Liberar não reemitiu a lista");
+    assert_eq!(again[1]["pair_externals"][0], outside("ana", "X", "full", false));
+}

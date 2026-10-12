@@ -86,7 +86,9 @@ pub fn list_sig<'a>(rows: impl IntoIterator<Item = &'a SessionRow>) -> String {
                 i.plan_name, i.plan_done, i.plan_total, i.plan_task, i.plan_task_total, i.plan_complete,
                 i.plan_tasks.as_deref().unwrap_or_default(),
                 i.plan_hidden, i.problema, i.provider, i.shared, i.owner, i.orq_arbiter,
-                i.pair_peers, i.pair_gid, i.pair_task, i.pair_external,
+                i.pair_peers, i.pair_gid, i.pair_task,
+                // Mesmo número de campos do `_list_sig` do Python; a lista com nível só existe no Rust.
+                match &i.pair_externals { Some(all) => json!(all), None => json!(i.pair_external) },
             ])
         })
         .collect();
@@ -123,6 +125,16 @@ mod tests {
         let row: SessionRow = serde_json::from_value(json!({"name": "s", "pair_peers": ["a", "é"], "pair_gid": "g",
             "pair_task": "T", "pair_external": {"alias": "x", "owner": "o", "session": "s"}})).unwrap();
         assert!(list_sig([&row]).ends_with(r#"["a", "é"], "g", "T", {"alias": "x", "owner": "o", "session": "s"}]]"#));
+    }
+
+    /// O "Liberar" só muda o nível do par: a lista tem de sair de novo.
+    #[test]
+    fn outside_pair_level_changes_the_sig() {
+        let row = |level: &str, pending: bool| -> SessionRow { serde_json::from_value(json!({"name": "s", "pair_externals": [
+            {"alias": "x", "owner": "o", "session": "s", "address": "https://x.ts.net:8443", "level": level, "pending": pending}]})).unwrap() };
+        let view = list_sig([&row("view", true)]);
+        assert_ne!(view, list_sig([&row("full", true)]));
+        assert_ne!(view, list_sig([&row("view", false)]));
     }
 
     #[test]

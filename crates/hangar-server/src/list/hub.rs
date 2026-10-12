@@ -485,12 +485,15 @@ async fn client_loop(mut sub: Subscription, out: mpsc::Sender<Bytes>) {
     }
 }
 
-/// Linhas que o convidado vê (`guest_safe` do Python): só as sessões do token, sem os nomes de
-/// outras sessões do dono (par e encadeamento), com o tipo de acesso a cada uma.
+/// Linhas que o convidado vê (`guest_safe` do Python): só as sessões do token, com o grupo
+/// recortado ao que ele enxerga (nenhum nome de outra sessão do dono), com o tipo de acesso a cada
+/// uma. A tarefa do grupo é texto do dono: só o par, que trabalha nela, a recebe.
 fn guest_rows<'a>(rows: impl IntoIterator<Item = &'a SessionRow>, guest: &Guest) -> Vec<SessionRow> {
     rows.into_iter().filter(|r| guest.sees(&r.name)).map(|r| {
         let mut r = r.clone();
-        (r.pair_peers, r.pair_external, r.pair_task, r.pair_gid, r.then_target) = (None, None, None, None, None);
+        if let Some(peers) = r.pair_peers.as_mut() { peers.retain(|p| guest.sees(p)); }
+        if guest.invite { r.pair_task = None; }
+        (r.pair_external, r.pair_externals, r.then_target) = (None, None, None);
         r.guest_kind = guest.kind_of(&r.name).map(|k| match k { Kind::Share => "share", Kind::Pair => "pair" }.to_owned());
         r
     }).collect()

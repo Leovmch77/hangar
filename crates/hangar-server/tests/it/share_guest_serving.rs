@@ -697,3 +697,42 @@ async fn encoded_slash_in_the_session_name_is_refused() {
     }
     assert_eq!(srv.python.input_calls(), 0);
 }
+
+/// Grupo `s0`+`s1`+`s2` com tarefa: o convidado vê o grupo, mas só os membros a que tem acesso.
+fn group_of_three(root: &Path) {
+    let dir = root.join("home/.claude/.hangar-pair");
+    std::fs::create_dir_all(&dir).unwrap();
+    for me in ["s0", "s1", "s2"] {
+        let peers: Vec<&str> = ["s0", "s1", "s2"].into_iter().filter(|p| *p != me).collect();
+        std::fs::write(dir.join(format!("{me}.json")), json!({"peers": peers, "gid": "g1", "task": "T"}).to_string()).unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn convidado_de_par_ve_o_grupo_dentro_do_acesso() {
+    let dir = tempfile::tempdir().unwrap();
+    group_of_three(dir.path());
+    let srv = list_srv(dir.path(), 3).await;
+    let (pair, t) = srv.g.share.store.create_redeemed("s0", Some("k:L-s0".into()), Kind::Pair).unwrap();
+    srv.g.share.store.grant(&pair.id, "s1", Some("k:L-s1".into()), Kind::Share).unwrap();
+    let (_, rows) = get_json(format!("http://{}/api/sessions", srv.guest), &t).await;
+    assert_eq!(names(&rows), ["s0", "s1"]);
+    let s0 = row(&rows, "s0");
+    assert_eq!((&s0["pair_gid"], &s0["pair_peers"], &s0["pair_task"]), (&json!("g1"), &json!(["s1"]), &json!("T")));
+    assert_eq!(row(&rows, "s1")["pair_peers"], json!(["s0"]));
+    assert!(!serde_json::to_string(&rows).unwrap().contains("s2"), "{rows}");
+    for field in ["pair_external", "pair_externals", "then_target"] {
+        assert_eq!(s0[field], Value::Null, "{field}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn convidado_de_convite_ve_o_grupo_sem_a_tarefa() {
+    let dir = tempfile::tempdir().unwrap();
+    group_of_three(dir.path());
+    let srv = list_srv(dir.path(), 3).await;
+    let t = srv.g.token("s0", Kind::Share);
+    let (_, rows) = get_json(format!("http://{}/api/sessions", srv.guest), &t).await;
+    let s0 = row(&rows, "s0");
+    assert_eq!((&s0["pair_gid"], &s0["pair_peers"], &s0["pair_task"]), (&json!("g1"), &json!([]), &Value::Null));
+}

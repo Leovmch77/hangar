@@ -438,6 +438,8 @@ impl ListBridge {
             let active = share.store.active_sessions();
             list_facts::mark_shared(&mut rows, &active);
             list_facts::mark_shared(&mut aside, &active);
+            super::links::mark_pair_levels(&mut rows, share);
+            super::links::mark_pair_levels(&mut aside, share);
         }
         let (env, caches) = (self.env.clone(), self.caches.clone());
         let inputs = Arc::new(RoundInputs { targets: Arc::new(pane_targets(&panes, &agent_pids, &children)),

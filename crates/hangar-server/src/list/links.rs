@@ -4,7 +4,7 @@ use super::discover_other::{Dirs, config_dir_of, env, truthy};
 use super::procs::ProcessView;
 use crate::groups::model::Sidecar;
 use crate::groups::store::file_stem;
-use hangar_api::session::SessionRow;
+use hangar_api::session::{PairExternal, SessionRow};
 use hangar_workspace::git::head_info;
 use hangar_workspace::worktrees::{main_repo_of, normpath, repo_root_of, try_removed_at, worktree_paths};
 use regex::Regex;
@@ -120,42 +120,63 @@ fn external_records(path: &Path) -> Option<Arc<ExternalRecords>> {
     })
 }
 
-/// `_pair_external`: o par de fora entre os peers da sessão, no `.hangar-pair` em `pair_dir`.
+/// Os pares de fora entre os peers da sessão (de qualquer membro local do grupo), no
+/// `.hangar-pair` em `pair_dir`. Nível "ver" até `mark_pair_levels` ler a loja de convites.
 /// Arquivo torto vale como vazio; quem o põe de lado é a loja (`share/pairs.rs`), aqui só se avisa.
-pub(crate) fn pair_external(name: &str, peers: &[String], pair_dir: &Path) -> Option<Map<String, Value>> {
-    external_record(peers, pair_dir, |local| local == name).map(|r| {
-        let mut out = Map::new();
-        for (out_key, key) in [("alias", "alias"), ("owner", "peer_owner"), ("session", "peer_session")] {
-            out.insert(out_key.to_owned(), r.get(key).cloned().unwrap_or(Value::Null));
+pub(crate) fn pair_externals(peers: &[String], pair_dir: &Path) -> Vec<PairExternal> {
+    let text = |r: &Map<String, Value>, k: &str| r.get(k).and_then(Value::as_str).unwrap_or_default().to_owned();
+    external_records_in(peers, pair_dir, |_| true).iter().map(|r| PairExternal {
+        alias: text(r, "alias"), owner: text(r, "peer_owner"), session: text(r, "peer_session"),
+        address: text(r, "peer_address"), level: "view".into(), pending: false,
+    }).collect()
+}
+
+/// Nível de cada sessão sob cada par de fora: o do registro filho dela sob a chave do par; o do
+/// par é o da ponta (`local_session`).
+pub fn mark_pair_levels(rows: &mut [SessionRow], share: &crate::share::ShareState) {
+    use crate::share::store::Kind;
+    for row in rows {
+        for e in row.pair_externals.iter_mut().flatten() {
+            let Some(rec) = share.pairs.by_address(&format!("{}::{}", e.alias, e.session)) else { continue };
+            let children = share.store.children(&rec.share_id);
+            let full = |s: &str| children.iter().any(|c| c.session == s && c.kind == Kind::Share);
+            let mine = full(&row.name);
+            e.level = if mine { "full" } else { "view" }.into();
+            e.pending = !mine && full(&rec.local_session);
         }
-        out
-    })
+    }
+}
+
+/// O formato antigo (`_pair_external`): só alias, dono e sessão.
+fn legacy_pair_external(e: &PairExternal) -> Map<String, Value> {
+    [("alias", &e.alias), ("owner", &e.owner), ("session", &e.session)].into_iter()
+        .map(|(k, v)| (k.to_owned(), Value::String(v.clone()))).collect()
 }
 
 /// Nome cru da sessão dona do par externo de `peers`. `name` pode ser o stem saneado do sidecar
 /// (a varredura só o conhece), como o `_encerrar_pares_externos` do Python aceitava.
 pub(crate) fn external_local_session(name: &str, peers: &[String], pair_dir: &Path) -> Option<String> {
     let stem = |local: &str| crate::groups::store::file_stem(local);
-    external_record(peers, pair_dir, |local| local == name || stem(local) == name)
+    external_records_in(peers, pair_dir, |local| local == name || stem(local) == name).into_iter().next()
         .and_then(|r| r.get("local_session").and_then(Value::as_str).map(str::to_owned))
 }
 
-fn external_record(peers: &[String], pair_dir: &Path, owned: impl Fn(&str) -> bool) -> Option<Map<String, Value>> {
+fn external_records_in(peers: &[String], pair_dir: &Path, owned: impl Fn(&str) -> bool) -> Vec<Map<String, Value>> {
     let path = pair_dir.join("external_pairs.json");
     let Some(records) = external_records(&path) else {
         // Ausente é o normal; existir e não ler é falha.
         if path.exists() { external_unreadable("file"); }
-        return None;
+        return Vec::new();
     };
     let records = match &*records {
         Ok(records) => records,
-        Err(field) => { external_unreadable(field); return None }
+        Err(field) => { external_unreadable(field); return Vec::new() }
     };
-    records.iter().find(|r| {
+    records.iter().filter(|r| {
         let field = |k: &str| r.get(k).and_then(Value::as_str);
         let (Some(local), Some(alias), Some(peer)) = (field("local_session"), field("alias"), field("peer_session")) else { return false };
         owned(local) && peers.contains(&format!("{alias}::{peer}"))
-    }).cloned()
+    }).cloned().collect()
 }
 
 /// Encadeamento e par (`ThenLink`, `PairLink`, `_pair_external`).
@@ -164,12 +185,14 @@ pub fn fill_links(row: &mut SessionRow, dirs: &Dirs, problems: &mut Problems) {
         .and_then(|l| l.get("target").and_then(Value::as_str).map(str::to_owned));
     match pair_of(&row.name, dirs, problems) {
         Some(pair) => {
-            row.pair_external = pair_external(&row.name, &pair.peers, &dirs.claude.join(".hangar-pair"));
+            let outside = pair_externals(&pair.peers, &dirs.claude.join(".hangar-pair"));
+            row.pair_external = outside.first().map(legacy_pair_external);
+            row.pair_externals = (!outside.is_empty()).then_some(outside);
             row.pair_peers = Some(pair.peers);
             row.pair_gid = Some(pair.gid);
             row.pair_task = pair.task;
         }
-        None => (row.pair_external, row.pair_peers, row.pair_gid, row.pair_task) = (None, None, None, None),
+        None => (row.pair_external, row.pair_externals, row.pair_peers, row.pair_gid, row.pair_task) = (None, None, None, None, None),
     }
 }
 

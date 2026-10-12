@@ -122,6 +122,19 @@ pub struct SessionInfo {
     #[serde(default)] pub guest_kind: Option<String>,
     /// Par com a sessão de outra pessoa (outra máquina, outro usuário).
     #[serde(default)] pub pair_external: Option<PairExternal>,
+    /// Todos os pares de fora do grupo, com o nível desta sessão sob cada um.
+    #[serde(default)] pub pair_externals: Option<Vec<PairExternalEntry>>,
+}
+
+/// `level`: "full" ou "view"; `pending` = o par tem acesso completo e esta sessão espera o "Liberar".
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+pub struct PairExternalEntry {
+    pub alias: String,
+    pub owner: String,
+    pub session: String,
+    pub address: String,
+    pub level: String,
+    pub pending: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
