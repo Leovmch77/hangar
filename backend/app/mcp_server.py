@@ -12,14 +12,16 @@ import asyncio
 import contextlib
 import json
 import re
+import os
 import secrets
+import shutil
 import time
 from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import HTTPException
 from mcp.server import MCPServer
-from mcp.server.mcpserver import Context
+from mcp.server.mcpserver import Context, Image
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
 
@@ -27,7 +29,15 @@ from app import auth as auth_mod
 from app import external_pairs, navshell, peers, quem_chama
 from app.config import settings
 
-mcp = MCPServer("hangar")
+_INSTRUCTIONS = (
+    "Hangar: sessões vizinhas e o navegador embutido desta sessão. "
+    "Mostrar algo que você montou ao usuário (desenho, mock de tela, comparação, gráfico, tabela, diagrama): "
+    "html_render, sem esperar pedido; imagem por caminho só para print real de tela. "
+    "Ver ou testar uma página: browser_open e depois browser (um verbo) ou browser_batch (vários já conhecidos); "
+    "tela desconhecida com várias ações: browser_goal, quando a sessão tem o Jev. "
+    "Falar com outra sessão: sessions, send, group, pair; abrir ou fechar: new_session, close_session.")
+
+mcp = MCPServer("hangar", instructions=_INSTRUCTIONS)
 
 # Nomes antigos das tools (português) → nome de hoje. Uma sessão já aberta carregou o catálogo na
 # abertura e vai chamar pelo nome que conhece até ser reiniciada — e sessão de trabalho não fecha
@@ -286,7 +296,7 @@ async def close_session(ctx: Context, alvo: str) -> dict[str, Any]:
 
 
 VERBOS_NAV = ("snapshot", "click", "fill", "type", "press", "hover", "wait", "eval", "tema", "layout", "console",
-              "network", "text", "url", "shot", "close", "goto", "back", "reload", "tab-list", "tab-new", "tab-switch", "tab-close")
+              "network", "text", "url", "shot", "close", "goto", "back", "reload", "login", "estado", "tab-list", "tab-new", "tab-switch", "tab-close")
 # Duas chamadas do mesmo turno não podem intercalar `click` e `snapshot`: o CLI serializa por
 # processo, aqui é uma trava por sessão.
 _travas_nav: dict[str, asyncio.Lock] = {}
@@ -294,6 +304,10 @@ _travas_nav: dict[str, asyncio.Lock] = {}
 
 def _pasta_shots(sessao: str) -> Path:
     return Path.home() / ".hangar" / "nav" / "shots" / re.sub(r"\W+", "-", sessao)
+
+
+# O `login` espera o usuário aprovar no painel (até 110 s no app).
+_TETO_VERBO = {"login": 120.0}
 
 
 async def _verbo_nav(sessao: str, verbo: str, args: list[str], aba: int | None) -> str:
@@ -307,7 +321,8 @@ async def _verbo_nav(sessao: str, verbo: str, args: list[str], aba: int | None) 
         await asyncio.to_thread(pasta.mkdir, parents=True, exist_ok=True)
         args = [str(pasta / f"{int(time.time() * 1000)}.png")]
     try:
-        texto = await asyncio.to_thread(navshell.verbo, sessao, verbo, args, aba)
+        extra = {"teto_s": _TETO_VERBO[verbo]} if verbo in _TETO_VERBO else {}
+        texto = await asyncio.to_thread(navshell.verbo, sessao, verbo, args, aba, **extra)
     except navshell.ShellIndisponivel as e:
         raise ToolError(str(e)) from e
     if texto.startswith("erro:"):
@@ -315,11 +330,11 @@ async def _verbo_nav(sessao: str, verbo: str, args: list[str], aba: int | None) 
     return texto
 
 
-@mcp.tool(description="Abre o navegador embutido desta sessão no app desktop do Hangar, como "
-                      "`hangar-preview open <url>`. No app nativo (Windows e Linux) o painel Navegador "
-                      "não monta sozinho: diga que a página está aberta no navegador da sessão, nunca "
-                      "que apareceu na tela do usuário. Só no Electron antigo o painel monta sozinho."
-                      + _SESSAO_DESC)
+@mcp.tool(description="Abre (ou navega) o navegador embutido desta sessão no app desktop do Hangar "
+                      "(= `hangar-preview open <url>`) e só volta com ele pronto: o verbo seguinte já funciona. "
+                      "Devolve a URL carregada. O painel aparece para o usuário só quando ele abrir esta "
+                      "sessão no app: diga que a página está aberta no navegador da sessão, nunca que "
+                      "apareceu na tela dele. Página já aberta: prefira browser goto." + _SESSAO_DESC)
 async def browser_open(ctx: Context, url: str, sessao: str = "") -> dict[str, Any]:
     from app import api
     eu = await _eu(ctx, sessao)
@@ -385,23 +400,40 @@ async def html_render(ctx: Context, title: str, html: str | None = None, url: st
         raise ToolError(f"{e.code}: {e.detail}" if e.detail else e.code) from e
 
 
-@mcp.tool(description="Um verbo do navegador embutido desta sessão (`hangar-preview <verbo>`). "
-                      "Verbos: snapshot (árvore com refs @eN), click/hover <ref>, fill <ref> <texto>, "
-                      "type <texto>, press <tecla>, wait [--text|--url] <valor>, eval <js> (só estado "
-                      "não-DOM, nunca pra clicar), console, network, text, url, shot (devolve o caminho "
-                      "do PNG), tema <claro|escuro|sistema>, layout [mobile|desktop|<largura> <altura>], "
-                      "close. Só no Electron antigo: tab-list, tab-new <url>, tab-switch <id>, "
-                      "tab-close [id] e `aba` (age numa aba sem trocar a que o usuário vê); o app "
-                      "nativo tem um navegador por sessão, sem abas." + _SESSAO_DESC)
+_BROWSER = (
+    "Um verbo do navegador desta sessão (= `hangar-preview <verbo>`); abra antes com browser_open. "
+    "LER: snapshot (árvore de acessibilidade com estados; só acionáveis têm ref @eN; refs morrem a cada "
+    "navegação ou re-render: refaça; args [\"--refs\"] traz só os acionáveis), text (texto visível, bem mais "
+    "barato), url, console [--limpar] (log, erros de JS não tratados, diálogos e downloads recusados), "
+    "network (liga na 1ª chamada: chame ANTES da ação; mostra método, status e falhas). "
+    "AGIR: click/hover <ref>, fill <ref> <texto>, type <texto> (campo já focado), press <tecla>. "
+    "NAVEGAR: goto <url>, back, reload (voltam com a página carregada). "
+    "ESPERAR (nunca sleep): wait --idle | --text <t> (ignora maiúsculas) | --url <t> | @eN | <ms>, "
+    "teto com --timeout <ms> até 40000. VER: shot (devolve a imagem e o caminho do PNG). "
+    "tema claro|escuro|sistema, layout mobile|desktop|<l> <a>, close (terminou, feche). "
+    "login [site]: pede ao usuário, na tela dele, o login do Chrome para o site (espera até 110 s; "
+    "uma chamada por necessidade, nunca em laço). Pausado pelo usuário, as ações voltam erro: espere ele retomar. "
+    "`erro:` volta como erro da tool. Tela desconhecida com várias ações: browser_goal (sessão com o Jev). "
+    "Só no Electron antigo: tab-list, tab-new <url>, tab-switch <id>, tab-close [id] e `aba`.")
+
+
+@mcp.tool(description=_BROWSER + _SESSAO_DESC)
 async def browser(ctx: Context, verbo: str, args: list[str | int] | None = None, aba: int | None = None,
-                  sessao: str = "") -> str:
+                  sessao: str = "") -> str | list[str | Image]:
     eu = await _eu(ctx, sessao)
     async with _travas_nav.setdefault(eu, asyncio.Lock()):
-        return await _verbo_nav(eu, verbo, [str(a) for a in args or []], aba)
+        texto = await _verbo_nav(eu, verbo, [str(a) for a in args or []], aba)
+    # O print volta na resposta: o agente vê sem outra ida ao disco.
+    png = Path(texto.removeprefix("ok: shot ").strip()) if verbo == "shot" else None
+    if png and png.is_file():
+        return [texto, Image(path=png)]
+    return texto
 
 
-@mcp.tool(description="Vários verbos do navegador em sequência, como `hangar-preview batch`: para no "
-                      "primeiro que falhar e diz em qual. Cada passo é {verbo, args?, aba?}." + _SESSAO_DESC)
+@mcp.tool(description="Vários verbos já conhecidos do navegador numa chamada, como `hangar-preview batch`: "
+                      "para no primeiro que falhar e diz em qual (seguir depois de um click que falhou faria o "
+                      "próximo fill digitar no lugar errado). Cada passo é {verbo, args?}, os mesmos verbos da "
+                      "tool browser. Tela que você ainda não viu: browser_goal." + _SESSAO_DESC)
 async def browser_batch(ctx: Context, passos: list[dict[str, Any]], sessao: str = "") -> dict[str, Any]:
     eu = await _eu(ctx, sessao)
     feitos: list[str] = []
@@ -413,6 +445,67 @@ async def browser_batch(ctx: Context, passos: list[dict[str, Any]], sessao: str 
             except ToolError as e:
                 raise ToolError(f"parou no passo {i} ({verbo}): {e}\nfeitos antes: {json.dumps(feitos, ensure_ascii=False)}") from e
     return {"feitos": feitos}
+
+
+_HANGAR_PREVIEW = Path(__file__).resolve().parents[2] / "scripts" / "hangar-preview"
+JEV_OFF = ("o Jev está desligado nesta sessão: abra uma com `hangar-send --new <nome> <cwd> --jev` (ou marque o Jev "
+           "em \"Mais opções\" ao criar). Sem ele, use browser e browser_batch.")
+JEV_UNCONFIGURED = "o Jev não está configurado neste servidor: cadastre a chave em Configurações do servidor > Jev."
+
+
+async def _jev_cli(ctx: Context, sessao: str, args: list[str], teto_s: float) -> tuple[int, str]:
+    """Roda `hangar-preview objetivo|confere` em nome da sessão, com a chave do servidor. Só vale para sessão que
+    nasceu com o Jev (o `headersHelper` repassa o HANGAR_JEV dela); a voz usa a do servidor."""
+    from app import runtime_config
+    _, voice = await _caller(ctx)
+    if not voice:
+        h = {k.lower(): v for k, v in _cabecalhos(ctx).items()}
+        if h.get("x-hangar-jev") != "on":
+            raise ToolError(JEV_OFF)
+    alvo = await _eu(ctx, sessao)
+    env = {k: v for k, v in os.environ.items() if k not in runtime_config.JEV_VARS}
+    env.update(runtime_config.env_jev(True))
+    if not env.get("TYPESAFE_API_KEY"):
+        raise ToolError(JEV_UNCONFIGURED)
+    node = shutil.which("node")
+    if not node:
+        raise ToolError("node não encontrado no PATH do backend: o objetivo roda pelo hangar-preview")
+    proc = await asyncio.create_subprocess_exec(node, str(_HANGAR_PREVIEW), *args, "--sessao", alvo, env=env,
+                                                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+    try:
+        saida, _ = await asyncio.wait_for(proc.communicate(), teto_s)
+    except TimeoutError:
+        proc.kill()
+        raise ToolError(f"o Jev não terminou em {teto_s:.0f}s; a página ficou onde parou (veja com browser snapshot)")
+    return proc.returncode or 0, saida.decode("utf-8", "replace").replace("hangar-preview: ", "").strip()
+
+
+@mcp.tool(description="O Jev dirige o navegador desta sessão sozinho até cumprir um objetivo (navegar até uma "
+                      "tela, preencher um cadastro, escolher num combobox): uma chamada no lugar de vários "
+                      "snapshot+click. Só em sessão aberta com o Jev. `dados`: valores para os campos, com as "
+                      "chaves que quiser (o Jev casa cada um com o rótulo). Resposta: os passos, `parou:`, `url:`, "
+                      "`texto:` e, se faltou valor, `falta-dado: <campo>` — chame de novo com ele em `dados`; a "
+                      "página fica onde parou. Erro = não cumpriu." + _SESSAO_DESC)
+async def browser_goal(ctx: Context, objetivo: str, dados: dict[str, Any] | None = None, passos: int = 15,
+                       sessao: str = "") -> str:
+    args = ["objetivo", objetivo, "--passos", str(max(1, min(passos, 40)))]
+    if dados:
+        args += ["--dados", json.dumps(dados, ensure_ascii=False)]
+    codigo, saida = await _jev_cli(ctx, sessao, args, 300.0)
+    if codigo != 0:
+        raise ToolError(saida)
+    return saida
+
+
+@mcp.tool(description="O Jev diz se a tela do navegador desta sessão já mostra um estado (\"o diálogo fechou e a "
+                      "lista mostra o item novo\"): use antes do shot ou para saber se uma ação deu certo, sem "
+                      "ler a árvore. Só em sessão aberta com o Jev. Devolve `sim` e a confiança." + _SESSAO_DESC)
+async def browser_check(ctx: Context, estado: str, sessao: str = "") -> dict[str, Any]:
+    codigo, saida = await _jev_cli(ctx, sessao, ["confere", estado], 60.0)
+    if codigo not in (0, 1):
+        raise ToolError(saida)
+    m = re.search(r"confere: ([0-9.]+)", saida)
+    return {"sim": codigo == 0, "confianca": float(m.group(1)) if m else None}
 
 
 # O gerenciador de sessões do SDK só roda UMA vez por instância: o sub-app nasce no lifespan.

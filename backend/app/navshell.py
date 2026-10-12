@@ -79,7 +79,8 @@ def esperar_pronto(name: str, desde_ms: int, teto_s: float = 20.0) -> str:
     raise ShellIndisponivel(f"o navegador não ficou pronto em {teto_s:.0f}s{detalhe}; o app desktop está aberto nesta máquina?")
 
 
-def verbo(name: str, verbo: str, args: Optional[list[str]] = None, aba: Optional[int] = None) -> str:
+def verbo(name: str, verbo: str, args: Optional[list[str]] = None, aba: Optional[int] = None,
+          teto_s: float = TETO_S) -> str:
     """Roda um verbo do navegador daquela sessão. Levanta `ShellIndisponivel` sem app desktop.
     `aba` age numa aba sem trocar a que está na tela; `None` é a ativa."""
     srv = _servidor()
@@ -94,7 +95,7 @@ def verbo(name: str, verbo: str, args: Optional[list[str]] = None, aba: Optional
         f"http://127.0.0.1:{int(srv['porta'])}/cmd", data=corpo, method="POST",
         headers={"Authorization": f"Bearer {srv['token']}", "Content-Type": "application/json"})
     try:
-        with urllib.request.urlopen(req, timeout=TETO_S) as r:   # noqa: S310 — loopback fixo
+        with urllib.request.urlopen(req, timeout=teto_s) as r:   # noqa: S310 — loopback fixo
             return r.read().decode("utf-8", "replace")
     except urllib.error.HTTPError as e:
         return e.read().decode("utf-8", "replace")

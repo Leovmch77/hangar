@@ -19,7 +19,7 @@
 //   hangar-preview network                 últimas respostas de rede
 //   hangar-preview text                    texto visível da página (innerText)
 //   hangar-preview url                     URL atual do navegador desta sessão
-//   hangar-preview shot [arquivo.png]      screenshot (default <tmp do sistema>/hangar-preview-<sessao>/<epoch ms>.png)
+//   hangar-preview shot [arquivo.png]      screenshot (default ~/.hangar/nav/shots/<sessao>/<epoch ms>.png)
 //   hangar-preview folha                   junta numa grade os shots sem nome tirados desde a última folha
 //   hangar-preview tab list                lista as abas (* = ativa)
 //   hangar-preview tab new <url>           abre outra aba com a url e torna ativa
@@ -40,7 +40,7 @@
 // mesmo com o shell fora do ar.
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
-import { homedir, tmpdir } from 'node:os';
+import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import fmt from '../shell/preview_fmt.cjs';
 import folha from '../shell/folha.cjs';
@@ -102,7 +102,7 @@ Identidade: sidecar da sessão no modo sem terminal; tmux no modo com terminal.
   network                 últimas respostas de rede
   text                    texto visível da página (innerText), sem árvore
   url                     URL atual
-  shot [arquivo.png]      screenshot (default <tmp do sistema>/hangar-preview-<sessao>/<epoch ms>.png)
+  shot [arquivo.png]      screenshot (default ~/.hangar/nav/shots/<sessao>/<epoch ms>.png)
   folha                   junta numa grade (6 por folha) os shots sem nome desde a última folha
   abas (só no Electron; o app nativo tem um navegador por sessão e recusa tab e --aba):
   tab list                lista as abas (* = ativa)
@@ -177,8 +177,9 @@ function nomeSessao() {
   return null;
 }
 
+// A mesma pasta da tool `browser` do MCP: um lugar só de prints por sessão, que o app do celular serve.
 function pastaShots() {
-  return join(tmpdir(), `hangar-preview-${(nomeSessao() || 'nav').replace(/\W+/g, '-')}`);
+  return join(DIR, 'shots', (nomeSessao() || 'nav').replace(/[^\p{L}\p{N}_]+/gu, '-'));
 }
 
 function lerSidecars() {
