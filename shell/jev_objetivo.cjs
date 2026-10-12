@@ -110,7 +110,9 @@ function sinonimos(head, candidatos) {
   return { ref: maisProvavel.ref, massa: iguais.reduce((s, c) => s + (p[c.ref] ?? 0), 0) };
 }
 
-const CHAVE_SECRETA = /senha|password|passwd|token|secret|segredo|api[-_ ]?key|chave|credencial|cart[aã]o|cvv|cvc|\bpin\b|\botp\b|c[oó]digo de verifica/i;
+// "_" conta como letra para \b, então pin/otp entram com bordas próprias (codigo_otp, pin_code).
+// "Chave" sozinha é larga demais (Chave PIX, chave de acesso da NF-e): só a de API, secreta ou privada.
+const CHAVE_SECRETA = /senha|password|passwd|token|secret|segredo|api[-_ ]?key|chave[ _-]?(?:de[ _-]?)?(?:api|secreta|privada)|cart[aã]o[ _-]?(?:de[ _-]?)?cr[eé]dito|(?<![a-z])(?:pin|otp|cvv|cvc)(?![a-z])|2fa|mfa|c[oó]digo[ _-]?(?:de[ _-]?)?verifica/i;
 
 /** Extrai os elementos acionáveis da árvore de acessibilidade do `snapshot`. */
 // Uma vaga a menos que o teto: todo head de alvo leva também a opção `_nenhum`.
@@ -574,6 +576,18 @@ function pedidoDeTexto(objetivo, campo, feito) {
 
 const ehSegredo = (campo) => CHAVE_SECRETA.test(campo);
 
+/**
+ * Troca o value= das linhas de campo com nome de segredo por "(oculto)". O value= é sempre o último
+ * da linha e o snapshot não o escapa (aspas no meio, número sem aspas): corta dele até o fim e testa
+ * a linha inteira antes dele, para nome com aspas não escapar do teste.
+ */
+function mascararValores(arvore) {
+  return String(arvore).split('\n').map((linha) => {
+    const i = linha.lastIndexOf(' value=');
+    return i >= 0 && CHAVE_SECRETA.test(linha.slice(0, i)) ? `${linha.slice(0, i)} value="(oculto)"` : linha;
+  }).join('\n');
+}
+
 /** Um pedido só para vários campos: num formulário escrito pelo modelo eram uma ida por campo. */
 function pedidoDeTextos(objetivo, campos, feito) {
   return [
@@ -658,6 +672,7 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
   const escritos = new Map();
   // Lista+valor ja tentados: valor que nao "pega" nao vira clique na mesma lista a cada passo.
   const listasTentadas = new Set();
+  const camposSecretos = new Set();
   let reolhou = 0;
   let urlDosEscritos = '';
   const agir = async (verbo, args) => {
@@ -695,8 +710,10 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
     // Campo sem nome de segredo pode estar com um valor secreto vindo de --dados ("Código de
     // verificação" <- otp): esse valor não sai da máquina no estado.
     const segredos = new Set(Object.entries(cofre).filter(([k, v]) => ehSegredo(k) && typeof v === 'string' && v).map(([, v]) => v));
-    if (segredos.size) {
-      for (const [k, v] of Object.entries(anotacao.valores)) if (segredos.has(v)) anotacao.valores[k] = '(oculto)';
+    // Por valor (igual ao de --dados) e por nome do campo onde o laço já digitou um segredo: o valor
+    // lido vem cortado e a página reformata (cartão "4111 1111 ..."), então só o valor não basta.
+    for (const [k, v] of Object.entries(anotacao.valores)) {
+      if (segredos.has(v) || camposSecretos.has(normalizar(k))) anotacao.valores[k] = '(oculto)';
     }
     const estado = montarEstado(objetivo, url, feito, texto, anotacao, cofre);
     if (!candidatos.length) {
@@ -846,8 +863,9 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
           escreverTexto,
         });
         if (parou) return { feito, sucesso: false, parou, falta };
-        const mostrado = ehSegredo(decisao.escolhido.nome) || (origem.startsWith('dados.') && ehSegredo(origem.slice(6)))
-          ? '(oculto)' : valor.slice(0, 40);
+        const secreto = ehSegredo(decisao.escolhido.nome) || (origem.startsWith('dados.') && ehSegredo(origem.slice(6)));
+        if (secreto) camposSecretos.add(normalizar(decisao.escolhido.nome));
+        const mostrado = secreto ? '(oculto)' : valor.slice(0, 40);
         log(`jev-objetivo passo ${passo}: TYPE_TEXT @${decisao.alvo} ("${decisao.escolhido.nome}" <- ${mostrado} via ${origem}) conf=${decisao.confianca.toFixed(2)}`);
         if (ehEditavel(decisao.escolhido, anotacao.editaveis)) {
           // O campo de busca do popover nao tem nome acessivel, entao nao tem ref: o caminho e abrir
@@ -891,6 +909,7 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
           if (usados.has(chave)) continue;
           if (atual(c) === cofre[chave]) continue;
           usados.add(chave);
+          if (ehSegredo(c.nome) || ehSegredo(chave)) camposSecretos.add(normalizar(c.nome));
           log(`jev-objetivo passo ${passo}: TYPE_TEXT @${c.ref} ("${c.nome}" <- ${ehSegredo(c.nome) || ehSegredo(chave) ? '(oculto)' : cofre[chave].slice(0, 40)} via dados.${chave}) conf=${forca(v).toFixed(2)} (mesmo pedido)`);
           await agir('fill', [`@${c.ref}`, cofre[chave]]);
           feito.push(`TYPE_TEXT "${c.nome}"`);
@@ -998,5 +1017,5 @@ module.exports = {
   parsarSnapshot, montarPerguntas, montarEstado, decidir, rodar, pedidoDeTexto,
   valorDoCampo, cabecaDoValor, jsDeSelecionar, jsDeEstarAberto, normalizar,
   perguntaDeConfere, chegouNoEstado, destinoDoJev, askJev,
-  LIMIARES, NENHUM, OPERACOES, SEM_SELECT, MAX_CANDIDATOS, CHAVE_SECRETA, semChave,
+  LIMIARES, NENHUM, OPERACOES, SEM_SELECT, MAX_CANDIDATOS, CHAVE_SECRETA, semChave, mascararValores,
 };

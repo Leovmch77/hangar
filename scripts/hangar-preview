@@ -236,20 +236,23 @@ function pidVivo(pid) {
   try { process.kill(pid, 0); return true; } catch (err) { return err && err.code === 'EPERM'; }
 }
 
-function srv() {
+function srv(sair = erro) {
   let dados;
   try {
     dados = JSON.parse(readFileSync(join(DIR, '_srv.json'), 'utf8'));
   } catch {
-    erro(MSG_SHELL_FORA);
+    return sair(MSG_SHELL_FORA);
   }
-  if (!pidVivo(dados.pid)) erro(MSG_SHELL_FORA);
+  if (!pidVivo(dados.pid)) return sair(MSG_SHELL_FORA);
   return dados;
 }
 
+// Para quem não pode encerrar o processo (as leituras depois do laço): a falha vira exceção.
+const lancar = (msg) => { throw new Error(msg); };
+
 // `aba` explícito (o batch manda por linha) vence o flag global.
-async function chamar(chave, verbo, cmdArgs, aba = flags.aba) {
-  const { porta, token } = srv();
+async function chamar(chave, verbo, cmdArgs, aba = flags.aba, sair = erro) {
+  const { porta, token } = srv(sair);
   let r, texto;
   try {
     r = await fetch(`http://127.0.0.1:${porta}/cmd`, {
@@ -261,7 +264,7 @@ async function chamar(chave, verbo, cmdArgs, aba = flags.aba) {
   } catch (err) {
     // App fechado ou reiniciado (a atualização reinicia) no meio do comando: frase, não a pilha do Node.
     const reabrir = urlAberta ? `hangar-preview open '${semToken(urlAberta)}'` : 'hangar-preview open <url>';
-    erro(`o app desktop fechou ou reiniciou no meio do comando (${err.cause?.code || err.cause?.message || err.message}). Espere ele voltar e reabra o navegador com: ${reabrir}`);
+    return sair(`o app desktop fechou ou reiniciou no meio do comando (${err.cause?.code || err.cause?.message || err.message}). Espere ele voltar e reabra o navegador com: ${reabrir}`);
   }
   // O servidor local responde SEMPRE 200 (é o texto que carrega erro: ...) — r.ok não basta.
   return { texto, codigo: r.ok && !texto.startsWith('erro:') ? 0 : 1 };
@@ -522,9 +525,8 @@ if (cmd === 'confere') {
   // (helpers comuns).
   if (snap.codigo !== 0) erro(`o snapshot falhou: ${semToken(snap.texto.slice(0, 200))}`, 2);
   // A árvore vai ao Jev, fora da máquina: sem o token da URL.
-  // value="..." de campo com nome de segredo ("Chave de API", "Senha") não vai ao Jev.
-  let arvore = semToken(snap.texto).replace(/^(\s*-\s+\w+\s+"([^"]*)"[^\n]*?\s)value="(?:[^"\\]|\\.)*"/gm,
-    (linha, inicio, nome) => (jev.CHAVE_SECRETA.test(nome) ? `${inicio}value="(oculto)"` : linha));
+  // value= de campo com nome de segredo ("Chave de API", "PIN") não vai ao Jev.
+  let arvore = jev.mascararValores(semToken(snap.texto));
   // A prova pode estar no topo ou no fim da página; o miolo de uma lista longa é repetição.
   if (arvore.length > 100_000) arvore = `${arvore.slice(0, 50_000)}\n…\n${arvore.slice(-50_000)}`;
   let respostas;
@@ -579,7 +581,7 @@ if (cmd === 'objetivo') {
   // vira rótulo, nunca o código de saída: quem decide é `resultado.sucesso`.
   const leitura = async (verbo) => {
     try {
-      const { texto, codigo } = await chamar(chave, verbo, []);
+      const { texto, codigo } = await chamar(chave, verbo, [], flags.aba, lancar);
       if (codigo !== 0) return `indisponivel (${semToken(texto.slice(0, 120))})`;
       const t = texto.replace(/^ok:\s*/, '').trim();
       // Só a url vem como literal JSON; o texto da página pode começar com aspas de verdade.
