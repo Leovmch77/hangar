@@ -449,6 +449,17 @@ pub(crate) async fn pass_any(
         cors(&headers, response.headers_mut());
         return response;
     }
+    if crate::share_reach::matches(req.method(), req.uri().path()) {
+        let (forward, owner) = gate(&st, peer, &req);
+        let headers = req.headers().clone();
+        let mut response = if owner {
+            crate::share_reach::public(st, req).await
+        } else {
+            crate::share_reach::unauthorized(&st, &forward.client_ip)
+        };
+        cors(&headers, response.headers_mut());
+        return response;
+    }
     if crate::worktree_routes::matches(req.method(), req.uri().path()) {
         let (forward, owner) = gate(&st, peer, &req);
         // Convidado segue ao Python, que o recusa como antes.
