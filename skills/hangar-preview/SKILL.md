@@ -108,7 +108,9 @@ clique que muda a lista já invalida as refs dela). A resposta é sempre
 - `url` — URL atual.
 - `console [--limpar]` — `console.log/warn/error` (objetos com prévia: `{a: 1, b: "x"}`), erros de
   JS não tratados e promessas recusadas (com arquivo:linha), diálogos (`dialogo confirm recusado:
-  ...`) e downloads recusados.
+  ...`) e downloads recusados. No Linux `confirm`/`prompt` são recusados sozinhos; **no Windows o
+  diálogo abre na tela e trava os verbos seguintes até uma pessoa fechá-lo** — evite clicar no que
+  abre `confirm` ali, ou avise o usuário.
 - `network` — `MÉTODO status url` e `MÉTODO FALHOU url: motivo`. A escuta liga na primeira chamada
   de `network` ou `wait --idle`: chame `network` uma vez ANTES da ação cujas requisições quer ver.
 - `shot [arq.png]` — print da viewport; padrão `~/.hangar/nav/shots/<sessao>/<ms>.png`. Com
