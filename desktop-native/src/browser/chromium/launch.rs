@@ -9,13 +9,17 @@ use std::{
     sync::OnceLock,
 };
 
-/// Ordem de busca: o pedido explícito, o do sistema (a distro o atualiza) e o baixado pelo instalador do app.
+/// Ordem de busca: o pedido explícito, o baixado pelo instalador (`chrome-headless-shell`) e o do sistema. O Chrome
+/// completo vem antes só quando a pessoa pede nas configurações: o gerenciador de senhas dele prende a entrada do site
+/// depois do primeiro login enviado, e o shell não tem essa parte.
 const SYSTEM: [&str; 4] = ["google-chrome-stable", "google-chrome", "chromium", "chromium-browser"];
 
-/// Achado uma vez por processo: roda a cada desenho do menu do painel.
+/// Achado uma vez por processo e por escolha: roda a cada desenho do menu do painel. A troca vale para o próximo
+/// Chromium que subir.
 pub fn find() -> Result<&'static Path, String> {
-    static FOUND: OnceLock<Result<PathBuf, String>> = OnceLock::new();
-    FOUND.get_or_init(|| search(env::var_os("HANGAR_CHROMIUM").map(PathBuf::from), downloaded(), env::var_os("PATH")))
+    static FOUND: [OnceLock<Result<PathBuf, String>>; 2] = [OnceLock::new(), OnceLock::new()];
+    let full = crate::appearance::get().full_chrome;
+    FOUND[full as usize].get_or_init(|| search(env::var_os("HANGAR_CHROMIUM").map(PathBuf::from), downloaded(), env::var_os("PATH"), full))
         .as_ref().map(PathBuf::as_path).map_err(Clone::clone)
 }
 
@@ -23,10 +27,12 @@ fn downloaded() -> Option<PathBuf> {
     Some(PathBuf::from(env::var_os("HOME")?).join(".hangar/native/chromium/chrome-headless-shell"))
 }
 
-fn search(explicit: Option<PathBuf>, downloaded: Option<PathBuf>, path: Option<std::ffi::OsString>) -> Result<PathBuf, String> {
+fn search(explicit: Option<PathBuf>, downloaded: Option<PathBuf>, path: Option<std::ffi::OsString>, full: bool) -> Result<PathBuf, String> {
     if let Some(bin) = explicit {
         return usable(&bin).then_some(bin.clone()).ok_or_else(|| format!("HANGAR_CHROMIUM aponta para {}, que nao e um executavel", bin.display()));
     }
+    let downloaded = downloaded.filter(|b| usable(b));
+    if !full && let Some(bin) = downloaded.clone() { return Ok(bin); }
     let dirs: Vec<PathBuf> = path.map(|p| env::split_paths(&p).collect()).unwrap_or_default();
     for name in SYSTEM {
         for dir in &dirs {
@@ -34,7 +40,7 @@ fn search(explicit: Option<PathBuf>, downloaded: Option<PathBuf>, path: Option<s
             if usable(&bin) && !snap(&bin) { return Ok(bin); }
         }
     }
-    if let Some(bin) = downloaded.filter(|b| usable(b)) { return Ok(bin); }
+    if let Some(bin) = downloaded { return Ok(bin); }
     Err("nenhum Chrome ou Chromium encontrado (instale o google-chrome ou o chromium, ou rode scripts/install-native.sh)".into())
 }
 
@@ -72,6 +78,9 @@ pub fn args(bin: &Path, profile: &Path) -> Vec<String> {
         "--disable-background-timer-throttling".into(),
         "--disable-renderer-backgrounding".into(),
         "--disable-backgrounding-occluded-windows".into(),
+        // Cookies cifrados com a chave fixa nos dois motores: pelo chaveiro do sistema cada um usa uma chave, e trocar de
+        // motor nas configurações deslogaria tudo.
+        "--password-store=basic".into(),
     ];
     if !is_shell(bin) { args.insert(0, "--headless".into()); }
     args
@@ -133,22 +142,24 @@ mod tests {
     }
 
     #[test]
-    fn search_prefers_explicit_then_system_then_downloaded() {
+    fn search_prefers_explicit_then_downloaded_then_system_unless_full_chrome_is_asked() {
         let dir = std::env::temp_dir().join(format!("hangar-chromium-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let system = exe(&dir, "chromium");
         let shell = exe(&dir, "chrome-headless-shell");
         let path = Some(dir.clone().into_os_string());
-        assert_eq!(search(None, None, path.clone()), Ok(system.clone()));
-        assert_eq!(search(None, Some(shell.clone()), path.clone()), Ok(system.clone()));
-        assert_eq!(search(None, Some(shell.clone()), None), Ok(shell.clone()));
-        assert_eq!(search(Some(shell.clone()), None, path.clone()), Ok(shell.clone()));
-        assert!(search(Some(dir.join("nada")), None, path).is_err());
-        assert!(search(None, Some(dir.join("nada")), None).is_err());
+        assert_eq!(search(None, None, path.clone(), false), Ok(system.clone()));
+        assert_eq!(search(None, Some(shell.clone()), path.clone(), false), Ok(shell.clone()));
+        assert_eq!(search(None, Some(shell.clone()), path.clone(), true), Ok(system.clone()));
+        assert_eq!(search(None, Some(shell.clone()), None, true), Ok(shell.clone()));
+        assert_eq!(search(None, Some(dir.join("nada")), path.clone(), false), Ok(system.clone()));
+        assert_eq!(search(Some(shell.clone()), None, path.clone(), true), Ok(shell.clone()));
+        assert!(search(Some(dir.join("nada")), None, path, false).is_err());
+        assert!(search(None, Some(dir.join("nada")), None, false).is_err());
         // O wrapper do Ubuntu em /usr/bin, que só chama o snap, não conta: cai no baixado.
         std::fs::write(&system, "#!/bin/sh\nexec /snap/bin/chromium \"$@\"\n").unwrap();
-        assert!(search(None, None, Some(dir.clone().into_os_string())).is_err());
-        assert_eq!(search(None, Some(shell.clone()), Some(dir.clone().into_os_string())), Ok(shell.clone()));
+        assert!(search(None, None, Some(dir.clone().into_os_string()), true).is_err());
+        assert_eq!(search(None, Some(shell.clone()), Some(dir.clone().into_os_string()), true), Ok(shell.clone()));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -159,5 +170,6 @@ mod tests {
         let shell = args(Path::new("/x/chrome-headless-shell"), profile);
         assert!(!shell.contains(&"--headless".to_string()));
         assert!(shell.contains(&"--force-device-scale-factor=1".to_string()));
+        assert!(shell.contains(&"--password-store=basic".to_string()));
     }
 }

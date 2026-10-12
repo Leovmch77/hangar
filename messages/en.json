@@ -5523,6 +5523,8 @@
   "native_settings_browser_group": "Browser",
   "native_settings_chrome_autofill": "Fill passwords saved in Chrome",
   "native_settings_chrome_autofill_desc": "When an https page has a login saved in your Chrome for the same address, the embedded browser fills in the username and password on its own, in any session.",
+  "native_settings_full_chrome": "Use the system's full Chrome",
+  "native_settings_full_chrome_desc": "The embedded browser uses the Google Chrome installed on this machine instead of the slim build Hangar downloads. Some sites, such as Google sign-in, accept the full Chrome better; in exchange, after a password login that site stops responding to clicks until the browser is reopened. Takes effect the next time the browser opens (close open browsers or restart the app).",
   "native_tray_open": "Open Hangar",
   "native_tray_quit": "Quit",
   "native_tray_notice_title": "Hangar is still running",

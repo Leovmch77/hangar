@@ -5523,6 +5523,8 @@
   "native_settings_browser_group": "Navegador",
   "native_settings_chrome_autofill": "Preencher senhas salvas no Chrome",
   "native_settings_chrome_autofill_desc": "Ao abrir uma página https com login salvo no seu Chrome para o mesmo endereço, o navegador embutido preenche usuário e senha sozinho, em qualquer sessão.",
+  "native_settings_full_chrome": "Usar o Chrome completo do sistema",
+  "native_settings_full_chrome_desc": "O navegador embutido passa a usar o Google Chrome instalado nesta máquina, e não a versão enxuta que o Hangar baixa. Alguns sites, como o login do Google, aceitam melhor o Chrome completo; em troca, depois de um login com senha aquele site para de responder aos cliques até o navegador ser reaberto. Vale na próxima vez que o navegador abrir (feche os navegadores abertos ou reinicie o app).",
   "native_tray_open": "Abrir Hangar",
   "native_tray_quit": "Sair",
   "native_tray_notice_title": "O Hangar continua aberto",
