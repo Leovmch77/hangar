@@ -14,8 +14,9 @@ pub trait Page {
 
 pub enum Reply { Text(String), Png(Vec<u8>) }
 
-pub const EVENTS: [&str; 7] = ["Runtime.consoleAPICalled", "Log.entryAdded", "Network.requestWillBeSent",
-    "Network.responseReceived", "Network.loadingFailed", "Page.frameNavigated", "Page.navigatedWithinDocument"];
+pub const EVENTS: [&str; 12] = ["Runtime.consoleAPICalled", "Runtime.exceptionThrown", "Log.entryAdded", "Network.requestWillBeSent",
+    "Network.responseReceived", "Network.loadingFinished", "Network.loadingFailed", "Page.frameNavigated", "Page.navigatedWithinDocument",
+    "Page.javascriptDialogOpening", "Page.javascriptDialogClosed", "Page.downloadWillBegin"];
 
 const LOG_MAX: usize = 200;
 const WAIT_MS: u64 = 15_000;
@@ -35,7 +36,12 @@ struct State {
     refs: HashMap<String, i64>,
     console: VecDeque<String>,
     network: VecDeque<String>,
-    inflight: u32,
+    /// Requisições sem resposta, por id: redirecionamento repete o id e não conta duas vezes.
+    inflight: HashSet<String>,
+    /// Método e endereço por id, até a requisição terminar: a falha (`loadingFailed`) não traz o endereço.
+    requests: HashMap<String, (String, String)>,
+    /// Diálogo aberto agora (tipo e texto), lido quando ele fecha.
+    dialog: Option<(String, String)>,
     last_network: Instant,
     theme: &'static str,
     layout: Layout,
@@ -63,7 +69,7 @@ fn push(list: &mut VecDeque<String>, line: String) {
 impl<P: Page> Controller<P> {
     pub fn new(page: P, hidden: bool) -> Self {
         Self { page, turn: Mutex::new(()), wanted_hidden: Cell::new(hidden), state: RefCell::new(State { refs: HashMap::new(), console: VecDeque::new(),
-            network: VecDeque::new(), inflight: 0, last_network: Instant::now(), theme: "sistema", layout: Layout::Desktop,
+            network: VecDeque::new(), inflight: HashSet::new(), requests: HashMap::new(), dialog: None, last_network: Instant::now(), theme: "sistema", layout: Layout::Desktop,
             hidden: false, navigated: false, navs: 0, enabled: HashSet::new() }) }
     }
 
@@ -92,21 +98,52 @@ impl<P: Page> Controller<P> {
         let mut s = self.state.borrow_mut();
         match method {
             "Runtime.consoleAPICalled" => {
-                let args: Vec<String> = p["args"].as_array().into_iter().flatten().map(|a| match a.get("value") {
-                    None => a["description"].as_str().or(a["type"].as_str()).unwrap_or("").to_owned(),
-                    Some(Value::String(t)) => t.clone(),
-                    Some(v) => v.to_string(),
-                }).collect();
+                let args: Vec<String> = p["args"].as_array().into_iter().flatten().map(remote_text).collect();
                 push(&mut s.console, format!("{}: {}", p["type"].as_str().unwrap_or("log"), args.join(" ")));
             }
+            "Runtime.exceptionThrown" => push(&mut s.console, exception_line(&p["exceptionDetails"])),
             "Log.entryAdded" => push(&mut s.console, format!("{}: {}", p["entry"]["level"].as_str().unwrap_or(""), p["entry"]["text"].as_str().unwrap_or(""))),
-            "Network.requestWillBeSent" => s.inflight += 1,
-            "Network.responseReceived" => {
-                s.inflight = s.inflight.saturating_sub(1);
-                s.last_network = Instant::now();
-                push(&mut s.network, format!("{} {}", p["response"]["status"], p["response"]["url"].as_str().unwrap_or("")));
+            // Extensão do perfil não é a página: fica fora do registro e da espera do `--idle`.
+            "Network.requestWillBeSent" if p["request"]["url"].as_str().is_some_and(|u| u.starts_with("chrome-extension:")) => {}
+            "Network.requestWillBeSent" => {
+                let id = p["requestId"].as_str().unwrap_or("").to_owned();
+                // Teto contra requisição que nunca termina (stream, socket): o mapa só serve à linha de falha.
+                if s.requests.len() > 500 { s.requests.clear(); }
+                s.requests.insert(id.clone(), (p["request"]["method"].as_str().unwrap_or("GET").to_owned(), p["request"]["url"].as_str().unwrap_or("").to_owned()));
+                s.inflight.insert(id);
             }
-            "Network.loadingFailed" => s.inflight = s.inflight.saturating_sub(1),
+            "Network.responseReceived" if p["response"]["url"].as_str().is_some_and(|u| u.starts_with("chrome-extension:")) => {}
+            "Network.responseReceived" => {
+                // A resposta encerra a espera do `--idle` mesmo em stream (SSE), que nunca termina de carregar.
+                if let Some(id) = p["requestId"].as_str() { s.inflight.remove(id); }
+                s.last_network = Instant::now();
+                let method = p["requestId"].as_str().and_then(|id| s.requests.get(id)).map_or("GET".to_owned(), |(m, _)| m.clone());
+                push(&mut s.network, format!("{method} {} {}", p["response"]["status"], p["response"]["url"].as_str().unwrap_or("")));
+            }
+            "Network.loadingFinished" => { if let Some(id) = p["requestId"].as_str() { s.requests.remove(id); } }
+            "Network.loadingFailed" => {
+                let id = p["requestId"].as_str().unwrap_or("");
+                s.inflight.remove(id);
+                s.last_network = Instant::now();
+                let (method, url) = s.requests.remove(id).unwrap_or_default();
+                let reason = p["blockedReason"].as_str().map(|r| format!("bloqueada: {r}"))
+                    .unwrap_or_else(|| p["errorText"].as_str().unwrap_or("").to_owned());
+                let canceled = if p["canceled"] == true { " (cancelada)" } else { "" };
+                push(&mut s.network, format!("{method} FALHOU {url}: {reason}{canceled}"));
+            }
+            "Page.javascriptDialogOpening" => {
+                let message: String = p["message"].as_str().unwrap_or("").chars().take(200).collect();
+                s.dialog = Some((p["type"].as_str().unwrap_or("dialog").to_owned(), message));
+            }
+            "Page.javascriptDialogClosed" => {
+                let (kind, message) = s.dialog.take().unwrap_or_default();
+                let outcome = if p["result"] == true { "aceito" } else { "recusado" };
+                push(&mut s.console, format!("dialogo {kind} {outcome}: {message}"));
+            }
+            "Page.downloadWillBegin" => {
+                let outcome = if cfg!(target_os = "linux") { "recusado (o navegador embutido nao baixa arquivos)" } else { "pedido" };
+                push(&mut s.console, format!("download {outcome}: {} {}", p["suggestedFilename"].as_str().unwrap_or(""), p["url"].as_str().unwrap_or("")));
+            }
             // Só o quadro principal: iframe navegando não invalida as refs da página.
             "Page.frameNavigated" if p["frame"]["parentId"].is_null() => { s.navigated = true; s.navs += 1; }
             "Page.navigatedWithinDocument" => s.navs += 1,
@@ -150,7 +187,7 @@ impl<P: Page> Controller<P> {
             let mut s = self.state.borrow_mut();
             s.refs.clear();
             // Requisição cancelada pela navegação nem sempre vira loadingFailed.
-            s.inflight = 0;
+            s.inflight.clear();
         }
         // O tema emulado se perde ao navegar; o tamanho não.
         if self.state.borrow().theme != "sistema" && let Err(e) = self.apply_theme().await { eprintln!("[nav] tema nao reaplicado: {e}"); }
@@ -329,7 +366,7 @@ impl<P: Page> Controller<P> {
                     "--text" => self.value(&text_js).await?.as_bool() == Some(true),
                     // Rede parada (contador zero e 500 ms sem resposta) e documento completo.
                     "--idle" => {
-                        let quiet = { let s = self.state.borrow(); s.inflight == 0 && s.last_network.elapsed().as_millis() > 500 };
+                        let quiet = { let s = self.state.borrow(); s.inflight.is_empty() && s.last_network.elapsed().as_millis() > 500 };
                         quiet && self.value("document.readyState").await?.as_str() == Some("complete")
                     }
                     _ => false,
@@ -462,6 +499,41 @@ impl<P: Page> Controller<P> {
         if png.is_empty() { return Ok(Reply::Text("erro: o navegador desta sessao nao produziu quadro — text/snapshot/click funcionam".into())); }
         Ok(Reply::Png(png))
     }
+}
+
+/// Argumento do console como o DevTools mostra: texto cru, número, e objeto pela prévia (`{a: 1, b: "x"}`).
+fn remote_text(a: &Value) -> String {
+    match a.get("value") {
+        Some(Value::String(t)) => return t.clone(),
+        Some(v) => return v.to_string(),
+        None => {}
+    }
+    let preview = &a["preview"];
+    let Some(props) = preview["properties"].as_array() else {
+        return a["description"].as_str().or(a["type"].as_str()).unwrap_or("").to_owned();
+    };
+    let value = |p: &Value| {
+        let v = p["value"].as_str().unwrap_or("");
+        if p["type"] == "string" { format!("{v:?}") } else { v.to_owned() }
+    };
+    let array = preview["subtype"] == "array";
+    let mut items: Vec<String> = props.iter().map(|p| if array { value(p) } else { format!("{}: {}", p["name"].as_str().unwrap_or(""), value(p)) }).collect();
+    if preview["overflow"] == true { items.push("…".into()); }
+    let body = items.join(", ");
+    if array { format!("[{body}]") } else {
+        let class = a["className"].as_str().filter(|c| *c != "Object").map(|c| format!("{c} ")).unwrap_or_default();
+        format!("{class}{{{body}}}")
+    }
+}
+
+/// Erro de JS que ninguém tratou: mensagem e onde aconteceu.
+fn exception_line(d: &Value) -> String {
+    let text = d["exception"]["description"].as_str().and_then(|t| t.lines().next())
+        .or(d["exception"]["value"].as_str()).or(d["text"].as_str()).unwrap_or("");
+    let at = d["url"].as_str().filter(|u| !u.is_empty())
+        .map(|u| format!(" ({u}:{}:{})", d["lineNumber"].as_i64().unwrap_or(0) + 1, d["columnNumber"].as_i64().unwrap_or(0) + 1))
+        .unwrap_or_default();
+    format!("erro nao tratado: {text}{at}")
 }
 
 /// Tira `--timeout <ms>` dos argumentos do `wait`. O teto fica abaixo dos 45 s que o servidor espera pela resposta.
