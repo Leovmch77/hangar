@@ -1126,6 +1126,25 @@ async fn outside_group_notice_reaches_every_local_and_never_goes_back() {
     assert_eq!(e.last_input()["text"], "[de fora: pc-ana::Y] só um");
 }
 
+/// A outra máquina tem dois pares conosco e as duas pontas de cá estão no mesmo grupo: o aviso
+/// chega por cada chave, e o mesmo `notice` não entra duas vezes na mesma sessão.
+#[tokio::test(flavor = "multi_thread")]
+async fn same_group_notice_through_two_pairs_reaches_each_local_once() {
+    let e = env().await;
+    let (_, t1) = e.seed_pair("s0", "pc-ana", "Y", ADDR);
+    let (_, t2) = e.seed_pair("s2", "pc-ana", "Z", ADDR);
+    e.group("s0", &["s2", "pc-ana::Y", "pc-ana::Z"]);
+    e.group("s2", &["s0", "pc-ana::Y", "pc-ana::Z"]);
+    for (token, session) in [(&t1, "s0"), (&t2, "s2")] {
+        let (status, body) = e.message(token, json!({"text": "oi", "session": session, "from": "Y", "group": true, "notice": "n1"})).await;
+        assert_eq!(status, 200, "{body}");
+    }
+    assert_eq!((e.inputs("s0"), e.inputs("s2")), (1, 1));
+    // Outro aviso, outro `notice`: entra de novo.
+    assert_eq!(e.message(&t1, json!({"text": "oi", "session": "s0", "from": "Y", "group": true, "notice": "n2"})).await.0, 200);
+    assert_eq!((e.inputs("s0"), e.inputs("s2")), (2, 2));
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn message_with_invalid_from_is_400() {
     let e = env().await;

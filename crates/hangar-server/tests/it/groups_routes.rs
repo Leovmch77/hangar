@@ -342,9 +342,30 @@ async fn group_notice_reaches_each_outside_pair_once() {
         let calls = other.calls();
         assert_eq!(calls.len(), 1, "{alias}: {calls:?}");
         assert_eq!(calls[0]["path"], "/api/pair/message");
-        assert_eq!(calls[0]["body"], json!({"text": "oi", "from": "s0", "group": true, "session": session}));
+        let mut body = calls[0]["body"].clone();
+        assert!(body.as_object_mut().unwrap().remove("notice").is_some_and(|n| n.as_str().is_some_and(|n| !n.is_empty())), "{body}");
+        assert_eq!(body, json!({"text": "oi", "from": "s0", "group": true, "session": session}));
         assert_eq!(calls[0]["auth"], json!(format!("Bearer tok-{alias}-{}", "t".repeat(30))));
     }
+}
+
+/// Dois pares com a mesma máquina: um POST por par (os grupos de lá podem ser outros), todos com
+/// o mesmo `notice`, que o outro lado usa para não entregar duas vezes à mesma sessão.
+#[tokio::test(flavor = "multi_thread")]
+async fn group_notice_to_two_pairs_of_one_machine_carries_one_notice_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let srv = server(dir.path(), 3).await;
+    let (ana, ana_base) = crate::share_pair_routes::other_machine().await;
+    seed_outside(&srv, "s0", "pc-ana", "Y", &ana_base);
+    seed_outside(&srv, "s1", "pc-ana", "Z", &ana_base);
+    write_group(&srv, "s0", &["s1", "pc-ana::Y", "pc-ana::Z"]);
+    write_group(&srv, "s1", &["s0", "pc-ana::Y", "pc-ana::Z"]);
+    let (status, body) = call(srv.addr, "POST", "s0/group-message", Some(&json!({"text": "oi"})), OWNER).await;
+    assert_eq!(status, 200, "{body}");
+    let calls = ana.calls();
+    assert_eq!(calls.len(), 2, "{calls:?}");
+    assert!(calls[0]["body"]["notice"].is_string(), "{calls:?}");
+    assert_eq!(calls[0]["body"]["notice"], calls[1]["body"]["notice"]);
 }
 
 /// Recado vindo de fora não volta a ser espalhado como aviso de grupo.

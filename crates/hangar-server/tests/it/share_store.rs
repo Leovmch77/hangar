@@ -599,6 +599,36 @@ fn grant_and_ungrant_reach_copies_held_by_other_tokens() {
 }
 
 #[test]
+fn member_who_left_and_came_back_is_copied_again_by_attach() {
+    let f = Fixture::new();
+    let (root, tok_pair) = pair_root(&f);
+    f.at(1001.0).grant(&root.id, "s", life("t:s"), Kind::Share).unwrap();
+    let (_, c) = f.store.create("z", life("t:3"), Kind::Share, false).unwrap();
+    let (_, tok_b) = f.at(1002.0).redeem(&c, "Pixel", None, Kind::Share).unwrap();
+    f.at(1003.0).attach(&tok_b, &tok_pair).unwrap();
+    f.store.ungrant(&root.id, "s").unwrap();
+    f.at(1004.0).grant(&root.id, "s", life("t:s"), Kind::Share).unwrap();
+    f.at(1005.0).attach(&tok_b, &tok_pair).unwrap();
+    assert_eq!(f.store.lookup_token(&tok_b).unwrap().sessions(), set(&["z", "dono", "s"]));
+}
+
+#[test]
+fn grant_after_attach_reaches_the_token_that_attached_the_root() {
+    let f = Fixture::new();
+    let (root, tok_pair) = pair_root(&f);
+    let (_, c) = f.store.create("z", life("t:3"), Kind::Share, false).unwrap();
+    let (_, tok_b) = f.at(1002.0).redeem(&c, "Pixel", None, Kind::Share).unwrap();
+    f.at(1003.0).attach(&tok_b, &tok_pair).unwrap();
+    f.at(1004.0).grant(&root.id, "novo", life("t:n"), Kind::Pair).unwrap();
+    let guest = f.store.lookup_token(&tok_b).unwrap();
+    assert_eq!(guest.sessions(), set(&["z", "dono", "novo"]));
+    assert_eq!(guest.kind_of("novo"), Some(Kind::Pair));
+    assert_eq!(f.store.children(&root.id).len(), 1, "a cópia não conta como filho do par");
+    f.at(1005.0).grant(&root.id, "novo", life("t:n"), Kind::Share).unwrap();
+    assert_eq!(f.store.lookup_token(&tok_b).unwrap().records.iter().filter(|r| r.session == "novo").count(), 1, "trocar o nível não duplica a cópia");
+}
+
+#[test]
 fn pair_invite_level_survives_a_restart() {
     let f = Fixture::new();
     let (_, code) = f.store.create_pair_invite("s0", life("t:1"), Kind::Share).unwrap();

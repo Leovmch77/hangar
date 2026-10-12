@@ -287,7 +287,7 @@ impl ShareStore {
         // A cópia aponta sempre para a RAIZ: revogar o registro original derruba toda a cadeia.
         // Uma raiz de par dá várias sessões: a chave é (raiz, sessão), não só a raiz.
         let mut done: HashSet<(String, String)> = state.values()
-            .filter(|x| x.token_hash.as_deref() == Some(h.token_hash.as_str()))
+            .filter(|x| x.token_hash.as_deref() == Some(h.token_hash.as_str()) && x.revoked_at.is_none())
             .filter_map(|x| x.parent_id.clone().map(|p| (p, x.session.clone()))).collect();
         let mut added = Vec::new();
         for s in &o.records {
@@ -320,17 +320,22 @@ impl ShareStore {
             .filter(|r| r.kind == Kind::Pair && r.parent_id.is_none() && r.revoked_at.is_none())
             .and_then(|r| r.token_hash.clone())
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "par desconhecido ou encerrado"))?;
-        let mut own = false;
+        // Quem já ligou a raiz pelo `attach` recebe também a sessão nova, senão o membro que
+        // entrou depois só aparece no token do par.
+        let mut holders: HashSet<String> = state.values()
+            .filter(|x| x.parent_id.as_deref() == Some(root_id) && x.revoked_at.is_none())
+            .filter_map(|x| x.token_hash.clone()).collect();
+        holders.insert(token);
         // As cópias que o `attach` deu a outros tokens seguem o nível: senão escreveriam depois do "ver".
         for x in state.values_mut().filter(|x| x.parent_id.as_deref() == Some(root_id) && x.session == session && x.revoked_at.is_none()) {
-            own |= x.token_hash.as_deref() == Some(token.as_str());
+            if let Some(t) = &x.token_hash { holders.remove(t); }
             x.kind = kind;
             x.life = life.clone();
         }
-        if !own {
+        for t in holders {
             let child = Share {
-                id: new_id(), session: session.into(), life, created_at: now, code_expires_at: now,
-                code_hash: String::new(), token_hash: Some(token), device: None, redeemed_at: Some(now),
+                id: new_id(), session: session.into(), life: life.clone(), created_at: now, code_expires_at: now,
+                code_hash: String::new(), token_hash: Some(t), device: None, redeemed_at: Some(now),
                 revoked_at: None, local: false, kind, parent_id: Some(root_id.into()), level: None,
             };
             state.insert(child.id.clone(), child);

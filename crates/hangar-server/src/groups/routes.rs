@@ -339,11 +339,13 @@ pub(super) async fn group_message(State(st): State<Arc<AppState>>, ConnectInfo(p
         Err(failed) => return asked.reply(StatusCode::SERVICE_UNAVAILABLE, json!({"detail": failed})),
     };
     let text = format!("[grupo: {}] {}", asked.name, body.text);
+    // Um id por aviso: dois pares com a mesma máquina mandam dois POSTs e lá cada sessão o recebe uma vez.
+    let notice = crate::mods::state::random_hex(8);
     let mut failed = Vec::new();
     for p in &link.peers {
         let outside = asked.st.share.as_ref().and_then(|s| s.pairs.by_address(p).map(|rec| (s, rec)));
         let sent = if let Some((share, rec)) = outside {
-            crate::share::pair_routes::notify_outside(&asked.st, share, &crate::share::pair_routes::Direct, &rec, &asked.name, &body.text).await
+            crate::share::pair_routes::notify_outside(&asked.st, share, &crate::share::pair_routes::Direct, &rec, &asked.name, &body.text, &notice).await
         } else if live.contains_key(p) { deliver_text(&asked.st, p, &text).await }
             else { Err(envelope("erro_sessao_inexistente", "sessão não encontrada".into(), json!({}))) };
         if let Err(e) = sent { failed.push(json!({"sessao": p, "erro": e})); }
