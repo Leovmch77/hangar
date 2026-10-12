@@ -775,6 +775,8 @@ impl BrowserPanel {
 
     /// O diálogo da página no painel: a pessoa responde aqui, ou o agente pelo verbo `dialog`.
     fn render_dialog(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        // No Windows o diálogo é o nativo do WebView2, na frente da página: a pessoa responde nele.
+        if cfg!(target_os = "windows") { return None; }
         let d = self.page.dialog.as_ref()?;
         let answer = |accept: bool| cx.listener(move |this: &mut Self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>| {
             let text = (accept && this.page.dialog.as_ref().is_some_and(|d| d.kind == "prompt")).then(|| this.dialog_input.read(cx).value().to_string());
