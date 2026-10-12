@@ -156,28 +156,24 @@ impl Starter {
     }
 }
 
-/// Diálogos segurados pelo `GetDeferral` até alguém responder, o mais novo por último. Página com iframe de outra
-/// origem abre um diálogo por processo ao mesmo tempo; recusar o anterior de dentro do evento do seguinte travava a
-/// página, então eles se empilham e são respondidos um por vez, do mais novo para o mais velho.
+/// Diálogo segurado pelo `GetDeferral` até alguém responder.
 #[cfg(target_os = "windows")]
-type PendingDialog = Rc<RefCell<Vec<(webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2ScriptDialogOpeningEventArgs,
-    webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Deferral, model::Dialog)>>>;
+type PendingDialog = Rc<RefCell<Option<(webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2ScriptDialogOpeningEventArgs,
+    webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Deferral)>>>;
 
-/// Solta os diálogos segurados, recusados, do mais novo para o mais velho. Quem os esquece (navegação, queda, página
-/// revivida) tem de soltá-los: com o `GetDeferral` aberto o WebView2 deixa a página parada e sem clique nem tecla.
+/// Solta o diálogo segurado, recusado. Quem esquece o diálogo (navegação, queda, página revivida) tem de soltá-lo:
+/// com o `GetDeferral` aberto o WebView2 deixa a página parada e não entrega mais clique nem tecla.
 #[cfg(target_os = "windows")]
 fn release_dialog(pending: &PendingDialog) {
-    let held = std::mem::take(&mut *pending.borrow_mut());
-    for (_, deferral, _) in held.into_iter().rev() {
-        // SAFETY: thread da interface; `Complete` sem `Accept` recusa o diálogo.
-        if let Err(e) = unsafe { deferral.Complete() } { eprintln!("[nav] dialogo esquecido nao foi solto: {}", e.message()); }
-    }
+    let Some((_, deferral)) = pending.borrow_mut().take() else { return };
+    // SAFETY: thread da interface; `Complete` sem `Accept` recusa o diálogo.
+    if let Err(e) = unsafe { deferral.Complete() } { eprintln!("[nav] dialogo esquecido nao foi solto: {}", e.message()); }
 }
 
-/// Diálogos e início de navegação pelo próprio WebView2. O diálogo padrão dele é janela modal que o agente não
-/// alcança: aqui ele fica segurado até o agente (verbo `dialog`) ou a pessoa (caixa do painel) responder; só o
-/// `beforeunload` passa sozinho. O `Started` do wry só chega com a resposta: sem o `NavigationStarting`, página lenta
-/// nunca mostrava o Parar.
+/// Diálogos e início de navegação pelo próprio WebView2. O diálogo padrão dele é janela modal que ninguém responde
+/// quando é o agente que o dispara: o `click` e todo verbo seguinte esperavam o prazo inteiro. Aqui, como no Linux,
+/// `alert`/`beforeunload` passam, `confirm`/`prompt` são recusados, e a pessoa vê o aviso no painel. O `Started` do
+/// wry só chega com a resposta: sem o `NavigationStarting`, página lenta nunca mostrava o Parar.
 #[cfg(target_os = "windows")]
 fn watch_native(view: &WebView, state: &Rc<RefCell<model::PageState>>, events: &async_channel::Sender<Event>, pending: &PendingDialog) {
     use webview2_com::{NavigationStartingEventHandler, ScriptDialogOpeningEventHandler, take_pwstr, Microsoft::Web::WebView2::Win32::{
@@ -202,11 +198,17 @@ fn watch_native(view: &WebView, state: &Rc<RefCell<model::PageState>>, events: &
         let name = if kind == COREWEBVIEW2_SCRIPT_DIALOG_KIND_ALERT { "alert" } else if kind == COREWEBVIEW2_SCRIPT_DIALOG_KIND_PROMPT { "prompt" } else { "confirm" };
         // Segura o diálogo aberto até o agente ou a pessoa responder (`answer_dialog`).
         let deferral = unsafe { args.GetDeferral()? };
-        // Nada é respondido aqui dentro: o diálogo entra na pilha e o painel mostra o mais novo.
-        let dialog = model::Dialog { kind: name.into(), message, default };
-        held.borrow_mut().push((args, deferral, dialog.clone()));
+        // Um segundo diálogo (iframe de outro processo) não pode deixar o primeiro preso: ele sai recusado, com aviso.
+        let replaced = held.borrow().is_some().then(|| st.borrow().dialog.as_ref().map(|d| d.message.clone()).unwrap_or_default());
+        release_dialog(&held);
+        *held.borrow_mut() = Some((args, deferral));
         let mut page = st.borrow_mut();
-        page.dialog = Some(dialog);
+        if let Some(previous) = replaced {
+            eprintln!("[nav] dialogo anterior recusado por chegar outro: {previous}");
+            page.notice = Some(crate::i18n::tr("browser_dialog_replaced").replace("{message}", previous.trim()));
+            page.notice_seq += 1;
+        }
+        page.dialog = Some(model::Dialog { kind: name.into(), message, default });
         send(&ev, &page);
         Ok(())
     }));
@@ -271,7 +273,7 @@ impl Engine {
     /// Responde o diálogo segurado e tira a caixa do painel.
     #[cfg(target_os = "windows")]
     pub fn answer_dialog(&self, accept: bool, text: Option<&str>) -> impl std::future::Future<Output = Result<(), String>> + 'static + use<> {
-        let Some((args, deferral, _)) = self.pending.borrow_mut().pop() else { return std::future::ready(Err("nenhum dialogo aberto na pagina".into())) };
+        let Some((args, deferral)) = self.pending.borrow_mut().take() else { return std::future::ready(Err("nenhum dialogo aberto na pagina".into())) };
         // SAFETY: thread da interface; `Complete` solta o diálogo segurado no `GetDeferral`.
         // `Complete` sempre: sem ele a página fica parada no diálogo, mesmo que o texto ou o aceite tenham falhado.
         let answered = unsafe {
@@ -287,10 +289,8 @@ impl Engine {
             })()
         };
         let completed = unsafe { deferral.Complete() };
-        // O diálogo anterior, se houver, volta a ser o da vez.
-        let next = self.pending.borrow().last().map(|(_, _, d)| d.clone());
         let mut page = self.state.borrow_mut();
-        page.dialog = next;
+        page.dialog = None;
         send(&self.events, &page);
         // Aceite ou texto que falharam viram recusa na página: quem respondeu tem de saber.
         std::future::ready(match (answered, completed) {
