@@ -7956,5 +7956,15 @@
   "live_voice_memory_kind_preferencia": "Preferência",
   "live_voice_memory_kind_referencia": "Referência",
   "live_voice_memory_kind_projeto": "Projeto",
-  "folder_branches_load_failed": "Não foi possível carregar as branches."
+  "folder_branches_load_failed": "Não foi possível carregar as branches.",
+  "native_share_reach_checking": "Preparando o acesso de fora… o link aparece quando abrir pela internet.",
+  "native_share_reach_failed_dns": "O endereço desta máquina ainda não existe no DNS público. Espere um pouco e tente de novo.",
+  "native_share_reach_failed_funnel": "O endereço existe, mas o Funnel da Tailscale não entregou o convite desta máquina.",
+  "native_share_reach_retry": "Tentar de novo",
+  "native_share_reach_needs_rust": "A conferência do link precisa do servidor Rust do Hangar, que não está rodando nesta máquina.",
+  "share_reach_checking": "Preparando o acesso de fora… o link aparece quando abrir pela internet.",
+  "share_reach_failed_dns": "O endereço desta máquina ainda não existe no DNS público. Espere um pouco e tente de novo.",
+  "share_reach_failed_funnel": "O endereço existe, mas o Funnel da Tailscale não entregou o convite desta máquina.",
+  "share_reach_retry": "Tentar de novo",
+  "share_reach_needs_rust": "A conferência do link precisa do servidor Rust do Hangar, que não está rodando nesta máquina."
 }
