@@ -3,7 +3,7 @@ from fastapi import Depends, FastAPI, WebSocket
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
-from app import guest_user_gate, guest_users, share_gate
+from app import guest_user_gate, guest_users
 from app.auth import require_auth
 from app.config import settings
 
@@ -15,7 +15,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "auth_token", "secret")
     monkeypatch.setattr(guest_users, "_path_override", tmp_path / "guests.json")
     monkeypatch.setattr(guest_users, "session_life", lambda n: LIVES.get(n))
-    monkeypatch.setattr(share_gate, "WATCH_INTERVAL", 0.05)
+    monkeypatch.setattr(guest_user_gate, "WATCH_INTERVAL", 0.05)
     guest_users._reset()
     (tmp_path / "p").mkdir()
     ana, ana_tok = guest_users.create("ana", str(tmp_path / "p"), False, True)

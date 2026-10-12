@@ -123,6 +123,7 @@ impl AppState {
             Ok(guest) => crate::share::from_env(guest.shares_file, list.env().dirs.as_ref(), list.env().capture_program.clone()),
             Err(e) => { tracing::error!("{e}"); None }
         };
+        if let Some(share) = &share { list.set_shares(share.clone()); }
         let groups = crate::groups::from_env(list.env().dirs.as_ref(),
             Arc::new(crate::groups::orq::PythonOrq::new(cfg.upstream, cfg.internal_secret.clone(), http.clone())), list.clone());
         AppState { accounts: crate::accounts::AccountService::new(crate::accounts::environment::AccountEnvironment::capture()), groups, peers: Arc::new(crate::groups::peers_from_env()), auth: Auth::new(&cfg.auth_token), http, side, cfg, terminal, terminal_address: None, diag,
@@ -252,6 +253,9 @@ pub async fn serve_with_guest(listener: TcpListener, mut state: AppState, guest:
     let state = Arc::new(state);
     // Abortada na saída: a tarefa segura o estado do servidor, que sobreviveria a ele.
     let _group_sweep = crate::groups::sweep::spawn(state.clone()).map(crate::AbortOnDrop);
+    // Sem a fotografia do Python a varredura não revoga nada (ver `life::sweep`); o túnel religa já.
+    let _share_sweep = state.share.clone().map(|share| crate::AbortOnDrop(tokio::spawn(
+        crate::share::owner_routes::sweep_loop(share, crate::share::owner_routes::SWEEP_EVERY))));
     let plugin_state = state.clone();
     let guest_state = state.clone();
     tokio::select! {
@@ -313,20 +317,54 @@ fn guest_socket(addr: SocketAddr) -> std::io::Result<TcpListener> {
 
 /// Roteador da 8766: tudo passa pelo porteiro, nada pergunta `gate`/`is_owner`.
 pub fn guest_router(state: Arc<AppState>) -> Router {
-    let Some(share) = state.share.clone() else {
+    let Some(pair) = pair_state(&state) else {
         return Router::new().fallback(|headers: HeaderMap| async move { not_found(&headers) }).with_state(state);
     };
-    use crate::share::{guest_routes, owner_routes, pair_routes};
-    // Da loja do dono o par do convidado só usa `share`; as rotas do dono (convite e par) ficam
-    // fora até a virada, porque na 8765 o Python ainda é quem grava os convites.
-    let owner = Arc::new(owner_routes::OwnerShareState { share: share.clone(), owner_port: state.cfg.listen.port(),
-        bind_ip: state.cfg.listen.ip().to_string(), net: Arc::new(owner_routes::RealNet), reach: owner_routes::Reach::production() });
-    let pair = Arc::new(pair_routes::PairState { app: state.clone(), owner, remote: Arc::new(pair_routes::Direct) });
+    let share = pair.owner.share.clone();
     // Os handlers do dono que também servem o convidado; o resto vai ao Python assinado.
     session_routes(guest_fallback).fallback(guest_fallback).with_state(state)
-        .merge(guest_routes::guest_router(share.clone(), guest_routes::owner_name()))
-        .merge(pair_routes::guest_pair_router(pair))
+        .merge(crate::share::guest_routes::guest_router(share.clone(), crate::share::guest_routes::owner_name()))
+        .merge(crate::share::pair_routes::guest_pair_router(pair))
         .layer(axum::middleware::from_fn_with_state(Arc::new(crate::share::gate::Gate::new(share)), crate::share::gate::guard))
+}
+
+/// Lojas, porta do dono e conferência pela internet que convite e par compartilham; `None` sem
+/// `HANGAR_SHARES_FILE`.
+fn pair_state(state: &Arc<AppState>) -> Option<Arc<crate::share::pair_routes::PairState>> {
+    use crate::share::{owner_routes, pair_routes};
+    let share = state.share.clone()?;
+    let owner = Arc::new(owner_routes::OwnerShareState { share, owner_port: state.cfg.listen.port(),
+        bind_ip: state.cfg.listen.ip().to_string(), net: Arc::new(owner_routes::RealNet), reach: owner_routes::Reach::production() });
+    Some(Arc::new(pair_routes::PairState { app: state.clone(), owner, remote: Arc::new(pair_routes::Direct) }))
+}
+
+/// Convites e par externo do dono na 8765; quem não é o dono segue ao Python, que recusa como antes.
+fn owner_share_router(state: &Arc<AppState>) -> Router {
+    let Some(pair) = pair_state(state) else { return Router::new() };
+    crate::share::owner_routes::owner_router(pair.owner.clone())
+        .merge(crate::share::pair_routes::owner_pair_router(pair))
+        .layer(axum::middleware::from_fn_with_state(state.clone(), owner_only))
+}
+
+/// Os mesmos handlers pelo caminho privado, para o dono que chega pelo Connect.
+fn private_share_router(state: &Arc<AppState>) -> Router {
+    let Some(pair) = pair_state(state) else { return Router::new() };
+    crate::share::owner_routes::private_router(pair.owner.clone())
+        .merge(crate::share::pair_routes::private_pair_router(pair))
+        .layer(axum::middleware::from_fn_with_state(state.clone(), crate::share::bridge::private_only))
+}
+
+async fn owner_only(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request,
+                    next: axum::middleware::Next) -> Response {
+    let (fwd, owner) = gate(&st, peer, &req);
+    // O preflight do CORS também é do Python.
+    if !owner || req.method() == Method::OPTIONS {
+        return pass(&st, req, &fwd).await;
+    }
+    let headers = req.headers().clone();
+    let mut resp = next.run(req).await;
+    cors(&headers, resp.headers_mut());
+    resp
 }
 
 /// Na 8766, anexos e rotas de sessão do workspace têm handler no Rust (o porteiro já limitou ao
@@ -403,12 +441,15 @@ pub fn terminal_router(state: Arc<AppState>) -> Router {
         .route("/__hangar_server/voice/memory", axum::routing::any(crate::voice::routes::private_memory))
         .route("/__hangar_server/voice/memory/{id}", axum::routing::any(crate::voice::routes::private_memory))
         .route("/__hangar_server/share/reachability", axum::routing::post(crate::share_reach::private))
+        .route("/__hangar_server/share", axum::routing::post(crate::share::bridge::private))
         .layer(axum::middleware::from_fn(crate::migration_status::count_bridge));
     // Painel, canal do estado e voz ficam fora da contagem: conexões longas, não chamadas da ponte.
+    let share = private_share_router(&state);
     router.route("/__hangar_server/term", get(crate::term::private_ws))
         .route("/__hangar_server/state/{name}/events", get(crate::side::private_events))
         .route("/__hangar_server/voice", get(crate::voice::routes::private_ws))
         .with_state(state)
+        .merge(share)
 }
 
 pub fn router(state: Arc<AppState>) -> Router {
@@ -437,6 +478,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/__hangar_server/voice/memory", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
         .route("/__hangar_server/voice/memory/{id}", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
         .route("/__hangar_server/share/reachability", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
+        .route("/__hangar_server/share", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
+        .route("/__hangar_server/share/owner/{*rest}", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
         .merge(plugin_routes())
         // Páginas HTML da conversa: só o dono; o convidado recebe o 404 de hoje.
         .route("/api/sessions/{name}/pages/{id}", get(crate::pages::routes::page).fallback(pass_any))
@@ -460,7 +503,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(crate::groups::routes::router())
         .fallback(pass_any)
         .layer(axum::middleware::from_fn(crate::migration_status::count_public))
-        .with_state(state)
+        .with_state(state.clone())
+        .merge(owner_share_router(&state))
 }
 
 fn plugin_routes() -> Router<Arc<AppState>> {

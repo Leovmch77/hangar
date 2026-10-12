@@ -80,7 +80,7 @@ def test_rename_moves_guest_ownership(ana, monkeypatch):
     monkeypatch.setattr(api, "_session_exists", lambda n: False)
     monkeypatch.setattr(api.registry, "rename", lambda a, b: None)
     monkeypatch.setattr(api, "_invalidate_lists", lambda: None)
-    monkeypatch.setattr(api.share_store, "rename", lambda a, b: None)
+    monkeypatch.setattr(api.share_bridge, "rename", lambda a, b: None)
     monkeypatch.setattr(api.bastao_mod, "caminho", lambda n: ana[1] / f"bastao-{n}")
     assert api._rename_session("velho", api.RenameBody(new="novo")) == {"ok": True, "name": "novo"}
     assert guest_users.owner_of("novo").id == g.id
@@ -159,7 +159,7 @@ def test_rename_survives_guest_claim_failure(ana, monkeypatch):
     monkeypatch.setattr(api.headless_sessions, "exists", lambda n: False)
     monkeypatch.setattr(tmux, "rename_session", lambda a, b: True)
     monkeypatch.setattr(api.registry, "rename", lambda a, b: None)
-    monkeypatch.setattr(api.share_store, "rename", lambda a, b: None)
+    monkeypatch.setattr(api.share_bridge, "rename", lambda a, b: None)
     monkeypatch.setattr(api.bastao_mod, "caminho", lambda n: tmp / f"bastao-{n}")
     monkeypatch.setattr(pqueue, "_queue_dir", lambda: tmp)
     (tmp / "velho.jsonl").write_text("q")
@@ -181,7 +181,7 @@ def test_mode_switch_result_survives_guest_life_failure(ana, monkeypatch):
     monkeypatch.setattr(api.settings, "auth_token", "secret")
     monkeypatch.setattr(api, "_trocar_modo", troca)
     monkeypatch.setattr(api, "session_life", lambda n: "k:novo")
-    monkeypatch.setattr(api.share_store, "set_life", lambda n, life: None)
+    monkeypatch.setattr(api.share_bridge, "set_life", lambda n, life: None)
     monkeypatch.setattr(guest_users, "set_life", boom)
     r = TestClient(api.app).post("/api/sessions/proj/modo-execucao", json={"terminal": False},
                                  headers={"Authorization": "Bearer secret"})

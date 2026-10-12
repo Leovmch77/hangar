@@ -561,3 +561,12 @@ def pairing_url_api(s: "Settings") -> str:
     if s.public_url:
         return f"{s.public_url.rstrip('/')}/?token={s.auth_token}&api={api}"
     return f"{api}/?token={s.auth_token}"
+
+
+# Porta do convidado: quem escuta é o hangar-server (Rust); o Python nunca a abre.
+GUEST_PORT = 8766
+
+
+def port_clash() -> bool:
+    # App na mesma porta do convite: o porteiro trancaria o dono e o Funnel exporia a API inteira.
+    return settings.port == GUEST_PORT

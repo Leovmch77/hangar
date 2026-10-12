@@ -191,6 +191,8 @@ pub struct ListBridge {
     caches: Arc<Caches>,
     /// Retrato do runtime das sessões sem terminal; sem ele, a linha diz `list_runtime_absent`.
     runtime: std::sync::OnceLock<Arc<dyn HeadlessSource>>,
+    /// Convites: a marca "compartilhada" sai da loja do Rust; sem ela, nenhuma linha é marcada.
+    shares: std::sync::OnceLock<Arc<crate::share::ShareState>>,
     /// Listas do dono abertas no hub: o retrato pedido de fora manda a mesma contagem, senão a
     /// pergunta ao Python alternaria de chave e a presença do app mudaria a cada pedido.
     owner_clients: AtomicU32,
@@ -227,7 +229,7 @@ impl ListBridge {
         let (caches, demoted) = (Arc::<Caches>::default(), Arc::<crate::state::demote::Demoted>::default());
         caches.classify.with(|c| c.hooks.set_demoted(demoted.clone()));
         Self { env: Arc::new(env), shadow_facts: facts.sibling(), facts, caches, runtime: std::sync::OnceLock::new(),
-            owner_clients: AtomicU32::new(0), seen: Mutex::default(),
+            shares: std::sync::OnceLock::new(), owner_clients: AtomicU32::new(0), seen: Mutex::default(),
             discovery: tokio::sync::Mutex::new(None),
             snapshot: tokio::sync::Mutex::new(None), git_running: Arc::default(),
             git_slots: Arc::new(tokio::sync::Semaphore::new(GIT_SLOTS)), epoch: AtomicU64::new(0),
@@ -240,6 +242,11 @@ impl ListBridge {
             self.demoted.demote(&sid, ts);
             sid
         }).collect()
+    }
+
+    /// Uma vez, na montagem do estado com `HANGAR_SHARES_FILE`.
+    pub fn set_shares(&self, share: Arc<crate::share::ShareState>) {
+        let _ = self.shares.set(share);
     }
 
     /// Uma vez, na subida do servidor com o runtime de pé.
@@ -426,7 +433,12 @@ impl ListBridge {
         let runtime = async { match self.runtime.get() { Some(r) => Some(r.snapshots().await), None => None } };
         let pane_pids = pi_pane_pids(&rows, &panes);
         let (fetched, runtime) = tokio::join!(client.fetch(&rows, input.owner_clients, &pane_pids, input.shadow), runtime);
-        let (mut rows, aside) = list_facts::apply((*rows).clone(), &fetched.facts, fetched.ok);
+        let (mut rows, mut aside) = list_facts::apply((*rows).clone(), &fetched.facts, fetched.ok);
+        if let Some(share) = self.shares.get() {
+            let active = share.store.active_sessions();
+            list_facts::mark_shared(&mut rows, &active);
+            list_facts::mark_shared(&mut aside, &active);
+        }
         let (env, caches) = (self.env.clone(), self.caches.clone());
         let inputs = Arc::new(RoundInputs { targets: Arc::new(pane_targets(&panes, &agent_pids, &children)),
             headless: runtime.map(|by_key| headless_by_name(&rows, by_key)), facts: fetched.facts.clone(), agent_pids });

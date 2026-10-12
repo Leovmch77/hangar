@@ -30,7 +30,7 @@ from sse_starlette.sse import EventSourceResponse
 from app import (agentes_sync, atomico, atualizacoes, atualizar, btw, closed_names, diag, harness_api,
                  loop_monitor, pensamento_pt, permission_mode, plugin_bridge, procinfo, quem_chama, tmux,
                  uds_messaging)
-from app import external_pair_api, external_pairs, groups_bridge, internal_api, list_bridge, migration_status, update_channel
+from app import groups_bridge, internal_api, list_bridge, migration_status, share_bridge, update_channel
 from app.auth import require_auth, require_loopback
 from app.send_executor import send_thread as _send_thread
 from app.internal_pool import internal_thread
@@ -88,12 +88,11 @@ from app.config import (list_config_dirs, _backend_config_base, settings,
                         resolve_scan_roots,
                         automations_enabled, resolve_bind_ip, variaveis_env)
 from app import runtime_config
-from app import share_api, share_guest_api, share_store
 from app.share_guest_api import guest_safe
 from app.guest_user_gate import GuestUserGate
 from app.connect_port import ConnectPortGate
 from app import guest_users, guest_users_api
-from app.share_gate import GUEST_TOKEN_KEY, ShareGate
+from app.share_gate import GUEST_TOKEN_KEY
 from app.guest_header import guest_of
 from app.share_life import session_life
 from app import tts
@@ -366,8 +365,6 @@ async def _lifespan(app: FastAPI):
 
     prune_task.add_done_callback(_prune_done)
 
-    # Primeira varredura na subida já religa o túnel se há convite ativo.
-    share_task = asyncio.create_task(share_api.sweep_loop(), name="share-sweep")
     pair_sweep_task = asyncio.create_task(_pair_sweep_loop(), name="pair-sweep")
 
     # Boot-resume dos loops: flags em memoria (tick em voo) morrem no restart; o sidecar e a verdade.
@@ -470,7 +467,6 @@ async def _lifespan(app: FastAPI):
         stall_task.cancel()
         loop_monitor_task.cancel()
         prune_task.cancel()
-        share_task.cancel()
         pair_sweep_task.cancel()
         await omp_sync.close()
         try:
@@ -666,9 +662,8 @@ async def _correlaciona_diag(request: Request, call_next):
         diag.req_atual.reset(token)
 
 
-# Porteiro da porta do convidado ANTES do CORS: o CORS o envolve, entao ate o 403/410 dele sai com
+# Porteiro do convidado com login ANTES do CORS: o CORS o envolve, entao ate o 403 dele sai com
 # Access-Control-Allow-Origin e o app do convidado le o codigo em vez de "erro de rede".
-app.add_middleware(ShareGate)
 app.add_middleware(GuestUserGate)
 # Body-size ANTES do CORS no codigo -> CORS fica por FORA (envolve ate o 413, adicionando headers CORS
 # na rejeicao). Ver _BodySizeLimitMiddleware.
@@ -706,9 +701,8 @@ app.include_router(peers_api.peers_router)
 app.include_router(update_channel.router)
 app.include_router(plugin_bridge.plugin_router)
 app.include_router(config_sync_api.config_sync_router)
-app.include_router(share_api.router)
-app.include_router(share_guest_api.router)
-app.include_router(external_pair_api.router)
+# Convites e par externo são do Rust; aqui só o repasse do dono que chega pelo Connect.
+app.include_router(share_bridge.router)
 app.include_router(migration_status.router)
 app.include_router(internal_api.router)
 registry = SessionRegistry()
@@ -2725,16 +2719,20 @@ async def kill_session(name: str, by: str | None = None):
         _log.info("closed name not recorded for %s: no transcript", name)
     plugin_bridge.esquecer(name)
     forget_frame(name)
-    if await asyncio.to_thread(share_store.revoke_session, name):
-        await asyncio.to_thread(share_api.sync_tunnel)
+    # O Rust revoga e desliga o túnel; fora do ar, fechar segue e o aviso volta na resposta.
+    share_failed = await asyncio.to_thread(share_bridge.revoke_session, name)
     warn = None
     if link:
         errs = await _avisar_saida(name, link["peers"])
     if errs:
+        if share_failed:
+            errs = [*errs, {"sessao": name, "erro": share_failed}]
         warn = erro("erro_pareamento_saida_falhou",
                     "aviso de saída falhou: " + "; ".join(
                         f"{x['sessao']}: {_erro_texto(x['erro'])}" for x in errs),
                     avisos=errs)
+    elif share_failed:
+        warn = share_failed
     return {"ok": True, "warning": warn}
 
 
@@ -2977,11 +2975,12 @@ async def _durante_troca(name: str, troca, *, transfer: bool = False):
 
 async def _during_transfer_life(name: str, troca, *, require_idle: bool = False):
     # A troca muda a identidade da sessão (sidecar <-> pane tmux); sem atualizar, a varredura
-    # revogaria o convite de uma sessão que continua viva. `changing_mode` a segura no meio.
-    if name in share_api.changing_mode:
+    # revogaria o convite de uma sessão que continua viva. O Rust a segura no meio ("não sei", 503).
+    if name in share_bridge.changing_mode:
         return await troca
-    share_api.changing_mode.add(name)
+    share_bridge.changing_mode.add(name)
     try:
+        await asyncio.to_thread(share_bridge.mode_change, name, True)
         from app import runtime_coordinator
         coordinator = runtime_coordinator.current()
         if coordinator is not None and coordinator.managed_queue(name):
@@ -2999,7 +2998,7 @@ async def _during_transfer_life(name: str, troca, *, require_idle: bool = False)
         try:
             def _move_life():
                 life = session_life(name)
-                share_store.set_life(name, life)
+                share_bridge.set_life(name, life)
                 try:
                     guest_users.set_life(name, life)
                 except Exception:
@@ -3007,7 +3006,8 @@ async def _during_transfer_life(name: str, troca, *, require_idle: bool = False)
                     _log.exception("[guests] dono de %s nao acompanhou a troca de modo", name)
             await asyncio.to_thread(_move_life)
         finally:
-            share_api.changing_mode.discard(name)
+            share_bridge.changing_mode.discard(name)
+            await asyncio.to_thread(share_bridge.mode_change, name, False)
             await asyncio.to_thread(_invalidate_lists)
 
 
@@ -3547,10 +3547,9 @@ def _rename_session(name: str, body: RenameBody):
             atomico.substituir(od, nd)
         _invalidate_lists()
         forget_frame(name)
-        share_store.rename(name, new)
-        external_pairs.rename_local(name, new)
+        share_failed = share_bridge.rename(name, new)
         _rename_guest_claim(name, new)
-        return {"ok": True, "name": new}
+        return {"ok": True, "name": new, **({"warning": share_failed} if share_failed else {})}
     if not tmux.has_session(name):
         raise HTTPException(404, detail=erro("erro_sessao_inexistente", "sessao nao encontrada"))
     if new == name:
@@ -3577,8 +3576,8 @@ def _rename_session(name: str, body: RenameBody):
         raise HTTPException(500, detail=erro("sessao_falha_renomear", "falha ao renomear"))
     _codex_lease_rename_finished(new)
     registry.rename(name, new)  # migra o cache name->jsonl (senao serve transcript errado pos-rename)
-    share_store.rename(name, new)
-    external_pairs.rename_local(name, new)
+    # O Rust move convites e pares externos; fora do ar, o rename segue e o aviso volta na resposta.
+    share_failed = share_bridge.rename(name, new)
     _rename_guest_claim(name, new)
     from app.pqueue import PromptQueue
     try:
@@ -3593,7 +3592,7 @@ def _rename_session(name: str, body: RenameBody):
         # Não derruba o rename (que já aconteceu no tmux), mas APARECE: sidecar que não migrou é
         # fila perdida ou dossiê órfão, e nenhum dos dois pode sumir calado.
         _log.warning("rename %s -> %s: sidecar nao migrou: %s", name, new, e)
-    return {"ok": True, "name": new}
+    return {"ok": True, "name": new, **({"warning": share_failed} if share_failed else {})}
 
 
 class ThenLinkBody(_StrictBody):
@@ -5868,42 +5867,17 @@ def _pair_contract_local(name: str) -> dict:
 
 
 async def _end_external_pair(name: str, p: str) -> list[dict] | None:
-    """Desfaz o par externo de `name` no endereço `p`: avisa o outro lado e apaga registro e convite.
-    None = `p` não é par externo de `name`. A saída feita no Rust chega aqui por
-    `/internal/external-pairs/end`."""
-    # O sidecar de `name` prova que o par é dele: a busca é pela sessão, não só pelo endereço.
-    rec = next((r for r in external_pairs.by_local(name) if r.address == p), None)
-    if rec is None:
-        return None
-    errs: list[dict] = []
-    if external_pairs.ambiguous(rec.alias):
-        # Só o aviso ao outro lado é pulado (o alias também é máquina tua); a limpeza local vale.
-        errs.append({"sessao": p, "erro": erro(
-            "erro_par_endereco_ambiguo",
-            f"'{rec.alias}' é ao mesmo tempo máquina tua e par externo", peer=p)})
-    else:
-        try:
-            await asyncio.to_thread(external_pairs.call, rec.peer_address, rec.peer_token,
-                                    "DELETE", "/api/pair")
-        except (peers.PeerError, ValueError) as ex:
-            if getattr(ex, "status", None) != 410:
-                # Texto do outro lado vai rotulado: a tela não deve tomá-lo por mensagem do app.
-                texto = (external_pair_api._REMOTE_LABEL if getattr(ex, "status", None) else "") + str(ex)[:300]
-                errs.append({"sessao": p, "erro": erro("erro_peer_nao_avisado", texto, peer=p)})
-    limpo = True
-    for what, fn in (("remover o registro", external_pairs.remove), ("revogar o convite", share_store.revoke)):
-        try:
-            await asyncio.to_thread(fn, rec.share_id)
-        except Exception as ex:  # noqa: BLE001 — cada passo roda mesmo que o anterior falhe
-            _log.warning("par externo: %s de '%s' falhou: %r", what, p, ex)
-            limpo = False
-    if not limpo:
-        # Convite que não foi revogado deixa o outro lado mandando recado: a saída não pode dizer que limpou.
-        errs.append({"sessao": p, "erro": erro(
-            "erro_par_limpeza_falhou",
-            f"o par externo com {p} não foi apagado por inteiro deste lado; o convite dele pode continuar valendo",
-            peer=p)})
-    return errs
+    """Desfaz o par externo de `name` no endereço `p` pelo Rust, dono do registro e do convite: ele
+    avisa o outro lado e apaga os dois. None = `p` não é par externo de `name`."""
+    try:
+        result = await asyncio.to_thread(share_bridge.call, "end_pair", local=name, address=p)
+    except share_bridge.ShareBridgeError as e:
+        if e.code == "share_bridge_off":
+            # Sem o Rust não há par externo vivo: segue como máquina própria.
+            return None
+        return [{"sessao": p, "erro": erro("erro_convite_nao_acompanhou",
+                                           f"o par externo com {p} não foi desfeito ({e.code})", peer=p)}]
+    return (result.get("errors") or []) if result.get("found") else None
 
 
 async def _avisar_saida(name: str, expeers: list[str]) -> list[dict]:

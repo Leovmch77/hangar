@@ -4,16 +4,41 @@ que ele enxerga. A chave do dono passa direto, sem consulta nenhuma.
 Delimita a INTERFACE, não é fronteira de segurança (ver guest_users).
 """
 import asyncio
+import contextlib
 import secrets
 from http.cookies import CookieError, SimpleCookie
+from typing import Callable
 from urllib.parse import parse_qs
 
-from app import auth as auth_mod, guest_header, guest_users, share_gate
-from app.config import settings
-from app.share_tunnel import GUEST_PORT, port_clash
+from starlette.responses import JSONResponse
+from starlette.websockets import WebSocket
+
+from app import auth as auth_mod, guest_header, guest_users
+from app.config import GUEST_PORT, port_clash, settings
+from app.mensagens import erro
+
+_LIST_ROUTES = {("GET", "/api/sessions"), ("GET", "/api/sessions/events")}
+# As globais que o convidado de convite também alcança (a cópia do Rust mora em `share/caller.rs`).
+_SHARE_GLOBAL_ROUTES = {
+    ("GET", "/api/model-options"),
+    ("GET", "/api/engines"),
+    ("GET", "/api/harness/codex/opcoes"),
+    ("POST", "/api/ditado/relimpar"),
+    ("POST", "/api/pensamento/pt"),
+    ("POST", "/api/tts"),
+    ("POST", "/api/tts/narrar"),
+}
+_GLOBAL_PREFIXES = (("GET", "/api/tts/audio/"),)
+# Alcançam outra sessão do dono ou abrem janela na tela dele; `share` deixaria o convidado
+# criar e revogar convites.
+_SHARE_BLOCKED = {"pair", "pair-remote", "unpair-remote", "group-message", "then", "orq", "bastao",
+                  "open-terminal", "open-editor", "nav", "share", "pair-invite", "pair-accept"}
+# Stream e WebSocket passam pelo porteiro uma vez só, na abertura: sem o vigia, tirar o acesso
+# não derrubaria um terminal ou uma lista já abertos.
+WATCH_INTERVAL = 5.0
 
 # O que a tela precisa para criar e acompanhar sessão; configuração do servidor fica de fora.
-_GLOBAL_ROUTES = share_gate._GLOBAL_ROUTES | {
+_GLOBAL_ROUTES = _SHARE_GLOBAL_ROUTES | {
     ("POST", "/api/sessions"),
     ("GET", "/api/sessions/creation-progress"),
     ("GET", "/api/fs/roots"),
@@ -28,13 +53,13 @@ _GLOBAL_ROUTES = share_gate._GLOBAL_ROUTES | {
 }
 # Navegador embutido não é do convidado; recusar aqui evita que o navsock
 # registre tentativa falha contra o IP dele.
-_BLOCKED = share_gate._BLOCKED | {"nav-remoto", "navegador"}
+_BLOCKED = _SHARE_BLOCKED | {"nav-remoto", "navegador"}
 
 
 def guest_allowed_user(guest, method: str, path: str) -> bool:
-    if (method, path) in share_gate._LIST_ROUTES or (method, path) in _GLOBAL_ROUTES:
+    if (method, path) in _LIST_ROUTES or (method, path) in _GLOBAL_ROUTES:
         return True
-    if any(method == m and path.startswith(p) for m, p in share_gate._GLOBAL_PREFIXES):
+    if any(method == m and path.startswith(p) for m, p in _GLOBAL_PREFIXES):
         return True
     parts = path.split("/")
     if len(parts) < 4 or parts[1:3] != ["api", "sessions"]:
@@ -75,13 +100,74 @@ def _token(scope) -> str:
     return jar[auth_mod.COOKIE].value if not https and auth_mod.COOKIE in jar else ""
 
 
+async def _deny(scope, receive, send, status: int, code: str, msg: str,
+                headers: dict | None = None) -> None:
+    if scope["type"] == "websocket":
+        # 1013 = "tente de novo": o cliente reconecta em vez de tratar como recusa definitiva.
+        await WebSocket(scope, receive, send).close(code=1013 if status == 503 else 1008)
+        return
+    await JSONResponse({"detail": erro(code, msg)}, status_code=status,
+                       headers=headers)(scope, receive, send)
+
+
+def _is_long(scope, path: str) -> bool:
+    return scope["type"] == "websocket" or path.endswith("/events")
+
+
+async def watch(app, scope, receive, send, still_valid: Callable[[], bool]) -> None:
+    """Roda o stream/WebSocket e o derruba (4410 / fim da resposta) quando `still_valid` vira False."""
+    ended = False
+    started = finished = closed = False
+
+    async def wrapped(message):
+        nonlocal started, finished, closed
+        kind = message["type"]
+        if kind == "websocket.close":
+            closed = True
+        if kind == "websocket.close" and ended:
+            # 4410 = "acesso encerrado" (espelho do HTTP 410) pro cliente não tratar como queda
+            # de rede e ficar reconectando. O cancel faz o handler fechar com 1000 no `finally`,
+            # então a troca do código tem que ser aqui.
+            message = {**message, "code": 4410}
+        elif kind == "http.response.start":
+            started = True
+        elif kind == "http.response.body" and not message.get("more_body"):
+            finished = True
+        await send(message)
+
+    task = asyncio.create_task(app(scope, receive, wrapped))
+    try:
+        while True:
+            done, _ = await asyncio.wait({task}, timeout=WATCH_INTERVAL)
+            if done:
+                task.result()
+                return
+            if not await asyncio.to_thread(still_valid):
+                break
+        ended = True                         # ANTES do cancel: o `finally` do handler já lê isto
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        if scope["type"] == "websocket" and not closed:
+            # Handler cancelado sem passar por close (ex.: parado num receive).
+            with contextlib.suppress(Exception):
+                await send({"type": "websocket.close", "code": 4410})
+        if scope["type"] == "http" and started and not finished:
+            # Sem fechar a resposta o uvicorn acusa "returned without completing response".
+            with contextlib.suppress(Exception):
+                await send({"type": "http.response.body", "body": b"", "more_body": False})
+    finally:
+        if not task.done():
+            task.cancel()
+
+
 class GuestUserGate:
     def __init__(self, app):
         self.app = app
 
     async def __call__(self, scope, receive, send):
         server = scope.get("server") or (None, None)
-        # Na porta do convidado de convite manda o ShareGate; com a porta colidida ela É a principal.
+        # Na porta do convidado de convite manda o porteiro do Rust; com a porta colidida ela É a principal.
         # Só /api/ tem dono de sessão; página, assets e /convite/ seguem sem o porteiro (o cookie
         # cp_token do próprio servidor do convidado chega aqui em toda carga da tela).
         # /api/sync/ é o hub: autentica pelo cp_sync, e o cp_token do convidado na mesma origem não
@@ -107,14 +193,12 @@ class GuestUserGate:
             return
         method = scope.get("method", "GET")
         if not await asyncio.to_thread(guest_allowed_user, guest, method, path):
-            await share_gate._deny(scope, receive, send, 403, "erro_fora_do_convidado",
-                                   "fora do acesso do convidado")
+            await _deny(scope, receive, send, 403, "erro_fora_do_convidado", "fora do acesso do convidado")
             return
         marker = guest_users.current.set(guest)
         try:
-            if share_gate._is_long(scope, path):
-                await share_gate.watch(self.app, scope, receive, send,
-                                       lambda: _still_allowed(token, method, path))
+            if _is_long(scope, path):
+                await watch(self.app, scope, receive, send, lambda: _still_allowed(token, method, path))
             else:
                 await self.app(scope, receive, send)
         finally:

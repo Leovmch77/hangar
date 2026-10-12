@@ -20,7 +20,6 @@ from app.hook_installer import (
 from app import migracao_sidecars, orq_politica, resilient_accept, rust_server
 from app.hook_state import hook_state
 from app.pi_inbox import escrever_endpoint
-from app.share_tunnel import GUEST_PORT, port_clash
 from app.connect_port import CONNECT_PORT
 
 LOOPBACK = {"127.0.0.1", "localhost", "::1"}
@@ -142,23 +141,6 @@ def _tcp_socket(host: str, port: int) -> socket.socket:
     return s
 
 
-def _guest_socket() -> socket.socket | None:
-    # Pela internet quem expõe é o Funnel (fala com 127.0.0.1); com o backend aberto pra rede, a
-    # porta do convite também escuta nela, pro convite funcionar na mesma rede sem Tailscale.
-    # Porta ocupada (outra instância nesta máquina) não derruba o boot; só fica sem compartilhar.
-    if port_clash():
-        print(f"[hangar] AVISO: CP_PORT={settings.port} é a porta do convite; "
-              "compartilhar sessão fica desligado até o app usar outra porta")
-        return None
-    host = "0.0.0.0" if resolve_bind_ip(settings) in ("0.0.0.0", "::") else "127.0.0.1"
-    try:
-        return _tcp_socket(host, GUEST_PORT)
-    except OSError as e:
-        print(f"[hangar] AVISO: porta do convite {GUEST_PORT} indisponível ({e}); "
-              "compartilhar sessão fica desligado")
-        return None
-
-
 def _connect_socket() -> socket.socket | None:
     # Só loopback: quem fala aqui é o Caddy desta máquina, nunca a rede.
     from app import connect_port
@@ -174,6 +156,11 @@ def _connect_socket() -> socket.socket | None:
             return sock
     print(f"[hangar] AVISO: {connect_port.unavailable}; o Connect fica desligado")
     return None
+
+
+def _extra_sockets() -> list[socket.socket]:
+    # A porta do convite (8766) é do hangar-server: o Python nunca a abre, com Rust ou sem.
+    return [s for s in (_connect_socket(),) if s]
 
 
 def main():
@@ -247,7 +234,7 @@ def main():
     except OSError as e:
         print(f"[hangar] ERRO: porta {settings.port} indisponível ({e})", file=sys.stderr)
         sys.exit(1)
-    extras = [s for s in (_guest_socket(), _connect_socket()) if s]
+    extras = _extra_sockets()
     if rust_bin is not None:
         # A porta pública fica com o hangar-server; o bind acima só provou que ela estava livre.
         main_sock.close()

@@ -259,7 +259,7 @@ def test_kill_session_in_rust_mode_shows_the_leave_warning_once(monkeypatch, cli
     monkeypatch.setattr(api, "_recusa_orq", lambda n: None)
     monkeypatch.setattr(api.registry, "kill", lambda n: registry.SessionRegistry._clear_pair(n))
     monkeypatch.setattr(api, "_invalidate_lists", lambda: None)
-    monkeypatch.setattr(api.share_store, "revoke_session", lambda n: False)
+    monkeypatch.setattr(api.share_bridge, "revoke_session", lambda n: None)
 
     async def boom(*a):
         raise AssertionError("o Rust já avisou")
@@ -431,4 +431,4 @@ def test_child_gets_group_env(monkeypatch, tmp_path):
     assert env["HANGAR_SERVER_ID"] == "casa"
     assert env["HANGAR_PEERS_FILE"] == str(peers._PEERS_FILE)
     assert env["HANGAR_PAIR_ARCHIVE"] == str(pair._arquivo_dir())
-    assert rust_server.RUST_SERVER_PROTOCOL == 56
+    assert rust_server.RUST_SERVER_PROTOCOL == 57

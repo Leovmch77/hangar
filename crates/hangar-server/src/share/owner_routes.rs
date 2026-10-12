@@ -5,7 +5,7 @@ use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::{Router, extract::{Path, RawQuery, State}, http::{StatusCode, header}, response::{IntoResponse, Response}, routing::{delete, get}};
+use axum::{Router, extract::{Path, RawQuery, State}, http::{StatusCode, header}, response::{IntoResponse, Response}, routing::{any, delete, get}};
 use futures_util::FutureExt;
 use futures_util::future::BoxFuture;
 use serde_json::{Value, json};
@@ -218,5 +218,18 @@ pub fn owner_router(state: Arc<OwnerShareState>) -> Router {
         .route("/api/share/prereqs", get(prereqs))
         .route("/api/sessions/{name}/share", get(list).post(create).delete(revoke_all))
         .route("/api/sessions/{name}/share/{id}", delete(revoke_one))
+        .with_state(state)
+}
+
+/// Os mesmos handlers para o dono que chega pelo Connect (o Python repassa); quem monta põe a
+/// checagem do segredo na frente.
+pub fn private_router(state: Arc<OwnerShareState>) -> Router {
+    const BASE: &str = "/__hangar_server/share/owner";
+    Router::new()
+        .route(&format!("{BASE}/prereqs"), any(prereqs))
+        .route(&format!("{BASE}/create/{{name}}"), any(create))
+        .route(&format!("{BASE}/list/{{name}}"), any(list))
+        .route(&format!("{BASE}/revoke/{{name}}/{{id}}"), any(revoke_one))
+        .route(&format!("{BASE}/revoke_all/{{name}}"), any(revoke_all))
         .with_state(state)
 }

@@ -10,7 +10,7 @@ use axum::body::Bytes;
 use axum::extract::{Path, RawQuery, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, post};
+use axum::routing::{any, delete, get, post};
 use axum::{Extension, Router};
 use futures_util::future::BoxFuture;
 use serde_json::{Map, Value, json};
@@ -475,6 +475,17 @@ pub fn owner_pair_router(state: Arc<PairState>) -> Router {
         .route("/api/sessions/{name}/pair-accept", post(pair_accept))
         .route("/api/external-pairs", get(list_pairs))
         .route("/api/external-pairs/send", post(external_send))
+        .with_state(state)
+}
+
+/// As rotas do dono para quem chega pelo Connect; quem monta põe a checagem do segredo na frente.
+pub fn private_pair_router(state: Arc<PairState>) -> Router {
+    const BASE: &str = "/__hangar_server/share/owner";
+    Router::new()
+        .route(&format!("{BASE}/pair_invite/{{name}}"), any(pair_invite))
+        .route(&format!("{BASE}/pair_accept/{{name}}"), any(pair_accept))
+        .route(&format!("{BASE}/pairs_send"), any(external_send))
+        .route(&format!("{BASE}/pairs_list"), any(list_pairs))
         .with_state(state)
 }
 

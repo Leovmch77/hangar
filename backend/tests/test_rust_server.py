@@ -539,7 +539,41 @@ def test_watcher_failure_puts_the_cause_in_the_diary(monkeypatch, events):
 def test_protocol_is_the_same_number_on_both_sides():
     lib = (Path(__file__).resolve().parents[2] / "crates/hangar-server/src/lib.rs").read_text()
     rust = int(re.search(r"pub const INTERNAL_PROTOCOL: u32 = (\d+);", lib).group(1))
-    assert rust == rust_server.RUST_SERVER_PROTOCOL == 56
+    assert rust == rust_server.RUST_SERVER_PROTOCOL == 57
+
+
+def _child_env(monkeypatch, tmp_path, host, port):
+    from app import list_bridge
+    monkeypatch.setattr(list_bridge, "dirs_env", lambda: "{}")
+    sup = rust_server.Supervisor(tmp_path / "bin", host, port, 2, "t", "127.0.0.1", lambda: False)
+    try:
+        return sup._env()
+    finally:
+        internal_api.set_secret(None)
+
+
+@pytest.mark.parametrize("bind,guest", [("127.0.0.1", "127.0.0.1:8766"), ("192.168.0.5", "127.0.0.1:8766"),
+                                        ("0.0.0.0", "0.0.0.0:8766"), ("::", "0.0.0.0:8766")])
+def test_child_listens_on_the_guest_port_like_the_python_did(monkeypatch, tmp_path, bind, guest):
+    from app.config import _backend_config_base
+    env = _child_env(monkeypatch, tmp_path, bind, 8765)
+    # Pela internet o Funnel fala com 127.0.0.1; aberto para a rede, o convite também vale na casa.
+    assert env["HANGAR_SERVER_GUEST_LISTEN"] == guest
+    assert env["HANGAR_SHARES_FILE"] == str(Path(_backend_config_base()) / "shares.json")
+
+
+def test_child_gets_no_guest_port_when_the_app_uses_it(monkeypatch, tmp_path):
+    monkeypatch.setenv("HANGAR_SERVER_GUEST_LISTEN", "127.0.0.1:1")
+    env = _child_env(monkeypatch, tmp_path, "127.0.0.1", 8766)
+    assert "HANGAR_SERVER_GUEST_LISTEN" not in env, "a porta do convite exporia a API do dono pelo Funnel"
+
+
+def test_python_never_binds_the_guest_port(monkeypatch):
+    sentinel = object()
+    monkeypatch.setattr(main, "_connect_socket", lambda: sentinel)
+    # Com e sem o Rust, o Python só abre a porta do Connect além da principal; a 8766 é do Rust.
+    assert main._extra_sockets() == [sentinel]
+    assert not hasattr(main, "_guest_socket")
 
 
 # --- Modo do processo (dono único, Task 5) ---
