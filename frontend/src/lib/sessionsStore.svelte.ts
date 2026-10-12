@@ -8,7 +8,8 @@
 import * as m from '../paraglide/messages';
 import type { EventSourceLike } from '@hangar/core';
 import { openSessionsStream, registrarDiag, novoReqDiag, checkInviteForServer, decidirRota, esquecerRota, rotaDecidida } from '@hangar/core';
-import { getActiveId, listServers, onServersChanged, type Server } from './auth';
+import { getActiveId, listServers, onServersChanged, setEphemeralServers, type Server } from './auth';
+import { attachGuest, listExternalPairs, pairExternals, reconcilePairEntries, type SessionInfo } from '@hangar/core';
 import { navPelaLista } from './navPelaLista';
 import { forgetServer, setLiveTerminals } from './hangarTerminals.svelte';
 import { getIdentificador } from './peers';
@@ -104,6 +105,60 @@ function createSessionsStore() {
   // SUBSTITUÍDO quando muda, como `latencias`: é o que acorda o `{#key}` do Chat no desktop.
   let epocas: Epocas = { vistas: new Map(), sumidas: new Map(), epochs: new Map() };
   let epochs = $state.raw<ReadonlyMap<string, number>>(epocas.epochs);
+
+  // ── Par externo: os pares nas linhas próprias dizem quando reler `/api/external-pairs`, que traz
+  // o token de cada um; com ele nascem as entradas temporárias (em memória, no auth) que leem a
+  // sessão de fora. Sem par nenhum, nada é pedido.
+  type PairSeen = Map<string, { owner: string; address: string }>;
+  const pairsSeen = new Map<string, PairSeen>();
+  const undoneHere = new Set<string>();
+  const attached = new Set<string>();
+  let pairSig = '';
+  let pairRun = 0;
+  let pairLeft = $state<{ owner: string; seq: number } | null>(null);
+  let pairSeq = 0;
+
+  function notePairs(id: string, sessions: SessionInfo[]) {
+    const now: PairSeen = new Map();
+    for (const row of sessions) for (const p of pairExternals(row)) now.set(`${p.alias}::${p.session}`, { owner: p.owner, address: p.address });
+    const before = pairsSeen.get(id);
+    if (before) {
+      for (const [key, p] of before) {
+        if (now.has(key) || undoneHere.delete(`${id}\n${key}`)) continue;
+        pairLeft = { owner: p.owner, seq: ++pairSeq };
+      }
+    }
+    pairsSeen.set(id, now);
+    void refreshPairs();
+  }
+
+  async function refreshPairs() {
+    const sig = [...pairsSeen].flatMap(([id, seen]) => [...seen].map(([k, p]) => `${id}|${k}|${p.address}`)).sort().join('\n');
+    if (sig === pairSig) return;
+    pairSig = sig;
+    const run = ++pairRun;
+    const own = servers.filter((s) => !s.invite && (pairsSeen.get(s.id)?.size ?? 0) > 0);
+    try {
+      const pairs = (await Promise.all(own.map((s) => listExternalPairs(s)))).flat();
+      if (run !== pairRun) return;
+      const { servers: next, attach } = reconcilePairEntries(listServers(), pairs, () => '');
+      // Id pelo endereço: o mesmo par continua achável pelo chat depois de outra leitura.
+      setEphemeralServers(next.filter((s) => s.ephemeral).map((s) => (s.id ? s : { ...s, id: `pair:${s.baseUrl}` })));
+      for (const a of attach) {
+        const key = `${a.entry.id}\n${a.token}`;
+        if (attached.has(key)) continue;
+        attached.add(key);
+        void attachGuest(a.entry, a.token).catch((e: unknown) => {
+          attached.delete(key);
+          registrarDiag({ evento: 'lista.par_ligar_falhou', nivel: 'aviso', codigo: (e as { code?: string })?.code ?? 'erro' }, a.entry.baseUrl);
+        });
+      }
+    } catch (e) {
+      if (run !== pairRun) return;
+      pairSig = '';   // a próxima lista tenta de novo
+      registrarDiag({ evento: 'lista.pares_falhou', nivel: 'aviso', codigo: (e as { code?: string })?.code ?? 'erro' });
+    }
+  }
 
   function recompute() {
     hidden = sweepHidden(hidden, slots);
@@ -293,6 +348,7 @@ function createSessionsStore() {
           const sessions = JSON.parse(e.data);
           if (!Array.isArray(sessions)) throw new Error('sessions frame must be an array');
           slots.set(s.id, { sessions, error: null });
+          if (!s.invite) notePairs(s.id, sessions);
           identityNeeded = sessions.some((session: { pair_peers?: string[] }) =>
             session.pair_peers?.some(peer => peer.includes('::')));
           loadIdentity();
@@ -453,6 +509,11 @@ function createSessionsStore() {
     // voltaria exibindo a latência de outra época, que ninguém mais vai corrigir.
     latencias = new Map();
     identities = new Map();
+    // As entradas temporárias ficam no auth: o chat de uma sessão de fora segue com a lista fechada.
+    pairsSeen.clear();
+    pairSig = '';
+    pairLeft = null;
+    pairRun++;
     slots.clear();
     quedas.clear(); tentativas.clear();
     // Parar não é sumiço: sem isto, o próximo retain() (o próprio DesktopShell, ao remontar)
@@ -474,6 +535,10 @@ function createSessionsStore() {
     get loading() { return agg.loading; },
     get servers() { return servers; },
     get identities() { return identities; },
+    /** Último par que sumiu da lista sem ter sido desfeito aqui: "<dono> saiu do pareamento". */
+    get pairLeft() { return pairLeft; },
+    /** Desfeito por esta pessoa: o sumiço na próxima lista não vira aviso. */
+    pairUndone(serverId: string, alias: string, session: string) { undoneHere.add(`${serverId}\n${alias}::${session}`); },
     retain() { if (++refs === 1) start(); },
     // Guarda contra consumidor futuro desbalanceado: um release a mais deixaria refs negativo e o
     // singleton nunca mais reconectaria (nenhum retain voltaria a bater 1). Piso em 0.

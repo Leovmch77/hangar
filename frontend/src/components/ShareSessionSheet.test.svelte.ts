@@ -4,7 +4,7 @@ import { mount, unmount, tick } from 'svelte';
 import * as m from '../paraglide/messages';
 
 const core = vi.hoisted(() => ({
-  listShares: vi.fn(), createShare: vi.fn(), revokeShare: vi.fn(), revokeAllShares: vi.fn(), sharePrereqs: vi.fn(),
+  listShares: vi.fn(), createShare: vi.fn(), createPairInvite: vi.fn(), revokeShare: vi.fn(), revokeAllShares: vi.fn(), sharePrereqs: vi.fn(),
   // Não existe mais no core: fica aqui só para provar que a folha não chama a conferência à parte.
   shareReachability: vi.fn(),
 }));
@@ -22,10 +22,10 @@ const ShareSessionSheet = (await import('./ShareSessionSheet.svelte')).default;
 const { SharePrerequisiteError, ShareReachError } = await import('@hangar/core');
 
 async function settle() { for (let i = 0; i < 6; i++) { await Promise.resolve(); await tick(); } }
-function montar(props: { open: boolean } = { open: true }) {
+function montar(props: { open: boolean } = { open: true }, groupSessions: string[] = []) {
   const el = document.createElement('div');
   document.body.appendChild(el);
-  return mount(ShareSessionSheet, { target: el, props: { get open() { return props.open; }, name: 's1', serverId: 'srv-a', onClose: vi.fn() } });
+  return mount(ShareSessionSheet, { target: el, props: { get open() { return props.open; }, name: 's1', serverId: 'srv-a', groupSessions, onClose: vi.fn() } });
 }
 const botao = (t: string) => [...document.querySelectorAll('button')].find((b) => b.textContent?.trim() === t)!;
 const agora = () => Math.floor(Date.now() / 1000);
@@ -245,6 +245,43 @@ describe('ShareSessionSheet', () => {
     // B começa livre para gerar o próprio link.
     expect(document.body.textContent).not.toContain(m.share_reach_checking());
     expect(botao(m.compartilhar_gerar())).toBeTruthy();
+    unmount(c);
+  });
+});
+
+describe('convidar para parear', () => {
+  it('escolhe o nível, diz quais sessões ficam abertas e mostra o link com o nível', async () => {
+    core.listShares.mockResolvedValue({ shares: [] });
+    core.createPairInvite.mockResolvedValue({ id: 'p1', link: 'https://d.ts.net:8443/par/AB12', expires_at: agora() + 86400 });
+    const c = montar({ open: true }, ['b']);
+    await settle();
+    expect(core.createPairInvite).not.toHaveBeenCalled();
+    botao(m.native_par_convidar()).click();
+    await settle();
+    expect(document.body.textContent).toContain(m.pair_level_title());
+    expect(document.body.textContent).toContain(m.pair_opens_sessions({ sessoes: 's1, b' }));
+    botao(m.pair_level_full()).click();
+    await settle();
+    expect(core.createPairInvite).toHaveBeenCalledWith('s1', 'full', expect.objectContaining({ id: 'srv-a' }), expect.any(AbortSignal));
+    const campo = document.querySelector<HTMLInputElement>('input[readonly]')!;
+    expect(campo.value).toBe('https://d.ts.net:8443/par/AB12');
+    expect(document.body.textContent).toContain(m.pair_level_full());
+    const wa = document.querySelector<HTMLAnchorElement>('a[href^="https://wa.me/"]')!;
+    expect(decodeURIComponent(wa.href)).toContain(m.native_par_whatsapp({ link: 'https://d.ts.net:8443/par/AB12' }));
+    unmount(c);
+  });
+
+  it('ver e mandar recado vai como view; a recusa de alcance aparece como no compartilhar', async () => {
+    core.listShares.mockResolvedValue({ shares: [] });
+    core.createPairInvite.mockRejectedValueOnce(new ShareReachError('funnel', '', m.share_reach_failed_funnel()));
+    const c = montar();
+    await settle();
+    botao(m.native_par_convidar()).click();
+    await settle();
+    botao(m.pair_level_view()).click();
+    await settle();
+    expect(core.createPairInvite).toHaveBeenCalledWith('s1', 'view', expect.anything(), expect.any(AbortSignal));
+    expect(document.body.textContent).toContain(m.share_reach_failed_funnel());
     unmount(c);
   });
 });

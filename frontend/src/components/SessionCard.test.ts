@@ -8,6 +8,11 @@ import SessionCard from './SessionCard.svelte';
 import type { AggSession, SessionInfo } from '@hangar/core';
 import { fecharNav, marcarNavAberto } from '../lib/navegadorPanel.svelte';
 import * as m from '../paraglide/messages';
+import * as core from '@hangar/core';
+
+vi.mock('@hangar/core', async (original) => ({
+  ...await original<typeof import('@hangar/core')>(), leavePair: vi.fn(), setPairAccess: vi.fn(),
+}));
 
 function sessao(over: Partial<SessionInfo>): SessionInfo {
   return { name: 's1', state: 'idle', ...over } as SessionInfo;
@@ -205,5 +210,64 @@ describe('SessionCard: linha de meta do nativo', () => {
     const { el, comp } = montar(sessao({ state: 'working', label: 'Pensando (12s · esc para interromper)' }));
     expect(el.querySelector('.status-sub.working')?.textContent).toBe('Pensando');
     unmount(comp);
+  });
+});
+
+describe('SessionCard: par externo', () => {
+  const PAR = { alias: 'casa', owner: 'Ana', session: 'api', address: 'https://ana.ts.net:8443', level: 'view' as const, pending: true };
+  async function abrirMenu(el: HTMLElement) {
+    vi.useFakeTimers();
+    el.querySelector<HTMLElement>('.session-row')!.dispatchEvent(new PointerEvent('pointerdown', { clientX: 1, clientY: 1, bubbles: true }));
+    vi.advanceTimersByTime(600);
+    vi.useRealTimers();
+    await tick();
+  }
+  const botao = (t: string) => [...document.querySelectorAll('button')].find((b) => b.textContent?.trim() === t);
+
+  it('sessão de fora: marca do dono, sem Fechar, e sair do pareamento pede confirmação', async () => {
+    vi.mocked(core.leavePair).mockResolvedValue({ ok: true });
+    const fora = { ...sessao({ name: 'api', guest_kind: 'pair' }), serverId: 'pair:x', serverInvite: true,
+      outside: { alias: 'casa', owner: 'Ana', localServerId: 'srv-a', localSession: 'hangar' } } as AggSession;
+    const { el, comp } = montar(fora);
+    expect(el.textContent).toContain(m.pair_from_owner({ dono: 'Ana' }));
+    expect(el.querySelector('.act.del')).toBeNull();
+    await abrirMenu(el);
+    expect(botao(m.convite_parar())).toBeUndefined();
+    botao(m.pair_leave_outside({ dono: 'Ana' }))!.click();
+    await tick();
+    expect(document.body.textContent).toContain(m.pair_leave_outside_body({ dono: 'Ana' }));
+    expect(core.leavePair).not.toHaveBeenCalled();
+    botao(m.pair_leave_outside({ dono: 'Ana' }))!.click();
+    await tick();
+    expect(core.leavePair).toHaveBeenCalledWith('casa', 'api', expect.objectContaining({ id: 'srv-a' }));
+    unmount(comp);
+    document.body.innerHTML = '';
+  });
+
+  it('sessão própria com par pendente: aviso, Liberar com confirmação e Desfazer par', async () => {
+    vi.mocked(core.setPairAccess).mockResolvedValue({ ok: true });
+    vi.mocked(core.leavePair).mockResolvedValue({ ok: true });
+    const propria = { ...sessao({ name: 'hangar', pair_externals: [PAR] }), serverId: 'srv-a' } as AggSession;
+    const { el, comp } = montar(propria);
+    expect(el.textContent).toContain(m.pair_full_pending());
+    await abrirMenu(el);
+    botao(m.pair_release({ dono: 'Ana' }))!.click();
+    await tick();
+    expect(document.body.textContent).toContain(m.pair_full_confirm({ sessao: 'hangar', dono: 'Ana' }));
+    botao(m.pair_release({ dono: 'Ana' }))!.click();
+    await tick();
+    expect(core.setPairAccess).toHaveBeenCalledWith('hangar', 'casa', 'full', expect.objectContaining({ id: 'srv-a' }));
+    await new Promise((r) => setTimeout(r, 0));
+    await tick();
+    expect(document.body.textContent).not.toContain(m.pair_full_confirm({ sessao: 'hangar', dono: 'Ana' }));
+    await abrirMenu(el);
+    botao(m.pair_undo_own({ dono: 'Ana' }))!.click();
+    await tick();
+    expect(document.body.textContent).toContain(m.pair_undo_anchor_body({ dono: 'Ana' }));
+    botao(m.pair_undo_own({ dono: 'Ana' }))!.click();
+    await tick();
+    expect(core.leavePair).toHaveBeenCalledWith('casa', 'api', expect.objectContaining({ id: 'srv-a' }));
+    unmount(comp);
+    document.body.innerHTML = '';
   });
 });

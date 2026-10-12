@@ -7,13 +7,14 @@
   import { sessionServerFor } from '../lib/sessionServer';
   import { copyText } from '../lib/clipboard';
   import {
-    createShare, listShares, revokeShare, revokeAllShares, relativeTime, resetsIn, sharePrereqs,
+    createShare, createPairInvite, listShares, revokeShare, revokeAllShares, relativeTime, resetsIn, sharePrereqs,
     SharePrerequisiteError, ShareReachError,
-    type ShareInfo, type ShareCreated, type SharePrereqs,
+    type ShareInfo, type ShareCreated, type SharePrereqs, type PairLevel,
   } from '@hangar/core';
 
-  interface Props { open: boolean; name: string; serverId: string; onClose: () => void }
-  let { open, name, serverId, onClose }: Props = $props();
+  // `groupSessions`: as outras sessões locais do grupo, que o acesso completo também abre.
+  interface Props { open: boolean; name: string; serverId: string; groupSessions?: string[]; onClose: () => void }
+  let { open, name, serverId, groupSessions = [], onClose }: Props = $props();
   // Pelo servidor recebido, sem trocar o ativo do app enquanto a folha espera a resposta.
   const server = () => sessionServerFor(serverId)();
 
@@ -33,6 +34,10 @@
   // O servidor só devolve o link do Funnel depois de ele abrir pela internet; não abriu, diz a etapa.
   let conferindoAlcance = $state(false);
   let falhaAlcance = $state<ShareReachError | null>(null);
+  // Convite de par: primeiro a escolha do nível; `nivelCriado` marca que o link é de par.
+  let escolherNivel = $state(false);
+  let nivelCriado = $state<PairLevel | null>(null);
+  let ultimoTipo: 'share' | 'local' | PairLevel = 'share';
 
   const msg = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
@@ -54,6 +59,8 @@
     copiado = false;
     falhaAlcance = null;
     gerando = false;
+    escolherNivel = false;
+    nivelCriado = null;
     conferindoAlcance = false;
     void carregar();
     // Fechar a folha, desmontar ou trocar de sessão para a conferência e a criação: a mesma folha
@@ -93,7 +100,9 @@
     timer = id;
   }
 
-  async function gerar(local = false) {
+  async function gerar(tipo: 'share' | 'local' | PairLevel = 'share') {
+    const local = tipo === 'local';
+    ultimoTipo = tipo;
     if (gerando) return;
     gerando = true;
     erroGerar = '';
@@ -107,9 +116,11 @@
     const [alvo, servidor] = [name, serverId];
     const velho = () => ctl.signal.aborted || alvo !== name || servidor !== serverId;
     try {
-      const r = await createShare(alvo, local, server(), ctl.signal);
+      const nivel = tipo === 'full' || tipo === 'view' ? tipo : null;
+      const r = nivel ? await createPairInvite(alvo, nivel, server(), ctl.signal) : await createShare(alvo, local, server(), ctl.signal);
       if (velho()) return;
       criado = r;
+      nivelCriado = nivel;
       void carregar();
     } catch (e) {
       if (velho()) return;
@@ -157,7 +168,8 @@
   }
 
   const whatsapp = $derived(
-    criado ? `https://wa.me/?text=${encodeURIComponent(m.compartilhar_whatsapp_texto({ link: criado.link }))}` : '',
+    criado ? `https://wa.me/?text=${encodeURIComponent(nivelCriado
+      ? m.native_par_whatsapp({ link: criado.link }) : m.compartilhar_whatsapp_texto({ link: criado.link }))}` : '',
   );
   const faltas = $derived(
     (preRequisito?.missing ?? []).map((f) =>
@@ -176,7 +188,8 @@
 
     {#if criado}
       <div class="share-link">
-        <span class="share-rotulo">{m.compartilhar_link_novo()}</span>
+        <span class="share-rotulo">{nivelCriado ? m.native_par_convidar() : m.compartilhar_link_novo()}</span>
+        {#if nivelCriado}<span class="share-sub">{nivelCriado === 'full' ? m.pair_level_full() : m.pair_level_view()}</span>{/if}
         <input class="share-url" readonly value={criado.link} aria-label={m.compartilhar_link_novo()}
                onfocus={(e) => e.currentTarget.select()} />
         <span class="share-sub">{m.compartilhar_vale_ate({ quando: resetsIn(criado.expires_at) })}</span>
@@ -191,16 +204,28 @@
       <div class="share-erro" role="alert">
         <p>{falhaAlcance.message}</p>
         {#if falhaAlcance.detail}<code class="share-fix">{falhaAlcance.detail}</code>{/if}
-        <button type="button" class="share-btn" onclick={() => gerar()}>{m.share_reach_retry()}</button>
+        <button type="button" class="share-btn" onclick={() => gerar(ultimoTipo)}>{m.share_reach_retry()}</button>
       </div>
     {:else}
       <button type="button" class="share-btn primario" onclick={() => gerar()} disabled={gerando || conferindo}>
         {gerando ? m.compartilhar_gerando() : m.compartilhar_gerar()}
       </button>
-      <button type="button" class="share-btn" onclick={() => gerar(true)} disabled={gerando || conferindo}>
+      <button type="button" class="share-btn" onclick={() => gerar('local')} disabled={gerando || conferindo}>
         {m.compartilhar_gerar_local()}
       </button>
       <span class="share-sub">{m.compartilhar_gerar_local_dica()}</span>
+      {#if escolherNivel}
+        <div class="share-nivel" role="group" aria-label={m.pair_level_title()}>
+          <span class="share-rotulo">{m.pair_level_title()}</span>
+          <button type="button" class="share-btn" onclick={() => gerar('full')} disabled={gerando || conferindo}>{m.pair_level_full()}</button>
+          <span class="share-sub">{m.pair_level_full_hint()}</span>
+          <span class="share-sub">{m.pair_opens_sessions({ sessoes: [name, ...groupSessions].join(', ') })}</span>
+          <button type="button" class="share-btn" onclick={() => gerar('view')} disabled={gerando || conferindo}>{m.pair_level_view()}</button>
+          <span class="share-sub">{m.pair_level_view_hint()}</span>
+        </div>
+      {:else}
+        <button type="button" class="share-btn" onclick={() => (escolherNivel = true)} disabled={gerando || conferindo}>{m.native_par_convidar()}</button>
+      {/if}
     {/if}
 
     {#if preRequisito}
@@ -255,7 +280,7 @@
   .share { display: flex; flex-direction: column; gap: var(--space-3); padding: var(--space-2) var(--space-4) var(--space-5); background: transparent; }
   .share-titulo { margin: 0; font-size: var(--text-base); font-weight: 600; color: var(--text-primary); }
   .share-aviso { margin: 0; font-size: var(--text-sm); color: var(--warning); }
-  .share-link { display: flex; flex-direction: column; gap: var(--space-2); }
+  .share-link, .share-nivel { display: flex; flex-direction: column; gap: var(--space-2); }
   .share-rotulo, .share-secao { margin: 0; font-size: var(--text-sm); font-weight: 600; color: var(--text-secondary); }
   .share-url {
     height: 36px; padding: 0 var(--space-3); font-family: var(--font-mono); font-size: var(--text-xs);

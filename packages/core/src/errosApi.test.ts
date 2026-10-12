@@ -51,3 +51,12 @@ describe('transcrição de áudio já enviado', () => {
     );
   });
 });
+
+describe('recusas do par externo', () => {
+  it.each(['erro_grupo_orq_par_externo', 'erro_par_repetido', 'erro_par_remetente_invalido'])(
+    '%s vira frase do app, não o texto do servidor', (code) => {
+      const texto = formataErro({ code, params: {}, msg: 'texto-do-servidor' });
+      expect(texto).not.toBe('texto-do-servidor');
+      expect(texto).not.toBe(code);
+    });
+});

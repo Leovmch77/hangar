@@ -789,3 +789,17 @@ it('orquestrador sem árbitro registrado: botão desligado', async () => {
     await unmount(t.comp);
   }
 });
+
+// Sessão da outra pessoa num par "ver e recado": o servidor dela recusa digitar; no lugar do
+// Composer, o aviso de só leitura.
+it('par externo só leitura: sem Composer, com o aviso', async () => {
+  sessionsStoreCtl.rows = [{ name: 'sess', state: 'idle', serverId: 'srv-test', provider: 'claude', guest_kind: 'pair' }];
+  const t = montar();
+  try {
+    await tick(); await tick();
+    expect(t.el.querySelector('.composer-stub')).toBeNull();
+    expect(t.el.textContent).toContain(m.native_par_so_leitura());
+  } finally {
+    await unmount(t.comp);
+  }
+});

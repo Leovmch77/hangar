@@ -14,6 +14,8 @@ vi.mock('@hangar/core', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@hangar/core')>()),
   pairSession: vi.fn(),
   unpairSession: vi.fn(),
+  setPairAccess: vi.fn(),
+  listExternalPairs: vi.fn(async () => []),
 }));
 const api = vi.mocked(apiLib);
 
@@ -232,6 +234,61 @@ describe('GrupoDropDialog — modo sair', () => {
     expect(withServer).toHaveBeenCalledWith('srv2', expect.any(Function));
     expect(api.unpairSession).toHaveBeenCalledWith('eu');
     expect(arrastarGrupo.pedido).toBeNull();
+    unmount(comp);
+  });
+});
+
+describe('GrupoDropDialog — par externo', () => {
+  const PAR = { alias: 'casa', owner: 'Ana', session: 'api', address: 'https://ana.ts.net:8443', level: 'full' as const, pending: false };
+  function grupoComFora() {
+    storeState.rows = [
+      sess({ name: 'hangar', serverId: 'srv1', pair_gid: 'g', pair_peers: ['casa::api'], pair_externals: [PAR] }),
+      sess({ name: 'api', serverId: 'pair:x', pair_gid: 'g', guest_kind: 'pair',
+        outside: { alias: 'casa', owner: 'Ana', localServerId: 'srv1', localSession: 'hangar' } }),
+      sess({ name: 'nova', serverId: 'srv1' }),
+    ];
+  }
+
+  it('soltar sobre a sessão de fora agrupa pela sessão local do par e só libera com o clique', async () => {
+    grupoComFora();
+    api.pairSession.mockResolvedValue({ ok: true, warning: null });
+    const comp = montar();
+    arrastarGrupo.comecar({ serverId: 'srv1', name: 'nova' });
+    arrastarGrupo.soltar('pair:x::api');
+    await tick();
+    expect(document.body.textContent).toContain(m.pair_full_confirm({ sessao: 'nova', dono: 'Ana' }));
+    clicarBotao(m.grupo_drop_confirmar());
+    await flush();
+    expect(withServer).toHaveBeenCalledWith('srv1', expect.any(Function));
+    expect(api.pairSession).toHaveBeenCalledWith('hangar', ['nova'], '', false);
+    expect(api.setPairAccess).not.toHaveBeenCalled();
+    unmount(comp);
+  });
+
+  it('marcado "Liberar", a sessão nova ganha acesso completo depois de entrar', async () => {
+    grupoComFora();
+    api.pairSession.mockResolvedValue({ ok: true, warning: null });
+    api.setPairAccess.mockResolvedValue({ ok: true });
+    const comp = montar();
+    arrastarGrupo.comecar({ serverId: 'srv1', name: 'nova' });
+    arrastarGrupo.soltar('srv1::hangar');
+    await tick();
+    document.querySelector<HTMLInputElement>('input[type="checkbox"]')!.click();
+    await tick();
+    clicarBotao(m.grupo_drop_confirmar());
+    await flush();
+    expect(api.setPairAccess).toHaveBeenCalledWith('nova', 'casa', 'full');
+    expect(arrastarGrupo.pedido).toBeNull();
+    unmount(comp);
+  });
+
+  it('a ponta do par saindo do grupo avisa que desfaz o par para todos', async () => {
+    grupoComFora();
+    api.listExternalPairs.mockResolvedValue([{ local_session: 'hangar', alias: 'casa', owner: 'Ana', session: 'api', address: PAR.address, token: 't' }]);
+    const comp = montar();
+    arrastarGrupo.pedirSaida({ serverId: 'srv1', name: 'hangar' });
+    await flush();
+    expect(document.body.textContent).toContain(m.pair_undo_anchor_body({ dono: 'Ana' }));
     unmount(comp);
   });
 });

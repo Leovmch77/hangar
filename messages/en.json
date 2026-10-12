@@ -7204,6 +7204,7 @@
   "erro_par_endereco_invalido": "The pair address is not a Tailscale Funnel address (https://….ts.net:8443).",
   "erro_par_nome_invalido": "The pair's machine name has unsupported characters.",
   "erro_par_link_invalido": "This is not a pairing invite link.",
+  "erro_par_remetente_invalido": "The outside message came with an invalid sender.",
   "erro_par_repetido": "This session is already paired with that outside session.",
   "erro_grupo_orq_par_externo": "An orchestration group does not take outside sessions.",
   "erro_par_recusado": "The other machine refused the invite: {detalhe}",
