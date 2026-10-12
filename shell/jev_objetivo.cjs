@@ -106,6 +106,8 @@ function parsarSnapshot(texto, max = MAX_CANDIDATOS - 1) {
     if (!PAPEIS_INTERATIVOS.has(papel)) continue;
     // Elemento sem nome acessível não dá ao Jev nada para julgar, e ocupa uma vaga do choice.
     if (!nome || !nome.trim()) continue;
+    // Desabilitado não reage ao clique nem aceita texto: como alvo, só gastaria um passo.
+    if (/\]\s.*\[disabled\]/.test(linha)) continue;
     achados.push({ ref, papel, nome: nome.trim().slice(0, 120) });
     if (achados.length >= max) break;
   }
