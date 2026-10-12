@@ -130,7 +130,7 @@ def codex(url: str, token: str) -> None:
         f'url = "{url}"',
         f'http_headers = {{ "Authorization" = "Bearer {token}" }}',
         'env_http_headers = { "X-Hangar-Key" = "CP_SESSION_KEY", "X-Hangar-Pane" = "TMUX_PANE", '
-        '"X-Hangar-Session" = "CP_SESSION_NAME" }',
+        '"X-Hangar-Session" = "CP_SESSION_NAME", "X-Hangar-Jev" = "HANGAR_JEV" }',
         FIM, ""])
     for home in [HOME / ".codex"] + sorted(HOME.glob(".codex-*")):
         if not home.is_dir():

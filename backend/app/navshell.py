@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -18,7 +19,9 @@ from typing import Any, Optional
 
 _log = logging.getLogger("hangar.navshell")
 
-TETO_S = 20.0
+# O app espera até 45 s pela resposta do navegador (`REPLY_SECS` em `browser/server.rs`).
+TETO_S = 45.0
+PAUSADO = "o usuario pausou o navegador; espere ele clicar em Retomar no painel e tente de novo"
 
 
 class ShellIndisponivel(RuntimeError):
@@ -44,7 +47,58 @@ def _chave(name: str) -> Optional[str]:
     return str(sc.get("chave")) if sc and sc.get("chave") else None
 
 
-def verbo(name: str, verbo: str, args: Optional[list[str]] = None, aba: Optional[int] = None) -> str:
+def url_antes(name: str) -> Optional[str]:
+    """Endereço do navegador da sessão antes do `open`; `None` sem navegador."""
+    from app.navsock import alvo_da_sessao
+    sc = alvo_da_sessao(name, exige_alvo=False)
+    return str(sc.get("url") or "") if sc else None
+
+
+def _navegou(atual: str, antes: Optional[str], pedida: str) -> bool:
+    """O sidecar já é da página pedida: não havia navegador, o endereço mudou, ou a pedida é a mesma de antes."""
+    if antes is None or atual != antes:
+        return True
+    pedida = pedida.strip().removeprefix("https://").removeprefix("http://").rstrip("/")
+    return bool(pedida) and pedida in antes
+
+
+def esperar_pronto(name: str, desde_ms: int, antes: Optional[str] = None, pedida: str = "", teto_s: float = 20.0) -> str:
+    """Espera o navegador que o `open` pediu: sidecar regravado depois do pedido, já na página pedida, e `url`
+    respondendo. Devolve a URL; levanta `ShellIndisponivel` se não ficar pronto no prazo."""
+    from app.navsock import alvo_da_sessao
+    prazo = time.monotonic() + teto_s
+    restante = lambda: max(0.5, min(TETO_S, prazo - time.monotonic()))  # noqa: E731
+    ultimo, pausa_conferida = "", False
+    while time.monotonic() < prazo:
+        sc = alvo_da_sessao(name, exige_alvo=False)
+        # Pausado pelo usuário, o app não navega: dizer na hora em vez de esgotar o prazo. Uma pergunta basta.
+        if sc and not pausa_conferida:
+            pausa_conferida = True
+            try:
+                if verbo(name, "estado", teto_s=restante()).strip() == "pausado":
+                    raise ShellIndisponivel(PAUSADO)
+            except ShellIndisponivel as e:
+                if str(e) == PAUSADO:
+                    raise
+        if sc and int(sc.get("ts") or 0) >= desde_ms and _navegou(str(sc.get("url") or ""), antes, pedida):
+            try:
+                texto = verbo(name, "url", teto_s=restante())
+            except ShellIndisponivel as e:
+                texto = str(e)
+            if texto.startswith("ok:"):
+                valor = texto.removeprefix("ok:").strip()
+                try:
+                    return str(json.loads(valor))
+                except ValueError:
+                    return valor
+            ultimo = texto
+        time.sleep(0.15)
+    detalhe = f" ({ultimo})" if ultimo else ""
+    raise ShellIndisponivel(f"o navegador não ficou pronto em {teto_s:.0f}s{detalhe}; o app desktop está aberto nesta máquina?")
+
+
+def verbo(name: str, verbo: str, args: Optional[list[str]] = None, aba: Optional[int] = None,
+          teto_s: float = TETO_S) -> str:
     """Roda um verbo do navegador daquela sessão. Levanta `ShellIndisponivel` sem app desktop.
     `aba` age numa aba sem trocar a que está na tela; `None` é a ativa."""
     srv = _servidor()
@@ -59,7 +113,7 @@ def verbo(name: str, verbo: str, args: Optional[list[str]] = None, aba: Optional
         f"http://127.0.0.1:{int(srv['porta'])}/cmd", data=corpo, method="POST",
         headers={"Authorization": f"Bearer {srv['token']}", "Content-Type": "application/json"})
     try:
-        with urllib.request.urlopen(req, timeout=TETO_S) as r:   # noqa: S310 — loopback fixo
+        with urllib.request.urlopen(req, timeout=teto_s) as r:   # noqa: S310 — loopback fixo
             return r.read().decode("utf-8", "replace")
     except urllib.error.HTTPError as e:
         return e.read().decode("utf-8", "replace")

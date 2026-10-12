@@ -49,18 +49,21 @@ pub struct Viewer {
 impl Viewer {
     /// Entrega um evento. Devolve o `sessionId` do quadro que ficou sem entrega (o descartado, ou o próprio sem
     /// ninguém para ler): ele precisa de ack aqui, senão o Chromium para de mandar quadros esperando.
-    pub fn deliver(&self, method: &str, params: &Value) -> Option<i64> {
-        let frame = frame_id(method, params);
-        let text = json!({"method": method, "params": params}).to_string();
-        match self.events.force_send(ViewerEvent::Cdp { text, frame }) {
-            Ok(Some(ViewerEvent::Cdp { frame, .. })) => frame,
-            Ok(_) => None,
-            Err(_) => frame,
-        }
-    }
+    pub fn deliver(&self, method: &str, params: &Value) -> Option<i64> { deliver(&self.events, method, params) }
 
     /// Avisa o motivo e solta o canal; a tarefa do socket fecha depois de escrever o aviso.
     pub fn detach(self, reason: &'static str) { let _ = self.events.force_send(ViewerEvent::Detached(reason)); }
+}
+
+/// `Viewer::deliver` para quem só tem o canal (a thread do pipe no Linux).
+pub fn deliver(events: &async_channel::Sender<ViewerEvent>, method: &str, params: &Value) -> Option<i64> {
+    let frame = frame_id(method, params);
+    let text = json!({"method": method, "params": params}).to_string();
+    match events.force_send(ViewerEvent::Cdp { text, frame }) {
+        Ok(Some(ViewerEvent::Cdp { frame, .. })) => frame,
+        Ok(_) => None,
+        Err(_) => frame,
+    }
 }
 
 /// `sessionId` de um quadro do screencast; `None` para os outros eventos.

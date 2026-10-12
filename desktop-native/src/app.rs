@@ -926,6 +926,9 @@ impl Hangar {
                 return;
             }
             this.refresh_desktop_palette(cx);
+            // Página do navegador escondida por um diálogo que levou outra janela à frente: sem foco não há quadro, e é
+            // no quadro que ela volta ao lugar. A volta do foco pede esse quadro.
+            if !this.side.browsers.is_empty() { cx.notify(); }
             // O papel de parede muda fora da janela; a volta do foco é quando repintar importa.
             let a = appearance::get();
             if a.background == appearance::Background::Desktop && a.wallpaper == appearance::Wallpaper::Glass { this.refresh_backdrop(window, cx); }

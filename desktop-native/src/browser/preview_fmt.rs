@@ -1,48 +1,112 @@
-//! Lógica pura do hangar-preview no app nativo, espelho de `shell/preview_fmt.cjs`. O texto sai igual ao do
-//! Electron porque o agente e o Jev leem esse formato.
+//! Lógica pura do hangar-preview no app nativo. A árvore do `snapshot` sai mais enxuta que a do Electron
+//! (`shell/preview_fmt.cjs`), mas cada linha acionável mantém `- papel "nome" [ref=@eN]` no começo: o Jev lê assim.
 use std::collections::HashMap;
 
 use serde_json::{Value, json};
 
 /// Papéis que só estruturam o desenho: não viram linha.
 const MUTE: [&str; 5] = ["none", "generic", "presentation", "InlineTextBox", "LineBreak"];
+/// Estrutura de tabela que só tem sentido com nome; sem ele, os filhos sobem um nível.
+const STRUCTURE: [&str; 5] = ["row", "cell", "gridcell", "rowgroup", "paragraph"];
 /// Só o que o agente pode acionar ganha ref, para o número não virar ruído.
 const ACTIONABLE: [&str; 15] = ["button", "link", "textbox", "searchbox", "checkbox", "radio", "combobox", "listbox",
     "option", "menuitem", "tab", "switch", "slider", "spinbutton", "treeitem"];
 pub const LAYOUT_MAX: u32 = 8192;
+/// Árvore maior que isto é cortada com aviso: uma página longa não pode encher o contexto do agente.
+pub const SNAPSHOT_MAX: usize = 24_000;
 
 pub struct Compact {
     pub lines: Vec<String>,
     pub refs: HashMap<String, i64>,
 }
 
-pub fn compact_ax(nodes: &[Value]) -> Compact {
+/// O que a linha não mostra mas o agente precisa saber antes de agir.
+fn states(node: &Value, role: &str, name: &str) -> String {
+    let mut out = String::new();
+    let mut flags: HashMap<&str, &Value> = HashMap::new();
+    for p in node["properties"].as_array().into_iter().flatten() {
+        if let Some(n) = p["name"].as_str() { flags.insert(n, &p["value"]["value"]); }
+    }
+    let on = |k: &str| flags.get(k).is_some_and(|v| **v == Value::Bool(true));
+    match flags.get("checked").and_then(|v| v.as_str().map(str::to_owned).or_else(|| v.as_bool().map(|b| b.to_string()))).as_deref() {
+        Some("true") => out += " [checked]",
+        Some("mixed") => out += " [mixed]",
+        Some(_) if matches!(role, "checkbox" | "radio" | "switch" | "menuitemcheckbox" | "menuitemradio") => out += " [unchecked]",
+        _ => {}
+    }
+    if on("pressed") { out += " [pressed]"; }
+    if on("selected") { out += " [selected]"; }
+    if let Some(v) = flags.get("expanded").and_then(|v| v.as_bool()) { out += if v { " [expanded]" } else { " [collapsed]" }; }
+    if on("disabled") { out += " [disabled]"; }
+    if on("focused") { out += " [focused]"; }
+    if on("required") { out += " [required]"; }
+    if flags.get("invalid").and_then(|v| v.as_str()).is_some_and(|v| v != "false") { out += " [invalid]"; }
+    match &node["value"]["value"] {
+        Value::String(value) if !value.is_empty() && value != name => {
+            let short: String = value.chars().take(80).collect();
+            out += &format!(" value=\"{short}{}\"", if short.len() < value.len() { "…" } else { "" });
+        }
+        Value::Number(n) => out += &format!(" value={n}"),
+        _ => {}
+    }
+    out
+}
+
+/// `refs_only`: só as linhas acionáveis, sem a estrutura em volta.
+pub fn compact_ax(nodes: &[Value], refs_only: bool) -> Compact {
     let by_id: HashMap<&str, &Value> = nodes.iter().filter_map(|n| Some((n["nodeId"].as_str()?, n))).collect();
     let mut out = Compact { lines: Vec::new(), refs: HashMap::new() };
     let mut seq = 0;
-    // Pilha em vez de recursão: DOM muito fundo não estoura a pilha da thread da interface.
-    let mut stack: Vec<(&str, usize)> = nodes.first().and_then(|n| n["nodeId"].as_str()).map(|id| vec![(id, 0)]).unwrap_or_default();
-    while let Some((id, level)) = stack.pop() {
+    // Pilha em vez de recursão: DOM muito fundo não estoura a pilha da thread da interface. Cada entrada leva o nome
+    // da linha acima, para o texto que só repete o nome dela não virar outra linha.
+    let mut stack: Vec<(&str, usize, &str)> = nodes.first().and_then(|n| n["nodeId"].as_str()).map(|id| vec![(id, 0, "")]).unwrap_or_default();
+    while let Some((id, level, parent)) = stack.pop() {
         let Some(node) = by_id.get(id) else { continue };
         let role = node["role"]["value"].as_str().unwrap_or("");
         let name = node["name"]["value"].as_str().unwrap_or("");
-        let mut child_level = level;
-        if !node["ignored"].as_bool().unwrap_or(false) && !role.is_empty() && !MUTE.contains(&role) {
-            let mut line = format!("{}- {role}", "  ".repeat(level));
+        let trimmed = name.trim();
+        let shown = !node["ignored"].as_bool().unwrap_or(false) && !role.is_empty() && !MUTE.contains(&role)
+            // Tabela de layout é desenho; o nome dela repete o texto dos filhos.
+            && !role.starts_with("Layout")
+            && !(trimmed.is_empty() && STRUCTURE.contains(&role))
+            // Texto que já está no nome de quem o contém (botão cujo nome junta os textos dele), ou só pontuação
+            // (" | "), não diz nada novo.
+            && !(role == "StaticText" && (parent.contains(trimmed) || !trimmed.chars().any(char::is_alphanumeric)));
+        let (mut child_level, mut child_parent) = (level, parent);
+        if shown {
+            let actionable = ACTIONABLE.contains(&role) && node["backendDOMNodeId"].as_i64().is_some();
+            let mut line = format!("{}- {role}", if refs_only { String::new() } else { "  ".repeat(level) });
             if !name.is_empty() { line += &format!(" \"{name}\""); }
-            if ACTIONABLE.contains(&role) && let Some(backend) = node["backendDOMNodeId"].as_i64() {
+            if actionable && let Some(backend) = node["backendDOMNodeId"].as_i64() {
                 seq += 1;
                 let r = format!("@e{seq}");
                 line += &format!(" [ref={r}]");
                 out.refs.insert(r, backend);
             }
-            out.lines.push(line);
+            line += &states(node, role, name);
+            if actionable || !refs_only { out.lines.push(line); }
             child_level = level + 1;
+            child_parent = name;
         }
         for child in node["childIds"].as_array().into_iter().flatten().rev() {
-            if let Some(child) = child.as_str() { stack.push((child, child_level)); }
+            if let Some(child) = child.as_str() { stack.push((child, child_level, child_parent)); }
         }
     }
+    out
+}
+
+/// Junta as linhas até `max` caracteres; o que passar vira um aviso com o caminho para ver o resto.
+pub fn capped(lines: &[String], max: usize) -> String {
+    let mut out = String::new();
+    for (i, line) in lines.iter().enumerate() {
+        if out.len() + line.len() + 1 > max {
+            out += &format!("… cortado: mostrei {i} de {} linhas. Use `snapshot --refs` (só acionáveis), `text` ou `snapshot --max <caracteres>`.", lines.len());
+            return out;
+        }
+        out += line;
+        out.push('\n');
+    }
+    out.pop();
     out
 }
 
@@ -127,7 +191,7 @@ mod tests {
             json!({"nodeId": "5", "ignored": true, "role": {"value": "link"}, "childIds": ["6"]}),
             node("6", "link", "Ajuda", Some(14), &[]),
         ];
-        let out = compact_ax(&nodes);
+        let out = compact_ax(&nodes, false);
         assert_eq!(out.lines, vec![
             "- RootWebArea \"Login\"",
             "  - textbox \"Email\" [ref=@e1]",
@@ -139,8 +203,34 @@ mod tests {
     }
 
     #[test]
+    fn lean_tree_drops_repeats_and_shows_state() {
+        let mut check = node("4", "checkbox", "Lembrar", Some(20), &[]);
+        check["properties"] = json!([{"name": "checked", "value": {"value": "false"}}, {"name": "disabled", "value": {"value": true}}]);
+        let mut field = node("5", "textbox", "Email", Some(21), &[]);
+        field["value"] = json!({"value": "a@b.c"});
+        field["properties"] = json!([{"name": "focused", "value": {"value": true}}, {"name": "required", "value": {"value": true}}]);
+        let nodes = vec![
+            node("1", "RootWebArea", "Login", None, &["2"]),
+            node("2", "LayoutTable", "", None, &["3"]),
+            node("3", "button", "Entrar agora", Some(19), &["6", "7", "4", "5"]),
+            check, field,
+            node("6", "StaticText", "agora", None, &[]),
+            node("7", "StaticText", " | ", None, &[]),
+        ];
+        assert_eq!(compact_ax(&nodes, false).lines, vec![
+            "- RootWebArea \"Login\"",
+            "  - button \"Entrar agora\" [ref=@e1]",
+            "    - checkbox \"Lembrar\" [ref=@e2] [unchecked] [disabled]",
+            "    - textbox \"Email\" [ref=@e3] [focused] [required] value=\"a@b.c\"",
+        ]);
+        assert_eq!(compact_ax(&nodes, true).lines[0], "- button \"Entrar agora\" [ref=@e1]");
+        let lines: Vec<String> = (0..10).map(|i| format!("linha {i}")).collect();
+        assert!(capped(&lines, 30).starts_with("linha 0\nlinha 1\nlinha 2\n… cortado: mostrei 3 de 10 linhas"));
+    }
+
+    #[test]
     fn empty_tree_gives_nothing() {
-        let out = compact_ax(&[]);
+        let out = compact_ax(&[], false);
         assert!(out.lines.is_empty() && out.refs.is_empty());
     }
 

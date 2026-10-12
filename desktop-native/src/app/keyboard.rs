@@ -48,6 +48,8 @@ impl Command {
             Self::CloseSession => "!Terminal && !Input && !BrowserPage",
             // F2 na página do navegador é da página.
             Self::RenameSession => "!Terminal && !BrowserPage",
+            // No painel do navegador, Ctrl+L vai ao endereço, como em todo navegador.
+            Self::FocusComposer => "!Terminal && !BrowserPanel",
             _ => self.context(),
         }
     }
