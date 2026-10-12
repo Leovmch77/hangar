@@ -31,6 +31,10 @@ const semRotulo = (nome) => String(nome).startsWith(SEM_ROTULO);
 // Só as linhas acionáveis, sem o teto de 24 mil caracteres: com o teto, os elementos depois do corte
 // sumiam da lista de alvos e a reconferência da ref dava "sumiu". Quem não conhece os flags os ignora.
 const SNAPSHOT_DO_LACO = ['--refs', '--max', '1000000'];
+// Pagina com conexao que reconecta sem parar (SignalR) nunca fica 500 ms sem rede, e o `--idle`
+// sem teto chegou a 5 s numa acao. Passado o teto o ciclo segue; se a tela ainda nao estiver pronta,
+// o laco olha de novo antes de desistir.
+const ESPERA_ASSENTAR = ['--idle', '--timeout', '800'];
 
 /** O rótulo da página traz o asterisco de obrigatório, o da árvore de acessibilidade não. */
 const normalizar = (nome) => String(nome).replace(/\s*\*\s*$/, '').trim().toLowerCase();
@@ -677,7 +681,7 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
     // Logo depois de um `open` ou de um clique que navega, a arvore ainda e a da pagina em branco.
     if (!candidatos.length && !esperouCarregar) {
       esperouCarregar = true;
-      await executar('wait', ['--idle']);
+      await executar('wait', ESPERA_ASSENTAR);
       passo -= 1;
       continue;
     }
@@ -702,17 +706,21 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
     const acabouDeDigitar = String(feito.at(-1) ?? '').startsWith('TYPE_TEXT');
     const respostas = await perguntar(estado, montarPerguntas(candidatos, cofre, anotacao.editaveis, anotacao.lista_aberta, acabouDeDigitar));
     // Lista fechada que o Jev casou com um valor de `dados` e ainda nao mostra esse valor: abre e
-    // escolhe a opcao de texto identico. Uma por ciclo, porque abrir a lista renumera as refs.
+    // escolhe a opcao de texto identico. Todas no mesmo ciclo: abrir uma lista renumera as refs, entao
+    // a seguinte e reencontrada pelo nome numa leitura nova.
     let preencheuLista = false;
-    for (const c of listasFechadas(candidatos, anotacao.editaveis, normalizar(anotacao.lista_aberta))) {
-      const v = respostas[cabecaDoValor(c.ref)];
+    let refsAtuais = null;
+    for (const c0 of listasFechadas(candidatos, anotacao.editaveis, normalizar(anotacao.lista_aberta))) {
+      const c = refsAtuais ? refsAtuais.find((x) => x.papel === 'combobox' && x.nome === c0.nome) : c0;
+      if (!c) continue;
+      const v = respostas[cabecaDoValor(c0.ref)];
       const chave = v?.choice;
       if (!chave || chave === NENHUM || forca(v) < LIMIARES.alvo || typeof cofre[chave] !== 'string' || ehSegredo(chave)) continue;
       const atualDaLista = Object.entries(anotacao.valores).find(([k]) => normalizar(k) === normalizar(c.nome))?.[1];
       if (normalizar(atualDaLista ?? '') === normalizar(cofre[chave])) continue;
       try {
         await agir('click', [`@${c.ref}`]);
-        await executar('wait', ['--idle']);
+        await executar('wait', ESPERA_ASSENTAR);
         const arvore = String(await executar('snapshot', SNAPSHOT_DO_LACO));
         const opcoes = /^\s*-\s+listbox\b/m.test(arvore) ? parsarSnapshot(arvore).filter((o) => o.papel === PAPEL_DE_OPCAO) : [];
         const casadas = opcoes.filter((o) => normalizar(o.nome) === normalizar(cofre[chave]));
@@ -724,15 +732,17 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
           await agir('click', [`@${casadas[0].ref}`]);
         }
         feito.push(`SELECT "${c.nome}"`);
+        if (casadas.length !== 1) { preencheuLista = true; break; }
+        await executar('wait', ESPERA_ASSENTAR);
+        refsAtuais = parsarSnapshot(await executar('snapshot', SNAPSHOT_DO_LACO));
       } catch (err) {
         if (!(err instanceof FalhaDoNavegador)) throw err;
         return { feito, sucesso: false, parou: `o navegador falhou no ${err.verbo}: ${err.message}` };
       }
       preencheuLista = true;
-      break;
     }
     if (preencheuLista) {
-      await executar('wait', ['--idle']);
+      await executar('wait', ESPERA_ASSENTAR);
       continue;
     }
     // Com a ordem explicita de quem chamou, a trava de risco vira registro: o passo segue e o log diz
@@ -747,7 +757,7 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
     if (decisao.parar && / sem alvo confiavel/.test(decisao.parar) && reolhou !== passo) {
       reolhou = passo;
       await executar('wait', ['500']);
-      await executar('wait', ['--idle']);
+      await executar('wait', ESPERA_ASSENTAR);
       passo -= 1;
       continue;
     }
@@ -823,7 +833,7 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
           const aberto = await executar('eval', [jsDeEstarAberto(decisao.escolhido.nome)]);
           if (!String(aberto).includes('true')) {
             await agir('click', [`@${decisao.alvo}`]);
-            await executar('wait', ['--idle']);
+            await executar('wait', ESPERA_ASSENTAR);
           }
           await agir('type', [valor]);
           // Sem esta espera o ciclo seguinte fotografa a lista ainda vazia e o Jev nao tem no que
@@ -870,7 +880,7 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
         // Lista recem-aberta com uma opcao de texto IDENTICO a um valor de `dados`: escolhe ja, sem
         // outra ida ao Jev. So igualdade exata e so um candidato; fora disso o ciclo seguinte decide.
         if (decisao.escolhido.papel === 'combobox' && Object.keys(cofre).length) {
-          await executar('wait', ['--idle']);
+          await executar('wait', ESPERA_ASSENTAR);
           const arvore = String(await executar('snapshot', SNAPSHOT_DO_LACO));
           // So lista ARIA aberta (listbox): num <select> nativo as opcoes de TODOS os selects da pagina
           // estao na arvore, e a igualdade de texto poderia mirar outro campo.
@@ -889,7 +899,7 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
       if (!(err instanceof FalhaDoNavegador)) throw err;
       return { feito, sucesso: false, parou: `o navegador falhou no ${err.verbo}: ${err.message}` };
     }
-    await executar('wait', ['--idle']);
+    await executar('wait', ESPERA_ASSENTAR);
   }
   return { feito, sucesso: false, parou: `estourou ${maxPassos} passos` };
 }
