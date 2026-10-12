@@ -23,6 +23,7 @@ pub mod runtime;
 pub mod session_write;
 pub mod share_reach;
 pub mod side;
+pub mod share;
 pub mod state;
 pub mod tail;
 pub mod term;
