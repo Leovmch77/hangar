@@ -5,7 +5,7 @@ use std::{
     collections::HashSet,
     path::{Path, PathBuf},
     rc::Rc,
-    sync::Mutex,
+    sync::{Mutex, atomic::{AtomicBool, Ordering}},
 };
 
 use gpui_kit::BackgroundExecutor;
@@ -25,6 +25,12 @@ static NOTICE: Mutex<Option<&'static str>> = Mutex::new(None);
 
 pub fn take_notice() -> Option<&'static str> { NOTICE.lock().ok()?.take() }
 
+/// Arquivos que o SQLite pode deixar ao lado do banco com mudanças ainda não juntadas.
+const SIDES: [&str; 2] = ["-wal", "-journal"];
+/// Tentativas da primeira passada que falharam por motivo passageiro (chaveiro trancado, cookie recusado). Passado
+/// isto desiste, para não perguntar ao chaveiro a cada abertura para sempre.
+const TRIES: u32 = 3;
+
 /// Antes do processo subir: a cópia a regravar, ou `None` se não há nada a fazer.
 pub fn prepare(profile: &Path) -> Option<PathBuf> {
     let dir = profile.join("Default");
@@ -35,35 +41,56 @@ pub fn prepare(profile: &Path) -> Option<PathBuf> {
         mark(profile);
         return None;
     };
-    // Copiada para o lado e renomeada: uma queda no meio não deixa cópia truncada passando por inteira.
+    // Os arquivos do lado vão antes e o banco é copiado para o lado e renomeado: uma queda no meio não deixa cópia
+    // truncada passando por inteira.
     let tmp = dir.join(format!("{COPY}.tmp"));
-    match std::fs::copy(&file, &tmp).and_then(|_| std::fs::rename(&tmp, &copy)) {
+    let copied = SIDES.iter().try_for_each(|side| match std::fs::copy(side_of(&file, side), side_of(&copy, side)) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
+    }).and_then(|_| std::fs::copy(&file, &tmp)).and_then(|_| std::fs::rename(&tmp, &copy));
+    match copied {
         Ok(()) => Some(copy),
         Err(e) => { eprintln!("[nav] cookies: copia do banco antigo falhou, os logins antigos se perdem: {e}"); None }
     }
 }
 
-/// Depois do aperto de mão: lê a cópia e regrava o que o perfil ainda não tem.
+/// Depois do aperto de mão: lê a cópia e regrava o que o perfil ainda não tem. A primeira passada grava a marca; a
+/// seguinte (`again`) só repõe o que não chegou ao disco e apaga a cópia, sem aviso.
 pub async fn run(browser: Rc<Browser>, profile: PathBuf, copy: PathBuf, background: BackgroundExecutor) {
+    // Um Chromium que cai e sobe de novo durante a leitura chamaria outra passada sobre a mesma cópia.
+    static RUNNING: AtomicBool = AtomicBool::new(false);
+    if RUNNING.swap(true, Ordering::AcqRel) { return; }
+    struct Done;
+    impl Drop for Done { fn drop(&mut self) { RUNNING.store(false, Ordering::Release); } }
+    let _done = Done;
+
+    let again = profile.join(CARRIED).exists();
     // `sqlite3` e chaveiro bloqueiam (o chaveiro trancado espera a pessoa): longe da interface.
-    let copy_path = copy.clone();
-    let read = background.spawn(async move { disk::read(&disk::chrome_file(copy)) }).await;
+    let source = copy.clone();
+    let read = background.spawn(async move { disk::read(&disk::chrome_file(source)) }).await;
     let cookies = match read {
         Ok(cookies) => cookies,
+        // A primeira passada já gravou: o que falhar agora não tira login de ninguém.
+        Err(e) if again => {
+            eprintln!("[nav] cookies: segunda leitura do banco antigo falhou ({}), copia apagada", e.status_key());
+            return remove_copy(&copy);
+        }
         Err(DiskError::NoSqlite) => {
-            // Instalar o sqlite3 resolve: a cópia fica e a próxima abertura tenta de novo, sem perguntar ao chaveiro.
+            // Instalar o sqlite3 resolve, e a falta dele não chega a perguntar ao chaveiro: tenta em toda abertura.
             eprintln!("[nav] cookies: sem sqlite3, os logins antigos esperam na copia");
             return notice("browser_cookies_carry_no_sqlite");
         }
+        // Chaveiro trancado (o prazo de espera) ou sem a ferramenta: pode mudar na próxima abertura, até o limite.
+        Err(e @ (DiskError::NoKey | DiskError::NoKeyTool)) => {
+            eprintln!("[nav] cookies: banco antigo sem chave ({})", e.status_key());
+            return retry_or_give_up(&profile, &copy, true);
+        }
         Err(e) => {
-            // Chaveiro que não entrega a chave não muda sozinho: perguntar a cada abertura só trava a pessoa.
             eprintln!("[nav] cookies: banco antigo ilegivel ({} {}), logins antigos perdidos", e.status_key(), e.detail());
-            mark(&profile);
-            let _ = std::fs::remove_file(&copy_path);
-            return notice("browser_cookies_carry_lost");
+            give_up(&profile, &copy, true);
+            return;
         }
     };
-    let again = profile.join(CARRIED).exists();
     let cookies_len = cookies.len();
     let locked = cookies.iter().filter(|c| c.get("__locked").is_some()).count();
     let present: HashSet<(String, String, String)> = match browser.call(None, "Storage.getCookies", json!({})).await {
@@ -80,9 +107,37 @@ pub async fn run(browser: Rc<Browser>, profile: PathBuf, copy: PathBuf, backgrou
     let missing: Vec<Value> = lasting.into_iter().filter(|c| key(c).is_none_or(|k| !present.contains(&k))).collect();
     let existing = cookies_len - locked - fleeting - missing.len();
     let (total, written) = (missing.len(), set(&browser, &missing).await);
+    // Recusa e Chromium que morreu no meio dão o mesmo `written`: sem processo vivo nada é concluído.
+    if !browser.alive() {
+        eprintln!("[nav] cookies: o Chromium fechou durante a regravacao, tenta na proxima abertura");
+        return;
+    }
     eprintln!("[nav] cookies do perfil antigo: {written} de {total} regravados, {existing} ja existiam, {fleeting} de sessao ou vencidos, {locked} sem chave");
-    if total > 0 && written == 0 { return; }
-    if again { let _ = std::fs::remove_file(&copy_path); } else { mark(&profile); }
+    if again { return remove_copy(&copy); }
+    if total > 0 && written == 0 { return retry_or_give_up(&profile, &copy, false); }
+    mark(&profile);
+}
+
+/// Conta a tentativa que falhou; no limite, desiste.
+fn retry_or_give_up(profile: &Path, copy: &Path, lost: bool) {
+    let tries = side_of(copy, ".tries");
+    let n = std::fs::read_to_string(&tries).ok().and_then(|t| t.trim().parse::<u32>().ok()).unwrap_or(0) + 1;
+    if n >= TRIES { return give_up(profile, copy, lost); }
+    let _ = std::fs::write(&tries, n.to_string());
+}
+
+fn give_up(profile: &Path, copy: &Path, lost: bool) {
+    eprintln!("[nav] cookies: desisti de trazer os logins antigos");
+    mark(profile);
+    remove_copy(copy);
+    if lost { notice("browser_cookies_carry_lost"); }
+}
+
+fn side_of(file: &Path, suffix: &str) -> PathBuf { PathBuf::from(format!("{}{suffix}", file.display())) }
+
+fn remove_copy(copy: &Path) {
+    for side in SIDES.into_iter().chain([".tries"]) { let _ = std::fs::remove_file(side_of(copy, side)); }
+    let _ = std::fs::remove_file(copy);
 }
 
 /// O Chromium recusa o lote inteiro por um cookie inválido: aí vai um por um e só os recusados ficam de fora.
@@ -128,15 +183,21 @@ mod tests {
         std::fs::remove_file(profile.join(CARRIED)).unwrap();
         std::fs::create_dir_all(profile.join("Default/Network")).unwrap();
         std::fs::write(profile.join("Default/Network/Cookies"), "banco").unwrap();
+        std::fs::write(profile.join("Default/Network/Cookies-wal"), "wal").unwrap();
         let copy = prepare(&profile).unwrap();
         assert_eq!(std::fs::read(&copy).unwrap(), b"banco");
+        assert_eq!(std::fs::read(side_of(&copy, "-wal")).unwrap(), b"wal");
         // Segunda abertura sem marca: a mesma cópia, sem recopiar o banco que o Chromium já reescreveu.
         std::fs::write(profile.join("Default/Network/Cookies"), "novo").unwrap();
         assert_eq!(std::fs::read(prepare(&profile).unwrap()).unwrap(), b"banco");
-        // Com a marca a cópia ainda volta uma vez (`run` a apaga depois de regravar o que faltar).
-        mark(&profile);
-        assert_eq!(prepare(&profile), Some(copy.clone()));
-        std::fs::remove_file(&copy).unwrap();
+        // Falha passageira conta tentativas; no limite desiste, marca e apaga a cópia com os arquivos do lado.
+        retry_or_give_up(&profile, &copy, false);
+        retry_or_give_up(&profile, &copy, false);
+        assert!(copy.exists() && !profile.join(CARRIED).exists());
+        retry_or_give_up(&profile, &copy, false);
+        assert!(!copy.exists() && !side_of(&copy, ".tries").exists() && !side_of(&copy, "-wal").exists());
+        assert!(profile.join(CARRIED).exists());
+        // Com a marca e sem cópia, nada mais a fazer.
         assert!(prepare(&profile).is_none());
         std::fs::remove_dir_all(&profile).unwrap();
     }
