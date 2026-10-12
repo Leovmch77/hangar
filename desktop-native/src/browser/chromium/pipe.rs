@@ -26,6 +26,8 @@ type Reply = Result<Value, String>;
 type Handler = Rc<RefCell<dyn FnMut(Value)>>;
 /// Consome um evento na própria thread de leitura (o quadro do painel, entregue sem passar pela interface).
 pub type Sink = Box<dyn Fn(Value) + Send>;
+/// Confirma ao Chromium o quadro de screencast com este número, de qualquer thread.
+pub type Acker = Box<dyn Fn(Value) + Send + Sync>;
 type Ready = Shared<LocalBoxFuture<'static, Result<(), String>>>;
 const LAUNCH_WAIT: Duration = Duration::from_secs(10);
 
@@ -258,7 +260,13 @@ impl Browser {
         self.watchers.borrow_mut().entry(event.to_owned()).or_default().push((owner.to_owned(), handler));
     }
 
+    /// Quadros desta sessão vão ao `sink`, sem confirmação: quem os desenha confirma com o `acker`.
     pub fn sink(&self, session: &str, sink: Sink) { lock(&self.wire.sinks).insert(session.to_owned(), sink); }
+
+    pub fn acker(&self, session: &str) -> Acker {
+        let (wire, session) = (self.wire.clone(), session.to_owned());
+        Box::new(move |id| wire.send(Some(&session), "Page.screencastFrameAck", json!({"sessionId": id}), None))
+    }
 
     fn forget(&self, session: &str) {
         self.handlers.borrow_mut().retain(|(s, _), _| s != session);
@@ -311,12 +319,8 @@ fn route(mut message: Value, wire: &Wire, events: &async_channel::Sender<Value>)
         && let Some(session) = message["sessionId"].as_str().map(str::to_owned)
         && lock(&wire.sinks).contains_key(&session)
     {
-        // Os parâmetros vão inteiros ao dono, sem copiar o quadro.
-        let params = message["params"].take();
-        let ack = json!({"sessionId": params["sessionId"]});
-        if let Some(sink) = lock(&wire.sinks).get(&session) { sink(params); }
-        // Sem o ack o Chromium para de mandar quadros.
-        wire.send(Some(&session), "Page.screencastFrameAck", ack, None);
+        // Os parâmetros vão inteiros ao dono, sem copiar o quadro; ele confirma depois de desenhar.
+        if let Some(sink) = lock(&wire.sinks).get(&session) { sink(message["params"].take()); }
         return;
     }
     let _ = events.try_send(message);
@@ -474,7 +478,7 @@ mod tests {
     }
 
     #[test]
-    fn frames_with_an_owner_skip_the_interface_and_are_acked() {
+    fn frames_with_an_owner_skip_the_interface_and_wait_for_the_owner_to_ack() {
         let (wire, reader) = wire();
         let (events, received) = async_channel::unbounded();
         let (tx, rx) = mpsc::channel();
@@ -487,7 +491,6 @@ mod tests {
         drop(wire);
         let mut all = Vec::new();
         std::io::Read::read_to_end(&mut { reader }, &mut all).unwrap();
-        let ack: Value = serde_json::from_slice(all.split(|b| *b == 0).next().unwrap()).unwrap();
-        assert_eq!((ack["method"].as_str(), ack["sessionId"].as_str(), ack["params"]["sessionId"].as_i64()), (Some("Page.screencastFrameAck"), Some("P"), Some(9)));
+        assert!(all.is_empty(), "a confirmação é de quem desenha, não do pipe");
     }
 }

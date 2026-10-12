@@ -77,6 +77,17 @@ impl BrowserPanel {
     fn engine(&self) -> Option<&Rc<Engine>> { self.engine.as_ref()?.as_ref().ok() }
 
     fn receive(&mut self, event: crate::browser::Event, window: &mut Window, cx: &mut Context<Self>) {
+        // Mesma textura com o conteúdo novo: a cópia guardada do painel já a pinta, basta a raiz redesenhar e o quadro
+        // ser confirmado depois do desenho. Textura nova (primeiro quadro, outro tamanho) redesenha o painel.
+        #[cfg(target_os = "linux")]
+        if let crate::browser::Event::Frame = event {
+            let Some(engine) = self.engine().cloned() else { return };
+            let replaced = engine.texture_replaced();
+            let weak = Rc::downgrade(&engine);
+            window.on_next_frame(move |_, _| if let Some(engine) = weak.upgrade() { engine.frame_seen() });
+            if replaced || !crate::motion::tick_root(cx) { cx.notify(); }
+            return;
+        }
         if let crate::browser::Event::State(page) = event {
             // Quem está digitando no endereço não perde o texto para a página que acabou de carregar.
             let url = page.url.clone().unwrap_or_default();

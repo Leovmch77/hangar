@@ -21,7 +21,7 @@ use serde_json::{Value, json};
 
 use super::{
     launch,
-    pipe::{Browser, CLOSED, Session},
+    pipe::{Acker, Browser, CLOSED, Session},
 };
 use crate::browser::{Event, Pointer, model};
 
@@ -41,20 +41,28 @@ struct Surface {
     events: async_channel::Sender<Event>,
     /// JPEG no painel, PNG nas páginas da conversa.
     format: image::ImageFormat,
+    /// Confirma um quadro ao Chromium. Ele só manda o próximo com poucos sem confirmação, então confirmar depois de
+    /// desenhar faz a página produzir quadros no ritmo da tela, e nenhum quando a janela não desenha.
+    ack: Acker,
 }
 
 #[derive(Default)]
 struct Slot {
-    /// Último quadro chegado, ainda em base64: o que chega antes de ele ser decodificado o substitui.
-    data: Option<String>,
+    /// Último quadro chegado (base64 e número para a confirmação): o que chega antes de ele ser decodificado o substitui.
+    data: Option<(String, Value)>,
     /// Há um `Event::Frame` que a tela ainda não desenhou: o próximo quadro espera, sem decodificar à toa.
     unseen: bool,
+    /// Número do quadro decodificado, confirmado quando a tela o desenhar.
+    drawn: Option<Value>,
+    /// Quadros trocados antes de decodificar, confirmados junto com o próximo desenho: confirmar na hora liberaria o
+    /// Chromium a mandar outro, e ele seguiria a todo vapor com a tela parada.
+    owed: Vec<Value>,
     closed: bool,
 }
 
 impl Slot {
     /// O quadro a decodificar agora: só o mais recente, e só depois de a tela ter desenhado o anterior.
-    fn next(&mut self) -> Option<String> { if self.unseen { None } else { self.data.take() } }
+    fn next(&mut self) -> Option<(String, Value)> { if self.unseen { None } else { self.data.take() } }
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> { m.lock().unwrap_or_else(PoisonError::into_inner) }
@@ -87,9 +95,9 @@ pub mod trace {
 }
 
 impl Surface {
-    fn new(events: async_channel::Sender<Event>, format: image::ImageFormat) -> Arc<Self> {
+    fn new(events: async_channel::Sender<Event>, format: image::ImageFormat, ack: Acker) -> Arc<Self> {
         let surface = Arc::new(Surface {
-            shown: Mutex::new(None), slot: Mutex::default(), wake: Condvar::new(), replaced: AtomicBool::new(false), events, format,
+            shown: Mutex::new(None), slot: Mutex::default(), wake: Condvar::new(), replaced: AtomicBool::new(false), events, format, ack,
         });
         let worker = surface.clone();
         if let Err(e) = std::thread::Builder::new().name("chromium-frames".into()).spawn(move || worker.decode_loop()) {
@@ -100,19 +108,22 @@ impl Surface {
 
     /// Na thread de leitura do pipe: guarda e acorda quem decodifica.
     fn frame(&self, mut params: Value) {
-        let Some(Value::String(data)) = params.get_mut("data").map(Value::take) else { return };
+        let id = params["sessionId"].take();
+        let Some(Value::String(data)) = params.get_mut("data").map(Value::take) else { return (self.ack)(id) };
         trace::add(&trace::ARRIVED, 1);
-        lock(&self.slot).data = Some(data);
+        let mut slot = lock(&self.slot);
+        if let Some((_, old)) = slot.data.replace((data, id)) { slot.owed.push(old); }
+        drop(slot);
         self.wake.notify_one();
     }
 
     fn decode_loop(&self) {
         loop {
-            let data = {
+            let (data, id) = {
                 let mut slot = lock(&self.slot);
                 loop {
                     if slot.closed { return; }
-                    if let Some(data) = slot.next() { break data; }
+                    if let Some(next) = slot.next() { break next; }
                     slot = self.wake.wait(slot).unwrap_or_else(PoisonError::into_inner);
                 }
             };
@@ -121,16 +132,22 @@ impl Surface {
                 Ok(()) => {
                     trace::add(&trace::DECODED, 1);
                     trace::add(&trace::DECODE_US, started.elapsed().as_micros() as u64);
-                    lock(&self.slot).unseen = true;
+                    let mut slot = lock(&self.slot);
+                    slot.unseen = true;
+                    if let Some(old) = slot.drawn.replace(id) { slot.owed.push(old); }
+                    drop(slot);
                     let _ = self.events.try_send(Event::Frame);
                 }
-                Err(e) => eprintln!("[nav] quadro do Chromium descartado: {e}"),
+                Err(e) => { eprintln!("[nav] quadro do Chromium descartado: {e}"); (self.ack)(id); }
             }
         }
     }
 
+    /// A tela desenhou: confirma o quadro ao Chromium e libera o próximo para decodificar.
     fn seen(&self) {
-        lock(&self.slot).unseen = false;
+        let (drawn, owed) = { let mut slot = lock(&self.slot); slot.unseen = false; (slot.drawn.take(), std::mem::take(&mut slot.owed)) };
+        if drawn.is_some() { trace::add(&trace::PAINTED, 1); }
+        for id in drawn.into_iter().chain(owed) { (self.ack)(id); }
         self.wake.notify_one();
     }
 
@@ -256,7 +273,7 @@ impl Starter {
         let measured = session.call_blocking("Runtime.evaluate", json!({"expression": "outerHeight-innerHeight", "returnByValue": true}))?;
         let decoration = measured["result"]["value"].as_f64().unwrap_or(0.).max(0.) as f32;
         let state = Rc::new(RefCell::new(model::PageState::default()));
-        let surface = Surface::new(events.clone(), image::ImageFormat::Jpeg);
+        let surface = Surface::new(events.clone(), image::ImageFormat::Jpeg, browser.acker(session.id()));
         let sink = surface.clone();
         browser.sink(session.id(), Box::new(move |params| sink.frame(params)));
         let dead = Rc::new(Cell::new(false));
@@ -332,7 +349,7 @@ impl Starter {
         // um pedido pausado) não pode chegar sem dono.
         let state = Rc::new(RefCell::new(model::PageState::default()));
         // PNG nas duas formas: o texto da conversa ao lado pede a nitidez que o JPEG perde.
-        let surface = Surface::new(events.clone(), image::ImageFormat::Png);
+        let surface = Surface::new(events.clone(), image::ImageFormat::Png, browser.acker(session.id()));
         let sink = surface.clone();
         browser.sink(session.id(), Box::new(move |params| sink.frame(params)));
         let dead = Rc::new(Cell::new(false));
@@ -574,7 +591,6 @@ impl Engine {
         }
         // Antes de ler: um quadro que chegue no meio ainda avisa a tela.
         self.surface.seen();
-        trace::add(&trace::PAINTED, 1);
         let device = gpui_wgpu::WgpuContext::shared_device().map(|(device, _)| device);
         let shown = {
             let mut latest = lock(&self.surface.shown);
@@ -704,15 +720,16 @@ mod tests {
     #[test]
     fn only_the_latest_frame_is_decoded_after_the_last_one_was_drawn() {
         let mut slot = Slot::default();
-        slot.data = Some("a".into());
-        slot.data = Some("b".into());
-        assert_eq!(slot.next().as_deref(), Some("b"), "o quadro trocado antes de decodificar não volta");
+        let frame = |d: &str| Some((d.to_owned(), serde_json::Value::Null));
+        slot.data = frame("a");
+        slot.data = frame("b");
+        assert_eq!(slot.next().map(|f| f.0).as_deref(), Some("b"), "o quadro trocado antes de decodificar não volta");
         slot.unseen = true;
-        slot.data = Some("c".into());
-        slot.data = Some("d".into());
+        slot.data = frame("c");
+        slot.data = frame("d");
         assert_eq!(slot.next(), None, "quadro anterior ainda não desenhado: espera");
         slot.unseen = false;
-        assert_eq!(slot.next().as_deref(), Some("d"));
+        assert_eq!(slot.next().map(|f| f.0).as_deref(), Some("d"));
         assert_eq!(slot.next(), None);
     }
 
