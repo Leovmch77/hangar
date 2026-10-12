@@ -8,23 +8,24 @@ import * as apiLib from '@hangar/core';
 import { withServer } from '../lib/auth';
 import type { AggSession } from '@hangar/core';
 
-const storeState = vi.hoisted(() => ({ rows: [] as unknown[], undo: vi.fn(), markLeavingPair: vi.fn() }));
+const storeState = vi.hoisted(() => ({ rows: [] as unknown[], undo: vi.fn(), markLeavingPair: vi.fn(), anchored: [] as unknown[] }));
 
 vi.mock('@hangar/core', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@hangar/core')>()),
   pairSession: vi.fn(),
   unpairSession: vi.fn(),
-  setPairAccess: vi.fn(),
-  listExternalPairs: vi.fn(async () => []),
+  grantFull: vi.fn(async () => []),
 }));
 const api = vi.mocked(apiLib);
 
 vi.mock('../lib/auth', () => ({
   withServer: vi.fn(async (_id: string, fn: () => Promise<unknown>) => fn()),
+  findServer: vi.fn((id: string) => ({ id })),
 }));
 
 vi.mock('../lib/sessionsStore.svelte', () => ({
-  sessionsStore: { get rows() { return storeState.rows; }, markLeavingPair: storeState.markLeavingPair },
+  sessionsStore: { get rows() { return storeState.rows; }, markLeavingPair: storeState.markLeavingPair,
+    anchoredPairs: (serverId: string, name: string) => serverId === 'srv1' && name === 'hangar' ? storeState.anchored : [] },
 }));
 
 function sess(over: Partial<AggSession> = {}): AggSession {
@@ -68,6 +69,7 @@ function flush(): Promise<void> {
 beforeEach(() => {
   vi.clearAllMocks();
   storeState.rows = [];
+  storeState.anchored = [];
   storeState.markLeavingPair.mockReturnValue(storeState.undo);
   arrastarGrupo.cancelar();
 });
@@ -262,14 +264,13 @@ describe('GrupoDropDialog — par externo', () => {
     await flush();
     expect(withServer).toHaveBeenCalledWith('srv1', expect.any(Function));
     expect(api.pairSession).toHaveBeenCalledWith('hangar', ['nova'], '', false);
-    expect(api.setPairAccess).not.toHaveBeenCalled();
+    expect(api.grantFull).toHaveBeenCalledWith([], { id: 'srv1' });
     unmount(comp);
   });
 
   it('marcado "Liberar", a sessão nova ganha acesso completo depois de entrar', async () => {
     grupoComFora();
     api.pairSession.mockResolvedValue({ ok: true, warning: null });
-    api.setPairAccess.mockResolvedValue({ ok: true });
     const comp = montar();
     arrastarGrupo.comecar({ serverId: 'srv1', name: 'nova' });
     arrastarGrupo.soltar('srv1::hangar');
@@ -278,14 +279,14 @@ describe('GrupoDropDialog — par externo', () => {
     await tick();
     clicarBotao(m.grupo_drop_confirmar());
     await flush();
-    expect(api.setPairAccess).toHaveBeenCalledWith('nova', 'casa', 'full');
+    expect(api.grantFull).toHaveBeenCalledWith([{ name: 'nova', alias: 'casa' }], { id: 'srv1' });
     expect(arrastarGrupo.pedido).toBeNull();
     unmount(comp);
   });
 
   it('a ponta do par saindo do grupo avisa que desfaz o par para todos', async () => {
     grupoComFora();
-    api.listExternalPairs.mockResolvedValue([{ local_session: 'hangar', alias: 'casa', owner: 'Ana', session: 'api', address: PAR.address, token: 't' }]);
+    storeState.anchored = [{ local_session: 'hangar', alias: 'casa', owner: 'Ana', session: 'api', address: PAR.address, token: 't' }];
     const comp = montar();
     arrastarGrupo.pedirSaida({ serverId: 'srv1', name: 'hangar' });
     await flush();
@@ -295,7 +296,7 @@ describe('GrupoDropDialog — par externo', () => {
 
   it('a ponta saindo marca o par como desfeito aqui; a saída falhando tira a marca', async () => {
     grupoComFora();
-    api.listExternalPairs.mockResolvedValue([{ local_session: 'hangar', alias: 'casa', owner: 'Ana', session: 'api', address: PAR.address, token: 't' }]);
+    storeState.anchored = [{ local_session: 'hangar', alias: 'casa', owner: 'Ana', session: 'api', address: PAR.address, token: 't' }];
     api.unpairSession.mockRejectedValue(new Error('caiu'));
     const comp = montar();
     arrastarGrupo.pedirSaida({ serverId: 'srv1', name: 'hangar' });

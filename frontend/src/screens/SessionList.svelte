@@ -89,7 +89,7 @@ import * as m from '../paraglide/messages';
   function grupoDe(alvo: { name: string; serverId: string } | null): string[] {
     const s = alvo ? sessions.find((x) => x.serverId === alvo.serverId && x.name === alvo.name) : null;
     if (!s?.pair_gid) return [];
-    return sessions.filter((x) => !x.outside && x.serverId === s.serverId && x.pair_gid === s.pair_gid && x.name !== s.name).map((x) => x.name);
+    return model.pairMembers(s.pair_gid).filter((x) => !x.outside && x.serverId === s.serverId && x.name !== s.name).map((x) => x.name);
   }
   // Par aceito numa sessão própria, viva; a linha de fora e o orquestrador não pareiam.
   const paraParear = $derived(sessions.filter((x) => !x.serverInvite && x.state !== 'dead' && x.provider !== 'orq'));

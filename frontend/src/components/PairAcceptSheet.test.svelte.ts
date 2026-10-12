@@ -7,6 +7,7 @@ const core = vi.hoisted(() => ({ acceptPair: vi.fn() }));
 vi.mock('../lib/auth', () => ({
   listServers: () => [{ id: 'srv-a', label: 'A', baseUrl: 'http://a', token: 't' }],
   listAllServers: () => [{ id: 'srv-a', label: 'A', baseUrl: 'http://a', token: 't' }],
+  findServer: (id: string) => [{ id: 'srv-a', label: 'A', baseUrl: 'http://a', token: 't' }].find((s) => s.id === id),
 }));
 vi.mock('@hangar/core', async (original) => ({ ...await original<typeof import('@hangar/core')>(), ...core }));
 

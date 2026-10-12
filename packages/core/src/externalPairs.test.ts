@@ -1,5 +1,8 @@
-import { describe, it, expect } from 'vitest';
-import { reconcilePairEntries, placeExternalRows, pairHeaderLabel, pairExternals, pairsLeft, type ExternalPair } from './externalPairs';
+import { describe, it, expect, vi } from 'vitest';
+import { reconcilePairEntries, placeExternalRows, pairHeaderLabel, pairExternals, pairsLeft, fullPairsByAlias, grantFull, createExternalPairSync, type ExternalPair } from './externalPairs';
+import { setPairAccess } from './api';
+
+vi.mock('./api', () => ({ setPairAccess: vi.fn() }));
 import type { Server } from './servers';
 import type { AggSession, SessionInfo, PairExternal } from './types';
 import type { ServerBucket } from './sessions';
@@ -101,5 +104,76 @@ describe('pairsLeft', () => {
     expect(leaving.size).toBe(0);
     expect(pairsLeft([a, b], [a], new Set())).toEqual([b]);
     expect(pairsLeft([a], [a], new Set())).toEqual([]);
+  });
+});
+
+describe('fullPairsByAlias', () => {
+  it('um por máquina de fora, só acesso completo já liberado', () => {
+    const rows = [
+      { pair_externals: [ext({ level: 'full' }), ext({ alias: 'bia', owner: 'Bia', level: 'view' })] },
+      { pair_externals: [ext({ level: 'full', session: 'h2' }), ext({ alias: 'cid', owner: 'Cid', level: 'full', pending: true })] },
+    ];
+    expect(fullPairsByAlias(rows)).toEqual([{ alias: 'casa', owner: 'Ana' }]);
+  });
+});
+
+describe('grantFull', () => {
+  it('libera cada par e junta as falhas sem parar na primeira', async () => {
+    vi.mocked(setPairAccess).mockRejectedValueOnce(new Error('caiu')).mockResolvedValue({ ok: true });
+    const falhas = await grantFull([{ name: 'a', alias: 'casa' }, { name: 'b', alias: 'casa' }], PROPRIO);
+    expect(falhas).toEqual(['a: caiu']);
+    expect(setPairAccess).toHaveBeenCalledWith('b', 'casa', 'full', PROPRIO);
+  });
+});
+
+describe('createExternalPairSync', () => {
+  const comPar = [{ name: 's', state: 'idle', pair_externals: [ext()] }] as SessionInfo[];
+  const setup = () => {
+    let t = 0;
+    let linhas: SessionInfo[] = comPar;
+    const read = vi.fn(async (_s: Server): Promise<ExternalPair[]> => [par()]);
+    const left: string[] = [];
+    const sync = createExternalPairSync({ read, apply: () => [], attach: async () => {}, onLeft: (p) => left.push(p.owner), now: () => t });
+    const tick = (rows = linhas) => { linhas = rows; return sync.refresh([PROPRIO, ENTRADA], (id) => id === PROPRIO.id ? linhas : null); };
+    return { read, left, sync, tick, avanca: (ms: number) => { t += ms; } };
+  };
+
+  it('relê só quando muda o que as linhas próprias mostram; o par sumir da leitura avisa', async () => {
+    const { read, left, sync, tick } = setup();
+    await tick();
+    expect(read).toHaveBeenCalledWith(PROPRIO);
+    expect(sync.anchored('o', 's')).toEqual([par()]);
+    await tick();
+    expect(read).toHaveBeenCalledTimes(1);
+    read.mockResolvedValue([]);
+    await tick([]);
+    expect(left).toEqual(['Ana']);
+    // Sem par nem leitura anterior: nada a pedir.
+    await tick([]);
+    expect(read).toHaveBeenCalledTimes(2);
+  });
+
+  it('leitura falha fica com os pares de antes e espera para tentar de novo', async () => {
+    const { read, left, sync, tick, avanca } = setup();
+    await tick();
+    read.mockRejectedValue(new Error('rede'));
+    await tick([...comPar, { name: 'x', state: 'idle', pair_externals: [ext({ session: 'h2' })] } as SessionInfo]);
+    expect(sync.anchored('o', 's')).toEqual([par()]);
+    expect(left).toEqual([]);
+    await tick();
+    expect(read).toHaveBeenCalledTimes(2);
+    avanca(2_000);
+    read.mockResolvedValue([par()]);
+    await tick();
+    expect(read).toHaveBeenCalledTimes(3);
+  });
+
+  it('marca de saída feita aqui não vira aviso', async () => {
+    const { read, left, sync, tick } = setup();
+    await tick();
+    sync.markLeaving('casa', 'h');
+    read.mockResolvedValue([]);
+    await tick([]);
+    expect(left).toEqual([]);
   });
 });

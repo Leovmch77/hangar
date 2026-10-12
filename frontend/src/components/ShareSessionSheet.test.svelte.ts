@@ -11,6 +11,7 @@ const core = vi.hoisted(() => ({
 vi.mock('../lib/auth', () => ({
   listServers: () => [{ id: 'srv-a', label: 'A', baseUrl: 'http://a', token: 't' }],
   listAllServers: () => [{ id: 'srv-a', label: 'A', baseUrl: 'http://a', token: 't' }],
+  findServer: (id: string) => [{ id: 'srv-a', label: 'A', baseUrl: 'http://a', token: 't' }].find((s) => s.id === id),
 }));
 vi.mock('../lib/clipboard', () => ({ copyText: vi.fn(async () => {}) }));
 vi.mock('@hangar/core', async (original) => ({

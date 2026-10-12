@@ -1,7 +1,6 @@
-import { projectKey, projectLabel, type AggSession, type GroupBy, type GrupoSessoes } from '@hangar/core';
+import { grupoDaSessao, type AggSession, type GroupBy, type GrupoSessoes } from '@hangar/core';
 
-// A sessão de fora não é grupo próprio: fica logo abaixo da sessão do par, no grupo dela (mesma
-// regra de chave do `agruparSessoes`). `all` acha a sessão do par quando ela está em "Precisa de você".
+// A sessão de fora não é grupo próprio: fica logo abaixo da sessão do par, no grupo dela. `all` acha a sessão do par quando ela está em "Precisa de você".
 export function placeOutside(groups: GrupoSessoes[], outside: AggSession[], modo: GroupBy, all: AggSession[]): GrupoSessoes[] {
   if (!outside.length) return groups;
   const out = groups.map((g) => ({ ...g, sessions: [...g.sessions] }));
@@ -19,15 +18,10 @@ export function placeOutside(groups: GrupoSessoes[], outside: AggSession[], modo
     const anchor = all.find(isAnchor);
     // ponytail: sessão do par escondida pela busca leva a de fora junto
     if (!anchor) continue;
-    const id = modo === 'server' ? anchor.serverId : modo === 'project' ? projectKey(anchor.cwd) : 'todas';
-    g = out.find((x) => x.id === id);
+    const k = grupoDaSessao(anchor, modo);
+    g = out.find((x) => x.id === k.id);
     if (g) { g.sessions.push(row); continue; }
-    out.push({
-      id,
-      label: modo === 'server' ? anchor.serverLabel : modo === 'project' ? projectLabel(anchor.cwd) : '',
-      color: modo === 'server' ? anchor.serverColor : null,
-      sessions: [row],
-    });
+    out.push({ ...k, sessions: [row] });
   }
   return out;
 }

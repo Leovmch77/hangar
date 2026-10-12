@@ -3,12 +3,12 @@
   import { desktop } from '../lib/desktop.svelte';
   import { renderMarkdown } from '../lib/markdown';
   import { getSessions, pairSession, unpairSession, getHistory, getPairContract } from '@hangar/core';
-  import { listExternalPairs, pairExternals, pairHeaderLabel, setPairAccess } from '@hangar/core';
+  import { fullPairsByAlias, grantFull, pairExternals, pairHeaderLabel } from '@hangar/core';
   import { useSessionServer } from '../lib/sessionServer';
   import { formataErro } from '@hangar/core';
   import { rotuloEstado, stateColors, parsePeerMessage, relativeTime, encodeCompareIds } from '@hangar/core';
   import { getActiveId } from '../lib/auth';
-  import type { ExternalPair, SessionInfo, State } from '@hangar/core';
+  import type { SessionInfo, State } from '@hangar/core';
   import { sessionsStore } from '../lib/sessionsStore.svelte';
   import * as m from '../paraglide/messages';
   import GroupGlyph from './icons/GroupGlyph.svelte';
@@ -37,14 +37,10 @@
   const temFora = $derived(locais.some((s) => pairExternals(s).length > 0));
   const parCabecalho = $derived(temFora ? pairHeaderLabel(sessionName, locais) : '');
   // Quem entra agora fica em "ver e recado" para o par com acesso completo, até marcar liberar.
-  const liberacoes = $derived.by(() => {
-    const porAlias = new Map<string, string>();
-    for (const s of locais) for (const p of pairExternals(s)) if (p.level === 'full' && !p.pending) porAlias.set(p.alias, p.owner);
-    return [...porAlias].map(([alias, owner]) => ({ alias, owner }));
-  });
+  const liberacoes = $derived(fullPairsByAlias(locais));
   let liberar = $state<string[]>([]);
   // Esta sessão é a ponta de algum par: sair do grupo desfaz o par para todos.
-  let pontaDe = $state<ExternalPair[]>([]);
+  const pontaDe = $derived(sessionsStore.anchoredPairs(sessionServer()?.id ?? getActiveId() ?? '', sessionName));
   let picked = $state<string[]>([]);   // MULTI-select: marca N sessões e pareia de uma vez
   let task = $state('');
 
@@ -118,10 +114,6 @@
     contract = null;
     contractError = null;
     liberar = [];
-    pontaDe = [];
-    listExternalPairs(sessionServer())
-      .then((pares) => { if (my === epoch) pontaDe = pares.filter((p) => p.local_session === sessionName); })
-      .catch(() => {});   // sem a lista, a saída segue; o servidor ainda avisa o outro lado
     if (members.length) {
       loadFeed(members, my);
       getPairContract(sessionName, sessionServer())
@@ -151,13 +143,7 @@
     try {
       // Mesmo endpoint pra criar grupo e pra ADICIONAR membro (o backend une os grupos).
       const res = await pairSession(sessionName, picked, task.trim(), false, sessionServer());
-      const falhas: string[] = [];
-      for (const alias of liberar) {
-        for (const nome of picked) {
-          try { await setPairAccess(nome, alias, 'full', sessionServer()); }
-          catch (e) { falhas.push(`${nome}: ${e instanceof Error ? e.message : String(e)}`); }
-        }
-      }
+      const falhas = await grantFull(liberar.flatMap((alias) => picked.map((name) => ({ name, alias }))), sessionServer());
       onChanged();
       if (falhas.length) {
         error = falhas.join('\n');

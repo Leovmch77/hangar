@@ -4,16 +4,16 @@ import { KeyboardAvoidingView } from 'react-native-keyboard-controller';
 import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { EnrichedMarkdownText } from 'react-native-enriched-markdown';
-import { fetchSessionsForServer, formataErro, getHistory, getPairContract, listExternalPairs, pairExternals, pairHeaderLabel, pairSession, setPairAccess, unpairSession } from '@hangar/core';
-import type { ChatEvent, ExternalPair } from '@hangar/core';
+import { fetchSessionsForServer, formataErro, fullPairsByAlias, getHistory, getPairContract, grantFull, pairExternals, pairHeaderLabel, pairSession, unpairSession } from '@hangar/core';
+import type { ChatEvent } from '@hangar/core';
 import { useServers } from '../../../../src/stores/servers';
-import { markLeavingPair, useSessions } from '../../../../src/stores/sessions';
+import { anchoredPairs, markLeavingPair, useSessions } from '../../../../src/stores/sessions';
 import { mkMarkdownStyle } from '../../../../src/chat/AssistantBubble';
 import { PairMembers } from '../../../../src/features/pair/PairMembers';
 import { PairPicker } from '../../../../src/features/pair/PairPicker';
 import { PairFeed } from '../../../../src/features/pair/PairFeed';
 import { montarFeed } from '../../../../src/features/pair/pairFeed';
-import { fullPairs, outsideRow } from '../../../../src/features/pair/groupPairs';
+import { outsideRow } from '../../../../src/features/pair/groupPairs';
 import * as m from '../../../../src/paraglide/messages';
 import { superficie } from '../../../../src/theme/superficie';
 
@@ -36,9 +36,6 @@ export default function PairSheet() {
   );
   const header = pairHeaderLabel(name, groupRows);
   const comFora = groupRows.some((row) => pairExternals(row).length > 0);
-  // Pares cuja ponta é esta sessão: sair do grupo os desfaz para todos.
-  const [anchored, setAnchored] = useState<ExternalPair[]>([]);
-  const anchorOwner = anchored[0]?.owner ?? null;
 
   const [sessions, setSessions] = useState<Awaited<ReturnType<typeof fetchSessionsForServer>>>([]);
   const [loading, setLoading] = useState(true);
@@ -59,16 +56,6 @@ export default function PairSheet() {
   // A ação só perde a validade com rota nova ou desmontagem; pair_peers mudando recarrega a tela, não cancela o POST.
   const actionEpoch = useRef(0);
   const mdStyle = useMemo(() => mkMarkdownStyle(theme), [theme]);
-
-  useEffect(() => {
-    setAnchored([]);
-    if (!routeServer || !comFora) return;
-    let alive = true;
-    listExternalPairs(routeServer)
-      .then((pairs) => { if (alive) setAnchored(pairs.filter((p) => p.local_session === name)); })
-      .catch(() => {});
-    return () => { alive = false; };
-  }, [routeServer, name, comFora]);
 
   useEffect(() => {
     setActionError('');
@@ -162,7 +149,7 @@ export default function PairSheet() {
 
   // Grupo com par de acesso completo: quem entra fica aberto para o dono só se a pessoa disser.
   function confirmPair() {
-    const full = fullPairs(groupRows);
+    const full = fullPairsByAlias(groupRows);
     if (!full.length) { void doPair(false); return; }
     const token = actionEpoch.current;
     const go = (release: boolean) => { if (token === actionEpoch.current) void doPair(release); };
@@ -180,7 +167,7 @@ export default function PairSheet() {
   async function doPair(release: boolean) {
     if (!picked.length || busy || loading || !routeServer) return;
     const selected = picked;
-    const full = release ? fullPairs(groupRows) : [];
+    const full = release ? fullPairsByAlias(groupRows) : [];
     const token = actionEpoch.current;
     const server = routeServer;
     setBusy(true);
@@ -192,12 +179,9 @@ export default function PairSheet() {
         setActionError(formataErro(result.warning) ?? String(result.warning));
         return;
       }
-      try {
-        for (const peer of selected) for (const p of full) await setPairAccess(peer, p.alias, 'full', server);
-      } catch (e) {
-        if (token === actionEpoch.current) setActionError(e instanceof Error ? e.message : String(e));
-        return;
-      }
+      const failures = await grantFull(selected.flatMap((peer) => full.map((p) => ({ name: peer, alias: p.alias }))), server);
+      if (token !== actionEpoch.current) return;
+      if (failures.length) { setActionError(failures.join('\n')); return; }
       if (token === actionEpoch.current) router.back();
     } catch {
       if (token === actionEpoch.current) setActionError(m.par_falhou_pareamento({ nomes: selected.join(', ') }));
@@ -213,7 +197,8 @@ export default function PairSheet() {
     setBusy(true);
     setActionError('');
     // O sumiço dos pares desta ponta não é a outra pessoa saindo.
-    const undo = anchored.map((p) => markLeavingPair(p.alias, p.session));
+    // Pares cuja ponta é esta sessão: sair do grupo os desfaz para todos.
+    const undo = anchoredPairs(serverId, name).map((p) => markLeavingPair(p.alias, p.session));
     try {
       const result = await unpairSession(name, server);
       if (token !== actionEpoch.current) return;
@@ -232,6 +217,7 @@ export default function PairSheet() {
 
   function confirmLeave() {
     const token = actionEpoch.current;
+    const anchorOwner = anchoredPairs(serverId, name)[0]?.owner ?? null;
     Alert.alert(
       m.comandos_confirmar({ n: m.par_sair_grupo() }),
       anchorOwner ? m.pair_undo_anchor_body({ dono: anchorOwner }) : undefined,

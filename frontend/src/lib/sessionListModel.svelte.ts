@@ -118,11 +118,10 @@ export function createSessionListModel(opts: SessionListModelOptions) {
 
   // Entradas temporárias de par externo nunca viram seção nem contam como servidor.
   const placed = $derived.by(() => {
-    const agg = { rows: sessionsStore.rows, byServer: sessionsStore.byServer };
-    if (rules.outsideRows === 'place') return placeExternalRows(agg);
-    const eph = new Set(agg.byServer.filter((b) => b.server.ephemeral).map((b) => b.server.id));
-    return eph.size === 0 ? agg
-      : { rows: agg.rows.filter((r) => !eph.has(r.serverId)), byServer: agg.byServer.filter((b) => !eph.has(b.server.id)) };
+    const agg = placeExternalRows({ rows: sessionsStore.rows, byServer: sessionsStore.byServer });
+    if (rules.outsideRows === 'place') return agg;
+    const local = (r: AggSession) => !r.outside;
+    return { rows: agg.rows.filter(local), byServer: agg.byServer.map((b) => ({ ...b, sessions: b.sessions.filter(local) })) };
   });
   const rows = $derived(placed.rows);
   const servers = $derived(sessionsStore.servers.filter((s) => !s.ephemeral));

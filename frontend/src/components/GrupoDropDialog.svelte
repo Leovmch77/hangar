@@ -6,9 +6,9 @@
   import ModalDialog from './ModalDialog.svelte';
   import { arrastarGrupo, mensagemRecusa, type ChaveSessao } from '../lib/arrastarGrupo.svelte';
   import { sessionsStore } from '../lib/sessionsStore.svelte';
-  import { withServer } from '../lib/auth';
-  import { pairSession, unpairSession, suggestGroupTask, formataErro, canPair, pairAnchor, pairExternals, setPairAccess, listExternalPairs } from '@hangar/core';
-  import type { AggSession, ExternalPair } from '@hangar/core';
+  import { findServer, withServer } from '../lib/auth';
+  import { pairSession, unpairSession, suggestGroupTask, formataErro, canPair, pairAnchor, pairExternals, fullPairsByAlias, grantFull } from '@hangar/core';
+  import type { AggSession } from '@hangar/core';
   import * as m from '../paraglide/messages';
 
   const pedido = $derived(arrastarGrupo.pedido);
@@ -40,15 +40,14 @@
   const liberacoes = $derived.by(() => {
     if (pedido?.modo !== 'agrupar') return [];
     const todos = [...membros(origemSessao), ...membros(alvoSessao)];
-    const porAlias = new Map<string, string>();
-    for (const s of todos) for (const p of pairExternals(s)) if (p.level === 'full' && !p.pending) porAlias.set(p.alias, p.owner);
-    return [...porAlias].map(([alias, owner]) => ({
+    return fullPairsByAlias(todos).map(({ alias, owner }) => ({
       alias, owner, sessoes: todos.filter((s) => !pairExternals(s).some((p) => p.alias === alias)).map((s) => s.name),
     })).filter((l) => l.sessoes.length > 0);
   });
   let liberar = $state<string[]>([]);
   // Ponta do par saindo do grupo desfaz o par para todos: a tela diz antes.
-  let pontaDe = $state<ExternalPair[]>([]);
+  const pontaDe = $derived(pedido?.modo === 'sair' && origemSessao
+    ? sessionsStore.anchoredPairs(origemSessao.serverId, origemSessao.name) : []);
 
   // join_group funde os grupos INTEIROS (api.py:3581): a lista é a união de origem, alvo e os
   // pares de cada um — mostrar só os dois nomes escondia quem mais o arrasto afeta.
@@ -114,13 +113,6 @@
       avisoFalhou = false;
       grupoNoClique = null;
       liberar = [];
-      pontaDe = [];
-      const o = origemSessao;
-      if (p.modo === 'sair' && o && pairExternals(o).length) {
-        void withServer(o.serverId, () => listExternalPairs())
-          .then((pares) => { if (pedido === p) pontaDe = pares.filter((x) => x.local_session === o.name); })
-          .catch(() => {});   // sem a lista, a saída segue; o servidor ainda avisa o outro lado
-      }
     });
   });
 
@@ -149,13 +141,8 @@
     try {
       const res = await withServer(a.serverId, () => pairSession(a.name, [o.name], herda ? '' : tarefa.trim(), substituir));
       if (pedido !== pedidoEmVoo) return;
-      const falhas: string[] = [];
-      for (const l of liberacoes.filter((x) => liberar.includes(x.alias))) {
-        for (const nome of l.sessoes) {
-          try { await withServer(a.serverId, () => setPairAccess(nome, l.alias, 'full')); }
-          catch (e) { falhas.push(`${nome}: ${e instanceof Error ? e.message : String(e)}`); }
-        }
-      }
+      const falhas = await grantFull(liberacoes.filter((x) => liberar.includes(x.alias))
+        .flatMap((l) => l.sessoes.map((name) => ({ name, alias: l.alias }))), findServer(a.serverId));
       if (pedido !== pedidoEmVoo) return;
       if (res.warning || falhas.length) {
         conflito = null;

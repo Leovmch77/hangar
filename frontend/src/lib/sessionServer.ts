@@ -1,6 +1,6 @@
 import { getContext, onDestroy, setContext } from 'svelte';
 import { REMOVED_BASE } from '@hangar/core';
-import { listAllServers, listServers, type Server } from './auth';
+import { findServer, type Server } from './auth';
 
 // Servidor da sessão aberta no chat, fixado na entrada. O chat e as folhas dele chamam a API por
 // ele, nunca pelo ativo do momento: o ativo muda por baixo de um chat aberto (overlay, withServer,
@@ -17,8 +17,7 @@ export type SessionServer = () => Server | undefined;
 export function sessionServerFor(id: string): SessionServer {
   return () => {
     if (!id) return undefined;
-    // `listServers` traz também a entrada temporária do par externo, que não é gravada.
-    return listAllServers().find((x) => x.id === id) ?? listServers().find((x) => x.id === id) ?? { id, label: id, baseUrl: REMOVED_BASE, token: '', removed: true };
+    return findServer(id) ?? { id, label: id, baseUrl: REMOVED_BASE, token: '', removed: true };
   };
 }
 

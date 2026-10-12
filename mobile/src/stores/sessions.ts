@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { openSessionsStream, aggregateSessions, jsonlDaSessao, sweepHidden, registrarDiag, decidirRota, esquecerRota, rotaDecidida, probeServerResponse, comTeto, placeExternalRows, pairExternals, listExternalPairs, attachGuest, pairsLeft } from '@hangar/core';
+import { openSessionsStream, aggregateSessions, jsonlDaSessao, sweepHidden, registrarDiag, decidirRota, esquecerRota, rotaDecidida, probeServerResponse, comTeto, placeExternalRows, listExternalPairs, attachGuest, createExternalPairSync } from '@hangar/core';
 import type { SessionInfo, Server, AggSession, ExternalPair } from '@hangar/core';
 import { sortSessions } from '@hangar/core';
 import type { Slot, ServerBucket, Aggregate } from '@hangar/core';
@@ -47,12 +47,6 @@ let foreground = true;
 let generation = 0;
 let unsubServers: (() => void) | null = null;
 let aggCache: Aggregate = { rows: [], byServer: [], loading: false };
-// Pares de fora por servidor próprio: quem não respondeu na última leitura fica com os de antes.
-let pairsByServer = new Map<string, ExternalPair[]>();
-let pairsSig = '';
-let pairsSeq = 0;
-const attached = new Set<string>();
-const leaving = new Set<string>();
 // O aviso de tela vem de fora: o store não carrega o toast (e com ele o nativo) nos testes.
 let pairNotice: (text: string) => void = () => {};
 export function setPairNotice(fn: (text: string) => void) { pairNotice = fn; }
@@ -120,64 +114,38 @@ function recompute(set: (p: Partial<SessionsState>) => void) {
   pairsMaybeChanged();
 }
 
-// Relê os pares só quando muda quem tem par de fora na lista própria.
+// Os pares nas linhas próprias dizem quando reler `/api/external-pairs`; o laço é o do core.
 function pairsMaybeChanged() {
   if (refs === 0 || !storeGet || !storeSet) return;
-  const sig = aggCache.byServer.filter((b) => !b.server.invite)
-    .flatMap((b) => b.sessions.flatMap((r) => pairExternals(r).map((p) => `${b.server.id}|${r.name}|${p.alias}::${p.session}`)))
-    .join('\n');
-  if (sig === pairsSig) return;
-  pairsSig = sig;
-  void refreshExternalPairs(storeGet, storeSet);
+  void pairSync.refresh(serversCache.filter((s) => !s.disabled), (id) => slots.get(id)?.sessions);
 }
 
-const pairKey = (p: Pick<ExternalPair, 'alias' | 'session'>) => `${p.alias}::${p.session}`;
-
-async function refreshExternalPairs(get: () => SessionsState, set: (p: Partial<SessionsState>) => void) {
-  const seq = ++pairsSeq;
-  const own = serversCache.filter((s) => !s.invite && !s.disabled);
-  const reads = await Promise.all(own.map((s) => listExternalPairs(s).then((l) => [s.id, l] as const, () => [s.id, null] as const)));
-  if (seq !== pairsSeq) return;
-  // Máquina tirada da lista leva os pares dela sem aviso: ninguém saiu do pareamento.
-  const before = own.flatMap((s) => pairsByServer.get(s.id) ?? []);
-  const next = new Map<string, ExternalPair[]>();
-  for (const [id, list] of reads) {
-    if (list) next.set(id, list);
-    else {
-      // Sem a marca, a próxima lista igual não releria: falha precisa poder tentar de novo.
-      pairsSig = '';
-      const old = pairsByServer.get(id);
-      if (old) next.set(id, old);
-    }
-  }
-  pairsByServer = next;
-  const all = [...next.values()].flat();
-  for (const p of pairsLeft(before, all, leaving)) pairNotice(m.pair_left_notice({ dono: p.owner }));
-  // Par que acabou tira a marca do attach dele: um par novo no mesmo token precisa ligar de novo.
-  const live = new Set(all.map((p) => p.token));
-  for (const k of attached) if (!live.has(k.split('\n')[1])) attached.delete(k);
-  const pending = useServers.getState().applyPairs(all);
-  for (const { entry, token } of pending) {
-    const key = `${entry.id}\n${token}`;
-    if (attached.has(key)) continue;
-    attached.add(key);
-    attachGuest(entry, token).then(
-      () => { disconnect(entry.id); connect(serversCache, get, set); },
-      (error: unknown) => {
-        attached.delete(key);
-        pairsSig = '';
-        registrarDiag({ evento: 'lista.falhou', nivel: 'erro', tela: 'lista', codigo: 'par_attach',
-          detalhe: error instanceof Error ? error.name : 'erro' }, entry.baseUrl);
-      },
-    );
-  }
+function newPairSync() {
+  return createExternalPairSync({
+    read: listExternalPairs,
+    apply: (all) => useServers.getState().applyPairs(all),
+    attach: (entry, token) => attachGuest(entry, token).catch((error: unknown) => {
+      registrarDiag({ evento: 'lista.falhou', nivel: 'erro', tela: 'lista', codigo: 'par_attach',
+        detalhe: error instanceof Error ? error.name : 'erro' }, entry.baseUrl);
+      throw error;
+    }),
+    onLeft: (p) => pairNotice(m.pair_left_notice({ dono: p.owner })),
+    onAttached: (entry) => {
+      disconnect(entry.id);
+      if (storeGet && storeSet) connect(serversCache, storeGet, storeSet);
+    },
+  });
 }
+let pairSync = newPairSync();
 
 /** "Sair"/"Desfazer" pelo próprio menu: o par sumir em seguida não é a outra pessoa saindo. */
 export function markLeavingPair(alias: string, session: string): () => void {
-  const key = pairKey({ alias, session });
-  leaving.add(key);
-  return () => { leaving.delete(key); };
+  return pairSync.markLeaving(alias, session);
+}
+
+/** Pares cuja ponta é esta sessão, pela última leitura: sair do grupo os desfaz para todos. */
+export function anchoredPairs(serverId: string, name: string): ExternalPair[] {
+  return pairSync.anchored(serverId, name);
 }
 
 function connect(list: Server[], get: () => SessionsState, set: (p: Partial<SessionsState>) => void) {
@@ -368,11 +336,8 @@ export function _resetSessionsForTests() {
   hidden = new Map<string, string | null>();
   serversCache = [];
   aggCache = { rows: [], byServer: [], loading: false };
-  pairsByServer = new Map();
-  pairsSig = '';
-  pairsSeq++;
-  attached.clear();
-  leaving.clear();
+  pairSync.reset();
+  pairSync = newPairSync();
   storeGet = null;
   storeSet = null;
   refs = 0;
