@@ -68,6 +68,10 @@ pub(super) struct BrowserPanel {
     page_zoom: (f32, f32, f32),
     /// Decidido pelo `Hangar` a cada quadro (`browser_visible`).
     shown: bool,
+    /// Último quadro da página, mostrado no lugar dela enquanto um diálogo ou aviso a cobre (Windows: a página nativa
+    /// fica por cima de tudo e precisa sair da frente).
+    #[cfg(target_os = "windows")]
+    still: Option<Arc<Image>>,
     /// Aviso do próprio painel (preenchimento do login que falhou), ao lado do `notice` que vem da página.
     local_notice: Option<String>,
     /// Cursor da página sob o mouse: o Chromium sem janela não avisa quando ele muda, então a página é perguntada.
@@ -127,7 +131,7 @@ impl BrowserPanel {
         ];
         Self { key, #[cfg(not(target_os = "macos"))] controller: None, #[cfg(not(target_os = "macos"))] cdp: None,
             #[cfg(not(target_os = "macos"))] relay: Default::default(), #[cfg(not(target_os = "macos"))] viewer: Rc::default(), engine: None, starting: None, _start: None, events, address, page: model::PageState::default(), invalid: None, #[cfg(not(target_os = "macos"))] cookies_status: None, #[cfg(not(target_os = "macos"))] cookies_confirmed: false, #[cfg(target_os = "linux")] last_fill: None, focus,
-            origin: Rc::default(), #[cfg(target_os = "linux")] emulated: None, page_scale: Rc::new(Cell::new(1.)), #[cfg(target_os = "linux")] page_zoom: (1., 0., 0.), shown: false, local_notice: None, #[cfg(target_os = "linux")] cursor: CursorStyle::Arrow, #[cfg(target_os = "linux")] cursor_probe: (false, None), copied: false, dismissed_notice: 0, address_stale: false, #[cfg(not(target_os = "macos"))] agent: None, #[cfg(not(target_os = "macos"))] agent_running: 0,
+            origin: Rc::default(), #[cfg(target_os = "linux")] emulated: None, page_scale: Rc::new(Cell::new(1.)), #[cfg(target_os = "windows")] still: None, #[cfg(target_os = "linux")] page_zoom: (1., 0., 0.), shown: false, local_notice: None, #[cfg(target_os = "linux")] cursor: CursorStyle::Arrow, #[cfg(target_os = "linux")] cursor_probe: (false, None), copied: false, dismissed_notice: 0, address_stale: false, #[cfg(not(target_os = "macos"))] agent: None, #[cfg(not(target_os = "macos"))] agent_running: 0,
             #[cfg(not(target_os = "macos"))] agent_seq: 0, #[cfg(not(target_os = "macos"))] paused: None, #[cfg(target_os = "windows")] agent_finished_at: None, #[cfg(not(target_os = "macos"))] _activity: None, _drain: drain, _subscriptions: subscriptions }
     }
 
@@ -632,9 +636,37 @@ impl BrowserPanel {
 
     /// Diz se mudou. Escondida, a página não se posiciona no desenho e a janela nativa some.
     /// O controlador põe um viewport fixo na página escondida, para ela seguir desenhando para o hangar-preview.
-    fn set_shown(&mut self, shown: bool, cx: &mut Context<Self>) -> bool {
+    fn set_shown(&mut self, shown: bool, covered: bool, cx: &mut Context<Self>) -> bool {
         if self.shown == shown { return false; }
         self.shown = shown;
+        #[cfg(target_os = "windows")]
+        if shown { self.still = None; }
+        #[cfg(target_os = "windows")]
+        if !shown && covered && let Some(cdp) = self.cdp.clone() {
+            // Coberta, a página só sai da frente com o último quadro pronto: sem ele o painel ficaria vazio atrás do
+            // diálogo. O teto curto evita que um quadro que não vem segure a página por cima do diálogo.
+            let shot = cdp.call("Page.captureScreenshot", serde_json::json!({"format": "jpeg", "quality": 85}));
+            cx.spawn(async move |this, cx| {
+                let timer = cx.background_executor().timer(std::time::Duration::from_millis(300));
+                let image = match futures::future::select(std::pin::pin!(shot), std::pin::pin!(timer)).await {
+                    futures::future::Either::Left((Ok(r), _)) => {
+                        use base64::Engine as _;
+                        r["data"].as_str().and_then(|d| base64::engine::general_purpose::STANDARD.decode(d).ok())
+                            .map(|bytes| Arc::new(Image::from_bytes(ImageFormat::Jpeg, bytes)))
+                    }
+                    _ => None,
+                };
+                let _ = this.update(cx, |this, cx| {
+                    if this.shown { return; }
+                    this.still = image;
+                    if let Some(engine) = this.engine() { engine.hide(); }
+                    cx.notify();
+                });
+            }).detach();
+        } else if !shown && let Some(engine) = self.engine() { engine.hide(); }
+        #[cfg(not(target_os = "windows"))]
+        let _ = covered;
+        #[cfg(not(target_os = "windows"))]
         if !shown && let Some(engine) = self.engine() { engine.hide(); }
         #[cfg(not(target_os = "macos"))]
         if let Some(ctl) = self.controller.clone() { cx.spawn(async move |_, _| ctl.set_hidden(!shown).await).detach(); }
@@ -752,6 +784,8 @@ impl BrowserPanel {
         let label = if self.page.title.trim().is_empty() { tr("browser") } else { self.page.title.clone() };
         #[cfg(target_os = "linux")]
         let page = page.cursor(self.cursor);
+        #[cfg(target_os = "windows")]
+        let page = page.when_some(self.still.clone().filter(|_| !self.shown), |el, still| el.child(img(still).absolute().inset_0().size_full().object_fit(ObjectFit::Fill)));
         page.bg(theme::background()).aria_label(label)
             .when(self.shown, |el| el.child(canvas(|_, _, _| {}, move |bounds, _, window, _| {
                 // Tela emulada: encaixada no painel, centrada no topo, e o ponteiro convertido na mesma escala.
@@ -977,7 +1011,7 @@ impl Hangar {
     pub(super) fn close_browser(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let showing = self.side_tab() == SideTab::Browser;
         if let Some(key) = self.side_key() { self.side.browser_open.remove(&key); }
-        for browser in self.side.browsers.values().cloned().collect::<Vec<_>>() { browser.update(cx, |panel, cx| { panel.set_shown(false, cx); }); }
+        for browser in self.side.browsers.values().cloned().collect::<Vec<_>>() { browser.update(cx, |panel, cx| { panel.set_shown(false, false, cx); }); }
         if showing { self.choose_side_tab(SideTab::Context, window, cx); } else { cx.notify(); }
     }
 
@@ -987,21 +1021,24 @@ impl Hangar {
     /// a busca, os painéis presos ao compositor e à barra do topo, os diálogos e folhas do kit e as notificações. A aba
     /// fechada no × sai de `side_tab`, então também esconde. No
     /// Linux a página é desenhada pela própria GPUI, e as camadas passam por cima dela sem precisar escondê-la.
-    fn browser_visible(&self, window: &mut Window, cx: &mut App) -> bool {
+    /// `(visível, coberta)`: coberta = estaria à vista, não fosse uma camada por cima.
+    fn browser_visible(&self, window: &mut Window, cx: &mut App) -> (bool, bool) {
         let covered = cfg!(not(target_os = "linux")) && (self.connection_dialog || self.search.open || self.popup_open()
             || window.has_active_dialog(cx) || window.has_active_sheet(cx) || !window.notifications(cx).is_empty());
-        self.side_width(window).is_some() && !self.files_expanded()
+        let in_view = self.side_width(window).is_some() && !self.files_expanded()
             && !self.side_menu_shown() && !self.subagent_tab_open() && self.side_tab() == SideTab::Browser
-            && self.settings.is_none() && self.costs.view.is_none() && self.worktrees.view.is_none() && !covered
+            && self.settings.is_none() && self.costs.view.is_none() && self.worktrees.view.is_none();
+        (in_view && !covered, in_view && covered)
     }
 
     /// A cada quadro da janela, antes das áreas guardadas desenharem.
     pub(super) fn sync_browser(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let visible = self.browser_visible(window, cx);
+        let (visible, covered) = self.browser_visible(window, cx);
         let current = self.browser_key();
         for (key, browser) in self.side.browsers.iter().map(|(k, b)| (k.clone(), b.clone())).collect::<Vec<_>>() {
-            let shown = visible && current.as_deref() == Some(key.as_str());
-            if browser.update(cx, |panel, cx| panel.set_shown(shown, cx)) && shown {
+            let mine = current.as_deref() == Some(key.as_str());
+            let shown = visible && mine;
+            if browser.update(cx, |panel, cx| panel.set_shown(shown, covered && mine, cx)) && shown {
                 // O painel é guardado entre quadros: sem um redesenho dele, a página não volta a se posicionar.
                 let id = browser.entity_id();
                 window.on_next_frame(move |_, cx| cx.notify(id));
