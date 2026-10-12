@@ -225,6 +225,8 @@ impl BrowserPanel {
                 self.address_stale = true;
             }
             if page.url != self.page.url { self.local_notice = None; }
+            #[cfg(target_os = "linux")]
+            if let Some(key) = crate::browser::take_cookie_notice() { self.cookies_status = Some(tr(key)); }
             if page.dialog != self.page.dialog {
                 #[cfg(not(target_os = "macos"))]
                 if let Some(ctl) = &self.controller { ctl.set_dialog(page.dialog.as_ref().map(|d| (d.kind.clone(), d.message.clone(), d.default.clone()))); }

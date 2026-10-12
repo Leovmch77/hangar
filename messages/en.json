@@ -4680,6 +4680,8 @@
   "native_browser_cookies_keyring": "The system keyring didn't hand over the key that opens the browser's cookies (locked, or kept in another wallet). Unlock the keyring and click again.",
   "native_browser_cookies_no_secret_tool": "The browser's cookies are encrypted and the secret-tool program (libsecret package) that asks the system keyring for the key is missing. Install it and click again.",
   "native_browser_cookies_disk_error": "Couldn't read the login from disk: {e}",
+  "native_browser_cookies_carry_no_sqlite": "The browser switched engines and the logins saved before haven't come over yet: the sqlite3 program is needed to read them. Install it (Arch: sudo pacman -S sqlite; Ubuntu: sudo apt install sqlite3) and open the browser again.",
+  "native_browser_cookies_carry_lost": "The browser switched engines and couldn't bring over the logins saved before (the system keyring didn't hand over the key). Sign in to the sites again, or import the login from your Chrome.",
   "native_browser_cookies_refused": "The browser didn't release the login: the prompt was declined or went 60 s without an answer. Click again and choose Allow.",
   "native_side_tools": "Tools",
   "native_side_tabs": "Panel tabs",

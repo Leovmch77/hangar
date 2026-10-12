@@ -4680,6 +4680,8 @@
   "native_browser_cookies_keyring": "O chaveiro do sistema não entregou a chave que abre os cookies do navegador (trancado ou guardado em outra carteira). Desbloqueie o chaveiro e clique de novo.",
   "native_browser_cookies_no_secret_tool": "Os cookies do navegador estão cifrados e falta o programa secret-tool (pacote libsecret), que pede a chave ao chaveiro do sistema. Instale-o e clique de novo.",
   "native_browser_cookies_disk_error": "Não deu pra ler o login do disco: {e}",
+  "native_browser_cookies_carry_no_sqlite": "O navegador trocou de motor e os logins salvos antes ainda não vieram: falta o programa sqlite3 para lê-los. Instale (no Arch: sudo pacman -S sqlite; no Ubuntu: sudo apt install sqlite3) e abra o navegador de novo.",
+  "native_browser_cookies_carry_lost": "O navegador trocou de motor e não conseguiu trazer os logins salvos antes (o chaveiro do sistema não entregou a chave). Entre de novo nos sites, ou importe o login do seu Chrome.",
   "native_browser_cookies_refused": "O navegador não liberou o login: o aviso foi recusado ou ficou 60 s sem resposta. Clique de novo e escolha Permitir.",
   "native_side_tools": "Ferramentas",
   "native_side_tabs": "Abas do painel",

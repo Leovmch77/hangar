@@ -414,7 +414,7 @@ def _preparo_gravado(repo, monkeypatch, *, lock_igual: bool, node_modules: bool,
     return [" ".join(c) for c in chamadas]
 
 
-def test_renovar_chromium_so_com_o_baixado_e_sem_derrubar(tmp_path, monkeypatch):
+def test_renovar_chromium_onde_o_script_ja_rodou_mesmo_com_download_falho(tmp_path, monkeypatch):
     chamadas = []
     class P:
         returncode = 1
@@ -425,7 +425,9 @@ def test_renovar_chromium_so_com_o_baixado_e_sem_derrubar(tmp_path, monkeypatch)
     monkeypatch.setattr(atualizar.Path, "home", lambda: tmp_path)
     atualizar._renovar_chromium()
     assert chamadas == []
-    (tmp_path / ".hangar" / "native" / "chromium").mkdir(parents=True)
+    # Download que falhou sem shell anterior: a pasta não nasceu, mas a marca sim, e a próxima atualização tenta de novo.
+    (tmp_path / ".hangar" / "native").mkdir(parents=True)
+    (tmp_path / ".hangar" / "native" / "chromium-ok").write_text("sistema: /usr/bin/google-chrome (baixar falhou: x)\n")
     atualizar._renovar_chromium()
     assert len(chamadas) == 1 and chamadas[0][0].endswith("install-chromium.sh")
 

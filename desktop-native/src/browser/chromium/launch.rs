@@ -19,8 +19,18 @@ const SYSTEM: [&str; 4] = ["google-chrome-stable", "google-chrome", "chromium", 
 pub fn find() -> Result<&'static Path, String> {
     static FOUND: [OnceLock<Result<PathBuf, String>>; 2] = [OnceLock::new(), OnceLock::new()];
     let full = crate::appearance::get().full_chrome;
-    FOUND[full as usize].get_or_init(|| search(env::var_os("HANGAR_CHROMIUM").map(PathBuf::from), downloaded(), env::var_os("PATH"), full))
-        .as_ref().map(PathBuf::as_path).map_err(Clone::clone)
+    FOUND[full as usize].get_or_init(|| {
+        let found = search(env::var_os("HANGAR_CHROMIUM").map(PathBuf::from), downloaded(), env::var_os("PATH"), full);
+        // Sem o shell baixado o Chrome completo entra no lugar, com o gerenciador de senhas que prende o login: fica no
+        // diário qual motor está em uso e por quê. Vale até o app reiniciar.
+        match &found {
+            Ok(bin) if !full && !is_shell(bin) => eprintln!("[nav] motor: {} (chrome-headless-shell ausente em {}; rode scripts/install-chromium.sh)",
+                bin.display(), downloaded().map_or_else(|| "?".into(), |d| d.display().to_string())),
+            Ok(bin) => eprintln!("[nav] motor: {}", bin.display()),
+            Err(e) => eprintln!("[nav] motor: nenhum ({e})"),
+        }
+        found
+    }).as_ref().map(PathBuf::as_path).map_err(Clone::clone)
 }
 
 fn downloaded() -> Option<PathBuf> {

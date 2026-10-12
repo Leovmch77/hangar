@@ -22,7 +22,7 @@ pub mod cdp {
 #[cfg(target_os = "linux")]
 mod chromium;
 #[cfg(target_os = "linux")]
-pub use chromium::{Engine, Warm};
+pub use chromium::{Engine, Warm, carry::take_notice as take_cookie_notice};
 
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 mod wry_engine;
