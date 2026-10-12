@@ -7217,7 +7217,7 @@
   "native_par_convidar": "Invite to pair",
   "native_par_titulo": "Pair with an invite",
   "native_par_titulo_sessao": "Pair {sessao} with an invite",
-  "native_par_aceitar_ajuda": "Paste the /par/ link the other person sent you. Their session and yours will exchange messages, and each of you sees the other's session without typing in it.",
+  "native_par_aceitar_ajuda": "Paste the /par/ link the other person sent you. Their session and yours will exchange messages, and each side chooses the access it gives the other.",
   "native_par_campo_aria": "Pair invite link",
   "native_par_placeholder": "https://….ts.net:8443/par/…",
   "native_par_qual_sessao": "Pair with which of your sessions?",
