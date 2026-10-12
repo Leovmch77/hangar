@@ -118,8 +118,8 @@ const PAGE_ROWS: &[(Page, &[(&str, Option<&str>)])] = &[
         ("server_roots", Some("server_roots_help")), ("server_machine_only", Some("server_machine_only_help")), ("server_env", Some("server_env_help"))]),
     (Page::Jev, &[("server_jev_key", Some("server_jev_key_help")), ("server_jev_default", Some("server_jev_default_help")),
         ("server_jev_endpoint", Some("server_jev_endpoint_help")), ("server_jev_model", Some("server_jev_model_help")),
-        ("server_jev_text_endpoint", Some("server_jev_text_endpoint_help")), ("server_jev_text_key", Some("server_jev_text_key_help")),
-        ("server_jev_text_model", Some("server_jev_text_model_help")), ("server_jev_cmd", Some("server_jev_cmd_help")),
+        ("server_jev_aux_endpoint", Some("server_jev_aux_endpoint_help")), ("server_jev_aux_key", Some("server_jev_aux_key_help")),
+        ("server_jev_aux_model", Some("server_jev_aux_model_help")), ("server_jev_aux_effort", Some("server_jev_aux_effort_help")),
         ("server_jev_provider", Some("server_jev_provider_help"))]),
 ];
 
@@ -1101,7 +1101,7 @@ mod tests {
     #[test]
     fn jev_search_finds_every_jev_field() {
         let (_, rows) = super::PAGE_ROWS.iter().find(|(page, _)| *page == super::Page::Jev).expect("Jev na busca");
-        for label in ["server_jev_key", "server_jev_default", "server_jev_endpoint", "server_jev_model", "server_jev_text_endpoint", "server_jev_text_key", "server_jev_text_model", "server_jev_cmd", "server_jev_provider"] {
+        for label in ["server_jev_key", "server_jev_default", "server_jev_endpoint", "server_jev_model", "server_jev_aux_endpoint", "server_jev_aux_key", "server_jev_aux_model", "server_jev_aux_effort", "server_jev_provider"] {
             assert!(rows.iter().any(|(row, _)| *row == label), "{label} fora da busca");
         }
     }
