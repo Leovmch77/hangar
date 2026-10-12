@@ -606,8 +606,10 @@ impl TerminalDriver {
         DraftOutcome::Stashed
     }
     async fn prove_input(&self, text: &str, before: &ComposerSnapshot) -> bool {
-        for _ in 0..self.limits.proof_attempts.max(1) {
-            self.settle().await;
+        // A primeira leitura vem logo depois do `literal_settle` que a escrita já esperou; a espera fica
+        // entre as tentativas. A prova é a mesma: só o texto presente passa.
+        for attempt in 0..self.limits.proof_attempts.max(1) {
+            if attempt > 0 { self.settle().await; }
             let Ok(now) = self.snapshot().await else { return false; };
             if now.proves(text, before) == Proof::Present { return true; }
         }
@@ -616,8 +618,9 @@ impl TerminalDriver {
     /// Depois do `Filled`: o plugin já confirmou o que pôs no campo. A tela só desmente quando dá para
     /// lê-la; composer ilegível (mensagem longa demais para o desenho) não segura o Enter.
     async fn prove_filled(&self, text: &str, before: &ComposerSnapshot) -> bool {
-        for _ in 0..self.limits.proof_attempts.max(1) {
-            self.settle().await;
+        // O plugin já respondeu `Filled`: lê a tela na hora e só espera entre as tentativas.
+        for attempt in 0..self.limits.proof_attempts.max(1) {
+            if attempt > 0 { self.settle().await; }
             let Ok((screen, typed)) = self.composer_capture().await else { return false };
             match Self::composer(&screen, &typed) {
                 Ok(now) if now.proves(text, before) == Proof::Present => return true,
@@ -659,8 +662,11 @@ impl TerminalDriver {
         let mut slash_selected = false;
         let clear = text.split_whitespace().next() == Some("/clear");
         let mut last_error = None;
-        for _ in 0..self.limits.proof_attempts.max(1) {
-            self.settle().await;
+        // Composer ainda com o texto logo após o Enter só reprova esta leitura: a seguinte espera o `settle`.
+        // Barra espera antes: o menu de sugestões ainda na tela pediria um segundo Enter antes do primeiro valer.
+        let slash = text.trim_start().starts_with('/');
+        for attempt in 0..self.limits.proof_attempts.max(1) {
+            if attempt > 0 || slash { self.settle().await; }
             let capture = if clear {
                 match self.verify_pane().await { Ok(()) => self.composer_capture_unverified().await, Err(e) => Err(e) }
             } else { self.composer_capture().await };

@@ -116,6 +116,10 @@ impl State {
         let conversation=Value::from(conversation);
         self.operations.iter().any(|(key,op)|!key.starts_with(CALL_PREFIX) && holds_terminal_write(op,&conversation))
     }
+    /// Linha mais antiga que a drenagem ainda entregaria (mesmo filtro do `Claim`): a nova espera atrás dela.
+    pub fn pending_ahead(&self,min_ts:f64)->bool {
+        self.rows.iter().any(|r|r["delivered"]==false && current(r,min_ts) && !self.protected(row_id(r)))
+    }
     pub fn new(key: &str, generation: u64, name: &str, rows: Vec<Value>) -> Self {
         Self { version:VERSION, owner_key:key.into(), generation, name:name.into(), rows,
             operations:BTreeMap::new(), used_occurrences:BTreeMap::new(), runtime_state:json!({}), next_seq:1 }
@@ -218,6 +222,8 @@ pub struct Store {
     state: State,
     fenced: bool,
     recover_before_compact: bool,
+    /// Projeção segurada pelo envio direto: a linha só aparece depois do `BeginDispatch`, já entregue.
+    held: bool,
 }
 
 /// Recusa da própria fila: frase fixa, sem caminho nem texto da conversa, então pode ir ao log.
@@ -269,7 +275,7 @@ impl Store {
             Err(error) => return Err(error),
         };
         let recover_before_compact=needs_terminal_recovery(&state);
-        let mut store = Self { state_path:state_path.into(), projection_dir:projection_dir.into(), state, fenced:false, recover_before_compact };
+        let mut store = Self { state_path:state_path.into(), projection_dir:projection_dir.into(), state, fenced:false, recover_before_compact, held:false };
         store.ensure_projection()?;
         Ok(store)
     }
@@ -307,6 +313,14 @@ impl Store {
     }
 
     pub fn exec(&mut self, generation: u64, call_id: &str, clock: ClockSample, action: Action) -> io::Result<Value> {
+        self.exec_held(generation, call_id, clock, action, false)
+    }
+
+    /// `hold`: grava com fsync mas não publica a projeção; ela segue segurada só pelo `BindDispatch`
+    /// seguinte, e qualquer outra ação (o `BeginDispatch` que marca entregue, o `Finish` que adia) a publica.
+    pub fn exec_held(&mut self, generation: u64, call_id: &str, clock: ClockSample, action: Action, hold: bool) -> io::Result<Value> {
+        let was_held = std::mem::take(&mut self.held);
+        let binds = matches!(&action, Action::BindDispatch { .. });
         self.unfence()?;
         if generation != self.state.generation { return Err(invalid("geração da fila mudou")); }
         if call_id.is_empty() { return Err(invalid("operação da fila sem identificador")); }
@@ -351,7 +365,8 @@ impl Store {
             self.state = state;
             self.fenced = false;
             self.recover_before_compact=false;
-            self.ensure_projection()?;
+            self.held = hold || binds && was_held;
+            if !self.held { self.ensure_projection()?; }
         }
         Ok(result)
     }
@@ -958,7 +973,7 @@ pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
 }
 
 enum QueueMessage {
-    Exec { generation:u64, call_id:String, clock:ClockSample, action:Action, reply:oneshot::Sender<io::Result<Value>> },
+    Exec { generation:u64, call_id:String, clock:ClockSample, action:Action, hold:bool, reply:oneshot::Sender<io::Result<Value>> },
     Stop,
     Snapshot(oneshot::Sender<io::Result<State>>),
 }
@@ -990,11 +1005,11 @@ impl QueueActor {
                         }
                         let _ = reply.send(Ok(store.state.clone()));
                     }
-                    QueueMessage::Exec { generation,call_id,clock,action,reply } => {
+                    QueueMessage::Exec { generation,call_id,clock,action,hold,reply } => {
                         let lease = lease.clone();
                         let job = tokio::task::spawn_blocking(move || {
                             let _lease = lease;
-                            let result = store.exec(generation,&call_id,clock,action);
+                            let result = store.exec_held(generation,&call_id,clock,action,hold);
                             (store,result)
                         }).await;
                         match job {
@@ -1012,8 +1027,12 @@ impl QueueActor {
     pub fn lease(&self) -> Arc<File> { self.lease.clone() }
 
     pub async fn exec(&self, generation:u64, call_id:&str, clock:ClockSample, action:Action) -> io::Result<Value> {
+        self.exec_held(generation,call_id,clock,action,false).await
+    }
+
+    pub async fn exec_held(&self, generation:u64, call_id:&str, clock:ClockSample, action:Action, hold:bool) -> io::Result<Value> {
         let (reply,response) = oneshot::channel();
-        self.sender.send(QueueMessage::Exec { generation,call_id:call_id.into(),clock,action,reply }).await
+        self.sender.send(QueueMessage::Exec { generation,call_id:call_id.into(),clock,action,hold,reply }).await
             .map_err(|_|invalid("fila encerrada"))?;
         response.await.map_err(|_|invalid("fila encerrada sem recibo"))?
     }
