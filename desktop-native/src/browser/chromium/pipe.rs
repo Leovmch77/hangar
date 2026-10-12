@@ -74,7 +74,8 @@ fn reply_of(message: &Value) -> Reply {
 
 pub struct Browser {
     wire: Arc<Wire>,
-    child: RefCell<Child>,
+    /// `None` só no fim: o `Drop` o leva para a thread que espera o processo sair.
+    child: RefCell<Option<Child>>,
     /// (sessão, evento) → ouvintes.
     handlers: RefCell<HashMap<(String, String), Vec<Handler>>>,
     /// Evento do navegador (`Target.*`, `CLOSED`) → (sessão dona, ouvinte); sai junto com a sessão dona.
@@ -187,7 +188,7 @@ impl Browser {
             .spawn(move || read(launched.reader, &reading, &events))
             .map_err(|e| e.to_string())?;
         let browser = Rc::new(Browser {
-            wire, child: RefCell::new(launched.child), handlers: RefCell::default(), watchers: RefCell::default(),
+            wire, child: RefCell::new(Some(launched.child)), handlers: RefCell::default(), watchers: RefCell::default(),
             initial: RefCell::default(), owned: RefCell::default(), alive: std::cell::Cell::new(true), ready: RefCell::new(None),
             _drain: RefCell::new(None),
         });
@@ -217,6 +218,8 @@ impl Browser {
 
     fn closed(&self) {
         self.alive.set(false);
+        // O pipe fechou porque o processo morreu: recolhe já, senão ele fica zumbi até o motor ser refeito.
+        if let Some(child) = self.child.borrow_mut().as_mut() { let _ = child.try_wait(); }
         self.notify(CLOSED, Value::Null);
     }
 
@@ -282,13 +285,17 @@ impl Drop for Browser {
     fn drop(&mut self) {
         // Saída limpa primeiro: o perfil é persistente, e o SIGKILL perde cookies e localStorage ainda não gravados.
         self.wire.send(None, "Browser.close", json!({}), None);
-        let mut child = self.child.borrow_mut();
-        for _ in 0..40 {
-            if !matches!(child.try_wait(), Ok(None)) { return; }
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        let _ = child.kill();
-        let _ = child.wait();
+        let Some(mut child) = self.child.take() else { return };
+        // A espera (até 2 s) fora da thread da tela, que fechava o painel congelada.
+        let waited = std::thread::Builder::new().name("chromium-exit".into()).spawn(move || {
+            for _ in 0..40 {
+                if !matches!(child.try_wait(), Ok(None)) { return; }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            let _ = child.kill();
+            let _ = child.wait();
+        });
+        if let Err(e) = waited { eprintln!("[nav] sem thread para fechar o Chromium: {e}"); }
     }
 }
 

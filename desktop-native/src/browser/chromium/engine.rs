@@ -238,9 +238,12 @@ pub struct Engine {
     /// Altura da barra que o Chrome completo sem janela ainda desconta da janela (o shell não tem).
     decoration: f32,
     executor: ForegroundExecutor,
+    background: BackgroundExecutor,
     surface: Arc<Surface>,
     placed: Cell<Option<(Size<Pixels>, f32)>>,
-    visible: Cell<bool>,
+    /// Conta os tamanhos pedidos durante um arrasto: só o último, parado por um instante, chega ao Chromium.
+    resizes: Rc<Cell<u64>>,
+    visible: Rc<Cell<bool>>,
     pressed: Cell<bool>,
     /// A página caiu ou se soltou com o Chromium vivo.
     dead: Rc<Cell<bool>>,
@@ -295,8 +298,8 @@ impl Starter {
         let dead = Rc::new(Cell::new(false));
         let publish = listen(&session, &target, &state, &events, &self.executor, &dead, false);
         Ok(Engine {
-            session, publish, target, window, decoration, executor: self.executor, surface, dead, png: false, double: false, context: None,
-            placed: Cell::new(None), visible: Cell::new(false), pressed: Cell::new(false),
+            session, publish, target, window, decoration, executor: self.executor, background: self.background, surface, dead, png: false,
+            double: false, context: None, placed: Cell::new(None), resizes: Rc::default(), visible: Rc::default(), pressed: Cell::new(false),
         })
     }
 
@@ -376,8 +379,9 @@ impl Starter {
         });
         match self.setup_target(browser, &session, target, &document).await {
             Ok((window, decoration)) => Ok(Engine {
-                session, publish, target: target.to_owned(), window, decoration, executor: self.executor.clone(), surface, dead, png: true, double: true,
-                context, placed: Cell::new(None), visible: Cell::new(false), pressed: Cell::new(false),
+                session, publish, target: target.to_owned(), window, decoration, executor: self.executor.clone(), background: self.background.clone(),
+                surface, dead, png: true, double: true, context, placed: Cell::new(None), resizes: Rc::default(), visible: Rc::default(),
+                pressed: Cell::new(false),
             }),
             Err(e) => { surface.close(); Err(e) }
         }
@@ -587,23 +591,19 @@ impl Engine {
         // texto em cinza (o fundo é transparente) e ela sai com cara de vídeo em baixa resolução ao lado do texto do app.
         let frame_scale = if self.double { (scale * 2.).ceil() } else { scale };
         let resized = self.placed.get() != Some((bounds.size, scale));
-        if resized {
-            self.placed.set(Some((bounds.size, scale)));
-            let size = json!({"width": w.round() as i64, "height": (h + self.decoration).round() as i64});
-            drop(self.session.browser().call(None, "Browser.setWindowBounds", json!({"windowId": self.window, "bounds": size})));
-            if self.double {
-                self.send("Emulation.setDeviceMetricsOverride", json!({
-                    "width": w.round() as i64, "height": h.round() as i64, "deviceScaleFactor": frame_scale, "mobile": false,
-                }));
+        let first = !self.visible.replace(true);
+        if resized { self.placed.set(Some((bounds.size, scale))); }
+        if first || resized {
+            let fit = Fit { session: self.session.clone(), window: self.window, decoration: self.decoration, double: self.double, png: self.png, w, h, frame_scale };
+            let turn = self.resizes.get() + 1;
+            self.resizes.set(turn);
+            if first {
+                fit.apply(resized);
+            } else {
+                // Durante um arrasto o quadro antigo estica até o painel; o Chromium só recebe o tamanho em que ele parou.
+                let (resizes, visible, timer) = (self.resizes.clone(), self.visible.clone(), self.background.timer(Duration::from_millis(RESIZE_SETTLE_MS)));
+                self.executor.spawn(async move { timer.await; if resizes.get() == turn && visible.get() { fit.apply(true); } }).detach();
             }
-        }
-        if !self.visible.replace(true) || resized {
-            let (pw, ph) = ((w * frame_scale).round() as i64, (h * frame_scale).round() as i64);
-            // JPEG alto em vez de PNG: o PNG pesa na decodificação e no pipe em página animada; o q92 deixa o texto
-            // legível (o q85 borrava). O `shot` continua em PNG.
-            let mut params = json!({"format": "jpeg", "quality": 92, "maxWidth": pw.max(1), "maxHeight": ph.max(1), "everyNthFrame": 1});
-            if self.png { params["format"] = "png".into(); params.as_object_mut().map(|p| p.remove("quality")); }
-            self.send("Page.startScreencast", params);
         }
         // Antes de ler: um quadro que chegue no meio ainda avisa a tela.
         self.surface.seen();
@@ -657,6 +657,32 @@ impl Engine {
     /// A página finge estar sempre focada (`setFocusEmulationEnabled`): o foco do painel não precisa ir a ela.
     pub fn focus(&self, _focused: bool) {}
     pub fn release_focus(&self) {}
+}
+
+const RESIZE_SETTLE_MS: u64 = 120;
+
+/// Tamanho e escala da página no painel, e como pedir ao Chromium.
+struct Fit { session: Rc<Session>, window: i64, decoration: f32, double: bool, png: bool, w: f32, h: f32, frame_scale: f32 }
+
+impl Fit {
+    fn apply(&self, resized: bool) {
+        let Fit { session, window, decoration, double, png, w, h, frame_scale } = self;
+        if resized {
+            let size = json!({"width": w.round() as i64, "height": (h + decoration).round() as i64});
+            drop(session.browser().call(None, "Browser.setWindowBounds", json!({"windowId": window, "bounds": size})));
+            if *double {
+                drop(session.call("Emulation.setDeviceMetricsOverride", json!({
+                    "width": w.round() as i64, "height": h.round() as i64, "deviceScaleFactor": frame_scale, "mobile": false,
+                })));
+            }
+        }
+        let (pw, ph) = ((w * frame_scale).round() as i64, (h * frame_scale).round() as i64);
+        // JPEG alto em vez de PNG: o PNG pesa na decodificação e no pipe em página animada; o q92 deixa o texto
+        // legível (o q85 borrava). O `shot` continua em PNG.
+        let mut params = json!({"format": "jpeg", "quality": 92, "maxWidth": pw.max(1), "maxHeight": ph.max(1), "everyNthFrame": 1});
+        if *png { params["format"] = "png".into(); params.as_object_mut().map(|p| p.remove("quality")); }
+        drop(session.call("Page.startScreencast", params));
+    }
 }
 
 /// Retângulo em pixels inteiros da tela, do tamanho do quadro: posição ou largura fracionada faz a GPU reamostrar a
