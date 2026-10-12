@@ -1894,6 +1894,17 @@ import { cachePrazo } from '../lib/cachePrazo';
     if (fileInput) fileInput.value = '';
   }
 
+  // Com a conversa desmontada no meio do envio (voltou para a lista), os $effect que gravam o
+  // rascunho e o cache de anexos já não rodam, e a conversa reaberta restaurava o que já foi.
+  // Só apaga o que ainda é o enviado: o que foi escrito depois fica.
+  function forgetSent(name: string, draftKey: string, caption: string, files: File[]) {
+    const cached = attachmentCache.get(name);
+    if (cached?.length === files.length && cached.every((a, i) => a.file === files[i])) attachmentCache.delete(name);
+    try {
+      if (parseStoredDraft(localStorage.getItem(draftKey)).text.trim() === caption) localStorage.removeItem(draftKey);
+    } catch { /* sem storage: o rascunho vivia só na memória */ }
+  }
+
   // Devolve se o envio deu certo -- enviarAutomatico() usa isso pra escolher o bipe (agudo/grave)
   // SO depois do desfecho real, nunca antes. O botao de enviar (onclick={submit}) ignora o retorno,
   // igual sempre ignorou.
@@ -1939,6 +1950,9 @@ import { cachePrazo } from '../lib/cachePrazo';
       uploading = true;
       attachError = '';
       let ok = true;
+      const sentName = sessionName;
+      const sentFiles = attachments.map((a) => a.file);
+      const sentDraftKey = draftStorageKey(dictationServerId, sessionName);
       try {
         // Sobe todos os anexos e junta os paths numa UNICA linha (o backend rejeita '\n' no
         // send-keys). Cada path nao tem espaco (nome gerado). Marca imagem x arquivo pelo tipo.
@@ -1969,6 +1983,7 @@ import { cachePrazo } from '../lib/cachePrazo';
         inputText = '';
         if (textareaEl) textareaEl.style.height = 'auto';
         clearAttachments();
+        forgetSent(sentName, sentDraftKey, caption, sentFiles);
       } catch (err) {
         // upload OU envio falhou -> mantem as fotos e o texto, mostra o erro.
         attachError = err instanceof Error ? err.message : m.composer_falha_envio();
