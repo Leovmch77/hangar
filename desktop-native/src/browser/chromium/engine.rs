@@ -700,8 +700,13 @@ fn key_event(down: bool, keystroke: &Keystroke) -> Option<Value> {
         // Ctrl/Alt + letra: atalho da página (Ctrl+A, Ctrl+Z), sem texto.
         let c = single_char(&keystroke.key)?;
         let upper = c.to_ascii_uppercase();
-        let code = if upper.is_ascii_alphabetic() { format!("Key{upper}") } else if upper.is_ascii_digit() { format!("Digit{upper}") } else { String::new() };
-        json!({"key": c.to_string(), "code": code, "windowsVirtualKeyCode": upper as u32})
+        // O próprio caractere como código virtual erra a pontuação: "." é 46, o Delete, e Ctrl+. apagava a palavra.
+        let (code, vk) = if upper.is_ascii_alphabetic() || upper.is_ascii_digit() {
+            (if upper.is_ascii_alphabetic() { format!("Key{upper}") } else { format!("Digit{upper}") }, upper as u32)
+        } else {
+            punctuation(c).map_or((String::new(), 0), |(code, vk)| (code.into(), vk))
+        };
+        json!({"key": c.to_string(), "code": code, "windowsVirtualKeyCode": vk})
     } else {
         return None;
     };

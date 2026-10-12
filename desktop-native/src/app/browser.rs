@@ -62,10 +62,10 @@ pub(super) struct BrowserPanel {
     emulated: Option<(f32, f32)>,
     /// px da página por px do painel na tela emulada; 1 sem emulação.
     page_scale: Rc<Cell<f32>>,
-    /// Zoom da página na tela emulada (`visualViewport.scale`): página sem `viewport` de celular abre afastada, e o
-    /// `Input` do CDP conta em px do layout, não da tela.
+    /// Área visível da página na tela emulada (`visualViewport`: zoom e deslocamento). Página sem `viewport` de celular
+    /// abre afastada, e o `Input` do CDP conta em px do layout. Relida a cada pergunta do cursor.
     #[cfg(target_os = "linux")]
-    page_zoom: f32,
+    page_zoom: (f32, f32, f32),
     /// Decidido pelo `Hangar` a cada quadro (`browser_visible`).
     shown: bool,
     /// Aviso do próprio painel (preenchimento do login que falhou), ao lado do `notice` que vem da página.
@@ -127,13 +127,15 @@ impl BrowserPanel {
         ];
         Self { key, #[cfg(not(target_os = "macos"))] controller: None, #[cfg(not(target_os = "macos"))] cdp: None,
             #[cfg(not(target_os = "macos"))] relay: Default::default(), #[cfg(not(target_os = "macos"))] viewer: Rc::default(), engine: None, starting: None, _start: None, events, address, page: model::PageState::default(), invalid: None, #[cfg(not(target_os = "macos"))] cookies_status: None, #[cfg(not(target_os = "macos"))] cookies_confirmed: false, #[cfg(target_os = "linux")] last_fill: None, focus,
-            origin: Rc::default(), #[cfg(target_os = "linux")] emulated: None, page_scale: Rc::new(Cell::new(1.)), #[cfg(target_os = "linux")] page_zoom: 1., shown: false, local_notice: None, #[cfg(target_os = "linux")] cursor: CursorStyle::Arrow, #[cfg(target_os = "linux")] cursor_probe: (false, None), copied: false, dismissed_notice: 0, address_stale: false, #[cfg(not(target_os = "macos"))] agent: None, #[cfg(not(target_os = "macos"))] agent_running: 0,
+            origin: Rc::default(), #[cfg(target_os = "linux")] emulated: None, page_scale: Rc::new(Cell::new(1.)), #[cfg(target_os = "linux")] page_zoom: (1., 0., 0.), shown: false, local_notice: None, #[cfg(target_os = "linux")] cursor: CursorStyle::Arrow, #[cfg(target_os = "linux")] cursor_probe: (false, None), copied: false, dismissed_notice: 0, address_stale: false, #[cfg(not(target_os = "macos"))] agent: None, #[cfg(not(target_os = "macos"))] agent_running: 0,
             #[cfg(not(target_os = "macos"))] agent_seq: 0, #[cfg(not(target_os = "macos"))] paused: None, #[cfg(target_os = "windows")] agent_finished_at: None, #[cfg(not(target_os = "macos"))] _activity: None, _drain: drain, _subscriptions: subscriptions }
     }
 
     fn engine(&self) -> Option<&Rc<Engine>> { self.engine.as_ref()?.as_ref().ok() }
 
     fn receive(&mut self, event: crate::browser::Event, window: &mut Window, cx: &mut Context<Self>) {
+        #[cfg(target_os = "windows")]
+        if let crate::browser::Event::UserInput = event { return self.user_input(cx); }
         if let crate::browser::Event::State(page) = event {
             // Quem está digitando no endereço não perde o texto para a página que acabou de carregar.
             let url = page.url.clone().unwrap_or_default();
@@ -143,11 +145,13 @@ impl BrowserPanel {
                 self.address_stale = true;
             }
             if page.url != self.page.url { self.local_notice = None; }
-            #[cfg(target_os = "linux")]
+            #[cfg(not(target_os = "macos"))]
             let loaded = self.page.loading && !page.loading;
             self.page = page;
             #[cfg(target_os = "linux")]
             if loaded { self.refresh_zoom(cx); }
+            #[cfg(target_os = "windows")]
+            if loaded && let Some(engine) = self.engine() { let history = engine.history(); cx.spawn(async move |_, _| history.await).detach(); }
             #[cfg(not(target_os = "macos"))]
             crate::browser::server::write_sidecar(&self.key, self.page.url.as_deref().unwrap_or(""), &self.page.title);
             #[cfg(target_os = "linux")]
@@ -311,33 +315,10 @@ impl BrowserPanel {
                 if this.update(cx, |this, cx| this.agent_acted(&a, cx)).is_err() { break; }
             }
         }));
-        #[cfg(target_os = "windows")]
-        self.listen_user_input(&cdp, cx);
         let setup = ctl.clone();
         cx.spawn(async move |_, _| setup.start().await).detach();
         self.controller = Some(ctl);
         self.cdp = Some(cdp);
-    }
-
-    /// No Windows a página é janela própria: clique e tecla da pessoa não passam pela GPUI. Quem avisa é um ouvinte
-    /// dentro da página, por um binding do CDP. A entrada sintética do agente também é `isTrusted`, por isso aviso com
-    /// verbo em andamento não conta (`user_input` olha `agent_running`).
-    #[cfg(target_os = "windows")]
-    fn listen_user_input(&self, cdp: &Rc<crate::browser::cdp::Cdp>, cx: &mut Context<Self>) {
-        const BINDING: &str = "__hangarUser";
-        const SCRIPT: &str = "(()=>{if(window.__hangarUserOn)return;window.__hangarUserOn=1;const f=e=>{if(e.isTrusted)try{__hangarUser(e.type)}catch(_){}};addEventListener('pointerdown',f,true);addEventListener('keydown',f,true)})()";
-        let (tx, rx) = async_channel::unbounded::<()>();
-        let listened = cdp.on("Runtime.bindingCalled", move |p| if p["name"] == BINDING { let _ = tx.try_send(()); });
-        if let Err(e) = listened { eprintln!("[nav] entrada do usuario sem ouvinte: {e}"); return; }
-        let calls = [cdp.call("Runtime.addBinding", serde_json::json!({"name": BINDING})),
-            cdp.call("Page.addScriptToEvaluateOnNewDocument", serde_json::json!({"source": SCRIPT})),
-            cdp.call("Runtime.evaluate", serde_json::json!({"expression": SCRIPT}))];
-        cx.spawn(async move |this, cx| {
-            for call in calls { if let Err(e) = call.await { eprintln!("[nav] ouvinte de entrada nao instalado: {e}"); } }
-            while rx.recv().await.is_ok() {
-                if this.update(cx, |this, cx| this.user_input(cx)).is_err() { break; }
-            }
-        }).detach();
     }
 
     /// Entrega ao espectador atual os eventos que a tela remota acompanha.
@@ -516,7 +497,7 @@ impl BrowserPanel {
     #[cfg(target_os = "linux")]
     fn copy_selection(&self, cx: &mut Context<Self>) {
         let Some(cdp) = self.cdp.clone() else { return };
-        const SELECTION: &str = "(()=>{const a=document.activeElement;if(a&&(a.tagName==='INPUT'||a.tagName==='TEXTAREA')&&a.selectionStart!=null&&a.type!=='password')return a.value.slice(a.selectionStart,a.selectionEnd);return String(getSelection())})()";
+        const SELECTION: &str = "(()=>{const a=document.activeElement;if(a&&a.type==='password')return '';if(a&&(a.tagName==='INPUT'||a.tagName==='TEXTAREA')&&a.selectionStart!=null)return a.value.slice(a.selectionStart,a.selectionEnd);return String(getSelection())})()";
         let call = cdp.call("Runtime.evaluate", serde_json::json!({"expression": SELECTION, "returnByValue": true}));
         cx.spawn(async move |_, cx| {
             match call.await {
@@ -687,10 +668,13 @@ impl BrowserPanel {
         let Some(cdp) = self.cdp.clone() else { return };
         self.cursor_probe.0 = true;
         let (x, y) = (f32::from(p.x), f32::from(p.y));
-        let js = format!("(()=>{{const e=document.elementFromPoint({x},{y});if(!e)return 'default';const c=getComputedStyle(e).cursor;if(c!=='auto')return c;const t=e.tagName;if(e.isContentEditable||t==='TEXTAREA'||(t==='INPUT'&&!/^(button|submit|reset|checkbox|radio|file|image|range|color)$/i.test(e.type)))return 'text';return 'default'}})()");
+        // O cursor e a área visível na mesma pergunta: zoom de SPA ou de pinça chega aqui sem esperar uma carga.
+        let js = format!("(()=>{{const k=(()=>{{const e=document.elementFromPoint({x},{y});if(!e)return 'default';const c=getComputedStyle(e).cursor;if(c!=='auto')return c;const t=e.tagName;if(e.isContentEditable||t==='TEXTAREA'||(t==='INPUT'&&!/^(button|submit|reset|checkbox|radio|file|image|range|color)$/i.test(e.type)))return 'text';return 'default'}})();return {{cursor:k,view:{VIEWPORT}}}}})()");
         let call = cdp.call("Runtime.evaluate", serde_json::json!({"expression": js, "returnByValue": true}));
         cx.spawn(async move |this, cx| {
-            let style = match call.await.ok().and_then(|r| r["result"]["value"].as_str().map(str::to_owned)).as_deref() {
+            let value = call.await.ok().map(|r| r["result"]["value"].clone()).unwrap_or_default();
+            let zoom = viewport_of(&value["view"]);
+            let style = match value["cursor"].as_str() {
                 Some("pointer") => CursorStyle::PointingHand,
                 Some("text" | "vertical-text") => CursorStyle::IBeam,
                 Some("crosshair") => CursorStyle::Crosshair,
@@ -703,6 +687,7 @@ impl BrowserPanel {
             };
             let _ = this.update(cx, |this, cx| {
                 this.cursor_probe.0 = false;
+                if let Some(z) = zoom { this.page_zoom = z; }
                 if this.cursor != style { this.cursor = style; cx.notify(); }
                 // O mouse andou durante a pergunta: pergunta de novo pelo ponto novo.
                 if this.cursor_probe.1 != Some(p) && let Some(at) = this.cursor_probe.1 { this.probe_again(at, cx); }
@@ -713,22 +698,24 @@ impl BrowserPanel {
     /// Ponto do painel em px da página.
     fn page_point(&self, at: Point<Pixels>) -> Point<Pixels> {
         #[cfg(target_os = "linux")]
-        let zoom = if self.emulated.is_some() && self.page_zoom > 0. { self.page_zoom } else { 1. };
+        let (zoom, ox, oy) = if self.emulated.is_some() && self.page_zoom.0 > 0. { self.page_zoom } else { (1., 0., 0.) };
         #[cfg(not(target_os = "linux"))]
-        let zoom = 1.;
+        let (zoom, ox, oy) = (1., 0., 0.);
         let (p, s) = (at - self.origin.get(), self.page_scale.get() / zoom);
-        point(px(f32::from(p.x) * s), px(f32::from(p.y) * s))
+        point(px(ox + f32::from(p.x) * s), px(oy + f32::from(p.y) * s))
     }
 
-    /// Relido ao trocar de tela emulada e a cada página carregada; sem emulação o zoom não entra na conta.
+    /// Relido ao trocar de tela emulada e a cada página carregada, um quadro depois: o tamanho emulado chega à página
+    /// depois da resposta do CDP. Sem emulação o zoom não entra na conta.
     #[cfg(target_os = "linux")]
     fn refresh_zoom(&mut self, cx: &mut Context<Self>) {
-        if self.emulated.is_none() { self.page_zoom = 1.; return; }
+        if self.emulated.is_none() { self.page_zoom = (1., 0., 0.); return; }
         let Some(cdp) = self.cdp.clone() else { return };
-        let call = cdp.call("Runtime.evaluate", serde_json::json!({"expression": "visualViewport.scale", "returnByValue": true}));
         cx.spawn(async move |this, cx| {
-            let zoom = call.await.ok().and_then(|r| r["result"]["value"].as_f64());
-            let _ = this.update(cx, |this, _| this.page_zoom = zoom.map_or(1., |z| z as f32));
+            cx.background_executor().timer(std::time::Duration::from_millis(200)).await;
+            let call = cdp.call("Runtime.evaluate", serde_json::json!({"expression": format!("({VIEWPORT})"), "returnByValue": true}));
+            let zoom = call.await.ok().and_then(|r| viewport_of(&r["result"]["value"]));
+            let _ = this.update(cx, |this, _| if let Some(z) = zoom { this.page_zoom = z });
         }).detach();
     }
 
@@ -795,6 +782,8 @@ impl BrowserPanel {
             .on_mouse_up(MouseButton::Middle, cx.listener(|this, event: &MouseUpEvent, _, _| this.pointer(Pointer::Up, event.button, event.position, event.click_count, &event.modifiers)))
             // Soltar fora da página ainda termina o arrasto começado nela.
             .on_mouse_up_out(MouseButton::Left, cx.listener(|this, event: &MouseUpEvent, _, _| this.pointer(Pointer::Up, event.button, event.position, event.click_count, &event.modifiers)))
+            .on_mouse_up_out(MouseButton::Right, cx.listener(|this, event: &MouseUpEvent, _, _| this.pointer(Pointer::Up, event.button, event.position, event.click_count, &event.modifiers)))
+            .on_mouse_up_out(MouseButton::Middle, cx.listener(|this, event: &MouseUpEvent, _, _| this.pointer(Pointer::Up, event.button, event.position, event.click_count, &event.modifiers)))
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, _cx| {
                 this.pointer(Pointer::Move, MouseButton::Left, event.position, 0, &event.modifiers);
                 #[cfg(target_os = "linux")]
@@ -917,6 +906,16 @@ impl Render for BrowserPanel {
         { root = root.children(self.render_agent(cx)); }
         root.child(self.render_page(cx))
     }
+}
+
+/// Zoom e deslocamento da área visível da página, no formato que `viewport_of` lê.
+#[cfg(target_os = "linux")]
+const VIEWPORT: &str = "[visualViewport.scale,visualViewport.offsetLeft,visualViewport.offsetTop]";
+
+#[cfg(target_os = "linux")]
+fn viewport_of(v: &serde_json::Value) -> Option<(f32, f32, f32)> {
+    let n = |i: usize| v.get(i).and_then(serde_json::Value::as_f64).map(|x| x as f32);
+    Some((n(0).filter(|z| *z > 0.)?, n(1)?, n(2)?))
 }
 
 /// "nav-tela está usando o navegador · clicando em “Salvar”". Nome longo de alvo é cortado: a faixa tem uma linha.

@@ -21,7 +21,19 @@ pub struct Engine {
     events: async_channel::Sender<Event>,
     /// Área onde a janela filha está; `None` = escondida. Evita chamada nativa a cada quadro.
     placed: Cell<Option<Bounds<Pixels>>>,
+    /// A página caiu (`Inspector.targetCrashed`): o painel refaz o motor no próximo `go`.
+    dead: Rc<Cell<bool>>,
+    /// CDP que segura os ouvintes do motor (queda); os ouvintes morrem com ele.
+    #[cfg(target_os = "windows")]
+    _watch: Option<Rc<super::cdp::Cdp>>,
 }
+
+/// Clique e tecla de verdade na página vão ao painel, que pausa o agente se ele estiver agindo. Script de
+/// inicialização vale desde o primeiro documento; o binding do CDP chegava tarde para ele.
+const USER_INPUT: &str = "(()=>{const f=e=>{if(e.isTrusted&&window.ipc)window.ipc.postMessage('hangar-user')};addEventListener('pointerdown',f,true);addEventListener('keydown',f,true)})()";
+
+/// Link com `target=_blank` e `window.open` abrem nesta página: o painel é um navegador de uma aba só.
+const SAME_TAB: &str = "(()=>{addEventListener('click',e=>{const a=e.target&&e.target.closest&&e.target.closest('a[target]');if(a&&a.target!=='_self'&&a.target!=='_top'&&a.target!=='_parent')a.target='_self'},true);const o=window.open;window.open=function(u){if(u){location.href=u;return window}return o.apply(this,arguments)}})()";
 
 fn send(events: &async_channel::Sender<Event>, state: &model::PageState) {
     let _ = events.try_send(Event::State(state.clone()));
@@ -53,22 +65,25 @@ impl Starter {
         // Cookies e logins ficam ao lado das configurações do app. O macOS ignora a pasta e usa o armazenamento do app.
         let mut context = WebContext::new(crate::appearance::dir().map(|dir| dir.join("browser")));
         let state = Rc::new(RefCell::new(model::PageState::default()));
-        let (on_load, on_title) = ((state.clone(), events.clone()), (state.clone(), events.clone()));
-        let builder = WebViewBuilder::new_with_web_context(&mut context).with_visible(false);
+        let (on_load, on_title, on_ipc) = ((state.clone(), events.clone()), (state.clone(), events.clone()), events.clone());
+        let builder = WebViewBuilder::new_with_web_context(&mut context).with_visible(false).with_initialization_script(SAME_TAB)
+            .with_initialization_script(USER_INPUT)
+            .with_ipc_handler(move |req| if req.body() == "hangar-user" { let _ = on_ipc.try_send(Event::UserInput); });
         // Estacionada visível fora da tela (ver `park`): nascer com foco roubaria o teclado da janela do app.
         #[cfg(target_os = "windows")]
         let builder = builder.with_focused(false);
         let view = builder
             // Bloqueio sem aviso: o handler só recebe a URL e não distingue o quadro principal de um iframe.
             .with_navigation_handler(|url| model::allowed_request(&url))
-            // ponytail: link com target=_blank não abre; carregar na mesma página quando fizer falta.
+            // O que escapar do SAME_TAB (página que abre janela sem ser por link nem `window.open`) não abre.
             .with_new_window_req_handler(|_, _| NewWindowResponse::Deny)
             .with_on_page_load_handler(move |event, url| {
                 let mut page = on_load.0.borrow_mut();
                 page.url = Some(url);
                 page.loading = matches!(event, PageLoadEvent::Started);
                 page.error = None;
-                // O wry não expõe o histórico: depois da primeira página, voltar/avançar ficam sempre ligados.
+                // No Windows o histórico vem do CDP (`history`); no macOS o wry não o expõe, e os dois ficam ligados.
+                #[cfg(not(target_os = "windows"))]
                 if !page.loading {
                     page.can_back = true;
                     page.can_forward = true;
@@ -82,7 +97,24 @@ impl Starter {
             })
             .build_as_child(&self)
             .map_err(|e| e.to_string())?;
-        let engine = Engine { view, _context: context, state, events, placed: Cell::new(None) };
+        let dead = Rc::new(Cell::new(false));
+        #[cfg(target_os = "windows")]
+        let watch = {
+            use wry::WebViewExtWindows;
+            let cdp = Rc::new(super::cdp::Cdp::new(view.webview()));
+            let (dead, state, events) = (dead.clone(), state.clone(), events.clone());
+            let listened = cdp.on("Inspector.targetCrashed", move |_| {
+                dead.set(true);
+                let mut page = state.borrow_mut();
+                (page.loading, page.error) = (false, Some(crate::i18n::tr("browser_err_crashed")));
+                send(&events, &page);
+            });
+            match listened {
+                Ok(()) => { drop(cdp.call("Inspector.enable", serde_json::json!({}))); Some(cdp) }
+                Err(e) => { eprintln!("[nav] queda da pagina sem ouvinte: {e}"); None }
+            }
+        };
+        let engine = Engine { view, _context: context, state, events, placed: Cell::new(None), dead, #[cfg(target_os = "windows")] _watch: watch };
         #[cfg(target_os = "windows")]
         engine.park();
         Ok(engine)
@@ -118,9 +150,22 @@ impl Engine {
         std::rc::Rc::new(super::cdp::Cdp::new(self.view.webview()))
     }
 
-    /// O WebView2 nasce e morre com o painel.
     #[cfg(target_os = "windows")]
-    pub fn alive(&self) -> bool { true }
+    pub fn alive(&self) -> bool { !self.dead.get() }
+
+    /// Voltar/avançar de verdade, lidos do histórico do WebView2 depois de cada carga. Devolve a tarefa: o painel a
+    /// roda, porque o motor não tem executor.
+    #[cfg(target_os = "windows")]
+    pub fn history(&self) -> impl std::future::Future<Output = ()> + 'static {
+        let (call, state, events) = (self.cdp().call("Page.getNavigationHistory", serde_json::json!({})), self.state.clone(), self.events.clone());
+        async move {
+            let h = match call.await { Ok(h) => h, Err(e) => return eprintln!("[nav] historico nao lido: {e}") };
+            let (index, count) = (h["currentIndex"].as_i64().unwrap_or(0), h["entries"].as_array().map_or(0, Vec::len) as i64);
+            let mut page = state.borrow_mut();
+            (page.can_back, page.can_forward) = (index > 0, index + 1 < count);
+            send(&events, &page);
+        }
+    }
 
     pub fn place(&self, bounds: Bounds<Pixels>, _window: &mut Window) {
         let hidden = self.placed.get().is_none();
