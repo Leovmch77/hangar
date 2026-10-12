@@ -613,7 +613,9 @@ mod passwords {
             while LOOKING.load(Ordering::Acquire) && start.elapsed() < KEYRING_WAIT * 7 {
                 std::thread::sleep(Duration::from_millis(100));
             }
-            return KEYS.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map_or_else(peanuts, |(_, k)| k.clone());
+            let found = KEYS.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map_or_else(peanuts, |(_, k)| k.clone());
+            // A consulta que terminou começou antes do clique: com falta, o chaveiro destrancado agora merece outra.
+            if found.list.len() > 1 || LOOKING.swap(true, Ordering::AcqRel) { return found; }
         }
         let _looking = Looking;
         lookup()
@@ -654,7 +656,8 @@ mod passwords {
             std::thread::sleep(Duration::from_millis(50));
         }
         let out = child.wait_with_output()?;
-        if !out.status.success() {
+        // `secret-tool` sai com 1 e sem texto quando só não tem a entrada (navegador não instalado): não é falha.
+        if !out.status.success() && !out.stderr.trim_ascii().is_empty() {
             eprintln!("[nav] chaveiro: {:?} saiu com {}: {}", cmd.get_program(), out.status, String::from_utf8_lossy(&out.stderr).trim());
         }
         Ok(Some(out))
