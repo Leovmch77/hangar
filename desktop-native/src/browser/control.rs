@@ -171,12 +171,16 @@ impl<P: Page> Controller<P> {
         // O diálogo só some com o fechamento visto pelo motor: resposta que falhou deixa ele aberto para outra tentativa.
         let (done, result) = futures::channel::oneshot::channel();
         match self.on_dialog_answer.borrow().as_ref() { Some(f) => f(accept, text, done), None => return "erro: dialog: o painel nao respondeu".into() }
-        self.dialog_answered.set(true);
         // O ok só depois de o motor confirmar: aceite que falhou vira recusa na página, e o agente precisa saber.
         match self.within(5000, result).await {
-            Some(Ok(Ok(()))) => format!("ok: dialog {}", if accept { "accept" } else { "dismiss" }),
+            Some(Ok(Ok(()))) => {
+                // Só com a resposta aceita o próximo verbo espera o fechamento; com erro o diálogo segue aberto.
+                self.dialog_answered.set(true);
+                format!("ok: dialog {}", if accept { "accept" } else { "dismiss" })
+            }
             Some(Ok(Err(e))) => format!("erro: dialog: a pagina nao recebeu a resposta: {e}"),
-            _ => "erro: dialog: o navegador nao confirmou a resposta em 5 s".into(),
+            Some(Err(_)) => "erro: dialog: o painel do navegador fechou antes de responder".into(),
+            None => "erro: dialog: o navegador nao confirmou a resposta em 5 s".into(),
         }
     }
 
