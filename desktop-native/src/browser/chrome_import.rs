@@ -152,14 +152,20 @@ fn url_from_port(port: u16) -> Result<Option<String>, ImportError> {
 
 /// Cookie do `Storage.getCookies` -> `CookieParam` do `Storage.setCookies`: só os campos que viajam.
 fn to_param(c: &Value) -> Value {
+    let secure = c["secure"].as_bool().unwrap_or(false);
+    let path = c["path"].as_str().unwrap_or("/");
     let mut o = json!({
         "name": c["name"],
         "value": c["value"],
-        "domain": c["domain"],
-        "path": c.get("path").filter(|v| v.is_string()).cloned().unwrap_or_else(|| json!("/")),
-        "secure": c["secure"].as_bool().unwrap_or(false),
+        "path": path,
+        "secure": secure,
         "httpOnly": c["httpOnly"].as_bool().unwrap_or(false),
     });
+    // Sem o ponto inicial o cookie é só do host: por `url`, senão viraria do domínio e um `__Host-` seria recusado.
+    match c["domain"].as_str() {
+        Some(host) if !host.starts_with('.') => o["url"] = json!(format!("{}://{host}{path}", if secure { "https" } else { "http" })),
+        _ => o["domain"] = c["domain"].clone(),
+    }
     if let Some(s) = c["sameSite"].as_str() {
         o["sameSite"] = json!(s);
     }
@@ -211,7 +217,7 @@ pub fn for_site(cookies: Vec<Value>, site: &str) -> Vec<Value> {
     let site = site.trim_start_matches('.').to_ascii_lowercase();
     cookies.into_iter().filter(|c| {
         let (host, domain_cookie) = match c["domain"].as_str() {
-            Some(d) => (d.trim_start_matches('.').to_ascii_lowercase(), true),
+            Some(d) => (d.trim_start_matches('.').to_ascii_lowercase(), d.starts_with('.')),
             None => match c["url"].as_str().and_then(|u| url::Url::parse(u).ok()) {
                 Some(u) => (u.host_str().unwrap_or_default().to_ascii_lowercase(), false),
                 None => return false,
@@ -290,8 +296,9 @@ fn cdp_once(ws: &str, method: &str) -> Result<Value, ImportError> {
     while !head.ends_with(b"\r\n\r\n") {
         // O Chrome segura o handshake enquanto pergunta "Permitir depuração remota?": falha depois de a pessoa ter tido
         // tempo de ver o diálogo é a resposta dela (ou o tempo esgotado), e não se tenta de novo.
-        stream.read_exact(&mut byte).map_err(|_| if asked.elapsed() >= HUMAN_ANSWER { ImportError::Refused } else {
-            ImportError::Failed("cdp: sem resposta ao handshake".into())
+        stream.read_exact(&mut byte).map_err(|e| {
+            let waited = matches!(e.kind(), std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock);
+            if waited || asked.elapsed() >= HUMAN_ANSWER { ImportError::Refused } else { ImportError::Failed("cdp: sem resposta ao handshake".into()) }
         })?;
         head.push(byte[0]);
         if head.len() > 8192 {
@@ -299,7 +306,10 @@ fn cdp_once(ws: &str, method: &str) -> Result<Value, ImportError> {
         }
     }
     if !head.starts_with(b"HTTP/1.1 101") {
-        return Err(ImportError::Refused);
+        // 403 é o "não" do diálogo; outra resposta é um serviço qualquer na porta de um `DevToolsActivePort` velho.
+        return Err(if head.starts_with(b"HTTP/1.1 403") { ImportError::Refused } else {
+            ImportError::Failed("cdp: a porta do perfil nao e o Chrome".into())
+        });
     }
 
     let payload = json!({"id": 1, "method": method}).to_string();
@@ -728,6 +738,8 @@ mod tests {
         assert_eq!(p["secure"], false);
         assert_eq!(p["httpOnly"], false);
         assert!(p.get("sameSite").is_none());
+        assert_eq!(p["url"], "http://x.com/", "sem o ponto inicial o cookie é só do host");
+        assert!(p.get("domain").is_none());
     }
 
     #[test]
@@ -768,6 +780,7 @@ mod tests {
         assert_eq!(names, [".github.com", "https://github.com/", "www.github.com"]);
         let sub = for_site(vec![c(".github.com"), c(".com"), host_only("https://github.com/")], "gist.github.com");
         assert_eq!(sub.len(), 2, "o pai .github.com entra; o host-only de github.com não; .com é pai e entra");
+        assert!(for_site(vec![c("github.com")], "gist.github.com").is_empty(), "domínio sem ponto (CDP) é só do host");
     }
 
     #[test]

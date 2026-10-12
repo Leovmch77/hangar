@@ -90,12 +90,15 @@ pub fn sources() -> Vec<Source> {
 pub fn read(source: &Source) -> Result<Vec<Value>, DiskError> {
     let query = if source.firefox {
         "select hex(host), hex(name), hex(value), hex(path), expiry, isSecure, isHttpOnly, sameSite, '' \
-         from moz_cookies where originAttributes = ''"
+         from moz_cookies where originAttributes = ''".to_owned()
     } else {
-        "select hex(host_key), hex(name), hex(value), hex(path), case when has_expires and is_persistent then expires_utc else 0 end, \
-         is_secure, is_httponly, samesite, hex(encrypted_value) from cookies where top_frame_site_key = ''"
+        // Cookie particionado (de iframe de outro site) fica de fora; banco antigo nem tem a coluna.
+        let partitioned = dump(&source.file, "select count(*) from pragma_table_info('cookies') where name = 'top_frame_site_key'")?
+            .first().and_then(|r| r.first()).is_some_and(|n| n != "0");
+        format!("select hex(host_key), hex(name), hex(value), hex(path), case when has_expires and is_persistent then expires_utc else 0 end, \
+         is_secure, is_httponly, samesite, hex(encrypted_value) from cookies{}", if partitioned { " where top_frame_site_key = ''" } else { "" })
     };
-    let rows = dump(&source.file, query)?;
+    let rows = dump(&source.file, &query)?;
     if source.firefox {
         return Ok(rows.iter().filter_map(|r| firefox_row(r)).collect());
     }
@@ -112,25 +115,26 @@ fn chrome_rows(rows: &[Vec<String>], version: u32, keys: &[Vec<u8>]) -> Result<V
     for row in rows {
         let [host, name, value, path, expires, secure, http_only, same_site, cipher] = row.as_slice() else { continue };
         let host = text(host);
-        let value = match decode_hex(cipher) {
-            Some(cipher) if !cipher.is_empty() => {
-                match keys.iter().find_map(|key| chrome_value(&cipher, key, &host, version)) {
-                    Some(v) => { opened += 1; v }
-                    None => { locked += 1; continue; }
-                }
-            }
-            _ => text(value),
-        };
         // Microssegundos desde 1601; 0 = cookie de sessão.
         let expires = expires.parse::<i64>().ok().filter(|e| *e > 0).map(|e| (e / 1_000_000 - 11_644_473_600) as f64);
         let same_site = match same_site.as_str() { "0" => Some("None"), "1" => Some("Lax"), "2" => Some("Strict"), _ => None };
+        let value = match decode_hex(cipher) {
+            Some(cipher) if !cipher.is_empty() => keys.iter().find_map(|key| chrome_value(&cipher, key, &host, version)),
+            _ => Some(text(value)),
+        };
+        let Some(value) = value else {
+            // Fica na lista sem valor e marcado: o filtro por site ainda o enxerga, e quem grava o tira e conta.
+            locked += 1;
+            let mut marker = param(&host, &text(name), "", &text(path), secure == "1", http_only == "1", same_site, expires);
+            marker["__locked"] = json!(true);
+            out.push(marker);
+            continue;
+        };
+        opened += 1;
         out.push(param(&host, &text(name), &value, &text(path), secure == "1", http_only == "1", same_site, expires));
     }
     if locked > 0 && opened == 0 {
         return Err(DiskError::NoKey);
-    }
-    if locked > 0 {
-        eprintln!("[cookies] {locked} cookies do disco sem chave que os abra; trazidos os outros {opened}");
     }
     Ok(out)
 }

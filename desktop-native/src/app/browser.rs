@@ -216,7 +216,11 @@ impl BrowserPanel {
                 if let Some(url) = this.starting.take() { this.navigate(url, window, cx); }
                 #[cfg(not(target_os = "macos"))]
                 if std::mem::take(&mut this.import_pending) {
-                    if this.cdp.is_some() { this.import_chrome_login(window, cx) } else { this.cookies_status = None }
+                    if this.cdp.is_some() { this.import_chrome_login(window, cx) } else {
+                        let reason = match &this.engine { Some(Err(e)) => e.clone(), _ => "o navegador nao subiu".into() };
+                        this.finish_login(Err(reason.clone()));
+                        this.cookies_status = Some(tr("browser_cookies_error").replace("{e}", &reason));
+                    }
                 }
                 cx.notify();
             });
@@ -420,6 +424,12 @@ impl BrowserPanel {
     #[cfg(not(target_os = "macos"))]
     fn answer_login_request(&mut self, allow: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some((site, reply)) = self.login_request.take() else { return };
+        // O agente desistiu (passou o prazo do verbo): aprovar agora traria cookies para ninguém.
+        if reply.is_canceled() {
+            self.cookies_status = Some(tr("browser_login_agent_expired"));
+            cx.notify();
+            return;
+        }
         if !allow {
             let _ = reply.send(crate::browser::control::Reply::Text("recusado: o usuario nao liberou o login".into()));
             cx.notify();
@@ -440,7 +450,8 @@ impl BrowserPanel {
             // Sem página aberta o motor nem existe: o botão o faz nascer e a importação segue quando ele estiver pronto.
             self.import_pending = true;
             self.cookies_status = Some(tr("browser_cookies_starting"));
-            if self.engine.is_none() && self.starting.is_none() { self.go("about:blank".into(), window, cx); }
+            // `go` refaz o motor que falhou ou caiu.
+            if self.starting.is_none() { self.go("about:blank".into(), window, cx); }
             cx.notify();
             return;
         };
@@ -478,8 +489,14 @@ impl BrowserPanel {
     /// Lê os cookies do perfil escolhido em thread de fundo (cópia do banco e `sqlite3`).
     #[cfg(target_os = "linux")]
     fn read_disk_cookies(&mut self, source: crate::browser::chrome_import::disk::Source, cx: &mut Context<Self>) {
-        let Some(cdp) = self.cdp.clone() else { return };
         self.cookie_sources.clear();
+        let Some(cdp) = self.cdp.clone() else {
+            let reason = tr("browser_cookies_starting");
+            self.finish_login(Err(reason.clone()));
+            self.cookies_status = Some(reason);
+            cx.notify();
+            return;
+        };
         self.cookies_status = Some(tr("browser_cookies_reading").replace("{source}", &source.label));
         cx.notify();
         let fetch = cx.background_executor().spawn(async move {
@@ -511,10 +528,21 @@ impl BrowserPanel {
                 return;
             }
         };
-        let cookies = match &self.import_site {
+        let mut cookies = match &self.import_site {
             Some(site) => crate::browser::chrome_import::for_site(cookies, site),
             None => cookies,
         };
+        // Cookie do disco que a chave do chaveiro não abriu: conta por site, para o login que faltou não virar "nenhum cookie".
+        let before = cookies.len();
+        cookies.retain(|c| c.get("__locked").is_none());
+        let locked = before - cookies.len();
+        if cookies.is_empty() && locked > 0 {
+            let reason = tr("browser_cookies_keyring");
+            self.finish_login(Err(reason.clone()));
+            self.cookies_status = Some(reason);
+            cx.notify();
+            return;
+        }
         // 0 cookies não é sucesso: a pessoa vê "nenhum cookie", não "0 trazidos" parecendo que deu certo.
         if cookies.is_empty() {
             self.finish_login(Ok(0));
@@ -525,19 +553,30 @@ impl BrowserPanel {
             cx.notify();
             return;
         }
-        let count = cookies.len();
         let site = self.import_site.clone();
-        let set = cdp.call("Storage.setCookies", serde_json::json!({"cookies": cookies}));
         cx.spawn(async move |this, cx| {
-            let reply = set.await;
+            // O Chromium recusa o lote inteiro por um cookie inválido: aí vai um por um e só os recusados ficam de fora.
+            let total = cookies.len();
+            let reply = match cdp.call("Storage.setCookies", serde_json::json!({"cookies": cookies})).await {
+                Ok(_) => Ok(total),
+                Err(e) => {
+                    let mut written = 0;
+                    for cookie in &cookies {
+                        if cdp.call("Storage.setCookies", serde_json::json!({"cookies": [cookie]})).await.is_ok() { written += 1; }
+                    }
+                    if written > 0 { Ok(written) } else { Err(e) }
+                }
+            };
             let _ = this.update(cx, |this, cx| {
                 match reply {
-                    Ok(_) => {
+                    Ok(count) => {
                         this.finish_login(Ok(count));
-                        let done = match &site {
+                        let mut done = match &site {
                             Some(site) => tr("browser_login_ok_site").replace("{site}", site),
                             None => tr("browser_cookies_ok"),
                         }.replace("{n}", &count.to_string());
+                        let skipped = total - count + locked;
+                        if skipped > 0 { done = format!("{done} {}", tr("browser_cookies_partial").replace("{n}", &skipped.to_string())); }
                         this.cookies_status = Some(done.clone());
                         if let Some(engine) = this.engine() { engine.reload(); }
                         // Sucesso é aviso, não estado: some sozinho. Erro fica até a próxima tentativa.
@@ -701,7 +740,7 @@ impl Render for BrowserPanel {
                 .text_size(px(11.)).text_color(theme::muted()).whitespace_normal().child(text)));
         }
         #[cfg(not(target_os = "macos"))]
-        if let Some((site, _)) = &self.login_request {
+        if let Some((site, _)) = self.login_request.as_ref().filter(|(_, reply)| !reply.is_canceled()) {
             let text = match site {
                 Some(site) => tr("browser_login_agent_site").replace("{site}", site),
                 None => tr("browser_login_agent_all"),

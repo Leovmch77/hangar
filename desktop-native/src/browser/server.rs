@@ -12,7 +12,8 @@ const HEAD_MAX: usize = 16 * 1024;
 const BODY_MAX: usize = 128 * 1024;
 /// O verbo mais lento (wait, eval, shot) tem teto de 15 s; este cobre a fila de dois deles.
 const REPLY_SECS: u64 = 45;
-const LOGIN_SECS: u64 = 180;
+/// Abaixo dos 120 s em que o Bash do Claude Code mata um comando.
+const LOGIN_SECS: u64 = 110;
 
 pub enum Request {
     /// Verbo do `/cmd`, o do hangar-preview.
@@ -243,7 +244,7 @@ async fn answer(bytes: &[u8], requests: &async_channel::Sender<Request>) -> Stri
     // `login` espera a pessoa aprovar no painel e, às vezes, escolher o perfil.
     let secs = if verb_is_login { LOGIN_SECS } else { REPLY_SECS };
     match tokio::time::timeout(Duration::from_secs(secs), rx).await {
-        Err(_) if verb_is_login => format!("erro: ninguem aprovou o login no painel em {secs}s"),
+        Err(_) if verb_is_login => format!("erro: o login nao terminou no painel em {secs}s (aprovacao ou escolha de perfil pendente)"),
         Err(_) => format!("erro: o app nao respondeu em {secs}s"),
         Ok(Err(_)) => "erro: o navegador fechou no meio do comando".into(),
         Ok(Ok(Reply::Text(text))) => text,

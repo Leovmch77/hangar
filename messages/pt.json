@@ -4611,6 +4611,8 @@
   "native_browser_cookies_no_chrome": "Não achei Chrome, Edge, Chromium nem Brave instalado nesta máquina.",
   "native_browser_cookies_headless": "A porta tem um Chrome de automação (headless), não o seu.",
   "native_browser_cookies_error": "Não deu pra trazer o login: {e}",
+  "native_browser_login_agent_expired": "O pedido do agente já tinha expirado; nada foi trazido.",
+  "native_browser_cookies_partial": "{n} ficaram de fora (o chaveiro não abriu ou o navegador recusou).",
   "native_browser_login_agent_site": "O agente pede o seu login do Chrome em {site}. Ele só fica sabendo quantos cookies vieram.",
   "native_browser_login_agent_all": "O agente pede o seu login do Chrome em todos os sites. Ele só fica sabendo quantos cookies vieram.",
   "native_browser_login_agent_allow": "Permitir",

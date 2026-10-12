@@ -4611,6 +4611,8 @@
   "native_browser_cookies_no_chrome": "Couldn't find Chrome, Edge, Chromium or Brave installed on this machine.",
   "native_browser_cookies_headless": "That port has an automation (headless) Chrome, not yours.",
   "native_browser_cookies_error": "Couldn't bring the login: {e}",
+  "native_browser_login_agent_expired": "The agent's request had already expired; nothing was brought.",
+  "native_browser_cookies_partial": "{n} were left out (the keyring didn't open them or the browser refused them).",
   "native_browser_login_agent_site": "The agent asks for your Chrome login on {site}. It only learns how many cookies came.",
   "native_browser_login_agent_all": "The agent asks for your Chrome login on every site. It only learns how many cookies came.",
   "native_browser_login_agent_allow": "Allow",
