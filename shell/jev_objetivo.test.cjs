@@ -127,7 +127,7 @@ test('para quando a decisao nao esta confiante', () => {
   assert.match(decidir({}, CANDIDATOS).parar, /sem operacao/);
 });
 
-test('dois botoes de rotulo IDENTICO somam a massa e o primeiro vale', () => {
+test('dois botoes de rotulo IDENTICO somam a massa e o mais provavel vale', () => {
   const gemeos = parsarSnapshot(`- RootWebArea "Hangar"
   - button "Nova sessão" [ref=@e2]
   - button "Nova sessão" [ref=@e21]
@@ -140,7 +140,7 @@ test('dois botoes de rotulo IDENTICO somam a massa e o primeiro vale', () => {
   };
   const passo = decidir(r, gemeos);
   // Nenhum dos dois chega ao piso de 0.6 sozinho, e os dois abrem a mesma folha.
-  assert.equal(passo.alvo, 'e2');
+  assert.equal(passo.alvo, 'e21');
   assert.ok(passo.confianca >= 0.6);
 });
 
@@ -276,7 +276,8 @@ test('TYPE_TEXT pede o valor ao LLM pequeno, vendo o campo', async () => {
     perguntar: async () => (volta++ === 0 ? resposta({ op: 'TYPE_TEXT' }) : resposta({ op: 'DONE' })),
   });
   assert.ok(executados.includes('fill @e4 Jefferson Felizardo'), 'digita o valor sem o \\n');
-  assert.match(pedidos[0], /Campo a preencher: Nome do paciente/);
+  // Com outros campos vazios na tela o primeiro pedido é o de lote; resposta fora de JSON cai no unitário.
+  assert.ok(pedidos.some((p) => /Campos? a preencher: .*Nome do paciente/.test(p)), pedidos.join('\n---\n'));
 });
 
 test('TYPE_TEXT sem dados e sem modelo de texto para em vez de chutar', async () => {
@@ -685,4 +686,35 @@ test('askJev: status de erro vira "o Jev recusou"', async () => {
   } finally {
     srv.close();
   }
+});
+
+test('nomes de segredo: bordas com _ e só a chave de API, secreta ou privada', () => {
+  const { CHAVE_SECRETA } = require('./jev_objetivo.cjs');
+  for (const nome of ['Senha', 'otp_code', 'codigo_otp', 'pin_code', 'PIN', 'codigo_de_verificacao', 'Código de verificação',
+    'codigo2fa', 'CVV', 'Chave de API', 'chave_secreta', 'API key', 'Cartão de crédito']) {
+    assert.ok(CHAVE_SECRETA.test(nome), nome);
+  }
+  for (const nome of ['Chave PIX', 'Chave de acesso', 'Nome', 'Opinião', 'Spinner', 'Cartão SUS']) {
+    assert.ok(!CHAVE_SECRETA.test(nome), nome);
+  }
+});
+
+test('mascararValores: valor sem escape, número sem aspas e nome com aspas', () => {
+  const { mascararValores } = require('./jev_objetivo.cjs');
+  const arvore = [
+    '- textbox "Chave de API" [ref=@e1] value="ab"cd"',
+    '- textbox "PIN" [ref=@e2] value=123456',
+    '- textbox "Senha "do" cofre" [ref=@e3] value="99"',
+    '- textbox "Nome" [ref=@e4] value="Ana"',
+    '- textbox "Senha" [ref=@e5] value="termina\\"',
+    '- button "Salvar" [ref=@e6]',
+  ].join('\n');
+  assert.deepEqual(mascararValores(arvore).split('\n'), [
+    '- textbox "Chave de API" [ref=@e1] value="(oculto)"',
+    '- textbox "PIN" [ref=@e2] value="(oculto)"',
+    '- textbox "Senha "do" cofre" [ref=@e3] value="(oculto)"',
+    '- textbox "Nome" [ref=@e4] value="Ana"',
+    '- textbox "Senha" [ref=@e5] value="(oculto)"',
+    '- button "Salvar" [ref=@e6]',
+  ]);
 });

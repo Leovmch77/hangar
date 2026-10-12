@@ -190,6 +190,9 @@ pub fn fetch_cookies(port: Option<u16>) -> Result<Vec<Value>, ImportError> {
             Err(e) => last = keep_specific(last, e),
         }
     }
+    // O mesmo endereço duas vezes (perfil e porta fixa) faria o navegador perguntar de novo.
+    let mut seen = std::collections::HashSet::new();
+    candidates.retain(|ws| seen.insert(ws.clone()));
     for ws in candidates {
         for attempt in 0..2 {
             match cdp_once(&ws, "Storage.getCookies") {
@@ -439,6 +442,7 @@ mod passwords {
     use std::num::NonZeroU32;
     use std::path::{Path, PathBuf};
     use std::process::Command;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant, SystemTime};
 
@@ -566,34 +570,62 @@ mod passwords {
     }
 
     /// O que o chaveiro entregou: as chaves candidatas e se faltou o programa que o lê.
+    #[derive(Clone)]
     pub(super) struct Keys {
         pub list: Vec<Vec<u8>>,
         pub no_tool: bool,
     }
 
-    static KEYS: Mutex<Option<(Option<Instant>, Vec<Vec<u8>>)>> = Mutex::new(None);
+    static KEYS: Mutex<Option<(Option<Instant>, Keys)>> = Mutex::new(None);
+    /// Uma consulta ao chaveiro por vez: com ele trancado, cada uma abriria o seu pedido de senha.
+    static LOOKING: AtomicBool = AtomicBool::new(false);
+
+    struct Looking;
+    impl Drop for Looking {
+        fn drop(&mut self) { LOOKING.store(false, Ordering::Release); }
+    }
+
+    fn peanuts() -> Keys { Keys { list: vec![b"peanuts".to_vec()], no_tool: false } }
 
     /// Para o autofill de cada página: chave achada vale pelo processo; sem ela (chaveiro travado, sem `secret-tool`)
-    /// tenta de novo depois de 5 min, em vez de pedir a senha do chaveiro a cada página.
+    /// tenta de novo depois de 5 min, em vez de pedir a senha do chaveiro a cada página. Com outra consulta em
+    /// andamento, fica só com o literal.
     pub(super) fn keys() -> Vec<Vec<u8>> {
         if let Some((retry, keys)) = KEYS.lock().unwrap_or_else(|e| e.into_inner()).as_ref()
             && retry.is_none_or(|at| at.elapsed() < Duration::from_secs(300))
         {
-            return keys.clone();
+            return keys.list.clone();
         }
-        let keys = fresh_keys().list;
+        if LOOKING.swap(true, Ordering::AcqRel) { return peanuts().list; }
+        let _looking = Looking;
+        let keys = lookup().list;
         if keys.len() == 1 {
             eprintln!("[nav] autofill: chaveiro sem a chave do Chrome; nova tentativa em 5 min");
         }
         keys
     }
 
-    /// Para o clique da pessoa: o chaveiro que ela acabou de destrancar vale já, sem esperar a falta guardada.
-    /// A consulta roda fora da trava, para uma pergunta presa no chaveiro não segurar o autofill.
+    /// Para o clique da pessoa: o chaveiro que ela acabou de destrancar vale já, sem esperar a falta guardada. Com uma
+    /// consulta já em andamento, espera ela e usa o resultado em vez de abrir outro pedido de senha.
     pub(super) fn fresh_keys() -> Keys {
+        if LOOKING.swap(true, Ordering::AcqRel) {
+            let start = Instant::now();
+            while LOOKING.load(Ordering::Acquire) && start.elapsed() < KEYRING_WAIT * 7 {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            let found = KEYS.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map_or_else(peanuts, |(_, k)| k.clone());
+            // A consulta que terminou começou antes do clique: com falta, o chaveiro destrancado agora merece outra.
+            if found.list.len() > 1 || LOOKING.swap(true, Ordering::AcqRel) { return found; }
+        }
+        let _looking = Looking;
+        lookup()
+    }
+
+    /// A consulta roda fora da trava do cache, para uma pergunta presa no chaveiro não segurar quem só lê o cache.
+    fn lookup() -> Keys {
         let keys = key_candidates();
         let retry = (keys.list.len() == 1).then(Instant::now);
-        *KEYS.lock().unwrap_or_else(|e| e.into_inner()) = Some((retry, keys.list.clone()));
+        *KEYS.lock().unwrap_or_else(|e| e.into_inner()) = Some((retry, keys.clone()));
         keys
     }
 
@@ -603,9 +635,18 @@ mod passwords {
     /// `Ok(None)` quando passou do prazo (o processo é morto).
     fn output_within(cmd: &mut Command) -> std::io::Result<Option<std::process::Output>> {
         let mut child = cmd.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null()).spawn()?;
+            .stderr(std::process::Stdio::piped()).spawn()?;
         let start = Instant::now();
-        while child.try_wait()?.is_none() {
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) => {}
+                Err(e) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(e);
+                }
+            }
             if start.elapsed() >= KEYRING_WAIT {
                 let _ = child.kill();
                 let _ = child.wait();
@@ -614,7 +655,12 @@ mod passwords {
             }
             std::thread::sleep(Duration::from_millis(50));
         }
-        child.wait_with_output().map(Some)
+        let out = child.wait_with_output()?;
+        // `secret-tool` sai com 1 e sem texto quando só não tem a entrada (navegador não instalado): não é falha.
+        if !out.status.success() && !out.stderr.trim_ascii().is_empty() {
+            eprintln!("[nav] chaveiro: {:?} saiu com {}: {}", cmd.get_program(), out.status, String::from_utf8_lossy(&out.stderr).trim());
+        }
+        Ok(Some(out))
     }
 
     /// Chaves candidatas: o literal "peanuts" (armazenamento básico) e a do chaveiro ("Chrome Safe Storage"); perfis
