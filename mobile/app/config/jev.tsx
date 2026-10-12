@@ -100,11 +100,16 @@ export default function Jev() {
       .finally(() => { if (g === gen.current) setApplying(false); });
   };
 
-  const matching = fetchValid ? models.filter((id) => id !== model && (!model || id.toLowerCase().includes(model.toLowerCase()))) : [];
+  // O nome já escolhido conta como achado (só não repete na lista): "nenhum" só quando nada contém o texto.
+  const containing = fetchValid ? models.filter((id) => !model || id.toLowerCase().includes(model.toLowerCase())) : [];
+  const matching = containing.filter((id) => id !== model);
   const shown = matching.slice(0, SHOWN);
 
   return (
-    <ServerConfigPage title={m.jev_title()} cfg={cfg}>
+    // Releitura que falha depois do atalho troca a página pelo erro: o "gravado" fica embaixo dele.
+    <ServerConfigPage title={m.jev_title()} cfg={cfg} extra={cfg.load.status !== 'ready' && cliproxyMsg ? (
+      <Text accessibilityLiveRegion="polite" style={[styles.note, { color: cliproxyMsg.ok ? c.muted : failed }]}>{cliproxyMsg.text}</Text>
+    ) : null}>
       <Muted>{m.jev_intro()}</Muted>
 
       <BlockHead title={m.browser_jev_decisions_title()} help={m.browser_jev_decisions_help()} />
@@ -151,7 +156,7 @@ export default function Jev() {
             {!url ? <Muted>{m.browser_jev_aux_models_need_url()}</Muted> : null}
             {fetchValid && modelsError ? <Text accessibilityRole="alert" style={[styles.note, { color: failed }]}>{modelsError}</Text> : null}
             {fetchValid && models.length ? (
-              <Muted>{!matching.length ? m.browser_jev_aux_models_no_match()
+              <Muted>{!containing.length ? m.browser_jev_aux_models_no_match()
                 : matching.length > SHOWN ? m.browser_jev_aux_models_cut({ shown: String(SHOWN), n: String(matching.length) })
                 : m.browser_jev_aux_models_found({ n: String(models.length) })}</Muted>
             ) : null}
