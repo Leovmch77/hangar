@@ -21,6 +21,7 @@ _log = logging.getLogger("hangar.navshell")
 
 # O app espera até 45 s pela resposta do navegador (`REPLY_SECS` em `browser/server.rs`).
 TETO_S = 45.0
+PAUSADO = "o usuario pausou o navegador; espere ele clicar em Retomar no painel e tente de novo"
 
 
 class ShellIndisponivel(RuntimeError):
@@ -54,6 +55,13 @@ def esperar_pronto(name: str, desde_ms: int, teto_s: float = 20.0) -> str:
     ultimo = ""
     while time.monotonic() < prazo:
         sc = alvo_da_sessao(name, exige_alvo=False)
+        # Pausado pelo usuário, o app não navega: dizer na hora em vez de esgotar o prazo.
+        try:
+            pausado = bool(sc) and verbo(name, "estado").strip() == "pausado"
+        except ShellIndisponivel:
+            pausado = False
+        if pausado:
+            raise ShellIndisponivel(PAUSADO)
         if sc and int(sc.get("ts") or 0) >= desde_ms:
             try:
                 texto = verbo(name, "url")

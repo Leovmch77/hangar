@@ -49,6 +49,7 @@ import jev from '../shell/jev_objetivo.cjs';
 const CDP = 'http://127.0.0.1:9223';
 const DIR = join(homedir(), '.hangar', 'nav');
 const PRONTO_MS = 20_000;
+const PAUSADO = 'o usuario pausou o navegador; espere ele clicar em Retomar no painel e tente de novo';
 // Endereço do navegador da sessão, para a frase de reabertura quando o app cai no meio do comando.
 let urlAberta = '';
 const VERBOS_SERVIDOR = new Set([
@@ -295,6 +296,8 @@ if (cmd === 'open') {
   let ultimo = '';
   while (Date.now() < prazo) {
     const sc = lerSidecars().find((s) => s.chave === nome || s.chave.endsWith(`::${nome}`));
+    // Pausado pelo usuário, o app não navega: dizer na hora em vez de esgotar o prazo.
+    if (sc && (await chamar(sc.chave, 'estado', [])).texto.trim() === 'pausado') erro(PAUSADO);
     if (sc && (sc.ts ?? 0) >= desde) {
       try {
         const { texto, codigo } = await chamar(sc.chave, 'url', []);
