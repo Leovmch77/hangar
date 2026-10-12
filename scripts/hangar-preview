@@ -260,7 +260,7 @@ async function chamar(chave, verbo, cmdArgs, aba = flags.aba) {
     texto = await r.text();
   } catch (err) {
     // App fechado ou reiniciado (a atualização reinicia) no meio do comando: frase, não a pilha do Node.
-    const reabrir = urlAberta ? `hangar-preview open ${semToken(urlAberta)}` : 'hangar-preview open <url>';
+    const reabrir = urlAberta ? `hangar-preview open '${semToken(urlAberta)}'` : 'hangar-preview open <url>';
     erro(`o app desktop fechou ou reiniciou no meio do comando (${err.cause?.code || err.cause?.message || err.message}). Espere ele voltar e reabra o navegador com: ${reabrir}`);
   }
   // O servidor local responde SEMPRE 200 (é o texto que carrega erro: ...) — r.ok não basta.
@@ -438,14 +438,22 @@ function escritorDeTexto(env = process.env) {
   if (envTexto(env, 'JEV_TEXTO_BASE_URL') && envTexto(env, 'JEV_TEXTO_API_KEY')) {
     const base = envTexto(env, 'JEV_TEXTO_BASE_URL').replace(/\/$/, '');
     const modelo = envTexto(env, 'JEV_TEXTO_MODELO') || 'gpt-4o-mini';
+    const chave = envTexto(env, 'JEV_TEXTO_API_KEY');
     return async (pedido) => {
-      const r = await fetch(`${base}/chat/completions`, {
-        method: 'POST',
-        headers: { authorization: `Bearer ${envTexto(env, 'JEV_TEXTO_API_KEY')}`, 'content-type': 'application/json' },
-        body: JSON.stringify({ model: modelo, messages: [{ role: 'user', content: pedido }], max_tokens: 600 }),
-      });
-      if (!r.ok) erro(`o modelo de texto recusou: ${r.status} ${(await r.text()).slice(0, 200)}`);
-      return (await r.json()).choices?.[0]?.message?.content ?? '';
+      let r;
+      try {
+        r = await fetch(`${base}/chat/completions`, {
+          method: 'POST',
+          headers: { authorization: `Bearer ${chave}`, 'content-type': 'application/json' },
+          body: JSON.stringify({ model: modelo, messages: [{ role: 'user', content: pedido }], max_tokens: 600 }),
+          signal: AbortSignal.timeout(60_000),
+        });
+        if (!r.ok) erro(`o modelo de texto recusou: ${r.status} ${jev.semChave(await r.text(), chave).slice(0, 200)}`);
+        return (await r.json()).choices?.[0]?.message?.content ?? '';
+      } catch (err) {
+        erro(err?.name === 'TimeoutError' ? 'o modelo de texto não respondeu em 60 s'
+          : `o modelo de texto falhou: ${jev.semChave(String(err?.message), chave).slice(0, 200)}`);
+      }
     };
   }
   const cmd = (envTexto(env, 'JEV_TEXTO_CMD') || TEXTO_CMD_PADRAO).split(/\s+/);
@@ -514,7 +522,9 @@ if (cmd === 'confere') {
   // (helpers comuns).
   if (snap.codigo !== 0) erro(`o snapshot falhou: ${semToken(snap.texto.slice(0, 200))}`, 2);
   // A árvore vai ao Jev, fora da máquina: sem o token da URL.
-  let arvore = semToken(snap.texto);
+  // value="..." de campo com nome de segredo ("Chave de API", "Senha") não vai ao Jev.
+  let arvore = semToken(snap.texto).replace(/^(\s*-\s+\w+\s+"([^"]*)"[^\n]*?\s)value="(?:[^"\\]|\\.)*"/gm,
+    (linha, inicio, nome) => (jev.CHAVE_SECRETA.test(nome) ? `${inicio}value="(oculto)"` : linha));
   // A prova pode estar no topo ou no fim da página; o miolo de uma lista longa é repetição.
   if (arvore.length > 100_000) arvore = `${arvore.slice(0, 50_000)}\n…\n${arvore.slice(-50_000)}`;
   let respostas;
@@ -572,18 +582,20 @@ if (cmd === 'objetivo') {
       const { texto, codigo } = await chamar(chave, verbo, []);
       if (codigo !== 0) return `indisponivel (${semToken(texto.slice(0, 120))})`;
       const t = texto.replace(/^ok:\s*/, '').trim();
-      return semToken(t.startsWith('"') ? JSON.parse(t) : t);
+      // Só a url vem como literal JSON; o texto da página pode começar com aspas de verdade.
+      return semToken(verbo === 'url' && t.startsWith('"') ? JSON.parse(t) : t);
     } catch (err) {
       return `indisponivel (${String(err?.message).slice(0, 120)})`;
     }
   };
+  // Linha legível por máquina: quem chamou reinvoca com esse dado em --dados, sem interpretar a
+  // frase acima. A página fica onde parou, então a segunda chamada continua dali. Sai antes das
+  // leituras finais: se o app cair nelas, o resultado do laço já foi dito.
+  if (resultado.falta) console.log(`falta-dado: ${resultado.falta}`);
+  console.log(resultado.feito.length ? `acoes: ${resultado.feito.length}` : 'nenhuma acao executada');
   console.log(`url: ${await leitura('url')}`);
   const textoFinal = (await leitura('text')).replace(/\s+/g, ' ').trim();
   console.log(`texto: ${textoFinal.length > 300 ? `${textoFinal.slice(0, 300)}…` : textoFinal}`);
-  // Linha legível por máquina: quem chamou reinvoca com esse dado em --dados, sem interpretar a
-  // frase acima. A página fica onde parou, então a segunda chamada continua dali.
-  if (resultado.falta) console.log(`falta-dado: ${resultado.falta}`);
-  console.log(resultado.feito.length ? `acoes: ${resultado.feito.length}` : 'nenhuma acao executada');
   // Código de saída é o que um script encadeando este comando lê. Sair 0 numa parada por teto de
   // passos ou por alvo sem confiança faria a automação seguir como se tivesse dado certo. O campo
   // `sucesso` vem do laço de propósito: amarrar isto ao texto de `parou` quebraria calado na

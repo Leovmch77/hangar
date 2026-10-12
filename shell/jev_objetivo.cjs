@@ -96,7 +96,7 @@ function sinonimos(head, candidatos) {
   // contra 0,33). O risco continua julgado sobre o vencedor.
   // So para botao/link, e o resto nao pode acrescentar outro ato ("Salvar e enviar" nao e "Salvar").
   const prefixo = (curto, longo) => longo.startsWith(`${curto} `)
-    && !/^(e|and|\+|&)\b/i.test(longo.slice(curto.length + 1));
+    && !/^(?:(?:e|and)\b|[+&])/i.test(longo.slice(curto.length + 1));
   const mesmoAto = (a, b) => a === b
     || (PAPEIS_QUE_ENVIAM.has(vencedor.papel) && (prefixo(a, b) || prefixo(b, a)));
   const iguais = candidatos.filter((c) => c.papel === vencedor.papel && mesmoAto(c.nome, vencedor.nome));
@@ -110,7 +110,7 @@ function sinonimos(head, candidatos) {
   return { ref: maisProvavel.ref, massa: iguais.reduce((s, c) => s + (p[c.ref] ?? 0), 0) };
 }
 
-const CHAVE_SECRETA = /senha|password|passwd|token|secret|api[-_ ]?key|cart[aã]o|cvv|cvc|\bpin\b|\botp\b/i;
+const CHAVE_SECRETA = /senha|password|passwd|token|secret|segredo|api[-_ ]?key|chave|credencial|cart[aã]o|cvv|cvc|\bpin\b|\botp\b|c[oó]digo de verifica/i;
 
 /** Extrai os elementos acionáveis da árvore de acessibilidade do `snapshot`. */
 // Uma vaga a menos que o teto: todo head de alvo leva também a opção `_nenhum`.
@@ -684,13 +684,20 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
     // Logo depois de um `open` ou de um clique que navega, a arvore ainda e a da pagina em branco.
     if (!candidatos.length && !esperouCarregar) {
       esperouCarregar = true;
-      await executar('wait', ESPERA_ASSENTAR);
+      // Página em branco não é ação recém-feita: o carregamento inteiro pode levar segundos.
+      await executar('wait', ['--idle', '--timeout', '5000']);
       passo -= 1;
       continue;
     }
     if (candidatos.length) esperouCarregar = false;
     const cofre = dados && typeof dados === 'object' ? dados : {};
     const anotacao = anotacaoLida;
+    // Campo sem nome de segredo pode estar com um valor secreto vindo de --dados ("Código de
+    // verificação" <- otp): esse valor não sai da máquina no estado.
+    const segredos = new Set(Object.entries(cofre).filter(([k, v]) => ehSegredo(k) && typeof v === 'string' && v).map(([, v]) => v));
+    if (segredos.size) {
+      for (const [k, v] of Object.entries(anotacao.valores)) if (segredos.has(v)) anotacao.valores[k] = '(oculto)';
+    }
     const estado = montarEstado(objetivo, url, feito, texto, anotacao, cofre);
     if (!candidatos.length) {
       // Página de sucesso costuma não ter nada clicável: DONE ainda precisa ser perguntado, e com
@@ -839,7 +846,8 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
           escreverTexto,
         });
         if (parou) return { feito, sucesso: false, parou, falta };
-        const mostrado = ehSegredo(decisao.escolhido.nome) ? '(oculto)' : valor.slice(0, 40);
+        const mostrado = ehSegredo(decisao.escolhido.nome) || (origem.startsWith('dados.') && ehSegredo(origem.slice(6)))
+          ? '(oculto)' : valor.slice(0, 40);
         log(`jev-objetivo passo ${passo}: TYPE_TEXT @${decisao.alvo} ("${decisao.escolhido.nome}" <- ${mostrado} via ${origem}) conf=${decisao.confianca.toFixed(2)}`);
         if (ehEditavel(decisao.escolhido, anotacao.editaveis)) {
           // O campo de busca do popover nao tem nome acessivel, entao nao tem ref: o caminho e abrir
@@ -883,7 +891,7 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
           if (usados.has(chave)) continue;
           if (atual(c) === cofre[chave]) continue;
           usados.add(chave);
-          log(`jev-objetivo passo ${passo}: TYPE_TEXT @${c.ref} ("${c.nome}" <- ${ehSegredo(c.nome) ? '(oculto)' : cofre[chave].slice(0, 40)} via dados.${chave}) conf=${forca(v).toFixed(2)} (mesmo pedido)`);
+          log(`jev-objetivo passo ${passo}: TYPE_TEXT @${c.ref} ("${c.nome}" <- ${ehSegredo(c.nome) || ehSegredo(chave) ? '(oculto)' : cofre[chave].slice(0, 40)} via dados.${chave}) conf=${forca(v).toFixed(2)} (mesmo pedido)`);
           await agir('fill', [`@${c.ref}`, cofre[chave]]);
           feito.push(`TYPE_TEXT "${c.nome}"`);
         }
@@ -958,6 +966,8 @@ function destinoDoJev(env) {
 
 const JEV_DEADLINE_MS = 15_000;
 
+const semChave = (texto, chave) => (chave ? String(texto).split(chave).join('***') : String(texto));
+
 // Endpoint pendurado prendia o comando pra sempre, e um `until hangar-preview confere` parava calado.
 async function askJev({ url, modelo, chave, estado, perguntas, deadlineMs = JEV_DEADLINE_MS }) {
   let r;
@@ -971,11 +981,12 @@ async function askJev({ url, modelo, chave, estado, perguntas, deadlineMs = JEV_
     });
     corpo = await r.text();
   } catch (err) {
+    // A mensagem do fetch repete o cabeçalho quando a chave tem caractere inválido.
     throw new Error(err?.name === 'TimeoutError'
       ? `o Jev não respondeu em ${deadlineMs / 1000} s`
-      : `o Jev falhou: ${String(err?.message).slice(0, 200)}`);
+      : `o Jev falhou: ${semChave(String(err?.message), chave).slice(0, 200)}`);
   }
-  if (!r.ok) throw new Error(`o Jev recusou: ${r.status} ${corpo.slice(0, 200)}`);
+  if (!r.ok) throw new Error(`o Jev recusou: ${r.status} ${semChave(corpo, chave).slice(0, 200)}`);
   try {
     return JSON.parse(corpo).answers;
   } catch (err) {
@@ -987,5 +998,5 @@ module.exports = {
   parsarSnapshot, montarPerguntas, montarEstado, decidir, rodar, pedidoDeTexto,
   valorDoCampo, cabecaDoValor, jsDeSelecionar, jsDeEstarAberto, normalizar,
   perguntaDeConfere, chegouNoEstado, destinoDoJev, askJev,
-  LIMIARES, NENHUM, OPERACOES, SEM_SELECT, MAX_CANDIDATOS,
+  LIMIARES, NENHUM, OPERACOES, SEM_SELECT, MAX_CANDIDATOS, CHAVE_SECRETA, semChave,
 };
