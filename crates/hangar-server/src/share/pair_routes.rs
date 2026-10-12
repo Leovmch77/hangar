@@ -366,10 +366,15 @@ async fn pair_access(State(st): St, Path(name): Path<String>, bytes: Bytes) -> R
     }
     // A sessão pode ter saído do grupo enquanto o nível era gravado; a saída já tirou o acesso, e o
     // grant que veio depois o devolveria. Relê e desfaz o que deixou de valer.
-    let still: Vec<String> = match mine().await { Ok(r) => r.into_iter().map(|r| r.share_id).collect(), Err(r) => return r };
+    // Sem conseguir reler, fecha: o dono repete o "Liberar".
+    let (still, failed) = match mine().await {
+        Ok(r) => (r.into_iter().map(|r| r.share_id).collect::<Vec<_>>(), None),
+        Err(r) => (Vec::new(), Some(r)),
+    };
     for rec in recs.iter().filter(|r| !still.contains(&r.share_id)) {
         if let Err(e) = share.store.ungrant(&rec.share_id, &name) { return io_failed(e) }
     }
+    if let Some(r) = failed { return r }
     if still.is_empty() {
         return detail(StatusCode::NOT_FOUND, "erro_par_inexistente", "este par externo não existe", json!({}));
     }
