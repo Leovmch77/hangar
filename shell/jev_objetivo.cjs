@@ -26,6 +26,9 @@ const PAPEIS_INTERATIVOS = new Set([
 const MAX_CANDIDATOS = 255;
 const PAPEIS_QUE_ENVIAM = new Set(['button', 'link', 'menuitem']);
 const NENHUM = '_nenhum';
+// Só as linhas acionáveis, sem o teto de 24 mil caracteres: com o teto, os elementos depois do corte
+// sumiam da lista de alvos e a reconferência da ref dava "sumiu". Quem não conhece os flags os ignora.
+const SNAPSHOT_DO_LACO = ['--refs', '--max', '1000000'];
 
 /** O rótulo da página traz o asterisco de obrigatório, o da árvore de acessibilidade não. */
 const normalizar = (nome) => String(nome).replace(/\s*\*\s*$/, '').trim().toLowerCase();
@@ -547,7 +550,7 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
   let esperouCarregar = false;
   for (let passo = 1; passo <= maxPassos; passo += 1) {
     const [snapshot, url, texto] = [
-      await executar('snapshot', []),
+      await executar('snapshot', SNAPSHOT_DO_LACO),
       await executar('url', []),
       await executar('text', []),
     ];
@@ -592,7 +595,7 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
     // decisao passa uma requisicao ao Jev, tempo de sobra para a pagina redesenhar — entao o nome
     // da ref escolhida e reconferido antes de agir.
     if (decisao.escolhido) {
-      const agora = parsarSnapshot(await executar('snapshot', []));
+      const agora = parsarSnapshot(await executar('snapshot', SNAPSHOT_DO_LACO));
       const mesmo = agora.find((c) => c.ref === decisao.alvo);
       if (!mesmo || mesmo.nome !== decisao.escolhido.nome) {
         log(`jev-objetivo passo ${passo}: @${decisao.alvo} mudou de "${decisao.escolhido.nome}" para "${mesmo?.nome ?? '(sumiu)'}" — reobservando`);

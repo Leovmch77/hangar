@@ -449,7 +449,8 @@ if (cmd === 'confere') {
   const chaveJev = process.env.TYPESAFE_API_KEY;
   if (!chaveJev) erro(semJev(), 2);
   const chave = sidecarDa(nomeSessao()).chave;
-  const snap = await chamar(chave, 'snapshot', []);
+  // O corte daqui (100 mil, cabeça e cauda) é o que vale; o teto padrão do snapshot cortaria antes.
+  const snap = await chamar(chave, 'snapshot', ['--max', '100000']);
   // Falta de chave, erro do snapshot e da chamada ao Jev saem 2: com 1, um laço `until confere`
   // giraria achando que a tela só não chegou lá. Navegador fechado ou shell fora do ar ainda saem 1
   // (helpers comuns).
