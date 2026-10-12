@@ -98,14 +98,17 @@ def _url_do_navegador(nav_dir: str, nome: str) -> str | None:
 
 
 def texto(url: str | None) -> str:
+    # Com o Jev na sessão, várias ações numa tela desconhecida vão numa chamada só.
+    jev = (" Várias ações numa tela que você não conhece: `browser_goal` (= `hangar-preview objetivo`)."
+           if os.environ.get("HANGAR_JEV") == "on" else "")
     if url:
         return (f"[hangar] Esta sessão tem o navegador embutido do Hangar aberto em {url}. Pra ver, "
                 "ler, clicar, testar ou tirar print dessa página, use as tools `browser`/`browser_batch` "
-                "do MCP hangar (sem elas: `hangar-preview` no shell), não agent-browser nem ver-front.")
+                f"do MCP hangar (sem elas: `hangar-preview` no shell; skill hangar-preview), não "
+                f"agent-browser nem ver-front.{jev}")
     return ("[hangar] Pra ver, testar ou tirar print de uma página, use o navegador embutido do Hangar: "
             "tools `browser_open`/`browser`/`browser_batch` do MCP hangar (sem elas: `hangar-preview "
-            "open <url>` no shell, skill hangar-preview). Não use agent-browser nem ver-front. Abrir "
-            "muda a janela do usuário: avise-o.")
+            f"open <url>` no shell; skill hangar-preview). Não use agent-browser nem ver-front.{jev}")
 
 
 # Sem Jev, é a regex que decide se a mensagem tem cara de tarefa de tela. Palavra que aparece
@@ -118,6 +121,7 @@ _TELA = re.compile(
 # Notificação de subagente chega como prompt, mas ninguém a escreveu pedindo tela.
 _NAO_E_PEDIDO = ("<task-notification", "[SYSTEM NOTIFICATION")
 JEV_URL = "https://api.typesafe.ai/v1/systemone"
+JEV_OPENROUTER_URL = "https://openrouter.ai/api/alpha/decisions"
 JEV_TIMEOUT_S = 2.0
 JEV_LIMIAR = 0.5
 
@@ -134,9 +138,15 @@ def _jev_precisa(prompt: str) -> bool | None:
     pergunta = {"precisa": {"type": "noul", "instructions": (
         "Will handling this message require opening, looking at, clicking or testing a web page or "
         "an app screen in a browser?")}}
+    # Mesma regra de `runtime_config.destino_jev`: chave do OpenRouter sem endereço vai ao OpenRouter.
+    endpoint, modelo = os.environ.get("JEV_ENDPOINT") or "", os.environ.get("JEV_MODEL") or ""
+    if "openrouter.ai" in endpoint or (not endpoint and key.startswith("sk-or-")):
+        endpoint, modelo = endpoint or JEV_OPENROUTER_URL, modelo or "~typesafe/jev-latest"
+        if modelo.startswith("typesafe/") and modelo.endswith("-latest"):
+            modelo = "~" + modelo
     req = urllib.request.Request(
-        os.environ.get("JEV_ENDPOINT") or JEV_URL,
-        data=json.dumps({"model": os.environ.get("JEV_MODEL") or "jev-latest",
+        endpoint or JEV_URL,
+        data=json.dumps({"model": modelo or "jev-latest",
                          "state": prompt[-4000:], "questions": pergunta}).encode(),
         headers={"authorization": f"Bearer {key}", "content-type": "application/json"})
     try:
