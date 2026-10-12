@@ -891,6 +891,31 @@ e resgata cada convite novo mandando o token que já tem: o backend acrescenta a
 token (01/10/2026, pedido do usuário; antes o mais novo substituía o anterior). Endereço que já é
 servidor próprio recusa o resgate. PWA e app Expo seguem com um convite por endereço.
 
+## Link de convite só aparece conferido de fora
+
+(11/10/2026, pedido do usuário.) O link de convite e o de par saíam assim que o Funnel era ligado.
+Quem recebia abria antes de o nome `*.ts.net` existir no DNS público, não conseguia acessar, e o
+DNS do provedor dele guardava a resposta "não existe" por mais um tempo. O dono só descobria
+quando a outra pessoa reclamava.
+
+Regra: os clientes (nativo e PWA) só mostram um link `https://…:8443/(convite|par)/…` depois que a
+rota do Rust `POST /api/share/reachability` responde `ok`. A rota espera no servidor, conferindo a
+cada 5 s por até 3 min:
+
+1. O nome do link no DNS público, por DNS-over-HTTPS (Cloudflare e Google; basta um). O DNS da
+   máquina não serve: na tailnet o MagicDNS sempre responde.
+2. A página do link pedida pelo IP público, com o nome no TLS e certificado conferido, sem seguir
+   redirecionamento, com 200 e corpo idêntico ao da mesma página pedida em `127.0.0.1:8766`. O
+   Funnel também chega por loopback, então a página só sai igual se quem respondeu foi esta
+   máquina.
+
+A rota só aceita link com o nome Tailscale desta máquina (`tailscale status --json`), para não virar
+cliente HTTP genérico. Link local (`http://<ip>:8766`) não é conferido. Sem o Rust (modo `python`),
+o Python responde 404 (ou 405, quando serve o `frontend/dist` na raiz) e o cliente diz que a conferência precisa do servidor Rust, sem mostrar o link.
+
+Limite: DNS de provedor que já guardou "não existe" ainda atrasa do outro lado. A conferência
+garante que o link só nasce com o nome já público, que era o caso real.
+
 ## Par externo: sessões de pessoas diferentes
 
 (01/10/2026, pedido do usuário.) Duas pessoas, cada uma no seu Hangar e na sua tailnet, pareiam

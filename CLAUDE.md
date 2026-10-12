@@ -449,6 +449,9 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
   o token do dono.** Confiança = usuário do sistema do dono. No servidor de convite, 410 e 401 são
   "encerrado" (nunca apagar o servidor nem abrir login) e 503 é tentar de novo. Motivo em
   [plataforma.md](docs/decisoes/plataforma.md#compartilhar-sessão-a-porta-do-convidado-é-a-única-na-internet).
+- **Link de convite pelo Funnel só aparece conferido de fora.** `POST /api/share/reachability`
+  (Rust) espera o nome no DNS público e a página do Funnel igual à de `127.0.0.1:8766`; nativo e
+  PWA não mostram o link antes. Evidência em [plataforma.md](docs/decisoes/plataforma.md#link-de-convite-só-aparece-conferido-de-fora).
 - **Par externo: o token de entrada é um `Share` de `kind: "pair"` (só leitura), o de saída mora
   em `external_pairs.json`.** Só endereço `https://*.ts.net:8443`; quem assina o recado é o token
   (`[de fora: alias::sessao]`), nunca o texto; só 410 desfaz o par; nome de sessão de fora é
