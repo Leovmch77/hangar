@@ -589,23 +589,33 @@ impl Engine {
         if self.visible.replace(false) { self.send("Page.stopScreencast", json!({})); }
     }
 
-    /// `at` relativo à origem da página, em px lógicos. Só o botão esquerdo.
-    pub fn pointer(&self, kind: Pointer, at: Point<Pixels>, clicks: usize) {
+    /// `at` relativo à origem da página, em px lógicos. Botão esquerdo, sem modificador.
+    pub fn pointer(&self, kind: Pointer, at: Point<Pixels>, clicks: usize) { self.mouse(kind, MouseButton::Left, at, clicks, &Modifiers::default()) }
+
+    /// Qualquer botão, com os modificadores. O `clickCount` da soltura repete o do aperto: sem ele o Chromium não
+    /// dispara `dblclick`. Arrasto só se acompanha com o esquerdo.
+    pub fn mouse(&self, kind: Pointer, button: MouseButton, at: Point<Pixels>, clicks: usize, modifiers: &Modifiers) {
         let (x, y) = (f32::from(at.x) as f64, f32::from(at.y) as f64);
-        let (kind, button, clicks) = match kind {
-            Pointer::Down => { self.pressed.set(true); ("mousePressed", "left", clicks.max(1)) }
-            Pointer::Up => { self.pressed.set(false); ("mouseReleased", "left", 1) }
-            Pointer::Move => ("mouseMoved", if self.pressed.get() { "left" } else { "none" }, 0),
+        let (name, bit) = match button { MouseButton::Right => ("right", 2), MouseButton::Middle => ("middle", 4), _ => ("left", 1) };
+        let left = name == "left";
+        let (kind, button, buttons, clicks) = match kind {
+            Pointer::Down => { if left { self.pressed.set(true) } ("mousePressed", name, bit, clicks.max(1)) }
+            Pointer::Up => { if left { self.pressed.set(false) } ("mouseReleased", name, 0, clicks.max(1)) }
+            Pointer::Move if self.pressed.get() => ("mouseMoved", "left", 1, 0),
+            Pointer::Move => ("mouseMoved", "none", 0, 0),
         };
-        let buttons = if self.pressed.get() { 1 } else { 0 };
-        self.send("Input.dispatchMouseEvent", json!({"type": kind, "x": x, "y": y, "button": button, "buttons": buttons, "clickCount": clicks}));
+        self.send("Input.dispatchMouseEvent", json!({"type": kind, "x": x, "y": y, "button": button, "buttons": buttons,
+            "clickCount": clicks, "modifiers": modifier_bits(modifiers)}));
     }
 
     /// `delta` em px lógicos; `delta.y > 0` avança a página. Quem chama já inverteu o sinal da GPUI.
-    pub fn wheel(&self, at: Point<Pixels>, delta: Point<Pixels>) {
+    pub fn wheel(&self, at: Point<Pixels>, delta: Point<Pixels>) { self.scroll(at, delta, &Modifiers::default()) }
+
+    /// Com modificadores: Ctrl+roda é zoom da página e Shift+roda rola de lado.
+    pub fn scroll(&self, at: Point<Pixels>, delta: Point<Pixels>, modifiers: &Modifiers) {
         self.send("Input.dispatchMouseEvent", json!({
             "type": "mouseWheel", "x": f32::from(at.x), "y": f32::from(at.y),
-            "deltaX": f32::from(delta.x), "deltaY": f32::from(delta.y), "button": "none",
+            "deltaX": f32::from(delta.x), "deltaY": f32::from(delta.y), "button": "none", "modifiers": modifier_bits(modifiers),
         }));
     }
 
@@ -646,9 +656,26 @@ impl Drop for Engine {
 
 /// Tecla da GPUI → `Input.dispatchKeyEvent`. Texto digitado vence, para "ç"/"ã" de tecla morta; tecla morta ainda
 /// compondo (sem texto) não vai à página.
+fn modifier_bits(m: &Modifiers) -> u8 {
+    [(m.alt, 1), (m.control, 2), (m.platform, 4), (m.shift, 8)].iter().filter(|(on, _)| *on).fold(0, |a, (_, b)| a | b)
+}
+
+/// `code` e `keyCode` da pontuação como no teclado americano, que é o que o Chromium reporta sem saber a tecla
+/// física: atalho de página que lê `e.code`/`e.keyCode` ("/" para buscar, "-" para diminuir) volta a funcionar.
+fn punctuation(c: char) -> Option<(&'static str, u32)> {
+    Some(match c {
+        ';' | ':' => ("Semicolon", 186), '=' | '+' => ("Equal", 187), ',' | '<' => ("Comma", 188), '-' | '_' => ("Minus", 189),
+        '.' | '>' => ("Period", 190), '/' | '?' => ("Slash", 191), '`' | '~' => ("Backquote", 192), '[' | '{' => ("BracketLeft", 219),
+        '\\' | '|' => ("Backslash", 220), ']' | '}' => ("BracketRight", 221), '\'' | '"' => ("Quote", 222),
+        '!' => ("Digit1", 49), '@' => ("Digit2", 50), '#' => ("Digit3", 51), '$' => ("Digit4", 52), '%' => ("Digit5", 53),
+        '^' => ("Digit6", 54), '&' => ("Digit7", 55), '*' => ("Digit8", 56), '(' => ("Digit9", 57), ')' => ("Digit0", 48),
+        _ => return None,
+    })
+}
+
 fn key_event(down: bool, keystroke: &Keystroke) -> Option<Value> {
     let m = &keystroke.modifiers;
-    let modifiers = [(m.alt, 1), (m.control, 2), (m.platform, 4), (m.shift, 8)].iter().filter(|(on, _)| *on).fold(0, |a, (_, b)| a | b);
+    let modifiers = modifier_bits(m);
     let typed = keystroke.key_char.as_deref().filter(|_| !m.control && !m.alt).and_then(single_char).filter(|c| !c.is_control());
     let named = match keystroke.key.as_str() {
         "enter" => Some("Enter"), "backspace" => Some("Backspace"), "delete" => Some("Delete"), "escape" => Some("Escape"),
@@ -661,8 +688,14 @@ fn key_event(down: bool, keystroke: &Keystroke) -> Option<Value> {
         crate::browser::preview_fmt::key_event(name)
     } else if let Some(c) = typed {
         let text = c.to_string();
-        let vk = if c.is_ascii_alphanumeric() { c.to_ascii_uppercase() as u32 } else if c == ' ' { 32 } else { 0 };
-        json!({"key": text, "text": text, "unmodifiedText": text, "windowsVirtualKeyCode": vk})
+        let upper = c.to_ascii_uppercase();
+        let (code, vk) = match c {
+            _ if upper.is_ascii_alphabetic() => (format!("Key{upper}"), upper as u32),
+            _ if c.is_ascii_digit() => (format!("Digit{c}"), c as u32),
+            ' ' => ("Space".into(), 32),
+            _ => punctuation(c).map_or((String::new(), 0), |(code, vk)| (code.into(), vk)),
+        };
+        json!({"key": text, "code": code, "text": text, "unmodifiedText": text, "windowsVirtualKeyCode": vk})
     } else if m.control || m.alt {
         // Ctrl/Alt + letra: atalho da página (Ctrl+A, Ctrl+Z), sem texto.
         let c = single_char(&keystroke.key)?;

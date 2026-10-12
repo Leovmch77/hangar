@@ -60,6 +60,7 @@ pub struct Controller<P: Page> {
     wanted_hidden: Cell<bool>,
     paused: Cell<bool>,
     on_activity: RefCell<Option<Box<dyn Fn(Activity)>>>,
+    on_layout: RefCell<Option<Box<dyn Fn(Option<(u32, u32)>)>>>,
 }
 
 fn push(list: &mut VecDeque<String>, line: String) {
@@ -69,7 +70,7 @@ fn push(list: &mut VecDeque<String>, line: String) {
 
 impl<P: Page> Controller<P> {
     pub fn new(page: P, hidden: bool) -> Self {
-        Self { page, turn: Mutex::new(()), wanted_hidden: Cell::new(hidden), paused: Cell::new(false), on_activity: RefCell::new(None), state: RefCell::new(State { refs: HashMap::new(), console: VecDeque::new(),
+        Self { page, turn: Mutex::new(()), wanted_hidden: Cell::new(hidden), paused: Cell::new(false), on_activity: RefCell::new(None), on_layout: RefCell::new(None), state: RefCell::new(State { refs: HashMap::new(), console: VecDeque::new(),
             network: VecDeque::new(), inflight: 0, last_network: Instant::now(), theme: "sistema", layout: Layout::Desktop,
             hidden: false, navigated: false, enabled: HashSet::new() }) }
     }
@@ -99,6 +100,9 @@ impl<P: Page> Controller<P> {
     pub fn set_paused(&self, paused: bool) { self.paused.set(paused); }
 
     pub fn on_activity(&self, f: impl Fn(Activity) + 'static) { *self.on_activity.borrow_mut() = Some(Box::new(f)); }
+
+    /// Tela emulada (`layout mobile` ou `<l> <a>`), para o painel desenhá-la na proporção certa; `None` = a do painel.
+    pub fn on_layout(&self, f: impl Fn(Option<(u32, u32)>) + 'static) { *self.on_layout.borrow_mut() = Some(Box::new(f)); }
 
     fn report(&self, verb: &str, target: Option<String>) {
         if let Some(f) = self.on_activity.borrow().as_ref() { f(Activity { verb: verb.into(), target }); }
@@ -442,6 +446,8 @@ impl<P: Page> Controller<P> {
             return Ok(format!("erro: layout {}: {e}", args.join(" ")));
         }
         self.state.borrow_mut().layout = wanted;
+        let screen = match wanted { Layout::Mobile => Some((390, 844)), Layout::Custom(w, h) => Some((w, h)), Layout::Desktop => None };
+        if let Some(f) = self.on_layout.borrow().as_ref() { f(screen); }
         Ok(format!("layout: {}", wanted.label()))
     }
 
