@@ -620,13 +620,17 @@ test('confere: noul no piso da conclusao passa; abaixo, torto ou ausente nao', (
   assert.deepEqual(chegouNoEstado(undefined), { p: 0, ok: false });
 });
 
-test('destino do Jev: endpoint e modelo do ambiente vencem o padrao', () => {
-  assert.deepEqual(destinoDoJev({}, 'jev-latest'),
+test('destino do Jev: mesma regra do destino_jev do backend', () => {
+  assert.deepEqual(destinoDoJev({}),
     { url: 'https://api.typesafe.ai/v1/systemone', modelo: 'jev-latest' });
-  assert.deepEqual(destinoDoJev({ JEV_ENDPOINT: 'https://openrouter.ai/api/alpha/decisions', JEV_MODEL: 'typesafe/jev-1.13-20260917' }, 'jev-latest'),
+  assert.deepEqual(destinoDoJev({ JEV_ENDPOINT: 'https://openrouter.ai/api/alpha/decisions', JEV_MODEL: 'typesafe/jev-1.13-20260917' }),
     { url: 'https://openrouter.ai/api/alpha/decisions', modelo: 'typesafe/jev-1.13-20260917' });
-  assert.deepEqual(destinoDoJev({ JEV_ENDPOINT: '  ', JEV_MODEL: '' }, 'jev-1.13.0'),
-    { url: 'https://api.typesafe.ai/v1/systemone', modelo: 'jev-1.13.0' });
+  assert.deepEqual(destinoDoJev({ JEV_ENDPOINT: '  ', JEV_MODEL: '' }),
+    { url: 'https://api.typesafe.ai/v1/systemone', modelo: 'jev-latest' });
+  assert.deepEqual(destinoDoJev({ TYPESAFE_API_KEY: 'sk-or-x' }),
+    { url: 'https://openrouter.ai/api/alpha/decisions', modelo: '~typesafe/jev-latest' });
+  assert.deepEqual(destinoDoJev({ TYPESAFE_API_KEY: 'sk-or-x', JEV_MODEL: 'typesafe/jev-latest' }),
+    { url: 'https://openrouter.ai/api/alpha/decisions', modelo: '~typesafe/jev-latest' });
 });
 
 const http = require('node:http');

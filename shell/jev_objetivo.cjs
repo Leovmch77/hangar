@@ -683,13 +683,26 @@ function chegouNoEstado(respostas) {
   return typeof p === 'number' ? { p, ok: p >= LIMIARES.conclusao } : { p: 0, ok: false };
 }
 
-const JEV_URL_PADRAO = 'https://api.typesafe.ai/v1/systemone';
+const JEV_TYPESAFE_URL = 'https://api.typesafe.ai/v1/systemone';
+const JEV_TYPESAFE_MODELO = 'jev-latest';
+const JEV_OPENROUTER_URL = 'https://openrouter.ai/api/alpha/decisions';
+const JEV_OPENROUTER_MODELO = '~typesafe/jev-latest';
 
-/** Endereço e modelo do Jev: os da configuração do servidor (injetados na sessão) ou o padrão. */
-function destinoDoJev(env, modeloPadrao) {
-  const url = String(env.JEV_ENDPOINT ?? '').trim() || JEV_URL_PADRAO;
-  const modelo = String(env.JEV_MODEL ?? '').trim() || modeloPadrao;
-  return { url, modelo };
+/**
+ * Endereço e modelo do Jev. O backend já injeta o par resolvido; esta é a mesma regra do
+ * `destino_jev` (runtime_config.py) para quem pôs só TYPESAFE_API_KEY no ambiente — uma chave
+ * `sk-or-` sem endereço ia para a typesafe.ai e era recusada.
+ */
+function destinoDoJev(env) {
+  const chave = String(env.TYPESAFE_API_KEY ?? '').trim();
+  const endpoint = String(env.JEV_ENDPOINT ?? '').trim();
+  let modelo = String(env.JEV_MODEL ?? '').trim();
+  if (endpoint.includes('openrouter.ai') || (!endpoint && chave.startsWith('sk-or-'))) {
+    modelo = modelo || JEV_OPENROUTER_MODELO;
+    if (modelo.startsWith('typesafe/') && modelo.endsWith('-latest')) modelo = `~${modelo}`;
+    return { url: endpoint || JEV_OPENROUTER_URL, modelo };
+  }
+  return { url: endpoint || JEV_TYPESAFE_URL, modelo: modelo || JEV_TYPESAFE_MODELO };
 }
 
 const JEV_DEADLINE_MS = 15_000;

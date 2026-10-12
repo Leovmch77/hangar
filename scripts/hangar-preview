@@ -459,7 +459,7 @@ if (cmd === 'confere') {
   // A prova pode estar no topo ou no fim da página; o miolo de uma lista longa é repetição.
   if (arvore.length > 100_000) arvore = `${arvore.slice(0, 50_000)}\n…\n${arvore.slice(-50_000)}`;
   let respostas;
-  const { url, modelo } = jev.destinoDoJev(process.env, 'jev-1.13.0');
+  const { url, modelo } = jev.destinoDoJev(process.env);
   try {
     respostas = await jev.askJev({ url, modelo, chave: chaveJev, estado: arvore, perguntas: jev.perguntaDeConfere(estado) });
   } catch (err) {
@@ -496,7 +496,7 @@ if (cmd === 'objetivo') {
     // Tudo que o navegador devolve vira estado enviado ao Jev: o token não sai da máquina.
     executar: async (verbo, args) => semToken((await chamar(chave, verbo, args)).texto),
     perguntar: async (estado, perguntas) => {
-      const { url, modelo } = jev.destinoDoJev(process.env, 'jev-latest');
+      const { url, modelo } = jev.destinoDoJev(process.env);
       try {
         return await jev.askJev({ url, modelo, chave: chaveJev, estado, perguntas });
       } catch (err) {
@@ -505,6 +505,11 @@ if (cmd === 'objetivo') {
     },
   });
   console.log(`\nparou: ${resultado.parou}`);
+  // Onde a página ficou, para quem chamou não precisar de um `url` e um `text` a mais.
+  const urlFinal = (await chamar(chave, 'url', [])).texto.replace(/^ok:\s*/, '').trim();
+  console.log(`url: ${semToken(urlFinal.startsWith('"') ? JSON.parse(urlFinal) : urlFinal)}`);
+  const textoFinal = (await chamar(chave, 'text', [])).texto.replace(/\s+/g, ' ').trim();
+  console.log(`texto: ${semToken(textoFinal.length > 300 ? `${textoFinal.slice(0, 300)}…` : textoFinal)}`);
   // Linha legível por máquina: quem chamou reinvoca com esse dado em --dados, sem interpretar a
   // frase acima. A página fica onde parou, então a segunda chamada continua dali.
   if (resultado.falta) console.log(`falta-dado: ${resultado.falta}`);
