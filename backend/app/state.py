@@ -255,8 +255,9 @@ def _menu_block(lines: list[str]) -> Optional[tuple[int, int]]:
             return None
     # Rascunho numerado em várias linhas: o `❯ N.` é a própria linha de prompt, colada na régua de
     # cima do composer. Opção de menu de verdade nunca encosta na régua: vem depois do título ou da
-    # pergunta.
-    if not pi_cursor and cursor > 0 and _RULE_RE.match(lines[cursor - 1]):
+    # pergunta. Rascunho não tem rodapé de navegação; com rodapé, segue como menu.
+    if (not pi_cursor and cursor > 0 and _RULE_RE.match(lines[cursor - 1])
+            and not any(_FOOTER_RE.search(ln) for ln in lines[cursor + 1:])):
         return None
     # Subindo do cursor, o topo do picker e o CHIP header (☐/☑ da AskUserQuestion) ou um boundary
     # (bullet/spinner do menu nativo, que nao tem chip). Parar no chip mantem FORA do bloco uma

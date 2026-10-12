@@ -111,7 +111,10 @@ def _respondida_depois(jsonl: str, desde: float, chamada: Optional[str] = None) 
     # Pergunta aberta já tem a chamada no transcript (gravada junto com o sidecar). Sem ela, o
     # sidecar ficou para trás e prenderia a sessão num cartão que nenhuma resposta alcança.
     if chamada and chamada not in ids:
-        return time.time() - desde >= _CARENCIA_CHAMADA
+        if time.time() - desde < _CARENCIA_CHAMADA:
+            return False
+        _log.debug("askq: pergunta sem a chamada no transcript, descartada tool_use_id=%s path=%s", chamada, jsonl)
+        return True
     return False
 
 

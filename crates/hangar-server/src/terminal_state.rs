@@ -233,7 +233,10 @@ fn menu_block(lines: &[&str]) -> Option<(usize, usize)> {
     }
     // Rascunho numerado em várias linhas: o `❯ N.` é a própria linha de prompt, colada na régua de
     // cima do composer. Opção de menu de verdade nunca encosta na régua: vem depois do título ou da pergunta.
-    if !pi && cursor > 0 && P.rule.is_match(lines[cursor - 1]) { return None; }
+    // Rascunho não tem rodapé de navegação; com rodapé, segue como menu.
+    if !pi && cursor > 0 && P.rule.is_match(lines[cursor - 1]) && !lines[cursor + 1..].iter().any(|l| P.footer.is_match(l)) {
+        return None;
+    }
     let top = (0..cursor).rev().find(|&i| boundary(lines[i]) || tab_bar(lines[i]))
         .map_or(0, |i| i + 1);
     let bottom = (cursor + 1..lines.len()).find(|&i| P.footer.is_match(lines[i]) || boundary(lines[i]))
