@@ -731,6 +731,34 @@ tinha a TypeSafe fixa.
 - **A lista de modelos do OpenRouter não traz o Jev de decisão.** `GET /api/v1/models` (458 modelos)
   só tinha `typesafe/jev-router`. Por isso a tela oferece duas sugestões fixas ("Sempre o mais
   novo" e "Versão fixa") e um campo livre, nunca uma busca de modelos.
+- **12/10/2026: a regra do destino ficou com quatro cópias.** O `orq.py` não tem mais cópia própria.
+  O `backend/hooks/nav_hook.py` também perdeu a dele e usa o `JEV_ENDPOINT`/`JEV_MODEL` que o
+  `env_jev` já resolveu. A quarta cópia hoje é o `destinoDoJev` do `shell/jev_objetivo.cjs`, que só
+  decide quando o CLI roda fora de uma sessão; dentro dela recebe o par resolvido. A precedência é
+  uma só: o runtime-config acima do ambiente.
+- **12/10/2026: o modelo auxiliar também é um só (`jev_aux_*`).** Antes havia dois modelos
+  auxiliares OpenAI-compatíveis: o `jev_texto_*` do navegador e o `LLM_*` do json do MCP do Computer
+  Use. Hoje há um conjunto só, com estes campos:
+  - `jev_aux_base_url`: a base, sem `/chat/completions`;
+  - `jev_aux_api_key`;
+  - `jev_aux_modelo`;
+  - `jev_aux_esforco`: vazio, `low`, `medium` ou `high`.
+
+  A sessão recebe esses valores como `JEV_AUX_*`. O `hangar-preview` dá prioridade a um
+  `JEV_TEXTO_*` posto explicitamente no ambiente, mesmo vazio: é assim que um roteiro de teste
+  desliga o escritor. O MCP recebe o `LLM_*` gerado a partir do auxiliar, e o `PUT
+  /api/computer-control` recusa um modelo diferente.
+
+  Migração: o primeiro valor gravado em `jev_aux_*` e a subida do backend copiam o `jev_texto_*`, ou
+  o `LLM_*` do MCP quando o primeiro não existe. Se o legado estiver ilegível, a gravação recusa em
+  vez de perdê-lo. O `llm_*` do ditado continua separado, pela regra de capacidades separadas.
+- **12/10/2026: a busca de modelos é do auxiliar, e mora no Rust.** As rotas `GET
+  /api/jev/aux/cliproxy` e `POST /api/jev/aux/models` ficam no `hangar-server` e só leem o
+  runtime-config; quem grava continua sendo o Python. A Anthropic recebe `x-api-key` e
+  `?limit=1000`, porque a lista dela é paginada em 20. Os outros provedores recebem `Bearer`. Uma
+  resposta 200 sem lista `data` é erro, e não "nenhum modelo". O CLIProxyAPI atual guarda as chaves
+  de cliente em `access.api-keys` (a raiz `api-keys` passou a ser dos provedores); o leitor aceita os
+  dois formatos.
 
 ## Triagem de recados da orquestrar-auto: Jev ligado, regex só anotando
 
