@@ -95,3 +95,15 @@ def test_python_mode_answers_unavailable_without_the_owner(rust, monkeypatch):
     assert response.status_code == 503
     assert response.json()["detail"]["code"] == "accounts_need_rust_server"
     assert _Rust.seen == []
+
+
+def test_jev_aux_goes_to_the_rust_owner_and_needs_it(rust, monkeypatch):
+    response = TestClient(app).post("/api/jev/aux/models", headers=AUTH, json={"base_url": "http://x/v1"})
+    assert response.status_code == _Rust.reply[0]
+    [seen] = _Rust.seen
+    assert (seen["path"], seen["account_path"]) == ("/__hangar_server/jev/aux", "/api/jev/aux/models")
+    assert TestClient(app).get("/api/jev/aux/cliproxy").status_code == 401
+    monkeypatch.setattr(runtime_coordinator, "current", lambda: SimpleNamespace(mode="python"))
+    response = TestClient(app).get("/api/jev/aux/cliproxy", headers=AUTH)
+    assert (response.status_code, response.json()["detail"]["code"]) == (503, "erro_jev_aux_precisa_rust")
+    assert len(_Rust.seen) == 1
