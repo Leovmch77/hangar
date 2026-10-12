@@ -378,6 +378,7 @@ const TEXTO_CMD_PADRAO = 'claude -p --model claude-haiku-4-5-20251001';
 const envTexto = (env, k) => String(env[k] ?? '').trim();
 
 function escritorDeTexto(env = process.env) {
+  // Sem `temperature`: modelos novos (Haiku 5.5 na Anthropic) recusam o pedido inteiro com ele.
   if (envTexto(env, 'JEV_TEXTO_BASE_URL') && envTexto(env, 'JEV_TEXTO_API_KEY')) {
     const base = envTexto(env, 'JEV_TEXTO_BASE_URL').replace(/\/$/, '');
     const modelo = envTexto(env, 'JEV_TEXTO_MODELO') || 'gpt-4o-mini';
@@ -385,7 +386,7 @@ function escritorDeTexto(env = process.env) {
       const r = await fetch(`${base}/chat/completions`, {
         method: 'POST',
         headers: { authorization: `Bearer ${envTexto(env, 'JEV_TEXTO_API_KEY')}`, 'content-type': 'application/json' },
-        body: JSON.stringify({ model: modelo, messages: [{ role: 'user', content: pedido }], max_tokens: 120, temperature: 0 }),
+        body: JSON.stringify({ model: modelo, messages: [{ role: 'user', content: pedido }], max_tokens: 120 }),
       });
       if (!r.ok) erro(`o modelo de texto recusou: ${r.status} ${(await r.text()).slice(0, 200)}`);
       return (await r.json()).choices?.[0]?.message?.content ?? '';
