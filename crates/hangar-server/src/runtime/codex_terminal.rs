@@ -613,7 +613,7 @@ impl crate::terminal_input::TerminalServices for PaneOnly {
     fn facts<'a>(&'a self,binding:&'a crate::terminal_input::TerminalBinding) -> crate::terminal_input::ServiceFuture<'a,crate::terminal_input::InputFacts> {
         let binding = binding.clone();
         Box::pin(async move { Ok(crate::terminal_input::InputFacts { binding,ready:true,idle:true,open_question:false,plugin_live:false,
-            plugin_user:false,clipboard_available:false,native:None }) })
+            plugin_user:false,clipboard_available:false,native:None,screen:None }) })
     }
     fn publish<'a>(&'a self,_:&'a crate::terminal_input::TerminalBinding,_:crate::terminal_input::PluginRequest) -> crate::terminal_input::ServiceFuture<'a,crate::terminal_input::PluginReply> {
         Box::pin(async { Ok(crate::terminal_input::PluginReply::Unavailable) })

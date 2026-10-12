@@ -4,7 +4,7 @@ use std::{sync::{Arc,atomic::{AtomicU32,Ordering}},time::{Duration,SystemTime,UN
 use tokio::process::Command;
 struct Facts(TerminalBinding);
 impl TerminalServices for Facts {
- fn facts<'a>(&'a self,_:&'a TerminalBinding)->ServiceFuture<'a,InputFacts>{Box::pin(async{Ok(InputFacts{binding:self.0.clone(),ready:true,idle:true,open_question:false,plugin_live:false,plugin_user:false,clipboard_available:true,native:None})})}
+ fn facts<'a>(&'a self,_:&'a TerminalBinding)->ServiceFuture<'a,InputFacts>{Box::pin(async{Ok(InputFacts{binding:self.0.clone(),ready:true,idle:true,open_question:false,plugin_live:false,plugin_user:false,clipboard_available:true,native:None,screen:None})})}
  fn publish<'a>(&'a self,_:&'a TerminalBinding,_:PluginRequest)->ServiceFuture<'a,PluginReply>{Box::pin(async{Ok(PluginReply::Unavailable)})}
  fn permission_guard<'a>(&'a self,_:&'a TerminalBinding)->ServiceFuture<'a,()>{Box::pin(async{Ok(())})}
 }

@@ -135,7 +135,7 @@ fn file_stamp(metadata: &std::fs::Metadata) -> Result<String, String> {
 }
 
 /// Aba de envio do formulário: o cursor vivo (o último da tela) está em "Submit answers".
-fn submit_tab(pane: &str) -> bool {
+pub(crate) fn submit_tab(pane: &str) -> bool {
     pane.lines().filter(|line| line.trim_start().starts_with(['❯', '›'])).last().is_some_and(|line| line.contains("Submit answers"))
 }
 

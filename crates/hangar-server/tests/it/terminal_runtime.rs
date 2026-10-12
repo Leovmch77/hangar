@@ -259,24 +259,68 @@ async fn terminal_runtime_prompt_reads_the_mux_once_per_stage_and_checks_life_la
     assert_eq!(calls[key-1].args.last().unwrap(),"#{pane_pid}\t#{session_name}\t#{pane_id}\t#{session_created}","{seen:?}");
     h.stop().await.unwrap();
 }
-/// Menu A respondido e a tela passa a B em qualquer captura até a última conferência antes da tecla,
-/// inclusive depois de a vida já provada na entrega: recusa, sem tecla.
-#[tokio::test]
-async fn terminal_runtime_select_refuses_b_shown_after_any_read_before_the_key() {
+fn menu(title:&str,options:&[&str])->String {
+    let lines:Vec<String>=options.iter().enumerate().map(|(i,o)|format!("{} {}. {o}",if i==0 {"❯"} else {" "},i+1)).collect();
+    format!("{title}\n{}\nEsc to cancel · to navigate\n",lines.join("\n"))
+}
+/// Responde pelo ator ao menu `shown`, registrado como o monitor o publica, com `panes` na tela (uma por
+/// captura, a última fica). Devolve a resposta e as teclas que saíram.
+async fn answer_menu(kind:&str,option:u64,shown:&str,panes:Vec<String>)->(hangar_server::runtime::protocol::RuntimeReply,Vec<String>) {
     use hangar_server::interactions::{InteractionKind,InteractionTarget};
-    let picker=|title:&str|format!("{title}\n❯ 1. first\n  2. second\nEsc to cancel · to navigate\n");
-    for shown in 0..=5 {
-        let f=Fixture::new().await;let h=f.start();let binding=hangar_server::terminal_facts::LocalTerminalFacts::binding(&f.target);
-        let mut panes=vec![picker("Question A");shown];panes.push(picker("Question B"));*f.io.panes.lock().unwrap()=panes;
-        let target=InteractionTarget {kind:InteractionKind::Menu,request_key:"terminal:menu".into()};
-        let id=f.plugin.interactions().observe_revision(&binding,&target,Some(interaction_semantic(&picker("Question A"),None).unwrap()),None).unwrap().unwrap();
-        f.io.calls.lock().unwrap().clear();
-        let reply=h.control(format!("select-{shown}"),"select".into(),json!({"option":1,"interaction_id":id})).await.unwrap();
+    let f=Fixture::new().await;let h=f.start();let binding=hangar_server::terminal_facts::LocalTerminalFacts::binding(&f.target);
+    *f.io.panes.lock().unwrap()=panes;
+    let target=InteractionTarget {kind:InteractionKind::Menu,request_key:"terminal:menu".into()};
+    let id=f.plugin.interactions().observe_revision(&binding,&target,Some(interaction_semantic(shown,None).unwrap()),None).unwrap().unwrap();
+    f.io.calls.lock().unwrap().clear();
+    let mut payload=json!({"interaction_id":id});if kind=="select" {payload["option"]=json!(option);}
+    let reply=h.control(format!("{kind}-answer"),kind.into(),payload).await.unwrap();h.stop().await.unwrap();
+    let keys=f.io.calls.lock().unwrap().iter().filter(|c|c.args[0]=="send-keys").map(|c|c.args.last().unwrap().clone()).collect();
+    (reply,keys)
+}
+/// Menu A respondido e a tela passa a B em qualquer captura até a da conferência final da tecla (a 7ª: duas
+/// por `check_interaction`, três vezes, e a do `verify` da tecla), depois de a vida já provada: recusa, sem tecla.
+#[tokio::test]
+async fn terminal_runtime_select_refuses_b_shown_at_any_capture_up_to_the_key() {
+    let (a,b)=(menu("Question A",&["first","second"]),menu("Question B",&["first","second"]));
+    for shown in 0..=6 {
+        let mut panes=vec![a.clone();shown];panes.push(b.clone());
+        let (reply,keys)=answer_menu("select",1,&a,panes).await;
         assert_eq!(reply.disposition,hangar_server::runtime::protocol::Disposition::Rejected,"B na captura {}: {reply:?}",shown+1);
         assert_eq!(reply.payload["code"],"erro_interacao_desatualizada","{reply:?}");
-        assert!(f.io.calls.lock().unwrap().iter().all(|c|c.args[0]!="send-keys"),"tecla com B na tela (captura {})",shown+1);
-        h.stop().await.unwrap();
+        assert!(keys.is_empty(),"tecla com B na tela (captura {}): {keys:?}",shown+1);
     }
+}
+/// A navegação até a opção: B na conferência final da primeira seta não deixa tecla nenhuma sair; B na da
+/// segunda deixa só a primeira, e a entrega fica incerta.
+#[tokio::test]
+async fn terminal_runtime_select_navigation_refuses_b_at_each_arrow() {
+    let (a,b)=(menu("Question A",&["first","second","third"]),menu("Question B",&["first","second","third"]));
+    // Capturas 1-4: os dois `check_interaction`; a 5ª é a da primeira seta, a 6ª a da segunda.
+    let (reply,keys)=answer_menu("select",3,&a,[vec![a.clone();4],vec![b.clone()]].concat()).await;
+    assert_eq!((reply.disposition,reply.payload["code"].clone()),(hangar_server::runtime::protocol::Disposition::Rejected,json!("erro_interacao_desatualizada")),"{reply:?}");
+    assert!(keys.is_empty(),"{keys:?}");
+    let (reply,keys)=answer_menu("select",3,&a,[vec![a.clone();5],vec![b.clone()]].concat()).await;
+    assert_eq!((reply.disposition,reply.payload["code"].clone()),(hangar_server::runtime::protocol::Disposition::Unknown,json!("erro_interacao_desatualizada")),"{reply:?}");
+    assert_eq!(keys,["Down"]);
+}
+/// Envio do menu de múltipla escolha: o `Right` só com o menu na conferência final; o Enter só com a mesma
+/// aba de envio que o `Right` abriu.
+#[tokio::test]
+async fn terminal_runtime_submit_selected_refuses_changed_menu_or_review_before_each_key() {
+    let (a,b)=(menu("Question A",&["[✔] first","[ ] second"]),menu("Question B",&["[✔] first","[ ] second"]));
+    let review=|answer:&str|format!("Review your answers\n → {answer}\n\n ❯ 1. Submit answers\n   2. Cancel\n");
+    // Capturas 1-4: `check_interaction` e a leitura do envio; a 5ª é a do `Right`.
+    let (reply,keys)=answer_menu("submit_selected",0,&a,[vec![a.clone();4],vec![b.clone()]].concat()).await;
+    assert_eq!((reply.disposition,reply.payload["code"].clone()),(hangar_server::runtime::protocol::Disposition::Rejected,json!("erro_interacao_desatualizada")),"{reply:?}");
+    assert!(keys.is_empty(),"{keys:?}");
+    // Depois do `Right`, a 6ª e a 7ª mostram a aba de envio; a 8ª, a do Enter, outra.
+    let (reply,keys)=answer_menu("submit_selected",0,&a,[vec![a.clone();5],vec![review("first");2],vec![review("second")]].concat()).await;
+    assert_eq!((reply.disposition,reply.payload["code"].clone()),(hangar_server::runtime::protocol::Disposition::Unknown,json!("erro_interacao_desatualizada")),"{reply:?}");
+    assert_eq!(keys,["Right"]);
+    // Sem troca, o Enter sai para a mesma aba.
+    let (reply,keys)=answer_menu("submit_selected",0,&a,[vec![a.clone();5],vec![review("first");3],vec!["❯ \n".into()]].concat()).await;
+    assert_eq!(reply.disposition,hangar_server::runtime::protocol::Disposition::Accepted,"{reply:?}");
+    assert_eq!(keys,["Right","\r"]);
 }
 /// A conversa (vida) ou o pane trocam em qualquer chamada até a última antes da tecla: a entrega não escreve.
 #[tokio::test]

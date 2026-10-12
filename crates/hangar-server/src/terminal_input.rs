@@ -43,6 +43,9 @@ pub struct InputFacts {
     #[serde(default)]
     pub clipboard_available: bool,
     pub native: Option<NativeMessage>,
+    /// A tela lida antes da prova da vida destes fatos: a guarda do menu a compara, sem outra captura.
+    #[serde(skip)]
+    pub screen: Option<String>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -332,6 +335,15 @@ pub fn interaction_pane(screen: &str) -> Result<Value, InteractionError> {
     }).collect::<Vec<_>>()}))
 }
 
+/// O que a guarda de uma tecla compara: o menu exibido ou, na aba de envio do formulário (que não é
+/// menu), as respostas listadas com o cursor em "Submit answers".
+fn guard_pane(screen: &str) -> Result<Value, InteractionError> {
+    if crate::state::ask::submit_tab(screen) {
+        return Ok(json!({"review": screen.lines().filter_map(|line| line.trim().strip_prefix('→')).map(str::trim).collect::<Vec<_>>()}));
+    }
+    interaction_pane(screen)
+}
+
 pub fn interaction_semantic(screen: &str, question: Option<&hangar_api::ask::AskQuestion>) -> Result<Value, InteractionError> {
     Ok(json!({"source":"terminal", "pane":interaction_pane(screen)?, "questions":question.map(|q| &q.questions)}))
 }
@@ -472,7 +484,8 @@ impl TerminalDriver {
     async fn effect(&self, args: Vec<String>, stdin: Vec<u8>) -> Result<(), IoFailure> {
         self.effect_guarded(args, stdin, None).await
     }
-    async fn check_text_guard(&self, guard: TextGuard<'_>) -> Result<(), IoFailure> {
+    /// `seen`: a tela que a conferência final acabou de ler, antes de provar a vida.
+    async fn check_text_guard(&self, guard: TextGuard<'_>, seen: Option<&str>) -> Result<(), IoFailure> {
         let Some(guard) = guard else { return Ok(()); };
         let failure = |error: InteractionError| IoFailure { code: error.code(), may_have_written: false };
         self.check_source(guard.expected, guard.closed).map_err(failure)?;
@@ -488,14 +501,14 @@ impl TerminalDriver {
                 return Err(failure(InteractionError::Changed));
             }
         } else if let Some(pane) = guard.pane {
-            let screen = self.capture_inner().await?;
-            if interaction_pane(&screen).map_err(failure)? != *pane { return Err(failure(InteractionError::Changed)); }
+            let screen = match seen { Some(screen) => screen.to_owned(), None => self.capture_inner().await? };
+            if guard_pane(&screen).map_err(failure)? != *pane { return Err(failure(InteractionError::Changed)); }
         }
         self.check_source(guard.expected, guard.closed).map_err(failure)
     }
     async fn effect_guarded(&self, args: Vec<String>, stdin: Vec<u8>, guard: TextGuard<'_>) -> Result<(), IoFailure> {
-        self.verify().await?;
-        self.check_text_guard(guard).await?;
+        let facts = self.verify().await?;
+        self.check_text_guard(guard, facts.screen.as_deref()).await?;
         let output = self.raw(args, stdin).await?;
         if !output.success { return Err(IoFailure { code: "mux_effect_failed", may_have_written: true }); }
         Ok(())
@@ -604,6 +617,11 @@ impl TerminalDriver {
     }
     async fn settle(&self) { tokio::time::sleep(self.limits.settle).await; }
     async fn key_inner(&self, key: &str) -> Result<(), IoFailure> { self.key_guarded(key, None).await }
+    /// Tecla num menu respondido: a tela da conferência final, logo antes dela, ainda mostra `pane`.
+    async fn menu_key(&self, key: &str, expected: Option<&ExpectedInteraction>, pane: Option<&Value>) -> Result<(), IoFailure> {
+        if expected.is_some() && pane.is_none() { return Err(IoFailure { code: InteractionError::Unavailable.code(), may_have_written: false }); }
+        self.key_guarded(key, expected.map(|expected| GuardedText { expected, closed: false, pane, input: None, allow_owned: false })).await
+    }
     async fn key_guarded(&self, key: &str, guard: TextGuard<'_>) -> Result<(), IoFailure> {
         let mut args = vec!["send-keys".into(), "-t".into(), self.binding.pane.clone()];
         if key == "Enter" && !self.binding.windows { args.extend(["-l".into(), "--".into(), "\r".into()]); }
@@ -939,7 +957,7 @@ impl TerminalDriver {
         if row.is_none() && require_cursor { return Err(IoFailure { code: "cursor_unreadable", may_have_written: false }); }
         if row.is_none() {
             for _ in 1..target {
-                self.key_inner("Down").await.map_err(|mut e| { e.may_have_written |= effects; e })?;
+                self.menu_key("Down", expected, original.as_ref()).await.map_err(|mut e| { e.may_have_written |= effects; e })?;
                 effects = true;
                 self.settle().await;
             }
@@ -949,14 +967,7 @@ impl TerminalDriver {
             let current = row.ok_or(IoFailure { code: "cursor_lost", may_have_written: effects })?;
             if current == target { return Ok((screen, effects)); }
             for _ in 0..target.abs_diff(current) {
-                if let Some(expected) = expected {
-                    self.check_source(expected, false).map_err(|error| IoFailure { code:error.code(), may_have_written:effects })?;
-                    let fresh = self.capture_inner().await.map_err(|mut error| { error.may_have_written |= effects; error })?;
-                    if interaction_pane(&fresh).ok().as_ref() != original.as_ref() {
-                        return Err(IoFailure { code:InteractionError::Changed.code(), may_have_written:effects });
-                    }
-                }
-                self.key_inner(if current < target { "Down" } else { "Up" }).await.map_err(|mut e| { e.may_have_written |= effects; e })?;
+                self.menu_key(if current < target { "Down" } else { "Up" }, expected, original.as_ref()).await.map_err(|mut e| { e.may_have_written |= effects; e })?;
                 effects = true;
                 self.settle().await;
             }
@@ -964,6 +975,13 @@ impl TerminalDriver {
             row = cursor(&screen).or_else(|| unnumbered_cursor(&screen));
         }
         Err(IoFailure { code: "cursor_drift", may_have_written: effects })
+    }
+    /// Tecla que falhou: a guarda do menu recusa como interação; o resto deixa a entrega incerta.
+    fn key_failed(error: IoFailure, stage: DeliveryStage, written: bool) -> DeliveryResult {
+        match InteractionError::from_code(error.code) {
+            Some(interaction) => Self::interaction_failure(interaction, written || error.may_have_written),
+            None => DeliveryResult::new(Disposition::Unknown, stage, error.code),
+        }
     }
     fn interaction_failure(error: InteractionError, written: bool) -> DeliveryResult {
         DeliveryResult::new(if written { Disposition::Unknown } else { Disposition::Rejected }, DeliveryStage::Identity, error.code())
@@ -1030,7 +1048,7 @@ impl TerminalDriver {
             }
         } else { screen };
         let multiple = screen.lines().any(|line| line.contains("[ ]") || line.contains("[✔]"));
-        if let Err(e) = self.key_inner(if multiple { "Space" } else { "Enter" }).await { return DeliveryResult::new(Disposition::Unknown, DeliveryStage::Select, e.code); }
+        if let Err(e) = self.menu_key(if multiple { "Space" } else { "Enter" }, expected, expected.map(|e| &e.semantic["pane"])).await { return Self::key_failed(e, DeliveryStage::Select, moved); }
         self.settle().await;
         let after = match self.capture_inner().await { Ok(s) if !s.trim().is_empty() => s, _ => return DeliveryResult::new(Disposition::Unknown, DeliveryStage::Select, "selection_unproved") };
         if multiple {
@@ -1061,13 +1079,12 @@ impl TerminalDriver {
             if let Err(error) = self.check_source(expected, false) { return Self::interaction_failure(error, false); }
         }
         if !live_picker(&screen) || !screen.lines().any(|l| l.contains("[ ]") || l.contains("[✔]")) { return DeliveryResult::new(Disposition::Deferred, DeliveryStage::Select, "multiple_picker_missing"); }
-        if let Err(e) = self.key_inner("Right").await { return Self::failed(e, DeliveryStage::Select); }
+        if let Err(e) = self.menu_key("Right", expected, expected.map(|e| &e.semantic["pane"])).await { return Self::failed(e, DeliveryStage::Select); }
         self.settle().await;
-        if !self.capture_inner().await.is_ok_and(|s| s.contains("Submit answers")) { return DeliveryResult::new(Disposition::Unknown, DeliveryStage::Select, "submit_tab_missing"); }
-        if let Some(expected) = expected {
-            if let Err(error) = self.check_source(expected, false) { return Self::interaction_failure(error, true); }
-        }
-        if let Err(e) = self.key_inner("Enter").await { return DeliveryResult::new(Disposition::Unknown, DeliveryStage::Select, e.code); }
+        let review = match self.capture_inner().await { Ok(s) if s.contains("Submit answers") => s, _ => return DeliveryResult::new(Disposition::Unknown, DeliveryStage::Select, "submit_tab_missing") };
+        // O Enter só vai para a mesma aba de envio que o `Right` abriu.
+        let review = match expected.map(|_| guard_pane(&review)).transpose() { Ok(pane) => pane, Err(error) => return Self::interaction_failure(error, true) };
+        if let Err(e) = self.menu_key("Enter", expected, review.as_ref()).await { return Self::key_failed(e, DeliveryStage::Select, true); }
         self.prove_control_submission(DeliveryStage::Select).await
     }
     async fn prove_control_submission(&self, stage: DeliveryStage) -> DeliveryResult {
@@ -1175,8 +1192,9 @@ impl TerminalDriver {
                     }
                     Some(pane)
                 } else { None };
+                let selected_pane = expected.and_then(|_| interaction_pane(&selected).ok());
+                if let Err(e) = self.menu_key(if answer.kind == AnswerKind::Option && answer.multi { "Space" } else { "Enter" }, expected, selected_pane.as_ref()).await { return Self::key_failed(e, DeliveryStage::Answer, effects); }
                 effects = true;
-                if let Err(e) = self.key_inner(if answer.kind == AnswerKind::Option && answer.multi { "Space" } else { "Enter" }).await { return DeliveryResult::new(Disposition::Unknown, DeliveryStage::Answer, e.code); }
                 self.settle().await;
                 if answer.kind == AnswerKind::Text {
                     let pane = if let Some(expected) = expected {
@@ -1196,7 +1214,8 @@ impl TerminalDriver {
                 screen = match self.capture_inner().await { Ok(s) => s, Err(e) => return DeliveryResult::new(Disposition::Unknown, DeliveryStage::Answer, e.code) };
             }
             if answer.multi {
-                if let Err(e) = self.key_inner("Right").await { return DeliveryResult::new(Disposition::Unknown, DeliveryStage::Answer, e.code); }
+                let pane = match expected.map(|_| interaction_pane(&screen)).transpose() { Ok(pane) => pane, Err(error) => return Self::interaction_failure(error, effects) };
+                if let Err(e) = self.menu_key("Right", expected, pane.as_ref()).await { return Self::key_failed(e, DeliveryStage::Answer, effects); }
                 self.settle().await;
             }
         }
@@ -1205,10 +1224,8 @@ impl TerminalDriver {
             let Ok(screen) = self.capture_inner().await else { continue; };
             if screen.contains("Submit answers") {
                 if !review_matches(&screen, answers) { continue; }
-                if let Some(expected) = expected {
-                    if let Err(error) = self.check_source(expected, false) { return Self::interaction_failure(error, true); }
-                }
-                if let Err(e) = self.key_inner("Enter").await { return DeliveryResult::new(Disposition::Unknown, DeliveryStage::Answer, e.code); }
+                let review = match expected.map(|_| guard_pane(&screen)).transpose() { Ok(pane) => pane, Err(error) => return Self::interaction_failure(error, true) };
+                if let Err(e) = self.menu_key("Enter", expected, review.as_ref()).await { return Self::key_failed(e, DeliveryStage::Answer, true); }
                 return self.prove_control_submission(DeliveryStage::Answer).await;
             }
             if !screen.trim().is_empty() && !live_picker(&screen) { return DeliveryResult::new(Disposition::Accepted, DeliveryStage::Answer, "answered"); }

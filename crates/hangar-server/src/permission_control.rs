@@ -367,7 +367,7 @@ mod tests {
     impl Services {
         fn new(windows: bool) -> Self {
             Self { facts: Mutex::new(InputFacts { binding: binding(windows), ready: true, idle: true,
-                open_question: false, plugin_live: false, plugin_user: false, clipboard_available: false, native: None }),
+                open_question: false, plugin_live: false, plugin_user: false, clipboard_available: false, native: None, screen: None }),
                 panel: Mutex::new(false), guard_count: Mutex::new(0), panel_after: Mutex::new(None) }
         }
     }

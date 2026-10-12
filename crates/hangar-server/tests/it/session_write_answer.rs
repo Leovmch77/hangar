@@ -156,7 +156,7 @@ struct Services;
 impl TerminalServices for Services {
     fn facts<'a>(&'a self,binding:&'a TerminalBinding) -> ServiceFuture<'a,InputFacts> {
         Box::pin(async move { Ok(InputFacts { binding:binding.clone(),ready:true,idle:true,open_question:false,
-            plugin_live:false,plugin_user:false,clipboard_available:false,native:None }) })
+            plugin_live:false,plugin_user:false,clipboard_available:false,native:None,screen:None }) })
     }
     fn publish<'a>(&'a self,_:&'a TerminalBinding,_:PluginRequest) -> ServiceFuture<'a,PluginReply> {
         Box::pin(async { Ok(PluginReply::Unavailable) })
@@ -267,7 +267,7 @@ async fn chat_guard_survives_journal_buffer_and_clipboard_preparation() {
     impl TerminalServices for Prepared {
         fn facts<'a>(&'a self,binding:&'a TerminalBinding) -> ServiceFuture<'a,InputFacts> {
             Box::pin(async move { Ok(InputFacts { binding:binding.clone(),ready:true,idle:true,open_question:false,
-                plugin_live:false,plugin_user:false,clipboard_available:true,native:None }) })
+                plugin_live:false,plugin_user:false,clipboard_available:true,native:None,screen:None }) })
         }
         fn publish<'a>(&'a self,_:&'a TerminalBinding,_:PluginRequest) -> ServiceFuture<'a,PluginReply> { Box::pin(async { panic!("publicação sem guarda") }) }
         fn permission_guard<'a>(&'a self,_:&'a TerminalBinding) -> ServiceFuture<'a,()> { Box::pin(async { Ok(()) }) }

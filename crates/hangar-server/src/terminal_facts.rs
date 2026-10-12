@@ -173,7 +173,7 @@ impl LocalTerminalFacts {
         // A tela e os arquivos lidos acima valem só com a mesma vida conferida depois deles.
         let pane_pid = self.check(target, binding).await?;
         let clipboard_available = binding.windows && clipboard_available(pane_pid);
-        Ok(InputFacts { binding: binding.clone(), ready, idle, open_question, plugin_live: live, plugin_user: live && has_mode(&plugin, "user"), clipboard_available, native })
+        Ok(InputFacts { binding: binding.clone(), ready, idle, open_question, plugin_live: live, plugin_user: live && has_mode(&plugin, "user"), clipboard_available, native, screen: Some(screen) })
     }
     pub fn plugin_facts(&self, target: &TerminalTarget) -> Result<Value, ServiceError> {
         match &self.plugin { Some(store) => store.facts(&Self::binding(target), Instant::now()), None => Ok(Value::Null) }

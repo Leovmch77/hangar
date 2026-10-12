@@ -3,7 +3,7 @@ use std::{collections::VecDeque, sync::{Arc, Mutex}, time::Duration};
 fn screen(s: &str) -> String { format!("history\n{}\n❯ {s}\n{}\n⏵⏵ bypass permissions\n\n", "─".repeat(30), "─".repeat(30)) }
 fn binding() -> TerminalBinding { TerminalBinding { name: "test".into(), pane: "%7".into(), conversation: "uuid".into(), generation: 1, created: 17, mux_argv: vec!["fake".into(), "-L".into(), "isolated".into()], windows: false, clipboard_lock_path: None } }
 struct Services { facts: Mutex<InputFacts>, reply: Mutex<PluginReply>, published: Mutex<Vec<PluginRequest>> }
-impl Services { fn new() -> Self { Self { facts: Mutex::new(InputFacts { binding: binding(), ready: true, idle: true, open_question: false, plugin_live: false, plugin_user: false,clipboard_available:true, native: None }), reply: Mutex::new(PluginReply::Unavailable), published: Mutex::new(vec![]) } } }
+impl Services { fn new() -> Self { Self { facts: Mutex::new(InputFacts { binding: binding(), ready: true, idle: true, open_question: false, plugin_live: false, plugin_user: false,clipboard_available:true, native: None, screen: None }), reply: Mutex::new(PluginReply::Unavailable), published: Mutex::new(vec![]) } } }
 impl TerminalServices for Services {
  fn facts<'a>(&'a self, _: &'a TerminalBinding) -> ServiceFuture<'a, InputFacts> { Box::pin(async { Ok(self.facts.lock().unwrap().clone()) }) }
  fn publish<'a>(&'a self, _: &'a TerminalBinding, r: PluginRequest) -> ServiceFuture<'a, PluginReply> { Box::pin(async move { self.published.lock().unwrap().push(r); Ok(self.reply.lock().unwrap().clone()) }) }
@@ -273,7 +273,8 @@ async fn terminal_input_guarded_submit_of_menu_without_sidecar_concludes_and_sta
  };
  let run=|store:Arc<InteractionStore>,screens:Vec<String>| {let io=Arc::new(FakeIo::new(screens));(io.clone(),driver(io,Arc::new(Services::new())).with_interactions(store).with_interaction_source(jsonl.clone()))};
  let (store,expected)=observed(1,multi);
- let (io,d)=run(store,vec![multi.into(),multi.into(),review.into(),screen("")]);
+ // A conferência final de cada tecla relê a tela: o menu antes do `Right`, a aba de envio antes do Enter.
+ let (io,d)=run(store,vec![multi.into(),multi.into(),multi.into(),review.into(),review.into(),screen("")]);
  let r=d.guarded_submit_selected(&expected).await;
  assert_eq!((r.disposition,r.code.as_str()),(Disposition::Accepted,"control_submitted"));
  assert_eq!(io.writes().iter().map(|w|w.args.last().unwrap().as_str()).collect::<Vec<_>>(),["Right","\r"]);
