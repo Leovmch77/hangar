@@ -118,9 +118,12 @@ impl State {
     /// telemetria (OpenTelemetry), que sai sozinha em intervalo e não muda a tela.
     fn ignored(&self, url: &str) -> bool {
         let base = without_query(url);
-        self.noise.contains(base) || base.contains("/__nextjs_") || ["/v1/traces", "/v1/metrics", "/v1/logs"].iter().any(|e| base.ends_with(e))
+        self.noise.contains(base) || base.contains("/__nextjs_") || ["/v1/traces", "/v1/metrics", "/v1/logs"].iter().any(|e| base.ends_with(e) && base.contains("otlp"))
     }
 }
+
+/// Teto de endereços em laço lembrados: além disso, voltam a contar para o `--idle`.
+const NOISE_MAX: usize = 64;
 
 fn without_query(url: &str) -> &str { url.split(['?', '#']).next().unwrap_or(url) }
 
@@ -264,7 +267,10 @@ impl<P: Page> Controller<P> {
             "Network.responseReceived" => {
                 // A resposta encerra a espera do `--idle` mesmo em stream (SSE), que nunca termina de carregar.
                 if let Some(id) = p["requestId"].as_str() { s.inflight.remove(id); }
-                if !s.ignored(p["response"]["url"].as_str().unwrap_or("")) { s.last_network = Instant::now(); }
+                let url = p["response"]["url"].as_str().unwrap_or("");
+                // Respondeu: o servidor subiu, e o endereço volta a contar a partir da próxima.
+                let revived = s.noise.remove(without_query(url));
+                if !revived && !s.ignored(url) { s.last_network = Instant::now(); }
                 let method = p["requestId"].as_str().and_then(|id| s.requests.get(id)).map_or("GET".to_owned(), |(m, _)| m.clone());
                 push(&mut s.network, format!("{method} {} {}", p["response"]["status"], p["response"]["url"].as_str().unwrap_or("")));
             }
@@ -274,7 +280,9 @@ impl<P: Page> Controller<P> {
                 s.inflight.remove(id);
                 let (method, url) = s.requests.remove(id).unwrap_or_default();
                 // Conexão recusada = nada escutando (SignalR, HMR sem servidor): a página tenta de novo em laço.
-                if p["errorText"].as_str().is_some_and(|e| e.ends_with("ERR_CONNECTION_REFUSED")) { s.noise.insert(without_query(&url).to_owned()); }
+                if p["errorText"].as_str().is_some_and(|e| e.ends_with("ERR_CONNECTION_REFUSED")) && s.noise.len() < NOISE_MAX {
+                    s.noise.insert(without_query(&url).to_owned());
+                }
                 if !s.ignored(&url) { s.last_network = Instant::now(); }
                 let reason = p["blockedReason"].as_str().map(|r| format!("bloqueada: {r}"))
                     .unwrap_or_else(|| p["errorText"].as_str().unwrap_or("").to_owned());
@@ -876,7 +884,12 @@ mod tests {
         start("5", "http://localhost:3000/pss/geral/v1/telemetria/otlp/v1/traces");
         assert!(c.state.borrow().inflight.is_empty());
         start("4", "http://localhost:3000/api/x");
-        assert_eq!(c.state.borrow().inflight.len(), 1);
+        start("6", "http://localhost:3000/v1/logs");
+        assert_eq!(c.state.borrow().inflight.len(), 2);
+        // O servidor subiu: a resposta tira o endereço do ruído, e a próxima chamada a ele conta.
+        c.on_event("Network.responseReceived", &json!({"requestId": "2", "response": {"status": 200, "url": hub}}));
+        start("7", hub);
+        assert!(c.state.borrow().inflight.contains("7"));
     }
 
     #[test]
