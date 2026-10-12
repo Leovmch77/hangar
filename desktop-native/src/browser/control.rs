@@ -86,7 +86,7 @@ pub struct Controller<P: Page> {
     dialog_answered: Cell<bool>,
     /// Acorda o verbo em andamento quando um diálogo abre: o clique que o abriu só voltaria depois da resposta.
     dialog_signal: RefCell<Option<futures::channel::oneshot::Sender<()>>>,
-    on_dialog_answer: RefCell<Option<Box<dyn Fn(bool, Option<String>)>>>,
+    on_dialog_answer: RefCell<Option<Box<dyn Fn(bool, Option<String>, futures::channel::oneshot::Sender<Result<(), String>>)>>>,
 }
 
 fn push(list: &mut VecDeque<String>, line: String) {
@@ -150,13 +150,15 @@ impl<P: Page> Controller<P> {
     }
 
     /// Quem responde o diálogo de verdade (o motor, pelo painel): o verbo `dialog` só repassa.
-    pub fn on_dialog_answer(&self, f: impl Fn(bool, Option<String>) + 'static) { *self.on_dialog_answer.borrow_mut() = Some(Box::new(f)); }
+    pub fn on_dialog_answer(&self, f: impl Fn(bool, Option<String>, futures::channel::oneshot::Sender<Result<(), String>>) + 'static) {
+        *self.on_dialog_answer.borrow_mut() = Some(Box::new(f));
+    }
 
     fn dialog_hint(kind: &str) -> &'static str {
         if kind == "prompt" { "dialog accept <texto> | dialog accept | dialog dismiss" } else if kind == "alert" { "dialog accept" } else { "dialog accept | dialog dismiss" }
     }
 
-    fn answer_dialog(&self, args: &[String]) -> String {
+    async fn answer_dialog(&self, args: &[String]) -> String {
         let Some((kind, _, default)) = self.dialog_open.borrow().clone() else { return "erro: dialog: nenhum dialogo aberto na pagina".into() };
         let accept = match args.first().map(String::as_str) {
             Some("accept" | "aceitar" | "ok") => true,
@@ -167,9 +169,15 @@ impl<P: Page> Controller<P> {
         let text = (accept && kind == "prompt").then(|| if args.len() > 1 { args[1..].join(" ") } else { default });
         // O gancho só põe a resposta no canal do painel: chamá-lo com o empréstimo aberto não reentra.
         // O diálogo só some com o fechamento visto pelo motor: resposta que falhou deixa ele aberto para outra tentativa.
-        match self.on_dialog_answer.borrow().as_ref() { Some(f) => f(accept, text), None => return "erro: dialog: o painel nao respondeu".into() }
+        let (done, result) = futures::channel::oneshot::channel();
+        match self.on_dialog_answer.borrow().as_ref() { Some(f) => f(accept, text, done), None => return "erro: dialog: o painel nao respondeu".into() }
         self.dialog_answered.set(true);
-        format!("ok: dialog {}", if accept { "accept" } else { "dismiss" })
+        // O ok só depois de o motor confirmar: aceite que falhou vira recusa na página, e o agente precisa saber.
+        match self.within(5000, result).await {
+            Some(Ok(Ok(()))) => format!("ok: dialog {}", if accept { "accept" } else { "dismiss" }),
+            Some(Ok(Err(e))) => format!("erro: dialog: a pagina nao recebeu a resposta: {e}"),
+            _ => "erro: dialog: o navegador nao confirmou a resposta em 5 s".into(),
+        }
     }
 
     /// Erro da página para o selo do painel (`Some`), ou `None` quando ela navega e a contagem recomeça.
@@ -263,7 +271,7 @@ impl<P: Page> Controller<P> {
     pub async fn run(&self, verb: &str, args: &[String]) -> Reply {
         if self.paused.get() && ACTING.contains(&verb) { return Reply::Text(PAUSED.into()); }
         // Antes da vez: o verbo que segura a vez pode estar parado justamente no diálogo.
-        if verb == "dialog" { return Reply::Text(self.answer_dialog(args)); }
+        if verb == "dialog" { return Reply::Text(self.answer_dialog(args).await); }
         let _turn = self.turn.lock().await;
         if self.paused.get() && ACTING.contains(&verb) { return Reply::Text(PAUSED.into()); }
         for _ in 0..20 {

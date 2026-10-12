@@ -4630,6 +4630,7 @@
   "native_browser_dialog_ok": "OK",
   "native_browser_dialog_cancel": "Cancel",
   "native_browser_errors_uncaught": "Uncaught error: {e}",
+  "native_browser_dialog_failed": "The page did not receive the dialog answer: {e}",
   "native_browser_ctl_using": "{session} is using the browser",
   "native_browser_ctl_click": "clicking “{target}”",
   "native_browser_ctl_click_plain": "clicking",
