@@ -211,6 +211,7 @@ async fn no_sidecar_no_list_request() {
 }
 
 /// A varredura só conhece o stem saneado do sidecar; o registro é achado pelo nome cru, sem o Python.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn dead_session_with_sanitized_name_ends_its_external_pair_by_the_raw_name() {
     let tmp = tempfile::tempdir().unwrap();
