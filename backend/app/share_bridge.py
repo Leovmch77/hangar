@@ -244,3 +244,13 @@ async def pairs_list(request: Request):
 @router.post("/api/external-pairs/send", dependencies=[Depends(require_auth)])
 async def pairs_send(request: Request):
     return await _owner(request, "pairs_send")
+
+
+@router.post("/api/sessions/{name}/pair-access", dependencies=[Depends(require_auth)])
+async def pair_access(name: str, request: Request):
+    return await _owner(request, f"pair_access/{_seg(name)}")
+
+
+@router.delete("/api/external-pairs/{alias}", dependencies=[Depends(require_auth)])
+async def pairs_undo(alias: str, request: Request):
+    return await _owner(request, f"pairs_undo/{_seg(alias)}")

@@ -257,6 +257,12 @@ pub(super) async fn pair(State(st): State<Arc<AppState>>, ConnectInfo(peer): Con
         let msg = format!("pareamento desfeito: falha ao avisar as sessões ({})", failures_text(&errs));
         return asked.refuse(StatusCode::BAD_GATEWAY, "erro_pareamento_desfeito", &msg, json!({"avisos": errs}));
     }
+    // Falhar aqui só deixa o membro novo invisível para quem é de fora: o lado seguro.
+    if let Some(share) = &asked.st.share {
+        for failed in crate::share::pair_routes::grant_members(share, &members).await {
+            tracing::warn!(code = "groups_outside_grant_failed", session = %asked.name, error = %failed, "groups: acesso de fora ao membro novo não gravado");
+        }
+    }
     let warning = if errs.is_empty() { Value::Null } else {
         envelope("erro_pareamento_aviso_parcial", format!("aviso falhou em: {}", failures_text(&errs)), json!({"avisos": errs}))
     };

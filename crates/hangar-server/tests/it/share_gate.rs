@@ -435,7 +435,7 @@ async fn pair_only_token_does_not_reach_globals() {
 fn pair_routes_need_a_root_pair_record() {
     let grant = |roots: Vec<String>| GuestGrant {
         token: "t".into(), token_hash: "h".into(),
-        sessions: HashMap::from([("cc".to_string(), Kind::Share)]), pair_roots: roots,
+        sessions: HashMap::from([("cc".to_string(), Kind::Share)]), pair_roots: roots, invite: true,
     };
     assert!(!guest_allowed(&Method::POST, "/api/pair/message", &grant(vec![])));
     assert!(guest_allowed(&Method::POST, "/api/pair/message", &grant(vec!["cc".into()])));

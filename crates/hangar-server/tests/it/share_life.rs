@@ -69,7 +69,7 @@ fn share(session: &str, life: &str) -> Share {
 }
 
 fn guest(records: Vec<Share>) -> Guest {
-    Guest { token_hash: "t".into(), records }
+    Guest { token_hash: "t".into(), records, invite: false }
 }
 
 fn cc() -> Guest {

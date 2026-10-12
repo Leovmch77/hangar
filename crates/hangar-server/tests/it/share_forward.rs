@@ -19,6 +19,7 @@ fn grant(sessions: &[(&str, Kind)]) -> GuestGrant {
         token_hash: "h".into(),
         sessions: sessions.iter().map(|(n, k)| (n.to_string(), *k)).collect::<HashMap<_, _>>(),
         pair_roots: vec![],
+        invite: sessions.iter().any(|(_, k)| *k == Kind::Share),
     }
 }
 

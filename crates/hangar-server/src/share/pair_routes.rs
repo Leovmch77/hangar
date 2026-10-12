@@ -314,7 +314,69 @@ async fn grant_group(app: &AppState, share: &ShareState, root_id: &str, name: &s
     Ok(())
 }
 
+/// Membro local do grupo sem acesso pelo par de fora ganha "ver e recado", qualquer que seja o
+/// nível do par: entrar em grupo (agente, `orq`, `hangar-send`) nunca dá escrita a quem é de fora.
+/// Quem já tinha fica com o que tinha. Devolve as falhas de disco.
+pub async fn grant_members(share: &ShareState, members: &[String]) -> Vec<String> {
+    let mut errs = Vec::new();
+    for rec in share.pairs.all().into_iter().filter(|r| members.contains(&r.address())) {
+        let have: Vec<String> = share.store.children(&rec.share_id).into_iter().map(|c| c.session).collect();
+        for m in members.iter().filter(|m| !m.contains("::") && **m != rec.local_session && !have.contains(m)) {
+            let Some(life) = share.lives.life(m, true).await else {
+                tracing::warn!(code = "external_pair_grant_skipped", session = %m, "par externo: sessão sem vida, acesso não dado");
+                continue;
+            };
+            if let Err(e) = share.store.grant(&rec.share_id, m, Some(life), Kind::Pair) { errs.push(format!("{m}: {e}")); }
+        }
+    }
+    errs
+}
+
 // --- dono ------------------------------------------------------------------------------------
+
+/// O "Liberar" (ou o rebaixar) de `name` para a máquina `alias`: vale para cada par dessa máquina no
+/// grupo da sessão. Só o dono chega aqui; o convidado é barrado pelo porteiro.
+async fn pair_access(State(st): St, Path(name): Path<String>, bytes: Bytes) -> Response {
+    let (v, body) = match fields(&bytes, &[("alias", true, Some(40))], false) { Ok(v) => v, Err(r) => return r };
+    let level = match level_in(&body) { Ok(l) => l, Err(r) => return r };
+    let share = &st.owner.share;
+    let Some(life) = share.lives.life(&name, true).await else {
+        return detail(StatusCode::NOT_FOUND, "erro_sessao_inexistente", "sessão não encontrada", json!({}));
+    };
+    let peers = match &st.app.groups {
+        Some(groups) => match groups.link(&name).await {
+            Ok(link) => link.map(|l| l.peers).unwrap_or_default(),
+            Err(_) => return respond(groups_unavailable("groups_store_failed")),
+        },
+        None => Vec::new(),
+    };
+    let recs: Vec<ExternalPair> = share.pairs.all().into_iter()
+        .filter(|r| r.alias == v[0] && (r.local_session == name || peers.contains(&r.address()))).collect();
+    if recs.is_empty() {
+        return detail(StatusCode::NOT_FOUND, "erro_par_inexistente", "este par externo não existe", json!({}));
+    }
+    for rec in recs {
+        if let Err(e) = share.store.grant(&rec.share_id, &name, Some(life.clone()), level) { return io_failed(e) }
+    }
+    json_response(StatusCode::OK, json!({"ok": true}))
+}
+
+/// "Sair do pareamento" e "Desfazer par": acaba o par `alias::session` para o grupo todo e avisa o
+/// outro lado.
+async fn undo_pair(State(st): St, Path(alias): Path<String>, RawQuery(query): RawQuery) -> Response {
+    let session = form_urlencoded::parse(query.unwrap_or_default().as_bytes())
+        .find(|(k, _)| k == "session").map(|(_, v)| v.into_owned()).unwrap_or_default();
+    let address = format!("{alias}::{session}");
+    let share = &st.owner.share;
+    let Some(rec) = share.pairs.by_address(&address) else {
+        return detail(StatusCode::NOT_FOUND, "erro_par_inexistente", "este par externo não existe", json!({}));
+    };
+    let errs = end_pair(&st.app, share, &*st.remote, &rec.local_session, &address).await.unwrap_or_default();
+    let warning = if errs.is_empty() { Value::Null } else {
+        json!({"code": "erro_pareamento_saida_falhou", "params": {"avisos": errs}, "msg": "aviso de saída falhou"})
+    };
+    json_response(StatusCode::OK, json!({"ok": true, "warning": warning}))
+}
 
 async fn pair_invite(State(st): St, Path(name): Path<String>, bytes: Bytes) -> Response {
     // Corpo vazio (cliente antigo) = ver e recado.
@@ -489,6 +551,9 @@ pub async fn end_pair(app: &AppState, share: &ShareState, remote: &dyn Remote, l
             errs.push(failed("erro_peer_nao_avisado", text));
         }
     }
+    if !unlink_all(app, address).await {
+        errs.push(failed("erro_par_limpeza_falhou", format!("o par externo com {address} continua no grupo de alguma sessão daqui")));
+    }
     if !drop_record(share, &rec.share_id) {
         // Convite que não foi revogado deixa o outro lado mandando recado: a saída não pode dizer que limpou.
         errs.push(failed("erro_par_limpeza_falhou",
@@ -497,11 +562,29 @@ pub async fn end_pair(app: &AppState, share: &ShareState, remote: &dyn Remote, l
     Some(errs)
 }
 
-/// Sessão morta fora do app: ninguém mais desfaz o par dela. Registro e convite saem na hora; o
-/// aviso ao outro lado segue solto.
-pub async fn session_died(share: Arc<ShareState>, remote: Arc<dyn Remote>, name: &str) {
-    for rec in share.pairs.all().into_iter().filter(|r| r.local_session == name || file_stem(&r.local_session) == name) {
+/// Tira `address` de todo grupo daqui que ainda o tenha: a ponta pode já ter saído do dela, e os
+/// outros membros ficariam com um par que não existe mais. `false` = algum grupo ficou com ele.
+async fn unlink_all(app: &AppState, address: &str) -> bool {
+    let Some(groups) = &app.groups else { return true };
+    let Ok(all) = groups.sidecars().await else { return false };
+    let mut ok = true;
+    for (stem, _) in all.into_iter().filter(|(_, s)| s.peers.iter().any(|p| p == address)) {
+        ok &= guarded("tirar o par do grupo", groups.external_unlink(&stem, address).await);
+    }
+    ok
+}
+
+/// Sessão morta fora do app: ninguém mais desfaz o par dela. Se era a ponta, o par acaba para o
+/// grupo inteiro (registro e convite saem na hora; o aviso ao outro lado segue solto); se era só
+/// membro, perde o acesso de fora.
+pub async fn session_died(app: Arc<AppState>, share: Arc<ShareState>, remote: Arc<dyn Remote>, name: &str) {
+    for rec in share.pairs.all() {
+        if rec.local_session != name && file_stem(&rec.local_session) != name {
+            guarded("revogar o acesso", share.store.ungrant(&rec.share_id, name));
+            continue;
+        }
         drop_record(&share, &rec.share_id);
+        unlink_all(&app, &rec.address()).await;
         let remote = remote.clone();
         tokio::spawn(async move {
             if let Err(e) = tell_leave(&*remote, &rec).await {
@@ -533,8 +616,10 @@ pub fn owner_pair_router(state: Arc<PairState>) -> Router {
     Router::new()
         .route("/api/sessions/{name}/pair-invite", post(pair_invite))
         .route("/api/sessions/{name}/pair-accept", post(pair_accept))
+        .route("/api/sessions/{name}/pair-access", post(pair_access))
         .route("/api/external-pairs", get(list_pairs))
         .route("/api/external-pairs/send", post(external_send))
+        .route("/api/external-pairs/{alias}", delete(undo_pair))
         .with_state(state)
 }
 
@@ -546,6 +631,8 @@ pub fn private_pair_router(state: Arc<PairState>) -> Router {
         .route(&format!("{BASE}/pair_accept/{{name}}"), any(pair_accept))
         .route(&format!("{BASE}/pairs_send"), any(external_send))
         .route(&format!("{BASE}/pairs_list"), any(list_pairs))
+        .route(&format!("{BASE}/pair_access/{{name}}"), any(pair_access))
+        .route(&format!("{BASE}/pairs_undo/{{alias}}"), any(undo_pair))
         .with_state(state)
 }
 

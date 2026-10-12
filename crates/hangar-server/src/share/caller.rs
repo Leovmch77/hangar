@@ -20,6 +20,8 @@ pub struct GuestGrant {
     pub sessions: HashMap<String, Kind>,
     /// Sessões dos registros de par que são raiz (não cópia de `attach`).
     pub pair_roots: Vec<String>,
+    /// Convite de compartilhamento de verdade: só ele alcança as rotas globais do chat.
+    pub invite: bool,
 }
 
 impl Caller {
@@ -52,7 +54,7 @@ impl GuestGrant {
             .filter_map(|name| guest.kind_of(&name).map(|kind| (name, kind)))
             .collect();
         let pair_roots = guest.pair_shares().into_iter().map(|s| s.session.clone()).collect();
-        Self { token: token.into(), token_hash: guest.token_hash.clone(), sessions, pair_roots }
+        Self { token: token.into(), token_hash: guest.token_hash.clone(), sessions, pair_roots, invite: guest.invite }
     }
 }
 
@@ -70,7 +72,7 @@ const GLOBAL_PREFIXES: &[(&str, &str)] = &[("GET", "/api/tts/audio/")];
 // Alcançam outra sessão do dono ou abrem janela na tela dele; `share` deixaria o convidado
 // criar e revogar convites.
 const BLOCKED: &[&str] = &["pair", "pair-remote", "unpair-remote", "group-message", "then", "orq", "bastao",
-    "open-terminal", "open-editor", "nav", "share", "pair-invite", "pair-accept"];
+    "open-terminal", "open-editor", "nav", "share", "pair-invite", "pair-accept", "pair-access"];
 // Leituras do chat do nativo: quem só vê a sessão pareada não alcança arquivo, terminal nem git.
 const PAIR_READ: &[&str] = &["", "events", "history", "commands", "plan-preview", "subagents", "uploads",
     "transcript-image"];
@@ -139,8 +141,8 @@ pub(crate) fn allowed(method: &Method, raw: &str, parsed: Option<&SessionPath>, 
         return !grant.pair_roots.is_empty();
     }
     if has(GLOBAL_ROUTES, method, path) || GLOBAL_PREFIXES.iter().any(|(m, p)| *m == method && path.starts_with(p)) {
-        // Token só de par não alcança nem as globais de leitura.
-        return grant.sessions.values().any(|k| *k == Kind::Share);
+        // Acesso vindo de par, mesmo completo, não gasta crédito do dono (TTS, ditado, pensamento).
+        return grant.invite;
     }
     let Some(SessionPath { name, session, rest }) = parsed else { return false };
     let Some(kind) = grant.sessions.get(session).copied() else { return false };

@@ -38,8 +38,14 @@ pub async fn notify_exit(st: &AppState, groups: &GroupService, name: &str, ex: &
                 errs.extend(found);
                 continue;
             }
-            // Par de fora de outro membro do grupo: nunca vira `/unpair-remote` da própria malha.
-            if share.pairs.by_address(p).is_some() { continue; }
+            // Par de fora de outro membro: quem sai só perde o acesso, e nunca vira `/unpair-remote`
+            // da própria malha.
+            if let Some(rec) = share.pairs.by_address(p) {
+                if let Err(e) = share.store.ungrant(&rec.share_id, name) {
+                    errs.push(failed(p, "erro_par_limpeza_falhou", e.to_string(), json!({"peer": p})));
+                }
+                continue;
+            }
         } else {
             // Sem as lojas de convite o par externo não tem quem o desfaça; nunca vira máquina própria.
             let (dir, owner, address) = (groups.pair_root().to_path_buf(), name.to_owned(), p.clone());

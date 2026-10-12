@@ -203,6 +203,7 @@ mod share_guest_routes;
 mod share_guest_serving;
 mod share_forward;
 mod share_pair_routes;
+mod share_pair_access;
 mod share_bridge;
 mod state_monitor_round;
 mod terminal_control;

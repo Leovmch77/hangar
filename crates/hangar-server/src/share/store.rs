@@ -74,6 +74,8 @@ pub enum PeekError {
 pub struct Guest {
     pub token_hash: String,
     pub records: Vec<Share>,
+    /// Tem convite de compartilhamento vivo (não acesso vindo de par): só ele gasta o crédito do dono.
+    pub invite: bool,
 }
 
 impl Guest {
@@ -267,9 +269,11 @@ impl ShareStore {
     }
 
     pub fn lookup_hash(&self, h: &str) -> Option<Guest> {
-        let records: Vec<Share> = self.lock().values()
+        let state = self.lock();
+        let records: Vec<Share> = state.values()
             .filter(|x| x.token_hash.as_deref() == Some(h)).cloned().collect();
-        (!records.is_empty()).then(|| Guest { token_hash: h.to_owned(), records })
+        let invite = records.iter().any(|x| x.kind == Kind::Share && x.revoked_at.is_none() && !under_pair(&state, x));
+        (!records.is_empty()).then(|| Guest { token_hash: h.to_owned(), records, invite })
     }
 
     /// Liga ao token `holder` as sessões vivas do token `other`; devolve quantas ligou.

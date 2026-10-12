@@ -323,6 +323,23 @@ def test_connect_owner_invite_goes_to_the_explicit_private_route(monkeypatch, cl
     assert client.post("/api/sessions/a/share").status_code == 401, "só o dono"
 
 
+def test_connect_pair_access_and_undo_go_to_their_private_routes(monkeypatch, client):
+    from app import voicesock
+    from fastapi.responses import JSONResponse
+    seen = []
+
+    async def forward(request, target, **kw):
+        seen.append((request.method, target))
+        return JSONResponse({"ok": True})
+    monkeypatch.setattr(voicesock, "forward_settings", forward)
+    assert client.post("/api/sessions/a b/pair-access", json={"alias": "ana", "level": "full"}, headers=H).json() == {"ok": True}
+    assert client.delete("/api/external-pairs/ana?session=han gar", headers=H).json() == {"ok": True}
+    assert seen == [("POST", "/__hangar_server/share/owner/pair_access/a%20b"),
+                    ("DELETE", "/__hangar_server/share/owner/pairs_undo/ana?session=han%20gar")]
+    assert client.post("/api/sessions/a/pair-access", json={}).status_code == 401, "só o dono"
+    assert client.delete("/api/external-pairs/ana?session=x").status_code == 401
+
+
 def test_connect_owner_invite_without_rust_is_404(client):
     list_bridge.configure(None, None)
     r = client.post("/api/sessions/a/share", headers=H)

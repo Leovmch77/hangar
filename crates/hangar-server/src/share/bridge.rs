@@ -68,7 +68,7 @@ async fn execute(st: Arc<AppState>, share: Arc<ShareState>, op: Operation) -> Re
             Ok(json!({}))
         }
         Operation::SessionDied { name } => {
-            pair_routes::session_died(share, Arc::new(Direct), &name).await;
+            pair_routes::session_died(st, share, Arc::new(Direct), &name).await;
             Ok(json!({}))
         }
         Operation::EndPair { local, address } => {

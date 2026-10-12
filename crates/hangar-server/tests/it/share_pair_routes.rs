@@ -83,15 +83,15 @@ impl LocalNet for NoNet {
 
 /// A outra máquina: anota cada pedido e responde o que o teste mandou (200 `{}` por padrão).
 #[derive(Default)]
-struct Other {
+pub(crate) struct Other {
     calls: Mutex<Vec<Value>>,
     replies: Mutex<HashMap<String, (u16, Value)>>,
 }
 
 impl Other {
-    fn reply(&self, key: &str, status: u16, body: Value) { self.replies.lock().unwrap().insert(key.into(), (status, body)); }
+    pub(crate) fn reply(&self, key: &str, status: u16, body: Value) { self.replies.lock().unwrap().insert(key.into(), (status, body)); }
     fn calls(&self) -> Vec<Value> { self.calls.lock().unwrap().clone() }
-    fn keys(&self) -> Vec<String> {
+    pub(crate) fn keys(&self) -> Vec<String> {
         self.calls().iter().map(|c| format!("{} {}", c["method"].as_str().unwrap(), c["path"].as_str().unwrap())).collect()
     }
 }
@@ -103,7 +103,7 @@ async fn serve(router: Router) -> SocketAddr {
     addr
 }
 
-async fn other_machine() -> (Arc<Other>, String) {
+pub(crate) async fn other_machine() -> (Arc<Other>, String) {
     let other = Arc::new(Other::default());
     let o = other.clone();
     let app = Router::new().fallback(move |req: Request| {
@@ -953,7 +953,7 @@ async fn exit_whose_notice_fails_warns_and_still_cleans() {
 async fn dead_session_ends_its_external_pair_and_tells_the_other_side() {
     let e = env().await;
     let (id, _) = e.seed_pair("nome com espaço", "pc-ana", "Y", ADDR);
-    pair_routes::session_died(e.share.clone(), e.remote.clone(), "nome-com-espa-o").await;
+    pair_routes::session_died(e.app.clone(), e.share.clone(), e.remote.clone(), "nome-com-espa-o").await;
     assert!(e.share.pairs.all().is_empty() && e.revoked(&id));
     let other = e.other.clone();
     fake::wait_until(move || other.keys() == ["DELETE /api/pair"]).await;
