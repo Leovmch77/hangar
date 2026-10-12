@@ -14,7 +14,7 @@ const HELLO_WITHIN: Duration = Duration::from_secs(10);
 /// Só o dono pelo `?token=` (como o terminal), com a Origin conferida pelo Python.
 pub async fn ws(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
     let (client_ip, https) = st.cfg.trusted.resolve(peer.ip(), req.headers());
-    let fwd = crate::proxy::Forward { client_ip, https };
+    let fwd = crate::proxy::Forward { client_ip, https, guest: None };
     let owner = crate::auth::query_param(req.uri().query(), "token").filter(|t| !t.is_empty())
         .is_some_and(|t| st.auth.is_owner(&fwd.client_ip, Some(t.as_bytes())));
     if !owner || req.method() != Method::GET { return crate::routes::pass(&st, req, &fwd).await; }

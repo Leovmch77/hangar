@@ -74,9 +74,10 @@ impl Env {
     /// Pelo porteiro de verdade; `local` é o endereço em que a conexão do convidado chegou.
     async fn app(&self, local: &str) -> Client {
         let gate = Arc::new(Gate::new(self.share.clone()));
+        // Por dentro do porteiro: troca o endereço que ele leu da conexão (loopback no teste).
         let router = guest_router(self.share.clone(), "nb".into())
-            .layer(axum::middleware::from_fn_with_state(gate, guard))
-            .layer(Extension(LocalAddr(local.parse::<SocketAddr>().unwrap())));
+            .layer(Extension(LocalAddr(local.parse::<SocketAddr>().unwrap())))
+            .layer(axum::middleware::from_fn_with_state(gate, guard));
         serve(router).await
     }
 

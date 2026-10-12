@@ -214,7 +214,7 @@ fn close_after_accept(ws: WebSocketUpgrade, code: u16, reason: &'static str) -> 
 
 async fn serve(st: Arc<AppState>, peer: SocketAddr, req: Request, want: Want) -> Response {
     let (client_ip, https) = st.cfg.trusted.resolve(peer.ip(), req.headers());
-    let fwd = Forward { client_ip, https };
+    let fwd = Forward { client_ip, https, guest: None };
     // Convidado da 8766: o porteiro já conferiu o token e a sessão; terminal só para o convite.
     let guest = caller(&req).and_then(Caller::grant).map(|g| {
         crate::share::caller::path_session(req.uri().path()).and_then(|s| g.sessions.get(&s).copied()) == Some(Kind::Share)

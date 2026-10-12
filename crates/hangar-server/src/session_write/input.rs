@@ -284,7 +284,7 @@ async fn relay_as_owner(st: &AppState, name: &str, body: String) -> (StatusCode,
     let path = format!("/api/sessions/{}/input", utf8_percent_encode(name, SEGMENT));
     let Ok(req) = Request::post(path).header(header::AUTHORIZATION, format!("Bearer {}", st.cfg.auth_token))
         .header(header::CONTENT_TYPE, "application/json").body(Body::from(body)) else { return (StatusCode::BAD_REQUEST, Value::Null) };
-    let fwd = Forward { client_ip: "127.0.0.1".into(), https: false };
+    let fwd = Forward { client_ip: "127.0.0.1".into(), https: false, guest: None };
     let response = pass(st, req, &fwd).await;
     let status = response.status();
     let bytes = to_bytes(response.into_body(), RELAY_REPLY_LIMIT).await.unwrap_or_default();

@@ -81,8 +81,18 @@ fn has(list: &[(&str, &str)], method: &str, path: &str) -> bool {
     list.iter().any(|(m, p)| *m == method && *p == path)
 }
 
+/// O Python casa as rotas com o `scope["path"]`, já decodificado (`unquote`, inválido vira U+FFFD).
+fn decoded(path: &str) -> std::borrow::Cow<'_, str> {
+    percent_encoding::percent_decode_str(path).decode_utf8_lossy()
+}
+
 /// Sessão que a rota nomeia (o terminal `term-X/term` conta como X); `None` fora de sessão.
 pub fn path_session(path: &str) -> Option<String> {
+    session_of(&decoded(path))
+}
+
+/// `path_session` sobre o caminho já decodificado: decodificar duas vezes mudaria um `%2520`.
+fn session_of(path: &str) -> Option<String> {
     let parts: Vec<&str> = path.split('/').collect();
     if parts.len() < 4 || parts[1..3] != ["api", "sessions"] || parts[3] == "events" {
         return None;
@@ -98,6 +108,7 @@ pub fn path_session(path: &str) -> Option<String> {
 }
 
 pub fn guest_allowed(method: &Method, path: &str, grant: &GuestGrant) -> bool {
+    let path = &*decoded(path);
     let method = method.as_str();
     if has(LIST_ROUTES, method, path) || has(ANY_GUEST_ROUTES, method, path) {
         return true;
@@ -114,7 +125,7 @@ pub fn guest_allowed(method: &Method, path: &str, grant: &GuestGrant) -> bool {
         return false;
     }
     let (name, rest) = (parts[3], &parts[4..]);
-    let Some(kind) = path_session(path).and_then(|s| grant.sessions.get(&s).copied()) else {
+    let Some(kind) = session_of(path).and_then(|s| grant.sessions.get(&s).copied()) else {
         return false;
     };
     if kind == Kind::Pair {

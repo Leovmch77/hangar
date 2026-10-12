@@ -403,6 +403,24 @@ fn path_session_only_strips_term_from_the_terminal() {
     assert_eq!(path_session("/api/sessions"), None);
 }
 
+/// O Python casa o nome com o `scope["path"]` já decodificado: espaço e acento chegam como `%20` e
+/// `%C3%A7`, e a sessão é a mesma.
+#[tokio::test]
+async fn session_names_in_the_path_are_percent_decoded() {
+    let h = harness().await;
+    for name in ["a b", "ação"] {
+        h.probe.keys.lock().unwrap().insert(name.into(), format!("L-{name}"));
+    }
+    let t = h.token("a b", Kind::Share);
+    let p = h.token("ação", Kind::Pair);
+    assert_eq!(path_session("/api/sessions/a%20b/history").as_deref(), Some("a b"));
+    assert_eq!(path_session("/api/sessions/term-a%C3%A7%C3%A3o/term").as_deref(), Some("ação"));
+    assert_eq!(status(&h, Method::GET, "/api/sessions/a%20b/history", &t).await, 200);
+    assert_eq!(status(&h, Method::POST, "/api/sessions/a%20b/input", &t).await, 200);
+    assert_eq!(status(&h, Method::GET, "/api/sessions/a%C3%A7%C3%A3o/history", &p).await, 200);
+    assert_eq!(status(&h, Method::GET, "/api/sessions/a%20c/history", &t).await, 403);
+}
+
 #[tokio::test]
 async fn shared_and_paired_on_same_token_pass_as_share() {
     let h = harness().await;

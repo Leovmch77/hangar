@@ -316,10 +316,17 @@ pub fn guest_router(state: Arc<AppState>) -> Router {
     let Some(share) = state.share.clone() else {
         return Router::new().fallback(|headers: HeaderMap| async move { not_found(&headers) }).with_state(state);
     };
-    // Os handlers do dono que também servem o convidado; o resto é o 404 do Python (Task 10).
-    session_routes(guest_fallback).fallback(guest_fallback)
+    use crate::share::{guest_routes, owner_routes, pair_routes};
+    // Da loja do dono o par do convidado só usa `share`; as rotas do dono (convite e par) ficam
+    // fora até a virada, porque na 8765 o Python ainda é quem grava os convites.
+    let owner = Arc::new(owner_routes::OwnerShareState { share: share.clone(), owner_port: state.cfg.listen.port(),
+        bind_ip: state.cfg.listen.ip().to_string(), net: Arc::new(owner_routes::RealNet), reach: owner_routes::Reach::production() });
+    let pair = Arc::new(pair_routes::PairState { app: state.clone(), owner, remote: Arc::new(pair_routes::Direct) });
+    // Os handlers do dono que também servem o convidado; o resto vai ao Python assinado.
+    session_routes(guest_fallback).fallback(guest_fallback).with_state(state)
+        .merge(guest_routes::guest_router(share.clone(), guest_routes::owner_name()))
+        .merge(pair_routes::guest_pair_router(pair))
         .layer(axum::middleware::from_fn_with_state(Arc::new(crate::share::gate::Gate::new(share)), crate::share::gate::guard))
-        .with_state(state)
 }
 
 /// Na 8766, anexos e rotas de sessão do workspace têm handler no Rust (o porteiro já limitou ao
@@ -331,8 +338,9 @@ async fn guest_fallback(st: State<Arc<AppState>>, peer: ConnectInfo<SocketAddr>,
     {
         return pass_any(st, peer, req).await;
     }
-    // Task 10: o resto da 8766 vai ao Python com o convidado assinado.
-    not_found(req.headers())
+    // O resto que o porteiro deixou passar vai ao Python com o convidado assinado.
+    let fwd = Forward { client_ip: peer.0.ip().to_string(), https: false, guest: None };
+    pass(&st, req, &fwd).await
 }
 
 /// Rotas cujo handler sabe atender o dono e o convidado; `fallback` é o repasse de cada porta.
@@ -501,14 +509,14 @@ pub(crate) fn gate(st: &AppState, peer: SocketAddr, req: &Request) -> (Forward, 
     let (client_ip, https) = st.cfg.trusted.resolve(peer.ip(), req.headers());
     let token = auth::presented_token(req.headers(), req.uri().query(), req.method(), https);
     let owner = st.auth.is_owner(&client_ip, token.as_deref());
-    (Forward { client_ip, https }, owner)
+    (Forward { client_ip, https, guest: None }, owner)
 }
 
 /// Quem pede. Na 8766 só o convidado que o porteiro pôs (nunca `is_owner`, nem `X-Forwarded-For`);
 /// na 8765, o dono pelo token.
 pub(crate) fn who(st: &AppState, peer: SocketAddr, req: &Request) -> (Forward, Option<Caller>) {
     if on_guest_port(req) {
-        return (Forward { client_ip: peer.ip().to_string(), https: false }, caller(req).cloned());
+        return (Forward { client_ip: peer.ip().to_string(), https: false, guest: None }, caller(req).cloned());
     }
     let (fwd, owner) = gate(st, peer, req);
     (fwd, owner.then_some(Caller::Owner))
@@ -526,10 +534,17 @@ pub(crate) fn not_found(headers: &HeaderMap) -> Response {
     resp
 }
 
-pub(crate) async fn pass(st: &AppState, req: Request, fwd: &Forward) -> Response {
+pub(crate) async fn pass(st: &AppState, mut req: Request, fwd: &Forward) -> Response {
     if on_guest_port(&req) {
-        // Task 10: repasse ao Python com o convidado assinado; até lá, nunca com a identidade do dono.
-        return not_found(req.headers());
+        // Sem convidado decidido (rota aberta sem handler) nada vai ao Python: nunca como dono.
+        let Some(grant) = caller(&req).and_then(Caller::grant).cloned() else { return not_found(req.headers()) };
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+        crate::share::forward::prepare_guest_request(&mut req, &st.cfg.internal_secret, &grant, now);
+        let guest = req.headers_mut().remove(crate::share::forward::HEADER);
+        // Loopback para o Python aceitar o cabeçalho; recusa de lá não entra no bloqueio do dono,
+        // que é por IP e o convidado do Funnel nem tem um.
+        let fwd = Forward { client_ip: "127.0.0.1".into(), https: false, guest };
+        return proxy::forward(&st.http, st.cfg.upstream, req, &fwd).await;
     }
     let upgrade = req.headers().contains_key(header::UPGRADE);
     let mut resp = proxy::forward(&st.http, st.cfg.upstream, req, fwd).await;
@@ -614,7 +629,7 @@ pub(crate) async fn pass_any(
         }
     }
     let (client_ip, https) = st.cfg.trusted.resolve(peer.ip(), req.headers());
-    pass(&st, req, &Forward { client_ip, https }).await
+    pass(&st, req, &Forward { client_ip, https, guest: None }).await
 }
 
 /// Id de correlação do diário: cabeçalho x-hangar-req; o EventSource só manda ?diag_req.

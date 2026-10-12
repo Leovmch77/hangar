@@ -32,6 +32,8 @@ pub fn client() -> HttpClient {
 pub struct Forward {
     pub client_ip: String,
     pub https: bool,
+    /// `x-hangar-guest` assinado pelo Rust para o convidado da 8766; o que veio de fora já saiu.
+    pub guest: Option<HeaderValue>,
 }
 
 const HOP: [&str; 7] = ["connection", "keep-alive", "proxy-connection", "transfer-encoding", "te", "trailer", "upgrade"];
@@ -41,7 +43,8 @@ pub async fn forward(http: &HttpClient, upstream: SocketAddr, mut req: Request, 
     let path = req.uri().path_and_query().map(|p| p.as_str().to_owned()).unwrap_or_else(|| "/".into());
     prepare(req.headers_mut(), fwd, upgrade);
     if upgrade {
-        return forward_upgrade(upstream, req, &path).await;
+        let watcher = req.extensions_mut().remove::<crate::share::gate::Watcher>();
+        return forward_upgrade(upstream, req, &path, watcher).await;
     }
     let Ok(uri) = format!("http://{upstream}{path}").parse::<Uri>() else {
         return (StatusCode::BAD_REQUEST, "hangar-server: caminho inválido").into_response();
@@ -71,6 +74,9 @@ fn prepare(h: &mut HeaderMap, fwd: &Forward, upgrade: bool) {
     h.remove("x-hangar-internal");
     // O convidado decidido é assinado só pelo Rust; vindo de fora é forjado.
     h.remove("x-hangar-guest");
+    if let Some(guest) = &fwd.guest {
+        h.insert("x-hangar-guest", guest.clone());
+    }
     h.remove("x-forwarded-for");
     h.remove("x-forwarded-proto");
     if let Ok(v) = HeaderValue::from_str(&fwd.client_ip) {
@@ -80,8 +86,9 @@ fn prepare(h: &mut HeaderMap, fwd: &Forward, upgrade: bool) {
 }
 
 /// Conexão própria por WebSocket: o pedido vai em forma de origem e, com o 101, os dois lados
-/// viram um cano de bytes.
-async fn forward_upgrade(upstream: SocketAddr, mut req: Request, path: &str) -> Response {
+/// viram um cano de bytes. Com `watcher` (convidado), o fim do acesso fecha com 4410.
+async fn forward_upgrade(upstream: SocketAddr, mut req: Request, path: &str,
+                         watcher: Option<crate::share::gate::Watcher>) -> Response {
     let Ok(uri) = path.parse::<Uri>() else {
         return (StatusCode::BAD_REQUEST, "hangar-server: caminho inválido").into_response();
     };
@@ -110,7 +117,13 @@ async fn forward_upgrade(upstream: SocketAddr, mut req: Request, path: &str) -> 
     let upstream_side = hyper::upgrade::on(&mut resp);
     tokio::spawn(async move {
         let (Ok(c), Ok(u)) = tokio::join!(client_side, upstream_side) else { return };
-        let _ = tokio::io::copy_bidirectional(&mut TokioIo::new(c), &mut TokioIo::new(u)).await;
+        let ended = async move {
+            match watcher {
+                Some(w) => w.until_ended().await,
+                None => std::future::pending().await,
+            }
+        };
+        crate::share::forward::pipe_watched(TokioIo::new(c), TokioIo::new(u), ended).await;
     });
     let (parts, _) = resp.into_parts();
     Response::from_parts(parts, Body::empty())

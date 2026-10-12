@@ -34,12 +34,14 @@ pub const CLOSE_ENDED: u16 = 4410;
 #[derive(Clone, Debug)]
 pub struct GuestConn {
     pub peer: SocketAddr,
+    /// Endereço desta ponta da conexão: decide entre o link do Funnel e o da rede da casa.
+    pub local: Option<SocketAddr>,
     fails: Arc<AtomicU32>,
 }
 
 impl Connected<IncomingStream<'_, TcpListener>> for GuestConn {
     fn connect_info(stream: IncomingStream<'_, TcpListener>) -> Self {
-        Self { peer: *stream.remote_addr(), fails: Arc::default() }
+        Self { peer: *stream.remote_addr(), local: stream.io().local_addr().ok(), fails: Arc::default() }
     }
 }
 
@@ -119,6 +121,9 @@ async fn deny(req: Request, status: StatusCode, code: &str, msg: &str) -> Respon
 pub async fn guard(State(gate): State<Arc<Gate>>, ConnectInfo(conn): ConnectInfo<GuestConn>, mut req: Request, next: Next) -> Response {
     // Os handlers continuam lendo o par TCP como na 8765.
     req.extensions_mut().insert(ConnectInfo(conn.peer));
+    if let Some(local) = conn.local {
+        req.extensions_mut().insert(super::guest_routes::LocalAddr(local));
+    }
     // Só o Rust assina esse cabeçalho; vindo de fora é forjado.
     req.headers_mut().remove("x-hangar-guest");
     let method = req.method().clone();

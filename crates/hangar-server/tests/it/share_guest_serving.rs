@@ -13,6 +13,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use axum::http::StatusCode;
 use fake::*;
 use futures_util::future::BoxFuture;
 use futures_util::StreamExt;
@@ -79,7 +80,7 @@ impl Guests {
     }
 }
 
-struct Srv { owner: SocketAddr, guest: SocketAddr, python: Arc<Fake>, g: Guests }
+struct Srv { owner: SocketAddr, guest: SocketAddr, python: Arc<Fake>, g: Guests, st: Arc<AppState> }
 
 /// Porta do dono e porta do convidado sobre o mesmo estado.
 async fn serve(mut state: AppState, python: Arc<Fake>, dir: &Path) -> Srv {
@@ -87,13 +88,15 @@ async fn serve(mut state: AppState, python: Arc<Fake>, dir: &Path) -> Srv {
     state.share = Some(g.share.clone());
     let state = Arc::new(state);
     let owner = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let guest = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let (o, gaddr) = (owner.local_addr().unwrap(), guest.local_addr().unwrap());
+    // Todas as interfaces: o convidado também chega pelo IP da rede da casa.
+    let guest = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
+    let o = owner.local_addr().unwrap();
+    let gaddr = SocketAddr::from(([127, 0, 0, 1], guest.local_addr().unwrap().port()));
     let app = router(state.clone()).into_make_service_with_connect_info::<SocketAddr>();
     tokio::spawn(async move { axum::serve(owner, app).await.unwrap() });
-    let app = guest_router(state).into_make_service_with_connect_info::<GuestConn>();
+    let app = guest_router(state.clone()).into_make_service_with_connect_info::<GuestConn>();
     tokio::spawn(async move { axum::serve(guest, app).await.unwrap() });
-    Srv { owner: o, guest: gaddr, python, g }
+    Srv { owner: o, guest: gaddr, python, g, st: state }
 }
 
 /// Lista com `n` sessões Claude de mentira (`s0`..), como em `list_support::server`.
@@ -280,17 +283,112 @@ async fn guest_does_not_reach_the_hangar_terminal_routes() {
     assert_eq!(srv.python.hits_to("/api/hangar-terminals"), 0);
 }
 
-/// No Python o atalho "no Hangar" do convidado é 403 próprio; até o repasse assinado (Task 10), o
-/// pedido nunca vai ao Python com a identidade do dono.
+/// No Python o atalho "no Hangar" do convidado é 403 próprio: o pedido chega lá como convidado
+/// assinado, nunca com a identidade do dono.
 #[tokio::test(flavor = "multi_thread")]
 async fn guest_cannot_start_a_hangar_copy() {
     let dir = tempfile::tempdir().unwrap();
     let srv = plain_srv(dir.path(), |_| {}).await;
     let t = srv.g.token("cc", Kind::Share);
-    let (status, _) = post_json(format!("http://{}/api/sessions/cc/shortcut-shell", srv.guest), &t,
+    post_json(format!("http://{}/api/sessions/cc/shortcut-shell", srv.guest), &t,
         json!({"command": "notepad", "runs_in": "hangar", "key": "global:k"})).await;
-    assert_ne!(status, 200);
-    assert_eq!(srv.python.hits_to("/api/sessions/cc/shortcut-shell"), 0);
+    assert_eq!(srv.python.hits_to("/api/sessions/cc/shortcut-shell"), 1);
+    let (_, h) = srv.python.last_hit();
+    assert!(!h.contains_key("authorization"));
+    assert!(h.contains_key("x-hangar-guest"));
+}
+
+// ── repasse assinado ao Python ───────────────────────────────────────────────────────────────
+
+/// Confere o `x-hangar-guest` como o `guest_header.verify` do Python: HMAC sobre método, caminho
+/// cru e payload; devolve o payload.
+fn verified(h: &axum::http::HeaderMap, method: &str, raw_path: &str) -> Value {
+    use base64::Engine;
+    let value = h["x-hangar-guest"].to_str().unwrap();
+    let (payload, mac) = value.split_once('.').unwrap();
+    let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, SECRET.as_bytes());
+    let expected: String = ring::hmac::sign(&key, format!("{method}\n{raw_path}\n{payload}").as_bytes())
+        .as_ref().iter().map(|b| format!("{b:02x}")).collect();
+    assert_eq!(mac, expected, "HMAC do cabeçalho");
+    let body: Value = serde_json::from_slice(&base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(payload).unwrap()).unwrap();
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+    let exp = body["exp"].as_u64().unwrap();
+    assert!(exp > now && exp <= now + 31, "validade curta: {exp} vs {now}");
+    body
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn guest_forward_is_signed_and_carries_no_invite_token() {
+    let dir = tempfile::tempdir().unwrap();
+    let srv = plain_srv(dir.path(), |_| {}).await;
+    let t = srv.g.token("cc", Kind::Share);
+    let r = client().get(format!("http://{}/api/sessions/cc/plan-preview?token={t}&x=1%202&y=a+b", srv.guest))
+        .header("x-hangar-guest", "forjado").send().await.unwrap();
+    assert_eq!((r.status().as_u16(), r.text().await.unwrap()), (200, "from-python".into()));
+    let (path, h) = srv.python.last_hit();
+    assert_eq!(path, "/api/sessions/cc/plan-preview?x=1%202&y=a+b");
+    assert!(!h.contains_key("authorization"));
+    assert_eq!(h["x-forwarded-for"], "127.0.0.1");
+    assert_eq!(verified(&h, "GET", "/api/sessions/cc/plan-preview")["s"], json!({"cc": "share"}));
+
+    // Rota global (fora de sessão) também vai assinada, e o Bearer não segue.
+    let r = client().get(format!("http://{}/api/model-options", srv.guest)).bearer_auth(&t).send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    let (path, h) = srv.python.last_hit();
+    assert_eq!(path, "/api/model-options");
+    assert!(!h.contains_key("authorization"));
+    verified(&h, "GET", "/api/model-options");
+}
+
+/// IP desta máquina na rede da casa; `None` sem rede (o teste que precisa dele não roda).
+fn lan_ip() -> Option<std::net::IpAddr> {
+    let s = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    s.connect("8.8.8.8:80").ok()?;
+    Some(s.local_addr().ok()?.ip()).filter(|ip| !ip.is_loopback())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn guest_forward_never_touches_the_owner_backoff() {
+    let Some(lan) = lan_ip() else { eprintln!("sem rede local: teste pulado"); return };
+    let dir = tempfile::tempdir().unwrap();
+    let srv = plain_srv(dir.path(), |_| {}).await;
+    let t = srv.g.token("cc", Kind::Share);
+    let url = format!("http://{lan}:{}/api/sessions/cc/input", srv.guest.port());
+    for status in [StatusCode::UNAUTHORIZED, StatusCode::TOO_MANY_REQUESTS] {
+        srv.python.set_input_reply(Some((status, json!({}))));
+        assert_eq!(post_json(url.clone(), &t, json!({"text": "oi"})).await.0, status.as_u16());
+    }
+    assert_eq!(srv.python.input_calls(), 2);
+    assert!(srv.st.auth.is_owner(&lan.to_string(), Some(OWNER.as_bytes())), "o dono nesse IP segue livre");
+}
+
+/// WebSocket repassado ao Python (o navegador remoto): revogar fecha com 4410, que o Python não sabe.
+#[tokio::test(flavor = "multi_thread")]
+async fn forwarded_guest_websocket_closes_4410_when_revoked() {
+    use tokio::io::AsyncReadExt;
+    let dir = tempfile::tempdir().unwrap();
+    let srv = plain_srv(dir.path(), |_| {}).await;
+    let t = srv.g.token("cc", Kind::Share);
+    let mut s = tokio::net::TcpStream::connect(srv.guest).await.unwrap();
+    s.write_all(format!("GET /api/sessions/cc/nav-remoto?token={t} HTTP/1.1\r\nHost: h\r\n\
+        Connection: Upgrade\r\nUpgrade: websocket\r\n\r\n").as_bytes()).await.unwrap();
+    let mut head = Vec::new();
+    let mut byte = [0u8; 1];
+    while !head.ends_with(b"\r\n\r\n") {
+        tokio::time::timeout(Duration::from_secs(5), s.read_exact(&mut byte)).await.unwrap().unwrap();
+        head.push(byte[0]);
+    }
+    assert!(head.starts_with(b"HTTP/1.1 101"), "{}", String::from_utf8_lossy(&head));
+    s.write_all(b"ola").await.unwrap();
+    let mut got = [0u8; 3];
+    tokio::time::timeout(Duration::from_secs(5), s.read_exact(&mut got)).await.unwrap().unwrap();
+    assert_eq!(&got, b"ola");
+    let (_, h) = srv.python.last_hit();
+    verified(&h, "GET", "/api/sessions/cc/nav-remoto");
+    srv.g.revoke_all();
+    let mut rest = Vec::new();
+    tokio::time::timeout(Duration::from_secs(12), s.read_to_end(&mut rest)).await.expect("o vigia fecha em até 5 s").unwrap();
+    assert_eq!(rest, [0x88, 0x02, 0x11, 0x3A]);
 }
 
 // ── stream da sessão ─────────────────────────────────────────────────────────────────────────
