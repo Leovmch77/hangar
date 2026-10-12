@@ -49,6 +49,9 @@ pub(super) struct BrowserPanel {
     origin: Rc<Cell<Point<Pixels>>>,
     /// Decidido pelo `Hangar` a cada quadro (`browser_visible`).
     shown: bool,
+    /// Último estado do sidecar a gravar (chave, endereço, título).
+    #[cfg(not(target_os = "macos"))]
+    sidecar: std::sync::Arc<std::sync::Mutex<Option<(String, String, String)>>>,
     /// Escala da janela já passada ao controlador; 0 = nenhuma ainda.
     #[cfg(target_os = "linux")]
     scale: Rc<Cell<f32>>,
@@ -77,7 +80,7 @@ impl BrowserPanel {
         ];
         Self { key, #[cfg(not(target_os = "macos"))] controller: None, #[cfg(not(target_os = "macos"))] cdp: None,
             #[cfg(not(target_os = "macos"))] relay: Default::default(), #[cfg(not(target_os = "macos"))] viewer: Rc::default(), #[cfg(target_os = "linux")] frames: Default::default(), engine: None, starting: None, _start: None, events, address, page: model::PageState::default(), invalid: None, #[cfg(not(target_os = "macos"))] cookies_status: None, #[cfg(not(target_os = "macos"))] cookies_confirmed: false, #[cfg(target_os = "linux")] last_fill: None, focus,
-            origin: Rc::default(), shown: false, #[cfg(target_os = "linux")] scale: Rc::default(), _drain: drain, _subscriptions: subscriptions }
+            origin: Rc::default(), shown: false, #[cfg(not(target_os = "macos"))] sidecar: Default::default(), #[cfg(target_os = "linux")] scale: Rc::default(), _drain: drain, _subscriptions: subscriptions }
     }
 
     fn engine(&self) -> Option<&Rc<Engine>> { self.engine.as_ref()?.as_ref().ok() }
@@ -102,11 +105,24 @@ impl BrowserPanel {
             }
             self.page = page;
             #[cfg(not(target_os = "macos"))]
-            crate::browser::server::write_sidecar(&self.key, self.page.url.as_deref().unwrap_or(""), &self.page.title);
+            self.save_sidecar(cx);
             #[cfg(target_os = "linux")]
             self.maybe_autofill(cx);
         }
         cx.notify();
+    }
+
+    /// O arquivo que o hangar-preview lê, gravado fora da thread da tela. A trava serializa as escritas e cada uma grava
+    /// o estado mais novo, então o arquivo termina sempre no último.
+    #[cfg(not(target_os = "macos"))]
+    fn save_sidecar(&self, cx: &mut Context<Self>) {
+        let latest = (self.key.clone(), self.page.url.clone().unwrap_or_default(), self.page.title.clone());
+        let slot = self.sidecar.clone();
+        *slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(latest);
+        cx.background_spawn(async move {
+            let current = slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some((key, url, title)) = current.as_ref() { crate::browser::server::write_sidecar(key, url, title); }
+        }).detach();
     }
 
     /// Ao terminar de carregar uma página https cuja origem tem senha salva no Chrome, preenche o login — só com a opção
