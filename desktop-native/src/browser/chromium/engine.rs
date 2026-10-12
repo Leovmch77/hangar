@@ -461,23 +461,21 @@ fn listen(
             p(&|page| { page.notice = Some(text.clone()); page.notice_seq += 1; });
         }
     });
-    // Sem resposta o diálogo trava a página, e no app não há quem o veja: `alert` e `beforeunload` passam, mas
-    // `confirm`/`prompt` são recusados, para nada ser confirmado sem alguém ter lido.
-    // A pessoa vê no painel o que foi respondido por ela.
+    // O diálogo fica aberto até alguém responder: o agente (verbo `dialog`) ou a pessoa (caixa do painel). Testar
+    // um "Excluir? OK/Cancelar" exige escolher. Só o `beforeunload` passa sozinho: sem isso a navegação travaria.
     let (weak, p) = (Rc::downgrade(session), publish.clone());
     let _ = session.on("Page.javascriptDialogOpening", move |params| {
-        let kind = params["type"].as_str().unwrap_or("");
-        let accept = matches!(kind, "alert" | "beforeunload");
-        let message: String = params["message"].as_str().unwrap_or("").chars().take(200).collect();
-        eprintln!("[nav] dialogo {kind} {}: {message}", if accept { "aceito" } else { "recusado" });
-        let key = match kind { "alert" => Some("browser_dialog_alert"), "beforeunload" => None, "prompt" => Some("browser_dialog_prompt_refused"), _ => Some("browser_dialog_refused") };
-        if let Some(key) = key {
-            let text = crate::i18n::tr(key).replace("{message}", message.trim());
-            p(&|page| { page.notice = Some(text.clone()); page.notice_seq += 1; });
+        let kind = params["type"].as_str().unwrap_or("").to_owned();
+        if kind == "beforeunload" {
+            if let Some(session) = weak.upgrade() { drop(session.call("Page.handleJavaScriptDialog", json!({"accept": true}))); }
+            return;
         }
-        let Some(session) = weak.upgrade() else { return };
-        drop(session.call("Page.handleJavaScriptDialog", json!({"accept": accept})));
+        let dialog = model::Dialog { kind, message: params["message"].as_str().unwrap_or("").chars().take(500).collect(),
+            default: params["defaultPrompt"].as_str().unwrap_or("").to_owned() };
+        p(&|page| page.dialog = Some(dialog.clone()));
     });
+    let p = publish.clone();
+    let _ = session.on("Page.javascriptDialogClosed", move |_| p(&|page| page.dialog = None));
     // O download é negado no navegador inteiro (`Browser.setDownloadBehavior`); sem aviso o clique parecia não fazer nada.
     let p = publish.clone();
     let _ = session.on("Page.downloadWillBegin", move |params| {
@@ -577,6 +575,13 @@ impl Engine {
     pub fn forward(&self) { self.history_step(1); }
     pub fn reload(&self) { self.send("Page.reload", json!({})); }
     pub fn stop(&self) { self.send("Page.stopLoading", json!({})); }
+
+    /// Responde o diálogo aberto; o `javascriptDialogClosed` tira a caixa do painel.
+    pub fn answer_dialog(&self, accept: bool, text: Option<&str>) {
+        let mut params = json!({"accept": accept});
+        if let Some(text) = text { params["promptText"] = text.into(); }
+        self.send("Page.handleJavaScriptDialog", params);
+    }
 
     fn history_step(&self, step: i64) {
         let (call, session) = (self.session.call("Page.getNavigationHistory", json!({})), Rc::downgrade(&self.session));

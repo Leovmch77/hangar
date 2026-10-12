@@ -35,7 +35,9 @@ const FRAME: &str = "new Promise(r=>{requestAnimationFrame(()=>requestAnimationF
 const FOCUS: &str = "(()=>{const a=document.activeElement;if(!a||a===document.body)return 'nada';const t=a.tagName.toLowerCase();const ok=a.isContentEditable||t==='textarea'||(t==='input'&&!/^(button|submit|reset|checkbox|radio|file|image|range|color)$/i.test(a.type||''));return ok?'':t+(a.type?'['+a.type+']':'')})()";
 const PROBE_READ: &str = "(typeof window.__hangarSonda===\"undefined\"?2:window.__hangarSonda)";
 /// Verbos que mudam a página: pausado, só estes são recusados; ler continua livre.
-const ACTING: [&str; 11] = ["click", "fill", "type", "press", "hover", "eval", "layout", "tema", "goto", "back", "reload"];
+const ACTING: [&str; 12] = ["click", "fill", "type", "press", "hover", "eval", "layout", "tema", "goto", "back", "reload", "dialog"];
+/// Com diálogo aberto a página não roda script: só estes respondem sem ele.
+const WITH_DIALOG: [&str; 5] = ["dialog", "url", "estado", "console", "network"];
 pub const PAUSED: &str = "erro: o usuario pausou o navegador; espere ele clicar em Retomar no painel e tente de novo";
 /// Tempo do realce do alvo antes da ação: o bastante para o olho achar, pouco para o agente sentir.
 const MARK_MS: u64 = 350;
@@ -73,6 +75,11 @@ pub struct Controller<P: Page> {
     on_activity: RefCell<Option<Box<dyn Fn(Activity)>>>,
     on_layout: RefCell<Option<Box<dyn Fn(Option<(u32, u32)>)>>>,
     on_page_error: RefCell<Option<Box<dyn Fn(Option<String>)>>>,
+    /// Diálogo aberto na página (tipo, mensagem), vindo do motor pelo painel.
+    dialog_open: RefCell<Option<(String, String)>>,
+    /// Acorda o verbo em andamento quando um diálogo abre: o clique que o abriu só voltaria depois da resposta.
+    dialog_signal: RefCell<Option<futures::channel::oneshot::Sender<()>>>,
+    on_dialog_answer: RefCell<Option<Box<dyn Fn(bool, Option<String>)>>>,
 }
 
 fn push(list: &mut VecDeque<String>, line: String) {
@@ -82,7 +89,7 @@ fn push(list: &mut VecDeque<String>, line: String) {
 
 impl<P: Page> Controller<P> {
     pub fn new(page: P, hidden: bool) -> Self {
-        Self { page, turn: Mutex::new(()), wanted_hidden: Cell::new(hidden), paused: Cell::new(false), on_activity: RefCell::new(None), on_layout: RefCell::new(None), on_page_error: RefCell::new(None), state: RefCell::new(State { refs: HashMap::new(), console: VecDeque::new(),
+        Self { page, turn: Mutex::new(()), wanted_hidden: Cell::new(hidden), paused: Cell::new(false), on_activity: RefCell::new(None), on_layout: RefCell::new(None), on_page_error: RefCell::new(None), dialog_open: RefCell::new(None), dialog_signal: RefCell::new(None), on_dialog_answer: RefCell::new(None), state: RefCell::new(State { refs: HashMap::new(), console: VecDeque::new(),
             network: VecDeque::new(), inflight: HashSet::new(), requests: HashMap::new(), dialog: None, last_network: Instant::now(), theme: "sistema", layout: Layout::Desktop,
             hidden: false, scale: None, navigated: false, navs: 0, enabled: HashSet::new() }) }
     }
@@ -123,6 +130,34 @@ impl<P: Page> Controller<P> {
 
     /// Tela emulada (`layout mobile` ou `<l> <a>`), para o painel desenhá-la na proporção certa; `None` = a do painel.
     pub fn on_layout(&self, f: impl Fn(Option<(u32, u32)>) + 'static) { *self.on_layout.borrow_mut() = Some(Box::new(f)); }
+
+    /// O motor viu um diálogo abrir (`Some`) ou fechar (`None`).
+    pub fn set_dialog(&self, dialog: Option<(String, String)>) {
+        let opened = dialog.is_some();
+        *self.dialog_open.borrow_mut() = dialog;
+        if opened && let Some(signal) = self.dialog_signal.borrow_mut().take() { let _ = signal.send(()); }
+    }
+
+    /// Quem responde o diálogo de verdade (o motor, pelo painel): o verbo `dialog` só repassa.
+    pub fn on_dialog_answer(&self, f: impl Fn(bool, Option<String>) + 'static) { *self.on_dialog_answer.borrow_mut() = Some(Box::new(f)); }
+
+    fn dialog_hint(kind: &str) -> &'static str {
+        if kind == "prompt" { "dialog accept <texto> | dialog accept | dialog dismiss" } else if kind == "alert" { "dialog accept" } else { "dialog accept | dialog dismiss" }
+    }
+
+    fn answer_dialog(&self, args: &[String]) -> String {
+        let Some((kind, _)) = self.dialog_open.borrow().clone() else { return "erro: dialog: nenhum dialogo aberto na pagina".into() };
+        let accept = match args.first().map(String::as_str) {
+            Some("accept" | "aceitar" | "ok") => true,
+            Some("dismiss" | "recusar" | "cancel") => false,
+            _ => return format!("erro: dialog: use {}", Self::dialog_hint(&kind)),
+        };
+        let text = (accept && kind == "prompt" && args.len() > 1).then(|| args[1..].join(" "));
+        // O gancho só põe a resposta no canal do painel: chamá-lo com o empréstimo aberto não reentra.
+        match self.on_dialog_answer.borrow().as_ref() { Some(f) => f(accept, text), None => return "erro: dialog: o painel nao respondeu".into() }
+        *self.dialog_open.borrow_mut() = None;
+        format!("ok: dialog {}", if accept { "accept" } else { "dismiss" })
+    }
 
     /// Erro da página para o selo do painel (`Some`), ou `None` quando ela navega e a contagem recomeça.
     pub fn on_page_error(&self, f: impl Fn(Option<String>) + 'static) { *self.on_page_error.borrow_mut() = Some(Box::new(f)); }
@@ -215,12 +250,19 @@ impl<P: Page> Controller<P> {
     pub async fn run(&self, verb: &str, args: &[String]) -> Reply {
         let _turn = self.turn.lock().await;
         if self.paused.get() && ACTING.contains(&verb) { return Reply::Text(PAUSED.into()); }
+        if verb == "dialog" { return Reply::Text(self.answer_dialog(args)); }
+        if let Some((kind, message)) = self.dialog_open.borrow().clone() && !WITH_DIALOG.contains(&verb) {
+            return Reply::Text(format!("erro: a pagina esta com um dialogo {kind} aberto: “{message}”. Responda antes: {}", Self::dialog_hint(&kind)));
+        }
+        let (signal, opened) = futures::channel::oneshot::channel();
+        *self.dialog_signal.borrow_mut() = Some(signal);
         let arg = |i: usize| args.get(i).map(String::as_str).unwrap_or("");
         // Anuncia antes de medir: a faixa que aparece muda a altura da página. Verbo com ref repete com o nome do alvo.
         if verb != "estado" { self.report(verb, (verb == "press").then(|| arg(0).to_owned())); }
+        let work = async {
         self.enable_base().await;
         self.after_navigation().await;
-        let result = match verb {
+        match verb {
             "snapshot" => self.snapshot_verb(args).await.map(Reply::Text),
             "click" => self.click(arg(0)).await.map(Reply::Text),
             "fill" => self.fill(arg(0), arg(1)).await.map(Reply::Text),
@@ -243,7 +285,19 @@ impl<P: Page> Controller<P> {
             "reload" => self.reload().await.map(Reply::Text),
             "tab-list" | "tab-new" | "tab-switch" | "tab-close" => Ok(Reply::Text("erro: o app nativo ainda nao tem abas: e um navegador por sessao".into())),
             _ => Ok(Reply::Text(format!("erro: verbo desconhecido: {verb}"))),
+        }
         };
+        // Diálogo aberto no meio do verbo (o clique em "Excluir"): a página para até a resposta, e o verbo volta agora.
+        let opened = async { if opened.await.is_err() { std::future::pending::<()>().await } };
+        let result = match select(std::pin::pin!(work), std::pin::pin!(opened)).await {
+            Either::Left((result, _)) => result,
+            Either::Right(_) => {
+                let _ = self.within(500, self.unmark()).await;
+                let (kind, message) = self.dialog_open.borrow().clone().unwrap_or_default();
+                Ok(Reply::Text(format!("ok: {verb} — a pagina abriu um dialogo {kind}: “{message}”. Responda com: {}", Self::dialog_hint(&kind))))
+            }
+        };
+        self.dialog_signal.borrow_mut().take();
         result.unwrap_or_else(|e| Reply::Text(format!("erro: {e}")))
     }
 
