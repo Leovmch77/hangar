@@ -60,12 +60,18 @@ def test_the_bridge_is_called_one_way_and_421_means_not_ours(monkeypatch):
 def test_bridge_failures_become_a_coded_failure_never_an_exception(monkeypatch):
     import json
     import socket
-    import urllib.request
 
     class Handler(http.server.BaseHTTPRequestHandler):
         def do_POST(self):
             status, body = (404, b"nope") if "/text/" in self.path else (409, b'{"detail": {"code": "close_kill_survived"}}')
             self.send_response(status)
+            self.send_header("content-length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):
+            body = b'[{"name": "compact"}]'
+            self.send_response(200)
             self.send_header("content-length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
@@ -85,6 +91,8 @@ def test_bridge_failures_become_a_coded_failure_never_an_exception(monkeypatch):
         assert refused[0] == 409 and code(refused) == "close_kill_survived", "o envelope do Rust passa como veio"
         text = runtime_coordinator.rust_codex_terminal("text", "input", body=b"{}")
         assert text[0] == 502 and code(text) == "codex_bridge_failed", "corpo que não é JSON vira código"
+        assert runtime_coordinator.rust_codex_terminal("cx", "commands", "GET") == (200, b'[{"name": "compact"}]'), \
+            "sucesso em lista (o /commands) passa intacto"
     finally:
         server.shutdown()
     with socket.socket() as probe:
@@ -100,12 +108,31 @@ def test_bridge_failures_become_a_coded_failure_never_an_exception(monkeypatch):
     assert asyncio.run(api_mod._send_one_codex("cx", "oi"))["error"]["code"] == "codex_bridge_failed", \
         "o envio do broadcast/grupo/MCP devolve a falha, sem levantar"
 
+    from http import client as http_client
+
     class Slow:
-        def open(self, *args, **kwargs):
+        sent = True
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def request(self, *args, **kwargs):
+            if not Slow.sent:
+                raise TimeoutError("timed out")
+
+        def getresponse(self):
             raise TimeoutError("timed out")
-    monkeypatch.setattr(urllib.request, "build_opener", lambda *args: Slow())
+
+        def close(self):
+            pass
+    monkeypatch.setattr(http_client, "HTTPConnection", Slow)
     late = runtime_coordinator.rust_codex_terminal("cx", "input", body=b"{}")
-    assert late[0] == 503 and code(late) == "codex_bridge_failed", "prazo estourado"
+    assert late[0] == 504 and code(late) == "codex_bridge_uncertain", "escrita enviada sem resposta: incerto, não repetir"
+    assert code(runtime_coordinator.rust_codex_terminal("cx", "commands", "GET")) == "codex_bridge_failed", \
+        "leitura sem resposta pode repetir"
+    Slow.sent = False
+    early = runtime_coordinator.rust_codex_terminal("cx", "input", body=b"{}")
+    assert early[0] == 503 and code(early) == "codex_bridge_failed", "prazo antes de enviar: pode repetir"
 
 
 def test_delete_answers_the_rust_code_when_the_close_fails(monkeypatch):

@@ -675,6 +675,31 @@ async fn owner_delete_kills_in_rust_then_forwards_marked_to_python() {
 }
 
 #[tokio::test]
+async fn owner_delete_without_a_header_secret_warns_the_skipped_python_cleanup() {
+    let fx = fixture();
+    let server_app = fake_app_server(true).await;
+    let (mut app,mut tui) = (app_server_process(&server_app.endpoint),tui());
+    fx.put_sidecar("cx-proof",fx.meta("cx-proof",&server_app.endpoint,Some(app.id()),&tui));
+    fx.panes(&["cx-proof"]);
+    let registry = registry().await;
+    let watcher = fx.watcher();
+    registry.bind_watcher(watcher.clone());
+    watcher.round(&registry).await;
+    let (python, upstream) = crate::fake::spawn_fake().await;
+    let mut cfg = crate::fake::config(upstream, "127.0.0.1");
+    cfg.internal_secret = "quebra\nlinha".into();
+    let state = hangar_server::routes::AppState::new(cfg);
+    assert!(state.state.runtime.set(registry.clone()).is_ok());
+    let server = crate::fake::spawn_state(state).await;
+    let (status, body) = delete_session(server, "cx-proof").await;
+    assert_eq!((status, body["warning"]["code"].as_str()), (200, Some("close_python_cleanup_skipped")),
+        "encerrou, e a limpeza do Python que não rodou aparece com código");
+    assert!(!registry.owns_codex_terminal("cx-proof"));
+    assert_eq!(python.hits_to("/api/sessions/cx-proof"), 0);
+    finish(&mut [&mut app,&mut tui]);
+}
+
+#[tokio::test]
 async fn owner_delete_that_fails_in_rust_answers_its_code_and_never_reaches_python() {
     let fx = fixture();
     let server_app = fake_app_server(true).await;
@@ -845,6 +870,8 @@ async fn owner_broadcast_answers_the_rust_code_for_a_codex_terminal_it_cannot_ad
     assert_eq!(body["results"]["cx-proof"]["error"]["code"],"codex_terminal_absent");
     assert_eq!(body["results"]["cx-proof"]["delivered"],false);
     assert_eq!(python.hits_to("/api/broadcast"),1,"só os outros nomes vão ao Python");
+    // O Python falso responde texto: resposta ilegível sai com código, nunca `error: null`.
+    assert_eq!(body["results"]["claude-x"]["error"]["code"],"broadcast_reply_unreadable");
     let sent:Value = serde_json::from_slice(&python.last_body()).unwrap();
     assert_eq!(sent["names"],json!(["claude-x"]),"o Codex com terminal do Rust nunca é repassado");
     assert_eq!(python.hits_to("/api/sessions/cx-proof/input"),0);

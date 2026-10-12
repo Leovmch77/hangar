@@ -548,6 +548,12 @@ const ERROS: Record<string, (params: Parametros) => string> = {
   // Troca de agente em curso: o Python recusa com este código, e o Rust o repassa nas rotas dos mods.
   session_transfer_busy: () => m.session_transfer_busy(),
   session_transfer_gate_unavailable: () => m.session_transfer_gate_unavailable(),
+  // Falhas da ponte e do runtime que a tela mostra sem que se saiba se a ação aconteceu.
+  codex_bridge_uncertain: () => m.codex_bridge_uncertain(),
+  claude_bridge_uncertain: () => m.claude_bridge_uncertain(),
+  close_python_cleanup_skipped: () => m.close_python_cleanup_skipped(),
+  relaunch_panicked: () => m.relaunch_panicked(),
+  broadcast_reply_unreadable: () => m.broadcast_reply_unreadable(),
 };
 
 // Falha com código do servidor (503 do dono único): a frase traduzida já está no `message`.

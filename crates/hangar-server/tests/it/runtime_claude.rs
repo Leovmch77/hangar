@@ -361,3 +361,17 @@ fn events_outside_a_turn_do_not_open_one() {
         assert_eq!(engine.view()["deliverable"],true,"{event}");
     }
 }
+
+#[test]
+fn relaunch_helper_failure_says_its_kind_before_exiting() {
+    let bin = env!("CARGO_BIN_EXE_hangar-server");
+    let run = |args: &[&str]| std::process::Command::new(bin).args(args).stdin(std::process::Stdio::null()).output().unwrap();
+    let bad = run(&["--session-relaunch"]);
+    assert_eq!(bad.status.code(), Some(126));
+    assert!(String::from_utf8_lossy(&bad.stderr).contains("InvalidInput"), "{}", String::from_utf8_lossy(&bad.stderr));
+    #[cfg(unix)] {
+        let gone = run(&["--session-relaunch", "/nonexistent/hangar-relaunch.sock"]);
+        assert_eq!(gone.status.code(), Some(126));
+        assert!(String::from_utf8_lossy(&gone.stderr).contains("NotFound"), "{}", String::from_utf8_lossy(&gone.stderr));
+    }
+}

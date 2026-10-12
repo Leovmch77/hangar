@@ -318,15 +318,21 @@ pub async fn broadcast(State(st): State<Arc<AppState>>, ConnectInfo(peer): Conne
         let reply = to_bytes(response.into_body(), RELAY_REPLY_LIMIT).await.unwrap_or_default();
         if let Some(results) = serde_json::from_slice::<Value>(&reply).ok().and_then(|v| v["results"].as_object().cloned()) { python = results; }
     }
+    // Resposta sem corpo legível nunca vira `error: null`: o envio pode ter falhado sem dizer por quê.
+    let unreadable = || json!({"ok": false, "delivered": false, "error": detail_body("broadcast_reply_unreadable",
+        "A resposta do envio veio ilegível; confira a sessão antes de reenviar.", json!({}))["detail"].clone()});
     let mut results = serde_json::Map::new();
     for name in &names {
         let result = if let Some(refusal) = refused.get(name) { refusal.clone() } else if ours.contains(name) {
             match deliver_reply(&st, name, &text).await {
                 (status, reply) if status.is_success() => reply,
-                (_, reply) => json!({"ok": false, "error": reply.get("detail").cloned().unwrap_or(Value::Null), "delivered": false}),
+                (_, reply) => match reply.get("detail").filter(|detail| !detail.is_null()) {
+                    Some(detail) => json!({"ok": false, "error": detail, "delivered": false}),
+                    None => unreadable(),
+                },
             }
         } else {
-            python.remove(name).unwrap_or_else(|| json!({"ok": false, "error": null, "delivered": false}))
+            python.remove(name).unwrap_or_else(unreadable)
         };
         results.insert(name.clone(), result);
     }

@@ -10,11 +10,12 @@ fn main() {
 async fn run() {
     let args:Vec<_>=std::env::args_os().collect();
     match hangar_server::runtime::claude_relaunch::helper_args(&args) {
-        Ok(Some(endpoint))=> {
-            let code=hangar_server::runtime::claude_relaunch::helper(endpoint).await.unwrap_or(126);
-            std::process::exit(code);
+        // Só o `kind`: a mensagem pode trazer caminho ou ambiente do relançamento.
+        Ok(Some(endpoint))=> match hangar_server::runtime::claude_relaunch::helper(endpoint).await {
+            Ok(code)=>std::process::exit(code),
+            Err(e)=>{ eprintln!("hangar-server: relaunch helper failed: {:?}", e.kind()); std::process::exit(126) },
         },
-        Err(_)=>std::process::exit(126),
+        Err(e)=>{ eprintln!("hangar-server: relaunch helper args invalid: {:?}", e.kind()); std::process::exit(126) },
         Ok(None)=>{},
     }
     let cfg = match hangar_server::config::Config::from_env() {

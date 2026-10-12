@@ -592,7 +592,8 @@ impl Watcher {
         Some(match reply {
             Ok(reply) if reply.disposition == Disposition::Accepted=>Ok(json!({"ok":true})),
             Ok(reply)=>Err(RuntimeError::new("erro_codex_nao_reiniciou",reply.payload["error"].as_str().unwrap_or("o runtime recusou o reinício"))),
-            Err(error)=>Err(RuntimeError::new("erro_codex_nao_reiniciou",&error.message)),
+            // O código do runtime segue: `reload_refusal` decide o status e o leva em `params.code`.
+            Err(error)=>Err(error),
         })
     }
 }

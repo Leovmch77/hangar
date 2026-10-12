@@ -119,8 +119,16 @@ pub async fn delete(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
     st.list.invalidate();
     match axum::http::HeaderValue::from_str(&st.cfg.internal_secret) {
         Ok(mark) => { req.headers_mut().insert(RUST_CLOSED, mark); }
-        // Sem a marca o Python tentaria encerrar de novo pela ponte: melhor não repassar.
-        Err(_) => return super::json_response(StatusCode::OK, json!({"ok": true, "warning": null})),
+        // Sem a marca o Python tentaria encerrar de novo pela ponte: não repassa, e a limpeza dele que
+        // não rodou vai no aviso.
+        Err(_) => {
+            tracing::error!(session = %name, code = "close_python_cleanup_skipped", "segredo interno não vira cabeçalho; limpeza do Python não rodou");
+            let warning = json!({"code": "close_python_cleanup_skipped", "params": {},
+                "msg": "Sessão encerrada, mas convites, atalhos e caches dela não foram limpos."});
+            let mut response = super::json_response(StatusCode::OK, json!({"ok": true, "warning": warning}));
+            crate::routes::cors(req.headers(), response.headers_mut());
+            return response;
+        }
     }
     crate::routes::pass(&st, req, &fwd).await
 }

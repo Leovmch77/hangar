@@ -252,6 +252,28 @@ mod guard_tests {
             assert_eq!(bytes.lock().unwrap().len(),usize::from(partial));
         }
     }
+
+    #[derive(Clone)] struct Capture(Arc<Mutex<Vec<u8>>>);
+    impl std::io::Write for Capture {
+        fn write(&mut self,data:&[u8]) -> std::io::Result<usize> { self.0.lock().unwrap().extend_from_slice(data); Ok(data.len()) }
+        fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+    }
+
+    #[tokio::test]
+    async fn a_broken_cano_line_leaves_its_cause_in_the_log() {
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let capture = Capture(output.clone());
+        let subscriber = tracing_subscriber::fmt().without_time().with_ansi(false).with_writer(move||capture.clone()).finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let (ours,mut theirs) = tokio::io::duplex(4096);
+        let snapshot = CanoSnapshot { kind:"cano_snapshot".into(),versao:2,pid:1,init:None,aberto:true,pendentes:vec![],
+            ultimo_result:None,rate_limit:None,stderr_tail:vec![],saiu:None,inflight:json!({}) };
+        let tasks = CanoConnection { snapshot,stream:BufReader::new(Box::new(ours)) }.start(1,4);
+        theirs.write_all(b"not json\n").await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1),tasks.reader_task).await.unwrap().unwrap();
+        let text = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+        assert!(text.contains("code=frame_json"),"{text}");
+    }
 }
 
 /// Quanto o `open` espera o cano lançado começar a escutar, como o Python antigo antes de matá-lo.
@@ -327,7 +349,11 @@ impl CanoConnection {
                         let value = tokio::select! {
                             result = read_into(&mut read, &mut frame, MAX_ENVELOPE) => match result {
                                 Ok(Some(value)) => Some(value),
-                                _ => { lost.notify_one(); return; }
+                                Ok(None) => { tracing::debug!("cano encerrou a conexão (EOF)"); lost.notify_one(); return; }
+                                Err(error) => {
+                                    tracing::warn!(code=%error.code,reason=%error.message,"leitura do cano falhou; conexão dada como perdida");
+                                    lost.notify_one(); return;
+                                }
                             },
                             _ = tokio::time::sleep_until(deadline) => None,
                             _ = stopping.changed() => return,

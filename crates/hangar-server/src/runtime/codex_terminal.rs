@@ -403,7 +403,15 @@ impl Watcher {
             let mut problems = crate::list::discover::Problems::default();
             crate::list::discover_other::sidecars(&dir,"sidecar Codex ilegível ou torto",&mut problems)
         }).await.unwrap_or_default();
-        let Ok(panes) = self.cfg.mux.list_panes().await else { return };
+        let panes = match self.cfg.mux.list_panes().await {
+            Ok(panes) => panes,
+            Err(error) => {
+                if crate::warn_limit::allow(None,"codex_watch_panes_unavailable") {
+                    tracing::warn!(code="codex_watch_panes_unavailable",reason=%error.code,"vigia do Codex com terminal sem a lista de panes; rodada sem decisão");
+                }
+                return;
+            }
+        };
         let home = &self.cfg.home;
         let mut seen = BTreeSet::new();
         for target in registry.codex_terminals().await {

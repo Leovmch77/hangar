@@ -43,6 +43,15 @@ async fn refusals_leave_their_reason_in_the_log() {
     }
     server.abort();
 
+    // Vigia do Codex com terminal sem multiplexador: a rodada sai sem decidir, mas diz por quê.
+    let home = tempfile::tempdir().unwrap();
+    let missing = home.path().join("missing-mux");
+    let watcher = hangar_server::runtime::codex_terminal::Watcher::new(hangar_server::runtime::codex_terminal::WatchConfig {
+        home: home.path().into(), queue_dir: home.path().join("queue"),
+        mux: hangar_server::list::mux::Mux::with_program(&missing, std::time::Duration::from_secs(5)), mux_program: missing.clone().into_os_string() });
+    let watched = Arc::new(RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(), "secret-test".into(), "instance-test".into()));
+    watcher.round(&watched).await;
+
     let log = String::from_utf8(output.lock().unwrap().clone()).unwrap();
     let count = |needle: &[&str]| log.lines().filter(|line| needle.iter().all(|n| line.contains(n))).count();
     assert_eq!(count(&["runtime recusou envelope", "status=400", "check=envelope"]), 1, "{log}");
@@ -50,4 +59,5 @@ async fn refusals_leave_their_reason_in_the_log() {
     assert_eq!(count(&["runtime recusou operação", "key=key-missing", "code=command_fields"]), 1, "{log}");
     assert_eq!(count(&["runtime recusou operação", "key=key-missing", "kind=snapshot", "code=runtime_binding"]), 1, "{log}");
     assert!(!log.contains("private-"), "corpo do pedido chegou ao log: {log}");
+    assert_eq!(count(&["vigia do Codex com terminal sem a lista de panes", "codex_watch_panes_unavailable"]), 1, "{log}");
 }

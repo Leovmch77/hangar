@@ -78,26 +78,30 @@ def rust_claude(name, route, method="POST", body=b""):
 
 def _rust_bridge(provider, name, route, method, body):
     from app import list_bridge
-    import urllib.error, urllib.parse, urllib.request
+    import http.client, urllib.parse
     endpoint = list_bridge.endpoint()
-    status, raw = 503, b""
+    status, raw, sent = 503, b"", False
     if endpoint is not None:
-        req = urllib.request.Request(f"http://{endpoint[0]}/__hangar_server/{provider}/{urllib.parse.quote(name, safe='')}/{route}",
-            data=body or None, headers={"content-type": "application/json", "x-hangar-internal": endpoint[1]}, method=method)
+        conn = http.client.HTTPConnection(endpoint[0], timeout=90)
         try:
-            with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req, timeout=90) as response:
-                status, raw = response.status, response.read()
-        except urllib.error.HTTPError as exc:
-            if exc.code == 421:
-                return None
-            status = exc.code
-            with suppress(OSError):
-                raw = exc.read()
-        except OSError:  # conexão recusada e prazo (TimeoutError) também são OSError
-            pass
+            conn.request(method, f"/__hangar_server/{provider}/{urllib.parse.quote(name, safe='')}/{route}", body=body or None,
+                         headers={"content-type": "application/json", "x-hangar-internal": endpoint[1]})
+            sent = True
+            response = conn.getresponse()
+            status, raw = response.status, response.read()
+        except (OSError, http.client.HTTPException):  # recusa, prazo e conexão caída
+            if sent and method not in ("GET", "HEAD"):
+                # O pedido inteiro saiu: a escrita pode ter sido entregue, e repetir duplicaria.
+                return 504, json.dumps({"detail": {"code": f"{provider}_bridge_uncertain", "params": {},
+                    "msg": "O Rust recebeu o pedido e não respondeu; confira o resultado antes de repetir."}}).encode()
+        finally:
+            conn.close()
+        if status == 421:
+            return None
     with suppress(ValueError):
-        body = json.loads(raw)
-        if isinstance(body, dict) and (status < 300 or isinstance(body.get("detail"), dict)):
+        parsed = json.loads(raw)
+        # Sucesso é qualquer JSON (o `/commands` é lista); erro precisa do envelope do Rust.
+        if status < 300 or (isinstance(parsed, dict) and isinstance(parsed.get("detail"), dict)):
             return status, raw
     # Ponte fora, prazo ou corpo sem o envelope do Rust: falha com código, nunca exceção crua.
     return max(status, 502), json.dumps({"detail": {"code": f"{provider}_bridge_failed", "params": {},

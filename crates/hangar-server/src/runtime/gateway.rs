@@ -305,7 +305,14 @@ impl RuntimeRegistry {
                 if event.channel!="reset" {continue;}
                 let name=registry.entries.lock().await.get(&event.key).filter(|e|e.generation==event.generation && e.provider=="claude" && matches!(e.handle,EntryHandle::Headless(_))).map(|e|e.name.clone());
                 let Some(name)=name else {continue;};
-                let current=match registry.interaction_binding_readonly(&name).await {Ok(current)=>current,Err(_)=>continue};
+                let current=match registry.interaction_binding_readonly(&name).await {Ok(current)=>current,Err(error)=>{
+                    // Sem o vínculo a conversa nova não é religada: o chat fica na antiga e isso tem de aparecer.
+                    tracing::warn!(session=%name,code=%error.code,reason=%error.message,"vínculo ilegível no reset; conversa não religada");
+                    // Erro já na tela (o próprio motivo da leitura falhar) fica: não troca pela consequência.
+                    let live=registry.live_sender(&name);
+                    if live.borrow().as_ref().is_none_or(|state|state.error.is_none()) {super::actor::mark_live_error(&live,&error.code,&error.message);}
+                    continue;
+                }};
                 if current.key!=event.key || current.generation!=event.generation || event.data["conversation"]!=current.conversation {continue;}
                 if let (Some(hubs),Some(info))=(registry.hubs.get().and_then(crate::side::WeakHubs::upgrade),registry.claude_info(&name).await) {
                     if let Err(error)=hubs.rebind_claude_info(&name,info) {super::actor::mark_live_error(&registry.live_sender(&name),&error.code,&error.message);}

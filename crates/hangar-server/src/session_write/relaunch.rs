@@ -21,7 +21,17 @@ type Outcome = Option<Result<Value, RuntimeError>>;
 /// Numa tarefa própria: o cliente que desiste não corta no meio uma troca já admitida (a porta reabre
 /// só quando ela termina).
 async fn detached(work: impl Future<Output = Outcome> + Send + 'static) -> Outcome {
-    tokio::spawn(work).await.unwrap_or_else(|_| Some(Err(RuntimeError::new("relaunch_job", "a troca foi interrompida"))))
+    tokio::spawn(work).await.unwrap_or_else(|error| {
+        tracing::error!(code = PANICKED, error = %error, "troca de modo ou reinício do Codex interrompido no meio");
+        Some(Err(RuntimeError::new(PANICKED, "A troca parou no meio; confira o estado da sessão antes de tentar de novo.")))
+    })
+}
+
+/// Pânico no meio da troca: não se sabe em que fase parou, então nunca é "não troquei".
+const PANICKED: &str = "relaunch_panicked";
+
+fn uncertain(error: &RuntimeError) -> bool {
+    error.code == PANICKED || crate::runtime::codex_relaunch::kill_phase(error)
 }
 
 /// `ModoExecucaoBody`: só `terminal`, booleano estrito.
@@ -34,23 +44,25 @@ fn terminal_field(headers: &axum::http::HeaderMap, bytes: &[u8]) -> Option<bool>
 }
 
 /// O `HTTPException` do `_trocar_modo`: recusa e falha de troca são 409 `erro_troca_modo`; processo que
-/// não saiu depois do kill é 500 com o código.
+/// não saiu depois do kill, ou troca interrompida por pânico, é 500 com o código.
 pub fn mode_refusal(error: &RuntimeError) -> (StatusCode, Value) {
     if error.code == "session_transfer_busy" { return (StatusCode::CONFLICT, busy_body()); }
-    if crate::runtime::codex_relaunch::kill_phase(error) {
+    if uncertain(error) {
         return (StatusCode::INTERNAL_SERVER_ERROR, super::detail_body(&error.code, &error.message, json!({})));
     }
     (StatusCode::CONFLICT, super::detail_body("erro_troca_modo", &format!("não troquei de modo: {}", error.message), json!({"erro": error.message})))
 }
 
-/// O `_reload_session` do Codex: com terminal é 409; o reinício que falha é 502.
+/// O `_reload_session` do Codex: com terminal é 409; fase incerta é 500 com o código; o reinício que
+/// falha é 502, com o código de origem em `params.code`.
 pub fn reload_refusal(error: &RuntimeError) -> (StatusCode, Value) {
     match error.code.as_str() {
         "session_transfer_busy" => (StatusCode::CONFLICT, busy_body()),
         "erro_recarregar_so_sem_terminal" => (StatusCode::CONFLICT, super::detail_body(&error.code, &error.message, json!({}))),
+        _ if uncertain(error) => (StatusCode::INTERNAL_SERVER_ERROR, super::detail_body(&error.code, &error.message, json!({}))),
         _ => {
             let reason: String = error.message.chars().take(200).collect();
-            (StatusCode::BAD_GATEWAY, super::detail_body("erro_codex_nao_reiniciou", &format!("o Codex não subiu de novo: {reason}"), json!({})))
+            (StatusCode::BAD_GATEWAY, super::detail_body("erro_codex_nao_reiniciou", &format!("o Codex não subiu de novo: {reason}"), json!({"code": error.code})))
         }
     }
 }
@@ -117,6 +129,19 @@ mod tests {
         assert_eq!(reload_refusal(&RuntimeError::new("erro_recarregar_so_sem_terminal", "x")).0, StatusCode::CONFLICT);
         let (status, body) = reload_refusal(&RuntimeError::new("cano_nao_subiu", "binário não encontrado: codex"));
         assert_eq!((status, body["detail"]["code"].as_str()), (StatusCode::BAD_GATEWAY, Some("erro_codex_nao_reiniciou")));
+        assert_eq!(body["detail"]["params"]["code"], "cano_nao_subiu", "o código de origem não se perde");
+        let (status, body) = reload_refusal(&RuntimeError::new("relaunch_process_alive", "ainda vivo"));
+        assert_eq!((status, body["detail"]["code"].as_str()), (StatusCode::INTERNAL_SERVER_ERROR, Some("relaunch_process_alive")));
+    }
+
+    #[tokio::test]
+    async fn a_panic_mid_switch_is_an_uncertain_phase_not_a_refusal() {
+        let crash = true;
+        let outcome = detached(async move { if crash { panic!("no meio") } None }).await.unwrap().unwrap_err();
+        assert_eq!(outcome.code, PANICKED);
+        for (status, body) in [mode_refusal(&outcome), reload_refusal(&outcome)] {
+            assert_eq!((status, body["detail"]["code"].as_str()), (StatusCode::INTERNAL_SERVER_ERROR, Some(PANICKED)));
+        }
     }
 
     #[test]
