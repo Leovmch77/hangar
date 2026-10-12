@@ -35,9 +35,9 @@ pub(super) struct BrowserPanel {
     /// Status da importação do login do Chrome, mostrado embaixo da barra.
     #[cfg(not(target_os = "macos"))]
     cookies_status: Option<String>,
-    /// A pessoa já viu o aviso de que o login importado vale para todas as sessões.
+    /// Login pedido com o motor ainda nascendo: a importação segue quando o CDP dele existir.
     #[cfg(not(target_os = "macos"))]
-    cookies_confirmed: bool,
+    import_pending: bool,
     /// URL cujo login já foi preenchido com as senhas salvas do Chrome, para não repetir a cada evento da mesma página.
     #[cfg(target_os = "linux")]
     last_fill: Option<String>,
@@ -70,7 +70,7 @@ impl BrowserPanel {
             cx.on_blur(&focus, window, |this, _, _| if let Some(engine) = this.engine() { engine.focus(false) }),
         ];
         Self { key, #[cfg(not(target_os = "macos"))] controller: None, #[cfg(not(target_os = "macos"))] cdp: None,
-            #[cfg(not(target_os = "macos"))] relay: Default::default(), #[cfg(not(target_os = "macos"))] viewer: Rc::default(), engine: None, starting: None, _start: None, events, address, page: model::PageState::default(), invalid: None, #[cfg(not(target_os = "macos"))] cookies_status: None, #[cfg(not(target_os = "macos"))] cookies_confirmed: false, #[cfg(target_os = "linux")] last_fill: None, focus,
+            #[cfg(not(target_os = "macos"))] relay: Default::default(), #[cfg(not(target_os = "macos"))] viewer: Rc::default(), engine: None, starting: None, _start: None, events, address, page: model::PageState::default(), invalid: None, #[cfg(not(target_os = "macos"))] cookies_status: None, #[cfg(not(target_os = "macos"))] import_pending: false, #[cfg(target_os = "linux")] last_fill: None, focus,
             origin: Rc::default(), shown: false, _drain: drain, _subscriptions: subscriptions }
     }
 
@@ -194,6 +194,10 @@ impl BrowserPanel {
                 #[cfg(not(target_os = "macos"))]
                 if let Some(Ok(engine)) = &this.engine { let engine = engine.clone(); this.attach(&engine, cx); }
                 if let Some(url) = this.starting.take() { this.navigate(url, window, cx); }
+                #[cfg(not(target_os = "macos"))]
+                if std::mem::take(&mut this.import_pending) {
+                    if this.cdp.is_some() { this.import_chrome_login(window, cx) } else { this.cookies_status = None }
+                }
                 cx.notify();
             });
         }));
@@ -311,20 +315,31 @@ impl BrowserPanel {
     /// Traz o login do Chrome real do usuário (CDP) para o navegador embutido, SÓ no clique e TUDO de uma vez: cada
     /// conexão ao CDP faz o Chrome perguntar "Permitir a depuração remota?" na tela da pessoa.
     #[cfg(not(target_os = "macos"))]
-    fn import_chrome_login(&mut self, cx: &mut Context<Self>) {
+    fn import_chrome_login(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         use crate::browser::chrome_import;
+        // O perfil do navegador embutido é um só para todas as sessões e agentes: o 1º clique da vida só avisa, o 2º
+        // traz e guarda que a pessoa já leu.
+        let mut seen = crate::appearance::get();
+        if !seen.chrome_cookies_confirmed {
+            if self.cookies_status.as_deref() != Some(tr("browser_cookies_confirm").as_str()) {
+                self.cookies_status = Some(tr("browser_cookies_confirm"));
+                cx.notify();
+                return;
+            }
+            seen.chrome_cookies_confirmed = true;
+            crate::appearance::set(seen);
+            cx.background_executor().spawn(async {
+                if let Err(e) = crate::appearance::save() { eprintln!("[nav] confirmacao do login nao foi gravada: {e}"); }
+            }).detach();
+        }
         let Some(cdp) = self.cdp.clone() else {
+            // Sem página aberta o motor nem existe: o botão o faz nascer e a importação segue quando ele estiver pronto.
+            self.import_pending = true;
             self.cookies_status = Some(tr("browser_cookies_starting"));
+            if self.engine.is_none() && self.starting.is_none() { self.go("about:blank".into(), window, cx); }
             cx.notify();
             return;
         };
-        // O perfil do navegador embutido é um só para todas as sessões e agentes: o 1º clique só avisa, o 2º traz.
-        if !self.cookies_confirmed {
-            self.cookies_confirmed = true;
-            self.cookies_status = Some(tr("browser_cookies_confirm"));
-            cx.notify();
-            return;
-        }
         self.cookies_status = Some(tr("browser_cookies_fetching"));
         cx.notify();
         // Plano B pra Chromium/Brave antigos: porta fixa por variável de ambiente.
@@ -342,11 +357,9 @@ impl BrowserPanel {
         use crate::browser::chrome_import::ImportError;
         let cookies = match result {
             Ok(cookies) => cookies,
-            Err(e @ ImportError::ChromeClosed) => {
+            Err(ImportError::ChromeClosed) => {
                 // Sem depuração ligada, o clique já abre a página do toggle no Chrome — um passo, não dois.
-                self.cookies_status = Some(tr(e.status_key()));
                 self.activate_chrome(cx);
-                cx.notify();
                 return;
             }
             Err(e) => {
@@ -386,17 +399,17 @@ impl BrowserPanel {
         }).detach();
     }
 
-    /// Abre `chrome://inspect/#remote-debugging` no Chrome do usuário e copia o endereço: o Chrome em execução recusa
+    /// Abre a página da depuração remota no navegador do usuário e copia o endereço: o navegador em execução recusa
     /// `chrome://` vindo da linha de comando, então a instrução manda colar na barra.
     #[cfg(not(target_os = "macos"))]
     fn activate_chrome(&mut self, cx: &mut Context<Self>) {
-        use crate::browser::chrome_import;
-        cx.write_to_clipboard(ClipboardItem::new_string(chrome_import::ACTIVATE_PAGE.to_owned()));
-        self.cookies_status = Some(tr(if chrome_import::open_remote_debug_page() {
-            "browser_cookies_activate"
-        } else {
-            "browser_cookies_no_chrome"
-        }));
+        self.cookies_status = Some(match crate::browser::chrome_import::open_remote_debug_page() {
+            Some(browser) => {
+                cx.write_to_clipboard(ClipboardItem::new_string(browser.page.to_owned()));
+                format!("{} {}", tr("browser_cookies_chrome_off"), tr("browser_cookies_activate")).replace("{browser}", browser.name)
+            }
+            None => tr("browser_cookies_no_chrome"),
+        });
         cx.notify();
     }
 
@@ -508,9 +521,12 @@ impl Render for BrowserPanel {
         // Botão que traz o login do Chrome real do usuário (só onde o motor fala CDP).
         #[cfg(not(target_os = "macos"))]
         {
-            toolbar = toolbar.child(chrome::icon_button("browser-cookies", IconName::Key, tr("browser_cookies_bring"), cx)
-                .disabled(!ready)
-                .on_click(cx.listener(|this, _, _, cx| this.import_chrome_login(cx))));
+            toolbar = toolbar.child(Button::new("browser-cookies")
+                .custom(ButtonCustomVariant::new(cx).color(transparent_black()).foreground(theme::muted())
+                    .hover(theme::hover()).active(theme::hover()))
+                .icon(Icon::new(IconName::Key).size(px(14.))).label(tr("browser_cookies_bring"))
+                .h(px(28.)).px(px(8.)).rounded(px(6.)).text_size(px(12.)).flex_shrink_0()
+                .on_click(cx.listener(|this, _, window, cx| this.import_chrome_login(window, cx))));
         }
         // Com a página na tela, a falha dela fica numa linha; sem página, `render_page` a mostra no lugar dela.
         let notice = self.invalid.clone().or_else(|| self.page.error.clone().filter(|_| ready && self.page.url.is_some()));

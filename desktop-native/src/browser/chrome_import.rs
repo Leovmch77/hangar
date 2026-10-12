@@ -13,8 +13,10 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use ring::rand::{SecureRandom, SystemRandom};
 use serde_json::{Value, json};
 
-pub const ACTIVATE_PAGE: &str = "chrome://inspect/#remote-debugging";
-const IO_TIMEOUT: Duration = Duration::from_secs(15);
+/// Tempo para a pessoa achar e responder o "Permitir a depuração remota?" do Chrome.
+const IO_TIMEOUT: Duration = Duration::from_secs(60);
+/// Falha no handshake antes disto é a conexão caindo (comum na 1ª depois de um tempo parado), não a pessoa respondendo.
+const HUMAN_ANSWER: Duration = Duration::from_secs(2);
 /// Dump de cookies de um perfil antigo passa de 1 MB; teto generoso, só pra barrar resposta absurda.
 const MAX_FRAME: usize = 64 * 1024 * 1024;
 
@@ -23,6 +25,8 @@ pub enum ImportError {
     ChromeClosed,
     /// A porta fixa tem um Chrome de automação, não o do usuário.
     Headless,
+    /// A pessoa recusou o "Permitir a depuração remota?" ou não respondeu a tempo: tentar de novo abriria outro diálogo.
+    Refused,
     /// Falha ao falar CDP.
     Failed(String),
 }
@@ -33,6 +37,7 @@ impl ImportError {
         match self {
             Self::ChromeClosed => "browser_cookies_chrome_off",
             Self::Headless => "browser_cookies_headless",
+            Self::Refused => "browser_cookies_refused",
             Self::Failed(_) => "browser_cookies_error",
         }
     }
@@ -45,26 +50,59 @@ impl ImportError {
     }
 }
 
-/// Raízes de perfil onde o Chrome grava `DevToolsActivePort`, na ordem em que vale procurar.
+/// Um navegador da família Chrome instalado de um jeito: onde fica o perfil (lá o Chrome grava `DevToolsActivePort`),
+/// a página que liga a depuração e como abri-lo.
+pub struct Browser {
+    pub name: &'static str,
+    pub page: &'static str,
+    root: PathBuf,
+    launch: Vec<std::ffi::OsString>,
+}
+
+const CHROME_PAGE: &str = "chrome://inspect/#remote-debugging";
+
+/// Na ordem em que vale procurar e abrir: o primeiro com perfil é o que a pessoa usa.
 /// Este módulo não compila no macOS, então o não-Windows aqui é o Linux.
-fn profile_roots() -> Vec<PathBuf> {
+fn browsers() -> Vec<Browser> {
     let home = dirs_home();
     #[cfg(target_os = "windows")]
     {
         let local = std::env::var_os("LOCALAPPDATA").map(PathBuf::from)
             .unwrap_or_else(|| home.join("AppData").join("Local"));
+        let programs: Vec<PathBuf> = ["ProgramFiles", "ProgramFiles(x86)"].iter()
+            .filter_map(std::env::var_os).map(PathBuf::from).chain([local.clone()]).collect();
+        let exe = |rel: &[&str]| programs.iter().map(|base| rel.iter().fold(base.clone(), |p, part| p.join(part)))
+            .find(|p| p.is_file()).map(|p| vec![p.into_os_string()]).unwrap_or_default();
         vec![
-            local.join("Google").join("Chrome").join("User Data"),
-            local.join("Microsoft").join("Edge").join("User Data"),
+            Browser { name: "Chrome", page: CHROME_PAGE, root: local.join("Google").join("Chrome").join("User Data"),
+                launch: exe(&["Google", "Chrome", "Application", "chrome.exe"]) },
+            Browser { name: "Edge", page: "edge://inspect/#remote-debugging", root: local.join("Microsoft").join("Edge").join("User Data"),
+                launch: exe(&["Microsoft", "Edge", "Application", "msedge.exe"]) },
         ]
     }
     #[cfg(not(target_os = "windows"))]
     {
         let cfg = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).unwrap_or_else(|| home.join(".config"));
+        let bin = |names: &[&str]| names.iter().find(|n| on_path(n)).map(|n| vec![(*n).into()]).unwrap_or_default();
+        let flatpak = |id: &str| {
+            let installed = [PathBuf::from("/var/lib/flatpak/app"), home.join(".local/share/flatpak/app")]
+                .iter().any(|dir| dir.join(id).is_dir());
+            if installed && on_path("flatpak") { vec!["flatpak".into(), "run".into(), id.into()] } else { vec![] }
+        };
+        let var_app = |id: &str, rel: &str| home.join(".var/app").join(id).join("config").join(rel);
+        let b = |name, root, launch| Browser { name, page: CHROME_PAGE, root, launch };
         vec![
-            cfg.join("google-chrome"),
-            cfg.join("chromium"),
-            cfg.join("BraveSoftware").join("Brave-Browser"),
+            b("Chrome", cfg.join("google-chrome"), bin(&["google-chrome-stable", "google-chrome"])),
+            b("Chrome", var_app("com.google.Chrome", "google-chrome"), flatpak("com.google.Chrome")),
+            b("Chrome Beta", cfg.join("google-chrome-beta"), bin(&["google-chrome-beta"])),
+            b("Chrome Dev", cfg.join("google-chrome-unstable"), bin(&["google-chrome-unstable"])),
+            b("Chrome Dev", var_app("com.google.ChromeDev", "google-chrome-unstable"), flatpak("com.google.ChromeDev")),
+            b("Chromium", cfg.join("chromium"), bin(&["chromium", "chromium-browser"])),
+            b("Chromium", home.join("snap/chromium/common/chromium"),
+                if std::path::Path::new("/snap/bin/chromium").is_file() { vec!["/snap/bin/chromium".into()] } else { vec![] }),
+            b("Chromium", var_app("org.chromium.Chromium", "chromium"), flatpak("org.chromium.Chromium")),
+            b("Brave", cfg.join("BraveSoftware").join("Brave-Browser"), bin(&["brave", "brave-browser"])),
+            b("Brave", var_app("com.brave.Browser", "BraveSoftware/Brave-Browser"), flatpak("com.brave.Browser")),
         ]
     }
 }
@@ -136,7 +174,7 @@ fn to_param(c: &Value) -> Value {
 /// aceita) e depois a porta fixa; cada candidato duas vezes, porque a 1ª conexão depois de um tempo
 /// parado costuma cair e as seguintes respondem.
 pub fn fetch_cookies(port: Option<u16>) -> Result<Vec<Value>, ImportError> {
-    let mut candidates: Vec<String> = profile_roots().iter().filter_map(endpoint_from_profile).collect();
+    let mut candidates: Vec<String> = browsers().iter().filter_map(|b| endpoint_from_profile(&b.root)).collect();
     // Headless na porta fixa não pode mascarar um perfil que funcionaria: fica como erro de reserva, não aborta.
     let mut last = ImportError::ChromeClosed;
     if let Some(p) = port {
@@ -153,6 +191,7 @@ pub fn fetch_cookies(port: Option<u16>) -> Result<Vec<Value>, ImportError> {
                     let cookies = result["cookies"].as_array().into_iter().flatten().map(to_param).collect();
                     return Ok(cookies);
                 }
+                Err(ImportError::Refused) => return Err(ImportError::Refused),
                 Err(e) => {
                     // O erro mais específico vence: um candidato velho (porta morta) não apaga a recusa do Chrome do usuário.
                     last = keep_specific(last, e);
@@ -173,6 +212,7 @@ fn keep_specific(current: ImportError, new: ImportError) -> ImportError {
             ImportError::ChromeClosed => 0,
             ImportError::Headless => 1,
             ImportError::Failed(_) => 2,
+            ImportError::Refused => 3,
         }
     }
     if rank(&new) >= rank(&current) { new } else { current }
@@ -220,16 +260,20 @@ fn cdp_once(ws: &str, method: &str) -> Result<Value, ImportError> {
     // Só os cabeçalhos: o servidor não manda quadro nenhum antes de a gente mandar o comando.
     let mut head = Vec::new();
     let mut byte = [0u8; 1];
+    let asked = std::time::Instant::now();
     while !head.ends_with(b"\r\n\r\n") {
-        // Timeout aqui é a pessoa demorando a aprovar "Permitir depuração remota?" (ou a conexão caindo), não Chrome off.
-        stream.read_exact(&mut byte).map_err(|_| ImportError::Failed("cdp: sem resposta ao handshake".into()))?;
+        // O Chrome segura o handshake enquanto pergunta "Permitir depuração remota?": falha depois de a pessoa ter tido
+        // tempo de ver o diálogo é a resposta dela (ou o tempo esgotado), e não se tenta de novo.
+        stream.read_exact(&mut byte).map_err(|_| if asked.elapsed() >= HUMAN_ANSWER { ImportError::Refused } else {
+            ImportError::Failed("cdp: sem resposta ao handshake".into())
+        })?;
         head.push(byte[0]);
         if head.len() > 8192 {
             return Err(ImportError::Failed("cdp: handshake sem fim".into()));
         }
     }
     if !head.starts_with(b"HTTP/1.1 101") {
-        return Err(ImportError::Failed("cdp: depuracao recusada ou indisponivel".into()));
+        return Err(ImportError::Refused);
     }
 
     let payload = json!({"id": 1, "method": method}).to_string();
@@ -306,34 +350,31 @@ fn read_frame(stream: &mut impl Read) -> Result<(bool, u8, Vec<u8>), ImportError
     Ok((fin, op, data))
 }
 
-/// Abre `chrome://inspect/#remote-debugging` no Chrome do usuário. Não se lança o Chrome direto deste
-/// processo sem fechar os descritores: o filho herdaria o pipe do CDP do Chromium embutido (fd 3 e 4)
-/// e o seguraria depois de o app fechar — por isso o `sh` que fecha todo descritor acima de 2.
-pub fn open_remote_debug_page() -> bool {
+/// Abre a página que liga a depuração no navegador da pessoa: o primeiro instalado com perfil, senão o primeiro
+/// instalado. `None` quando nenhum está instalado, para não dizer que abriu o que não existe.
+/// No Linux não se lança o navegador direto deste processo sem fechar os descritores: o filho herdaria o pipe do CDP
+/// do Chromium embutido (fd 3 e 4) e o seguraria depois de o app fechar — por isso o `sh` que fecha todo descritor
+/// acima de 2.
+pub fn open_remote_debug_page() -> Option<Browser> {
     use std::process::{Command, Stdio};
+    let mut found: Vec<Browser> = browsers().into_iter().filter(|b| !b.launch.is_empty()).collect();
+    found.sort_by_key(|b| !b.root.is_dir());
+    let browser = found.into_iter().next()?;
+    let (program, args) = browser.launch.split_first()?;
     #[cfg(target_os = "windows")]
-    {
-        Command::new("cmd").args(["/c", "start", "", "chrome", ACTIVATE_PAGE])
-            .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().is_ok()
-    }
+    let mut cmd = { let mut cmd = Command::new(program); cmd.args(args).arg(browser.page); cmd };
     #[cfg(not(target_os = "windows"))]
-    {
+    let mut cmd = {
         use std::os::unix::process::CommandExt;
         let fd_close = "for fd in $(seq 3 1023); do eval \"exec $fd>&-\"; done 2>/dev/null; exec \"$0\" \"$@\"";
-        for bin in ["google-chrome-stable", "google-chrome", "chromium", "chromium-browser", "brave"] {
-            if !on_path(bin) {
-                continue;
-            }
-            let spawned = Command::new("sh").args(["-c", fd_close, bin, ACTIVATE_PAGE])
-                .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
-                .process_group(0).spawn();
-            if let Ok(mut child) = spawned {
-                std::thread::spawn(move || { let _ = child.wait(); });
-                return true;
-            }
-        }
-        false
-    }
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", fd_close]).arg(program).args(args).arg(browser.page).process_group(0);
+        cmd
+    };
+    let mut child = cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn()
+        .inspect_err(|e| eprintln!("[cookies] {} nao abriu: {e}", browser.name)).ok()?;
+    std::thread::spawn(move || { let _ = child.wait(); });
+    Some(browser)
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -653,7 +694,7 @@ mod tests {
     }
 
     // Integração real: contra um Chrome headful com depuração na porta HANGAR_TEST_CDP_PORT. Rode com
-    // XDG_CONFIG_HOME vazio para `profile_roots` não achar o Chrome do usuário e cair na porta fixa.
+    // XDG_CONFIG_HOME vazio para `browsers` não achar o Chrome do usuário e cair na porta fixa.
     #[test]
     #[ignore = "precisa de um Chrome com depuração em HANGAR_TEST_CDP_PORT"]
     fn fetch_cookies_against_a_live_chrome() {
