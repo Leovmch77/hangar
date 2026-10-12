@@ -25,6 +25,7 @@ use tokio::sync::{broadcast, mpsc};
 use crate::auth::{self, Auth};
 use crate::config::Config;
 use crate::proxy::{self, Forward, HttpClient};
+use crate::share::caller::{Caller, caller};
 use crate::side::{Binding, Hub, Hubs, INFO_TTL, Lease, Out, Queued, SideCtx, remember_info};
 use crate::tail::{self, Watchers};
 use crate::transcript::{InternalInfo, SKIPPED_LINES, history_etag, merged_history};
@@ -312,15 +313,65 @@ fn guest_socket(addr: SocketAddr) -> std::io::Result<TcpListener> {
 
 /// Roteador da 8766: tudo passa pelo porteiro, nada pergunta `gate`/`is_owner`.
 pub fn guest_router(state: Arc<AppState>) -> Router {
-    // Mesmo corpo do 404 do FastAPI, que os clientes já tratam.
-    let router = Router::new().fallback(|| async {
-        (StatusCode::NOT_FOUND, [(header::CONTENT_TYPE, "application/json")], r#"{"detail":"Not Found"}"#)
-    });
-    let router = match state.share.clone() {
-        Some(share) => router.layer(axum::middleware::from_fn_with_state(Arc::new(crate::share::gate::Gate::new(share)), crate::share::gate::guard)),
-        None => router,
+    let Some(share) = state.share.clone() else {
+        return Router::new().fallback(|headers: HeaderMap| async move { not_found(&headers) }).with_state(state);
     };
-    router.with_state(state)
+    // Os handlers do dono que também servem o convidado; o resto é o 404 do Python (Task 10).
+    session_routes(guest_fallback).fallback(guest_fallback)
+        .layer(axum::middleware::from_fn_with_state(Arc::new(crate::share::gate::Gate::new(share)), crate::share::gate::guard))
+        .with_state(state)
+}
+
+/// Na 8766, anexos e rotas de sessão do workspace têm handler no Rust (o porteiro já limitou ao
+/// nível); o resto ainda é do Python.
+async fn guest_fallback(st: State<Arc<AppState>>, peer: ConnectInfo<SocketAddr>, req: Request) -> Response {
+    let (method, path) = (req.method(), req.uri().path());
+    if caller(&req).is_some()
+        && (crate::uploads::http::matches(method, path) || crate::workspace_routes::matches(method, path))
+    {
+        return pass_any(st, peer, req).await;
+    }
+    // Task 10: o resto da 8766 vai ao Python com o convidado assinado.
+    not_found(req.headers())
+}
+
+/// Rotas cujo handler sabe atender o dono e o convidado; `fallback` é o repasse de cada porta.
+fn session_routes<H, T>(fallback: H) -> Router<Arc<AppState>>
+where H: axum::handler::Handler<T, Arc<AppState>>, T: 'static {
+    Router::new()
+        .route("/api/sessions/{name}/term", get(crate::term::session_ws).fallback(fallback.clone()))
+        // Outro método nessas rotas (preflight OPTIONS, HEAD) segue ao Python.
+        .route("/api/sessions", get(crate::list::hub::list).fallback(fallback.clone()))
+        .route("/api/sessions/events", get(crate::list::hub::events).fallback(fallback.clone()))
+        .route("/api/sessions/{name}/history", get(history).fallback(fallback.clone()))
+        .route("/api/sessions/{name}/events", get(events).fallback(fallback.clone()))
+        // Interface dos mods: o Rust atende a sessão sem terminal dele; o resto segue ao Python.
+        .route("/api/sessions/{name}/plugin/press", axum::routing::post(crate::mods::routes::press).fallback(fallback.clone()))
+        .route("/api/sessions/{name}/plugin/close", axum::routing::post(crate::mods::routes::close).fallback(fallback.clone()))
+        .route("/api/sessions/{name}/plugin/show", axum::routing::post(crate::mods::routes::show).fallback(fallback.clone()))
+        .route("/api/sessions/{name}/plugin/input", axum::routing::post(crate::mods::routes::input).fallback(fallback.clone()))
+        // Escritas Claude: o Rust decide por pedido e repassa o que não é dele (corpo intacto).
+        .route("/api/sessions/{name}/input", axum::routing::post(crate::session_write::input::input).fallback(fallback.clone()))
+        .route("/api/sessions/{name}/steer", axum::routing::post(crate::session_write::input::steer).fallback(fallback.clone()))
+        .route("/api/sessions/{name}/interrupt", axum::routing::post(crate::session_write::control::interrupt).fallback(fallback.clone()))
+        .route("/api/sessions/{name}/select", axum::routing::post(crate::session_write::control::select).fallback(fallback.clone()))
+        .route("/api/sessions/{name}/select/submit", axum::routing::post(crate::session_write::control::select_submit).fallback(fallback.clone()))
+        .route("/api/sessions/{name}/answer", axum::routing::post(crate::session_write::answer::answer).fallback(fallback.clone()))
+        .route("/api/sessions/{name}/keys", axum::routing::post(crate::session_write::control::keys).fallback(fallback.clone()))
+        .route("/api/sessions/{name}/term-input", axum::routing::post(crate::session_write::control::term_input).fallback(fallback.clone()))
+        .route("/api/sessions/{name}/queue/{entry_id}", axum::routing::delete(crate::session_write::control::queue_remove).fallback(fallback.clone()))
+        // Rotas só do Codex: o Rust atende a sessão sem terminal dele; o resto segue ao Python.
+        .route("/api/sessions/{name}/models", get(crate::session_write::codex::models).fallback(fallback.clone()))
+        .route("/api/sessions/{name}/model", axum::routing::post(crate::session_write::codex::model).fallback(fallback.clone()))
+        .route("/api/sessions/{name}/service-tier", axum::routing::post(crate::session_write::codex::service_tier).fallback(fallback.clone()))
+        .route("/api/sessions/{name}/codex/mode", axum::routing::post(crate::session_write::codex::mode).fallback(fallback.clone()))
+        .route("/api/sessions/{name}/limits", get(crate::session_write::codex::limits).fallback(fallback.clone()))
+        .route("/api/sessions/{name}/question/skip", axum::routing::post(crate::session_write::codex::skip_question).fallback(fallback.clone()))
+        .route("/api/sessions/{name}/commands", get(crate::session_write::codex::commands).fallback(fallback.clone()))
+        .route("/api/sessions/{name}/codex-permissions", get(crate::session_write::codex::permissions).fallback(fallback.clone()))
+        // Mesmo caminho: o axum junta o POST à rota de cima (um repasse só, o dela).
+        .route("/api/sessions/{name}/codex-permissions", axum::routing::post(crate::session_write::codex::set_permission))
+        .route("/api/sessions/{name}/cost", get(crate::costs_routes::session_cost).fallback(fallback))
 }
 
 pub fn terminal_router(state: Arc<AppState>) -> Router {
@@ -353,8 +404,7 @@ pub fn terminal_router(state: Arc<AppState>) -> Router {
 }
 
 pub fn router(state: Arc<AppState>) -> Router {
-    Router::new()
-        .route("/api/sessions/{name}/term", get(crate::term::session_ws).fallback(pass_any))
+    session_routes(pass_any)
         .route("/api/hangar-terminals/{ident}/term", get(crate::term::hangar_ws).fallback(pass_any))
         .route("/__hangar_server/health", get(health))
         .route("/__hangar_server/terminal", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
@@ -379,42 +429,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/__hangar_server/voice/memory", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
         .route("/__hangar_server/voice/memory/{id}", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
         .route("/__hangar_server/share/reachability", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
-        // Outro método nessas rotas (preflight OPTIONS, HEAD) segue ao Python.
-        .route("/api/sessions", get(crate::list::hub::list).fallback(pass_any))
-        .route("/api/sessions/events", get(crate::list::hub::events).fallback(pass_any))
-        .route("/api/sessions/{name}/history", get(history).fallback(pass_any))
-        .route("/api/sessions/{name}/events", get(events).fallback(pass_any))
-        // Interface dos mods: o Rust atende a sessão sem terminal dele; o resto segue ao Python.
-        .route("/api/sessions/{name}/plugin/press", axum::routing::post(crate::mods::routes::press).fallback(pass_any))
-        .route("/api/sessions/{name}/plugin/close", axum::routing::post(crate::mods::routes::close).fallback(pass_any))
-        .route("/api/sessions/{name}/plugin/show", axum::routing::post(crate::mods::routes::show).fallback(pass_any))
-        .route("/api/sessions/{name}/plugin/input", axum::routing::post(crate::mods::routes::input).fallback(pass_any))
         .merge(plugin_routes())
-        // Páginas HTML da conversa: o dono lê no Rust; o convidado segue ao Python.
+        // Páginas HTML da conversa: só o dono; o convidado recebe o 404 de hoje.
         .route("/api/sessions/{name}/pages/{id}", get(crate::pages::routes::page).fallback(pass_any))
         .route("/api/sessions/{name}/pages/{id}/shot", get(crate::pages::routes::shot).fallback(pass_any))
-        // Escritas Claude: o Rust decide por pedido e repassa o que não é dele (corpo intacto).
-        .route("/api/sessions/{name}/input", axum::routing::post(crate::session_write::input::input).fallback(pass_any))
-        .route("/api/sessions/{name}/steer", axum::routing::post(crate::session_write::input::steer).fallback(pass_any))
-        .route("/api/sessions/{name}/interrupt", axum::routing::post(crate::session_write::control::interrupt).fallback(pass_any))
-        .route("/api/sessions/{name}/select", axum::routing::post(crate::session_write::control::select).fallback(pass_any))
-        .route("/api/sessions/{name}/select/submit", axum::routing::post(crate::session_write::control::select_submit).fallback(pass_any))
-        .route("/api/sessions/{name}/answer", axum::routing::post(crate::session_write::answer::answer).fallback(pass_any))
-        .route("/api/sessions/{name}/keys", axum::routing::post(crate::session_write::control::keys).fallback(pass_any))
-        .route("/api/sessions/{name}/term-input", axum::routing::post(crate::session_write::control::term_input).fallback(pass_any))
-        .route("/api/sessions/{name}/queue/{entry_id}", axum::routing::delete(crate::session_write::control::queue_remove).fallback(pass_any))
-        // Rotas só do Codex: o Rust atende a sessão sem terminal dele; o resto segue ao Python.
-        .route("/api/sessions/{name}/models", get(crate::session_write::codex::models).fallback(pass_any))
-        .route("/api/sessions/{name}/model", axum::routing::post(crate::session_write::codex::model).fallback(pass_any))
-        .route("/api/sessions/{name}/service-tier", axum::routing::post(crate::session_write::codex::service_tier).fallback(pass_any))
-        .route("/api/sessions/{name}/codex/mode", axum::routing::post(crate::session_write::codex::mode).fallback(pass_any))
-        .route("/api/sessions/{name}/limits", get(crate::session_write::codex::limits).fallback(pass_any))
-        .route("/api/sessions/{name}/question/skip", axum::routing::post(crate::session_write::codex::skip_question).fallback(pass_any))
-        .route("/api/sessions/{name}/commands", get(crate::session_write::codex::commands).fallback(pass_any))
-        .route("/api/sessions/{name}/codex-permissions", get(crate::session_write::codex::permissions).fallback(pass_any))
-        // Mesmo caminho: o axum junta o POST à rota de cima (um repasse só, o dela).
-        .route("/api/sessions/{name}/codex-permissions", axum::routing::post(crate::session_write::codex::set_permission))
-        .route("/api/sessions/{name}/cost", get(crate::costs_routes::session_cost).fallback(pass_any))
         .route("/api/costs", get(crate::costs_routes::costs).fallback(pass_any))
         .route("/api/cotacao", get(crate::costs_routes::cotacao).fallback(pass_any))
         .route("/api/uso", get(crate::costs_routes::usage).fallback(pass_any))
@@ -486,7 +504,33 @@ pub(crate) fn gate(st: &AppState, peer: SocketAddr, req: &Request) -> (Forward, 
     (Forward { client_ip, https }, owner)
 }
 
+/// Quem pede. Na 8766 só o convidado que o porteiro pôs (nunca `is_owner`, nem `X-Forwarded-For`);
+/// na 8765, o dono pelo token.
+pub(crate) fn who(st: &AppState, peer: SocketAddr, req: &Request) -> (Forward, Option<Caller>) {
+    if on_guest_port(req) {
+        return (Forward { client_ip: peer.ip().to_string(), https: false }, caller(req).cloned());
+    }
+    let (fwd, owner) = gate(st, peer, req);
+    (fwd, owner.then_some(Caller::Owner))
+}
+
+fn on_guest_port(req: &Request) -> bool {
+    req.extensions().get::<ConnectInfo<crate::share::gate::GuestConn>>().is_some()
+        || matches!(caller(req), Some(Caller::Guest(_)))
+}
+
+/// O 404 do FastAPI, que os clientes já tratam.
+pub(crate) fn not_found(headers: &HeaderMap) -> Response {
+    let mut resp = (StatusCode::NOT_FOUND, [(header::CONTENT_TYPE, "application/json")], r#"{"detail":"Not Found"}"#).into_response();
+    cors(headers, resp.headers_mut());
+    resp
+}
+
 pub(crate) async fn pass(st: &AppState, req: Request, fwd: &Forward) -> Response {
+    if on_guest_port(&req) {
+        // Task 10: repasse ao Python com o convidado assinado; até lá, nunca com a identidade do dono.
+        return not_found(req.headers());
+    }
     let upgrade = req.headers().contains_key(header::UPGRADE);
     let mut resp = proxy::forward(&st.http, st.cfg.upstream, req, fwd).await;
     resp.extensions_mut().insert(crate::migration_status::Forwarded);
@@ -506,10 +550,17 @@ pub(crate) async fn pass_any(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     req: Request,
 ) -> Response {
-    // Anexos e contas do dono são do Rust; o convidado segue ao Python.
+    // Anexos e contas do dono são do Rust; o anexo também do convidado da sessão (o porteiro já
+    // limitou ao nível: par só baixa um arquivo).
     let uploads = crate::uploads::http::matches(req.method(), req.uri().path());
+    // Valores próprios: um `&Request` vivo através de `await` tira o `Send` do handler.
+    let (session, method) = (crate::share::caller::path_session(req.uri().path()), req.method().clone());
+    let session_ok = |who: &Option<Caller>| who.as_ref().is_some_and(|c| session.as_ref().is_some_and(|s| c.can(s, &method)));
     if (uploads || crate::accounts::http::matches(req.method(), req.uri().path()))
-        && gate(&st, peer, &req).1
+        && match who(&st, peer, &req).1 {
+            Some(Caller::Owner) => true,
+            guest => uploads && session_ok(&guest),
+        }
     {
         let headers = req.headers().clone();
         let path = req.uri().path().to_owned();
@@ -529,7 +580,7 @@ pub(crate) async fn pass_any(
         cors(&headers, response.headers_mut());
         return response;
     }
-    if crate::share_reach::matches(req.method(), req.uri().path()) {
+    if crate::share_reach::matches(req.method(), req.uri().path()) && !on_guest_port(&req) {
         let (forward, owner) = gate(&st, peer, &req);
         let headers = req.headers().clone();
         let mut response = if owner {
@@ -541,9 +592,9 @@ pub(crate) async fn pass_any(
         return response;
     }
     if crate::worktree_routes::matches(req.method(), req.uri().path()) {
-        let (forward, owner) = gate(&st, peer, &req);
+        let (forward, who) = who(&st, peer, &req);
         // Convidado segue ao Python, que o recusa como antes.
-        if owner {
+        if matches!(who, Some(Caller::Owner)) {
             let headers = req.headers().clone();
             let mut response = crate::worktree_routes::public(st, req, forward).await;
             cors(&headers, response.headers_mut());
@@ -551,8 +602,11 @@ pub(crate) async fn pass_any(
         }
     }
     if crate::workspace_routes::matches(req.method(), req.uri().path()) {
-        let (forward, owner) = gate(&st, peer, &req);
-        if owner {
+        let (forward, who) = who(&st, peer, &req);
+        // Só o convite (não o par) alcança as rotas da sessão dele; `/api/fs/*` não tem sessão.
+        let share = who.as_ref().and_then(Caller::grant).zip(session.as_ref())
+            .is_some_and(|(g, s)| g.sessions.get(s) == Some(&crate::share::store::Kind::Share));
+        if matches!(who, Some(Caller::Owner)) || share {
             let headers = req.headers().clone();
             let mut response = crate::workspace_routes::public(st, req, forward).await;
             cors(&headers, response.headers_mut());
@@ -587,9 +641,9 @@ async fn history(
     path: Result<Path<String>, PathRejection>,
     req: Request,
 ) -> Response {
-    let (fwd, owner) = gate(&st, peer, &req);
+    let (fwd, who) = who(&st, peer, &req);
     let name = match path {
-        Ok(Path(n)) if owner && req.method() == Method::GET => n,
+        Ok(Path(n)) if req.method() == Method::GET && who.as_ref().is_some_and(|c| c.can(&n, req.method())) => n,
         _ => return pass(&st, req, &fwd).await,
     };
     let limit = match auth::query_param(req.uri().query(), "limit") {
@@ -662,11 +716,13 @@ async fn events(
     path: Result<Path<String>, PathRejection>,
     req: Request,
 ) -> Response {
-    let (fwd, owner) = gate(&st, peer, &req);
+    let (fwd, who) = who(&st, peer, &req);
     let name = match path {
-        Ok(Path(n)) if owner && req.method() == Method::GET => n,
+        Ok(Path(n)) if req.method() == Method::GET && who.as_ref().is_some_and(|c| c.can(&n, req.method())) => n,
         _ => return pass(&st, req, &fwd).await,
     };
+    // Convidado não recebe aviso de mod nem pedido de navegador, e não conta como app do dono.
+    let guest = matches!(who, Some(Caller::Guest(_)));
     let Ok(info) = st.info(&name).await else {
         return route_failed(&st, req.headers(), "rust.events_failed", &name, "internal_info", INFO_REASON);
     };
@@ -681,11 +737,11 @@ async fn events(
     tracing::debug!(session = %name, req = %diag_req(&req), retomada = resume.is_some(), "events: abriu");
     // O app que sabe juntar a diferença da vista dos mods anuncia; app antigo segue com a vista inteira.
     let deltas = auth::query_param(req.uri().query(), "ui_delta").as_deref() == Some("1");
-    let lease = st.side.hubs.acquire(&name, binding, &st.side);
+    let lease = st.side.hubs.acquire_as(&name, binding, &st.side, !guest);
     let hub = lease.hub.clone();
     let (tx, rx) = mpsc::channel::<Queued>(64);
     tokio::spawn(client_loop(lease, resume, tx));
-    let mut resp = Response::new(Body::from_stream(device_stream(rx, hub, deltas).map(Ok::<Bytes, Infallible>)));
+    let mut resp = Response::new(Body::from_stream(device_stream(rx, hub, deltas, guest).map(Ok::<Bytes, Infallible>)));
     let h = resp.headers_mut();
     h.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/event-stream; charset=utf-8"));
     h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
@@ -698,11 +754,12 @@ async fn events(
 /// O que a conexão de um aparelho escreve, na ordem da fila. O marcador do `plugin_ui` só vira quadro
 /// aqui, quando o corpo da resposta pede o próximo: o aparelho lento recebe a vista mais nova, e a fila
 /// guarda marcadores, não cópias de até ~400 KB.
-fn device_stream(rx: mpsc::Receiver<Queued>, hub: Arc<Hub>, deltas: bool) -> impl futures_util::Stream<Item = Bytes> {
+/// `guest`: retrato e ao vivo sem `plugin_toast` e `nav` (texto do dono, url com o token dele).
+fn device_stream(rx: mpsc::Receiver<Queued>, hub: Arc<Hub>, deltas: bool, guest: bool) -> impl futures_util::Stream<Item = Bytes> {
     futures_util::stream::unfold((rx, hub, None), move |(mut rx, hub, mut ui)| async move {
         loop {
             let item = rx.recv().await?;
-            if let Some(frame) = hub.resolve(item, &mut ui, deltas) {
+            if let Some(frame) = hub.resolve(item, &mut ui, deltas).filter(|f| !(guest && crate::side::owner_only(f))) {
                 return Some((frame, (rx, hub, ui)));
             }
         }
@@ -897,7 +954,7 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(5), async {
             while hub.tx.receiver_count() == 0 { tokio::time::sleep(Duration::from_millis(5)).await; }
         }).await.unwrap();
-        (ctx, Box::pin(device_stream(rx, hub, deltas)))
+        (ctx, Box::pin(device_stream(rx, hub, deltas, false)))
     }
 
     /// Os próximos quadros sem `ping`, como (evento, dado), até o evento `until` inclusive.
@@ -1025,7 +1082,7 @@ mod tests {
         let hub = lease.hub.clone();
         let receivers = hub.tx.receiver_count();
         tokio::spawn(client_loop(lease, None, tx));
-        let mut late = Box::pin(device_stream(rx, hub.clone(), true));
+        let mut late = Box::pin(device_stream(rx, hub.clone(), true, false));
         assert_eq!(read_until(&mut late, ("plugin_ui", &first)).await.last().unwrap().1, first);
         tokio::time::timeout(Duration::from_secs(5), async {
             while hub.tx.receiver_count() == receivers { tokio::time::sleep(Duration::from_millis(5)).await; }

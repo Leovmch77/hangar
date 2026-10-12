@@ -33,7 +33,8 @@ use tokio::time::Instant;
 use super::http::{fits, invalid, reply};
 use super::model::*;
 use super::state::Turn;
-use crate::routes::{AppState, gate, pass, route_failed};
+use crate::routes::{AppState, pass, route_failed, who};
+use crate::share::caller::Caller;
 use crate::runtime::ingress::IngressPass;
 use crate::session_write::busy_body;
 
@@ -74,17 +75,26 @@ type Done = Box<Response>;
 /// superfície no Rust, para a rota que o Python não tem (`input`).
 async fn owned(st: &Arc<AppState>, peer: SocketAddr, path: Result<Path<String>, PathRejection>, req: Request,
     outside: Option<fn() -> ModsError>) -> Result<(String, HeaderMap, Body), Done> {
-    let (fwd, owner) = gate(st, peer, &req);
+    let (fwd, who) = who(st, peer, &req);
     let bridged = req.extensions().get::<Bridged>().is_some();
-    let owner = owner || bridged;
+    let owner = matches!(who, Some(Caller::Owner)) || bridged;
+    // O convidado da 8766 é atendido como o que chega pela ponte.
+    let method = req.method().clone();
+    let guest = |name: &str| who.as_ref().is_some_and(|c| c.grant().is_some() && c.can(name, &method));
     match (path, outside) {
-        (Ok(Path(name)), _) if owner && st.mods.owns(&name) => {
+        (Ok(Path(name)), _) if (owner || guest(&name)) && st.mods.owns(&name) => {
             let headers = req.headers().clone();
             Ok((name, headers, req.into_body()))
         }
         (Ok(Path(_)), Some(refusal)) if owner => Err(Box::new(refused(req.headers(), &refusal()))),
         // Da ponte nunca volta ao Python: ele trata a sessão que não é do Rust.
         _ if bridged => Err(Box::new(StatusCode::NOT_FOUND.into_response())),
+        // Terminal no Rust sem a interface dos mods aqui: o clique do Python dirigiria o pane do
+        // executor calado. A digitação o Python nem tem (404 abaixo).
+        (Ok(Path(name)), None) if guest(&name) && match st.state.runtime.get() {
+            Some(runtime) => runtime.is_terminal(&name).await,
+            None => false,
+        } => Err(Box::new(reply(Some(req.headers()), StatusCode::SERVICE_UNAVAILABLE, json!({"detail": no_answer().detail()})))),
         _ => Err(Box::new(pass(st, req, &fwd).await)),
     }
 }

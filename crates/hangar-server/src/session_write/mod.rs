@@ -3,7 +3,7 @@
 //! as rotas só do Codex sem terminal moram em `codex`; o que o Rust admite mas não atende (corpo que o
 //! FastAPI recusa) volta ao Python por `relay`.
 //!
-//! Ordem fixa de `admit`: dono → corpo → porta (`enter`) → entrada (`writable`) → decisão. A entrada
+//! Ordem fixa de `admit`: quem pede (dono, ou convidado na sessão do convite) → corpo → porta (`enter`) → entrada (`writable`) → decisão. A entrada
 //! é procurada DEPOIS da porta: a achada antes de esperar pode ser a que o relançamento parou.
 //! Repasse nunca acontece com o passe na mão: o `freeze` do Python fecha a porta e esperaria o
 //! nosso próprio passe.
@@ -26,7 +26,7 @@ use percent_encoding::percent_decode_str;
 use serde_json::{Value, json};
 
 use crate::proxy::Forward;
-use crate::routes::{AppState, cors, gate, pass};
+use crate::routes::{AppState, cors, pass, who};
 use crate::runtime::gateway::{RuntimeRegistry, WriteTarget};
 use crate::runtime::ingress::{GateClosed, IngressPass};
 pub use table::{Owner, Provider, WriteRoute, decide};
@@ -82,9 +82,10 @@ async fn forward_whole(st: &AppState, parts: Parts, bytes: Bytes, fwd: &Forward)
 /// pronta (repasse ao Python com o corpo intacto, ou a recusa da porta fechada).
 pub(crate) async fn admit(st: &Arc<AppState>, peer: SocketAddr, req: Request, route: WriteRoute,
     early: impl Fn(&Bytes) -> bool) -> Result<(Ctx, Bytes), Response> {
-    let (fwd, owner) = gate(st, peer, &req);
+    let (fwd, who) = who(st, peer, &req);
     let runtime = st.state.runtime.get().cloned();
-    let (Some(runtime), true, Some(name)) = (runtime, owner, session_name(req.uri().path())) else {
+    let name = session_name(req.uri().path()).filter(|n| who.as_ref().is_some_and(|c| c.can(n, req.method())));
+    let (Some(runtime), Some(name)) = (runtime, name) else {
         return Err(pass(st, req, &fwd).await);
     };
     let (parts, body) = req.into_parts();

@@ -22,6 +22,30 @@ pub struct GuestGrant {
     pub pair_roots: Vec<String>,
 }
 
+impl Caller {
+    /// Quem pode usar a sessão nesse método: o dono sempre; o convidado só nas do convite, e o de
+    /// par só lendo. O recorte fino por rota é do porteiro; este é o do handler.
+    pub fn can(&self, name: &str, method: &Method) -> bool {
+        match self {
+            Caller::Owner => true,
+            Caller::Guest(grant) => match grant.sessions.get(name) {
+                Some(Kind::Share) => true,
+                Some(Kind::Pair) => *method == Method::GET,
+                None => false,
+            },
+        }
+    }
+
+    pub fn grant(&self) -> Option<&Arc<GuestGrant>> {
+        match self { Caller::Guest(grant) => Some(grant), Caller::Owner => None }
+    }
+}
+
+/// O `Caller` que o porteiro da 8766 pôs no pedido; na 8765 nunca há um (ver `routes::who`).
+pub fn caller(req: &axum::extract::Request) -> Option<&Caller> {
+    req.extensions().get::<Caller>()
+}
+
 impl GuestGrant {
     pub fn new(token: &str, guest: &Guest) -> Self {
         let sessions = guest.sessions().into_iter()

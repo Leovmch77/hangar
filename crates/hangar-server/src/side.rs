@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
@@ -276,6 +276,9 @@ pub struct Hub {
     wake: Arc<Notify>,
     /// Vezes que a troca vazou (o Python mandou um dos quatro para sessão do Rust) e foi registrada.
     pub(crate) python_leaks: AtomicU32,
+    /// Aparelhos do dono no chat: a conexão interna leva `app=1` só com algum (convidado e canal
+    /// privado não calam o push do dono nem recebem avisos de mod).
+    owners: AtomicUsize,
 }
 
 /// O que um aparelho recebe ao entrar: cauda + retrato, e o canal para o resto. `ui`: a versão do
@@ -305,7 +308,7 @@ impl From<Bytes> for Queued {
 }
 
 impl Hub {
-    fn start(name: &str, binding: Binding, ctx: SideCtx) -> Arc<Hub> {
+    fn start(name: &str, binding: Binding, ctx: SideCtx, owners: usize) -> Arc<Hub> {
         let (tx, _) = broadcast::channel(CHANNEL);
         let hub = Arc::new_cyclic(|weak| {
             let tail = FileTail::spawn(
@@ -328,6 +331,7 @@ impl Hub {
                 committed: Mutex::new(None),
                 wake: Arc::new(Notify::new()),
                 python_leaks: AtomicU32::new(0),
+                owners: AtomicUsize::new(owners),
             }
         });
         hub.ensure_monitor();
@@ -657,9 +661,10 @@ async fn run_side(hub: Arc<Hub>) {
 
 async fn side_once(hub: &Arc<Hub>, attempt: &mut u32) -> SideEnd {
     let url = format!(
-        "http://{}/internal/sessions/{}/side-events?app=1",
+        "http://{}/internal/sessions/{}/side-events?app={}",
         hub.ctx.upstream,
-        utf8_percent_encode(&hub.name, NON_ALPHANUMERIC)
+        utf8_percent_encode(&hub.name, NON_ALPHANUMERIC),
+        u8::from(hub.owners.load(Ordering::SeqCst) > 0)
     );
     let req = match axum::http::Request::get(url).header("x-hangar-internal", &hub.ctx.secret).body(Body::empty()) {
         Ok(r) => r,
@@ -769,6 +774,11 @@ fn private_frame(frame: &[u8], events: &[&str]) -> bool {
     state_frame(frame, events) || state_frame(frame, &[LATEST[PLUGIN_UI]])
 }
 
+/// Quadro que só o dono recebe: aviso de mod (texto dele) e pedido de navegador (url com o token).
+pub(crate) fn owner_only(frame: &[u8]) -> bool {
+    state_frame(frame, &["plugin_toast", "nav"])
+}
+
 /// Quadro de um dos eventos do estado dados.
 fn state_frame(frame: &[u8], events: &[&str]) -> bool {
     let Some(rest) = frame.strip_prefix(b"event: ") else { return false };
@@ -843,7 +853,8 @@ pub async fn private_events(
     let Some(binding) = info.as_ref().and_then(Binding::from_info).filter(|b| b.state_events().is_some()) else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    let lease = st.side.hubs.acquire(&name, binding, &st.side);
+    // Quem lê daqui é o Python, para quem entrou pelas portas dele: conta o próprio app.
+    let lease = st.side.hubs.acquire_as(&name, binding, &st.side, false);
     let (tx, rx) = tokio::sync::mpsc::channel::<Bytes>(64);
     tokio::spawn(private_loop(lease, tx));
     let stream = futures_util::stream::unfold(rx, |mut rx| async move {
@@ -916,10 +927,17 @@ impl WeakHubs {
 pub struct Lease {
     hubs: Hubs,
     pub hub: Arc<Hub>,
+    owner: bool,
 }
 
 impl Hubs {
+    /// Aparelho do dono.
     pub fn acquire(&self, name: &str, binding: Binding, ctx: &SideCtx) -> Lease {
+        self.acquire_as(name, binding, ctx, true)
+    }
+
+    /// `owner: false`: convidado ou canal privado; não conta como app do dono.
+    pub fn acquire_as(&self, name: &str, binding: Binding, ctx: &SideCtx, owner: bool) -> Lease {
         let mut map = self.0.lock().unwrap();
         let hub = match map.get_mut(name) {
             Some((hub, n)) => {
@@ -927,17 +945,23 @@ impl Hubs {
                 hub.clone()
             }
             None => {
-                let hub = Hub::start(name, binding, ctx.clone());
+                let hub = Hub::start(name, binding, ctx.clone(), usize::from(owner));
                 map.insert(name.to_string(), (hub.clone(), 1));
                 drop(map);
                 // Hub novo começa sem retrato: a faixa e os avisos que o Rust já publicou entram agora.
                 hub.seed(ctx.mods.replay(name));
-                return Lease { hubs: self.clone(), hub };
+                return Lease { hubs: self.clone(), hub, owner };
             }
         };
+        // Contado sob a trava do mapa: o `Drop` de outro aparelho não cruza o zero no meio.
+        let first_owner = owner && hub.owners.fetch_add(1, Ordering::SeqCst) == 0;
         drop(map);
         hub.ensure_current(&binding);
-        Lease { hubs: self.clone(), hub }
+        if first_owner {
+            // O `app=` da conexão interna só muda religando; os aparelhos seguem no mesmo canal.
+            hub.restart_side();
+        }
+        Lease { hubs: self.clone(), hub, owner }
     }
 
     pub fn downgrade(&self) -> WeakHubs {
@@ -969,11 +993,16 @@ impl Drop for Lease {
             return;
         }
         *n -= 1;
+        let last_owner = self.owner && self.hub.owners.fetch_sub(1, Ordering::SeqCst) == 1;
         if *n == 0 {
             let (h, _) = map.remove(&self.hub.name).expect("presente acima");
             drop(map);
             // Último aparelho saiu: fecha a conexão interna (o Python roda app_saiu) e o leitor.
             h.stop();
+        } else if last_owner {
+            drop(map);
+            // Só convidados ficaram: religa com `app=0`.
+            self.hub.restart_side();
         }
     }
 }

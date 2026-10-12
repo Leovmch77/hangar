@@ -15,7 +15,7 @@ use serde_json::{Map, Value, json};
 use super::input::{MSG_CODEX_CONTROL, answer, codex_control, json_content_type};
 use super::{Ctx, WriteRoute, admit, detail_body, enter_then_find, json_response, relay, session_name};
 use crate::mods::state::random_hex;
-use crate::routes::{AppState, cors, gate, pass};
+use crate::routes::{AppState, cors, gate, pass, who};
 use crate::runtime::protocol::{Disposition, OperationKind, RuntimeCommand, RuntimeError, RuntimeReply};
 
 type Answer = (StatusCode, Value);
@@ -227,9 +227,9 @@ pub async fn mode(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInf
 /// `/limits` nunca é erro nem espera, como no Python: porta fechada (troca em curso) ou leitura que falha
 /// dão a resposta neutra.
 pub async fn limits(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
-    let (fwd, owner) = gate(&st, peer, &req);
-    let name = session_name(req.uri().path());
-    let (Some(runtime), Some(name), true) = (st.state.runtime.get(), name, owner) else { return pass(&st, req, &fwd).await };
+    let (fwd, who) = who(&st, peer, &req);
+    let name = session_name(req.uri().path()).filter(|n| who.as_ref().is_some_and(|c| c.can(n, req.method())));
+    let (Some(runtime), Some(name)) = (st.state.runtime.get(), name) else { return pass(&st, req, &fwd).await };
     if !ours(&st, Some(&name)).await { return pass(&st, req, &fwd).await; }
     let sent = match enter_then_find(runtime, &name, Duration::ZERO).await {
         Ok(Some((_held, target))) if target.provider == "codex" && !target.terminal =>
