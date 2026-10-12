@@ -52,6 +52,10 @@ fn states(node: &Value, role: &str, name: &str) -> String {
     out
 }
 
+fn property<'a>(node: &'a Value, name: &str) -> Option<&'a Value> {
+    node["properties"].as_array()?.iter().find(|p| p["name"] == name).map(|p| &p["value"]["value"])
+}
+
 /// `refs_only`: só as linhas acionáveis, sem a estrutura em volta.
 pub fn compact_ax(nodes: &[Value], refs_only: bool) -> Compact {
     let by_id: HashMap<&str, &Value> = nodes.iter().filter_map(|n| Some((n["nodeId"].as_str()?, n))).collect();
@@ -63,6 +67,10 @@ pub fn compact_ax(nodes: &[Value], refs_only: bool) -> Compact {
     while let Some((id, level, parent)) = stack.pop() {
         let Some(node) = by_id.get(id) else { continue };
         let role = node["role"]["value"].as_str().unwrap_or("");
+        // Editor rico (`contenteditable` sem papel, como o Tiptap) é um campo para o agente: vira `textbox` com ref.
+        let editor = !ACTIONABLE.contains(&role) && property(node, "editable").is_some()
+            && property(node, "focusable") == Some(&Value::Bool(true));
+        let role = if editor { "textbox" } else { role };
         let name = node["name"]["value"].as_str().unwrap_or("");
         let trimmed = name.trim();
         let shown = !node["ignored"].as_bool().unwrap_or(false) && !role.is_empty() && !MUTE.contains(&role)
@@ -226,6 +234,17 @@ mod tests {
         assert_eq!(compact_ax(&nodes, true).lines[0], "- button \"Entrar agora\" [ref=@e1]");
         let lines: Vec<String> = (0..10).map(|i| format!("linha {i}")).collect();
         assert!(capped(&lines, 30).starts_with("linha 0\nlinha 1\nlinha 2\n… cortado: mostrei 3 de 10 linhas"));
+    }
+
+    #[test]
+    fn rich_text_editor_is_a_textbox_with_ref() {
+        let mut editor = node("2", "generic", "", Some(30), &["3"]);
+        editor["properties"] = json!([{"name": "editable", "value": {"value": "richtext"}}, {"name": "focusable", "value": {"value": true}}]);
+        let mut inner = node("3", "paragraph", "", None, &[]);
+        inner["properties"] = json!([{"name": "editable", "value": {"value": "richtext"}}]);
+        let out = compact_ax(&[node("1", "RootWebArea", "UTI", None, &["2"]), editor, inner], false);
+        assert_eq!(out.lines[1], "  - textbox [ref=@e1]");
+        assert_eq!(out.refs.get("@e1"), Some(&30));
     }
 
     #[test]
