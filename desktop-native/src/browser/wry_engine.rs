@@ -121,9 +121,10 @@ impl Starter {
         let watch = {
             use wry::WebViewExtWindows;
             let cdp = Rc::new(super::cdp::Cdp::new(view.webview()));
-            let (dead, state, events) = (dead.clone(), state.clone(), events.clone());
+            let (dead, state, events, held) = (dead.clone(), state.clone(), events.clone(), pending.clone());
             let listened = cdp.on("Inspector.targetCrashed", move |_| {
                 dead.set(true);
+                release_dialog(&held);
                 let mut page = state.borrow_mut();
                 (page.loading, page.error, page.dialog) = (false, Some(crate::i18n::tr("browser_err_crashed")), None);
                 send(&events, &page);
@@ -160,6 +161,15 @@ impl Starter {
 type PendingDialog = Rc<RefCell<Option<(webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2ScriptDialogOpeningEventArgs,
     webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Deferral)>>>;
 
+/// Solta o diálogo segurado, recusado. Quem esquece o diálogo (navegação, queda, página revivida) tem de soltá-lo:
+/// com o `GetDeferral` aberto o WebView2 deixa a página parada e não entrega mais clique nem tecla.
+#[cfg(target_os = "windows")]
+fn release_dialog(pending: &PendingDialog) {
+    let Some((_, deferral)) = pending.borrow_mut().take() else { return };
+    // SAFETY: thread da interface; `Complete` sem `Accept` recusa o diálogo.
+    if let Err(e) = unsafe { deferral.Complete() } { eprintln!("[nav] dialogo esquecido nao foi solto: {}", e.message()); }
+}
+
 /// Diálogos e início de navegação pelo próprio WebView2. O diálogo padrão dele é janela modal que ninguém responde
 /// quando é o agente que o dispara: o `click` e todo verbo seguinte esperavam o prazo inteiro. Aqui, como no Linux,
 /// `alert`/`beforeunload` passam, `confirm`/`prompt` são recusados, e a pessoa vê o aviso no painel. O `Started` do
@@ -194,7 +204,7 @@ fn watch_native(view: &WebView, state: &Rc<RefCell<model::PageState>>, events: &
         send(&ev, &page);
         Ok(())
     }));
-    let (st, ev) = (state.clone(), events.clone());
+    let (st, ev, held) = (state.clone(), events.clone(), pending.clone());
     let starting = NavigationStartingEventHandler::create(Box::new(move |_, args| {
         // O handler do wry roda antes e cancela endereço bloqueado: aí não há carga para mostrar.
         let mut cancel = windows::core::BOOL::default();
@@ -209,6 +219,8 @@ fn watch_native(view: &WebView, state: &Rc<RefCell<model::PageState>>, events: &
         page.loading = true;
         page.dialog = None;
         send(&ev, &page);
+        drop(page);
+        release_dialog(&held);
         Ok(())
     }));
     let mut token = 0i64;
@@ -280,6 +292,8 @@ impl Engine {
     /// Página que caiu volta com `Reload` no mesmo WebView2: o processo da página renasce e o histórico fica.
     pub fn revive(&self) {
         self.dead.set(false);
+        #[cfg(target_os = "windows")]
+        release_dialog(&self.pending);
         { let mut page = self.state.borrow_mut(); page.error = None; send(&self.events, &page); }
         self.reload();
         // A página nova pode vir sem os domínios ligados na que caiu; sem eles a próxima queda passaria calada.

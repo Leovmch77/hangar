@@ -4629,6 +4629,7 @@
   "native_browser_dialog_says": "A página avisa",
   "native_browser_dialog_ok": "OK",
   "native_browser_dialog_cancel": "Cancelar",
+  "native_browser_errors_uncaught": "Erro não tratado: {e}",
   "native_browser_ctl_using": "{session} está usando o navegador",
   "native_browser_ctl_click": "clicando em “{target}”",
   "native_browser_ctl_click_plain": "clicando",
