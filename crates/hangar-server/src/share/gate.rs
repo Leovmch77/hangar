@@ -9,8 +9,8 @@ use std::time::Duration;
 
 use axum::body::Body;
 use axum::extract::connect_info::Connected;
-use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{ConnectInfo, FromRequestParts, Request, State};
+use axum::extract::ws::{CloseFrame, Message, WebSocket};
+use axum::extract::{ConnectInfo, Request, State};
 use axum::http::{HeaderValue, Method, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
@@ -101,15 +101,9 @@ fn is_websocket(req: &Request) -> bool {
 
 async fn deny(req: Request, status: StatusCode, code: &str, msg: &str) -> Response {
     if is_websocket(&req) {
-        let (mut parts, _) = req.into_parts();
-        if let Ok(ws) = WebSocketUpgrade::from_request_parts(&mut parts, &()).await {
-            // Aceita só para fechar com código: 1013 é "tente de novo", e o cliente precisa lê-lo.
-            let code = if status == StatusCode::SERVICE_UNAVAILABLE { 1013 } else { 1008 };
-            return ws.on_upgrade(move |mut socket| async move {
-                let _ = socket.send(Message::Close(Some(CloseFrame { code, reason: "".into() }))).await;
-            });
-        }
-        return status.into_response();
+        // O que o uvicorn responde ao `close` antes do `accept`: 403 vazio, sem CORS, e a
+        // conexão fecha. Os clientes tratam a recusa no aperto de mão.
+        return (StatusCode::FORBIDDEN, [(header::CONNECTION, "close")]).into_response();
     }
     let body = serde_json::json!({"detail": {"code": code, "params": {}, "msg": msg}}).to_string();
     let mut resp = (status, [(header::CONTENT_TYPE, "application/json")], body).into_response();

@@ -209,16 +209,19 @@ async fn count_chunks(r: reqwest::Response, after_first: impl FnOnce()) -> usize
     text.lines().filter(|l| l.starts_with("data:")).count()
 }
 
-/// Código de fechamento do primeiro quadro de Close (pulando texto).
-async fn close_code(url: &str) -> u16 {
-    let (mut ws, _) = tokio_tungstenite::connect_async(url).await.expect("aperto de mão");
-    loop {
-        match tokio::time::timeout(Duration::from_secs(5), ws.next()).await.expect("sem fechamento") {
-            Some(Ok(tungstenite::Message::Close(Some(f)))) => return u16::from(f.code),
-            Some(Ok(tungstenite::Message::Close(None))) | None => return 1005,
-            Some(Ok(_)) => continue,
-            Some(Err(e)) => panic!("{e}"),
+/// Aperto de mão recusado como o uvicorn faz com o `close` antes do `accept`: 403 seco.
+async fn handshake_refusal(url: &str) -> (u16, Vec<u8>, Option<String>, bool) {
+    let mut req = tungstenite::client::IntoClientRequest::into_client_request(url).unwrap();
+    req.headers_mut().insert("origin", "https://app-do-convidado.example".parse().unwrap());
+    match tokio_tungstenite::connect_async(req).await {
+        Err(tungstenite::Error::Http(r)) => {
+            let h = r.headers();
+            let connection = h.get("connection").and_then(|v| v.to_str().ok()).map(str::to_owned);
+            let cors = h.contains_key("access-control-allow-origin");
+            (r.status().as_u16(), r.body().clone().unwrap_or_default(), connection, cors)
         }
+        Err(e) => panic!("esperava recusa HTTP, veio {e}"),
+        Ok(_) => panic!("esperava recusa no aperto de mão, a conexão abriu"),
     }
 }
 
@@ -496,15 +499,16 @@ async fn guest_terminal_with_foreign_origin_passes_the_gate() {
 }
 
 #[tokio::test]
-async fn websocket_refusals_close_1008_or_1013() {
+async fn websocket_refusals_are_a_bare_403_at_the_handshake() {
     let h = harness().await;
     let t = h.token("cc", Kind::Share);
-    // Sessão fora do convite e token desconhecido: recusa definitiva.
-    assert_eq!(close_code(&h.ws(&format!("/api/sessions/outra/term?token={t}"))).await, 1008);
-    assert_eq!(close_code(&h.ws("/api/sessions/cc/term?token=x")).await, 1008);
-    // 503 vira 1013, "tente de novo".
+    // Fora do convite, token desconhecido e 503 da troca de modo: todos viram o mesmo 403 vazio,
+    // sem CORS (o CORSMiddleware não toca WebSocket) e com Connection: close.
+    let want = (403, Vec::new(), Some("close".to_owned()), false);
+    assert_eq!(handshake_refusal(&h.ws(&format!("/api/sessions/outra/term?token={t}"))).await, want);
+    assert_eq!(handshake_refusal(&h.ws("/api/sessions/cc/term?token=x")).await, want);
     h.share.lives.facts().begin_mode_change("cc");
-    assert_eq!(close_code(&h.ws(&format!("/api/sessions/cc/term?token={t}"))).await, 1013);
+    assert_eq!(handshake_refusal(&h.ws(&format!("/api/sessions/cc/term?token={t}"))).await, want);
 }
 
 // --- foco da revisão ---
