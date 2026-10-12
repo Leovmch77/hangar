@@ -1,9 +1,10 @@
 import { create } from 'zustand';
-import { openSessionsStream, aggregateSessions, jsonlDaSessao, sweepHidden, registrarDiag, decidirRota, esquecerRota, rotaDecidida, probeServerResponse, comTeto } from '@hangar/core';
-import type { SessionInfo, Server, AggSession } from '@hangar/core';
+import { openSessionsStream, aggregateSessions, jsonlDaSessao, sweepHidden, registrarDiag, decidirRota, esquecerRota, rotaDecidida, probeServerResponse, comTeto, placeExternalRows, pairExternals, listExternalPairs, attachGuest } from '@hangar/core';
+import type { SessionInfo, Server, AggSession, ExternalPair } from '@hangar/core';
 import { sortSessions } from '@hangar/core';
 import type { Slot, ServerBucket, Aggregate } from '@hangar/core';
 import { useServers } from './servers';
+import * as m from '../paraglide/messages';
 
 // Store vivo da lista de sessões — porte de frontend/src/lib/sessionsStore.svelte.ts
 // para zustand. Um EventSource por servidor, refcount compartilhado, agregação via
@@ -46,6 +47,17 @@ let foreground = true;
 let generation = 0;
 let unsubServers: (() => void) | null = null;
 let aggCache: Aggregate = { rows: [], byServer: [], loading: false };
+// Pares de fora por servidor próprio: quem não respondeu na última leitura fica com os de antes.
+let pairsByServer = new Map<string, ExternalPair[]>();
+let pairsSig = '';
+let pairsSeq = 0;
+const attached = new Set<string>();
+const leaving = new Set<string>();
+// O aviso de tela vem de fora: o store não carrega o toast (e com ele o nativo) nos testes.
+let pairNotice: (text: string) => void = () => {};
+export function setPairNotice(fn: (text: string) => void) { pairNotice = fn; }
+let storeGet: (() => SessionsState) | null = null;
+let storeSet: ((p: Partial<SessionsState>) => void) | null = null;
 
 const RETRY_MIN_MS = 5_000;
 const RETRY_MAX_MS = 60_000;
@@ -94,7 +106,8 @@ function scheduleRetry(id: string, get: () => SessionsState, set: (p: Partial<Se
 
 function recompute(set: (p: Partial<SessionsState>) => void) {
   hidden = sweepHidden(hidden, slots);
-  aggCache = aggregateSessions(serversCache, slots, hidden);
+  const agg = aggregateSessions(serversCache, slots, hidden);
+  aggCache = { ...placeExternalRows(agg), loading: agg.loading };
   const byServerRecord: Record<string, AggSession[]> = {};
   for (const b of aggCache.byServer) byServerRecord[b.server.id] = b.sessions;
   set({
@@ -104,6 +117,73 @@ function recompute(set: (p: Partial<SessionsState>) => void) {
     loading: aggCache.loading,
     servers: serversCache,
   });
+  pairsMaybeChanged();
+}
+
+// Relê os pares só quando muda quem tem par de fora na lista própria.
+function pairsMaybeChanged() {
+  if (refs === 0 || !storeGet || !storeSet) return;
+  const sig = aggCache.byServer.filter((b) => !b.server.invite)
+    .flatMap((b) => b.sessions.flatMap((r) => pairExternals(r).map((p) => `${b.server.id}|${r.name}|${p.alias}::${p.session}`)))
+    .join('\n');
+  if (sig === pairsSig) return;
+  pairsSig = sig;
+  void refreshExternalPairs(storeGet, storeSet);
+}
+
+const pairKey = (p: Pick<ExternalPair, 'alias' | 'session'>) => `${p.alias}::${p.session}`;
+
+async function refreshExternalPairs(get: () => SessionsState, set: (p: Partial<SessionsState>) => void) {
+  const seq = ++pairsSeq;
+  const own = serversCache.filter((s) => !s.invite && !s.disabled);
+  const reads = await Promise.all(own.map((s) => listExternalPairs(s).then((l) => [s.id, l] as const, () => [s.id, null] as const)));
+  if (seq !== pairsSeq) return;
+  // Máquina tirada da lista leva os pares dela sem aviso: ninguém saiu do pareamento.
+  const before = own.flatMap((s) => pairsByServer.get(s.id) ?? []);
+  const next = new Map<string, ExternalPair[]>();
+  for (const [id, list] of reads) {
+    if (list) next.set(id, list);
+    else {
+      // Sem a marca, a próxima lista igual não releria: falha precisa poder tentar de novo.
+      pairsSig = '';
+      const old = pairsByServer.get(id);
+      if (old) next.set(id, old);
+    }
+  }
+  pairsByServer = next;
+  const all = [...next.values()].flat();
+  const now = new Set(all.map(pairKey));
+  for (const p of before) {
+    const key = pairKey(p);
+    if (now.has(key)) continue;
+    if (leaving.delete(key)) continue;
+    pairNotice(m.pair_left_notice({ dono: p.owner }));
+  }
+  // Par que acabou tira a marca do attach dele: um par novo no mesmo token precisa ligar de novo.
+  const live = new Set(all.map((p) => p.token));
+  for (const k of attached) if (!live.has(k.split('\n')[1])) attached.delete(k);
+  const pending = useServers.getState().applyPairs(all);
+  for (const { entry, token } of pending) {
+    const key = `${entry.id}\n${token}`;
+    if (attached.has(key)) continue;
+    attached.add(key);
+    attachGuest(entry, token).then(
+      () => { disconnect(entry.id); connect(serversCache, get, set); },
+      (error: unknown) => {
+        attached.delete(key);
+        pairsSig = '';
+        registrarDiag({ evento: 'lista.falhou', nivel: 'erro', tela: 'lista', codigo: 'par_attach',
+          detalhe: error instanceof Error ? error.name : 'erro' }, entry.baseUrl);
+      },
+    );
+  }
+}
+
+/** "Sair"/"Desfazer" pelo próprio menu: o par sumir em seguida não é a outra pessoa saindo. */
+export function markLeavingPair(alias: string, session: string): () => void {
+  const key = pairKey({ alias, session });
+  leaving.add(key);
+  return () => { leaving.delete(key); };
 }
 
 function connect(list: Server[], get: () => SessionsState, set: (p: Partial<SessionsState>) => void) {
@@ -113,6 +193,8 @@ function connect(list: Server[], get: () => SessionsState, set: (p: Partial<Sess
     if (streams.has(s.id)) continue;
     if (retryTimers.has(s.id)) continue;
     if (connecting.has(s.id)) continue;
+    // Convite que acabou não é máquina fora do ar: não reconecta.
+    if (s.inviteEnded) continue;
     const attempt = { server: { ...s }, generation, abort: new AbortController() };
     connecting.set(s.id, attempt);
     void synchronize(attempt, get, set);
@@ -127,6 +209,12 @@ async function synchronize(attempt: ConnectionAttempt, get: () => SessionsState,
     if (!isCurrent(attempt)) return;
     try {
       const response = await probeServerResponse(s, '/api/sessions', { signal: comTeto(attempt.abort.signal, 4000) });
+      if (s.invite && (response.status === 401 || response.status === 410)) {
+        useServers.getState().markEnded(s.id);
+        slots.delete(s.id);
+        recompute(set);
+        return;
+      }
       if (!response.ok) throw new Error(String(response.status));
       const sessions = await response.json() as SessionInfo[];
       if (!isCurrent(attempt)) return;
@@ -202,6 +290,8 @@ async function synchronize(attempt: ConnectionAttempt, get: () => SessionsState,
 }
 
 function start(get: () => SessionsState, set: (p: Partial<SessionsState>) => void) {
+  storeGet = get;
+  storeSet = set;
   serversCache = useServers.getState().servers.slice();
   connect(serversCache, get, set);
   // observa mudanças de servidores (useServers é zustand)
@@ -284,6 +374,13 @@ export function _resetSessionsForTests() {
   hidden = new Map<string, string | null>();
   serversCache = [];
   aggCache = { rows: [], byServer: [], loading: false };
+  pairsByServer = new Map();
+  pairsSig = '';
+  pairsSeq++;
+  attached.clear();
+  leaving.clear();
+  storeGet = null;
+  storeSet = null;
   refs = 0;
   unsubServers?.();
   unsubServers = null;

@@ -66,6 +66,8 @@ export default function ChatScreen() {
         chat.release();
         retido.current = false;
       }
+      // Conversa de fora usa a entrada do par como ativa; ao sair, a ativa volta a ser máquina própria.
+      useServers.getState().ensureOwnActive();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ready, serverId, name]);
@@ -185,6 +187,8 @@ export default function ChatScreen() {
   }, [ready, servidorSumiu, serverId, name]);
   const provider: Provider | null = codexPreThread ? 'codex' : rowsProvider ?? fetchedSession?.provider ?? null;
   const orq = isOrq({ provider });
+  // Par em "ver e mandar recado": a conversa é de outra pessoa e só se acompanha.
+  const soLeitura = currentSession?.guest_kind === 'pair';
   const wasPreThread = useRef(false);
   useEffect(() => {
     if (wasPreThread.current && currentSession?.tracked) chat.retry();
@@ -532,6 +536,8 @@ export default function ChatScreen() {
               )
               : orq
               ? <OrqFooter serverId={serverId} arbiter={currentSession?.orq_arbiter} />
+              : soLeitura
+              ? <Text style={styles.notice} accessibilityRole="text">{m.native_par_so_leitura()}</Text>
               : (
                 <>
                   <Composer key={rota} serverId={serverId} name={name} draft={draft?.route === rota ? draft.text : undefined}
@@ -544,7 +550,7 @@ export default function ChatScreen() {
             : null}
           </View>
           {/* Linha de status do app de PC, colada embaixo da caixa e fora da área que a conversa cobre. */}
-          {!servidorSumiu && !codexPreThread && fetchedSession !== null && !orq && !dead
+          {!servidorSumiu && !codexPreThread && fetchedSession !== null && !orq && !soLeitura && !dead
             ? <ComposerStatusLine key={`status:${rota}`} serverId={serverId} name={name} />
             : null}
           <KeyboardBar />

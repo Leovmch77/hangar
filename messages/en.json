@@ -7985,5 +7985,6 @@
   "pair_left_notice": "{dono} left the pair.",
   "pair_not_transitive": "The group is not transitive: someone paired with another person cannot reach sessions outside this group.",
   "pair_opens_sessions": "Will be open: {sessoes}",
-  "native_pair_release_failed": "Session {sessao} joined the group, but full access for {dono} was not released: {erro}"
+  "native_pair_release_failed": "Session {sessao} joined the group, but full access for {dono} was not released: {erro}",
+  "pair_share_link": "Share link"
 }

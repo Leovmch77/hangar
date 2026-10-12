@@ -4,7 +4,7 @@ import { KeyboardAvoidingView } from 'react-native-keyboard-controller';
 import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { EnrichedMarkdownText } from 'react-native-enriched-markdown';
-import { fetchSessionsForServer, formataErro, getHistory, getPairContract, pairSession, unpairSession } from '@hangar/core';
+import { fetchSessionsForServer, formataErro, getHistory, getPairContract, listExternalPairs, pairExternals, pairHeaderLabel, pairSession, setPairAccess, unpairSession } from '@hangar/core';
 import type { ChatEvent } from '@hangar/core';
 import { useServers } from '../../../../src/stores/servers';
 import { useSessions } from '../../../../src/stores/sessions';
@@ -13,6 +13,7 @@ import { PairMembers } from '../../../../src/features/pair/PairMembers';
 import { PairPicker } from '../../../../src/features/pair/PairPicker';
 import { PairFeed } from '../../../../src/features/pair/PairFeed';
 import { montarFeed } from '../../../../src/features/pair/pairFeed';
+import { fullPairs, outsideRow } from '../../../../src/features/pair/groupPairs';
 import * as m from '../../../../src/paraglide/messages';
 import { superficie } from '../../../../src/theme/superficie';
 
@@ -27,6 +28,16 @@ export default function PairSheet() {
   const current = useSessions((state) => state.rows.find((row) => row.serverId === serverId && row.name === name) ?? null);
   const peers = current?.pair_peers ?? [];
   const peersKey = peers.join('\u0000');
+  const allRows = useSessions((state) => state.rows);
+  const groupRows = useMemo(
+    () => allRows.filter((row) => row.serverId === serverId && (row.name === name || peers.includes(row.name))),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [allRows, serverId, name, peersKey],
+  );
+  const header = pairHeaderLabel(name, groupRows);
+  const comFora = groupRows.some((row) => pairExternals(row).length > 0);
+  // Dono do par cuja ponta é esta sessão: sair do grupo desfaz o par para todos.
+  const [anchorOwner, setAnchorOwner] = useState<string | null>(null);
 
   const [sessions, setSessions] = useState<Awaited<ReturnType<typeof fetchSessionsForServer>>>([]);
   const [loading, setLoading] = useState(true);
@@ -47,6 +58,16 @@ export default function PairSheet() {
   // A ação só perde a validade com rota nova ou desmontagem; pair_peers mudando recarrega a tela, não cancela o POST.
   const actionEpoch = useRef(0);
   const mdStyle = useMemo(() => mkMarkdownStyle(theme), [theme]);
+
+  useEffect(() => {
+    setAnchorOwner(null);
+    if (!routeServer || !comFora) return;
+    let alive = true;
+    listExternalPairs(routeServer)
+      .then((pairs) => { if (alive) setAnchorOwner(pairs.find((p) => p.local_session === name)?.owner ?? null); })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, [routeServer, name, comFora]);
 
   useEffect(() => {
     setActionError('');
@@ -138,9 +159,27 @@ export default function PairSheet() {
     setPicked((currentPicked) => currentPicked.includes(peer) ? currentPicked.filter((item) => item !== peer) : [...currentPicked, peer]);
   }
 
-  async function doPair() {
+  // Grupo com par de acesso completo: quem entra fica aberto para o dono só se a pessoa disser.
+  function confirmPair() {
+    const full = fullPairs(groupRows);
+    if (!full.length) { void doPair(false); return; }
+    const token = actionEpoch.current;
+    const go = (release: boolean) => { if (token === actionEpoch.current) void doPair(release); };
+    Alert.alert(
+      m.pair_level_title(),
+      full.map((p) => m.pair_full_confirm({ sessao: picked.join(', '), dono: p.owner })).join('\n\n'),
+      [
+        { text: m.comum_cancelar(), style: 'cancel' },
+        { text: m.pair_level_view(), onPress: () => go(false) },
+        { text: m.pair_level_full(), onPress: () => go(true) },
+      ],
+    );
+  }
+
+  async function doPair(release: boolean) {
     if (!picked.length || busy || loading || !routeServer) return;
     const selected = picked;
+    const full = release ? fullPairs(groupRows) : [];
     const token = actionEpoch.current;
     const server = routeServer;
     setBusy(true);
@@ -150,9 +189,15 @@ export default function PairSheet() {
       if (token !== actionEpoch.current) return;
       if (result.warning) {
         setActionError(formataErro(result.warning) ?? String(result.warning));
-      } else {
-        router.back();
+        return;
       }
+      try {
+        for (const peer of selected) for (const p of full) await setPairAccess(peer, p.alias, 'full', server);
+      } catch (e) {
+        if (token === actionEpoch.current) setActionError(e instanceof Error ? e.message : String(e));
+        return;
+      }
+      if (token === actionEpoch.current) router.back();
     } catch {
       if (token === actionEpoch.current) setActionError(m.par_falhou_pareamento({ nomes: selected.join(', ') }));
     } finally {
@@ -185,7 +230,7 @@ export default function PairSheet() {
     const token = actionEpoch.current;
     Alert.alert(
       m.comandos_confirmar({ n: m.par_sair_grupo() }),
-      undefined,
+      anchorOwner ? m.pair_undo_anchor_body({ dono: anchorOwner }) : undefined,
       [
         { text: m.comum_cancelar(), style: 'cancel' },
         { text: m.comum_confirmar(), style: 'destructive', onPress: () => { if (token === actionEpoch.current) void doLeave(); } },
@@ -194,6 +239,8 @@ export default function PairSheet() {
   }
 
   function openPeer(peer: string) {
+    const fora = outsideRow(allRows, peer);
+    if (fora) { router.push(`/s/${fora.serverId}/${encodeURIComponent(fora.name)}` as never); return; }
     router.push(`/s/${serverId}/${encodeURIComponent(peer)}` as never);
   }
 
@@ -233,6 +280,12 @@ export default function PairSheet() {
           showsVerticalScrollIndicator={false}
           contentContainerStyle={styles.scroll}
         >
+          {comFora ? (
+            <View style={styles.fora}>
+              <Text style={[styles.sectionTitle, { color: theme.tokens.text.primary }]} accessibilityRole="header">{header}</Text>
+              <Text style={[styles.path, { color: theme.tokens.text.muted }]}>{m.pair_not_transitive()}</Text>
+            </View>
+          ) : null}
           {actionError ? <Text style={[styles.actionError, { color: theme.tokens.status.error }]} accessibilityRole="alert" selectable>{actionError}</Text> : null}
           {peers.length && loadError ? <Text style={[styles.actionError, { color: theme.tokens.status.error }]} accessibilityRole="alert" selectable>{loadError}</Text> : null}
           {peers.length ? (
@@ -247,7 +300,7 @@ export default function PairSheet() {
                 onOpenPeer={openPeer}
                 onToggleAdding={() => { setAdding(true); setPicked([]); }}
                 onToggle={togglePick}
-                onAdd={() => void doPair()}
+                onAdd={confirmPair}
                 onLeave={confirmLeave}
               />}
 
@@ -277,7 +330,7 @@ export default function PairSheet() {
               loading={loading}
               onToggle={togglePick}
               onTaskChange={setTask}
-              onPair={() => void doPair()}
+              onPair={confirmPair}
             />
           )}
         </ScrollView>
@@ -307,4 +360,5 @@ const styles = StyleSheet.create((theme) => ({
   contractBody: { borderWidth: 1, borderRadius: theme.base.radius.md, padding: theme.base.space[3] },
   path: { fontSize: theme.base.text.xs },
   contractError: { fontSize: theme.base.text.xs },
+  fora: { gap: theme.base.space[1] },
 }));

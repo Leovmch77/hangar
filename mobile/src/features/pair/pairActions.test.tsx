@@ -42,6 +42,10 @@ const mocks = vi.hoisted(() => {
     pairSession: vi.fn(),
     unpairSession: vi.fn(),
     formataErro: (value: unknown) => String(value),
+    listExternalPairs: vi.fn(async () => []),
+    setPairAccess: vi.fn(),
+    pairExternals: () => [],
+    pairHeaderLabel: (label: string) => label,
   };
   const reset = (peers: string[]) => {
     params.name = 'fixture-a';
