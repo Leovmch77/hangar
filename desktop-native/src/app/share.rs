@@ -2,7 +2,7 @@
 //! o gerou (o backend guarda o hash), então ele aparece uma vez, até fechar o diálogo.
 use super::*;
 use super::device::Remote;
-use crate::api::{Reach, ShareCreated, ShareEntry, ShareFailure, SharePrereqs};
+use crate::api::{Failure, Reach, ShareCreated, ShareEntry, ShareFailure, SharePrereqs};
 
 const WATCH_EVERY: Duration = Duration::from_secs(3);
 const WATCH_FOR: Duration = Duration::from_secs(5 * 60);
@@ -229,8 +229,7 @@ impl ShareDialog {
         self.reach_task = Some(cx.spawn(async move |this, cx| {
             let _job = job;
             let reach = match result.await {
-                Ok(Ok(reach)) => reach,
-                Ok(Err(e)) => Reach::Failed { stage: "funnel".into(), detail: Hangar::failure(&e) },
+                Ok(r) => reach_from(r),
                 Err(_) => return,
             };
             let _ = this.update(cx, |d, cx| { d.reach = Some(reach); cx.notify(); });
@@ -263,6 +262,11 @@ impl ShareDialog {
                 match &self.reach {
                     Some(Reach::NeedsRust) => div().id("share-reach").role(Role::Alert).text_sm().text_color(theme::warning()).whitespace_normal()
                         .child(tr_shared("share_reach_needs_rust", &[])).into_any_element(),
+                    Some(Reach::Error(message)) => div().id("share-reach").role(Role::Alert).flex().flex_col().gap_2().items_start()
+                        .child(div().text_sm().text_color(theme::danger()).whitespace_normal().child(message.clone()))
+                        .child(Button::new("share-reach-retry").small().label(tr_shared("share_reach_retry", &[]))
+                            .on_click(cx.listener(move |d, _, _, cx| d.check_reach(link.clone(), cx))))
+                        .into_any_element(),
                     Some(Reach::Failed { stage, detail }) => div().id("share-reach").role(Role::Alert).flex().flex_col().gap_2().items_start()
                         .child(div().text_sm().text_color(theme::danger()).whitespace_normal()
                             .child(tr_shared(if stage == "dns" { "share_reach_failed_dns" } else { "share_reach_failed_funnel" }, &[])))
@@ -375,12 +379,34 @@ impl Hangar {
     }
 }
 
+/// 404/405 = backend sem o Rust (o Python não tem a rota; os estáticos respondem 405 ao POST). Os outros erros são do
+/// pedido, não do Funnel: dizer "o Funnel não entregou" apontaria a causa errada.
+fn reach_from(result: Result<Reach, Failure>) -> Reach {
+    match result {
+        Ok(reach) => reach,
+        Err(Failure { status: Some(404 | 405), .. }) => Reach::NeedsRust,
+        Err(e) => Reach::Error(Hangar::failure(&e)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{whatsapp_url, when_label, operator_command, pkexec_outcome, Authorized, needs_reach_check};
     use crate::api::SharePrereqs;
     use crate::i18n::tr_shared;
     use core::prelude::v1::test;
+
+    #[test]
+    fn reach_errors_are_not_a_funnel_verdict() {
+        use super::reach_from;
+        use crate::api::{Failure, Reach};
+        let fail = |status| Err(Failure { status, detail: "share_reach_no_tailscale".into(), retry_after: None, uncertain: false, code: None });
+        assert_eq!(reach_from(fail(Some(404))), Reach::NeedsRust);
+        assert_eq!(reach_from(fail(Some(405))), Reach::NeedsRust);
+        assert!(matches!(reach_from(fail(Some(503))), Reach::Error(m) if !m.is_empty()));
+        assert!(matches!(reach_from(fail(None)), Reach::Error(m) if !m.is_empty()));
+        assert_eq!(reach_from(Ok(Reach::Ok)), Reach::Ok);
+    }
 
     #[test]
     fn only_funnel_links_wait_for_the_check() {

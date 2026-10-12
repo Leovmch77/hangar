@@ -453,13 +453,10 @@ impl Api {
         Self::checked(r, true).await.map_err(ShareFailure::Other)?.json().await.map_err(|_| ShareFailure::Other(Failure::transport(true)))
     }
 
-    /// O servidor espera até o link abrir de fora (até 3 min) e responde uma vez. 404/405 = backend sem o Rust (o Python
-    /// não tem a rota; em produção os arquivos estáticos respondem 405 ao POST).
+    /// O servidor espera até o link abrir de fora e responde uma vez: até 20 s do `tailscale status` mais 3 min de
+    /// conferência, então o prazo daqui fica acima disso para não desistir na véspera da resposta.
     pub async fn share_reachability(&self, link: &str) -> Result<Reach, Failure> {
-        let value = match self.server_send(reqwest::Method::POST, &["share", "reachability"], Some(json!({"link": link})), 200).await {
-            Err(Failure { status: Some(404 | 405), .. }) => return Ok(Reach::NeedsRust),
-            other => other?,
-        };
+        let value = self.server_send(reqwest::Method::POST, &["share", "reachability"], Some(json!({"link": link})), 220).await?;
         Ok(if value["ok"] == true { Reach::Ok } else {
             Reach::Failed { stage: value["stage"].as_str().unwrap_or("funnel").into(), detail: value["detail"].as_str().unwrap_or_default().into() }
         })
@@ -744,9 +741,10 @@ pub struct ShareCreated { pub link: String, pub expires_at: f64 }
 /// O convite de par tem a mesma forma do de compartilhamento: link e validade.
 pub type PairInvite = ShareCreated;
 
-/// Resposta da conferência do link pelo Funnel; `NeedsRust` = backend sem o servidor Rust (rota inexistente).
+/// Resposta da conferência do link pelo Funnel; `NeedsRust` = backend sem o servidor Rust (rota inexistente); `Error` = o
+/// pedido falhou (recusa, sem Tailscale, rede), sem veredito sobre o Funnel.
 #[derive(Clone, Debug, PartialEq)]
-pub enum Reach { Ok, Failed { stage: String, detail: String }, NeedsRust }
+pub enum Reach { Ok, Failed { stage: String, detail: String }, NeedsRust, Error(String) }
 
 #[derive(Clone, Debug, serde::Deserialize)]
 pub struct PairAccepted { pub alias: String, pub owner: String, pub session: String }
