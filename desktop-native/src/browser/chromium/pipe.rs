@@ -11,7 +11,6 @@ use std::{
     sync::{
         Arc, Mutex, PoisonError,
         atomic::{AtomicU64, Ordering},
-        mpsc,
     },
     time::Duration,
 };
@@ -26,6 +25,8 @@ type Reply = Result<Value, String>;
 type Handler = Rc<RefCell<dyn FnMut(Value)>>;
 /// Consome um evento na própria thread de leitura (o quadro do painel, entregue sem passar pela interface).
 pub type Sink = Box<dyn Fn(Value) + Send>;
+/// Confirma ao Chromium o quadro de screencast com este número, de qualquer thread.
+pub type Acker = Box<dyn Fn(Value) + Send + Sync>;
 type Ready = Shared<LocalBoxFuture<'static, Result<(), String>>>;
 const LAUNCH_WAIT: Duration = Duration::from_secs(10);
 
@@ -72,7 +73,8 @@ fn reply_of(message: &Value) -> Reply {
 
 pub struct Browser {
     wire: Arc<Wire>,
-    child: RefCell<Child>,
+    /// `None` só no fim: o `Drop` o leva para a thread que espera o processo sair.
+    child: RefCell<Option<Child>>,
     /// (sessão, evento) → ouvintes.
     handlers: RefCell<HashMap<(String, String), Vec<Handler>>>,
     /// Evento do navegador (`Target.*`, `CLOSED`) → (sessão dona, ouvinte); sai junto com a sessão dona.
@@ -92,21 +94,12 @@ thread_local! {
 }
 
 impl Browser {
-    /// O Chromium em uso, ou um novo. Nasce com a escala da janela que abriu o primeiro navegador.
-    pub fn shared(executor: &ForegroundExecutor, scale: f32) -> Result<Rc<Browser>, String> {
+    /// O Chromium em uso, ou um novo, sem esperar o processo responder: o aperto de mão corre sozinho e `ready` o
+    /// espera. Para a interface não congelar enquanto o Chromium nasce.
+    pub fn shared_async(executor: &ForegroundExecutor, background: &BackgroundExecutor) -> Result<Rc<Browser>, String> {
         if let Some(browser) = Self::current() { return Ok(browser); }
         let bin = launch::find()?;
-        let browser = Self::launch(bin, &Self::profile()?, scale, executor)?;
-        SHARED.with(|s| *s.borrow_mut() = Rc::downgrade(&browser));
-        Ok(browser)
-    }
-
-    /// Como `shared`, sem esperar o processo responder: o aperto de mão corre sozinho e `ready` o espera. Para a
-    /// interface não congelar enquanto o Chromium nasce.
-    pub fn shared_async(executor: &ForegroundExecutor, background: &BackgroundExecutor, scale: f32) -> Result<Rc<Browser>, String> {
-        if let Some(browser) = Self::current() { return Ok(browser); }
-        let bin = launch::find()?;
-        let browser = Self::spawn(bin, &Self::profile()?, scale, executor)?;
+        let browser = Self::spawn(bin, &Self::profile()?, executor)?;
         let handshake = browser.handshake(bin, background).boxed_local().shared();
         // Corre mesmo sem ninguém esperar: quem só aquece o processo não fica olhando.
         executor.spawn(handshake.clone()).detach();
@@ -157,22 +150,9 @@ impl Browser {
         }
     }
 
-    fn launch(bin: &Path, profile: &Path, scale: f32, executor: &ForegroundExecutor) -> Result<Rc<Browser>, String> {
-        let browser = Self::spawn(bin, profile, scale, executor)?;
-        browser.call_blocking(None, "Browser.getVersion", json!({}), Duration::from_secs(10))
-            .map_err(|e| format!("o Chromium ({}) nao respondeu: {e}", bin.display()))?;
-        // Títulos e endereços das páginas, e janelas abertas por `window.open`.
-        browser.call_blocking(None, "Target.setDiscoverTargets", json!({"discover": true}), Duration::from_secs(5))?;
-        let targets = browser.call_blocking(None, "Target.getTargets", json!({}), Duration::from_secs(5))?;
-        *browser.initial.borrow_mut() = targets["targetInfos"].as_array().into_iter().flatten()
-            .filter(|t| t["type"] == "page").filter_map(|t| t["targetId"].as_str().map(str::to_owned)).collect();
-        drop(browser.call(None, "Browser.setDownloadBehavior", json!({"behavior": "deny"})));
-        Ok(browser)
-    }
-
     /// Processo, thread de leitura e entrega dos eventos; nenhuma espera pelo CDP.
-    fn spawn(bin: &Path, profile: &Path, scale: f32, executor: &ForegroundExecutor) -> Result<Rc<Browser>, String> {
-        let launched = launch::spawn(bin, profile, scale).map_err(|e| format!("o Chromium ({}) nao abriu: {e}", bin.display()))?;
+    fn spawn(bin: &Path, profile: &Path, executor: &ForegroundExecutor) -> Result<Rc<Browser>, String> {
+        let launched = launch::spawn(bin, profile).map_err(|e| format!("o Chromium ({}) nao abriu: {e}", bin.display()))?;
         let wire = Arc::new(Wire {
             writer: Mutex::new(launched.writer),
             next: AtomicU64::new(1),
@@ -185,7 +165,7 @@ impl Browser {
             .spawn(move || read(launched.reader, &reading, &events))
             .map_err(|e| e.to_string())?;
         let browser = Rc::new(Browser {
-            wire, child: RefCell::new(launched.child), handlers: RefCell::default(), watchers: RefCell::default(),
+            wire, child: RefCell::new(Some(launched.child)), handlers: RefCell::default(), watchers: RefCell::default(),
             initial: RefCell::default(), owned: RefCell::default(), alive: std::cell::Cell::new(true), ready: RefCell::new(None),
             _drain: RefCell::new(None),
         });
@@ -215,6 +195,8 @@ impl Browser {
 
     fn closed(&self) {
         self.alive.set(false);
+        // O pipe fechou porque o processo morreu: recolhe já, senão ele fica zumbi até o motor ser refeito.
+        if let Some(child) = self.child.borrow_mut().as_mut() { let _ = child.try_wait(); }
         self.notify(CLOSED, Value::Null);
     }
 
@@ -239,14 +221,6 @@ impl Browser {
         async move { rx.await.map_err(|_| "o Chromium fechou".to_string())? }
     }
 
-    /// Para o nascimento do navegador, que acontece numa chamada síncrona da interface. A resposta vem da thread de
-    /// leitura, então esperar aqui não trava nada além desta chamada.
-    pub fn call_blocking(&self, session: Option<&str>, method: &str, params: Value, timeout: Duration) -> Reply {
-        let (tx, rx) = mpsc::channel();
-        self.wire.send(session, method, params, Some(Box::new(move |reply| { let _ = tx.send(reply); })));
-        rx.recv_timeout(timeout).map_err(|_| format!("{method}: o Chromium nao respondeu"))?
-    }
-
     pub fn on(&self, session: &str, event: &str, f: impl FnMut(Value) + 'static) {
         let handler: Handler = Rc::new(RefCell::new(f));
         self.handlers.borrow_mut().entry((session.to_owned(), event.to_owned())).or_default().push(handler);
@@ -258,7 +232,13 @@ impl Browser {
         self.watchers.borrow_mut().entry(event.to_owned()).or_default().push((owner.to_owned(), handler));
     }
 
+    /// Quadros desta sessão vão ao `sink`, sem confirmação: quem os desenha confirma com o `acker`.
     pub fn sink(&self, session: &str, sink: Sink) { lock(&self.wire.sinks).insert(session.to_owned(), sink); }
+
+    pub fn acker(&self, session: &str) -> Acker {
+        let (wire, session) = (self.wire.clone(), session.to_owned());
+        Box::new(move |id| wire.send(Some(&session), "Page.screencastFrameAck", json!({"sessionId": id}), None))
+    }
 
     fn forget(&self, session: &str) {
         self.handlers.borrow_mut().retain(|(s, _), _| s != session);
@@ -274,13 +254,17 @@ impl Drop for Browser {
     fn drop(&mut self) {
         // Saída limpa primeiro: o perfil é persistente, e o SIGKILL perde cookies e localStorage ainda não gravados.
         self.wire.send(None, "Browser.close", json!({}), None);
-        let mut child = self.child.borrow_mut();
-        for _ in 0..40 {
-            if !matches!(child.try_wait(), Ok(None)) { return; }
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        let _ = child.kill();
-        let _ = child.wait();
+        let Some(mut child) = self.child.take() else { return };
+        // A espera (até 2 s) fora da thread da tela, que fechava o painel congelada.
+        let waited = std::thread::Builder::new().name("chromium-exit".into()).spawn(move || {
+            for _ in 0..40 {
+                if !matches!(child.try_wait(), Ok(None)) { return; }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            let _ = child.kill();
+            let _ = child.wait();
+        });
+        if let Err(e) = waited { eprintln!("[nav] sem thread para fechar o Chromium: {e}"); }
     }
 }
 
@@ -311,12 +295,8 @@ fn route(mut message: Value, wire: &Wire, events: &async_channel::Sender<Value>)
         && let Some(session) = message["sessionId"].as_str().map(str::to_owned)
         && lock(&wire.sinks).contains_key(&session)
     {
-        // Os parâmetros vão inteiros ao dono, sem copiar o quadro.
-        let params = message["params"].take();
-        let ack = json!({"sessionId": params["sessionId"]});
-        if let Some(sink) = lock(&wire.sinks).get(&session) { sink(params); }
-        // Sem o ack o Chromium para de mandar quadros.
-        wire.send(Some(&session), "Page.screencastFrameAck", ack, None);
+        // Os parâmetros vão inteiros ao dono, sem copiar o quadro; ele confirma depois de desenhar.
+        if let Some(sink) = lock(&wire.sinks).get(&session) { sink(message["params"].take()); }
         return;
     }
     let _ = events.try_send(message);
@@ -329,13 +309,7 @@ pub struct Session {
 }
 
 impl Session {
-    pub fn attach(browser: &Rc<Browser>, target: &str) -> Result<Session, String> {
-        let attached = browser.call_blocking(None, "Target.attachToTarget", json!({"targetId": target, "flatten": true}), Duration::from_secs(5))?;
-        let id = attached["sessionId"].as_str().ok_or("attachToTarget sem sessionId")?.to_owned();
-        Ok(Session { browser: browser.clone(), id })
-    }
-
-    /// `attach` sem travar a interface.
+    /// Liga uma sessão CDP ao alvo, sem travar a interface.
     pub fn attach_async(browser: &Rc<Browser>, target: &str) -> impl Future<Output = Result<Session, String>> + use<> {
         let (call, browser) = (browser.call(None, "Target.attachToTarget", json!({"targetId": target, "flatten": true})), browser.clone());
         async move {
@@ -352,10 +326,6 @@ impl Session {
 
     pub fn call(&self, method: &str, params: Value) -> impl Future<Output = Reply> + use<> {
         self.browser.call(Some(&self.id), method, params)
-    }
-
-    pub fn call_blocking(&self, method: &str, params: Value) -> Reply {
-        self.browser.call_blocking(Some(&self.id), method, params, Duration::from_secs(5))
     }
 
     pub fn on(&self, event: &str, f: impl FnMut(Value) + 'static) -> Result<(), String> {
@@ -377,6 +347,7 @@ impl Drop for Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::mpsc;
 
     fn wire() -> (Arc<Wire>, std::io::PipeReader) {
         let (reader, writer) = std::io::pipe().unwrap();
@@ -432,7 +403,7 @@ mod tests {
     fn page_mode_png_frames_keep_the_transparent_background() {
         let bin = launch::find().unwrap();
         let profile = std::env::temp_dir().join(format!("hangar-page-proof-{}", std::process::id()));
-        let launched = launch::spawn(bin, &profile, 1.0).unwrap();
+        let launched = launch::spawn(bin, &profile).unwrap();
         let wire = Arc::new(Wire { writer: Mutex::new(launched.writer), next: AtomicU64::new(1), pending: Mutex::default(), sinks: Mutex::default() });
         let (events, _received) = async_channel::unbounded();
         let reading = wire.clone();
@@ -474,7 +445,7 @@ mod tests {
     }
 
     #[test]
-    fn frames_with_an_owner_skip_the_interface_and_are_acked() {
+    fn frames_with_an_owner_skip_the_interface_and_wait_for_the_owner_to_ack() {
         let (wire, reader) = wire();
         let (events, received) = async_channel::unbounded();
         let (tx, rx) = mpsc::channel();
@@ -487,7 +458,6 @@ mod tests {
         drop(wire);
         let mut all = Vec::new();
         std::io::Read::read_to_end(&mut { reader }, &mut all).unwrap();
-        let ack: Value = serde_json::from_slice(all.split(|b| *b == 0).next().unwrap()).unwrap();
-        assert_eq!((ack["method"].as_str(), ack["sessionId"].as_str(), ack["params"]["sessionId"].as_i64()), (Some("Page.screencastFrameAck"), Some("P"), Some(9)));
+        assert!(all.is_empty(), "a confirmação é de quem desenha, não do pipe");
     }
 }
