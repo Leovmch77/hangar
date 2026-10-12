@@ -183,16 +183,16 @@ async def test_guest_channel_failure_closes_the_stream(rust):
     assert exc.value.code == "state_channel_off"
 
 
-async def test_side_events_keeps_info_queue_nav_ping_toast(rust):
+async def test_side_events_keeps_queue_nav_ping_toast(rust):
     adapter, jsonl = rust
     entry = pqueue.PromptQueue("s").append("manda isso depois", delivered=False)
     sse.nav_pendente("s", "http://localhost:5173")
     plugin_bridge._store_toast("s", "Jenkins configurado.", 9000, "demo")
     gen = sse.merged_events("s", str(jsonl), side=True)
-    quer = {"info", "message", "nav", "ping", "plugin_toast"}
+    quer = {"message", "nav", "ping", "plugin_toast"}
     vistos = await _coleta(gen, lambda v: quer <= set(_nomes(v)))
     assert quer <= set(_nomes(vistos))
-    assert vistos[0]["event"] == "info"
+    assert "info" not in _nomes(vistos), "a conversa é escolhida pelo Rust"
     msg = next(json.loads(e["data"]) for e in vistos if e["event"] == "message")
     assert msg["id"] == f"queued-{entry['id']}"
     assert not {"state", "preview", "ask_question", "suggest"} & set(_nomes(vistos))
@@ -270,7 +270,6 @@ async def _por(gen, segundos):
 async def test_codex_headless_internal_connection_sends_none_of_the_six(codex, monkeypatch):
     adapter, jsonl, _sidecar, confirmados = codex
     vistos = await _por(sse.merged_events("cx", str(jsonl), provider="codex", side=True), 1.5)
-    assert vistos[0]["event"] == "info" and json.loads(vistos[0]["data"])["headless"] is True
     assert not _SEIS & set(_nomes(vistos)), _nomes(vistos)
     assert adapter.tails == [str(jsonl)], "o tail_pump fica: é ele que confirma a fila do Codex"
     # Abertura confirma uma vez; o `user_msg` do transcript, outra.
@@ -285,28 +284,6 @@ async def test_codex_headless_guest_reads_six_from_rust_channel(codex):
         vistos = await _coleta(gen, lambda v: "ferramenta" in _nomes(v))
     do_rust = [(e["event"], e["data"]) for e in vistos if e["event"] in _SEIS]
     assert do_rust == _CODEX_EVENTS, "os seis passam como o hub os publicou, sem cópia do Python"
-
-
-async def test_codex_headless_flip_reprovides_and_sends_new_info(codex, monkeypatch):
-    from app.models import SessionInfo
-    _adapter, jsonl, sidecar, _ = codex
-    viva = {"headless": True}
-
-    async def lista():
-        return [SessionInfo(name="cx", jsonl=str(jsonl), provider="codex", headless=viva["headless"])]
-
-    monkeypatch.setattr(sse, "_cached_list", lista)
-    gen = sse.merged_events("cx", str(jsonl), provider="codex", side=True)
-
-    async def vira():
-        await asyncio.sleep(0.3)
-        sidecar["headless"] = viva["headless"] = False
-
-    task = asyncio.create_task(vira())
-    vistos = await _coleta(gen, lambda v: sum(e["event"] == "info" for e in v) >= 2, limite=6.0)
-    await task
-    infos = [json.loads(e["data"]) for e in vistos if e["event"] == "info"]
-    assert [i["headless"] for i in infos[:2]] == [True, False], infos
 
 
 @pytest.mark.parametrize("count_app", [False, True])
@@ -374,7 +351,6 @@ def test_claude_headless_state_is_rust_when_owned(monkeypatch, modo, owns, rust)
 async def test_claude_headless_internal_connection_sends_none_of_the_six(headless):
     adapter, jsonl = headless
     vistos = await _por(sse.merged_events("h", str(jsonl), provider="claude", side=True), 1.5)
-    assert vistos[0]["event"] == "info" and json.loads(vistos[0]["data"])["provider"] == "claude-headless"
     assert not _SEIS & set(_nomes(vistos)), _nomes(vistos)
     assert adapter.drains == [], "a fila do Claude sem terminal o ator drena sozinho"
     assert adapter.tails == [], "a prévia gravada é suprimida no hub"

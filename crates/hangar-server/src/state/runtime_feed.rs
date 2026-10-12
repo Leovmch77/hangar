@@ -291,7 +291,7 @@ mod tests {
     fn fixture() -> Fixture {
         let dir = tempfile::tempdir().unwrap();
         let ctx = test_ctx();
-        let binding = Binding { provider: Provider::Codex, jsonl: dir.path().join("rollout-abc.jsonl"), key: "thread-1".into(), headless: true };
+        let binding = Binding { provider: Provider::Codex, jsonl: dir.path().join("rollout-abc.jsonl"), key: "thread-1".into(), headless: true, life: None };
         let lease = ctx.hubs.acquire("s", binding, &ctx);
         Fixture { _dir: dir, lease, published: Arc::default() }
     }
@@ -437,7 +437,7 @@ mod tests {
     fn claude_fixture() -> Fixture {
         let dir = tempfile::tempdir().unwrap();
         let ctx = test_ctx();
-        let binding = Binding { provider: Provider::ClaudeHeadless, jsonl: dir.path().join("sid.jsonl"), key: "sid".into(), headless: false };
+        let binding = Binding { provider: Provider::ClaudeHeadless, jsonl: dir.path().join("sid.jsonl"), key: "sid".into(), headless: false, life: None };
         let lease = ctx.hubs.acquire("s", binding, &ctx);
         Fixture { _dir: dir, lease, published: Arc::default() }
     }

@@ -54,6 +54,7 @@ pub async fn server(root: &Path, n: usize) -> Server {
         capture_program: script.into_os_string(), procs: Arc::new(hangar_server::list::procs::SystemProcs::default()), dirs },
         FactsClient::new(upstream, SECRET.into())));
     state.list = list.clone();
+    state.side.locate = Arc::new(hangar_server::locate::ListLocate { list: list.clone() });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let app = router(Arc::new(state)).into_make_service_with_connect_info::<SocketAddr>();

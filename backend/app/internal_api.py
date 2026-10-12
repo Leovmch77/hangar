@@ -18,7 +18,6 @@ from sse_starlette.sse import EventSourceResponse
 from app import diag
 from app.internal_pool import internal_thread
 from app.mensagens import erro
-from app.models import session_key
 from app.sse import merged_events
 
 _LOOPBACK = {"127.0.0.1", "::1"}
@@ -47,27 +46,6 @@ async def require_internal(request: Request) -> None:
             diag.registrar("internal.recusado", "aviso",
                            codigo="sem_segredo" if secret is None else "segredo_errado")
         raise HTTPException(status_code=404)
-
-
-def info_payload(name: str, provider: str, jsonl: str | None) -> dict:
-    """O `InternalInfo` do Rust: a rota `info` e o evento `info` do side-events usam este mesmo."""
-    from app.adapters import chave_de
-    from app.pqueue import PromptQueue
-
-    headless = False
-    if provider == "codex":
-        from app.adapters.codex import sessions as codex_sessions
-        headless = bool((codex_sessions.load(name) or {}).get("headless"))
-    return {
-        # Chave do adapter: o Claude sem terminal vem como "claude-headless".
-        "provider": chave_de(name, provider),
-        "jsonl": jsonl,
-        "session_key": session_key(jsonl) if jsonl else "",
-        # Tudo que o merged_history do Rust precisa além do transcript.
-        "history": {"queue": str(PromptQueue(name).path)},
-        # Codex sem terminal: o hub do Rust liga o feed do estado no lugar do Python.
-        "headless": headless,
-    }
 
 
 router = APIRouter(prefix="/internal", dependencies=[Depends(require_internal)], include_in_schema=False)
@@ -361,24 +339,17 @@ async def worktrees_context() -> dict:
     }
 
 
-@router.get("/sessions/{name}/info")
-async def session_info(name: str) -> dict:
-    # Import tardio: api.py importa este módulo no topo.
-    from app import api
-
-    info = await api._cached_info(name)
-    if info is None:
-        raise HTTPException(status_code=404)
+@router.post("/sessions/{name}/reopen")
+async def session_reopen(name: str) -> dict:
+    """Abrir a conversa reabre a sessão em erro. Quem escolhe a conversa é o Rust; o coordenador
+    que reabre ainda é daqui. Responde antes de reabrir; uma por sessão em voo."""
     from app import runtime_coordinator
     coordinator = runtime_coordinator.current()
     if coordinator is not None and coordinator.managed_queue(name) and name not in _projection_tasks:
-        # Fora da resposta: o Rust espera este /info, e voltar ao Rust dentro dele (vínculo do pane +
-        # ensure_projection) atrasava cada /history. Abrir a conversa continua disparando a
-        # reabertura da sessão em erro; uma por sessão em voo.
         task = asyncio.create_task(_ensure_projection(coordinator, name))
         _projection_tasks[name] = task
         task.add_done_callback(lambda _t, n=name: _projection_tasks.pop(n, None))
-    return info_payload(name, info.provider, info.jsonl)
+    return {"ok": True}
 
 
 _projection_tasks: dict[str, asyncio.Task] = {}
@@ -617,15 +588,12 @@ async def costs_scopes() -> dict:
 
 
 @router.get("/sessions/{name}/side-events")
-async def side_events(name: str, app: int = 0):
+async def side_events(name: str, provider: str, jsonl: str, app: int = 0):
     """Uma conexão por sessão para o hangar-server, que reparte estado, prévia, perguntas e fila
-    entre os aparelhos. `app=1`: há ao menos um aparelho do dono no chat (push fica calado)."""
-    from app import api as _api   # api monta este roteador
-    sessions = await asyncio.to_thread(_api.registry.list)
-    info = next((s for s in sessions if s.name == name), None)
-    if not info or not info.jsonl:
-        raise HTTPException(404, detail=erro("erro_sessao_inexistente",
-                                             "session or transcript not found"))
+    entre os aparelhos. `provider` e `jsonl` são a conversa que o Rust escolheu; a troca ele faz
+    religando a conexão. `app=1`: há ao menos um aparelho do dono no chat (push fica calado)."""
+    if provider not in ("claude", "claude-headless", "codex") or not jsonl:
+        raise HTTPException(400)
     return EventSourceResponse(
-        merged_events(name, info.jsonl, provider=info.provider, count_app=bool(app), side=True),
+        merged_events(name, jsonl, provider=provider, count_app=bool(app), side=True),
         send_timeout=30)

@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 use super::chrome::{self, Job};
 use super::store::{NewPage, Store};
 use super::{HEIGHT_MAX, HEIGHT_MIN, HTML_MAX_CHARS, TITLE_MAX_CHARS, Theme, WIDTHS, images, theme};
-use crate::routes::{AppState, INFO_REASON, cors, fetch_info, gate, pass, route_failed};
+use crate::routes::{AppState, INFO_REASON, cors, gate, pass, route_failed};
 
 const MESSAGE: &str = "Mostrada ao leitor acima da resposta. Não mencione nem descreva a página; responda só o que ela não diz.";
 const BODY_LIMIT: usize = 4 * 1024 * 1024;
@@ -123,7 +123,7 @@ async fn publish(st: &AppState, b: PublishBody) -> Value {
     let height = b.height.map(|h| h as u32);
     // Rascunho de site só confere o endereço: sem o login do Jefferson o servidor nem abriria.
     if b.draft && let Some(url) = &site { return json!({"ok": true, "result": {"draft": {"url": url}}}); }
-    let info = match fetch_info(&st.http, st.cfg.upstream, &st.cfg.internal_secret, &b.session).await {
+    let info = match st.info(&b.session).await {
         Ok(Some(i)) => i,
         Ok(None) => return fail("erro_sessao_desconhecida", "sessão não encontrada"),
         Err(_) => return fail("erro_pagina_sem_info", INFO_REASON),
@@ -235,7 +235,7 @@ fn no_html(req: &HeaderMap) -> Response { not_found(req, "erro_pagina_sem_html",
 
 /// Chave da pasta da sessão; a resposta pronta quando não há (página expirada ou Python sem responder).
 async fn session_key(st: &AppState, headers: &HeaderMap, name: &str) -> Result<String, Response> {
-    match fetch_info(&st.http, st.cfg.upstream, &st.cfg.internal_secret, name).await {
+    match st.info(name).await {
         Ok(Some(info)) => Ok(info.session_key),
         Ok(None) => Err(expired(headers)),
         Err(_) => Err(route_failed(st, headers, "rust.pages_failed", name, "erro_pagina_sem_info", INFO_REASON)),

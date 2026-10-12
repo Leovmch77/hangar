@@ -17,19 +17,16 @@ use axum::routing::get;
 use axum::serve::ListenerExt;
 use bytes::Bytes;
 use futures_util::StreamExt;
-use http_body_util::BodyExt;
-use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, mpsc};
 
 use crate::auth::{self, Auth};
 use crate::config::Config;
 use crate::proxy::{self, Forward, HttpClient};
-use crate::side::{Binding, Hub, Hubs, INFO_TTL, Lease, Out, Queued, SideCtx, remember_info};
+use crate::side::{Binding, Hub, Hubs, Lease, Out, Queued, SideCtx};
 use crate::tail::{self, Watchers};
 use crate::transcript::{InternalInfo, SKIPPED_LINES, history_etag, merged_history};
 
-const INFO_TIMEOUT: Duration = Duration::from_secs(10);
 const PING_EVERY: Duration = Duration::from_secs(10);
 const COMMENT_EVERY: Duration = Duration::from_secs(15);
 const SEND_TIMEOUT: Duration = Duration::from_secs(30);
@@ -97,20 +94,20 @@ impl AppState {
                       costs: Arc<crate::costs::collect::Collector>, fx: Arc<crate::costs::fx::Fx>) -> AppState {
         let http = proxy::client();
         let mods = crate::mods::state::Mods::default();
+        let facts = crate::list::facts::FactsClient::new(cfg.upstream, cfg.internal_secret.clone());
+        let list = Arc::new(crate::list::bridge::ListBridge::new(crate::list::bridge::ListEnv::from_env(), facts));
         let mut side = SideCtx {
             upstream: cfg.upstream,
             secret: cfg.internal_secret.clone(),
             http: http.clone(),
             watchers: Watchers::default(),
             hubs: Hubs::default(),
-            infos: Default::default(),
+            locate: Arc::new(crate::locate::ListLocate { list: list.clone() }),
             monitors: None,
             mods: mods.clone(),
         };
         mods.bind_hubs(side.hubs.downgrade());
         let diag = crate::diag::DiagClient::new(cfg.upstream, cfg.internal_secret.clone());
-        let facts = crate::list::facts::FactsClient::new(cfg.upstream, cfg.internal_secret.clone());
-        let list = Arc::new(crate::list::bridge::ListBridge::new(crate::list::bridge::ListEnv::from_env(), facts));
         let state = Arc::new(crate::state::live::StateEnv::new(terminal.clone(), list.clone(),
             crate::state::facts::StateFactsClient::new(cfg.upstream, cfg.internal_secret.clone()), diag.clone()));
         side.monitors = Some(crate::state::live::spawner(state.clone()));
@@ -145,63 +142,18 @@ impl AppState {
         cache
     }
 
-    /// `info` da sessão com cache curto: várias telas abrindo juntas viram uma consulta só. Só o
-    /// `/events` usa, porque o primeiro `info` da conexão interna corrige um valor velho com `reset`.
+    /// Qual conversa é a da sessão, pela descoberta do Rust. `Ok(None)`: sessão inexistente.
     pub(crate) async fn info(&self, name: &str) -> Result<Option<InternalInfo>, InfoFailed> {
-        if let Some((at, v)) = self.side.infos.lock().unwrap().get(name) {
-            if at.elapsed() < INFO_TTL {
-                return Ok(v.clone());
-            }
-        }
-        let v = fetch_info(&self.http, self.cfg.upstream, &self.cfg.internal_secret, name).await?;
-        // Só a sessão encontrada fica no cache: cada reconexão volta a perguntar pela inexistente.
-        if v.is_some() { remember_info(&self.side.infos, name, v.clone()); }
-        Ok(v)
+        self.side.locate.info(name).await
+    }
+
+    /// Abrir a conversa reabre a sessão em erro; quem reabre é o coordenador do Python.
+    pub(crate) fn request_reopen(&self, name: &str) {
+        crate::locate::request_reopen(&self.http, self.cfg.upstream, &self.cfg.internal_secret, name);
     }
 }
 
-/// A rota interna não respondeu o `info` (fora do ar, erro, corpo inválido). 404 não é isto.
-pub(crate) struct InfoFailed;
-
-/// `Ok(None)` = 404: sessão inexistente, que o Python responde. O segredo recusado também é 404, e
-/// o Python registra essa recusa no diário (`internal.recusado`).
-pub(crate) async fn fetch_info(http: &HttpClient, upstream: SocketAddr, secret: &str, name: &str) -> Result<Option<InternalInfo>, InfoFailed> {
-    let url = format!("http://{upstream}/internal/sessions/{}/info", utf8_percent_encode(name, NON_ALPHANUMERIC));
-    let req = axum::http::Request::get(url).header("x-hangar-internal", secret).body(Body::empty()).map_err(|_| InfoFailed)?;
-    let resp = match tokio::time::timeout(INFO_TIMEOUT, http.request(req)).await {
-        Ok(Ok(r)) => r,
-        Ok(Err(e)) => {
-            tracing::warn!(session = %name, "info interna falhou: {e}");
-            return Err(InfoFailed);
-        }
-        Err(_) => {
-            tracing::warn!(session = %name, "info interna sem resposta");
-            return Err(InfoFailed);
-        }
-    };
-    if resp.status() == StatusCode::NOT_FOUND {
-        return Ok(None);
-    }
-    if !resp.status().is_success() {
-        tracing::warn!(session = %name, status = %resp.status(), "info interna recusada");
-        return Err(InfoFailed);
-    }
-    let body = match tokio::time::timeout(INFO_TIMEOUT, resp.into_body().collect()).await {
-        Ok(Ok(b)) => b.to_bytes(),
-        _ => {
-            tracing::warn!(session = %name, "corpo da info interna não chegou");
-            return Err(InfoFailed);
-        }
-    };
-    match serde_json::from_slice(&body) {
-        Ok(v) => Ok(Some(v)),
-        Err(e) => {
-            // Só a posição: a mensagem do serde pode citar o valor.
-            tracing::warn!(session = %name, line = e.line(), column = e.column(), "info interna inválida");
-            Err(InfoFailed)
-        }
-    }
-}
+pub(crate) use crate::locate::InfoFailed;
 
 /// Falha do Rust numa rota que é dele: 503 com o código, que o app mostra, e uma linha no diário.
 /// `detail` é o envelope que o `lerErro` do app já traduz; `reason` é frase fixa, nunca conversa.
@@ -515,16 +467,21 @@ async fn history(
             Err(_) => return pass(&st, req, &fwd).await,
         },
     };
-    // Sem o cache: sessão recriada com o mesmo nome dentro do TTL devolveria a conversa morta, e
-    // nada a corrigiria depois (o `/events` só a corrige com `reset` por estar ligado ao hub).
-    let Ok(info) = fetch_info(&st.http, st.cfg.upstream, &st.cfg.internal_secret, &name).await else {
+    let Ok(info) = st.info(&name).await else {
         return route_failed(&st, req.headers(), "rust.history_failed", &name, "internal_info", INFO_REASON);
     };
-    if info.is_some() { remember_info(&st.side.infos, &name, info.clone()); }
     // Sessão inexistente ou provedor fora do Rust: o Python é o dono.
-    let Some(hreq) = info.and_then(|i| i.history_request(limit)) else {
+    let Some(info) = info else { return pass(&st, req, &fwd).await };
+    let Some(mut hreq) = info.history_request(limit) else {
         return pass(&st, req, &fwd).await;
     };
+    st.request_reopen(&name);
+    // Com o chat ao vivo aberto, vale o transcript que o hub já confirmou: uma leitura solta da
+    // descoberta não pode mostrar outra conversa que a do canal ao vivo.
+    let fresh = Binding::from_info(&info);
+    if let Some(bound) = st.side.hubs.bound(&name).filter(|b| fresh.as_ref().is_some_and(|f| !b.changes_at_once(f))) {
+        hreq.jsonl = bound.jsonl;
+    }
     tracing::debug!(session = %name, req = %diag_req(&req), "history");
     let inm = req.headers().get(header::IF_NONE_MATCH).and_then(|v| v.to_str().ok()).map(str::to_owned);
     let log_name = name.clone();
@@ -587,6 +544,7 @@ async fn events(
     let Some(binding) = info.as_ref().and_then(Binding::from_info) else {
         return pass(&st, req, &fwd).await;
     };
+    st.request_reopen(&name);
     // A query vence: o app recria o EventSource a cada queda, e objeto novo não manda o cabeçalho.
     let resume = auth::query_param(req.uri().query(), "last_event_id")
         .filter(|v| !v.is_empty())
@@ -796,13 +754,13 @@ mod tests {
             http: proxy::client(),
             watchers: Watchers::default(),
             hubs: Hubs::default(),
-            infos: Default::default(),
+            locate: Arc::new(crate::locate::Unavailable),
             monitors: None,
             mods: Default::default(),
         };
         let jsonl = dir.join("t.jsonl");
         std::fs::write(&jsonl, "").unwrap();
-        let lease = ctx.hubs.acquire("s", Binding { provider: crate::transcript::Provider::Claude, jsonl, key: "k".into(), headless: false }, &ctx);
+        let lease = ctx.hubs.acquire("s", Binding { provider: crate::transcript::Provider::Claude, jsonl, key: "k".into(), headless: false, life: None }, &ctx);
         let hub = lease.hub.clone();
         let (tx, rx) = mpsc::channel::<Queued>(64);
         tokio::spawn(client_loop(lease, None, tx));
@@ -934,7 +892,7 @@ mod tests {
         // Quem entra agora recebe a vista inteira no retrato, e a próxima já como diferença sobre ela.
         let (tx, rx) = mpsc::channel::<Queued>(64);
         let lease = ctx.hubs.acquire("s", Binding { provider: crate::transcript::Provider::Claude, jsonl: dir.path().join("t.jsonl"),
-            key: "k".into(), headless: false }, &ctx);
+            key: "k".into(), headless: false, life: None }, &ctx);
         let hub = lease.hub.clone();
         let receivers = hub.tx.receiver_count();
         tokio::spawn(client_loop(lease, None, tx));

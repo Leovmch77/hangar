@@ -759,8 +759,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (spawn, count) = fake_monitors(IDLE_PANE);
         let ctx = SideCtx { upstream: "127.0.0.1:9".parse().unwrap(), secret: "s".into(), http: crate::proxy::client(),
-            watchers: Default::default(), hubs: Hubs::default(), infos: Default::default(), monitors: Some(spawn), mods: Default::default() };
-        let binding = |p| Binding { provider: p, jsonl: dir.path().join("a.jsonl"), key: "a".into(), headless: false };
+            watchers: Default::default(), hubs: Hubs::default(), locate: std::sync::Arc::new(crate::locate::Unavailable), monitors: Some(spawn), mods: Default::default() };
+        let binding = |p| Binding { provider: p, jsonl: dir.path().join("a.jsonl"), key: "a".into(), headless: false, life: None };
         // Dono no celular, dono no desktop e o canal do convidado: um hub, um Monitor.
         let leases: Vec<_> = (0..3).map(|_| ctx.hubs.acquire("s", binding(Provider::Claude), &ctx)).collect();
         assert_eq!(count.load(Ordering::SeqCst), 1);

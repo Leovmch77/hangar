@@ -131,8 +131,8 @@ async fn no_reset_until(es: &mut Events, event: &str, data: &str) {
 }
 
 #[tokio::test]
-async fn new_info_resets_every_device_and_follows_new_file() {
-    let (dir, _a, _offs, fake, srv) = setup(0..2, "sess-e").await;
+async fn transcript_read_twice_resets_every_device_and_follows_new_file() {
+    let (dir, a_path, _offs, fake, srv) = setup(0..2, "sess-e").await;
     let b_path = dir.path().join("sess-e2.jsonl");
     append_lines(&b_path, 100..102);
 
@@ -143,22 +143,53 @@ async fn new_info_resets_every_device_and_follows_new_file() {
         devices.push(es);
     }
     wait_until(|| fake.side_conns() == 1).await;
+    assert_eq!(fake.side_jsonls(), [a_path.to_string_lossy()]);
 
-    let novo = info_json("claude", &b_path);
-    fake.set_info(novo.clone());
-    fake.push_side("info", &novo.to_string());
+    fake.set_info(info_json("claude", &b_path));
+    readings(&fake, 1).await;
     for es in &mut devices {
         next_named(es, "reset").await;
         let m = messages(es, 2).await;
         assert_eq!(id_of(&m[0]), "u100");
         assert!(m[0].id.starts_with("sess-e2:"));
     }
+    // A conexão interna é religada com o transcript novo.
+    wait_until(|| fake.side_conns() == 2).await;
+    assert_eq!(fake.side_jsonls()[1], b_path.to_string_lossy());
     let marker = r#"{"turns":42}"#;
     fake.push_side("stats", marker);
     for es in &mut devices {
         no_reset_until(es, "stats", marker).await;
     }
-    assert_eq!(fake.side_conns(), 1, "a troca vem pela conexão que já existe");
+}
+
+/// A descoberta apontou outro arquivo por uma leitura só: ninguém perde a conversa da tela.
+#[tokio::test]
+async fn transcript_read_once_keeps_the_conversation() {
+    let (dir, a_path, _offs, fake, srv) = setup(0..2, "sess-flap").await;
+    let other = dir.path().join("sess-outra.jsonl");
+    append_lines(&other, 100..101);
+    let mut a = sse(open_events(srv, "s", "", &[]).await);
+    messages(&mut a, 2).await;
+    wait_until(|| fake.side_conns() == 1).await;
+
+    fake.set_info(info_json("claude", &other));
+    readings(&fake, 1).await;
+    fake.set_info(info_json("claude", &a_path));
+    readings(&fake, 2).await;
+    let marker = r#"{"turns":9}"#;
+    fake.push_side("stats", marker);
+    no_reset_until(&mut a, "stats", marker).await;
+    // Um aparelho que entra com a leitura solta também não troca nada.
+    fake.set_info(info_json("claude", &other));
+    let mut b = sse(open_events(srv, "s", "", &[]).await);
+    assert_eq!(id_of(&messages(&mut b, 2).await[0]), "u0");
+    fake.set_info(info_json("claude", &a_path));
+    let r = client().get(format!("http://{srv}/api/sessions/s/history")).bearer_auth(OWNER).send().await.unwrap();
+    let evs: Vec<Value> = serde_json::from_str(&r.text().await.unwrap()).unwrap();
+    let ids: Vec<String> = evs.iter().map(|e| e["id"].as_str().unwrap().to_owned()).collect();
+    assert_eq!(ids, ["u0", "u1"]);
+    assert_eq!(fake.side_conns(), 1);
 }
 
 #[tokio::test]
@@ -170,7 +201,7 @@ async fn provider_outside_rust_resets_and_next_connection_goes_to_python() {
 
     let pi = json!({"provider": "pi", "jsonl": jsonl, "session_key": "sess-f", "history": {}});
     fake.set_info(pi.clone());
-    fake.push_side("info", &pi.to_string());
+    readings(&fake, 1).await;
     next_named(&mut a, "reset").await;
     assert!(stream_ends(&mut a).await);
 
@@ -193,16 +224,21 @@ async fn truncated_transcript_resets_and_rereads_from_start() {
 
 #[tokio::test]
 async fn same_name_with_new_transcript_never_serves_the_dead_one() {
-    let (dir, _a, _offs, fake, srv) = setup(0..1, "sess-morta").await;
+    let (dir, a_path, _offs, fake, srv) = setup(0..1, "sess-morta").await;
+    let with_life = |path: &std::path::Path, life: &str| {
+        let mut v = info_json("claude", path);
+        v["lifecycle_id"] = json!(life);
+        v
+    };
+    fake.set_info(with_life(&a_path, "b:1"));
     let mut a = sse(open_events(srv, "s", "", &[]).await);
     assert_eq!(id_of(&messages(&mut a, 1).await[0]), "u0");
     wait_until(|| fake.side_conns() == 1).await;
 
-    // A sessão morreu e nasceu outra com o mesmo nome; o cache de info já venceu.
+    // A sessão morreu e nasceu outra com o mesmo nome: outra vida, troca na hora, sem confirmação.
     let nova = dir.path().join("sess-nova.jsonl");
     append_lines(&nova, 100..101);
-    fake.set_info(info_json("claude", &nova));
-    tokio::time::sleep(Duration::from_millis(1100)).await;
+    fake.set_info(with_life(&nova, "b:2"));
 
     let mut b = sse(open_events(srv, "s", "", &[]).await);
     let first = next_non_ping(&mut b).await;
@@ -214,8 +250,8 @@ async fn same_name_with_new_transcript_never_serves_the_dead_one() {
     assert_eq!(id_of(&messages(&mut a, 1).await[0]), "u100");
     wait_until(|| fake.side_conns() == 2).await;
 
-    // O primeiro `info` da conexão religada confirma a troca: nenhum reset a mais, nenhuma
-    // religação a mais.
+    // A vigia lê a mesma conversa nova: nenhum reset a mais, nenhuma religação a mais.
+    readings(&fake, 2).await;
     let marker = r#"{"turns":42}"#;
     fake.push_side("stats", marker);
     no_reset_until(&mut a, "stats", marker).await;

@@ -13,6 +13,7 @@ pub mod costs_failure;
 pub mod diag;
 pub mod groups;
 pub mod list;
+pub mod locate;
 pub mod migration_status;
 pub mod mods;
 pub mod pages;

@@ -483,6 +483,12 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
   que ele mesmo já é dono, e o Python nunca repergunta ao Rust dentro de uma chamada que o Rust
   fez: a volta Rust → Python → Rust prende o pool do Python e trava o backend na subida. Evidência em
   [plataforma.md](docs/decisoes/plataforma.md#migrar-é-migrar-o-caminho-inteiro).
+- **Qual conversa é a da sessão é o Rust que decide** (`locate.rs`, a descoberta da lista), e a
+  troca de transcript só vale lida duas vezes seguidas; provider, modo do Codex ou outra vida da
+  sessão trocam na hora. Com o chat ao vivo aberto, o `/history` segue o transcript que o hub
+  confirmou. A conexão interna recebe a conversa do Rust; a reabertura em erro continua no
+  coordenador do Python (`POST /internal/sessions/{name}/reopen`). Evidência em
+  [plataforma.md](docs/decisoes/plataforma.md#a-conversa-da-sessão-é-escolhida-pelo-rust-e-a-troca-espera-duas-leituras).
 - **A porta 8765 é do `hangar-server` (Rust); o Python escuta atrás, numa porta de loopback.**
   Ele atende `/history` e `/events` de Claude/Codex, `/api/costs`, `/api/uso`, `/api/cotacao` e o
   custo de sessão Codex com o token do dono, e o terminal real do dono (só pelo

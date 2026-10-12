@@ -251,3 +251,18 @@ async fn pair_change_alone_reemits_the_list() {
     assert_eq!(gone[1]["pair_peers"], Value::Null);
 }
 
+
+/// O histórico sai da descoberta do Rust, sem perguntar ao Python qual é a conversa, e abrir a
+/// conversa pede a reabertura da sessão em erro ao coordenador dele.
+#[tokio::test(flavor = "multi_thread")]
+async fn history_comes_from_the_rust_discovery() {
+    let dir = tempfile::tempdir().unwrap();
+    let srv = server(dir.path(), 1).await;
+    let r = client().get(format!("http://{}/api/sessions/s0/history", srv.addr)).bearer_auth(OWNER).send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    let evs: Vec<Value> = serde_json::from_str(&r.text().await.unwrap()).unwrap();
+    assert_eq!(evs.iter().map(|e| e["text"].as_str().unwrap_or_default()).collect::<Vec<_>>(), ["linha 0"]);
+    let python = srv.python.clone();
+    fake::wait_until(move || python.hits_to("/internal/sessions/s0/reopen") == 1).await;
+    assert_eq!(srv.python.info_calls(), 0);
+}
