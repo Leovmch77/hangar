@@ -198,10 +198,16 @@ fn watch_native(view: &WebView, state: &Rc<RefCell<model::PageState>>, events: &
         let name = if kind == COREWEBVIEW2_SCRIPT_DIALOG_KIND_ALERT { "alert" } else if kind == COREWEBVIEW2_SCRIPT_DIALOG_KIND_PROMPT { "prompt" } else { "confirm" };
         // Segura o diálogo aberto até o agente ou a pessoa responder (`answer_dialog`).
         let deferral = unsafe { args.GetDeferral()? };
-        // Um segundo diálogo (iframe de outro processo) não pode deixar o primeiro preso.
+        // Um segundo diálogo (iframe de outro processo) não pode deixar o primeiro preso: ele sai recusado, com aviso.
+        let replaced = held.borrow().is_some().then(|| st.borrow().dialog.as_ref().map(|d| d.message.clone()).unwrap_or_default());
         release_dialog(&held);
         *held.borrow_mut() = Some((args, deferral));
         let mut page = st.borrow_mut();
+        if let Some(previous) = replaced {
+            eprintln!("[nav] dialogo anterior recusado por chegar outro: {previous}");
+            page.notice = Some(crate::i18n::tr("browser_dialog_replaced").replace("{message}", previous.trim()));
+            page.notice_seq += 1;
+        }
         page.dialog = Some(model::Dialog { kind: name.into(), message, default });
         send(&ev, &page);
         Ok(())
