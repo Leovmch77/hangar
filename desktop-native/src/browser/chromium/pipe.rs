@@ -11,7 +11,6 @@ use std::{
     sync::{
         Arc, Mutex, PoisonError,
         atomic::{AtomicU64, Ordering},
-        mpsc,
     },
     time::Duration,
 };
@@ -95,17 +94,8 @@ thread_local! {
 }
 
 impl Browser {
-    /// O Chromium em uso, ou um novo. Nasce com a escala da janela que abriu o primeiro navegador.
-    pub fn shared(executor: &ForegroundExecutor) -> Result<Rc<Browser>, String> {
-        if let Some(browser) = Self::current() { return Ok(browser); }
-        let bin = launch::find()?;
-        let browser = Self::launch(bin, &Self::profile()?, executor)?;
-        SHARED.with(|s| *s.borrow_mut() = Rc::downgrade(&browser));
-        Ok(browser)
-    }
-
-    /// Como `shared`, sem esperar o processo responder: o aperto de mão corre sozinho e `ready` o espera. Para a
-    /// interface não congelar enquanto o Chromium nasce.
+    /// O Chromium em uso, ou um novo, sem esperar o processo responder: o aperto de mão corre sozinho e `ready` o
+    /// espera. Para a interface não congelar enquanto o Chromium nasce.
     pub fn shared_async(executor: &ForegroundExecutor, background: &BackgroundExecutor) -> Result<Rc<Browser>, String> {
         if let Some(browser) = Self::current() { return Ok(browser); }
         let bin = launch::find()?;
@@ -158,19 +148,6 @@ impl Browser {
                 }
             }
         }
-    }
-
-    fn launch(bin: &Path, profile: &Path, executor: &ForegroundExecutor) -> Result<Rc<Browser>, String> {
-        let browser = Self::spawn(bin, profile, executor)?;
-        browser.call_blocking(None, "Browser.getVersion", json!({}), Duration::from_secs(10))
-            .map_err(|e| format!("o Chromium ({}) nao respondeu: {e}", bin.display()))?;
-        // Títulos e endereços das páginas, e janelas abertas por `window.open`.
-        browser.call_blocking(None, "Target.setDiscoverTargets", json!({"discover": true}), Duration::from_secs(5))?;
-        let targets = browser.call_blocking(None, "Target.getTargets", json!({}), Duration::from_secs(5))?;
-        *browser.initial.borrow_mut() = targets["targetInfos"].as_array().into_iter().flatten()
-            .filter(|t| t["type"] == "page").filter_map(|t| t["targetId"].as_str().map(str::to_owned)).collect();
-        drop(browser.call(None, "Browser.setDownloadBehavior", json!({"behavior": "deny"})));
-        Ok(browser)
     }
 
     /// Processo, thread de leitura e entrega dos eventos; nenhuma espera pelo CDP.
@@ -242,14 +219,6 @@ impl Browser {
         let (tx, rx) = futures::channel::oneshot::channel();
         self.wire.send(session, method, params, Some(Box::new(move |reply| { let _ = tx.send(reply); })));
         async move { rx.await.map_err(|_| "o Chromium fechou".to_string())? }
-    }
-
-    /// Para o nascimento do navegador, que acontece numa chamada síncrona da interface. A resposta vem da thread de
-    /// leitura, então esperar aqui não trava nada além desta chamada.
-    pub fn call_blocking(&self, session: Option<&str>, method: &str, params: Value, timeout: Duration) -> Reply {
-        let (tx, rx) = mpsc::channel();
-        self.wire.send(session, method, params, Some(Box::new(move |reply| { let _ = tx.send(reply); })));
-        rx.recv_timeout(timeout).map_err(|_| format!("{method}: o Chromium nao respondeu"))?
     }
 
     pub fn on(&self, session: &str, event: &str, f: impl FnMut(Value) + 'static) {
@@ -340,13 +309,7 @@ pub struct Session {
 }
 
 impl Session {
-    pub fn attach(browser: &Rc<Browser>, target: &str) -> Result<Session, String> {
-        let attached = browser.call_blocking(None, "Target.attachToTarget", json!({"targetId": target, "flatten": true}), Duration::from_secs(5))?;
-        let id = attached["sessionId"].as_str().ok_or("attachToTarget sem sessionId")?.to_owned();
-        Ok(Session { browser: browser.clone(), id })
-    }
-
-    /// `attach` sem travar a interface.
+    /// Liga uma sessão CDP ao alvo, sem travar a interface.
     pub fn attach_async(browser: &Rc<Browser>, target: &str) -> impl Future<Output = Result<Session, String>> + use<> {
         let (call, browser) = (browser.call(None, "Target.attachToTarget", json!({"targetId": target, "flatten": true})), browser.clone());
         async move {
@@ -363,10 +326,6 @@ impl Session {
 
     pub fn call(&self, method: &str, params: Value) -> impl Future<Output = Reply> + use<> {
         self.browser.call(Some(&self.id), method, params)
-    }
-
-    pub fn call_blocking(&self, method: &str, params: Value) -> Reply {
-        self.browser.call_blocking(Some(&self.id), method, params, Duration::from_secs(5))
     }
 
     pub fn on(&self, event: &str, f: impl FnMut(Value) + 'static) -> Result<(), String> {
@@ -388,6 +347,7 @@ impl Drop for Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::mpsc;
 
     fn wire() -> (Arc<Wire>, std::io::PipeReader) {
         let (reader, writer) = std::io::pipe().unwrap();

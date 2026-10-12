@@ -69,7 +69,7 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> { m.lock().unwrap_or_el
 
 /// Só para medir: com `HANGAR_NATIVE_NAV_TRACE` no ambiente, uma linha por segundo no stderr com os quadros que
 /// chegaram, os decodificados (e o tempo médio deles) e as pinturas da página.
-pub mod trace {
+mod trace {
     use std::sync::{OnceLock, atomic::{AtomicU64, Ordering::Relaxed}};
     pub static ARRIVED: AtomicU64 = AtomicU64::new(0);
     pub static DECODED: AtomicU64 = AtomicU64::new(0);
@@ -269,38 +269,12 @@ impl Engine {
 }
 
 impl Starter {
-    /// Sobe o Chromium (se ainda não há um) e abre o alvo desta sessão. As respostas chegam pela thread de leitura,
-    /// então esperar aqui não trava o pipe; o primeiro navegador espera o processo nascer.
-    pub fn start(self, events: async_channel::Sender<Event>) -> Result<Engine, String> {
-        let browser = Browser::shared(&self.executor)?;
-        let long = Duration::from_secs(10);
-        let created = browser.call_blocking(None, "Target.createTarget", json!({"url": "about:blank", "newWindow": true}), long)?;
-        let target = created["targetId"].as_str().ok_or("createTarget sem targetId")?.to_owned();
-        browser.own(&target, true);
-        browser.close_initial();
-        let session = Rc::new(Session::attach(&browser, &target)?);
-        let window = browser.call_blocking(None, "Browser.getWindowForTarget", json!({"targetId": target}), long)?["windowId"]
-            .as_i64().ok_or("getWindowForTarget sem windowId")?;
-        session.call_blocking("Page.enable", json!({}))?;
-        // Queda do renderer chega só por aqui (`Inspector.targetCrashed`, na sessão da página).
-        session.call_blocking("Inspector.enable", json!({}))?;
-        // A página do agente, que ninguém olha, se comporta como focada: `:focus`, `focus()` e o teclado funcionam.
-        session.call_blocking("Emulation.setFocusEmulationEnabled", json!({"enabled": true}))?;
-        // Mesma regra de endereço do painel: só web (http/https sem usuário e senha); o resto não carrega.
-        session.call_blocking("Fetch.enable", json!({"patterns": [{"resourceType": "Document", "requestStage": "Request"}]}))?;
-        browser.call_blocking(None, "Browser.setWindowBounds", json!({"windowId": window, "bounds": {"width": 1280, "height": 800}}), long)?;
-        let measured = session.call_blocking("Runtime.evaluate", json!({"expression": "outerHeight-innerHeight", "returnByValue": true}))?;
-        let decoration = measured["result"]["value"].as_f64().unwrap_or(0.).max(0.) as f32;
-        let state = Rc::new(RefCell::new(model::PageState::default()));
-        let surface = Surface::new(events.clone(), image::ImageFormat::Jpeg, browser.acker(session.id()));
-        let sink = surface.clone();
-        browser.sink(session.id(), Box::new(move |params| sink.frame(params)));
-        let dead = Rc::new(Cell::new(false));
-        let publish = listen(&session, &target, &state, &events, &self.executor, &dead, false);
-        Ok(Engine {
-            session, publish, target, window, decoration, executor: self.executor, background: self.background, surface, dead, png: false,
-            double: false, context: None, placed: Cell::new(None), resizes: Rc::default(), visible: Rc::default(), pressed: Cell::new(false),
-        })
+    /// O navegador do painel: sobe o Chromium (se ainda não há um) e abre o alvo desta sessão sem travar a interface.
+    pub fn start(self, events: async_channel::Sender<Event>) -> impl Future<Output = Result<Engine, String>> + use<> {
+        async move {
+            let browser = self.browser().await?;
+            self.open(&browser, None, None, events, true).await
+        }
     }
 
     /// Site de verdade na conversa: o mesmo perfil do painel (cookies e login), navegação livre dentro do site e popup
@@ -308,7 +282,7 @@ impl Starter {
     pub fn start_url(self, url: String, events: async_channel::Sender<Event>) -> impl Future<Output = Result<Engine, String>> + use<> {
         async move {
             let browser = self.browser().await?;
-            let engine = self.open(&browser, None, None, events).await?;
+            let engine = self.open(&browser, None, None, events, false).await?;
             engine.load(&url);
             Ok(engine)
         }
@@ -322,7 +296,7 @@ impl Starter {
             let browser = self.browser().await?;
             let created = self.browser_call(&browser, "Target.createBrowserContext", json!({"disposeOnDetach": true})).await?;
             let context = created["browserContextId"].as_str().ok_or("createBrowserContext sem id")?.to_owned();
-            let opened = self.open(&browser, Some(context.clone()), Some((html, width, background)), events).await;
+            let opened = self.open(&browser, Some(context.clone()), Some((html, width, background)), events, false).await;
             // Falhou no meio: fechar o contexto fecha junto o alvo que já tenha nascido nele.
             if opened.is_err() { drop(browser.call(None, "Target.disposeBrowserContext", json!({"browserContextId": context}))); }
             opened
@@ -343,16 +317,17 @@ impl Starter {
         answer(&self.background, method, session.call(method, params)).await
     }
 
-    /// Alvo da página da conversa. Falhou depois de nascer: o alvo fecha aqui, que ninguém mais o conhece.
-    async fn open(&self, browser: &Rc<Browser>, context: Option<String>, document: Option<Document>, events: async_channel::Sender<Event>)
-        -> Result<Engine, String> {
+    /// Alvo do painel (`panel`: JPEG na escala da tela) ou da conversa (PNG no dobro). Falhou depois de nascer: o alvo
+    /// fecha aqui, que ninguém mais o conhece.
+    async fn open(&self, browser: &Rc<Browser>, context: Option<String>, document: Option<Document>, events: async_channel::Sender<Event>,
+        panel: bool) -> Result<Engine, String> {
         let mut create = json!({"url": "about:blank", "newWindow": true});
         if let Some(context) = &context { create["browserContextId"] = context.as_str().into(); }
         let created = self.browser_call(browser, "Target.createTarget", create).await?;
         let target = created["targetId"].as_str().ok_or("createTarget sem targetId")?.to_owned();
         browser.own(&target, true);
         browser.close_initial();
-        let opened = self.open_target(browser, &target, context, document, events).await;
+        let opened = self.open_target(browser, &target, context, document, events, panel).await;
         if opened.is_err() {
             browser.own(&target, false);
             drop(browser.call(None, "Target.closeTarget", json!({"targetId": target})));
@@ -362,13 +337,15 @@ impl Starter {
 
     async fn open_target(
         &self, browser: &Rc<Browser>, target: &str, context: Option<String>, document: Option<Document>, events: async_channel::Sender<Event>,
+        panel: bool,
     ) -> Result<Engine, String> {
         let session = Rc::new(answer(&self.background, "Target.attachToTarget", Session::attach_async(browser, target)).await?);
         // Ouvintes antes de qualquer espera: a interface segue rodando, e o que a página mandar enquanto nasce (a altura,
         // um pedido pausado) não pode chegar sem dono.
         let state = Rc::new(RefCell::new(model::PageState::default()));
-        // PNG nas duas formas: o texto da conversa ao lado pede a nitidez que o JPEG perde.
-        let surface = Surface::new(events.clone(), image::ImageFormat::Png, browser.acker(session.id()));
+        // PNG na conversa: o texto ao lado pede a nitidez que o JPEG perde. No painel, JPEG, mais leve em página animada.
+        let format = if panel { image::ImageFormat::Jpeg } else { image::ImageFormat::Png };
+        let surface = Surface::new(events.clone(), format, browser.acker(session.id()));
         let sink = surface.clone();
         browser.sink(session.id(), Box::new(move |params| sink.frame(params)));
         let dead = Rc::new(Cell::new(false));
@@ -380,7 +357,7 @@ impl Starter {
         match self.setup_target(browser, &session, target, &document).await {
             Ok((window, decoration)) => Ok(Engine {
                 session, publish, target: target.to_owned(), window, decoration, executor: self.executor.clone(), background: self.background.clone(),
-                surface, dead, png: true, double: true, context, placed: Cell::new(None), resizes: Rc::default(), visible: Rc::default(),
+                surface, dead, png: !panel, double: !panel, context, placed: Cell::new(None), resizes: Rc::default(), visible: Rc::default(),
                 pressed: Cell::new(false),
             }),
             Err(e) => { surface.close(); Err(e) }
@@ -546,10 +523,13 @@ impl Engine {
     pub fn cdp(&self) -> Rc<Session> { self.session.clone() }
 
     /// Sessão própria para a tela remota do celular: o screencast dela tem o tamanho do aparelho, sem mexer no do painel.
-    pub fn viewer_session(&self) -> Result<Rc<Session>, String> {
-        let session = Session::attach(self.session.browser(), &self.target)?;
-        session.call_blocking("Page.enable", json!({}))?;
-        Ok(Rc::new(session))
+    pub fn viewer_session(&self) -> impl Future<Output = Result<Rc<Session>, String>> + use<> {
+        let (attach, background) = (Session::attach_async(self.session.browser(), &self.target), self.background.clone());
+        async move {
+            let session = answer(&background, "Target.attachToTarget", attach).await?;
+            answer(&background, "Page.enable", session.call("Page.enable", json!({}))).await?;
+            Ok(Rc::new(session))
+        }
     }
 
     fn send(&self, method: &str, params: Value) { drop(self.session.call(method, params)); }

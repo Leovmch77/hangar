@@ -22,6 +22,9 @@ pub(super) struct BrowserPanel {
     /// Quem olha a tela remota; os ouvintes de evento do CDP guardam só referência fraca.
     #[cfg(not(target_os = "macos"))]
     viewer: Rc<std::cell::RefCell<Option<crate::browser::relay::Viewer>>>,
+    /// Canal do espectador atual, para a thread do pipe entregar os quadros sem passar pela interface.
+    #[cfg(target_os = "linux")]
+    frames: std::sync::Arc<std::sync::Mutex<Option<async_channel::Sender<crate::browser::relay::ViewerEvent>>>>,
     /// Nasce na primeira navegação, que tem a janela.
     engine: Option<Result<Rc<Engine>, String>>,
     /// Endereço a abrir quando o motor terminar de nascer; `Some` enquanto ele nasce.
@@ -73,7 +76,7 @@ impl BrowserPanel {
             cx.on_blur(&focus, window, |this, _, _| if let Some(engine) = this.engine() { engine.focus(false) }),
         ];
         Self { key, #[cfg(not(target_os = "macos"))] controller: None, #[cfg(not(target_os = "macos"))] cdp: None,
-            #[cfg(not(target_os = "macos"))] relay: Default::default(), #[cfg(not(target_os = "macos"))] viewer: Rc::default(), engine: None, starting: None, _start: None, events, address, page: model::PageState::default(), invalid: None, #[cfg(not(target_os = "macos"))] cookies_status: None, #[cfg(not(target_os = "macos"))] cookies_confirmed: false, #[cfg(target_os = "linux")] last_fill: None, focus,
+            #[cfg(not(target_os = "macos"))] relay: Default::default(), #[cfg(not(target_os = "macos"))] viewer: Rc::default(), #[cfg(target_os = "linux")] frames: Default::default(), engine: None, starting: None, _start: None, events, address, page: model::PageState::default(), invalid: None, #[cfg(not(target_os = "macos"))] cookies_status: None, #[cfg(not(target_os = "macos"))] cookies_confirmed: false, #[cfg(target_os = "linux")] last_fill: None, focus,
             origin: Rc::default(), shown: false, #[cfg(target_os = "linux")] scale: Rc::default(), _drain: drain, _subscriptions: subscriptions }
     }
 
@@ -200,11 +203,11 @@ impl BrowserPanel {
         self._start = Some(cx.spawn_in(window, async move |this, cx| {
             // Corpo da tarefa, fora de `update`: a App não está emprestada, então o laço de mensagens que o WebView2
             // roda até nascer pode executar outras tarefas da GPUI sem pânico.
+            // No Linux o motor nasce sem travar a interface; o WebView2 nasce numa chamada síncrona.
             #[cfg(target_os = "linux")]
-            let started = std::time::Instant::now();
+            let engine = match starter { Ok(starter) => starter.start(events).await, Err(e) => Err(e) }.map(Rc::new);
+            #[cfg(not(target_os = "linux"))]
             let engine = starter.and_then(|starter| starter.start(events)).map(Rc::new);
-            #[cfg(target_os = "linux")]
-            if crate::browser::trace::on() { eprintln!("nav abertura_bloqueante_ms={:.0}", started.elapsed().as_secs_f64() * 1000.); }
             if let Err(e) = &engine { eprintln!("[nav] motor do navegador falhou: {e}"); }
             // Painel fechado no meio: o motor cai junto com o resultado.
             let _ = this.update_in(cx, |this, window, cx| {
@@ -271,17 +274,56 @@ impl BrowserPanel {
 
     /// Espectador novo da tela remota; o anterior recebe o aviso de que outro aparelho assumiu.
     #[cfg(not(target_os = "macos"))]
-    pub(super) fn watch(&self, viewer: crate::browser::relay::Viewer) -> Result<(), String> {
-        if self.cdp.is_none() { return Err(format!("erro: o navegador da sessao {} ainda esta iniciando, tente de novo em instantes", self.key)); }
+    pub(super) fn watch(&self, viewer: crate::browser::relay::Viewer, reply: futures::channel::oneshot::Sender<Result<(), String>>, cx: &mut Context<Self>) {
+        if self.cdp.is_none() {
+            let _ = reply.send(Err(format!("erro: o navegador da sessao {} ainda esta iniciando, tente de novo em instantes", self.key)));
+            return;
+        }
+        // No Linux o espectador tem sessão própria no alvo, criada no primeiro; sem travar a interface.
         #[cfg(target_os = "linux")]
         if self.relay.borrow().is_none() {
-            let engine = self.engine().ok_or_else(|| format!("erro: a sessao {} nao tem navegador aberto", self.key))?;
-            let session = engine.viewer_session().map_err(|e| format!("erro: tela remota sem sessao no navegador: {e}"))?;
-            self.listen_relay(&session);
-            *self.relay.borrow_mut() = Some(session);
+            let Some(engine) = self.engine() else { let _ = reply.send(Err(format!("erro: a sessao {} nao tem navegador aberto", self.key))); return };
+            let opening = engine.viewer_session();
+            cx.spawn(async move |this, cx| {
+                let opened = opening.await.map_err(|e| format!("erro: tela remota sem sessao no navegador: {e}"));
+                let answer = this.update(cx, |panel, _| opened.map(|session| {
+                    if panel.relay.borrow().is_none() {
+                        panel.listen_relay(&session);
+                        // Os quadros do espectador vão do pipe direto ao socket; o resto passa pela interface.
+                        let (frames, ack) = (panel.frames.clone(), session.browser().acker(session.id()));
+                        session.browser().sink(session.id(), Box::new(move |params| {
+                            let events = frames.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+                            let unsent = match events {
+                                Some(events) => crate::browser::relay::deliver(&events, "Page.screencastFrame", &params),
+                                None => params["sessionId"].as_i64(),
+                            };
+                            if let Some(id) = unsent { ack(id.into()); }
+                        }));
+                        *panel.relay.borrow_mut() = Some(session);
+                    }
+                    panel.take_viewer(viewer);
+                })).unwrap_or_else(|_| Err("erro: o navegador fechou".into()));
+                let _ = reply.send(answer);
+            }).detach();
+            return;
         }
+        let _ = cx;
+        self.take_viewer(viewer);
+        let _ = reply.send(Ok(()));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn take_viewer(&self, viewer: crate::browser::relay::Viewer) {
+        self.set_frames(Some(viewer.events.clone()));
         if let Some(old) = self.viewer.borrow_mut().replace(viewer) { old.detach(crate::browser::relay::REPLACED); }
-        Ok(())
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn set_frames(&self, events: Option<async_channel::Sender<crate::browser::relay::ViewerEvent>>) {
+        #[cfg(target_os = "linux")]
+        { *self.frames.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = events; }
+        #[cfg(not(target_os = "linux"))]
+        let _ = events;
     }
 
     /// O espectador `id` saiu: o screencast para, a menos que outro já o tenha substituído.
@@ -290,6 +332,7 @@ impl BrowserPanel {
         let mut viewer = self.viewer.borrow_mut();
         if viewer.as_ref().is_none_or(|v| v.id != id) { return; }
         *viewer = None;
+        self.set_frames(None);
         // No Linux a sessão do espectador cai inteira, e o screencast dela junto.
         #[cfg(target_os = "linux")]
         self.relay.borrow_mut().take();
@@ -300,6 +343,7 @@ impl BrowserPanel {
     /// Navegador fechando: quem olha recebe o fim antes de o painel cair.
     #[cfg(not(target_os = "macos"))]
     pub(super) fn end_viewer(&self) {
+        self.set_frames(None);
         if let Some(viewer) = self.viewer.borrow_mut().take() { viewer.detach("target_closed"); }
     }
 
@@ -561,6 +605,8 @@ impl Hangar {
     /// Linha Navegador do menu do painel: abre o navegador na primeira vez e leva à aba dele.
     pub(super) fn open_browser(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(key) = self.browser_key() else { return };
+        #[cfg(target_os = "linux")]
+        { self.side.warm = Engine::warm(window, cx).inspect_err(|e| eprintln!("[nav] Chromium nao subiu antes do endereco: {e}")).ok(); }
         let browser = self.browser_for(key, window, cx);
         self.show_browser_tab(window, cx);
         browser.update(cx, |panel, cx| panel.focus_address(window, cx));
@@ -588,6 +634,8 @@ impl Hangar {
     pub(super) fn close_browser(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let showing = self.side_tab() == SideTab::Browser;
         if let Some(key) = self.side_key() { self.side.browser_open.remove(&key); }
+        #[cfg(target_os = "linux")]
+        { self.side.warm = None; }
         for browser in self.side.browsers.values().cloned().collect::<Vec<_>>() { browser.update(cx, |panel, cx| { panel.set_shown(false, cx); }); }
         if showing { self.choose_side_tab(SideTab::Context, window, cx); } else { cx.notify(); }
     }
@@ -675,7 +723,10 @@ impl Hangar {
                 return cx.spawn(async move |_, _| { let _ = reply.send(call.await); }).detach();
             }
             Request::Watch { key, viewer, reply } => {
-                let _ = reply.send(match self.side.browsers.get(&key) { Some(b) => b.read(cx).watch(viewer), None => Err(missing(&key)) });
+                match self.side.browsers.get(&key).cloned() {
+                    Some(b) => b.update(cx, |panel, cx| panel.watch(viewer, reply, cx)),
+                    None => { let _ = reply.send(Err(missing(&key))); }
+                }
                 return;
             }
             Request::Unwatch { key, id } => {
