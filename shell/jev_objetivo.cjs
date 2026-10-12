@@ -182,6 +182,9 @@ function cabecasDeValor(campos, dados) {
 /** Combobox que so mostra a lista depois de digitar: e campo de texto E botao ao mesmo tempo. */
 const ehEditavel = (c, editaveis) => c.papel === 'combobox' && editaveis.has(normalizar(c.nome));
 
+const listasFechadas = (candidatos, editaveis, aberta) => (aberta ? [] : candidatos.filter(
+  (c) => c.papel === 'combobox' && !ehEditavel(c, editaveis)));
+
 /**
  * O corpo de perguntas de um ciclo: operação, os alvos especulativos e o risco. Uma requisição.
  *
@@ -209,7 +212,9 @@ function montarPerguntas(candidatos, dados = {}, editaveis = new Set(), listaAbe
   if (!opcoes.length) delete disponiveis.SELECT;
   if (!acabouDeDigitar) delete disponiveis.PRESS_ENTER;
   return {
-    ...cabecasDeValor(campos, dados),
+    // Lista fechada tambem ganha pergunta de valor: com ela o laco abre e escolhe sozinho a opcao
+    // igual ao dado, sem depender da operacao que o Jev escolheria para o formulario inteiro.
+    ...cabecasDeValor([...campos, ...listasFechadas(candidatos, editaveis, aberta)], dados),
     ...headDeAlvo('select_target', 'If the next operation is SELECT, which option is chosen?', opcoes),
     operacao: {
       type: 'choice',
@@ -646,6 +651,7 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
   let repetidas = 0;
   let esperouCarregar = false;
   const escritos = new Map();
+  let reolhou = 0;
   let urlDosEscritos = '';
   const agir = async (verbo, args) => {
     const saida = String(await executar(verbo, args));
@@ -695,12 +701,55 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
 
     const acabouDeDigitar = String(feito.at(-1) ?? '').startsWith('TYPE_TEXT');
     const respostas = await perguntar(estado, montarPerguntas(candidatos, cofre, anotacao.editaveis, anotacao.lista_aberta, acabouDeDigitar));
+    // Lista fechada que o Jev casou com um valor de `dados` e ainda nao mostra esse valor: abre e
+    // escolhe a opcao de texto identico. Uma por ciclo, porque abrir a lista renumera as refs.
+    let preencheuLista = false;
+    for (const c of listasFechadas(candidatos, anotacao.editaveis, normalizar(anotacao.lista_aberta))) {
+      const v = respostas[cabecaDoValor(c.ref)];
+      const chave = v?.choice;
+      if (!chave || chave === NENHUM || forca(v) < LIMIARES.alvo || typeof cofre[chave] !== 'string' || ehSegredo(chave)) continue;
+      const atualDaLista = Object.entries(anotacao.valores).find(([k]) => normalizar(k) === normalizar(c.nome))?.[1];
+      if (normalizar(atualDaLista ?? '') === normalizar(cofre[chave])) continue;
+      try {
+        await agir('click', [`@${c.ref}`]);
+        await executar('wait', ['--idle']);
+        const arvore = String(await executar('snapshot', SNAPSHOT_DO_LACO));
+        const opcoes = /^\s*-\s+listbox\b/m.test(arvore) ? parsarSnapshot(arvore).filter((o) => o.papel === PAPEL_DE_OPCAO) : [];
+        const casadas = opcoes.filter((o) => normalizar(o.nome) === normalizar(cofre[chave]));
+        if (casadas.length !== 1) {
+          // Sem opcao identica a lista fica aberta e o ciclo seguinte decide com ela na tela.
+          log(`jev-objetivo passo ${passo}: CLICK @${c.ref} (${rotulo(c)}) para escolher "${cofre[chave].slice(0, 40)}" (sem opcao identica)`);
+        } else {
+          log(`jev-objetivo passo ${passo}: SELECT @${casadas[0].ref} ("${casadas[0].nome}") em ${rotulo(c)} via dados.${chave} conf=${forca(v).toFixed(2)}`);
+          await agir('click', [`@${casadas[0].ref}`]);
+        }
+        feito.push(`SELECT "${c.nome}"`);
+      } catch (err) {
+        if (!(err instanceof FalhaDoNavegador)) throw err;
+        return { feito, sucesso: false, parou: `o navegador falhou no ${err.verbo}: ${err.message}` };
+      }
+      preencheuLista = true;
+      break;
+    }
+    if (preencheuLista) {
+      await executar('wait', ['--idle']);
+      continue;
+    }
     // Com a ordem explicita de quem chamou, a trava de risco vira registro: o passo segue e o log diz
     // qual clique arriscado foi liberado.
     let decisao = decidir(respostas, candidatos);
     if (permitirRisco && decisao.parar?.startsWith('operacao arriscada')) {
       log(`jev-objetivo passo ${passo}: risco liberado por --permitir-risco (${decisao.parar})`);
       decisao = decidir(respostas, candidatos, { ...LIMIARES, arriscado: Infinity, arriscadoAlvo: Infinity });
+    }
+    // Tela que acabou de mudar (formulario abrindo, listas carregando) deixa o Jev sem alvo firme num
+    // estado que nao e o final: antes de desistir, espera e olha de novo, uma vez por passo.
+    if (decisao.parar && / sem alvo confiavel/.test(decisao.parar) && reolhou !== passo) {
+      reolhou = passo;
+      await executar('wait', ['500']);
+      await executar('wait', ['--idle']);
+      passo -= 1;
+      continue;
     }
     if (decisao.parar) return { feito, sucesso: decisao.sucesso === true, parou: decisao.parar };
 
