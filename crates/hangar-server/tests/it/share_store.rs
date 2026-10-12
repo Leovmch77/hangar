@@ -463,3 +463,137 @@ fn concurrent_writes_end_with_the_latest_state_on_disk() {
     assert_eq!(ids(&f.store).len(), 160);
     assert_eq!(ids(&f.reopen()), ids(&f.store));
 }
+
+// Registros filhos do par: um por sessão do grupo, sob a chave do par, com o nível dela.
+
+fn pair_root(f: &Fixture) -> (hangar_server::share::store::Share, String) {
+    f.at(1000.0).create_redeemed("dono", life("t:1"), Kind::Pair).unwrap()
+}
+
+#[test]
+fn grant_gives_the_pair_token_the_session_with_its_level() {
+    let f = Fixture::new();
+    let (root, tok) = pair_root(&f);
+    f.at(1001.0).grant(&root.id, "membro", life("t:m"), Kind::Share).unwrap();
+    let guest = f.store.lookup_token(&tok).unwrap();
+    assert_eq!(guest.kind_of("membro"), Some(Kind::Share));
+    let child = guest.share_for("membro").unwrap();
+    assert_eq!(child.parent_id.as_deref(), Some(root.id.as_str()));
+    // A vida é a da sessão do filho: o porteiro e a varredura comparam com ela.
+    assert_eq!(child.life, life("t:m"));
+    // Filho não fala pelo par: só a raiz.
+    assert_eq!(guest.pair_shares().len(), 1);
+    f.at(1002.0).grant(&root.id, "membro", life("t:m"), Kind::Pair).unwrap();
+    assert_eq!(f.store.lookup_token(&tok).unwrap().kind_of("membro"), Some(Kind::Pair));
+    assert_eq!(f.store.children(&root.id).len(), 1, "trocar o nível não cria outro filho");
+    assert!(f.store.ungrant(&root.id, "membro").unwrap());
+    assert!(!f.store.lookup_token(&tok).unwrap().sees("membro"));
+    assert!(!f.store.ungrant(&root.id, "membro").unwrap());
+    assert!(f.store.children(&root.id).is_empty());
+}
+
+#[test]
+fn grant_on_unknown_or_revoked_root_fails() {
+    let f = Fixture::new();
+    assert!(f.at(1000.0).grant("nao-existe", "membro", life("t:m"), Kind::Share).is_err());
+    let (root, _) = pair_root(&f);
+    f.store.revoke(&root.id).unwrap();
+    assert!(f.store.grant(&root.id, "membro", life("t:m"), Kind::Share).is_err());
+}
+
+#[test]
+fn revoking_the_root_drops_every_child() {
+    let f = Fixture::new();
+    let (root, tok) = pair_root(&f);
+    f.at(1001.0).grant(&root.id, "a", life("t:a"), Kind::Share).unwrap();
+    f.store.grant(&root.id, "b", life("t:b"), Kind::Pair).unwrap();
+    assert_eq!(f.store.lookup_token(&tok).unwrap().sessions(), set(&["dono", "a", "b"]));
+    f.store.revoke(&root.id).unwrap();
+    assert!(f.store.lookup_token(&tok).unwrap().sessions().is_empty());
+    assert!(f.store.children(&root.id).is_empty());
+}
+
+#[test]
+fn attach_copies_every_child_of_the_same_root() {
+    let f = Fixture::new();
+    let (root, tok_pair) = pair_root(&f);
+    f.at(1001.0).grant(&root.id, "a", life("t:a"), Kind::Share).unwrap();
+    f.store.grant(&root.id, "b", life("t:b"), Kind::Pair).unwrap();
+    let (_, c) = f.store.create("z", life("t:3"), Kind::Share, false).unwrap();
+    let (_, tok) = f.at(1002.0).redeem(&c, "Pixel", None, Kind::Share).unwrap();
+    assert_eq!(f.at(1003.0).attach(&tok, &tok_pair).unwrap(), 3);
+    assert_eq!(f.store.lookup_token(&tok).unwrap().sessions(), set(&["z", "dono", "a", "b"]));
+    assert_eq!(f.at(1004.0).attach(&tok, &tok_pair).unwrap(), 0);
+    // A cópia não é filho do par: `children` só devolve os da chave do par.
+    assert_eq!(f.store.children(&root.id).len(), 2);
+    // Tirar a sessão do par tira também da cópia.
+    f.store.ungrant(&root.id, "a").unwrap();
+    assert_eq!(f.store.lookup_token(&tok).unwrap().sessions(), set(&["z", "dono", "b"]));
+}
+
+#[test]
+fn pair_children_stay_out_of_owner_list_shared_mark_and_end_all() {
+    let f = Fixture::new();
+    let (root, tok) = pair_root(&f);
+    f.at(1001.0).grant(&root.id, "membro", life("t:m"), Kind::Share).unwrap();
+    assert!(f.store.list_for("membro").is_empty());
+    assert!(f.store.active_sessions().is_empty());
+    assert_eq!(f.store.revoke_session("membro", Some(Kind::Share)).unwrap(), 0);
+    assert!(f.store.lookup_token(&tok).unwrap().sees("membro"));
+    // Sessão que morreu leva tudo.
+    assert_eq!(f.store.revoke_session("membro", None).unwrap(), 1);
+}
+
+#[test]
+fn set_root_session_moves_only_the_root() {
+    let f = Fixture::new();
+    let (root, tok) = pair_root(&f);
+    f.at(1001.0).grant(&root.id, "membro", life("t:m"), Kind::Pair).unwrap();
+    assert!(f.store.set_root_session(&root.id, "membro", life("t:m")).unwrap());
+    let guest = f.store.lookup_token(&tok).unwrap();
+    assert_eq!(guest.sessions(), set(&["membro"]));
+    // A raiz leva a vida da sessão nova: com a antiga, o porteiro a daria por encerrada.
+    assert_eq!(guest.pair_shares()[0].session, "membro");
+    assert_eq!(guest.pair_shares()[0].life, life("t:m"));
+    assert_eq!(f.store.children(&root.id).len(), 1);
+    assert!(!f.store.set_root_session("nao-existe", "x", None).unwrap());
+}
+
+#[test]
+fn children_survive_reload_without_new_fields_on_disk() {
+    let f = Fixture::new();
+    let (root, tok) = pair_root(&f);
+    f.at(1001.0).grant(&root.id, "membro", life("t:m"), Kind::Share).unwrap();
+    // Mesmas chaves do formato do Python: um Hangar antigo lê o arquivo sem quarentena.
+    let raw: Vec<serde_json::Map<String, serde_json::Value>> =
+        serde_json::from_str(&std::fs::read_to_string(f.file()).unwrap()).unwrap();
+    let keys = ["id", "session", "life", "created_at", "code_expires_at", "code_hash", "token_hash",
+        "device", "redeemed_at", "revoked_at", "local", "kind", "parent_id"];
+    for record in &raw {
+        let mut got: Vec<&str> = record.keys().map(String::as_str).collect();
+        got.sort();
+        let mut want = keys.to_vec();
+        want.sort();
+        assert_eq!(got, want);
+    }
+    let st = f.reopen();
+    assert_eq!(st.lookup_token(&tok).unwrap().kind_of("membro"), Some(Kind::Share));
+    assert_eq!(st.children(&root.id).len(), 1);
+    assert!(st.list_for("membro").is_empty());
+}
+
+#[test]
+fn grant_and_ungrant_reach_copies_held_by_other_tokens() {
+    let f = Fixture::new();
+    let (root, tok_pair) = pair_root(&f);
+    f.at(1001.0).grant(&root.id, "s", life("t:s"), Kind::Share).unwrap();
+    let (_, c) = f.store.create("z", life("t:3"), Kind::Share, false).unwrap();
+    let (_, tok_b) = f.at(1002.0).redeem(&c, "Pixel", None, Kind::Share).unwrap();
+    assert_eq!(f.at(1003.0).attach(&tok_b, &tok_pair).unwrap(), 2);
+    assert_eq!(f.store.lookup_token(&tok_b).unwrap().kind_of("s"), Some(Kind::Share));
+    // Baixar o nível no par baixa também na cópia: senão o outro token seguiria escrevendo.
+    f.store.grant(&root.id, "s", life("t:s"), Kind::Pair).unwrap();
+    assert_eq!(f.store.lookup_token(&tok_b).unwrap().kind_of("s"), Some(Kind::Pair));
+    assert!(f.store.ungrant(&root.id, "s").unwrap());
+    assert_eq!(f.store.lookup_token(&tok_b).unwrap().sessions(), set(&["z", "dono"]));
+}

@@ -269,13 +269,14 @@ impl ShareStore {
         }
         let mut state = self.lock();
         // A cópia aponta sempre para a RAIZ: revogar o registro original derruba toda a cadeia.
-        let mut done: HashSet<String> = state.values()
+        // Uma raiz de par dá várias sessões: a chave é (raiz, sessão), não só a raiz.
+        let mut done: HashSet<(String, String)> = state.values()
             .filter(|x| x.token_hash.as_deref() == Some(h.token_hash.as_str()))
-            .filter_map(|x| x.parent_id.clone()).collect();
+            .filter_map(|x| x.parent_id.clone().map(|p| (p, x.session.clone()))).collect();
         let mut added = Vec::new();
         for s in &o.records {
             let root = s.parent_id.clone().unwrap_or_else(|| s.id.clone());
-            if s.revoked_at.is_some() || !done.insert(root.clone()) {
+            if s.revoked_at.is_some() || !done.insert((root.clone(), s.session.clone())) {
                 continue;
             }
             added.push(Share {
@@ -295,10 +296,72 @@ impl ShareStore {
         Ok(count)
     }
 
+    /// Dá ao par a sessão com o nível `kind`, ou troca o nível de quem já a tinha pelo par.
+    pub fn grant(&self, root_id: &str, session: &str, life: Option<String>, kind: Kind) -> io::Result<()> {
+        let now = self.now();
+        let mut state = self.lock();
+        let token = state.get(root_id)
+            .filter(|r| r.kind == Kind::Pair && r.parent_id.is_none() && r.revoked_at.is_none())
+            .and_then(|r| r.token_hash.clone())
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "par desconhecido ou encerrado"))?;
+        let mut own = false;
+        // As cópias que o `attach` deu a outros tokens seguem o nível: senão escreveriam depois do "ver".
+        for x in state.values_mut().filter(|x| x.parent_id.as_deref() == Some(root_id) && x.session == session && x.revoked_at.is_none()) {
+            own |= x.token_hash.as_deref() == Some(token.as_str());
+            x.kind = kind;
+            x.life = life.clone();
+        }
+        if !own {
+            let child = Share {
+                id: new_id(), session: session.into(), life, created_at: now, code_expires_at: now,
+                code_hash: String::new(), token_hash: Some(token), device: None, redeemed_at: Some(now),
+                revoked_at: None, local: false, kind, parent_id: Some(root_id.into()),
+            };
+            state.insert(child.id.clone(), child);
+        }
+        self.persist(state)
+    }
+
+    /// Tira a sessão do par, cópias de outros tokens incluídas; `false` se ele não a dava.
+    pub fn ungrant(&self, root_id: &str, session: &str) -> io::Result<bool> {
+        let now = self.now();
+        let mut state = self.lock();
+        let mut found = false;
+        for x in state.values_mut().filter(|x| x.parent_id.as_deref() == Some(root_id) && x.session == session && x.revoked_at.is_none()) {
+            x.revoked_at = Some(now);
+            found = true;
+        }
+        if found { self.persist(state)?; }
+        Ok(found)
+    }
+
+    /// Filhos vivos sob a chave do próprio par (as cópias de outros tokens ficam de fora).
+    pub fn children(&self, root_id: &str) -> Vec<Share> {
+        let state = self.lock();
+        let Some(token) = state.get(root_id).and_then(|r| r.token_hash.clone()) else { return Vec::new() };
+        state.values()
+            .filter(|x| x.parent_id.as_deref() == Some(root_id) && x.revoked_at.is_none() && x.token_hash.as_deref() == Some(token.as_str()))
+            .cloned().collect()
+    }
+
+    /// Ancora a raiz do par noutra sessão; a vida acompanha, senão o porteiro a daria por encerrada.
+    pub fn set_root_session(&self, root_id: &str, new_session: &str, life: Option<String>) -> io::Result<bool> {
+        let mut state = self.lock();
+        let Some(root) = state.get_mut(root_id).filter(|r| r.parent_id.is_none() && r.revoked_at.is_none()) else {
+            return Ok(false);
+        };
+        root.session = new_session.into();
+        root.life = life;
+        self.persist(state)?;
+        Ok(true)
+    }
+
     pub fn list_for(&self, session: &str) -> Vec<Share> {
         let now = self.now();
-        let mut out: Vec<Share> = self.lock().values()
-            .filter(|x| x.session == session && x.kind == Kind::Share && x.active(now)).cloned().collect();
+        let state = self.lock();
+        let mut out: Vec<Share> = state.values()
+            .filter(|x| x.session == session && x.kind == Kind::Share && x.active(now) && !under_pair(&state, x))
+            .cloned().collect();
         out.sort_by(|a, b| a.created_at.total_cmp(&b.created_at));
         out
     }
@@ -325,9 +388,11 @@ impl ShareStore {
     pub fn revoke_session(&self, session: &str, kind: Option<Kind>) -> io::Result<usize> {
         let now = self.now();
         let mut state = self.lock();
+        // Com tipo é o "encerrar" de um recurso (convite ou par); o acesso dado pelo par só sai pelo par.
+        let paired: HashSet<String> = state.values().filter(|x| under_pair(&state, x)).map(|x| x.id.clone()).collect();
         let mut count = 0;
         for x in state.values_mut() {
-            if x.session == session && x.revoked_at.is_none() && kind.is_none_or(|k| x.kind == k) {
+            if x.session == session && x.revoked_at.is_none() && kind.is_none_or(|k| x.kind == k && !paired.contains(&x.id)) {
                 x.revoked_at = Some(now);
                 count += 1;
             }
@@ -379,7 +444,8 @@ impl ShareStore {
 
     pub fn active_sessions(&self) -> HashSet<String> {
         let now = self.now();
-        self.lock().values().filter(|x| x.kind == Kind::Share && x.active(now))
+        let state = self.lock();
+        state.values().filter(|x| x.kind == Kind::Share && x.active(now) && !under_pair(&state, x))
             .map(|x| x.session.clone()).collect()
     }
 
@@ -414,6 +480,11 @@ impl ShareStore {
         }
         Ok(revoked)
     }
+}
+
+/// Acesso que veio de um par (filho da chave do par ou cópia dele): não é convite do dono.
+fn under_pair(state: &State, x: &Share) -> bool {
+    x.parent_id.as_ref().and_then(|p| state.get(p)).is_some_and(|r| r.kind == Kind::Pair)
 }
 
 fn peek_in<'a>(state: &'a State, code: &str, kind: Kind, now: f64) -> Result<&'a Share, PeekError> {
