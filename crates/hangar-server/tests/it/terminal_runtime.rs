@@ -185,6 +185,9 @@ async fn real_process_timeout_ends_grandchild_before_detach_and_new_lease() {
     let mut f=Fixture::new().await;let script=f._dir.path().join("fake_mux.py");let late=f._dir.path().join("late-write");
     let code=format!(r#"import os,sys,time,subprocess
 path={}
+# O pane é o próprio teste (o agente da sessão): no Windows o `python` do venv é um lançador, e o pai
+# do script não seria o teste.
+agent={}
 mode=sys.argv[1]
 if mode in ('--child','--grand'):
  open(path+mode+'.pid','w').write(str(os.getpid()))
@@ -192,7 +195,7 @@ if mode in ('--child','--grand'):
  else:time.sleep(2.5);open(path,'w').write('late')
  time.sleep(10)
 elif mode=='--other':time.sleep(60)
-elif mode=='display-message':print(str(os.getppid())+'\tsession\t%1\t1' if sys.argv[-1].startswith('#{{pane_pid}}') else 'session\t%1\t1')
+elif mode=='display-message':print(str(agent)+'\tsession\t%1\t1' if sys.argv[-1].startswith('#{{pane_pid}}') else 'session\t%1\t1')
 elif mode=='capture-pane':print('─'*32+'\n❯ \n'+'─'*32)
 elif mode=='send-keys' and '-l' in sys.argv:
  subprocess.Popen([sys.executable,__file__,'--child'])
@@ -200,7 +203,7 @@ elif mode=='send-keys' and '-l' in sys.argv:
  deadline=time.monotonic()+10
  while not os.path.exists(path+'--grand.pid') and time.monotonic()<deadline:time.sleep(.005)
  time.sleep(10)
-"#,json!(late.to_str().unwrap()));
+"#,json!(late.to_str().unwrap()),std::process::id());
     std::fs::write(&script,code).unwrap();
     let python=std::env::var("HANGAR_TEST_PYTHON").unwrap_or_else(|_|if cfg!(windows){"python".into()}else{"python3".into()});
     let mut other=KillOnDrop(std::process::Command::new(&python).arg(&script).arg("--other").spawn().unwrap());let other_born=std::time::Instant::now();

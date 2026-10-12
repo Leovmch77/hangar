@@ -72,6 +72,7 @@ async def _shadow(infos: list[SessionInfo], pane_pids: dict[str, int]) -> dict:
 def _row_sig(i: SessionInfo) -> dict:
     """A tupla do `sse._list_sig`, com nome por campo."""
     d = i.model_dump(mode="json", include=set(SIG_FIELDS))
+    d["interaction_id"] = i.interaction_id      # fora do JSON do modelo, dentro da assinatura
     d["status_line"] = sse._status_sig(i.status_line)
     d["context"] = sse._context_sig(i.context)
     d["label"] = i.label if i.provider == "codex" and not i.tracked else bool(i.label)

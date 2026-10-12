@@ -1005,8 +1005,11 @@ mod tests {
         let bridge = ListBridge::new(ListEnv { mux: Mux::default(), capture_program: "missing-test-mux".into(),
             procs: Arc::new(procs::SystemProcs::default()), dirs: Some(dirs) }, FactsClient::new("127.0.0.1:9".parse().unwrap(), "s".into()));
         let row = || serde_json::from_value::<SessionRow>(json!({"name":"s","provider":"claude","headless":true,"lifecycle_id":"k"})).unwrap();
-        *bridge.discovery.lock().await = Some(Discovery { at: Instant::now(), wall: wall_now(), epoch: 0, fresh: true,
-            rows: Arc::new(vec![row()]), agent_pids: Arc::default(), panes: Arc::default(), children: Arc::default() });
+        // A descoberta semeada vale por `DISCOVER_TTL`; no Windows a recusa do endereço dos fatos leva ~2 s
+        // por rodada e a seguinte redescobriria pelo multiplexador real. Cada rodada parte da mesma linha.
+        let seed = || async { *bridge.discovery.lock().await = Some(Discovery { at: Instant::now(), wall: wall_now(), epoch: 0, fresh: true,
+            rows: Arc::new(vec![row()]), agent_pids: Arc::default(), panes: Arc::default(), children: Arc::default() }); };
+        seed().await;
         let binding = InteractionBinding { key: "k".into(), conversation: "sid".into(), generation: 1 };
         let local = PluginFacts { plugin_state: None, waiter_open: true, heartbeat_age_ms: Some(0), question: None,
             questions: vec![json!({"id":"perm:a","interaction_id":"a","questions":[],"tool":"Bash","resumo":"cmd"})], suggestion: "".into() };
@@ -1017,10 +1020,12 @@ mod tests {
         let mut ambiguous = local;
         ambiguous.questions.push(json!({"id":"perm:b","interaction_id":"b","questions":[],"tool":"Bash","resumo":"cmd"}));
         *lock(&bridge.test_plugins) = Some(reading(binding.clone(), Ok(ambiguous)));
+        seed().await;
         let rebuilt = bridge.produce_round(&ProduceFacts::default()).await.unwrap().0;
         assert_eq!(rebuilt.rows[0].interaction_id.as_deref(), Some("a"));
         assert_eq!(rebuilt.rows[0].problema.as_deref(), Some("erro_interacao_indisponivel"));
         *lock(&bridge.test_plugins) = Some(reading(InteractionBinding { generation: 2, ..binding }, Err("plugin_store_unavailable".into())));
+        seed().await;
         let next = bridge.produce_round(&ProduceFacts::default()).await.unwrap().0;
         assert!(next.rows[0].interaction_id.is_none(), "rodada nova não herda cartão da geração anterior");
     }

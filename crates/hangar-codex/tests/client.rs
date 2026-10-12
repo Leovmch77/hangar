@@ -175,6 +175,20 @@ async fn raw_listener() -> (tokio::net::TcpListener,String) {
     (listener,url)
 }
 
+/// Quadros que o app-server parado não deixa sair. O Winsock aceita inteiros os dois primeiros `send` com
+/// o par sem ler, de qualquer tamanho, e só o terceiro para; no Linux o primeiro grande já prende e os
+/// outros esperam na fila. Devolve o recibo do último, o que nunca sai do processo nos dois SOs.
+const FILL_FRAMES:usize = 2;
+async fn stuck_write(outgoing:&tokio::sync::mpsc::Sender<RawWrite>,size:usize) -> tokio::sync::oneshot::Receiver<Result<(),ClientError>> {
+    for _ in 0..FILL_FRAMES {
+        let (fill,_) = tokio::sync::oneshot::channel();
+        assert!(outgoing.send(RawWrite { text:"a".repeat(size),receipt:fill,guard:None }).await.is_ok());
+    }
+    let (receipt,written) = tokio::sync::oneshot::channel();
+    assert!(outgoing.send(RawWrite { text:"b".repeat(size),receipt,guard:None }).await.is_ok());
+    written
+}
+
 /// Enfileira um quadro e devolve o recibo; `None` = a fila já estava fechada.
 async fn raw_send(raw:&RawWebSocket,text:String) -> Option<Result<(),ClientError>> {
     let (receipt,written) = tokio::sync::oneshot::channel();
@@ -284,8 +298,7 @@ async fn dropping_a_raw_websocket_stuck_in_a_send_frees_the_socket() {
         }
     });
     let raw = connect_raw_ws(&url).await.unwrap();
-    let (receipt,written) = tokio::sync::oneshot::channel();
-    assert!(raw.outgoing.send(RawWrite { text:"a".repeat(15 << 20),receipt,guard:None }).await.is_ok());
+    let written = stuck_write(&raw.outgoing,15 << 20).await;
     tokio::time::sleep(Duration::from_millis(300)).await;
     drop(raw);
     dropped_tx.send(()).unwrap();
@@ -313,8 +326,7 @@ async fn abort_now_frees_a_stuck_socket_before_any_reconnect_could_start() {
         at.elapsed()
     });
     let RawWebSocket { incoming:_incoming,outgoing,tasks } = connect_raw_ws(&url).await.unwrap();
-    let (receipt,written) = tokio::sync::oneshot::channel();
-    assert!(outgoing.send(RawWrite { text:"a".repeat(15 << 20),receipt,guard:None }).await.is_ok());
+    let written = stuck_write(&outgoing,15 << 20).await;
     tokio::time::sleep(Duration::from_millis(300)).await;
     tasks.abort_now();
     aborted_tx.send(std::time::Instant::now()).unwrap();
@@ -337,6 +349,10 @@ async fn raw_websocket_closed_during_the_write_is_not_ok() {
         drop(ws);
     });
     let mut raw = connect_raw_ws(&url).await.unwrap();
-    assert!(!matches!(raw_send(&raw,"a".repeat(12 << 20)).await,Some(Ok(()))));
+    // Os primeiros quadros podem caber inteiros no `send` do Windows (ver `stuck_write`); o que ainda está
+    // saindo quando o TCP cai nunca é `Ok`.
+    let written = stuck_write(&raw.outgoing,12 << 20).await;
+    let receipt = tokio::time::timeout(Duration::from_secs(5),written).await.expect("recibo sem desfecho");
+    assert!(!matches!(receipt,Ok(Ok(()))));
     assert!(tokio::time::timeout(Duration::from_secs(5),raw.incoming.recv()).await.unwrap().is_none());
 }

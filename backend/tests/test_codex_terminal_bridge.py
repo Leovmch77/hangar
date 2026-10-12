@@ -124,6 +124,7 @@ def test_delete_answers_the_rust_code_when_the_close_fails(monkeypatch):
 
 def test_sends_from_python_paths_go_to_the_rust_and_return_its_code(monkeypatch):
     calls = []
+    monkeypatch.setattr(runtime_coordinator, "rust_owns_codex_terminal", lambda: True)
     monkeypatch.setattr(runtime_coordinator, "rust_codex_terminal",
                         lambda *args: calls.append(args) or (200, b'{"ok": true, "delivered": true}'))
 

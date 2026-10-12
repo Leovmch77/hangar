@@ -213,15 +213,19 @@ mod tests {
         });
         let mut io = WebSocketConnection::connect(&format!("ws://{address}")).await.unwrap().start(1, 8);
         tokio::time::pause();
-        // Maior que os buffers de envio e recepção do loopback somados, abaixo de `MAX_FRAME`.
-        let frame = json!({"id": "hangar:1:stuck", "params": {"blob": "a".repeat(15 << 20)}});
-        assert!(io.try_send(WireFrame { operation_id: "stuck".into(), frame, ephemeral: false, until: None, guard: None }).is_ok());
-        match tokio::time::timeout(ACK_WAIT * 2, io.events.recv()).await.expect("escrita parada sem desfecho") {
-            Some(IoEvent::WriteAck { operation_id, outcome }) => {
-                assert_eq!(operation_id, "stuck");
-                assert_eq!(outcome, WriteOutcome::Unknown);
+        // Maiores que os buffers do loopback, abaixo de `MAX_FRAME`. Três: o Winsock aceita inteiros os dois
+        // primeiros `send` com o par sem ler, de qualquer tamanho, e só o terceiro para; no Linux o primeiro já prende.
+        for id in ["fill-1", "fill-2", "stuck"] {
+            let frame = json!({"id": format!("hangar:1:{id}"), "params": {"blob": "a".repeat(15 << 20)}});
+            assert!(io.try_send(WireFrame { operation_id: id.into(), frame, ephemeral: false, until: None, guard: None }).is_ok());
+        }
+        loop {
+            match tokio::time::timeout(ACK_WAIT * 2, io.events.recv()).await.expect("escrita parada sem desfecho") {
+                // Só os de enchimento podem ter saído inteiros antes do socket parar.
+                Some(IoEvent::WriteAck { operation_id, outcome: WriteOutcome::Written }) => assert!(operation_id.starts_with("fill-"), "{operation_id}"),
+                Some(IoEvent::WriteAck { outcome, .. }) => { assert_eq!(outcome, WriteOutcome::Unknown); break; }
+                _ => panic!("transporte encerrou em vez de dar o prazo"),
             }
-            _ => panic!("transporte encerrou em vez de dar o prazo"),
         }
         // O primeiro incerto por prazo encerra o transporte: a fila não fica presa atrás do socket parado.
         assert!(matches!(tokio::time::timeout(ACK_WAIT, io.events.recv()).await.expect("sem fim depois do prazo"), Some(IoEvent::End { code: None })));

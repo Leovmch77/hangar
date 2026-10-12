@@ -3745,7 +3745,7 @@ def test_kill_nao_avisa_companheiros_que_ficaram(api_client):
          patch("app.api._deliver", side_effect=fake_deliver):
         r = api_client.delete("/api/sessions/a", headers=_h())
     assert r.status_code == 200 and r.json() == {"ok": True, "warning": None}
-    kill.assert_called_once_with("a")
+    kill.assert_called_once_with("a", closed_by_rust=False)
     assert entregues == {}
 
 

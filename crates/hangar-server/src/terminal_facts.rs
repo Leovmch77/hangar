@@ -154,7 +154,9 @@ impl LocalTerminalFacts {
         let live = current && plugin["waiter_open"] == true;
         let open_question = question || plugin["questions"].as_array().is_some_and(|questions| !questions.is_empty());
         let clipboard_available = if binding.windows { self.clipboard_available(binding).await? } else { false };
-        let native = if cfg!(unix) && let Some((sender, _)) = input::message_prefix(text)
+        // Em qualquer SO, como o `_native_socket` do Python: quem não fala o socket (o escritor fora do Unix)
+        // responde `NotWritten` e a entrega segue pelo teclado.
+        let native = if let Some((sender, _)) = input::message_prefix(text)
             && let Some(socket) = native.as_ref().and_then(|record| record["messagingSocketPath"].as_str()).filter(|path| !path.is_empty())
             && Path::new(socket).try_exists().map_err(|_| ServiceError("terminal_native_socket_unavailable"))? {
             Some(NativeMessage { socket: socket.into(), origin: target.metadata.origin.clone(), sender: sender.into(),

@@ -4725,7 +4725,10 @@ def _pane_info(name: str) -> tuple[str, str | None]:
 async def _send_one_codex(name: str, text: str, *, track_entry: bool = False) -> dict:
     # Codex com terminal do Rust (broadcast, grupo, par, MCP): o envio vai à ponte dele, num sentido só.
     from app import runtime_coordinator
-    if rust := await asyncio.to_thread(runtime_coordinator.rust_codex_terminal, name, "input", "POST", json.dumps({"text": text}).encode()):
+    # A checagem de posse é memória: só a ponte (rede) vai a uma thread, e sem o Rust dono a entrega não
+    # depende do executor padrão.
+    if runtime_coordinator.rust_owns_codex_terminal() and (rust := await asyncio.to_thread(
+            runtime_coordinator.rust_codex_terminal, name, "input", "POST", json.dumps({"text": text}).encode())):
         reply = json.loads(rust[1] or b"{}")
         return reply if rust[0] < 300 else {"ok": False, "error": reply.get("detail"), "delivered": False}
     managed = await _send_managed(name, text, "codex", track_entry=track_entry)
