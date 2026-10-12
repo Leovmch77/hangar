@@ -56,6 +56,14 @@ impl Tailscale for Fake {
 fn turns_funnel(c: &[String]) -> bool { c[0] == "funnel" && !c.iter().any(|a| a == "status") }
 
 #[tokio::test]
+async fn storable_handle_reaches_the_inner_runner() {
+    let handle: std::sync::Arc<dyn tunnel::DynTailscale> = std::sync::Arc::new(Fake::new());
+    assert_eq!(tunnel::host(&handle).await.unwrap(), "nb.tail1.ts.net");
+    assert!(Tailscale::needs_operator(&handle));
+    assert_eq!(Tailscale::user(&handle), "jefferson");
+}
+
+#[tokio::test]
 async fn host_strips_trailing_dot() {
     assert_eq!(tunnel::host(&Fake::new()).await.unwrap(), "nb.tail1.ts.net");
 }

@@ -47,11 +47,12 @@ impl Tailscale for std::sync::Arc<dyn DynTailscale> {
         let inner = self.clone();
         async move {
             let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-            inner.run_boxed(&refs).await
+            // `(*inner)` chama o objeto guardado; `inner.` cairia de volta neste impl do `Arc` e recursaria sem fim.
+            (*inner).run_boxed(&refs).await
         }
     }
-    fn needs_operator(&self) -> bool { self.needs_operator_dyn() }
-    fn user(&self) -> String { self.user_dyn() }
+    fn needs_operator(&self) -> bool { (**self).needs_operator_dyn() }
+    fn user(&self) -> String { (**self).user_dyn() }
 }
 
 /// O `tailscale` de verdade, sem herdar a autoridade do servidor.
