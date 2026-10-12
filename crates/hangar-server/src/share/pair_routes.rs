@@ -493,7 +493,10 @@ async fn pair_accept(State(st): St, Path(name): Path<String>, bytes: Bytes) -> R
         let msg = format!("pareamento desfeito: falha ao avisar as sessões ({e})");
         return detail(StatusCode::BAD_GATEWAY, "erro_pareamento_desfeito", &msg, json!({"avisos": e}));
     }
-    json_response(StatusCode::OK, json!({"ok": true, "alias": alias, "owner": owner, "session": session, "level": level_name(given)}))
+    // `level` = o que o outro lado me deu (Hangar antigo não diz: "view"); `level_given` = o que eu dei.
+    let received = if resp.get("level").and_then(Value::as_str) == Some("full") { "full" } else { "view" };
+    json_response(StatusCode::OK, json!({"ok": true, "alias": alias, "owner": owner, "session": session,
+        "level": received, "level_given": level_name(given)}))
 }
 
 async fn list_pairs(State(st): St) -> Response {

@@ -577,7 +577,7 @@ async fn valid_accept_writes_the_pair_and_sends_normalized_owner() {
     e.other.reply("POST /api/pair/redeem", 200, good());
     let (status, body) = e.accept("s1").await;
     assert_eq!(status, 200, "{body}");
-    assert_eq!(body, json!({"ok": true, "alias": "pc-ana", "owner": "pc-ana", "session": "Y", "level": "view"}));
+    assert_eq!(body, json!({"ok": true, "alias": "pc-ana", "owner": "pc-ana", "session": "Y", "level": "view", "level_given": "view"}));
     let sent = &e.other.calls()[0];
     assert_eq!(sent["auth"], Value::Null, "resgate vai sem Authorization");
     assert_eq!(sent["body"]["owner"], "minha-maquina");
@@ -1011,7 +1011,8 @@ async fn accept_full_with_new_peer_gives_full_access_and_sends_level() {
     answer["level"] = json!("view");
     e.other.reply("POST /api/pair/redeem", 200, answer);
     let (status, body) = e.owner_post("/api/sessions/s1/pair-accept", json!({"link": LINK, "level": "full"})).await;
-    assert_eq!((status, &body["level"]), (200, &json!("full")), "{body}");
+    // `level` = o que o outro lado me deu; `level_given` = o que eu dei a ele.
+    assert_eq!((status, &body["level"], &body["level_given"]), (200, &json!("view"), &json!("full")), "{body}");
     let sent = &e.other.calls()[0]["body"];
     assert_eq!(sent["level"], "full");
     assert_eq!(e.kind_for(sent["token"].as_str().unwrap(), "s1"), Some(Kind::Share));
@@ -1024,7 +1025,7 @@ async fn accept_full_with_old_peer_falls_back_to_view() {
     // Hangar antigo: a resposta do resgate não traz `level`.
     e.other.reply("POST /api/pair/redeem", 200, good());
     let (status, body) = e.owner_post("/api/sessions/s1/pair-accept", json!({"link": LINK, "level": "full"})).await;
-    assert_eq!((status, &body["level"]), (200, &json!("view")), "{body}");
+    assert_eq!((status, &body["level"], &body["level_given"]), (200, &json!("view"), &json!("view")), "{body}");
     let sent = &e.other.calls()[0]["body"];
     assert_eq!(e.kind_for(sent["token"].as_str().unwrap(), "s1"), Some(Kind::Pair));
     assert_eq!(e.level_given().await, "view");
@@ -1037,7 +1038,7 @@ async fn accept_without_level_is_view() {
     answer["level"] = json!("full");
     e.other.reply("POST /api/pair/redeem", 200, answer);
     let (status, body) = e.accept("s1").await;
-    assert_eq!((status, &body["level"]), (200, &json!("view")), "{body}");
+    assert_eq!((status, &body["level"], &body["level_given"]), (200, &json!("full"), &json!("view")), "{body}");
     assert_eq!(e.other.calls()[0]["body"]["level"], "view");
 }
 
