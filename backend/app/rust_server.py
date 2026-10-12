@@ -316,6 +316,12 @@ class Supervisor:
         self.runtime_secret = None
         self.runtime_transport = None
         self.last_transport = None
+        self._snapshot_retry: asyncio.Task | None = None
+
+    def _cancel_snapshot_retry(self) -> None:
+        if self._snapshot_retry is not None:
+            self._snapshot_retry.cancel()
+            self._snapshot_retry = None
 
     def _env(self) -> dict[str, str]:
         # Import tardio: internal_api puxa o app, que o uvicorn interno já carregou a esta altura.
@@ -371,6 +377,7 @@ class Supervisor:
         transcription_bridge.configure(None, None)
         push.configure_presence(None, None)
         terminal_observer.configure(None, None)
+        self._cancel_snapshot_retry()
         if self.proc is not None:
             from app.runtime_process import cleanup
             await asyncio.to_thread(cleanup, self.proc)
@@ -446,7 +453,9 @@ class Supervisor:
                 groups_bridge.set_capable(health.get("groups") is not False)
                 # Pontes ligadas: o Rust recém-subido aprende as trocas de modo e transferências em curso.
                 from app import share_bridge
-                await asyncio.to_thread(share_bridge.send_snapshot)
+                if not await asyncio.to_thread(share_bridge.send_snapshot):
+                    # Sem a fotografia o convidado fica no 503 e a varredura não revoga nada.
+                    self._snapshot_retry = asyncio.create_task(share_bridge.send_snapshot_until_sent(self.stopping))
                 self.configure_runtime(ready, env["HANGAR_INTERNAL_SECRET"], env["HANGAR_RUNTIME_INSTANCE"], owns)
                 return "up"
             await asyncio.sleep(_POLL)
@@ -534,6 +543,7 @@ class Supervisor:
         pages_bridge.configure(None, None)
         costs_sources.set_served_by_rust(False)
         terminal_observer.configure(None, None)
+        self._cancel_snapshot_retry()
         proc = self.proc
         if proc is None:
             return

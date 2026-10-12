@@ -142,11 +142,27 @@ async fn snapshot_releases_the_verdict_and_mode_change_holds_it() {
     result(&srv, "mode_change_begin", json!({"name": "s"})).await;
     assert_eq!(verdict(&guest(), Some("s"), &srv.share.lives).await, Verdict::Unsure);
     result(&srv, "mode_change_end", json!({"name": "s"})).await;
-    // Transferência em curso quando o Rust subiu: a vida de origem vale até a troca acabar.
+    // Transferência em curso quando o Rust subiu (terminal e sidecar sumidos): a vida de origem vale.
+    srv.probe.keys.lock().unwrap().clear();
     result(&srv, "facts_snapshot", json!({"lives": {"s": "k:A"}, "changing": []})).await;
     assert_eq!(verdict(&guest(), Some("s"), &srv.share.lives).await, Verdict::Ok);
     result(&srv, "mode_change_end", json!({"name": "s"})).await;
     assert_eq!(verdict(&guest(), Some("s"), &srv.share.lives).await, Verdict::Ended, "o fim da troca solta a vida de origem");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn mode_change_end_keeps_the_transfer_still_incomplete() {
+    // Restauração que falhou: a transferência segue incompleta depois da troca de modo.
+    let dir = tempfile::tempdir().unwrap();
+    let srv = server(dir.path(), true).await;
+    let (_, token) = srv.share.store.create_redeemed("s", Some("k:A".into()), Kind::Share).unwrap();
+    let guest = || srv.share.store.lookup_token(&token).unwrap();
+    result(&srv, "facts_snapshot", json!({"lives": {"s": "k:A"}, "changing": []})).await;
+    result(&srv, "mode_change_begin", json!({"name": "s"})).await;
+    result(&srv, "mode_change_end", json!({"name": "s", "source_life": "k:A"})).await;
+    assert_eq!(verdict(&guest(), Some("s"), &srv.share.lives).await, Verdict::Ok);
+    result(&srv, "mode_change_end", json!({"name": "s", "source_life": null})).await;
+    assert_eq!(verdict(&guest(), Some("s"), &srv.share.lives).await, Verdict::Ended);
 }
 
 #[tokio::test(flavor = "multi_thread")]

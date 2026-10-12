@@ -235,10 +235,13 @@ impl ShareStore {
         if token.is_empty() {
             return None;
         }
-        let h = hash(token);
+        self.lookup_hash(&hash(token))
+    }
+
+    pub fn lookup_hash(&self, h: &str) -> Option<Guest> {
         let records: Vec<Share> = self.lock().values()
-            .filter(|x| x.token_hash.as_deref() == Some(h.as_str())).cloned().collect();
-        (!records.is_empty()).then_some(Guest { token_hash: h, records })
+            .filter(|x| x.token_hash.as_deref() == Some(h)).cloned().collect();
+        (!records.is_empty()).then(|| Guest { token_hash: h.to_owned(), records })
     }
 
     /// Liga ao token `holder` as sessões vivas do token `other`; devolve quantas ligou.

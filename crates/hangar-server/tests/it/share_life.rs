@@ -12,6 +12,9 @@ struct Fake {
     births: Mutex<HashMap<String, u64>>,
     has: Mutex<Option<bool>>,
     sidecar: Mutex<bool>,
+    transfer: Mutex<bool>,
+    /// Roda no meio da consulta ao multiplexador: o que o Python faz enquanto o Rust pergunta.
+    on_has: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl Fake {
@@ -32,6 +35,9 @@ impl LifeProbe for Fake {
         Box::pin(async move { b })
     }
     fn has_session<'a>(&'a self, _name: &'a str) -> BoxFuture<'a, Option<bool>> {
+        if let Some(hook) = self.on_has.lock().unwrap().take() {
+            hook();
+        }
         let h = *self.has.lock().unwrap();
         Box::pin(async move { h })
     }
@@ -40,6 +46,9 @@ impl LifeProbe for Fake {
     }
     fn sidecar_exists(&self, _name: &str) -> bool {
         *self.sidecar.lock().unwrap()
+    }
+    fn sidecar_transfer(&self, _name: &str) -> bool {
+        *self.transfer.lock().unwrap()
     }
 }
 
@@ -177,6 +186,45 @@ async fn sessionless_route_ok_if_any_record_ok() {
     assert_eq!(verdict(&guest(vec![share("dd", "k:L9")]), None, &lives).await, Verdict::Ended);
 }
 
+#[tokio::test]
+async fn stale_transfer_life_loses_to_a_new_tmux_birth() {
+    // Rust reiniciado com transferência incompleta na fotografia; a sessão renasceu com o mesmo nome.
+    let (fake, facts, lives) = setup(false);
+    facts.apply_snapshot(HashMap::from([("cc".to_string(), "k:L1".to_string())]), HashSet::new());
+    fake.birth_of("cc", 99);
+    assert_eq!(verdict(&cc(), Some("cc"), &lives).await, Verdict::Ended);
+}
+
+#[tokio::test]
+async fn transfer_life_wins_only_over_the_sidecar_of_the_transfer() {
+    let (fake, facts, lives) = setup(true);
+    facts.set_life("cc", Some("k:L1".into()));
+    fake.key("cc", "DESTINO");
+    assert_eq!(verdict(&cc(), Some("cc"), &lives).await, Verdict::Ended, "sidecar sem transfer_id é outra vida");
+    *fake.transfer.lock().unwrap() = true;
+    assert_eq!(lives.life("cc", true).await.as_deref(), Some("k:L1"));
+    assert_eq!(verdict(&cc(), Some("cc"), &lives).await, Verdict::Ok);
+}
+
+#[tokio::test]
+async fn verdict_rereads_the_record_before_ending() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(ShareStore::open(dir.path().join("shares.json"), Arc::new(|| 1000.0)));
+    let (_, token) = store.create_redeemed("cc", Some("k:L1".into()), Kind::Share).unwrap();
+    let fake = Arc::new(Fake::default());
+    let facts = Arc::new(LifeFacts::default());
+    facts.apply_snapshot(HashMap::new(), HashSet::new());
+    let reread = store.clone();
+    let lives = Lives::new(fake.clone(), facts).rereading(move |hash| reread.lookup_hash(hash));
+    let stale = store.lookup_token(&token).unwrap();
+    // A troca de modo move o convite entre a leitura do registro e a decisão.
+    store.set_life("cc", Some("k:L2".into())).unwrap();
+    fake.key("cc", "L2");
+    assert_eq!(verdict(&stale, Some("cc"), &lives).await, Verdict::Ok);
+    fake.key("cc", "OUTRA");
+    assert_eq!(verdict(&stale, Some("cc"), &lives).await, Verdict::Ended);
+}
+
 // --- varredura (`share_api._alive`) ---
 
 fn store() -> (tempfile::TempDir, ShareStore) {
@@ -240,6 +288,23 @@ async fn sweep_skips_session_changing_mode() {
     assert!(store.has_active(false));
     facts.end_mode_change("proj");
     assert_eq!(sweep(&store, &lives).await.unwrap(), 1);
+}
+
+#[tokio::test]
+async fn sweep_mode_change_finishing_mid_probe_does_not_revoke() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(ShareStore::open(dir.path().join("shares.json"), Arc::new(|| 1000.0)));
+    store.create("proj", Some("t:1".into()), Kind::Share, false).unwrap();
+    let (fake, facts, lives) = setup(true);
+    facts.begin_mode_change("proj");
+    fake.mux_says(Some(false));
+    let (s, f) = (store.clone(), facts.clone());
+    *fake.on_has.lock().unwrap() = Some(Box::new(move || {
+        s.set_life("proj", Some("k:novo".into())).unwrap();
+        f.end_mode_change("proj");
+    }));
+    assert_eq!(sweep(&store, &lives).await.unwrap(), 0);
+    assert!(store.has_active(false));
 }
 
 #[tokio::test]

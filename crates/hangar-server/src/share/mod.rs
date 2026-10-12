@@ -32,10 +32,14 @@ pub fn from_env(shares_file: Option<std::path::PathBuf>, dirs: Option<&crate::li
     };
     let clock: store::Clock = Arc::new(|| std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs_f64()).unwrap_or_default());
-    Some(Arc::new(ShareState {
-        store: store::ShareStore::open(shares_file, clock),
-        pairs: pairs::PairStore::open(dirs.claude.join(".hangar-pair").join("external_pairs.json")),
-        lives: life::Lives::new(Arc::new(life::MuxProbe::new(mux_program, dirs.home.clone())), Arc::default()),
-        tailscale: Arc::new(tunnel::Real),
+    Some(Arc::new_cyclic(|me: &std::sync::Weak<ShareState>| {
+        let me = me.clone();
+        ShareState {
+            store: store::ShareStore::open(shares_file, clock),
+            pairs: pairs::PairStore::open(dirs.claude.join(".hangar-pair").join("external_pairs.json")),
+            lives: life::Lives::new(Arc::new(life::MuxProbe::new(mux_program, dirs.home.clone())), Arc::default())
+                .rereading(move |hash| me.upgrade()?.store.lookup_hash(hash)),
+            tailscale: Arc::new(tunnel::Real),
+        }
     }))
 }

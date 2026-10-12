@@ -76,6 +76,8 @@ pub trait LifeProbe: Send + Sync {
     /// Chave do sidecar sem terminal ou Codex, nessa ordem.
     fn sidecar_key(&self, name: &str) -> Option<String>;
     fn sidecar_exists(&self, name: &str) -> bool;
+    /// O sidecar foi escrito por uma transferência (`transfer_id`).
+    fn sidecar_transfer(&self, _name: &str) -> bool { false }
 }
 
 pub struct MuxProbe { program: OsString, home: PathBuf, mux: MuxProcess }
@@ -92,6 +94,18 @@ impl MuxProbe {
         let base = self.home.join(".hangar");
         [base.join("claude-headless").join(&file), base.join("codex-sessions").join(&file)]
     }
+
+    /// O primeiro sidecar com chave, como o laço de `share_life.session_life`.
+    fn keyed_sidecar(&self, name: &str) -> Option<Value> {
+        self.sidecar_paths(name).iter().find_map(|path| {
+            let meta: Value = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+            text(&meta, "key").map(|_| meta)
+        })
+    }
+}
+
+fn text(meta: &Value, field: &str) -> Option<String> {
+    meta.get(field).and_then(Value::as_str).filter(|v| !v.is_empty()).map(str::to_owned)
 }
 
 impl LifeProbe for MuxProbe {
@@ -113,25 +127,38 @@ impl LifeProbe for MuxProbe {
         Box::pin(self.mux.has_session(name))
     }
     fn sidecar_key(&self, name: &str) -> Option<String> {
-        self.sidecar_paths(name).iter().find_map(|path| {
-            let meta: Value = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
-            meta.get("key").and_then(Value::as_str).filter(|k| !k.is_empty()).map(str::to_owned)
-        })
+        self.keyed_sidecar(name).and_then(|meta| text(&meta, "key"))
+    }
+    fn sidecar_transfer(&self, name: &str) -> bool {
+        self.keyed_sidecar(name).is_some_and(|meta| text(&meta, "transfer_id").is_some())
     }
     fn sidecar_exists(&self, name: &str) -> bool {
         self.sidecar_paths(name).iter().any(|p| p.exists())
     }
 }
 
+type Reread = Box<dyn Fn(&str) -> Option<Guest> + Send + Sync>;
+
 pub struct Lives {
     probe: Arc<dyn LifeProbe>,
     facts: Arc<LifeFacts>,
-    cache: Mutex<HashMap<String, (Instant, Option<String>)>>,
+    cache: Mutex<HashMap<String, (Instant, Probed)>>,
+    reread: Option<Reread>,
 }
+
+/// O que o multiplexador e o disco disseram; a vida de origem da transferência entra sempre na hora.
+#[derive(Clone)]
+enum Probed { Key { key: String, transfer: bool }, Birth(Option<u64>) }
 
 impl Lives {
     pub fn new(probe: Arc<dyn LifeProbe>, facts: Arc<LifeFacts>) -> Self {
-        Self { probe, facts, cache: Mutex::default() }
+        Self { probe, facts, cache: Mutex::default(), reread: None }
+    }
+
+    /// Releitura dos registros de um token na loja (pelo hash).
+    pub fn rereading(mut self, reread: impl Fn(&str) -> Option<Guest> + Send + Sync + 'static) -> Self {
+        self.reread = Some(Box::new(reread));
+        self
     }
 
     pub fn facts(&self) -> &LifeFacts {
@@ -139,22 +166,29 @@ impl Lives {
     }
 
     pub async fn life(&self, name: &str, fresh: bool) -> Option<String> {
-        // Durante a transferência terminal e sidecar somem: a vida de origem é a que vale.
-        if let Some(life) = self.facts.transfer_life(name) {
-            return Some(life);
-        }
-        if !fresh
-            && let Some((at, life)) = self.cache.lock().unwrap_or_else(|e| e.into_inner()).get(name)
-            && at.elapsed() < LIFE_TTL
-        {
-            return life.clone();
-        }
-        let life = match self.probe.sidecar_key(name) {
-            Some(key) => session_life(Some(&key), None),
-            None => session_life(None, self.probe.birth(name).await),
+        let cached = if fresh { None } else {
+            self.cache.lock().unwrap_or_else(|e| e.into_inner()).get(name)
+                .filter(|(at, _)| at.elapsed() < LIFE_TTL).map(|(_, probed)| probed.clone())
         };
-        self.cache.lock().unwrap_or_else(|e| e.into_inner()).insert(name.into(), (Instant::now(), life.clone()));
-        life
+        let probed = match cached {
+            Some(probed) => probed,
+            None => {
+                let probed = match self.probe.sidecar_key(name) {
+                    Some(key) => Probed::Key { transfer: self.probe.sidecar_transfer(name), key },
+                    None => Probed::Birth(self.probe.birth(name).await),
+                };
+                self.cache.lock().unwrap_or_else(|e| e.into_inner()).insert(name.into(), (Instant::now(), probed.clone()));
+                probed
+            }
+        };
+        // Ordem de `share_life.session_life`: a vida de origem só vence o sidecar que a própria
+        // transferência escreveu, e só vale sem terminal; um nascimento novo é outra vida.
+        let transfer = self.facts.transfer_life(name);
+        match probed {
+            Probed::Key { transfer: true, .. } if transfer.is_some() => transfer,
+            Probed::Key { key, .. } => session_life(Some(&key), None),
+            Probed::Birth(birth) => session_life(None, birth).or(transfer),
+        }
     }
 
     /// Só o multiplexador respondendo "não há" e nenhum sidecar sobrando: vida `None` sozinha
@@ -193,6 +227,19 @@ async fn record_verdict(share: &Share, lives: &Lives) -> Verdict {
 
 /// Veredito do token para a rota: com sessão, o registro dela; sem, vale se algum vale.
 pub async fn verdict(guest: &Guest, session: Option<&str>, lives: &Lives) -> Verdict {
+    let first = guest_verdict(guest, session, lives).await;
+    if first != Verdict::Ended {
+        return first;
+    }
+    // O registro é cópia: a troca de modo pode tê-lo movido de vida depois da leitura, e o 410 é
+    // final para o convidado.
+    match lives.reread.as_ref().and_then(|reread| reread(&guest.token_hash)) {
+        Some(fresh) => guest_verdict(&fresh, session, lives).await,
+        None => first,
+    }
+}
+
+async fn guest_verdict(guest: &Guest, session: Option<&str>, lives: &Lives) -> Verdict {
     if let Some(name) = session {
         return match guest.share_for(name) {
             Some(share) => record_verdict(share, lives).await,
@@ -217,16 +264,21 @@ pub async fn sweep(store: &ShareStore, lives: &Lives) -> std::io::Result<usize> 
         return store.sweep(|_, _| true);
     }
     // A consulta é assíncrona e a closure do `sweep` não: lê antes, decide dentro.
-    let sessions: HashSet<String> = store.all().into_iter()
-        .filter(|s| s.revoked_at.is_none()).map(|s| s.session).collect();
+    let probed: HashSet<(String, Option<String>)> = store.all().into_iter()
+        .filter(|s| s.revoked_at.is_none()).map(|s| (s.session, s.life)).collect();
     let mut current = HashMap::new();
-    for name in sessions {
-        let life = lives.life(&name, true).await;
-        let absent = life.is_none() && lives.confirmed_absent(&name).await;
-        current.insert(name, (life, absent));
+    for name in probed.iter().map(|(name, _)| name).collect::<HashSet<_>>() {
+        let life = lives.life(name, true).await;
+        let absent = life.is_none() && lives.confirmed_absent(name).await;
+        current.insert(name.clone(), (life, absent));
     }
     store.sweep(|session, life| {
         if facts.changing_mode(session) {
+            return true;
+        }
+        // Registro que mudou durante a consulta (troca de modo que acabou no meio) fica para a
+        // próxima rodada: a consulta foi de antes.
+        if !probed.contains(&(session.to_owned(), life.map(str::to_owned))) {
             return true;
         }
         match current.get(session) {

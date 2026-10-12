@@ -173,8 +173,55 @@ def test_mode_change_holds_the_invite_and_moves_its_life(monkeypatch, bridge):
     assert asyncio.run(api._during_transfer_life("s", troca())) == "feito"
     assert seen == [("durante", True, [("mode_change_begin", {"name": "s"})])]
     assert bridge.calls == [("mode_change_begin", {"name": "s"}), ("set_life", {"name": "s", "life": "k:novo"}),
-                            ("mode_change_end", {"name": "s"})]
+                            ("mode_change_end", {"name": "s", "source_life": None})]
     assert "s" not in share_bridge.changing_mode
+
+
+def test_mode_change_end_carries_the_incomplete_transfer(monkeypatch, bridge):
+    from app import conversation_transfer
+    monkeypatch.setattr(conversation_transfer, "list_incomplete",
+                        lambda: [SimpleNamespace(name="t", source_life="k:origem")])
+    share_bridge.mode_change("t", False)
+    share_bridge.mode_change("u", False)
+    assert bridge.calls == [("mode_change_end", {"name": "t", "source_life": "k:origem"}),
+                            ("mode_change_end", {"name": "u", "source_life": None})]
+
+
+def test_failed_set_life_is_replayed_before_the_next_snapshot(monkeypatch, bridge):
+    from app import conversation_transfer
+    monkeypatch.setattr(share_bridge, "changing_mode", set())
+    monkeypatch.setattr(share_bridge, "_unsent_lives", {})
+    monkeypatch.setattr(conversation_transfer, "list_incomplete", lambda: [])
+    bridge.replies["set_life"] = share_bridge.ShareBridgeError("share_bridge_unavailable")
+    assert share_bridge.set_life("s", "k:novo") is not None
+    del bridge.replies["set_life"]
+    bridge.calls.clear()
+    assert share_bridge.send_snapshot()
+    # O Rust novo aprende a vida nova antes de a fotografia soltar o veredito.
+    assert bridge.calls == [("set_life", {"name": "s", "life": "k:novo"}),
+                            ("facts_snapshot", {"lives": {}, "changing": []})]
+    bridge.calls.clear()
+    assert share_bridge.send_snapshot()
+    assert bridge.calls == [("facts_snapshot", {"lives": {}, "changing": []})]
+
+
+def test_snapshot_is_retried_until_rust_takes_it(monkeypatch):
+    results = [False, False, True]
+    sleeps = []
+    monkeypatch.setattr(share_bridge, "send_snapshot", lambda: results.pop(0))
+    monkeypatch.setattr(list_bridge, "endpoint", lambda: ("127.0.0.1:9", "s"))
+
+    async def no_wait(delay):
+        sleeps.append(delay)
+    monkeypatch.setattr(share_bridge.asyncio, "sleep", no_wait)
+    asyncio.run(share_bridge.send_snapshot_until_sent(lambda: False))
+    assert results == [] and sleeps == [1.0, 2.0, 4.0]
+    # Parando o backend, ou o Rust caiu (o próximo manda a sua), a repetição acaba.
+    results[:] = [False] * 5
+    asyncio.run(share_bridge.send_snapshot_until_sent(lambda: True))
+    monkeypatch.setattr(list_bridge, "endpoint", lambda: None)
+    asyncio.run(share_bridge.send_snapshot_until_sent(lambda: False))
+    assert len(results) == 5
 
 
 def test_snapshot_carries_transfers_and_mode_changes(monkeypatch, bridge):
@@ -182,7 +229,8 @@ def test_snapshot_carries_transfers_and_mode_changes(monkeypatch, bridge):
     monkeypatch.setattr(share_bridge, "changing_mode", {"m"})
     monkeypatch.setattr(conversation_transfer, "list_incomplete",
                         lambda: [SimpleNamespace(name="t", source_life="k:origem")])
-    share_bridge.send_snapshot()
+    monkeypatch.setattr(share_bridge, "_unsent_lives", {})
+    assert share_bridge.send_snapshot()
     assert bridge.calls == [("facts_snapshot", {"lives": {"t": "k:origem"}, "changing": ["m"]})]
 
 
@@ -192,7 +240,7 @@ def test_snapshot_is_not_sent_when_transfers_are_unreadable(monkeypatch, bridge,
     def boom():
         raise OSError(13, "negado")
     monkeypatch.setattr(conversation_transfer, "list_incomplete", boom)
-    share_bridge.send_snapshot()
+    assert not share_bridge.send_snapshot()
     # Sem fotografia o Rust segue no "não sei": nunca 410 por uma transferência que ele não viu.
     assert bridge.calls == []
     assert [e for e in events if e[0] == "convites.fotografia_falhou"]
@@ -201,7 +249,11 @@ def test_snapshot_is_not_sent_when_transfers_are_unreadable(monkeypatch, bridge,
 def test_supervisor_sends_the_snapshot_when_bridges_come_up(monkeypatch):
     from app import internal_api, rust_server
     sent = []
-    monkeypatch.setattr(share_bridge, "send_snapshot", lambda: sent.append(list_bridge.endpoint()))
+    monkeypatch.setattr(share_bridge, "send_snapshot", lambda: sent.append(list_bridge.endpoint()) or len(sent) > 1)
+
+    async def no_wait(delay):
+        pass
+    monkeypatch.setattr(share_bridge.asyncio, "sleep", no_wait)
     supervisor = rust_server.Supervisor(__import__("pathlib").Path("/bin/true"), "127.0.0.1", 1, 2, "t",
                                         "127.0.0.1", lambda: False)
     monkeypatch.setattr(rust_server, "_spawn", lambda binary, env: SimpleNamespace(poll=lambda: None, pid=1))
@@ -211,12 +263,18 @@ def test_supervisor_sends_the_snapshot_when_bridges_come_up(monkeypatch):
         "protocol": rust_server.RUST_SERVER_PROTOCOL, "terminal_address": "127.0.0.1:9", "terminal_panel": True,
         "owns": [{"provider": "claude", "headless": True}]})
     monkeypatch.setattr(supervisor, "configure_runtime", lambda *a: None)
+
+    async def start_and_retry():
+        state = await supervisor._start()
+        await supervisor._snapshot_retry
+        return state
     try:
-        assert asyncio.run(supervisor._start()) == "up"
+        assert asyncio.run(start_and_retry()) == "up"
     finally:
         internal_api.set_secret(None)
         list_bridge.configure(None, None)
-    assert len(sent) == 1 and sent[0][0] == "127.0.0.1:9", "a fotografia sai com as pontes já ligadas"
+    assert sent[0][0] == "127.0.0.1:9", "a fotografia sai com as pontes já ligadas"
+    assert len(sent) == 2, "a primeira falhou: repete até o Rust aceitar"
 
 
 def test_registry_dead_session_asks_rust_to_end_its_external_pairs(bridge):

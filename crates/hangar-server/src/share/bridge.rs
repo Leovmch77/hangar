@@ -29,7 +29,7 @@ enum Operation {
     RevokeSession { name: String },
     SetLife { name: String, life: Option<String> },
     ModeChangeBegin { name: String },
-    ModeChangeEnd { name: String },
+    ModeChangeEnd { name: String, #[serde(default)] source_life: Option<String> },
     FactsSnapshot { lives: HashMap<String, String>, changing: HashSet<String> },
     Rename { old: String, new: String },
     SessionDied { name: String },
@@ -55,10 +55,10 @@ async fn execute(st: Arc<AppState>, share: Arc<ShareState>, op: Operation) -> Re
         }
         Operation::SetLife { name, life } => share.store.set_life(&name, life).map(|()| json!({})).map_err(io_failed),
         Operation::ModeChangeBegin { name } => { facts.begin_mode_change(&name); Ok(json!({})) }
-        Operation::ModeChangeEnd { name } => {
-            // A vida de origem de uma transferência vista na fotografia vale só até a troca acabar.
+        Operation::ModeChangeEnd { name, source_life } => {
+            // A transferência que segue incompleta (restauração que falhou) continua valendo.
             facts.end_mode_change(&name);
-            facts.set_life(&name, None);
+            facts.set_life(&name, source_life);
             Ok(json!({}))
         }
         Operation::FactsSnapshot { lives, changing } => { facts.apply_snapshot(lives, changing); Ok(json!({})) }
