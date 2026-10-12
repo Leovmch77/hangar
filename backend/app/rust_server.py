@@ -135,6 +135,12 @@ class ProtocolMismatch(ValueError):
     """O binário fala outro contrato: religar não adianta, e o motivo tem de dizer isso."""
 
 
+async def _send_snapshot(stopping) -> None:
+    from app import share_bridge
+    if not await asyncio.to_thread(share_bridge.send_snapshot):
+        await share_bridge.send_snapshot_until_sent(stopping)
+
+
 def _runtime_ready(proc, instance: str) -> dict:
     if proc.stdout is None:
         raise ValueError("partida sem cano de resposta")
@@ -452,11 +458,10 @@ class Supervisor:
                 # o Python segue dono delas.
                 groups_bridge.set_capable(health.get("groups") is not False)
                 # Pontes ligadas: o Rust recém-subido aprende as trocas de modo e transferências em curso.
-                from app import share_bridge
-                if not await asyncio.to_thread(share_bridge.send_snapshot):
-                    # Sem a fotografia o convidado fica no 503 e a varredura não revoga nada.
-                    self._snapshot_retry = asyncio.create_task(share_bridge.send_snapshot_until_sent(self.stopping))
                 self.configure_runtime(ready, env["HANGAR_INTERNAL_SECRET"], env["HANGAR_RUNTIME_INSTANCE"], owns)
+                # Sem a fotografia o convidado fica no 503 e a varredura não revoga nada; ela vai
+                # depois das pontes e fora da partida, repetida até o Rust aceitar.
+                self._snapshot_retry = asyncio.create_task(_send_snapshot(self.stopping))
                 return "up"
             await asyncio.sleep(_POLL)
         return "silent"

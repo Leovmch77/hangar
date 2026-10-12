@@ -568,11 +568,8 @@ def test_child_gets_no_guest_port_when_the_app_uses_it(monkeypatch, tmp_path):
     assert "HANGAR_SERVER_GUEST_LISTEN" not in env, "a porta do convite exporia a API do dono pelo Funnel"
 
 
-def test_python_never_binds_the_guest_port(monkeypatch):
-    sentinel = object()
-    monkeypatch.setattr(main, "_connect_socket", lambda: sentinel)
+def test_python_never_binds_the_guest_port():
     # Com e sem o Rust, o Python só abre a porta do Connect além da principal; a 8766 é do Rust.
-    assert main._extra_sockets() == [sentinel]
     assert not hasattr(main, "_guest_socket")
 
 

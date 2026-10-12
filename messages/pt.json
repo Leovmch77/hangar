@@ -7961,6 +7961,5 @@
   "share_reach_failed_dns": "O endereço desta máquina ainda não existe no DNS público. Espere um pouco e tente de novo.",
   "share_reach_failed_funnel": "O endereço existe, mas o Funnel da Tailscale não entregou o convite desta máquina.",
   "share_reach_retry": "Tentar de novo",
-  "share_create_needs_rust": "Compartilhar precisa do servidor Rust do Hangar, que não está rodando nesta máquina.",
-  "share_reach_needs_rust": "A conferência do link precisa do servidor Rust do Hangar, que não está rodando nesta máquina."
+  "share_create_needs_rust": "Compartilhar precisa do servidor Rust do Hangar, que não está rodando nesta máquina."
 }

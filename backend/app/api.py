@@ -7619,7 +7619,7 @@ async def relimpar_ditado(body: RelimparBody, request: Request):
     if body.session:
         from app import guest_users
         guest = guest_of(request)
-        if guest is not None and guest.share_for(body.session) is None:
+        if guest is not None and not guest.sees(body.session):
             raise HTTPException(403, "A conversa de destino não está autorizada.")
         viewer = guest_users.current.get()
         if viewer is not None and not guest_users.visible_to(viewer, body.session):

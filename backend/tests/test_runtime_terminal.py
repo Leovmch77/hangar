@@ -871,6 +871,7 @@ def test_claude_terminal_controls_route_to_owner(monkeypatch,tmp_path,control):
 def test_public_guest_routes_follow_owner(monkeypatch,tmp_path,kind,status):
     import base64,hashlib,hmac
     from app import api, guest_header, guest_users, internal_api
+    from types import SimpleNamespace
     from app.config import settings
     from fastapi.testclient import TestClient
     gateway=TerminalGateway()
@@ -888,7 +889,7 @@ def test_public_guest_routes_follow_owner(monkeypatch,tmp_path,kind,status):
         client=TestClient(api.app,base_url='http://127.0.0.1:8765')
     else:
         internal_api.set_secret('secret')
-        monkeypatch.setattr(guest_header,'_now',lambda:1000)
+        monkeypatch.setattr(guest_header,'time',SimpleNamespace(time=lambda:1000))
         payload=base64.urlsafe_b64encode(json.dumps({'s':{'session':kind},'exp':1030}).encode()).rstrip(b'=').decode()
         mac=hmac.new(b'secret',f'POST\n/api/sessions/session/input\n{payload}'.encode(),hashlib.sha256).hexdigest()
         headers={'x-hangar-guest':f'{payload}.{mac}'}

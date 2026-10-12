@@ -3,6 +3,7 @@ import base64
 import hashlib
 import hmac
 import json
+from types import SimpleNamespace
 
 import pytest
 from fastapi import Depends, FastAPI, Request, WebSocket
@@ -38,32 +39,28 @@ def _scope(value: str, *, method="GET", raw_path=b"/api/sessions/a/history", cli
 @pytest.fixture(autouse=True)
 def env(monkeypatch):
     internal_api.set_secret(SECRET)
-    monkeypatch.setattr(guest_header, "_now", lambda: NOW)
+    monkeypatch.setattr(guest_header, "time", SimpleNamespace(time=lambda: NOW))
     yield
     internal_api.set_secret(None)
 
 
 def test_valid_from_loopback_gives_view():
     v = _sign("GET", "/api/sessions/a/history", {"a": "share", "b": "pair"}, NOW + 30)
-    view = guest_header.verify(_scope(v))
+    view = guest_header.guest_of(_scope(v))
     assert view is not None
     assert view.sessions == {"a": "share", "b": "pair"}
     assert view.sees("a") and not view.sees("c")
     assert view.kind_of("b") == "pair" and view.kind_of("c") is None
-    share = view.share_for("a")
-    assert (share.kind, share.session) == ("share", "a")
-    assert view.share_for("c") is None
-    assert [s.session for s in view.pair_shares()] == ["b"]
 
 
 def test_rust_vector_verifies():
-    view = guest_header.verify(_scope(RUST_VECTOR))
+    view = guest_header.guest_of(_scope(RUST_VECTOR))
     assert view is not None and view.sessions == {"a": "share", "b": "pair"}
 
 
 def test_exp_equal_to_now_is_still_valid():
     v = _sign("GET", "/api/sessions/a/history", {"a": "share"}, NOW)
-    assert guest_header.verify(_scope(v)) is not None
+    assert guest_header.guest_of(_scope(v)) is not None
 
 
 @pytest.mark.parametrize("case", ["no_secret", "expired", "other_path", "other_method", "outside",
@@ -91,18 +88,18 @@ def test_invalid_header_gives_none(case):
         scope = _scope("nada")
     elif case == "missing":
         scope = {**scope, "headers": []}
-    assert guest_header.verify(scope) is None
+    assert guest_header.guest_of(scope) is None
 
 
 def test_signed_over_raw_path_not_decoded():
     v = _sign("GET", "/api/sessions/a%20b/history", {"a b": "share"}, NOW + 30)
-    assert guest_header.verify(_scope(v, raw_path=b"/api/sessions/a%20b/history")) is not None
-    assert guest_header.verify(_scope(v, raw_path=b"/api/sessions/a b/history")) is None
+    assert guest_header.guest_of(_scope(v, raw_path=b"/api/sessions/a%20b/history")) is not None
+    assert guest_header.guest_of(_scope(v, raw_path=b"/api/sessions/a b/history")) is None
 
 
 def test_websocket_scope_uses_get_and_raw_path():
     v = _sign("GET", "/api/sessions/a/nav-remoto", {"a": "share"}, NOW + 30)
-    assert guest_header.verify(_scope(v, raw_path=b"/api/sessions/a/nav-remoto", kind="websocket")) is not None
+    assert guest_header.guest_of(_scope(v, raw_path=b"/api/sessions/a/nav-remoto", kind="websocket")) is not None
 
 
 def test_websocket_route_sees_guest():
@@ -155,3 +152,15 @@ def test_guest_user_gate_yields_to_valid_header(gated):
     assert c.get(f"/api/sessions/dono/history?token={login_token}").status_code == 403
     r = c.get(f"/api/sessions/dono/history?token={login_token}", headers={"x-hangar-guest": v})
     assert r.status_code == 200 and r.json() == {"sessions": {"dono": "share"}, "login": False}
+
+
+def test_verified_once_per_request(gated, monkeypatch):
+    c, _ = gated
+    calls = []
+    real = guest_header._verify
+    monkeypatch.setattr(guest_header, "_verify", lambda scope: calls.append(1) or real(scope))
+    v = _sign("GET", "/api/sessions/a/history", {"a": "share"}, NOW + 30)
+    r = c.get("/api/sessions/a/history", headers={"x-hangar-guest": v})
+    # Porteiro, require_auth e a rota perguntam; só a primeira confere a assinatura.
+    assert r.status_code == 200 and r.json()["sessions"] == {"a": "share"}
+    assert calls == [1]

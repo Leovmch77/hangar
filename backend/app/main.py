@@ -158,11 +158,6 @@ def _connect_socket() -> socket.socket | None:
     return None
 
 
-def _extra_sockets() -> list[socket.socket]:
-    # A porta do convite (8766) é do hangar-server: o Python nunca a abre, com Rust ou sem.
-    return [s for s in (_connect_socket(),) if s]
-
-
 def main():
     bind = resolve_bind_ip(settings)
     _saida_utf8()   # antes de qualquer print: o QR abaixo quebra em cp1252
@@ -234,7 +229,9 @@ def main():
     except OSError as e:
         print(f"[hangar] ERRO: porta {settings.port} indisponível ({e})", file=sys.stderr)
         sys.exit(1)
-    extras = _extra_sockets()
+    # A porta do convite (8766) é do hangar-server: o Python nunca a abre, com Rust ou sem.
+    connect_sock = _connect_socket()
+    extras = [connect_sock] if connect_sock else []
     if rust_bin is not None:
         # A porta pública fica com o hangar-server; o bind acima só provou que ela estava livre.
         main_sock.close()

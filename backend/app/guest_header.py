@@ -5,16 +5,12 @@ import hashlib
 import hmac
 import json
 import time
-from types import SimpleNamespace
 
 from app import internal_api
 
 HEADER = b"x-hangar-guest"
-_LOOPBACK = {"127.0.0.1", "::1"}
-
-
-def _now() -> float:
-    return time.time()
+# Conferido uma vez por pedido: o porteiro confere e as rotas leem o mesmo resultado do scope.
+_SCOPE_KEY = "hangar.guest"
 
 
 class GuestView:
@@ -29,18 +25,20 @@ class GuestView:
     def kind_of(self, name: str | None) -> str | None:
         return self.sessions.get(name)
 
-    def share_for(self, name: str | None):
-        kind = self.sessions.get(name)
-        return None if kind is None else SimpleNamespace(kind=kind, session=name)
 
-    def pair_shares(self) -> list:
-        return [SimpleNamespace(kind=k, session=n) for n, k in self.sessions.items() if k == "pair"]
-
-
-def verify(obj) -> GuestView | None:
+def guest_of(obj) -> GuestView | None:
+    """Convidado deste pedido (scope, Request ou WebSocket), ou None para o dono."""
     scope = obj if isinstance(obj, dict) else getattr(obj, "scope", None)
+    if not scope:
+        return None
+    if _SCOPE_KEY not in scope:
+        scope[_SCOPE_KEY] = _verify(scope)
+    return scope[_SCOPE_KEY]
+
+
+def _verify(scope: dict) -> GuestView | None:
     secret = internal_api._secret
-    if not scope or secret is None or (scope.get("client") or ("",))[0] not in _LOOPBACK:
+    if secret is None or (scope.get("client") or ("",))[0] not in internal_api._LOOPBACK:
         return None
     value = next((v for k, v in scope.get("headers") or [] if k == HEADER), None)
     raw_path = scope.get("raw_path")
@@ -57,14 +55,9 @@ def verify(obj) -> GuestView | None:
         sessions, exp = data["s"], data["exp"]
     except (binascii.Error, ValueError, KeyError, TypeError):
         return None
-    if not isinstance(sessions, dict) or not isinstance(exp, int) or exp < _now():
+    if not isinstance(sessions, dict) or not isinstance(exp, int) or exp < time.time():
         return None
     return GuestView({str(n): str(k) for n, k in sessions.items()})
-
-
-def guest_of(obj):
-    """Convidado deste pedido, ou None para o dono."""
-    return verify(obj)
 
 
 # Campos da lista que citam OUTRAS sessões do dono (pareamento e encadeamento).

@@ -18,8 +18,14 @@ from app.config import GUEST_PORT, port_clash, settings
 from app.mensagens import erro
 
 _LIST_ROUTES = {("GET", "/api/sessions"), ("GET", "/api/sessions/events")}
-# As globais que o convidado de convite também alcança (a cópia do Rust mora em `share/caller.rs`).
-_SHARE_GLOBAL_ROUTES = {
+_GLOBAL_PREFIXES = (("GET", "/api/tts/audio/"),)
+# Stream e WebSocket passam pelo porteiro uma vez só, na abertura: sem o vigia, tirar o acesso
+# não derrubaria um terminal ou uma lista já abertos.
+WATCH_INTERVAL = 5.0
+
+# O que a tela precisa para criar e acompanhar sessão; configuração do servidor fica de fora.
+# Inclui as globais que o convidado de convite também alcança (a cópia do Rust mora em `share/caller.rs`).
+_GLOBAL_ROUTES = {
     ("GET", "/api/model-options"),
     ("GET", "/api/engines"),
     ("GET", "/api/harness/codex/opcoes"),
@@ -27,18 +33,6 @@ _SHARE_GLOBAL_ROUTES = {
     ("POST", "/api/pensamento/pt"),
     ("POST", "/api/tts"),
     ("POST", "/api/tts/narrar"),
-}
-_GLOBAL_PREFIXES = (("GET", "/api/tts/audio/"),)
-# Alcançam outra sessão do dono ou abrem janela na tela dele; `share` deixaria o convidado
-# criar e revogar convites.
-_SHARE_BLOCKED = {"pair", "pair-remote", "unpair-remote", "group-message", "then", "orq", "bastao",
-                  "open-terminal", "open-editor", "nav", "share", "pair-invite", "pair-accept"}
-# Stream e WebSocket passam pelo porteiro uma vez só, na abertura: sem o vigia, tirar o acesso
-# não derrubaria um terminal ou uma lista já abertos.
-WATCH_INTERVAL = 5.0
-
-# O que a tela precisa para criar e acompanhar sessão; configuração do servidor fica de fora.
-_GLOBAL_ROUTES = _SHARE_GLOBAL_ROUTES | {
     ("POST", "/api/sessions"),
     ("GET", "/api/sessions/creation-progress"),
     ("GET", "/api/fs/roots"),
@@ -51,9 +45,12 @@ _GLOBAL_ROUTES = _SHARE_GLOBAL_ROUTES | {
     ("GET", "/api/me"),
     ("POST", "/api/diag"),
 }
-# Navegador embutido não é do convidado; recusar aqui evita que o navsock
-# registre tentativa falha contra o IP dele.
-_BLOCKED = _SHARE_BLOCKED | {"nav-remoto", "navegador"}
+# Alcançam outra sessão do dono ou abrem janela na tela dele; `share` deixaria o convidado
+# criar e revogar convites. Navegador embutido não é do convidado; recusar aqui evita que o
+# navsock registre tentativa falha contra o IP dele.
+_BLOCKED = {"pair", "pair-remote", "unpair-remote", "group-message", "then", "orq", "bastao",
+            "open-terminal", "open-editor", "nav", "share", "pair-invite", "pair-accept",
+            "nav-remoto", "navegador"}
 
 
 def guest_allowed_user(guest, method: str, path: str) -> bool:
@@ -179,7 +176,7 @@ class GuestUserGate:
             await self.app(scope, receive, send)
             return
         # Convidado de convite já decidido e assinado pelo Rust: não é convidado com login.
-        if guest_header.verify(scope) is not None:
+        if guest_header.guest_of(scope) is not None:
             await self.app(scope, receive, send)
             return
         token = _token(scope)
