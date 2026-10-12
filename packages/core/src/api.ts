@@ -258,7 +258,7 @@ async function sessionFetch<T>(server: Server | null | undefined, path: string, 
 // quem precisa do STATUS ou de um header — hoje o histórico condicional (304 + ETag), que não tem
 // corpo pra desserializar e cujo status não é erro. O diário e o rastreio de "sem rede/voltou"
 // ficam aqui: um fetch escrito à mão sairia do registro sem ninguém notar.
-async function apiFetchRes(path: string, init?: RequestInit, server?: Server, probe = false): Promise<Response> {
+async function apiFetchRes(path: string, init?: RequestInit, server?: Server, probe = false, countsOutage = true): Promise<Response> {
   const destino = server?.baseUrl ?? apiEnv().getBaseUrl();
   const base = server ? baseOf(server) : destino;
   // Servidor de convite só atende a sessão compartilhada e as rotas do chat: o resto nem sai
@@ -316,7 +316,7 @@ async function apiFetchRes(path: string, init?: RequestInit, server?: Server, pr
       }
       if (poll) _semRede.add(`${destino}|${rota}`);
       // Só falha de REDE esfria (o `isAbortError` acima já tirou o cancelamento de quem chamou).
-      if (server) registrarFalha(server.id);
+      if (server && countsOutage) registrarFalha(server.id);
     }
     throw e;
   }
@@ -3768,9 +3768,11 @@ export function needsReachCheck(link: string): boolean {
 /** Espera no servidor até o link abrir de fora (até 3 min). 404/405 = backend sem o Rust
  * (em produção o StaticFiles do Python responde 405 ao POST). */
 export async function shareReachability(link: string, server?: Server | null, signal?: AbortSignal): Promise<Reach> {
+  // Espera minutos no servidor; o iOS mata o fetch em segundo plano e a tela repete na volta.
+  // Essa queda não é do servidor: não esfria, e a repetição não é barrada por esfriamento.
   const res = await apiFetchRes('/api/share/reachability', {
     method: 'POST', body: JSON.stringify({ link }), signal,
-  }, server ?? undefined);
+  }, server ?? undefined, true, false);
   if (res.status === 404 || res.status === 405) return { ok: false, stage: 'needs_rust', detail: '' };
   await ensureOk(res, server);
   return res.json() as Promise<Reach>;
