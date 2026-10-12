@@ -385,7 +385,8 @@ fn listen(
         let failed = frame["unreachableUrl"].as_str().filter(|u| !u.is_empty());
         let url = failed.unwrap_or(frame["url"].as_str().unwrap_or("")).to_owned();
         let keep = failed.is_some();
-        p(&|page| { page.url = Some(url.clone()); page.notice = None; if !keep { page.error = None; } });
+        // A página de erro de uma navegação bloqueada traz o aviso do bloqueio: ele fica com ela.
+        p(&|page| { page.url = Some(url.clone()); if !keep { page.error = None; page.notice = None; } });
         h();
     });
     let (p, h, m) = (publish.clone(), history.clone(), main.clone());

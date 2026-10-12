@@ -103,7 +103,14 @@ impl Engine {
     pub fn back(&self) { self.report(self.view.evaluate_script("history.back()")); }
     pub fn forward(&self) { self.report(self.view.evaluate_script("history.forward()")); }
     pub fn reload(&self) { self.report(self.view.reload()); }
-    pub fn stop(&self) { self.report(self.view.evaluate_script("window.stop()")); }
+    /// `window.stop()` roda no documento atual e não cancela a navegação que ainda não trouxe o novo; no Windows o CDP
+    /// cancela as duas.
+    pub fn stop(&self) {
+        #[cfg(target_os = "windows")]
+        drop(self.cdp().call("Page.stopLoading", serde_json::json!({})));
+        #[cfg(not(target_os = "windows"))]
+        self.report(self.view.evaluate_script("window.stop()"));
+    }
 
     #[cfg(target_os = "windows")]
     pub fn cdp(&self) -> std::rc::Rc<super::cdp::Cdp> {

@@ -224,6 +224,7 @@ impl BrowserPanel {
         engine.load(&url);
         // O agente não apaga o endereço que a pessoa está digitando; o `State` da página o atualiza quando ela sair dali.
         if by == By::User || !self.address.focus_handle(cx).is_focused(window) {
+            if by == By::User { self.address_stale = false; }
             self.address.update(cx, |input, cx| input.set_value(url, window, cx));
         } else {
             self.address_stale = true;
@@ -242,6 +243,8 @@ impl BrowserPanel {
             // Painel fechado no meio: o motor cai junto com o resultado.
             let _ = this.update_in(cx, |this, window, cx| {
                 this.engine = Some(engine);
+                // O motor novo conta os avisos do zero.
+                this.dismissed_notice = 0;
                 #[cfg(not(target_os = "macos"))]
                 if let Some(Ok(engine)) = &this.engine { let engine = engine.clone(); this.attach(&engine, cx); }
                 // Motor que não nasceu guarda o endereço pedido: é o que "Tentar de novo" volta a abrir.
