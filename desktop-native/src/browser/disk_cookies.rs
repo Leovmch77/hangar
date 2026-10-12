@@ -6,7 +6,7 @@ use std::process::Command;
 
 use serde_json::{Value, json};
 
-use super::passwords::{decode_hex, decrypt_bytes, keys, private_dir};
+use super::passwords::{decode_hex, decrypt_bytes, fresh_keys, private_dir};
 
 /// Um perfil de navegador com cookies em disco.
 #[derive(Clone)]
@@ -22,6 +22,8 @@ pub enum DiskError {
     NoSqlite,
     /// Os valores estão cifrados e nenhuma chave do chaveiro os abre (chaveiro trancado, outra carteira).
     NoKey,
+    /// Os valores estão cifrados e não há `secret-tool` (nem `kwallet-query` no KDE) para pedir a chave.
+    NoKeyTool,
     Unreadable(String),
 }
 
@@ -31,6 +33,7 @@ impl DiskError {
         match self {
             Self::NoSqlite => "browser_cookies_no_sqlite",
             Self::NoKey => "browser_cookies_keyring",
+            Self::NoKeyTool => "browser_cookies_no_secret_tool",
             Self::Unreadable(_) => "browser_cookies_disk_error",
         }
     }
@@ -102,14 +105,21 @@ pub fn read(source: &Source) -> Result<Vec<Value>, DiskError> {
     if source.firefox {
         return Ok(rows.iter().filter_map(|r| firefox_row(r)).collect());
     }
-    let version: u32 = dump(&source.file, "select value from meta where key = 'version'")?
-        .first().and_then(|r| r.first()).and_then(|v| v.parse().ok()).unwrap_or(0);
-    chrome_rows(&rows, version, &keys())
+    let version: Option<u32> = dump(&source.file, "select value from meta where key = 'version'")?
+        .first().and_then(|r| r.first()).and_then(|v| v.parse().ok());
+    if version.is_none() { eprintln!("[nav] cookies: versao do banco ilegivel em {}", source.file.display()); }
+    // Sem valor cifrado nenhum, o chaveiro nem é consultado (pode estar pedindo senha).
+    let encrypted = rows.iter().any(|r| r.get(8).is_some_and(|c| !c.is_empty()));
+    let keys = if encrypted { fresh_keys() } else { super::passwords::Keys { list: Vec::new(), no_tool: false } };
+    chrome_rows(&rows, version, &keys.list).map_err(|e| match e {
+        DiskError::NoKey if keys.no_tool => DiskError::NoKeyTool,
+        e => e,
+    })
 }
 
 /// Linhas do Chrome -> cookies. Erro só quando há valor cifrado e nenhum abre: cookie com chave errada não pode virar
 /// "0 cookies" calado.
-fn chrome_rows(rows: &[Vec<String>], version: u32, keys: &[Vec<u8>]) -> Result<Vec<Value>, DiskError> {
+fn chrome_rows(rows: &[Vec<String>], version: Option<u32>, keys: &[Vec<u8>]) -> Result<Vec<Value>, DiskError> {
     let mut out = Vec::new();
     let (mut locked, mut opened) = (0, 0);
     for row in rows {
@@ -140,14 +150,14 @@ fn chrome_rows(rows: &[Vec<String>], version: u32, keys: &[Vec<u8>]) -> Result<V
 }
 
 /// A partir da versão 24 do banco o texto vem depois do SHA-256 do host: conferir o prefixo também prova que a chave
-/// é a certa, sem depender de o valor parecer texto.
-fn chrome_value(cipher: &[u8], key: &[u8], host: &str, version: u32) -> Option<String> {
+/// é a certa, sem depender de o valor parecer texto. Versão ilegível aceita as duas formas.
+fn chrome_value(cipher: &[u8], key: &[u8], host: &str, version: Option<u32>) -> Option<String> {
     let plain = decrypt_bytes(cipher, key)?;
-    let plain = if version >= 24 {
-        let digest = ring::digest::digest(&ring::digest::SHA256, host.as_bytes());
-        plain.strip_prefix(digest.as_ref())?.to_vec()
-    } else {
-        plain
+    let digest = ring::digest::digest(&ring::digest::SHA256, host.as_bytes());
+    let plain = match version {
+        Some(v) if v >= 24 => plain.strip_prefix(digest.as_ref())?.to_vec(),
+        Some(_) => plain,
+        None => plain.strip_prefix(digest.as_ref()).map(<[u8]>::to_vec).unwrap_or(plain),
     };
     let text = String::from_utf8(plain).ok()?;
     text.chars().all(|c| !c.is_control()).then_some(text)
@@ -194,7 +204,11 @@ fn dump(db: &Path, query: &str) -> Result<Vec<Vec<String>>, DiskError> {
         std::fs::copy(db, &copy).map_err(|e| DiskError::Unreadable(format!("{}: {e}", db.display())))?;
         for suffix in ["-wal", "-journal", "-shm"] {
             let side = PathBuf::from(format!("{}{suffix}", db.display()));
-            if side.is_file() { std::fs::copy(&side, format!("{}{suffix}", copy.display())).ok(); }
+            // Sem o WAL as mudanças recentes (o login de agora) ficariam de fora caladas; sumir entre olhar e copiar é normal.
+            match std::fs::copy(&side, format!("{}{suffix}", copy.display())) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(DiskError::Unreadable(format!("{}: {e}", side.display()))),
+                _ => {}
+            }
         }
         let out = Command::new("sqlite3").args(["-readonly", "-separator", "|"]).arg(&copy).arg(query).output()
             .map_err(|e| if e.kind() == std::io::ErrorKind::NotFound { DiskError::NoSqlite } else {
@@ -206,7 +220,8 @@ fn dump(db: &Path, query: &str) -> Result<Vec<Vec<String>>, DiskError> {
         }
         Ok(String::from_utf8_lossy(&out.stdout).lines().map(|l| l.split('|').map(str::to_owned).collect()).collect())
     })();
-    std::fs::remove_dir_all(&dir).ok();
+    // A cópia tem os cookies (os do Firefox em texto puro): falha ao apagar fica no diário.
+    if let Err(e) = std::fs::remove_dir_all(&dir) { eprintln!("[nav] cookies: copia do banco ficou em {}: {e}", dir.display()); }
     result
 }
 
@@ -240,16 +255,18 @@ mod tests {
         buf[..plain.len()].copy_from_slice(&plain);
         let mut cipher = b"v11".to_vec();
         cipher.extend_from_slice(Enc::new((&key).into(), (&[0x20u8; 16]).into()).encrypt_padded_mut::<Pkcs7>(&mut buf, plain.len()).unwrap());
-        assert_eq!(chrome_value(&cipher, b"k", ".x.com", 24).as_deref(), Some("segredo"));
-        assert!(chrome_value(&cipher, b"k", ".y.com", 24).is_none(), "prefixo de outro host");
-        assert!(chrome_value(&cipher, b"errada", ".x.com", 24).is_none());
+        assert_eq!(chrome_value(&cipher, b"k", ".x.com", Some(24)).as_deref(), Some("segredo"));
+        assert!(chrome_value(&cipher, b"k", ".y.com", Some(24)).is_none(), "prefixo de outro host");
+        assert!(chrome_value(&cipher, b"errada", ".x.com", Some(24)).is_none());
+        // Versão do banco ilegível: o prefixo do host ainda é reconhecido, em vez de tudo virar "chaveiro".
+        assert_eq!(chrome_value(&cipher, b"k", ".x.com", None).as_deref(), Some("segredo"));
 
         let hexed: String = cipher.iter().map(|b| format!("{b:02X}")).collect();
         let row = |c: &str| vec![hex(".x.com"), hex("sid"), String::new(), hex("/"), "13400000000000000".into(), "1".into(), "1".into(), "1".into(), c.to_owned()];
-        let ok = chrome_rows(&[row(&hexed)], 24, &[b"k".to_vec()]).ok().unwrap();
+        let ok = chrome_rows(&[row(&hexed)], Some(24), &[b"k".to_vec()]).ok().unwrap();
         assert_eq!(ok[0]["value"], "segredo");
         assert_eq!(ok[0]["sameSite"], "Lax");
-        assert!(matches!(chrome_rows(&[row(&hexed)], 24, &[b"errada".to_vec()]), Err(DiskError::NoKey)));
+        assert!(matches!(chrome_rows(&[row(&hexed)], Some(24), &[b"errada".to_vec()]), Err(DiskError::NoKey)));
     }
 
     #[test]

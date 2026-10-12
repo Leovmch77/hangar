@@ -709,7 +709,10 @@ impl<P: Page> Controller<P> {
         }
         self.page.call("Emulation.setTouchEmulationEnabled", json!({"enabled": false})).await?;
         // Sem troca o Chromium do Linux se apresenta como "HeadlessChrome", e Google, GitHub e afins recusam o login.
-        let version = self.page.call("Browser.getVersion", json!({})).await.unwrap_or_default();
+        let version = self.page.call("Browser.getVersion", json!({})).await.unwrap_or_else(|e| {
+            eprintln!("[nav] Browser.getVersion falhou ({e}): o User-Agent fica o do Chromium sem janela");
+            Default::default()
+        });
         self.page.call("Emulation.setUserAgentOverride", desktop_agent(&version)).await?;
         match layout {
             Layout::Custom(w, h) => self.page.call("Emulation.setDeviceMetricsOverride", metrics(w, h, 1., false)).await?,
