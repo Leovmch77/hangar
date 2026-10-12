@@ -26,6 +26,9 @@ pub struct Engine {
     /// CDP que segura os ouvintes do motor (queda); os ouvintes morrem com ele.
     #[cfg(target_os = "windows")]
     _watch: Option<Rc<super::cdp::Cdp>>,
+    /// Escondida de verdade por estar parada (ver `sleep`).
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    asleep: Cell<bool>,
 }
 
 /// Clique e tecla de verdade na página vão ao painel, que pausa o agente se ele estiver agindo. Script de
@@ -141,7 +144,7 @@ impl Starter {
                 Err(e) => { eprintln!("[nav] queda da pagina sem ouvinte: {e}"); None }
             }
         };
-        let engine = Engine { view, _context: context, state, events, placed: Cell::new(None), dead, #[cfg(target_os = "windows")] _watch: watch };
+        let engine = Engine { view, _context: context, state, events, placed: Cell::new(None), asleep: Cell::new(false), dead, #[cfg(target_os = "windows")] _watch: watch };
         #[cfg(target_os = "windows")]
         engine.park();
         Ok(engine)
@@ -268,7 +271,22 @@ impl Engine {
             position: LogicalPosition::new(f32::from(bounds.origin.x) as f64, f32::from(bounds.origin.y) as f64).into(),
             size: LogicalSize::new(f32::from(bounds.size.width) as f64, f32::from(bounds.size.height) as f64).into(),
         }));
-        if hidden { self.report(self.view.set_visible(true)); }
+        if hidden { self.report(self.view.set_visible(true)); self.asleep.set(false); }
+    }
+
+    /// Estacionada e sem uso: escondida de verdade, o WebView2 para de compor quadros que ninguém vê.
+    #[cfg(target_os = "windows")]
+    pub fn sleep(&self) {
+        if self.placed.get().is_none() && !self.asleep.replace(true) { self.report(self.view.set_visible(false)); }
+    }
+
+    /// Estaciona de novo, visível, antes de um verbo. Devolve se estava dormindo: aí o WebView2 precisa de um instante
+    /// para voltar a compor antes de receber clique e tecla.
+    #[cfg(target_os = "windows")]
+    pub fn wake(&self) -> bool {
+        if !self.asleep.replace(false) { return false; }
+        self.park();
+        true
     }
 
     /// Escondido de verdade (`SW_HIDE`), o WebView2 para de gerar quadros e o CDP perde clique, tecla e `shot`.

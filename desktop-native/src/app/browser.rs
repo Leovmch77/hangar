@@ -18,6 +18,12 @@ const AGENT_LINGER: std::time::Duration = std::time::Duration::from_secs(2);
 /// Quem pediu a navegação: só a pessoa leva o foco à página e troca o endereço que ela está digitando.
 #[derive(Clone, Copy, PartialEq)]
 pub(super) enum By { User, Agent }
+/// Tempo estacionada e parada até a WebView do Windows deixar de compor.
+#[cfg(target_os = "windows")]
+const SLEEP_AFTER: std::time::Duration = std::time::Duration::from_secs(10);
+/// Tempo para a WebView acordada voltar a compor antes do verbo.
+#[cfg(target_os = "windows")]
+const WAKE_SETTLE: std::time::Duration = std::time::Duration::from_millis(200);
 
 pub(super) struct BrowserPanel {
     /// `servidor::sessão` dona deste navegador: nome do sidecar que o hangar-preview lê.
@@ -35,6 +41,9 @@ pub(super) struct BrowserPanel {
     /// Quem olha a tela remota; os ouvintes de evento do CDP guardam só referência fraca.
     #[cfg(not(target_os = "macos"))]
     viewer: Rc<std::cell::RefCell<Option<crate::browser::relay::Viewer>>>,
+    /// Canal do espectador atual, para a thread do pipe entregar os quadros sem passar pela interface.
+    #[cfg(target_os = "linux")]
+    frames: std::sync::Arc<std::sync::Mutex<Option<async_channel::Sender<crate::browser::relay::ViewerEvent>>>>,
     /// Nasce na primeira navegação, que tem a janela.
     engine: Option<Result<Rc<Engine>, String>>,
     /// Endereço a abrir quando o motor terminar de nascer; `Some` enquanto ele nasce.
@@ -108,6 +117,15 @@ pub(super) struct BrowserPanel {
     agent_finished_at: Option<std::time::Instant>,
     #[cfg(not(target_os = "macos"))]
     _activity: Option<Task<()>>,
+    /// Conta os pedidos de dormir: só o último, sem uso desde então, esconde a WebView.
+    #[cfg(target_os = "windows")]
+    idle: Cell<u64>,
+    /// Último estado do sidecar a gravar (chave, endereço, título).
+    #[cfg(not(target_os = "macos"))]
+    sidecar: std::sync::Arc<std::sync::Mutex<Option<(String, String, String)>>>,
+    /// Escala da janela já passada ao controlador; 0 = nenhuma ainda.
+    #[cfg(target_os = "linux")]
+    scale: Rc<Cell<f32>>,
     _drain: Task<()>,
     _subscriptions: [Subscription; 5],
 }
@@ -136,9 +154,9 @@ impl BrowserPanel {
             cx.on_blur(&focus, window, |this, _, _| if let Some(engine) = this.engine() { engine.focus(false) }),
         ];
         Self { key, #[cfg(not(target_os = "macos"))] controller: None, #[cfg(not(target_os = "macos"))] cdp: None,
-            #[cfg(not(target_os = "macos"))] relay: Default::default(), #[cfg(not(target_os = "macos"))] viewer: Rc::default(), engine: None, starting: None, _start: None, events, address, page: model::PageState::default(), invalid: None, #[cfg(not(target_os = "macos"))] cookies_status: None, #[cfg(not(target_os = "macos"))] cookies_confirmed: false, #[cfg(target_os = "linux")] last_fill: None, focus,
+            #[cfg(not(target_os = "macos"))] relay: Default::default(), #[cfg(not(target_os = "macos"))] viewer: Rc::default(), #[cfg(target_os = "linux")] frames: Default::default(), engine: None, starting: None, _start: None, events, address, page: model::PageState::default(), invalid: None, #[cfg(not(target_os = "macos"))] cookies_status: None, #[cfg(not(target_os = "macos"))] cookies_confirmed: false, #[cfg(target_os = "linux")] last_fill: None, focus,
             origin: Rc::default(), #[cfg(target_os = "linux")] emulated: None, page_scale: Rc::new(Cell::new(1.)), #[cfg(target_os = "windows")] still: None, #[cfg(target_os = "windows")] released: Vec::new(), #[cfg(target_os = "windows")] cover_gen: 0, #[cfg(target_os = "linux")] page_zoom: (1., 0., 0.), shown: false, local_notice: None, #[cfg(target_os = "linux")] cursor: CursorStyle::Arrow, #[cfg(target_os = "linux")] cursor_probe: (false, None), copied: false, dismissed_notice: 0, address_stale: false, #[cfg(not(target_os = "macos"))] agent: None, #[cfg(not(target_os = "macos"))] agent_running: 0,
-            #[cfg(not(target_os = "macos"))] agent_seq: 0, #[cfg(not(target_os = "macos"))] paused: None, #[cfg(target_os = "windows")] agent_finished_at: None, #[cfg(not(target_os = "macos"))] _activity: None, _drain: drain, _subscriptions: subscriptions }
+            #[cfg(not(target_os = "macos"))] agent_seq: 0, #[cfg(not(target_os = "macos"))] paused: None, #[cfg(target_os = "windows")] agent_finished_at: None, #[cfg(not(target_os = "macos"))] _activity: None, #[cfg(target_os = "windows")] idle: Cell::new(0), #[cfg(not(target_os = "macos"))] sidecar: Default::default(), #[cfg(target_os = "linux")] scale: Rc::default(), _drain: drain, _subscriptions: subscriptions }
     }
 
     fn engine(&self) -> Option<&Rc<Engine>> { self.engine.as_ref()?.as_ref().ok() }
@@ -146,6 +164,17 @@ impl BrowserPanel {
     fn receive(&mut self, event: crate::browser::Event, window: &mut Window, cx: &mut Context<Self>) {
         #[cfg(target_os = "windows")]
         if let crate::browser::Event::UserInput = event { return self.user_input(cx); }
+        // Mesma textura com o conteúdo novo: a cópia guardada do painel já a pinta, basta a raiz redesenhar e o quadro
+        // ser confirmado depois do desenho. Textura nova (primeiro quadro, outro tamanho) redesenha o painel.
+        #[cfg(target_os = "linux")]
+        if let crate::browser::Event::Frame = event {
+            let Some(engine) = self.engine().cloned() else { return };
+            let replaced = engine.texture_replaced();
+            let weak = Rc::downgrade(&engine);
+            window.on_next_frame(move |_, _| if let Some(engine) = weak.upgrade() { engine.frame_seen() });
+            if replaced || !crate::motion::tick_root(cx) { cx.notify(); }
+            return;
+        }
         if let crate::browser::Event::State(page) = event {
             // Quem está digitando no endereço não perde o texto para a página que acabou de carregar.
             let url = page.url.clone().unwrap_or_default();
@@ -165,11 +194,24 @@ impl BrowserPanel {
             #[cfg(target_os = "windows")]
             if (loaded || moved) && let Some(engine) = self.engine() { let history = engine.history(); cx.spawn(async move |_, _| history.await).detach(); }
             #[cfg(not(target_os = "macos"))]
-            crate::browser::server::write_sidecar(&self.key, self.page.url.as_deref().unwrap_or(""), &self.page.title);
+            self.save_sidecar(cx);
             #[cfg(target_os = "linux")]
             self.maybe_autofill(cx);
         }
         cx.notify();
+    }
+
+    /// O arquivo que o hangar-preview lê, gravado fora da thread da tela. A trava serializa as escritas e cada uma grava
+    /// o estado mais novo, então o arquivo termina sempre no último.
+    #[cfg(not(target_os = "macos"))]
+    fn save_sidecar(&self, cx: &mut Context<Self>) {
+        let latest = (self.key.clone(), self.page.url.clone().unwrap_or_default(), self.page.title.clone());
+        let slot = self.sidecar.clone();
+        *slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(latest);
+        cx.background_spawn(async move {
+            let current = slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some((key, url, title)) = current.as_ref() { crate::browser::server::write_sidecar(key, url, title); }
+        }).detach();
     }
 
     /// Ao terminar de carregar uma página https cuja origem tem senha salva no Chrome, preenche o login — só com a opção
@@ -273,6 +315,10 @@ impl BrowserPanel {
         self._start = Some(cx.spawn_in(window, async move |this, cx| {
             // Corpo da tarefa, fora de `update`: a App não está emprestada, então o laço de mensagens que o WebView2
             // roda até nascer pode executar outras tarefas da GPUI sem pânico.
+            // No Linux o motor nasce sem travar a interface; o WebView2 nasce numa chamada síncrona.
+            #[cfg(target_os = "linux")]
+            let engine = match starter { Ok(starter) => starter.start(events).await, Err(e) => Err(e) }.map(Rc::new);
+            #[cfg(not(target_os = "linux"))]
             let engine = starter.and_then(|starter| starter.start(events)).map(Rc::new);
             if let Err(e) = &engine { eprintln!("[nav] motor do navegador falhou: {e}"); }
             // Painel fechado no meio: o motor cai junto com o resultado.
@@ -331,6 +377,8 @@ impl BrowserPanel {
         cx.spawn(async move |_, _| setup.start().await).detach();
         self.controller = Some(ctl);
         self.cdp = Some(cdp);
+        #[cfg(target_os = "linux")]
+        self.scale.set(0.);
     }
 
     /// Entrega ao espectador atual os eventos que a tela remota acompanha.
@@ -365,17 +413,56 @@ impl BrowserPanel {
 
     /// Espectador novo da tela remota; o anterior recebe o aviso de que outro aparelho assumiu.
     #[cfg(not(target_os = "macos"))]
-    pub(super) fn watch(&self, viewer: crate::browser::relay::Viewer) -> Result<(), String> {
-        if self.cdp.is_none() { return Err(format!("erro: o navegador da sessao {} ainda esta iniciando, tente de novo em instantes", self.key)); }
+    pub(super) fn watch(&self, viewer: crate::browser::relay::Viewer, reply: futures::channel::oneshot::Sender<Result<(), String>>, cx: &mut Context<Self>) {
+        if self.cdp.is_none() {
+            let _ = reply.send(Err(format!("erro: o navegador da sessao {} ainda esta iniciando, tente de novo em instantes", self.key)));
+            return;
+        }
+        // No Linux o espectador tem sessão própria no alvo, criada no primeiro; sem travar a interface.
         #[cfg(target_os = "linux")]
         if self.relay.borrow().is_none() {
-            let engine = self.engine().ok_or_else(|| format!("erro: a sessao {} nao tem navegador aberto", self.key))?;
-            let session = engine.viewer_session().map_err(|e| format!("erro: tela remota sem sessao no navegador: {e}"))?;
-            self.listen_relay(&session);
-            *self.relay.borrow_mut() = Some(session);
+            let Some(engine) = self.engine() else { let _ = reply.send(Err(format!("erro: a sessao {} nao tem navegador aberto", self.key))); return };
+            let opening = engine.viewer_session();
+            cx.spawn(async move |this, cx| {
+                let opened = opening.await.map_err(|e| format!("erro: tela remota sem sessao no navegador: {e}"));
+                let answer = this.update(cx, |panel, _| opened.map(|session| {
+                    if panel.relay.borrow().is_none() {
+                        panel.listen_relay(&session);
+                        // Os quadros do espectador vão do pipe direto ao socket; o resto passa pela interface.
+                        let (frames, ack) = (panel.frames.clone(), session.browser().acker(session.id()));
+                        session.browser().sink(session.id(), Box::new(move |params| {
+                            let events = frames.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+                            let unsent = match events {
+                                Some(events) => crate::browser::relay::deliver(&events, "Page.screencastFrame", &params),
+                                None => params["sessionId"].as_i64(),
+                            };
+                            if let Some(id) = unsent { ack(id.into()); }
+                        }));
+                        *panel.relay.borrow_mut() = Some(session);
+                    }
+                    panel.take_viewer(viewer);
+                })).unwrap_or_else(|_| Err("erro: o navegador fechou".into()));
+                let _ = reply.send(answer);
+            }).detach();
+            return;
         }
+        let _ = cx;
+        self.take_viewer(viewer);
+        let _ = reply.send(Ok(()));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn take_viewer(&self, viewer: crate::browser::relay::Viewer) {
+        self.set_frames(Some(viewer.events.clone()));
         if let Some(old) = self.viewer.borrow_mut().replace(viewer) { old.detach(crate::browser::relay::REPLACED); }
-        Ok(())
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn set_frames(&self, events: Option<async_channel::Sender<crate::browser::relay::ViewerEvent>>) {
+        #[cfg(target_os = "linux")]
+        { *self.frames.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = events; }
+        #[cfg(not(target_os = "linux"))]
+        let _ = events;
     }
 
     /// O espectador `id` saiu: o screencast para, a menos que outro já o tenha substituído.
@@ -384,6 +471,7 @@ impl BrowserPanel {
         let mut viewer = self.viewer.borrow_mut();
         if viewer.as_ref().is_none_or(|v| v.id != id) { return; }
         *viewer = None;
+        self.set_frames(None);
         // No Linux a sessão do espectador cai inteira, e o screencast dela junto.
         #[cfg(target_os = "linux")]
         self.relay.borrow_mut().take();
@@ -394,6 +482,7 @@ impl BrowserPanel {
     /// Navegador fechando: quem olha recebe o fim antes de o painel cair.
     #[cfg(not(target_os = "macos"))]
     pub(super) fn end_viewer(&self) {
+        self.set_frames(None);
         if let Some(viewer) = self.viewer.borrow_mut().take() { viewer.detach("target_closed"); }
     }
 
@@ -706,6 +795,8 @@ impl BrowserPanel {
         let capturing = false;
         #[cfg(not(target_os = "macos"))]
         if !capturing && let Some(ctl) = self.controller.clone() { cx.spawn(async move |_, _| ctl.set_hidden(!shown).await).detach(); }
+        #[cfg(target_os = "windows")]
+        if !shown { self.schedule_sleep(cx); }
         #[cfg(target_os = "macos")]
         let _ = cx;
         true
@@ -759,6 +850,33 @@ impl BrowserPanel {
                 if this.cursor != style { this.cursor = style; cx.notify(); }
                 // O mouse andou durante a pergunta: pergunta de novo pelo ponto novo.
                 if this.cursor_probe.1 != Some(p) && let Some(at) = this.cursor_probe.1 { this.probe_again(at, cx); }
+            });
+        }).detach();
+    }
+
+    /// Alguém vai usar a página (verbo do agente, espectador): acorda a WebView estacionada e recomeça a contagem.
+    /// Devolve se ela estava dormindo.
+    #[cfg(target_os = "windows")]
+    pub(super) fn touch(&self, cx: &mut Context<Self>) -> bool {
+        let woke = self.engine().is_some_and(|engine| engine.wake());
+        self.schedule_sleep(cx);
+        woke
+    }
+
+    /// Escondida, sem verbo do agente e sem espectador por `SLEEP_AFTER`, a WebView para de compor.
+    #[cfg(target_os = "windows")]
+    fn schedule_sleep(&self, cx: &mut Context<Self>) {
+        if self.shown { return; }
+        let turn = self.idle.get() + 1;
+        self.idle.set(turn);
+        let timer = cx.background_executor().timer(SLEEP_AFTER);
+        cx.spawn(async move |this, cx| {
+            timer.await;
+            let _ = this.update(cx, |panel, cx| {
+                if panel.idle.get() != turn || panel.shown { return; }
+                // Um `wait` longo segura a vez do controlador: a página está em uso, tenta de novo depois.
+                if panel.controller.as_ref().is_some_and(|c| c.busy()) || panel.viewer.borrow().is_some() { return panel.schedule_sleep(cx); }
+                if let Some(engine) = panel.engine() { engine.sleep(); }
             });
         }).detach();
     }
@@ -817,13 +935,15 @@ impl BrowserPanel {
         let emulated = self.emulated;
         #[cfg(not(target_os = "linux"))]
         let emulated: Option<(f32, f32)> = None;
+        #[cfg(target_os = "linux")]
+        let (ctl, scale) = (self.controller.clone(), self.scale.clone());
         let label = if self.page.title.trim().is_empty() { tr("browser") } else { self.page.title.clone() };
         #[cfg(target_os = "linux")]
         let page = page.cursor(self.cursor);
         #[cfg(target_os = "windows")]
         let page = page.when_some(self.still.clone().filter(|_| !self.shown), |el, still| el.child(img(still).absolute().inset_0().size_full().object_fit(ObjectFit::Contain)));
         page.bg(theme::background()).aria_label(label)
-            .when(self.shown, |el| el.child(canvas(|_, _, _| {}, move |bounds, _, window, _| {
+            .when(self.shown, |el| el.child(canvas(|_, _, _| {}, move |bounds, _, window, _cx| {
                 // Tela emulada: encaixada no painel, centrada no topo, e o ponteiro convertido na mesma escala.
                 let placed = match emulated {
                     Some((w, h)) if w > 0. && h > 0. => {
@@ -836,6 +956,12 @@ impl BrowserPanel {
                 };
                 origin.set(placed.origin);
                 engine.place(placed, window);
+                // A página desenha na escala desta janela (o Chromium nasce em 1, às vezes com ela escondida).
+                #[cfg(target_os = "linux")]
+                if scale.replace(window.scale_factor()) != window.scale_factor() && let Some(ctl) = ctl.clone() {
+                    let wanted = window.scale_factor();
+                    window.spawn(_cx, async move |_| ctl.set_scale(wanted).await).detach();
+                }
             }).absolute().inset_0()))
             // Só no Linux a GPUI desenha por cima da página; no Windows ela é janela própria e cobriria o contorno.
             .when(cfg!(target_os = "linux") && self.agent_acting(), |el| el.child(div().absolute().inset_0().border_2().border_color(theme::accent())))
@@ -1025,6 +1151,8 @@ impl Hangar {
     /// Linha Navegador do menu do painel: abre o navegador na primeira vez e leva à aba dele.
     pub(super) fn open_browser(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(key) = self.browser_key() else { return };
+        #[cfg(target_os = "linux")]
+        { self.side.warm = Engine::warm(window, cx).inspect_err(|e| eprintln!("[nav] Chromium nao subiu antes do endereco: {e}")).ok(); }
         let browser = self.browser_for(key, window, cx);
         self.show_browser_tab(window, cx);
         browser.update(cx, |panel, cx| panel.focus_address(window, cx));
@@ -1052,6 +1180,8 @@ impl Hangar {
     pub(super) fn close_browser(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let showing = self.side_tab() == SideTab::Browser;
         if let Some(key) = self.side_key() { self.side.browser_open.remove(&key); }
+        #[cfg(target_os = "linux")]
+        { self.side.warm = None; }
         for browser in self.side.browsers.values().cloned().collect::<Vec<_>>() { browser.update(cx, |panel, cx| { panel.set_shown(false, false, cx); }); }
         if showing { self.choose_side_tab(SideTab::Context, window, cx); } else { cx.notify(); }
     }
@@ -1145,7 +1275,14 @@ impl Hangar {
                 return cx.spawn(async move |_, _| { let _ = reply.send(call.await); }).detach();
             }
             Request::Watch { key, viewer, reply } => {
-                let _ = reply.send(match self.side.browsers.get(&key) { Some(b) => b.read(cx).watch(viewer), None => Err(missing(&key)) });
+                match self.side.browsers.get(&key).cloned() {
+                    Some(b) => b.update(cx, |panel, cx| {
+                        #[cfg(target_os = "windows")]
+                        panel.touch(cx);
+                        panel.watch(viewer, reply, cx)
+                    }),
+                    None => { let _ = reply.send(Err(missing(&key))); }
+                }
                 return;
             }
             Request::Unwatch { key, id } => {
@@ -1159,7 +1296,9 @@ impl Hangar {
             if closed { crate::browser::server::remove_sidecar(&key); self.side.browser_open.remove(&key); cx.notify(); }
             return answer(reply, if closed { "ok: close".into() } else { format!("erro: a sessao {key} nao tem navegador aberto") });
         }
-        let Some(browser) = self.side.browsers.get(&key) else { return answer(reply, missing(&key)) };
+        let Some(browser) = self.side.browsers.get(&key).cloned() else { return answer(reply, missing(&key)) };
+        #[cfg(target_os = "windows")]
+        let woke = browser.update(cx, |panel, cx| panel.touch(cx));
         let panel = browser.read(cx);
         // Página que caiu não responde: sem isto cada verbo esperava o prazo inteiro do controlador.
         if panel.engine().is_some_and(|e| !e.alive()) {
@@ -1174,7 +1313,11 @@ impl Hangar {
         };
         let browser = browser.downgrade();
         let _ = browser.update(cx, |panel, _| panel.agent_started());
+        #[cfg(target_os = "windows")]
+        let settle = woke.then(|| cx.background_executor().timer(WAKE_SETTLE));
         cx.spawn(async move |_, cx| {
+            #[cfg(target_os = "windows")]
+            if let Some(settle) = settle { settle.await; }
             let _ = reply.send(ctl.run(&verb, &args).await);
             let _ = browser.update(cx, |panel, cx| panel.agent_finished(cx));
         }).detach();

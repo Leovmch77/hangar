@@ -162,6 +162,9 @@ pub(super) struct Side {
     pub(super) browser_open: HashSet<String>,
     /// Aba escolhida por sessão (chave de `browser_key`); sessão sem escolha usa a última preferência gravada.
     pub(super) tabs: HashMap<String, SideTab>,
+    /// Chromium subindo desde o clique em Navegador, para a página não esperar o processo depois do endereço digitado.
+    #[cfg(target_os = "linux")]
+    pub(super) warm: Option<crate::browser::Warm>,
 }
 
 impl Default for Side {
@@ -169,6 +172,7 @@ impl Default for Side {
         let saved = appearance::get();
         Self { open: true, menu: false, width: saved.side_width, browser_width: saved.side_browser_width, drag: None, shortcuts: None, project: ProjectShortcuts::default(), cost: None, cost_task: None, cost_gen: 0, orq: Default::default(),
             files: None, diff: None, reloading: HashSet::new(), run_code_pending: HashSet::new(), git: None, run: None, browsers: HashMap::new(), browser_open: HashSet::new(), tabs: HashMap::new(),
+            #[cfg(target_os = "linux")] warm: None,
             shortcut_terms: HashMap::new(), shortcut_focus: HashMap::new(), shortcut_running: HashMap::new(), shortcut_recheck: HashMap::new() }
     }
 }

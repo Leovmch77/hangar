@@ -5,7 +5,7 @@ use std::{cell::{Cell, RefCell}, collections::{HashMap, HashSet, VecDeque}, futu
 use futures::{future::{Either, select}, lock::Mutex};
 use serde_json::{Value, json};
 
-use super::preview_fmt::{Layout, compact_ax, key_event, parse_layout};
+use super::preview_fmt::{Layout, SNAPSHOT_MAX, capped, compact_ax, key_event, parse_layout};
 
 pub trait Page {
     fn call(&self, method: &str, params: Value) -> impl Future<Output = Result<Value, String>>;
@@ -17,11 +17,13 @@ pub enum Reply { Text(String), Png(Vec<u8>) }
 /// O que o agente está fazendo agora, para a faixa do painel. `target` é o nome do alvo na árvore da página ou a tecla.
 pub struct Activity { pub verb: String, pub target: Option<String> }
 
-pub const EVENTS: [&str; 6] = ["Runtime.consoleAPICalled", "Log.entryAdded", "Network.requestWillBeSent",
-    "Network.responseReceived", "Network.loadingFailed", "Page.frameNavigated"];
+pub const EVENTS: [&str; 12] = ["Runtime.consoleAPICalled", "Runtime.exceptionThrown", "Log.entryAdded", "Network.requestWillBeSent",
+    "Network.responseReceived", "Network.loadingFinished", "Network.loadingFailed", "Page.frameNavigated", "Page.navigatedWithinDocument",
+    "Page.javascriptDialogOpening", "Page.javascriptDialogClosed", "Page.downloadWillBegin"];
 
 const LOG_MAX: usize = 200;
 const WAIT_MS: u64 = 15_000;
+const WAIT_MAX_MS: u64 = 40_000;
 const SHOT_MS: u64 = 15_000;
 const POLL_MS: u64 = 120;
 /// Escondida, a página fica sem tamanho; um viewport fixo a mantém desenhando para o `shot`.
@@ -33,7 +35,7 @@ const FRAME: &str = "new Promise(r=>{requestAnimationFrame(()=>requestAnimationF
 const FOCUS: &str = "(()=>{const a=document.activeElement;if(!a||a===document.body)return 'nada';const t=a.tagName.toLowerCase();const ok=a.isContentEditable||t==='textarea'||(t==='input'&&!/^(button|submit|reset|checkbox|radio|file|image|range|color)$/i.test(a.type||''));return ok?'':t+(a.type?'['+a.type+']':'')})()";
 const PROBE_READ: &str = "(typeof window.__hangarSonda===\"undefined\"?2:window.__hangarSonda)";
 /// Verbos que mudam a página: pausado, só estes são recusados; ler continua livre.
-const ACTING: [&str; 8] = ["click", "fill", "type", "press", "hover", "eval", "layout", "tema"];
+const ACTING: [&str; 11] = ["click", "fill", "type", "press", "hover", "eval", "layout", "tema", "goto", "back", "reload"];
 pub const PAUSED: &str = "erro: o usuario pausou o navegador; espere ele clicar em Retomar no painel e tente de novo";
 /// Tempo do realce do alvo antes da ação: o bastante para o olho achar, pouco para o agente sentir.
 const MARK_MS: u64 = 350;
@@ -42,12 +44,21 @@ struct State {
     refs: HashMap<String, i64>,
     console: VecDeque<String>,
     network: VecDeque<String>,
-    inflight: u32,
+    /// Requisições sem resposta, por id: redirecionamento repete o id e não conta duas vezes.
+    inflight: HashSet<String>,
+    /// Método e endereço por id, até a requisição terminar: a falha (`loadingFailed`) não traz o endereço.
+    requests: HashMap<String, (String, String)>,
+    /// Diálogo aberto agora (tipo e texto), lido quando ele fecha.
+    dialog: Option<(String, String)>,
     last_network: Instant,
     theme: &'static str,
     layout: Layout,
     hidden: bool,
+    /// Escala da janela onde o painel está; `None` onde o motor já desenha na escala certa (WebView2).
+    scale: Option<f32>,
     navigated: bool,
+    /// Conta navegações do quadro principal (documento novo ou só o endereço): `goto`/`back`/`reload` esperam mudar.
+    navs: u64,
     enabled: HashSet<&'static str>,
 }
 
@@ -71,9 +82,13 @@ fn push(list: &mut VecDeque<String>, line: String) {
 impl<P: Page> Controller<P> {
     pub fn new(page: P, hidden: bool) -> Self {
         Self { page, turn: Mutex::new(()), wanted_hidden: Cell::new(hidden), paused: Cell::new(false), on_activity: RefCell::new(None), on_layout: RefCell::new(None), state: RefCell::new(State { refs: HashMap::new(), console: VecDeque::new(),
-            network: VecDeque::new(), inflight: 0, last_network: Instant::now(), theme: "sistema", layout: Layout::Desktop,
-            hidden: false, navigated: false, enabled: HashSet::new() }) }
+            network: VecDeque::new(), inflight: HashSet::new(), requests: HashMap::new(), dialog: None, last_network: Instant::now(), theme: "sistema", layout: Layout::Desktop,
+            hidden: false, scale: None, navigated: false, navs: 0, enabled: HashSet::new() }) }
     }
+
+    /// Algum verbo segurando a vez agora (um `wait` longo, por exemplo).
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    pub fn busy(&self) -> bool { self.turn.try_lock().is_none() }
 
     /// Aplica o pedido mais novo, não o do nascimento: o painel pode aparecer enquanto os domínios ligam.
     pub async fn start(&self) {
@@ -112,27 +127,66 @@ impl<P: Page> Controller<P> {
         if let Some(f) = self.on_activity.borrow().as_ref() { f(Activity { verb: verb.into(), target }); }
     }
 
+    /// O painel apareceu numa janela com esta escala: a página desktop passa a desenhar nela, sem mexer no tamanho.
+    pub async fn set_scale(&self, scale: f32) {
+        let _turn = self.turn.lock().await;
+        let (layout, hidden) = { let mut s = self.state.borrow_mut(); s.scale = Some(scale); (s.layout, s.hidden) };
+        if layout == Layout::Desktop && !hidden && let Err(e) = self.apply_layout(layout).await { eprintln!("[nav] escala nao aplicada: {e}"); }
+    }
+
     pub fn on_event(&self, method: &str, p: &Value) {
         let mut s = self.state.borrow_mut();
         match method {
             "Runtime.consoleAPICalled" => {
-                let args: Vec<String> = p["args"].as_array().into_iter().flatten().map(|a| match a.get("value") {
-                    None => a["description"].as_str().or(a["type"].as_str()).unwrap_or("").to_owned(),
-                    Some(Value::String(t)) => t.clone(),
-                    Some(v) => v.to_string(),
-                }).collect();
+                let args: Vec<String> = p["args"].as_array().into_iter().flatten().map(remote_text).collect();
                 push(&mut s.console, format!("{}: {}", p["type"].as_str().unwrap_or("log"), args.join(" ")));
             }
+            "Runtime.exceptionThrown" => push(&mut s.console, exception_line(&p["exceptionDetails"])),
             "Log.entryAdded" => push(&mut s.console, format!("{}: {}", p["entry"]["level"].as_str().unwrap_or(""), p["entry"]["text"].as_str().unwrap_or(""))),
-            "Network.requestWillBeSent" => s.inflight += 1,
-            "Network.responseReceived" => {
-                s.inflight = s.inflight.saturating_sub(1);
-                s.last_network = Instant::now();
-                push(&mut s.network, format!("{} {}", p["response"]["status"], p["response"]["url"].as_str().unwrap_or("")));
+            // Extensão do perfil não é a página: fica fora do registro e da espera do `--idle`.
+            "Network.requestWillBeSent" if p["request"]["url"].as_str().is_some_and(|u| u.starts_with("chrome-extension:")) => {}
+            "Network.requestWillBeSent" => {
+                let id = p["requestId"].as_str().unwrap_or("").to_owned();
+                // Teto contra requisição que nunca termina (stream, socket): o mapa só serve à linha de falha.
+                if s.requests.len() > 500 { s.requests.clear(); }
+                s.requests.insert(id.clone(), (p["request"]["method"].as_str().unwrap_or("GET").to_owned(), p["request"]["url"].as_str().unwrap_or("").to_owned()));
+                s.inflight.insert(id);
             }
-            "Network.loadingFailed" => s.inflight = s.inflight.saturating_sub(1),
+            "Network.responseReceived" if p["response"]["url"].as_str().is_some_and(|u| u.starts_with("chrome-extension:")) => {}
+            "Network.responseReceived" => {
+                // A resposta encerra a espera do `--idle` mesmo em stream (SSE), que nunca termina de carregar.
+                if let Some(id) = p["requestId"].as_str() { s.inflight.remove(id); }
+                s.last_network = Instant::now();
+                let method = p["requestId"].as_str().and_then(|id| s.requests.get(id)).map_or("GET".to_owned(), |(m, _)| m.clone());
+                push(&mut s.network, format!("{method} {} {}", p["response"]["status"], p["response"]["url"].as_str().unwrap_or("")));
+            }
+            "Network.loadingFinished" => { if let Some(id) = p["requestId"].as_str() { s.requests.remove(id); } }
+            "Network.loadingFailed" => {
+                let id = p["requestId"].as_str().unwrap_or("");
+                s.inflight.remove(id);
+                s.last_network = Instant::now();
+                let (method, url) = s.requests.remove(id).unwrap_or_default();
+                let reason = p["blockedReason"].as_str().map(|r| format!("bloqueada: {r}"))
+                    .unwrap_or_else(|| p["errorText"].as_str().unwrap_or("").to_owned());
+                let canceled = if p["canceled"] == true { " (cancelada)" } else { "" };
+                push(&mut s.network, format!("{method} FALHOU {url}: {reason}{canceled}"));
+            }
+            "Page.javascriptDialogOpening" => {
+                let message: String = p["message"].as_str().unwrap_or("").chars().take(200).collect();
+                s.dialog = Some((p["type"].as_str().unwrap_or("dialog").to_owned(), message));
+            }
+            "Page.javascriptDialogClosed" => {
+                let (kind, message) = s.dialog.take().unwrap_or_default();
+                let outcome = if p["result"] == true { "aceito" } else { "recusado" };
+                push(&mut s.console, format!("dialogo {kind} {outcome}: {message}"));
+            }
+            "Page.downloadWillBegin" => {
+                let outcome = if cfg!(target_os = "linux") { "recusado (o navegador embutido nao baixa arquivos)" } else { "pedido" };
+                push(&mut s.console, format!("download {outcome}: {} {}", p["suggestedFilename"].as_str().unwrap_or(""), p["url"].as_str().unwrap_or("")));
+            }
             // Só o quadro principal: iframe navegando não invalida as refs da página.
-            "Page.frameNavigated" if p["frame"]["parentId"].is_null() => s.navigated = true,
+            "Page.frameNavigated" if p["frame"]["parentId"].is_null() => { s.navigated = true; s.navs += 1; }
+            "Page.navigatedWithinDocument" => s.navs += 1,
             _ => {}
         }
     }
@@ -146,7 +200,7 @@ impl<P: Page> Controller<P> {
         self.enable_base().await;
         self.after_navigation().await;
         let result = match verb {
-            "snapshot" => self.snapshot().await.map(Reply::Text),
+            "snapshot" => self.snapshot_verb(args).await.map(Reply::Text),
             "click" => self.click(arg(0)).await.map(Reply::Text),
             "fill" => self.fill(arg(0), arg(1)).await.map(Reply::Text),
             "type" => self.type_text(arg(0)).await.map(Reply::Text),
@@ -162,6 +216,9 @@ impl<P: Page> Controller<P> {
             "console" => Ok(Reply::Text(self.console(arg(0) == "--limpar"))),
             "network" => self.network().await.map(Reply::Text),
             "shot" => self.shot().await,
+            "goto" => self.goto(arg(0)).await.map(Reply::Text),
+            "back" => self.back().await.map(Reply::Text),
+            "reload" => self.reload().await.map(Reply::Text),
             "tab-list" | "tab-new" | "tab-switch" | "tab-close" => Ok(Reply::Text("erro: o app nativo ainda nao tem abas: e um navegador por sessao".into())),
             _ => Ok(Reply::Text(format!("erro: verbo desconhecido: {verb}"))),
         };
@@ -174,7 +231,7 @@ impl<P: Page> Controller<P> {
             let mut s = self.state.borrow_mut();
             s.refs.clear();
             // Requisição cancelada pela navegação nem sempre vira loadingFailed.
-            s.inflight = 0;
+            s.inflight.clear();
         }
         // O tema emulado se perde ao navegar; o tamanho não.
         if self.state.borrow().theme != "sistema" && let Err(e) = self.apply_theme().await { eprintln!("[nav] tema nao reaplicado: {e}"); }
@@ -202,12 +259,28 @@ impl<P: Page> Controller<P> {
         Ok(r["result"]["value"].clone())
     }
 
-    async fn snapshot(&self) -> Result<String, String> {
+    /// Árvore inteira (`wait @eN` usa só as refs).
+    async fn snapshot(&self) -> Result<Vec<String>, String> { self.tree(false).await }
+
+    async fn tree(&self, refs_only: bool) -> Result<Vec<String>, String> {
         self.enable("Accessibility").await?;
         let tree = self.page.call("Accessibility.getFullAXTree", json!({})).await?;
-        let out = compact_ax(tree["nodes"].as_array().map_or(&[][..], Vec::as_slice));
+        let out = compact_ax(tree["nodes"].as_array().map_or(&[][..], Vec::as_slice), refs_only);
         self.state.borrow_mut().refs = out.refs;
-        Ok(out.lines.join("\n"))
+        Ok(out.lines)
+    }
+
+    /// `snapshot [--refs] [--max <caracteres>]`.
+    async fn snapshot_verb(&self, args: &[String]) -> Result<String, String> {
+        let refs_only = args.iter().any(|a| a == "--refs");
+        let max = match args.iter().position(|a| a == "--max") {
+            None => SNAPSHOT_MAX,
+            Some(i) => match args.get(i + 1).and_then(|v| v.parse::<usize>().ok()).filter(|m| *m >= 1000) {
+                Some(m) => m,
+                None => return Ok("erro: snapshot --max precisa de um numero de caracteres (1000 ou mais)".into()),
+            },
+        };
+        Ok(capped(&self.tree(refs_only).await?, max))
     }
 
     /// Ref velha e ref inexistente dão no mesmo lugar: o nó morre em qualquer re-render, e a saída é o mesmo snapshot novo.
@@ -368,46 +441,99 @@ impl<P: Page> Controller<P> {
     }
 
     async fn wait(&self, args: &[String]) -> Result<String, String> {
+        let (args, limit) = match split_timeout(args) { Ok(v) => v, Err(e) => return Ok(e) };
         let target = args.first().map(String::as_str).unwrap_or("");
         let joined = args.join(" ");
         if let Some(ms) = target.bytes().all(|b| b.is_ascii_digit()).then(|| target.parse::<u64>().ok()).flatten() {
             self.page.sleep(ms).await;
             return Ok(format!("ok: wait {target}ms"));
         }
-        let needle = args.get(1).map(String::as_str).unwrap_or("");
-        // Alvo torto esperaria 15 s para dar um erro que já se sabe agora.
+        // O resto da linha é o trecho: `wait --text create account` sem aspas também vale.
+        let needle = args.get(1..).map(|rest| rest.join(" ")).unwrap_or_default();
+        // Alvo torto esperaria o prazo inteiro para dar um erro que já se sabe agora.
         let valid = match target {
             "--url" | "--text" => !needle.is_empty(),
             "--idle" => true,
             t => t.len() > 2 && t.starts_with("@e") && t[2..].bytes().all(|b| b.is_ascii_digit()),
         };
-        if !valid { return Ok(format!("erro: wait: alvo invalido: {joined} (use @eN, --url texto, --text texto, --idle ou ms)")); }
+        if !valid { return Ok(format!("erro: wait: alvo invalido: {joined} (use @eN, --url texto, --text texto, --idle ou ms; teto com --timeout ms)")); }
         if target == "--idle" { self.enable("Network").await?; }
+        // O que a pessoa lê como texto inclui o rótulo de botão `<input>`, que o innerText não traz.
+        let text_js = format!("(()=>{{const n={};const t=document.body.innerText+'\\n'+[...document.querySelectorAll('input[type=submit],input[type=button],input[type=reset]')].map(e=>e.value).join('\\n');return t.toLowerCase().includes(n.toLowerCase())}})()",
+            serde_json::to_string(&needle).unwrap_or_default());
         // Conta o tempo das checagens além das pausas: página presa num laço de JS não responde ao
         // evaluate, e sem teto o verbo seguraria a vez de todos os outros.
         let mut waited = 0;
-        while waited < WAIT_MS {
+        while waited < limit {
             let check = async {
                 Ok::<_, String>(match target {
                     t if t.starts_with('@') => { self.snapshot().await?; self.state.borrow().refs.contains_key(t) }
-                    "--url" => self.value("location.href").await?.as_str().is_some_and(|u| u.contains(needle)),
-                    "--text" => self.value("document.body.innerText").await?.as_str().is_some_and(|u| u.contains(needle)),
+                    "--url" => self.value("location.href").await?.as_str().is_some_and(|u| u.contains(needle.as_str())),
+                    "--text" => self.value(&text_js).await?.as_bool() == Some(true),
                     // Rede parada (contador zero e 500 ms sem resposta) e documento completo.
                     "--idle" => {
-                        let quiet = { let s = self.state.borrow(); s.inflight == 0 && s.last_network.elapsed().as_millis() > 500 };
+                        let quiet = { let s = self.state.borrow(); s.inflight.is_empty() && s.last_network.elapsed().as_millis() > 500 };
                         quiet && self.value("document.readyState").await?.as_str() == Some("complete")
                     }
                     _ => false,
                 })
             };
             let t0 = Instant::now();
-            let Some(hit) = self.within(WAIT_MS.saturating_sub(waited), check).await else { break };
+            let Some(hit) = self.within(limit.saturating_sub(waited), check).await else { break };
             if hit? { return Ok(format!("ok: wait {joined}")); }
             let spent = t0.elapsed().as_millis() as u64;
             self.page.sleep(POLL_MS).await;
             waited += POLL_MS + spent;
         }
-        Ok(format!("erro: wait {joined} nao aconteceu em {WAIT_MS}ms"))
+        Ok(format!("erro: wait {joined} nao aconteceu em {limit}ms"))
+    }
+
+    /// Navegação pedida por verbo: as refs antigas morrem já, e a resposta só sai com o documento novo carregado.
+    async fn settle(&self, verb: &str, before: u64) -> Result<String, String> {
+        self.state.borrow_mut().refs.clear();
+        let mut waited = 0;
+        while waited < WAIT_MS {
+            let t0 = Instant::now();
+            // A navegação conta antes de perguntar: lido depois, o "complete" ainda podia ser do documento antigo.
+            let moved = self.state.borrow().navs != before;
+            // Contexto destruído no meio = o documento ainda está trocando; tenta de novo.
+            let ready = self.within(WAIT_MS - waited, self.value("document.readyState")).await;
+            if moved && let Some(Ok(v)) = &ready && v.as_str() == Some("complete") {
+                let url = self.value("location.href").await?;
+                return Ok(format!("ok: {verb} {}", url.as_str().unwrap_or("")));
+            }
+            if ready.is_none() { break; }
+            self.page.sleep(POLL_MS).await;
+            waited += POLL_MS + t0.elapsed().as_millis() as u64;
+        }
+        Ok(format!("erro: {verb}: a pagina nao terminou de carregar em {WAIT_MS}ms"))
+    }
+
+    async fn goto(&self, url: &str) -> Result<String, String> {
+        let url = url.trim();
+        if url.is_empty() { return Ok("erro: goto precisa de uma url".into()); }
+        let url = if url.contains("://") { url.to_owned() } else { format!("http://{url}") };
+        let before = self.state.borrow().navs;
+        let r = self.page.call("Page.navigate", json!({"url": url})).await?;
+        if let Some(e) = r["errorText"].as_str().filter(|e| !e.is_empty()) { return Ok(format!("erro: goto {url}: {e}")); }
+        self.settle("goto", before).await
+    }
+
+    async fn back(&self) -> Result<String, String> {
+        let h = self.page.call("Page.getNavigationHistory", json!({})).await?;
+        let index = h["currentIndex"].as_i64().unwrap_or(0);
+        let Some(entry) = usize::try_from(index - 1).ok().and_then(|i| h["entries"].get(i)) else {
+            return Ok("erro: back: nao ha pagina anterior".into());
+        };
+        let before = self.state.borrow().navs;
+        self.page.call("Page.navigateToHistoryEntry", json!({"entryId": entry["id"]})).await?;
+        self.settle("back", before).await
+    }
+
+    async fn reload(&self) -> Result<String, String> {
+        let before = self.state.borrow().navs;
+        self.page.call("Page.reload", json!({})).await?;
+        self.settle("reload", before).await
     }
 
     async fn apply_theme(&self) -> Result<(), String> {
@@ -424,9 +550,9 @@ impl<P: Page> Controller<P> {
     }
 
     async fn apply_layout(&self, layout: Layout) -> Result<(), String> {
-        let metrics = |w: u32, h: u32, scale: u32, mobile: bool| json!({"width": w, "height": h, "deviceScaleFactor": scale, "mobile": mobile});
+        let metrics = |w: u32, h: u32, scale: f32, mobile: bool| json!({"width": w, "height": h, "deviceScaleFactor": scale, "mobile": mobile});
         if layout == Layout::Mobile {
-            self.page.call("Emulation.setDeviceMetricsOverride", metrics(390, 844, 2, true)).await?;
+            self.page.call("Emulation.setDeviceMetricsOverride", metrics(390, 844, 2., true)).await?;
             self.page.call("Emulation.setTouchEmulationEnabled", json!({"enabled": true, "maxTouchPoints": 5})).await?;
             self.page.call("Emulation.setUserAgentOverride", json!({"userAgent": MOBILE_UA})).await?;
             return Ok(());
@@ -434,9 +560,15 @@ impl<P: Page> Controller<P> {
         self.page.call("Emulation.setTouchEmulationEnabled", json!({"enabled": false})).await?;
         self.page.call("Emulation.setUserAgentOverride", json!({"userAgent": ""})).await?;
         match layout {
-            Layout::Custom(w, h) => self.page.call("Emulation.setDeviceMetricsOverride", metrics(w, h, 1, false)).await?,
-            _ if self.state.borrow().hidden => self.page.call("Emulation.setDeviceMetricsOverride", metrics(HIDDEN_VIEWPORT.0, HIDDEN_VIEWPORT.1, 1, false)).await?,
-            _ => self.page.call("Emulation.clearDeviceMetricsOverride", json!({})).await?,
+            Layout::Custom(w, h) => self.page.call("Emulation.setDeviceMetricsOverride", metrics(w, h, 1., false)).await?,
+            _ if self.state.borrow().hidden => self.page.call("Emulation.setDeviceMetricsOverride", metrics(HIDDEN_VIEWPORT.0, HIDDEN_VIEWPORT.1, 1., false)).await?,
+            _ => {
+                self.page.call("Emulation.clearDeviceMetricsOverride", json!({})).await?;
+                // Largura e altura 0 = o tamanho segue a janela; só a escala é emulada. Depois de limpar: sem isso o
+                // 0×0 mantém o tamanho da emulação anterior (a da página escondida).
+                let scale = self.state.borrow().scale;
+                match scale { Some(scale) => self.page.call("Emulation.setDeviceMetricsOverride", metrics(0, 0, scale, false)).await?, None => json!({}) }
+            }
         };
         Ok(())
     }
@@ -482,6 +614,50 @@ impl<P: Page> Controller<P> {
         if png.is_empty() { return Ok(Reply::Text("erro: o navegador desta sessao nao produziu quadro — text/snapshot/click funcionam".into())); }
         Ok(Reply::Png(png))
     }
+}
+
+/// Argumento do console como o DevTools mostra: texto cru, número, e objeto pela prévia (`{a: 1, b: "x"}`).
+fn remote_text(a: &Value) -> String {
+    match a.get("value") {
+        Some(Value::String(t)) => return t.clone(),
+        Some(v) => return v.to_string(),
+        None => {}
+    }
+    let preview = &a["preview"];
+    let Some(props) = preview["properties"].as_array() else {
+        return a["description"].as_str().or(a["type"].as_str()).unwrap_or("").to_owned();
+    };
+    let value = |p: &Value| {
+        let v = p["value"].as_str().unwrap_or("");
+        if p["type"] == "string" { format!("{v:?}") } else { v.to_owned() }
+    };
+    let array = preview["subtype"] == "array";
+    let mut items: Vec<String> = props.iter().map(|p| if array { value(p) } else { format!("{}: {}", p["name"].as_str().unwrap_or(""), value(p)) }).collect();
+    if preview["overflow"] == true { items.push("…".into()); }
+    let body = items.join(", ");
+    if array { format!("[{body}]") } else {
+        let class = a["className"].as_str().filter(|c| *c != "Object").map(|c| format!("{c} ")).unwrap_or_default();
+        format!("{class}{{{body}}}")
+    }
+}
+
+/// Erro de JS que ninguém tratou: mensagem e onde aconteceu.
+fn exception_line(d: &Value) -> String {
+    let text = d["exception"]["description"].as_str().and_then(|t| t.lines().next())
+        .or(d["exception"]["value"].as_str()).or(d["text"].as_str()).unwrap_or("");
+    let at = d["url"].as_str().filter(|u| !u.is_empty())
+        .map(|u| format!(" ({u}:{}:{})", d["lineNumber"].as_i64().unwrap_or(0) + 1, d["columnNumber"].as_i64().unwrap_or(0) + 1))
+        .unwrap_or_default();
+    format!("erro nao tratado: {text}{at}")
+}
+
+/// Tira `--timeout <ms>` dos argumentos do `wait`. O teto fica abaixo dos 45 s que o servidor espera pela resposta.
+fn split_timeout(args: &[String]) -> Result<(Vec<String>, u64), String> {
+    let Some(i) = args.iter().position(|a| a == "--timeout") else { return Ok((args.to_vec(), WAIT_MS)) };
+    let ms = args.get(i + 1).and_then(|v| v.parse::<u64>().ok()).filter(|ms| (1..=WAIT_MAX_MS).contains(ms))
+        .ok_or_else(|| format!("erro: wait: --timeout precisa de ms entre 1 e {WAIT_MAX_MS}"))?;
+    let rest = args.iter().enumerate().filter(|(j, _)| *j != i && *j != i + 1).map(|(_, a)| a.clone()).collect();
+    Ok((rest, ms))
 }
 
 /// A página de verdade: o CDP do motor (WebView2 no Windows, Chromium sem janela no Linux) e o relógio da GPUI.
@@ -631,7 +807,7 @@ mod tests {
         let c = ctl(|_, _| Ok(json!({})));
         for args in [&["--url"][..], &["--texto", "x"], &["@x1"], &[]] {
             assert_eq!(text(block_on(c.run("wait", &s(args)))),
-                format!("erro: wait: alvo invalido: {} (use @eN, --url texto, --text texto, --idle ou ms)", args.join(" ")));
+                format!("erro: wait: alvo invalido: {} (use @eN, --url texto, --text texto, --idle ou ms; teto com --timeout ms)", args.join(" ")));
         }
         assert!(!methods(&c).contains(&"Runtime.evaluate".to_string()));
     }
@@ -691,6 +867,16 @@ mod tests {
         assert_eq!(last.map(|(_, p)| (p["width"].clone(), p["height"].clone())), Some((json!(1280), json!(800))));
         block_on(c.set_hidden(false));
         assert_eq!(methods(&c).last().map(String::as_str), Some("Emulation.clearDeviceMetricsOverride"));
+    }
+
+    #[test]
+    fn visible_desktop_draws_at_the_window_scale_and_custom_layout_stays_exact() {
+        let c = ctl(|_, _| Ok(json!({})));
+        block_on(c.set_scale(1.25));
+        let last = |c: &Controller<Fake>| c.page.calls.borrow().iter().rev().find(|(m, _)| m == "Emulation.setDeviceMetricsOverride").cloned().map(|(_, p)| p);
+        assert_eq!(last(&c), Some(json!({"width": 0, "height": 0, "deviceScaleFactor": 1.25, "mobile": false})));
+        block_on(c.run("layout", &s(&["1280", "800"])));
+        assert_eq!(last(&c), Some(json!({"width": 1280, "height": 800, "deviceScaleFactor": 1.0, "mobile": false})));
     }
 
     #[test]
