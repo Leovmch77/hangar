@@ -133,16 +133,24 @@ pub(crate) fn pair_externals(peers: &[String], pair_dir: &Path) -> Vec<PairExter
 
 /// Nível de cada sessão sob cada par de fora: o do registro filho dela sob a chave do par; o do
 /// par é o da ponta (`local_session`).
-pub fn mark_pair_levels(rows: &mut [SessionRow], share: &crate::share::ShareState) {
-    use crate::share::store::Kind;
+/// Roda a cada tique da lista: as duas lojas são lidas uma vez, e só se alguma linha tem par de fora.
+pub fn mark_pair_levels<'a>(rows: impl IntoIterator<Item = &'a mut SessionRow>, share: &crate::share::ShareState) {
+    let mut rows = rows.into_iter().filter(|r| r.pair_externals.as_ref().is_some_and(|e| !e.is_empty())).peekable();
+    if rows.peek().is_none() { return }
+    let full_by_root = share.store.full_sessions();
+    let none = std::collections::HashSet::new();
+    // endereço → (ponta daqui, sessões com acesso completo); o primeiro registro vence, como no `by_address`.
+    let mut by_address = std::collections::HashMap::new();
+    for rec in share.pairs.all() {
+        let full = full_by_root.get(&rec.share_id).unwrap_or(&none);
+        by_address.entry(rec.address()).or_insert((rec.local_session, full));
+    }
     for row in rows {
         for e in row.pair_externals.iter_mut().flatten() {
-            let Some(rec) = share.pairs.by_address(&format!("{}::{}", e.alias, e.session)) else { continue };
-            let children = share.store.children(&rec.share_id);
-            let full = |s: &str| children.iter().any(|c| c.session == s && c.kind == Kind::Share);
-            let mine = full(&row.name);
+            let Some((local, full)) = by_address.get(&format!("{}::{}", e.alias, e.session)) else { continue };
+            let mine = full.contains(&row.name);
             e.level = if mine { "full" } else { "view" }.into();
-            e.pending = !mine && full(&rec.local_session);
+            e.pending = !mine && full.contains(local);
         }
     }
 }

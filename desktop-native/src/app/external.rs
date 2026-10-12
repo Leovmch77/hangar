@@ -58,9 +58,7 @@ impl Hangar {
     }
 
     /// Sessões de fora na máquina `key`: aparecem só dentro do grupo, então a seção da máquina as esconde.
-    pub(super) fn outside_names_on(&self, key: &str) -> HashSet<String> {
-        self.external_pairs.iter().filter(|(_, p)| servers::norm(&p.address) == key).map(|(_, p)| p.session.clone()).collect()
-    }
+    pub(super) fn outside_names_on(&self, key: &str) -> Option<&HashSet<String>> { self.outside_names.get(key) }
 
     /// Donos dos pares que a sessão `origin` segura: ela sair do grupo ou fechar desfaz o par para o grupo inteiro.
     pub(super) fn anchored_owners(&self, origin: &super::sidebar::Target) -> Vec<String> {
@@ -124,7 +122,7 @@ impl Hangar {
         for s in self.servers.iter().filter(|s| is_own(s)) {
             let key = servers::norm(&s.address);
             let list = if self.is_active_key(&key) { Some(&self.sessions) } else { self.remote.get(&key).map(|l| &l.sessions) };
-            seen.extend(list.into_iter().flatten().map(|x| (key.clone(), x.name.clone(), x.outside_pairs())).filter(|(_, _, p)| !p.is_empty()));
+            seen.extend(list.into_iter().flatten().map(|x| (key.clone(), x.name.clone(), x.outside_pairs().into_owned())).filter(|(_, _, p)| !p.is_empty()));
         }
         if self.external_seen.as_ref() == Some(&seen) { return; }
         self.external_seen = Some(seen);
@@ -175,6 +173,8 @@ impl Hangar {
     /// Acerta as entradas do par na lista de máquinas; as listas recomeçam só quando a entrada muda ou o attach entra.
     pub(super) fn apply_external_pairs(&mut self, cx: &mut Context<Self>) {
         let pairs: Vec<api::ExternalPairDto> = self.external_pairs.iter().map(|(_, p)| p.clone()).collect();
+        self.outside_names.clear();
+        for p in &pairs { self.outside_names.entry(servers::norm(&p.address)).or_default().insert(p.session.clone()); }
         let before = self.servers.clone();
         let pending = reconcile_pair_entries(&mut self.servers, &pairs);
         // Par que acabou tira a marca do attach dele: um par novo no mesmo token precisa ligar de novo.

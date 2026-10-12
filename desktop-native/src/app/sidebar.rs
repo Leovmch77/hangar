@@ -436,7 +436,7 @@ impl Hangar {
     pub(super) fn remote_layout<'a>(&self, key: &str, sessions: &'a [SessionInfo], cx: &App) -> Layout<'a> {
         // A sessão de fora já aparece dentro do grupo; na seção do convite da mesma máquina ela sairia duas vezes.
         let mut hidden = self.sidebar.hidden_on(key);
-        hidden.extend(self.outside_names_on(key));
+        hidden.extend(self.outside_names_on(key).into_iter().flatten().cloned());
         let mut l = layout(sessions, &self.sidebar.filter.read(cx).value(), Self::by_project(), &hidden);
         for group in &mut l.groups { group.key = format!("{key}::{}", group.key); }
         l
@@ -1369,7 +1369,7 @@ fn fill_menu(menu: PopupMenu, hangar: &WeakEntity<Hangar>, target: &Target, sess
         PopupMenuItem::element(move |_, _| div().text_color(theme::danger()).child(label.clone())).disabled(invite && access.active)
             .on_click(move |_, window, cx| { let _ = hangar.update(cx, |this, cx| this.close_target(target.clone(), window, cx)); })
     };
-    let pairs = session.outside_pairs();
+    let pairs = session.outside_pairs().into_owned();
     let (undo_weak, undo_target) = (hangar.clone(), target.clone());
     let git = has_git(session);
     let chain_label = match &session.then_target {

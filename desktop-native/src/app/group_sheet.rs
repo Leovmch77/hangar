@@ -401,8 +401,10 @@ impl Hangar {
         });
         // Acesso completo pendente de cada membro daqui, com o "Liberar" ao lado.
         let server = servers::norm(&sheet.server);
-        let pending: Vec<(String, PairExternalEntry)> = std::iter::once(&me).chain(peers.iter()).filter_map(|name| self.live(name))
-            .flat_map(|s| s.outside_pairs().into_iter().filter(|p| p.pending).map(|p| (s.name.clone(), p))).collect();
+        let mut pending: Vec<(String, PairExternalEntry)> = Vec::new();
+        for s in std::iter::once(&me).chain(peers.iter()).filter_map(|name| self.live(name)) {
+            pending.extend(s.outside_pairs().iter().filter(|p| p.pending).map(|p| (s.name.clone(), p.clone())));
+        }
         let pending = pending.into_iter().enumerate().fold(div().flex().flex_col().gap(px(2.)), |list, (i, (name, p))| {
             let (target, alias) = (super::sidebar::Target::new(&server, &name), p.alias.clone());
             list.child(div().flex().items_center().gap_3().px_2().py(px(6.)).rounded(px(8.)).bg(theme::warning().opacity(0.08))

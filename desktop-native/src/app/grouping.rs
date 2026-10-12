@@ -42,7 +42,7 @@ pub(super) struct Grant { pub session: String, pub alias: String, pub owner: Str
 /// Juntar `side` (uma sessão e seus membros locais) a um grupo cujo par de fora tem acesso completo: cada sessão que chega
 /// fica aberta para ele, e a tela confirma antes. Pendente conta como completo: o par tem, só falta liberar.
 pub(super) fn full_grants(group: &SessionInfo, side: &SessionInfo) -> Vec<Grant> {
-    let full: Vec<PairExternalEntry> = group.outside_pairs().into_iter().filter(|p| p.level == "full" || p.pending).collect();
+    let full: Vec<PairExternalEntry> = group.outside_pairs().iter().filter(|p| p.level == "full" || p.pending).cloned().collect();
     let mine = side.outside_pairs();
     let names = std::iter::once(side.name.clone()).chain(side.peers().iter().filter(|p| !p.contains("::")).cloned());
     names.flat_map(|session| full.iter().filter(|p| !mine.iter().any(|m| m.alias == p.alias && m.session == p.session))
@@ -110,8 +110,10 @@ pub(super) fn cluster<'a>(list: &[&'a SessionInfo]) -> Vec<ListRow<'a>> {
         let label = members.iter().filter_map(|m| m.pair_task.as_deref().map(str::trim)).find(|t| !t.is_empty()).map(str::to_owned)
             .unwrap_or_else(|| members.iter().map(|m| m.name.as_str()).collect::<Vec<_>>().join(", "));
         let mut outside: Vec<PairExternalEntry> = Vec::new();
-        for p in members.iter().flat_map(|m| m.outside_pairs()) {
-            if !outside.iter().any(|o| o.alias == p.alias && o.session == p.session) { outside.push(p); }
+        for m in &members {
+            for p in m.outside_pairs().iter() {
+                if !outside.iter().any(|o| o.alias == p.alias && o.session == p.session) { outside.push(p.clone()); }
+            }
         }
         out.push(ListRow::Header { gid: gid.to_owned(), label: pair_header_label(&label, &outside), members: members.clone() });
         out.extend(members.into_iter().map(ListRow::Session));

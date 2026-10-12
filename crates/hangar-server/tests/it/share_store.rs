@@ -545,18 +545,23 @@ fn pair_children_stay_out_of_owner_list_shared_mark_and_end_all() {
 }
 
 #[test]
-fn set_root_session_moves_only_the_root() {
+fn grant_many_reaches_attached_tokens_and_full_sessions_reads_the_pair_token() {
     let f = Fixture::new();
     let (root, tok) = pair_root(&f);
-    f.at(1001.0).grant(&root.id, "membro", life("t:m"), Kind::Pair).unwrap();
-    assert!(f.store.set_root_session(&root.id, "membro", life("t:m")).unwrap());
-    let guest = f.store.lookup_token(&tok).unwrap();
-    assert_eq!(guest.sessions(), set(&["membro"]));
-    // A raiz leva a vida da sessão nova: com a antiga, o porteiro a daria por encerrada.
-    assert_eq!(guest.pair_shares()[0].session, "membro");
-    assert_eq!(guest.pair_shares()[0].life, life("t:m"));
-    assert_eq!(f.store.children(&root.id).len(), 1);
-    assert!(!f.store.set_root_session("nao-existe", "x", None).unwrap());
+    let (_, c) = f.store.create("outra", life("t:o"), Kind::Share, false).unwrap();
+    let (_, other) = f.at(1001.0).redeem(&c, "Pixel", None, Kind::Share).unwrap();
+    f.store.attach(&other, &tok).unwrap();
+    let sessions = [("a".to_owned(), life("t:a")), ("b".to_owned(), life("t:b"))];
+    f.at(1002.0).grant_many(&root.id, &sessions, Kind::Share).unwrap();
+    for t in [&tok, &other] {
+        let guest = f.store.lookup_token(t).unwrap();
+        assert_eq!(guest.kind_of("a"), Some(Kind::Share));
+        assert_eq!(guest.kind_of("b"), Some(Kind::Share));
+    }
+    f.store.grant(&root.id, "b", life("t:b"), Kind::Pair).unwrap();
+    assert_eq!(f.store.lookup_token(&other).unwrap().kind_of("b"), Some(Kind::Pair));
+    assert_eq!(f.store.full_sessions().get(&root.id), Some(&set(&["a"])));
+    assert!(f.store.grant_many("nao-existe", &sessions, Kind::Pair).is_err());
 }
 
 #[test]

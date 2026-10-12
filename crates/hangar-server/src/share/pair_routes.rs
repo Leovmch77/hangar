@@ -23,7 +23,7 @@ use super::tunnel::GUEST_PORT;
 use super::ShareState;
 use crate::session_write::{detail, json_response};
 use crate::groups::peers::PeerError;
-use crate::groups::local::{JoinRefusal, external_link_refusal};
+use crate::groups::local::{JoinRefusal, external_link_refusal, is_remote};
 use crate::groups::routes::{ORQ_OUTSIDE_CODE, ORQ_OUTSIDE_MSG, STORM_MAX, STORM_WINDOW, outside_addresses, providers, storm};
 use crate::groups::service::GroupError;
 use crate::groups::store::file_stem;
@@ -301,22 +301,27 @@ async fn group_locals(app: &AppState, name: &str) -> Result<Vec<String>, String>
     let mut locals = vec![name.to_owned()];
     if let Some(groups) = &app.groups
         && let Some(side) = groups.link(name).await.map_err(|e| e.to_string())? {
-        locals.extend(side.peers.into_iter().filter(|p| !p.contains("::") && p != name));
+        locals.extend(side.peers.into_iter().filter(|p| !is_remote(p) && p != name));
     }
     Ok(locals)
 }
 
+/// `(sessão, vida)` de cada uma; sem vida conhecida o acesso não teria fim e ela fica de fora.
+async fn with_lives(share: &ShareState, sessions: impl IntoIterator<Item = String>) -> Vec<(String, Option<String>)> {
+    let mut out = Vec::new();
+    for session in sessions {
+        match share.lives.life(&session, true).await {
+            Some(life) => out.push((session, Some(life))),
+            None => tracing::warn!(code = "external_pair_grant_skipped", session = %session, "par externo: sessão sem vida, acesso não dado"),
+        }
+    }
+    out
+}
+
 /// O nível vale para cada sessão daqui do grupo da ponta do par, cada uma com a própria vida.
 async fn grant_group(app: &AppState, share: &ShareState, root_id: &str, name: &str, kind: Kind) -> Result<(), String> {
-    for session in group_locals(app, name).await? {
-        // Sem vida conhecida o acesso não teria fim: a sessão fica de fora.
-        let Some(life) = share.lives.life(&session, true).await else {
-            tracing::warn!(code = "external_pair_grant_skipped", session = %session, "par externo: sessão sem vida, nível não aplicado");
-            continue;
-        };
-        share.store.grant(root_id, &session, Some(life), kind).map_err(|e| e.to_string())?;
-    }
-    Ok(())
+    let sessions = with_lives(share, group_locals(app, name).await?).await;
+    share.store.grant_many(root_id, &sessions, kind).map_err(|e| e.to_string())
 }
 
 /// Membro local do grupo sem acesso pelo par de fora ganha "ver e recado", qualquer que seja o
@@ -324,14 +329,15 @@ async fn grant_group(app: &AppState, share: &ShareState, root_id: &str, name: &s
 /// Quem já tinha fica com o que tinha. Devolve as falhas de disco.
 pub async fn grant_members(share: &ShareState, members: &[String]) -> Vec<String> {
     let mut errs = Vec::new();
+    // O caso comum, grupo sem ninguém de fora, não lê as lojas.
+    if !members.iter().any(|m| is_remote(m)) { return errs }
     for rec in share.pairs.all().into_iter().filter(|r| members.contains(&r.address())) {
         let have: Vec<String> = share.store.children(&rec.share_id).into_iter().map(|c| c.session).collect();
-        for m in members.iter().filter(|m| !m.contains("::") && **m != rec.local_session && !have.contains(m)) {
-            let Some(life) = share.lives.life(m, true).await else {
-                tracing::warn!(code = "external_pair_grant_skipped", session = %m, "par externo: sessão sem vida, acesso não dado");
-                continue;
-            };
-            if let Err(e) = share.store.grant(&rec.share_id, m, Some(life), Kind::Pair) { errs.push(format!("{m}: {e}")); }
+        let missing = members.iter().filter(|m| !is_remote(m) && **m != rec.local_session && !have.contains(m)).cloned().collect::<Vec<_>>();
+        let sessions = with_lives(share, missing).await;
+        if let Err(e) = share.store.grant_many(&rec.share_id, &sessions, Kind::Pair) {
+            let names: Vec<&str> = sessions.iter().map(|(s, _)| s.as_str()).collect();
+            errs.push(format!("{}: {e}", names.join(", ")));
         }
     }
     errs
@@ -348,37 +354,35 @@ async fn pair_access(State(st): St, Path(name): Path<String>, bytes: Bytes) -> R
     let Some(life) = share.lives.life(&name, true).await else {
         return detail(StatusCode::NOT_FOUND, "erro_sessao_inexistente", "sessão não encontrada", json!({}));
     };
-    let mine = || async {
-        let peers = match &st.app.groups {
-            Some(groups) => groups.link(&name).await.map_err(|_| respond(groups_unavailable("groups_store_failed")))?
-                .map(|l| l.peers).unwrap_or_default(),
-            None => Vec::new(),
-        };
-        Ok::<Vec<ExternalPair>, Response>(share.pairs.all().into_iter()
-            .filter(|r| r.alias == v[0] && (r.local_session == name || peers.contains(&r.address()))).collect())
-    };
-    let recs = match mine().await { Ok(r) => r, Err(r) => return r };
-    if recs.is_empty() {
-        return detail(StatusCode::NOT_FOUND, "erro_par_inexistente", "este par externo não existe", json!({}));
-    }
+    let recs = match pairs_reaching(&st.app, share, &name, &v[0]).await { Ok(r) => r, Err(r) => return respond(r) };
+    if recs.is_empty() { return respond(no_pair()) }
     for rec in &recs {
         if let Err(e) = share.store.grant(&rec.share_id, &name, Some(life.clone()), level) { return io_failed(e) }
     }
     // A sessão pode ter saído do grupo enquanto o nível era gravado; a saída já tirou o acesso, e o
     // grant que veio depois o devolveria. Relê e desfaz o que deixou de valer.
     // Sem conseguir reler, fecha: o dono repete o "Liberar".
-    let (still, failed) = match mine().await {
+    let (still, failed) = match pairs_reaching(&st.app, share, &name, &v[0]).await {
         Ok(r) => (r.into_iter().map(|r| r.share_id).collect::<Vec<_>>(), None),
-        Err(r) => (Vec::new(), Some(r)),
+        Err(r) => (Vec::new(), Some(respond(r))),
     };
     for rec in recs.iter().filter(|r| !still.contains(&r.share_id)) {
         if let Err(e) = share.store.ungrant(&rec.share_id, &name) { return io_failed(e) }
     }
     if let Some(r) = failed { return r }
-    if still.is_empty() {
-        return detail(StatusCode::NOT_FOUND, "erro_par_inexistente", "este par externo não existe", json!({}));
-    }
+    if still.is_empty() { return respond(no_pair()) }
     json_response(StatusCode::OK, json!({"ok": true}))
+}
+
+/// Os pares da máquina `alias` que alcançam `session`: os dela e os dos membros do grupo dela.
+async fn pairs_reaching(app: &AppState, share: &ShareState, session: &str, alias: &str) -> Result<Vec<ExternalPair>, Refusal> {
+    let peers = match &app.groups {
+        Some(groups) => groups.link(session).await.map_err(|_| groups_unavailable("groups_store_failed"))?
+            .map(|l| l.peers).unwrap_or_default(),
+        None => Vec::new(),
+    };
+    Ok(share.pairs.all().into_iter()
+        .filter(|r| r.alias == alias && (r.local_session == session || peers.contains(&r.address()))).collect())
 }
 
 /// "Sair do pareamento" e "Desfazer par": acaba o par `alias::session` para o grupo todo e avisa o
@@ -388,9 +392,7 @@ async fn undo_pair(State(st): St, Path(alias): Path<String>, RawQuery(query): Ra
         .find(|(k, _)| k == "session").map(|(_, v)| v.into_owned()).unwrap_or_default();
     let address = format!("{alias}::{session}");
     let share = &st.owner.share;
-    let Some(rec) = share.pairs.by_address(&address) else {
-        return detail(StatusCode::NOT_FOUND, "erro_par_inexistente", "este par externo não existe", json!({}));
-    };
+    let Some(rec) = share.pairs.by_address(&address) else { return respond(no_pair()) };
     let errs = end_pair(&st.app, share, &*st.remote, &rec.local_session, &address).await.unwrap_or_default();
     let warning = if errs.is_empty() { Value::Null } else {
         json!({"code": "erro_pareamento_saida_falhou", "params": {"avisos": errs}, "msg": "aviso de saída falhou"})
@@ -515,9 +517,9 @@ async fn pair_accept(State(st): St, Path(name): Path<String>, bytes: Bytes) -> R
 }
 
 async fn list_pairs(State(st): St) -> Response {
-    let store = &st.owner.share.store;
+    let full_by_root = st.owner.share.store.full_sessions();
     let all: Vec<Value> = st.owner.share.pairs.all().into_iter().map(|r| {
-        let full = store.children(&r.share_id).iter().any(|c| c.session == r.local_session && c.kind == Kind::Share);
+        let full = full_by_root.get(&r.share_id).is_some_and(|s| s.contains(&r.local_session));
         json!({"local_session": r.local_session, "alias": r.alias, "owner": r.peer_owner, "session": r.peer_session,
             "address": r.peer_address, "token": r.peer_token, "level_given": level_name(if full { Kind::Share } else { Kind::Pair })})
     }).collect();
@@ -540,12 +542,7 @@ pub async fn send(app: &AppState, share: &ShareState, remote: &dyn Remote, sende
     -> Result<Value, Refusal> {
     let (alias, to) = target.split_once("::").unwrap_or((target, ""));
     if !pairs::valid_session(to) { return Err(no_pair()) }
-    let mates = match &app.groups {
-        Some(groups) => groups.link(sender).await.map_err(|_| groups_unavailable("groups_store_failed"))?.map(|l| l.peers).unwrap_or_default(),
-        None => Vec::new(),
-    };
-    let mine: Vec<ExternalPair> = share.pairs.all().into_iter()
-        .filter(|r| r.alias == alias && (r.local_session == sender || mates.contains(&r.address()))).collect();
+    let mine = pairs_reaching(app, share, sender, alias).await?;
     let rec = mine.iter().find(|r| r.address() == target).or(mine.first()).cloned().ok_or_else(no_pair)?;
     let body = with_from(json!({"text": text, "session": rec.peer_session, "to": to}), sender);
     post_message(app, share, remote, &rec, &body).await
@@ -619,7 +616,10 @@ async fn unlink_all(app: &AppState, address: &str) -> bool {
     let Some(groups) = &app.groups else { return true };
     let Ok(all) = groups.sidecars().await else { return false };
     let mut ok = true;
-    for (stem, _) in all.into_iter().filter(|(_, s)| s.peers.iter().any(|p| p == address)) {
+    // Um `external_unlink` já limpa o grupo inteiro: um por gid basta.
+    let mut groups_done = std::collections::HashSet::new();
+    for (stem, sidecar) in all.into_iter().filter(|(_, s)| s.peers.iter().any(|p| p == address)) {
+        if !sidecar.gid.is_empty() && !groups_done.insert(sidecar.gid) { continue }
         ok &= guarded("tirar o par do grupo", groups.external_unlink(&stem, address).await);
     }
     ok
@@ -793,17 +793,13 @@ fn pair_of(share: &ShareState, caller: Option<&Caller>, session: Option<&str>) -
 }
 
 /// O mesmo aviso de grupo chega por cada par que a outra máquina tem conosco; só o primeiro
-/// entregue entra (`mark` grava a entrega, sem ele só pergunta).
+/// entregue entra. Chave → hora da entrega.
 // ponytail: mapa do processo podado pela janela da tempestade, como o `storm`.
-fn notice_seen(key: &str, mark: bool) -> bool {
+fn seen_notices() -> std::sync::MutexGuard<'static, std::collections::HashMap<String, std::time::Instant>> {
     use std::collections::HashMap;
     use std::sync::{LazyLock, Mutex};
-    use std::time::Instant;
-    static SEEN: LazyLock<Mutex<HashMap<String, Instant>>> = LazyLock::new(Mutex::default);
-    let now = Instant::now();
-    let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
-    seen.retain(|_, t| now.duration_since(*t) < STORM_WINDOW);
-    if mark { seen.insert(key.to_owned(), now).is_some() } else { seen.contains_key(key) }
+    static SEEN: LazyLock<Mutex<HashMap<String, std::time::Instant>>> = LazyLock::new(Mutex::default);
+    SEEN.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 async fn pair_message(State(st): St, caller: Option<Extension<Caller>>, bytes: Bytes) -> Response {
@@ -842,16 +838,18 @@ async fn pair_message(State(st): St, caller: Option<Extension<Caller>>, bytes: B
         let mut last = (StatusCode::OK, json!({"ok": true}));
         let mut delivered = false;
         let notice = map.get("notice").and_then(Value::as_str).filter(|n| !n.is_empty() && n.len() <= 64);
+        if notice.is_some() { seen_notices().retain(|_, t| t.elapsed() < STORM_WINDOW); }
         for session in &locals {
             let key = notice.map(|n| format!("{}\n{n}\n{session}", rec.peer_address));
-            if key.as_deref().is_some_and(|k| notice_seen(k, false)) {
+            // A entrega de antes pode vencer enquanto as outras sessões recebem: a hora vale aqui.
+            if key.as_deref().is_some_and(|k| seen_notices().get(k).is_some_and(|t| t.elapsed() < STORM_WINDOW)) {
                 delivered = true;
                 continue;
             }
             let (status, reply) = write_input(&st.app, session, &text, true).await;
             if status.is_success() {
                 delivered = true;
-                if let Some(k) = &key { notice_seen(k, true); }
+                if let Some(k) = key { seen_notices().insert(k, std::time::Instant::now()); }
             } else {
                 tracing::warn!(code = "external_pair_group_notice_failed", session = %session, status = status.as_u16(), "par externo: aviso de grupo de fora não entregue");
                 last = (status, reply);

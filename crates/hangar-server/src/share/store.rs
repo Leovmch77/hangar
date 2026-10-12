@@ -2,7 +2,7 @@
 //!
 //! Só hashes vão ao disco; código e token crus existem só na resposta que os entrega. Este
 //! processo é o único escritor, então o estado em memória é a verdade e o disco é a cópia.
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -314,6 +314,12 @@ impl ShareStore {
 
     /// Dá ao par a sessão com o nível `kind`, ou troca o nível de quem já a tinha pelo par.
     pub fn grant(&self, root_id: &str, session: &str, life: Option<String>, kind: Kind) -> io::Result<()> {
+        self.grant_many(root_id, &[(session.to_owned(), life)], kind)
+    }
+
+    /// O `grant` de várias sessões `(sessão, vida)` sob a mesma raiz, gravando o arquivo uma vez.
+    pub fn grant_many(&self, root_id: &str, sessions: &[(String, Option<String>)], kind: Kind) -> io::Result<()> {
+        if sessions.is_empty() { return Ok(()) }
         let now = self.now();
         let mut state = self.lock();
         let token = state.get(root_id)
@@ -322,23 +328,26 @@ impl ShareStore {
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "par desconhecido ou encerrado"))?;
         // Quem já ligou a raiz pelo `attach` recebe também a sessão nova, senão o membro que
         // entrou depois só aparece no token do par.
-        let mut holders: HashSet<String> = state.values()
+        let mut all_holders: HashSet<String> = state.values()
             .filter(|x| x.parent_id.as_deref() == Some(root_id) && x.revoked_at.is_none())
             .filter_map(|x| x.token_hash.clone()).collect();
-        holders.insert(token);
-        // As cópias que o `attach` deu a outros tokens seguem o nível: senão escreveriam depois do "ver".
-        for x in state.values_mut().filter(|x| x.parent_id.as_deref() == Some(root_id) && x.session == session && x.revoked_at.is_none()) {
-            if let Some(t) = &x.token_hash { holders.remove(t); }
-            x.kind = kind;
-            x.life = life.clone();
-        }
-        for t in holders {
-            let child = Share {
-                id: new_id(), session: session.into(), life: life.clone(), created_at: now, code_expires_at: now,
-                code_hash: String::new(), token_hash: Some(t), device: None, redeemed_at: Some(now),
-                revoked_at: None, local: false, kind, parent_id: Some(root_id.into()), level: None,
-            };
-            state.insert(child.id.clone(), child);
+        all_holders.insert(token);
+        for (session, life) in sessions {
+            let mut holders = all_holders.clone();
+            // As cópias que o `attach` deu a outros tokens seguem o nível: senão escreveriam depois do "ver".
+            for x in state.values_mut().filter(|x| x.parent_id.as_deref() == Some(root_id) && x.session == *session && x.revoked_at.is_none()) {
+                if let Some(t) = &x.token_hash { holders.remove(t); }
+                x.kind = kind;
+                x.life = life.clone();
+            }
+            for t in holders {
+                let child = Share {
+                    id: new_id(), session: session.clone(), life: life.clone(), created_at: now, code_expires_at: now,
+                    code_hash: String::new(), token_hash: Some(t), device: None, redeemed_at: Some(now),
+                    revoked_at: None, local: false, kind, parent_id: Some(root_id.into()), level: None,
+                };
+                state.insert(child.id.clone(), child);
+            }
         }
         self.persist(state)
     }
@@ -365,16 +374,18 @@ impl ShareStore {
             .cloned().collect()
     }
 
-    /// Ancora a raiz do par noutra sessão; a vida acompanha, senão o porteiro a daria por encerrada.
-    pub fn set_root_session(&self, root_id: &str, new_session: &str, life: Option<String>) -> io::Result<bool> {
-        let mut state = self.lock();
-        let Some(root) = state.get_mut(root_id).filter(|r| r.parent_id.is_none() && r.revoked_at.is_none()) else {
-            return Ok(false);
-        };
-        root.session = new_session.into();
-        root.life = life;
-        self.persist(state)?;
-        Ok(true)
+    /// Por raiz de par: as sessões que o próprio token dela vê com acesso completo (filho `Share`
+    /// vivo de `children`). Uma volta na loja para todos os pares.
+    pub fn full_sessions(&self) -> HashMap<String, HashSet<String>> {
+        let state = self.lock();
+        let mut out: HashMap<String, HashSet<String>> = HashMap::new();
+        for x in state.values().filter(|x| x.kind == Kind::Share && x.revoked_at.is_none()) {
+            let Some(root) = x.parent_id.as_ref().and_then(|p| state.get(p)) else { continue };
+            if root.token_hash.is_some() && x.token_hash == root.token_hash {
+                out.entry(root.id.clone()).or_default().insert(x.session.clone());
+            }
+        }
+        out
     }
 
     pub fn list_for(&self, session: &str) -> Vec<Share> {

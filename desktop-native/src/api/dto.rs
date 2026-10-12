@@ -175,8 +175,9 @@ impl SessionInfo {
     /// A sessão da outra pessoa num par externo: acompanha, sem escrever nem mexer nela.
     pub fn read_only(&self) -> bool { self.guest_kind.as_deref() == Some("pair") }
     /// Pares de fora do grupo; servidor sem `pair_externals` manda só o primeiro, sem nível nem endereço (ver e recado).
-    pub fn outside_pairs(&self) -> Vec<PairExternalEntry> {
-        if let Some(all) = &self.pair_externals { return all.clone(); }
+    /// Lido a cada quadro: emprestado; só o servidor antigo paga a cópia.
+    pub fn outside_pairs(&self) -> std::borrow::Cow<'_, [PairExternalEntry]> {
+        if let Some(all) = &self.pair_externals { return std::borrow::Cow::Borrowed(all); }
         self.pair_external.iter().map(|p| PairExternalEntry { alias: p.alias.clone(), owner: p.owner.clone(), session: p.session.clone(),
             level: "view".into(), ..Default::default() }).collect()
     }

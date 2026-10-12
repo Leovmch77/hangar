@@ -646,6 +646,8 @@ pub struct Hangar {
     pending_remote: Option<(String, String)>,
     /// Pares externos lidos de cada servidor próprio (chave dele, par).
     external_pairs: Vec<(String, api::ExternalPairDto)>,
+    /// Sessões de fora por máquina (`servers::norm`), refeito no `apply_external_pairs`: a barra o lê a cada quadro.
+    outside_names: HashMap<String, HashSet<String>>,
     /// Sessões com par externo na última lista vista: a releitura dos pares só sai quando isto muda.
     external_seen: Option<Vec<(String, String, Vec<api::dto::PairExternalEntry>)>>,
     /// Attach já feitos ou em voo (endereço, token da entrada, token do par).
@@ -891,7 +893,7 @@ impl Hangar {
             new_chat: None, new_chat_focus: cx.focus_handle().tab_stop(true),
             new_chat_folders: Default::default(), landing: None, opening: None, side_seen: None, side_slide: None, arrived: HashMap::new(), tree_parts: HashSet::new(), part_arrived: HashMap::new(), tree_folds: HashMap::new(), tree_motion: false, active_token: String::new(), ready_sessions: None,
             servers: known_servers, remote: HashMap::new(), remote_tasks: Vec::new(), remote_gen: 0, servers_rev: 0, invite_ended: HashSet::new(), pending_open: None, pending_remote: None,
-            external_pairs: Vec::new(), external_seen: None, attached: HashSet::new(), external_seq: 0,
+            external_pairs: Vec::new(), outside_names: HashMap::new(), external_seen: None, attached: HashSet::new(), external_seq: 0,
             dictation: Default::default(),
             voice: voice_ui::VoiceUi { a11y_dump: Self::watch_a11y_dump(window, cx), ..Default::default() },
             player: Default::default(),
