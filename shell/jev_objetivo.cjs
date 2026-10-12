@@ -390,7 +390,7 @@ const JS_VALORES = `(() => {
 
 const VAZIO = { valores: {}, obrigatorios_vazios: [], editaveis: new Set(), lista_aberta: '' };
 
-async function valoresAtuais(executar) {
+async function valoresAtuais(executar, log = () => {}) {
   try {
     const bruto = await executar('eval', [JS_VALORES]);
     // O navegador devolve o resultado JA como literal de string JSON, entao sao DOIS JSON.parse —
@@ -406,8 +406,9 @@ async function valoresAtuais(executar) {
       editaveis: new Set((obj.editaveis ?? []).map(normalizar)),
       lista_aberta: obj.lista_aberta ?? '',
     };
-  } catch {
-    // Anotação é melhoria, não requisito: sem ela o laço segue como antes.
+  } catch (err) {
+    // Anotação é melhoria, não requisito: o laço segue sem ela, mas a falha fica registrada.
+    log(`jev-objetivo: leitura dos valores dos campos falhou (${String(err?.message ?? err).slice(0, 120)})`);
     return VAZIO;
   }
 }
@@ -670,7 +671,7 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
       executar('snapshot', SNAPSHOT_DO_LACO),
       executar('url', []),
       executar('text', []),
-      valoresAtuais(executar),
+      valoresAtuais(executar, log),
     ]);
     // O navegador responde erro como TEXTO. Sem esta checagem, um `erro: a aba nao descongelou`
     // seria lido como uma página sem elementos e o laço reportaria a página errada em vez da falha.
