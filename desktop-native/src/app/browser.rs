@@ -38,6 +38,9 @@ pub(super) struct BrowserPanel {
     /// Login pedido com o motor ainda nascendo: a importação segue quando o CDP dele existir.
     #[cfg(not(target_os = "macos"))]
     import_pending: bool,
+    /// Perfis com cookies em disco esperando a pessoa escolher de qual trazer.
+    #[cfg(target_os = "linux")]
+    cookie_sources: Vec<crate::browser::chrome_import::disk::Source>,
     /// URL cujo login já foi preenchido com as senhas salvas do Chrome, para não repetir a cada evento da mesma página.
     #[cfg(target_os = "linux")]
     last_fill: Option<String>,
@@ -70,7 +73,7 @@ impl BrowserPanel {
             cx.on_blur(&focus, window, |this, _, _| if let Some(engine) = this.engine() { engine.focus(false) }),
         ];
         Self { key, #[cfg(not(target_os = "macos"))] controller: None, #[cfg(not(target_os = "macos"))] cdp: None,
-            #[cfg(not(target_os = "macos"))] relay: Default::default(), #[cfg(not(target_os = "macos"))] viewer: Rc::default(), engine: None, starting: None, _start: None, events, address, page: model::PageState::default(), invalid: None, #[cfg(not(target_os = "macos"))] cookies_status: None, #[cfg(not(target_os = "macos"))] import_pending: false, #[cfg(target_os = "linux")] last_fill: None, focus,
+            #[cfg(not(target_os = "macos"))] relay: Default::default(), #[cfg(not(target_os = "macos"))] viewer: Rc::default(), engine: None, starting: None, _start: None, events, address, page: model::PageState::default(), invalid: None, #[cfg(not(target_os = "macos"))] cookies_status: None, #[cfg(not(target_os = "macos"))] import_pending: false, #[cfg(target_os = "linux")] cookie_sources: Vec::new(), #[cfg(target_os = "linux")] last_fill: None, focus,
             origin: Rc::default(), shown: false, _drain: drain, _subscriptions: subscriptions }
     }
 
@@ -340,30 +343,67 @@ impl BrowserPanel {
             cx.notify();
             return;
         };
+        // No Linux o perfil em disco vem primeiro: sem diálogo no navegador da pessoa, e com ele fechado.
+        #[cfg(target_os = "linux")]
+        {
+            let mut sources = chrome_import::disk::sources();
+            if sources.len() == 1 {
+                self.read_disk_cookies(sources.remove(0), cx);
+                return;
+            }
+            if !sources.is_empty() {
+                self.cookie_sources = sources;
+                self.cookies_status = Some(tr("browser_cookies_pick"));
+                cx.notify();
+                return;
+            }
+        }
         self.cookies_status = Some(tr("browser_cookies_fetching"));
         cx.notify();
         // Plano B pra Chromium/Brave antigos: porta fixa por variável de ambiente.
         let port = std::env::var("HANGAR_CHROME_CDP_PORT").ok().and_then(|v| v.trim().parse().ok());
-        let fetch = cx.background_executor().spawn(async move { chrome_import::fetch_cookies(port) });
+        let fetch = cx.background_executor().spawn(async move {
+            chrome_import::fetch_cookies(port).map_err(|e| match e {
+                chrome_import::ImportError::ChromeClosed => None,
+                e => Some(tr(e.status_key()).replace("{e}", e.detail())),
+            })
+        });
         cx.spawn(async move |this, cx| {
             let result = fetch.await;
             let _ = this.update(cx, |this, cx| this.apply_cookies(result, cdp, cx));
         }).detach();
     }
 
+    /// Lê os cookies do perfil escolhido em thread de fundo (cópia do banco e `sqlite3`).
+    #[cfg(target_os = "linux")]
+    fn read_disk_cookies(&mut self, source: crate::browser::chrome_import::disk::Source, cx: &mut Context<Self>) {
+        let Some(cdp) = self.cdp.clone() else { return };
+        self.cookie_sources.clear();
+        self.cookies_status = Some(tr("browser_cookies_reading").replace("{source}", &source.label));
+        cx.notify();
+        let fetch = cx.background_executor().spawn(async move {
+            crate::browser::chrome_import::disk::read(&source)
+                .map_err(|e| Some(tr(e.status_key()).replace("{e}", e.detail())))
+        });
+        cx.spawn(async move |this, cx| {
+            let result = fetch.await;
+            let _ = this.update(cx, |this, cx| this.apply_cookies(result, cdp, cx));
+        }).detach();
+    }
+
+    /// `Err(None)` é o Chrome sem depuração ligada; `Err(Some)`, a frase do erro.
     #[cfg(not(target_os = "macos"))]
-    fn apply_cookies(&mut self, result: Result<Vec<serde_json::Value>, crate::browser::chrome_import::ImportError>,
+    fn apply_cookies(&mut self, result: Result<Vec<serde_json::Value>, Option<String>>,
         cdp: Rc<crate::browser::cdp::Cdp>, cx: &mut Context<Self>) {
-        use crate::browser::chrome_import::ImportError;
         let cookies = match result {
             Ok(cookies) => cookies,
-            Err(ImportError::ChromeClosed) => {
+            Err(None) => {
                 // Sem depuração ligada, o clique já abre a página do toggle no Chrome — um passo, não dois.
                 self.activate_chrome(cx);
                 return;
             }
-            Err(e) => {
-                self.cookies_status = Some(tr(e.status_key()).replace("{e}", e.detail()));
+            Err(Some(text)) => {
+                self.cookies_status = Some(text);
                 cx.notify();
                 return;
             }
@@ -540,6 +580,16 @@ impl Render for BrowserPanel {
             root = root.when_some(self.cookies_status.clone(), |el, text| el.child(div().id("browser-cookies-status")
                 .flex_shrink_0().px_3().py(px(6.)).role(Role::Status)
                 .text_size(px(11.)).text_color(theme::muted()).whitespace_normal().child(text)));
+        }
+        #[cfg(target_os = "linux")]
+        if !self.cookie_sources.is_empty() {
+            let picks = self.cookie_sources.iter().enumerate().map(|(i, source)| {
+                let source = source.clone();
+                Button::new(("browser-cookie-source", i)).small().label(source.label.clone())
+                    .on_click(cx.listener(move |this, _, _, cx| this.read_disk_cookies(source.clone(), cx)))
+            });
+            root = root.child(div().id("browser-cookie-sources").flex_shrink_0().flex().flex_wrap().gap_1().px_3().pb(px(6.))
+                .children(picks));
         }
         root.child(self.render_page(cx))
     }

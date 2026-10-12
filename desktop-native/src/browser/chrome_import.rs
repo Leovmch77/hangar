@@ -476,7 +476,7 @@ mod passwords {
 
     /// Pasta 0700 de nome aleatório criada aqui (falha se já existir): sem `XDG_RUNTIME_DIR` a base é o `/tmp`, e um
     /// symlink pré-plantado com nome previsível desviaria a cópia do banco cifrado.
-    fn private_dir() -> std::io::Result<PathBuf> {
+    pub(super) fn private_dir() -> std::io::Result<PathBuf> {
         use std::os::unix::fs::DirBuilderExt;
         let base = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
         let dir = base.join(format!("hangar-ld-{}-{}", std::process::id(), rand_suffix()));
@@ -519,7 +519,7 @@ mod passwords {
 
     /// Chave do chaveiro achada vale pelo processo; sem ela (chaveiro travado, sem `secret-tool`) tenta de novo depois
     /// de 5 min, em vez de pedir a senha do chaveiro a cada página ou desistir até reiniciar o app.
-    fn keys() -> Vec<Vec<u8>> {
+    pub(super) fn keys() -> Vec<Vec<u8>> {
         static KEYS: Mutex<Option<(Option<Instant>, Vec<Vec<u8>>)>> = Mutex::new(None);
         let mut cached = KEYS.lock().unwrap_or_else(|e| e.into_inner());
         if let Some((retry, keys)) = cached.as_ref()
@@ -540,11 +540,23 @@ mod passwords {
     /// diferem, então tenta as duas e fica com a que decifra para texto limpo.
     fn key_candidates() -> Vec<Vec<u8>> {
         let mut keys: Vec<Vec<u8>> = vec![b"peanuts".to_vec()];
-        for app in ["chrome", "chromium"] {
+        for app in ["chrome", "chromium", "brave"] {
             if let Ok(out) = Command::new("secret-tool").args(["lookup", "application", app]).output()
                 && out.status.success() && !out.stdout.is_empty()
             {
                 keys.push(out.stdout);
+            }
+        }
+        // No KDE o Chrome guarda a chave na KWallet, que o `secret-tool` não lê.
+        if std::env::var("XDG_CURRENT_DESKTOP").is_ok_and(|d| d.contains("KDE")) {
+            for (entry, folder) in [("Chrome Safe Storage", "Chrome Keys"), ("Chromium Safe Storage", "Chromium Keys"),
+                ("Brave Safe Storage", "Brave Keys")] {
+                if let Ok(out) = Command::new("kwallet-query").args(["-r", entry, "-f", folder, "kdewallet"]).output()
+                    && out.status.success()
+                {
+                    let key = String::from_utf8_lossy(&out.stdout).trim_end().to_owned();
+                    if !key.is_empty() && !key.starts_with("Failed") { keys.push(key.into_bytes()); }
+                }
             }
         }
         keys.sort();
@@ -555,6 +567,14 @@ mod passwords {
     /// AES-128-CBC v10/v11 do Linux: IV de 16 espaços, chave = PBKDF2(senha, "saltysalt", 1, SHA-1, 16 bytes). Sem o
     /// prefixo de 32 bytes do mac/Windows. `None` quando a chave não decifra para texto limpo.
     fn decrypt(cipher: &[u8], password: &[u8]) -> Option<String> {
+        let plain = decrypt_bytes(cipher, password)?;
+        let text = std::str::from_utf8(&plain).ok()?;
+        // Lixo de controle (exceto espaços) significa chave errada.
+        text.chars().all(|c| !c.is_control() || c.is_whitespace()).then(|| text.to_owned())
+    }
+
+    /// Só a decifração, sem conferir o texto: o valor de cookie novo começa com 32 bytes binários.
+    pub(super) fn decrypt_bytes(cipher: &[u8], password: &[u8]) -> Option<Vec<u8>> {
         if cipher.len() < 3 || (&cipher[..3] != b"v10" && &cipher[..3] != b"v11") {
             return None;
         }
@@ -563,12 +583,10 @@ mod passwords {
         let mut buf = cipher[3..].to_vec();
         let plain = Aes128CbcDec::new((&key).into(), (&[0x20u8; 16]).into())
             .decrypt_padded_mut::<Pkcs7>(&mut buf).ok()?;
-        let text = std::str::from_utf8(plain).ok()?;
-        // Lixo de controle (exceto espaços) significa chave errada.
-        text.chars().all(|c| !c.is_control() || c.is_whitespace()).then(|| text.to_owned())
+        Some(plain.to_vec())
     }
 
-    fn decode_hex(s: &str) -> Option<Vec<u8>> {
+    pub(super) fn decode_hex(s: &str) -> Option<Vec<u8>> {
         // Separador de coluna dentro de um username desloca os campos e a "hex" vira texto arbitrário: sem o guarda,
         // o corte `[i..i+2]` cairia no meio de um char multibyte e derrubaria a thread.
         if !s.is_ascii() || !s.len().is_multiple_of(2) {
@@ -651,6 +669,10 @@ mod passwords {
 
 #[cfg(target_os = "linux")]
 pub use passwords::{credentials_for, inject_login_js};
+
+#[cfg(target_os = "linux")]
+#[path = "disk_cookies.rs"]
+pub mod disk;
 
 #[cfg(test)]
 mod tests {
