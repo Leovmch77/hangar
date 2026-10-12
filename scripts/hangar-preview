@@ -71,6 +71,7 @@ for (let i = 0; i < args.length; i++) {
   else if (args[i] === '--aba') flags.aba = Number(args[++i]);
   else if (args[i] === '--dados') flags.dados = args[++i];
   else if (args[i] === '--passos') flags.passos = args[++i];
+  else if (args[i] === '--permitir-risco') flags.permitirRisco = true;
   else pos.push(args[i]);
 }
 if (flags.aba != null && !Number.isInteger(flags.aba)) erro('--aba precisa do numero da aba (veja: hangar-preview tab list)');
@@ -116,6 +117,8 @@ Identidade: sidecar da sessão no modo sem terminal; tmux no modo com terminal.
   objetivo e confere precisam do Jev ligado na sessão (hangar-send --new ... --jev):
   objetivo <texto>        o Jev dirige sozinho até cumprir o objetivo (uma requisição por ciclo)
     --passos <n>          teto de passos (default 15)
+    --permitir-risco      libera, so nesta chamada, o clique que exclui, compra, envia ou publica
+                          (quem chama responde pela ordem do usuario; cada liberacao sai no log)
     --dados <json>        valores para os campos, com as chaves que você quiser: o Jev casa cada
                           um com o rótulo da página. Campo não coberto cai no LLM pequeno
                           (JEV_TEXTO_BASE_URL/_API_KEY/_MODELO, ou JEV_TEXTO_CMD)
@@ -547,6 +550,7 @@ if (cmd === 'objetivo') {
     objetivo,
     dados,
     maxPassos: Number(flags.passos) > 0 ? Number(flags.passos) : 15,
+    permitirRisco: flags.permitirRisco === true,
     escreverTexto: problema ? undefined : escritorDeTexto(),
     log: (linha) => console.log(semToken(linha)),
     // Tudo que o navegador devolve vira estado enviado ao Jev: o token não sai da máquina.

@@ -113,9 +113,9 @@ const CHAVE_SECRETA = /senha|password|passwd|token|secret|api[-_ ]?key|cart[aã]
 function parsarSnapshot(texto, max = MAX_CANDIDATOS - 1) {
   const achados = [];
   for (const linha of String(texto).split('\n')) {
-    const m = linha.match(/^\s*-\s+(\w+)(?:\s+"([\s\S]*?)")?\s+\[ref=@(e\d+)\]/);
+    const m = linha.match(/^\s*-\s+(\w+)(?:\s+"([\s\S]*?)")?\s+\[ref=@(e\d+)\]((?: \[\w+\])*)/);
     if (!m) continue;
-    const [, papel, nome, ref] = m;
+    const [, papel, nome, ref, marcas] = m;
     if (!PAPEIS_INTERATIVOS.has(papel)) continue;
     // Elemento sem nome acessível não dá ao Jev nada para julgar, e ocupa uma vaga do choice. Campo de
     // texto é a exceção: editor rich text (Tiptap, ProseMirror) costuma não ter rótulo, e sem ele não
@@ -123,13 +123,16 @@ function parsarSnapshot(texto, max = MAX_CANDIDATOS - 1) {
     if ((!nome || !nome.trim()) && !PAPEIS_DE_TEXTO.has(papel)) continue;
     // Desabilitado não reage ao clique nem aceita texto: como alvo, só gastaria um passo.
     if (/\[ref=@e\d+\](?: \[\w+\])* \[disabled\]/.test(linha)) continue;
-    achados.push({ ref, papel, nome: (nome?.trim() || `${SEM_ROTULO} ${ref}`).slice(0, 120) });
+    // Estado que o Jev precisa para nao desfazer o proprio passo: "Filtros" ja aberto, clicado de
+    // novo, fecha o painel. Fica fora do nome, que e a identidade usada na reconferencia da ref.
+    const estado = (marcas.match(/\[(expanded|collapsed|checked|pressed|selected)\]/g) ?? []).join(' ');
+    achados.push({ ref, papel, nome: (nome?.trim() || `${SEM_ROTULO} ${ref}`).slice(0, 120), ...(estado ? { estado } : {}) });
     if (achados.length >= max) break;
   }
   return achados;
 }
 
-const rotulo = (c) => `${c.papel} "${c.nome}"`;
+const rotulo = (c) => `${c.papel} "${c.nome}"${c.estado ? ` ${c.estado}` : ''}`;
 
 /** Um head de alvo por operação que precisa de um; vazio quando a página não oferece aquele tipo. */
 function headDeAlvo(nome, instrucao, candidatos) {
@@ -637,7 +640,7 @@ class FalhaDoNavegador extends Error {
  * `perguntar(estado, perguntas)` fala com o Jev, `executar(verbo, args)` com o navegador e
  * `escreverTexto(pedido)` com o LLM pequeno.
  */
-async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, escreverTexto, log = () => {} }) {
+async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, escreverTexto, permitirRisco = false, log = () => {} }) {
   const feito = [];
   let anterior = null;
   let repetidas = 0;
@@ -692,7 +695,13 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
 
     const acabouDeDigitar = String(feito.at(-1) ?? '').startsWith('TYPE_TEXT');
     const respostas = await perguntar(estado, montarPerguntas(candidatos, cofre, anotacao.editaveis, anotacao.lista_aberta, acabouDeDigitar));
-    const decisao = decidir(respostas, candidatos);
+    // Com a ordem explicita de quem chamou, a trava de risco vira registro: o passo segue e o log diz
+    // qual clique arriscado foi liberado.
+    let decisao = decidir(respostas, candidatos);
+    if (permitirRisco && decisao.parar?.startsWith('operacao arriscada')) {
+      log(`jev-objetivo passo ${passo}: risco liberado por --permitir-risco (${decisao.parar})`);
+      decisao = decidir(respostas, candidatos, { ...LIMIARES, arriscado: Infinity, arriscadoAlvo: Infinity });
+    }
     if (decisao.parar) return { feito, sucesso: decisao.sucesso === true, parou: decisao.parar };
 
     // As refs sao indice de arvore, nao identidade de no: renumeram a cada re-render (nesta mesma
