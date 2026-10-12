@@ -334,7 +334,9 @@ impl BrowserPanel {
                     let picking = !self.cookie_sources.is_empty();
                     #[cfg(not(target_os = "linux"))]
                     let picking = false;
-                    if !self.importing && !self.import_pending && self.login_reply.is_none() && !picking { self.cookies_status = None; }
+                    if !self.importing && !self.import_pending && self.login_request.is_none() && self.login_reply.is_none() && !picking {
+                        self.cookies_status = None;
+                    }
                 }
                 self.go(url, By::User, window, cx)
             }
