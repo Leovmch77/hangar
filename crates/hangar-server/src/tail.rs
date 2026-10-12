@@ -207,6 +207,34 @@ pub fn backfill(path: &Path, key: &str, provider: Provider, resume: Option<&str>
     }
 }
 
+/// Última resposta gravada na cauda que o `backfill` leria, direto dos eventos: montar e reler os
+/// quadros SSE só para achá-la dobrava o trabalho de cada hub que nasce.
+pub fn last_committed(path: &Path, provider: Provider) -> std::io::Result<Option<String>> {
+    let start = tail_offset(path, BACKFILL_LINES)?;
+    let file = match File::open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    let mut reader = BufReader::new(file);
+    reader.seek(SeekFrom::Start(start))?;
+    let mut parser = LineParser::new(provider);
+    let (mut at, mut last, mut line) = (start, None, Vec::new());
+    loop {
+        line.clear();
+        let n = reader.read_until(b'\n', &mut line)?;
+        if n == 0 || line.last() != Some(&b'\n') {
+            return Ok(last);
+        }
+        if let Ok(evs) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| parser.feed(&line, at))) {
+            if let Some(text) = evs.into_iter().filter_map(crate::state::preview::committed_from_event).last() {
+                last = Some(text);
+            }
+        }
+        at += n as u64;
+    }
+}
+
 /// Um observador por pasta, compartilhado por todos os leitores de arquivos dela.
 #[derive(Clone, Default)]
 pub struct Watchers(Arc<Mutex<HashMap<PathBuf, DirWatch>>>);
@@ -473,6 +501,21 @@ mod tests {
 
     fn first_line(f: &Bytes) -> String {
         String::from_utf8_lossy(f).split("\r\n").next().unwrap().to_owned()
+    }
+
+    #[test]
+    fn last_committed_matches_the_last_assistant_frame_of_the_backfill() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("t.jsonl");
+        let reply = |i: usize| format!("{{\"type\":\"assistant\",\"uuid\":\"a{i}\",\"timestamp\":\"2026-10-02T11:00:{i:02}.000Z\",\"message\":{{\"id\":\"m{i}\",\"role\":\"assistant\",\"content\":[{{\"type\":\"text\",\"text\":\"resposta {i}\"}}]}}}}\n");
+        write(&p, 0..10, &reply(1));
+        write(&p, 10..20, &(reply(2) + "{\"parcial\":"));
+        let cut = complete_end(&p).unwrap();
+        let frames = backfill(&p, "k", Provider::Claude, None, cut);
+        let old = frames.iter().rev().find_map(|f| crate::state::preview::committed_from_frame(f));
+        assert!(old.as_deref().is_some_and(|t| t.contains("resposta 2")));
+        assert_eq!(last_committed(&p, Provider::Claude).unwrap(), old);
+        assert_eq!(last_committed(&dir.path().join("nada.jsonl"), Provider::Claude).ok().flatten(), None);
     }
 
     #[test]

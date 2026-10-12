@@ -64,6 +64,52 @@ def test_unknown_session_404():
     assert r.status_code == 404
 
 
+def test_info_answers_without_waiting_for_the_projection():
+    calls = []
+
+    async def slow_op(name, command, operation_id):
+        calls.append((name, command["kind"]))
+        await asyncio.sleep(0.5)
+
+    coordinator = SimpleNamespace(managed_queue=lambda name: True, op=slow_op)
+
+    async def scenario():
+        started = time.monotonic()
+        first = await internal_api.session_info("s1")
+        second = await internal_api.session_info("s1")
+        assert time.monotonic() - started < 0.4
+        assert first == second and first["jsonl"] == "/p/abc-123.jsonl"
+        await asyncio.sleep(0.05)
+        # Uma reabertura em voo por sessão: a segunda tela não empilha outra.
+        assert calls == [("s1", "ensure_projection")]
+        await asyncio.sleep(0.6)
+        await internal_api.session_info("s1")
+        await asyncio.sleep(0.05)
+        assert calls == [("s1", "ensure_projection")] * 2
+        await asyncio.gather(*internal_api._projection_tasks.values())
+
+    with patch("app.api._cached_info", AsyncMock(return_value=_info())), \
+            patch("app.runtime_coordinator.current", return_value=coordinator):
+        asyncio.run(scenario())
+
+
+def test_projection_failure_goes_to_the_diary_without_failing_the_info():
+    async def broken(name, command, operation_id):
+        raise RuntimeError("ator ausente")
+
+    coordinator = SimpleNamespace(managed_queue=lambda name: True, op=broken)
+
+    async def scenario():
+        assert (await internal_api.session_info("s1"))["jsonl"] == "/p/abc-123.jsonl"
+        await asyncio.gather(*internal_api._projection_tasks.values())
+
+    with patch("app.api._cached_info", AsyncMock(return_value=_info())), \
+            patch("app.runtime_coordinator.current", return_value=coordinator), \
+            patch.object(internal_api.diag, "registrar") as registrar:
+        asyncio.run(scenario())
+    assert registrar.call_args.args[:2] == ("runtime.history_failed", "erro")
+
+
 def test_workspace_context_contains_only_registry_metadata(tmp_path):
     with patch("app.api._guardar_snap", return_value=[_info()]), patch("app.fs.allowed_roots", return_value=[tmp_path]):
         response = _client().get("/internal/workspace/context?name=s1", headers={"X-Hangar-Internal": SECRET})

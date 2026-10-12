@@ -371,19 +371,31 @@ async def session_info(name: str) -> dict:
         raise HTTPException(status_code=404)
     from app import runtime_coordinator
     coordinator = runtime_coordinator.current()
-    if coordinator is not None and coordinator.managed_queue(name):
-        import uuid
-        try:
-            await coordinator.op(name, {"kind":"ensure_projection"}, uuid.uuid4().hex)
-        except runtime_coordinator.TransferInProgress:
-            # Na passagem ninguém grava: a projeção em disco é a última dos dois donos. O aviso
-            # deixa rastro de uma passagem que não termina.
-            diag.registrar("runtime.info_during_transfer", "aviso", sessao=name)
-        except Exception as exc:
-            from app.runtime_coordinator import failure_reason
-            diag.registrar("runtime.history_failed", "erro", sessao=name, **failure_reason(exc))
-            raise HTTPException(503) from None
+    if coordinator is not None and coordinator.managed_queue(name) and name not in _projection_tasks:
+        # Fora da resposta: o Rust espera este /info, e voltar ao Rust dentro dele (vínculo do pane +
+        # ensure_projection) atrasava cada /history. Abrir a conversa continua disparando a
+        # reabertura da sessão em erro; uma por sessão em voo.
+        task = asyncio.create_task(_ensure_projection(coordinator, name))
+        _projection_tasks[name] = task
+        task.add_done_callback(lambda _t, n=name: _projection_tasks.pop(n, None))
     return info_payload(name, info.provider, info.jsonl)
+
+
+_projection_tasks: dict[str, asyncio.Task] = {}
+
+
+async def _ensure_projection(coordinator, name: str) -> None:
+    from app import runtime_coordinator
+    import uuid
+    try:
+        await coordinator.op(name, {"kind":"ensure_projection"}, uuid.uuid4().hex)
+    except runtime_coordinator.TransferInProgress:
+        # Na passagem ninguém grava: a projeção em disco é a última dos dois donos. O aviso
+        # deixa rastro de uma passagem que não termina.
+        diag.registrar("runtime.info_during_transfer", "aviso", sessao=name)
+    except Exception as exc:
+        from app.runtime_coordinator import failure_reason
+        diag.registrar("runtime.history_failed", "erro", sessao=name, **failure_reason(exc))
 
 
 @router.get("/sessions/{name}/plugin")
