@@ -2,7 +2,7 @@
 //! o gerou (o backend guarda o hash), então ele aparece uma vez, até fechar o diálogo.
 use super::*;
 use super::device::Remote;
-use crate::api::{ShareCreated, ShareEntry, ShareFailure, SharePrereqs};
+use crate::api::{Reach, ShareCreated, ShareEntry, ShareFailure, SharePrereqs};
 
 const WATCH_EVERY: Duration = Duration::from_secs(3);
 const WATCH_FOR: Duration = Duration::from_secs(5 * 60);
@@ -18,6 +18,16 @@ pub(super) fn when_label(epoch: f64) -> String {
 }
 
 enum Created { Link(ShareCreated), Pair(ShareCreated), Blocked(SharePrereqs) }
+
+/// Só o link do Funnel espera a conferência; o da rede local (`http://…:8766`) aparece na hora.
+pub(super) fn needs_reach_check(link: &str) -> bool { link.starts_with("https://") }
+
+/// O pedido roda no runtime tokio: soltar a `Task` do GPUI não o para, então quem a segura aborta junto.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) { self.0.abort(); }
+}
 
 /// Só a linha do comando: colar o `fix` inteiro num terminal rodaria também a frase do Funnel.
 fn operator_command(p: &SharePrereqs) -> Option<&str> {
@@ -113,6 +123,9 @@ pub(super) struct ShareDialog {
     watching: bool,
     authorizing: bool,
     authorize_error: Option<String>,
+    // Conferência do link pelo Funnel: `None` = ainda esperando. Soltar `reach_task` cancela o pedido.
+    reach: Option<Reach>,
+    reach_task: Option<Task<()>>,
 }
 
 impl ShareDialog {
@@ -130,6 +143,7 @@ impl ShareDialog {
     fn create(&mut self, pair: bool, cx: &mut Context<Self>) {
         if self.busy { return; }
         (self.busy, self.copied, self.created, self.authorize_error) = (true, false, None, None);
+        (self.reach, self.reach_task) = (None, None);
         let name = self.name.clone();
         self.call(move |api| async move {
             let made = if pair { api.create_pair_invite(&name).await.map(Created::Pair) } else { api.share_create(&name).await.map(Created::Link) };
@@ -151,7 +165,7 @@ impl ShareDialog {
             let result = api.share_revoke(&name, id.as_deref()).await.map_err(|e| Hangar::failure(&e));
             move |d: &mut ShareDialog| match result {
                 // Encerrar todos invalida o link recém-gerado na tela; o convite de par segue valendo no backend.
-                Ok(()) => if all && matches!(d.created, Some(Ok(Created::Link(_)))) { d.created = None; },
+                Ok(()) => if all && matches!(d.created, Some(Ok(Created::Link(_)))) { (d.created, d.reach_task) = (None, None); },
                 Err(e) => d.revoke_error = Some(e),
             }
         }, cx);
@@ -200,6 +214,30 @@ impl ShareDialog {
         cx.notify();
     }
 
+    /// Convite do Funnel recém-chegado: confere antes de mostrar. O retorno de `create` não tem `cx`, então quem dispara é
+    /// o fim de cada `call`; a guarda deixa só a primeira vez passar.
+    fn start_reach(&mut self, cx: &mut Context<Self>) {
+        let Some(Ok(Created::Link(c) | Created::Pair(c))) = &self.created else { return };
+        if needs_reach_check(&c.link) && self.reach.is_none() && self.reach_task.is_none() { self.check_reach(c.link.clone(), cx); }
+    }
+
+    fn check_reach(&mut self, link: String, cx: &mut Context<Self>) {
+        self.reach = None;
+        let (done, result) = tokio::sync::oneshot::channel();
+        let api = self.api.clone();
+        let job = AbortOnDrop(self.runtime.spawn(async move { let _ = done.send(api.share_reachability(&link).await); }));
+        self.reach_task = Some(cx.spawn(async move |this, cx| {
+            let _job = job;
+            let reach = match result.await {
+                Ok(Ok(reach)) => reach,
+                Ok(Err(e)) => Reach::Failed { stage: "funnel".into(), detail: Hangar::failure(&e) },
+                Err(_) => return,
+            };
+            let _ = this.update(cx, |d, cx| { d.reach = Some(reach); cx.notify(); });
+        }));
+        cx.notify();
+    }
+
     /// Pedido no runtime do app; a resposta volta ao diálogo se ele ainda existir, e a lista se relê depois de mudar.
     fn call<F, Fut, A>(&mut self, call: F, cx: &mut Context<Self>)
     where F: FnOnce(Api) -> Fut + Send + 'static, Fut: std::future::Future<Output = A> + Send + 'static, A: FnOnce(&mut ShareDialog) + Send + 'static {
@@ -211,6 +249,7 @@ impl ShareDialog {
             let _ = this.update(cx, |d, cx| {
                 let reread = !d.list.loading;
                 apply(d);
+                d.start_reach(cx);
                 if reread { d.reload(cx); }
                 cx.notify();
             });
@@ -219,6 +258,24 @@ impl ShareDialog {
 
     fn render_created(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         Some(match self.created.as_ref()? {
+            Ok(Created::Link(c) | Created::Pair(c)) if needs_reach_check(&c.link) && self.reach != Some(Reach::Ok) => {
+                let link = c.link.clone();
+                match &self.reach {
+                    Some(Reach::NeedsRust) => div().id("share-reach").role(Role::Alert).text_sm().text_color(theme::warning()).whitespace_normal()
+                        .child(tr_shared("share_reach_needs_rust", &[])).into_any_element(),
+                    Some(Reach::Failed { stage, detail }) => div().id("share-reach").role(Role::Alert).flex().flex_col().gap_2().items_start()
+                        .child(div().text_sm().text_color(theme::danger()).whitespace_normal()
+                            .child(tr_shared(if stage == "dns" { "share_reach_failed_dns" } else { "share_reach_failed_funnel" }, &[])))
+                        .when(!detail.is_empty(), |el| el.child(div().text_xs().text_color(theme::muted()).whitespace_normal().child(detail.clone())))
+                        .child(Button::new("share-reach-retry").small().label(tr_shared("share_reach_retry", &[]))
+                            .on_click(cx.listener(move |d, _, _, cx| d.check_reach(link.clone(), cx))))
+                        .into_any_element(),
+                    // Ainda conferindo (`Ok` não chega aqui: a guarda do braço o manda para o link).
+                    _ => div().id("share-reach").role(Role::Status).flex().items_center().gap_2().text_sm().text_color(theme::muted())
+                        .child(chrome::Spinner::new("share-reach-spin", IconName::LoaderCircle, px(14.), theme::accent()))
+                        .child(div().flex_1().whitespace_normal().child(tr_shared("share_reach_checking", &[]))).into_any_element(),
+                }
+            }
             Ok(Created::Link(c) | Created::Pair(c)) => {
                 let key = if matches!(self.created, Some(Ok(Created::Pair(_)))) { "native_par_whatsapp" } else { "compartilhar_whatsapp_texto" };
                 let (copy, send) = (c.link.clone(), whatsapp_url(&tr_shared(key, &[("link", &c.link)])));
@@ -310,7 +367,8 @@ impl Hangar {
         };
         let (runtime, name) = (self.runtime.handle().clone(), target.name);
         let dialog = cx.new(|_| ShareDialog { api, runtime, name: name.clone(), list: Remote::default(), created: None,
-            revoke_error: None, copied: false, busy: false, watch: None, watching: false, authorizing: false, authorize_error: None });
+            revoke_error: None, copied: false, busy: false, watch: None, watching: false, authorizing: false, authorize_error: None,
+            reach: None, reach_task: None });
         dialog.update(cx, |d, cx| d.reload(cx));
         let title = tr_shared("compartilhar_titulo", &[("nome", &name)]);
         window.open_dialog(cx, move |d, _, _| popup::dialog(d).w(px(560.)).title(title.clone()).child(dialog.clone()));
@@ -319,10 +377,16 @@ impl Hangar {
 
 #[cfg(test)]
 mod tests {
-    use super::{whatsapp_url, when_label, operator_command, pkexec_outcome, Authorized};
+    use super::{whatsapp_url, when_label, operator_command, pkexec_outcome, Authorized, needs_reach_check};
     use crate::api::SharePrereqs;
     use crate::i18n::tr_shared;
     use core::prelude::v1::test;
+
+    #[test]
+    fn only_funnel_links_wait_for_the_check() {
+        assert!(needs_reach_check("https://maq.tail1.ts.net:8443/par/abc"));
+        assert!(!needs_reach_check("http://192.168.0.10:8766/convite/abc"));
+    }
 
     #[test]
     fn operator_command_is_only_the_command_line() {
