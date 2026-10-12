@@ -16,8 +16,6 @@ const MAX_PAGE: usize = 256 * 1024;
 const EVERY: Duration = Duration::from_secs(5);
 const DEADLINE: Duration = Duration::from_secs(180);
 const BODY_LIMIT: usize = 4 * 1024;
-// O mesmo teto do `tunnel._run` do Python.
-const TAILSCALE_TIMEOUT: Duration = Duration::from_secs(20);
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct InviteLink { pub host: String, pub path: String }
@@ -183,16 +181,9 @@ pub async fn answer(body: &[u8], own_host: Option<String>, probe: &Probe, every:
     }
 }
 
-/// `tailscale status --json` → `Self.DNSName` sem o ponto final; o mesmo nome que o Python põe no link.
+/// O mesmo nome que o Python põe no link, lido sem passar a autoridade do servidor ao `tailscale`.
 async fn own_host() -> Option<String> {
-    let mut command = tokio::process::Command::new("tailscale");
-    command.args(["status", "--json"]).stdin(std::process::Stdio::null()).kill_on_drop(true);
-    #[cfg(windows)] { command.creation_flags(0x08000000); } // CREATE_NO_WINDOW: sem console piscando.
-    let out = tokio::time::timeout(TAILSCALE_TIMEOUT, command.output()).await.ok()?.ok()?;
-    if !out.status.success() { return None; }
-    let v: Value = serde_json::from_slice(&out.stdout).ok()?;
-    let name = v.pointer("/Self/DNSName")?.as_str()?.trim_end_matches('.');
-    (!name.is_empty()).then(|| name.to_owned())
+    crate::share::tunnel::host(&crate::share::tunnel::Real).await.ok()
 }
 
 fn json_response(status: StatusCode, v: Value) -> Response {
