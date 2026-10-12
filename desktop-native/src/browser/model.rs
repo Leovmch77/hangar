@@ -9,6 +9,8 @@ pub struct PageState {
     pub can_back: bool,
     pub can_forward: bool,
     pub error: Option<String>,
+    /// Aviso do que o navegador fez sozinho (diálogo recusado, download negado); some ao navegar.
+    pub notice: Option<String>,
 }
 
 pub fn loopback(url: &url::Url) -> bool {

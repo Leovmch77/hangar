@@ -385,7 +385,7 @@ fn listen(
         let failed = frame["unreachableUrl"].as_str().filter(|u| !u.is_empty());
         let url = failed.unwrap_or(frame["url"].as_str().unwrap_or("")).to_owned();
         let keep = failed.is_some();
-        p(&|page| { page.url = Some(url.clone()); if !keep { page.error = None; } });
+        p(&|page| { page.url = Some(url.clone()); page.notice = None; if !keep { page.error = None; } });
         h();
     });
     let (p, h, m) = (publish.clone(), history.clone(), main.clone());
@@ -413,14 +413,27 @@ fn listen(
     });
     // Sem resposta o diálogo trava a página, e no app não há quem o veja: `alert` e `beforeunload` passam, mas
     // `confirm`/`prompt` são recusados, para nada ser confirmado sem alguém ter lido.
-    let weak = Rc::downgrade(session);
+    // A pessoa vê no painel o que foi respondido por ela.
+    let (weak, p) = (Rc::downgrade(session), publish.clone());
     let _ = session.on("Page.javascriptDialogOpening", move |params| {
         let kind = params["type"].as_str().unwrap_or("");
         let accept = matches!(kind, "alert" | "beforeunload");
         let message: String = params["message"].as_str().unwrap_or("").chars().take(200).collect();
         eprintln!("[nav] dialogo {kind} {}: {message}", if accept { "aceito" } else { "recusado" });
+        let key = match kind { "alert" => Some("browser_dialog_alert"), "beforeunload" => None, _ => Some("browser_dialog_refused") };
+        if let Some(key) = key {
+            let text = crate::i18n::tr(key).replace("{message}", message.trim());
+            p(&|page| page.notice = Some(text.clone()));
+        }
         let Some(session) = weak.upgrade() else { return };
         drop(session.call("Page.handleJavaScriptDialog", json!({"accept": accept})));
+    });
+    // O download é negado no navegador inteiro (`Browser.setDownloadBehavior`); sem aviso o clique parecia não fazer nada.
+    let p = publish.clone();
+    let _ = session.on("Page.downloadWillBegin", move |params| {
+        let file = params["suggestedFilename"].as_str().filter(|f| !f.is_empty()).or(params["url"].as_str()).unwrap_or("").to_owned();
+        let text = crate::i18n::tr("browser_download_denied").replace("{file}", &file);
+        p(&|page| page.notice = Some(text.clone()));
     });
     let (p, m) = (publish.clone(), main.clone());
     session.watch("Target.targetInfoChanged", move |params| {

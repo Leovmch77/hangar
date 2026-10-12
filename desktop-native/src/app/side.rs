@@ -997,6 +997,11 @@ impl Hangar {
             .child(div().w_full().max_w(px(280.)).flex().flex_col().gap(px(8.))
                 .when(browser, |el| el.child(row("side-menu-browser", IconName::Globe, tr("browser"), cx)
                     .on_click(cx.listener(|this, _, window, cx| this.open_browser(window, cx)))))
+                // Sem Chrome nem Chromium a linha fica, desligada, e diz o que falta: sumir calada fazia a pessoa procurar.
+                .when_some(crate::browser::Engine::available().err(), |el, error| el
+                    .child(row("side-menu-browser", IconName::Globe, tr("browser"), cx).disabled(true).opacity(0.5))
+                    .child(div().px(px(4.)).text_size(px(11.)).text_color(theme::muted()).whitespace_normal()
+                        .child(if error.starts_with("HANGAR_CHROMIUM") { error } else { tr("browser_unavailable") })))
                 .when(terminal, |el| el.child(row("side-menu-terminal", IconName::SquareTerminal, tr("shortcuts_native_terminal"), cx)
                     .on_click(cx.listener(|this, _, window, cx| this.show_terminal(window, cx)))))
                 .when(git, |el| el

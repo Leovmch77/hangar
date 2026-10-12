@@ -59,6 +59,10 @@ pub(super) struct BrowserPanel {
     origin: Rc<Cell<Point<Pixels>>>,
     /// Decidido pelo `Hangar` a cada quadro (`browser_visible`).
     shown: bool,
+    /// Aviso do próprio painel (preenchimento do login que falhou), ao lado do `notice` que vem da página.
+    local_notice: Option<String>,
+    /// Aviso que a pessoa fechou no ×: o motor reenvia o estado inteiro, e o aviso voltaria a cada evento.
+    dismissed_notice: Option<String>,
     /// O que o agente está fazendo, enquanto a faixa aparece.
     #[cfg(not(target_os = "macos"))]
     agent: Option<String>,
@@ -100,7 +104,7 @@ impl BrowserPanel {
         ];
         Self { key, #[cfg(not(target_os = "macos"))] controller: None, #[cfg(not(target_os = "macos"))] cdp: None,
             #[cfg(not(target_os = "macos"))] relay: Default::default(), #[cfg(not(target_os = "macos"))] viewer: Rc::default(), engine: None, starting: None, _start: None, events, address, page: model::PageState::default(), invalid: None, #[cfg(not(target_os = "macos"))] cookies_status: None, #[cfg(not(target_os = "macos"))] cookies_confirmed: false, #[cfg(target_os = "linux")] last_fill: None, focus,
-            origin: Rc::default(), shown: false, #[cfg(not(target_os = "macos"))] agent: None, #[cfg(not(target_os = "macos"))] agent_running: 0,
+            origin: Rc::default(), shown: false, local_notice: None, dismissed_notice: None, #[cfg(not(target_os = "macos"))] agent: None, #[cfg(not(target_os = "macos"))] agent_running: 0,
             #[cfg(not(target_os = "macos"))] agent_seq: 0, #[cfg(not(target_os = "macos"))] paused: None, #[cfg(target_os = "windows")] agent_finished_at: None, #[cfg(not(target_os = "macos"))] _activity: None, _drain: drain, _subscriptions: subscriptions }
     }
 
@@ -113,6 +117,7 @@ impl BrowserPanel {
             if !self.address.focus_handle(cx).is_focused(window) && self.address.read(cx).value() != url {
                 self.address.update(cx, |input, cx| input.set_value(url, window, cx));
             }
+            if page.url != self.page.url { self.local_notice = None; }
             self.page = page;
             #[cfg(not(target_os = "macos"))]
             crate::browser::server::write_sidecar(&self.key, self.page.url.as_deref().unwrap_or(""), &self.page.title);
@@ -164,6 +169,7 @@ impl BrowserPanel {
                             let class = detail["exception"]["className"].as_str().unwrap_or("?");
                             let text = detail["text"].as_str().unwrap_or("");
                             eprintln!("[nav] autofill: exceção no script da página: {class}: {text}");
+                            let _ = this.update(cx, |this, cx| { this.local_notice = Some(tr("browser_autofill_failed")); cx.notify(); });
                             break;
                         }
                         if v["result"]["value"].as_bool() == Some(true) {
@@ -172,6 +178,7 @@ impl BrowserPanel {
                     }
                     Err(e) => {
                         eprintln!("[nav] autofill: Runtime.evaluate falhou: {e}");
+                        let _ = this.update(cx, |this, cx| { this.local_notice = Some(tr("browser_autofill_failed")); cx.notify(); });
                         break;
                     }
                 }
@@ -709,6 +716,12 @@ impl Render for BrowserPanel {
                 .flex_shrink_0().px_3().py(px(6.)).role(Role::Status)
                 .text_size(px(11.)).text_color(theme::muted()).whitespace_normal().child(text)));
         }
+        let notice = self.page.notice.clone().filter(|n| self.dismissed_notice.as_ref() != Some(n)).or_else(|| self.local_notice.clone());
+        root = root.when_some(notice, |el, text| el.child(div().id("browser-page-notice").flex_shrink_0().flex().items_center().gap_2()
+            .px_3().py(px(4.)).border_b_1().border_color(theme::border()).role(Role::Status)
+            .child(div().flex_1().min_w_0().text_size(px(11.)).text_color(theme::warning()).whitespace_normal().child(text))
+            .child(chrome::icon_button("browser-notice-close", IconName::Close, tr("close"), cx)
+                .on_click(cx.listener(|this, _, _, cx| { this.dismissed_notice = this.page.notice.clone(); this.local_notice = None; cx.notify(); })))));
         #[cfg(not(target_os = "macos"))]
         { root = root.children(self.render_agent(cx)); }
         root.child(self.render_page(cx))
