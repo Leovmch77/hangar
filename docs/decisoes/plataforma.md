@@ -1009,6 +1009,52 @@ terminais de atalho, modos de permissão).
 reinjeta é o hook de SessionStart, que só existe no Claude (o protocolo de par comum já se
 comporta assim).
 
+### Nível por lado, grupo misto e sessão de fora dentro do grupo (12/10/2026)
+
+Pedido do usuário: acesso completo como no compartilhamento, cada lado escolhendo o que dá,
+valendo para o grupo inteiro (inclusive quem entrar depois), vários pares e grupo misto, nos três
+clientes, e sem nada novo no Python.
+
+**O nível é um filho por sessão, não um campo do par.** Sob a raiz do par, cada sessão local do
+grupo ganha um registro com `parent_id` = raiz e o MESMO token: `Kind::Share` = acesso completo,
+`Kind::Pair` = ver e recado. O porteiro já resolvia acesso por `(token, sessão, kind)`, então
+escrever, terminal e as recusas saem sem código novo; `revoke(raiz)` derruba os filhos. Variante
+nova de `Kind` está proibida porque o leitor antigo poria o `shares.json` inteiro em quarentena.
+`grant`/`ungrant` também mexem nas cópias de `attach` da mesma raiz, senão o "Liberar" não chega
+ao token que o app do outro lado usa. Filho vindo de par fica fora de "Encerrar todos", da lista
+de convites e das rotas globais do chat (TTS, ditado, pensamento), que gastam crédito do dono.
+
+**O nível só viaja para mostrar.** Cada lado aplica o que ELE dá; o outro lado recebe o valor só
+para exibir. Resgate ou resposta sem `level` vem de Hangar antigo e vira `view`: dar escrita a
+quem não mostra que recebeu seria surpresa para o dono.
+
+**Entrar no grupo dá `view`; `full` só pelo clique.** Só a entrada pelo cliente é distinguível de
+entrada por agente (`hangar-send --pair`, MCP, executores da `orq` usam a mesma rota). Por isso
+toda entrada dá ver e recado e o acesso completo vem de `POST /api/sessions/{n}/pair-access`, que
+os clientes chamam depois da confirmação ("terá o terminal desta máquina") ou no "Liberar". Isso
+é garantia de interface, não fronteira de segurança: acesso completo é o shell do dono, como no
+compartilhamento.
+
+**A âncora não é trocada.** A sessão que fez o par sair do grupo ou morrer desfaz o par nos dois
+lados (a tela avisa antes); outro membro local saindo só perde o acesso. Reancorar exigiria
+renomear o registro dos dois lados no meio de recados em trânsito, sem pedido que o justifique.
+Grupo `orq` recusa membro de fora: executores entram e saem o tempo todo.
+
+**Aviso de grupo atravessa com um salto.** Local → cada par de fora pela chave de saída; de fora →
+todos os locais do grupo e para aí. `group_message` recusa texto que começa com `[de fora:`, e o
+remetente de fora vem do registro, com a sessão de origem validada. Sem o salto único, dois pares
+no mesmo grupo fariam o recado bater e voltar entre as máquinas.
+
+**Um apelido por máquina de fora.** Segundo par com o mesmo endereço reusa o apelido; par repetido
+(mesmo endereço e mesma sessão de fora) é recusado com `erro_par_repetido`.
+
+**Sessão de fora dentro do grupo.** A linha traz `pair_externals` (todos os pares do grupo, com
+`level` e `pending`); `pair_external` (o primeiro) fica por compatibilidade. Os clientes montam a
+sessão de fora a partir da entrada temporária do convite e a põem no grupo local, sem seção
+"Par · dono": duas aparições da mesma sessão confundiam com quem ela estava pareada. No menu dela
+não existe "Fechar" (era ambíguo: fecharia a sessão de outra pessoa); existe "Sair do pareamento
+com <dono>".
+
 **No Rust (12/10/2026, par externo parte 2).** `external_pairs.json` e as rotas do par passaram
 para o `hangar-server` junto com a 8766; só ele grava o arquivo (`backend/hooks/pair_hook.py` e a
 lista do Python só leem). Dois pares de fora na mesma chave agora se resolvem pela sessão (antes

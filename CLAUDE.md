@@ -455,12 +455,18 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
 - **Link de convite pelo Funnel só aparece conferido de fora.** A criação (Rust) espera o nome no
   DNS público e a página do Funnel igual à de `127.0.0.1:8766`; não abriu, revoga e responde 409
   `share_reach_failed` com a etapa. Nativo e PWA não chamam mais `/api/share/reachability`. Evidência em [plataforma.md](docs/decisoes/plataforma.md#link-de-convite-só-aparece-conferido-de-fora).
-- **Par externo: o token de entrada é um `Share` de `kind: "pair"` (só leitura), o de saída mora
+- **Par externo: o token de entrada é a raiz `Share` de `kind: "pair"`, o de saída mora
   em `external_pairs.json`; os dois arquivos são só do Rust.** O Python pede por
   `/__hangar_server/share` (fechar, renomear, trocar de modo). Só endereço `https://*.ts.net:8443`; quem assina o recado é o token
   (`[de fora: alias::sessao]`), nunca o texto; só 410 desfaz o par; nome de sessão de fora é
   `[A-Za-z0-9._-]{1,64}`; chamada à outra máquina nunca segue redirect. Um token de convidado cobre
-  várias sessões da mesma máquina. Motivo em
+  várias sessões da mesma máquina. Cada lado escolhe o nível que DÁ (`full`/`view`), guardado como
+  filho por sessão do grupo sob a raiz (`Kind::Share` = completo, `Kind::Pair` = ver e recado),
+  nunca variante nova de `Kind`; resposta sem `level` = Hangar antigo = `view`. Toda entrada em
+  grupo dá `view`; `full` só pela rota do dono `pair-access`, chamada pelos clientes (nunca por
+  `hangar-send`/MCP). A âncora sair ou morrer desfaz o par; grupo `orq` recusa membro de fora;
+  aviso de grupo atravessa o par com um salto só. Sessão de fora aparece dentro do grupo, nunca em
+  seção própria. Motivo em
   [plataforma.md](docs/decisoes/plataforma.md#par-externo-sessões-de-pessoas-diferentes).
 - **Logs pertencem ao Hangar, não à conta.** Use `log_paths.base()`; diário exportável registra
   etapas, códigos e origem da falha. Texto de conversa, credenciais e saídas brutas ficam fora

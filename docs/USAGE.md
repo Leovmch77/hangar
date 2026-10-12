@@ -460,6 +460,29 @@ um servidor "Convite · <você>", e pode tudo ali: conversar, trocar modelo e pe
   é passageiro (você trocando o modo da sessão, tmux ou túnel fora, o servidor do Hangar
   reiniciando) e ele tenta de novo, o código não foi gasto.
 
+### Parear com a sessão de outra pessoa
+
+Junta uma sessão sua com a de outra pessoa que usa o Hangar: as duas trocam recados e cada um vê a
+sessão do outro dentro do próprio grupo. Usa os mesmos pré-requisitos do compartilhamento.
+
+- **Convidar:** menu da sessão → "Compartilhar sessão" → "Convidar para parear" (no app do
+  celular, "Convidar para parear" direto no menu) → escolha o acesso que a outra pessoa terá:
+  **"Ver e mandar recado"** (lê a conversa e manda recados) ou **"Acesso completo"** (escreve nas
+  sessões do grupo, inclusive o terminal desta máquina). O link
+  `…ts.net:8443/par/…` só aparece depois de conferido pela internet, como no compartilhamento.
+- **Aceitar:** "Parear por convite…" no menu da sessão (ou em Máquinas, no PWA e no app; no nativo,
+  basta clicar no link), cole o link, escolha a sua sessão e o acesso que VOCÊ dá. O aviso diz o que a outra pessoa te
+  deu. Nos dois lados, a sessão de fora aparece dentro do grupo, marcada "de <dono>", com o
+  cabeçalho `sua-sessão ↔ apelido::sessão (dono)`.
+- **O nível vale para o grupo inteiro.** Quem você puser no grupo pela tela, com par em acesso
+  completo, pede confirmação e já entra liberado. Quem entrar por agente (`hangar-send --pair`,
+  MCP) fica com "ver e mandar recado" e a linha mostra "Acesso completo pendente" com o botão
+  "Liberar para <dono>". Grupo de orquestração não aceita sessão de fora.
+- **Sair:** na sessão de fora, "Sair do pareamento com <dono>" (a sessão dela continua rodando;
+  vocês param de se ver). Na sua sessão, "Desfazer par com <dono>". Tirar do grupo a sessão que
+  fez o par, ou fechá-la, desfaz o par para o grupo inteiro; tirar outra só corta o acesso a ela.
+- Do outro lado com Hangar antigo, o par funciona com "ver e mandar recado" dos dois lados.
+
 ### Opções do Claude Code
 
 Em **Configurações → Harnesses → Claude Code → Opções**, a preferência **Atualizar barra de
