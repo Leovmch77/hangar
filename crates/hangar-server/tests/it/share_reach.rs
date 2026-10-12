@@ -191,3 +191,31 @@ async fn route_answers_401_to_non_owner_in_rust() {
     let v: serde_json::Value = serde_json::from_str(&r.text().await.unwrap()).unwrap();
     assert_eq!(v, serde_json::json!({"detail": {"code": "erro_nao_autorizado", "params": {}, "msg": "unauthorized"}}));
 }
+
+#[tokio::test]
+async fn private_route_needs_the_secret_and_answers_like_the_public_one() {
+    // Ponte do Connect (8768): o Python só repassa, a decisão é a mesma da rota pública.
+    use std::net::SocketAddr;
+    let (_fake, up) = crate::fake::spawn_fake().await;
+    let state = std::sync::Arc::new(hangar_server::routes::AppState::new(crate::fake::config(up, "")));
+    let serve_app = |app: Router| async move {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await.unwrap() });
+        addr
+    };
+    let private = serve_app(hangar_server::routes::terminal_router(state.clone())).await;
+    let public = serve_app(hangar_server::routes::router(state)).await;
+    let post = |addr: SocketAddr, secret: Option<&'static str>| {
+        let mut req = crate::fake::client().post(format!("http://{addr}/__hangar_server/share/reachability")).body("não é json");
+        if let Some(s) = secret { req = req.header("x-hangar-internal", s); }
+        req.send()
+    };
+    assert_eq!(post(private, None).await.unwrap().status(), 404);
+    assert_eq!(post(private, Some("outro")).await.unwrap().status(), 404);
+    assert_eq!(post(public, Some(crate::fake::SECRET)).await.unwrap().status(), 404, "a porta pública não tem a ponte");
+    let r = post(private, Some(crate::fake::SECRET)).await.unwrap();
+    assert_eq!(r.status(), 400);
+    let v: serde_json::Value = serde_json::from_str(&r.text().await.unwrap()).unwrap();
+    assert_eq!(v["detail"]["code"], "share_reach_link_refused");
+}

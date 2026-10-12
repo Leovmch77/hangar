@@ -6577,6 +6577,18 @@ async def server_voice_memory(request: Request, memory_id: str | None = None):
     return await voicesock.forward_settings(request, target)
 
 
+@app.post("/api/share/reachability", dependencies=[Depends(require_auth)])
+async def share_reachability(request: Request):
+    # Só o Connect (8768) chega aqui; a decisão é do Rust, o Python só repassa.
+    from app import voicesock
+    if voicesock.is_guest(request):
+        raise HTTPException(403, detail=erro("share_owner_only", "Só o dono confere o link de convite."))
+    return await voicesock.forward_settings(
+        request, "/__hangar_server/share/reachability", timeout=220,  # o Rust insiste até ~200 s
+        unavailable=lambda: JSONResponse({"detail": erro(
+            "share_needs_rust_server", "a conferência do link precisa do servidor Rust")}, status_code=404))
+
+
 class CodexModelBody(_StrictBody):
     model: str
     effort: str | None = None

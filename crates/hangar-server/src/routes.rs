@@ -266,6 +266,7 @@ pub fn terminal_router(state: Arc<AppState>) -> Router {
         .route("/__hangar_server/voice/settings", axum::routing::any(crate::voice::routes::private_settings))
         .route("/__hangar_server/voice/memory", axum::routing::any(crate::voice::routes::private_memory))
         .route("/__hangar_server/voice/memory/{id}", axum::routing::any(crate::voice::routes::private_memory))
+        .route("/__hangar_server/share/reachability", axum::routing::post(crate::share_reach::private))
         .layer(axum::middleware::from_fn(crate::migration_status::count_bridge));
     // Painel, canal do estado e voz ficam fora da contagem: conexões longas, não chamadas da ponte.
     router.route("/__hangar_server/term", get(crate::term::private_ws))
@@ -300,6 +301,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/__hangar_server/voice/settings", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
         .route("/__hangar_server/voice/memory", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
         .route("/__hangar_server/voice/memory/{id}", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
+        .route("/__hangar_server/share/reachability", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
         // Outro método nessas rotas (preflight OPTIONS, HEAD) segue ao Python.
         .route("/api/sessions", get(crate::list::hub::list).fallback(pass_any))
         .route("/api/sessions/events", get(crate::list::hub::events).fallback(pass_any))
