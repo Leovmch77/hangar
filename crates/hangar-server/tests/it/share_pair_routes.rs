@@ -224,7 +224,7 @@ async fn env_with(o: Opts) -> Env {
     let reach = if o.reach_fails { reach_dns_fails().await } else { reach_ok().await };
     let owner_state = Arc::new(OwnerShareState { share: share.clone(), owner_port: o.owner_port, bind_ip: "127.0.0.1".into(),
         net: Arc::new(NoNet), reach });
-    let pair_state = Arc::new(PairState { app: app.clone(), owner: owner_state, remote: remote.clone() });
+    let pair_state = Arc::new(PairState { app: app.clone(), owner: owner_state, remote: remote.clone(), invite_levels: Default::default() });
     let owner = format!("http://{}", serve(owner_pair_router(pair_state.clone())).await);
     let guarded = guest_pair_router(pair_state)
         .layer(axum::middleware::from_fn_with_state(Arc::new(Gate::new(share.clone())), guard));
@@ -522,7 +522,7 @@ async fn valid_accept_writes_the_pair_and_sends_normalized_owner() {
     e.other.reply("POST /api/pair/redeem", 200, good());
     let (status, body) = e.accept("s1").await;
     assert_eq!(status, 200, "{body}");
-    assert_eq!(body, json!({"ok": true, "alias": "pc-ana", "owner": "pc-ana", "session": "Y"}));
+    assert_eq!(body, json!({"ok": true, "alias": "pc-ana", "owner": "pc-ana", "session": "Y", "level": "view"}));
     let sent = &e.other.calls()[0];
     assert_eq!(sent["auth"], Value::Null, "resgate vai sem Authorization");
     assert_eq!(sent["body"]["owner"], "minha-maquina");
@@ -830,7 +830,7 @@ async fn owner_list_carries_the_token_for_the_native_app() {
     e.seed_pair("s0", "pc-ana", "Y", ADDR);
     let (status, body) = e.call(&e.owner, "GET", "/api/external-pairs", None, None).await;
     assert_eq!(status, 200);
-    assert_eq!(body, json!([{"local_session": "s0", "alias": "pc-ana", "owner": "pc-ana", "session": "Y", "address": ADDR, "token": tok_y()}]));
+    assert_eq!(body, json!([{"local_session": "s0", "alias": "pc-ana", "owner": "pc-ana", "session": "Y", "address": ADDR, "token": tok_y(), "level_given": "view"}]));
 }
 
 // --- fim do par pela saída do grupo, sem o Python -----------------------------------------------
@@ -902,4 +902,86 @@ async fn dead_session_ends_its_external_pair_and_tells_the_other_side() {
     assert!(e.share.pairs.all().is_empty() && e.revoked(&id));
     let other = e.other.clone();
     fake::wait_until(move || other.keys() == ["DELETE /api/pair"]).await;
+}
+
+// --- nível de acesso (convite, aceite, resgate) ------------------------------------------------
+
+impl Env {
+    async fn invite(&self, name: &str, body: Value) -> (u16, Value) {
+        self.owner_post(&format!("/api/sessions/{name}/pair-invite"), body).await
+    }
+    fn kind_for(&self, token: &str, session: &str) -> Option<Kind> { self.share.store.lookup_token(token)?.kind_of(session) }
+    async fn level_given(&self) -> Value { self.call(&self.owner, "GET", "/api/external-pairs", None, None).await.1[0]["level_given"].clone() }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn invite_full_redeemed_by_new_peer_gives_full_access() {
+    let e = env().await;
+    let (status, body) = e.invite("s0", json!({"level": "full"})).await;
+    assert_eq!(status, 200, "{body}");
+    let code = code_of(body["link"].as_str().unwrap());
+    let (status, body) = e.redeem(&code, json!({"level": "view"})).await;
+    assert_eq!((status, &body["level"]), (200, &json!("full")), "{body}");
+    assert_eq!(e.kind_for(body["token"].as_str().unwrap(), "s0"), Some(Kind::Share));
+    assert_eq!(e.level_given().await, "full");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn invite_full_redeemed_by_old_peer_falls_back_to_view() {
+    let e = env().await;
+    let (_, body) = e.invite("s0", json!({"level": "full"})).await;
+    let code = code_of(body["link"].as_str().unwrap());
+    // Hangar antigo não manda `level` no resgate.
+    let (status, body) = e.redeem(&code, json!({})).await;
+    assert_eq!((status, &body["level"]), (200, &json!("view")), "{body}");
+    assert_eq!(e.kind_for(body["token"].as_str().unwrap(), "s0"), Some(Kind::Pair));
+    assert_eq!(e.level_given().await, "view");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn invite_without_level_is_view_and_bad_level_is_refused() {
+    let e = env().await;
+    let (_, body) = e.invite("s0", Value::Null).await;
+    let code = code_of(body["link"].as_str().unwrap());
+    let (status, body) = e.redeem(&code, json!({"level": "full"})).await;
+    assert_eq!((status, &body["level"]), (200, &json!("view")), "{body}");
+    assert_eq!(e.kind_for(body["token"].as_str().unwrap(), "s0"), Some(Kind::Pair));
+    assert_eq!(e.invite("s2", json!({"level": "admin"})).await.0, 422);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn accept_full_with_new_peer_gives_full_access_and_sends_level() {
+    let e = env().await;
+    let mut answer = good();
+    answer["level"] = json!("view");
+    e.other.reply("POST /api/pair/redeem", 200, answer);
+    let (status, body) = e.owner_post("/api/sessions/s1/pair-accept", json!({"link": LINK, "level": "full"})).await;
+    assert_eq!((status, &body["level"]), (200, &json!("full")), "{body}");
+    let sent = &e.other.calls()[0]["body"];
+    assert_eq!(sent["level"], "full");
+    assert_eq!(e.kind_for(sent["token"].as_str().unwrap(), "s1"), Some(Kind::Share));
+    assert_eq!(e.level_given().await, "full");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn accept_full_with_old_peer_falls_back_to_view() {
+    let e = env().await;
+    // Hangar antigo: a resposta do resgate não traz `level`.
+    e.other.reply("POST /api/pair/redeem", 200, good());
+    let (status, body) = e.owner_post("/api/sessions/s1/pair-accept", json!({"link": LINK, "level": "full"})).await;
+    assert_eq!((status, &body["level"]), (200, &json!("view")), "{body}");
+    let sent = &e.other.calls()[0]["body"];
+    assert_eq!(e.kind_for(sent["token"].as_str().unwrap(), "s1"), Some(Kind::Pair));
+    assert_eq!(e.level_given().await, "view");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn accept_without_level_is_view() {
+    let e = env().await;
+    let mut answer = good();
+    answer["level"] = json!("full");
+    e.other.reply("POST /api/pair/redeem", 200, answer);
+    let (status, body) = e.accept("s1").await;
+    assert_eq!((status, &body["level"]), (200, &json!("view")), "{body}");
+    assert_eq!(e.other.calls()[0]["body"]["level"], "view");
 }

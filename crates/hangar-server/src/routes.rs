@@ -344,7 +344,7 @@ fn pair_state(state: &Arc<AppState>) -> Option<Arc<PairState>> {
     let share = state.share.clone()?;
     let owner = Arc::new(owner_routes::OwnerShareState { share, owner_port: state.cfg.listen.port(),
         bind_ip: state.cfg.listen.ip().to_string(), net: Arc::new(owner_routes::RealNet), reach: owner_routes::Reach::production() });
-    Some(Arc::new(pair_routes::PairState { app: state.clone(), owner, remote: Arc::new(pair_routes::Direct) }))
+    Some(Arc::new(pair_routes::PairState { app: state.clone(), owner, remote: Arc::new(pair_routes::Direct), invite_levels: Default::default() }))
 }
 
 /// Convites e par externo do dono na 8765; quem não é o dono segue ao Python, que recusa como antes.

@@ -4,7 +4,8 @@
 //!
 //! Uma chave pode ter mais de um par (resgate com token já existente): recado e saída nomeiam a
 //! sessão (`session` no corpo, `?session=` na saída) e só sem ambiguidade a omitem, como o Python.
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use axum::body::Bytes;
 use axum::extract::{Path, RawQuery, State};
@@ -59,6 +60,10 @@ pub struct PairState {
     /// Lojas, porta do dono e conferência pela internet, as mesmas do convite comum.
     pub owner: Arc<OwnerShareState>,
     pub remote: Arc<dyn Remote>,
+    /// Nível de cada convite ainda não resgatado. Fora do `shares.json` (Hangar antigo não conhece o
+    /// campo): reiniciar antes do resgate deixa o convite em "ver e recado", o lado seguro.
+    // ponytail: convite vencido sem resgate fica aqui até reiniciar; poucos bytes por convite.
+    pub invite_levels: Mutex<HashMap<String, Kind>>,
 }
 
 type St = State<Arc<PairState>>;
@@ -260,9 +265,48 @@ async fn notify_paired(app: &AppState, me: &str, peer: &str, owner: &str) -> Res
     sent.map_err(|e| e.get("msg").map_or_else(|| py_str(&e), py_str))
 }
 
+/// `level` do corpo: "full" = acesso completo (`Share`), "view" ou ausente = ver e recado (`Pair`).
+fn level_in(map: &Map<String, Value>) -> Result<Kind, Response> {
+    match map.get("level") {
+        None | Some(Value::Null) => Ok(Kind::Pair),
+        Some(Value::String(s)) if s == "view" => Ok(Kind::Pair),
+        Some(Value::String(s)) if s == "full" => Ok(Kind::Share),
+        Some(other) => Err(json_response(StatusCode::UNPROCESSABLE_ENTITY, json!({"detail": [{"type": "literal_error",
+            "loc": ["body", "level"], "msg": "Input should be 'full' or 'view'", "input": other}]}))),
+    }
+}
+
+fn level_name(kind: Kind) -> &'static str { if kind == Kind::Share { "full" } else { "view" } }
+
+/// Sem `level` = Hangar antigo do outro lado: o que eu dou a ele cai para "ver e recado".
+fn clamp_for_old(other: Option<&Value>, mine: Kind) -> Kind {
+    if other.is_none_or(Value::is_null) { Kind::Pair } else { mine }
+}
+
+/// O nível vale para cada sessão daqui do grupo da ponta do par, cada uma com a própria vida.
+async fn grant_group(app: &AppState, share: &ShareState, root_id: &str, name: &str, kind: Kind) -> Result<(), String> {
+    let mut locals = vec![name.to_owned()];
+    if let Some(groups) = &app.groups
+        && let Some(side) = groups.link(name).await.map_err(|e| e.to_string())? {
+        locals.extend(side.peers.into_iter().filter(|p| !p.contains("::") && p != name));
+    }
+    for session in locals {
+        // Sem vida conhecida o acesso não teria fim: a sessão fica de fora.
+        let Some(life) = share.lives.life(&session, true).await else {
+            tracing::warn!(code = "external_pair_grant_skipped", session = %session, "par externo: sessão sem vida, nível não aplicado");
+            continue;
+        };
+        share.store.grant(root_id, &session, Some(life), kind).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 // --- dono ------------------------------------------------------------------------------------
 
-async fn pair_invite(State(st): St, Path(name): Path<String>) -> Response {
+async fn pair_invite(State(st): St, Path(name): Path<String>, bytes: Bytes) -> Response {
+    // Corpo vazio (cliente antigo) = ver e recado.
+    let map = match serde_json::from_slice::<Value>(&bytes) { Ok(Value::Object(m)) => m, _ => Map::new() };
+    let level = match level_in(&map) { Ok(l) => l, Err(r) => return r };
     let share = &st.owner.share;
     let Some(life) = share.lives.life(&name, true).await else {
         return detail(StatusCode::NOT_FOUND, "erro_sessao_inexistente", "sessão não encontrada", json!({}));
@@ -275,6 +319,7 @@ async fn pair_invite(State(st): St, Path(name): Path<String>) -> Response {
     let (s, code) = match share.store.create(&name, Some(life), Kind::Pair, false) { Ok(v) => v, Err(e) => return io_failed(e) };
     // Mesma regra do convite comum: o link só sai depois de abrir pela internet.
     if let Some(refusal) = reach_or_revoke(&st.owner, &base, format!("/par/{code}"), &s.id).await { return refusal }
+    st.invite_levels.lock().unwrap().insert(s.id.clone(), level);
     json_response(StatusCode::OK, json!({"id": s.id, "link": format!("{base}/par/{code}"), "expires_at": s.code_expires_at}))
 }
 
@@ -290,7 +335,8 @@ async fn undo_remote(remote: &dyn Remote, address: &str, token: &str, session: &
 }
 
 async fn pair_accept(State(st): St, Path(name): Path<String>, bytes: Bytes) -> Response {
-    let (vals, _) = match fields(&bytes, &[("link", true, None)], false) { Ok(v) => v, Err(r) => return r };
+    let (vals, body) = match fields(&bytes, &[("link", true, None)], false) { Ok(v) => v, Err(r) => return r };
+    let level = match level_in(&body) { Ok(l) => l, Err(r) => return r };
     let parsed = pairs::parse_pair_link(&vals[0])
         .filter(|(_, code)| (1..=64).contains(&code.len()) && code.bytes().all(|b| b.is_ascii_alphanumeric()));
     let Some((address, code)) = parsed else {
@@ -312,7 +358,8 @@ async fn pair_accept(State(st): St, Path(name): Path<String>, bytes: Bytes) -> R
     let my_base = match share.ensure_on().await { Ok(b) => b, Err(e) => return prereq_error(e) };
     // Vale antes do resgate: recado do outro lado pode chegar antes de este lado terminar.
     let (mine, my_token) = match share.store.create_redeemed(&name, Some(life), Kind::Pair) { Ok(v) => v, Err(e) => return io_failed(e) };
-    let ask = json!({"code": code, "session": name, "address": my_base, "token": my_token, "owner": my_owner(app)});
+    let ask = json!({"code": code, "session": name, "address": my_base, "token": my_token, "owner": my_owner(app),
+        "level": level_name(level)});
     let resp = match remote.call(&address, None, reqwest::Method::POST, "/api/pair/redeem", Some(&ask)).await {
         Ok((_, resp)) => resp,
         Err(e) => {
@@ -338,6 +385,7 @@ async fn pair_accept(State(st): St, Path(name): Path<String>, bytes: Bytes) -> R
         return detail(StatusCode::BAD_GATEWAY, "erro_par_resposta_invalida", "resposta do par inválida", json!({}));
     }
     let token = token.unwrap_or_default();
+    let given = clamp_for_old(resp.get("level"), level);
     let alias = share.pairs.free_alias(owner, &app.peers.ids(), &server_id(app));
     let peer = format!("{alias}::{session}");
     let mut linked = false;
@@ -347,6 +395,7 @@ async fn pair_accept(State(st): St, Path(name): Path<String>, bytes: Bytes) -> R
             created_at: share.store.now() }).map_err(|e| e.to_string())?;
         join_external(app, &name, &peer).await.map_err(|(_, d)| d["msg"].as_str().unwrap_or_default().to_owned())?;
         linked = true;
+        grant_group(app, share, &mine.id, &name, given).await?;
         notify_paired(app, &name, &peer, owner).await
     }.await;
     if let Err(e) = done {
@@ -361,12 +410,16 @@ async fn pair_accept(State(st): St, Path(name): Path<String>, bytes: Bytes) -> R
         let msg = format!("pareamento desfeito: falha ao avisar as sessões ({e})");
         return detail(StatusCode::BAD_GATEWAY, "erro_pareamento_desfeito", &msg, json!({"avisos": e}));
     }
-    json_response(StatusCode::OK, json!({"ok": true, "alias": alias, "owner": owner, "session": session}))
+    json_response(StatusCode::OK, json!({"ok": true, "alias": alias, "owner": owner, "session": session, "level": level_name(given)}))
 }
 
 async fn list_pairs(State(st): St) -> Response {
-    let all: Vec<Value> = st.owner.share.pairs.all().into_iter().map(|r| json!({"local_session": r.local_session,
-        "alias": r.alias, "owner": r.peer_owner, "session": r.peer_session, "address": r.peer_address, "token": r.peer_token})).collect();
+    let store = &st.owner.share.store;
+    let all: Vec<Value> = st.owner.share.pairs.all().into_iter().map(|r| {
+        let full = store.children(&r.share_id).iter().any(|c| c.session == r.local_session && c.kind == Kind::Share);
+        json!({"local_session": r.local_session, "alias": r.alias, "owner": r.peer_owner, "session": r.peer_session,
+            "address": r.peer_address, "token": r.peer_token, "level_given": level_name(if full { Kind::Share } else { Kind::Pair })})
+    }).collect();
     json_response(StatusCode::OK, Value::Array(all))
 }
 
@@ -499,7 +552,7 @@ async fn pair_page(State(st): St, Path(code): Path<String>) -> Response {
 
 async fn pair_redeem(State(st): St, bytes: Bytes) -> Response {
     let spec = [("code", true, Some(64)), ("session", true, Some(64)), ("address", true, Some(200)), ("token", true, Some(200)), ("owner", true, Some(40))];
-    let (v, _) = match fields(&bytes, &spec, false) { Ok(v) => v, Err(r) => return r };
+    let (v, ask) = match fields(&bytes, &spec, false) { Ok(v) => v, Err(r) => return r };
     let [code, session, address, token, owner] = &v[..] else { unreachable!() };
     let (app, share) = (&*st.app, &*st.owner.share);
     let address = pairs::normalize_address(address);
@@ -548,6 +601,13 @@ async fn pair_redeem(State(st): St, bytes: Bytes) -> Response {
         undo_local(app, share, &name, &peer, &redeemed.id).await;
         return respond(undone());
     }
+    let mine = st.invite_levels.lock().unwrap().remove(&invite.id).unwrap_or(Kind::Pair);
+    let given = clamp_for_old(ask.get("level"), mine);
+    if let Err(e) = grant_group(app, share, &redeemed.id, &name, given).await {
+        tracing::warn!(code = "external_pair_grant_failed", session = %name, error = %e, "par externo: nível não gravado, resgate desfeito");
+        undo_local(app, share, &name, &peer, &redeemed.id).await;
+        return respond(undone());
+    }
     if let Err(e) = notify_paired(app, &name, &peer, owner).await {
         tracing::warn!(code = "external_pair_notice_failed", session = %name, error = %e, "par externo: aviso falhou, resgate desfeito");
         undo_local(app, share, &name, &peer, &redeemed.id).await;
@@ -555,7 +615,7 @@ async fn pair_redeem(State(st): St, bytes: Bytes) -> Response {
         return respond((StatusCode::BAD_GATEWAY, undone().1));
     }
     json_response(StatusCode::OK, json!({"session": name, "owner": my_owner(app),
-        "address": format!("https://{my_host}:{FUNNEL_PORT}"), "token": my_token}))
+        "address": format!("https://{my_host}:{FUNNEL_PORT}"), "token": my_token, "level": level_name(given)}))
 }
 
 /// O registro de par do token que fala. Com várias raízes, `session` escolhe; sem ela, só vale a única.
