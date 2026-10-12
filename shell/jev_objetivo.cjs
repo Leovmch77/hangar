@@ -36,7 +36,9 @@ const normalizar = (nome) => String(nome).replace(/\s*\*\s*$/, '').trim().toLowe
 const OPERACOES = {
   CLICK: 'click an element to move one step toward the goal',
   TYPE_TEXT: 'type a value into a text field',
-  SELECT: 'choose an option in a dropdown',
+  // Lista fechada (combobox do Radix mostrando "Selecione") abre com CLICK; sem esta distinção o Jev
+  // escolhia SELECT e mirava opções de outra lista que estavam na tela.
+  SELECT: 'choose one of the option elements already listed on the page; a closed dropdown is opened with CLICK first',
   // Busca costuma ter dois botoes iguais e a lista de sugestoes aberta: o alvo do clique se dividia
   // entre os tres e o laco parava com o termo ja digitado. Enter no campo nao precisa de alvo.
   PRESS_ENTER: 'press Enter in the field just typed into, to run the search or submit that one field',
@@ -53,7 +55,7 @@ const OPERACOES = {
 // re-observa e corrige. O alvo é que precisa de piso alto — clicar no elemento errado não corrige.
 // DONE e BLOCKED tem piso PROPRIO, e alto: um CLICK errado o ciclo seguinte corrige, uma parada
 // errada encerra o trabalho. Com o piso da operacao o laco declarou pronto com 0,50, sem ter salvo.
-const LIMIARES = { operacao: 0.3, alvo: 0.6, arriscado: 0.5, conclusao: 0.6 };
+const LIMIARES = { operacao: 0.3, alvo: 0.6, arriscado: 0.5, arriscadoAlvo: 0.3, conclusao: 0.6 };
 
 const distribuicao = (resposta) => Object.entries(resposta?.probabilities ?? {})
   .sort((a, b) => b[1] - a[1]).slice(0, 3)
@@ -83,14 +85,19 @@ function forca(resposta) {
 function sinonimos(head, candidatos) {
   const vencedor = candidatos.find((c) => c.ref === head?.choice);
   if (!vencedor) return null;
-  const iguais = candidatos.filter((c) => c.papel === vencedor.papel && c.nome === vencedor.nome);
+  // Também conta como gêmeo o rótulo que COMEÇA com o outro, palavra inteira: "Editar" no painel e
+  // "Editar registro de 12/10/2026 10:39" na lista abrem a mesma edição, e a massa se dividia (0,34
+  // contra 0,33). O risco continua julgado sobre o vencedor.
+  const mesmoAto = (a, b) => a === b || b.startsWith(`${a} `) || a.startsWith(`${b} `);
+  const iguais = candidatos.filter((c) => c.papel === vencedor.papel && mesmoAto(c.nome, vencedor.nome));
   if (iguais.length < 2) return null;
   // Sem distribuição não há massa a somar, e somar `{}` daria ZERO — trocando a `confidence` que o
   // `forca()` usaria por um piso que nada alcança, e travando o laço justamente onde esta função
   // existe pra destravar. Sem `probabilities`, o caminho é o de sempre.
   const p = head.probabilities;
   if (!p) return null;
-  return { ref: iguais[0].ref, massa: iguais.reduce((s, c) => s + (p[c.ref] ?? 0), 0) };
+  const maisProvavel = iguais.reduce((m, c) => ((p[c.ref] ?? 0) > (p[m.ref] ?? 0) ? c : m), iguais[0]);
+  return { ref: maisProvavel.ref, massa: iguais.reduce((s, c) => s + (p[c.ref] ?? 0), 0) };
 }
 
 const CHAVE_SECRETA = /senha|password|passwd|token|secret|api[-_ ]?key|cart[aã]o|cvv|cvc|\bpin\b|\botp\b/i;
@@ -104,11 +111,13 @@ function parsarSnapshot(texto, max = MAX_CANDIDATOS - 1) {
     if (!m) continue;
     const [, papel, nome, ref] = m;
     if (!PAPEIS_INTERATIVOS.has(papel)) continue;
-    // Elemento sem nome acessível não dá ao Jev nada para julgar, e ocupa uma vaga do choice.
-    if (!nome || !nome.trim()) continue;
+    // Elemento sem nome acessível não dá ao Jev nada para julgar, e ocupa uma vaga do choice. Campo de
+    // texto é a exceção: editor rich text (Tiptap, ProseMirror) costuma não ter rótulo, e sem ele não
+    // havia onde escrever o corpo de uma evolução.
+    if ((!nome || !nome.trim()) && !PAPEIS_DE_TEXTO.has(papel)) continue;
     // Desabilitado não reage ao clique nem aceita texto: como alvo, só gastaria um passo.
     if (/\[ref=@e\d+\](?: \[\w+\])* \[disabled\]/.test(linha)) continue;
-    achados.push({ ref, papel, nome: nome.trim().slice(0, 120) });
+    achados.push({ ref, papel, nome: (nome?.trim() || 'campo de texto sem rotulo').slice(0, 120) });
     if (achados.length >= max) break;
   }
   return achados;
@@ -218,9 +227,10 @@ function montarPerguntas(candidatos, dados = {}, editaveis = new Set(), listaAbe
     // Sem esta regra o head escolhia um campo que valores_atuais ja mostrava cheio, e o laco
     // reescrevia o mesmo texto enquanto o campo que faltava seguia vazio.
     ...headDeAlvo('type_text_target', 'If the next operation is TYPE_TEXT, which field is typed into? '
-      + 'Pick a field that valores_atuais shows as still empty, or as still showing an invitation '
-      + 'to choose ("Buscar...", "Selecione..."). Never pick a field that already holds the value '
-      + 'it needs.', campos),
+      + 'Pick a field that valores_atuais shows as still empty, as still showing an invitation '
+      + 'to choose ("Buscar...", "Selecione..."), or holding a value different from what the goal asks '
+      + 'for it (an edit replaces the old text). Never pick a field that already holds exactly the '
+      + 'value it needs.', campos),
     // Pergunta PROPRIA para encerrar, em vez de um limiar mais alto no `choice` da operacao: sao
     // coisas diferentes. "DONE e a melhor das operacoes" nao e "a pagina confirma que acabou" — o
     // laco ja deu DONE 0,59 com "Alteracoes nao salvas" escrito na tela. Esta pergunta olha o fato.
@@ -235,6 +245,12 @@ function montarPerguntas(candidatos, dados = {}, editaveis = new Set(), listaAbe
       type: 'noul',
       instructions: 'The next operation would buy, send, publish, or delete something that another person would see or that cannot be undone.',
     },
+    // O risco do CLIQUE e julgado por elemento: perguntado sobre "a proxima operacao", o Jev julgava
+    // o objetivo inteiro, e "crie uma evolucao e salve" barrava ja o botao que so abre o formulario.
+    ...headDeAlvo('click_risk', 'Which of these elements, if clicked now, would make a purchase or payment, send '
+      + 'a message or order to someone outside, publish something, or delete something? Opening a form, a menu, '
+      + 'a dialog, a tab or a new blank record does not count, and neither does saving or editing a record.',
+    candidatos.filter((c) => PAPEIS_QUE_ENVIAM.has(c.papel))),
   };
 }
 
@@ -300,8 +316,11 @@ const JS_VALORES = `(() => {
   const espelho = (e) => (e.parentElement || {}).querySelector
     ? e.parentElement.querySelector('select') : null;
   const fora = { valores: {}, obrigatorios_vazios: [], editaveis: [], lista_aberta: '' };
-  for (const e of document.querySelectorAll('input,textarea,select,[role=switch],[role=checkbox],[role=combobox]')) {
+  for (const e of document.querySelectorAll('input,textarea,select,[role=switch],[role=checkbox],[role=combobox],[contenteditable=true]')) {
     if (!visivel(e)) continue;
+    // Editor rich text sem rotulo: mesmo nome que o parsarSnapshot da a ele, e o texto como valor.
+    const rico = e.isContentEditable && !/^(INPUT|TEXTAREA)$/.test(e.tagName);
+    if (rico) { const n = nomeDe(e) || 'campo de texto sem rotulo'; fora.valores[n.slice(0, 80)] = String(e.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 400); continue; }
     const nome = nomeDe(e);
     if (!nome) continue;
     // aria-checked="false" PRECISA virar false, nao cair no ramo de baixo: um switch do Radix e
@@ -485,7 +504,15 @@ function decidir(respostas, candidatos = [], limiares = LIMIARES) {
   if (!escolhido) return { parar: `o Jev escolheu ${head.choice}, que nao esta na pagina` };
   // So clique em botao, link ou item de menu confirma, compra ou apaga. Julgado em todo passo, o
   // risco do objetivo inteiro ("preencha e envie") barrava ja o primeiro campo ou o primeiro radio.
-  if (escolha === 'CLICK' && PAPEIS_QUE_ENVIAM.has(escolhido.papel) && ehArriscado) return paradaDeRisco();
+  if (escolha === 'CLICK' && PAPEIS_QUE_ENVIAM.has(escolhido.papel)) {
+    const p = respostas.click_risk?.probabilities;
+    // Sem o head (resposta antiga ou falha), vale o julgamento geral de antes.
+    const risco = p ? (gemeos ? candidatos.filter((c) => c.papel === escolhido.papel && c.nome === escolhido.nome)
+      .reduce((soma, c) => soma + (p[c.ref] ?? 0), 0) : (p[alvo] ?? 0)) : null;
+    if (risco === null ? ehArriscado : risco >= limiares.arriscadoAlvo) {
+      return { parar: `operacao arriscada (${(risco ?? arriscado).toFixed(2)}): clicar em ${rotulo(escolhido)} precisa da ordem do usuario` };
+    }
+  }
   // SELECT numa listbox ARIA vira clique; quem decide se ele pode acontecer e o laco, que so sabe
   // disso depois de tentar o <select> nativo.
   return { operacao: escolha, alvo, escolhido, confianca: forcaAlvo, arriscado: ehArriscado ? arriscado : null };
