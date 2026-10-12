@@ -121,7 +121,8 @@ Identidade: sidecar da sessão no modo sem terminal; tmux no modo com terminal.
                           (quem chama responde pela ordem do usuario; cada liberacao sai no log)
     --dados <json>        valores para os campos, com as chaves que você quiser: o Jev casa cada
                           um com o rótulo da página. Campo não coberto cai no LLM pequeno
-                          (JEV_TEXTO_BASE_URL/_API_KEY/_MODELO, ou JEV_TEXTO_CMD)
+                          (modelo auxiliar do Jev: JEV_AUX_BASE_URL/_API_KEY/_MODELO/_ESFORCO,
+                          ou JEV_TEXTO_CMD)
   confere <estado>        o Jev diz se a tela já mostra o estado (sai 0 = sim); use antes do shot
   JEV_ENDPOINT / JEV_MODEL  onde e com qual modelo o Jev decide (configuração do servidor; vazio = typesafe.ai)
 
@@ -429,12 +430,15 @@ function semJev() {
 }
 
 // O LLM pequeno que escreve o valor de um campo no `objetivo` — o único ponto do laço em que um
-// modelo de linguagem entra. Endpoint compatível com a OpenAI se JEV_TEXTO_BASE_URL estiver posta;
+// modelo de linguagem entra. Endpoint compatível com a OpenAI se o auxiliar tiver endereço;
 // senão, um comando local que lê o pedido como argumento e imprime só o valor.
 const TEXTO_CMD_PADRAO = 'claude -p --model claude-haiku-4-5-20251001';
 
 // Lido igual aqui e na checagem de `problemaDoEscritor`: valor com espaço passava numa e quebrava na outra.
-const envTexto = (env, k) => String(env[k] ?? '').trim();
+// O auxiliar da sessão chega em JEV_AUX_*; JEV_TEXTO_* posto no ambiente, mesmo vazio, é ordem de quem
+// chamou (desligar o escritor num teste) e vence.
+const DO_AUX = { JEV_TEXTO_BASE_URL: 'JEV_AUX_BASE_URL', JEV_TEXTO_API_KEY: 'JEV_AUX_API_KEY', JEV_TEXTO_MODELO: 'JEV_AUX_MODELO' };
+const envTexto = (env, k) => String((k in DO_AUX && !(k in env) ? env[DO_AUX[k]] : env[k]) ?? '').trim();
 
 function escritorDeTexto(env = process.env) {
   // Sem `temperature`: modelos novos (Haiku 5.5 na Anthropic) recusam o pedido inteiro com ele.
@@ -442,13 +446,15 @@ function escritorDeTexto(env = process.env) {
     const base = envTexto(env, 'JEV_TEXTO_BASE_URL').replace(/\/$/, '');
     const modelo = envTexto(env, 'JEV_TEXTO_MODELO') || 'gpt-4o-mini';
     const chave = envTexto(env, 'JEV_TEXTO_API_KEY');
+    const esforco = envTexto(env, 'JEV_AUX_ESFORCO');
     return async (pedido) => {
       let r;
       try {
         r = await fetch(`${base}/chat/completions`, {
           method: 'POST',
           headers: { authorization: `Bearer ${chave}`, 'content-type': 'application/json' },
-          body: JSON.stringify({ model: modelo, messages: [{ role: 'user', content: pedido }], max_tokens: 600 }),
+          body: JSON.stringify({ model: modelo, messages: [{ role: 'user', content: pedido }], max_tokens: 600,
+            ...(esforco ? { reasoning_effort: esforco } : {}) }),
           signal: AbortSignal.timeout(60_000),
         });
         if (!r.ok) erro(`o modelo de texto recusou: ${r.status} ${jev.semChave(await r.text(), chave).slice(0, 200)}`);
@@ -495,10 +501,10 @@ function problemaDoEscritor(env = process.env) {
   const problemas = [];
   if (base) {
     if (base === String(env.JEV_ENDPOINT ?? '').trim() || /\/decisions\/?$|systemone/.test(base)) {
-      problemas.push(`jev_texto_base_url ("${base}") e o endereco de decisoes do Jev; ali vai um endpoint`
+      problemas.push(`jev_aux_base_url ("${base}") e o endereco de decisoes do Jev; ali vai um endpoint`
         + ' compativel com a OpenAI, como https://openrouter.ai/api/v1');
     } else if (!chave) {
-      problemas.push(`jev_texto_base_url esta preenchido e jev_texto_api_key esta vazio: preencha a chave`);
+      problemas.push(`jev_aux_base_url esta preenchido e jev_aux_api_key esta vazio: preencha a chave do modelo auxiliar`);
     } else {
       return null;
     }

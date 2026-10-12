@@ -100,7 +100,7 @@ pub fn rust_route(method: &Method, path: &str) -> bool {
     if crate::accounts::http::matches(method, path) { return true; }
     if *method == Method::GET {
         if matches!(path, "/api/sessions" | "/api/sessions/events" | "/api/costs" | "/api/cotacao" | "/api/uso" | "/api/migration/status" | "/api/presence"
-            | "/api/voice" | "/api/voice/settings" | "/api/voice/memory") {
+            | "/api/voice" | "/api/voice/settings" | "/api/voice/memory" | "/api/jev/aux/cliproxy") {
             return true;
         }
         let tail = path.strip_prefix("/api/sessions/").and_then(|r| r.split_once('/')).map(|(_, t)| t);
@@ -120,7 +120,7 @@ pub fn rust_route(method: &Method, path: &str) -> bool {
     }
     // Interface dos mods: o Rust atende as sessões dele e repassa as outras (os contadores mostram).
     if *method == Method::POST {
-        if matches!(path, "/api/claude/defaults" | "/api/presence" | "/api/presence/heartbeat") {
+        if matches!(path, "/api/claude/defaults" | "/api/presence" | "/api/presence/heartbeat" | "/api/jev/aux/models") {
             return true;
         }
         let tail = path.strip_prefix("/api/sessions/").and_then(|r| r.split_once('/')).map(|(_, t)| t);

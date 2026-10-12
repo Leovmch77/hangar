@@ -122,7 +122,6 @@ _TELA = re.compile(
 # Notificação de subagente chega como prompt, mas ninguém a escreveu pedindo tela.
 _NAO_E_PEDIDO = ("<task-notification", "[SYSTEM NOTIFICATION")
 JEV_URL = "https://api.typesafe.ai/v1/systemone"
-JEV_OPENROUTER_URL = "https://openrouter.ai/api/alpha/decisions"
 JEV_TIMEOUT_S = 2.0
 JEV_LIMIAR = 0.5
 # Depois de uma falha o Jev descansa: chave errada ou endereço fora fariam cada prompt pagar o teto de espera.
@@ -169,12 +168,8 @@ def _jev_precisa(prompt: str) -> bool | None:
     pergunta = {"precisa": {"type": "noul", "instructions": (
         "Will handling this message require opening, looking at, clicking or testing a web page or "
         "an app screen in a browser?")}}
-    # Mesma regra de `runtime_config.destino_jev`: chave do OpenRouter sem endereço vai ao OpenRouter.
+    # Endereço e modelo chegam resolvidos pelo backend (`runtime_config.jev_destino_env`).
     endpoint, modelo = os.environ.get("JEV_ENDPOINT") or "", os.environ.get("JEV_MODEL") or ""
-    if "openrouter.ai" in endpoint or (not endpoint and key.startswith("sk-or-")):
-        endpoint, modelo = endpoint or JEV_OPENROUTER_URL, modelo or "~typesafe/jev-latest"
-        if modelo.startswith("typesafe/") and modelo.endswith("-latest"):
-            modelo = "~" + modelo
     req = urllib.request.Request(
         endpoint or JEV_URL,
         data=json.dumps({"model": modelo or "jev-latest",

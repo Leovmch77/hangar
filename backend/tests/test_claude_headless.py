@@ -1659,7 +1659,8 @@ def test_processo_nao_herda_a_ponte_de_outra_sessao(sidecar, monkeypatch, lancad
 
 
 @pytest.mark.parametrize("var", ["CLAUDE_CODE_SUBAGENT_MODEL", "CLAUDE_CODE_ENABLE_FUNCTION_HOOKS",
-                                 "TYPESAFE_API_KEY", "JEV_ENDPOINT", "JEV_MODEL", "JEV_TEXTO_API_KEY"])
+                                 "TYPESAFE_API_KEY", "JEV_ENDPOINT", "JEV_MODEL", "JEV_TEXTO_API_KEY",
+                                 "JEV_AUX_API_KEY"])
 def test_processo_nao_herda_do_backend_variavel_da_sessao(sidecar, monkeypatch, lancador_cano, var):
     """Sessão sem subagente, sem Jev e com o portão de hooks desligado: o valor que o backend herdou
     de outra sessão não chega ao filho."""

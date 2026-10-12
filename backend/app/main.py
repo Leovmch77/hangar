@@ -194,6 +194,12 @@ def main():
         computer_control.migrate_jev()
     except Exception as e:                            # noqa: BLE001 — nunca derruba a subida
         print(f"[hangar] AVISO: configuração do Jev não chegou ao Computer Use ({e})")
+    # Modelo auxiliar único: o texto do navegador ou o modelo do Computer Use vira o `jev_aux_*`.
+    try:
+        from app import runtime_config
+        runtime_config.migrar_jev_aux()
+    except Exception as e:                            # noqa: BLE001 — nunca derruba a subida
+        print(f"[hangar] AVISO: o modelo auxiliar antigo não virou o do Jev ({e})")
     # Ponte de skills (pi/kimi/codex) — rebuilda as fazendas de symlinks a partir das fontes do
     # Claude. Aqui e no installer: bump de versão de plugin muda o caminho do cache e link velho
     # fica pendurado; fail-soft como os hooks, um erro aqui não pode impedir o backend de subir.
