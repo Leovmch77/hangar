@@ -61,7 +61,8 @@ async fn timeout_after_good_answer_keeps_last_without_marking() {
     // Python travado não custa 1 s a cada tique: dentro do prazo, fica a falha sem perguntar.
     let asked = fake.list_facts_calls.load(SeqCst);
     let quick = Instant::now();
-    assert!(!client.fetch(&rows, 3, &BTreeMap::new(), false).await.fresh);
+    let cached = client.fetch(&rows, 3, &BTreeMap::new(), false).await;
+    assert!(cached.ok && !cached.fresh, "ainda na carência, sem perguntar de novo");
     assert!(quick.elapsed() < Duration::from_millis(100));
     assert_eq!(fake.list_facts_calls.load(SeqCst), asked);
 }

@@ -199,7 +199,7 @@ export function MessageList({
         return nunca;
       }
     }
-  }, [resultDe, abrirDetalhe, sessionName, serverId, look, tasks]);
+  }, [resultDe, abrirDetalhe, sessionName, serverId, look, tasks, working, session?.provider, session?.headless]);
 
   // "Ir pro fim" (como o web): aparece com mais de uma tela entre o que se vê e o fim. Mensagem que
   // chega nesse meio-tempo muda o botão pra aviso, senão a conversa anda sem a pessoa saber.
