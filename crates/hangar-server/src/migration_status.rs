@@ -104,7 +104,7 @@ pub fn rust_route(method: &Method, path: &str) -> bool {
             return true;
         }
         let tail = path.strip_prefix("/api/sessions/").and_then(|r| r.split_once('/')).map(|(_, t)| t);
-        // `term`: o painel do dono abre no Rust; o resto (convidado, Connect) passa pelo Python e liga ao PTY dele.
+        // `term`: o painel abre no Rust; login de convidado e Connect passam pelo Python e voltam ao mesmo PTY.
         if matches!(tail, Some("history" | "events" | "cost" | "term" | "models" | "limits" | "commands" | "codex-permissions")) || tail.is_some_and(|t| t.starts_with("pages/")) {
             return true;
         }
@@ -146,7 +146,19 @@ pub fn rust_route(method: &Method, path: &str) -> bool {
         | ("DELETE", Some("pair")) | ("GET", Some("pair/contract"))) {
         return true;
     }
-    crate::workspace_routes::matches(method, path) || crate::worktree_routes::matches(method, path)
+    crate::share_reach::matches(method, path) || share_route(method, path)
+        || crate::workspace_routes::matches(method, path) || crate::worktree_routes::matches(method, path)
+}
+
+/// Convites e par externo do dono (`share::owner_routes`, `share::pair_routes`).
+fn share_route(method: &Method, path: &str) -> bool {
+    let tail = path.strip_prefix("/api/sessions/").and_then(|r| r.split_once('/')).map(|(_, t)| t);
+    match method.as_str() {
+        "GET" => matches!(path, "/api/share/prereqs" | "/api/external-pairs") || tail == Some("share"),
+        "POST" => path == "/api/external-pairs/send" || matches!(tail, Some("share" | "pair-invite" | "pair-accept")),
+        "DELETE" => tail.is_some_and(|t| t == "share" || t.strip_prefix("share/").is_some_and(|id| !id.is_empty() && !id.contains('/'))),
+        _ => false,
+    }
 }
 
 /// Um ou mais pedidos reais por área, só para a tabela; a decisão é de `rust_route`.
@@ -350,7 +362,10 @@ mod tests {
             && !rust_route(&Method::POST, "/api/sessions/a/queue/e1") && get("/api/cotas") && !rust_route(&Method::POST, "/api/worktrees/create"));
         assert!(rust_route(&Method::POST, "/api/sessions/a/pair") && rust_route(&Method::DELETE, "/api/sessions/a/pair")
             && get("/api/sessions/a/pair/contract") && rust_route(&Method::POST, "/api/sessions/a/unpair-remote")
-            && !get("/api/sessions/a/pair") && !rust_route(&Method::POST, "/api/sessions/a/pair-invite"));
+            && !get("/api/sessions/a/pair") && rust_route(&Method::POST, "/api/sessions/a/pair-invite"));
+        assert!(rust_route(&Method::POST, "/api/sessions/a/share") && rust_route(&Method::DELETE, "/api/sessions/a/share/s1")
+            && get("/api/share/prereqs") && rust_route(&Method::POST, "/api/share/reachability")
+            && !rust_route(&Method::DELETE, "/api/sessions/a/share/s1/x"));
         assert_eq!(AREAS[area_of("/api/sessions/a/git/commit/abc/files")], "workspace");
         assert_eq!(AREAS[area_of("/api/sessions-x")], "other", "prefixo só casa por segmento inteiro");
         assert_eq!(AREAS[area_of("/assets/index.js")], "static");

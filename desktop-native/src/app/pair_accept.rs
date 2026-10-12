@@ -20,6 +20,10 @@ pub(super) fn parse_pair_link(raw: &str) -> Option<String> {
 }
 
 /// Código do convite (usado, vencido, revogado…) tem frase própria; `Hangar::failure` leria todo 410 como "encerrado".
+pub(super) fn unreachable_text(stage: &str) -> String {
+    tr_shared(if stage == "dns" { "share_reach_failed_dns" } else { "share_reach_failed_funnel" }, &[])
+}
+
 fn accept_failure(error: &Failure) -> String {
     if error.detail.starts_with("erro_convite_") { tr_shared(&error.detail, &[]) } else { Hangar::failure(error) }
 }
@@ -132,6 +136,8 @@ impl Hangar {
                     match &failure {
                         ShareFailure::Blocked(prereqs) => (d.error, d.blocked) = (None, Some(prereqs.clone())),
                         ShareFailure::Other(e) => (d.error, d.blocked) = (Some(accept_failure(e)), None),
+                        ShareFailure::NeedsRust => (d.error, d.blocked) = (Some(tr_shared("share_create_needs_rust", &[])), None),
+                        ShareFailure::Unreachable { stage, .. } => (d.error, d.blocked) = (Some(unreachable_text(stage)), None),
                     }
                     cx.notify();
                 }); }

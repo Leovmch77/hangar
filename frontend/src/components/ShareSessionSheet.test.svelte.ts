@@ -5,6 +5,7 @@ import * as m from '../paraglide/messages';
 
 const core = vi.hoisted(() => ({
   listShares: vi.fn(), createShare: vi.fn(), revokeShare: vi.fn(), revokeAllShares: vi.fn(), sharePrereqs: vi.fn(),
+  // Não existe mais no core: fica aqui só para provar que a folha não chama a conferência à parte.
   shareReachability: vi.fn(),
 }));
 vi.mock('../lib/auth', () => ({
@@ -18,7 +19,7 @@ vi.mock('@hangar/core', async (original) => ({
 }));
 
 const ShareSessionSheet = (await import('./ShareSessionSheet.svelte')).default;
-const { SharePrerequisiteError } = await import('@hangar/core');
+const { SharePrerequisiteError, ShareReachError } = await import('@hangar/core');
 
 async function settle() { for (let i = 0; i < 6; i++) { await Promise.resolve(); await tick(); } }
 function montar(props: { open: boolean } = { open: true }) {
@@ -49,7 +50,6 @@ describe('ShareSessionSheet', () => {
   it('gerar link mostra o link e o WhatsApp leva o link no texto', async () => {
     core.listShares.mockResolvedValue({ shares: [] });
     core.createShare.mockResolvedValue({ id: 'x1', link: 'https://d.ts.net:8443/convite/K7P2', expires_at: agora() + 86400 });
-    core.shareReachability.mockResolvedValue({ ok: true });
     const c = montar();
     await settle();
     botao(m.compartilhar_gerar()).click();
@@ -59,6 +59,37 @@ describe('ShareSessionSheet', () => {
     expect(campo.value).toBe('https://d.ts.net:8443/convite/K7P2');
     const wa = document.querySelector<HTMLAnchorElement>('a[href^="https://wa.me/"]')!;
     expect(decodeURIComponent(wa.href)).toContain('https://d.ts.net:8443/convite/K7P2');
+    // A criação já esperou o link abrir de fora: nada de conferência à parte.
+    expect(core.shareReachability).not.toHaveBeenCalled();
+    unmount(c);
+  });
+
+  it('enquanto o servidor confere o link do Funnel, a folha diz que está preparando', async () => {
+    core.listShares.mockResolvedValue({ shares: [] });
+    core.createShare.mockReturnValue(new Promise(() => {}));
+    const c = montar();
+    await settle();
+    botao(m.compartilhar_gerar()).click();
+    await settle();
+    expect(document.body.textContent).toContain(m.share_reach_checking());
+    unmount(c);
+  });
+
+  it('link que não abriu de fora: mostra a etapa e o detalhe, e tentar de novo gera outro', async () => {
+    core.listShares.mockResolvedValue({ shares: [] });
+    core.createShare.mockRejectedValueOnce(new ShareReachError('dns', 'sem nome', m.share_reach_failed_dns()));
+    const c = montar();
+    await settle();
+    botao(m.compartilhar_gerar()).click();
+    await settle();
+    expect(document.body.textContent).toContain(m.share_reach_failed_dns());
+    expect(document.body.textContent).toContain('sem nome');
+    core.createShare.mockResolvedValueOnce({ id: 'x2', link: 'https://d.ts.net:8443/convite/Z9', expires_at: agora() + 86400 });
+    botao(m.share_reach_retry()).click();
+    await settle();
+    expect(core.createShare).toHaveBeenCalledTimes(2);
+    expect(document.querySelector<HTMLInputElement>(`input[aria-label="${m.compartilhar_link_novo()}"]`)!.value)
+      .toBe('https://d.ts.net:8443/convite/Z9');
     unmount(c);
   });
 

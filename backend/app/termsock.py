@@ -463,8 +463,7 @@ async def _motor_rust(ws: WebSocket, name: str, cols: int, rows: int) -> None:
 
     A porta de entrada já rodou aqui; o Rust recebe só o alvo conferido e tem o painel único de
     todas as portas. Fechamento do Rust (1000 "outra conexao assumiu", 1011, 1013) chega igual ao
-    cliente; cliente que sai, ou convidado revogado (o `share_gate` cancela esta task), fecha o
-    lado do Rust, que desmonta.
+    cliente; cliente que sai fecha o lado do Rust, que desmonta.
     """
     from urllib.parse import urlencode
     from websockets.asyncio.client import connect

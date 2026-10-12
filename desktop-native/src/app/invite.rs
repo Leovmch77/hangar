@@ -27,6 +27,10 @@ pub(super) fn parse_invite_link(raw: &str) -> Option<(String, String)> {
     (host_ok && code_ok).then_some((address, code))
 }
 
+/// Num servidor de convite só 401 e 410 encerram. 502 (Funnel com o servidor Rust reiniciando), 503 e conexão recusada
+/// são tentar de novo.
+pub(super) fn ends_invite(status: Option<u16>) -> bool { matches!(status, Some(401 | 410)) }
+
 /// O nome desta máquina, que o dono vê na lista de quem entrou.
 pub(super) fn device_label() -> String {
     let name = if cfg!(windows) { std::env::var("COMPUTERNAME").ok() }
@@ -179,7 +183,7 @@ impl Hangar {
     /// de conexão. Nos outros, 401/403 continuam sendo login perdido.
     pub(super) fn auth_lost(&mut self, error: &Failure) -> bool {
         if !self.active_invite() { return matches!(error.status, Some(401 | 403)); }
-        if matches!(error.status, Some(401 | 410)) && let Some(address) = self.server.as_deref() {
+        if ends_invite(error.status) && let Some(address) = self.server.as_deref() {
             self.invite_ended.insert(servers::norm(address));
             self.sessions.clear();
         }
@@ -188,7 +192,7 @@ impl Hangar {
 
     /// Texto da falha na conexão ativa: num convite, 401/410 é o compartilhamento que acabou, não login perdido.
     pub(super) fn active_failure(&self, error: &Failure) -> String {
-        if self.active_invite() && matches!(error.status, Some(401 | 410)) { tr_shared("convite_encerrado", &[]) } else { Self::failure(error) }
+        if self.active_invite() && ends_invite(error.status) { tr_shared("convite_encerrado", &[]) } else { Self::failure(error) }
     }
 
     fn open_invite(&self) -> bool {
@@ -198,13 +202,13 @@ impl Hangar {
     /// Falha na sessão aberta. Numa sessão de outra máquina o login do servidor ativo não tem culpa: nunca abre a conexão.
     pub(super) fn chat_auth_lost(&mut self, error: &Failure) -> bool {
         let Some(key) = self.open_api.as_ref().map(|api| servers::norm(&api.identity())) else { return self.auth_lost(error) };
-        if self.open_invite() && matches!(error.status, Some(401 | 410)) { self.invite_ended.insert(key); }
+        if self.open_invite() && ends_invite(error.status) { self.invite_ended.insert(key); }
         false
     }
 
     pub(super) fn chat_failure(&self, error: &Failure) -> String {
         if self.open_api.is_none() { return self.active_failure(error); }
-        if self.open_invite() && matches!(error.status, Some(401 | 410)) { tr_shared("convite_encerrado", &[]) } else { Self::failure(error) }
+        if self.open_invite() && ends_invite(error.status) { tr_shared("convite_encerrado", &[]) } else { Self::failure(error) }
     }
 
     /// Parar de acompanhar um convite: sai só deste aparelho; a sessão do dono continua viva.
@@ -230,6 +234,12 @@ mod tests {
 
     fn entry(id: &str, label: &str, address: &str, token: &str, invite: bool) -> servers::ServerEntry {
         servers::ServerEntry { id: id.into(), label: label.into(), address: address.into(), token: token.into(), disabled: false, invite, lan: None, ephemeral: false }
+    }
+
+    #[test]
+    fn only_401_and_410_end_an_invite() {
+        assert!(ends_invite(Some(401)) && ends_invite(Some(410)));
+        for status in [Some(502), Some(503), Some(500), None] { assert!(!ends_invite(status), "{status:?}"); }
     }
 
     #[test]

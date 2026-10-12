@@ -107,7 +107,7 @@ impl Hangar {
         if generation != self.remote_gen { return false; }
         let invite = self.server_entry(&key).is_some_and(|s| s.invite);
         // 401 só é "encerrado" num convite; nos outros continua sendo login perdido.
-        let ended = |error: &Failure| error.status == Some(410) || (invite && error.status == Some(401));
+        let ended = |error: &Failure| error.status == Some(410) || (invite && super::invite::ends_invite(error.status));
         let Some(list) = self.remote.get_mut(&key) else { return false };
         // Ping e lista igual à de antes não redesenham: cada aviso aqui acordava todas as áreas.
         let mut changed = true;

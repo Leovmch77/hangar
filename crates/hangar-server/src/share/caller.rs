@@ -143,3 +143,28 @@ pub fn guest_allowed(method: &Method, path: &str, grant: &GuestGrant) -> bool {
         Some(head) => !BLOCKED.contains(head),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{GLOBAL_PREFIXES, GLOBAL_ROUTES};
+    use std::collections::BTreeSet;
+
+    /// Strings do array `export const <name>` em `share.ts`: o cliente só pede o que a porta deixa.
+    fn ts_array(src: &str, name: &str) -> BTreeSet<String> {
+        let start = src.find(&format!("export const {name}")).unwrap_or_else(|| panic!("{name} sumiu de share.ts"));
+        let body = &src[start..];
+        let body = &body[body.find("= [").expect("array") + 3..];
+        let body = &body[..body.find("];").expect("fim do array")];
+        body.split('\'').skip(1).step_by(2).map(str::to_owned).collect()
+    }
+
+    #[test]
+    fn client_global_routes_match_the_guest_port() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../packages/core/src/share.ts");
+        let src = std::fs::read_to_string(path).expect("packages/core/src/share.ts");
+        let paths: BTreeSet<String> = GLOBAL_ROUTES.iter().map(|(_, p)| (*p).to_owned()).collect();
+        let prefixes: BTreeSet<String> = GLOBAL_PREFIXES.iter().map(|(_, p)| (*p).to_owned()).collect();
+        assert_eq!(ts_array(&src, "INVITE_GLOBAL_PATHS"), paths);
+        assert_eq!(ts_array(&src, "INVITE_GLOBAL_PREFIXES"), prefixes);
+    }
+}

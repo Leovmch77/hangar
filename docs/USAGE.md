@@ -439,8 +439,12 @@ um servidor "Convite · <você>", e pode tudo ali: conversar, trocar modelo e pe
   operador; no web o comando aparece com "Copiar". **"Liberar no Tailscale"** abre a página do
   Tailscale que libera o Funnel e fica conferindo por 5 min: liberou, o aviso some e o "Gerar link de
   convite" volta.
-- **Compartilhar:** menu da sessão → "Compartilhar sessão" → "Gerar link de convite". O link
+- **Compartilhar:** menu da sessão → "Compartilhar sessão" → "Gerar link de convite". Enquanto o
+  servidor confere que o link já abre pela internet (até ~3 min), aparece "Preparando o acesso de
+  fora…"; se não abrir, o diálogo diz em que etapa parou (DNS ou Funnel) e você gera de novo. O link
   `https://<máquina>.ts.net:8443/convite/<código>` vale 24 h e serve uma vez só. Mande pelo WhatsApp.
+  Compartilhar precisa do servidor Rust do Hangar rodando na máquina: sem ele a porta do convite
+  fica fechada e o diálogo avisa.
   Na mesma rede, sem Tailscale: "Gerar link local" dá `http://<ip-da-rede>:8766/convite/<código>`,
   que só abre de quem está naquela rede (a máquina precisa de `CP_LAN_BIND_IP=0.0.0.0`). No PWA
   aberto por `https` o navegador bloqueia o link `http`; use o app nativo ou o desktop.
@@ -452,8 +456,9 @@ um servidor "Convite · <você>", e pode tudo ali: conversar, trocar modelo e pe
   em cerca de 5 s. Sem convite ativo o Funnel da porta 8443 desliga sozinho.
 - **O que o convidado não faz:** ele não conta como o seu app aberto (você segue recebendo as
   notificações) e a lista dele não mostra o nome das suas outras sessões. Servidor de convite que
-  responde "encerrado" (ou 401) vira "compartilhamento encerrado"; erro 503 é passageiro (você trocando
-  o modo da sessão, tmux ou túnel fora) e ele tenta de novo, o código não foi gasto.
+  responde "encerrado" (ou 401) vira "compartilhamento encerrado"; erro 503, 502 ou conexão recusada
+  é passageiro (você trocando o modo da sessão, tmux ou túnel fora, o servidor do Hangar
+  reiniciando) e ele tenta de novo, o código não foi gasto.
 
 ### Opções do Claude Code
 

@@ -1,9 +1,10 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
-  parseInviteLink, inviteAllows, redeemInvite, InviteRedeemError, SharePrerequisiteError,
+  parseInviteLink, inviteAllows, redeemInvite, InviteRedeemError, SharePrerequisiteError, ShareReachError,
 } from './share';
+import * as m from './paraglide/messages';
 import { configureApi, type ApiEnv } from './apiEnv';
-import { getConfig, getAtualizacao, checkInviteForServer, createShare, sharePrereqs, needsReachCheck } from './api';
+import { getConfig, getAtualizacao, checkInviteForServer, createShare, sharePrereqs } from './api';
 import type { Server } from './servers';
 
 const CONVITE: Server = { id: 'srv-i', label: 'Convite · J', baseUrl: 'https://dono.ts.net:8443', token: 'tg', invite: true };
@@ -149,6 +150,20 @@ describe('trava do servidor de convite em apiFetchRes', () => {
     expect(await checkInviteForServer(CONVITE)).toBe(false);
     expect(onInviteEnded).not.toHaveBeenCalled();
   });
+  it('502 (Funnel com o servidor Rust reiniciando) também é tentar de novo, nunca fim do convite', async () => {
+    const onInviteEnded = vi.fn();
+    ambiente({ onInviteEnded });
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('', { status: 502 }));
+    expect(await checkInviteForServer(CONVITE)).toBe(false);
+    expect(onInviteEnded).not.toHaveBeenCalled();
+  });
+  it('conexão recusada num servidor de convite não encerra o convite', async () => {
+    const onInviteEnded = vi.fn();
+    ambiente({ onInviteEnded });
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(new TypeError('Failed to fetch'));
+    await expect(checkInviteForServer(CONVITE)).rejects.toThrow('Failed to fetch');
+    expect(onInviteEnded).not.toHaveBeenCalled();
+  });
 });
 
 describe('createShare', () => {
@@ -181,6 +196,24 @@ describe('createShare', () => {
     const e = await createShare('s1').catch((x: unknown) => x);
     expect((e as SharePrerequisiteError).enableUrl).toBeNull();
   });
+  it('409 share_reach_failed diz a etapa em que o link não abriu de fora', async () => {
+    ambiente();
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(resposta(409, { detail: {
+      code: 'share_reach_failed', msg: 'o link não abriu pela internet: sem nome',
+      params: { stage: 'dns', detail: 'sem nome' },
+    } }));
+    const e = await createShare('s1').catch((x: unknown) => x);
+    expect(e).toBeInstanceOf(ShareReachError);
+    expect((e as ShareReachError).stage).toBe('dns');
+    expect((e as ShareReachError).detail).toBe('sem nome');
+    expect((e as ShareReachError).message).toBe(m.share_reach_failed_dns());
+  });
+  it.each([404, 405])('%i na criação = servidor sem o Rust', async (status) => {
+    ambiente();
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{"detail":"Not Found"}', { status }));
+    const e = await createShare('s1').catch((x: unknown) => x);
+    expect(e).toMatchObject({ status, code: 'share_create_needs_rust', message: m.share_create_needs_rust() });
+  });
 });
 
 describe('sharePrereqs', () => {
@@ -202,12 +235,5 @@ describe('sharePrereqs', () => {
     expect((await sharePrereqs()).enable_url).toBeNull();
     expect((await sharePrereqs()).enable_url).toBeNull();
     expect((await sharePrereqs()).enable_url).toBe(ok);
-  });
-});
-
-describe('needsReachCheck', () => {
-  it('só o link do Funnel espera a conferência', () => {
-    expect(needsReachCheck('https://maq.tail1.ts.net:8443/convite/abc')).toBe(true);
-    expect(needsReachCheck('http://192.168.0.10:8766/convite/abc')).toBe(false);
   });
 });

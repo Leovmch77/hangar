@@ -1,6 +1,5 @@
 """Terminal com o Rust dono do PTY: o termsock só faz a porta de entrada e liga os bytes ao Rust."""
 import asyncio
-import dataclasses
 import threading
 import time
 from types import SimpleNamespace
@@ -12,21 +11,12 @@ from starlette.websockets import WebSocketDisconnect
 from websockets.asyncio.server import serve
 from websockets.exceptions import ConnectionClosed
 
-from app import diag, list_bridge, runtime_coordinator, share_api, share_gate, share_store, termsock, tmux
+from app import diag, list_bridge, runtime_coordinator, termsock, tmux
 from app.config import settings
 from app.connect_port import CONNECT_PORT, ConnectPortGate
 
-SHARED = share_store.Share(
-    id="s1", session="cc", life="L1", created_at=0.0, code_expires_at=0.0, code_hash="c",
-    token_hash="t", device="Pixel", redeemed_at=1.0, revoked_at=None)
-STATE = {"revoked": False}
-GUEST_WS = "ws://127.0.0.1:8766"
-
-
-def _lookup(t):
-    if t != "g":
-        return None
-    return share_store.Guest([dataclasses.replace(SHARED, revoked_at=2.0) if STATE["revoked"] else SHARED])
+# Convidado de convite não passa mais por aqui: a 8766 e o terminal dele são do Rust.
+OWNER_WS = f"ws://127.0.0.1:{CONNECT_PORT}"
 
 
 class FakeRust:
@@ -108,11 +98,6 @@ def no_pty(monkeypatch):
 def rust(monkeypatch, no_pty):
     monkeypatch.setattr(settings, "auth_token", "secret")
     monkeypatch.setattr(settings, "port", 8765)
-    STATE["revoked"] = False
-    share_gate._life_cache.clear()
-    monkeypatch.setattr(share_store, "lookup_token", _lookup)
-    monkeypatch.setattr(share_gate, "session_life", lambda name: "L1" if name == "cc" else None)
-    monkeypatch.setattr(share_api, "confirmed_absent", lambda name: False)
     monkeypatch.setattr(tmux, "has_session", lambda name: True)
     monkeypatch.setattr(runtime_coordinator, "_current", SimpleNamespace(mode="rust"))
     fake = FakeRust()
@@ -129,24 +114,23 @@ def _app():
     async def term(ws: WebSocket, name: str):
         await termsock.term_ws(ws, name)
 
-    a.add_middleware(share_gate.ShareGate)
     a.add_middleware(ConnectPortGate)
     return a
 
 
-def _guest():
-    return TestClient(_app(), base_url="http://127.0.0.1:8766", client=("203.0.113.9", 1))
+def _owner():
+    return TestClient(_app(), base_url=f"http://127.0.0.1:{CONNECT_PORT}", client=("127.0.0.1", 5))
 
 
-def test_guest_terminal_pipes_to_rust_no_pty(rust, no_pty):
-    with _guest().websocket_connect(f"{GUEST_WS}/api/sessions/cc/term?token=g&cols=100&rows=30") as ws:
+def test_terminal_pipes_to_rust_no_pty(rust, no_pty):
+    with _owner().websocket_connect(f"{OWNER_WS}/api/sessions/cc/term?token=secret&cols=100&rows=30") as ws:
         assert ws.receive_bytes() == b"hello-from-rust"
         ws.send_bytes(b"abc")
         assert ws.receive_bytes() == b"echo:abc"
         ws.send_text('{"t":"resize","cols":90,"rows":20}')
         _until(lambda: '{"t":"resize","cols":90,"rows":20}' in rust.received)
     path, headers = rust.requests[0]
-    # O token do convidado fica no Python: o Rust só recebe o alvo já conferido.
+    # O token fica no Python: o Rust só recebe o alvo já conferido.
     assert path == "/__hangar_server/term?target=cc&cols=100&rows=30"
     assert headers["x-hangar-internal"] == "sek"
     _until(rust.closed.is_set)
@@ -190,23 +174,11 @@ def test_cancel_during_cleanup_still_closes_upstream(rust, monkeypatch):
     _until(rust.closed.is_set)
 
 
-def test_revoked_guest_closes_upstream_4410(rust, monkeypatch):
-    monkeypatch.setattr(share_gate, "WATCH_INTERVAL", 0.05)
-    with _guest().websocket_connect(f"{GUEST_WS}/api/sessions/cc/term?token=g") as ws:
-        assert ws.receive_bytes() == b"hello-from-rust"
-        STATE["revoked"] = True
-        with pytest.raises(WebSocketDisconnect) as e:
-            while True:
-                ws.receive_bytes()
-    assert e.value.code == 4410
-    _until(rust.closed.is_set)
-
-
 def test_rust_close_code_reaches_the_client(rust, monkeypatch):
     taken = FakeRust(close_with=(1000, "outra conexao assumiu"))
     list_bridge.configure(f"127.0.0.1:{taken.port}", "sek")
     try:
-        with _guest().websocket_connect(f"{GUEST_WS}/api/sessions/cc/term?token=g") as ws:
+        with _owner().websocket_connect(f"{OWNER_WS}/api/sessions/cc/term?token=secret") as ws:
             assert ws.receive_bytes() == b"hello-from-rust"
             with pytest.raises(WebSocketDisconnect) as e:
                 ws.receive_bytes()
@@ -225,7 +197,7 @@ def test_bridge_failure_closes_1013_with_code_and_no_pty(rust, no_pty, monkeypat
         async def starting():
             raise runtime_coordinator.RuntimeStarting("subindo")
         monkeypatch.setattr(runtime_coordinator, "_current", SimpleNamespace(mode="pending", await_mode=starting))
-    with _guest().websocket_connect(f"{GUEST_WS}/api/sessions/cc/term?token=g") as ws:
+    with _owner().websocket_connect(f"{OWNER_WS}/api/sessions/cc/term?token=secret") as ws:
         with pytest.raises(WebSocketDisconnect) as e:
             ws.receive_bytes()
     assert e.value.code == 1013
@@ -235,7 +207,7 @@ def test_bridge_failure_closes_1013_with_code_and_no_pty(rust, no_pty, monkeypat
 
 def test_python_mode_keeps_the_python_pty(rust, no_pty, monkeypatch):
     monkeypatch.setattr(runtime_coordinator, "_current", SimpleNamespace(mode="python"))
-    with _guest().websocket_connect(f"{GUEST_WS}/api/sessions/cc/term?token=g") as ws:
+    with _owner().websocket_connect(f"{OWNER_WS}/api/sessions/cc/term?token=secret") as ws:
         assert ws.receive_bytes() == b"python-pty"
     assert no_pty == ["cc"] and rust.requests == []
 
@@ -280,7 +252,7 @@ def test_rust_refusal_maps_to_a_close_code_with_status_in_the_diary(rust, monkey
     list_bridge.configure(f"127.0.0.1:{refusing.port}", "sek")
     try:
         with pytest.raises(WebSocketDisconnect) as e:
-            with _guest().websocket_connect(f"{GUEST_WS}/api/sessions/cc/term?token=g") as ws:
+            with _owner().websocket_connect(f"{OWNER_WS}/api/sessions/cc/term?token=secret") as ws:
                 ws.receive_bytes()
         assert e.value.code == code
         if status != 403:

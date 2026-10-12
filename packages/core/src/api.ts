@@ -10,7 +10,7 @@ import { mensagemDeErro, formataErro, type EnvelopeErro } from './errosApi';
 import { registrar as registrarDiag, novoReq } from './diag';
 import { dispensaPrazo, retryAfterMs, registrarFalha, registrarSucesso } from './esfriamento';
 import {
-  inviteAllows, SharePrerequisiteError, tailscaleEnableUrl, type ShareCreated, type ShareInfo, type SharePrereqs,
+  inviteAllows, SharePrerequisiteError, ShareReachError, tailscaleEnableUrl, type ShareCreated, type ShareInfo, type SharePrereqs,
 } from './share';
 import type { CotaContaResumo } from './cotaResumo';
 import type { Shortcut, ProjectShortcut, ProjectShortcuts } from './shortcuts';
@@ -3737,8 +3737,16 @@ export async function applyConfigSyncForServer(s: Server, items: readonly Config
 }
 
 // Compartilhar sessão (dono). Todas no servidor ATIVO: a Sidebar usa `withServer`.
+/** O link do Funnel só volta depois de abrir de fora (o servidor confere até 3 min); 404/405 =
+ * backend sem o Rust (em produção o StaticFiles do Python responde 405 ao POST). */
 export async function createShare(name: string, local = false, server?: Server | null): Promise<ShareCreated> {
-  const res = await apiFetchRes(`/api/sessions/${encodeURIComponent(name)}/share${local ? '?local=true' : ''}`, { method: 'POST' }, server ?? undefined);
+  // Espera minutos no servidor; o iOS mata o fetch em segundo plano. Essa queda não é do
+  // servidor: não esfria, e a nova tentativa não é barrada por esfriamento.
+  const res = await apiFetchRes(`/api/sessions/${encodeURIComponent(name)}/share${local ? '?local=true' : ''}`,
+    { method: 'POST', signal: AbortSignal.timeout(240_000) }, server ?? undefined, true, false);
+  if (res.status === 404 || res.status === 405) {
+    throw Object.assign(new Error(m.share_create_needs_rust()), { status: res.status, code: 'share_create_needs_rust' });
+  }
   if (res.status === 409) {
     const corpo = (await res.clone().json().catch(() => null)) as { detail?: EnvelopeErro } | null;
     const d = corpo?.detail;
@@ -3750,32 +3758,14 @@ export async function createShare(name: string, local = false, server?: Server |
         tailscaleEnableUrl(d.params?.enable_url),
       );
     }
+    if (d?.code === 'share_reach_failed') {
+      const stage = d.params?.stage === 'dns' ? 'dns' : 'funnel';
+      throw new ShareReachError(stage, typeof d.params?.detail === 'string' ? d.params.detail : '',
+        stage === 'dns' ? m.share_reach_failed_dns() : m.share_reach_failed_funnel());
+    }
   }
   await ensureOk(res, server);
   return res.json() as Promise<ShareCreated>;
-}
-
-export type Reach =
-  | { ok: true }
-  | { ok: false; stage: 'dns' | 'funnel'; detail: string }
-  | { ok: false; stage: 'needs_rust'; detail: '' };
-
-// Link local (http na rede da casa) não passa pela internet: não há o que conferir.
-export function needsReachCheck(link: string): boolean {
-  return link.startsWith('https://');
-}
-
-/** Espera no servidor até o link abrir de fora (até 3 min). 404/405 = backend sem o Rust
- * (em produção o StaticFiles do Python responde 405 ao POST). */
-export async function shareReachability(link: string, server?: Server | null, signal?: AbortSignal): Promise<Reach> {
-  // Espera minutos no servidor; o iOS mata o fetch em segundo plano e a tela repete na volta.
-  // Essa queda não é do servidor: não esfria, e a repetição não é barrada por esfriamento.
-  const res = await apiFetchRes('/api/share/reachability', {
-    method: 'POST', body: JSON.stringify({ link }), signal,
-  }, server ?? undefined, true, false);
-  if (res.status === 404 || res.status === 405) return { ok: false, stage: 'needs_rust', detail: '' };
-  await ensureOk(res, server);
-  return res.json() as Promise<Reach>;
 }
 
 // Só consulta: não liga o Funnel. Sem tailscale responde 409, e quem confere segue esperando.

@@ -56,7 +56,20 @@ export class SharePrerequisiteError extends Error {
   }
 }
 
-// Espelho de `_GLOBAL_ROUTES`/`_GLOBAL_PREFIXES` em backend/app/share_gate.py. `/api/config`
+// A criação espera no servidor até o link do Funnel abrir de fora; não abriu, o convite já foi
+// revogado lá e o erro diz em que etapa parou.
+export class ShareReachError extends Error {
+  readonly stage: 'dns' | 'funnel';
+  readonly detail: string;
+  constructor(stage: 'dns' | 'funnel', detail: string, message: string) {
+    super(message);
+    this.stage = stage;
+    this.detail = detail;
+  }
+}
+
+// Espelho de `GLOBAL_ROUTES`/`GLOBAL_PREFIXES` em crates/hangar-server/src/share/caller.rs (um
+// teste de lá lê este arquivo e compara). `/api/config`
 // fica de fora de propósito: o `getConfig()` do Chat já tem `.catch(() => {})` e cai no padrão.
 export const INVITE_GLOBAL_PATHS: readonly string[] = [
   '/api/model-options', '/api/engines', '/api/harness/codex/opcoes',

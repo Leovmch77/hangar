@@ -440,26 +440,20 @@ impl Api {
         self.post_with_prerequisites(name, "pair-accept", Some(json!({"link": link}))).await
     }
 
-    // Rota que sobe o Funnel: 409 de pré-requisito vira `Blocked`, e o resto segue como falha comum.
+    // Rota que sobe o Funnel: as recusas de `share_refusal` têm tela própria, e o resto segue como falha comum. O
+    // servidor só responde com o link do Funnel aberto de fora: até 20 s do `tailscale status` mais 3 min de conferência,
+    // então o prazo daqui fica acima disso para não desistir na véspera da resposta.
     async fn post_with_prerequisites<T: serde::de::DeserializeOwned>(&self, name: &str, action: &str, body: Option<Value>) -> Result<T, ShareFailure> {
-        let mut req = self.client.post(self.endpoint(Some(name), Some(action))).timeout(Duration::from_secs(60));
+        let mut req = self.client.post(self.endpoint(Some(name), Some(action))).timeout(Duration::from_secs(220));
         if let Some(body) = body { req = req.json(&body); }
         let r = req.send().await.map_err(|_| ShareFailure::Other(Failure::transport(true)))?;
-        if r.status() == StatusCode::CONFLICT {
+        let status = r.status().as_u16();
+        if matches!(status, 404 | 405 | 409) {
             let body = r.json::<Value>().await.unwrap_or(Value::Null);
-            if let Some(prereqs) = share_blocked(&body) { return Err(ShareFailure::Blocked(prereqs)); }
-            return Err(ShareFailure::Other(Failure { status: Some(409), detail: failure_detail(Some(body), 409), retry_after: None, uncertain: false, code: None }));
+            if let Some(refusal) = share_refusal(status, &body) { return Err(refusal); }
+            return Err(ShareFailure::Other(Failure { status: Some(status), detail: failure_detail(Some(body), status), retry_after: None, uncertain: false, code: None }));
         }
         Self::checked(r, true).await.map_err(ShareFailure::Other)?.json().await.map_err(|_| ShareFailure::Other(Failure::transport(true)))
-    }
-
-    /// O servidor espera até o link abrir de fora e responde uma vez: até 20 s do `tailscale status` mais 3 min de
-    /// conferência, então o prazo daqui fica acima disso para não desistir na véspera da resposta.
-    pub async fn share_reachability(&self, link: &str) -> Result<Reach, Failure> {
-        let value = self.server_send(reqwest::Method::POST, &["share", "reachability"], Some(json!({"link": link})), 220).await?;
-        Ok(if value["ok"] == true { Reach::Ok } else {
-            Reach::Failed { stage: value["stage"].as_str().unwrap_or("funnel").into(), detail: value["detail"].as_str().unwrap_or_default().into() }
-        })
     }
 
     /// Só consulta o que falta; não liga o Funnel.
@@ -741,11 +735,6 @@ pub struct ShareCreated { pub link: String, pub expires_at: f64 }
 /// O convite de par tem a mesma forma do de compartilhamento: link e validade.
 pub type PairInvite = ShareCreated;
 
-/// Resposta da conferência do link pelo Funnel; `NeedsRust` = backend sem o servidor Rust (rota inexistente); `Error` = o
-/// pedido falhou (recusa, sem Tailscale, rede), sem veredito sobre o Funnel.
-#[derive(Clone, Debug, PartialEq)]
-pub enum Reach { Ok, Failed { stage: String, detail: String }, NeedsRust, Error(String) }
-
 #[derive(Clone, Debug, serde::Deserialize)]
 pub struct PairAccepted { pub alias: String, pub owner: String, pub session: String }
 
@@ -764,7 +753,23 @@ fn tailscale_link<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Strin
     Ok(value.filter(|url| url.starts_with("https://login.tailscale.com/")))
 }
 
-pub enum ShareFailure { Blocked(SharePrereqs), Other(Failure) }
+/// `Unreachable`: o link do Funnel não abriu de fora no prazo (o servidor já revogou o convite); `NeedsRust`: a rota não
+/// existe (backend sem o servidor Rust).
+pub enum ShareFailure { Blocked(SharePrereqs), Unreachable { stage: String, detail: String }, NeedsRust, Other(Failure) }
+
+/// Recusa da criação que a tela trata à parte; o resto segue como falha comum.
+pub fn share_refusal(status: u16, body: &Value) -> Option<ShareFailure> {
+    match status {
+        404 | 405 => Some(ShareFailure::NeedsRust),
+        409 => share_blocked(body).map(ShareFailure::Blocked).or_else(|| {
+            let detail = body.get("detail")?;
+            if detail.get("code")?.as_str()? != "share_reach_failed" { return None; }
+            let field = |k: &str| detail.get("params").and_then(|p| p.get(k)).and_then(Value::as_str).unwrap_or_default().to_owned();
+            Some(ShareFailure::Unreachable { stage: field("stage"), detail: field("detail") })
+        }),
+        _ => None,
+    }
+}
 
 /// Lista vazia ainda é pré-requisito: o `fix` diz o que fazer.
 pub fn share_blocked(body: &Value) -> Option<SharePrereqs> {

@@ -121,7 +121,7 @@ fn external_records(path: &Path) -> Option<Arc<ExternalRecords>> {
 }
 
 /// `_pair_external`: o par de fora entre os peers da sessão, no `.hangar-pair` em `pair_dir`.
-/// Arquivo torto vale como vazio, como no Python; quem o põe de lado é o Python, aqui só se avisa.
+/// Arquivo torto vale como vazio; quem o põe de lado é a loja (`share/pairs.rs`), aqui só se avisa.
 pub(crate) fn pair_external(name: &str, peers: &[String], pair_dir: &Path) -> Option<Map<String, Value>> {
     external_record(peers, pair_dir, |local| local == name).map(|r| {
         let mut out = Map::new();

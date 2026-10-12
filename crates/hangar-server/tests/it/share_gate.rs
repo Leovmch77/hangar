@@ -284,6 +284,8 @@ async fn blocked_list() {
         "nav", "share", "pair-invite", "pair-accept"] {
         assert_eq!(status(&h, Method::POST, &format!("/api/sessions/cc/{tail}"), &t).await, 403, "{tail}");
     }
+    // Painel da orquestração: leitura também fica de fora.
+    assert_eq!(status(&h, Method::GET, "/api/sessions/cc/orq/panel", &t).await, 403);
 }
 
 #[tokio::test]

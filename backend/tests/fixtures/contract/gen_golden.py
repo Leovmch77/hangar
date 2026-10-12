@@ -1389,7 +1389,7 @@ def cross_route_rows() -> list:
     from unittest.mock import patch
 
     from fastapi.testclient import TestClient
-    from app import api, conversation_transfer, external_pairs, pair, peers
+    from app import api, conversation_transfer, pair, peers
     from app.config import settings
     from app.models import SessionInfo
 
@@ -1410,12 +1410,10 @@ def cross_route_rows() -> list:
             saved = (pair.settings.projects_dir, settings.server_id, here["at"])
             # Nunca o ~/.claude/.hangar-pair de verdade.
             pair.settings.projects_dir, settings.server_id, here["at"] = Path(tmp) / m / "projects", ids[m], m
-            external_pairs._reset()
             try:
                 yield
             finally:
                 pair.settings.projects_dir, settings.server_id, here["at"] = saved
-                external_pairs._reset()
 
         def call_url(base, token, method, path, body=None, timeout=8, label="", follow_redirects=False):
             calls.append({"to": label, "method": method, "path": path, "body": body})

@@ -88,12 +88,10 @@ from app.config import (list_config_dirs, _backend_config_base, settings,
                         resolve_scan_roots,
                         automations_enabled, resolve_bind_ip, variaveis_env)
 from app import runtime_config
-from app.share_guest_api import guest_safe
 from app.guest_user_gate import GuestUserGate
 from app.connect_port import ConnectPortGate
 from app import guest_users, guest_users_api
-from app.share_gate import GUEST_TOKEN_KEY
-from app.guest_header import guest_of
+from app.guest_header import guest_of, guest_safe
 from app.share_life import session_life
 from app import tts
 from app.tts_text import preparar as tts_preparar
@@ -4288,8 +4286,7 @@ async def sessions_events(request: Request):
     from app.sse import list_events
     guest = guest_of(request)
     return EventSourceResponse(
-        list_events(only=guest, viewer=guest_users.current.get(),
-                    token=request.scope.get(GUEST_TOKEN_KEY)),
+        list_events(only=guest, viewer=guest_users.current.get()),
         send_timeout=30)
 
 

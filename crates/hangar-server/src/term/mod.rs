@@ -1,8 +1,9 @@
 //! Terminal real do dono: `WS /api/sessions/{name}/term` (`?shortcut=`) e
 //! `WS /api/hangar-terminals/{ident}/term`. Um cano de bytes para o `tmux attach` da sessão; o
 //! servidor não interpreta nada. O convidado de convite da 8766 entra pelo porteiro (sem token do
-//! dono nem Origin) e cai com 4410 quando o acesso acaba. Quem não é dono nem convidado segue ao
-//! Python (token errado, bloqueio, Connect), que volta por `/__hangar_server/term`.
+//! dono nem Origin) e cai com 4410 quando o acesso acaba. Quem não é dono nem convidado de convite
+//! segue ao Python (login de convidado, token errado, bloqueio, Connect), que volta por
+//! `/__hangar_server/term`.
 pub(crate) mod origin;
 mod pty;
 mod resolve;
@@ -159,9 +160,9 @@ pub async fn hangar_ws(State(st): State<Arc<AppState>>, ConnectInfo(peer): Conne
     serve(st, peer, req, Want::Hangar(ident)).await
 }
 
-/// `/__hangar_server/term` na porta privada: o Python liga aqui quem entrou pelas portas dele
-/// (convidado, Connect) depois da porta de entrada dele. O alvo já vem conferido; o painel é o
-/// mesmo da 8765, então um dono e um convidado nunca anexam juntos.
+/// `/__hangar_server/term` na porta privada: o Python liga aqui quem ele autenticou (login de
+/// convidado, Connect na 8768) depois da porta de entrada dele. O alvo já vem conferido; o painel é
+/// o mesmo da 8765 e da 8766, então um dono e um convidado nunca anexam juntos.
 pub async fn private_ws(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
     if !crate::workspace_routes::private_ok(&st, peer, req.headers()) {
         return StatusCode::NOT_FOUND.into_response();

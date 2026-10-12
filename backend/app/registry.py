@@ -148,10 +148,21 @@ async def _atualizar_git(cwd: str) -> None:
 
 
 def _pair_external(name: str, peers_: list[str] | None) -> dict | None:
-    from app import external_pairs
-    for r in external_pairs.by_local(name):
-        if r.address in (peers_ or []):
-            return {"alias": r.alias, "owner": r.peer_owner, "session": r.peer_session}
+    # O dono de `external_pairs.json` é o Rust; aqui só se lê, e arquivo torto vale como vazio.
+    if not peers_:
+        return None
+    from app.pair import _pair_dir
+    try:
+        records = json.loads((_pair_dir() / "external_pairs.json").read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as e:
+        _log.warning("external_pairs.json ilegível: %s", e)
+        return None
+    for r in records if isinstance(records, list) else []:
+        if isinstance(r, dict) and r.get("local_session") == name \
+                and f"{r.get('alias')}::{r.get('peer_session')}" in peers_:
+            return {"alias": r.get("alias"), "owner": r.get("peer_owner"), "session": r.get("peer_session")}
     return None
 
 

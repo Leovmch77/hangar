@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi.testclient import TestClient
 
-from app import api, external_pair_api, groups_bridge, pair, registry, runtime_coordinator
+from app import api, groups_bridge, pair, registry, runtime_coordinator
 from app.config import settings
 from app.models import SessionInfo
 
@@ -377,45 +377,6 @@ def test_registry_rename_does_not_write_groups_in_rust_mode(monkeypatch):
     reg.rename("a", "c")
     assert reached == [("a", "c")]
     assert pair.PairLink("a").get()["peers"] == ["b"]
-
-
-def test_external_pair_link_and_unlink_in_rust_mode(monkeypatch):
-    calls = _rust(monkeypatch, reply=lambda op, a: {"gid": "g9"} if op == "group.external_link" else {})
-    undo = asyncio.run(external_pair_api._join_external("a", "casa::b", {"a": "claude", "outra": "codex"}))
-    external_pair_api._restore_external(undo)
-    assert calls == [("group.external_link", {"local": "a", "address": "casa::b", "harness": {"a": "claude"}}),
-                     ("group.external_unlink", {"local": "a", "address": "casa::b"})]
-
-
-def test_external_pair_refusal_in_rust_mode(monkeypatch):
-    _rust(monkeypatch, error="erro_pareamento_mistura_cross")
-    with pytest.raises(pair.PairMixError):
-        asyncio.run(external_pair_api._join_external("a", "casa::b", {}))
-
-
-@pytest.mark.parametrize("code,undone", [("groups_bridge_unavailable", True), ("groups_bridge_invalid", True),
-                                         ("groups_runtime_starting", False)])
-def test_external_link_with_uncertain_outcome_is_undone(monkeypatch, code, undone):
-    """Prazo ou resposta perdida depois do pedido: o Rust pode ter gravado o par sem registro nem token."""
-    def reply(op, a):
-        if op == "group.external_link":
-            raise groups_bridge.GroupsBridgeError(code)
-        return {}
-    calls = _rust(monkeypatch, reply=reply)
-    with pytest.raises(groups_bridge.GroupsBridgeError) as e:
-        asyncio.run(external_pair_api._join_external("a", "casa::b", {}))
-    assert e.value.code == code
-    unlink = ("group.external_unlink", {"local": "a", "address": "casa::b"})
-    assert (unlink in calls) is undone
-
-
-def test_external_teardown_in_rust_mode_unlinks(monkeypatch):
-    calls = _rust(monkeypatch, reply={})
-    monkeypatch.setattr(external_pair_api.external_pairs, "remove", lambda sid: None)
-    monkeypatch.setattr(external_pair_api.share_store, "revoke", lambda sid: None)
-    rec = SimpleNamespace(share_id="s1", local_session="a", address="casa::b")
-    asyncio.run(external_pair_api.teardown(rec, notify=False))
-    assert calls == [("group.external_unlink", {"local": "a", "address": "casa::b"})]
 
 
 def test_child_gets_group_env(monkeypatch, tmp_path):
