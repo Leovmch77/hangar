@@ -69,6 +69,8 @@ fn prepare(h: &mut HeaderMap, fwd: &Forward, upgrade: bool) {
     }
     // Só o próprio hangar-server fala com as rotas internas.
     h.remove("x-hangar-internal");
+    // O convidado decidido é assinado só pelo Rust; vindo de fora é forjado.
+    h.remove("x-hangar-guest");
     h.remove("x-forwarded-for");
     h.remove("x-forwarded-proto");
     if let Ok(v) = HeaderValue::from_str(&fwd.client_ip) {
