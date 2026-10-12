@@ -261,7 +261,8 @@ fn fake_tmux(dir: &Path, name: &str) -> (String, std::path::PathBuf) {
     
     let (script, log) = (dir.join("tmux"), dir.join("tmux.log"));
     crate::write_executable(&script, format!(
-        "#!/bin/sh\nif [ \"$1\" = display-message ]; then printf '{name}\\t%%1\\t1\\n'; exit 0; fi\necho \"$@\" >> '{}'\n", log.display()));
+        // `#{pane_pid}` responde o pid de quem chamou (o próprio teste, que é o "agente" da sessão).
+        "#!/bin/sh\nif [ \"$1\" = display-message ]; then for last; do :; done; case \"$last\" in '#{{pane_pid}}'*) printf \"$PPID\\t\";; esac; printf '{name}\\t%%1\\t1\\n'; exit 0; fi\nif [ \"$1\" = capture-pane ]; then printf '────────────────────────────────\\n❯ \\n────────────────────────────────\\n'; exit 0; fi\necho \"$@\" >> '{}'\n", log.display()));
     (script.to_str().unwrap().to_owned(), log)
 }
 
@@ -289,6 +290,9 @@ async fn open_terminal_with(registry: &RuntimeRegistry, dir: &Path, name: &str, 
         mux_argv, windows: false, clipboard_lock_path: None };
     let transcript = dir.join(format!("{name}.jsonl"));
     std::fs::write(&transcript, "").unwrap();
+    // Registro nativo do Claude para o agente (o próprio teste): prova a conversa sem transcript aberto.
+    std::fs::create_dir_all(dir.join("sessions")).unwrap();
+    std::fs::write(dir.join("sessions").join(format!("{}.json", std::process::id())), json!({"pid": std::process::id(), "sessionId": "sid"}).to_string()).unwrap();
     registry.open_terminal(TerminalTarget { key: format!("k-{name}"), generation: 1, name: name.into(), binding,
         lease_path: dir.join(format!("{name}.lease")), state_path, projection_dir, transcript, created: 0.0, plugin_key: None,
         metadata: hangar_server::terminal_facts::TerminalMetadata { config_dir:dir.into(),agent_pid:std::process::id(),agent_birth:hangar_server::terminal_facts::agent_birth(std::process::id()).unwrap(),legacy_import_after:None,fingerprint:"fixture".into(),origin:"uds:fixture".into() } }).await.unwrap();

@@ -226,11 +226,12 @@ async fn chat_b_during_closure_stays_on_disk_and_receives_no_text() {
     let dir = tempfile::tempdir().unwrap();
     let jsonl = dir.path().join("projects/p/sid.jsonl");
     let path = sidecar(&jsonl,"Question A");
-    let mut expected = terminal_expected(&jsonl,"Question A");
     let a = std::fs::read(&path).unwrap();
     sidecar(&jsonl,"Question B");
     let b = std::fs::read(&path).unwrap();
     std::fs::write(&path,a).unwrap();
+    // A revisão inclui o carimbo do arquivo: a pergunta exibida é a A regravada, não a primeira escrita.
+    let mut expected = terminal_expected(&jsonl,"Question A");
     let io = Arc::new(PaneIo::new(picker("Question A")));
     *io.replacement.lock().unwrap() = Some((path.clone(),b.clone(),picker("Question B")));
     let result = driver(io.clone(),jsonl.clone(),&mut expected).guarded_answer_chat(&expected,&answers(),"same-operation").await;
@@ -399,7 +400,8 @@ async fn native_chat_without_previous_answers_keeps_the_native_option() {
     let jsonl = dir.path().join("projects/p/sid.jsonl");
     let path = sidecar(&jsonl,"Question A");
     std::fs::write(&path,json!({"tool_input":{"questions":[{"header":"h","question":"Question A","options":[]}]}}).to_string()).unwrap();
-    let screen = "Question A\n❯ 1. Chat about this\nEsc to cancel · to navigate".to_owned();
+    // O seletor do Claude sempre tem duas linhas ou mais; com o cursor no "Chat about this", só o Enter.
+    let screen = "Question A\n❯ 1. Chat about this\n  2. Type something.\nEsc to cancel · to navigate".to_owned();
     let (question,revision) = ask::read_revision(&jsonl).unwrap().unwrap();
     let mut expected = ExpectedInteraction { semantic:interaction_semantic(&screen,Some(&question)).unwrap(),source_revision:Some(revision),..expected(InteractionKind::Question) };
     let io = Arc::new(PaneIo::new(screen));

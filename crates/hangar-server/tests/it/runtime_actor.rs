@@ -700,7 +700,9 @@ async fn a_failed_sidecar_update_still_hands_the_session_over() {
     let handle = claude_actor(dir.path(),cano,closed).await;
     tokio::time::timeout(std::time::Duration::from_secs(5),async {
         loop {
-            if handle.snapshot().await.unwrap()["error"] == "policy_transport" { break; }
+            // A troca de conversa grava o sidecar pelo ciclo de vida do Rust; sem ele ligado, a gravação
+            // falha e a sessão fica em erro, nunca seguindo calada na conversa velha.
+            if handle.snapshot().await.unwrap()["error"] == "state_lifecycle_unbound" { break; }
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
     }).await.expect("falha do sidecar precisa pôr a sessão em erro");
@@ -1191,6 +1193,10 @@ for line in sys.stdin:
         result = {{"thread": {{"id": "thread-new", "path": "/tmp/rollout-thread-new.jsonl"}}, "model": "gpt-test", "serviceTier": "default"}}
     elif method in ("thread/start", "thread/resume"):
         result = {{"thread": {{"id": "thread-new", "path": "/tmp/rollout-thread-new.jsonl"}}, "model": "gpt-test"}}
+    elif method == "thread/settings/update" and os.path.exists(os.path.join(d, "tier")):
+        # Como o Codex: a troca de Fast chega também como aviso da thread, que o motor exige antes de conferir.
+        send({{"method": "thread/settings/updated", "params": {{"threadId": "thread-new", "threadSettings": {{"serviceTier": msg["params"].get("serviceTier")}}}}}})
+        result = {{}}
     elif method == "turn/start":
         result = {{"turn": {{"id": "turn-1", "status": "inProgress"}}}}
     elif method == "thread/read" and os.path.exists(os.path.join(d, "cut")):
@@ -1334,7 +1340,7 @@ for line in sys.stdin:
         std::fs::write(dir.path().join("tier"),"").unwrap();
         let handle = registry.handle(&key,1).await.unwrap();
         let reply = handle.command(control("tier-1",OperationKind::SetServiceTier,json!({"service_tier":"default"}))).await.unwrap();
-        assert!(reply.disposition == Disposition::Accepted,"a confirmação do Codex vale; só o arquivo recusa");
+        assert!(reply.disposition == Disposition::Accepted,"a confirmação do Codex vale; só o arquivo recusa: {:?}",reply.payload);
         // O mesmo job salva a vista com o Fast e logo depois roda o patch: esperar por ela prova que o patch foi pedido.
         until("vista salva com o Fast",||std::fs::read(dir.path().join("q.json")).ok()
             .and_then(|raw|serde_json::from_slice::<Value>(&raw).ok())
@@ -1790,11 +1796,17 @@ mod terminal_async {
 
     /// Ator do Codex com terminal sem pergunta pendente, assinado e livre para abrir turno.
     async fn quiet_actor(dir:&std::path::Path) -> (RuntimeHandle,tokio::task::JoinHandle<()>,tokio::sync::mpsc::UnboundedSender<Value>,Arc<Mutex<Vec<String>>>) {
+        subscribed_actor(dir,true).await
+    }
+
+    /// `idle`: espera também a sessão entregável. Com entrada na fila, ela sai logo e a espera não vale.
+    async fn subscribed_actor(dir:&std::path::Path,idle:bool) -> (RuntimeHandle,tokio::task::JoinHandle<()>,tokio::sync::mpsc::UnboundedSender<Value>,Arc<Mutex<Vec<String>>>) {
         let rollout = dir.join("chat.jsonl");
         if !rollout.exists() { std::fs::write(&rollout,"").unwrap(); }
         let (cano,server,push,starts) = terminal_cano_with(rollout,json!([])).await;
         let handle = terminal_actor(dir,cano,Arc::new(InteractionStore::default())).await;
-        view_until(&handle,"assinada e livre para turno",|v|v["subscribed"] == true && v["deliverable"] == true).await;        (handle,server,push,starts)
+        view_until(&handle,"assinada e livre para turno",|v|v["subscribed"] == true && (!idle || v["deliverable"] == true)).await;
+        (handle,server,push,starts)
     }
 
     fn ordinary() -> Action {
@@ -1900,7 +1912,7 @@ mod terminal_async {
         drop(push);
         server.abort();
         // A retenção da vida anterior continua viva em quem a pegou e não segura a vida nova.
-        let (second,server,push,starts) = quiet_actor(dir.path()).await;
+        let (second,server,push,starts) = subscribed_actor(dir.path(),false).await;
         until("a vida nova leva a entrada",||accepted(dir.path(),"ordinary")).await;
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         assert_eq!(*starts.lock().unwrap(),vec!["segue".to_owned()],"exatamente uma vez");

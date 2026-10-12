@@ -35,7 +35,9 @@ async fn code(server: std::net::SocketAddr, name: &str, route: &str, body: &str)
 }
 
 /// A matriz de uma sessão aberta: `/answer` e `/select` com ID ausente, antigo e atual e corpo torto.
-async fn identity_matrix(server: std::net::SocketAddr, python: &Fake, store: &InteractionStore, binding: &InteractionBinding, name: &str) {
+/// `open`: o ator tem a pergunta aberta. Sem terminal o motor confere o ID contra a pergunta que ele
+/// mesmo segura; sem nenhuma, o ID atual do retrato fabricado é de pergunta encerrada (desatualizada).
+async fn identity_matrix(server: std::net::SocketAddr, python: &Fake, store: &InteractionStore, binding: &InteractionBinding, name: &str, open: bool) {
     let (old_q, current_q) = shown(store, binding, InteractionKind::Question);
     let (old_s, current_s) = shown(store, binding, InteractionKind::Approval);
     for (route, body, want) in [
@@ -51,7 +53,11 @@ async fn identity_matrix(server: std::net::SocketAddr, python: &Fake, store: &In
         ("select", json!({"option": 1, "interaction_id": current_s}))] {
         let (status, reply) = send(server, "POST", &format!("{name}/{route}"), &body.to_string()).await;
         assert_ne!(reply, json!("from-python"), "{name} {route}");
-        assert!(![MISSING, STALE].contains(&reply["detail"]["code"].as_str().unwrap_or("")), "{name} {route}: {status} {reply}");
+        if open {
+            assert!(![MISSING, STALE].contains(&reply["detail"]["code"].as_str().unwrap_or("")), "{name} {route}: {status} {reply}");
+        } else {
+            assert_eq!((status, reply["detail"]["code"].clone()), (409, json!(STALE)), "{name} {route}: sem pergunta aberta no motor");
+        }
     }
     for (route, body) in [("answer", r#"{"answers":"x"}"#), ("answer", r#"{"answers":[],"interaction_id":5}"#), ("select", r#"{"option":"1"}"#)] {
         assert_eq!(code(server, name, route, body).await, (422, json!("erro_corpo_invalido")), "{name} {route} {body}");
@@ -98,7 +104,7 @@ async fn claude_headless_answers_and_refuses_in_rust() {
     open_dying(&registry, dir.path(), "d", "claude").await.notify_one();
     until_sick(&registry, "d").await;
     let (python, server) = serve_with_interactions(registry, store.clone()).await;
-    identity_matrix(server, &python, &store, &binding, "s").await;
+    identity_matrix(server, &python, &store, &binding, "s", false).await;
     unhealthy(server, &python, "d").await;
 }
 
@@ -111,7 +117,7 @@ async fn codex_headless_answers_and_refuses_in_rust() {
     open_dying(&registry, dir.path(), "d", "codex").await.notify_one();
     until_sick(&registry, "d").await;
     let (python, server) = serve_with_interactions(registry, store.clone()).await;
-    identity_matrix(server, &python, &store, &binding, "c").await;
+    identity_matrix(server, &python, &store, &binding, "c", false).await;
     unhealthy(server, &python, "d").await;
 }
 
@@ -123,7 +129,7 @@ async fn claude_terminal_answers_and_refuses_in_rust() {
     crate::session_write_control::open_terminal(&registry, dir.path(), "t").await;
     let binding = registry.interaction_binding("t").await.unwrap();
     let (python, server) = serve_with_interactions(registry, store.clone()).await;
-    identity_matrix(server, &python, &store, &binding, "t").await;
+    identity_matrix(server, &python, &store, &binding, "t", true).await;
     // Entrada com o vínculo trocado: doente, e a recusa é do Rust.
     let sick_dir = tempfile::tempdir().unwrap();
     let sick = crate::session_write_input::registry().await;

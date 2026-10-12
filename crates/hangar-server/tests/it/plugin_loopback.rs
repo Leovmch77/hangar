@@ -234,8 +234,9 @@ async fn stopping_allows_a_restart_on_the_same_public_and_bridge_port() {
         if again {
             server = restart(address, upstream).await;
         }
+        // A rota do plugin é do Rust: corpo vazio é recusado por ele (422), prova de que a ponte atende.
         let response = post(server.bridge, "state", json!({})).await;
-        assert_eq!(response.status().as_u16(), 200);
+        assert_eq!(response.status().as_u16(), 422);
         server.stop().await;
     }
 }
@@ -294,6 +295,8 @@ mod held_routes {
     fn envelope() -> Value { json!({"sessao":"original","token":mint_keyed(OWNER,"original","process-key")}) }
     async fn value(response: reqwest::Response) -> Value { serde_json::from_str(&response.text().await.unwrap()).unwrap() }
 
+    // Unix: o agente falso precisa de `argv[0]` próprio (`arg0`).
+    #[cfg(unix)]
     #[tokio::test]
     async fn plugin_loopback_held_appstate_and_runtime_share_one_store_and_identity_registry() {
         if std::env::var_os("HANGAR_PLUGIN_BOOT_CHECK").is_none() {
@@ -324,8 +327,18 @@ mod held_routes {
         let dir = tempfile::tempdir().unwrap();
         let (socket, _seen, cano) = mods_support::vitrine_cano(&[]).await;
         let _cano = Running(cano);
-        registry.open(mods_support::claude_target(dir.path(), socket, true)).await.unwrap();
-        let binding = registry.interaction_binding("session").await.unwrap();
+        // O registro de produção comprova o agente pelos processos reais: um `claude` da conversa, filho
+        // deste processo (que faz as vezes do cano).
+        let mut agent = {
+            use std::os::unix::process::CommandExt;
+            std::process::Command::new("/bin/sh").arg0("claude").args(["-c", "sleep 60; :", "--session-id", "sid-1"]).spawn().unwrap()
+        };
+        let mut target = mods_support::claude_target(dir.path(), socket, true);
+        target.binding.pid = std::process::id();
+        let opened = registry.open(target).await;
+        let binding = opened.and(registry.interaction_binding("session").await);
+        let _ = agent.kill(); let _ = agent.wait();
+        let binding = binding.unwrap();
         let ask = plugin::Ask { id:"perm:boot".into(), questions:None, tool:Some("Bash".into()), janela_ms:None, summary:None };
         let poll = plugin.begin_ask(&binding, ask, PermissionGate { app_present:true, terminal_attached:false, mode_without_dialog:false }, std::time::Instant::now()).unwrap();
         let pending = plugin.pending(&binding, std::time::Instant::now()).unwrap();

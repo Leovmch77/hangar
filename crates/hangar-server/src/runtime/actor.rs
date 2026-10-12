@@ -820,15 +820,24 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
     // Retenção de turnos (`hold_turns`): só a referência fraca fica aqui; quem segura é dono da forte.
     let mut turn_hold:Option<std::sync::Weak<()>> = None;
     let turn_hold_released = Arc::new(Notify::new());
+    // Pedidos de retenção que chegaram com uma drenagem em curso: respondem quando ela termina.
+    let mut hold_waiters:Vec<oneshot::Sender<Result<TurnHold,RuntimeError>>> = Vec::new();
     // O snapshot é do cano; no WebSocket o estado vem do próprio app-server depois de conectar.
     if let Some(snapshot) = snapshot { effects.extend(engine.hydrate(snapshot)?); }
     if adopted || engine.view()["initialized"] != true || target.provider == "codex" && engine.view()["ready"] != true {
-        let id = if target.provider=="claude" {format!("bootstrap:{}:{}:{}:{}",target.key,target.generation,target.binding.pid,target.metadata["cano"]["process_birth"])} else {format!("bootstrap:{}:{}",target.key,target.generation)};
+        let mut id = if target.provider=="claude" {format!("bootstrap:{}:{}:{}:{}",target.key,target.generation,target.binding.pid,target.metadata["cano"]["process_birth"])} else {format!("bootstrap:{}:{}",target.key,target.generation)};
+        // Vida nova do ator na mesma geração (reabertura): a subida da vida anterior já fechou e não pode ser
+        // reenviada; esta sobe com outra operação, senão o `initialize` nunca sai.
+        if initial.operations.get(&id).is_some_and(|op|matches!(op.status,Status::Accepted|Status::Rejected|Status::Confirmed)) { id = format!("{id}:{}",unique()); }
         queue.exec(target.generation,&format!("prepare:{id}"),clock(start),Action::Prepare { id:id.clone(),payload:json!({"kind":"bootstrap"}),entry_id:None }).await.map_err(io_failure)?;
         effects.extend(engine.initialize(id)?);
     }
     loop {
         live.error(&error);
+        if !drain_active && !hold_waiters.is_empty() {
+            let view = engine.view();
+            for response in hold_waiters.drain(..) { let _ = response.send(turn_hold_reply(&view,&mut turn_hold,&turn_hold_released)); }
+        }
         if block_claude_sid(&mut target,&engine.view()) {
             sid_transition=true;
             for (id,pending) in roots.iter_mut().filter(|(_,pending)|pending.result.is_none()) {
@@ -1361,19 +1370,11 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
                         // Socket fora não recusa (sem fonte de turno, como o `_guard_permissao_codex`); fila
                         // reivindicando ou despachando já é um turno a caminho. A checagem vale também para quem
                         // reaproveita a retenção viva: a TUI pode ter aberto turno durante o primeiro seletor.
-                        let view = engine.view();
-                        let shared = turn_hold.as_ref().and_then(std::sync::Weak::upgrade);
-                        let reply = if drain_active || view["connected"] == true && view["deliverable"] == false {
-                            Err(RuntimeError::new(TURN_HOLD_BUSY,"a sessão está trabalhando — espere ela terminar"))
-                        } else if let Some(token) = shared {
-                            Ok(TurnHold { token:Some(token),released:turn_hold_released.clone() })
-                        } else {
-                            let token = Arc::new(());
-                            turn_hold = Some(Arc::downgrade(&token));
-                            Ok(TurnHold { token:Some(token),released:turn_hold_released.clone() })
-                        };
+                        // Drenagem em curso pode não achar nada: a resposta espera o desfecho dela em vez de
+                        // recusar por uma reivindicação que talvez não vire turno.
+                        if drain_active { hold_waiters.push(response); continue; }
                         // Quem pediu desistiu: o valor cai aqui e a retenção some no próximo passo.
-                        let _ = response.send(reply);
+                        let _ = response.send(turn_hold_reply(&engine.view(),&mut turn_hold,&turn_hold_released));
                     }
                     Message::Drain(response) => {
                         if target.metadata["lifecycle_pending"]==true {let _=response.send(Ok(json!({"sent":0})));continue;}
@@ -1686,8 +1687,14 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
                     }
                     Job::Finished { generation,reply,result } => {
                         if generation!=target.generation {continue;}
-                        if let Err(failure) = result { fail_root(&mut roots,&reply.operation_id,failure.clone()); enter_error(&mut error,&target,failure); }
+                        // Resposta reservada já gravada: o desfecho é o da reserva (sai na vez dela); a falha do
+                        // diário vai ao log, como na própria gravação da reserva.
+                        let reserved = reply.payload["reserved"] == true;
+                        if let (Err(failure),false) = (&result,reserved) { fail_root(&mut roots,&reply.operation_id,failure.clone()); enter_error(&mut error,&target,failure.clone()); }
                         else {
+                          if let Err(failure) = &result {
+                              tracing::warn!(key=%target.key,session=%target.name,code=%failure.code,"desfecho da resposta reservada não foi gravado; a reserva segue");
+                          }
                           if !roots.contains_key(&reply.operation_id) {
                               if let Some(command) = initial.operations.get(&reply.operation_id).and_then(|operation|serde_json::from_value::<RuntimeCommand>(operation.payload.clone()).ok()) {
                                   roots.insert(reply.operation_id.clone(),Pending::stored(command,reply.clone()));
@@ -2173,6 +2180,20 @@ fn stored_reply(id:&str,prepared:&Value) -> Option<RuntimeReply> {
     };
     serde_json::from_value(prepared["result"].clone()).ok()
         .or_else(||Some(RuntimeReply { operation_id:id.into(),disposition,payload:Value::Null }))
+}
+
+/// Retenção de turnos sem drenagem em curso: recusa se há turno (socket ligado e sessão não entregável);
+/// senão reaproveita a retenção viva ou abre outra.
+fn turn_hold_reply(view:&Value,turn_hold:&mut Option<std::sync::Weak<()>>,released:&Arc<Notify>) -> Result<TurnHold,RuntimeError> {
+    if view["connected"] == true && view["deliverable"] == false {
+        return Err(RuntimeError::new(TURN_HOLD_BUSY,"a sessão está trabalhando — espere ela terminar"));
+    }
+    let token = turn_hold.as_ref().and_then(std::sync::Weak::upgrade).unwrap_or_else(|| {
+        let token = Arc::new(());
+        *turn_hold = Some(Arc::downgrade(&token));
+        token
+    });
+    Ok(TurnHold { token:Some(token),released:released.clone() })
 }
 
 /// Quem pediu o drain espera quando há o que sair: fila comum entregável, resposta reservada apta ou drain em curso.

@@ -75,6 +75,8 @@ class SessionInfo(BaseModel):
     lifecycle_id: Optional[str] = None
     transfer_id: Optional[str] = None
     transfer_phase: Optional[str] = None
+    # ID da pergunta/permissão exibida na linha, como o Rust o publica; a assinatura da lista o inclui.
+    interaction_id: Optional[str] = None
     cwd: Optional[str] = None
     jsonl: Optional[str] = None
     # Qual Adapter dirige esta sessao (app.adapters.get_adapter). "claude" cobre TODA sessao de hoje

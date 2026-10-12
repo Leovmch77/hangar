@@ -73,7 +73,8 @@ async fn open_refuses_carry() {
 async fn terminal_runtime_gateway_opens_without_cano_and_fences_generation() {
     let dir=tempfile::tempdir().unwrap();
     let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap(); let address=listener.local_addr().unwrap();
-    let registry=Arc::new(RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(),"secret-test".into(),"instance-test".into()));
+    // Ligado aos hubs como o servidor monta: fechar a vida do terminal esquece a cota pelo hub.
+    let registry=crate::runtime_open::with_hubs(RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(),"secret-test".into(),"instance-test".into()));
     let server=tokio::spawn(gateway::serve(listener,registry.clone(),"secret-test".into(),"instance-test".into(),hangar_server::INTERNAL_PROTOCOL));
     let binding=serde_json::json!({"name":"session","pane":"%1","conversation":"sid","generation":1,"created":1,"mux_argv":["fake"],"windows":false,"clipboard_lock_path":null});
     let descriptor=serde_json::json!({"name":"session","key":"key","provider":"claude","headless":false,"meta":{"key":"key","terminal":binding,"config_dir":dir.path(),"agent_pid":std::process::id(),"agent_birth":hangar_server::terminal_facts::agent_birth(std::process::id()).unwrap(),"fingerprint":"fixture-life","message_origin":"uds:fixture"},"jsonl":dir.path().join("chat.jsonl"),"projection_dir":dir.path().join("projection"),"state_path":dir.path().join("state"),"lock_path":dir.path().join("lease"),"generation":1});

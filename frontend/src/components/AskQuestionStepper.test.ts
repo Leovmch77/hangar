@@ -61,7 +61,7 @@ describe('AskQuestionStepper: saídas de texto', () => {
   it('troca A na revisão por B com menos opções sem quebrar a tela', async () => {
     const el = document.createElement('div'); document.body.appendChild(el);
     const first = { ...payload, request_id: 'same-native-id', interaction_id: 'interaction-a' };
-    const second: AskQuestionPayload = { ...first, interaction_id: 'interaction-b',
+    const second = { ...first, interaction_id: 'interaction-b',
       questions: [{ ...payload.questions[0], options: [{ label: 'Única', description: '' }] }] };
     const onSubmit = vi.fn().mockResolvedValue(undefined);
     const comp = createClassComponent({ component: AskQuestionStepper, target: el, props: {

@@ -361,10 +361,11 @@ describe('contratos de conversa com servidor explícito', () => {
     { path: '/plugin/close', body: { site: 'pm-mock-mr' }, run: (s?: Server) => closePluginPane('mesma/sessão', 'pm-mock-mr', s) },
     { path: '/plugin/show', body: { site: 'pm-mock-mr' }, run: (s?: Server) => showPluginPane('mesma/sessão', 'pm-mock-mr', s) },
     { path: '/plugin/input', body: { site: 'vitrine-campos', plugin: 'vitrine', key: 'V18-campo', kind: 'change', value: 'oi' }, run: (s?: Server) => inputPluginField('mesma/sessão', 'vitrine-campos', CAMPO, 'change', 'oi', s) },
-    { path: '/select', body: { option: 1, interaction_id: 'interaction-a' }, run: (s?: Server) => selectOption('mesma/sessão', 1, 'interaction-a', s) },
-    { path: '/select', body: { option: 2 }, run: (s?: Server) => selectOption('mesma/sessão', 2, undefined, s) },
-    { path: '/select/submit', body: { interaction_id: 'interaction-a' }, run: (s?: Server) => submitSelected('mesma/sessão', 'interaction-a', s) },
-    { path: '/select/submit', body: {}, run: (s?: Server) => submitSelected('mesma/sessão', null, s) },
+    // `/select` sai pelo `sessionFetch`: o erro tem a forma do apiFetch (mensagem limpa e `code`), que o cartão lê.
+    { path: '/select', body: { option: 1, interaction_id: 'interaction-a' }, run: (s?: Server) => selectOption('mesma/sessão', 1, 'interaction-a', s), refused: 'recusado' },
+    { path: '/select', body: { option: 2 }, run: (s?: Server) => selectOption('mesma/sessão', 2, undefined, s), refused: 'recusado' },
+    { path: '/select/submit', body: { interaction_id: 'interaction-a' }, run: (s?: Server) => submitSelected('mesma/sessão', 'interaction-a', s), refused: 'recusado' },
+    { path: '/select/submit', body: {}, run: (s?: Server) => submitSelected('mesma/sessão', null, s), refused: 'recusado' },
     { path: '/answer', body: { answers: [], request_id: 0, interaction_id: 'form-a' }, run: (s?: Server) => answerQuestions('mesma/sessão', [], 0, 'form-a', s) },
     { path: '/answer', body: { answers: [] }, run: (s?: Server) => answerQuestions('mesma/sessão', [], undefined, undefined, s) },
     { path: '/question/skip', body: { request_id: 'req-b', interaction_id: 'form-a' }, run: (s?: Server) => skipQuestion('mesma/sessão', 'req-b', 'form-a', s) },
@@ -427,9 +428,9 @@ describe('contratos de conversa com servidor explícito', () => {
     expect(JSON.parse(fetchMock.mock.calls[0][1]?.body as string)).toEqual({ answers, request_id: 'req-b' });
   });
 
-  it.each(mutations)('$path recusado por B não remove a credencial ativa nem repete POST', async ({ run }) => {
+  it.each(mutations)('$path recusado por B não remove a credencial ativa nem repete POST', async ({ run, refused }) => {
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{"detail":"recusado"}', { status: 401 }));
-    await expect(run(target)).rejects.toMatchObject({ status: 401, message: '401: recusado' });
+    await expect(run(target)).rejects.toMatchObject({ status: 401, message: refused ?? '401: recusado' });
     expect(onUnauthorizedSpy).not.toHaveBeenCalled();
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });

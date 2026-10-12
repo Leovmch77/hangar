@@ -393,7 +393,8 @@ impl Executor {
                         // Clique de mod em curso, ou o que ele guardou ainda por sair: a fila não entrega nem
                         // reconcilia no pane antes disso (C6).
                         if self.held() || !self.parked.is_empty() {continue;}
-                        if (self.options.lifecycle.is_some() || self.clear_watch.is_some()) && let Err(failure)=self.reconcile_life().await {self.enter_error(failure).await?;}
+                        // Sem ciclo de vida ligado a reconciliação só falharia; a trava do `/clear` sai pelo `expire_clear` da drenagem.
+                        if self.options.lifecycle.is_some() && let Err(failure)=self.reconcile_life().await {self.enter_error(failure).await?;}
                         // O `/clear` incerto depois do Enter deixa o erro de entrega incerta: a trava ainda vence.
                         if self.last_error.as_deref()==Some("terminal_facts") {
                             match self.drain_once(None).await {

@@ -366,7 +366,7 @@ def _list_sig(infos) -> str:
           getattr(i, "git_added", None), getattr(i, "git_removed", None),
           i.state, i.tracked, getattr(i, "headless", False), i.jsonl, i.question, i.stalled, i.limited,
           getattr(i, "lifecycle_id", None), getattr(i, "transfer_id", None),
-          getattr(i, "transfer_phase", None),
+          getattr(i, "transfer_phase", None), getattr(i, "interaction_id", None),
           getattr(i, "last_reply", None), getattr(i, "last_reply_at", None),
           getattr(i, "pending_questions", 0),
           i.limit_reset, i.then_target, _status_sig(getattr(i, "status_line", None)),

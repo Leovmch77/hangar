@@ -456,7 +456,8 @@ async fn an_app_server_that_outlives_the_kill_leaves_the_session_parked_not_buri
     assert!(error.message.contains(&app.id().to_string()),"a resposta nomeia o pid vivo: {}",error.message);
     assert!(error.message.contains("feche-a e abra a conversa de novo"),"a resposta diz o que fazer: {}",error.message);
     let parked = fx.sidecar("cx-proof").expect("sidecar no disco");
-    assert_eq!(parked["headless"],false);
+    // O sidecar do lançador não grava `headless`: ausente é terminal, e a troca não o virou.
+    assert_ne!(parked["headless"],true,"continua de terminal");
     assert!(parked["app_pid"].is_null(),"sem `unpark`: a vigia não enterra uma sessão sem pane");
     assert!(registry.writable("cx-proof").await.is_none(),"nenhum sem terminal subiu");
     // Rodadas depois do prazo de morte: nada é apagado.

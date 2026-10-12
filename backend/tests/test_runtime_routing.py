@@ -806,7 +806,9 @@ def test_legacy_client_refused_while_rust_owns(birth):
     asyncio.run(scenario())
 
 
-def test_codex_headless_stays_python_while_rust_owns(birth, monkeypatch):
+def test_codex_headless_stays_python_while_rust_does_not_announce_it(birth, monkeypatch):
+    # Codex sem terminal é do Rust quando a saúde dele o anuncia em `owns` (o padrão já o inclui); um
+    # hangar-server que não o anuncia deixa a sessão com o Python.
     from app.adapters.codex import sessions as codex_sessions
     from app.runtime_adapter import LegacyBridge, assert_legacy
     meta = {"name":"c1", "key":"codexkey", "headless":True, "thread_id":"thread", "rollout_path":"/tmp/rollout.jsonl"}
@@ -815,6 +817,7 @@ def test_codex_headless_stays_python_while_rust_owns(birth, monkeypatch):
     owner = birth.build(transport)
     owner.legacy = LegacyBridge(owner, {"claude":birth.adapter, "codex":SimpleNamespace(_sessions={})})
     owner.mode = "rust"
+    owner._owns = {("claude", True), ("claude", False)}
     async def scenario():
         owner.loop = asyncio.get_running_loop()
         assert await owner.prepare_session("c1", "codex", launch=True)
@@ -1223,8 +1226,11 @@ def test_codex_switch_to_terminal_has_no_python_hand_over(codex_birth, monkeypat
         runtime_coordinator.refuse_python_client(name, "codex")
     monkeypatch.setattr(codex_birth.codex, "open_terminal", open_terminal, raising=False)
     async def scenario():
+        import os
         owner.loop = asyncio.get_running_loop()
         await owner.ensure_open("cx")
+        # Processo vivo no arquivo: a recusa devolve a sessão ao Rust (cano parado ficaria só registrado).
+        codex_birth.codex_sessions.update("cx", cano={"pid":os.getpid(), "escuta":"unix:/tmp/vivo.sock", "token":"t", "ts":1.0, "versao":2})
         with pytest.raises(RuntimeError, match="bloqueado"):
             await owner.lifecycle_call("cx", "open_terminal", {})
     asyncio.run(scenario())

@@ -281,8 +281,11 @@ pub fn apply(rows: Vec<SessionRow>, facts: &ListFacts, ok: bool) -> (Vec<Session
     let mut aside = Vec::new();
     for row in rows {
         let external = overrides.remove(row.name.as_str());
-        let row = if row.provider == "claude" { row } else { external.cloned().unwrap_or(row) };
-        if row.provider != "claude" && facts.frozen.contains(&row.name) { aside.push(row) } else { work.push(row) }
+        // Quem decide é a sessão descoberta: a Claude é do Rust; a de outro agente em troca (mesmo que o
+        // destino seja Claude) segue a linha e o congelamento da transferência.
+        let claude = row.provider == "claude";
+        let row = if claude { row } else { external.cloned().unwrap_or(row) };
+        if !claude && facts.frozen.contains(&row.name) { aside.push(row) } else { work.push(row) }
     }
     // Linha que a transferência cria (a sessão de origem já saiu da descoberta).
     for row in facts.overrides.iter().filter(|r| r.provider != "claude" && overrides.contains_key(r.name.as_str())) {

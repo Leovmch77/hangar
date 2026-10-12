@@ -21,7 +21,7 @@ _shortcuts = sse._ListRefresher()
 SIG_FIELDS = ("name", "cwd", "branch", "git_cwd", "worktree_gone", "git_dirty",
               "git_ahead", "git_behind", "git_added", "git_removed", "state", "tracked", "headless",
               "jsonl", "question", "stalled", "limited", "lifecycle_id", "transfer_id", "transfer_phase",
-              "last_reply", "last_reply_at", "pending_questions", "limit_reset", "then_target", "status_line",
+              "interaction_id", "last_reply", "last_reply_at", "pending_questions", "limit_reset", "then_target", "status_line",
               "context", "model", "label", "startup_steps", "loop_status", "loop_iter", "engine", "conta",
               "codex_service_tier", "plan_name", "plan_done", "plan_total", "plan_task", "plan_task_total",
               "plan_complete", "plan_tasks", "plan_hidden", "problema", "provider", "shared", "owner",

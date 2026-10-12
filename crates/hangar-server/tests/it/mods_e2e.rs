@@ -40,7 +40,13 @@ async fn world(swallow: &'static [&'static str]) -> World {
     python.set_info(info_json("claude-headless", &transcript));
     let state = AppState::new(config(upstream, "127.0.0.1"));
     let mods = state.mods.clone();
-    let registry = registry(&mods);
+    // Como o `lib.rs`: o registro é o ciclo de vida e o runtime do estado ao vivo, ligado aos hubs do chat.
+    let registry = Arc::new(RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(), "secret-test".into(), "instance-test".into())
+        .with_mods(mods.clone()).with_processes(Arc::new(crate::runtime_open::RecipeProcesses("sid-1"))));
+    registry.bind_lifecycle();
+    registry.bind_hubs(state.side.hubs.downgrade());
+    let _ = state.state.lifecycle.set(registry.clone());
+    let _ = state.side.runtime.set(registry.clone());
     let _ = state.state.runtime.set(registry.clone());
     let server = spawn_state(state).await;
     let (escuta, seen, cano) = vitrine_cano(swallow).await;

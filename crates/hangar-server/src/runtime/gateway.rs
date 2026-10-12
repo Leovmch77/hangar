@@ -849,21 +849,30 @@ impl RuntimeRegistry {
             _=>None,
         };
         if let Some(plugin) = &self.plugin { plugin.forget(key).map_err(|error|failure(error.0))?; }
+        // Processo que o Rust não comprova ser desta vida: o ator para e a sessão sai daqui, mas nada é
+        // morto (`killed: false`); quem pediu decide.
+        let mut foreign = false;
         let stopped = match (&handle,kill) {
             (EntryHandle::Headless(handle),true) if runtime_target.as_ref().is_some_and(|target|target.provider=="claude")=> {
                 let target=runtime_target.as_ref().unwrap();
                 let born=cano_birth.ok_or_else(||failure("lifecycle_process_birth_missing"))?;
-                let procs=crate::list::procs::SystemProcs::default();
-                if !super::lifecycle::process_absent(&procs,i64::from(target.binding.pid),born)?
-                    && (crate::terminal_facts::agent_birth(target.binding.pid)!=Some(born) || process::liveness(target.binding.pid,key)!=process::Liveness::Ours) {return Err(failure("lifecycle_process_changed"));}
+                let procs=self.processes.clone();
+                let ours=super::lifecycle::process_absent(procs.as_ref(),i64::from(target.binding.pid),born).map(|absent|absent
+                    || crate::terminal_facts::agent_birth(target.binding.pid)==Some(born) && process::liveness(target.binding.pid,key)==process::Liveness::Ours);
+                if !matches!(ours,Ok(true)) {
+                    foreign = true;
+                    if let Err(error) = handle.stop().await { tracing::warn!(key,code=%error.code,"ator parou com erro ao soltar processo alheio"); }
+                    Err(ours.err().unwrap_or_else(||failure("lifecycle_process_changed")))
+                } else {
                 let stopped=handle.stop().await;
                 if let Err(error)=&stopped && wait_lease(&target.lease_path).await.is_err() {return Err(error.clone());}
                 let mut cano=process::Cano {pid:target.binding.pid,escuta:target.binding.escuta.clone(),token:target.binding.token.clone(),ts:0.0,versao:target.binding.versao,extra:Default::default()};
                 cano.extra.insert("process_birth".into(),json!(born));
                 let dir=super::lifecycle::claude_sidecar_dir()?;
                 process::kill(&cano,key,&dir).await.map_err(|e|RuntimeError::new(e.code(),"o cano da sessão não foi encerrado"))?;
-                if let Some(recipe)=&recipe {let (pid,birth)=recipe.agent_identity();if !super::lifecycle::process_absent(&procs,pid,birth)? {return Err(failure("lifecycle_agent_still_alive"));}}
+                if let Some(recipe)=&recipe {let (pid,birth)=recipe.agent_identity();if !super::lifecycle::process_absent(procs.as_ref(),pid,birth)? {return Err(failure("lifecycle_agent_still_alive"));}}
                 Ok(())
+                }
             },
             (EntryHandle::Headless(handle),true)=>handle.stop_killing().await,
             (EntryHandle::Terminal {target,handle},true)=> {
@@ -894,7 +903,7 @@ impl RuntimeRegistry {
                 tracing::warn!(key,code=%error.code,"ator terminou mas a trava não liberou em 3 s; sessão segue presa");
                 return Err(error);
             }
-            if kill && closed_life.is_some() {
+            if kill && closed_life.is_some() && !foreign {
                 if let Some(store)=&self.interactions {store.forget(key).map_err(crate::interactions::runtime_error)?;}
                 self.entries.lock().await.remove(key);
                 if let Some(mods)=&self.mods {mods.forget(&name,life);}
@@ -949,7 +958,7 @@ impl RuntimeRegistry {
                 let live=entry.live.borrow().clone()?;
                 let binding=live.binding.as_ref().filter(|binding|binding.key==entry.mode_source.binding.key && binding.generation==entry.generation && !binding.conversation.is_empty())?;
                 let jsonl=entry.mode_source.transcript.with_file_name(format!("{}.jsonl",binding.conversation));
-                Some(crate::transcript::InternalInfo {provider:"claude_headless".into(),jsonl:Some(jsonl),session_key:binding.key.clone(),history:json!({"queue":entry.lease_path.parent()?.parent()?.join(format!("{name}.jsonl"))}),headless:true})
+                Some(crate::transcript::InternalInfo {provider:crate::transcript::Provider::ClaudeHeadless.as_str().into(),jsonl:Some(jsonl),session_key:binding.key.clone(),history:json!({"queue":entry.lease_path.parent()?.parent()?.join(format!("{name}.jsonl"))}),headless:true})
             },
             _=>None,
         }

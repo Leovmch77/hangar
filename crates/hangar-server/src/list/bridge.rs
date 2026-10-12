@@ -241,12 +241,14 @@ impl ListBridge {
         }
     }
 
-    /// Rebaixamentos da rodada valem no cache Rust da lista e do Monitor.
-    fn demote(&self, effects: Vec<Effect>) -> Vec<String> {
-        effects.into_iter().map(|Effect::DemoteAwaiting { sid, ts }| {
+    /// Rebaixamentos da rodada valem no cache Rust da lista e do Monitor, e vão ao mapa de marcadores do
+    /// Python, que o push e as rotas dele ainda leem e que ele grava no arquivo de estado.
+    fn demote(&self, effects: Vec<Effect>) {
+        let sids: Vec<String> = effects.into_iter().map(|Effect::DemoteAwaiting { sid, ts }| {
             self.demoted.demote(&sid, ts);
             sid
-        }).collect()
+        }).collect();
+        if !sids.is_empty() { self.facts.demote(sids); }
     }
 
     /// Uma vez, na subida do servidor com o runtime de pé.
@@ -275,12 +277,14 @@ impl ListBridge {
         if let Some(readings) = lock(&self.test_plugins).clone() { return readings; }
         let jobs = rows.iter().filter(|row| row.provider == "claude").map(|row| async {
             let read = match self.plugin_runtime.get() {
-                Some(runtime) => crate::state::facts::plugin_reading(runtime, &row.name).await,
-                None => Err("list_plugin_source_absent".into()),
+                // Sessão que ainda não foi aberta no Rust não tem pergunta segurada a projetar.
+                Some(runtime) if !runtime.has_entry(None, &row.name).await => None,
+                Some(runtime) => Some(crate::state::facts::plugin_reading(runtime, &row.name).await),
+                None => Some(Err("list_plugin_source_absent".into())),
             };
-            (row.name.clone(), read)
+            read.map(|read| (row.name.clone(), read))
         });
-        futures_util::future::join_all(jobs).await.into_iter().collect()
+        futures_util::future::join_all(jobs).await.into_iter().flatten().collect()
     }
 
     fn project_plugins(&self, rows: &mut [SessionRow], plugins: &BTreeMap<String, Result<crate::state::facts::PluginReading, String>>) {

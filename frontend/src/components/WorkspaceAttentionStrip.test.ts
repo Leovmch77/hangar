@@ -31,6 +31,7 @@ it('A e B sobrepostas mantêm C ativo e enviam cada identidade ao servidor da pe
     getBaseUrl: () => auth.servers.find((s) => s.id === auth.activeId)!.baseUrl,
     getToken: () => auth.servers.find((s) => s.id === auth.activeId)!.token,
     onUnauthorized: vi.fn(), origin: null,
+    createEventSource: () => { throw new Error('sem SSE no teste'); },
   });
   const completions: Array<(response: Response) => void> = [];
   const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(() => new Promise<Response>((resolve) => {

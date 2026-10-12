@@ -307,9 +307,13 @@ impl CanoConnection {
         let (events_tx, events) = mpsc::channel(capacity.max(1));
         let (stop, stop_rx) = watch::channel(false);
         let pending = Arc::new(Mutex::new(HashMap::<String, Instant>::new()));
+        // Conexão perdida (EOF ou erro de leitura sem `cano_saiu`): o escritor sai junto e o canal de eventos
+        // fecha; o ator vê a queda do transporte (`cano_closed`), não a saída do processo.
+        let lost = Arc::new(tokio::sync::Notify::new());
         let reader_task = {
             let pending = pending.clone();
             let events = events_tx.clone();
+            let lost = lost.clone();
             let mut stop = stop_rx.clone();
             let mut stopping = stop_rx.clone();
             tokio::spawn(async move {
@@ -323,7 +327,7 @@ impl CanoConnection {
                         let value = tokio::select! {
                             result = read_into(&mut read, &mut frame, MAX_ENVELOPE) => match result {
                                 Ok(Some(value)) => Some(value),
-                                _ => { let _ = events.send(IoEvent::End { code: None }).await; return; }
+                                _ => { lost.notify_one(); return; }
                             },
                             _ = tokio::time::sleep_until(deadline) => None,
                             _ = stopping.changed() => return,
@@ -424,7 +428,7 @@ impl CanoConnection {
                     }
                 }
             };
-            tokio::select! { _ = work => {}, _ = stop.changed() => {} }
+            tokio::select! { _ = work => {}, _ = stop.changed() => {}, _ = lost.notified() => {} }
             let _ = write.shutdown().await;
         });
         IoTasks { writer, ui_writer, events, stop, reader_task, writer_task }

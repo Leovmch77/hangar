@@ -18,6 +18,7 @@
   "lifecycle_id": null,
   "transfer_id": null,
   "transfer_phase": null,
+  "interaction_id": null,
   "cwd": null,
   "jsonl": null,
   "provider": "claude",
