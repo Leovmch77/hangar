@@ -578,7 +578,8 @@ impl Engine {
             let turn = self.resizes.get() + 1;
             self.resizes.set(turn);
             if first {
-                fit.apply(resized);
+                // O tamanho aplicado antes de esconder pode ter ficado para trás (ajuste pendente descartado).
+                fit.apply(true);
             } else {
                 // Durante um arrasto o quadro antigo estica até o painel; o Chromium só recebe o tamanho em que ele parou.
                 let (resizes, visible, timer) = (self.resizes.clone(), self.visible.clone(), self.background.timer(Duration::from_millis(RESIZE_SETTLE_MS)));

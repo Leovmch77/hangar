@@ -47,24 +47,42 @@ def _chave(name: str) -> Optional[str]:
     return str(sc.get("chave")) if sc and sc.get("chave") else None
 
 
-def esperar_pronto(name: str, desde_ms: int, teto_s: float = 20.0) -> str:
-    """Espera o navegador que o `open` pediu: sidecar regravado depois do pedido e `url` respondendo.
-    Devolve a URL; levanta `ShellIndisponivel` se não ficar pronto no prazo."""
+def url_antes(name: str) -> Optional[str]:
+    """Endereço do navegador da sessão antes do `open`; `None` sem navegador."""
+    from app.navsock import alvo_da_sessao
+    sc = alvo_da_sessao(name, exige_alvo=False)
+    return str(sc.get("url") or "") if sc else None
+
+
+def _navegou(atual: str, antes: Optional[str], pedida: str) -> bool:
+    """O sidecar já é da página pedida: não havia navegador, o endereço mudou, ou a pedida é a mesma de antes."""
+    if antes is None or atual != antes:
+        return True
+    pedida = pedida.strip().removeprefix("https://").removeprefix("http://").rstrip("/")
+    return bool(pedida) and pedida in antes
+
+
+def esperar_pronto(name: str, desde_ms: int, antes: Optional[str] = None, pedida: str = "", teto_s: float = 20.0) -> str:
+    """Espera o navegador que o `open` pediu: sidecar regravado depois do pedido, já na página pedida, e `url`
+    respondendo. Devolve a URL; levanta `ShellIndisponivel` se não ficar pronto no prazo."""
     from app.navsock import alvo_da_sessao
     prazo = time.monotonic() + teto_s
-    ultimo = ""
+    restante = lambda: max(0.5, min(TETO_S, prazo - time.monotonic()))  # noqa: E731
+    ultimo, pausa_conferida = "", False
     while time.monotonic() < prazo:
         sc = alvo_da_sessao(name, exige_alvo=False)
-        # Pausado pelo usuário, o app não navega: dizer na hora em vez de esgotar o prazo.
-        try:
-            pausado = bool(sc) and verbo(name, "estado").strip() == "pausado"
-        except ShellIndisponivel:
-            pausado = False
-        if pausado:
-            raise ShellIndisponivel(PAUSADO)
-        if sc and int(sc.get("ts") or 0) >= desde_ms:
+        # Pausado pelo usuário, o app não navega: dizer na hora em vez de esgotar o prazo. Uma pergunta basta.
+        if sc and not pausa_conferida:
+            pausa_conferida = True
             try:
-                texto = verbo(name, "url")
+                if verbo(name, "estado", teto_s=restante()).strip() == "pausado":
+                    raise ShellIndisponivel(PAUSADO)
+            except ShellIndisponivel as e:
+                if str(e) == PAUSADO:
+                    raise
+        if sc and int(sc.get("ts") or 0) >= desde_ms and _navegou(str(sc.get("url") or ""), antes, pedida):
+            try:
+                texto = verbo(name, "url", teto_s=restante())
             except ShellIndisponivel as e:
                 texto = str(e)
             if texto.startswith("ok:"):

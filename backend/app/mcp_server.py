@@ -339,12 +339,13 @@ async def browser_open(ctx: Context, url: str, sessao: str = "") -> dict[str, An
     from app import api
     eu = await _eu(ctx, sessao)
     desde = int(time.time() * 1000)
+    antes = await asyncio.to_thread(navshell.url_antes, eu)
     try:
         await api.abrir_nav_sessao(eu, api.NavBody(url=url))
     except HTTPException as e:
         raise ToolError(_detalhe(e)) from e
     try:
-        pronto = await asyncio.to_thread(navshell.esperar_pronto, eu, desde)
+        pronto = await asyncio.to_thread(navshell.esperar_pronto, eu, desde, antes, url)
     except navshell.ShellIndisponivel as e:
         raise ToolError(str(e)) from e
     return {"ok": True, "url": pronto}
@@ -470,13 +471,19 @@ async def _jev_cli(ctx: Context, sessao: str, args: list[str], teto_s: float) ->
     node = shutil.which("node")
     if not node:
         raise ToolError("node não encontrado no PATH do backend: o objetivo roda pelo hangar-preview")
-    proc = await asyncio.create_subprocess_exec(node, str(_HANGAR_PREVIEW), *args, "--sessao", alvo, env=env,
-                                                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
-    try:
-        saida, _ = await asyncio.wait_for(proc.communicate(), teto_s)
-    except TimeoutError:
-        proc.kill()
-        raise ToolError(f"o Jev não terminou em {teto_s:.0f}s; a página ficou onde parou (veja com browser snapshot)")
+    # Mesma trava dos verbos: uma chamada `browser` no meio refaria o snapshot e trocaria as refs do Jev.
+    async with _travas_nav.setdefault(alvo, asyncio.Lock()):
+        proc = await asyncio.create_subprocess_exec(node, str(_HANGAR_PREVIEW), *args, "--sessao", alvo, env=env,
+                                                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+        try:
+            saida, _ = await asyncio.wait_for(proc.communicate(), teto_s)
+        except TimeoutError:
+            raise ToolError(f"o Jev não terminou em {teto_s:.0f}s; a página ficou onde parou (veja com browser snapshot)")
+        finally:
+            # Prazo estourado ou chamada cancelada: o Node não segue dirigindo o navegador sozinho.
+            if proc.returncode is None:
+                proc.kill()
+                await proc.wait()
     return proc.returncode or 0, saida.decode("utf-8", "replace").replace("hangar-preview: ", "").strip()
 
 
@@ -502,10 +509,11 @@ async def browser_goal(ctx: Context, objetivo: str, dados: dict[str, Any] | None
                       "ler a árvore. Só em sessão aberta com o Jev. Devolve `sim` e a confiança." + _SESSAO_DESC)
 async def browser_check(ctx: Context, estado: str, sessao: str = "") -> dict[str, Any]:
     codigo, saida = await _jev_cli(ctx, sessao, ["confere", estado], 60.0)
-    if codigo not in (0, 1):
-        raise ToolError(saida)
     m = re.search(r"confere: ([0-9.]+)", saida)
-    return {"sim": codigo == 0, "confianca": float(m.group(1)) if m else None}
+    # Saída 1 também vem de app fechado ou navegador sumido: sem a linha do Jev não é "ainda não", é erro.
+    if codigo not in (0, 1) or not m:
+        raise ToolError(saida)
+    return {"sim": codigo == 0, "confianca": float(m.group(1))}
 
 
 # O gerenciador de sessões do SDK só roda UMA vez por instância: o sub-app nasce no lifespan.

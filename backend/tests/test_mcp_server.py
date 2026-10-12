@@ -211,7 +211,8 @@ async def test_browser_open_completa_pagina_propria_e_recusa_outro_caminho(ident
     monkeypatch.setattr(api, "nav_pendente", lambda name, url: gravados.append((name, url)))
     monkeypatch.setattr(api, "resolve_bind_ip", lambda s: "0.0.0.0")
     monkeypatch.setattr(settings, "port", 8765)
-    monkeypatch.setattr(mcp_server.navshell, "esperar_pronto", lambda name, desde: "http://x/")
+    monkeypatch.setattr(mcp_server.navshell, "esperar_pronto", lambda name, desde, antes, pedida: "http://x/")
+    monkeypatch.setattr(mcp_server.navshell, "url_antes", lambda name: None)
     async with sessao_mcp({"X-Hangar-Pane": "%3"}) as s:
         # O Rust codifica o nome inteiro (`%65u` é `eu`).
         for url in ("/api/sessions/eu/pages/abc-1", "/api/sessions/%65u/pages/abc-1"):
@@ -367,7 +368,8 @@ async def test_voz_usa_o_mcp_inteiro_e_fecha_so_pelo_sim_falado(voz, monkeypatch
     monkeypatch.setattr(api, "unpair_session", unpair_session)
     monkeypatch.setattr(api, "abrir_nav_sessao", abrir_nav_sessao)
     monkeypatch.setattr(mcp_server.navshell, "verbo", lambda name, v, args=None, aba=None: nav.append((name, v)) or f"ok: {v}")
-    monkeypatch.setattr(mcp_server.navshell, "esperar_pronto", lambda name, desde: "http://x/")
+    monkeypatch.setattr(mcp_server.navshell, "esperar_pronto", lambda name, desde, antes, pedida: "http://x/")
+    monkeypatch.setattr(mcp_server.navshell, "url_antes", lambda name: None)
     monkeypatch.setattr(pages_bridge, "publish", lambda payload: chamadas.setdefault("pagina", payload["session"]) and {"ok": True})
     async with sessao_mcp({"X-Hangar-Voice": "ok"}) as s:
         res = await s.call_tool("who_am_i", {})

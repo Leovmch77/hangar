@@ -285,6 +285,8 @@ if (cmd === 'open') {
   } catch { /* sem .env */ }
   if (!token) erro('não achei CP_AUTH_TOKEN no backend/.env do repo');
   const desde = Date.now();
+  const doNome = (s) => s.chave === nome || s.chave.endsWith(`::${nome}`);
+  const antes = lerSidecars().find(doNome)?.url ?? null;
   const res = await fetch(`http://127.0.0.1:${process.env.PORT || 8765}/api/sessions/${encodeURIComponent(nome)}/nav`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
@@ -295,12 +297,20 @@ if (cmd === 'open') {
   // Volta só com o navegador pronto: o verbo seguinte ao `open` falhava com "nenhum navegador aberto".
   // Pronto = sidecar regravado depois do pedido (o app grava a cada navegação) e `url` respondendo.
   const prazo = desde + PRONTO_MS;
+  // Já na página pedida: não havia navegador, o endereço mudou, ou a pedida é a mesma de antes. Sem isto, um
+  // evento da página anterior (título de SPA) regravando o sidecar fazia o `open` voltar com a URL antiga.
+  const pedida = url.trim().replace(/^https?:\/\//, '').replace(/\/$/, '');
+  const navegou = (atual) => antes === null || atual !== antes || (pedida !== '' && antes.includes(pedida));
   let ultimo = '';
+  let pausaConferida = false;
   while (Date.now() < prazo) {
-    const sc = lerSidecars().find((s) => s.chave === nome || s.chave.endsWith(`::${nome}`));
-    // Pausado pelo usuário, o app não navega: dizer na hora em vez de esgotar o prazo.
-    if (sc && (await chamar(sc.chave, 'estado', [])).texto.trim() === 'pausado') erro(PAUSADO);
-    if (sc && (sc.ts ?? 0) >= desde) {
+    const sc = lerSidecars().find(doNome);
+    // Pausado pelo usuário, o app não navega: dizer na hora em vez de esgotar o prazo. Uma pergunta basta.
+    if (sc && !pausaConferida) {
+      pausaConferida = true;
+      if ((await chamar(sc.chave, 'estado', [])).texto.trim() === 'pausado') erro(PAUSADO);
+    }
+    if (sc && (sc.ts ?? 0) >= desde && navegou(sc.url)) {
       try {
         const { texto, codigo } = await chamar(sc.chave, 'url', []);
         if (codigo === 0) {

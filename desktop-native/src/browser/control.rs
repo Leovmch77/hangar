@@ -417,9 +417,10 @@ impl<P: Page> Controller<P> {
         let mut waited = 0;
         while waited < WAIT_MS {
             let t0 = Instant::now();
+            // A navegação conta antes de perguntar: lido depois, o "complete" ainda podia ser do documento antigo.
+            let moved = self.state.borrow().navs != before;
             // Contexto destruído no meio = o documento ainda está trocando; tenta de novo.
             let ready = self.within(WAIT_MS - waited, self.value("document.readyState")).await;
-            let moved = self.state.borrow().navs != before;
             if moved && let Some(Ok(v)) = &ready && v.as_str() == Some("complete") {
                 let url = self.value("location.href").await?;
                 return Ok(format!("ok: {verb} {}", url.as_str().unwrap_or("")));
