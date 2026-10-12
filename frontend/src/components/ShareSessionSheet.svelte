@@ -8,7 +8,8 @@
   import { copyText } from '../lib/clipboard';
   import {
     createShare, listShares, revokeShare, revokeAllShares, relativeTime, resetsIn, sharePrereqs,
-    SharePrerequisiteError, type ShareInfo, type ShareCreated, type SharePrereqs,
+    SharePrerequisiteError, needsReachCheck, shareReachability,
+    type ShareInfo, type ShareCreated, type SharePrereqs, type Reach,
   } from '@hangar/core';
 
   interface Props { open: boolean; name: string; serverId: string; onClose: () => void }
@@ -29,6 +30,14 @@
   let comandoCopiado = $state(false);
   let conferindo = $state(false);
   let timer: ReturnType<typeof setInterval> | undefined;
+  // Link do Funnel só aparece depois que o servidor provou que ele abre pela internet.
+  let alcance = $state<Reach | 'checking' | null>(null);
+  let erroAlcance = $state('');
+  let alcanceCtrl: AbortController | undefined;
+  // O iPhone mata o fetch longo quando o PWA vai para o fundo: falha sem resposta do servidor
+  // nesse intervalo não é veredito, a conferência recomeça quando a tela volta.
+  let saiuDaTela = false;
+  let retomarLink: string | null = null;
 
   const msg = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
@@ -48,10 +57,55 @@
     erroGerar = '';
     preRequisito = null;
     copiado = false;
+    alcance = null;
+    erroAlcance = '';
     void carregar();
-    // Fechar a folha (ou desmontar) para a conferência: ninguém está esperando a resposta.
-    return pararConferencia;
+    document.addEventListener('visibilitychange', aoMudarVisibilidade);
+    // Fechar a folha (ou desmontar) para as conferências: ninguém está esperando a resposta.
+    return () => {
+      document.removeEventListener('visibilitychange', aoMudarVisibilidade);
+      pararConferencia();
+      pararAlcance();
+    };
   });
+
+  function aoMudarVisibilidade() {
+    if (document.visibilityState === 'hidden') { saiuDaTela = true; return; }
+    if (retomarLink && alcance === 'checking') {
+      const link = retomarLink;
+      retomarLink = null;
+      void conferirAlcance(link);
+    }
+  }
+
+  function pararAlcance() {
+    alcanceCtrl?.abort();
+    alcanceCtrl = undefined;
+    retomarLink = null;
+  }
+
+  async function conferirAlcance(link: string) {
+    pararAlcance();
+    const ctrl = new AbortController();
+    alcanceCtrl = ctrl;
+    alcance = 'checking';
+    erroAlcance = '';
+    saiuDaTela = document.visibilityState === 'hidden';
+    try {
+      const r = await shareReachability(link, server(), ctrl.signal);
+      if (!ctrl.signal.aborted) alcance = r;
+    } catch (e) {
+      if (ctrl.signal.aborted) return;
+      const semResposta = !(e instanceof Error && 'status' in e);
+      if (semResposta && saiuDaTela) {
+        if (document.visibilityState === 'visible') void conferirAlcance(link);
+        else retomarLink = link;
+        return;
+      }
+      alcance = null;
+      erroAlcance = msg(e);
+    }
+  }
 
   function pararConferencia() {
     clearInterval(timer);
@@ -86,8 +140,12 @@
     preRequisito = null;
     copiado = false;
     comandoCopiado = false;
+    pararAlcance();
+    alcance = null;
+    erroAlcance = '';
     try {
       criado = await createShare(name, local, server());
+      if (needsReachCheck(criado.link)) void conferirAlcance(criado.link);
       void carregar();
     } catch (e) {
       if (e instanceof SharePrerequisiteError) preRequisito = { missing: e.missing, fix: e.fix, enable_url: e.enableUrl };
@@ -121,6 +179,7 @@
   async function encerrarTodos() {
     try {
       await revokeAllShares(name, server());
+      pararAlcance();
       criado = null;
       await carregar();
     } catch (e) {
@@ -128,6 +187,10 @@
     }
   }
 
+  const linkPronto = $derived(
+    !!criado && (!needsReachCheck(criado.link) || (alcance !== 'checking' && alcance?.ok === true)),
+  );
+  const falhaAlcance = $derived(alcance && alcance !== 'checking' && !alcance.ok ? alcance : null);
   const whatsapp = $derived(
     criado ? `https://wa.me/?text=${encodeURIComponent(m.compartilhar_whatsapp_texto({ link: criado.link }))}` : '',
   );
@@ -146,7 +209,7 @@
     <h2 class="share-titulo">{m.compartilhar_titulo({ nome: name })}</h2>
     <p class="share-aviso" role="note">{m.compartilhar_aviso_confianca()}</p>
 
-    {#if criado}
+    {#if criado && linkPronto}
       <div class="share-link">
         <span class="share-rotulo">{m.compartilhar_link_novo()}</span>
         <input class="share-url" readonly value={criado.link} aria-label={m.compartilhar_link_novo()}
@@ -157,6 +220,22 @@
           <a class="share-btn primario" href={whatsapp} target="_blank" rel="noopener noreferrer">{m.compartilhar_whatsapp()}</a>
         </div>
       </div>
+    {:else if criado}
+      {#if alcance === 'checking'}
+        <p class="share-sub" role="status">{m.share_reach_checking()}</p>
+      {:else}
+        <div class="share-erro" role="alert">
+          <p>{falhaAlcance
+            ? falhaAlcance.stage === 'dns' ? m.share_reach_failed_dns()
+              : falhaAlcance.stage === 'funnel' ? m.share_reach_failed_funnel()
+              : m.share_reach_needs_rust()
+            : erroAlcance}</p>
+          {#if falhaAlcance?.detail}<code class="share-fix">{falhaAlcance.detail}</code>{/if}
+          {#if falhaAlcance?.stage !== 'needs_rust'}
+            <button type="button" class="share-btn" onclick={() => criado && conferirAlcance(criado.link)}>{m.share_reach_retry()}</button>
+          {/if}
+        </div>
+      {/if}
     {:else}
       <button type="button" class="share-btn primario" onclick={() => gerar()} disabled={gerando || conferindo}>
         {gerando ? m.compartilhar_gerando() : m.compartilhar_gerar()}

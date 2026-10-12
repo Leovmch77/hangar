@@ -5,6 +5,7 @@ import * as m from '../paraglide/messages';
 
 const core = vi.hoisted(() => ({
   listShares: vi.fn(), createShare: vi.fn(), revokeShare: vi.fn(), revokeAllShares: vi.fn(), sharePrereqs: vi.fn(),
+  shareReachability: vi.fn(),
 }));
 vi.mock('../lib/auth', () => ({
   listServers: () => [{ id: 'srv-a', label: 'A', baseUrl: 'http://a', token: 't' }],
@@ -48,6 +49,7 @@ describe('ShareSessionSheet', () => {
   it('gerar link mostra o link e o WhatsApp leva o link no texto', async () => {
     core.listShares.mockResolvedValue({ shares: [] });
     core.createShare.mockResolvedValue({ id: 'x1', link: 'https://d.ts.net:8443/convite/K7P2', expires_at: agora() + 86400 });
+    core.shareReachability.mockResolvedValue({ ok: true });
     const c = montar();
     await settle();
     botao(m.compartilhar_gerar()).click();

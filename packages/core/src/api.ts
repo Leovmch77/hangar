@@ -3755,6 +3755,27 @@ export async function createShare(name: string, local = false, server?: Server |
   return res.json() as Promise<ShareCreated>;
 }
 
+export type Reach =
+  | { ok: true }
+  | { ok: false; stage: 'dns' | 'funnel'; detail: string }
+  | { ok: false; stage: 'needs_rust'; detail: '' };
+
+// Link local (http na rede da casa) não passa pela internet: não há o que conferir.
+export function needsReachCheck(link: string): boolean {
+  return link.startsWith('https://');
+}
+
+/** Espera no servidor até o link abrir de fora (até 3 min). 404/405 = backend sem o Rust
+ * (em produção o StaticFiles do Python responde 405 ao POST). */
+export async function shareReachability(link: string, server?: Server | null, signal?: AbortSignal): Promise<Reach> {
+  const res = await apiFetchRes('/api/share/reachability', {
+    method: 'POST', body: JSON.stringify({ link }), signal,
+  }, server ?? undefined);
+  if (res.status === 404 || res.status === 405) return { ok: false, stage: 'needs_rust', detail: '' };
+  await ensureOk(res, server);
+  return res.json() as Promise<Reach>;
+}
+
 // Só consulta: não liga o Funnel. Sem tailscale responde 409, e quem confere segue esperando.
 export async function sharePrereqs(server?: Server | null): Promise<SharePrereqs> {
   const r = await sessionFetch<SharePrereqs>(server, '/api/share/prereqs');

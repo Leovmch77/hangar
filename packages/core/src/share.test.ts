@@ -3,7 +3,7 @@ import {
   parseInviteLink, inviteAllows, redeemInvite, InviteRedeemError, SharePrerequisiteError,
 } from './share';
 import { configureApi, type ApiEnv } from './apiEnv';
-import { getConfig, getAtualizacao, checkInviteForServer, createShare, sharePrereqs } from './api';
+import { getConfig, getAtualizacao, checkInviteForServer, createShare, sharePrereqs, needsReachCheck } from './api';
 import type { Server } from './servers';
 
 const CONVITE: Server = { id: 'srv-i', label: 'Convite · J', baseUrl: 'https://dono.ts.net:8443', token: 'tg', invite: true };
@@ -202,5 +202,12 @@ describe('sharePrereqs', () => {
     expect((await sharePrereqs()).enable_url).toBeNull();
     expect((await sharePrereqs()).enable_url).toBeNull();
     expect((await sharePrereqs()).enable_url).toBe(ok);
+  });
+});
+
+describe('needsReachCheck', () => {
+  it('só o link do Funnel espera a conferência', () => {
+    expect(needsReachCheck('https://maq.tail1.ts.net:8443/convite/abc')).toBe(true);
+    expect(needsReachCheck('http://192.168.0.10:8766/convite/abc')).toBe(false);
   });
 });
