@@ -19,7 +19,7 @@ from app import guest_users, list_bridge
 from app.auth import _LOOPBACK, _blocked, _record_fail
 from app.config import settings
 from app.connect_port import CONNECT_PEER
-from app.share_gate import guest_of
+from app.guest_header import guest_of
 from app.termsock import _origem_aceita
 
 _log = logging.getLogger(__name__)

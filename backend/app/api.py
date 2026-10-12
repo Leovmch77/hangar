@@ -93,7 +93,8 @@ from app.share_guest_api import guest_safe
 from app.guest_user_gate import GuestUserGate
 from app.connect_port import ConnectPortGate
 from app import guest_users, guest_users_api
-from app.share_gate import GUEST_TOKEN_KEY, ShareGate, guest_of
+from app.share_gate import GUEST_TOKEN_KEY, ShareGate
+from app.guest_header import guest_of
 from app.share_life import session_life
 from app import tts
 from app.tts_text import preparar as tts_preparar
@@ -869,7 +870,7 @@ async def term_ws_route(ws: WebSocket, name: str):
 async def hangar_term_ws_route(ws: WebSocket, ident: str):
     # Terminal de nenhuma sessao: convidado de sessao compartilhada nunca chega aqui.
     from app import shortcut_terminals, termsock
-    from app.share_gate import guest_of
+    from app.guest_header import guest_of
     if guest_of(ws) is not None:
         await ws.close(code=1008)
         return
@@ -8458,7 +8459,7 @@ def _shortcut_shell(name: str, body: ShortcutShellBody, request: Request, *, pow
     # (app/shortcut_terminals.py, no tmux e no psmux): a pessoa ve a saida numa aba do painel e
     # fecha quando quiser, e o programa sobrevive a restart do backend. `runs_in="hangar"` cria uma
     # copia unica do servidor, sem dono.
-    from app.share_gate import guest_of
+    from app.guest_header import guest_of
     # Convidado nao cria nem reaproveita copia No Hangar: ele nao a ve, nao a fecha, e o reuso traria
     # uma janela pra frente na tela do dono.
     guest_user = guest_users.current.get()

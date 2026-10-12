@@ -19,7 +19,7 @@ from app import diag, guest_users
 from app.auth import require_auth
 from app.config import settings
 from app.mensagens import erro
-from app.share_gate import guest_of
+from app.guest_header import guest_of
 
 # Código que o Supervisor registra quando desiste do Rust; `None` com o Rust na porta.
 _reason: str | None = None

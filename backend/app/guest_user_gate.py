@@ -8,7 +8,7 @@ import secrets
 from http.cookies import CookieError, SimpleCookie
 from urllib.parse import parse_qs
 
-from app import auth as auth_mod, guest_users, share_gate
+from app import auth as auth_mod, guest_header, guest_users, share_gate
 from app.config import settings
 from app.share_tunnel import GUEST_PORT, port_clash
 
@@ -90,6 +90,10 @@ class GuestUserGate:
         path = scope.get("path", "")
         if scope["type"] not in ("http", "websocket") or not path.startswith("/api/") or (
                 path.startswith("/api/sync/")) or (server[1] == GUEST_PORT and not port_clash()):
+            await self.app(scope, receive, send)
+            return
+        # Convidado de convite já decidido e assinado pelo Rust: não é convidado com login.
+        if guest_header.verify(scope) is not None:
             await self.app(scope, receive, send)
             return
         token = _token(scope)

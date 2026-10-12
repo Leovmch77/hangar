@@ -30,7 +30,7 @@ from uvicorn.protocols.utils import ClientDisconnected
 from app import guest_users, tmux
 from app.auth import _LOOPBACK, _blocked, _record_fail
 from app.config import settings
-from app.share_gate import guest_of
+from app.guest_header import guest_of
 
 _log = logging.getLogger(__name__)
 
