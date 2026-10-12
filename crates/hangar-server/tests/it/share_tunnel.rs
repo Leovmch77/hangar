@@ -1,3 +1,4 @@
+use futures_util::future::BoxFuture;
 use hangar_server::share::tunnel::{self, Output, Prereqs, Tailscale, FIX_FUNNEL};
 use serde_json::json;
 use std::sync::Mutex;
@@ -28,7 +29,15 @@ impl Fake {
 }
 
 impl Tailscale for Fake {
-    async fn run(&self, args: &[&str]) -> Result<Output, String> {
+    fn run<'a>(&'a self, args: &'a [&'a str]) -> BoxFuture<'a, Result<Output, String>> {
+        Box::pin(async move { self.reply(args) })
+    }
+    fn needs_operator(&self) -> bool { self.linux }
+    fn user(&self) -> String { "jefferson".into() }
+}
+
+impl Fake {
+    fn reply(&self, args: &[&str]) -> Result<Output, String> {
         let mut s = self.state.lock().unwrap();
         s.calls.push(args.iter().map(|a| a.to_string()).collect());
         let (mut out, mut success) = (String::new(), true);
@@ -49,18 +58,39 @@ impl Tailscale for Fake {
         }
         Ok(Output { success, stdout: out, stderr: String::new() })
     }
-    fn needs_operator(&self) -> bool { self.linux }
-    fn user(&self) -> String { "jefferson".into() }
 }
 
 fn turns_funnel(c: &[String]) -> bool { c[0] == "funnel" && !c.iter().any(|a| a == "status") }
 
 #[tokio::test]
 async fn storable_handle_reaches_the_inner_runner() {
-    let handle: std::sync::Arc<dyn tunnel::DynTailscale> = std::sync::Arc::new(Fake::new());
-    assert_eq!(tunnel::host(&handle).await.unwrap(), "nb.tail1.ts.net");
-    assert!(Tailscale::needs_operator(&handle));
-    assert_eq!(Tailscale::user(&handle), "jefferson");
+    let handle: std::sync::Arc<dyn Tailscale> = std::sync::Arc::new(Fake::new());
+    assert_eq!(tunnel::host(&*handle).await.unwrap(), "nb.tail1.ts.net");
+    assert!(handle.needs_operator());
+    assert_eq!(handle.user(), "jefferson");
+}
+
+#[tokio::test]
+async fn ensure_on_with_funnel_already_on_does_not_reopen_it() {
+    let fake = Fake::new();
+    fake.set(|s| s.on = true);
+    assert_eq!(tunnel::ensure_on(&fake).await.unwrap(), "https://nb.tail1.ts.net:8443");
+    assert!(!fake.calls().iter().any(|c| turns_funnel(c)), "{:?}", fake.calls());
+}
+
+#[tokio::test]
+async fn cached_host_asks_tailscale_once() {
+    let (fake, memo) = (Fake::new(), tunnel::Memo::default());
+    assert_eq!(tunnel::cached_host(&fake, &memo).await.unwrap(), "nb.tail1.ts.net");
+    assert_eq!(tunnel::cached_host(&fake, &memo).await.unwrap(), "nb.tail1.ts.net");
+    assert_eq!(fake.calls().len(), 1, "{:?}", fake.calls());
+}
+
+#[tokio::test]
+async fn cached_host_does_not_keep_a_failure() {
+    let memo = tunnel::Memo::default();
+    assert!(tunnel::cached_host(&Missing, &memo).await.is_err());
+    assert_eq!(tunnel::cached_host(&Fake::new(), &memo).await.unwrap(), "nb.tail1.ts.net");
 }
 
 #[tokio::test]
@@ -159,7 +189,9 @@ async fn sync_acts_only_on_the_difference() {
 
 struct Missing;
 impl Tailscale for Missing {
-    async fn run(&self, _: &[&str]) -> Result<Output, String> { Err("tailscale nao encontrado".into()) }
+    fn run<'a>(&'a self, _: &'a [&'a str]) -> BoxFuture<'a, Result<Output, String>> {
+        Box::pin(async { Err("tailscale nao encontrado".into()) })
+    }
 }
 
 #[tokio::test]

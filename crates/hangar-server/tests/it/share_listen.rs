@@ -13,19 +13,21 @@ use hangar_server::share::life::{LifeFacts, Lives, MuxProbe};
 use hangar_server::share::pairs::PairStore;
 use hangar_server::share::store::ShareStore;
 use hangar_server::share::store::Kind;
-use hangar_server::share::tunnel::{DynTailscale, Output, Real, Tailscale};
+use futures_util::future::BoxFuture;
+use hangar_server::share::tunnel::{Output, Real, Tailscale};
 use serde_json::{Value, json};
 
 fn share(dir: &std::path::Path) -> Arc<ShareState> {
     share_with(dir, Arc::new(Real))
 }
 
-fn share_with(dir: &std::path::Path, tailscale: Arc<dyn DynTailscale>) -> Arc<ShareState> {
+fn share_with(dir: &std::path::Path, tailscale: Arc<dyn Tailscale>) -> Arc<ShareState> {
     Arc::new(ShareState {
         store: ShareStore::open(dir.join("shares.json"), Arc::new(|| 100.0)),
         pairs: PairStore::open(dir.join("external_pairs.json")),
         lives: Lives::new(Arc::new(MuxProbe::new("/nonexistent/tmux", dir.to_owned())), Arc::new(LifeFacts::default())),
         tailscale,
+        tunnel: Default::default(),
     })
 }
 
@@ -33,7 +35,9 @@ fn share_with(dir: &std::path::Path, tailscale: Arc<dyn DynTailscale>) -> Arc<Sh
 struct NoTunnel;
 
 impl Tailscale for NoTunnel {
-    async fn run(&self, _args: &[&str]) -> Result<Output, String> { Err("sem tailscale".into()) }
+    fn run<'a>(&'a self, _args: &'a [&'a str]) -> BoxFuture<'a, Result<Output, String>> {
+        Box::pin(async { Err("sem tailscale".into()) })
+    }
 }
 
 /// Sobe o servidor com a porta do convidado em `guest`; devolve a porta principal.

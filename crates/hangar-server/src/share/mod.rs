@@ -18,7 +18,27 @@ pub struct ShareState {
     pub store: store::ShareStore,
     pub pairs: pairs::PairStore,
     pub lives: life::Lives,
-    pub tailscale: Arc<dyn tunnel::DynTailscale>,
+    pub tailscale: Arc<dyn tunnel::Tailscale>,
+    pub tunnel: tunnel::Memo,
+}
+
+impl ShareState {
+    /// Nome desta máquina no Tailscale, lembrado por alguns minutos.
+    pub async fn host(&self) -> Result<String, String> {
+        tunnel::cached_host(&*self.tailscale, &self.tunnel).await
+    }
+
+    /// Liga o Funnel; a varredura passa a conferir o estado de novo.
+    pub async fn ensure_on(&self) -> Result<String, tunnel::TunnelError> {
+        let done = tunnel::ensure_on(&*self.tailscale).await;
+        self.tunnel.set_applied(done.is_ok().then_some(true));
+        done
+    }
+}
+
+/// Nome desta máquina para o outro lado: o id de servidor, senão o nome do sistema.
+pub fn machine_name(server_id: &str) -> String {
+    if server_id.is_empty() { sysinfo::System::host_name().unwrap_or_default() } else { server_id.to_owned() }
 }
 
 /// Estado de convites quando o Python indica o `shares.json`. O `external_pairs.json` mora no
@@ -40,6 +60,7 @@ pub fn from_env(shares_file: Option<std::path::PathBuf>, dirs: Option<&crate::li
             lives: life::Lives::new(Arc::new(life::MuxProbe::new(mux_program, dirs.home.clone())), Arc::default())
                 .rereading(move |hash| me.upgrade()?.store.lookup_hash(hash)),
             tailscale: Arc::new(tunnel::Real),
+            tunnel: tunnel::Memo::default(),
         }
     }))
 }

@@ -449,3 +449,17 @@ fn reads_and_rewrites_python_file_without_losing_fields() {
     let rewritten = std::fs::read_to_string(f.file()).unwrap();
     assert_eq!(rewritten, python);
 }
+
+// A gravação sai do lock do estado: com escritas concorrentes, o disco termina no último estado.
+#[test]
+fn concurrent_writes_end_with_the_latest_state_on_disk() {
+    let f = Fixture::new();
+    std::thread::scope(|s| {
+        for _ in 0..8 {
+            s.spawn(|| for _ in 0..20 { f.store.create("proj", life("t:1"), Kind::Share, false).unwrap(); });
+        }
+    });
+    let ids = |st: &ShareStore| st.all().into_iter().map(|s| s.id).collect::<HashSet<_>>();
+    assert_eq!(ids(&f.store).len(), 160);
+    assert_eq!(ids(&f.reopen()), ids(&f.store));
+}

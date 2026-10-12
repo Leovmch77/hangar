@@ -10,7 +10,6 @@ use std::time::Duration;
 use tokio::time::Instant;
 
 pub const FUNNEL_PORT: u16 = 8443;
-const GUEST_LOCAL: &str = "http://127.0.0.1:8766";
 const CALL_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_PAGE: usize = 256 * 1024;
 const EVERY: Duration = Duration::from_secs(5);
@@ -33,7 +32,7 @@ impl Probe {
             doh: vec!["https://cloudflare-dns.com/dns-query".into(), "https://dns.google/resolve".into()],
             funnel_scheme: "https",
             funnel_port: FUNNEL_PORT,
-            local_base: GUEST_LOCAL.into(),
+            local_base: format!("http://127.0.0.1:{}", crate::share::tunnel::GUEST_PORT),
         }
     }
 }

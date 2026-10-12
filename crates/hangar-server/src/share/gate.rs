@@ -8,7 +8,6 @@ use std::time::Duration;
 
 use axum::body::Body;
 use axum::extract::connect_info::Connected;
-use axum::extract::ws::{CloseFrame, Message, WebSocket};
 use axum::extract::{ConnectInfo, Request, State};
 use axum::http::{HeaderValue, Method, StatusCode, header};
 use axum::middleware::Next;
@@ -18,7 +17,7 @@ use futures_util::StreamExt;
 use tokio::net::TcpListener;
 
 use super::ShareState;
-use super::caller::{Caller, GuestGrant, guest_allowed, path_session};
+use super::caller::{Caller, GuestGrant, SessionPath, allowed};
 use super::life::{Verdict, verdict};
 
 pub const WATCH_EVERY: Duration = Duration::from_secs(5);
@@ -73,6 +72,14 @@ impl Watcher {
             if ended {
                 return;
             }
+        }
+    }
+
+    /// Fim do acesso de quem tem vigia; sem vigia (o dono) nunca resolve.
+    pub async fn ended(watcher: Option<&Watcher>) {
+        match watcher {
+            Some(w) => w.until_ended().await,
+            None => std::future::pending().await,
         }
     }
 }
@@ -144,7 +151,7 @@ pub async fn guard(State(gate): State<Arc<Gate>>, ConnectInfo(conn): ConnectInfo
         req.extensions_mut().insert(super::guest_routes::LocalAddr(local));
     }
     // Só o Rust assina esse cabeçalho; vindo de fora é forjado.
-    req.headers_mut().remove("x-hangar-guest");
+    req.headers_mut().remove(super::forward::HEADER);
     let method = req.method().clone();
     let path = req.uri().path().to_owned();
     if let Some(resp) = preflight(&req) {
@@ -157,7 +164,8 @@ pub async fn guard(State(gate): State<Arc<Gate>>, ConnectInfo(conn): ConnectInfo
     let Some(guest) = gate.share.store.lookup_token(&token) else {
         return deny(req, StatusCode::UNAUTHORIZED, "erro_nao_autorizado", "unauthorized").await;
     };
-    let session = path_session(&path);
+    let parsed = SessionPath::parse(&path);
+    let session = parsed.as_ref().map(|p| p.session.clone());
     // `%2F` no nome: o Starlette nunca casava `/` dentro de `{name}`, e o handler leria outra sessão.
     if session.as_deref().is_some_and(|s| s.contains('/') || guest.share_for(s).is_none()) {
         return deny(req, StatusCode::FORBIDDEN, "erro_fora_do_convite", "fora da sessao compartilhada").await;
@@ -172,10 +180,13 @@ pub async fn guard(State(gate): State<Arc<Gate>>, ConnectInfo(conn): ConnectInfo
         Verdict::Ok => {}
     }
     let grant = Arc::new(GuestGrant::new(&token, &guest));
-    if !guest_allowed(&method, &path, &grant) {
+    if !allowed(&method, &path, parsed.as_ref(), &grant) {
         return deny(req, StatusCode::FORBIDDEN, "erro_fora_do_convite", "fora da sessao compartilhada").await;
     }
     req.extensions_mut().insert(Caller::Guest(grant));
+    if let Some(parsed) = parsed {
+        req.extensions_mut().insert(parsed);
+    }
     let websocket = is_websocket(&req);
     if !websocket && !path.ends_with("/events") {
         return next.run(req).await;
@@ -211,15 +222,4 @@ pub fn watch(body: Body, watcher: Watcher) -> Body {
         }
     });
     Body::from_stream(stream)
-}
-
-/// Roda o handler do WebSocket e fecha com 4410 quando o acesso acaba de verdade.
-pub async fn watch_ws(mut socket: WebSocket, watcher: &Watcher, run: impl AsyncFnOnce(&mut WebSocket)) {
-    let ended = tokio::select! {
-        _ = run(&mut socket) => false,
-        _ = watcher.until_ended() => true,
-    };
-    if ended {
-        let _ = socket.send(Message::Close(Some(CloseFrame { code: CLOSE_ENDED, reason: "".into() }))).await;
-    }
 }

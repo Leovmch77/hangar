@@ -25,7 +25,8 @@ use tokio::sync::{broadcast, mpsc};
 use crate::auth::{self, Auth};
 use crate::config::Config;
 use crate::proxy::{self, Forward, HttpClient};
-use crate::share::caller::{Caller, caller};
+use crate::share::caller::{Caller, SessionPath, caller};
+use crate::share::pair_routes::PairState;
 use crate::side::{Binding, Hub, Hubs, INFO_TTL, Lease, Out, Queued, SideCtx, remember_info};
 use crate::tail::{self, Watchers};
 use crate::transcript::{InternalInfo, SKIPPED_LINES, history_etag, merged_history};
@@ -258,15 +259,18 @@ pub async fn serve_with_guest(listener: TcpListener, mut state: AppState, guest:
         crate::share::owner_routes::sweep_loop(share, crate::share::owner_routes::SWEEP_EVERY))));
     let plugin_state = state.clone();
     let guest_state = state.clone();
+    // Uma só para as três portas: convite e par veem as mesmas lojas e a mesma conferência.
+    let pair = pair_state(&state);
+    let guest_pair = pair.clone();
     tokio::select! {
         result = async {
             match guest {
-                Some(addr) => serve_guest(addr, guest_state).await,
+                Some(addr) => serve_guest(addr, guest_state, guest_pair).await,
                 None => std::future::pending::<std::io::Result<()>>().await,
             }
         } => result,
-        result = axum::serve(listener.tap_io(crate::nodelay), router(state.clone()).into_make_service_with_connect_info::<SocketAddr>()) => result,
-        result = axum::serve(private.tap_io(crate::nodelay), terminal_router(state).into_make_service_with_connect_info::<SocketAddr>()) => result,
+        result = axum::serve(listener.tap_io(crate::nodelay), router_with(state.clone(), pair.as_ref()).into_make_service_with_connect_info::<SocketAddr>()) => result,
+        result = axum::serve(private.tap_io(crate::nodelay), terminal_router_with(state, pair.as_ref()).into_make_service_with_connect_info::<SocketAddr>()) => result,
         result = async {
             match plugin {
                 Some(plugin) => axum::serve(plugin.tap_io(crate::nodelay), plugin_router(plugin_state).into_make_service_with_connect_info::<SocketAddr>()).await,
@@ -276,10 +280,10 @@ pub async fn serve_with_guest(listener: TcpListener, mut state: AppState, guest:
     }
 }
 
-async fn serve_guest(addr: SocketAddr, state: Arc<AppState>) -> std::io::Result<()> {
+async fn serve_guest(addr: SocketAddr, state: Arc<AppState>, pair: Option<Arc<PairState>>) -> std::io::Result<()> {
     let listener = bind_guest(addr).await;
     state.guest_bound.store(true, Ordering::Relaxed);
-    axum::serve(listener, guest_router(state).into_make_service_with_connect_info::<crate::share::gate::GuestConn>()).await
+    axum::serve(listener, guest_router_with(state, pair).into_make_service_with_connect_info::<crate::share::gate::GuestConn>()).await
 }
 
 /// O filho anterior pode ainda segurar a porta: tenta para sempre, um aviso por mudança de estado.
@@ -317,12 +321,17 @@ fn guest_socket(addr: SocketAddr) -> std::io::Result<TcpListener> {
 
 /// Roteador da 8766: tudo passa pelo porteiro, nada pergunta `gate`/`is_owner`.
 pub fn guest_router(state: Arc<AppState>) -> Router {
-    let Some(pair) = pair_state(&state) else {
+    let pair = pair_state(&state);
+    guest_router_with(state, pair)
+}
+
+fn guest_router_with(state: Arc<AppState>, pair: Option<Arc<PairState>>) -> Router {
+    let Some(pair) = pair else {
         return Router::new().fallback(|headers: HeaderMap| async move { not_found(&headers) }).with_state(state);
     };
     let share = pair.owner.share.clone();
     // Os handlers do dono que também servem o convidado; o resto vai ao Python assinado.
-    session_routes(guest_fallback).fallback(guest_fallback).with_state(state)
+    session_routes(pass_any).fallback(pass_any).with_state(state)
         .merge(crate::share::guest_routes::guest_router(share.clone(), crate::share::guest_routes::owner_name()))
         .merge(crate::share::pair_routes::guest_pair_router(pair))
         .layer(axum::middleware::from_fn_with_state(Arc::new(crate::share::gate::Gate::new(share)), crate::share::gate::guard))
@@ -330,7 +339,7 @@ pub fn guest_router(state: Arc<AppState>) -> Router {
 
 /// Lojas, porta do dono e conferência pela internet que convite e par compartilham; `None` sem
 /// `HANGAR_SHARES_FILE`.
-fn pair_state(state: &Arc<AppState>) -> Option<Arc<crate::share::pair_routes::PairState>> {
+fn pair_state(state: &Arc<AppState>) -> Option<Arc<PairState>> {
     use crate::share::{owner_routes, pair_routes};
     let share = state.share.clone()?;
     let owner = Arc::new(owner_routes::OwnerShareState { share, owner_port: state.cfg.listen.port(),
@@ -339,18 +348,18 @@ fn pair_state(state: &Arc<AppState>) -> Option<Arc<crate::share::pair_routes::Pa
 }
 
 /// Convites e par externo do dono na 8765; quem não é o dono segue ao Python, que recusa como antes.
-fn owner_share_router(state: &Arc<AppState>) -> Router {
-    let Some(pair) = pair_state(state) else { return Router::new() };
+fn owner_share_router(state: &Arc<AppState>, pair: Option<&Arc<PairState>>) -> Router {
+    let Some(pair) = pair else { return Router::new() };
     crate::share::owner_routes::owner_router(pair.owner.clone())
-        .merge(crate::share::pair_routes::owner_pair_router(pair))
+        .merge(crate::share::pair_routes::owner_pair_router(pair.clone()))
         .layer(axum::middleware::from_fn_with_state(state.clone(), owner_only))
 }
 
 /// Os mesmos handlers pelo caminho privado, para o dono que chega pelo Connect.
-fn private_share_router(state: &Arc<AppState>) -> Router {
-    let Some(pair) = pair_state(state) else { return Router::new() };
+fn private_share_router(state: &Arc<AppState>, pair: Option<&Arc<PairState>>) -> Router {
+    let Some(pair) = pair else { return Router::new() };
     crate::share::owner_routes::private_router(pair.owner.clone())
-        .merge(crate::share::pair_routes::private_pair_router(pair))
+        .merge(crate::share::pair_routes::private_pair_router(pair.clone()))
         .layer(axum::middleware::from_fn_with_state(state.clone(), crate::share::bridge::private_only))
 }
 
@@ -365,20 +374,6 @@ async fn owner_only(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
     let mut resp = next.run(req).await;
     cors(&headers, resp.headers_mut());
     resp
-}
-
-/// Na 8766, anexos e rotas de sessão do workspace têm handler no Rust (o porteiro já limitou ao
-/// nível); o resto ainda é do Python.
-async fn guest_fallback(st: State<Arc<AppState>>, peer: ConnectInfo<SocketAddr>, req: Request) -> Response {
-    let (method, path) = (req.method(), req.uri().path());
-    if caller(&req).is_some()
-        && (crate::uploads::http::matches(method, path) || crate::workspace_routes::matches(method, path))
-    {
-        return pass_any(st, peer, req).await;
-    }
-    // O resto que o porteiro deixou passar vai ao Python com o convidado assinado.
-    let fwd = Forward { client_ip: peer.0.ip().to_string(), https: false, guest: None };
-    pass(&st, req, &fwd).await
 }
 
 /// Rotas cujo handler sabe atender o dono e o convidado; `fallback` é o repasse de cada porta.
@@ -421,6 +416,11 @@ where H: axum::handler::Handler<T, Arc<AppState>>, T: 'static {
 }
 
 pub fn terminal_router(state: Arc<AppState>) -> Router {
+    let pair = pair_state(&state);
+    terminal_router_with(state, pair.as_ref())
+}
+
+fn terminal_router_with(state: Arc<AppState>, pair: Option<&Arc<PairState>>) -> Router {
     let router = Router::new()
         .route("/__hangar_server/terminal", axum::routing::post(crate::terminal_routes::terminal))
         .route("/__hangar_server/workspace", axum::routing::post(crate::workspace_routes::private))
@@ -444,7 +444,7 @@ pub fn terminal_router(state: Arc<AppState>) -> Router {
         .route("/__hangar_server/share", axum::routing::post(crate::share::bridge::private))
         .layer(axum::middleware::from_fn(crate::migration_status::count_bridge));
     // Painel, canal do estado e voz ficam fora da contagem: conexões longas, não chamadas da ponte.
-    let share = private_share_router(&state);
+    let share = private_share_router(&state, pair);
     router.route("/__hangar_server/term", get(crate::term::private_ws))
         .route("/__hangar_server/state/{name}/events", get(crate::side::private_events))
         .route("/__hangar_server/voice", get(crate::voice::routes::private_ws))
@@ -453,33 +453,16 @@ pub fn terminal_router(state: Arc<AppState>) -> Router {
 }
 
 pub fn router(state: Arc<AppState>) -> Router {
+    let pair = pair_state(&state);
+    router_with(state, pair.as_ref())
+}
+
+fn router_with(state: Arc<AppState>, pair: Option<&Arc<PairState>>) -> Router {
     session_routes(pass_any)
         .route("/api/hangar-terminals/{ident}/term", get(crate::term::hangar_ws).fallback(pass_any))
         .route("/__hangar_server/health", get(health))
-        .route("/__hangar_server/terminal", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
-        .route("/__hangar_server/workspace", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
-        .route("/__hangar_server/transcription/{operation}", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
-        .route("/__hangar_server/dictation/{operation}", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
-        .route("/__hangar_server/claude/customizations", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
-        .route("/__hangar_server/list", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
-        .route("/__hangar_server/accounts", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
-        .route("/__hangar_server/uploads/{name}", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
-        .route("/__hangar_server/quotas", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
-        .route("/__hangar_server/accounts/claude", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
-        .route("/__hangar_server/accounts/public", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
-        .route("/__hangar_server/pages", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
-        .route("/__hangar_server/groups", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
-        .route("/__hangar_server/presence", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
-        .route("/__hangar_server/mods/{name}/{op}", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
-        .route("/__hangar_server/term", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
-        .route("/__hangar_server/state/{name}/events", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
-        .route("/__hangar_server/voice", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
-        .route("/__hangar_server/voice/settings", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
-        .route("/__hangar_server/voice/memory", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
-        .route("/__hangar_server/voice/memory/{id}", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
-        .route("/__hangar_server/share/reachability", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
-        .route("/__hangar_server/share", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
-        .route("/__hangar_server/share/owner/{*rest}", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
+        // As rotas privadas não existem nesta porta.
+        .route("/__hangar_server/{*rest}", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
         .merge(plugin_routes())
         // Páginas HTML da conversa: só o dono; o convidado recebe o 404 de hoje.
         .route("/api/sessions/{name}/pages/{id}", get(crate::pages::routes::page).fallback(pass_any))
@@ -504,7 +487,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .fallback(pass_any)
         .layer(axum::middleware::from_fn(crate::migration_status::count_public))
         .with_state(state.clone())
-        .merge(owner_share_router(&state))
+        .merge(owner_share_router(&state, pair))
 }
 
 fn plugin_routes() -> Router<Arc<AppState>> {
@@ -560,15 +543,27 @@ pub(crate) fn gate(st: &AppState, peer: SocketAddr, req: &Request) -> (Forward, 
 /// na 8765, o dono pelo token.
 pub(crate) fn who(st: &AppState, peer: SocketAddr, req: &Request) -> (Forward, Option<Caller>) {
     if on_guest_port(req) {
-        return (Forward { client_ip: peer.ip().to_string(), https: false, guest: None }, caller(req).cloned());
+        return (forward_for(st, peer, req), caller(req).cloned());
     }
     let (fwd, owner) = gate(st, peer, req);
     (fwd, owner.then_some(Caller::Owner))
 }
 
+/// O repasse de quem pede, sem decidir se é o dono. Convidado vai como loopback para o Python
+/// aceitar o cabeçalho assinado.
+pub(crate) fn forward_for(st: &AppState, peer: SocketAddr, req: &Request) -> Forward {
+    if on_guest_port(req) {
+        let guest = caller(req).and_then(Caller::grant).cloned();
+        let client_ip = if guest.is_some() { "127.0.0.1".into() } else { peer.ip().to_string() };
+        return Forward { client_ip, https: false, guest };
+    }
+    let (client_ip, https) = st.cfg.trusted.resolve(peer.ip(), req.headers());
+    Forward { client_ip, https, guest: None }
+}
+
+/// Chegou pela 8766: o `GuestConn` só existe no listener do convidado.
 fn on_guest_port(req: &Request) -> bool {
     req.extensions().get::<ConnectInfo<crate::share::gate::GuestConn>>().is_some()
-        || matches!(caller(req), Some(Caller::Guest(_)))
 }
 
 /// O 404 do FastAPI, que os clientes já tratam.
@@ -579,16 +574,16 @@ pub(crate) fn not_found(headers: &HeaderMap) -> Response {
 }
 
 pub(crate) async fn pass(st: &AppState, mut req: Request, fwd: &Forward) -> Response {
-    if on_guest_port(&req) {
-        // Sem convidado decidido (rota aberta sem handler) nada vai ao Python: nunca como dono.
-        let Some(grant) = caller(&req).and_then(Caller::grant).cloned() else { return not_found(req.headers()) };
+    if let Some(grant) = &fwd.guest {
+        // Assinado aqui, não no porteiro: a escrita pode esperar a porta da sessão mais que a validade.
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
-        crate::share::forward::prepare_guest_request(&mut req, &st.cfg.internal_secret, &grant, now);
-        let guest = req.headers_mut().remove(crate::share::forward::HEADER);
-        // Loopback para o Python aceitar o cabeçalho; recusa de lá não entra no bloqueio do dono,
-        // que é por IP e o convidado do Funnel nem tem um.
-        let fwd = Forward { client_ip: "127.0.0.1".into(), https: false, guest };
-        return proxy::forward(&st.http, st.cfg.upstream, req, &fwd).await;
+        crate::share::forward::prepare_guest_request(&mut req, &st.cfg.internal_secret, grant, now);
+        // Recusa de lá não entra no bloqueio do dono, que é por IP e o convidado do Funnel nem tem um.
+        return proxy::forward(&st.http, st.cfg.upstream, req, fwd).await;
+    }
+    // Sem convidado decidido (rota aberta sem handler) nada da 8766 vai ao Python: nunca como dono.
+    if on_guest_port(&req) {
+        return not_found(req.headers());
     }
     let upgrade = req.headers().contains_key(header::UPGRADE);
     let mut resp = proxy::forward(&st.http, st.cfg.upstream, req, fwd).await;
@@ -613,7 +608,7 @@ pub(crate) async fn pass_any(
     // limitou ao nível: par só baixa um arquivo).
     let uploads = crate::uploads::http::matches(req.method(), req.uri().path());
     // Valores próprios: um `&Request` vivo através de `await` tira o `Send` do handler.
-    let (session, method) = (crate::share::caller::path_session(req.uri().path()), req.method().clone());
+    let (session, method) = (req.extensions().get::<SessionPath>().map(|p| p.session.clone()), req.method().clone());
     let session_ok = |who: &Option<Caller>| who.as_ref().is_some_and(|c| session.as_ref().is_some_and(|s| c.can(s, &method)));
     if (uploads || crate::accounts::http::matches(req.method(), req.uri().path()))
         && match who(&st, peer, &req).1 {
@@ -672,8 +667,8 @@ pub(crate) async fn pass_any(
             return response;
         }
     }
-    let (client_ip, https) = st.cfg.trusted.resolve(peer.ip(), req.headers());
-    pass(&st, req, &Forward { client_ip, https, guest: None }).await
+    let fwd = forward_for(&st, peer, &req);
+    pass(&st, req, &fwd).await
 }
 
 /// Id de correlação do diário: cabeçalho x-hangar-req; o EventSource só manda ?diag_req.

@@ -28,7 +28,7 @@ struct Probe { keys: Mutex<HashMap<String, String>> }
 impl LifeProbe for Probe {
     fn birth<'a>(&'a self, _name: &'a str) -> BoxFuture<'a, Option<u64>> { Box::pin(async { None }) }
     fn has_session<'a>(&'a self, _name: &'a str) -> BoxFuture<'a, Option<bool>> { Box::pin(async { Some(false) }) }
-    fn sidecar_key(&self, name: &str) -> Option<String> { self.keys.lock().unwrap().get(name).cloned() }
+    fn sidecar(&self, name: &str) -> Option<(String, bool)> { self.keys.lock().unwrap().get(name).cloned().map(|k| (k, false)) }
     fn sidecar_exists(&self, _name: &str) -> bool { false }
 }
 
@@ -50,6 +50,7 @@ async fn server(dir: &Path, with_share: bool) -> Srv {
         pairs: PairStore::open(dir.join("external_pairs.json")),
         lives: Lives::new(probe.clone(), Arc::new(LifeFacts::default())),
         tailscale: Arc::new(Real),
+        tunnel: Default::default(),
     });
     if with_share { state.share = Some(share.clone()); }
     let state = Arc::new(state);

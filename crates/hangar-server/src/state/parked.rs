@@ -5,8 +5,17 @@ use std::path::{Path, PathBuf};
 use hangar_api::state::StateEvent;
 use serde_json::{Value, json};
 
-fn sidecar_path(name: &str, home: &Path) -> PathBuf {
-    home.join(".hangar").join("claude-headless").join(format!("{}.json", crate::list::discover_other::sanitize_session_name(name)))
+pub(crate) fn sidecar_path(name: &str, home: &Path) -> PathBuf {
+    sidecar_in("claude-headless", name, home)
+}
+
+/// O sidecar da sessão Codex (`~/.hangar/codex-sessions/<nome>.json`).
+pub(crate) fn codex_sidecar_path(name: &str, home: &Path) -> PathBuf {
+    sidecar_in("codex-sessions", name, home)
+}
+
+fn sidecar_in(dir: &str, name: &str, home: &Path) -> PathBuf {
+    home.join(".hangar").join(dir).join(format!("{}.json", crate::list::discover_other::sanitize_session_name(name)))
 }
 
 /// Pasta `projects` do Claude para a conta: a da sessão, ou a padrão (`CP_PROJECTS_DIR`, `CLAUDE_CONFIG_DIR`, `~/.claude`).

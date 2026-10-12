@@ -29,9 +29,8 @@ use futures_util::{SinkExt, StreamExt};
 use tokio::sync::{Notify, mpsc, watch};
 
 use crate::auth;
-use crate::proxy::Forward;
 use crate::routes::{AppState, pass};
-use crate::share::caller::{Caller, caller};
+use crate::share::caller::{Caller, SessionPath, caller};
 use crate::share::gate::Watcher;
 use crate::share::store::Kind;
 
@@ -214,12 +213,12 @@ fn close_after_accept(ws: WebSocketUpgrade, code: u16, reason: &'static str) -> 
 }
 
 async fn serve(st: Arc<AppState>, peer: SocketAddr, req: Request, want: Want) -> Response {
-    let (client_ip, https) = st.cfg.trusted.resolve(peer.ip(), req.headers());
-    let fwd = Forward { client_ip, https, guest: None };
+    let fwd = crate::routes::forward_for(&st, peer, &req);
     // Convidado da 8766: o porteiro já conferiu o token e a sessão; terminal só para o convite.
-    // Confere o nome que o terminal vai abrir (o do `Path`), não uma releitura da URL.
+    // A sessão é a que o porteiro partiu da rota, a mesma que o `Path` do terminal abre.
+    let session = req.extensions().get::<SessionPath>().map(|p| p.session.as_str());
     let guest = caller(&req).and_then(Caller::grant).map(|g| match &want {
-        Want::Session { name, .. } => g.sessions.get(name.strip_prefix("term-").unwrap_or(name)) == Some(&Kind::Share),
+        Want::Session { .. } => session.is_some_and(|s| g.sessions.get(s) == Some(&Kind::Share)),
         Want::Hangar(_) => false,
     });
     // Só `?token=`, como o termsock: Bearer e cookie não abrem shell.
@@ -358,12 +357,7 @@ async fn run(st: Arc<AppState>, socket: WebSocket, target: String, cols: u16, ro
     let mut ping = tokio::time::interval_at(start + cfg.ping_every, cfg.ping_every);
     let mut pong_due: Option<tokio::time::Instant> = None;
     let mut warned = false;
-    let revoked = async {
-        match &watcher {
-            Some(w) => w.until_ended().await,
-            None => std::future::pending().await,
-        }
-    };
+    let revoked = Watcher::ended(watcher.as_ref());
     tokio::pin!(revoked);
     let end = loop {
         tokio::select! {

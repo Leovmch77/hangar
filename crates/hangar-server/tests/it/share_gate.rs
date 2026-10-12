@@ -10,7 +10,7 @@ use std::time::Duration;
 use axum::Router;
 use axum::body::Body;
 use axum::extract::ws::{Message, WebSocketUpgrade};
-use axum::extract::{ConnectInfo, Extension, Path, Request};
+use axum::extract::{ConnectInfo, Path, Request};
 use axum::http::{Method, StatusCode};
 use axum::middleware::from_fn_with_state;
 use axum::response::{IntoResponse, Response};
@@ -19,7 +19,7 @@ use futures_util::StreamExt;
 use futures_util::future::BoxFuture;
 use hangar_server::share::ShareState;
 use hangar_server::share::caller::{Caller, GuestGrant, guest_allowed, path_session};
-use hangar_server::share::gate::{Gate, GuestConn, Watcher, guard, watch_ws};
+use hangar_server::share::gate::{Gate, GuestConn, guard};
 use hangar_server::share::life::{LifeFacts, LifeProbe, Lives};
 use hangar_server::share::pairs::PairStore;
 use hangar_server::share::store::{Kind, ShareStore};
@@ -42,8 +42,8 @@ impl LifeProbe for Probe {
         let h = *self.has.lock().unwrap();
         Box::pin(async move { h })
     }
-    fn sidecar_key(&self, name: &str) -> Option<String> {
-        self.keys.lock().unwrap().get(name).cloned()
+    fn sidecar(&self, name: &str) -> Option<(String, bool)> {
+        self.keys.lock().unwrap().get(name).cloned().map(|k| (k, false))
     }
     fn sidecar_exists(&self, _name: &str) -> bool {
         false
@@ -123,16 +123,6 @@ async fn events(req: Request) -> Response {
     r
 }
 
-/// Terminal que fica aberto: só o vigia fecha (teto de 3 s para o teste não travar).
-async fn hold(ws: WebSocketUpgrade, Extension(w): Extension<Watcher>) -> Response {
-    ws.on_upgrade(move |socket| async move {
-        watch_ws(socket, &w, async |s| {
-            let _ = s.send(Message::Text("aberto".into())).await;
-            let _ = tokio::time::timeout(Duration::from_secs(3), s.recv()).await;
-        }).await;
-    })
-}
-
 async fn term(ws: WebSocketUpgrade, Path(name): Path<String>) -> Response {
     ws.on_upgrade(move |mut s| async move {
         let _ = s.send(Message::Text(format!("ok {name}").into())).await;
@@ -153,12 +143,12 @@ async fn harness() -> H {
         pairs: PairStore::open(dir.path().join("external_pairs.json")),
         lives: Lives::new(probe.clone(), facts),
         tailscale: Arc::new(Real),
+        tunnel: Default::default(),
     });
     let gate = Arc::new(Gate { share: share.clone(), watch_every: Duration::from_millis(50) });
     let app = Router::new()
         .route("/api/sessions/events", get(events))
         .route("/api/sessions/{name}/events", get(events))
-        .route("/api/sessions/{name}/term-hold", get(hold))
         .route("/api/sessions/{name}/term", get(term))
         .fallback(any(echo))
         .layer(from_fn_with_state(gate, guard));
@@ -487,23 +477,7 @@ async fn open_stream_ends_when_absence_is_confirmed() {
     assert!((1..500).contains(&n), "{n}");
 }
 
-#[tokio::test]
-async fn open_websocket_closes_4410_when_access_is_revoked() {
-    let h = harness().await;
-    let t = h.token("cc", Kind::Share);
-    let (mut ws, _) = tokio_tungstenite::connect_async(h.ws(&format!("/api/sessions/cc/term-hold?token={t}"))).await.unwrap();
-    let first = ws.next().await.unwrap().unwrap();
-    assert_eq!(first, tungstenite::Message::Text("aberto".into()));
-    h.revoke_all();
-    let code = loop {
-        match tokio::time::timeout(Duration::from_secs(5), ws.next()).await.expect("vigia não fechou") {
-            Some(Ok(tungstenite::Message::Close(Some(f)))) => break u16::from(f.code),
-            Some(Ok(_)) => continue,
-            other => panic!("{other:?}"),
-        }
-    };
-    assert_eq!(code, 4410);
-}
+// O fechamento 4410 pelos caminhos reais: `share_guest_serving` (terminal e WebSocket repassado).
 
 #[tokio::test]
 async fn guest_terminal_with_foreign_origin_passes_the_gate() {

@@ -1,6 +1,7 @@
 //! Repasse ao Python de tudo que o hangar-server não atende sozinho, inclusive WebSocket,
 //! upload e streaming. Nunca segue redirect: a resposta volta como veio.
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::body::Body;
@@ -10,6 +11,10 @@ use axum::response::{IntoResponse, Response};
 use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
+
+use crate::share::caller::GuestGrant;
+use crate::share::forward::HEADER as GUEST_HEADER;
+use crate::share::gate::Watcher;
 
 pub type HttpClient = Client<HttpConnector, Body>;
 
@@ -29,11 +34,12 @@ pub fn client() -> HttpClient {
 
 /// Cliente já resolvido pelo `TrustedHosts`. Vai ao Python como valor único do X-Forwarded-For:
 /// o uvicorn confia em 127.0.0.1 (o Rust) e chega ao mesmo cliente que chegaria sem o Rust.
+#[derive(Clone)]
 pub struct Forward {
     pub client_ip: String,
     pub https: bool,
-    /// `x-hangar-guest` assinado pelo Rust para o convidado da 8766; o que veio de fora já saiu.
-    pub guest: Option<HeaderValue>,
+    /// Convidado da 8766 decidido pelo porteiro; `routes::pass` assina o cabeçalho na hora do repasse.
+    pub guest: Option<Arc<GuestGrant>>,
 }
 
 const HOP: [&str; 7] = ["connection", "keep-alive", "proxy-connection", "transfer-encoding", "te", "trailer", "upgrade"];
@@ -43,7 +49,7 @@ pub async fn forward(http: &HttpClient, upstream: SocketAddr, mut req: Request, 
     let path = req.uri().path_and_query().map(|p| p.as_str().to_owned()).unwrap_or_else(|| "/".into());
     prepare(req.headers_mut(), fwd, upgrade);
     if upgrade {
-        let watcher = req.extensions_mut().remove::<crate::share::gate::Watcher>();
+        let watcher = req.extensions_mut().remove::<Watcher>();
         return forward_upgrade(upstream, req, &path, watcher).await;
     }
     let Ok(uri) = format!("http://{upstream}{path}").parse::<Uri>() else {
@@ -72,10 +78,9 @@ fn prepare(h: &mut HeaderMap, fwd: &Forward, upgrade: bool) {
     }
     // Só o próprio hangar-server fala com as rotas internas.
     h.remove("x-hangar-internal");
-    // O convidado decidido é assinado só pelo Rust; vindo de fora é forjado.
-    h.remove("x-hangar-guest");
-    if let Some(guest) = &fwd.guest {
-        h.insert("x-hangar-guest", guest.clone());
+    // O convidado decidido já veio assinado por `routes::pass`; sem ele, o cabeçalho é forjado.
+    if fwd.guest.is_none() {
+        h.remove(GUEST_HEADER);
     }
     h.remove("x-forwarded-for");
     h.remove("x-forwarded-proto");
@@ -88,7 +93,7 @@ fn prepare(h: &mut HeaderMap, fwd: &Forward, upgrade: bool) {
 /// Conexão própria por WebSocket: o pedido vai em forma de origem e, com o 101, os dois lados
 /// viram um cano de bytes. Com `watcher` (convidado), o fim do acesso fecha com 4410.
 async fn forward_upgrade(upstream: SocketAddr, mut req: Request, path: &str,
-                         watcher: Option<crate::share::gate::Watcher>) -> Response {
+                         watcher: Option<Watcher>) -> Response {
     let Ok(uri) = path.parse::<Uri>() else {
         return (StatusCode::BAD_REQUEST, "hangar-server: caminho inválido").into_response();
     };
@@ -117,12 +122,7 @@ async fn forward_upgrade(upstream: SocketAddr, mut req: Request, path: &str,
     let upstream_side = hyper::upgrade::on(&mut resp);
     tokio::spawn(async move {
         let (Ok(c), Ok(u)) = tokio::join!(client_side, upstream_side) else { return };
-        let ended = async move {
-            match watcher {
-                Some(w) => w.until_ended().await,
-                None => std::future::pending().await,
-            }
-        };
+        let ended = async move { Watcher::ended(watcher.as_ref()).await };
         crate::share::forward::pipe_watched(TokioIo::new(c), TokioIo::new(u), ended).await;
     });
     let (parts, _) = resp.into_parts();

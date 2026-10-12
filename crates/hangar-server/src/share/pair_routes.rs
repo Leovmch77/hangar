@@ -16,11 +16,12 @@ use futures_util::future::BoxFuture;
 use serde_json::{Map, Value, json};
 
 use super::caller::Caller;
-use super::owner_routes::{OwnerShareState, Ts, io_failed, json_response, prereq_error, reach_or_revoke};
+use super::owner_routes::{OwnerShareState, io_failed, prereq_error, reach_or_revoke};
 use super::pairs::{self, ExternalPair, FUNNEL_PORT};
 use super::store::{Kind, PeekError, Share};
-use super::tunnel::{self, GUEST_PORT};
+use super::tunnel::GUEST_PORT;
 use super::ShareState;
+use crate::session_write::{detail, json_response};
 use crate::groups::peers::PeerError;
 use crate::groups::routes::{STORM_MAX, STORM_WINDOW, providers, storm};
 use crate::groups::service::GroupError;
@@ -69,7 +70,7 @@ fn fail(status: StatusCode, code: &str, msg: &str, params: Value) -> Refusal {
     (status, json!({"code": code, "params": params, "msg": msg}))
 }
 
-fn respond((status, detail): Refusal) -> Response { json_response(status, json!({"detail": detail})) }
+pub(super) fn respond((status, detail): Refusal) -> Response { json_response(status, json!({"detail": detail})) }
 
 fn groups_unavailable(code: &str) -> Refusal {
     fail(StatusCode::SERVICE_UNAVAILABLE, "erro_grupo_indisponivel", "os grupos estão indisponíveis agora", json!({"detalhe": code}))
@@ -89,13 +90,14 @@ pub fn reason(e: &PeekError) -> (&'static str, &'static str, &'static str) {
 
 const REASONS: [PeekError; 4] = [PeekError::Used, PeekError::Expired, PeekError::Revoked, PeekError::Unknown];
 
-fn code_error(e: &PeekError) -> Refusal {
+pub(super) fn code_error(e: &PeekError) -> Refusal {
     let (why, code, msg) = reason(e);
     let status = if why == "unknown" { StatusCode::NOT_FOUND } else { StatusCode::GONE };
     fail(status, code, msg, json!({"reason": why}))
 }
 
-/// `_PAGE` do convite: pt-BR fixo, a única tela servida pela porta do convidado.
+/// `_PAGE` do convite e do par: pt-BR fixo, a única tela servida pela porta do convidado.
+// ponytail: fora do Paraglide; é a única tela servida pela porta do convite.
 pub fn page(body: &str) -> String {
     format!(r#"<!doctype html><html lang="pt-BR"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex">
@@ -107,25 +109,10 @@ text-align:center;border:1px solid #888;background:transparent;color:inherit;tex
 .p{{background:#3b6ef5;color:#fff;border-color:#3b6ef5}}</style></head><body>{body}</body></html>"#)
 }
 
-#[cfg(unix)]
-fn hostname() -> String {
-    let mut b = [0u8; 256];
-    // SAFETY: buffer próprio, tamanho certo; o nome sai terminado em zero ou cortado no tamanho.
-    if unsafe { libc::gethostname(b.as_mut_ptr().cast(), b.len()) } != 0 { return String::new(); }
-    let n = b.iter().position(|&c| c == 0).unwrap_or(b.len());
-    String::from_utf8_lossy(&b[..n]).into_owned()
-}
-
-#[cfg(not(unix))]
-fn hostname() -> String { std::env::var("COMPUTERNAME").unwrap_or_default() }
-
 fn server_id(app: &AppState) -> String { app.groups.as_ref().map(|g| g.server_id().to_owned()).unwrap_or_default() }
 
 /// `_owner()`: o id da máquina, ou o nome do sistema.
-fn machine(app: &AppState) -> String {
-    let id = server_id(app);
-    if id.is_empty() { hostname() } else { id }
-}
+fn machine(app: &AppState) -> String { super::machine_name(&server_id(app)) }
 
 /// O nome da máquina pode ter espaço e acento; o outro lado só aceita o alfabeto de `valid_owner`.
 fn my_owner(app: &AppState) -> String { cut(&pairs::slug(&machine(app)), 40) }
@@ -134,32 +121,35 @@ fn leave_path(session: &str) -> String {
     format!("/api/pair?session={}", form_urlencoded::byte_serialize(session.as_bytes()).collect::<String>())
 }
 
-/// Corpo JSON com campos texto obrigatórios e teto em caracteres, como o modelo do pydantic: 422.
-fn fields(bytes: &[u8], spec: &[(&str, Option<usize>)]) -> Result<(Vec<String>, Map<String, Value>), Response> {
-    let bad = |kind: &str, loc: Value, msg: String, extra: Value| {
-        let mut item = json!({"type": kind, "loc": loc, "msg": msg});
-        if let Value::Object(more) = extra { item.as_object_mut().unwrap().extend(more); }
-        json_response(StatusCode::UNPROCESSABLE_ENTITY, json!({"detail": [item]}))
-    };
+/// Corpo JSON com campos texto `(nome, obrigatório, teto em caracteres)`, como o modelo do
+/// pydantic: 422; o opcional ausente vem vazio. `guest` = o formato do `share_guest_api.py`, que
+/// junta todos os problemas e descreve o JSON torto; o do par para no primeiro.
+pub(super) fn fields(bytes: &[u8], spec: &[(&str, bool, Option<usize>)], guest: bool) -> Result<(Vec<String>, Map<String, Value>), Response> {
+    let invalid = |issues: Vec<Value>| json_response(StatusCode::UNPROCESSABLE_ENTITY, json!({"detail": issues}));
     let map = match serde_json::from_slice::<Value>(bytes) {
         Ok(Value::Object(map)) => map,
-        Ok(other) => return Err(bad("model_attributes_type", json!(["body"]), "Input should be a valid dictionary or object to extract fields from".into(), json!({"input": other}))),
-        Err(_) => return Err(bad("json_invalid", json!(["body", 0]), "JSON decode error".into(), json!({}))),
+        Ok(other) => return Err(invalid(vec![json!({"type": "model_attributes_type", "loc": ["body"],
+            "msg": "Input should be a valid dictionary or object to extract fields from", "input": other})])),
+        Err(_) if guest => return Err(invalid(vec![json!({"type": "json_invalid", "loc": ["body", 0], "msg": "JSON decode error",
+            "input": {}, "ctx": {"error": "Expecting value"}})])),
+        Err(_) => return Err(invalid(vec![json!({"type": "json_invalid", "loc": ["body", 0], "msg": "JSON decode error"})])),
     };
-    let mut out = Vec::new();
-    for (name, max) in spec {
-        match map.get(*name) {
-            None => return Err(bad("missing", json!(["body", name]), "Field required".into(), json!({"input": map}))),
-            Some(Value::String(s)) if max.is_some_and(|m| s.chars().count() > m) => {
-                let m = max.unwrap_or_default();
-                return Err(bad("string_too_long", json!(["body", name]), format!("String should have at most {m} characters"),
-                    json!({"input": s, "ctx": {"max_length": m}})));
-            }
-            Some(Value::String(s)) => out.push(s.clone()),
-            Some(other) => return Err(bad("string_type", json!(["body", name]), "Input should be a valid string".into(), json!({"input": other}))),
-        }
+    let (mut out, mut issues) = (Vec::new(), Vec::new());
+    for &(name, required, max) in spec {
+        let issue = match map.get(name) {
+            None if required => json!({"type": "missing", "loc": ["body", name], "msg": "Field required", "input": map}),
+            None => { out.push(String::new()); continue }
+            Some(Value::String(s)) => match max {
+                Some(m) if s.chars().count() > m => json!({"type": "string_too_long", "loc": ["body", name],
+                    "msg": format!("String should have at most {m} characters"), "input": s, "ctx": {"max_length": m}}),
+                _ => { out.push(s.clone()); continue }
+            },
+            Some(other) => json!({"type": "string_type", "loc": ["body", name], "msg": "Input should be a valid string", "input": other}),
+        };
+        issues.push(issue);
+        if !guest { break }
     }
-    Ok((out, map))
+    if issues.is_empty() { Ok((out, map)) } else { Err(invalid(issues)) }
 }
 
 /// `_refused`: o outro lado respondeu com o envelope dele; convite usado/vencido vira a frase própria.
@@ -224,10 +214,19 @@ async fn unlink_guarded(app: &AppState, local: &str, address: &str) {
     }
 }
 
+/// Registro de par e convite saem juntos; `false` = algum dos dois ficou no disco.
+fn drop_record(share: &ShareState, id: &str) -> bool {
+    guarded("remover o registro", share.pairs.remove(id)) & guarded("revogar o convite", share.store.revoke(id))
+}
+
+/// Avisa o outro lado de que o par acabou, com o token que ele entregou.
+async fn tell_leave(remote: &dyn Remote, rec: &ExternalPair) -> Result<(), PeerError> {
+    remote.call(&rec.peer_address, Some(&rec.peer_token), reqwest::Method::DELETE, &leave_path(&rec.peer_session), None).await.map(drop)
+}
+
 async fn undo_local(app: &AppState, share: &ShareState, local: &str, address: &str, id: &str) {
     unlink_guarded(app, local, address).await;
-    guarded("revogar o convite", share.store.revoke(id));
-    guarded("remover o registro", share.pairs.remove(id));
+    drop_record(share, id);
 }
 
 /// Grava o par no grupo de `name` (antes do link a sessão está sempre solta).
@@ -266,13 +265,13 @@ async fn notify_paired(app: &AppState, me: &str, peer: &str, owner: &str) -> Res
 async fn pair_invite(State(st): St, Path(name): Path<String>) -> Response {
     let share = &st.owner.share;
     let Some(life) = share.lives.life(&name, true).await else {
-        return respond(fail(StatusCode::NOT_FOUND, "erro_sessao_inexistente", "sessão não encontrada", json!({})));
+        return detail(StatusCode::NOT_FOUND, "erro_sessao_inexistente", "sessão não encontrada", json!({}));
     };
     if st.owner.owner_port == GUEST_PORT {
         let msg = format!("o app roda na porta do convite ({GUEST_PORT}): troque CP_PORT no backend/.env e reinicie");
-        return respond(fail(StatusCode::CONFLICT, "erro_compartilhar_porta_do_convite", &msg, json!({"port": GUEST_PORT})));
+        return detail(StatusCode::CONFLICT, "erro_compartilhar_porta_do_convite", &msg, json!({"port": GUEST_PORT}));
     }
-    let base = match tunnel::ensure_on(&Ts(&share.tailscale)).await { Ok(b) => b, Err(e) => return prereq_error(e) };
+    let base = match share.ensure_on().await { Ok(b) => b, Err(e) => return prereq_error(e) };
     let (s, code) = match share.store.create(&name, Some(life), Kind::Pair, false) { Ok(v) => v, Err(e) => return io_failed(e) };
     // Mesma regra do convite comum: o link só sai depois de abrir pela internet.
     if let Some(refusal) = reach_or_revoke(&st.owner, &base, format!("/par/{code}"), &s.id).await { return refusal }
@@ -291,26 +290,26 @@ async fn undo_remote(remote: &dyn Remote, address: &str, token: &str, session: &
 }
 
 async fn pair_accept(State(st): St, Path(name): Path<String>, bytes: Bytes) -> Response {
-    let (vals, _) = match fields(&bytes, &[("link", None)]) { Ok(v) => v, Err(r) => return r };
+    let (vals, _) = match fields(&bytes, &[("link", true, None)], false) { Ok(v) => v, Err(r) => return r };
     let parsed = pairs::parse_pair_link(&vals[0])
         .filter(|(_, code)| (1..=64).contains(&code.len()) && code.bytes().all(|b| b.is_ascii_alphanumeric()));
     let Some((address, code)) = parsed else {
-        return respond(fail(StatusCode::BAD_REQUEST, "erro_par_link_invalido", "link de par inválido", json!({})));
+        return detail(StatusCode::BAD_REQUEST, "erro_par_link_invalido", "link de par inválido", json!({}));
     };
     let (app, share, remote) = (&*st.app, &*st.owner.share, &*st.remote);
     let Some(life) = share.lives.life(&name, true).await else {
-        return respond(fail(StatusCode::NOT_FOUND, "erro_sessao_inexistente", "sessão não encontrada", json!({})));
+        return detail(StatusCode::NOT_FOUND, "erro_sessao_inexistente", "sessão não encontrada", json!({}));
     };
     // Antes de chamar o outro lado: recusar depois queimaria o código dele à toa.
     match already_grouped(app, &name).await {
         Ok(false) => {}
-        Ok(true) => return respond(fail(StatusCode::CONFLICT, "erro_pareamento_mistura_cross", MSG_ALREADY, json!({}))),
+        Ok(true) => return detail(StatusCode::CONFLICT, "erro_pareamento_mistura_cross", MSG_ALREADY, json!({})),
         Err(r) => return respond(r),
     }
     if st.owner.owner_port == GUEST_PORT {
-        return respond(fail(StatusCode::CONFLICT, "erro_compartilhar_porta_do_convite", "porta do convite", json!({"port": GUEST_PORT})));
+        return detail(StatusCode::CONFLICT, "erro_compartilhar_porta_do_convite", "porta do convite", json!({"port": GUEST_PORT}));
     }
-    let my_base = match tunnel::ensure_on(&Ts(&share.tailscale)).await { Ok(b) => b, Err(e) => return prereq_error(e) };
+    let my_base = match share.ensure_on().await { Ok(b) => b, Err(e) => return prereq_error(e) };
     // Vale antes do resgate: recado do outro lado pode chegar antes de este lado terminar.
     let (mine, my_token) = match share.store.create_redeemed(&name, Some(life), Kind::Pair) { Ok(v) => v, Err(e) => return io_failed(e) };
     let ask = json!({"code": code, "session": name, "address": my_base, "token": my_token, "owner": my_owner(app)});
@@ -334,9 +333,9 @@ async fn pair_accept(State(st): St, Path(name): Path<String>, bytes: Bytes) -> R
         // O outro lado já gravou o par com o nosso token: desfaz lá, se o token dele serve pra isso.
         let undoable = token.filter(|t| !t.is_empty() && t.bytes().all(|b| (0x20..0x7f).contains(&b)));
         if let Some(t) = undoable && !undo_remote(remote, &address, t, session).await {
-            return respond(fail(StatusCode::BAD_GATEWAY, "erro_pareamento_desfeito_parcial", MSG_PARTIAL, json!({})));
+            return detail(StatusCode::BAD_GATEWAY, "erro_pareamento_desfeito_parcial", MSG_PARTIAL, json!({}));
         }
-        return respond(fail(StatusCode::BAD_GATEWAY, "erro_par_resposta_invalida", "resposta do par inválida", json!({})));
+        return detail(StatusCode::BAD_GATEWAY, "erro_par_resposta_invalida", "resposta do par inválida", json!({}));
     }
     let token = token.unwrap_or_default();
     let alias = share.pairs.free_alias(owner, &app.peers.ids(), &server_id(app));
@@ -345,7 +344,7 @@ async fn pair_accept(State(st): St, Path(name): Path<String>, bytes: Bytes) -> R
     let done: Result<(), String> = async {
         share.pairs.add(ExternalPair { share_id: mine.id.clone(), local_session: name.clone(), alias: alias.clone(),
             peer_owner: owner.into(), peer_session: session.into(), peer_address: address.clone(), peer_token: token.into(),
-            created_at: now() }).map_err(|e| e.to_string())?;
+            created_at: share.store.now() }).map_err(|e| e.to_string())?;
         join_external(app, &name, &peer).await.map_err(|(_, d)| d["msg"].as_str().unwrap_or_default().to_owned())?;
         linked = true;
         notify_paired(app, &name, &peer, owner).await
@@ -357,16 +356,12 @@ async fn pair_accept(State(st): St, Path(name): Path<String>, bytes: Bytes) -> R
         let undone = undo_remote(remote, &address, token, session).await;
         guarded("remover o registro", share.pairs.remove(&mine.id));
         if !undone {
-            return respond(fail(StatusCode::BAD_GATEWAY, "erro_pareamento_desfeito_parcial", MSG_PARTIAL, json!({})));
+            return detail(StatusCode::BAD_GATEWAY, "erro_pareamento_desfeito_parcial", MSG_PARTIAL, json!({}));
         }
         let msg = format!("pareamento desfeito: falha ao avisar as sessões ({e})");
-        return respond(fail(StatusCode::BAD_GATEWAY, "erro_pareamento_desfeito", &msg, json!({"avisos": e})));
+        return detail(StatusCode::BAD_GATEWAY, "erro_pareamento_desfeito", &msg, json!({"avisos": e}));
     }
     json_response(StatusCode::OK, json!({"ok": true, "alias": alias, "owner": owner, "session": session}))
-}
-
-fn now() -> f64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64())
 }
 
 async fn list_pairs(State(st): St) -> Response {
@@ -401,7 +396,7 @@ pub async fn send(app: &AppState, share: &ShareState, remote: &dyn Remote, sende
 }
 
 async fn external_send(State(st): St, bytes: Bytes) -> Response {
-    let (v, _) = match fields(&bytes, &[("sender", None), ("target", None), ("text", None)]) { Ok(v) => v, Err(r) => return r };
+    let (v, _) = match fields(&bytes, &[("sender", true, None), ("target", true, None), ("text", true, None)], false) { Ok(v) => v, Err(r) => return r };
     match send(&st.app, &st.owner.share, &*st.remote, &v[0], &v[1], &v[2]).await {
         Ok(body) => json_response(StatusCode::OK, body),
         Err(refusal) => respond(refusal),
@@ -418,16 +413,14 @@ pub async fn end_pair(app: &AppState, share: &ShareState, remote: &dyn Remote, l
     if share.pairs.ambiguous(&rec.alias, &app.peers.ids()) {
         // Só o aviso ao outro lado é pulado (o alias também é máquina tua); a limpeza local vale.
         errs.push(failed("erro_par_endereco_ambiguo", format!("'{}' é ao mesmo tempo máquina tua e par externo", rec.alias)));
-    } else if let Err(e) = remote.call(&rec.peer_address, Some(&rec.peer_token), reqwest::Method::DELETE, &leave_path(&rec.peer_session), None).await {
+    } else if let Err(e) = tell_leave(remote, &rec).await {
         let answered = matches!(e, PeerError::Refused { .. });
         if !matches!(e, PeerError::Refused { status: 410, .. }) {
             let text = format!("{}{}", if answered { REMOTE_LABEL } else { "" }, cut(&e.text(&rec.peer_address), 300));
             errs.push(failed("erro_peer_nao_avisado", text));
         }
     }
-    let removed = guarded("remover o registro", share.pairs.remove(&rec.share_id));
-    let revoked = guarded("revogar o convite", share.store.revoke(&rec.share_id));
-    if !(removed && revoked) {
+    if !drop_record(share, &rec.share_id) {
         // Convite que não foi revogado deixa o outro lado mandando recado: a saída não pode dizer que limpou.
         errs.push(failed("erro_par_limpeza_falhou",
             format!("o par externo com {address} não foi apagado por inteiro deste lado; o convite dele pode continuar valendo")));
@@ -439,11 +432,10 @@ pub async fn end_pair(app: &AppState, share: &ShareState, remote: &dyn Remote, l
 /// aviso ao outro lado segue solto.
 pub async fn session_died(share: Arc<ShareState>, remote: Arc<dyn Remote>, name: &str) {
     for rec in share.pairs.all().into_iter().filter(|r| r.local_session == name || file_stem(&r.local_session) == name) {
-        guarded("remover o registro", share.pairs.remove(&rec.share_id));
-        guarded("revogar o convite", share.store.revoke(&rec.share_id));
+        drop_record(&share, &rec.share_id);
         let remote = remote.clone();
         tokio::spawn(async move {
-            if let Err(e) = remote.call(&rec.peer_address, Some(&rec.peer_token), reqwest::Method::DELETE, &leave_path(&rec.peer_session), None).await {
+            if let Err(e) = tell_leave(&*remote, &rec).await {
                 tracing::warn!(code = "external_pair_remote_not_told", error = %e.text(&rec.peer_address), "par externo: outro lado não avisado da sessão morta");
             }
         });
@@ -458,8 +450,7 @@ async fn teardown(app: &AppState, share: &ShareState, rec: &ExternalPair, notify
         tracing::warn!(code = "external_pair_unlink_failed", session = %rec.local_session, error = %e, "par externo: o grupo não foi desfeito");
         return Err(groups_unavailable("groups_store_failed"));
     }
-    guarded("remover o registro", share.pairs.remove(&rec.share_id));
-    guarded("revogar o convite", share.store.revoke(&rec.share_id));
+    drop_record(share, &rec.share_id);
     if notify {
         let text = format!("[painel: par externo encerrado] '{}' saiu do pareamento. Volte a operar independente.", rec.address());
         if let Err(e) = deliver_text(app, &rec.local_session, &text).await {
@@ -507,30 +498,30 @@ async fn pair_page(State(st): St, Path(code): Path<String>) -> Response {
 }
 
 async fn pair_redeem(State(st): St, bytes: Bytes) -> Response {
-    let spec = [("code", Some(64)), ("session", Some(64)), ("address", Some(200)), ("token", Some(200)), ("owner", Some(40))];
-    let (v, _) = match fields(&bytes, &spec) { Ok(v) => v, Err(r) => return r };
+    let spec = [("code", true, Some(64)), ("session", true, Some(64)), ("address", true, Some(200)), ("token", true, Some(200)), ("owner", true, Some(40))];
+    let (v, _) = match fields(&bytes, &spec, false) { Ok(v) => v, Err(r) => return r };
     let [code, session, address, token, owner] = &v[..] else { unreachable!() };
     let (app, share) = (&*st.app, &*st.owner.share);
     let address = pairs::normalize_address(address);
     let Some(address) = address.filter(|_| pairs::valid_token(token) && pairs::valid_session(session)) else {
-        return respond(fail(StatusCode::BAD_REQUEST, "erro_par_endereco_invalido", "endereço do par inválido", json!({})));
+        return detail(StatusCode::BAD_REQUEST, "erro_par_endereco_invalido", "endereço do par inválido", json!({}));
     };
     if !pairs::valid_owner(owner) {
-        return respond(fail(StatusCode::BAD_REQUEST, "erro_par_nome_invalido", "nome da máquina do par inválido", json!({})));
+        return detail(StatusCode::BAD_REQUEST, "erro_par_nome_invalido", "nome da máquina do par inválido", json!({}));
     }
     let invite = match share.store.peek(code, Kind::Pair) { Ok(s) => s, Err(e) => return respond(code_error(&e)) };
-    let my_host = match tunnel::host(&Ts(&share.tailscale)).await {
+    let my_host = match share.host().await {
         Ok(h) => h,
         Err(e) => {
             tracing::warn!(code = "external_pair_tunnel_unavailable", error = %e, "par externo: túnel indisponível ao resgatar convite");
-            return respond(fail(StatusCode::SERVICE_UNAVAILABLE, "erro_sessao_indisponivel", "indisponível por instantes", json!({})));
+            return detail(StatusCode::SERVICE_UNAVAILABLE, "erro_sessao_indisponivel", "indisponível por instantes", json!({}));
         }
     };
     let name = invite.session;
     // Antes de gastar o código: sessão já agrupada recusa sem queimar o convite.
     match already_grouped(app, &name).await {
         Ok(false) => {}
-        Ok(true) => return respond(fail(StatusCode::CONFLICT, "erro_pareamento_mistura_cross", MSG_ALREADY, json!({}))),
+        Ok(true) => return detail(StatusCode::CONFLICT, "erro_pareamento_mistura_cross", MSG_ALREADY, json!({})),
         Err(r) => return respond(r),
     }
     let alias = share.pairs.free_alias(owner, &app.peers.ids(), &server_id(app));
@@ -551,7 +542,7 @@ async fn pair_redeem(State(st): St, bytes: Bytes) -> Response {
         }
     };
     let added = share.pairs.add(ExternalPair { share_id: redeemed.id.clone(), local_session: name.clone(), alias, peer_owner: owner.clone(),
-        peer_session: session.clone(), peer_address: address, peer_token: token.clone(), created_at: now() });
+        peer_session: session.clone(), peer_address: address, peer_token: token.clone(), created_at: share.store.now() });
     if let Err(e) = added {
         tracing::warn!(code = "external_pair_record_failed", session = %name, error = %e, "par externo: resgate desfeito");
         undo_local(app, share, &name, &peer, &redeemed.id).await;
@@ -585,18 +576,18 @@ fn pair_of(share: &ShareState, caller: Option<&Caller>, session: Option<&str>) -
 }
 
 async fn pair_message(State(st): St, caller: Option<Extension<Caller>>, bytes: Bytes) -> Response {
-    let (v, map) = match fields(&bytes, &[("text", Some(MAX_MESSAGE))]) { Ok(v) => v, Err(r) => return r };
+    let (v, map) = match fields(&bytes, &[("text", true, Some(MAX_MESSAGE))], false) { Ok(v) => v, Err(r) => return r };
     let share = &st.owner.share;
     let pair = match pair_of(share, caller.as_deref(), map.get("session").and_then(Value::as_str)) { Ok(s) => s, Err(r) => return respond(r) };
     let Some(rec) = share.pairs.by_share(&pair.id) else {
-        let mut r = respond(fail(StatusCode::SERVICE_UNAVAILABLE, "erro_sessao_indisponivel", "par ainda abrindo", json!({})));
+        let mut r = detail(StatusCode::SERVICE_UNAVAILABLE, "erro_sessao_indisponivel", "par ainda abrindo", json!({}));
         r.headers_mut().insert(header::RETRY_AFTER, HeaderValue::from_static("5"));
         return r;
     };
     if storm(&format!("ext:{}", pair.id)) {
-        return respond(fail(StatusCode::TOO_MANY_REQUESTS, "erro_group_message_tempestade",
+        return detail(StatusCode::TOO_MANY_REQUESTS, "erro_group_message_tempestade",
             &format!("mais de {STORM_MAX} avisos de grupo em {}s — parece loop; espere ou responda 1:1", STORM_WINDOW.as_secs()),
-            json!({"max": STORM_MAX, "janela": STORM_WINDOW.as_secs()})));
+            json!({"max": STORM_MAX, "janela": STORM_WINDOW.as_secs()}));
     }
     // O cabeçalho sai do registro (carimbado pelo token), nunca do texto que o outro lado mandou.
     let text = format!("[de fora: {}] {}", rec.address(), pairs::sanitize_message(&v[0]));

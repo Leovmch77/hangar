@@ -378,8 +378,13 @@ mod tests {
     fn every_route_registered_in_the_router_is_known_to_the_table() {
         // O checkout do Windows pode trazer CRLF; o fim do roteador é procurado por "\n}\n".
         let source = include_str!("routes.rs").replace("\r\n", "\n");
-        let body = &source[source.find("pub fn router(").unwrap()..];
-        let body = &body[..body.find("\n}\n").unwrap()];
+        // As rotas de sessão moram em `session_routes`, montadas pelas duas portas; o resto, em `router`.
+        let fn_body = |name: &str| {
+            let body = &source[source.find(name).unwrap()..];
+            body[..body.find("\n}\n").unwrap()].to_owned()
+        };
+        let body = fn_body("pub fn router(") + "\n" + &fn_body("fn session_routes<");
+        let body = body.as_str();
         let (mut seen, mut api) = (0, 0);
         for line in body.lines().map(str::trim).filter(|l| l.starts_with(".route(\"")) {
             seen += 1;

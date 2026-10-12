@@ -26,11 +26,13 @@ use serde_json::{Value, json};
 struct FakeTs { down: Mutex<bool> }
 
 impl Tailscale for FakeTs {
-    async fn run(&self, args: &[&str]) -> Result<Output, String> {
-        if *self.down.lock().unwrap() { return Err("sem tailscale".into()); }
-        assert_eq!(args, ["status", "--json"]);
-        let out = json!({"Self": {"ID": "n1", "DNSName": "nb.ts.net."}}).to_string();
-        Ok(Output { success: true, stdout: out, stderr: String::new() })
+    fn run<'a>(&'a self, args: &'a [&'a str]) -> BoxFuture<'a, Result<Output, String>> {
+        Box::pin(async move {
+            if *self.down.lock().unwrap() { return Err("sem tailscale".into()); }
+            assert_eq!(args, ["status", "--json"]);
+            let out = json!({"Self": {"ID": "n1", "DNSName": "nb.ts.net."}}).to_string();
+            Ok(Output { success: true, stdout: out, stderr: String::new() })
+        })
     }
 }
 
@@ -40,7 +42,7 @@ struct FakeLife;
 impl LifeProbe for FakeLife {
     fn birth<'a>(&'a self, _name: &'a str) -> BoxFuture<'a, Option<u64>> { Box::pin(async { Some(1) }) }
     fn has_session<'a>(&'a self, _name: &'a str) -> BoxFuture<'a, Option<bool>> { Box::pin(async { Some(true) }) }
-    fn sidecar_key(&self, _name: &str) -> Option<String> { None }
+    fn sidecar(&self, _name: &str) -> Option<(String, bool)> { None }
     fn sidecar_exists(&self, _name: &str) -> bool { false }
 }
 
@@ -64,6 +66,7 @@ fn env() -> Env {
         pairs: PairStore::open(dir.path().join("external_pairs.json")),
         lives: Lives::new(Arc::new(FakeLife), facts),
         tailscale: ts.clone(),
+        tunnel: Default::default(),
     });
     Env { _dir: dir, ts, clock, share }
 }

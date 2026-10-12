@@ -48,11 +48,11 @@ fn good() -> Value { json!({"owner": "pc-ana", "session": "Y", "token": "r".repe
 struct FakeTs;
 
 impl Tailscale for FakeTs {
-    async fn run(&self, args: &[&str]) -> Result<Output, String> {
+    fn run<'a>(&'a self, args: &'a [&'a str]) -> BoxFuture<'a, Result<Output, String>> {
         let stdout = if args.starts_with(&["status", "--json"]) {
             json!({"Self": {"ID": "n1", "DNSName": "eu.tail.ts.net.", "CapMap": {"funnel": null}}}).to_string()
         } else { String::new() };
-        Ok(Output { success: true, stdout, stderr: String::new() })
+        Box::pin(async move { Ok(Output { success: true, stdout, stderr: String::new() }) })
     }
     fn needs_operator(&self) -> bool { false }
     fn user(&self) -> String { "eu".into() }
@@ -70,7 +70,7 @@ impl LifeProbe for FakeLife {
         let has = name.starts_with('s');
         Box::pin(async move { Some(has) })
     }
-    fn sidecar_key(&self, _name: &str) -> Option<String> { None }
+    fn sidecar(&self, _name: &str) -> Option<(String, bool)> { None }
     fn sidecar_exists(&self, _name: &str) -> bool { false }
 }
 
@@ -169,6 +169,7 @@ pub(crate) fn share_state(shares: &Path, pair_dir: &Path, clock: Arc<Mutex<f64>>
         pairs: PairStore::open(pair_dir.join("external_pairs.json")),
         lives: Lives::new(Arc::new(FakeLife), facts),
         tailscale: Arc::new(FakeTs),
+        tunnel: Default::default(),
     })
 }
 

@@ -86,27 +86,50 @@ fn decoded(path: &str) -> std::borrow::Cow<'_, str> {
     percent_encoding::percent_decode_str(path).decode_utf8_lossy()
 }
 
+/// Rota de sessão partida uma vez, no porteiro, e lida por quem vem depois (extensão do pedido).
+/// `name` é o segmento cru decodificado sozinho, como o `Path` dos handlers: um `%2F` fica dentro
+/// do nome. `session` conta o terminal `term-X/term` como X. `rest` é o resto decodificado inteiro
+/// e partido em '/', como o Starlette casaria.
+#[derive(Clone, Debug)]
+pub struct SessionPath {
+    pub name: String,
+    pub session: String,
+    pub rest: Vec<String>,
+}
+
+impl SessionPath {
+    /// `None` fora de `/api/sessions/{name}` e na lista (`/api/sessions/events`).
+    pub fn parse(raw: &str) -> Option<Self> {
+        let mut parts = raw.splitn(5, '/').skip(1);
+        if (parts.next(), parts.next()) != (Some("api"), Some("sessions")) {
+            return None;
+        }
+        let name = decoded(parts.next()?).into_owned();
+        if name == "events" {
+            return None;
+        }
+        let tail = parts.next();
+        // Sessão cujo nome começa com "term-" não vira outra: só o terminal `term-X/term`.
+        let session = match name.strip_prefix("term-") {
+            Some(inner) if tail == Some("term") => inner.to_owned(),
+            _ => name.clone(),
+        };
+        let rest = tail.map(|t| decoded(t).split('/').map(str::to_owned).collect()).unwrap_or_default();
+        Some(Self { name, session, rest })
+    }
+}
+
 /// Sessão que a rota nomeia (o terminal `term-X/term` conta como X); `None` fora de sessão.
-/// Decodifica só o segmento, como o `Path` dos handlers: um `%2F` fica dentro do nome.
 pub fn path_session(path: &str) -> Option<String> {
-    let parts: Vec<&str> = path.split('/').collect();
-    if parts.len() < 4 || parts[1..3] != ["api", "sessions"] {
-        return None;
-    }
-    let name = decoded(parts[3]);
-    if name == "events" {
-        return None;
-    }
-    // Sessão cujo nome começa com "term-" não vira outra: só o terminal `term-X/term`.
-    if let Some(inner) = name.strip_prefix("term-")
-        && parts[4..] == ["term"]
-    {
-        return Some(inner.into());
-    }
-    Some(name.into_owned())
+    SessionPath::parse(path).map(|p| p.session)
 }
 
 pub fn guest_allowed(method: &Method, raw: &str, grant: &GuestGrant) -> bool {
+    allowed(method, raw, SessionPath::parse(raw).as_ref(), grant)
+}
+
+/// `guest_allowed` com a rota já partida pelo porteiro.
+pub(crate) fn allowed(method: &Method, raw: &str, parsed: Option<&SessionPath>, grant: &GuestGrant) -> bool {
     let path = &*decoded(raw);
     let method = method.as_str();
     if has(LIST_ROUTES, method, path) || has(ANY_GUEST_ROUTES, method, path) {
@@ -119,14 +142,9 @@ pub fn guest_allowed(method: &Method, raw: &str, grant: &GuestGrant) -> bool {
         // Token só de par não alcança nem as globais de leitura.
         return grant.sessions.values().any(|k| *k == Kind::Share);
     }
-    let parts: Vec<&str> = path.split('/').collect();
-    if parts.len() < 4 || parts[1..3] != ["api", "sessions"] {
-        return false;
-    }
-    let (name, rest) = (parts[3], &parts[4..]);
-    let Some(kind) = path_session(raw).and_then(|s| grant.sessions.get(&s).copied()) else {
-        return false;
-    };
+    let Some(SessionPath { name, session, rest }) = parsed else { return false };
+    let Some(kind) = grant.sessions.get(session).copied() else { return false };
+    let rest: Vec<&str> = rest.iter().map(String::as_str).collect();
     if kind == Kind::Pair {
         let head = rest.first().copied().unwrap_or("");
         // Anexo é um arquivo só; a listagem de uploads fica fechada.

@@ -5,7 +5,8 @@
 use std::collections::HashSet;
 use std::io;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
@@ -118,7 +119,7 @@ fn random<const N: usize>() -> [u8; N] {
 }
 
 fn new_id() -> String {
-    random::<8>().iter().map(|b| format!("{b:02x}")).collect()
+    crate::mods::state::random_hex(8)
 }
 
 fn new_token() -> String {
@@ -150,35 +151,50 @@ pub struct ShareStore {
     path: PathBuf,
     clock: Clock,
     state: Mutex<State>,
+    /// Número da última fotografia tirada, contado sob `state`.
+    taken: AtomicU64,
+    /// Número da fotografia que está no disco; a gravação acontece sob este lock, fora do `state`.
+    written: Mutex<u64>,
 }
 
 impl ShareStore {
     pub fn open(path: PathBuf, clock: Clock) -> Self {
         let state = load(&path, (clock)());
-        Self { path, clock, state: Mutex::new(state) }
+        Self { path, clock, state: Mutex::new(state), taken: AtomicU64::new(0), written: Mutex::new(0) }
     }
 
-    fn now(&self) -> f64 {
+    /// O relógio da loja (o injetado nos testes).
+    pub fn now(&self) -> f64 {
         (self.clock)()
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, State> {
+    fn lock(&self) -> MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    fn save(&self, state: &State) -> io::Result<()> {
+    /// Fotografa sob o lock do estado e grava depois de soltá-lo: quem só lê não espera o fsync.
+    fn persist(&self, state: MutexGuard<'_, State>) -> io::Result<()> {
+        let records: Vec<&Share> = state.values().collect();
+        let bytes = serde_json::to_vec_pretty(&records).map_err(io::Error::other)?;
+        let seq = self.taken.fetch_add(1, Ordering::Relaxed) + 1;
+        drop(state);
+        let mut written = self.written.lock().unwrap_or_else(|e| e.into_inner());
+        // Uma fotografia mais nova já está no disco: gravar esta a desfaria.
+        if *written > seq {
+            return Ok(());
+        }
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let records: Vec<&Share> = state.values().collect();
-        let bytes = serde_json::to_vec_pretty(&records).map_err(io::Error::other)?;
-        crate::runtime::queue::atomic_write(&self.path, &bytes)
+        crate::runtime::queue::atomic_write(&self.path, &bytes)?;
+        *written = seq;
+        Ok(())
     }
 
     fn insert(&self, share: Share) -> io::Result<()> {
         let mut state = self.lock();
         state.insert(share.id.clone(), share);
-        self.save(&state)
+        self.persist(state)
     }
 
     pub fn create(&self, session: &str, life: Option<String>, kind: Kind, local: bool) -> io::Result<(Share, String)> {
@@ -214,7 +230,7 @@ impl ShareStore {
         share.device = (!device.is_empty()).then_some(device);
         share.redeemed_at = Some(now);
         let share = share.clone();
-        self.save(&state).map_err(|e| PeekError::Io(e.to_string()))?;
+        self.persist(state).map_err(|e| PeekError::Io(e.to_string()))?;
         Ok((share, token))
     }
 
@@ -274,7 +290,7 @@ impl ShareStore {
             state.insert(share.id.clone(), share);
         }
         if count > 0 {
-            self.save(&state)?;
+            self.persist(state)?;
         }
         Ok(count)
     }
@@ -302,7 +318,7 @@ impl ShareStore {
                 x.revoked_at = Some(now);
             }
         }
-        self.save(&state)?;
+        self.persist(state)?;
         Ok(true)
     }
 
@@ -317,7 +333,7 @@ impl ShareStore {
             }
         }
         if count > 0 {
-            self.save(&state)?;
+            self.persist(state)?;
         }
         Ok(count)
     }
@@ -329,7 +345,7 @@ impl ShareStore {
             x.session = new.into();
             changed = true;
         }
-        if changed { self.save(&state) } else { Ok(()) }
+        if changed { self.persist(state) } else { Ok(()) }
     }
 
     pub fn set_life(&self, session: &str, life: Option<String>) -> io::Result<()> {
@@ -340,7 +356,7 @@ impl ShareStore {
             x.life = Some(life.clone());
             changed = true;
         }
-        if changed { self.save(&state) } else { Ok(()) }
+        if changed { self.persist(state) } else { Ok(()) }
     }
 
     // Revogado fica guardado por dias, então "tem registro" cobre o funnel a desligar depois do
@@ -394,7 +410,7 @@ impl ShareStore {
             !(old_revoked || old_unused)
         });
         if revoked > 0 || state.len() != before {
-            self.save(&state)?;
+            self.persist(state)?;
         }
         Ok(revoked)
     }

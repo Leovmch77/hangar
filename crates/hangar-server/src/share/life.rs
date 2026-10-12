@@ -11,9 +11,9 @@ use futures_util::future::BoxFuture;
 use serde_json::Value;
 
 use super::store::{Guest, Share, ShareStore};
-use crate::list::discover_other::sanitize_session_name;
 use crate::list::links::session_life;
 use crate::state::capture::MuxProcess;
+use crate::state::parked::{codex_sidecar_path, sidecar_path};
 
 // ponytail: cache de 2 s por nome; cada consulta é um processo do tmux e o chat faz vários
 // pedidos por segundo. Revogar vale na hora: o registro é lido a cada pedido.
@@ -73,11 +73,10 @@ pub trait LifeProbe: Send + Sync {
     fn birth<'a>(&'a self, name: &'a str) -> BoxFuture<'a, Option<u64>>;
     /// `None` = o multiplexador não respondeu, que não é sessão morta.
     fn has_session<'a>(&'a self, name: &'a str) -> BoxFuture<'a, Option<bool>>;
-    /// Chave do sidecar sem terminal ou Codex, nessa ordem.
-    fn sidecar_key(&self, name: &str) -> Option<String>;
+    /// Chave do sidecar sem terminal ou Codex, nessa ordem, e se uma transferência o escreveu
+    /// (`transfer_id`).
+    fn sidecar(&self, name: &str) -> Option<(String, bool)>;
     fn sidecar_exists(&self, name: &str) -> bool;
-    /// O sidecar foi escrito por uma transferência (`transfer_id`).
-    fn sidecar_transfer(&self, _name: &str) -> bool { false }
 }
 
 pub struct MuxProbe { program: OsString, home: PathBuf, mux: MuxProcess }
@@ -90,17 +89,7 @@ impl MuxProbe {
     }
 
     fn sidecar_paths(&self, name: &str) -> [PathBuf; 2] {
-        let file = format!("{}.json", sanitize_session_name(name));
-        let base = self.home.join(".hangar");
-        [base.join("claude-headless").join(&file), base.join("codex-sessions").join(&file)]
-    }
-
-    /// O primeiro sidecar com chave, como o laço de `share_life.session_life`.
-    fn keyed_sidecar(&self, name: &str) -> Option<Value> {
-        self.sidecar_paths(name).iter().find_map(|path| {
-            let meta: Value = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
-            text(&meta, "key").map(|_| meta)
-        })
+        [sidecar_path(name, &self.home), codex_sidecar_path(name, &self.home)]
     }
 }
 
@@ -126,11 +115,12 @@ impl LifeProbe for MuxProbe {
     fn has_session<'a>(&'a self, name: &'a str) -> BoxFuture<'a, Option<bool>> {
         Box::pin(self.mux.has_session(name))
     }
-    fn sidecar_key(&self, name: &str) -> Option<String> {
-        self.keyed_sidecar(name).and_then(|meta| text(&meta, "key"))
-    }
-    fn sidecar_transfer(&self, name: &str) -> bool {
-        self.keyed_sidecar(name).is_some_and(|meta| text(&meta, "transfer_id").is_some())
+    /// O primeiro sidecar com chave, como o laço de `share_life.session_life`.
+    fn sidecar(&self, name: &str) -> Option<(String, bool)> {
+        self.sidecar_paths(name).iter().find_map(|path| {
+            let meta: Value = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+            Some((text(&meta, "key")?, text(&meta, "transfer_id").is_some()))
+        })
     }
     fn sidecar_exists(&self, name: &str) -> bool {
         self.sidecar_paths(name).iter().any(|p| p.exists())
@@ -173,8 +163,8 @@ impl Lives {
         let probed = match cached {
             Some(probed) => probed,
             None => {
-                let probed = match self.probe.sidecar_key(name) {
-                    Some(key) => Probed::Key { transfer: self.probe.sidecar_transfer(name), key },
+                let probed = match self.probe.sidecar(name) {
+                    Some((key, transfer)) => Probed::Key { key, transfer },
                     None => Probed::Birth(self.probe.birth(name).await),
                 };
                 self.cache.lock().unwrap_or_else(|e| e.into_inner()).insert(name.into(), (Instant::now(), probed.clone()));

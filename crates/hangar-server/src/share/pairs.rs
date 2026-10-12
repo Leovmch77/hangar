@@ -1,7 +1,7 @@
 //! `external_pairs.json`: o lado de saída do par externo (endereço e token que o OUTRO usuário
 //! entregou). O lado de entrada é um convite de `kind: "pair"` na loja de convites; fora do
 //! `peers.json`, que guarda o token de dono das máquinas do próprio usuário.
-use crate::groups::peers::{PeerError, TOO_LARGE};
+use crate::groups::peers::{self, PeerError};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -9,14 +9,10 @@ use std::collections::HashSet;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex, MutexGuard, OnceLock};
-use std::time::Duration;
 use unicode_normalization::UnicodeNormalization;
 
 pub const MAX_TEXT: usize = 16000;
 pub const FUNNEL_PORT: u16 = 8443;
-const READ_TIMEOUT: Duration = Duration::from_secs(8);
-const TOTAL_TIMEOUT: Duration = Duration::from_secs(16);
-const MAX_BODY: usize = 1 << 20;
 /// Colchete que abre um cabeçalho forjado (o de largura total o NFKC já vira `[`).
 const OPENERS: [char; 3] = ['[', '\u{ff3b}', '\u{3010}'];
 
@@ -261,58 +257,13 @@ static HTTP: OnceLock<reqwest::Client> = OnceLock::new();
 /// `Authorization`.
 pub async fn call(address: &str, token: Option<&str>, method: reqwest::Method, path: &str, body: Option<&Value>)
     -> Result<(u16, Option<Value>), PeerError> {
-    let transport = |e: &dyn std::error::Error| PeerError::Transport(format!("{address} inacessível: {}", chain(e)));
     let http = match HTTP.get() {
         Some(http) => http,
         None => {
-            let built = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none())
-                .connect_timeout(READ_TIMEOUT).read_timeout(READ_TIMEOUT).timeout(TOTAL_TIMEOUT)
-                .build().map_err(|e| transport(&e))?;
+            let built = peers::client(reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()))
+                .map_err(|e| peers::transport(address, &e))?;
             HTTP.get_or_init(|| built)
         }
     };
-    let mut req = http.request(method, format!("{address}{path}")).header(reqwest::header::CONTENT_TYPE, "application/json");
-    if let Some(token) = token.filter(|t| !t.is_empty()) { req = req.bearer_auth(token); }
-    if let Some(body) = body { req = req.body(body.to_string()); }
-    let mut resp = req.send().await.map_err(|e| transport(&e))?;
-    let status = resp.status();
-    let mut raw = Vec::new();
-    loop {
-        match resp.chunk().await {
-            Ok(Some(chunk)) => {
-                raw.extend_from_slice(&chunk);
-                if raw.len() > MAX_BODY {
-                    // A recusa ainda se lê pelo primeiro 1 MiB; o sucesso grande é incerto.
-                    if !status.is_success() { raw.truncate(MAX_BODY); break; }
-                    return Err(PeerError::Transport(TOO_LARGE.into()));
-                }
-            }
-            Ok(None) => break,
-            Err(e) if status.is_success() => return Err(transport(&e)),
-            Err(_) => break,
-        }
-    }
-    let text = String::from_utf8_lossy(&raw);
-    if !status.is_success() {
-        let detail = match serde_json::from_str::<Value>(&text) {
-            Ok(Value::Object(mut map)) => map.remove("detail").unwrap_or_else(|| Value::String(text.clone().into_owned())),
-            _ => Value::String(text.into_owned()),
-        };
-        return Err(PeerError::Refused { status: status.as_u16(), detail });
-    }
-    if text.trim().is_empty() { return Ok((status.as_u16(), None)); }
-    serde_json::from_str(&text).map(|v| (status.as_u16(), Some(v)))
-        .map_err(|e| PeerError::Transport(format!("{address} respondeu corpo ilegível: {e}")))
-}
-
-/// O erro e suas causas numa linha: o do `reqwest` sozinho não diz o que caiu.
-fn chain(e: &dyn std::error::Error) -> String {
-    let mut text = e.to_string();
-    let mut source = e.source();
-    while let Some(cause) = source {
-        text.push_str(": ");
-        text.push_str(&cause.to_string());
-        source = cause.source();
-    }
-    text
+    peers::request(http, address, &format!("{address}{path}"), token, method, body).await
 }

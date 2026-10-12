@@ -41,14 +41,12 @@ impl LifeProbe for Fake {
         let h = *self.has.lock().unwrap();
         Box::pin(async move { h })
     }
-    fn sidecar_key(&self, name: &str) -> Option<String> {
-        self.keys.lock().unwrap().get(name).cloned()
+    fn sidecar(&self, name: &str) -> Option<(String, bool)> {
+        let key = self.keys.lock().unwrap().get(name).cloned()?;
+        Some((key, *self.transfer.lock().unwrap()))
     }
     fn sidecar_exists(&self, _name: &str) -> bool {
         *self.sidecar.lock().unwrap()
-    }
-    fn sidecar_transfer(&self, _name: &str) -> bool {
-        *self.transfer.lock().unwrap()
     }
 }
 

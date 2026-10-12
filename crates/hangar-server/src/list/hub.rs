@@ -63,8 +63,8 @@ impl HeadlessSource for crate::runtime::gateway::RuntimeRegistry {
 struct Published {
     sessions: Option<Bytes>,
     sessions_seq: u64,
-    /// As linhas do quadro `sessions`: cada convidado recorta as dele a cada envio.
-    rows: Option<Arc<Vec<SessionRow>>>,
+    /// A produção do quadro `sessions` (só `Arc`s): cada convidado recorta as linhas dele.
+    rows: Option<Produced>,
     /// Código e quadro enquanto a lista está em erro.
     error: Option<(&'static str, Bytes)>,
     error_seq: u64,
@@ -376,7 +376,7 @@ fn publish(tx: &watch::Sender<Arc<Published>>, last: &mut Last, outcome: Result<
                     Ok(json) => {
                         next.sessions = Some(sse_frame("sessions", &json, None));
                         next.sessions_seq += 1;
-                        next.rows = Some(Arc::new(rows.iter().map(|r| (*r).clone()).collect()));
+                        next.rows = Some(p.clone());
                         next.error = None;
                         last.sig = Some(sig);
                         changed = true;
@@ -506,21 +506,29 @@ async fn guest_loop(mut sub: Subscription, share: Arc<ShareState>, token: String
     let mut ping = tokio::time::interval_at(start + PING_EVERY, PING_EVERY);
     let mut comment = tokio::time::interval_at(start + COMMENT_EVERY, COMMENT_EVERY);
     let (mut last, mut error_seq) = (None::<String>, 0);
+    // Lista publicada e recorte do token da última volta: iguais, o quadro sairia igual.
+    let mut seen: Option<(u64, Vec<(String, Option<Kind>)>)> = None;
     loop {
         let p = sub.rx.borrow_and_update().clone();
         if let Some((_, frame)) = p.error.as_ref().filter(|_| p.error_seq != error_seq) {
             error_seq = p.error_seq;
             // A volta do erro reemite a lista.
-            last = None;
+            (last, seen) = (None, None);
             if !push(&out, frame.clone()).await { return }
-        } else if let (None, Some(rows), Some(guest)) = (&p.error, &p.rows, share.store.lookup_token(&token)) {
-            match serde_json::to_string(&guest_rows(rows.iter(), &guest)) {
-                Ok(json) if last.as_deref() != Some(json.as_str()) => {
-                    if !push(&out, sse_frame("sessions", &json, None)).await { return }
-                    last = Some(json);
+        } else if let (None, Some(produced), Some(guest)) = (&p.error, &p.rows, share.store.lookup_token(&token)) {
+            let mut view: Vec<(String, Option<Kind>)> = guest.sessions().into_iter().map(|n| { let k = guest.kind_of(&n); (n, k) }).collect();
+            view.sort_by(|a, b| a.0.cmp(&b.0));
+            let key = (p.sessions_seq, view);
+            if seen.as_ref() != Some(&key) {
+                match serde_json::to_string(&guest_rows(visible(produced), &guest)) {
+                    Ok(json) if last.as_deref() != Some(json.as_str()) => {
+                        if !push(&out, sse_frame("sessions", &json, None)).await { return }
+                        last = Some(json);
+                    }
+                    Ok(_) => {}
+                    Err(_) => return,
                 }
-                Ok(_) => {}
-                Err(_) => return,
+                seen = Some(key);
             }
         }
         tokio::select! {

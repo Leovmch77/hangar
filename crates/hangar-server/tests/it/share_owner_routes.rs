@@ -37,7 +37,15 @@ impl FakeTs {
 }
 
 impl Tailscale for FakeTs {
-    async fn run(&self, args: &[&str]) -> Result<Output, String> {
+    fn run<'a>(&'a self, args: &'a [&'a str]) -> BoxFuture<'a, Result<Output, String>> {
+        Box::pin(async move { self.reply(args) })
+    }
+    fn needs_operator(&self) -> bool { true }
+    fn user(&self) -> String { "jefferson".into() }
+}
+
+impl FakeTs {
+    fn reply(&self, args: &[&str]) -> Result<Output, String> {
         let mut s = self.0.lock().unwrap();
         s.calls.push(args.iter().map(|a| a.to_string()).collect());
         if s.missing_binary { return Err("tailscale nao encontrado".into()); }
@@ -57,8 +65,6 @@ impl Tailscale for FakeTs {
         }
         Ok(Output { success, stdout: out, stderr: String::new() })
     }
-    fn needs_operator(&self) -> bool { true }
-    fn user(&self) -> String { "jefferson".into() }
 }
 
 /// Só "proj" existe; o resto o multiplexador confirma ausente.
@@ -74,7 +80,7 @@ impl LifeProbe for FakeLife {
         let has = self.births.lock().unwrap().contains_key(name);
         Box::pin(async move { Some(has) })
     }
-    fn sidecar_key(&self, _name: &str) -> Option<String> { None }
+    fn sidecar(&self, _name: &str) -> Option<(String, bool)> { None }
     fn sidecar_exists(&self, _name: &str) -> bool { false }
 }
 
@@ -147,6 +153,7 @@ fn env() -> Env {
         pairs: PairStore::open(dir.path().join("external_pairs.json")),
         lives: Lives::new(life.clone(), facts),
         tailscale: ts.clone(),
+        tunnel: Default::default(),
     });
     Env { _dir: dir, ts, life, net: Arc::new(FakeNet::default()), clock, share }
 }
@@ -361,6 +368,24 @@ async fn funnel_stays_on_during_grace_then_drops() {
     *e.clock.lock().unwrap() += ENDED_GRACE.as_secs_f64() + 1.0;
     sync_tunnel(&e.share).await;
     assert!(!e.ts.on());
+}
+
+#[tokio::test]
+async fn sync_skips_tailscale_once_funnel_is_known_off() {
+    let e = env();
+    let (s, _) = e.share.store.create("proj", Some("t:1".into()), Kind::Share, false).unwrap();
+    e.share.store.revoke(&s.id).unwrap();
+    *e.clock.lock().unwrap() += ENDED_GRACE.as_secs_f64() + 1.0;
+    sync_tunnel(&e.share).await;
+    let n = e.ts.calls().len();
+    assert!(n > 0, "a primeira rodada confere o Funnel");
+    sync_tunnel(&e.share).await;
+    sync_tunnel(&e.share).await;
+    assert_eq!(e.ts.calls().len(), n, "já desligado: nenhum `tailscale` a mais");
+    // Um convite novo volta a conferir.
+    e.share.store.create("proj", Some("t:1".into()), Kind::Share, false).unwrap();
+    sync_tunnel(&e.share).await;
+    assert!(e.ts.on());
 }
 
 #[tokio::test]
