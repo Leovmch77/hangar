@@ -381,8 +381,11 @@ fn listen(
     let _ = session.on("Page.frameNavigated", move |params| {
         let frame = &params["frame"];
         if !frame["parentId"].is_null() { return; }
-        let url = frame["url"].as_str().unwrap_or("").to_owned();
-        p(&|page| { page.url = Some(url.clone()); page.error = None; });
+        // Página de erro do Chromium: o endereço é o que não abriu (`unreachableUrl`), e o erro da carga fica.
+        let failed = frame["unreachableUrl"].as_str().filter(|u| !u.is_empty());
+        let url = failed.unwrap_or(frame["url"].as_str().unwrap_or("")).to_owned();
+        let keep = failed.is_some();
+        p(&|page| { page.url = Some(url.clone()); if !keep { page.error = None; } });
         h();
     });
     let (p, h, m) = (publish.clone(), history.clone(), main.clone());
@@ -451,7 +454,7 @@ fn listen(
     }
     session.watch("Target.targetDestroyed", move |params| { if let Some(id) = params["targetId"].as_str() { closing.borrow_mut().remove(id); } });
     let p = publish.clone();
-    session.watch(CLOSED, move |_| p(&|page| { page.loading = false; page.error = Some("o Chromium fechou; feche e abra o navegador".into()); }));
+    session.watch(CLOSED, move |_| p(&|page| { page.loading = false; page.error = Some(crate::i18n::tr("browser_err_closed")); }));
     // A página caiu com o Chromium vivo: sem isto o painel congela no último quadro, calado.
     let fell: Rc<dyn Fn()> = {
         let (weak, p, dead) = (Rc::downgrade(session), publish.clone(), dead.clone());
@@ -459,7 +462,7 @@ fn listen(
             if dead.replace(true) { return; }
             eprintln!("[nav] a pagina caiu");
             if let Some(session) = weak.upgrade() { session.fail_pending(); }
-            p(&|page| { page.loading = false; page.error = Some("a pagina caiu; abra o endereco de novo".into()); });
+            p(&|page| { page.loading = false; page.error = Some(crate::i18n::tr("browser_err_crashed")); });
         })
     };
     let f = fell.clone();
@@ -490,14 +493,14 @@ impl Engine {
     pub fn evaluate(&self, expression: &str) { self.send("Runtime.evaluate", json!({"expression": expression})); }
 
     pub fn load(&self, url: &str) {
-        let (call, publish) = (self.session.call("Page.navigate", json!({"url": url})), self.publish.clone());
+        let (call, publish, target) = (self.session.call("Page.navigate", json!({"url": url})), self.publish.clone(), url.to_owned());
         self.executor.spawn(async move {
             // Falha de rede: o Chromium mostra a página de erro dele, e a barra o motivo.
             let error = match call.await {
-                Ok(r) => r["errorText"].as_str().filter(|e| !e.is_empty()).map(str::to_owned),
-                Err(e) => Some(e),
+                Ok(r) => r["errorText"].as_str().filter(|e| !e.is_empty()).map(|e| crate::browser::model::load_error(e, &target)),
+                Err(e) => Some(crate::browser::model::load_error(&e, &target)),
             };
-            if let Some(error) = error { publish(&|page| page.error = Some(error.clone())); }
+            if let Some(error) = error { publish(&|page| { page.loading = false; page.error = Some(error.clone()); }); }
         }).detach();
     }
 

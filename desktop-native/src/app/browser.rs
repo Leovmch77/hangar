@@ -15,6 +15,10 @@ enum Pause { Asked, TookOver }
 #[cfg(not(target_os = "macos"))]
 const AGENT_LINGER: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// Quem pediu a navegação: só a pessoa leva o foco à página e troca o endereço que ela está digitando.
+#[derive(Clone, Copy, PartialEq)]
+pub(super) enum By { User, Agent }
+
 pub(super) struct BrowserPanel {
     /// `servidor::sessão` dona deste navegador: nome do sidecar que o hangar-preview lê.
     #[cfg_attr(target_os = "macos", allow(dead_code))]
@@ -34,7 +38,7 @@ pub(super) struct BrowserPanel {
     /// Nasce na primeira navegação, que tem a janela.
     engine: Option<Result<Rc<Engine>, String>>,
     /// Endereço a abrir quando o motor terminar de nascer; `Some` enquanto ele nasce.
-    starting: Option<String>,
+    starting: Option<(String, By)>,
     _start: Option<Task<()>>,
     events: async_channel::Sender<crate::browser::Event>,
     address: Entity<InputState>,
@@ -179,31 +183,33 @@ impl BrowserPanel {
         let text = self.address.read(cx).value().to_string();
         match model::normalize_address(&text) {
             Err(key) => self.invalid = Some(tr(key)),
-            Ok(url) => self.go(url, window, cx),
+            Ok(url) => self.go(url, By::User, window, cx),
         }
         cx.notify();
     }
 
     /// Navega, ou faz o motor nascer e navega quando ele ficar pronto.
-    pub(super) fn go(&mut self, url: String, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn go(&mut self, url: String, by: By, window: &mut Window, cx: &mut Context<Self>) {
         self.invalid = None;
         // Motor que falhou (ou o Chromium que caiu) volta a ser tentado no próximo `open`.
         #[cfg(not(target_os = "macos"))]
         if matches!(&self.engine, Some(Err(_))) || self.engine().is_some_and(|e| !e.alive()) { self.drop_engine(); }
         if self.engine.is_some() {
-            self.navigate(url, window, cx);
-        } else if self.starting.replace(url).is_none() {
+            self.navigate(url, by, window, cx);
+        } else if self.starting.replace((url, by)).is_none() {
             // Enter repetido enquanto o motor nasce só troca o endereço pendente.
             self.start(window, cx);
         }
     }
 
-    fn navigate(&mut self, url: String, window: &mut Window, cx: &mut Context<Self>) {
+    fn navigate(&mut self, url: String, by: By, window: &mut Window, cx: &mut Context<Self>) {
         let Some(engine) = self.engine() else { return };
         engine.load(&url);
-        self.address.update(cx, |input, cx| input.set_value(url, window, cx));
-        // Aberto pelo agente com o painel fora da tela: o foco fica onde o usuário está digitando.
-        if self.shown { self.focus.focus(window, cx); }
+        // O agente não apaga o endereço que a pessoa está digitando; o `State` da página o atualiza quando ela sair dali.
+        if by == By::User || !self.address.focus_handle(cx).is_focused(window) {
+            self.address.update(cx, |input, cx| input.set_value(url, window, cx));
+        }
+        if by == By::User && self.shown { self.focus.focus(window, cx); }
     }
 
     fn start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -219,7 +225,12 @@ impl BrowserPanel {
                 this.engine = Some(engine);
                 #[cfg(not(target_os = "macos"))]
                 if let Some(Ok(engine)) = &this.engine { let engine = engine.clone(); this.attach(&engine, cx); }
-                if let Some(url) = this.starting.take() { this.navigate(url, window, cx); }
+                // Motor que não nasceu guarda o endereço pedido: é o que "Tentar de novo" volta a abrir.
+                match this.starting.take() {
+                    Some((url, by)) if this.engine().is_some() => this.navigate(url, by, window, cx),
+                    Some((url, _)) => this.page.url = Some(url),
+                    None => {}
+                }
                 cx.notify();
             });
         }));
@@ -436,6 +447,18 @@ impl BrowserPanel {
             .into_any_element())
     }
 
+    /// Recarregar e "Tentar de novo": motor caído ou que não nasceu volta a nascer no mesmo endereço (`go` o refaz);
+    /// com erro de carga, o endereço que falhou é carregado de novo, porque a página atual é a de erro.
+    fn retry(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let dead = !matches!(&self.engine, Some(Ok(e)) if e.alive());
+        let url = self.page.url.clone().or_else(|| self.starting.as_ref().map(|(u, _)| u.clone()));
+        match (dead || self.page.error.is_some(), url) {
+            (true, Some(url)) => self.go(url, By::User, window, cx),
+            _ => if let Some(engine) = self.engine() { engine.reload() },
+        }
+        cx.notify();
+    }
+
     fn restore_address(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let url = self.page.url.clone().unwrap_or_default();
         self.address.update(cx, |input, cx| input.set_value(url, window, cx));
@@ -582,16 +605,21 @@ impl BrowserPanel {
             .track_focus(&self.focus).key_context("BrowserPage");
         let note = |text: String, color: Hsla| div().size_full().flex().items_center().justify_center().p_4()
             .text_size(px(12.)).text_color(color).text_center().whitespace_normal().child(text);
+        let failure = |text: String, cx: &mut Context<Self>| div().size_full().flex().flex_col().items_center().justify_center().gap_3().p_4()
+            .child(div().text_size(px(12.)).text_color(theme::danger()).text_center().whitespace_normal().child(text))
+            .child(Button::new("browser-retry").outline().small().icon(IconName::RotateCw).label(tr("browser_retry"))
+                .on_click(cx.listener(|this, _, window, cx| this.retry(window, cx))));
         let engine = match &self.engine {
             None if self.starting.is_some() => return page.role(Role::Status).child(note(tr("loading"), theme::muted())).into_any_element(),
             None => return page.child(note(tr("browser_empty"), theme::faint())).into_any_element(),
             Some(Err(error)) => return page.role(Role::Alert)
-                .child(note(tr("browser_failed").replace("{error}", error), theme::warning())).into_any_element(),
+                .child(failure(tr("browser_failed").replace("{error}", error), cx)).into_any_element(),
             Some(Ok(engine)) => engine.clone(),
         };
-        // Sem página nenhuma, o erro da primeira carga é o conteúdo; com página, o motor mostra a dele.
-        if let (None, Some(error)) = (&self.page.url, &self.page.error) {
-            return page.role(Role::Alert).child(note(error.clone(), theme::warning())).into_any_element();
+        // No Linux o erro da carga toma o lugar da página de erro do Chromium (em inglês e sem o botão). No Windows a
+        // página é janela própria e ficaria por cima: lá o erro só vira página quando não há página nenhuma.
+        if let Some(error) = &self.page.error && (cfg!(target_os = "linux") || self.page.url.is_none()) {
+            return page.role(Role::Alert).child(failure(error.clone(), cx)).into_any_element();
         }
         let origin = self.origin.clone();
         let label = if self.page.title.trim().is_empty() { tr("browser") } else { self.page.title.clone() };
@@ -652,7 +680,7 @@ impl Render for BrowserPanel {
             .on_click(cx.listener(|this, _, _, _| if let Some(engine) = this.engine() { engine.forward() }));
         let reload = chrome::icon_button("browser-reload", IconName::RotateCw, tr("browser_reload"), cx)
             .disabled(!ready || self.page.url.is_none())
-            .on_click(cx.listener(|this, _, _, _| if let Some(engine) = this.engine() { engine.reload() }));
+            .on_click(cx.listener(|this, _, window, cx| this.retry(window, cx)));
         let address = div().flex_1().min_w_0()
             .capture_action(cx.listener(|this, _: &Escape, window, cx| { cx.stop_propagation(); this.restore_address(window, cx); }))
             .child(Input::new(&self.address).id("browser-address").small().aria_label(tr("browser_address"))
@@ -669,7 +697,7 @@ impl Render for BrowserPanel {
                 .on_click(cx.listener(|this, _, _, cx| this.import_chrome_login(cx))));
         }
         // Com a página na tela, a falha dela fica numa linha; sem página, `render_page` a mostra no lugar dela.
-        let notice = self.invalid.clone().or_else(|| self.page.error.clone().filter(|_| ready && self.page.url.is_some()));
+        let notice = self.invalid.clone().or_else(|| self.page.error.clone().filter(|_| !cfg!(target_os = "linux") && ready && self.page.url.is_some()));
         #[allow(unused_mut)]
         let mut root = div().size_full().flex().flex_col()
             .child(toolbar)
@@ -729,7 +757,7 @@ impl Hangar {
     pub(super) fn open_in_browser_panel(&mut self, url: String, window: &mut Window, cx: &mut Context<Self>) {
         let Some(key) = self.browser_key() else { return };
         let browser = self.browser_for(key, window, cx);
-        browser.update(cx, |panel, cx| panel.go(url, window, cx));
+        browser.update(cx, |panel, cx| panel.go(url, By::User, window, cx));
         self.show_browser_tab(window, cx);
     }
 
@@ -804,7 +832,7 @@ impl Hangar {
         let key = format!("{}::{name}", super::servers::norm(server));
         let browser = self.browser_for(key.clone(), window, cx);
         // Pausado pela pessoa, o agente não troca a página dela; o `open` do CLI pergunta o `estado` e devolve o erro.
-        browser.update(cx, |panel, cx| if panel.agent_paused() { eprintln!("[nav] nav ignorado: navegador pausado pelo usuario") } else { panel.go(url.to_owned(), window, cx) });
+        browser.update(cx, |panel, cx| if panel.agent_paused() { eprintln!("[nav] nav ignorado: navegador pausado pelo usuario") } else { panel.go(url.to_owned(), By::Agent, window, cx) });
         if self.browser_key().as_deref() == Some(key.as_str()) { self.show_browser_tab(window, cx); } else {
             self.side.browser_open.insert(key.clone());
             self.side.tabs.insert(key, SideTab::Browser);
