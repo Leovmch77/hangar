@@ -7205,6 +7205,7 @@
   "erro_par_nome_invalido": "O nome da máquina do par tem caracteres não aceitos.",
   "erro_par_link_invalido": "Este não é um link de convite para parear.",
   "erro_par_repetido": "Esta sessão já está pareada com essa sessão de fora.",
+  "erro_grupo_orq_par_externo": "Grupo de orquestração não aceita sessão de fora.",
   "erro_par_recusado": "A outra máquina recusou o convite: {detalhe}",
   "erro_par_fora_do_ar": "A máquina do par não respondeu. Confira se ela está ligada e com o Funnel ativo. {detalhe}",
   "erro_par_resposta_invalida": "A máquina do par respondeu algo inesperado.",

@@ -6,7 +6,7 @@
 //! `/pair` e `DELETE /pair` seguram a porta de entrada da sessão até gravar o grupo (um rename não
 //! grava o nome velho por cima) e a soltam antes dos avisos: o aviso à própria sessão passa pela
 //! porta de novo e, com o passe na mão, travaria contra um fechamento que espera esse passe.
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
@@ -170,6 +170,14 @@ fn failures_text(errs: &[Value]) -> String {
 
 pub(super) fn envelope(code: &str, msg: String, params: Value) -> Value { json!({"code": code, "params": params, "msg": msg}) }
 
+/// Endereços dos pares externos; sem as lojas de convite, nenhum (todo remoto é máquina própria).
+pub(crate) fn outside_addresses(st: &AppState) -> HashSet<String> {
+    st.share.as_ref().map(|s| s.pairs.addresses()).unwrap_or_default()
+}
+
+pub(crate) const ORQ_OUTSIDE_CODE: &str = "erro_grupo_orq_par_externo";
+pub(crate) const ORQ_OUTSIDE_MSG: &str = "grupo de orquestração não aceita sessão de fora: os executores entram e saem o tempo todo";
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PairBody {
@@ -188,6 +196,9 @@ pub(super) async fn pair(State(st): State<Arc<AppState>>, ConnectInfo(peer): Con
     let raw = if !body.peers.is_empty() { body.peers } else if !body.peer.is_empty() { vec![body.peer] } else { Vec::new() };
     let mut others: Vec<String> = Vec::new();
     for p in raw.into_iter().filter(|p| !p.is_empty()) {
+        // Membro de fora não tem sidecar aqui: entrar com ele é entrar no grupo da ponta daqui.
+        // Assim ele nunca chega ao `pair_cross`, que é só de máquina própria.
+        let p = asked.st.share.as_ref().and_then(|s| s.pairs.by_address(&p)).map_or(p, |r| r.local_session);
         if !others.contains(&p) { others.push(p); }
     }
     let held = match asked.enter().await { Ok(held) => held, Err(busy) => return busy };
@@ -211,10 +222,13 @@ pub(super) async fn pair(State(st): State<Arc<AppState>>, ConnectInfo(peer): Con
     if !missing.is_empty() {
         return asked.refuse(StatusCode::NOT_FOUND, "erro_sessao_nao_encontrada_detalhe", &format!("sessão não encontrada: {missing}"), json!({"detalhe": missing}));
     }
-    let joined = asked.groups.join(JoinOwned { name, others, task: body.task, replace_task: body.replace_task, harness: harness.clone(), orq: body.orq }).await;
+    let outside = outside_addresses(&asked.st);
+    let joined = asked.groups.join(JoinOwned { name, others, task: body.task, replace_task: body.replace_task, harness: harness.clone(),
+        orq: body.orq, outside }).await;
     let JoinOutcome { members, gid, task, orq, newcomers, before } = match joined {
         Ok(outcome) => outcome,
         Err(GroupError::Refused(JoinRefusal::Mix)) => return asked.refuse(StatusCode::BAD_REQUEST, "erro_pareamento_mistura_cross", MIX_MSG, json!({})),
+        Err(GroupError::Refused(JoinRefusal::OrqOutside)) => return asked.refuse(StatusCode::CONFLICT, ORQ_OUTSIDE_CODE, ORQ_OUTSIDE_MSG, json!({})),
         Err(GroupError::Refused(JoinRefusal::TaskConflict { existing })) => return asked.refuse(StatusCode::CONFLICT, "erro_pareamento_tarefa_existente",
             &format!("o grupo já tem tarefa: {} — repita com --substituir-tarefa pra trocar", py_repr(&json!(existing))), json!({"existente": existing})),
         Err(GroupError::Orq(PromoteError::Conflict(text))) => return asked.refuse(StatusCode::CONFLICT, "erro_orq_arquivo_mudou", &text, json!({})),

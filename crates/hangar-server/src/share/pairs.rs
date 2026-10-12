@@ -89,6 +89,9 @@ impl PairStore {
 
     pub fn by_local(&self, session: &str) -> Vec<ExternalPair> { self.lock().iter().filter(|r| r.local_session == session).cloned().collect() }
 
+    /// Os membros de grupo que são de fora: separa par externo de máquina própria (`srv::`).
+    pub fn addresses(&self) -> HashSet<String> { self.lock().iter().map(ExternalPair::address).collect() }
+
     /// Apelido do dono de fora que não colide com peer, com esta máquina nem com outro par. A mesma
     /// máquina (endereço) mantém o apelido que já tem, mesmo com o dono renomeado.
     pub fn free_alias(&self, owner: &str, address: &str, peers: &HashSet<String>, own_id: &str) -> String {

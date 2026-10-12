@@ -3,7 +3,7 @@
 use super::local::{self, JoinInput, JoinRefusal, Snapshot};
 use super::model::Sidecar;
 use super::store::{PairDir, StoreError};
-use std::collections::{BTreeMap, hash_map::RandomState};
+use std::collections::{BTreeMap, HashSet, hash_map::RandomState};
 use std::future::Future;
 use std::hash::{BuildHasher, Hasher};
 use std::pin::Pin;
@@ -52,6 +52,8 @@ pub struct JoinOwned {
     pub replace_task: bool,
     pub harness: BTreeMap<String, String>,
     pub orq: bool,
+    /// Endereços (`alias::sessao`) dos pares externos: os remotos que não são máquina própria.
+    pub outside: HashSet<String>,
 }
 
 pub struct JoinOutcome {
@@ -112,7 +114,9 @@ impl GroupService {
         let name = input.name.clone();
         let plan = blocking(move || -> Result<local::JoinPlan, GroupError> {
             let read = reader(&dir);
-            let join = JoinInput { name: &input.name, others: &input.others, task: &input.task, replace_task: input.replace_task, harness: &input.harness, orq: input.orq };
+            let outside = |p: &str| input.outside.contains(p);
+            let join = JoinInput { name: &input.name, others: &input.others, task: &input.task, replace_task: input.replace_task,
+                harness: &input.harness, orq: input.orq, outside: &outside };
             let plan = local::plan_join(&read, &join, &fresh_gid).map_err(GroupError::Refused)?;
             for loser in &plan.merged { dir.merge_contract(loser, &plan.gid); }
             if let Err(e) = apply(&dir, &[], &plan.writes) {
@@ -220,34 +224,39 @@ impl GroupService {
         done
     }
 
-    pub async fn external_link(&self, local: &str, address: &str, harness: BTreeMap<String, String>) -> Result<String, GroupError> {
+    pub async fn external_link(&self, local: &str, address: &str, harness: BTreeMap<String, String>, outside: HashSet<String>) -> Result<String, GroupError> {
         let _guard = self.lock.lock().await;
         let (dir, local, address) = (self.dir.clone(), local.to_owned(), address.to_owned());
         let gid = blocking(move || -> Result<String, GroupError> {
-            let writes = local::plan_external_link(&reader(&dir), &local, &address, &harness, &fresh_gid).map_err(GroupError::Refused)?;
-            apply(&dir, &[], &writes)?;
+            let outside = |p: &str| outside.contains(p);
+            let read = reader(&dir);
+            let writes = local::plan_external_link(&read, &local, &address, &harness, &outside, &fresh_gid).map_err(GroupError::Refused)?;
+            let before: Snapshot = writes.iter().map(|(n, _)| (n.clone(), read(n))).collect();
+            if let Err(e) = apply(&dir, &[], &writes) {
+                restore_logged(&dir, &before);
+                return Err(e.into());
+            }
             Ok(writes.into_iter().next().map(|(_, s)| s.gid).unwrap_or_default())
         }).await??;
         self.changed();
         Ok(gid)
     }
 
-    /// Tira `address` da lista de `local`; sem mais ninguém (e sem orq), o grupo some e o contrato
-    /// vai para o arquivo.
+    /// Tira `address` de cada membro local do grupo de `local`; sem mais ninguém (e sem orq), o
+    /// grupo some e o contrato vai para o arquivo.
     pub async fn external_unlink(&self, local: &str, address: &str) -> Result<(), GroupError> {
         let archive = {
             let _guard = self.lock.lock().await;
             let (dir, local, address) = (self.dir.clone(), local.to_owned(), address.to_owned());
             blocking(move || {
-                let Some(mut st) = reader(&dir)(&local) else { return Ok(None) };
-                if !st.peers.contains(&address) { return Ok(None); }
-                st.peers.retain(|p| *p != address);
-                if st.peers.is_empty() && !st.orq {
-                    dir.clear_sidecar(&local)?;
-                    return Ok(Some(st.gid));
+                let read = reader(&dir);
+                let (clears, writes, archive) = local::plan_external_unlink(&read, &local, &address);
+                let before: Snapshot = clears.iter().chain(writes.iter().map(|(n, _)| n)).map(|n| (n.clone(), read(n))).collect();
+                if let Err(e) = apply(&dir, &clears, &writes) {
+                    restore_logged(&dir, &before);
+                    return Err(GroupError::from(e));
                 }
-                dir.write_sidecar(&local, &st)?;
-                Ok::<_, GroupError>(None)
+                Ok(archive)
             }).await??
         };
         self.changed();

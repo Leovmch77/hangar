@@ -23,7 +23,8 @@ use super::tunnel::GUEST_PORT;
 use super::ShareState;
 use crate::session_write::{detail, json_response};
 use crate::groups::peers::PeerError;
-use crate::groups::routes::{STORM_MAX, STORM_WINDOW, providers, storm};
+use crate::groups::local::{JoinRefusal, external_link_refusal};
+use crate::groups::routes::{ORQ_OUTSIDE_CODE, ORQ_OUTSIDE_MSG, STORM_MAX, STORM_WINDOW, outside_addresses, providers, storm};
 use crate::groups::service::GroupError;
 use crate::groups::store::file_stem;
 use crate::routes::AppState;
@@ -31,7 +32,7 @@ use crate::session_write::input::{deliver_text, write_input};
 use crate::transcript::py::py_str;
 use crate::workspace_routes::html_escape;
 
-const MSG_ALREADY: &str = "a sessão já está em grupo ou pareada — desfaça esse par antes de parear com outra máquina";
+const MSG_ALREADY: &str = "a sessão está pareada com outra máquina tua — desfaça esse par antes de parear com outra pessoa";
 const REMOTE_LABEL: &str = "resposta da outra máquina: ";
 const MSG_PARTIAL: &str = "pareamento desfeito aqui, mas a outra máquina pode continuar pareada: desfaça lá";
 const RESP_KEYS: [&str; 5] = ["ok", "delivered", "steered", "native", "queued"];
@@ -233,15 +234,22 @@ async fn undo_local(app: &AppState, share: &ShareState, local: &str, address: &s
     drop_record(share, id);
 }
 
-/// Grava o par no grupo de `name` (antes do link a sessão está sempre solta).
+fn link_refused(refusal: &JoinRefusal) -> Refusal {
+    match refusal {
+        JoinRefusal::OrqOutside => fail(StatusCode::CONFLICT, ORQ_OUTSIDE_CODE, ORQ_OUTSIDE_MSG, json!({})),
+        _ => fail(StatusCode::CONFLICT, "erro_pareamento_mistura_cross", MSG_ALREADY, json!({})),
+    }
+}
+
+/// Grava o par no grupo de `name`: o endereço entra em cada membro local dele.
 async fn join_external(app: &AppState, name: &str, peer: &str) -> Result<(), Refusal> {
     let Some(groups) = &app.groups else { return Err(groups_unavailable("groups_unavailable")) };
     let wanted = [name.to_owned()];
     let harness = providers(app, &wanted).await.map_err(|failed| (StatusCode::SERVICE_UNAVAILABLE, failed))?
         .into_iter().filter(|(n, _)| n == name).collect();
-    match groups.external_link(name, peer, harness).await {
+    match groups.external_link(name, peer, harness, outside_addresses(app)).await {
         Ok(_) => Ok(()),
-        Err(GroupError::Refused(_)) => Err(fail(StatusCode::CONFLICT, "erro_pareamento_mistura_cross", MSG_ALREADY, json!({}))),
+        Err(GroupError::Refused(r)) => Err(link_refused(&r)),
         Err(e) => {
             tracing::warn!(code = "external_pair_group_failed", session = name, error = %e, "par externo: o grupo não foi gravado");
             // A escrita pode ter chegado ao disco: o `unlink` só age se o endereço estiver lá.
@@ -251,9 +259,15 @@ async fn join_external(app: &AppState, name: &str, peer: &str) -> Result<(), Ref
     }
 }
 
-async fn already_grouped(app: &AppState, name: &str) -> Result<bool, Refusal> {
+/// A mesma recusa do `external_link`, antes de falar com o outro lado ou de gastar o código.
+async fn link_refusal(app: &AppState, name: &str) -> Result<(), Refusal> {
     let Some(groups) = &app.groups else { return Err(groups_unavailable("groups_unavailable")) };
-    groups.link(name).await.map(|l| l.is_some()).map_err(|_| groups_unavailable("groups_store_failed"))
+    let link = groups.link(name).await.map_err(|_| groups_unavailable("groups_store_failed"))?;
+    let outside = outside_addresses(app);
+    match external_link_refusal(link.as_ref(), &|p| outside.contains(p)) {
+        Some(r) => Err(link_refused(&r)),
+        None => Ok(()),
+    }
 }
 
 /// O aviso de par à sessão daqui; `Err` = o texto da falha (`_erro_texto`).
@@ -345,11 +359,7 @@ async fn pair_accept(State(st): St, Path(name): Path<String>, bytes: Bytes) -> R
         return detail(StatusCode::NOT_FOUND, "erro_sessao_inexistente", "sessão não encontrada", json!({}));
     };
     // Antes de chamar o outro lado: recusar depois queimaria o código dele à toa.
-    match already_grouped(app, &name).await {
-        Ok(false) => {}
-        Ok(true) => return detail(StatusCode::CONFLICT, "erro_pareamento_mistura_cross", MSG_ALREADY, json!({})),
-        Err(r) => return respond(r),
-    }
+    if let Err(r) = link_refusal(app, &name).await { return respond(r) }
     if st.owner.owner_port == GUEST_PORT {
         return detail(StatusCode::CONFLICT, "erro_compartilhar_porta_do_convite", "porta do convite", json!({"port": GUEST_PORT}));
     }
@@ -578,12 +588,8 @@ async fn pair_redeem(State(st): St, bytes: Bytes) -> Response {
     };
     let name = invite.session;
     if share.pairs.paired_with(&address, session) { return repeated(); }
-    // Antes de gastar o código: sessão já agrupada recusa sem queimar o convite.
-    match already_grouped(app, &name).await {
-        Ok(false) => {}
-        Ok(true) => return detail(StatusCode::CONFLICT, "erro_pareamento_mistura_cross", MSG_ALREADY, json!({})),
-        Err(r) => return respond(r),
-    }
+    // Antes de gastar o código: grupo que não aceita par de fora recusa sem queimar o convite.
+    if let Err(r) = link_refusal(app, &name).await { return respond(r) }
     let alias = share.pairs.free_alias(owner, &address, &app.peers.ids(), &server_id(app));
     let peer = format!("{alias}::{session}");
     if let Err(r) = join_external(app, &name, &peer).await { return respond(r) }

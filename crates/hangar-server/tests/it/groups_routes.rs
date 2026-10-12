@@ -24,7 +24,8 @@ use hangar_server::routes::{AppState, router};
 use hangar_server::runtime::gateway::RuntimeRegistry;
 use serde_json::{Value, json};
 
-struct Server { addr: SocketAddr, python: Arc<fake::Fake>, groups: Arc<GroupService>, pair: PathBuf, runtime: Arc<RuntimeRegistry> }
+struct Server { addr: SocketAddr, python: Arc<fake::Fake>, groups: Arc<GroupService>, pair: PathBuf, runtime: Arc<RuntimeRegistry>,
+    share: Arc<hangar_server::share::ShareState> }
 
 /// `n` sessões Claude (`s0`..) e o roteador de grupo montado na frente do principal.
 async fn server(root: &Path, n: usize) -> Server {
@@ -41,6 +42,8 @@ async fn server(root: &Path, n: usize) -> Server {
     let pair = home.join(".claude/.hangar-pair");
     let groups = Arc::new(GroupService::new(PairDir::new(pair.clone(), root.join("arquivo")), Arc::new(PythonOrq::from_state(&state)), "casa".into()));
     state.groups = Some(groups.clone());
+    let share = crate::share_pair_routes::share_state(&root.join("shares.json"), &pair, Arc::new(std::sync::Mutex::new(1_000.0)));
+    state.share = Some(share.clone());
     // Sem entrada aberta: só a porta de entrada de cada nome conta. A política nunca é chamada.
     let runtime = Arc::new(RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(), "s".into(), "i".into()));
     assert!(state.state.runtime.set(runtime.clone()).is_ok());
@@ -51,7 +54,7 @@ async fn server(root: &Path, n: usize) -> Server {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    Server { addr, python, groups, pair, runtime }
+    Server { addr, python, groups, pair, runtime, share }
 }
 
 async fn call(addr: SocketAddr, method: &str, path: &str, body: Option<&Value>, token: &str) -> (u16, Value) {
@@ -272,4 +275,36 @@ async fn uncertain_promotion_restores_and_goes_to_the_diary() {
         && d["codigo"] == "groups_orq_promote_status_500")).await;
     assert_eq!(srv.python.diag().iter().filter(|d| d["evento"] == "rust.groups_orq_promote_uncertain").count(), 1,
         "o conflito do Python não é incerteza");
+}
+
+/// Grupo misto: sessão local entra no grupo que tem membro de fora; pedir o de fora pelo nome é
+/// entrar no grupo da ponta daqui; máquina própria continua sem mistura.
+#[tokio::test(flavor = "multi_thread")]
+async fn local_session_joins_a_group_with_an_outside_member() {
+    use hangar_server::share::pairs::ExternalPair;
+    use hangar_server::share::store::Kind;
+    let dir = tempfile::tempdir().unwrap();
+    let srv = server(dir.path(), 4).await;
+    srv.python.set_internal("pair/text", StatusCode::OK, json!({"text": "protocolo do grupo"}));
+    let (s, _) = srv.share.store.create_redeemed("s0", Some("t:1".into()), Kind::Pair).unwrap();
+    srv.share.pairs.add(ExternalPair { share_id: s.id, local_session: "s0".into(), alias: "pc-ana".into(), peer_owner: "pc-ana".into(),
+        peer_session: "Y".into(), peer_address: "https://a.tail.ts.net:8443".into(), peer_token: "t".repeat(32), created_at: 1.0 }).unwrap();
+    srv.groups.external_link("s0", "pc-ana::Y", Default::default(), ["pc-ana::Y".to_owned()].into()).await.unwrap();
+
+    let (status, body) = call(srv.addr, "POST", "s1/pair", Some(&json!({"peers": ["s0"]})), OWNER).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["members"], json!(["s1", "s0", "pc-ana::Y"]));
+    assert_eq!(srv.groups.link("s1").await.unwrap().unwrap().peers, ["s0", "pc-ana::Y"]);
+
+    let (status, body) = call(srv.addr, "POST", "s2/pair", Some(&json!({"peers": ["pc-ana::Y"]})), OWNER).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(srv.groups.link("s2").await.unwrap().unwrap().peers, ["s0", "s1", "pc-ana::Y"]);
+
+    let (status, body) = call(srv.addr, "POST", "s3/pair", Some(&json!({"peers": ["s0"], "orq": true})), OWNER).await;
+    assert_eq!((status, body["detail"]["code"].clone()), (409, json!("erro_grupo_orq_par_externo")));
+    assert!(srv.groups.link("s3").await.unwrap().is_none());
+    let (status, body) = call(srv.addr, "POST", "s3/pair", Some(&json!({"peers": ["lab::x", "s0"]})), OWNER).await;
+    assert_eq!((status, body["detail"]["code"].clone()), (400, json!("erro_pareamento_cross_1_1")));
+    let (status, body) = call(srv.addr, "POST", "s0/pair", Some(&json!({"peers": ["lab::x"]})), OWNER).await;
+    assert_eq!((status, body["detail"]["code"].clone()), (400, json!("erro_pareamento_mistura_cross")));
 }

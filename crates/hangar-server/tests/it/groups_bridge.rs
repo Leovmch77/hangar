@@ -79,7 +79,7 @@ async fn public(srv: &Server, method: &str, path: &str, body: Option<&Value>) ->
 async fn group(srv: &Server, name: &str, others: &[&str]) {
     let harness: BTreeMap<String, String> = std::iter::once(name).chain(others.iter().copied()).map(|n| (n.to_owned(), "claude".to_owned())).collect();
     srv.groups.join(JoinOwned { name: name.into(), others: others.iter().map(|o| (*o).to_owned()).collect(), task: String::new(),
-        replace_task: false, harness, orq: false }).await.ok().unwrap();
+        replace_task: false, harness, orq: false, outside: Default::default() }).await.ok().unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]

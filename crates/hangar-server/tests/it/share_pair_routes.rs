@@ -267,6 +267,11 @@ impl Env {
         std::fs::write(self.pair_dir.join(format!("{name}.json")),
             json!({"peers": peers, "task": "t", "gid": "abababab", "harness": {}}).to_string()).unwrap();
     }
+    fn orq_group(&self, name: &str, peers: &[&str]) {
+        std::fs::create_dir_all(&self.pair_dir).unwrap();
+        std::fs::write(self.pair_dir.join(format!("{name}.json")),
+            json!({"peers": peers, "task": "t", "gid": "cdcdcdcd", "harness": {}, "orq": true}).to_string()).unwrap();
+    }
     fn live(&self) -> usize { self.share.store.all().iter().filter(|s| s.revoked_at.is_none()).count() }
     fn inputs(&self, name: &str) -> usize { self.python.hits_to(&format!("/api/sessions/{name}/input")) }
     fn last_input(&self) -> Value { serde_json::from_slice(&self.python.last_body()).unwrap() }
@@ -313,18 +318,49 @@ async fn redeem_refuses_bad_session_and_token() {
     assert!(e.share.store.peek(&code, Kind::Pair).is_ok());
 }
 
-/// Também cobre `resgate_com_sessao_em_grupo_nao_gasta_o_codigo` e `_com_conflito_de_tarefa_e_409`:
-/// no Rust a recusa do grupo é sempre "já agrupada", e o título da tarefa não volta.
+/// Sessão em grupo com outra local: o par entra no grupo inteiro e o nível vale para as duas.
 #[tokio::test(flavor = "multi_thread")]
-async fn redeem_with_session_already_grouped_is_409_and_keeps_the_code() {
+async fn redeem_with_session_in_a_local_group_reaches_every_member() {
     let e = env().await;
     e.group("s0", &["s2"]);
+    e.group("s2", &["s0"]);
+    let (_, code) = e.share.store.create_pair_invite("s0", Some("t:1".into()), Kind::Share).unwrap();
+    let (status, body) = e.redeem(&code, json!({"level": "view"})).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(e.sidecar("s0").unwrap()["peers"], json!(["s2", "pc-ana::Y"]));
+    assert_eq!(e.sidecar("s2").unwrap()["peers"], json!(["s0", "pc-ana::Y"]));
+    let token = body["token"].as_str().unwrap();
+    assert_eq!((e.kind_for(token, "s0"), e.kind_for(token, "s2")), (Some(Kind::Share), Some(Kind::Share)));
+    assert_eq!(e.kind_for(token, "s1"), None);
+}
+
+/// Grupo com máquina própria continua recusando, sem gastar o código; grupo `orq` recusa com frase própria.
+#[tokio::test(flavor = "multi_thread")]
+async fn redeem_into_own_machine_or_orq_group_is_409_and_keeps_the_code() {
+    let e = env().await;
+    e.group("s0", &["lab::x"]);
     let code = e.pair_code("s0");
     let (status, body) = e.redeem(&code, json!({})).await;
-    assert_eq!((status, &body["detail"]["code"]), (409, &json!("erro_pareamento_mistura_cross")));
+    assert_eq!((status, &body["detail"]["code"]), (409, &json!("erro_pareamento_mistura_cross")), "{body}");
     assert!(body["detail"]["params"].get("existente").is_none() && !body.to_string().contains("'t'"));
-    assert!(e.share.store.peek(&code, Kind::Pair).is_ok());
+    e.orq_group("s2", &["s3"]);
+    let orq_code = e.pair_code("s2");
+    let (status, body) = e.redeem(&orq_code, json!({})).await;
+    assert_eq!((status, &body["detail"]["code"]), (409, &json!("erro_grupo_orq_par_externo")), "{body}");
+    assert!(e.share.store.peek(&code, Kind::Pair).is_ok() && e.share.store.peek(&orq_code, Kind::Pair).is_ok());
     assert!(e.share.pairs.all().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn session_with_an_outside_pair_takes_a_second_one() {
+    let e = env().await;
+    e.seed_pair("s0", "pc-bia", "W", "https://b.tail.ts.net:8443");
+    e.group("s0", &["pc-bia::W"]);
+    let code = e.pair_code("s0");
+    let (status, body) = e.redeem(&code, json!({})).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(e.sidecar("s0").unwrap()["peers"], json!(["pc-bia::W", "pc-ana::Y"]));
+    assert_eq!(e.share.pairs.by_local("s0").len(), 2);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -508,12 +544,31 @@ async fn accept_with_invalid_link_is_400() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn accept_with_grouped_session_never_calls_the_other_side() {
+async fn accept_with_orq_or_own_machine_group_never_calls_the_other_side() {
     let e = env().await;
-    e.group("s1", &["s2"]);
+    e.group("s1", &["lab::x"]);
     let (status, body) = e.accept("s1").await;
     assert_eq!((status, &body["detail"]["code"]), (409, &json!("erro_pareamento_mistura_cross")));
+    e.orq_group("s2", &["s3"]);
+    let (status, body) = e.accept("s2").await;
+    assert_eq!((status, &body["detail"]["code"]), (409, &json!("erro_grupo_orq_par_externo")));
     assert!(e.other.calls().is_empty() && e.share.store.all().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn accept_with_session_in_a_local_group_reaches_every_member() {
+    let e = env().await;
+    e.group("s1", &["s2"]);
+    e.group("s2", &["s1"]);
+    let mut answer = good();
+    answer["level"] = json!("view");
+    e.other.reply("POST /api/pair/redeem", 200, answer);
+    let (status, body) = e.owner_post("/api/sessions/s1/pair-accept", json!({"link": LINK, "level": "full"})).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(e.sidecar("s1").unwrap()["peers"], json!(["s2", "pc-ana::Y"]));
+    assert_eq!(e.sidecar("s2").unwrap()["peers"], json!(["s1", "pc-ana::Y"]));
+    let mine = e.other.calls()[0]["body"]["token"].as_str().unwrap().to_owned();
+    assert_eq!((e.kind_for(&mine, "s1"), e.kind_for(&mine, "s2")), (Some(Kind::Share), Some(Kind::Share)));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1034,4 +1089,18 @@ async fn accept_of_a_repeated_pair_is_409_and_undoes_the_other_side() {
     assert_eq!(e.share.pairs.all().len(), 1);
     assert_eq!(e.live(), 1, "só o par antigo segue valendo: {seeded}");
     assert!(e.sidecar("s1").is_none());
+}
+
+/// Membro local que não é a ponta do par sai do grupo: o par fica e nada vai à malha própria.
+#[tokio::test(flavor = "multi_thread")]
+async fn other_member_leaving_a_mixed_group_never_calls_unpair_remote() {
+    let e = env().await;
+    let (id, _) = e.seed_pair("s0", "pc-ana", "Y", &e.other_base);
+    e.group("s0", &["s2", "pc-ana::Y"]);
+    e.group("s2", &["s0", "pc-ana::Y"]);
+    let (ex, warnings) = leave_and_notify(&e.app, e.app.groups.as_ref().unwrap(), "s2").await.unwrap();
+    assert_eq!((ex, warnings), (vec!["s0".to_owned(), "pc-ana::Y".to_owned()], vec![]));
+    assert!(e.other.calls().is_empty());
+    assert!(e.share.pairs.by_address("pc-ana::Y").is_some() && !e.revoked(&id));
+    assert_eq!(e.sidecar("s0").unwrap()["peers"], json!(["pc-ana::Y"]));
 }
