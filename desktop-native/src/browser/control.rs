@@ -14,6 +14,9 @@ pub trait Page {
 
 pub enum Reply { Text(String), Png(Vec<u8>) }
 
+/// O que o agente está fazendo agora, para a faixa do painel. `target` é o nome do alvo na árvore da página ou a tecla.
+pub struct Activity { pub verb: String, pub target: Option<String> }
+
 pub const EVENTS: [&str; 6] = ["Runtime.consoleAPICalled", "Log.entryAdded", "Network.requestWillBeSent",
     "Network.responseReceived", "Network.loadingFailed", "Page.frameNavigated"];
 
@@ -29,6 +32,11 @@ const FRAME: &str = "new Promise(r=>{requestAnimationFrame(()=>requestAnimationF
 /// '' = dá para digitar; senão, o que está com foco.
 const FOCUS: &str = "(()=>{const a=document.activeElement;if(!a||a===document.body)return 'nada';const t=a.tagName.toLowerCase();const ok=a.isContentEditable||t==='textarea'||(t==='input'&&!/^(button|submit|reset|checkbox|radio|file|image|range|color)$/i.test(a.type||''));return ok?'':t+(a.type?'['+a.type+']':'')})()";
 const PROBE_READ: &str = "(typeof window.__hangarSonda===\"undefined\"?2:window.__hangarSonda)";
+/// Verbos que mudam a página: pausado, só estes são recusados; ler continua livre.
+const ACTING: [&str; 8] = ["click", "fill", "type", "press", "hover", "eval", "layout", "tema"];
+pub const PAUSED: &str = "erro: o usuario pausou o navegador; espere ele clicar em Retomar no painel e tente de novo";
+/// Tempo do realce do alvo antes da ação: o bastante para o olho achar, pouco para o agente sentir.
+const MARK_MS: u64 = 350;
 
 struct State {
     refs: HashMap<String, i64>,
@@ -50,6 +58,8 @@ pub struct Controller<P: Page> {
     turn: Mutex<()>,
     /// Último `hidden` pedido: quem pega o `turn` aplica este, não o seu, porque a fila do `turn` não garante ordem.
     wanted_hidden: Cell<bool>,
+    paused: Cell<bool>,
+    on_activity: RefCell<Option<Box<dyn Fn(Activity)>>>,
 }
 
 fn push(list: &mut VecDeque<String>, line: String) {
@@ -59,7 +69,7 @@ fn push(list: &mut VecDeque<String>, line: String) {
 
 impl<P: Page> Controller<P> {
     pub fn new(page: P, hidden: bool) -> Self {
-        Self { page, turn: Mutex::new(()), wanted_hidden: Cell::new(hidden), state: RefCell::new(State { refs: HashMap::new(), console: VecDeque::new(),
+        Self { page, turn: Mutex::new(()), wanted_hidden: Cell::new(hidden), paused: Cell::new(false), on_activity: RefCell::new(None), state: RefCell::new(State { refs: HashMap::new(), console: VecDeque::new(),
             network: VecDeque::new(), inflight: 0, last_network: Instant::now(), theme: "sistema", layout: Layout::Desktop,
             hidden: false, navigated: false, enabled: HashSet::new() }) }
     }
@@ -83,6 +93,15 @@ impl<P: Page> Controller<P> {
         self.state.borrow_mut().hidden = self.wanted_hidden.get();
         let layout = self.state.borrow().layout;
         if let Err(e) = self.apply_layout(layout).await { eprintln!("[nav] layout nao aplicado: {e}"); }
+    }
+
+    /// Pausado pelo usuário: os verbos de `ACTING` voltam com `PAUSED` até ele retomar.
+    pub fn set_paused(&self, paused: bool) { self.paused.set(paused); }
+
+    pub fn on_activity(&self, f: impl Fn(Activity) + 'static) { *self.on_activity.borrow_mut() = Some(Box::new(f)); }
+
+    fn report(&self, verb: &str, target: Option<String>) {
+        if let Some(f) = self.on_activity.borrow().as_ref() { f(Activity { verb: verb.into(), target }); }
     }
 
     pub fn on_event(&self, method: &str, p: &Value) {
@@ -112,9 +131,12 @@ impl<P: Page> Controller<P> {
 
     pub async fn run(&self, verb: &str, args: &[String]) -> Reply {
         let _turn = self.turn.lock().await;
+        if self.paused.get() && ACTING.contains(&verb) { return Reply::Text(PAUSED.into()); }
+        let arg = |i: usize| args.get(i).map(String::as_str).unwrap_or("");
+        // Anuncia antes de medir: a faixa que aparece muda a altura da página. Verbo com ref repete com o nome do alvo.
+        self.report(verb, (verb == "press").then(|| arg(0).to_owned()));
         self.enable_base().await;
         self.after_navigation().await;
-        let arg = |i: usize| args.get(i).map(String::as_str).unwrap_or("");
         let result = match verb {
             "snapshot" => self.snapshot().await.map(Reply::Text),
             "click" => self.click(arg(0)).await.map(Reply::Text),
@@ -194,6 +216,33 @@ impl<P: Page> Controller<P> {
         Ok((q.len() >= 6).then(|| (((q[0] + q[4]) / 2.).round() as i64, ((q[1] + q[5]) / 2.).round() as i64)))
     }
 
+    /// Anuncia a ação com o nome do alvo e, com a página à vista, realça o alvo antes de agir. O realce é do próprio
+    /// Chromium (fora do DOM): não entra no snapshot nem segura o clique, e no Windows aparece dentro do WebView2.
+    /// Roda antes de `center`: a espera do realce deixa a faixa assentar antes de medir onde clicar.
+    async fn mark(&self, verb: &str, r: &str) {
+        let Some(id) = self.state.borrow().refs.get(r).copied() else { return };
+        let _ = self.page.call("DOM.scrollIntoViewIfNeeded", json!({"backendNodeId": id})).await;
+        let name = self.page.call("Accessibility.getPartialAXTree", json!({"backendNodeId": id, "fetchRelatives": false})).await.ok()
+            .and_then(|t| t["nodes"].as_array()?.iter().find_map(|n| n["name"]["value"].as_str().map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned)));
+        self.report(verb, name);
+        if self.state.borrow().hidden { return; }
+        let color = |a: f64| json!({"r": 124, "g": 135, "b": 232, "a": a});
+        let shown = async {
+            self.enable("DOM").await?;
+            self.enable("Overlay").await?;
+            self.page.call("Overlay.highlightNode", json!({"backendNodeId": id,
+                "highlightConfig": {"borderColor": color(1.), "contentColor": color(0.18), "showInfo": false}})).await
+        };
+        match shown.await {
+            Ok(_) => self.page.sleep(MARK_MS).await,
+            Err(e) => eprintln!("[nav] realce do alvo falhou: {e}"),
+        }
+    }
+
+    async fn unmark(&self) {
+        if self.state.borrow().enabled.contains("Overlay") { let _ = self.page.call("Overlay.hideHighlight", json!({})).await; }
+    }
+
     /// Ouvinte em captura prova que o EVENTO chegou ao documento. `pointerdown` antes de `mousedown`: um
     /// `preventDefault` no primeiro suprime o segundo (combobox do Radix).
     async fn arrived(&self, types: &[&str], fire: impl AsyncFn() -> Result<(), String>) -> Result<bool, String> {
@@ -211,13 +260,18 @@ impl<P: Page> Controller<P> {
         }
     }
 
-    async fn click(&self, r: &str) -> Result<String, String> {
-        let Some((x, y)) = self.center(r).await? else { return Ok(format!("erro: ref {r} nao existe (rode snapshot de novo)")) };
+    async fn click(&self, r: &str) -> Result<String, String> { self.click_as("click", r).await }
+
+    async fn click_as(&self, verb: &str, r: &str) -> Result<String, String> {
+        self.mark(verb, r).await;
+        let Some((x, y)) = self.center(r).await? else { self.unmark().await; return Ok(format!("erro: ref {r} nao existe (rode snapshot de novo)")) };
         let base = |t: &str| json!({"type": t, "x": x, "y": y, "button": "left", "clickCount": 1});
         let ok = self.arrived(&["pointerdown", "mousedown"], async || {
             self.page.call("Input.dispatchMouseEvent", base("mousePressed")).await?;
             self.page.call("Input.dispatchMouseEvent", base("mouseReleased")).await.map(|_| ())
-        }).await?;
+        }).await;
+        self.unmark().await;
+        let ok = ok?;
         Ok(if ok { format!("ok: click {r}") } else { format!("erro: click {r}: o evento nao chegou na pagina (aba escondida sem quadro) — tire um shot e repita") })
     }
 
@@ -227,7 +281,7 @@ impl<P: Page> Controller<P> {
     }
 
     async fn fill(&self, r: &str, text: &str) -> Result<String, String> {
-        let clicked = self.click(r).await?;
+        let clicked = self.click_as("fill", r).await?;
         if clicked.starts_with("erro:") { return Ok(clicked); }
         if let Some(focus) = self.not_editable().await? {
             return Ok(format!("erro: fill {r}: o clique nao deixou um campo de texto com foco (foco em {focus}) — a ref e mesmo um campo? rode snapshot"));
@@ -264,8 +318,11 @@ impl<P: Page> Controller<P> {
     }
 
     async fn hover(&self, r: &str) -> Result<String, String> {
-        let Some((x, y)) = self.center(r).await? else { return Ok(format!("erro: ref {r} nao existe (rode snapshot de novo)")) };
-        self.page.call("Input.dispatchMouseEvent", json!({"type": "mouseMoved", "x": x, "y": y})).await?;
+        self.mark("hover", r).await;
+        let Some((x, y)) = self.center(r).await? else { self.unmark().await; return Ok(format!("erro: ref {r} nao existe (rode snapshot de novo)")) };
+        let moved = self.page.call("Input.dispatchMouseEvent", json!({"type": "mouseMoved", "x": x, "y": y})).await;
+        self.unmark().await;
+        moved?;
         self.frame().await;
         Ok(format!("ok: hover {r}"))
     }

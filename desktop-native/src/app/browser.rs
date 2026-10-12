@@ -6,6 +6,15 @@ use super::*;
 use crate::appearance::SideTab;
 use crate::browser::{Engine, Pointer, model};
 
+/// Por que o agente está parado: o botão Pausar ou a pessoa mexendo na página (Assumir, clique, tecla).
+#[cfg(not(target_os = "macos"))]
+#[derive(Clone, Copy, PartialEq)]
+enum Pause { Asked, TookOver }
+
+/// Faixa "agente no controle": some este tempo depois do último verbo terminar.
+#[cfg(not(target_os = "macos"))]
+const AGENT_LINGER: std::time::Duration = std::time::Duration::from_secs(2);
+
 pub(super) struct BrowserPanel {
     /// `servidor::sessão` dona deste navegador: nome do sidecar que o hangar-preview lê.
     #[cfg_attr(target_os = "macos", allow(dead_code))]
@@ -46,6 +55,19 @@ pub(super) struct BrowserPanel {
     origin: Rc<Cell<Point<Pixels>>>,
     /// Decidido pelo `Hangar` a cada quadro (`browser_visible`).
     shown: bool,
+    /// O que o agente está fazendo, enquanto a faixa aparece.
+    #[cfg(not(target_os = "macos"))]
+    agent: Option<String>,
+    /// Verbos do agente em andamento; a faixa só começa a sumir com zero.
+    #[cfg(not(target_os = "macos"))]
+    agent_running: u32,
+    /// Muda a cada ação: o sumiço agendado por uma ação velha não apaga a faixa de uma nova.
+    #[cfg(not(target_os = "macos"))]
+    agent_seq: u64,
+    #[cfg(not(target_os = "macos"))]
+    paused: Option<Pause>,
+    #[cfg(not(target_os = "macos"))]
+    _activity: Option<Task<()>>,
     _drain: Task<()>,
     _subscriptions: [Subscription; 4],
 }
@@ -71,7 +93,8 @@ impl BrowserPanel {
         ];
         Self { key, #[cfg(not(target_os = "macos"))] controller: None, #[cfg(not(target_os = "macos"))] cdp: None,
             #[cfg(not(target_os = "macos"))] relay: Default::default(), #[cfg(not(target_os = "macos"))] viewer: Rc::default(), engine: None, starting: None, _start: None, events, address, page: model::PageState::default(), invalid: None, #[cfg(not(target_os = "macos"))] cookies_status: None, #[cfg(not(target_os = "macos"))] cookies_confirmed: false, #[cfg(target_os = "linux")] last_fill: None, focus,
-            origin: Rc::default(), shown: false, _drain: drain, _subscriptions: subscriptions }
+            origin: Rc::default(), shown: false, #[cfg(not(target_os = "macos"))] agent: None, #[cfg(not(target_os = "macos"))] agent_running: 0,
+            #[cfg(not(target_os = "macos"))] agent_seq: 0, #[cfg(not(target_os = "macos"))] paused: None, #[cfg(not(target_os = "macos"))] _activity: None, _drain: drain, _subscriptions: subscriptions }
     }
 
     fn engine(&self) -> Option<&Rc<Engine>> { self.engine.as_ref()?.as_ref().ok() }
@@ -213,10 +236,42 @@ impl BrowserPanel {
         }
         #[cfg(target_os = "windows")]
         { self.listen_relay(&cdp); *self.relay.borrow_mut() = Some(cdp.clone()); }
+        let (activity, acted) = async_channel::unbounded();
+        ctl.on_activity(move |a| { let _ = activity.try_send(a); });
+        // Motor refeito começa sem pausa: a pausa era do motor que caiu.
+        self.paused = None;
+        self._activity = Some(cx.spawn(async move |this, cx| {
+            while let Ok(a) = acted.recv().await {
+                if this.update(cx, |this, cx| this.agent_acted(&a, cx)).is_err() { break; }
+            }
+        }));
+        #[cfg(target_os = "windows")]
+        self.listen_user_input(&cdp, cx);
         let setup = ctl.clone();
         cx.spawn(async move |_, _| setup.start().await).detach();
         self.controller = Some(ctl);
         self.cdp = Some(cdp);
+    }
+
+    /// No Windows a página é janela própria: clique e tecla da pessoa não passam pela GPUI. Quem avisa é um ouvinte
+    /// dentro da página, por um binding do CDP. A entrada sintética do agente também é `isTrusted`, por isso aviso com
+    /// verbo em andamento não conta (`user_input` olha `agent_running`).
+    #[cfg(target_os = "windows")]
+    fn listen_user_input(&self, cdp: &Rc<crate::browser::cdp::Cdp>, cx: &mut Context<Self>) {
+        const BINDING: &str = "__hangarUser";
+        const SCRIPT: &str = "(()=>{if(window.__hangarUserOn)return;window.__hangarUserOn=1;const f=e=>{if(e.isTrusted)try{__hangarUser(e.type)}catch(_){}};addEventListener('pointerdown',f,true);addEventListener('keydown',f,true)})()";
+        let (tx, rx) = async_channel::unbounded::<()>();
+        let listened = cdp.on("Runtime.bindingCalled", move |p| if p["name"] == BINDING { let _ = tx.try_send(()); });
+        if let Err(e) = listened { eprintln!("[nav] entrada do usuario sem ouvinte: {e}"); return; }
+        let calls = [cdp.call("Runtime.addBinding", serde_json::json!({"name": BINDING})),
+            cdp.call("Page.addScriptToEvaluateOnNewDocument", serde_json::json!({"source": SCRIPT})),
+            cdp.call("Runtime.evaluate", serde_json::json!({"expression": SCRIPT}))];
+        cx.spawn(async move |this, cx| {
+            for call in calls { if let Err(e) = call.await { eprintln!("[nav] ouvinte de entrada nao instalado: {e}"); } }
+            while rx.recv().await.is_ok() {
+                if this.update(cx, |this, cx| this.user_input(cx)).is_err() { break; }
+            }
+        }).detach();
     }
 
     /// Entrega ao espectador atual os eventos que a tela remota acompanha.
@@ -299,6 +354,73 @@ impl BrowserPanel {
 
     #[cfg(not(target_os = "macos"))]
     pub(super) fn controller(&self) -> Option<Rc<crate::browser::control::Controller<crate::browser::control::CdpPage>>> { self.controller.clone() }
+
+    #[cfg(not(target_os = "macos"))]
+    fn agent_acted(&mut self, a: &crate::browser::control::Activity, cx: &mut Context<Self>) {
+        self.agent = Some(describe_activity(&self.key, a));
+        self.agent_seq += 1;
+        cx.notify();
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    pub(super) fn agent_started(&mut self) { self.agent_running += 1; }
+
+    /// Verbo terminou: sem outro em andamento, a faixa some depois de `AGENT_LINGER`, se nenhuma ação nova chegar.
+    #[cfg(not(target_os = "macos"))]
+    pub(super) fn agent_finished(&mut self, cx: &mut Context<Self>) {
+        self.agent_running = self.agent_running.saturating_sub(1);
+        if self.agent_running > 0 || self.agent.is_none() { return; }
+        let seq = self.agent_seq;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(AGENT_LINGER).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.agent_seq == seq && this.agent_running == 0 { this.agent = None; cx.notify(); }
+            });
+        }).detach();
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn pause(&mut self, why: Pause, cx: &mut Context<Self>) {
+        self.paused = Some(why);
+        if let Some(ctl) = &self.controller { ctl.set_paused(true); }
+        cx.notify();
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn resume(&mut self, cx: &mut Context<Self>) {
+        self.paused = None;
+        if let Some(ctl) = &self.controller { ctl.set_paused(false); }
+        cx.notify();
+    }
+
+    /// Clique ou tecla da pessoa na página com o agente agindo: ela assumiu, e o agente para na hora.
+    #[cfg(not(target_os = "macos"))]
+    fn user_input(&mut self, cx: &mut Context<Self>) {
+        if self.agent.is_some() && self.paused.is_none() && (cfg!(target_os = "linux") || self.agent_running == 0) { self.pause(Pause::TookOver, cx); }
+    }
+
+    /// Faixa entre a barra e a página: o agente agindo (Pausar, Assumir) ou parado pela pessoa (Retomar).
+    #[cfg(not(target_os = "macos"))]
+    fn render_agent(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let strip = |id: &'static str, color: Hsla| div().id(id).flex_shrink_0().flex().items_center().gap_2().px_3().py(px(5.))
+            .bg(color.opacity(0.2)).border_b_1().border_color(color.opacity(0.45)).text_size(px(12.)).role(Role::Status)
+            .child(div().size(px(8.)).flex_shrink_0().rounded_full().bg(color));
+        let label = |text: String| div().flex_1().min_w_0().truncate().child(text);
+        if let Some(why) = self.paused {
+            let text = tr(if why == Pause::Asked { "browser_ctl_paused" } else { "browser_ctl_took_over" });
+            return Some(strip("browser-agent-paused", theme::warning()).child(label(text))
+                .child(Button::new("browser-agent-resume").outline().small().label(tr("browser_ctl_resume"))
+                    .on_click(cx.listener(|this, _, _, cx| this.resume(cx))))
+                .into_any_element());
+        }
+        let text = self.agent.clone()?;
+        Some(strip("browser-agent", theme::accent()).child(label(text))
+            .child(Button::new("browser-agent-pause").outline().small().label(tr("browser_ctl_pause"))
+                .on_click(cx.listener(|this, _, _, cx| this.pause(Pause::Asked, cx))))
+            .child(Button::new("browser-agent-take").outline().small().label(tr("browser_ctl_take"))
+                .on_click(cx.listener(|this, _, window, cx| { this.pause(Pause::TookOver, cx); this.focus.focus(window, cx); })))
+            .into_any_element())
+    }
 
     fn restore_address(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let url = self.page.url.clone().unwrap_or_default();
@@ -423,6 +545,13 @@ impl BrowserPanel {
         true
     }
 
+    fn agent_acting(&self) -> bool {
+        #[cfg(not(target_os = "macos"))]
+        { self.agent.is_some() && self.paused.is_none() }
+        #[cfg(target_os = "macos")]
+        false
+    }
+
     fn pointer(&self, kind: Pointer, at: Point<Pixels>, clicks: usize) {
         if let Some(engine) = self.engine() { engine.pointer(kind, at - self.origin.get(), clicks); }
     }
@@ -450,7 +579,11 @@ impl BrowserPanel {
                 origin.set(bounds.origin);
                 engine.place(bounds, window);
             }).absolute().inset_0()))
+            // Só no Linux a GPUI desenha por cima da página; no Windows ela é janela própria e cobriria o contorno.
+            .when(cfg!(target_os = "linux") && self.agent_acting(), |el| el.child(div().absolute().inset_0().border_2().border_color(theme::accent())))
             .on_mouse_down(MouseButton::Left, cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                #[cfg(not(target_os = "macos"))]
+                this.user_input(cx);
                 this.focus.focus(window, cx);
                 this.pointer(Pointer::Down, event.position, event.click_count);
             }))
@@ -466,6 +599,8 @@ impl BrowserPanel {
             }))
             // A tecla é da página: os atalhos do app (Esc, "/") não comem o que se digita nela.
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                #[cfg(not(target_os = "macos"))]
+                this.user_input(cx);
                 if let Some(engine) = this.engine() {
                     let k = &event.keystroke;
                     // O Chromium sem janela tem área de transferência própria: colar lê a do sistema e digita o texto.
@@ -525,8 +660,38 @@ impl Render for BrowserPanel {
                 .flex_shrink_0().px_3().py(px(6.)).role(Role::Status)
                 .text_size(px(11.)).text_color(theme::muted()).whitespace_normal().child(text)));
         }
+        #[cfg(not(target_os = "macos"))]
+        { root = root.children(self.render_agent(cx)); }
         root.child(self.render_page(cx))
     }
+}
+
+/// "nav-tela está usando o navegador · clicando em “Salvar”". Nome longo de alvo é cortado: a faixa tem uma linha.
+#[cfg(not(target_os = "macos"))]
+fn describe_activity(key: &str, a: &crate::browser::control::Activity) -> String {
+    let session = key.rsplit("::").next().unwrap_or(key);
+    let target = a.target.as_deref().map(|t| {
+        let t = t.split_whitespace().collect::<Vec<_>>().join(" ");
+        if t.chars().count() > 40 { format!("{}…", t.chars().take(39).collect::<String>()) } else { t }
+    });
+    let (named, plain) = match a.verb.as_str() {
+        "click" => ("browser_ctl_click", "browser_ctl_click_plain"),
+        "fill" => ("browser_ctl_fill", "browser_ctl_fill_plain"),
+        "hover" => ("browser_ctl_hover", "browser_ctl_hover_plain"),
+        "press" => ("browser_ctl_press", "browser_ctl_type"),
+        "type" => ("", "browser_ctl_type"),
+        "snapshot" | "text" | "url" | "console" | "network" => ("", "browser_ctl_read"),
+        "wait" => ("", "browser_ctl_wait"),
+        "shot" => ("", "browser_ctl_shot"),
+        _ => ("", ""),
+    };
+    let using = tr("browser_ctl_using").replace("{session}", session);
+    let doing = match target {
+        Some(t) if !named.is_empty() => tr(named).replace("{target}", &t),
+        _ if !plain.is_empty() => tr(plain),
+        _ => return using,
+    };
+    format!("{using} · {doing}")
 }
 
 impl Hangar {
@@ -674,6 +839,11 @@ impl Hangar {
                 None => format!("erro: a sessao {key} nao tem navegador aberto"),
             });
         };
-        cx.spawn(async move |_, _| { let _ = reply.send(ctl.run(&verb, &args).await); }).detach();
+        let browser = browser.downgrade();
+        let _ = browser.update(cx, |panel, _| panel.agent_started());
+        cx.spawn(async move |_, cx| {
+            let _ = reply.send(ctl.run(&verb, &args).await);
+            let _ = browser.update(cx, |panel, cx| panel.agent_finished(cx));
+        }).detach();
     }
 }
