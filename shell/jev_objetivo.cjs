@@ -493,11 +493,23 @@ function decidir(respostas, candidatos = [], limiares = LIMIARES) {
   const paradaDeRisco = () => ({ parar: `operacao arriscada (${arriscado.toFixed(2)}): precisa da ordem do usuario` });
   if (escolha === 'PRESS_ENTER') return ehArriscado ? paradaDeRisco() : { operacao: 'PRESS_ENTER' };
 
-  const head = respostas[HEAD_DA_OPERACAO[escolha]];
-  const gemeos = sinonimos(head, candidatos);
-  const forcaAlvo = gemeos ? gemeos.massa : forca(head);
-  if (!head || head.choice === NENHUM || forcaAlvo < limiares.alvo) {
-    return { parar: `${escolha} sem alvo confiavel (${distribuicao(head) || forcaAlvo.toFixed(2)})` };
+  const alvoDe = (op) => {
+    const h = respostas[HEAD_DA_OPERACAO[op]];
+    const g = sinonimos(h, candidatos);
+    const f = g ? g.massa : forca(h);
+    return { head: h, gemeos: g, forcaAlvo: f, ok: Boolean(h) && h.choice !== NENHUM && f >= limiares.alvo };
+  };
+  let { head, gemeos, forcaAlvo, ok } = alvoDe(escolha);
+  if (!ok) {
+    // A segunda operação mais provável, se ela tem alvo firme: com "Local = AMBULATÓRIO" nos dados o
+    // Jev pendia para SELECT numa lista ainda fechada, enquanto o CLICK que a abre tinha alvo 0,9.
+    const segunda = Object.entries(operacao.probabilities ?? {})
+      .filter(([k, pr]) => k !== escolha && HEAD_DA_OPERACAO[k] && pr >= limiares.operacao)
+      .sort((a, b) => b[1] - a[1])[0];
+    const outra = segunda ? alvoDe(segunda[0]) : null;
+    if (!outra?.ok) return { parar: `${escolha} sem alvo confiavel (${distribuicao(head) || forcaAlvo.toFixed(2)})` };
+    escolha = segunda[0];
+    ({ head, gemeos, forcaAlvo } = outra);
   }
   const alvo = gemeos ? gemeos.ref : head.choice;
   const escolhido = candidatos.find((c) => c.ref === alvo);
@@ -535,12 +547,30 @@ function pedidoDeTexto(objetivo, campo, feito) {
 
 const ehSegredo = (campo) => CHAVE_SECRETA.test(campo);
 
+/** Um pedido só para vários campos: num formulário escrito pelo modelo eram uma ida por campo. */
+function pedidoDeTextos(objetivo, campos, feito) {
+  return [
+    `Objetivo do usuario: ${objetivo}`,
+    `Ja feito: ${feito.slice(-5).join('; ') || 'nada ainda'}`,
+    `Campos a preencher: ${JSON.stringify(campos)}`,
+    'Responda APENAS com um objeto JSON, sem cercas de codigo, com cada campo como chave e o valor a digitar.',
+    'Cada campo leva so o dado que o objetivo atribui a ele; nao repita num campo o que pertence a outro.',
+    `Campo cujo dado o objetivo nao contem leva exatamente "${SEM_VALOR}".`,
+  ].join('\n');
+}
+
+function lerTextos(resposta) {
+  const t = String(resposta).trim().replace(/^```(?:json)?\s*|\s*```$/g, '');
+  const obj = JSON.parse(t.slice(t.indexOf('{'), t.lastIndexOf('}') + 1));
+  return obj && typeof obj === 'object' ? obj : {};
+}
+
 /**
  * De onde sai o texto de um campo, nesta ordem: o que o chamador mandou em `dados` (o Jev só
  * escolhe qual chave), depois o LLM pequeno. Sem nenhum dos dois, para dizendo qual campo faltou —
  * quem chamou sabe o valor e pode mandar na próxima.
  */
-async function valorDoCampo({ campo, escolha, cofre, objetivo, feito, escreverTexto, limiares = LIMIARES }) {
+async function valorDoCampo({ campo, escolha, cofre, objetivo, feito, escreverTexto, limiares = LIMIARES, escritos = new Map(), vizinhos = [] }) {
   const chave = escolha?.choice;
   if (chave && chave !== NENHUM && forca(escolha) >= limiares.alvo && typeof cofre[chave] === 'string') {
     return { valor: cofre[chave], origem: `dados.${chave}` };
@@ -560,7 +590,20 @@ async function valorDoCampo({ campo, escolha, cofre, objetivo, feito, escreverTe
   if (!escreverTexto) {
     return { parou: `precisa digitar em "${campo.nome}": ${porque}, e nao ha modelo de texto configurado`, falta: campo.nome };
   }
-  const valor = (await escreverTexto(pedidoDeTexto(objetivo, campo.nome, feito))).trim();
+  if (!escritos.has(campo.nome)) {
+    const nomes = [campo.nome, ...vizinhos.filter((n) => n !== campo.nome && !ehSegredo(n) && !escritos.has(n))];
+    let lidos = null;
+    if (nomes.length > 1) {
+      try {
+        lidos = lerTextos(await escreverTexto(pedidoDeTextos(objetivo, nomes, feito)));
+      } catch {
+        lidos = null; // resposta fora de JSON: cai no pedido de um campo só
+      }
+    }
+    if (lidos) for (const n of nomes) escritos.set(n, String(lidos[n] ?? SEM_VALOR));
+    else escritos.set(campo.nome, await escreverTexto(pedidoDeTexto(objetivo, campo.nome, feito)));
+  }
+  const valor = String(escritos.get(campo.nome)).trim();
   if (!valor || valor.includes(SEM_VALOR)) {
     return { parou: `o campo "${campo.nome}" precisa de um dado que nao esta no objetivo: ${porque}`, falta: campo.nome };
   }
@@ -584,17 +627,20 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
   let anterior = null;
   let repetidas = 0;
   let esperouCarregar = false;
+  const escritos = new Map();
   const agir = async (verbo, args) => {
     const saida = String(await executar(verbo, args));
     if (saida.startsWith('erro:')) throw new FalhaDoNavegador(verbo, saida);
     return saida;
   };
   for (let passo = 1; passo <= maxPassos; passo += 1) {
-    const [snapshot, url, texto] = [
-      await executar('snapshot', SNAPSHOT_DO_LACO),
-      await executar('url', []),
-      await executar('text', []),
-    ];
+    // Em paralelo: sao leituras independentes, e em serie somavam um ida e volta cada por passo.
+    const [snapshot, url, texto, anotacaoLida] = await Promise.all([
+      executar('snapshot', SNAPSHOT_DO_LACO),
+      executar('url', []),
+      executar('text', []),
+      valoresAtuais(executar),
+    ]);
     // O navegador responde erro como TEXTO. Sem esta checagem, um `erro: a aba nao descongelou`
     // seria lido como uma página sem elementos e o laço reportaria a página errada em vez da falha.
     for (const [verbo, saida] of [['snapshot', snapshot], ['url', url], ['text', texto]]) {
@@ -610,7 +656,7 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
     }
     if (candidatos.length) esperouCarregar = false;
     const cofre = dados && typeof dados === 'object' ? dados : {};
-    const anotacao = await valoresAtuais(executar);
+    const anotacao = anotacaoLida;
     const estado = montarEstado(objetivo, url, feito, texto, anotacao, cofre);
     if (!candidatos.length) {
       // Página de sucesso costuma não ter nada clicável: DONE ainda precisa ser perguntado, e com
@@ -677,7 +723,13 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
         await agir('press', ['PageDown']);
         feito.push('SCROLL_DOWN');
       } else if (decisao.operacao === 'TYPE_TEXT') {
+        const vazio = (c) => !Object.entries(anotacao.valores).find(([k]) => normalizar(k) === normalizar(c.nome))?.[1];
+        const vizinhos = candidatos.filter((c) => PAPEIS_DE_TEXTO.has(c.papel) && !ehEditavel(c, anotacao.editaveis) && vazio(c)
+          && !(respostas[cabecaDoValor(c.ref)]?.choice in cofre && forca(respostas[cabecaDoValor(c.ref)]) >= LIMIARES.alvo))
+          .map((c) => c.nome);
         const { valor, origem, parou, falta } = await valorDoCampo({
+          escritos,
+          vizinhos,
           campo: decisao.escolhido,
           escolha: respostas[cabecaDoValor(decisao.alvo)],
           cofre,
@@ -704,10 +756,51 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
           await agir('fill', [`@${decisao.alvo}`, valor]);
         }
         feito.push(`TYPE_TEXT "${decisao.escolhido.nome}"`);
+        // Os outros campos de texto que o Jev ja casou com um valor de `dados` neste mesmo pedido vao
+        // junto: num formulario de 7 campos eram 7 idas ao Jev para respostas que ja estavam na mao.
+        // So `dados` (nunca o modelo de texto), so campo comum (combobox editavel pede abrir e digitar)
+        // e so quando o valor atual difere do pedido.
+        const usados = new Set(origem.startsWith('dados.') ? [origem.slice(6)] : []);
+        const atual = (c) => Object.entries(anotacao.valores).find(([k]) => normalizar(k) === normalizar(c.nome))?.[1];
+        for (const c of candidatos) {
+          if (c.ref === decisao.alvo || !PAPEIS_DE_TEXTO.has(c.papel) || ehEditavel(c, anotacao.editaveis)) continue;
+          const v = respostas[cabecaDoValor(c.ref)];
+          const chave = v?.choice;
+          // Sem valor de `dados`, o que o modelo de texto ja escreveu para este campo no pedido unico.
+          const escrito = String(escritos.get(c.nome) ?? '').trim();
+          if (!(chave && chave !== NENHUM && forca(v) >= LIMIARES.alvo && typeof cofre[chave] === 'string')) {
+            if (!escrito || escrito.includes(SEM_VALOR) || ehSegredo(c.nome) || atual(c)) continue;
+            log(`jev-objetivo passo ${passo}: TYPE_TEXT @${c.ref} ("${c.nome}" <- ${escrito.slice(0, 40)} via llm) (mesmo pedido)`);
+            await agir('fill', [`@${c.ref}`, escrito]);
+            feito.push(`TYPE_TEXT "${c.nome}"`);
+            continue;
+          }
+          if (usados.has(chave)) continue;
+          if (atual(c) === cofre[chave]) continue;
+          usados.add(chave);
+          log(`jev-objetivo passo ${passo}: TYPE_TEXT @${c.ref} ("${c.nome}" <- ${ehSegredo(c.nome) ? '(oculto)' : cofre[chave].slice(0, 40)} via dados.${chave}) conf=${forca(v).toFixed(2)} (mesmo pedido)`);
+          await agir('fill', [`@${c.ref}`, cofre[chave]]);
+          feito.push(`TYPE_TEXT "${c.nome}"`);
+        }
       } else {
         log(`jev-objetivo passo ${passo}: CLICK @${decisao.alvo} (${rotulo(decisao.escolhido)}) conf=${decisao.confianca.toFixed(2)}`);
         await agir('click', [`@${decisao.alvo}`]);
         feito.push(`CLICK ${rotulo(decisao.escolhido)}`);
+        // Lista recem-aberta com uma opcao de texto IDENTICO a um valor de `dados`: escolhe ja, sem
+        // outra ida ao Jev. So igualdade exata e so um candidato; fora disso o ciclo seguinte decide.
+        if (decisao.escolhido.papel === 'combobox' && Object.keys(cofre).length) {
+          await executar('wait', ['--idle']);
+          const opcoes = parsarSnapshot(await executar('snapshot', SNAPSHOT_DO_LACO)).filter((c) => c.papel === PAPEL_DE_OPCAO);
+          const valores = new Set(Object.entries(cofre).filter(([k, v]) => typeof v === 'string' && !ehSegredo(k)).map(([, v]) => normalizar(v)));
+          const casadas = opcoes.filter((o) => valores.has(normalizar(o.nome)));
+          if (casadas.length === 1) {
+            const o = casadas[0];
+            log(`jev-objetivo passo ${passo}: SELECT @${o.ref} ("${o.nome}") igual a um valor de dados`);
+            const saida = await executar('eval', [jsDeSelecionar(o.nome)]);
+            if (String(saida).includes(SEM_SELECT)) await agir('click', [`@${o.ref}`]);
+            feito.push(`SELECT "${o.nome}"`);
+          }
+        }
       }
     } catch (err) {
       if (!(err instanceof FalhaDoNavegador)) throw err;

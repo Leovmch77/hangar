@@ -438,7 +438,7 @@ function escritorDeTexto(env = process.env) {
       const r = await fetch(`${base}/chat/completions`, {
         method: 'POST',
         headers: { authorization: `Bearer ${envTexto(env, 'JEV_TEXTO_API_KEY')}`, 'content-type': 'application/json' },
-        body: JSON.stringify({ model: modelo, messages: [{ role: 'user', content: pedido }], max_tokens: 120 }),
+        body: JSON.stringify({ model: modelo, messages: [{ role: 'user', content: pedido }], max_tokens: 600 }),
       });
       if (!r.ok) erro(`o modelo de texto recusou: ${r.status} ${(await r.text()).slice(0, 200)}`);
       return (await r.json()).choices?.[0]?.message?.content ?? '';
