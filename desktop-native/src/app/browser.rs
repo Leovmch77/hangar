@@ -75,6 +75,9 @@ pub(super) struct BrowserPanel {
     /// Quadros que saíram da tela: o `Hangar` os tira do cache e do atlas da GPU, que não os soltam sozinhos.
     #[cfg(target_os = "windows")]
     released: Vec<Arc<Image>>,
+    /// Sobe a cada vez que o painel é coberto: captura de uma cobertura anterior que chega atrasada é descartada.
+    #[cfg(target_os = "windows")]
+    cover_gen: u32,
     /// Aviso do próprio painel (preenchimento do login que falhou), ao lado do `notice` que vem da página.
     local_notice: Option<String>,
     /// Cursor da página sob o mouse: o Chromium sem janela não avisa quando ele muda, então a página é perguntada.
@@ -134,7 +137,7 @@ impl BrowserPanel {
         ];
         Self { key, #[cfg(not(target_os = "macos"))] controller: None, #[cfg(not(target_os = "macos"))] cdp: None,
             #[cfg(not(target_os = "macos"))] relay: Default::default(), #[cfg(not(target_os = "macos"))] viewer: Rc::default(), engine: None, starting: None, _start: None, events, address, page: model::PageState::default(), invalid: None, #[cfg(not(target_os = "macos"))] cookies_status: None, #[cfg(not(target_os = "macos"))] cookies_confirmed: false, #[cfg(target_os = "linux")] last_fill: None, focus,
-            origin: Rc::default(), #[cfg(target_os = "linux")] emulated: None, page_scale: Rc::new(Cell::new(1.)), #[cfg(target_os = "windows")] still: None, #[cfg(target_os = "windows")] released: Vec::new(), #[cfg(target_os = "linux")] page_zoom: (1., 0., 0.), shown: false, local_notice: None, #[cfg(target_os = "linux")] cursor: CursorStyle::Arrow, #[cfg(target_os = "linux")] cursor_probe: (false, None), copied: false, dismissed_notice: 0, address_stale: false, #[cfg(not(target_os = "macos"))] agent: None, #[cfg(not(target_os = "macos"))] agent_running: 0,
+            origin: Rc::default(), #[cfg(target_os = "linux")] emulated: None, page_scale: Rc::new(Cell::new(1.)), #[cfg(target_os = "windows")] still: None, #[cfg(target_os = "windows")] released: Vec::new(), #[cfg(target_os = "windows")] cover_gen: 0, #[cfg(target_os = "linux")] page_zoom: (1., 0., 0.), shown: false, local_notice: None, #[cfg(target_os = "linux")] cursor: CursorStyle::Arrow, #[cfg(target_os = "linux")] cursor_probe: (false, None), copied: false, dismissed_notice: 0, address_stale: false, #[cfg(not(target_os = "macos"))] agent: None, #[cfg(not(target_os = "macos"))] agent_running: 0,
             #[cfg(not(target_os = "macos"))] agent_seq: 0, #[cfg(not(target_os = "macos"))] paused: None, #[cfg(target_os = "windows")] agent_finished_at: None, #[cfg(not(target_os = "macos"))] _activity: None, _drain: drain, _subscriptions: subscriptions }
     }
 
@@ -494,7 +497,11 @@ impl BrowserPanel {
     fn retry(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // No Windows a página que caiu volta no mesmo WebView2, sem perder o histórico.
         #[cfg(target_os = "windows")]
-        if let Some(engine) = self.engine() && !engine.alive() { engine.revive(); return cx.notify(); }
+        if let Some(engine) = self.engine() && !engine.alive() {
+            engine.revive();
+            if let Some(ctl) = &self.controller { ctl.reset_domains(); }
+            return cx.notify();
+        }
         // Fora do macOS o `go` já refaz o motor que falhou; aqui vale para todos.
         if matches!(&self.engine, Some(Err(_))) { self.engine = None; }
         let dead = !matches!(&self.engine, Some(Ok(e)) if e.alive());
@@ -654,13 +661,19 @@ impl BrowserPanel {
             // Coberta, a página só sai da frente com o último quadro pronto: sem ele o painel ficaria vazio atrás do
             // diálogo. O teto curto evita que um quadro que não vem segure a página por cima do diálogo.
             let shot = cdp.call("Page.captureScreenshot", serde_json::json!({"format": "jpeg", "quality": 85}));
+            self.cover_gen += 1;
+            let generation = self.cover_gen;
             cx.spawn(async move |this, cx| {
                 let decode = |r: Result<serde_json::Value, String>| -> Option<Arc<Image>> {
                     use base64::Engine as _;
                     r.ok()?["data"].as_str().and_then(|d| base64::engine::general_purpose::STANDARD.decode(d).ok())
                         .map(|bytes| Arc::new(Image::from_bytes(ImageFormat::Jpeg, bytes)))
                 };
-                let put = |this: &mut Self, image: Option<Arc<Image>>| if let Some(image) = image && let Some(old) = this.still.replace(image) { this.released.push(old); };
+                let put = |this: &mut Self, image: Option<Arc<Image>>| {
+                    let Some(image) = image else { return };
+                    if this.cover_gen != generation { return this.released.push(image); }
+                    if let Some(old) = this.still.replace(image) { this.released.push(old); }
+                };
                 let leave = |this: &mut Self, cx: &mut Context<Self>| {
                     if let Some(engine) = this.engine() { engine.hide(); }
                     // Só agora o viewport fixo da página escondida: antes, a captura podia sair já nesse tamanho.

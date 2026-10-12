@@ -176,7 +176,11 @@ fn watch_native(view: &WebView, state: &Rc<RefCell<model::PageState>>, events: &
         Ok(())
     }));
     let (st, ev) = (state.clone(), events.clone());
-    let starting = NavigationStartingEventHandler::create(Box::new(move |_, _| {
+    let starting = NavigationStartingEventHandler::create(Box::new(move |_, args| {
+        // O handler do wry roda antes e cancela endereço bloqueado: aí não há carga para mostrar.
+        let mut cancel = windows::core::BOOL::default();
+        if let Some(args) = args { unsafe { args.Cancel(&mut cancel)?; } }
+        if cancel.as_bool() { return Ok(()); }
         let mut page = st.borrow_mut();
         if !page.loading { page.loading = true; send(&ev, &page); }
         Ok(())
@@ -225,6 +229,12 @@ impl Engine {
         self.dead.set(false);
         { let mut page = self.state.borrow_mut(); page.error = None; send(&self.events, &page); }
         self.reload();
+        // A página nova pode vir sem os domínios ligados na que caiu; sem eles a próxima queda passaria calada.
+        #[cfg(target_os = "windows")]
+        if let Some(cdp) = &self._watch {
+            drop(cdp.call("Page.enable", serde_json::json!({})));
+            drop(cdp.call("Inspector.enable", serde_json::json!({})));
+        }
     }
 
     /// Voltar/avançar de verdade, lidos do histórico do WebView2 depois de cada carga. Devolve a tarefa: o painel a

@@ -96,6 +96,10 @@ impl<P: Page> Controller<P> {
         if let Err(e) = self.apply_layout(layout).await { eprintln!("[nav] layout nao aplicado: {e}"); }
     }
 
+    /// A página caiu e voltou no mesmo alvo: os domínios ligados morreram com ela, e o próximo verbo os liga de novo.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    pub fn reset_domains(&self) { self.state.borrow_mut().enabled.clear(); }
+
     /// Pausado pelo usuário: os verbos de `ACTING` voltam com `PAUSED` até ele retomar.
     pub fn set_paused(&self, paused: bool) { self.paused.set(paused); }
 
