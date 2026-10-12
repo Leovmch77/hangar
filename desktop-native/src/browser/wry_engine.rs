@@ -70,8 +70,16 @@ impl Starter {
             .with_initialization_script(USER_INPUT)
             .with_ipc_handler(move |req| if req.body() == "hangar-user" { let _ = on_ipc.try_send(Event::UserInput); });
         // Estacionada visível fora da tela (ver `park`): nascer com foco roubaria o teclado da janela do app.
+        // O agente dirige a página com o app em segundo plano ou com ela estacionada: sem estes, o WebView2 a dá por
+        // encoberta e congela os timers (eval e url estouravam o prazo até um clique no app). Os três primeiros são os
+        // padrões do wry, que somem quando se passa argumentos. Todo WebView2 desta pasta nasce com os mesmos.
         #[cfg(target_os = "windows")]
-        let builder = builder.with_focused(false);
+        let builder = {
+            use wry::WebViewBuilderExtWindows;
+            builder.with_focused(false).with_additional_browser_args(concat!(
+                "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,CalculateNativeWinOcclusion ",
+                "--disable-background-timer-throttling --disable-renderer-backgrounding --disable-backgrounding-occluded-windows"))
+        };
         let view = builder
             // Bloqueio sem aviso: o handler só recebe a URL e não distingue o quadro principal de um iframe.
             .with_navigation_handler(|url| model::allowed_request(&url))
