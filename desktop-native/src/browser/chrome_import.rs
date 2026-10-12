@@ -386,15 +386,18 @@ fn read_frame(stream: &mut impl Read) -> Result<(bool, u8, Vec<u8>), ImportError
     Ok((fin, op, data))
 }
 
-/// Abre a página que liga a depuração no navegador da pessoa: o primeiro instalado com perfil, senão o primeiro
-/// instalado. `None` quando nenhum está instalado, para não dizer que abriu o que não existe.
+/// Abre o navegador da pessoa (o instalado usado por último) com a página que liga a depuração; o que já está aberto
+/// recusa `chrome://` da linha de comando e mostra uma aba nova, por isso o endereço também vai copiado. `None`
+/// quando nenhum está instalado, para não dizer que abriu o que não existe.
 /// No Linux não se lança o navegador direto deste processo sem fechar os descritores: o filho herdaria o pipe do CDP
 /// do Chromium embutido (fd 3 e 4) e o seguraria depois de o app fechar — por isso o `sh` que fecha todo descritor
 /// acima de 2.
 pub fn open_remote_debug_page() -> Option<Browser> {
     use std::process::{Command, Stdio};
     let mut found: Vec<Browser> = browsers().into_iter().filter(|b| !b.launch.is_empty()).collect();
-    found.sort_by_key(|b| !b.root.is_dir());
+    // O usado por último primeiro: o `Local State` é regravado a cada uso, e quem tem Chrome e Edge pode usar só o Edge.
+    let used = |b: &Browser| std::fs::metadata(b.root.join("Local State")).and_then(|m| m.modified()).ok();
+    found.sort_by_key(|b| std::cmp::Reverse(used(b)));
     let browser = found.into_iter().next()?;
     let (program, args) = browser.launch.split_first()?;
     #[cfg(target_os = "windows")]

@@ -674,10 +674,12 @@ o que falta.
 pede ao próprio Chrome (ou Edge) pela depuração remota. Na primeira vez:
 
 1. Deixe o Chrome aberto e clique em **Trazer login do Chrome** → **Trazer login**.
-2. O Hangar abre no Chrome a página `chrome://inspect/#remote-debugging` (no Edge,
-   `edge://inspect/#remote-debugging`) e copia o endereço. Se ela não abrir sozinha: no Chrome,
-   **Ctrl+L**, **Ctrl+V**, **Enter**.
-3. Marque **Permitir depuração remota para este navegador**. Isso fica ligado; não precisa repetir.
+2. O Hangar abre o navegador que você usou por último (Chrome ou Edge) e copia o endereço da página
+   que liga a depuração (`chrome://inspect/#remote-debugging`; no Edge,
+   `edge://inspect/#remote-debugging`). O navegador não abre essa página sozinho: nele, **Ctrl+L**,
+   **Ctrl+V**, **Enter**.
+3. Marque **Allow remote debugging for this browser instance** (a opção aparece em inglês, mesmo no
+   Chrome em português). Isso fica ligado; não precisa repetir.
 4. Volte ao Hangar e clique de novo em **Trazer login do Chrome** → **Trazer login**.
 5. O Chrome pergunta **Permitir a depuração remota?**: clique em **Permitir** em até 60 segundos.
    Recusou ou passou do tempo, o Hangar não insiste; é só clicar de novo.

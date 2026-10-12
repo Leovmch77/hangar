@@ -4607,7 +4607,7 @@
   "native_browser_cookies_none": "No cookies found in Chrome.",
   "native_browser_cookies_starting": "The browser is still opening. Try again in a moment.",
   "native_browser_cookies_chrome_off": "{browser} doesn't have remote debugging on. It's turned on once, on a page inside the browser itself.",
-  "native_browser_cookies_activate": "Opened that page in {browser} and copied the address. There: Ctrl+L, Ctrl+V, Enter → check \"Allow remote debugging for this browser\" → come back and click again.",
+  "native_browser_cookies_activate": "Opened {browser} and copied the page address. There: Ctrl+L, Ctrl+V, Enter → check \"Allow remote debugging for this browser instance\" → come back and click again.",
   "native_browser_cookies_no_chrome": "Couldn't find Chrome, Edge, Chromium or Brave installed on this machine.",
   "native_browser_cookies_headless": "That port has an automation (headless) Chrome, not yours.",
   "native_browser_cookies_error": "Couldn't bring the login: {e}",

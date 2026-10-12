@@ -4607,7 +4607,7 @@
   "native_browser_cookies_none": "Nenhum cookie encontrado no Chrome.",
   "native_browser_cookies_starting": "O navegador ainda está abrindo. Tente de novo em instantes.",
   "native_browser_cookies_chrome_off": "O {browser} está sem a depuração remota ligada. Ela se liga uma vez só, numa página do próprio navegador.",
-  "native_browser_cookies_activate": "Abri essa página no {browser} e copiei o endereço. Lá: Ctrl+L, Ctrl+V, Enter → marque \"Permitir depuração remota para este navegador\" → volte aqui e clique de novo.",
+  "native_browser_cookies_activate": "Abri o {browser} e copiei o endereço da página. Lá: Ctrl+L, Ctrl+V, Enter → marque \"Allow remote debugging for this browser instance\" (a opção aparece em inglês) → volte aqui e clique de novo.",
   "native_browser_cookies_no_chrome": "Não achei Chrome, Edge, Chromium nem Brave instalado nesta máquina.",
   "native_browser_cookies_headless": "A porta tem um Chrome de automação (headless), não o seu.",
   "native_browser_cookies_error": "Não deu pra trazer o login: {e}",

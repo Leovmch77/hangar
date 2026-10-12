@@ -101,7 +101,15 @@ impl BrowserPanel {
             if !self.address.focus_handle(cx).is_focused(window) && self.address.read(cx).value() != url {
                 self.address.update(cx, |input, cx| input.set_value(url, window, cx));
             }
+            // A linha do login fala do site em que foi pedida: noutro site ela some, salvo no meio de uma importação.
+            #[cfg(not(target_os = "macos"))]
+            let before = self.page_site();
             self.page = page;
+            #[cfg(not(target_os = "macos"))]
+            if before.is_some() && self.page_site().is_some() && before != self.page_site() && !self.import_pending
+                && self.login_reply.is_none() && !self.cookie_sources_waiting() {
+                self.cookies_status = None;
+            }
             #[cfg(not(target_os = "macos"))]
             crate::browser::server::write_sidecar(&self.key, self.page.url.as_deref().unwrap_or(""), &self.page.title);
             #[cfg(target_os = "linux")]
@@ -339,6 +347,15 @@ impl BrowserPanel {
     /// Traz o login do Chrome real do usuário (CDP) para o navegador embutido, SÓ no clique e TUDO de uma vez: cada
     /// conexão ao CDP faz o Chrome perguntar "Permitir a depuração remota?" na tela da pessoa.
     #[cfg(not(target_os = "macos"))]
+    /// Há escolha de perfil na tela, esperando a pessoa.
+    #[cfg(not(target_os = "macos"))]
+    fn cookie_sources_waiting(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        return !self.cookie_sources.is_empty();
+        #[cfg(not(target_os = "linux"))]
+        false
+    }
+
     /// Site da página aberta (http/https), sem o `www.`: o que o diálogo oferece.
     #[cfg(not(target_os = "macos"))]
     fn page_site(&self) -> Option<String> {
