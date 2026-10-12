@@ -470,7 +470,7 @@ fn listen(
         let accept = matches!(kind, "alert" | "beforeunload");
         let message: String = params["message"].as_str().unwrap_or("").chars().take(200).collect();
         eprintln!("[nav] dialogo {kind} {}: {message}", if accept { "aceito" } else { "recusado" });
-        let key = match kind { "alert" => Some("browser_dialog_alert"), "beforeunload" => None, _ => Some("browser_dialog_refused") };
+        let key = match kind { "alert" => Some("browser_dialog_alert"), "beforeunload" => None, "prompt" => Some("browser_dialog_prompt_refused"), _ => Some("browser_dialog_refused") };
         if let Some(key) = key {
             let text = crate::i18n::tr(key).replace("{message}", message.trim());
             p(&|page| { page.notice = Some(text.clone()); page.notice_seq += 1; });

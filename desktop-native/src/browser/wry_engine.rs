@@ -158,7 +158,8 @@ impl Starter {
 #[cfg(target_os = "windows")]
 fn watch_native(view: &WebView, state: &Rc<RefCell<model::PageState>>, events: &async_channel::Sender<Event>) {
     use webview2_com::{NavigationStartingEventHandler, ScriptDialogOpeningEventHandler, take_pwstr, Microsoft::Web::WebView2::Win32::{
-        COREWEBVIEW2_SCRIPT_DIALOG_KIND, COREWEBVIEW2_SCRIPT_DIALOG_KIND_ALERT, COREWEBVIEW2_SCRIPT_DIALOG_KIND_BEFOREUNLOAD}};
+        COREWEBVIEW2_SCRIPT_DIALOG_KIND, COREWEBVIEW2_SCRIPT_DIALOG_KIND_ALERT, COREWEBVIEW2_SCRIPT_DIALOG_KIND_BEFOREUNLOAD,
+        COREWEBVIEW2_SCRIPT_DIALOG_KIND_PROMPT}};
     use wry::WebViewExtWindows;
     let core = view.webview();
     // SAFETY: thread da interface, dona do WebView2.
@@ -177,7 +178,8 @@ fn watch_native(view: &WebView, state: &Rc<RefCell<model::PageState>>, events: &
         // Sem `Accept`, o diálogo volta recusado assim que o evento termina.
         if accept { unsafe { args.Accept()?; } }
         let key = if kind == COREWEBVIEW2_SCRIPT_DIALOG_KIND_ALERT { Some("browser_dialog_alert") }
-            else if kind == COREWEBVIEW2_SCRIPT_DIALOG_KIND_BEFOREUNLOAD { None } else { Some("browser_dialog_refused") };
+            else if kind == COREWEBVIEW2_SCRIPT_DIALOG_KIND_BEFOREUNLOAD { None }
+            else if kind == COREWEBVIEW2_SCRIPT_DIALOG_KIND_PROMPT { Some("browser_dialog_prompt_refused") } else { Some("browser_dialog_refused") };
         if let Some(key) = key {
             let mut page = st.borrow_mut();
             page.notice = Some(crate::i18n::tr(key).replace("{message}", message.trim()));
@@ -190,10 +192,16 @@ fn watch_native(view: &WebView, state: &Rc<RefCell<model::PageState>>, events: &
     let starting = NavigationStartingEventHandler::create(Box::new(move |_, args| {
         // O handler do wry roda antes e cancela endereço bloqueado: aí não há carga para mostrar.
         let mut cancel = windows::core::BOOL::default();
-        if let Some(args) = args { unsafe { args.Cancel(&mut cancel)?; } }
+        let mut uri = windows::core::PWSTR::null();
+        if let Some(args) = &args { unsafe { args.Cancel(&mut cancel)?; args.Uri(&mut uri)?; } }
+        // SAFETY: o WebView2 aloca o endereço; `take_pwstr` o libera.
+        let uri = if uri.is_null() { String::new() } else { take_pwstr(uri) };
         if cancel.as_bool() { return Ok(()); }
         let mut page = st.borrow_mut();
-        if !page.loading { page.loading = true; send(&ev, &page); }
+        // O endereço pedido já na barra: o estado anterior ainda tinha o da página que está saindo.
+        if !uri.is_empty() { page.url = Some(uri); }
+        page.loading = true;
+        send(&ev, &page);
         Ok(())
     }));
     let mut token = 0i64;

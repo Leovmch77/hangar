@@ -229,7 +229,8 @@ impl<P: Page> Controller<P> {
             "hover" => self.hover(arg(0)).await.map(Reply::Text),
             "wait" => self.wait(args).await.map(Reply::Text),
             "eval" => self.eval(arg(0)).await.map(Reply::Text),
-            "url" => self.eval("location.href").await.map(Reply::Text),
+            // Pelo histórico do navegador, não por JS: responde mesmo com a página presa (diálogo aberto, laço de script).
+            "url" => self.current_url().await.map(Reply::Text),
             "estado" => Ok(Reply::Text(if self.paused.get() { "pausado".into() } else { "livre".into() })),
             "text" => self.value("document.body.innerText").await.map(|v| Reply::Text(v.as_str().unwrap_or("").to_owned())),
             "tema" => self.theme(arg(0)).await.map(Reply::Text),
@@ -281,6 +282,15 @@ impl<P: Page> Controller<P> {
     }
 
     /// Árvore inteira (`wait @eN` usa só as refs).
+    async fn current_url(&self) -> Result<String, String> {
+        let h = self.page.call("Page.getNavigationHistory", json!({})).await?;
+        let index = h["currentIndex"].as_u64().unwrap_or(0) as usize;
+        match h["entries"].get(index).and_then(|e| e["url"].as_str()) {
+            Some(url) => Ok(format!("ok: {}", Value::String(url.to_owned()))),
+            None => self.eval("location.href").await,
+        }
+    }
+
     async fn snapshot(&self) -> Result<Vec<String>, String> { self.tree(false).await }
 
     async fn tree(&self, refs_only: bool) -> Result<Vec<String>, String> {
