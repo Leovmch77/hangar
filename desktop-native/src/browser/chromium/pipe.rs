@@ -126,22 +126,20 @@ impl Browser {
         let version = self.call(None, "Browser.getVersion", json!({}));
         let discover = self.call(None, "Target.setDiscoverTargets", json!({"discover": true}));
         let targets = self.call(None, "Target.getTargets", json!({}));
+        // Sem a negação o download cai na pasta do usuário sem ninguém pedir: faz parte do aperto de mão, com o mesmo prazo.
+        let deny = self.call(None, "Browser.setDownloadBehavior", json!({"behavior": "deny"}));
         let (weak, timer, bin) = (Rc::downgrade(self), background.timer(LAUNCH_WAIT), bin.display().to_string());
         async move {
-            let answers = async { Ok::<_, String>((version.await?, discover.await?, targets.await?)) };
+            let answers = async { Ok::<_, String>((version.await?, discover.await?, targets.await?, deny.await?)) };
             let answers = match futures::future::select(std::pin::pin!(answers), std::pin::pin!(timer)).await {
                 futures::future::Either::Left((answers, _)) => answers,
                 futures::future::Either::Right(_) => Err("tempo esgotado".into()),
             };
             let Some(browser) = weak.upgrade() else { return Err("o Chromium fechou".into()) };
             match answers {
-                Ok((_, _, targets)) => {
+                Ok((_, _, targets, _)) => {
                     *browser.initial.borrow_mut() = targets["targetInfos"].as_array().into_iter().flatten()
                         .filter(|t| t["type"] == "page").filter_map(|t| t["targetId"].as_str().map(str::to_owned)).collect();
-                    let deny = browser.call(None, "Browser.setDownloadBehavior", json!({"behavior": "deny"}));
-                    drop(browser);
-                    // Sem a negação o download cai na pasta do usuário sem ninguém pedir: a falha fica no diário.
-                    if let Err(e) = deny.await { eprintln!("[nav] downloads nao negados: {e}"); }
                     Ok(())
                 }
                 Err(e) => {

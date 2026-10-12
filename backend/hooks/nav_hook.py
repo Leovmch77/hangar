@@ -3,7 +3,7 @@
 # dispara quando o pedido casa com a descrição, e "testa o login" não cita preview — sem este
 # aviso a sessão vai de agent-browser sem saber que há um navegador dela na tela do usuário.
 # Electron no ar = pid do ~/.hangar/nav/_srv.json vivo (o arquivo sobrevive a crash, só o pid
-# decide, mesmo teste do CLI). Sem Electron, sem saída. Falha em silêncio.
+# decide, mesmo teste do CLI). Sem Electron, sem saída. Falha sem travar o prompt, com uma linha no log do Hangar.
 import json
 import os
 import re
@@ -127,6 +127,7 @@ JEV_TIMEOUT_S = 2.0
 JEV_LIMIAR = 0.5
 # Depois de uma falha o Jev descansa: chave errada ou endereço fora fariam cada prompt pagar o teto de espera.
 JEV_PAUSA_S = 300
+LOG_MAX = 256 * 1024
 
 
 def _registrar(motivo: str) -> None:
@@ -136,7 +137,11 @@ def _registrar(motivo: str) -> None:
                 if os.name == "nt" else os.path.expanduser("~/.hangar"))
         base = os.path.join(root, "logs", "privado")
         os.makedirs(base, exist_ok=True, mode=0o700)
-        fd = os.open(os.path.join(base, "nav_hook-falhas.log"), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        arquivo = os.path.join(base, "nav_hook-falhas.log")
+        # Falha repetida a cada prompt não pode encher o disco: passou do teto, recomeça.
+        if os.path.exists(arquivo) and os.path.getsize(arquivo) > LOG_MAX:
+            os.replace(arquivo, arquivo + ".1")
+        fd = os.open(arquivo, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
         with os.fdopen(fd, "a", encoding="utf-8") as fh:
             fh.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {motivo[:300]}\n")
     except Exception:
@@ -184,8 +189,8 @@ def _jev_precisa(prompt: str) -> bool | None:
             os.makedirs(_nav_dir(), exist_ok=True)
             with open(_pausa_jev(), "w"):
                 pass
-        except OSError:
-            pass
+        except OSError as e2:
+            _registrar(f"pausa do jev nao gravada ({e2}); cada prompt vai tentar de novo")
         return None
 
 
