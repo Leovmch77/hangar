@@ -197,7 +197,11 @@ pub fn fetch_cookies(port: Option<u16>) -> Result<Vec<Value>, ImportError> {
                     let cookies = result["cookies"].as_array().into_iter().flatten().map(to_param).collect();
                     return Ok(cookies);
                 }
-                Err(ImportError::Refused) => return Err(ImportError::Refused),
+                // Não repete no mesmo navegador (seria outro diálogo), mas o próximo perfil ainda pode ser o certo.
+                Err(ImportError::Refused) => {
+                    last = ImportError::Refused;
+                    break;
+                }
                 Err(e) => {
                     // O erro mais específico vence: um candidato velho (porta morta) não apaga a recusa do Chrome do usuário.
                     last = keep_specific(last, e);
@@ -297,8 +301,13 @@ fn cdp_once(ws: &str, method: &str) -> Result<Value, ImportError> {
         // O Chrome segura o handshake enquanto pergunta "Permitir depuração remota?": falha depois de a pessoa ter tido
         // tempo de ver o diálogo é a resposta dela (ou o tempo esgotado), e não se tenta de novo.
         stream.read_exact(&mut byte).map_err(|e| {
-            let waited = matches!(e.kind(), std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock);
-            if waited || asked.elapsed() >= HUMAN_ANSWER { ImportError::Refused } else { ImportError::Failed("cdp: sem resposta ao handshake".into()) }
+            use std::io::ErrorKind::*;
+            let waited = matches!(e.kind(), TimedOut | WouldBlock);
+            // Só a conexão fechada pelo navegador depois de dar tempo ao diálogo é o "não"; outro erro é falha de rede.
+            let closed = matches!(e.kind(), UnexpectedEof | ConnectionReset | ConnectionAborted);
+            if waited || (closed && asked.elapsed() >= HUMAN_ANSWER) { ImportError::Refused } else {
+                ImportError::Failed(format!("cdp: sem resposta ao handshake ({e})"))
+            }
         })?;
         head.push(byte[0]);
         if head.len() > 8192 {
@@ -556,51 +565,96 @@ mod passwords {
         ["Login Data", "Login Data For Account"].iter().map(|n| base.join(n)).filter(|p| p.exists()).collect()
     }
 
-    /// Chave do chaveiro achada vale pelo processo; sem ela (chaveiro travado, sem `secret-tool`) tenta de novo depois
-    /// de 5 min, em vez de pedir a senha do chaveiro a cada página ou desistir até reiniciar o app.
+    /// O que o chaveiro entregou: as chaves candidatas e se faltou o programa que o lê.
+    pub(super) struct Keys {
+        pub list: Vec<Vec<u8>>,
+        pub no_tool: bool,
+    }
+
+    static KEYS: Mutex<Option<(Option<Instant>, Vec<Vec<u8>>)>> = Mutex::new(None);
+
+    /// Para o autofill de cada página: chave achada vale pelo processo; sem ela (chaveiro travado, sem `secret-tool`)
+    /// tenta de novo depois de 5 min, em vez de pedir a senha do chaveiro a cada página.
     pub(super) fn keys() -> Vec<Vec<u8>> {
-        static KEYS: Mutex<Option<(Option<Instant>, Vec<Vec<u8>>)>> = Mutex::new(None);
-        let mut cached = KEYS.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some((retry, keys)) = cached.as_ref()
+        if let Some((retry, keys)) = KEYS.lock().unwrap_or_else(|e| e.into_inner()).as_ref()
             && retry.is_none_or(|at| at.elapsed() < Duration::from_secs(300))
         {
             return keys.clone();
         }
-        let keys = key_candidates();
+        let keys = fresh_keys().list;
         if keys.len() == 1 {
             eprintln!("[nav] autofill: chaveiro sem a chave do Chrome; nova tentativa em 5 min");
         }
-        let retry = (keys.len() == 1).then(Instant::now);
-        *cached = Some((retry, keys.clone()));
         keys
+    }
+
+    /// Para o clique da pessoa: o chaveiro que ela acabou de destrancar vale já, sem esperar a falta guardada.
+    /// A consulta roda fora da trava, para uma pergunta presa no chaveiro não segurar o autofill.
+    pub(super) fn fresh_keys() -> Keys {
+        let keys = key_candidates();
+        let retry = (keys.list.len() == 1).then(Instant::now);
+        *KEYS.lock().unwrap_or_else(|e| e.into_inner()) = Some((retry, keys.list.clone()));
+        keys
+    }
+
+    /// Chaveiro que pede a senha segura o programa até a pessoa responder; passado isto, desiste.
+    const KEYRING_WAIT: Duration = Duration::from_secs(30);
+
+    /// `Ok(None)` quando passou do prazo (o processo é morto).
+    fn output_within(cmd: &mut Command) -> std::io::Result<Option<std::process::Output>> {
+        let mut child = cmd.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null()).spawn()?;
+        let start = Instant::now();
+        while child.try_wait()?.is_none() {
+            if start.elapsed() >= KEYRING_WAIT {
+                let _ = child.kill();
+                let _ = child.wait();
+                eprintln!("[nav] chaveiro: {:?} sem resposta em {}s", cmd.get_program(), KEYRING_WAIT.as_secs());
+                return Ok(None);
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        child.wait_with_output().map(Some)
     }
 
     /// Chaves candidatas: o literal "peanuts" (armazenamento básico) e a do chaveiro ("Chrome Safe Storage"); perfis
     /// diferem, então tenta as duas e fica com a que decifra para texto limpo.
-    fn key_candidates() -> Vec<Vec<u8>> {
+    fn key_candidates() -> Keys {
         let mut keys: Vec<Vec<u8>> = vec![b"peanuts".to_vec()];
+        let mut tools = 0;
         for app in ["chrome", "chromium", "brave"] {
-            if let Ok(out) = Command::new("secret-tool").args(["lookup", "application", app]).output()
-                && out.status.success() && !out.stdout.is_empty()
-            {
-                keys.push(out.stdout);
+            match output_within(Command::new("secret-tool").args(["lookup", "application", app])) {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => break,
+                Err(e) => { tools += 1; eprintln!("[nav] chaveiro: secret-tool: {e}"); }
+                // Prazo esgotado: o chaveiro está esperando a senha, e os próximos esperariam de novo.
+                Ok(None) => { tools += 1; break; }
+                Ok(Some(out)) => {
+                    tools += 1;
+                    if out.status.success() && !out.stdout.is_empty() { keys.push(out.stdout); }
+                }
             }
         }
         // No KDE o Chrome guarda a chave na KWallet, que o `secret-tool` não lê.
         if std::env::var("XDG_CURRENT_DESKTOP").is_ok_and(|d| d.contains("KDE")) {
             for (entry, folder) in [("Chrome Safe Storage", "Chrome Keys"), ("Chromium Safe Storage", "Chromium Keys"),
                 ("Brave Safe Storage", "Brave Keys")] {
-                if let Ok(out) = Command::new("kwallet-query").args(["-r", entry, "-f", folder, "kdewallet"]).output()
-                    && out.status.success()
-                {
-                    let key = String::from_utf8_lossy(&out.stdout).trim_end().to_owned();
-                    if !key.is_empty() && !key.starts_with("Failed") { keys.push(key.into_bytes()); }
+                match output_within(Command::new("kwallet-query").args(["-r", entry, "-f", folder, "kdewallet"])) {
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => break,
+                    Err(e) => { tools += 1; eprintln!("[nav] chaveiro: kwallet-query: {e}"); }
+                    Ok(None) => { tools += 1; break; }
+                    Ok(Some(out)) => {
+                        tools += 1;
+                        if out.status.success() {
+                            let key = String::from_utf8_lossy(&out.stdout).trim_end().to_owned();
+                            if !key.is_empty() && !key.starts_with("Failed") { keys.push(key.into_bytes()); }
+                        }
+                    }
                 }
             }
         }
         keys.sort();
         keys.dedup();
-        keys
+        Keys { list: keys, no_tool: tools == 0 }
     }
 
     /// AES-128-CBC v10/v11 do Linux: IV de 16 espaços, chave = PBKDF2(senha, "saltysalt", 1, SHA-1, 16 bytes). Sem o

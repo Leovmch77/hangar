@@ -138,7 +138,10 @@ impl Browser {
                 Ok((_, _, targets)) => {
                     *browser.initial.borrow_mut() = targets["targetInfos"].as_array().into_iter().flatten()
                         .filter(|t| t["type"] == "page").filter_map(|t| t["targetId"].as_str().map(str::to_owned)).collect();
-                    drop(browser.call(None, "Browser.setDownloadBehavior", json!({"behavior": "deny"})));
+                    let deny = browser.call(None, "Browser.setDownloadBehavior", json!({"behavior": "deny"}));
+                    drop(browser);
+                    // Sem a negação o download cai na pasta do usuário sem ninguém pedir: a falha fica no diário.
+                    if let Err(e) = deny.await { eprintln!("[nav] downloads nao negados: {e}"); }
                     Ok(())
                 }
                 Err(e) => {

@@ -125,7 +125,7 @@ clique que muda a lista já invalida as refs dela). A resposta é sempre
 - `layout [mobile|desktop|<largura> <altura>]` — emula o viewport sem mexer na janela.
 - `login [site]` — pede ao usuário, na tela dele, o login do Chrome dele para o site (padrão: o da
   página aberta; ex. `login github.com`). O painel mostra Permitir/Recusar e espera até 110 s.
-  Responde `ok: <n> cookies para <site>`, `recusado: ...` ou `erro: ...`; nunca devolve valor de
+  Responde `ok: <n> cookies para <site>` ou `erro: ...` (recusa e 0 cookies também são `erro:`); nunca devolve valor de
   cookie. Use quando a página pede login e você precisa entrar como o usuário. **Uma chamada por
   necessidade, nunca em laço**: cada uma é um pedido na tela dele.
 - `estado` — `pausado` ou `livre`.

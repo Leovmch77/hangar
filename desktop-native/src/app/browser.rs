@@ -428,11 +428,12 @@ impl BrowserPanel {
         { self.listen_relay(&cdp); *self.relay.borrow_mut() = Some(cdp.clone()); }
         let (activity, acted) = async_channel::unbounded();
         ctl.on_activity(move |a| { let _ = activity.try_send(a); });
-        let (answer, answers) = async_channel::unbounded::<(bool, Option<String>)>();
-        ctl.on_dialog_answer(move |accept, text| { let _ = answer.try_send((accept, text)); });
+        let (answer, answers) = async_channel::unbounded::<(bool, Option<String>, futures::channel::oneshot::Sender<Result<(), String>>)>();
+        ctl.on_dialog_answer(move |accept, text, done| { let _ = answer.try_send((accept, text, done)); });
         cx.spawn(async move |this, cx| {
-            while let Ok((accept, text)) = answers.recv().await {
-                if this.update(cx, |this, _| if let Some(engine) = this.engine() { engine.answer_dialog(accept, text.as_deref()) }).is_err() { break; }
+            while let Ok((accept, text, done)) = answers.recv().await {
+                let Ok(call) = this.update(cx, |this, _| this.engine().map(|e| e.answer_dialog(accept, text.as_deref()))) else { break };
+                let _ = done.send(match call { Some(call) => call.await, None => Err("o navegador fechou".into()) });
             }
         }).detach();
         let (error, errors) = async_channel::unbounded();
@@ -777,7 +778,10 @@ impl BrowserPanel {
         let d = self.page.dialog.as_ref()?;
         let answer = |accept: bool| cx.listener(move |this: &mut Self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>| {
             let text = (accept && this.page.dialog.as_ref().is_some_and(|d| d.kind == "prompt")).then(|| this.dialog_input.read(cx).value().to_string());
-            if let Some(engine) = this.engine() { engine.answer_dialog(accept, text.as_deref()); }
+            let Some(call) = this.engine().map(|e| e.answer_dialog(accept, text.as_deref())) else { return };
+            cx.spawn(async move |this, cx| if let Err(e) = call.await {
+                let _ = this.update(cx, |this, cx| { this.local_notice = Some(tr("browser_dialog_failed").replace("{e}", &e)); cx.notify(); });
+            }).detach();
         });
         let title = tr(if d.kind == "alert" { "browser_dialog_says" } else { "browser_dialog_asks" });
         Some(div().id("browser-dialog").flex_shrink_0().flex().flex_col().gap_2().px_3().py(px(8.)).role(Role::AlertDialog)
@@ -891,18 +895,21 @@ impl BrowserPanel {
         cx: &mut Context<Self>) {
         let site = site.or_else(|| self.page_site());
         if let Some((_, old)) = self.login_request.replace((site, reply)) {
-            let _ = old.send(crate::browser::control::Reply::Text("recusado: outro pedido de login substituiu este".into()));
+            let _ = old.send(crate::browser::control::Reply::Text("erro: outro pedido de login substituiu este".into()));
         }
         cx.notify();
     }
 
     /// Resposta ao agente: a contagem ou o motivo, nunca valor de cookie.
     #[cfg(not(target_os = "macos"))]
-    fn finish_login(&mut self, result: Result<usize, String>) {
+    /// `Ok((trazidos, de fora))`.
+    fn finish_login(&mut self, result: Result<(usize, usize), String>) {
         let Some((site, reply)) = self.login_reply.take() else { return };
         let site = site.unwrap_or_else(|| "todos os sites".into());
+        let skipped = |n: usize| if n > 0 { format!(" ({n} ficaram de fora)") } else { String::new() };
         let text = match result {
-            Ok(n) => format!("ok: {n} cookies para {site}"),
+            Ok((0, out)) => format!("erro: login de {site} nao veio: nenhum cookie do site no navegador{}", skipped(out)),
+            Ok((n, out)) => format!("ok: {n} cookies para {site}{}", skipped(out)),
             Err(e) => format!("erro: login de {site} nao veio: {e}"),
         };
         let _ = reply.send(crate::browser::control::Reply::Text(text));
@@ -918,7 +925,7 @@ impl BrowserPanel {
             return;
         }
         if !allow {
-            let _ = reply.send(crate::browser::control::Reply::Text("recusado: o usuario nao liberou o login".into()));
+            let _ = reply.send(crate::browser::control::Reply::Text("erro: login recusado pelo usuario".into()));
             cx.notify();
             return;
         }
@@ -1037,7 +1044,7 @@ impl BrowserPanel {
         }
         // 0 cookies não é sucesso: a pessoa vê "nenhum cookie", não "0 trazidos" parecendo que deu certo.
         if cookies.is_empty() {
-            self.finish_login(Ok(0));
+            self.finish_login(Ok((0, locked)));
             self.cookies_status = Some(match &self.import_site {
                 Some(site) => tr("browser_login_none_site").replace("{site}", site),
                 None => tr("browser_cookies_none"),
@@ -1062,7 +1069,7 @@ impl BrowserPanel {
             let _ = this.update(cx, |this, cx| {
                 match reply {
                     Ok(count) => {
-                        this.finish_login(Ok(count));
+                        this.finish_login(Ok((count, total - count + locked)));
                         let mut done = match &site {
                             Some(site) => tr("browser_login_ok_site").replace("{site}", site),
                             None => tr("browser_cookies_ok"),
