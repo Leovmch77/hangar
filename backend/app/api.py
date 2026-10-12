@@ -622,6 +622,23 @@ async def _contas_pelo_rust(request: Request, call_next):
 
 
 @app.middleware("http")
+async def _jev_aux_pelo_rust(request: Request, call_next):
+    """A busca de modelos do Jev é do Rust: o dono que entra pela porta do Python (Connect) segue para
+    ele pela ponte; sem o Rust, o erro diz isso em vez de um 404 que a tela leria como servidor antigo."""
+    if not request.url.path.startswith("/api/jev/aux/"):
+        return await call_next(request)
+    try:
+        require_auth(request)
+    except HTTPException as error:
+        return JSONResponse({"detail": error.detail}, status_code=error.status_code, headers=error.headers)
+    from app import account_bridge
+    if account_bridge.owner_mode() == "python":
+        return JSONResponse({"detail": erro("erro_jev_aux_precisa_rust",
+                                            "o servidor está sem o processo Rust; reinicie o Hangar")}, status_code=503)
+    return await account_bridge.forward_public(request, "/__hangar_server/jev/aux")
+
+
+@app.middleware("http")
 async def _correlaciona_diag(request: Request, call_next):
     """Põe o id do front no contexto, pra o diário poder LIGAR as duas pontas.
 

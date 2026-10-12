@@ -212,19 +212,38 @@ JEV_VARS = ("TYPESAFE_API_KEY", "JEV_ENDPOINT", "JEV_MODEL", *(var for _, var in
 
 
 def sem_chat_completions(url: str) -> str:
-    url = (url or "").strip().rstrip("/")
-    return url[: -len("/chat/completions")] if url.endswith("/chat/completions") else url
+    """Base do endpoint: tira o `/chat/completions` do caminho, mantendo a query (`?api-version=...`)."""
+    from urllib.parse import urlsplit, urlunsplit
+    partes = urlsplit((url or "").strip())
+    caminho = partes.path.rstrip("/")
+    if caminho.endswith("/chat/completions"):
+        caminho = caminho[: -len("/chat/completions")]
+    return urlunsplit(partes._replace(path=caminho))
+
+
+def com_chat_completions(base: str) -> str:
+    """Endereço completo a partir da base, com o caminho antes da query."""
+    from urllib.parse import urlsplit, urlunsplit
+    partes = urlsplit(sem_chat_completions(base))
+    return urlunsplit(partes._replace(path=partes.path + "/chat/completions")) if base else ""
+
+
+_CAMPOS_AUX = ("jev_aux_base_url", "jev_aux_api_key", "jev_aux_modelo", "jev_aux_esforco")
 
 
 def _jev_aux_legado(estrito: bool = False) -> dict[str, str]:
-    """Auxiliar de antes da configuração única: o `jev_texto_*` do navegador, senão o `LLM_*` do
-    Computer Use. Vale só enquanto nenhum `jev_aux_*` foi gravado."""
+    """Auxiliar de antes da configuração única, vindo INTEIRO de uma origem: o `jev_texto_*` do
+    navegador ou o `LLM_*` do Computer Use. Vale só enquanto nenhum `jev_aux_*` foi gravado.
+
+    As duas com o mesmo endereço e modelo são a mesma escolha: o campo vazio numa vem da outra (o
+    esforço só existe no Computer Use). Diferentes, vale a mais completa (empate: a do navegador), e o
+    diário registra; a do Computer Use fica guardada pelo `sync_jev` antes de ser trocada."""
     d = _carregar()
-    base = str(d.get("jev_texto_base_url") or "").strip()
-    if base:
-        return {"jev_aux_base_url": sem_chat_completions(base),
-                "jev_aux_api_key": str(d.get("jev_texto_api_key") or "").strip(),
-                "jev_aux_modelo": str(d.get("jev_texto_modelo") or "").strip(), "jev_aux_esforco": ""}
+    texto = {}
+    if str(d.get("jev_texto_base_url") or "").strip():
+        texto = dict(zip(_CAMPOS_AUX, (sem_chat_completions(str(d.get("jev_texto_base_url"))),
+                                        str(d.get("jev_texto_api_key") or "").strip(),
+                                        str(d.get("jev_texto_modelo") or "").strip(), "")))
     from app import computer_control
     try:
         env = (computer_control._known_entry() or {}).get("env") or {}
@@ -233,13 +252,25 @@ def _jev_aux_legado(estrito: bool = False) -> dict[str, str]:
         if estrito:
             raise ValueError(f"jev_aux: não consegui ler o modelo antigo do Computer Use ({e}); tente de novo") from e
         logging.getLogger(__name__).warning("jev_aux: modelo do Computer Use ilegível: %s", e)
-        return {}
-    if not str(env.get("LLM_PROXY_URL") or "").strip():
-        return {}
-    return {"jev_aux_base_url": sem_chat_completions(str(env["LLM_PROXY_URL"])),
-            "jev_aux_api_key": str(env.get("LLM_PROXY_KEY") or ""),
-            "jev_aux_modelo": str(env.get("LLM_MODEL") or ""),
-            "jev_aux_esforco": str(env.get("LLM_EFFORT") or "")}
+        env = {}
+    mcp = {}
+    if str(env.get("LLM_PROXY_URL") or "").strip():
+        mcp = dict(zip(_CAMPOS_AUX, (sem_chat_completions(str(env["LLM_PROXY_URL"])),
+                                      str(env.get("LLM_PROXY_KEY") or "").strip(),
+                                      str(env.get("LLM_MODEL") or "").strip(),
+                                      str(env.get("LLM_EFFORT") or "").strip())))
+    if not (texto and mcp):
+        return texto or mcp
+    mesma = all(texto[c] == mcp[c] for c in ("jev_aux_base_url", "jev_aux_modelo")) and \
+        (not texto["jev_aux_api_key"] or not mcp["jev_aux_api_key"] or texto["jev_aux_api_key"] == mcp["jev_aux_api_key"])
+    if mesma:
+        return {c: texto[c] or mcp[c] for c in _CAMPOS_AUX}
+    completo = lambda o: sum(bool(o[c]) for c in _CAMPOS_AUX)
+    escolha, nome = (texto, "navegador") if completo(texto) >= completo(mcp) else (mcp, "Computer Use")
+    logging.getLogger(__name__).warning(
+        "jev_aux: o modelo auxiliar do navegador (%s, %s) e o do Computer Use (%s, %s) eram diferentes; vale o do %s",
+        texto["jev_aux_base_url"], texto["jev_aux_modelo"], mcp["jev_aux_base_url"], mcp["jev_aux_modelo"], nome)
+    return escolha
 
 
 def migrar_jev_aux() -> None:

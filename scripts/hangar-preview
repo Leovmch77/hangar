@@ -511,7 +511,7 @@ function problemaDoEscritor(env = process.env) {
   }
   const comando = envTexto(env, 'JEV_TEXTO_CMD') || TEXTO_CMD_PADRAO;
   if (!executavel(comando.split(/\s+/)[0])) {
-    problemas.push(`jev_texto_cmd ("${comando}") nao e um comando instalado; ali vai um comando que`
+    problemas.push(`jev_texto_cmd ("${comando}", chave do runtime-config sem campo na tela) nao e um comando instalado; ali vai um comando que`
       + ` recebe o pedido como argumento e imprime so o valor, como "${TEXTO_CMD_PADRAO}"`);
   }
   return problemas.length ? problemas.join('; ') : null;

@@ -264,6 +264,7 @@ pub fn terminal_router(state: Arc<AppState>) -> Router {
         .route("/__hangar_server/presence", axum::routing::get(crate::presence::private))
         .route("/__hangar_server/mods/{name}/{op}", axum::routing::post(crate::mods::routes::bridge))
         .route("/__hangar_server/voice/settings", axum::routing::any(crate::voice::routes::private_settings))
+        .route("/__hangar_server/jev/aux", axum::routing::any(crate::jev_aux::private))
         .route("/__hangar_server/voice/memory", axum::routing::any(crate::voice::routes::private_memory))
         .route("/__hangar_server/voice/memory/{id}", axum::routing::any(crate::voice::routes::private_memory))
         .layer(axum::middleware::from_fn(crate::migration_status::count_bridge));
@@ -298,6 +299,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/__hangar_server/state/{name}/events", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
         .route("/__hangar_server/voice", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
         .route("/__hangar_server/voice/settings", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
+        .route("/__hangar_server/jev/aux", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
         .route("/__hangar_server/voice/memory", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
         .route("/__hangar_server/voice/memory/{id}", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
         // Outro método nessas rotas (preflight OPTIONS, HEAD) segue ao Python.

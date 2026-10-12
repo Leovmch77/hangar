@@ -449,7 +449,7 @@ ACCOUNT_PREFIXES = ("/api/claude-configs", "/api/codex-contas", "/api/cotas", "/
 NEED_RUST = erro("accounts_need_rust_server", "contas e cotas precisam do servidor Rust")
 
 
-async def forward_public(request):
+async def forward_public(request, target: str = "/__hangar_server/accounts/public"):
     """Leva ao Rust o pedido de conta que entrou pelas portas do Python, já autenticado, e devolve
     a resposta dele como veio. Em pending, sem transporte, recusa: nunca abre um segundo
     escritor. Quem chama já respondeu NEED_RUST no modo python."""
@@ -461,7 +461,7 @@ async def forward_public(request):
     body = await request.body()
     query = request.url.query
     forwarded = urllib.request.Request(
-        f"http://{config[0]}/__hangar_server/accounts/public" + (f"?{query}" if query else ""),
+        f"http://{config[0]}{target}" + (f"?{query}" if query else ""),
         data=body or None, method=request.method,
         headers={"content-type": request.headers.get("content-type", "application/json"),
                  "x-hangar-internal": config[1], "x-hangar-path": request.url.path})
