@@ -536,8 +536,11 @@ impl ListBridge {
                     let keep = |new: Value, old: Value| if new.is_null() { old } else { new };
                     git.insert(dir.clone(), (keep(summary, before.0), keep(diff, before.1)));
                     drop(git);
-                    // Versão lida depois do `git status`, que pode regravar o índice.
-                    lock(&caches.git_gate).insert(dir.clone(), GitGate { at: Instant::now(), activity, fingerprint: git_fingerprint(&dir) });
+                    // Versão lida depois do `git status`, que pode regravar o índice. Consulta que falhou não
+                    // grava a versão: a próxima rodada tenta de novo, sem esperar o teto.
+                    if !failed {
+                        lock(&caches.git_gate).insert(dir.clone(), GitGate { at: Instant::now(), activity, fingerprint: git_fingerprint(&dir) });
+                    }
                     failed
                 }).await;
                 // A pasta no diário pelo nome, sem o caminho inteiro.

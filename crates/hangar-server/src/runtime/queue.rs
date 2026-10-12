@@ -283,6 +283,7 @@ impl Store {
     pub fn state(&self) -> &State { &self.state }
 
     pub fn ensure_projection(&mut self) -> io::Result<()> {
+        self.held = false;
         let mut output = Vec::new();
         for row in &self.state.rows { serde_json::to_writer(&mut output, row)?; output.push(b'\n'); }
         let path = self.projection_dir.join(format!("{}.jsonl", sanitize(&self.state.name)));
@@ -319,7 +320,8 @@ impl Store {
     /// `hold`: grava com fsync mas não publica a projeção; ela segue segurada só pelo `BindDispatch`
     /// seguinte, e qualquer outra ação (o `BeginDispatch` que marca entregue, o `Finish` que adia) a publica.
     pub fn exec_held(&mut self, generation: u64, call_id: &str, clock: ClockSample, action: Action, hold: bool) -> io::Result<Value> {
-        let was_held = std::mem::take(&mut self.held);
+        // Lido sem zerar: ação que falha antes de gravar deixa a linha segurada para a próxima publicar.
+        let was_held = self.held;
         let binds = matches!(&action, Action::BindDispatch { .. });
         self.unfence()?;
         if generation != self.state.generation { return Err(invalid("geração da fila mudou")); }

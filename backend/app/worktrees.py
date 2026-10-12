@@ -227,6 +227,9 @@ def _claude_tail(jsonl: str) -> tuple[str | None, list[tuple[str, bool, str | No
                 fh.seek(max(0, end - 64))
                 mark = fh.read(end - max(0, end - 64))
     except OSError:
+        # Sem a entrada velha: a próxima leitura volta a ler o arquivo inteiro, não junta sobre ela.
+        with _cache_lock:
+            _tails.pop(jsonl, None)
         return None, []
     if grow:
         last, hits = _scan_claude(reversed(fresh))

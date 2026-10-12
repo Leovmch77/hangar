@@ -29,7 +29,7 @@ fn full(extra: Value) -> Value {
 }
 
 #[tokio::test]
-async fn timeout_keeps_last_and_marks_problem() {
+async fn timeout_after_good_answer_keeps_last_without_marking() {
     let (fake, addr) = spawn_fake().await;
     *fake.list_facts.lock().unwrap() = (full(json!({"states": {"cx": state("working")}, "stall_seconds": 60.0})), Duration::ZERO);
     let client = FactsClient::new(addr, SECRET.into());
@@ -48,18 +48,20 @@ async fn timeout_keeps_last_and_marks_problem() {
     // Entrada nova (mais um cliente): pergunta, e o Python não responde em 1 s.
     let late = client.fetch(&rows, 2, &BTreeMap::new(), false).await;
     assert!(started.elapsed() < Duration::from_millis(1800), "esperou além do prazo: {:?}", started.elapsed());
-    assert!(!late.ok);
+    // Uma falha logo depois de resposta boa fica na carência: os últimos fatos, sem marcar a lista.
+    // O fim da carência (3 falhas ou 5 s) está nos testes de `list::facts`.
+    assert!(late.ok && !late.fresh);
     let (work, aside) = facts::apply(rows.clone(), &late.facts, late.ok);
     assert!(aside.is_empty());
     let cx = work.iter().find(|r| r.name == "cx").unwrap();
     assert_eq!(cx.state, "working", "fica o último valor bom");
-    assert_eq!(cx.problema.as_deref(), Some("list_facts_unavailable"));
+    assert_eq!(cx.problema, None);
     // A Claude é do Rust: a falha dos fatos não a marca.
     assert_eq!(work.iter().find(|r| r.name == "cc").unwrap().problema, None);
     // Python travado não custa 1 s a cada tique: dentro do prazo, fica a falha sem perguntar.
     let asked = fake.list_facts_calls.load(SeqCst);
     let quick = Instant::now();
-    assert!(!client.fetch(&rows, 3, &BTreeMap::new(), false).await.ok);
+    assert!(!client.fetch(&rows, 3, &BTreeMap::new(), false).await.fresh);
     assert!(quick.elapsed() < Duration::from_millis(100));
     assert_eq!(fake.list_facts_calls.load(SeqCst), asked);
 }

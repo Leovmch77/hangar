@@ -735,7 +735,9 @@ impl Executor {
                 };
                 // Falha com a projeção segurada: a linha que ficou na fila precisa aparecer.
                 if let Err(failure)=begun {
-                    if fresh {let _=self.action(Action::EnsureProjection).await;}
+                    if fresh && self.action(Action::EnsureProjection).await.is_err() {
+                        tracing::warn!(key=%self.target.key,session=%self.target.name,code="queue_projection_failed","a linha segurada não voltou à projeção depois da falha da entrega");
+                    }
                     return Err(failure);
                 }
                 let publication=format!("{}:{}:{id}",self.target.key,self.target.generation);

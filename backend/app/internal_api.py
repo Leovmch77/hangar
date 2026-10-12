@@ -388,7 +388,8 @@ async def _ensure_projection(coordinator, name: str) -> None:
     from app import runtime_coordinator
     import uuid
     try:
-        await coordinator.op(name, {"kind":"ensure_projection"}, uuid.uuid4().hex)
+        # Com prazo: uma chamada presa deixaria a sessão em `_projection_tasks` e bloquearia as próximas.
+        await asyncio.wait_for(coordinator.op(name, {"kind":"ensure_projection"}, uuid.uuid4().hex), 60)
     except runtime_coordinator.TransferInProgress:
         # Na passagem ninguém grava: a projeção em disco é a última dos dois donos. O aviso
         # deixa rastro de uma passagem que não termina.
