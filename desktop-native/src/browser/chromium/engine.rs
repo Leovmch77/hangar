@@ -520,6 +520,7 @@ impl Engine {
     pub fn back(&self) { self.history_step(-1); }
     pub fn forward(&self) { self.history_step(1); }
     pub fn reload(&self) { self.send("Page.reload", json!({})); }
+    pub fn stop(&self) { self.send("Page.stopLoading", json!({})); }
 
     fn history_step(&self, step: i64) {
         let (call, session) = (self.session.call("Page.getNavigationHistory", json!({})), Rc::downgrade(&self.session));

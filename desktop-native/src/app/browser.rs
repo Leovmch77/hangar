@@ -61,6 +61,8 @@ pub(super) struct BrowserPanel {
     shown: bool,
     /// Aviso do próprio painel (preenchimento do login que falhou), ao lado do `notice` que vem da página.
     local_notice: Option<String>,
+    /// O endereço acabou de ir para a área de transferência: o ícone vira um visto por um instante.
+    copied: bool,
     /// Aviso que a pessoa fechou no ×: o motor reenvia o estado inteiro, e o aviso voltaria a cada evento.
     dismissed_notice: Option<String>,
     /// O que o agente está fazendo, enquanto a faixa aparece.
@@ -104,7 +106,7 @@ impl BrowserPanel {
         ];
         Self { key, #[cfg(not(target_os = "macos"))] controller: None, #[cfg(not(target_os = "macos"))] cdp: None,
             #[cfg(not(target_os = "macos"))] relay: Default::default(), #[cfg(not(target_os = "macos"))] viewer: Rc::default(), engine: None, starting: None, _start: None, events, address, page: model::PageState::default(), invalid: None, #[cfg(not(target_os = "macos"))] cookies_status: None, #[cfg(not(target_os = "macos"))] cookies_confirmed: false, #[cfg(target_os = "linux")] last_fill: None, focus,
-            origin: Rc::default(), shown: false, local_notice: None, dismissed_notice: None, #[cfg(not(target_os = "macos"))] agent: None, #[cfg(not(target_os = "macos"))] agent_running: 0,
+            origin: Rc::default(), shown: false, local_notice: None, copied: false, dismissed_notice: None, #[cfg(not(target_os = "macos"))] agent: None, #[cfg(not(target_os = "macos"))] agent_running: 0,
             #[cfg(not(target_os = "macos"))] agent_seq: 0, #[cfg(not(target_os = "macos"))] paused: None, #[cfg(target_os = "windows")] agent_finished_at: None, #[cfg(not(target_os = "macos"))] _activity: None, _drain: drain, _subscriptions: subscriptions }
     }
 
@@ -466,6 +468,17 @@ impl BrowserPanel {
         cx.notify();
     }
 
+    fn copy_address(&mut self, url: Option<String>, cx: &mut Context<Self>) {
+        let Some(url) = url else { return };
+        cx.write_to_clipboard(ClipboardItem::new_string(url));
+        self.copied = true;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(std::time::Duration::from_millis(1500)).await;
+            let _ = this.update(cx, |this, cx| { this.copied = false; cx.notify(); });
+        }).detach();
+    }
+
     fn restore_address(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let url = self.page.url.clone().unwrap_or_default();
         self.address.update(cx, |input, cx| input.set_value(url, window, cx));
@@ -685,9 +698,22 @@ impl Render for BrowserPanel {
         let forward = chrome::icon_button("browser-forward", IconName::ArrowRight, tr("browser_forward"), cx)
             .disabled(!ready || !self.page.can_forward)
             .on_click(cx.listener(|this, _, _, _| if let Some(engine) = this.engine() { engine.forward() }));
-        let reload = chrome::icon_button("browser-reload", IconName::RotateCw, tr("browser_reload"), cx)
-            .disabled(!ready || self.page.url.is_none())
-            .on_click(cx.listener(|this, _, window, cx| this.retry(window, cx)));
+        // Carregando, o mesmo lugar para a carga, como no Chrome.
+        let reload = if self.page.loading && ready {
+            chrome::icon_button("browser-stop", IconName::Close, tr("browser_stop"), cx)
+                .on_click(cx.listener(|this, _, _, _| if let Some(engine) = this.engine() { engine.stop() }))
+        } else {
+            chrome::icon_button("browser-reload", IconName::RotateCw, tr("browser_reload"), cx)
+                .disabled(!ready || self.page.url.is_none())
+                .on_click(cx.listener(|this, _, window, cx| this.retry(window, cx)))
+        };
+        let url = self.page.url.clone().filter(|u| u.starts_with("http://") || u.starts_with("https://"));
+        let copy = chrome::icon_button("browser-copy", if self.copied { IconName::Check } else { IconName::Copy }, tr("browser_copy"), cx)
+            .disabled(url.is_none())
+            .on_click(cx.listener({ let url = url.clone(); move |this, _, _, cx| this.copy_address(url.clone(), cx) }));
+        let open_out = chrome::icon_button("browser-open-out", IconName::ExternalLink, tr("browser_open_out"), cx)
+            .disabled(url.is_none())
+            .on_click(cx.listener(move |_, _, _, cx| if let Some(url) = &url { cx.open_url(url) }));
         let address = div().flex_1().min_w_0()
             .capture_action(cx.listener(|this, _: &Escape, window, cx| { cx.stop_propagation(); this.restore_address(window, cx); }))
             .child(Input::new(&self.address).id("browser-address").small().aria_label(tr("browser_address"))
@@ -695,7 +721,7 @@ impl Render for BrowserPanel {
         #[allow(unused_mut)]
         let mut toolbar = div().id("browser-toolbar").flex_shrink_0().flex().items_center().gap_1().px_2().py(px(6.))
             .border_b_1().border_color(theme::border())
-            .child(back).child(forward).child(reload).child(address);
+            .child(back).child(forward).child(reload).child(address).child(copy).child(open_out);
         // Botão que traz o login do Chrome real do usuário (só onde o motor fala CDP).
         #[cfg(not(target_os = "macos"))]
         {
@@ -706,7 +732,22 @@ impl Render for BrowserPanel {
         // Com a página na tela, a falha dela fica numa linha; sem página, `render_page` a mostra no lugar dela.
         let notice = self.invalid.clone().or_else(|| self.page.error.clone().filter(|_| !cfg!(target_os = "linux") && ready && self.page.url.is_some()));
         #[allow(unused_mut)]
-        let mut root = div().size_full().flex().flex_col()
+        let mut root = div().size_full().flex().flex_col().key_context("BrowserPanel")
+            // Antes da página: atalhos de navegador valem no painel inteiro e não chegam a ela.
+            .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                let k = &event.keystroke;
+                let (m, page) = (k.modifiers, this.focus.is_focused(window));
+                let only = |alt: bool| m.alt == alt && !m.control && !m.platform && !m.shift;
+                match k.key.as_str() {
+                    "l" if m.secondary() && !m.alt && !m.shift => this.focus_address(window, cx),
+                    "f5" if !m.modified() => this.retry(window, cx),
+                    "r" if m.secondary() && !m.alt && !m.shift => this.retry(window, cx),
+                    "left" if page && only(true) => { if let Some(engine) = this.engine() { engine.back() } }
+                    "right" if page && only(true) => { if let Some(engine) = this.engine() { engine.forward() } }
+                    _ => return,
+                }
+                cx.stop_propagation();
+            }))
             .child(toolbar)
             .when_some(notice, |el, text| el.child(div().id("browser-notice").flex_shrink_0().px_3().py(px(6.)).role(Role::Alert)
                 .text_size(px(11.)).text_color(theme::danger()).whitespace_normal().child(text)));

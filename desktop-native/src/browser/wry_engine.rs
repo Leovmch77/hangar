@@ -103,6 +103,7 @@ impl Engine {
     pub fn back(&self) { self.report(self.view.evaluate_script("history.back()")); }
     pub fn forward(&self) { self.report(self.view.evaluate_script("history.forward()")); }
     pub fn reload(&self) { self.report(self.view.reload()); }
+    pub fn stop(&self) { self.report(self.view.evaluate_script("window.stop()")); }
 
     #[cfg(target_os = "windows")]
     pub fn cdp(&self) -> std::rc::Rc<super::cdp::Cdp> {
