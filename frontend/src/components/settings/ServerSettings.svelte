@@ -9,7 +9,7 @@
   import PushPresence from '../PushPresence.svelte';
   import { pushSupported } from '../../lib/push';
   import type { PushTarget } from '../../lib/quietHours';
-  import { getJevAuxCliproxy, listJevAuxModels, patchConfig, patchConfigForServer, type JevAuxCliproxy } from '@hangar/core';
+  import { getJevAuxCliproxy, listJevAuxModels, patchConfig, patchConfigForServer, sameJevAuxUrl, type JevAuxCliproxy } from '@hangar/core';
   import { getComputerControl } from '../../lib/credenciais';
   import * as m from '../../paraglide/messages';
 
@@ -149,7 +149,8 @@
     buscaDe = buscaAtual;
     const g = geracao;
     try {
-      const r = await listJevAuxModels(store.alvo, { base_url: auxUrl, api_key: chave || null, use_saved_key: !chave });
+      const salva = !chave && sameJevAuxUrl(auxUrl, store.campos['jev_aux_base_url']?.valor);
+      const r = await listJevAuxModels(store.alvo, { base_url: auxUrl, api_key: chave || null, use_saved_key: salva });
       if (g !== geracao) return;
       modelos = r.models;
       if (!r.models.length) modelosErro = m.browser_jev_aux_models_none();

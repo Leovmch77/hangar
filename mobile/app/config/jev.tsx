@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { AccessibilityInfo, Pressable, Text, View } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
-import { getComputerControlEnabled, getJevAuxCliproxy, listJevAuxModels, patchConfigForServer, type JevAuxCliproxy } from '@hangar/core';
+import { getComputerControlEnabled, getJevAuxCliproxy, listJevAuxModels, patchConfigForServer, sameJevAuxUrl, type JevAuxCliproxy } from '@hangar/core';
 import { BlockHead, Box, ConfigRow, Disclosure, Muted, ServerConfigPage } from '../../src/features/config/ServerConfigParts';
 import { Pill } from '../../src/features/config/PageHeader';
 import { useSettingsColors } from '../../src/features/config/colors';
@@ -69,7 +69,8 @@ export default function Jev() {
     setFetching(true);
     setModelsError('');
     setFetchedFor(fetchKey);
-    listJevAuxModels(server, { base_url: url, api_key: key || null, use_saved_key: !key })
+    const saved = !key && sameJevAuxUrl(url, cfg.fields.jev_aux_base_url?.valor);
+    listJevAuxModels(server, { base_url: url, api_key: key || null, use_saved_key: saved })
       .then((r) => { if (g !== gen.current) return; setModels(r.models); if (!r.models.length) setModelsError(m.browser_jev_aux_models_none()); })
       .catch((e: unknown) => { if (g !== gen.current) return; setModels([]); setModelsError(message(e)); })
       .finally(() => { if (g === gen.current) setFetching(false); });
