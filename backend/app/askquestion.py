@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import time
 from pathlib import Path
 from typing import Optional
 from app.models import AskQuestion
@@ -11,6 +12,7 @@ _log = logging.getLogger("hangar.askquestion")
 # Rabo do transcript lido pra achar a resposta da pergunta. Um turno inteiro cabe folgado; o
 # arquivo pode ter dezenas de MB, entao e seek, nao varredura.
 _SPAN_RESPOSTA = 256 * 1024
+_CARENCIA_CHAMADA = 5.0   # prazo para a chamada da pergunta aparecer no transcript
 
 
 def _sidecar_path(jsonl: str) -> Path:
@@ -51,7 +53,7 @@ def _quando(obj: dict) -> float:
         return 0.0
 
 
-def _respondida_depois(jsonl: str, desde: float) -> bool:
+def _respondida_depois(jsonl: str, desde: float, chamada: Optional[str] = None) -> bool:
     """A pergunta ja foi respondida DEPOIS de `desde` (mtime do sidecar)?
 
     O sidecar nao e apagado quando a resposta vem pela TUI (so no /answer), entao ele sozinho nao
@@ -106,6 +108,10 @@ def _respondida_depois(jsonl: str, desde: float) -> bool:
         _log.debug("askq: janela do transcript nao alcanca a pergunta path=%s — trata como "
                    "respondida", jsonl)
         return True
+    # Pergunta aberta já tem a chamada no transcript (gravada junto com o sidecar). Sem ela, o
+    # sidecar ficou para trás e prenderia a sessão num cartão que nenhuma resposta alcança.
+    if chamada and chamada not in ids:
+        return time.time() - desde >= _CARENCIA_CHAMADA
     return False
 
 
@@ -137,7 +143,8 @@ def pergunta_aberta(stem: Optional[str]) -> Optional[AskQuestion]:
         if not isinstance(data, dict):
             continue
         tp = data.get("transcript_path")
-        if not isinstance(tp, str) or _respondida_depois(tp, quando):
+        chamada = data.get("tool_use_id")
+        if not isinstance(tp, str) or _respondida_depois(tp, quando, chamada if isinstance(chamada, str) else None):
             continue
         try:
             return AskQuestion.model_validate({"questions": data["tool_input"]["questions"]})
