@@ -26,7 +26,7 @@ const SLEEP_AFTER: std::time::Duration = std::time::Duration::from_secs(10);
 const WAKE_SETTLE: std::time::Duration = std::time::Duration::from_millis(200);
 
 /// Pedido do painel ao `Hangar`: o print da página vai para o compositor da sessão.
-pub(super) enum PanelEvent { Shot(Vec<u8>) }
+pub(super) enum PanelEvent { Shot { key: String, bytes: Vec<u8> } }
 
 impl EventEmitter<PanelEvent> for BrowserPanel {}
 
@@ -661,12 +661,18 @@ impl BrowserPanel {
         let shot = cdp.call("Page.captureScreenshot", serde_json::json!({"format": "png"}));
         cx.spawn(async move |this, cx| {
             use base64::Engine as _;
-            let bytes = shot.await.and_then(|r| base64::engine::general_purpose::STANDARD
+            // Página com diálogo aberto ou travada não responde: sem prazo o botão ficava ocupado para sempre.
+            let timer = cx.background_executor().timer(std::time::Duration::from_secs(15));
+            let shot = match futures::future::select(std::pin::pin!(shot), std::pin::pin!(timer)).await {
+                futures::future::Either::Left((r, _)) => r,
+                futures::future::Either::Right(_) => Err(tr("browser_shot_timeout")),
+            };
+            let bytes = shot.and_then(|r| base64::engine::general_purpose::STANDARD
                 .decode(r["data"].as_str().unwrap_or("")).map_err(|e| e.to_string())).and_then(|b| if b.is_empty() { Err("vazio".into()) } else { Ok(b) });
             let _ = this.update(cx, |this, cx| {
                 this.shooting = false;
                 match bytes {
-                    Ok(bytes) => cx.emit(PanelEvent::Shot(bytes)),
+                    Ok(bytes) => cx.emit(PanelEvent::Shot { key: this.key.clone(), bytes }),
                     Err(e) => this.local_notice = Some(tr("browser_shot_failed").replace("{e}", &e)),
                 }
                 cx.notify();
@@ -1318,13 +1324,17 @@ impl Hangar {
     fn browser_for(&mut self, key: String, window: &mut Window, cx: &mut Context<Self>) -> Entity<BrowserPanel> {
         if let Some(browser) = self.side.browsers.get(&key) { return browser.clone(); }
         let browser = cx.new(|cx| BrowserPanel::new(key.clone(), window, cx));
-        cx.subscribe(&browser, |this, _, event: &PanelEvent, cx| match event { PanelEvent::Shot(bytes) => this.attach_page_shot(bytes.clone(), cx) }).detach();
+        cx.subscribe(&browser, |this, _, event: &PanelEvent, cx| match event {
+            PanelEvent::Shot { key, bytes } => this.attach_page_shot(key, bytes.clone(), cx),
+        }).detach();
         self.side.browsers.insert(key, browser.clone());
         browser
     }
 
     /// O print vai para a mensagem da sessão aberta, como uma imagem colada: o botão só existe com o painel dela à vista.
-    fn attach_page_shot(&mut self, bytes: Vec<u8>, cx: &mut Context<Self>) {
+    /// Se a pessoa trocou de sessão enquanto o print saía, ele não vai para a conversa errada.
+    fn attach_page_shot(&mut self, owner: &str, bytes: Vec<u8>, cx: &mut Context<Self>) {
+        if self.browser_key().as_deref() != Some(owner) { return eprintln!("[nav] print de {owner} descartado: outra sessao aberta"); }
         let Some(key) = self.composer_key() else { return };
         let name = format!("pagina-{}.png", self.attach_seq + 1);
         if let Err(problem) = self.add_attachment(&key, name, bytes) { self.action_feedback.insert(key, (problem, true)); }

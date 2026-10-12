@@ -4623,6 +4623,7 @@
   "native_browser_errors_count": "{n} errors",
   "native_browser_errors_title": "Page errors since it opened",
   "native_browser_errors_clear": "Clear",
+  "native_browser_shot_timeout": "the page did not answer within 15 s",
   "native_browser_ctl_using": "{session} is using the browser",
   "native_browser_ctl_click": "clicking “{target}”",
   "native_browser_ctl_click_plain": "clicking",
