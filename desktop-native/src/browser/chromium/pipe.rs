@@ -28,6 +28,37 @@ pub type Sink = Box<dyn Fn(Value) + Send>;
 /// Confirma ao Chromium o quadro de screencast com este número, de qualquer thread.
 pub type Acker = Box<dyn Fn(Value) + Send + Sync>;
 type Ready = Shared<LocalBoxFuture<'static, Result<(), String>>>;
+/// Marca do perfil cujos cookies já estão na chave fixa (`--password-store=basic`).
+const CARRIED: &str = ".cookies-basic";
+/// Cópia do banco gravado pela chave do chaveiro, guardada até a regravação dar certo: o Chromium com a chave fixa
+/// descarta na primeira abertura o que não consegue ler.
+const KEYRING_COPY: &str = "Cookies.keyring";
+
+/// Cookies do perfil gravados pela chave do chaveiro e ainda não regravados. Lidos antes do processo subir, com o banco
+/// fechado. Leitura que falha (sem `sqlite3`, chaveiro trancado) mantém a cópia e tenta de novo na próxima abertura.
+fn carry_cookies(profile: &Path) -> Option<Vec<Value>> {
+    use crate::browser::chrome_import::disk;
+    if profile.join(CARRIED).exists() { return None; }
+    let (file, copy) = (profile.join("Default").join("Cookies"), profile.join("Default").join(KEYRING_COPY));
+    if !copy.exists() {
+        if !file.is_file() { carried_done(profile); return None; }
+        if let Err(e) = std::fs::copy(&file, &copy) { eprintln!("[nav] cookies do perfil antigo sem copia: {e}"); return None; }
+    }
+    match disk::read(&disk::chrome_file(copy)) {
+        Ok(mut cookies) => {
+            cookies.retain(|c| c.get("__locked").is_none());
+            if cookies.is_empty() { carried_done(profile); return None; }
+            Some(cookies)
+        }
+        Err(e) => { eprintln!("[nav] cookies do perfil antigo ilegiveis, tenta na proxima abertura: {} {}", e.status_key(), e.detail()); None }
+    }
+}
+
+fn carried_done(profile: &Path) {
+    let _ = std::fs::write(profile.join(CARRIED), "");
+    let _ = std::fs::remove_file(profile.join("Default").join(KEYRING_COPY));
+}
+
 const LAUNCH_WAIT: Duration = Duration::from_secs(10);
 
 /// O lado que qualquer thread usa: escrever e casar respostas.
@@ -99,8 +130,21 @@ impl Browser {
     pub fn shared_async(executor: &ForegroundExecutor, background: &BackgroundExecutor) -> Result<Rc<Browser>, String> {
         if let Some(browser) = Self::current() { return Ok(browser); }
         let bin = launch::find()?;
-        let browser = Self::spawn(bin, &Self::profile()?, executor)?;
-        let handshake = browser.handshake(bin, background).boxed_local().shared();
+        let profile = Self::profile()?;
+        let carried = carry_cookies(&profile);
+        let browser = Self::spawn(bin, &profile, executor)?;
+        let handshake = browser.handshake(bin, background);
+        let weak = Rc::downgrade(&browser);
+        let handshake = async move {
+            handshake.await?;
+            if let (Some(cookies), Some(browser)) = (carried, weak.upgrade()) {
+                match browser.call(None, "Storage.setCookies", json!({"cookies": cookies})).await {
+                    Ok(_) => carried_done(&profile),
+                    Err(e) => eprintln!("[nav] cookies do perfil antigo nao regravados, tenta na proxima abertura: {e}"),
+                }
+            }
+            Ok(())
+        }.boxed_local().shared();
         // Corre mesmo sem ninguém esperar: quem só aquece o processo não fica olhando.
         executor.spawn(handshake.clone()).detach();
         *browser.ready.borrow_mut() = Some(handshake);
@@ -353,6 +397,23 @@ mod tests {
     fn wire() -> (Arc<Wire>, std::io::PipeReader) {
         let (reader, writer) = std::io::pipe().unwrap();
         (Arc::new(Wire { writer: Mutex::new(writer), next: AtomicU64::new(1), pending: Mutex::default(), sinks: Mutex::default() }), reader)
+    }
+
+    #[test]
+    fn old_cookies_stay_copied_until_they_are_read() {
+        let profile = std::env::temp_dir().join(format!("hangar-carry-{}", std::process::id()));
+        std::fs::create_dir_all(profile.join("Default")).unwrap();
+        // Banco ilegível: a cópia fica para a próxima abertura e a marca não sai.
+        std::fs::write(profile.join("Default/Cookies"), "nao e sqlite").unwrap();
+        assert!(carry_cookies(&profile).is_none());
+        assert!(profile.join("Default").join(KEYRING_COPY).exists());
+        assert!(!profile.join(CARRIED).exists());
+        // Perfil sem cookies: nada a carregar, marca posta e cópia apagada.
+        std::fs::remove_file(profile.join("Default/Cookies")).unwrap();
+        std::fs::remove_file(profile.join("Default").join(KEYRING_COPY)).unwrap();
+        assert!(carry_cookies(&profile).is_none());
+        assert!(profile.join(CARRIED).exists());
+        std::fs::remove_dir_all(&profile).unwrap();
     }
 
     #[test]
