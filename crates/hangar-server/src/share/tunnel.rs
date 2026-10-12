@@ -26,6 +26,34 @@ pub trait Tailscale: Send + Sync {
     }
 }
 
+/// Forma guardável no estado compartilhado (`Arc<dyn DynTailscale>`): o `Tailscale` com `impl Future` não é objeto.
+pub trait DynTailscale: Send + Sync {
+    fn run_boxed<'a>(&'a self, args: &'a [&'a str]) -> futures_util::future::BoxFuture<'a, Result<Output, String>>;
+    fn needs_operator_dyn(&self) -> bool;
+    fn user_dyn(&self) -> String;
+}
+
+impl<T: Tailscale> DynTailscale for T {
+    fn run_boxed<'a>(&'a self, args: &'a [&'a str]) -> futures_util::future::BoxFuture<'a, Result<Output, String>> {
+        Box::pin(self.run(args))
+    }
+    fn needs_operator_dyn(&self) -> bool { self.needs_operator() }
+    fn user_dyn(&self) -> String { self.user() }
+}
+
+impl Tailscale for std::sync::Arc<dyn DynTailscale> {
+    fn run(&self, args: &[&str]) -> impl Future<Output = Result<Output, String>> + Send {
+        let args: Vec<String> = args.iter().map(|a| (*a).to_owned()).collect();
+        let inner = self.clone();
+        async move {
+            let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+            inner.run_boxed(&refs).await
+        }
+    }
+    fn needs_operator(&self) -> bool { self.needs_operator_dyn() }
+    fn user(&self) -> String { self.user_dyn() }
+}
+
 /// O `tailscale` de verdade, sem herdar a autoridade do servidor.
 pub struct Real;
 impl Tailscale for Real {
