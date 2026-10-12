@@ -221,6 +221,8 @@ pub(super) struct VoiceUi {
     /// Resumo do raciocínio do turno em curso e a ação que o organizador executa.
     pub(super) thought: String,
     pub(super) action: Option<OrganizerAction>,
+    /// Etapa do objetivo em curso no computador ("Lendo a tela"), como o servidor publica.
+    pub(super) progress: Option<String>,
     /// Passo da animação de espera: muda a cada `ANIM_STEP` e força a repintura entre níveis iguais.
     pub(super) anim_step: u128,
     /// Quando a chamada ficou ao vivo: base do cronômetro.
@@ -647,7 +649,7 @@ impl Hangar {
         (self.voice.server, self.voice.target) = (Some(self.active_key()), screen);
         self.voice.click_gate = ConfirmGate::default();
         self.voice.activity = CallActivity::Idle;
-        (self.voice.thought, self.voice.action) = (String::new(), None);
+        (self.voice.thought, self.voice.action, self.voice.progress) = (String::new(), None, None);
         self.voice.shown = None;
         (self.voice.effective, self.voice.backstage, self.voice.followed) = (None, Vec::new(), Vec::new());
         (self.voice.error, self.voice.call_error) = (None, None);
@@ -703,7 +705,7 @@ impl Hangar {
         self.voice.levels = (0., 0.);
         (self.voice.live_since, self.voice.ticker) = (None, None);
         self.voice.activity = CallActivity::Idle;
-        (self.voice.thought, self.voice.action) = (String::new(), None);
+        (self.voice.thought, self.voice.action, self.voice.progress) = (String::new(), None, None);
         self.voice.shown = None;
     }
 
@@ -963,6 +965,7 @@ impl Hangar {
         self.voice.backstage = state["backstage"].as_array().into_iter().flatten().filter_map(parse_backstage).collect();
         self.voice.thought = text(&state["thought"]).unwrap_or_default();
         self.voice.action = parse_action(&state["action"]);
+        self.voice.progress = text(&state["progress"]).filter(|p| !p.trim().is_empty());
         self.voice.followed = state["followed"].as_array().into_iter().flatten().filter_map(|f| text(&f["name"])).collect();
         // Com a lista à mostra, a gravação da voz aparece na hora; fechada, ela é relida ao abrir.
         let rev = state["memory"].as_u64();
@@ -1373,7 +1376,8 @@ impl Hangar {
             let action = self.voice.action.as_ref().map(action_text);
             let thought = thought_tail(&self.voice.thought, 3, 140);
             // Texto solto não vira nó de acessibilidade: o estado inteiro vai no nome do bloco.
-            let spoken = [Some(self.voice_status().to_string()), target.clone(), action.clone()]
+            let progress = self.voice.progress.clone();
+            let spoken = [Some(self.voice_status().to_string()), target.clone(), action.clone(), progress.clone()]
                 .into_iter().flatten().collect::<Vec<_>>().join(" · ");
             header = header.child(div().id("voice-status").role(Role::Status).aria_label(spoken).flex().flex_col().gap(px(8.)).p(px(12.)).rounded(px(10.)).border_1().border_color(theme::border())
                 .child(div().flex().items_center().gap(px(12.))
@@ -1383,6 +1387,7 @@ impl Hangar {
                         .children(target.map(|name| div().text_xs().text_color(theme::faint()).truncate().child(name))))
                     .children(self.call_time().map(|time| div().flex_shrink_0().text_lg().text_color(theme::text()).child(time))))
                 .children(action.map(|text| div().text_sm().text_color(theme::text()).truncate().child(text)))
+                .children(progress.map(|step| div().text_xs().text_color(theme::warning()).truncate().child(step)))
                 .when(!thought.is_empty(), |el| el.child(div().flex().flex_col().gap(px(2.))
                     .children(thought.into_iter().map(|line| div().text_xs().text_color(theme::muted()).truncate().child(line))))));
         } else if let Some(client) = &self.voice.busy {

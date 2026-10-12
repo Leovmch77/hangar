@@ -111,6 +111,9 @@ enum Done {
     Jev(tools::JevAsked, Result<jev::Decision, String>),
     Failed { code: &'static str, text: String },
     Gate(bool),
+    /// Etapa e fim do objetivo `run` no computador; os de um objetivo que já não é o atual são largados.
+    ComputerStep { run: u64, step: String },
+    ComputerEnded { run: u64 },
 }
 
 /// O que uma tarefa de rede leva consigo.
@@ -132,7 +135,13 @@ struct Snapshot {
     five_hour: RateWindow, seven_day: RateWindow, backstage: VecDeque<Backstage>, thought: String, action: Option<OrganizerAction>,
     /// Sobe a cada gravação da memória na chamada; o aparelho relê a lista quando ele muda.
     memory: u64,
+    /// Objetivo no computador em curso e a última etapa dele (vazia até a primeira).
+    computer: Option<String>,
 }
+
+/// Roda um objetivo no computador mandando cada etapa ao segundo argumento; os testes trocam o HCC por um falso.
+pub(super) type ComputerRunner = Arc<dyn Fn(String, Box<dyn Fn(String) + Send + Sync>)
+    -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>> + Send + Sync>;
 
 pub struct Controller {
     voice: Voice, machines: Arc<Machines>, jev: Option<jev::Config>, device: DeviceLink, gate: GateSource, diag: DiagClient,
@@ -167,6 +176,9 @@ pub struct Controller {
     /// Sessão `(máquina, nome)` do plano em curso: o `SendPlan` só traz o nome.
     plan_key: Option<Key>,
     computer: Option<tokio::task::JoinHandle<()>>,
+    computer_runner: ComputerRunner,
+    /// Sobe a cada objetivo: etapa atrasada de um anterior não volta à tela.
+    computer_run: u64,
     /// O dono caiu e nenhum outro assumiu: ferramentas de tela recusam até o próximo `hello`/oferta.
     detached: bool,
     /// Falha do evento anterior: a que vem logo antes do `Closed` foi a que encerrou a chamada.
@@ -191,7 +203,8 @@ impl Controller {
         Self { voice, machines, jev, device, gate, diag, done, done_rx: Some(done_rx), backoff: Arc::default(), client: String::new(),
             actions: Vec::new(), rows: Vec::new(), followed: HashSet::new(), watched: HashSet::new(), talked: HashMap::new(), jev_switched: None,
             close_gate: ConfirmGate::default(), interrupt_gate: ConfirmGate::default(), shortcut_gate: Arc::default(), api_gate: ConfirmGate::default(), closing: false, last_screen: target.clone(), sent_turn: None, pending_question: None,
-            spoken: HashSet::new(), heard_recent: String::new(), session_names: Vec::new(), target, plan_key: None, computer: None, detached: false, last_failure: None, forwarded: HashMap::new(),
+            spoken: HashSet::new(), heard_recent: String::new(), session_names: Vec::new(), target, plan_key: None, computer: None,
+            computer_runner: Arc::new(|objective, on_step| Box::pin(super::computer::run(objective, on_step))), computer_run: 0, detached: false, last_failure: None, forwarded: HashMap::new(),
             next_tool: 0, owner_epoch: 0, next_offer: 0, latest_offer: None, snap: Snapshot { phase: "connecting", ..Snapshot::default() }, sent_state: None, sent_at: None, dirty: true }
     }
 
@@ -222,9 +235,10 @@ impl Controller {
         }
         // Fechado já: o hub não entrega um aparelho novo a esta chamada que está acabando.
         drop(from_device);
+        // Antes do último retrato: a chamada parada não deixa etapa do computador na tela.
+        self.stop_computer();
         self.flush_state();
         watcher.abort();
-        self.stop_computer();
         log("controller end");
     }
 
@@ -391,6 +405,10 @@ impl Controller {
             },
             Done::Jev(asked, result) => self.on_jev(asked, result),
             Done::Failed { code, text } => self.action_failed(code, text),
+            Done::ComputerStep { run, step } => if run == self.computer_run && self.snap.computer.is_some() {
+                self.snap.computer = Some(sentence(&step));
+            },
+            Done::ComputerEnded { run } => if run == self.computer_run { self.snap.computer = None; },
             Done::Gate(true) => {}
             Done::Gate(false) => {
                 log("voice beta turned off: stopping the call");
@@ -585,6 +603,8 @@ impl Controller {
 
     fn stop_computer(&mut self) {
         if let Some(task) = self.computer.take() && !task.is_finished() { log("computer aborted"); task.abort(); }
+        self.snap.computer = None;
+        self.dirty = true;
     }
 
     fn state_json(&self) -> Value {
@@ -595,7 +615,9 @@ impl Controller {
         json!({
             "phase": s.phase,
             "mode": match s.mode { Mode::Direct => "direct", Mode::Plan => "plan" },
-            "activity": match s.activity { Activity::Idle => "idle", Activity::Thinking => "thinking", Activity::Searching => "searching", Activity::Working => "working" },
+            // Enquanto o computador opera, a voz está trabalhando, seja qual for o turno do organizador.
+            "activity": if s.computer.is_some() { "working" } else { match s.activity { Activity::Idle => "idle", Activity::Thinking => "thinking", Activity::Searching => "searching", Activity::Working => "working" } },
+            "progress": s.computer.as_deref().filter(|step| !step.is_empty()),
             "draft": s.draft,
             "error": s.error.as_ref().map(|(code, text)| json!({"code": code, "text": text})),
             "plan": s.plan.as_ref().map(|(path, markdown)| json!({"path": path.display().to_string(), "markdown": markdown})),
@@ -629,6 +651,12 @@ impl Controller {
         self.sent_at = Some(Instant::now());
         self.device.send(ServerMsg::State { state });
     }
+}
+
+/// Etapa do HCC ("lendo a tela") como linha da tela: maiúscula inicial.
+fn sentence(step: &str) -> String {
+    let mut chars = step.chars();
+    chars.next().map_or_else(String::new, |first| first.to_uppercase().chain(chars).collect())
 }
 
 fn push_thought(thought: &mut String, delta: &str) {

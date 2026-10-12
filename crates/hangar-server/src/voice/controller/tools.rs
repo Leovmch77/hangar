@@ -8,7 +8,7 @@ use crate::voice::organizer::{OpenRequest, SEND_DUPLICATE, confirmed_switch_targ
 use crate::voice::rules::{JEV_SWITCH_ECHO, Listed, after_switch, SessionMatch, TALKED_WINDOW, can_leave, can_pair, jev_action_choice,
     jev_send_choice, jev_switch_choice, looks_like_path, machine_aliases, match_qualified, match_session, narrow_by_context, pick_folder,
     question_text, send_reply, sessions_text, unique_name, Delivery};
-use crate::voice::{computer, jev, log, observe};
+use crate::voice::{jev, log, observe};
 use hangar_api::session::SessionRow;
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use serde_json::{Value, json};
@@ -403,12 +403,17 @@ impl Controller {
         }
         log("computer start");
         let ctx = self.ctx();
+        self.computer_run += 1;
+        let run = self.computer_run;
+        self.snap.computer = Some(String::new());
+        self.dirty = true;
+        let steps = ctx.done.clone();
+        let on_step = Box::new(move |step: String| { let _ = steps.send(Done::ComputerStep { run, step }); });
+        let running = (self.computer_runner)(objective, on_step);
         self.computer = Some(tokio::spawn(async move {
-            let result = match tokio::task::spawn_blocking(computer::launch).await {
-                Ok(Ok(launch)) => computer::run_objective(launch, &objective).await,
-                Ok(Err(text)) => Err(text),
-                Err(_) => Err("Não consegui preparar o hangar-computer-control.".into()),
-            };
+            let result = running.await;
+            // Pela mesma fila das etapas: o fim chega depois de todas elas.
+            let _ = ctx.done.send(Done::ComputerEnded { run });
             match result {
                 // "parou: …" é resultado do HCC, não falha do app: volta como está, sem sucesso.
                 Ok(text) => {
