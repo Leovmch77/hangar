@@ -6,7 +6,7 @@ import { textoProblema } from '../lib/problema';
   import { cwdParts, rotuloEstado, stateColors, untrackedReason, providerName, relativeTime, fmtWhen, isOrq, worktreeLabel } from '@hangar/core';
   import { getPushSettings, setSessionMute, getBranches, checkoutBranch, gitAction, openEditor, setThenLink, clearThenLink, canPair, canLeave } from '@hangar/core';
   import { leavePair, pairExternals, setPairAccess, type PairExternal } from '@hangar/core';
-  import { sessionServerFor } from '../lib/sessionServer';
+  import { sessionServerFor, type SessionServer } from '../lib/sessionServer';
   import { sessionsStore } from '../lib/sessionsStore.svelte';
   import { worktreeStatus } from '../lib/worktreeStatus.svelte';
   import { listOwnServers, withServer } from '../lib/auth';
@@ -202,19 +202,23 @@ import { textoProblema } from '../lib/problema';
     view = 'confirm';
     say('');
   }
-  // O par é desfeito no MEU servidor, que avisa o outro lado.
+  // O par é desfeito no MEU servidor, que avisa o outro lado. A marca vem antes: o par some da
+  // próxima leitura, e isso não é a outra pessoa saindo.
+  async function desfazerAqui(alias: string, peer: string, server: ReturnType<SessionServer>) {
+    const desfazer = sessionsStore.markLeavingPair(alias, peer);
+    try { if (!(await leavePair(alias, peer, server)).ok) desfazer(); }
+    catch (e) { desfazer(); throw e; }
+  }
   function sairDoPar() {
     if (!outside) return;
     const { alias, owner, localServerId } = outside;
     pedirConfirmacao(m.pair_leave_outside({ dono: owner }), m.pair_leave_outside_body({ dono: owner }), async () => {
-      await leavePair(alias, session.name, sessionServerFor(localServerId)());
-      sessionsStore.pairUndone(localServerId, alias, session.name);
+      await desfazerAqui(alias, session.name, sessionServerFor(localServerId)());
     });
   }
   function desfazerPar(p: PairExternal) {
     pedirConfirmacao(m.pair_undo_own({ dono: p.owner }), m.pair_undo_anchor_body({ dono: p.owner }), async () => {
-      await leavePair(p.alias, p.session, sessionServerFor(serverId)());
-      sessionsStore.pairUndone(serverId, p.alias, p.session);
+      await desfazerAqui(p.alias, p.session, sessionServerFor(serverId)());
     });
   }
   function liberar(p: PairExternal) {
@@ -776,7 +780,7 @@ import { textoProblema } from '../lib/problema';
               {@render item(m.pair_release({ dono: p.owner }), 'M12 3l7 4v5c0 4-3 7-7 9-4-2-7-5-7-9V7z', () => liberar(p), {})}
             {/each}
             {#each pairs as p (`${p.alias}::${p.session}`)}
-              {@render item(m.pair_undo_own({ dono: p.owner }), 'M15 4h4v16h-4M10 8l-4 4 4 4M6 12h10', () => desfazerPar(p), { danger: true })}
+              {@render item(m.pair_undo_own({ dono: pairs.length > 1 ? `${p.owner} · ${p.session}` : p.owner }), 'M15 4h4v16h-4M10 8l-4 4 4 4M6 12h10', () => desfazerPar(p), { danger: true })}
             {/each}
           </div>
         {/if}

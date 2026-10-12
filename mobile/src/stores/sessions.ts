@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { openSessionsStream, aggregateSessions, jsonlDaSessao, sweepHidden, registrarDiag, decidirRota, esquecerRota, rotaDecidida, probeServerResponse, comTeto, placeExternalRows, pairExternals, listExternalPairs, attachGuest } from '@hangar/core';
+import { openSessionsStream, aggregateSessions, jsonlDaSessao, sweepHidden, registrarDiag, decidirRota, esquecerRota, rotaDecidida, probeServerResponse, comTeto, placeExternalRows, pairExternals, listExternalPairs, attachGuest, pairsLeft } from '@hangar/core';
 import type { SessionInfo, Server, AggSession, ExternalPair } from '@hangar/core';
 import { sortSessions } from '@hangar/core';
 import type { Slot, ServerBucket, Aggregate } from '@hangar/core';
@@ -152,13 +152,7 @@ async function refreshExternalPairs(get: () => SessionsState, set: (p: Partial<S
   }
   pairsByServer = next;
   const all = [...next.values()].flat();
-  const now = new Set(all.map(pairKey));
-  for (const p of before) {
-    const key = pairKey(p);
-    if (now.has(key)) continue;
-    if (leaving.delete(key)) continue;
-    pairNotice(m.pair_left_notice({ dono: p.owner }));
-  }
+  for (const p of pairsLeft(before, all, leaving)) pairNotice(m.pair_left_notice({ dono: p.owner }));
   // Par que acabou tira a marca do attach dele: um par novo no mesmo token precisa ligar de novo.
   const live = new Set(all.map((p) => p.token));
   for (const k of attached) if (!live.has(k.split('\n')[1])) attached.delete(k);

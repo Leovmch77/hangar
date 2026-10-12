@@ -8,7 +8,7 @@ import * as apiLib from '@hangar/core';
 import { withServer } from '../lib/auth';
 import type { AggSession } from '@hangar/core';
 
-const storeState = vi.hoisted(() => ({ rows: [] as unknown[] }));
+const storeState = vi.hoisted(() => ({ rows: [] as unknown[], undo: vi.fn(), markLeavingPair: vi.fn() }));
 
 vi.mock('@hangar/core', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@hangar/core')>()),
@@ -24,7 +24,7 @@ vi.mock('../lib/auth', () => ({
 }));
 
 vi.mock('../lib/sessionsStore.svelte', () => ({
-  sessionsStore: { get rows() { return storeState.rows; } },
+  sessionsStore: { get rows() { return storeState.rows; }, markLeavingPair: storeState.markLeavingPair },
 }));
 
 function sess(over: Partial<AggSession> = {}): AggSession {
@@ -68,6 +68,7 @@ function flush(): Promise<void> {
 beforeEach(() => {
   vi.clearAllMocks();
   storeState.rows = [];
+  storeState.markLeavingPair.mockReturnValue(storeState.undo);
   arrastarGrupo.cancelar();
 });
 afterEach(() => {
@@ -289,6 +290,20 @@ describe('GrupoDropDialog — par externo', () => {
     arrastarGrupo.pedirSaida({ serverId: 'srv1', name: 'hangar' });
     await flush();
     expect(document.body.textContent).toContain(m.pair_undo_anchor_body({ dono: 'Ana' }));
+    unmount(comp);
+  });
+
+  it('a ponta saindo marca o par como desfeito aqui; a saída falhando tira a marca', async () => {
+    grupoComFora();
+    api.listExternalPairs.mockResolvedValue([{ local_session: 'hangar', alias: 'casa', owner: 'Ana', session: 'api', address: PAR.address, token: 't' }]);
+    api.unpairSession.mockRejectedValue(new Error('caiu'));
+    const comp = montar();
+    arrastarGrupo.pedirSaida({ serverId: 'srv1', name: 'hangar' });
+    await flush();
+    clicarBotao(m.grupo_drop_sair_confirmar());
+    await flush();
+    expect(storeState.markLeavingPair).toHaveBeenCalledWith('casa', 'api');
+    expect(storeState.undo).toHaveBeenCalled();
     unmount(comp);
   });
 });

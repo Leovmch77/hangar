@@ -5,9 +5,9 @@ import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { EnrichedMarkdownText } from 'react-native-enriched-markdown';
 import { fetchSessionsForServer, formataErro, getHistory, getPairContract, listExternalPairs, pairExternals, pairHeaderLabel, pairSession, setPairAccess, unpairSession } from '@hangar/core';
-import type { ChatEvent } from '@hangar/core';
+import type { ChatEvent, ExternalPair } from '@hangar/core';
 import { useServers } from '../../../../src/stores/servers';
-import { useSessions } from '../../../../src/stores/sessions';
+import { markLeavingPair, useSessions } from '../../../../src/stores/sessions';
 import { mkMarkdownStyle } from '../../../../src/chat/AssistantBubble';
 import { PairMembers } from '../../../../src/features/pair/PairMembers';
 import { PairPicker } from '../../../../src/features/pair/PairPicker';
@@ -36,8 +36,9 @@ export default function PairSheet() {
   );
   const header = pairHeaderLabel(name, groupRows);
   const comFora = groupRows.some((row) => pairExternals(row).length > 0);
-  // Dono do par cuja ponta é esta sessão: sair do grupo desfaz o par para todos.
-  const [anchorOwner, setAnchorOwner] = useState<string | null>(null);
+  // Pares cuja ponta é esta sessão: sair do grupo os desfaz para todos.
+  const [anchored, setAnchored] = useState<ExternalPair[]>([]);
+  const anchorOwner = anchored[0]?.owner ?? null;
 
   const [sessions, setSessions] = useState<Awaited<ReturnType<typeof fetchSessionsForServer>>>([]);
   const [loading, setLoading] = useState(true);
@@ -60,11 +61,11 @@ export default function PairSheet() {
   const mdStyle = useMemo(() => mkMarkdownStyle(theme), [theme]);
 
   useEffect(() => {
-    setAnchorOwner(null);
+    setAnchored([]);
     if (!routeServer || !comFora) return;
     let alive = true;
     listExternalPairs(routeServer)
-      .then((pairs) => { if (alive) setAnchorOwner(pairs.find((p) => p.local_session === name)?.owner ?? null); })
+      .then((pairs) => { if (alive) setAnchored(pairs.filter((p) => p.local_session === name)); })
       .catch(() => {});
     return () => { alive = false; };
   }, [routeServer, name, comFora]);
@@ -211,6 +212,8 @@ export default function PairSheet() {
     const server = routeServer;
     setBusy(true);
     setActionError('');
+    // O sumiço dos pares desta ponta não é a outra pessoa saindo.
+    const undo = anchored.map((p) => markLeavingPair(p.alias, p.session));
     try {
       const result = await unpairSession(name, server);
       if (token !== actionEpoch.current) return;
@@ -220,6 +223,7 @@ export default function PairSheet() {
         router.back();
       }
     } catch {
+      for (const u of undo) u();
       if (token === actionEpoch.current) setActionError(m.par_falhou_saida());
     } finally {
       if (token === actionEpoch.current) setBusy(false);

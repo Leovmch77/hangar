@@ -8,7 +8,7 @@
   import { sessionsStore } from '../lib/sessionsStore.svelte';
   import { withServer } from '../lib/auth';
   import { pairSession, unpairSession, suggestGroupTask, formataErro, canPair, pairAnchor, pairExternals, setPairAccess, listExternalPairs } from '@hangar/core';
-  import type { AggSession } from '@hangar/core';
+  import type { AggSession, ExternalPair } from '@hangar/core';
   import * as m from '../paraglide/messages';
 
   const pedido = $derived(arrastarGrupo.pedido);
@@ -48,7 +48,7 @@
   });
   let liberar = $state<string[]>([]);
   // Ponta do par saindo do grupo desfaz o par para todos: a tela diz antes.
-  let pontaDe = $state<string[]>([]);
+  let pontaDe = $state<ExternalPair[]>([]);
 
   // join_group funde os grupos INTEIROS (api.py:3581): a lista é a união de origem, alvo e os
   // pares de cada um — mostrar só os dois nomes escondia quem mais o arrasto afeta.
@@ -118,7 +118,7 @@
       const o = origemSessao;
       if (p.modo === 'sair' && o && pairExternals(o).length) {
         void withServer(o.serverId, () => listExternalPairs())
-          .then((pares) => { if (pedido === p) pontaDe = [...new Set(pares.filter((x) => x.local_session === o.name).map((x) => x.owner))]; })
+          .then((pares) => { if (pedido === p) pontaDe = pares.filter((x) => x.local_session === o.name); })
           .catch(() => {});   // sem a lista, a saída segue; o servidor ainda avisa o outro lado
       }
     });
@@ -204,6 +204,8 @@
     if (!o) { erro = mensagemRecusa('dead'); return; }
     busy = true;
     erro = null;
+    // A ponta saindo desfaz os pares dela: o sumiço deles não é a outra pessoa saindo.
+    const desfazer = pontaDe.map((x) => sessionsStore.markLeavingPair(x.alias, x.session));
     try {
       const res = await withServer(o.serverId, () => unpairSession(o.name));
       if (pedido !== pedidoEmVoo) return;
@@ -214,6 +216,7 @@
         arrastarGrupo.cancelar();
       }
     } catch (e) {
+      for (const d of desfazer) d();
       if (pedido !== pedidoEmVoo) return;
       erro = e instanceof Error && e.message ? e.message : m.grupo_drop_sair_falhou();
     } finally {
@@ -304,7 +307,7 @@
         </div>
       {/if}
 
-      {#each pontaDe as dono (dono)}<p class="gd-erro">{m.pair_undo_anchor_body({ dono })}</p>{/each}
+      {#each [...new Set(pontaDe.map((x) => x.owner))] as dono (dono)}<p class="gd-erro">{m.pair_undo_anchor_body({ dono })}</p>{/each}
       {#if erro}<p class="gd-erro">{erro}</p>{/if}
       {#if bloqueio && !erro}<p class="gd-erro">{bloqueio}</p>{/if}
 

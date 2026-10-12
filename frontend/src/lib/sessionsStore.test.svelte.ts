@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { sessionsStore } from './sessionsStore.svelte';
 import { getIdentificador } from './peers';
 import { configureDiag, estaDesligado, registrarFalha, registrarSucesso, _limparEsfriamentoParaTestes } from '@hangar/core';
@@ -335,6 +335,7 @@ it('registra primeiro quadro, parse inválido, silêncio e volta sem copiar quad
 });
 
 describe('par externo', () => {
+  beforeEach(() => { pares.listExternalPairs.mockReset(); pares.attachGuest.mockReset(); pares.setEphemeralServers.mockReset(); });
   const par = { alias: 'casa', owner: 'Ana', session: 'api', address: 'https://ana.ts.net:8443', level: 'view', pending: false };
   const linha = (externos: unknown[]) => JSON.stringify([{ name: 'hangar', state: 'idle', pair_externals: externos }]);
 
@@ -354,16 +355,59 @@ describe('par externo', () => {
     expect(sessionsStore.pairLeft).toBeNull();
     pares.listExternalPairs.mockResolvedValue([]);
     streams.get('lan')!.get('sessions')!({ data: linha([]) });
-    expect(sessionsStore.pairLeft?.owner).toBe('Ana');
+    await vi.waitFor(() => expect(sessionsStore.pairLeft?.owner).toBe('Ana'));
     await vi.waitFor(() => expect(pares.setEphemeralServers.mock.lastCall![0]).toEqual([]));
   });
 
-  it('quem desfez o par aqui não recebe o aviso de que o outro saiu', () => {
-    pares.listExternalPairs.mockResolvedValue([]);
+  const doServidor = (token = 'tp', session = 'api') => ({ local_session: 'hangar', alias: 'casa', owner: 'Ana', session,
+    address: 'https://ana.ts.net:8443', token });
+
+  it('quem desfez o par aqui não recebe o aviso de que o outro saiu', async () => {
+    pares.listExternalPairs.mockResolvedValue([doServidor()]);
     sessionsStore.retain();
     streams.get('lan')!.get('sessions')!({ data: linha([par]) });
-    sessionsStore.pairUndone('lan', 'casa', 'api');
+    await vi.waitFor(() => expect(pares.setEphemeralServers).toHaveBeenCalled());   // a leitura terminou
+    sessionsStore.markLeavingPair('casa', 'api');
+    pares.listExternalPairs.mockResolvedValue([]);
     streams.get('lan')!.get('sessions')!({ data: linha([]) });
+    await new Promise((r) => setTimeout(r, 0));
     expect(sessionsStore.pairLeft).toBeNull();
+  });
+
+  it('saída que falhou desfaz a marca: o outro sair depois avisa', async () => {
+    pares.listExternalPairs.mockResolvedValue([doServidor()]);
+    sessionsStore.retain();
+    streams.get('lan')!.get('sessions')!({ data: linha([par]) });
+    await vi.waitFor(() => expect(pares.setEphemeralServers).toHaveBeenCalled());   // a leitura terminou
+    sessionsStore.markLeavingPair('casa', 'api')();
+    pares.listExternalPairs.mockResolvedValue([]);
+    streams.get('lan')!.get('sessions')!({ data: linha([]) });
+    await vi.waitFor(() => expect(sessionsStore.pairLeft?.owner).toBe('Ana'));
+  });
+
+  it('linha do par sumir sem o par acabar (sessão fechada, lista com problema) não avisa', async () => {
+    pares.listExternalPairs.mockResolvedValue([doServidor()]);
+    sessionsStore.retain();
+    streams.get('lan')!.get('sessions')!({ data: linha([par]) });
+    await vi.waitFor(() => expect(pares.setEphemeralServers).toHaveBeenCalled());   // a leitura terminou
+    streams.get('lan')!.get('sessions')!({ data: linha([]) });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(sessionsStore.pairLeft).toBeNull();
+  });
+
+  it('par que acabou libera o attach do token: o mesmo par voltando liga de novo', async () => {
+    pares.attachGuest.mockResolvedValue(undefined);
+    const dois = [doServidor('t1'), doServidor('t2', 'docs')];
+    const linhaDois = linha([par, { ...par, session: 'docs' }]);
+    pares.listExternalPairs.mockResolvedValue(dois);
+    sessionsStore.retain();
+    streams.get('lan')!.get('sessions')!({ data: linhaDois });
+    await vi.waitFor(() => expect(pares.attachGuest).toHaveBeenCalledTimes(1));
+    pares.listExternalPairs.mockResolvedValue([doServidor('t1')]);
+    streams.get('lan')!.get('sessions')!({ data: linha([par]) });
+    await vi.waitFor(() => expect(pares.setEphemeralServers).toHaveBeenCalledTimes(2));
+    pares.listExternalPairs.mockResolvedValue(dois);
+    streams.get('lan')!.get('sessions')!({ data: linhaDois });
+    await vi.waitFor(() => expect(pares.attachGuest).toHaveBeenCalledTimes(2));
   });
 });

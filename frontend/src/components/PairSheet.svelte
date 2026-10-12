@@ -8,7 +8,8 @@
   import { formataErro } from '@hangar/core';
   import { rotuloEstado, stateColors, parsePeerMessage, relativeTime, encodeCompareIds } from '@hangar/core';
   import { getActiveId } from '../lib/auth';
-  import type { SessionInfo, State } from '@hangar/core';
+  import type { ExternalPair, SessionInfo, State } from '@hangar/core';
+  import { sessionsStore } from '../lib/sessionsStore.svelte';
   import * as m from '../paraglide/messages';
   import GroupGlyph from './icons/GroupGlyph.svelte';
 
@@ -43,7 +44,7 @@
   });
   let liberar = $state<string[]>([]);
   // Esta sessão é a ponta de algum par: sair do grupo desfaz o par para todos.
-  let pontaDe = $state<string[]>([]);
+  let pontaDe = $state<ExternalPair[]>([]);
   let picked = $state<string[]>([]);   // MULTI-select: marca N sessões e pareia de uma vez
   let task = $state('');
 
@@ -119,7 +120,7 @@
     liberar = [];
     pontaDe = [];
     listExternalPairs(sessionServer())
-      .then((pares) => { if (my === epoch) pontaDe = [...new Set(pares.filter((p) => p.local_session === sessionName).map((p) => p.owner))]; })
+      .then((pares) => { if (my === epoch) pontaDe = pares.filter((p) => p.local_session === sessionName); })
       .catch(() => {});   // sem a lista, a saída segue; o servidor ainda avisa o outro lado
     if (members.length) {
       loadFeed(members, my);
@@ -182,6 +183,8 @@
     if (busy) return;
     busy = true;
     error = null;
+    // A ponta saindo desfaz os pares dela: o sumiço deles não é a outra pessoa saindo.
+    const desfazer = pontaDe.map((p) => sessionsStore.markLeavingPair(p.alias, p.session));
     try {
       const res = await unpairSession(sessionName, sessionServer());
       onChanged();
@@ -191,6 +194,7 @@
         onClose();
       }
     } catch (e) {
+      for (const d of desfazer) d();
       error = e instanceof Error && e.message ? `${m.par_falhou_saida()} ${e.message}` : m.par_falhou_saida();
     } finally {
       busy = false;
@@ -352,7 +356,7 @@
 
       <!-- Rodape FIXO: "Sair do grupo" e destrutivo e nao pode fugir com o scroll do contrato. -->
       <div class="pair-foot">
-        {#each pontaDe as dono (dono)}<p class="error">{m.pair_undo_anchor_body({ dono })}</p>{/each}
+        {#each [...new Set(pontaDe.map((p) => p.owner))] as dono (dono)}<p class="error">{m.pair_undo_anchor_body({ dono })}</p>{/each}
         {#if error}<p class="error">{error}</p>{/if}
         <button class="danger-btn" onclick={doLeave} disabled={busy}>
           {busy ? m.par_saindo() : m.par_sair_grupo()}

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { reconcilePairEntries, placeExternalRows, pairHeaderLabel, pairExternals, type ExternalPair } from './externalPairs';
+import { reconcilePairEntries, placeExternalRows, pairHeaderLabel, pairExternals, pairsLeft, type ExternalPair } from './externalPairs';
 import type { Server } from './servers';
 import type { AggSession, SessionInfo, PairExternal } from './types';
 import type { ServerBucket } from './sessions';
@@ -90,5 +90,16 @@ describe('pairHeaderLabel', () => {
     const b = { pair_externals: [ext(), ext({ alias: 'bia', owner: 'Bia', session: 'k' })] };
     expect(pairHeaderLabel('hangar', [a, b])).toBe('hangar ↔ casa::h (Ana), bia::k (Bia)');
     expect(pairHeaderLabel('hangar', [{ pair_external: null }])).toBe('hangar');
+  });
+});
+
+describe('pairsLeft', () => {
+  it('par que sumiu da leitura avisa; o desfeito aqui não, e a marca é consumida', () => {
+    const a = par(), b = par({ session: 'h2', owner: 'Bia' });
+    const leaving = new Set(['casa::h']);
+    expect(pairsLeft([a, b], [], leaving)).toEqual([b]);
+    expect(leaving.size).toBe(0);
+    expect(pairsLeft([a, b], [a], new Set())).toEqual([b]);
+    expect(pairsLeft([a], [a], new Set())).toEqual([]);
   });
 });

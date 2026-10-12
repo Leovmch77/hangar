@@ -44,7 +44,7 @@ const mocks = vi.hoisted(() => {
     formataErro: (value: unknown) => String(value),
     listExternalPairs: vi.fn(async () => []),
     setPairAccess: vi.fn(),
-    pairExternals: () => [],
+    pairExternals: vi.fn((_row: unknown): unknown[] => []),
     pairHeaderLabel: (label: string) => label,
   };
   const reset = (peers: string[]) => {
@@ -61,7 +61,9 @@ const mocks = vi.hoisted(() => {
     core.pairSession.mockReset();
     core.unpairSession.mockReset();
   };
-  return { deferred, params, setPeers, useSessions, useServers, back, alert, core, reset };
+  const undo = vi.fn();
+  const markLeavingPair = vi.fn(() => undo);
+  return { deferred, params, setPeers, useSessions, useServers, back, alert, core, reset, undo, markLeavingPair };
 });
 
 vi.mock('react-native', async (importOriginal) => ({
@@ -79,7 +81,7 @@ vi.mock('expo-router', () => ({
 }));
 vi.mock('@hangar/core', () => mocks.core);
 vi.mock('../../stores/servers', () => ({ useServers: mocks.useServers }));
-vi.mock('../../stores/sessions', () => ({ useSessions: mocks.useSessions }));
+vi.mock('../../stores/sessions', () => ({ useSessions: mocks.useSessions, markLeavingPair: mocks.markLeavingPair }));
 vi.mock('../../chat/AssistantBubble', () => ({ mkMarkdownStyle: () => ({}) }));
 vi.mock('./PairFeed', () => ({ PairFeed: () => null }));
 vi.mock('./PairPicker', () => ({
@@ -106,6 +108,8 @@ vi.mock('../../paraglide/messages', () => ({
   compare_servidor_nao_encontrado: () => 'Servidor não encontrado',
   par_falhou_pareamento: ({ nomes }: { nomes: string }) => `Falhou o pareamento com ${nomes}.`,
   par_falhou_saida: () => 'Falhou a saída do grupo.',
+  pair_undo_anchor_body: ({ dono }: { dono: string }) => `desfaz ${dono}`,
+  pair_not_transitive: () => 'não transitivo',
 }));
 
 import PairSheet from '../../../app/s/[server]/[name]/pair';
@@ -245,5 +249,22 @@ describe('PairSheet — ação em voo sobrevive à atualização de pair_peers',
 
     expect(mocks.core.unpairSession).toHaveBeenCalledTimes(1);
     expect(mocks.back).toHaveBeenCalledTimes(1);
+  });
+
+  it('a ponta saindo marca o par como desfeito aqui; a saída falhando tira a marca', async () => {
+    mocks.reset(['fixture-b']);
+    mocks.core.pairExternals.mockReturnValue([{ alias: 'casa', owner: 'Ana', session: 'api' }]);
+    mocks.core.listExternalPairs.mockResolvedValue([{ local_session: 'fixture-a', alias: 'casa', owner: 'Ana', session: 'api' }] as never);
+    mocks.core.unpairSession.mockRejectedValue(new Error('saída'));
+    await mount();
+
+    click('leave');
+    const buttons = mocks.alert.mock.calls[0][2] as Array<{ onPress?: () => void }>;
+    act(() => { buttons[1].onPress?.(); });
+    await flush();
+
+    expect(mocks.markLeavingPair).toHaveBeenCalledWith('casa', 'api');
+    expect(mocks.undo).toHaveBeenCalled();
+    mocks.core.pairExternals.mockReturnValue([]);
   });
 });

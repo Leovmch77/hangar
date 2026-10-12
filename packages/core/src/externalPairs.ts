@@ -35,6 +35,14 @@ export function reconcilePairEntries(list: Server[], pairs: ExternalPair[], newI
   return { servers, attach };
 }
 
+/** Pares que sumiram entre duas leituras de `/api/external-pairs` sem terem sido desfeitos aqui:
+ * "<dono> saiu do pareamento". Consome de `leaving` (`alias::sessão`) a marca de quem sumiu. */
+export function pairsLeft(before: ExternalPair[], now: ExternalPair[], leaving: Set<string>): ExternalPair[] {
+  const key = (p: ExternalPair) => `${p.alias}::${p.session}`;
+  const live = new Set(now.map(key));
+  return before.filter((p) => !live.has(key(p)) && !leaving.delete(key(p)));
+}
+
 /** Pares de fora da linha; servidor antigo manda só `pair_external`, sem nível (= ver e recado). */
 export function pairExternals(s: PairFields): PairExternal[] {
   if (s.pair_externals) return s.pair_externals;

@@ -270,4 +270,14 @@ describe('SessionCard: par externo', () => {
     unmount(comp);
     document.body.innerHTML = '';
   });
+
+  it('dois pares do mesmo dono: o Desfazer diz qual sessão', async () => {
+    const pares = [{ ...PAR, pending: false }, { ...PAR, session: 'docs', pending: false }];
+    const { el, comp } = montar({ ...sessao({ name: 'hangar', pair_externals: pares }), serverId: 'srv-a' } as AggSession);
+    await abrirMenu(el);
+    expect(botao(m.pair_undo_own({ dono: 'Ana · api' }))).toBeTruthy();
+    expect(botao(m.pair_undo_own({ dono: 'Ana · docs' }))).toBeTruthy();
+    unmount(comp);
+    document.body.innerHTML = '';
+  });
 });
