@@ -727,7 +727,10 @@ impl Hangar {
         if s.aux_models.loading || url.is_empty() { return; }
         let proxy = s.cliproxy_key();
         let typed = s.draft.get("jev_aux_api_key").map(text_of).filter(|t| !t.trim().is_empty() && !proxy);
-        let saved = typed.is_none() && !proxy && s.key_set("jev_aux_api_key");
+        // A chave salva só vale para o endereço salvo; outro endereço sem chave digitada vai sem chave.
+        let norm = |u: &str| u.trim().trim_end_matches('/').trim_end_matches("/chat/completions").trim_end_matches('/').to_owned();
+        let saved_url = s.fields.get("jev_aux_base_url").and_then(|f| f.get("valor")).map(text_of).unwrap_or_default();
+        let saved = typed.is_none() && !proxy && s.key_set("jev_aux_api_key") && norm(&saved_url) == norm(&url);
         let body = json!({"base_url": url, "use_saved_key": saved, "api_key": typed, "use_cliproxy_key": proxy});
         let seq = s.aux_models.start();
         let done = self.server_config_send_later();
