@@ -5,7 +5,7 @@
   import { toolLook } from '../lib/toolLook.svelte';
   import { tick } from 'svelte';
   import type { Snippet } from 'svelte';
-  import { planDisplayText, parseContextoUso, dayStarts } from '@hangar/core';
+  import { planDisplayText, parseContextoUso, dayStarts, waitsInQueue } from '@hangar/core';
   import OrqTimelineEvent from './OrqTimelineEvent.svelte';
   import ContextCard from './ContextCard.svelte';
   import SessionPlanPreview from './SessionPlanPreview.svelte';
@@ -53,6 +53,7 @@
     onAbrirAgente?: (prompt: string | undefined, titulo: string) => void;
     dockH: number;
     codex?: boolean;
+    headless?: boolean;
     plan?: {
       eventId: string | null;
       serverId?: string;
@@ -116,7 +117,7 @@
   let {
     events, stateEvent, pending, sessionName, dockH, preview = '', previewMd = false, previewFull = false, previewVivo = false, pensamento = '', ferramenta = null, onSelectOption, onSubmitSelected, onCancel, agentesRodando = [], onAbrirAgente = undefined,
     askOpen = false, askPayload = null, askActive = false, onAnswer, onAskClose, onFimDoLocal,
-    imageUrl, swapIds, codex = false, plan = null, footer,
+    imageUrl, swapIds, codex = false, headless = false, plan = null, footer,
     onForward, onRunCommand, onOpenSession, onOpenOrq, onDescartarFila, ancora = 0, focoId = null
   }: Props = $props();
   const sessionServer = useSessionServer();
@@ -603,7 +604,9 @@
                nao chegou ao agente (fila: a TUI engoliu as teclas; held: o hook barrou). Sem esta
                linha a bolha perdida acendia solida igual a uma aceita e o usuario ficava achando
                que mandou — falha tem que aparecer, nao sumir. -->
-          <div class="queued-row" class:dim={working && !ev.desistiu}>
+          <!-- Atenua só o que ainda espera a vez: sem terminal, a já entregue ao processo não está na fila. -->
+          <div class="queued-row" class:dim={working && !ev.desistiu
+            && (ev.id.startsWith('held:') || waitsInQueue(ev, codex ? 'codex' : null, headless))}>
             {#if imgFotos}
               <ImageBubble caption={imgFotos.caption} srcs={imgFotos.filenames.map((f) => uploadUrl(sessionName, f, false, sessionServer()))}
                            thumbs={imgFotos.filenames.map((f) => uploadUrl(sessionName, f, false, sessionServer(), 192))} />

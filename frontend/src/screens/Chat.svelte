@@ -2740,12 +2740,10 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
     return (i >= 0 ? text.slice(0, i) : text).trim();
   }
 
-  // Quantas msgs estão ESPERANDO o turno atual — o número do chip de fila do Kimi. São as bolhas
-  // translúcidas, e elas vêm de DUAS fontes: o eco local (`pending`, de quem acabou de mandar deste
-  // aparelho) e o evento sintético "queued-" da fila durável do backend (visível em TODO cliente).
-  // Medido em 14/08/2026: um envio pelo app vira "queued-" em ~1s e o dedup ali embaixo REMOVE o
-  // pending correspondente — contar só o `pending` dava 0 com a bolha na tela e o chip nunca
-  // aparecia. `desistiu` fora: aquela não está na fila, está perdida (a TUI engoliu as teclas).
+  // Quantas msgs estão ESPERANDO o turno atual — o número do chip de fila do Kimi. Conta só o evento
+  // sintético "queued-" da fila durável do backend (visível em TODO cliente): o eco local (`pending`)
+  // é o POST ainda em voo, e o dedup o troca pelo "queued-" assim que a fila grava a entrada.
+  // `desistiu` fora: aquela não está na fila, está perdida (a TUI engoliu as teclas).
   // Duas travas de propósito: (1) só Kimi, Codex e Claude oferecem o chip; sem isto TODA sessão
   // pagava um scan O(n) sobre `events` a cada evento novo do SSE (o arquivo já trocou o
   // `deriveActivity` por fold incremental pelo mesmo motivo); (2) `kind === 'user_msg'` — o prefixo
@@ -2755,8 +2753,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   const filaCount = $derived(
     sessionProvider !== 'kimi' && sessionProvider !== 'codex' && !(sessionProvider === 'claude' && !desktop) && !sessionHeadless
       ? 0
-      : pending.length
-        + queuedMessages(events, sessionProvider, sessionHeadless).length,
+      : queuedMessages(events, sessionProvider, sessionHeadless).length,
   );
 
   // "mandar agora" (chip da fila): o ctrl-s promove a fila da TUI pro turno em curso. Com
@@ -2798,7 +2795,8 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
     // estado (flip idle->working no instante do envio) derrubava até o eco condicional antigo
     // ("mandei e sumiu"). O dedup abaixo reconcilia contra o evento real em qualquer estado.
     const pendingId: string | null = `pending-${pendingSeq++}`;
-    pending = [...pending, { id: pendingId, text }];
+    // Em idle a mensagem é digitada na hora: o eco atenuado parecia mensagem entrando na fila.
+    pending = [...pending, { id: pendingId, text, solid: currentState === 'idle' }];
     try {
       if (steer && (sessionProvider === 'codex' || sessionHeadless)) {
         await steerSession(sessionName, text, sessionServer());
@@ -3466,6 +3464,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
       {events}
       onAbrirAgente={desktop ? abrirAgenteNoPainel : undefined}
       codex={sessionProvider === 'codex'}
+      headless={sessionHeadless}
       plan={planControls}
       footer={chatPlans}
       {stateEvent}
