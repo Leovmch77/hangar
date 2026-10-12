@@ -24,6 +24,7 @@ const PAPEIS_INTERATIVOS = new Set([
 // Teto do próprio `choice` do Jev. A doc manda mandar a lista inteira em vez de uma pré-seleção,
 // porque opção omitida é opção que o modelo não pode escolher.
 const MAX_CANDIDATOS = 255;
+const PAPEIS_QUE_ENVIAM = new Set(['button', 'link', 'menuitem']);
 const NENHUM = '_nenhum';
 
 /** O rótulo da página traz o asterisco de obrigatório, o da árvore de acessibilidade não. */
@@ -33,10 +34,14 @@ const OPERACOES = {
   CLICK: 'click an element to move one step toward the goal',
   TYPE_TEXT: 'type a value into a text field',
   SELECT: 'choose an option in a dropdown',
+  // Busca costuma ter dois botoes iguais e a lista de sugestoes aberta: o alvo do clique se dividia
+  // entre os tres e o laco parava com o termo ja digitado. Enter no campo nao precisa de alvo.
+  PRESS_ENTER: 'press Enter in the field just typed into, to run the search or submit that one field',
   SCROLL_DOWN: 'scroll down because what the goal needs is not visible yet',
   // "Parece pronto" nao basta: com o formulario todo preenchido o Jev dava DONE enquanto a tela
   // ainda dizia "Alteracoes nao salvas". O criterio pede a confirmacao da propria pagina.
-  DONE: 'the goal is fully accomplished and the page itself confirms it — nothing is left to submit, save or confirm',
+  DONE: 'the goal is fully accomplished and the page itself confirms it — nothing is left to submit, save or confirm; '
+    + 'for a goal of reaching a page or running a search, that page or those results are on screen',
   BLOCKED: 'the goal cannot be accomplished from this page',
 };
 
@@ -85,10 +90,11 @@ function sinonimos(head, candidatos) {
   return { ref: iguais[0].ref, massa: iguais.reduce((s, c) => s + (p[c.ref] ?? 0), 0) };
 }
 
-const CHAVE_SECRETA = /senha|password|passwd|token|secret|api[-_ ]?key|cartao|cvv/i;
+const CHAVE_SECRETA = /senha|password|passwd|token|secret|api[-_ ]?key|cart[aã]o|cvv|cvc|\bpin\b|\botp\b/i;
 
 /** Extrai os elementos acionáveis da árvore de acessibilidade do `snapshot`. */
-function parsarSnapshot(texto, max = MAX_CANDIDATOS) {
+// Uma vaga a menos que o teto: todo head de alvo leva também a opção `_nenhum`.
+function parsarSnapshot(texto, max = MAX_CANDIDATOS - 1) {
   const achados = [];
   for (const linha of String(texto).split('\n')) {
     const m = linha.match(/^\s*-\s+(\w+)(?:\s+"([\s\S]*?)")?\s+\[ref=@(e\d+)\]/);
@@ -160,7 +166,7 @@ const ehEditavel = (c, editaveis) => c.papel === 'combobox' && editaveis.has(nor
  * campo ou clicar noutro lugar a fecha e joga fora o passo. Isso o código sabe, então não vira
  * pergunta — perguntando, o laço alternava entre abrir a lista e digitar noutro campo sem fim.
  */
-function montarPerguntas(candidatos, dados = {}, editaveis = new Set(), listaAberta = '') {
+function montarPerguntas(candidatos, dados = {}, editaveis = new Set(), listaAberta = '', acabouDeDigitar = false) {
   const opcoes = candidatos.filter((c) => c.papel === PAPEL_DE_OPCAO);
   // `combobox` ENTRA em clicaveis: o dropdown do Radix e um <button role="combobox"> que so abre
   // com clique, e a lista de opcoes so aparece na arvore depois de aberto. `option` tambem entra:
@@ -178,6 +184,7 @@ function montarPerguntas(candidatos, dados = {}, editaveis = new Set(), listaAbe
   if (!clicaveis.length) delete disponiveis.CLICK;
   if (!campos.length) delete disponiveis.TYPE_TEXT;
   if (!opcoes.length) delete disponiveis.SELECT;
+  if (!acabouDeDigitar) delete disponiveis.PRESS_ENTER;
   return {
     ...cabecasDeValor(campos, dados),
     ...headDeAlvo('select_target', 'If the next operation is SELECT, which option is chosen?', opcoes),
@@ -215,7 +222,8 @@ function montarPerguntas(candidatos, dados = {}, editaveis = new Set(), listaAbe
     concluido: {
       type: 'noul',
       instructions: 'The page now shows that the goal was carried out: a success message, a saved or '
-        + 'confirmed state, or the new or changed record visible in the page content. '
+        + 'confirmed state, the new or changed record visible in the page content, or, when the goal '
+        + 'is to reach a page or see results, that page or those results now on screen. '
         + 'Pending changes, unsaved changes or a form still waiting to be submitted mean this is false.',
     },
     arriscado: {
@@ -242,10 +250,15 @@ function recortarTexto(texto) {
 }
 
 /** O estado que acompanha as perguntas. */
-function montarEstado(objetivo, url, feito, textoDaPagina = '', anotacao = {}) {
+function montarEstado(objetivo, url, feito, textoDaPagina = '', anotacao = {}, dados = {}) {
   return {
     objetivo,
     url,
+    // Sem os valores na mesa, a escolha de opcao de um select e a de qual campo recebe a busca
+    // eram feitas as cegas: so os heads de valor viam `dados`. Segredo continua fora.
+    ...(Object.keys(dados).length ? {
+      dados_para_usar: Object.fromEntries(Object.entries(dados).map(([k, v]) => [k, amostraDoValor(k, v)])),
+    } : {}),
     ja_feito: feito.slice(-8),
     // Lido da página a cada ciclo, não acumulado pelo laço: pega também o que a própria página
     // preencheu sozinha (padrão, derivado de outro campo) e o que um passo anterior desfez.
@@ -278,7 +291,7 @@ const JS_VALORES = `(() => {
   // Um combobox do Radix e um <button>: o .value dele e sempre "", e o valor escolhido so existe
   // como texto. Lido pelo .value ele parecia eternamente vazio, e o Jev re-mirava o campo que
   // acabara de preencher. Quando o Radix espelha num <select> escondido, esse select e a verdade.
-  const comboEscrito = (e) => e.tagName !== 'INPUT' && e.getAttribute('role') === 'combobox';
+  const comboEscrito = (e) => e.tagName !== 'INPUT' && e.tagName !== 'TEXTAREA' && e.getAttribute('role') === 'combobox';
   const espelho = (e) => (e.parentElement || {}).querySelector
     ? e.parentElement.querySelector('select') : null;
   const fora = { valores: {}, obrigatorios_vazios: [], editaveis: [], lista_aberta: '' };
@@ -301,13 +314,18 @@ const JS_VALORES = `(() => {
       : (aberto ? 'lista aberta, buscando "' + String((busca || {}).value || '') + '"'
         : (combo ? String(e.innerText || '').replace(/\\s+/g, ' ').trim() : String(e.value ?? '')));
     const chave = nome.slice(0, 80);
-    if (valor) fora.valores[chave] = valor.slice(0, 60);
+    // O estado vai ao Jev, fora da maquina: o que esta digitado num campo de senha nao vai junto.
+    const segredo = e.type === 'password' || ${CHAVE_SECRETA}.test(nome);
+    // Vazio entra como "": ausente, o Jev nao sabia se o campo estava vazio ou se nem era lido, e o
+    // alvo de TYPE_TEXT ficava dividido com _nenhum logo abaixo do piso.
+    fora.valores[chave] = segredo ? (valor ? '(oculto)' : '') : valor.slice(0, 60);
     if (aberto) fora.lista_aberta = chave;
     // Combobox que so revela a lista depois de digitar: o laco precisa abrir e DIGITAR, nao so
-    // clicar e escolher. O popover do cmdk se anuncia por haspopup=dialog; a forma ARIA padrao,
-    // por aria-autocomplete num input.
-    const ac = e.getAttribute('aria-autocomplete');
-    if (e.tagName === 'INPUT' && ac && ac !== 'none') fora.editaveis.push(chave);
+    // clicar e escolher. O popover do cmdk se anuncia por haspopup=dialog; qualquer <input> de texto
+    // ou <textarea> que a arvore chama de combobox (busca com sugestoes, <input list>) aceita
+    // digitacao — so por aria-autocomplete, a busca do DuckDuckGo ficava so clicavel.
+    if (e.tagName === 'TEXTAREA') fora.editaveis.push(chave);
+    else if (e.tagName === 'INPUT' && !/^(checkbox|radio|button|submit|reset|file|hidden|range|color|image)$/.test(e.type)) fora.editaveis.push(chave);
     else if (combo && e.getAttribute('aria-haspopup') === 'dialog') fora.editaveis.push(chave);
     // Obrigatorio vazio e o que impede o submit. Sem isso o Jev clica em "Salvar" no terceiro
     // passo, porque salvar parece mesmo um passo valido rumo a um objetivo que diz "e salvar".
@@ -445,11 +463,11 @@ function decidir(respostas, candidatos = [], limiares = LIMIARES) {
     else return { parar: `o Jev diz que daqui nao da (${forcaOp.toFixed(2)})` };
   }
 
-  const arriscado = respostas.arriscado?.noul;
-  if (typeof arriscado === 'number' && arriscado >= limiares.arriscado) {
-    return { parar: `operacao arriscada (${arriscado.toFixed(2)}): precisa da ordem do usuario` };
-  }
   if (escolha === 'SCROLL_DOWN') return { operacao: 'SCROLL_DOWN' };
+  const arriscado = respostas.arriscado?.noul;
+  const ehArriscado = typeof arriscado === 'number' && arriscado >= limiares.arriscado;
+  const paradaDeRisco = () => ({ parar: `operacao arriscada (${arriscado.toFixed(2)}): precisa da ordem do usuario` });
+  if (escolha === 'PRESS_ENTER') return ehArriscado ? paradaDeRisco() : { operacao: 'PRESS_ENTER' };
 
   const head = respostas[HEAD_DA_OPERACAO[escolha]];
   const gemeos = sinonimos(head, candidatos);
@@ -460,7 +478,12 @@ function decidir(respostas, candidatos = [], limiares = LIMIARES) {
   const alvo = gemeos ? gemeos.ref : head.choice;
   const escolhido = candidatos.find((c) => c.ref === alvo);
   if (!escolhido) return { parar: `o Jev escolheu ${head.choice}, que nao esta na pagina` };
-  return { operacao: escolha, alvo, escolhido, confianca: forcaAlvo };
+  // So clique em botao, link ou item de menu confirma, compra ou apaga. Julgado em todo passo, o
+  // risco do objetivo inteiro ("preencha e envie") barrava ja o primeiro campo ou o primeiro radio.
+  if (escolha === 'CLICK' && PAPEIS_QUE_ENVIAM.has(escolhido.papel) && ehArriscado) return paradaDeRisco();
+  // SELECT numa listbox ARIA vira clique; quem decide se ele pode acontecer e o laco, que so sabe
+  // disso depois de tentar o <select> nativo.
+  return { operacao: escolha, alvo, escolhido, confianca: forcaAlvo, arriscado: ehArriscado ? arriscado : null };
 }
 
 /** O que o LLM de texto recebe: só o necessário para escrever um valor de campo. */
@@ -521,6 +544,7 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
   const feito = [];
   let anterior = null;
   let repetidas = 0;
+  let esperouCarregar = false;
   for (let passo = 1; passo <= maxPassos; passo += 1) {
     const [snapshot, url, texto] = [
       await executar('snapshot', []),
@@ -533,8 +557,17 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
       if (String(saida).startsWith('erro:')) return { feito, sucesso: false, parou: `o navegador falhou no ${verbo}: ${saida}` };
     }
     const candidatos = parsarSnapshot(snapshot);
+    // Logo depois de um `open` ou de um clique que navega, a arvore ainda e a da pagina em branco.
+    if (!candidatos.length && !esperouCarregar) {
+      esperouCarregar = true;
+      await executar('wait', ['--idle']);
+      passo -= 1;
+      continue;
+    }
+    if (candidatos.length) esperouCarregar = false;
+    const cofre = dados && typeof dados === 'object' ? dados : {};
     const anotacao = await valoresAtuais(executar);
-    const estado = montarEstado(objetivo, url, feito, texto, anotacao);
+    const estado = montarEstado(objetivo, url, feito, texto, anotacao, cofre);
     if (!candidatos.length) {
       // Página de sucesso costuma não ter nada clicável: DONE ainda precisa ser perguntado, e com
       // a mesma prova do laço normal — a página confirmando, não só o Jev preferindo DONE.
@@ -549,8 +582,8 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
       };
     }
 
-    const cofre = dados && typeof dados === 'object' ? dados : {};
-    const respostas = await perguntar(estado, montarPerguntas(candidatos, cofre, anotacao.editaveis, anotacao.lista_aberta));
+    const acabouDeDigitar = String(feito.at(-1) ?? '').startsWith('TYPE_TEXT');
+    const respostas = await perguntar(estado, montarPerguntas(candidatos, cofre, anotacao.editaveis, anotacao.lista_aberta, acabouDeDigitar));
     const decisao = decidir(respostas, candidatos);
     if (decisao.parar) return { feito, sucesso: decisao.sucesso === true, parou: decisao.parar };
 
@@ -580,9 +613,18 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
     if (decisao.operacao === 'SELECT') {
       log(`jev-objetivo passo ${passo}: SELECT @${decisao.alvo} ("${decisao.escolhido.nome}") conf=${decisao.confianca.toFixed(2)}`);
       const saida = await executar('eval', [jsDeSelecionar(decisao.escolhido.nome)]);
-      if (String(saida).includes(SEM_SELECT)) await executar('click', [`@${decisao.alvo}`]);
+      if (String(saida).includes(SEM_SELECT)) {
+        if (decisao.arriscado !== null) {
+          return { feito, sucesso: false, parou: `operacao arriscada (${decisao.arriscado.toFixed(2)}): precisa da ordem do usuario` };
+        }
+        await executar('click', [`@${decisao.alvo}`]);
+      }
       else if (String(saida).includes('erro:')) return { feito, sucesso: false, parou: `SELECT falhou: ${saida}` };
       feito.push(`SELECT "${decisao.escolhido.nome}"`);
+    } else if (decisao.operacao === 'PRESS_ENTER') {
+      log(`jev-objetivo passo ${passo}: PRESS_ENTER`);
+      await executar('press', ['Enter']);
+      feito.push('PRESS_ENTER');
     } else if (decisao.operacao === 'SCROLL_DOWN') {
       log(`jev-objetivo passo ${passo}: SCROLL_DOWN`);
       await executar('press', ['PageDown']);
