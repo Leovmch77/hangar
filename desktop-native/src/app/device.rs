@@ -635,7 +635,14 @@ impl Hangar {
                     next.chrome_autofill = *on;
                     this.apply_appearance(next, true, cx);
                 }));
+            let full = Switch::new("full-chrome").checked(a.full_chrome).accessibility_label(tr("settings_full_chrome"))
+                .on_click(cx.listener(|this, on: &bool, _, cx| {
+                    let mut next = appearance::get();
+                    next.full_chrome = *on;
+                    this.apply_appearance(next, true, cx);
+                }));
             settings_box().child(self.row(IconName::Key, "settings_chrome_autofill", Some(tr("settings_chrome_autofill_desc")), true, toggle.into_any_element()))
+                .child(self.row(IconName::Globe, "settings_full_chrome", Some(tr("settings_full_chrome_desc")), true, full.into_any_element()))
         });
         let lead = tr(if crate::tray::SUPPORTED { "settings_general_lead_window" } else { "settings_general_lead" });
         div().flex().flex_col()

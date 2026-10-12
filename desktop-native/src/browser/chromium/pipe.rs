@@ -99,8 +99,17 @@ impl Browser {
     pub fn shared_async(executor: &ForegroundExecutor, background: &BackgroundExecutor) -> Result<Rc<Browser>, String> {
         if let Some(browser) = Self::current() { return Ok(browser); }
         let bin = launch::find()?;
-        let browser = Self::spawn(bin, &Self::profile()?, executor)?;
+        let profile = Self::profile()?;
+        let carry = super::carry::prepare(&profile);
+        let browser = Self::spawn(bin, &profile, executor)?;
         let handshake = browser.handshake(bin, background).boxed_local().shared();
+        if let Some(copy) = carry {
+            let (ready, weak, background) = (handshake.clone(), Rc::downgrade(&browser), background.clone());
+            executor.spawn(async move {
+                if ready.await.is_err() { return; }
+                if let Some(browser) = weak.upgrade() { super::carry::run(browser, profile, copy, background).await; }
+            }).detach();
+        }
         // Corre mesmo sem ninguém esperar: quem só aquece o processo não fica olhando.
         executor.spawn(handshake.clone()).detach();
         *browser.ready.borrow_mut() = Some(handshake);

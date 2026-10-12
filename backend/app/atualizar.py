@@ -884,12 +884,17 @@ def _preparar(topologia: str, *, dist: bool = True, release: tuple | None = None
 def _renovar_chromium() -> None:
     """O chrome-headless-shell baixado não se atualiza como o Chrome da distro, e é ele que abre
     qualquer site para o agente: cada Atualizar confere a versão estável e baixa de novo se mudou.
-    O script nunca falha; um código diferente de zero só vira log, sem derrubar a atualização."""
-    if not sys.platform.startswith("linux") or not (Path.home() / ".hangar" / "native" / "chromium").is_dir():
+    Roda em toda máquina onde o script já rodou (a marca existe), para que um download que falhou
+    seja tentado de novo. O script nunca falha; código diferente de zero ou marca de falha só vira
+    log, sem derrubar a atualização."""
+    marca = Path.home() / ".hangar" / "native" / "chromium-ok"
+    if not sys.platform.startswith("linux") or not marca.is_file():
         return
     p = _rodar([str(REPO / "scripts" / "install-chromium.sh")], cwd=REPO, timeout=900)
     if p.returncode != 0:
         _log.warning("install-chromium.sh saiu com %s: %s", p.returncode, _cauda(p, 4))
+    elif "falhou" in marca.read_text(encoding="utf-8", errors="replace"):
+        _log.warning("install-chromium.sh: %s", _cauda(p, 4))
 
 
 def _stop_windows_front() -> None:

@@ -46,6 +46,9 @@ impl DiskError {
     }
 }
 
+/// O banco `Cookies` de um perfil do Chrome, sem nome para mostrar.
+pub fn chrome_file(file: PathBuf) -> Source { Source { label: String::new(), file, firefox: false } }
+
 /// Perfis com cookies, na ordem dos navegadores de `browsers()` e com o perfil "Default" primeiro.
 pub fn sources() -> Vec<Source> {
     let mut out = Vec::new();
