@@ -128,6 +128,9 @@ pub(super) struct BrowserPanel {
     agent_seq: u64,
     #[cfg(not(target_os = "macos"))]
     paused: Option<Pause>,
+    /// A sessão dona deste navegador está trabalhando: a faixa fica entre uma ação e outra, sem subir e descer.
+    #[cfg(not(target_os = "macos"))]
+    pub(super) session_working: bool,
     /// Fim do último verbo: aviso de entrada da página que chega logo depois é eco da entrada sintética do agente.
     #[cfg(target_os = "windows")]
     agent_finished_at: Option<std::time::Instant>,
@@ -173,7 +176,7 @@ impl BrowserPanel {
         Self { key, #[cfg(not(target_os = "macos"))] controller: None, #[cfg(not(target_os = "macos"))] cdp: None,
             #[cfg(not(target_os = "macos"))] relay: Default::default(), #[cfg(not(target_os = "macos"))] viewer: Rc::default(), #[cfg(target_os = "linux")] frames: Default::default(), engine: None, starting: None, _start: None, events, address, dialog_input, page: model::PageState::default(), invalid: None, #[cfg(not(target_os = "macos"))] cookies_status: None, #[cfg(not(target_os = "macos"))] cookies_confirmed: false, #[cfg(target_os = "linux")] last_fill: None, focus,
             origin: Rc::default(), #[cfg(target_os = "linux")] emulated: None, page_scale: Rc::new(Cell::new(1.)), #[cfg(target_os = "windows")] still: None, #[cfg(target_os = "windows")] released: Vec::new(), #[cfg(target_os = "windows")] cover_gen: 0, #[cfg(target_os = "linux")] page_zoom: (1., 0., 0.), shown: false, local_notice: None, #[cfg(target_os = "linux")] cursor: CursorStyle::Arrow, #[cfg(target_os = "linux")] cursor_probe: (false, None), page_errors: Default::default(), error_count: 0, errors_open: false, shooting: false, copied: false, dismissed_notice: 0, address_stale: false, #[cfg(not(target_os = "macos"))] agent: None, #[cfg(not(target_os = "macos"))] agent_running: 0,
-            #[cfg(not(target_os = "macos"))] agent_seq: 0, #[cfg(not(target_os = "macos"))] paused: None, #[cfg(target_os = "windows")] agent_finished_at: None, #[cfg(not(target_os = "macos"))] _activity: None, #[cfg(target_os = "windows")] idle: Cell::new(0), #[cfg(not(target_os = "macos"))] sidecar: Default::default(), #[cfg(target_os = "linux")] scale: Rc::default(), _drain: drain, _subscriptions: subscriptions }
+            #[cfg(not(target_os = "macos"))] agent_seq: 0, #[cfg(not(target_os = "macos"))] paused: None, #[cfg(not(target_os = "macos"))] session_working: false, #[cfg(target_os = "windows")] agent_finished_at: None, #[cfg(not(target_os = "macos"))] _activity: None, #[cfg(target_os = "windows")] idle: Cell::new(0), #[cfg(not(target_os = "macos"))] sidecar: Default::default(), #[cfg(target_os = "linux")] scale: Rc::default(), _drain: drain, _subscriptions: subscriptions }
     }
 
     fn engine(&self) -> Option<&Rc<Engine>> { self.engine.as_ref()?.as_ref().ok() }
@@ -544,8 +547,21 @@ impl BrowserPanel {
     pub(super) fn controller(&self) -> Option<Rc<crate::browser::control::Controller<crate::browser::control::CdpPage>>> { self.controller.clone() }
 
     #[cfg(not(target_os = "macos"))]
+    fn set_agent(&mut self, text: Option<String>) {
+        if let Some(ctl) = &self.controller { ctl.set_strip_shown(text.is_some()); }
+        self.agent = text;
+    }
+
+    /// A sessão parou de trabalhar: a faixa vai embora como depois do último verbo.
+    #[cfg(not(target_os = "macos"))]
+    pub(super) fn set_session_working(&mut self, working: bool, cx: &mut Context<Self>) {
+        self.session_working = working;
+        if !working && self.agent_running == 0 && self.agent.is_some() { self.schedule_hide(cx); }
+    }
+
+    #[cfg(not(target_os = "macos"))]
     fn agent_acted(&mut self, a: &crate::browser::control::Activity, cx: &mut Context<Self>) {
-        self.agent = Some(describe_activity(&self.key, a));
+        self.set_agent(Some(describe_activity(&self.key, a)));
         self.agent_seq += 1;
         // A atividade chega por canal: o verbo pode já ter terminado, e aí ninguém mais agendaria o sumiço.
         if self.agent_running == 0 { self.schedule_hide(cx); }
@@ -561,6 +577,16 @@ impl BrowserPanel {
         self.agent_running = self.agent_running.saturating_sub(1);
         #[cfg(target_os = "windows")]
         { self.agent_finished_at = Some(std::time::Instant::now()); }
+        // O realce do alvo fica meio segundo depois da ação, se outra não vier antes: o controlador não espera por ele.
+        if let Some(cdp) = self.cdp.clone() {
+            let seq = self.agent_seq;
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(std::time::Duration::from_millis(500)).await;
+                if this.read_with(cx, |this, _| this.agent_seq == seq && this.agent_running == 0).unwrap_or(false) {
+                    drop(cdp.call("Overlay.hideHighlight", serde_json::json!({})));
+                }
+            }).detach();
+        }
         if self.agent_running > 0 || self.agent.is_none() { return; }
         self.schedule_hide(cx);
     }
@@ -571,7 +597,10 @@ impl BrowserPanel {
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(AGENT_LINGER).await;
             let _ = this.update(cx, |this, cx| {
-                if this.agent_seq == seq && this.agent_running == 0 { this.agent = None; cx.notify(); }
+                if this.agent_seq != seq || this.agent_running > 0 { return; }
+                // Sessão ainda trabalhando: a faixa fica, sem a ação que já acabou; some quando a sessão parar.
+                let text = this.session_working.then(|| tr("browser_ctl_using").replace("{session}", this.key.rsplit("::").next().unwrap_or(&this.key)));
+                if this.agent != text { this.set_agent(text); cx.notify(); }
             });
         }).detach();
     }
@@ -1344,6 +1373,12 @@ impl Hangar {
         let current = self.browser_key();
         for (key, browser) in self.side.browsers.iter().map(|(k, b)| (k.clone(), b.clone())).collect::<Vec<_>>() {
             let mine = current.as_deref() == Some(key.as_str());
+            #[cfg(not(target_os = "macos"))]
+            {
+                let name = key.rsplit("::").next().unwrap_or(&key);
+                let working = self.sessions.iter().any(|s| s.name == name && s.state == "working");
+                if browser.read(cx).session_working != working { browser.update(cx, |panel, cx| panel.set_session_working(working, cx)); }
+            }
             let shown = visible && mine;
             #[cfg(target_os = "windows")]
             if !browser.read(cx).released.is_empty() {
