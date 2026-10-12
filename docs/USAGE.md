@@ -657,10 +657,10 @@ copia do seu Chrome os **cookies** (só eles: senhas, histórico e favoritos fic
 **Como fazer (Linux e Windows):**
 
 1. Abra o site no navegador embutido (por exemplo `github.com`).
-2. Clique em **Trazer login do Chrome**, à direita da barra de endereço. Se a página pedir senha,
+2. Clique em **Trazer meu login**, à direita da barra de endereço. Se a página pedir senha,
    aparece também uma linha "Esta página pede login…" com o botão **Usar meu login**: é o mesmo
    caminho.
-3. No diálogo **Usar meu login do Chrome em github.com**, clique em **Trazer login**. A página
+3. No diálogo **Usar meu login em github.com**, clique em **Trazer login**. A página
    recarrega já logada, e a linha embaixo da barra diz quantos cookies vieram.
 
 **Linux:** o Hangar lê o perfil do Chrome direto do disco, sem diálogo no Chrome e com ele aberto
@@ -673,14 +673,14 @@ o que falta.
 **Windows:** o Windows não deixa outro programa ler os cookies do Chrome no disco, então o Hangar os
 pede ao próprio Chrome (ou Edge) pela depuração remota. Na primeira vez:
 
-1. Deixe o Chrome aberto e clique em **Trazer login do Chrome** → **Trazer login**.
+1. Deixe o Chrome (ou o Edge) aberto e clique em **Trazer meu login** → **Trazer login**.
 2. O Hangar abre o navegador que você usou por último (Chrome ou Edge) e copia o endereço da página
    que liga a depuração (`chrome://inspect/#remote-debugging`; no Edge,
    `edge://inspect/#remote-debugging`). O navegador não abre essa página sozinho: nele, **Ctrl+L**,
    **Ctrl+V**, **Enter**.
 3. Marque **Allow remote debugging for this browser instance** (a opção aparece em inglês, mesmo no
    Chrome em português). Isso fica ligado; não precisa repetir.
-4. Volte ao Hangar e clique de novo em **Trazer login do Chrome** → **Trazer login**.
+4. Volte ao Hangar e clique de novo em **Trazer meu login** → **Trazer login**.
 5. O Chrome pergunta **Permitir a depuração remota?**: clique em **Permitir** em até 60 segundos.
    Recusou ou passou do tempo, o Hangar não insiste; é só clicar de novo.
 
@@ -692,7 +692,7 @@ todos — prático, mas **os agentes que usam o navegador embutido ficam logados
 está logado**.
 
 **O agente pode pedir.** O agente da sessão pode chamar `hangar-preview login github.com` quando
-precisar entrar como você. Aparece no painel **"O agente pede o seu login do Chrome em github.com"**
+precisar entrar como você. Aparece no painel **"O agente pede o seu login do navegador em github.com"**
 com **Permitir** e **Recusar**; só um clique seu, no app, aprova (nem o agente nem o celular
 alcançam esses botões). O agente fica sabendo só quantos cookies vieram, nunca o valor deles.
 
