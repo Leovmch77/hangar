@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
-import { Pressable, Text, View } from 'react-native';
+import { AccessibilityInfo, Pressable, Text, View } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
-import { getComputerControlEnabled, getJevAuxCliproxy, listJevAuxModels, patchConfigForServer, type JevAuxCliproxy } from '@hangar/core';
+import { getComputerControlEnabled, getJevAuxCliproxy, listJevAuxModels, patchConfigForServer, sameJevAuxUrl, type JevAuxCliproxy } from '@hangar/core';
 import { BlockHead, Box, ConfigRow, Disclosure, Muted, ServerConfigPage } from '../../src/features/config/ServerConfigParts';
 import { Pill } from '../../src/features/config/PageHeader';
 import { useSettingsColors } from '../../src/features/config/colors';
@@ -21,8 +21,11 @@ export default function Jev() {
   const [advanced, setAdvanced] = useState(false);
   const [cliproxy, setCliproxy] = useState<JevAuxCliproxy | null>(null);
   const [applying, setApplying] = useState(false);
-  const [cliproxyMsg, setCliproxyMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  // `url`: o endereço gravado; editar o campo depois tira a mensagem da tela.
+  const [cliproxyMsg, setCliproxyMsg] = useState<{ ok: boolean; text: string; url: string } | null>(null);
   const [models, setModels] = useState<string[]>([]);
+  // Endereço e chave da última busca: lista e erro só valem enquanto os campos forem esses.
+  const [fetchedFor, setFetchedFor] = useState('');
   const [fetching, setFetching] = useState(false);
   const [modelsError, setModelsError] = useState('');
   const [computer, setComputer] = useState<{ enabled: boolean } | { error: string } | null>(null);
@@ -36,6 +39,8 @@ export default function Jev() {
     setCliproxy(null);
     setCliproxyError('');
     setCliproxyMsg(null);
+    setApplying(false);
+    setFetching(false);
     setComputer(null);
     setModels([]);
     setModelsError('');
@@ -53,6 +58,9 @@ export default function Jev() {
   const auxSupported = 'jev_aux_base_url' in cfg.fields;
   const url = textOf(cfg.current('jev_aux_base_url')).trim();
   const model = textOf(cfg.current('jev_aux_modelo')).trim();
+  const fetchKey = `${url}\n${textOf(cfg.draft.jev_aux_api_key).trim()}`;
+  const fetchValid = fetchedFor === fetchKey;
+  const shownMsg = cliproxyMsg && cliproxyMsg.url === url ? cliproxyMsg : null;
 
   const fetchModels = () => {
     if (!server || fetching || !url) return;
@@ -60,34 +68,49 @@ export default function Jev() {
     const g = gen.current;
     setFetching(true);
     setModelsError('');
-    listJevAuxModels(server, { base_url: url, api_key: key || null, use_saved_key: !key })
+    setFetchedFor(fetchKey);
+    const saved = !key && sameJevAuxUrl(url, cfg.fields.jev_aux_base_url?.valor);
+    listJevAuxModels(server, { base_url: url, api_key: key || null, use_saved_key: saved })
       .then((r) => { if (g !== gen.current) return; setModels(r.models); if (!r.models.length) setModelsError(m.browser_jev_aux_models_none()); })
       .catch((e: unknown) => { if (g !== gen.current) return; setModels([]); setModelsError(message(e)); })
-      .finally(() => setFetching(false));
+      .finally(() => { if (g === gen.current) setFetching(false); });
   };
 
   // Grava na hora, fora do rascunho: a chave do CLIProxyAPI só existe no servidor.
-  const useCliproxy = () => {
+  const applyCliproxy = () => {
     if (!server || !cliproxy || applying) return;
     const g = gen.current;
     setApplying(true);
     setCliproxyMsg(null);
-    patchConfigForServer(server, { jev_aux_cliproxy: true, jev_aux_base_url: cliproxy.preset_url })
+    const target = cliproxy.preset_url;
+    patchConfigForServer(server, { jev_aux_cliproxy: true, jev_aux_base_url: target })
       .then(() => {
         if (g !== gen.current) return;
         cfg.unstage('jev_aux_base_url');
         cfg.unstage('jev_aux_api_key');
         cfg.reload();
-        setCliproxyMsg({ ok: true, text: m.browser_jev_aux_cliproxy_done() });
+        setCliproxyMsg({ ok: true, text: m.browser_jev_aux_cliproxy_done(), url: target });
+        // A região viva só existe no Android: no iOS o leitor de tela precisa do anúncio.
+        AccessibilityInfo.announceForAccessibility(m.browser_jev_aux_cliproxy_done());
       })
-      .catch((e: unknown) => { if (g === gen.current) setCliproxyMsg({ ok: false, text: message(e) }); })
-      .finally(() => setApplying(false));
+      .catch((e: unknown) => {
+        if (g !== gen.current) return;
+        setCliproxyMsg({ ok: false, text: message(e), url });
+        AccessibilityInfo.announceForAccessibility(message(e));
+      })
+      .finally(() => { if (g === gen.current) setApplying(false); });
   };
 
-  const shown = models.filter((id) => id !== model && (!model || id.toLowerCase().includes(model.toLowerCase()))).slice(0, SHOWN);
+  // O nome já escolhido conta como achado (só não repete na lista): "nenhum" só quando nada contém o texto.
+  const containing = fetchValid ? models.filter((id) => !model || id.toLowerCase().includes(model.toLowerCase())) : [];
+  const matching = containing.filter((id) => id !== model);
+  const shown = matching.slice(0, SHOWN);
 
   return (
-    <ServerConfigPage title={m.jev_title()} cfg={cfg}>
+    // Releitura que falha depois do atalho troca a página pelo erro: o "gravado" fica embaixo dele.
+    <ServerConfigPage title={m.jev_title()} cfg={cfg} extra={cfg.load.status !== 'ready' && cliproxyMsg ? (
+      <Text accessibilityLiveRegion="polite" style={[styles.note, { color: cliproxyMsg.ok ? c.muted : failed }]}>{cliproxyMsg.text}</Text>
+    ) : null}>
       <Muted>{m.jev_intro()}</Muted>
 
       <BlockHead title={m.browser_jev_decisions_title()} help={m.browser_jev_decisions_help()} />
@@ -111,11 +134,11 @@ export default function Jev() {
                 : cliproxy.has_keys ? m.browser_jev_aux_cliproxy_ready({ url: cliproxy.preset_url })
                 : m.browser_jev_aux_cliproxy_no_key()}</Muted>
               <View style={styles.row}>
-                <Pill label={m.browser_jev_aux_cliproxy_use()} onPress={useCliproxy}
+                <Pill label={m.browser_jev_aux_cliproxy_use()} onPress={applyCliproxy}
                   disabled={applying || !cliproxy.running || !cliproxy.has_keys} />
               </View>
-              {cliproxyMsg ? (
-                <Text accessibilityLiveRegion="polite" style={[styles.note, { color: cliproxyMsg.ok ? c.muted : failed }]}>{cliproxyMsg.text}</Text>
+              {shownMsg ? (
+                <Text accessibilityLiveRegion="polite" style={[styles.note, { color: shownMsg.ok ? c.muted : failed }]}>{shownMsg.text}</Text>
               ) : null}
             </View>
           ) : cliproxyError ? (
@@ -132,8 +155,12 @@ export default function Jev() {
                 onPress={fetchModels} disabled={fetching || !url} />
             </View>
             {!url ? <Muted>{m.browser_jev_aux_models_need_url()}</Muted> : null}
-            {modelsError ? <Text accessibilityRole="alert" style={[styles.note, { color: failed }]}>{modelsError}</Text> : null}
-            {models.length ? <Muted>{m.browser_jev_aux_models_found({ n: String(models.length) })}</Muted> : null}
+            {fetchValid && modelsError ? <Text accessibilityRole="alert" style={[styles.note, { color: failed }]}>{modelsError}</Text> : null}
+            {fetchValid && models.length ? (
+              <Muted>{!containing.length ? m.browser_jev_aux_models_no_match()
+                : matching.length > SHOWN ? m.browser_jev_aux_models_cut({ shown: String(SHOWN), n: String(matching.length) })
+                : m.browser_jev_aux_models_found({ n: String(models.length) })}</Muted>
+            ) : null}
             {shown.length ? (
               <Box>
                 {shown.map((id) => (
@@ -167,6 +194,7 @@ const styles = StyleSheet.create({
   block: { gap: 8 },
   row: { flexDirection: 'row' },
   note: { fontSize: 13, lineHeight: 18, paddingHorizontal: 4 },
-  model: { paddingVertical: 10, paddingHorizontal: 12, borderTopWidth: StyleSheet.hairlineWidth },
+  // 44 pt: alvo de toque mínimo.
+  model: { minHeight: 44, justifyContent: 'center', paddingHorizontal: 12, borderTopWidth: StyleSheet.hairlineWidth },
   modelText: { fontSize: 14 },
 });

@@ -9,7 +9,7 @@
   import PushPresence from '../PushPresence.svelte';
   import { pushSupported } from '../../lib/push';
   import type { PushTarget } from '../../lib/quietHours';
-  import { getJevAuxCliproxy, listJevAuxModels, patchConfig, patchConfigForServer, type JevAuxCliproxy } from '@hangar/core';
+  import { getJevAuxCliproxy, listJevAuxModels, patchConfig, patchConfigForServer, sameJevAuxUrl, type JevAuxCliproxy } from '@hangar/core';
   import { getComputerControl } from '../../lib/credenciais';
   import * as m from '../../paraglide/messages';
 
@@ -101,8 +101,11 @@
   // Atalho do CLIProxyAPI local, lista de modelos do provedor e o estado do Computer Use: só na seção jev.
   let cliproxy = $state<JevAuxCliproxy | null>(null);
   let cliproxyAplicando = $state(false);
-  let cliproxyMsg = $state<{ ok: boolean; texto: string } | null>(null);
+  // `url`: o endereço gravado; editar o campo depois tira a mensagem da tela.
+  let cliproxyMsg = $state<{ ok: boolean; texto: string; url: string } | null>(null);
   let modelos = $state<string[]>([]);
+  // Endereço e chave da última busca: lista e erro só valem enquanto os campos forem esses.
+  let buscaDe = $state('');
   let buscando = $state(false);
   let modelosErro = $state('');
   let computer = $state<{ enabled: boolean } | null>(null);
@@ -117,6 +120,8 @@
     cliproxy = null;
     cliproxyErro = '';
     cliproxyMsg = null;
+    cliproxyAplicando = false;
+    buscando = false;
     computer = null;
     computerErro = '';
     modelos = [];
@@ -133,14 +138,19 @@
   });
 
   const auxUrl = $derived(String(store.valorAtual('jev_aux_base_url') ?? '').trim());
+  const buscaAtual = $derived(`${auxUrl}\n${store.rascunhoDe('jev_aux_api_key').trim()}`);
+  const buscaValida = $derived(buscaDe === buscaAtual);
+  const cliproxyMsgVisivel = $derived(cliproxyMsg && (!auxSuportado || auxUrl === cliproxyMsg.url) ? cliproxyMsg : null);
   async function buscarModelos() {
     if (buscando || !auxUrl) return;
     buscando = true;
     modelosErro = '';
     const chave = store.rascunhoDe('jev_aux_api_key').trim();
+    buscaDe = buscaAtual;
     const g = geracao;
     try {
-      const r = await listJevAuxModels(store.alvo, { base_url: auxUrl, api_key: chave || null, use_saved_key: !chave });
+      const salva = !chave && sameJevAuxUrl(auxUrl, store.campos['jev_aux_base_url']?.valor);
+      const r = await listJevAuxModels(store.alvo, { base_url: auxUrl, api_key: chave || null, use_saved_key: salva });
       if (g !== geracao) return;
       modelos = r.models;
       if (!r.models.length) modelosErro = m.browser_jev_aux_models_none();
@@ -149,12 +159,12 @@
       modelos = [];
       modelosErro = e instanceof Error ? e.message : String(e);
     } finally {
-      buscando = false;
+      if (g === geracao) buscando = false;
     }
   }
 
   // Grava na hora (não vai pelo rascunho): a chave do CLIProxyAPI só existe no servidor, e o campo não a recebe.
-  async function usarCliproxy() {
+  async function aplicarCliproxy() {
     if (!cliproxy || cliproxyAplicando) return;
     cliproxyAplicando = true;
     cliproxyMsg = null;
@@ -164,19 +174,16 @@
     try {
       await (s ? patchConfigForServer(s, mudanca) : patchConfig(mudanca));
       if (g !== geracao) return;
+      // Gravado vale mesmo se a releitura abaixo falhar: o erro dela aparece pelo próprio store.
+      cliproxyMsg = { ok: true, texto: m.browser_jev_aux_cliproxy_done(), url: mudanca.jev_aux_base_url };
       store.desfazerRascunho('jev_aux_base_url');
       store.desfazerRascunho('jev_aux_api_key');
       await store.carregar();
-      if (g !== geracao) return;
-      // Gravou, mas a releitura falhou: a tela diz as duas coisas em vez de só "gravado".
-      cliproxyMsg = store.erro
-        ? { ok: false, texto: `${m.browser_jev_aux_cliproxy_done()} ${store.erro}` }
-        : { ok: true, texto: m.browser_jev_aux_cliproxy_done() };
     } catch (e) {
       if (g !== geracao) return;
-      cliproxyMsg = { ok: false, texto: e instanceof Error ? e.message : String(e) };
+      cliproxyMsg = { ok: false, texto: e instanceof Error ? e.message : String(e), url: auxUrl };
     } finally {
-      cliproxyAplicando = false;
+      if (g === geracao) cliproxyAplicando = false;
     }
   }
 
@@ -277,6 +284,10 @@
     <h2>{TITULOS[secao]}</h2>
   </header>
 
+  <!-- Fora dos estados da leitura: "gravado" continua à vista se a releitura logo depois falhar. -->
+  {#if secao === 'jev' && cliproxyMsgVisivel}
+    <p class="aviso" class:erro={!cliproxyMsgVisivel.ok} role="status">{cliproxyMsgVisivel.texto}</p>
+  {/if}
   {#if store.carregando}
     <p class="aviso">{m.comum_carregando()}</p>
   {:else if store.erro && !Object.keys(store.campos).length}
@@ -306,11 +317,10 @@
               <p class="ajuda">{!cliproxy.running ? m.browser_jev_aux_cliproxy_stopped({ url: cliproxy.preset_url })
                 : cliproxy.has_keys ? m.browser_jev_aux_cliproxy_ready({ url: cliproxy.preset_url })
                 : m.browser_jev_aux_cliproxy_no_key()}</p>
-              <button type="button" class="btn" onclick={usarCliproxy}
+              <button type="button" class="btn" onclick={aplicarCliproxy}
                 disabled={cliproxyAplicando || !cliproxy.running || !cliproxy.has_keys} aria-busy={cliproxyAplicando}>
                 {m.browser_jev_aux_cliproxy_use()}
               </button>
-              {#if cliproxyMsg}<p class="aviso" class:erro={!cliproxyMsg.ok} role="status">{cliproxyMsg.texto}</p>{/if}
             </div>
           {:else if cliproxyErro}
             <p class="aviso erro" role="alert">{m.browser_jev_aux_cliproxy_error({ e: cliproxyErro })}</p>
@@ -321,7 +331,7 @@
               {buscando ? m.browser_jev_aux_models_fetching() : m.browser_jev_aux_models_fetch()}
             </button>
             {#if !auxUrl}<span class="ajuda">{m.browser_jev_aux_models_need_url()}</span>{/if}
-            {#if modelos.length}
+            {#if buscaValida && modelos.length}
               <label class="ajuda" for="jev-aux-lista">{m.browser_jev_aux_models_found({ n: String(modelos.length) })}</label>
               <select id="jev-aux-lista" class="jev-lista"
                 value={modelos.includes(String(store.valorAtual('jev_aux_modelo'))) ? String(store.valorAtual('jev_aux_modelo')) : ''}
@@ -330,7 +340,7 @@
                 {#each modelos as id (id)}<option value={id}>{id}</option>{/each}
               </select>
             {/if}
-            {#if modelosErro}<p class="aviso erro" role="alert">{modelosErro}</p>{/if}
+            {#if buscaValida && modelosErro}<p class="aviso erro" role="alert">{modelosErro}</p>{/if}
           </div>
           {#each jevCampos(['jev_aux_esforco']) as c (c.chave)}<LinhaConfig campo={c} {store} />{/each}
         {/if}

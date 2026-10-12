@@ -2106,7 +2106,13 @@ export function getJevAuxCliproxy(s: Server | null): Promise<JevAuxCliproxy> {
   return s ? apiFetchForServer(s, path) : apiFetch(path, { signal: AbortSignal.timeout(8000) });
 }
 
-/** Só `base_url` é obrigatório; sem chave nova o servidor usa a salva. */
+/** A chave salva só vale para o endereço salvo: pedir com outro endereço volta `erro_jev_aux_chave_outro_endereco`. */
+export function sameJevAuxUrl(a: unknown, b: unknown): boolean {
+  const norm = (v: unknown) => String(v ?? '').trim().replace(/\/+$/, '').replace(/\/chat\/completions$/, '').replace(/\/+$/, '');
+  return norm(a) !== '' && norm(a) === norm(b);
+}
+
+/** Só `base_url` é obrigatório. Sem chave digitada e com outro endereço, vai sem chave (Ollama local). */
 export interface JevAuxModelsRequest { base_url: string; api_key?: string | null; use_saved_key?: boolean; use_cliproxy_key?: boolean }
 
 /** Só o que a página do Jev mostra do Computer Use (o celular não tem a tela dele). */

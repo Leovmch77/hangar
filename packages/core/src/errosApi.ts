@@ -220,6 +220,8 @@ const ERROS: Record<string, (params: Parametros) => string> = {
   erro_computer_control_llm_movido: () => m.erro_computer_control_llm_movido(),
   erro_jev_aux_url: () => m.erro_jev_aux_url(),
   erro_jev_aux_cliproxy_key: () => m.erro_jev_aux_cliproxy_key(),
+  erro_jev_aux_chave_outro_endereco: () => m.erro_jev_aux_chave_outro_endereco(),
+  erro_jev_aux_precisa_rust: () => m.erro_jev_aux_precisa_rust(),
   erro_jev_aux_models: (p) => m.erro_jev_aux_models({ status: p.status == null ? '—' : String(p.status), error: String(p.error ?? '') }),
   erro_computer_control_target_name: () => m.erro_computer_control_target_name(),
   erro_computer_control_target_exists: (p) => m.erro_computer_control_target_exists({ name: String(p.name) }),
