@@ -221,27 +221,33 @@ def _meu_endereco() -> str:
 def anunciar(antigo: str) -> list[dict]:
     """Grava esta máquina (nome, endereço, token) em cada peer e apaga lá o nome `antigo`.
     Sem isso a outra ponta segue conhecendo o nome velho e o recado de volta não tem destino."""
+    alvos = [pid for pid, cfg in peers.listar_peers().items() if isinstance(cfg, dict) and cfg.get("enabled") is not False]
+    if not alvos:
+        return []
     base = _meu_endereco()
     if not base:
         return [{"id": "", "estado": "falhou", "motivo": "sem_endereco"}]
     corpo = {"id": settings.server_id, "base_url": base, "token": settings.auth_token}
     resultado: list[dict] = []
     # ponytail: um peer por vez; paralelo se a lista crescer e o teto de 8s por peer pesar.
-    for pid, cfg in peers.listar_peers().items():
-        if not isinstance(cfg, dict) or cfg.get("enabled") is False:
-            continue
+    for pid in alvos:
+        # Qualquer erro vira aviso do peer: o nome desta máquina já foi trocado, a rota não pode dar 500.
         try:
             peers.call(pid, "POST", "/api/peers", corpo)
-            if antigo and antigo != settings.server_id:
-                try:
-                    peers.call(pid, "DELETE", f"/api/peers/{antigo}")
-                except peers.PeerError as e:
-                    if e.status != 404:
-                        raise
-            resultado.append({"id": pid, "estado": "ok", "motivo": ""})
-        except peers.PeerError as e:
+        except Exception as e:
             _log.warning("anunciar em %s falhou: %s", pid, e)
             resultado.append({"id": pid, "estado": "falhou", "motivo": str(e)})
+            continue
+        # O nome novo já está lá: falha aqui é só o velho que sobrou, e o motivo precisa dizer isso.
+        if antigo and antigo != settings.server_id:
+            try:
+                peers.call(pid, "DELETE", f"/api/peers/{antigo}")
+            except Exception as e:
+                if getattr(e, "status", None) != 404:
+                    _log.warning("apagar %s em %s falhou: %s", antigo, pid, e)
+                    resultado.append({"id": pid, "estado": "falhou", "motivo": f"nome antigo {antigo!r} ficou lá: {e}"})
+                    continue
+        resultado.append({"id": pid, "estado": "ok", "motivo": ""})
     return resultado
 
 

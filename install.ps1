@@ -823,6 +823,8 @@ if (-not $SoChecar -and -not (Select-String -Path $envFile -Pattern '^CP_SERVER_
     if ($nomeMaquina) {
         Set-EnvKey -Chave 'CP_SERVER_ID' -Valor $nomeMaquina
         Ok "nome desta maquina para as outras: $nomeMaquina"
+    } else {
+        Falta 'nome desta maquina nao definido: o nome do computador nao serve; defina na tela Maquinas'
     }
 }
 

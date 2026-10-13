@@ -381,8 +381,12 @@ nota "É esse token que você digita no celular na primeira conexão."
 if ! grep -q '^CP_SERVER_ID=.' backend/.env; then
   NOME_MAQUINA=$(hostname | tr 'A-Z' 'a-z' | sed 's/[^a-z0-9_-]/-/g; s/^[-_]*//' | cut -c1-32)
   if [ -n "$NOME_MAQUINA" ]; then
+    # Sem a quebra no fim do arquivo, o nome grudaria na última linha (o token).
+    [ -s backend/.env ] && [ -n "$(tail -c1 backend/.env)" ] && echo >> backend/.env
     printf 'CP_SERVER_ID=%s\n' "$NOME_MAQUINA" >> backend/.env
     ok "nome desta máquina para as outras: $NOME_MAQUINA"
+  else
+    falta "nome desta máquina não definido: o hostname não serve; defina na tela Máquinas"
   fi
 fi
 
