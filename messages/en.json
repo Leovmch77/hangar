@@ -3014,6 +3014,8 @@
   "erro_upload_inexistente": "the audio is no longer in the session folder",
   "erro_arquivo_caminho_convidado": "guests can only transcribe audio from this session's folder",
   "erro_sem_plano_ativo": "no active plan",
+  "erro_planos_precisa_rust": "plans need the Rust server, which is not running",
+  "erro_plano_interno": "the plan operation was interrupted; try again",
   "erro_sem_pasta_planos": "repo without a plans folder",
   "erro_nome_plano_invalido": "invalid plan name: {nome}",
   "erro_plano_nao_encontrado": "plan not found: {nome}",

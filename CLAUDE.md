@@ -363,7 +363,10 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
   mesclada; upstream apagado nunca comprova merge. Pontas iguais continuam protegidas. Evidência
   e limites em [plataforma.md](docs/decisoes/plataforma.md#worktrees-mescladas-usam-a-origem-e-a-base-publicada).
 - **Plan progress lê o `.md` do plano**, sem arquivo de estado: blocos cercados são removidos
-  preservando offsets, e a decoração roda dentro do `to_thread` do git.
+  preservando offsets, e a decoração do Python roda dentro do `to_thread` do git. As rotas de
+  plano e a prévia do plano nativo são do Rust e usam o mesmo rastreador da lista, para o
+  painel e a linha elegerem o mesmo plano. Evidência em
+  [plataforma.md](docs/decisoes/plataforma.md#plan-progress).
 - **Ditado: a transcrição não é o problema, o que vem depois é.** Vocabulário vai para a Whisper
   (consertar depois é impossível por construção); regra de prompt só funciona com exemplo de
   entrada e saída; raciocínio no modelo de limpeza piora e não é calibragem. Quem manda no estilo

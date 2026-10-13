@@ -394,6 +394,8 @@ const ERROS: Record<string, (params: Parametros) => string> = {
   erro_upload_inexistente: () => m.erro_upload_inexistente(),
   erro_arquivo_caminho_convidado: () => m.erro_arquivo_caminho_convidado(),
   erro_sem_plano_ativo: () => m.erro_sem_plano_ativo(),
+  erro_planos_precisa_rust: () => m.erro_planos_precisa_rust(),
+  erro_plano_interno: () => m.erro_plano_interno(),
   erro_sem_pasta_planos: () => m.erro_sem_pasta_planos(),
   erro_nome_plano_invalido: (p) => m.erro_nome_plano_invalido({ nome: String(p.nome) }),
   erro_plano_nao_encontrado: (p) => m.erro_plano_nao_encontrado({ nome: String(p.nome) }),
