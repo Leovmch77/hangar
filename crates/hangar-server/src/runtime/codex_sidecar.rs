@@ -38,6 +38,20 @@ pub fn load(path:&Path) -> Option<Meta> {
     match serde_json::from_slice::<Value>(&std::fs::read(path).ok()?).ok()? { Value::Object(meta)=>Some(meta), _=>None }
 }
 
+/// Como `load`, mas só a ausência é `Ok(None)`: arquivo que existe e não se lê é erro, para quem
+/// decide pelo sidecar se a sessão é dele.
+pub fn read(path:&Path) -> io::Result<Option<Meta>> {
+    let raw = match std::fs::read(path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    match serde_json::from_slice::<Value>(&raw).map_err(|error|io::Error::new(io::ErrorKind::InvalidData,error))? {
+        Value::Object(meta) => Ok(Some(meta)),
+        _ => Err(io::Error::new(io::ErrorKind::InvalidData,"sidecar não é um objeto")),
+    }
+}
+
 fn write(path:&Path,meta:&Meta) -> io::Result<()> { super::queue::atomic_write(path,&serde_json::to_vec(meta)?) }
 
 fn text<'a>(meta:&'a Meta,field:&str) -> Option<&'a str> { meta.get(field).and_then(Value::as_str).filter(|s|!s.is_empty()) }

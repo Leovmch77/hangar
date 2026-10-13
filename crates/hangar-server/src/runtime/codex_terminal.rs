@@ -497,7 +497,17 @@ impl Watcher {
     /// encerramento, e o Python precisa dela para guardar o nome fechado.
     pub async fn kill_by_name(&self,registry:&RuntimeRegistry,name:&str) -> Option<Result<Value,RuntimeError>> {
         let file = codex_sidecar::path(&codex_sidecar::dir(&self.cfg.home),name);
-        let meta = tokio::task::spawn_blocking(move||codex_sidecar::load(&file)).await.ok().flatten();
+        // Só a ausência devolve ao Python: sidecar que existe e não se lê não prova que a sessão não é do
+        // Rust, e o Python encerraria sem a marca dele.
+        let read = match tokio::task::spawn_blocking(move||codex_sidecar::read(&file)).await {
+            Ok(Ok(meta)) => Ok(meta),
+            Ok(Err(error)) => {
+                tracing::warn!(session = %name, code = "close_sidecar_unreadable", kind = ?error.kind(), "sidecar do Codex ilegível ao encerrar");
+                Err(RuntimeError::new("close_sidecar_unreadable","o arquivo da sessão Codex não pôde ser lido; nada foi encerrado"))
+            }
+            Err(_) => Err(RuntimeError::new("close_sidecar_unreadable","a leitura do arquivo da sessão Codex falhou; nada foi encerrado")),
+        };
+        let meta = read.as_ref().ok().cloned().flatten();
         let transcript = meta.as_ref().and_then(|m|text(m,"rollout_path")).filter(|p|!p.is_empty()).map(str::to_owned);
         let with_transcript = |mut value:Value,fallback:Option<&Path>| {
             if let Some(path) = transcript.clone().or_else(||fallback.map(|p|p.to_string_lossy().into_owned())) { value["transcript"] = json!(path); }
@@ -506,7 +516,7 @@ impl Watcher {
         if let Some(target) = registry.codex_terminals().await.into_iter().find(|t|t.name == name) {
             return Some(self.kill(registry,&target).await.map(|v|with_transcript(v,target.transcript.as_deref())));
         }
-        let meta = meta?;
+        let meta = match read { Ok(meta) => meta?, Err(error) => return Some(Err(error)) };
         if meta.get("headless").is_some_and(truthy) { return None; }
         let _round = self.misses.lock().await;
         if let Err(error) = self.kill_pane(name).await { return Some(Err(error)); }

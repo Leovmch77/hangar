@@ -629,6 +629,25 @@ async fn kill_by_name_closes_a_life_the_rust_has_not_adopted_yet() {
     finish(&mut [&mut app,&mut tui]);
 }
 
+#[tokio::test]
+async fn unreadable_sidecar_refuses_the_close_and_never_reaches_python() {
+    // Sidecar que existe e não se lê não prova que a sessão não é do Rust: encerrar recusa com código.
+    let fx = fixture();
+    std::fs::create_dir_all(fx.sidecar_dir()).unwrap();
+    std::fs::write(fx.sidecar_path("cx-proof"),b"{ cortado").unwrap();
+    fx.panes(&["cx-proof"]);
+    let registry = registry().await;
+    registry.bind_watcher(fx.watcher());
+    let refused = registry.kill_codex_terminal("cx-proof").await.expect("sidecar presente").unwrap_err();
+    assert_eq!(refused.code,"close_sidecar_unreadable");
+    assert!(std::fs::read_to_string(&fx.panes).unwrap().starts_with("cx-proof\t"),"nada foi encerrado");
+    let (python, server) = serve_owner(registry.clone()).await;
+    let (status, body) = delete_session(server, "cx-proof").await;
+    assert_eq!(status, 500);
+    assert_eq!(body["detail"]["code"], "close_sidecar_unreadable", "{body}");
+    assert_eq!(python.hits_to("/api/sessions/cx-proof"), 0, "o Python não encerra no lugar do Rust");
+}
+
 /// Servidor com o registro (e a vigia ligada nele), diante de um Python falso.
 pub(crate) async fn serve_owner(registry: Arc<hangar_server::runtime::gateway::RuntimeRegistry>) -> (Arc<crate::fake::Fake>, std::net::SocketAddr) {
     let (python, upstream) = crate::fake::spawn_fake().await;
