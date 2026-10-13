@@ -4,7 +4,8 @@ description: |
   Use quando o pedido é migrar, portar ou "levar para o Rust" uma responsabilidade que hoje mora
   no backend Python do Hangar (backend/app) para o hangar-server (crates/): rota, ponte, poller,
   fila, estado ou integração que já existe no Python. NÃO use para recurso novo sem equivalente
-  Python (nasce direto no Rust) nem para correção pontual de bug em código já migrado.
+  Python (nasce direto no Rust) nem para correção pontual de bug em código já migrado. Trabalho
+  misto: use só para a parte que existe no Python.
 ---
 
 # Migrar do Python para o Rust
@@ -59,8 +60,8 @@ commit, decisão) | plataforma`. Mostre a contagem por área e peça a aprovaç�
    prazo, subprocesso por chamada, volta Python↔Rust) é redesenhado. Grave o equivalente Rust e o
    porquê: evento em vez de polling, async sem pool, estado compartilhado, uma fonte por chave.
    Contorno que só existia por limite do Python não é copiado.
-3. **Bug do Python** achado no caminho: registre e pergunte. Sem outra resposta, o Rust reproduz o
-   bug e a correção vem em commit próprio, depois da paridade.
+3. **Bug do Python** achado no caminho: registre e pergunte. Enquanto a pergunta está aberta, o padrão
+   provisório é o Rust reproduzir o bug; a correção vem em commit próprio, depois da paridade.
 4. Diferença aprovada entra no registro (item, antes, depois, motivo, resposta do usuário) e na
    lista fechada do contrato da rota.
 5. Sinal do Claude Code ou do Codex vence adivinhação por transcript ou pane: hook, evento do
@@ -70,11 +71,12 @@ commit, decisão) | plataforma`. Mostre a contagem por área e peça a aprovaç�
 ## 4. Prender o comportamento antes de portar
 
 1. **Caracterização:** valor esperado só vem de executar o Python, nunca de ler o código. Fixture
-   de contrato em `backend/tests/fixtures/contract/` grava o commit de origem e o comando que a
+   de contrato (crie `backend/tests/fixtures/contract/<area>/`) grava o commit de origem e o comando que a
    gerou; nunca é editada à mão.
 2. **Diferencial:** enquanto o Python existe, as mesmas entradas vão aos dois lados. Cada lado roda
    isolado, partindo do mesmo estado inicial restaurado (config dir temporário, sidecars; nunca o
-   Rust sobre o estado que o Python já alterou), com o mesmo relógio e os mesmos ids injetados. Compara saída e efeitos (arquivos escritos, teclas enviadas ao tmux,
+   Rust sobre o estado que o Python já alterou), com o mesmo relógio e os mesmos ids injetados (sem ponto de injeção, registre o limite no
+   `conferencia.md`). Compara saída e efeitos (arquivos escritos, teclas enviadas ao tmux,
    processos abertos) pela regra do contrato.
 3. **Entradas** cruzam cada armadilha abaixo e cada ramo de erro do inventário.
 4. **Teste não é ajustado para passar:** sem truncar saída, sem comparar mais frouxo que o
@@ -118,7 +120,7 @@ Todos passam antes de dizer "migrado":
    situação = não pronto.
 2. **Relatório do diferencial** (`conferencia.md`): entradas comparadas, diferenças duras (status,
    campo, código, efeito) e moles (texto) por tipo. Zero diferenças sobre poucas entradas não fecha.
-3. **Revisão de falhas caladas:** um revisor independente (`ecc:silent-failure-hunter`) sobre o
+3. **Revisão de falhas caladas:** um revisor independente (`ecc:silent-failure-hunter` ou equivalente) sobre o
    diff inteiro; correção volta ao portão 1.
 4. **Caminho inteiro:** `grep` nos dois lados pelos chamadores do `escopo.md`; nenhum aponta para
    o Python, nenhuma volta entre os dois. Antes de apagar o Python, cada pytest da área tem par
