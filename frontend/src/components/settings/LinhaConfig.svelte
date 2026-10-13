@@ -26,8 +26,10 @@
     motivo?: string;
     /** Permite remover o override salvo pelo app e voltar ao valor do ambiente. */
     removivel?: boolean;
+    /** Campo de texto que abre uma lista com busca (o texto livre continua valendo). */
+    combo?: { opcoes: { value: string; label: string }[]; aoAbrir: () => void; aviso: string | null; vazio: string };
   }
-  let { campo: c, store, escopo = 'servidor', veredito, motivo, removivel = false }: Props = $props();
+  let { campo: c, store, escopo = 'servidor', veredito, motivo, removivel = false, combo = undefined }: Props = $props();
   const estado = $derived(store.campos[c.chave]);
   const removendo = $derived(store.remocaoPendente(c.chave));
 </script>
@@ -102,6 +104,11 @@
       value={store.rascunhoDe(c.chave)}
       oninput={(e) => store.setRascunho(c.chave, e.currentTarget.value)}
     />
+  {:else if combo}
+    <Select id={`cfg-${c.chave}`} class="campo-select" ariaLabel={c.rotulo} livre
+      value={String(store.valorAtual(c.chave) ?? '')}
+      opcoes={combo.opcoes} aoAbrir={combo.aoAbrir} aviso={combo.aviso} vazio={combo.vazio}
+      onchange={(v) => store.setRascunho(c.chave, v)} />
   {:else}
     <input
       id={`cfg-${c.chave}`}

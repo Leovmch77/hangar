@@ -1,16 +1,16 @@
 import { useEffect, useRef, useState } from 'react';
-import { AccessibilityInfo, Pressable, Text, View } from 'react-native';
+import { AccessibilityInfo, Pressable, ScrollView, Text, TextInput, View } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { getComputerControlEnabled, getJevAuxCliproxy, listJevAuxModels, patchConfigForServer, sameJevAuxUrl, type JevAuxCliproxy } from '@hangar/core';
-import { BlockHead, Box, ConfigRow, Disclosure, Muted, ServerConfigPage } from '../../src/features/config/ServerConfigParts';
+import { BlockHead, Box, ConfigRow, Disclosure, Muted, RowShell, ScopeChips, ServerConfigPage, useInputStyle } from '../../src/features/config/ServerConfigParts';
+import { AnchoredPanel } from '../../src/ui/AnchoredPanel';
+import { Icon } from '../../src/ui/Icon';
 import { Pill } from '../../src/features/config/PageHeader';
 import { useSettingsColors } from '../../src/features/config/colors';
-import { textOf, useServerConfig } from '../../src/features/config/serverConfig';
+import { FIELDS, textOf, useServerConfig, type ServerConfig } from '../../src/features/config/serverConfig';
 import * as m from '../../src/paraglide/messages';
 
 const message = (e: unknown) => (e instanceof Error && e.message ? e.message : m.erro_desconhecido());
-// A lista do provedor pode ter centenas de modelos: o campo Modelo filtra, e só as primeiras aparecem.
-const SHOWN = 30;
 
 export default function Jev() {
   const cfg = useServerConfig();
@@ -101,10 +101,6 @@ export default function Jev() {
       .finally(() => { if (g === gen.current) setApplying(false); });
   };
 
-  // O nome já escolhido conta como achado (só não repete na lista): "nenhum" só quando nada contém o texto.
-  const containing = fetchValid ? models.filter((id) => !model || id.toLowerCase().includes(model.toLowerCase())) : [];
-  const matching = containing.filter((id) => id !== model);
-  const shown = matching.slice(0, SHOWN);
 
   return (
     // Releitura que falha depois do atalho troca a página pelo erro: o "gravado" fica embaixo dele.
@@ -147,31 +143,14 @@ export default function Jev() {
           <Box>
             <ConfigRow cfg={cfg} k="jev_aux_base_url" />
             <ConfigRow cfg={cfg} k="jev_aux_api_key" />
-            <ConfigRow cfg={cfg} k="jev_aux_modelo" />
+            <ModelField cfg={cfg} models={fetchValid ? models : []}
+              onOpen={() => { if (url && !fetching && (!fetchValid || modelsError)) fetchModels(); }}
+              notice={!url ? m.browser_jev_aux_models_need_url()
+                : fetching ? m.browser_jev_aux_models_fetching()
+                : !fetchValid ? m.browser_jev_aux_models_stale()
+                : modelsError || null}
+              failed={fetchValid && !!modelsError && modelsError !== m.browser_jev_aux_models_none() && !fetching} />
           </Box>
-          <View style={styles.block}>
-            <View style={styles.row}>
-              <Pill label={fetching ? m.browser_jev_aux_models_fetching() : m.browser_jev_aux_models_fetch()}
-                onPress={fetchModels} disabled={fetching || !url} />
-            </View>
-            {!url ? <Muted>{m.browser_jev_aux_models_need_url()}</Muted> : null}
-            {fetchValid && modelsError ? <Text accessibilityRole="alert" style={[styles.note, { color: failed }]}>{modelsError}</Text> : null}
-            {fetchValid && models.length ? (
-              <Muted>{!containing.length ? m.browser_jev_aux_models_no_match()
-                : matching.length > SHOWN ? m.browser_jev_aux_models_cut({ shown: String(SHOWN), n: String(matching.length) })
-                : m.browser_jev_aux_models_found({ n: String(models.length) })}</Muted>
-            ) : null}
-            {shown.length ? (
-              <Box>
-                {shown.map((id) => (
-                  <Pressable key={id} accessibilityRole="button" accessibilityLabel={id} onPress={() => cfg.stage('jev_aux_modelo', id)}
-                    style={({ pressed }) => [styles.model, { borderTopColor: c.border }, pressed && { backgroundColor: c.hover }]}>
-                    <Text style={[styles.modelText, { color: c.text }]} numberOfLines={1}>{id}</Text>
-                  </Pressable>
-                ))}
-              </Box>
-            ) : null}
-          </View>
           <Box>
             <ConfigRow cfg={cfg} k="jev_aux_esforco" />
           </Box>
@@ -190,7 +169,69 @@ export default function Jev() {
   );
 }
 
+/**
+ * Campo Modelo que abre a lista do provedor com busca. Digitar muda o valor (vale um modelo fora da
+ * lista) e filtra por trecho; tocar numa linha escolhe e fecha.
+ */
+function ModelField({ cfg, models, onOpen, notice, failed }: {
+  cfg: ServerConfig; models: string[]; onOpen: () => void; notice: string | null; failed: boolean;
+}) {
+  const c = useSettingsColors();
+  const { theme } = useUnistyles();
+  const input = useInputStyle();
+  const anchor = useRef<View>(null);
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState('');
+  const k = 'jev_aux_modelo';
+  const field = FIELDS[k];
+  const value = textOf(cfg.current(k));
+  const off = !(k in cfg.fields);
+  const q = query.trim().toLowerCase();
+  const list = q ? models.filter((id) => id.toLowerCase().includes(q)) : models;
+  const show = () => { if (off) return; setQuery(''); setOpen(true); onOpen(); };
+  const close = () => setOpen(false);
+
+  return (
+    <RowShell icon={field.icon} title={field.label()} chips={<ScopeChips cfg={cfg} k={k} />} help={field.help()}>
+      <Pressable ref={anchor} onPress={show} disabled={off} accessibilityRole="combobox" accessibilityLabel={field.label()}
+        accessibilityValue={{ text: value }} accessibilityState={{ expanded: open, disabled: off }}
+        style={[input.style, styles.trigger]}>
+        <Text style={[styles.triggerText, { color: value ? c.text : c.faint }]} numberOfLines={1}>{value || '—'}</Text>
+        <Icon name="ChevronDown" size={14} color={c.muted} />
+      </Pressable>
+      <AnchoredPanel open={open} anchor={anchor.current} onClose={close} label={field.label()} closeLabel={m.native_close()}
+        radius={12} padding={4} maxHeightRatio={1}>
+        <View style={styles.panel}>
+          <TextInput {...input} autoFocus value={value} accessibilityLabel={field.label()} autoCapitalize="none" autoCorrect={false}
+            returnKeyType="done" onSubmitEditing={close}
+            onChangeText={(t) => { cfg.stage(k, t); setQuery(t); }} />
+          {notice ? (
+            <Text accessibilityRole={failed ? 'alert' : undefined} style={[styles.note, { color: failed ? theme.tokens.status.error : c.muted }]}>{notice}</Text>
+          ) : list.length === 0 ? (
+            <Text style={[styles.note, { color: c.muted }]}>{q ? m.browser_jev_aux_models_no_match() : m.browser_jev_aux_models_none()}</Text>
+          ) : (
+            <ScrollView style={styles.models} keyboardShouldPersistTaps="handled">
+              {list.map((id) => (
+                <Pressable key={id} accessibilityRole="button" accessibilityLabel={id} accessibilityState={{ selected: id === value }}
+                  onPress={() => { cfg.stage(k, id); close(); }}
+                  style={({ pressed }) => [styles.model, { borderTopColor: c.border },
+                    id === value && { backgroundColor: c.accentDim }, pressed && { backgroundColor: c.hover }]}>
+                  <Text style={[styles.modelText, { color: id === value ? c.accentText : c.text }]} numberOfLines={1}>{id}</Text>
+                </Pressable>
+              ))}
+            </ScrollView>
+          )}
+        </View>
+      </AnchoredPanel>
+    </RowShell>
+  );
+}
+
 const styles = StyleSheet.create({
+  trigger: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  triggerText: { flex: 1, fontSize: 15 },
+  panel: { gap: 8, padding: 4 },
+  models: { maxHeight: 360 },
   block: { gap: 8 },
   row: { flexDirection: 'row' },
   note: { fontSize: 13, lineHeight: 18, paddingHorizontal: 4 },

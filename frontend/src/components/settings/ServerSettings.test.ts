@@ -515,8 +515,12 @@ describe('ServerSettings — Jev em uma tela própria', () => {
     const aux = mount(ServerSettings, { target: el, props: { store: comAux, secao: 'jev' } });
     await tick();
     expect(el.querySelector('#cfg-jev_aux_base_url')).not.toBeNull();
-    const buscar = [...el.querySelectorAll<HTMLButtonElement>('.jev-modelos button')].find((b) => b.textContent?.includes(m.browser_jev_aux_models_fetch()));
-    expect(buscar?.disabled, 'sem endereço não há o que buscar').toBe(true);
+    // O campo Modelo é a própria lista com busca: sem endereço, ela abre dizendo o que falta.
+    const modelo = el.querySelector<HTMLInputElement>('#cfg-jev_aux_modelo');
+    expect(modelo?.getAttribute('role')).toBe('combobox');
+    modelo!.click();
+    await tick();
+    expect(document.body.textContent).toContain(m.browser_jev_aux_models_need_url());
     unmount(aux);
     const advanced = mount(ServerSettings, { target: el, props: { store, secao: 'avancado' } });
     await tick();
