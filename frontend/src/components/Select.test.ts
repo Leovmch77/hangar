@@ -104,6 +104,10 @@ it('modo livre: digitar vale como valor e filtra; Enter escolhe; aviso toma o lu
     await settle();
     expect(onchange).toHaveBeenLastCalledWith('HAIKU');
     expect(document.querySelectorAll('[role="option"]')).toHaveLength(1);
+    // Nada destacado depois de digitar: a seta escolhe, e só então o Enter troca o texto.
+    expect(campo.getAttribute('aria-activedescendant')).toBeNull();
+    campo.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+    await settle();
     campo.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
     await settle();
     expect(onchange).toHaveBeenLastCalledWith('anthropic/claude-haiku');

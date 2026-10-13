@@ -144,10 +144,11 @@ export default function Jev() {
             <ConfigRow cfg={cfg} k="jev_aux_base_url" />
             <ConfigRow cfg={cfg} k="jev_aux_api_key" />
             <ModelField cfg={cfg} models={fetchValid ? models : []}
-              onOpen={() => { if (!fetchValid && url) fetchModels(); }}
+              onOpen={() => { if (url && !fetching && (!fetchValid || modelsError)) fetchModels(); }}
               notice={!url ? m.browser_jev_aux_models_need_url()
                 : fetching ? m.browser_jev_aux_models_fetching()
-                : fetchValid && modelsError ? modelsError : null}
+                : !fetchValid ? m.browser_jev_aux_models_stale()
+                : modelsError || null}
               failed={fetchValid && !!modelsError && modelsError !== m.browser_jev_aux_models_none() && !fetching} />
           </Box>
           <Box>

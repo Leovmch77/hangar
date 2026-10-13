@@ -7184,6 +7184,7 @@
   "browser_jev_aux_models_fetching": "Buscando…",
   "browser_jev_aux_models_need_url": "Preencha o endereço para buscar.",
   "browser_jev_aux_models_none": "O provedor não devolveu nenhum modelo.",
+  "browser_jev_aux_models_stale": "A lista é de outro endereço ou chave. Feche e abra de novo para buscar.",
   "browser_jev_aux_models_no_match": "Nenhum modelo com esse nome. Apague o campo Modelo para ver a lista toda.",
   "erro_jev_aux_chave_outro_endereco": "digite a chave para este endereço: a chave salva só vai para o endereço salvo",
   "erro_jev_aux_precisa_rust": "o servidor está sem o processo Rust; reinicie o Hangar",

@@ -7184,6 +7184,7 @@
   "browser_jev_aux_models_fetching": "Fetching…",
   "browser_jev_aux_models_need_url": "Fill in the address to fetch.",
   "browser_jev_aux_models_none": "The provider returned no models.",
+  "browser_jev_aux_models_stale": "The list is for another address or key. Close and open it again to fetch.",
   "browser_jev_aux_models_no_match": "No model with that name. Clear the Model field to see the whole list.",
   "erro_jev_aux_chave_outro_endereco": "type the key for this address: the saved key only goes to the saved address",
   "erro_jev_aux_precisa_rust": "the server is running without its Rust process; restart Hangar",

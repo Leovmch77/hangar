@@ -114,7 +114,8 @@
   async function abrir(limpar = true) {
     if (disabled) return;
     if (limpar) filtro = '';
-    ativo = filtro ? 0 : Math.max(0, opcoes.findIndex((o) => o.value === value));
+    // Livre com texto digitado: nada destacado, para o Enter manter o texto em vez de trocar pelo 1º.
+    ativo = filtro ? (livre ? -1 : 0) : Math.max(0, opcoes.findIndex((o) => o.value === value));
     medir();
     aberto = true;
     aoAbrir?.();
@@ -127,6 +128,11 @@
   function fechar() {
     aberto = false;
     botao?.focus();
+  }
+
+  // Livre não tem o fundo que fecha no clique (ele cobriria o próprio campo): fecha quando o foco sai.
+  function saiu() {
+    if (livre) aberto = false;
   }
 
   function escolher(v: string) {
@@ -154,7 +160,7 @@
     if (e.key === 'Tab') { fechar(); return; } // O Tab nativo continua a partir do gatilho, não do portal.
     if (e.key === 'Enter') {
       e.preventDefault();
-      const o = aviso ? undefined : visiveis[ativo];
+      const o = aviso || ativo < 0 ? undefined : visiveis[ativo];
       if (o) escolher(o.value);
       else if (livre) fechar();
       return;
@@ -162,7 +168,8 @@
     if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
       e.preventDefault();
       if (!visiveis.length) return;
-      ativo = (ativo + (e.key === 'ArrowDown' ? 1 : -1) + visiveis.length) % visiveis.length;
+      ativo = ativo < 0 ? (e.key === 'ArrowDown' ? 0 : visiveis.length - 1)
+        : (ativo + (e.key === 'ArrowDown' ? 1 : -1) + visiveis.length) % visiveis.length;
       requestAnimationFrame(() =>
         listaEl?.querySelector<HTMLElement>('[data-ativo="true"]')?.scrollIntoView({ block: 'nearest' }));
     }
@@ -202,10 +209,11 @@
     aria-autocomplete="list"
     aria-controls={idLista}
     aria-expanded={aberto}
-    aria-activedescendant={aberto && !aviso && visiveis.length ? `${idLista}-${ativo}` : undefined}
+    aria-activedescendant={aberto && !aviso && ativo >= 0 && visiveis.length ? `${idLista}-${ativo}` : undefined}
     {value}
-    oninput={(e) => { onchange(e.currentTarget.value); filtro = e.currentTarget.value; ativo = 0; if (!aberto) void abrir(false); }}
+    oninput={(e) => { onchange(e.currentTarget.value); filtro = e.currentTarget.value; ativo = -1; if (!aberto) void abrir(false); }}
     onclick={() => { if (!aberto) void abrir(); }}
+    onblur={saiu}
     onkeydown={teclado}
   />
 {:else}
@@ -233,10 +241,13 @@
 {#if aberto}
   <!-- Backdrop transparente: fecha ao clicar fora sem precisar de listener global no document, que
        nas outras telas já brigou com o click-fantasma do iOS (ver BottomSheet). -->
-  <div class="sel-fora" use:portal onclick={fechar} role="presentation"></div>
+  {#if !livre}<div class="sel-fora" use:portal onclick={fechar} role="presentation"></div>{/if}
+  <!-- Livre: clicar na lista não tira o foco do campo (senão o blur fecharia antes do clique). -->
   <div
     class="sel-lista"
     use:portal
+    onmousedown={(e) => { if (livre) e.preventDefault(); }}
+    role="presentation"
     style="top:{pos.top === null ? 'auto' : `${pos.top}px`}; bottom:{pos.bottom === null ? 'auto' : `${pos.bottom}px`}; left:{pos.left}px; width:{pos.width}px; max-height:{pos.maxH}px"
   >
     {#if comFiltro}

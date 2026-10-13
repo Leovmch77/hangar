@@ -143,10 +143,11 @@
   // Lista do campo Modelo: busca ao abrir quando ainda não há uma para o endereço e a chave atuais.
   const modelosCombo = $derived({
     opcoes: buscaValida ? modelos.map((id) => ({ value: id, label: id })) : [],
-    aoAbrir: () => { if (!buscaValida && auxUrl) void buscarModelos(); },
+    // Busca que falhou (ou veio vazia) tenta de novo ao reabrir: não há mais botão de buscar.
+    aoAbrir: () => { if (auxUrl && !buscando && (!buscaValida || modelosErro)) void buscarModelos(); },
     aviso: !auxUrl ? m.browser_jev_aux_models_need_url()
       : buscando ? m.browser_jev_aux_models_fetching()
-      : !buscaValida ? null
+      : !buscaValida ? m.browser_jev_aux_models_stale()
       : modelosErro || null,
     vazio: m.browser_jev_aux_models_no_match(),
   });
