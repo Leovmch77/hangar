@@ -280,7 +280,23 @@ impl AccountService {
         self.report_config_problems(&config.problems);
         let aliases = &config.aliases;
         let mut sources = vec![];
-        for (row, account) in self.claude_accounts()? {
+        // Catálogo que falha tira só a origem dele: as outras fontes seguem com cota.
+        let catalog_failed = |code: &'static str, origin: &str| {
+            tracing::warn!(code, origin, "catálogo de contas ilegível; a cota das outras fontes segue");
+            if let Some(diag) = self.quotas.diag.get() {
+                diag.report("rust.quota_sources_partial", &format!("cotas:{origin}"), code,
+                    "catálogo de contas ilegível; a cota das outras fontes segue");
+            }
+        };
+        let claude = self.claude_accounts().unwrap_or_else(|error| {
+            catalog_failed(error.code, "claude");
+            vec![]
+        });
+        let codex = self.visible_codex_accounts().unwrap_or_else(|error| {
+            catalog_failed(error.code, "codex");
+            vec![]
+        });
+        for (row, account) in claude {
             let path = row["path"].as_str().ok_or_else(AccountError::io)?;
             if !account.is_default
                 && !crate::accounts::storage::real_file(
@@ -291,7 +307,7 @@ impl AccountService {
             }
             sources.push((json!({"id":format!("claude:{path}"),"label":row["label"],"provedor":"claude","ativa":row["active"]}),Origin::Account(Provider::Claude, account)));
         }
-        for account in self.visible_codex_accounts()? {
+        for account in codex {
             let path = crate::accounts::catalog::resolved(&account.home);
             sources.push((json!({"id":format!("codex:{}",path.to_string_lossy()),
                 "label":if account.is_default {"Codex"} else {&account.id},"provedor":"codex","ativa":false}),Origin::Account(Provider::Codex,account)));
@@ -748,6 +764,28 @@ mod tests {
         let rows = restarted.quotas(Some(bridge()), false, false).await.unwrap();
         assert_eq!(reads.load(Ordering::SeqCst), 1);
         assert_eq!(row(&rows, "chave:test").unwrap()["label"], "Chave");
+        server.abort();
+    }
+
+    /// Catálogo de contas ilegível derruba só aquela origem: as chaves de API seguem com cota.
+    #[tokio::test]
+    async fn unreadable_account_catalog_keeps_the_other_sources() {
+        let handler = || async { Json(json!({"usage":{"limit":"10","remaining":"5"}})) };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = axum::Router::new().route("/v1/usages", axum::routing::get(handler));
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let (temp, service) = service_with_engine(&format!("http://{address}/v1"));
+        let mut env = service.env.clone();
+        // HOME que é arquivo: listar as pastas das contas falha com erro de E/S.
+        env.home = temp.path().join("home-arquivo");
+        std::fs::write(&env.home, "x").unwrap();
+        env.codex_default = env.home.join(".codex");
+        env.base.insert("CP_ENGINES_FILE".into(), temp.path().join(".claude/engines.json").to_string_lossy().into_owned());
+        let service = AccountService::new(env);
+        assert!(service.claude_accounts().is_err() || service.visible_codex_accounts().is_err(), "o caso precisa de um catálogo que falha");
+        let rows = service.quotas(None, false, false).await.expect("a cota das outras fontes sai");
+        assert_eq!(row(&rows, "chave:test").unwrap()["estado"], "lida");
         server.abort();
     }
 
