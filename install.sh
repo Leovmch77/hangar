@@ -376,6 +376,16 @@ grep -q '^CP_AUTH_TOKEN=.\+' backend/.env 2>/dev/null \
   || fail "o token não foi gravado em backend/.env — sem ele o celular não entra"
 nota "É esse token que você digita no celular na primeira conexão."
 
+# Sem nome a máquina não conversa com as outras (recado de volta sai sem endereço). Nome que já
+# existe fica: trocá-lo pela tela avisa as outras máquinas, trocá-lo aqui não avisaria.
+if ! grep -q '^CP_SERVER_ID=.' backend/.env; then
+  NOME_MAQUINA=$(hostname | tr 'A-Z' 'a-z' | sed 's/[^a-z0-9_-]/-/g; s/^[-_]*//' | cut -c1-32)
+  if [ -n "$NOME_MAQUINA" ]; then
+    printf 'CP_SERVER_ID=%s\n' "$NOME_MAQUINA" >> backend/.env
+    ok "nome desta máquina para as outras: $NOME_MAQUINA"
+  fi
+fi
+
 QUER_TAILSCALE=0
 if [ "$TAILSCALE" = nao ]; then
   nota "Tailscale: não usar (--tailscale=nao), mesmo se já estiver instalado"

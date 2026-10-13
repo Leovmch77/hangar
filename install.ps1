@@ -815,6 +815,17 @@ if ($script:temLog) { Add-Content -Path $logInstall -Value '  ok  CP_AUTH_TOKEN 
 Retoma-Log
 Nota 'E esse token que voce digita no celular na primeira conexao.'
 
+# Sem nome a maquina nao conversa com as outras (recado de volta sai sem endereco). Nome que ja
+# existe fica: troca-lo pela tela avisa as outras maquinas, troca-lo aqui nao avisaria.
+if (-not $SoChecar -and -not (Select-String -Path $envFile -Pattern '^CP_SERVER_ID=.' -Quiet)) {
+    $nomeMaquina = ($env:COMPUTERNAME.ToLower() -replace '[^a-z0-9_-]', '-').TrimStart('-_')
+    if ($nomeMaquina.Length -gt 32) { $nomeMaquina = $nomeMaquina.Substring(0, 32) }
+    if ($nomeMaquina) {
+        Set-EnvKey -Chave 'CP_SERVER_ID' -Valor $nomeMaquina
+        Ok "nome desta maquina para as outras: $nomeMaquina"
+    }
+}
+
 # Segunda e ultima pergunta. A resposta decide se o Tailscale entra na lista do 1/8 - instalar
 # terceiro no meio do passo 6 era o que fazia a instalacao parar de novo quase no fim.
 $script:querTailscale = $false

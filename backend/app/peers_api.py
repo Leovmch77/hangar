@@ -16,7 +16,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from app import atomico, descoberta, peers, peers_check, runtime_config
+from app import alcance, atomico, descoberta, peers, peers_check, runtime_config
 from app.auth import require_auth
 from app.config import detect_lan_ip, resolve_bind_ip, settings
 from app.mensagens import erro
@@ -198,9 +198,51 @@ def put_identificador(body: dict) -> dict:
             peers.validar_id(valor)
         except ValueError as e:
             raise HTTPException(400, detail=erro("peers_id_invalido", str(e))) from e
+    antigo = settings.server_id or ""
     _escrever_id_env(valor)
     settings.server_id = valor
-    return {"identificador": valor}
+    avisos = anunciar(antigo) if valor and valor != antigo else []
+    return {"identificador": valor, "avisos": avisos}
+
+
+@peers_router.post("/anunciar", dependencies=[Depends(require_auth)])
+def anunciar_rota() -> list[dict]:
+    if not settings.server_id:
+        raise HTTPException(400, detail=erro("peers_sem_identificador", "esta máquina não tem identificador"))
+    return anunciar("")
+
+
+def _meu_endereco() -> str:
+    """Tailscale primeiro: alcança de qualquer rede; a rede local só vale quando não há Tailscale."""
+    nome = alcance._nome_tailscale()
+    return f"https://{nome}" if nome else lan_url(settings)
+
+
+def anunciar(antigo: str) -> list[dict]:
+    """Grava esta máquina (nome, endereço, token) em cada peer e apaga lá o nome `antigo`.
+    Sem isso a outra ponta segue conhecendo o nome velho e o recado de volta não tem destino."""
+    base = _meu_endereco()
+    if not base:
+        return [{"id": "", "estado": "falhou", "motivo": "sem_endereco"}]
+    corpo = {"id": settings.server_id, "base_url": base, "token": settings.auth_token}
+    resultado: list[dict] = []
+    # ponytail: um peer por vez; paralelo se a lista crescer e o teto de 8s por peer pesar.
+    for pid, cfg in peers.listar_peers().items():
+        if not isinstance(cfg, dict) or cfg.get("enabled") is False:
+            continue
+        try:
+            peers.call(pid, "POST", "/api/peers", corpo)
+            if antigo and antigo != settings.server_id:
+                try:
+                    peers.call(pid, "DELETE", f"/api/peers/{antigo}")
+                except peers.PeerError as e:
+                    if e.status != 404:
+                        raise
+            resultado.append({"id": pid, "estado": "ok", "motivo": ""})
+        except peers.PeerError as e:
+            _log.warning("anunciar em %s falhou: %s", pid, e)
+            resultado.append({"id": pid, "estado": "falhou", "motivo": str(e)})
+    return resultado
 
 
 def _escrever_id_env(valor: str) -> None:
