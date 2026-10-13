@@ -74,7 +74,10 @@ for (let i = 0; i < args.length; i++) {
   else if (args[i] === '--passos') flags.passos = args[++i];
   else if (args[i] === '--permitir-risco') flags.permitirRisco = true;
   else if (args[i] === '--refazer') flags.refazer = true;
-  else if (args[i] === '--pasta') flags.pasta = args[++i];
+  else if (args[i] === '--pasta') {
+    flags.pasta = args[++i];
+    if (!flags.pasta || flags.pasta.startsWith('--')) erro('--pasta precisa do diretório: --pasta .hangar/roteiros');
+  }
   else if (args[i] === '--cwd') flags.cwd = args[++i];
   else pos.push(args[i]);
 }
@@ -577,7 +580,8 @@ if (cmd === 'objetivo') {
     dados,
     refazer: flags.refazer === true,
     // O MCP roda este script no cwd do backend: ele manda o da sessão em --cwd.
-    pasta: flags.pasta || roteiro.pastaDe(flags.cwd || process.cwd()),
+    // --pasta relativa é relativa ao cwd da sessão, não ao do backend.
+    pasta: flags.pasta ? resolve(flags.cwd || process.cwd(), flags.pasta) : roteiro.pastaDe(flags.cwd || process.cwd()),
     maxPassos: Number(flags.passos) > 0 ? Number(flags.passos) : 15,
     permitirRisco: flags.permitirRisco === true,
     escreverTexto: problema ? undefined : escritorDeTexto(),

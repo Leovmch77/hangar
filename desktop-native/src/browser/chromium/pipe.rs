@@ -63,6 +63,13 @@ impl Wire {
 
     fn alive(&self) -> bool { self.gone.get().is_none() }
 
+    /// Marca o fim pedido pelo app; `false` quando o processo já tinha saído sozinho, e aí a queda segue ao diário.
+    fn retire(&self, reason: &str) -> bool {
+        if self.gone.set(format!("{RETIRED}: {reason}")).is_err() { return false; }
+        self.asked.store(true, Ordering::SeqCst);
+        true
+    }
+
     fn send(&self, session: Option<&str>, method: &str, params: Value, done: Option<Box<dyn FnOnce(Reply) + Send>>) {
         // Processo que já saiu: a escrita poderia até passar (pipe ainda aberto por um instante) e ninguém responderia.
         if let Some(gone) = self.gone.get() {
@@ -216,8 +223,7 @@ impl Browser {
     /// próximo pedido subir outro no mesmo perfil sem dois processos nele.
     /// ponytail: SIGKILL sem `Browser.close`; o que o processo doente ainda não gravou do perfil se perde.
     pub fn retire(&self, reason: &str) {
-        self.wire.asked.store(true, Ordering::SeqCst);
-        if self.wire.gone.set(format!("{RETIRED}: {reason}")).is_err() { return; }
+        if !self.wire.retire(reason) { return; }
         eprintln!("[nav] Chromium descartado: {reason}");
         if let Some(mut child) = lock(&self.wire.child).take() {
             let _ = child.kill();
@@ -529,6 +535,18 @@ mod tests {
     pub(super) fn wire() -> (Arc<Wire>, std::io::PipeReader) {
         let (reader, writer) = std::io::pipe().unwrap();
         (Wire::new(writer, None), reader)
+    }
+
+    #[test]
+    fn retire_after_a_real_death_leaves_it_for_the_diary() {
+        let (dead, _r) = wire();
+        let _ = dead.gone.set("morreu sozinho".into());
+        assert!(!dead.retire("doente"));
+        assert!(!dead.asked.load(Ordering::SeqCst), "a queda de verdade ainda vai ao diário");
+        let (alive, _r) = wire();
+        assert!(alive.retire("doente"));
+        assert!(alive.asked.load(Ordering::SeqCst));
+        assert!(alive.gone.get().unwrap().ends_with("doente"));
     }
 
     #[test]

@@ -368,8 +368,10 @@ impl Starter {
         let _ = session.on("Runtime.bindingCalled", move |params| {
             if params["name"] == "hangarHost" { let _ = host.try_send(Event::Host(params["payload"].as_str().unwrap_or("").to_owned())); }
         });
+        // Falhou aqui: quem fecha o alvo é o `open`, o único que chama.
         match self.setup_target(browser, &session, target, &document).await {
             // Página em branco que cai antes de nascer não é a página: é o Chromium que não consegue mais criá-las.
+            Err(e) if dead.get() => { surface.close(); Err(format!("{BORN_DEAD}: a pagina caiu ao nascer ({e})")) }
             _ if dead.get() => { surface.close(); Err(format!("{BORN_DEAD}: a pagina caiu ao nascer")) }
             Ok((window, decoration)) => Ok(Engine {
                 session, publish, target: target.to_owned(), window, decoration, executor: self.executor.clone(), background: self.background.clone(),

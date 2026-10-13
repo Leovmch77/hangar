@@ -4,8 +4,8 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
-const { rodarComRoteiro, relocalizar, elementoDe, arquivo, pastaDe, juntar, PASTA } = require('./jev_roteiro.cjs');
-const { parsarSnapshot } = require('./jev_objetivo.cjs');
+const { rodarComRoteiro, relocalizar, elementoDe, arquivo, pastaDe, juntar, salvar, gravador, PASTA } = require('./jev_roteiro.cjs');
+const { parsarSnapshot, jsDeSelecionar } = require('./jev_objetivo.cjs');
 
 const OBJETIVO = 'incluir uma alergia com descrição {descricao}';
 const pastaNova = () => fs.mkdtempSync(path.join(os.tmpdir(), 'roteiro-'));
@@ -165,6 +165,8 @@ test('roteiro ilegivel: avisa, roda pelo Jev e regrava', async () => {
   const r = await rodarComRoteiro({ pasta, objetivo: OBJETIVO, dados: { descricao: 'A' }, executar: s.executar, perguntar: jevDoSite(s) });
   assert.equal(r.sucesso, true);
   assert.match(r.roteiro, /roteiro ilegível, seguindo pelo Jev/);
+  assert.match(r.roteiro, /ilegível guardado em .*\.bak/);
+  assert.equal(fs.readFileSync(`${arq}.bak`, 'utf8'), '{ quebrado');
   assert.equal(lerUnico(pasta).versao, 2);
 });
 
@@ -314,6 +316,76 @@ test('arquivo em versao desconhecida nunca e sobrescrito; a corrida segue valend
   assert.equal(r.sucesso, true);
   assert.match(r.roteiro, /não gravado: arquivo em versão 3/);
   assert.equal(fs.readFileSync(arq, 'utf8'), futuro);
+});
+
+test('salvar: tmp unico por escrita e nenhum tmp sobra quando falha', () => {
+  const pasta = pastaNova();
+  const arq = path.join(pasta, 'r.json');
+  // Outro escritor com o tmp "fixo" aberto não atrapalha.
+  fs.mkdirSync(`${arq}.tmp`);
+  salvar(arq, { versao: 2, variantes: [] });
+  assert.equal(JSON.parse(fs.readFileSync(arq, 'utf8')).versao, 2);
+  const preso = path.join(pasta, 'dir.json');
+  fs.mkdirSync(path.join(preso, 'x'), { recursive: true });
+  assert.throws(() => salvar(preso, { versao: 2, variantes: [] }));
+  assert.deepEqual(fs.readdirSync(pasta).filter((n) => n.startsWith('dir.json.')), [], 'tmp removido na falha');
+});
+
+test('corridas simultaneas: a gravacao rele o arquivo e junta, nunca apaga a outra', async () => {
+  const { pasta, arq, boa } = await gravarBoa();
+  fs.rmSync(arq);
+  const s = site();
+  const jev = jevDoSite(s);
+  let uma = true;
+  const r = await rodarComRoteiro({ pasta, objetivo: OBJETIVO, dados: { descricao: 'B' }, executar: s.executar,
+    perguntar: async (e, q) => {
+      // Outra corrida grava no meio desta.
+      if (uma) { uma = false; escrever(arq, [comNome(boa, 0, 'Da outra')]); }
+      return jev(e, q);
+    } });
+  assert.equal(r.sucesso, true);
+  assert.deepEqual(lerUnico(pasta).variantes.map((v) => v.passos[0].alvo.elemento.name), ['Incluir', 'Da outra']);
+});
+
+test('url com erro: roda pelo Jev sem gravar nem repetir, e diz por que', async () => {
+  const pasta = pastaNova();
+  const s = site();
+  let primeira = true;
+  const executar = async (verbo, args) => {
+    if (verbo === 'url' && primeira) { primeira = false; return 'erro: navegador fora do ar'; }
+    return s.executar(verbo, args);
+  };
+  const r = await rodarComRoteiro({ pasta, objetivo: OBJETIVO, dados: { descricao: 'A' }, executar, perguntar: jevDoSite(s) });
+  assert.equal(r.sucesso, true);
+  assert.match(r.roteiro, /^sem página \(erro: navegador fora do ar\)$/);
+  assert.deepEqual(fs.readdirSync(pasta), []);
+});
+
+test('select que devolveu erro nao vira passo', async () => {
+  const g = gravador(async () => 'ok: "erro: opcao sumiu"', {});
+  await g.executar('eval', [jsDeSelecionar('Penicilina')]);
+  assert.deepEqual(g.variante(), { motivo: 'nenhuma ação a gravar' });
+});
+
+test('pasta global: o host (sem porta) entra na chave e na conferencia da pagina', async () => {
+  const pasta = pastaNova();
+  const comHost = (s, host) => async (verbo, args) => {
+    const r = await s.executar(verbo, args);
+    return verbo === 'url' ? String(r).replace('http://local/', `http://${host}/`) : r;
+  };
+  const s1 = site();
+  await rodarComRoteiro({ pasta, comHost: true, objetivo: OBJETIVO, dados: { descricao: 'A' }, executar: comHost(s1, 'a.test'), perguntar: jevDoSite(s1) });
+  assert.equal(lerUnico(pasta).passos[0].janela.classe, 'a.test/alergia');
+  // Outra porta do mesmo host repete.
+  const s2 = site();
+  const r2 = await rodarComRoteiro({ pasta, comHost: true, objetivo: OBJETIVO, dados: { descricao: 'B' }, executar: comHost(s2, 'a.test:3000'), perguntar: proibido });
+  assert.match(r2.roteiro, /repetidos 3 de 3/);
+  // Outro site com o mesmo caminho nunca usa o arquivo dele.
+  const s3 = site();
+  const r3 = await rodarComRoteiro({ pasta, comHost: true, objetivo: OBJETIVO, dados: { descricao: 'B' }, executar: comHost(s3, 'b.test'), perguntar: jevDoSite(s3) });
+  assert.equal(r3.sucesso, true);
+  assert.doesNotMatch(r3.roteiro, /variante/);
+  assert.equal(fs.readdirSync(pasta).filter((n) => n.endsWith('.json')).length, 2);
 });
 
 test('--refazer grava so a variante nova', async () => {

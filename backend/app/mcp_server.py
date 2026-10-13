@@ -508,17 +508,18 @@ async def browser_goal(ctx: Context, objetivo: str, dados: dict[str, Any] | None
         args.append("--refazer")
     if pasta.strip():
         args += ["--pasta", pasta.strip()]
-    else:
-        # O script roda no cwd do backend: a pasta do roteiro sai do git onde a sessão trabalha.
-        from app import api
-        try:
-            args += ["--cwd", await asyncio.to_thread(api._session_git_cwd, await _eu(ctx, sessao))]
-        except HTTPException:
-            pass  # sessão sem cwd conhecido: o roteiro fica no cache do usuário
+    # O script roda no cwd do backend: a pasta do roteiro (e `pasta` relativa) sai do git onde a
+    # sessão trabalha.
+    from app import api
+    aviso = ""
+    try:
+        args += ["--cwd", await asyncio.to_thread(api._session_git_cwd, await _eu(ctx, sessao))]
+    except HTTPException as e:
+        aviso = f"\naviso: cwd da sessão desconhecido ({e.detail}); roteiro relativo ao backend ou no cache do usuário"
     codigo, saida = await _jev_cli(ctx, sessao, args, 300.0)
     if codigo != 0:
-        raise ToolError(saida)
-    return saida
+        raise ToolError(saida + aviso)
+    return saida + aviso
 
 
 @mcp.tool(description="O Jev diz se a tela do navegador desta sessão já mostra um estado (\"o diálogo fechou e a "
