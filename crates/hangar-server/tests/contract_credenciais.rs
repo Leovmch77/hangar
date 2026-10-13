@@ -120,7 +120,8 @@ async fn run(case: &Value, python: std::net::SocketAddr) -> (Answer, Answer) {
             hangar_server::accounts::environment::AccountEnvironment::from_map([
                 ("HOME".into(), home_text.clone()),
                 ("USERPROFILE".into(), home_text.clone()),
-                ("PATH".into(), format!("{}:/usr/bin:/bin", bin.display())),
+                // O node dos falsos vem do PATH de quem roda: no CI ele não está em /usr/bin.
+                ("PATH".into(), format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default())),
             ].into()),
         );
         state
