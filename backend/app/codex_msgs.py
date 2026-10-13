@@ -37,6 +37,7 @@ CATALOGO: dict[str, str] = {
     "aviso_hooks_sem_arquivo": "Hooks sem arquivo no Codex e sem equivalente em ~/.claude/hooks: {arquivos}",
     "aviso_historico_indisponivel": "Histórico nativo indisponível; colisões existentes serão preservadas.",
     "aviso_ignorados": "Não reconhecidos pelo Codex e ignorados em {pasta}/: {arquivos}",
+    "aviso_agente_plugin_ilegivel": "Agente de plugin ilegível e ignorado: {path}",
     "aviso_memoria_erro": "Não foi possível ler a memória de {n} projeto(s), entre eles {exemplos}.",
     "aviso_memoria_nao_reconhecida": "O Codex não reconheceu a memória de {n} projeto(s), entre eles {exemplos}.",
     "aviso_memoria_sem_fonte": "Nenhuma memória do Claude encontrada para importar.",

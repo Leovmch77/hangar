@@ -6,6 +6,7 @@ use crate::interactions::{ExpectedInteraction,InteractionBinding,InteractionErro
 use serde_json::{Value,json};
 use std::{collections::VecDeque,path::PathBuf,sync::{Arc,atomic::{AtomicBool,AtomicU64,Ordering}},time::{Duration,SystemTime,UNIX_EPOCH}};
 use tokio::sync::{Mutex,mpsc,oneshot,broadcast};
+use super::terminal_status::{self, StatusSender};
 
 #[derive(Clone)]
 pub struct TerminalTarget {
@@ -23,10 +24,10 @@ pub type ModsAnchor=Arc<std::sync::Mutex<Option<String>>>;
 /// o executor devolve o teclado ao prompt e escreve. `clear_wait`: quanto a trava do `/clear` espera a
 /// conversa nova antes de conferir se ele foi aplicado. `give_up_after`: quanto a entrega incerta espera a
 /// prova antes de ser desistida sozinha (com o Claude parado).
-pub struct TerminalOptions { pub lifecycle:Option<std::sync::Weak<super::gateway::RuntimeRegistry>>,pub permissions:Option<Arc<std::sync::Mutex<crate::state::permission::PermissionMemory>>>,pub interactions:Option<Arc<InteractionStore>>,pub plugin:Option<Arc<crate::plugin::Store>>,pub mode_facts:Option<crate::terminal_facts::ModeReader>,pub terms:Option<Arc<crate::term::Terms>>,pub io:Arc<dyn TerminalIo>,pub limits:InputLimits,pub tick:Duration,pub stall_notice:Duration,pub anchor:ModsAnchor,pub focus_return:Duration,pub clear_wait:Duration,pub give_up_after:Duration }
+pub struct TerminalOptions { pub lifecycle:Option<std::sync::Weak<super::gateway::RuntimeRegistry>>,pub permissions:Option<Arc<std::sync::Mutex<crate::state::permission::PermissionMemory>>>,pub interactions:Option<Arc<InteractionStore>>,pub plugin:Option<Arc<crate::plugin::Store>>,pub mode_facts:Option<crate::terminal_facts::ModeReader>,pub terms:Option<Arc<crate::term::Terms>>,pub io:Arc<dyn TerminalIo>,pub limits:InputLimits,pub tick:Duration,pub stall_notice:Duration,pub anchor:ModsAnchor,pub focus_return:Duration,pub clear_wait:Duration,pub give_up_after:Duration,pub status:Option<StatusSender> }
 impl Default for TerminalOptions {
     fn default()->Self {Self {lifecycle:None,permissions:None,interactions:None,plugin:None,mode_facts:None,terms:None,io:Arc::new(input::ProcessIo::default()),limits:InputLimits::default(),tick:Duration::from_secs(1),stall_notice:Duration::from_secs(30),
-        anchor:ModsAnchor::default(),focus_return:FOCUS_RETURN,clear_wait:CLEAR_APPLY_WAIT,give_up_after:GIVE_UP_AFTER}}
+        anchor:ModsAnchor::default(),focus_return:FOCUS_RETURN,clear_wait:CLEAR_APPLY_WAIT,give_up_after:GIVE_UP_AFTER,status:None}}
 }
 /// Quanto uma linha espera, desde a primeira vez que viu o foco num mod, antes de o executor devolver o
 /// teclado ao prompt. Cobre quem acabou de levar o foco a um painel no terminal, sem deixar a mensagem do
@@ -298,8 +299,18 @@ impl TerminalActor {
         let receipt=ReceiptIndex::new("claude",&target.binding.conversation);
         let (sender,receiver)=mpsc::channel(64); let closed=Arc::new(AtomicBool::new(false)); let anchor=options.anchor.clone();
         let local=Arc::new(crate::terminal_facts::LocalTerminalFacts::new(options.io.clone(),options.plugin.clone(),options.mode_facts.clone()));
+        let status=options.status.clone();
+        if let Some(sender)=&status { sender.send_replace(Default::default()); }
         let executor=Executor {target,queue:Arc::new(queue),local,options,events,revision,sequence,receipt,deliverable:false,last_error:None,uncertain:vec![],unprovable:false,mode_unproved:false,modes_cache:None,uncertain_since:None,loan:None,stall:None,hold:None,hold_checked:false,focus_refused:false,parked:VecDeque::new(),away:None,clear_watch:None,clear_notice:None,footer_misses:None,reconciliation:None,confirm_until:None,confirm_seen:None};
-        let task=tokio::spawn(executor.run(receiver,closed.clone()));
+        let run=executor.run(receiver,closed.clone());
+        let task=tokio::spawn(async move {
+            let mut guard=terminal_status::PanicMark(status);
+            let result=run.await;
+            if let Some(sender)=guard.0.take() && let Err(failure)=&result {
+                terminal_status::publish_problem(&sender,&failure.code,&failure.message);
+            }
+            result
+        });
         TerminalHandle {sender,closed,task:Arc::new(Mutex::new(Some(task))),stopped:Arc::new(Mutex::new(None)),anchor}
     }
 }
@@ -371,6 +382,7 @@ impl Executor {
     async fn publish(&self)->Result<(),RuntimeError> {
         self.revision.fetch_add(1,Ordering::AcqRel);
         let data=self.snapshot().await?;
+        if let Some(sender)=&self.options.status { terminal_status::publish_snapshot(sender,&data); }
         let _=self.events.send(RuntimeEvent {key:self.target.key.clone(),generation:self.target.generation,revision:self.revision.load(Ordering::Acquire),channel:"snapshot".into(),data}); Ok(())
     }
     async fn enter_error(&mut self,failure:RuntimeError)->Result<(),RuntimeError> {
@@ -378,6 +390,7 @@ impl Executor {
         tracing::warn!(key=%self.target.key,session=%self.target.name,code=%failure.code,reason=%failure.message,"entrada terminal entrou em erro");
         self.last_error=Some(failure.code.clone()); self.deliverable=false;
         self.publish().await?;
+        if let Some(sender)=&self.options.status { terminal_status::publish_problem(sender,&failure.code,&failure.message); }
         let revision=self.revision.fetch_add(1,Ordering::AcqRel)+1;
         let _=self.events.send(RuntimeEvent {key:self.target.key.clone(),generation:self.target.generation,revision,channel:"problem".into(),
             data:json!({"error_code":failure.code,"message":failure.message})}); Ok(())
@@ -412,6 +425,7 @@ impl Executor {
             self.action(Action::SetRuntimeState {state}).await?;
         }
         if self.cleared(&self.queue.snapshot().await.map_err(|_|error("queue_io"))?) {self.clear_watch=Some(tokio::time::Instant::now()+self.options.clear_wait);}
+        if let Some(sender)=&self.options.status { terminal_status::publish_snapshot(sender,&self.snapshot().await?); }
         let mut timer=tokio::time::interval(self.options.tick.max(Duration::from_millis(1))); timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             // Guardadas durante um clique de mod: saem na ordem em que chegaram, assim que ele solta o pane.

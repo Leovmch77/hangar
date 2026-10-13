@@ -1598,6 +1598,14 @@ donos: captura, `permission.observe` e `session.dead` saem uma vez, de um lugar 
   `PreviewBroker`, o `tail_pump` (que só servia à supressão da prévia), a sugestão, a pergunta e o
   `drain`. Se o Python mandar um dos quatro eventos para sessão do Rust, o hub descarta e registra
   `state_python_leak` uma vez por sessão.
+- O erro do envio terminal e o motivo de entrada parada chegam pelo `watch` compacto por nome
+  (`RuntimeRegistry::terminal_status`), escrito pelo próprio `TerminalActor`. O monitor lê o
+  último valor ao conectar e só acorda por mudanças da sua sessão; não assina o canal global nem
+  consulta o ator para recuperar eventos perdidos. A reabertura limpa o erro da vida anterior;
+  erro e frase continuam visíveis na reconexão. O canal global continua atendendo os consumidores
+  do coordenador Python (inicialização, recuperação, controles e troca de conversa). Falha de
+  abertura ou de ciclo de vida gravada no canal `live` do nome aparece ao conectar, quando o ator
+  não tem erro, até ele publicar de novo; a mesma tarefa segue o `plugin::Store` da sessão.
 - `rebind` (`/clear`, troca do filho) acorda o `Monitor` na hora: o retrato perde o estado e o novo
   sai sem esperar o tique. A captura é recriada na época nova (o pool solta o vínculo velho do
   mesmo consumidor) e solta ao fim do `Monitor`.
@@ -1620,6 +1628,17 @@ donos: captura, `permission.observe` e `session.dead` saem uma vez, de um lugar 
   para 29 ms de CPU por segundo e o total de 297,5 para 146; latência marcador → `state` igual à do
   Python (mediana ~0,45 s), com a cópia dos marcadores relida só quando o observador das pastas vê
   escrita.
+
+### Avisos de envio terminal por sessão
+
+(12/10/2026.) Cada monitor assinava o broadcast global e clonava `RuntimeEvent.data` antes de
+filtrar a sessão e o tipo do evento. O ator agora publica só código de erro, frase e motivo da
+entrada parada no canal do nome. A atualização aproveita o snapshot que já ia ao Python.
+
+Prova local: sete testes unitários de `terminal_status`, incluindo dez publicadores concorrentes,
+84 testes de `terminal_runtime` e 20 de `conversations` passaram. Cobrem estado anterior à
+assinatura, reconexão, isolamento, erro/recuperação, reabertura e mensagens no SSE. Não houve
+reinício do servidor em uso nem medição de ganho de CPU ou latência no app.
 
 ### Codex sem terminal: o feed do runtime no lugar do `Monitor`
 

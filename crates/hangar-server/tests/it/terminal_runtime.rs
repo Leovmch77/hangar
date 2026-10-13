@@ -1,6 +1,7 @@
 use hangar_server::runtime::{actor::PolicyClient,protocol::{RuntimeCommand,OperationKind,ClockSample},queue::{self,QueueActor,Store,Action},terminal::{TerminalActor,TerminalTarget,TerminalOptions}};
 use hangar_server::terminal_input::*;
 use hangar_server::mods::click::{PaneOp,PaneReply};
+use hangar_server::runtime::terminal_status::{StatusSender, TerminalStatus};
 use serde_json::{Value,json};
 use std::sync::{Arc,Mutex,atomic::AtomicU64};
 use std::time::Duration;
@@ -83,7 +84,7 @@ fn plugin_instance()->String {
     let mut stamp=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
     let mut instance=String::new();while stamp>0 {instance.insert(0,char::from_digit((stamp%36) as u32,36).unwrap());stamp/=36;}instance.push_str("-fixture");instance
 }
-struct Fixture { _dir:tempfile::TempDir,target:TerminalTarget,policy:PolicyClient,io:Arc<Io>, idle:Arc<std::sync::atomic::AtomicBool>, ready:Arc<std::sync::atomic::AtomicBool>, generation:Arc<AtomicU64>, native:Arc<std::sync::atomic::AtomicBool>, unknown:Arc<std::sync::atomic::AtomicBool>, focus_plugin:Arc<std::sync::atomic::AtomicBool>, plugin:Arc<hangar_server::plugin::Store>, instance:String, plugin_task:Mutex<Option<tokio::task::JoinHandle<()>>>, plugin_requests:Arc<Mutex<Vec<Value>>>, calls:Arc<Mutex<Vec<Value>>>,server:tokio::task::JoinHandle<()> }
+struct Fixture { _dir:tempfile::TempDir,target:TerminalTarget,policy:PolicyClient,io:Arc<Io>, idle:Arc<std::sync::atomic::AtomicBool>, ready:Arc<std::sync::atomic::AtomicBool>, generation:Arc<AtomicU64>, native:Arc<std::sync::atomic::AtomicBool>, unknown:Arc<std::sync::atomic::AtomicBool>, focus_plugin:Arc<std::sync::atomic::AtomicBool>, plugin:Arc<hangar_server::plugin::Store>, instance:String, plugin_task:Mutex<Option<tokio::task::JoinHandle<()>>>, plugin_requests:Arc<Mutex<Vec<Value>>>, calls:Arc<Mutex<Vec<Value>>>,status:StatusSender,server:tokio::task::JoinHandle<()> }
 impl Fixture {
     async fn new()->Self {
         let dir=tempfile::tempdir().unwrap();let io=Arc::new(Io::new());let config=dir.path().join("config");
@@ -102,7 +103,7 @@ impl Fixture {
             (axum::http::StatusCode::SERVICE_UNAVAILABLE,[("content-type","application/json")],json!({"ok":false,"error_code":"retired_policy"}).to_string())
         }}));
         let server=tokio::spawn(async move {axum::serve(listener,router).await.unwrap()});
-        Self {_dir:dir,target,policy:PolicyClient::new(address,"test".into(),"instance".into()),io,idle,ready,generation,native,unknown,focus_plugin,plugin,instance:plugin_instance(),plugin_task:Default::default(),plugin_requests:Default::default(),calls,server}
+        Self {_dir:dir,target,policy:PolicyClient::new(address,"test".into(),"instance".into()),io,idle,ready,generation,native,unknown,focus_plugin,plugin,instance:plugin_instance(),plugin_task:Default::default(),plugin_requests:Default::default(),calls,status:tokio::sync::watch::channel(TerminalStatus::default()).0,server}
     }
     fn owner(&self,receipt:bool) {
         let binding=hangar_server::terminal_facts::LocalTerminalFacts::binding(&self.target);
@@ -150,7 +151,7 @@ impl Fixture {
         self.start_plugin();
         let lease=crate::lease_when_free(&self.target.lease_path);
         let store=Store::open(&self.target.state_path,&self.target.projection_dir,queue::State::new("key",1,"session",vec![])).unwrap();
-        let options=TerminalOptions {interactions:Some(self.plugin.interactions().clone()),plugin:Some(self.plugin.clone()),io:self.io.clone(),limits:InputLimits {settle:Duration::ZERO,literal_settle:Duration::ZERO,multiline_settle:Duration::ZERO,slash_settle:Duration::ZERO,proof_attempts:1,ready_attempts:1,cleanup_attempts:1},tick:Duration::from_millis(15),stall_notice,focus_return,clear_wait,..TerminalOptions::default()};
+        let options=TerminalOptions {interactions:Some(self.plugin.interactions().clone()),plugin:Some(self.plugin.clone()),io:self.io.clone(),limits:InputLimits {settle:Duration::ZERO,literal_settle:Duration::ZERO,multiline_settle:Duration::ZERO,slash_settle:Duration::ZERO,proof_attempts:1,ready_attempts:1,cleanup_attempts:1},tick:Duration::from_millis(15),stall_notice,focus_return,clear_wait,status:Some(self.status.clone()),..TerminalOptions::default()};
         TerminalActor::spawn(self.target.clone(),QueueActor::start(store,lease),self.policy.clone(),options,events,Arc::new(AtomicU64::new(0)))
     }
     fn start_give_up(&self,give_up_after:Duration)->hangar_server::runtime::terminal::TerminalHandle {
@@ -423,8 +424,11 @@ async fn unknown_fill_blocks_second_input_after_detach_restart_and_same_sid_gene
     f.unknown.store(false,std::sync::atomic::Ordering::Release);
     let lease=crate::lease_when_free(&f.target.lease_path);
     let store=Store::open(&f.target.state_path,&f.target.projection_dir,queue::State::new("key",2,"session",vec![])).unwrap();
-    let options=TerminalOptions {io:f.io.clone(),limits:InputLimits::default(),tick:Duration::from_millis(15),stall_notice:Duration::from_secs(30),..TerminalOptions::default()};
+    let options=TerminalOptions {io:f.io.clone(),limits:InputLimits::default(),tick:Duration::from_millis(15),stall_notice:Duration::from_secs(30),status:Some(f.status.clone()),..TerminalOptions::default()};
     let h=TerminalActor::spawn(f.target.clone(),QueueActor::start(store,lease),f.policy.clone(),options,broadcast::channel(128).0,Arc::new(AtomicU64::new(0)));
+    assert_eq!(h.snapshot().await.unwrap()["view"]["input_stalled"], "delivery_unproved");
+    let late=f.status.subscribe();
+    assert_eq!(late.borrow().input_stalled.as_deref(), Some("delivery_unproved"), "a reabertura publica o bloqueio antes de atender o monitor");
     assert_eq!(h.drain().await.unwrap()["drained"],0);
     assert_eq!(h.command(f.command("C","C")).await.unwrap().disposition,hangar_server::runtime::protocol::Disposition::Deferred);
     assert_eq!(f.io.calls.lock().unwrap().len(),effects);assert_eq!(f.calls.lock().unwrap().len(),publications);
@@ -454,6 +458,8 @@ async fn terminal_runtime_maintenance_failure_publishes_problem_and_stops_uncoor
         loop {let event=receiver.recv().await.unwrap();if event.channel=="problem"{break event;}}
     }).await.unwrap();
     assert_eq!(problem.data["error_code"],"receipt_scan");
+    assert_eq!(f.status.borrow().error.as_deref(), Some("receipt_scan"));
+    assert_eq!(f.status.borrow().message.as_deref(), problem.data["message"].as_str());
     assert_eq!(h.snapshot().await.unwrap()["error"],"receipt_scan");
     let count=f.state()["operations"].as_object().unwrap().len();
     tokio::time::sleep(Duration::from_millis(60)).await;
@@ -462,7 +468,21 @@ async fn terminal_runtime_maintenance_failure_publishes_problem_and_stops_uncoor
     std::fs::write(&f.target.transcript,"").unwrap();
     h.confirm().await.unwrap();
     assert!(h.snapshot().await.unwrap()["error"].is_null());
+    assert_eq!(*f.status.borrow(), TerminalStatus::default());
     h.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn terminal_runtime_status_reopening_resets_old_error_before_subscribing() {
+    let f=Fixture::new().await;
+    for _ in 0..2 {
+        f.status.send_replace(TerminalStatus {error:Some("old_error".into()),message:Some("erro da vida anterior".into()),input_stalled:None});
+        let h=f.start();
+        h.snapshot().await.unwrap();
+        let late=f.status.subscribe();
+        assert_eq!(*late.borrow(), TerminalStatus::default());
+        h.stop().await.unwrap();
+    }
 }
 
 #[tokio::test]
@@ -475,6 +495,7 @@ async fn terminal_runtime_unknown_delivery_is_signaled_without_retyping() {
         loop {let event=receiver.recv().await.unwrap();if event.channel=="problem"{break event;}}
     }).await.unwrap();
     assert_eq!(problem.data["error_code"],"terminal_delivery_unknown");
+    assert_eq!(f.status.borrow().error.as_deref(), Some("terminal_delivery_unknown"));
     assert_eq!(h.snapshot().await.unwrap()["error"],"terminal_delivery_unknown");
     let calls=f.io.calls.lock().unwrap().len();
     h.command(command).await.unwrap(); tokio::time::sleep(Duration::from_millis(60)).await;
@@ -1167,6 +1188,7 @@ async fn terminal_runtime_deferred_without_write_backs_off_and_surfaces_the_reas
     assert_eq!(h.command(f.command("busy","Olá")).await.unwrap().disposition,hangar_server::runtime::protocol::Disposition::Deferred);
     let start=std::time::Instant::now();
     while h.snapshot().await.unwrap()["view"]["input_stalled"]!="composer_busy" {assert!(start.elapsed()<WAIT,"o motivo não chegou à vista"); tokio::time::sleep(Duration::from_millis(5)).await;}
+    f.wait_for("motivo chegou ao canal da sessão", || f.status.borrow().input_stalled.as_deref()==Some("composer_busy")).await;
     // Parada visível, as tentativas seguem espaçadas: o tique de 15 ms daria ~30 em 500 ms.
     let clears=||f.io.calls.lock().unwrap().iter().filter(|r|r.args.last().is_some_and(|a|a=="C-s")).count();
     let before=clears(); tokio::time::sleep(Duration::from_millis(500)).await;
@@ -1176,6 +1198,7 @@ async fn terminal_runtime_deferred_without_write_backs_off_and_surfaces_the_reas
     f.wait_for("entregue depois do rascunho sair",||f.state()["rows"][0]["delivered"]==true).await;
     let start=std::time::Instant::now();
     while !h.snapshot().await.unwrap()["view"]["input_stalled"].is_null() {assert!(start.elapsed()<WAIT,"o motivo não saiu da vista"); tokio::time::sleep(Duration::from_millis(5)).await;}
+    f.wait_for("entrega limpou o canal da sessão", || f.status.borrow().input_stalled.is_none()).await;
     h.stop().await.unwrap();
 }
 // Tique de 15 ms dobrando: aos 2,5 s a próxima tentativa só viria perto de 3,8 s.

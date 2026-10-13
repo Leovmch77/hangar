@@ -45,6 +45,8 @@ pub struct AppState {
     pub side: SideCtx,
     pub terminal: crate::terminal_control::TerminalPool,
     pub terminal_address: Option<SocketAddr>,
+    /// Segundo socket da porta pública, em `[::]` dual-stack; atende como o primeiro.
+    pub public_v6: Option<TcpListener>,
     pub workspace_slots: Arc<tokio::sync::Semaphore>,
     pub workspace_read_slots: Arc<tokio::sync::Semaphore>,
     pub workspace_meta_slots: Arc<tokio::sync::Semaphore>,
@@ -124,7 +126,7 @@ impl AppState {
         side.monitors = Some(crate::state::live::spawner(state.clone()));
         let groups = crate::groups::from_env(list.env().dirs.as_ref(),
             Arc::new(crate::groups::orq::PythonOrq::new(cfg.upstream, cfg.internal_secret.clone(), http.clone())), list.clone());
-        AppState { accounts: crate::accounts::AccountService::new(crate::accounts::environment::AccountEnvironment::capture()), groups, peers: Arc::new(crate::groups::peers_from_env()), auth: Auth::new(&cfg.auth_token), http, side, cfg, terminal, terminal_address: None, diag,
+        AppState { accounts: crate::accounts::AccountService::new(crate::accounts::environment::AccountEnvironment::capture()), groups, peers: Arc::new(crate::groups::peers_from_env()), auth: Auth::new(&cfg.auth_token), http, side, cfg, terminal, terminal_address: None, public_v6: None, diag,
             workspace_slots: Arc::new(tokio::sync::Semaphore::new(4)),
             interactions, plugin,
             transcription: Arc::default(),
@@ -198,7 +200,9 @@ pub async fn serve_with_state(listener: TcpListener, mut state: AppState) -> std
     let private = TcpListener::bind("127.0.0.1:0").await?;
     state.terminal_address = Some(private.local_addr()?);
     state.voice.set_self(listener.local_addr()?, &state.cfg.auth_token);
+    let public_v6 = state.public_v6.take();
     let state = Arc::new(state);
+    let v6_state = state.clone();
     // Abortada na saída: a tarefa segura o estado do servidor, que sobreviveria a ele.
     let _group_sweep = crate::groups::sweep::spawn(state.clone()).map(crate::AbortOnDrop);
     let plugin_state = state.clone();
@@ -206,12 +210,29 @@ pub async fn serve_with_state(listener: TcpListener, mut state: AppState) -> std
         result = axum::serve(listener.tap_io(crate::nodelay), router(state.clone()).into_make_service_with_connect_info::<SocketAddr>()) => result,
         result = axum::serve(private.tap_io(crate::nodelay), terminal_router(state).into_make_service_with_connect_info::<SocketAddr>()) => result,
         result = async {
+            match public_v6 {
+                Some(v6) => axum::serve(v6.tap_io(crate::nodelay), router(v6_state).layer(axum::middleware::map_request(ipv4_peer))
+                    .into_make_service_with_connect_info::<SocketAddr>()).await,
+                None => std::future::pending::<std::io::Result<()>>().await,
+            }
+        } => result,
+        result = async {
             match plugin {
                 Some(plugin) => axum::serve(plugin.tap_io(crate::nodelay), plugin_router(plugin_state).into_make_service_with_connect_info::<SocketAddr>()).await,
                 None => std::future::pending::<std::io::Result<()>>().await,
             }
         } => result,
     }
+}
+
+/// No socket dual-stack o cliente IPv4 chega como `::ffff:a.b.c.d`; quem decide "local" e proxy confiável compara IPv4.
+async fn ipv4_peer(mut req: axum::extract::Request) -> axum::extract::Request {
+    if let Some(ConnectInfo(peer)) = req.extensions_mut().get_mut::<ConnectInfo<SocketAddr>>()
+        && let std::net::IpAddr::V6(ip) = peer.ip()
+        && let Some(v4) = ip.to_ipv4_mapped() {
+        peer.set_ip(v4.into());
+    }
+    req
 }
 
 pub fn terminal_router(state: Arc<AppState>) -> Router {

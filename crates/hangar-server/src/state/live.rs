@@ -1,6 +1,5 @@
 //! Fontes Rust do Monitor: vínculo do runtime, Store do plugin, arquivos e captura compartilhada.
 //! Fatos externos só decoram os recursos que permanecem fora deste recorte.
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
@@ -552,33 +551,27 @@ fn read_files(env: &StateEnv, name: &str, sid: Option<&str>) -> Result<FileFacts
 
 /// Segue o ator de entrada terminal da sessão: erro e escritor parado viram o problema do estado.
 async fn watch_runtime(registry: Arc<RuntimeRegistry>, name: String, view: Arc<Mutex<RuntimeView>>, wake: Arc<Notify>, plugin_wake: Arc<Notify>) {
-    let mut rx = registry.subscribe();
+    let mut receiver = registry.terminal_status(&name);
     let mut plugin = registry.plugin().ok().map(|store| store.subscribe());
-    let mut keys: HashMap<String, bool> = HashMap::new();
-    let set = |next: RuntimeView| {
-        let mut v = view.lock().unwrap_or_else(|e| e.into_inner());
-        let changed = (v.error.as_deref(), v.message.as_deref(), v.input_stalled.as_deref())
-            != (next.error.as_deref(), next.message.as_deref(), next.input_stalled.as_deref());
-        *v = next;
-        if changed {
-            wake.notify_one();
-        }
-    };
-    let from_snapshot = |data: &Value, current: &RuntimeView| {
-        let error = data["error"].as_str().map(str::to_owned);
-        // A frase veio no `problem`; o retrato só traz o código.
-        let message = current.message.clone().filter(|_| error.is_some() && error == current.error);
-        RuntimeView { error, message, input_stalled: data["view"]["input_stalled"].as_str().map(str::to_owned) }
-    };
-    let current = || view.lock().unwrap_or_else(|e| e.into_inner()).clone();
-    let live = registry.live(&name);
-    if let Some(state) = live.borrow().as_ref() {
-        set(RuntimeView { error: state.error.as_ref().map(|(code, _)| code.clone()),
-            message: state.error.as_ref().map(|(_, message)| message.clone()), ..Default::default() });
-    }
+    // Falha de abertura ou ciclo de vida mora no canal `live`: vale até o ator publicar de novo.
+    let mut lifecycle = registry.live(&name).borrow().as_ref().and_then(|state| state.error.clone());
     loop {
-        let incoming = tokio::select! {
-            event = rx.recv() => event,
+        let mut next = receiver.borrow_and_update().clone();
+        if let Some((code, message)) = lifecycle.take() && next.error.is_none() {
+            next = RuntimeView { error: Some(code), message: Some(message), ..Default::default() };
+        }
+        {
+            let mut current = view.lock().unwrap_or_else(|e| e.into_inner());
+            if *current != next {
+                *current = next;
+                wake.notify_one();
+            }
+        }
+        tokio::select! {
+            changed = receiver.changed() => if changed.is_err() {
+                tracing::warn!(session = name.as_str(), code = "state_runtime_closed", "estado: canal terminal acabou; o problema da entrada fica no último valor");
+                return;
+            },
             event = async { match plugin.as_mut() { Some(rx) => rx.recv().await, None => std::future::pending().await } } => {
                 match event {
                     Ok(key) if registry.interaction_binding_readonly(&name).await.is_ok_and(|binding| binding.key == key) => plugin_wake.notify_waiters(),
@@ -586,51 +579,7 @@ async fn watch_runtime(registry: Arc<RuntimeRegistry>, name: String, view: Arc<M
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => { plugin = None; plugin_wake.notify_waiters(); },
                     _ => {},
                 }
-                continue;
             }
-        };
-        let event = match incoming {
-            Ok(event) => event,
-            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                let state = live.borrow().clone();
-                match state {
-                    Some(state) => set(RuntimeView { error: state.error.as_ref().map(|(code, _)| code.clone()),
-                        message: state.error.as_ref().map(|(_, message)| message.clone()), ..Default::default() }),
-                    None => set(RuntimeView { error: Some("state_runtime_unavailable".into()), ..Default::default() }),
-                }
-                continue;
-            }
-            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                tracing::warn!(session = name.as_str(), code = "state_runtime_closed", "estado: eventos do runtime acabaram; o problema da entrada fica no último valor");
-                return;
-            }
-        };
-        let mine = match keys.get(&event.key) {
-            Some(mine) => *mine,
-            // O ator publica antes de entrar no registro: chave ainda sem dono não é guardada.
-            None => match registry.terminal_name(&event.key).await {
-                None => false,
-                Some(owner) => {
-                    if keys.len() > 256 {
-                        keys.clear();
-                    }
-                    let mine = owner == name;
-                    keys.insert(event.key.clone(), mine);
-                    mine
-                }
-            },
-        };
-        if !mine {
-            continue;
-        }
-        match event.channel.as_str() {
-            "snapshot" => set(from_snapshot(&event.data, &current())),
-            "problem" => {
-                let cur = current();
-                set(RuntimeView { error: event.data["error_code"].as_str().map(str::to_owned),
-                    message: event.data["message"].as_str().map(str::to_owned), input_stalled: cur.input_stalled });
-            }
-            _ => {}
         }
     }
 }
@@ -638,6 +587,47 @@ async fn watch_runtime(registry: Arc<RuntimeRegistry>, name: String, view: Arc<M
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn terminal_status_monitor_reads_initial_state_and_ignores_other_sessions() {
+        let registry = Arc::new(RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(), "test".into(), "instance".into()));
+        let sender = registry.terminal_status_sender("a");
+        let initial = RuntimeView { error: Some("queue_io".into()), message: Some("fila indisponível".into()), input_stalled: None };
+        sender.send_replace(initial.clone());
+        let view = Arc::new(Mutex::new(RuntimeView::default()));
+        let wake = Arc::new(Notify::new());
+        let task = tokio::spawn(watch_runtime(registry.clone(), "a".into(), view.clone(), wake.clone(), Arc::new(Notify::new())));
+        tokio::time::timeout(Duration::from_secs(1), wake.notified()).await.unwrap();
+        assert_eq!(*view.lock().unwrap(), initial);
+        registry.terminal_status_sender("b").send_replace(RuntimeView { input_stalled: Some("composer_busy".into()), ..Default::default() });
+        let headless = registry.live("headless");
+        assert!(headless.borrow().is_none());
+        assert!(tokio::time::timeout(Duration::from_millis(30), wake.notified()).await.is_err(), "outra sessão não acorda este monitor");
+        assert_eq!(*view.lock().unwrap(), initial);
+        sender.send_replace(RuntimeView::default());
+        tokio::time::timeout(Duration::from_secs(1), wake.notified()).await.unwrap();
+        assert_eq!(*view.lock().unwrap(), RuntimeView::default());
+        task.abort();
+        let _ = task.await;
+    }
+
+    #[tokio::test]
+    async fn terminal_status_monitor_reconnects_to_the_latest_of_ten_updates() {
+        let registry = Arc::new(RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(), "test".into(), "instance".into()));
+        let sender = registry.terminal_status_sender("a");
+        for i in 0..10 {
+            sender.send_replace(RuntimeView { input_stalled: Some(format!("reason-{i}")), ..Default::default() });
+        }
+        for _ in 0..2 {
+            let view = Arc::new(Mutex::new(RuntimeView::default()));
+            let wake = Arc::new(Notify::new());
+            let task = tokio::spawn(watch_runtime(registry.clone(), "a".into(), view.clone(), wake.clone(), Arc::new(Notify::new())));
+            tokio::time::timeout(Duration::from_secs(1), wake.notified()).await.unwrap();
+            assert_eq!(view.lock().unwrap().input_stalled.as_deref(), Some("reason-9"));
+            task.abort();
+            let _ = task.await;
+        }
+    }
 
     #[test]
     fn live_sources_do_not_call_migrated_http_policies() {

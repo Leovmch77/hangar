@@ -4,8 +4,7 @@ use hangar_api::state::StateEvent;
 
 /// O que o ator de entrada terminal publica: `error` é o código do canal `problem` ou do retrato,
 /// `message` a frase dele, `input_stalled` o código do escritor parado.
-#[derive(Clone, Debug, Default)]
-pub struct RuntimeView { pub error: Option<String>, pub message: Option<String>, pub input_stalled: Option<String> }
+pub use crate::runtime::terminal_status::TerminalStatus as RuntimeView;
 
 /// `runtime_adapter.runtime_problem`: `(código, detalhe)` do runtime para o `problema` do estado.
 pub fn runtime_problem(view: &RuntimeView) -> Option<(String, String)> {

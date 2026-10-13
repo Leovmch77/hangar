@@ -203,10 +203,12 @@ def test_checar_peer_rota_id_faltando_e_400_nomeado(monkeypatch, cli):
 @pytest.fixture
 def env_tmp(tmp_path, monkeypatch):
     """Seam de I/O do identificador: o .env da máquina não pode aparecer num teste de rota."""
-    from app import peers_api
+    from app import peers, peers_api
     p = tmp_path / ".env"
     monkeypatch.setattr(peers_api, "_ENV_ARQUIVO", p)
     monkeypatch.setattr(settings, "server_id", "")
+    # Trocar o nome avisa os peers: sem isto o teste gravaria "casa" nas máquinas reais.
+    monkeypatch.setattr(peers, "_PEERS_FILE", tmp_path / "peers.json")
     return p
 
 
@@ -243,10 +245,41 @@ def test_identificador_leitura_sem_credencial_e_401(cli):
     assert cli.get("/api/peers/identificador").status_code == 401
 
 
+def test_trocar_identificador_avisa_peers_e_apaga_o_nome_velho(env_tmp, cli, monkeypatch, tmp_path):
+    from app import alcance, peers
+    (tmp_path / "peers.json").write_text(json.dumps({
+        "outra": {"base_url": "https://outra.ts.net", "token": "tk"},
+        "desligada": {"base_url": "https://off.ts.net", "token": "tk", "enabled": False},
+        "caida": {"base_url": "https://caida.ts.net", "token": "tk"}}), encoding="utf-8")
+    monkeypatch.setattr(settings, "server_id", "velho")
+    monkeypatch.setattr(alcance, "_nome_tailscale", lambda: "eu.ts.net")
+    chamadas = []
+
+    def falso(pid, method, path, body=None, timeout=8):
+        chamadas.append((pid, method, path, body))
+        if pid == "caida":
+            raise peers.PeerError("fora do ar", transport=True)
+        if method == "DELETE":
+            raise peers.PeerError("nao existe", status=404)
+        return 200, []
+    monkeypatch.setattr(peers, "call", falso)
+
+    r = cli.put("/api/peers/identificador", headers=AUTH, json={"identificador": "novo"})
+    estados = {a["id"]: a["estado"] for a in r.json()["avisos"]}
+    assert estados == {"outra": "ok", "caida": "falhou"}
+    assert ("outra", "POST", "/api/peers", {"id": "novo", "base_url": "https://eu.ts.net", "token": TOKEN}) in chamadas
+    assert ("outra", "DELETE", "/api/peers/velho", None) in chamadas
+    assert not any(c[0] == "desligada" for c in chamadas)
+
+    chamadas.clear()
+    assert {a["id"] for a in cli.post("/api/peers/anunciar", headers=AUTH).json()} == {"outra", "caida"}
+    assert not any(c[1] == "DELETE" for c in chamadas)
+
+
 def test_gravar_identificador(env_tmp, cli):
     r = cli.put("/api/peers/identificador", headers=AUTH, json={"identificador": "casa"})
     assert r.status_code == 200
-    assert r.json() == {"identificador": "casa"}
+    assert r.json() == {"identificador": "casa", "avisos": []}
     assert settings.server_id == "casa"           # o processo passa a parear na hora
     assert "CP_SERVER_ID=casa" in env_tmp.read_text(encoding="utf-8")   # o hangar-send lê daqui
     assert cli.get("/api/peers/identificador", headers=AUTH).json()["identificador"] == "casa"

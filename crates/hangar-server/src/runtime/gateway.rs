@@ -90,6 +90,7 @@ pub struct RuntimeRegistry {
     /// Problema do último retrato de cada ator com terminal (chave → geração, código), para a lista
     /// quando o `Monitor` não está vivo.
     terminal_problems:std::sync::Mutex<BTreeMap<String,(u64,String)>>,
+    terminal_status:std::sync::Mutex<BTreeMap<String,super::terminal_status::StatusSender>>,
 }
 
 /// A trava pode demorar a soltar: as tarefas de E/S de um ator que saiu, ou o `LockFileEx` de um
@@ -245,7 +246,7 @@ async fn attach_terminal_mods(mods:&crate::mods::state::Mods,target:&super::term
 impl RuntimeRegistry {
     pub fn new(upstream:SocketAddr,secret:String,instance:String) -> Self {
         let reopen_to=(upstream,secret.clone(),crate::proxy::client(),crate::diag::DiagClient::new(upstream,secret.clone()));
-        Self { reopen_to,terminal_problems:Default::default(),interactions:None,entries:Arc::new(Mutex::new(BTreeMap::new())),terminal_states:None,terms:None,events:broadcast::channel(1024).0,
+        Self { reopen_to,terminal_problems:Default::default(),terminal_status:Default::default(),interactions:None,entries:Arc::new(Mutex::new(BTreeMap::new())),terminal_states:None,terms:None,events:broadcast::channel(1024).0,
             policy:PolicyClient::new(upstream,secret,instance.clone()),instance,lifecycle:Mutex::new(BTreeMap::new()),revisions:Mutex::new(BTreeMap::new()),mods:None,plugin:None,ingress:Default::default(),
             respawn_base:Duration::from_secs(5),permissions:None,processes:Arc::new(crate::list::procs::SystemProcs::default()),live:Default::default(),codex_owned:Default::default(),hubs:std::sync::OnceLock::new(),self_ref:std::sync::OnceLock::new(),
             watcher:std::sync::OnceLock::new(),codex_wake:Arc::new(tokio::sync::Notify::new()) }
@@ -627,7 +628,23 @@ impl RuntimeRegistry {
     pub fn ingress(&self) -> &super::ingress::IngressGates { &self.ingress }
     pub fn subscribe(&self) -> broadcast::Receiver<RuntimeEvent> { self.events.subscribe() }
     /// Último valor da sessão `name` para o feed do hub; `None` enquanto ela não está aberta aqui.
-    pub fn live(&self,name:&str) -> LiveReceiver { self.live_sender(name).subscribe() }
+    pub fn live(&self,name:&str) -> LiveReceiver {
+        let mut map = self.live.lock().unwrap_or_else(|e|e.into_inner());
+        map.retain(|key,sender|key == name || sender.receiver_count() > 0 || sender.sender_count() > 1 || sender.borrow().is_some());
+        map.entry(name.to_owned()).or_insert_with(||tokio::sync::watch::channel(None).0).subscribe()
+    }
+    /// Estado do envio terminal, sem receber eventos das outras sessões.
+    pub fn terminal_status(&self,name:&str) -> super::terminal_status::StatusReceiver {
+        // Assinar sob a trava evita que a limpeza confunda o leitor com um publicador novo.
+        let mut map=self.terminal_status.lock().unwrap_or_else(|e|e.into_inner());
+        map.retain(|key,sender|key==name || sender.receiver_count()>0 || sender.sender_count()>1 || sender.borrow().error.is_some());
+        map.entry(name.to_owned()).or_insert_with(||tokio::sync::watch::channel(Default::default()).0).subscribe()
+    }
+    pub(crate) fn terminal_status_sender(&self,name:&str) -> super::terminal_status::StatusSender {
+        let mut map=self.terminal_status.lock().unwrap_or_else(|e|e.into_inner());
+        map.retain(|key,sender|key==name || sender.receiver_count()>0 || sender.sender_count()>1 || sender.borrow().error.is_some());
+        map.entry(name.to_owned()).or_insert_with(||tokio::sync::watch::channel(Default::default()).0).clone()
+    }
     /// Canal do nome, criado na primeira procura (feed ou ator, o que vier antes). Canal vazio e sem
     /// receptor sai do mapa aqui: sem isto o mapa guardaria todo nome que já teve chat aberto. Canal
     /// que um ator já segura (cópia fora do mapa) fica, mesmo vazio: o ator só escreve no primeiro passo.
@@ -873,7 +890,7 @@ impl RuntimeRegistry {
                         .map_err(crate::interactions::runtime_error)?;
                 }
                 // A âncora nasce com o executor, que a lê, e passa ao elo pelo `handle`, também na reabertura.
-                let options=super::terminal::TerminalOptions {lifecycle:self.self_ref.get().cloned(),permissions:self.permissions.clone(),interactions:self.interactions.clone(),plugin:self.plugin.clone(),mode_facts:Some(self.terminal_mode_reader()),terms:self.terms.clone(),anchor:super::terminal::ModsAnchor::default(),..Default::default()};
+                let options=super::terminal::TerminalOptions {lifecycle:self.self_ref.get().cloned(),permissions:self.permissions.clone(),interactions:self.interactions.clone(),plugin:self.plugin.clone(),mode_facts:Some(self.terminal_mode_reader()),terms:self.terms.clone(),anchor:super::terminal::ModsAnchor::default(),status:Some(self.terminal_status_sender(&target.name)),..Default::default()};
                 let handle=super::terminal::TerminalActor::spawn(target.clone(),QueueActor::start(store,lease),self.policy.clone(),options,self.events.clone(),revision);
                 // A vida no `Mods` é única no servidor (`new_life`).
                 let life=match &self.mods {
@@ -1591,8 +1608,20 @@ impl RuntimeRegistry {
     async fn clear_live(&self,name:&str) {
         // Outra vida com o mesmo nome (reaberta antes deste fechamento) segue dona do canal.
         if self.entries.lock().await.values().any(|entry|entry.name == name) { return; }
+        {
+            let mut map=self.terminal_status.lock().unwrap_or_else(|e|e.into_inner());
+            // Cópia fora do mapa é o ator de outra vida com o mesmo nome, que nasce antes de entrar em
+            // `entries`: zerar ou tirar o canal dele deixaria o monitor sem status.
+            if let Some(sender)=map.get(name) && sender.sender_count()==1 {
+                let failed=sender.borrow().error.is_some();
+                if !failed {
+                    sender.send_replace(Default::default());
+                    if sender.receiver_count()==0 { map.remove(name); }
+                }
+            }
+        }
         let mut map = self.live.lock().unwrap_or_else(|e|e.into_inner());
-        if let Some(sender) = map.get(name) {
+        if let Some(sender) = map.get(name) && sender.sender_count() == 1 {
             // Vida que acabou com erro: o problema fica até a próxima abertura, que escreve por cima.
             // ponytail: o canal com erro de sessão apagada fica no mapa; um por nome, sem crescer.
             if sender.borrow().as_ref().is_some_and(|state|state.error.is_some()) { return; }
@@ -1634,10 +1663,6 @@ impl RuntimeRegistry {
     pub async fn is_terminal(&self,name:&str) -> bool {
         self.entries.lock().await.values().filter(|e|e.name==name).max_by_key(|e|e.generation)
             .is_some_and(|e|e.handle.has_terminal())
-    }
-    /// Sessão do ator de entrada terminal de chave `key`.
-    pub async fn terminal_name(&self,key:&str) -> Option<String> {
-        match &self.entries.lock().await.get(key)?.handle { EntryHandle::Terminal {target,..}=>Some(target.name.clone()), _=>None }
     }
     /// Leitura pura: quem exclui já pode segurar exclusividade.
     pub async fn account_usage(&self, key: &crate::accounts::AccountKey) -> crate::accounts::UsageFacts {
@@ -2182,6 +2207,64 @@ mod tests {
         assert!(registry.entries.lock().await.is_empty(),"nenhuma sessão ficou sem fechar");
     }
 
+    #[tokio::test]
+    async fn terminal_status_is_independent_from_global_events_and_cleans_healthy_names() {
+        let registry = RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(), "test".into(), "instance".into());
+        let sender = registry.terminal_status_sender("a");
+        let _other = registry.terminal_status("b");
+        let mut receiver = registry.terminal_status("a");
+        let mut global = registry.subscribe();
+        assert_eq!(registry.events.receiver_count(), 1, "o canal por sessão não assina o global");
+        for i in 0..10 {
+            assert!(registry.events.send(RuntimeEvent { key: format!("other-{i}"), generation:1, revision:1, channel:"snapshot".into(), data:json!({"view":{"text":"large unrelated state"}}) }).is_ok());
+        }
+        assert!(!receiver.has_changed().unwrap());
+        assert_eq!(global.recv().await.unwrap().key, "other-0", "o consumidor Python continua recebendo os eventos");
+        sender.send_replace(super::super::terminal_status::TerminalStatus { input_stalled:Some("composer_busy".into()), ..Default::default() });
+        assert_eq!(receiver.borrow_and_update().input_stalled.as_deref(), Some("composer_busy"));
+        drop(sender);
+        registry.clear_live("a").await;
+        assert_eq!(*receiver.borrow(), Default::default());
+        drop(receiver);
+        let _new = registry.terminal_status("c");
+        assert!(!registry.terminal_status.lock().unwrap().contains_key("a"));
+    }
+
+    #[tokio::test]
+    async fn terminal_status_failed_close_keeps_error_detail_for_reconnection() {
+        let registry = RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(), "test".into(), "instance".into());
+        let sender = registry.terminal_status_sender("a");
+        super::super::terminal_status::publish_problem(&sender, "queue_io", "fila indisponível");
+        registry.clear_live("a").await;
+        let receiver = registry.terminal_status("a");
+        assert_eq!(receiver.borrow().error.as_deref(), Some("queue_io"));
+        assert_eq!(receiver.borrow().message.as_deref(), Some("fila indisponível"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn terminal_status_concurrent_updates_stay_with_their_ten_sessions() {
+        let registry = RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(), "test".into(), "instance".into());
+        let barrier = Arc::new(tokio::sync::Barrier::new(10));
+        let mut receivers = Vec::new();
+        let mut publishers = tokio::task::JoinSet::new();
+        for i in 0..10 {
+            let name = format!("session-{i}");
+            let sender = registry.terminal_status_sender(&name);
+            receivers.push((name.clone(), registry.terminal_status(&name)));
+            let barrier = barrier.clone();
+            publishers.spawn(async move {
+                barrier.wait().await;
+                sender.send_replace(super::super::terminal_status::TerminalStatus { input_stalled:Some(name), ..Default::default() });
+            });
+        }
+        while let Some(result) = publishers.join_next().await { result.unwrap(); }
+        for (name, mut receiver) in receivers {
+            tokio::time::timeout(Duration::from_secs(1), receiver.changed()).await.unwrap().unwrap();
+            assert_eq!(receiver.borrow().input_stalled.as_deref(), Some(name.as_str()));
+        }
+        assert_eq!(registry.events.receiver_count(), 0);
+    }
+
     #[test]
     fn healthy_follows_python_rust_failed() {
         assert!(!healthy(true,&json!({"error":"terminal_facts","view":{}})));
@@ -2313,6 +2396,43 @@ mod tests {
         registry.live_sender("a").send_replace(Some(Arc::new(LiveState::default())));
         registry.clear_live("a").await;
         assert!(rx.borrow().is_none(),"vida que acabou bem: o canal esvazia");
+    }
+
+    #[tokio::test]
+    async fn close_leaves_the_channels_of_a_new_life_with_the_same_name() {
+        let registry = RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(),"test".into(),"instance".into());
+        // A vida nova já pegou os canais e escreveu, mas ainda não entrou em `entries`.
+        let status = registry.terminal_status_sender("a");
+        status.send_replace(super::super::terminal_status::TerminalStatus { input_stalled:Some("delivery_unproved".into()),..Default::default() });
+        let live = registry.live_sender("a");
+        live.send_replace(Some(Arc::new(LiveState::default())));
+        registry.clear_live("a").await;
+        assert_eq!(registry.terminal_status("a").borrow().input_stalled.as_deref(),Some("delivery_unproved"));
+        assert!(registry.live("a").borrow().is_some(),"o canal da vida nova segue com o valor dela");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn subscribing_readers_do_not_prevent_closed_channels_from_clearing() {
+        let registry = Arc::new(RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(),"test".into(),"instance".into()));
+        let status = registry.terminal_status("a");
+        let live = registry.live("a");
+        let reader_registry = registry.clone();
+        let readers = std::thread::spawn(move || {
+            for _ in 0..10_000 {
+                let _status = reader_registry.terminal_status("a");
+                let _live = reader_registry.live("a");
+            }
+        });
+        for _ in 0..1_000 {
+            registry.terminal_status_sender("a").send_replace(super::super::terminal_status::TerminalStatus {
+                input_stalled:Some("composer_busy".into()),..Default::default()
+            });
+            registry.live_sender("a").send_replace(Some(Arc::new(LiveState::default())));
+            registry.clear_live("a").await;
+            assert_eq!(*status.borrow(), Default::default(),"assinar não conserva o bloqueio encerrado");
+            assert!(live.borrow().is_none(),"assinar não conserva a vida encerrada");
+        }
+        readers.join().unwrap();
     }
 
     #[tokio::test]
