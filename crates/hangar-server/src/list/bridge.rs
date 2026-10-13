@@ -313,7 +313,8 @@ impl ListBridge {
     async fn plugin_facts(&self, rows: &[SessionRow]) -> BTreeMap<String, Result<crate::state::facts::PluginReading, String>> {
         #[cfg(test)]
         if let Some(readings) = lock(&self.test_plugins).clone() { return readings; }
-        let jobs = rows.iter().filter(|row| row.provider == "claude").map(|row| async {
+        // Sem terminal o cartão é o do canal nativo (retrato do runtime); o do plugin o motor recusaria.
+        let jobs = rows.iter().filter(|row| row.provider == "claude" && !row.headless).map(|row| async {
             let read = match self.plugin_runtime.get() {
                 // Sessão que ainda não foi aberta no Rust não tem pergunta segurada a projetar.
                 Some(runtime) if !runtime.has_entry(None, &row.name).await => None,

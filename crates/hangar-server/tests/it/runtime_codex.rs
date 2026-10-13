@@ -105,6 +105,31 @@ fn server_request_once() {
 }
 
 #[test]
+fn published_cards_carry_the_id_that_answers_them() {
+    let mut engine = engine();
+    identified(&mut engine);
+    line(&mut engine,json!({"id":1,"method":"item/commandExecution/requestApproval","params":{"threadId":"thread-1","command":"pwd"}}),10.0);
+    let view = engine.view();
+    let shown = view["interaction_id"].as_str().map(str::to_owned);
+    assert!(shown.is_some(),"aprovação publicada sem interaction_id: {view}");
+    let missing = engine.command(command(OperationKind::Select,json!({"option":1})),clock(10.0)).unwrap_err();
+    assert_eq!(missing.code,"erro_interacao_sem_identidade");
+    let answer = frames(&engine.command(command(OperationKind::Select,json!({"option":1,"interaction_id":shown})),clock(10.0)).unwrap());
+    assert_eq!((answer[0]["id"].clone(),answer[0]["result"]["decision"].clone()),(json!(1),json!("accept")));
+    line(&mut engine,json!({"id":2,"method":"item/tool/requestUserInput","params":{"threadId":"thread-1",
+        "questions":[{"id":"q1","header":"H","question":"Qual?","options":[{"label":"A","description":""}]}]}}),11.0);
+    let form = engine.view()["codex_question"].clone();
+    let form_id = form["interaction_id"].as_str().map(str::to_owned);
+    assert!(form_id.is_some(),"pergunta publicada sem interaction_id: {form}");
+    let stale = engine.command(RuntimeCommand { operation_id:"op-2".into(),kind:OperationKind::AnswerQuestions,
+        payload:json!({"request_id":2,"interaction_id":shown,"answers":[{"question_id":"q1","kind":"option","indices":[0]}]}) },clock(11.0)).unwrap_err();
+    assert_eq!(stale.code,"erro_interacao_desatualizada");
+    let answer = frames(&engine.command(RuntimeCommand { operation_id:"op-3".into(),kind:OperationKind::AnswerQuestions,
+        payload:json!({"request_id":2,"interaction_id":form_id,"answers":[{"question_id":"q1","kind":"option","indices":[0]}]}) },clock(11.0)).unwrap());
+    assert_eq!(answer[0]["id"],2);
+}
+
+#[test]
 fn turn_end_idle_before_drain() {
     let mut engine = engine();
     line(&mut engine,json!({"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-1"}}}),10.0);

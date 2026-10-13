@@ -56,7 +56,6 @@ pub struct RuntimeFeed {
     plugin_reading: Option<crate::state::facts::PluginReading>,
     source_binding: Option<(u64, crate::side::Binding)>,
     last_binding: Option<crate::interactions::InteractionBinding>,
-    trusted: Option<(crate::interactions::InteractionBinding, StateEvent)>,
     lifecycle: Arc<std::sync::OnceLock<Arc<dyn super::live::Lifecycle>>>,
 }
 
@@ -97,7 +96,7 @@ impl RuntimeFeed {
         Self { hub: Arc::downgrade(hub), name, wake: hub.wake(), live, published, owner: super::live::next_owner(),
             facts: facts.map(|src| Watching { src, at: None, error: None }), facts_wake, sent: Sent::default(),
             claude, headless: binding_headless(hub), parked: Parked::Absent, home: None,
-            registry: None, plugin_events: None, plugin_reading: None, source_binding: None, last_binding: None, trusted: None, lifecycle: Arc::default() }
+            registry: None, plugin_events: None, plugin_reading: None, source_binding: None, last_binding: None, lifecycle: Arc::default() }
     }
 
     pub fn with_registry(mut self, registry: Option<Arc<crate::runtime::gateway::RuntimeRegistry>>) -> Self {
@@ -171,14 +170,12 @@ impl RuntimeFeed {
         if hub.source_binding().as_ref() != Some(&source)
             || read.as_ref().is_ok_and(|reading| reading.binding.conversation != source.1.key) {
             self.plugin_reading = None;
-            self.trusted = None;
             w.error = Some("state_plugin_binding_changed".into());
             return Some(RETRY);
         }
         match read {
             Ok(reading) => {
                 self.last_binding = Some(reading.binding.clone());
-                if self.trusted.as_ref().is_some_and(|(binding, _)| binding != &reading.binding) { self.trusted = None; }
                 w.error = reading.facts.as_ref().err().cloned();
                 self.plugin_reading = Some(reading);
             }
@@ -222,13 +219,11 @@ impl RuntimeFeed {
         if self.source_binding.is_none() && self.facts.is_none() { self.source_binding = Some(source.clone()); }
         if self.source_binding.as_ref() != Some(&source) {
             self.plugin_reading = None;
-            self.trusted = None;
             self.wake.notify_one();
             return true;
         }
         if self.sent.generation != Some(generation) {
             self.sent = Sent { generation: Some(generation), ..Sent::default() };
-            self.trusted = None;
         }
         let runtime_binding = if self.claude {
             match &self.registry {
@@ -259,22 +254,15 @@ impl RuntimeFeed {
                 _ => false,
             }
         } else { true };
-        if interaction_unavailable {
-            self.plugin_reading = None;
-            if self.trusted.as_ref().is_some_and(|(trusted, _)| !display_binding_confirmed || observed_binding != Some(trusted) || trusted.conversation != source.1.key) {
-                self.trusted = None;
-            }
-        }
-        if self.trusted.as_ref().is_some_and(|(trusted, _)| runtime_binding.as_ref().is_some_and(|binding| binding != trusted)) { self.trusted = None; }
+        if interaction_unavailable { self.plugin_reading = None; }
         if self.plugin_reading.as_ref().is_some_and(|reading| runtime_binding.as_ref().is_some_and(|binding| binding != &reading.binding)) {
             self.plugin_reading = None;
-            self.trusted = None;
             self.wake.notify_one();
             return true;
         }
         let live_binding_changed = runtime_binding.as_ref().is_some_and(|binding|
             value.as_ref().and_then(|live| live.as_ref()).is_some_and(|live| live.binding.as_ref() != Some(binding)));
-        if live_binding_changed { self.plugin_reading = None; self.trusted = None; }
+        if live_binding_changed { self.plugin_reading = None; }
         let (mut state, texts) = match &value {
             None => (feed_problem(&self.name, self.headless, "runtime_absent", "o servidor não tem o runtime ligado"), Default::default()),
             // Sessão parada (não aberta no Rust, encerrada, ou abrindo): `idle`, como o Python. Abertura
@@ -316,23 +304,8 @@ impl RuntimeFeed {
                 state.problema_detalhe = Some(code.clone());
             }
         }
-        if let Some(reading) = &self.plugin_reading {
-            let projection = reading.facts.as_ref().map_err(Clone::clone).and_then(|local| {
-                crate::state::facts::project_plugin_state(&mut state, &local.questions)
-            });
-            if let Err(code) = projection {
-                if let Some((_, previous)) = self.trusted.as_ref().filter(|(binding, _)| binding == &reading.binding) {
-                    crate::state::facts::preserve_cards(&mut state, previous);
-                }
-                state.problema = Some(super::facts::UNAVAILABLE.into());
-                state.problema_detalhe = Some(code);
-            }
-            if reading.facts.is_ok() { self.trusted = Some((reading.binding.clone(), state.clone())); }
-        } else if self.facts.as_ref().is_some_and(|facts| facts.error.is_some())
-            && let Some((trusted, previous)) = &self.trusted
-            && (runtime_binding.as_ref() == Some(trusted) || interaction_unavailable && display_binding_confirmed && observed_binding == Some(trusted)) {
-            crate::state::facts::preserve_cards(&mut state, previous);
-        }
+        // Sem terminal, o cartão é só o do canal nativo (que o motor responde): o `ask:`/`perm:` do plugin
+        // seria respondido com 409, e o `ask.ts` encerra a própria pergunta quando o nativo vence.
         let [preview, thinking, tool] = texts;
         let preview = match hub.committed() {
             Some(committed) if super::preview::is_committed(&preview, &committed) => String::new(),
@@ -465,29 +438,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn feed_keeps_independent_form_id_on_selector_conflict_and_store_error() {
+    async fn headless_claude_shows_only_the_native_cards_never_the_plugin_ones() {
         use crate::interactions::InteractionBinding;
         use crate::state::facts::{PluginFacts, PluginReading};
         let f = claude_fixture();
         let binding = InteractionBinding { key: "k".into(), conversation: "sid".into(), generation: 1 };
-        let (_tx, rx) = channel(Some(live("idle")));
+        let native = LiveState { public_state: json!({"session": "s", "state": "awaiting_input", "headless": true,
+            "codex_question": {"provider":"claude","request_id":1,"interaction_id":"native-form","questions":[{"question":"Pasta?","options":[]}]}}),
+            ..Default::default() };
+        let (_tx, rx) = channel(Some(native));
         let mut feed = RuntimeFeed::new(&f.lease.hub, Some(rx), f.published.clone(), None);
         let local = PluginFacts { plugin_state: None, waiter_open: true, heartbeat_age_ms: Some(0), question: None,
-            questions: vec![json!({"id":"ask:b","interaction_id":"b","questions":[{"question":"Pasta?","options":[]} ]})], suggestion: "".into() };
-        feed.plugin_reading = Some(PluginReading { binding: binding.clone(), facts: Ok(local.clone()) });
+            questions: vec![json!({"id":"ask:b","interaction_id":"b","questions":[{"question":"Pasta?","options":[]}]}),
+                json!({"id":"perm:a","interaction_id":"a","questions":[],"tool":"Bash"})], suggestion: "".into() };
+        feed.plugin_reading = Some(PluginReading { binding, facts: Ok(local) });
         assert!(feed.round().await);
-        let mut conflicting = local;
-        conflicting.questions.extend([json!({"id":"perm:a","interaction_id":"a","questions":[],"tool":"Bash"}),
-            json!({"id":"perm:c","interaction_id":"c","questions":[],"tool":"Bash"})]);
-        feed.plugin_reading = Some(PluginReading { binding: binding.clone(), facts: Ok(conflicting) });
-        assert!(feed.round().await);
-        assert!(feed.sent.question.as_deref().unwrap().contains("\"interaction_id\":\"b\""));
-        feed.plugin_reading = Some(PluginReading { binding: binding.clone(), facts: Err("plugin_store_unavailable".into()) });
-        assert!(feed.round().await);
-        assert!(feed.sent.question.as_deref().unwrap().contains("\"interaction_id\":\"b\""));
-        feed.plugin_reading = Some(PluginReading { binding: InteractionBinding { generation: 2, ..binding }, facts: Err("plugin_store_unavailable".into()) });
-        assert!(feed.round().await);
-        assert_eq!(feed.sent.question.as_deref(), Some("null"));
+        let question: Value = serde_json::from_str(feed.sent.question.as_deref().unwrap()).unwrap();
+        assert_eq!(question["interaction_id"], "native-form");
+        let state: Value = serde_json::from_str(feed.sent.state.as_deref().unwrap()).unwrap();
+        assert!(state["problema"].is_null(), "cartão do plugin não disputa com o nativo: {state}");
+        assert!(state["interaction_id"].is_null() && state["question"].is_null(), "perm: do plugin não vira cartão: {state}");
     }
 
     #[tokio::test]
@@ -688,11 +658,13 @@ mod tests {
         let life = registry.interaction_binding_readonly("s").await.unwrap();
         let gate = crate::plugin::PermissionGate {app_present:true,terminal_attached:false,mode_without_dialog:false};
         let _pending = plugin.begin_ask(&life, serde_json::from_value(json!({"id":"ask:b","questions":[{"question":"B?","options":[]}]})).unwrap(), gate, std::time::Instant::now()).unwrap();
+        plugin.suggest(&life, "suggest-b".into(), true).unwrap();
         let mut rx = f.lease.hub.tx.subscribe();
         feed.refresh_facts().await;
         assert!(feed.round().await);
         let got = collect(&mut rx, Duration::from_millis(20)).await;
-        assert!(of(&got,"ask_question").iter().any(|event| event.2["request_id"] == "ask:b"));
+        assert!(of(&got,"suggest").iter().any(|event| event.2["text"] == "suggest-b"));
+        assert!(!got.iter().any(|(_,_,data)| data.to_string().contains("ask:b")), "sem terminal o cartão do plugin não aparece");
         assert!(!got.iter().any(|(_,_,data)| data.to_string().contains("ask:a") || data.to_string().contains("suggest-a")));
         let old_binding = crate::interactions::InteractionBinding { key:"feed-key".into(),conversation:"sid-b".into(),generation:1 };
         let (_old_tx, old_view) = channel(Some(LiveState { binding:Some(old_binding),

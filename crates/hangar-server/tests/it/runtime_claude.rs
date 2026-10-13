@@ -59,6 +59,67 @@ fn pending_plan_rules() {
     assert_eq!(engine.view()["pending"].as_array().unwrap().len(),5);
 }
 
+/// Sem terminal, o cartão publicado é o que o app responde: o ID sai do próprio estado.
+fn identified(engine:&mut ClaudeEngine) {
+    engine.set_interactions("key".into(),std::sync::Arc::new(hangar_server::interactions::InteractionStore::default())).unwrap();
+}
+fn shown_id(engine:&ClaudeEngine) -> Option<String> { engine.view()["public_state"]["interaction_id"].as_str().map(str::to_owned) }
+fn ack(engine:&mut ClaudeEngine,operation_id:&str) {
+    engine.apply(EngineInput::WriteAck { operation_id:operation_id.into(),outcome:WriteOutcome::Written },clock(11.0)).unwrap();
+}
+
+#[test]
+fn headless_permission_card_carries_the_id_that_answers_it() {
+    let mut engine = engine(json!({"name":"session","session_id":"sid","initialized":true}));
+    identified(&mut engine);
+    line(&mut engine,json!({"type":"control_request","request_id":7,"request":{
+        "subtype":"can_use_tool","tool_name":"Bash","input":{"command":"ls"}}}),10.0);
+    let state = engine.view()["public_state"].clone();
+    assert_eq!(state["question"],"Permitir Bash? ls");
+    let shown = shown_id(&engine);
+    assert!(shown.is_some(),"permissão publicada sem interaction_id: {state}");
+    let shown = shown.unwrap();
+    assert_eq!(shown_id(&engine).as_deref(),Some(shown.as_str()),"o mesmo cartão mantém o ID");
+    let missing = engine.command(command(OperationKind::Select,json!({"option":1})),clock(10.0)).unwrap_err();
+    assert_eq!(missing.code,"erro_interacao_sem_identidade");
+    let effects = engine.command(command(OperationKind::Select,json!({"option":1,"interaction_id":shown})),clock(10.0)).unwrap();
+    assert_eq!(writes(&effects)[0]["response"]["request_id"],7);
+    assert_eq!(writes(&effects)[0]["response"]["response"]["behavior"],"allow");
+    ack(&mut engine,"op-1");
+    assert!(shown_id(&engine).is_none(),"respondido, o cartão sai");
+    line(&mut engine,json!({"type":"control_request","request_id":8,"request":{
+        "subtype":"can_use_tool","tool_name":"Bash","input":{"command":"pwd"}}}),12.0);
+    assert_ne!(shown_id(&engine).as_deref(),Some(shown.as_str()));
+    let stale = engine.command(RuntimeCommand { operation_id:"op-2".into(),kind:OperationKind::Select,
+        payload:json!({"option":1,"interaction_id":shown}) },clock(12.0)).unwrap_err();
+    assert_eq!(stale.code,"erro_interacao_desatualizada");
+}
+
+#[test]
+fn headless_question_and_plan_cards_carry_the_id_that_answers_them() {
+    let mut engine = engine(json!({"name":"session","session_id":"sid","initialized":true}));
+    identified(&mut engine);
+    line(&mut engine,json!({"type":"control_request","request_id":1,"request":{
+        "subtype":"can_use_tool","tool_name":"AskUserQuestion","input":{"questions":[{
+        "question":"Qual opção?","header":"Opção","multiSelect":false,"options":[{"label":"A","description":""}]}]}}}),10.0);
+    let form = engine.view()["public_state"]["codex_question"].clone();
+    let form_id = form["interaction_id"].as_str().map(str::to_owned);
+    assert!(form_id.is_some(),"pergunta publicada sem interaction_id: {form}");
+    let effects = engine.command(command(OperationKind::AnswerQuestions,json!({"request_id":1,
+        "answers":[{"kind":"option","indices":[0]}],"interaction_id":form_id})),clock(10.0)).unwrap();
+    assert_eq!(writes(&effects)[0]["response"]["response"]["updatedInput"]["answers"]["Qual opção?"],"A");
+    ack(&mut engine,"op-1");
+    line(&mut engine,json!({"type":"control_request","request_id":2,"request":{
+        "subtype":"can_use_tool","tool_name":"ExitPlanMode","input":{"plan":"# Plano"},"tool_use_id":"t1"}}),12.0);
+    assert_eq!(engine.view()["public_state"]["question"],"Aprovar o plano?");
+    let plan = shown_id(&engine);
+    assert!(plan.is_some(),"plano publicado sem interaction_id");
+    let effects = engine.command(RuntimeCommand { operation_id:"op-2".into(),kind:OperationKind::Select,
+        payload:json!({"option":1,"interaction_id":plan}) },clock(12.0)).unwrap();
+    assert_eq!(writes(&effects)[0]["response"]["request_id"],2);
+    assert_eq!(writes(&effects)[0]["response"]["response"]["behavior"],"allow");
+}
+
 #[test]
 fn question_validates_current_request() {
     use hangar_server::interactions::{InteractionBinding, InteractionKind, InteractionStore, native_target};

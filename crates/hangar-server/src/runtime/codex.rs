@@ -416,6 +416,39 @@ impl Engine {
     }
 
     pub fn view(&self) -> Value {
+        let mut state = self.shown_state();
+        self.stamp_shown(&mut state);
+        serde_json::to_value(state).unwrap()
+    }
+
+    /// O app só responde com o ID do cartão que viu: ele sai daqui, com o mesmo alvo, conteúdo e época que a resposta confere.
+    // ponytail: o alvo respondido não é encerrado no store; a resposta já recusa ID de pedido que saiu.
+    fn stamp_shown(&self,state:&mut StateEvent) {
+        let Some((key,store)) = self.interactions.as_ref().filter(|_|!self.thread_id.is_empty()) else { return };
+        let binding = InteractionBinding { key:key.clone(),conversation:self.thread_id.clone(),generation:self.generation };
+        let request = |kind,wanted:&dyn Fn(&Value)->bool| -> Result<Option<String>,InteractionError> {
+            let Some((id,request)) = self.server_requests.iter().find(|(_,r)|wanted(r)) else { return Ok(None) };
+            let thread = request["params"]["threadId"].as_str().filter(|t|!t.is_empty()).ok_or(InteractionError::Unavailable)?;
+            let revision = self.request_epochs.get(id).ok_or(InteractionError::Unavailable)?.to_string();
+            store.observe_revision(&binding,&native_target(kind,thread,&json!(id)),Some(request.clone()),Some(revision))
+        };
+        let mut shown = Ok(());
+        if state.options.is_some() {
+            shown = request(InteractionKind::Approval,&is_card).map(|id|state.interaction_id = id);
+        }
+        if let Some(form) = state.codex_question.as_mut() {
+            let id = if self.blocking_question().is_some() {
+                request(InteractionKind::Question,&|r|r["method"] == "item/tool/requestUserInput" || form_fields(r).is_some())
+            } else {
+                self.async_questions.pending.first().map_or(Ok(None),|(key,question)|
+                    store.observe(&binding,&native_target(InteractionKind::Question,&self.thread_id,&json!(key)),Some(question.clone())))
+            };
+            match id { Ok(id) => if let Some(id) = id { form.insert("interaction_id".into(),json!(id)); }, Err(error) => shown = Err(error) }
+        }
+        if let Err(error) = shown && state.problema.is_none() { state.problema = Some(error.code().into()); }
+    }
+
+    fn shown_state(&self) -> StateEvent {
         let mut state = self.state.clone();
         let question = self.blocking_question().or_else(||self.async_questions.pending.first().map(|(_,q)|q.clone()));
         let pending_approval = self.server_requests.iter().find(|(_,r)|is_card(r));
@@ -432,7 +465,7 @@ impl Engine {
             && (!self.server_requests.is_empty() || !self.lost_requests.is_empty()) {
             state.state = "awaiting_input".into();
             state.question = Some("O Codex pediu algo que só o terminal responde; responda na TUI.".into());
-            return serde_json::to_value(state).unwrap();
+            return state;
         }
         if let Some((_,request)) = pending_approval {
             let place = |path:Option<String>|path.map_or(String::new(),|p|format!(" em {p}"));
@@ -442,14 +475,14 @@ impl Engine {
             if method == "item/permissions/requestApproval" {
                 state.question = Some(permissions_text(request));
                 state.options = Some(["Permitir neste turno","Permitir na sessão","Negar"].map(String::from).to_vec());
-                return serde_json::to_value(state).unwrap();
+                return state;
             }
             if method == ELICITATION {
                 let p = &request["params"];
                 state.question = Some(format!("{} pede para abrir {}: {}",p["serverName"].as_str().unwrap_or("Um servidor MCP"),
                     p["url"].as_str().unwrap_or(""),p["message"].as_str().unwrap_or("")));
                 state.options = Some(["Concluí","Cancelar"].map(String::from).to_vec());
-                return serde_json::to_value(state).unwrap();
+                return state;
             }
             let (target,reason) = if request["method"] == "item/fileChange/requestApproval" {
                 let (root,reason) = match decoded(request) {
@@ -467,7 +500,7 @@ impl Engine {
             if !unreadable_command(request) { options.push("Sempre permitir".into()); }
             state.options = Some(options);
         }
-        serde_json::to_value(state).unwrap()
+        state
     }
 
     pub fn control_view(&self) -> Value {

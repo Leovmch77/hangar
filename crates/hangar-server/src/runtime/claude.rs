@@ -239,7 +239,25 @@ impl ClaudeEngine {
                 }
             }
         }
+        self.stamp_shown(&mut state);
         state
+    }
+
+    /// O app só responde com o ID do cartão que viu: ele sai daqui, com o mesmo alvo e conteúdo que a resposta confere.
+    // ponytail: o alvo respondido não é encerrado no store; a resposta já recusa ID de pedido que saiu.
+    fn stamp_shown(&self,state:&mut StateEvent) {
+        let Some((key,store)) = &self.interactions else { return };
+        let conversation = self.metadata["session_id"].as_str().unwrap_or("");
+        let binding = InteractionBinding { key:key.clone(),conversation:conversation.into(),generation:self.generation };
+        let observe = |kind,native:&Value,semantic:&Value| store.observe(&binding,&native_target(kind,conversation,native),Some(semantic.clone()));
+        let shown = if let Some(question) = &self.question {
+            observe(InteractionKind::Question,&question["request_id"],question).map(|id|{
+                if let (Some(form),Some(id)) = (state.codex_question.as_mut(),id) { form.insert("interaction_id".into(),json!(id)); }
+            })
+        } else if let Some((id,request)) = self.pending.first() {
+            observe(InteractionKind::Approval,&json!(id),request).map(|id|state.interaction_id = id)
+        } else { Ok(()) };
+        if let Err(error) = shown && state.problema.is_none() { state.problema = Some(error.code().into()); }
     }
 
     fn deliverable(&self) -> bool { self.alive && self.initialized && !self.initializing && !self.in_progress
