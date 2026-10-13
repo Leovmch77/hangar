@@ -1252,7 +1252,9 @@ impl RuntimeRegistry {
         recipe.apply_choices(&mut launch,view["model"].as_str(),view["effort"].as_str())?;
         let sidecar_dir=super::lifecycle::claude_sidecar_dir()?;
         let extra=target.metadata["cano"].as_object().map(|meta|meta.iter().filter(|(k,_)|!matches!(k.as_str(),"pid"|"escuta"|"token"|"ts"|"versao")).map(|(k,v)|(k.clone(),v.clone())).collect()).unwrap_or_default();
-        let prepared=process::prepare_recipe(&launch,key,&sidecar_dir,extra).map_err(|e|RuntimeError::new(e.code(),"não preparei a receita; origem conservada"))?;
+        let prepared={let (key,dir)=(key.to_owned(),sidecar_dir.clone());
+            tokio::task::spawn_blocking(move||process::prepare_recipe(&launch,&key,&dir,extra)).await.map_err(|_|failure("relaunch_recipe"))?}
+            .map_err(|e|RuntimeError::new(e.code(),"não preparei a receita; origem conservada"))?;
         if !from_exit {recipe.verify(&procs)?;}
         let latest=match &context {Some(ctx)=>ctx.view.clone(),None=>handle.as_ref().ok_or_else(||failure("runtime_binding"))?.view().await?};
         if (!from_exit && latest["alive"]!=true) || latest["in_progress"]==true || !latest["question"].is_null() || latest["pending"].as_array().is_none_or(|v|!v.is_empty())

@@ -232,7 +232,7 @@ pub(crate) async fn stage_session(io:&dyn TerminalIo,mux_argv:&[String],name:&st
     let mut args=prefix.to_vec();args.extend(["new-session".into(),"-d".into(),"-P".into(),"-F".into(),"#{session_name}\t#{window_index}\t#{pane_index}\t#{pane_id}\t#{pane_pid}".into(),"-s".into(),name.into(),"-c".into(),cwd.to_str().ok_or_else(||failure("relaunch_cwd"))?.into(),"-x".into(),"200".into(),"-y".into(),"50".into()]);
     for (key,value) in env_e {args.extend(["-e".into(),format!("{key}={value}")]);}
     args.push(shell);
-    let scope=super::process::scope_command().map_err(|_|failure("relaunch_scope"))?;
+    let scope=tokio::task::spawn_blocking(super::process::scope_command).await.map_err(|_|failure("relaunch_scope"))?.map_err(|_|failure("relaunch_scope"))?;
     let (program,args)=if let Some((leader,scope_args))=scope.split_first() {
         let mut scoped=scope_args.iter().map(|a|a.to_str().ok_or_else(||failure("relaunch_scope")).map(str::to_owned)).collect::<Result<Vec<_>,_>>()?;
         scoped.push(program.clone());scoped.extend(args);

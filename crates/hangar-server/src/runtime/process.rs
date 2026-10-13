@@ -170,6 +170,13 @@ fn probe_binary(bin: &Path) -> bool {
 /// Unit run-….scope not found"). Só ela se repete, com estas esperas; qualquer outra falha responde na hora.
 const SCOPE_RETRY: [Duration; 3] = [Duration::from_millis(200), Duration::from_millis(400), Duration::from_millis(800)];
 const SCOPE_UNIT_MISSING: &str = "systemd_scope_unit_missing";
+const SCOPE_REFUSED: &str = "systemd_scope_refused";
+const SCOPE_ABSENT: &str = "systemd_scope_absent";
+
+/// Primeira linha não vazia, truncada: vai ao log e ao erro sem trazer a saída inteira.
+fn first_line(text: &[u8]) -> Option<String> {
+    String::from_utf8_lossy(text).lines().map(str::trim).find(|line| !line.is_empty()).map(|line| line.chars().take(200).collect())
+}
 
 /// A recusa vem de escopos criados ao mesmo tempo: quem foi recusado junto não pode repetir junto.
 /// Espera entre a base e o dobro dela.
@@ -185,35 +192,48 @@ fn scope_unit_missing(stderr: &[u8]) -> Option<String> {
 }
 
 /// Escopo transiente do systemd, fora do cgroup do serviço (senão o restart dele mata o cano).
-/// `--scope` faz `exec`: o pid lançado continua sendo o do cano. Sondado uma vez, como `tmux._scope_probe`.
+/// `--scope` faz `exec`: o pid lançado continua sendo o do cano. Sondado como `tmux._scope_probe`.
 /// Caminho absoluto pelo PATH do servidor: o processo nasce com o ambiente da sessão, cujo PATH não
 /// precisa ter o `systemd-run`, e a sondagem só prova o que a subida vai rodar se for o mesmo binário.
-/// Recusa transitória esgotada: esta subida segue sem escopo, como na sondagem que falha, mas nada fica
-/// gravado e a próxima subida sonda de novo.
+/// Só fica gravado o que não muda com o processo vivo: escopo provado, ou sem `systemd-run`/`XDG_RUNTIME_DIR`.
+/// Recusa (a transitória esgotada ou outra) deixa esta subida sem escopo e a próxima sonda de novo.
+/// Bloqueante (processo e esperas): chamar fora do runtime.
 #[cfg(unix)]
 fn scope_prefix() -> &'static [std::ffi::OsString] {
     const ARGS: &[&str] = &["--user", "--scope", "--collect", "-q", "--"];
     static PREFIX: OnceLock<Vec<std::ffi::OsString>> = OnceLock::new();
+    // Uma sondagem por vez: duas em paralelo criariam a colisão de escopos que a repetição tenta evitar.
+    static PROBING: std::sync::Mutex<()> = std::sync::Mutex::new(());
     if let Some(prefix) = PREFIX.get() { return prefix; }
-    let absent = || PREFIX.get_or_init(|| {
-        tracing::warn!("systemd-run --user --scope indisponível; cano nasce no cgroup do servidor");
+    let _probing = PROBING.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(prefix) = PREFIX.get() { return prefix; }
+    let absent = |reason: &str| PREFIX.get_or_init(|| {
+        tracing::warn!(code = SCOPE_ABSENT, reason, "escopo do systemd indisponível; cano nasce no cgroup do servidor");
         Vec::new()
     });
-    let Some(bin) = std::env::var_os("XDG_RUNTIME_DIR").and(std::env::var_os("PATH"))
+    if std::env::var_os("XDG_RUNTIME_DIR").is_none() { return absent("sem XDG_RUNTIME_DIR"); }
+    let Some(bin) = std::env::var_os("PATH")
         .and_then(|path| std::env::split_paths(&path).map(|dir| dir.join("systemd-run")).find(|p| p.is_file()))
-    else { return absent() };
+    else { return absent("sem systemd-run no PATH") };
     let mut waits = SCOPE_RETRY.iter();
     loop {
         let output = std::process::Command::new(&bin).args(ARGS).arg("true")
             .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped()).output();
-        let refusal = match output {
+        let output = match output {
             Ok(output) if output.status.success() =>
                 return PREFIX.get_or_init(|| std::iter::once(bin.into_os_string()).chain(ARGS.iter().map(Into::into)).collect()),
-            Ok(output) => scope_unit_missing(&output.stderr),
-            Err(_) => None,
+            Ok(output) => output,
+            Err(error) => {
+                tracing::warn!(code = SCOPE_REFUSED, cause = %error.kind(), "sondagem do escopo systemd não rodou; esta subida segue sem escopo");
+                return &[];
+            }
         };
-        let Some(refusal) = refusal else { return absent() };
+        let Some(refusal) = scope_unit_missing(&output.stderr) else {
+            let cause = first_line(&output.stderr).unwrap_or_else(|| format!("saída {}", output.status));
+            tracing::warn!(code = SCOPE_REFUSED, cause, "sondagem do escopo systemd recusada; esta subida segue sem escopo");
+            return &[];
+        };
         let Some(wait) = waits.next() else {
             tracing::warn!(code = SCOPE_UNIT_MISSING, refusal, "sondagem do escopo systemd recusada em todas as tentativas; esta subida segue sem escopo");
             return &[];
@@ -285,6 +305,7 @@ pub(crate) fn scope_command()->Result<Vec<std::ffi::OsString>,ProcessError> {
 
 /// Prévia privada de uma receita provada; ambiente só em memória, nunca no diário.
 pub struct PreparedRecipe {bin:PathBuf,prefix:Vec<std::ffi::OsString>,program:Vec<std::ffi::OsString>,env:Vec<(std::ffi::OsString,std::ffi::OsString)>,cwd:PathBuf,key:String,sidecar_dir:PathBuf,extra:Map<String,Value>}
+/// Bloqueante (acha o cano e sonda o escopo): chamar fora do runtime.
 pub fn prepare_recipe(recipe:&crate::list::procs::ProcessRecipe,key:&str,sidecar_dir:&Path,extra:Map<String,Value>)->Result<PreparedRecipe,ProcessError> {
     if recipe.argv.is_empty() || recipe.environ.is_empty() || !recipe.executable.is_file()
         || recipe.argv.iter().any(|arg|arg.as_encoded_bytes().contains(&0)) {return Err(ProcessError::Spawn("receita incompleta".into()));}
@@ -412,21 +433,31 @@ async fn spawn_once(spec:&PreparedRecipe)->Result<Cano,Started> {
         cano.versao = connection.snapshot.versao;
         return Ok(cano);
     }
-    let refusal = scope_err.and_then(|mut file| {
+    let stderr = scope_err.map(|mut file| {
         let mut text = Vec::new();
-        file.rewind().and_then(|()| file.read_to_end(&mut text)).ok()?;
-        scope_unit_missing(&text)
-    });
+        let _ = file.rewind().and_then(|()| file.read_to_end(&mut text));
+        text
+    }).unwrap_or_default();
+    let refusal = scope_unit_missing(&stderr);
+    // O arquivo junta o `systemd-run` (antes do exec) e o cano (depois): a causa vai ao log nos dois casos.
+    let cause = first_line(&stderr);
+    // ponytail: quem escreveu se reconhece pelo estilo do systemd ("Failed to …"); o cano escreve no `--log`.
+    let scope_refused = refusal.is_none() && listened.is_none() && cause.as_deref().is_some_and(|line| line.starts_with("Failed to "));
     match &listened {
-        Some(Err(error)) => tracing::warn!(pid, code = %error.code, "cano não escutou; matando o que subiu"),
-        _ if refusal.is_none() => tracing::warn!(pid, "cano saiu antes de escutar"),
-        _ => {},
+        _ if refusal.is_some() => {},
+        _ if scope_refused => tracing::warn!(pid, code = SCOPE_REFUSED, cause, "escopo do systemd recusado ao subir o cano"),
+        Some(Err(error)) => tracing::warn!(pid, code = %error.code, cause, "cano não escutou; matando o que subiu"),
+        _ => tracing::warn!(pid, code = "cano_saiu_antes_de_escutar", cause, "cano saiu antes de escutar"),
     }
     if let Err(failure) = kill(&cano, &spec.key, &spec.sidecar_dir).await {
         tracing::warn!(pid, code = failure.code(), "cano que não escutou não foi encerrado");
     }
     if listened.is_some() { tokio::spawn(async move { let _ = child.wait().await; }); }
-    Err(refusal.map_or(Started::Failed(ProcessError::NotListening), Started::UnitMissing))
+    Err(match (refusal, cause) {
+        (Some(refusal), _) => Started::UnitMissing(refusal),
+        (None, Some(cause)) if scope_refused => Started::Failed(ProcessError::Spawn(format!("escopo do systemd recusado: {cause}"))),
+        _ => Started::Failed(ProcessError::NotListening),
+    })
 }
 
 /// Mata o grupo do cano (cano + agente) só se o pid ainda for o cano da chave e, confirmada a saída,
