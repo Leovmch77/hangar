@@ -285,6 +285,11 @@ fn transcript_mode(path: &Path, cache: &Mutex<TranscriptModes>) -> Result<Option
         let value: Value = serde_json::from_slice(raw).ok()?;value["permissionMode"].as_str().filter(|mode| !mode.is_empty() && *mode != "plan").map(str::to_owned)
     });cache.insert(path.to_owned(), (key, mode.clone()));Ok(mode)
 }
+/// Modo sem confirmação na memória: o último que o próprio CLI gravou no transcript, senão o da conta
+/// (a ordem do Python). Para a classe do recado que o Rust manda pronta.
+pub(crate) fn unconfirmed_mode(transcript: &Path, config: &Path) -> Result<String, ServiceError> {
+    match transcript_mode(transcript, &Mutex::new(TranscriptModes::default()))? { Some(mode) => Ok(mode), None => account_mode(config) }
+}
 fn account_mode(config: &Path) -> Result<String, ServiceError> {
     let value = read_json(&config.join("settings.json"), "terminal_account_mode_unavailable")?;
     Ok(match value.as_ref().and_then(|value| value["permissions"]["defaultMode"].as_str()) { Some("default") => "manual", Some(mode @ ("plan" | "auto" | "manual" | "acceptEdits" | "bypassPermissions" | "dontAsk")) => mode, _ => "bypassPermissions" }.into())

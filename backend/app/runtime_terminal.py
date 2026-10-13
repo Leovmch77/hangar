@@ -352,6 +352,12 @@ def facts(payload, metadata):
     sender, _ = uds_messaging.separar_prefixo(text)
     endpoint = _native_socket(current) if sender and os.name == 'posix' else None
     if endpoint:
+        from app import runtime_coordinator
+        coordinator = runtime_coordinator.current()
+        if coordinator is not None and coordinator.mode != "python":
+            # Com o Rust de pé a classe do recado é dele: esta reserva nunca a recalcula.
+            from app.runtime_policy import ModeClassMissing
+            raise ModeClassMissing("recado terminal sem a classe de modo do Rust")
         native = dict(socket=endpoint, origin=f'uds:{uds_messaging.INBOX.path}' if uds_messaging.INBOX.path else f'uds:hangar-{os.getpid()}',
             sender=sender, mode=api._classe_modo(sender, current.name, current.meta['config_dir'], current.jsonl),
             message_id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"hangar:{current.key}:{payload['operation_id']}")))

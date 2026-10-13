@@ -201,8 +201,9 @@ pub struct Engine {
     skips:BTreeMap<RequestId,(String,String)>,
     /// Último evento da conversa: turno calado por muito tempo é conferido no app-server.
     last_event:f64,
-    /// Modo gravado com o processo caído: patch → (operação, modo anterior). Só responde depois de gravado.
-    mode_writes:BTreeMap<RequestId,(String,Option<String>)>,
+    /// Modo a gravar com o processo caído: (patch, operação, modo). Vale só depois de gravado; até lá a
+    /// vista o leva (o patch confere contra ela) e `permission_mode` segue o salvo.
+    mode_write:Option<(RequestId,String,String)>,
 }
 
 fn error(message:&str) -> RuntimeError { RuntimeError::new("codex_command",message) }
@@ -454,7 +455,7 @@ impl Engine {
             preview:LiveBuffer::default(),response_started:false,first_response_start:None,compacting:false,
             running_commands:BTreeMap::new(),thinking:LiveBuffer::default(),was_working:metadata["in_progress"] == true,
             rpc:BTreeMap::new(),server_requests:Vec::new(),
-            request_epochs:BTreeMap::new(),answering:BTreeSet::new(),lost_requests:BTreeSet::new(),wires:BTreeMap::new(),policies:BTreeMap::new(),last_format_request:None,format_gate:FormatGate::default(),reported_formats:BTreeSet::new(),async_questions,reservations:Vec::new(),skill_preparations:BTreeMap::new(),skips:BTreeMap::new(),last_event:clock.monotonic_s,mode_writes:BTreeMap::new(),metadata }
+            request_epochs:BTreeMap::new(),answering:BTreeSet::new(),lost_requests:BTreeSet::new(),wires:BTreeMap::new(),policies:BTreeMap::new(),last_format_request:None,format_gate:FormatGate::default(),reported_formats:BTreeSet::new(),async_questions,reservations:Vec::new(),skill_preparations:BTreeMap::new(),skips:BTreeMap::new(),last_event:clock.monotonic_s,mode_write:None,metadata }
     }
 
     pub fn view(&self) -> Value {
@@ -571,7 +572,8 @@ impl Engine {
         json!({"alive":self.alive,"initialized":self.initialized,"ready":self.ready,"in_progress":self.in_progress,
             "headless":self.headless,"connected":self.connected,"subscribed":self.subscribed,"rollout_path":self.rollout_path,
             "thread_id":self.thread_id,"turn_id":self.turn_id,"model":self.model,"effort":self.effort,"mode":self.mode,"service_tier":self.service_tier,
-            "permission_mode":self.permission_mode,"token_usage":self.token_usage,"rate_limits":self.rate_limits,
+            "permission_mode":self.mode_write.as_ref().map(|(_,_,mode)|mode.clone()).or(self.permission_mode.clone()),
+            "permission_mode_saved":self.permission_mode,"token_usage":self.token_usage,"rate_limits":self.rate_limits,
             "runtime_counter":self.counter,"state_revision":self.state_revision,"settings_revision":self.settings_revision,"deliverable":self.deliverable(),"pending":self.server_requests.iter()
                 .map(|(id,request)|json!({"request_id":id,"request":request})).collect::<Vec<_>>(),
             "async_questions":self.async_questions.pending,"async_local_answers":self.async_questions.local_answers,
@@ -1219,10 +1221,11 @@ impl Engine {
         // Python; a resposta espera a gravação.
         if self.headless && !self.alive && command.kind == OperationKind::SetPermissionMode {
             let mode = known_mode(&command.payload)?;
-            let previous = self.permission_mode.replace(mode.into());
+            if self.mode_write.is_some() { return Err(RuntimeError::new("erro_permissao_ocupada","a troca de permissão anterior ainda está sendo gravada")); }
             let mut effects = Vec::new();
+            self.mode_write = Some((RequestId::String(String::new()),command.operation_id,mode.into()));
             let patch = self.policy("session.patch_meta",json!({"permission_mode":mode}),&mut effects);
-            self.mode_writes.insert(patch,(command.operation_id,previous));
+            if let Some(write) = self.mode_write.as_mut() { write.0 = patch; }
             self.changed(&mut effects,false);
             return Ok(effects);
         }
@@ -1607,12 +1610,12 @@ impl Engine {
                 }
             }
             EngineInput::PolicyResult { request_id,payload } => {
-                if let Some((operation_id,previous)) = self.mode_writes.remove(&request_id) {
+                if let Some((_,operation_id,mode)) = self.mode_write.take_if(|(patch,..)|*patch == request_id) {
                     self.policies.remove(&request_id);
                     if payload["updated"] == true {
-                        effects.push(Effect::Reply { operation_id,disposition:Disposition::Accepted,payload:json!({"current":self.permission_mode}) });
+                        self.permission_mode = Some(mode.clone());
+                        effects.push(Effect::Reply { operation_id,disposition:Disposition::Accepted,payload:json!({"current":mode}) });
                     } else {
-                        self.permission_mode = previous;
                         effects.push(Effect::Reply { operation_id,disposition:Disposition::Rejected,
                             payload:json!({"error":"não foi possível gravar o modo de permissão no arquivo da sessão","code":payload.get("error").cloned().unwrap_or(Value::Null)}) });
                     }

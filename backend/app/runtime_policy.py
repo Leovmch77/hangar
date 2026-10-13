@@ -33,8 +33,12 @@ async def execute(kind: str, payload: dict, metadata: dict) -> dict:
         return {"ok": False, "error_type": type(exc).__name__}
 
 
+class ModeClassMissing(RuntimeError):
+    """O nome da classe é o código que volta ao Rust (`error_type`)."""
+
+
 def native_message(payload, metadata):
-    from app import api, uds_messaging
+    from app import uds_messaging
     text = payload.get("text")
     operation_id = metadata.get("operation_id")
     if not isinstance(text, str) or not isinstance(operation_id, str) or not operation_id:
@@ -45,9 +49,11 @@ def native_message(payload, metadata):
     endpoint = uds_messaging.socket_da_sessao(metadata.get("session_id", ""), metadata.get("config_dir"))
     if not endpoint:
         return {"outcome": "not_written", "reason": "no_socket"}
-    # A classe confirmada vem do Rust, dono da memória de modo; sem ela, o cálculo pelo transcript e pela conta.
-    mode = payload.get("mode") if payload.get("mode") in ("bypass", "prompting") else \
-        api._classe_modo(sender, metadata["name"], metadata.get("config_dir"), metadata.get("jsonl"))
+    # A classe vem pronta do Rust, dono da memória de modo: sem ela o recado é recusado com código, nunca
+    # recalculado aqui com o Rust de pé.
+    mode = payload.get("mode")
+    if mode not in ("bypass", "prompting"):
+        raise ModeClassMissing("recado sem a classe de modo do Rust")
     mid = str(uuid.uuid5(uuid.NAMESPACE_URL, "hangar:" + metadata["key"] + ":" + operation_id))
     validate = metadata.get("validate")
     if validate is None:

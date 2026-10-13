@@ -278,6 +278,41 @@ async fn an_old_sidecar_without_endpoint_is_relaunched_by_the_rust_and_a_failure
 }
 
 #[tokio::test]
+async fn reload_of_an_old_terminal_sidecar_refuses_without_relaunching_it() {
+    // Recarregar só vale sem terminal: perguntar se é do Rust não pode relançar o terminal antigo.
+    let fx = fixture();
+    fx.put_sidecar("cx-old",legacy_meta(&fx));
+    std::fs::write(&fx.panes,"").unwrap();
+    let registry = relaunch_registry(&fx).await;
+    let watcher = relaunch_watcher(&fx,&relaunch_tmux(&fx));
+    registry.bind_watcher(watcher.clone());
+    for _ in 0..3 {
+        let refused = registry.restart_codex("cx-old").await.expect("Codex do Rust").unwrap_err();
+        assert_eq!(refused.code,"erro_recarregar_so_sem_terminal");
+    }
+    // Nenhuma tentativa de relançar foi contada: a escrita ainda tenta e mostra o motivo real.
+    let write = watcher.adopt_now(&registry,"cx-old").await;
+    assert_eq!(write.map(|r|r.map_err(|e|e.code)),Some(Err("codex_launcher_missing".into())));
+}
+
+#[tokio::test]
+async fn only_launch_failures_count_toward_giving_up() {
+    // Modo de permissão ilegível no sidecar não é falha do lançador: não leva ao "desisti".
+    let fx = fixture();
+    let mut meta = legacy_meta(&fx);
+    meta["permission_mode"] = json!("Custom (config.toml)");
+    fx.put_sidecar("cx-old",meta);
+    std::fs::write(&fx.panes,"").unwrap();
+    let registry = relaunch_registry(&fx).await;
+    let watcher = relaunch_watcher(&fx,&relaunch_tmux(&fx));
+    registry.bind_watcher(watcher.clone());
+    for _ in 0..4 {
+        let refused = watcher.adopt_now(&registry,"cx-old").await;
+        assert_ne!(refused.map(|r|r.map_err(|e|e.code)),Some(Err("codex_terminal_relaunch_gave_up".into())));
+    }
+}
+
+#[tokio::test]
 async fn an_old_sidecar_with_its_pane_alive_is_never_relaunched() {
     // Pane vivo: recriar destruiria a tela de quem trabalha nela; fica o código, sem tocar no pane.
     let fx = fixture();

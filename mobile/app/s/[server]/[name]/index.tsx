@@ -222,8 +222,9 @@ export default function ChatScreen() {
   useEffect(() => {
     const id = listForm?.interaction_id;
     if (!listForm?.questions?.length || !id || listFormOpened.current === id) return;
-    if (askOpen || askPayload?.interaction_id === id) return;
+    // Visto antes de decidir: o formulário que o stream já abriu (e foi respondido) não reabre pela lista atrasada.
     listFormOpened.current = id;
+    if (askOpen || askPayload?.interaction_id === id) return;
     chat.openAsk(listForm);
   }, [listForm, askOpen, askPayload, chat]);
 

@@ -218,8 +218,9 @@ pub struct Watcher {
     /// escrita, encerramento e troca de modo.
     pub(super) misses:tokio::sync::Mutex<BTreeMap<String,std::time::Instant>>,
     death_after:Duration,
-    /// Relançamentos seguidos que falharam do sidecar antigo, por nome (o `TETO_SUBIDAS` do Python).
-    pub(super) legacy_failures:tokio::sync::Mutex<BTreeMap<String,u8>>,
+    /// Relançamentos seguidos que falharam do sidecar antigo, por nome, com a hora da última falha (o
+    /// `TETO_SUBIDAS` do Python).
+    pub(super) legacy_failures:tokio::sync::Mutex<BTreeMap<String,(u8,std::time::Instant)>>,
 }
 
 /// Sidecar do desenho antigo (terminal sem `endpoint`): a escrita o relança pelo lançador.

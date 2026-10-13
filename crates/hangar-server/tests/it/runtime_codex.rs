@@ -2305,3 +2305,19 @@ fn a_dead_headless_records_the_permission_for_the_next_start() {
     let error = engine.command(command(OperationKind::SetPermissionMode,json!({"mode":"Read Only"})),clock(13.0)).unwrap_err();
     assert_eq!(error.code,"erro_modo_desconhecido");
 }
+
+#[test]
+fn a_dead_headless_mode_is_published_only_once_written() {
+    let mut engine = engine();
+    line(&mut engine,json!({"type":"cano_saiu","rc":1}),10.0);
+    let before = engine.control_view()["permission_mode"].clone();
+    let effects = engine.command(command(OperationKind::SetPermissionMode,json!({"mode":"Approve for me"})),clock(11.0)).unwrap();
+    let patch = effects.iter().find_map(|e|match e { Effect::Policy { kind,request_id,.. } if kind == "session.patch_meta" => Some(request_id.clone()),_=>None }).unwrap();
+    // Ainda não gravado: o modo mostrado é o salvo, e outra troca espera esta terminar.
+    assert_eq!(engine.control_view()["permission_mode_saved"],before);
+    let second = engine.command(RuntimeCommand { operation_id:"op-2".into(),kind:OperationKind::SetPermissionMode,payload:json!({"mode":"Full Access"}) },clock(11.2)).unwrap_err();
+    assert_eq!(second.code,"erro_permissao_ocupada");
+    engine.apply(EngineInput::PolicyResult { request_id:patch,payload:json!({"updated":false}) },clock(11.5)).unwrap();
+    assert_eq!(engine.control_view()["permission_mode"],before,"a falha volta ao modo gravado, nunca a um pendente");
+    assert_eq!(engine.control_view()["permission_mode_saved"],before);
+}

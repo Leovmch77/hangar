@@ -1180,11 +1180,12 @@ impl Hubs {
             }
             None => {
                 let hub = Hub::start(name, binding, ctx.clone());
+                // O convidado conta sob a mesma trava do `n`: fora dela, `app_present` veria o hub só com ele como do dono.
+                if guest { hub.guests.fetch_add(1, Ordering::AcqRel); }
                 map.insert(name.to_string(), (hub.clone(), 1));
                 drop(map);
                 // Hub novo começa sem retrato: a faixa e os avisos que o Rust já publicou entram agora.
                 hub.seed(ctx.mods.replay(name));
-                if guest { hub.guests.fetch_add(1, Ordering::AcqRel); }
                 return Lease { hubs: self.clone(), hub, guest };
             }
         };

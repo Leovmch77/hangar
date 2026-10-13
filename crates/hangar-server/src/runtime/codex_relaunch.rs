@@ -28,8 +28,9 @@ const INGRESS_WAIT:Duration = Duration::from_secs(10);
 const EXIT_WAIT:Duration = Duration::from_secs(5);
 /// Motor novo até assentar na conversa.
 const SETTLE_WAIT:Duration = Duration::from_secs(45);
-/// Relançamentos seguidos do sidecar antigo antes de a escrita parar de tentar.
+/// Relançamentos seguidos do sidecar antigo antes de a escrita parar de tentar, e por quanto tempo.
 const LEGACY_TRIES:u8 = 3;
+const LEGACY_WINDOW:Duration = Duration::from_secs(600);
 /// Releitura da configuração da conversa antes de ir para sem terminal.
 const SETTINGS_READ_WAIT:Duration = Duration::from_secs(5);
 const POLL:Duration = Duration::from_millis(200);
@@ -327,7 +328,13 @@ impl Watcher {
     pub(super) async fn relaunch_legacy(&self,registry:&RuntimeRegistry,name:&str) -> Option<Result<(),RuntimeError>> {
         let meta = self.load(name).await?;
         if meta.get("headless").is_some_and(truthy) || terminal::text(&meta,"endpoint").is_some() || self.transfer_busy(name,&meta).await { return None; }
-        if self.legacy_failures.lock().await.get(name).is_some_and(|failures|*failures >= LEGACY_TRIES) {
+        let given_up = {
+            let mut failures = self.legacy_failures.lock().await;
+            // Passado o prazo, a próxima escrita tenta de novo (o lançador pode ter sido instalado).
+            failures.retain(|_,(_,at)|at.elapsed() < LEGACY_WINDOW);
+            failures.get(name).is_some_and(|(count,_)|*count >= LEGACY_TRIES)
+        };
+        if given_up {
             return Some(Err(RuntimeError::new("codex_terminal_relaunch_gave_up","o terminal desta sessão não reabriu depois de várias tentativas; feche e abra a sessão de novo")));
         }
         match self.cfg.mux.list_panes().await {
@@ -336,6 +343,9 @@ impl Watcher {
                 "o terminal do Codex está aberto sem um app-server que o Hangar alcance; feche e abra a sessão de novo"))),
             Ok(_) => {}
         }
+        // Só a falha do lançador ou da adoção conta para o teto: porta ocupada, multiplexador calado e
+        // sidecar ilegível passam sem gastar tentativa.
+        let mut launched = false;
         let result = async {
             let _closed = hold(registry.ingress(),name).await?;
             let _round = self.misses.lock().await;
@@ -343,11 +353,19 @@ impl Watcher {
             let key = terminal::text(&meta,"key").filter(|key|terminal::valid_key(key)).map_or_else(||random_hex(16),str::to_owned);
             let wanted = cleared(terminal_settings(meta,&json!({}),&key)?,false);
             let (base,check) = (registry.codex_environment(),Value::Object(wanted.clone()));
+            launched = true;
             tokio::task::spawn_blocking(move||super::codex_pane::launch_recipe(&base,&check).map(|_|())).await.map_err(|_|job())??;
             self.open_terminal(registry,name,&key,&wanted,None).await
         }.await;
         let mut failures = self.legacy_failures.lock().await;
-        if result.is_ok() { failures.remove(name); } else { *failures.entry(name.to_owned()).or_default() += 1; }
+        match &result {
+            Ok(()) => { failures.remove(name); }
+            Err(_) if launched => {
+                let entry = failures.entry(name.to_owned()).or_insert((0,std::time::Instant::now()));
+                *entry = (entry.0 + 1,std::time::Instant::now());
+            }
+            Err(_) => {}
+        }
         Some(result)
     }
 
@@ -680,7 +698,9 @@ impl Watcher {
         let meta = self.load(name).await?;
         if self.transfer_busy(name,&meta).await { return None; }
         if !meta.get("headless").is_some_and(truthy) {
-            let ours = registry.codex_terminals().await.iter().any(|t|t.name == name) || self.adopt_now(registry,name).await.is_some();
+            // Só leitura: perguntar se é do Rust não adota nem relança o terminal (o sidecar antigo relançaria).
+            use crate::session_write::{Owner,Provider as Route,WriteRoute,decide};
+            let ours = registry.codex_terminals().await.iter().any(|t|t.name == name) || decide(WriteRoute::CodexControl,Route::Codex,true) == Owner::Rust;
             return ours.then(||Err(RuntimeError::new("erro_recarregar_so_sem_terminal","reiniciar só vale para sessão Codex sem terminal")));
         }
         if let Err(error) = self.open_parked(registry,name).await? { return Some(Err(error)); }

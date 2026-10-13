@@ -91,8 +91,15 @@
     const prev = getActiveId();
     selectServer(s.serverId);
     try {
-      await answerQuestions(s.name, answers, form.request_id, form.interaction_id);
+      const r = await answerQuestions(s.name, answers, form.request_id, form.interaction_id);
+      // Sem confirmação o card não some como respondido: o passo a passo mostra e deixa tentar de novo.
+      if (!r?.ok) throw new Error(m.native_action_uncertain());
       if (current(s) && expandedKey === k) expandedKey = null;
+      // Entregue como texto (o seletor não respondeu): já chegou, repetir duplicaria; fica o aviso visível.
+      if (r.fallback) {
+        erro = { key: k, msg: m.askq_enviada_como_texto() };
+        erroTimer = setTimeout(() => (erro = null), 8000);
+      }
     } finally {
       if (prev && prev !== s.serverId) selectServer(prev);
     }

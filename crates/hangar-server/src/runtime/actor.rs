@@ -1678,7 +1678,12 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
                                             // A classe do recado vai pronta: a memória de modo é do Rust, e o Python não volta a ele.
                                             let text = command.payload["text"].as_str().unwrap_or("");
                                             let sender = crate::terminal_input::message_prefix(text).map(|(sender,_)|sender).filter(|_|!text.starts_with("[painel:"));
-                                            let class = match lifecycle.as_ref().and_then(std::sync::Weak::upgrade) { Some(registry)=>registry.message_class(sender,&target.name).await, None=>None };
+                                            // Leitura que falha sobe com o código; sem registro ligado (só fora do servidor) vai sem
+                                            // classe, e o Python recusa com `ModeClassMissing` em vez de recalcular.
+                                            let class = match lifecycle.as_ref().and_then(std::sync::Weak::upgrade) {
+                                                Some(registry)=>Some(registry.message_class(sender,&target.name).await?),
+                                                None=>None,
+                                            };
                                             let payload = json!({"text":command.payload["text"],"mode":class});
                                             queue.exec(target.generation,&format!("prepare:{phase}"),sample,Action::Prepare { id:phase.clone(),
                                                 payload:json!({"kind":"native_message","request_id":id,"payload":payload}),entry_id:None }).await.map_err(io_failure)?;

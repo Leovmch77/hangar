@@ -59,3 +59,33 @@ it('formulário da lista responde pelo /answer do servidor dono, sem abrir o cha
     component.$destroy(); target.remove();
   }
 });
+
+it('resposta sem confirmação não fecha o card: o passo a passo mostra e deixa tentar de novo', async () => {
+  overwriteGetLocale(() => 'pt');
+  auth.activeId = 'c';
+  auth.selectServer.mockImplementation((id) => { auth.activeId = id; return true; });
+  configureApi({
+    getBaseUrl: () => auth.servers.find((s) => s.id === auth.activeId)!.baseUrl,
+    getToken: () => auth.servers.find((s) => s.id === auth.activeId)!.token,
+    onUnauthorized: vi.fn(), origin: null,
+    createEventSource: () => { throw new Error('sem SSE no teste'); },
+  });
+  vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{"ok":false}'));
+  const session: AggSession = {
+    name: 's', state: 'awaiting_input', serverId: 'a', serverLabel: 'a', serverColor: '#fff', question: 'Qual?',
+    ask_form: { request_id: 'ask:t1', interaction_id: 'form-a', questions: [{ header: 'H', question: 'Qual?', multiSelect: false,
+      options: [{ label: 'A', description: '' }] }] },
+  };
+  const target = document.createElement('div'); document.body.appendChild(target);
+  const component = createClassComponent({ component: AttentionFeed, target, props: { sessions: [session], onOpenChat: vi.fn() } });
+  try {
+    await tick();
+    target.querySelector<HTMLButtonElement>('.attn-main')!.click(); await tick();
+    target.querySelector<HTMLButtonElement>('.option-btn')!.click(); await tick();
+    target.querySelector<HTMLButtonElement>('.primary-btn')!.click();
+    await vi.waitFor(() => expect(target.querySelector('.error-msg')).not.toBeNull());
+    expect(target.querySelector('.primary-btn')).not.toBeNull();
+  } finally {
+    component.$destroy(); target.remove();
+  }
+});

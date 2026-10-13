@@ -200,7 +200,15 @@ impl Sources for NativeSources {
             };
             let memory = state.state.permissions.lock().map_err(|_| ServiceError("permission_store_unavailable"))?;
             // Modo incerto (troca em curso) também segura: só `auto`/`dontAsk` confirmados soltam.
-            let mode = memory.confirmed(&identity.binding.conversation).ok().flatten();
+            let mode = match memory.confirmed(&identity.binding.conversation) {
+                Ok(mode) => mode,
+                Err(code) => {
+                    if crate::warn_limit::allow(Some(&identity.binding.key), code) {
+                        tracing::warn!(key = %identity.binding.key, session = %identity.name, code, "portão da permissão: modo incerto; o app segura");
+                    }
+                    None
+                }
+            };
             Ok(permission_gate(state.list.owner_clients() > 0 || state.list.python_apps() > 0 || state.side.hubs.app_present(), attached,
                 mode.as_ref().map(|mode| mode.current.as_str())))
         })

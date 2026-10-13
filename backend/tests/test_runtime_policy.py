@@ -64,7 +64,7 @@ def test_native_message_has_journal_before_uds(monkeypatch):
         assert kwargs["msg_id"]
         raise OSError("write sem prova")
     monkeypatch.setattr(uds_messaging, "enviar", send)
-    result = runtime_policy.native_message({"text":"[de: source] Olá"}, {"key":"key", "name":"session",
+    result = runtime_policy.native_message({"text":"[de: source] Olá", "mode":"prompting"}, {"key":"key", "name":"session",
         "session_id":"sid", "operation_id":"op", "validate":lambda: validated.append(True)})
     assert result["outcome"] == "unknown"
 
@@ -79,6 +79,8 @@ def test_native_message_uses_the_mode_the_rust_sent(monkeypatch):
     monkeypatch.setattr(uds_messaging, "enviar", lambda sock, text, sender, mode, **kw: sent.append(mode))
     meta = {"key":"key", "name":"session", "session_id":"sid", "operation_id":"op", "validate":lambda: None}
     runtime_policy.native_message({"text":"[de: source] Olá", "mode":"bypass"}, meta)
-    runtime_policy.native_message({"text":"[de: source] Olá", "mode":"turbo"}, meta)
-    runtime_policy.native_message({"text":"[de: source] Olá"}, meta)
-    assert sent == ["bypass", "prompting", "prompting"]
+    # Sem a classe (ou com uma inválida) recusa com código: o Python não recalcula com o Rust de pé.
+    for payload in ({"text":"[de: source] Olá", "mode":"turbo"}, {"text":"[de: source] Olá"}):
+        with pytest.raises(runtime_policy.ModeClassMissing):
+            runtime_policy.native_message(payload, meta)
+    assert sent == ["bypass"]

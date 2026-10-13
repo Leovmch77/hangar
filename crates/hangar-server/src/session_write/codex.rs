@@ -334,7 +334,8 @@ pub async fn permissions(State(st): State<Arc<AppState>>, ConnectInfo(peer): Con
     // O modo do motor, que vale com o processo caído; a vista publicada só chega depois de gravada e
     // logo após abrir ou trocar o modo ainda traria o anterior.
     let result = match ctx.target.handle.view().await {
-        Ok(view) => (StatusCode::OK, permission_modes(view["permission_mode"].as_str())),
+        // O modo gravado: com o processo caído, a troca em gravação só vale quando o arquivo a aceitar.
+        Ok(view) => (StatusCode::OK, permission_modes(view["permission_mode_saved"].as_str().or(view["permission_mode"].as_str()))),
         Err(error) => (StatusCode::SERVICE_UNAVAILABLE, detail_body("erro_permissao_picker", &error.to_string(), json!({}))),
     };
     answer(&ctx, result)

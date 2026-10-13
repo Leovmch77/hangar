@@ -557,13 +557,30 @@ impl RuntimeRegistry {
     /// Classe do recado (`bypass`/`prompting`) para o Python, que não guarda mais a memória de modo: a do
     /// remetente quando é sessão aberta aqui, senão a do alvo. `None`: nenhum modo confirmado; o Python cai
     /// no transcript e na conta, como antes.
-    pub(crate) async fn message_class(&self,sender:Option<&str>,target:&str) -> Option<&'static str> {
+    pub(crate) async fn message_class(&self,sender:Option<&str>,target:&str) -> Result<&'static str,RuntimeError> {
         let read=self.terminal_mode_reader();
-        let mut mode=None;
-        for name in sender.into_iter().chain(std::iter::once(target)) {
-            if let Ok(Some(source))=read(name.to_owned()).await && let Some(found)=source.confirmed {mode=Some(found);break;}
+        let class=|mode:&str| if mode.to_ascii_lowercase().contains("bypass") {"bypass"} else {"prompting"};
+        // Leitura que falha é erro com código, nunca o Python recalculando com o Rust de pé.
+        if let Some(sender)=sender && let Some(source)=read(sender.to_owned()).await.map_err(|e|failure(e.0))?
+            && let Some(mode)=source.confirmed {return Ok(class(&mode));}
+        let source=read(target.to_owned()).await.map_err(|e|failure(e.0))?.ok_or_else(||failure("runtime_binding"))?;
+        if let Some(mode)=source.confirmed {return Ok(class(&mode));}
+        let config=self.config_dir_of(target).await.ok_or_else(||failure("terminal_account_mode_unavailable"))?;
+        let transcript=source.transcript.clone();
+        let mode=tokio::task::spawn_blocking(move||crate::terminal_facts::unconfirmed_mode(&transcript,&config)).await
+            .map_err(|_|failure("terminal_mode_unavailable"))?.map_err(|e|failure(e.0))?;
+        Ok(class(&mode))
+    }
+    /// Pasta da conta da sessão aberta aqui (sem a gravada, a padrão do Claude).
+    async fn config_dir_of(&self,name:&str) -> Option<std::path::PathBuf> {
+        let entries=self.entries.lock().await;
+        let entry=entries.values().find(|entry|entry.name==name)?;
+        match &entry.handle {
+            EntryHandle::Terminal {target,..}=>Some(target.metadata.config_dir.clone()),
+            EntryHandle::Headless(_)=>entry.runtime_target.as_ref().and_then(|target|target.metadata["config_dir"].as_str().map(std::path::PathBuf::from))
+                .or_else(||std::env::home_dir().map(|home|home.join(".claude"))),
+            EntryHandle::CodexTerminal {..}=>None,
         }
-        mode.map(|mode|if mode.to_ascii_lowercase().contains("bypass") {"bypass"} else {"prompting"})
     }
     /// Vínculo e metadados do terminal, sem enviar um pedido ao ator ocupado.
     pub async fn terminal_target(&self,name:&str)->Result<Option<super::terminal::TerminalTarget>,RuntimeError> {
@@ -2173,8 +2190,13 @@ mod tests {
         memory.lock().unwrap().observe("new-sid","plan");
         assert_eq!(read("same".into()).await.unwrap().unwrap().confirmed.as_deref(),Some("bypassPermissions"));
         // Decisão M6: a classe do recado sai daqui para o Python; remetente desconhecido cai no alvo.
-        assert_eq!(registry.message_class(Some("ninguem"),"same").await,Some("bypass"));
-        assert_eq!(registry.message_class(None,"fora").await,None);
+        assert_eq!(registry.message_class(Some("ninguem"),"same").await.unwrap(),"bypass");
+        // Alvo sem entrada é erro com código (o Python não recalcula com o Rust de pé).
+        assert_eq!(registry.message_class(None,"fora").await.unwrap_err().code,"runtime_binding");
+        // Sem modo confirmado, o Rust mesmo cai no transcript e na conta, como o Python fazia.
+        *memory.lock().unwrap()=crate::state::permission::PermissionMemory::default();
+        std::fs::write(dir.path().join("settings.json"),r#"{"permissions":{"defaultMode":"bypassPermissions"}}"#).unwrap();
+        assert_eq!(registry.message_class(None,"same").await.unwrap(),"bypass");
         handle.stop().await.unwrap();
     }
 
