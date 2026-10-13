@@ -232,7 +232,7 @@ async fn operation_id_cannot_be_reused_with_another_payload() {
 /// disco lento atrasa sem bloquear nada, e quem fica preso atrás da RPC deixa a fila parada.
 async fn unless_queue_stalls<T>(state:&std::path::Path,work:impl std::future::Future<Output=T>) -> T {
     tokio::pin!(work);
-    let (mut last,mut since) = (std::fs::read(state).unwrap(),std::time::Instant::now());
+    let (mut last,mut since,start) = (std::fs::read(state).unwrap(),std::time::Instant::now(),std::time::Instant::now());
     loop {
         tokio::select! {
             done = &mut work => return done,
@@ -240,6 +240,8 @@ async fn unless_queue_stalls<T>(state:&std::path::Path,work:impl std::future::Fu
                 let now = std::fs::read(state).unwrap();
                 if now != last { (last,since) = (now,std::time::Instant::now()); }
                 assert!(since.elapsed() < std::time::Duration::from_secs(5),"a fila parou de gravar");
+                // Fila que regrava sem parar também não pode prender o teste para sempre.
+                assert!(start.elapsed() < std::time::Duration::from_secs(60),"a operação não terminou em 60 s");
             }
         }
     }
