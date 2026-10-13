@@ -1104,7 +1104,7 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
                         let result=tokio::task::spawn_blocking(move || {let _lease=lease;super::lifecycle::patch_sidecar(&captured,&values)}).await.map_err(|_|failure("lifecycle_worker"))??;
                         if result["updated"]!=true {return Err(failure("lifecycle_sidecar_stale"));}
                         let mut metadata=result["metadata"].clone();metadata["lifecycle_pending"]=target.metadata["lifecycle_pending"].clone();
-                        queue.exec(target.generation,&format!("claude-metadata:{version}"),sample,Action::AdvanceLifecycle {generation:target.generation,state:json!({"metadata":metadata})}).await.map_err(io_failure)?;
+                        queue.exec(target.generation,&format!("claude-metadata:{}",unique()),sample,Action::AdvanceLifecycle {generation:target.generation,state:json!({"metadata":metadata})}).await.map_err(io_failure)?;
                         Ok::<_,RuntimeError>((metadata,result["digest"].as_str().ok_or_else(||failure("lifecycle_commit_digest"))?.to_owned()))
                     }.await;
                     match saved {
