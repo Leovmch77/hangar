@@ -150,7 +150,8 @@ pub async fn public(state: Arc<crate::routes::AppState>, request: Request) -> Re
     let env = service.env.clone();
     let config = match tokio::task::spawn_blocking(move || other::load(&env)).await {
         Ok(config) => Arc::new(config),
-        Err(_) => {
+        Err(error) => {
+            tracing::error!(code = "credentials_config_failed", panic = error.is_panic(), "leitura das configs das fontes falhou");
             report("credentials_config_failed", "leitura das configs das fontes falhou; a lista segue sem chaves");
             Arc::new(other::Config::default())
         }
