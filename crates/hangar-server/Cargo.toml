@@ -102,5 +102,9 @@ name = "contract_local_policy"   # troca HOME, USERPROFILE e TZ
 path = "tests/contract_local_policy.rs"
 
 [[test]]
+name = "scope_retry"   # troca o PATH e o logger global
+path = "tests/scope_retry.rs"
+
+[[test]]
 name = "costs_hook"   # gancho de pânico global (install_panic_hook)
 path = "tests/costs_hook/main.rs"
