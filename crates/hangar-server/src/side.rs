@@ -1199,8 +1199,8 @@ impl Hubs {
         }
     }
 
-    pub(crate) fn rebind_claude(&self,name:&str,key:&str,jsonl:PathBuf,queue:PathBuf)->Result<(),crate::runtime::protocol::RuntimeError> {
-        self.rebind_claude_info(name,InternalInfo {provider:"claude".into(),jsonl:Some(jsonl),session_key:key.into(),history:serde_json::json!({"queue":queue}),headless:false,lifecycle_id:None})
+    pub(crate) fn rebind_claude(&self,name:&str,conversation:&str,jsonl:PathBuf,queue:PathBuf)->Result<(),crate::runtime::protocol::RuntimeError> {
+        self.rebind_claude_info(name,InternalInfo {provider:"claude".into(),jsonl:Some(jsonl),session_key:conversation.into(),history:serde_json::json!({"queue":queue}),headless:false,lifecycle_id:None})
     }
     pub(crate) fn rebind_claude_info(&self,name:&str,info:InternalInfo)->Result<(),crate::runtime::protocol::RuntimeError> {
         let binding=Binding::from_info(&info).filter(|b|matches!(b.provider,Provider::Claude|Provider::ClaudeHeadless)).ok_or_else(||crate::runtime::protocol::RuntimeError::new("lifecycle_hub_binding","vínculo do hub inválido"))?;
@@ -1920,5 +1920,35 @@ mod tests {
         lease.hub.restart_side();
         assert!(lease.hub.side.lock().unwrap().is_none(), "hub fechado não religa");
         assert!(lease.hub.bound.lock().unwrap().is_none());
+    }
+
+    /// Claude com terminal aberto no runtime: o hub ligado por `SideCtx::info` leva a conversa como
+    /// chave, que é o que o `Monitor` compara antes de capturar (senão `state_binding_changed`).
+    #[tokio::test]
+    async fn terminal_hub_bound_by_the_runtime_keys_the_conversation() {
+        use crate::runtime::gateway::RuntimeRegistry;
+        let dir = tempfile::tempdir().unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let registry = Arc::new(RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(), "secret-test".into(), "instance-test".into()));
+        let ctx = test_ctx();
+        registry.bind_hubs(ctx.hubs.downgrade());
+        assert!(ctx.runtime.set(registry.clone()).is_ok());
+        let server = tokio::spawn(crate::runtime::gateway::serve(listener, registry.clone(), "secret-test".into(), "instance-test".into(), crate::INTERNAL_PROTOCOL));
+        let pid = std::process::id();
+        let terminal = serde_json::json!({"name":"s","pane":"%1","conversation":"sid","generation":1,"created":1,"mux_argv":["fake"],"windows":false,"clipboard_lock_path":null});
+        let descriptor = serde_json::json!({"name":"s","key":"terminal_key","provider":"claude","headless":false,
+            "meta":{"key":"terminal_key","terminal":terminal,"config_dir":dir.path(),"agent_pid":pid,"agent_birth":crate::terminal_facts::agent_birth(pid).unwrap(),"fingerprint":"fixture-life","message_origin":"uds:fixture"},
+            "jsonl":dir.path().join("sid.jsonl"),"projection_dir":dir.path().join("projection"),"state_path":dir.path().join("state"),"lock_path":dir.path().join("lease"),"generation":1});
+        let send = |command: serde_json::Value| reqwest::Client::new().post(format!("http://{address}/runtime/op"))
+            .header("x-hangar-internal", "secret-test").header("x-hangar-runtime-instance", "instance-test").header("content-type", "application/json")
+            .body(serde_json::json!({"protocol":crate::INTERNAL_PROTOCOL,"instance":"instance-test","key":"terminal_key","generation":1,"operation_id":"op","clock":{"monotonic_s":0.0,"epoch_s":0.0},"command":command}).to_string()).send();
+        assert!(send(serde_json::json!({"kind":"open","descriptor":descriptor})).await.unwrap().status().is_success());
+        let info = ctx.info("s").await.unwrap().unwrap();
+        let lease = ctx.hubs.acquire("s", Binding::from_info(&info).unwrap(), &ctx);
+        let life = registry.interaction_binding_readonly("s").await.unwrap();
+        assert_eq!(lease.hub.session_key().as_deref(), Some(life.conversation.as_str()));
+        assert!(send(serde_json::json!({"kind":"close"})).await.unwrap().status().is_success());
+        server.abort();
     }
 }

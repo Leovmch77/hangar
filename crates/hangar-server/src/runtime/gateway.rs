@@ -956,18 +956,19 @@ impl RuntimeRegistry {
         if let Some(mods) = &self.mods { mods.forget(&name,life); }
         Ok(if kill { json!({"closed":true,"killed":true}) } else { json!({"closed":true}) })
     }
+    /// `session_key` é a conversa, como na descoberta: o hub a compara com o `conversation` do vínculo.
     pub async fn claude_info(&self,name:&str)->Option<crate::transcript::InternalInfo> {
         let entries=self.entries.lock().await;
         let mut matches=entries.values().filter(|entry|entry.name==name && entry.provider=="claude");
         let entry=matches.next()?;if matches.next().is_some() {return None;}
         match &entry.handle {
-            EntryHandle::Terminal {target,..}=>Some(crate::transcript::InternalInfo {provider:"claude".into(),jsonl:Some(target.transcript.clone()),session_key:target.key.clone(),
+            EntryHandle::Terminal {target,..}=>Some(crate::transcript::InternalInfo {provider:"claude".into(),jsonl:Some(target.transcript.clone()),session_key:target.binding.conversation.clone(),
                 history:json!({"queue":target.projection_dir.join(format!("{}.jsonl",name))}),headless:false,lifecycle_id:None}),
             EntryHandle::Headless(_)=> {
                 let live=entry.live.borrow().clone()?;
                 let binding=live.binding.as_ref().filter(|binding|binding.key==entry.mode_source.binding.key && binding.generation==entry.generation && !binding.conversation.is_empty())?;
                 let jsonl=entry.mode_source.transcript.with_file_name(format!("{}.jsonl",binding.conversation));
-                Some(crate::transcript::InternalInfo {provider:crate::transcript::Provider::ClaudeHeadless.as_str().into(),jsonl:Some(jsonl),session_key:binding.key.clone(),history:json!({"queue":entry.lease_path.parent()?.parent()?.join(format!("{name}.jsonl"))}),headless:true,lifecycle_id:None})
+                Some(crate::transcript::InternalInfo {provider:crate::transcript::Provider::ClaudeHeadless.as_str().into(),jsonl:Some(jsonl),session_key:binding.conversation.clone(),history:json!({"queue":entry.lease_path.parent()?.parent()?.join(format!("{name}.jsonl"))}),headless:true,lifecycle_id:None})
             },
             _=>None,
         }
@@ -980,7 +981,7 @@ impl RuntimeRegistry {
     }
     fn rebind_claude_hub(&self,target:&super::terminal::TerminalTarget)->Result<(),RuntimeError> {
         let hubs=self.hubs.get().and_then(crate::side::WeakHubs::upgrade).ok_or_else(||failure("lifecycle_hubs_unbound"))?;
-        hubs.rebind_claude(&target.name,&target.key,target.transcript.clone(),target.projection_dir.join(format!("{}.jsonl",target.name)))
+        hubs.rebind_claude(&target.name,&target.binding.conversation,target.transcript.clone(),target.projection_dir.join(format!("{}.jsonl",target.name)))
     }
     /// Chamado pelo ator serial: não para nem consulta o próprio ator e não espera reabridor HTTP.
     pub(super) async fn commit_claude_sid(&self,target:&RuntimeTarget,queue:&QueueActor,patch:&Value)->Result<RuntimeTarget,RuntimeError> {

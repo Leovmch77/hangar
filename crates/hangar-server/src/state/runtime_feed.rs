@@ -558,6 +558,54 @@ mod tests {
         assert!(!got.iter().any(|(_,_,data)| data.to_string().contains("ask:a")));
     }
 
+    /// Hub ligado como no servidor (`SideCtx::info` pergunta ao runtime antes da descoberta): a rodada
+    /// prova a conversa e publica a vista do ator, sem `state_feed_binding_unavailable`.
+    #[tokio::test]
+    async fn hub_bound_by_the_runtime_info_publishes_the_actor_view() {
+        use crate::runtime::protocol::{CanoBinding, RuntimeTarget};
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        let dir = tempfile::tempdir().unwrap();
+        let boot = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let python = boot.local_addr().unwrap();
+        let boot_server = tokio::spawn(async move {
+            axum::serve(boot, axum::Router::new().fallback(|| async { crate::session_write::json_response(axum::http::StatusCode::OK, json!({"ok":true,"data":{}})) })).await.unwrap();
+        });
+        let cano = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = cano.local_addr().unwrap();
+        let cano_server = tokio::spawn(async move {
+            let (socket, _) = cano.accept().await.unwrap();
+            let mut socket = BufReader::new(socket);
+            let mut token = String::new();
+            socket.read_line(&mut token).await.unwrap();
+            let snapshot = json!({"type":"cano_snapshot","versao":2,"pid":42,"init":null,"aberto":false,
+                "pendentes":[],"ultimo_result":null,"rate_limit":null,"stderr_tail":[],"saiu":null,"inflight":{}});
+            socket.get_mut().write_all(format!("{snapshot}\n").as_bytes()).await.unwrap();
+            let mut line = String::new();
+            while socket.read_line(&mut line).await.unwrap_or(0) > 0 { line.clear(); }
+        });
+        let processes = Arc::new(RecipeProcesses {sid:std::sync::Mutex::new("sid".into()),config:dir.path().into()});
+        let registry = Arc::new(crate::runtime::gateway::RuntimeRegistry::new(python, "test".into(), "feed-info".into()).with_processes(processes));
+        let ctx = test_ctx();
+        registry.bind_hubs(ctx.hubs.downgrade());
+        assert!(ctx.runtime.set(registry.clone()).is_ok());
+        registry.open(RuntimeTarget { key:"runtime-key".into(), generation:1, name:"s".into(), provider:"claude".into(),
+            metadata:json!({"name":"s","headless":true,"session_id":"sid","initialized":true}),
+            binding:CanoBinding {pid:42,escuta:format!("tcp:{address}"),token:"cano-test".into(),versao:2},
+            lease_path:dir.path().join("feed.lock"),state_path:dir.path().join("queue.json"),
+            projection_dir:dir.path().join("projection"),transcript:dir.path().join("sid.jsonl"),created:0.0 }).await.unwrap();
+        let info = ctx.info("s").await.unwrap().unwrap();
+        let lease = ctx.hubs.acquire("s", Binding::from_info(&info).unwrap(), &ctx);
+        let mut rx = lease.hub.tx.subscribe();
+        let mut feed = RuntimeFeed::new(&lease.hub, Some(registry.live("s")), Arc::default(), None).with_registry(Some(registry.clone()));
+        assert!(feed.round().await);
+        let got = collect(&mut rx, Duration::from_millis(20)).await;
+        let state = &of(&got, "state")[0].2;
+        assert!(state["problema"].is_null(), "rodada sem prova da conversa: {state}");
+        registry.close("runtime-key", 1).await.unwrap();
+        cano_server.abort();
+        boot_server.abort();
+    }
+
     struct RecipeProcesses {sid:std::sync::Mutex<String>,config:std::path::PathBuf}
     impl crate::list::procs::ProcessView for RecipeProcesses {
         fn children(&self,_:Duration)->std::io::Result<Arc<crate::list::procs::ChildrenMap>> {Ok(Arc::new(std::collections::HashMap::from([(42,vec![43])]))) }

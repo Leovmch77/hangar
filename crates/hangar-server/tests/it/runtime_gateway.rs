@@ -85,6 +85,7 @@ async fn terminal_runtime_gateway_opens_without_cano_and_fences_generation() {
     assert!(registry.handle("key",1).await.is_err());
     let readonly=registry.terminal_target("session").await.unwrap().unwrap();assert_eq!(readonly.binding.conversation,"sid");
     assert_eq!(registry.interaction_binding_readonly("session").await.unwrap().generation,1);
+    assert_eq!(registry.claude_info("session").await.unwrap().session_key,"sid","chave do hub é a conversa, não a do runtime");
     assert_eq!(registry.list_snapshots_readonly().await["key"]["error"],"runtime_live_unavailable","sem Published não inventa estado parado");
     assert_eq!(send(2,serde_json::json!({"kind":"snapshot"})).send().await.unwrap().status(),503);
     assert!(hangar_server::runtime::queue::acquire_lease(&dir.path().join("lease")).is_err());
@@ -127,6 +128,16 @@ async fn readonly_headless_binding_comes_from_the_owner_feed() {
     assert!(registry.terminal_target("session").await.unwrap().is_none());
     let snapshots=registry.list_snapshots_readonly().await;assert_eq!(snapshots["key"]["key"],"key");assert_eq!(snapshots["key"]["view"]["headless"],true);
     registry.close("key",1).await.unwrap();assert!(registry.interaction_binding_readonly("session").await.is_err());cano.abort();
+}
+/// A chave do hub é a conversa (o feed e a taxa a comparam com `conversation`), nunca a chave do runtime.
+#[tokio::test]
+async fn headless_claude_info_keys_the_hub_by_conversation() {
+    let dir=tempfile::tempdir().unwrap();let (registry,_,cano)=opened(dir.path()).await;
+    let binding=registry.interaction_binding_readonly("session").await.unwrap();
+    let info=registry.claude_info("session").await.unwrap();
+    assert_eq!(info.session_key,binding.conversation);
+    assert_eq!(info.jsonl.unwrap().file_name().unwrap(),"sid-1.jsonl");
+    registry.close("key",1).await.unwrap();cano.abort();
 }
 #[tokio::test]
 async fn a_failing_status_service_does_not_stop_the_session() {
