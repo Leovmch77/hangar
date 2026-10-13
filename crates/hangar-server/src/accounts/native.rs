@@ -301,6 +301,21 @@ pub fn auth_public(result: &Value) -> Value {
         _ => unavailable(false),
     }
 }
+/// Conta em uso por um login ou `auth.json` trocando no meio da leitura: não é falha de leitura.
+fn busy() -> Value {
+    let mut result = unavailable(false);
+    result["reason"] = json!("busy");
+    result
+}
+
+/// Fora da lista de credenciais `busy` não existe: essas rotas sempre mostraram só `cli_missing`.
+pub(crate) fn without_busy(mut auth: Value) -> Value {
+    if auth["reason"] == "busy" && let Some(object) = auth.as_object_mut() {
+        object.remove("reason");
+    }
+    auth
+}
+
 pub(crate) fn unavailable(missing: bool) -> Value {
     let mut result = json!({"method":"unknown","status":"unavailable","email":null,"plan":null});
     if missing {
@@ -381,7 +396,7 @@ impl AccountService {
             return unavailable(false);
         };
         let Ok(_guard) = self.locks.try_acquire(&key, GuardMode::Shared) else {
-            return unavailable(false);
+            return busy();
         };
         let Ok(current) = self.resolve(Provider::Codex, &account.id) else {
             return unavailable(false);
@@ -421,11 +436,13 @@ impl AccountService {
             }
             Err(code) => unavailable(code == "codex_account_cli_missing"),
         };
-        if *cancel.borrow()
-            || AuthCache::signature(account).ok().as_ref() != Some(&signature)
+        if *cancel.borrow() {
+            return unavailable(false);
+        }
+        if AuthCache::signature(account).ok().as_ref() != Some(&signature)
             || self.codex_auth.generation(&key) != generation
         {
-            return unavailable(false);
+            return busy();
         }
         self.codex_auth
             .put(&key, signature, generation, value.clone());

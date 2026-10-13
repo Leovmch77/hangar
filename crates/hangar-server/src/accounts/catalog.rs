@@ -646,6 +646,7 @@ pub fn disconnected_auth() -> Value {
     json!({"method":"none","status":"disconnected","email":null,"plan":null})
 }
 pub fn codex_dto(account: &Account, auth: Value, sync: Value) -> Value {
+    let auth = super::native::without_busy(auth);
     let home = displayed(&resolved(&account.home));
     let settings = account.is_default
         && (account.home.join("config.toml").is_file()

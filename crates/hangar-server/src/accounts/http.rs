@@ -490,7 +490,7 @@ pub async fn private(
             } else {
                 state.accounts.read_codex_auth(&account).await
             };
-            return Json(value).into_response();
+            return Json(super::native::without_busy(value)).into_response();
         }
         return codex_operation(&state,&body.action,&body.account_id,body.attempt_id.as_deref().unwrap_or("")).await;
     }

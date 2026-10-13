@@ -85,6 +85,7 @@ fn codex_login(auth: &Value, preparing: bool) -> Value {
             let reason = match auth["reason"].as_str() {
                 Some("cli_missing") => json!("cli-ausente"),
                 Some("deadline") => json!("prazo"),
+                Some("busy") => Value::Null,
                 _ if preparing => Value::Null,
                 _ => json!("leitura-falhou"),
             };
@@ -292,6 +293,8 @@ mod tests {
         assert_eq!(reason(unavailable_auth(), false), json!("leitura-falhou"));
         assert_eq!(reason(unavailable_auth(), true), Value::Null);
         assert_eq!(reason(json!({"status":"unavailable","reason":"cli_missing"}), false), json!("cli-ausente"));
+        // Conta ocupada (login em curso) ou `auth.json` mudando: não é falha, igual ao Python.
+        assert_eq!(reason(json!({"status":"unavailable","reason":"busy"}), false), Value::Null);
         let odd = codex_login(&json!({"status":"expired"}), false);
         assert_eq!((&odd["estado"], &odd["loggedIn"]), (&json!("indisponivel"), &Value::Null));
         let off = codex_login(&json!({"status":"disconnected"}), false);
