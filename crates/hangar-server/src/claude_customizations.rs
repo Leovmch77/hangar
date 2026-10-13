@@ -108,10 +108,20 @@ pub async fn private(
         Ok(op) => op,
         Err(_) => return envelope(Err(invalid())),
     };
+    envelope(run(&st, op).await)
+}
+
+/// Catálogo de plugins e skills da pasta na conta, para a rota pública: o erro volta como
+/// `(status, código, texto)` para o envelope `detail` do Python.
+pub async fn public_catalog(st: &Arc<AppState>, cwd: PathBuf, config_dir: PathBuf) -> std::result::Result<Value, (u16, &'static str, &'static str)> {
+    run(st, Operation::Catalog(Context { cwd, config_dir })).await.map_err(|e| (e.status, e.code, e.detail))
+}
+
+async fn run(st: &Arc<AppState>, op: Operation) -> Result<Value> {
     let slots = if matches!(&op, Operation::Catalog(_)) { &st.workspace_read_slots } else { &st.workspace_slots };
     let permit = match slots.clone().try_acquire_owned() {
         Ok(permit) => permit,
-        Err(_) => return envelope(Err(error(503, "claude_customizations_busy", "Consulta de plugins ocupada."))),
+        Err(_) => return Err(error(503, "claude_customizations_busy", "Consulta de plugins ocupada.")),
     };
     let op = match tokio::task::spawn_blocking(move || {
         match &op {
@@ -129,8 +139,8 @@ pub async fn private(
         Ok::<_, CustomizationError>(op)
     }).await {
         Ok(Ok(op)) => op,
-        Ok(Err(error)) => return envelope(Err(error)),
-        Err(_) => return envelope(Err(error(500, "claude_customizations_failed", "Não deu para validar as escolhas da conversa."))),
+        Ok(Err(error)) => return Err(error),
+        Err(_) => return Err(error(500, "claude_customizations_failed", "Não deu para validar as escolhas da conversa.")),
     };
     // O CLI só consulta metadados; leituras de disco e gravação ficam fora do executor assíncrono.
     let context = match &op {
@@ -139,18 +149,15 @@ pub async fn private(
         _ => None,
     };
     let installations = if let Some((cwd, config_dir)) = context {
-        match installed_plugins(cwd, config_dir).await {
-            Ok(installations) => installations,
-            Err(error) => return envelope(Err(error)),
-        }
+        installed_plugins(cwd, config_dir).await?
     } else { Vec::new() };
-    envelope(match tokio::task::spawn_blocking(move || {
+    match tokio::task::spawn_blocking(move || {
         let _permit = permit;
         execute(op, installations, &store_root()?)
     }).await {
         Ok(result) => result,
         Err(_) => Err(error(500, "claude_customizations_failed", "Não foi possível confirmar as escolhas da conversa.")),
-    })
+    }
 }
 
 fn valid_part(name: &str) -> bool {

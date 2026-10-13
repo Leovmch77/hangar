@@ -171,7 +171,8 @@ pub fn rust_route(method: &Method, path: &str) -> bool {
         | ("DELETE", Some("pair")) | ("GET", Some("pair/contract"))) {
         return true;
     }
-    crate::workspace_routes::matches(method, path) || crate::worktree_routes::matches(method, path)
+    crate::plans::routes::matches(method, path) || crate::workspace_routes::matches(method, path)
+        || crate::worktree_routes::matches(method, path)
 }
 
 /// Um ou mais pedidos reais por área, só para a tabela; a decisão é de `rust_route`.
@@ -384,6 +385,9 @@ mod tests {
         assert!(post("/api/sessions/a/subagents/x1/message") && !post("/api/sessions/a/subagents//message") && !get("/api/sessions/a/subagents/x1/message"));
         assert!(["whoami", "pull", "ask", "ask-fim", "filled", "submitted", "state", "suggest", "rate", "agent", "agent-sent"].iter().all(|e| post(&format!("/api/plugin/{e}"))));
         assert!(!rust_route(&Method::DELETE, "/api/sessions") && !post("/api/plugin/outra"));
+        assert!(get("/api/sessions/a/plan") && get("/api/sessions/a/plans") && get("/api/sessions/a/plan-preview")
+            && get("/api/claude/customizations") && rust_route(&Method::POST, "/api/sessions/a/plan-step")
+            && !rust_route(&Method::POST, "/api/sessions/a/plan") && !get("/api/sessions/a/plan-step"));
         assert_eq!(AREAS[area_of("/api/sessions/a/git/commit/abc/files")], "workspace");
         assert_eq!(AREAS[area_of("/api/sessions-x")], "other", "prefixo só casa por segmento inteiro");
         assert_eq!(AREAS[area_of("/assets/index.js")], "static");

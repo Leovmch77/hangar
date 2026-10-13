@@ -169,6 +169,7 @@ mod mods_terminal_state;
 mod mods_tree;
 mod pages_routes;
 mod perf_accounts_uploads;
+mod plans_routes;
 mod plugin_loopback;
 mod proxy;
 mod queue_v2_terminal;
