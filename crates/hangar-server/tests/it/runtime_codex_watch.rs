@@ -428,7 +428,7 @@ fn relaunch_watcher(fx:&Fixture,tmux:&std::path::Path) -> Arc<Watcher> {
 
 /// App-server falso que ignora o SIGTERM (o `sleep` filho morre, o laço segue).
 fn stubborn_app_server(endpoint:&str) -> Child {
-    std::process::Command::new("sh").args(["-c","trap '' TERM; while :; do sleep 1; done","app-server",endpoint]).spawn().unwrap()
+    crate::runtime_open::with_app_server_argv(std::process::Command::new("sh").args(["-c","trap '' TERM; while :; do sleep 1; done","app-server",endpoint]).spawn().unwrap(),endpoint)
 }
 
 #[tokio::test]

@@ -193,7 +193,20 @@ pub(crate) async fn fake_app_server(answer_turns:bool) -> FakeAppServer {
 /// sem app-server de verdade. Dois comandos no `-c`: o shell não troca a própria imagem pelo `sleep`.
 #[cfg(unix)]
 pub(crate) fn app_server_process(endpoint:&str) -> std::process::Child {
-    std::process::Command::new("sh").args(["-c","sleep 120; true","app-server",endpoint]).spawn().unwrap()
+    with_app_server_argv(std::process::Command::new("sh").args(["-c","sleep 120; true","app-server",endpoint]).spawn().unwrap(),endpoint)
+}
+
+/// O `spawn` volta quando o exec troca a memória do filho, antes de o kernel gravar o argv novo: por um
+/// instante o `cmdline` vem vazio e a admissão recusa o pid. Devolve o filho só com o argv já legível.
+#[cfg(unix)]
+pub(crate) fn with_app_server_argv(child:std::process::Child,endpoint:&str) -> std::process::Child {
+    use hangar_server::runtime::codex_terminal::{AppServer,app_server};
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while app_server(child.id(),endpoint) != AppServer::Ours {
+        assert!(std::time::Instant::now() < deadline,"o filho não chegou ao argv do app-server");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    child
 }
 
 #[cfg(unix)]

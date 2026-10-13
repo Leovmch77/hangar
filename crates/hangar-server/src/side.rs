@@ -1608,6 +1608,13 @@ mod tests {
             }
         });
         let mut child = std::process::Command::new("sh").args(["-c", "sleep 120; true", "app-server", &endpoint]).spawn().unwrap();
+        // O `spawn` volta quando o exec troca a memória do filho, antes de o kernel gravar o argv novo: por um
+        // instante o `cmdline` vem vazio, e a admissão lê o argv. O app-server adotado de verdade já roda há tempo.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while crate::runtime::codex_terminal::app_server(child.id(), &endpoint) != crate::runtime::codex_terminal::AppServer::Ours {
+            assert!(std::time::Instant::now() < deadline, "o filho não chegou ao argv do app-server");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
         let (spawn, count) = fake_feeds();
         let ctx = SideCtx { monitors: Some(spawn), ..idle_ctx() };
         let registry = Arc::new(RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(), "s".into(), "i".into()));
