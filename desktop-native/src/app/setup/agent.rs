@@ -332,7 +332,7 @@ mod tests {
         failed.feed(Agent::Claude, r#"{"type":"result","subtype":"error_max_turns","is_error":true}"#);
         assert!(failed.failed);
         assert_eq!(failed.explanation.as_deref(), Some("error_max_turns"));
-        assert_eq!(t.lines, vec!["$ systemctl --user status", "✎ /home/dev/hangar/install.sh", "aviso cru no stderr"]);
+        assert_eq!(t.lines, vec!["olhando", "$ systemctl --user status", "✎ /home/dev/hangar/install.sh", "aviso cru no stderr"]);
     }
 
     #[test]
