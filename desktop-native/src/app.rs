@@ -2092,6 +2092,12 @@ impl Hangar {
                 // Estado vazio é a conversa recém-aberta: o turno já corria, e quem conta é o último envio.
                 if turned { self.turn_seen = (state.state == "working" && !self.chat.state.state.is_empty()).then(Instant::now); }
                 if state.state == "working" { self.sent_until = None; }
+                // A escolha enviada já teve efeito quando a sessão sai da pergunta ou passa a outra.
+                if (state.state != "awaiting_input" || state.interaction_id != self.chat.state.interaction_id)
+                    && let Some(key) = self.selected_key()
+                    && self.action_feedback.get(&key).is_some_and(|(text, _)| *text == tr("option_sent")) {
+                    self.action_feedback.remove(&key);
+                }
                 self.chat.update_state(state);
                 self.sync_working_row(cx);
                 if turned { self.restart_subagent_count(cx); }
