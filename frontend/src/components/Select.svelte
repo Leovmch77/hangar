@@ -241,13 +241,15 @@
 {#if aberto}
   <!-- Backdrop transparente: fecha ao clicar fora sem precisar de listener global no document, que
        nas outras telas já brigou com o click-fantasma do iOS (ver BottomSheet). -->
-  {#if !livre}<div class="sel-fora" use:portal onclick={fechar} role="presentation"></div>{/if}
+  <!-- Sempre no DOM, mesmo no livre (escondido): um bloco a mais em volta de um nó levado pro <body>
+       desmontava fora de ordem e apagava o que vinha depois na tela de quem usa o Select. -->
+  <div class="sel-fora" class:sel-fora-livre={livre} use:portal onclick={fechar} role="presentation"></div>
   <!-- Livre: clicar na lista não tira o foco do campo (senão o blur fecharia antes do clique). -->
   <div
     class="sel-lista"
     use:portal
-    onmousedown={(e) => { if (livre) e.preventDefault(); }}
-    role="presentation"
+    onmousedown={livre ? (e) => e.preventDefault() : undefined}
+    role={livre ? 'presentation' : undefined}
     style="top:{pos.top === null ? 'auto' : `${pos.top}px`}; bottom:{pos.bottom === null ? 'auto' : `${pos.bottom}px`}; left:{pos.left}px; width:{pos.width}px; max-height:{pos.maxH}px"
   >
     {#if comFiltro}
@@ -321,6 +323,8 @@
   .sel-campo:focus-visible, .sel-campo.aberto { border-color: var(--accent); outline: none; }
   .sel-campo:disabled { opacity: 0.6; cursor: default; }
   .sel-livre { cursor: text; }
+  /* Livre fecha pelo foco: o fundo cobriria o próprio campo. */
+  .sel-fora-livre { display: none; }
   .sel-valor { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .sel-seta { color: var(--text-secondary); font-size: 11px; flex: none; }
 
