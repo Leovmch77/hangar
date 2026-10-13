@@ -168,8 +168,9 @@ impl Sources for NativeSources {
             let rows = state.list.discover(None).await.map_err(|_| ServiceError("plugin_discovery_unavailable"))?;
             let mut facts = Vec::new();
             for row in rows.iter().filter(|row| row.provider == "claude" && !row.headless) {
-                let target = registry.terminal_target(&row.name).await.map_err(|_| ServiceError("plugin_identity_ambiguous"))?
-                    .ok_or(ServiceError("plugin_identity_missing"))?;
+                // Sem entrada de terminal no runtime (aberta à mão, em troca de vida) a linha não é candidata;
+                // falhar aqui deixaria todo plugin sem identidade por causa de uma sessão alheia.
+                let Some(target) = registry.terminal_target(&row.name).await.map_err(|_| ServiceError("plugin_identity_ambiguous"))? else { continue };
                 let identity = self.identity(&row.name).await?;
                 let raw = self.command(&target.binding, vec!["display-message".into(), "-p".into(), "-t".into(), target.binding.pane.clone(),
                     "#{session_name}\t#{session_created}\t#{pane_id}\t#{socket_path}\t#{session_id}\t#{pid}".into()]).await?;

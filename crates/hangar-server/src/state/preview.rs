@@ -308,10 +308,12 @@ pub async fn tick<S: Sources>(src: &S, slot: &mut Slot, frame: Option<&Frame>, e
     if src.epoch() != epoch {
         return true;
     }
+    // Uma linha por resposta: a próxima volta a `working` rearma o registro.
+    if slot.state.as_deref() == Some("working") { slot.ghost_logged = false; }
     match slot.offer(text, md, full, src.committed()) {
         Some(t) if !t.text.is_empty() && slot.state.as_deref().is_some_and(|s| s != "working") && !std::mem::replace(&mut slot.ghost_logged, true) => {
             tracing::info!(session = src.name(), state = slot.state.as_deref().unwrap_or(""), md = t.md, full = t.full,
-                trecho = %t.text.chars().take(80).collect::<String>(), "prévia com texto em sessão parada");
+                chars = t.text.chars().count(), "prévia com texto em sessão parada");
             src.publish_preview(PreviewEvent { session: src.name().to_owned(), text: t.text, md: t.md, full: t.full, vivo: false }).await
         }
         Some(t) => src.publish_preview(PreviewEvent { session: src.name().to_owned(), text: t.text, md: t.md, full: t.full, vivo: false }).await,

@@ -1119,7 +1119,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stopped_claude_without_sidecar_stays_bare_idle() {
+    async fn stopped_claude_without_sidecar_or_binding_is_idle_with_the_coded_problem() {
         let f = claude_fixture();
         let home = tempfile::tempdir().unwrap();
         let mut rx = f.lease.hub.tx.subscribe();
@@ -1129,6 +1129,9 @@ mod tests {
         let state = &of(&got, "state")[0].2;
         assert_eq!(state["state"], "idle");
         assert!(state["status_line"].is_null());
+        // Sem vínculo comprovado não se decide `dead`: o problema aparece, nunca um estado inventado.
+        assert_eq!(state["problema"], "runtime_falhou", "{state}");
+        assert!(state["problema_detalhe"].as_str().is_some_and(|d| d.starts_with("state_lifecycle_unbound")), "{state}");
     }
 
     /// Claude parado sem sidecar, com os fatos do Python dizendo se há troca de modo em curso.

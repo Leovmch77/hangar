@@ -34,7 +34,7 @@ async fn serve(st:Arc<AppState>,peer:SocketAddr,req:Request,set:bool)->Response 
     let target=match enter_then_find(&runtime,&name,st.write_gate_wait).await {
         Ok(Some((held,target))) if target.provider=="claude"=>(held,target),
         Ok(_)=>return pass(&st,req,&forward).await,
-        Err(_)=>return json_response(StatusCode::CONFLICT,super::busy_body()),
+        Err(_)=>{let mut response=json_response(StatusCode::CONFLICT,super::busy_body());cors(req.headers(),response.headers_mut());return response},
     };
     let (held,target)=target;
     let headers=req.headers().clone();
@@ -43,7 +43,7 @@ async fn serve(st:Arc<AppState>,peer:SocketAddr,req:Request,set:bool)->Response 
     let probe=form_urlencoded::parse(query.as_bytes()).find(|(key,_)|key=="sondar").is_some_and(|(_,value)|matches!(value.to_ascii_lowercase().as_str(),"1"|"true"|"on"|"yes"));
     let mode=if set {
         match to_bytes(req.into_body(),BODY_LIMIT).await {
-            Ok(bytes)=>match mode_body(&bytes) {Ok(mode)=>Some(mode),Err((code,status))=>return json_response(status,detail_body(code,"modo de permissão inválido",json!({})))},
+            Ok(bytes)=>match mode_body(&bytes) {Ok(mode)=>Some(mode),Err((code,status))=>{let mut response=json_response(status,detail_body(code,"modo de permissão inválido",json!({})));cors(&headers,response.headers_mut());return response}},
             Err(_)=>return super::too_large(&headers),
         }
     } else {None};

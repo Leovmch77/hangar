@@ -20,10 +20,12 @@ use crate::{browser::server::{Request, respond}, ws::{self, Error}};
 
 /// Comandos que, numa sessão de página, mexeriam além dela: no navegador inteiro, em outras sessões ou nos cookies
 /// do perfil da pessoa.
-const DENIED: [&str; 13] = [
+const DENIED: [&str; 20] = [
     "Browser.close", "Browser.crash", "Browser.crashGpuProcess", "Browser.setDownloadBehavior", "Browser.setWindowBounds",
     "Target.createTarget", "Target.closeTarget", "Target.createBrowserContext", "Target.disposeBrowserContext",
     "Target.attachToTarget", "Target.exposeDevToolsProtocol", "Page.crash", "Network.clearBrowserCookies",
+    "Network.getCookies", "Network.getAllCookies", "Network.setCookie", "Network.setCookies", "Network.deleteCookies",
+    "Storage.getCookies", "Storage.setCookies",
 ];
 const CONTEXT: &str = "hangar-context-";
 
@@ -322,6 +324,9 @@ mod tests {
         assert!(server_text(&mut client).await.1["error"]["message"].as_str().unwrap().contains("Storage.getCookies"));
         send(&mut client, json!({"id": 4, "sessionId": "C1", "method": "Browser.close"})).await;
         assert_eq!(server_text(&mut client).await.1["id"], 4);
+        // O perfil é compartilhado: cookie de outro site (httpOnly incluído) não sai pela sessão da página.
+        send(&mut client, json!({"id": 5, "sessionId": "C1", "method": "Network.getCookies", "params": {"urls": ["https://github.com"]}})).await;
+        assert!(server_text(&mut client).await.1["error"]["message"].as_str().unwrap().contains("Network.getCookies"));
         assert!(pipe.try_recv().is_err());
 
         client.write_all(&client_frame(8, &1000u16.to_be_bytes())).await.unwrap();

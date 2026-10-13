@@ -60,6 +60,41 @@ describe('OptionButtons: identidade exibida', () => {
   });
 });
 
+describe('OptionButtons: o que mudar no plano', () => {
+  it('envio em voo da pergunta A não trava o campo da B', async () => {
+    const el = document.createElement('div');
+    document.body.appendChild(el);
+    let release!: () => void;
+    const onSelect = vi.fn(() => new Promise<void>((r) => { release = r; }));
+    const options = ['Yes, and auto-accept edits', 'Tell Claude what to change'];
+    const comp = createClassComponent({ component: OptionButtons, target: el, props: {
+      question: 'Plano?', options, interactionId: 'plan-a', planReview: true, onSelect, onCancel: vi.fn(),
+    } });
+    const abrirEEnviar = async () => {
+      el.querySelectorAll<HTMLButtonElement>('.option-btn')[1].click();
+      await tick();
+      const area = el.querySelector<HTMLTextAreaElement>('.plan-feedback textarea')!;
+      area.value = 'menos passos';
+      area.dispatchEvent(new Event('input'));
+      await tick();
+      el.querySelector<HTMLFormElement>('.plan-feedback')!.requestSubmit();
+      await tick();
+      return area;
+    };
+    await tick();
+    expect((await abrirEEnviar()).disabled).toBe(true);
+    comp.$set({ interactionId: 'plan-b' });
+    await tick();
+    el.querySelectorAll<HTMLButtonElement>('.option-btn')[1].click();
+    await tick();
+    expect(el.querySelector<HTMLTextAreaElement>('.plan-feedback textarea')!.disabled).toBe(false);
+    release();
+    await tick();
+    expect(onSelect).toHaveBeenCalledWith(2, 'plan-a', 'menos passos');
+    comp.$destroy(); el.remove();
+  });
+});
+
 describe('OptionButtons: links na pergunta', () => {
   it('URL vira link que abre fora do app', async () => {
     const { el, fim } = await montar('srv pede para abrir https://a.com/x: confirme');

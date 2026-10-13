@@ -24,17 +24,21 @@
   // Campo do "o que mudar": o texto fica até o cartão sair, então um envio recusado não o perde.
   let feedbackOpen = $state(false);
   let feedback = $state('');
-  let sending = $state(false);
+  // O envio em voo é de um cartão só: a pergunta seguinte não herda o campo travado da anterior.
+  let inFlight = $state.raw<object | null>(null);
+  const sending = $derived(inFlight !== null);
   async function sendFeedback(index: number, id: string | null | undefined, select: Props['onSelect']) {
     const text = feedback.trim();
-    if (!text || sending) return;
-    sending = true;
-    try { await select(index, id, text); } finally { sending = false; }
+    if (!text || inFlight) return;
+    const mine = {};
+    inFlight = mine;
+    try { await select(index, id, text); } finally { if (inFlight === mine) inFlight = null; }
   }
   $effect.pre(() => {
     void interactionId;
     feedbackOpen = false;
     feedback = '';
+    inFlight = null;
   });
 
   // MÚLTIPLA ESCOLHA: o TUI desenha a caixinha antes do rótulo ("[ ] Alfa", "[✔] Alfa"), e é só

@@ -2778,7 +2778,7 @@ async def kill_session(name: str, by: str | None = None, request: Request = None
     try:
         errs = await asyncio.to_thread(registry.kill, name, closed_by_rust=closed) or []
     except KillFailed as e:
-        raise HTTPException(500, e.detail or str(e))
+        raise HTTPException(500, e.detail or str(e)) from None
     finally:
         if not closed:
             await asyncio.to_thread(_invalidate_lists)

@@ -804,7 +804,12 @@ impl Executor {
         let outside=matches!(&action,PermissionAction::Set {mode} if mode=="bypassPermissions") && (current=="dontAsk" || !bypass_in_cycle(self.target.metadata.agent_pid)?);
         self.action(Action::Prepare {id:id.into(),payload:original,entry_id:None}).await?;
         self.action(Action::BeginDispatch {id:id.into(),wire_id:format!("permission:{}:{id}",self.target.generation),staged:false}).await?;
-        if !memory.lock().map_err(|_|error("permission_store_poisoned"))?.begin(&tracking) {return Err(error("permission_snapshot_absent"));}
+        if !memory.lock().map_err(|_|error("permission_store_poisoned"))?.begin(&tracking) {
+            // Fechada no diário: a repetição do mesmo ID responde a mesma causa, não `recovered_operation`.
+            let refused=reply(id,Disposition::Rejected,json!({"ok":false,"current":current,"error_code":"permission_snapshot_absent"}));
+            self.action(Action::Finish {id:id.into(),status:status(Disposition::Rejected),result:serde_json::to_value(&refused).unwrap()}).await?;
+            return Ok(refused);
+        }
         let controlled=if outside {
             let mut value=initial.clone();
             value["requires_reopen"]=json!(true);value["cycle_closed"]=json!(true);value["error_code"]=json!("permission_reopen_required");
