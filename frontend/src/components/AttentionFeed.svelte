@@ -1,7 +1,9 @@
 <script lang="ts">
   import * as m from '../paraglide/messages';
   import OptionButtons from './OptionButtons.svelte';
-  import { selectOption, submitSelected } from '@hangar/core';
+  import AskQuestionCard from './AskQuestionCard.svelte';
+  import { answerQuestions, selectOption, submitSelected } from '@hangar/core';
+  import type { AnswerItem, AskQuestionPayload } from '@hangar/core';
   import { getActiveId, selectServer } from '../lib/auth';
   import { attentionFeed } from '@hangar/core';
   import type { AggSession } from '@hangar/core';
@@ -21,7 +23,9 @@
 
   const feed = $derived(attentionFeed(sessions));
   const keyOf = (s: AggSession) => `${s.serverId}::${s.name}`;
-  const requestKey = (s: AggSession) => JSON.stringify([keyOf(s), s.interaction_id]);
+  const requestKey = (s: AggSession) => JSON.stringify([keyOf(s), s.interaction_id, s.ask_form?.interaction_id]);
+  // O formulário (AskUserQuestion, também o segurado pelo plugin) responde daqui, pelo `/answer`: o app faz tudo.
+  const respondivel = (s: AggSession) => !!(s.ask_form?.questions?.length || s.options?.length);
   const current = (s: AggSession) => feed.some((entry) => requestKey(entry) === requestKey(s));
 
   let expandedKey = $state<string | null>(null); // entry com OptionButtons aberto (só um por vez)
@@ -38,7 +42,7 @@
   let ocupada = $state<string | null>(null);
 
   function toggle(s: AggSession) {
-    if (s.options?.length) {
+    if (respondivel(s)) {
       const k = keyOf(s);
       expandedKey = expandedKey === k ? null : k; // expande/colapsa inline (sem montar chat)
       clearTimeout(erroTimer);
@@ -76,6 +80,21 @@
     } finally {
       if (ocupada === request) ocupada = null;
       if (prev && prev !== s.serverId) selectServer(prev); // restaura pra o chat aberto ficar no server dele
+    }
+  }
+
+  /** Formulário respondido pelo passo a passo inline. Erro sobe ao passo a passo, que o mostra e deixa tentar de novo. */
+  async function responder(s: AggSession, answers: AnswerItem[], form: AskQuestionPayload) {
+    const k = keyOf(s);
+    clearTimeout(erroTimer);
+    erro = null;
+    const prev = getActiveId();
+    selectServer(s.serverId);
+    try {
+      await answerQuestions(s.name, answers, form.request_id, form.interaction_id);
+      if (current(s) && expandedKey === k) expandedKey = null;
+    } finally {
+      if (prev && prev !== s.serverId) selectServer(prev);
     }
   }
 
@@ -121,7 +140,7 @@
             </span>
             {#if s.question}<span class="attn-q" title={s.question}>{s.question}</span>{/if}
           </span>
-          {#if s.options?.length}
+          {#if respondivel(s)}
             <span class="attn-caret" class:open aria-hidden="true">▾</span>
           {:else}
             <span class="attn-caret" aria-hidden="true">›</span>
@@ -130,7 +149,13 @@
         {#if erro && erro.key === keyOf(s)}
           <p class="attn-err" role="status">{erro.msg}</p>
         {/if}
-        {#if open && s.options?.length}
+        {#if open && s.ask_form?.questions?.length}
+          {#each [{ ...s }] as displayed (displayed.ask_form?.interaction_id)}
+            <AskQuestionCard open={true} payload={displayed.ask_form ?? null} escapes={true}
+              onSubmit={(answers, form) => responder(displayed, answers, form)}
+              onClose={() => (expandedKey = null)} />
+          {/each}
+        {:else if open && s.options?.length}
           {#each [{ ...s }] as displayed (displayed.interaction_id)}
             <OptionButtons
               question={s.question ?? ''}

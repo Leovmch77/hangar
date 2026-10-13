@@ -553,6 +553,17 @@ impl RuntimeRegistry {
             })
         })
     }
+    /// Classe do recado (`bypass`/`prompting`) para o Python, que não guarda mais a memória de modo: a do
+    /// remetente quando é sessão aberta aqui, senão a do alvo. `None`: nenhum modo confirmado; o Python cai
+    /// no transcript e na conta, como antes.
+    pub(crate) async fn message_class(&self,sender:Option<&str>,target:&str) -> Option<&'static str> {
+        let read=self.terminal_mode_reader();
+        let mut mode=None;
+        for name in sender.into_iter().chain(std::iter::once(target)) {
+            if let Ok(Some(source))=read(name.to_owned()).await && let Some(found)=source.confirmed {mode=Some(found);break;}
+        }
+        mode.map(|mode|if mode.to_ascii_lowercase().contains("bypass") {"bypass"} else {"prompting"})
+    }
     /// Vínculo e metadados do terminal, sem enviar um pedido ao ator ocupado.
     pub async fn terminal_target(&self,name:&str)->Result<Option<super::terminal::TerminalTarget>,RuntimeError> {
         let entries=self.entries.lock().await;let mut matches=entries.iter().filter(|(_,entry)|entry.name==name);
@@ -2136,6 +2147,9 @@ mod tests {
         memory.lock().unwrap().observe("new-sid","bypassPermissions");
         memory.lock().unwrap().observe("new-sid","plan");
         assert_eq!(read("same".into()).await.unwrap().unwrap().confirmed.as_deref(),Some("bypassPermissions"));
+        // Decisão M6: a classe do recado sai daqui para o Python; remetente desconhecido cai no alvo.
+        assert_eq!(registry.message_class(Some("ninguem"),"same").await,Some("bypass"));
+        assert_eq!(registry.message_class(None,"fora").await,None);
         handle.stop().await.unwrap();
     }
 

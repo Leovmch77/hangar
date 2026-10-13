@@ -252,6 +252,45 @@ async fn to_headless_refuses_when_the_conversation_settings_cannot_be_read() {
     finish(&mut [&mut app,&mut tui]);
 }
 
+/// Sidecar do desenho antigo: terminal sem `endpoint` nem `app_pid` (o app-server era filho do backend).
+fn legacy_meta(fx:&Fixture) -> Value {
+    let rollout = fx.root.join("rollout.jsonl");
+    std::fs::write(&rollout,"{}\n").unwrap();
+    json!({"name":"cx-old","provider":"codex","thread_id":"thread-1","rollout_path":rollout,"cwd":fx.root,"codex_home":fx.home.join(".codex")})
+}
+
+#[tokio::test]
+async fn an_old_sidecar_without_endpoint_is_relaunched_by_the_rust_and_a_failure_has_a_code() {
+    // Como o `ensure_running` do Python: sem pane, a escrita relança TUI e app-server pelo lançador; aqui o
+    // lançador não está no PATH, e a falha sai com o código dele (nunca `codex_terminal_not_ready` calado).
+    let fx = fixture();
+    fx.put_sidecar("cx-old",legacy_meta(&fx));
+    std::fs::write(&fx.panes,"").unwrap();
+    let registry = relaunch_registry(&fx).await;
+    let watcher = relaunch_watcher(&fx,&relaunch_tmux(&fx));
+    registry.bind_watcher(watcher.clone());
+    let refused = watcher.adopt_now(&registry,"cx-old").await;
+    assert_eq!(refused.map(|r|r.map_err(|e|e.code)),Some(Err("codex_launcher_missing".into())));
+    // Três subidas falhas e a escrita para de tentar a cada pedido (o teto do Python), com código próprio.
+    for _ in 0..2 { let _ = watcher.adopt_now(&registry,"cx-old").await; }
+    let gave_up = watcher.adopt_now(&registry,"cx-old").await;
+    assert_eq!(gave_up.map(|r|r.map_err(|e|e.code)),Some(Err("codex_terminal_relaunch_gave_up".into())));
+}
+
+#[tokio::test]
+async fn an_old_sidecar_with_its_pane_alive_is_never_relaunched() {
+    // Pane vivo: recriar destruiria a tela de quem trabalha nela; fica o código, sem tocar no pane.
+    let fx = fixture();
+    fx.put_sidecar("cx-old",legacy_meta(&fx));
+    std::fs::write(&fx.panes,"cx-old\t1\t4242\t/w\t%7\t\tcodex\t1700000000\t0\t0\n").unwrap();
+    let registry = relaunch_registry(&fx).await;
+    let watcher = relaunch_watcher(&fx,&relaunch_tmux(&fx));
+    registry.bind_watcher(watcher.clone());
+    let refused = watcher.adopt_now(&registry,"cx-old").await;
+    assert_eq!(refused.map(|r|r.map_err(|e|e.code)),Some(Err("codex_terminal_without_control".into())));
+    assert!(std::fs::read_to_string(&fx.panes).unwrap().starts_with("cx-old\t"),"o pane segue");
+}
+
 #[tokio::test]
 async fn rename_and_mode_switch_close_the_actor_without_killing() {
     let fx = fixture();

@@ -1332,6 +1332,8 @@ impl Hangar {
         self.clear_visible_preview();
         self.chat.state.state = session.state.clone();
         self.chat.state.question = session.question.clone();
+        // O app responde: o formulário que a lista trouxe já abre o passo a passo (`/answer`), antes do stream.
+        if let Some(ask) = list_form(&session) { self.chat.update_ask(Some(ask)); }
         self.error = None;
         self.loading = session.readable();
         self.history_started = false;
@@ -5568,6 +5570,13 @@ fn save_connection(address: &str, token: &str, servers: &[servers::ServerEntry])
 /// Fração da altura da janela que um painel de mod acima da faixa pode ocupar.
 const PLUGIN_PANE_MAX_SHARE: f32 = 0.45;
 
+/// O formulário da linha da lista, no mesmo formato do `ask_question` do stream.
+fn list_form(session: &crate::api::dto::SessionInfo) -> Option<Ask> {
+    let raw = session.ask_form.clone()?;
+    let payload: crate::api::dto::AskPayload = serde_json::from_value(raw.clone()).ok()?;
+    (!payload.questions.is_empty() && payload.interaction_id.is_some()).then(|| Ask::new(payload, &raw))
+}
+
 fn select_snapshot(state: &SessionState) -> String { json!([state.question, state.options, state.interaction_id]).to_string() }
 
 fn select_body(snapshot: &str, option: Option<usize>) -> Option<Value> {
@@ -6781,6 +6790,21 @@ mod tests {
         assert_eq!(select_text_body(&snapshot, 3, "  Use Postgres  "), Some(serde_json::json!({"option":3, "interaction_id":"i1", "text":"Use Postgres"})));
         assert!(select_text_body(&snapshot, 3, "   ").is_none());
         assert!(select_text_body("invalid", 3, "x").is_none());
+    }
+
+    #[test]
+    fn list_form_opens_the_stepper_with_its_interaction_id() {
+        // Decisão M11: a pergunta da lista (também a segurada pelo plugin) abre o passo a passo e responde
+        // pelo `/answer` com o ID do formulário; sem ID ou sem perguntas, nada abre.
+        let raw = serde_json::json!({"name":"n", "ask_form": {"request_id":"ask:t1", "interaction_id":"form-a", "provider":"claude",
+            "questions":[{"header":"H", "question":"Qual?", "multiSelect":false, "options":[{"label":"A"}]}]}});
+        let session: crate::api::dto::SessionInfo = serde_json::from_value(raw).unwrap();
+        use super::list_form;
+        let ask = list_form(&session).expect("passo a passo da lista");
+        assert_eq!(ask.payload.interaction_id.as_deref(), Some("form-a"));
+        assert_eq!(ask.payload.request_id, Some(serde_json::json!("ask:t1")));
+        let bare: crate::api::dto::SessionInfo = serde_json::from_value(serde_json::json!({"name":"n", "ask_form": {"questions": []}})).unwrap();
+        assert!(list_form(&bare).is_none());
     }
 
     #[test]

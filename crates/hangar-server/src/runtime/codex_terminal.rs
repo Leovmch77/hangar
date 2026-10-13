@@ -218,7 +218,12 @@ pub struct Watcher {
     /// escrita, encerramento e troca de modo.
     pub(super) misses:tokio::sync::Mutex<BTreeMap<String,std::time::Instant>>,
     death_after:Duration,
+    /// Relançamentos seguidos que falharam do sidecar antigo, por nome (o `TETO_SUBIDAS` do Python).
+    pub(super) legacy_failures:tokio::sync::Mutex<BTreeMap<String,u8>>,
 }
+
+/// Sidecar do desenho antigo (terminal sem `endpoint`): a escrita o relança pelo lançador.
+pub(super) const LEGACY_SIDECAR:&str = "codex_terminal_legacy";
 
 /// Sidecar do Codex com terminal pronto para adotar.
 #[derive(Clone,Debug)]
@@ -406,7 +411,7 @@ fn pending_projection(queue_dir:&Path,name:&str) -> Result<Vec<Value>,RuntimeErr
 }
 
 impl Watcher {
-    pub fn new(cfg:WatchConfig) -> Self { Self { cfg,misses:Default::default(),death_after:DEATH_AFTER } }
+    pub fn new(cfg:WatchConfig) -> Self { Self { cfg,misses:Default::default(),death_after:DEATH_AFTER,legacy_failures:Default::default() } }
     /// Prazo de ausência antes da morte; os testes encurtam.
     pub fn with_death_after(mut self,after:Duration) -> Self { self.death_after = after; self }
 
@@ -494,7 +499,11 @@ impl Watcher {
     pub async fn adopt_now(&self,registry:&RuntimeRegistry,name:&str) -> Option<Result<(),RuntimeError>> {
         // Subir o sem terminal pode levar segundos: fora da exclusão da vigia.
         let adopted = { let _round = self.misses.lock().await; self.adopt_locked(registry,name).await };
-        match adopted { None => self.open_parked(registry,name).await, adopted => adopted }
+        match adopted {
+            None => self.open_parked(registry,name).await,
+            Some(Err(error)) if error.code == LEGACY_SIDECAR => self.relaunch_legacy(registry,name).await,
+            adopted => adopted,
+        }
     }
 
     /// `adopt_now` para quem já segura a exclusão da vigia (a troca de modo).
@@ -511,6 +520,9 @@ impl Watcher {
                 .and_then(|at|at.elapsed().ok())).await.ok().flatten();
             if age.is_none_or(|age|age < LAUNCH_WAIT) { return None; }
             return Some(Err(RuntimeError::new("codex_terminal_launch_stuck","o terminal do Codex está abrindo há tempo demais; feche e abra a sessão de novo")));
+        }
+        if text(&meta,"endpoint").is_none() {
+            return Some(Err(RuntimeError::new(LEGACY_SIDECAR,"o arquivo da sessão é do desenho antigo, sem o endereço do app-server")));
         }
         let Some(c) = candidate(&meta,&self.cfg.home) else {
             return Some(Err(RuntimeError::new("codex_terminal_not_ready","o Codex com terminal ainda não tem app-server pronto")));

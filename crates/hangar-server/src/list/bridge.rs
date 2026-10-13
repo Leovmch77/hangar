@@ -39,6 +39,7 @@ pub const DISCOVER_TTL: Duration = Duration::from_secs(1);
 pub const SNAPSHOT_TTL: Duration = Duration::from_secs(2);
 /// Sessão fora da lista por este tempo perde os caches por nome.
 const FORGET_AFTER: Duration = Duration::from_secs(10);
+const PYTHON_APPS_TTL: Duration = Duration::from_secs(10);
 /// Rodada da lista mais velha que isto não serve à limpeza das páginas: são vários tiques sem rodada.
 const LIVE_FRESH: Duration = Duration::from_secs(15);
 const CAPTURE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -236,6 +237,8 @@ pub struct ListBridge {
     owner_clients: AtomicU32,
     /// Última rodada em que cada nome estava na lista: sumido há `FORGET_AFTER`, os caches dele saem.
     seen: Mutex<HashMap<String, Instant>>,
+    /// Aparelhos do dono atendidos pelo Python (Connect), da última resposta boa dos fatos, e quando chegou.
+    python_apps: Mutex<Option<(u32, Instant)>>,
     /// Trava assíncrona = um por vez: quem chega durante a varredura espera e reaproveita o resultado.
     discovery: tokio::sync::Mutex<Option<Discovery>>,
     snapshot: tokio::sync::Mutex<Option<Snapshot>>,
@@ -271,7 +274,7 @@ impl ListBridge {
         let (caches, demoted) = (Arc::<Caches>::default(), Arc::<crate::state::demote::Demoted>::default());
         caches.classify.with(|c| c.hooks.set_demoted(demoted.clone()));
         Self { env: Arc::new(env), shadow_facts: facts.sibling(), facts, caches, runtime: std::sync::OnceLock::new(),
-            owner_clients: AtomicU32::new(0), seen: Mutex::default(),
+            owner_clients: AtomicU32::new(0), seen: Mutex::default(), python_apps: Mutex::default(),
             discovery: tokio::sync::Mutex::new(None),
             snapshot: tokio::sync::Mutex::new(None), git_running: Arc::default(),
             git_slots: Arc::new(tokio::sync::Semaphore::new(GIT_SLOTS)), epoch: AtomicU64::new(0),
@@ -311,6 +314,11 @@ impl ListBridge {
     }
 
     pub fn owner_clients(&self) -> u32 { self.owner_clients.load(Ordering::Relaxed) }
+    /// Aparelhos do dono que entraram pelo Python (Connect). Vence em 10 s, como o `_apps_remotos` do Python:
+    /// fatos que pararam de chegar não seguram permissão num app que ninguém vê.
+    pub fn python_apps(&self) -> u32 {
+        lock(&self.python_apps).filter(|(_, at)| at.elapsed() <= PYTHON_APPS_TTL).map_or(0, |(count, _)| count)
+    }
 
     async fn plugin_facts(&self, rows: &[SessionRow]) -> BTreeMap<String, Result<crate::state::facts::PluginReading, String>> {
         #[cfg(test)]
@@ -362,6 +370,8 @@ impl ListBridge {
                 .and_then(|question| question["questions"][0]["question"].as_str().map(str::to_owned)));
             row.options = state.options;
             row.interaction_id = state.interaction_id;
+            // A pergunta que o plugin segura vai inteira, com o ID do formulário: o card a responde pelo `/answer`.
+            if let Some(form) = state.codex_question { row.ask_form = Some(Value::Object(form)); }
             if let Ok(local) = &reading.facts { row.pending_questions = row.pending_questions.max(local.questions.len().min(u32::MAX as usize) as u32); }
         }
     }
@@ -547,6 +557,7 @@ impl ListBridge {
         let runtime = async { match self.runtime.get() { Some(r) => Some(r.snapshots().await), None => None } };
         let pane_pids = pi_pane_pids(&rows, &panes);
         let (fetched, runtime, plugins) = tokio::join!(client.fetch(&rows, input.owner_clients, &pane_pids, input.shadow), runtime, self.plugin_facts(&rows));
+        if fetched.ok && !input.shadow { *lock(&self.python_apps) = Some((fetched.facts.owner_apps, Instant::now())); }
         let (mut rows, aside) = list_facts::apply((*rows).clone(), &fetched.facts, fetched.ok);
         let mut targets = pane_targets(&panes, &agent_pids, &children);
         if let Some(registry) = self.plugin_runtime.get() {
@@ -1102,10 +1113,9 @@ mod tests {
         *lock(&bridge.test_plugins) = Some(reading(binding.clone(), Ok(ambiguous)));
         seed().await;
         let rebuilt = bridge.produce_round(&ProduceFacts::default()).await.unwrap().0;
+        // Decisão P21: duas permissões seguradas saem uma de cada vez, sem problema na linha.
         assert_eq!(rebuilt.rows[0].interaction_id.as_deref(), Some("a"));
-        // Parity M12: o código interno vai ao diário; a linha leva o código com frase nas três telas.
-        assert_eq!(rebuilt.rows[0].problema.as_deref(), Some(INTERACTION_UNAVAILABLE));
-        assert!(list_facts::notes_for(&rebuilt.rows[0].name).iter().any(|code| code == "erro_interacao_indisponivel"));
+        assert_ne!(rebuilt.rows[0].problema.as_deref(), Some(INTERACTION_UNAVAILABLE), "nunca o problema no lugar do cartão");
         *lock(&bridge.test_plugins) = Some(reading(InteractionBinding { generation: 2, ..binding }, Err("plugin_store_unavailable".into())));
         seed().await;
         let next = bridge.produce_round(&ProduceFacts::default()).await.unwrap().0;
@@ -1182,6 +1192,34 @@ mod tests {
         let binding = InteractionBinding { key: "k".into(), conversation: "sid".into(), generation: 1 };
         bridge.project_plugins(&mut rows, &BTreeMap::from([("s".into(), Ok(PluginReading { binding, facts: Ok(local) }))]));
         assert_eq!((rows[0].state.as_str(), rows[0].stalled), ("awaiting_input", false));
+    }
+
+    /// Decisão M11: a pergunta que o plugin segura chega ao card com o formulário e o ID dele, para o `/answer`.
+    #[test]
+    fn held_ask_question_reaches_the_row_as_a_form() {
+        use crate::interactions::InteractionBinding;
+        use crate::state::facts::{PluginFacts, PluginReading};
+        let bridge = ListBridge::new(ListEnv { mux: Mux::default(), capture_program: "missing-test-mux".into(),
+            procs: Arc::new(procs::SystemProcs::default()), dirs: None }, FactsClient::new("127.0.0.1:9".parse().unwrap(), "s".into()));
+        let mut rows = vec![serde_json::from_value::<SessionRow>(json!({"name":"s","provider":"claude","state":"working"})).unwrap()];
+        let form = json!({"id":"ask:t1","interaction_id":"form-a","questions":[{"header":"H","question":"Qual?","multiSelect":false,"options":[{"label":"A","description":""}]}]});
+        let local = PluginFacts { plugin_state: None, waiter_open: true, heartbeat_age_ms: Some(0), question: None, questions: vec![form], suggestion: "".into() };
+        let binding = InteractionBinding { key: "k".into(), conversation: "sid".into(), generation: 1 };
+        bridge.project_plugins(&mut rows, &BTreeMap::from([("s".into(), Ok(PluginReading { binding, facts: Ok(local) }))]));
+        let row = &rows[0];
+        assert_eq!(row.state, "awaiting_input");
+        let form = row.ask_form.as_ref().expect("formulário na linha");
+        assert_eq!((form["interaction_id"].as_str(), form["request_id"].as_str()), (Some("form-a"), Some("ask:t1")));
+        assert_eq!(form["questions"][0]["question"], "Qual?");
+    }
+
+    /// Parity M12: o código interno de identidade vai ao diário; a linha leva o código com frase.
+    #[test]
+    fn internal_interaction_codes_become_the_public_one() {
+        let mut rows = vec![serde_json::from_value::<SessionRow>(json!({"name":"m12-row","provider":"claude","problema":"askq_pane_mismatch"})).unwrap()];
+        public_problems(&mut rows);
+        assert_eq!(rows[0].problema.as_deref(), Some(INTERACTION_UNAVAILABLE));
+        assert!(list_facts::notes_for("m12-row").iter().any(|code| code == "askq_pane_mismatch"));
     }
 
     /// Parity A5: o problema do runtime das linhas Claude chega à classificação. Sem terminal, o do

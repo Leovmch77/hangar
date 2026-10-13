@@ -3065,6 +3065,7 @@
   "erro_fila_pendente": "there are queued messages waiting for delivery",
   "erro_permissao_reabrir": "the session didn't reopen in bypass and went back to its previous mode",
   "erro_menu_aberto": "a menu is open in the session's terminal; close it and try again",
+  "erro_par_externo_orq": "This session is an orchestration's arbiter and can't pair with another machine; its group was left as it was.",
   "erro_modo_so_claude": "switching mode only works for Claude sessions",
   "erro_troca_modo": "mode not switched: {erro}",
   "erro_conta_so_claude": "only a Claude session on an Anthropic account can switch accounts",

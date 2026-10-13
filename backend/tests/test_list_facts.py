@@ -162,6 +162,17 @@ def test_facts_without_shadow_sends_null(monkeypatch):
     assert _compute([_row("cc")])["shadow"] is None
 
 
+def test_facts_carry_the_owner_apps_python_serves(monkeypatch):
+    # Decisão P24: lista e chat do dono pelo Connect (servidos aqui) também são o app presente no Rust.
+    from app import plugin_bridge
+    async def keep(infos, state_only=False):
+        return infos
+
+    monkeypatch.setattr(sse._list_registry, "list_with_state", keep)
+    monkeypatch.setattr(plugin_bridge, "_apps_abertos", 2)
+    assert _compute([_row("cc")])["owner_apps"] == 2
+
+
 def test_shadow_signature_has_every_list_sig_field():
     # Campo novo no `_list_sig` sem par aqui deixaria a sombra cega para ele.
     info = registry.SessionInfo(name="x")

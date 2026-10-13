@@ -210,11 +210,15 @@ fn codex_owned(provider: &str, terminal: bool) -> bool {
 
 /// Só a sessão Codex do Rust passa pela porta; o resto vai ao Python como chegou.
 async fn admit_codex(st: &Arc<AppState>, peer: SocketAddr, req: Request) -> Result<(Ctx, Bytes), Response> {
+    admit_codex_as(st, peer, req, WriteRoute::CodexControl).await
+}
+
+async fn admit_codex_as(st: &Arc<AppState>, peer: SocketAddr, req: Request, route: WriteRoute) -> Result<(Ctx, Bytes), Response> {
     let (fwd, owner) = gate(st, peer, &req);
     // Só o dono abre ou adota: o convidado segue ao Python, que o autentica.
     if !owner { return Err(pass(st, req, &fwd).await); }
     match ours(st, session_name(req.uri().path()).as_deref()).await {
-        Ok(true) => admit(st, peer, req, WriteRoute::CodexControl).await,
+        Ok(true) => admit(st, peer, req, route).await,
         Ok(false) => Err(pass(st, req, &fwd).await),
         Err(error) => {
             let mut response = json_response(StatusCode::SERVICE_UNAVAILABLE, detail_body(&error.code, &error.message, json!({})));
@@ -322,7 +326,7 @@ pub async fn commands(State(st): State<Arc<AppState>>, ConnectInfo(peer): Connec
 }
 
 pub async fn permissions(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
-    let (ctx, _) = admitted!(st, peer, req);
+    let (ctx, _) = match admit_codex_as(&st, peer, req, WriteRoute::CodexPermission).await { Ok(admitted) => admitted, Err(response) => return response };
     if matches!(ctx.target.handle, EntryHandle::CodexTerminal { .. }) {
         let result = terminal_permission(&ctx, PermissionAction::Read { probe: false }).await;
         return answer(&ctx, result);
@@ -337,7 +341,7 @@ pub async fn permissions(State(st): State<Arc<AppState>>, ConnectInfo(peer): Con
 }
 
 pub async fn set_permission(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
-    let (ctx, bytes) = admitted!(st, peer, req);
+    let (ctx, bytes) = match admit_codex_as(&st, peer, req, WriteRoute::CodexPermission).await { Ok(admitted) => admitted, Err(response) => return response };
     let Some(body) = object(&bytes, ctx.headers()).and_then(|f| strings(&f, "mode", None)) else { return invalid_body(ctx.headers()) };
     if matches!(ctx.target.handle, EntryHandle::CodexTerminal { .. }) {
         let mode = body["mode"].as_str().unwrap_or_default().to_owned();

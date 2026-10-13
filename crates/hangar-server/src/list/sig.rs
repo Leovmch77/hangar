@@ -69,12 +69,23 @@ pub fn list_sig<'a>(rows: impl IntoIterator<Item = &'a SessionRow>) -> String {
     let items: Vec<Value> = rows
         .into_iter()
         .map(|i| {
-            let label = if i.provider == "codex" && !i.tracked {
-                json!(i.label)
-            } else {
-                json!(i.label.as_deref().is_some_and(|l| !l.is_empty()))
-            };
-            json!([
+            let mut sig = row_sig(i);
+            // Só a linha com formulário leva o ID dele (formulário novo com a mesma pergunta também sai);
+            // as demais seguem byte a byte com o Python.
+            if let (Value::Array(items), Some(id)) = (&mut sig, i.ask_form.as_ref().and_then(|form| form.get("interaction_id"))) { items.push(id.clone()); }
+            sig
+        })
+        .collect();
+    pyjson::dumps_unicode(&Value::Array(items), false)
+}
+
+fn row_sig(i: &SessionRow) -> Value {
+    let label = if i.provider == "codex" && !i.tracked {
+        json!(i.label)
+    } else {
+        json!(i.label.as_deref().is_some_and(|l| !l.is_empty()))
+    };
+    json!([
                 i.name, i.cwd, i.branch, i.git_cwd, i.worktree_gone, i.git_dirty,
                 i.git_ahead, i.git_behind, i.git_added, i.git_removed,
                 i.state, i.tracked, i.headless, i.jsonl, i.question, i.stalled, i.limited,
@@ -88,9 +99,6 @@ pub fn list_sig<'a>(rows: impl IntoIterator<Item = &'a SessionRow>) -> String {
                 i.plan_hidden, i.problema, i.provider, i.shared, i.owner, i.orq_arbiter,
                 i.pair_peers, i.pair_gid, i.pair_task, i.pair_external,
             ])
-        })
-        .collect();
-    pyjson::dumps_unicode(&Value::Array(items), false)
 }
 
 #[cfg(test)]
@@ -106,6 +114,18 @@ mod tests {
     }
 
     /// Valores tirados do `sse._status_sig` do Python.
+    /// Formulário novo com a mesma pergunta republica a linha (o card responde pelo ID dele).
+    #[test]
+    fn form_interaction_id_enters_the_signature() {
+        let mut row: SessionRow = serde_json::from_value(json!({"name":"s","question":"Q"})).unwrap();
+        let plain = list_sig(&[row.clone()]);
+        row.ask_form = Some(json!({"interaction_id":"f1","questions":[]}));
+        let first = list_sig(&[row.clone()]);
+        assert_ne!(plain, first);
+        row.ask_form = Some(json!({"interaction_id":"f2","questions":[]}));
+        assert_ne!(first, list_sig(&[row]));
+    }
+
     #[test]
     fn status_sig_matches_python() {
         let cases = [

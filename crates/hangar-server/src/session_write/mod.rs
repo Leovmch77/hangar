@@ -142,12 +142,19 @@ pub(crate) async fn route_write(runtime: &RuntimeRegistry, name: &str, route: Wr
     };
     let Some(provider) = Provider::from_str(&target.provider) else { return Write::Python };
     if decide(route, provider, target.terminal) == Owner::Python { return Write::Python; }
+    // Exceção da entrada doente: o modo de permissão do Codex sem terminal cujo processo caiu e não voltou
+    // é lido e gravado no arquivo da sessão, e vale na próxima subida (como no Python).
+    if !target.healthy && route == WriteRoute::CodexPermission && dead_headless_codex(&target).await { return Write::Rust(pass_in, target); }
     if !target.healthy {
         // O 503 fica; a reabertura que o Python fazia antes de entregar é pedida agora.
         runtime.request_reopen(name);
         return Write::Failed(RuntimeError::new("runtime_unhealthy", UNHEALTHY_MSG));
     }
     Write::Rust(pass_in, target)
+}
+
+async fn dead_headless_codex(target: &WriteTarget) -> bool {
+    target.provider == "codex" && !target.terminal && target.handle.view().await.is_ok_and(|view| view["alive"] == false)
 }
 
 pub(crate) fn busy_body() -> Value { detail_body("session_transfer_busy", BUSY_MSG, json!({})) }

@@ -28,6 +28,8 @@ const INGRESS_WAIT:Duration = Duration::from_secs(10);
 const EXIT_WAIT:Duration = Duration::from_secs(5);
 /// Motor novo até assentar na conversa.
 const SETTLE_WAIT:Duration = Duration::from_secs(45);
+/// Relançamentos seguidos do sidecar antigo antes de a escrita parar de tentar.
+const LEGACY_TRIES:u8 = 3;
 /// Releitura da configuração da conversa antes de ir para sem terminal.
 const SETTINGS_READ_WAIT:Duration = Duration::from_secs(5);
 const POLL:Duration = Duration::from_millis(200);
@@ -317,6 +319,36 @@ impl Watcher {
             target.binding = CanoBinding { pid:cano.pid,escuta:cano.escuta,token:cano.token,versao:cano.versao };
         }
         Some(registry.open_with_launch(target,codex_sidecar::dir(&self.cfg.home)).await.map(|_|()))
+    }
+
+    /// Sidecar do desenho antigo (terminal sem `endpoint`): sem pane, relança TUI e app-server pelo lançador
+    /// (`--cwd`/`--resume` + chave), adota e entrega, como o `ensure_running` do Python. Pane vivo nunca é
+    /// recriado; três falhas seguidas param as tentativas por escrita. Falha sai com o código dela.
+    pub(super) async fn relaunch_legacy(&self,registry:&RuntimeRegistry,name:&str) -> Option<Result<(),RuntimeError>> {
+        let meta = self.load(name).await?;
+        if meta.get("headless").is_some_and(truthy) || terminal::text(&meta,"endpoint").is_some() || self.transfer_busy(name,&meta).await { return None; }
+        if self.legacy_failures.lock().await.get(name).is_some_and(|failures|*failures >= LEGACY_TRIES) {
+            return Some(Err(RuntimeError::new("codex_terminal_relaunch_gave_up","o terminal desta sessão não reabriu depois de várias tentativas; feche e abra a sessão de novo")));
+        }
+        match self.cfg.mux.list_panes().await {
+            Err(error) => return Some(Err(RuntimeError::new("codex_terminal_mux",&format!("o multiplexador não respondeu ({})",error.code)))),
+            Ok(panes) if terminal::pane_of(&panes,name).is_some() => return Some(Err(RuntimeError::new("codex_terminal_without_control",
+                "o terminal do Codex está aberto sem um app-server que o Hangar alcance; feche e abra a sessão de novo"))),
+            Ok(_) => {}
+        }
+        let result = async {
+            let _closed = hold(registry.ingress(),name).await?;
+            let _round = self.misses.lock().await;
+            let meta = self.load(name).await.ok_or_else(gone)?;
+            let key = terminal::text(&meta,"key").filter(|key|terminal::valid_key(key)).map_or_else(||random_hex(16),str::to_owned);
+            let wanted = cleared(terminal_settings(meta,&json!({}),&key)?,false);
+            let (base,check) = (registry.codex_environment(),Value::Object(wanted.clone()));
+            tokio::task::spawn_blocking(move||super::codex_pane::launch_recipe(&base,&check).map(|_|())).await.map_err(|_|job())??;
+            self.open_terminal(registry,name,&key,&wanted,None).await
+        }.await;
+        let mut failures = self.legacy_failures.lock().await;
+        if result.is_ok() { failures.remove(name); } else { *failures.entry(name.to_owned()).or_default() += 1; }
+        Some(result)
     }
 
     /// Vida nova na fila (atual + 1), sem a vida do terminal anterior: o escritor único da geração.

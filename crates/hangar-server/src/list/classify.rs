@@ -35,6 +35,30 @@ pub const RUNTIME_ABSENT: &str = "list_runtime_absent";
 const CAPTURE_PARALLEL: usize = 4;
 
 /// Os quadros na ordem dos nomes, no máximo `CAPTURE_PARALLEL` processos de uma vez.
+/// ID do menu do pane da sessão Claude com terminal do Rust, para os botões do card responderem pelo app.
+/// `before`: o vínculo lido antes da captura; mudou no meio, a leitura não vale.
+async fn menu_interaction<C: CaptureSource>(runtime: &crate::runtime::gateway::RuntimeRegistry, io: &C, row: &mut SessionRow,
+    before: Option<&crate::interactions::InteractionBinding>, pane: Result<&str, ()>) -> Result<Option<String>, String> {
+    // `claude` aberto à mão, sem entrada no Rust: não há resposta a identificar, nem problema.
+    if runtime.hand_opened(&row.name).await { return Ok(None); }
+    let binding = runtime.interaction_binding_readonly(&row.name).await.map_err(|e| e.code)?;
+    if before != Some(&binding) { return Err("erro_interacao_desatualizada".into()); }
+    let target = runtime.terminal_target(&row.name).await.map_err(|e| e.code)?.ok_or("terminal_target_missing")?;
+    if io.target(&row.name).as_deref() != Some(target.binding.pane.as_str()) { return Err("terminal_capture_target_changed".into()); }
+    let jsonl = row.jsonl.as_deref().map(Path::new).ok_or("askq_transcript_missing")?;
+    let pane = pane.map_err(|()| "list_capture_failed")?;
+    let store = runtime.plugin().map_err(|e| e.code)?;
+    let question = crate::state::ask::observe_terminal(store.interactions(), &binding, jsonl, pane)?;
+    let (menu, _) = crate::state::ask::observe_screen_menu(&store, &binding, jsonl, pane)?;
+    if runtime.interaction_binding_readonly(&row.name).await.map_err(|e| e.code)? != binding { return Err("erro_interacao_desatualizada".into()); }
+    if let Some(question) = question {
+        row.pending_questions = row.pending_questions.max(1);
+        // O formulário vai à linha com o ID dele: o card responde pelo `/answer`, como o passo a passo do chat.
+        row.ask_form = serde_json::to_value(&question).ok();
+    }
+    Ok(menu)
+}
+
 async fn capture_all<C: CaptureSource>(io: &C, names: Vec<&str>) -> Vec<Result<String, CaptureFailed>> {
     // Os futuros montados antes: um closure dentro do stream tira o `Send` da rodada.
     let pending: Vec<_> = names.into_iter().map(|n| io.capture(n)).collect();
@@ -367,23 +391,9 @@ impl Classifier {
                 apply(row, a);
                 if let Ok(pane) = &frames[k] { self.observe_permission(&row.name, pane, capture_bindings.get(&row.name).and_then(|result| result.as_ref().ok()), permission_revisions.get(&row.name).copied()).await; }
                 if let Some(runtime) = &self.plugin_runtime {
-                    let observed = async {
-                        // `claude` aberto à mão, sem entrada no Rust: não há resposta a identificar, nem problema.
-                        if runtime.hand_opened(&row.name).await { return Ok(None); }
-                        let binding = runtime.interaction_binding_readonly(&row.name).await.map_err(|e| e.code)?;
-                        if capture_bindings.get(&row.name).and_then(|result| result.as_ref().ok()) != Some(&binding) { return Err("erro_interacao_desatualizada".into()); }
-                        let target = runtime.terminal_target(&row.name).await.map_err(|e| e.code)?.ok_or("terminal_target_missing")?;
-                        if io.target(&row.name).as_deref() != Some(target.binding.pane.as_str()) { return Err("terminal_capture_target_changed".into()); }
-                        let jsonl = row.jsonl.as_deref().map(Path::new).ok_or("askq_transcript_missing")?;
-                        let pane = frames[k].as_ref().map_err(|_| "list_capture_failed")?;
-                        let store = runtime.plugin().map_err(|e| e.code)?;
-                        let question = crate::state::ask::observe_terminal(store.interactions(), &binding, jsonl, pane)?;
-                        let (menu, _) = crate::state::ask::observe_screen_menu(&store, &binding, jsonl, pane)?;
-                        if runtime.interaction_binding_readonly(&row.name).await.map_err(|e| e.code)? != binding { return Err("erro_interacao_desatualizada".into()); }
-                        if question.is_some() { row.pending_questions = row.pending_questions.max(1); }
-                        Ok::<_, String>(menu)
-                    }.await;
-                    match observed { Ok(id) => row.interaction_id = id, Err(code) => row.problema = Some(code) }
+                    let before = capture_bindings.get(&row.name).and_then(|result| result.as_ref().ok()).cloned();
+                    let pane = frames[k].as_ref().map(String::as_str).map_err(|_| ());
+                    match menu_interaction(runtime, io, row, before.as_ref(), pane).await { Ok(id) => row.interaction_id = id, Err(code) => row.problema = Some(code) }
                 }
                 match row.last_activity {
                     Some(t) if a.state == "idle" => { self.idle_checked.insert(row.name.clone(), t); }
@@ -418,6 +428,17 @@ impl Classifier {
                 row.label = None;
                 row.question = Some(q.question);
                 row.options = Some(q.options);
+                // O app responde (decisão do usuário): o quadro desta rodada não foi lido, então lê agora e dá ao
+                // card o ID do menu do pane, que o `/select` responde pelas teclas como no chat.
+                if let Some(runtime) = &self.plugin_runtime && !runtime.hand_opened(&row.name).await {
+                    let before = runtime.interaction_binding_readonly(&row.name).await.ok();
+                    let frame = io.capture(&row.name).await;
+                    if let Ok(pane) = &frame && let Some(options) = analyze(pane).options.filter(|o| !o.is_empty()) { row.options = Some(options); }
+                    match menu_interaction(runtime, io, row, before.as_ref(), frame.as_deref().map_err(|_| ())).await {
+                        Ok(id) => row.interaction_id = id,
+                        Err(code) => row.problema = Some(code),
+                    }
+                }
             }
         }
 

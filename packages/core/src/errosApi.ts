@@ -471,6 +471,7 @@ const ERROS: Record<string, (params: Parametros) => string> = {
   erro_fila_pendente: () => m.erro_fila_pendente(),
   erro_permissao_reabrir: () => m.erro_permissao_reabrir(),
   erro_menu_aberto: () => m.erro_menu_aberto(),
+  erro_par_externo_orq: () => m.erro_par_externo_orq(),
   erro_modo_so_claude: () => m.erro_modo_so_claude(),
   erro_troca_modo: (p) => m.erro_troca_modo({ erro: String(p.erro ?? '') }),
   erro_conta_so_claude: () => m.erro_conta_so_claude(),

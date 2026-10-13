@@ -63,12 +63,10 @@ impl RateStore {
     }
 }
 
-pub fn permission_gate(app_present: bool, terminal_attached: Option<bool>, mode: Option<&str>, previous: Option<&str>) -> PermissionGate {
-    let mode_without_dialog = match mode {
-        Some("manual" | "acceptEdits") => false,
-        Some("plan") => !matches!(previous, Some("manual" | "acceptEdits")),
-        _ => true,
-    };
+/// Como o Python: o app segura a permissão em qualquer modo, menos nos que não perguntam (`auto`,
+/// `dontAsk`); modo ainda desconhecido segura também. O app faz tudo; o terminal é o fundo.
+pub fn permission_gate(app_present: bool, terminal_attached: Option<bool>, mode: Option<&str>) -> PermissionGate {
+    let mode_without_dialog = matches!(mode, Some("auto" | "dontAsk"));
     PermissionGate { app_present, terminal_attached: terminal_attached.unwrap_or(true), mode_without_dialog }
 }
 
@@ -201,9 +199,10 @@ impl Sources for NativeSources {
                 match target { Some(target) => self.attached(&target.binding).await, None => Some(true) }
             };
             let memory = state.state.permissions.lock().map_err(|_| ServiceError("permission_store_unavailable"))?;
-            let mode = memory.confirmed(&identity.binding.conversation).map_err(ServiceError)?;
-            Ok(permission_gate(state.list.owner_clients() > 0 || state.side.hubs.app_present(), attached,
-                mode.as_ref().map(|mode| mode.current.as_str()), mode.as_ref().map(|mode| mode.previous_non_plan.as_str())))
+            // Modo incerto (troca em curso) também segura: só `auto`/`dontAsk` confirmados soltam.
+            let mode = memory.confirmed(&identity.binding.conversation).ok().flatten();
+            Ok(permission_gate(state.list.owner_clients() > 0 || state.list.python_apps() > 0 || state.side.hubs.app_present(), attached,
+                mode.as_ref().map(|mode| mode.current.as_str())))
         })
     }
     fn band_present<'a>(&'a self, identity: &'a Identity) -> SourceFuture<'a, bool> {
@@ -257,16 +256,25 @@ mod tests {
     }
 
     #[test]
-    fn gate_requires_presence_detachment_and_confirmed_asking_mode() {
-        for (app, attached, mode, previous) in [(false, Some(false), Some("manual"), Some("manual")),
-            (true, Some(true), Some("manual"), Some("manual")), (true, None, Some("manual"), Some("manual")),
-            (true, Some(false), Some("auto"), Some("auto")), (true, Some(false), Some("dontAsk"), Some("dontAsk")),
-            (true, Some(false), None, None), (true, Some(false), Some("plan"), Some("bypassPermissions"))] {
-            let gate = permission_gate(app, attached, mode, previous);
-            assert!(!gate.app_present || gate.terminal_attached || gate.mode_without_dialog);
+    fn gate_requires_presence_and_detachment() {
+        for (app, attached) in [(false, Some(false)), (true, Some(true)), (true, None)] {
+            let gate = permission_gate(app, attached, Some("manual"));
+            assert!(!gate.app_present || gate.terminal_attached);
         }
-        let gate = permission_gate(true, Some(false), Some("manual"), Some("manual"));
+        let gate = permission_gate(true, Some(false), Some("manual"));
         assert!(gate.app_present && !gate.terminal_attached && !gate.mode_without_dialog);
+    }
+
+    /// Decisão do usuário (B4/P23), como o Python: o app segura em qualquer modo, menos `auto`/`dontAsk`;
+    /// modo ainda desconhecido e `plan` também seguram.
+    #[test]
+    fn app_holds_in_every_mode_but_auto_and_dont_ask() {
+        for mode in [None, Some("manual"), Some("acceptEdits"), Some("plan"), Some("bypassPermissions")] {
+            assert!(!permission_gate(true, Some(false), mode).mode_without_dialog, "{mode:?}");
+        }
+        for mode in ["auto", "dontAsk"] {
+            assert!(permission_gate(true, Some(false), Some(mode)).mode_without_dialog, "{mode}");
+        }
     }
 
     #[test]

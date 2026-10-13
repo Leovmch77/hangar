@@ -84,6 +84,10 @@ pub struct SessionRow {
     pub options: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interaction_id: Option<String>,
+    /// Formulário da pergunta aberta (`AskUserQuestion`), com o `interaction_id` dele: o card responde pelo
+    /// `/answer`, como o passo a passo do chat. Vale também a pergunta segurada pelo plugin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ask_form: Option<Value>,
     #[serde(default)]
     pub stalled: bool,
     #[serde(default)]

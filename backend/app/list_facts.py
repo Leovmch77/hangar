@@ -54,6 +54,9 @@ async def compute(rows: list[dict], owner_clients: int, pane_pids: dict[str, int
     _shortcuts._launch_shortcuts()
     out["shortcuts"] = _shortcuts.shortcuts_data
     out["shadow"] = None
+    # Lista e chat do dono que o Python atende (Connect): também seguram a permissão no app, no Rust.
+    from app import plugin_bridge
+    out["owner_apps"] = plugin_bridge.apps_abertos()
     return out
 
 

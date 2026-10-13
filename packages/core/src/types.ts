@@ -32,6 +32,9 @@ export type Provider = 'claude' | 'codex' | 'pi' | 'kimi' | 'omp' | 'orq';
 
 export interface SessionInfo {
   interaction_id?: string | null;
+  /** Formulário da pergunta aberta (AskUserQuestion, também a segurada pelo plugin), com o ID dele:
+   *  o card responde pelo `/answer`, como o passo a passo do chat. */
+  ask_form?: AskQuestionPayload | null;
   codex_account?: string | null;
   codex_home?: string | null;
   name: string;

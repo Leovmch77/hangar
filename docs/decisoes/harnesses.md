@@ -5,6 +5,13 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
 
 ## Regras vigentes
 
+- **Exceção à "entrada doente é 503": a permissão do Codex sem terminal caído.** Com o processo que
+  caiu e não voltou, `GET /codex-permissions` lê o modo do motor (o mesmo do arquivo da sessão) e o
+  `POST` grava o modo novo no arquivo da sessão, que vale na próxima subida; a resposta espera a
+  gravação. Modo desconhecido continua recusado (400), nunca Full Access. As outras rotas da entrada
+  doente seguem 503 `runtime_unhealthy`. Motivo: era o comportamento do Python, e sem ele a pílula de
+  permissão não abria depois de três subidas falhas (decisão do usuário, 13/10/2026).
+
 - **O organizador do ditado executa uma chamada mínima, separada da sessão principal.** Claude
   usa `--safe-mode` e conserva a autenticação de destino: assinatura OAuth, keychain, API key ou `apiKeyHelper`. Codex
   mantém a autenticação da conta de destino e usa execução efêmera com configurações mínimas.

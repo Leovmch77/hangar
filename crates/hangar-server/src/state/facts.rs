@@ -65,11 +65,14 @@ pub fn plugin_surfaces(questions: &[Value]) -> Result<(Option<&Value>, Option<&V
     for question in questions {
         let id = question["id"].as_str().filter(|id| !id.is_empty()).ok_or("plugin_question_invalid")?;
         question["interaction_id"].as_str().filter(|id| !id.is_empty()).ok_or("plugin_question_invalid")?;
-        let surface = if id.starts_with("perm:") { &mut selector } else {
-            if question["questions"].as_array().is_none_or(Vec::is_empty) { return Err("plugin_question_invalid".into()); }
-            &mut form
-        };
-        if surface.replace(question).is_some() { return Err("erro_interacao_indisponivel".into()); }
+        // Permissões seguradas juntas saem uma de cada vez, na ordem estável do Store: respondida a primeira,
+        // a seguinte aparece (o app faz tudo, nada fica para o terminal).
+        if id.starts_with("perm:") {
+            selector.get_or_insert(question);
+            continue;
+        }
+        if question["questions"].as_array().is_none_or(Vec::is_empty) { return Err("plugin_question_invalid".into()); }
+        if form.replace(question).is_some() { return Err("erro_interacao_indisponivel".into()); }
     }
     Ok((selector, form))
 }
@@ -328,8 +331,17 @@ mod tests {
 
     #[test]
     fn same_surface_ambiguity_is_not_an_empty_question() {
-        let questions = vec![json!({"id":"perm:a","interaction_id":"a"}), json!({"id":"perm:b","interaction_id":"b"})];
-        assert_eq!(plugin_surfaces(&questions).unwrap_err(), "erro_interacao_indisponivel");
+        let forms = vec![json!({"id":"ask:a","interaction_id":"a","questions":[{}]}), json!({"id":"ask:b","interaction_id":"b","questions":[{}]})];
+        assert_eq!(plugin_surfaces(&forms).unwrap_err(), "erro_interacao_indisponivel");
+    }
+
+    /// Decisão do usuário (P21): duas permissões seguradas saem uma de cada vez; respondida a primeira,
+    /// a segunda aparece. Nunca o problema no lugar do cartão.
+    #[test]
+    fn held_permissions_come_one_at_a_time() {
+        let both = vec![json!({"id":"perm:a","interaction_id":"a"}), json!({"id":"perm:b","interaction_id":"b"})];
+        assert_eq!(plugin_surfaces(&both).unwrap().0.unwrap()["interaction_id"], "a");
+        assert_eq!(plugin_surfaces(&both[1..]).unwrap().0.unwrap()["interaction_id"], "b");
     }
 
     #[test]

@@ -349,6 +349,8 @@ pub struct Hub {
     /// O ator do Codex com terminal desta sessão é do Rust: o feed publica o estado. O pane continua no
     /// `Binding` (`headless: false`); dono é outra coisa.
     runtime_owned: std::sync::atomic::AtomicBool,
+    /// Assinantes que entraram pelo convite (não contam como app do dono).
+    guests: std::sync::atomic::AtomicUsize,
 }
 
 /// O que um aparelho recebe ao entrar: cauda + retrato, e o canal para o resto. `ui`: a versão do
@@ -403,6 +405,7 @@ impl Hub {
                 wake: Arc::new(Notify::new()),
                 python_leaks: AtomicU32::new(0),
                 runtime_owned: std::sync::atomic::AtomicBool::new(owned),
+                guests: std::sync::atomic::AtomicUsize::new(0),
             }
         });
         hub.ensure_monitor();
@@ -1079,7 +1082,9 @@ pub async fn private_events(
     let Some(binding) = info.as_ref().and_then(Binding::from_info).filter(|b| b.state_events().is_some() || owned(b)) else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    let lease = st.side.hubs.acquire(&name, binding, &st.side);
+    // O Python diz se quem entrou é convidado (`x-hangar-app: 0`); sem o cabeçalho, conta como app do dono.
+    let guest = req.headers().get("x-hangar-app").is_some_and(|value| value == "0");
+    let lease = st.side.hubs.acquire_as(&name, binding, &st.side, guest);
     let (tx, rx) = tokio::sync::mpsc::channel::<Bytes>(64);
     tokio::spawn(private_loop(lease, tx));
     let stream = futures_util::stream::unfold(rx, |mut rx| async move {
@@ -1152,13 +1157,21 @@ impl WeakHubs {
 pub struct Lease {
     hubs: Hubs,
     pub hub: Arc<Hub>,
+    /// Convidado: assina o hub, mas não é o app do dono aberto (nem segura permissão, nem cala push).
+    guest: bool,
 }
 
 impl Hubs {
     pub fn plugin_rates(&self) -> Arc<crate::plugin::sources::RateStore> { self.1.clone() }
-    pub fn app_present(&self) -> bool { self.0.lock().unwrap_or_else(|e| e.into_inner()).values().any(|(_, n)| *n > 0) }
+    /// Algum aparelho do dono (direto ou pelo Connect) com uma conversa aberta; convidado não conta, como no Python.
+    pub fn app_present(&self) -> bool {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).values().any(|(hub, n)| *n > hub.guests.load(Ordering::Acquire))
+    }
 
-    pub fn acquire(&self, name: &str, binding: Binding, ctx: &SideCtx) -> Lease {
+    pub fn acquire(&self, name: &str, binding: Binding, ctx: &SideCtx) -> Lease { self.acquire_as(name, binding, ctx, false) }
+
+    /// `guest`: assinante que entrou pelo convite.
+    pub fn acquire_as(&self, name: &str, binding: Binding, ctx: &SideCtx, guest: bool) -> Lease {
         let mut map = self.0.lock().unwrap();
         let hub = match map.get_mut(name) {
             Some((hub, n)) => {
@@ -1171,12 +1184,14 @@ impl Hubs {
                 drop(map);
                 // Hub novo começa sem retrato: a faixa e os avisos que o Rust já publicou entram agora.
                 hub.seed(ctx.mods.replay(name));
-                return Lease { hubs: self.clone(), hub };
+                if guest { hub.guests.fetch_add(1, Ordering::AcqRel); }
+                return Lease { hubs: self.clone(), hub, guest };
             }
         };
+        if guest { hub.guests.fetch_add(1, Ordering::AcqRel); }
         drop(map);
         hub.ensure_current(&binding);
-        Lease { hubs: self.clone(), hub }
+        Lease { hubs: self.clone(), hub, guest }
     }
 
     pub fn downgrade(&self) -> WeakHubs {
@@ -1240,6 +1255,7 @@ impl Drop for Lease {
         if !Arc::ptr_eq(h, &self.hub) {
             return;
         }
+        if self.guest { self.hub.guests.fetch_sub(1, Ordering::AcqRel); }
         *n -= 1;
         if *n == 0 {
             let (h, _) = map.remove(&self.hub.name).expect("presente acima");
@@ -1502,6 +1518,22 @@ mod tests {
         ctx.hubs.rebind_claude_info("s", info("b")).unwrap();
         let other = side_events(&mut rx, Duration::from_millis(200)).await;
         assert!(other.iter().any(|(e, _)| e == "rebind"), "{other:?}");
+    }
+
+    /// Decisão P24, como o Python: o convidado assina o hub, mas não é app do dono presente; o Connect é.
+    #[tokio::test]
+    async fn guest_subscriber_is_not_the_owner_app() {
+        let dir = tempfile::tempdir().unwrap();
+        let binding = Binding { provider: Provider::Claude, jsonl: dir.path().join("a.jsonl"), key: "a".into(), headless: false, life: None };
+        let (spawn, _) = fake_monitors(IDLE_PANE);
+        let ctx = SideCtx { monitors: Some(spawn), ..idle_ctx() };
+        let guest = ctx.hubs.acquire_as("s", binding.clone(), &ctx, true);
+        assert!(!ctx.hubs.app_present(), "convidado sozinho não segura permissão");
+        let owner = ctx.hubs.acquire_as("s", binding, &ctx, false);
+        assert!(ctx.hubs.app_present());
+        drop(owner);
+        assert!(!ctx.hubs.app_present());
+        drop(guest);
     }
 
     #[tokio::test]

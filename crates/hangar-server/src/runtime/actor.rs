@@ -1670,11 +1670,16 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
                                     native.insert(id.clone());
                                     let queue = queue.clone(); let target = target.clone(); let policy = engine.policy.clone().unwrap();
                                     let command = pending.command.clone(); let original = pending.original.clone(); let view = engine.view(); let sample = clock(start);
+                                    let lifecycle = engine.lifecycle.clone();
                                     jobs.spawn(async move {
                                         let result = async {
                                             // Uma fase por tentativa: a adiada volta pelo drain e não pode reaproveitar os recibos da anterior.
                                             let phase = format!("{id}:native_message:{}",unique());
-                                            let payload = json!({"text":command.payload["text"]});
+                                            // A classe do recado vai pronta: a memória de modo é do Rust, e o Python não volta a ele.
+                                            let text = command.payload["text"].as_str().unwrap_or("");
+                                            let sender = crate::terminal_input::message_prefix(text).map(|(sender,_)|sender).filter(|_|!text.starts_with("[painel:"));
+                                            let class = match lifecycle.as_ref().and_then(std::sync::Weak::upgrade) { Some(registry)=>registry.message_class(sender,&target.name).await, None=>None };
+                                            let payload = json!({"text":command.payload["text"],"mode":class});
                                             queue.exec(target.generation,&format!("prepare:{phase}"),sample,Action::Prepare { id:phase.clone(),
                                                 payload:json!({"kind":"native_message","request_id":id,"payload":payload}),entry_id:None }).await.map_err(io_failure)?;
                                             let cursor = capture_cursor(&target,&view).await?;

@@ -67,3 +67,18 @@ def test_native_message_has_journal_before_uds(monkeypatch):
     result = runtime_policy.native_message({"text":"[de: source] Olá"}, {"key":"key", "name":"session",
         "session_id":"sid", "operation_id":"op", "validate":lambda: validated.append(True)})
     assert result["outcome"] == "unknown"
+
+
+def test_native_message_uses_the_mode_the_rust_sent(monkeypatch):
+    # Decisão do usuário (M6): o Rust manda a classe confirmada junto do recado; o Python não consulta
+    # memória nem volta ao Rust. Sem ela (ou inválida), vale o cálculo de antes.
+    from app import api, uds_messaging
+    sent = []
+    monkeypatch.setattr(uds_messaging, "socket_da_sessao", lambda *args: "fake.sock")
+    monkeypatch.setattr(api, "_classe_modo", lambda *args: "prompting")
+    monkeypatch.setattr(uds_messaging, "enviar", lambda sock, text, sender, mode, **kw: sent.append(mode))
+    meta = {"key":"key", "name":"session", "session_id":"sid", "operation_id":"op", "validate":lambda: None}
+    runtime_policy.native_message({"text":"[de: source] Olá", "mode":"bypass"}, meta)
+    runtime_policy.native_message({"text":"[de: source] Olá", "mode":"turbo"}, meta)
+    runtime_policy.native_message({"text":"[de: source] Olá"}, meta)
+    assert sent == ["bypass", "prompting", "prompting"]

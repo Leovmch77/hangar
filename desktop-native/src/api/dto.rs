@@ -67,6 +67,9 @@ pub struct SessionInfo {
     pub question: Option<String>,
     pub options: Option<Vec<String>>,
     #[serde(default)] pub interaction_id: Option<String>,
+    /// Formulário da pergunta aberta (`AskUserQuestion`, também a segurada pelo plugin), com o ID dele: o
+    /// passo a passo responde pelo `/answer` logo ao abrir a sessão, sem esperar o stream.
+    #[serde(default)] pub ask_form: Option<Value>,
     /// Perguntas esperando resposta fora do terminal (as assíncronas do Codex); a aba mostra "? N".
     #[serde(default)] pub pending_questions: u32,
     pub problema: Option<String>,

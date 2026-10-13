@@ -2280,3 +2280,28 @@ fn an_uncertain_reserved_answer_shows_the_question_again() {
     assert_eq!(engine.view()["codex_question"]["questions"][0]["question"],"Qual pasta?");
     assert_eq!(engine.control_view()["pending_questions"],1);
 }
+
+#[test]
+fn a_dead_headless_records_the_permission_for_the_next_start() {
+    // Processo caído que não voltou: o modo vai ao arquivo da sessão e vale na próxima subida (Python).
+    let mut engine = engine();
+    line(&mut engine,json!({"type":"cano_saiu","rc":1}),10.0);
+    assert_eq!(engine.control_view()["alive"],false);
+    let effects = engine.command(command(OperationKind::SetPermissionMode,json!({"mode":"approve for me"})),clock(11.0)).unwrap();
+    assert!(!effects.iter().any(|e|matches!(e,Effect::Respawn { .. })),"não sobe processo");
+    assert!(reply_of(&effects,"op-1").is_none(),"responde depois de gravar");
+    let (patch,payload) = effects.iter().find_map(|e|match e { Effect::Policy { kind,request_id,payload } if kind == "session.patch_meta" => Some((request_id.clone(),payload.clone())),_=>None }).unwrap();
+    assert_eq!(payload,json!({"permission_mode":"Approve for me"}));
+    let done = engine.apply(EngineInput::PolicyResult { request_id:patch,payload:json!({"updated":true}) },clock(11.5)).unwrap();
+    assert_eq!(reply_of(&done,"op-1"),Some((Disposition::Accepted,json!({"current":"Approve for me"}))));
+    assert_eq!(engine.control_view()["permission_mode"],"Approve for me");
+    // Gravação recusada: o modo anterior volta e a resposta diz que não gravou.
+    let effects = engine.command(RuntimeCommand { operation_id:"op-2".into(),kind:OperationKind::SetPermissionMode,payload:json!({"mode":"Full Access"}) },clock(12.0)).unwrap();
+    let patch = effects.iter().find_map(|e|match e { Effect::Policy { kind,request_id,.. } if kind == "session.patch_meta" => Some(request_id.clone()),_=>None }).unwrap();
+    let failed = engine.apply(EngineInput::PolicyResult { request_id:patch,payload:json!({"updated":false,"error":"codex_sidecar_io"}) },clock(12.5)).unwrap();
+    assert_eq!(reply_of(&failed,"op-2").map(|(d,_)|d),Some(Disposition::Rejected));
+    assert_eq!(engine.control_view()["permission_mode"],"Approve for me");
+    // Modo desconhecido continua recusado, nunca Full Access.
+    let error = engine.command(command(OperationKind::SetPermissionMode,json!({"mode":"Read Only"})),clock(13.0)).unwrap_err();
+    assert_eq!(error.code,"erro_modo_desconhecido");
+}

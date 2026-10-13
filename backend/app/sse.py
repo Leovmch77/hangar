@@ -760,7 +760,7 @@ def _codex_headless(name: str) -> bool:
     return bool((codex_sessions.load(name) or {}).get("headless"))
 
 
-async def _canal_do_estado(name: str):
+async def _canal_do_estado(name: str, app: bool = True):
     """`(evento, dado)` do canal privado do hub (`/__hangar_server/state/{name}/events`), para quem
     entrou pelas portas do Python. HTTP/1.0: o corpo vem cru até o fim, sem pedaços."""
     from urllib.parse import quote
@@ -776,7 +776,9 @@ async def _canal_do_estado(name: str):
         raise RustStateChannelError("state_channel_unavailable") from e
     try:
         writer.write((f"GET /__hangar_server/state/{quote(name, safe='')}/events HTTP/1.0\r\n"
-                      f"host: {address}\r\nx-hangar-internal: {secret}\r\n\r\n").encode())
+                      f"host: {address}\r\nx-hangar-internal: {secret}\r\n"
+                      # Convidado assina o hub sem ser o app do dono presente (permissão segurada, push).
+                      f"x-hangar-app: {'1' if app else '0'}\r\n\r\n").encode())
         await writer.drain()
         status = (await asyncio.wait_for(reader.readline(), 10)).split()
         if len(status) < 2 or status[1] != b"200":
@@ -1080,7 +1082,7 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
     async def rust_state_pump():
         # Estado, prévia, pergunta e sugestão do `Monitor` do Rust, como o hub os publicou.
         try:
-            async for event, data in _canal_do_estado(name):
+            async for event, data in _canal_do_estado(name, count_app):
                 await queue.put(("__rust__", (event, data)))
         except asyncio.CancelledError:
             raise

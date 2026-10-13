@@ -201,6 +201,8 @@ pub struct Engine {
     skips:BTreeMap<RequestId,(String,String)>,
     /// Último evento da conversa: turno calado por muito tempo é conferido no app-server.
     last_event:f64,
+    /// Modo gravado com o processo caído: patch → (operação, modo anterior). Só responde depois de gravado.
+    mode_writes:BTreeMap<RequestId,(String,Option<String>)>,
 }
 
 fn error(message:&str) -> RuntimeError { RuntimeError::new("codex_command",message) }
@@ -232,6 +234,12 @@ fn service_tier(value:&Value) -> Option<String> {
 /// Os modos da tela, como em `sem_terminal.MODOS`.
 const MODES:[&str;3] = ["Ask for approval","Approve for me","Full Access"];
 // Recebem só nomes de `MODES`; qualquer outro texto cai no mais restrito, nunca em Full Access.
+/// Um dos `MODES`, sem diferença de maiúsculas; qualquer outro texto é recusado, nunca vira Full Access.
+fn known_mode(payload:&Value) -> Result<&'static str,RuntimeError> {
+    let wanted = payload["mode"].as_str().unwrap_or("").trim();
+    MODES.iter().find(|mode|mode.eq_ignore_ascii_case(wanted)).copied().ok_or_else(||RuntimeError::new("erro_modo_desconhecido",
+        &format!("modo desconhecido: {wanted} (os modos são: {})",MODES.join(", "))))
+}
 fn approval(mode:&str) -> &'static str { if mode == "Full Access" { "never" } else { "on-request" } }
 fn sandbox(mode:&str) -> &'static str { match mode { "Full Access"=>"danger-full-access","Approve for me"=>"workspace-write",_=>"read-only" } }
 
@@ -446,7 +454,7 @@ impl Engine {
             preview:LiveBuffer::default(),response_started:false,first_response_start:None,compacting:false,
             running_commands:BTreeMap::new(),thinking:LiveBuffer::default(),was_working:metadata["in_progress"] == true,
             rpc:BTreeMap::new(),server_requests:Vec::new(),
-            request_epochs:BTreeMap::new(),answering:BTreeSet::new(),lost_requests:BTreeSet::new(),wires:BTreeMap::new(),policies:BTreeMap::new(),last_format_request:None,format_gate:FormatGate::default(),reported_formats:BTreeSet::new(),async_questions,reservations:Vec::new(),skill_preparations:BTreeMap::new(),skips:BTreeMap::new(),last_event:clock.monotonic_s,metadata }
+            request_epochs:BTreeMap::new(),answering:BTreeSet::new(),lost_requests:BTreeSet::new(),wires:BTreeMap::new(),policies:BTreeMap::new(),last_format_request:None,format_gate:FormatGate::default(),reported_formats:BTreeSet::new(),async_questions,reservations:Vec::new(),skill_preparations:BTreeMap::new(),skips:BTreeMap::new(),last_event:clock.monotonic_s,mode_writes:BTreeMap::new(),metadata }
     }
 
     pub fn view(&self) -> Value {
@@ -1207,6 +1215,17 @@ impl Engine {
         if !self.headless && relaunches(command.kind) {
             return Err(RuntimeError::new(TERMINAL_RELAUNCH,"o Codex com terminal não é relançado pelo Hangar; faça isso na TUI"));
         }
+        // Processo caído que não voltou: o modo vai ao arquivo da sessão e vale na próxima subida, como no
+        // Python; a resposta espera a gravação.
+        if self.headless && !self.alive && command.kind == OperationKind::SetPermissionMode {
+            let mode = known_mode(&command.payload)?;
+            let previous = self.permission_mode.replace(mode.into());
+            let mut effects = Vec::new();
+            let patch = self.policy("session.patch_meta",json!({"permission_mode":mode}),&mut effects);
+            self.mode_writes.insert(patch,(command.operation_id,previous));
+            self.changed(&mut effects,false);
+            return Ok(effects);
+        }
         if !self.alive { return Err(error("runtime sem terminal indisponível")); }
         // Catálogo fechado do terminal: as mesmas transformações do sem terminal, sem a tabela de
         // aprovação/sandbox dele (já ausente nos ramos abaixo quando `headless` é falso).
@@ -1414,9 +1433,7 @@ impl Engine {
                 self.send(id,request,Some(next),&mut effects);
             }
             OperationKind::SetPermissionMode => {
-                let wanted = payload["mode"].as_str().unwrap_or("").trim();
-                let mode = *MODES.iter().find(|mode|mode.eq_ignore_ascii_case(wanted)).ok_or_else(||RuntimeError::new("erro_modo_desconhecido",
-                    &format!("modo desconhecido: {wanted} (os modos são: {})",MODES.join(", "))))?;
+                let mode = known_mode(&payload)?;
                 // O `approvalPolicy` vale no próximo turno; o sandbox só muda subindo o processo de novo.
                 if sandbox(mode) != sandbox(self.launch_mode()) {
                     if !self.ready || !self.turn_known { return Err(error("não foi possível confirmar o estado do turno; permissão mantida")); }
@@ -1590,6 +1607,18 @@ impl Engine {
                 }
             }
             EngineInput::PolicyResult { request_id,payload } => {
+                if let Some((operation_id,previous)) = self.mode_writes.remove(&request_id) {
+                    self.policies.remove(&request_id);
+                    if payload["updated"] == true {
+                        effects.push(Effect::Reply { operation_id,disposition:Disposition::Accepted,payload:json!({"current":self.permission_mode}) });
+                    } else {
+                        self.permission_mode = previous;
+                        effects.push(Effect::Reply { operation_id,disposition:Disposition::Rejected,
+                            payload:json!({"error":"não foi possível gravar o modo de permissão no arquivo da sessão","code":payload.get("error").cloned().unwrap_or(Value::Null)}) });
+                    }
+                    self.changed(&mut effects,true);
+                    return Ok(effects);
+                }
                 if let Some((operation_id,question)) = self.skips.remove(&request_id) {
                     self.policies.remove(&request_id);
                     if payload["updated"] == true {

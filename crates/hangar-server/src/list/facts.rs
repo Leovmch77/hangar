@@ -91,6 +91,9 @@ pub struct ListFacts {
     /// Só no pedido da sombra: a assinatura de cada linha da lista que o Python serviu, por nome.
     /// `None` sem lista recente dele (ninguém com ela aberta) ou fora da sombra.
     pub shadow: Option<super::shadow::PySigs>,
+    /// Aparelhos do dono que o Python atende (lista e chat pelo Connect): também são o app presente.
+    #[serde(default)]
+    pub owner_apps: u32,
     /// Nenhuma resposta boa ainda: acesso, escondidas, transferências e orquestrações são
     /// desconhecidos, não vazios. Todas as linhas levam o problema, e o hub não serve a lista ao dono.
     #[serde(skip)]
@@ -101,7 +104,7 @@ impl Default for ListFacts {
     fn default() -> Self {
         Self { states: HashMap::new(), overrides: Vec::new(), frozen: HashSet::new(), orq: Vec::new(),
             orq_error: None, shared: HashSet::new(), owners: HashMap::new(), hidden: HashSet::new(), problems: BTreeMap::new(),
-            stall_seconds: 300.0, nav: Value::Null, shortcuts: None, shadow: None, unknown: true }
+            stall_seconds: 300.0, nav: Value::Null, shortcuts: None, shadow: None, owner_apps: 0, unknown: true }
     }
 }
 

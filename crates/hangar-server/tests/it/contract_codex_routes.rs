@@ -261,3 +261,56 @@ fn skip_that_was_not_saved_is_a_send_failure_and_a_bad_answer_is_invalid() {
     let (status, body) = skip_answer(&invalid);
     assert_eq!((status.as_u16(), body["detail"]["code"].as_str()), (409, Some("erro_codex_resposta_invalida")));
 }
+
+/// Cano que cai logo depois de abrir e não volta (sem quem o religue): a entrada fica doente.
+async fn dying_cano() -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let Ok((stream, _)) = listener.accept().await else { return };
+        let mut reader = BufReader::new(stream);
+        let mut header = String::new();
+        if reader.read_line(&mut header).await.is_err() { return; }
+        let snapshot = json!({"type":"cano_snapshot","versao":2,"pid":42,"init":null,"aberto":false,
+            "pendentes":[],"ultimo_result":null,"rate_limit":null,"stderr_tail":[],"saiu":null,"inflight":{}});
+        reader.get_mut().write_all(format!("{snapshot}\n").as_bytes()).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let _ = reader.get_mut().write_all(format!("{}\n", json!({"type":"cano_saiu","rc":1})).as_bytes()).await;
+        let mut rest = String::new();
+        while reader.read_line(&mut rest).await.unwrap_or(0) > 0 { rest.clear(); }
+    });
+    format!("tcp:{address}")
+}
+
+#[tokio::test]
+async fn permissions_of_a_dead_headless_codex_answer_from_the_session_file_not_503() {
+    let dir = tempfile::tempdir().unwrap();
+    let registry = Arc::new(RuntimeRegistry::new(policy().await, "secret-test".into(), "instance-test".into()));
+    let metadata = json!({"name": "s", "headless": true, "thread_id": "thread-1", "initialized": true, "ready": true, "cwd": "/tmp/projeto",
+        "permission_mode": "Ask for approval"});
+    registry.open(RuntimeTarget { key: "k".into(), generation: 1, name: "s".into(), provider: "codex".into(), metadata,
+        binding: CanoBinding { pid: 42, escuta: dying_cano().await, token: "secret-test".into(), versao: 2 },
+        lease_path: dir.path().join("k.lock"), state_path: dir.path().join("k.queue-state.json"), projection_dir: dir.path().join("k-projection"),
+        transcript: dir.path().join("k.jsonl"), created: 0.0 }).await.unwrap();
+    let handle = registry.handle("k", 1).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async { while handle.view().await.unwrap()["alive"] != false { tokio::time::sleep(Duration::from_millis(20)).await; } })
+        .await.expect("o cano caiu");
+    let (python, server) = serve(registry.clone()).await;
+    let get = |server| async move { client().get(format!("http://{server}/api/sessions/s/codex-permissions"))
+        .header("authorization", format!("Bearer {OWNER}")).send().await.unwrap() };
+    let post = |server, mode: &'static str| async move { client().post(format!("http://{server}/api/sessions/s/codex-permissions"))
+        .header("authorization", format!("Bearer {OWNER}")).header("content-type", "application/json")
+        .body(json!({"mode": mode}).to_string()).send().await.unwrap() };
+    let read = get(server).await;
+    assert_eq!(read.status().as_u16(), 200);
+    assert_eq!(serde_json::from_str::<Value>(&read.text().await.unwrap()).unwrap()["current"], "Ask for approval");
+    let written = post(server, "Approve for me").await;
+    assert_eq!((written.status().as_u16(), written.text().await.unwrap()), (200, json!({"current": "Approve for me"}).to_string()));
+    assert_eq!(serde_json::from_str::<Value>(&get(server).await.text().await.unwrap()).unwrap()["current"], "Approve for me");
+    let unknown = post(server, "Read Only").await;
+    assert_eq!(unknown.status().as_u16(), 400, "modo desconhecido continua recusado");
+    assert_eq!(python.hits_to("/api/sessions/s/codex-permissions"), 0);
+    // Outra rota da mesma sessão doente continua 503 com o código.
+    let models = client().get(format!("http://{server}/api/sessions/s/models")).header("authorization", format!("Bearer {OWNER}")).send().await.unwrap();
+    assert_eq!(models.status().as_u16(), 503);
+}

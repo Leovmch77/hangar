@@ -215,6 +215,18 @@ export default function ChatScreen() {
     chat.openAsk(payload, q.id);
   }, [events, provider, askOpen, askPiId, askPiDismissed, chat]);
 
+  // A pergunta da lista (fora do quadro ou segurada pelo plugin) abre o passo a passo na hora, com o ID do
+  // formulário: responde pelo `/answer` sem esperar o stream. Uma vez por formulário, para fechar não reabrir.
+  const listForm = currentSession?.ask_form;
+  const listFormOpened = useRef<string | null>(null);
+  useEffect(() => {
+    const id = listForm?.interaction_id;
+    if (!listForm?.questions?.length || !id || listFormOpened.current === id) return;
+    if (askOpen || askPayload?.interaction_id === id) return;
+    listFormOpened.current = id;
+    chat.openAsk(listForm);
+  }, [listForm, askOpen, askPayload, chat]);
+
   // quem responde: OptionButtons quando awaiting_input com question/options e sem stepper aberto
   const showOptions = !!(!askOpen && stateEvent?.state === 'awaiting_input' && stateEvent.question && stateEvent.options?.length);
   const optionKey = JSON.stringify([serverId, name, showOptions, stateEvent?.interaction_id ?? [stateEvent?.question, stateEvent?.options]]);

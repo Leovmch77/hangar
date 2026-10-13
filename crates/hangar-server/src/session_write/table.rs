@@ -18,6 +18,8 @@ pub enum WriteRoute {
     Input, Steer, Interrupt, Select, SelectSubmit, Answer, Keys, TermInput, QueueRemove,
     /// Rotas só do Codex (`/models`, `/model`, `/limits`, `/commands`…), com e sem terminal.
     CodexControl,
+    /// `/codex-permissions`: como `CodexControl`, e a única que atende o sem terminal caído (`route_write`).
+    CodexPermission,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -27,7 +29,7 @@ pub enum Owner { Rust, Python }
 /// recusa com código, e o Python nunca relança nem responde por ela.
 pub fn decide(route: WriteRoute, provider: Provider, terminal: bool) -> Owner {
     match route {
-        WriteRoute::CodexControl if provider != Provider::Codex => Owner::Python,
+        WriteRoute::CodexControl | WriteRoute::CodexPermission if provider != Provider::Codex => Owner::Python,
         // Teclas cruas e a aba Submit só existem num pane: sem terminal quem responde é o Python, como hoje.
         WriteRoute::Keys | WriteRoute::TermInput | WriteRoute::SelectSubmit if !terminal => Owner::Python,
         _ => Owner::Rust,
@@ -58,7 +60,7 @@ pub(crate) fn body_ok(route: WriteRoute, body: &Bytes) -> bool {
     match route {
         Input | Select | Answer | Keys | TermInput => object(),
         Steer | SelectSubmit => body.is_empty() || object(),
-        Interrupt | QueueRemove | CodexControl => true,
+        Interrupt | QueueRemove | CodexControl | CodexPermission => true,
     }
 }
 
