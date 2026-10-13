@@ -685,6 +685,50 @@ mod tests {
         }
     }
 
+    /// Arquivos de config editados à mão (motores, Kimi, cookies, apelidos) nunca derrubam a leitura.
+    #[test]
+    fn config_readers_never_panic_on_hostile_files() {
+        let mut seed: u64 = 0x2545_f491_4f6c_dd1d;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        let claude = home.join(".claude");
+        std::fs::create_dir_all(&claude).unwrap();
+        std::fs::create_dir_all(home.join(".kimi-code")).unwrap();
+        let env = AccountEnvironment::from_map([("HOME".into(), home.to_string_lossy().into_owned())].into());
+        let files = [
+            (claude.join("engines.json"), r#"{"a":{"base_url":"https://opencode.ai/x","api_key":"k","label":"L"},"b":"t","c":{"base_url":["x"]}}"#),
+            (home.join(".kimi-code/config.toml"), "[providers.apikey]\ntype = \"kimi\"\napi_key = \"k\"\nbase_url = \"https://api.kimi.com/coding\"\n"),
+            (claude.join(".hangar-opencode.json"), r#"{"chave:a":{"workspace_id":"w","auth_cookie":"c"}}"#),
+            (claude.join(".hangar-apelidos.json"), r#"{"chave:a":" Nome ","x":3}"#),
+        ];
+        let alphabet = br#"{}[]":,.=\n-+0123456789 abcktypeurl_"#;
+        for _ in 0..3_000 {
+            for (path, sample) in &files {
+                let mut bytes = sample.as_bytes().to_vec();
+                for _ in 0..(next() % 6) {
+                    let at = (next() as usize) % (bytes.len() + 1);
+                    match next() % 3 {
+                        0 if at < bytes.len() => {
+                            bytes.remove(at);
+                        }
+                        1 => bytes.insert(at, alphabet[(next() as usize) % alphabet.len()]),
+                        _ => bytes.insert(at, (next() % 256) as u8),
+                    }
+                }
+                std::fs::write(path, bytes).unwrap();
+            }
+            let _ = sources(&env);
+            let _ = aliases(&env);
+            let _ = opencode_saved(&env);
+        }
+    }
+
     #[test]
     fn python_float_rules() {
         assert_eq!(py_float(" 1e2 "), Some(100.0));
