@@ -283,6 +283,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/sessions/{name}/events", get(events).fallback(pass_any))
         .route("/api/sessions/{name}/subagents", get(crate::subagents::public).fallback(pass_any))
         .route("/api/sessions/{name}/subagents/{agent_id}", get(crate::subagents::public).fallback(pass_any))
+        .route("/api/sessions/{name}/subagents/{agent_id}/message", axum::routing::post(crate::subagents::message).fallback(pass_any))
         // Interface dos mods: o Rust atende a sessão sem terminal dele; o resto segue ao Python.
         .route("/api/sessions/{name}/plugin/press", axum::routing::post(crate::mods::routes::press).fallback(pass_any))
         .route("/api/sessions/{name}/plugin/close", axum::routing::post(crate::mods::routes::close).fallback(pass_any))

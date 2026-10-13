@@ -141,6 +141,11 @@ pub fn rust_route(method: &Method, path: &str) -> bool {
     if *method == Method::POST && matches!(tail, Some("input" | "steer" | "interrupt" | "select" | "select/submit" | "answer" | "keys" | "term-input")) {
         return true;
     }
+    // Texto a um subagente em segundo plano: o plugin do Claude entrega pelo `/pull`.
+    if *method == Method::POST && tail.and_then(|t| t.strip_prefix("subagents/")).and_then(|t| t.strip_suffix("/message"))
+        .is_some_and(|id| !id.is_empty() && !id.contains('/')) {
+        return true;
+    }
     // Rotas só do Codex e modos de permissão do Claude: o Rust atende as sessões dele. `CODEX_RELAUNCH`
     // fica de fora: no Claude relançar e recarregar são do Python.
     if *method == Method::POST && matches!(tail, Some("model" | "service-tier" | "codex/mode" | "question/skip" | "codex-permissions"
@@ -155,7 +160,7 @@ pub fn rust_route(method: &Method, path: &str) -> bool {
         return true;
     }
     if *method == Method::POST && (path == "/api/broadcast" || matches!(path.strip_prefix("/api/plugin/"),
-        Some("whoami" | "pull" | "ask" | "ask-fim" | "plan" | "filled" | "submitted" | "state" | "suggest" | "rate"))) {
+        Some("whoami" | "pull" | "ask" | "ask-fim" | "plan" | "filled" | "submitted" | "state" | "suggest" | "rate" | "agent" | "agent-sent"))) {
         return true;
     }
     if *method == Method::DELETE && tail.and_then(|t| t.strip_prefix("queue/")).is_some_and(|id| !id.is_empty() && !id.contains('/')) {
@@ -376,7 +381,8 @@ mod tests {
         assert!(!post("/api/sessions/a/modo-execucao") && !post("/api/sessions/a/recarregar"), "no Claude são do Python");
         assert!(post("/api/sessions/a/permission-mode")
             && get("/api/sessions/a/permission-modes") && rust_route(&Method::DELETE, "/api/sessions/a") && post("/api/broadcast"));
-        assert!(["whoami", "pull", "ask", "ask-fim", "filled", "submitted", "state", "suggest", "rate"].iter().all(|e| post(&format!("/api/plugin/{e}"))));
+        assert!(post("/api/sessions/a/subagents/x1/message") && !post("/api/sessions/a/subagents//message") && !get("/api/sessions/a/subagents/x1/message"));
+        assert!(["whoami", "pull", "ask", "ask-fim", "filled", "submitted", "state", "suggest", "rate", "agent", "agent-sent"].iter().all(|e| post(&format!("/api/plugin/{e}"))));
         assert!(!rust_route(&Method::DELETE, "/api/sessions") && !post("/api/plugin/outra"));
         assert_eq!(AREAS[area_of("/api/sessions/a/git/commit/abc/files")], "workspace");
         assert_eq!(AREAS[area_of("/api/sessions-x")], "other", "prefixo só casa por segmento inteiro");

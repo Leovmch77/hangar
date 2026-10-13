@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 use crate::auth::{TrustedHosts, is_loopback};
 use crate::interactions::InteractionBinding;
 use crate::mods::bridge::{machine_key_ok, mint_keyed, session_token_ok};
-use super::{Ask, PermissionGate, PluginMode, Pull, Receipt, ServiceError, Store};
+use super::{AgentState, Ask, PermissionGate, PluginMode, Pull, Receipt, ServiceError, Store};
 
 pub type SourceFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, ServiceError>> + Send + 'a>>;
 
@@ -64,6 +64,8 @@ pub fn router<S: Clone + Send + Sync + 'static>(state: Arc<RouteState>) -> Route
         .route("/api/plugin/state", post(state_event))
         .route("/api/plugin/suggest", post(suggest))
         .route("/api/plugin/rate", post(rate))
+        .route("/api/plugin/agent", post(agent))
+        .route("/api/plugin/agent-sent", post(agent_sent))
         .layer(DefaultBodyLimit::disable())
         .with_state(state)
 }
@@ -98,6 +100,12 @@ struct StateBody {
 struct Plan { id: String, plan: String, path: Option<String> }
 #[derive(Deserialize)]
 struct Suggest { texto: String, mostrada: bool }
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentEvent { agent_id: String, estado: AgentState, at: Option<i64> }
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentSent { id: String, is_delivered: bool, reason: Option<String> }
 #[derive(Deserialize)]
 struct Rate { tokens: u64, seconds: f64, session_id: String }
 
@@ -258,6 +266,18 @@ async fn plan(State(st): State<Arc<RouteState>>, Json(body): Json<Envelope<Plan>
 async fn suggest(State(st): State<Arc<RouteState>>, Json(body): Json<Envelope<Suggest>>) -> Response {
     let identity = match admit(&st, &body).await { Ok(identity) => identity, Err(error) => return fail(error) };
     match st.store.suggest(&identity.binding, body.body.texto, body.body.mostrada) { Ok(()) => ok(), Err(error) => fail(error) }
+}
+/// Sinal de ciclo de vida de um subagente (`agent.spawn`, fim do turno dele, retomada).
+async fn agent(State(st): State<Arc<RouteState>>, Json(body): Json<Envelope<AgentEvent>>) -> Response {
+    let identity = match admit(&st, &body).await { Ok(identity) => identity, Err(error) => return fail(error) };
+    let AgentEvent { agent_id, estado, at } = body.body;
+    match st.store.record_agent(&identity.binding, &agent_id, estado, at) { Ok(()) => ok(), Err(error) => fail(error) }
+}
+/// Resposta do `$.session.send` a um texto que o `/pull` entregou.
+async fn agent_sent(State(st): State<Arc<RouteState>>, Json(body): Json<Envelope<AgentSent>>) -> Response {
+    let identity = match admit(&st, &body).await { Ok(identity) => identity, Err(error) => return fail(error) };
+    let AgentSent { id, is_delivered, reason } = body.body;
+    match st.store.agent_sent(&identity.binding, &id, is_delivered, reason) { Ok(()) => ok(), Err(error) => fail(error) }
 }
 async fn rate(State(st): State<Arc<RouteState>>, Json(body): Json<Envelope<Rate>>) -> Response {
     if body.body.tokens == 0 || body.body.tokens > 1_000_000 || !body.body.seconds.is_finite() || body.body.seconds <= 0.0 || body.body.seconds > 3600.0 {

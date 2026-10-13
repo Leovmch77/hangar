@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -16,6 +16,10 @@ const HOOK_ALIVE: Duration = Duration::from_secs(2);
 const CONFIRM: Duration = Duration::from_secs(5);
 const PUBLISH: Duration = Duration::from_secs(30);
 const FOCUS: Duration = Duration::from_secs(1);
+/// O `SendMessage` volta logo (fila do agente ou retomada); passado isso a entrega é desconhecida.
+const AGENT_SEND: Duration = Duration::from_secs(15);
+/// O modo que o plugin declara no `/pull` quando sabe entregar texto a um subagente.
+pub const AGENT_MESSAGE_MODE: &str = "agent_message";
 
 fn question_visible(interrupted: bool, poll_open: bool, age: Duration) -> bool {
     !interrupted && age <= ALIVE && (poll_open || age <= NO_POLL)
@@ -107,7 +111,22 @@ struct Session {
     state: Option<(Instant, String, Option<String>)>,
     suggestion: String,
     plan: Option<PlanNotice>,
+    agents: HashMap<String, AgentLife>,
+    agent_waits: HashMap<String, oneshot::Sender<AgentSend>>,
+    agent_outbox: VecDeque<(String, Value)>,
+    agent_next: u64,
 }
+
+/// Ciclo de vida de um subagente, como o Claude Code o sinaliza ao plugin.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AgentState { Running, Finished, Failed }
+#[derive(Clone, Debug, PartialEq)]
+pub struct AgentLife { pub state: AgentState, pub ended_at: Option<String> }
+
+/// Resultado de mandar texto a um subagente pelo plugin.
+#[derive(Clone, Debug, PartialEq)]
+pub enum AgentSend { Delivered, Refused(String), NoPlugin, NoAnswer }
 
 /// Aviso do `ExitPlanMode`: o hook não segura, o diálogo do terminal é que responde.
 #[derive(Clone, Debug, PartialEq)]
@@ -179,7 +198,8 @@ impl Store {
         }
         if let Some(old) = memory.sessions.remove(&binding.key) { finish_session(old); }
         memory.sessions.insert(binding.key.clone(), Session { binding: binding.clone(), owner: None, waiter: None,
-            heartbeat: None, publication: None, questions: BTreeMap::new(), closed: HashMap::new(), state: None, suggestion: String::new(), plan: None });
+            heartbeat: None, publication: None, questions: BTreeMap::new(), closed: HashMap::new(), state: None, suggestion: String::new(), plan: None,
+            agents: HashMap::new(), agent_waits: HashMap::new(), agent_outbox: VecDeque::new(), agent_next: 0 });
         self.notify(&binding.key);
         Ok(())
     }
@@ -223,6 +243,10 @@ impl Store {
         let modes = if pull.modos.is_empty() { HashSet::from(["fill".to_owned()]) } else { pull.modos.into_iter().collect() };
         s.owner = Some(Owner { instance: pull.instance, modes, seen: now });
         if s.state.is_none() { s.state = pull.estado.map(|state| (now, state, None)); }
+        if let Some((_, payload)) = s.agent_outbox.pop_front() {
+            s.heartbeat = Some(now);
+            return Ok(Poll::ready(payload));
+        }
         let (sender, receiver) = oneshot::channel();
         s.waiter = Some(Waiter { id, sender: Some(sender) });
         s.heartbeat = Some(now);
@@ -474,6 +498,67 @@ impl Store {
         if s.plan.as_ref().is_some_and(|p| p.tool_use_id == tool_use_id) { s.plan = None; self.notify(&binding.key); }
         Ok(())
     }
+    /// `running` reabre um subagente encerrado (retomada pelo `SendMessage`) e apaga o fim.
+    pub fn record_agent(&self, binding: &InteractionBinding, agent_id: &str, state: AgentState, at_ms: Option<i64>) -> Result<(), ServiceError> {
+        if agent_id.is_empty() || agent_id.len() > 128 { return Err(ServiceError("plugin_body_invalid")); }
+        let mut memory = self.memory.lock().map_err(|_| unavailable())?;
+        let s = session(&mut memory, binding)?;
+        let ended_at = (state != AgentState::Running).then(|| {
+            at_ms.and_then(chrono::DateTime::from_timestamp_millis).unwrap_or_else(chrono::Utc::now)
+                .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+        });
+        // ponytail: sem teto por conversa; a memória some com a vida da sessão.
+        s.agents.insert(agent_id.to_owned(), AgentLife { state, ended_at });
+        self.notify(&binding.key);
+        Ok(())
+    }
+    pub fn agent_lives(&self, binding: &InteractionBinding) -> Result<HashMap<String, AgentLife>, ServiceError> {
+        let mut memory = self.memory.lock().map_err(|_| unavailable())?;
+        Ok(session(&mut memory, binding)?.agents.clone())
+    }
+    /// Plugin vivo que declarou saber entregar a subagentes.
+    pub fn can_message_agents(&self, binding: &InteractionBinding, now: Instant) -> bool {
+        self.alive(binding, now).unwrap_or(false)
+            && self.declared_modes(binding).is_ok_and(|modes| modes.contains(AGENT_MESSAGE_MODE))
+    }
+
+    /// Entrega pelo `/pull` aberto (ou o próximo) e espera a confirmação do plugin.
+    /// Sem confirmação no prazo o pedido sai da fila: nunca chega atrasado depois do 504.
+    pub async fn send_agent(&self, binding: &InteractionBinding, agent_id: &str, text: &str) -> Result<AgentSend, ServiceError> {
+        if !self.can_message_agents(binding, Instant::now()) { return Ok(AgentSend::NoPlugin); }
+        let (id, receiver) = {
+            let mut memory = self.memory.lock().map_err(|_| unavailable())?;
+            if memory.stopping { return Ok(AgentSend::NoPlugin); }
+            let s = session(&mut memory, binding)?;
+            s.agent_next += 1;
+            let id = format!("agent-msg-{}", s.agent_next);
+            let payload = json!({"text":null,"agent_message":{"id":id,"to":agent_id,"text":text}});
+            let (sender, receiver) = oneshot::channel();
+            s.agent_waits.insert(id.clone(), sender);
+            if !s.waiter.as_mut().is_some_and(|w| w.send(payload.clone())) { s.agent_outbox.push_back((id.clone(), payload)); }
+            (id, receiver)
+        };
+        let reply = tokio::time::timeout(AGENT_SEND, receiver).await;
+        let mut memory = self.memory.lock().map_err(|_| unavailable())?;
+        let reply = match reply { Ok(Ok(reply)) => reply, _ => AgentSend::NoAnswer };
+        if let Ok(s) = session(&mut memory, binding) {
+            s.agent_waits.remove(&id);
+            s.agent_outbox.retain(|(queued, _)| *queued != id);
+            if reply == AgentSend::Delivered {
+                s.agents.insert(agent_id.to_owned(), AgentLife { state: AgentState::Running, ended_at: None });
+                self.notify(&binding.key);
+            }
+        }
+        Ok(reply)
+    }
+    pub fn agent_sent(&self, binding: &InteractionBinding, id: &str, delivered: bool, reason: Option<String>) -> Result<(), ServiceError> {
+        let mut memory = self.memory.lock().map_err(|_| unavailable())?;
+        if let Some(sender) = session(&mut memory, binding)?.agent_waits.remove(id) {
+            let _ = sender.send(if delivered { AgentSend::Delivered } else { AgentSend::Refused(reason.unwrap_or_default()) });
+        }
+        Ok(())
+    }
+
     pub fn facts(&self, binding: &InteractionBinding, now: Instant) -> Result<Value, ServiceError> {
         let mut memory = self.memory.lock().map_err(|_| unavailable())?;
         let s = session(&mut memory, binding)?;
@@ -934,6 +1019,75 @@ mod tests {
         store.stop().unwrap();
         assert_eq!(poll.wait().await, json!({"text":null}));
         assert_eq!(store.publish(&binding, request(PluginMode::Fill)).await.unwrap(), PluginReply::Unavailable);
+    }
+
+    fn agent_pull() -> Pull { let mut p = pull("i"); p.modos.push(AGENT_MESSAGE_MODE.into()); p }
+
+    #[test]
+    fn agent_lifecycle_finishes_fails_and_resume_reopens() {
+        let (store, binding) = setup();
+        store.record_agent(&binding, "a1", AgentState::Running, None).unwrap();
+        assert_eq!(store.agent_lives(&binding).unwrap()["a1"], AgentLife { state: AgentState::Running, ended_at: None });
+        store.record_agent(&binding, "a1", AgentState::Finished, Some(1_791_900_509_038)).unwrap();
+        assert_eq!(store.agent_lives(&binding).unwrap()["a1"].ended_at.as_deref(), Some("2026-10-13T14:08:29.038Z"));
+        store.record_agent(&binding, "a1", AgentState::Running, None).unwrap();
+        assert_eq!(store.agent_lives(&binding).unwrap()["a1"], AgentLife { state: AgentState::Running, ended_at: None }, "retomada");
+        store.record_agent(&binding, "a2", AgentState::Failed, None).unwrap();
+        assert!(store.agent_lives(&binding).unwrap()["a2"].ended_at.is_some());
+        assert_eq!(store.record_agent(&binding, "", AgentState::Running, None).unwrap_err().0, "plugin_body_invalid");
+        // Outra vida da sessão começa sem os sinais da anterior.
+        let next = InteractionBinding { generation: 3, ..binding.clone() };
+        store.interactions.bind(&next).unwrap();
+        store.bind(&next).unwrap();
+        assert!(store.agent_lives(&next).unwrap().is_empty());
+        assert!(store.agent_lives(&binding).is_err());
+    }
+
+    #[tokio::test]
+    async fn agent_message_round_trip_through_the_open_pull_marks_running() {
+        let (store, binding) = setup();
+        store.record_agent(&binding, "a1", AgentState::Finished, None).unwrap();
+        let poll = store.begin_pull(&binding, agent_pull(), Instant::now()).unwrap();
+        assert!(store.can_message_agents(&binding, Instant::now()));
+        let mut send = Box::pin(store.send_agent(&binding, "a1", "olá"));
+        assert!(send.as_mut().now_or_never().is_none());
+        let got = poll.wait().await;
+        assert_eq!(got["agent_message"], json!({"id":"agent-msg-1","to":"a1","text":"olá"}));
+        assert_eq!(got["text"], Value::Null, "plugin antigo não confunde com prompt");
+        store.agent_sent(&binding, "agent-msg-1", true, None).unwrap();
+        assert_eq!(send.await.unwrap(), AgentSend::Delivered);
+        assert_eq!(store.agent_lives(&binding).unwrap()["a1"].state, AgentState::Running);
+    }
+
+    #[tokio::test]
+    async fn agent_message_queues_for_the_next_pull_and_reports_refusal() {
+        let (store, binding) = setup();
+        drop(store.begin_pull(&binding, agent_pull(), Instant::now()).unwrap());
+        let mut send = Box::pin(store.send_agent(&binding, "a1", "x"));
+        assert!(send.as_mut().now_or_never().is_none());
+        let got = store.begin_pull(&binding, agent_pull(), Instant::now()).unwrap().wait().await;
+        assert_eq!(got["agent_message"]["id"], "agent-msg-1");
+        store.agent_sent(&binding, "agent-msg-1", false, Some("this session has no SendMessage tool".into())).unwrap();
+        assert_eq!(send.await.unwrap(), AgentSend::Refused("this session has no SendMessage tool".into()));
+        assert!(store.agent_lives(&binding).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn agent_message_needs_a_plugin_that_declared_it() {
+        let (store, binding) = setup();
+        assert_eq!(store.send_agent(&binding, "a1", "x").await.unwrap(), AgentSend::NoPlugin);
+        let _poll = store.begin_pull(&binding, pull("i"), Instant::now()).unwrap();
+        assert!(!store.can_message_agents(&binding, Instant::now()));
+        assert_eq!(store.send_agent(&binding, "a1", "x").await.unwrap(), AgentSend::NoPlugin);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn agent_message_without_confirmation_is_unknown_and_leaves_the_queue() {
+        let (store, binding) = setup();
+        drop(store.begin_pull(&binding, agent_pull(), Instant::now()).unwrap());
+        assert_eq!(store.send_agent(&binding, "a1", "x").await.unwrap(), AgentSend::NoAnswer);
+        let next = store.begin_pull(&binding, agent_pull(), Instant::now()).unwrap();
+        assert!(next.wait().now_or_never().is_none(), "texto expirado não sai no pull seguinte");
     }
 }
 

@@ -101,7 +101,7 @@ async function pull($: EngineInterface, ponte: Bridge) {
       // A conversa vai a cada poll: o `/clear` troca o id sem `session.start`, e o backend só
       // entrega à conversa que ele acompanha (um segundo `claude` no mesmo pane recebe 409).
       body: JSON.stringify({
-        sessao: ponte.sessao, token: ponte.token, instance: instance(), modos: ["fill", "user", "receipt_v2", "focus"], estado: lastState(),
+        sessao: ponte.sessao, token: ponte.token, instance: instance(), modos: ["fill", "user", "receipt_v2", "focus", "agent_message"], estado: lastState(),
         session_id: await $.session.id(),
       }),
     });
@@ -110,10 +110,25 @@ async function pull($: EngineInterface, ponte: Bridge) {
     if (r.status === 409) clearBridge();
     else if (r.status === 200) setBridge(ponte);
     if (r.status === 200) {
-      const { text, modo, faixa, publication_id, generation, session_id } = JSON.parse(r.text) as {
+      const { text, modo, faixa, publication_id, generation, session_id, agent_message } = JSON.parse(r.text) as {
         text?: string | null; modo?: string; faixa?: boolean; publication_id?: string; generation?: number; session_id?: string;
+        agent_message?: { id: string; to: string; text: string };
       };
       if (faixa === false) askResend();
+      if (agent_message) {
+        // O `SendMessage` direto, sem o modelo pai: agente vivo recebe na fila, o parado é retomado.
+        let sent: { isDelivered: boolean; reason?: string };
+        try {
+          sent = await $.session.send({ to: { agentId: agent_message.to }, text: agent_message.text });
+        } catch (err) {
+          sent = { isDelivered: false, reason: String(err) };
+        }
+        await $.http.fetch(`${ponte.url}/agent-sent`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ sessao: ponte.sessao, token: ponte.token, id: agent_message.id, ...sent }),
+        });
+      }
       const receipt = { publication_id, generation };
       if (modo === "focus") {
         let ok = false;

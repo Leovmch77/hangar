@@ -5,7 +5,7 @@
 //!   Claude `<transcript sem .jsonl>/subagents/agent-<id>.jsonl` (+ `.meta.json`),
 //!   Kimi   `<sessão>/agents/<id>/wire.jsonl` ao lado do `agents/main/wire.jsonl`,
 //!   Pi     `<transcript sem .jsonl>/<taskId>/run-<n>/session.jsonl` (só o run mais alto).
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::net::SocketAddr;
@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
-use axum::extract::{ConnectInfo, Request, State};
+use axum::extract::{ConnectInfo, Path as UrlPath, Request, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use hangar_api::chat::{ChatEvent, ChatKind};
@@ -21,6 +21,8 @@ use hangar_api::session::SessionRow;
 use regex::Regex;
 use serde_json::{Map, Value, json};
 
+use crate::interactions::InteractionBinding;
+use crate::plugin::{AgentLife, AgentSend};
 use crate::routes::{AppState, cors, gate, pass, route_failed};
 use crate::side::Binding;
 use crate::transcript::{LineParser, Provider, decode_line};
@@ -73,6 +75,37 @@ fn refusal(status: StatusCode, code: &str, msg: &str, req: &HeaderMap) -> Respon
     reply(status, json!({"detail": {"code": code, "params": {}, "msg": msg}}), req)
 }
 
+const NO_TERMINAL: &str = "erro_subagente_mensagem_sem_terminal";
+const NO_PLUGIN: &str = "erro_subagente_mensagem_sem_plugin";
+const MESSAGE_BODY_MAX: usize = 64 * 1024;
+
+/// O vínculo do plugin desta sessão, só se ele for da mesma conversa listada.
+async fn plugin_binding(st: &AppState, name: &str, jsonl: &Path) -> Option<InteractionBinding> {
+    let registry = st.state.runtime.get()?;
+    let binding = registry.interaction_binding_readonly(name).await.ok()?;
+    (jsonl.file_stem().is_some_and(|stem| stem.to_string_lossy() == binding.conversation)).then_some(binding)
+}
+
+/// O que a sessão diz sobre mandar texto a subagentes, antes de olhar o plugin.
+fn message_blocked(provider: &str, headless: bool) -> Option<&'static str> {
+    if provider != "claude" { Some(NO_PLUGIN) } else if headless { Some(NO_TERMINAL) } else { None }
+}
+
+/// `state`, `endedAt`, `canMessage` e `messageBlocked` de um item. No Claude com terminal o estado é o
+/// sinal do plugin (null sem sinal); Kimi e Pi dizem sozinhos que acabaram (`finished`).
+fn decorate(a: &mut Map<String, Value>, life: Option<&AgentLife>, blocked: Option<&str>) {
+    let (state, ended) = match (life, a.get("finished").and_then(Value::as_bool)) {
+        (Some(life), _) => (json!(life.state), json!(life.ended_at)),
+        (None, Some(true)) => (json!("finished"), a.get("updatedAt").filter(|v| v.as_str().is_some_and(|t| !t.is_empty())).cloned().unwrap_or(Value::Null)),
+        (None, Some(false)) => (json!("running"), Value::Null),
+        (None, None) => (Value::Null, Value::Null),
+    };
+    a.insert("state".into(), state);
+    a.insert("endedAt".into(), ended);
+    a.insert("canMessage".into(), json!(blocked.is_none()));
+    a.insert("messageBlocked".into(), json!(blocked));
+}
+
 async fn serve(st: &AppState, (name, agent): (String, Option<String>), query: Option<&str>, headers: &HeaderMap) -> Response {
     // `events: int = 0` do FastAPI: texto é 422; negativo pede a lista vazia.
     let events = match crate::auth::query_param(query, "events") {
@@ -91,9 +124,23 @@ async fn serve(st: &AppState, (name, agent): (String, Option<String>), query: Op
         return refusal(StatusCode::CONFLICT, "erro_subagentes_conversa_desconhecida",
             "the session's conversation is not known yet; subagents of another conversation are not shown", headers);
     };
-    let done = tokio::task::spawn_blocking(move || match agent {
-        None => Ok(json!(list_subagents(&provider, &jsonl))),
-        Some(id) => get_subagent(&provider, &jsonl, &id, events).map(Value::Object).ok_or(()),
+    let mut blocked = message_blocked(&provider, row.headless);
+    let mut lives = HashMap::new();
+    if blocked.is_none() {
+        let binding = plugin_binding(st, &name, &jsonl).await;
+        lives = binding.as_ref().and_then(|b| st.plugin.agent_lives(b).ok()).unwrap_or_default();
+        if !binding.is_some_and(|b| st.plugin.can_message_agents(&b, std::time::Instant::now())) { blocked = Some(NO_PLUGIN); }
+    }
+    let done = tokio::task::spawn_blocking(move || {
+        let mut fill = |mut a: Map<String, Value>| {
+            let life = a.get("agentId").and_then(Value::as_str).and_then(|id| lives.get(id));
+            decorate(&mut a, life, blocked);
+            a
+        };
+        match agent {
+            None => Ok(json!(list_subagents(&provider, &jsonl).into_iter().map(&mut fill).collect::<Vec<_>>())),
+            Some(id) => get_subagent(&provider, &jsonl, &id, events).map(|a| Value::Object(fill(a))).ok_or(()),
+        }
     })
     .await;
     match done {
@@ -103,6 +150,57 @@ async fn serve(st: &AppState, (name, agent): (String, Option<String>), query: Op
             tracing::warn!(session = %name, panic = e.is_panic(), "subagentes no Rust caiu");
             route_failed(st, headers, "rust.subagents_failed", &name, "subagents_panic", "a leitura dos subagentes caiu no servidor")
         }
+    }
+}
+
+/// `POST /api/sessions/{name}/subagents/{agent_id}/message` `{"text"}`: o plugin do Claude roda o
+/// `SendMessage` direto (fila do agente vivo, ou retomada do parado), sem passar pelo modelo pai.
+pub async fn message(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    UrlPath((name, agent_id)): UrlPath<(String, String)>, req: Request) -> Response {
+    let (fwd, owner) = gate(&st, peer, &req);
+    if !owner { return pass(&st, req, &fwd).await; }
+    let headers = req.headers().clone();
+    let invalid = || refusal(StatusCode::UNPROCESSABLE_ENTITY, "erro_corpo_invalido", "body must be {\"text\": non-empty string without control characters}", &headers);
+    let Ok(bytes) = axum::body::to_bytes(req.into_body(), MESSAGE_BODY_MAX).await else { return invalid() };
+    let Some(text) = serde_json::from_slice::<Value>(&bytes).ok().and_then(|v| v.get("text").and_then(Value::as_str).map(str::to_owned))
+        .filter(|t| valid_text(t)) else { return invalid() };
+    let row = match tokio::time::timeout(LOOKUP_TIMEOUT, row_of(&st, &name)).await.unwrap_or(Err("locate_timeout")) {
+        Ok(Some(row)) => row,
+        Ok(None) => return refusal(StatusCode::NOT_FOUND, "erro_sessao_inexistente", "session or transcript not found", &headers),
+        Err(code) => return route_failed(&st, &headers, "rust.subagents_failed", &name, code, crate::routes::INFO_REASON),
+    };
+    if let Some(code) = message_blocked(&row.provider, row.headless) {
+        return refusal(StatusCode::CONFLICT, code, "this session cannot message its subagents", &headers);
+    }
+    let Some((provider, jsonl)) = conversation(&row, st.side.hubs.bound(&name)) else {
+        return refusal(StatusCode::CONFLICT, "erro_subagentes_conversa_desconhecida", "the session's conversation is not known yet", &headers);
+    };
+    let exists = { let (provider, jsonl, id) = (provider.clone(), jsonl.clone(), agent_id.clone());
+        tokio::task::spawn_blocking(move || get_subagent(&provider, &jsonl, &id, 0).is_some()).await.unwrap_or(false) };
+    if !exists {
+        return refusal(StatusCode::CONFLICT, "erro_subagente_inexistente", "subagent not found in this conversation", &headers);
+    }
+    let Some(binding) = plugin_binding(&st, &name, &jsonl).await else {
+        return refusal(StatusCode::CONFLICT, NO_PLUGIN, "no live plugin bridge for this session", &headers);
+    };
+    match st.plugin.send_agent(&binding, &agent_id, &text).await {
+        Ok(sent) => sent_reply(&sent, &headers),
+        Err(error) => refusal(StatusCode::CONFLICT, NO_PLUGIN, error.0, &headers),
+    }
+}
+
+/// Texto não vazio; quebra de linha e tab passam, o resto dos controles não.
+fn valid_text(text: &str) -> bool {
+    !text.trim().is_empty() && !text.chars().any(|c| c.is_control() && c != '\n' && c != '\t')
+}
+
+fn sent_reply(sent: &AgentSend, headers: &HeaderMap) -> Response {
+    match sent {
+        AgentSend::Delivered => reply(StatusCode::OK, json!({"delivered": true}), headers),
+        AgentSend::Refused(reason) => reply(StatusCode::CONFLICT, json!({"detail": {"code": "erro_subagente_mensagem_recusada",
+            "params": {"reason": reason}, "msg": "Claude Code refused the message", "reason": reason}}), headers),
+        AgentSend::NoPlugin => refusal(StatusCode::CONFLICT, NO_PLUGIN, "no live plugin bridge for this session", headers),
+        AgentSend::NoAnswer => refusal(StatusCode::GATEWAY_TIMEOUT, "erro_subagente_mensagem_sem_resposta", "the plugin did not confirm the delivery", headers),
     }
 }
 
@@ -782,6 +880,56 @@ mod tests {
                    (json!("task1"), json!("scout"), json!("novo"), json!(true), json!("ls")));
         let ev = get_subagent("pi", &pi, "task1", 10).unwrap()["events"].clone();
         assert_eq!((ev[2]["id"].clone(), ev[2]["text"].clone()), (json!("m2:1"), json!("fim")));
+    }
+
+    #[test]
+    fn items_carry_lifecycle_and_message_capability() {
+        use crate::plugin::AgentState;
+        let item = |extra: Value| { let mut m = unreadable("a", 0.0); m.insert("updatedAt".into(), json!("2026-10-13T10:00:05Z"));
+            if let Value::Object(e) = extra { m.extend(e); } m };
+        let pick = |a: &Map<String, Value>| json!([a["state"], a["endedAt"], a["canMessage"], a["messageBlocked"]]);
+
+        let mut a = item(json!({}));
+        decorate(&mut a, None, message_blocked("claude", false));
+        assert_eq!(pick(&a), json!([null, null, true, null]), "Claude com terminal sem sinal ainda");
+        let life = AgentLife { state: AgentState::Finished, ended_at: Some("2026-10-13T10:00:09.000Z".into()) };
+        decorate(&mut a, Some(&life), Some(NO_PLUGIN));
+        assert_eq!(pick(&a), json!(["finished", "2026-10-13T10:00:09.000Z", false, NO_PLUGIN]));
+        decorate(&mut a, Some(&AgentLife { state: AgentState::Running, ended_at: None }), None);
+        assert_eq!(pick(&a), json!(["running", null, true, null]));
+
+        let mut h = item(json!({"failed": true}));
+        decorate(&mut h, None, message_blocked("claude", true));
+        assert_eq!(pick(&h), json!([null, null, false, NO_TERMINAL]), "sem terminal o Claude Code recusa o envio");
+
+        let mut k = item(json!({"finished": true}));
+        decorate(&mut k, None, message_blocked("kimi", false));
+        assert_eq!(pick(&k), json!(["finished", "2026-10-13T10:00:05Z", false, NO_PLUGIN]));
+        let mut p = item(json!({"finished": false}));
+        decorate(&mut p, None, message_blocked("pi", false));
+        assert_eq!(pick(&p), json!(["running", null, false, NO_PLUGIN]));
+    }
+
+    #[test]
+    fn message_text_and_replies_follow_the_contract() {
+        assert!(valid_text("oi\n\tsegue") && !valid_text("  \n") && !valid_text("a\u{1b}[31m") && !valid_text("a\rb"));
+        let h = HeaderMap::new();
+        let body = |r: Response| async move {
+            let status = r.status().as_u16();
+            let v: Value = serde_json::from_slice(&axum::body::to_bytes(r.into_body(), 4096).await.unwrap()).unwrap();
+            (status, v)
+        };
+        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        rt.block_on(async {
+            assert_eq!(body(sent_reply(&AgentSend::Delivered, &h)).await, (200, json!({"delivered": true})));
+            let (s, v) = body(sent_reply(&AgentSend::Refused("this session has no SendMessage tool".into()), &h)).await;
+            assert_eq!((s, v["detail"]["code"].clone(), v["detail"]["params"]["reason"].clone()),
+                (409, json!("erro_subagente_mensagem_recusada"), json!("this session has no SendMessage tool")));
+            let (s, v) = body(sent_reply(&AgentSend::NoPlugin, &h)).await;
+            assert_eq!((s, v["detail"]["code"].clone()), (409, json!(NO_PLUGIN)));
+            let (s, v) = body(sent_reply(&AgentSend::NoAnswer, &h)).await;
+            assert_eq!((s, v["detail"]["code"].clone()), (504, json!("erro_subagente_mensagem_sem_resposta")));
+        });
     }
 
     #[test]

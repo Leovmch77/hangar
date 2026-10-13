@@ -1,5 +1,6 @@
 import type { EngineInterface, On } from "claude-code";
 import { agentDone, bridge, setLastState } from "./bridge";
+import { parseNotifications } from "./verificarParse";
 
 const MEASURE_TIMEOUT_MS = 2_000;
 
@@ -36,6 +37,38 @@ async function send($: EngineInterface, estado: string, extra: Record<string, un
   }
 }
 
+export type AgentEstado = "running" | "finished" | "failed";
+
+/** `<status>` da task-notification no estado do subagente: só `completed` é fim normal. */
+export function agentEnd(status: string): AgentEstado {
+  return status === "completed" ? "finished" : "failed";
+}
+
+/** O texto de um `content` de linha: string ou blocos `text`. */
+export function contentText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content.map((b) => (b && typeof b === "object" && "text" in b && typeof b.text === "string" ? b.text : "")).join("\n");
+}
+
+// Subagente em segundo plano termina pela task-notification: o `turn.complete` dele pode ser só o fim de
+// um turno, com mensagem na fila para o próximo.
+const background = new Set<string>();
+
+async function agentLife($: EngineInterface, agentId: string, estado: AgentEstado) {
+  const p = bridge();
+  if (!p || !agentId) return;
+  try {
+    await $.http.fetch(`${p.url}/agent`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sessao: p.sessao, token: p.token, agentId, estado, at: Date.now() }),
+    });
+  } catch {
+    // Sem backend o sinal se perde; o subagente segue e a lista mostra o último estado conhecido.
+  }
+}
+
 /** Estado por EVENTO, no lugar da leitura do pane.
  *
  * O par é `turn.start`/`turn.complete`, não `prompt.submit`/`classic.Stop`: o
@@ -59,9 +92,39 @@ export function registerState(on: On) {
     // Fim de subagente não é a sessão parada: o turno principal pode seguir trabalhando.
     if (e.agentId) {
       agentDone(e.agentId, { answer: e.answer, isAborted: e.isAborted });
+      if (!background.has(e.agentId)) await agentLife($, e.agentId, e.isAborted ? "failed" : "finished");
       return next(e);
     }
     await send($, "idle", { motivo: e.reason }, true);
+    return next(e);
+  });
+
+  // Ciclo de vida dos subagentes para a lista do app: nasce aqui, termina no `turn.complete` (primeiro plano)
+  // ou na task-notification (segundo plano), e volta a rodar quando um SendMessage o retoma.
+  on("agent.spawn", async ($, e, next) => {
+    const r = await next(e);
+    if ("agentId" in r && r.agentId) {
+      if (e.background) background.add(r.agentId);
+      await agentLife($, r.agentId, "running");
+    }
+    return r;
+  });
+
+  on("tool.call", { tool: "SendMessage" }, async ($, e, next) => {
+    const to = (e as { to?: unknown }).to;
+    if (typeof to === "string" && to) {
+      background.add(to);
+      await agentLife($, to, "running");
+    }
+    return next(e);
+  });
+
+  on("session.append", async ($, e, next) => {
+    if (e.origin.kind === "task-notification") {
+      for (const { id, status } of parseNotifications(contentText(e.message.content))) {
+        await agentLife($, id, agentEnd(status));
+      }
+    }
     return next(e);
   });
 
