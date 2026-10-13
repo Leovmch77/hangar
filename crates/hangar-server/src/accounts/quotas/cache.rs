@@ -92,11 +92,13 @@ impl QuotaCache {
             if let Some(endpoint) = previous.get("endpoint_sha") {
                 entry["endpoint_sha"] = endpoint.clone();
             }
-            // Só leitura boa zera a contagem de recusas.
-            if !good
-                && let Some(count) = previous.get("unreachable_count")
-            {
-                entry["unreachable_count"] = count.clone();
+            // Só leitura boa zera a espera de recusas; contagem e prazo andam juntos.
+            if !good {
+                for field in ["unreachable_count", "unreachable_until"] {
+                    if let Some(value) = previous.get(field) {
+                        entry[field] = value.clone();
+                    }
+                }
             }
         }
         self.entries.insert(id.into(), entry);
@@ -107,24 +109,31 @@ impl QuotaCache {
         self.dirty |= self.entries.remove(id).is_some();
     }
 
-    /// Endereço lido pela fonte; trocado, a espera por conexão recusada recomeça do zero. Grava só
-    /// o hash: `base_url` editada à mão pode levar usuário e senha ou token na query.
-    pub fn set_endpoint(&mut self, id: &str, endpoint: &str) {
+    /// Endereço e credencial da fonte (`Reader::fingerprint`). Trocado qualquer um, a cota guardada
+    /// era de outra chave e a espera de outro endereço: a entrada sai inteira. Grava só o hash, que
+    /// leva a chave junto: `base_url` editada à mão pode ter senha ou token, e sem a chave o hash de
+    /// uma senha curta se quebraria offline.
+    pub fn set_endpoint(&mut self, id: &str, fingerprint: &str) {
         let Some(entry) = self.entries.get_mut(id).and_then(Value::as_object_mut) else {
             return;
         };
-        let digest = ring::digest::digest(&ring::digest::SHA256, endpoint.as_bytes());
+        let digest = ring::digest::digest(&ring::digest::SHA256, fingerprint.as_bytes());
         let sha: String = digest.as_ref().iter().map(|b| format!("{b:02x}")).collect();
         // O campo antigo guardava a URL em claro: sai na primeira passada.
         let legacy = entry.remove("endpoint").is_some();
-        if entry.get("endpoint_sha").and_then(Value::as_str) == Some(sha.as_str()) {
-            self.dirty |= legacy;
-            return;
+        match entry.get("endpoint_sha").and_then(Value::as_str) {
+            Some(known) if known == sha => self.dirty |= legacy,
+            Some(_) => {
+                self.entries.remove(id);
+                self.dirty = true;
+            }
+            None => {
+                entry.remove("unreachable_count");
+                entry.remove("unreachable_until");
+                entry.insert("endpoint_sha".into(), json!(sha));
+                self.dirty = true;
+            }
         }
-        entry.remove("unreachable_count");
-        entry.remove("unreachable_until");
-        entry.insert("endpoint_sha".into(), json!(sha));
-        self.dirty = true;
     }
 
     /// A fonte respondeu (qualquer status HTTP): está no ar, a contagem de recusas zera.
@@ -362,6 +371,30 @@ mod tests {
         cache.clear_unreachable("chave:x");
         assert!(cache.needs_refresh("chave:x", 1400.0, false), "resposta HTTP tira a espera");
         assert_eq!(cache.mark_unreachable("chave:x", 1400.0, false), 1, "e recomeça a escada");
+    }
+
+    #[test]
+    fn silent_failure_after_refusal_keeps_the_wait_with_its_step() {
+        let refused = || json!({"estado":"indisponivel","motivo":"sem-resposta","janelas":[]});
+        let mut cache = QuotaCache::default();
+        cache.update("chave:x", refused(), 1000.0);
+        cache.mark_unreachable("chave:x", 1000.0, false);
+        // Prazo esgotado logo depois (sem contato): nem some a espera, nem a contagem fica sem ela.
+        cache.update("chave:x", refused(), 1100.0);
+        assert!(!cache.needs_refresh("chave:x", 1500.0, false), "a espera de 10 min segue");
+        assert!(cache.needs_refresh("chave:x", 1600.0, false));
+    }
+
+    #[test]
+    fn new_key_on_the_same_address_drops_the_old_reading() {
+        let mut cache = QuotaCache::default();
+        cache.update("chave:x", good(), 1000.0);
+        cache.set_endpoint("chave:x", "https://host/usages\0chave-1");
+        cache.set_endpoint("chave:x", "https://host/usages\0chave-1");
+        assert_eq!(cache.get("chave:x"), Some(good()), "mesma chave conserva");
+        cache.set_endpoint("chave:x", "https://host/usages\0chave-2");
+        assert_eq!(cache.get("chave:x"), None, "chave nova não herda a cota da antiga");
+        assert!(cache.needs_refresh("chave:x", 1001.0, false));
     }
 
     #[test]

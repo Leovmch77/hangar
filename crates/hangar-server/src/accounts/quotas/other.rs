@@ -63,8 +63,16 @@ impl Reader {
         }
     }
 
-    /// Endereço lido, sem credencial: muda quando a pessoa troca a `base_url`, e é o que zera a
-    /// espera de uma fonte que recusava conexão.
+    /// Endereço e credencial da leitura: trocar qualquer um descarta a cota guardada e a espera.
+    /// Sai do processo só como hash (`QuotaCache::set_endpoint`).
+    pub fn fingerprint(&self, endpoints: &Endpoints) -> String {
+        let secret = match self {
+            Reader::Kimi { key, .. } | Reader::CommandCode { key } => key,
+            Reader::OpenCode { cookie, .. } => cookie,
+        };
+        format!("{}\0{secret}", self.url(endpoints))
+    }
+
     pub fn url(&self, endpoints: &Endpoints) -> String {
         match self {
             Reader::Kimi { base, .. } => format!("{}/usages", base.trim_end_matches('/')),
@@ -119,12 +127,28 @@ fn env_value<'a>(env: &'a AccountEnvironment, name: &str) -> Option<&'a str> {
     env.base.get(name).map(String::as_str).filter(|v| !v.is_empty())
 }
 
-fn json_object(path: &Path) -> Map<String, Value> {
-    std::fs::read(path)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-        .and_then(|value| value.as_object().cloned())
-        .unwrap_or_default()
+/// Ausente não é problema (nenhum conteúdo, nenhum código); ilegível dá o código para o diário.
+fn read_file(path: &Path, unreadable: &'static str, problems: &mut Vec<&'static str>) -> Option<Vec<u8>> {
+    match std::fs::read(path) {
+        Ok(bytes) => Some(bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(_) => {
+            problems.push(unreadable);
+            None
+        }
+    }
+}
+
+/// Objeto JSON de um arquivo de config; fora do formato = vazio, com o código.
+fn json_object(bytes: Option<Vec<u8>>, invalid: &'static str, problems: &mut Vec<&'static str>) -> Map<String, Value> {
+    let Some(bytes) = bytes else { return Map::new() };
+    match serde_json::from_slice::<Value>(&bytes) {
+        Ok(Value::Object(map)) => map,
+        _ => {
+            problems.push(invalid);
+            Map::new()
+        }
+    }
 }
 
 /// `str.strip()` do Python: também tira os separadores U+001C–U+001F, que o `trim` não tira.
@@ -132,50 +156,36 @@ pub fn py_strip(text: &str) -> &str {
     text.trim_matches(|c: char| c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c))
 }
 
-/// Apelidos da tela de contas: só texto não vazio, com as pontas aparadas; ilegível = nenhum.
-pub fn aliases(env: &AccountEnvironment) -> Map<String, Value> {
-    json_object(&read_path(shared(env).join(".hangar-apelidos.json")))
-        .into_iter()
-        .filter_map(|(id, value)| {
-            let alias = py_strip(value.as_str()?);
-            (!alias.is_empty()).then(|| (id, json!(alias)))
-        })
-        .collect()
-}
-
-/// Cookies colados na tela, só os completos (`workspace_id` e `auth_cookie` texto não vazio).
-pub(crate) fn opencode_saved(env: &AccountEnvironment) -> Map<String, Value> {
-    let filled = |value: &Value| value.as_str().is_some_and(|s| !s.is_empty());
-    json_object(&read_path(shared(env).join(".hangar-opencode.json")))
-        .into_iter()
-        .filter(|(_, entry)| filled(&entry["workspace_id"]) && filled(&entry["auth_cookie"]))
-        .collect()
-}
-
-fn opencode_config(env: &AccountEnvironment, id: &str) -> Option<(String, String)> {
-    if let Some(entry) = opencode_saved(env).get(id) {
-        let text = |field: &str| entry[field].as_str().unwrap_or_default().to_owned();
-        return Some((text("workspace_id"), text("auth_cookie")));
-    }
-    // Reserva do ambiente (as variáveis do pi-quotas): o que a pessoa colou na tela vence.
-    let workspace = py_strip(env.base.get("OPENCODE_GO_WORKSPACE_ID").map_or("", String::as_str));
-    let cookie = py_strip(env.base.get("OPENCODE_GO_AUTH_COOKIE").map_or("", String::as_str));
-    (!workspace.is_empty() && !cookie.is_empty()).then(|| (workspace.to_owned(), cookie.to_owned()))
-}
-
 pub(crate) fn kimi_config(env: &AccountEnvironment) -> PathBuf {
     env_value(env, "KIMI_CODE_HOME").map(PathBuf::from).unwrap_or_else(|| env.home.join(".kimi-code")).join("config.toml")
 }
 
-fn kimi_providers(env: &AccountEnvironment) -> Vec<(String, String, String)> {
-    let Some(text) = std::fs::read(kimi_config(env)).ok().and_then(|b| String::from_utf8(b).ok()) else {
-        return vec![];
-    };
+/// Os arquivos das fontes lidos uma vez por pedido (leitura síncrona: quem chama roda em
+/// `spawn_blocking`). Arquivo torto vira código em `problems`, nunca a lista caída.
+#[derive(Default)]
+pub struct Config {
+    pub sources: Vec<Source>,
+    pub problems: Vec<&'static str>,
+    /// Apelidos da tela de contas: só texto não vazio, com as pontas aparadas.
+    pub aliases: Map<String, Value>,
+    /// `engines.json` cru: a lista de credenciais mostra também motor sem chave.
+    pub engines: Map<String, Value>,
+    /// Cookies colados na tela, só os completos (`workspace_id` e `auth_cookie` texto não vazio).
+    pub opencode: Map<String, Value>,
+    /// Texto do `config.toml` do Kimi, para saber quais provedores o app gravou.
+    pub kimi_text: Option<String>,
+}
+
+fn kimi_providers(text: Option<&str>, problems: &mut Vec<&'static str>) -> Vec<(String, String, String)> {
+    let Some(text) = text else { return vec![] };
     // O `tomllib` recusa o arquivo com BOM.
-    if text.starts_with('\u{feff}') {
-        return vec![];
-    }
-    let Ok(table) = text.parse::<toml::Table>() else { return vec![] };
+    let table = match text.parse::<toml::Table>() {
+        Ok(table) if !text.starts_with('\u{feff}') => table,
+        _ => {
+            problems.push("kimi_config_invalid");
+            return vec![];
+        }
+    };
     let Some(providers) = table.get("providers").and_then(toml::Value::as_table) else { return vec![] };
     let filled = |value: Option<&toml::Value>| value.and_then(toml::Value::as_str).filter(|s| !s.is_empty()).map(str::to_owned);
     providers
@@ -191,35 +201,6 @@ fn kimi_providers(env: &AccountEnvironment) -> Vec<(String, String, String)> {
         .collect()
 }
 
-/// Problema de leitura de um arquivo de configuração das fontes, para o diário. Ausente não é
-/// problema; o comportamento segue o mesmo (arquivo ilegível = como se não existisse).
-fn file_problem(path: &Path, unreadable: &'static str, invalid: &'static str, parse: impl Fn(&str) -> bool) -> Option<&'static str> {
-    let bytes = match std::fs::read(path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
-        Err(_) => return Some(unreadable),
-    };
-    match std::str::from_utf8(&bytes) {
-        Ok(text) if parse(text) => None,
-        _ => Some(invalid),
-    }
-}
-
-/// Arquivos das fontes (Kimi, apelidos, cookies do OpenCode) que existem mas não puderam ser lidos.
-// ponytail: relê arquivos pequenos uma vez por ciclo de cota em vez de devolver o erro de cada leitor.
-pub fn config_problems(env: &AccountEnvironment) -> Vec<&'static str> {
-    let object = |text: &str| serde_json::from_str::<Value>(text).is_ok_and(|v| v.is_object());
-    let toml = |text: &str| !text.starts_with('\u{feff}') && text.parse::<toml::Table>().is_ok();
-    [
-        file_problem(&kimi_config(env), "kimi_config_unreadable", "kimi_config_invalid", toml),
-        file_problem(&read_path(shared(env).join(".hangar-apelidos.json")), "aliases_unreadable", "aliases_invalid", object),
-        file_problem(&read_path(shared(env).join(".hangar-opencode.json")), "opencode_cookies_unreadable", "opencode_cookies_invalid", object),
-    ]
-    .into_iter()
-    .flatten()
-    .collect()
-}
-
 /// `^[a-z0-9][a-z0-9_-]{0,31}$` do Python, cujo `$` também casa antes de uma quebra final.
 pub(crate) fn engine_name_ok(name: &str) -> bool {
     static NAME: std::sync::LazyLock<regex::Regex> =
@@ -227,20 +208,97 @@ pub(crate) fn engine_name_ok(name: &str) -> bool {
     NAME.is_match(name)
 }
 
-/// Motores do `engines.json` e os problemas achados (códigos para o diário). Arquivo ilegível ou
-/// fora do formato vira nenhum motor, nunca a lista inteira caída.
-pub(crate) fn engines(env: &AccountEnvironment) -> (Map<String, Value>, Vec<&'static str>) {
+fn engines(env: &AccountEnvironment, problems: &mut Vec<&'static str>) -> Map<String, Value> {
     let path = env_value(env, "CP_ENGINES_FILE").map(PathBuf::from).unwrap_or_else(|| shared(env).join("engines.json"));
-    let bytes = match std::fs::read(&path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return (Map::new(), vec![]),
-        Err(_) => return (Map::new(), vec!["engines_unreadable"]),
-    };
-    let Ok(text) = std::str::from_utf8(&bytes) else { return (Map::new(), vec!["engines_not_utf8"]) };
-    match parse_json(text.as_bytes()) {
-        Some(Value::Object(map)) => (map, vec![]),
-        _ => (Map::new(), vec!["engines_invalid"]),
+    let Some(bytes) = read_file(&path, "engines_unreadable", problems) else { return Map::new() };
+    if std::str::from_utf8(&bytes).is_err() {
+        problems.push("engines_not_utf8");
+        return Map::new();
     }
+    match parse_json(&bytes) {
+        Some(Value::Object(map)) => map,
+        _ => {
+            problems.push("engines_invalid");
+            Map::new()
+        }
+    }
+}
+
+fn opencode_env(env: &AccountEnvironment) -> Option<(String, String)> {
+    // Reserva do ambiente (as variáveis do pi-quotas): o que a pessoa colou na tela vence.
+    let workspace = py_strip(env.base.get("OPENCODE_GO_WORKSPACE_ID").map_or("", String::as_str));
+    let cookie = py_strip(env.base.get("OPENCODE_GO_AUTH_COOKIE").map_or("", String::as_str));
+    (!workspace.is_empty() && !cookie.is_empty()).then(|| (workspace.to_owned(), cookie.to_owned()))
+}
+
+/// Lê config do Kimi, `engines.json`, cookies do OpenCode e apelidos uma vez e monta as fontes:
+/// provedores do Kimi Code primeiro, depois os motores, cada grupo na ordem do arquivo. Sem
+/// deduplicação: a mesma chave nos dois lugares são duas fontes. Motor torto sai sozinho.
+pub fn load(env: &AccountEnvironment) -> Config {
+    let mut problems = vec![];
+    let kimi_text = read_file(&kimi_config(env), "kimi_config_unreadable", &mut problems)
+        .and_then(|bytes| String::from_utf8(bytes).map_err(|_| problems.push("kimi_config_invalid")).ok());
+    let aliases_file = read_file(&read_path(shared(env).join(".hangar-apelidos.json")), "aliases_unreadable", &mut problems);
+    let aliases = json_object(aliases_file, "aliases_invalid", &mut problems)
+        .into_iter()
+        .filter_map(|(id, value)| {
+            let alias = py_strip(value.as_str()?);
+            (!alias.is_empty()).then(|| (id, json!(alias)))
+        })
+        .collect();
+    let filled = |value: &Value| value.as_str().is_some_and(|s| !s.is_empty());
+    let opencode_file =
+        read_file(&read_path(shared(env).join(".hangar-opencode.json")), "opencode_cookies_unreadable", &mut problems);
+    let opencode: Map<String, Value> = json_object(opencode_file, "opencode_cookies_invalid", &mut problems)
+        .into_iter()
+        .filter(|(_, entry)| filled(&entry["workspace_id"]) && filled(&entry["auth_cookie"]))
+        .collect();
+    let engines = engines(env, &mut problems);
+
+    let mut sources = vec![];
+    for (name, key, base) in kimi_providers(kimi_text.as_deref(), &mut problems) {
+        let reader = if base.contains("commandcode.ai") { Reader::CommandCode { key } } else { Reader::Kimi { key, base } };
+        sources.push(Source { id: format!("kimi:{name}"), label: json!(name), provider: reader.kind(), reader });
+    }
+    for (name, data) in &engines {
+        if !engine_name_ok(name) {
+            continue;
+        }
+        let Some(data) = data.as_object() else {
+            problems.push("engine_not_object");
+            continue;
+        };
+        // Motor com `label` ou `base_url` fora do tipo sai da cota como sai da lista de credenciais.
+        let label = match data.get("label") {
+            Some(label) if !falsy(label) && !label.is_string() => {
+                problems.push("engine_invalid_label");
+                continue;
+            }
+            Some(label) if !falsy(label) => label.clone(),
+            _ => json!(name),
+        };
+        if data.get("base_url").is_some_and(|base| !base.is_null() && !base.is_string()) {
+            problems.push("engine_invalid_base_url");
+            continue;
+        }
+        let text = |field: &str| data.get(field).and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_owned);
+        let (Some(key), Some(base)) = (text("api_key"), text("base_url")) else { continue };
+        let id = format!("chave:{name}");
+        let saved = |entry: &Value| {
+            let text = |field: &str| entry[field].as_str().unwrap_or_default().to_owned();
+            (text("workspace_id"), text("auth_cookie"))
+        };
+        let cookie = if base.contains("opencode.ai") { opencode.get(&id).map(saved).or_else(|| opencode_env(env)) } else { None };
+        let (provider, reader) = if let Some((workspace, cookie)) = cookie {
+            ("opencode", Reader::OpenCode { workspace, cookie })
+        } else if base.contains("commandcode.ai") {
+            ("commandcode", Reader::CommandCode { key })
+        } else {
+            ("kimi", Reader::Kimi { key, base: kimi_usages_base(&base) })
+        };
+        sources.push(Source { id, label, provider, reader });
+    }
+    Config { sources, problems, aliases, engines, opencode, kimi_text }
 }
 
 pub(crate) fn falsy(value: &Value) -> bool {
@@ -261,41 +319,6 @@ fn kimi_usages_base(base: &str) -> String {
     } else {
         base.to_owned()
     }
-}
-
-/// Provedores do Kimi Code primeiro, depois os motores, cada grupo na ordem do arquivo. Sem
-/// deduplicação: a mesma chave nos dois lugares são duas fontes. Motor torto sai sozinho, com o
-/// código do problema na segunda lista.
-pub fn sources(env: &AccountEnvironment) -> (Vec<Source>, Vec<&'static str>) {
-    let mut out = vec![];
-    for (name, key, base) in kimi_providers(env) {
-        let reader = if base.contains("commandcode.ai") { Reader::CommandCode { key } } else { Reader::Kimi { key, base } };
-        out.push(Source { id: format!("kimi:{name}"), label: json!(name), provider: reader.kind(), reader });
-    }
-    let (engines, mut problems) = engines(env);
-    for (name, data) in engines {
-        if !engine_name_ok(&name) {
-            continue;
-        }
-        let Some(data) = data.as_object() else {
-            problems.push("engine_not_object");
-            continue;
-        };
-        let filled = |field: &str| data.get(field).and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_owned);
-        let (Some(key), Some(base)) = (filled("api_key"), filled("base_url")) else { continue };
-        let id = format!("chave:{name}");
-        let label = data.get("label").filter(|label| !falsy(label)).cloned().unwrap_or_else(|| json!(name));
-        let opencode = if base.contains("opencode.ai") { opencode_config(env, &id) } else { None };
-        let (provider, reader) = if let Some((workspace, cookie)) = opencode {
-            ("opencode", Reader::OpenCode { workspace, cookie })
-        } else if base.contains("commandcode.ai") {
-            ("commandcode", Reader::CommandCode { key })
-        } else {
-            ("kimi", Reader::Kimi { key, base: kimi_usages_base(&base) })
-        };
-        out.push(Source { id, label, provider, reader });
-    }
-    (out, problems)
 }
 
 // ------------------------------------------------------------------------------- semântica Python
@@ -576,27 +599,56 @@ pub fn client() -> Result<reqwest::Client, crate::accounts::catalog::AccountErro
         .map_err(|_| crate::accounts::catalog::AccountError::io())
 }
 
+/// Teto do corpo lido: `base_url` é editável e uma resposta sem fim viraria memória.
+const MAX_BODY: usize = 1 << 20;
+
 enum Fetch {
     Body(u16, Vec<u8>),
     Status(u16),
-    NoResponse { unreachable: bool },
+    /// Sem resposta HTTP; `refused` = conexão recusada ou sem rota (entra na espera crescente).
+    NoResponse { refused: bool, code: &'static str },
     BadHeader,
     BadUrl,
-    /// Endereço que o cliente não consegue montar (host com espaço, porta inválida).
+    /// Endereço que não se monta (host com espaço, porta inválida).
     Invalid,
+    TooBig,
 }
 
-/// O que a tentativa disse sobre a fonte, além da leitura: decide a espera e o diário.
+/// O que a tentativa disse sobre a fonte, além da leitura: decide a espera.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Contact {
     /// Houve resposta HTTP: a fonte está no ar, a espera por recusa zera.
     Answered,
     /// Conexão recusada ou sem rota: entra na espera crescente.
     Refused,
-    /// Sem resposta por outro motivo (prazo, corpo cortado, credencial que não vira cabeçalho).
+    /// Sem resposta por outro motivo (prazo, DNS, corpo cortado, credencial que não vira cabeçalho,
+    /// endereço que não se monta): não sobe a escada, o código vai ao diário.
     Silent,
-    /// `base_url` que não forma endereço: problema de configuração, não de rede.
-    BadUrl,
+}
+
+/// Uma leitura: a cota, o que a tentativa disse da fonte e, quando há o que registrar, o código do
+/// diário (sem segredo).
+pub struct Outcome {
+    pub value: Value,
+    pub contact: Contact,
+    pub code: Option<&'static str>,
+}
+
+/// Só recusa e falta de rota contam como "ninguém escutando": DNS e prazo de conexão também saem
+/// por `is_connect()`, e a Wi-Fi que cai não pode deixar as fontes da nuvem 1 h em espera.
+fn refused(error: &reqwest::Error) -> bool {
+    use std::io::ErrorKind::{ConnectionRefused, HostUnreachable, NetworkUnreachable};
+    let mut cause = std::error::Error::source(error);
+    while let Some(err) = cause {
+        if err
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io| matches!(io.kind(), ConnectionRefused | HostUnreachable | NetworkUnreachable))
+        {
+            return true;
+        }
+        cause = err.source();
+    }
+    false
 }
 
 async fn get(client: &reqwest::Client, url: &str, headers: &[(&str, String)]) -> Fetch {
@@ -605,31 +657,43 @@ async fn get(client: &reqwest::Client, url: &str, headers: &[(&str, String)]) ->
     if !SCHEME.is_match(url) {
         return Fetch::BadUrl;
     }
+    if reqwest::Url::parse(url).is_err() {
+        return Fetch::Invalid;
+    }
     let mut request = client.get(url);
     for (name, value) in headers {
         // O valor nunca vai a log nem a erro: é chave ou cookie.
         let Ok(value) = HeaderValue::from_str(value) else { return Fetch::BadHeader };
         request = request.header(*name, value);
     }
-    match request.send().await {
-        Ok(response) => {
-            let status = response.status().as_u16();
-            if !response.status().is_success() {
-                return Fetch::Status(status);
-            }
-            match response.bytes().await {
-                Ok(body) => Fetch::Body(status, body.to_vec()),
-                Err(_) => Fetch::NoResponse { unreachable: false },
-            }
+    let mut response = match request.send().await {
+        Ok(response) => response,
+        Err(error) if refused(&error) => return Fetch::NoResponse { refused: true, code: "quota_source_unreachable" },
+        Err(error) if error.is_timeout() => return Fetch::NoResponse { refused: false, code: "quota_source_timeout" },
+        Err(_) => return Fetch::NoResponse { refused: false, code: "quota_source_no_response" },
+    };
+    let status = response.status().as_u16();
+    if !response.status().is_success() {
+        return Fetch::Status(status);
+    }
+    if response.content_length().is_some_and(|length| length > MAX_BODY as u64) {
+        return Fetch::TooBig;
+    }
+    let mut body = Vec::new();
+    loop {
+        match response.chunk().await {
+            Ok(Some(chunk)) if body.len() + chunk.len() > MAX_BODY => return Fetch::TooBig,
+            Ok(Some(chunk)) => body.extend_from_slice(&chunk),
+            Ok(None) => return Fetch::Body(status, body),
+            Err(error) if error.is_timeout() => return Fetch::NoResponse { refused: false, code: "quota_source_timeout" },
+            Err(_) => return Fetch::NoResponse { refused: false, code: "quota_source_no_response" },
         }
-        Err(error) if error.is_builder() => Fetch::Invalid,
-        Err(error) => Fetch::NoResponse { unreachable: error.is_connect() },
     }
 }
 
-/// Uma leitura: (cota, o que a tentativa disse da fonte). Sem resposta = `sem-resposta`; status de erro =
-/// `http-<código>` (o 429 é o que faz o cache esperar).
-pub async fn read(client: &reqwest::Client, reader: &Reader, endpoints: &Endpoints, now: f64) -> (Value, Contact) {
+/// Uma leitura. Sem resposta = `sem-resposta`; status de erro = `http-<código>` (o 429 é o que faz o
+/// cache esperar).
+pub async fn read(client: &reqwest::Client, reader: &Reader, endpoints: &Endpoints, now: f64) -> Outcome {
     let url = reader.url(endpoints);
     let headers: Vec<(&str, String)> = match reader {
         Reader::Kimi { key, .. } => vec![
@@ -648,58 +712,50 @@ pub async fn read(client: &reqwest::Client, reader: &Reader, endpoints: &Endpoin
             ("cookie", format!("auth={cookie}")),
         ],
     };
-    let unavailable = |reason: &str| reading("indisponivel", vec![], Some(reason));
+    let out = |reason: &str, contact, code| Outcome { value: reading("indisponivel", vec![], Some(reason)), contact, code };
     let (status, body) = match get(client, &url, &headers).await {
         Fetch::Body(status, body) => (status, body),
-        Fetch::Status(status) => return (unavailable(&format!("http-{status}")), Contact::Answered),
-        Fetch::NoResponse { unreachable } => {
-            return (unavailable("sem-resposta"), if unreachable { Contact::Refused } else { Contact::Silent });
+        Fetch::Status(status) => return out(&format!("http-{status}"), Contact::Answered, None),
+        Fetch::NoResponse { refused, code } => {
+            return out("sem-resposta", if refused { Contact::Refused } else { Contact::Silent }, Some(code));
         }
-        Fetch::BadHeader => return (unavailable("credencial-invalida"), Contact::Silent),
-        Fetch::BadUrl => {
-            tracing::error!(code = "quota_reader_failed", kind = reader.kind(), "leitor de cota quebrado: endereço sem esquema");
-            return (unavailable("erro-leitor"), Contact::Silent);
-        }
+        Fetch::BadHeader => return out("credencial-invalida", Contact::Silent, Some("quota_credential_invalid")),
+        Fetch::BadUrl => return out("erro-leitor", Contact::Silent, Some("quota_reader_failed")),
         // O Python também dizia `sem-resposta`; o código separado aponta a config, não a rede.
-        Fetch::Invalid => {
-            tracing::warn!(code = "quota_source_bad_url", kind = reader.kind(), "base_url da fonte de cota não forma endereço");
-            return (unavailable("sem-resposta"), Contact::BadUrl);
-        }
+        Fetch::Invalid => return out("sem-resposta", Contact::Silent, Some("quota_source_bad_url")),
+        Fetch::TooBig => return out("resposta-grande", Contact::Answered, Some("quota_response_too_large")),
     };
     let windows = match reader {
         Reader::OpenCode { .. } => {
             if body.is_empty() {
-                return (unavailable(&format!("http-{status}")), Contact::Answered);
+                return out(&format!("http-{status}"), Contact::Answered, None);
             }
             let windows = opencode(&String::from_utf8_lossy(&body), now);
             if windows.is_empty() {
                 // Página de login com 200 ou painel mudou: "não informa cota", nunca zero.
-                return (unavailable("painel-sem-numeros"), Contact::Answered);
+                return out("painel-sem-numeros", Contact::Answered, None);
             }
             windows
         }
         _ => {
-            let Some(value) = parse_json(&body) else { return (unavailable("sem-resposta"), Contact::Answered) };
+            let Some(value) = parse_json(&body) else { return out("sem-resposta", Contact::Answered, None) };
             if !value.is_object() {
-                return (unavailable(&format!("http-{status}")), Contact::Answered);
+                return out(&format!("http-{status}"), Contact::Answered, None);
             }
             let windows = match reader {
                 Reader::CommandCode { .. } => commandcode(&value),
                 _ => match kimi(&value) {
                     Ok(windows) => windows,
-                    Err(()) => {
-                        tracing::error!(code = "quota_reader_failed", kind = "kimi", "leitor de cota quebrado: duração sem valor finito");
-                        return (unavailable("erro-leitor"), Contact::Answered);
-                    }
+                    Err(()) => return out("erro-leitor", Contact::Answered, Some("quota_reader_failed")),
                 },
             };
             if windows.is_empty() {
-                return (unavailable("formato-desconhecido"), Contact::Answered);
+                return out("formato-desconhecido", Contact::Answered, None);
             }
             windows
         }
     };
-    (reading("lida", windows, None), Contact::Answered)
+    Outcome { value: reading("lida", windows, None), contact: Contact::Answered, code: None }
 }
 
 #[cfg(test)]
@@ -787,9 +843,7 @@ mod tests {
                 }
                 std::fs::write(path, bytes).unwrap();
             }
-            let _ = sources(&env);
-            let _ = aliases(&env);
-            let _ = opencode_saved(&env);
+            let _ = load(&env);
         }
     }
 
@@ -809,9 +863,65 @@ mod tests {
     #[tokio::test]
     async fn base_url_that_is_not_an_address_is_a_config_problem_not_a_refusal() {
         let reader = Reader::Kimi { key: "k".into(), base: "http://host com espaço".into() };
-        let (value, contact) = read(&client().unwrap(), &reader, &Endpoints::default(), 0.0).await;
-        assert_eq!(value["motivo"], "sem-resposta");
-        assert_eq!(contact, Contact::BadUrl);
+        let outcome = read(&client().unwrap(), &reader, &Endpoints::default(), 0.0).await;
+        assert_eq!(outcome.value["motivo"], "sem-resposta");
+        assert_eq!((outcome.contact, outcome.code), (Contact::Silent, Some("quota_source_bad_url")));
+    }
+
+    /// DNS que não resolve não é "ninguém escutando": não pode pôr a fonte na espera crescente.
+    #[tokio::test]
+    async fn name_that_does_not_resolve_is_silent_not_refused() {
+        let reader = Reader::Kimi { key: "k".into(), base: "http://hangar-nao-existe.invalid".into() };
+        let outcome = read(&client().unwrap(), &reader, &Endpoints::default(), 0.0).await;
+        assert_eq!(outcome.value["motivo"], "sem-resposta");
+        assert_eq!(outcome.contact, Contact::Silent);
+    }
+
+    #[tokio::test]
+    async fn closed_local_port_is_refused() {
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
+        let reader = Reader::Kimi { key: "k".into(), base: format!("http://{closed}") };
+        let outcome = read(&client().unwrap(), &reader, &Endpoints::default(), 0.0).await;
+        assert_eq!((outcome.contact, outcome.code), (Contact::Refused, Some("quota_source_unreachable")));
+    }
+
+    /// Resposta acima do teto não vira memória: `resposta-grande`, a fonte está no ar.
+    #[tokio::test]
+    async fn oversized_body_is_cut_off() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let big = "x".repeat(MAX_BODY + 1);
+        let app = axum::Router::new().route("/usages", axum::routing::get(move || {
+            let big = big.clone();
+            async move { big }
+        }));
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let reader = Reader::Kimi { key: "k".into(), base: format!("http://{address}") };
+        let outcome = read(&client().unwrap(), &reader, &Endpoints::default(), 0.0).await;
+        assert_eq!(outcome.value["motivo"], "resposta-grande");
+        assert_eq!((outcome.contact, outcome.code), (Contact::Answered, Some("quota_response_too_large")));
+        server.abort();
+    }
+
+    #[test]
+    fn fingerprint_changes_with_the_secret_and_the_address() {
+        let endpoints = Endpoints::default();
+        let a = Reader::Kimi { key: "k1".into(), base: "https://x".into() }.fingerprint(&endpoints);
+        assert_ne!(a, Reader::Kimi { key: "k2".into(), base: "https://x".into() }.fingerprint(&endpoints));
+        assert_ne!(a, Reader::Kimi { key: "k1".into(), base: "https://y".into() }.fingerprint(&endpoints));
+    }
+
+    #[test]
+    fn engine_with_label_that_is_not_text_is_left_out_of_the_quotas() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        std::fs::create_dir_all(home.join(".claude")).unwrap();
+        std::fs::write(home.join(".claude/engines.json"), r#"{"a":{"base_url":"https://x","api_key":"k","label":7},"b":{"base_url":"https://x","api_key":"k"}}"#).unwrap();
+        let env = AccountEnvironment::from_map([("HOME".into(), home.to_string_lossy().into_owned())].into());
+        let config = load(&env);
+        let ids: Vec<&str> = config.sources.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, ["chave:b"]);
+        assert_eq!(config.problems, ["engine_invalid_label"]);
     }
 
     #[test]
@@ -819,17 +929,19 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path();
         let env = AccountEnvironment::from_map([("HOME".into(), home.to_string_lossy().into_owned())].into());
-        assert!(config_problems(&env).is_empty(), "ausente não é problema");
+        assert!(load(&env).problems.is_empty(), "ausente não é problema");
         std::fs::create_dir_all(home.join(".claude")).unwrap();
         std::fs::create_dir_all(home.join(".kimi-code")).unwrap();
         std::fs::write(home.join(".kimi-code/config.toml"), "\u{feff}[providers]\n").unwrap();
         std::fs::write(home.join(".claude/.hangar-apelidos.json"), "[1]").unwrap();
         std::fs::write(home.join(".claude/.hangar-opencode.json"), b"\xff{").unwrap();
-        assert_eq!(config_problems(&env), ["kimi_config_invalid", "aliases_invalid", "opencode_cookies_invalid"]);
+        let mut problems = load(&env).problems;
+        problems.sort();
+        assert_eq!(problems, ["aliases_invalid", "kimi_config_invalid", "opencode_cookies_invalid"], "cada arquivo uma vez");
         std::fs::write(home.join(".kimi-code/config.toml"), "[providers]\n").unwrap();
         std::fs::write(home.join(".claude/.hangar-apelidos.json"), "{}").unwrap();
         std::fs::write(home.join(".claude/.hangar-opencode.json"), "{}").unwrap();
-        assert!(config_problems(&env).is_empty());
+        assert!(load(&env).problems.is_empty());
     }
 
     #[test]

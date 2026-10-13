@@ -44,7 +44,7 @@ pub async fn public(state: Arc<crate::routes::AppState>, request: Request) -> Re
         Ok(bridge) => bridge,
         Err(error) => return response(Err(error)),
     };
-    let result = state.accounts.quotas(bridge, force, false).await;
+    let result = state.accounts.quotas(Some(bridge), force, false).await;
     if suggestion_only {
         return match result {
             Ok(rows) => match rows.as_array().and_then(|rows| suggestion(rows)) {
@@ -99,7 +99,7 @@ pub async fn private(
     response(
         state
             .accounts
-            .quotas(bridge, body.force, body.cached_only)
+            .quotas(Some(bridge), body.force, body.cached_only)
             .await,
     )
 }
@@ -112,6 +112,8 @@ pub struct Quotas {
     pub runtime: Arc<std::sync::OnceLock<Arc<crate::runtime::gateway::RuntimeRegistry>>>,
     pub diag: Arc<std::sync::OnceLock<crate::diag::DiagClient>>,
     pub endpoints: other::Endpoints,
+    /// Problemas de config já levados ao diário: a lista é lida a cada poll e só a mudança conta.
+    pub reported: Arc<std::sync::Mutex<Vec<&'static str>>>,
 }
 
 /// De onde sai a leitura de uma fonte.
@@ -119,8 +121,6 @@ pub struct Quotas {
 enum Origin {
     Account(Provider, Account),
     Other(other::Reader),
-    /// `label` de motor que não é texto: o Python quebrava ao montar a leitura (`sem-resposta`).
-    Broken,
 }
 
 pub fn now() -> f64 {
@@ -192,39 +192,87 @@ impl AccountService {
         }
     }
 
+    /// A ponte só serve à renovação do token Claude: sem ela as outras fontes são lidas igual.
     pub async fn quotas(
         &self,
-        bridge: AccountsBridge,
+        bridge: Option<AccountsBridge>,
         force: bool,
         cached_only: bool,
     ) -> Result<Value, AccountError> {
+        self.quotas_with(bridge, force, cached_only, None).await
+    }
+
+    /// `config` já lido por quem chama (a lista de credenciais lê os mesmos arquivos).
+    pub async fn quotas_with(
+        &self,
+        bridge: Option<AccountsBridge>,
+        force: bool,
+        cached_only: bool,
+        config: Option<Arc<other::Config>>,
+    ) -> Result<Value, AccountError> {
         let service = self.clone();
         // O worker conserva as guardas e termina a publicação se o cliente desconectar.
-        tokio::spawn(async move { service.quotas_owned(bridge, force, cached_only).await })
+        tokio::spawn(async move { service.quotas_owned(bridge, force, cached_only, config).await })
             .await
             .map_err(|_| AccountError::io())?
     }
 
+    /// Cota com prazo: estourado, devolve o que o cache já tem (`true` no segundo campo) e a leitura
+    /// de rede segue no worker, gravando o cache para a próxima.
+    pub async fn quotas_within(
+        &self,
+        bridge: Option<AccountsBridge>,
+        force: bool,
+        deadline: Duration,
+        config: Arc<other::Config>,
+    ) -> (Result<Value, AccountError>, bool) {
+        match tokio::time::timeout(deadline, self.quotas_with(bridge.clone(), force, false, Some(config.clone()))).await {
+            Ok(result) => (result, false),
+            Err(_) => (self.quotas_with(bridge, false, true, Some(config)).await, true),
+        }
+    }
+
+    /// Diário e log só quando o conjunto de problemas muda: a lista é relida a cada poll.
+    fn report_config_problems(&self, problems: &[&'static str]) {
+        let mut sorted = problems.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        {
+            let Ok(mut last) = self.quotas.reported.lock() else { return };
+            if *last == sorted {
+                return;
+            }
+            *last = sorted.clone();
+        }
+        for code in sorted {
+            tracing::warn!(code, "configuração de fonte de cota fora do formato; as outras seguem");
+            if let Some(diag) = self.quotas.diag.get() {
+                diag.report("rust.quota_sources_partial", "cotas", code, "configuração de fonte de cota fora do formato; as outras seguem");
+            }
+        }
+    }
+
     async fn quotas_owned(
         &self,
-        bridge: AccountsBridge,
+        bridge: Option<AccountsBridge>,
         force: bool,
         cached_only: bool,
+        config: Option<Arc<other::Config>>,
     ) -> Result<Value, AccountError> {
         let _refresh = if cached_only {
             None
         } else {
             Some(self.quotas.refresh.lock().await)
         };
-        let (others, mut problems) = other::sources(&self.env);
-        problems.extend(other::config_problems(&self.env));
-        for code in problems {
-            tracing::warn!(code, "configuração de fonte de cota fora do formato; as outras seguem");
-            if let Some(diag) = self.quotas.diag.get() {
-                diag.report("rust.quota_sources_partial", "cotas", code, "configuração de fonte de cota fora do formato; as outras seguem");
+        let config = match config {
+            Some(config) => config,
+            None => {
+                let env = self.env.clone();
+                Arc::new(tokio::task::spawn_blocking(move || other::load(&env)).await.map_err(|_| AccountError::io())?)
             }
-        }
-        let aliases = other::aliases(&self.env);
+        };
+        self.report_config_problems(&config.problems);
+        let aliases = &config.aliases;
         let mut sources = vec![];
         for (row, account) in self.claude_accounts()? {
             let path = row["path"].as_str().ok_or_else(AccountError::io)?;
@@ -243,10 +291,9 @@ impl AccountService {
                 "label":if account.is_default {"Codex"} else {&account.id},"provedor":"codex","ativa":false}),Origin::Account(Provider::Codex,account)));
         }
         let mut endpoints = vec![];
-        for source in others {
-            let origin = if source.label.is_string() { Origin::Other(source.reader.clone()) } else { Origin::Broken };
-            endpoints.push((source.id.clone(), source.reader.url(&self.quotas.endpoints)));
-            sources.push((source.row(), origin));
+        for source in &config.sources {
+            endpoints.push((source.id.clone(), source.reader.fingerprint(&self.quotas.endpoints)));
+            sources.push((source.row(), Origin::Other(source.reader.clone())));
         }
         let client = external_client(Duration::from_secs(8))?;
         let other_client = other::client()?;
@@ -306,22 +353,19 @@ impl AccountService {
                         let (mut value, signature, contact) = match origin {
                             Origin::Account(provider, account) => {
                                 let (value, signature) = service
-                                    .read_quota(provider, &account, &client, Some(&bridge))
+                                    .read_quota(provider, &account, &client, bridge.as_ref())
                                     .await;
                                 (value, signature, None)
                             }
                             Origin::Other(reader) => {
-                                let (value, contact) = other::read(
+                                let outcome = other::read(
                                     &other_client,
                                     &reader,
                                     &service.quotas.endpoints,
                                     now(),
                                 )
                                 .await;
-                                (value, None, Some((contact, reader.kind())))
-                            }
-                            Origin::Broken => {
-                                (reading("indisponivel", vec![], Some("sem-resposta")), None, None)
+                                (outcome.value, None, Some((outcome.contact, outcome.code, reader.kind())))
                             }
                         };
                         for field in ["id", "label", "provedor", "ativa"] {
@@ -350,23 +394,26 @@ impl AccountService {
                 cache.set_endpoint(&id, endpoint);
             }
             // Tipo de leitor e degrau da espera vão no campo de sessão: id e nome do motor ficam fora.
+            let Some((contact, code, kind)) = contact else { continue };
             match contact {
-                Some((other::Contact::Answered, _)) => cache.clear_unreachable(&id),
-                Some((other::Contact::Refused, kind)) => {
+                other::Contact::Answered => cache.clear_unreachable(&id),
+                other::Contact::Refused => {
                     let attempt = cache.mark_unreachable(&id, at, force);
                     tracing::warn!(code = "quota_source_unreachable", kind, attempt, "fonte de cota recusou a conexão");
                     if let Some(diag) = self.quotas.diag.get() {
                         diag.report("rust.quota_source_unreachable", &format!("cotas:{kind}:tentativa-{attempt}"),
                             "quota_source_unreachable", "fonte de cota recusou a conexão; nova tentativa com espera crescente");
                     }
+                    continue;
                 }
-                Some((other::Contact::BadUrl, kind)) => {
-                    if let Some(diag) = self.quotas.diag.get() {
-                        diag.report("rust.quota_source_bad_url", &format!("cotas:{kind}"), "quota_source_bad_url",
-                            "base_url da fonte de cota não forma endereço");
-                    }
+                other::Contact::Silent => {}
+            }
+            if let Some(code) = code {
+                tracing::warn!(code, kind, "leitura de cota sem número; a fonte segue na lista");
+                if let Some(diag) = self.quotas.diag.get() {
+                    diag.report("rust.quota_source_problem", &format!("cotas:{kind}"), code,
+                        "leitura de cota sem número; a fonte segue na lista");
                 }
-                Some((other::Contact::Silent, _)) | None => {}
             }
         }
         if !cached_only && cache.dirty() && cache.save(&self.quota_path()).is_err() {
@@ -678,8 +725,8 @@ mod tests {
         });
         let (_temp, service) = service_with_engine(&format!("http://{address}/v1"));
         let (first, second) = tokio::join!(
-            service.quotas(bridge(), false, false),
-            service.quotas(bridge(), false, false)
+            service.quotas(Some(bridge()), false, false),
+            service.quotas(Some(bridge()), false, false)
         );
         for rows in [&first.unwrap(), &second.unwrap()] {
             let row = row(rows, "chave:test").unwrap();
@@ -692,7 +739,7 @@ mod tests {
         let stored: Value = serde_json::from_slice(&std::fs::read(service.quota_path()).unwrap()).unwrap();
         assert_eq!(stored["chave:test"]["cota"]["id"], "chave:test");
         let restarted = AccountService::new(service.env.clone());
-        let rows = restarted.quotas(bridge(), false, false).await.unwrap();
+        let rows = restarted.quotas(Some(bridge()), false, false).await.unwrap();
         assert_eq!(reads.load(Ordering::SeqCst), 1);
         assert_eq!(row(&rows, "chave:test").unwrap()["label"], "Chave");
         server.abort();
@@ -718,11 +765,11 @@ mod tests {
         let (_temp, service) = service_with_engine(&format!("http://{address}/v1"));
         let refreshing = tokio::spawn({
             let service = service.clone();
-            async move { service.quotas(bridge(), false, false).await }
+            async move { service.quotas(Some(bridge()), false, false).await }
         });
         in_flight.recv().await.unwrap();
         // Quem escolhe conta ao abrir sessão lê só o cache; a rede das outras fontes não é dele.
-        let cached = tokio::time::timeout(Duration::from_secs(2), service.quotas(bridge(), false, true))
+        let cached = tokio::time::timeout(Duration::from_secs(2), service.quotas(Some(bridge()), false, true))
             .await
             .expect("a leitura do cache esperou o refresh em voo");
         assert!(row(&cached.unwrap(), "chave:test").is_none(), "o cache ainda não tinha a leitura em voo");
@@ -731,11 +778,46 @@ mod tests {
         server.abort();
     }
 
+    /// Fonte lenta não segura quem tem prazo: sai o cache, e a leitura em voo grava para a próxima.
+    #[tokio::test]
+    async fn slow_source_past_the_deadline_returns_the_cache_and_keeps_reading() {
+        let release = Arc::new(tokio::sync::Notify::new());
+        let gate = release.clone();
+        let handler = move || {
+            let gate = gate.clone();
+            async move {
+                gate.notified().await;
+                Json(json!({"usage":{"limit":"10","remaining":"5"}}))
+            }
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = axum::Router::new().route("/v1/usages", axum::routing::get(handler));
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let (_temp, service) = service_with_engine(&format!("http://{address}/v1"));
+        let config = Arc::new(other::load(&service.env));
+        let started = std::time::Instant::now();
+        let (rows, late) = service.quotas_within(None, false, Duration::from_millis(300), config).await;
+        assert!(late && started.elapsed() < Duration::from_secs(3));
+        assert!(row(&rows.unwrap(), "chave:test").is_none(), "o cache ainda não tinha a leitura");
+        release.notify_one();
+        let mut stored = Value::Null;
+        for _ in 0..50 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            if let Ok(bytes) = std::fs::read(service.quota_path()) {
+                stored = serde_json::from_slice(&bytes).unwrap();
+                break;
+            }
+        }
+        assert_eq!(stored["chave:test"]["cota"]["estado"], "lida", "a leitura em voo terminou e gravou");
+        server.abort();
+    }
+
     #[tokio::test]
     async fn refused_source_waits_before_paying_the_connection_again() {
         let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
         let (_temp, service) = service_with_engine(&format!("http://{closed}"));
-        let rows = service.quotas(bridge(), false, false).await.unwrap();
+        let rows = service.quotas(Some(bridge()), false, false).await.unwrap();
         let first = row(&rows, "chave:test").unwrap();
         assert_eq!((&first["estado"], &first["motivo"]), (&json!("indisponivel"), &json!("sem-resposta")));
         let stored: Value = serde_json::from_slice(&std::fs::read(service.quota_path()).unwrap()).unwrap();
@@ -745,7 +827,7 @@ mod tests {
         assert!((wait - 600.0).abs() < 1.0, "{wait}");
         assert!(entry.get("endpoint").is_none() && entry["endpoint_sha"].is_string(), "endereço só como hash");
         // Forçar fura a espera, mas não sobe degrau: a próxima automática segue em 10 min.
-        service.quotas(bridge(), true, false).await.unwrap();
+        service.quotas(Some(bridge()), true, false).await.unwrap();
         let stored: Value = serde_json::from_slice(&std::fs::read(service.quota_path()).unwrap()).unwrap();
         assert_eq!(stored["chave:test"]["unreachable_count"], 1);
     }

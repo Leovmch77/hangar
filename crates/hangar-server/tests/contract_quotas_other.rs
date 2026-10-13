@@ -123,8 +123,8 @@ async fn readers_match_python() {
             commandcode: format!("{origin}/alpha/billing/credits"),
             opencode: format!("{origin}/workspace/{{}}/go"),
         };
-        let (value, contact) = other::read(&client, &reader, &endpoints, now).await;
-        let unreachable = contact == other::Contact::Refused;
+        let outcome = other::read(&client, &reader, &endpoints, now).await;
+        let (value, unreachable) = (outcome.value, outcome.contact == other::Contact::Refused);
         let got = json!({"estado": value["estado"], "janelas": value["janelas"], "motivo": value["motivo"]});
         let seen = std::mem::take(&mut state.lock().unwrap().seen);
         let (expected, requests) = match case["diferenca"].as_str() {
@@ -211,16 +211,21 @@ fn sources_match_python() {
         }
         let env = AccountEnvironment::from_map(base);
         let expected = &case["expected"];
-        let (sources, _) = other::sources(&env);
+        let config = other::load(&env);
         let got = json!({
-                "sources": sources.iter().map(|s| {
+                "sources": config.sources.iter().map(|s| {
                     let mut row = s.row();
                     row["leitor"] = json!({"tipo": s.reader.kind(), "args": s.reader.args()});
                     row
                 }).collect::<Vec<_>>(),
-                "aliases": other::aliases(&env),
+                "aliases": config.aliases,
             });
-        let want = if expected.get("erro").is_some() { json!({"erro": true}) } else { expected.clone() };
+        let mut want = if expected.get("erro").is_some() { json!({"erro": true}) } else { expected.clone() };
+        // R#12 (revisão Rust, 13/10): motor com `label` que não é texto sai da cota como já saía da
+        // lista de credenciais (D1); o Python o lia e dava `sem-resposta`.
+        if let Some(rows) = want["sources"].as_array_mut() {
+            rows.retain(|row| row["label"].is_string());
+        }
         // D1: o motor que não é objeto sai sozinho; os outros continuam fontes.
         if name == "motor_nao_objeto_derruba" {
             let ids: Vec<&Value> = got["sources"].as_array().into_iter().flatten().map(|s| &s["id"]).collect();
