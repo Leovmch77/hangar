@@ -263,13 +263,14 @@ fn whole_list(input: Option<&Map<String, Value>>, list: &str, title: &str) -> Op
     }).collect())
 }
 
-/// Se o SendMessage acorda o colega `key` ("teammate:<nome>"): pelo nome ou por `*`. Pedido de
+/// Se o SendMessage acorda `key` (agentId ou "teammate:<nome>"): pelo id, pelo nome ou por `*`. Pedido de
 /// encerramento não abre rodada, porque nenhum aviso de ocioso viria fechá-la.
 fn wakes(input: Option<&serde_json::Map<String, Value>>, key: &str) -> bool {
     let shutdown = input.and_then(|v| v.get("message")).and_then(|m| m.get("type")).and_then(Value::as_str)
         .is_some_and(|t| t.starts_with("shutdown"));
     let to = input.and_then(|v| v.get("to").or_else(|| v.get("recipient"))).and_then(Value::as_str).unwrap_or("");
-    !shutdown && key.strip_prefix("teammate:").is_some_and(|name| to == "*" || name == to)
+    // Agente de fundo comum é retomado pelo SendMessage endereçado ao agentId dele.
+    !shutdown && (to == key || key.strip_prefix("teammate:").is_some_and(|name| to == "*" || name == to))
 }
 
 /// Agentes e shells de fundo, dobrados dos eventos como o `createActivityFolder` do web. Refeito a cada troca do
@@ -844,6 +845,12 @@ mod tests {
         let mut ended = start.clone();
         ended.push(note("n", "ag-1"));
         assert!(running(&ended).is_empty());
+        // Recado retoma o agente encerrado; o fim seguinte fecha de novo.
+        let mut resumed = ended.clone();
+        resumed.push(with_input(call("m", "sm1", "SendMessage"), json!({"to": "ag-1", "message": "continua"})));
+        assert_eq!(running(&resumed), vec!["t1"]);
+        resumed.push(note("n2", "ag-1"));
+        assert!(running(&resumed).is_empty());
         // Fim antes do lançamento, pelos dois caminhos.
         for end in [result("x", "task:ag-1"), note("n", "ag-1")] {
             let events = vec![agent("a", "t1", json!({})), end, launch("r", "t1", "ag-1")];
