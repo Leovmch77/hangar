@@ -54,19 +54,41 @@ export function contentText(content: unknown): string {
 // Subagente em segundo plano termina pela task-notification: o `turn.complete` dele pode ser só o fim de
 // um turno, com mensagem na fila para o próximo.
 const background = new Set<string>();
+// Só um id que o `agent.spawn` devolveu é subagente: o `SendMessage` também fala com nomes, `*` e colegas.
+// ponytail: sem teto; o conjunto morre com o processo do claude.
+const spawned = new Set<string>();
+// Fim já avisado: o `running` do `agent.spawn` sai depois do `next(e)` e não pode cobrir um fim rápido.
+const ended = new Set<string>();
+// Fila única: os avisos chegam ao backend na ordem em que aconteceram, mesmo com o hook já liberado.
+let agentQueue: Promise<void> = Promise.resolve();
+const AGENT_POST_MS = 1500;
 
-async function agentLife($: EngineInterface, agentId: string, estado: AgentEstado) {
+async function postAgent($: EngineInterface, agentId: string, estado: AgentEstado, at: number) {
   const p = bridge();
-  if (!p || !agentId) return;
+  if (!p) return;
   try {
-    await $.http.fetch(`${p.url}/agent`, {
+    const r = await $.http.fetch(`${p.url}/agent`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ sessao: p.sessao, token: p.token, agentId, estado, at: Date.now() }),
+      body: JSON.stringify({ sessao: p.sessao, token: p.token, agentId, estado, at }),
     });
-  } catch {
-    // Sem backend o sinal se perde; o subagente segue e a lista mostra o último estado conhecido.
+    if (r.status !== 200) $.ui.log(`hangar: aviso do subagente ${agentId} (${estado}) recusado: ${r.status} ${r.text}`, { to: "debug" });
+  } catch (err) {
+    // Sem backend o subagente segue; a lista do app fica no último estado que chegou.
+    $.ui.log(`hangar: aviso do subagente ${agentId} (${estado}) não chegou: ${String(err)}`, { to: "debug" });
   }
+}
+
+/** Avisa sem segurar o hook além do prazo: backend pendurado não atrasa o subagente nem o turno. */
+function agentLife($: EngineInterface, agentId: string, estado: AgentEstado): Promise<unknown> {
+  if (!agentId || !bridge()) return Promise.resolve();
+  if (estado === "running") ended.delete(agentId);
+  else ended.add(agentId);
+  const at = Date.now();
+  // Cada passo também tem prazo: um POST pendurado não prende os avisos seguintes.
+  const step = agentQueue.then(() => Promise.race([postAgent($, agentId, estado, at), $.clock.sleep(AGENT_POST_MS)]));
+  agentQueue = step.then(() => {});
+  return Promise.race([step, $.clock.sleep(AGENT_POST_MS)]);
 }
 
 /** Estado por EVENTO, no lugar da leitura do pane.
@@ -104,24 +126,27 @@ export function registerState(on: On) {
   on("agent.spawn", async ($, e, next) => {
     const r = await next(e);
     if ("agentId" in r && r.agentId) {
+      spawned.add(r.agentId);
       if (e.background) background.add(r.agentId);
-      await agentLife($, r.agentId, "running");
+      // O de primeiro plano pode ter acabado antes de o `next` voltar.
+      if (!ended.has(r.agentId)) await agentLife($, r.agentId, "running");
     }
     return r;
   });
 
+  // Retomada: só conta a chamada que passou e falou com um subagente conhecido. Ela roda até o
+  // `turn.complete` dela; se vier task-notification, também encerra.
   on("tool.call", { tool: "SendMessage" }, async ($, e, next) => {
+    const r = await next(e);
     const to = (e as { to?: unknown }).to;
-    if (typeof to === "string" && to) {
-      background.add(to);
-      await agentLife($, to, "running");
-    }
-    return next(e);
+    if (typeof to === "string" && spawned.has(to) && !r.deny && !r.isError) await agentLife($, to, "running");
+    return r;
   });
 
   on("session.append", async ($, e, next) => {
     if (e.origin.kind === "task-notification") {
       for (const { id, status } of parseNotifications(contentText(e.message.content))) {
+        background.delete(id);
         await agentLife($, id, agentEnd(status));
       }
     }

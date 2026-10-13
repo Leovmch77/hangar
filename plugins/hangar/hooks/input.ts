@@ -92,6 +92,42 @@ export async function returnFocus(read: () => Promise<{ text: string }>,
   return { moved, restored };
 }
 
+type AgentSent = { isDelivered: boolean; reason?: string };
+// Id já tratado: de novo, só a confirmação sai outra vez, nunca uma segunda entrega.
+const agentHandled = new Map<string, AgentSent>();
+const AGENT_HANDLED_KEPT = 32;
+
+/** O `SendMessage` direto, sem o modelo pai: agente vivo recebe na fila, o parado é retomado. */
+export async function deliverAgentMessage($: Pick<EngineInterface, "session" | "http" | "ui">, ponte: Bridge,
+  msg: { id: string; to: string; text: string }): Promise<void> {
+  let sent: AgentSent | undefined = agentHandled.get(msg.id);
+  if (!sent) {
+    try {
+      sent = (await $.session.send({ to: { agentId: msg.to }, text: msg.text })) ?? { isDelivered: false, reason: "sem resposta do Claude Code" };
+    } catch (err) {
+      sent = { isDelivered: false, reason: String(err) };
+    }
+    agentHandled.set(msg.id, sent);
+    if (agentHandled.size > AGENT_HANDLED_KEPT) agentHandled.delete(agentHandled.keys().next().value!);
+  }
+  let failure = "";
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const r = await $.http.fetch(`${ponte.url}/agent-sent`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ sessao: ponte.sessao, token: ponte.token, id: msg.id, ...sent }),
+      });
+      if (r.status === 200) return;
+      failure = `${r.status} ${r.text}`;
+    } catch (err) {
+      failure = String(err);
+    }
+  }
+  // O app recebe 504 "resultado desconhecido"; a entrega em si já aconteceu ou não, conforme `sent`.
+  $.ui.log(`hangar: confirmação da mensagem ${msg.id} ao subagente ${msg.to} não chegou (${sent.isDelivered ? "entregue" : "recusada"}): ${failure}`, { to: "debug" });
+}
+
 async function pull($: EngineInterface, ponte: Bridge) {
   let espera = REARM_MS;
   try {
@@ -115,22 +151,11 @@ async function pull($: EngineInterface, ponte: Bridge) {
         agent_message?: { id: string; to: string; text: string };
       };
       if (faixa === false) askResend();
-      if (agent_message) {
-        // O `SendMessage` direto, sem o modelo pai: agente vivo recebe na fila, o parado é retomado.
-        let sent: { isDelivered: boolean; reason?: string };
-        try {
-          sent = await $.session.send({ to: { agentId: agent_message.to }, text: agent_message.text });
-        } catch (err) {
-          sent = { isDelivered: false, reason: String(err) };
-        }
-        await $.http.fetch(`${ponte.url}/agent-sent`, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ sessao: ponte.sessao, token: ponte.token, id: agent_message.id, ...sent }),
-        });
-      }
       const receipt = { publication_id, generation };
-      if (modo === "focus") {
+      // A resposta com texto para um subagente não traz prompt: nada abaixo vale para ela.
+      if (agent_message) {
+        await deliverAgentMessage($, ponte, agent_message);
+      } else if (modo === "focus") {
         let ok = false;
         try {
           if (!session_id || await $.session.id() === session_id) {
