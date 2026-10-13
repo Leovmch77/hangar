@@ -552,6 +552,68 @@ mod tests {
         assert_eq!(t.active(&repo, t0, 104.5).unwrap().name, "b", "sem sticky vence o mais novo");
     }
 
+    /// Plano com mtime de `age` segundos atrás.
+    fn aged(plans: &Path, name: &str, body: &str, age: f64) {
+        let p = plans.join(name);
+        fs::write(&p, body).unwrap();
+        fs::File::options().write(true).open(&p).unwrap()
+            .set_modified(UNIX_EPOCH + std::time::Duration::from_secs_f64(now() - age)).unwrap();
+    }
+    const PENDING: &str = "- [x] **Step 1: a**\n- [ ] **Step 2: b**\n";
+
+    #[test]
+    fn election_prefers_pending_then_newest_and_skips_old_plans() {
+        let (_dir, repo, plans) = repo();
+        aged(&plans, "2026-07-01-completo.md", "- [x] **Step 1: a**\n", 1.0);
+        aged(&plans, "2026-07-02-pendente-velho.md", PENDING, 100.0);
+        aged(&plans, "2026-07-03-pendente-novo.md", PENDING, 50.0);
+        aged(&plans, "2026-07-04-abandonado.md", PENDING, 15.0 * 86400.0);
+        aged(&plans, "2026-07-05-checklist.md", "- [x] item solto\n- [ ] outro\n", 1.0);
+        assert_eq!(PlanTracker::default().active(&repo, now(), 1.0).unwrap().name, "pendente-novo");
+        let (_dir, repo, plans) = super::tests::repo();
+        aged(&plans, "2026-07-01-so-completo.md", "- [x] **Step 1: a**\n", 1.0);
+        let p = PlanTracker::default().active(&repo, now(), 1.0).unwrap();
+        assert_eq!((p.name.as_str(), p.complete, p.task_idx), ("so-completo", true, 1), "completo só quando não há pendente");
+    }
+
+    #[test]
+    fn pin_wins_while_pending_even_unstarted_and_falls_back_when_done_or_gone() {
+        let (_dir, repo, plans) = repo();
+        aged(&plans, "2026-07-01-pendente.md", PENDING, 10.0);
+        aged(&plans, "2026-07-02-nao-comecado.md", "- [ ] **Step 1: a**\n", 20.0);
+        aged(&plans, "2026-07-03-completo.md", "- [x] **Step 1: a**\n", 30.0);
+        let pin = repo.join(".git").join(PIN_FILE);
+        let elected = |mono: f64| PlanTracker::default().active(&repo, now(), mono).map(|p| p.name);
+        fs::write(&pin, "2026-07-02-nao-comecado\n").unwrap();
+        assert_eq!(elected(1.0).as_deref(), Some("nao-comecado"));
+        fs::write(&pin, "2026-07-03-completo\n").unwrap();
+        assert_eq!(elected(1.0).as_deref(), Some("pendente"), "pin em plano completo volta ao automático");
+        fs::write(&pin, "2026-07-09-sumiu\n").unwrap();
+        assert_eq!(elected(1.0).as_deref(), Some("pendente"));
+        for bad in ["../fora", "a/b", "a\\b", "..", ".", ""] {
+            fs::write(&pin, format!("{bad}\n")).unwrap();
+            assert_eq!(read_pin(&plans), None, "{bad:?}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn one_unreadable_plan_does_not_hide_the_others() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_dir, repo, plans) = repo();
+        aged(&plans, "2026-07-01-legivel.md", PENDING, 10.0);
+        aged(&plans, "2026-07-02-ilegivel.md", PENDING, 1.0);
+        fs::set_permissions(plans.join("2026-07-02-ilegivel.md"), fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::read(plans.join("2026-07-02-ilegivel.md")).is_ok() {
+            return; // root lê tudo: o caso não existe aqui.
+        }
+        let mut t = PlanTracker::default();
+        assert_eq!(t.active(&repo, now(), 1.0).unwrap().name, "legivel");
+        let stems: Vec<String> = t.catalog(&repo).unwrap()["plans"].as_array().unwrap().iter()
+            .map(|p| p["stem"].as_str().unwrap().to_owned()).collect();
+        assert_eq!(stems, ["2026-07-01-legivel"]);
+    }
+
     #[cfg(unix)]
     #[test]
     fn unreadable_pin_reaches_the_diary() {

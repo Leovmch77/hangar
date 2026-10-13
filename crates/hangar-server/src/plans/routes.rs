@@ -23,6 +23,9 @@ use crate::session_write::{busy_body, detail_body, json_response, session_name};
 const BODY_LIMIT: usize = 64 * 1024;
 const SESSION_TAILS: [&str; 6] = ["plan", "plans", "plan-preview", "plan-pin", "plan-step", "plan-archive"];
 const CATALOG: &str = "/api/claude/customizations";
+/// O que escapar num segmento de caminho: controle, espaço, `%` e o que a URI não aceita cru.
+const SEGMENT: &percent_encoding::AsciiSet = &percent_encoding::CONTROLS.add(b' ').add(b'%').add(b'"').add(b'#')
+    .add(b'<').add(b'>').add(b'?').add(b'`').add(b'{').add(b'}');
 
 /// Caminho e método que estas rotas atendem; o resto da ponte segue sem dono aqui.
 pub fn matches(method: &Method, path: &str) -> bool {
@@ -67,7 +70,11 @@ pub async fn forwarded(State(st): State<Arc<AppState>>, ConnectInfo(peer): Conne
     if !crate::workspace_routes::private_ok(&st, peer, req.headers()) {
         return StatusCode::NOT_FOUND.into_response();
     }
-    let Some(path) = req.headers().get("x-hangar-path").and_then(|v| v.to_str().ok()).map(str::to_owned) else {
+    // O Starlette manda o caminho já decodificado: cada segmento volta a ser escapado, senão um
+    // nome de sessão com espaço não vira URI e um `%` seria decodificado duas vezes.
+    let Some(path) = req.headers().get("x-hangar-path").and_then(|v| std::str::from_utf8(v.as_bytes()).ok())
+        .map(|p| p.split('/').map(|seg| percent_encoding::utf8_percent_encode(seg, SEGMENT).to_string()).collect::<Vec<_>>().join("/"))
+    else {
         return StatusCode::BAD_REQUEST.into_response();
     };
     if !matches(req.method(), &path) {
@@ -238,10 +245,12 @@ async fn enter(st: &AppState, name: &str) -> Result<Option<crate::runtime::ingre
 }
 
 async fn write(st: &Arc<AppState>, name: &str, tail: &str, bytes: &[u8]) -> Response {
-    let op = match parse_write(tail, bytes) { Ok(op) => op, Err(msg) => return unprocessable("body", &msg) };
+    // A trava vem antes do corpo, como a dependência `_transfer_guard` antes da validação.
     let _pass = match enter(st, name).await { Ok(pass) => pass, Err(r) => return r };
+    let op = match parse_write(tail, bytes) { Ok(op) => op, Err(msg) => return unprocessable("body", &msg) };
     let cwd = match session_cwd(st, name).await { Ok(cwd) => cwd, Err(r) => return r };
-    let Some(root) = plans_dir(&cwd) else { return no_plans_dir() };
+    let at = cwd.clone();
+    let Some(root) = (match blocking(move || plans_dir(&at)).await { Ok(root) => root, Err(r) => return r }) else { return no_plans_dir() };
     match op {
         WriteOp::Pin(body) => pin(st, root, body.stem).await,
         WriteOp::Step(body) => step(st, root, cwd, body).await,
@@ -257,7 +266,8 @@ async fn pin(st: &AppState, root: PathBuf, stem: Option<String>) -> Response {
         if !safe_stem(stem) {
             return refused(StatusCode::BAD_REQUEST, "erro_nome_plano_invalido", &format!("nome de plano inválido: {stem}"), params);
         }
-        if !root.join(format!("{stem}.md")).is_file() {
+        let candidate = root.join(format!("{stem}.md"));
+        if !matches!(blocking(move || candidate.is_file()).await, Ok(true)) {
             return refused(StatusCode::NOT_FOUND, "erro_plano_nao_encontrado", &format!("plano não encontrado: {stem}"), params);
         }
     }
@@ -322,7 +332,8 @@ async fn preview(st: &Arc<AppState>, name: &str, query: &HashMap<String, String>
     if row.provider != "claude" {
         return json_response(StatusCode::OK, Value::Null);
     }
-    let cwd = PathBuf::from(row.cwd.unwrap_or_default());
+    // Sem pasta, configuração e caminho relativo seriam lidos da pasta do próprio servidor.
+    let Some(cwd) = row.cwd.filter(|c| !c.is_empty()).map(PathBuf::from) else { return missing_session() };
     let found = match blocking(move || super::claude::discover(Path::new(&jsonl), &cwd)).await { Ok(f) => f, Err(r) => return r };
     let Some(plan) = found else { return json_response(StatusCode::OK, Value::Null) };
     let mut reply = json!({"name": plan.name, "path": plan.path.to_string_lossy()});

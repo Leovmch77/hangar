@@ -209,7 +209,7 @@ fn block_id(event: &Map<String, Value>, kind: Kind) -> Option<String> {
     let at = |i: usize| if i == 0 { uuid.to_owned() } else { format!("{uuid}:{i}") };
     let mut index = 0;
     for block in blocks.iter().filter_map(Value::as_object) {
-        let nonblank = |key: &str| block.get(key).and_then(Value::as_str).is_some_and(|t| !t.trim().is_empty());
+        let nonblank = |key: &str| block.get(key).and_then(Value::as_str).is_some_and(|t| !crate::transcript::py::strip(t).is_empty());
         match str_field(block, "type") {
             Some("tool_use") => {
                 if let Kind::ToolUse(id) = kind && str_field(block, "id") == Some(id) {
@@ -217,7 +217,8 @@ fn block_id(event: &Map<String, Value>, kind: Kind) -> Option<String> {
                 }
                 index += 1;
             }
-            Some("text") if block.get("text").is_some_and(Value::is_string) => {
+            // Todo bloco de texto ganha posição, como no parser do chat, mesmo vazio ou nulo.
+            Some("text") => {
                 if matches!(kind, Kind::Text) && nonblank("text") {
                     return Some(at(index));
                 }
@@ -408,6 +409,16 @@ mod tests {
             result_of("r2", "write-2"), assistant("a-plan-2", text("Plano segundo."), None)]);
         let found = discover(&t, &tmp).unwrap();
         assert_eq!((found.path, found.anchor_id.as_deref()), (second, Some("a-plan-2")));
+    }
+
+    #[test]
+    fn anchor_counts_every_text_block_like_the_chat_parser() {
+        let event = json!({"uuid": "u", "message": {"content": [
+            {"type": "text", "text": null}, {"type": "thinking", "thinking": "  "}, {"type": "text", "text": ""},
+            {"type": "tool_use", "id": "t"}, {"type": "text", "text": "Plano."}]}});
+        let event = event.as_object().unwrap();
+        assert_eq!(block_id(event, Kind::ToolUse("t")).as_deref(), Some("u:2"));
+        assert_eq!(block_id(event, Kind::Text).as_deref(), Some("u:3"));
     }
 
     #[test]

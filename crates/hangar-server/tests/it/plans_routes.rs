@@ -188,6 +188,10 @@ async fn strangers_go_to_python_and_the_bridge_needs_the_secret() {
     let resp = client().get(format!("{private}?content=false")).header("x-hangar-path", "/api/sessions/s0/plan-preview")
         .header("x-hangar-internal", SECRET).send().await.unwrap();
     assert_eq!(resp.status(), 200);
+    // O Starlette manda o caminho decodificado: espaço no nome volta a ser escapado, sem 400.
+    let resp = client().get(&private).header("x-hangar-path", "/api/sessions/s 0%/plan").header("x-hangar-internal", SECRET).send().await.unwrap();
+    assert_eq!(resp.status(), 404);
+    assert_eq!(serde_json::from_str::<Value>(&resp.text().await.unwrap()).unwrap()["detail"]["code"], "erro_sessao_inexistente");
     let resp = client().get(&private).header("x-hangar-path", "/api/sessions/s0/history").header("x-hangar-internal", SECRET).send().await.unwrap();
     assert_eq!(resp.status(), 404, "só os caminhos de plano e o catálogo");
     assert_eq!(srv.python.hits_to("/api/sessions/s0/history"), 0);
