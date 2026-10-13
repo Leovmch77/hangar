@@ -21,6 +21,7 @@ const READY_MAX_WAIT:Duration=Duration::from_secs(16);
 const READY_BUDGET:Duration=Duration::from_secs(120);
 const CONFIRM_POLL:Duration=Duration::from_millis(50);
 const CONFIRM_WINDOW:Duration=Duration::from_secs(30);
+const CONFIRM_RETRY:Duration=Duration::from_secs(30);
 /// Teto de um pedido de app aos mods: o mais longo da superfície (desenho de novo e clique, 6 s) mais
 /// 1 s de folga para o relógio do ator, abaixo dos 8 s em que o app desiste. O registro serializa os
 /// pedidos da sessão, então um pedido sem teto prenderia os seguintes.
@@ -618,7 +619,7 @@ enum Job {
     View { generation:u64,version:u64,view:Value,result:Result<(),RuntimeError> },
     Drained {generation:u64,result:Result<Vec<RuntimeCommand>,RuntimeError>},
     DrainFinished(Result<RuntimeReply,RuntimeError>),
-    Confirmed { response:Option<oneshot::Sender<Result<Value,RuntimeError>>>,result:Result<(Vec<String>,usize),RuntimeError> },
+    Confirmed { response:Option<oneshot::Sender<Result<Value,RuntimeError>>>,result:Result<(Vec<String>,usize,Option<f64>),RuntimeError> },
     Steered { id:String,result:Result<Vec<String>,RuntimeError> },
     NativeInput { id:String,result:Result<Value,RuntimeError> },
     /// `persisted`: o que o disco tem depois da gravação (None = nem a leitura respondeu).
@@ -757,11 +758,15 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
     let state_gate = Arc::new(Mutex::new(SavedView::default()));
     let mut durable_view = json!({"alive":true,"initialized":false,"ready":false});
     let mut last_state = String::new();
+    let mut last_marker = String::new();
     let mut confirming = false;
     // Entrada enviada: a confirmação segue o crescimento do transcript (só `stat`) em vez de esperar o idle;
     // a prova é a mesma do `confirm_inputs`. Prazo para não vigiar uma entrada que nunca chega.
     let mut confirm_until: Option<Instant> = None;
     let mut confirm_seen: Option<u64> = None;
+    // Claude sem terminal: próxima conferência da fila enquanto houver entrada entregue sem prova. Nasce
+    // vencida para a subida acertar o que ficou da vida anterior.
+    let mut confirm_recheck: Option<Instant> = (target.provider == "claude").then(Instant::now);
     let mut channels:BTreeMap<String,Value> = ["preview","thinking","tool"].into_iter().map(|channel|
         (channel.into(),json!({"session":target.name,"text":"","md":true,"full":true,"vivo":true}))).collect();
     let mut live = LiveOut { sender:engine.live.clone(),state:LiveState {
@@ -769,6 +774,14 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
         public_state:engine.view()["public_state"].clone(),..Default::default() } };
     live.send();
     let receipt = Arc::new(std::sync::Mutex::new(ReceiptIndex::new(&target.provider,engine.view()["conversation"].as_str().unwrap_or(""))));
+    // Entrada de uma sessão anterior com a mesma chave nunca drena nem confirma: só ocupava a fila.
+    if target.provider == "claude" && target.created > 0.0 {
+        match queue.exec(target.generation,&format!("prune:{}",unique()),clock(start),Action::Prune { min_ts:target.created }).await {
+            Ok(pruned) if pruned.as_u64().unwrap_or(0) > 0 => tracing::info!(key=%target.key,session=%target.name,pruned=%pruned,"fila: entradas de sessão anterior removidas"),
+            Ok(_) => {},
+            Err(failure) => { let _ = io_failure(failure); }
+        }
+    }
     let mut sequence = initial.operations.keys().filter_map(|id|id.rsplit(':').next()?.parse::<u64>().ok()).max().unwrap_or(0);
     let mut write_order = 0u64;
     let mut next_write = 1u64;
@@ -893,8 +906,16 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
                 fail_root(&mut roots,&id,RuntimeError::new(TURN_HOLD_BUSY,"espere o Codex terminar e responda às perguntas antes de compactar"));
                 continue;
             }
+            let message = matches!(pending.command.kind,OperationKind::Input | OperationKind::Steer);
             match engine.command(pending.command.clone(),clock(start)) {
-                Ok(next)=>effects.extend(next),Err(error)=>defer_unwritten(&mut roots,&attempts,&native,&id,error,&mut effects),
+                Ok(next)=>effects.extend(next),
+                Err(error)=>{
+                    // Como o "próximo prompt tenta de novo" do Python: a mensagem espera na fila e pede outra subida.
+                    if message && target.provider == "claude" && engine.view()["alive"] == false {
+                        publish(&events,&target,&mut revision,"claude_wake",json!({"conversation":engine.view()["conversation"]}));
+                    }
+                    defer_unwritten(&mut roots,&attempts,&native,&id,error,&mut effects)
+                }
             }
         }
         while let Some(effect) = effects.pop_front() {
@@ -1085,6 +1106,16 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
                     }
                 },
                 Effect::WakeQueue => { drain_requested = true; },
+                Effect::InputEchoed { operation_id } => {
+                    // Prova direta da CLI: confirma a entrada da operação sem esperar o transcript (que fica de reserva).
+                    let queue = queue.clone(); let generation = target.generation; let sample = clock(start);
+                    jobs.spawn(async move { Job::Saved(async {
+                        let state = queue.snapshot().await.map_err(io_failure)?;
+                        let Some(entry) = state.operations.get(&operation_id).and_then(|op|op.entry_id.clone()) else { return Ok(()) };
+                        if !state.rows.iter().any(|row|row["id"] == entry.as_str() && row["confirmed"] != true) { return Ok(()); }
+                        queue.exec(generation,&format!("echo-confirm:{}",unique()),sample,Action::Confirm { entry_ids:vec![entry] }).await.map(|_|()).map_err(io_failure)
+                    }.await) });
+                },
                 Effect::ConfirmLocalCommands => {
                     // Mesma regra do adapter Python: comando local não aparece no transcript, então o
                     // reconcile nunca o confirmaria; a CLI já o consumiu. Só as entradas de barra.
@@ -1251,7 +1282,7 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
                             let _ = response.send(Err(RuntimeError::new("operation_internal","operação interna do runtime")));
                             continue;
                         }
-                        if matches!(command.kind,OperationKind::Input) { confirm_until = Some(Instant::now() + CONFIRM_WINDOW); confirm_seen = None; }
+                        if matches!(command.kind,OperationKind::Input | OperationKind::Steer) { confirm_until = Some(Instant::now() + CONFIRM_WINDOW); confirm_seen = None; }
                         if from_queue && roots.get(&id).is_some_and(|pending|pending.result.as_ref().is_some_and(|reply|reply.disposition == Disposition::Deferred)) {
                             roots.remove(&id);
                         }
@@ -1370,7 +1401,7 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
                     }
                     Message::Confirm(response) => {
                         let view = engine.view();
-                        let job = confirm_inputs(queue.clone(),receipt.clone(),transcript_of(&target,&view),receipt_conversation(&target,&view),target.generation,clock(start));
+                        let job = confirm_inputs(queue.clone(),receipt.clone(),transcript_of(&target,&view),receipt_conversation(&target,&view),target.generation,clock(start),target.provider=="claude");
                         jobs.spawn(async move { Job::Confirmed { response:Some(response),result:job.await } });
                     }
                     Message::Stop { response,kill } => {
@@ -1446,7 +1477,10 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
                             });
                         }
                     }
-                    Some(IoEvent::Stderr(_)) => {},
+                    // O motivo de uma queda do Claude (`not logged in`, CLI quebrada) só sai pelo stderr.
+                    Some(IoEvent::Stderr(text)) => if target.provider == "claude" {
+                        effects.extend(engine.apply(EngineInput::Line(json!({"type":"cano_stderr","linha":text})),clock(start))?);
+                    },
                     // Queda durante uma subida pedida é a do processo que ela encerrou: não agenda outra.
                     Some(IoEvent::End { .. }) if respawn.task.is_some() => respawn.swallowed = true,
                     Some(IoEvent::End { code }) => {
@@ -1544,7 +1578,7 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
                         if !confirming {
                             confirming = true;
                             let view = engine.view();
-                            let job = confirm_inputs(queue.clone(),receipt.clone(),transcript_of(&target,&view),receipt_conversation(&target,&view),target.generation,clock(start));
+                            let job = confirm_inputs(queue.clone(),receipt.clone(),transcript_of(&target,&view),receipt_conversation(&target,&view),target.generation,clock(start),target.provider=="claude");
                             jobs.spawn(async move { Job::Confirmed { response:None,result:job.await } });
                         }
                         drain_requested = true;
@@ -1759,9 +1793,19 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
                                 // Confirmar em todo idle, como o adapter Python: sem isto nenhuma entrada vira
                                 // confirmed, a poda não as alcança e a fila enche.
                                 let state = view["public_state"]["state"].as_str().unwrap_or("").to_owned();
+                                // Sem pane não há hook `Notification`: o marcador do state_hook põe a espera na mesma
+                                // esteira do push de "aguardando" e da pausa do loop das sessões com terminal.
+                                // A queda grava `dead` (push de "caiu", como no tmux); a saída limpa só desfaz a espera.
+                                if target.provider == "claude" {
+                                    let marker = if view["alive"] == false && view["public_state"]["problema"] == "headless_processo_caiu" { "dead" } else { state.as_str() };
+                                    if marker != last_marker && (matches!(marker,"awaiting_input" | "dead") || last_marker == "awaiting_input") {
+                                        write_state_marker(&target,&view,marker);
+                                    }
+                                    last_marker = marker.to_owned();
+                                }
                                 if state == "idle" && last_state != "idle" && !confirming {
                                     confirming = true;
-                                    let job = confirm_inputs(queue.clone(),receipt.clone(),transcript_of(&target,&view),receipt_conversation(&target,&view),target.generation,clock(start));
+                                    let job = confirm_inputs(queue.clone(),receipt.clone(),transcript_of(&target,&view),receipt_conversation(&target,&view),target.generation,clock(start),target.provider=="claude");
                                     jobs.spawn(async move { Job::Confirmed { response:None,result:job.await } });
                                 }
                                 last_state = state;
@@ -1851,8 +1895,15 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
                     }
                     Job::Confirmed { response,result } => {
                         if response.is_none() { confirming = false; }
+                        // Sem terminal a conferência volta sozinha até cada entrada confirmar ou desistir; falha tenta de novo.
+                        if target.provider == "claude" {
+                            confirm_recheck = match &result {
+                                Ok((_,_,due)) => due.map(|due|Instant::now() + Duration::from_secs_f64((due - clock(start).epoch_s).max(0.0) + 0.5)),
+                                Err(_) => Some(Instant::now() + CONFIRM_RETRY),
+                            };
+                        }
                         match result {
-                            Ok((ids,legacy))=>{
+                            Ok((ids,legacy,_))=>{
                                 // Sem desligar ao confirmar: outra entrada da janela pode esperar a vez dela; o
                                 // prazo encerra a vigília, que só custa um `stat` por volta.
                                 for id in &ids { effects.extend(engine.confirm_input(id)); }
@@ -1915,6 +1966,13 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
             }
             // Só acorda; a limpeza da retenção solta é a do topo do laço.
             _ = turn_hold_released.notified(), if turn_hold.is_some() => {}
+            _ = tokio::time::sleep_until(tokio::time::Instant::from_std(confirm_recheck.unwrap_or_else(Instant::now))), if confirm_recheck.is_some() && !confirming => {
+                confirm_recheck = None;
+                confirming = true;
+                let view = engine.view();
+                let job = confirm_inputs(queue.clone(),receipt.clone(),transcript_of(&target,&view),receipt_conversation(&target,&view),target.generation,clock(start),target.provider=="claude");
+                jobs.spawn(async move { Job::Confirmed { response:None,result:job.await } });
+            }
             _ = tokio::time::sleep(CONFIRM_POLL), if confirm_until.is_some() && !confirming => {
                 if confirm_until.is_some_and(|until|Instant::now() >= until) { confirm_until = None; continue; }
                 // O transcript da conversa vigente: a TUI do Codex com terminal pode ter trocado de conversa.
@@ -1924,7 +1982,7 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
                 if len != confirm_seen {
                     confirm_seen = len;
                     confirming = true;
-                    let job = confirm_inputs(queue.clone(),receipt.clone(),transcript,receipt_conversation(&target,&view),target.generation,clock(start));
+                    let job = confirm_inputs(queue.clone(),receipt.clone(),transcript,receipt_conversation(&target,&view),target.generation,clock(start),target.provider=="claude");
                     jobs.spawn(async move { Job::Confirmed { response:None,result:job.await } });
                 }
             }
@@ -2053,8 +2111,51 @@ async fn kill_process(engine:&RuntimeEngine,target:&RuntimeTarget) -> Result<(),
 
 /// Prova cada entrada despachada e ainda não confirmada contra o transcript, a partir do cursor do
 /// despacho. Uma leitura do transcript por rodada; o estado só é relido depois de uma confirmação.
-/// Devolve as operações confirmadas e quantas entradas legadas saíram junto.
+/// Devolve as operações confirmadas, quantas entradas legadas saíram junto e, no Claude sem terminal, quando
+/// a próxima entrada ainda sem prova vence o prazo (a conferência volta nessa hora).
 async fn confirm_inputs(queue:Arc<QueueActor>,receipt:Arc<std::sync::Mutex<ReceiptIndex>>,path:std::path::PathBuf,conversation:Option<String>,
+    generation:u64,sample:ClockSample,give_up:bool) -> Result<(Vec<String>,usize,Option<f64>),RuntimeError> {
+    let (confirmed,legacy) = prove_inputs(queue.clone(),receipt,path,conversation,generation,sample).await?;
+    if !give_up { return Ok((confirmed,legacy,None)); }
+    let outcome = queue.exec(generation,&format!("give-up:{}",unique()),sample,
+        Action::GiveUpUnproved { now:sample.epoch_s,grace:HEADLESS_PROOF_GRACE_S }).await.map_err(io_failure)?;
+    if let Some(given) = outcome["given_up"].as_array().filter(|given|!given.is_empty()) {
+        tracing::info!(entries=?given,"entrega sem prova no prazo: entrada marcada como não chegou");
+    }
+    Ok((confirmed,legacy,outcome["next_due"].as_f64()))
+}
+
+/// `<config_dir>/.hangar-state/<sid>.json`, o mesmo arquivo do state_hook da conta. Falha vai ao log.
+fn write_state_marker(target:&RuntimeTarget,view:&Value,state:&str) {
+    let Some(sid) = view["conversation"].as_str().filter(|sid|!sid.is_empty()) else { return };
+    let Some(base) = target.metadata["config_dir"].as_str().filter(|dir|!dir.is_empty()).map(std::path::PathBuf::from)
+        .or_else(||std::env::home_dir().map(|home|home.join(".claude"))) else { return };
+    let dir = base.join(".hangar-state");
+    let tmp = dir.join(format!("{sid}.json.tmp"));
+    let written = std::fs::create_dir_all(&dir)
+        .and_then(|()|std::fs::write(&tmp,json!({"state":state,"ts":clock(Instant::now()).epoch_s}).to_string()))
+        .and_then(|()|std::fs::rename(&tmp,dir.join(format!("{sid}.json"))));
+    if let Err(error) = written && crate::warn_limit::allow(Some(&target.key),"state_marker_write") {
+        tracing::warn!(key=%target.key,session=%target.name,%error,"marcador de estado não gravado");
+    }
+}
+
+/// O processo não sobe mais: o que esperava na fila vira "não chegou" (descartável), em vez de sair horas
+/// depois quando alguém reabrir a sessão. Devolve quantas entradas mudaram.
+pub async fn abandon_queued(handle:&RuntimeHandle) -> Result<usize,RuntimeError> {
+    let rows = handle.queue(format!("abandon-load:{}",unique()),Action::Load).await?;
+    let mut count = 0;
+    for id in rows.as_array().into_iter().flatten().filter(|row|row["delivered"] == false).filter_map(|row|row["id"].as_str()) {
+        handle.queue(format!("abandon:{id}:{}",unique()),Action::Abandon { entry_id:id.into() }).await?;
+        count += 1;
+    }
+    Ok(count)
+}
+
+/// Prazo do Claude sem terminal para a linha da entrada aparecer no transcript (hooks lentos incluídos).
+const HEADLESS_PROOF_GRACE_S:f64 = 60.0;
+
+async fn prove_inputs(queue:Arc<QueueActor>,receipt:Arc<std::sync::Mutex<ReceiptIndex>>,path:std::path::PathBuf,conversation:Option<String>,
     generation:u64,sample:ClockSample) -> Result<(Vec<String>,usize),RuntimeError> {
     // Conversa trocada pela TUI: cursores e leitura da anterior não provam entrega na nova.
     if let Some(conversation) = conversation { receipt.lock().map_err(|_|failure("receipt_panic"))?.rebind(&conversation); }
@@ -2108,9 +2209,11 @@ fn transcript_of(target:&RuntimeTarget,view:&Value) -> std::path::PathBuf {
     }
 }
 
-/// Só o Codex com terminal troca de conversa sob o mesmo ator; os demais mantêm o recibo da abertura.
+/// Codex com terminal (a TUI adota outra thread) e Claude sem terminal (`/clear`, `system/init` com outro
+/// sid) trocam de conversa sob o mesmo ator: o recibo segue a conversa da vista, como os cursores novos.
 fn receipt_conversation(target:&RuntimeTarget,view:&Value) -> Option<String> {
-    (target.provider == "codex" && view["headless"] == false).then(||view["conversation"].as_str().unwrap_or("").to_owned())
+    (target.provider == "claude" || target.provider == "codex" && view["headless"] == false)
+        .then(||view["conversation"].as_str().unwrap_or("").to_owned())
 }
 
 async fn capture_cursor(target:&RuntimeTarget,view:&Value) -> Result<Value,RuntimeError> {
@@ -2325,6 +2428,27 @@ mod tests {
         let output=engine.initialize("b-init".into()).unwrap();
         assert!(output.iter().any(|effect|matches!(effect,Effect::Write {frame,..} if frame["request_id"].as_str().is_some_and(|id|id.starts_with("hangar:5:")))));
         assert!(store.exec(4,"late-a-claim",ClockSample {monotonic_s:1.0,epoch_s:2.0},Action::Claim {min_ts:0.0,limit:None,entry_id:None}).is_err());
+    }
+    #[tokio::test]
+    async fn headless_claude_receipt_follows_the_conversation_after_a_sid_change() {
+        // Recibo nasceu na conversa "a"; depois da troca para "b" (o `/clear` do chat), o envio
+        // seguinte captura o cursor em "b" e a linha dele em "b" precisa confirmar.
+        let dir=tempfile::tempdir().unwrap();let transcript=dir.path().join("b.jsonl");
+        std::fs::write(&transcript,"").unwrap();
+        let mut target=commit_target();target.generation=5;target.metadata["session_id"]=json!("b");target.transcript=transcript.clone();
+        let view=json!({"conversation":"b","headless":true});
+        let store=super::super::queue::Store::open(&dir.path().join("state"),dir.path(),super::super::queue::State::new("key",5,"s",vec![])).unwrap();
+        let queue=Arc::new(QueueActor::start(store,super::super::queue::acquire_lease(&dir.path().join("lease")).unwrap()));
+        let clock=ClockSample {monotonic_s:0.0,epoch_s:1.0};
+        let receipt=Arc::new(std::sync::Mutex::new(ReceiptIndex::new("claude","a")));
+        queue.exec(5,"append",clock,Action::Append {text:"Olá".into(),delivered:true,ts:None,pre_transcript:false,entry_id:Some("msg".into())}).await.unwrap();
+        queue.exec(5,"prepare",clock,Action::Prepare {id:"msg".into(),payload:json!({"kind":"input"}),entry_id:Some("msg".into())}).await.unwrap();
+        let cursor=capture_cursor(&target,&view).await.unwrap();
+        queue.exec(5,"cursor",clock,Action::BindDispatch {id:"msg".into(),cursor}).await.unwrap();
+        std::fs::write(&transcript,format!("{}\n",json!({"type":"user","uuid":"u-1","sessionId":"b","message":{"role":"user","content":"Olá"}}))).unwrap();
+        let (confirmed,_,_)=confirm_inputs(queue.clone(),receipt,transcript_of(&target,&view),receipt_conversation(&target,&view),5,clock,false).await.unwrap();
+        assert_eq!(confirmed,vec!["msg".to_owned()],"a linha da conversa nova não confirmou a entrada");
+        Arc::try_unwrap(queue).ok().unwrap().shutdown().await.unwrap();
     }
     #[test]
     fn sid_b_blocks_claim_before_async_metadata_commit() {

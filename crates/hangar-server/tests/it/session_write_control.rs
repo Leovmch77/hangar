@@ -328,9 +328,11 @@ async fn headless_interrupt_is_served_in_rust() {
     let (dir, registry) = (tempfile::tempdir().unwrap(), registry().await);
     let sink = open_headless(&registry, dir.path(), "s").await;
     let (python, server) = serve(registry).await;
-    assert_eq!(send(server, "POST", "s/interrupt", "").await, (200, json!({"ok": true})));
+    // Sessão parada: não há turno a interromper, e dizer "ok" seria fingir (como o Python).
+    let (status, body) = send(server, "POST", "s/interrupt", "").await;
+    assert_eq!((status, body["detail"]["code"].as_str()), (409, Some("erro_sem_turno")), "{body}");
     assert_eq!(python.hits_to("/api/sessions/s/interrupt"), 0);
-    assert!(sink.lock().unwrap().iter().any(|e| e.to_string().contains("interrupt")), "o cano recebeu a interrupção");
+    assert!(!sink.lock().unwrap().iter().any(|e| e.to_string().contains("interrupt")), "sem turno nada vai ao cano");
 }
 
 #[tokio::test]

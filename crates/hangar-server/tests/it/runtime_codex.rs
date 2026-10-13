@@ -2,7 +2,11 @@ use hangar_server::runtime::{codex::Engine,protocol::*};
 use serde_json::{Value,json};
 
 fn clock(seconds:f64) -> ClockSample { ClockSample { monotonic_s:seconds,epoch_s:1_800_000_000.0 + seconds } }
-fn engine() -> Engine { Engine::new(json!({"name":"session","thread_id":"thread-1","headless":true,"model":"gpt-6","initialized":true,"ready":true}),1,clock(10.0)) }
+/// Como em produção, o motor nasce com o store de identidades: cartão sem ele é publicado como não respondível.
+fn engine() -> Engine { bare_engine().with_store() }
+fn bare_engine() -> Engine { Engine::new(json!({"name":"session","thread_id":"thread-1","headless":true,"model":"gpt-6","initialized":true,"ready":true}),1,clock(10.0)) }
+trait WithStore { fn with_store(self) -> Self; }
+impl WithStore for Engine { fn with_store(mut self) -> Self { identified(&mut self); self } }
 fn frames(effects:&[Effect]) -> Vec<Value> { effects.iter().filter_map(|e|match e { Effect::Write { frame,.. }=>Some(frame.clone()),_=>None }).collect() }
 fn command(kind:OperationKind,payload:Value) -> RuntimeCommand { RuntimeCommand { operation_id:"op-1".into(),kind,payload } }
 fn line(engine:&mut Engine,value:Value,time:f64) -> Vec<Effect> { engine.apply(EngineInput::Line(value),clock(time)).unwrap() }
@@ -61,7 +65,7 @@ fn takeover_restores_async_question_before_ready() {
     let question = json!({"provider":"codex", "request_id":"async:thread-1:item:0", "is_async":true,
         "questions":[{"id":"answer", "question":"Qual opção?", "options":[]}]});
     let engine = Engine::new(json!({"name":"session", "thread_id":"thread-1", "initialized":true, "ready":true,
-        "async_questions":[["async:thread-1:item:0",question]], "async_seen":["item"]}),1,clock(10.0));
+        "async_questions":[["async:thread-1:item:0",question]], "async_seen":["item"]}),1,clock(10.0)).with_store();
     assert_eq!(engine.view()["state"], "awaiting_input");
     assert_eq!(engine.view()["codex_question"]["request_id"], "async:thread-1:item:0");
     assert_eq!(engine.control_view()["deliverable"], false);
@@ -127,6 +131,23 @@ fn published_cards_carry_the_id_that_answers_them() {
     let answer = frames(&engine.command(RuntimeCommand { operation_id:"op-3".into(),kind:OperationKind::AnswerQuestions,
         payload:json!({"request_id":2,"interaction_id":form_id,"answers":[{"question_id":"q1","kind":"option","indices":[0]}]}) },clock(11.0)).unwrap());
     assert_eq!(answer[0]["id"],2);
+}
+
+#[test]
+fn shown_card_without_store_or_thread_is_unanswerable() {
+    let approval = json!({"id":1,"method":"item/commandExecution/requestApproval","params":{"threadId":"thread-1","command":"pwd"}});
+    let mut engine = bare_engine();
+    line(&mut engine,approval.clone(),10.0);
+    let view = engine.view();
+    assert_eq!((view["problema"].as_str(),view["problema_detalhe"].as_str()),(Some("runtime_falhou"),Some("erro_interacao_indisponivel")),"{view}");
+    assert!(view["options"].is_null() && view["interaction_id"].is_null(),"cartão sem ID parece respondível: {view}");
+    let mut threadless = Engine::new(json!({"name":"session","thread_id":"","headless":true,"initialized":true,"ready":true}),1,clock(10.0));
+    identified(&mut threadless);
+    threadless.set_problem("codex_sem_conexao",Some("caiu".into()));
+    line(&mut threadless,approval,10.0);
+    let view = threadless.view();
+    assert_eq!((view["problema"].as_str(),view["problema_detalhe"].as_str()),(Some("codex_sem_conexao"),Some("caiu · erro_interacao_indisponivel")),"{view}");
+    assert!(view["options"].is_null() && view["interaction_id"].is_null(),"cartão sem ID parece respondível: {view}");
 }
 
 #[test]

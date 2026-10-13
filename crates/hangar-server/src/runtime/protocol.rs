@@ -104,6 +104,9 @@ pub enum Effect {
     WakeQueue,
     /// A CLI consumiu um comando local (`/clear`, `/cost`…), que não vira linha `user` no transcript.
     ConfirmLocalCommands,
+    /// Claude sem terminal: o eco (`isReplay`, mesmo `uuid`) da mensagem escrita por esta operação saiu, então
+    /// ela entrou na conversa (o prompt barrado por hook não ecoa).
+    InputEchoed { operation_id: String },
     StateChanged,
     /// Interface dos mods (superfície remota): quadro fora do diário, publicação, aviso e resposta aos apps.
     Surface { effect: crate::mods::model::SurfaceEffect },

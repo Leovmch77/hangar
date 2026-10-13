@@ -54,7 +54,7 @@ pub fn owned_modes() -> Vec<(Provider, bool)> {
 /// Sessão do Rust com corpo fora disso recebe `erro_corpo_invalido` daqui, nunca o repasse.
 pub(crate) fn body_ok(route: WriteRoute, body: &Bytes) -> bool {
     use WriteRoute::*;
-    let object = || serde_json::from_slice::<serde_json::Value>(body).is_ok_and(|v| v.is_object());
+    let object = || serde_json::from_slice::<serde_json::Value>(&super::input::scrub_lone_surrogates(body)).is_ok_and(|v| v.is_object());
     match route {
         Input | Select | Answer | Keys | TermInput => object(),
         Steer | SelectSubmit => body.is_empty() || object(),

@@ -163,7 +163,8 @@ impl ReceiptIndex {
             } else {
                 match obj["type"].as_str() {
                     Some("user") => (content_text(&obj["message"]["content"]),"user"),
-                    Some("queue-operation") if obj["operation"] == "dequeue" => (obj["content"].as_str().unwrap_or("").to_owned(),"dequeue"),
+                    // `remove` (absorbed_mid_turn): a CLI tirou a mensagem da fila interna porque o turno a consumiu.
+                    Some("queue-operation") if obj["operation"] == "dequeue" || obj["operation"] == "remove" => (obj["content"].as_str().unwrap_or("").to_owned(),"dequeue"),
                     Some("attachment") if obj["attachment"]["type"] == "queued_command" => (content_text(&obj["attachment"]["prompt"]),"steer"),
                     _ => continue,
                 }

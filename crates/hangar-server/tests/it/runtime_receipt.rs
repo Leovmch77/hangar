@@ -62,6 +62,20 @@ fn enqueue_is_not_consumption() {
 }
 
 #[test]
+fn removal_absorbed_mid_turn_is_consumption() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("chat.jsonl");
+    std::fs::write(&path,"").unwrap();
+    let mut index = ReceiptIndex::new("claude","sid");
+    let cursor = index.capture(&path).unwrap();
+    std::fs::write(&path,"{\"type\":\"queue-operation\",\"operation\":\"enqueue\",\"content\":\"Olá\"}\n\
+        {\"type\":\"queue-operation\",\"operation\":\"remove\",\"content\":\"Olá\",\"reason\":\"absorbed_mid_turn\"}\n").unwrap();
+    index.scan(&path).unwrap();
+    assert!(index.match_after(&path,&cursor,&json!({"text":"Olá"}),&BTreeMap::new()).unwrap().is_some(),
+        "a mensagem absorvida no meio do turno saiu da fila interna: é a prova do consumo");
+}
+
+#[test]
 fn cursor_is_dispatch_not_enqueue() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("chat.jsonl");

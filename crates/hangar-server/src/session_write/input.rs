@@ -165,9 +165,37 @@ pub fn steer_terminal_done(promoted: bool, confirm: &Result<Value, RuntimeError>
 /// O `/compact` do Codex é controle do motor (`thread/compact/start`), não texto, com e sem terminal.
 pub fn is_codex_compact(provider: &str, text: &str) -> bool { provider == "codex" && text.split_whitespace().next() == Some("/compact") }
 
+/// Emoji cortado no ditado ou na colagem chega como `\ud83d` solto, que o serde recusa: vira U+FFFD e a
+/// mensagem sai, como no Python. Par completo e `\\u` literal ficam como estão.
+pub(crate) fn scrub_lone_surrogates(bytes: &[u8]) -> std::borrow::Cow<'_, [u8]> {
+    let escape = |at: usize| -> Option<u16> {
+        let hex = bytes.get(at..at + 6)?;
+        if hex[0] != b'\\' || hex[1] != b'u' { return None; }
+        u16::from_str_radix(std::str::from_utf8(&hex[2..]).ok()?, 16).ok()
+    };
+    let mut out: Option<Vec<u8>> = None;
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'\\' { if let Some(out) = out.as_mut() { out.push(bytes[i]); } i += 1; continue; }
+        let step = match escape(i) {
+            Some(0xD800..=0xDBFF) if escape(i + 6).is_some_and(|low| (0xDC00..=0xDFFF).contains(&low)) => 12,
+            Some(0xD800..=0xDFFF) => {
+                let out = out.get_or_insert_with(|| bytes[..i].to_vec());
+                out.extend_from_slice(&[b'\\', b'u', b'f', b'f', b'f', b'd']);
+                i += 6; continue;
+            }
+            Some(_) => 6,
+            None => 2.min(bytes.len() - i),
+        };
+        if let Some(out) = out.as_mut() { out.extend_from_slice(&bytes[i..i + step]); }
+        i += step;
+    }
+    out.map_or(std::borrow::Cow::Borrowed(bytes), std::borrow::Cow::Owned)
+}
+
 /// Corpo do `InputBody` do FastAPI: só `text` (texto) e `steer` (booleano); o resto é 422 dele.
 fn parse_body(bytes: &Bytes) -> Option<(String, bool)> {
-    let object = serde_json::from_slice::<Value>(bytes).ok()?;
+    let object = serde_json::from_slice::<Value>(&scrub_lone_surrogates(bytes)).ok()?;
     let object = object.as_object()?;
     if object.keys().any(|k| k != "text" && k != "steer") { return None; }
     let steer = match object.get("steer") { None => false, Some(Value::Bool(b)) => *b, Some(_) => return None };
@@ -400,5 +428,15 @@ mod broadcast_tests {
             r#"{"names":"a","text":"oi"}"#, r#"{"names":["a"]}"#, "[]", "oi"] {
             assert_eq!(parse_broadcast(&b(refused)), None, "{refused}");
         }
+    }
+
+    #[test]
+    fn cut_emoji_is_replaced_and_the_text_still_goes() {
+        let b = |s: &'static str| Bytes::from_static(s.as_bytes());
+        assert_eq!(parse_body(&b(r#"{"text":"oi \ud83d"}"#)), Some(("oi \u{FFFD}".into(), false)));
+        // Par completo escapado (alto + baixo) continua sendo o emoji.
+        let pair = format!("{{\"text\":\"{}udc00 e {}ud83d{}ude00 e {}{}ud83d\"}}", '\\', '\\', '\\', '\\', '\\');
+        assert_eq!(parse_body(&Bytes::from(pair)), Some(("\u{FFFD} e \u{1F600} e \\ud83d".into(), false)));
+        assert!(crate::session_write::table::body_ok(crate::session_write::table::WriteRoute::Steer, &b(r#"{"text":"\ud83d"}"#)));
     }
 }

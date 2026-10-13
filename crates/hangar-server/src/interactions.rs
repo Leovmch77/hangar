@@ -78,6 +78,22 @@ pub fn runtime_error(error: InteractionError) -> crate::runtime::protocol::Runti
     crate::runtime::protocol::RuntimeError::new(error.code(), error.message())
 }
 
+/// Cartão exibido que não ganhou ID: o código vai à faixa sem apagar um problema que já estava lá.
+/// `runtime_falhou` porque é o código que web, app e nativo traduzem; quem chama tira as opções.
+pub fn mark_unidentified(state: &mut hangar_api::state::StateEvent, error: InteractionError) {
+    let code = error.code();
+    if state.problema.is_none() {
+        state.problema = Some("runtime_falhou".into());
+        state.problema_detalhe = Some(code.into());
+        return;
+    }
+    state.problema_detalhe = Some(match state.problema_detalhe.take() {
+        Some(detail) if detail.contains(code) => detail,
+        Some(detail) if !detail.is_empty() => format!("{detail} · {code}"),
+        _ => code.into(),
+    });
+}
+
 /// O tipo do ID faz parte da identidade: zero e texto "0" são pedidos distintos.
 pub fn native_target(kind: InteractionKind, conversation: &str, request_id: &Value) -> InteractionTarget {
     InteractionTarget { kind, request_key: serde_json::json!([conversation, request_id]).to_string() }

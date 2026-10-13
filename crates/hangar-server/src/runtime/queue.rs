@@ -193,6 +193,9 @@ pub enum Action {
     SetDelivered { entry_id:String, value:bool, steered:bool },
     Abandon { entry_id:String },
     GiveUp { entry_id:String },
+    /// Entregue há mais de `grace` s e sem prova vira desistida; o prazo conta do despacho (`dispatched_ts`) ou da
+    /// reivindicação (`claimed_ts`), campos só do Rust na linha.
+    GiveUpUnproved { now:f64, grace:f64 },
     BumpAttempts { entry_id:String },
     EntryDelivered { entry_id:String },
     Confirm { entry_ids:Vec<String> },
@@ -630,7 +633,7 @@ fn apply(state: &mut State, action: Action, clock: ClockSample, call_id: &str) -
             for row in &mut state.rows {
                 if protected.contains(row_id(row)) || entry_id.as_deref().is_some_and(|id| id != row_id(row)) { continue; }
                 if row["delivered"] == false && current(row,min_ts) {
-                    row["delivered"] = json!(true);
+                    row["delivered"] = json!(true); row["claimed_ts"] = json!(clock.epoch_s);
                     claimed.push(row.clone());
                     if limit.is_some_and(|limit| claimed.len() >= limit) { break; }
                 }
@@ -674,6 +677,30 @@ fn apply(state: &mut State, action: Action, clock: ClockSample, call_id: &str) -
             release_terminal_write_barrier(state);
             json!(!ids.is_empty())
         }
+        // Sem terminal a escrita no stdin é a entrega e nada é redigitado: sem prova no prazo, a entrada vira
+        // "não chegou" (descartável) e a incerta deixa de segurar a fila. A prova que chegar depois a resgata.
+        Action::GiveUpUnproved { now, grace } => {
+            let mut given = Vec::new();
+            let mut next_due: Option<f64> = None;
+            for row in &mut state.rows {
+                if row["delivered"] != true || row["confirmed"] == true || row["desistiu"] == true
+                    || row["papel"] == "assistant" || row["steered"] == true { continue; }
+                let id = row_id(row).to_owned();
+                let ops = || state.operations.iter().filter(|(key, op)| !key.starts_with(CALL_PREFIX) && op.entry_id.as_deref() == Some(id.as_str()));
+                // Escrita em curso: o desfecho é do ator.
+                if ops().any(|(_, op)| op.status == Status::Dispatching) { continue; }
+                let since = ["dispatched_ts","claimed_ts","ts"].iter().find_map(|key| row[*key].as_f64()).unwrap_or(0.0);
+                if since + grace > now { next_due = Some(next_due.map_or(since + grace, |due: f64| due.min(since + grace))); continue; }
+                row["desistiu"] = json!(true); row["desistiu_ts"] = json!(now);
+                given.push(id);
+            }
+            for op in state.operations.iter_mut().filter(|(key, op)| !key.starts_with(CALL_PREFIX) && op.status == Status::Unknown
+                && op.entry_id.as_ref().is_some_and(|entry| given.contains(entry))).map(|(_, op)| op) {
+                op.status = Status::Rejected;
+                op.result = json!({"operation_id":op.id,"disposition":"rejected","payload":{"code":"delivery_given_up"}});
+            }
+            json!({"given_up":given,"next_due":next_due})
+        }
         Action::BumpAttempts { entry_id } => {
             if let Some(row) = state.rows.iter_mut().find(|r| row_id(r) == entry_id && !protected.contains(&entry_id)) {
                 let count = row["attempts"].as_u64().unwrap_or(0) + 1;
@@ -682,11 +709,14 @@ fn apply(state: &mut State, action: Action, clock: ClockSample, call_id: &str) -
         }
         Action::EntryDelivered { entry_id } => state.rows.iter().find(|r| row_id(r) == entry_id)
             .map(|r|json!(r["delivered"].as_bool().unwrap_or(false))).unwrap_or(Value::Null),
+        // Prova direta da CLI (eco da mensagem ou resposta de comando local): vale mesmo com a escrita ainda sem
+        // desfecho (o eco e o `result` podem vir antes do `Finish`) e resgata a desistida.
         Action::Confirm { entry_ids } => {
             let mut count = 0;
             for row in &mut state.rows {
-                if !protected.contains(row_id(row)) && entry_ids.iter().any(|id| id == row_id(row)) && row["delivered"] == true && row["confirmed"] != true {
+                if entry_ids.iter().any(|id| id == row_id(row)) && row["delivered"] == true && row["confirmed"] != true {
                     row["confirmed"] = json!(true); count += 1;
+                    row.as_object_mut().unwrap().remove("desistiu");
                 }
             }
             json!(count)
@@ -750,7 +780,10 @@ fn apply(state: &mut State, action: Action, clock: ClockSample, call_id: &str) -
             if !matches!(op.status,Status::Prepared | Status::Dispatching) { return Err(invalid("operação não pode ser reenviada")); }
             op.wire_attempts.entry(wire_id).or_insert_with(||json!({"status":if staged {"staged"} else {"dispatching"},"result":null}));
             op.status = Status::Dispatching;
-            for row in &mut state.rows { if Some(row_id(row)) == op.entry_id.as_deref() { row["delivered"] = json!(true); } }
+            for row in &mut state.rows { if Some(row_id(row)) == op.entry_id.as_deref() {
+                row["delivered"] = json!(true);
+                if row.get("dispatched_ts").is_none() { row["dispatched_ts"] = json!(clock.epoch_s); }
+            } }
             serde_json::to_value(op)?
         }
         Action::MarkWriting { id, wire_id } => {
@@ -853,9 +886,10 @@ fn apply(state: &mut State, action: Action, clock: ClockSample, call_id: &str) -
                 .filter_map(|op|op.payload["logical_id"].as_str()).collect();
             let protected:BTreeSet<_> = state.operations.values().filter(|op|matches!(op.status,Status::Accepted|Status::Unknown|Status::Dispatching|Status::Confirmed|Status::Rejected)
                 || phases.contains(op.id.as_str())).filter_map(|op|op.entry_id.as_deref()).collect();
-            let claimed:BTreeSet<_> = state.operations.iter().filter(|(call,op)|call.starts_with("call::terminal:queue:") && op.payload["kind"]=="claim")
+            let claimed:BTreeSet<_> = state.operations.iter().filter(|(call,op)|["call::terminal:queue:","call::claim:","call::steer-claim:"]
+                    .iter().any(|prefix|call.starts_with(prefix)) && op.payload["kind"]=="claim")
                 .flat_map(|(_,op)|op.result.as_array().into_iter().flatten()).filter_map(|row|row["id"].as_str()).collect();
-            // Só o claim do executor terminal, sem despacho, prova ausência de efeito na TUI.
+            // Só o claim do executor (terminal ou drain sem terminal), sem despacho, prova ausência de efeito.
             for row in &mut state.rows {
                 let id=row_id(row);
                 if row["delivered"]==true && row["confirmed"]!=true && row["desistiu"]!=true && claimed.contains(id) && !protected.contains(id) {
@@ -1120,6 +1154,62 @@ impl QueueActor {
     pub async fn shutdown(self) -> io::Result<()> {
         self.sender.send(QueueMessage::Stop).await.map_err(|_|invalid("fila já encerrada"))?;
         self.task.await.map_err(|_|invalid("persistência da fila interrompida"))
+    }
+}
+
+#[cfg(test)]
+mod headless_delivery_tests {
+    use super::*;
+    fn store(dir:&tempfile::TempDir) -> Store {
+        Store::open(&dir.path().join("state.json"),dir.path(),State::new("key",1,"session",vec![])).unwrap()
+    }
+    fn clock(epoch_s:f64) -> ClockSample { ClockSample { monotonic_s:0.0,epoch_s } }
+    fn append(store:&mut Store,id:&str,ts:f64) {
+        store.exec(1,&format!("append:{id}"),clock(ts),Action::Append { text:id.into(),delivered:false,ts:Some(ts),pre_transcript:false,entry_id:Some(id.into()) }).unwrap();
+    }
+    fn row(store:&Store,id:&str) -> Value { store.state().rows.iter().find(|r|r["id"] == id).unwrap().clone() }
+
+    #[test]
+    fn headless_claim_that_never_dispatched_goes_back_to_the_queue_on_recovery() {
+        let dir=tempfile::tempdir().unwrap(); let mut store=store(&dir);
+        append(&mut store,"a",10.0);
+        store.exec(1,"claim:x",clock(11.0),Action::Claim { min_ts:0.0,limit:Some(1),entry_id:None }).unwrap();
+        store.exec(1,"stop-recover:x",clock(12.0),Action::Recover).unwrap();
+        assert_eq!(row(&store,"a")["delivered"],false,"reivindicada e nunca despachada ficou como entregue");
+    }
+
+    #[test]
+    fn local_command_answered_before_the_write_finished_is_confirmed() {
+        let dir=tempfile::tempdir().unwrap(); let mut store=store(&dir);
+        append(&mut store,"/cost",10.0);
+        store.exec(1,"prepare",clock(11.0),Action::Prepare { id:"/cost".into(),payload:json!({"kind":"input"}),entry_id:Some("/cost".into()) }).unwrap();
+        store.exec(1,"begin",clock(11.0),Action::BeginDispatch { id:"/cost".into(),wire_id:"w".into(),staged:false }).unwrap();
+        // O `result` local chegou antes do `Finish` da escrita.
+        assert_eq!(store.exec(1,"local-confirm",clock(12.0),Action::Confirm { entry_ids:vec!["/cost".into()] }).unwrap(),json!(1));
+        assert_eq!(row(&store,"/cost")["confirmed"],true);
+    }
+
+    #[test]
+    fn give_up_counts_from_the_dispatch_and_frees_the_uncertain_entry() {
+        let dir=tempfile::tempdir().unwrap(); let mut store=store(&dir);
+        // Esperou na fila muito tempo e foi despachada agora: o prazo conta do despacho.
+        append(&mut store,"late",10.0);
+        append(&mut store,"lost",10.0);
+        append(&mut store,"writing",10.0);
+        for id in ["late","lost","writing"] {
+            store.exec(1,&format!("prepare:{id}"),clock(100.0),Action::Prepare { id:id.into(),payload:json!({"kind":"input"}),entry_id:Some(id.into()) }).unwrap();
+        }
+        store.exec(1,"begin:lost",clock(100.0),Action::BeginDispatch { id:"lost".into(),wire_id:"w-lost".into(),staged:false }).unwrap();
+        store.exec(1,"finish:lost",clock(100.0),Action::Finish { id:"lost".into(),status:Status::Unknown,result:json!({}) }).unwrap();
+        store.exec(1,"begin:writing",clock(100.0),Action::BeginDispatch { id:"writing".into(),wire_id:"w-writing".into(),staged:false }).unwrap();
+        store.exec(1,"begin:late",clock(150.0),Action::BeginDispatch { id:"late".into(),wire_id:"w-late".into(),staged:false }).unwrap();
+        store.exec(1,"finish:late",clock(150.0),Action::Finish { id:"late".into(),status:Status::Accepted,result:json!({}) }).unwrap();
+        let outcome=store.exec(1,"give-up",clock(170.0),Action::GiveUpUnproved { now:170.0,grace:60.0 }).unwrap();
+        assert_eq!(outcome,json!({"given_up":["lost"],"next_due":210.0}));
+        assert_eq!(row(&store,"lost")["desistiu"],true);
+        assert!(row(&store,"late")["desistiu"].is_null() && row(&store,"writing")["desistiu"].is_null());
+        assert_eq!(store.state().operations["lost"].status,Status::Rejected,"a incerta desistida não segura mais o descarte");
+        assert_eq!(store.exec(1,"remove",clock(171.0),Action::Remove { entry_id:"lost".into() }).unwrap(),json!(true));
     }
 }
 

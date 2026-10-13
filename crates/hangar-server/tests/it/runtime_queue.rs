@@ -21,8 +21,18 @@ fn compaction_matches_python_oracle() {
         results.push(store.exec(1,step[0].as_str().unwrap(),clock(),action).unwrap());
     }
     fill(&mut store,oracle["fill"].as_u64().unwrap() as usize,"fill");
-    assert_eq!(json!(results),oracle["results"]);
-    assert_eq!(serde_json::to_value(store.state()).unwrap(),oracle["final"]);
+    // `claimed_ts`/`dispatched_ts` são só do Rust (prazo de desistência sem prova); a poda é a mesma.
+    fn strip(value:&mut serde_json::Value) {
+        match value {
+            serde_json::Value::Object(map) => { map.remove("claimed_ts"); map.remove("dispatched_ts"); map.values_mut().for_each(strip); }
+            serde_json::Value::Array(items) => items.iter_mut().for_each(strip),
+            _ => {},
+        }
+    }
+    let (mut results,mut state) = (json!(results),serde_json::to_value(store.state()).unwrap());
+    strip(&mut results); strip(&mut state);
+    assert_eq!(results,oracle["results"]);
+    assert_eq!(state,oracle["final"]);
     // O eco da primeira continua usado: a segunda, com cursor antes dele, não o reaproveita.
     let mut proof = oracle["steps"].as_array().unwrap().iter().find(|step|step[0] == "proof-first").unwrap()[1]["proof"].clone();
     proof["cursor"] = store.state().operations["second"].dispatch_cursor.clone();

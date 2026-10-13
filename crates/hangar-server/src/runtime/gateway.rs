@@ -298,7 +298,8 @@ impl RuntimeRegistry {
             loop {
                 let event=match events.recv().await {Ok(event)=>event,Err(broadcast::error::RecvError::Lagged(_))=>{tracing::warn!(code="lifecycle_event_lagged","ligação de conversa perdeu eventos");continue;},Err(_)=>break};
                 let Some(registry)=weak.upgrade() else {break};
-                if event.channel=="claude_exit" {
+                // `claude_wake`: mensagem nova para um processo morto; depois do teto, abre outra rodada.
+                if event.channel=="claude_exit" || event.channel=="claude_wake" {
                     registry.schedule_claude_respawn(&event.key,event.generation).await;
                     continue;
                 }
@@ -348,6 +349,7 @@ impl RuntimeRegistry {
         let (registry,key)=(self.clone(),key.to_owned());
         tokio::spawn(async move {
             let id=format!("auto-restart:{key}:{generation}");
+            let mut gave_up=false;
             for attempt in 0..3 {
                 tokio::time::sleep(base * (1u32<<attempt)).await;
                 if context.cancelled.load(std::sync::atomic::Ordering::Acquire) {break;}
@@ -362,7 +364,15 @@ impl RuntimeRegistry {
                         super::actor::mark_live_error(&registry.live_sender(&name),&error.code,&error.message);
                         tracing::warn!(key,session=name,attempt,code=%error.code,"reabertura automática não confirmada");
                         if matches!(error.code.as_str(),"lifecycle_cancelled"|"runtime_generation"|"runtime_binding"|"lifecycle_conversation") {break;}
+                        gave_up=attempt==2;
                     },
+                }
+            }
+            // Teto de subidas: o que esperava na fila vira "não chegou" em vez de sair horas depois, calado.
+            if gave_up && !context.cancelled.load(std::sync::atomic::Ordering::Acquire) {
+                let handle=registry.entries.lock().await.get(&key).filter(|e|e.generation==generation).and_then(|e|match &e.handle {EntryHandle::Headless(h)=>Some(h.clone()),_=>None});
+                if let Some(handle)=handle && let Err(error)=super::actor::abandon_queued(&handle).await {
+                    tracing::warn!(key,session=name,code=%error.code,"fila não marcada como não chegou depois do teto de subidas");
                 }
             }
             if let Ok(mut operation)=barrier.operation.lock() && operation.as_ref().is_some_and(|(_,current)|Arc::ptr_eq(current,&context.cancelled)) {*operation=None;}
@@ -955,6 +965,18 @@ impl RuntimeRegistry {
         // terminal, esquece só esta vida: outra sessão que tenha tomado o nome (outra vida) fica.
         if let Some(mods) = &self.mods { mods.forget(&name,life); }
         Ok(if kill { json!({"closed":true,"killed":true}) } else { json!({"closed":true}) })
+    }
+    /// Ciclo dos subagentes da sessão Claude sem terminal aberta aqui, por agentId:
+    /// `{"<agentId>":{"state":"running|completed|failed|stopped","run_id":"…","end_time":<ms>|null}}`.
+    /// `None` = não há sessão Claude sem terminal com esse nome neste servidor.
+    pub async fn claude_subagents(&self,name:&str) -> Option<Result<Value,RuntimeError>> {
+        let handle={
+            let entries=self.entries.lock().await;
+            let mut matches=entries.values().filter(|entry|entry.name==name && entry.provider=="claude");
+            let entry=matches.next()?;if matches.next().is_some() {return None;}
+            match &entry.handle {EntryHandle::Headless(handle)=>handle.clone(),_=>return None}
+        };
+        Some(handle.view().await.map(|view|view["subagents"].clone()))
     }
     /// `session_key` é a conversa, como na descoberta: o hub a compara com o `conversation` do vínculo.
     pub async fn claude_info(&self,name:&str)->Option<crate::transcript::InternalInfo> {

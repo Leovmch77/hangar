@@ -424,28 +424,39 @@ impl Engine {
     /// O app só responde com o ID do cartão que viu: ele sai daqui, com o mesmo alvo, conteúdo e época que a resposta confere.
     // ponytail: o alvo respondido não é encerrado no store; a resposta já recusa ID de pedido que saiu.
     fn stamp_shown(&self,state:&mut StateEvent) {
-        let Some((key,store)) = self.interactions.as_ref().filter(|_|!self.thread_id.is_empty()) else { return };
-        let binding = InteractionBinding { key:key.clone(),conversation:self.thread_id.clone(),generation:self.generation };
-        let request = |kind,wanted:&dyn Fn(&Value)->bool| -> Result<Option<String>,InteractionError> {
-            let Some((id,request)) = self.server_requests.iter().find(|(_,r)|wanted(r)) else { return Ok(None) };
+        if state.options.is_none() && state.codex_question.is_none() { return; }
+        // Cartão exibido sem store, sem thread ou sem o pedido que o originou não tem como ser respondido.
+        let store = self.interactions.as_ref().filter(|_|!self.thread_id.is_empty()).ok_or(InteractionError::Unavailable);
+        let binding = |key:&String|InteractionBinding { key:key.clone(),conversation:self.thread_id.clone(),generation:self.generation };
+        let request = |kind,wanted:&dyn Fn(&Value)->bool| -> Result<String,InteractionError> {
+            let (key,store) = store?;
+            let (id,request) = self.server_requests.iter().find(|(_,r)|wanted(r)).ok_or(InteractionError::Unavailable)?;
             let thread = request["params"]["threadId"].as_str().filter(|t|!t.is_empty()).ok_or(InteractionError::Unavailable)?;
             let revision = self.request_epochs.get(id).ok_or(InteractionError::Unavailable)?.to_string();
-            store.observe_revision(&binding,&native_target(kind,thread,&json!(id)),Some(request.clone()),Some(revision))
+            store.observe_revision(&binding(key),&native_target(kind,thread,&json!(id)),Some(request.clone()),Some(revision))?.ok_or(InteractionError::Unavailable)
         };
-        let mut shown = Ok(());
         if state.options.is_some() {
-            shown = request(InteractionKind::Approval,&is_card).map(|id|state.interaction_id = id);
+            match request(InteractionKind::Approval,&is_card) {
+                Ok(id) => state.interaction_id = Some(id),
+                Err(error) => { crate::interactions::mark_unidentified(state,error); state.options = None; state.interaction_id = None; }
+            }
         }
-        if let Some(form) = state.codex_question.as_mut() {
+        if state.codex_question.is_some() {
             let id = if self.blocking_question().is_some() {
                 request(InteractionKind::Question,&|r|r["method"] == "item/tool/requestUserInput" || form_fields(r).is_some())
             } else {
-                self.async_questions.pending.first().map_or(Ok(None),|(key,question)|
-                    store.observe(&binding,&native_target(InteractionKind::Question,&self.thread_id,&json!(key)),Some(question.clone())))
+                store.and_then(|(key,store)| {
+                    let (id,question) = self.async_questions.pending.first().ok_or(InteractionError::Unavailable)?;
+                    store.observe(&binding(key),&native_target(InteractionKind::Question,&self.thread_id,&json!(id)),Some(question.clone()))?
+                        .ok_or(InteractionError::Unavailable)
+                })
             };
-            match id { Ok(id) => if let Some(id) = id { form.insert("interaction_id".into(),json!(id)); }, Err(error) => shown = Err(error) }
+            match (id,state.codex_question.as_mut()) {
+                (Ok(id),Some(form)) => { form.insert("interaction_id".into(),json!(id)); }
+                (Err(error),_) => { crate::interactions::mark_unidentified(state,error); state.codex_question = None; }
+                (Ok(_),None) => {}
+            }
         }
-        if let Err(error) = shown && state.problema.is_none() { state.problema = Some(error.code().into()); }
     }
 
     fn shown_state(&self) -> StateEvent {
@@ -2056,4 +2067,27 @@ fn question_response(question:&Value,answers:&Value) -> Result<Value,RuntimeErro
         result.insert(id.into(),json!({"answers":[value]}));
     }
     Ok(json!({"answers":result}))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shown_card_without_its_request_keeps_both_identity_errors() {
+        let question = json!({"provider":"codex","request_id":"async:t:item:0","is_async":true,"questions":[{"id":"a","question":"Q?","options":[]}]});
+        let mut engine = Engine::new(json!({"name":"s","thread_id":"t","headless":true,"initialized":true,"ready":true,
+            "async_questions":[["async:t:item:0",question]],"async_seen":["item"]}),1,ClockSample { monotonic_s:10.0,epoch_s:1.0 });
+        let store = Arc::new(InteractionStore::default());
+        engine.set_interactions("key".into(),store.clone()).unwrap();
+        // Outra vida tomou a chave: a pergunta assíncrona falha ao observar.
+        store.bind(&InteractionBinding { key:"key".into(),conversation:"other".into(),generation:9 }).unwrap();
+        let mut state = engine.shown_state();
+        // Cartão de aprovação sem pedido do servidor por trás.
+        state.options = Some(vec!["Permitir".into(),"Negar".into()]);
+        engine.stamp_shown(&mut state);
+        assert_eq!(state.problema.as_deref(),Some("runtime_falhou"));
+        assert_eq!(state.problema_detalhe.as_deref(),Some("erro_interacao_indisponivel · erro_interacao_desatualizada"));
+        assert!(state.options.is_none() && state.codex_question.is_none() && state.interaction_id.is_none());
+    }
 }

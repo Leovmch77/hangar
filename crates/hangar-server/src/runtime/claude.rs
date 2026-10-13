@@ -76,7 +76,31 @@ pub struct ClaudeEngine {
     slash_input: Option<String>,
     unknown: BTreeSet<String>,
     surface: Option<Surface>,
+    /// Últimas linhas do stderr do processo: o motivo de uma queda (`not logged in`, CLI quebrada).
+    stderr_tail: Vec<String>,
+    /// O problema da queda está no arquivo da sessão: o próximo turno bom o apaga de lá.
+    problem_persisted: bool,
+    /// Ciclo de cada subagente (`local_agent`) por agentId: a última execução manda (`run_id` novo = retomado).
+    subagents: BTreeMap<String,Value>,
+    /// `uuid` de cada mensagem escrita → operação: o eco com o mesmo `uuid` prova a entrega. Teto pequeno porque
+    /// prompt barrado por hook nunca ecoa.
+    echoes: std::collections::VecDeque<(String,String)>,
+    /// `task_id` do último `background_tasks_changed`: o trabalho de fundo segue vivo depois do `result`.
+    background: BTreeSet<String>,
 }
+
+const ECHO_LIMIT: usize = 64;
+
+/// UUID estável da mensagem de uma operação (formato v5 sobre o SHA-1 do ID): reescrever o mesmo quadro
+/// depois de reiniciar mantém o eco casável.
+fn echo_uuid(operation_id:&str) -> String {
+    let mut bytes = sha1_smol::Sha1::from(operation_id.as_bytes()).digest().bytes();
+    bytes[6] = (bytes[6] & 0x0f) | 0x50; bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    let hex:String = bytes[..16].iter().map(|b|format!("{b:02x}")).collect();
+    format!("{}-{}-{}-{}-{}",&hex[..8],&hex[8..12],&hex[12..16],&hex[16..20],&hex[20..32])
+}
+
+const STDERR_TAIL: usize = 10;
 
 fn string(value:&Value) -> Option<String> { value.as_str().map(str::to_owned) }
 fn error(message:&str) -> RuntimeError { RuntimeError::new("claude_command",message) }
@@ -86,9 +110,13 @@ impl ClaudeEngine {
     pub fn new(metadata:Value,generation:u64,clock:ClockSample) -> Self {
         let permission_mode = metadata["permission_mode"].as_str().map(mode);
         let previous_non_plan = string(&metadata["previous_non_plan"]);
+        // A queda da vida anterior mora no arquivo da sessão (`problema: [código, detalhe]`, o formato do Python).
+        let persisted = metadata["problema"].as_array().and_then(|pair|Some((pair.first()?.as_str()?.to_owned(),pair.get(1).and_then(Value::as_str).map(str::to_owned))));
         let state = StateEvent { session:metadata["name"].as_str().unwrap_or("").into(), state:"idle".into(),
             headless:true, claude_permission_mode:permission_mode.clone(),claude_previous_non_plan:previous_non_plan.clone(),
-            status_line:string(&metadata["status_line"]),..StateEvent::default() };
+            status_line:string(&metadata["status_line"]),problema:persisted.as_ref().map(|(code,_)|code.clone()),
+            problema_detalhe:persisted.as_ref().and_then(|(_,detail)|detail.clone()),..StateEvent::default() };
+        let problem_persisted = persisted.is_some();
         let mut effort_intent = metadata["effort_intent"].is_object().then(||metadata["effort_intent"].clone());
         if let Some(intent) = effort_intent.as_mut() {
             if intent["status"] == "dispatching" { intent["status"] = json!("unknown"); }
@@ -102,7 +130,7 @@ impl ClaudeEngine {
             preview:LiveBuffer::default(),thinking:LiveBuffer::default(),tool_input:LiveBuffer::default(),tool_name:None,tool_visible:false,
             label:None,compacting:false,turn_start:None,label_deadline:None,tokens_closed:0,tokens_message:None,gen_start:None,
             token_chars:0,thinking_start:None,thought_s:0.0,tasks:Vec::new(),usage:metadata.get("usage").cloned().unwrap_or(Value::Null),
-            context_window:metadata["context_window"].as_u64(),cost:metadata["cost"].as_f64(),effort_intent,effort_deadline:None,active_input:None,slash_input:None,unknown:BTreeSet::new(),surface:None,metadata };
+            context_window:metadata["context_window"].as_u64(),cost:metadata["cost"].as_f64(),effort_intent,effort_deadline:None,active_input:None,slash_input:None,unknown:BTreeSet::new(),surface:None,stderr_tail:Vec::new(),problem_persisted,subagents:BTreeMap::new(),echoes:std::collections::VecDeque::new(),background:BTreeSet::new(),metadata };
         if let Some(controls) = engine.metadata["control_carry"].as_array() {
             for control in controls {
                 let Ok(request_id) = serde_json::from_value::<RequestId>(control["request_id"].clone()) else { continue };
@@ -182,7 +210,8 @@ impl ClaudeEngine {
             }
         }
         self.waiters.clear(); self.policies.clear(); self.last_format_request = None; self.format_gate.reset();
-        self.pending.clear(); self.question = None; self.effort_intent = None;
+        self.pending.clear(); self.question = None; self.effort_intent = None; self.subagents.clear();
+        self.tasks.clear(); self.background.clear(); self.label = None;
         self.effort_deadline = None; self.active_input = None; self.restore_plan = None;
         self.in_progress = false; self.turn_start = None; self.label_deadline = None;
         self.clear_streams(effects);
@@ -195,7 +224,8 @@ impl ClaudeEngine {
             "question":self.question,"model":self.model,"effort":self.effort,"permission_mode":self.permission_mode,
             "previous_non_plan":self.previous_non_plan,"commands":self.commands,"terminal_commands":self.terminal_commands,
             "usage":self.usage,"context_window":self.context_window,"cost":self.cost,"effort_intent":self.effort_intent,
-            "runtime_counter":self.counter,"conversation":self.metadata["session_id"],"deliverable":self.deliverable()})
+            "runtime_counter":self.counter,"conversation":self.metadata["session_id"],"deliverable":self.deliverable(),
+            "subagents":self.subagents})
     }
 
     fn public_state(&self) -> StateEvent {
@@ -204,7 +234,8 @@ impl ClaudeEngine {
         state.claude_previous_non_plan = self.previous_non_plan.clone();
         state.codex_question = self.question.as_ref().and_then(|q|q.as_object().cloned());
         state.question = None; state.options = None; state.claude_plan_pending = None;
-        state.state = if !self.alive { "dead" } else if !self.pending.is_empty() || self.question.is_some() { "awaiting_input" }
+        // Processo morto não é "Sessão encerrada": a faixa mostra o problema e o próximo prompt sobe outro.
+        state.state = if !self.alive { "idle" } else if !self.pending.is_empty() || self.question.is_some() { "awaiting_input" }
             else if self.in_progress || self.initializing { "working" } else { "idle" }.into();
         let mut label = self.label.clone();
         if self.initializing && !self.in_progress { label = Some("Iniciando sessão…".into()); }
@@ -229,10 +260,7 @@ impl ClaudeEngine {
                     state.claude_plan_pending = json!({"plan":request["input"]["plan"].as_str().unwrap_or(""),
                         "path":request["input"]["planFilePath"].as_str(),"tool_use_id":request["tool_use_id"].as_str()}).as_object().cloned();
                 } else {
-                    let detail = request["description"].as_str().or_else(||request["input"]["command"].as_str())
-                        .or_else(||request["input"]["file_path"].as_str()).or_else(||request["input"]["path"].as_str()).unwrap_or("");
-                    let detail = if detail.chars().count() > 200 { format!("{}…",detail.chars().take(200).collect::<String>()) } else { detail.into() };
-                    state.question = Some(format!("Permitir {}? {detail}",request["tool_name"].as_str().unwrap_or("ferramenta")).trim().into());
+                    state.question = Some(permission_text(request));
                     let mut options = vec!["Permitir".into(),"Negar".into()];
                     if request["permission_suggestions"].as_array().is_some_and(|rules|rules.iter().any(Value::is_object)) { options.push("Sempre permitir".into()); }
                     state.options = Some(options);
@@ -246,18 +274,27 @@ impl ClaudeEngine {
     /// O app só responde com o ID do cartão que viu: ele sai daqui, com o mesmo alvo e conteúdo que a resposta confere.
     // ponytail: o alvo respondido não é encerrado no store; a resposta já recusa ID de pedido que saiu.
     fn stamp_shown(&self,state:&mut StateEvent) {
-        let Some((key,store)) = &self.interactions else { return };
-        let conversation = self.metadata["session_id"].as_str().unwrap_or("");
-        let binding = InteractionBinding { key:key.clone(),conversation:conversation.into(),generation:self.generation };
-        let observe = |kind,native:&Value,semantic:&Value| store.observe(&binding,&native_target(kind,conversation,native),Some(semantic.clone()));
-        let shown = if let Some(question) = &self.question {
-            observe(InteractionKind::Question,&question["request_id"],question).map(|id|{
-                if let (Some(form),Some(id)) = (state.codex_question.as_mut(),id) { form.insert("interaction_id".into(),json!(id)); }
-            })
+        let (kind,native,semantic) = if let Some(question) = &self.question {
+            (InteractionKind::Question,question["request_id"].clone(),question)
         } else if let Some((id,request)) = self.pending.first() {
-            observe(InteractionKind::Approval,&json!(id),request).map(|id|state.interaction_id = id)
-        } else { Ok(()) };
-        if let Err(error) = shown && state.problema.is_none() { state.problema = Some(error.code().into()); }
+            (InteractionKind::Approval,json!(id),request)
+        } else { return };
+        let observed = (|| {
+            let (key,store) = self.interactions.as_ref().ok_or(InteractionError::Unavailable)?;
+            if kind == InteractionKind::Question && state.codex_question.is_none() { return Err(InteractionError::Unavailable); }
+            let conversation = self.metadata["session_id"].as_str().unwrap_or("");
+            let binding = InteractionBinding { key:key.clone(),conversation:conversation.into(),generation:self.generation };
+            store.observe(&binding,&native_target(kind.clone(),conversation,&native),Some(semantic.clone()))?.ok_or(InteractionError::Unavailable)
+        })();
+        match (observed,state.codex_question.as_mut()) {
+            (Ok(id),Some(form)) if kind == InteractionKind::Question => { form.insert("interaction_id".into(),json!(id)); }
+            (Ok(id),_) => state.interaction_id = Some(id),
+            // Sem ID a resposta seria recusada: o cartão não pode parecer respondível.
+            (Err(error),_) => {
+                crate::interactions::mark_unidentified(state,error);
+                state.options = None; state.codex_question = None; state.claude_plan_pending = None; state.interaction_id = None;
+            }
+        }
     }
 
     fn deliverable(&self) -> bool { self.alive && self.initialized && !self.initializing && !self.in_progress
@@ -330,6 +367,7 @@ impl ClaudeEngine {
                 Some("user")=>"input",
                 _=>return,
             };
+            if kind == "input" && frame["uuid"].is_string() { self.expect_echo(&operation_id); }
             self.wires.insert(operation_id,Wire { interaction:None,kind:kind.into(),request_id:None,final_result:false });
             return;
         }
@@ -340,6 +378,21 @@ impl ClaudeEngine {
         self.waiters.insert(request_id.clone(),Waiter { operation_id:operation_id.clone(),subtype:subtype.into(),payload,
             deadline:self.clock.monotonic_s,timed_out:true });
         self.wires.insert(operation_id,Wire { interaction:None,kind:"control".into(),request_id:Some(request_id),final_result:false });
+    }
+
+    fn expect_echo(&mut self,operation_id:&str) -> String {
+        let uuid = echo_uuid(operation_id);
+        if !self.echoes.iter().any(|(known,_)|*known == uuid) {
+            if self.echoes.len() >= ECHO_LIMIT { self.echoes.pop_front(); }
+            self.echoes.push_back((uuid.clone(),operation_id.into()));
+        }
+        uuid
+    }
+
+    /// Resposta que o motor dá sozinho: cada uma com ID próprio, senão a segunda é recusada no despacho e a CLI espera.
+    fn server_answer_id(&mut self) -> String {
+        self.counter += 1;
+        format!("server:{}:{}",self.generation,self.counter)
     }
 
     fn answer(&mut self,operation_id:String,request_id:RequestId,body:Value,effects:&mut Vec<Effect>) {
@@ -360,6 +413,7 @@ impl ClaudeEngine {
     pub fn hydrate(&mut self,snapshot:CanoSnapshot) -> Result<Vec<Effect>,RuntimeError> {
         let mut effects = Vec::new();
         self.alive = snapshot.saiu.is_none();
+        self.stderr_tail = snapshot.stderr_tail.iter().rev().take(STDERR_TAIL).rev().cloned().collect();
         for raw in snapshot.init.iter().chain(snapshot.rate_limit.iter()) {
             effects.extend(self.apply(EngineInput::Line(serde_json::from_str(raw).map_err(|_|error("snapshot inválido"))?),self.clock)?);
         }
@@ -417,7 +471,13 @@ impl ClaudeEngine {
 
     pub fn command(&mut self,command:RuntimeCommand,clock:ClockSample) -> Result<Vec<Effect>,RuntimeError> {
         self.clock = clock;
-        if !self.alive { return Err(error("processo não está vivo")); }
+        if !self.alive {
+            // A queda levou os pedidos em aberto: responder a um deles é responder a algo que já não existe (409).
+            if matches!(command.kind,OperationKind::Select | OperationKind::AnswerQuestions | OperationKind::SkipQuestion) {
+                return Err(runtime_error(InteractionError::Changed));
+            }
+            return Err(error("processo não está vivo"));
+        }
         let mut effects = Vec::new();
         let operation_id = command.operation_id;
         let payload = command.payload;
@@ -433,10 +493,15 @@ impl ClaudeEngine {
                     self.active_input = Some(operation_id.clone());
                     self.start_turn();
                 }
-                effects.push(Effect::Write { operation_id:Some(operation_id),frame:json!({"type":"user","session_id":"","parent_tool_use_id":null,"message":{
+                let uuid = self.expect_echo(&operation_id);
+                effects.push(Effect::Write { operation_id:Some(operation_id),frame:json!({"type":"user","uuid":uuid,"session_id":"","parent_tool_use_id":null,"message":{
                     "role":"user","content":payload.get("content").cloned().unwrap_or_else(||json!([{"type":"text","text":text}]))}}) });
             }
             OperationKind::Interrupt => {
+                // Sem turno não há o que interromper: dizer isso, e não fingir um Parar que aconteceu.
+                if !self.in_progress && self.pending.is_empty() && self.question.is_none() {
+                    return Ok(vec![Effect::Reply { operation_id,disposition:Disposition::Accepted,payload:json!({"interrupted":false}) }]);
+                }
                 let mut requests:Vec<_> = self.pending.iter().map(|(id,_)|id.clone()).collect();
                 if let Some(question) = &self.question {
                     requests.push(serde_json::from_value(question["request_id"].clone()).map_err(|_|error("ID da pergunta inválido"))?);
@@ -445,7 +510,9 @@ impl ClaudeEngine {
                     self.answer(format!("{operation_id}:deny:{index}"),id,json!({"behavior":"deny","message":"Interrompido pelo usuário."}),&mut effects);
                 }
                 self.restore_plan = None;
-                self.control(operation_id,"interrupt",json!({}),&mut effects);
+                self.control(operation_id.clone(),"interrupt",json!({}),&mut effects);
+                // O Parar vale quando chega ao stdin (como no Python): esperar a resposta da CLI virava incerto.
+                if let Some(wire) = self.wires.get_mut(&operation_id) { wire.kind = "interrupt".into(); }
                 self.clear_streams(&mut effects);
             }
             OperationKind::Select => {
@@ -574,6 +641,7 @@ impl ClaudeEngine {
         if wire.kind == "effort" && outcome == WriteOutcome::Written { return; }
         let kind = wire.kind.clone();
         let request_id = wire.request_id.clone();
+        if kind == "interrupt" && let Some(id) = &request_id { self.waiters.remove(id); }
         let disposition = match outcome { WriteOutcome::Written => Disposition::Accepted,
             WriteOutcome::NotWritten => Disposition::Rejected,WriteOutcome::Unknown => Disposition::Unknown };
         wire.final_result = outcome != WriteOutcome::Unknown;
@@ -667,6 +735,7 @@ impl ClaudeEngine {
                             self.state.problema = Some("headless_nao_subiu".into());
                             self.state.problema_detalhe = Some(response["error"].as_str().unwrap_or("initialize recusado").chars().take(300).collect());
                         }
+                        self.restore_failed(&waiter,response["error"].as_str().unwrap_or("recusado"));
                         effects.push(Effect::Reply { operation_id:waiter.operation_id,disposition:Disposition::Rejected,
                             payload:json!({"error":response["error"],"permission_boot_rejected":waiter.subtype=="set_permission_mode" && waiter.payload["mode"]=="bypassPermissions"}) });
                     }
@@ -743,7 +812,8 @@ impl ClaudeEngine {
                 }
                 let tool = request["tool_name"].as_str().unwrap_or("");
                 if request["subtype"] != "can_use_tool" {
-                    self.answer(format!("server:{}:{}",self.generation,self.counter),request_id,json!({}),effects);
+                    let id = self.server_answer_id();
+                    self.answer(id,request_id,json!({}),effects);
                     let subtype = request["subtype"].as_str().unwrap_or("");
                     self.policy("unknown_private",json!({"kind":format!("control_request/{subtype}"),"event":event}),effects);
                     if self.unknown.insert(format!("control_request/{subtype}")) {
@@ -753,7 +823,8 @@ impl ClaudeEngine {
                     self.question = Some(json!({"provider":"claude","request_id":request_id,"questions":request["input"]["questions"]}));
                 } else if self.permission_mode.as_deref() == Some("plan") && self.previous_non_plan.as_deref() == Some("bypassPermissions")
                     && !["ExitPlanMode","Edit","Write","MultiEdit","NotebookEdit"].contains(&tool) {
-                    self.answer(format!("server:{}:{}",self.generation,self.counter),request_id,
+                    let id = self.server_answer_id();
+                    self.answer(id,request_id,
                         json!({"behavior":"allow","updatedInput":request.get("input").cloned().unwrap_or_else(||json!({}))}),effects);
                 } else if let Some((_,old)) = self.pending.iter_mut().find(|(id,_)|*id == request_id) { *old = request; }
                 else { self.pending.push((request_id,request)); }
@@ -761,13 +832,25 @@ impl ClaudeEngine {
             }
             "control_cancel_request" => {
                 let id:RequestId = serde_json::from_value(event["request_id"].clone()).map_err(|_|error("ID de cancelamento inválido"))?;
+                // Alguém decidiu antes da pessoa (hook PermissionRequest, ou a CLI desistiu): no terminal isso
+                // aparece como uma linha; aqui o cartão sumiria calado.
+                let mut note = self.pending.iter().find(|(request_id,_)|request_id == &id)
+                    .map(|(_,request)|format!("⚙️ {} — decidido por hook, sem você",permission_text(request)));
                 self.pending.retain(|(request_id,_)|request_id != &id);
-                if self.question.as_ref().and_then(|q|serde_json::from_value::<RequestId>(q["request_id"].clone()).ok()) == Some(id) { self.question = None; }
+                if let Some(question) = self.question.take_if(|q|serde_json::from_value::<RequestId>(q["request_id"].clone()).ok().as_ref() == Some(&id)) {
+                    let first:String = question["questions"][0]["question"].as_str().unwrap_or("").chars().take(120).collect();
+                    note = Some(format!("⚙️ Pergunta cancelada antes da resposta: {first}").trim_end_matches([':',' ']).to_owned());
+                }
                 self.changed(effects,true);
+                if let Some(text) = note { self.policy("local_output",json!({"text":text}),effects); }
             }
             "result" => {
-                self.in_progress = false; self.turn_start = None; self.label_deadline = None; self.label = None;
-                self.pending.clear(); self.question = None; self.tasks.clear(); self.restore_plan = None;
+                self.in_progress = false; self.turn_start = None; self.label_deadline = None;
+                // O agente de fundo ainda vivo segue no rótulo; o resto acabou com o turno.
+                let background = &self.background;
+                self.tasks.retain(|(key,_)|background.contains(key));
+                self.label = self.tasks_label();
+                self.pending.clear(); self.question = None; self.restore_plan = None;
                 if let Some(id) = self.active_input.take() {
                     if let Some(wire) = self.wires.get_mut(&id) { wire.final_result = true; }
                     effects.push(Effect::Reply { operation_id:id,disposition:Disposition::Accepted,payload:json!({"consumed":true}) });
@@ -779,7 +862,12 @@ impl ClaudeEngine {
                     self.state.problema = Some(if event["result"].as_str().unwrap_or("").to_lowercase().contains("not logged in") {
                         "headless_sem_login" } else { "headless_turno_erro" }.into());
                     self.state.problema_detalhe = Some(format!("{subtype}: {}",event["result"].as_str().unwrap_or("").chars().take(300).collect::<String>()));
-                } else if subtype == "success" && !local { self.state.problema = None; self.state.problema_detalhe = None; }
+                } else if subtype == "success" && !local {
+                    self.state.problema = None; self.state.problema_detalhe = None;
+                    if std::mem::take(&mut self.problem_persisted) {
+                        effects.push(Effect::PersistClaude { operation_id:None,patch:json!({"problema":null}) });
+                    }
+                }
                 if local { effects.push(Effect::ConfirmLocalCommands); }
                 self.apply_usage(&event,effects);
                 self.clear_streams(effects); self.changed(effects,true);
@@ -800,9 +888,21 @@ impl ClaudeEngine {
                 self.alive = false; self.in_progress = false; self.initializing = false;
                 self.turn_start = None; self.label_deadline = None; self.init_warning = None; self.effort_deadline = None;
                 self.pending.clear(); self.question = None; self.clear_streams(effects);
+                // O trabalho de fundo morre com o processo.
+                self.tasks.clear(); self.background.clear(); self.label = None;
+                for agent in self.subagents.values_mut().filter(|agent|agent["state"] == "running") { agent["state"] = json!("stopped"); }
                 // Pedidos dos apps em aberto respondem com código e a interface dos mods some.
                 if let Some(surface) = self.surface.as_mut() { let out = surface.on_exit(); Self::surface_out(effects,out); }
-                self.state.problema = Some("headless_caiu".into());
+                // Saída limpa (0, SIGTERM, SIGKILL) e conexão perdida sem código (`rc` nulo) não são queda; o resto
+                // leva o motivo: a 1ª linha da faixa é o stderr, não o código.
+                if let Some(rc) = event["rc"].as_i64().filter(|rc|![0,-15,-9].contains(rc)) {
+                    let reason:String = self.stderr_tail.join("\n").chars().take(280).collect();
+                    let detail = if reason.is_empty() { format!("rc={rc}") } else { format!("{reason}\nrc={rc}") };
+                    self.state.problema = Some("headless_processo_caiu".into());
+                    self.state.problema_detalhe = Some(detail.clone());
+                    self.problem_persisted = true;
+                    effects.push(Effect::PersistClaude { operation_id:None,patch:json!({"problema":["headless_processo_caiu",detail]}) });
+                }
                 for (operation_id,wire) in &mut self.wires {
                     if !wire.final_result {
                         effects.push(Effect::Reply { operation_id:operation_id.clone(),disposition:Disposition::Unknown,payload:json!({"error":"cano encerrado"}) });
@@ -810,7 +910,20 @@ impl ClaudeEngine {
                 }
                 self.waiters.clear(); self.changed(effects,true);
             }
-            "user" => { self.label = None; self.changed(effects,true); }
+            "user" => {
+                if event["isReplay"] == true && let Some(uuid) = event["uuid"].as_str()
+                    && let Some(index) = self.echoes.iter().position(|(known,_)|known == uuid) {
+                    let (_,operation_id) = self.echoes.remove(index).unwrap();
+                    effects.push(Effect::InputEchoed { operation_id });
+                }
+                self.label = None; self.changed(effects,true);
+            }
+            "cano_stderr" => {
+                if let Some(text) = event["linha"].as_str().map(str::trim_end).filter(|text|!text.is_empty()) {
+                    self.stderr_tail.push(text.to_owned());
+                    if self.stderr_tail.len() > STDERR_TAIL { self.stderr_tail.remove(0); }
+                }
+            }
             "keep_alive" | "tool_progress" | "command_lifecycle" => {},
             _ => {
                 self.policy("unknown_private",json!({"kind":kind,"event":event}),effects);
@@ -818,6 +931,57 @@ impl ClaudeEngine {
             }
         }
         Ok(())
+    }
+
+    /// Tarefa no rótulo; a mesma tarefa retomada (mesmo `task_id`) não entra duas vezes.
+    fn start_task(&mut self,task:&Value) {
+        let id = task["task_id"].as_str().map(str::to_owned).unwrap_or_else(||task["task_id"].to_string());
+        if self.tasks.iter().any(|(key,_)|*key == id) { return; }
+        self.tasks.push((id,json!({"kind":task["subagent_type"].as_str().or_else(||task["task_type"].as_str()).unwrap_or("agente"),"step":task["description"]})));
+    }
+
+    fn tasks_label(&self) -> Option<String> {
+        self.tasks.last().map(|(_,task)| {
+            let step = task["step"].as_str().unwrap_or("").trim_start_matches("Running ").trim();
+            let label = if step.is_empty() { format!("{}…",task["kind"].as_str().unwrap_or("agente")) }
+                else { format!("{}: {step}",task["kind"].as_str().unwrap_or("agente")) };
+            let label = if self.tasks.len() > 1 { format!("{} agentes · {label}",self.tasks.len()) } else { label };
+            label.chars().take(120).collect()
+        })
+    }
+
+    /// Execução de subagente em curso (`task_started` ou a lista de `background_tasks_changed`); `local_bash` e
+    /// outras tarefas ficam de fora. A mesma execução vista de novo não apaga o desfecho já gravado.
+    fn track_subagent(&mut self,task:&Value) {
+        if task["task_type"] != "local_agent" { return; }
+        let (Some(id),run) = (task["task_id"].as_str(),task["run_id"].as_str().unwrap_or("")) else { return };
+        let entry = self.subagents.entry(id.into()).or_insert(Value::Null);
+        if entry["run_id"] != run { *entry = json!({"state":"running","run_id":run,"end_time":null}); }
+    }
+
+    /// Desfecho da execução atual (`task_updated` com `patch`, `task_notification`); de outra execução, ignorado.
+    fn finish_subagent(&mut self,event:&Value) {
+        let Some(entry) = event["task_id"].as_str().and_then(|id|self.subagents.get_mut(id)) else { return };
+        if event["run_id"].as_str().is_some_and(|run|entry["run_id"] != run) { return; }
+        let state = match event["patch"]["status"].as_str().or_else(||event["status"].as_str()) {
+            Some("completed") => "completed",
+            Some("failed") => "failed",
+            Some("killed" | "cancelled" | "stopped") => "stopped",
+            _ => "",
+        };
+        if !state.is_empty() { entry["state"] = json!(state); }
+        if let Some(end) = event["patch"]["end_time"].as_u64() { entry["end_time"] = json!(end); }
+    }
+
+    fn restore_failed(&mut self,waiter:&Waiter,reason:&str) { self.restore_failed_for(&waiter.operation_id,&waiter.payload,reason); }
+
+    /// A volta ao modo de base depois do plano aprovado falhou: a sessão segue no modo errado, e isso aparece.
+    fn restore_failed_for(&mut self,operation_id:&str,payload:&Value,reason:&str) -> bool {
+        if !operation_id.ends_with(":restore_mode") { return false; }
+        let base = payload["mode"].as_str().unwrap_or("");
+        self.state.problema = Some("headless_turno_erro".into());
+        self.state.problema_detalhe = Some(format!("modo {base:?} não reaplicado após o plano: {}",reason.chars().take(200).collect::<String>()));
+        true
     }
 
     fn set_mode(&mut self,selected:&str,operation_id:Option<String>,effects:&mut Vec<Effect>) {
@@ -854,7 +1018,8 @@ impl ClaudeEngine {
                         effects.push(Effect::PersistClaude {operation_id:None,patch:json!({"session_id":sid,"permission_mode":self.permission_mode,"previous_non_plan":self.previous_non_plan})});
                     }
                 }
-                if let Some(model) = event["model"].as_str() { self.model = Some(model.into()); }
+                // Sessão com motor: o proxy pode devolver só o modelo base; a rota fixa é a escolha da sessão.
+                if let Some(model) = event["model"].as_str().filter(|_|self.metadata["engine_account"].as_str().is_none_or(str::is_empty)) { self.model = Some(model.into()); }
                 if event["terminal_slash_commands"].is_array() { self.terminal_commands = event["terminal_slash_commands"].clone(); }
             }
             "status" => {
@@ -863,22 +1028,35 @@ impl ClaudeEngine {
                 else if event["status"] == "requesting" && self.in_progress && !self.compacting { self.label = Some("Pensando…".into()); }
             }
             "thinking_tokens" if self.in_progress && !self.compacting => self.label = Some("Pensando…".into()),
-            "compact_boundary" => { self.compacting = false; self.label = None; }
+            "compact_boundary" => if std::mem::take(&mut self.compacting) { self.label = None; },
+            // O conjunto vivo inteiro do trabalho de fundo: substitui o que se sabia dele (o que saiu terminou).
+            "background_tasks_changed" => {
+                let live:BTreeSet<String> = event["tasks"].as_array().into_iter().flatten().filter_map(|task|task["task_id"].as_str().map(str::to_owned)).collect();
+                for task in event["tasks"].as_array().into_iter().flatten() {
+                    self.track_subagent(task);
+                    self.start_task(task);
+                }
+                let gone:Vec<String> = self.background.difference(&live).cloned().collect();
+                self.tasks.retain(|(key,_)|!gone.contains(key));
+                self.background = live;
+                self.label = self.tasks_label();
+            }
             "task_started" | "task_progress" | "task_notification" | "task_updated" => {
+                if subtype == "task_started" { self.track_subagent(event); }
+                else if subtype != "task_progress" { self.finish_subagent(event); }
                 let id = event["task_id"].as_str().map(str::to_owned).unwrap_or_else(||event["task_id"].to_string());
-                if subtype == "task_started" {
-                    self.tasks.push((id,json!({"kind":event["subagent_type"].as_str().or_else(||event["task_type"].as_str()).unwrap_or("agente"),"step":event["description"]})));
+                // Como no Python: o rótulo só muda quando a lista de subagentes ou o passo de um deles muda.
+                let relabel = if subtype == "task_started" {
+                    self.start_task(event);
+                    true
                 } else if subtype == "task_progress" {
-                    if let Some((_,task)) = self.tasks.iter_mut().find(|(key,_)|*key == id) { task["step"] = event["description"].clone(); }
+                    match self.tasks.iter_mut().find(|(key,_)|*key == id) {
+                        Some((_,task)) => { if let Some(step) = event["description"].as_str().filter(|s|!s.is_empty()) { task["step"] = json!(step); } true }
+                        None => false,
+                    }
                 } else if event["status"].as_str().or_else(||event["patch"]["status"].as_str())
-                    .is_some_and(|s|["completed","failed","killed","cancelled"].contains(&s)) { self.tasks.retain(|(key,_)|key != &id); }
-                self.label = self.tasks.last().map(|(_,task)| {
-                    let step = task["step"].as_str().unwrap_or("").trim_start_matches("Running ").trim();
-                    let label = if step.is_empty() { format!("{}…",task["kind"].as_str().unwrap_or("agente")) }
-                        else { format!("{}: {step}",task["kind"].as_str().unwrap_or("agente")) };
-                    let label = if self.tasks.len() > 1 { format!("{} agentes · {label}",self.tasks.len()) } else { label };
-                    label.chars().take(120).collect()
-                });
+                    .is_some_and(|s|["completed","failed","killed","cancelled"].contains(&s)) { self.tasks.retain(|(key,_)|key != &id); true } else { false };
+                if relabel { self.label = self.tasks_label(); }
             }
             _ => return,
         }
@@ -988,12 +1166,17 @@ impl ClaudeEngine {
                 self.changed(effects,true);
             }
         }
+        let mut expired = Vec::new();
         for waiter in self.waiters.values_mut() {
             if !waiter.timed_out && now >= waiter.deadline {
                 waiter.timed_out = true;
                 effects.push(Effect::Reply { operation_id:waiter.operation_id.clone(),disposition:Disposition::Unknown,
                     payload:json!({"error":"controle sem resposta"}) });
+                expired.push((waiter.operation_id.clone(),waiter.payload.clone()));
             }
+        }
+        for (operation_id,payload) in expired {
+            if self.restore_failed_for(&operation_id,&payload,"sem resposta da CLI") { self.changed(effects,true); }
         }
         if self.label_deadline.is_some_and(|deadline|now >= deadline) {
             self.label_deadline = self.turn_start.map(|_|now+1.0); self.changed(effects,false);
@@ -1009,6 +1192,13 @@ impl ClaudeEngine {
             .into_iter().flatten().chain(self.waiters.values().filter(|w|!w.timed_out).map(|w|w.deadline))
             .min_by(f64::total_cmp)
     }
+}
+
+fn permission_text(request:&Value) -> String {
+    let detail = request["description"].as_str().or_else(||request["input"]["command"].as_str())
+        .or_else(||request["input"]["file_path"].as_str()).or_else(||request["input"]["path"].as_str()).unwrap_or("");
+    let detail = if detail.chars().count() > 200 { format!("{}…",detail.chars().take(200).collect::<String>()) } else { detail.into() };
+    format!("Permitir {}? {detail}",request["tool_name"].as_str().unwrap_or("ferramenta")).trim().into()
 }
 
 fn turn_activity(kind:&str,event:&Value) -> bool {
@@ -1080,5 +1270,22 @@ fn answer_body(question:&Value,answers:&Value) -> Result<Value,RuntimeError> {
         if !response.is_empty() { lines.push("Ele já respondeu:".into()); lines.extend(response.iter().map(|(q,a)|format!("- {q} → {}",a.as_str().unwrap_or("")))); }
         lines.push("Não repita a pergunta: responda em texto e aguarde a mensagem dele.".into());
         Ok(json!({"behavior":"deny","message":lines.join("\n")}))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn question_that_is_not_a_form_is_shown_unanswerable() {
+        let clock = ClockSample { monotonic_s:10.0,epoch_s:1_800_000_010.0 };
+        let mut engine = ClaudeEngine::new(json!({"name":"session","session_id":"sid","initialized":true}),1,clock);
+        engine.set_interactions("key".into(),Arc::new(InteractionStore::default())).unwrap();
+        engine.question = Some(json!("não é formulário"));
+        let state = engine.public_state();
+        assert_eq!(state.problema.as_deref(),Some("runtime_falhou"));
+        assert_eq!(state.problema_detalhe.as_deref(),Some("erro_interacao_indisponivel"));
+        assert!(state.codex_question.is_none() && state.interaction_id.is_none() && state.options.is_none());
     }
 }
