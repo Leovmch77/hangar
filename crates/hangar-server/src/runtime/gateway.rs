@@ -962,12 +962,12 @@ impl RuntimeRegistry {
         let entry=matches.next()?;if matches.next().is_some() {return None;}
         match &entry.handle {
             EntryHandle::Terminal {target,..}=>Some(crate::transcript::InternalInfo {provider:"claude".into(),jsonl:Some(target.transcript.clone()),session_key:target.key.clone(),
-                history:json!({"queue":target.projection_dir.join(format!("{}.jsonl",name))}),headless:false}),
+                history:json!({"queue":target.projection_dir.join(format!("{}.jsonl",name))}),headless:false,lifecycle_id:None}),
             EntryHandle::Headless(_)=> {
                 let live=entry.live.borrow().clone()?;
                 let binding=live.binding.as_ref().filter(|binding|binding.key==entry.mode_source.binding.key && binding.generation==entry.generation && !binding.conversation.is_empty())?;
                 let jsonl=entry.mode_source.transcript.with_file_name(format!("{}.jsonl",binding.conversation));
-                Some(crate::transcript::InternalInfo {provider:crate::transcript::Provider::ClaudeHeadless.as_str().into(),jsonl:Some(jsonl),session_key:binding.key.clone(),history:json!({"queue":entry.lease_path.parent()?.parent()?.join(format!("{name}.jsonl"))}),headless:true})
+                Some(crate::transcript::InternalInfo {provider:crate::transcript::Provider::ClaudeHeadless.as_str().into(),jsonl:Some(jsonl),session_key:binding.key.clone(),history:json!({"queue":entry.lease_path.parent()?.parent()?.join(format!("{name}.jsonl"))}),headless:true,lifecycle_id:None})
             },
             _=>None,
         }

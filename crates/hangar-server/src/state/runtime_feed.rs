@@ -427,7 +427,7 @@ mod tests {
     fn fixture() -> Fixture {
         let dir = tempfile::tempdir().unwrap();
         let ctx = test_ctx();
-        let binding = Binding { provider: Provider::Codex, jsonl: dir.path().join("rollout-abc.jsonl"), key: "thread-1".into(), headless: true };
+        let binding = Binding { provider: Provider::Codex, jsonl: dir.path().join("rollout-abc.jsonl"), key: "thread-1".into(), headless: true, life: None };
         let lease = ctx.hubs.acquire("s", binding, &ctx);
         Fixture { _dir: dir, lease, published: Arc::default(), ctx }
     }
@@ -538,7 +538,7 @@ mod tests {
         let mut feed = RuntimeFeed::new(&f.lease.hub,Some(registry.live("s")),f.published.clone(),Some(feed_facts(&py,&external)))
             .with_registry(Some(registry.clone())).with_home(home.path());
         feed.refresh_facts().await;
-        let b = Binding {provider:Provider::ClaudeHeadless,jsonl:f._dir.path().join("sid-b.jsonl"),key:"sid-b".into(),headless:true};
+        let b = Binding {provider:Provider::ClaudeHeadless,jsonl:f._dir.path().join("sid-b.jsonl"),key:"sid-b".into(),headless:true,life:None};
         let _rebinding = f.ctx.hubs.acquire("s",b,&f.ctx);
         let mut rx = f.lease.hub.tx.subscribe();
         assert!(feed.round().await);
@@ -631,7 +631,7 @@ mod tests {
                 plugin.suggest(&life, "suggest-a".into(), true).unwrap();
                 let mut rx = f.lease.hub.tx.subscribe();
                 feed.refresh_facts().await;
-                let b = Binding {provider:Provider::ClaudeHeadless,jsonl:f._dir.path().join("sid-b.jsonl"),key:"sid-b".into(),headless:true};
+                let b = Binding {provider:Provider::ClaudeHeadless,jsonl:f._dir.path().join("sid-b.jsonl"),key:"sid-b".into(),headless:true,life:None};
                 let _rebinding = f.ctx.hubs.acquire("s", b, &f.ctx);
                 assert!(feed.round().await);
                 assert!(collect(&mut rx, Duration::from_millis(20)).await.iter().all(|(_,kind,_)| !matches!(kind.as_str(),"ask_question"|"state"|"suggest")));
@@ -792,7 +792,7 @@ mod tests {
     fn claude_fixture() -> Fixture {
         let dir = tempfile::tempdir().unwrap();
         let ctx = test_ctx();
-        let binding = Binding { provider: Provider::ClaudeHeadless, jsonl: dir.path().join("sid.jsonl"), key: "sid".into(), headless: false };
+        let binding = Binding { provider: Provider::ClaudeHeadless, jsonl: dir.path().join("sid.jsonl"), key: "sid".into(), headless: false, life: None };
         let lease = ctx.hubs.acquire("s", binding, &ctx);
         Fixture { _dir: dir, lease, published: Arc::default(), ctx }
     }

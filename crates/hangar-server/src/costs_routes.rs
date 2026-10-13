@@ -5,7 +5,7 @@ use crate::costs::index::IndexError;
 use crate::costs::py::LocalTs;
 use crate::costs::{CacheKey, codex, report_costs, report_uso, session_cost};
 use crate::costs_failure::FailureReason;
-use crate::routes::{AppState, cors, fetch_info, gate, maybe_gzip, pass, route_failed};
+use crate::routes::{AppState, cors, gate, maybe_gzip, pass, route_failed};
 use axum::body::Body;
 use axum::extract::{ConnectInfo, Path, Request, State};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
@@ -310,7 +310,7 @@ pub async fn session_cost(
     if !owner || request.method() != Method::GET {
         return pass(&state, request, &forward).await;
     }
-    let result = match fetch_info(&state.http, state.cfg.upstream, &state.cfg.internal_secret, &name).await {
+    let result = match state.info(&name).await {
         Err(_) => Err(FailureReason::InfoUnavailable),
         Ok(info) => match info
             .filter(|info| info.provider == "codex")

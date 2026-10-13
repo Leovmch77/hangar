@@ -42,7 +42,7 @@ pub(crate) fn peer_bodies(text: &str) -> Vec<&str> {
     PEER_BODY.captures_iter(t).filter_map(|c| c.get(1)).map(|m| strip(m.as_str())).filter(|b| !b.is_empty()).collect()
 }
 
-/// O que o Python devolve em `GET /internal/sessions/{name}/info`.
+/// A sessão como a descoberta do Rust a vê (`locate::info_of`).
 #[derive(serde::Deserialize, Clone, Debug)]
 pub struct InternalInfo {
     pub provider: String,
@@ -56,6 +56,8 @@ pub struct InternalInfo {
     /// Codex sem terminal (sidecar `headless`): o estado ao vivo dele é do feed do hub.
     #[serde(default)]
     pub headless: bool,
+    #[serde(default)]
+    pub lifecycle_id: Option<String>,
 }
 
 #[derive(Clone, Debug)]

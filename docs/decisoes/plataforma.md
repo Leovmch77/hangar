@@ -2030,6 +2030,35 @@ contava threads `asyncio_N` e o uvloop nomeia `ThreadPoolExecutor-N_M` (mostrava
   sobraram nos dois lados. Uma ponte que vai e volta entre os processos no mesmo pedido é bug de
   desenho, não detalhe de desempenho.
 
+## A conversa da sessão é escolhida pelo Rust, e a troca espera duas leituras
+
+Relatado em 12/10/2026: no app nativo de outra máquina, a conversa de uma sessão Claude com terminal
+ficou só com a prévia ("Composing…"), sem as mensagens de cima, e elas voltaram sozinhas depois. O
+histórico e o chat ao vivo já eram do Rust desde 02/10 (`af6b1a373`), mas qual `.jsonl` abrir ainda
+vinha do Python: `GET /internal/sessions/{name}/info` (a descoberta do `registry.list()`) e o evento
+`info` do `side-events`. O Python só trocava de transcript depois de ver a troca em duas rodadas de
+2 s (`jsonl_watcher`), porque a resolução oscila quando o processo com `--session-id` some por um
+ciclo, e cada troca apaga a conversa na tela. O Rust, ao ligar um aparelho, trocava com uma leitura
+só (`ensure_current`), sem log. A lista do Rust já tinha a própria descoberta desde 05/10
+(`fe121c8cb`); ninguém voltou para ligar o histórico nela. Não deu para confirmar na máquina do
+relato, porque esse caminho não deixava rastro.
+
+- **A descoberta é a da lista do Rust** (`locate.rs`, `ListLocate`): o retrato de até 2 s e, se a
+  sessão não estiver nele, uma rodada nova. `/history`, `/events`, páginas da conversa, custo da
+  sessão Codex e o canal privado do estado leem dali. O `/info` do Python e o evento `info` saíram
+  (protocolo 57).
+- **A troca de transcript só vale lida duas vezes seguidas** (`side::judge`, vigia de 2 s por hub).
+  Troca de provider, de modo do Codex ou de vida da sessão (`lifecycle_id`, outra sessão com o mesmo
+  nome) vale na hora. Sessão sumida também espera duas leituras. Cada leitura diferente, confirmada
+  ou descartada, vai ao log.
+- **Com o chat ao vivo aberto, o `/history` usa o transcript que o hub confirmou**, não a leitura
+  solta: o histórico e o canal ao vivo nunca mostram conversas diferentes.
+- **A conexão interna recebe a conversa do Rust** (`side-events?provider=…&jsonl=…`) e não procura
+  nada; a troca religa essa conexão. O Python continua com a própria descoberta só no modo `python`,
+  no convidado (8766) e no Connect (8768).
+- **A reabertura da sessão em erro continua no coordenador do Python**: abrir a conversa (dono ou
+  convidado) pede `POST /internal/sessions/{name}/reopen`, sem esperar resposta.
+
 ## Processos que usam uma conta: o Claude Desktop não é cliente
 
 Medido em 11/10/2026. O Claude Desktop (app da Anthropic, Electron) se chama `claude`, junta o argv
@@ -2063,8 +2092,8 @@ login `unknown`: "Outros agentes" é o grupo das chaves de API.
 
 ## Perguntas, permissões e ciclo de vida no Rust: fronteira com o Python
 
-(11/10/2026, branch `Hangar-rust`, contrato interno **52**, **57** depois da fusão com a `main`,
-que já estava em 56; desenho [`2026-10-10-conversation-permissions-rust-design.md`](../superpowers/specs/2026-10-10-conversation-permissions-rust-design.md),
+(11/10/2026, branch `Hangar-rust`, contrato interno **52**; **58** depois das fusões com a
+`main`, que chegou a 57 com a descoberta da conversa no Rust; desenho [`2026-10-10-conversation-permissions-rust-design.md`](../superpowers/specs/2026-10-10-conversation-permissions-rust-design.md),
 decisões A/B do usuário de 11/10.) Perguntas, aprovações de ferramenta e modos de permissão do
 Claude e do Codex, e o ciclo de vida da sessão já aberta, passaram a ter um dono só: o
 `hangar-server`. O motivo é o mesmo do dono único: cada ida Rust → Python → Rust era um ponto onde

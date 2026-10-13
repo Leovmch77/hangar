@@ -526,7 +526,8 @@ impl Hangar {
         let set = !state.llm_url.trim().is_empty() && !state.llm_model.trim().is_empty();
         let text = if set {
             let effort = if state.llm_effort.is_empty() { String::new() } else { format!(" · {}", state.llm_effort) };
-            tr("computer_control_llm_from_jev").replace("{model}", &format!("{}{effort}", state.llm_model)).replace("{url}", &state.llm_url)
+            let url = state.llm_url.trim_end_matches('/').trim_end_matches("/chat/completions");
+            tr("computer_control_llm_from_jev").replace("{model}", &format!("{}{effort}", state.llm_model)).replace("{url}", url)
         } else { tr("computer_control_llm_from_jev_missing") };
         div().flex().flex_col().gap_2()
             .child(div().id("computer-llm-summary").text_sm().text_color(theme::muted()).whitespace_normal().child(text))

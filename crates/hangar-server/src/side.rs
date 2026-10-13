@@ -45,9 +45,23 @@ pub struct Binding {
     /// Codex sem terminal: o estado é do feed do runtime, não do Python. O Claude sem terminal já vem
     /// no provider (`ClaudeHeadless`).
     pub headless: bool,
+    /// Vida da sessão (`lifecycle_id`): muda quando outra sessão nasce com o mesmo nome.
+    pub life: Option<String>,
 }
 
 impl Binding {
+    /// Mesmo transcript, provider e modo; a vida não entra (ela pode faltar numa rodada).
+    pub fn same_conversation(&self, other: &Binding) -> bool {
+        (self.provider, &self.jsonl, &self.key, self.headless) == (other.provider, &other.jsonl, &other.key, other.headless)
+    }
+
+    /// Troca que vale na hora: provider ou modo (a sessão terminando de se identificar) ou outra
+    /// sessão com o mesmo nome. A troca de transcript dentro da mesma sessão espera confirmação.
+    pub fn changes_at_once(&self, other: &Binding) -> bool {
+        let other_life = matches!((&self.life, &other.life), (Some(a), Some(b)) if a != b);
+        self.provider != other.provider || self.headless != other.headless || other_life
+    }
+
     /// Eventos do estado que o Rust publica para esta ligação: os quatro do `Monitor` (Claude com
     /// terminal), os do feed (Claude e Codex sem terminal) ou nenhum (o Python observa).
     pub fn state_events(&self) -> Option<&'static [&'static str]> {
@@ -70,21 +84,56 @@ impl Binding {
             jsonl: info.jsonl.clone()?,
             key: info.session_key.clone(),
             headless: info.headless,
+            life: info.lifecycle_id.clone(),
         })
     }
 }
 
-pub const INFO_TTL: Duration = Duration::from_secs(1);
-pub type InfoCache = Arc<Mutex<HashMap<String, (Instant, Option<InternalInfo>)>>>;
+/// Intervalo entre as leituras da descoberta que vigiam a troca de transcript.
+const WATCH_EVERY: Duration = Duration::from_secs(2);
 
-/// Guarda o `info` mais recente; o da conexão interna também entra, para quem chega logo depois
-/// de uma troca não religar o hub com um `info` velho.
-pub fn remember_info(cache: &InfoCache, name: &str, info: Option<InternalInfo>) {
-    let mut m = cache.lock().unwrap();
-    if m.len() > 256 {
-        m.retain(|_, (at, _)| at.elapsed() < INFO_TTL);
+/// O que a leitura da descoberta pede ao hub.
+#[derive(Debug, PartialEq)]
+enum Verdict {
+    Keep,
+    /// Leitura diferente da ligação, ainda sem confirmação.
+    Wait,
+    Rebind(Binding),
+    /// Sessão sumida ou provider fora do Rust.
+    Close,
+}
+
+/// Troca de transcript (ou sessão sumida) só vale lida duas vezes seguidas: a descoberta pode
+/// apontar outro arquivo da pasta por uma rodada, e cada troca apaga a conversa na tela de todos.
+/// `Binding::changes_at_once` vale na hora.
+fn judge(current: &Binding, seen: Option<Option<Binding>>, pending: &mut Option<Option<Option<Binding>>>) -> Verdict {
+    let immediate = match &seen {
+        Some(Some(b)) if b.same_conversation(current) => {
+            *pending = None;
+            return Verdict::Keep;
+        }
+        Some(Some(b)) => current.changes_at_once(b),
+        // Provider que o Rust não lê.
+        Some(None) => true,
+        None => false,
+    };
+    let repeated = pending.as_ref().is_some_and(|p| match (p, &seen) {
+        (Some(Some(a)), Some(Some(b))) => a.same_conversation(b),
+        (a, b) => a == b,
+    });
+    if !immediate && !repeated {
+        *pending = Some(seen);
+        return Verdict::Wait;
     }
-    m.insert(name.to_string(), (Instant::now(), info));
+    *pending = None;
+    match seen {
+        Some(Some(b)) => Verdict::Rebind(b),
+        _ => Verdict::Close,
+    }
+}
+
+fn file_name(p: &std::path::Path) -> String {
+    p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
 }
 
 /// Eventos cujo último valor vale para quem chega depois: o Python só os manda na mudança.
@@ -159,13 +208,23 @@ pub struct SideCtx {
     pub http: HttpClient,
     pub watchers: Watchers,
     pub hubs: Hubs,
-    pub infos: InfoCache,
+    /// Qual conversa é a de cada sessão (a descoberta do Rust); o hub a relê para seguir trocas.
+    pub locate: Arc<dyn crate::locate::Locate>,
     /// `None`: sem estado no Rust (testes do hub); o Python segue produzindo os quatro eventos.
     pub monitors: Option<SpawnMonitor>,
     /// Faixa e avisos que o Rust publica nas sessões sem terminal dele (interface dos mods).
     pub mods: crate::mods::state::Mods,
     /// Registro do runtime, quando ligado: diz se o ator do Codex com terminal é do Rust (dono do estado).
     pub runtime: Arc<std::sync::OnceLock<Arc<crate::runtime::gateway::RuntimeRegistry>>>,
+}
+
+impl SideCtx {
+    /// A conversa da sessão: a do runtime daqui quando ele abriu o Claude (ele já confirmou a troca e
+    /// religou o hub), senão a descoberta. Sem isso a vigia desfaria o `/clear` que a descoberta ainda não viu.
+    pub(crate) async fn info(&self, name: &str) -> Result<Option<InternalInfo>, crate::locate::InfoFailed> {
+        if let Some(runtime) = self.runtime.get() && let Some(info) = runtime.claude_info(name).await { return Ok(Some(info)); }
+        self.locate.info(name).await
+    }
 }
 
 #[derive(Default)]
@@ -483,22 +542,107 @@ impl Hub {
         Some((rx, cached, events))
     }
 
-    /// Aparelho novo com `info` diferente (sessão recriada com o mesmo nome): troca o leitor já,
-    /// para ele nunca receber a cauda do transcript morto, e religa a conexão interna, cujo
-    /// primeiro `info` confirma ou corrige.
+    /// Aparelho novo cuja leitura da descoberta difere da ligação. Provider trocado religa já; outro
+    /// transcript fica com a vigia do hub (`watch_binding`), que só troca lido duas vezes: uma
+    /// leitura solta apagaria a conversa na tela de todos.
     /// Hub já fechado (removido do mapa): nada a fazer; o `attach` dá `None` e o aparelho recebe
     /// `reset` e volta ao Python.
     fn ensure_current(self: &Arc<Self>, binding: &Binding) {
-        let same = match self.bound.lock().unwrap().as_ref() {
+        let current = match self.bound.lock().unwrap().as_ref() {
             None => return,
-            Some(b) => b.binding == *binding,
+            Some(b) => b.binding.clone(),
         };
-        if !same {
+        if current.same_conversation(binding) {
+            // Sessão que voltou com a mesma conversa (resume): o `Monitor` que viu a morte renasce.
+            self.ensure_monitor();
+        } else if current.changes_at_once(binding) {
+            tracing::info!(session = %self.name, "provider trocou ou a sessão é outra; reset nos aparelhos");
             self.rebind(binding.clone());
             self.restart_side();
         } else {
-            // Sessão que voltou com a mesma conversa (resume): o `Monitor` que viu a morte renasce.
-            self.ensure_monitor();
+            tracing::info!(session = %self.name, ligado = %file_name(&current.jsonl), lido = %file_name(&binding.jsonl),
+                "aparelho leu outro transcript; a vigia confirma antes de trocar");
+        }
+    }
+
+    /// Relê a descoberta a cada `WATCH_EVERY` e segue a troca de transcript (`/clear`, resume) só
+    /// quando ela se repete; sessão sumida ou provider fora do Rust fecham o hub.
+    async fn watch_binding(self: Arc<Self>) {
+        let mut pending = None;
+        let mut failing: Option<&'static str> = None;
+        loop {
+            tokio::time::sleep(WATCH_EVERY).await;
+            let Some(before) = self.binding() else { return };
+            let info = match self.ctx.info(&self.name).await {
+                Ok(info) => {
+                    if let Some(code) = failing.take() {
+                        tracing::info!(session = %self.name, code, "descoberta da sessão voltou");
+                    }
+                    info
+                }
+                // Descoberta fora: nada prova troca nenhuma, e a conversa atual fica.
+                Err(crate::locate::InfoFailed(code)) => {
+                    if failing.replace(code).is_none() {
+                        tracing::warn!(session = %self.name, code, "descoberta da sessão falhou; a vigia segue na conversa atual");
+                    }
+                    continue;
+                }
+            };
+            let seen = match &info {
+                None => None,
+                Some(i) if Provider::parse(&i.provider).is_none() => Some(None),
+                Some(i) => match Binding::from_info(i) {
+                    Some(b) => Some(Some(b)),
+                    // Linha ainda sem transcript (sessão nascendo, troca em curso): nada a comparar.
+                    None => continue,
+                },
+            };
+            // Um aparelho entrando pode ter religado o hub enquanto a leitura corria.
+            let Some(current) = self.binding() else { return };
+            if current != before {
+                pending = None;
+                continue;
+            }
+            if let Some(Some(b)) = &seen {
+                self.learn_life(b);
+            }
+            let gone = seen.is_none();
+            let had_pending = pending.is_some();
+            match judge(&current, seen, &mut pending) {
+                Verdict::Keep if had_pending => {
+                    tracing::info!(session = %self.name, "troca de transcript não se repetiu; ignorada");
+                }
+                Verdict::Keep => {}
+                Verdict::Wait if gone => {
+                    tracing::info!(session = %self.name, "sessão fora da descoberta; confirma na próxima leitura");
+                }
+                Verdict::Wait => {
+                    tracing::info!(session = %self.name, ligado = %file_name(&current.jsonl), "descoberta leu outro transcript; confirma na próxima leitura");
+                }
+                Verdict::Rebind(next) => {
+                    tracing::info!(session = %self.name, de = %file_name(&current.jsonl), para = %file_name(&next.jsonl),
+                        "transcript ou provider trocou; reset nos aparelhos");
+                    self.rebind(next);
+                    // Aborta esta mesma tarefa: a vigia renasce com a conexão interna da ligação nova.
+                    self.restart_side();
+                    return;
+                }
+                Verdict::Close => {
+                    let why = if gone { "sessão sumiu da descoberta" } else { "provider saiu do Rust" };
+                    tracing::info!(session = %self.name, why, "aparelhos voltam ao Python");
+                    self.close();
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Hub que nasceu sem a vida da sessão (rodada sem ela) passa a tê-la: sem isso, outra sessão com
+    /// o mesmo nome esperaria duas leituras em vez de trocar na hora.
+    fn learn_life(&self, seen: &Binding) {
+        let mut bound = self.bound.lock().unwrap();
+        if let Some(b) = bound.as_mut().filter(|b| b.binding.life.is_none() && b.binding.same_conversation(seen)) {
+            b.binding.life = seen.life.clone();
         }
     }
 
@@ -697,7 +841,15 @@ enum SideEnd {
     Retry,
 }
 
+/// A conexão interna da ligação atual e a vigia da troca de transcript, que morrem juntas.
 async fn run_side(hub: Arc<Hub>) {
+    tokio::select! {
+        _ = side_loop(hub.clone()) => {}
+        _ = hub.clone().watch_binding() => {}
+    }
+}
+
+async fn side_loop(hub: Arc<Hub>) {
     let mut attempt = 0u32;
     loop {
         match side_once(&hub, &mut attempt).await {
@@ -715,10 +867,14 @@ async fn run_side(hub: Arc<Hub>) {
 }
 
 async fn side_once(hub: &Arc<Hub>, attempt: &mut u32) -> SideEnd {
+    // O Python segue o transcript que o Rust escolheu; a troca religa esta conexão (`restart_side`).
+    let Some(binding) = hub.bound.lock().unwrap().as_ref().map(|b| b.binding.clone()) else { return SideEnd::Gone };
     let url = format!(
-        "http://{}/internal/sessions/{}/side-events?app=1",
+        "http://{}/internal/sessions/{}/side-events?app=1&provider={}&jsonl={}",
         hub.ctx.upstream,
-        utf8_percent_encode(&hub.name, NON_ALPHANUMERIC)
+        utf8_percent_encode(&hub.name, NON_ALPHANUMERIC),
+        binding.provider.as_str(),
+        utf8_percent_encode(&binding.jsonl.to_string_lossy(), NON_ALPHANUMERIC),
     );
     let req = match axum::http::Request::get(url).header("x-hangar-internal", &hub.ctx.secret).body(Body::empty()) {
         Ok(r) => r,
@@ -741,7 +897,11 @@ async fn side_once(hub: &Arc<Hub>, attempt: &mut u32) -> SideEnd {
     if resp.status() == StatusCode::NOT_FOUND {
         // O Python dá 404 também ao segredo recusado: com o hub já ligado, vale o aviso.
         tracing::warn!(session = %hub.name, "conexão interna: 404 (sessão sumiu ou segredo interno recusado)");
-        remember_info(&hub.ctx.infos, &hub.name, None);
+        return SideEnd::Gone;
+    }
+    if resp.status() == StatusCode::BAD_REQUEST {
+        // Conversa recusada pelo Python: repetir o mesmo pedido não muda a resposta.
+        tracing::warn!(session = %hub.name, provider = binding.provider.as_str(), "conexão interna: 400 (conversa recusada); aparelhos voltam ao Python");
         return SideEnd::Gone;
     }
     if !resp.status().is_success() {
@@ -770,33 +930,13 @@ async fn side_once(hub: &Arc<Hub>, attempt: &mut u32) -> SideEnd {
                 return SideEnd::Retry;
             }
         };
+        if first {
+            // Conexão nova manda a fila inteira de novo: o retrato anterior sai.
+            hub.cache.lock().unwrap().queue.clear();
+            *attempt = 0;
+            first = false;
+        }
         match ev.event.as_str() {
-            "info" => {
-                let mut info = match serde_json::from_str::<InternalInfo>(&ev.data) {
-                    Ok(i) => i,
-                    Err(e) => {
-                        tracing::warn!(session = %hub.name, line = e.line(), column = e.column(), "info interna inválida");
-                        return SideEnd::Retry;
-                    }
-                };
-                if let Some(runtime)=hub.ctx.runtime.get() && let Some(local)=runtime.claude_info(&hub.name).await {info=local;}
-                remember_info(&hub.ctx.infos, &hub.name, Some(info.clone()));
-                if first {
-                    // Conexão nova manda a fila inteira de novo: o retrato anterior sai.
-                    hub.cache.lock().unwrap().queue.clear();
-                    *attempt = 0;
-                    first = false;
-                }
-                let Some(binding) = Binding::from_info(&info) else {
-                    tracing::info!(session = %hub.name, provider = %info.provider, "provider fora do Rust; aparelhos voltam ao Python");
-                    return SideEnd::Gone;
-                };
-                let same = hub.bound.lock().unwrap().as_ref().is_some_and(|b| b.binding == binding);
-                if !same {
-                    tracing::info!(session = %hub.name, "transcript ou provider trocou; reset nos aparelhos");
-                    hub.rebind(binding);
-                }
-            }
             "ping" => {}
             "stats" => overlay_plugin_rate(hub, &ev.data).await,
             event => {
@@ -926,9 +1066,11 @@ pub async fn private_events(
         return StatusCode::NOT_FOUND.into_response();
     }
     let Ok(info) = st.info(&name).await else {
-        st.diag.report("rust.state_channel_failed", &name, "internal_info", "o backend não devolveu os dados da sessão");
+        st.diag.report("rust.state_channel_failed", &name, "internal_info", crate::routes::INFO_REASON);
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
+    // Convidado abrindo a conversa também reabre a sessão em erro, como o dono.
+    if info.is_some() { st.request_reopen(&name); }
     // Só Claude (com ou sem terminal), Codex sem terminal e Codex com terminal de ator no Rust têm o estado
     // aqui; o resto o Python observa.
     let owned = |b: &Binding| b.provider == Provider::Codex && st.side.runtime.get().is_some_and(|r| r.owns_codex_terminal(&name));
@@ -1058,16 +1200,24 @@ impl Hubs {
     }
 
     pub(crate) fn rebind_claude(&self,name:&str,key:&str,jsonl:PathBuf,queue:PathBuf)->Result<(),crate::runtime::protocol::RuntimeError> {
-        self.rebind_claude_info(name,InternalInfo {provider:"claude".into(),jsonl:Some(jsonl),session_key:key.into(),history:serde_json::json!({"queue":queue}),headless:false})
+        self.rebind_claude_info(name,InternalInfo {provider:"claude".into(),jsonl:Some(jsonl),session_key:key.into(),history:serde_json::json!({"queue":queue}),headless:false,lifecycle_id:None})
     }
     pub(crate) fn rebind_claude_info(&self,name:&str,info:InternalInfo)->Result<(),crate::runtime::protocol::RuntimeError> {
         let binding=Binding::from_info(&info).filter(|b|matches!(b.provider,Provider::Claude|Provider::ClaudeHeadless)).ok_or_else(||crate::runtime::protocol::RuntimeError::new("lifecycle_hub_binding","vínculo do hub inválido"))?;
         let hub=self.0.lock().map_err(|_|crate::runtime::protocol::RuntimeError::new("lifecycle_hub_unavailable","hub da sessão indisponível"))?.get(name).map(|(hub,_)|hub.clone());
         if let Some(hub)=hub {
-            remember_info(&hub.ctx.infos,name,Some(info));
             hub.rebind(binding);
+            // A conexão interna leva a conversa escolhida: renasce com a nova, como na troca da vigia.
+            hub.restart_side();
         }
         Ok(())
+    }
+
+    /// A ligação do hub vivo da sessão: o transcript que o chat ao vivo segue.
+    pub fn bound(&self, name: &str) -> Option<Binding> {
+        let hub = self.0.lock().unwrap().get(name).map(|(h, _)| h.clone())?;
+        let bound = hub.bound.lock().unwrap();
+        bound.as_ref().map(|b| b.binding.clone())
     }
 
     fn evict(&self, name: &str, hub: &Arc<Hub>) {
@@ -1104,7 +1254,7 @@ pub(crate) fn test_ctx() -> SideCtx {
         http: crate::proxy::client(),
         watchers: Watchers::default(),
         hubs: Hubs::default(),
-        infos: InfoCache::default(),
+        locate: Arc::new(crate::locate::Unavailable),
         monitors: None,
         mods: Default::default(),
         runtime: Default::default(),
@@ -1142,12 +1292,14 @@ mod tests {
     async fn stamped_publication_cannot_write_to_rebound_conversation() {
         let dir = tempfile::tempdir().unwrap();
         let ctx = test_ctx();
-        let binding = |sid: &str| Binding {provider:Provider::ClaudeHeadless,jsonl:dir.path().join(format!("{sid}.jsonl")),key:sid.into(),headless:true};
+        let binding = |sid: &str| Binding {provider:Provider::ClaudeHeadless,jsonl:dir.path().join(format!("{sid}.jsonl")),key:sid.into(),headless:true,life:None};
         let a = ctx.hubs.acquire("stamped", binding("a"), &ctx);
         let old = a.hub.source_binding().unwrap();
         let mut reopened = binding("a");
         reopened.jsonl = dir.path().join("another-account/a.jsonl");
-        let b = ctx.hubs.acquire("stamped", reopened, &ctx);
+        // Troca já confirmada (vigia ou runtime): um aparelho entrando com outra leitura não religa sozinho.
+        a.hub.rebind(reopened);
+        let b = &a;
         let fresh = b.hub.source_binding().unwrap();
         assert_eq!(old.1.key, fresh.1.key);
         assert_ne!(old.0, fresh.0);
@@ -1161,6 +1313,40 @@ mod tests {
         let cached = b.hub.cache.lock().unwrap().replay();
         assert!(!cached.iter().any(|frame| String::from_utf8_lossy(frame).contains("\"interaction_id\":\"a\"")));
         assert!(cached.iter().any(|frame| String::from_utf8_lossy(frame).contains("\"interaction_id\":\"b\"")));
+    }
+
+    fn bind(jsonl: &str, life: Option<&str>) -> Binding {
+        Binding { provider: Provider::Claude, jsonl: jsonl.into(), key: jsonl.into(), headless: false, life: life.map(str::to_owned) }
+    }
+
+    #[test]
+    fn transcript_change_needs_two_readings_and_a_single_one_is_dropped() {
+        let current = bind("a", Some("v1"));
+        let mut pending = None;
+        assert_eq!(judge(&current, Some(Some(bind("b", Some("v1")))), &mut pending), Verdict::Wait);
+        assert_eq!(judge(&current, Some(Some(bind("a", Some("v1")))), &mut pending), Verdict::Keep);
+        assert!(pending.is_none(), "a leitura solta não fica guardada");
+        assert_eq!(judge(&current, Some(Some(bind("b", None))), &mut pending), Verdict::Wait);
+        assert_eq!(judge(&current, Some(Some(bind("b", Some("v1")))), &mut pending), Verdict::Rebind(bind("b", Some("v1"))),
+            "a vida que falta numa rodada não desfaz a confirmação");
+        // Duas leituras diferentes entre si também não confirmam nada.
+        assert_eq!(judge(&current, Some(Some(bind("b", None))), &mut pending), Verdict::Wait);
+        assert_eq!(judge(&current, Some(Some(bind("c", None))), &mut pending), Verdict::Wait);
+    }
+
+    #[test]
+    fn other_life_or_provider_changes_at_once_and_gone_needs_two_readings() {
+        let current = bind("a", Some("v1"));
+        let mut pending = None;
+        assert_eq!(judge(&current, Some(Some(bind("b", Some("v2")))), &mut pending), Verdict::Rebind(bind("b", Some("v2"))));
+        let codex = Binding { provider: Provider::Codex, ..bind("a", Some("v1")) };
+        assert_eq!(judge(&current, Some(Some(codex.clone())), &mut pending), Verdict::Rebind(codex.clone()));
+        let headless = Binding { headless: true, ..codex.clone() };
+        assert_eq!(judge(&codex, Some(Some(headless.clone())), &mut pending), Verdict::Rebind(headless), "Codex trocou de modo");
+        assert_eq!(judge(&current, Some(None), &mut pending), Verdict::Close, "provider fora do Rust");
+        assert_eq!(judge(&current, None, &mut pending), Verdict::Wait);
+        assert_eq!(judge(&current, None, &mut pending), Verdict::Close);
+        assert_eq!(judge(&current, Some(Some(bind("a", None))), &mut pending), Verdict::Keep, "sem a vida, a mesma conversa");
     }
 
     #[test]
@@ -1278,7 +1464,7 @@ mod tests {
     #[tokio::test]
     async fn monitor_publishes_after_rebind() {
         let dir = tempfile::tempdir().unwrap();
-        let binding = |n: &str| Binding { provider: Provider::Claude, jsonl: dir.path().join(format!("{n}.jsonl")), key: n.into(), headless: false };
+        let binding = |n: &str| Binding { provider: Provider::Claude, jsonl: dir.path().join(format!("{n}.jsonl")), key: n.into(), headless: false, life: None };
         let (spawn, count) = fake_monitors(IDLE_PANE);
         let ctx = SideCtx { monitors: Some(spawn), ..idle_ctx() };
         let lease = ctx.hubs.acquire("s", binding("a"), &ctx);
@@ -1297,7 +1483,7 @@ mod tests {
     #[tokio::test]
     async fn python_state_for_rust_session_dropped_once() {
         let dir = tempfile::tempdir().unwrap();
-        let binding = Binding { provider: Provider::Claude, jsonl: dir.path().join("a.jsonl"), key: "a".into(), headless: false };
+        let binding = Binding { provider: Provider::Claude, jsonl: dir.path().join("a.jsonl"), key: "a".into(), headless: false, life: None };
         let (spawn, _) = fake_monitors(IDLE_PANE);
         let ctx = SideCtx { monitors: Some(spawn), ..idle_ctx() };
         let lease = ctx.hubs.acquire("s", binding, &ctx);
@@ -1318,7 +1504,7 @@ mod tests {
         assert!(!state.contains("working"), "o retrato fica com o estado do Rust");
 
         // Codex com terminal: o Python segue dono.
-        let codex = Binding { provider: Provider::Codex, jsonl: dir.path().join("c.jsonl"), key: "c".into(), headless: false };
+        let codex = Binding { provider: Provider::Codex, jsonl: dir.path().join("c.jsonl"), key: "c".into(), headless: false, life: None };
         let other = ctx.hubs.acquire("c", codex, &ctx);
         assert!(on_side_event(&other.hub, "state", r#"{"state":"idle"}"#));
         assert!(on_side_event(&other.hub, "pensamento", r#"{"text":""}"#));
@@ -1331,7 +1517,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (spawn, _) = fake_feeds();
         let ctx = SideCtx { monitors: Some(spawn), ..idle_ctx() };
-        let codex = Binding { provider: Provider::Codex, jsonl: dir.path().join("c.jsonl"), key: "c".into(), headless: true };
+        let codex = Binding { provider: Provider::Codex, jsonl: dir.path().join("c.jsonl"), key: "c".into(), headless: true, life: None };
         let lease = ctx.hubs.acquire("c", codex, &ctx);
         for event in ["state", "preview", "ask_question", "suggest", "pensamento", "ferramenta"] {
             assert!(!on_side_event(&lease.hub, event, r#"{"text":""}"#), "{event} do Python para Codex sem terminal sai");
@@ -1346,7 +1532,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (spawn, count) = fake_feeds();
         let ctx = SideCtx { monitors: Some(spawn), ..idle_ctx() };
-        let binding = Binding { provider: Provider::ClaudeHeadless, jsonl: dir.path().join("h.jsonl"), key: "h".into(), headless: false };
+        let binding = Binding { provider: Provider::ClaudeHeadless, jsonl: dir.path().join("h.jsonl"), key: "h".into(), headless: false, life: None };
         let lease = ctx.hubs.acquire("h", binding, &ctx);
         assert_eq!(count.load(Ordering::SeqCst), 1, "o hub liga o feed");
         for event in ["state", "preview", "ask_question", "suggest", "pensamento", "ferramenta"] {
@@ -1362,7 +1548,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (spawn, count) = fake_feeds();
         let ctx = SideCtx { monitors: Some(spawn), ..idle_ctx() };
-        let binding = |provider| Binding { provider, jsonl: dir.path().join("a.jsonl"), key: "a".into(), headless: false };
+        let binding = |provider| Binding { provider, jsonl: dir.path().join("a.jsonl"), key: "a".into(), headless: false, life: None };
         let lease = ctx.hubs.acquire("s", binding(Provider::Claude), &ctx);
         assert_eq!(lease.hub.owned_events(), &STATE_EVENTS[..], "com terminal: o Monitor");
         let _again = ctx.hubs.acquire("s", binding(Provider::ClaudeHeadless), &ctx);
@@ -1382,7 +1568,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (spawn, count) = fake_feeds();
         let ctx = SideCtx { monitors: Some(spawn), ..idle_ctx() };
-        let claude = Binding { provider: Provider::ClaudeHeadless, jsonl: dir.path().join("h.jsonl"), key: "h".into(), headless: false };
+        let claude = Binding { provider: Provider::ClaudeHeadless, jsonl: dir.path().join("h.jsonl"), key: "h".into(), headless: false, life: None };
         let codex = Binding { provider: Provider::Codex, headless: true, ..claude.clone() };
         let lease = ctx.hubs.acquire("s", claude.clone(), &ctx);
         assert_eq!(count.load(Ordering::SeqCst), 1);
@@ -1427,7 +1613,7 @@ mod tests {
         let registry = Arc::new(RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(), "s".into(), "i".into()));
         registry.bind_hubs(ctx.hubs.downgrade());
         let _ = ctx.runtime.set(registry.clone());
-        let binding = Binding { provider: Provider::Codex, jsonl: dir.path().join("rollout.jsonl"), key: "thread-1".into(), headless: false };
+        let binding = Binding { provider: Provider::Codex, jsonl: dir.path().join("rollout.jsonl"), key: "thread-1".into(), headless: false, life: None };
         let lease = ctx.hubs.acquire("cx-proof", binding, &ctx);
         assert!(!lease.hub.runtime_feed() && lease.hub.owned_events().is_empty(), "sem ator no Rust, o Python observa");
         let target = CodexTerminalTarget { key: "codex-key".into(), generation: 1, name: "cx-proof".into(), endpoint: endpoint.clone(),
@@ -1455,7 +1641,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (spawn, count) = fake_feeds();
         let ctx = SideCtx { monitors: Some(spawn), ..idle_ctx() };
-        let binding = |headless| Binding { provider: Provider::Codex, jsonl: dir.path().join("c.jsonl"), key: "c".into(), headless };
+        let binding = |headless| Binding { provider: Provider::Codex, jsonl: dir.path().join("c.jsonl"), key: "c".into(), headless, life: None };
         let lease = ctx.hubs.acquire("c", binding(false), &ctx);
         let mut rx = lease.hub.tx.subscribe();
         assert!(!lease.hub.has_monitor(), "com terminal: sem dono do estado no Rust");
@@ -1481,7 +1667,7 @@ mod tests {
                 move |name| seen.lock().unwrap().push(format!("rust.state_feed_failed:{name}"))))
         });
         let ctx = SideCtx { monitors: Some(spawn), ..idle_ctx() };
-        let binding = Binding { provider: Provider::Codex, jsonl: dir.path().join("c.jsonl"), key: "c".into(), headless: true };
+        let binding = Binding { provider: Provider::Codex, jsonl: dir.path().join("c.jsonl"), key: "c".into(), headless: true, life: None };
         let lease = ctx.hubs.acquire("c", binding.clone(), &ctx);
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert_eq!(*reported.lock().unwrap(), ["rust.state_feed_failed:c"]);
@@ -1494,7 +1680,7 @@ mod tests {
     #[test]
     fn private_channel_serves_headless_six_events() {
         let six = ["state", "preview", "ask_question", "suggest", "pensamento", "ferramenta"];
-        let codex = Binding { provider: Provider::Codex, jsonl: "c".into(), key: "c".into(), headless: true };
+        let codex = Binding { provider: Provider::Codex, jsonl: "c".into(), key: "c".into(), headless: true, life: None };
         let claude = Binding { headless: false, provider: Provider::Claude, ..codex.clone() };
         let terminal = Binding { headless: false, ..codex.clone() };
         assert_eq!(codex.state_events(), Some(&six[..]));
@@ -1517,13 +1703,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let jsonl = dir.path().join("k.jsonl");
         std::fs::write(&jsonl, "").unwrap();
-        let info = serde_json::json!({"provider": "claude", "jsonl": jsonl, "session_key": "k", "history": {}}).to_string();
-        let python = axum::Router::new().route("/internal/sessions/{name}/info", get(move || {
-            let info = info.clone();
-            async move { ([(axum::http::header::CONTENT_TYPE, "application/json")], info) }
-        }))
-            // Sem esta rota a conexão interna leva 404, que é "sessão sumiu": o hub fecharia com o canal
-            // ainda aberto, e o teste dependia de chegar antes disso.
+        // Sem esta rota a conexão interna leva 404, que é "sessão sumiu": o hub fecharia com o canal
+        // ainda aberto, e o teste dependia de chegar antes disso.
+        let python = axum::Router::new()
             .route("/internal/sessions/{name}/side-events", get(|| async {
                 axum::body::Body::from_stream(futures_util::stream::pending::<Result<axum::body::Bytes, std::convert::Infallible>>())
             }));
@@ -1537,6 +1719,8 @@ mod tests {
         let cfg = crate::config::Config { listen: "127.0.0.1:0".parse().unwrap(), upstream, internal_secret: "s".into(),
             auth_token: "dono".into(), log_path: None, trusted: crate::auth::TrustedHosts::parse("127.0.0.1") };
         let mut st = crate::routes::AppState::new(cfg);
+        st.side.locate = Arc::new(crate::locate::Fixed(Some(serde_json::from_value(serde_json::json!(
+            {"provider": "claude", "jsonl": jsonl, "session_key": "k", "history": {}})).unwrap())));
         let (spawn, count) = fake_monitors(IDLE_PANE);
         st.side.monitors = Some(spawn);
         let st = Arc::new(st);
@@ -1604,7 +1788,7 @@ mod tests {
         let upstream = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, axum::Router::new()).await.unwrap() });
         let dir = tempfile::tempdir().unwrap();
-        let binding = Binding { provider: Provider::Claude, jsonl: dir.path().join("a.jsonl"), key: "a".into(), headless: false };
+        let binding = Binding { provider: Provider::Claude, jsonl: dir.path().join("a.jsonl"), key: "a".into(), headless: false, life: None };
         let ctx = SideCtx { upstream, ..test_ctx() };
         let lease = ctx.hubs.acquire("s", binding, &ctx);
         let gone = tokio::time::timeout(Duration::from_secs(2), async {
@@ -1618,7 +1802,7 @@ mod tests {
     async fn own_pane_question_not_replayed_after_answer() {
         // A pergunta do `Monitor` sai uma vez por pergunta: quem chega depois da resposta não a recebe.
         let dir = tempfile::tempdir().unwrap();
-        let binding = Binding { provider: Provider::Claude, jsonl: dir.path().join("a.jsonl"), key: "a".into(), headless: false };
+        let binding = Binding { provider: Provider::Claude, jsonl: dir.path().join("a.jsonl"), key: "a".into(), headless: false, life: None };
         let ctx = idle_ctx();
         let lease = ctx.hubs.acquire("s", binding, &ctx);
         let late = |hub: &Hub| hub.subscribe_state().unwrap().1.iter().any(|f| f.starts_with(b"event: ask_question"));
@@ -1634,7 +1818,7 @@ mod tests {
     #[tokio::test]
     async fn finished_monitor_releases_python_events_and_returns_with_next_subscriber() {
         let dir = tempfile::tempdir().unwrap();
-        let binding = Binding { provider: Provider::Claude, jsonl: dir.path().join("a.jsonl"), key: "a".into(), headless: false };
+        let binding = Binding { provider: Provider::Claude, jsonl: dir.path().join("a.jsonl"), key: "a".into(), headless: false, life: None };
         let count = Arc::new(AtomicU32::new(0));
         let spawned = count.clone();
         // `Monitor` que acaba na hora, como depois de ver a sessão morta.
@@ -1663,7 +1847,7 @@ mod tests {
     async fn seed_does_not_overwrite_a_newer_band() {
         use serde_json::json;
         let dir = tempfile::tempdir().unwrap();
-        let binding = Binding { provider: Provider::Claude, jsonl: dir.path().join("t.jsonl"), key: "k".into(), headless: false };
+        let binding = Binding { provider: Provider::Claude, jsonl: dir.path().join("t.jsonl"), key: "k".into(), headless: false, life: None };
         let ctx = idle_ctx();
         ctx.mods.bind_hubs(ctx.hubs.downgrade());
         struct Quiet;
@@ -1695,7 +1879,7 @@ mod tests {
     #[tokio::test]
     async fn dead_reader_resets_devices_and_the_next_attach_gets_a_fresh_hub() {
         let dir = tempfile::tempdir().unwrap();
-        let binding = Binding { provider: Provider::Claude, jsonl: dir.path().join("t.jsonl"), key: tail::PANIC_KEY.into(), headless: false };
+        let binding = Binding { provider: Provider::Claude, jsonl: dir.path().join("t.jsonl"), key: tail::PANIC_KEY.into(), headless: false, life: None };
         let ctx = idle_ctx();
         let lease = ctx.hubs.acquire("s", binding.clone(), &ctx);
         let mut rx = lease.hub.tx.subscribe();
@@ -1718,7 +1902,7 @@ mod tests {
     #[tokio::test]
     async fn closed_hub_never_restarts_the_internal_connection() {
         let dir = tempfile::tempdir().unwrap();
-        let binding = |n: &str| Binding { provider: Provider::Claude, jsonl: dir.path().join(n), key: n.into(), headless: false };
+        let binding = |n: &str| Binding { provider: Provider::Claude, jsonl: dir.path().join(n), key: n.into(), headless: false, life: None };
         let ctx = idle_ctx();
         let lease = ctx.hubs.acquire("s", binding("a"), &ctx);
         assert!(lease.hub.side.lock().unwrap().is_some());

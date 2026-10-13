@@ -1233,7 +1233,11 @@ impl Hangar {
             // A seleção sai logo depois: o valor mora no rascunho, e escolher de novo o mesmo modelo (depois de um
             // desfazer) tem que voltar a valer.
             let sub = cx.subscribe_in(&model_box, window, |this: &mut Hangar, model_box, event: &ComboboxEvent<ModelList>, window, cx| {
-                let ComboboxEvent::Change(values) = event else { return };
+                // Fechou (escolha, Esc ou clique fora): a próxima abertura começa sem o filtro desta.
+                let values = match event {
+                    ComboboxEvent::Confirm(_) => { model_box.update(cx, |state, cx| state.set_query("", window, cx)); return; }
+                    ComboboxEvent::Change(values) => values,
+                };
                 let Some(model) = values.first() else { return };
                 this.set_jev_text(AUX_MODEL, model, window, cx);
                 model_box.update(cx, |state, cx| state.clear_selection(cx));

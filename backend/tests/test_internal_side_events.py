@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 
 from app import internal_api, plugin_bridge, pqueue, sse
 from app.adapters.preview_push import PushPreviewSource
-from app.models import ChatEvent, SessionInfo, StateEvent, session_key
+from app.models import ChatEvent, SessionInfo, StateEvent
 
 _TEXTO = "resposta já gravada no arquivo"
 _SECRET = "cd" * 32
@@ -58,20 +58,14 @@ async def _coleta(gen, ate, limite=5.0):
     return vistos
 
 
-async def test_side_comeca_por_info_nao_manda_transcript_e_ainda_drena(tmp_path, fila, monkeypatch):
+async def test_side_nao_manda_transcript_nem_info_e_ainda_drena(tmp_path, fila, monkeypatch):
     adapter = _Adapter()
     monkeypatch.setattr(sse, "get_adapter", lambda provider: adapter)
     jsonl = tmp_path / "abc123.jsonl"
     jsonl.write_text("")
     gen = sse.merged_events("lado-a", str(jsonl), side=True)
     vistos = await _coleta(gen, lambda v: any(e["event"] == "state" for e in v))
-    assert vistos[0]["event"] == "info"
-    info = json.loads(vistos[0]["data"])
-    assert info["provider"] == "claude"
-    assert info["jsonl"] == str(jsonl)
-    assert info["session_key"] == session_key(str(jsonl))
-    assert info["headless"] is False
-    assert not any(e["event"] == "message" for e in vistos)
+    assert not any(e["event"] in ("message", "info") for e in vistos)
     await asyncio.sleep(0.05)   # o drain é fire-and-forget
     assert adapter.drains == [("lado-a", str(jsonl))]
 
@@ -89,23 +83,31 @@ async def test_side_ainda_suprime_previa_ja_gravada(tmp_path, fila, monkeypatch)
     assert any(e["event"] == "preview" and json.loads(e["data"])["text"] == "" for e in vistos)
 
 
-async def test_side_troca_de_provider_emite_info_e_nunca_reset(tmp_path, fila, monkeypatch):
+async def test_side_nao_procura_o_transcript_sozinho(tmp_path, fila, monkeypatch):
+    # Quem escolhe e troca a conversa é o Rust, religando esta conexão: aqui ninguém relê a lista.
     monkeypatch.setattr(sse, "get_adapter", lambda provider: _Adapter())
     velho = tmp_path / "velho.jsonl"
     velho.write_text("")
-    novo = tmp_path / "rollout-2026-10-02T10-00-00-0199aaaa-bbbb-7ccc-8ddd-eeeeffff0000.jsonl"
-    novo.write_text("")
+    lidas = []
 
     async def lista():
-        return [SessionInfo(name="lado-troca", jsonl=str(novo), provider="codex")]
+        lidas.append(1)
+        return [SessionInfo(name="lado-troca", jsonl=str(tmp_path / "novo.jsonl"), provider="codex")]
 
     monkeypatch.setattr(sse, "_cached_list", lista)
     gen = sse.merged_events("lado-troca", str(velho), side=True)
-    vistos = await _coleta(gen, lambda v: sum(e["event"] == "info" for e in v) >= 2)
-    infos = [json.loads(e["data"]) for e in vistos if e["event"] == "info"]
-    assert infos[1]["provider"] == "codex"
-    assert infos[1]["jsonl"] == str(novo)
-    assert not any(e["event"] == "reset" for e in vistos)
+    vistos = []
+    try:
+        # O vigia relê a lista a cada 2 s: a janela cobre duas rodadas dele.
+        async with asyncio.timeout(4.5):
+            async for ev in gen:
+                vistos.append(ev)
+    except TimeoutError:
+        pass
+    finally:
+        await gen.aclose()
+    assert lidas == []
+    assert not any(e["event"] in ("reset", "info") for e in vistos)
 
 
 async def test_side_repassa_a_fila(tmp_path, fila, monkeypatch):
@@ -119,50 +121,45 @@ async def test_side_repassa_a_fila(tmp_path, fila, monkeypatch):
     assert msg["id"] == f"queued-{entry['id']}"
 
 
-async def test_rota_side_events_conta_app_so_com_app_1_e_recusa_sessao_inexistente(
+async def test_rota_side_events_conta_app_so_com_app_1_e_recusa_conversa_invalida(
         tmp_path, fila, monkeypatch):
     from fastapi import HTTPException
-    from app import api
     monkeypatch.setattr(sse, "get_adapter", lambda provider: _Adapter())
-    jsonl = tmp_path / "r.jsonl"
-    jsonl.write_text("")
-    monkeypatch.setattr(api.registry, "list",
-                        lambda: [SessionInfo(name="lado-rota", jsonl=str(jsonl), provider="claude")])
-    with pytest.raises(HTTPException) as exc:
-        await internal_api.side_events("outra", app=1)
-    assert exc.value.status_code == 404
+    jsonl = str(tmp_path / "r.jsonl")
+    (tmp_path / "r.jsonl").write_text("")
+    for provider, path in (("pi", jsonl), ("claude", ""), ("claude", "relativo.jsonl")):
+        with pytest.raises(HTTPException) as exc:
+            await internal_api.side_events("lado-rota", provider=provider, jsonl=path, app=1)
+        assert exc.value.status_code == 400
 
     antes = plugin_bridge._apps_abertos
-    gen = (await internal_api.side_events("lado-rota", app=1)).body_iterator
-    assert (await anext(gen))["event"] == "info"
+    gen = (await internal_api.side_events("lado-rota", provider="claude", jsonl=jsonl, app=1)).body_iterator
+    await anext(gen)
     assert plugin_bridge._apps_abertos == antes + 1
     await gen.aclose()
     assert plugin_bridge._apps_abertos == antes
 
-    gen0 = (await internal_api.side_events("lado-rota", app=0)).body_iterator
-    assert (await anext(gen0))["event"] == "info"
+    gen0 = (await internal_api.side_events("lado-rota", provider="claude", jsonl=jsonl, app=0)).body_iterator
+    await anext(gen0)
     assert plugin_bridge._apps_abertos == antes
     await gen0.aclose()
 
 
 def test_rota_side_events_so_atende_conexao_interna_com_segredo(tmp_path, monkeypatch):
     from app import api
-    jsonl = tmp_path / "r.jsonl"
-    monkeypatch.setattr(api.registry, "list",
-                        lambda: [SessionInfo(name="s1", jsonl=str(jsonl), provider="claude")])
 
     async def finito(name, jsonl, **kw):
-        yield {"event": "info", "data": "{}"}
+        yield {"event": "ping", "data": "{}"}
 
     monkeypatch.setattr(internal_api, "merged_events", finito)
-    rota = "/internal/sessions/s1/side-events"
+    rota = f"/internal/sessions/s1/side-events?provider=claude&jsonl={tmp_path / 'r.jsonl'}"
     mudo = '{"detail":"Not Found"}'
     internal_api.set_secret(_SECRET)
     try:
         loopback = TestClient(api.app, client=("127.0.0.1", 50000))
         ok = loopback.get(rota, headers={"X-Hangar-Internal": _SECRET})
         assert ok.status_code == 200
-        assert "event: info" in ok.text
+        assert "event: ping" in ok.text
         # Recusa é sempre o 404 mudo: sem cabeçalho, cabeçalho errado ou fora do loopback.
         for client, headers in (
             (loopback, {}),

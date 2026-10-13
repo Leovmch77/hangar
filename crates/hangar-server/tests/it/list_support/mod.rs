@@ -57,6 +57,7 @@ pub async fn server(root: &Path, n: usize) -> Server {
     list.set_plugin_runtime(Arc::new(hangar_server::runtime::gateway::RuntimeRegistry::new(upstream, SECRET.into(), "instance-test".into())
         .with_plugin(state.plugin.clone())));
     state.list = list.clone();
+    state.side.locate = Arc::new(hangar_server::locate::ListLocate { list: list.clone() });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let app = router(Arc::new(state)).into_make_service_with_connect_info::<SocketAddr>();

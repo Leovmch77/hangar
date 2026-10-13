@@ -806,19 +806,12 @@ async def _canal_do_estado(name: str):
         writer.close()
 
 
-def _info_event(name: str, provider: str, jsonl: str | None) -> dict:
-    """`info` da conexão interna: o mesmo JSON da rota /internal/sessions/{name}/info."""
-    from app.internal_api import info_payload   # internal_api importa este módulo
-    return {"event": "info",
-            "data": json.dumps(info_payload(name, provider, jsonl), ensure_ascii=False)}
-
-
 async def merged_events(name: str, jsonl: str, provider: str = "claude",
                         start_offset: int | None = None, count_app: bool = True,
                         side: bool = False):
-    # side=True: conexão interna do hangar-server (internal_api.side_events). Abre com `info` e o
-    # repete no lugar do `reset`. A conversa o hangar-server lê do arquivo; aqui o transcript só é
-    # seguido para a supressão da prévia e a baixa da fila do Codex.
+    # side=True: conexão interna do hangar-server (internal_api.side_events). O transcript é o que
+    # o Rust escolheu, e a troca ele faz religando esta conexão; aqui ele só é seguido para a
+    # supressão da prévia e a baixa da fila do Codex.
     # count_app=False: conexao de convidado. Contar como app do dono aberto calaria as push dele.
     # provider: default "claude" preserva o comportamento de hoje pros callers que ainda nao passam
     # (api.py so passa quando uma tarefa futura ligar o seletor de provider no endpoint).
@@ -1203,9 +1196,11 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
         asyncio.create_task(pump("message", pqueue.follow(min_ts=start_ts, emit_confirmed=True))),
         *state_tasks.values(),
         asyncio.create_task(ping_loop()),
-        asyncio.create_task(jsonl_watcher()),
         asyncio.create_task(band_pump()),
     ]
+    # Conexão interna do Rust: quem escolhe e troca o transcript é ele, que religa esta conexão.
+    if not side:
+        tasks.append(asyncio.create_task(jsonl_watcher()))
     # Aviso de mod pode trazer texto sensível do dono: convidado não recebe. O marcador do navegador
     # também não: a url da página de rascunho leva o token do dono.
     if count_app:
@@ -1226,9 +1221,6 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
     if count_app:
         plugin_bridge.app_entrou()
     try:
-        if side:
-            # Dentro do try: quem desconecta já aqui ainda passa pelo finally (tarefas, app_saiu).
-            yield _info_event(name, current_provider, current_jsonl)
         while True:
             # Só o tail_pump enfileira o 3o item (o offset -> `id:` do SSE); os demais produtores
             # continuam mandando pares. Desempacota tolerante em vez de tocar em todos eles.
@@ -1276,8 +1268,7 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
                 stats_task = asyncio.create_task(stats_pump(novo_jsonl))
                 state_tasks = _fontes_do_estado(novo_prov, rust_state)
                 tasks += [t for t in (tail_task, stats_task, *state_tasks.values()) if t is not None]
-                yield (_info_event(name, current_provider, current_jsonl) if side
-                       else {"event": "reset", "data": "{}"})
+                yield {"event": "reset", "data": "{}"}
                 continue
             if event == "__reset__":
                 diag.registrar("sse.reiniciou", sessao=name, provider=current_provider,
@@ -1322,8 +1313,7 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
                     state_tasks["state"].cancel()
                     state_tasks["state"] = asyncio.create_task(pump("state", _monitor_de(current_provider)))
                     tasks.append(state_tasks["state"])
-                yield (_info_event(name, current_provider, current_jsonl) if side
-                       else {"event": "reset", "data": "{}"})
+                yield {"event": "reset", "data": "{}"}
                 continue
             if event == "preview":
                 # Le o ULTIMO texto do slot na hora do envio (frames antigos ja foram sobrescritos).
