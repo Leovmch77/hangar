@@ -7184,7 +7184,7 @@
   "browser_jev_aux_key": "Key",
   "browser_jev_aux_key_help": "Provider key. It stays on the server; only its end shows here.",
   "browser_jev_aux_model": "Model",
-  "browser_jev_aux_model_help": "It must read images for Computer Use. Use Fetch models to see what the provider offers.",
+  "browser_jev_aux_model_help": "It must read images for Computer Use. Open the field to see the provider's models and type to filter.",
   "browser_jev_aux_effort": "Effort",
   "browser_jev_aux_effort_help": "How much the model reasons before answering. More effort, slower.",
   "browser_jev_aux_effort_default": "Provider default",
