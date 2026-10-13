@@ -216,10 +216,13 @@ impl AccountService {
         } else {
             Some(self.quotas.refresh.lock().await)
         };
-        let others = other::sources(&self.env).map_err(|code| {
-            tracing::warn!(code, "fontes de cota ilegíveis");
-            AccountError::io()
-        })?;
+        let (others, problems) = other::sources(&self.env);
+        for code in problems {
+            tracing::warn!(code, "motor do engines.json fora do formato; os outros seguem");
+            if let Some(diag) = self.quotas.diag.get() {
+                diag.report("rust.quota_sources_partial", "cotas", code, "motor do engines.json fora do formato; os outros seguem");
+            }
+        }
         let aliases = other::aliases(&self.env);
         let mut sources = vec![];
         for (row, account) in self.claude_accounts()? {

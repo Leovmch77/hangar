@@ -176,6 +176,15 @@ async fn credentials_match_python() {
         if connect != (status, kind.clone(), body.clone()) {
             failures.push(format!("{name}: a ponte do Connect respondeu diferente do dono: {connect:?}"));
         }
+        // D1: a parte com problema sai sozinha (motor torto, engines.json ilegível, cota indisponível);
+        // a conta Claude continua na lista.
+        if matches!(name, "engines_fora_do_utf8" | "motor_nao_objeto" | "motor_label_numero" | "motor_base_url_lista") {
+            let ids: Vec<&Value> = body.as_array().into_iter().flatten().map(|row| &row["id"]).collect();
+            if status != 200 || ids != [&json!(format!("claude:{HOME}/.claude"))] {
+                failures.push(format!("{name}: D1 esperava 200 só com a conta Claude, rust {status} {body}"));
+            }
+            continue;
+        }
         if status != expected["status"].as_u64().unwrap() as u16 {
             failures.push(format!("{name}: status {status} != {}: {body}", expected["status"]));
             continue;

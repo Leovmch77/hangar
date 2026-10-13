@@ -186,24 +186,19 @@ pub(crate) fn engine_name_ok(name: &str) -> bool {
     NAME.is_match(name)
 }
 
-pub(crate) fn engines(env: &AccountEnvironment) -> Result<Map<String, Value>, &'static str> {
+/// Motores do `engines.json` e os problemas achados (códigos para o diário). Arquivo ilegível ou
+/// fora do formato vira nenhum motor, nunca a lista inteira caída.
+pub(crate) fn engines(env: &AccountEnvironment) -> (Map<String, Value>, Vec<&'static str>) {
     let path = env_value(env, "CP_ENGINES_FILE").map(PathBuf::from).unwrap_or_else(|| shared(env).join("engines.json"));
     let bytes = match std::fs::read(&path) {
         Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Map::new()),
-        Err(_) => {
-            tracing::warn!(code = "engines_unreadable", "engines.json não pôde ser lido; nenhum motor nesta leitura");
-            return Ok(Map::new());
-        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return (Map::new(), vec![]),
+        Err(_) => return (Map::new(), vec!["engines_unreadable"]),
     };
-    // ponytail: bytes fora do UTF-8 derrubavam a enumeração inteira no Python; reproduzido até o conserto do D1.
-    let text = std::str::from_utf8(&bytes).map_err(|_| "engines_not_utf8")?;
+    let Ok(text) = std::str::from_utf8(&bytes) else { return (Map::new(), vec!["engines_not_utf8"]) };
     match parse_json(text.as_bytes()) {
-        Some(Value::Object(map)) => Ok(map),
-        _ => {
-            tracing::warn!(code = "engines_invalid", "engines.json não é um objeto JSON; nenhum motor nesta leitura");
-            Ok(Map::new())
-        }
+        Some(Value::Object(map)) => (map, vec![]),
+        _ => (Map::new(), vec!["engines_invalid"]),
     }
 }
 
@@ -228,19 +223,23 @@ fn kimi_usages_base(base: &str) -> String {
 }
 
 /// Provedores do Kimi Code primeiro, depois os motores, cada grupo na ordem do arquivo. Sem
-/// deduplicação: a mesma chave nos dois lugares são duas fontes.
-pub fn sources(env: &AccountEnvironment) -> Result<Vec<Source>, &'static str> {
+/// deduplicação: a mesma chave nos dois lugares são duas fontes. Motor torto sai sozinho, com o
+/// código do problema na segunda lista.
+pub fn sources(env: &AccountEnvironment) -> (Vec<Source>, Vec<&'static str>) {
     let mut out = vec![];
     for (name, key, base) in kimi_providers(env) {
         let reader = if base.contains("commandcode.ai") { Reader::CommandCode { key } } else { Reader::Kimi { key, base } };
         out.push(Source { id: format!("kimi:{name}"), label: json!(name), provider: reader.kind(), reader });
     }
-    for (name, data) in engines(env)? {
+    let (engines, mut problems) = engines(env);
+    for (name, data) in engines {
         if !engine_name_ok(&name) {
             continue;
         }
-        // ponytail: motor que não é objeto derrubava a enumeração inteira no Python; reproduzido até o conserto do D1.
-        let data = data.as_object().ok_or("engine_not_object")?;
+        let Some(data) = data.as_object() else {
+            problems.push("engine_not_object");
+            continue;
+        };
         let filled = |field: &str| data.get(field).and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_owned);
         let (Some(key), Some(base)) = (filled("api_key"), filled("base_url")) else { continue };
         let id = format!("chave:{name}");
@@ -255,7 +254,7 @@ pub fn sources(env: &AccountEnvironment) -> Result<Vec<Source>, &'static str> {
         };
         out.push(Source { id, label, provider, reader });
     }
-    Ok(out)
+    (out, problems)
 }
 
 // ------------------------------------------------------------------------------- semântica Python

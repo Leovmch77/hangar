@@ -2,13 +2,11 @@
 //! a cota conhece, numa lista só. Tudo em processo: nenhuma pergunta ao Python.
 use super::{
     AccountKey, Provider,
-    catalog::AccountError,
-    http::{Json, bridge, error},
+    http::{Json, bridge},
     quotas::other,
 };
 use axum::{
     extract::Request,
-    http::StatusCode,
     response::{IntoResponse, Response},
 };
 use serde_json::{Map, Value, json};
@@ -18,11 +16,6 @@ const CODEX_AUTH_DEADLINE: Duration = Duration::from_secs(3);
 
 fn unavailable_auth() -> Value {
     json!({"method":"unknown","status":"unavailable","email":null,"plan":null})
-}
-
-/// O 500 cru do FastAPI: falhas que o Python não tratava derrubavam a lista com ele.
-fn crash() -> Response {
-    (StatusCode::INTERNAL_SERVER_ERROR, [(axum::http::header::CONTENT_TYPE, "text/plain; charset=utf-8")], "Internal Server Error").into_response()
 }
 
 /// `sk-kimi••••4f2a`: nunca a chave inteira. Conta caracteres, não bytes.
@@ -80,9 +73,13 @@ fn managed_block(text: Option<&str>, name: &str) -> bool {
     text.find(&start).is_some_and(|i| text[i..].contains(&end))
 }
 
-async fn codex_snapshot(state: &crate::routes::AppState, account: &super::catalog::Account, force: bool, bridge: &super::bridge::AccountsBridge) -> (Value, Value) {
+async fn codex_snapshot(state: &crate::routes::AppState, account: &super::catalog::Account, force: bool, bridge: Option<&super::bridge::AccountsBridge>) -> (Value, Value) {
     let service = &state.accounts;
-    let sync = service.preparation_status(account, bridge).await;
+    // Sem a ponte o preparo é desconhecido: `null`, nunca um `idle` inventado.
+    let sync = match bridge {
+        Some(bridge) => service.preparation_status(account, bridge).await,
+        None => json!({"status": null}),
+    };
     if sync["status"] == "running" {
         return (unavailable_auth(), sync);
     }
@@ -114,24 +111,35 @@ pub async fn public(state: Arc<crate::routes::AppState>, request: Request) -> Re
         Ok(force) => force,
         Err(response) => return *response,
     };
+    // Parte com problema sai sozinha (linha indisponível, cota nula, motor fora) e vai ao diário;
+    // a lista das outras credenciais nunca cai junto.
+    let report = |code: &'static str, reason: &'static str| state.diag.report("rust.credentials_partial", "credenciais", code, reason);
     let service = state.accounts.clone();
-    let codex = match service.visible_codex_accounts() {
-        Ok(accounts) => accounts,
-        Err(err) => return error(err),
+    let codex = service.visible_codex_accounts().unwrap_or_else(|err| {
+        report(err.code, "contas Codex ilegíveis; a lista segue sem elas");
+        vec![]
+    });
+    let bridge = bridge(&state).ok();
+    if bridge.is_none() {
+        report("account_prepare_bridge_unavailable", "ponte de contas ausente; sem cota nem preparo Codex nesta lista");
+    }
+    let snapshots = futures_util::future::join_all(codex.iter().map(|account| codex_snapshot(&state, account, force, bridge.as_ref())));
+    let quotas = async {
+        match &bridge {
+            Some(bridge) => service.quotas(bridge.clone(), force, false).await.ok(),
+            None => None,
+        }
     };
-    let bridge = match bridge(&state) {
-        Ok(bridge) => bridge,
-        Err(_) => return error(AccountError::new(503, "account_prepare_bridge_unavailable", "", json!({}))),
-    };
-    let snapshots = futures_util::future::join_all(codex.iter().map(|account| codex_snapshot(&state, account, force, &bridge)));
-    let quotas = service.quotas(bridge.clone(), force, false);
     let claude = service.claude_states();
     let (snapshots, quotas, claude) = tokio::join!(snapshots, quotas, claude);
     let env = &service.env;
     let aliases = other::aliases(env);
-    let Ok(quotas) = quotas else {
-        return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"detail":{"code":"quota_bridge_unavailable"}}))).into_response();
-    };
+    let quotas = quotas.unwrap_or_else(|| {
+        if bridge.is_some() {
+            report("quota_unavailable", "cotas indisponíveis; as linhas saem sem cota");
+        }
+        json!([])
+    });
     // Id repetido na cota: vale o último valor, na posição do primeiro.
     let mut quota = Map::new();
     for row in quotas.as_array().into_iter().flatten() {
@@ -139,10 +147,10 @@ pub async fn public(state: Arc<crate::routes::AppState>, request: Request) -> Re
             quota.insert(id.to_owned(), row.clone());
         }
     }
-    let claude = match claude {
-        Ok(rows) => rows,
-        Err(err) => return error(err),
-    };
+    let claude = claude.unwrap_or_else(|err| {
+        report(err.code, "contas Claude ilegíveis; a lista segue sem elas");
+        json!([])
+    });
     let mut out = vec![];
     for row in claude.as_array().into_iter().flatten() {
         let path = row["path"].as_str().unwrap_or_default();
@@ -155,25 +163,32 @@ pub async fn public(state: Arc<crate::routes::AppState>, request: Request) -> Re
             "plano": login["plano"], "motivo": login["motivo"], "refreshExpiresAt": float(&login["refreshExpiresAt"])});
         out.push(item);
     }
-    let engines = match other::engines(env) {
-        Ok(engines) => engines,
-        Err(_) => return crash(),
-    };
+    let (engines, problems) = other::engines(env);
+    for code in problems {
+        report(code, "engines.json ilegível; a lista segue sem chaves de API");
+    }
     let cookies = other::opencode_saved(env);
     for (name, data) in engines.into_iter().filter(|(name, _)| other::engine_name_ok(name)) {
-        let Some(data) = data.as_object() else { return crash() };
+        let Some(data) = data.as_object() else {
+            report("engine_not_object", "motor do engines.json fora do formato; os outros seguem");
+            continue;
+        };
         let id = format!("chave:{name}");
         let natural = match data.get("label") {
-            Some(label) if !other::falsy(label) => match label {
-                Value::String(_) => label.clone(),
-                _ => return crash(),
-            },
+            Some(label @ Value::String(_)) if !other::falsy(label) => label.clone(),
+            Some(label) if !other::falsy(label) => {
+                report("engine_invalid_label", "motor com label que não é texto; os outros seguem");
+                continue;
+            }
             _ => json!(name),
         };
         let base = match data.get("base_url") {
             None | Some(Value::Null) => Value::Null,
             Some(base @ Value::String(_)) => base.clone(),
-            Some(_) => return crash(),
+            Some(_) => {
+                report("engine_invalid_base_url", "motor com base_url que não é texto; os outros seguem");
+                continue;
+            }
         };
         let accepts = base.as_str().is_some_and(|b| b.contains("opencode.ai"));
         let mut item = line(&id, "chave", "api_key", &natural, &aliases, &quota);
@@ -186,13 +201,15 @@ pub async fn public(state: Arc<crate::routes::AppState>, request: Request) -> Re
     }
     for (account, (auth, sync)) in codex.iter().zip(snapshots) {
         let id = format!("codex:{}", super::catalog::resolved(&account.home).to_string_lossy());
-        let method = auth["method"].as_str().unwrap_or("unknown");
+        let mut method = auth["method"].as_str().unwrap_or("unknown");
         if !matches!(method, "oauth" | "api_key" | "none" | "unknown") {
-            return crash();
+            report("codex_auth_method_unknown", "método de autenticação Codex desconhecido; sai unknown");
+            method = "unknown";
         }
-        let sync = if account.is_default { Value::Null } else { sync["status"].clone() };
+        let mut sync = if account.is_default { Value::Null } else { sync["status"].clone() };
         if !(sync.is_null() || matches!(sync.as_str(), Some("idle" | "running" | "ready" | "partial" | "error"))) {
-            return crash();
+            report("codex_sync_unknown", "estado de preparo Codex desconhecido; sai null");
+            sync = Value::Null;
         }
         let known = auth["status"].as_str().unwrap_or("unavailable") != "unavailable";
         let (state, logged) = if known { ("ok", json!(auth["status"] == "connected")) } else { ("indisponivel", Value::Null) };

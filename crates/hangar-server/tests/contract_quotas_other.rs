@@ -203,18 +203,24 @@ fn sources_match_python() {
         }
         let env = AccountEnvironment::from_map(base);
         let expected = &case["expected"];
-        let got = match other::sources(&env) {
-            Err(_) => json!({"erro": true}),
-            Ok(sources) => json!({
+        let (sources, _) = other::sources(&env);
+        let got = json!({
                 "sources": sources.iter().map(|s| {
                     let mut row = s.row();
                     row["leitor"] = json!({"tipo": s.reader.kind(), "args": s.reader.args()});
                     row
                 }).collect::<Vec<_>>(),
                 "aliases": other::aliases(&env),
-            }),
-        };
+            });
         let want = if expected.get("erro").is_some() { json!({"erro": true}) } else { expected.clone() };
+        // D1: o motor que não é objeto sai sozinho; os outros continuam fontes.
+        if name == "motor_nao_objeto_derruba" {
+            let ids: Vec<&Value> = got["sources"].as_array().into_iter().flatten().map(|s| &s["id"]).collect();
+            if ids != [&json!("chave:a")] {
+                failures.push(format!("{name}: D1 esperava só chave:a, rust {got}"));
+            }
+            continue;
+        }
         if got != want {
             failures.push(format!("{name}:\n  python {want}\n  rust   {got}"));
         }
