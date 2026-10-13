@@ -8083,5 +8083,17 @@
   "live_voice_memory_kind_preferencia": "Preference",
   "live_voice_memory_kind_referencia": "Reference",
   "live_voice_memory_kind_projeto": "Project",
-  "folder_branches_load_failed": "Couldn't load the branches."
+  "folder_branches_load_failed": "Couldn't load the branches.",
+  "native_activity_background": "Background",
+  "native_subagent_composer": "Message @{agent}…",
+  "native_subagent_message_unavailable": "This subagent doesn't accept messages right now",
+  "atividade_grupo_rodando": "Running · {n}",
+  "atividade_grupo_terminados": "Finished · {n}",
+  "atividade_grupo_antigos": "Older · {n}",
+  "atividade_terminou": "finished {h}",
+  "atividade_parou": "stopped {h}",
+  "erro_subagente_mensagem_sem_terminal": "Without a terminal, Claude Code doesn't accept a direct message to the subagent",
+  "erro_subagente_mensagem_sem_plugin": "The Hangar plugin isn't active in this session, so the message to the subagent has no way through",
+  "erro_subagente_mensagem_recusada": "Claude Code refused the message: {reason}",
+  "erro_subagente_mensagem_sem_resposta": "Claude Code didn't confirm whether it delivered the message to the subagent"
 }

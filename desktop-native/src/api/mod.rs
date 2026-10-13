@@ -141,6 +141,12 @@ fn failure_detail(body: Option<Value>, status: u16) -> String {
                 let key = if code == "internal_info" { "history_internal_info" } else { code };
                 if let Some(message) = crate::i18n::tr_web(key, &std::collections::HashMap::new()) { return Some(message); }
             }
+            // Mensagem direta ao subagente: a frase pelo código, com o `reason` da recusa do Claude Code dentro.
+            if let Some(code) = fields.get("code").and_then(Value::as_str).filter(|code| code.starts_with("erro_subagente_")) {
+                let reason = fields.get("reason").or_else(|| fields.get("params").and_then(|p| p.get("reason"))).and_then(Value::as_str).or(msg).unwrap_or("");
+                let params = std::collections::HashMap::from([("reason".to_owned(), reason.to_owned())]);
+                if let Some(message) = crate::i18n::tr_web(code, &params) { return Some(message); }
+            }
             // Atalhos do projeto: a frase do web pelo código, com o motivo (`params.detalhe`) dentro; sem a frase, o `msg`.
             if let Some(code @ ("erro_project_shortcuts" | "erro_project_shortcuts_projeto" | "erro_project_shortcuts_arquivo" | "erro_shortcut_pasta")) = fields.get("code").and_then(Value::as_str) {
                 let reason = fields.get("params").and_then(|p| p.get("detalhe")).and_then(Value::as_str).or(msg).unwrap_or("");
@@ -824,6 +830,19 @@ mod tests {
         assert!(message.contains("test/channel"), "{message}");
         assert!(!message.contains("{branch}"));
         assert_ne!(message, "server fallback");
+    }
+
+    #[test]
+    fn subagent_message_refusals_translate_by_code_with_the_reason() {
+        for code in ["erro_subagente_mensagem_sem_terminal", "erro_subagente_mensagem_sem_plugin", "erro_subagente_inexistente",
+            "erro_subagente_mensagem_sem_resposta"] {
+            let message = failure_detail(Some(json!({"detail": {"code": code}})), 409);
+            assert_eq!(message, crate::i18n::tr_web(code, &Default::default()).unwrap());
+        }
+        let refused = failure_detail(Some(json!({"detail": {"code": "erro_subagente_mensagem_recusada", "reason": "agente ocupado"}})), 409);
+        assert!(refused.contains("agente ocupado") && !refused.contains("{reason}"), "{refused}");
+        let nested = failure_detail(Some(json!({"detail": {"code": "erro_subagente_mensagem_recusada", "params": {"reason": "x1"}}})), 409);
+        assert!(nested.contains("x1"), "{nested}");
     }
 
     #[test]

@@ -125,6 +125,24 @@ thread_local! {
 /// Caixa da coluna da conversa, como o `max-width` da `.messages-inner` e do `.composer-card` do web (MessageList.svelte,
 /// Chat.svelte, Composer.svelte): teto por degrau da janela, maior com o painel direito aberto, e a escala da Aparência
 /// sobre o menor entre o teto e o espaço, sem passar do espaço.
+/// O cartão do compositor (borda que acende com o foco, fundo e sombra), o mesmo na conversa e no subagente.
+fn composer_card(focused: bool) -> Div {
+    div().relative().flex().flex_col().gap(px(10.)).pt(px(12.)).pr(px(12.)).pb(px(10.)).pl(px(16.)).rounded(px(18.)).border_1()
+        .border_color(if focused { theme::accent_focus() } else { theme::border_strong() }).bg(theme::boxed()).shadow(theme::card_shadow())
+}
+
+/// O Enviar redondo do compositor. Colado: botão claro com a seta na cor do fundo; caixa solta: destaque, como nos mocks.
+fn send_button<T: 'static>(id: &'static str, enabled: bool, label: String, cx: &mut Context<T>) -> Button {
+    let (fill, ink) = match (enabled, theme::is_floating()) {
+        (false, _) => (theme::raised(), theme::faint()),
+        (true, true) => (theme::accent(), theme::on_accent()),
+        (true, false) => (theme::text(), theme::background()),
+    };
+    Button::new(id).custom(ButtonCustomVariant::new(cx).color(fill).foreground(ink).hover(fill.opacity(0.88)).active(fill.opacity(0.8)))
+        .bg(fill).icon(chrome::small_icon(IconName::ArrowUp, 16., ink))
+        .size(px(30.)).rounded_full().tooltip(tr("send_hint")).accessibility_label(label).disabled(!enabled)
+}
+
 fn column_box(composer: bool) -> Div {
     let (window, side) = COLUMN_FRAME.get();
     let a = crate::appearance::get();
@@ -4322,16 +4340,7 @@ impl Hangar {
                 .tooltip(tr("stop_hint")).accessibility_label(tr("stop")).disabled(stopping)
                 .on_click(cx.listener(|this, _, window, cx| this.request_stop(window, cx)))
         } else {
-            let enabled = !blocked && has_input;
-            // Colado: botão claro com a seta na cor do fundo; caixa solta: destaque, como nos mocks.
-            let (fill, ink) = match (enabled, theme::is_floating()) {
-                (false, _) => (theme::raised(), theme::faint()),
-                (true, true) => (theme::accent(), theme::on_accent()),
-                (true, false) => (theme::text(), theme::background()),
-            };
-            Button::new("send").custom(ButtonCustomVariant::new(cx).color(fill).foreground(ink).hover(fill.opacity(0.88)).active(fill.opacity(0.8)))
-                .bg(fill).icon(chrome::small_icon(IconName::ArrowUp, 16., ink))
-                .size(px(30.)).rounded_full().tooltip(tr("send_hint")).accessibility_label(send_label).disabled(!enabled)
+            send_button("send", !blocked && has_input, send_label, cx)
                 .on_click(cx.listener(|this, _, window, cx| this.submit(false, false, window, cx)))
         };
         let commands = chrome::icon_button("commands", IconName::SquareSlash, tr("commands"), cx).disabled(!readable).selected(self.command_panel)
@@ -4358,8 +4367,7 @@ impl Hangar {
             .children(pills)
             .children(mode)
             .child(div().ml(px(6.)).child(action));
-        let card = div().relative().flex().flex_col().gap(px(10.)).pt(px(12.)).pr(px(12.)).pb(px(10.)).pl(px(16.)).rounded(px(18.)).border_1()
-            .border_color(if focused { theme::accent_focus() } else { theme::border_strong() }).bg(theme::boxed()).shadow(theme::card_shadow())
+        let card = composer_card(focused)
             .when_some(tray, |el, tray| el.child(tray))
             .when_some(uploading, |el, (done, total)| el.child(div().text_xs().text_color(theme::accent())
                 .child(tr("attach_progress").replace("{done}", &done.to_string()).replace("{total}", &total.to_string()))))
