@@ -76,6 +76,9 @@ fn interaction_errors_keep_codes_and_unknown_never_becomes_success_or_not_sent()
         assert_eq!(answer.1["detail"]["code"], "erro_sem_confirmacao_resposta");
         assert_ne!(answer.0,StatusCode::OK);
     }
+    // Sem terminal nada é digitado: a frase é a do canal da CLI, não a do texto no pane.
+    let headless = headless_answer(false,&unknown).1["detail"]["msg"].as_str().unwrap().to_owned();
+    assert!(headless.contains("A CLI não confirmou") && !headless.contains("por texto"),"{headless}");
 }
 
 #[test]

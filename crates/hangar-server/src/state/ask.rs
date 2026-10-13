@@ -64,6 +64,53 @@ fn matches_item(state: &StateEvent, payload: &AskQuestion, item: &AskQuestionIte
     ok
 }
 
+/// Pergunta que quebra em linhas: o pane só dá a última delas, então basta caber no texto do sidecar.
+fn same_question(pane: Option<&str>, item: &str) -> bool {
+    let compact = |s: &str| s.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+    pane.map(compact).is_some_and(|pane| !pane.is_empty() && compact(item).contains(&pane))
+}
+
+fn later_step(event: &StateEvent, question: &AskQuestion) -> bool {
+    question.questions.iter().skip(1)
+        .any(|item| same_question(event.question.as_deref(), &item.question) && matches_item(event, question, item, false))
+}
+
+fn question_target() -> crate::interactions::InteractionTarget {
+    crate::interactions::InteractionTarget { kind: crate::interactions::InteractionKind::Question, request_key: "terminal:askq".into() }
+}
+
+/// O sidecar responde por este menu: a primeira etapa, ou uma seguinte do formulário já publicado.
+/// O resto (outra pergunta, rótulo que não casa, etapa sem a primeira) fica com os botões do pane.
+fn holds(interactions: &crate::interactions::InteractionStore, binding: &crate::interactions::InteractionBinding,
+    question: &AskQuestion, revision: &str, event: &StateEvent) -> Result<bool, String> {
+    if matches(event, question) { return Ok(true); }
+    if !later_step(event, question) { return Ok(false); }
+    Ok(interactions.current(binding, &question_target()).map_err(|e| e.code().to_owned())?
+        .is_some_and(|published| published.source_revision.as_deref() == Some(revision)))
+}
+
+/// `holds` para o menu já retratado (`interaction_pane`), que é o que o escritor confere.
+pub fn holds_pane(interactions: &crate::interactions::InteractionStore, binding: &crate::interactions::InteractionBinding,
+    jsonl: &Path, pane: &serde_json::Value) -> Result<bool, String> {
+    let Some((question, revision)) = read_revision(jsonl)? else { return Ok(false) };
+    holds(interactions, binding, &question, &revision, &pane_event(pane))
+}
+
+fn pane_event(pane: &serde_json::Value) -> StateEvent {
+    let options = pane["options"].as_array().map(|o| o.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect());
+    StateEvent { state: "awaiting_input".into(), question: pane["question"].as_str().map(str::to_owned), options, ..Default::default() }
+}
+
+/// O menu retratado é a etapa `index` do formulário, pelo mesmo casamento da publicação (prefixo
+/// quando há prévia) e, depois da primeira, pelo texto da pergunta.
+pub fn pane_is_step(questions: &serde_json::Value, index: usize, pane: &serde_json::Value) -> bool {
+    let Ok(items) = serde_json::from_value::<Vec<AskQuestionItem>>(questions.clone()) else { return false };
+    let Some(item) = items.get(index) else { return false };
+    let event = pane_event(pane);
+    let form = AskQuestion { questions: items.clone(), interaction_id: None };
+    matches_item(&event, &form, item, false) && (index == 0 || same_question(event.question.as_deref(), &item.question))
+}
+
 /// `<config>/projects/<cwd>/<sid>.jsonl` → `<config>/.hangar-askq/<sid>.json`.
 pub fn sidecar_path(jsonl: &Path) -> Option<PathBuf> {
     let config = jsonl.parent()?.parent()?.parent()?;
@@ -84,6 +131,39 @@ pub fn read_pending(jsonl: &Path) -> Result<Option<AskQuestion>, String> {
 
 static CONSUMED: LazyLock<Mutex<HashMap<PathBuf, BTreeSet<String>>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
+/// Sinais do plugin: chamadas do AskUserQuestion que terminaram (`/ask-fim`, vença o app ou o terminal)
+/// e quando começou a vida atual de cada conversa (o `/pull` de uma instância nova). O sidecar não
+/// diz quando a pergunta acabou; o transcript fica só como reserva sem o plugin.
+#[derive(Default)]
+struct PluginSignals { ended: BTreeSet<String>, lives: HashMap<String, f64> }
+static SIGNALS: LazyLock<Mutex<PluginSignals>> = LazyLock::new(Default::default);
+
+/// A chamada `tool_use_id` do AskUserQuestion acabou no plugin.
+pub fn call_ended(tool_use_id: &str) {
+    if tool_use_id.is_empty() { return; }
+    let Ok(mut signals) = SIGNALS.lock() else { return };
+    // ponytail: ids únicos por chamada; acima de 512 recomeça (só volta a valer a reserva do transcript).
+    if signals.ended.len() > 512 { signals.ended.clear(); }
+    signals.ended.insert(tool_use_id.into());
+}
+
+/// Instância do plugin (`<ms em base 36>-…`) puxando pela conversa `session_id`: a vida dela começou ali.
+pub fn life_started(session_id: &str, instance: &str) {
+    let Some(started) = instance.split('-').next().and_then(|stamp| u64::from_str_radix(stamp, 36).ok()).map(|ms| ms as f64 / 1000.0) else { return };
+    let Ok(mut signals) = SIGNALS.lock() else { return };
+    if signals.lives.len() > 512 { signals.lives.clear(); }
+    let life = signals.lives.entry(session_id.into()).or_insert(started);
+    *life = life.max(started);
+}
+
+/// O plugin já encerrou esta pergunta: a chamada terminou, ou o sidecar é de uma vida anterior da
+/// conversa (o Claude morreu nela e a conversa voltou, sem `PostToolUse`).
+pub fn ended_by_plugin(session_id: &str, tool_use_id: Option<&str>, written: f64) -> bool {
+    let Ok(signals) = SIGNALS.lock() else { return false };
+    tool_use_id.is_some_and(|call| signals.ended.contains(call))
+        || signals.lives.get(session_id).is_some_and(|started| written + 1.0 < *started)
+}
+
 /// Não apaga o caminho: ele pode já guardar a pergunta seguinte.
 pub fn consume_revision(jsonl: &Path, revision: &str) -> Result<(), String> {
     let path = sidecar_path(jsonl).ok_or("askq_path")?;
@@ -100,15 +180,29 @@ fn answered_in_transcript(jsonl: &Path, call: &str, revision: &str) -> Result<(b
     use std::io::{Read, Seek, SeekFrom};
     let key = (jsonl.to_path_buf(), revision.to_owned());
     let (start, seen_before) = SCANNED.lock().map_err(|_| "askq_scan_lock")?.get(&key).copied().unwrap_or((0, false));
-    let mut file = std::fs::File::open(jsonl).map_err(|e| format!("askq_transcript_unreadable:{:?}", e.kind()))?;
     let mut buf = Vec::new();
-    file.seek(SeekFrom::Start(start)).and_then(|_| file.read_to_end(&mut buf))
-        .map_err(|e| format!("askq_transcript_unreadable:{:?}", e.kind()))?;
+    let read = std::fs::File::open(jsonl).and_then(|mut file| { file.seek(SeekFrom::Start(start))?; file.read_to_end(&mut buf) });
+    match read {
+        Ok(_) => {}
+        // Sem transcript a chamada nunca chegou a ele: o prazo do órfão decide.
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok((false, seen_before)),
+        // Ilegível não prova nada: a pergunta segue pendente, e o menu que não é ela segue respondível.
+        Err(e) => {
+            if crate::warn_limit::allow(None, "askq_transcript_unreadable") {
+                tracing::warn!(transcript = %jsonl.display(), code = "askq_transcript_unreadable", io_kind = ?e.kind(), "askq: transcript ilegível, pergunta segue pendente");
+            }
+            return Ok((false, true));
+        }
+    }
     let complete = buf.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
+    let contains = |line: &[u8], needle: &str| line.windows(needle.len()).any(|w| w == needle.as_bytes());
     let needle = format!("\"tool_use_id\":\"{call}\"");
-    let contains = |needle: &str| buf[..complete].windows(needle.len()).any(|w| w == needle.as_bytes());
-    let found = contains(&needle);
-    let call_seen = seen_before || contains(&format!("\"id\":\"{call}\""));
+    // Só um bloco `tool_result` da chamada prova a resposta; outra entrada com o mesmo par (anexo, progresso) não.
+    let found = buf[..complete].split(|&b| b == b'\n').filter(|line| contains(line, &needle)).any(|line| {
+        serde_json::from_slice::<serde_json::Value>(line).ok().is_some_and(|entry| entry["message"]["content"].as_array()
+            .is_some_and(|blocks| blocks.iter().any(|b| b["type"] == "tool_result" && b["tool_use_id"] == call)))
+    });
+    let call_seen = seen_before || contains(&buf[..complete], &format!("\"id\":\"{call}\""));
     let mut scanned = SCANNED.lock().map_err(|_| "askq_scan_lock")?;
     // ponytail: uma entrada por revisão; acima de 64 recomeça do zero (só custa uma releitura).
     if scanned.len() > 64 { scanned.clear(); }
@@ -122,13 +216,13 @@ pub fn read_revision(jsonl: &Path) -> Result<Option<(AskQuestion, String)>, Stri
     let metadata = match std::fs::metadata(&path) {
         Ok(metadata) => metadata,
         Err(e) if e.kind() == ErrorKind::NotFound => { consumed.remove(&path); return Ok(None); },
-        Err(e) => return Err(format!("askq_unreadable:{:?}", e.kind())),
+        Err(e) => return Ok(unusable(&path, "askq_unreadable", Some(e.kind()))),
     };
     let stamp = file_stamp(&metadata)?;
     let bytes = match std::fs::read(&path) {
         Ok(bytes) => bytes,
         Err(e) if e.kind() == ErrorKind::NotFound => { consumed.remove(&path); return Ok(None); },
-        Err(e) => return Err(format!("askq_unreadable:{:?}", e.kind())),
+        Err(e) => return Ok(unusable(&path, "askq_unreadable", Some(e.kind()))),
     };
     let mut digest = ring::digest::Context::new(&ring::digest::SHA256);
     digest.update(stamp.as_bytes());
@@ -139,13 +233,12 @@ pub fn read_revision(jsonl: &Path) -> Result<Option<(AskQuestion, String)>, Stri
         Ok(current) if current == bytes && std::fs::metadata(&path).ok().and_then(|m| file_stamp(&m).ok()).as_ref() == Some(&stamp) => {},
         Ok(_) => return Err("askq_changed_during_read".into()),
         Err(e) if e.kind() == ErrorKind::NotFound => { consumed.remove(&path); return Ok(None); },
-        Err(e) => return Err(format!("askq_unreadable:{:?}", e.kind())),
+        Err(e) => return Ok(unusable(&path, "askq_unreadable", Some(e.kind()))),
     }
     if consumed.get(&path).is_some_and(|revisions| revisions.contains(&revision)) { return Ok(None); }
     // ponytail: `multiSelect` como texto ("true") o pydantic aceita e o serde recusa; o resultado
     // é o mesmo de um sidecar quebrado (fica o menu do pane), e o hook grava o booleano.
-    // Só o código: a mensagem do serde pode citar o texto da pergunta.
-    let sidecar: Sidecar = serde_json::from_slice(&bytes).map_err(|_| "askq_malformed".to_owned())?;
+    let Ok(sidecar) = serde_json::from_slice::<Sidecar>(&bytes) else { return Ok(unusable(&path, "askq_malformed", None)) };
     drop(consumed);
     // O hook não apaga o sidecar quando a resposta vem pelo terminal: sem isto a pergunta velha
     // prenderia todo menu seguinte (plano, permissão) em askq_pane_mismatch. Só a resposta achada
@@ -153,6 +246,12 @@ pub fn read_revision(jsonl: &Path) -> Result<Option<(AskQuestion, String)>, Stri
     // ponytail: sidecar sem tool_use_id (o hook sempre grava) não é conferido.
     // Órfão: a chamada nunca chegou ao transcript passada a carência; a lista o expira igual.
     let age = metadata.modified().ok().and_then(|m| m.elapsed().ok()).map_or(0.0, |d| d.as_secs_f64());
+    let written = metadata.modified().ok().and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0.0, |d| d.as_secs_f64());
+    // O plugin viu a pergunta acabar (ou a vida dela acabar): é o sinal do próprio Claude Code.
+    if jsonl.file_stem().and_then(|s| s.to_str()).is_some_and(|sid| ended_by_plugin(sid, sidecar.tool_use_id.as_deref(), written)) {
+        CONSUMED.lock().map_err(|_| "askq_consumed_lock")?.entry(path).or_default().insert(revision);
+        return Ok(None);
+    }
     if let Some(call) = sidecar.tool_use_id.as_deref()
         && let (answered, call_seen) = answered_in_transcript(jsonl, call, &revision)?
         && (answered || !call_seen && age >= crate::list::facts_files::ASK_GRACE) {
@@ -161,6 +260,15 @@ pub fn read_revision(jsonl: &Path) -> Result<Option<(AskQuestion, String)>, Stri
         return Ok(None);
     }
     Ok(Some((AskQuestion { questions: sidecar.tool_input.questions, interaction_id: None }, revision)))
+}
+
+/// Sidecar que existe e não serve (hook antigo, formato do `tool_input` mudado): sem pergunta, e o menu
+/// do pane segue respondível; só o diário o mostra. Só o código: o serde citaria o texto da pergunta.
+fn unusable(path: &Path, code: &'static str, io_kind: Option<ErrorKind>) -> Option<(AskQuestion, String)> {
+    if crate::warn_limit::allow(None, code) {
+        tracing::warn!(sidecar = %path.display(), code, io_kind = ?io_kind, "askq: sidecar inutilizável, fica o menu do pane");
+    }
+    None
 }
 
 fn file_stamp(metadata: &std::fs::Metadata) -> Result<String, String> {
@@ -184,7 +292,12 @@ pub fn observe_menu(interactions: &crate::interactions::InteractionStore,
     if submit_tab(pane) { return Ok(None); }
     let target = crate::interactions::InteractionTarget { kind: crate::interactions::InteractionKind::Menu, request_key: "terminal:menu".into() };
     let analysis = crate::terminal_state::analyze(pane);
-    let semantic = if analysis.state == "awaiting_input" && read_revision(jsonl)?.is_none() {
+    let event = StateEvent { state: analysis.state.clone(), question: analysis.question.clone(), options: analysis.options.clone(), ..Default::default() };
+    let held = match read_revision(jsonl)? {
+        Some((question, revision)) if analysis.state == "awaiting_input" => holds(interactions, binding, &question, &revision, &event)?,
+        _ => false,
+    };
+    let semantic = if analysis.state == "awaiting_input" && !held {
         Some(crate::terminal_input::interaction_semantic(pane, None).map_err(|e| e.code().to_owned())?)
     } else { None };
     interactions.observe(binding, &target, semantic).map_err(|e| e.code().to_owned())
@@ -227,7 +340,7 @@ pub fn plan_target(tool_use_id: &str) -> crate::interactions::InteractionTarget 
 /// publicação (lista e monitor) e para os fatos do executor.
 pub fn observe_terminal(interactions: &crate::interactions::InteractionStore,
     binding: &crate::interactions::InteractionBinding, jsonl: &Path, pane: &str) -> Result<Option<AskQuestion>, String> {
-    let target = crate::interactions::InteractionTarget { kind: crate::interactions::InteractionKind::Question, request_key: "terminal:askq".into() };
+    let target = question_target();
     let pending = read_revision(jsonl)?;
     let Some((mut question, revision)) = pending else {
         interactions.observe_revision(binding, &target, None, None).map_err(|e| e.code().to_owned())?;
@@ -239,19 +352,23 @@ pub fn observe_terminal(interactions: &crate::interactions::InteractionStore,
     if analysis.state != "awaiting_input" && !submit { return Ok(None); }
     let event = StateEvent { state: analysis.state, question: analysis.question, options: analysis.options, ..Default::default() };
     // Texto da pergunta junto: com opções iguais às da primeira, só ele separa as etapas.
-    let later = submit || question.questions.iter().skip(1)
-        .any(|item| event.question.as_deref() == Some(item.question.as_str()) && matches_item(&event, &question, item, false));
-    if later {
+    if submit || later_step(&event, &question) {
         // Etapa seguinte (ou envio) do formulário já publicado: o mesmo ID, sem retratar de novo,
-        // porque o retrato desta etapa trocaria o ID que está sendo respondido.
-        let published = interactions.current(binding, &target).map_err(|e| e.code().to_owned())?
-            .filter(|published| published.source_revision.as_deref() == Some(revision.as_str()))
-            .ok_or("askq_pane_mismatch")?;
+        // porque o retrato desta etapa trocaria o ID que está sendo respondido. Sem a primeira
+        // publicada (servidor reiniciado no meio), a etapa fica com os botões do pane.
+        let Some(published) = interactions.current(binding, &target).map_err(|e| e.code().to_owned())?
+            .filter(|published| published.source_revision.as_deref() == Some(revision.as_str())) else {
+            if !submit && crate::warn_limit::allow(Some(&binding.key), "askq_step_unpublished") {
+                tracing::info!(key = binding.key.as_str(), code = "askq_step_unpublished", "askq: etapa do formulário sem a primeira publicada, fica com os botões do pane");
+            }
+            return Ok(None);
+        };
         if read_revision(jsonl)?.as_ref().map(|(_, current)| current) != Some(&revision) { return Err("askq_changed_during_read".into()); }
         question.interaction_id = Some(published.interaction_id);
         return Ok(Some(question));
     }
-    if !matches(&event, &question) { return Err("askq_pane_mismatch".into()); }
+    // Menu que não é esta pergunta: fica com os botões do pane (`observe_menu`), nunca o stepper.
+    if !matches(&event, &question) { return Ok(None); }
     let semantic = crate::terminal_input::interaction_semantic(pane, Some(&question)).map_err(|e| e.code().to_owned())?;
     if read_revision(jsonl)?.as_ref().map(|(_, current)| current) != Some(&revision) { return Err("askq_changed_during_read".into()); }
     question.interaction_id = interactions.observe_revision(binding, &target, Some(semantic), Some(revision))
@@ -359,12 +476,16 @@ mod tests {
         // Pergunta fechada (composer de volta, sidecar ainda no disco): nada aberto, registro intacto.
         assert_eq!(observe_terminal(&store, &binding, &jsonl, "────────────────\n❯ \n────────────────\n"), Ok(None));
         assert_eq!(store.expected(&binding, Some(&published)).unwrap(), expected);
-        // Etapa 2 sem a primeira ter sido publicada não ganha identidade.
+        // Etapa 2 sem a primeira publicada (servidor reiniciado no meio): sem stepper, e os botões
+        // do pane respondem, como no Python.
         let (fresh, fresh_binding) = bound_store();
-        assert_eq!(observe_terminal(&fresh, &fresh_binding, &jsonl, STEP_TWO).unwrap_err(), "askq_pane_mismatch");
-        // Pergunta fora do formulário segue recusada, e a causa chega inteira ao executor.
-        let refused = observe_terminal(&store, &binding, &jsonl, OTHER).unwrap_err();
-        assert_eq!(failure_code(&refused), "askq_pane_mismatch");
+        assert_eq!(observe_terminal(&fresh, &fresh_binding, &jsonl, STEP_TWO), Ok(None));
+        assert!(observe_menu(&fresh, &fresh_binding, &jsonl, STEP_TWO).unwrap().is_some());
+        // Menu fora do formulário: não é a pergunta, fica com os botões do pane.
+        assert_eq!(observe_terminal(&store, &binding, &jsonl, OTHER), Ok(None));
+        assert!(observe_menu(&store, &binding, &jsonl, OTHER).unwrap().is_some());
+        // A etapa 2 do formulário publicado não responde como menu comum.
+        assert_eq!(observe_menu(&store, &binding, &jsonl, STEP_TWO), Ok(None));
         assert_eq!(failure_code("askq_unreadable:PermissionDenied"), "askq_unreadable");
         assert_eq!(failure_code("algo_novo"), "terminal_question_unavailable");
         // Troca real A→B: B é outro formulário, com outra revisão e outro ID; o de A deixa de valer.
@@ -388,22 +509,80 @@ mod tests {
             {"question":"Cor?","header":"Cor","multiSelect":false,"options":[{"label":"Azul"},{"label":"Verde"}]}]}}"#).unwrap();
         let ask = r#"{"timestamp":"2099-01-01T00:00:00Z","message":{"content":[{"type":"tool_use","id":"toolu_cor","name":"AskUserQuestion"}]}}"#;
         let (store, binding) = bound_store();
-        // Sem transcript não há prova: erro com código, nunca a pergunta sumida.
-        let missing = observe_terminal(&store, &binding, &jsonl, PLAN).unwrap_err();
-        assert_eq!(failure_code(&missing), "askq_transcript_unreadable");
-        // Pergunta ainda aberta: o menu de outra pergunta segue recusado.
-        std::fs::write(&jsonl, format!("{ask}\n")).unwrap();
-        assert_eq!(observe_terminal(&store, &binding, &jsonl, PLAN).unwrap_err(), "askq_pane_mismatch");
-        // Respondida no terminal (o hook não apaga o sidecar): o plano é um menu comum, com identidade.
-        std::fs::write(&jsonl, format!("{ask}\n{}\n",
-            r#"{"timestamp":"2099-01-01T00:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_cor"}]}}"#)).unwrap();
+        const COR: &str = "   Cor?\n\n ❯ 1. Azul\n   2. Verde\n   3. Type something.\n   4. Chat about this\n";
+        // Sem transcript nada prova a resposta: a pergunta segue pendente para o menu dela, e o menu
+        // de outra pergunta segue respondível pelos botões do pane.
         assert_eq!(observe_terminal(&store, &binding, &jsonl, PLAN), Ok(None));
         assert!(observe_menu(&store, &binding, &jsonl, PLAN).unwrap().is_some());
+        assert!(observe_terminal(&store, &binding, &jsonl, COR).unwrap().is_some());
+        // Pergunta sem resposta (o Claude morreu nela e a conversa voltou): o menu seguinte responde.
+        std::fs::write(&jsonl, format!("{ask}\n")).unwrap();
+        assert_eq!(observe_terminal(&store, &binding, &jsonl, PLAN), Ok(None));
+        assert!(observe_menu(&store, &binding, &jsonl, PLAN).unwrap().is_some());
+        // Só um bloco `tool_result` prova a resposta: outra entrada com o mesmo par não.
+        let append = |line: &str| { use std::io::Write; writeln!(std::fs::OpenOptions::new().append(true).open(&jsonl).unwrap(), "{line}").unwrap() };
+        append(r#"{"timestamp":"2099-01-01T00:00:01Z","type":"progress","data":{"tool_use_id":"toolu_cor"}}"#);
+        assert!(observe_terminal(&store, &binding, &jsonl, COR).unwrap().is_some());
+        // Respondida no terminal (o hook não apaga o sidecar): o plano é um menu comum, com identidade.
+        append(r#"{"timestamp":"2099-01-01T00:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_cor"}]}}"#);
+        assert_eq!(observe_terminal(&store, &binding, &jsonl, PLAN), Ok(None));
+        assert!(observe_menu(&store, &binding, &jsonl, PLAN).unwrap().is_some());
+        assert_eq!(observe_terminal(&store, &binding, &jsonl, COR), Ok(None));
+    }
+
+    #[test]
+    fn the_plugin_ends_the_question_without_the_transcript() {
+        const COR: &str = "   Cor?\n\n ❯ 1. Azul\n   2. Verde\n";
+        let tmp = tempfile::tempdir().unwrap();
+        let sidecar = |sid: &str, call: &str| {
+            let jsonl = tmp.path().join(format!("projects/p/{sid}.jsonl"));
+            let path = sidecar_path(&jsonl).unwrap();
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::create_dir_all(jsonl.parent().unwrap()).unwrap();
+            // A chamada está no transcript e não tem resposta: só o plugin pode dizer que acabou.
+            std::fs::write(&jsonl, format!("{{\"message\":{{\"content\":[{{\"type\":\"tool_use\",\"id\":\"{call}\"}}]}}}}\n")).unwrap();
+            std::fs::write(&path, format!(r#"{{"tool_use_id":"{call}","tool_input":{{"questions":[
+                {{"question":"Cor?","header":"Cor","multiSelect":false,"options":[{{"label":"Azul"}},{{"label":"Verde"}}]}}]}}}}"#)).unwrap();
+            (jsonl, path)
+        };
+        let (store, binding) = bound_store();
+        // `/ask-fim` da chamada: vença o terminal ou o app, a pergunta acabou.
+        let (jsonl, _) = sidecar("sid-fim", "toolu_fim");
+        assert!(observe_terminal(&store, &binding, &jsonl, COR).unwrap().is_some());
+        call_ended("toolu_fim");
+        assert_eq!(observe_terminal(&store, &binding, &jsonl, COR), Ok(None));
+        // Vida nova da conversa (o Claude morreu na pergunta e voltou): o sidecar de antes não vale.
+        let (jsonl, path) = sidecar("sid-vida", "toolu_vida");
+        let before = std::time::SystemTime::now() - std::time::Duration::from_secs(60);
+        std::fs::OpenOptions::new().write(true).open(&path).unwrap().set_times(std::fs::FileTimes::new().set_modified(before)).unwrap();
+        assert!(observe_terminal(&store, &binding, &jsonl, COR).unwrap().is_some());
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+        let mut stamp = String::new(); let mut n = now;
+        while n > 0 { stamp.insert(0, char::from_digit((n % 36) as u32, 36).unwrap()); n /= 36; }
+        life_started("sid-vida", &format!("{stamp}-x"));
+        assert_eq!(observe_terminal(&store, &binding, &jsonl, COR), Ok(None));
+        // Pergunta feita nesta vida segue aberta.
+        let (jsonl, _) = sidecar("sid-vida", "toolu_nova");
+        assert!(observe_terminal(&store, &binding, &jsonl, COR).unwrap().is_some());
+    }
+
+    #[test]
+    fn preview_label_cut_differently_by_the_pane_keeps_the_pane_buttons() {
+        let tmp = tempfile::tempdir().unwrap();
+        let jsonl = tmp.path().join("projects/p/sid.jsonl");
+        let path = sidecar_path(&jsonl).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, r#"{"tool_input":{"questions":[{"question":"Layout?","header":"L","multiSelect":false,
+            "options":[{"label":"Grade","preview":"x"},{"label":"Lista","preview":"y"}]}]}}"#).unwrap();
+        let (store, binding) = bound_store();
+        let menu = "   Layout?\n\n ❯ 1. Grelha\n   2. Lista\n";
+        assert_eq!(observe_terminal(&store, &binding, &jsonl, menu), Ok(None));
+        assert!(observe_menu(&store, &binding, &jsonl, menu).unwrap().is_some());
     }
 
     #[test]
     fn orphan_sidecar_whose_call_never_reached_the_transcript_expires_after_the_grace() {
-        const MENU: &str = "   Outra?\n\n ❯ 1. X\n   2. Y\n";
+        const MENU: &str = "   Cor?\n\n ❯ 1. Azul\n   2. Verde\n";
         let tmp = tempfile::tempdir().unwrap();
         let jsonl = tmp.path().join("projects/p/sid.jsonl");
         let path = sidecar_path(&jsonl).unwrap();
@@ -413,8 +592,9 @@ mod tests {
         std::fs::write(&path, r#"{"tool_use_id":"toolu_orfa","tool_input":{"questions":[
             {"question":"Cor?","header":"Cor","multiSelect":false,"options":[{"label":"Azul"},{"label":"Verde"}]}]}}"#).unwrap();
         let (store, binding) = bound_store();
-        // Recém-gravado, a chamada ainda pode estar a caminho do transcript.
-        assert_eq!(observe_terminal(&store, &binding, &jsonl, MENU).unwrap_err(), "askq_pane_mismatch");
+        // Recém-gravado, a chamada ainda pode estar a caminho do transcript: o menu é a pergunta.
+        assert!(observe_terminal(&store, &binding, &jsonl, MENU).unwrap().is_some());
+        assert_eq!(observe_menu(&store, &binding, &jsonl, MENU), Ok(None));
         let old = std::time::SystemTime::now() - std::time::Duration::from_secs(60);
         std::fs::OpenOptions::new().write(true).open(&path).unwrap().set_times(std::fs::FileTimes::new().set_modified(old)).unwrap();
         assert_eq!(observe_terminal(&store, &binding, &jsonl, MENU), Ok(None));
@@ -486,14 +666,20 @@ mod tests {
     }
 
     #[test]
-    fn missing_is_none_and_broken_is_error() {
+    fn missing_and_broken_sidecar_leave_the_pane_menu_answerable() {
         let dir = tempfile::tempdir().unwrap();
         let jsonl = dir.path().join("projects/p/sid.jsonl");
         assert_eq!(read_pending(&jsonl), Ok(None));
         let askq = sidecar_path(&jsonl).unwrap();
         std::fs::create_dir_all(askq.parent().unwrap()).unwrap();
-        std::fs::write(&askq, "{").unwrap();
-        assert_eq!(read_pending(&jsonl), Err("askq_malformed".to_owned()));
+        // Hook antigo ou `tool_input` mudado: sem pergunta, como no Python, e o menu segue respondível.
+        for broken in ["{", r#"{"tool_input":{"questions":"x"}}"#] {
+            std::fs::write(&askq, broken).unwrap();
+            assert_eq!(read_pending(&jsonl), Ok(None));
+            let (store, binding) = bound_store();
+            assert_eq!(observe_terminal(&store, &binding, &jsonl, OTHER), Ok(None));
+            assert!(observe_menu(&store, &binding, &jsonl, OTHER).unwrap().is_some());
+        }
         // `questions` vazio derruba o Python (`questions[0]`); aqui só não abre o stepper.
         let empty = AskQuestion { questions: Vec::new(), interaction_id: None };
         assert!(!matches(&StateEvent { state: "awaiting_input".into(), options: Some(vec!["A".into()]), ..Default::default() }, &empty));

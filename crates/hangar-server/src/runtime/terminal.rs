@@ -416,6 +416,7 @@ impl Executor {
                         // Sem ciclo de vida ligado a reconciliação só falharia; a trava do `/clear` sai pelo `expire_clear` da drenagem.
                         if self.options.lifecycle.is_some() && let Err(failure)=self.reconcile_life().await {self.enter_error(failure).await?;}
                         self.expire_uncertain().await;
+                        if self.last_error.is_none() {self.expire_unproved().await;}
                         // O `/clear` incerto depois do Enter deixa o erro de entrega incerta: a trava ainda vence.
                         if self.last_error.as_deref()==Some("terminal_facts") {
                             match self.drain_once(None).await {
@@ -829,6 +830,9 @@ impl Executor {
             return Ok(reply(id,Disposition::Unknown,json!({"code":"recovered_operation"})));
         }
         let expected=if matches!(kind,"select"|"submit_selected"|"answer_questions"|"answer_chat") {Some(self.expected(&payload)?)}else{None};
+        // Pergunta `ask:` do plugin que ele não pode receber agora (sem recibo, vida nova antes do `/pull`):
+        // a resposta cai nas teclas do pane, como no Python. Permissão nunca: lá a recusa é de propósito.
+        let mut keyboard_ask=false;
         if let Some(expected)=&expected {
             let question=matches!(kind,"answer_questions"|"answer_chat");
             if (question && expected.target.kind!=crate::interactions::InteractionKind::Question)
@@ -838,7 +842,11 @@ impl Executor {
             if let Some(request_id)=expected.target.request_key.strip_prefix("plugin:").filter(|_|expected.semantic["source"]!="terminal") {
                 if kind=="submit_selected" {return Err(runtime_error(InteractionError::Unavailable));}
                 if payload.get("request_id").filter(|value|!value.is_null()).is_some_and(|value|value.as_str()!=Some(request_id)) {return Err(runtime_error(InteractionError::Changed));}
-                self.local.plugin_question(&self.target,expected).await.map_err(|error|RuntimeError::new(error.0,"pergunta do plugin não conferida"))?;
+                match self.local.plugin_question(&self.target,expected).await {
+                    Err(error) if error.0==InteractionError::Unavailable.code() && request_id.starts_with("ask:") && kind=="answer_questions" => keyboard_ask=true,
+                    Err(error) => return Err(RuntimeError::new(error.0,"pergunta do plugin não conferida")),
+                    Ok(_) => {},
+                }
             } else {
                 if expected.semantic["source"]!="terminal" {return Err(runtime_error(InteractionError::Unavailable));}
                 if let Some(request_id)=payload.get("request_id").filter(|value|!value.is_null()) {
@@ -847,7 +855,8 @@ impl Executor {
                 }
             }
         }
-        if self.cleared(&state) && !self.expire_clear().await {return Err(error("runtime_clear_barrier"));}
+        // A trava segura só o texto, que cairia na conversa nova; Parar, teclas e respostas seguem com ela.
+        if kind=="input" && self.cleared(&state) && !self.expire_clear().await {return Err(error("runtime_clear_barrier"));}
         let text=payload["text"].as_str().unwrap_or("");
         let prompt=kind=="input"; let slash=prompt && text.trim_start().starts_with('/');
         let row_id=if prompt && !slash {Some(entry.unwrap_or_else(||id.into()))}else{None};
@@ -890,6 +899,7 @@ impl Executor {
         let services=self.services(root,id,text);
         let mut driver=TerminalDriver::new(self.target.binding.clone(),services.clone(),self.options.io.clone(),self.options.limits.clone()).with_interaction_source(self.target.transcript.clone());
         if let Some(store)=&self.options.interactions {driver=driver.with_interactions(store.clone());}
+        if matches!(kind,"key"|"navigation_key"|"interactive_key"|"terminal_input"|"interrupt") {driver=driver.controls();}
         if self.footer_misses.as_ref().is_some_and(|(row,misses)|row==root && *misses>=FOCUS_RETURN_TRIES) {driver=driver.footer_kept();}
         let facts=if prompt {Some(services.facts(&self.target.binding).await)}else{None};
         let current=facts.as_ref().is_none_or(|result|result.as_ref().is_ok_and(|facts|facts.binding==self.target.binding));
@@ -921,7 +931,8 @@ impl Executor {
                     Some(store)=>store.pending_all(&crate::terminal_facts::LocalTerminalFacts::binding(&self.target),std::time::Instant::now()).map_err(|failure|error(failure.0))?,None=>vec![],
                 }} else {vec![]};
                 let mut delivered=if let Some(expected)=expected.as_ref().filter(|expected|expected.target.request_key.starts_with("plugin:") && expected.semantic["source"]!="terminal") {
-                    self.plugin_control(kind,&payload,expected,&publication,&services).await
+                    if keyboard_ask {driver.plugin_ask_keys(expected,&serde_json::from_value::<Vec<QuestionAnswer>>(payload["answers"].clone()).unwrap()).await}
+                    else {self.plugin_control(kind,&payload,expected,&publication,&services).await}
                 } else {match kind {
                         // Foco fora do prompt: adia sem escrever, como o `overlay`; a linha volta à fila e
                         // o próximo tique tenta de novo.
@@ -957,8 +968,21 @@ impl Executor {
                     })();
                     if let Err(failure)=notice {delivered.disposition=input::Disposition::Unknown;delivered.code=failure.0.into();}
                 }
-                delivery(id,delivered)
+                let mut sent=delivery(id,delivered);
+                // A TUI já consumiu a mensagem enfileirada: nada a promover, e não é falha.
+                if matches!(kind,"steer"|"steer_queue") && sent.payload["code"]=="no_queued_input" {sent.payload["promoted"]=json!(false);}
+                sent
             };
+        // O Esc saiu e o picker não fechou a tempo: o texto do "conversar" vai para a fila, que só
+        // digita com o composer à vista, em vez de se perder.
+        if kind=="answer_chat" && result.payload["code"]=="answer_chat_close_unproved" && let Some(expected)=&expected {
+            let questions:Vec<String>=expected.semantic["questions"].as_array().into_iter().flatten().map(|q|q["question"].as_str().unwrap_or("").to_string()).collect();
+            let text=crate::session_write::answer::chat_text(payload["answers"].as_array().map(Vec::as_slice).unwrap_or_default(),&questions);
+            if !text.is_empty() {
+                self.services("maintenance","maintenance","").action("queue",Action::Append {text,delivered:false,ts:None,pre_transcript:false,entry_id:Some(format!("{id}:chat"))}).await?;
+                result=reply(id,Disposition::Deferred,json!({"code":"answer_chat_queued","queued":true,"cleanup":"not_needed"}));
+            }
+        }
         if let Some(expected)=&expected {
             result.payload["interaction_id"]=json!(expected.interaction_id);
             result.payload["interaction_binding"]=json!({"key":expected.binding.key,"conversation":expected.binding.conversation,"generation":expected.binding.generation});
@@ -1002,8 +1026,13 @@ impl Executor {
         if result.disposition==Disposition::Unknown {
             tracing::warn!(key=%self.target.key,session=%self.target.name,code=%result.payload["code"].as_str().unwrap_or("plugin_control_uncertain"),
                 reason="a entrega não foi comprovada",stage=%result.payload["stage"].as_str().unwrap_or("plugin"),"entrega terminal incerta");
-            if row_id.is_some() {self.uncertain.push(id.into());} else if !clear_raised {self.unprovable=true;}
-            self.enter_error(error("terminal_delivery_unknown")).await?;
+            // Resposta a menu incerta não trava a fila: a entrega seguinte só digita com o composer à vista,
+            // e o menu que seguiu aberto a adia sozinho.
+            if matches!(kind,"select"|"submit_selected"|"answer_questions") {self.publish().await?;}
+            else {
+                if row_id.is_some() {self.uncertain.push(id.into());} else if !clear_raised {self.unprovable=true;}
+                self.enter_error(error("terminal_delivery_unknown")).await?;
+            }
         }else{self.last_error=None; self.uncertain.clear(); self.unprovable=false; self.publish().await?;}
         if row_id.is_some() && result.disposition==Disposition::Accepted {
             self.confirm_until=Some(tokio::time::Instant::now()+CONFIRM_WINDOW); self.confirm_seen=None;
@@ -1026,7 +1055,8 @@ impl Executor {
         let due=self.away.as_ref().filter(|away|away.row==row && away.tries<FOCUS_RETURN_TRIES).map(|away|away.next);
         let next=due.map_or(now+stall.wait,|due|(now+stall.wait).min(due));
         let stall=self.stall.insert(Stall {next,..stall});
-        if !stall.surfaced && now.duration_since(stall.since)>=self.options.stall_notice {
+        // Sem área de transferência a mesma sessão de logon não volta esperando: o motivo aparece na hora.
+        if !stall.surfaced && (now.duration_since(stall.since)>=self.options.stall_notice || stall.code=="clipboard_unavailable") {
             stall.surfaced=true;
             tracing::warn!(key=%self.target.key,session=%self.target.name,code=%stall.code,
                 waited_s=now.duration_since(stall.since).as_secs(),"entrada terminal parada: o terminal recusa a entrega sem escrever");
@@ -1050,10 +1080,34 @@ impl Executor {
         let facts=services.facts(&self.target.binding).await.map_err(|_|error("terminal_facts"))?;
         // Trabalhando não segura a fila: o Claude enfileira o que chega no meio do turno, como no envio direto.
         self.deliverable=facts.binding==self.target.binding && facts.ready && !facts.open_question;
+        // Composer que não se lê (o desenho mudou): não digita às cegas, mas a série de espera aparece na vista.
+        if !self.deliverable && facts.binding==self.target.binding && facts.screen.as_deref().is_some_and(input::composer_unreadable) {
+            if let Some(row)=state.rows.iter().find(|r|r["delivered"]==false).and_then(|r|r["id"].as_str()).map(str::to_owned) {
+                let surfaced=|stall:&Option<Stall>|stall.as_ref().is_some_and(|s|s.surfaced);
+                let before=surfaced(&self.stall);
+                self.track_stall(&row,&reply("drain",Disposition::Deferred,json!({"code":"composer_unreadable","stage":"ready"})));
+                if !before && surfaced(&self.stall) {self.publish().await?;}
+            }
+            return Ok(json!({"drained":0}));
+        }
         if !self.deliverable || facts.binding!=self.target.binding {
             // Caixa ilegível ou com pergunta é espera normal: o motivo antigo sai da tela.
             if self.stall.take().is_some_and(|s|s.surfaced) {self.publish().await?;}
             return Ok(json!({"drained":0}));
+        }
+        // Pergunta aberta que o pane não mostra (o menu rolou para fora da tela): as teclas do recado
+        // navegariam o picker. A fila espera a resposta no transcript.
+        // Sidecar mais velho que este processo é de uma vida que morreu na pergunta: retomada a conversa, o
+        // Claude a dá por recusada sem disparar o PostToolUse, e o sidecar fica.
+        let (config,stem,born)=(self.target.metadata.config_dir.clone(),self.target.binding.conversation.clone(),self.target.metadata.agent_birth);
+        if tokio::task::spawn_blocking(move||{
+            let sidecar=config.join(crate::list::facts_files::ASKQ_DIR).join(format!("{stem}.json"));
+            let written=std::fs::metadata(&sidecar).and_then(|m|m.modified()).ok().and_then(|t|t.duration_since(UNIX_EPOCH).ok()).map(|t|t.as_secs_f64());
+            written.is_some_and(|written|written+1.0>=born) && crate::list::facts_files::open_question(Some(&stem),&[config]).is_some()
+        }).await.map_err(|_|error("terminal_facts"))? {
+            self.deliverable=false;
+            if self.stall.take().is_some_and(|s|s.surfaced) {self.publish().await?;}
+            return Ok(json!({"drained":0,"question_open":true}));
         }
         // A espera crescente só segura a escrita: os fatos (e o `deliverable`) seguem frescos, e o
         // composer que esvaziou (o dono enviou o rascunho) libera a tentativa na hora.
@@ -1074,7 +1128,9 @@ impl Executor {
         if !state.rows.iter().any(|r|r["delivered"]==true && r["confirmed"]!=true){return Ok(json!({"confirmed":0}));}
         self.receipt.scan(&self.target.transcript).map_err(|_|error("receipt_scan"))?;
         let mut count=0;
-        for operation in state.operations.values().filter(|op|op.entry_id.is_some() && matches!(op.status,Status::Accepted|Status::Unknown|Status::Dispatching)) {
+        // A desistida também: a mensagem que chegou depois deixa de constar como "não chegou".
+        let given_up=|op:&super::queue::Operation|op.status==Status::Rejected && op.result["payload"]["code"]=="delivery_given_up";
+        for operation in state.operations.values().filter(|op|op.entry_id.is_some() && (matches!(op.status,Status::Accepted|Status::Unknown|Status::Dispatching) || given_up(op))) {
             let current=self.queue.snapshot().await.map_err(|_|error("queue_io"))?;
             let Some(row)=current.rows.iter().find(|r|r["id"].as_str()==operation.entry_id.as_deref() && r["confirmed"]!=true) else {continue;};
             let Ok(cursor)=serde_json::from_value::<DispatchCursor>(operation.dispatch_cursor.clone())else{continue;};
@@ -1134,6 +1190,32 @@ impl Executor {
             waited_s=now.duration_since(since).as_secs(),"entrega incerta sem prova no prazo: desistida, sem reenviar; a fila segue");
         self.release_uncertain().await;
         if let Err(failure)=self.publish().await {tracing::warn!(key=%self.target.key,code=%failure.code,"vista da desistência não publicou");}
+    }
+    /// Entrega aceita sem prova (eco diferente, prompt barrado por hook) passado o prazo, com o Claude
+    /// parado: vira desistida, que o Descartar tira. Nada é reenviado; a prova que chegar depois ainda a
+    /// confirma (`confirm_rows`). A incerta que segura a escrita é do `expire_uncertain`.
+    async fn expire_unproved(&mut self) {
+        let Ok(state)=self.queue.snapshot().await else {return};
+        if state.terminal_write_blocked(&self.target.binding.conversation) || self.cleared(&state) {return;}
+        let (now,grace)=(sample().epoch_s,self.options.give_up_after.as_secs_f64());
+        let due=state.rows.iter().any(|r|r["delivered"]==true && r["confirmed"]!=true && r["desistiu"]!=true && r["papel"]!="assistant" && r["steered"]!=true
+            && ["dispatched_ts","claimed_ts","ts"].iter().find_map(|k|r[*k].as_f64()).unwrap_or(0.0)+grace<=now);
+        if !due {return;}
+        // Parado, o que o Claude tivesse enfileirado já teria virado conversa.
+        if !self.services("maintenance","maintenance","").facts(&self.target.binding).await.is_ok_and(|facts|facts.binding==self.target.binding && facts.idle) {return;}
+        if self.confirm_rows().await.is_err() {return;}
+        let id=format!("give_up_unproved:{}",self.sequence.fetch_add(1,Ordering::Relaxed));
+        match self.queue.exec(self.target.generation,&id,sample(),Action::GiveUpUnproved {now,grace}).await {
+            Ok(given) if given["given_up"].as_array().is_some_and(|ids|!ids.is_empty())=>{
+                tracing::warn!(key=%self.target.key,session=%self.target.name,code="delivery_given_up",entries=%given["given_up"],
+                    "entrega aceita sem prova no prazo: desistida, sem reenviar");
+                if let Err(failure)=self.publish().await {tracing::warn!(key=%self.target.key,code=%failure.code,"vista da desistência não publicou");}
+            }
+            Ok(_)=>{},
+            Err(_)=>if crate::warn_limit::allow(Some(&self.target.key),"give_up_unproved_queue_io") {
+                tracing::warn!(key=%self.target.key,code="give_up_unproved_queue_io","desistência da entrega sem prova não gravou; tenta no próximo tique");
+            },
+        }
     }
     /// Depois de uma desistência: a memória da entrega incerta só sai quando o disco não segura mais a escrita.
     async fn release_uncertain(&mut self) {

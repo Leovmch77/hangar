@@ -24,6 +24,8 @@ type Answer = (StatusCode, Value);
 const MSG_CHAT_UNCONFIRMED: &str = "a pergunta foi fechada, mas a resposta por texto não foi confirmada — confira na sessão antes de responder de novo";
 const MSG_HEADLESS_INVALID: &str = "A pergunta mudou ou não aceita essas respostas. Confira as opções e tente novamente.";
 const MSG_HEADLESS_SEND: &str = "Não foi possível enviar a resposta.";
+/// Sem terminal não há texto digitado: a resposta vai pelo canal da CLI, que não confirmou.
+const MSG_HEADLESS_UNCONFIRMED: &str = "A CLI não confirmou a resposta; confira a conversa antes de responder de novo.";
 const MSG_CODEX_SEND: &str = "Não foi possível confirmar o envio da resposta ao Codex.";
 /// Código com que o ator sem terminal recusa uma resposta inválida (`claude.rs::error`).
 const ACTOR_REFUSAL: &str = "claude_command";
@@ -244,6 +246,20 @@ pub fn control_answer(sent: &Result<RuntimeReply, RuntimeError>) -> Answer {
     }
 }
 
+/// "Conversar" com respostas: o texto que não se confirma é 502 `erro_envio_falhou`, não 409. O app
+/// trata 409 como "nada digitado" e reenviar duplicaria a mensagem.
+pub fn chat_answer(sent: &Result<RuntimeReply, RuntimeError>) -> Answer {
+    match sent {
+        // O texto ficou na fila do Rust, que o entrega quando o composer voltar: aceito, como no Python.
+        Ok(reply) if reply.disposition == Disposition::Deferred && reply.payload["queued"] == true =>
+            (StatusCode::OK, json!({"ok": true, "fallback": false, "queued": true})),
+        Ok(reply) if reply.disposition == Disposition::Unknown
+            && matches!(reply.payload["code"].as_str(), Some("erro_sem_confirmacao_resposta" | "answer_chat_close_unproved")) =>
+            (StatusCode::BAD_GATEWAY, detail_body("erro_envio_falhou", MSG_CHAT_UNCONFIRMED, json!({}))),
+        _ => control_answer(sent),
+    }
+}
+
 /// O corpo do `answer_questions` sem terminal: o ator confere a pergunta pendente e monta a resposta.
 pub fn headless_command(body: &Body) -> Value { json!({"request_id": body.request_id, "answers": body.answers_json(), "interaction_id": body.interaction_id}) }
 
@@ -259,7 +275,7 @@ pub fn headless_answer(codex: bool, sent: &Result<RuntimeReply, RuntimeError>) -
         Ok(reply) => match reply.disposition {
             Disposition::Accepted => success(),
             Disposition::Rejected | Disposition::Deferred => invalid(),
-            Disposition::Unknown => (StatusCode::CONFLICT, detail_body("erro_sem_confirmacao_resposta", MSG_CHAT_UNCONFIRMED, json!({}))),
+            Disposition::Unknown => (StatusCode::CONFLICT, detail_body("erro_sem_confirmacao_resposta", if codex { MSG_CHAT_UNCONFIRMED } else { MSG_HEADLESS_UNCONFIRMED }, json!({}))),
         },
     }
 }
@@ -271,7 +287,7 @@ async fn terminal(ctx: &Ctx, body: &Body, expected: &ExpectedInteraction, handle
         Ok(Plan::Chat) => {
             let mut payload = json!({"answers":body.answers_json(), "interaction_id":body.interaction_id});
             if !body.request_id.is_null() { payload["request_id"] = body.request_id.clone(); }
-            control_answer(&handle.control(random_hex(16), "answer_chat".into(), payload).await)
+            chat_answer(&handle.control(random_hex(16), "answer_chat".into(), payload).await)
         }
     }
 }

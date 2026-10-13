@@ -114,7 +114,7 @@ async fn terminal_input_socket_partial_never_falls_back() {
 #[tokio::test]
 async fn terminal_input_allowlists_explicit_steer() {
  let io=Arc::new(FakeIo::new(vec![screen("")]));let d=driver(io.clone(),Arc::new(Services::new()));
- assert_eq!(d.key("C-c",false).await.disposition,Disposition::Rejected);assert_eq!(d.key("C-c",true).await.disposition,Disposition::Accepted);assert_eq!(d.key("PageUp",false).await.disposition,Disposition::Accepted);assert_eq!(d.steer().await.disposition,Disposition::Deferred);assert_eq!(io.writes().len(),2);
+ assert_eq!(d.key("C-c",false).await.disposition,Disposition::Rejected);assert_eq!(d.key("C-c",true).await.disposition,Disposition::Accepted);assert_eq!(d.key("PageUp",false).await.disposition,Disposition::Accepted);let steer=d.steer().await;assert_eq!((steer.disposition,steer.code.as_str()),(Disposition::Accepted,"no_queued_input"),"sem fila na TUI não é falha");assert_eq!(io.writes().len(),2);
 }
 #[tokio::test]
 async fn terminal_input_select_closed_loop() {
@@ -165,6 +165,78 @@ fn terminal_input_review_matches_per_question_not_cross_question_substrings() {
  let a=vec![option_answer(0,"first"),option_answer(1,"second")];
  assert!(review_matches("Review\n→ first\n→ second",&a));assert!(!review_matches("Review\n→ second\n→ first",&a));assert!(!review_matches("Review\n→ firstly\n→ second",&a));
 }
+#[test]
+fn terminal_input_review_ignores_free_text_and_arrows_in_the_history() {
+ // Como o Python: só os rótulos de opção se conferem; texto livre com vírgula ou quebra não segura o envio.
+ let text=QuestionAnswer {kind:AnswerKind::Text,question_id:None,indices:vec![],labels:vec![],multi:false,value:Some("sim, pode".into()),type_index:Some(2),chat_index:None};
+ let a=vec![option_answer(0,"first"),text];
+ assert!(review_matches("Review\n→ first\n→ sim, pode\n❯ 1. Submit answers",&a));
+ assert!(review_matches("Review\n→ first\n→ uma resposta que quebra\n  em duas linhas\n❯ 1. Submit answers",&a));
+ assert!(review_matches("● passo → feito\nReview\n→ first\n→ sim, pode\n❯ 1. Submit answers",&a));
+ assert!(!review_matches("Review\n→ outra\n→ sim, pode\n❯ 1. Submit answers",&a));
+}
+#[tokio::test]
+async fn terminal_input_answer_reaches_a_picker_whose_footer_the_task_list_pushed_up() {
+ let pane=include_str!("../../../../backend/tests/fixtures/pane_askuserquestion.txt").to_string();
+ let io=Arc::new(FakeIo::new(vec![pane,screen("")]));
+ let r=driver(io.clone(),Arc::new(Services::new())).answer(&[option_answer(0,"Opção Alpha")]).await;
+ assert_eq!((r.disposition,r.code.as_str()),(Disposition::Accepted,"answered"));
+ assert_eq!(io.writes().iter().map(|w|w.args.last().unwrap().clone()).collect::<Vec<_>>(),["\r"]);
+}
+#[tokio::test]
+async fn terminal_input_owner_controls_only_check_the_pane() {
+ // Claude caído e o pane de volta ao shell: os fatos da sessão falham, mas Parar e o espelho digitam.
+ let io=Arc::new(FakeIo::new(vec![screen("")]));let s=Arc::new(Services::new());s.facts.lock().unwrap().binding.conversation="other".into();
+ assert_ne!(driver(io.clone(),s.clone()).key("Escape",false).await.disposition,Disposition::Accepted,"a entrega comum segue a guarda inteira");
+ let d=driver(io.clone(),s).controls();
+ assert_eq!(d.key("Escape",false).await.disposition,Disposition::Accepted);
+ assert_eq!(d.text("claude -c").await.disposition,Disposition::Accepted);
+ assert_eq!(d.interrupt(false).await.disposition,Disposition::Accepted);
+}
+/// Telas reais do Claude Code 2.1.296 com um subagente vendo o composer (`Message @general-purpose…`).
+const SUB_COMPOSER: &str = include_str!("../fixtures/subagent/sub_composer.ansi");
+#[tokio::test]
+async fn terminal_input_composer_of_a_subagent_goes_back_to_main_before_typing() {
+ let at=|name:&str|std::fs::read_to_string(format!("{}/tests/fixtures/subagent/{name}.ansi",env!("CARGO_MANIFEST_DIR"))).unwrap();
+ let io=Arc::new(FakeIo::new(vec![at("sub_composer"),at("sub_composer"),at("sub_pill"),at("sub_main_cursor"),at("main_view_focus"),at("main_composer2"),screen("hello"),screen("")]));
+ let r=driver(io.clone(),Arc::new(Services::new())).prompt("hello","id").await;
+ assert_eq!((r.disposition,r.code.as_str()),(Disposition::Accepted,"submitted"));
+ assert_eq!(io.writes().iter().map(|w|w.args.last().unwrap().clone()).collect::<Vec<_>>(),["Down","Down","\r","Escape","hello","\r"]);
+}
+#[tokio::test]
+async fn terminal_input_subagent_composer_with_a_draft_defers_without_typing() {
+ let draft=SUB_COMPOSER.replace("\u{1b}[2mMessage @general-purpose…\u{1b}[0m","rascunho do dono");
+ assert!(draft.contains("rascunho do dono"));
+ let io=Arc::new(FakeIo::new(vec![draft]));
+ let r=driver(io.clone(),Arc::new(Services::new())).prompt("hello","id").await;
+ assert_eq!((r.disposition,r.code.as_str()),(Disposition::Deferred,"composer_targets_subagent"));
+ assert!(io.writes().is_empty());
+}
+#[tokio::test]
+async fn terminal_input_select_outcomes_follow_the_python() {
+ let p=|row:usize|format!("Question\n{}\nEsc to cancel · to navigate",if row==1{"❯ 1. first\n  2. second"}else{"  1. first\n❯ 2. second"});
+ // Cursor que não chega: só setas saíram, a opção não foi enviada (recusa, não incerta).
+ let io=Arc::new(FakeIo::new(vec![p(1)]));
+ let r=driver(io.clone(),Arc::new(Services::new())).select(2,true).await;
+ assert_eq!((r.disposition,r.code.as_str()),(Disposition::Rejected,"cursor_drift"));assert!(!keys(&io).contains(&"\r".to_string()));
+ // TUI lenta: a primeira leitura depois do Enter ainda mostra o picker, a seguinte não.
+ let io=Arc::new(FakeIo::new(vec![p(1),p(1),screen("")]));
+ let r=driver(io.clone(),Arc::new(Services::new())).select(1,true).await;
+ assert_eq!((r.disposition,r.code.as_str()),(Disposition::Accepted,"selected"));
+ // Múltipla escolha cuja marca não mudou: aviso e ok, para um segundo toque não desmarcar.
+ let multi="Quais?\n❯ 1. [ ] A\n  2. [ ] B\nEsc to cancel · to navigate".to_string();
+ let io=Arc::new(FakeIo::new(vec![multi]));
+ let r=driver(io.clone(),Arc::new(Services::new())).select(1,true).await;
+ assert_eq!((r.disposition,r.code.as_str()),(Disposition::Accepted,"selection_unchanged"));assert_eq!(keys(&io),["Space"]);
+}
+#[tokio::test]
+async fn terminal_input_checkbox_in_the_history_is_not_a_multiple_choice() {
+ let p=|row:usize|format!("● Plano\n  - [ ] tarefa um\n  - [x] tarefa dois\nPermitir?\n{}\nEsc to cancel · to navigate",if row==1{"❯ 1. Yes\n  2. No"}else{"  1. Yes\n❯ 2. No"});
+ let io=Arc::new(FakeIo::new(vec![p(1),screen("")]));
+ let r=driver(io.clone(),Arc::new(Services::new())).select(1,true).await;
+ assert_eq!((r.disposition,r.code.as_str()),(Disposition::Accepted,"selected"));
+ assert_eq!(io.writes()[0].args.last().unwrap(),"\r");
+}
 #[tokio::test]
 async fn terminal_input_answer_single_and_review_mismatch_never_extra_enter() {
  let io=Arc::new(FakeIo::new(vec![picker(),screen("")]));
@@ -176,7 +248,8 @@ async fn terminal_input_answer_single_and_review_mismatch_never_extra_enter() {
 async fn terminal_input_submit_selected_needs_submit_tab() {
  let multi="Question\n❯ 1. [✔] first\n  2. [ ] second\nEsc to cancel · to navigate";
  let io=Arc::new(FakeIo::new(vec![multi.into(),multi.into()]));
- assert_eq!(driver(io.clone(),Arc::new(Services::new())).submit_selected().await.disposition,Disposition::Unknown);assert_eq!(io.writes().len(),1);assert_eq!(io.writes()[0].args.last().unwrap(),"Right");
+ // Sem a aba de envio o Enter não sai: só o `Right` foi, nada enviado (recusa, como o Python).
+ assert_eq!(driver(io.clone(),Arc::new(Services::new())).submit_selected().await.disposition,Disposition::Rejected);assert_eq!(io.writes().len(),1);assert_eq!(io.writes()[0].args.last().unwrap(),"Right");
 }
 #[tokio::test]
 async fn terminal_input_interrupt_clear_checks_nonempty_to_avoid_rewind() {
@@ -191,10 +264,15 @@ async fn terminal_input_stale_after_wait_prevents_late_effect() {
  assert_eq!(task.await.unwrap().disposition,Disposition::Deferred);assert!(io.writes().is_empty());
 }
 #[tokio::test]
-async fn terminal_input_no_second_enter_for_plain_slash_residual() {
+async fn terminal_input_parked_slash_command_gets_one_more_enter() {
+ // Como o Python: o mesmo comando parado no composer ganha outro Enter, com ou sem dica de menu.
+ let io=Arc::new(FakeIo::new(vec![screen(""),screen("/clear"),screen("/clear"),screen("")]));
+ assert_eq!(driver(io.clone(),Arc::new(Services::new())).prompt("/clear","id").await.disposition,Disposition::Accepted);
+ assert_eq!(io.writes().iter().map(|w|w.args.last().unwrap().clone()).collect::<Vec<_>>(),["/clear","\r","\r"]);
+ // Nunca um terceiro: comando que segue parado fica incerto.
  let io=Arc::new(FakeIo::new(vec![screen(""),screen("/clear"),screen("/clear")]));
  assert_eq!(driver(io.clone(),Arc::new(Services::new())).prompt("/clear","id").await.disposition,Disposition::Unknown);
- assert_eq!(io.writes().len(),2);
+ assert_eq!(io.writes().len(),3);
 }
 #[cfg(unix)]
 #[tokio::test]
@@ -337,6 +415,16 @@ async fn terminal_input_clipboard_unavailable_preserves_literal_and_blocks_clipb
  assert_eq!(d.prompt(text,"id").await.disposition,if text.contains('\n'){Disposition::Deferred}else{Disposition::Accepted});assert!(!io.calls.lock().unwrap().iter().any(|r|r.program=="powershell.exe"));}
 }
 
+#[tokio::test]
+async fn terminal_input_windows_dash_placeholder_left_behind_is_visible_not_lost() {
+ // Como o Python: o `x` provisório que o pane não apagou é corrupção visível; o texto sai mesmo assim.
+ let mut b=binding();b.windows=true;b.pane="=test:0.0".into();
+ let s=Arc::new(Services::new());s.facts.lock().unwrap().binding=b.clone();
+ let io=Arc::new(FakeIo::new(vec![screen("x-abc")]));
+ let r=TerminalDriver::new(b,s,io.clone(),instant_limits()).text("-abc").await;
+ assert_eq!((r.disposition,r.code.as_str()),(Disposition::Accepted,"text_written"));
+ assert_eq!(keys(&io),["x-abc","Home","DC"]);
+}
 fn instant_limits() -> InputLimits { InputLimits { settle:Duration::ZERO,literal_settle:Duration::ZERO,multiline_settle:Duration::ZERO,slash_settle:Duration::ZERO,proof_attempts:2,ready_attempts:2,cleanup_attempts:3 } }
 #[tokio::test]
 async fn terminal_input_interleaved_interactive_pastes_keep_each_pane_bytes() {

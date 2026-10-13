@@ -118,6 +118,8 @@ struct Session {
     agent_late: VecDeque<(String, String)>,
     agent_outbox: VecDeque<(String, Value)>,
     agent_next: u64,
+    /// O último `session.end` do plugin (`fim`): o estado seguinte não o apaga.
+    ended: Option<Instant>,
 }
 
 /// Ciclo de vida de um subagente, como o Claude Code o sinaliza ao plugin.
@@ -202,7 +204,7 @@ impl Store {
         if let Some(old) = memory.sessions.remove(&binding.key) { finish_session(old); }
         memory.sessions.insert(binding.key.clone(), Session { binding: binding.clone(), owner: None, waiter: None,
             heartbeat: None, publication: None, questions: BTreeMap::new(), closed: HashMap::new(), state: None, suggestion: String::new(), plan: None,
-            agents: HashMap::new(), agent_waits: HashMap::new(), agent_late: VecDeque::new(), agent_outbox: VecDeque::new(), agent_next: 0 });
+            agents: HashMap::new(), agent_waits: HashMap::new(), agent_late: VecDeque::new(), agent_outbox: VecDeque::new(), agent_next: 0, ended: None });
         self.notify(&binding.key);
         Ok(())
     }
@@ -462,6 +464,13 @@ impl Store {
         let s = session(&mut memory, binding)?;
         Ok(s.waiter.is_some() || s.heartbeat.is_some_and(|at| now.saturating_duration_since(at) < ALIVE))
     }
+    /// O plugin prova que a conversa do vínculo é a atual: um `/pull` aberto agora, que só entra com o
+    /// `session_id` dela, e nenhum `session.end` (`fim`, o `/clear` incluso) depois de ele começar.
+    pub fn conversation_proved(&self, binding: &InteractionBinding) -> Result<bool, ServiceError> {
+        let mut memory = self.memory.lock().map_err(|_| unavailable())?;
+        let s = session(&mut memory, binding)?;
+        Ok(s.waiter.is_some() && s.owner.as_ref().is_some_and(|owner| s.ended.is_none_or(|ended| ended < owner.seen)))
+    }
     pub fn recent_state(&self, binding: &InteractionBinding, now: Instant) -> Result<Option<(String, Option<String>)>, ServiceError> {
         let mut memory = self.memory.lock().map_err(|_| unavailable())?;
         let s = session(&mut memory, binding)?;
@@ -473,6 +482,7 @@ impl Store {
         let mut memory = self.memory.lock().map_err(|_| unavailable())?;
         let s = session(&mut memory, binding)?;
         if state == "working" { s.suggestion.clear(); }
+        if state == "fim" { s.ended = Some(now); }
         s.state = Some((now, state, reason));
         self.notify(&binding.key);
         Ok(())

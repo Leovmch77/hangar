@@ -117,6 +117,14 @@ impl LocalTerminalFacts {
         if fields.len()!=4 || fields[1]!=binding.name || fields[3].parse::<u64>().ok()!=Some(binding.created) || (!binding.windows && fields[2]!=binding.pane) {return Err(ServiceError("terminal_binding_changed"));}
         let pane_pid=fields[0].parse::<i64>().ok().filter(|pid|*pid>0).ok_or(ServiceError("terminal_pane_unavailable"))?;
         let (metadata, conversation, transcript) = (target.metadata.clone(), binding.conversation.clone(), target.transcript.clone());
+        // Sem o registro nativo, o `/pull` aberto do plugin desta vida prova a conversa (o Claude Code só o
+        // aceita com o `session_id` dela), sem ler os arquivos abertos do processo.
+        let plugin_proof = match &self.plugin {
+            // Plugin sem vínculo ou ilegível não prova nada: segue a leitura do processo.
+            Some(store) => self.plugin_facts(target).is_ok_and(|facts| plugin_current(&facts, target.metadata.cut(target.created)))
+                && store.conversation_proved(&Self::binding(target)).unwrap_or(false),
+            None => false,
+        };
         tokio::task::spawn_blocking(move || {
             let procs=SystemProcs::default();let children=procs.children(Duration::ZERO).map_err(|_|ServiceError("terminal_agent_unavailable"))?;
             if !crate::list::discover::descendants(pane_pid,&children).contains(&i64::from(metadata.agent_pid)) {return Err(ServiceError("terminal_agent_changed"));}
@@ -124,7 +132,7 @@ impl LocalTerminalFacts {
             #[cfg(not(windows))]
             if procs.argv_checked(i64::from(metadata.agent_pid)).map_err(|_|ServiceError("terminal_agent_unavailable"))?.is_empty() {return Err(ServiceError("terminal_agent_unavailable"));}
             if !same_birth(born, metadata.agent_birth) { return Err(ServiceError("terminal_agent_changed")); }
-            if native_record(&metadata, &conversation)?.is_none() {
+            if native_record(&metadata, &conversation)?.is_none() && !plugin_proof {
                 current_transcript(&procs, &metadata, &conversation, &transcript)?;
             }
             Ok(pane_pid)
@@ -385,6 +393,25 @@ mod tests {
         std::fs::write(dir.path().join(".hangar-state/sid.json"),json!({"state":"idle","ts":now+2.0}).to_string()).unwrap();assert!(local.read(&target,&target.binding,"").await.unwrap().idle);
         drop(poll);plugin.forget("key").unwrap();assert!(local.read(&target,&target.binding,"").await.is_err());
     }
+    #[cfg(target_os="linux")]
+    #[tokio::test]
+    async fn open_plugin_pull_proves_the_conversation_without_the_native_record() {
+        use crate::plugin::Pull;
+        let dir=tempfile::tempdir().unwrap();let target=target(dir.path());let binding=LocalTerminalFacts::binding(&target);
+        std::fs::create_dir_all(target.transcript.parent().unwrap()).unwrap();std::fs::write(&target.transcript,"").unwrap();
+        let plugin=Arc::new(Store::new(Arc::new(crate::interactions::InteractionStore::default())));plugin.interactions().bind(&binding).unwrap();plugin.bind(&binding).unwrap();
+        let local=LocalTerminalFacts::new(frame(),Some(plugin.clone()),None);
+        // Sem registro nativo nem o transcript aberto pelo processo, e sem plugin: não há prova.
+        assert_eq!(local.check(&target,&target.binding).await.unwrap_err().0,"terminal_conversation_unavailable");
+        let now=SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64();let mut stamp=(now*1000.0) as u64;let mut instance=String::new();while stamp>0 {instance.insert(0,char::from_digit((stamp%36) as u32,36).unwrap());stamp/=36;}
+        let poll=plugin.begin_pull(&binding,Pull {instance,modos:vec!["fill".into()],estado:Some("idle".into()),session_id:Some("sid".into())},Instant::now()).unwrap();
+        assert!(local.check(&target,&target.binding).await.is_ok(),"o /pull aberto prova a conversa");
+        // `session.end` (o `/clear`) depois de o /pull começar: a prova acaba, mesmo com outro estado depois.
+        plugin.record_state(&binding,"fim".into(),Some("clear".into()),Instant::now()).unwrap();
+        plugin.record_state(&binding,"idle".into(),None,Instant::now()).unwrap();
+        assert_eq!(local.check(&target,&target.binding).await.unwrap_err().0,"terminal_conversation_unavailable");
+        drop(poll);
+    }
     /// Pane que troca de tela a cada Enter enviado, como o formulário do TUI.
     struct FormIo { screens: Vec<String>, at: Mutex<usize>, keys: Mutex<Vec<String>> }
     impl TerminalIo for FormIo {
@@ -447,9 +474,9 @@ mod tests {
         assert_eq!((result.disposition,result.code.as_str()),(input::Disposition::Accepted,"control_submitted"));
         assert_eq!(*io.keys.lock().unwrap(),["\r","\r","\r"]);
         assert_eq!(interactions.expected(&binding,Some(&expected.interaction_id)).unwrap(),expected);
-        // Menu fora do formulário: a causa chega inteira pela leitura dos fatos e nada é teclado.
+        // Menu fora do formulário: é menu do pane, não esta pergunta; o ID do formulário não o responde.
         let (_,expected,io,driver)=run(vec![other]);
-        assert_eq!(driver.capture().await.unwrap_err().code,"askq_pane_mismatch");
+        assert!(driver.capture().await.is_ok());
         assert_eq!(driver.guarded_answer(&expected,&answers).await.disposition,input::Disposition::Rejected);
         assert!(io.keys.lock().unwrap().is_empty());
         // Troca real A→B na etapa 2: o ID de A não responde B.
@@ -458,6 +485,42 @@ mod tests {
         let result=driver.guarded_answer(&expected,&answers).await;
         assert_eq!((result.disposition,result.code.as_str()),(input::Disposition::Rejected,crate::interactions::InteractionError::Changed.code()));
         assert!(io.keys.lock().unwrap().is_empty());
+    }
+    #[tokio::test]
+    async fn menu_beside_another_question_and_cut_preview_labels_still_answer() {
+        let dir=tempfile::tempdir().unwrap();let target=target(dir.path());let binding=LocalTerminalFacts::binding(&target);
+        std::fs::create_dir(dir.path().join("sessions")).unwrap();
+        std::fs::write(dir.path().join("sessions").join(format!("{}.json",target.metadata.agent_pid)),json!({"pid":target.metadata.agent_pid,"sessionId":"sid","status":"idle"}).to_string()).unwrap();
+        let sidecar=crate::state::ask::sidecar_path(&target.transcript).unwrap();std::fs::create_dir_all(sidecar.parent().unwrap()).unwrap();
+        let foot="\nEnter to select · ↑/↓ to navigate · Esc to cancel\n";
+        let closed="────────────────────────────────\n❯ \n────────────────────────────────\n".to_string();
+        let limits=InputLimits {settle:Duration::ZERO,literal_settle:Duration::ZERO,multiline_settle:Duration::ZERO,slash_settle:Duration::ZERO,proof_attempts:2,ready_attempts:2,cleanup_attempts:2};
+        let setup=|screens:Vec<String>| {
+            let interactions=Arc::new(crate::interactions::InteractionStore::default());let plugin=Arc::new(Store::new(interactions.clone()));
+            interactions.bind(&binding).unwrap();plugin.bind(&binding).unwrap();
+            let io=Arc::new(FormIo {screens,at:Mutex::new(0),keys:Mutex::new(Vec::new())});
+            let facts=Arc::new(FormFacts {local:LocalTerminalFacts::new(io.clone(),Some(plugin),None),target:target.clone()});
+            let driver=TerminalDriver::new(target.binding.clone(),facts,io.clone(),limits.clone()).with_interactions(interactions.clone()).with_interaction_source(target.transcript.clone());
+            (interactions,io,driver)
+        };
+        // Sidecar de outra pergunta e uma permissão na tela: os botões do pane respondem.
+        std::fs::write(&sidecar,json!({"tool_input":{"questions":[{"question":"Cor?","header":"Cor","multiSelect":false,"options":[{"label":"Azul"},{"label":"Verde"}]}]}}).to_string()).unwrap();
+        let menu=format!("   Permitir Bash?\n\n ❯ 1. Yes\n   2. No\n{foot}");
+        let (interactions,io,driver)=setup(vec![menu.clone(),closed.clone()]);
+        let id=crate::state::ask::observe_menu(&interactions,&binding,&target.transcript,&menu).unwrap().expect("o menu ganha identidade");
+        let result=driver.guarded_select(&interactions.expected(&binding,Some(&id)).unwrap(),1,true).await;
+        assert_eq!((result.disposition,result.code.as_str()),(input::Disposition::Accepted,"selected"));
+        assert_eq!(*io.keys.lock().unwrap(),["\r"]);
+        // Prévia: o pane corta o rótulo; a resposta segue pelo mesmo casamento da publicação.
+        std::fs::write(&sidecar,json!({"tool_input":{"questions":[{"question":"Layout?","header":"L","multiSelect":false,
+            "options":[{"label":"Grade larga","preview":"x"},{"label":"Lista","preview":"y"}]}]}}).to_string()).unwrap();
+        let cut=format!("   Layout?\n\n ❯ 1. Grade lar\n   2. Lista\n   3. Type something.\n   4. Chat about this\n{foot}");
+        let (interactions,io,driver)=setup(vec![cut.clone(),closed]);
+        let id=crate::state::ask::observe_terminal(&interactions,&binding,&target.transcript,&cut).unwrap().unwrap().interaction_id.unwrap();
+        let answers:Vec<input::QuestionAnswer>=serde_json::from_value(json!([{"kind":"option","indices":[0],"labels":["Grade larga"]}])).unwrap();
+        let result=driver.guarded_answer(&interactions.expected(&binding,Some(&id)).unwrap(),&answers).await;
+        assert_eq!((result.disposition,result.code.as_str()),(input::Disposition::Accepted,"answered"));
+        assert_eq!(*io.keys.lock().unwrap(),["\r"]);
     }
     #[tokio::test]
     async fn sender_mode_and_target_life_are_checked_without_actor_calls() {
@@ -490,6 +553,7 @@ mod tests {
             assert_eq!(input::plugin_answer_body(&ab,&json!([invalid])).unwrap_err().0,"terminal_answer_invalid","{invalid}");
         }
         assert_eq!(input::plugin_answer_body(&ab,&json!([{"kind":"option","indices":[1],"labels":["B"]}])).unwrap(),json!({"answers":{"Q":"B"}}));
+        assert_eq!(input::plugin_answer_body(&ab,&json!([{"kind":"option","indices":[1],"labels":[" B "]}])).unwrap(),json!({"answers":{"Q":"B"}}),"espaço no rótulo não recusa");
         assert_eq!(input::plugin_answer_body(&ab,&json!([{"kind":"option","indices":[0,1],"labels":["A","B"]}])).unwrap(),json!({"answers":{"Q":"A, B"}}));
         assert!(plugin_current(&json!({"owner_instance":"rs-owner"}),1.0));assert!(!plugin_current(&json!({"owner_instance":"rs-owner"}),1.001));
     }

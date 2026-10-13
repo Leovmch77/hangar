@@ -204,7 +204,10 @@ async fn whoami(State(st): State<Arc<RouteState>>, ConnectInfo(peer): ConnectInf
 async fn pull(State(st): State<Arc<RouteState>>, Json(body): Json<Envelope<Pull>>) -> Response {
     let identity = match admit(&st, &body).await { Ok(identity) => identity, Err(error) => return fail(error) };
     let present = match st.sources.band_present(&identity).await { Ok(present) => present, Err(error) => return fail(error) };
+    let instance = body.body.instance.clone();
     let poll = match st.store.begin_pull(&identity.binding, body.body, Instant::now()) { Ok(poll) => poll, Err(error) => return fail(error) };
+    // A conversa conferida acima tem esta vida desde o nascimento da instância.
+    crate::state::ask::life_started(&identity.binding.conversation, &instance);
     let mut result = poll.wait().await;
     result["faixa"] = json!(present);
     Json(result).into_response()
@@ -229,6 +232,8 @@ fn receipt(id: Option<String>, generation: Option<u64>, session_id: Option<Strin
 async fn finish(State(st): State<Arc<RouteState>>, Json(body): Json<Envelope<Finished>>) -> Response {
     let identity = match admit(&st, &body).await { Ok(identity) => identity, Err(error) => return fail(error) };
     let body = body.body;
+    // O fim da chamada vale vença o app ou o terminal: o sidecar dela deixa de segurar menu e fila.
+    if let Some(call) = body.id.strip_prefix("ask:") { crate::state::ask::call_ended(call); }
     let receipt = match receipt(body.publication_id, body.generation, body.session_id) { Ok(r) => r, Err(error) => return fail(error) };
     match st.store.finish(&identity.binding, &body.id, &body.vencedor, receipt) { Ok(()) => ok(), Err(error) => fail(error) }
 }

@@ -153,6 +153,13 @@ impl Fixture {
         let options=TerminalOptions {interactions:Some(self.plugin.interactions().clone()),plugin:Some(self.plugin.clone()),io:self.io.clone(),limits:InputLimits {settle:Duration::ZERO,literal_settle:Duration::ZERO,multiline_settle:Duration::ZERO,slash_settle:Duration::ZERO,proof_attempts:1,ready_attempts:1,cleanup_attempts:1},tick:Duration::from_millis(15),stall_notice,focus_return,clear_wait,..TerminalOptions::default()};
         TerminalActor::spawn(self.target.clone(),QueueActor::start(store,lease),self.policy.clone(),options,events,Arc::new(AtomicU64::new(0)))
     }
+    fn start_give_up(&self,give_up_after:Duration)->hangar_server::runtime::terminal::TerminalHandle {
+        self.start_plugin();
+        let lease=crate::lease_when_free(&self.target.lease_path);
+        let store=Store::open(&self.target.state_path,&self.target.projection_dir,queue::State::new("key",1,"session",vec![])).unwrap();
+        let options=TerminalOptions {interactions:Some(self.plugin.interactions().clone()),plugin:Some(self.plugin.clone()),io:self.io.clone(),limits:InputLimits {settle:Duration::ZERO,literal_settle:Duration::ZERO,multiline_settle:Duration::ZERO,slash_settle:Duration::ZERO,proof_attempts:1,ready_attempts:1,cleanup_attempts:1},tick:Duration::from_millis(15),give_up_after,..TerminalOptions::default()};
+        TerminalActor::spawn(self.target.clone(),QueueActor::start(store,lease),self.policy.clone(),options,broadcast::channel(128).0,Arc::new(AtomicU64::new(0)))
+    }
     fn command(&self,id:&str,text:&str)->RuntimeCommand { RuntimeCommand {operation_id:id.into(),kind:OperationKind::Input,payload:json!({"text":text,"pre_transcript":false})} }
     /// Lê o estado que o ator grava por troca atômica. No Windows quem abre o arquivo no instante da troca
     /// recebe NotFound ou acesso negado; a leitura seguinte já vê o arquivo novo.
@@ -295,7 +302,7 @@ async fn terminal_runtime_select_refuses_b_shown_at_any_capture_up_to_the_key() 
     }
 }
 /// A navegação até a opção: B na conferência final da primeira seta não deixa tecla nenhuma sair; B na da
-/// segunda deixa só a primeira, e a entrega fica incerta.
+/// segunda deixa só a primeira: só setas saíram, sem Enter, então é recusa e não incerteza.
 #[tokio::test]
 async fn terminal_runtime_select_navigation_refuses_b_at_each_arrow() {
     let (a,b)=(menu("Question A",&["first","second","third"]),menu("Question B",&["first","second","third"]));
@@ -304,7 +311,7 @@ async fn terminal_runtime_select_navigation_refuses_b_at_each_arrow() {
     assert_eq!((reply.disposition,reply.payload["code"].clone()),(hangar_server::runtime::protocol::Disposition::Rejected,json!("erro_interacao_desatualizada")),"{reply:?}");
     assert!(keys.is_empty(),"{keys:?}");
     let (reply,keys)=answer_menu("select",3,&a,[vec![a.clone();5],vec![b.clone()]].concat()).await;
-    assert_eq!((reply.disposition,reply.payload["code"].clone()),(hangar_server::runtime::protocol::Disposition::Unknown,json!("erro_interacao_desatualizada")),"{reply:?}");
+    assert_eq!((reply.disposition,reply.payload["code"].clone()),(hangar_server::runtime::protocol::Disposition::Rejected,json!("erro_interacao_desatualizada")),"{reply:?}");
     assert_eq!(keys,["Down"]);
 }
 /// Envio do menu de múltipla escolha: o `Right` só com o menu na conferência final; o Enter só com a mesma
@@ -575,7 +582,8 @@ async fn terminal_runtime_working_allows_safe_tui_enqueue_without_hiding_pending
 async fn terminal_runtime_explicit_steer_uses_driver_and_no_prompt_row() {
     let f=Fixture::new().await; let h=f.start();
     let result=h.control("steer-now".into(),"steer".into(),json!({})).await.unwrap();
-    assert_eq!(result.disposition,hangar_server::runtime::protocol::Disposition::Deferred);
+    // Sem mensagem na fila da TUI não há o que promover: 200 `promoted:false`, como no Python.
+    assert_eq!((result.disposition,result.payload["promoted"].clone()),(hangar_server::runtime::protocol::Disposition::Accepted,json!(false)),"{}",result.payload);
     assert!(f.state()["rows"].as_array().unwrap().is_empty()); h.stop().await.unwrap();
 }
 
@@ -640,6 +648,25 @@ async fn terminal_runtime_permission_without_receipt_never_gets_a_keyboard_fallb
     assert!(f.io.calls.lock().unwrap().iter().all(|call|call.args[0]=="display-message"));
     assert!(f.calls.lock().unwrap().is_empty());assert!(f.plugin_requests.lock().unwrap().is_empty());
     assert!(tokio::time::timeout(Duration::ZERO,poll.wait()).await.is_err(),"nenhuma resposta entregue ao hook sem receipt_v2");
+    h.stop().await.unwrap();
+}
+#[tokio::test]
+async fn terminal_runtime_question_without_receipt_falls_back_to_the_pane_keys() {
+    // Vida nova antes do `/pull` voltar: o plugin segura a pergunta e não recebe a resposta. Como no Python, as
+    // teclas do pane respondem, conferindo que o picker mostra a pergunta dele.
+    use hangar_server::plugin::{Ask,PermissionGate};
+    let f=Fixture::new().await;let h=f.start();f.owner(false);let binding=hangar_server::terminal_facts::LocalTerminalFacts::binding(&f.target);
+    let questions=vec![json!({"question":"Escolha B","header":"B","options":[{"label":"primeira"},{"label":"segunda"}]})];
+    let poll=f.plugin.begin_ask(&binding,Ask {id:"ask:B".into(),questions:Some(questions),tool:None,janela_ms:None,summary:None},PermissionGate {app_present:true,terminal_attached:false,mode_without_dialog:false},std::time::Instant::now()).unwrap();
+    let interaction=f.plugin.pending(&binding,std::time::Instant::now()).unwrap().interaction_id;
+    let picker="Escolha B\n❯ 1. primeira\n  2. segunda\n  3. Type something.\n  4. Chat about this\nEnter to select · ↑/↓ to navigate · Esc to cancel\n".to_string();
+    let closed="────────────────────────────────\n❯ \n────────────────────────────────\n".to_string();
+    *f.io.panes.lock().unwrap()=vec![picker.clone(),picker.clone(),picker.clone(),picker,closed];
+    let reply=h.control("ask-keys".into(),"answer_questions".into(),json!({"request_id":"ask:B","interaction_id":interaction,"answers":[{"kind":"option","indices":[0],"labels":["primeira"]}]})).await.unwrap();
+    assert_eq!((reply.disposition,reply.payload["code"].clone()),(hangar_server::runtime::protocol::Disposition::Accepted,json!("answered")),"{}",reply.payload);
+    let keys:Vec<String>=f.io.calls.lock().unwrap().iter().filter(|c|c.args[0]=="send-keys").map(|c|c.args.last().unwrap().clone()).collect();
+    assert_eq!(keys,["\r"]);
+    assert!(tokio::time::timeout(Duration::ZERO,poll.wait()).await.is_err(),"nada entregue ao hook sem receipt_v2");
     h.stop().await.unwrap();
 }
 #[tokio::test]
@@ -766,7 +793,10 @@ async fn terminal_runtime_clear_after_dispatch_holds_old_binding_until_detach() 
     assert_eq!(f.state()["runtime_state"]["preserve_binding"],true);
     let count=f.io.calls.lock().unwrap().len(); h.command(f.command("clear-now","/clear")).await.unwrap(); assert_eq!(f.io.calls.lock().unwrap().len(),count);
     assert!(h.command(f.command("old-life","Olá")).await.is_err());
-    assert!(h.control("old-key".into(),"interactive_key".into(),json!({"key":"C-c"})).await.is_err());
+    assert_eq!(f.io.calls.lock().unwrap().len(),count);
+    // A tecla do espelho não escreve na conversa: segue com a trava, como no Python.
+    assert_eq!(h.control("old-key".into(),"interactive_key".into(),json!({"key":"C-c"})).await.unwrap().disposition,hangar_server::runtime::protocol::Disposition::Accepted);
+    let count=f.io.calls.lock().unwrap().len();
     h.drain().await.unwrap(); assert_eq!(f.io.calls.lock().unwrap().len(),count); h.stop().await.unwrap();
 }
 
@@ -850,6 +880,95 @@ async fn terminal_runtime_clear_while_busy_waits_for_the_turn_before_releasing()
     assert!(f.state()["runtime_state"]["clear_barrier"].is_object());
     f.idle.store(true,std::sync::atomic::Ordering::Release);
     f.wait_for("trava sai com a sessão parada",||f.state()["runtime_state"]["clear_barrier"].is_null()).await;
+    h.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn terminal_runtime_clear_barrier_lets_controls_through_while_the_turn_runs() {
+    // A trava espera o turno, mas Parar e as teclas do espelho não escrevem na conversa nova.
+    let f=Fixture::new().await; let h=f.start_clear(Duration::from_millis(100));
+    assert_eq!(h.command(f.command("clear-busy","/clear")).await.unwrap().disposition,hangar_server::runtime::protocol::Disposition::Accepted);
+    f.idle.store(false,std::sync::atomic::Ordering::Release);
+    assert!(f.state()["runtime_state"]["clear_barrier"].is_object());
+    let stop=h.control("stop-during-clear".into(),"interrupt".into(),json!({"clear":false})).await;
+    assert_eq!(stop.as_ref().map(|r|r.disposition).map_err(|e|e.code.clone()),Ok(hangar_server::runtime::protocol::Disposition::Accepted));
+    let key=h.control("key-during-clear".into(),"navigation_key".into(),json!({"key":"Down"})).await;
+    assert_eq!(key.as_ref().map(|r|r.disposition).map_err(|e|e.code.clone()),Ok(hangar_server::runtime::protocol::Disposition::Accepted));
+    let keys:Vec<String>=f.io.calls.lock().unwrap().iter().filter(|r|r.args[0]=="send-keys").map(|r|r.args.last().unwrap().clone()).collect();
+    assert!(keys.iter().any(|k|k=="Escape") && keys.iter().any(|k|k=="Down"),"{keys:?}");
+    assert!(f.state()["runtime_state"]["clear_barrier"].is_object(),"o controle não solta a trava");
+    h.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn terminal_runtime_unreadable_composer_holding_the_queue_shows_why() {
+    // O desenho do composer mudou: nada é digitado às cegas, mas a vista diz por que a fila não anda.
+    let f=Fixture::new().await; f.ready.store(false,std::sync::atomic::Ordering::Release);
+    let h=f.start_full(broadcast::channel(128).0,Duration::from_millis(50));
+    h.queue("append-u".into(),Action::Append {text:"Parada".into(),delivered:false,ts:None,pre_transcript:false,entry_id:Some("u".into())}).await.unwrap();
+    let start=std::time::Instant::now();
+    while h.snapshot().await.unwrap()["view"]["input_stalled"]!="composer_unreadable" {
+        assert!(start.elapsed()<WAIT,"o motivo nunca apareceu: {}",h.snapshot().await.unwrap()["view"]); tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(!f.io.calls.lock().unwrap().iter().any(|r|r.args.last().unwrap()=="Parada"));
+    f.ready.store(true,std::sync::atomic::Ordering::Release);
+    f.wait_for("entrega com o composer legível",||f.io.calls.lock().unwrap().iter().any(|r|r.args.last().unwrap()=="Parada")).await;
+    h.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn terminal_runtime_accepted_without_proof_is_given_up_and_rescued_when_it_shows_up() {
+    // Eco que não casa ou prompt barrado por hook: com o Claude parado, a bolha vira "não chegou" (o
+    // Descartar a tira), sem reenviar; a mensagem que aparece depois no transcript volta a ser entregue.
+    let f=Fixture::new().await; let h=f.start_give_up(Duration::from_millis(200));
+    assert_eq!(h.command(f.command("lost","Olá")).await.unwrap().disposition,hangar_server::runtime::protocol::Disposition::Accepted);
+    f.wait_for("desistida no prazo",||f.state()["rows"][0]["desistiu"]==true).await;
+    let typed=||f.io.calls.lock().unwrap().iter().filter(|r|r.args.contains(&"-l".into()) && r.args.last().unwrap()=="Olá").count();
+    assert_eq!(typed(),1,"nunca reenviada");
+    std::fs::write(&f.target.transcript,format!("{}\n",json!({"type":"user","sessionId":"sid","uuid":"late","timestamp":chrono::Utc::now().to_rfc3339(),"message":{"content":"Olá"}}))).unwrap();
+    h.confirm().await.unwrap();
+    assert_eq!(f.state()["rows"][0]["confirmed"],true); assert!(f.state()["rows"][0]["desistiu"].is_null());
+    h.stop().await.unwrap();
+    // A incerta desistida (`GiveUp`) também é resgatada.
+    let f=Fixture::new().await; f.io.fail_enter.store(true,std::sync::atomic::Ordering::Release); let h=f.start();
+    assert_eq!(h.command(f.command("unsure","Olá")).await.unwrap().disposition,hangar_server::runtime::protocol::Disposition::Unknown);
+    assert_eq!(h.queue("give-up".into(),Action::GiveUp {entry_id:"unsure".into()}).await.unwrap(),json!(true));
+    assert_eq!(f.state()["rows"][0]["desistiu"],true);
+    std::fs::write(&f.target.transcript,format!("{}\n",json!({"type":"user","sessionId":"sid","uuid":"late","timestamp":chrono::Utc::now().to_rfc3339(),"message":{"content":"Olá"}}))).unwrap();
+    h.confirm().await.unwrap();
+    assert_eq!(f.state()["rows"][0]["confirmed"],true,"{}",f.state()["rows"]);
+    h.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn terminal_runtime_question_scrolled_off_screen_holds_the_queue() {
+    // O menu do AskUserQuestion saiu da tela: as teclas do recado navegariam o picker. A fila espera a resposta.
+    let f=Fixture::new().await;
+    let config=f.target.metadata.config_dir.clone();std::fs::create_dir_all(config.join(".hangar-askq")).unwrap();
+    std::fs::write(&f.target.transcript,"{\"timestamp\":\"2099-01-01T00:00:00Z\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_q\",\"name\":\"AskUserQuestion\"}]}}\n").unwrap();
+    std::fs::write(config.join(".hangar-askq/sid.json"),json!({"transcript_path":f.target.transcript,"tool_use_id":"toolu_q","tool_input":{"questions":[
+        {"question":"Cor?","header":"Cor","multiSelect":false,"options":[{"label":"Azul"},{"label":"Verde"}]}]}}).to_string()).unwrap();
+    let h=f.start();
+    h.queue("append-q".into(),Action::Append {text:"Recado".into(),delivered:false,ts:None,pre_transcript:false,entry_id:Some("q".into())}).await.unwrap();
+    assert_eq!(h.drain().await.unwrap()["drained"],0);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(!f.io.calls.lock().unwrap().iter().any(|r|r.args.last().unwrap()=="Recado"),"nada digitado com a pergunta aberta");
+    use std::io::Write;
+    writeln!(std::fs::OpenOptions::new().append(true).open(&f.target.transcript).unwrap(),"{{\"timestamp\":\"2099-01-01T00:00:01Z\",\"message\":{{\"content\":[{{\"type\":\"tool_result\",\"tool_use_id\":\"toolu_q\"}}]}}}}").unwrap();
+    f.wait_for("entrega depois da resposta",||f.io.calls.lock().unwrap().iter().any(|r|r.args.last().unwrap()=="Recado")).await;
+    h.stop().await.unwrap();
+    // Sidecar de uma vida que morreu na pergunta (mais velho que o processo): a conversa retomada não a mostra
+    // nem dispara o PostToolUse, e a fila não espera por ela.
+    let f=Fixture::new().await;
+    let config=f.target.metadata.config_dir.clone();std::fs::create_dir_all(config.join(".hangar-askq")).unwrap();
+    std::fs::write(&f.target.transcript,"{\"timestamp\":\"2099-01-01T00:00:00Z\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_q\",\"name\":\"AskUserQuestion\"}]}}\n").unwrap();
+    let sidecar=config.join(".hangar-askq/sid.json");
+    std::fs::write(&sidecar,json!({"transcript_path":f.target.transcript,"tool_use_id":"toolu_q","tool_input":{"questions":[
+        {"question":"Cor?","header":"Cor","multiSelect":false,"options":[{"label":"Azul"},{"label":"Verde"}]}]}}).to_string()).unwrap();
+    std::fs::OpenOptions::new().write(true).open(&sidecar).unwrap().set_times(std::fs::FileTimes::new().set_modified(std::time::UNIX_EPOCH+Duration::from_secs(1))).unwrap();
+    let h=f.start();
+    h.queue("append-old".into(),Action::Append {text:"Recado".into(),delivered:false,ts:None,pre_transcript:false,entry_id:Some("old".into())}).await.unwrap();
+    f.wait_for("entrega sem esperar a pergunta morta",||f.io.calls.lock().unwrap().iter().any(|r|r.args.last().unwrap()=="Recado")).await;
     h.stop().await.unwrap();
 }
 

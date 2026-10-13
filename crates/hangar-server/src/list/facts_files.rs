@@ -546,6 +546,8 @@ pub fn open_question(stem: Option<&str>, dirs: &[PathBuf]) -> Option<OpenQuestio
             continue;
         };
         let since = mtime.duration_since(UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64());
+        // O fim da chamada (ou da vida) visto pelo plugin vale antes da leitura do transcript.
+        if crate::state::ask::ended_by_plugin(stem, data.get("tool_use_id").and_then(Value::as_str), since) { continue; }
         if answered_cached(stem, tp, since, data.get("tool_use_id").and_then(Value::as_str)) {
             continue;
         }
