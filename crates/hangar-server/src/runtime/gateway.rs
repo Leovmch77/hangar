@@ -205,10 +205,17 @@ impl RuntimeRegistry {
     pub fn ingress(&self) -> &super::ingress::IngressGates { &self.ingress }
     pub fn subscribe(&self) -> broadcast::Receiver<RuntimeEvent> { self.events.subscribe() }
     /// Último valor da sessão `name` para o feed do hub; `None` enquanto ela não está aberta aqui.
-    pub fn live(&self,name:&str) -> LiveReceiver { self.live_sender(name).subscribe() }
+    pub fn live(&self,name:&str) -> LiveReceiver {
+        let mut map = self.live.lock().unwrap_or_else(|e|e.into_inner());
+        map.retain(|key,sender|key == name || sender.receiver_count() > 0 || sender.sender_count() > 1 || sender.borrow().is_some());
+        map.entry(name.to_owned()).or_insert_with(||tokio::sync::watch::channel(None).0).subscribe()
+    }
     /// Estado do envio terminal, sem receber eventos das outras sessões.
     pub fn terminal_status(&self,name:&str) -> super::terminal_status::StatusReceiver {
-        self.terminal_status_sender(name).subscribe()
+        // Assinar sob a trava evita que a limpeza confunda o leitor com um publicador novo.
+        let mut map=self.terminal_status.lock().unwrap_or_else(|e|e.into_inner());
+        map.retain(|key,sender|key==name || sender.receiver_count()>0 || sender.sender_count()>1 || sender.borrow().error.is_some());
+        map.entry(name.to_owned()).or_insert_with(||tokio::sync::watch::channel(Default::default()).0).subscribe()
     }
     pub(crate) fn terminal_status_sender(&self,name:&str) -> super::terminal_status::StatusSender {
         let mut map=self.terminal_status.lock().unwrap_or_else(|e|e.into_inner());
@@ -888,6 +895,30 @@ mod tests {
         registry.clear_live("a").await;
         assert_eq!(registry.terminal_status("a").borrow().input_stalled.as_deref(),Some("delivery_unproved"));
         assert!(registry.live("a").borrow().is_some(),"o canal da vida nova segue com o valor dela");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn subscribing_readers_do_not_prevent_closed_channels_from_clearing() {
+        let registry = Arc::new(RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(),"test".into(),"instance".into()));
+        let status = registry.terminal_status("a");
+        let live = registry.live("a");
+        let reader_registry = registry.clone();
+        let readers = std::thread::spawn(move || {
+            for _ in 0..10_000 {
+                let _status = reader_registry.terminal_status("a");
+                let _live = reader_registry.live("a");
+            }
+        });
+        for _ in 0..1_000 {
+            registry.terminal_status_sender("a").send_replace(super::super::terminal_status::TerminalStatus {
+                input_stalled:Some("composer_busy".into()),..Default::default()
+            });
+            registry.live_sender("a").send_replace(Some(Arc::new(LiveState::default())));
+            registry.clear_live("a").await;
+            assert_eq!(*status.borrow(), Default::default(),"assinar não conserva o bloqueio encerrado");
+            assert!(live.borrow().is_none(),"assinar não conserva a vida encerrada");
+        }
+        readers.join().unwrap();
     }
 
     #[tokio::test]
