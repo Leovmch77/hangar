@@ -61,6 +61,7 @@ pub struct RuntimeRegistry {
     respawn_base:Duration,
     /// Último valor da sessão sem terminal por nome, para o feed do hub (`live`).
     live:std::sync::Mutex<BTreeMap<String,LiveSender>>,
+    terminal_status:std::sync::Mutex<BTreeMap<String,super::terminal_status::StatusSender>>,
 }
 
 /// A trava pode demorar a soltar: as tarefas de E/S de um ator que saiu, ou o `LockFileEx` de um
@@ -194,7 +195,7 @@ impl RuntimeRegistry {
     pub fn new(upstream:SocketAddr,secret:String,instance:String) -> Self {
         Self { entries:Mutex::new(BTreeMap::new()),events:broadcast::channel(1024).0,
             policy:PolicyClient::new(upstream,secret,instance.clone()),instance,lifecycle:Mutex::new(BTreeMap::new()),revisions:Mutex::new(BTreeMap::new()),mods:None,ingress:Default::default(),
-            respawn_base:Duration::from_secs(5),live:Default::default() }
+            respawn_base:Duration::from_secs(5),live:Default::default(),terminal_status:Default::default() }
     }
     pub fn with_respawn_base(mut self,base:Duration) -> Self { self.respawn_base = base; self }
     /// Interface dos mods: sessão Claude sem terminal aberta aqui vira superfície remota e publica no `Mods`.
@@ -205,6 +206,15 @@ impl RuntimeRegistry {
     pub fn subscribe(&self) -> broadcast::Receiver<RuntimeEvent> { self.events.subscribe() }
     /// Último valor da sessão `name` para o feed do hub; `None` enquanto ela não está aberta aqui.
     pub fn live(&self,name:&str) -> LiveReceiver { self.live_sender(name).subscribe() }
+    /// Estado do envio terminal, sem receber eventos das outras sessões.
+    pub fn terminal_status(&self,name:&str) -> super::terminal_status::StatusReceiver {
+        self.terminal_status_sender(name).subscribe()
+    }
+    pub(crate) fn terminal_status_sender(&self,name:&str) -> super::terminal_status::StatusSender {
+        let mut map=self.terminal_status.lock().unwrap_or_else(|e|e.into_inner());
+        map.retain(|key,sender|key==name || sender.receiver_count()>0 || sender.sender_count()>1 || sender.borrow().error.is_some());
+        map.entry(name.to_owned()).or_insert_with(||tokio::sync::watch::channel(Default::default()).0).clone()
+    }
     /// Canal do nome, criado na primeira procura (feed ou ator, o que vier antes). Canal vazio e sem
     /// receptor sai do mapa aqui: sem isto o mapa guardaria todo nome que já teve chat aberto. Canal
     /// que um ator já segura (cópia fora do mapa) fica, mesmo vazio: o ator só escreve no primeiro passo.
@@ -341,7 +351,7 @@ impl RuntimeRegistry {
                 let store=open_store(&target.state_path,&target.projection_dir,&target.key,target.generation,&target.name,lease.clone()).await?;
                 let revision=self.revisions.lock().await.entry(target.key.clone()).or_insert_with(||Arc::new(AtomicU64::new(0))).clone();
                 // A âncora nasce com o executor, que a lê, e passa ao elo pelo `handle`, também na reabertura.
-                let options=super::terminal::TerminalOptions {anchor:super::terminal::ModsAnchor::default(),..Default::default()};
+                let options=super::terminal::TerminalOptions {anchor:super::terminal::ModsAnchor::default(),status:Some(self.terminal_status_sender(&target.name)),..Default::default()};
                 let handle=super::terminal::TerminalActor::spawn(target.clone(),QueueActor::start(store,lease),self.policy.clone(),options,self.events.clone(),revision);
                 // A vida no `Mods` é única no servidor (`new_life`).
                 let life=match &self.mods {
@@ -412,6 +422,16 @@ impl RuntimeRegistry {
     async fn clear_live(&self,name:&str) {
         // Outra vida com o mesmo nome (reaberta antes deste fechamento) segue dona do canal.
         if self.entries.lock().await.values().any(|entry|entry.name == name) { return; }
+        {
+            let mut map=self.terminal_status.lock().unwrap_or_else(|e|e.into_inner());
+            if let Some(sender)=map.get(name) {
+                let failed=sender.borrow().error.is_some();
+                if !failed {
+                    sender.send_replace(Default::default());
+                    if sender.receiver_count()==0 { map.remove(name); }
+                }
+            }
+        }
         let mut map = self.live.lock().unwrap_or_else(|e|e.into_inner());
         if let Some(sender) = map.get(name) {
             // Vida que acabou com erro: o problema fica até a próxima abertura, que escreve por cima.
@@ -455,10 +475,6 @@ impl RuntimeRegistry {
     pub async fn is_terminal(&self,name:&str) -> bool {
         self.entries.lock().await.values().filter(|e|e.name==name).max_by_key(|e|e.generation)
             .is_some_and(|e|matches!(e.handle,EntryHandle::Terminal {..}))
-    }
-    /// Sessão do ator de entrada terminal de chave `key`.
-    pub async fn terminal_name(&self,key:&str) -> Option<String> {
-        match &self.entries.lock().await.get(key)?.handle { EntryHandle::Terminal {target,..}=>Some(target.name.clone()), EntryHandle::Headless(_)=>None }
     }
     /// Leitura pura: quem exclui já pode segurar exclusividade.
     pub async fn account_usage(&self, key: &crate::accounts::AccountKey) -> crate::accounts::UsageFacts {
@@ -720,6 +736,64 @@ async fn events(State(state):State<Gateway>) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn terminal_status_is_independent_from_global_events_and_cleans_healthy_names() {
+        let registry = RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(), "test".into(), "instance".into());
+        let sender = registry.terminal_status_sender("a");
+        let _other = registry.terminal_status("b");
+        let mut receiver = registry.terminal_status("a");
+        let mut global = registry.subscribe();
+        assert_eq!(registry.events.receiver_count(), 1, "o canal por sessão não assina o global");
+        for i in 0..10 {
+            assert!(registry.events.send(RuntimeEvent { key: format!("other-{i}"), generation:1, revision:1, channel:"snapshot".into(), data:json!({"view":{"text":"large unrelated state"}}) }).is_ok());
+        }
+        assert!(!receiver.has_changed().unwrap());
+        assert_eq!(global.recv().await.unwrap().key, "other-0", "o consumidor Python continua recebendo os eventos");
+        sender.send_replace(super::super::terminal_status::TerminalStatus { input_stalled:Some("composer_busy".into()), ..Default::default() });
+        assert_eq!(receiver.borrow_and_update().input_stalled.as_deref(), Some("composer_busy"));
+        registry.clear_live("a").await;
+        assert_eq!(*receiver.borrow(), Default::default());
+        drop(receiver);
+        drop(sender);
+        let _new = registry.terminal_status("c");
+        assert!(!registry.terminal_status.lock().unwrap().contains_key("a"));
+    }
+
+    #[tokio::test]
+    async fn terminal_status_failed_close_keeps_error_detail_for_reconnection() {
+        let registry = RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(), "test".into(), "instance".into());
+        let sender = registry.terminal_status_sender("a");
+        super::super::terminal_status::publish_problem(&sender, "queue_io", "fila indisponível");
+        registry.clear_live("a").await;
+        let receiver = registry.terminal_status("a");
+        assert_eq!(receiver.borrow().error.as_deref(), Some("queue_io"));
+        assert_eq!(receiver.borrow().message.as_deref(), Some("fila indisponível"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn terminal_status_concurrent_updates_stay_with_their_ten_sessions() {
+        let registry = RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(), "test".into(), "instance".into());
+        let barrier = Arc::new(tokio::sync::Barrier::new(10));
+        let mut receivers = Vec::new();
+        let mut publishers = tokio::task::JoinSet::new();
+        for i in 0..10 {
+            let name = format!("session-{i}");
+            let sender = registry.terminal_status_sender(&name);
+            receivers.push((name.clone(), registry.terminal_status(&name)));
+            let barrier = barrier.clone();
+            publishers.spawn(async move {
+                barrier.wait().await;
+                sender.send_replace(super::super::terminal_status::TerminalStatus { input_stalled:Some(name), ..Default::default() });
+            });
+        }
+        while let Some(result) = publishers.join_next().await { result.unwrap(); }
+        for (name, mut receiver) in receivers {
+            tokio::time::timeout(Duration::from_secs(1), receiver.changed()).await.unwrap().unwrap();
+            assert_eq!(receiver.borrow().input_stalled.as_deref(), Some(name.as_str()));
+        }
+        assert_eq!(registry.events.receiver_count(), 0);
+    }
 
     #[test]
     fn healthy_follows_python_rust_failed() {

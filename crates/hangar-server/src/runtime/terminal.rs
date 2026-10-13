@@ -5,6 +5,7 @@ use crate::mods::click::{Pane,PaneFuture,PaneOp,PaneReply};
 use serde_json::{Value,json};
 use std::{collections::VecDeque,path::PathBuf,sync::{Arc,atomic::{AtomicBool,AtomicU64,Ordering}},time::{Duration,SystemTime,UNIX_EPOCH}};
 use tokio::sync::{Mutex,mpsc,oneshot,broadcast};
+use super::terminal_status::{self, StatusSender};
 
 #[derive(Clone)]
 pub struct TerminalTarget {
@@ -21,10 +22,10 @@ pub type ModsAnchor=Arc<std::sync::Mutex<Option<String>>>;
 /// o executor devolve o teclado ao prompt e escreve. `clear_wait`: quanto a trava do `/clear` espera a
 /// conversa nova antes de conferir se ele foi aplicado. `give_up_after`: quanto a entrega incerta espera a
 /// prova antes de ser desistida sozinha (com o Claude parado).
-pub struct TerminalOptions { pub io:Arc<dyn TerminalIo>,pub limits:InputLimits,pub tick:Duration,pub stall_notice:Duration,pub anchor:ModsAnchor,pub focus_return:Duration,pub clear_wait:Duration,pub give_up_after:Duration }
+pub struct TerminalOptions { pub io:Arc<dyn TerminalIo>,pub limits:InputLimits,pub tick:Duration,pub stall_notice:Duration,pub anchor:ModsAnchor,pub focus_return:Duration,pub clear_wait:Duration,pub give_up_after:Duration,pub status:Option<StatusSender> }
 impl Default for TerminalOptions {
     fn default()->Self {Self {io:Arc::new(input::ProcessIo::default()),limits:InputLimits::default(),tick:Duration::from_secs(1),stall_notice:Duration::from_secs(30),
-        anchor:ModsAnchor::default(),focus_return:FOCUS_RETURN,clear_wait:CLEAR_APPLY_WAIT,give_up_after:GIVE_UP_AFTER}}
+        anchor:ModsAnchor::default(),focus_return:FOCUS_RETURN,clear_wait:CLEAR_APPLY_WAIT,give_up_after:GIVE_UP_AFTER,status:None}}
 }
 /// Quanto uma linha espera, desde a primeira vez que viu o foco num mod, antes de o executor devolver o
 /// teclado ao prompt. Cobre quem acabou de levar o foco a um painel no terminal, sem deixar a mensagem do
@@ -261,8 +262,18 @@ impl TerminalActor {
         let sequence=Arc::new(AtomicU64::new(queue.initial_state().next_seq.max(previous.max(queue.initial_state().operations.len() as u64).saturating_add(1))));
         let receipt=ReceiptIndex::new("claude",&target.binding.conversation);
         let (sender,receiver)=mpsc::channel(64); let closed=Arc::new(AtomicBool::new(false)); let anchor=options.anchor.clone();
+        let status=options.status.clone();
+        if let Some(sender)=&status { sender.send_replace(Default::default()); }
         let executor=Executor {target,queue:Arc::new(queue),policy,options,events,revision,sequence,receipt,deliverable:false,last_error:None,uncertain:vec![],unprovable:false,uncertain_since:None,loan:None,stall:None,hold:None,hold_checked:false,focus_refused:false,parked:VecDeque::new(),away:None,clear_watch:None,clear_notice:None,footer_misses:None,confirm_until:None,confirm_seen:None};
-        let task=tokio::spawn(executor.run(receiver,closed.clone()));
+        let run=executor.run(receiver,closed.clone());
+        let task=tokio::spawn(async move {
+            let mut guard=terminal_status::PanicMark(status);
+            let result=run.await;
+            if let Some(sender)=guard.0.take() && let Err(failure)=&result {
+                terminal_status::publish_problem(&sender,&failure.code,&failure.message);
+            }
+            result
+        });
         TerminalHandle {sender,closed,task:Arc::new(Mutex::new(Some(task))),stopped:Arc::new(Mutex::new(None)),anchor}
     }
 }
@@ -321,6 +332,7 @@ impl Executor {
     async fn publish(&self)->Result<(),RuntimeError> {
         self.revision.fetch_add(1,Ordering::AcqRel);
         let data=self.snapshot().await?;
+        if let Some(sender)=&self.options.status { terminal_status::publish_snapshot(sender,&data); }
         let _=self.events.send(RuntimeEvent {key:self.target.key.clone(),generation:self.target.generation,revision:self.revision.load(Ordering::Acquire),channel:"snapshot".into(),data}); Ok(())
     }
     async fn enter_error(&mut self,failure:RuntimeError)->Result<(),RuntimeError> {
@@ -328,6 +340,7 @@ impl Executor {
         tracing::warn!(key=%self.target.key,session=%self.target.name,code=%failure.code,reason=%failure.message,"entrada terminal entrou em erro");
         self.last_error=Some(failure.code.clone()); self.deliverable=false;
         self.publish().await?;
+        if let Some(sender)=&self.options.status { terminal_status::publish_problem(sender,&failure.code,&failure.message); }
         let revision=self.revision.fetch_add(1,Ordering::AcqRel)+1;
         let _=self.events.send(RuntimeEvent {key:self.target.key.clone(),generation:self.target.generation,revision,channel:"problem".into(),
             data:json!({"error_code":failure.code,"message":failure.message})}); Ok(())
