@@ -629,10 +629,16 @@ enum Job {
     Reserved { operation_id:String,reservation:ReservedAsyncAnswer,result:Result<(),RuntimeError>,persisted:Option<bool> },
 }
 
+/// Identificador de operação da fila. O diário guarda recibos de servidores anteriores e o pid se
+/// repete entre reinícios: sem a marca de subida, o contador zerado colide com um recibo antigo.
 fn unique() -> String {
     static COUNTER:std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    format!("{}:{}",std::process::id(),COUNTER.fetch_add(1,Ordering::Relaxed))
+    static BOOT:std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let boot = BOOT.get_or_init(||boot_id(std::process::id(),SystemTime::now().duration_since(UNIX_EPOCH).map_or(0,|d|d.as_nanos())));
+    format!("{boot}:{}",COUNTER.fetch_add(1,Ordering::Relaxed))
 }
+
+fn boot_id(pid:u32,nanos:u128) -> String { format!("{pid}-{nanos}") }
 
 pub struct RuntimeActor;
 
@@ -2501,6 +2507,17 @@ mod tests {
     fn commit_target()->RuntimeTarget {
         RuntimeTarget {key:"key".into(),generation:4,name:"s".into(),provider:"claude".into(),metadata:json!({"session_id":"a","lifecycle_pending":false}),
             binding:CanoBinding {pid:42,escuta:"fixture".into(),token:"fixture".into(),versao:2},lease_path:"lease".into(),state_path:"state".into(),projection_dir:"projection".into(),transcript:"a.jsonl".into(),created:1.0}
+    }
+    #[test]
+    fn metadata_commit_after_a_server_restart_with_the_same_pid_does_not_reuse_a_journaled_id() {
+        let dir=tempfile::tempdir().unwrap();let state=dir.path().join("state");
+        let commit=|boot:&str,session:&str| {
+            let mut store=super::super::queue::Store::open(&state,dir.path(),super::super::queue::State::new("key",2,"s",vec![])).unwrap();
+            store.exec(2,&format!("claude-metadata:{boot}:0"),ClockSample {monotonic_s:0.0,epoch_s:1.0},
+                Action::AdvanceLifecycle {generation:2,state:json!({"metadata":{"key":"key","session_id":session}})}).map(|_|())
+        };
+        commit(&boot_id(4242,1_000),"a").unwrap();
+        commit(&boot_id(4242,2_000),"b").expect("servidor novo com o mesmo pid e o contador zerado não pode repetir o id");
     }
     #[test]
     fn sdk_sid_b_blocks_a_rows_then_new_ids_and_binding_use_generation_b() {
