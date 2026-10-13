@@ -377,3 +377,14 @@ def test_remover_nao_toca_provedor_do_usuario(tmp_path):
     cfg.write_text(CONFIG_KIMI)
     assert agentes_sync.remover("apikey", alvos=("kimi",), homes=homes)["kimi"]["motivo"] == "nao-gerenciado"
     assert cfg.read_text() == CONFIG_KIMI
+
+
+def test_sentinelas_iguais_as_que_o_rust_procura():
+    """O Python grava o bloco, o Rust (`managed_block` em credentials.rs) o reconhece: mudar o texto
+    só de um lado faz a linha virar `gerenciada: false` e a tela esconde o Apagar."""
+    from pathlib import Path
+    rust = (Path(__file__).resolve().parents[2]
+            / "crates/hangar-server/src/accounts/credentials.rs").read_text(encoding="utf-8")
+    ini, fim = agentes_sync._sentinelas("{name}")
+    assert f'format!("{ini}")' in rust
+    assert f'format!("{fim}")' in rust

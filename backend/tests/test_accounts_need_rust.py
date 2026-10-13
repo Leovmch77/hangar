@@ -3,7 +3,8 @@
 No modo python (sem binário, CP_RUST_SERVER=0, supervisor que desistiu), as rotas de conta e cota
 que o Rust atende respondem 503 `accounts_need_rust_server`, e os consumidores internos tratam a
 ponte ausente como "sem cota, sem login conhecido", sem ler credencial nem abrir CLI pelo Python.
-As rotas que só existem no Python (lista de credenciais, apelido, cookie) continuam.
+A lista de credenciais (`GET /api/credenciais`) também é do Rust e responde o mesmo 503; as escritas
+que só existem no Python (apelido, cookie, sincronizar) continuam.
 """
 import asyncio
 import json
