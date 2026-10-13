@@ -2031,6 +2031,21 @@ contava threads `asyncio_N` e o uvloop nomeia `ThreadPoolExecutor-N_M` (mostrava
   sobraram nos dois lados. Uma ponte que vai e volta entre os processos no mesmo pedido é bug de
   desenho, não detalhe de desempenho.
 
+**Credenciais e cotas das outras fontes (13/10/2026, protocolo 58).** O `GET /api/credenciais`
+(chamado pelo app nativo a cada 300 s) ia ao Python, que perguntava ao Rust login, autenticação Codex
+e cota; dentro da cota o Rust voltava ao Python para listar e ler as fontes Kimi, CommandCode e
+OpenCode (`quota_facts`, pool `quota-facts`). Medido em 13/10 (versão `25e3cd44`): na DELPHI-02 e
+no notebook-lhais, ~2 s cravados na cota e ~5 s na lista a cada 10 min, com picos de 20–45 s; em
+12/10 o `pool.espera` mostrou 7 threads presas e um `POST /input` esperou 67 s. Agora a lista
+(caminho exato; as escritas seguem no Python) e as fontes e leitores dessas cotas moram no Rust
+(`accounts/credentials.rs`, `accounts/quotas/other.rs`), conferidos contra goldens gerados pelo
+Python. Fonte com conexão recusada (motor em `127.0.0.1:8317` sem ninguém escutando custava 2 s por
+ciclo no Windows) espera 10 min, depois 30 min, depois 1 h; zera com leitura boa ou `base_url` nova,
+e o botão atualizar fura a espera. O cliente das fontes não segue redirecionamento (a chave não sai
+do endereço cadastrado) e nunca registra valor de chave ou cookie. Uma parte com problema não
+derruba mais a lista nem as cotas. Medição antes/depois na DELPHI-02: pendente. Fica no Python a
+renovação do token Claude pela janela de login (`/internal/accounts/claude-window`).
+
 ## A conversa da sessão é escolhida pelo Rust, e a troca espera duas leituras
 
 Relatado em 12/10/2026: no app nativo de outra máquina, a conversa de uma sessão Claude com terminal

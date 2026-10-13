@@ -55,10 +55,13 @@ Continua no Python, por ser o que o Rust consome ou o que ele não atende:
 - as rotas `/internal` de contas: janela escondida do login e da renovação
   (`ClaudeWindows`, em `claude_window.py`), fatos de uso, preparo e invalidação do
   catálogo de modelos do Codex;
-- as cotas de Kimi, CommandCode e OpenCode (`quota_facts`), pedidas pelo Rust;
 - os leitores de cota Codex que a transferência de conversa usa;
-- as rotas só Python de credenciais: lista, apelido, cookie do OpenCode,
-  sincronização nos agentes e remoção de provedor Kimi.
+- as escritas de credenciais: apelido, cookie do OpenCode, sincronização nos agentes e
+  remoção de provedor Kimi.
+
+Desde 13/10/2026 a lista `GET /api/credenciais` e as cotas de Kimi, CommandCode e OpenCode
+são do Rust, sem pergunta ao Python (ver "Migrar é migrar o caminho inteiro" em
+[plataforma.md](plataforma.md#migrar-é-migrar-o-caminho-inteiro)).
 
 ## Anexos
 
