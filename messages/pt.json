@@ -8092,8 +8092,12 @@
   "atividade_grupo_antigos": "Mais antigos · {n}",
   "atividade_terminou": "terminou {h}",
   "atividade_parou": "parou {h}",
+  "atividade_sem_noticia": "sem notícia há {t}",
+  "erro_subagente_estado_indisponivel": "Não deu para ler o estado dos subagentes nesta sessão (vínculo ou memória do plugin indisponível)",
+  "erro_subagente_mensagem_vinculo_desatualizado": "A conversa do plugin mudou durante o envio: abra o subagente de novo e tente outra vez",
   "erro_subagente_mensagem_sem_terminal": "Sem terminal, o Claude Code não aceita mensagem direta ao subagente",
   "erro_subagente_mensagem_sem_plugin": "O plugin do Hangar não está ativo nesta sessão: a mensagem ao subagente não tem por onde ir",
+  "erro_subagente_mensagem_plugin_antigo": "Esta sessão abriu com uma versão antiga do plugin do Hangar; reabra a sessão para mandar mensagem ao subagente.",
   "erro_subagente_mensagem_recusada": "O Claude Code recusou a mensagem: {reason}",
   "erro_subagente_mensagem_sem_resposta": "O Claude Code não respondeu se entregou a mensagem ao subagente"
 }

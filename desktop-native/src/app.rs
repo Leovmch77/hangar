@@ -4318,7 +4318,7 @@ impl Hangar {
                     .on_click(cx.listener(|this, _, window, cx| this.open_git_panel(window, cx))).into_any_element()
             } else { place.into_any_element() };
             // O recuo negativo põe o texto do último item na mesma borda da faixa da pasta, do outro lado.
-            let usage = div().flex_shrink_0().mr(px(-6.)).flex().items_center().gap(px(2.))
+            let usage = div().flex_shrink_0().ml_auto().mr(px(-6.)).flex().items_center().gap(px(2.))
                 .when_some(cache, |el, cache| el.child(cache_chip(cache)))
                 .child(popup::anchor(div(), "composer-ctx").child(ring("composer-ctx", tr("ring_context"), ctx_pct, self.context_card)
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_context_card(cx)))))
@@ -4326,7 +4326,9 @@ impl Hangar {
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_usage_card(cx)))))
                 .when_some(cost, |el, cost| el.child(div().text_color(theme::faint()).opacity(0.6).child("·"))
                     .child(div().h(px(22.)).px(px(6.)).flex().items_center().text_color(theme::muted()).child(cost)));
-            div().pt(px(7.)).px(px(6.)).flex().items_center().gap(px(6.)).text_xs().text_color(theme::faint())
+            // Coluna estreita (painel direito aberto): os anéis descem para a linha de baixo em vez de vazar para baixo do
+            // painel, que os cobria.
+            div().pt(px(7.)).px(px(6.)).flex().flex_wrap().items_center().gap(px(6.)).gap_y(px(2.)).text_xs().text_color(theme::faint())
                 .children(session.as_ref().map(|s| self.render_group_chips(s, cx)))
                 .child(place)
                 .child(div().flex_1())

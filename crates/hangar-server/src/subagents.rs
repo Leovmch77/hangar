@@ -75,25 +75,47 @@ fn refusal(status: StatusCode, code: &str, msg: &str, req: &HeaderMap) -> Respon
     reply(status, json!({"detail": {"code": code, "params": {}, "msg": msg}}), req)
 }
 
-const NO_TERMINAL: &str = "erro_subagente_mensagem_sem_terminal";
+/// Ponte viva, mas o plugin carregado na abertura da sessão não declara `agent_message`.
+const OLD_PLUGIN: &str = "erro_subagente_mensagem_plugin_antigo";
 const NO_PLUGIN: &str = "erro_subagente_mensagem_sem_plugin";
+/// O vínculo ou a memória do plugin não puderam ser lidos: o estado é desconhecido, não "sem sinal".
+const STATE_UNAVAILABLE: &str = "erro_subagente_estado_indisponivel";
+const STALE_BINDING: &str = "erro_subagente_mensagem_vinculo_desatualizado";
 const MESSAGE_BODY_MAX: usize = 64 * 1024;
 
-/// O vínculo do plugin desta sessão, só se ele for da mesma conversa listada.
-async fn plugin_binding(st: &AppState, name: &str, jsonl: &Path) -> Option<InteractionBinding> {
-    let registry = st.state.runtime.get()?;
-    let binding = registry.interaction_binding_readonly(name).await.ok()?;
-    (jsonl.file_stem().is_some_and(|stem| stem.to_string_lossy() == binding.conversation)).then_some(binding)
+/// O vínculo do plugin desta sessão, só se ele for da mesma conversa listada; `Ok(None)` = vínculo de outra conversa.
+/// Erro = o vínculo não pôde ser lido (o código de quem falhou).
+async fn plugin_binding(st: &AppState, name: &str, jsonl: &Path) -> Result<Option<InteractionBinding>, String> {
+    let registry = st.state.runtime.get().ok_or_else(|| "runtime_unavailable".to_owned())?;
+    let binding = registry.interaction_binding_readonly(name).await.map_err(|e| e.code)?;
+    Ok((jsonl.file_stem().is_some_and(|stem| stem.to_string_lossy() == binding.conversation)).then_some(binding))
 }
 
-/// O que a sessão diz sobre mandar texto a subagentes, antes de olhar o plugin.
-fn message_blocked(provider: &str, headless: bool) -> Option<&'static str> {
-    if provider != "claude" { Some(NO_PLUGIN) } else if headless { Some(NO_TERMINAL) } else { None }
+/// Um aviso por sessão e código, não um a cada consulta da lista.
+fn warn_once(name: &str, code: &str) {
+    static SEEN: LazyLock<std::sync::Mutex<std::collections::HashSet<(String, String)>>> = LazyLock::new(Default::default);
+    // ponytail: conjunto sem teto; cresce com sessões × códigos distintos, poucos por processo.
+    if SEEN.lock().is_ok_and(|mut seen| seen.insert((name.to_owned(), code.to_owned()))) {
+        tracing::warn!(session = %name, code, "estado dos subagentes indisponível");
+    }
+}
+
+/// O que a sessão diz sobre mandar texto a subagentes, antes de olhar o plugin. Claude sem terminal também carrega o
+/// plugin (`--plugin-dir` em todo modo) e o `$.session.send` retoma o subagente no `claude -p`.
+fn message_blocked(provider: &str) -> Option<&'static str> {
+    (provider != "claude").then_some(NO_PLUGIN)
+}
+
+/// Por que o plugin desta conversa não entrega a subagentes: sem ponte viva, ou plugin antigo sem o modo.
+fn plugin_block(st: &AppState, binding: &InteractionBinding) -> Option<&'static str> {
+    if !st.plugin.alive(binding, std::time::Instant::now()).unwrap_or(false) { return Some(NO_PLUGIN); }
+    if !st.plugin.can_message_agents(binding, std::time::Instant::now()) { return Some(OLD_PLUGIN); }
+    None
 }
 
 /// `state`, `endedAt`, `canMessage` e `messageBlocked` de um item. No Claude com terminal o estado é o
 /// sinal do plugin (null sem sinal); Kimi e Pi dizem sozinhos que acabaram (`finished`).
-fn decorate(a: &mut Map<String, Value>, life: Option<&AgentLife>, blocked: Option<&str>) {
+fn decorate(a: &mut Map<String, Value>, life: Option<&AgentLife>, blocked: Option<&str>, problem: Option<&str>) {
     let (state, ended) = match (life, a.get("finished").and_then(Value::as_bool)) {
         (Some(life), _) => (json!(life.state), json!(life.ended_at)),
         (None, Some(true)) => (json!("finished"), a.get("updatedAt").filter(|v| v.as_str().is_some_and(|t| !t.is_empty())).cloned().unwrap_or(Value::Null)),
@@ -104,6 +126,7 @@ fn decorate(a: &mut Map<String, Value>, life: Option<&AgentLife>, blocked: Optio
     a.insert("endedAt".into(), ended);
     a.insert("canMessage".into(), json!(blocked.is_none()));
     a.insert("messageBlocked".into(), json!(blocked));
+    if let Some(problem) = problem { a.insert("problema".into(), json!(problem)); }
 }
 
 async fn serve(st: &AppState, (name, agent): (String, Option<String>), query: Option<&str>, headers: &HeaderMap) -> Response {
@@ -124,17 +147,33 @@ async fn serve(st: &AppState, (name, agent): (String, Option<String>), query: Op
         return refusal(StatusCode::CONFLICT, "erro_subagentes_conversa_desconhecida",
             "the session's conversation is not known yet; subagents of another conversation are not shown", headers);
     };
-    let mut blocked = message_blocked(&provider, row.headless);
+    let mut blocked = message_blocked(&provider);
     let mut lives = HashMap::new();
+    let mut problem = None;
     if blocked.is_none() {
-        let binding = plugin_binding(st, &name, &jsonl).await;
-        lives = binding.as_ref().and_then(|b| st.plugin.agent_lives(b).ok()).unwrap_or_default();
-        if !binding.is_some_and(|b| st.plugin.can_message_agents(&b, std::time::Instant::now())) { blocked = Some(NO_PLUGIN); }
+        match plugin_binding(st, &name, &jsonl).await {
+            Ok(Some(b)) => match st.plugin.agent_lives(&b) {
+                Ok(l) => {
+                    lives = l;
+                    blocked = plugin_block(st, &b);
+                }
+                // A memória respondeu: o plugin não registrou esta conversa. É ausência lida, não falha.
+                Err(e) if e.0 == "erro_interacao_desatualizada" => blocked = Some(NO_PLUGIN),
+                Err(e) => problem = Some(e.0.to_owned()),
+            },
+            Ok(None) => blocked = Some(NO_PLUGIN),
+            Err(code) => problem = Some(code),
+        }
+        if let Some(code) = &problem {
+            warn_once(&name, code);
+            blocked = Some(STATE_UNAVAILABLE);
+        }
     }
+    let problem = problem.map(|_| STATE_UNAVAILABLE);
     let done = tokio::task::spawn_blocking(move || {
         let mut fill = |mut a: Map<String, Value>| {
             let life = a.get("agentId").and_then(Value::as_str).and_then(|id| lives.get(id));
-            decorate(&mut a, life, blocked);
+            decorate(&mut a, life, blocked, problem);
             a
         };
         match agent {
@@ -169,23 +208,41 @@ pub async fn message(State(st): State<Arc<AppState>>, ConnectInfo(peer): Connect
         Ok(None) => return refusal(StatusCode::NOT_FOUND, "erro_sessao_inexistente", "session or transcript not found", &headers),
         Err(code) => return route_failed(&st, &headers, "rust.subagents_failed", &name, code, crate::routes::INFO_REASON),
     };
-    if let Some(code) = message_blocked(&row.provider, row.headless) {
+    if let Some(code) = message_blocked(&row.provider) {
         return refusal(StatusCode::CONFLICT, code, "this session cannot message its subagents", &headers);
     }
     let Some((provider, jsonl)) = conversation(&row, st.side.hubs.bound(&name)) else {
         return refusal(StatusCode::CONFLICT, "erro_subagentes_conversa_desconhecida", "the session's conversation is not known yet", &headers);
     };
     let exists = { let (provider, jsonl, id) = (provider.clone(), jsonl.clone(), agent_id.clone());
-        tokio::task::spawn_blocking(move || get_subagent(&provider, &jsonl, &id, 0).is_some()).await.unwrap_or(false) };
-    if !exists {
-        return refusal(StatusCode::CONFLICT, "erro_subagente_inexistente", "subagent not found in this conversation", &headers);
+        tokio::task::spawn_blocking(move || get_subagent(&provider, &jsonl, &id, 0).is_some()).await };
+    match exists {
+        Ok(true) => {}
+        Ok(false) => return refusal(StatusCode::CONFLICT, "erro_subagente_inexistente", "subagent not found in this conversation", &headers),
+        Err(e) => {
+            tracing::warn!(session = %name, panic = e.is_panic(), "leitura do subagente caiu antes da mensagem");
+            return route_failed(&st, &headers, "rust.subagents_failed", &name, "subagents_panic", "a leitura dos subagentes caiu no servidor");
+        }
     }
-    let Some(binding) = plugin_binding(&st, &name, &jsonl).await else {
-        return refusal(StatusCode::CONFLICT, NO_PLUGIN, "no live plugin bridge for this session", &headers);
+    let binding = match plugin_binding(&st, &name, &jsonl).await {
+        Ok(Some(binding)) => binding,
+        Ok(None) => return refusal(StatusCode::CONFLICT, NO_PLUGIN, "no live plugin bridge for this session", &headers),
+        Err(code) => {
+            warn_once(&name, &code);
+            return route_failed(&st, &headers, "rust.subagents_failed", &name, STATE_UNAVAILABLE, "o vínculo do plugin desta sessão não pôde ser lido");
+        }
     };
+    if plugin_block(&st, &binding) == Some(OLD_PLUGIN) {
+        return refusal(StatusCode::CONFLICT, OLD_PLUGIN, "the session's plugin predates agent messages; reopen the session", &headers);
+    }
     match st.plugin.send_agent(&binding, &agent_id, &text).await {
         Ok(sent) => sent_reply(&sent, &headers),
-        Err(error) => refusal(StatusCode::CONFLICT, NO_PLUGIN, error.0, &headers),
+        // A conversa do plugin trocou entre o vínculo e o envio.
+        Err(error) if error.0 == "erro_interacao_desatualizada" => refusal(StatusCode::CONFLICT, STALE_BINDING, error.0, &headers),
+        Err(error) => {
+            warn_once(&name, error.0);
+            route_failed(&st, &headers, "rust.subagents_failed", &name, STATE_UNAVAILABLE, "a memória do plugin não pôde ser lida")
+        }
     }
 }
 
@@ -890,24 +947,28 @@ mod tests {
         let pick = |a: &Map<String, Value>| json!([a["state"], a["endedAt"], a["canMessage"], a["messageBlocked"]]);
 
         let mut a = item(json!({}));
-        decorate(&mut a, None, message_blocked("claude", false));
+        decorate(&mut a, None, message_blocked("claude"), None);
         assert_eq!(pick(&a), json!([null, null, true, null]), "Claude com terminal sem sinal ainda");
         let life = AgentLife { state: AgentState::Finished, ended_at: Some("2026-10-13T10:00:09.000Z".into()) };
-        decorate(&mut a, Some(&life), Some(NO_PLUGIN));
+        decorate(&mut a, Some(&life), Some(NO_PLUGIN), None);
         assert_eq!(pick(&a), json!(["finished", "2026-10-13T10:00:09.000Z", false, NO_PLUGIN]));
-        decorate(&mut a, Some(&AgentLife { state: AgentState::Running, ended_at: None }), None);
+        decorate(&mut a, Some(&AgentLife { state: AgentState::Running, ended_at: None }), None, None);
         assert_eq!(pick(&a), json!(["running", null, true, null]));
 
         let mut h = item(json!({"failed": true}));
-        decorate(&mut h, None, message_blocked("claude", true));
-        assert_eq!(pick(&h), json!([null, null, false, NO_TERMINAL]), "sem terminal o Claude Code recusa o envio");
+        decorate(&mut h, None, Some(OLD_PLUGIN), None);
+        assert_eq!(pick(&h), json!([null, null, false, OLD_PLUGIN]), "plugin sem o modo agent_message");
 
         let mut k = item(json!({"finished": true}));
-        decorate(&mut k, None, message_blocked("kimi", false));
+        decorate(&mut k, None, message_blocked("kimi"), None);
         assert_eq!(pick(&k), json!(["finished", "2026-10-13T10:00:05Z", false, NO_PLUGIN]));
         let mut p = item(json!({"finished": false}));
-        decorate(&mut p, None, message_blocked("pi", false));
+        decorate(&mut p, None, message_blocked("pi"), None);
         assert_eq!(pick(&p), json!(["running", null, false, NO_PLUGIN]));
+
+        let mut u = item(json!({}));
+        decorate(&mut u, None, Some(STATE_UNAVAILABLE), Some(STATE_UNAVAILABLE));
+        assert_eq!((pick(&u), &u["problema"]), (json!([null, null, false, STATE_UNAVAILABLE]), &json!(STATE_UNAVAILABLE)), "falha de leitura aparece, estado fica nulo");
     }
 
     #[test]

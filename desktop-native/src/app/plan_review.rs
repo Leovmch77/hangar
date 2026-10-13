@@ -105,7 +105,9 @@ impl Hangar {
         let input = cx.new(|cx| InputState::new(window, cx).placeholder(tr("plan_review_changes_placeholder")));
         // O botão Enviar depende do texto: cada edição redesenha o cartão; Enter envia como o botão.
         let change = cx.subscribe(&input, |this, _, event: &InputEvent, cx| match event {
-            InputEvent::PressEnter { .. } => this.send_plan_feedback(cx),
+            // Shift+Enter (ou Ctrl/Cmd+Enter) não envia: só o Enter puro, como o compositor do subagente.
+            InputEvent::PressEnter { secondary: false, shift: false } => this.send_plan_feedback(cx),
+            InputEvent::PressEnter { .. } => {}
             _ => cx.notify(),
         });
         input.update(cx, |input, cx| input.focus(window, cx));
@@ -120,7 +122,13 @@ impl Hangar {
         let text = input.read(cx).value().to_string();
         let option = self.chat.state.options.clone().unwrap_or_default().iter()
             .position(|option| interaction::plan_choice_key(option) == Some("plan_review_changes"));
-        let (Some(index), false) = (option, text.trim().is_empty()) else { return };
+        if text.trim().is_empty() { return; }
+        // Sem a opção "o que mudar" no menu exibido, o pedido mudou: avisa em vez de engolir o texto.
+        let Some(index) = option else {
+            if let Some(key) = self.selected_key() { self.action_feedback.insert(key, (tr("request_changed"), true)); }
+            cx.notify();
+            return;
+        };
         let snapshot = select_snapshot(&self.chat.state);
         self.review_action(&expected, Action::SelectText(index + 1, text), snapshot, cx);
     }

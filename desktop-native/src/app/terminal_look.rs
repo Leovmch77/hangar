@@ -4,13 +4,13 @@ use super::*;
 use crate::editdiff::{self, Edit, Op};
 
 /// Linhas de um arquivo novo antes do "… +N linhas": o mesmo corte do Claude Code.
-const WRITE_SHOWN: usize = 10;
+pub(super) const WRITE_SHOWN: usize = 10;
 /// Linhas de uma edição antes do "… +N linhas": acima disso o cabeçalho expande.
-const EDIT_SHOWN: usize = 40;
-const INDENT: f32 = 22.;
+pub(super) const EDIT_SHOWN: usize = 40;
+pub(super) const INDENT: f32 = 22.;
 
 /// Edit, MultiEdit e o patch do Codex aparecem como "Update", que é o nome que o terminal usa.
-fn display_name(name: &str) -> String {
+pub(super) fn display_name(name: &str) -> String {
     match name.to_ascii_lowercase().as_str() {
         "edit" | "multiedit" | "notebookedit" | "apply_patch" => "Update".into(),
         _ => conversation::tool_display_name(name),
@@ -27,7 +27,7 @@ fn input_path(input: Option<&serde_json::Map<String, serde_json::Value>>) -> Opt
 
 /// O argumento do cabeçalho e, quando é um nome de arquivo, o caminho inteiro para o tooltip. Busca (Grep, Glob) tem
 /// `path` de diretório: fica com o resumo de sempre.
-fn header_arg(name: Option<&str>, input: Option<&serde_json::Map<String, serde_json::Value>>) -> (String, Option<String>) {
+pub(super) fn header_arg(name: Option<&str>, input: Option<&serde_json::Map<String, serde_json::Value>>) -> (String, Option<String>) {
     let file_tool = name.is_some_and(|n| FILE_TOOLS.contains(&n.to_ascii_lowercase().as_str()));
     match file_tool.then(|| input_path(input)).flatten() {
         Some(path) => (crate::composer::basename(&path).to_owned(), Some(path)),
@@ -44,7 +44,7 @@ fn count_with(one: &str, many: &str, n: usize, extra: &[(&str, &str)]) -> String
 }
 
 /// "2 linhas adicionadas, 1 removida", ou a linha do arquivo novo.
-fn edit_summary(edits: &[Edit], created: bool) -> String {
+pub(super) fn edit_summary(edits: &[Edit], created: bool) -> String {
     let (added, removed) = editdiff::totals(edits);
     if created {
         let key = if added == 1 { "term_gravou_1" } else { "term_gravou_n" };
@@ -112,7 +112,7 @@ fn visible_edits(takes: &[usize]) -> Vec<(usize, usize)> {
 
 /// O corpo de uma edição: os trechos, um embaixo do outro, nunca mais que `SHOWN_MAX` linhas de diff. `limit` corta o
 /// arquivo novo e a edição recolhidos. Devolve as linhas, quantas ficaram de fora e quantas linhas de diff a chamada tem no total.
-fn diff_body(call: &ChatEvent, edits: &[Edit], limit: Option<usize>, cx: &App) -> (Vec<AnyElement>, usize, usize) {
+pub(super) fn diff_body(call: &ChatEvent, edits: &[Edit], limit: Option<usize>, cx: &App) -> (Vec<AnyElement>, usize, usize) {
     let painted = super::edits::painted(call, edits, cx);
     let total: usize = edits.iter().map(|e| e.lines.len()).sum();
     let takes = split_budget(&edits.iter().map(|e| e.lines.len()).collect::<Vec<_>>(), limit.unwrap_or(usize::MAX).min(super::edits::SHOWN_MAX));
@@ -146,7 +146,7 @@ fn diff_body(call: &ChatEvent, edits: &[Edit], limit: Option<usize>, cx: &App) -
 
 /// O que uma chamada conta na linha dobrada; a mesma regra do `terminalFoldKind` do core.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum FoldKind { Search, Read, List, Mcp, Shell }
+pub(super) enum FoldKind { Search, Read, List, Mcp, Shell }
 
 // Os conjuntos do Claude Code: comando de shell cujas partes só usam estes conta como busca, leitura ou listagem; os
 // neutros não decidem nada.
@@ -236,7 +236,7 @@ fn shell_fold_kind(cmd: &str) -> FoldKind {
     if list { FoldKind::List } else if search { FoldKind::Search } else if read { FoldKind::Read } else { FoldKind::Shell }
 }
 
-fn is_any(name: &str, names: &[&str]) -> bool { names.iter().any(|n| name.eq_ignore_ascii_case(n)) }
+pub(super) fn is_any(name: &str, names: &[&str]) -> bool { names.iter().any(|n| name.eq_ignore_ascii_case(n)) }
 
 /// O servidor de um nome `mcp__<servidor>__<ferramenta>`, sem o prefixo `hangar-`, como o cartão mostra.
 fn mcp_server(name: &str) -> Option<&str> {
@@ -247,11 +247,11 @@ fn mcp_server(name: &str) -> Option<&str> {
     Some(server.strip_prefix("hangar-").unwrap_or(server))
 }
 
-const SHELL_TOOLS: &[&str] = &["bash", "powershell", "shell", "exec", "exec_command"];
+pub(super) const SHELL_TOOLS: &[&str] = &["bash", "powershell", "shell", "exec", "exec_command"];
 
 /// Tipo da chamada na linha dobrada, como o Claude Code conta; `None` não dobra (edição, gravação, agente e o carregador
 /// de ferramentas ficam sempre à vista).
-fn fold_kind(name: Option<&str>, input: Option<&serde_json::Map<String, serde_json::Value>>) -> Option<FoldKind> {
+pub(super) fn fold_kind(name: Option<&str>, input: Option<&serde_json::Map<String, serde_json::Value>>) -> Option<FoldKind> {
     let name = name.unwrap_or_default();
     if is_any(name, &["read", "notebookread"]) { return Some(FoldKind::Read); }
     if is_any(name, &["grep", "glob", "find", "websearch", "webfetch"]) { return Some(FoldKind::Search); }
@@ -270,7 +270,7 @@ fn fold_kind(name: Option<&str>, input: Option<&serde_json::Map<String, serde_js
 
 /// A linha dobrada, na ordem e no tempo verbal do Claude Code: "Buscou 1 padrão, leu 2 arquivos, rodou 3 comandos de
 /// shell"; enquanto alguma roda, "Lendo 2 arquivos…". `kinds` é o tipo de cada chamada, já calculado pelo grupo.
-fn fold_title(events: &[ChatEvent], tools: &[Tool], kinds: &[FoldKind], running: bool) -> String {
+pub(super) fn fold_title(events: &[ChatEvent], tools: &[Tool], kinds: &[FoldKind], running: bool) -> String {
     let (mut counts, mut files, mut servers) = ([0usize; 5], std::collections::HashSet::new(), Vec::<&str>::new());
     let mut pathless_reads = 0;
     for (tool, &kind) in tools.iter().zip(kinds) {

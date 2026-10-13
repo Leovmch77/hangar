@@ -264,7 +264,8 @@ fn whole_list(input: Option<&Map<String, Value>>, list: &str, title: &str) -> Op
 }
 
 /// Se o SendMessage acorda `key` (agentId ou "teammate:<nome>"): pelo id, pelo nome ou por `*`. Pedido de
-/// encerramento não abre rodada, porque nenhum aviso de ocioso viria fechá-la.
+/// encerramento não abre rodada, porque nenhum aviso de ocioso viria fechá-la. Para o agentId, só o resultado do
+/// SendMessage sem erro confirma a retomada (`fold_activity`).
 fn wakes(input: Option<&serde_json::Map<String, Value>>, key: &str) -> bool {
     let shutdown = input.and_then(|v| v.get("message")).and_then(|m| m.get("type")).and_then(Value::as_str)
         .is_some_and(|t| t.starts_with("shutdown"));
@@ -285,6 +286,8 @@ pub fn fold_activity(events: &[ChatEvent]) -> Activity {
     let mut shell_pending: HashSet<&str> = HashSet::new();
     // Colega de equipe -> hora do último SendMessage para ele; aviso de ocioso anterior chegou atrasado.
     let mut woken: HashMap<String, f64> = HashMap::new();
+    // SendMessage a um agentId esperando o resultado: tool_use_id -> (agentId, hora do envio). Recusado não retoma.
+    let mut resume_pending: HashMap<&str, Vec<(String, Option<f64>)>> = HashMap::new();
     let mut agent_calls: HashSet<&str> = HashSet::new();
     let mut agent_ids: HashMap<&str, &str> = HashMap::new();
     let mut agents = Vec::new();
@@ -299,6 +302,15 @@ pub fn fold_activity(events: &[ChatEvent]) -> Activity {
         match event.kind.as_str() {
             "tool_result" => {
                 let Some(id) = tool_key(event) else { continue };
+                if let Some(keys) = resume_pending.remove(id) {
+                    if event.is_error != Some(true) {
+                        for (key, at) in keys {
+                            if let Some(&call) = background.get(&key) { resulted.remove(call); }
+                            if let Some(at) = at { woken.insert(key, at); }
+                        }
+                    }
+                    continue;
+                }
                 if let Some(task) = id.strip_prefix("task:") {
                     if matches!((woken.get(task), event.ts), (Some(&since), Some(at)) if at < since) { continue; }
                     finish(task.to_owned(), &background, &mut resulted, &mut finished_early);
@@ -346,6 +358,10 @@ pub fn fold_activity(events: &[ChatEvent]) -> Activity {
                     Some("SendMessage") => {
                         for (key, &call) in &background {
                             if !wakes(input, key) { continue; }
+                            if !key.starts_with("teammate:") {
+                                if let Some(send) = tool_key(event) { resume_pending.entry(send).or_default().push((key.clone(), event.ts)); }
+                                continue;
+                            }
                             resulted.remove(call);
                             if let Some(at) = event.ts { woken.insert(key.clone(), at); }
                         }
@@ -845,9 +861,14 @@ mod tests {
         let mut ended = start.clone();
         ended.push(note("n", "ag-1"));
         assert!(running(&ended).is_empty());
-        // Recado retoma o agente encerrado; o fim seguinte fecha de novo.
+        // Recado retoma o agente encerrado só quando o resultado do SendMessage confirma; o fim seguinte fecha de novo.
         let mut resumed = ended.clone();
         resumed.push(with_input(call("m", "sm1", "SendMessage"), json!({"to": "ag-1", "message": "continua"})));
+        assert!(running(&resumed).is_empty(), "sem resultado ainda, nada de retomada");
+        let mut refused = resumed.clone();
+        refused.push(ChatEvent { is_error: Some(true), ..answered("mr", "sm1", "agente não encontrado") });
+        assert!(running(&refused).is_empty(), "SendMessage recusado não reabre o agente");
+        resumed.push(answered("mr", "sm1", "Message sent"));
         assert_eq!(running(&resumed), vec!["t1"]);
         resumed.push(note("n2", "ag-1"));
         assert!(running(&resumed).is_empty());

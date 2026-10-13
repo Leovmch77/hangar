@@ -48,9 +48,11 @@ pub(super) struct SubRun {
     /// O servidor aceita mensagem direta a este subagente; senão, o código do motivo.
     can_message: bool,
     message_blocked: Option<String>,
+    /// O servidor não conseguiu ler o estado (`problema`): `state` nulo aqui é desconhecido, não "sem sinal".
+    problem: Option<String>,
 }
 
-/// Sem `state` nem Agent do pai, um registro parado há tanto tempo terminou.
+/// Sem `state` nem Agent do pai, um registro parado há tanto tempo fica "sem notícia": não é prova de fim.
 const STALE_SECS: f64 = 600.;
 
 fn wall_seconds(at: &str) -> Option<f64> {
@@ -65,6 +67,7 @@ fn parse_sub(item: &Value) -> Option<SubRun> {
         updated: text(item, "updatedAt").as_deref().and_then(wall_seconds).or_else(|| item.get("mtime").and_then(Value::as_f64)),
         can_message: item.get("canMessage").and_then(Value::as_bool).unwrap_or(false),
         message_blocked: text(item, "messageBlocked").filter(|s| !s.is_empty()),
+        problem: text(item, "problema").filter(|s| !s.is_empty()),
         agent_id: text(item, "agentId")?,
         agent_type: text(item, "agentType").filter(|t| !t.is_empty()),
         prompt: text(item, "prompt"),
@@ -87,20 +90,19 @@ fn blocked_text(code: Option<&str>) -> String {
     code.and_then(|code| crate::i18n::tr_web(code, &HashMap::new())).unwrap_or_else(|| tr("subagent_message_unavailable"))
 }
 
-/// Terminou antes de `midnight` (hoje 00:00): vai para "Mais antigos".
-fn older(at: Option<f64>, midnight: f64) -> bool { at.is_some_and(|at| at < midnight) }
+/// Terminou antes de `midnight` (hoje 00:00): vai para "Mais antigos". Sem a meia-noite local, ninguém vai.
+fn older(at: Option<f64>, midnight: Option<f64>) -> bool { at.zip(midnight).is_some_and(|(at, midnight)| at < midnight) }
 
-/// Hoje 00:00 no fuso local, em segundos desde a época.
-fn today_start() -> f64 {
+/// Hoje 00:00 no fuso local, em segundos desde a época; meia-noite inexistente no fuso (horário de verão), nada.
+fn today_start() -> Option<f64> {
     use chrono::{Local, TimeZone};
     let now = Local::now();
-    now.date_naive().and_hms_opt(0, 0, 0).and_then(|t| Local.from_local_datetime(&t).earliest())
-        .map(|t| t.timestamp() as f64).unwrap_or(0.)
+    now.date_naive().and_hms_opt(0, 0, 0).and_then(|t| Local.from_local_datetime(&t).earliest()).map(|t| t.timestamp() as f64)
 }
 
-/// HH:MM local de um horário de parede.
-fn clock(at: f64) -> String {
-    chrono::DateTime::from_timestamp(at as i64, 0).map(|t| t.with_timezone(&chrono::Local).format("%H:%M").to_string()).unwrap_or_default()
+/// HH:MM local de um horário de parede; fora do alcance do relógio, nada (a linha fica sem horário).
+fn clock(at: f64) -> Option<String> {
+    chrono::DateTime::from_timestamp(at as i64, 0).map(|t| t.with_timezone(&chrono::Local).format("%H:%M").to_string())
 }
 
 /// O instante local de um horário de parede (segundos desde a época); no futuro, agora.
@@ -146,15 +148,22 @@ fn match_sub<'a>(subs: &'a [SubRun], prompt: Option<&str>) -> Option<&'a SubRun>
 /// `finished`. O Agent é achado pelo `agentId` do resultado; sem ele, pelo prompt, e só quando um Agent e um subagente
 /// casam um com o outro e mais ninguém: ambíguo não afirma o fim.
 fn sub_done(agents: &[AgentRun], subs: &[SubRun], run: &SubRun) -> bool {
-    sub_status(agents, subs, run, now_seconds()) != SubStatus::Running
+    matches!(sub_status(agents, subs, run, now_seconds()), SubStatus::Finished(_) | SubStatus::Failed(_))
 }
 
-/// Rodando, terminado ou falho, com o horário do fim (o `endedAt`, senão a última escrita).
+/// Sem sinal de vida nem de fim: não é "Pensando" nem "terminou".
+fn sub_silent(agents: &[AgentRun], subs: &[SubRun], run: &SubRun) -> bool {
+    matches!(sub_status(agents, subs, run, now_seconds()), SubStatus::Silent(_))
+}
+
+/// Rodando, terminado ou falho, com o horário do fim (o `endedAt`, senão a última escrita); ou sem notícia desde a
+/// última escrita.
 #[derive(Clone, Copy, Debug, PartialEq)]
-enum SubStatus { Running, Finished(Option<f64>), Failed(Option<f64>) }
+enum SubStatus { Running, Finished(Option<f64>), Failed(Option<f64>), Silent(f64) }
 
 /// O `state` do servidor decide; sem ele, o fim do backend ou do Agent do pai, e o registro sem Agent do pai parado há
-/// mais de 10 min terminou na última escrita (subagente de outra conversa não fica "Pensando" para sempre).
+/// mais de 10 min fica sem notícia desde a última escrita (subagente de outra conversa não fica "Pensando" para sempre,
+/// e o silêncio não prova o fim).
 fn sub_status(agents: &[AgentRun], subs: &[SubRun], run: &SubRun, now: f64) -> SubStatus {
     let at = run.ended.or(run.updated);
     match run.state.as_deref() {
@@ -169,7 +178,7 @@ fn sub_status(agents: &[AgentRun], subs: &[SubRun], run: &SubRun, now: f64) -> S
         Some(id) => id == &run.agent_id,
         None => match_sub(std::slice::from_ref(run), a.prompt.as_deref()).is_some(),
     });
-    if !parent && run.updated.is_some_and(|updated| now - updated > STALE_SECS) { return SubStatus::Finished(run.updated); }
+    if let Some(updated) = run.updated.filter(|updated| !parent && now - updated > STALE_SECS) { return SubStatus::Silent(updated); }
     SubStatus::Running
 }
 
@@ -307,15 +316,17 @@ impl ActivityPanel {
         let (mut running, mut finished, mut older_lines) = (Vec::new(), Vec::new(), Vec::new());
         for s in &self.subs {
             let status = sub_status(&self.activity.agents, &self.subs, s, now);
-            let (ended, failed) = match status { SubStatus::Running => (None, false), SubStatus::Finished(at) => (Some(at), false), SubStatus::Failed(at) => (Some(at), true) };
+            let (ended, failed) = match status { SubStatus::Running | SubStatus::Silent(_) => (None, false), SubStatus::Finished(at) => (Some(at), false), SubStatus::Failed(at) => (Some(at), true) };
+            let silent = match status { SubStatus::Silent(at) => Some(at), _ => None };
             // Ilegível não diz "0 chamadas": os campos vêm zerados porque o registro não foi lido.
             let calls = if s.unreadable { web("atividade_sub_ilegivel") } else { calls_line(s) };
-            let line = OrphanLine { key: s.agent_id.clone(), title: sub_title(&self.subs, s), tag: s.agent_type.clone(), done: ended.is_some(), failed,
-                now: match ended {
-                    None => calls,
-                    Some(at) => {
-                        let mark = match at {
-                            Some(at) => web_with(if failed { "atividade_parou" } else { "atividade_terminou" }, "h", clock(at)),
+            let line = OrphanLine { key: s.agent_id.clone(), title: sub_title(&self.subs, s), tag: s.agent_type.clone(), done: ended.is_some() || silent.is_some(), failed,
+                now: match (ended, silent) {
+                    (None, Some(at)) => format!("{} · {calls}", web_with("atividade_sem_noticia", "t", interval(now - at))),
+                    (None, None) => calls,
+                    (Some(at), _) => {
+                        let mark = match at.and_then(clock) {
+                            Some(h) => web_with(if failed { "atividade_parou" } else { "atividade_terminou" }, "h", h),
                             None => if failed { tr("tool_failed") } else { web("atividade_sub_concluido") },
                         };
                         format!("{mark} · {calls}")
@@ -610,6 +621,7 @@ impl Render for ActivityPanel {
             body = body.child(warning_line(web("atividade_erro_subagentes")));
         }
         if let Some(notice) = &self.notice { body = body.child(warning_line(notice.clone())); }
+        if let Some(code) = self.subs.iter().find_map(|s| s.problem.as_deref()) { body = body.child(warning_line(web(code))); }
         let sub_row = |s: &OrphanLine, window: &mut Window, cx: &mut Context<Self>| {
             let content = div().flex().flex_col().gap(px(3.)).when(s.done && !s.failed, |el| el.opacity(0.6))
                 .child(div().flex().items_center().gap_1().min_w_0()
@@ -633,7 +645,8 @@ impl Render for ActivityPanel {
                 }
             }).collect();
             rows.extend(lines.running.iter().map(|s| sub_row(s, window, cx)));
-            let count = (lines.agents.len() + lines.running.len()).to_string();
+            // Os sem notícia (`done` na seção Rodando) aparecem aqui, mas não contam como rodando.
+            let count = (lines.agents.len() + lines.running.iter().filter(|s| !s.done).count()).to_string();
             body = body.child(section(web_with("atividade_grupo_rodando", "n", count), None).children(rows));
         }
         if !lines.finished.is_empty() || !lines.older.is_empty() {
@@ -739,13 +752,15 @@ impl ActivityPanel {
             self.placeholder = placeholder.clone();
             input.update(cx, |input, cx| input.set_placeholder(placeholder, window, cx));
         }
-        let focused = input.read(cx).focus_handle(cx).is_focused(window);
+        let mut focused = input.read(cx).focus_handle(cx).is_focused(window);
+        // Sem envio possível o campo não guarda o foco: sem cursor piscando num compositor que não manda nada.
+        if focused && !run.can_message { window.blur(cx); focused = false; }
         let has_text = !input.read(cx).value().trim().is_empty();
         let label = tr(if self.sending { "sending" } else { "send" });
         let send = super::send_button("subagent-send", run.can_message && has_text && !self.sending, label, cx)
             .on_click(cx.listener(|this, _, _, cx| this.send_message(cx)));
         let note = if run.can_message { self.send_error.clone().map(|e| (e, true)) } else { Some((blocked_text(run.message_blocked.as_deref()), false)) };
-        let card = super::composer_card(focused)
+        let card = super::composer_card(focused).when(!run.can_message, |el| el.opacity(0.5).cursor_not_allowed())
             .child(div().text_base().child(Textarea::new(&input).appearance(false).disabled(!run.can_message)))
             .child(div().flex().items_center().child(div().flex_1()).child(send));
         div().flex_shrink_0().px(px(12.)).pb(px(10.)).flex().flex_col().gap_1()
@@ -761,7 +776,7 @@ impl ActivityPanel {
         let Some(opened) = &self.opened else { return div().into_any_element() };
         let run = &opened.run;
         let empty = |text: String| div().px_4().py_4().text_center().text_sm().text_color(theme::faint()).child(text).into_any_element();
-        let running = !opened.done && !run.failed && !run.unreadable;
+        let running = !opened.done && !run.failed && !run.unreadable && !sub_silent(&self.activity.agents, &self.subs, run);
         let body = if !opened.loaded { empty(tr("subagent_loading")) }
             else if opened.has_events {
                 let conversation = super::panes::cached_selectable(self.conversation.clone().into(), StyleRefinement::default().size_full());
@@ -1078,9 +1093,11 @@ impl Hangar {
             let view = tab.view.read(cx);
             let opened = view.opened.as_ref();
             let unavailable = view.notice.is_some() || opened.is_some_and(|o| o.run.unreadable);
-            let running = !unavailable && opened.is_some_and(|o| !o.done);
+            let silent = opened.is_some_and(|o| sub_silent(&view.activity.agents, &view.subs, &o.run));
+            let running = !unavailable && !silent && opened.is_some_and(|o| !o.done);
             let failed = opened.is_some_and(|o| o.run.failed);
             let icon = if running { self.working_mark_slot(super::panes::Area::Side, format!("subagent-tab-{id}"), 12., theme::accent()) }
+                else if silent && !unavailable && !failed { chrome::small_icon(IconName::Info, 12., theme::muted()).into_any_element() }
                 else { chrome::small_icon(if unavailable { IconName::Info } else if failed { TAB_CROSS } else { IconName::Check }, 12.,
                     if failed || unavailable { theme::warning() } else { theme::success() }).into_any_element() };
             Tab::new().label(tab.title.clone()).prefix(icon)
@@ -1277,11 +1294,11 @@ mod tests {
 
     fn sub(id: &str, prompt: &str) -> SubRun {
         SubRun { agent_id: id.into(), agent_type: None, prompt: Some(prompt.into()), calls: 0, last_tool: None, finished: false, unreadable: false, tools: Vec::new(), failed: false, started: None,
-            state: None, ended: None, updated: None, can_message: false, message_blocked: None }
+            state: None, ended: None, updated: None, can_message: false, message_blocked: None, problem: None }
     }
 
     #[test]
-    fn server_state_wins_and_a_stale_orphan_without_state_counts_as_finished() {
+    fn server_state_wins_and_a_stale_orphan_without_state_is_silent_not_finished() {
         use super::{SubStatus, sub_status};
         let now = 10_000.;
         let with = |state: Option<&str>, ended: Option<f64>, updated: Option<f64>| SubRun {
@@ -1291,8 +1308,8 @@ mod tests {
         assert_eq!(sub_status(&running_parent, &[], &with(Some("finished"), Some(9_000.), Some(9_500.)), now), SubStatus::Finished(Some(9_000.)));
         assert_eq!(sub_status(&running_parent, &[], &with(Some("failed"), None, Some(9_500.)), now), SubStatus::Failed(Some(9_500.)));
         assert_eq!(sub_status(&[parent("t1", "tarefa um", Some("a"), false)], &[], &with(Some("running"), None, Some(1.)), now), SubStatus::Running);
-        // Sem `state`, sem Agent do pai e parado há mais de 10 min: terminou na última escrita.
-        assert_eq!(sub_status(&[], &[], &with(None, None, Some(now - 601.)), now), SubStatus::Finished(Some(now - 601.)));
+        // Sem `state`, sem Agent do pai e parado há mais de 10 min: sem notícia desde a última escrita, sem afirmar fim.
+        assert_eq!(sub_status(&[], &[], &with(None, None, Some(now - 601.)), now), SubStatus::Silent(now - 601.));
         assert_eq!(sub_status(&[], &[], &with(None, None, Some(now - 60.)), now), SubStatus::Running);
         assert_eq!(sub_status(&[], &[], &with(None, None, None), now), SubStatus::Running);
         // Com o Agent do pai rodando, o registro parado não vira fim.
@@ -1303,8 +1320,10 @@ mod tests {
     #[test]
     fn finished_before_today_go_under_older() {
         use super::older;
-        assert!(older(Some(99.), 100.));
-        assert!(!older(Some(100.), 100.) && !older(None, 100.));
+        assert!(older(Some(99.), Some(100.)));
+        assert!(!older(Some(100.), Some(100.)) && !older(None, Some(100.)));
+        // Sem a meia-noite local, nada vai para "Mais antigos".
+        assert!(!older(Some(99.), None));
     }
 
     #[test]
