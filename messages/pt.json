@@ -7184,7 +7184,7 @@
   "browser_jev_aux_key": "Chave",
   "browser_jev_aux_key_help": "Chave do provedor. Fica no servidor; aqui aparece só o final.",
   "browser_jev_aux_model": "Modelo",
-  "browser_jev_aux_model_help": "Precisa ler imagem para o Computer Use. Use Buscar modelos para ver os que o provedor oferece.",
+  "browser_jev_aux_model_help": "Precisa ler imagem para o Computer Use. Abra o campo para ver os modelos do provedor e digite para filtrar.",
   "browser_jev_aux_effort": "Esforço",
   "browser_jev_aux_effort_help": "Quanto o modelo raciocina antes de responder. Mais esforço, mais lento.",
   "browser_jev_aux_effort_default": "Padrão do provedor",
