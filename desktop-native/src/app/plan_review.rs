@@ -103,11 +103,26 @@ impl Hangar {
     fn toggle_plan_feedback(&mut self, tool_id: String, window: &mut Window, cx: &mut Context<Self>) {
         if self.plan_review.feedback.as_ref().is_some_and(|f| f.tool_id == tool_id) { self.plan_review.feedback = None; cx.notify(); return; }
         let input = cx.new(|cx| InputState::new(window, cx).placeholder(tr("plan_review_changes_placeholder")));
-        // O botão Enviar depende do texto: cada edição redesenha o cartão.
-        let change = cx.subscribe(&input, |_, _, _: &InputEvent, cx| cx.notify());
+        // O botão Enviar depende do texto: cada edição redesenha o cartão; Enter envia como o botão.
+        let change = cx.subscribe(&input, |this, _, event: &InputEvent, cx| match event {
+            InputEvent::PressEnter { .. } => this.send_plan_feedback(cx),
+            _ => cx.notify(),
+        });
         input.update(cx, |input, cx| input.focus(window, cx));
         self.plan_review.feedback = Some(Feedback { tool_id, input, _change: change });
         cx.notify();
+    }
+
+    /// O mesmo envio do botão: opção "o que mudar" do plano exibido, com o texto do campo.
+    fn send_plan_feedback(&mut self, cx: &mut Context<Self>) {
+        let Some(expected) = self.plan_review.current.clone() else { return };
+        let Some(input) = self.plan_review.feedback.as_ref().filter(|f| f.tool_id == expected.1.tool_id).map(|f| f.input.clone()) else { return };
+        let text = input.read(cx).value().to_string();
+        let option = self.chat.state.options.clone().unwrap_or_default().iter()
+            .position(|option| interaction::plan_choice_key(option) == Some("plan_review_changes"));
+        let (Some(index), false) = (option, text.trim().is_empty()) else { return };
+        let snapshot = select_snapshot(&self.chat.state);
+        self.review_action(&expected, Action::SelectText(index + 1, text), snapshot, cx);
     }
 
     pub(super) fn render_plan_review_card(&mut self, expanded: bool, busy: bool, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
