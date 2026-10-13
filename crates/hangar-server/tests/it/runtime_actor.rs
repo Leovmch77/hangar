@@ -1361,7 +1361,10 @@ for line in sys.stdin:
         let key = unique_key();
         let (registry,calls) = lifecycle_session(dir.path(),&key,"Full Access",std::time::Duration::from_secs(5)).await;
         let mut events = registry.subscribe();
-        write_sidecar(dir.path(),"other-life",json!({}));
+        // Com a trava, como a outra vida grava: sem ela, um patch desta vida ainda a caminho lê o arquivo
+        // antigo e o recoloca por cima, e o patch do modo deixa de ser recusado.
+        let other = json!({"name":"cx","key":"other-life","provider":"codex","headless":true,"cwd":dir.path()});
+        hangar_server::runtime::codex_sidecar::locked(dir.path(),"cx",|path|std::fs::write(path,other.to_string())).unwrap();
         let handle = registry.handle(&key,1).await.unwrap();
         let _ = handle.command(control("perm-1",OperationKind::SetPermissionMode,json!({"mode":"full access"}))).await;
         tokio::time::timeout(std::time::Duration::from_secs(10),async {
