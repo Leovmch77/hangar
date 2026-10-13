@@ -45,6 +45,7 @@ import { delimiter, dirname, join, resolve } from 'node:path';
 import fmt from '../shell/preview_fmt.cjs';
 import folha from '../shell/folha.cjs';
 import jev from '../shell/jev_objetivo.cjs';
+import roteiro from '../shell/jev_roteiro.cjs';
 
 const CDP = 'http://127.0.0.1:9223';
 const DIR = join(homedir(), '.hangar', 'nav');
@@ -72,6 +73,7 @@ for (let i = 0; i < args.length; i++) {
   else if (args[i] === '--dados') flags.dados = args[++i];
   else if (args[i] === '--passos') flags.passos = args[++i];
   else if (args[i] === '--permitir-risco') flags.permitirRisco = true;
+  else if (args[i] === '--refazer') flags.refazer = true;
   else pos.push(args[i]);
 }
 if (flags.aba != null && !Number.isInteger(flags.aba)) erro('--aba precisa do numero da aba (veja: hangar-preview tab list)');
@@ -117,6 +119,7 @@ Identidade: sidecar da sessão no modo sem terminal; tmux no modo com terminal.
   objetivo e confere precisam do Jev ligado na sessão (hangar-send --new ... --jev):
   objetivo <texto>        o Jev dirige sozinho até cumprir o objetivo (uma requisição por ciclo)
     --passos <n>          teto de passos (default 15)
+    --refazer             ignora o roteiro gravado do mesmo objetivo (o Jev decide tudo e regrava)
     --permitir-risco      libera, so nesta chamada, o clique que exclui, compra, envia ou publica
                           (quem chama responde pela ordem do usuario; cada liberacao sai no log)
     --dados <json>        valores para os campos, com as chaves que você quiser: o Jev casa cada
@@ -564,9 +567,11 @@ if (cmd === 'objetivo') {
   // campo que precisaria do escritor para com falta-dado.
   const problema = problemaDoEscritor();
   if (problema) console.error(`hangar-preview: aviso: modelo de texto inutilizavel: ${problema}`);
-  const resultado = await jev.rodar({
+  const inicio = Date.now();
+  const resultado = await roteiro.rodarComRoteiro({
     objetivo,
     dados,
+    refazer: flags.refazer === true,
     maxPassos: Number(flags.passos) > 0 ? Number(flags.passos) : 15,
     permitirRisco: flags.permitirRisco === true,
     escreverTexto: problema ? undefined : escritorDeTexto(),
@@ -583,6 +588,8 @@ if (cmd === 'objetivo') {
     },
   });
   console.log(`\nparou: ${resultado.parou}`);
+  if (resultado.roteiro) console.log(`roteiro: ${resultado.roteiro}`);
+  console.log(`jev: acoes=${resultado.jev.acoes} verificacao=${resultado.jev.verificacao} tempo=${((Date.now() - inicio) / 1000).toFixed(1)}s`);
   // Onde a página ficou, para quem chamou não precisar de um `url` e um `text` a mais. Falha aqui
   // vira rótulo, nunca o código de saída: quem decide é `resultado.sucesso`.
   const leitura = async (verbo) => {
