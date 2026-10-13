@@ -170,7 +170,7 @@ def _plugins_desejados(settings: dict) -> set[str]:
     return {k for k, v in enabled.items() if v}
 
 
-_NOME_AGENTE = re.compile(r"^name:[ \t]*['\"]?([^'\"\n]+?)['\"]?[ \t]*$", re.MULTILINE)
+_NOME_AGENTE = re.compile(r"^name:[ \t]*['\"]?([^'\"\s][^'\"\n]*?)['\"]?[ \t]*$", re.MULTILINE)
 
 
 def _pastas_agentes_plugins(home: Path, settings: dict) -> list[tuple[str, Path]]:
@@ -185,19 +185,24 @@ def _pastas_agentes_plugins(home: Path, settings: dict) -> list[tuple[str, Path]
     return pastas
 
 
-def _agentes_de_plugins(home: Path, settings: dict) -> dict[str, str]:
-    """Nome no Codex (`<plugin>_<agente>`) -> markdown com o `name:` já trocado por ele."""
-    agentes = {}
+def _agentes_de_plugins(home: Path, settings: dict) -> tuple[dict[str, str], list[Path]]:
+    """Nome no Codex (`<plugin>_<agente>`) -> markdown com o `name:` já trocado por ele, e os
+    arquivos que não deu para ler (um arquivo ruim não derruba a importação do resto)."""
+    agentes, ilegiveis = {}, []
     for plugin, pasta in _pastas_agentes_plugins(home, settings):
         for md in sorted(pasta.glob("*.md")):
-            texto = md.read_text(encoding="utf-8").replace("\r\n", "\n")
+            try:
+                texto = md.read_text(encoding="utf-8-sig").replace("\r\n", "\n")
+            except (OSError, UnicodeDecodeError):
+                ilegiveis.append(md)
+                continue
             fim = texto.find("\n---", 4) if texto.startswith("---\n") else -1
             achado = _NOME_AGENTE.search(texto, 4, fim) if fim > 0 else None
             if achado is None:
                 continue  # AGENTS.md/README sem cabeçalho não é agente
             nome = re.sub(r"[^A-Za-z0-9_]", "_", f"{plugin}_{achado[1]}")
             agentes[nome] = texto[:achado.start(1)] + nome + texto[achado.end(1):]
-    return agentes
+    return agentes, ilegiveis
 
 
 def _origem_marketplace(data: dict, *, claude: bool = False) -> tuple[str, str] | None:
@@ -878,7 +883,9 @@ class IntegracaoCodex:
                     shutil.copytree(origem, cc / nome, ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".git"))
             importados = registro.get("artefatos", {})
             (cc / "agents").mkdir(exist_ok=True)
-            for nome, texto in _agentes_de_plugins(self.home, settings).items():
+            agentes_plugins, ilegiveis = _agentes_de_plugins(self.home, settings)
+            self._estado["avisos"].extend(msg("aviso_agente_plugin_ilegivel", path=md) for md in ilegiveis)
+            for nome, texto in agentes_plugins.items():
                 alvo = self.codex_home / "agents" / f"{nome}.toml"
                 # Plugin que já registra o próprio agente no Codex fica com o dele.
                 if (alvo.exists() and str(alvo) not in importados) or (cc / "agents" / f"{nome}.md").exists():

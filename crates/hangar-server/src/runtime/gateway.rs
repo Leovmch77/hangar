@@ -424,7 +424,9 @@ impl RuntimeRegistry {
         if self.entries.lock().await.values().any(|entry|entry.name == name) { return; }
         {
             let mut map=self.terminal_status.lock().unwrap_or_else(|e|e.into_inner());
-            if let Some(sender)=map.get(name) {
+            // Cópia fora do mapa é o ator de outra vida com o mesmo nome, que nasce antes de entrar em
+            // `entries`: zerar ou tirar o canal dele deixaria o monitor sem status.
+            if let Some(sender)=map.get(name) && sender.sender_count()==1 {
                 let failed=sender.borrow().error.is_some();
                 if !failed {
                     sender.send_replace(Default::default());
@@ -433,7 +435,7 @@ impl RuntimeRegistry {
             }
         }
         let mut map = self.live.lock().unwrap_or_else(|e|e.into_inner());
-        if let Some(sender) = map.get(name) {
+        if let Some(sender) = map.get(name) && sender.sender_count() == 1 {
             // Vida que acabou com erro: o problema fica até a próxima abertura, que escreve por cima.
             // ponytail: o canal com erro de sessão apagada fica no mapa; um por nome, sem crescer.
             if sender.borrow().as_ref().is_some_and(|state|state.error.is_some()) { return; }
@@ -873,6 +875,19 @@ mod tests {
         registry.live_sender("a").send_replace(Some(Arc::new(LiveState::default())));
         registry.clear_live("a").await;
         assert!(rx.borrow().is_none(),"vida que acabou bem: o canal esvazia");
+    }
+
+    #[tokio::test]
+    async fn close_leaves_the_channels_of_a_new_life_with_the_same_name() {
+        let registry = RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(),"test".into(),"instance".into());
+        // A vida nova já pegou os canais e escreveu, mas ainda não entrou em `entries`.
+        let status = registry.terminal_status_sender("a");
+        status.send_replace(super::super::terminal_status::TerminalStatus { input_stalled:Some("delivery_unproved".into()),..Default::default() });
+        let live = registry.live_sender("a");
+        live.send_replace(Some(Arc::new(LiveState::default())));
+        registry.clear_live("a").await;
+        assert_eq!(registry.terminal_status("a").borrow().input_stalled.as_deref(),Some("delivery_unproved"));
+        assert!(registry.live("a").borrow().is_some(),"o canal da vida nova segue com o valor dela");
     }
 
     #[tokio::test]

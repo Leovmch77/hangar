@@ -690,12 +690,19 @@ def test_agentes_de_plugins_seguem_o_que_o_claude_carrega(tmp_path):
     ecc = tmp_path / "cache/ecc@ecc/2.2.0"
     (ecc / "agents/code-reviewer.md").write_text("---\r\nname: code-reviewer\r\ndescription: d\r\n---\r\ncorpo\r\n")
     (ecc / "agents/AGENTS.md").write_text("# registro, sem cabeçalho\n")
+    (ecc / "agents/bom.md").write_text("﻿---\nname: \"bom\"\ndescription: d\n---\n", encoding="utf-8")
+    (ecc / "agents/vazio.md").write_text("---\nname: \ndescription: d\n---\n")
+    (ecc / "agents/latin.md").write_bytes("---\nname: ação\n---\n".encode("latin-1"))
     (ecc / "agents-disabled/go-reviewer.md").write_text("---\nname: go-reviewer\ndescription: d\n---\n")
     (tmp_path / "cache/desligado@m/1.0/agents/x.md").write_text("---\nname: x\ndescription: d\n---\n")
     plugins = tmp_path / ".claude/plugins"
     plugins.mkdir(parents=True)
     (plugins / "installed_plugins.json").write_text(json.dumps({"version": 2, "plugins": instalados}))
 
-    agentes = _agentes_de_plugins(tmp_path, {"enabledPlugins": {"ecc@ecc": True, "desligado@m": False}})
+    agentes, ilegiveis = _agentes_de_plugins(tmp_path, {"enabledPlugins": {"ecc@ecc": True, "desligado@m": False}})
 
-    assert agentes == {"ecc_code_reviewer": "---\nname: ecc_code_reviewer\ndescription: d\n---\ncorpo\n"}
+    assert agentes == {
+        "ecc_bom": "---\nname: \"ecc_bom\"\ndescription: d\n---\n",
+        "ecc_code_reviewer": "---\nname: ecc_code_reviewer\ndescription: d\n---\ncorpo\n",
+    }
+    assert ilegiveis == [ecc / "agents/latin.md"]

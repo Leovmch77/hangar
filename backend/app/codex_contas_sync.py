@@ -99,7 +99,7 @@ _SENSITIVE_RESOURCE_NAMES = frozenset({
     "archived_sessions", "agent.db", "models.db", "state.sqlite", "config.sqlite",
 })
 _AUTH_ENV = re.compile(
-    r"^(?:OPENAI|CODEX|CHATGPT)_.+(?:(?:KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL)(?:_FILE)?|ACCOUNT_ID|ORG_ID|PROJECT_ID)$",
+    r"^(?:OPENAI|CODEX|CHATGPT)_.*(?:(?:KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL)(?:_FILE)?|ACCOUNT_ID|ORG_ID|PROJECT_ID)$",
     re.IGNORECASE,
 )
 _INFORMATIONAL_ISSUES = frozenset({

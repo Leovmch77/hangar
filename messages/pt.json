@@ -3520,6 +3520,7 @@
   "harness_codex_m_aviso_confianca_indisponivel": "Esta versão do Codex não informou a confiança dos hooks.",
   "harness_codex_m_aviso_historico_indisponivel": "Histórico nativo indisponível; colisões existentes serão preservadas.",
   "harness_codex_m_aviso_ignorados": "Não reconhecidos pelo Codex e ignorados em {pasta}/: {arquivos}",
+  "harness_codex_m_aviso_agente_plugin_ilegivel": "Agente de plugin ilegível e ignorado: {path}",
   "harness_codex_m_aviso_memoria_erro": "Não foi possível ler a memória de {n} projeto(s), entre eles {exemplos}.",
   "harness_codex_m_aviso_memoria_nao_reconhecida": "O Codex não reconheceu a memória de {n} projeto(s), entre eles {exemplos}.",
   "harness_codex_m_aviso_memoria_sem_fonte": "Nenhuma memória do Claude encontrada para importar.",

@@ -744,6 +744,7 @@ async def test_mcp_environment_does_not_inherit_identity_or_runtime(isolated, fa
         "CODEX_SQLITE_HOME": str(source / "state.sqlite"),
         "OPENAI_API_KEY": "secret",
         "OPENAI_IDENTITY_TOKEN_FILE": str(source / "identity-token"),
+        "CODEX_TOKEN": "secret",
         "TOOL_ENDPOINT": "keep",
         "TYPESAFE_API_KEY": "third-party",
     }}})

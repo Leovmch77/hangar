@@ -3520,6 +3520,7 @@
   "harness_codex_m_aviso_confianca_indisponivel": "This Codex version did not report hook trust.",
   "harness_codex_m_aviso_historico_indisponivel": "Native history unavailable; existing collisions will be kept.",
   "harness_codex_m_aviso_ignorados": "Not recognized by Codex and skipped in {pasta}/: {arquivos}",
+  "harness_codex_m_aviso_agente_plugin_ilegivel": "Unreadable plugin agent skipped: {path}",
   "harness_codex_m_aviso_memoria_erro": "Could not read the memory of {n} project(s), including {exemplos}.",
   "harness_codex_m_aviso_memoria_nao_reconhecida": "Codex did not recognize the memory of {n} project(s), including {exemplos}.",
   "harness_codex_m_aviso_memoria_sem_fonte": "No Claude memories found to import.",
