@@ -93,6 +93,9 @@ pub fn args(bin: &Path, profile: &Path) -> Vec<String> {
         "--password-store=basic".into(),
         // `navigator.webdriver` ligado faz o Google recusar o login ("navegador pode não ser seguro").
         "--disable-blink-features=AutomationControlled".into(),
+        // Ambiente de teste local (túnel da VM em https://localhost) usa certificado autoassinado. Só localhost:
+        // site de fora continua exigindo certificado válido.
+        "--allow-insecure-localhost".into(),
     ];
     if !is_shell(bin) { args.insert(0, "--headless".into()); }
     args
@@ -183,5 +186,7 @@ mod tests {
         assert!(!shell.contains(&"--headless".to_string()));
         assert!(shell.contains(&"--force-device-scale-factor=1".to_string()));
         assert!(shell.contains(&"--password-store=basic".to_string()));
+        assert!(shell.contains(&"--allow-insecure-localhost".to_string()));
+        assert!(!shell.iter().any(|a| a == "--ignore-certificate-errors"));
     }
 }
