@@ -592,8 +592,8 @@ async def side_events(name: str, provider: str, jsonl: str, app: int = 0):
     """Uma conexão por sessão para o hangar-server, que reparte estado, prévia, perguntas e fila
     entre os aparelhos. `provider` e `jsonl` são a conversa que o Rust escolheu; a troca ele faz
     religando a conexão. `app=1`: há ao menos um aparelho do dono no chat (push fica calado)."""
-    if provider not in ("claude", "claude-headless", "codex") or not jsonl:
-        raise HTTPException(400)
+    if provider not in ("claude", "claude-headless", "codex") or not Path(jsonl).is_absolute():
+        raise HTTPException(400, detail=erro("erro_conversa_invalida", "provider ou transcript inválido"))
     return EventSourceResponse(
         merged_events(name, jsonl, provider=provider, count_app=bool(app), side=True),
         send_timeout=30)

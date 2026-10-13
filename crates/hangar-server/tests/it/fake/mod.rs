@@ -398,18 +398,19 @@ impl hangar_server::locate::Locate for FakeLocate {
         Result<Option<hangar_server::transcript::InternalInfo>, hangar_server::locate::InfoFailed>> {
         use hangar_server::locate::InfoFailed;
         use http_body_util::BodyExt;
+        const FAIL: InfoFailed = InfoFailed("fake_info");
         Box::pin(async move {
             let name = percent_encoding::utf8_percent_encode(name, percent_encoding::NON_ALPHANUMERIC);
             let url = format!("http://{}/internal/sessions/{name}/info", self.upstream);
-            let req = axum::http::Request::get(url).header("x-hangar-internal", &self.secret).body(Body::empty()).map_err(|_| InfoFailed)?;
-            let resp = self.http.request(req).await.map_err(|_| InfoFailed)?;
+            let req = axum::http::Request::get(url).header("x-hangar-internal", &self.secret).body(Body::empty()).map_err(|_| FAIL)?;
+            let resp = self.http.request(req).await.map_err(|_| FAIL)?;
             match resp.status() {
                 StatusCode::NOT_FOUND => return Ok(None),
-                s if !s.is_success() => return Err(InfoFailed),
+                s if !s.is_success() => return Err(FAIL),
                 _ => {}
             }
-            let body = resp.into_body().collect().await.map_err(|_| InfoFailed)?.to_bytes();
-            serde_json::from_slice(&body).map(Some).map_err(|_| InfoFailed)
+            let body = resp.into_body().collect().await.map_err(|_| FAIL)?.to_bytes();
+            serde_json::from_slice(&body).map(Some).map_err(|_| FAIL)
         })
     }
 }
@@ -578,10 +579,8 @@ pub async fn wait_until(cond: impl Fn() -> bool) {
 
 /// Espera a descoberta ser lida `n` vezes depois de agora (a vigia do hub lê a cada 2 s).
 pub async fn readings(fake: &Fake, n: usize) {
-    let from = fake.info_calls();
     for _ in 0..n {
         let at = fake.info_calls();
         wait_until(|| fake.info_calls() > at).await;
     }
-    assert!(fake.info_calls() >= from + n);
 }

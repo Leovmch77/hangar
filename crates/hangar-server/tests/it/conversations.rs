@@ -192,6 +192,21 @@ async fn transcript_read_once_keeps_the_conversation() {
     assert_eq!(fake.side_conns(), 1);
 }
 
+/// Linha da descoberta ainda sem transcript (sessão nascendo, troca em curso) não fecha o hub.
+#[tokio::test]
+async fn reading_without_transcript_keeps_the_conversation() {
+    let (_dir, _jsonl, _offs, fake, srv) = setup(0..1, "sess-sem").await;
+    let mut a = sse(open_events(srv, "s", "", &[]).await);
+    messages(&mut a, 1).await;
+    wait_until(|| fake.side_conns() == 1).await;
+    fake.set_info(json!({"provider": "claude", "session_key": "", "history": {}}));
+    readings(&fake, 2).await;
+    let marker = r#"{"turns":3}"#;
+    fake.push_side("stats", marker);
+    no_reset_until(&mut a, "stats", marker).await;
+    assert_eq!(fake.side_conns(), 1);
+}
+
 #[tokio::test]
 async fn provider_outside_rust_resets_and_next_connection_goes_to_python() {
     let (_dir, jsonl, _offs, fake, srv) = setup(0..1, "sess-f").await;

@@ -144,12 +144,16 @@ impl AppState {
 
     /// Qual conversa é a da sessão, pela descoberta do Rust. `Ok(None)`: sessão inexistente.
     pub(crate) async fn info(&self, name: &str) -> Result<Option<InternalInfo>, InfoFailed> {
-        self.side.locate.info(name).await
+        let found = self.side.locate.info(name).await;
+        if let Err(InfoFailed(code)) = found {
+            tracing::warn!(session = %name, code, "descoberta da sessão falhou");
+        }
+        found
     }
 
     /// Abrir a conversa reabre a sessão em erro; quem reabre é o coordenador do Python.
     pub(crate) fn request_reopen(&self, name: &str) {
-        crate::locate::request_reopen(&self.http, self.cfg.upstream, &self.cfg.internal_secret, name);
+        crate::locate::request_reopen(&self.http, self.cfg.upstream, &self.cfg.internal_secret, &self.diag, name);
     }
 }
 
@@ -472,10 +476,11 @@ async fn history(
     };
     // Sessão inexistente ou provedor fora do Rust: o Python é o dono.
     let Some(info) = info else { return pass(&st, req, &fwd).await };
+    // Antes de qualquer repasse: sessão em erro ainda sem transcript também é reaberta.
+    st.request_reopen(&name);
     let Some(mut hreq) = info.history_request(limit) else {
         return pass(&st, req, &fwd).await;
     };
-    st.request_reopen(&name);
     // Com o chat ao vivo aberto, vale o transcript que o hub já confirmou: uma leitura solta da
     // descoberta não pode mostrar outra conversa que a do canal ao vivo.
     let fresh = Binding::from_info(&info);
@@ -540,11 +545,12 @@ async fn events(
     let Ok(info) = st.info(&name).await else {
         return route_failed(&st, req.headers(), "rust.events_failed", &name, "internal_info", INFO_REASON);
     };
+    // Antes de qualquer repasse: sessão em erro ainda sem transcript também é reaberta.
+    if info.is_some() { st.request_reopen(&name); }
     // Sessão inexistente ou provedor fora do Rust: o Python é o dono.
     let Some(binding) = info.as_ref().and_then(Binding::from_info) else {
         return pass(&st, req, &fwd).await;
     };
-    st.request_reopen(&name);
     // A query vence: o app recria o EventSource a cada queda, e objeto novo não manda o cabeçalho.
     let resume = auth::query_param(req.uri().query(), "last_event_id")
         .filter(|v| !v.is_empty())

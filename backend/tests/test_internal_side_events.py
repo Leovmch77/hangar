@@ -98,7 +98,8 @@ async def test_side_nao_procura_o_transcript_sozinho(tmp_path, fila, monkeypatch
     gen = sse.merged_events("lado-troca", str(velho), side=True)
     vistos = []
     try:
-        async with asyncio.timeout(2.5):
+        # O vigia relê a lista a cada 2 s: a janela cobre duas rodadas dele.
+        async with asyncio.timeout(4.5):
             async for ev in gen:
                 vistos.append(ev)
     except TimeoutError:
@@ -126,7 +127,7 @@ async def test_rota_side_events_conta_app_so_com_app_1_e_recusa_conversa_invalid
     monkeypatch.setattr(sse, "get_adapter", lambda provider: _Adapter())
     jsonl = str(tmp_path / "r.jsonl")
     (tmp_path / "r.jsonl").write_text("")
-    for provider, path in (("pi", jsonl), ("claude", "")):
+    for provider, path in (("pi", jsonl), ("claude", ""), ("claude", "relativo.jsonl")):
         with pytest.raises(HTTPException) as exc:
             await internal_api.side_events("lado-rota", provider=provider, jsonl=path, app=1)
         assert exc.value.status_code == 400

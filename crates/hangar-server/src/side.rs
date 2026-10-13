@@ -514,20 +514,53 @@ impl Hub {
     /// quando ela se repete; sessão sumida ou provider fora do Rust fecham o hub.
     async fn watch_binding(self: Arc<Self>) {
         let mut pending = None;
+        let mut failing: Option<&'static str> = None;
         loop {
             tokio::time::sleep(WATCH_EVERY).await;
-            let Some(current) = self.bound.lock().unwrap().as_ref().map(|b| b.binding.clone()) else { return };
-            let seen = match self.ctx.locate.info(&self.name).await {
-                Ok(info) => info.map(|i| Binding::from_info(&i)),
-                // Descoberta fora: nada prova troca nenhuma.
-                Err(_) => continue,
+            let Some(before) = self.binding() else { return };
+            let info = match self.ctx.locate.info(&self.name).await {
+                Ok(info) => {
+                    if let Some(code) = failing.take() {
+                        tracing::info!(session = %self.name, code, "descoberta da sessão voltou");
+                    }
+                    info
+                }
+                // Descoberta fora: nada prova troca nenhuma, e a conversa atual fica.
+                Err(crate::locate::InfoFailed(code)) => {
+                    if failing.replace(code).is_none() {
+                        tracing::warn!(session = %self.name, code, "descoberta da sessão falhou; a vigia segue na conversa atual");
+                    }
+                    continue;
+                }
             };
+            let seen = match &info {
+                None => None,
+                Some(i) if Provider::parse(&i.provider).is_none() => Some(None),
+                Some(i) => match Binding::from_info(i) {
+                    Some(b) => Some(Some(b)),
+                    // Linha ainda sem transcript (sessão nascendo, troca em curso): nada a comparar.
+                    None => continue,
+                },
+            };
+            // Um aparelho entrando pode ter religado o hub enquanto a leitura corria.
+            let Some(current) = self.binding() else { return };
+            if current != before {
+                pending = None;
+                continue;
+            }
+            if let Some(Some(b)) = &seen {
+                self.learn_life(b);
+            }
+            let gone = seen.is_none();
             let had_pending = pending.is_some();
             match judge(&current, seen, &mut pending) {
                 Verdict::Keep if had_pending => {
                     tracing::info!(session = %self.name, "troca de transcript não se repetiu; ignorada");
                 }
                 Verdict::Keep => {}
+                Verdict::Wait if gone => {
+                    tracing::info!(session = %self.name, "sessão fora da descoberta; confirma na próxima leitura");
+                }
                 Verdict::Wait => {
                     tracing::info!(session = %self.name, ligado = %file_name(&current.jsonl), "descoberta leu outro transcript; confirma na próxima leitura");
                 }
@@ -540,11 +573,21 @@ impl Hub {
                     return;
                 }
                 Verdict::Close => {
-                    tracing::info!(session = %self.name, "sessão sumiu ou saiu do Rust; aparelhos voltam ao Python");
+                    let why = if gone { "sessão sumiu da descoberta" } else { "provider saiu do Rust" };
+                    tracing::info!(session = %self.name, why, "aparelhos voltam ao Python");
                     self.close();
                     return;
                 }
             }
+        }
+    }
+
+    /// Hub que nasceu sem a vida da sessão (rodada sem ela) passa a tê-la: sem isso, outra sessão com
+    /// o mesmo nome esperaria duas leituras em vez de trocar na hora.
+    fn learn_life(&self, seen: &Binding) {
+        let mut bound = self.bound.lock().unwrap();
+        if let Some(b) = bound.as_mut().filter(|b| b.binding.life.is_none() && b.binding.same_conversation(seen)) {
+            b.binding.life = seen.life.clone();
         }
     }
 
@@ -795,6 +838,11 @@ async fn side_once(hub: &Arc<Hub>, attempt: &mut u32) -> SideEnd {
     if resp.status() == StatusCode::NOT_FOUND {
         // O Python dá 404 também ao segredo recusado: com o hub já ligado, vale o aviso.
         tracing::warn!(session = %hub.name, "conexão interna: 404 (sessão sumiu ou segredo interno recusado)");
+        return SideEnd::Gone;
+    }
+    if resp.status() == StatusCode::BAD_REQUEST {
+        // Conversa recusada pelo Python: repetir o mesmo pedido não muda a resposta.
+        tracing::warn!(session = %hub.name, provider = binding.provider.as_str(), "conexão interna: 400 (conversa recusada); aparelhos voltam ao Python");
         return SideEnd::Gone;
     }
     if !resp.status().is_success() {

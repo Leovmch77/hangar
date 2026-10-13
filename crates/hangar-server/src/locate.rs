@@ -18,9 +18,9 @@ use crate::transcript::InternalInfo;
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// A descoberta não respondeu (multiplexador fora, pastas ausentes) ou não sabe dizer se a sessão
-/// existe. "Não existe" é `Ok(None)`.
-#[derive(Debug)]
-pub struct InfoFailed;
+/// existe; o código diz qual. "Não existe" é `Ok(None)`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct InfoFailed(pub &'static str);
 
 pub trait Locate: Send + Sync {
     fn info<'a>(&'a self, name: &'a str) -> BoxFuture<'a, Result<Option<InternalInfo>, InfoFailed>>;
@@ -31,7 +31,7 @@ pub struct Unavailable;
 
 impl Locate for Unavailable {
     fn info<'a>(&'a self, _name: &'a str) -> BoxFuture<'a, Result<Option<InternalInfo>, InfoFailed>> {
-        Box::pin(async { Err(InfoFailed) })
+        Box::pin(async { Err(InfoFailed("locate_unavailable")) })
     }
 }
 
@@ -50,23 +50,34 @@ pub struct ListLocate {
     pub list: Arc<ListBridge>,
 }
 
+/// Uma rodada da lista travada (multiplexador, fatos do Python) não pendura `/history` e `/events`.
+const LOCATE_TIMEOUT: Duration = Duration::from_secs(10);
+
 impl Locate for ListLocate {
     fn info<'a>(&'a self, name: &'a str) -> BoxFuture<'a, Result<Option<InternalInfo>, InfoFailed>> {
         Box::pin(async move {
-            let claude = self.list.env().dirs.as_ref().map(|d| d.claude.clone()).ok_or(InfoFailed)?;
-            let p = self.list.snapshot().await.map_err(|_| InfoFailed)?;
+            tokio::time::timeout(LOCATE_TIMEOUT, self.find(name)).await.unwrap_or(Err(InfoFailed("locate_timeout")))
+        })
+    }
+}
+
+impl ListLocate {
+    async fn find(&self, name: &str) -> Result<Option<InternalInfo>, InfoFailed> {
+        {
+            let claude = self.list.env().dirs.as_ref().map(|d| d.claude.clone()).ok_or(InfoFailed("list_dirs_missing"))?;
+            let p = self.list.snapshot().await.map_err(|e| InfoFailed(e.code))?;
             if let Some(row) = p.rows.iter().find(|r| r.name == name) {
                 return Ok(Some(info_of(row, &claude)));
             }
             // Sessão criada agora: o retrato de até 2 s ainda não a tem.
-            let p = self.list.refresh().await.map_err(|_| InfoFailed)?;
+            let p = self.list.refresh().await.map_err(|e| InfoFailed(e.code))?;
             match p.rows.iter().find(|r| r.name == name) {
                 Some(row) => Ok(Some(info_of(row, &claude))),
                 // Sem os fatos do Python as linhas de transferência e `orq` faltam: ausência não prova nada.
-                None if p.facts.unknown => Err(InfoFailed),
+                None if p.facts.unknown => Err(InfoFailed("list_facts_unknown")),
                 None => Ok(None),
             }
-        })
+        }
     }
 }
 
@@ -91,9 +102,10 @@ pub fn session_key(jsonl: &str) -> String {
         return name(p.parent().and_then(Path::parent).and_then(Path::parent));
     }
     let stem = p.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    // `^rollout-.*-<uuid>$`: depois de `rollout-` ainda vem um `-` antes do id.
     if stem.starts_with("rollout-") && stem.len() >= 36 && stem.is_char_boundary(stem.len() - 36) {
-        let id = &stem[stem.len() - 36..];
-        if stem[..stem.len() - 36].ends_with('-') && is_uuid(id) {
+        let (head, id) = stem.split_at(stem.len() - 36);
+        if head.len() > "rollout-".len() && head.ends_with('-') && is_uuid(id) {
             return id.to_owned();
         }
     }
@@ -112,18 +124,33 @@ pub fn queue_path(claude: &Path, name: &str) -> PathBuf {
 }
 
 /// Abrir a conversa reabre a sessão em erro (`runtime_coordinator`, no Python). Sem esperar:
-/// a leitura do histórico não depende dela.
-pub fn request_reopen(http: &HttpClient, upstream: std::net::SocketAddr, secret: &str, name: &str) {
+/// a leitura do histórico não depende dela. Falha vai ao log e ao diário.
+pub fn request_reopen(http: &HttpClient, upstream: std::net::SocketAddr, secret: &str, diag: &crate::diag::DiagClient, name: &str) {
+    const REASON: &str = "o pedido de reabertura da sessão não chegou ao backend";
     let url = format!("http://{upstream}/internal/sessions/{}/reopen", utf8_percent_encode(name, NON_ALPHANUMERIC));
-    let Ok(req) = axum::http::Request::post(url).header("x-hangar-internal", secret).body(Body::empty()) else { return };
-    let (http, name) = (http.clone(), name.to_owned());
+    let Ok(req) = axum::http::Request::post(url).header("x-hangar-internal", secret).body(Body::empty()) else {
+        tracing::warn!(session = %name, "pedido de reabertura inválido");
+        diag.report("rust.reopen_failed", name, "reopen_request_invalid", REASON);
+        return;
+    };
+    let (http, diag, name) = (http.clone(), diag.clone(), name.to_owned());
     tokio::spawn(async move {
-        match tokio::time::timeout(Duration::from_secs(10), http.request(req)).await {
-            Ok(Ok(r)) if r.status().is_success() => {}
-            Ok(Ok(r)) => tracing::warn!(session = %name, status = %r.status(), "pedido de reabertura recusado"),
-            Ok(Err(e)) => tracing::warn!(session = %name, "pedido de reabertura falhou: {e}"),
-            Err(_) => tracing::warn!(session = %name, "pedido de reabertura sem resposta"),
-        }
+        let code = match tokio::time::timeout(Duration::from_secs(10), http.request(req)).await {
+            Ok(Ok(r)) if r.status().is_success() => return,
+            Ok(Ok(r)) => {
+                tracing::warn!(session = %name, status = %r.status(), "pedido de reabertura recusado");
+                "reopen_refused"
+            }
+            Ok(Err(e)) => {
+                tracing::warn!(session = %name, "pedido de reabertura falhou: {e}");
+                "reopen_unreachable"
+            }
+            Err(_) => {
+                tracing::warn!(session = %name, "pedido de reabertura sem resposta");
+                "reopen_timeout"
+            }
+        };
+        diag.report("rust.reopen_failed", &name, code, REASON);
     });
 }
 
@@ -138,6 +165,8 @@ mod tests {
         assert_eq!(session_key("/x/rollout-2026-10-12T10-00-00-0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b.jsonl"),
                    "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b");
         assert_eq!(session_key("/x/rollout-sem-id.jsonl"), "rollout-sem-id");
+        assert_eq!(session_key("/x/rollout-0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b.jsonl"),
+                   "rollout-0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b", "sem nada entre `rollout-` e o id, como o regex do Python");
     }
 
     #[test]
