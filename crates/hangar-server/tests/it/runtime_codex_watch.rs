@@ -28,7 +28,8 @@ pub(crate) fn fixture() -> Fixture {
         has-session) n=\"${{3#=}}\"; grep -q \"^$n\t\" \"$P\";;\n  \
         kill-session) n=\"${{3#=}}\"; grep -v \"^$n\t\" \"$P\" > \"$P.new\"; mv \"$P.new\" \"$P\";;\n  \
         display-message) printf 'cx-proof\t%%7\t1700000000\\n';;\n  \
-        send-keys) echo \"$@\" >> \"$P.keys\";;\n  *) exit 1;;\nesac\n"));
+        capture-pane) cat \"$P.screen\";;\n  \
+        send-keys) echo \"$@\" >> \"$P.keys\"; if [ -f \"$P.after\" ]; then cp \"$P.after\" \"$P.screen\"; fi;;\n  *) exit 1;;\nesac\n"));
     Fixture { _dir:dir,home,queue,panes,tmux,root }
 }
 
@@ -127,6 +128,52 @@ async fn a_round_adopts_follows_a_new_app_server_and_buries_the_dead_pane() {
     assert!(fx.sidecar("cx-proof").is_none(),"sidecar da vida apagado");
     assert!(!fx.queue_state(&key).exists(),"fila da vida apagada");
     finish(&mut [&mut app1,&mut app2]);
+}
+
+#[tokio::test]
+async fn a_message_typed_before_the_adoption_is_kept_in_the_queue() {
+    // A TUI ainda abria: o Python gravou a mensagem na fila pelo nome. Adotar não pode apagá-la.
+    let fx = fixture();
+    let server = fake_app_server(true).await;
+    let (mut app,mut tui) = (app_server_process(&server.endpoint),tui());
+    std::fs::create_dir_all(&fx.queue).unwrap();
+    std::fs::write(fx.queue.join("cx-proof.jsonl"),format!("{}\n",json!({"id":"early","text":"oi antes da TUI","ts":1.0e12,"delivered":false}))).unwrap();
+    fx.put_sidecar("cx-proof",fx.meta("cx-proof",&server.endpoint,Some(app.id()),&tui));
+    fx.panes(&["cx-proof"]);
+    let registry = registry().await;
+    fx.watcher().round(&registry).await;
+    assert!(registry.owns_codex_terminal("cx-proof"));
+    let key = key_of(&fx.sidecar("cx-proof").unwrap());
+    let rows = fx.queue_json(&key)["rows"].clone();
+    assert!(rows.as_array().unwrap().iter().any(|row|row["id"] == "early" && row["text"] == "oi antes da TUI"),"{rows}");
+    let projection = std::fs::read_to_string(fx.queue.join("cx-proof.jsonl")).unwrap();
+    assert!(projection.contains("early"),"a projeção regravada mantém a mensagem: {projection}");
+    finish(&mut [&mut app,&mut tui]);
+}
+
+#[tokio::test]
+async fn reconnecting_follows_the_conversation_the_session_file_moved_to() {
+    // O socket caiu e, nessa janela, a TUI abriu outra conversa (`/new`): o lançador gravou a nova no
+    // arquivo da sessão, e a reconexão assina ela, não a antiga (o `ensure_running` do Python).
+    let fx = fixture();
+    let server = fake_app_server(true).await;
+    let (mut app,mut tui) = (app_server_process(&server.endpoint),tui());
+    fx.put_sidecar("cx-proof",fx.meta("cx-proof",&server.endpoint,Some(app.id()),&tui));
+    fx.panes(&["cx-proof"]);
+    let registry = registry().await;
+    fx.watcher().round(&registry).await;
+    server.wait_method(1,"thread/resume").await;
+    let mut meta = fx.sidecar("cx-proof").unwrap();
+    meta["thread_id"] = json!("thread-2");
+    meta["rollout_path"] = json!(fx.root.join("rollout-2.jsonl"));
+    fx.put_sidecar("cx-proof",meta);
+    server.drop_connection(1);
+    let resume = server.wait_method(2,"thread/resume").await;
+    assert_eq!(resume["params"]["threadId"],"thread-2");
+    let key = key_of(&fx.sidecar("cx-proof").unwrap());
+    let handle = registry.handle(&key,1).await.unwrap();
+    assert_eq!(handle.view().await.unwrap()["thread_id"],"thread-2");
+    finish(&mut [&mut app,&mut tui]);
 }
 
 #[tokio::test]
@@ -319,10 +366,11 @@ async fn to_headless_refuses_an_unread_permission_mode_and_kills_nothing() {
     registry.bind_watcher(watcher.clone());
     watcher.round(&registry).await;
     let before = fx.sidecar("cx-proof").unwrap();
-    // O tmux falso não tem `capture-pane`: o seletor não lê modo nenhum.
+    // O tmux falso não tem `capture-pane`: o seletor não lê modo nenhum, e a recusa diz isso (não "não suportada").
     let error = switch_until_settled(&watcher,&registry,||PermissionRead::Pane(None)).await;
     assert_eq!(error.code,"erro_troca_modo");
-    assert!(error.message.contains("não é suportada sem terminal"),"{}",error.message);
+    assert!(error.message.contains("Não consegui ler a permissão atual no terminal"),"{}",error.message);
+    assert!(!error.message.contains("não é suportada"),"{}",error.message);
     untouched(&fx,&registry,&before,&mut app,&mut tui);
     assert!(registry.ingress().enter("cx-proof",Duration::ZERO).await.is_ok(),"a porta reabriu");
     // Lido, mas fora dos três modos do sem terminal: a mesma recusa, nunca Full Access.
@@ -515,7 +563,8 @@ for line in sys.stdin:
         result = {{"userAgent": "hangar/{} (x)"}}
     elif method in ("thread/start", "thread/resume"):
         thread = params.get("threadId") or thread
-        result = {{"thread": {{"id": thread, "path": "/tmp/rollout.jsonl"}}, "model": "gpt-test"}}
+        # Sem modelo na resposta: vale o do arquivo da sessão que a troca gravou.
+        result = {{"thread": {{"id": thread, "path": "/tmp/rollout.jsonl", "status": {{"type": "idle"}}}}}}
     elif method == "thread/read":
         result = {{"thread": {{"id": thread, "status": {{"type": "idle"}}, "turns": []}}}}
     else:
@@ -529,7 +578,10 @@ async fn to_headless_brings_up_the_headless_with_the_read_mode_restores_plan_and
     crate::use_cano_bin();
     let fx = fixture();
     let server = fake_app_server(true).await;
-    let (app,tui) = (app_server_process(&server.endpoint),tui());
+    // Jev ligado só no ambiente do processo vivo, como o terminal o recebe do lançador.
+    let app = crate::runtime_open::with_app_server_argv(std::process::Command::new("sh").args(["-c","sleep 120; true","app-server",&server.endpoint])
+        .env("HANGAR_JEV","on").spawn().unwrap(),&server.endpoint);
+    let tui = tui();
     let (app_pid,tui_pid) = (app.id(),tui.id());
     let mut meta = relaunch_meta(&fx,&server.endpoint,&app,&tui);
     // Sidecar velho em Full Access; o seletor leu "Approve for me". O modo plan volta depois da troca.
@@ -569,6 +621,8 @@ async fn to_headless_brings_up_the_headless_with_the_read_mode_restores_plan_and
     assert_eq!(sidecar["key"],json!(key),"a mesma chave: a vida segue a fila");
     assert!(sidecar["cano"]["pid"].as_u64().is_some(),"o cano novo foi gravado");
     assert!(sidecar["endpoint"].is_null() && sidecar["app_pid"].is_null(),"nada do terminal antigo");
+    assert_eq!(sidecar["jev"],true,"o Jev do processo vivo segue para o sem terminal");
+    assert_eq!((sidecar["model"].as_str(),sidecar["effort"].as_str()),(Some("gpt-tui"),Some("high")),"modelo e esforço relidos da conversa, não da vista");
     assert_eq!(fx.queue_json(&key)["generation"].as_u64(),Some(generation + 1),"vida nova na mesma fila, que não foi apagada");
     assert!(registry.owns_codex_headless("cx-proof").await);
     assert!(!registry.owns_codex_terminal("cx-proof"));
@@ -588,6 +642,34 @@ async fn to_headless_brings_up_the_headless_with_the_read_mode_restores_plan_and
 }
 
 #[tokio::test]
+async fn a_parked_headless_codex_is_opened_here_instead_of_going_to_python() {
+    // Depois de reiniciar a máquina (cano morto, fila vazia) o Python recusa o próprio cliente: o Rust abre
+    // a sessão na hora, como o `ensure_running` do Python, e atende o Recarregar e os controles.
+    crate::use_cano_bin();
+    let fx = fixture();
+    let registry = relaunch_registry(&fx).await;
+    let bin = fx.root.join("bin");
+    let log = fx.root.join("codex-methods.jsonl");
+    fake_headless_codex(&bin,&log);
+    let rollout = fx.root.join("rollout.jsonl");
+    std::fs::write(&rollout,"{}\n").unwrap();
+    fx.put_sidecar("cx-h",json!({"name":"cx-h","provider":"codex","headless":true,"key":"k-parked","thread_id":"thread-1",
+        "rollout_path":rollout,"cwd":fx.root,"codex_home":fx.home.join(".codex"),"permission_mode":"Full Access","model":"gpt-test"}));
+    let watcher = fx.watcher();
+    registry.bind_watcher(watcher.clone());
+    assert!(!registry.owns_codex_headless("cx-h").await);
+    assert_eq!(registry.restart_codex("cx-h").await.expect("Codex sem terminal do Rust").unwrap(),json!({"ok":true}));
+    assert!(registry.owns_codex_headless("cx-h").await,"aberto no Rust");
+    let generation = fx.queue_json("k-parked")["generation"].as_u64().unwrap();
+    registry.close_with_kill("k-parked",generation).await.unwrap();
+    // Fechado de novo, a escrita também o abre aqui em vez de repassar.
+    assert!(matches!(registry.adopt_now("cx-h").await,Some(Ok(()))));
+    assert!(registry.owns_codex_headless("cx-h").await);
+    let generation = fx.queue_json("k-parked")["generation"].as_u64().unwrap();
+    registry.close_with_kill("k-parked",generation).await.unwrap();
+}
+
+#[tokio::test]
 async fn relaunch_routes_go_to_python_when_the_session_is_not_a_codex_of_the_rust() {
     let (python, server) = serve_owner(registry().await).await;
     for (route, body) in [("modo-execucao", json!({"terminal": true})), ("recarregar", json!({}))] {
@@ -602,9 +684,10 @@ async fn relaunch_routes_go_to_python_when_the_session_is_not_a_codex_of_the_rus
     registry.bind_watcher(fx.watcher());
     assert!(registry.relaunch_codex("claude-x", true, None).await.is_none());
     assert!(registry.restart_codex("claude-x").await.is_none());
+    // Sem terminal parado é do Rust: abrir falha aqui (sem `cwd` para subir) e o erro aparece, sem repasse.
     fx.put_sidecar("cx-h", json!({"name": "cx-h", "provider": "codex", "headless": true, "key": "k-h", "thread_id": "t"}));
-    assert!(registry.relaunch_codex("cx-h", true, None).await.is_none(), "sem terminal aberto pelo Python");
-    assert!(registry.restart_codex("cx-h").await.is_none());
+    assert!(registry.relaunch_codex("cx-h", true, None).await.expect("do Rust").is_err());
+    assert!(registry.restart_codex("cx-h").await.expect("do Rust").is_err());
 }
 
 #[tokio::test]
@@ -795,6 +878,37 @@ async fn pane_only_routes_drive_the_codex_pane_with_the_terminal_writer() {
     let before = keys.lines().count();
     assert!(hangar_server::session_write::control::pane_step_answer(&hangar_server::runtime::codex_terminal::pane_driver(&stale,Default::default(),None).key("Up",false).await).is_err());
     assert_eq!(std::fs::read_to_string(fx.panes.with_extension("keys")).unwrap().lines().count(),before);
+}
+
+#[tokio::test]
+async fn implementing_the_plan_is_answered_in_the_rust_through_the_pane_lock() {
+    // O Python teclava direto no pane do Rust, fora da trava; a rota agora é do Rust.
+    let fx = fixture();
+    let server = fake_app_server(true).await;
+    let (mut app,mut tui) = (app_server_process(&server.endpoint),tui());
+    fx.put_sidecar("cx-proof",fx.meta("cx-proof",&server.endpoint,Some(app.id()),&tui));
+    fx.panes(&["cx-proof"]);
+    let registry = registry().await;
+    let watcher = fx.watcher();
+    registry.bind_watcher(watcher.clone());
+    watcher.round(&registry).await;
+    assert!(registry.owns_codex_terminal("cx-proof"));
+    let menu = "• Plano pronto\n\n  Implement this plan?\n\n› 1. Yes, implement this plan\n  2. No, stay in Plan mode\n\n  Press enter to confirm or esc to go back\n";
+    std::fs::write(fx.panes.with_extension("screen"),menu).unwrap();
+    std::fs::write(fx.panes.with_extension("after"),"• Implementando o plano\n\n› \n").unwrap();
+    let (python, server_addr) = serve_owner(registry.clone()).await;
+    let post = || crate::fake::client().post(format!("http://{server_addr}/api/sessions/cx-proof/codex/plan/implement"))
+        .header("authorization", format!("Bearer {}", crate::fake::OWNER)).send();
+    let response = post().await.unwrap();
+    assert_eq!((response.status().as_u16(),response.text().await.unwrap()),(200,json!({"ok":true}).to_string()));
+    let keys = std::fs::read_to_string(fx.panes.with_extension("keys")).unwrap_or_default();
+    assert!(keys.contains("-l -- \r"),"o Enter da opção 1: {keys:?}");
+    // Sem o seletor na tela: 409 com o código do Python, e nada vai ao Python.
+    let response = post().await.unwrap();
+    assert_eq!(response.status().as_u16(),409);
+    assert_eq!(serde_json::from_str::<Value>(&response.text().await.unwrap()).unwrap()["detail"]["code"],"erro_codex_controle");
+    assert_eq!(python.hits_to("/api/sessions/cx-proof/codex/plan/implement"),0);
+    finish(&mut [&mut app,&mut tui]);
 }
 
 #[tokio::test]

@@ -37,13 +37,19 @@ fn as_owner(req: &mut Request, name: &str, rest: &str) -> bool {
     true
 }
 
-/// `/__hangar_server/claude/<nome>/<rota>`: só `POST` em `answer`, `select` e `select/submit` de sessão
-/// Claude com entrada no Rust, pela mesma rota do dono. Outra rota, método ou sessão: 421.
+/// `/__hangar_server/claude/<nome>/<rota>`: `POST` em `answer`, `select`, `select/submit` e
+/// `permission-mode`, e `GET` em `permission-modes`, de sessão Claude com entrada no Rust, pela mesma rota
+/// do dono. Outra rota, método ou sessão: 421.
 pub async fn claude(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, mut req: Request) -> Response {
-    use super::{answer, control};
+    use super::{answer, control, permissions};
     if !crate::workspace_routes::private_ok(&st, peer, req.headers()) { return StatusCode::NOT_FOUND.into_response(); }
     let Some((name, rest)) = split(&req, "/__hangar_server/claude/") else { return not_ours() };
-    if req.method() != Method::POST || !matches!(rest.as_str(), "answer" | "select" | "select/submit") { return not_ours(); }
+    let allowed = match *req.method() {
+        Method::POST => matches!(rest.as_str(), "answer" | "select" | "select/submit" | "permission-mode"),
+        Method::GET => rest == "permission-modes",
+        _ => false,
+    };
+    if !allowed { return not_ours(); }
     let Some(runtime) = st.state.runtime.get().cloned() else { return not_ours() };
     if !runtime.writable(&name).await.is_some_and(|target| target.provider == "claude") { return not_ours(); }
     if !as_owner(&mut req, &name, &rest) { return not_ours(); }
@@ -51,6 +57,8 @@ pub async fn claude(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
     match rest.as_str() {
         "answer" => answer::answer(s, c, req).await,
         "select" => control::select(s, c, req).await,
+        "permission-mode" => permissions::set_mode(s, c, req).await,
+        "permission-modes" => permissions::modes(s, c, req).await,
         _ => control::select_submit(s, c, req).await,
     }
 }
@@ -160,6 +168,7 @@ async fn dispatch(st: Arc<AppState>, peer: SocketAddr, method: &str, rest: &str,
         ("POST", "model") => codex::model(s, c, req).await,
         ("POST", "service-tier") => codex::service_tier(s, c, req).await,
         ("POST", "codex/mode") => codex::mode(s, c, req).await,
+        ("POST", "codex/plan/implement") => codex::plan_implement(s, c, req).await,
         ("GET", "limits") => codex::limits(s, c, req).await,
         ("POST", "question/skip") => codex::skip_question(s, c, req).await,
         ("GET", "commands") => codex::commands(s, c, req).await,

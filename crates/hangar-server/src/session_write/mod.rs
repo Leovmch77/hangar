@@ -142,7 +142,11 @@ pub(crate) async fn route_write(runtime: &RuntimeRegistry, name: &str, route: Wr
     };
     let Some(provider) = Provider::from_str(&target.provider) else { return Write::Python };
     if decide(route, provider, target.terminal) == Owner::Python { return Write::Python; }
-    if !target.healthy { return Write::Failed(RuntimeError::new("runtime_unhealthy", UNHEALTHY_MSG)); }
+    if !target.healthy {
+        // O 503 fica; a reabertura que o Python fazia antes de entregar é pedida agora.
+        runtime.request_reopen(name);
+        return Write::Failed(RuntimeError::new("runtime_unhealthy", UNHEALTHY_MSG));
+    }
     Write::Rust(pass_in, target)
 }
 

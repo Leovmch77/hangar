@@ -522,6 +522,68 @@ mod tests {
         assert_eq!((result.disposition,result.code.as_str()),(input::Disposition::Accepted,"answered"));
         assert_eq!(*io.keys.lock().unwrap(),["\r"]);
     }
+    /// Picker que o Esc fecha e composer que mostra o que foi digitado até o Enter.
+    struct FallbackIo { picker: String, composer: Mutex<Option<String>>, buffer: Mutex<String>, keys: Mutex<Vec<String>> }
+    impl TerminalIo for FallbackIo {
+        fn command<'a>(&'a self, request: CommandRequest) -> IoFuture<'a, CommandOutput> { Box::pin(async move {
+            let rule = "─".repeat(32);
+            let stdout = match request.args[0].as_str() {
+                "capture-pane" => match &*self.composer.lock().unwrap() { None => self.picker.clone(), Some(text) => format!("{rule}\n❯ {text}\n{rule}\n") }.into_bytes(),
+                "display-message" if request.args.last().is_some_and(|arg| arg.starts_with("#{pane_pid}\t")) => format!("{}\tsession\t%1\t1\n", std::process::id()).into_bytes(),
+                "display-message" => b"session\t%1\t1\n".to_vec(),
+                // Texto de várias linhas vai colado: o buffer carregado entra no composer.
+                "load-buffer" => { *self.buffer.lock().unwrap() = String::from_utf8(request.stdin.clone()).unwrap(); Vec::new() }
+                "paste-buffer" => {
+                    let text = self.buffer.lock().unwrap().clone();
+                    if let Some(composer) = self.composer.lock().unwrap().as_mut() { *composer = text.clone(); }
+                    self.keys.lock().unwrap().push(text);
+                    Vec::new()
+                }
+                "send-keys" => {
+                    let key = request.args.last().unwrap().clone();
+                    let mut composer = self.composer.lock().unwrap();
+                    if key == "Escape" { *composer = Some(String::new()); }
+                    else if key == "\r" { if composer.is_some() { *composer = Some(String::new()); } }
+                    else if request.args.contains(&"-l".into()) && let Some(text) = composer.as_mut() { *text = key.clone(); }
+                    self.keys.lock().unwrap().push(key);
+                    Vec::new()
+                }
+                other => panic!("comando inesperado: {other}"),
+            };
+            Ok(CommandOutput { success: true, stdout })
+        }) }
+        fn socket<'a>(&'a self, _: &'a NativeMessage, _: Vec<u8>) -> IoFuture<'a, WriteOutcome> { Box::pin(async { panic!("resposta não usa o socket") }) }
+    }
+    #[tokio::test]
+    async fn keys_that_fail_on_the_same_picker_fall_back_to_a_text_answer() {
+        let dir=tempfile::tempdir().unwrap();let target=target(dir.path());let binding=LocalTerminalFacts::binding(&target);
+        std::fs::create_dir(dir.path().join("sessions")).unwrap();
+        std::fs::write(dir.path().join("sessions").join(format!("{}.json",target.metadata.agent_pid)),json!({"pid":target.metadata.agent_pid,"sessionId":"sid","status":"idle"}).to_string()).unwrap();
+        let sidecar=crate::state::ask::sidecar_path(&target.transcript).unwrap();std::fs::create_dir_all(sidecar.parent().unwrap()).unwrap();
+        std::fs::write(&sidecar,json!({"tool_input":{"questions":[{"question":"Cor?","header":"Cor","multiSelect":false,"options":[{"label":"Azul"},{"label":"Verde"}]}]}}).to_string()).unwrap();
+        // O cursor não anda (as setas não chegam): as teclas falham com o mesmo picker na tela.
+        let picker="   Cor?\n\n ❯ 1. Azul\n   2. Verde\n   3. Type something.\n   4. Chat about this\n\nEnter to select · ↑/↓ to navigate · Esc to cancel\n".to_string();
+        let interactions=Arc::new(crate::interactions::InteractionStore::default());let plugin=Arc::new(Store::new(interactions.clone()));
+        interactions.bind(&binding).unwrap();plugin.bind(&binding).unwrap();
+        let id=crate::state::ask::observe_terminal(&interactions,&binding,&target.transcript,&picker).unwrap().unwrap().interaction_id.unwrap();
+        let expected=interactions.expected(&binding,Some(&id)).unwrap();
+        let io=Arc::new(FallbackIo {picker,composer:Mutex::new(None),buffer:Mutex::new(String::new()),keys:Mutex::new(Vec::new())});
+        let facts=Arc::new(FormFacts {local:LocalTerminalFacts::new(io.clone(),Some(plugin),None),target:target.clone()});
+        let limits=InputLimits {settle:Duration::ZERO,literal_settle:Duration::ZERO,multiline_settle:Duration::ZERO,slash_settle:Duration::ZERO,proof_attempts:2,ready_attempts:2,cleanup_attempts:2};
+        let driver=TerminalDriver::new(target.binding.clone(),facts,io.clone(),limits).with_interactions(interactions.clone()).with_interaction_source(target.transcript.clone());
+        let answers:Vec<input::QuestionAnswer>=serde_json::from_value(json!([{"kind":"option","indices":[1],"labels":["Verde"]}])).unwrap();
+        let keys=driver.guarded_answer(&expected,&answers).await;
+        assert_eq!((keys.disposition,keys.code.as_str()),(input::Disposition::Rejected,"cursor_drift"));
+        let fallback=driver.guarded_answer_fallback(&expected,&answers,"op").await.expect("o mesmo picker na tela: há reserva");
+        assert_eq!((fallback.disposition,fallback.code.as_str()),(input::Disposition::Accepted,"answer_fallback_sent"));
+        let sent=io.keys.lock().unwrap().clone();
+        let escape=sent.iter().position(|k|k=="Escape").unwrap();
+        assert!(sent[escape+1].contains("- Cor? → Verde"),"{sent:?}");assert_eq!(sent.last().unwrap(),"\r");
+        // Com o composer na tela (o picker já fechou), nenhum Esc às cegas: fica a recusa.
+        let before=io.keys.lock().unwrap().len();
+        assert!(driver.guarded_answer_fallback(&expected,&answers,"op2").await.is_none());
+        assert_eq!(io.keys.lock().unwrap().len(),before);
+    }
     #[tokio::test]
     async fn sender_mode_and_target_life_are_checked_without_actor_calls() {
         let dir=tempfile::tempdir().unwrap();let target=target(dir.path());let queries=Arc::new(Mutex::new(Vec::new()));let (recorded,own)=(queries.clone(),target.clone());

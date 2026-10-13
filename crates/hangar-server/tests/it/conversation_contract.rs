@@ -221,6 +221,11 @@ async fn claude_bridge_serves_only_answer_and_select_of_a_rust_claude() {
     assert_eq!(call(reqwest::Method::GET, "s/answer", "", true).await.0, 421);
     assert_eq!(post("nada/answer", json!({"answers": [option()]}).to_string()).await.0, 421);
     assert_eq!(call(reqwest::Method::POST, "s/answer", "{}", false).await.0, 404, "sem o segredo a ponte não existe");
+    // Parity M1: o modo pedido pelo convidado ou pelo Connect é do Rust, como o do dono.
+    let (status, reply) = call(reqwest::Method::GET, "s/permission-modes", "", true).await;
+    assert_eq!((status, reply["sondavel"].as_bool()), (200, Some(false)), "{reply}");
+    assert_eq!(post("s/permission-modes", "{}".into()).await.0, 421, "lista só por GET");
+    assert_eq!(python.hits_to("/api/sessions/s/permission-modes"), 0);
     // A rota irmã das personalizações não é engolida pela ponte.
     assert_ne!(post("customizations", "{}".into()).await.0, 421);
     for route in ["answer", "select", "select/submit", "input"] {

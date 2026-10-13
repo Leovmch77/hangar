@@ -223,7 +223,7 @@ pub async fn ui(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<
     // atual e o token dele: numa sessão renomeada, o cache do Python é pelo nome de agora.
     let copy = json!({"sessao": name, "token": mint(&st.cfg.auth_token, &name), "above": body.above, "columns": body.columns, "panes": body.panes});
     copy_to_python(&st, &copy).await;
-    st.mods.terminal_ui(&name, TerminalView { above: body.above, columns: body.body_columns, panes: body.panes, shown: body.shown, caps: body.caps });
+    st.mods.terminal_ui(&name, TerminalView { above: body.above, columns: body.body_columns, panes: body.panes, shown: body.shown, caps: body.caps, crop_columns: body.columns });
     st.mods.schedule_shown(&name);
     ok()
 }

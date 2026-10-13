@@ -524,7 +524,7 @@ async def _codex_rust_port(name: str, request: Request):
         if codex_sessions.exists(name):
             reply = await asyncio.to_thread(runtime_coordinator.rust_codex_terminal, name, route, request.method, body)
         # Idem para a ponte do Claude: mesmo critério de provedor das rotas (`info.provider`).
-        if reply is None and route in {"answer", "select", "select/submit"} \
+        if reply is None and route.split("?")[0] in {"answer", "select", "select/submit", "permission-mode", "permission-modes"} \
                 and getattr(await _cached_info(name), "provider", "claude") == "claude":
             reply = await asyncio.to_thread(runtime_coordinator.rust_claude, name, route, request.method, body)
         if reply:
@@ -1246,7 +1246,10 @@ def _do_notify_awaiting(session_id: str) -> None:
             coordinator = runtime_coordinator.current()
             if coordinator is not None and coordinator.managed_runtime(info.name):
                 # Com o Rust de pé a sessão é dele: o estado é o último que ele publicou.
-                state = ((coordinator.slot(info.name).view or {}).get("view") or {}).get("public_state") or {}
+                state = ((coordinator.slot(info.name).view or {}).get("view") or {}).get("public_state")
+                if not isinstance(state, dict):
+                    _log.warning("push aguardando: sem a vista do Rust para %s; push não enviado", info.name)
+                    return False
                 info.state, info.question = state.get("state"), state.get("question")
                 return state.get("state") == "awaiting_input"
             snap = get_adapter(CLAUDE_HEADLESS).snapshot(info.name)
@@ -1408,6 +1411,9 @@ def _confirm_and_drain(name: str) -> None:
             return  # nada a confirmar: nao paga registry nem o scan do transcript
         info = _cached_info_sync(name)
         if not info or not info.jsonl:
+            return
+        # Fila e confirmação do Codex com terminal são do Rust: gravar na projeção dele seria um segundo escritor.
+        if info.provider == "codex" and not info.headless and runtime_coordinator.rust_owns_codex_terminal():
             return
         from app.conversation_history import confirmation_options
         confirmation = confirmation_options(name, info.jsonl, info.provider)
@@ -6795,7 +6801,7 @@ def _menu_de_implementar_plano(pane: str) -> bool:
                 and menu[1][0].startswith("Yes, implement this plan"))
 
 
-@app.post("/api/sessions/{name}/codex/plan/implement", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
+@app.post("/api/sessions/{name}/codex/plan/implement", dependencies=[Depends(require_auth), Depends(_transfer_guard), Depends(_codex_rust_port)])
 def implementar_plano_codex(name: str):
     if not _session_exists(name):
         raise HTTPException(404, detail=erro(
@@ -9933,7 +9939,7 @@ def _guard_perm(name: str, info) -> None:
     if pane and is_overlay(pane):
         raise HTTPException(409, "ha um menu aberto no terminal da sessao")
 
-@app.get("/api/sessions/{name}/permission-modes", dependencies=[Depends(require_auth)])
+@app.get("/api/sessions/{name}/permission-modes", dependencies=[Depends(require_auth), Depends(_codex_rust_port)])
 async def permission_modes(name: str, sondar: bool = False):
     """Lista dos modos de permissão.
 
@@ -10015,7 +10021,7 @@ async def permission_modes(name: str, sondar: bool = False):
     return {"current": cur, "modes": modos, "sondavel": cur != "dontAsk",
             "restaurado": restaurado, "previous_non_plan": anterior_nao_plan}
 
-@app.post("/api/sessions/{name}/permission-mode", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
+@app.post("/api/sessions/{name}/permission-mode", dependencies=[Depends(require_auth), Depends(_transfer_guard), Depends(_codex_rust_port)])
 async def permission_mode_set(name: str, body: PermissionModeBody):
     """Troca o modo de permissão via BTab até casar o alvo (teto 6 teclas).
 

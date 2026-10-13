@@ -481,6 +481,8 @@ impl Hub {
 
     /// A ligação atual: o feed escolhe por ela.
     pub fn binding(&self) -> Option<Binding> { self.bound.lock().unwrap().as_ref().map(|b| b.binding.clone()) }
+    /// Os mods da sessão: a faixa e os painéis que cortam a prévia.
+    pub(crate) fn mods(&self) -> &crate::mods::state::Mods { &self.ctx.mods }
 
     /// Geração da ligação atual (a época do `Monitor`); `None` com o hub fechado.
     pub fn generation(&self) -> Option<u64> { self.bound.lock().unwrap().as_ref().map(|b| b.generation) }
@@ -1206,6 +1208,9 @@ impl Hubs {
         let binding=Binding::from_info(&info).filter(|b|matches!(b.provider,Provider::Claude|Provider::ClaudeHeadless)).ok_or_else(||crate::runtime::protocol::RuntimeError::new("lifecycle_hub_binding","vínculo do hub inválido"))?;
         let hub=self.0.lock().map_err(|_|crate::runtime::protocol::RuntimeError::new("lifecycle_hub_unavailable","hub da sessão indisponível"))?.get(name).map(|(hub,_)|hub.clone());
         if let Some(hub)=hub {
+            // A mesma conversa (reabertura em bypass): nada a religar; o `reset` faria o chat sumir e voltar
+            // em todos os aparelhos. Como o Python, só o transcript novo reseta.
+            if hub.bound.lock().unwrap().as_ref().is_some_and(|bound|bound.binding.same_conversation(&binding)) {return Ok(());}
             hub.rebind(binding);
             // A conexão interna leva a conversa escolhida: renasce com a nova, como na troca da vigia.
             hub.restart_side();
@@ -1478,6 +1483,25 @@ mod tests {
         assert!(after.iter().any(|(e, _)| e == "state"), "estado novo logo depois do rebind: {after:?}");
         assert!(lease.hub.cache.lock().unwrap().latest[0].is_some(), "o retrato volta a ter o estado");
         assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 1, "o rebind não cria outro Monitor");
+    }
+
+    /// Parity B8: a reabertura em bypass religa a mesma conversa; o chat não recebe `reset` por isso.
+    #[tokio::test]
+    async fn same_conversation_rebind_does_not_reset_the_chat() {
+        let dir = tempfile::tempdir().unwrap();
+        let info = |sid: &str| InternalInfo { provider: "claude".into(), jsonl: Some(dir.path().join(format!("{sid}.jsonl"))), session_key: sid.into(),
+            history: serde_json::json!({"queue": dir.path().join("s.jsonl")}), headless: false, lifecycle_id: None };
+        let (spawn, _) = fake_monitors(IDLE_PANE);
+        let ctx = SideCtx { monitors: Some(spawn), ..idle_ctx() };
+        let lease = ctx.hubs.acquire("s", Binding::from_info(&info("a")).unwrap(), &ctx);
+        let mut rx = lease.hub.tx.subscribe();
+        side_events(&mut rx, Duration::from_millis(200)).await;
+        ctx.hubs.rebind_claude_info("s", info("a")).unwrap();
+        let same = side_events(&mut rx, Duration::from_millis(200)).await;
+        assert!(!same.iter().any(|(e, _)| e == "rebind"), "{same:?}");
+        ctx.hubs.rebind_claude_info("s", info("b")).unwrap();
+        let other = side_events(&mut rx, Duration::from_millis(200)).await;
+        assert!(other.iter().any(|(e, _)| e == "rebind"), "{other:?}");
     }
 
     #[tokio::test]

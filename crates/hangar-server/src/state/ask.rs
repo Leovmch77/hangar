@@ -159,9 +159,17 @@ pub fn life_started(session_id: &str, instance: &str) {
 /// O plugin já encerrou esta pergunta: a chamada terminou, ou o sidecar é de uma vida anterior da
 /// conversa (o Claude morreu nela e a conversa voltou, sem `PostToolUse`).
 pub fn ended_by_plugin(session_id: &str, tool_use_id: Option<&str>, written: f64) -> bool {
-    let Ok(signals) = SIGNALS.lock() else { return false };
-    tool_use_id.is_some_and(|call| signals.ended.contains(call))
-        || signals.lives.get(session_id).is_some_and(|started| written + 1.0 < *started)
+    call_ended_by_plugin(tool_use_id) || older_than_life(session_id, written)
+}
+
+fn call_ended_by_plugin(tool_use_id: Option<&str>) -> bool {
+    SIGNALS.lock().is_ok_and(|signals| tool_use_id.is_some_and(|call| signals.ended.contains(call)))
+}
+
+/// Sidecar escrito antes da vida atual da conversa começar. Não é prova definitiva: um worker do plugin
+/// que reinicia com a pergunta aberta também parece vida nova.
+fn older_than_life(session_id: &str, written: f64) -> bool {
+    SIGNALS.lock().is_ok_and(|signals| signals.lives.get(session_id).is_some_and(|started| written + 1.0 < *started))
 }
 
 /// Não apaga o caminho: ele pode já guardar a pergunta seguinte.
@@ -188,7 +196,7 @@ fn answered_in_transcript(jsonl: &Path, call: &str, revision: &str) -> Result<(b
         Err(e) if e.kind() == ErrorKind::NotFound => return Ok((false, seen_before)),
         // Ilegível não prova nada: a pergunta segue pendente, e o menu que não é ela segue respondível.
         Err(e) => {
-            if crate::warn_limit::allow(None, "askq_transcript_unreadable") {
+            if crate::warn_limit::allow(jsonl.file_stem().and_then(|s| s.to_str()), "askq_transcript_unreadable") {
                 tracing::warn!(transcript = %jsonl.display(), code = "askq_transcript_unreadable", io_kind = ?e.kind(), "askq: transcript ilegível, pergunta segue pendente");
             }
             return Ok((false, true));
@@ -247,9 +255,18 @@ pub fn read_revision(jsonl: &Path) -> Result<Option<(AskQuestion, String)>, Stri
     // Órfão: a chamada nunca chegou ao transcript passada a carência; a lista o expira igual.
     let age = metadata.modified().ok().and_then(|m| m.elapsed().ok()).map_or(0.0, |d| d.as_secs_f64());
     let written = metadata.modified().ok().and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0.0, |d| d.as_secs_f64());
-    // O plugin viu a pergunta acabar (ou a vida dela acabar): é o sinal do próprio Claude Code.
-    if jsonl.file_stem().and_then(|s| s.to_str()).is_some_and(|sid| ended_by_plugin(sid, sidecar.tool_use_id.as_deref(), written)) {
+    // O plugin viu a chamada acabar: é o sinal do próprio Claude Code, e vale de vez.
+    if call_ended_by_plugin(sidecar.tool_use_id.as_deref()) {
         CONSUMED.lock().map_err(|_| "askq_consumed_lock")?.entry(path).or_default().insert(revision);
+        return Ok(None);
+    }
+    // Sidecar de antes da vida atual: fora enquanto ela durar, sem consumir a revisão (um worker do plugin
+    // reiniciado com a pergunta aberta também parece vida nova) e com registro.
+    let sid = jsonl.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
+    if older_than_life(sid, written) {
+        if crate::warn_limit::allow(Some(sid), "askq_previous_life") {
+            tracing::info!(session = sid, code = "askq_previous_life", "askq: sidecar de uma vida anterior da conversa, fora da pergunta aberta");
+        }
         return Ok(None);
     }
     if let Some(call) = sidecar.tool_use_id.as_deref()
@@ -265,8 +282,10 @@ pub fn read_revision(jsonl: &Path) -> Result<Option<(AskQuestion, String)>, Stri
 /// Sidecar que existe e não serve (hook antigo, formato do `tool_input` mudado): sem pergunta, e o menu
 /// do pane segue respondível; só o diário o mostra. Só o código: o serde citaria o texto da pergunta.
 fn unusable(path: &Path, code: &'static str, io_kind: Option<ErrorKind>) -> Option<(AskQuestion, String)> {
-    if crate::warn_limit::allow(None, code) {
-        tracing::warn!(sidecar = %path.display(), code, io_kind = ?io_kind, "askq: sidecar inutilizável, fica o menu do pane");
+    // Por sessão: uma conversa com o sidecar torto não cala o aviso das outras.
+    let session = path.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
+    if crate::warn_limit::allow(Some(session), code) {
+        tracing::warn!(session, sidecar = %path.display(), code, io_kind = ?io_kind, "askq: sidecar inutilizável, fica o menu do pane");
     }
     None
 }

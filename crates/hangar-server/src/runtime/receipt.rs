@@ -176,11 +176,20 @@ impl ReceiptIndex {
             let recorded_conversation = if self.provider == "codex" { self.meta_conversation.clone() }
                 else { obj["sessionId"].as_str().map(str::to_owned) };
             let identity_unprovable = self.provider == "codex" && recorded_conversation.is_none();
-            // Vários recados num registro só: cada um é uma ocorrência, senão o primeiro gasta o registro e os outros nunca confirmam.
-            let peers:Vec<String> = if kind == "user" { crate::transcript::history::peer_bodies(&text).into_iter().map(str::to_owned).collect() } else { Vec::new() };
-            // O registro inteiro vem por último: o que foi digitado junto com os recados também confirma.
-            let mut parts:Vec<(String,String)> = peers.into_iter().enumerate().map(|(n,body)|(format!("#peer{n}"),body)).collect();
-            parts.push((String::new(),text));
+            // Mensagens que chegaram durante o turno: a CLI as junta num `user` só, um bloco de texto por entrada (cada
+            // entrada do Hangar é um bloco). Cada bloco é uma ocorrência, senão a primeira gasta o registro.
+            let blocks = if self.provider != "codex" && kind == "user" { text_blocks(&obj["message"]["content"]) } else { Vec::new() };
+            let records = if blocks.len() > 1 { blocks } else { vec![text] };
+            let tagged = records.len() > 1;
+            let mut parts:Vec<(String,String)> = Vec::new();
+            for (b,record) in records.into_iter().enumerate() {
+                let tag = if tagged { format!("#block{b}") } else { String::new() };
+                // Vários recados num registro só: cada um é uma ocorrência, senão o primeiro gasta o registro e os outros nunca confirmam.
+                let peers:Vec<String> = if kind == "user" { crate::transcript::history::peer_bodies(&record).into_iter().map(str::to_owned).collect() } else { Vec::new() };
+                parts.extend(peers.into_iter().enumerate().map(|(n,body)|(format!("{tag}#peer{n}"),body)));
+                // O registro inteiro vem por último: o que foi digitado junto com os recados também confirma.
+                if !record.trim().is_empty() { parts.push((tag,record)); }
+            }
             for (suffix,text) in parts {
                 self.occurrences.push(Occurrence { id:format!("{}|{id}|{record}{suffix}",self.conversation),conversation:self.conversation.clone(),
                     file_identity:id.clone(),offset:start,end_offset:offset,text,kind:kind.into(),timestamp,recorded_conversation:recorded_conversation.clone(),identity_unprovable });
@@ -245,6 +254,11 @@ pub(crate) fn legacy_accepts(occurrence: &Occurrence, sent: f64) -> bool {
     matches!(occurrence.kind.as_str(),"user" | "dequeue" | "steer")
         && occurrence.timestamp.is_some_and(|ts|ts + LEGACY_CLOCK_SLACK_S >= sent)
         && (occurrence.identity_unprovable || occurrence.recorded_conversation.as_deref() == Some(occurrence.conversation.as_str()))
+}
+
+fn text_blocks(content: &Value) -> Vec<String> {
+    content.as_array().map(|blocks| blocks.iter().filter(|b|b["type"] == "text")
+        .filter_map(|b|b["text"].as_str().map(str::to_owned)).collect()).unwrap_or_default()
 }
 
 fn content_text(content: &Value) -> String {

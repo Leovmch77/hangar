@@ -148,7 +148,7 @@ pub fn rust_route(method: &Method, path: &str) -> bool {
     }
     // Rotas só do Codex e modos de permissão do Claude: o Rust atende as sessões dele. `CODEX_RELAUNCH`
     // fica de fora: no Claude relançar e recarregar são do Python.
-    if *method == Method::POST && matches!(tail, Some("model" | "service-tier" | "codex/mode" | "question/skip" | "codex-permissions"
+    if *method == Method::POST && matches!(tail, Some("model" | "service-tier" | "codex/mode" | "codex/plan/implement" | "question/skip" | "codex-permissions"
         | "permission-mode")) {
         return true;
     }

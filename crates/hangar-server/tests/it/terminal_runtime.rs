@@ -582,8 +582,8 @@ async fn terminal_runtime_working_allows_safe_tui_enqueue_without_hiding_pending
 async fn terminal_runtime_explicit_steer_uses_driver_and_no_prompt_row() {
     let f=Fixture::new().await; let h=f.start();
     let result=h.control("steer-now".into(),"steer".into(),json!({})).await.unwrap();
-    // Sem mensagem na fila da TUI não há o que promover: 200 `promoted:false`, como no Python.
-    assert_eq!((result.disposition,result.payload["promoted"].clone()),(hangar_server::runtime::protocol::Disposition::Accepted,json!(false)),"{}",result.payload);
+    // Sem a marca da fila na TUI não se prova consumo: adiado com o código.
+    assert_eq!((result.disposition,result.payload["code"].clone()),(hangar_server::runtime::protocol::Disposition::Deferred,json!("no_queued_input")),"{}",result.payload);
     assert!(f.state()["rows"].as_array().unwrap().is_empty()); h.stop().await.unwrap();
 }
 
@@ -662,6 +662,9 @@ async fn terminal_runtime_question_without_receipt_falls_back_to_the_pane_keys()
     let picker="Escolha B\n❯ 1. primeira\n  2. segunda\n  3. Type something.\n  4. Chat about this\nEnter to select · ↑/↓ to navigate · Esc to cancel\n".to_string();
     let closed="────────────────────────────────\n❯ \n────────────────────────────────\n".to_string();
     *f.io.panes.lock().unwrap()=vec![picker.clone(),picker.clone(),picker.clone(),picker,closed];
+    // Corpo torto: recusa com o código e o executor segue de pé para a resposta seguinte.
+    let bad=h.control("ask-bad".into(),"answer_questions".into(),json!({"request_id":"ask:B","interaction_id":interaction,"answers":[{"kind":"option","indices":"x"}]})).await;
+    assert_eq!(bad.unwrap_err().code,"terminal_payload");
     let reply=h.control("ask-keys".into(),"answer_questions".into(),json!({"request_id":"ask:B","interaction_id":interaction,"answers":[{"kind":"option","indices":[0],"labels":["primeira"]}]})).await.unwrap();
     assert_eq!((reply.disposition,reply.payload["code"].clone()),(hangar_server::runtime::protocol::Disposition::Accepted,json!("answered")),"{}",reply.payload);
     let keys:Vec<String>=f.io.calls.lock().unwrap().iter().filter(|c|c.args[0]=="send-keys").map(|c|c.args.last().unwrap().clone()).collect();
@@ -1770,5 +1773,111 @@ async fn delivered_row_confirms_when_transcript_grows_without_waiting_the_tick()
     let start=std::time::Instant::now();
     f.wait_for("confirmada pelo transcript",||f.state()["rows"][0]["confirmed"]==true).await;
     assert!(start.elapsed()<Duration::from_secs(2),"confirmação esperou {:?}",start.elapsed());
+    h.stop().await.unwrap();
+}
+
+/// Parity A2: rodapé que não muda depois da tecla não deixa a sessão doente. O Python relia o modo
+/// e devolvia o final; a entrega seguia.
+#[tokio::test]
+async fn unchanged_footer_after_mode_key_reads_back_and_keeps_delivering() {
+    let f=Fixture::new().await;
+    *f.io.panes.lock().unwrap()=vec![format!("{}\n❯ \n{}\n⏵⏵ accept edits on (shift+tab to cycle)\n","─".repeat(32),"─".repeat(32))];
+    let lease=crate::lease_when_free(&f.target.lease_path);
+    let store=Store::open(&f.target.state_path,&f.target.projection_dir,queue::State::new("key",1,"session",vec![])).unwrap();
+    let memory=Arc::new(Mutex::new(hangar_server::state::permission::PermissionMemory::default()));
+    let terms=Arc::new(hangar_server::term::Terms::new(hangar_server::term::TermConfig::default()));
+    let options=TerminalOptions {io:f.io.clone(),permissions:Some(memory.clone()),terms:Some(terms),limits:InputLimits {settle:Duration::ZERO,literal_settle:Duration::ZERO,multiline_settle:Duration::ZERO,slash_settle:Duration::ZERO,proof_attempts:1,ready_attempts:1,cleanup_attempts:1},tick:Duration::from_secs(600),..TerminalOptions::default()};
+    let h=TerminalActor::spawn(f.target.clone(),QueueActor::start(store,lease),f.policy.clone(),options,broadcast::channel(128).0,Arc::new(AtomicU64::new(0)));
+    let reply=h.control("mode".into(),"set_permission_mode".into(),json!({"mode":"plan"})).await.unwrap();
+    assert_eq!(reply.payload["current"],"acceptEdits","{reply:?}");
+    assert_eq!(reply.disposition,hangar_server::runtime::protocol::Disposition::Rejected,"{reply:?}");
+    let snapshot=h.snapshot().await.unwrap();
+    assert!(snapshot["error"].is_null(),"modo incerto não trava a entrega: {snapshot}");
+    assert_eq!(memory.lock().unwrap().confirmed("sid").unwrap().map(|v|v.current),Some("acceptEdits".into()));
+    h.stop().await.unwrap();
+}
+
+/// Pane cujo rodapé mostra o modo corrente e cada BTab passa ao seguinte do ciclo.
+struct CycleIo {inner:Arc<Io>,modes:Mutex<std::collections::VecDeque<&'static str>>,btabs:std::sync::atomic::AtomicUsize}
+impl TerminalIo for CycleIo {
+    fn command<'a>(&'a self,r:CommandRequest)->IoFuture<'a,CommandOutput> { Box::pin(async move {
+        if r.args[0]=="send-keys" && r.args.last().is_some_and(|k|k=="BTab") {
+            self.btabs.fetch_add(1,std::sync::atomic::Ordering::SeqCst);
+            let mut modes=self.modes.lock().unwrap();let first=modes.pop_front().unwrap();modes.push_back(first);
+            return Ok(CommandOutput {success:true,stdout:vec![]});
+        }
+        let capture=r.args[0]=="capture-pane";
+        let mut out=self.inner.command(r).await?;
+        if capture {
+            let phrase=match *self.modes.lock().unwrap().front().unwrap() {"manual"=>"manual mode on","auto"=>"auto mode on","plan"=>"plan mode on",_=>"accept edits on"};
+            out.stdout.extend(format!("⏵⏵ {phrase} (shift+tab to cycle)\n").into_bytes());
+        }
+        Ok(out)
+    }) }
+    fn socket<'a>(&'a self,m:&'a NativeMessage,e:Vec<u8>)->IoFuture<'a,WriteOutcome> {self.inner.socket(m,e)}
+}
+
+/// Parity M2 (`test_perm_get_cache_usa_mesma_lista`): a lista sondada fica guardada na vida da conversa;
+/// a leitura seguinte a devolve e a sonda seguinte não dá outra volta de teclas.
+#[tokio::test]
+async fn probed_modes_are_cached_for_reads_and_later_probes() {
+    let f=Fixture::new().await;
+    let io=Arc::new(CycleIo {inner:f.io.clone(),modes:Mutex::new(["manual","auto","plan"].into()),btabs:Default::default()});
+    let lease=crate::lease_when_free(&f.target.lease_path);
+    let store=Store::open(&f.target.state_path,&f.target.projection_dir,queue::State::new("key",1,"session",vec![])).unwrap();
+    let memory=Arc::new(Mutex::new(hangar_server::state::permission::PermissionMemory::default()));
+    let terms=Arc::new(hangar_server::term::Terms::new(hangar_server::term::TermConfig::default()));
+    let options=TerminalOptions {io:io.clone(),permissions:Some(memory),terms:Some(terms),limits:InputLimits {settle:Duration::ZERO,literal_settle:Duration::ZERO,multiline_settle:Duration::ZERO,slash_settle:Duration::ZERO,proof_attempts:1,ready_attempts:1,cleanup_attempts:1},tick:Duration::from_secs(600),..TerminalOptions::default()};
+    let h=TerminalActor::spawn(f.target.clone(),QueueActor::start(store,lease),f.policy.clone(),options,broadcast::channel(128).0,Arc::new(AtomicU64::new(0)));
+    let probe=h.control("p1".into(),"permission_modes".into(),json!({"probe":true})).await.unwrap();
+    assert_eq!(probe.payload["modes"],json!(["manual","auto","plan"]),"{probe:?}");
+    let pressed=io.btabs.load(std::sync::atomic::Ordering::SeqCst);
+    let read=h.control("r1".into(),"permission_modes".into(),json!({"probe":false})).await.unwrap();
+    assert_eq!(read.payload["modes"],json!(["manual","auto","plan"]),"{read:?}");
+    let again=h.control("p2".into(),"permission_modes".into(),json!({"probe":true})).await.unwrap();
+    assert_eq!(again.payload["modes"],json!(["manual","auto","plan"]),"{again:?}");
+    assert_eq!(io.btabs.load(std::sync::atomic::Ordering::SeqCst),pressed,"a segunda sonda usa a lista guardada");
+    h.stop().await.unwrap();
+}
+
+/// Parity M3 (`test_bypass_fora_do_ciclo_com_sessao_trabalhando_recusa_sem_reabrir`): bypass fora do ciclo
+/// do processo vai direto à reabertura, sem girar o modo; a ociosidade recusa com o motivo do Python.
+#[tokio::test]
+async fn bypass_outside_the_cycle_presses_no_key_and_busy_says_why() {
+    let f=Fixture::new().await;
+    let io=Arc::new(CycleIo {inner:f.io.clone(),modes:Mutex::new(["manual","auto","plan"].into()),btabs:Default::default()});
+    let lease=crate::lease_when_free(&f.target.lease_path);
+    let store=Store::open(&f.target.state_path,&f.target.projection_dir,queue::State::new("key",1,"session",vec![])).unwrap();
+    let memory=Arc::new(Mutex::new(hangar_server::state::permission::PermissionMemory::default()));
+    let terms=Arc::new(hangar_server::term::Terms::new(hangar_server::term::TermConfig::default()));
+    let options=TerminalOptions {io:io.clone(),permissions:Some(memory),terms:Some(terms),limits:InputLimits {settle:Duration::ZERO,literal_settle:Duration::ZERO,multiline_settle:Duration::ZERO,slash_settle:Duration::ZERO,proof_attempts:1,ready_attempts:1,cleanup_attempts:1},tick:Duration::from_secs(600),..TerminalOptions::default()};
+    let h=TerminalActor::spawn(f.target.clone(),QueueActor::start(store,lease),f.policy.clone(),options,broadcast::channel(128).0,Arc::new(AtomicU64::new(0)));
+    // O agente deste teste é o próprio processo de teste: nasceu sem a flag de bypass.
+    let reply=h.control("bypass".into(),"set_permission_mode".into(),json!({"mode":"bypassPermissions"})).await.unwrap();
+    assert_eq!((reply.disposition,reply.payload["requires_reopen"].clone(),reply.payload["cycle_closed"].clone()),
+        (hangar_server::runtime::protocol::Disposition::Deferred,json!(true),json!(true)),"{reply:?}");
+    assert_eq!(io.btabs.load(std::sync::atomic::Ordering::SeqCst),0,"sem girar o modo");
+    f.idle.store(false,std::sync::atomic::Ordering::Release);
+    let busy=h.control("guard".into(),"lifecycle_guard".into(),json!({})).await.unwrap_err();
+    assert_eq!(busy.code,"erro_sessao_trabalhando");
+    h.stop().await.unwrap();
+}
+
+/// Parity B1 (`test_perm_get_sonda_que_nao_voltou_marca_restaurado_false`): sonda que não volta ao modo
+/// inicial responde 200 com a lista e `restaurado:false`, não 409 sem a lista.
+#[tokio::test]
+async fn probe_that_does_not_restore_still_answers_the_list() {
+    let f=Fixture::new().await;
+    let cycle=["manual","auto","plan","auto","plan","auto","plan","auto","plan","auto"];
+    let io=Arc::new(CycleIo {inner:f.io.clone(),modes:Mutex::new(cycle.into()),btabs:Default::default()});
+    let lease=crate::lease_when_free(&f.target.lease_path);
+    let store=Store::open(&f.target.state_path,&f.target.projection_dir,queue::State::new("key",1,"session",vec![])).unwrap();
+    let memory=Arc::new(Mutex::new(hangar_server::state::permission::PermissionMemory::default()));
+    let terms=Arc::new(hangar_server::term::Terms::new(hangar_server::term::TermConfig::default()));
+    let options=TerminalOptions {io:io.clone(),permissions:Some(memory),terms:Some(terms),limits:InputLimits {settle:Duration::ZERO,literal_settle:Duration::ZERO,multiline_settle:Duration::ZERO,slash_settle:Duration::ZERO,proof_attempts:1,ready_attempts:1,cleanup_attempts:1},tick:Duration::from_secs(600),..TerminalOptions::default()};
+    let h=TerminalActor::spawn(f.target.clone(),QueueActor::start(store,lease),f.policy.clone(),options,broadcast::channel(128).0,Arc::new(AtomicU64::new(0)));
+    let probe=h.control("p".into(),"permission_modes".into(),json!({"probe":true})).await.unwrap();
+    assert_eq!((probe.disposition,probe.payload["restaurado"].clone(),probe.payload["modes"].clone()),
+        (hangar_server::runtime::protocol::Disposition::Accepted,json!(false),json!(["manual","auto","plan"])),"{probe:?}");
     h.stop().await.unwrap();
 }

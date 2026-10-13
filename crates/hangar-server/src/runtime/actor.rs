@@ -140,6 +140,9 @@ struct Respawn {
     carried:Value,
     /// Operação da pessoa (reiniciar, trocar o sandbox) e o que ela recebe quando o processo novo conecta.
     user:Option<(String,Value)>,
+    /// Reiniciar pedido durante uma religação automática: o processo novo dela é o pedido, e quem pediu
+    /// recebe o desfecho dela (o Python serializava pela trava em vez de recusar).
+    waiting:Vec<(String,Value)>,
     /// A queda entregou `cano_saiu`: o processo filho morreu e o cano que ficou pode ser encerrado.
     kill:bool,
     /// O cano caiu durante uma subida pedida: a queda é dela, não agenda outra.
@@ -760,6 +763,8 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
     let mut last_state = String::new();
     let mut last_marker = String::new();
     let mut confirming = false;
+    // Codex: o ocioso chegou com uma conferência em voo, que pode ter lido o rollout antes da linha da entrada.
+    let mut confirm_again = false;
     // Entrada enviada: a confirmação segue o crescimento do transcript (só `stat`) em vez de esperar o idle;
     // a prova é a mesma do `confirm_inputs`. Prazo para não vigiar uma entrada que nunca chega.
     let mut confirm_until: Option<Instant> = None;
@@ -865,8 +870,15 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
                         let claimed = queue.exec(target.generation,&format!("steer-claim:{id}"),sample,
                             Action::Claim { min_ts:target.created,limit:None,entry_id }).await.map_err(io_failure)?;
                         let mut replies = Vec::new();
+                        let state = queue.snapshot().await.map_err(io_failure)?;
                         for row in claimed.as_array().ok_or_else(||failure("queue_shape"))? {
                             let entry = row["id"].as_str().ok_or_else(||failure("queue_entry"))?.to_owned();
+                            // A resposta reservada não é orientação: sai pelo despacho dela, senão iria duas vezes.
+                            if state.operations.get(&entry).is_some_and(|op|op.payload["kind"] == "dispatch_async_answer") {
+                                queue.exec(target.generation,&format!("steer-skip:{id}:{entry}"),sample,
+                                    Action::SetDelivered { entry_id:entry,value:false,steered:false }).await.map_err(io_failure)?;
+                                continue;
+                            }
                             let command = RuntimeCommand { operation_id:format!("{id}:{entry}"),kind:OperationKind::Steer,
                                 payload:json!({"text":row["text"],"entry_id":entry,"pre_transcript":row["pre_transcript"].as_bool().unwrap_or(false)}) };
                             let (response,receive) = oneshot::channel();
@@ -914,7 +926,7 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
                     if message && target.provider == "claude" && engine.view()["alive"] == false {
                         publish(&events,&target,&mut revision,"claude_wake",json!({"conversation":engine.view()["conversation"]}));
                     }
-                    defer_unwritten(&mut roots,&attempts,&native,&id,error,&mut effects)
+                    defer_unwritten(&target.provider,&mut roots,&attempts,&native,&id,error,&mut effects)
                 }
             }
         }
@@ -1172,6 +1184,7 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
                 }
                 Effect::Respawn { operation_id,reason,patch,reply } => {
                     if respawn.task.is_some() {
+                        if reason == "restart" && patch.is_null() && respawn.user.is_none() { respawn.waiting.push((operation_id,reply)); continue; }
                         fail_root(&mut roots,&operation_id,RuntimeError::new("erro_codex_reiniciando","o Codex já está subindo de novo; tente em instantes"));
                         continue;
                     }
@@ -1218,9 +1231,9 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
                 handed.insert(attempt.logical_id.clone());
             }
         }
-        // Pergunta assíncrona pendente barra mensagem comum (`deliverable`), mas não a resposta reservada a ela.
+        // Resposta reservada apta sai antes da mensagem comum: ela responde a uma pergunta já feita.
         let deliverable = if target.provider=="claude" {claude_delivery_allowed(&target,&engine.view(),error.is_some())} else {engine.view()["deliverable"]==true};
-        let reserved = if deliverable || target.metadata["lifecycle_pending"]==true { None } else { engine.ready_async_answer_entry() };
+        let reserved = if target.metadata["lifecycle_pending"]==true { None } else { engine.ready_async_answer_entry() };
         if drain_requested && !drain_active && turn_hold.is_none() && !closed.load(Ordering::Acquire) && (deliverable || reserved.is_some())
             && !roots.values().any(|root|root.preparing && matches!(root.command.kind,OperationKind::Input | OperationKind::Steer)) {
             drain_requested = false; drain_active = true;
@@ -1310,7 +1323,7 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
                                 next.await;
                             }
                             let result = async {
-                                if matches!(command.kind,OperationKind::Input | OperationKind::Steer) {
+                                if matches!(command.kind,OperationKind::Input | OperationKind::Steer) && !rowless(&target.provider,&command) {
                                     let entry_id = command.payload["entry_id"].as_str().unwrap_or(&id);
                                     let rows = queue.exec(target.generation,&format!("load:{id}"),sample,Action::Load).await.map_err(io_failure)?;
                                     if !rows.as_array().is_some_and(|rows|rows.iter().any(|row|row["id"] == entry_id)) {
@@ -1320,7 +1333,7 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
                                 }
                                 // A reservada já existe com a própria entrada: a mesma intenção, nunca outra.
                                 let entry_id = match command.kind {
-                                    OperationKind::Input | OperationKind::Steer => Some(command.payload["entry_id"].as_str().unwrap_or(&id).to_owned()),
+                                    OperationKind::Input | OperationKind::Steer if !rowless(&target.provider,&command) => Some(command.payload["entry_id"].as_str().unwrap_or(&id).to_owned()),
                                     OperationKind::DispatchAsyncAnswer => command.payload["entry_id"].as_str().map(str::to_owned),
                                     _ => None,
                                 };
@@ -1401,7 +1414,7 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
                     }
                     Message::Confirm(response) => {
                         let view = engine.view();
-                        let job = confirm_inputs(queue.clone(),receipt.clone(),transcript_of(&target,&view),receipt_conversation(&target,&view),target.generation,clock(start),target.provider=="claude");
+                        let job = confirm_inputs(queue.clone(),receipt.clone(),transcript_of(&target,&view),receipt_conversation(&target,&view),target.generation,clock(start),give_up_now(&target,&view));
                         jobs.spawn(async move { Job::Confirmed { response:Some(response),result:job.await } });
                     }
                     Message::Stop { response,kill } => {
@@ -1428,6 +1441,8 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
                 // App-server adotado: a queda é só do socket de controle, nunca do processo. Sem religar
                 // nem matar, uma reconexão por vez ao mesmo processo, com a fila segura até lá.
                 if adoption.is_some() && matches!(event, None | Some(IoEvent::End { .. })) {
+                    let code = match &event { Some(IoEvent::End { code:Some(code) }) => format!("close_{code}"), _ => "close_unknown".into() };
+                    effects.push_back(Effect::Diag { event:DiagEvent::CodexConnectionClosed,code });
                     io_open = false;
                     std::mem::replace(&mut io,super::codex_terminal::closed_io()).stop().await;
                     transport_epoch += 1;
@@ -1530,7 +1545,7 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
                             Ok(_)=>effects.extend(engine.initialize(id)?),
                             Err(failure)=>enter_error(&mut error,&target,io_failure(failure)),
                         }
-                        if let Some((operation_id,payload)) = respawn.user.take() {
+                        for (operation_id,payload) in respawn.user.take().into_iter().chain(std::mem::take(&mut respawn.waiting)) {
                             effects.push_back(Effect::Reply { operation_id,disposition:Disposition::Accepted,payload });
                         }
                         drain_requested = true;
@@ -1540,6 +1555,7 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
                         tracing::warn!(key=%target.key,session=%target.name,code=%failure.code,reason=%failure.message,attempt=respawn.failures,"processo da sessão não subiu de novo");
                         let user = respawn.user.take();
                         if let Some((operation_id,_)) = &user { fail_root(&mut roots,operation_id,failure.clone()); }
+                        for (operation_id,_) in std::mem::take(&mut respawn.waiting) { fail_root(&mut roots,&operation_id,failure.clone()); }
                         let gone = std::mem::take(&mut respawn.swallowed);
                         if gone {
                             effects.extend(engine.apply(EngineInput::Line(json!({"type":"cano_saiu","rc":null})),clock(start))?);
@@ -1568,6 +1584,18 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
                         io_open = true;
                         reconnect.connected();
                         tracing::info!(key=%target.key,session=%target.name,"Codex com terminal reconectado; assinando a mesma conversa");
+                        // A TUI pode ter aberto outra conversa durante a queda (`/new`): o vínculo segue a do arquivo da
+                        // sessão desta vida, como o `ensure_running` do Python, antes de assinar.
+                        if let Some(life) = adoption.as_ref().and_then(|adoption|adoption.cell.sidecar()).cloned() {
+                            let meta = tokio::task::spawn_blocking(move||super::codex_sidecar::load(&super::codex_sidecar::path(&life.dir,&life.name))
+                                .filter(|meta|meta.get("key").and_then(Value::as_str) == Some(life.key.as_str()))).await.ok().flatten();
+                            if let Some(meta) = meta && let Some(thread) = meta.get("thread_id").and_then(Value::as_str)
+                                && engine.view()["thread_id"].as_str().is_some_and(|current|current != thread) {
+                                let moved = json!({"method":"thread/started","params":{"thread":{"id":thread,"path":meta.get("rollout_path"),
+                                    "cwd":meta.get("cwd"),"source":"cli"}}});
+                                effects.extend(engine.apply(EngineInput::Line(moved),clock(start))?);
+                            }
+                        }
                         // Mesma thread, inicializada e assinada de novo; conectado e assinado voltam separados.
                         let id = format!("bootstrap:{}:{}:{}",target.key,target.generation,unique());
                         match queue.exec(target.generation,&format!("prepare:{id}"),clock(start),Action::Prepare { id:id.clone(),payload:json!({"kind":"bootstrap"}),entry_id:None }).await {
@@ -1578,7 +1606,7 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
                         if !confirming {
                             confirming = true;
                             let view = engine.view();
-                            let job = confirm_inputs(queue.clone(),receipt.clone(),transcript_of(&target,&view),receipt_conversation(&target,&view),target.generation,clock(start),target.provider=="claude");
+                            let job = confirm_inputs(queue.clone(),receipt.clone(),transcript_of(&target,&view),receipt_conversation(&target,&view),target.generation,clock(start),give_up_now(&target,&view));
                             jobs.spawn(async move { Job::Confirmed { response:None,result:job.await } });
                         }
                         drain_requested = true;
@@ -1669,7 +1697,7 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
                                     });
                                 } else { pending.ready_to_run = true; }
                             }
-                            Err(error)=>defer_unwritten(&mut roots,&attempts,&native,&id,error,&mut effects),
+                            Err(error)=>defer_unwritten(&target.provider,&mut roots,&attempts,&native,&id,error,&mut effects),
                         }
                     }
                     Job::Write { wire,generation,result } => {
@@ -1722,7 +1750,8 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
                             pending.preparing = false;
                             pending.result = Some(reply.clone());
                             for response in pending.responses.drain(..) { let _ = response.send(Ok(reply.clone())); }
-                            if reply.disposition == Disposition::Deferred && matches!(pending.command.kind,OperationKind::Input | OperationKind::Steer | OperationKind::DispatchAsyncAnswer) {
+                            if reply.disposition == Disposition::Deferred && matches!(pending.command.kind,OperationKind::Input | OperationKind::Steer | OperationKind::DispatchAsyncAnswer)
+                                && !rowless(&target.provider,&pending.command) {
                                 let queue = queue.clone(); let id = reply.operation_id.clone(); let generation = target.generation; let sample = clock(start);
                                 jobs.spawn(async move { Job::Saved(queue.exec(generation,&format!("unclaim:{}",unique()),sample,
                                     Action::SetDelivered { entry_id:id,value:false,steered:false }).await.map(|_|()).map_err(io_failure)) });
@@ -1781,6 +1810,10 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
                             },
                             Err(failure)=>{
                                 publish(&events,&target,&mut revision,"problem",json!({"error_code":failure.code,"message":failure.message}));
+                                // O "Pular" do Codex espera esta gravação para responder: ela falhou, a pergunta volta.
+                                if target.provider == "codex" && kind == "session.patch_meta" {
+                                    effects.extend(engine.apply(EngineInput::PolicyResult { request_id,payload:json!({"updated":false,"error":failure.code}) },clock(start))?);
+                                }
                                 enter_error(&mut error,&target,failure);
                             },
                         }
@@ -1797,15 +1830,14 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
                                 // esteira do push de "aguardando" e da pausa do loop das sessões com terminal.
                                 // A queda grava `dead` (push de "caiu", como no tmux); a saída limpa só desfaz a espera.
                                 if target.provider == "claude" {
-                                    let marker = if view["alive"] == false && view["public_state"]["problema"] == "headless_processo_caiu" { "dead" } else { state.as_str() };
-                                    if marker != last_marker && (matches!(marker,"awaiting_input" | "dead") || last_marker == "awaiting_input") {
-                                        write_state_marker(&target,&view,marker);
-                                    }
+                                    let (marker,write) = state_marker(&last_marker,&view);
+                                    if write { write_state_marker(&target,&view,marker); }
                                     last_marker = marker.to_owned();
                                 }
+                                if target.provider == "codex" && state == "idle" && last_state != "idle" && confirming { confirm_again = true; }
                                 if state == "idle" && last_state != "idle" && !confirming {
                                     confirming = true;
-                                    let job = confirm_inputs(queue.clone(),receipt.clone(),transcript_of(&target,&view),receipt_conversation(&target,&view),target.generation,clock(start),target.provider=="claude");
+                                    let job = confirm_inputs(queue.clone(),receipt.clone(),transcript_of(&target,&view),receipt_conversation(&target,&view),target.generation,clock(start),give_up_now(&target,&view));
                                     jobs.spawn(async move { Job::Confirmed { response:None,result:job.await } });
                                 }
                                 last_state = state;
@@ -1916,6 +1948,12 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
                                 if let Some(response) = response { let _ = response.send(Err(error)); }
                             }
                         }
+                        if !confirming && std::mem::take(&mut confirm_again) {
+                            confirming = true;
+                            let view = engine.view();
+                            let job = confirm_inputs(queue.clone(),receipt.clone(),transcript_of(&target,&view),receipt_conversation(&target,&view),target.generation,clock(start),give_up_now(&target,&view));
+                            jobs.spawn(async move { Job::Confirmed { response:None,result:job.await } });
+                        }
                     }
                     Job::Steered { id,result } => {
                         let (disposition,payload) = match result {
@@ -1929,11 +1967,11 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
                             tracing::warn!(key=%target.key,session=%target.name,code=%failure.code,persisted=?persisted,"gravação da resposta reservada falhou");
                         }
                         match persisted {
-                            // Gravada (mesmo com erro depois): ela sai na vez dela, então quem respondeu recebe o
-                            // resultado incerto de reservada, nunca um erro que esconde uma entrega futura.
+                            // Gravada (mesmo com erro depois): ela sai na vez dela e o cartão fecha, como o envio na hora
+                            // do Python; a decisão em si continua sem confirmação até o turno.
                             Some(true) => {
                                 effects.extend(engine.settle_async_answer(&reservation.entry_id,true));
-                                effects.push_back(Effect::Reply { operation_id,disposition:Disposition::Unknown,payload:reservation.reply_payload() });
+                                effects.push_back(Effect::Reply { operation_id,disposition:Disposition::Accepted,payload:reservation.reply_payload() });
                             }
                             Some(false) => {
                                 effects.extend(engine.settle_async_answer(&reservation.entry_id,false));
@@ -1970,7 +2008,7 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
                 confirm_recheck = None;
                 confirming = true;
                 let view = engine.view();
-                let job = confirm_inputs(queue.clone(),receipt.clone(),transcript_of(&target,&view),receipt_conversation(&target,&view),target.generation,clock(start),target.provider=="claude");
+                let job = confirm_inputs(queue.clone(),receipt.clone(),transcript_of(&target,&view),receipt_conversation(&target,&view),target.generation,clock(start),give_up_now(&target,&view));
                 jobs.spawn(async move { Job::Confirmed { response:None,result:job.await } });
             }
             _ = tokio::time::sleep(CONFIRM_POLL), if confirm_until.is_some() && !confirming => {
@@ -1982,7 +2020,7 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
                 if len != confirm_seen {
                     confirm_seen = len;
                     confirming = true;
-                    let job = confirm_inputs(queue.clone(),receipt.clone(),transcript,receipt_conversation(&target,&view),target.generation,clock(start),target.provider=="claude");
+                    let job = confirm_inputs(queue.clone(),receipt.clone(),transcript,receipt_conversation(&target,&view),target.generation,clock(start),give_up_now(&target,&view));
                     jobs.spawn(async move { Job::Confirmed { response:None,result:job.await } });
                 }
             }
@@ -2002,12 +2040,13 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
                         // Sem escrita começada a entrada não chegou à CLI: volta para a fila em vez de ficar incerta.
                         let prefix = format!("{id}:");
                         let written = native.contains(id) || attempts.values().any(|attempt|attempt.logical_id == *id || attempt.logical_id.starts_with(&prefix));
-                        let unsent = !written && matches!(pending.command.kind,OperationKind::Input | OperationKind::Steer | OperationKind::DispatchAsyncAnswer);
+                        let unsent = !written && matches!(pending.command.kind,OperationKind::Input | OperationKind::Steer | OperationKind::DispatchAsyncAnswer)
+                            && !rowless(&target.provider,&pending.command);
                         if crate::warn_limit::allow(Some(&target.key),"deadline") {
                             tracing::warn!(key=%target.key,session=%target.name,operation=%id,unsent,"operação sem resposta em 30 s");
                         }
-                        effects.push_back(Effect::Reply { operation_id:id.clone(),disposition:if unsent { Disposition::Deferred } else { Disposition::Unknown },
-                            payload:json!({"error":"operação sem resposta"}) });
+                        let disposition = if unsent { Disposition::Deferred } else if !written && rowless(&target.provider,&pending.command) { Disposition::Rejected } else { Disposition::Unknown };
+                        effects.push_back(Effect::Reply { operation_id:id.clone(),disposition,payload:json!({"error":"operação sem resposta"}) });
                     }
                 }
                 if let Some(adoption) = &adoption && reconnect.task.is_none() && reconnect.next_at.is_some_and(|at|sample.monotonic_s >= at) {
@@ -2114,9 +2153,15 @@ async fn kill_process(engine:&RuntimeEngine,target:&RuntimeTarget) -> Result<(),
 /// Devolve as operações confirmadas, quantas entradas legadas saíram junto e, no Claude sem terminal, quando
 /// a próxima entrada ainda sem prova vence o prazo (a conferência volta nessa hora).
 async fn confirm_inputs(queue:Arc<QueueActor>,receipt:Arc<std::sync::Mutex<ReceiptIndex>>,path:std::path::PathBuf,conversation:Option<String>,
-    generation:u64,sample:ClockSample,give_up:bool) -> Result<(Vec<String>,usize,Option<f64>),RuntimeError> {
+    generation:u64,sample:ClockSample,give_up:Option<bool>) -> Result<(Vec<String>,usize,Option<f64>),RuntimeError> {
     let (confirmed,legacy) = prove_inputs(queue.clone(),receipt,path,conversation,generation,sample).await?;
-    if !give_up { return Ok((confirmed,legacy,None)); }
+    match give_up {
+        None => return Ok((confirmed,legacy,None)),
+        // Turno em curso, pedido em aberto ou processo morto: a CLI ainda pode consumir a mensagem; desistir
+        // agora poria "não chegou" (e o Descartar) numa entrada que ainda vai rodar. Volta depois.
+        Some(false) => return Ok((confirmed,legacy,Some(sample.epoch_s + CONFIRM_RETRY.as_secs_f64()))),
+        Some(true) => {},
+    }
     let outcome = queue.exec(generation,&format!("give-up:{}",unique()),sample,
         Action::GiveUpUnproved { now:sample.epoch_s,grace:HEADLESS_PROOF_GRACE_S }).await.map_err(io_failure)?;
     if let Some(given) = outcome["given_up"].as_array().filter(|given|!given.is_empty()) {
@@ -2125,11 +2170,31 @@ async fn confirm_inputs(queue:Arc<QueueActor>,receipt:Arc<std::sync::Mutex<Recei
     Ok((confirmed,legacy,outcome["next_due"].as_f64()))
 }
 
-/// `<config_dir>/.hangar-state/<sid>.json`, o mesmo arquivo do state_hook da conta. Falha vai ao log.
+/// Marcador desta vista e se ele muda o arquivo: entrar ou sair da espera, a queda (`dead`) e a saída dela
+/// (a vida nova volta a `idle`; sem isto o `dead` ficava gravado para sempre).
+fn state_marker<'a>(last:&str,view:&'a Value) -> (&'a str,bool) {
+    let state = view["public_state"]["state"].as_str().unwrap_or("");
+    let marker = if view["alive"] == false && view["public_state"]["problema"] == "headless_processo_caiu" { "dead" } else { state };
+    let watched = |m:&str|matches!(m,"awaiting_input" | "dead");
+    (marker,marker != last && (watched(marker) || watched(last)))
+}
+
+/// `<config_dir>/.hangar-state/<sid>.json`, o mesmo arquivo do state_hook da conta.
 fn write_state_marker(target:&RuntimeTarget,view:&Value,state:&str) {
-    let Some(sid) = view["conversation"].as_str().filter(|sid|!sid.is_empty()) else { return };
-    let Some(base) = target.metadata["config_dir"].as_str().filter(|dir|!dir.is_empty()).map(std::path::PathBuf::from)
-        .or_else(||std::env::home_dir().map(|home|home.join(".claude"))) else { return };
+    write_state_marker_in(target,view,state,&crate::accounts::environment::AccountEnvironment::capture());
+}
+
+/// Sem `config_dir` o lançador sobe a CLI sem `CLAUDE_CONFIG_DIR` próprio: ela usa a pasta padrão do ambiente
+/// (`CLAUDE_CONFIG_DIR` herdado, senão `~/.claude`), e o marcador vai para a mesma. Sem conversa não há arquivo.
+fn write_state_marker_in(target:&RuntimeTarget,view:&Value,state:&str,env:&crate::accounts::environment::AccountEnvironment) {
+    let Some(sid) = view["conversation"].as_str().filter(|sid|!sid.is_empty()) else {
+        if crate::warn_limit::allow(Some(&target.key),"state_marker_unbound") {
+            tracing::warn!(key=%target.key,session=%target.name,state,"marcador de estado não gravado: a sessão ainda não tem conversa; o push de aguardando não sai");
+        }
+        return;
+    };
+    let base = target.metadata["config_dir"].as_str().filter(|dir|!dir.is_empty()).map(std::path::PathBuf::from)
+        .unwrap_or_else(||env.claude_base.clone());
     let dir = base.join(".hangar-state");
     let tmp = dir.join(format!("{sid}.json.tmp"));
     let written = std::fs::create_dir_all(&dir)
@@ -2150,6 +2215,12 @@ pub async fn abandon_queued(handle:&RuntimeHandle) -> Result<usize,RuntimeError>
         count += 1;
     }
     Ok(count)
+}
+
+/// Desistência só no Claude sem terminal (`None` nos outros), e só com o processo vivo e parado (`Some(true)`).
+fn give_up_now(target:&RuntimeTarget,view:&Value) -> Option<bool> {
+    (target.provider == "claude").then(|| view["alive"] == true && view["in_progress"] != true && view["iniciando"] != true
+        && view["pending"].as_array().is_none_or(Vec::is_empty) && view["question"].is_null())
 }
 
 /// Prazo do Claude sem terminal para a linha da entrada aparecer no transcript (hooks lentos incluídos).
@@ -2329,10 +2400,17 @@ fn recover_phase(state:&super::queue::State,phase:&super::queue::Operation) -> b
 
 /// Falha antes de qualquer escrita no fio: nada chegou à CLI, então a entrada volta para a fila
 /// (adiada, como o `deferred` do Python) em vez de ficar incerta e presa para sempre.
-fn defer_unwritten(roots:&mut BTreeMap<String,Pending>,attempts:&BTreeMap<String,Attempt>,native:&BTreeSet<String>,id:&str,error:RuntimeError,effects:&mut VecDeque<Effect>) {
+/// Orientação com texto do Codex vai direto ao turno (`turn/steer`), sem linha na fila, como no Python: recusada
+/// ou sem turno, ela é erro de quem orientou e nunca fica na fila esperando um turno que não vem.
+fn rowless(provider:&str,command:&RuntimeCommand) -> bool {
+    provider == "codex" && command.kind == OperationKind::Steer && command.payload["entry_id"].as_str().is_none()
+}
+
+fn defer_unwritten(provider:&str,roots:&mut BTreeMap<String,Pending>,attempts:&BTreeMap<String,Attempt>,native:&BTreeSet<String>,id:&str,error:RuntimeError,effects:&mut VecDeque<Effect>) {
     let prefix = format!("{id}:");
     let written = native.contains(id) || attempts.values().any(|attempt|attempt.logical_id == id || attempt.logical_id.starts_with(&prefix));
-    let input = roots.get(id).is_some_and(|pending|matches!(pending.command.kind,OperationKind::Input | OperationKind::Steer | OperationKind::DispatchAsyncAnswer));
+    let input = roots.get(id).is_some_and(|pending|matches!(pending.command.kind,OperationKind::Input | OperationKind::Steer | OperationKind::DispatchAsyncAnswer)
+        && !rowless(provider,&pending.command));
     if written || !input { return fail_root(roots,id,error); }
     let Some(pending) = roots.get_mut(id) else { return };
     if crate::warn_limit::allow(Some(id),&error.code) {
@@ -2429,6 +2507,34 @@ mod tests {
         assert!(output.iter().any(|effect|matches!(effect,Effect::Write {frame,..} if frame["request_id"].as_str().is_some_and(|id|id.starts_with("hangar:5:")))));
         assert!(store.exec(4,"late-a-claim",ClockSample {monotonic_s:1.0,epoch_s:2.0},Action::Claim {min_ts:0.0,limit:None,entry_id:None}).is_err());
     }
+    #[test]
+    fn dead_marker_is_rewritten_when_the_new_life_comes_back() {
+        let crashed = json!({"alive":false,"public_state":{"state":"idle","problema":"headless_processo_caiu"}});
+        let back = json!({"alive":true,"public_state":{"state":"idle"}});
+        assert_eq!(state_marker("idle",&crashed),("dead",true));
+        assert_eq!(state_marker("dead",&back),("idle",true),"o `dead` ficava gravado depois da subida");
+        assert_eq!(state_marker("idle",&back),("idle",false));
+        assert_eq!(state_marker("working",&json!({"alive":true,"public_state":{"state":"awaiting_input"}})),("awaiting_input",true));
+    }
+    #[test]
+    fn marker_without_config_dir_goes_to_the_default_folder_the_cli_uses() {
+        use crate::accounts::environment::AccountEnvironment;
+        let home=tempfile::tempdir().unwrap();
+        let env=AccountEnvironment::from_map([("HOME".to_owned(),home.path().to_string_lossy().into_owned())].into());
+        let mut target=commit_target(); target.metadata["config_dir"]=Value::Null;
+        write_state_marker_in(&target,&json!({"conversation":"sid-default"}),"awaiting_input",&env);
+        let marker:Value=serde_json::from_slice(&std::fs::read(home.path().join(".claude/.hangar-state/sid-default.json")).unwrap()).unwrap();
+        assert_eq!(marker["state"],"awaiting_input");
+        // Pasta padrão vinda do ambiente (`CLAUDE_CONFIG_DIR` herdado) vence o `~/.claude`.
+        let other=home.path().join("conta");
+        let env=AccountEnvironment::from_map([("HOME".to_owned(),home.path().to_string_lossy().into_owned()),
+            ("CLAUDE_CONFIG_DIR".to_owned(),other.to_string_lossy().into_owned())].into());
+        write_state_marker_in(&target,&json!({"conversation":"sid-env"}),"awaiting_input",&env);
+        assert!(other.join(".hangar-state/sid-env.json").exists());
+        // Sem conversa não há arquivo.
+        write_state_marker_in(&target,&json!({"conversation":""}),"awaiting_input",&env);
+        assert_eq!(std::fs::read_dir(other.join(".hangar-state")).unwrap().count(),1);
+    }
     #[tokio::test]
     async fn headless_claude_receipt_follows_the_conversation_after_a_sid_change() {
         // Recibo nasceu na conversa "a"; depois da troca para "b" (o `/clear` do chat), o envio
@@ -2446,7 +2552,7 @@ mod tests {
         let cursor=capture_cursor(&target,&view).await.unwrap();
         queue.exec(5,"cursor",clock,Action::BindDispatch {id:"msg".into(),cursor}).await.unwrap();
         std::fs::write(&transcript,format!("{}\n",json!({"type":"user","uuid":"u-1","sessionId":"b","message":{"role":"user","content":"Olá"}}))).unwrap();
-        let (confirmed,_,_)=confirm_inputs(queue.clone(),receipt,transcript_of(&target,&view),receipt_conversation(&target,&view),5,clock,false).await.unwrap();
+        let (confirmed,_,_)=confirm_inputs(queue.clone(),receipt,transcript_of(&target,&view),receipt_conversation(&target,&view),5,clock,None).await.unwrap();
         assert_eq!(confirmed,vec!["msg".to_owned()],"a linha da conversa nova não confirmou a entrada");
         Arc::try_unwrap(queue).ok().unwrap().shutdown().await.unwrap();
     }

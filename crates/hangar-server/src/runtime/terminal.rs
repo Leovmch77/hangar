@@ -43,6 +43,13 @@ const FOCUS_STEP_POLL:Duration=Duration::from_millis(20);
 /// foram. É da linha, como a série do `Stall`: a linha seguinte começa do zero.
 struct Away {row:String,since:tokio::time::Instant,next:tokio::time::Instant,tries:u32}
 fn error(code:&str)->RuntimeError {RuntimeError::new(code,"operação terminal conservada no diário")}
+/// O Claude só põe o bypass no Shift+Tab de quem nasceu com ele.
+fn bypass_in_cycle(agent:u32)->bool {
+    use crate::list::procs::ProcessView;
+    let argv=crate::list::procs::SystemProcs::default().argv(i64::from(agent));
+    argv.iter().any(|a|a=="--dangerously-skip-permissions" || a=="--allow-dangerously-skip-permissions" || a=="--permission-mode=bypassPermissions")
+        || argv.windows(2).any(|pair|pair[0]=="--permission-mode" && pair[1]=="bypassPermissions")
+}
 fn sample()->ClockSample {ClockSample {monotonic_s:0.0,epoch_s:SystemTime::now().duration_since(UNIX_EPOCH).map(|d|d.as_secs_f64()).unwrap_or(0.0)}}
 fn safe_characters(text:&str)->bool {!text.chars().any(|c| c.is_control() && !matches!(c,'\n'|'\t'))}
 fn valid_text(text:&str)->bool {!text.trim().is_empty() && safe_characters(text)}
@@ -182,6 +189,10 @@ struct Executor {
     /// Entradas com linha na fila cuja entrega ficou incerta nesta vida do ator: o transcript ainda
     /// pode prová-las. Incerteza sem linha (tecla, seleção) não tem prova e só sai na reabertura.
     uncertain:Vec<String>,unprovable:bool,
+    /// Troca de modo sem prova do resultado: segura só a reabertura até uma leitura confirmar o modo.
+    mode_unproved:bool,
+    /// Ciclo de modos já sondado nesta vida (conversa): leituras e sondas seguintes o devolvem sem teclas.
+    modes_cache:Option<Value>,
     /// Dona da trava de escrita e quando ela foi vista pela primeira vez nesta vida do ator (o prazo de desistir).
     uncertain_since:Option<(String,tokio::time::Instant)>,
     /// Teclado emprestado ao Python (administração que digita no pane): id, prazo e o pedido que o abriu.
@@ -283,7 +294,7 @@ impl TerminalActor {
         let receipt=ReceiptIndex::new("claude",&target.binding.conversation);
         let (sender,receiver)=mpsc::channel(64); let closed=Arc::new(AtomicBool::new(false)); let anchor=options.anchor.clone();
         let local=Arc::new(crate::terminal_facts::LocalTerminalFacts::new(options.io.clone(),options.plugin.clone(),options.mode_facts.clone()));
-        let executor=Executor {target,queue:Arc::new(queue),local,options,events,revision,sequence,receipt,deliverable:false,last_error:None,uncertain:vec![],unprovable:false,uncertain_since:None,loan:None,stall:None,hold:None,hold_checked:false,focus_refused:false,parked:VecDeque::new(),away:None,clear_watch:None,clear_notice:None,footer_misses:None,reconciliation:None,confirm_until:None,confirm_seen:None};
+        let executor=Executor {target,queue:Arc::new(queue),local,options,events,revision,sequence,receipt,deliverable:false,last_error:None,uncertain:vec![],unprovable:false,mode_unproved:false,modes_cache:None,uncertain_since:None,loan:None,stall:None,hold:None,hold_checked:false,focus_refused:false,parked:VecDeque::new(),away:None,clear_watch:None,clear_notice:None,footer_misses:None,reconciliation:None,confirm_until:None,confirm_seen:None};
         let task=tokio::spawn(executor.run(receiver,closed.clone()));
         TerminalHandle {sender,closed,task:Arc::new(Mutex::new(Some(task))),stopped:Arc::new(Mutex::new(None)),anchor}
     }
@@ -765,21 +776,45 @@ impl Executor {
         let initial=permission_control::claude(&driver,PermissionAction::Read {probe:false}).await?;
         let current=initial["current"].as_str().ok_or_else(||error("erro_permissao_leitura"))?;
         memory.lock().map_err(|_|error("permission_store_poisoned"))?.observe_capture(&tracking,current,captured_revision).map_err(error)?;
+        let cached=self.modes_cache.clone().filter(|_|kind=="permission_modes");
+        let probe=kind=="permission_modes" && payload["probe"].as_bool().unwrap_or(false);
         let action=if kind=="set_permission_mode" {PermissionAction::Set {mode:payload["mode"].as_str().ok_or_else(||error("erro_permissao_invalida"))?.into()}}
-            else {PermissionAction::Read {probe:payload["probe"].as_bool().unwrap_or(false)}};
+            else {PermissionAction::Read {probe:probe && cached.is_none()}};
         self.action(Action::Prepare {id:id.into(),payload:original,entry_id:None}).await?;
         self.action(Action::BeginDispatch {id:id.into(),wire_id:format!("permission:{}:{id}",self.target.generation),staged:false}).await?;
         if !memory.lock().map_err(|_|error("permission_store_poisoned"))?.begin(&tracking) {return Err(error("permission_snapshot_absent"));}
-        let controlled=permission_control::claude(&driver,action).await;
-        let (mut value,disposition)=match controlled {
+        // Como o Python (`_bypass_no_ciclo`): sem a flag no processo o bypass não está no Shift+Tab; girar o
+        // modo às cegas só mudaria o que a pessoa tinha. Vai direto à reabertura.
+        // `dontAsk` não sai pelo Shift+Tab sem perder o modo: também reabre sem tecla.
+        let outside=matches!(&action,PermissionAction::Set {mode} if mode=="bypassPermissions") && (current=="dontAsk" || !bypass_in_cycle(self.target.metadata.agent_pid));
+        let controlled=if outside {
+            let mut value=initial.clone();
+            value["requires_reopen"]=json!(true);value["cycle_closed"]=json!(true);value["error_code"]=json!("permission_reopen_required");
+            value["ok"]=json!(false);value["mode"]=json!(current);value["requested"]=json!("bypassPermissions");
+            Ok(value)
+        } else {permission_control::claude(&driver,action).await};
+        let (mut value,mut disposition)=match controlled {
             Ok(value)=> {
                 let disposition=if value["uncertain"]==true || value["current"].is_null() {Disposition::Unknown}
                     else if value["requires_reopen"]==true {Disposition::Deferred}
-                    else if value["ok"]==true {Disposition::Accepted} else {Disposition::Rejected};
+                    // A sonda que não voltou responde a lista com `restaurado:false`, como o Python.
+                    else if value["ok"]==true || kind=="permission_modes" {Disposition::Accepted} else {Disposition::Rejected};
                 (value,disposition)
             },
             Err(failure)=>(json!({"ok":false,"current":null,"error_code":failure.code,"uncertain":true}),Disposition::Unknown),
         };
+        if let Some(modes)=cached {value["modes"]=modes;}
+        else if probe && value["uncertain"]==false && value["modes"].as_array().is_some_and(|modes|!modes.is_empty()) {self.modes_cache=Some(value["modes"].clone());}
+        // Como o Python: tecla sem efeito visível relê o rodapé e responde o modo que ficou, sem outra tecla.
+        if disposition==Disposition::Unknown && let Ok(read)=permission_control::claude(&driver,PermissionAction::Read {probe:false}).await
+            && let Some(mode)=read["current"].as_str() {
+            value["current"]=json!(mode);value["last_confirmed"]=json!(mode);value["uncertain"]=json!(false);
+            let requested=value["requested"].as_str().map(str::to_owned);
+            if let Some(requested)=&requested {value["mode"]=json!(mode);value["ok"]=json!(requested==mode);}
+            if value["restaurado"].is_boolean() {value["restaurado"]=json!(value["initial"]==mode);}
+            disposition=if requested.as_deref().is_none_or(|requested|requested==mode) {Disposition::Accepted} else {Disposition::Rejected};
+            if disposition==Disposition::Accepted {value["error_code"]=Value::Null;}
+        }
         {
             let mut memory=memory.lock().map_err(|_|error("permission_store_poisoned"))?;
             if disposition==Disposition::Unknown {
@@ -791,25 +826,27 @@ impl Executor {
         }
         let result=reply(id,disposition,value);
         self.action(Action::Finish {id:id.into(),status:status(disposition),result:serde_json::to_value(&result).unwrap()}).await?;
-        if disposition==Disposition::Unknown {
-            self.unprovable=true;self.enter_error(error("permission_result_unknown")).await?;
-        } else {
-            if self.last_error.as_deref()==Some("permission_result_unknown") {self.last_error=None;self.unprovable=false;}
-            self.publish().await?;
-        }
+        // Modo sem prova só segura o que depende dele (reabertura, classe dos recados); a entrega segue,
+        // e o pedido recebe o código.
+        self.mode_unproved=disposition==Disposition::Unknown;
+        self.publish().await?;
         Ok(result)
     }
 
     async fn execute(&mut self,id:&str,kind:&str,payload:Value,entry:Option<String>)->Result<RuntimeReply,RuntimeError> {
         if id.is_empty() || id.starts_with("call::") || id.starts_with("terminal-") {return Err(error("operation_id"));}
         if kind=="lifecycle_guard" {
-            if self.loaned() || self.held() || self.last_error.is_some() || !self.uncertain.is_empty() || self.unprovable {return Err(error("lifecycle_busy"));}
+            if self.loaned() || self.held() || self.last_error.is_some() || !self.uncertain.is_empty() || self.unprovable || self.mode_unproved {return Err(error("lifecycle_busy"));}
             let state=self.queue.snapshot().await.map_err(|_|error("queue_io"))?;
             if self.cleared(&state) || state.terminal_write_blocked(&self.target.binding.conversation) {return Err(error("lifecycle_uncertain"));}
             let services=self.services(id,id,"");
             services.permission_guard(&self.target.binding).await.map_err(|e|error(e.0))?;
             let facts=services.facts(&self.target.binding).await.map_err(|e|error(e.0))?;
-            if facts.binding!=self.target.binding || !facts.idle || facts.open_question {return Err(error("lifecycle_busy"));}
+            if facts.binding!=self.target.binding {return Err(error("lifecycle_busy"));}
+            // Os motivos do `_motivo_ocupada` do Python, com a frase que o app já conhece.
+            if facts.open_question {return Err(error("erro_sessao_esperando_resposta"));}
+            if !facts.idle {return Err(error("erro_sessao_trabalhando"));}
+            if state.rows.iter().any(|row|row["delivered"]==false) {return Err(error("erro_fila_pendente"));}
             return Ok(reply(id,Disposition::Accepted,json!({"idle":true,"conversation":self.target.binding.conversation})));
         }
         if matches!(kind,"permission_modes"|"set_permission_mode") {return self.permission(id,kind,payload).await;}
@@ -931,7 +968,12 @@ impl Executor {
                     Some(store)=>store.pending_all(&crate::terminal_facts::LocalTerminalFacts::binding(&self.target),std::time::Instant::now()).map_err(|failure|error(failure.0))?,None=>vec![],
                 }} else {vec![]};
                 let mut delivered=if let Some(expected)=expected.as_ref().filter(|expected|expected.target.request_key.starts_with("plugin:") && expected.semantic["source"]!="terminal") {
-                    if keyboard_ask {driver.plugin_ask_keys(expected,&serde_json::from_value::<Vec<QuestionAnswer>>(payload["answers"].clone()).unwrap()).await}
+                    if keyboard_ask {match serde_json::from_value::<Vec<QuestionAnswer>>(payload["answers"].clone()) {
+                        Ok(answers)=>driver.plugin_ask_keys(expected,&answers).await,
+                        // Corpo torto recusa com o código, nunca derruba o executor.
+                        Err(_)=>DeliveryResult {disposition:input::Disposition::Rejected,stage:input::DeliveryStage::Validate,cleanup:input::Cleanup::NotNeeded,
+                            native:false,message_id:None,code:"invalid_answer".into(),draft:None},
+                    }}
                     else {self.plugin_control(kind,&payload,expected,&publication,&services).await}
                 } else {match kind {
                         // Foco fora do prompt: adia sem escrever, como o `overlay`; a linha volta à fila e
@@ -951,7 +993,24 @@ impl Executor {
                             Some(text)=>driver.guarded_plan_feedback(expected.as_ref().unwrap(),payload["option"].as_u64().unwrap() as usize,text).await,
                             None=>driver.guarded_select(expected.as_ref().unwrap(),payload["option"].as_u64().unwrap() as usize,true).await,
                         },
-                        "answer_questions"=>driver.guarded_answer(expected.as_ref().unwrap(),&serde_json::from_value::<Vec<QuestionAnswer>>(payload["answers"].clone()).unwrap()).await,
+                        "answer_questions"=>match serde_json::from_value::<Vec<QuestionAnswer>>(payload["answers"].clone()) {
+                            Ok(answers)=>{
+                                let expected=expected.as_ref().unwrap();
+                                let keys=driver.guarded_answer(expected,&answers).await;
+                                // As teclas falharam com o mesmo picker na tela: a reserva do Python, as respostas como mensagem.
+                                let drive_failed=keys.disposition!=input::Disposition::Accepted && keys.stage!=input::DeliveryStage::Validate
+                                    && InteractionError::from_code(&keys.code).is_none();
+                                match if drive_failed {driver.guarded_answer_fallback(expected,&answers,&publication).await} else {None} {
+                                    Some(fallback)=>{
+                                        tracing::warn!(key=%self.target.key,session=%self.target.name,code=%keys.code,fallback=%fallback.code,"as teclas da resposta falharam; a resposta foi por texto");
+                                        fallback
+                                    }
+                                    None=>keys,
+                                }
+                            }
+                            Err(_)=>DeliveryResult {disposition:input::Disposition::Rejected,stage:input::DeliveryStage::Validate,cleanup:input::Cleanup::NotNeeded,
+                                native:false,message_id:None,code:"invalid_answer".into(),draft:None},
+                        },
                         "answer_chat"=>driver.guarded_answer_chat(expected.as_ref().unwrap(),&serde_json::from_value::<Vec<QuestionAnswer>>(payload["answers"].clone()).unwrap(),&publication).await,
                         "submit_selected"=>driver.guarded_submit_selected(expected.as_ref().unwrap()).await,
                         "interrupt"=>driver.interrupt(payload["clear"].as_bool().unwrap_or(false)).await,
@@ -968,10 +1027,7 @@ impl Executor {
                     })();
                     if let Err(failure)=notice {delivered.disposition=input::Disposition::Unknown;delivered.code=failure.0.into();}
                 }
-                let mut sent=delivery(id,delivered);
-                // A TUI já consumiu a mensagem enfileirada: nada a promover, e não é falha.
-                if matches!(kind,"steer"|"steer_queue") && sent.payload["code"]=="no_queued_input" {sent.payload["promoted"]=json!(false);}
-                sent
+                delivery(id,delivered)
             };
         // O Esc saiu e o picker não fechou a tempo: o texto do "conversar" vai para a fila, que só
         // digita com o composer à vista, em vez de se perder.

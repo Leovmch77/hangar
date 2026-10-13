@@ -325,7 +325,7 @@ async fn abort_now_frees_a_stuck_socket_before_any_reconnect_could_start() {
         }
         at.elapsed()
     });
-    let RawWebSocket { incoming:_incoming,outgoing,tasks } = connect_raw_ws(&url).await.unwrap();
+    let RawWebSocket { incoming:_incoming,outgoing,tasks,.. } = connect_raw_ws(&url).await.unwrap();
     let written = stuck_write(&outgoing,15 << 20).await;
     tokio::time::sleep(Duration::from_millis(300)).await;
     tasks.abort_now();
@@ -355,4 +355,37 @@ async fn raw_websocket_closed_during_the_write_is_not_ok() {
     let receipt = tokio::time::timeout(Duration::from_secs(5),written).await.expect("recibo sem desfecho");
     assert!(!matches!(receipt,Ok(Ok(()))));
     assert!(tokio::time::timeout(Duration::from_secs(5),raw.incoming.recv()).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn raw_websocket_receives_a_resume_larger_than_sixteen_megabytes() {
+    use futures_util::SinkExt;
+    // O `thread/resume` de uma conversa longa já passou de 16 MiB: o teto derrubava a conexão a cada assinatura.
+    let (listener,url) = raw_listener().await;
+    let big = format!("{{\"id\":1,\"result\":{{\"pad\":\"{}\"}}}}","a".repeat(18 * 1024 * 1024));
+    let size = big.len();
+    tokio::spawn(async move {
+        let (stream,_) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+        ws.send(tokio_tungstenite::tungstenite::Message::text(big)).await.unwrap();
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    });
+    let mut raw = connect_raw_ws(&url).await.unwrap();
+    let got = tokio::time::timeout(Duration::from_secs(10),raw.incoming.recv()).await.unwrap().expect("conexão caiu na mensagem grande");
+    assert_eq!(got.len(),size);
+}
+
+#[tokio::test]
+async fn raw_websocket_keeps_the_close_code_for_the_diary() {
+    use futures_util::SinkExt;
+    use tokio_tungstenite::tungstenite::protocol::{CloseFrame,frame::coding::CloseCode};
+    let (listener,url) = raw_listener().await;
+    tokio::spawn(async move {
+        let (stream,_) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+        let _ = ws.send(tokio_tungstenite::tungstenite::Message::Close(Some(CloseFrame { code:CloseCode::Error,reason:"".into() }))).await;
+    });
+    let mut raw = connect_raw_ws(&url).await.unwrap();
+    assert!(tokio::time::timeout(Duration::from_secs(5),raw.incoming.recv()).await.unwrap().is_none());
+    assert_eq!(*raw.close_code.lock().unwrap(),Some(1011));
 }

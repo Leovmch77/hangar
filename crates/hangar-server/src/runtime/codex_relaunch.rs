@@ -28,6 +28,8 @@ const INGRESS_WAIT:Duration = Duration::from_secs(10);
 const EXIT_WAIT:Duration = Duration::from_secs(5);
 /// Motor novo até assentar na conversa.
 const SETTLE_WAIT:Duration = Duration::from_secs(45);
+/// Releitura da configuração da conversa antes de ir para sem terminal.
+const SETTINGS_READ_WAIT:Duration = Duration::from_secs(5);
 const POLL:Duration = Duration::from_millis(200);
 /// Fases da transferência que já terminaram (`_TERMINAL`).
 const TRANSFER_DONE:[&str;3] = ["complete","rejected","rolled_back"];
@@ -73,11 +75,11 @@ async fn hold<'a>(gates:&'a IngressGates,name:&'a str) -> Result<Held<'a>,Runtim
 }
 
 /// Transferência de conversa sem fase final para este nome: pelo `transfer_id` do sidecar ou pelo índice
-/// por sessão. Registro ilegível conta como em curso (o lado seguro).
-// ponytail: sem o `_belongs` do Python; um registro aberto de outra vida do mesmo nome também recusa.
-fn transfer_open(home:&Path,name:&str,sidecar_transfer:Option<&str>) -> bool {
+/// por sessão. Pelo índice só vale o registro desta vida (`source_life` = `k:<chave>`, o `_belongs` do
+/// Python): o de outra vida de mesmo nome não segura a troca. Registro ilegível conta como em curso.
+fn transfer_open(home:&Path,name:&str,sidecar_transfer:Option<&str>,key:Option<&str>) -> bool {
     let base = home.join(".hangar").join("conversation-transfers");
-    let open = |id:&str| -> bool {
+    let open = |id:&str,marked:bool| -> bool {
         let id = id.to_ascii_lowercase();
         if id.len() != 36 || !id.bytes().all(|b|b.is_ascii_hexdigit() || b == b'-') { return true; }
         let raw = match std::fs::read(base.join(format!("{id}.json"))) {
@@ -85,13 +87,14 @@ fn transfer_open(home:&Path,name:&str,sidecar_transfer:Option<&str>) -> bool {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound=>return false,
             Err(_)=>return true,
         };
-        serde_json::from_slice::<Value>(&raw).map_or(true,|record|record["name"] == name && !TRANSFER_DONE.contains(&record["phase"].as_str().unwrap_or("")))
+        serde_json::from_slice::<Value>(&raw).map_or(true,|record|record["name"] == name && !TRANSFER_DONE.contains(&record["phase"].as_str().unwrap_or(""))
+            && (marked || key.is_none_or(|key|record["source_life"] == format!("k:{key}"))))
     };
-    if sidecar_transfer.is_some_and(open) { return true; }
+    if sidecar_transfer.is_some_and(|id|open(id,true)) { return true; }
     let digest = ring::digest::digest(&ring::digest::SHA256,name.as_bytes());
     let hex:String = digest.as_ref().iter().map(|b|format!("{b:02x}")).collect();
     match std::fs::read(base.join("indexes").join(format!("session-{hex}.json"))) {
-        Ok(raw)=>serde_json::from_slice::<Vec<String>>(&raw).map_or(true,|ids|ids.iter().any(|id|open(id))),
+        Ok(raw)=>serde_json::from_slice::<Vec<String>>(&raw).map_or(true,|ids|ids.iter().any(|id|open(id,false))),
         Err(error)=>error.kind() != std::io::ErrorKind::NotFound,
     }
 }
@@ -256,7 +259,8 @@ impl Watcher {
 
     async fn transfer_busy(&self,name:&str,meta:&Meta) -> bool {
         let (home,name,transfer) = (self.cfg.home.clone(),name.to_owned(),terminal::text(meta,"transfer_id").map(str::to_owned));
-        tokio::task::spawn_blocking(move||transfer_open(&home,&name,transfer.as_deref())).await.unwrap_or(true)
+        let key = terminal::text(meta,"key").map(str::to_owned);
+        tokio::task::spawn_blocking(move||transfer_open(&home,&name,transfer.as_deref(),key.as_deref())).await.unwrap_or(true)
     }
 
     async fn sidecar_update(&self,name:&str,expect:Vec<(&'static str,Value)>,patch:Value) -> Result<Option<Meta>,RuntimeError> {
@@ -280,6 +284,35 @@ impl Watcher {
         }
     }
 
+    /// Geração em que a fila da chave está agora, sem mexer nela.
+    async fn generation(&self,key:&str,name:&str) -> Result<u64,RuntimeError> {
+        let (state_path,lease_path) = terminal::queue_files(&self.cfg.queue_dir,key);
+        let (queue_dir,key,name) = (self.cfg.queue_dir.clone(),key.to_owned(),name.to_owned());
+        tokio::task::spawn_blocking(move || -> std::io::Result<u64> {
+            let _lease = terminal::lease_blocking(&lease_path)?;
+            Ok(Store::open(&state_path,&queue_dir,QueueState::new(&key,1,&name,Vec::new()))?.state().generation)
+        }).await.map_err(|_|job())?.map_err(terminal::io_failure)
+    }
+
+    /// Codex sem terminal parado (sem ator aqui, cano morto ou vivo): o Rust é o dono e o abre na hora,
+    /// subindo o processo se preciso, como o `ensure_running` do Python. `None`: não é sem terminal do
+    /// Rust, ou há transferência a recuperar (o Python atende como hoje).
+    pub async fn open_parked(&self,registry:&RuntimeRegistry,name:&str) -> Option<Result<(),RuntimeError>> {
+        use crate::session_write::{Owner,Provider as Route,WriteRoute,decide};
+        let meta = self.load(name).await?;
+        if !meta.get("headless").is_some_and(truthy) || decide(WriteRoute::CodexControl,Route::Codex,false) != Owner::Rust { return None; }
+        let key = terminal::text(&meta,"key")?.to_owned();
+        if registry.codex_headless(name).await.is_some() { return Some(Ok(())); }
+        if registry.has_entry(Some(&key),name).await || self.transfer_busy(name,&meta).await { return None; }
+        let generation = match self.generation(&key,name).await { Ok(generation)=>generation, Err(error)=>return Some(Err(error)) };
+        let mut target = headless_target(&self.cfg.queue_dir,name,&key,generation,&meta);
+        // Cano gravado e vivo é reaproveitado (`launch_if_needed`); sem ele, sobe um.
+        if let Some(cano) = meta.get("cano").cloned().and_then(|cano|serde_json::from_value::<super::process::Cano>(cano).ok()) {
+            target.binding = CanoBinding { pid:cano.pid,escuta:cano.escuta,token:cano.token,versao:cano.versao };
+        }
+        Some(registry.open_with_launch(target,codex_sidecar::dir(&self.cfg.home)).await.map(|_|()))
+    }
+
     /// Vida nova na fila (atual + 1), sem a vida do terminal anterior: o escritor único da geração.
     async fn advance(&self,key:&str,name:&str) -> Result<u64,RuntimeError> {
         let (state_path,lease_path) = terminal::queue_files(&self.cfg.queue_dir,key);
@@ -300,6 +333,7 @@ impl Watcher {
         let meta = self.load(name).await?;
         let headless = meta.get("headless").is_some_and(truthy);
         let adopted = registry.codex_terminals().await.iter().any(|t|t.name == name);
+        if headless && let Err(error) = self.open_parked(registry,name).await? { return Some(Err(error)); }
         if headless != to_terminal {
             // Já no modo pedido: responde aqui só pela sessão aberta aqui.
             let ours = if headless { registry.codex_headless(name).await.is_some() } else { adopted };
@@ -362,7 +396,16 @@ impl Watcher {
         let found = registry.writable(name).await.ok_or_else(gone)?;
         let EntryHandle::CodexTerminal { target,handle,cell } = found.handle else { return Err(gone()) };
         let meta = self.load(name).await.filter(|meta|terminal::text(meta,"key") == Some(target.key.as_str())).ok_or_else(gone)?;
-        let view = self.preconditions(registry,&handle,&meta,false).await?;
+        let mut view = self.preconditions(registry,&handle,&meta,false).await?;
+        // O `/model` digitado na TUI pode não ter avisado o motor: a configuração sai da conversa, como o
+        // `thread/resume` do Python. Sem resposta no prazo vale a vista.
+        let settings_read = handle.command(RuntimeCommand { operation_id:random_hex(16),kind:OperationKind::ReadSettings,payload:json!({"include_turns":false}) });
+        match tokio::time::timeout(SETTINGS_READ_WAIT,settings_read).await {
+            Ok(Ok(reply)) if reply.disposition == Disposition::Accepted => {
+                for field in ["model","effort","service_tier","mode"] { if !reply.payload[field].is_null() { view[field] = reply.payload[field].clone(); } }
+            }
+            _ => tracing::warn!(session=%name,"configuração da conversa não relida antes da troca; vale a do motor"),
+        }
         // Retenção dos turnos antes do seletor e até o ator sair: nenhum `turn/start` entre a leitura e o kill.
         let turns = match handle.hold_turns().await {
             Ok(hold)=>hold,
@@ -377,7 +420,8 @@ impl Watcher {
                     Ok(read)=>read["current"].as_str().map(str::to_owned),
                     Err(error)=>{
                         tracing::warn!(session=%name,code=%error.code,"seletor de permissões não leu o modo; troca recusada");
-                        None
+                        // O motivo real (painel aberto, rascunho na TUI, menu aberto), não "modo não suportado".
+                        return Err(refuse(&format!("Não consegui ler a permissão atual no terminal: {}. A sessão foi mantida.",error.message.trim_end_matches('.'))));
                     }
                 }
             }
@@ -387,6 +431,11 @@ impl Watcher {
         // sidecar, que não acompanha o `/permissions` digitado direto na TUI.
         let mut settings = with_settings(meta.clone(),&view,&target.key);
         settings.insert("permission_mode".into(),json!(permission));
+        // O Jev está no ambiente do processo vivo: o sidecar do terminal não o grava (`_jev_do_processo`).
+        if let Some(pid) = terminal::pid(&meta,"app_pid").map(i64::from) {
+            let read = tokio::task::spawn_blocking(move||SystemProcs::default().env_var(pid,"HANGAR_JEV")).await.map_err(|_|job())?;
+            if let Ok(value) = read { settings.insert("jev".into(),json!(value.is_some_and(|v|v == "on"))); }
+        }
         let back = cleared(settings.clone(),false);
         let headless = cleared(settings,true);
         self.launcher_ready(registry,&back).await?;
@@ -585,6 +634,7 @@ impl Watcher {
             let ours = registry.codex_terminals().await.iter().any(|t|t.name == name) || self.adopt_now(registry,name).await.is_some();
             return ours.then(||Err(RuntimeError::new("erro_recarregar_so_sem_terminal","reiniciar só vale para sessão Codex sem terminal")));
         }
+        if let Err(error) = self.open_parked(registry,name).await? { return Some(Err(error)); }
         let (_,_,handle) = registry.codex_headless(name).await?;
         let _closed = match hold(registry.ingress(),name).await { Ok(closed)=>closed, Err(error)=>return Some(Err(error)) };
         // Vale com a sessão trabalhando: é a saída de um turno que nunca fecha.
@@ -617,17 +667,22 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let base = home.path().join(".hangar").join("conversation-transfers");
         std::fs::create_dir_all(base.join("indexes")).unwrap();
-        assert!(!transfer_open(home.path(),"cx",None),"sem registro");
+        assert!(!transfer_open(home.path(),"cx",None,None),"sem registro");
         let id = "0000000a-0000-0000-0000-000000000001";
         std::fs::write(base.join(format!("{id}.json")),json!({"name":"cx","phase":"publishing"}).to_string()).unwrap();
-        assert!(transfer_open(home.path(),"cx",Some(id)),"pelo sidecar");
+        assert!(transfer_open(home.path(),"cx",Some(id),None),"pelo sidecar");
         let hex:String = ring::digest::digest(&ring::digest::SHA256,b"cx").as_ref().iter().map(|b|format!("{b:02x}")).collect();
         std::fs::write(base.join("indexes").join(format!("session-{hex}.json")),json!([id]).to_string()).unwrap();
-        assert!(transfer_open(home.path(),"cx",None),"pelo índice da sessão");
-        assert!(!transfer_open(home.path(),"other",None));
+        assert!(transfer_open(home.path(),"cx",None,None),"pelo índice da sessão");
+        // Registro aberto de outra vida do mesmo nome não segura esta; o desta vida, sim.
+        std::fs::write(base.join(format!("{id}.json")),json!({"name":"cx","phase":"publishing","source_life":"k:old"}).to_string()).unwrap();
+        assert!(!transfer_open(home.path(),"cx",None,Some("new")),"outra vida");
+        assert!(transfer_open(home.path(),"cx",None,Some("old")),"esta vida");
+        assert!(transfer_open(home.path(),"cx",Some(id),Some("new")),"marcado no sidecar vale sempre");
+        assert!(!transfer_open(home.path(),"other",None,None));
         std::fs::write(base.join(format!("{id}.json")),json!({"name":"cx","phase":"complete"}).to_string()).unwrap();
-        assert!(!transfer_open(home.path(),"cx",Some(id)),"fase final libera");
-        assert!(transfer_open(home.path(),"cx",Some("../x")),"id torto não sai da pasta e conta como em curso");
+        assert!(!transfer_open(home.path(),"cx",Some(id),None),"fase final libera");
+        assert!(transfer_open(home.path(),"cx",Some("../x"),None),"id torto não sai da pasta e conta como em curso");
     }
 
     #[test]

@@ -120,6 +120,8 @@ struct Session {
     agent_next: u64,
     /// O último `session.end` do plugin (`fim`): o estado seguinte não o apaga.
     ended: Option<Instant>,
+    /// Conversa que o plugin do mesmo processo passou a informar no `/pull` (`/clear`, `/resume`).
+    reported: Option<String>,
 }
 
 /// Ciclo de vida de um subagente, como o Claude Code o sinaliza ao plugin.
@@ -204,7 +206,7 @@ impl Store {
         if let Some(old) = memory.sessions.remove(&binding.key) { finish_session(old); }
         memory.sessions.insert(binding.key.clone(), Session { binding: binding.clone(), owner: None, waiter: None,
             heartbeat: None, publication: None, questions: BTreeMap::new(), closed: HashMap::new(), state: None, suggestion: String::new(), plan: None,
-            agents: HashMap::new(), agent_waits: HashMap::new(), agent_late: VecDeque::new(), agent_outbox: VecDeque::new(), agent_next: 0, ended: None });
+            agents: HashMap::new(), agent_waits: HashMap::new(), agent_late: VecDeque::new(), agent_outbox: VecDeque::new(), agent_next: 0, ended: None, reported: None });
         self.notify(&binding.key);
         Ok(())
     }
@@ -232,8 +234,17 @@ impl Store {
     }
 
     pub fn begin_pull(&self, binding: &InteractionBinding, pull: Pull, now: Instant) -> Result<Poll<'_>, ServiceError> {
-        if pull.session_id.as_deref() != Some(binding.conversation.as_str()) { return Err(ServiceError("plugin_conversation_mismatch")); }
         let mut memory = self.memory.lock().map_err(|_| unavailable())?;
+        if pull.session_id.as_deref() != Some(binding.conversation.as_str()) {
+            // O processo trocou de conversa (`/clear`, `/resume`): o plugin já fala com o id novo, e é por
+            // ele que o ciclo de vida sabe da troca, sem reler o registro nativo a cada tique.
+            if let Some(sid) = pull.session_id.filter(|sid| !sid.is_empty() && sid.len() <= 128 && sid.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_".contains(&b)))
+                && let Ok(s) = session(&mut memory, binding) && s.reported.as_deref() != Some(sid.as_str()) {
+                s.reported = Some(sid);
+                self.notify(&binding.key);
+            }
+            return Err(ServiceError("plugin_conversation_mismatch"));
+        }
         if memory.stopping { return Ok(Poll::ready(json!({"text":null}))); }
         memory.next_waiter += 1;
         let id = memory.next_waiter;
@@ -257,7 +268,7 @@ impl Store {
         s.heartbeat = Some(now);
         self.notify(&binding.key);
         Ok(Poll { guard: Some(PollGuard { store: self, binding: binding.clone(), request_id: None, id, handed: false }),
-            receiver: Some(receiver), ready: None, timeout: POLL })
+            receiver: Some(receiver), ready: None, timeout: POLL, pause: Duration::ZERO })
     }
 
     pub fn begin_ask(&self, binding: &InteractionBinding, ask: Ask, gate: PermissionGate, now: Instant) -> Result<Poll<'_>, ServiceError> {
@@ -277,8 +288,9 @@ impl Store {
         }
         let semantic = plugin_semantic(&json!({"questions":ask.questions.clone().unwrap_or_default(),"tool":ask.tool,"resumo":ask.summary}));
         let interrupted = s.questions.get(&ask.id).and_then(|q| q.interrupted);
-        if interrupted.is_some_and(|at| now.saturating_duration_since(at) <= HOOK_ALIVE) {
-            return Ok(Poll::ready(json!({"answers":null})));
+        if let Some(at) = interrupted.filter(|at| now.saturating_duration_since(*at) <= HOOK_ALIVE) {
+            // Como o Python, o poll seguinte espera a janela da interrupção em vez de voltar na hora.
+            return Ok(Poll::later(json!({"answers":null}), HOOK_ALIVE.saturating_sub(now.saturating_duration_since(at))));
         }
         if s.questions.get(&ask.id).is_some_and(|q| !question_visible(q.interrupted.is_some() || q.expired, q.waiter.is_some(), now.saturating_duration_since(q.seen))) {
             close_question(&self.interactions, binding, &ask.id)?;
@@ -307,7 +319,7 @@ impl Store {
         q.waiter = Some(Waiter { id: poll_id, sender: Some(sender) });
         let timeout = match ask.janela_ms { Some(ms) if ms != 0 => Duration::from_millis(ms.max(0) as u64).min(POLL), _ => POLL };
         Ok(Poll { guard: Some(PollGuard { store: self, binding: binding.clone(), request_id: Some(ask.id), id: poll_id, handed: false }),
-            receiver: Some(receiver), ready: None, timeout })
+            receiver: Some(receiver), ready: None, timeout, pause: Duration::ZERO })
     }
 
     pub fn pending_all(&self, binding: &InteractionBinding, now: Instant) -> Result<Vec<PluginQuestion>, ServiceError> {
@@ -471,6 +483,11 @@ impl Store {
         let s = session(&mut memory, binding)?;
         Ok(s.waiter.is_some() && s.owner.as_ref().is_some_and(|owner| s.ended.is_none_or(|ended| ended < owner.seen)))
     }
+    /// A conversa nova que o plugin informou depois de a do vínculo acabar, se houver.
+    pub fn reported_conversation(&self, binding: &InteractionBinding) -> Result<Option<String>, ServiceError> {
+        let mut memory = self.memory.lock().map_err(|_| unavailable())?;
+        Ok(session(&mut memory, binding)?.reported.clone())
+    }
     pub fn recent_state(&self, binding: &InteractionBinding, now: Instant) -> Result<Option<(String, Option<String>)>, ServiceError> {
         let mut memory = self.memory.lock().map_err(|_| unavailable())?;
         let s = session(&mut memory, binding)?;
@@ -625,11 +642,17 @@ pub struct Poll<'a> {
     receiver: Option<oneshot::Receiver<Value>>,
     ready: Option<Value>,
     timeout: Duration,
+    /// Espera antes da resposta pronta: o hook que repete o poll sem dormir não gira em laço.
+    pause: Duration,
 }
 impl Poll<'_> {
-    fn ready(value: Value) -> Self { Self { guard: None, receiver: None, ready: Some(value), timeout: Duration::ZERO } }
+    fn ready(value: Value) -> Self { Self { guard: None, receiver: None, ready: Some(value), timeout: Duration::ZERO, pause: Duration::ZERO } }
+    fn later(value: Value, pause: Duration) -> Self { Self { pause, ..Self::ready(value) } }
     pub async fn wait(mut self) -> Value {
-        if let Some(value) = self.ready.take() { return value; }
+        if let Some(value) = self.ready.take() {
+            if !self.pause.is_zero() { tokio::time::sleep(self.pause).await; }
+            return value;
+        }
         let empty = if self.guard.as_ref().is_some_and(|g| g.request_id.is_some()) { json!({"answers":null}) } else { json!({"text":null}) };
         let Some(receiver) = self.receiver.take() else { return empty; };
         match tokio::time::timeout(self.timeout, receiver).await {
@@ -711,6 +734,19 @@ mod tests {
         assert_eq!(new.wait().await, json!({"answers":null}));
         assert_eq!(store.pending(&binding, Instant::now()).unwrap().id, "perm:p");
         drop(other);
+    }
+
+    /// Parity P22 (`test_interrupcao_pelo_app_solta_a_pergunta_na_hora_e_acorda_o_long_poll`): depois da
+    /// interrupção, o poll seguinte do mesmo hook espera a janela em vez de voltar na hora (laço sem pausa).
+    #[tokio::test(start_paused = true)]
+    async fn interrupted_question_next_poll_waits_instead_of_spinning() {
+        let (store, binding) = setup();
+        let poll = store.begin_ask(&binding, ask("q"), gate(), Instant::now()).unwrap();
+        store.interrupt(&binding, "q").unwrap();
+        assert_eq!(poll.wait().await, json!({"answers":null}), "a interrupção acorda o long-poll na hora");
+        let started = tokio::time::Instant::now();
+        assert_eq!(store.begin_ask(&binding, ask("q"), gate(), Instant::now()).unwrap().wait().await, json!({"answers":null}));
+        assert!(started.elapsed() >= HOOK_ALIVE - Duration::from_millis(50), "{:?}", started.elapsed());
     }
 
     #[test]
@@ -993,8 +1029,11 @@ mod tests {
         let (store, binding) = setup();
         let first = store.begin_pull(&binding, pull("first"), Instant::now()).unwrap();
         assert_eq!(store.begin_pull(&binding, pull("second"), Instant::now()).err().unwrap().0, "plugin_instance_conflict");
+        assert_eq!(store.reported_conversation(&binding).unwrap(), None);
         let mut wrong = pull("first"); wrong.session_id = Some("other".into());
         assert_eq!(store.begin_pull(&binding, wrong, Instant::now()).err().unwrap().0, "plugin_conversation_mismatch");
+        // Parity item 3: a conversa nova que o plugin informa é o sinal da troca (`/clear`, `/resume`).
+        assert_eq!(store.reported_conversation(&binding).unwrap().as_deref(), Some("other"));
         let future = InteractionBinding { generation: 3, ..binding.clone() };
         store.interactions.bind(&future).unwrap();
         store.bind(&future).unwrap();

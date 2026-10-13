@@ -20,6 +20,45 @@ fn one_echo_confirms_only_one_identical_prompt() {
     assert!(restored.match_after(&path,&cursor,&row,&used).unwrap().is_none());
 }
 
+/// Linha real do Claude Code 2.1.296 (sem terminal, caminhos encurtados): três mensagens que chegaram durante o
+/// turno viraram UMA mensagem `user` com um bloco de texto por entrada (e as imagens no meio).
+pub(crate) fn merged_inputs_line(session:&str,timestamp:&str) -> serde_json::Value {
+    json!({"type":"user","uuid":"17729883-e589-4998-b1ee-45d3e73dcd56","timestamp":timestamp,"sessionId":session,
+        "promptSource":"sdk","message":{"role":"user","content":[
+            {"type":"text","text":"aqui precisava saber oque esta rodando, ou ja terminou — 📎 imagem: /up/1791899344-c98f30.png"},
+            {"type":"image","source":{"type":"base64","media_type":"image/png","data":""}},
+            {"type":"text","text":"precisa melhorar essa tela de ativiidades, talvez ate mudar esse nome, pq nao faz mujito sentido faz? "},
+            {"type":"text","text":"e ele ainda ocme um pouco ali da barra, daria pra conseguir mandar msg nesses subagnts? — 📎 imagem: /up/1791899408-46912e.png 📎 imagem: /up/1791899409-aa.png"},
+            {"type":"image","source":{"type":"base64","media_type":"image/png","data":""}},
+            {"type":"image","source":{"type":"base64","media_type":"image/png","data":""}}]}})
+}
+pub(crate) const MERGED_INPUTS:[&str;3] = [
+    "aqui precisava saber oque esta rodando, ou ja terminou — 📎 imagem: /up/1791899344-c98f30.png",
+    "precisa melhorar essa tela de ativiidades, talvez ate mudar esse nome, pq nao faz mujito sentido faz? ",
+    "e ele ainda ocme um pouco ali da barra, daria pra conseguir mandar msg nesses subagnts? — 📎 imagem: /up/1791899408-46912e.png 📎 imagem: /up/1791899409-aa.png",
+];
+
+#[test]
+fn merged_user_message_confirms_one_entry_per_text_block() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("chat.jsonl");
+    std::fs::write(&path, "").unwrap();
+    let mut index = ReceiptIndex::new("claude", "sid");
+    let cursor = index.capture(&path).unwrap();
+    std::fs::write(&path, format!("{}\n", merged_inputs_line("sid","2026-10-13T13:50:29.778Z"))).unwrap();
+    index.scan(&path).unwrap();
+    let mut used = BTreeMap::new();
+    for (n,text) in MERGED_INPUTS.into_iter().enumerate() {
+        let row = json!({"text":text});
+        let proof = index.match_after(&path,&cursor,&row,&used).unwrap();
+        let proof = proof.unwrap_or_else(||panic!("entrada {n} sem prova na mensagem juntada: {text}"));
+        assert!(proof.validates(&cursor,&row));
+        assert!(used.insert(proof.occurrence.id.clone(),json!({"operation_id":n})).is_none(),"um bloco provou duas entradas");
+    }
+    // Cada bloco vale uma vez: uma quarta entrada com o mesmo texto da primeira não acha prova.
+    assert!(index.match_after(&path,&cursor,&json!({"text":MERGED_INPUTS[0]}),&used).unwrap().is_none());
+}
+
 #[test]
 fn batched_peer_messages_confirm_one_entry_each() {
     let dir = tempfile::tempdir().unwrap();

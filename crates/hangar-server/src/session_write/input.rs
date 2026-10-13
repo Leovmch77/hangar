@@ -21,6 +21,7 @@ use crate::runtime::protocol::{Disposition, OperationKind, RuntimeCommand, Runti
 
 const MSG_UNKNOWN: &str = "resultado incerto; entrada conservada sem reenvio";
 const MSG_REJECTED: &str = "entrada recusada pelo runtime";
+const MSG_CLEAR_WAIT: &str = "Espere o /clear terminar e envie de novo.";
 pub(super) const MSG_STEER_UNKNOWN: &str = "resultado incerto; a operação foi conservada sem reenvio";
 pub(super) const MSG_STEER_REFUSED: &str = "operação recusada pelo runtime";
 pub(super) const MSG_CONTROL_DEFERRED: &str = "O controle não foi executado; confira a sessão.";
@@ -32,6 +33,8 @@ pub struct Params<'a> {
     pub text: &'a str,
     pub steer: bool,
     pub terminal: bool,
+    /// No Codex a barra também tem linha na fila (o ator anexa toda entrada), como no `_send_one_codex_locked`.
+    pub codex: bool,
     pub operation_id: &'a str,
 }
 
@@ -63,9 +66,15 @@ fn failed(code: String, msg: String) -> (Sent, Diary) {
 pub fn classify(p: &Params, sent: &Result<RuntimeReply, RuntimeError>) -> (Sent, Diary) {
     let reply = match sent {
         Ok(reply) => reply,
+        // Texto durante a trava do `/clear`: fora da fila (a troca de conversa a esvaziaria calada), o app o guarda.
+        Err(error) if error.code == "runtime_clear_barrier" => {
+            let refused = Sent::Refused { code: "erro_aguarde_clear", msg: MSG_CLEAR_WAIT.into(), params: json!({}) };
+            return (refused, Some(("runtime.send_failed", diary_code(&error.code))));
+        }
         Err(error) => return failed(error.code.clone(), error.to_string()),
     };
-    let (queued, entry) = (queued(p.text), p.steer && queued(p.text));
+    let queued = queued(p.text) || p.codex;
+    let entry = p.steer && queued;
     let unknown = reply.disposition == Disposition::Unknown;
     // Com terminal a entrega incerta é confirmada depois pelo transcript, uma vez, sem reenvio.
     let proved_later = unknown && queued && p.terminal;
@@ -88,9 +97,10 @@ pub fn classify(p: &Params, sent: &Result<RuntimeReply, RuntimeError>) -> (Sent,
     }
 }
 
-/// Só sem terminal: com ele o Claude não promove (só o Kimi), então não há `steer_queue`.
+/// Sem terminal, ou Codex com terminal (o turno é do app-server, como o `steer_queue` do Python): o Claude
+/// com terminal não promove (só o Kimi).
 pub fn wants_steer_queue(p: &Params, sent: &Sent) -> bool {
-    !p.terminal && p.steer && matches!(sent, Sent::Done { entry: true, delivered: false, .. })
+    (!p.terminal || p.codex) && p.steer && matches!(sent, Sent::Done { entry: true, delivered: false, .. })
 }
 
 pub fn was_steered(operation_id: &str, promoted: &Result<RuntimeReply, RuntimeError>) -> bool {
@@ -229,7 +239,7 @@ fn report(st: &AppState, name: &str, diary: Diary) {
 /// O miolo do `/input` depois da admissão: envia ao ator, orienta se pedido e responde como o Python.
 async fn send(st: &AppState, name: &str, target: &WriteTarget, text: &str, steer: bool) -> (StatusCode, Value) {
     let operation_id = random_hex(16);
-    let params = Params { text, steer, terminal: target.terminal, operation_id: &operation_id };
+    let params = Params { text, steer, terminal: target.terminal, codex: target.provider == "codex", operation_id: &operation_id };
     let sent = target.handle.command(RuntimeCommand { operation_id: operation_id.clone(), kind: OperationKind::Input,
         payload: json!({"text": text, "pre_transcript": false}) }).await;
     let (sent, diary) = classify(&params, &sent);

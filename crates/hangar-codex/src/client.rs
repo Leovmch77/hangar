@@ -210,6 +210,8 @@ pub struct RawWrite {
 pub struct RawWebSocket {
     pub incoming:mpsc::Receiver<String>,
     pub outgoing:mpsc::Sender<RawWrite>,
+    /// Código de fechamento do WebSocket quando a leitura acaba (1006 = caiu sem quadro de fechamento), para o diário.
+    pub close_code:Arc<Mutex<Option<u16>>>,
     /// Quem segura o transporte segura também as tarefas dele: soltar encerra as duas.
     pub tasks:RawTasks,
 }
@@ -241,7 +243,9 @@ impl Drop for RawTasks {
 pub async fn connect_raw_ws(url:&str) -> Result<RawWebSocket,ClientError> {
     use futures_util::{SinkExt,StreamExt};
     use tokio_tungstenite::tungstenite::{Message,protocol::WebSocketConfig,client::IntoClientRequest};
-    let config = WebSocketConfig::default().max_message_size(Some(MAX_LINE)).max_frame_size(Some(MAX_LINE));
+    // Sem teto, como o `max_size=None` do Python: o `thread/resume` devolve o histórico inteiro, e uma conversa
+    // longa passa de 16 MiB; o teto derrubava a conexão a cada assinatura.
+    let config = WebSocketConfig::default().max_message_size(None).max_frame_size(None);
     let request = url.into_client_request().map_err(|error|ClientError::Io(error.to_string()))?;
     // O transporte não tem TLS: wss:// sairia em texto puro para uma porta TLS.
     if request.uri().scheme_str() != Some("ws") { return Err(ClientError::Io("só ws:// é aceito (transporte sem TLS)".into())); }
@@ -253,16 +257,22 @@ pub async fn connect_raw_ws(url:&str) -> Result<RawWebSocket,ClientError> {
     let (socket,_) = tokio_tungstenite::client_async_with_config(request,stream,Some(config)).await.map_err(|error|ClientError::Io(error.to_string()))?;
     let (mut sink,mut stream) = socket.split();
     let (incoming_tx,incoming) = mpsc::channel::<String>(INCOMING_CAPACITY);
+    let close_code = Arc::new(Mutex::new(None));
+    let closed = close_code.clone();
     let mut reader = tokio::spawn(async move {
+        let mut code = 1006;
         while let Some(message) = stream.next().await {
             match message {
                 Ok(Message::Text(text)) => { if incoming_tx.send(text.to_string()).await.is_err() { break; } }
-                Ok(Message::Close(_)) => break,
+                Ok(Message::Close(frame)) => { code = frame.map_or(1005,|frame|u16::from(frame.code)); break; }
                 Ok(Message::Binary(data)) => tracing::warn!(bytes=data.len(),error="binary","mensagem do app-server do Codex descartada"),
                 Ok(_) => {},
                 Err(e) => { tracing::warn!(error=ws_error_kind(&e),"leitura do WebSocket do Codex falhou; conexão encerrada"); break; }
             }
         }
+        // Antes de soltar o canal: quem vê a leitura acabar já encontra o código.
+        *closed.lock().unwrap_or_else(|e|e.into_inner()) = Some(code);
+        drop(incoming_tx);
     });
     let reader_abort = reader.abort_handle();
     let (outgoing,mut writes) = mpsc::channel::<RawWrite>(OUTGOING_CAPACITY);
@@ -287,7 +297,7 @@ pub async fn connect_raw_ws(url:&str) -> Result<RawWebSocket,ClientError> {
         reader.abort();
         if !failed { let _ = sink.close().await; }
     });
-    Ok(RawWebSocket { incoming,outgoing,tasks:RawTasks { reader:reader_abort,writer:writer.abort_handle() } })
+    Ok(RawWebSocket { incoming,outgoing,close_code,tasks:RawTasks { reader:reader_abort,writer:writer.abort_handle() } })
 }
 
 #[derive(Default)]

@@ -832,10 +832,10 @@ impl ClaudeEngine {
             }
             "control_cancel_request" => {
                 let id:RequestId = serde_json::from_value(event["request_id"].clone()).map_err(|_|error("ID de cancelamento inválido"))?;
-                // Alguém decidiu antes da pessoa (hook PermissionRequest, ou a CLI desistiu): no terminal isso
-                // aparece como uma linha; aqui o cartão sumiria calado.
+                // O pedido acabou antes da resposta (hook, Parar, fim do turno, prazo da CLI): no terminal isso aparece
+                // como uma linha; aqui o cartão sumiria calado. Sem prova de quem decidiu, o texto não afirma.
                 let mut note = self.pending.iter().find(|(request_id,_)|request_id == &id)
-                    .map(|(_,request)|format!("⚙️ {} — decidido por hook, sem você",permission_text(request)));
+                    .map(|(_,request)|format!("⚙️ {} — encerrado antes da sua resposta",permission_text(request)));
                 self.pending.retain(|(request_id,_)|request_id != &id);
                 if let Some(question) = self.question.take_if(|q|serde_json::from_value::<RequestId>(q["request_id"].clone()).ok().as_ref() == Some(&id)) {
                     let first:String = question["questions"][0]["question"].as_str().unwrap_or("").chars().take(120).collect();
@@ -885,6 +885,7 @@ impl ClaudeEngine {
             // O turno acabou junto: o estado e a faixa (`isWorking`) acompanham.
             "conversation_reset" => { self.reset_conversation(effects); self.changed(effects,true); }
             "cano_saiu" => {
+                let working = self.in_progress || !self.pending.is_empty() || self.question.is_some();
                 self.alive = false; self.in_progress = false; self.initializing = false;
                 self.turn_start = None; self.label_deadline = None; self.init_warning = None; self.effort_deadline = None;
                 self.pending.clear(); self.question = None; self.clear_streams(effects);
@@ -893,15 +894,23 @@ impl ClaudeEngine {
                 for agent in self.subagents.values_mut().filter(|agent|agent["state"] == "running") { agent["state"] = json!("stopped"); }
                 // Pedidos dos apps em aberto respondem com código e a interface dos mods some.
                 if let Some(surface) = self.surface.as_mut() { let out = surface.on_exit(); Self::surface_out(effects,out); }
-                // Saída limpa (0, SIGTERM, SIGKILL) e conexão perdida sem código (`rc` nulo) não são queda; o resto
-                // leva o motivo: a 1ª linha da faixa é o stderr, não o código.
-                if let Some(rc) = event["rc"].as_i64().filter(|rc|![0,-15,-9].contains(rc)) {
-                    let reason:String = self.stderr_tail.join("\n").chars().take(280).collect();
-                    let detail = if reason.is_empty() { format!("rc={rc}") } else { format!("{reason}\nrc={rc}") };
-                    self.state.problema = Some("headless_processo_caiu".into());
-                    self.state.problema_detalhe = Some(detail.clone());
-                    self.problem_persisted = true;
-                    effects.push(Effect::PersistClaude { operation_id:None,patch:json!({"problema":["headless_processo_caiu",detail]}) });
+                // Só a saída limpa com a sessão parada (0 ou SIGTERM) não é queda. SIGKILL (OOM, kill -9) e qualquer
+                // saída no meio do turno cortaram trabalho: queda, com o motivo (a 1ª linha da faixa é o stderr).
+                match event["rc"].as_i64() {
+                    Some(rc) if rc == -9 || ![0,-15].contains(&rc) || working => {
+                        let reason:String = self.stderr_tail.join("\n").chars().take(280).collect();
+                        let detail = if reason.is_empty() { format!("rc={rc}") } else { format!("{reason}\nrc={rc}") };
+                        self.state.problema = Some("headless_processo_caiu".into());
+                        self.state.problema_detalhe = Some(detail.clone());
+                        self.problem_persisted = true;
+                        effects.push(Effect::PersistClaude { operation_id:None,patch:json!({"problema":["headless_processo_caiu",detail]}) });
+                    }
+                    Some(_) => {},
+                    // Sem código: a conexão com o processo caiu (ele pode seguir vivo). Visível, mas não é queda gravada.
+                    None => {
+                        self.state.problema = Some("runtime_falhou".into());
+                        self.state.problema_detalhe = Some("cano_closed: a conexão com o processo caiu sem código de saída".into());
+                    }
                 }
                 for (operation_id,wire) in &mut self.wires {
                     if !wire.final_result {

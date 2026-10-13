@@ -393,7 +393,8 @@ fn request_cancelled_by_the_cli_leaves_a_note() {
     let mut engine = engine(json!({"name":"session","session_id":"sid","initialized":true}));
     line(&mut engine,json!({"type":"control_request","request_id":7,"request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"ls"}}}),10.0);
     let effects = line(&mut engine,json!({"type":"control_cancel_request","request_id":7}),11.0);
-    assert_eq!(notes(&effects),vec!["⚙️ Permitir Bash? ls — decidido por hook, sem você".to_owned()]);
+    // O cancelamento vem também do Parar, do fim do turno e do prazo da CLI: sem prova de que foi um hook, o texto é neutro.
+    assert_eq!(notes(&effects),vec!["⚙️ Permitir Bash? ls — encerrado antes da sua resposta".to_owned()]);
     line(&mut engine,json!({"type":"control_request","request_id":8,"request":{"subtype":"can_use_tool","tool_name":"AskUserQuestion",
         "input":{"questions":[{"question":"Qual pasta?","options":[]}]}}}),12.0);
     let effects = line(&mut engine,json!({"type":"control_cancel_request","request_id":8}),13.0);
@@ -556,13 +557,34 @@ fn crash_stays_idle_with_the_reason_and_survives_into_the_next_life() {
 
 #[test]
 fn clean_exit_is_not_a_crash() {
-    for rc in [0,-15,-9] {
+    for rc in [0,-15] {
         let mut engine = engine(json!({"name":"session","session_id":"sid","initialized":true}));
         let effects = line(&mut engine,json!({"type":"cano_saiu","rc":rc}),12.0);
         let state = engine.view()["public_state"].clone();
         assert_eq!(state["state"],"idle","rc={rc}: {state}");
         assert!(state["problema"].is_null() && persisted_problem(&effects).is_none(),"rc={rc} não é queda: {state}");
     }
+}
+
+#[test]
+fn kill_or_exit_mid_turn_is_a_crash_and_lost_connection_is_visible() {
+    // SIGKILL (OOM, kill -9) e qualquer saída no meio do turno cortam o trabalho: é queda, com o problema.
+    for (rc,working) in [(-9,false),(0,true),(-15,true)] {
+        let mut engine = engine(json!({"name":"session","session_id":"sid","initialized":true}));
+        if working { line(&mut engine,json!({"type":"command_lifecycle","state":"started"}),11.0); }
+        let effects = line(&mut engine,json!({"type":"cano_saiu","rc":rc}),12.0);
+        let state = engine.view()["public_state"].clone();
+        assert_eq!((state["problema"].as_str(),state["problema_detalhe"].as_str()),(Some("headless_processo_caiu"),Some(format!("rc={rc}").as_str())),
+            "rc={rc} working={working}: {state}");
+        assert!(persisted_problem(&effects).is_some());
+    }
+    // Sem código de saída: a conexão com o processo caiu; a faixa diz isso, sem gravar queda no arquivo.
+    let mut engine = engine(json!({"name":"session","session_id":"sid","initialized":true}));
+    let effects = line(&mut engine,json!({"type":"cano_saiu","rc":null}),12.0);
+    let state = engine.view()["public_state"].clone();
+    assert_eq!(state["problema"],"runtime_falhou","{state}");
+    assert!(state["problema_detalhe"].as_str().unwrap_or("").starts_with("cano_closed"),"{state}");
+    assert!(persisted_problem(&effects).is_none());
 }
 
 #[test]

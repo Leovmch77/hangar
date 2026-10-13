@@ -287,6 +287,9 @@ fn sanitize(name: &str) -> String {
     name.chars().map(|c| if c.is_ascii_alphanumeric() || matches!(c,'_' | '-' | '.') { c } else { '-' }).collect()
 }
 
+/// A projeção da fila de `name`: o mesmo `.jsonl` que o `PromptQueue` do Python lê e grava pelo nome.
+pub(crate) fn projection_path(projection_dir: &Path, name: &str) -> PathBuf { projection_dir.join(format!("{}.jsonl", sanitize(name))) }
+
 impl Store {
     pub fn open(state_path: &Path, projection_dir: &Path, initial: State) -> io::Result<Self> {
         if let Some(parent) = state_path.parent() { std::fs::create_dir_all(parent)?; }
@@ -1176,6 +1179,17 @@ mod headless_delivery_tests {
         store.exec(1,"claim:x",clock(11.0),Action::Claim { min_ts:0.0,limit:Some(1),entry_id:None }).unwrap();
         store.exec(1,"stop-recover:x",clock(12.0),Action::Recover).unwrap();
         assert_eq!(row(&store,"a")["delivered"],false,"reivindicada e nunca despachada ficou como entregue");
+    }
+
+    #[test]
+    fn steered_entry_never_gives_up() {
+        // Decisão do usuário (paridade com o Python): orientação sem prova não vira "não chegou".
+        let dir=tempfile::tempdir().unwrap(); let mut store=store(&dir);
+        append(&mut store,"steer",10.0);
+        store.exec(1,"steered",clock(11.0),Action::SetDelivered { entry_id:"steer".into(),value:true,steered:true }).unwrap();
+        let outcome=store.exec(1,"give-up",clock(500.0),Action::GiveUpUnproved { now:500.0,grace:60.0 }).unwrap();
+        assert_eq!(outcome["given_up"],json!([]));
+        assert!(row(&store,"steer")["desistiu"].is_null());
     }
 
     #[test]

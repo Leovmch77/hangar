@@ -1638,6 +1638,31 @@ class SessionRegistry:
         _decorate_transfers(out)
         return out
 
+    def _decorate_replies(self, infos: list[SessionInfo]) -> None:
+        """Última resposta para a linha parada da lista. Usa o mesmo tail-read provider-aware do
+        /history e roda fora do event loop; working/awaiting continuam mostrando o sinal vivo."""
+        for info in infos:
+            info.last_reply = None
+            info.last_reply_at = None
+            if info.state != "idle" or not info.jsonl:
+                continue
+            provider = getattr(info, "provider", "claude")
+            marker = (info.jsonl, info.last_activity, provider)
+            cached = self._reply_cache.get(info.name)
+            if cached is None or cached[:3] != marker:
+                try:
+                    event = next((ev for ev in reversed(merged_history(
+                        info.name, info.jsonl, provider, limit=8
+                    )) if ev.kind == "assistant_msg" and ev.text), None)
+                except Exception:
+                    _log.warning("lista: falha lendo ultima resposta sessao=%s", info.name,
+                                 exc_info=True)
+                    continue
+                text = _texto_simples(event.text)[:160] if event and event.text else None
+                cached = (*marker, text, (event.ts or info.last_activity) if event else None)
+                self._reply_cache[info.name] = cached
+            info.last_reply, info.last_reply_at = cached[3], cached[4]
+
     async def _radar_de_limite(self, infos: list[SessionInfo], raspadas: set[str]) -> None:
         """Preenche limited/limit_reset das sessoes TRAVADAS que o fast-path de marcador nao raspou.
         Uma sessao esperando o limite voltar e `working` pelo hook e sem transcript avancando —
@@ -2078,33 +2103,10 @@ class SessionRegistry:
             )
         await self._radar_de_limite(infos, raspadas={i.name for i in pending})
         if state_only:
+            # Pi, omp e Kimi: o histórico deles ainda é do Python, então a última resposta vai nos fatos.
+            await asyncio.to_thread(self._decorate_replies, [i for i in infos if i.provider in ("pi", "omp", "kimi")])
             return infos
-        # Última resposta para a linha parada da lista. Usa o mesmo tail-read provider-aware do
-        # /history e roda fora do event loop; working/awaiting continuam mostrando o sinal vivo.
-        def _decorate_replies() -> None:
-            for info in infos:
-                info.last_reply = None
-                info.last_reply_at = None
-                if info.state != "idle" or not info.jsonl:
-                    continue
-                provider = getattr(info, "provider", "claude")
-                marker = (info.jsonl, info.last_activity, provider)
-                cached = self._reply_cache.get(info.name)
-                if cached is None or cached[:3] != marker:
-                    try:
-                        event = next((ev for ev in reversed(merged_history(
-                            info.name, info.jsonl, provider, limit=8
-                        )) if ev.kind == "assistant_msg" and ev.text), None)
-                    except Exception:
-                        _log.warning("lista: falha lendo ultima resposta sessao=%s", info.name,
-                                     exc_info=True)
-                        continue
-                    text = _texto_simples(event.text)[:160] if event and event.text else None
-                    cached = (*marker, text, (event.ts or info.last_activity) if event else None)
-                    self._reply_cache[info.name] = cached
-                info.last_reply, info.last_reply_at = cached[3], cached[4]
-
-        await asyncio.to_thread(_decorate_replies)
+        await asyncio.to_thread(self._decorate_replies, infos)
         # Estado de git por sessão — SÓ aqui (payload do /api/sessions), nunca em list(): git_summary
         # forka `git status` e list() é o caminho leve chamado por kill()/resume/SSE. E como
         # list_with_state é awaitado direto no event loop (/api/sessions, sse, stall_watch), o loop

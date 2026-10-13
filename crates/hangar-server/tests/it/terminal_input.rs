@@ -114,7 +114,7 @@ async fn terminal_input_socket_partial_never_falls_back() {
 #[tokio::test]
 async fn terminal_input_allowlists_explicit_steer() {
  let io=Arc::new(FakeIo::new(vec![screen("")]));let d=driver(io.clone(),Arc::new(Services::new()));
- assert_eq!(d.key("C-c",false).await.disposition,Disposition::Rejected);assert_eq!(d.key("C-c",true).await.disposition,Disposition::Accepted);assert_eq!(d.key("PageUp",false).await.disposition,Disposition::Accepted);let steer=d.steer().await;assert_eq!((steer.disposition,steer.code.as_str()),(Disposition::Accepted,"no_queued_input"),"sem fila na TUI não é falha");assert_eq!(io.writes().len(),2);
+ assert_eq!(d.key("C-c",false).await.disposition,Disposition::Rejected);assert_eq!(d.key("C-c",true).await.disposition,Disposition::Accepted);assert_eq!(d.key("PageUp",false).await.disposition,Disposition::Accepted);let steer=d.steer().await;assert_eq!((steer.disposition,steer.code.as_str()),(Disposition::Deferred,"no_queued_input"),"sem a marca não há prova de consumo");assert_eq!(io.writes().len(),2);
 }
 #[tokio::test]
 async fn terminal_input_select_closed_loop() {
@@ -171,9 +171,12 @@ fn terminal_input_review_ignores_free_text_and_arrows_in_the_history() {
  let text=QuestionAnswer {kind:AnswerKind::Text,question_id:None,indices:vec![],labels:vec![],multi:false,value:Some("sim, pode".into()),type_index:Some(2),chat_index:None};
  let a=vec![option_answer(0,"first"),text];
  assert!(review_matches("Review\n→ first\n→ sim, pode\n❯ 1. Submit answers",&a));
- assert!(review_matches("Review\n→ first\n→ uma resposta que quebra\n  em duas linhas\n❯ 1. Submit answers",&a));
  assert!(review_matches("● passo → feito\nReview\n→ first\n→ sim, pode\n❯ 1. Submit answers",&a));
  assert!(!review_matches("Review\n→ outra\n→ sim, pode\n❯ 1. Submit answers",&a));
+ // O texto livre é conferido pelo começo que a linha mostra: outro texto não passa.
+ assert!(!review_matches("Review\n→ first\n→ não\n❯ 1. Submit answers",&a));
+ let long=QuestionAnswer {kind:AnswerKind::Text,question_id:None,indices:vec![],labels:vec![],multi:false,value:Some("uma resposta que quebra em duas linhas".into()),type_index:Some(2),chat_index:None};
+ assert!(review_matches("Review\n→ first\n→ uma resposta que quebra\n  em duas linhas\n❯ 1. Submit answers",&[option_answer(0,"first"),long]));
 }
 #[tokio::test]
 async fn terminal_input_answer_reaches_a_picker_whose_footer_the_task_list_pushed_up() {
@@ -202,6 +205,11 @@ async fn terminal_input_composer_of_a_subagent_goes_back_to_main_before_typing()
  let r=driver(io.clone(),Arc::new(Services::new())).prompt("hello","id").await;
  assert_eq!((r.disposition,r.code.as_str()),(Disposition::Accepted,"submitted"));
  assert_eq!(io.writes().iter().map(|w|w.args.last().unwrap().clone()).collect::<Vec<_>>(),["Down","Down","\r","Escape","hello","\r"]);
+ // O foco já voltou ao composer depois do Enter no `main`: sem Esc, que ali interromperia o turno.
+ let io=Arc::new(FakeIo::new(vec![at("sub_composer"),at("sub_composer"),at("sub_pill"),at("sub_main_cursor"),at("main_composer2"),at("main_composer2"),screen("hello"),screen("")]));
+ let r=driver(io.clone(),Arc::new(Services::new())).prompt("hello","id").await;
+ assert_eq!((r.disposition,r.code.as_str()),(Disposition::Accepted,"submitted"));
+ assert_eq!(keys(&io),["Down","Down","\r","hello","\r"]);
 }
 #[tokio::test]
 async fn terminal_input_subagent_composer_with_a_draft_defers_without_typing() {
@@ -211,6 +219,34 @@ async fn terminal_input_subagent_composer_with_a_draft_defers_without_typing() {
  let r=driver(io.clone(),Arc::new(Services::new())).prompt("hello","id").await;
  assert_eq!((r.disposition,r.code.as_str()),(Disposition::Deferred,"composer_targets_subagent"));
  assert!(io.writes().is_empty());
+}
+#[tokio::test]
+async fn terminal_input_multiline_term_input_is_pasted_as_a_block_without_enter() {
+ // Decisão do dono: várias linhas no espelho vão coladas em bloco; nada roda até ele apertar Enter.
+ let io=Arc::new(FakeIo::new(vec![screen("")]));
+ let r=driver(io.clone(),Arc::new(Services::new())).controls().text("ls\necho fim").await;
+ assert_eq!((r.disposition,r.code.as_str()),(Disposition::Accepted,"text_written"));
+ let calls=io.calls.lock().unwrap();
+ assert_eq!(calls.iter().find(|c|c.args.contains(&"load-buffer".into())).unwrap().stdin,b"ls\necho fim");
+ assert!(calls.iter().any(|c|c.args.contains(&"paste-buffer".into()) && c.args.contains(&"-p".into())));
+ assert!(!calls.iter().any(|c|c.args.contains(&"send-keys".into())),"nenhuma tecla, nem Enter");
+}
+#[tokio::test]
+async fn terminal_input_plugin_question_by_keys_checks_every_step() {
+ use hangar_server::interactions::{ExpectedInteraction,InteractionBinding,InteractionKind,plugin_target};
+ let questions=serde_json::json!([{"question":"Cor?","header":"C","options":[{"label":"Azul"},{"label":"Verde"}]},{"question":"Pasta?","header":"P","options":[{"label":"A"},{"label":"B"}]}]);
+ let expected=ExpectedInteraction {binding:InteractionBinding {key:"k".into(),conversation:"uuid".into(),generation:1},target:plugin_target(InteractionKind::Question,"ask:x"),
+  interaction_id:"id".into(),semantic:serde_json::json!({"questions":questions}),source_revision:None};
+ let step=|q:&str,a:&str,b:&str|format!("{q}\n❯ 1. {a}\n  2. {b}\n  3. Type something.\nEnter to select · ↑/↓ to navigate · Esc to cancel");
+ // A etapa 2 que aparece é de outra pergunta: nenhuma tecla vai para ela.
+ let io=Arc::new(FakeIo::new(vec![step("Cor?","Azul","Verde"),step("Cor?","Azul","Verde"),step("Outra?","X","Y")]));
+ let answers=vec![option_answer(0,"Azul"),option_answer(0,"A")];
+ let r=driver(io.clone(),Arc::new(Services::new())).plugin_ask_keys(&expected,&answers).await;
+ assert_eq!(r.code,"erro_interacao_desatualizada");assert_eq!(keys(&io),["\r"]);
+ // Rótulo que não é o da opção do plugin: recusa antes da tecla.
+ let io=Arc::new(FakeIo::new(vec![step("Cor?","Azul","Verde")]));
+ let r=driver(io.clone(),Arc::new(Services::new())).plugin_ask_keys(&expected,&[option_answer(0,"Verde"),option_answer(0,"A")]).await;
+ assert_eq!((r.disposition,r.code.as_str()),(Disposition::Rejected,"erro_interacao_desatualizada"));assert!(keys(&io).is_empty());
 }
 #[tokio::test]
 async fn terminal_input_select_outcomes_follow_the_python() {
@@ -223,11 +259,11 @@ async fn terminal_input_select_outcomes_follow_the_python() {
  let io=Arc::new(FakeIo::new(vec![p(1),p(1),screen("")]));
  let r=driver(io.clone(),Arc::new(Services::new())).select(1,true).await;
  assert_eq!((r.disposition,r.code.as_str()),(Disposition::Accepted,"selected"));
- // Múltipla escolha cuja marca não mudou: aviso e ok, para um segundo toque não desmarcar.
+ // Múltipla escolha cuja marca não mudou depois das releituras: incerta com o código, nunca sucesso.
  let multi="Quais?\n❯ 1. [ ] A\n  2. [ ] B\nEsc to cancel · to navigate".to_string();
  let io=Arc::new(FakeIo::new(vec![multi]));
  let r=driver(io.clone(),Arc::new(Services::new())).select(1,true).await;
- assert_eq!((r.disposition,r.code.as_str()),(Disposition::Accepted,"selection_unchanged"));assert_eq!(keys(&io),["Space"]);
+ assert_eq!((r.disposition,r.code.as_str()),(Disposition::Unknown,"selection_unchanged"));assert_eq!(keys(&io),["Space"]);
 }
 #[tokio::test]
 async fn terminal_input_checkbox_in_the_history_is_not_a_multiple_choice() {
@@ -416,13 +452,13 @@ async fn terminal_input_clipboard_unavailable_preserves_literal_and_blocks_clipb
 }
 
 #[tokio::test]
-async fn terminal_input_windows_dash_placeholder_left_behind_is_visible_not_lost() {
- // Como o Python: o `x` provisório que o pane não apagou é corrupção visível; o texto sai mesmo assim.
+async fn terminal_input_windows_dash_placeholder_left_behind_fails_with_its_code() {
+ // O `x` provisório que o pane não apagou mudaria o texto: falha com o código, nunca entregue.
  let mut b=binding();b.windows=true;b.pane="=test:0.0".into();
  let s=Arc::new(Services::new());s.facts.lock().unwrap().binding=b.clone();
  let io=Arc::new(FakeIo::new(vec![screen("x-abc")]));
  let r=TerminalDriver::new(b,s,io.clone(),instant_limits()).text("-abc").await;
- assert_eq!((r.disposition,r.code.as_str()),(Disposition::Accepted,"text_written"));
+ assert_eq!((r.disposition,r.code.as_str()),(Disposition::Unknown,"placeholder_unremoved"));
  assert_eq!(keys(&io),["x-abc","Home","DC"]);
 }
 fn instant_limits() -> InputLimits { InputLimits { settle:Duration::ZERO,literal_settle:Duration::ZERO,multiline_settle:Duration::ZERO,slash_settle:Duration::ZERO,proof_attempts:2,ready_attempts:2,cleanup_attempts:3 } }
@@ -475,17 +511,18 @@ async fn terminal_input_clipboard_wait_rechecks_all_guards_without_erasing_new_d
 #[tokio::test]
 async fn terminal_input_answer_first_arrow_uncertain_never_defers_or_submits() {
  let io=Arc::new(FakeIo::new(vec![picker()]));*io.fail.lock().unwrap()=Some("Down".into());let r=driver(io.clone(),Arc::new(Services::new())).answer(&[option_answer(1,"second")]).await;
- assert_eq!(r.disposition,Disposition::Unknown);assert_eq!(io.writes().len(),1);assert_eq!(io.writes()[0].args.last().unwrap(),"Down");
+ // Só a seta pode ter saído, sem Enter: recusa com o código (nada respondido), como no `/select`.
+ assert_eq!(r.disposition,Disposition::Rejected);assert_eq!(io.writes().len(),1);assert_eq!(io.writes()[0].args.last().unwrap(),"Down");
 }
 #[tokio::test]
-async fn terminal_input_answer_arrow_accepted_then_capture_failed_is_unknown() {
+async fn terminal_input_answer_arrow_accepted_then_capture_failed_is_refused_without_enter() {
  struct CaptureFailure(FakeIo);
  impl TerminalIo for CaptureFailure {
   fn command<'a>(&'a self,r:CommandRequest)->IoFuture<'a,CommandOutput>{Box::pin(async move{let navigated=!self.0.writes().is_empty();if navigated && r.args.contains(&"capture-pane".into()){return Err(IoFailure {code:"capture_failed",may_have_written:false});}self.0.command(r).await})}
   fn socket<'a>(&'a self,d:&'a NativeMessage,e:Vec<u8>)->IoFuture<'a,WriteOutcome>{self.0.socket(d,e)}
  }
  let io=Arc::new(CaptureFailure(FakeIo::new(vec![picker()])));let d=TerminalDriver::new(binding(),Arc::new(Services::new()),io.clone(),instant_limits());let r=d.answer(&[option_answer(1,"second")]).await;
- assert_eq!(r.disposition,Disposition::Unknown);assert_eq!(io.0.writes().len(),1);assert_eq!(io.0.writes()[0].args.last().unwrap(),"Down");
+ assert_eq!(r.disposition,Disposition::Rejected);assert_eq!(io.0.writes().len(),1);assert_eq!(io.0.writes()[0].args.last().unwrap(),"Down");
 }
 
 #[test]

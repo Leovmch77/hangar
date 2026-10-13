@@ -45,7 +45,14 @@ pub struct PermissionMemory {
     operations: HashMap<String, usize>,
     uncertain: std::collections::HashSet<String>,
     revisions: HashMap<String, u64>,
+    /// Conversas vistas só em `plan`: a base fora do plano é um palpite, não uma leitura.
+    guessed_base: std::collections::HashSet<String>,
+    /// Ordem das bases confirmadas, da mais antiga: a memória guarda só as últimas `KEEP`.
+    order: std::collections::VecDeque<String>,
 }
+
+/// O teto do Python (`_ultimos_nao_plan`): cada conversa nova entra e nenhuma sai sem ele.
+const KEEP: usize = 200;
 
 pub type PermissionStore = std::sync::Arc<std::sync::Mutex<PermissionMemory>>;
 
@@ -83,6 +90,7 @@ impl PermissionMemory {
         if self.operations.contains_key(key) || self.uncertain.contains(key) {
             return self.confirmed[key].clone();
         }
+        if !self.confirmed.contains_key(key) && mode == "plan" { self.guessed_base.insert(key.to_owned()); }
         let view = self.confirmed.entry(key.to_owned()).or_insert_with(|| PermissionView {
             current: mode.to_owned(),
             previous_non_plan: "manual".into(),
@@ -90,9 +98,20 @@ impl PermissionMemory {
         view.current = mode.to_owned();
         if mode != "plan" {
             view.previous_non_plan = mode.to_owned();
+            self.guessed_base.remove(key);
         }
-        view.clone()
+        let view = view.clone();
+        self.order.retain(|old| old != key);
+        self.order.push_back(key.to_owned());
+        if self.order.len() > KEEP && let Some(oldest) = self.order.pop_front() {
+            // Em operação ou incerta, a entrada segue: o executor ainda vai concluí-la.
+            if self.operations.contains_key(&oldest) || self.uncertain.contains(&oldest) { self.order.push_back(oldest); }
+            else { self.confirmed.remove(&oldest); self.guessed_base.remove(&oldest); self.revisions.remove(&oldest); }
+        }
+        view
     }
+    /// A base fora do plano foi lida no rodapé (e não suposta na primeira leitura já em `plan`).
+    pub fn base_known(&self, key: &str) -> bool { !self.guessed_base.contains(key) }
 
     /// Sem leitura confirmada não há retrato para preservar: recusa antes de enviar teclas.
     pub fn begin(&mut self, key: &str) -> bool {
@@ -143,6 +162,19 @@ impl Watch {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Parity B6: a memória poda como o Python (200), sem perder a conversa em operação.
+    #[test]
+    fn memory_keeps_the_latest_conversations() {
+        let mut memory = PermissionMemory::default();
+        memory.observe("busy", "manual");
+        assert!(memory.begin("busy"));
+        for n in 0..KEEP + 5 { memory.observe(&format!("s{n}"), "auto"); }
+        assert!(memory.get("s0").is_none(), "a mais antiga saiu");
+        assert!(memory.get(&format!("s{}", KEEP + 4)).is_some());
+        assert!(memory.confirmed("busy").unwrap().is_some(), "em operação fica");
+        assert!(memory.confirmed.len() <= KEEP + 1);
+    }
 
     #[tokio::test]
     async fn capture_before_unknown_finish_cannot_reconfirm_and_fresh_capture_can() {

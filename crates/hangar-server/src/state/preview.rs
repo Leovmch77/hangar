@@ -214,6 +214,9 @@ pub struct Slot {
     columns: Option<u32>,
     anchor: Option<String>,
     marker: Option<(String, f64)>,
+    /// Último estado publicado: texto em voo com a sessão parada é a bolha fantasma, e vai ao log uma vez.
+    pub state: Option<String>,
+    ghost_logged: bool,
 }
 
 impl Slot {
@@ -306,6 +309,11 @@ pub async fn tick<S: Sources>(src: &S, slot: &mut Slot, frame: Option<&Frame>, e
         return true;
     }
     match slot.offer(text, md, full, src.committed()) {
+        Some(t) if !t.text.is_empty() && slot.state.as_deref().is_some_and(|s| s != "working") && !std::mem::replace(&mut slot.ghost_logged, true) => {
+            tracing::info!(session = src.name(), state = slot.state.as_deref().unwrap_or(""), md = t.md, full = t.full,
+                trecho = %t.text.chars().take(80).collect::<String>(), "prévia com texto em sessão parada");
+            src.publish_preview(PreviewEvent { session: src.name().to_owned(), text: t.text, md: t.md, full: t.full, vivo: false }).await
+        }
         Some(t) => src.publish_preview(PreviewEvent { session: src.name().to_owned(), text: t.text, md: t.md, full: t.full, vivo: false }).await,
         None => true,
     }

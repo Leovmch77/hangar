@@ -110,7 +110,9 @@ struct Snapshot { at: Instant, epoch: u64, produced: Produced,
 
 /// O que a classificação e a decoração de uma rodada usaram além das linhas.
 struct RoundInputs { agent_pids: Arc<HashMap<String, u32>>, targets: Arc<BTreeMap<String, String>>,
-    headless: Option<BTreeMap<String, Value>>, facts: Arc<ListFacts> }
+    headless: Option<BTreeMap<String, Value>>, facts: Arc<ListFacts>,
+    /// Problema do runtime por sessão: o do lançador (Python) sem terminal, o do ator do Rust com terminal.
+    problems: BTreeMap<String, String> }
 
 /// Uma produção inteira guardada: as linhas Claude como a descoberta e os fatos as deram, antes de
 /// classificar, e as entradas. A rodada parcial reclassifica uma delas sem descobrir de novo.
@@ -353,6 +355,8 @@ impl ListBridge {
             }
             if reading.facts.is_ok() { previous.insert(row.name.clone(), (reading.binding.clone(), state.clone())); }
             row.state = state.state;
+            // A travada é medida sobre "trabalhando"; a pergunta segurada pelo plugin a desfaz.
+            if row.state != "working" { row.stalled = false; }
             row.label = state.label;
             row.question = state.question.or_else(|| state.codex_question.as_ref()
                 .and_then(|question| question["questions"][0]["question"].as_str().map(str::to_owned)));
@@ -500,10 +504,8 @@ impl ListBridge {
                 if rows.is_empty() {
                     return None;
                 }
-                let mut problems = inp.facts.problems.clone();
-                for row in rows.iter().filter(|row| row.provider == "claude") { problems.remove(&row.name); }
                 let facts = Facts { hooks, alive: &alive, config_dirs: &config_dirs, headless: inp.headless.as_ref(),
-                    problems: &problems, stall_seconds: inp.facts.stall_seconds, monitors: &published };
+                    problems: &inp.problems, stall_seconds: inp.facts.stall_seconds, monitors: &published };
                 let effects = handle.block_on(classifier.classify_some(&mut rows, &facts, &io));
                 Some((rows, effects))
             });
@@ -515,6 +517,7 @@ impl ListBridge {
         let Some((mut changed, effects)) = done else { return Ok(Partial::Unchanged) };
         let plugins = self.plugin_facts(&changed).await;
         self.project_plugins(&mut changed, &plugins);
+        public_problems(&mut changed);
         list_facts::mark_stale(&mut changed, &snap.facts, snap.facts_ok);
         self.demote(effects);
         let mut rows = (*snap.rows).clone();
@@ -563,9 +566,11 @@ impl ListBridge {
                 }
             }
         }
+        let terminal = match self.plugin_runtime.get() { Some(registry) => registry.terminal_problems().await, None => BTreeMap::new() };
+        let problems = claude_problems(&rows, &fetched.facts.problems, &terminal);
         let (env, caches) = (self.env.clone(), self.caches.clone());
         let inputs = Arc::new(RoundInputs { targets: Arc::new(targets),
-            headless: runtime.map(|by_key| headless_by_name(&rows, by_key)), facts: fetched.facts.clone(), agent_pids });
+            headless: runtime.map(|by_key| headless_by_name(&rows, by_key)), facts: fetched.facts.clone(), agent_pids, problems });
         // Só o hub acorda por arquivo: sem lista do dono aberta, ninguém usaria a cópia.
         let keep = input.owner_clients > 0 && !input.shadow;
         let handle = tokio::runtime::Handle::current();
@@ -579,12 +584,10 @@ impl ListBridge {
             let alive = |pid: i64| pid_alive(&*env.procs, pid);
             let io = MuxCapture::new(env.capture_program.clone(), CAPTURE_TIMEOUT, inp.targets.clone());
             let pre: Vec<SessionRow> = if keep { rows.iter().filter(|r| r.provider == "claude").cloned().collect() } else { Vec::new() };
-            let mut problems = inp.facts.problems.clone();
-            for row in rows.iter().filter(|row| row.provider == "claude") { problems.remove(&row.name); }
             let effects = caches.classify.with(|Classify { classifier, hooks }| {
                 hooks.refresh(&config_dirs);
                 let facts = Facts { hooks, alive: &alive, config_dirs: &config_dirs,
-                    headless: inp.headless.as_ref(), problems: &problems, stall_seconds: inp.facts.stall_seconds,
+                    headless: inp.headless.as_ref(), problems: &inp.problems, stall_seconds: inp.facts.stall_seconds,
                     monitors: &published };
                 handle.block_on(classifier.classify(&mut rows, &facts, &io))
             });
@@ -596,6 +599,7 @@ impl ListBridge {
         if !input.shadow { self.demote(effects); }
         let mut rows = rows;
         self.project_plugins(&mut rows, &plugins);
+        public_problems(&mut rows);
         rows.extend(aside);
         list_facts::mark_stale(&mut rows, &fetched.facts, fetched.ok);
         if !input.shadow {
@@ -792,6 +796,34 @@ fn run_discovery(panes: &[Pane], procs: &dyn ProcessView, children: &ChildrenMap
 /// Retrato do runtime (por chave) no nome de cada linha Claude sem terminal e de cada linha Codex: a
 /// linha leva a chave na vida (`k:<chave>`). Linha sem chave fica fora, como sessão parada. Codex com
 /// terminal só entra quando o Rust tem o ator dela: quem publica é o dono, não a presença do pane.
+/// Falha ao identificar a pergunta de uma linha Claude (sidecar, plugin, vínculo do Rust): a tela recebe um
+/// código só, com frase; o código interno vai ao diário da lista.
+pub(crate) const INTERACTION_UNAVAILABLE: &str = "interacao_indisponivel";
+fn public_problems(rows: &mut [SessionRow]) {
+    for row in rows.iter_mut().filter(|row| row.provider == "claude") {
+        let Some(code) = row.problema.as_deref() else { continue };
+        let internal = code.starts_with("askq_") || code.starts_with("erro_interacao_") || (code.starts_with("plugin_") && code.ends_with("_invalid"))
+            || matches!(code, "runtime_binding" | "list_plugin_source_absent" | "terminal_target_missing" | "terminal_capture_target_changed" | "plugin_store_unavailable");
+        if internal {
+            list_facts::note("rust.list_interaction_unavailable", &row.name, code.to_owned(), "lista: pergunta da sessão sem identidade");
+            row.problema = Some(INTERACTION_UNAVAILABLE.into());
+        }
+    }
+}
+
+/// Problema do runtime das linhas Claude: sem terminal, o que o lançador (Python) registrou; com terminal,
+/// o do ator do Rust, nunca o eco dele que passou pelo Python. Os demais provedores seguem os fatos.
+fn claude_problems(rows: &[SessionRow], python: &BTreeMap<String, String>, terminal: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+    let mut problems = python.clone();
+    for row in rows.iter().filter(|row| row.provider == "claude" && !row.headless) {
+        match terminal.get(&row.name) {
+            Some(code) => { problems.insert(row.name.clone(), code.clone()); }
+            None => { problems.remove(&row.name); }
+        }
+    }
+    problems
+}
+
 fn headless_by_name(rows: &[SessionRow], by_key: BTreeMap<String, Value>) -> BTreeMap<String, Value> {
     let mut by_key = by_key;
     rows.iter().filter(|r| r.provider == "codex" || (r.headless && r.provider == "claude")).filter_map(|r| {
@@ -1071,7 +1103,9 @@ mod tests {
         seed().await;
         let rebuilt = bridge.produce_round(&ProduceFacts::default()).await.unwrap().0;
         assert_eq!(rebuilt.rows[0].interaction_id.as_deref(), Some("a"));
-        assert_eq!(rebuilt.rows[0].problema.as_deref(), Some("erro_interacao_indisponivel"));
+        // Parity M12: o código interno vai ao diário; a linha leva o código com frase nas três telas.
+        assert_eq!(rebuilt.rows[0].problema.as_deref(), Some(INTERACTION_UNAVAILABLE));
+        assert!(list_facts::notes_for(&rebuilt.rows[0].name).iter().any(|code| code == "erro_interacao_indisponivel"));
         *lock(&bridge.test_plugins) = Some(reading(InteractionBinding { generation: 2, ..binding }, Err("plugin_store_unavailable".into())));
         seed().await;
         let next = bridge.produce_round(&ProduceFacts::default()).await.unwrap().0;
@@ -1132,6 +1166,37 @@ mod tests {
         assert_eq!((row.state.as_str(), row.question.as_deref(), row.interaction_id.as_deref()),
             ("awaiting_input", Some("Bash: ls"), Some("shown-a")));
         assert_eq!(row.options.as_deref(), Some(&["Yes".to_owned(), "No".to_owned()][..]));
+    }
+
+    /// Parity M14: permissão segurada pelo plugin troca "trabalhando" por "aguardando" e desfaz a travada,
+    /// que só vale para "trabalhando" (sem isso sai o aviso e o push de travada).
+    #[test]
+    fn held_permission_is_awaiting_not_stalled() {
+        use crate::interactions::InteractionBinding;
+        use crate::state::facts::{PluginFacts, PluginReading};
+        let bridge = ListBridge::new(ListEnv { mux: Mux::default(), capture_program: "missing-test-mux".into(),
+            procs: Arc::new(procs::SystemProcs::default()), dirs: None }, FactsClient::new("127.0.0.1:9".parse().unwrap(), "s".into()));
+        let mut rows = vec![serde_json::from_value::<SessionRow>(json!({"name":"s","provider":"claude","state":"working","stalled":true})).unwrap()];
+        let local = PluginFacts { plugin_state: None, waiter_open: true, heartbeat_age_ms: Some(0), question: None,
+            questions: vec![json!({"id":"perm:a","interaction_id":"a","questions":[],"tool":"Bash","resumo":"cmd"})], suggestion: "".into() };
+        let binding = InteractionBinding { key: "k".into(), conversation: "sid".into(), generation: 1 };
+        bridge.project_plugins(&mut rows, &BTreeMap::from([("s".into(), Ok(PluginReading { binding, facts: Ok(local) }))]));
+        assert_eq!((rows[0].state.as_str(), rows[0].stalled), ("awaiting_input", false));
+    }
+
+    /// Parity A5: o problema do runtime das linhas Claude chega à classificação. Sem terminal, o do
+    /// lançador (Python); com terminal, o do ator do Rust, e nunca o eco velho do Python.
+    #[test]
+    fn claude_runtime_problems_reach_the_rows() {
+        let row = |name: &str, provider: &str, headless: bool| serde_json::from_value::<SessionRow>(json!({"name":name,"provider":provider,"headless":headless})).unwrap();
+        let rows = [row("hl", "claude", true), row("term", "claude", false), row("calm", "claude", false), row("pi", "pi", false)];
+        let python = BTreeMap::from([("hl".into(), "headless_sem_login".into()), ("calm".into(), "runtime_falhou".into()), ("pi".into(), "x".into())]);
+        let terminal = BTreeMap::from([("term".into(), "terminal_input_composer_busy".into())]);
+        let problems = claude_problems(&rows, &python, &terminal);
+        assert_eq!(problems.get("hl").map(String::as_str), Some("headless_sem_login"));
+        assert_eq!(problems.get("term").map(String::as_str), Some("terminal_input_composer_busy"));
+        assert_eq!(problems.get("calm"), None, "com terminal o Python não decide");
+        assert_eq!(problems.get("pi").map(String::as_str), Some("x"));
     }
 
     #[test]

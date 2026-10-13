@@ -94,6 +94,7 @@ pub fn limits_answer(sent: &Result<RuntimeReply, RuntimeError>) -> Answer {
 /// `/question/skip`: pergunta que não está mais lá (recusa do motor) é 409; falha de envio é 503.
 pub fn skip_answer(sent: &Result<RuntimeReply, RuntimeError>) -> Answer {
     let invalid = || (StatusCode::CONFLICT, detail_body("erro_codex_resposta_invalida", MSG_INVALID_ANSWER, json!({})));
+    let unsent = || (StatusCode::SERVICE_UNAVAILABLE, detail_body("erro_codex_resposta_envio", MSG_ANSWER_UNSENT, json!({})));
     // Identidade ausente, trocada ou ilegível sai com o código próprio, nunca como falha de envio.
     if let Some(failed) = super::control::interaction_result(sent) { return failed; }
     match sent {
@@ -101,9 +102,11 @@ pub fn skip_answer(sent: &Result<RuntimeReply, RuntimeError>) -> Answer {
         // Com terminal o cancelamento escrito não prova quem decidiu: resultado incerto, como em /answer e /select.
         Ok(reply) if reply.disposition == Disposition::Unknown && reply.payload["decision_confirmed"] == false =>
             (StatusCode::CONFLICT, detail_body("erro_sem_confirmacao_resposta", super::control::MSG_UNCONFIRMED_ANSWER, json!({}))),
+        // Gravar o "Pular" falhou: a pergunta continua, e o erro é do envio, como o 503 do Python.
+        Ok(reply) if reply.disposition == Disposition::Rejected && reply.payload["skip_not_saved"] == true => unsent(),
         Ok(reply) if reply.disposition == Disposition::Rejected => invalid(),
-        Err(error) if error.code == "codex_command" => invalid(),
-        _ => (StatusCode::SERVICE_UNAVAILABLE, detail_body("erro_codex_resposta_envio", MSG_ANSWER_UNSENT, json!({}))),
+        Err(error) if matches!(error.code.as_str(), "codex_command" | crate::runtime::codex::INVALID_ANSWER) => invalid(),
+        _ => unsent(),
     }
 }
 
@@ -185,12 +188,19 @@ fn literal(fields: &Map<String, Value>, key: &str, values: &[&str]) -> Option<St
 
 // ── rotas ───────────────────────────────────────────────────────────────────────────────────────
 
-/// Sessão Codex que a tabela entrega ao Rust nesta rota.
-async fn ours(st: &AppState, name: Option<&str>) -> bool {
-    match (st.state.runtime.get(), name) {
-        (Some(runtime), Some(name)) => runtime.writable(name).await.is_some_and(|t| codex_owned(&t.provider, t.terminal)),
-        _ => false,
+/// Sessão Codex que a tabela entrega ao Rust nesta rota. Sem ator aberto, o Codex do Rust é adotado (com
+/// terminal) ou aberto (sem terminal parado) agora: o Python recusaria o próprio cliente.
+async fn ours(st: &AppState, name: Option<&str>) -> Result<bool, RuntimeError> {
+    let (Some(runtime), Some(name)) = (st.state.runtime.get(), name) else { return Ok(false) };
+    if runtime.writable(name).await.is_none() {
+        match runtime.adopt_now(name).await {
+            None => return Ok(false),
+            // É do Rust e não abriu: a falha aparece com o código dela, nunca vira repasse.
+            Some(Err(error)) => return Err(error),
+            Some(Ok(())) => {}
+        }
     }
+    Ok(runtime.writable(name).await.is_some_and(|t| codex_owned(&t.provider, t.terminal)))
 }
 
 /// A saúde fica com a admissão; aqui só provedor e modo, pela mesma tabela que anuncia a posse.
@@ -200,11 +210,18 @@ fn codex_owned(provider: &str, terminal: bool) -> bool {
 
 /// Só a sessão Codex do Rust passa pela porta; o resto vai ao Python como chegou.
 async fn admit_codex(st: &Arc<AppState>, peer: SocketAddr, req: Request) -> Result<(Ctx, Bytes), Response> {
-    if !ours(st, session_name(req.uri().path()).as_deref()).await {
-        let (fwd, _) = gate(st, peer, &req);
-        return Err(pass(st, req, &fwd).await);
+    let (fwd, owner) = gate(st, peer, &req);
+    // Só o dono abre ou adota: o convidado segue ao Python, que o autentica.
+    if !owner { return Err(pass(st, req, &fwd).await); }
+    match ours(st, session_name(req.uri().path()).as_deref()).await {
+        Ok(true) => admit(st, peer, req, WriteRoute::CodexControl).await,
+        Ok(false) => Err(pass(st, req, &fwd).await),
+        Err(error) => {
+            let mut response = json_response(StatusCode::SERVICE_UNAVAILABLE, detail_body(&error.code, &error.message, json!({})));
+            cors(req.headers(), response.headers_mut());
+            Err(response)
+        }
     }
-    admit(st, peer, req, WriteRoute::CodexControl).await
 }
 
 async fn run(ctx: &Ctx, kind: OperationKind, payload: Value) -> Result<RuntimeReply, RuntimeError> {
@@ -266,7 +283,7 @@ pub async fn limits(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
     let (fwd, owner) = gate(&st, peer, &req);
     let name = session_name(req.uri().path());
     let (Some(runtime), Some(name), true) = (st.state.runtime.get(), name, owner) else { return pass(&st, req, &fwd).await };
-    if !ours(&st, Some(&name)).await { return pass(&st, req, &fwd).await; }
+    if !ours(&st, Some(&name)).await.unwrap_or(true) { return pass(&st, req, &fwd).await; }
     let sent = match enter_then_find(runtime, &name, Duration::ZERO).await {
         Ok(Some((_held, target))) if codex_owned(&target.provider, target.terminal) =>
             target.handle.command(RuntimeCommand { operation_id: random_hex(16), kind: OperationKind::ReadRateLimits, payload: json!({}) }).await,
@@ -321,6 +338,48 @@ pub async fn set_permission(State(st): State<Arc<AppState>>, ConnectInfo(peer): 
     let sent = run(&ctx, OperationKind::SetPermissionMode, json!({"mode": body["mode"]})).await;
     log_outcome(&ctx.name, "permission", &sent, "troca de permissão do Codex não aceita");
     answer(&ctx, permission_answer(&sent))
+}
+
+const MSG_PLAN_NOT_OPEN: &str = "O seletor de implementação não está aberto na sessão.";
+const MSG_PLAN_STILL_OPEN: &str = "O Codex não fechou o seletor de implementação.";
+/// Espera do seletor aparecer e de fechar depois do Enter, a mesma do Python.
+const PLAN_MENU_WAIT: Duration = Duration::from_secs(2);
+
+fn implement_menu(screen: &str) -> Option<bool> {
+    let menu = crate::terminal_state::analyze(screen).codex_menu?;
+    Some(menu.question.as_deref() == Some("Implement this plan?") && menu.options.first().is_some_and(|o| o.starts_with("Yes, implement this plan")))
+}
+
+/// `POST /codex/plan/implement`: o "Yes, implement this plan" do seletor da TUI, pela trava do pane desta
+/// vida (a mesma de `/keys`, `/term-input` e do seletor de permissões). Sem terminal não há seletor.
+pub async fn plan_implement(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
+    let (ctx, _) = admitted!(st, peer, req);
+    let not_open = || (StatusCode::CONFLICT, detail_body("erro_codex_controle", MSG_PLAN_NOT_OPEN, json!({})));
+    let EntryHandle::CodexTerminal { target, cell, .. } = &ctx.target.handle else { return answer(&ctx, not_open()) };
+    if ctx.st.term.is_active(&ctx.name) { return answer(&ctx, super::control::panel_open_refusal()); }
+    let driver = crate::runtime::codex_terminal::pane_driver(&target.terminal, cell.pane_serial(), Some(ctx.st.term.clone()));
+    let deadline = tokio::time::Instant::now() + PLAN_MENU_WAIT;
+    loop {
+        let screen = driver.capture().await.unwrap_or_default();
+        match implement_menu(&screen) {
+            Some(true) => break,
+            // Outro seletor aberto: não é o do plano.
+            Some(false) => return answer(&ctx, not_open()),
+            None if tokio::time::Instant::now() >= deadline => return answer(&ctx, not_open()),
+            None => tokio::time::sleep(Duration::from_millis(50)).await,
+        }
+    }
+    let selected = driver.select(1, true).await;
+    use crate::terminal_input::Disposition as Pane;
+    let result = match selected.disposition {
+        Pane::Accepted => (StatusCode::OK, json!({"ok": true})),
+        Pane::Unknown => (StatusCode::CONFLICT, detail_body("erro_codex_controle", MSG_PLAN_STILL_OPEN, json!({}))),
+        _ => (StatusCode::CONFLICT, detail_body("erro_opcao_nao_convergiu", "não consegui iniciar o plano pelo terminal", json!({"detalhe": selected.code}))),
+    };
+    if result.0 != StatusCode::OK && crate::warn_limit::allow(Some(&ctx.name), &format!("codex_plan:{}", selected.code)) {
+        tracing::warn!(session = %ctx.name, code = %selected.code, "seletor de implementação do plano não convergiu");
+    }
+    answer(&ctx, result)
 }
 
 const MSG_PERMISSION_BUSY: &str = "a sessão está trabalhando — espere ela terminar";

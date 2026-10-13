@@ -43,14 +43,17 @@ fn terminal_field(headers: &axum::http::HeaderMap, bytes: &[u8]) -> Option<bool>
     }
 }
 
-/// O `HTTPException` do `_trocar_modo`: recusa e falha de troca são 409 `erro_troca_modo`; processo que
-/// não saiu depois do kill, ou troca interrompida por pânico, é 500 com o código.
+/// O `HTTPException` do `_trocar_modo`: recusa e falha de troca são 409 `erro_troca_modo`, como no Python,
+/// inclusive terminal que não fechou ou processo que não saiu (o código de origem vai em `params.code`); só
+/// a troca interrompida por pânico, sem fase conhecida, é 500 com o código.
 pub fn mode_refusal(error: &RuntimeError) -> (StatusCode, Value) {
     if error.code == "session_transfer_busy" { return (StatusCode::CONFLICT, busy_body()); }
-    if uncertain(error) {
+    if error.code == PANICKED {
         return (StatusCode::INTERNAL_SERVER_ERROR, super::detail_body(&error.code, &error.message, json!({})));
     }
-    (StatusCode::CONFLICT, super::detail_body("erro_troca_modo", &format!("não troquei de modo: {}", error.message), json!({"erro": error.message})))
+    let mut params = json!({"erro": error.message});
+    if crate::runtime::codex_relaunch::kill_phase(error) { params["code"] = json!(error.code); }
+    (StatusCode::CONFLICT, super::detail_body("erro_troca_modo", &format!("não troquei de modo: {}", error.message), params))
 }
 
 /// O `_reload_session` do Codex: com terminal é 409; fase incerta é 500 com o código; o reinício que
@@ -120,8 +123,11 @@ mod tests {
         assert_eq!(body["detail"]["code"], "erro_troca_modo");
         assert!(body["detail"]["msg"].as_str().unwrap().starts_with("não troquei de modo: Esta política"));
         assert_eq!(mode_refusal(&RuntimeError::new("session_transfer_busy", "x")).1["detail"]["code"], "session_transfer_busy");
-        let (status, body) = mode_refusal(&RuntimeError::new("relaunch_process_alive", "O terminal ainda está encerrando; não abri outro processo."));
-        assert_eq!((status, body["detail"]["code"].as_str()), (StatusCode::INTERNAL_SERVER_ERROR, Some("relaunch_process_alive")));
+        // Terminal que não fechou ou processo que não saiu: 409 `erro_troca_modo` do Python, com o código de origem.
+        for code in ["relaunch_process_alive", "relaunch_kill_survived", "relaunch_kill_mux"] {
+            let (status, body) = mode_refusal(&RuntimeError::new(code, "O terminal ainda está encerrando; não abri outro processo."));
+            assert_eq!((status, body["detail"]["code"].as_str(), body["detail"]["params"]["code"].as_str()), (StatusCode::CONFLICT, Some("erro_troca_modo"), Some(code)));
+        }
     }
 
     #[test]

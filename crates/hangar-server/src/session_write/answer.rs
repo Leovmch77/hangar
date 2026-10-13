@@ -24,6 +24,7 @@ type Answer = (StatusCode, Value);
 const MSG_CHAT_UNCONFIRMED: &str = "a pergunta foi fechada, mas a resposta por texto não foi confirmada — confira na sessão antes de responder de novo";
 const MSG_HEADLESS_INVALID: &str = "A pergunta mudou ou não aceita essas respostas. Confira as opções e tente novamente.";
 const MSG_HEADLESS_SEND: &str = "Não foi possível enviar a resposta.";
+const MSG_FALLBACK_NOT_DELIVERED: &str = "não consegui responder por aqui — a pergunta segue aberta, responda no terminal";
 /// Sem terminal não há texto digitado: a resposta vai pelo canal da CLI, que não confirmou.
 const MSG_HEADLESS_UNCONFIRMED: &str = "A CLI não confirmou a resposta; confira a conversa antes de responder de novo.";
 const MSG_CODEX_SEND: &str = "Não foi possível confirmar o envio da resposta ao Codex.";
@@ -232,12 +233,36 @@ pub fn chat_text(answers: &[Value], questions: &[String]) -> String {
     lines.join("\n")
 }
 
+/// Porta de `_askq_fallback_text`: as respostas viram "pergunta → resposta" quando as teclas falham.
+/// "Conversar" não vira linha (o Esc da reserva já leva ao chat). Sem nada a mandar devolve vazio.
+pub fn fallback_text(answers: &[Value], questions: &[String]) -> String {
+    let lines: Vec<String> = answers.iter().enumerate().filter_map(|(i, a)| {
+        let response = match a["kind"].as_str() {
+            Some("option") => a["labels"].as_array().map(|l| l.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", ")).unwrap_or_default(),
+            Some("text") => a["value"].as_str().unwrap_or_default().to_owned(),
+            _ => return None,
+        };
+        if response.is_empty() { return None; }
+        Some(match questions.get(i).filter(|q| !q.is_empty()) { Some(q) => format!("- {q} → {response}"), None => format!("- {response}") })
+    }).collect();
+    if lines.is_empty() { return String::new(); }
+    format!("Respondendo as perguntas (o seletor de opções falhou, vai por texto):\n{}", lines.join("\n"))
+}
+
 pub fn control_answer(sent: &Result<RuntimeReply, RuntimeError>) -> Answer {
     if let Some(failed) = interaction_result(sent) { return failed; }
     let reply = match sent {
         Ok(reply) => reply,
         Err(error) => return runtime_failed(error),
     };
+    // Reserva por texto (as teclas falharam): só a mensagem entregue diz que respondeu.
+    match reply.payload["code"].as_str() {
+        Some("answer_fallback_sent") if reply.disposition == Disposition::Accepted => return (StatusCode::OK, json!({"ok": true, "fallback": true})),
+        Some("answer_fallback_not_delivered") => return (StatusCode::CONFLICT, detail_body("erro_resposta_nao_entregue", MSG_FALLBACK_NOT_DELIVERED, json!({}))),
+        Some("answer_fallback_unproved") => return (StatusCode::CONFLICT, detail_body("erro_drive_fallback_falhou",
+            "não deu pra confirmar a resposta por texto depois das teclas", json!({"erro": "answer_fallback_unproved"}))),
+        _ => {}
+    }
     match reply.disposition {
         Disposition::Accepted => success(),
         Disposition::Deferred => refused(MSG_CONTROL_DEFERRED),
@@ -271,6 +296,8 @@ pub fn headless_answer(codex: bool, sent: &Result<RuntimeReply, RuntimeError>) -
         if codex { MSG_CODEX_SEND } else { MSG_HEADLESS_SEND }, json!({})));
     match sent {
         Err(error) if error.code == ACTOR_REFUSAL && !codex => invalid(),
+        // Resposta que não serve à pergunta é erro de quem respondeu, não do envio (o `ValueError` do Python).
+        Err(error) if codex && error.code == crate::runtime::codex::INVALID_ANSWER => invalid(),
         Err(_) => unsent(),
         Ok(reply) => match reply.disposition {
             Disposition::Accepted => success(),

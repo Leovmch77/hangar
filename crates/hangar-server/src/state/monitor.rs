@@ -24,6 +24,10 @@ pub const POLL: Duration = Duration::from_millis(750);
 /// Rodadas sem spinner depois das quais o marcador `working` deixa de valer (`HOOK_WORKING_GRACE`).
 pub const HOOK_GRACE: u32 = 8;
 pub const OBSERVATION_FAILED: &str = "terminal_observacao_falhou";
+/// Falhas da observação que são a troca de conversa em curso (`/clear`, reabertura): o vínculo muda e a
+/// entrada fecha e reabre. Como o Python, essas rodadas são puladas; a que dura além disto aparece.
+const SWITCHING: [&str; 2] = ["state_binding_changed", "runtime_binding"];
+const SWITCH_GRACE: u8 = 8;
 pub const PERMISSION_FAILED: &str = "permission_observe_failed";
 
 /// Quadro capturado e a análise que o pool já fez dele.
@@ -162,6 +166,20 @@ struct Memory {
     held_form: Option<Value>,
     native_form: Option<Value>,
     binding: Option<crate::interactions::InteractionBinding>,
+    /// Rodadas seguidas puladas pela troca de conversa.
+    switch_misses: u8,
+    /// Última linha de status sem métrica de contexto já registrada.
+    ctx_warned: Option<String>,
+}
+
+static CTX_PAIR: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new(r"([\d.,]+)\s*[kKmM]?\s*/\s*([\d.,]+)\s*[kKmM]?").unwrap());
+static CTX_LABELED: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new(r"\bctx\s*[\d.,]+\s*[kKmM]?\s*/\s*[\d.,]+\s*[kKmM]?").unwrap());
+
+/// `sse.context_pairs`: pares numéricos no segmento 💬 (2 ou mais: há métrica); "ctx x/y" conta como 2.
+fn context_pairs(line: &str) -> usize {
+    let Some(segment) = line.split_once('💬').map(|(_, rest)| rest.split('│').next().unwrap_or("")) else { return 0 };
+    let n = CTX_PAIR.find_iter(segment).count();
+    if CTX_LABELED.is_match(segment) { n.max(2) } else { n }
 }
 
 pub struct Monitor<S> { src: S, poll: Duration, mem: Memory, epoch: u64, edges: Edges }
@@ -301,7 +319,14 @@ impl<S: Sources> Monitor<S> {
         let key = key_of(&event);
         if self.mem.key.as_ref() == Some(&key) { return None; }
         self.mem.key = Some(key);
-        if event.problema.is_none() && self.edges.deliverable(&event) {
+        self.mem.preview.state = Some(event.state.clone());
+        // Diagnóstico do "medição indisponível" (`sse.py`): a linha de status crua, uma vez por linha distinta.
+        if let Some(line) = event.status_line.as_deref().filter(|line| context_pairs(line) < 2 && self.mem.ctx_warned.as_deref() != Some(*line)) {
+            tracing::info!(session = self.src.name(), statusline = line, "estado: sem métrica de contexto");
+            self.mem.ctx_warned = Some(line.to_owned());
+        }
+        // Como o Python, a borda vale com problema na linha; só o estado que não foi observado não decide.
+        if event.problema.as_deref() != Some(OBSERVATION_FAILED) && self.edges.deliverable(&event) {
             self.src.deliverable();
         }
         self.mem.last = Some(event.clone());
@@ -384,8 +409,20 @@ impl<S: Sources> Monitor<S> {
             }
         }
         match captured {
-            Err(f) => self.fail(OBSERVATION_FAILED, f.code, &facts).await,
-            Ok(frame) => self.reduce(frame, facts, epoch).await,
+            Err(f) if SWITCHING.contains(&f.code.as_str()) && self.mem.switch_misses < SWITCH_GRACE => {
+                self.mem.switch_misses += 1;
+                Step::Sleep
+            }
+            Err(f) => {
+                let step = self.fail(OBSERVATION_FAILED, f.code, &facts).await;
+                // O arquivo do hook não depende da captura: a prévia segue andando com a observação caída.
+                if !preview::tick(&self.src, &mut self.mem.preview, None, epoch).await { return Step::Exit(Exit::Closed); }
+                step
+            }
+            Ok(frame) => {
+                self.mem.switch_misses = 0;
+                self.reduce(frame, facts, epoch).await
+            }
         }
     }
 
@@ -548,6 +585,8 @@ mod tests {
         permissions: Mutex<Option<permission::PermissionStore>>,
         captured_permission: Mutex<Option<permission::MemoryRevision>>,
         finish_mode: Mutex<Option<String>>,
+        hook: Mutex<Vec<HookFile>>,
+        previews: Mutex<Vec<String>>,
     }
 
     impl Fake {
@@ -555,7 +594,8 @@ mod tests {
             Arc::new(Self { frames, round: AtomicU32::new(0), has_session: AtomicU32::new(0), facts: Mutex::default(),
                 wake: Arc::default(), epoch: AtomicU64::new(0), events: Mutex::default(), others: Mutex::default(),
                 runtime: Mutex::default(), runtime_wake: Arc::default(), ask: Mutex::default(), ask_reads: AtomicU32::new(0),
-                deliveries: Mutex::default(), files_failed: Mutex::default(), permissions: Mutex::default(), captured_permission: Mutex::default(), finish_mode: Mutex::default() })
+                deliveries: Mutex::default(), files_failed: Mutex::default(), permissions: Mutex::default(), captured_permission: Mutex::default(), finish_mode: Mutex::default(),
+                hook: Mutex::default(), previews: Mutex::default() })
         }
         fn rounds(&self) -> u32 { self.round.load(Ordering::SeqCst) }
         fn states(&self) -> Vec<String> { self.events.lock().unwrap().iter().map(|(_, e)| e.state.clone()).collect() }
@@ -619,9 +659,9 @@ mod tests {
         fn deliverable(&self) { self.deliveries.lock().unwrap().push(self.rounds()); }
         fn hub_wake(&self) -> Arc<Notify> { Arc::default() }
         async fn preview_capture(&self) -> Option<Result<Frame, CaptureFailed>> { None }
-        async fn preview_files(&self, _: &str) -> Vec<HookFile> { Vec::new() }
+        async fn preview_files(&self, _: &str) -> Vec<HookFile> { self.hook.lock().unwrap().clone() }
         fn committed(&self) -> Option<Arc<str>> { None }
-        async fn publish_preview(&self, _: PreviewEvent) -> bool { true }
+        async fn publish_preview(&self, event: PreviewEvent) -> bool { self.previews.lock().unwrap().push(event.text); true }
         fn wall(&self) -> f64 { wall_now() }
     }
 
@@ -730,6 +770,22 @@ mod tests {
         let problems: Vec<_> = fake.events.lock().unwrap().iter().map(|(_, e)| e.problema.clone()).collect();
         assert_eq!(problems, [None, Some(OBSERVATION_FAILED.into()), None, Some(OBSERVATION_FAILED.into())],
             "um evento por código; a volta publica de novo");
+        task.abort();
+    }
+
+    /// Parity B7: as rodadas da troca de conversa (`/clear`: vínculo trocando, entrada fechada e reaberta)
+    /// não publicam problema; só a falha que dura além da troca aparece.
+    #[tokio::test(start_paused = true)]
+    async fn conversation_switch_rounds_do_not_flicker_a_problem() {
+        let switching = |code: &str| Err(CaptureFailed { code: code.into(), attempt: None });
+        let mut frames = vec![Ok(SPINNER), switching("state_binding_changed"), switching("runtime_binding"), Ok(SPINNER)];
+        frames.extend(std::iter::repeat_n(switching("state_binding_changed"), SWITCH_GRACE as usize + 1));
+        let fake = Fake::new(frames);
+        let task = tokio::spawn(Monitor::new(fake.clone()).run());
+        tokio::time::sleep(POLL * (SWITCH_GRACE as u32 + 6)).await;
+        let problems: Vec<_> = fake.events.lock().unwrap().iter().map(|(_, e)| e.problema.clone()).collect();
+        assert_eq!(problems.first(), Some(&None));
+        assert_eq!(problems.iter().filter(|p| p.is_some()).count(), 1, "só a troca que não termina aparece: {problems:?}");
         task.abort();
     }
 
@@ -846,6 +902,43 @@ mod tests {
         fake.epoch.fetch_add(1, Ordering::SeqCst);
         tokio::time::sleep(POLL * 2).await;
         assert_eq!(fake.deliveries.lock().unwrap().len(), 2);
+        task.abort();
+    }
+
+    /// Parity estado B1 (`test_drain_fires_once_on_overlay_to_idle`): a borda "voltou a aceitar texto"
+    /// drena mesmo com um problema do runtime na linha, como o Python.
+    #[tokio::test(start_paused = true)]
+    async fn deliverable_edge_drains_with_a_runtime_problem() {
+        let mut frames = vec![Ok(MENU), Ok(MENU)];
+        frames.extend(std::iter::repeat_n(Ok(IDLE), 6));
+        let fake = Fake::new(frames);
+        *fake.runtime.lock().unwrap() = Some(("terminal_input_composer_busy".into(), "composer_busy".into()));
+        let task = tokio::spawn(Monitor::new(fake.clone()).run());
+        tokio::time::sleep(POLL * 8).await;
+        assert_eq!(fake.deliveries.lock().unwrap().len(), 1, "{:?}", fake.states());
+        task.abort();
+    }
+
+    /// Parity estado B4: a contagem do diagnóstico de contexto é a do Python.
+    #[test]
+    fn context_pairs_like_python() {
+        assert_eq!(context_pairs("🤖 Opus │ 💬 46k/200k │ 💵 1"), 1);
+        assert_eq!(context_pairs("💬 46k/200k · 12k/50k"), 2);
+        assert_eq!(context_pairs("💬 ctx 46k/200k"), 2);
+        assert_eq!(context_pairs("sem segmento"), 0);
+    }
+
+    /// Parity estado B2: com a observação do pane falhando, a prévia do hook (MessageDisplay) segue andando:
+    /// o arquivo não depende da captura, como no `PreviewBroker` do Python.
+    #[tokio::test(start_paused = true)]
+    async fn hook_preview_keeps_going_while_the_observation_fails() {
+        let fail = || Err(CaptureFailed { code: "terminal observer EOF".into(), attempt: None });
+        let fake = Fake::new(vec![Ok(SPINNER), fail()]);
+        let task = tokio::spawn(Monitor::new(fake.clone()).run());
+        tokio::time::sleep(POLL * 2).await;
+        *fake.hook.lock().unwrap() = vec![HookFile { text: "resposta em andamento no hook".into(), ts: Some(wall_now()) }];
+        tokio::time::sleep(POLL * 3).await;
+        assert!(fake.previews.lock().unwrap().iter().any(|t| t == "resposta em andamento no hook"), "{:?}", fake.previews.lock().unwrap());
         task.abort();
     }
 

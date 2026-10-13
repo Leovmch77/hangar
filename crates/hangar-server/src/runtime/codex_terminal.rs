@@ -335,6 +335,10 @@ pub(super) fn lease_blocking(path:&Path) -> std::io::Result<Arc<std::fs::File>> 
 fn prepare(sidecar_dir:&Path,queue_dir:&Path,c:&Candidate,life:&Value) -> Result<(String,u64),RuntimeError> {
     let changed = ||RuntimeError::new("codex_sidecar_changed","o sidecar mudou de vida durante a adoção");
     let mut expected = c.key.clone();
+    // Mensagem digitada antes da adoção (TUI ainda abrindo, sem sidecar pronto) foi para o Python, que a
+    // gravou na projeção pelo nome; abrir a fila regrava a projeção e a apagaria calada. Lida antes.
+    let projected = pending_projection(queue_dir,&c.name);
+    let mut foreign:Option<Vec<Value>> = None;
     for _ in 0..2 {
         let key = match &expected {
             Some(key) => key.clone(),
@@ -346,6 +350,8 @@ fn prepare(sidecar_dir:&Path,queue_dir:&Path,c:&Candidate,life:&Value) -> Result
         let lease = acquire_lease(&lease_path).map_err(io_failure)?;
         let existed = state_path.exists();
         let mut store = Store::open(&state_path,queue_dir,QueueState::new(&key,1,&c.name,Vec::new())).map_err(io_failure)?;
+        // Só o que a fila não tem: linhas dela na projeção são dela (inclusive as de uma vida que sai).
+        let foreign = foreign.get_or_insert_with(||projected.iter().filter(|row|!store.state().rows.iter().any(|own|own["id"] == row["id"])).cloned().collect());
         let recorded = store.state().runtime_state[CODEX_LIFE].clone();
         let current = store.state().generation;
         let mut life = life.clone();
@@ -364,9 +370,24 @@ fn prepare(sidecar_dir:&Path,queue_dir:&Path,c:&Candidate,life:&Value) -> Result
         // Escritor único da geração: o mesmo `AdvanceLifecycle` da troca de modo (atual = só fatos, +1 = vida nova).
         let clock = ClockSample { monotonic_s:0.0,epoch_s:std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d|d.as_secs_f64()).unwrap_or(0.0) };
         advance_life(&mut store,generation,&c.name,life,clock).map_err(io_failure)?;
+        for row in foreign.iter() {
+            let id = row["id"].as_str().unwrap_or_default();
+            if store.state().rows.iter().any(|own|own["id"] == id) { continue; }
+            store.exec(store.state().generation,&format!("adopt-pending:{id}"),clock,Action::Append { text:row["text"].as_str().unwrap_or_default().into(),
+                delivered:false,ts:row["ts"].as_f64(),pre_transcript:row["pre_transcript"] == true,entry_id:Some(id.into()) }).map_err(io_failure)?;
+        }
         return Ok((key,generation));
     }
     Err(changed())
+}
+
+/// Entradas não entregues da projeção pelo nome: as que o Python gravou sem a fila desta chave.
+fn pending_projection(queue_dir:&Path,name:&str) -> Vec<Value> {
+    let Ok(raw) = std::fs::read_to_string(super::queue::projection_path(queue_dir,name)) else { return Vec::new() };
+    raw.lines().filter_map(|line|serde_json::from_str::<Value>(line).ok())
+        .filter(|row|row["delivered"] == false && row["papel"].is_null() && row["text"].is_string()
+            && row["id"].as_str().is_some_and(|id|!id.is_empty()))
+        .collect()
 }
 
 impl Watcher {
@@ -453,11 +474,12 @@ impl Watcher {
         misses.retain(|id,_|seen.contains(id));
     }
 
-    /// Escrita sem ator aberto: adota agora o Codex com terminal de `name`. `None` = não é Codex com
-    /// terminal, e a escrita segue o caminho de sempre.
+    /// Escrita sem ator aberto: adota agora o Codex com terminal de `name`, ou abre o sem terminal parado
+    /// (`open_parked`). `None` = não é Codex do Rust, e a escrita segue o caminho de sempre.
     pub async fn adopt_now(&self,registry:&RuntimeRegistry,name:&str) -> Option<Result<(),RuntimeError>> {
-        let _round = self.misses.lock().await;
-        self.adopt_locked(registry,name).await
+        // Subir o sem terminal pode levar segundos: fora da exclusão da vigia.
+        let adopted = { let _round = self.misses.lock().await; self.adopt_locked(registry,name).await };
+        match adopted { None => self.open_parked(registry,name).await, adopted => adopted }
     }
 
     /// `adopt_now` para quem já segura a exclusão da vigia (a troca de modo).
@@ -466,6 +488,9 @@ impl Watcher {
         let meta = tokio::task::spawn_blocking(move||codex_sidecar::load(&file)).await.ok().flatten()?;
         if meta.get("headless").is_some_and(truthy) { return None; }
         if registry.has_entry(None,name).await { return Some(Ok(())); }
+        // TUI ainda subindo: a mensagem fica na fila pelo nome (o Python a grava) e a adoção a assume,
+        // como antes de existir o sidecar.
+        if meta.get("launching").is_some_and(truthy) { return None; }
         let Some(c) = candidate(&meta,&self.cfg.home) else {
             return Some(Err(RuntimeError::new("codex_terminal_not_ready","o Codex com terminal ainda não tem app-server pronto")));
         };

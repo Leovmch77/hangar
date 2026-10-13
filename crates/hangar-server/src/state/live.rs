@@ -178,6 +178,11 @@ pub(crate) fn next_owner() -> u64 { NEXT_OWNER.fetch_add(1, Ordering::Relaxed) }
 
 struct CaptureSlot { generation: u64, target: String, capture: Arc<PaneCapture> }
 
+fn cut_of(view: &crate::mods::state::TerminalView) -> (Option<u32>, Option<String>) {
+    let columns = view.crop_columns.filter(|_| view.panes.iter().any(|pane| pane.placement == "dock")).and_then(|c| u32::try_from(c).ok());
+    (columns, crate::mods::tree::anchor(&view.above))
+}
+
 pub struct LiveSources {
     env: Arc<StateEnv>,
     hub: Weak<Hub>,
@@ -232,6 +237,15 @@ impl LiveSources {
 
     /// Captura da época atual: troca de época ou de pane recria a fonte (o pool solta o vínculo
     /// anterior do mesmo consumidor sozinho).
+    /// Onde a conversa acaba no pane, dos mods do Rust (`preview.py`: `transcript_columns`, `band_anchor`):
+    /// largura só com painel ancorado ao lado, e o começo da faixa.
+    fn preview_cut(&self) -> (Option<u32>, Option<String>) {
+        let Some(hub) = self.hub.upgrade() else { return (None, None) };
+        let mods = hub.mods();
+        let Some(view) = mods.life(&self.name).and_then(|life| mods.terminal_view_in(&self.name, life)) else { return (None, None) };
+        cut_of(&view)
+    }
+
     async fn pane(&self) -> Arc<PaneCapture> {
         let generation = self.epoch();
         let target = self.target().await;
@@ -279,12 +293,11 @@ impl Sources for LiveSources {
 
     async fn facts(&self) -> RoundFacts {
         // Só largura/âncora de mods permanecem externos; pergunta, modo e vida não vêm desse retrato.
-        let external = self.env.facts().get(&self.name);
-        let mut facts = RoundFacts {
-            body_columns: external.as_ref().and_then(|r| r.facts.body_columns),
-            band_anchor: external.as_ref().and_then(|r| r.facts.band_anchor.clone()),
-            ..Default::default()
-        };
+        let (body_columns, band_anchor) = self.preview_cut();
+        let mut facts = RoundFacts { body_columns, band_anchor, ..Default::default() };
+        // Sem entrada no Rust (claude aberto à mão, que só entra no primeiro envio pelo app): o estado sai
+        // só do pane e dos arquivos, como no Python; não há vínculo de plugin, pergunta nem modo a ler.
+        if let Some(registry) = self.env.runtime.get() && !registry.has_entry(None, &self.name).await { return facts; }
         let local = match self.env.runtime.get() {
             Some(registry) => super::facts::plugin_reading(registry, &self.name).await,
             None => Err("plugin_runtime_absent".into()),
@@ -339,6 +352,7 @@ impl Sources for LiveSources {
         let epoch = self.epoch();
         *self.last_frame.lock().unwrap_or_else(|e| e.into_inner()) = None;
         let registry = self.env.runtime.get().ok_or_else(|| CaptureFailed { code: "state_runtime_unbound".into(), attempt: None })?;
+        if !registry.has_entry(None, &self.name).await { return self.pane().await.capture().await; }
         let binding = registry.interaction_binding_readonly(&self.name).await.map_err(|e| CaptureFailed { code: e.code, attempt: None })?;
         if self.sid().as_deref() != Some(binding.conversation.as_str()) { return Err(CaptureFailed { code: "state_binding_changed".into(), attempt: None }); }
         let revision = self.env.permissions.lock().map_err(|_| CaptureFailed { code: "permission_store_unavailable".into(), attempt: None })?
@@ -358,6 +372,12 @@ impl Sources for LiveSources {
     async fn dead(&self) -> Result<Dead, String> {
         let lifecycle = self.env.lifecycle.get().ok_or("state_lifecycle_unbound")?;
         let registry = self.env.runtime.get().ok_or("plugin_runtime_absent")?;
+        // Sessão sem entrada no Rust (claude aberto à mão, ou já fechada): o multiplexador sem ela basta,
+        // como no Python; não há fila nem vínculo a limpar aqui.
+        if !registry.has_entry(None, &self.name).await {
+            self.env.agents.forget(&self.name);
+            return Ok(Dead::Ok);
+        }
         let binding = registry.interaction_binding_readonly(&self.name).await.map_err(|e| e.code)?;
         let dead = lifecycle.dead(&self.name, &binding.key, &binding.conversation, binding.generation).await;
         if matches!(dead, Ok(Dead::Ok)) { self.env.agents.forget(&self.name); }
@@ -366,6 +386,11 @@ impl Sources for LiveSources {
 
     async fn observe_permission(&self, key: &str, mode: &str) -> Result<(String, String), String> {
         let registry = self.env.runtime.get().ok_or("state_runtime_unbound")?;
+        if !registry.has_entry(None, &self.name).await {
+            // Sem executor que gire o modo, a leitura do rodapé é a confirmação (a memória é por conversa).
+            let view = self.env.permissions.lock().map_err(|_| "permission_store_unavailable")?.observe(key, mode);
+            return Ok((view.current, view.previous_non_plan));
+        }
         let binding = registry.interaction_binding_readonly(&self.name).await.map_err(|e| e.code)?;
         if binding.conversation != key || self.sid().as_deref() != Some(key) { return Err("permission_binding_changed".into()); }
         let revision = self.last_frame.lock().map_err(|_| "permission_frame_unavailable")?.as_ref()
@@ -621,6 +646,18 @@ mod tests {
             assert!(!source.contains(call), "fonte migrada não pode chamar {call}");
         }
         assert!(source.contains("registry.drain(&name)"));
+    }
+
+    /// Parity estado M1: a prévia corta no painel ancorado e na faixa dos mods com os dados do Rust.
+    #[test]
+    fn preview_cut_comes_from_the_rust_mods() {
+        use crate::mods::state::{TerminalPane, TerminalView};
+        let pane = |placement: &str| TerminalPane { id: "p".into(), title: String::new(), placement: placement.into(), columns: Some(40), tree: serde_json::Value::Null, data: None };
+        let view = TerminalView { above: serde_json::json!({"type": "Box", "children": ["Migração do relatório 2/6"]}), columns: Some(80),
+            panes: vec![pane("dock")], shown: None, caps: vec![], crop_columns: Some(85) };
+        assert_eq!(cut_of(&view), (Some(85), Some("Migração do rela".into())));
+        let inline = TerminalView { panes: vec![pane("inline")], ..view };
+        assert_eq!(cut_of(&inline).0, None, "só com painel ancorado");
     }
 
     #[test]

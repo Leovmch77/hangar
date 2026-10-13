@@ -177,6 +177,9 @@ pub(crate) async fn fake_app_server(answer_turns:bool) -> FakeAppServer {
                         Some("initialize") => Some(json!({"id":frame["id"],"result":{"userAgent":"fake"}})),
                         Some("thread/resume") => Some(json!({"id":frame["id"],"error":{"code":-32600,"message":"no rollout found for thread id thread-1"}})),
                         Some("turn/start") if answer_turns => Some(json!({"id":frame["id"],"result":{"turn":{"id":"turn-1","status":"inProgress","items":[]}}})),
+                        // A configuração que a TUI tem agora (o `/model` digitado nela não avisa o motor).
+                        Some("thread/read") => Some(json!({"id":frame["id"],"result":{"thread":{"id":frame["params"]["threadId"],"status":{"type":"idle"},
+                            "turns":[],"model":"gpt-tui","reasoningEffort":"high"}}})),
                         _ => None,
                     };
                     if let Some(reply) = reply {

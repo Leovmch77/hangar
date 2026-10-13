@@ -569,3 +569,13 @@ fn codex_terminal_compact_answers_like_the_python_send() {
     refused(reply(Disposition::Rejected, json!({"error": "recusado"})), "recusado");
     refused(reply(Disposition::Rejected, json!({})), "entrada recusada pelo runtime");
 }
+
+#[test]
+fn invalid_codex_option_is_a_bad_answer_not_a_failure_to_answer() {
+    use hangar_server::session_write::control::select_headless_answer;
+    let invalid = Err(RuntimeError::new(hangar_server::runtime::codex::INVALID_ANSWER, "opção inválida"));
+    let (status, body) = select_headless_answer(&invalid);
+    assert_eq!((status, body["detail"]["code"].as_str()), (StatusCode::CONFLICT, Some("erro_codex_resposta_invalida")));
+    let (status, _) = select_headless_answer(&Err(RuntimeError::new("codex_command", "runtime sem terminal indisponível")));
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "falha de envio continua 503");
+}

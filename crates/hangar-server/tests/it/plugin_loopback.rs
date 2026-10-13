@@ -362,9 +362,10 @@ mod held_routes {
         assert_eq!(store.facts(&facts.identity.binding, std::time::Instant::now()).unwrap()["plugin_state"]["state"], "working");
         body["token"] = json!(mint_keyed(OWNER, "original", "untracked"));
         assert_eq!(post(address, "state", body).await.status().as_u16(), 409);
+        // Parity P25: desligar o caminho do plugin vale para quem nasce (`whoami`); a sessão já aberta segue.
         facts.enabled.store(false, Ordering::Relaxed);
         let mut body = envelope(); body["texto"] = json!("sugestão"); body["mostrada"] = json!(true);
-        assert_eq!(post(address, "suggest", body).await.status().as_u16(), 409);
+        assert_eq!(post(address, "suggest", body).await.status().as_u16(), 200);
         assert_eq!(value(post(address, "whoami", json!({"chave":machine_key(OWNER),"pane":"%1","session_id":"sid"})).await).await, json!({"sessao":null}));
     }
 
@@ -478,6 +479,19 @@ mod held_routes {
             assert_eq!(post(address, "ask-fim", finish).await.status().as_u16(), 200);
             assert_eq!(answer.await.unwrap(), plugin::PluginReply::Accepted);
         }
+    }
+
+    #[tokio::test]
+    async fn plugin_loopback_only_an_accepted_finish_ends_the_question() {
+        let (_store, _facts, address, _server) = start().await;
+        // Recibo torto: o fim é recusado e a pergunta segue aberta para o menu e a fila.
+        let mut body = envelope(); body["id"] = json!("ask:toolu_fim_recusado"); body["vencedor"] = json!("terminal"); body["publication_id"] = json!("p");
+        assert!(post(address,"ask-fim",body).await.status().is_client_error());
+        assert!(!hangar_server::state::ask::ended_by_plugin("sid",Some("toolu_fim_recusado"),0.0));
+        // O fim aceito (o terminal venceu, sem recibo) encerra a chamada.
+        let mut body = envelope(); body["id"] = json!("ask:toolu_fim_aceito"); body["vencedor"] = json!("terminal");
+        assert_eq!(post(address,"ask-fim",body).await.status().as_u16(),200);
+        assert!(hangar_server::state::ask::ended_by_plugin("sid",Some("toolu_fim_aceito"),0.0));
     }
 
     #[tokio::test]

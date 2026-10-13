@@ -37,7 +37,7 @@ impl WebSocketConnection {
     }
 
     pub fn start(self, _generation: u64, capacity: usize) -> IoTasks {
-        let RawWebSocket { mut incoming, outgoing, tasks } = self.socket;
+        let RawWebSocket { mut incoming, outgoing, tasks, close_code } = self.socket;
         let (writer, mut commands) = mpsc::channel::<WireFrame>(capacity.max(1));
         let (ui_writer, mut ui_commands) = mpsc::channel::<WireFrame>(UI_CAPACITY);
         let (events_tx, events) = mpsc::channel(capacity.max(1));
@@ -53,7 +53,8 @@ impl WebSocketConnection {
                             _ => tracing::warn!("mensagem do app-server do Codex fora do JSON esperado; leitura continua"),
                         }
                     }
-                    let _ = events.send(IoEvent::End { code: None }).await;
+                    let code = close_code.lock().unwrap_or_else(|e| e.into_inner()).map(i64::from);
+                    let _ = events.send(IoEvent::End { code }).await;
                 };
                 tokio::select! { _ = work => {}, _ = stop.changed() => {} }
             })
@@ -188,7 +189,8 @@ mod tests {
             drop(tokio_tungstenite::accept_async(stream).await.unwrap());
         });
         let mut io = WebSocketConnection::connect(&format!("ws://{address}")).await.unwrap().start(1, 8);
-        assert!(matches!(tokio::time::timeout(Duration::from_secs(5), io.events.recv()).await.unwrap(), Some(IoEvent::End { code: None })));
+        // Sem quadro de fechamento: o código da queda (1006) vai ao diário, como o `codex.connection_closed` do Python.
+        assert!(matches!(tokio::time::timeout(Duration::from_secs(5), io.events.recv()).await.unwrap(), Some(IoEvent::End { code: Some(1006) })));
         let frame = json!({"id": "hangar:1:late", "method": "turn/start"});
         assert!(io.try_send(WireFrame { operation_id: "late".into(), frame, ephemeral: false, until: None, guard: None }).is_ok());
         match tokio::time::timeout(Duration::from_secs(5), io.events.recv()).await.unwrap() {

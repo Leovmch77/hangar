@@ -85,6 +85,11 @@ pub struct RuntimeRegistry {
     watcher:std::sync::OnceLock<Arc<super::codex_terminal::Watcher>>,
     /// Acorda a vigia quando um ator adotado perde o app-server.
     codex_wake:Arc<tokio::sync::Notify>,
+    /// Destino do pedido de reabertura ao coordenador do Python (porta e segredo internos).
+    reopen_to:(SocketAddr,String,crate::proxy::HttpClient,crate::diag::DiagClient),
+    /// Problema do último retrato de cada ator com terminal (chave → geração, código), para a lista
+    /// quando o `Monitor` não está vivo.
+    terminal_problems:std::sync::Mutex<BTreeMap<String,(u64,String)>>,
 }
 
 /// A trava pode demorar a soltar: as tarefas de E/S de um ator que saiu, ou o `LockFileEx` de um
@@ -239,10 +244,17 @@ async fn attach_terminal_mods(mods:&crate::mods::state::Mods,target:&super::term
 
 impl RuntimeRegistry {
     pub fn new(upstream:SocketAddr,secret:String,instance:String) -> Self {
-        Self { interactions:None,entries:Arc::new(Mutex::new(BTreeMap::new())),terminal_states:None,terms:None,events:broadcast::channel(1024).0,
+        let reopen_to=(upstream,secret.clone(),crate::proxy::client(),crate::diag::DiagClient::new(upstream,secret.clone()));
+        Self { reopen_to,terminal_problems:Default::default(),interactions:None,entries:Arc::new(Mutex::new(BTreeMap::new())),terminal_states:None,terms:None,events:broadcast::channel(1024).0,
             policy:PolicyClient::new(upstream,secret,instance.clone()),instance,lifecycle:Mutex::new(BTreeMap::new()),revisions:Mutex::new(BTreeMap::new()),mods:None,plugin:None,ingress:Default::default(),
             respawn_base:Duration::from_secs(5),permissions:None,processes:Arc::new(crate::list::procs::SystemProcs::default()),live:Default::default(),codex_owned:Default::default(),hubs:std::sync::OnceLock::new(),self_ref:std::sync::OnceLock::new(),
             watcher:std::sync::OnceLock::new(),codex_wake:Arc::new(tokio::sync::Notify::new()) }
+    }
+    /// Escrita para sessão doente: o coordenador do Python a reabre, como fazia antes de entregar.
+    /// Responde na hora; quem escreveu recebe o 503 e tenta de novo.
+    pub fn request_reopen(&self,name:&str) {
+        let (upstream,secret,http,diag)=&self.reopen_to;
+        crate::locate::request_reopen(http,*upstream,secret,diag,name);
     }
     /// Liga a vigia do Codex com terminal: escrita sem ator adota na hora e encerrar passa por ela.
     pub fn bind_watcher(&self,watcher:Arc<super::codex_terminal::Watcher>) { let _ = self.watcher.set(watcher); }
@@ -298,6 +310,7 @@ impl RuntimeRegistry {
             loop {
                 let event=match events.recv().await {Ok(event)=>event,Err(broadcast::error::RecvError::Lagged(_))=>{tracing::warn!(code="lifecycle_event_lagged","ligação de conversa perdeu eventos");continue;},Err(_)=>break};
                 let Some(registry)=weak.upgrade() else {break};
+                if event.channel=="snapshot" && event.data["view"]["terminal"]==true {registry.note_terminal_problem(&event);continue;}
                 // `claude_wake`: mensagem nova para um processo morto; depois do teto, abre outra rodada.
                 if event.channel=="claude_exit" || event.channel=="claude_wake" {
                     registry.schedule_claude_respawn(&event.key,event.generation).await;
@@ -320,6 +333,28 @@ impl RuntimeRegistry {
                 }
             }
         });
+    }
+    /// Os mesmos códigos do `runtime_problem` do Python: erro do ator, ou a entrada parada e o motivo.
+    fn note_terminal_problem(&self,event:&RuntimeEvent) {
+        let stalled=|code:&str| match code {
+            "composer_busy"=>"terminal_input_composer_busy","composer_unreadable"=>"terminal_input_composer_unreadable",
+            "capture_failed"|"capture_utf8"=>"terminal_input_capture_failed","clear_not_applied"=>"terminal_clear_not_applied",
+            _=>"terminal_input_stalled",
+        };
+        let problem=if event.data["error"].is_string() {Some("runtime_falhou")}
+            else {event.data["view"]["input_stalled"].as_str().filter(|code|!code.is_empty()).map(stalled)};
+        let mut map=self.terminal_problems.lock().unwrap_or_else(|e|e.into_inner());
+        match problem {
+            Some(code)=>{map.insert(event.key.clone(),(event.generation,code.into()));},
+            None=>{map.remove(&event.key);},
+        }
+    }
+    /// Nome → problema dos atores com terminal abertos aqui, do último retrato publicado.
+    pub async fn terminal_problems(&self)->BTreeMap<String,String> {
+        let problems=self.terminal_problems.lock().unwrap_or_else(|e|e.into_inner()).clone();
+        self.entries.lock().await.iter().filter(|(_,entry)|matches!(entry.handle,EntryHandle::Terminal {..}))
+            .filter_map(|(key,entry)|problems.get(key).filter(|(generation,_)|*generation==entry.generation).map(|(_,code)|(entry.name.clone(),code.clone())))
+            .collect()
     }
     pub fn bind_lifecycle(self:&Arc<Self>) {let _=self.self_ref.set(Arc::downgrade(self));}
     async fn cancel_lifecycle_name(&self,name:&str) {
@@ -467,21 +502,25 @@ impl RuntimeRegistry {
                         .confirmed(&source.binding.conversation).map_err(crate::terminal_input::ServiceError)?,
                     None=>return Err(crate::terminal_input::ServiceError("terminal_mode_unavailable")),
                 };
-                if let Some(mode)=confirmed.clone() {
-                    source.confirmed=Some(if mode.current=="plan" {mode.previous_non_plan} else {mode.current});
-                } else if terminal {
-                    if let Some(state)=published.as_ref().and_then(|published|published.get(&name,Some(&source.binding.conversation))) {
+                // Base suposta (primeira leitura já em `plan`) não decide: vale o transcript ou o modo de abertura,
+                // como o `session_non_plan_mode` do Python.
+                let known=match &permissions {Some(memory)=>memory.lock().map_err(|_|crate::terminal_input::ServiceError("terminal_mode_unavailable"))?.base_known(&source.binding.conversation),None=>true};
+                match confirmed.clone() {
+                    Some(mode) if mode.current=="plan" && !known=>{},
+                    Some(mode)=>source.confirmed=Some(if mode.current=="plan" {mode.previous_non_plan} else {mode.current}),
+                    None if terminal=>if let Some(state)=published.as_ref().and_then(|published|published.get(&name,Some(&source.binding.conversation))) {
                         if state.problema.is_some() {return Err(crate::terminal_input::ServiceError("terminal_mode_unavailable"));}
                         source.confirmed=state.claude_permission_mode.clone().filter(|mode|!mode.is_empty() && mode!="plan")
                             .or_else(||state.claude_previous_non_plan.clone().filter(|mode|!mode.is_empty() && mode!="plan"));
-                    }
-                } else {
-                    let current=live.borrow().clone().filter(|state|state.error.is_none()).ok_or(crate::terminal_input::ServiceError("terminal_mode_unavailable"))?;
-                    let binding=current.binding.as_ref().filter(|binding|binding.key==source.binding.key && binding.generation==source.binding.generation && !binding.conversation.is_empty()).ok_or(crate::terminal_input::ServiceError("terminal_mode_binding_changed"))?;
-                    if binding.conversation!=source.binding.conversation {return Err(crate::terminal_input::ServiceError("terminal_mode_binding_changed"));}
-                    source.confirmed=current.public_state["claude_permission_mode"].as_str().filter(|mode|!mode.is_empty() && *mode!="plan")
-                        .or_else(||current.public_state["claude_previous_non_plan"].as_str().filter(|mode|!mode.is_empty() && *mode!="plan"))
-                        .map(str::to_owned).or(source.confirmed);
+                    },
+                    None=>{
+                        let current=live.borrow().clone().filter(|state|state.error.is_none()).ok_or(crate::terminal_input::ServiceError("terminal_mode_unavailable"))?;
+                        let binding=current.binding.as_ref().filter(|binding|binding.key==source.binding.key && binding.generation==source.binding.generation && !binding.conversation.is_empty()).ok_or(crate::terminal_input::ServiceError("terminal_mode_binding_changed"))?;
+                        if binding.conversation!=source.binding.conversation {return Err(crate::terminal_input::ServiceError("terminal_mode_binding_changed"));}
+                        source.confirmed=current.public_state["claude_permission_mode"].as_str().filter(|mode|!mode.is_empty() && *mode!="plan")
+                            .or_else(||current.public_state["claude_previous_non_plan"].as_str().filter(|mode|!mode.is_empty() && *mode!="plan"))
+                            .map(str::to_owned).or(source.confirmed);
+                    },
                 }
                 let entries=entries.lock().await;
                 if !entries.get(&source.binding.key).is_some_and(|entry|entry.name==name && entry.generation==source.binding.generation && entry.mode_source.binding==declared.binding && entry.mode_source.transcript==declared.transcript) {
@@ -900,6 +939,12 @@ impl RuntimeRegistry {
                 use crate::list::procs::ProcessView;
                 if before.dead || procs.recipe(i64::from(target.metadata.agent_pid)).map_err(|_|failure("lifecycle_process_read"))?.birth!=target.metadata.agent_birth {return Err(failure("lifecycle_process_changed"));}
                 handle.stop().await?;
+                // Como o Python, antes de matar: a pergunta aberta desta vida não reabre o stepper numa
+                // sessão futura com a mesma conversa. Sem conseguir apagar, só o diário: o fechamento segue.
+                if let Some(path)=crate::state::ask::sidecar_path(&target.transcript)
+                    && let Err(error)=std::fs::remove_file(&path) && error.kind()!=std::io::ErrorKind::NotFound {
+                    tracing::warn!(key,session=%name,kind=?error.kind(),"pergunta aberta não foi apagada ao fechar");
+                }
                 let killed=super::lifecycle::kill_terminal(&crate::terminal_input::ProcessIo::default(),&procs,&target.binding,
                     i64::from(target.metadata.agent_pid),target.metadata.agent_birth).await;
                 if let Err(error)=&killed {super::actor::mark_live_error(&self.live_sender(&name),&error.code,&error.message);}
@@ -958,6 +1003,7 @@ impl RuntimeRegistry {
             }
         } else if let Some(store) = &self.interactions { store.forget(key).map_err(crate::interactions::runtime_error)?; }
         self.entries.lock().await.remove(key);
+        self.terminal_problems.lock().unwrap_or_else(|e|e.into_inner()).remove(key);
         // Codex com terminal fora do Rust: o hub devolve o estado à observação do Python.
         if matches!(handle,EntryHandle::CodexTerminal {..}) { self.mark_codex_owner(&name,key,generation,false); }
         self.clear_live(&name).await;
@@ -1024,6 +1070,11 @@ impl RuntimeRegistry {
         if saved["updated"]!=true {return Err(failure("lifecycle_sidecar_stale"));}
         let mut next=target.clone();next.generation=target.generation.checked_add(1).ok_or_else(||failure("runtime_generation"))?;
         next.metadata=saved["metadata"].clone();next.metadata["lifecycle_pending"]=json!(false);
+        // Plugins e skills escolhidos seguem a conversa nova; sem isso, reabri-la viria com tudo ligado.
+        let (sid,settings)=(next_sid.to_owned(),next.metadata["claude_settings"].clone());
+        if let Err(code)=tokio::task::spawn_blocking(move||crate::claude_customizations::remember(&sid,&settings)).await.map_err(|_|"claude_customizations_failed").and_then(|r|r) {
+            tracing::warn!(key=%target.key,session=%target.name,code,"escolhas da conversa não passaram à conversa nova do /clear");
+        }
         next.transcript=target.transcript.with_file_name(format!("{next_sid}.jsonl"));
         let clock=ClockSample {monotonic_s:0.0,epoch_s:SystemTime::now().duration_since(UNIX_EPOCH).map_or(0.0,|d|d.as_secs_f64())};
         queue.exec(target.generation,&format!("sid-commit:{}:{}:{next_sid}",target.key,target.generation),clock,Action::AdvanceLifecycle {generation:next.generation,state:json!({"conversation_reset":{"previous":previous,"next":next_sid},"metadata":next.metadata})}).await.map_err(|_|failure("queue_io"))?;
@@ -1039,15 +1090,33 @@ impl RuntimeRegistry {
             Some(EntryHandle::Terminal {target,..}) if target.binding.conversation==conversation=>target,
             _=>return Ok(json!({"in_transfer":true})),
         };
-        let sid=super::lifecycle::read_native_conversation(&target.metadata.config_dir,i64::from(target.metadata.agent_pid))?;
+        // A troca vem do próprio Claude Code: o plugin passa a informar a conversa nova no `/pull` (o `/clear`
+        // encerra a antiga com `session.end`). Sem ele, vale o registro nativo do processo.
+        let reported=self.plugin.as_ref().and_then(|plugin|plugin.reported_conversation(&crate::terminal_facts::LocalTerminalFacts::binding(&target)).ok().flatten());
+        let sid=match &reported {
+            Some(sid)=>sid.clone(),
+            None=>match super::lifecycle::read_native_conversation(&target.metadata.config_dir,i64::from(target.metadata.agent_pid)) {
+                Ok(sid)=>sid,
+                // Registro que este Claude Code não grava, ou lido no meio da escrita: não é troca nem
+                // defeito da sessão; o próximo tique (ou o plugin) decide.
+                Err(error) if error.code=="lifecycle_native_read"=>return Ok(json!({"changed":false})),
+                Err(error)=>return Err(error),
+            },
+        };
         if sid==conversation {return Ok(json!({"changed":false}));}
         let _ingress=super::lifecycle::ClosedIngress::acquire(&self.ingress,name).await?;
         let barrier=self.barrier(key).await;let _guard=barrier.lock().await;
         let current=self.interaction_binding_readonly(name).await?;
         if !super::lifecycle::matches_life(&current,key,conversation,generation) {return Ok(json!({"in_transfer":true}));}
         let procs=crate::list::procs::SystemProcs::default();
-        let confirmed=super::lifecycle::native_conversation(&target.metadata.config_dir,i64::from(target.metadata.agent_pid),target.metadata.agent_birth,&procs)?;
-        if confirmed!=sid {return Err(failure("lifecycle_native_changed"));}
+        if reported.is_some() {
+            // O plugin é o do processo da sessão: basta ele seguir vivo, com o mesmo nascimento.
+            use crate::list::procs::ProcessView;
+            if procs.recipe(i64::from(target.metadata.agent_pid)).map_err(|_|failure("lifecycle_process_read"))?.birth!=target.metadata.agent_birth {return Err(failure("lifecycle_process_changed"));}
+        } else {
+            let confirmed=super::lifecycle::native_conversation(&target.metadata.config_dir,i64::from(target.metadata.agent_pid),target.metadata.agent_birth,&procs)?;
+            if confirmed!=sid {return Err(failure("lifecycle_native_changed"));}
+        }
         let pane=super::lifecycle::pane(&crate::terminal_input::ProcessIo::default(),&target.binding).await?;
         if pane.dead {return Err(failure("lifecycle_native_dead"));}
         let retained=self.entries.lock().await.get(key).and_then(|entry|entry.relaunch.clone());
@@ -1373,6 +1442,19 @@ impl RuntimeRegistry {
             if let Err(stop)=stopped {tracing::warn!(key,code=%stop.code,"ator do relançamento não foi encerrado");}
             if let Err(stop)=process::kill(&cano,key,&sidecar_dir).await {tracing::warn!(key,code=stop.code(),"cano não confirmado não foi encerrado");}
             super::actor::mark_live_error(&self.live_sender(name),&error.code,&error.message);
+            // Como o Python: o bypass pedido que não pegou (a CLI recusa o `initialize`) volta a conversa ao
+            // modo de antes num processo novo, em vez de deixá-la parada até alguém reabrir à mão.
+            if requested==Some("bypassPermissions") && !from_exit && let Some(previous)=view["permission_mode"].as_str().filter(|mode|*mode!="bypassPermissions") {
+                let context=Arc::new(super::lifecycle::HeadlessOperation {target:target.clone(),
+                    binding:crate::interactions::InteractionBinding {key:key.into(),conversation:binding.conversation.clone(),generation:target.generation},
+                    recipe:recipe.clone(),view:view.clone(),birth:cano.extra["process_birth"].as_f64().unwrap_or(0.0),auto:auto_respawn,
+                    cancelled:Arc::new(std::sync::atomic::AtomicBool::new(false))});
+                let restored=Box::pin(self.reopen_headless_locked(name,key,target.generation,&format!("{id}:restore"),Some(previous),true,Some(context),0)).await;
+                return Err(match restored {
+                    Ok(_)=>RuntimeError::new("erro_permissao_reabrir",&format!("a sessão não reabriu em bypass ({}) e voltou ao modo de antes",error.code)),
+                    Err(restore)=>RuntimeError::new(&error.code,&format!("a sessão não reabriu em bypass e não voltou ao modo de antes ({}); ela ficou sem processo",restore.code)),
+                });
+            }
         }
         result
     }
@@ -1428,9 +1510,11 @@ impl RuntimeRegistry {
         // Tabela lida com sucesso e pid original ausente: erro de captura não equivale a morte.
         if !super::lifecycle::process_absent(&procs,i64::from(target.metadata.agent_pid),target.metadata.agent_birth)? {return Ok(Dead::InTransfer);}
         let io=crate::terminal_input::ProcessIo::default();
-        match super::lifecycle::pane(&io,&target.binding).await {
+        // Pane morto com a sessão do multiplexador de pé (`remain-on-exit`): a fila fica para depois do
+        // `/resume`, como no Python; só a sessão que sumiu leva a fila junto.
+        let gone=match super::lifecycle::pane(&io,&target.binding).await {
             Ok(pane) if !pane.dead=>return Ok(Dead::InTransfer),
-            Ok(_)=>{},
+            Ok(_)=>false,
             Err(error)=> {
                 // Se a sessão sumiu, a lista do multiplexador deve provar isso; silêncio não prova.
                 use crate::terminal_input::{TerminalIo,CommandRequest};
@@ -1440,8 +1524,9 @@ impl RuntimeRegistry {
                 if !list.success {return Err(error);}
                 let text=std::str::from_utf8(&list.stdout).map_err(|_|failure("lifecycle_capture"))?;
                 if text.lines().any(|n|n==name) {return Err(error);}
+                true
             },
-        }
+        };
         // A chave/geração ficou presa pela barreira; callbacks de A nunca chegam ao Store de B.
         self.close_locked(key,generation,false).await?;
         let lease=wait_lease(&target.lease_path).await?;
@@ -1451,7 +1536,7 @@ impl RuntimeRegistry {
             let mut store=Store::open(&target.state_path,&target.projection_dir,QueueState::new(&target.key,target.generation,&target.name,vec![])).map_err(|_|failure("queue_io"))?;
             if store.state().owner_key!=target.key || store.state().generation!=generation {return Err(failure("runtime_generation"));}
             let clock=ClockSample {monotonic_s:0.0,epoch_s:SystemTime::now().duration_since(UNIX_EPOCH).map_or(0.0,|d|d.as_secs_f64())};
-            store.exec(generation,&format!("dead-clear:{key}:{generation}",key=target.key),clock,Action::Clear).map_err(|_|failure("queue_io"))?;
+            if gone {store.exec(generation,&format!("dead-clear:{key}:{generation}",key=target.key),clock,Action::Clear).map_err(|_|failure("queue_io"))?;}
             store.exec(generation,&format!("dead-state:{key}:{generation}",key=target.key),clock,Action::AdvanceLifecycle {generation,state:json!({"terminal_lifecycle":{"closed":true,"conversation":target.binding.conversation}})}).map_err(|_|failure("queue_io"))?;
             Ok::<_,RuntimeError>(())
         }).await.map_err(|_|failure("lifecycle_worker"))??;
@@ -1685,8 +1770,9 @@ async fn dispatch(registry:&RuntimeRegistry,envelope:&Envelope) -> Result<Value,
                 let sidecar_dir = sidecar_dir.filter(|dir|!dir.as_os_str().is_empty()).ok_or_else(||failure("launch_sidecar_dir"))?;
                 registry.open_with_launch(target,sidecar_dir).await
             },
-            // Codex sem terminal com a pasta do arquivo: o Rust administra o processo mesmo sem subir agora.
-            Target::Headless(target,Some(sidecar_dir)) if target.provider == "codex" && !sidecar_dir.as_os_str().is_empty()=>{
+            // Sem terminal com a pasta do arquivo: o Rust administra o processo mesmo sem subir agora (o
+            // Claude que cai é religado aqui).
+            Target::Headless(target,Some(sidecar_dir)) if !sidecar_dir.as_os_str().is_empty()=>{
                 if target.key!=envelope.key || target.generation!=envelope.generation{return Err(failure("runtime_binding"));}
                 registry.open_managed(target,sidecar_dir).await
             },
@@ -1828,6 +1914,31 @@ mod tests {
     }
     struct OwnSidecar(std::path::PathBuf);
     impl Drop for OwnSidecar {fn drop(&mut self) {let _=std::fs::remove_file(&self.0);}}
+    /// Parity A3: Claude sem terminal aberto pelo Python com a pasta do sidecar fica administrado: o processo
+    /// que cai é religado pelo Rust (`auto_respawn`), como o adapter antigo fazia.
+    #[tokio::test]
+    async fn claude_headless_opened_with_sidecar_dir_is_managed() {
+        use tokio::io::{AsyncBufReadExt,AsyncWriteExt,BufReader};
+        let dir=tempfile::tempdir().unwrap();
+        let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();let address=listener.local_addr().unwrap();
+        let server=tokio::spawn(async move {
+            let (socket,_)=listener.accept().await.unwrap();let mut socket=BufReader::new(socket);let mut line=String::new();socket.read_line(&mut line).await.unwrap();
+            let snapshot=json!({"type":"cano_snapshot","versao":2,"pid":42,"init":null,"aberto":false,"pendentes":[],"ultimo_result":null,"rate_limit":null,"stderr_tail":[],"saiu":null,"inflight":{}});
+            socket.get_mut().write_all(format!("{snapshot}\n").as_bytes()).await.unwrap();
+            loop {line.clear();if socket.read_line(&mut line).await.unwrap_or(0)==0 {break;}}
+        });
+        let meta=json!({"key":"key","name":"cl","session_id":"a","headless":true,"initialized":true,"config_dir":dir.path(),"permission_mode":"manual",
+            "cano":{"pid":42,"escuta":format!("tcp:{address}"),"token":"fixture","versao":2}});
+        let descriptor=json!({"name":"cl","key":"key","provider":"claude","headless":true,"meta":meta,"jsonl":dir.path().join("a.jsonl"),
+            "projection_dir":dir.path().join("projection"),"state_path":dir.path().join("state"),"lock_path":dir.path().join("lease"),"generation":1,"sidecar_dir":dir.path()});
+        let registry=Arc::new(RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(),"fixture".into(),"instance".into()).with_processes(Arc::new(SidRecipeProcesses {dir:dir.path().into()})));
+        let hubs=crate::side::Hubs::default();registry.bind_hubs(hubs.downgrade());
+        let envelope=Envelope {protocol:0,instance:"instance".into(),key:"key".into(),generation:1,operation_id:"op".into(),clock:ClockSample {monotonic_s:0.0,epoch_s:0.0},
+            command:json!({"kind":"open","descriptor":descriptor})};
+        dispatch(&registry,&envelope).await.unwrap();
+        assert!(registry.entries.lock().await.get("key").unwrap().auto_respawn.is_some(),"processo que cai fica sem dono");
+        registry.close("key",1).await.unwrap();server.abort();
+    }
     #[tokio::test]
     async fn opening_barrier_busy_sid_commit_retries_after_snapshot_and_release() {
         use tokio::io::{AsyncBufReadExt,AsyncWriteExt,BufReader};
@@ -1909,6 +2020,69 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&blocked).unwrap(),r#"{"used":10,"window":100}"#);
         assert!(!dir.path().join("old-sid.context.json").exists());
         assert_eq!(invalidated.load(std::sync::atomic::Ordering::Relaxed),1);
+        // Parity A5: o problema do ator chega à lista pelo último retrato, só o da vida aberta.
+        let snapshot=|generation:u64,data:Value|RuntimeEvent {key:"B".into(),generation,revision:1,channel:"snapshot".into(),data};
+        registry.note_terminal_problem(&snapshot(7,json!({"error":null,"view":{"terminal":true,"input_stalled":"composer_busy"}})));
+        assert_eq!(registry.terminal_problems().await,BTreeMap::from([("same".to_owned(),"terminal_input_composer_busy".to_owned())]));
+        registry.note_terminal_problem(&snapshot(7,json!({"error":"terminal_delivery_unknown","view":{"terminal":true}})));
+        assert_eq!(registry.terminal_problems().await["same"],"runtime_falhou");
+        registry.note_terminal_problem(&snapshot(6,json!({"error":"x","view":{"terminal":true}})));
+        assert!(registry.terminal_problems().await.is_empty(),"retrato de outra vida não vale");
+        registry.note_terminal_problem(&snapshot(7,json!({"error":null,"view":{"terminal":true}})));
+        assert!(registry.terminal_problems().await.is_empty());
+        handle.stop().await.unwrap();
+    }
+
+    /// Parity M7: o Claude Code que não grava `sessions/<pid>.json` (ou o arquivo lido no meio da escrita)
+    /// não deixa a sessão em erro a cada tique: sem sinal de troca, a conversa segue a mesma.
+    #[tokio::test]
+    async fn missing_native_record_is_no_conversation_change() {
+        use crate::terminal_input::TerminalBinding;
+        let dir=tempfile::tempdir().unwrap();
+        let registry=RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(),"test".into(),"instance".into());
+        let target=super::super::terminal::TerminalTarget {key:"B".into(),generation:7,name:"same".into(),
+            binding:TerminalBinding {name:"same".into(),pane:"%77".into(),conversation:"new-sid".into(),generation:7,created:1,mux_argv:vec!["fixture-mux".into()],windows:false,clipboard_lock_path:None},
+            metadata:crate::terminal_facts::TerminalMetadata {config_dir:dir.path().into(),agent_pid:77,agent_birth:1000.0,legacy_import_after:None,fingerprint:"fixture-b".into(),origin:"uds:fixture".into()},
+            state_path:dir.path().join("B.json"),lease_path:dir.path().join("B.lock"),projection_dir:dir.path().into(),transcript:dir.path().join("new-sid.jsonl"),created:1.0,plugin_key:None};
+        let lease=acquire_lease(&target.lease_path).unwrap();
+        let store=Store::open(&target.state_path,&target.projection_dir,QueueState::new("B",7,"same",vec![])).unwrap();
+        let options=super::super::terminal::TerminalOptions {io:Arc::new(NoExternalIo),tick:Duration::from_secs(3600),..Default::default()};
+        let handle=super::super::terminal::TerminalActor::spawn(target.clone(),QueueActor::start(store,lease),registry.policy.clone(),options,registry.events.clone(),Arc::new(AtomicU64::new(0)));
+        registry.entries.lock().await.insert("B".into(),Entry {generation:7,handle:EntryHandle::Terminal {target:target.clone(),handle:handle.clone()},lease_path:target.lease_path.clone(),name:"same".into(),mods_life:0,provider:"claude".into(),account_key:None,relaunch:None,settings_owner:None,
+            mode_source:crate::terminal_facts::ModeSource {binding:crate::terminal_facts::LocalTerminalFacts::binding(&target),transcript:target.transcript.clone(),confirmed:None},live:registry.live_sender("same"),runtime_target:None,cano_birth:None,auto_respawn:None,respawn_inflight:false});
+        assert_eq!(registry.reconcile_claude("same","B","new-sid",7).await.unwrap(),json!({"changed":false}));
+        std::fs::create_dir_all(dir.path().join("sessions")).unwrap();
+        std::fs::write(dir.path().join("sessions/77.json"),br#"{"pid":77,"sessio"#).unwrap();
+        assert_eq!(registry.reconcile_claude("same","B","new-sid",7).await.unwrap(),json!({"changed":false}),"lido no meio da escrita");
+        handle.stop().await.unwrap();
+    }
+
+    /// Parity M5: a primeira leitura já em `plan` não inventa `manual` como base dos recados; sem a base
+    /// lida, decide o transcript ou o modo de abertura (`session_non_plan_mode`).
+    #[tokio::test]
+    async fn guessed_plan_base_does_not_decide_the_message_class() {
+        use crate::interactions::InteractionBinding;
+        use crate::terminal_input::TerminalBinding;
+        let dir=tempfile::tempdir().unwrap();
+        let memory=Arc::new(std::sync::Mutex::new(crate::state::permission::PermissionMemory::default()));
+        let registry=RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(),"test".into(),"instance".into()).with_permissions(memory.clone());
+        let binding=InteractionBinding {key:"B".into(),conversation:"new-sid".into(),generation:7};
+        let target=super::super::terminal::TerminalTarget {key:"B".into(),generation:7,name:"same".into(),
+            binding:TerminalBinding {name:"same".into(),pane:"%77".into(),conversation:"new-sid".into(),generation:7,created:1,mux_argv:vec!["fixture-mux".into()],windows:false,clipboard_lock_path:None},
+            metadata:crate::terminal_facts::TerminalMetadata {config_dir:dir.path().into(),agent_pid:77,agent_birth:1000.0,legacy_import_after:None,fingerprint:"fixture-b".into(),origin:"uds:fixture".into()},
+            state_path:dir.path().join("B.json"),lease_path:dir.path().join("B.lock"),projection_dir:dir.path().into(),transcript:dir.path().join("new-sid.jsonl"),created:1.0,plugin_key:None};
+        let lease=acquire_lease(&target.lease_path).unwrap();
+        let store=Store::open(&target.state_path,&target.projection_dir,QueueState::new("B",7,"same",vec![])).unwrap();
+        let options=super::super::terminal::TerminalOptions {io:Arc::new(NoExternalIo),tick:Duration::from_secs(3600),..Default::default()};
+        let handle=super::super::terminal::TerminalActor::spawn(target.clone(),QueueActor::start(store,lease),registry.policy.clone(),options,registry.events.clone(),Arc::new(AtomicU64::new(0)));
+        registry.entries.lock().await.insert("B".into(),Entry {generation:7,handle:EntryHandle::Terminal {target:target.clone(),handle:handle.clone()},lease_path:target.lease_path.clone(),name:"same".into(),mods_life:0,provider:"claude".into(),account_key:None,relaunch:None,settings_owner:None,
+            mode_source:crate::terminal_facts::ModeSource {binding,transcript:target.transcript.clone(),confirmed:None},live:registry.live_sender("same"),runtime_target:None,cano_birth:None,auto_respawn:None,respawn_inflight:false});
+        let read=registry.terminal_mode_reader();
+        memory.lock().unwrap().observe("new-sid","plan");
+        assert_eq!(read("same".into()).await.unwrap().unwrap().confirmed,None,"base suposta não vira `manual`");
+        memory.lock().unwrap().observe("new-sid","bypassPermissions");
+        memory.lock().unwrap().observe("new-sid","plan");
+        assert_eq!(read("same".into()).await.unwrap().unwrap().confirmed.as_deref(),Some("bypassPermissions"));
         handle.stop().await.unwrap();
     }
 

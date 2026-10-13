@@ -781,6 +781,12 @@ fn restricted_settings(settings: &Value) -> Result<()> {
     if items > MAX_ITEMS { return Err(invalid()); }
     Ok(())
 }
+/// O `remember` do Python: as escolhas da sessão passam à conversa nova (o `/clear` sem terminal). Vazio não
+/// grava nada.
+pub fn remember(session_id: &str, settings: &Value) -> std::result::Result<(), &'static str> {
+    if settings.is_null() || settings.as_object().is_some_and(|object| object.is_empty()) { return Ok(()); }
+    save_settings(&store_root().map_err(|e| e.code)?, session_id, settings).map_err(|e| e.code)
+}
 fn store_root() -> Result<PathBuf> {
     let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))
         .filter(|home| !home.is_empty()).ok_or_else(|| error(500, "claude_customizations_store_unavailable", "Diretório das escolhas da conversa indisponível."))?;

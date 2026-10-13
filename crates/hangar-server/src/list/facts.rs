@@ -57,6 +57,11 @@ pub struct RowState {
     /// Só Codex: o snapshot ao vivo vence o sidecar.
     #[serde(default)]
     pub codex_service_tier: Option<String>,
+    /// Só Pi, omp e Kimi: o histórico deles ainda é lido pelo Python.
+    #[serde(default)]
+    pub last_reply: Option<String>,
+    #[serde(default)]
+    pub last_reply_at: Option<f64>,
 }
 
 /// Todos os campos são obrigatórios na resposta: chave que falta é contrato quebrado, nunca vazio.
@@ -306,14 +311,24 @@ pub fn apply(rows: Vec<SessionRow>, facts: &ListFacts, ok: bool) -> (Vec<Session
     let mut aside = Vec::new();
     for row in rows {
         let external = overrides.remove(row.name.as_str());
-        // Quem decide é a sessão descoberta: a Claude é do Rust; a de outro agente em troca (mesmo que o
-        // destino seja Claude) segue a linha e o congelamento da transferência.
+        // Quem decide é a sessão descoberta: da Claude, vida e pergunta são do Rust e só a transferência
+        // vem do Python; a de outro agente em troca (mesmo que o destino seja Claude) segue a linha dela.
         let claude = row.provider == "claude";
-        let row = if claude { row } else { external.cloned().unwrap_or(row) };
-        if !claude && facts.frozen.contains(&row.name) { aside.push(row) } else { work.push(row) }
+        let row = match external {
+            Some(ext) if claude => {
+                let mut row = row;
+                row.transfer_id.clone_from(&ext.transfer_id);
+                row.transfer_phase.clone_from(&ext.transfer_phase);
+                if ext.problema.is_some() { row.problema.clone_from(&ext.problema); }
+                row
+            }
+            Some(ext) => ext.clone(),
+            None => row,
+        };
+        if (!claude || row.transfer_id.is_some()) && facts.frozen.contains(&row.name) { aside.push(row) } else { work.push(row) }
     }
     // Linha que a transferência cria (a sessão de origem já saiu da descoberta).
-    for row in facts.overrides.iter().filter(|r| r.provider != "claude" && overrides.contains_key(r.name.as_str())) {
+    for row in facts.overrides.iter().filter(|r| overrides.contains_key(r.name.as_str())) {
         if facts.frozen.contains(&row.name) { aside.push(row.clone()) } else { work.push(row.clone()) }
     }
     aside.extend(facts.orq.iter().cloned());
@@ -336,6 +351,8 @@ pub fn apply(rows: Vec<SessionRow>, facts: &ListFacts, ok: bool) -> (Vec<Session
                 row.codex_service_tier.clone_from(&s.codex_service_tier);
             } else {
                 row.conta.clone_from(&s.conta);
+                row.last_reply.clone_from(&s.last_reply);
+                row.last_reply_at = s.last_reply_at;
             }
         }
         if !ok { row.problema = Some(UNAVAILABLE.into()); }
@@ -489,6 +506,36 @@ mod tests {
         let (work, aside) = apply(vec![row("pi", "")], &facts, true);
         assert!(work.is_empty());
         assert_eq!(aside[0].interaction_id.as_deref(), Some("pi"));
+    }
+
+    /// Parity M13: a última resposta de Pi, omp e Kimi (histórico ainda do Python) chega à linha.
+    #[test]
+    fn other_agents_last_reply_comes_with_the_facts() {
+        let row = serde_json::from_value::<SessionRow>(json!({"name":"p","provider":"pi"})).unwrap();
+        let state: RowState = serde_json::from_value(json!({"state":"idle","label":null,"question":null,"options":null,"problema":null,
+            "status_line":null,"last_activity":5.0,"limit_reset":null,"last_reply":"pronto","last_reply_at":4.0})).unwrap();
+        let facts = ListFacts { states: HashMap::from([("p".into(), state)]), unknown: false, ..Default::default() };
+        let (work, _) = apply(vec![row], &facts, true);
+        assert_eq!((work[0].last_reply.as_deref(), work[0].last_reply_at), (Some("pronto"), Some(4.0)));
+    }
+
+    /// Parity A4 (`test_facts_transfer_overrides_by_name`): a troca Claude → Codex põe fase e falha na
+    /// linha Claude, não a classifica enquanto corre, e a linha de recuperação aparece sem a origem.
+    #[test]
+    fn claude_transfer_keeps_phase_and_recovery_row() {
+        let row = |v: Value| serde_json::from_value::<SessionRow>(v).unwrap();
+        let ext = row(json!({"name":"s","provider":"claude","interaction_id":"old-python","transfer_id":"t1","transfer_phase":"prepared","problema":"restore_failed"}));
+        let facts = ListFacts { overrides: vec![ext.clone()], frozen: HashSet::from(["s".into()]), unknown: false, ..Default::default() };
+        let (work, aside) = apply(vec![row(json!({"name":"s","provider":"claude","interaction_id":"rust"}))], &facts, true);
+        assert!(work.is_empty(), "transferência em curso não é classificada");
+        assert_eq!((aside[0].transfer_id.as_deref(), aside[0].transfer_phase.as_deref(), aside[0].problema.as_deref()),
+            (Some("t1"), Some("prepared"), Some("restore_failed")));
+        assert_eq!(aside[0].interaction_id.as_deref(), Some("rust"), "a pergunta segue a do Rust");
+        let (work, aside) = apply(vec![], &facts, true);
+        assert_eq!(work.len() + aside.len(), 1, "linha de recuperação sem a origem descoberta");
+        let done = ListFacts { overrides: vec![ext], frozen: HashSet::new(), unknown: false, ..Default::default() };
+        let (work, _) = apply(vec![row(json!({"name":"s","provider":"claude"}))], &done, true);
+        assert_eq!(work[0].transfer_phase.as_deref(), Some("prepared"), "fase terminal classifica e mostra a fase");
     }
 
     #[test]

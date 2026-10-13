@@ -196,6 +196,14 @@ class Slot:
     change_from_rust: bool = False      # fechada no Rust pela administração, ainda sem reabrir
 
 
+def _open_command(descriptor):
+    """Claude sem terminal abre administrado (pasta do arquivo da sessão): o Rust religa o processo que cai."""
+    if descriptor["provider"] == "claude" and descriptor["headless"]:
+        from app.adapters.claude_headless import sessions
+        descriptor = {**descriptor, "sidecar_dir": str(sessions._dir())}
+    return {"kind":"open", "descriptor":descriptor}
+
+
 def _clock():
     return {"monotonic_s": time.monotonic(), "epoch_s": time.time()}
 
@@ -434,7 +442,7 @@ class RuntimeCoordinator:
             await asyncio.to_thread(validate_binding, slot.binding.descriptor())
             binding = copy.deepcopy(slot.binding)
             descriptor = binding.descriptor()
-            ready = await self._rpc(descriptor, {"kind":"open", "descriptor":descriptor}, uuid.uuid4().hex)
+            ready = await self._rpc(descriptor, _open_command(descriptor), uuid.uuid4().hex)
             self._check_opened(ready, descriptor)
         else:
             pending = await asyncio.to_thread(_has_pending, slot.binding.state_path)
@@ -557,7 +565,7 @@ class RuntimeCoordinator:
             await asyncio.to_thread(validate_binding, descriptor)
             await asyncio.to_thread(self._prepare_queue_file, binding)
             sent = True
-            ready = await self._rpc(descriptor, {"kind":"open", "descriptor":descriptor}, uuid.uuid4().hex)
+            ready = await self._rpc(descriptor, _open_command(descriptor), uuid.uuid4().hex)
             self._check_opened(ready, descriptor)
         except Exception as exc:
             diag.registrar("runtime.open_failed", "erro", sessao=name, **failure_reason(exc))
@@ -660,7 +668,7 @@ class RuntimeCoordinator:
             if binding is None or (binding.meta.get("cano") or {}).get("pid") != cano["pid"]:
                 raise RuntimeError("sidecar mudou durante a abertura da sessão")
             descriptor, sent = binding.descriptor(), True
-            ready = await self._rpc(descriptor, {"kind":"open", "descriptor":descriptor}, uuid.uuid4().hex)
+            ready = await self._rpc(descriptor, _open_command(descriptor), uuid.uuid4().hex)
             self._check_opened(ready, descriptor)
         except Exception as exc:
             diag.registrar("runtime.open_failed", "erro", sessao=name, **failure_reason(exc))
@@ -985,6 +993,8 @@ class RuntimeCoordinator:
                     slot = self.slots.get(event["key"])
                     if slot is None or slot.phase != Phase.Rust:
                         continue
+                    if type(event.get("generation")) is int and event["generation"] > slot.binding.generation:
+                        self._follow_rust_life(slot, event)
                     if type(event.get("generation")) is int and event["generation"] != slot.binding.generation:
                         continue
                     previous = slot.view.get("revision", -1)
@@ -1034,6 +1044,53 @@ class RuntimeCoordinator:
             await asyncio.to_thread(claude_customizations.remember, binding.meta["session_id"], settings)
         except claude_customizations.CustomizationsError as exc:
             diag.registrar("claude.customizations_not_saved", "aviso", sessao=binding.name, codigo=exc.code)
+
+    def _follow_rust_life(self, slot, event):
+        """O Rust avança a vida sozinho (`/clear`, conversa nova, reabertura em bypass). O Python
+        segue a geração dele; com a velha, fechar, renomear e trocar de conta seriam recusados."""
+        data = event.get("data") if isinstance(event.get("data"), dict) else {}
+        conversation = data.get("conversation") if event.get("channel") in {"reset", "view"} else (data.get("view") or {}).get("conversation")
+        with slot.guard:
+            binding = copy.deepcopy(slot.binding)
+            binding.generation = event["generation"]
+            terminal = binding.meta.get("terminal")
+            if isinstance(terminal, dict):
+                terminal["generation"] = binding.generation
+            if binding.provider == "claude" and isinstance(conversation, str) and conversation:
+                binding.meta["session_id"] = conversation
+                if isinstance(terminal, dict):
+                    terminal["conversation"] = conversation
+                if binding.jsonl:
+                    binding.jsonl = str(Path(binding.jsonl).with_name(f"{conversation}.jsonl"))
+            slot.binding, slot.cache_valid = binding, False
+        from app import diag
+        diag.registrar("runtime.followed_rust_life", "ok", sessao=binding.name)
+        self._refresh(slot)
+        if isinstance(binding.meta.get("terminal"), dict) and self.loop is not None:
+            self.loop.create_task(self._follow_terminal_pane(slot, binding.generation))
+
+    async def _follow_terminal_pane(self, slot, generation):
+        """Reabertura em bypass troca o pane e o processo: relê o vínculo mantendo a chave da sessão."""
+        from app.runtime_terminal import pending_binding, resolve_binding
+        def resolve():
+            pending = pending_binding(slot.binding.name, slot.binding)
+            if pending is None:
+                return None
+            pending.meta.pop("terminal", None)
+            return resolve_binding(pending.name, pending)
+        try:
+            fresh = await asyncio.to_thread(resolve)
+        except Exception as exc:
+            from app import diag
+            diag.registrar("runtime.follow_pane_failed", "aviso", sessao=slot.binding.name, **failure_reason(exc))
+            return
+        with slot.guard:
+            if (fresh is None or fresh.key != slot.binding.key or slot.binding.generation != generation
+                    or fresh.meta.get("session_id") != slot.binding.meta.get("session_id")):
+                return
+            fresh.generation = generation
+            fresh.meta["terminal"]["generation"] = generation
+            slot.binding = fresh
 
     def _rebind(self, slot, conversation):
         key = slot.binding.key
@@ -1369,7 +1426,7 @@ class RuntimeCoordinator:
                     raise RuntimeError("vínculo da sessão mudou durante a reabertura")
                 if not codex:
                     descriptor = binding.descriptor()
-                    ready = await self._rpc(descriptor, {"kind":"open", "descriptor":descriptor}, uuid.uuid4().hex)
+                    ready = await self._rpc(descriptor, _open_command(descriptor), uuid.uuid4().hex)
                     if not (ready.get("opened") is True and isinstance(ready.get("state"), dict)
                             and ready.get("instance") == self.instance and ready.get("key") == descriptor["key"]
                             and ready.get("generation") == descriptor["generation"]):
@@ -1955,7 +2012,7 @@ class RuntimeCoordinator:
             else:
                 binding = copy.deepcopy(slot.binding)
                 descriptor = binding.descriptor()
-                ready = await self._rpc(descriptor, {"kind":"open", "descriptor":descriptor}, uuid.uuid4().hex)
+                ready = await self._rpc(descriptor, _open_command(descriptor), uuid.uuid4().hex)
                 self._check_opened(ready, descriptor)
         except Exception as exc:
             if not headless:

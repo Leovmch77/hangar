@@ -15,10 +15,17 @@ fn mode_body(bytes:&[u8])->Result<String,(&'static str,StatusCode)> {
     if !MODES.contains(&mode.as_str()) {return Err(("erro_permissao_invalida",StatusCode::CONFLICT));}
     Ok(mode)
 }
+/// As recusas que o app já explica, nos códigos que ele conhece (os do Python).
+fn public_code(code:&str)->&str {
+    match code {"terminal_panel_active"|"terminal_panel_open"=>"erro_terminal_aberto","permission_menu_open"=>"erro_menu_aberto",_=>code}
+}
 fn result(reply:crate::runtime::protocol::RuntimeReply)->(StatusCode,Value) {
     if reply.disposition==Disposition::Accepted {return (StatusCode::OK,reply.payload);}
-    let code=reply.payload["error_code"].as_str().or_else(||reply.payload["code"].as_str()).unwrap_or("erro_permissao_leitura");
-    (StatusCode::CONFLICT,detail_body(code,"não consegui confirmar o modo de permissão; confira a sessão",reply.payload.clone()))
+    let code=public_code(reply.payload["error_code"].as_str().or_else(||reply.payload["code"].as_str()).unwrap_or("erro_permissao_leitura"));
+    // A frase do app (`erro_permissao_teto`) lê `alvo` e `ficou`, os nomes do Python.
+    let mut params=reply.payload.clone();
+    if params["requested"].is_string() {params["alvo"]=params["requested"].clone();params["ficou"]=params["current"].clone();}
+    (StatusCode::CONFLICT,detail_body(code,"não consegui confirmar o modo de permissão; confira a sessão",params))
 }
 async fn serve(st:Arc<AppState>,peer:SocketAddr,req:Request,set:bool)->Response {
     let (forward,owner)=gate(&st,peer,&req);
@@ -68,7 +75,7 @@ async fn serve(st:Arc<AppState>,peer:SocketAddr,req:Request,set:bool)->Response 
     });
     let (status,body)=match job.await {
         Ok(Ok(value))=>value,
-        Ok(Err(error))=>(StatusCode::CONFLICT,detail_body(&error.code,&error.message,json!({}))),
+        Ok(Err(error))=>(StatusCode::CONFLICT,detail_body(public_code(&error.code),&error.message,json!({}))),
         Err(_)=>(StatusCode::SERVICE_UNAVAILABLE,detail_body("lifecycle_panic","não consegui confirmar o modo de permissão",json!({}))),
     };
     let mut response=json_response(status,body);cors(&headers,response.headers_mut());response
@@ -93,5 +100,18 @@ mod tests {
         assert_eq!(status,StatusCode::CONFLICT);
         assert_eq!(body["detail"]["params"]["current"],Value::Null);
         assert_eq!(body["detail"]["code"],"permission_key_timeout");
+    }
+    /// Parity B2 (`test_perm_post_teto_409_devolve_ficou`).
+    #[test]
+    fn ceiling_refusal_carries_the_python_names() {
+        let reply=crate::runtime::protocol::RuntimeReply {operation_id:"id".into(),disposition:Disposition::Rejected,payload:json!({"current":"plan","mode":"plan","requested":"dontAsk","error_code":"erro_permissao_teto"})};
+        let (status,body)=result(reply);
+        assert_eq!(status,StatusCode::CONFLICT);
+        assert_eq!((body["detail"]["params"]["alvo"].as_str(),body["detail"]["params"]["ficou"].as_str(),body["detail"]["params"]["mode"].as_str()),(Some("dontAsk"),Some("plan"),Some("plan")));
+        // Parity B3: painel e menu abertos recusam com os códigos que o app explica.
+        for (internal,public) in [("terminal_panel_active","erro_terminal_aberto"),("permission_menu_open","erro_menu_aberto")] {
+            let reply=crate::runtime::protocol::RuntimeReply {operation_id:"id".into(),disposition:Disposition::Rejected,payload:json!({"error_code":internal})};
+            assert_eq!(result(reply).1["detail"]["code"],public);
+        }
     }
 }

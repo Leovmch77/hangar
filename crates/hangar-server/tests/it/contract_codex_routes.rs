@@ -58,7 +58,8 @@ async fn cano(rpc: Value, busy: bool) -> String {
     format!("tcp:{address}")
 }
 
-/// Python falso da política: `ok` a tudo (o `session.patch_meta` do pular e do modo de permissão).
+/// Python falso da política: `ok` a tudo, com o `{"updated": true}` do `session.patch_meta` gravado (o
+/// pular só responde depois dele).
 async fn policy() -> std::net::SocketAddr {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -77,7 +78,7 @@ async fn policy() -> std::net::SocketAddr {
                     }
                     let mut body = vec![0; length];
                     reader.read_exact(&mut body).await.unwrap();
-                    let reply = json!({"ok":true,"data":{}}).to_string();
+                    let reply = json!({"ok":true,"data":{"updated":true}}).to_string();
                     let response = format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{reply}", reply.len());
                     reader.get_mut().write_all(response.as_bytes()).await.unwrap();
                 }
@@ -247,4 +248,16 @@ async fn terminal_entry_goes_to_python() {
         assert_eq!(call(server, case, OWNER).await, (200, Value::String("from-python".into())), "{}", case["name"]);
         assert_eq!(python.last_hit().0, format!("/api/sessions/s/{}", case["route"].as_str().unwrap()));
     }
+}
+
+#[test]
+fn skip_that_was_not_saved_is_a_send_failure_and_a_bad_answer_is_invalid() {
+    use hangar_server::runtime::protocol::{Disposition, RuntimeReply};
+    // O Python gravava antes de esconder: falha de gravação é 503 e a pergunta continua.
+    let unsaved = Ok(RuntimeReply { operation_id: "op".into(), disposition: Disposition::Rejected, payload: json!({"skip_not_saved": true}) });
+    let (status, body) = skip_answer(&unsaved);
+    assert_eq!((status.as_u16(), body["detail"]["code"].as_str()), (503, Some("erro_codex_resposta_envio")));
+    let invalid = Err(RuntimeError::new(hangar_server::runtime::codex::INVALID_ANSWER, "a pergunta já está sendo pulada"));
+    let (status, body) = skip_answer(&invalid);
+    assert_eq!((status.as_u16(), body["detail"]["code"].as_str()), (409, Some("erro_codex_resposta_invalida")));
 }

@@ -82,6 +82,35 @@ fn interaction_errors_keep_codes_and_unknown_never_becomes_success_or_not_sent()
 }
 
 #[test]
+fn text_fallback_answers_like_the_python() {
+    use hangar_server::runtime::protocol::Disposition;
+    let reply = |disposition, code: &str| -> Result<RuntimeReply,RuntimeError> { Ok(RuntimeReply { operation_id:"op".into(), disposition, payload:json!({"code":code}) }) };
+    // As teclas falharam e a resposta saiu por texto: 200 `fallback:true`.
+    assert_eq!(control_answer(&reply(Disposition::Accepted,"answer_fallback_sent")), (StatusCode::OK, json!({"ok":true,"fallback":true})));
+    // O texto não saiu (o picker não fechou): nunca diz que respondeu.
+    let (status, body) = control_answer(&reply(Disposition::Unknown,"answer_fallback_not_delivered"));
+    assert_eq!((status, body["detail"]["code"].clone()), (StatusCode::CONFLICT, json!("erro_resposta_nao_entregue")));
+    let (status, body) = control_answer(&reply(Disposition::Unknown,"answer_fallback_unproved"));
+    assert_eq!((status, body["detail"]["code"].clone()), (StatusCode::CONFLICT, json!("erro_drive_fallback_falhou")));
+    // Texto da reserva: "pergunta → resposta", sem a linha do "conversar".
+    let answers = vec![json!({"kind":"option","labels":["Sim"]}), json!({"kind":"text","value":"azul"}), json!({"kind":"chat"})];
+    assert_eq!(fallback_text(&answers, &["Q1".into(),"Q2".into(),"Q3".into()]),
+        "Respondendo as perguntas (o seletor de opções falhou, vai por texto):\n- Q1 → Sim\n- Q2 → azul");
+    assert_eq!(fallback_text(&[json!({"kind":"chat"})], &[]), "");
+}
+
+#[test]
+fn text_during_the_clear_barrier_is_refused_with_its_own_wait_code() {
+    use hangar_server::session_write::input::{Params, classify, input_answer};
+    // Fora da fila: a troca de conversa do `/clear` a esvaziaria calada. O app guarda o texto e mostra o motivo.
+    let params = Params { text: "Olá", steer: false, terminal: true, codex: false, operation_id: "op" };
+    let (sent, _) = classify(&params, &Err(RuntimeError::new("runtime_clear_barrier", "operação terminal conservada no diário")));
+    let (status, body) = input_answer(&sent, false);
+    assert_eq!((status.as_u16(), body["detail"]["code"].clone()), (400, json!("erro_aguarde_clear")));
+    assert_eq!(body["detail"]["msg"], "Espere o /clear terminar e envie de novo.");
+}
+
+#[test]
 fn codex_terminal_written_or_reserved_answer_is_uncertain_over_http() {
     use hangar_server::runtime::protocol::Disposition;
     use hangar_server::session_write::{codex::skip_answer, control::select_headless_answer};
@@ -509,4 +538,15 @@ fn skip_question_requires_the_displayed_interaction_and_exact_native_target() {
         payload:json!({"request_id":0,"interaction_id":current})},clock).unwrap();
     assert!(effects.iter().any(|effect|matches!(effect,Effect::Write {frame,..} if frame["id"] == 0 && frame["result"]["action"] == "cancel")));
     assert!(engine.interaction_write_error("skip-current").is_none());
+}
+
+#[test]
+fn invalid_codex_answer_is_a_bad_answer_not_a_send_failure() {
+    // Como o `ValueError` do Python: resposta vazia, fora das opções ou de pergunta já respondida é 409
+    // `erro_codex_resposta_invalida`; o 503 fica para o envio que falhou.
+    let invalid = Err(RuntimeError::new(hangar_server::runtime::codex::INVALID_ANSWER, "resposta vazia"));
+    let (status, body) = headless_answer(true, &invalid);
+    assert_eq!((status, body["detail"]["code"].as_str()), (StatusCode::CONFLICT, Some("erro_codex_resposta_invalida")));
+    let (status, body) = headless_answer(true, &Err(RuntimeError::new("codex_command", "runtime sem terminal indisponível")));
+    assert_eq!((status, body["detail"]["code"].as_str()), (StatusCode::SERVICE_UNAVAILABLE, Some("erro_codex_resposta_envio")));
 }

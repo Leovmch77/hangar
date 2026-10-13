@@ -139,7 +139,8 @@ fn local(state: &RouteState, peer: SocketAddr, headers: &HeaderMap) -> bool {
 }
 async fn admit<T>(state: &RouteState, envelope: &Envelope<T>) -> Result<Identity, ServiceError> {
     if !session_token_ok(&state.secret, &envelope.sessao, &envelope.token) { return Err(ServiceError("plugin_token_invalid")); }
-    if !state.sources.enabled().await? { return Err(ServiceError("plugin_disabled")); }
+    // O liga/desliga (`claude_function_hooks`) vale para o processo que nasce (`whoami`); a sessão já aberta
+    // com o plugin segue atendida, como no Python, que só conferia o token aqui.
     let key = envelope.token.split_once('.').map(|(key, _)| key);
     let identity = state.sources.resolve(&envelope.sessao, key).await?;
     if identity.binding.key.is_empty() || identity.binding.conversation.is_empty() || identity.plugin_key.is_empty()
@@ -232,10 +233,15 @@ fn receipt(id: Option<String>, generation: Option<u64>, session_id: Option<Strin
 async fn finish(State(st): State<Arc<RouteState>>, Json(body): Json<Envelope<Finished>>) -> Response {
     let identity = match admit(&st, &body).await { Ok(identity) => identity, Err(error) => return fail(error) };
     let body = body.body;
-    // O fim da chamada vale vença o app ou o terminal: o sidecar dela deixa de segurar menu e fila.
-    if let Some(call) = body.id.strip_prefix("ask:") { crate::state::ask::call_ended(call); }
     let receipt = match receipt(body.publication_id, body.generation, body.session_id) { Ok(r) => r, Err(error) => return fail(error) };
-    match st.store.finish(&identity.binding, &body.id, &body.vencedor, receipt) { Ok(()) => ok(), Err(error) => fail(error) }
+    match st.store.finish(&identity.binding, &body.id, &body.vencedor, receipt) {
+        Ok(()) => {
+            // Só o fim aceito, vença o app ou o terminal: o sidecar da chamada deixa de segurar menu e fila.
+            if let Some(call) = body.id.strip_prefix("ask:") { crate::state::ask::call_ended(call); }
+            ok()
+        }
+        Err(error) => fail(error),
+    }
 }
 async fn acknowledge(st: &RouteState, body: Envelope<Acknowledged>, mode: PluginMode) -> Response {
     let identity = match admit(st, &body).await { Ok(identity) => identity, Err(error) => return fail(error) };

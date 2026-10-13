@@ -17,7 +17,8 @@ _problema_avisado: set[tuple[str, str]] = set()
 
 _OTHERS = frozenset({"codex", "pi", "omp", "kimi"})
 _STATE_FIELDS = ("state", "label", "question", "options", "problema", "status_line", "pending_questions",
-                 "startup_steps", "last_activity", "limited", "limit_reset", "stalled", "codex_service_tier")
+                 "startup_steps", "last_activity", "limited", "limit_reset", "stalled", "codex_service_tier",
+                 "last_reply", "last_reply_at")
 # A lista não espera terminal de atalho: o leitor do refresher, com a última leitura boa.
 _shortcuts = sse._ListRefresher()
 # Campos do `sse._list_sig`, pelo nome: a sombra do Rust compara campo a campo e grava só o nome.

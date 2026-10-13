@@ -813,6 +813,74 @@ async fn queued_entries_become_not_delivered_when_the_process_gives_up() {
 }
 
 #[tokio::test]
+async fn rows_left_unconfirmed_by_an_older_binary_confirm_when_the_actor_opens() {
+    // Retrato do estado real: três orientações mandadas durante o turno, aceitas, cada uma com cursor; a CLI as
+    // juntou numa mensagem só e a versão anterior confirmou só uma. Ao abrir, o ator acerta as outras sozinho.
+    use hangar_server::runtime::receipt::ReceiptIndex;
+    let dir = tempfile::tempdir().unwrap();
+    let transcript = dir.path().join("chat.jsonl");
+    std::fs::write(&transcript,"").unwrap();
+    let cursor = serde_json::to_value(ReceiptIndex::new("claude","sid-1").capture(&transcript).unwrap()).unwrap();
+    let ids = ["r0","r1","r2"];
+    {
+        let mut store = Store::open(&dir.path().join("key.queue-state.json"),&dir.path().join("projection"),State::new("key",1,"session",vec![])).unwrap();
+        let clock = ClockSample { monotonic_s:0.0,epoch_s:epoch_now()-600.0 };
+        for (id,text) in ids.iter().zip(crate::runtime_receipt::MERGED_INPUTS) {
+            let op = format!("steer-1:{id}");
+            store.exec(1,&format!("append:{id}"),clock,Action::Append { text:text.into(),delivered:true,ts:None,pre_transcript:false,entry_id:Some((*id).into()) }).unwrap();
+            store.exec(1,&format!("prepare:{id}"),clock,Action::Prepare { id:op.clone(),payload:json!({"kind":"steer"}),entry_id:Some((*id).into()) }).unwrap();
+            store.exec(1,&format!("cursor:{id}"),clock,Action::BindDispatch { id:op.clone(),cursor:cursor.clone() }).unwrap();
+            store.exec(1,&format!("begin:{id}"),clock,Action::BeginDispatch { id:op.clone(),wire_id:format!("w:{id}"),staged:false }).unwrap();
+            store.exec(1,&format!("finish:{id}"),clock,Action::Finish { id:op,status:Status::Accepted,result:json!({}) }).unwrap();
+            store.exec(1,&format!("steered:{id}"),clock,Action::SetDelivered { entry_id:(*id).into(),value:true,steered:true }).unwrap();
+        }
+    }
+    std::fs::write(&transcript,format!("{}\n",crate::runtime_receipt::merged_inputs_line("sid-1","2026-10-13T13:50:29.778Z"))).unwrap();
+    let (cano,server) = claude_cano(vec![]).await;
+    let (policy,_) = policy_server().await;
+    let handle = claude_actor(dir.path(),cano,policy).await;
+    tokio::time::timeout(std::time::Duration::from_secs(3),async {
+        loop {
+            let state = queue_state(dir.path());
+            if ids.iter().all(|id|state.rows.iter().any(|row|row["id"] == *id && row["confirmed"] == true)) { break; }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }).await.unwrap_or_else(|_|panic!("entradas juntadas pela CLI seguem sem confirmação: {:?}",queue_state(dir.path()).rows));
+    handle.stop().await.unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn headless_entry_is_not_given_up_while_a_turn_runs() {
+    // Com turno em curso a CLI ainda pode consumir a mensagem: "não chegou" (e o Descartar) agora seria mentira.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("chat.jsonl"),"").unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (stream,_) = listener.accept().await.unwrap();
+        let mut reader = BufReader::new(stream);
+        let mut header = String::new(); reader.read_line(&mut header).await.unwrap();
+        let snapshot = json!({"type":"cano_snapshot","versao":2,"pid":42,"init":null,"aberto":true,
+            "pendentes":[],"ultimo_result":null,"rate_limit":null,"stderr_tail":[],"saiu":null,"inflight":{}});
+        reader.get_mut().write_all(format!("{snapshot}\n").as_bytes()).await.unwrap();
+        let mut raw = String::new();
+        while reader.read_line(&mut raw).await.unwrap_or(0) > 0 { raw.clear(); }
+    });
+    let (policy,_) = policy_server().await;
+    let handle = claude_actor(dir.path(),address,policy).await;
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    handle.queue("lost".into(),Action::Append { text:"no meio do turno".into(),delivered:true,ts:Some(epoch_now()-120.0),
+        pre_transcript:false,entry_id:Some("lost".into()) }).await.unwrap();
+    handle.confirm().await.unwrap();
+    let state = queue_state(dir.path());
+    let row = state.rows.iter().find(|row|row["id"] == "lost").unwrap();
+    assert!(row["desistiu"].is_null(),"desistiu com o turno em curso: {row}");
+    handle.stop().await.unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test]
 async fn steer_line_in_the_transcript_confirms_without_waiting_for_the_turn_end() {
     // A orientação no meio do turno também abre a vigília do transcript, como a mensagem comum.
     let dir = tempfile::tempdir().unwrap();
@@ -973,6 +1041,11 @@ async fn the_deadline_never_puts_back_a_native_message_that_may_have_been_sent()
 /// Cano Codex falso: depois do retrato manda o que o teste empurrar; responde e confirma cada escrita.
 /// Devolve os métodos escritos no fio.
 async fn codex_cano(pendentes:Vec<&'static str>) -> (std::net::SocketAddr,tokio::task::JoinHandle<Vec<String>>,tokio::sync::mpsc::UnboundedSender<Value>) {
+    codex_cano_refusing(pendentes,0).await
+}
+
+/// `codex_cano` que recusa (erro JSON-RPC) os primeiros `refusals` `turn/start`.
+async fn codex_cano_refusing(pendentes:Vec<&'static str>,mut refusals:usize) -> (std::net::SocketAddr,tokio::task::JoinHandle<Vec<String>>,tokio::sync::mpsc::UnboundedSender<Value>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let (push,mut pushed) = tokio::sync::mpsc::unbounded_channel::<Value>();
@@ -1001,8 +1074,11 @@ async fn codex_cano(pendentes:Vec<&'static str>) -> (std::net::SocketAddr,tokio:
                     let ack = json!({"type":"cano_input_ack","operation_id":envelope["operation_id"],"outcome":"written"});
                     write.write_all(format!("{ack}\n").as_bytes()).await.unwrap();
                     if frame.get("id").is_some() && frame.get("method").is_some() {
+                        let refused = frame["method"] == "turn/start" && refusals > 0;
+                        if refused { refusals -= 1; }
                         let result = if frame["method"] == "turn/start" { json!({"turn":{"id":"turn-1","status":"inProgress"}}) } else { json!({"data":[]}) };
-                        let reply = json!({"type":"cano_output","frame":json!({"id":frame["id"],"result":result}).to_string()});
+                        let answer = if refused { json!({"id":frame["id"],"error":{"code":-32600,"message":"turn not accepted"}}) } else { json!({"id":frame["id"],"result":result}) };
+                        let reply = json!({"type":"cano_output","frame":answer.to_string()});
                         write.write_all(format!("{reply}\n").as_bytes()).await.unwrap();
                     }
                 }
@@ -1159,6 +1235,30 @@ async fn queued_input_drains_without_any_subscriber() {
     assert_eq!(methods.iter().filter(|m|*m == "turn/start").count(),2,"{methods:?}");
 }
 
+#[tokio::test]
+async fn refused_turn_start_puts_the_input_back_and_the_next_idle_sends_it() {
+    // Recusa explícita do Codex: nada começou, a entrada volta à fila (`deferred` do Python) e sai no próximo ocioso.
+    let dir = tempfile::tempdir().unwrap();
+    let (cano,server,push) = codex_cano_refusing(vec![],1).await;
+    let handle = codex_live_actor(dir.path(),cano,None).await;
+    let first = handle.command(RuntimeCommand { operation_id:"in-1".into(),kind:OperationKind::Input,payload:json!({"text":"um"}) }).await.unwrap();
+    assert!(first.disposition == Disposition::Deferred,"{first:?}");
+    let path = dir.path().join("key.queue-state.json");
+    let row = |path:&std::path::Path| { let state:State = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        state.rows.iter().find(|row|row["id"] == "in-1").cloned() };
+    tokio::time::timeout(std::time::Duration::from_secs(5),async { while row(&path).is_none_or(|row|row["delivered"] != false) { tokio::time::sleep(std::time::Duration::from_millis(20)).await; } })
+        .await.expect("a entrada recusada volta para a fila");
+    push.send(json!({"method":"thread/status/changed","params":{"threadId":"thread-1","status":{"type":"idle"}}})).unwrap();
+    let sent = |path:&std::path::Path| { let state:State = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        state.operations.get("in-1").is_some_and(|op|matches!(op.status,Status::Accepted | Status::Confirmed)) };
+    tokio::time::timeout(std::time::Duration::from_secs(5),async { while !sent(&path) { tokio::time::sleep(std::time::Duration::from_millis(20)).await; } })
+        .await.expect("o ocioso seguinte entrega a mensagem");
+    handle.stop().await.unwrap();
+    drop(push);
+    let methods = server.await.unwrap();
+    assert_eq!(methods.iter().filter(|m|*m == "turn/start").count(),2,"{methods:?}");
+}
+
 // --- Codex sem terminal nasce e religa no Rust (5B Task 4) ---
 
 #[cfg(target_os = "linux")]
@@ -1191,7 +1291,7 @@ for line in sys.stdin:
     if method == "initialize":
         result = {{"userAgent": "hangar/{} (x)"}}
     elif method in ("thread/start", "thread/resume"):
-        result = {{"thread": {{"id": "thread-new", "path": "/tmp/rollout-thread-new.jsonl"}}, "model": "gpt-test"}}
+        result = {{"thread": {{"id": "thread-new", "path": "/tmp/rollout-thread-new.jsonl", "status": {{"type": "idle"}}}}, "model": "gpt-test"}}
     else:
         result = {{}}
     print(json.dumps({{"id": msg["id"], "result": result}}), flush=True)
@@ -1402,9 +1502,9 @@ for line in sys.stdin:
     if method == "initialize":
         result = {{"userAgent": "hangar/{} (x)"}}
     elif method == "thread/resume" and os.path.exists(os.path.join(d, "tier")):
-        result = {{"thread": {{"id": "thread-new", "path": "/tmp/rollout-thread-new.jsonl"}}, "model": "gpt-test", "serviceTier": "default"}}
+        result = {{"thread": {{"id": "thread-new", "path": "/tmp/rollout-thread-new.jsonl", "status": {{"type": "idle"}}}}, "model": "gpt-test", "serviceTier": "default"}}
     elif method in ("thread/start", "thread/resume"):
-        result = {{"thread": {{"id": "thread-new", "path": "/tmp/rollout-thread-new.jsonl"}}, "model": "gpt-test"}}
+        result = {{"thread": {{"id": "thread-new", "path": "/tmp/rollout-thread-new.jsonl", "status": {{"type": "idle"}}}}, "model": "gpt-test"}}
     elif method == "thread/settings/update" and os.path.exists(os.path.join(d, "tier")):
         # Como o Codex: a troca de Fast chega também como aviso da thread, que o motor exige antes de conferir.
         send({{"method": "thread/settings/updated", "params": {{"threadId": "thread-new", "threadSettings": {{"serviceTier": msg["params"].get("serviceTier")}}}}}})
@@ -1867,23 +1967,24 @@ mod terminal_async {
         let store = Arc::new(InteractionStore::default());
         let handle = terminal_actor(dir.path(),cano,store.clone()).await;
         view_until(&handle,"assinada",|v|v["subscribed"] == true && question_open(v)).await;
-        // A mensagem comum entrou antes e fica barrada pela pergunta pendente.
+        // A pergunta assíncrona não segura a mensagem comum: ela sai na hora, como no Python.
         handle.queue("ordinary".into(),Action::Append { text:"segue".into(),delivered:false,ts:None,pre_transcript:false,entry_id:Some("ordinary".into()) }).await.unwrap();
+        until("a mensagem comum não espera a pergunta",||accepted(dir.path(),"ordinary")).await;
+        // Com o turno dela rodando, a resposta é reservada; gravada, a pessoa recebe "aceito" e o cartão fecha.
         let reply = answer(&handle,&store).await;
-        assert!(reply.disposition == Disposition::Unknown,"reservada não é entregue");
+        assert!(reply.disposition == Disposition::Accepted,"reserva gravada é resposta aceita");
         assert_eq!(reply.payload["reserved"],true);
         assert_eq!(reply.payload["decision_confirmed"],false);
         let entry = reply.payload["entry_id"].as_str().unwrap().to_owned();
         let state = queue_state(dir.path());
         assert_eq!(state.operations[&entry].entry_id.as_deref(),Some(entry.as_str()),"entrada e operação gravadas juntas");
-        until("turno da resposta reservada aceito",||accepted(dir.path(),&entry)).await;
-        assert_eq!(*starts.lock().unwrap(),vec![ANSWER.to_owned()],"só a reservada saiu");
-        assert_eq!(queue_state(dir.path()).rows.iter().find(|row|row["id"] == "ordinary").unwrap()["delivered"],false);
-        view_until(&handle,"a pergunta respondida sai das pendências",|v|!question_open(v)).await;
-        // Fim do turno: a comum segue, depois da reservada.
+        assert!(handle.view().await.unwrap()["public_state"]["codex_question"].is_null(),"o cartão respondido fecha");
+        assert!(!accepted(dir.path(),&entry),"reservada espera o fim do turno");
+        // Fim do turno: a reservada sai, uma vez.
         push.send(json!({"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1","status":"completed"}}})).unwrap();
-        until("mensagem comum depois da reservada",||accepted(dir.path(),"ordinary")).await;
-        assert_eq!(*starts.lock().unwrap(),vec![ANSWER.to_owned(),"segue".to_owned()]);
+        until("turno da resposta reservada aceito",||accepted(dir.path(),&entry)).await;
+        assert_eq!(*starts.lock().unwrap(),vec!["segue".to_owned(),ANSWER.to_owned()]);
+        view_until(&handle,"a pergunta respondida sai das pendências",|v|!question_open(v)).await;
         // O recibo no rollout confirma a entrada reservada pela operação dela.
         handle.confirm().await.unwrap();
         until("reservada confirmada pelo recibo",||queue_state(dir.path()).rows.iter().any(|row|row["id"] == entry.as_str() && row["confirmed"] == true)).await;
@@ -1991,7 +2092,7 @@ mod terminal_async {
         std::fs::set_permissions(&projection,std::fs::Permissions::from_mode(0o500)).unwrap();
         let reply = answer(&handle,&store).await;
         std::fs::set_permissions(&projection,std::fs::Permissions::from_mode(0o700)).unwrap();
-        assert!(reply.disposition == Disposition::Unknown,"gravada, a resposta não pode virar erro de envio");
+        assert!(reply.disposition == Disposition::Accepted,"gravada, a resposta não pode virar erro de envio");
         assert_eq!(reply.payload["reserved"],true);
         let entry = reply.payload["entry_id"].as_str().unwrap().to_owned();
         assert!(queue_state(dir.path()).operations.contains_key(&entry));
@@ -2000,6 +2101,49 @@ mod terminal_async {
         until("a reserva gravada sai",||accepted(dir.path(),&entry)).await;
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         assert_eq!(*starts.lock().unwrap(),vec![ANSWER.to_owned()],"exatamente uma vez");
+        handle.stop().await.unwrap();
+        drop(push);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn steer_with_text_and_no_turn_is_refused_and_leaves_no_queue_row() {
+        // `/steer` com texto vai direto ao `turn/steer` (Python): sem turno é recusa, nunca linha presa na fila.
+        let dir = tempfile::tempdir().unwrap();
+        let (handle,server,push,starts) = quiet_actor(dir.path()).await;
+        let refused = handle.command(RuntimeCommand { operation_id:"steer".into(),kind:OperationKind::Steer,payload:json!({"text":"mais curto","turn_id":null}) }).await;
+        assert!(refused.as_ref().is_err() || refused.as_ref().is_ok_and(|r|r.disposition == Disposition::Rejected),"{refused:?}");
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert!(queue_state(dir.path()).rows.is_empty(),"a orientação não vira linha na fila: {:?}",queue_state(dir.path()).rows);
+        // A fila segue livre: a próxima mensagem sai.
+        handle.queue("ordinary".into(),ordinary()).await.unwrap();
+        until("a fila não ficou travada",||accepted(dir.path(),"ordinary")).await;
+        assert_eq!(*starts.lock().unwrap(),vec!["segue".to_owned()]);
+        handle.stop().await.unwrap();
+        drop(push);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn steering_the_queue_leaves_the_reserved_answer_to_its_own_dispatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let rollout = dir.path().join("chat.jsonl");
+        std::fs::write(&rollout,"").unwrap();
+        let (cano,server,push,starts) = terminal_cano(rollout).await;
+        let store = Arc::new(InteractionStore::default());
+        let handle = terminal_actor(dir.path(),cano,store.clone()).await;
+        view_until(&handle,"assinada",|v|v["subscribed"] == true && question_open(v)).await;
+        handle.queue("ordinary".into(),ordinary()).await.unwrap();
+        until("turno da mensagem comum",||accepted(dir.path(),"ordinary")).await;
+        let entry = answer(&handle,&store).await.payload["entry_id"].as_str().unwrap().to_owned();
+        handle.queue("later".into(),Action::Append { text:"depois".into(),delivered:false,ts:None,pre_transcript:false,entry_id:Some("later".into()) }).await.unwrap();
+        let steered = handle.command(RuntimeCommand { operation_id:"steer-queue".into(),kind:OperationKind::SteerQueue,payload:json!({"entry_id":null}) }).await.unwrap();
+        assert_eq!(steered.payload["ids"],json!(["later"]),"só a mensagem comum orienta");
+        assert_eq!(queue_state(dir.path()).rows.iter().find(|row|row["id"] == entry.as_str()).unwrap()["delivered"],false,"a reservada espera a vez dela");
+        push.send(json!({"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1","status":"completed"}}})).unwrap();
+        until("a reservada sai pelo despacho dela",||accepted(dir.path(),&entry)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert_eq!(starts.lock().unwrap().iter().filter(|text|*text == ANSWER).count(),1,"a resposta sai uma vez");
         handle.stop().await.unwrap();
         drop(push);
         server.abort();

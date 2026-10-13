@@ -102,6 +102,8 @@ pub fn select_headless_answer(sent: &Result<RuntimeReply, RuntimeError>) -> Answ
     match sent {
         // O ator recusa a opção sem permissão em aberto com este código (não como resposta).
         Err(error) if error.code == "no_pending_permission" => failure("erro_opcao_nao_convergiu", MSG_NO_PERMISSION, json!({})),
+        // Opção que o cartão do Codex não tem: erro de quem respondeu, não falha de envio.
+        Err(error) if error.code == crate::runtime::codex::INVALID_ANSWER => failure("erro_codex_resposta_invalida", &error.message, json!({})),
         Err(error) => not_answered(&error.to_string()),
         Ok(reply) => match reply.disposition {
             Disposition::Accepted => ok(),

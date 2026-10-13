@@ -135,9 +135,23 @@ fn headless_state(row: &mut SessionRow, retrato: Option<&BTreeMap<String, Value>
     row.status_line = text("status_line");
     // O problema da vista (queda do socket, falha do runtime) aparece também na lista.
     if row.problema.is_none() { row.problema = text("problema"); }
-    if let Some(q) = state["codex_question"].as_object() {
-        row.state = "awaiting_input".into();
-        row.question = q["questions"][0]["question"].as_str().map(str::to_owned);
+    codex_question(row, state["codex_question"].as_object());
+    codex_pending(row, Some(retrato));
+}
+
+/// Pergunta do Codex na linha: com o turno rodando a assíncrona não troca "trabalhando" por espera
+/// (o motor já decide o estado), como na lista do Python.
+fn codex_question(row: &mut SessionRow, question: Option<&serde_json::Map<String, Value>>) {
+    let Some(q) = question else { return };
+    if row.state != "working" { row.state = "awaiting_input".into(); }
+    row.question = q.get("questions").and_then(|qs| qs[0]["question"].as_str()).map(str::to_owned);
+}
+
+/// Contagem de perguntas assíncronas sem resposta, do ator do Rust (os fatos do Python não o veem).
+fn codex_pending(row: &mut SessionRow, retrato: Option<&BTreeMap<String, Value>>) {
+    if let Some(count) = retrato.and_then(|r| r.get(&row.name)).filter(|s| s["error"].is_null())
+        .and_then(|s| s["view"]["pending_questions"].as_u64()) {
+        row.pending_questions = u32::try_from(count).unwrap_or(u32::MAX);
     }
 }
 
@@ -239,21 +253,27 @@ impl Classifier {
                 && facts.headless.is_some_and(|r| r.contains_key(&row.name));
             // Codex sem terminal com chat aberto: o feed do hub e o chat dizem o mesmo; sem ele, vale o
             // fato do Python (o mesmo espelho da vista do Rust). Contagem, conta e atividade seguem dos fatos.
+            // Sem o cliente Python, o fato dele infere "hooks não aprovados" de um turno no rollout sem marcador;
+            // o ator do Rust sabe o turno pelo app-server e não usa o marcador.
+            let rust_codex = row.provider == "codex" && facts.headless.is_some_and(|r| r.contains_key(&row.name));
+            if rust_codex && row.problema.as_deref() == Some("codex_hooks_nao_aprovados") { row.problema = None; }
             if row.provider == "codex" && (row.headless || rust_codex_terminal)
                 && let Some(ev) = facts.monitors.get(&row.name, sid(row).as_deref())
             {
                 from_monitor(row, &ev);
-                if let Some(q) = &ev.codex_question {
-                    row.state = "awaiting_input".into();
-                    row.question = q.get("questions").and_then(|qs| qs[0]["question"].as_str()).map(str::to_owned);
-                }
+                codex_question(row, ev.codex_question.as_ref());
+                codex_pending(row, facts.headless);
                 continue;
             }
             // Sem feed, o estado sai da vista do ator: o Python perdeu o cliente e o fato dele ficou para trás.
             if rust_codex_terminal {
+                // A vista do ator nasce sem linha de status até o primeiro turno; a do rollout (fato) cobre.
+                let from_rollout = row.status_line.take();
                 headless_state(row, facts.headless, None);
+                if row.status_line.is_none() { row.status_line = from_rollout; }
                 continue;
             }
+            if row.provider == "codex" && row.headless { codex_pending(row, facts.headless); }
             // Sem feed, a linha de status sai da vista do ator, a mesma do chat: a do fato vem do
             // rollout, com cache, e só vê o modelo novo no turno seguinte.
             if row.provider == "codex" && row.headless
@@ -348,6 +368,8 @@ impl Classifier {
                 if let Ok(pane) = &frames[k] { self.observe_permission(&row.name, pane, capture_bindings.get(&row.name).and_then(|result| result.as_ref().ok()), permission_revisions.get(&row.name).copied()).await; }
                 if let Some(runtime) = &self.plugin_runtime {
                     let observed = async {
+                        // `claude` aberto à mão, sem entrada no Rust: não há resposta a identificar, nem problema.
+                        if !runtime.has_entry(None, &row.name).await { return Ok(None); }
                         let binding = runtime.interaction_binding_readonly(&row.name).await.map_err(|e| e.code)?;
                         if capture_bindings.get(&row.name).and_then(|result| result.as_ref().ok()) != Some(&binding) { return Err("erro_interacao_desatualizada".into()); }
                         let target = runtime.terminal_target(&row.name).await.map_err(|e| e.code)?.ok_or("terminal_target_missing")?;
@@ -589,6 +611,20 @@ mod tests {
         assert_eq!(row2.state, "working");
     }
 
+    /// Parity M12: `claude` aberto à mão (sem entrada no Rust) não ganha o aviso `runtime_binding`.
+    #[tokio::test]
+    async fn hand_opened_claude_without_rust_entry_has_no_false_problem() {
+        let (_d, dirs, mut row) = setup("awaiting_input", 900.0);
+        let io = Fixed { frame: Ok(IDLE.into()), wall: 1000.0, calls: Mutex::new(0) };
+        let hooks = HookStates::load(&dirs);
+        let facts = Facts { hooks: &hooks, alive: &|_| false, config_dirs: &dirs, headless: Some(&BTreeMap::new()),
+                            problems: &BTreeMap::new(), stall_seconds: 300.0, monitors: &Published::default() };
+        let mut classifier = Classifier::default();
+        classifier.set_plugin_runtime(std::sync::Arc::new(crate::runtime::gateway::RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(), "t".into(), "i".into())));
+        classifier.classify(std::slice::from_mut(&mut row), &facts, &io).await;
+        assert_eq!(row.problema, None);
+    }
+
     #[tokio::test]
     async fn uses_monitor_state_when_alive() {
         // Marcador awaiting manda capturar; com `Monitor` vivo, vale o que ele publicou, sem captura.
@@ -764,6 +800,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn codex_terminal_of_the_rust_keeps_the_rollout_status_line_and_drops_the_stale_hooks_warning() {
+        // Depois de reiniciar, a vista do ator só tem linha de status no primeiro turno: a do rollout (fato)
+        // fica. O "hooks não aprovados" do fato vem de o Python não ter mais o cliente: o ator não usa o marcador.
+        let row = serde_json::from_value::<SessionRow>(serde_json::json!({"name": "cx", "provider": "codex", "headless": false,
+            "state": "idle", "jsonl": "/x/rollout-abc.jsonl", "status_line": "🤖 gpt (high) │ 💬 46k/95", "problema": "codex_hooks_nao_aprovados"})).unwrap();
+        let hooks = HookStates::default();
+        let problems = BTreeMap::new();
+        let io = Fixed { frame: Ok(String::new()), wall: 1000.0, calls: Mutex::new(0) };
+        let owned = BTreeMap::from([("cx".to_owned(), serde_json::json!({"error": null, "view": {"alive": true, "headless": false,
+            "public_state": {"state": "working", "status_line": null, "headless": false}}}))]);
+        let monitors = Published::default();
+        let facts = Facts { hooks: &hooks, alive: &|_| false, config_dirs: &[], headless: Some(&owned),
+                            problems: &problems, stall_seconds: 1e12, monitors: &monitors };
+        let mut rust = row;
+        Classifier::default().classify(std::slice::from_mut(&mut rust), &facts, &io).await;
+        assert_eq!(rust.state, "working");
+        assert_eq!(rust.status_line.as_deref(), Some("🤖 gpt (high) │ 💬 46k/95"));
+        assert_eq!(rust.problema, None);
+    }
+
+    #[tokio::test]
     async fn codex_headless_reads_the_feed() {
         // Linha do Codex sem terminal com o feed vivo: estado e pergunta dele; sem feed, o fato do Python.
         let row = || -> SessionRow { serde_json::from_value(serde_json::json!({"name": "cx", "provider": "codex", "headless": true,
@@ -782,9 +839,22 @@ mod tests {
             state: "working".into(), status_line: Some("gpt".into()), codex_question: question.as_object().cloned(), ..Default::default() }));
         let mut with = row();
         Classifier::default().classify(std::slice::from_mut(&mut with), &facts, &io).await;
+        // Turno rodando: a pergunta assíncrona aparece, mas a sessão segue trabalhando (como no Python).
         assert_eq!((with.state.as_str(), with.question.as_deref(), with.status_line.as_deref()),
-                   ("awaiting_input", Some("Qual caminho?"), Some("gpt")));
-        assert_eq!(with.pending_questions, without.pending_questions, "contagem segue dos fatos");
+                   ("working", Some("Qual caminho?"), Some("gpt")));
+        assert_eq!(with.pending_questions, without.pending_questions, "sem o ator no retrato, a contagem segue dos fatos");
+        // Ocioso com a pergunta: espera.
+        monitors.set(2, "cx", Some("rollout-abc".into()), std::sync::Arc::new(hangar_api::state::StateEvent {
+            state: "idle".into(), codex_question: question.as_object().cloned(), ..Default::default() }));
+        let mut idle = row();
+        Classifier::default().classify(std::slice::from_mut(&mut idle), &facts, &io).await;
+        assert_eq!(idle.state, "awaiting_input");
+        // Com o ator no retrato, a contagem vem dele: os fatos do Python não enxergam sessão do Rust.
+        let owned = BTreeMap::from([("cx".to_owned(), serde_json::json!({"error": null, "view": {"alive": true, "pending_questions": 1,
+            "public_state": {"state": "idle"}}}))]);
+        let mut counted = row();
+        Classifier::default().classify(std::slice::from_mut(&mut counted), &Facts { headless: Some(&owned), ..facts }, &io).await;
+        assert_eq!(counted.pending_questions, 1);
         assert_eq!(*io.calls.lock().unwrap(), 0);
     }
 

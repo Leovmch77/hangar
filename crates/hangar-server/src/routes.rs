@@ -314,6 +314,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/sessions/{name}/model", axum::routing::post(crate::session_write::codex::model).fallback(pass_any))
         .route("/api/sessions/{name}/service-tier", axum::routing::post(crate::session_write::codex::service_tier).fallback(pass_any))
         .route("/api/sessions/{name}/codex/mode", axum::routing::post(crate::session_write::codex::mode).fallback(pass_any))
+        .route("/api/sessions/{name}/codex/plan/implement", axum::routing::post(crate::session_write::codex::plan_implement).fallback(pass_any))
         .route("/api/sessions/{name}/limits", get(crate::session_write::codex::limits).fallback(pass_any))
         .route("/api/sessions/{name}/question/skip", axum::routing::post(crate::session_write::codex::skip_question).fallback(pass_any))
         .route("/api/sessions/{name}/commands", get(crate::session_write::codex::commands).fallback(pass_any))

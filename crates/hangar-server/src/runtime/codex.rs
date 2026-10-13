@@ -88,6 +88,11 @@ impl AsyncQuestions {
         } else if let wire::ThreadItem::UserMessage { content,.. } = item {
             let text = content.iter().filter_map(|block|match block { wire::UserInput::Text { text }=>Some(text.as_str()),_=>None }).collect::<String>();
             if let Some(count) = self.echoes.get_mut(&text).filter(|c|**c > 0) { *count -= 1; return; }
+            // O formato que o Hangar escreve (e o do histórico antigo) cita o título; cada resposta consome uma pergunta só.
+            let quoted = self.pending.iter().find(|(_,question)|question["questions"][0]["question"].as_str()
+                .and_then(|title|text.strip_prefix(&format!("> {title}\n\n"))).is_some_and(|answer|!answer.trim().is_empty()))
+                .map(|(id,_)|id.clone());
+            if let Some(id) = quoted { self.resolve(&id); return; }
             let text = text.trim();
             if let Some(body) = text.strip_prefix("<send_user_message_question_reply>").and_then(|s|s.strip_suffix("</send_user_message_question_reply>")) {
                 if let Ok(Value::Array(replies)) = serde_json::from_str::<Value>(body) {
@@ -138,9 +143,14 @@ pub struct Engine {
     connected:bool,
     /// Terminal: o `thread/resume` colou e os eventos da thread chegam. Sem terminal `ready` cobre os dois.
     subscribed:bool,
+    /// A conversa já disse se há turno (ativa/ociosa; no terminal, também a ausência de rollout). Antes
+    /// disso um `turn/start` do terminal poderia cair em cima do turno da TUI, e trocar o sandbox sem
+    /// terminal (que reinicia o processo) poderia matar um turno vivo.
+    turn_known:bool,
     /// Próxima tentativa de assinar (relógio monotônico); só a ausência do rollout agenda outra.
     subscribe_due:Option<f64>,
     subscribe_wait:f64,
+    subscribe_warned:bool,
     /// Terminal: quando o último `turn/start` foi aceito. Sem assinatura não chega `turn/completed`.
     in_progress_since:Option<f64>,
     rollout_path:Option<String>,
@@ -187,9 +197,17 @@ pub struct Engine {
     /// Terminal: respostas assíncronas reservadas na fila, na ordem em que entraram.
     reservations:Vec<Reservation>,
     skill_preparations:BTreeMap<RequestId,RuntimeCommand>,
+    /// "Pular" esperando a gravação: patch → (operação, pergunta). Só responde depois de gravado.
+    skips:BTreeMap<RequestId,(String,String)>,
+    /// Último evento da conversa: turno calado por muito tempo é conferido no app-server.
+    last_event:f64,
 }
 
 fn error(message:&str) -> RuntimeError { RuntimeError::new("codex_command",message) }
+/// Resposta que não serve para a pergunta (vazia, fora das opções, já respondida): o erro é de quem
+/// respondeu, não do envio — a rota a mostra como resposta inválida (409), como o `ValueError` do Python.
+pub const INVALID_ANSWER:&str = "codex_answer_invalid";
+fn invalid_answer(message:&str) -> RuntimeError { RuntimeError::new(INVALID_ANSWER,message) }
 
 /// Recusa com terminal do que só existe relançando o app-server (reinício, sandbox/permissão, troca de modo de abertura).
 pub const TERMINAL_RELAUNCH:&str = "codex_terminal_relaunch";
@@ -239,6 +257,10 @@ const SUBSCRIBE_RETRY_MAX:f64 = 10.0;
 /// Teto do turno numa sessão terminal não assinada, o `UNSUBSCRIBED_TURN_TTL` do adapter Python.
 const UNSUBSCRIBED_TURN_TTL:f64 = 300.0;
 
+/// Turno sem nenhum evento por este tempo é conferido por `thread/read`: um `turn/completed` perdido com a
+/// conexão viva deixava a sessão trabalhando para sempre (o Python destravava pelo marcador do hook).
+const TURN_PROBE_AFTER:f64 = 60.0;
+
 /// Thread sem turno ainda não tem rollout: o `resume` a recusa até o primeiro turno gravar o arquivo.
 fn missing_rollout(message:&str) -> bool { message.contains("no rollout found") }
 
@@ -253,6 +275,15 @@ fn primary_thread(thread:&Value,cwd:Option<&str>) -> bool {
 }
 
 fn retry_problem(problem:Option<&str>) -> bool { matches!(problem,Some("codex_sem_conexao" | "codex_limite_uso")) }
+/// Problemas do turno: somem quando a resposta chega ou um item novo do turno começa, como no Python.
+fn turn_problem(problem:Option<&str>) -> bool {
+    matches!(problem,Some("codex_sem_conexao" | "codex_limite_uso" | "codex_sem_login" | "headless_turno_erro" | "codex_prompt_bloqueado"))
+}
+/// Detalhe do erro do turno: o `additionalDetails` pode ser a página HTML do provedor; só a primeira linha serve.
+fn error_detail(error:&wire::TurnError) -> Option<String> {
+    let text = error.additional_details.as_deref().filter(|d|!d.trim().is_empty()).unwrap_or(&error.message).trim();
+    Some(text.lines().next().unwrap_or("").chars().take(300).collect::<String>()).filter(|d|!d.is_empty())
+}
 
 /// Pedido do servidor guardado cru (vai ao snapshot como veio), lido pelo tipo na hora de mostrar.
 fn decoded(request:&Value) -> wire::ServerRequest {
@@ -338,12 +369,12 @@ fn field_question(field:&Field) -> Value {
 fn form_content(fields:&[Field],response:&Value) -> Result<Value,RuntimeError> {
     let mut content = serde_json::Map::new();
     for field in fields {
-        let text = response["answers"][&field.id]["answers"][0].as_str().ok_or_else(||error("responda a todas as perguntas"))?;
+        let text = response["answers"][&field.id]["answers"][0].as_str().ok_or_else(||invalid_answer("responda a todas as perguntas"))?;
         let value = match &field.kind {
-            FieldKind::Choice(choices) => choices.iter().find(|(label,_)|label == text).map(|(_,v)|v.clone()).ok_or_else(||error("opção inválida"))?,
+            FieldKind::Choice(choices) => choices.iter().find(|(label,_)|label == text).map(|(_,v)|v.clone()).ok_or_else(||invalid_answer("opção inválida"))?,
             FieldKind::Bool => json!(text == "sim"),
-            FieldKind::Number(true) => json!(text.trim().parse::<i64>().map_err(|_|error("informe um número inteiro"))?),
-            FieldKind::Number(false) => json!(text.trim().parse::<f64>().ok().filter(|n|n.is_finite()).ok_or_else(||error("informe um número"))?),
+            FieldKind::Number(true) => json!(text.trim().parse::<i64>().map_err(|_|invalid_answer("informe um número inteiro"))?),
+            FieldKind::Number(false) => json!(text.trim().parse::<f64>().ok().filter(|n|n.is_finite()).ok_or_else(||invalid_answer("informe um número"))?),
             FieldKind::Text => json!(text),
         };
         content.insert(field.id.clone(),value);
@@ -399,12 +430,15 @@ impl Engine {
         let subscribed = !headless && metadata["subscribed"] == true;
         Self { interactions:None,generation,clock,counter:metadata["runtime_counter"].as_u64().unwrap_or(0),headless,
             alive:true,initialized:metadata["initialized"] == true,ready:if headless { metadata["ready"] == true } else { subscribed },
-            connected:!headless && metadata["connected"] == true,subscribed,subscribe_due:None,subscribe_wait:SUBSCRIBE_RETRY_BASE,in_progress_since:None,
+            connected:!headless && metadata["connected"] == true,subscribed,turn_known:if headless { metadata["ready"] == true } else { metadata["connected"] == true },subscribe_due:None,subscribe_wait:SUBSCRIBE_RETRY_BASE,subscribe_warned:false,in_progress_since:None,
             rollout_path:string(&metadata["rollout_path"]),reconnect:false,fresh_process:false,
             thread_id:metadata["thread_id"].as_str().unwrap_or("").into(),turn_id:None,in_progress:false,
             state:StateEvent { session:metadata["name"].as_str().unwrap_or("").into(),state:"idle".into(),headless,
                 status_line:string(&metadata["status_line"]),..StateEvent::default() },state_revision:metadata["state_revision"].as_u64().unwrap_or(0),settings_revision:metadata["settings_revision"].as_u64().unwrap_or(0),
-            model:string(&metadata["model"]),effort:string(&metadata["effort"]),mode:string(&metadata["mode"]),
+            model:string(&metadata["model"]),effort:string(&metadata["effort"]),
+            // Transferida sem modo gravado: o `previous_non_plan` da transferência diz se ela veio em plan (como o Python ao assinar).
+            mode:string(&metadata["mode"]).or_else(||metadata["transfer_id"].as_str().filter(|id|!id.is_empty())
+                .map(|_|if metadata["previous_non_plan"].as_str().is_some_and(|p|!p.is_empty()) { "plan".into() } else { "default".into() })),
             service_tier:metadata.get("service_tier").and_then(service_tier),service_tier_pending:None,
             // Com terminal o sidecar guarda a abertura, não o modo de agora. Sem terminal, o desconhecido
             // já foi recusado no `new_checked`; em nenhum dos dois vira Full Access.
@@ -412,7 +446,7 @@ impl Engine {
             preview:LiveBuffer::default(),response_started:false,first_response_start:None,compacting:false,
             running_commands:BTreeMap::new(),thinking:LiveBuffer::default(),was_working:metadata["in_progress"] == true,
             rpc:BTreeMap::new(),server_requests:Vec::new(),
-            request_epochs:BTreeMap::new(),answering:BTreeSet::new(),lost_requests:BTreeSet::new(),wires:BTreeMap::new(),policies:BTreeMap::new(),last_format_request:None,format_gate:FormatGate::default(),reported_formats:BTreeSet::new(),async_questions,reservations:Vec::new(),skill_preparations:BTreeMap::new(),metadata }
+            request_epochs:BTreeMap::new(),answering:BTreeSet::new(),lost_requests:BTreeSet::new(),wires:BTreeMap::new(),policies:BTreeMap::new(),last_format_request:None,format_gate:FormatGate::default(),reported_formats:BTreeSet::new(),async_questions,reservations:Vec::new(),skill_preparations:BTreeMap::new(),skips:BTreeMap::new(),last_event:clock.monotonic_s,metadata }
     }
 
     pub fn view(&self) -> Value {
@@ -446,7 +480,7 @@ impl Engine {
                 request(InteractionKind::Question,&|r|r["method"] == "item/tool/requestUserInput" || form_fields(r).is_some())
             } else {
                 store.and_then(|(key,store)| {
-                    let (id,question) = self.async_questions.pending.first().ok_or(InteractionError::Unavailable)?;
+                    let (id,question) = self.shown_async().ok_or(InteractionError::Unavailable)?;
                     store.observe(&binding(key),&native_target(InteractionKind::Question,&self.thread_id,&json!(id)),Some(question.clone()))?
                         .ok_or(InteractionError::Unavailable)
                 })
@@ -461,7 +495,7 @@ impl Engine {
 
     fn shown_state(&self) -> StateEvent {
         let mut state = self.state.clone();
-        let question = self.blocking_question().or_else(||self.async_questions.pending.first().map(|(_,q)|q.clone()));
+        let question = self.blocking_question().or_else(||self.shown_async().map(|(_,q)|q.clone()));
         let pending_approval = self.server_requests.iter().find(|(_,r)|is_card(r));
         state.state = if !self.alive { "dead" } else if self.blocking_question().is_some() || pending_approval.is_some()
             || question.is_some() && !self.in_progress { "awaiting_input" } else if self.in_progress { "working" } else { "idle" }.into();
@@ -514,6 +548,11 @@ impl Engine {
         state
     }
 
+    /// Pergunta assíncrona sem resposta registrada: a reservada na fila já foi respondida pela pessoa.
+    fn shown_async(&self) -> Option<&(String,Value)> {
+        self.async_questions.pending.iter().find(|(id,_)|!self.reservations.iter().any(|r|r.reservation.request_id == *id))
+    }
+
     pub fn control_view(&self) -> Value {
         json!({"alive":self.alive,"initialized":self.initialized,"ready":self.ready,"in_progress":self.in_progress,
             "headless":self.headless,"connected":self.connected,"subscribed":self.subscribed,"rollout_path":self.rollout_path,
@@ -524,7 +563,8 @@ impl Engine {
             "async_questions":self.async_questions.pending,"async_local_answers":self.async_questions.local_answers,
             "async_seen":self.async_questions.seen,"async_resolved":self.async_questions.resolved,
             "async_echoes":self.async_questions.echoes,"async_during_load":self.async_questions.during_load,
-            "skipped_async_questions":self.async_questions.skipped})
+            "skipped_async_questions":self.async_questions.skipped,
+            "pending_questions":self.async_questions.pending.iter().filter(|(id,_)|!self.reservations.iter().any(|r|r.reservation.request_id == *id)).count()})
     }
 
     fn blocking_question(&self) -> Option<Value> {
@@ -552,9 +592,10 @@ impl Engine {
     }
 
     /// Terminal envia conectado, antes de assinar: o rollout que a assinatura exige nasce desse primeiro turno.
-    fn sendable(&self) -> bool { if self.headless { self.ready } else { self.initialized && self.connected && !self.thread_id.is_empty() } }
+    fn sendable(&self) -> bool { if self.headless { self.ready } else { self.initialized && self.connected && self.turn_known && !self.thread_id.is_empty() } }
 
-    fn deliverable(&self) -> bool { self.async_dispatch_ready() && self.async_questions.pending.is_empty() }
+    /// Pergunta assíncrona não segura mensagem comum: ela vira turno novo, como no Python.
+    fn deliverable(&self) -> bool { self.async_dispatch_ready() }
 
     /// Tudo o que segura um turno novo, menos as perguntas assíncronas: a resposta reservada de uma
     /// delas não pode esperar a si mesma.
@@ -566,7 +607,7 @@ impl Engine {
 
     fn async_pending(&self,request_id:&str) -> bool { self.async_questions.pending.iter().any(|(id,_)|id == request_id) }
 
-    /// Só a primeira reserva apta, pela ordem da fila; mensagem comum continua barrada pelo `deliverable`.
+    /// Só a primeira reserva apta, pela ordem da fila; o ator a manda antes da mensagem comum.
     pub fn ready_async_answer_entry(&self) -> Option<String> {
         if self.headless || !self.async_dispatch_ready() { return None; }
         self.reservations.iter().find(|r|r.state == ReservationState::Reserved && self.async_pending(&r.reservation.request_id))
@@ -627,12 +668,13 @@ impl Engine {
         if self.policies.remove(request_id).as_deref() == Some("format_status") { self.format_gate.reset(); }
     }
 
-    fn policy(&mut self,kind:&str,payload:Value,effects:&mut Vec<Effect>) {
+    fn policy(&mut self,kind:&str,payload:Value,effects:&mut Vec<Effect>) -> RequestId {
         self.counter += 1;
         let request_id = RequestId::String(format!("policy:{}:{}",self.generation,self.counter));
         self.policies.insert(request_id.clone(),kind.into());
         if kind == "format_status" { self.last_format_request = Some(request_id.clone()); }
-        effects.push(Effect::Policy { kind:kind.into(),request_id,payload });
+        effects.push(Effect::Policy { kind:kind.into(),request_id:request_id.clone(),payload });
+        request_id
     }
 
     fn changed(&mut self,effects:&mut Vec<Effect>,format:bool) {
@@ -846,7 +888,7 @@ impl Engine {
                 Err(failure) => tracing::warn!(session=%self.state.session,code=%failure.code,"escrita não enviada sem desfecho na queda"),
             }
         }
-        self.connected = false; self.subscribed = false; self.ready = false; self.subscribe_due = None;
+        self.connected = false; self.subscribed = false; self.ready = false; self.subscribe_due = None; self.turn_known = false;
         self.clear_preview(&mut effects);
         self.lost_requests.extend(self.server_requests.iter().map(|(id,_)|id.clone()));
         self.server_requests.clear(); self.answering.clear(); self.request_epochs.clear();
@@ -858,7 +900,8 @@ impl Engine {
             if rpc.timed_out { continue; }
             effects.push(Effect::Reply { operation_id:rpc.operation_id.clone(),disposition:Disposition::Unknown,payload:json!({"error":"a conexão com o Codex caiu"}) });
             if let Some(parent) = rpc.continuation.as_ref().and_then(|next|next["parent"].as_str()) {
-                effects.push(Effect::Reply { operation_id:parent.into(),disposition:Disposition::Unknown,payload:json!({"error":"a conexão com o Codex caiu"}) });
+                let disposition = if skill_parent(&rpc).is_some() { Disposition::Deferred } else { Disposition::Unknown };
+                effects.push(Effect::Reply { operation_id:parent.into(),disposition,payload:json!({"error":"a conexão com o Codex caiu"}) });
             }
         }
         for entry in uncertain { self.set_reservation(&entry,ReservationState::Uncertain); }
@@ -874,6 +917,7 @@ impl Engine {
         self.reconnect = reconnect;
         self.ready = false;
         self.connected = false; self.subscribed = false; self.subscribe_due = None; self.subscribe_wait = SUBSCRIBE_RETRY_BASE;
+        self.turn_known = false;
         let mut effects = Vec::new();
         let request = ClientRequest::Initialize(wire::InitializeParams {
             client_info:wire::ClientInfo { name:"hangar".into(),title:None,version:"0.1.0".into() },
@@ -899,6 +943,10 @@ impl Engine {
 
     fn schedule_subscribe(&mut self) {
         if self.headless || !self.connected || self.subscribed { return; }
+        // Cerca de 10 tentativas cobrem o primeiro turno gravar o rollout; passar disso é erro permanente (Python).
+        if self.subscribe_wait >= SUBSCRIBE_RETRY_MAX && !std::mem::replace(&mut self.subscribe_warned,true) {
+            tracing::warn!(session=%self.state.session,"o Codex não assinou a conversa da TUI depois de várias tentativas; sem turno, prévia nem linha de status até assinar");
+        }
         self.subscribe_due = Some(self.clock.monotonic_s + self.subscribe_wait);
         self.subscribe_wait = (self.subscribe_wait * 1.5).min(SUBSCRIBE_RETRY_MAX);
     }
@@ -934,11 +982,15 @@ impl Engine {
         if self.headless || !self.connected || self.subscribed || rpc.params["threadId"] != self.thread_id.as_str() { return; }
         let Some(response) = response else {
             let message = if invalid { error.as_str().unwrap_or("") } else { line["error"]["message"].as_str().unwrap_or("") };
-            if !invalid && missing_rollout(message) { self.schedule_subscribe(); } else { self.subscription_failed(message,effects); }
+            if !invalid && missing_rollout(message) {
+                // Sem rollout a conversa nunca teve turno: o primeiro envio é o que o cria.
+                self.schedule_subscribe();
+                if !std::mem::replace(&mut self.turn_known,true) { effects.push(Effect::WakeQueue); }
+            } else { self.subscription_failed(message,effects); }
             self.changed(effects,false);
             return;
         };
-        self.subscribed = true; self.ready = true; self.subscribe_due = None; self.subscribe_wait = SUBSCRIBE_RETRY_BASE;
+        self.subscribed = true; self.ready = true; self.turn_known = true; self.subscribe_due = None; self.subscribe_wait = SUBSCRIBE_RETRY_BASE;
         if self.state.problema.as_deref() == Some("codex_conversa_nao_abriu") { self.state.problema = None; self.state.problema_detalhe = None; }
         if let Some(path) = response.thread.path.clone().filter(|path|!path.is_empty()) { self.rollout_path = Some(path); }
         if rpc.settings_revision == self.settings_revision {
@@ -978,7 +1030,7 @@ impl Engine {
         self.reservations.clear();
         self.state.problema = None; self.state.problema_detalhe = None;
         // A conversa nova também nasce sem rollout: assina de novo, e o envio segue liberado pela mesma conexão.
-        self.subscribed = false; self.ready = false; self.subscribe_wait = SUBSCRIBE_RETRY_BASE;
+        self.subscribed = false; self.ready = false; self.subscribe_wait = SUBSCRIBE_RETRY_BASE; self.turn_known = true;
         self.policy("session.patch_meta",json!({"thread_id":self.thread_id,"rollout_path":self.rollout_path}),effects);
         self.subscribe(effects);
         self.changed(effects,true);
@@ -1042,6 +1094,8 @@ impl Engine {
         let Some(next) = rpc.continuation.as_ref().filter(|next|next["kind"] == "bootstrap_thread") else { return false };
         // Cano vivo com thread ainda sem turno: ela já está carregada nele, e o `resume` só a recusa por não ter rollout.
         if !self.fresh_process && rpc.method == "thread/resume" && message.contains("no rollout found") {
+            // Sem rollout a conversa nunca teve turno.
+            self.turn_known = true;
             self.async_questions.hydrate(&self.thread_id,&json!({}));
             self.thread_opened(next["parent"].as_str().unwrap_or(""),effects);
             self.changed(effects,true);
@@ -1182,7 +1236,14 @@ impl Engine {
                     return Ok(effects);
                 }
                 let text = payload["text"].as_str().filter(|s|!s.trim().is_empty()).ok_or_else(||error("a orientação não pode estar vazia"))?;
-                let turn = payload["turn_id"].as_str().or(self.turn_id.as_deref()).ok_or_else(||error("não há turno em andamento para orientar"))?;
+                let Some(turn) = payload["turn_id"].as_str().or(self.turn_id.as_deref()) else {
+                    // Adotada no meio do turno o `resume` vem sem turnos: o id sai do `thread/read`, como no Python.
+                    if !self.in_progress || payload["turn_read"] == true { return Err(error("não há turno em andamento para orientar")); }
+                    let next = json!({"kind":"steer","parent":id,"command":{"operation_id":id,"kind":"steer","payload":payload}});
+                    self.send(format!("{id}:read"),self.thread_read(true),Some(next),&mut effects);
+                    self.changed(&mut effects,false);
+                    return Ok(effects);
+                };
                 if !self.in_progress { return Err(error("não há turno em andamento para orientar")); }
                 let request = ClientRequest::TurnSteer(wire::TurnSteerParams { thread_id:self.thread_id.clone(),
                     expected_turn_id:turn.into(),input:input_of(&payload,text) });
@@ -1241,7 +1302,7 @@ impl Engine {
                     .cloned().ok_or_else(||runtime_error(InteractionError::Changed))?;
                 self.check_request(&expected,InteractionKind::Approval,&request_id,&request)?;
                 let option = payload["option"].as_u64().ok_or_else(||error("opção inválida"))?;
-                let invalid = || error("opção inválida");
+                let invalid = || invalid_answer("opção inválida");
                 let result = match request["method"].as_str().unwrap_or("") {
                     "item/permissions/requestApproval" => {
                         let granted = request["params"]["permissions"].clone();
@@ -1253,7 +1314,8 @@ impl Engine {
                         }
                     }
                     ELICITATION => match option { 1=>json!({"action":"accept"}),2=>json!({"action":"cancel"}),_=>return Err(invalid()) },
-                    _ => json!({"decision":match option { 1=>"accept",2=>"decline",3 if !unreadable_command(&request)=>"acceptForSession",_=>return Err(invalid()) }}),
+                    // Como no Python: fora de "Permitir" e "Sempre permitir" é negar. Comando ilegível não tem o "Sempre".
+                    _ => json!({"decision":match option { 1=>"accept",3 if unreadable_command(&request)=>return Err(invalid()),3=>"acceptForSession",_=>"decline" }}),
                 };
                 self.answer(id.clone(),request_id,result,None,&mut effects)?;
                 self.wires.get_mut(&id).unwrap().interaction = Some(expected);
@@ -1264,7 +1326,7 @@ impl Engine {
                     .map_err(|_|runtime_error(InteractionError::Changed))?;
                 if let RequestId::String(request) = &request_id {
                     if request.starts_with("async:") {
-                        let question = self.async_questions.pending.iter().find(|(key,_)|key == request).map(|(_,q)|q.clone()).ok_or_else(||error("a pergunta já foi respondida ou pertence a outra conversa"))?;
+                        let question = self.async_questions.pending.iter().find(|(key,_)|key == request).map(|(_,q)|q.clone()).ok_or_else(||invalid_answer("a pergunta já foi respondida ou pertence a outra conversa"))?;
                         expected.check(&native_target(InteractionKind::Question,&self.thread_id,&json!(request_id)),&question,None).map_err(runtime_error)?;
                         let response = question_response(&question,&payload["answers"])?;
                         let answer = response["answers"]["answer"]["answers"][0].as_str().unwrap_or("");
@@ -1317,10 +1379,12 @@ impl Engine {
                     let RequestId::String(request) = request_id else { return Err(runtime_error(InteractionError::Changed)); };
                     let (_,question) = self.async_questions.pending.iter().find(|(key,_)|key == &request).ok_or_else(||runtime_error(InteractionError::Changed))?;
                     expected.check(&native_target(InteractionKind::Question,&self.thread_id,&json!(request)),question,None).map_err(runtime_error)?;
-                    // Sem escrita nativa: validação e retirada ficam na mesma rodada do dono.
-                    self.async_questions.skipped.insert(request.clone()); self.async_questions.resolve(&request);
-                    self.policy("session.patch_meta",json!({"skipped_async_questions":self.async_questions.skipped}),&mut effects);
-                    effects.push(Effect::Reply { operation_id:id,disposition:Disposition::Accepted,payload:json!({}) });
+                    if self.skips.values().any(|(_,skipping)|*skipping == request) { return Err(invalid_answer("a pergunta já está sendo pulada")); }
+                    // Sem escrita nativa, o "Pular" só existe no arquivo da sessão: grava antes de esconder e só
+                    // então responde, como no Python; a vista já leva a lista nova para o patch não sair velho.
+                    self.async_questions.skipped.insert(request.clone());
+                    let patch = self.policy("session.patch_meta",json!({"skipped_async_questions":self.async_questions.skipped}),&mut effects);
+                    self.skips.insert(patch,(id,request));
                 }
             }
             OperationKind::DispatchAsyncAnswer => {
@@ -1349,7 +1413,7 @@ impl Engine {
                     &format!("modo desconhecido: {wanted} (os modos são: {})",MODES.join(", "))))?;
                 // O `approvalPolicy` vale no próximo turno; o sandbox só muda subindo o processo de novo.
                 if sandbox(mode) != sandbox(self.launch_mode()) {
-                    if !self.ready { return Err(error("não foi possível confirmar o estado do turno; permissão mantida")); }
+                    if !self.ready || !self.turn_known { return Err(error("não foi possível confirmar o estado do turno; permissão mantida")); }
                     if self.in_progress || !self.server_requests.is_empty() {
                         return Err(RuntimeError::new("erro_permissao_ocupada","a sessão está trabalhando; mudar o sandbox reiniciaria o Codex — espere ela terminar"));
                     }
@@ -1430,6 +1494,13 @@ impl Engine {
                     let answered = server.is_some();
                     if let Some(id) = server {
                         if outcome == WriteOutcome::NotWritten && self.request_epochs.get(&id).copied() == server_epoch { self.answering.remove(&id); }
+                        // Recusa automática que não chegou: o turno pode ficar preso esperando por ela, e a pessoa precisa saber.
+                        let refused = self.server_requests.iter().find(|(key,_)|key == &id).filter(|(_,request)|unsupported_notice(request).is_some())
+                            .and_then(|(_,request)|request["method"].as_str()).map(str::to_owned);
+                        if let Some(method) = refused.filter(|_|self.headless && outcome != WriteOutcome::Written) {
+                            let why = if outcome == WriteOutcome::NotWritten { "não foi escrita" } else { "sem confirmação" };
+                            self.policy("local_output",json!({"text":format!("O Codex pediu `{method}`, que a sessão sem terminal não atende, e a recusa não chegou nele ({why}). O turno pode ficar preso; interrompa se não andar.")}),&mut effects);
+                        }
                         // Com terminal a escrita não decide nada: a TUI pode ter respondido antes, e o pedido só sai no `serverRequest/resolved`.
                         if self.headless && outcome == WriteOutcome::Written && self.request_epochs.get(&id).copied() == server_epoch {
                             let notice = self.server_requests.iter().find(|(key,_)|key == &id).and_then(|(_,request)|unsupported_notice(request));
@@ -1438,6 +1509,8 @@ impl Engine {
                         }
                     }
                     let reserved = request_id.as_ref().and_then(|id|self.rpc.get(id)).and_then(reserved_entry);
+                    let input = request_id.as_ref().and_then(|id|self.rpc.get(id)).is_some_and(input_turn);
+                    let skill = request_id.as_ref().and_then(|id|self.rpc.get(id)).and_then(skill_parent);
                     if outcome == WriteOutcome::NotWritten {
                         // Assinatura que nem saiu tenta de novo na espera crescente, senão a sessão ficaria surda calada.
                         if let Some(id) = request_id { if self.rpc.remove(&id).is_some_and(|rpc|subscribe_rpc(&rpc)) { self.schedule_subscribe(); } }
@@ -1452,7 +1525,7 @@ impl Engine {
                     } else {
                         match outcome { WriteOutcome::Written=>Disposition::Accepted,
                             // Reserva que não saiu volta à fila pela mesma operação; a pergunta é conferida de novo.
-                            WriteOutcome::NotWritten if reserved.is_some() => Disposition::Deferred,
+                            WriteOutcome::NotWritten if reserved.is_some() || input => Disposition::Deferred,
                             WriteOutcome::NotWritten=>Disposition::Rejected,WriteOutcome::Unknown=>Disposition::Unknown }
                     };
                     if let Some(entry) = &reserved {
@@ -1460,6 +1533,9 @@ impl Engine {
                     }
                     let mut payload = json!({"write_outcome":outcome});
                     if answered && !self.headless { payload["decision_confirmed"] = json!(false); }
+                    if let Some(parent) = skill.filter(|_|outcome == WriteOutcome::NotWritten) {
+                        effects.push(Effect::Reply { operation_id:parent,disposition:Disposition::Deferred,payload:payload.clone() });
+                    }
                     effects.push(Effect::Reply { operation_id,disposition,payload });
                     self.changed(&mut effects,true);
                 }
@@ -1476,7 +1552,9 @@ impl Engine {
                         uncertain.extend(reserved_entry(rpc));
                         effects.push(Effect::Reply { operation_id:rpc.operation_id.clone(),disposition:Disposition::Unknown,payload:json!({"error":"RPC sem resposta"}) });
                         if let Some(parent) = rpc.continuation.as_ref().and_then(|next|next["parent"].as_str()) {
-                            effects.push(Effect::Reply { operation_id:parent.into(),disposition:Disposition::Unknown,payload:json!({"error":"preparação sem resposta"}) });
+                            // Ler o catálogo não escreve nada no turno: a mensagem volta à fila em vez de ficar incerta.
+                            let disposition = if skill_parent(rpc).is_some() { Disposition::Deferred } else { Disposition::Unknown };
+                            effects.push(Effect::Reply { operation_id:parent.into(),disposition,payload:json!({"error":"preparação sem resposta"}) });
                         }
                     }
                 }
@@ -1490,6 +1568,12 @@ impl Engine {
                     self.subscribe(&mut effects);
                     self.changed(&mut effects,false);
                 }
+                if self.turn_probe_due().is_some_and(|due|clock.monotonic_s >= due) {
+                    self.last_event = clock.monotonic_s;
+                    self.counter += 1;
+                    let operation_id = format!("turn-probe:{}:{}",self.generation,self.counter);
+                    self.send(operation_id,self.thread_read(false),Some(json!({"kind":"turn_probe"})),&mut effects);
+                }
                 // Como o Python: só libera o envio, sem dar o turno por concluído nem reenviar; `>=` evita prazo que nunca vence.
                 if self.unsubscribed_turn_due().is_some_and(|due|clock.monotonic_s >= due) {
                     tracing::warn!(session = %self.metadata["name"].as_str().unwrap_or("-"),
@@ -1500,6 +1584,19 @@ impl Engine {
                 }
             }
             EngineInput::PolicyResult { request_id,payload } => {
+                if let Some((operation_id,question)) = self.skips.remove(&request_id) {
+                    self.policies.remove(&request_id);
+                    if payload["updated"] == true {
+                        self.async_questions.resolve(&question);
+                        effects.push(Effect::Reply { operation_id,disposition:Disposition::Accepted,payload:json!({}) });
+                    } else {
+                        self.async_questions.skipped.remove(&question);
+                        effects.push(Effect::Reply { operation_id,disposition:Disposition::Rejected,
+                            payload:json!({"error":"não foi possível gravar a pergunta pulada","skip_not_saved":true,"code":payload.get("error").cloned().unwrap_or(Value::Null)}) });
+                    }
+                    self.changed(&mut effects,true);
+                    return Ok(effects);
+                }
                 if let Some(mut command) = self.skill_preparations.remove(&request_id) {
                     if let Some(skill) = payload["skill"].as_object() {
                         command.payload["input"].as_array_mut().ok_or_else(||error("entrada de skill inválida"))?
@@ -1569,10 +1666,20 @@ impl Engine {
                 self.changed(effects,true);
                 return Ok(());
             }
-            // A leitura que antecede a troca de modo ou o Stop falhou: quem espera é a operação de cima.
-            let operation_id = rpc.continuation.as_ref().filter(|next|next["kind"] == "set_mode" || next["kind"] == "interrupt")
-                .and_then(|next|next["parent"].as_str()).map_or(rpc.operation_id,str::to_owned);
-            effects.push(Effect::Reply { operation_id,disposition:Disposition::Rejected,payload:json!({"error":line["error"]}) });
+            // O catálogo de skills não mudou nada: a mensagem volta para a fila, como o 400 + fila do Python.
+            if let Some(parent) = skill_parent(&rpc) {
+                effects.push(Effect::Reply { operation_id:rpc.operation_id.clone(),disposition:Disposition::Rejected,payload:json!({"error":line["error"]}) });
+                effects.push(Effect::Reply { operation_id:parent,disposition:Disposition::Deferred,payload:json!({"error":line["error"]}) });
+                self.changed(effects,false);
+                return Ok(());
+            }
+            // A leitura que antecede a troca de modo, o Stop ou a orientação falhou: quem espera é a operação de cima.
+            let operation_id = rpc.continuation.as_ref().filter(|next|matches!(next["kind"].as_str(),Some("set_mode" | "interrupt" | "steer")))
+                .and_then(|next|next["parent"].as_str()).map_or(rpc.operation_id.clone(),str::to_owned);
+            // `turn/start` recusado não começou nada: a mensagem volta à fila e sai no próximo ocioso, como no Python.
+            let disposition = if input_turn(&rpc) { Disposition::Deferred } else { Disposition::Rejected };
+            effects.push(Effect::Reply { operation_id,disposition,payload:json!({"error":line["error"]}) });
+            self.changed(effects,false);
             return Ok(());
         }
         let result = line.get("result").cloned().unwrap_or_else(||json!({}));
@@ -1698,6 +1805,15 @@ impl Engine {
                         collaboration_mode:Some(mode),..Default::default() });
                     self.send(next["parent"].as_str().unwrap_or("").into(),request,None,effects);
                 }
+                Some("steer") => {
+                    let mut command:RuntimeCommand = serde_json::from_value(next["command"].clone()).map_err(|_|error("orientação inválida"))?;
+                    command.payload["turn_read"] = json!(true);
+                    let parent = command.operation_id.clone();
+                    match self.command(command,self.clock) {
+                        Ok(next) => effects.extend(next),
+                        Err(failure) => effects.push(Effect::Reply { operation_id:parent,disposition:Disposition::Rejected,payload:json!({"error":failure.message}) }),
+                    }
+                }
                 Some("interrupt") => {
                     let parent = next["parent"].as_str().unwrap_or("");
                     if let Some(turn) = self.turn_id.clone() {
@@ -1717,6 +1833,8 @@ impl Engine {
                         self.send(operation_id,request,None,effects);
                     }
                 }
+                // O turno que parecia rodando já acabou: a fila não espera um `turn/completed` que não vem.
+                Some("turn_probe") => if !self.in_progress { effects.push(Effect::WakeQueue); },
                 Some("cut_check") => {
                     if cut {
                         self.state.problema = Some("codex_turno_cortado".into()); self.state.problema_detalhe = None;
@@ -1754,6 +1872,7 @@ impl Engine {
 
     fn restore_thread(&mut self,thread:&wire::Thread,rpc:&Rpc) {
         if rpc.state_revision == self.state_revision {
+            if matches!(thread.status,wire::ThreadStatus::Active | wire::ThreadStatus::Idle) { self.turn_known = true; }
             match thread.status {
                 wire::ThreadStatus::Active => {
                     self.in_progress = true;
@@ -1778,6 +1897,7 @@ impl Engine {
         // também passa, para o pedido sair da fila. O resto vindo de outra thread é descartado.
         let foreign = params["threadId"].as_str().filter(|thread|*thread != self.thread_id);
         if foreign.is_some() && !line.get("id").is_some_and(|id|!id.is_null()) && method != "serverRequest/resolved" { return Ok(()); }
+        self.last_event = self.clock.monotonic_s;
         if let Some(id) = line.get("id").filter(|id|!id.is_null()) {
             let request_id:RequestId = serde_json::from_value(id.clone()).map_err(|_|error("ID de pedido do servidor inválido"))?;
             if self.server_requests.iter().any(|(id,request)|id == &request_id && request == &line) { return Ok(()); }
@@ -1843,7 +1963,7 @@ impl Engine {
                 if self.ready_async_answer_entry().is_some() { effects.push(Effect::WakeQueue); }
             }
             N::TurnStarted(n) => {
-                self.in_progress = true; self.turn_id = Some(n.turn.id).filter(|id|!id.is_empty()); self.state_revision += 1;
+                self.in_progress = true; self.turn_known = true; self.turn_id = Some(n.turn.id).filter(|id|!id.is_empty()); self.state_revision += 1;
                 self.first_response_start = self.turn_id.clone().map(|id|(id,self.clock.monotonic_s));
                 self.response_started = false; self.state.codex_buffering = false; self.clear_preview(effects);
                 self.state.problema = None; self.state.problema_detalhe = None;
@@ -1852,11 +1972,15 @@ impl Engine {
             }
             N::TurnCompleted(n) => {
                 if !n.turn.id.is_empty() && self.turn_id.as_deref().is_some_and(|current|current != n.turn.id) { return Ok(()); }
-                self.in_progress = false; self.turn_id = None; self.state_revision += 1; self.compacting = false;
+                self.in_progress = false; self.turn_id = None; self.state_revision += 1; self.compacting = false; self.turn_known = true;
                 self.lost_requests.clear();
                 self.first_response_start = None;
                 self.state.codex_buffering = false; self.response_started = false; self.clear_preview(effects);
-                self.server_requests.clear(); self.answering.clear(); self.request_epochs.clear();
+                // Só os pedidos desta conversa: o subagente segue com o dele, como no Python.
+                let ended:Vec<RequestId> = self.server_requests.iter().filter(|(_,request)|request["params"]["threadId"].as_str().is_none_or(|thread|thread == self.thread_id))
+                    .map(|(id,_)|id.clone()).collect();
+                for id in &ended { self.answering.remove(id); self.request_epochs.remove(id); }
+                self.server_requests.retain(|(id,_)|!ended.contains(id));
                 // Status lido cru não é confiável: não apaga nem cria problema, só fecha o turno.
                 if from_raw {
                     // Sem o detalhe (não decodificou), mas um turno que falhou não pode parecer concluído.
@@ -1869,15 +1993,19 @@ impl Engine {
                     // O `turn.error` pode vir sem `codexErrorInfo`; a causa já veio no `error` anterior.
                     if class.is_some() || !matches!(self.state.problema.as_deref(),Some("codex_limite_uso" | "codex_sem_login")) {
                         self.state.problema = Some(class.unwrap_or("headless_turno_erro").into());
-                        self.state.problema_detalhe = Some(error.message).filter(|m|!m.is_empty());
+                        self.state.problema_detalhe = error_detail(&error);
                     }
                 } else if retry_problem(self.state.problema.as_deref()) { self.state.problema = None; self.state.problema_detalhe = None; }
                 self.changed(effects,true); effects.push(Effect::WakeQueue); return Ok(());
             }
             N::ThreadStatusChanged(n) => {
                 match n.status {
-                    wire::ThreadStatus::Active => self.in_progress = true,
-                    wire::ThreadStatus::Idle => { self.in_progress = false; self.turn_id = None; self.state.codex_buffering = false; },
+                    wire::ThreadStatus::Active => { self.in_progress = true; self.turn_known = true; },
+                    wire::ThreadStatus::Idle => {
+                        self.in_progress = false; self.turn_id = None; self.state.codex_buffering = false; self.turn_known = true;
+                        // Ocioso sem `turn/completed` também libera a fila.
+                        effects.push(Effect::WakeQueue);
+                    },
                     _ => return Ok(()),
                 }
                 self.state_revision += 1;
@@ -1908,7 +2036,14 @@ impl Engine {
                             "seconds":self.clock.monotonic_s-started,"conversation":self.thread_id}) });
                     }
                 }
-                self.response_started = true; self.state.codex_buffering = false;
+                // Delta vazio não é resposta: não tira o aviso de espera nem o problema do turno.
+                if !n.delta.is_empty() {
+                    self.response_started = true; self.state.codex_buffering = false;
+                    if turn_problem(self.state.problema.as_deref()) {
+                        self.state.problema = None; self.state.problema_detalhe = None;
+                        self.changed(effects,false);
+                    }
+                }
                 if let Some(text) = self.preview.append(&n.delta,self.clock.monotonic_s) { self.publish(text,effects); }
                 return Ok(());
             }
@@ -1931,6 +2066,10 @@ impl Engine {
             }
             N::ItemStarted(n) | N::ItemCompleted(n) => {
                 let started = method == "item/started";
+                let current = n.turn_id.is_empty() || self.turn_id.as_deref().is_none_or(|turn|turn == n.turn_id);
+                // Mensagem completa com texto é resposta, como o delta não vazio.
+                let answered = !started && current && matches!(&n.item,wire::ThreadItem::AgentMessage { text,.. } if !text.is_empty());
+                if answered { self.response_started = true; self.state.codex_buffering = false; }
                 self.async_questions.observe(&self.thread_id,&n.item,&params["item"]);
                 match &n.item {
                     wire::ThreadItem::ContextCompaction { .. } => self.compacting = started,
@@ -1944,7 +2083,8 @@ impl Engine {
                     },
                     _ => {},
                 }
-                if !matches!(n.item,wire::ThreadItem::UserMessage { .. }) && retry_problem(self.state.problema.as_deref()) {
+                let new_item = started && current && !matches!(n.item,wire::ThreadItem::UserMessage { .. });
+                if (new_item || answered) && turn_problem(self.state.problema.as_deref()) {
                     self.state.problema = None; self.state.problema_detalhe = None;
                 }
             }
@@ -1962,7 +2102,7 @@ impl Engine {
             N::Error(n) => {
                 self.state.problema = Some(n.error.codex_error_info.as_ref().and_then(error_class)
                     .unwrap_or(if n.will_retry { "codex_sem_conexao" } else { "headless_turno_erro" }).into());
-                self.state.problema_detalhe = Some(n.error.message).filter(|m|!m.is_empty());
+                self.state.problema_detalhe = error_detail(&n.error);
             }
             N::HookCompleted(n) if n.run.event_name == "userPromptSubmit" && ["blocked","stopped"].contains(&n.run.status.as_str()) => {
                 let source = n.run.source_path.as_deref().unwrap_or("hook");
@@ -1982,7 +2122,15 @@ impl Engine {
 
     pub fn next_deadline(&self) -> Option<f64> {
         self.preview.deadline().into_iter().chain(self.thinking.deadline()).chain(self.rpc.values().filter(|rpc|!rpc.timed_out).map(|rpc|rpc.deadline))
-            .chain(self.service_tier_pending.as_ref().map(|pending|pending.deadline)).chain(self.subscribe_due).chain(self.unsubscribed_turn_due()).min_by(f64::total_cmp)
+            .chain(self.service_tier_pending.as_ref().map(|pending|pending.deadline)).chain(self.subscribe_due).chain(self.unsubscribed_turn_due())
+            .chain(self.turn_probe_due()).min_by(f64::total_cmp)
+    }
+
+    /// Conferência do turno calado: só com a assinatura (ou o cano) entregando eventos e nenhuma em voo.
+    fn turn_probe_due(&self) -> Option<f64> {
+        let listening = if self.headless { self.ready } else { self.subscribed };
+        let probing = self.rpc.values().any(|rpc|!rpc.timed_out && rpc.continuation.as_ref().is_some_and(|next|next["kind"] == "turn_probe"));
+        (self.alive && listening && self.in_progress && !probing).then_some(self.last_event + TURN_PROBE_AFTER)
     }
 
     /// Só vale sem assinatura: assinada, quem fecha o turno é o `turn/completed`.
@@ -2031,6 +2179,12 @@ impl Engine {
 }
 
 fn subscribe_rpc(rpc:&Rpc) -> bool { rpc.continuation.as_ref().is_some_and(|next|next["kind"] == "subscribe") }
+/// O `turn/start` de uma mensagem comum (a resposta assíncrona tem continuação).
+fn input_turn(rpc:&Rpc) -> bool { rpc.method == "turn/start" && rpc.continuation.is_none() }
+/// Operação de cima de uma leitura de catálogo de skills: sem ela nada foi escrito no turno.
+fn skill_parent(rpc:&Rpc) -> Option<String> {
+    rpc.continuation.as_ref().filter(|next|next["kind"] == "skill_lookup").and_then(|next|next["parent"].as_str()).map(str::to_owned)
+}
 fn reserved_entry(rpc:&Rpc) -> Option<String> {
     rpc.continuation.as_ref().filter(|next|next["kind"] == "async_answer" && next["reserved"] == true)
         .and_then(|next|next["entry_id"].as_str()).map(str::to_owned)
@@ -2045,24 +2199,24 @@ fn subscribe_operation(operation_id:&str) -> bool {
 }
 
 fn question_response(question:&Value,answers:&Value) -> Result<Value,RuntimeError> {
-    let questions = question["questions"].as_array().ok_or_else(||error("perguntas inválidas"))?;
-    let answers = answers.as_array().filter(|answers|answers.len() == questions.len()).ok_or_else(||error("responda a todas as perguntas"))?;
+    let questions = question["questions"].as_array().ok_or_else(||invalid_answer("perguntas inválidas"))?;
+    let answers = answers.as_array().filter(|answers|answers.len() == questions.len()).ok_or_else(||invalid_answer("responda a todas as perguntas"))?;
     let mut result = serde_json::Map::new();
     for answer in answers {
-        let id = answer["question_id"].as_str().ok_or_else(||error("a resposta não corresponde às perguntas pendentes"))?;
-        let question = questions.iter().find(|q|q["id"] == id).ok_or_else(||error("a resposta não corresponde às perguntas pendentes"))?;
-        if result.contains_key(id) { return Err(error("pergunta respondida duas vezes")); }
+        let id = answer["question_id"].as_str().ok_or_else(||invalid_answer("a resposta não corresponde às perguntas pendentes"))?;
+        let question = questions.iter().find(|q|q["id"] == id).ok_or_else(||invalid_answer("a resposta não corresponde às perguntas pendentes"))?;
+        if result.contains_key(id) { return Err(invalid_answer("pergunta respondida duas vezes")); }
         let value = match answer["kind"].as_str() {
             Some("text") => {
-                if question["options"].as_array().is_some_and(|o|!o.is_empty()) && question["isOther"] != true { return Err(error("esta pergunta não aceita resposta em texto")); }
-                answer["value"].as_str().filter(|s|!s.trim().is_empty()).ok_or_else(||error("resposta vazia"))?.to_owned()
+                if question["options"].as_array().is_some_and(|o|!o.is_empty()) && question["isOther"] != true { return Err(invalid_answer("esta pergunta não aceita resposta em texto")); }
+                answer["value"].as_str().filter(|s|!s.trim().is_empty()).ok_or_else(||invalid_answer("resposta vazia"))?.to_owned()
             }
             Some("option") => {
-                let indices = answer["indices"].as_array().filter(|i|i.len() == 1).ok_or_else(||error("escolha uma opção válida"))?;
-                let index = indices[0].as_u64().ok_or_else(||error("opção inválida"))?;
-                question["options"].as_array().and_then(|options|options.get(index as usize)).and_then(|option|option["label"].as_str()).ok_or_else(||error("opção inválida"))?.into()
+                let indices = answer["indices"].as_array().filter(|i|i.len() == 1).ok_or_else(||invalid_answer("escolha uma opção válida"))?;
+                let index = indices[0].as_u64().ok_or_else(||invalid_answer("opção inválida"))?;
+                question["options"].as_array().and_then(|options|options.get(index as usize)).and_then(|option|option["label"].as_str()).ok_or_else(||invalid_answer("opção inválida"))?.into()
             }
-            _ => return Err(error("responda à pergunta antes de enviar")),
+            _ => return Err(invalid_answer("responda à pergunta antes de enviar")),
         };
         result.insert(id.into(),json!({"answers":[value]}));
     }

@@ -50,20 +50,26 @@ pub(crate) async fn cano_with(kill: Option<Arc<tokio::sync::Notify>>) -> String 
 }
 
 /// Python falso da política: responde `ok` a tudo.
-async fn policy() -> std::net::SocketAddr {
+async fn policy() -> std::net::SocketAddr { policy_seen(Arc::default()).await }
+
+/// O mesmo, guardando a linha de cada pedido (método e caminho).
+async fn policy_seen(seen: Arc<std::sync::Mutex<Vec<String>>>) -> std::net::SocketAddr {
     use tokio::io::AsyncReadExt;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     tokio::spawn(async move {
         loop {
             let Ok((stream, _)) = listener.accept().await else { return };
+            let seen = seen.clone();
             tokio::spawn(async move {
                 let mut reader = BufReader::new(stream);
                 loop {
                     let mut length = 0usize;
+                    let mut first = true;
                     loop {
                         let mut line = String::new();
                         if reader.read_line(&mut line).await.unwrap_or(0) == 0 { return; }
+                        if std::mem::take(&mut first) { seen.lock().unwrap().push(line.trim_end().to_owned()); }
                         if line == "\r\n" { break; }
                         if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") { length = value.trim().parse().unwrap(); }
                     }
@@ -289,4 +295,29 @@ async fn post_to(server: std::net::SocketAddr, name: &str, route: &str, body: &s
         .header("content-type", "application/json").header("authorization", format!("Bearer {OWNER}"))
         .body(body.to_owned()).send().await.unwrap();
     (response.status().as_u16(), response.text().await.unwrap())
+}
+
+/// Parity A3: escrever para a sessão doente pede a reabertura ao coordenador do Python (o 503 fica).
+#[tokio::test]
+async fn unhealthy_write_asks_python_to_reopen_the_session() {
+    let seen: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+    let dir = tempfile::tempdir().unwrap();
+    let registry = crate::runtime_open::with_hubs(RuntimeRegistry::new(policy_seen(seen.clone()).await, "secret-test".into(), "instance-test".into())
+        .with_processes(Arc::new(crate::runtime_open::RecipeProcesses("sid-1"))));
+    let kill = Arc::new(tokio::sync::Notify::new());
+    open_entry_with(&registry, dir.path(), "d", "doente", 1, cano_with(Some(kill.clone())).await).await;
+    kill.notify_one();
+    for _ in 0..100 {
+        if !registry.writable("doente").await.unwrap().healthy { break; }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let (_python, server) = serve_with(Some(registry.clone())).await;
+    let (status, _) = post_to(server, "doente", "input", r#"{"text":"oi"}"#).await;
+    assert_eq!(status, 503);
+    let wanted = "POST /internal/sessions/doente/reopen HTTP/1.1";
+    for _ in 0..100 {
+        if seen.lock().unwrap().iter().any(|line| line == wanted) { break; }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(seen.lock().unwrap().iter().any(|line| line == wanted), "{:?}", seen.lock().unwrap());
 }

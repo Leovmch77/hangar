@@ -68,7 +68,8 @@ fn takeover_restores_async_question_before_ready() {
         "async_questions":[["async:thread-1:item:0",question]], "async_seen":["item"]}),1,clock(10.0)).with_store();
     assert_eq!(engine.view()["state"], "awaiting_input");
     assert_eq!(engine.view()["codex_question"]["request_id"], "async:thread-1:item:0");
-    assert_eq!(engine.control_view()["deliverable"], false);
+    // Pergunta assíncrona não segura a mensagem comum (o Python só barrava a `requestUserInput`).
+    assert_eq!(engine.control_view()["deliverable"], true);
 }
 
 #[test]
@@ -244,7 +245,10 @@ fn conversation_terminal_connects_then_subscribes_without_creating_thread_or_per
     assert_eq!(view["connected"],true);
     assert_eq!(view["subscribed"],false);
     assert_eq!(view["ready"],false);
-    assert_eq!(view["deliverable"],true);
+    // Conectado ainda não sabe se a TUI está no meio de um turno: espera a resposta da assinatura.
+    assert_eq!(view["deliverable"],false);
+    line(&mut engine,json!({"id":resume_of(&effects)["id"],"error":{"message":"no rollout found for thread id thread-1"}}),11.5);
+    assert_eq!(engine.control_view()["deliverable"],true);
     let start = frames(&engine.command(command(OperationKind::Input,json!({"text":"Olá"})),clock(12.0)).unwrap());
     assert_eq!(start[0]["method"],"turn/start");
     assert!(start[0]["params"].get("approvalPolicy").is_none() && start[0]["params"].get("summary").is_none());
@@ -472,9 +476,10 @@ fn question_hydrate_merges_notifications() {
         "id":"question-new","type":"agentMessage","delivery":"async","questions":[{"title":"Nova pergunta","options":["A","B"]}]}}}),11.0);
     line(&mut engine,json!({"id":id,"result":{"thread":{"id":"thread-1","status":{"type":"idle"},"turns":[]}}}),12.0);
     assert_eq!(engine.view()["codex_question"]["questions"][0]["question"],"Nova pergunta");
+    // A resposta citada (`> título\n\nresposta`) é a que o Hangar escreve: fecha a pergunta, como no Python.
     line(&mut engine,json!({"method":"item/completed","params":{"threadId":"thread-1","item":{
         "id":"ordinary-user","type":"userMessage","content":[{"type":"text","text":"> Nova pergunta\n\nA"}]}}}),13.0);
-    assert_eq!(engine.view()["codex_question"]["questions"][0]["question"],"Nova pergunta");
+    assert!(engine.view()["codex_question"].is_null());
 }
 
 #[test]
@@ -1545,9 +1550,9 @@ fn conversation_terminal_async_answer_is_reserved_not_sent() {
     assert!(answer_async(&mut engine,&store,&question,"answer-2",13.6).is_err());
     assert!(matches!(engine.settle_async_answer(&reservation.entry_id,true).as_slice(),[Effect::WakeQueue]));
     assert_eq!(engine.ready_async_answer_entry(),Some(reservation.entry_id.clone()));
-    // A pergunta continua pendente e a mensagem comum continua barrada.
+    // A pergunta continua pendente até o turno; a mensagem comum não espera por ela.
     assert_eq!(async_ids(&engine),vec![json!(question)]);
-    assert_eq!(engine.control_view()["deliverable"],false);
+    assert_eq!(engine.control_view()["deliverable"],true);
     let again = answer_async(&mut engine,&store,&question,"answer-3",14.0).unwrap();
     assert!(reservation_of(&again).is_none() && frames(&again).is_empty());
     assert_eq!(reply_of(&again,"answer-3"),Some((Disposition::Unknown,reservation.reply_payload())));
@@ -1607,11 +1612,10 @@ fn conversation_terminal_reserved_answer_goes_before_an_earlier_ordinary_input()
     let mut engine = subscribed_terminal();
     let store = identified(&mut engine);
     let question = ask_async(&mut engine,"q1","Qual pasta?",13.0);
-    // A mensagem comum chegou antes e espera a pergunta.
-    let ordinary = engine.command(RuntimeCommand { operation_id:"ordinary".into(),kind:OperationKind::Input,payload:json!({"text":"segue"}) },clock(13.2)).unwrap();
-    assert_eq!(reply_of(&ordinary,"ordinary").map(|(d,_)|d),Some(Disposition::Deferred));
     let reservation = reserved(&mut engine,&store,&question,"answer-1",13.5);
-    assert_eq!(engine.control_view()["deliverable"],false,"a reserva não libera a primeira mensagem comum");
+    // As duas podem sair; o ator reivindica a reservada (pronta aqui) antes da mensagem comum da fila.
+    assert_eq!(engine.control_view()["deliverable"],true);
+    assert_eq!(engine.ready_async_answer_entry(),Some(reservation.entry_id.clone()));
     let start = frames(&dispatch(&mut engine,&reservation,14.0))[0].clone();
     line(&mut engine,json!({"id":start["id"],"result":{"turn":{"id":"turn-1"}}}),14.5);
     let ended = line(&mut engine,json!({"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1","status":"completed"}}}),15.0);
@@ -1678,7 +1682,9 @@ fn conversation_terminal_reservation_for_a_closed_question_is_refused_without_a_
     let question = ask_async(&mut engine,"q1","Qual pasta?",13.0);
     let reservation = reserved(&mut engine,&store,&question,"answer-1",13.5);
     let token = async_token(&engine,&store,&question);
-    engine.command(RuntimeCommand { operation_id:"skip".into(),kind:OperationKind::SkipQuestion,payload:json!({"request_id":question,"interaction_id":token}) },clock(14.0)).unwrap();
+    let skipped = engine.command(RuntimeCommand { operation_id:"skip".into(),kind:OperationKind::SkipQuestion,payload:json!({"request_id":question,"interaction_id":token}) },clock(14.0)).unwrap();
+    let patch = skipped.iter().find_map(|e|match e { Effect::Policy { kind,request_id,.. } if kind == "session.patch_meta" => Some(request_id.clone()),_=>None }).unwrap();
+    engine.apply(EngineInput::PolicyResult { request_id:patch,payload:json!({"updated":true}) },clock(14.2)).unwrap();
     let refused = dispatch(&mut engine,&reservation,14.5);
     assert!(frames(&refused).is_empty());
     let (disposition,payload) = reply_of(&refused,&reservation.operation_id).unwrap();
@@ -1993,4 +1999,258 @@ fn conversation_terminal_relaunch_controls_are_refused_with_a_code() {
     // Processo caído não vira relançamento: o app-server com terminal não é do Hangar.
     line(&mut engine,json!({"type":"cano_saiu"}),14.0);
     assert_eq!(engine.command(op("op-1",OperationKind::Restart,json!({})),clock(14.5)).err().unwrap().code,TERMINAL_RELAUNCH);
+}
+
+// --- Paridade com o adapter Python (correções da auditoria) ---
+
+#[test]
+fn quoted_answer_in_history_resolves_the_question_once() {
+    // `> título\n\nresposta` é o que o Hangar escreve e o que o histórico antigo guarda.
+    let mut engine = engine();
+    let read = engine.command(command(OperationKind::ReadSettings,json!({"include_turns":true})),clock(10.0)).unwrap();
+    let id = frames(&read)[0]["id"].clone();
+    let question = |item:&str|json!({"id":item,"type":"agentMessage","delivery":"async","questions":[{"title":"Qual cor?","options":["Azul"]}]});
+    let answer = |item:&str,text:&str|json!({"id":item,"type":"userMessage","content":[{"type":"text","text":text}]});
+    line(&mut engine,json!({"id":id,"result":{"thread":{"id":"thread-1","status":{"type":"idle"},"turns":[{"items":[
+        question("q1"),question("q2"),answer("u0","Qual cor? Azul"),answer("u1","> Qual cor?\n\nAzul")]}]}}}),11.0);
+    // Texto comum não responde; a resposta citada consome só uma das duas de mesmo título.
+    assert_eq!(async_ids(&engine),vec![json!("async:thread-1:q2:0")]);
+    line(&mut engine,json!({"method":"item/completed","params":{"threadId":"thread-1","item":answer("u2","> Qual cor?\n\n  ")}}),12.0);
+    assert_eq!(async_ids(&engine).len(),1,"resposta em branco não conta");
+    line(&mut engine,json!({"method":"item/completed","params":{"threadId":"thread-1","item":answer("u3","> Qual cor?\n\nVerde")}}),13.0);
+    assert!(async_ids(&engine).is_empty());
+    assert!(engine.view()["codex_question"].is_null());
+}
+
+#[test]
+fn pending_async_question_does_not_hold_an_ordinary_message() {
+    // A pergunta assíncrona não segura a fila: a mensagem comum vira turno novo, como no Python.
+    let mut engine = subscribed_terminal();
+    identified(&mut engine);
+    ask_async(&mut engine,"q1","Qual pasta?",13.0);
+    assert_eq!(engine.view()["state"],"awaiting_input");
+    assert_eq!(engine.control_view()["deliverable"],true);
+    let sent = engine.command(command(OperationKind::Input,json!({"text":"segue"})),clock(13.5)).unwrap();
+    assert_eq!(frames(&sent)[0]["method"],"turn/start");
+    // Com o turno rodando a pergunta não troca "trabalhando" por espera.
+    line(&mut engine,json!({"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-1"}}}),14.0);
+    assert_eq!(engine.view()["state"],"working");
+    assert_eq!(engine.view()["codex_question"]["questions"][0]["question"],"Qual pasta?");
+}
+
+#[test]
+fn reserved_answer_hides_the_card() {
+    let mut engine = subscribed_terminal();
+    let store = identified(&mut engine);
+    let question = ask_async(&mut engine,"q1","Qual pasta?",13.0);
+    reserved(&mut engine,&store,&question,"answer-1",13.5);
+    // Resposta registrada na fila: o cartão fecha, como no Python, e a pergunta só sai de vez no turno.
+    assert!(engine.view()["codex_question"].is_null());
+    assert_eq!(engine.view()["state"],"idle");
+    assert_eq!(async_ids(&engine),vec![json!(question)]);
+    assert_eq!(engine.control_view()["pending_questions"],0);
+}
+
+#[test]
+fn refused_or_unwritten_turn_start_puts_the_input_back() {
+    let fresh = |headless:bool|if headless { engine() } else { subscribed_terminal() };
+    for headless in [true,false] {
+        let mut refusing = fresh(headless);
+        let start = frames(&refusing.command(command(OperationKind::Input,json!({"text":"Olá"})),clock(13.0)).unwrap())[0].clone();
+        let refused = line(&mut refusing,json!({"id":start["id"],"error":{"code":-32600,"message":"turn already active"}}),13.5);
+        assert_eq!(reply_of(&refused,"op-1").map(|(d,_)|d),Some(Disposition::Deferred),"headless={headless}");
+        let mut losing = fresh(headless);
+        losing.command(command(OperationKind::Input,json!({"text":"Olá"})),clock(13.0)).unwrap();
+        let lost = ack(&mut losing,"op-1",WriteOutcome::NotWritten,13.5);
+        assert_eq!(reply_of(&lost,"op-1").map(|(d,_)|d),Some(Disposition::Deferred),"headless={headless}");
+        assert_eq!(losing.control_view()["deliverable"],true);
+    }
+}
+
+#[test]
+fn failed_skill_catalog_puts_the_input_back() {
+    let mut engine = engine();
+    let effects = engine.command(command(OperationKind::Input,json!({"text":"/skill Olá","skill_name":"skill",
+        "input":[{"type":"text","text":"/skill Olá"}]})),clock(10.0)).unwrap();
+    let read = frames(&effects)[0].clone();
+    let refused = line(&mut engine,json!({"id":read["id"],"error":{"message":"skills indisponíveis"}}),11.0);
+    assert_eq!(reply_of(&refused,"op-1").map(|(d,_)|d),Some(Disposition::Deferred));
+    assert_eq!(engine.control_view()["deliverable"],true);
+}
+
+#[test]
+fn steer_without_a_known_turn_reads_it_first() {
+    // Adotada no meio do turno, o `resume` não traz o id: o Python o lia por `thread/read` com turnos.
+    let mut engine = subscribed_terminal();
+    line(&mut engine,json!({"method":"thread/status/changed","params":{"threadId":"thread-1","status":{"type":"active"}}}),13.0);
+    let effects = engine.command(RuntimeCommand { operation_id:"steer".into(),kind:OperationKind::Steer,payload:json!({"text":"mais curto","turn_id":null}) },clock(13.5)).unwrap();
+    let read = frames(&effects)[0].clone();
+    assert_eq!(read["method"],"thread/read");
+    assert_eq!(read["params"]["includeTurns"],true);
+    let effects = line(&mut engine,json!({"id":read["id"],"result":{"thread":{"id":"thread-1","status":{"type":"active"},
+        "turns":[{"id":"turn-0","status":"completed","items":[]},{"id":"turn-9","status":"inProgress","items":[]}]}}}),14.0);
+    let steer = frames(&effects)[0].clone();
+    assert_eq!(steer["method"],"turn/steer");
+    assert_eq!(steer["params"]["expectedTurnId"],"turn-9");
+    let done = line(&mut engine,json!({"id":steer["id"],"result":{"turnId":"turn-9"}}),14.5);
+    assert_eq!(reply_of(&done,"steer").map(|(d,_)|d),Some(Disposition::Accepted));
+    // Lido e sem turno em andamento: recusa, sem escrever a orientação.
+    let mut engine = subscribed_terminal();
+    line(&mut engine,json!({"method":"thread/status/changed","params":{"threadId":"thread-1","status":{"type":"active"}}}),13.0);
+    let read = frames(&engine.command(RuntimeCommand { operation_id:"steer".into(),kind:OperationKind::Steer,payload:json!({"text":"x"}) },clock(13.5)).unwrap())[0].clone();
+    let effects = line(&mut engine,json!({"id":read["id"],"result":{"thread":{"id":"thread-1","status":{"type":"idle"},"turns":[]}}}),14.0);
+    assert!(frames(&effects).is_empty());
+    assert_eq!(reply_of(&effects,"steer").map(|(d,_)|d),Some(Disposition::Rejected));
+}
+
+#[test]
+fn adopted_terminal_waits_to_know_the_turn_before_sending() {
+    // Adotada com a TUI no meio de um turno: nada sai antes de a assinatura dizer o estado da conversa.
+    let mut engine = terminal();
+    let resume = resume_of(&connect(&mut engine));
+    assert_eq!(engine.control_view()["deliverable"],false);
+    let held = engine.command(command(OperationKind::Input,json!({"text":"Olá"})),clock(11.5)).unwrap();
+    assert_eq!(reply_of(&held,"op-1").map(|(d,_)|d),Some(Disposition::Deferred));
+    let effects = line(&mut engine,json!({"id":resume["id"],"result":{"thread":{"id":"thread-1","path":"/r/one.jsonl","status":{"type":"active"},"turns":[]}}}),12.0);
+    assert!(effects.iter().any(|e|matches!(e,Effect::WakeQueue)));
+    assert_eq!(engine.control_view()["deliverable"],false);
+    assert_eq!(engine.view()["state"],"working");
+    // Sem rollout ainda: a conversa nunca teve turno, e o primeiro envio é o que cria o rollout.
+    let mut engine = terminal();
+    let resume = resume_of(&connect(&mut engine));
+    let effects = line(&mut engine,json!({"id":resume["id"],"error":{"message":"no rollout found for thread id thread-1"}}),12.0);
+    assert!(effects.iter().any(|e|matches!(e,Effect::WakeQueue)));
+    assert_eq!(engine.control_view()["deliverable"],true);
+}
+
+#[test]
+fn turn_problem_detail_is_the_first_line_and_leaves_when_the_answer_starts() {
+    let mut engine = engine();
+    line(&mut engine,json!({"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-1"}}}),10.0);
+    let page = format!("<html>{}\n<body>erro</body>","x".repeat(400));
+    line(&mut engine,json!({"method":"error","params":{"threadId":"thread-1","turnId":"turn-1","willRetry":false,
+        "error":{"message":"falhou","additionalDetails":page}}}),10.5);
+    assert_eq!(engine.view()["problema"],"headless_turno_erro");
+    assert_eq!(engine.view()["problema_detalhe"].as_str().unwrap().chars().count(),300);
+    assert!(!engine.view()["problema_detalhe"].as_str().unwrap().contains('\n'));
+    line(&mut engine,json!({"method":"error","params":{"threadId":"thread-1","willRetry":false,"error":{"message":"primeira\nsegunda"}}}),10.6);
+    assert_eq!(engine.view()["problema_detalhe"],"primeira");
+    line(&mut engine,json!({"method":"item/agentMessage/delta","params":{"threadId":"thread-1","turnId":"turn-1","delta":"Oi"}}),11.0);
+    assert!(engine.view()["problema"].is_null(),"a resposta chegou no mesmo turno");
+    // Bloqueio do prompt também sai quando um item novo do turno começa.
+    line(&mut engine,json!({"method":"hook/completed","params":{"threadId":"thread-1","turnId":"turn-1","run":{"eventName":"userPromptSubmit",
+        "status":"blocked","sourcePath":"/h.sh","entries":[{"kind":"stop","text":"não"}]}}}),11.5);
+    assert_eq!(engine.view()["problema"],"codex_prompt_bloqueado");
+    line(&mut engine,json!({"method":"item/started","params":{"threadId":"thread-1","turnId":"turn-1","item":{"type":"reasoning","id":"r1"}}}),12.0);
+    assert!(engine.view()["problema"].is_null());
+}
+
+#[test]
+fn buffering_notice_ignores_empty_deltas_and_leaves_with_a_finished_answer() {
+    let mut engine = engine();
+    line(&mut engine,json!({"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-1"}}}),10.0);
+    let buffering = json!({"method":"model/safetyBuffering/updated","params":{"threadId":"thread-1","turnId":"turn-1","showBufferingUi":true}});
+    line(&mut engine,buffering.clone(),10.5);
+    assert_eq!(engine.view()["codex_buffering"],true);
+    line(&mut engine,json!({"method":"item/agentMessage/delta","params":{"threadId":"thread-1","turnId":"turn-1","delta":""}}),11.0);
+    assert_eq!(engine.view()["codex_buffering"],true,"delta vazio não é resposta");
+    line(&mut engine,json!({"method":"item/completed","params":{"threadId":"thread-1","turnId":"turn-1","item":{"type":"agentMessage","id":"a","text":"Pronto"}}}),11.5);
+    assert_eq!(engine.view()["codex_buffering"],false);
+    // Resposta já começou: um aviso novo do mesmo turno não volta.
+    line(&mut engine,buffering,12.0);
+    assert_eq!(engine.view()["codex_buffering"],false);
+}
+
+#[test]
+fn refusal_that_never_reached_the_codex_leaves_a_note() {
+    let mut engine = engine();
+    let effects = line(&mut engine,json!({"id":77,"method":"foo/bar","params":{"threadId":"thread-1"}}),10.0);
+    let operation = effects.iter().find_map(|e|match e { Effect::Write { operation_id,frame } if frame["id"] == 77 => operation_id.clone(),_=>None }).unwrap();
+    let lost = ack(&mut engine,&operation,WriteOutcome::NotWritten,10.5);
+    let note = lost.iter().find_map(|e|match e { Effect::Policy { kind,payload,.. } if kind == "local_output" => payload["text"].as_str().map(str::to_owned),_=>None });
+    assert!(note.as_deref().is_some_and(|text|text.contains("foo/bar") && text.contains("a recusa não chegou nele") && text.contains("interrompa")),"{note:?}");
+}
+
+#[test]
+fn main_turn_end_keeps_a_subagent_request() {
+    let mut engine = subscribed_terminal();
+    line(&mut engine,json!({"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-1"}}}),13.0);
+    request(&mut engine,7,"item/commandExecution/requestApproval",json!({"threadId":"thread-1","command":"pwd"}));
+    request(&mut engine,8,"item/commandExecution/requestApproval",json!({"threadId":"child","command":"ls"}));
+    line(&mut engine,json!({"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1","status":"completed"}}}),14.0);
+    assert_eq!(pending_ids(&engine),vec![json!(8)]);
+}
+
+#[test]
+fn idle_status_alone_wakes_the_queue() {
+    let mut engine = engine();
+    line(&mut engine,json!({"method":"thread/status/changed","params":{"threadId":"thread-1","status":{"type":"active"}}}),10.0);
+    let idle = line(&mut engine,json!({"method":"thread/status/changed","params":{"threadId":"thread-1","status":{"type":"idle"}}}),11.0);
+    assert!(idle.iter().any(|e|matches!(e,Effect::WakeQueue)));
+}
+
+#[test]
+fn skip_answers_only_after_the_session_file_keeps_it() {
+    for saved in [true,false] {
+        let mut engine = engine();
+        let store = identified(&mut engine);
+        let question = ask_async(&mut engine,"q1","Qual pasta?",10.0);
+        let token = async_token(&engine,&store,&question);
+        let effects = engine.command(command(OperationKind::SkipQuestion,json!({"request_id":question,"interaction_id":token})),clock(10.5)).unwrap();
+        assert!(reply_of(&effects,"op-1").is_none(),"respondeu antes de gravar");
+        let patch = effects.iter().find_map(|e|match e { Effect::Policy { kind,request_id,payload } if kind == "session.patch_meta" => Some((request_id.clone(),payload.clone())),_=>None }).unwrap();
+        assert_eq!(patch.1["skipped_async_questions"],json!([question.clone()]));
+        let done = engine.apply(EngineInput::PolicyResult { request_id:patch.0,payload:json!({"updated":saved}) },clock(11.0)).unwrap();
+        if saved {
+            assert_eq!(reply_of(&done,"op-1").map(|(d,_)|d),Some(Disposition::Accepted));
+            assert!(async_ids(&engine).is_empty());
+        } else {
+            assert_eq!(reply_of(&done,"op-1").map(|(d,p)|(d,p["skip_not_saved"].clone())),Some((Disposition::Rejected,json!(true))));
+            assert_eq!(async_ids(&engine),vec![json!(question)],"a pergunta não gravada como pulada continua");
+            assert_eq!(engine.control_view()["skipped_async_questions"],json!([]));
+        }
+    }
+}
+
+#[test]
+fn a_lost_turn_end_is_found_by_reading_the_thread_after_a_silent_minute() {
+    // `turn/completed` perdido com a conexão viva deixava a sessão trabalhando e a fila presa para sempre.
+    let mut engine = subscribed_terminal();
+    line(&mut engine,json!({"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-1"}}}),13.0);
+    assert!(frames(&engine.apply(EngineInput::Tick,clock(60.0)).unwrap()).is_empty(),"turno ativo e recente não é conferido");
+    let probe = engine.apply(EngineInput::Tick,clock(73.0)).unwrap();
+    let read = frames(&probe).into_iter().find(|f|f["method"] == "thread/read").expect("conferência do turno");
+    assert_eq!(read["params"]["threadId"],"thread-1");
+    assert!(frames(&engine.apply(EngineInput::Tick,clock(74.0)).unwrap()).is_empty(),"uma conferência por vez");
+    let effects = line(&mut engine,json!({"id":read["id"],"result":{"thread":{"id":"thread-1","status":{"type":"idle"},"turns":[]}}}),74.5);
+    assert!(effects.iter().any(|e|matches!(e,Effect::WakeQueue)));
+    assert_eq!(engine.view()["state"],"idle");
+    assert_eq!(engine.control_view()["deliverable"],true);
+}
+
+#[test]
+fn sandbox_change_needs_a_turn_state_the_codex_confirmed() {
+    // Como o Python: depois de religar, sem a conversa dizer ativa ou ociosa, trocar o sandbox (que reinicia
+    // o processo) poderia matar um turno vivo; recusa e mantém a permissão.
+    for (status,allowed) in [("notLoaded",false),("idle",true)] {
+        let (mut engine,sent) = bootstrapped(json!({"name":"session","thread_id":"thread-1","headless":true,"cwd":"/w","permission_mode":"Full Access"}));
+        let resume = find_method(&sent,"thread/resume");
+        line(&mut engine,json!({"id":resume["id"],"result":{"thread":{"id":"thread-1","path":"/r.jsonl","status":{"type":status},"turns":[]}}}),12.0);
+        assert_eq!(engine.control_view()["ready"],true,"{status}");
+        let changed = engine.command(command(OperationKind::SetPermissionMode,json!({"mode":"Ask for approval"})),clock(13.0));
+        match changed {
+            Ok(effects) => { assert!(allowed,"{status}"); assert!(effects.iter().any(|e|matches!(e,Effect::Respawn { .. }))); }
+            Err(error) => { assert!(!allowed,"{status}: {}",error.message); assert!(error.message.contains("confirmar o estado do turno")); }
+        }
+    }
+}
+
+#[test]
+fn transferred_session_without_a_saved_mode_starts_in_the_mode_it_came_with() {
+    let meta = |previous:Value|json!({"name":"session","thread_id":"thread-1","headless":false,"cwd":"/work","transfer_id":"t-1","previous_non_plan":previous});
+    assert_eq!(Engine::new(meta(json!("Ask for approval")),1,clock(10.0)).view()["codex_mode"],"plan");
+    assert_eq!(Engine::new(meta(Value::Null),1,clock(10.0)).view()["codex_mode"],"default");
+    // Modo gravado vence.
+    let mut saved = meta(json!("Full Access")); saved["mode"] = json!("default");
+    assert_eq!(Engine::new(saved,1,clock(10.0)).view()["codex_mode"],"default");
 }
