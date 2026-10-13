@@ -315,7 +315,7 @@ mod tests {
     struct FrameIo(Vec<u8>);
     impl TerminalIo for FrameIo {
         fn command<'a>(&'a self, request: CommandRequest) -> IoFuture<'a, CommandOutput> { Box::pin(async move {
-            let stdout = match request.args[0].as_str() { "capture-pane" => self.0.clone(), "display-message" if request.args.last().is_some_and(|arg| arg == "#{pane_pid}\t#{session_name}\t#{pane_id}\t#{session_created}") => format!("{}\tsession\t%1\t1\n",std::process::id()).into_bytes(), "display-message" if request.args.last().is_some_and(|arg| arg == "#{pane_pid}") => b"4294967295\n".to_vec(), "display-message" => b"session\t%1\t1\n".to_vec(), _ => panic!("fatos locais não escrevem") };Ok(CommandOutput { success: true, stdout })
+            let stdout = match request.args[0].as_str() { "capture-pane" => self.0.clone(), "display-message" if request.args.last().is_some_and(|arg| arg == "#{pane_pid}\t#{session_name}\t#{pane_id}\t#{session_created}") => format!("{}\tsession\t%1\t1\n",std::process::id()).into_bytes(), "display-message" => b"session\t%1\t1\n".to_vec(), _ => panic!("fatos locais não escrevem") };Ok(CommandOutput { success: true, stdout })
         }) }
         fn socket<'a>(&'a self, _: &'a NativeMessage, _: Vec<u8>) -> IoFuture<'a, WriteOutcome> { Box::pin(async { panic!("fatos locais não entregam") }) }
     }
@@ -360,8 +360,17 @@ mod tests {
         target.metadata.agent_birth+=1.0;assert_eq!(local.read(&target,&target.binding,"").await.unwrap_err().0,"terminal_agent_changed");target.metadata.agent_birth-=1.0;
         let mut binding=target.binding.clone();binding.generation+=1;assert_eq!(local.read(&target,&binding,"").await.unwrap_err().0,"terminal_binding_changed");
         let local=LocalTerminalFacts::new(Arc::new(FrameIo(vec![0xff])),None,None);assert_eq!(local.read(&target,&target.binding,"").await.unwrap_err().0,"capture_utf8");
-        target.binding.windows=true;target.binding.pane="=session:0.0".into();let local=LocalTerminalFacts::new(frame(),None,None);assert!(!local.read(&target,&target.binding,"").await.unwrap().clipboard_available);
+        target.binding.windows=true;target.binding.pane="=session:0.0".into();let local=LocalTerminalFacts::new(frame(),None,None);
+        // O pane do teste é este processo: a sessão de logon do servidor, que só serve fora da sessão 0.
+        assert_eq!(local.read(&target,&target.binding,"").await.unwrap().clipboard_available,interactive_session());
     }
+    #[test]
+    fn clipboard_needs_a_pane_whose_logon_session_is_readable() {
+        assert!(!clipboard_available(-1));assert!(!clipboard_available(i64::from(u32::MAX)));
+        assert_eq!(clipboard_available(i64::from(std::process::id())),interactive_session());
+    }
+    /// Sessão de logon deste processo legível e fora da 0 (a dos serviços); nunca fora do Windows.
+    fn interactive_session() -> bool { process_session(std::process::id()).is_some_and(|session| session > 0) }
     #[tokio::test]
     async fn native_then_current_plugin_then_hook_decide_idle() {
         use crate::plugin::Pull;

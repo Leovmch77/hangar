@@ -15,11 +15,16 @@ const BUSY_STEP: Duration = Duration::from_millis(10);
 
 /// Espera o banco ocupado até `BUSY`. Não o `busy_timeout` do SQLite: o `nanosleep` dele volta no
 /// primeiro sinal (o SIGCHLD de qualquer filho do servidor) e a espera acaba antes do prazo.
+/// O prazo é do relógio, não da contagem de passos: cada `sleep` dura mais que o pedido (relógio de
+/// ~16 ms do Windows, máquina carregada) e 500 passos passariam muito de `BUSY`.
 fn wait_busy(connection: &Connection) -> rusqlite::Result<()> {
+    thread_local! { static STARTED: std::cell::Cell<std::time::Instant> = std::cell::Cell::new(std::time::Instant::now()); }
     fn step(count: i32) -> bool {
-        if u128::try_from(count).unwrap_or(u128::MAX) >= BUSY.as_millis() / BUSY_STEP.as_millis() { return false; }
+        // O SQLite chama com 0 a cada nova espera pela trava, na linha que espera.
+        if count == 0 { STARTED.set(std::time::Instant::now()); }
+        let Some(left) = BUSY.checked_sub(STARTED.get().elapsed()).filter(|left| !left.is_zero()) else { return false };
         // O `sleep` da std retoma depois de um sinal até completar o passo.
-        std::thread::sleep(BUSY_STEP);
+        std::thread::sleep(BUSY_STEP.min(left));
         true
     }
     connection.busy_handler(Some(step))

@@ -703,6 +703,10 @@ async fn terminal_runtime_unreadable_capture_recovers_without_sse() {
     f.io.capture_error.store(false,std::sync::atomic::Ordering::Release);f.wait_for("a mesma fila retoma",||!typed_at(&f,"Quando voltar").is_empty()).await;
     assert!(h.snapshot().await.unwrap()["error"].is_null());h.stop().await.unwrap();assert_eq!(typed_at(&f,"Quando voltar").len(),1);assert!(f.calls.lock().unwrap().is_empty());
 }
+// Binding Windows simulado: a sessão de logon não se lê fora do Windows, e a área de transferência
+// fica indisponível. No Windows o pane do teste é este processo, na sessão do servidor, e escreveria
+// na área de transferência real; ali a regra da sessão é coberta em `terminal_facts`.
+#[cfg(not(windows))]
 #[tokio::test]
 async fn terminal_runtime_windows_clipboard_unavailable_does_not_write_multiline() {
     let mut f=Fixture::new().await;f.target.binding.windows=true;f.target.binding.pane="=session:0.0".into();f.target.binding.clipboard_lock_path=Some(f._dir.path().join("clipboard.lock"));

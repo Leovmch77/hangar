@@ -168,19 +168,23 @@ fn probe_binary(bin: &Path) -> bool {
 
 /// Escopo transiente do systemd, fora do cgroup do serviço (senão o restart dele mata o cano).
 /// `--scope` faz `exec`: o pid lançado continua sendo o do cano. Sondado uma vez, como `tmux._scope_probe`.
+/// Caminho absoluto pelo PATH do servidor: o processo nasce com o ambiente da sessão, cujo PATH não
+/// precisa ter o `systemd-run`, e a sondagem só prova o que a subida vai rodar se for o mesmo binário.
 #[cfg(unix)]
-fn scope_prefix() -> &'static [&'static str] {
-    const SCOPE: &[&str] = &["systemd-run", "--user", "--scope", "--collect", "-q", "--"];
-    static USABLE: OnceLock<bool> = OnceLock::new();
-    let usable = *USABLE.get_or_init(|| {
-        let ok = std::env::var_os("XDG_RUNTIME_DIR").is_some()
-            && std::process::Command::new(SCOPE[0]).args(&SCOPE[1..]).arg("true")
-                .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null()).status().is_ok_and(|s| s.success());
-        if !ok { tracing::warn!("systemd-run --user --scope indisponível; cano nasce no cgroup do servidor"); }
-        ok
-    });
-    if usable { SCOPE } else { &[] }
+fn scope_prefix() -> &'static [std::ffi::OsString] {
+    const ARGS: &[&str] = &["--user", "--scope", "--collect", "-q", "--"];
+    static PREFIX: OnceLock<Vec<std::ffi::OsString>> = OnceLock::new();
+    PREFIX.get_or_init(|| {
+        let bin = std::env::var_os("XDG_RUNTIME_DIR").and(std::env::var_os("PATH"))
+            .and_then(|path| std::env::split_paths(&path).map(|dir| dir.join("systemd-run")).find(|p| p.is_file()));
+        let ok = bin.as_ref().is_some_and(|bin| std::process::Command::new(bin).args(ARGS).arg("true")
+            .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null()).status().is_ok_and(|s| s.success()));
+        match bin {
+            Some(bin) if ok => std::iter::once(bin.into_os_string()).chain(ARGS.iter().map(Into::into)).collect(),
+            _ => { tracing::warn!("systemd-run --user --scope indisponível; cano nasce no cgroup do servidor"); Vec::new() }
+        }
+    })
 }
 
 /// O executável pelo PATH do ambiente da sessão (PATHEXT no Windows: o `hangar-engine` é `.CMD`).
@@ -220,26 +224,26 @@ fn new_listen(key: &str, dir: &Path) -> String {
 pub async fn spawn(spec: &LaunchSpec) -> Result<Cano, ProcessError> {
     let bin = tokio::task::spawn_blocking(cano_binary).await.map_err(|_| ProcessError::NoCano)??;
     #[cfg(unix)]
-    let prefix = tokio::task::spawn_blocking(scope_prefix).await.unwrap_or_else(|e| {
+    let prefix: &[std::ffi::OsString] = tokio::task::spawn_blocking(scope_prefix).await.unwrap_or_else(|e| {
         tracing::warn!(error = %e, "sondagem do escopo systemd falhou; o cano sobe sem o escopo");
         &[]
     });
     #[cfg(not(unix))]
-    let prefix: &[&str] = &[];
+    let prefix: &[std::ffi::OsString] = &[];
     let program = spec.program.first().ok_or_else(|| ProcessError::Spawn("comando vazio".into()))?;
     let exe = resolve_program(program, &spec.env)
         .ok_or_else(|| ProcessError::Spawn(format!("binário não encontrado: {program}")))?;
     let program=std::iter::once(exe.into_os_string()).chain(spec.program[1..].iter().map(std::ffi::OsString::from)).collect();
     let env=spec.env.iter().map(|(k,v)|(k.into(),v.into())).collect();
-    spawn_recipe(PreparedRecipe {bin,prefix:prefix.iter().map(Into::into).collect(),program,env,cwd:spec.cwd.clone(),key:spec.key.clone(),sidecar_dir:spec.sidecar_dir.clone(),extra:spec.cano_extra.clone()}).await
+    spawn_recipe(PreparedRecipe {bin,prefix:prefix.to_vec(),program,env,cwd:spec.cwd.clone(),key:spec.key.clone(),sidecar_dir:spec.sidecar_dir.clone(),extra:spec.cano_extra.clone()}).await
 }
 
 pub(crate) fn scope_command()->Result<Vec<std::ffi::OsString>,ProcessError> {
     #[cfg(unix)] let prefix=scope_prefix();
-    #[cfg(not(unix))] let prefix:&[&str]=&[];
+    #[cfg(not(unix))] let prefix:&[std::ffi::OsString]=&[];
     #[cfg(target_os="linux")]
     if Path::new("/run/systemd/system").exists() && prefix.is_empty() {return Err(ProcessError::Spawn("escopo da sessão indisponível; origem conservada".into()));}
-    Ok(prefix.iter().map(Into::into).collect())
+    Ok(prefix.to_vec())
 }
 
 /// Prévia privada de uma receita provada; ambiente só em memória, nunca no diário.
