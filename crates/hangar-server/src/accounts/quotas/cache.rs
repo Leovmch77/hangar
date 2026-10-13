@@ -3,7 +3,8 @@ use std::{fs, io, path::Path};
 
 pub const TTL: f64 = 300.0;
 pub const RATE_LIMIT_WAIT: f64 = 600.0;
-/// Espera de uma fonte que recusou a conexão, pela vez seguida: no Windows cada recusa custa ~2 s.
+/// Espera de uma fonte que recusou a conexão, pela vez seguida: cada recusa trava a leitura (no
+/// Windows, a pilha TCP tenta de novo antes de desistir).
 pub const UNREACHABLE_WAITS: [f64; 3] = [600.0, 1800.0, 3600.0];
 
 #[derive(Default)]
@@ -151,9 +152,11 @@ impl QuotaCache {
         let Some(entry) = self.entries.get_mut(id).and_then(Value::as_object_mut) else {
             return 0;
         };
-        let previous = entry.get("unreachable_count").and_then(Value::as_u64).unwrap_or(0);
-        let count = if forced { previous.max(1) } else { previous + 1 };
-        let wait = UNREACHABLE_WAITS[(count.min(UNREACHABLE_WAITS.len() as u64) - 1) as usize];
+        // O arquivo é editável à mão: o valor lido não passa do último degrau.
+        let steps = UNREACHABLE_WAITS.len() as u64;
+        let previous = entry.get("unreachable_count").and_then(Value::as_u64).unwrap_or(0).min(steps);
+        let count = if forced { previous.max(1) } else { (previous + 1).min(steps) };
+        let wait = UNREACHABLE_WAITS[(count - 1) as usize];
         entry.insert("unreachable_count".into(), json!(count));
         entry.insert("unreachable_until".into(), json!(now + wait));
         self.dirty = true;
@@ -356,6 +359,17 @@ mod tests {
         let mut cache = QuotaCache::load(&path);
         cache.set_endpoint("chave:x", url);
         assert!(!cache.dirty(), "mesmo endereço não regrava");
+    }
+
+    #[test]
+    fn counter_from_a_hand_edited_cache_never_panics() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cache.json");
+        fs::write(&path, json!({"chave:x":{"gravado_em":1000,"cota":good(),
+            "unreachable_count":u64::MAX,"unreachable_until":5000}}).to_string()).unwrap();
+        let mut cache = QuotaCache::load(&path);
+        assert_eq!(cache.mark_unreachable("chave:x", 1000.0, false), 3);
+        assert_eq!(cache.mark_unreachable("chave:x", 1000.0, true), 3);
     }
 
     #[test]

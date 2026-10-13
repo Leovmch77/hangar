@@ -218,7 +218,8 @@ impl AccountService {
     }
 
     /// Cota com prazo: estourado, devolve o que o cache já tem (`true` no segundo campo) e a leitura
-    /// de rede segue no worker, gravando o cache para a próxima.
+    /// de rede segue no worker, gravando o cache para a próxima. Leitura de outro pedido já em voo
+    /// também responde do cache, mas não é atraso (`false`).
     pub async fn quotas_within(
         &self,
         bridge: Option<AccountsBridge>,
@@ -226,10 +227,10 @@ impl AccountService {
         deadline: Duration,
         config: Arc<other::Config>,
     ) -> (Result<Value, AccountError>, bool) {
-        // ponytail: leitura de rede já em voo e o pedido não é forçado → responde do cache em vez de enfileirar outra (corrida
-        // curta entre o try_lock e o lock do worker é aceitável: no pior caso uma leitura a mais).
+        // ponytail: leitura de rede já em voo e o pedido não é forçado → responde do cache em vez de
+        // enfileirar outra (corrida curta entre o try_lock e o lock do worker: no pior caso uma leitura a mais).
         if !force && self.quotas.refresh.try_lock().is_err() {
-            return (self.quotas_with(bridge, false, true, Some(config)).await, true);
+            return (self.quotas_with(bridge, false, true, Some(config)).await, false);
         }
         match tokio::time::timeout(deadline, self.quotas_with(bridge.clone(), force, false, Some(config.clone()))).await {
             Ok(result) => (result, false),
@@ -748,6 +749,22 @@ mod tests {
         assert_eq!(reads.load(Ordering::SeqCst), 1);
         assert_eq!(row(&rows, "chave:test").unwrap()["label"], "Chave");
         server.abort();
+    }
+
+    /// Leitura em voo não é prazo estourado; a forçada espera a vez e só ela pode estourar.
+    #[tokio::test]
+    async fn in_flight_read_is_not_late_and_a_forced_one_still_waits() {
+        let (_temp, service) = service_with_engine("http://127.0.0.1:9/v1");
+        let config = Arc::new(other::Config::default());
+        let held = service.quotas.refresh.lock().await;
+        let started = std::time::Instant::now();
+        let (rows, late) = service.quotas_within(None, false, Duration::from_secs(5), config.clone()).await;
+        assert!(rows.is_ok());
+        assert!(!late, "em voo não conta como prazo");
+        assert!(started.elapsed() < Duration::from_secs(1));
+        let (_, late) = service.quotas_within(None, true, Duration::from_millis(100), config).await;
+        assert!(late, "forçada espera o lock e estoura o prazo");
+        drop(held);
     }
 
     #[tokio::test]
