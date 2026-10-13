@@ -2030,7 +2030,7 @@ relato, porque esse caminho não deixava rastro.
 - **A descoberta é a da lista do Rust** (`locate.rs`, `ListLocate`): o retrato de até 2 s e, se a
   sessão não estiver nele, uma rodada nova. `/history`, `/events`, páginas da conversa, custo da
   sessão Codex e o canal privado do estado leem dali. O `/info` do Python e o evento `info` saíram
-  (protocolo 56).
+  (protocolo 57).
 - **A troca de transcript só vale lida duas vezes seguidas** (`side::judge`, vigia de 2 s por hub).
   Troca de provider, de modo do Codex ou de vida da sessão (`lifecycle_id`, outra sessão com o mesmo
   nome) vale na hora. Sessão sumida também espera duas leituras. Cada leitura diferente, confirmada
