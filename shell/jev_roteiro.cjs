@@ -4,13 +4,14 @@
 // mudou um lado, muda o outro e sobe `versao`. Nunca guarda ref @eN nem coordenada: cada passo é
 // reencontrado na página por papel + nome (+ ordem entre gêmeos). Valor de `dados` vai pela CHAVE.
 
+const { execFileSync } = require('node:child_process');
 const { createHash } = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const jev = require('./jev_objetivo.cjs');
 
-const VERSAO = 1;
+const VERSAO = 2;
 const PASTA = path.join(os.homedir(), '.cache', 'hangar', 'roteiros');
 
 const normal = (t) => String(t).split(/\s+/).filter(Boolean).join(' ').toLowerCase();
@@ -22,25 +23,37 @@ function limpar(saida) {
   try { return JSON.parse(t); } catch { return t; }
 }
 
-/** Origem + caminho, sem a query: a mesma tela com outro paciente na URL é a mesma tela. */
+/**
+ * Só o caminho: sem a query (a mesma tela com outro paciente é a mesma tela) e sem a origem (o
+ * mesmo roteiro vale no localhost:3000 do dev e no :8116 da VM).
+ */
 function classeDe(url) {
   const t = limpar(url);
   try {
     const u = new URL(t);
-    return u.origin === 'null' ? u.href.split(/[?#]/)[0] : u.origin + u.pathname;
+    return u.origin === 'null' ? u.href.split(/[?#]/)[0] : u.pathname;
   } catch {
     return t.split(/[?#]/)[0];
   }
 }
 
-function origemDe(url) {
-  try { return new URL(limpar(url)).origin; } catch { return limpar(url); }
+const slug = (t) => String(t).normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase()
+  .replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60).replace(/-+$/, '') || 'objetivo';
+
+/** Mesma tela de partida, mesmo texto do objetivo e mesmas chaves de `dados`: os valores podem mudar. */
+function arquivo(pasta, tela, objetivo, dados) {
+  const semente = JSON.stringify([tela, normal(objetivo), Object.keys(dados ?? {}).sort()]);
+  return path.join(pasta, `${slug(objetivo)}-${createHash('sha256').update(semente).digest('hex').slice(0, 8)}.json`);
 }
 
-/** Mesmo site, mesmo texto do objetivo e mesmas chaves de `dados`: os valores podem mudar. */
-function arquivo(pasta, origem, objetivo, dados) {
-  const semente = JSON.stringify([origem, normal(objetivo), Object.keys(dados ?? {}).sort()]);
-  return path.join(pasta, `${createHash('sha256').update(semente).digest('hex').slice(0, 16)}.json`);
+/** `.hangar/roteiros` na raiz do git de `cwd`, para o roteiro ir junto com o projeto; fora de repo, o cache. */
+function pastaDe(cwd) {
+  try {
+    const raiz = execFileSync('git', ['-C', cwd, 'rev-parse', '--show-toplevel'], { stdio: ['ignore', 'pipe', 'ignore'] })
+      .toString().trim();
+    if (raiz) return path.join(raiz, '.hangar', 'roteiros');
+  } catch { /* fora de repositório git */ }
+  return PASTA;
 }
 
 /** null só quando ainda não há roteiro; qualquer outra coisa ilegível é erro que o resultado mostra. */
@@ -53,9 +66,19 @@ function carregar(arq) {
     throw err;
   }
   const r = JSON.parse(texto);
+  // A versão 1 tinha um caminho só: vira a única variante.
+  if (r?.versao === 1 && Array.isArray(r.passos)) return { versao: VERSAO, objetivo: r.objetivo, variantes: [{ passos: r.passos, fim: r.fim ?? null }] };
   if (r?.versao !== VERSAO) throw new Error(`versão ${r?.versao} do formato, esperada ${VERSAO}`);
-  if (!Array.isArray(r.passos)) throw new Error('roteiro sem passos');
+  if (!Array.isArray(r.variantes) || r.variantes.some((v) => !Array.isArray(v?.passos))) throw new Error('roteiro sem variantes');
   return r;
+}
+
+const MAX_VARIANTES = 5;
+const sequencia = (v) => JSON.stringify(v.passos.map((p) => [p.janela?.classe, p.alvo, p.acao]));
+
+/** A corrida que deu certo vai à frente; a variante de mesma sequência sai; ficam as 5 mais recentes. */
+function juntar(antigas, nova) {
+  return [nova, ...antigas.filter((v) => sequencia(v) !== sequencia(nova))].slice(0, MAX_VARIANTES);
 }
 
 function salvar(arq, roteiro) {
@@ -164,8 +187,8 @@ function gravador(executar, dados) {
     executar: embrulhado,
     classe: () => classe,
     candidatos: () => candidatos,
-    /** O roteiro, ou o motivo de não gravar. */
-    roteiro(objetivo) {
+    /** A variante desta corrida, ou o motivo de não gravar. */
+    variante() {
       if (problema) return { motivo: problema };
       if (!passos.length) return { motivo: 'nenhuma ação a gravar' };
       // Credencial nunca vai a disco: com chave secreta em `dados` ou campo de senha preenchido, nada é gravado.
@@ -173,8 +196,8 @@ function gravador(executar, dados) {
         || passos.some((p) => p.valor && jev.CHAVE_SECRETA.test(p.alvo?.elemento?.name ?? ''))) {
         return { motivo: 'contém um valor secreto' };
       }
-      // `fim` fica fora do formato do desktop (ele ignora): diz em que tela o objetivo terminou.
-      return { roteiro: { versao: VERSAO, objetivo, passos, fim: { classe, titulo: titulos.get(classe) ?? '' } } };
+      // `fim` é só dado: em que tela o objetivo terminou. Sucesso continua exigindo a página confirmar.
+      return { variante: { passos, fim: { classe, titulo: titulos.get(classe) ?? '' } } };
     },
   };
 }
@@ -195,32 +218,62 @@ async function olhar(executar) {
   return { candidatos: candidatosDe(snap), classe: classeDe(url) };
 }
 
-/** Repete os passos enquanto a página bate com a gravada; para na primeira divergência. */
-async function repetir({ roteiro, executar, dados, log }) {
+/** Primeira leitura: espera a página em branco carregar e duas leituras iguais seguidas. */
+async function lerPaginaInicial(executar) {
+  let vista = await olhar(executar);
+  if (vista.erro) return vista;
+  if (!vista.candidatos.length) {
+    await executar('wait', ['--idle', '--timeout', '5000']);
+    vista = await olhar(executar);
+    if (vista.erro) return vista;
+  }
+  // Página recém-aberta ainda carregando: clicar antes dela assentar não faz nada, e a carga
+  // muda a árvore como se o clique tivesse funcionado.
+  for (let i = 0; i < 6; i += 1) {
+    await executar('wait', ['400']);
+    const outra = await olhar(executar);
+    if (outra.erro) return outra;
+    const igual = assinatura(outra.candidatos) === assinatura(vista.candidatos);
+    vista = outra;
+    if (igual) break;
+  }
+  return vista;
+}
+
+/** Valor e elemento do passo nesta página, sem ler de novo; `motivo` quando não resolve. */
+function resolver(p, vista, cofre) {
+  if (vista.classe !== p.janela?.classe) return { motivo: `página ${vista.classe}, gravada ${p.janela?.classe}` };
+  let valor = null;
+  if (p.valor?.dados !== undefined) {
+    valor = cofre[p.valor.dados];
+    if (typeof valor !== 'string') return { motivo: `dados.${p.valor.dados} não veio` };
+  } else if (p.valor?.literal !== undefined) valor = String(p.valor.literal);
+  if (p.alvo && !p.alvo.elemento) return { motivo: 'alvo de janela não existe no navegador' };
+  if (!p.alvo) return { alvo: null, valor };
+  // Clique em opção escolhida pelo valor de `dados`: procura a opção do valor DESTA vez.
+  const nome = p.acao?.op !== 'fill' && p.valor?.dados !== undefined ? valor : p.alvo.elemento.name;
+  const alvo = relocalizar(vista.candidatos, p.alvo.elemento, nome);
+  if (!alvo) {
+    const { role, ordem } = p.alvo.elemento;
+    return { motivo: `${role} "${nome}" (${ordem?.indice + 1} de ${ordem?.de}) não está na página do mesmo jeito` };
+  }
+  return { alvo, valor };
+}
+
+/**
+ * Repete os passos enquanto a página bate com a gravada; para na primeira divergência. O passo 1
+ * usa `vista`, a leitura que escolheu esta variante.
+ */
+async function repetir({ passos, executar, dados, log, vista: primeira }) {
   const cofre = dados && typeof dados === 'object' ? dados : {};
   const feito = [];
   let antes = null;
-  for (const [n, p] of roteiro.passos.entries()) {
+  for (const [n, p] of passos.entries()) {
     const parar = (motivo) => ({ feito, repetidos: n, parou: `parou no passo ${n + 1}: ${motivo}` });
-    let vista = await olhar(executar);
+    let vista = n === 0 && primeira ? primeira : await olhar(executar);
     if (vista.erro) return parar(vista.erro);
-    if (!vista.candidatos.length) {
-      await executar('wait', ['--idle', '--timeout', '5000']);
-      vista = await olhar(executar);
-      if (vista.erro) return parar(vista.erro);
-    }
-    // Página recém-aberta ainda carregando: clicar antes dela assentar não faz nada, e a carga
-    // muda a árvore como se o clique tivesse funcionado. Espera duas leituras iguais seguidas.
-    for (let i = 0; n === 0 && i < 6; i += 1) {
-      await executar('wait', ['400']);
-      const outra = await olhar(executar);
-      if (outra.erro) return parar(outra.erro);
-      const igual = assinatura(outra.candidatos) === assinatura(vista.candidatos);
-      vista = outra;
-      if (igual) break;
-    }
     // O passo anterior mudou a tela na gravação: espera um pouco pela mudança antes de chamar de divergência.
-    if (n > 0 && roteiro.passos[n - 1].mudou_tela === true) {
+    if (n > 0 && passos[n - 1].mudou_tela === true) {
       for (let i = 0; i < 4 && assinatura(vista.candidatos) === antes; i += 1) {
         await executar('wait', ['500']);
         vista = await olhar(executar);
@@ -228,26 +281,16 @@ async function repetir({ roteiro, executar, dados, log }) {
       }
       if (assinatura(vista.candidatos) === antes) return parar('a tela não mudou depois do passo anterior');
     }
-    if (vista.classe !== p.janela?.classe) return parar(`página ${vista.classe}, gravada ${p.janela?.classe}`);
-    let valor = null;
-    if (p.valor?.dados !== undefined) {
-      valor = cofre[p.valor.dados];
-      if (typeof valor !== 'string') return parar(`dados.${p.valor.dados} não veio`);
-    } else if (p.valor?.literal !== undefined) valor = String(p.valor.literal);
-    let alvo = null;
-    if (p.alvo?.elemento) {
-      // Clique em opção escolhida pelo valor de `dados`: procura a opção do valor DESTA vez.
-      const nome = p.acao?.op !== 'fill' && p.valor?.dados !== undefined ? valor : p.alvo.elemento.name;
-      alvo = relocalizar(vista.candidatos, p.alvo.elemento, nome);
-      // Diálogo ou lista que ainda está chegando: olha de novo antes de chamar de divergência.
-      for (let i = 0; i < 4 && !alvo; i += 1) {
-        await executar('wait', ['500']);
-        vista = await olhar(executar);
-        if (vista.erro) return parar(vista.erro);
-        alvo = relocalizar(vista.candidatos, p.alvo.elemento, nome);
-      }
-      if (!alvo) return parar(`${p.alvo.elemento.role} "${nome}" (${p.alvo.elemento.ordem?.indice + 1} de ${p.alvo.elemento.ordem?.de}) não está na página do mesmo jeito`);
-    } else if (p.alvo) return parar('alvo de janela não existe no navegador');
+    let r = resolver(p, vista, cofre);
+    // Diálogo ou lista que ainda está chegando: olha de novo antes de chamar de divergência.
+    for (let i = 0; i < 4 && r.motivo && p.alvo?.elemento && vista.classe === p.janela?.classe; i += 1) {
+      await executar('wait', ['500']);
+      vista = await olhar(executar);
+      if (vista.erro) return parar(vista.erro);
+      r = resolver(p, vista, cofre);
+    }
+    if (r.motivo) return parar(r.motivo);
+    const { alvo, valor } = r;
     const op = p.acao?.op;
     const args = {
       click: () => ['click', [`@${alvo?.ref}`]],
@@ -265,16 +308,17 @@ async function repetir({ roteiro, executar, dados, log }) {
     // No <select> nativo ausente, o clique gravado logo depois escolhe na listbox ARIA.
     if (saida.startsWith('erro:') || (op === 'select' && saida.includes('erro:'))) return parar(`${verbo} falhou: ${saida.slice(0, 200)}`);
     feito.push(FEITO[op](alvo, p.acao.key));
-    log(`jev-objetivo roteiro ${n + 1}/${roteiro.passos.length}: ${feito.at(-1)}`);
+    log(`jev-objetivo roteiro ${n + 1}/${passos.length}: ${feito.at(-1)}`);
     if (op === 'type') await executar('eval', [jev.JS_ESPERAR_OPCOES]);
     await executar('wait', jev.ESPERA_ASSENTAR);
   }
-  return { feito, repetidos: roteiro.passos.length, parou: null };
+  return { feito, repetidos: passos.length, parou: null };
 }
 
 /**
- * O `rodar` com roteiro: repete o gravado sem perguntar ao Jev e, na divergência, o Jev continua da
- * página de agora. Sucesso pelo Jev regrava. `jev` conta as perguntas por fase.
+ * O `rodar` com roteiro: escolhe a primeira variante cujo passo 1 casa com a página, repete sem
+ * perguntar ao Jev e, na divergência, o Jev continua da página de agora — nunca outra variante
+ * depois de uma ter agido. Toda corrida que dá certo vira a variante 0. `jev` conta por fase.
  */
 async function rodarComRoteiro({ objetivo, dados, perguntar, executar, refazer = false, pasta = PASTA, log = () => {}, ...resto }) {
   const jevConta = { acoes: 0, verificacao: 0 };
@@ -282,51 +326,59 @@ async function rodarComRoteiro({ objetivo, dados, perguntar, executar, refazer =
   const contado = async (estado, perguntas) => { jevConta[fase] += 1; return perguntar(estado, perguntas); };
   const cofre = dados && typeof dados === 'object' ? dados : {};
   const g = gravador(executar, cofre);
-  const arq = arquivo(pasta, origemDe(await g.executar('url', [])), objetivo, cofre);
+  const arq = arquivo(pasta, classeDe(await g.executar('url', [])), objetivo, cofre);
   const avisos = [];
   let gravado = null;
-  if (!refazer) {
-    try {
-      gravado = carregar(arq);
-    } catch (err) {
-      avisos.push(`roteiro ilegível, seguindo pelo Jev: ${String(err?.message ?? err).slice(0, 200)}`);
-      log(`jev-objetivo: ${avisos.at(-1)}`);
-    }
+  try {
+    gravado = carregar(arq);
+  } catch (err) {
+    avisos.push(`roteiro ilegível, seguindo pelo Jev: ${String(err?.message ?? err).slice(0, 200)}`);
+    log(`jev-objetivo: ${avisos.at(-1)}`);
   }
+  const fechar = (resultado) => {
+    if (resultado.sucesso) {
+      const { variante, motivo } = g.variante();
+      if (variante) {
+        try {
+          salvar(arq, { versao: VERSAO, objetivo, variantes: juntar(gravado?.variantes ?? [], variante) });
+          avisos.push(`gravado em ${arq}`);
+        } catch (err) {
+          avisos.push(`não gravado: ${err.message}`);
+        }
+      } else avisos.push(`não gravado: ${motivo}`);
+    }
+    return { ...resultado, roteiro: avisos.join('; ') || null, jev: jevConta };
+  };
   let feito = [];
-  if (gravado) {
-    const r = await repetir({ roteiro: gravado, executar: g.executar, dados: cofre, log });
-    feito = r.feito;
-    avisos.push(`repetidos ${r.repetidos} de ${gravado.passos.length} passos${r.parou ? `; ${r.parou}` : ''}`);
-    if (r.parou) log(`jev-objetivo: ${avisos.at(-1)}; o Jev segue daqui`);
-    else {
-      // Sempre a pergunta de conclusão: a página final igual à gravada não prova que salvou
-      // (formulário em diálogo fica no mesmo endereço).
-      const url = await g.executar('url', []);
-      fase = 'verificacao';
-      const texto = await g.executar('text', []);
-      const { concluido } = await contado(jev.montarEstado(objetivo, url, feito, texto, {}, cofre), { concluido: jev.montarPerguntas([]).concluido });
-      const prova = typeof concluido?.noul === 'number' ? concluido.noul : 0;
-      fase = 'acoes';
-      if (prova >= jev.LIMIARES.conclusao) {
-        return { feito, sucesso: true, parou: `roteiro repetido; página confirma (${prova.toFixed(2)})`, roteiro: avisos.join('; '), jev: jevConta };
+  if (gravado && !refazer) {
+    const vista = await lerPaginaInicial(g.executar);
+    const i = vista.erro ? -1 : gravado.variantes.findIndex((v) => v.passos.length && !resolver(v.passos[0], vista, cofre).motivo);
+    if (i < 0) {
+      avisos.push(`nenhuma das ${gravado.variantes.length} variantes casa com a página${vista.erro ? ` (${vista.erro})` : ''}; o Jev segue`);
+      log(`jev-objetivo: ${avisos.at(-1)}`);
+    } else {
+      const { passos } = gravado.variantes[i];
+      const r = await repetir({ passos, executar: g.executar, dados: cofre, log, vista });
+      feito = r.feito;
+      avisos.push(`variante ${i + 1} de ${gravado.variantes.length}: repetidos ${r.repetidos} de ${passos.length} passos${r.parou ? `; ${r.parou}` : ''}`);
+      if (r.parou) log(`jev-objetivo: ${avisos.at(-1)}; o Jev segue daqui`);
+      else {
+        // Sempre a pergunta de conclusão: a página final igual à gravada não prova que salvou
+        // (formulário em diálogo fica no mesmo endereço).
+        const url = await g.executar('url', []);
+        fase = 'verificacao';
+        const texto = await g.executar('text', []);
+        const { concluido } = await contado(jev.montarEstado(objetivo, url, feito, texto, {}, cofre), { concluido: jev.montarPerguntas([]).concluido });
+        const prova = typeof concluido?.noul === 'number' ? concluido.noul : 0;
+        fase = 'acoes';
+        if (prova >= jev.LIMIARES.conclusao) {
+          return fechar({ feito, sucesso: true, parou: `roteiro repetido; página confirma (${prova.toFixed(2)})` });
+        }
+        avisos.push(`a página não confirmou o fim (${prova.toFixed(2)}); o Jev segue`);
       }
-      avisos.push(`a página não confirmou o fim (${prova.toFixed(2)}); o Jev segue`);
     }
   }
-  const resultado = await jev.rodar({ ...resto, objetivo, dados, log, perguntar: contado, executar: g.executar, feitoInicial: feito });
-  if (resultado.sucesso) {
-    const { roteiro, motivo } = g.roteiro(objetivo);
-    if (roteiro) {
-      try {
-        salvar(arq, roteiro);
-        avisos.push(`gravado em ${arq}`);
-      } catch (err) {
-        avisos.push(`não gravado: ${err.message}`);
-      }
-    } else avisos.push(`não gravado: ${motivo}`);
-  }
-  return { ...resultado, roteiro: avisos.join('; ') || null, jev: jevConta };
+  return fechar(await jev.rodar({ ...resto, objetivo, dados, log, perguntar: contado, executar: g.executar, feitoInicial: feito }));
 }
 
-module.exports = { rodarComRoteiro, gravador, repetir, relocalizar, elementoDe, arquivo, carregar, salvar, classeDe, VERSAO, PASTA };
+module.exports = { rodarComRoteiro, gravador, repetir, relocalizar, elementoDe, arquivo, pastaDe, carregar, salvar, juntar, classeDe, VERSAO, MAX_VARIANTES, PASTA };

@@ -3,7 +3,8 @@ const { test } = require('node:test');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { rodarComRoteiro, relocalizar, elementoDe, arquivo } = require('./jev_roteiro.cjs');
+const { execFileSync } = require('node:child_process');
+const { rodarComRoteiro, relocalizar, elementoDe, arquivo, pastaDe, juntar, PASTA } = require('./jev_roteiro.cjs');
 const { parsarSnapshot } = require('./jev_objetivo.cjs');
 
 const OBJETIVO = 'incluir uma alergia com descrição {descricao}';
@@ -11,7 +12,9 @@ const pastaNova = () => fs.mkdtempSync(path.join(os.tmpdir(), 'roteiro-'));
 const lerUnico = (pasta) => {
   const nomes = fs.readdirSync(pasta).filter((n) => n.endsWith('.json'));
   assert.equal(nomes.length, 1);
-  return JSON.parse(fs.readFileSync(path.join(pasta, nomes[0]), 'utf8'));
+  const r = JSON.parse(fs.readFileSync(path.join(pasta, nomes[0]), 'utf8'));
+  // A variante 0 a mao, para os testes de um caminho so.
+  return { ...r, ...r.variantes[0] };
 };
 
 /** Lista de alergias -> formulário -> salvo. `base` muda a numeração das refs entre corridas. */
@@ -79,10 +82,11 @@ test('grava so o que deu certo, no formato do desktop, com o valor por chave', a
   assert.match(r.roteiro, /gravado em/);
   assert.equal(r.jev.acoes, 4);
   const g = lerUnico(pasta);
-  assert.equal(g.versao, 1);
+  assert.equal(g.versao, 2);
+  assert.equal(g.variantes.length, 1);
   assert.deepEqual(g.passos.map((p) => p.acao.op), ['click', 'fill', 'click']);
   assert.deepEqual(g.passos[1].valor, { dados: 'descricao' });
-  assert.deepEqual(g.passos[1].janela, { classe: 'http://local/alergia/nova', titulo: 'Alergia' });
+  assert.deepEqual(g.passos[1].janela, { classe: '/alergia/nova', titulo: 'Alergia' });
   assert.deepEqual(g.passos[0].alvo.elemento.ordem, { indice: 0, de: 1 });
   assert.deepEqual(g.passos.map((p) => p.mudou_tela), [true, false, true]);
   assert.ok(!JSON.stringify(g).includes('"A"') && !JSON.stringify(g).includes('@e'), 'nem valor nem ref no arquivo');
@@ -122,9 +126,10 @@ test('gemeos em outra quantidade: o Jev segue da pagina atual e regrava', async 
   const s2 = site({ abrir: 3 });
   const r = await rodarComRoteiro({ pasta, objetivo: 'abrir o segundo', executar: s2.executar, perguntar: jevDoSite(s2, { abrirN: 2 }) });
   assert.equal(r.sucesso, true);
-  assert.match(r.roteiro, /repetidos 0 de 1 passos; parou no passo 1: button "Abrir" \(2 de 2\)/);
+  assert.match(r.roteiro, /nenhuma das 1 variantes casa com a página; o Jev segue/);
   assert.ok(r.jev.acoes > 0);
-  assert.deepEqual(lerUnico(pasta).passos[0].alvo.elemento.ordem, { indice: 1, de: 3 });
+  const g = lerUnico(pasta);
+  assert.deepEqual(g.variantes.map((v) => v.passos[0].alvo.elemento.ordem.de), [3, 2], 'a nova na frente, a antiga fica');
 });
 
 test('elemento que sumiu: o Jev continua com os passos ja repetidos', async () => {
@@ -154,13 +159,13 @@ test('dado secreto: nada vai a disco', async () => {
 
 test('roteiro ilegivel: avisa, roda pelo Jev e regrava', async () => {
   const pasta = pastaNova();
-  const arq = arquivo(pasta, 'http://local', OBJETIVO, { descricao: 'A' });
+  const arq = arquivo(pasta, '/alergia', OBJETIVO, { descricao: 'A' });
   fs.writeFileSync(arq, '{ quebrado');
   const s = site();
   const r = await rodarComRoteiro({ pasta, objetivo: OBJETIVO, dados: { descricao: 'A' }, executar: s.executar, perguntar: jevDoSite(s) });
   assert.equal(r.sucesso, true);
   assert.match(r.roteiro, /roteiro ilegível, seguindo pelo Jev/);
-  assert.equal(lerUnico(pasta).versao, 1);
+  assert.equal(lerUnico(pasta).versao, 2);
 });
 
 test('--refazer ignora o roteiro', async () => {
@@ -177,7 +182,8 @@ test('repeticao sem a pagina confirmar nao e sucesso: o Jev segue e regrava', as
   const s1 = site();
   await rodarComRoteiro({ pasta, objetivo: OBJETIVO, dados: { descricao: 'A' }, executar: s1.executar, perguntar: jevDoSite(s1) });
   const arq = path.join(pasta, fs.readdirSync(pasta)[0]);
-  fs.writeFileSync(arq, JSON.stringify({ ...lerUnico(pasta), passos: lerUnico(pasta).passos.slice(0, 2) }));
+  const curto = lerUnico(pasta);
+  fs.writeFileSync(arq, JSON.stringify({ versao: 2, objetivo: curto.objetivo, variantes: [{ ...curto.variantes[0], passos: curto.passos.slice(0, 2) }] }));
   // Roteiro parou antes de salvar, mas a pagina final tem o mesmo endereco gravado em `fim`.
   const s2 = site();
   const jev = jevDoSite(s2);
@@ -189,4 +195,86 @@ test('repeticao sem a pagina confirmar nao e sucesso: o Jev segue e regrava', as
   assert.deepEqual(r.jev, { acoes: 2, verificacao: 1 });
   assert.match(r.roteiro, /não confirmou o fim \(0\.20\).*gravado em/);
   assert.equal(lerUnico(pasta).passos.length, 3);
+});
+
+test('nome legivel, sem a origem: o mesmo roteiro vale em outra porta', async () => {
+  assert.match(path.basename(arquivo('/x', '/pss/alergia', 'Incluir uma alergia com nome {nome}', { nome: 'a' })),
+    /^incluir-uma-alergia-com-nome-nome-[0-9a-f]{8}\.json$/);
+  assert.equal(arquivo('/x', '/a', 'Ação  É', {}), arquivo('/x', '/a', 'ação é', {}));
+  const pasta = pastaNova();
+  const s1 = site();
+  await rodarComRoteiro({ pasta, objetivo: OBJETIVO, dados: { descricao: 'A' }, executar: s1.executar, perguntar: jevDoSite(s1) });
+  const s2 = site();
+  const outraPorta = async (verbo, args) => {
+    const r = await s2.executar(verbo, args);
+    return verbo === 'url' ? String(r).replace('http://local/', 'http://local:3000/') : r;
+  };
+  const r = await rodarComRoteiro({ pasta, objetivo: OBJETIVO, dados: { descricao: 'B' }, executar: outraPorta, perguntar: proibido });
+  assert.equal(r.sucesso, true, r.parou);
+  assert.match(r.roteiro, /repetidos 3 de 3/);
+});
+
+test('pasta: .hangar/roteiros na raiz do git de qualquer subpasta; fora de repo, o cache', () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'repo-'));
+  execFileSync('git', ['init', '-q', repo]);
+  fs.mkdirSync(path.join(repo, 'src'));
+  const raiz = fs.realpathSync(repo);
+  assert.equal(pastaDe(path.join(repo, 'src')), path.join(raiz, '.hangar', 'roteiros'));
+  assert.equal(pastaDe(fs.mkdtempSync(path.join(os.tmpdir(), 'solto-'))), PASTA);
+});
+
+/** Grava a corrida boa e devolve o arquivo e a variante dela, para montar outras à mão. */
+async function gravarBoa() {
+  const pasta = pastaNova();
+  const s = site();
+  await rodarComRoteiro({ pasta, objetivo: OBJETIVO, dados: { descricao: 'A' }, executar: s.executar, perguntar: jevDoSite(s) });
+  const arq = path.join(pasta, fs.readdirSync(pasta)[0]);
+  const boa = JSON.parse(fs.readFileSync(arq, 'utf8')).variantes[0];
+  return { pasta, arq, boa };
+}
+const comNome = (v, n, nome) => ({ ...v, passos: v.passos.map((p, i) => (i === n ? { ...p, alvo: { elemento: { ...p.alvo.elemento, name: nome } } } : p)) });
+const escrever = (arq, variantes) => fs.writeFileSync(arq, JSON.stringify({ versao: 2, objetivo: OBJETIVO, variantes }));
+
+test('variantes: vale a primeira cujo passo 1 casa com a pagina, e ela vai a frente', async () => {
+  const { pasta, arq, boa } = await gravarBoa();
+  const outra = comNome(boa, 0, 'Novo registro');
+  escrever(arq, [outra, boa]);
+  const s = site();
+  const r = await rodarComRoteiro({ pasta, objetivo: OBJETIVO, dados: { descricao: 'B' }, executar: s.executar, perguntar: proibido });
+  assert.equal(r.sucesso, true, r.parou);
+  assert.match(r.roteiro, /variante 2 de 2: repetidos 3 de 3/);
+  assert.deepEqual(lerUnico(pasta).variantes.map((v) => v.passos[0].alvo.elemento.name), ['Incluir', 'Novo registro']);
+});
+
+test('variantes: depois de uma agir, a divergencia vai ao Jev, nunca a outra variante', async () => {
+  const { pasta, arq, boa } = await gravarBoa();
+  const quebra = comNome(boa, 1, 'Campo que nao existe');
+  escrever(arq, [quebra, boa]);
+  const s = site();
+  const r = await rodarComRoteiro({ pasta, objetivo: OBJETIVO, dados: { descricao: 'B' }, executar: s.executar, perguntar: jevDoSite(s) });
+  assert.equal(r.sucesso, true);
+  assert.match(r.roteiro, /variante 1 de 2: repetidos 1 de 3 passos; parou no passo 2/);
+  assert.ok(r.jev.acoes > 0, 'o Jev seguiu');
+  // A corrida refez a sequencia da `boa`: ela sai como duplicata e a nova fica a frente.
+  const g = lerUnico(pasta);
+  assert.deepEqual(g.variantes.map((v) => v.passos[1].alvo.elemento.name), ['Descrição', 'Campo que nao existe']);
+});
+
+test('variantes: igual sai, no maximo 5, a mais recente primeiro', () => {
+  const v = (n) => ({ passos: [{ janela: { classe: '/a', titulo: 't' }, alvo: null, acao: { op: 'press', key: `K${n}` }, valor: null, mudou_tela: n % 2 === 0 }], fim: null });
+  const lista = [1, 2, 3, 4, 5].map(v);
+  assert.deepEqual(juntar(lista, v(3)).map((x) => x.passos[0].acao.key), ['K3', 'K1', 'K2', 'K4', 'K5'], 'mudou_tela e valor nao contam');
+  assert.deepEqual(juntar(lista, v(9)).map((x) => x.passos[0].acao.key), ['K9', 'K1', 'K2', 'K3', 'K4']);
+});
+
+test('arquivo da versao 1 e lido como uma variante e regravado na 2', async () => {
+  const { pasta, arq, boa } = await gravarBoa();
+  fs.writeFileSync(arq, JSON.stringify({ versao: 1, objetivo: OBJETIVO, passos: boa.passos, fim: boa.fim }));
+  const s = site();
+  const r = await rodarComRoteiro({ pasta, objetivo: OBJETIVO, dados: { descricao: 'B' }, executar: s.executar, perguntar: proibido });
+  assert.equal(r.sucesso, true, r.parou);
+  assert.match(r.roteiro, /variante 1 de 1: repetidos 3 de 3/);
+  const g = lerUnico(pasta);
+  assert.equal(g.versao, 2);
+  assert.equal(g.variantes.length, 1);
 });

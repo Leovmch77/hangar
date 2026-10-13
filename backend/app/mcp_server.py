@@ -496,12 +496,25 @@ async def _jev_cli(ctx: Context, sessao: str, args: list[str], teto_s: float) ->
                       "snapshot+click. Só em sessão aberta com o Jev. `dados`: valores para os campos, com as "
                       "chaves que quiser (o Jev casa cada um com o rótulo). Resposta: os passos, `parou:`, `url:`, "
                       "`texto:` e, se faltou valor, `falta-dado: <campo>` — chame de novo com ele em `dados`; a "
-                      "página fica onde parou. Erro = não cumpriu." + _SESSAO_DESC)
+                      "página fica onde parou. Erro = não cumpriu. O objetivo que deu certo vira roteiro em "
+                      "`.hangar/roteiros/` na raiz do git da sessão (ou em `pasta`) e a próxima chamada igual o "
+                      "repete sem o Jev decidir cada passo; `refazer: true` ignora o roteiro." + _SESSAO_DESC)
 async def browser_goal(ctx: Context, objetivo: str, dados: dict[str, Any] | None = None, passos: int = 15,
-                       sessao: str = "") -> str:
+                       refazer: bool = False, pasta: str = "", sessao: str = "") -> str:
     args = ["objetivo", objetivo, "--passos", str(max(1, min(passos, 40)))]
     if dados:
         args += ["--dados", json.dumps(dados, ensure_ascii=False)]
+    if refazer:
+        args.append("--refazer")
+    if pasta.strip():
+        args += ["--pasta", pasta.strip()]
+    else:
+        # O script roda no cwd do backend: a pasta do roteiro sai do git onde a sessão trabalha.
+        from app import api
+        try:
+            args += ["--cwd", await asyncio.to_thread(api._session_git_cwd, await _eu(ctx, sessao))]
+        except HTTPException:
+            pass  # sessão sem cwd conhecido: o roteiro fica no cache do usuário
     codigo, saida = await _jev_cli(ctx, sessao, args, 300.0)
     if codigo != 0:
         raise ToolError(saida)
