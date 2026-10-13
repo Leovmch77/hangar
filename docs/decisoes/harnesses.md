@@ -332,8 +332,10 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   sincronização. Sem thread não há sidecar, e o app fica esperando para sempre — o cartão de
   seletor pré-thread existe para isso.
 - **A abertura com terminal não pergunta nada que o Hangar já sabe responder** (decisão do
-  dono): a TUI sobe com `check_for_update_on_startup=false`; o lançador atualiza o Codex do npm
-  antes do app-server (versão publicada consultada no máximo uma vez por hora, a tela mostra
+  dono): a TUI sobe com `check_for_update_on_startup=false`; o lançador atualiza o Codex do npm,
+  ou o standalone oficial por `codex update` com `CODEX_RELEASE` fixado e o `CODEX_HOME` do
+  standalone (nunca o da conta), antes do app-server (versão publicada consultada no máximo
+  uma vez por hora, a tela mostra
   "atualizando o Codex"), e confia nos hooks pendentes pelo app-server (`hooks/list` +
   `config/batchWrite` do `trusted_hash`), porque eles vêm da sincronização do próprio Hangar.
   Falha em qualquer dos dois só registra na tela e a abertura segue. O cartão pré-thread

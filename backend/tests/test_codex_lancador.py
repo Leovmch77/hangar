@@ -953,10 +953,104 @@ def test_falha_do_install_mostra_so_a_classe(monkeypatch, tmp_path, capsys, stde
 
 def test_instalacao_fora_do_npm_avisa_uma_vez_por_hora(monkeypatch, tmp_path, capsys):
     atualizar, chamadas = _atualizacao(monkeypatch, tmp_path, instalado="/usr/local/bin/codex")
+    monkeypatch.setitem(atualizar.__globals__, "_latest_standalone_version",
+                        lambda: pytest.fail("instalação de fora não é standalone"))
     atualizar()
     atualizar()
     assert capsys.readouterr().err.count("atualização automática do Codex indisponível") == 1
     assert ["view", "@openai/codex", "version"] not in chamadas
+
+
+def _standalone(monkeypatch, tmp_path, publicada="0.161.0", update_rc=0):
+    """Árvore standalone falsa (layout do instalador oficial) com um `codex` falso de verdade."""
+    home = tmp_path / ".codex"
+    release = home / "packages" / "standalone" / "releases" / "0.159.3-x86_64-unknown-linux-musl"
+    (release / "bin").mkdir(parents=True)
+    falso = release / "bin" / "codex"
+    falso.write_text('#!/bin/sh\n[ "$1" = --version ] && { echo "codex-cli 0.159.3"; exit 0; }\n'
+                     '[ "$1" = update ] || exit 9\n'
+                     'printf "%s\\n" "$CODEX_HOME" "$CODEX_RELEASE" "$CODEX_INSTALL_DIR" > "$FAKE_UPDATE_OUT"\n'
+                     f'exit {update_rc}\n')
+    falso.chmod(0o755)
+    (home / "packages" / "standalone" / "current").symlink_to(release)
+    visivel = tmp_path / ".local" / "bin" / "codex"
+    visivel.parent.mkdir(parents=True)
+    visivel.symlink_to(home / "packages" / "standalone" / "current" / "bin" / "codex")
+    saida = tmp_path / "update.out"
+    monkeypatch.setenv("FAKE_UPDATE_OUT", str(saida))
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "conta"))   # conta do Hangar, não a do standalone
+
+    atualizar = runpy.run_path(str(_LANCADOR))["_atualizar_codex"]
+    globais = atualizar.__globals__
+    consultas = []
+    monkeypatch.setattr(globais["shutil"], "which", lambda nome: str(visivel) if nome == "codex" else None)
+    monkeypatch.setattr(globais["Path"], "home", lambda: tmp_path)
+    monkeypatch.setitem(globais, "_latest_standalone_version",
+                        lambda: consultas.append(1) or publicada)
+    return atualizar, saida, consultas, home
+
+
+def _proxima_em(tmp_path) -> float:
+    return json.loads((tmp_path / ".hangar" / "codex-atualizacao.json").read_text())["proxima_em"] - time.time()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="binário falso POSIX")
+def test_standalone_desatualizado_chama_o_atualizador_oficial(monkeypatch, tmp_path, capsys):
+    atualizar, saida, _, home = _standalone(monkeypatch, tmp_path)
+    atualizar()
+    assert saida.read_text().splitlines() == [str(home), "0.161.0", str(tmp_path / ".local" / "bin")]
+    err = capsys.readouterr().err
+    assert "atualizando o Codex 0.159.3 → 0.161.0" in err and "Codex atualizado para 0.161.0" in err
+    assert 3500 < _proxima_em(tmp_path) <= 3600
+
+
+@pytest.mark.skipif(os.name != "posix", reason="binário falso POSIX")
+def test_standalone_na_versao_publicada_nao_chama_o_atualizador(monkeypatch, tmp_path, capsys):
+    atualizar, saida, consultas, _ = _standalone(monkeypatch, tmp_path, publicada="0.159.3")
+    atualizar()
+    atualizar()
+    assert not saida.exists() and len(consultas) == 1
+    assert "indisponível" not in capsys.readouterr().err
+    assert 3500 < _proxima_em(tmp_path) <= 3600
+
+
+@pytest.mark.skipif(os.name != "posix", reason="binário falso POSIX")
+def test_falha_do_atualizador_standalone_abre_e_tenta_em_1_h(monkeypatch, tmp_path, capsys):
+    atualizar, saida, _, _ = _standalone(monkeypatch, tmp_path, update_rc=3)
+    atualizar()
+    assert saida.exists()
+    err = capsys.readouterr().err
+    assert "atualizador oficial saiu com código 3" in err
+    assert "a sessão abre na 0.159.3 e tenta de novo em 1 h" in err
+    assert 3500 < _proxima_em(tmp_path) <= 3600
+
+
+def test_canal_standalone_le_a_tag_com_user_agent_proprio(monkeypatch):
+    import io
+    versao = runpy.run_path(str(_LANCADOR))["_latest_standalone_version"]
+    pedidos = []
+
+    def urlopen(pedido, timeout):
+        pedidos.append(pedido)
+        return io.BytesIO(b'{"tag_name": "rust-v0.161.0", "assets": []}')
+    monkeypatch.setattr(versao.__globals__["urllib"].request, "urlopen", urlopen)
+    assert versao() == "0.161.0"
+    # Com o User-Agent padrão do urllib o canal responde 403.
+    assert pedidos[0].get_header("User-agent") == "hangar-codex-tui"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="binário falso POSIX")
+def test_falha_ao_consultar_o_canal_standalone_tenta_em_5_min(monkeypatch, tmp_path, capsys):
+    import urllib.error
+    atualizar, saida, _, _ = _standalone(monkeypatch, tmp_path)
+
+    def sem_rede():
+        raise urllib.error.URLError("offline")
+    monkeypatch.setitem(atualizar.__globals__, "_latest_standalone_version", sem_rede)
+    atualizar()
+    assert not saida.exists()
+    assert "tenta de novo em 5 min" in capsys.readouterr().err
+    assert 0 < _proxima_em(tmp_path) <= 300
 
 
 def _hooks_server(respostas_batch):
