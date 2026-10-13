@@ -319,6 +319,7 @@ impl RuntimeEngine {
         match &self.core { Core::Claude(core)=>core.interaction_write_error(id),Core::Codex(core)=>core.interaction_write_error(id) }
     }
     fn write_is_current(&self,id:&str) -> bool { match &self.core { Core::Claude(core)=>core.write_is_current(id),Core::Codex(core)=>core.write_is_current(id) } }
+    fn volatile_write(&self,id:&str) -> bool { match &self.core { Core::Claude(_)=>false,Core::Codex(core)=>core.volatile_write(id) } }
     fn forget_policy(&mut self,id:&RequestId) { match &mut self.core { Core::Claude(core)=>core.forget_policy(id),Core::Codex(core)=>core.forget_policy(id) } }
     fn confirm_input(&mut self,id:&str) -> Vec<Effect> {
         match &mut self.core { Core::Claude(_)=>vec![Effect::Reply { operation_id:id.into(),disposition:Disposition::Accepted,payload:json!({"confirmed":true}) }],
@@ -592,7 +593,8 @@ fn spawn_sid_commit(jobs:&mut JoinSet<Job>,registry:Option<std::sync::Weak<super
 }
 
 #[derive(Clone)]
-struct Attempt { logical_id:String,phase_id:String,frame:Value,order:u64,epoch:u64,generation:u64 }
+/// `volatile`: escrita fora do diário (assinatura da TUI); preparo, recibo e desfecho não tocam a fila.
+struct Attempt { logical_id:String,phase_id:String,frame:Value,order:u64,epoch:u64,generation:u64,volatile:bool }
 fn next_current_write<'a>(ready:&mut BTreeMap<u64,(String,u64,Result<(),RuntimeError>)>,next:&mut u64,attempts:&'a BTreeMap<String,Attempt>,generation:u64)->Option<(&'a Attempt,Result<(),RuntimeError>)> {
     while let Some((wire,source,result))=ready.remove(next) {
         *next+=1;
@@ -741,7 +743,7 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
     let mut arrival = 0u64;
     let mut attempts:BTreeMap<String,Attempt> = initial.operations.values().filter(|phase|recover_phase(&initial,phase))
         .filter_map(|phase|Some((phase.id.clone(),Attempt { logical_id:phase.payload["logical_id"].as_str()?.into(),
-            phase_id:phase.id.clone(),frame:phase.payload["frame"].clone(),order:0,epoch:0,generation:phase.payload["generation"].as_u64().unwrap_or(target.generation) }))).collect();
+            phase_id:phase.id.clone(),frame:phase.payload["frame"].clone(),order:0,epoch:0,generation:phase.payload["generation"].as_u64().unwrap_or(target.generation),volatile:false }))).collect();
     // Época local do transporte adotado: sobe na queda e na reconexão, e escrita preparada em outra época
     // não sai no socket novo.
     let mut transport_epoch = 0u64;
@@ -902,8 +904,12 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
                     write_order += 1;
                     let logical_id = operation_id.unwrap_or_else(||format!("system:{}:{sequence}",target.generation));
                     let wire = format!("wire:{logical_id}:{sequence}");
-                    let attempt = Attempt { logical_id:logical_id.clone(),phase_id:wire.clone(),frame:frame.clone(),order:write_order,epoch:transport_epoch,generation:target.generation };
+                    let volatile = engine.volatile_write(&logical_id);
+                    let attempt = Attempt { logical_id:logical_id.clone(),phase_id:wire.clone(),frame:frame.clone(),order:write_order,epoch:transport_epoch,generation:target.generation,volatile };
                     attempts.insert(wire.clone(),attempt.clone());
+                    // Sem preparo nem vista forçada: os IDs dela nunca entram no diário, então o contador salvo
+                    // continua cobrindo todos os que entram. Mantém a ordem das escritas.
+                    if volatile { prepared_writes.insert(write_order,(wire,target.generation,Ok(()))); continue; }
                     let queue = queue.clone(); let target = target.clone(); let view = engine.view(); let sample = clock(start);
                     let state_gate = state_gate.clone(); let state_version = state_version;
                     jobs.spawn(async move {
@@ -963,8 +969,10 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
                     let reply = RuntimeReply { operation_id:operation_id.clone(),disposition,payload };
                     let queue = queue.clone(); let generation = target.generation; let sample = clock(start);
                     let related:Vec<_> = attempts.values().filter(|attempt|attempt.logical_id == operation_id).cloned().collect();
+                    let volatile = !related.is_empty() && related.iter().all(|attempt|attempt.volatile);
                     jobs.spawn(async move {
                         let result = async {
+                            if volatile { return Ok(()); }
                             for attempt in related {
                                 queue.exec(generation,&format!("finish:{}:{}",attempt.phase_id,unique()),sample,Action::Finish {
                                     id:attempt.phase_id,status:status(disposition),result:serde_json::to_value(&reply).unwrap() }).await.map_err(io_failure)?;
@@ -1414,9 +1422,11 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
                         };
                         if let Some(attempt) = attempts.get(&operation_id) {
                             let logical_id = attempt.logical_id.clone();
+                            let volatile = attempt.volatile;
                             let queue = queue.clone(); let generation = target.generation; let sample = clock(start);
                             jobs.spawn(async move {
                                 let result = async {
+                                  if volatile { return Ok(()); }
                                   let state = queue.snapshot().await.map_err(io_failure)?;
                                   if state.operations.get(&operation_id).is_some_and(|phase|matches!(phase.status,Status::Accepted | Status::Rejected | Status::Confirmed)) { return Ok(()); }
                                   queue.exec(generation,&format!("ack:{operation_id}:{}",unique()),sample,Action::Finish {
@@ -2335,8 +2345,8 @@ mod tests {
         let (release,wait)=oneshot::channel();let old_queue=queue.clone();
         let old=tokio::spawn(async move {wait.await.unwrap();Job::Write {wire:"wire-a".into(),generation:4,result:old_queue.exec(4,"late-cursor-a",clock,Action::BindDispatch {id:"wire-a".into(),cursor:json!({})}).await.map(|_|()).map_err(io_failure)}});
         queue.exec(4,"sid-b",clock,Action::AdvanceLifecycle {generation:5,state:json!({"conversation_reset":{"previous":"a","next":"b"},"metadata":{"key":"key","session_id":"b"}})}).await.unwrap();
-        let attempts=BTreeMap::from([("wire-a".into(),Attempt {logical_id:"a".into(),phase_id:"wire-a".into(),frame:json!({"message":"a"}),order:1,epoch:0,generation:4}),
-            ("wire-b".into(),Attempt {logical_id:"b".into(),phase_id:"wire-b".into(),frame:json!({"message":"b"}),order:2,epoch:0,generation:5})]);
+        let attempts=BTreeMap::from([("wire-a".into(),Attempt {logical_id:"a".into(),phase_id:"wire-a".into(),frame:json!({"message":"a"}),order:1,epoch:0,generation:4,volatile:false}),
+            ("wire-b".into(),Attempt {logical_id:"b".into(),phase_id:"wire-b".into(),frame:json!({"message":"b"}),order:2,epoch:0,generation:5,volatile:false})]);
         let mut ready=BTreeMap::from([(2,("wire-b".into(),5,Ok(())))]);let mut next=1;
         assert!(next_current_write(&mut ready,&mut next,&attempts,5).is_none());
         release.send(()).unwrap();let Job::Write {wire,generation,result}=old.await.unwrap() else {panic!("resultado de escrita")};assert!(result.is_err());

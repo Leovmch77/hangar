@@ -1970,6 +1970,12 @@ impl Engine {
 
     pub fn async_question_pending(&self,request_id:&str) -> bool { self.async_pending(request_id) }
 
+    /// Assinatura da TUI fica fora do diário: repetir é inofensivo, a resposta só vale nesta conexão e,
+    /// enquanto o rollout não existe, cada tentativa gravaria a fila inteira.
+    pub fn volatile_write(&self,operation_id:&str) -> bool {
+        !self.headless && self.rpc.values().any(|rpc|rpc.operation_id == operation_id && subscribe_rpc(rpc) && !rpc.timed_out)
+    }
+
     pub fn write_is_current(&self,operation_id:&str) -> bool {
         self.wires.get(operation_id).is_none_or(|wire|(wire.request_id.is_none() || !wire.final_result)
             && wire.server_request.as_ref().is_none_or(|id|self.request_epochs.get(id).copied() == wire.server_epoch)

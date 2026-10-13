@@ -164,6 +164,31 @@ async fn rename_and_mode_switch_close_the_actor_without_killing() {
 }
 
 #[tokio::test]
+async fn waiting_for_the_rollout_does_not_rewrite_the_queue_on_each_attempt() {
+    let fx = fixture();
+    let server = fake_app_server(true).await;
+    let (mut app,mut tui) = (app_server_process(&server.endpoint),tui());
+    fx.put_sidecar("cx-proof",fx.meta("cx-proof",&server.endpoint,Some(app.id()),&tui));
+    fx.panes(&["cx-proof"]);
+    let registry = registry().await;
+    fx.watcher().round(&registry).await;
+    let key = key_of(&fx.sidecar("cx-proof").unwrap());
+    let resumes = || server.frames_of(1).iter().filter(|f|f["method"] == "thread/resume").count();
+    let wait_resumes = |n:usize| async move {
+        tokio::time::timeout(Duration::from_secs(10),async { while resumes() < n { tokio::time::sleep(Duration::from_millis(20)).await; } })
+            .await.unwrap_or_else(|_|panic!("menos de {n} tentativas de assinar"));
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    };
+    wait_resumes(1).await;
+    let before = fx.queue_json(&key)["next_seq"].as_u64().unwrap();
+    wait_resumes(3).await;
+    // Cada `thread/resume` recusado por `no rollout found` é só "ainda não": nada durável mudou.
+    assert_eq!(fx.queue_json(&key)["next_seq"].as_u64().unwrap(),before,"tentativa recusada gravou a fila");
+    assert!(registry.owns_codex_terminal("cx-proof"));
+    finish(&mut [&mut app,&mut tui]);
+}
+
+#[tokio::test]
 async fn no_answer_from_the_multiplexer_decides_nothing() {
     let fx = fixture();
     let server = fake_app_server(true).await;
