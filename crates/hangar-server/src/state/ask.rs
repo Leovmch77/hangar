@@ -91,6 +91,25 @@ pub fn consume_revision(jsonl: &Path, revision: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Até onde o transcript já foi lido à procura da resposta de cada revisão: só o que cresceu é relido.
+static SCANNED: LazyLock<Mutex<HashMap<PathBuf, (String, u64)>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// O transcript tem o `tool_result` da chamada? Lê só linhas inteiras desde a última leitura.
+fn answered_in_transcript(jsonl: &Path, call: &str, revision: &str) -> Result<bool, String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let start = SCANNED.lock().map_err(|_| "askq_scan_lock")?.get(jsonl)
+        .filter(|(seen, _)| seen == revision).map_or(0, |(_, offset)| *offset);
+    let mut file = std::fs::File::open(jsonl).map_err(|e| format!("askq_transcript_unreadable:{:?}", e.kind()))?;
+    let mut buf = Vec::new();
+    file.seek(SeekFrom::Start(start)).and_then(|_| file.read_to_end(&mut buf))
+        .map_err(|e| format!("askq_transcript_unreadable:{:?}", e.kind()))?;
+    let complete = buf.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
+    let needle = format!("\"tool_use_id\":\"{call}\"");
+    let found = buf[..complete].windows(needle.len()).any(|w| w == needle.as_bytes());
+    SCANNED.lock().map_err(|_| "askq_scan_lock")?.insert(jsonl.to_path_buf(), (revision.to_owned(), start + complete as u64));
+    Ok(found)
+}
+
 pub fn read_revision(jsonl: &Path) -> Result<Option<(AskQuestion, String)>, String> {
     let path = sidecar_path(jsonl).ok_or("askq_path")?;
     let mut consumed = CONSUMED.lock().map_err(|_| "askq_consumed_lock")?;
@@ -121,13 +140,14 @@ pub fn read_revision(jsonl: &Path) -> Result<Option<(AskQuestion, String)>, Stri
     // é o mesmo de um sidecar quebrado (fica o menu do pane), e o hook grava o booleano.
     // Só o código: a mensagem do serde pode citar o texto da pergunta.
     let sidecar: Sidecar = serde_json::from_slice(&bytes).map_err(|_| "askq_malformed".to_owned())?;
+    drop(consumed);
     // O hook não apaga o sidecar quando a resposta vem pelo terminal: sem isto a pergunta velha
-    // prenderia todo menu seguinte (plano, permissão) em askq_pane_mismatch.
-    // ponytail: só sidecar com tool_use_id (o hook sempre grava) é conferido no transcript.
-    if let (Some(call), Some(transcript), Ok(modified)) = (sidecar.tool_use_id.as_deref(), jsonl.to_str(), metadata.modified()) {
-        let since = modified.duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64());
-        let session = jsonl.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-        if crate::list::facts_files::answered_cached(session, transcript, since, Some(call)) { return Ok(None); }
+    // prenderia todo menu seguinte (plano, permissão) em askq_pane_mismatch. Só a resposta achada
+    // no transcript tira a pergunta; dúvida a mantém aberta.
+    // ponytail: sidecar sem tool_use_id (o hook sempre grava) não é conferido.
+    if let Some(call) = sidecar.tool_use_id.as_deref() && answered_in_transcript(jsonl, call, &revision)? {
+        CONSUMED.lock().map_err(|_| "askq_consumed_lock")?.entry(path).or_default().insert(revision);
+        return Ok(None);
     }
     Ok(Some((AskQuestion { questions: sidecar.tool_input.questions, interaction_id: None }, revision)))
 }
@@ -197,8 +217,8 @@ pub fn observe_terminal(interactions: &crate::interactions::InteractionStore,
 
 /// Código estático da falha da pergunta, para a causa chegar ao resultado da entrega.
 pub fn failure_code(code: &str) -> &'static str {
-    const KNOWN: [&str; 7] = ["askq_pane_mismatch", "askq_changed_during_read", "askq_malformed", "askq_path",
-        "askq_consumed_lock", "askq_revision_missing", "askq_unreadable"];
+    const KNOWN: [&str; 9] = ["askq_pane_mismatch", "askq_changed_during_read", "askq_malformed", "askq_path",
+        "askq_consumed_lock", "askq_revision_missing", "askq_unreadable", "askq_transcript_unreadable", "askq_scan_lock"];
     let base = code.split(':').next().unwrap_or(code);
     KNOWN.into_iter().find(|known| *known == base)
         .or_else(|| crate::interactions::InteractionError::from_code(code).map(|error| error.code()))
@@ -323,9 +343,12 @@ mod tests {
         std::fs::write(&path, r#"{"tool_use_id":"toolu_cor","tool_input":{"questions":[
             {"question":"Cor?","header":"Cor","multiSelect":false,"options":[{"label":"Azul"},{"label":"Verde"}]}]}}"#).unwrap();
         let ask = r#"{"timestamp":"2099-01-01T00:00:00Z","message":{"content":[{"type":"tool_use","id":"toolu_cor","name":"AskUserQuestion"}]}}"#;
+        let (store, binding) = bound_store();
+        // Sem transcript não há prova: erro com código, nunca a pergunta sumida.
+        let missing = observe_terminal(&store, &binding, &jsonl, PLAN).unwrap_err();
+        assert_eq!(failure_code(&missing), "askq_transcript_unreadable");
         // Pergunta ainda aberta: o menu de outra pergunta segue recusado.
         std::fs::write(&jsonl, format!("{ask}\n")).unwrap();
-        let (store, binding) = bound_store();
         assert_eq!(observe_terminal(&store, &binding, &jsonl, PLAN).unwrap_err(), "askq_pane_mismatch");
         // Respondida no terminal (o hook não apaga o sidecar): o plano é um menu comum, com identidade.
         std::fs::write(&jsonl, format!("{ask}\n{}\n",
