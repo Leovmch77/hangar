@@ -329,10 +329,8 @@ fn num(value: &Value) -> Option<f64> {
     }
 }
 
-/// `max(0.0, min(100.0, x))` do Python: NaN vira 100, como lá.
 fn clamp_pct(x: f64) -> f64 {
-    let low = if x < 100.0 { x } else { 100.0 };
-    if low > 0.0 { low } else { 0.0 }
+    x.clamp(0.0, 100.0)
 }
 
 /// JSON como o `json.loads`: aceita `NaN`/`Infinity` fora de texto. Eles viram texto, que o
@@ -489,8 +487,10 @@ fn window_label(minutes: &Value) -> Result<String, ()> {
     Ok(format!("{:.0}min", n.trunc()))
 }
 
-fn window(label: &str, pct: f64, reset: Option<f64>) -> Value {
-    json!({"rotulo":label,"pct":clamp_pct(pct),"reset_ts":reset,"por_modelo":false})
+/// Conta não finita (NaN/inf na resposta) não é janela: mostraria a fonte esgotada por lixo.
+fn window(label: &str, pct: f64, reset: Option<f64>) -> Option<Value> {
+    pct.is_finite()
+        .then(|| json!({"rotulo":label,"pct":clamp_pct(pct),"reset_ts":reset,"por_modelo":false}))
 }
 
 fn kimi_window(detail: &Value, label: &str) -> Option<Value> {
@@ -499,7 +499,7 @@ fn kimi_window(detail: &Value, label: &str) -> Option<Value> {
     if limit <= 0.0 {
         return None;
     }
-    Some(window(label, (limit - remaining) / limit * 100.0, detail.get("resetTime").and_then(py_iso)))
+    window(label, (limit - remaining) / limit * 100.0, detail.get("resetTime").and_then(py_iso))
 }
 
 /// `limits[]` por duração, depois o `usage` do topo como `7d` (a janela do plano).
@@ -525,7 +525,7 @@ fn commandcode_window(value: &Value, label: &str) -> Option<Value> {
     }
     // `resetAt` em epoch-milissegundos; 0 = janela sem reset marcado.
     let reset = value.get("resetAt").and_then(num).filter(|r| *r != 0.0).map(|r| r / 1000.0);
-    Some(window(label, used / cap * 100.0, reset))
+    window(label, used / cap * 100.0, reset)
 }
 
 pub fn commandcode(body: &Value) -> Vec<Value> {
@@ -558,7 +558,7 @@ pub fn opencode(html: &str, now: f64) -> Vec<Value> {
                 let c = reset_first.captures(html)?;
                 (c[2].parse::<f64>().ok()?, c[1].parse::<f64>().ok()?)
             };
-            Some(window(label, pct, Some(now + if wait > 0.0 { wait } else { 0.0 })))
+            window(label, pct, Some(now + if wait > 0.0 { wait } else { 0.0 }))
         })
         .collect()
 }

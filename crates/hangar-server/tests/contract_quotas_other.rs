@@ -135,6 +135,13 @@ async fn readers_match_python() {
             ),
             _ => (case["expected"].clone(), case["requests"].as_array().unwrap().clone()),
         };
+        // R#7 (usuário, 13/10): janela com conta não finita (NaN/inf) some; o Python dava 100% ou
+        // 0%. Nestes dois casos nenhuma janela é finita, então a cota fica sem formato conhecido.
+        let expected = if matches!(name, "kimi_nan_e_inf_em_texto" | "kimi_json_com_nan") {
+            json!({"estado":"indisponivel","janelas":[],"motivo":"formato-desconhecido"})
+        } else {
+            expected
+        };
         if got != expected {
             failures.push(format!("{name}: leitura\n  python {expected}\n  rust   {got}"));
         }
