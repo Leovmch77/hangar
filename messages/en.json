@@ -191,6 +191,8 @@
   "session_problem_hide_details": "Hide details",
   "session_problem_exit_code": "Process exit code: {code}",
   "chat_plan_ver": "View plan",
+  "chat_plan_aprovar_dica": "Read the plan before choosing one of the options below.",
+  "chat_plan_tela_cheia": "Open the plan full screen",
   "chat_plan_implementar": "Implement the plan",
   "chat_plan_continuar": "Continue planning",
   "chat_plan_iniciando": "Starting…",

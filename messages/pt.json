@@ -191,6 +191,8 @@
   "session_problem_hide_details": "Ocultar detalhes",
   "session_problem_exit_code": "Código de saída do processo: {code}",
   "chat_plan_ver": "Ver plano",
+  "chat_plan_aprovar_dica": "Leia o plano antes de escolher uma das opções abaixo.",
+  "chat_plan_tela_cheia": "Abrir o plano em tela cheia",
   "chat_plan_implementar": "Implementar o plano",
   "chat_plan_continuar": "Continuar planejando",
   "chat_plan_iniciando": "Iniciando…",
