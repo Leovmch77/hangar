@@ -216,11 +216,12 @@ impl AccountService {
         } else {
             Some(self.quotas.refresh.lock().await)
         };
-        let (others, problems) = other::sources(&self.env);
+        let (others, mut problems) = other::sources(&self.env);
+        problems.extend(other::config_problems(&self.env));
         for code in problems {
-            tracing::warn!(code, "motor do engines.json fora do formato; os outros seguem");
+            tracing::warn!(code, "configuração de fonte de cota fora do formato; as outras seguem");
             if let Some(diag) = self.quotas.diag.get() {
-                diag.report("rust.quota_sources_partial", "cotas", code, "motor do engines.json fora do formato; os outros seguem");
+                diag.report("rust.quota_sources_partial", "cotas", code, "configuração de fonte de cota fora do formato; as outras seguem");
             }
         }
         let aliases = other::aliases(&self.env);
@@ -302,31 +303,31 @@ impl AccountService {
                     let service = self.clone();
                     async move {
                         let id = source["id"].as_str().unwrap_or("");
-                        let (mut value, signature, unreachable) = match origin {
+                        let (mut value, signature, contact) = match origin {
                             Origin::Account(provider, account) => {
                                 let (value, signature) = service
                                     .read_quota(provider, &account, &client, Some(&bridge))
                                     .await;
-                                (value, signature, false)
+                                (value, signature, None)
                             }
                             Origin::Other(reader) => {
-                                let (value, unreachable) = other::read(
+                                let (value, contact) = other::read(
                                     &other_client,
                                     &reader,
                                     &service.quotas.endpoints,
                                     now(),
                                 )
                                 .await;
-                                (value, None, unreachable)
+                                (value, None, Some((contact, reader.kind())))
                             }
                             Origin::Broken => {
-                                (reading("indisponivel", vec![], Some("sem-resposta")), None, false)
+                                (reading("indisponivel", vec![], Some("sem-resposta")), None, None)
                             }
                         };
                         for field in ["id", "label", "provedor", "ativa"] {
                             value[field] = source[field].clone();
                         }
-                        (id.to_owned(), value, signature, unreachable)
+                        (id.to_owned(), value, signature, contact)
                     }
                 })
                 .buffer_unordered(8);
@@ -337,7 +338,7 @@ impl AccountService {
         }
         let mut held = self.quotas.cache.lock().await;
         let cache = held.get_or_insert_with(|| cache::QuotaCache::load(&self.quota_path()));
-        for ((id, value, signature, unreachable), at) in readings {
+        for ((id, value, signature, contact), at) in readings {
             if value["motivo"] == "credencial-alterada" {
                 cache.remove(&id);
             }
@@ -348,12 +349,24 @@ impl AccountService {
             if let Some((_, endpoint)) = endpoints.iter().find(|(other, _)| *other == id) {
                 cache.set_endpoint(&id, endpoint);
             }
-            if unreachable {
-                cache.mark_unreachable(&id, at);
-                if let Some(diag) = self.quotas.diag.get() {
-                    diag.report("rust.quota_source_unreachable", "cotas", "quota_source_unreachable",
-                        "fonte de cota recusou a conexão; nova tentativa com espera crescente");
+            // Tipo de leitor e degrau da espera vão no campo de sessão: id e nome do motor ficam fora.
+            match contact {
+                Some((other::Contact::Answered, _)) => cache.clear_unreachable(&id),
+                Some((other::Contact::Refused, kind)) => {
+                    let attempt = cache.mark_unreachable(&id, at, force);
+                    tracing::warn!(code = "quota_source_unreachable", kind, attempt, "fonte de cota recusou a conexão");
+                    if let Some(diag) = self.quotas.diag.get() {
+                        diag.report("rust.quota_source_unreachable", &format!("cotas:{kind}:tentativa-{attempt}"),
+                            "quota_source_unreachable", "fonte de cota recusou a conexão; nova tentativa com espera crescente");
+                    }
                 }
+                Some((other::Contact::BadUrl, kind)) => {
+                    if let Some(diag) = self.quotas.diag.get() {
+                        diag.report("rust.quota_source_bad_url", &format!("cotas:{kind}"), "quota_source_bad_url",
+                            "base_url da fonte de cota não forma endereço");
+                    }
+                }
+                Some((other::Contact::Silent, _)) | None => {}
             }
         }
         if !cached_only && cache.dirty() && cache.save(&self.quota_path()).is_err() {
@@ -730,11 +743,11 @@ mod tests {
         assert_eq!(entry["unreachable_count"], 1);
         let wait = entry["unreachable_until"].as_f64().unwrap() - entry["gravado_em"].as_f64().unwrap();
         assert!((wait - 600.0).abs() < 1.0, "{wait}");
-        assert_eq!(entry["endpoint"], format!("http://{closed}/usages"));
-        // Forçar fura a espera e conta mais uma recusa (30 min na segunda).
+        assert!(entry.get("endpoint").is_none() && entry["endpoint_sha"].is_string(), "endereço só como hash");
+        // Forçar fura a espera, mas não sobe degrau: a próxima automática segue em 10 min.
         service.quotas(bridge(), true, false).await.unwrap();
         let stored: Value = serde_json::from_slice(&std::fs::read(service.quota_path()).unwrap()).unwrap();
-        assert_eq!(stored["chave:test"]["unreachable_count"], 2);
+        assert_eq!(stored["chave:test"]["unreachable_count"], 1);
     }
     #[test]
     fn suggestion_uses_tightest_window_and_prefers_active_on_tie() {

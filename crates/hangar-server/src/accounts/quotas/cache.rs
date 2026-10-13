@@ -83,8 +83,8 @@ impl QuotaCache {
         let mut entry = json!({"gravado_em": now, "cota": value,
             "retry_at": if limited { Some(now + RATE_LIMIT_WAIT) } else { None }});
         if let Some(previous) = self.entries.get(id) {
-            if let Some(endpoint) = previous.get("endpoint") {
-                entry["endpoint"] = endpoint.clone();
+            if let Some(endpoint) = previous.get("endpoint_sha") {
+                entry["endpoint_sha"] = endpoint.clone();
             }
             // Só leitura boa zera a contagem de recusas.
             if !good
@@ -101,29 +101,48 @@ impl QuotaCache {
         self.dirty |= self.entries.remove(id).is_some();
     }
 
-    /// Endereço lido pela fonte; trocado, a espera por conexão recusada recomeça do zero.
+    /// Endereço lido pela fonte; trocado, a espera por conexão recusada recomeça do zero. Grava só
+    /// o hash: `base_url` editada à mão pode levar usuário e senha ou token na query.
     pub fn set_endpoint(&mut self, id: &str, endpoint: &str) {
         let Some(entry) = self.entries.get_mut(id).and_then(Value::as_object_mut) else {
             return;
         };
-        if entry.get("endpoint").and_then(Value::as_str) == Some(endpoint) {
+        let digest = ring::digest::digest(&ring::digest::SHA256, endpoint.as_bytes());
+        let sha: String = digest.as_ref().iter().map(|b| format!("{b:02x}")).collect();
+        // O campo antigo guardava a URL em claro: sai na primeira passada.
+        let legacy = entry.remove("endpoint").is_some();
+        if entry.get("endpoint_sha").and_then(Value::as_str) == Some(sha.as_str()) {
+            self.dirty |= legacy;
             return;
         }
         entry.remove("unreachable_count");
         entry.remove("unreachable_until");
-        entry.insert("endpoint".into(), json!(endpoint));
+        entry.insert("endpoint_sha".into(), json!(sha));
         self.dirty = true;
     }
 
-    pub fn mark_unreachable(&mut self, id: &str, now: f64) {
+    /// A fonte respondeu (qualquer status HTTP): está no ar, a contagem de recusas zera.
+    pub fn clear_unreachable(&mut self, id: &str) {
         let Some(entry) = self.entries.get_mut(id).and_then(Value::as_object_mut) else {
             return;
         };
-        let count = entry.get("unreachable_count").and_then(Value::as_u64).unwrap_or(0) + 1;
+        let count = entry.remove("unreachable_count").is_some();
+        self.dirty |= entry.remove("unreachable_until").is_some() || count;
+    }
+
+    /// Recusa registrada; devolve a tentativa em que a escada está. O botão atualizar não sobe
+    /// degrau: três cliques seguidos não podem levar a fonte a 1 h de espera.
+    pub fn mark_unreachable(&mut self, id: &str, now: f64, forced: bool) -> u64 {
+        let Some(entry) = self.entries.get_mut(id).and_then(Value::as_object_mut) else {
+            return 0;
+        };
+        let previous = entry.get("unreachable_count").and_then(Value::as_u64).unwrap_or(0);
+        let count = if forced { previous.max(1) } else { previous + 1 };
         let wait = UNREACHABLE_WAITS[(count.min(UNREACHABLE_WAITS.len() as u64) - 1) as usize];
         entry.insert("unreachable_count".into(), json!(count));
         entry.insert("unreachable_until".into(), json!(now + wait));
         self.dirty = true;
+        count
     }
 
     pub fn credential_changed(&self, id: &str, signature: &Value) -> bool {
@@ -264,7 +283,7 @@ mod tests {
         for wait in [600.0, 1800.0, 3600.0, 3600.0] {
             cache.update("chave:x", refused(), at);
             cache.set_endpoint("chave:x", "http://127.0.0.1:8317/usages");
-            cache.mark_unreachable("chave:x", at);
+            cache.mark_unreachable("chave:x", at, false);
             cache.save(&path).unwrap();
             cache = QuotaCache::load(&path);
             assert!(!cache.needs_refresh("chave:x", at + wait - 1.0, false), "espera {wait}");
@@ -274,16 +293,49 @@ mod tests {
         }
         cache.update("chave:x", good(), at);
         cache.update("chave:x", refused(), at + 300.0);
-        cache.mark_unreachable("chave:x", at + 300.0);
+        cache.mark_unreachable("chave:x", at + 300.0, false);
         assert!(!cache.needs_refresh("chave:x", at + 300.0 + 599.0, false), "leitura boa zera a contagem");
         assert!(cache.needs_refresh("chave:x", at + 300.0 + 600.0, false));
         cache.set_endpoint("chave:x", "http://127.0.0.1:9999/usages");
-        cache.mark_unreachable("chave:x", at + 900.0);
+        cache.mark_unreachable("chave:x", at + 900.0, false);
         assert!(cache.needs_refresh("chave:x", at + 900.0 + 600.0, false), "endereço novo recomeça em 10 min");
         cache.set_endpoint("chave:x", "http://outro/usages");
         assert!(cache.needs_refresh("chave:x", at + 1300.0, false), "endereço novo não herda a espera");
         cache.update("chave:x", json!({"estado":"indisponivel","motivo":"http-404"}), at + 1300.0);
         assert!(cache.needs_refresh("chave:x", at + 1300.0 + 300.0, false), "resposta HTTP não espera além do TTL");
+    }
+
+    #[test]
+    fn endpoint_is_stored_as_a_hash_and_the_old_plain_field_goes_away() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cache.json");
+        let url = "https://usuario:senha@host/usages?token=abc";
+        fs::write(&path, json!({"chave:x":{"gravado_em":1000,"cota":good(),"endpoint":url,
+            "unreachable_count":2,"unreachable_until":5000}}).to_string()).unwrap();
+        let mut cache = QuotaCache::load(&path);
+        cache.set_endpoint("chave:x", url);
+        cache.update("chave:x", good(), 1000.0);
+        cache.save(&path).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("senha") && !text.contains("token"), "{text}");
+        let mut cache = QuotaCache::load(&path);
+        cache.set_endpoint("chave:x", url);
+        assert!(!cache.dirty(), "mesmo endereço não regrava");
+    }
+
+    #[test]
+    fn any_http_answer_resets_and_forced_attempts_do_not_climb() {
+        let refused = || json!({"estado":"indisponivel","motivo":"sem-resposta","janelas":[]});
+        let mut cache = QuotaCache::default();
+        cache.update("chave:x", refused(), 1000.0);
+        assert_eq!(cache.mark_unreachable("chave:x", 1000.0, false), 1);
+        assert_eq!(cache.mark_unreachable("chave:x", 1000.0, true), 1, "atualizar não sobe degrau");
+        assert_eq!(cache.mark_unreachable("chave:x", 1000.0, true), 1);
+        assert_eq!(cache.mark_unreachable("chave:x", 1000.0, false), 2);
+        cache.update("chave:x", json!({"estado":"indisponivel","motivo":"http-404"}), 1100.0);
+        cache.clear_unreachable("chave:x");
+        assert!(cache.needs_refresh("chave:x", 1400.0, false), "resposta HTTP tira a espera");
+        assert_eq!(cache.mark_unreachable("chave:x", 1400.0, false), 1, "e recomeça a escada");
     }
 
     #[test]

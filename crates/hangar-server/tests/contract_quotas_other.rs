@@ -123,7 +123,8 @@ async fn readers_match_python() {
             commandcode: format!("{origin}/alpha/billing/credits"),
             opencode: format!("{origin}/workspace/{{}}/go"),
         };
-        let (value, unreachable) = other::read(&client, &reader, &endpoints, now).await;
+        let (value, contact) = other::read(&client, &reader, &endpoints, now).await;
+        let unreachable = contact == other::Contact::Refused;
         let got = json!({"estado": value["estado"], "janelas": value["janelas"], "motivo": value["motivo"]});
         let seen = std::mem::take(&mut state.lock().unwrap().seen);
         let (expected, requests) = match case["diferenca"].as_str() {

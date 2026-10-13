@@ -113,20 +113,18 @@ pub async fn public(state: Arc<crate::routes::AppState>, request: Request) -> Re
     };
     // Parte com problema sai sozinha (linha indisponível, cota nula, motor fora) e vai ao diário;
     // a lista das outras credenciais nunca cai junto.
-    let report = |code: &'static str, reason: &'static str| state.diag.report("rust.credentials_partial", "credenciais", code, reason);
+    let report = |code: &str, reason: &'static str| state.diag.report("rust.credentials_partial", "credenciais", code, reason);
     let service = state.accounts.clone();
     let codex = service.visible_codex_accounts().unwrap_or_else(|err| {
         report(err.code, "contas Codex ilegíveis; a lista segue sem elas");
         vec![]
     });
-    let bridge = bridge(&state).ok();
-    if bridge.is_none() {
-        report("account_prepare_bridge_unavailable", "ponte de contas ausente; sem cota nem preparo Codex nesta lista");
-    }
+    let bridge = bridge(&state).map_err(|err| report(err.code, "ponte de contas ausente; sem cota nem preparo Codex nesta lista")).ok();
     let snapshots = futures_util::future::join_all(codex.iter().map(|account| codex_snapshot(&state, account, force, bridge.as_ref())));
     let quotas = async {
         match &bridge {
-            Some(bridge) => service.quotas(bridge.clone(), force, false).await.ok(),
+            Some(bridge) => service.quotas(bridge.clone(), force, false).await
+                .map_err(|err| report(err.code, "cotas indisponíveis; as linhas saem sem cota")).ok(),
             None => None,
         }
     };
@@ -134,12 +132,7 @@ pub async fn public(state: Arc<crate::routes::AppState>, request: Request) -> Re
     let (snapshots, quotas, claude) = tokio::join!(snapshots, quotas, claude);
     let env = &service.env;
     let aliases = other::aliases(env);
-    let quotas = quotas.unwrap_or_else(|| {
-        if bridge.is_some() {
-            report("quota_unavailable", "cotas indisponíveis; as linhas saem sem cota");
-        }
-        json!([])
-    });
+    let quotas = quotas.unwrap_or_else(|| json!([]));
     // Id repetido na cota: vale o último valor, na posição do primeiro.
     let mut quota = Map::new();
     for row in quotas.as_array().into_iter().flatten() {
@@ -225,7 +218,14 @@ pub async fn public(state: Arc<crate::routes::AppState>, request: Request) -> Re
         out.push(item);
     }
     // Cota sem cadastro continua visível, mas não comprova autenticação do Codex.
-    let kimi = std::fs::read(other::kimi_config(env)).ok().and_then(|b| String::from_utf8(b).ok());
+    let kimi = match std::fs::read(other::kimi_config(env)).map(String::from_utf8) {
+        Ok(Ok(text)) => Some(text),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        _ => {
+            report("kimi_config_unreadable", "config.toml do Kimi ilegível; provedores Kimi saem como não gerenciados");
+            None
+        }
+    };
     for (id, row) in &quota {
         let codex = id.starts_with("codex:");
         if !(codex || id.starts_with("kimi:")) || out.iter().any(|item| item["id"] == id.as_str()) {

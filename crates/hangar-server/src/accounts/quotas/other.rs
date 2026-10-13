@@ -27,11 +27,22 @@ impl Default for Endpoints {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub enum Reader {
     Kimi { key: String, base: String },
     CommandCode { key: String },
     OpenCode { workspace: String, cookie: String },
+}
+
+// Chave e cookie nunca saem num `{:?}` de log.
+impl std::fmt::Debug for Reader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Reader::Kimi { base, .. } => write!(f, "Kimi {{ base: {base:?}, key: \"…\" }}"),
+            Reader::CommandCode { .. } => write!(f, "CommandCode {{ key: \"…\" }}"),
+            Reader::OpenCode { workspace, .. } => write!(f, "OpenCode {{ workspace: {workspace:?}, cookie: \"…\" }}"),
+        }
+    }
 }
 
 impl Reader {
@@ -43,6 +54,7 @@ impl Reader {
         }
     }
 
+    /// Só para o teste de contrato comparar com o Python; devolve segredos.
     pub fn args(&self) -> Vec<&str> {
         match self {
             Reader::Kimi { key, base } => vec![key, base],
@@ -177,6 +189,35 @@ fn kimi_providers(env: &AccountEnvironment) -> Vec<(String, String, String)> {
             Some((name.clone(), filled(provider.get("api_key"))?, filled(provider.get("base_url"))?))
         })
         .collect()
+}
+
+/// Problema de leitura de um arquivo de configuração das fontes, para o diário. Ausente não é
+/// problema; o comportamento segue o mesmo (arquivo ilegível = como se não existisse).
+fn file_problem(path: &Path, unreadable: &'static str, invalid: &'static str, parse: impl Fn(&str) -> bool) -> Option<&'static str> {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(_) => return Some(unreadable),
+    };
+    match std::str::from_utf8(&bytes) {
+        Ok(text) if parse(text) => None,
+        _ => Some(invalid),
+    }
+}
+
+/// Arquivos das fontes (Kimi, apelidos, cookies do OpenCode) que existem mas não puderam ser lidos.
+// ponytail: relê arquivos pequenos uma vez por ciclo de cota em vez de devolver o erro de cada leitor.
+pub fn config_problems(env: &AccountEnvironment) -> Vec<&'static str> {
+    let object = |text: &str| serde_json::from_str::<Value>(text).is_ok_and(|v| v.is_object());
+    let toml = |text: &str| !text.starts_with('\u{feff}') && text.parse::<toml::Table>().is_ok();
+    [
+        file_problem(&kimi_config(env), "kimi_config_unreadable", "kimi_config_invalid", toml),
+        file_problem(&read_path(shared(env).join(".hangar-apelidos.json")), "aliases_unreadable", "aliases_invalid", object),
+        file_problem(&read_path(shared(env).join(".hangar-opencode.json")), "opencode_cookies_unreadable", "opencode_cookies_invalid", object),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
 }
 
 /// `^[a-z0-9][a-z0-9_-]{0,31}$` do Python, cujo `$` também casa antes de uma quebra final.
@@ -541,6 +582,21 @@ enum Fetch {
     NoResponse { unreachable: bool },
     BadHeader,
     BadUrl,
+    /// Endereço que o cliente não consegue montar (host com espaço, porta inválida).
+    Invalid,
+}
+
+/// O que a tentativa disse sobre a fonte, além da leitura: decide a espera e o diário.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Contact {
+    /// Houve resposta HTTP: a fonte está no ar, a espera por recusa zera.
+    Answered,
+    /// Conexão recusada ou sem rota: entra na espera crescente.
+    Refused,
+    /// Sem resposta por outro motivo (prazo, corpo cortado, credencial que não vira cabeçalho).
+    Silent,
+    /// `base_url` que não forma endereço: problema de configuração, não de rede.
+    BadUrl,
 }
 
 async fn get(client: &reqwest::Client, url: &str, headers: &[(&str, String)]) -> Fetch {
@@ -566,13 +622,14 @@ async fn get(client: &reqwest::Client, url: &str, headers: &[(&str, String)]) ->
                 Err(_) => Fetch::NoResponse { unreachable: false },
             }
         }
+        Err(error) if error.is_builder() => Fetch::Invalid,
         Err(error) => Fetch::NoResponse { unreachable: error.is_connect() },
     }
 }
 
-/// Uma leitura: (cota, recusou conexão). Sem resposta = `sem-resposta`; status de erro =
+/// Uma leitura: (cota, o que a tentativa disse da fonte). Sem resposta = `sem-resposta`; status de erro =
 /// `http-<código>` (o 429 é o que faz o cache esperar).
-pub async fn read(client: &reqwest::Client, reader: &Reader, endpoints: &Endpoints, now: f64) -> (Value, bool) {
+pub async fn read(client: &reqwest::Client, reader: &Reader, endpoints: &Endpoints, now: f64) -> (Value, Contact) {
     let url = reader.url(endpoints);
     let headers: Vec<(&str, String)> = match reader {
         Reader::Kimi { key, .. } => vec![
@@ -594,30 +651,37 @@ pub async fn read(client: &reqwest::Client, reader: &Reader, endpoints: &Endpoin
     let unavailable = |reason: &str| reading("indisponivel", vec![], Some(reason));
     let (status, body) = match get(client, &url, &headers).await {
         Fetch::Body(status, body) => (status, body),
-        Fetch::Status(status) => return (unavailable(&format!("http-{status}")), false),
-        Fetch::NoResponse { unreachable } => return (unavailable("sem-resposta"), unreachable),
-        Fetch::BadHeader => return (unavailable("credencial-invalida"), false),
+        Fetch::Status(status) => return (unavailable(&format!("http-{status}")), Contact::Answered),
+        Fetch::NoResponse { unreachable } => {
+            return (unavailable("sem-resposta"), if unreachable { Contact::Refused } else { Contact::Silent });
+        }
+        Fetch::BadHeader => return (unavailable("credencial-invalida"), Contact::Silent),
         Fetch::BadUrl => {
             tracing::error!(code = "quota_reader_failed", kind = reader.kind(), "leitor de cota quebrado: endereço sem esquema");
-            return (unavailable("erro-leitor"), false);
+            return (unavailable("erro-leitor"), Contact::Silent);
+        }
+        // O Python também dizia `sem-resposta`; o código separado aponta a config, não a rede.
+        Fetch::Invalid => {
+            tracing::warn!(code = "quota_source_bad_url", kind = reader.kind(), "base_url da fonte de cota não forma endereço");
+            return (unavailable("sem-resposta"), Contact::BadUrl);
         }
     };
     let windows = match reader {
         Reader::OpenCode { .. } => {
             if body.is_empty() {
-                return (unavailable(&format!("http-{status}")), false);
+                return (unavailable(&format!("http-{status}")), Contact::Answered);
             }
             let windows = opencode(&String::from_utf8_lossy(&body), now);
             if windows.is_empty() {
                 // Página de login com 200 ou painel mudou: "não informa cota", nunca zero.
-                return (unavailable("painel-sem-numeros"), false);
+                return (unavailable("painel-sem-numeros"), Contact::Answered);
             }
             windows
         }
         _ => {
-            let Some(value) = parse_json(&body) else { return (unavailable("sem-resposta"), false) };
+            let Some(value) = parse_json(&body) else { return (unavailable("sem-resposta"), Contact::Answered) };
             if !value.is_object() {
-                return (unavailable(&format!("http-{status}")), false);
+                return (unavailable(&format!("http-{status}")), Contact::Answered);
             }
             let windows = match reader {
                 Reader::CommandCode { .. } => commandcode(&value),
@@ -625,17 +689,17 @@ pub async fn read(client: &reqwest::Client, reader: &Reader, endpoints: &Endpoin
                     Ok(windows) => windows,
                     Err(()) => {
                         tracing::error!(code = "quota_reader_failed", kind = "kimi", "leitor de cota quebrado: duração sem valor finito");
-                        return (unavailable("erro-leitor"), false);
+                        return (unavailable("erro-leitor"), Contact::Answered);
                     }
                 },
             };
             if windows.is_empty() {
-                return (unavailable("formato-desconhecido"), false);
+                return (unavailable("formato-desconhecido"), Contact::Answered);
             }
             windows
         }
     };
-    (reading("lida", windows, None), false)
+    (reading("lida", windows, None), Contact::Answered)
 }
 
 #[cfg(test)]
@@ -727,6 +791,45 @@ mod tests {
             let _ = aliases(&env);
             let _ = opencode_saved(&env);
         }
+    }
+
+    #[test]
+    fn reader_debug_never_shows_key_or_cookie() {
+        let readers = [
+            Reader::Kimi { key: "sk-segredo-1".into(), base: "https://api.kimi.com/coding/v1".into() },
+            Reader::CommandCode { key: "sk-segredo-2".into() },
+            Reader::OpenCode { workspace: "wrk".into(), cookie: "cookie-segredo".into() },
+        ];
+        for reader in readers {
+            let text = format!("{reader:?}");
+            assert!(!text.contains("segredo"), "{text}");
+        }
+    }
+
+    #[tokio::test]
+    async fn base_url_that_is_not_an_address_is_a_config_problem_not_a_refusal() {
+        let reader = Reader::Kimi { key: "k".into(), base: "http://host com espaço".into() };
+        let (value, contact) = read(&client().unwrap(), &reader, &Endpoints::default(), 0.0).await;
+        assert_eq!(value["motivo"], "sem-resposta");
+        assert_eq!(contact, Contact::BadUrl);
+    }
+
+    #[test]
+    fn broken_config_files_are_reported_and_missing_ones_are_not() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        let env = AccountEnvironment::from_map([("HOME".into(), home.to_string_lossy().into_owned())].into());
+        assert!(config_problems(&env).is_empty(), "ausente não é problema");
+        std::fs::create_dir_all(home.join(".claude")).unwrap();
+        std::fs::create_dir_all(home.join(".kimi-code")).unwrap();
+        std::fs::write(home.join(".kimi-code/config.toml"), "\u{feff}[providers]\n").unwrap();
+        std::fs::write(home.join(".claude/.hangar-apelidos.json"), "[1]").unwrap();
+        std::fs::write(home.join(".claude/.hangar-opencode.json"), b"\xff{").unwrap();
+        assert_eq!(config_problems(&env), ["kimi_config_invalid", "aliases_invalid", "opencode_cookies_invalid"]);
+        std::fs::write(home.join(".kimi-code/config.toml"), "[providers]\n").unwrap();
+        std::fs::write(home.join(".claude/.hangar-apelidos.json"), "{}").unwrap();
+        std::fs::write(home.join(".claude/.hangar-opencode.json"), "{}").unwrap();
+        assert!(config_problems(&env).is_empty());
     }
 
     #[test]
