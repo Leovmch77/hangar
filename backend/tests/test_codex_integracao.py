@@ -676,3 +676,26 @@ async def test_rodada_mostra_tempo_da_acao_e_o_erro_diz_onde_parou(tmp_path, mon
     erro = final["erros"][0]
     assert erro["codigo"] == "erro_falha_etapa"
     assert erro["params"] == {"tipo": "CodexNativoErro", "etapa": "Codex importando superpowers@oficial"}
+
+
+def test_agentes_de_plugins_seguem_o_que_o_claude_carrega(tmp_path):
+    from app.codex_integracao import _agentes_de_plugins
+    instalados = {}
+    for id_, versao in (("ecc@ecc", "2.2.0"), ("desligado@m", "1.0")):
+        raiz = tmp_path / "cache" / id_ / versao
+        (raiz / "agents").mkdir(parents=True)
+        (raiz / "agents-disabled").mkdir()
+        instalados[id_] = [{"scope": "project", "projectPath": "/x", "installPath": str(tmp_path / "outra")},
+                           {"scope": "user", "installPath": str(raiz)}]
+    ecc = tmp_path / "cache/ecc@ecc/2.2.0"
+    (ecc / "agents/code-reviewer.md").write_text("---\r\nname: code-reviewer\r\ndescription: d\r\n---\r\ncorpo\r\n")
+    (ecc / "agents/AGENTS.md").write_text("# registro, sem cabeçalho\n")
+    (ecc / "agents-disabled/go-reviewer.md").write_text("---\nname: go-reviewer\ndescription: d\n---\n")
+    (tmp_path / "cache/desligado@m/1.0/agents/x.md").write_text("---\nname: x\ndescription: d\n---\n")
+    plugins = tmp_path / ".claude/plugins"
+    plugins.mkdir(parents=True)
+    (plugins / "installed_plugins.json").write_text(json.dumps({"version": 2, "plugins": instalados}))
+
+    agentes = _agentes_de_plugins(tmp_path, {"enabledPlugins": {"ecc@ecc": True, "desligado@m": False}})
+
+    assert agentes == {"ecc_code_reviewer": "---\nname: ecc_code_reviewer\ndescription: d\n---\ncorpo\n"}

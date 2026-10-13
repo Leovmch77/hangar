@@ -745,6 +745,7 @@ async def test_mcp_environment_does_not_inherit_identity_or_runtime(isolated, fa
         "OPENAI_API_KEY": "secret",
         "OPENAI_IDENTITY_TOKEN_FILE": str(source / "identity-token"),
         "TOOL_ENDPOINT": "keep",
+        "TYPESAFE_API_KEY": "third-party",
     }}})
     _config(account.home / "config.toml")
 
@@ -752,7 +753,7 @@ async def test_mcp_environment_does_not_inherit_identity_or_runtime(isolated, fa
 
     assert result["status"] == "ready", result
     config = tomllib.loads((account.home / "config.toml").read_text())
-    assert config["mcp_servers"]["probe"]["env"] == {"TOOL_ENDPOINT": "keep"}
+    assert config["mcp_servers"]["probe"]["env"] == {"TOOL_ENDPOINT": "keep", "TYPESAFE_API_KEY": "third-party"}
     assert {issue["code"] for issue in result["issues"]} == {
         "codex_account_mcp_runtime_excluded",
         "codex_account_mcp_auth_excluded",
