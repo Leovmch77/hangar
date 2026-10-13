@@ -73,10 +73,16 @@ impl QuotaCache {
     pub fn update(&mut self, id: &str, reading: Value, now: f64) {
         let limited = reading["motivo"] == "http-429";
         let good = reading["estado"] == "lida";
+        // A última leitura boa fica, mas com o motivo da falha nova: números velhos sem aviso
+        // pareciam certos.
         let value = if reading["estado"] == "indisponivel" {
-            self.get(id)
-                .filter(|old| old["estado"] == "lida")
-                .unwrap_or(reading)
+            match self.get(id).filter(|old| old["estado"] == "lida") {
+                Some(mut old) => {
+                    old["motivo"] = reading["motivo"].clone();
+                    old
+                }
+                None => reading,
+            }
         } else {
             reading
         };
@@ -207,7 +213,9 @@ mod tests {
         let loaded = QuotaCache::load(&path);
         assert!(!loaded.needs_refresh("claude:test", 1599.0, true));
         assert!(loaded.needs_refresh("claude:test", 1600.0, true));
-        assert_eq!(loaded.get("claude:test"), Some(good()));
+        let mut kept = good();
+        kept["motivo"] = json!("http-429");
+        assert_eq!(loaded.get("claude:test"), Some(kept));
         assert_eq!(loaded.get("kimi:test"), Some(good()));
     }
 
@@ -253,6 +261,22 @@ mod tests {
     }
 
     #[test]
+    fn failure_after_good_read_keeps_numbers_and_shows_the_new_reason() {
+        let mut cache = QuotaCache::default();
+        cache.update("test", good(), 1000.0);
+        cache.update(
+            "test",
+            json!({"estado":"indisponivel","janelas":[],"motivo":"painel-sem-numeros"}),
+            1100.0,
+        );
+        let kept = cache.get("test").unwrap();
+        assert_eq!((&kept["estado"], &kept["janelas"], &kept["ts"]), (&json!("lida"), &json!([{"pct":42}]), &json!(1000)));
+        assert_eq!(kept["motivo"], "painel-sem-numeros");
+        cache.update("test", good(), 1200.0);
+        assert_eq!(cache.get("test").unwrap()["motivo"], Value::Null);
+    }
+
+    #[test]
     fn ttl_force_logout_and_network_failure_have_distinct_effects() {
         let mut cache = QuotaCache::default();
         cache.update("test", good(), 1000.0);
@@ -264,7 +288,9 @@ mod tests {
             json!({"estado":"indisponivel","motivo":"sem-resposta"}),
             1100.0,
         );
-        assert_eq!(cache.get("test"), Some(good()));
+        let mut kept = good();
+        kept["motivo"] = json!("sem-resposta");
+        assert_eq!(cache.get("test"), Some(kept));
         cache.update(
             "test",
             json!({"estado":"sem_credencial","janelas":[]}),
