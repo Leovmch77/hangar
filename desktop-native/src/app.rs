@@ -856,7 +856,7 @@ impl Hangar {
             match crate::browser::server::start(&runtime, requests) {
                 Ok(_) => cx.spawn_in(window, async move |this, cx| {
                     while let Ok(request) = received.recv().await {
-                        if this.update_in(cx, |this, _, cx| this.dispatch_preview(request, cx)).is_err() { break; }
+                        if this.update_in(cx, |this, window, cx| this.dispatch_preview(request, window, cx)).is_err() { break; }
                     }
                 }).detach(),
                 Err(e) => eprintln!("[nav] servidor do hangar-preview nao subiu: {e}"),

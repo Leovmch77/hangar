@@ -1010,3 +1010,20 @@ cabeçalho, nunca para a URL.
 - Fechar a página (`Target.closeTarget`, `Page.close`) e desconectar só soltam as sessões do
   cliente; a página continua. Download segue negado pelo app.
 - O `/cdp` da tela remota do celular continua com a lista fechada de 8 comandos.
+
+## CDP sem token por nome de sessão: sempre de pé, só loopback, sem Origin
+
+`ws://127.0.0.1:<porta>/cdp/browser/<nome>` (app nativo, Linux) é o mesmo CDP do `/cdp/browser`,
+sem token, para quem só recebe uma URL (o `connectOverCDP` do Playwright dentro de um MCP). Vale
+enquanto o app roda, sem passo prévio do modelo: se o navegador da sessão não existe, a conexão o
+abre em `about:blank` (escondido, como o `hangar-preview open` fora da tela) e espera o motor.
+A porta é a do servidor local (`_srv.json`); o app tenta reusar a da execução anterior. O endereço
+também sai no campo `cdp_local` do sidecar da sessão.
+
+- Recusa (403) pedido com `Origin` (página web sempre manda, o Playwright não) e `Host` diferente
+  de `127.0.0.1:<porta>`/`localhost:<porta>` (rebinding de DNS). Escuta só em 127.0.0.1.
+- Só sessões do servidor desta máquina; nome desconhecido é 404 `session_not_found`, navegador que
+  não sobe em 20 s é 503 `browser_not_ready`. Nunca aceita o WebSocket e fica parado.
+- Risco que fica: qualquer programa local pode dirigir o navegador da sessão enquanto o app roda,
+  como uma porta de depuração do Chrome. O `/cdp/browser` com `Authorization` e o `/cdp` do celular
+  não mudam.
