@@ -367,6 +367,7 @@ impl Executor {
             self.action(Action::SetRuntimeState {state}).await?;
         }
         if self.cleared(&self.queue.snapshot().await.map_err(|_|error("queue_io"))?) {self.clear_watch=Some(tokio::time::Instant::now()+self.options.clear_wait);}
+        if let Some(sender)=&self.options.status { terminal_status::publish_snapshot(sender,&self.snapshot().await?); }
         let mut timer=tokio::time::interval(self.options.tick.max(Duration::from_millis(1))); timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             // Guardadas durante um clique de mod: saem na ordem em que chegaram, assim que ele solta o pane.
