@@ -178,6 +178,11 @@ impl Transcript {
     fn feed_claude(&mut self, event: &Value) {
         match event.get("type").and_then(Value::as_str) {
             Some("assistant") => for block in event.pointer("/message/content").and_then(Value::as_array).into_iter().flatten() {
+                if block.get("type").and_then(Value::as_str) == Some("text") {
+                    let text = block.get("text").and_then(Value::as_str).unwrap_or_default();
+                    self.lines.extend(text.lines().map(str::trim_end).filter(|l| !l.is_empty()).map(str::to_owned));
+                    continue;
+                }
                 if block.get("type").and_then(Value::as_str) != Some("tool_use") { continue; }
                 let input = block.get("input");
                 match block.get("name").and_then(Value::as_str) {

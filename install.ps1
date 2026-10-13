@@ -2707,7 +2707,9 @@ Ok 'leitura de processo (psutil) funcionando'
 Pop-Location
 
 # Sobra de rodada anterior: o kill pode demorar, entao limpa antes de contar de novo.
-$antigas = & tmux list-sessions -F '#{session_name}' 2>$null | Where-Object { $_ -like 'cp-fumaca-*' }
+# Sem servidor do psmux ainda (instalacao nova) o list-sessions avisa no stderr; com 'Stop' isso
+# derrubaria o instalador antes do teste de verdade.
+$antigas = & { $ErrorActionPreference = 'Continue'; & tmux list-sessions -F '#{session_name}' 2>$null } | Where-Object { $_ -like 'cp-fumaca-*' }
 foreach ($velha in $antigas) { Nativo tmux kill-session -t "=$velha" | Out-Null }
 
 $sessao = "cp-fumaca-$PID"
@@ -2733,7 +2735,7 @@ if (-not $morreu) {
     # O kill-session do psmux nao derruba o pane. Como a sessao e NOSSA e sabemos o pane_pid,
     # matamos o processo direto - sem `tmux kill-server`, que levaria junto as sessoes do usuario.
     # Limpar o proprio lixo e obrigacao do teste; deixar isso pra pessoa e transferir trabalho.
-    $pids = & tmux list-panes -t "=$sessao" -F '#{pane_pid}' 2>$null
+    $pids = & { $ErrorActionPreference = 'Continue'; & tmux list-panes -t "=$sessao" -F '#{pane_pid}' 2>$null }
     foreach ($pane in $pids) {
         if ($pane -match '^\d+$') { Stop-Process -Id $pane -Force -ErrorAction SilentlyContinue }
     }
