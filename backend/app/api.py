@@ -4316,28 +4316,14 @@ async def peer_address(name: str):
 
 
 @app.get("/api/sessions/{name}/subagents", dependencies=[Depends(require_auth)])
-async def subagents_list(name: str):
-    # Subagentes soltos (tool Agent). O transcript de cada um mora em <session-dir>/subagents/ —
-    # e é a ÚNICA fonte do que ele está chamando enquanto roda; o jsonl do pai só tem o pedido.
-    info = await _cached_info(name)
-    if not info or not info.jsonl:
-        raise HTTPException(404, detail=erro("erro_sessao_inexistente", "session or transcript not found"))
-    from app.subagents import list_subagents
-    return await asyncio.to_thread(list_subagents, info.jsonl)
-
-
 @app.get("/api/sessions/{name}/subagents/{agent_id}", dependencies=[Depends(require_auth)])
-async def subagent_detail(name: str, agent_id: str, events: int = 0):
-    info = await _cached_info(name)
-    if not info or not info.jsonl:
-        raise HTTPException(404, detail=erro("erro_sessao_inexistente", "session or transcript not found"))
-    from app.subagents import get_subagent
-    # events=N -> devolve tambem o transcript do subagente nos MESMOS ChatEvent do chat, pra a UI
-    # reusar a lista de mensagens em vez de desenhar um formato proprio.
-    a = await asyncio.to_thread(get_subagent, info.jsonl, agent_id, 40, events)
-    if a is None:
-        raise HTTPException(404, detail=erro("erro_subagente_inexistente", "subagent not found"))
-    return a
+async def subagents_pelo_rust(request: Request, name: str, agent_id: str | None = None):
+    # Subagentes são do Rust, que sabe qual conversa é a da sessão: convidado e Connect só repassam.
+    from app import account_bridge
+    if account_bridge.owner_mode() == "python":
+        raise HTTPException(503, detail=erro("erro_subagentes_precisa_rust",
+                                             "o servidor está sem o processo Rust; reinicie o Hangar"))
+    return await account_bridge.forward_public(request, "/__hangar_server/subagents")
 
 
 @app.get("/api/sessions/events", dependencies=[Depends(require_auth)])

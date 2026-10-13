@@ -112,6 +112,9 @@ pub fn rust_route(method: &Method, path: &str) -> bool {
         if matches!(tail, Some("history" | "events" | "cost" | "term" | "models" | "limits" | "commands" | "codex-permissions")) || tail.is_some_and(|t| t.starts_with("pages/")) {
             return true;
         }
+        if tail.is_some_and(|t| t == "subagents" || t.strip_prefix("subagents/").is_some_and(|id| !id.is_empty() && !id.contains('/'))) {
+            return true;
+        }
         if path.strip_prefix("/api/hangar-terminals/").is_some_and(|r| r.ends_with("/term")) {
             return true;
         }

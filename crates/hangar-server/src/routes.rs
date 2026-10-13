@@ -237,6 +237,7 @@ pub fn terminal_router(state: Arc<AppState>) -> Router {
         .route("/__hangar_server/jev/aux", axum::routing::any(crate::jev_aux::private))
         .route("/__hangar_server/voice/memory", axum::routing::any(crate::voice::routes::private_memory))
         .route("/__hangar_server/voice/memory/{id}", axum::routing::any(crate::voice::routes::private_memory))
+        .route("/__hangar_server/subagents", get(crate::subagents::private))
         .layer(axum::middleware::from_fn(crate::migration_status::count_bridge));
     // Painel, canal do estado e voz ficam fora da contagem: conexões longas, não chamadas da ponte.
     router.route("/__hangar_server/term", get(crate::term::private_ws))
@@ -274,11 +275,14 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/__hangar_server/jev/aux", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
         .route("/__hangar_server/voice/memory", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
         .route("/__hangar_server/voice/memory/{id}", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
+        .route("/__hangar_server/subagents", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
         // Outro método nessas rotas (preflight OPTIONS, HEAD) segue ao Python.
         .route("/api/sessions", get(crate::list::hub::list).fallback(pass_any))
         .route("/api/sessions/events", get(crate::list::hub::events).fallback(pass_any))
         .route("/api/sessions/{name}/history", get(history).fallback(pass_any))
         .route("/api/sessions/{name}/events", get(events).fallback(pass_any))
+        .route("/api/sessions/{name}/subagents", get(crate::subagents::public).fallback(pass_any))
+        .route("/api/sessions/{name}/subagents/{agent_id}", get(crate::subagents::public).fallback(pass_any))
         // Interface dos mods: o Rust atende a sessão sem terminal dele; o resto segue ao Python.
         .route("/api/sessions/{name}/plugin/press", axum::routing::post(crate::mods::routes::press).fallback(pass_any))
         .route("/api/sessions/{name}/plugin/close", axum::routing::post(crate::mods::routes::close).fallback(pass_any))
