@@ -2757,8 +2757,11 @@ async def kill_session(name: str, by: str | None = None, request: Request = None
     closed = bool(request and internal_api._secret) and secrets.compare_digest(request.headers.get("x-hangar-rust-closed", "").encode(), internal_api._secret.encode())
     # No modo Rust a saída do grupo (dentro do kill) já avisa as outras máquinas e o par externo.
     link = None if closed or groups_bridge.rust_owns_groups() else await asyncio.to_thread(lambda: PairLink(name).get())
-    # Fechada pelo Rust a sessão já saiu da lista: não há transcript a achar.
-    jsonl = None if closed else await asyncio.to_thread(_jsonl_of_session, name)
+    # Fechada pelo Rust a sessão já saiu da lista: o transcript vem no cabeçalho dele.
+    if closed:
+        jsonl = urllib.parse.unquote(request.headers.get("x-hangar-closed-transcript", "")) or None
+    else:
+        jsonl = await asyncio.to_thread(_jsonl_of_session, name)
     try:
         errs = await asyncio.to_thread(registry.kill, name, closed_by_rust=closed) or []
     except KillFailed as e:
@@ -2772,6 +2775,8 @@ async def kill_session(name: str, by: str | None = None, request: Request = None
         except OSError:
             # Fechar já aconteceu; sem o nome, a conversa só não volta pelo nome antigo.
             _log.warning("closed name not recorded for %s", name, exc_info=True)
+    elif closed:
+        _log.warning("closed name not recorded for %s: Rust close sent no transcript", name)
     else:
         _log.info("closed name not recorded for %s: no transcript", name)
     plugin_bridge.esquecer(name)

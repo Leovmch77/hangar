@@ -1,7 +1,9 @@
 """Repasse num sentido, à ponte do Rust, do que entra pelo Python para um Codex com terminal dele."""
 import asyncio
 import http.server
+import logging
 import threading
+import urllib.parse
 
 import pytest
 from starlette.requests import Request
@@ -226,6 +228,29 @@ def test_delete_marked_by_the_rust_only_cleans_python_stores(monkeypatch):
     assert calls[1:] == [False, "invalidate"], "marca que não é o segredo não vale"
     asyncio.run(api_mod.kill_session("cx"))
     assert calls[3:] == [False, "invalidate"], "chamada em processo (MCP) encerra como sempre"
+
+
+def test_delete_closed_by_the_rust_records_the_closed_name_from_its_transcript(monkeypatch, caplog):
+    from app import internal_api
+    monkeypatch.setattr(internal_api, "_secret", "segredo")
+    killed, recorded = [], []
+    monkeypatch.setattr(api_mod.registry, "kill", lambda name, closed_by_rust=False: killed.append(name) or [])
+    monkeypatch.setattr(api_mod.registry, "list", lambda: pytest.fail("fechada pelo Rust: não procura na lista"))
+    monkeypatch.setattr(api_mod, "_recusa_orq", lambda name: None)
+    monkeypatch.setattr(api_mod.share_store, "revoke_session", lambda name: 0)
+    monkeypatch.setattr(api_mod.closed_names, "record", lambda jsonl, name: recorded.append((jsonl, name)))
+
+    def request(*extra):
+        return Request({"type": "http", "method": "DELETE", "path": "/api/sessions/cx", "query_string": b"",
+                        "headers": [(b"x-hangar-rust-closed", b"segredo"), *extra]})
+    path = "/home/u/Área de trabalho/rollout-1.jsonl"
+    encoded = urllib.parse.quote(path, safe="").encode()
+    asyncio.run(api_mod.kill_session("cx", request=request((b"x-hangar-closed-transcript", encoded))))
+    assert recorded == [(path, "cx")]
+    with caplog.at_level(logging.WARNING, logger=api_mod._log.name):
+        assert asyncio.run(api_mod.kill_session("cx", request=request()))["ok"] is True
+    assert recorded == [(path, "cx")] and killed == ["cx", "cx"], "sem transcript a limpeza segue"
+    assert "Rust close sent no transcript" in caplog.text
 
 
 def test_published_terminal_with_the_rust_owner_is_left_to_the_watcher(monkeypatch):

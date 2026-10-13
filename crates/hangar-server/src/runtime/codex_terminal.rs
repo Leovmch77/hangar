@@ -493,12 +493,20 @@ impl Watcher {
 
     /// `DELETE` que entrou pelo Python. `None` = não é Codex com terminal (o Python encerra como hoje). Sem
     /// ator aberto (vida ainda não pronta), o pane e o que a vida comprovar; o resto é das lojas do Python.
+    /// O `Ok` leva `transcript` (a conversa atual do sidecar) quando ela é conhecida: o sidecar some no
+    /// encerramento, e o Python precisa dela para guardar o nome fechado.
     pub async fn kill_by_name(&self,registry:&RuntimeRegistry,name:&str) -> Option<Result<Value,RuntimeError>> {
-        if let Some(target) = registry.codex_terminals().await.into_iter().find(|t|t.name == name) {
-            return Some(self.kill(registry,&target).await);
-        }
         let file = codex_sidecar::path(&codex_sidecar::dir(&self.cfg.home),name);
-        let meta = tokio::task::spawn_blocking(move||codex_sidecar::load(&file)).await.ok().flatten()?;
+        let meta = tokio::task::spawn_blocking(move||codex_sidecar::load(&file)).await.ok().flatten();
+        let transcript = meta.as_ref().and_then(|m|text(m,"rollout_path")).filter(|p|!p.is_empty()).map(str::to_owned);
+        let with_transcript = |mut value:Value,fallback:Option<&Path>| {
+            if let Some(path) = transcript.clone().or_else(||fallback.map(|p|p.to_string_lossy().into_owned())) { value["transcript"] = json!(path); }
+            value
+        };
+        if let Some(target) = registry.codex_terminals().await.into_iter().find(|t|t.name == name) {
+            return Some(self.kill(registry,&target).await.map(|v|with_transcript(v,target.transcript.as_deref())));
+        }
+        let meta = meta?;
         if meta.get("headless").is_some_and(truthy) { return None; }
         let _round = self.misses.lock().await;
         if let Err(error) = self.kill_pane(name).await { return Some(Err(error)); }
@@ -506,7 +514,7 @@ impl Watcher {
             let projection = !registry.has_entry(None,name).await;
             self.clean(name,&c.endpoint,c.app_pid,c.key,projection).await;
         }
-        Some(Ok(json!({"closed":true,"killed":true})))
+        Some(Ok(with_transcript(json!({"closed":true,"killed":true}),None)))
     }
 
     /// Encerrar mira a vida, não o nome: logo depois de um renomear (ou com outra sessão no nome antigo) o

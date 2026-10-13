@@ -639,7 +639,8 @@ pub(crate) async fn serve_owner(registry: Arc<hangar_server::runtime::gateway::R
 
 async fn delete_session(server: std::net::SocketAddr, name: &str) -> (u16, Value) {
     let response = crate::fake::client().delete(format!("http://{server}/api/sessions/{name}"))
-        .header("authorization", format!("Bearer {}", crate::fake::OWNER)).header("x-hangar-rust-closed", "forjado").send().await.unwrap();
+        .header("authorization", format!("Bearer {}", crate::fake::OWNER)).header("x-hangar-rust-closed", "forjado")
+        .header("x-hangar-closed-transcript", "%2Fforjado").send().await.unwrap();
     let status = response.status().as_u16();
     (status, serde_json::from_str(&response.text().await.unwrap()).unwrap_or(Value::Null))
 }
@@ -649,7 +650,9 @@ async fn owner_delete_kills_in_rust_then_forwards_marked_to_python() {
     let fx = fixture();
     let server_app = fake_app_server(true).await;
     let (mut app,mut tui) = (app_server_process(&server_app.endpoint),tui());
-    fx.put_sidecar("cx-proof",fx.meta("cx-proof",&server_app.endpoint,Some(app.id()),&tui));
+    let mut meta = fx.meta("cx-proof",&server_app.endpoint,Some(app.id()),&tui);
+    meta["rollout_path"] = json!("/r/Área de trabalho/rollout-1.jsonl");
+    fx.put_sidecar("cx-proof",meta);
     fx.panes(&["cx-proof"]);
     let registry = registry().await;
     let watcher = fx.watcher();
@@ -667,10 +670,14 @@ async fn owner_delete_kills_in_rust_then_forwards_marked_to_python() {
     let (_, headers) = python.last_hit();
     assert_eq!(headers.get("x-hangar-rust-closed").and_then(|v| v.to_str().ok()), Some(crate::fake::SECRET),
         "a marca é a do Rust, nunca a que veio de fora");
+    let transcript = headers.get("x-hangar-closed-transcript").and_then(|v| v.to_str().ok()).unwrap();
+    assert_eq!(percent_encoding::percent_decode_str(transcript).decode_utf8().unwrap(), "/r/Área de trabalho/rollout-1.jsonl",
+        "a conversa encerrada vai junto, para o nome fechado");
     // Outra sessão (sem sidecar Codex) vai ao Python como chegou, sem marca.
     let _ = delete_session(server, "claude-x").await;
     let (_, headers) = python.last_hit();
     assert!(headers.get("x-hangar-rust-closed").is_none());
+    assert!(headers.get("x-hangar-closed-transcript").is_none(), "o forjado sai");
     finish(&mut [&mut app,&mut tui]);
 }
 

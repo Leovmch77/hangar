@@ -86,6 +86,8 @@ pub async fn codex(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectIn
 /// Marca do `DELETE` que o Rust já encerrou e repassa: o valor é o segredo interno, e o Python, ao vê-la,
 /// limpa só as lojas dele, sem voltar ao Rust.
 pub const RUST_CLOSED: &str = "x-hangar-rust-closed";
+/// Transcript (percent-encoded) da sessão que o Rust encerrou, junto da marca.
+pub const CLOSED_TRANSCRIPT: &str = "x-hangar-closed-transcript";
 
 /// `DELETE /api/sessions/{name}` do dono. Codex com terminal do Rust: encerra aqui (pane, ator, app-server,
 /// sidecar, fila e saída do grupo) e só então repassa o pedido marcado ao Python, para convites, "then",
@@ -95,6 +97,7 @@ pub async fn delete(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
     let (fwd, owner) = crate::routes::gate(&st, peer, &req);
     // Só o próprio Rust põe a marca: a que vier de fora sai antes de qualquer decisão.
     req.headers_mut().remove(RUST_CLOSED);
+    req.headers_mut().remove(CLOSED_TRANSCRIPT);
     let name = super::session_name(req.uri().path());
     // Sem vigia (sem as pastas da lista), `kill_codex_terminal` é `None`.
     let (Some(runtime), true, Some(name)) = (st.state.runtime.get().cloned(), owner, name)
@@ -106,7 +109,13 @@ pub async fn delete(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
             crate::routes::cors(req.headers(), response.headers_mut());
             return response;
         }
-        Some(Ok(_)) => {}
+        Some(Ok(closed)) => {
+            // Só o caminho da conversa, para o Python guardar o nome fechado; sem ele, o Python registra a falta.
+            if let Some(path) = closed["transcript"].as_str() {
+                let encoded = percent_encoding::utf8_percent_encode(path, percent_encoding::NON_ALPHANUMERIC).to_string();
+                if let Ok(value) = axum::http::HeaderValue::from_str(&encoded) { req.headers_mut().insert(CLOSED_TRANSCRIPT, value); }
+            }
+        }
     }
     if let Some(groups) = st.groups.clone() {
         match crate::groups::exit::leave_and_notify(&st, &groups, &name).await {
