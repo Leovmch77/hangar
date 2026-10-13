@@ -754,10 +754,10 @@ mod tests {
         assert_eq!(global.recv().await.unwrap().key, "other-0", "o consumidor Python continua recebendo os eventos");
         sender.send_replace(super::super::terminal_status::TerminalStatus { input_stalled:Some("composer_busy".into()), ..Default::default() });
         assert_eq!(receiver.borrow_and_update().input_stalled.as_deref(), Some("composer_busy"));
+        drop(sender);
         registry.clear_live("a").await;
         assert_eq!(*receiver.borrow(), Default::default());
         drop(receiver);
-        drop(sender);
         let _new = registry.terminal_status("c");
         assert!(!registry.terminal_status.lock().unwrap().contains_key("a"));
     }
