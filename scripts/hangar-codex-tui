@@ -141,6 +141,7 @@ def _codex() -> str:
 
 _CONSULTA_VERSAO_S = 3600
 _NEW_ATTEMPT_S = 300
+_UPDATE_TIMEOUT_S = 600
 _PREFIXO = "hangar-codex-tui:"
 
 
@@ -173,11 +174,12 @@ def _installed_by_npm(codex: str, npm: str) -> bool:
 
 
 def _standalone_home(caminho: str) -> Path | None:
-    # O instalador oficial da OpenAI guarda o binário em <CODEX_HOME>/packages/standalone/.
-    partes = Path(caminho).parts
-    for i in range(len(partes) - 1):
-        if partes[i].lower() == "packages" and partes[i + 1].lower() == "standalone":
-            return Path(*partes[:i])
+    # O instalador oficial guarda o binário em <CODEX_HOME>/packages/standalone/releases/, e é
+    # esse trecho inteiro que o próprio Codex exige; `packages/standalone` sozinho casa monorepo npm.
+    partes = [parte.lower() for parte in Path(caminho).parts]
+    for i in range(len(partes) - 2):
+        if partes[i:i + 3] == ["packages", "standalone", "releases"]:
+            return Path(*Path(caminho).parts[:i])
     return None
 
 
@@ -197,7 +199,9 @@ def _atualizar_codex() -> None:
     A TUI sobe com a checagem dela desligada (o aviso travava a abertura); quem atualiza é o
     lançador, aqui, e a tela de abertura do app mostra a espera. A versão publicada é consultada no
     máximo uma vez por hora. Falha nunca impede a abertura: a sessão segue na versão instalada e
-    toda falha vira uma linha fixa na tela, sem a saída crua do npm.
+    toda falha vira uma linha fixa na tela, sem a saída crua do npm. A saída do instalador
+    standalone vai ao pane: é o instalador oficial, que mostra versão, URL pública e pastas da
+    instalação, sem token.
     """
     codex = shutil.which("codex")
     if not codex:
@@ -270,12 +274,11 @@ def _atualizar_codex() -> None:
             saida = rodar([codex, "--version"], 15)
             atual = (saida.stdout.split() or [""])[-1]
             if standalone is not None:
-                publicada, publicou = _latest_standalone_version(), True
+                publicada = _latest_standalone_version()
             else:
                 consulta = rodar([npm, "view", "@openai/codex", "version"], 15)
-                publicada, publicou = consulta.stdout.strip(), consulta.returncode == 0
-            consultou = saida.returncode == 0 and publicou \
-                and bool(_versao(publicada) and _versao(atual))
+                publicada = consulta.stdout.strip() if consulta.returncode == 0 else ""
+            consultou = saida.returncode == 0 and bool(_versao(publicada) and _versao(atual))
         except (OSError, ValueError, subprocess.SubprocessError):
             consultou = False
         if not consultou:
@@ -293,13 +296,32 @@ def _atualizar_codex() -> None:
                 # O CODEX_HOME da conta levaria o instalador a outra pasta; a versão vai fixada na
                 # que foi conferida, e o link visível fica onde o `which` o achou.
                 ambiente = {**os.environ, "CODEX_HOME": str(standalone), "CODEX_RELEASE": publicada}
-                if _standalone_home(codex) is None:
-                    ambiente["CODEX_INSTALL_DIR"] = str(Path(codex).parent)
+                visivel = str(Path(codex).parent)
+                if _standalone_home(os.path.realpath(visivel)) is None:
+                    ambiente["CODEX_INSTALL_DIR"] = visivel
+                else:
+                    ambiente.pop("CODEX_INSTALL_DIR", None)
+                grupo = os.name != "nt"
                 # A saída do instalador oficial vai ao pane: é ela que mostra o motivo de uma falha.
-                feito = subprocess.run([codex, "update"], env=ambiente, stdin=subprocess.DEVNULL,
-                                       stdout=2, stderr=2, timeout=600)
+                proc = subprocess.Popen([codex, "update"], env=ambiente, stdin=subprocess.DEVNULL,
+                                        stdout=2, stderr=2, start_new_session=grupo)
+                try:
+                    codigo, erro = proc.wait(timeout=_UPDATE_TIMEOUT_S), ""
+                except subprocess.TimeoutExpired:
+                    # O `curl | sh` é neto: matar só o `codex` deixaria o instalador trocando o
+                    # binário com a sessão aberta. ponytail: no Windows só o filho morre.
+                    try:
+                        if grupo:
+                            os.killpg(proc.pid, signal.SIGKILL)
+                        else:
+                            proc.kill()
+                    except ProcessLookupError:
+                        pass
+                    proc.wait()
+                    raise
             else:
-                feito = rodar([npm, "install", "-g", f"@openai/codex@{publicada}"], 600)
+                feito = rodar([npm, "install", "-g", f"@openai/codex@{publicada}"], _UPDATE_TIMEOUT_S)
+                codigo, erro = feito.returncode, feito.stderr
         except subprocess.TimeoutExpired:
             print(f"{_PREFIXO} a atualização do Codex passou de 10 min e foi interrompida",
                   file=sys.stderr)
@@ -311,14 +333,26 @@ def _atualizar_codex() -> None:
                 print(f"{_PREFIXO} o Codex pode ter ficado incompleto; reinstale com {reinstalar}",
                       file=sys.stderr)
             return
-        if feito.returncode == 0:
+        if codigo == 0 and standalone is not None:
+            # Código 0 não prova a troca: o que vale é a versão que o `codex` responde agora.
+            try:
+                depois = (rodar([codex, "--version"], 15).stdout.split() or [""])[-1]
+            except (OSError, subprocess.SubprocessError):
+                depois = ""
+            if depois != publicada:
+                lida = depois if _versao(depois) else "ilegível"
+                print(f"{_PREFIXO} o atualizador oficial terminou, mas o Codex responde {lida} em "
+                      f"vez de {publicada}; a sessão abre assim e tenta de novo em 1 h",
+                      file=sys.stderr)
+                return
+        if codigo == 0:
             print(f"{_PREFIXO} Codex atualizado para {publicada}", file=sys.stderr)
         elif standalone is not None:
             print(f"{_PREFIXO} não deu para atualizar o Codex (o atualizador oficial saiu com "
-                  f"código {feito.returncode}); a sessão abre na {atual} e tenta de novo em 1 h",
+                  f"código {codigo}); a sessão abre na {atual} e tenta de novo em 1 h",
                   file=sys.stderr)
         else:
-            print(f"{_PREFIXO} não deu para atualizar o Codex ({_npm_failure_kind(feito.stderr)}); "
+            print(f"{_PREFIXO} não deu para atualizar o Codex ({_npm_failure_kind(erro)}); "
                   f"a sessão abre na {atual} e tenta de novo em 1 h", file=sys.stderr)
     except Exception as exc:
         print(f"{_PREFIXO} não deu para preparar a atualização do Codex ({type(exc).__name__}); "

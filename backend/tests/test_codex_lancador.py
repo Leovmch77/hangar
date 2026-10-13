@@ -961,29 +961,40 @@ def test_instalacao_fora_do_npm_avisa_uma_vez_por_hora(monkeypatch, tmp_path, ca
     assert ["view", "@openai/codex", "version"] not in chamadas
 
 
-def _standalone(monkeypatch, tmp_path, publicada="0.161.0", update_rc=0):
-    """Árvore standalone falsa (layout do instalador oficial) com um `codex` falso de verdade."""
+def _standalone(monkeypatch, tmp_path, publicada="0.161.0", update_rc=0, troca=True, corpo="",
+                pelo_current=False):
+    """Árvore standalone falsa (layout do instalador oficial) com um `codex` falso de verdade.
+
+    O `update` falso grava o ambiente que recebeu; com `troca`, o `--version` passa a responder a
+    versão nova depois dele.
+    """
     home = tmp_path / ".codex"
     release = home / "packages" / "standalone" / "releases" / "0.159.3-x86_64-unknown-linux-musl"
     (release / "bin").mkdir(parents=True)
     falso = release / "bin" / "codex"
-    falso.write_text('#!/bin/sh\n[ "$1" = --version ] && { echo "codex-cli 0.159.3"; exit 0; }\n'
+    nova = '[ -e "$FAKE_UPDATE_OUT" ] && { echo "codex-cli 0.161.0"; exit 0; }; ' if troca else ""
+    falso.write_text(f'#!/bin/sh\nif [ "$1" = --version ]; then {nova}echo "codex-cli 0.159.3"; exit 0; fi\n'
                      '[ "$1" = update ] || exit 9\n'
                      'printf "%s\\n" "$CODEX_HOME" "$CODEX_RELEASE" "$CODEX_INSTALL_DIR" > "$FAKE_UPDATE_OUT"\n'
-                     f'exit {update_rc}\n')
+                     f'{corpo}\nexit {update_rc}\n')
     falso.chmod(0o755)
-    (home / "packages" / "standalone" / "current").symlink_to(release)
+    current = home / "packages" / "standalone" / "current"
+    current.symlink_to(release)
     visivel = tmp_path / ".local" / "bin" / "codex"
     visivel.parent.mkdir(parents=True)
-    visivel.symlink_to(home / "packages" / "standalone" / "current" / "bin" / "codex")
+    visivel.symlink_to(current / "bin" / "codex")
+    achado = current / "bin" / "codex" if pelo_current else visivel
     saida = tmp_path / "update.out"
     monkeypatch.setenv("FAKE_UPDATE_OUT", str(saida))
-    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "conta"))   # conta do Hangar, não a do standalone
+    # Valores da conta do Hangar, que não podem chegar ao instalador.
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "conta"))
+    monkeypatch.setenv("CODEX_INSTALL_DIR", str(tmp_path / "conta" / "bin"))
+    monkeypatch.setenv("CODEX_RELEASE", "0.1.0")
 
     atualizar = runpy.run_path(str(_LANCADOR))["_atualizar_codex"]
     globais = atualizar.__globals__
     consultas = []
-    monkeypatch.setattr(globais["shutil"], "which", lambda nome: str(visivel) if nome == "codex" else None)
+    monkeypatch.setattr(globais["shutil"], "which", lambda nome: str(achado) if nome == "codex" else None)
     monkeypatch.setattr(globais["Path"], "home", lambda: tmp_path)
     monkeypatch.setitem(globais, "_latest_standalone_version",
                         lambda: consultas.append(1) or publicada)
@@ -1023,6 +1034,49 @@ def test_falha_do_atualizador_standalone_abre_e_tenta_em_1_h(monkeypatch, tmp_pa
     assert "atualizador oficial saiu com código 3" in err
     assert "a sessão abre na 0.159.3 e tenta de novo em 1 h" in err
     assert 3500 < _proxima_em(tmp_path) <= 3600
+
+
+@pytest.mark.skipif(os.name != "posix", reason="binário falso POSIX")
+def test_atualizador_que_sai_com_0_sem_trocar_a_versao_nao_e_sucesso(monkeypatch, tmp_path, capsys):
+    atualizar, saida, _, _ = _standalone(monkeypatch, tmp_path, troca=False)
+    atualizar()
+    assert saida.exists()
+    err = capsys.readouterr().err
+    assert "Codex responde 0.159.3 em vez de 0.161.0" in err and "tenta de novo em 1 h" in err
+    assert "Codex atualizado" not in err
+    assert 3500 < _proxima_em(tmp_path) <= 3600
+
+
+@pytest.mark.skipif(os.name != "posix", reason="binário falso POSIX")
+def test_codex_achado_dentro_do_standalone_nao_leva_pasta_de_link(monkeypatch, tmp_path):
+    atualizar, saida, _, home = _standalone(monkeypatch, tmp_path, pelo_current=True)
+    atualizar()
+    # Sem pasta de link a conta não vaza: o instalador fica no padrão dele.
+    assert saida.read_text().splitlines() == [str(home), "0.161.0", ""]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="binário falso POSIX")
+def test_prazo_estourado_mata_o_instalador_neto(monkeypatch, tmp_path, capsys):
+    neto = tmp_path / "neto.pid"
+    atualizar, _, _, _ = _standalone(monkeypatch, tmp_path,
+                                     corpo=f'sleep 60 & echo $! > "{neto}"; wait')
+    monkeypatch.setitem(atualizar.__globals__, "_UPDATE_TIMEOUT_S", 1)
+    atualizar()
+    assert "passou de 10 min e foi interrompida" in capsys.readouterr().err
+    pid = int(neto.read_text())
+
+    def morto():
+        try:
+            return Path(f"/proc/{pid}/stat").read_text().split()[2] == "Z"
+        except OSError:
+            return True
+    assert _espera(morto, 5)
+
+
+def test_npm_em_pasta_packages_standalone_de_monorepo_nao_e_standalone():
+    standalone_home = runpy.run_path(str(_LANCADOR))["_standalone_home"]
+    assert standalone_home("/w/mono/packages/standalone/node_modules/@openai/codex/bin/codex.js") is None
+    assert standalone_home("/h/.codex/packages/standalone/releases/0.1.0-x/bin/codex") == Path("/h/.codex")
 
 
 def test_canal_standalone_le_a_tag_com_user_agent_proprio(monkeypatch):
