@@ -139,10 +139,10 @@ pub fn spawn(bin: &Path, profile: &Path) -> io::Result<Launched> {
 
 /// A saída do Chromium vai para o diário do app, não para o terminal de quem o abriu.
 fn log_file() -> Stdio {
-    crate::appearance::dir()
-        .and_then(|dir| File::options().create(true).append(true).open(dir.join("chromium.log")).ok())
-        .map_or_else(Stdio::null, Stdio::from)
+    log_path().and_then(|path| File::options().create(true).append(true).open(path).ok()).map_or_else(Stdio::null, Stdio::from)
 }
+
+pub fn log_path() -> Option<PathBuf> { crate::appearance::dir().map(|dir| dir.join("chromium.log")) }
 
 #[cfg(test)]
 mod tests {
