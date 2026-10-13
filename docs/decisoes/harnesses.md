@@ -164,6 +164,15 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   `plugin::Store` do Rust (`state::facts::plugin_reading`); o `held` dos fatos Python da lista
   vem sempre vazio. Ver
   [cartão de permissão segurado](#cartão-de-permissão-segurado-pelo-hook).
+- **Aprovação do plano com terminal: o plugin avisa, o diálogo do terminal responde.** No
+  `tool.check` do `ExitPlanMode`, `plan.ts` manda `plan:<tool_use_id>`, o plano e o caminho a
+  `POST /api/plugin/plan`, que guarda e responde na hora (devolver `allow` não pula o diálogo da
+  TUI, medido no 2.1.296). O cartão (`claude_plan_pending` + `interaction_id` do alvo
+  `plugin:plan:<id>`) só sai enquanto o pane mostra "Would you like to proceed?"; o menu comum
+  nunca ganha ID nesse diálogo, e sem o aviso o estado leva `plan_notice_missing`. O
+  `tool_result` no transcript encerra o aviso. `/select` aperta as teclas do diálogo (1 = auto,
+  2 = manual); a opção 3 com `text` digita o retorno na própria linha da opção e o Enter recusa o
+  plano levando o texto a Claude.
 - **O `wire.jsonl` do Kimi não é bem-comportado**: nem toda escrita é turno (`config.update` com
   a sessão parada), e o main fica mudo quando delega. Quem decide é a fronteira de turno, não o
   mtime. `tool.result` não tem `uuid` — id é `res:<toolCallId>`.

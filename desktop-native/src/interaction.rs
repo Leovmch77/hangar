@@ -73,6 +73,7 @@ fn confirmed_plan_paths(events: &[ChatEvent], exit_id: &str) -> Vec<String> {
 pub fn plan_choice_key(option: &str) -> Option<&'static str> {
     match option {
         "Yes, and bypass permissions" | "Yes, and switch to BYPASS PERMISSIONS (no further prompts) for this session" => Some("plan_review_bypass"),
+        "Yes, and use auto mode" => Some("plan_review_auto_mode"),
         "Yes, manually approve edits" => Some("plan_review_manual"),
         "Yes, and auto-accept edits" => Some("plan_review_auto"),
         "Tell Claude what to change" => Some("plan_review_changes"),
@@ -257,12 +258,13 @@ fn plan_markers(text: &str) -> Vec<(usize, usize, bool)> {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum Action { Answer, Skip, Select(usize), Submit, Cancel, Steer, Discard(String), Implement }
+/// `SelectText`: a escolha que leva o texto digitado junto (o "o que mudar" do plano).
+pub enum Action { Answer, Skip, Select(usize), SelectText(usize, String), Submit, Cancel, Steer, Discard(String), Implement }
 
 impl Action {
     pub fn path(&self) -> Vec<&str> {
         match self {
-            Action::Answer => vec!["answer"], Action::Skip => vec!["question", "skip"], Action::Select(_) => vec!["select"], Action::Submit => vec!["select", "submit"],
+            Action::Answer => vec!["answer"], Action::Skip => vec!["question", "skip"], Action::Select(_) | Action::SelectText(..) => vec!["select"], Action::Submit => vec!["select", "submit"],
             Action::Cancel => vec!["interrupt"], Action::Steer => vec!["steer"], Action::Discard(id) => vec!["queue", id],
             Action::Implement => vec!["codex", "plan", "implement"],
         }
@@ -351,6 +353,21 @@ mod tests {
         events.pop();
         events.push(ChatEvent { kind: "user_msg".into(), id: "u".into(), text: Some("Nova tarefa".into()), ..Default::default() });
         assert!(plan_review(&events, &state, "claude").is_none());
+    }
+
+    #[test]
+    fn claude_plan_review_accepts_the_terminal_state_with_the_tui_choices() {
+        let state = crate::api::dto::SessionState {
+            options: Some(vec!["Yes, and use auto mode".into(), "Yes, manually approve edits".into(), "Tell Claude what to change".into()]),
+            interaction_id: Some("i1".into()),
+            claude_plan_pending: json!({"plan":"# Plano", "path":"/plans/p.md", "tool_use_id":"p1"}).as_object().cloned(), ..plan_state() };
+        let events = vec![tool("tool_use", "p1", "ExitPlanMode", json!({"plan":"# Plano"}))];
+        let plan = plan_review(&events, &state, "claude").unwrap();
+        assert_eq!((plan.tool_id.as_str(), plan.plan.as_str(), plan.path.as_deref()), ("p1", "# Plano", Some("/plans/p.md")));
+        assert!(plan_review(&[], &state, "claude").is_some());
+        let keys: Vec<_> = state.options.unwrap().iter().map(|o| plan_choice_key(o)).collect();
+        assert_eq!(keys, vec![Some("plan_review_auto_mode"), Some("plan_review_manual"), Some("plan_review_changes")]);
+        assert_eq!(plan_choice_key("Yes, and auto-accept edits"), Some("plan_review_auto"));
     }
 
     #[test]

@@ -1,16 +1,41 @@
 <script lang="ts">
   import * as m from '../paraglide/messages';
-  import { kindOf, isPermission as isPermissionFn, questionParts } from '@hangar/core';
+  import { kindOf, isPermission as isPermissionFn, questionParts, planChoiceKey, type PlanChoiceKey } from '@hangar/core';
   interface Props {
     question: string;
     options: string[];
     interactionId?: string | null;
-    onSelect: (index: number, interactionId: string | null | undefined) => void;
+    onSelect: (index: number, interactionId: string | null | undefined, text?: string) => void | Promise<void>;
     onCancel: () => void;
     /** Envia as opções já marcadas (só múltipla escolha). Ausente = sem botão de enviar. */
     onSubmit?: (interactionId: string | null | undefined) => void;
+    /** Diálogo de aprovação do plano: rótulos curtos e "o que mudar" abre um campo de texto. */
+    planReview?: boolean;
   }
-  let { question, options, interactionId, onSelect, onCancel, onSubmit }: Props = $props();
+  let { question, options, interactionId, onSelect, onCancel, onSubmit, planReview = false }: Props = $props();
+
+  const PLAN_LABEL: Record<PlanChoiceKey, () => string> = {
+    bypass: m.native_plan_review_bypass, auto_mode: m.native_plan_review_auto_mode,
+    manual: m.native_plan_review_manual, auto: m.native_plan_review_auto,
+    changes: m.native_plan_review_changes, keep: m.native_plan_review_keep,
+  };
+  function planKey(o: string): PlanChoiceKey | null { return planReview ? planChoiceKey(o) : null; }
+  function label(o: string): string { const key = planKey(o); return key ? PLAN_LABEL[key]() : o; }
+  // Campo do "o que mudar": o texto fica até o cartão sair, então um envio recusado não o perde.
+  let feedbackOpen = $state(false);
+  let feedback = $state('');
+  let sending = $state(false);
+  async function sendFeedback(index: number, id: string | null | undefined, select: Props['onSelect']) {
+    const text = feedback.trim();
+    if (!text || sending) return;
+    sending = true;
+    try { await select(index, id, text); } finally { sending = false; }
+  }
+  $effect.pre(() => {
+    void interactionId;
+    feedbackOpen = false;
+    feedback = '';
+  });
 
   // MÚLTIPLA ESCOLHA: o TUI desenha a caixinha antes do rótulo ("[ ] Alfa", "[✔] Alfa"), e é só
   // por ela que dá pra saber — o pane não diz de outro jeito. Aqui marcar e enviar são ações
@@ -25,7 +50,7 @@
   function marcada(o: string): boolean { return /^\[[^\s\]]\]/.test(o); }
 
   const kinds = $derived(options.map(kindOf));
-  const isPermission = $derived(isPermissionFn(options));
+  const isPermission = $derived(!planReview && isPermissionFn(options));
 </script>
 
 {#each [{ interactionId, onSelect, onSubmit }] as displayed (displayed.interactionId)}
@@ -45,8 +70,11 @@
         class:option-btn--always={isPermission && kinds[i] === 'always'}
         class:option-btn--deny={isPermission && kinds[i] === 'deny'}
         style="animation-delay: {i * 40}ms"
-        onclick={() => displayed.onSelect(i + 1, displayed.interactionId)}
+        onclick={() => planKey(opt) === 'changes' ? (feedbackOpen = !feedbackOpen) : displayed.onSelect(i + 1, displayed.interactionId)}
         aria-pressed={multipla ? marcada(opt) : undefined}
+        aria-expanded={planKey(opt) === 'changes' ? feedbackOpen : undefined}
+        title={planKey(opt) ? opt : undefined}
+        aria-label={planKey(opt) ? `${i + 1}. ${opt}` : undefined}
       >
         <span class="opt-num">{i + 1}.</span>
         {#if multipla}
@@ -55,8 +83,19 @@
             {marcada(opt) ? '✔' : ''}
           </span>
         {/if}
-        <span class="opt-text">{multipla ? semCaixa(opt) : opt}</span>
+        <span class="opt-text">{multipla ? semCaixa(opt) : label(opt)}</span>
       </button>
+      {#if feedbackOpen && planKey(opt) === 'changes'}
+        <form class="plan-feedback" onsubmit={(e) => { e.preventDefault(); void sendFeedback(i + 1, displayed.interactionId, displayed.onSelect); }}>
+          <!-- svelte-ignore a11y_autofocus -->
+          <textarea bind:value={feedback} rows="3" autofocus disabled={sending}
+                    placeholder={m.native_plan_review_changes_placeholder()}
+                    aria-label={m.native_plan_review_changes_placeholder()}></textarea>
+          <button type="submit" class="feedback-send" disabled={!feedback.trim() || sending} aria-busy={sending}>
+            {m.native_send()}
+          </button>
+        </form>
+      {/if}
     {/each}
     {#if multipla && onSubmit}
       <!-- Marcar não envia. Sem este botão a única saída era Cancelar. -->
@@ -202,6 +241,28 @@
     border-color: var(--accent);
     color: var(--bg-base);
   }
+
+  .plan-feedback { display: grid; gap: var(--space-2); }
+  .plan-feedback textarea {
+    width: 100%;
+    resize: vertical;
+    background: var(--surface-inset);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-lg);
+    padding: var(--space-2) var(--space-3);
+    color: var(--text-primary);
+    font: inherit;
+  }
+  .feedback-send {
+    justify-self: end;
+    min-height: 44px;
+    padding: 0 var(--space-4);
+    border-radius: var(--radius-md);
+    background: var(--accent);
+    color: var(--bg-base);
+    font-weight: 600;
+  }
+  .feedback-send:disabled { opacity: 0.45; cursor: default; }
 
   .opt-num {
     font-family: var(--font-mono);

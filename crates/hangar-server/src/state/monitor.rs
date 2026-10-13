@@ -45,6 +45,8 @@ pub struct RoundFacts {
     pub questions: Vec<Value>,
     pub binding: Option<crate::interactions::InteractionBinding>,
     pub native_selector: Option<String>,
+    /// O plano do `ExitPlanMode` cujo diálogo o pane mostra (`claude_plan_pending`).
+    pub plan_pending: Option<serde_json::Map<String, Value>>,
     pub in_transfer: bool,
     pub permission_op: bool,
     pub permission_uncertain: bool,
@@ -65,7 +67,7 @@ impl RoundFacts {
             alive: r.alive(now),
             plugin_state: r.plugin_state(now).map(|p| p.state.clone()),
             question: r.question(now).map(|q| json!({"id": q.id, "questions": q.questions, "tool": q.tool, "resumo": q.resumo})),
-            questions: Vec::new(), binding: None, native_selector: None,
+            questions: Vec::new(), binding: None, native_selector: None, plan_pending: None,
             in_transfer: r.in_transfer(now),
             permission_op: r.facts.permission_op,
             permission_uncertain: false, permission_revision: None,
@@ -471,14 +473,16 @@ impl<S: Sources> Monitor<S> {
             status_line: a.status_line, overlay: a.overlay, login: a.login, limited: a.limit_reset.is_some(),
             limit_reset: a.limit_reset, loop_status: loop_info.status, loop_iter: loop_info.iter, loop_max: loop_info.max,
             claude_permission_mode: mode, claude_previous_non_plan: previous, shells: files.shells,
-            problema, problema_detalhe, interaction_id: facts.native_selector.clone(), ..Default::default()
+            problema, problema_detalhe, interaction_id: facts.native_selector.clone(),
+            claude_plan_pending: facts.plan_pending.clone(), ..Default::default()
         };
         let projection = super::facts::project_plugin_state(&mut event, &facts.questions);
         if let Err(code) = &projection {
             event.problema = Some(UNAVAILABLE.into());
             event.problema_detalhe = Some(code.clone());
         }
-        if (projection.is_err() || facts.unavailable.is_some() || files.unavailable.is_some())
+        // Sem o aviso do plano não há cartão a guardar: o anterior seria de um diálogo que já fechou.
+        if (projection.is_err() || facts.unavailable.as_deref().is_some_and(|code| code != "plan_notice_missing") || files.unavailable.is_some())
             && let Some(previous) = &self.mem.last {
             super::facts::preserve_cards(&mut event, previous);
         }

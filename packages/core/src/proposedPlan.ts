@@ -106,3 +106,20 @@ export function pendingReplyPlan(events: ChatEvent[], anchorId: string | null = 
   }
   return null;
 }
+
+export type PlanChoiceKey = 'bypass' | 'auto_mode' | 'manual' | 'auto' | 'changes' | 'keep';
+
+/** Abrevia só as escolhas conhecidas do diálogo de plano da TUI (mesma tabela do nativo,
+ *  `plan_choice_key`); o rótulo completo continua no botão para leitor de tela e dica. */
+export function planChoiceKey(option: string): PlanChoiceKey | null {
+  switch (option.trim()) {
+    case 'Yes, and bypass permissions':
+    case 'Yes, and switch to BYPASS PERMISSIONS (no further prompts) for this session': return 'bypass';
+    case 'Yes, and use auto mode': return 'auto_mode';
+    case 'Yes, manually approve edits': return 'manual';
+    case 'Yes, and auto-accept edits': return 'auto';
+    case 'Tell Claude what to change': return 'changes';
+    case 'No, keep planning': return 'keep';
+    default: return null;
+  }
+}

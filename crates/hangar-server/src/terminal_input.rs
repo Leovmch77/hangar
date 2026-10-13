@@ -1057,8 +1057,56 @@ impl TerminalDriver {
         if option == 0 || expected.semantic["pane"]["options"].as_array().is_none_or(|options| option > options.len()) {
             return Self::interaction_failure(InteractionError::Changed, false);
         }
+        if let Some(refused) = self.plan_gone(expected).await { return refused; }
         if let Err(error) = self.check_interaction(expected).await { return Self::interaction_failure(error, false); }
         self.select_inner(option, require_cursor, Some(expected)).await
+    }
+
+    /// Cartão do plano cujo diálogo saiu da tela: recusa própria, antes de qualquer tecla.
+    async fn plan_gone(&self, expected: &ExpectedInteraction) -> Option<DeliveryResult> {
+        if !expected.target.request_key.starts_with("plugin:plan:") { return None; }
+        match self.capture_inner().await {
+            Ok(screen) if crate::terminal_state::plan_dialog(&crate::terminal_state::analyze(&screen)) => None,
+            Ok(_) => Some(DeliveryResult::new(Disposition::Rejected, DeliveryStage::Identity, "plan_dialog_missing")),
+            Err(error) => Some(Self::failed(error, DeliveryStage::Select)),
+        }
+    }
+
+    /// Terceira opção do plano com o retorno: o diálogo abre o texto na própria linha da opção, e o
+    /// Enter recusa o plano levando o texto a Claude.
+    pub async fn guarded_plan_feedback(&self, expected: &ExpectedInteraction, option: usize, text: &str) -> DeliveryResult {
+        let _serial = self.serial.lock().await;
+        if !expected.target.request_key.starts_with("plugin:plan:") || option != 3 || !valid_text(text) || text.trim().is_empty() || text.contains('\n') {
+            return DeliveryResult::new(Disposition::Rejected, DeliveryStage::Validate, "invalid_option");
+        }
+        if expected.semantic["pane"]["options"].as_array().is_none_or(|options| options.len() != 3) {
+            return Self::interaction_failure(InteractionError::Changed, false);
+        }
+        if let Some(refused) = self.plan_gone(expected).await { return refused; }
+        let screen = match self.check_interaction(expected).await { Ok(screen) => screen, Err(error) => return Self::interaction_failure(error, false) };
+        let (_, moved) = match self.navigate(option, screen, true, Some(expected)).await { Ok(s) => s, Err(e) => return Self::failed(e, DeliveryStage::Select) };
+        match self.check_interaction(expected).await {
+            Ok(current) if cursor(&current) == Some(option) => {},
+            Ok(_) => return Self::interaction_failure(InteractionError::Changed, moved),
+            Err(error) => return Self::interaction_failure(error, moved),
+        }
+        let guard = GuardedText { expected, closed: false, pane: Some(&expected.semantic["pane"]), input: None, allow_owned: false };
+        if let Err(e) = self.literal_guarded(text, Some(guard)).await { return Self::key_failed(e, DeliveryStage::Select, moved); }
+        self.settle().await;
+        // O rótulo da opção virou o texto: a guarda do menu não serve mais, a prova é a própria linha.
+        let typed = match self.capture_inner().await { Ok(s) => s, Err(e) => return DeliveryResult::new(Disposition::Unknown, DeliveryStage::Select, e.code) };
+        let analysis = crate::terminal_state::analyze(&typed);
+        let label = analysis.options.as_ref().and_then(|o| o.get(2)).map(|l| compact(l)).unwrap_or_default();
+        if !crate::terminal_state::plan_dialog(&analysis) || cursor(&typed) != Some(option) || label.is_empty() || !compact(text).starts_with(&label) {
+            return DeliveryResult::new(Disposition::Unknown, DeliveryStage::Select, "plan_feedback_unproved");
+        }
+        if let Err(e) = self.key_inner("Enter").await { return Self::key_failed(e, DeliveryStage::Select, true); }
+        self.settle().await;
+        match self.capture_inner().await {
+            Ok(after) if !after.trim().is_empty() && !crate::terminal_state::plan_dialog(&crate::terminal_state::analyze(&after)) =>
+                DeliveryResult::new(Disposition::Accepted, DeliveryStage::Select, "selected"),
+            _ => DeliveryResult::new(Disposition::Unknown, DeliveryStage::Select, "plan_still_open"),
+        }
     }
 
     pub async fn select(&self, option: usize, require_cursor: bool) -> DeliveryResult {

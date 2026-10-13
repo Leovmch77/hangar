@@ -3,5 +3,5 @@ pub mod routes;
 pub mod sources;
 mod store;
 
-pub use store::{Ask, PermissionGate, PluginQuestion, Poll, Pull, Receipt, Store};
+pub use store::{Ask, PermissionGate, PlanNotice, PluginQuestion, Poll, Pull, Receipt, Store};
 pub use crate::terminal_input::{PluginMode, PluginReply, PluginRequest, ServiceError};

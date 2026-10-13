@@ -4786,6 +4786,8 @@
   "native_plan_review_auto": "Approve and accept edits",
   "native_plan_review_changes": "Request changes",
   "native_plan_review_keep": "Continue planning",
+  "native_plan_review_auto_mode": "Approve with auto mode",
+  "native_plan_review_changes_placeholder": "What should Claude change in the plan?",
   "native_codex_plan_title": "Codex proposed a plan.",
   "native_codex_plan_wait": "Codex proposed a plan. Wait until the session is available and the queue is empty to implement it.",
   "native_codex_plan_implement": "Implement plan",

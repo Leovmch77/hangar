@@ -152,7 +152,7 @@ pub fn rust_route(method: &Method, path: &str) -> bool {
         return true;
     }
     if *method == Method::POST && (path == "/api/broadcast" || matches!(path.strip_prefix("/api/plugin/"),
-        Some("whoami" | "pull" | "ask" | "ask-fim" | "filled" | "submitted" | "state" | "suggest" | "rate"))) {
+        Some("whoami" | "pull" | "ask" | "ask-fim" | "plan" | "filled" | "submitted" | "state" | "suggest" | "rate"))) {
         return true;
     }
     if *method == Method::DELETE && tail.and_then(|t| t.strip_prefix("queue/")).is_some_and(|id| !id.is_empty() && !id.contains('/')) {

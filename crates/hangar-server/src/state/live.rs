@@ -319,8 +319,8 @@ impl Sources for LiveSources {
                 match registry.plugin() {
                     Ok(store) => {
                         let (store, life) = (store.clone(), binding.clone());
-                        match tokio::task::spawn_blocking(move || super::ask::observe_menu(store.interactions(), &life, &jsonl, &pane)).await {
-                            Ok(Ok(id)) => facts.native_selector = id,
+                        match tokio::task::spawn_blocking(move || super::ask::observe_screen_menu(&store, &life, &jsonl, &pane)).await {
+                            Ok(Ok((id, plan))) => { facts.native_selector = id; facts.plan_pending = plan; },
                             Ok(Err(code)) => facts.unavailable = Some(code),
                             Err(_) => facts.unavailable = Some("askq_task_failed".into()),
                         }

@@ -3,6 +3,7 @@ import { registerAsk } from "./ask";
 import { registerBtw } from "./btw";
 import { registerInput } from "./input";
 import { registerPerm } from "./perm";
+import { registerPlan } from "./plan";
 import { registerRate } from "./rate";
 import { registerState } from "./state";
 import { registerSuggest } from "./suggest";
@@ -19,6 +20,7 @@ export const register: Register = (on) => {
   registerSuggest(on);
   registerAsk(on);
   registerPerm(on);
+  registerPlan(on);
   registerRate(on);
   registerUi(on);
   // Depois do `ui.ts`: o painel do `/btw` fica por dentro da cadeia que ele espelha no app.

@@ -250,11 +250,11 @@ export default function ChatScreen() {
   };
   // Cada ação copia o servidor da rota no toque: removido vira aviso, nunca cai no ativo.
   const destino = () => useServers.getState().servers.find((s) => s.id === serverId);
-  const handleSelectOption = async (n: number, interactionId: string | null | undefined) => {
+  const handleSelectOption = async (n: number, interactionId: string | null | undefined, text?: string) => {
     if (!optionCurrent()) return;
     const target = destino();
     if (!target) return mostrarAviso(m.chat_servidor_removido());
-    try { await selectOptionForServer(target, name, n, interactionId); }
+    try { await selectOptionForServer(target, name, n, interactionId, text); }
     catch (e) { optionError(e); }
   };
   // Escolha múltipla: as marcadas já foram para o terminal, aqui só confirma.
@@ -359,12 +359,16 @@ export default function ChatScreen() {
   const planPending = stateEvent?.claude_plan_pending;
   const optionsSlot = showOptions || planPending || decidablePlan || aviso ? (
     <View style={styles.slot}>
-      {planPending ? <PendingPlan {...planPending} /> : null}
+      {planPending ? (
+        <PendingPlan key={showOptions ? optionRequest.generation : undefined} {...planPending}
+                     {...(showOptions ? { options: stateEvent!.options!, question: stateEvent!.question!, interactionId: stateEvent!.interaction_id,
+                                          onSelect: handleSelectOption, onCancel: handleCancelOptions } : {})} />
+      ) : null}
       {decidablePlan && !planPending ? (
         <PlanActions key={decidablePlan.id} plan={decidablePlan.plan} onImplement={implementPlan}
                      disabled={stateEvent?.state !== 'idle' || pending.length > 0} />
       ) : null}
-      {showOptions ? (
+      {showOptions && !planPending ? (
         <OptionButtons key={optionRequest.generation} question={stateEvent!.question!} options={stateEvent!.options!} interactionId={stateEvent!.interaction_id} onSelect={handleSelectOption} onCancel={handleCancelOptions} onSubmit={handleSubmitOptions} />
       ) : null}
       {aviso ? <Text style={styles.aviso} accessibilityRole="alert">{aviso}</Text> : null}

@@ -936,7 +936,10 @@ impl Executor {
                         "key"|"navigation_key"=>driver.key(payload["key"].as_str().unwrap(),false).await,
                         "interactive_key"=>driver.key(payload["key"].as_str().unwrap(),true).await,
                         "terminal_input"=>driver.text(text).await,
-                        "select"=>driver.guarded_select(expected.as_ref().unwrap(),payload["option"].as_u64().unwrap() as usize,true).await,
+                        "select"=>match payload["text"].as_str() {
+                            Some(text)=>driver.guarded_plan_feedback(expected.as_ref().unwrap(),payload["option"].as_u64().unwrap() as usize,text).await,
+                            None=>driver.guarded_select(expected.as_ref().unwrap(),payload["option"].as_u64().unwrap() as usize,true).await,
+                        },
                         "answer_questions"=>driver.guarded_answer(expected.as_ref().unwrap(),&serde_json::from_value::<Vec<QuestionAnswer>>(payload["answers"].clone()).unwrap()).await,
                         "answer_chat"=>driver.guarded_answer_chat(expected.as_ref().unwrap(),&serde_json::from_value::<Vec<QuestionAnswer>>(payload["answers"].clone()).unwrap(),&publication).await,
                         "submit_selected"=>driver.guarded_submit_selected(expected.as_ref().unwrap()).await,
@@ -1263,14 +1266,14 @@ fn is_clear(text:&str)->bool {text.split_whitespace().next()==Some("/clear")}
 fn validate(kind:&str,payload:&Value)->Result<(),RuntimeError> {
     let fields:&[&str]=match kind {
         "input"=>&["text","pre_transcript"],"steer"=>&[],"key"|"navigation_key"|"interactive_key"=>&["key"],"terminal_input"=>&["text"],
-        "select"=>&["option","require_cursor","request_id","interaction_id"],"answer_questions"|"answer_chat"=>&["answers","request_id","interaction_id"],"interrupt"=>&["clear"],"submit_selected"=>&["interaction_id"],"steer_queue"=>&["entry_id"],_=>return Err(error("terminal_control")),
+        "select"=>&["option","require_cursor","request_id","interaction_id","text"],"answer_questions"|"answer_chat"=>&["answers","request_id","interaction_id"],"interrupt"=>&["clear"],"submit_selected"=>&["interaction_id"],"steer_queue"=>&["entry_id"],_=>return Err(error("terminal_control")),
     };
     if !payload.as_object().is_some_and(|p|p.keys().all(|k|fields.contains(&k.as_str()))){return Err(error("terminal_payload"));}
     let valid=match kind {
         "input"=>payload["text"].as_str().is_some_and(valid_text) && payload.get("pre_transcript").is_none_or(Value::is_boolean),
         "terminal_input"=>payload["text"].as_str().is_some_and(safe_characters),
         "key"|"navigation_key"|"interactive_key"=>payload["key"].is_string(),
-        "select"=>payload["option"].as_u64().is_some_and(|v|v>0 && v<=100) && payload.get("require_cursor").is_none_or(Value::is_boolean) && payload.get("request_id").is_none_or(Value::is_string),
+        "select"=>payload["option"].as_u64().is_some_and(|v|v>0 && v<=100) && payload.get("require_cursor").is_none_or(Value::is_boolean) && payload.get("text").is_none_or(|t|t.as_str().is_some_and(|t|valid_text(t) && !t.contains('\n'))) && payload.get("request_id").is_none_or(Value::is_string),
         "answer_questions"|"answer_chat"=>serde_json::from_value::<Vec<QuestionAnswer>>(payload["answers"].clone()).is_ok_and(|answers|!answers.is_empty() && answers.iter().all(|a|match a.kind {
             AnswerKind::Option=>!a.indices.is_empty() && a.indices.iter().all(|i|*i<100) && (a.multi||a.indices.len()==1) && !a.labels.is_empty(),
             AnswerKind::Text=>a.type_index.is_some_and(|i|i<100) && a.value.as_ref().is_some_and(|v|valid_text(v)&&!v.contains('\n')),

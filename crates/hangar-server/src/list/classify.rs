@@ -356,7 +356,7 @@ impl Classifier {
                         let pane = frames[k].as_ref().map_err(|_| "list_capture_failed")?;
                         let store = runtime.plugin().map_err(|e| e.code)?;
                         let question = crate::state::ask::observe_terminal(store.interactions(), &binding, jsonl, pane)?;
-                        let menu = crate::state::ask::observe_menu(store.interactions(), &binding, jsonl, pane)?;
+                        let (menu, _) = crate::state::ask::observe_screen_menu(&store, &binding, jsonl, pane)?;
                         if runtime.interaction_binding_readonly(&row.name).await.map_err(|e| e.code)? != binding { return Err("erro_interacao_desatualizada".into()); }
                         if question.is_some() { row.pending_questions = row.pending_questions.max(1); }
                         Ok::<_, String>(menu)

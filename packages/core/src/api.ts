@@ -723,10 +723,10 @@ export async function sendInputForServer(s: Server, name: string, text: string):
 // Responde uma opção do picker (awaiting_input) direto do card. Mesma convenção de índice do
 // selectOption por-servidor-ativo (api.ts): option é 1-BASED (1 = primeira opção) — o backend
 // valida ge=1 e traduz pra (option-1)×Down + Enter no tmux.
-export async function selectOptionForServer(s: Server, name: string, option: number, interactionId: string | null | undefined): Promise<void> {
+export async function selectOptionForServer(s: Server, name: string, option: number, interactionId: string | null | undefined, text?: string): Promise<void> {
   const res = await apiFetchRes(`/api/sessions/${encodeURIComponent(name)}/select`, {
     method: 'POST',
-    body: JSON.stringify({ option, ...(interactionId == null ? {} : { interaction_id: interactionId }) }),
+    body: selectBody(option, interactionId, text),
   }, s);
   // Mesmo tratamento do sendInputForServer: o erro do picker tambem e renderizado no card.
   if (!res.ok) throw new Error(`${res.status}: ${await errorDetail(res)}`);
@@ -2484,10 +2484,20 @@ export async function relimparDitado(
   });
 }
 
-export async function selectOption(name: string, option: number, interactionId: string | null | undefined, server?: Server | null): Promise<void> {
+// `text` só acompanha a escolha que pede texto (o "o que mudar" do plano); o servidor recusa com 422
+// nas demais, então ele nunca é mandado vazio.
+function selectBody(option: number, interactionId: string | null | undefined, text?: string): string {
+  return JSON.stringify({
+    option,
+    ...(interactionId == null ? {} : { interaction_id: interactionId }),
+    ...(text == null ? {} : { text }),
+  });
+}
+
+export async function selectOption(name: string, option: number, interactionId: string | null | undefined, server?: Server | null, text?: string): Promise<void> {
   await sessionFetch<{ ok: boolean }>(server, `/api/sessions/${encodeURIComponent(name)}/select`, {
     method: 'POST',
-    body: JSON.stringify({ option, ...(interactionId == null ? {} : { interaction_id: interactionId }) }),
+    body: selectBody(option, interactionId, text),
   });
 }
 

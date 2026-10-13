@@ -1364,7 +1364,8 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   // acceptEdits) e manda o pedido. Sem arquivo descoberto, a última resposta do turno é o plano.
   // Com `ExitPlanMode` pendente a CLI pergunta, sim: a aprovação é o seletor, e o plano vem no
   // estado. O card ancora na chamada da ferramenta e só mostra o plano, sem botão de implementar.
-  const headlessPlanoPendente = $derived(sessionHeadless && currentState === 'awaiting_input'
+  // Vale com e sem terminal: o diálogo da TUI chega no mesmo formato.
+  const headlessPlanoPendente = $derived(currentState === 'awaiting_input'
     ? stateEvent?.claude_plan_pending ?? null : null);
   const headlessPlanEvent = $derived.by(() => {
     const pendente = headlessPlanoPendente;
@@ -1407,7 +1408,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   }
   const planAnchorId = $derived.by(() => {
     if (sessionProvider === 'codex') return codexPlanEvent?.id ?? null;
-    if (sessionHeadless) return headlessPlanEvent?.id ?? null;
+    if (sessionHeadless || headlessPlanoPendente) return headlessPlanEvent?.id ?? null;
     if (sessionProvider !== 'claude') return null;
     const id = claudePlanDiscovery?.anchor_id;
     if (!id) return null;
@@ -1424,7 +1425,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
     provider: sessionProvider ?? 'claude',
     revision: currentState,
     desktop,
-    codexPlan: sessionHeadless ? headlessPlan : codexPlan,
+    codexPlan: sessionHeadless || headlessPlanoPendente ? headlessPlan : codexPlan,
     disabled: currentState !== 'idle' || pending.length > 0,
     onImplement: sessionHeadless ? implementHeadlessPlan : implementCodexPlan,
     discovery: sessionProvider === 'claude' ? (planAnchorId && !headlessPlanoPendente ? claudePlanDiscovery : null) : undefined,
@@ -3127,14 +3128,15 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   // e so entao da Enter — dois toques rapidos leriam a mesma tela e se atropelariam no meio.
   let selBusy = $state.raw<{ interactionId: string | null | undefined } | null>(null);
 
-  async function handleSelect(option: number, interactionId: string | null | undefined) {
+  async function handleSelect(option: number, interactionId: string | null | undefined, text?: string) {
     if (selBusy && selBusy.interactionId === interactionId) return;
     const request = { interactionId };
     selBusy = request;
     clearTimeout(avisoErrTimer);
     avisoErr = '';
     try {
-      await selectOption(sessionName, option, interactionId, sessionServer());
+      if (text == null) await selectOption(sessionName, option, interactionId, sessionServer());
+      else await selectOption(sessionName, option, interactionId, sessionServer(), text);
     } catch (err) {
       console.error('selectOption error:', err);
       if ((codexPreThread ? codexPayload?.interaction_id : stateEvent?.interaction_id) === interactionId) mostrarAviso(err);

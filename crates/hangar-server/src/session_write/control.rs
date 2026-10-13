@@ -34,6 +34,7 @@ const MSG_NOT_SENT: &str = "não consegui responder pelo terminal — opção N�
 pub(super) const MSG_UNCONFIRMED_ANSWER: &str = "resposta enviada, mas nao deu pra confirmar a tempo — confira na sessao antes de responder de novo";
 const MSG_NOT_MARKED: &str = "não consegui marcar essa opção no terminal — tente de novo";
 const MSG_NOT_SUBMITTED: &str = "não consegui enviar as opções marcadas — tente de novo";
+const MSG_PLAN_GONE: &str = "o terminal não mostra mais a aprovação do plano — nada foi enviado";
 const MSG_NO_PERMISSION: &str = "nenhum pedido de permissão pendente";
 const MSG_NOT_IN_QUEUE: &str = "entrada não está na fila";
 
@@ -86,6 +87,7 @@ pub fn select_terminal_answer(sent: &Result<RuntimeReply, RuntimeError>) -> (Ans
         Disposition::Accepted => (ok(), None),
         Disposition::Deferred => (control_failed(MSG_CONTROL_DEFERRED), None),
         Disposition::Unknown => (failure("erro_sem_confirmacao_resposta", MSG_UNCONFIRMED_ANSWER, json!({})), None),
+        Disposition::Rejected if payload_code(reply) == Some("plan_dialog_missing") => (failure("erro_plano_fora_da_tela", MSG_PLAN_GONE, json!({})), None),
         Disposition::Rejected => {
             let code = payload_code(reply).unwrap_or("rejected");
             (failure("erro_opcao_nao_convergiu", MSG_NOT_MARKED, json!({"detalhe": code})), Some(("opcao.nao_convergiu", diary_code(code))))
@@ -111,17 +113,24 @@ pub fn select_headless_answer(sent: &Result<RuntimeReply, RuntimeError>) -> Answ
 }
 
 /// Formas normalizáveis e inválidas seguem intactas ao FastAPI, inclusive o ID recebido.
-fn parse_option(bytes: &Bytes) -> Option<(u64, Option<String>)> {
+/// `text` vazio vale como ausente; com texto, só a terceira opção do plano (o retorno a Claude), numa linha.
+fn parse_option(bytes: &Bytes) -> Option<(u64, Option<String>, Option<String>)> {
     let object = serde_json::from_slice::<Value>(bytes).ok()?;
     let object = object.as_object()?;
-    if object.keys().any(|key| key != "option" && key != "interaction_id") { return None; }
-    let supplied = match object.get("interaction_id") {
-        None | Some(Value::Null) => None,
-        Some(Value::String(id)) => Some(id.clone()),
-        _ => return None,
+    if object.keys().any(|key| key != "option" && key != "interaction_id" && key != "text") { return None; }
+    let field = |name: &str| match object.get(name) {
+        None | Some(Value::Null) => Some(None),
+        Some(Value::String(s)) => Some(Some(s.clone())),
+        _ => None,
     };
-    Some((object.get("option")?.as_u64().filter(|n| (1..=50).contains(n))?, supplied))
+    let (supplied, text) = (field("interaction_id")?, field("text")?.filter(|t| !t.trim().is_empty()));
+    let option = object.get("option")?.as_u64().filter(|n| (1..=50).contains(n))?;
+    if text.as_deref().is_some_and(|t| option != 3 || t.chars().any(char::is_control)) { return None; }
+    Some((option, supplied, text))
 }
+
+/// Diálogo do `ExitPlanMode`: o cartão vem do aviso do plugin, a resposta são as teclas do diálogo.
+pub fn plan_interaction(expected: &ExpectedInteraction) -> bool { expected.target.request_key.starts_with("plugin:plan:") }
 
 fn parse_submit(bytes: &Bytes) -> Option<Option<String>> {
     let object = if bytes.is_empty() { json!({}) } else { serde_json::from_slice::<Value>(bytes).ok()? };
@@ -275,13 +284,15 @@ pub async fn select(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
         Ok(admitted) => admitted,
         Err(response) => return response,
     };
-    let Some((option, supplied)) = parse_option(&bytes).filter(|_| json_content_type(ctx.headers())) else { return invalid_body(ctx.headers()) };
+    let Some((option, supplied, text)) = parse_option(&bytes).filter(|_| json_content_type(ctx.headers())) else { return invalid_body(ctx.headers()) };
     let expected = match expected(&ctx, supplied.as_deref()).await { Ok(expected) => expected, Err(failed) => return answer(&ctx, failed) };
+    if text.is_some() && !plan_interaction(&expected) { return invalid_body(ctx.headers()); }
     let operation_id = random_hex(16);
     let result = match &ctx.target.handle {
         EntryHandle::Terminal { handle, .. } => match select_plan(&expected, option, st.term.is_active(&ctx.name)) {
             Err(refused) => refused,
-            Ok(payload) => {
+            Ok(mut payload) => {
+                if let Some(text) = text { payload["text"] = json!(text); }
                 let (answered, diary) = select_terminal_answer(&handle.control(operation_id, "select".into(), payload).await);
                 report(&ctx, diary);
                 answered

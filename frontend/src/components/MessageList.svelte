@@ -77,7 +77,8 @@
     previewVivo?: boolean; // deltas do proprio modelo, no ritmo real -> sem maquina de escrever
     pensamento?: string;   // raciocinio em voo (Claude sem terminal); some quando o bloco cai no transcript
     ferramenta?: { nome: string; input: Record<string, unknown> } | null;   // chamada com o pedido ainda sendo escrito
-    onSelectOption: (i: number, interactionId: string | null | undefined) => void;
+    /** `text` só no "o que mudar" do plano; a promessa diz ao cartão quando o envio acabou. */
+    onSelectOption: (i: number, interactionId: string | null | undefined, text?: string) => void | Promise<void>;
     /** Múltipla escolha: envia o que já foi marcado. Ausente = sem botão de enviar. */
     onSubmitSelected?: (interactionId: string | null | undefined) => void;
     onCancel: () => void;
@@ -756,6 +757,7 @@
         question={stateEvent.question}
         options={stateEvent.options ?? []}
         interactionId={stateEvent.interaction_id}
+        planReview={!!stateEvent.claude_plan_pending}
         onSelect={onSelectOption}
         onSubmit={onSubmitSelected}
         onCancel={onCancel}

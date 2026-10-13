@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { proposedPlan, planDisplayText, planTitle, pendingProposedPlan, pendingReplyPlan } from './proposedPlan';
+import { proposedPlan, planDisplayText, planTitle, pendingProposedPlan, pendingReplyPlan, planChoiceKey } from './proposedPlan';
 import type { ChatEvent } from './types';
 
 describe('plano à espera de decisão', () => {
@@ -51,5 +51,17 @@ describe('plano proposto pelo Codex', () => {
   });
   it('reconhece a tag final sem abertura no trecho recebido', () => {
     expect(proposedPlan('# Plano\n\nEtapas.\n</proposed_plan>')).toBe('# Plano\n\nEtapas.');
+  });
+});
+
+describe('planChoiceKey', () => {
+  it('abrevia só as escolhas conhecidas do diálogo de plano da TUI', () => {
+    expect(planChoiceKey('Yes, manually approve edits')).toBe('manual');
+    expect(planChoiceKey('Yes, and bypass permissions')).toBe('bypass');
+    expect(planChoiceKey('Yes, and auto-accept edits')).toBe('auto');
+    expect(planChoiceKey('Tell Claude what to change')).toBe('changes');
+    expect(planChoiceKey('No, keep planning')).toBe('keep');
+    expect(planChoiceKey('Yes, and use auto mode')).toBe('auto_mode');
+    expect(planChoiceKey('Outra coisa')).toBeNull();
   });
 });

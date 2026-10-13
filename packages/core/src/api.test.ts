@@ -373,6 +373,7 @@ describe('contratos de conversa com servidor explícito', () => {
     // `/select` sai pelo `sessionFetch`: o erro tem a forma do apiFetch (mensagem limpa e `code`), que o cartão lê.
     { path: '/select', body: { option: 1, interaction_id: 'interaction-a' }, run: (s?: Server) => selectOption('mesma/sessão', 1, 'interaction-a', s), refused: 'recusado' },
     { path: '/select', body: { option: 2 }, run: (s?: Server) => selectOption('mesma/sessão', 2, undefined, s), refused: 'recusado' },
+    { path: '/select', body: { option: 3, interaction_id: 'plan-a', text: 'troque o passo 2' }, run: (s?: Server) => selectOption('mesma/sessão', 3, 'plan-a', s, 'troque o passo 2'), refused: 'recusado' },
     { path: '/select/submit', body: { interaction_id: 'interaction-a' }, run: (s?: Server) => submitSelected('mesma/sessão', 'interaction-a', s), refused: 'recusado' },
     { path: '/select/submit', body: {}, run: (s?: Server) => submitSelected('mesma/sessão', null, s), refused: 'recusado' },
     { path: '/answer', body: { answers: [], request_id: 0, interaction_id: 'form-a' }, run: (s?: Server) => answerQuestions('mesma/sessão', [], 0, 'form-a', s) },
@@ -414,6 +415,16 @@ describe('contratos de conversa com servidor explícito', () => {
       { answers: [], request_id: 0, interaction_id: 'form-a' },
     ]);
     expect(fetchMock.mock.calls.every(([url]) => String(url).startsWith('https://b.test/'))).toBe(true);
+  });
+
+  it('seletor por servidor leva o texto do pedido de alteração do plano', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response('{"ok":true}'));
+    await selectOptionForServer(target, 'sessao', 3, 'plan-a', 'troque o passo 2');
+    await selectOptionForServer(target, 'sessao', 1, 'plan-a');
+    expect(fetchMock.mock.calls.map(([, init]) => JSON.parse(init?.body as string))).toEqual([
+      { option: 3, interaction_id: 'plan-a', text: 'troque o passo 2' },
+      { option: 1, interaction_id: 'plan-a' },
+    ]);
   });
 
   it.each([undefined, null])('seletores legados não fabricam identidade (%s)', async (id) => {

@@ -582,3 +582,39 @@ it('Claude sem terminal mostra o plano enquanto o ExitPlanMode espera aprovaçã
   await emit('state', { session: 'codex-flow', state: 'working', headless: true, claude_permission_mode: 'default' });
   expect(document.querySelector('.plan-preview')).toBeNull();
 });
+
+it('Claude com terminal mostra o plano pendente e pede alteração com texto', async () => {
+  harness.provider = 'claude';
+  await montarClaude();
+  await emit('message', {
+    id: 'a-exit:2', kind: 'tool_use', tool_name: 'ExitPlanMode', tool_use_id: 'toolu_term',
+    tool_input: { plan: '# Plano do terminal\n\n- passo' }, ts: 1,
+  });
+  const opcoes = ['Yes, and use auto mode', 'Yes, manually approve edits', 'Tell Claude what to change'];
+  await emit('state', {
+    session: 'codex-flow', state: 'awaiting_input', headless: false, claude_permission_mode: 'plan',
+    question: 'Claude has written up a plan and is ready to execute. Would you like to proceed?',
+    options: opcoes, interaction_id: 'plan-term',
+    claude_plan_pending: { plan: '# Plano do terminal\n\n- passo', path: '/p/plano.md', tool_use_id: 'toolu_term' },
+  });
+  expect(document.querySelector('.plan-name')?.textContent).toBe('Plano do terminal');
+  expect(document.querySelector('.plan-preview .plan-actions')).toBeNull();
+  const botoes = [...document.querySelectorAll<HTMLButtonElement>('.option-btn:not(.option-btn--cancel)')];
+  expect(botoes.map((b) => b.querySelector('.opt-text')?.textContent))
+    .toEqual(['Aprovar com modo automático', 'Aprovar com revisão manual', 'Pedir alterações']);
+  expect(botoes.map((b) => b.title)).toEqual(opcoes);
+
+  botoes[1].click(); await flush();
+  expect(api.selectOption).toHaveBeenLastCalledWith('codex-flow', 2, 'plan-term', expect.anything());
+
+  // "O que mudar" abre o campo no cartão em vez de responder; vazio não envia.
+  botoes[2].click(); await flush();
+  expect(api.selectOption).toHaveBeenCalledTimes(1);
+  const campo = document.querySelector<HTMLTextAreaElement>('.plan-feedback textarea')!;
+  const enviar = document.querySelector<HTMLButtonElement>('.plan-feedback button[type="submit"]')!;
+  expect(enviar.disabled).toBe(true);
+  campo.value = '  troque o passo 2  '; campo.dispatchEvent(new Event('input', { bubbles: true })); await flush();
+  expect(enviar.disabled).toBe(false);
+  enviar.click(); await flush();
+  expect(api.selectOption).toHaveBeenLastCalledWith('codex-flow', 3, 'plan-term', expect.anything(), 'troque o passo 2');
+});

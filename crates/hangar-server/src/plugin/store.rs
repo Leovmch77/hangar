@@ -106,7 +106,12 @@ struct Session {
     closed: HashMap<String, (String, Option<Receipt>)>,
     state: Option<(Instant, String, Option<String>)>,
     suggestion: String,
+    plan: Option<PlanNotice>,
 }
+
+/// Aviso do `ExitPlanMode`: o hook não segura, o diálogo do terminal é que responde.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PlanNotice { pub tool_use_id: String, pub plan: String, pub path: Option<String> }
 #[derive(Default)]
 struct Memory { sessions: HashMap<String, Session>, next_waiter: u64, stopping: bool }
 
@@ -174,7 +179,7 @@ impl Store {
         }
         if let Some(old) = memory.sessions.remove(&binding.key) { finish_session(old); }
         memory.sessions.insert(binding.key.clone(), Session { binding: binding.clone(), owner: None, waiter: None,
-            heartbeat: None, publication: None, questions: BTreeMap::new(), closed: HashMap::new(), state: None, suggestion: String::new() });
+            heartbeat: None, publication: None, questions: BTreeMap::new(), closed: HashMap::new(), state: None, suggestion: String::new(), plan: None });
         self.notify(&binding.key);
         Ok(())
     }
@@ -449,6 +454,24 @@ impl Store {
         let mut memory = self.memory.lock().map_err(|_| unavailable())?;
         session(&mut memory, binding)?.suggestion = if shown { text } else { String::new() };
         self.notify(&binding.key);
+        Ok(())
+    }
+    pub fn notice_plan(&self, binding: &InteractionBinding, tool_use_id: String, plan: String, path: Option<String>) -> Result<(), ServiceError> {
+        if tool_use_id.is_empty() { return Err(ServiceError("plugin_body_invalid")); }
+        let mut memory = self.memory.lock().map_err(|_| unavailable())?;
+        session(&mut memory, binding)?.plan = Some(PlanNotice { tool_use_id, plan, path });
+        self.notify(&binding.key);
+        Ok(())
+    }
+    pub fn plan_notice(&self, binding: &InteractionBinding) -> Result<Option<PlanNotice>, ServiceError> {
+        let mut memory = self.memory.lock().map_err(|_| unavailable())?;
+        Ok(session(&mut memory, binding)?.plan.clone())
+    }
+    /// Só o aviso da mesma chamada sai: um mais novo que chegou no meio fica.
+    pub fn drop_plan(&self, binding: &InteractionBinding, tool_use_id: &str) -> Result<(), ServiceError> {
+        let mut memory = self.memory.lock().map_err(|_| unavailable())?;
+        let s = session(&mut memory, binding)?;
+        if s.plan.as_ref().is_some_and(|p| p.tool_use_id == tool_use_id) { s.plan = None; self.notify(&binding.key); }
         Ok(())
     }
     pub fn facts(&self, binding: &InteractionBinding, now: Instant) -> Result<Value, ServiceError> {

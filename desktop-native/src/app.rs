@@ -2880,7 +2880,7 @@ impl Hangar {
     fn current_snapshot(&self, action: &Action) -> Option<String> {
         match action {
             Action::Answer | Action::Skip => self.chat.ask.as_ref().map(|ask| ask.fingerprint.clone()),
-            Action::Select(_) | Action::Submit => Some(select_snapshot(&self.chat.state)),
+            Action::Select(_) | Action::SelectText(..) | Action::Submit => Some(select_snapshot(&self.chat.state)),
             Action::Implement => self.codex_plan().map(|(_, plan)| plan),
             Action::Discard(id) => self.chat.events.iter().any(|e| e.id == format!("queued-{id}")
                 && (e.desistiu == Some(true) || holds_queue(e, self.chat.state.problema.as_deref()))).then(|| id.clone()),
@@ -2916,6 +2916,7 @@ impl Hangar {
             Action::Answer => match self.answer_body(cx) { Some(body) => Some(body), None => return },
             Action::Skip => match self.chat.ask.as_ref().and_then(interaction::skip_body) { Some(body) => Some(body), None => return },
             Action::Select(option) => match select_body(&snapshot, Some(*option)) { Some(body) => Some(body), None => return },
+            Action::SelectText(option, text) => match select_text_body(&snapshot, *option, text) { Some(body) => Some(body), None => return },
             Action::Submit => match select_body(&snapshot, None) { Some(body) => Some(body), None => return },
             _ => None,
         };
@@ -2961,7 +2962,7 @@ impl Hangar {
                     }
                     (tr("ask_skipped"), false)
                 }
-                Action::Select(_) | Action::Submit => (tr("option_sent"), false),
+                Action::Select(_) | Action::SelectText(..) | Action::Submit => (tr("option_sent"), false),
                 Action::Cancel => (tr("stop_requested"), false),
                 Action::Implement => (tr("plan_implement_sent"), false),
                 Action::Discard(id) => {
@@ -5561,6 +5562,15 @@ fn select_body(snapshot: &str, option: Option<usize>) -> Option<Value> {
     Some(body)
 }
 
+/// Texto vazio não sai: a TUI trataria como "mudar nada".
+fn select_text_body(snapshot: &str, option: usize, text: &str) -> Option<Value> {
+    let text = text.trim();
+    if text.is_empty() { return None; }
+    let mut body = select_body(snapshot, Some(option))?;
+    body["text"] = json!(text);
+    Some(body)
+}
+
 fn display_body(event: &ChatEvent) -> String {
     match event.kind.as_str() {
         // Skill injetada: o corpo é o SKILL.md, que a linha recolhida só mostra ao abrir.
@@ -6744,6 +6754,17 @@ mod tests {
         assert_eq!(select_body(&select_snapshot(&b), Some(1)), Some(serde_json::json!({"option":1})));
         assert_eq!(select_body(&select_snapshot(&b), None), Some(serde_json::json!({})));
         assert!(select_body("invalid", Some(1)).is_none());
+    }
+
+    #[test]
+    fn conversation_plan_feedback_goes_with_its_option_and_the_displayed_id() {
+        use super::{select_text_body, select_snapshot, SessionState};
+        let state = SessionState { question: Some("Proceed?".into()), options: Some(vec!["A".into(), "B".into(), "Tell Claude what to change".into()]),
+            interaction_id: Some("i1".into()), ..Default::default() };
+        let snapshot = select_snapshot(&state);
+        assert_eq!(select_text_body(&snapshot, 3, "  Use Postgres  "), Some(serde_json::json!({"option":3, "interaction_id":"i1", "text":"Use Postgres"})));
+        assert!(select_text_body(&snapshot, 3, "   ").is_none());
+        assert!(select_text_body("invalid", 3, "x").is_none());
     }
 
     #[test]

@@ -187,6 +187,37 @@ pub fn observe_menu(interactions: &crate::interactions::InteractionStore,
     interactions.observe(binding, &target, semantic).map_err(|e| e.code().to_owned())
 }
 
+pub fn observe_screen_menu(plugin: &crate::plugin::Store, binding: &crate::interactions::InteractionBinding,
+    jsonl: &Path, pane: &str) -> Result<(Option<String>, Option<serde_json::Map<String, serde_json::Value>>), String> {
+    let interactions = plugin.interactions();
+    let mut notice = plugin.plan_notice(binding).map_err(|e| e.0.to_owned())?;
+    // ponytail: divide o cursor de leitura com o sidecar do askq; com os dois abertos, cada um relê do começo.
+    if let Some(call) = notice.as_ref().map(|n| n.tool_use_id.clone())
+        && answered_in_transcript(jsonl, &call, &format!("plan:{call}"))?.0 {
+        plugin.drop_plan(binding, &call).map_err(|e| e.0.to_owned())?;
+        interactions.observe(binding, &plan_target(&call), None).map_err(|e| e.code().to_owned())?;
+        notice = None;
+    }
+    if submit_tab(pane) || !crate::terminal_state::plan_dialog(&crate::terminal_state::analyze(pane)) {
+        if let Some(n) = &notice { interactions.observe(binding, &plan_target(&n.tool_use_id), None).map_err(|e| e.code().to_owned())?; }
+        return Ok((observe_menu(interactions, binding, jsonl, pane)?, None));
+    }
+    // O diálogo do plano nunca vira menu comum: sem o aviso do plugin, é falha visível.
+    let menu = crate::interactions::InteractionTarget { kind: crate::interactions::InteractionKind::Menu, request_key: "terminal:menu".into() };
+    interactions.observe(binding, &menu, None).map_err(|e| e.code().to_owned())?;
+    let n = notice.ok_or("plan_notice_missing")?;
+    let mut semantic = crate::terminal_input::interaction_semantic(pane, None).map_err(|e| e.code().to_owned())?;
+    semantic["tool_use_id"] = serde_json::json!(n.tool_use_id);
+    let id = interactions.observe(binding, &plan_target(&n.tool_use_id), Some(semantic)).map_err(|e| e.code().to_owned())?;
+    let plan = serde_json::json!({"plan": n.plan, "path": n.path, "tool_use_id": n.tool_use_id});
+    Ok((id, plan.as_object().cloned()))
+}
+
+/// Tipo `Menu`: a resposta é a tecla no diálogo do pane, conferida pelo mesmo escritor dos menus.
+pub fn plan_target(tool_use_id: &str) -> crate::interactions::InteractionTarget {
+    crate::interactions::plugin_target(crate::interactions::InteractionKind::Menu, &format!("plan:{tool_use_id}"))
+}
+
 /// Mesmo quadro e semântica que o escritor reconfere antes do primeiro efeito. Única regra para a
 /// publicação (lista e monitor) e para os fatos do executor.
 pub fn observe_terminal(interactions: &crate::interactions::InteractionStore,
@@ -397,6 +428,46 @@ mod tests {
         assert_eq!(observe_menu(&store, &binding, &jsonl, SUBMIT), Ok(None));
         assert_eq!(store.expected(&binding, Some(&id)).unwrap(), expected);
         assert_ne!(observe_menu(&store, &binding, &jsonl, OTHER).unwrap().unwrap(), id);
+    }
+
+    const PLAN: &str = include_str!("../../tests/fixtures/pane_plan_dialog.txt");
+
+    #[test]
+    fn plan_dialog_publishes_the_plugin_plan_id_never_the_pane_menu() {
+        use serde_json::json;
+        let dir = tempfile::tempdir().unwrap();
+        let jsonl = dir.path().join("projects/p/sid.jsonl");
+        std::fs::create_dir_all(jsonl.parent().unwrap()).unwrap();
+        std::fs::write(&jsonl, "").unwrap();
+        let binding = crate::interactions::InteractionBinding { key: "k".into(), conversation: "sid".into(), generation: 1 };
+        let store = crate::plugin::Store::new(std::sync::Arc::new(crate::interactions::InteractionStore::default()));
+        store.interactions().bind(&binding).unwrap();
+        store.bind(&binding).unwrap();
+        let menu = crate::interactions::InteractionTarget { kind: crate::interactions::InteractionKind::Menu, request_key: "terminal:menu".into() };
+
+        // Diálogo do plano sem o aviso do plugin: falha visível, e o menu do pane não ganha ID.
+        assert_eq!(observe_screen_menu(&store, &binding, &jsonl, PLAN), Err("plan_notice_missing".to_owned()));
+        assert!(store.interactions().current(&binding, &menu).unwrap().is_none());
+
+        store.notice_plan(&binding, "toolu_1".into(), "# Plano".into(), Some("/p.md".into())).unwrap();
+        let (id, plan) = observe_screen_menu(&store, &binding, &jsonl, PLAN).unwrap();
+        let id = id.unwrap();
+        assert_eq!(plan.unwrap(), *json!({"plan":"# Plano","path":"/p.md","tool_use_id":"toolu_1"}).as_object().unwrap());
+        let expected = store.interactions().expected(&binding, Some(&id)).unwrap();
+        assert_eq!(expected.target, crate::interactions::plugin_target(crate::interactions::InteractionKind::Menu, "plan:toolu_1"));
+        assert_eq!(expected.semantic["pane"]["options"], json!(["Yes, and use auto mode", "Yes, manually approve edits", "Tell Claude what to change"]));
+        assert!(store.interactions().current(&binding, &menu).unwrap().is_none());
+        assert_eq!(observe_screen_menu(&store, &binding, &jsonl, PLAN).unwrap().0.as_deref(), Some(id.as_str()));
+
+        // Fora do diálogo o cartão some e o menu comum volta a ter o ID dele.
+        const OTHER: &str = "   Outra?\n\n ❯ 1. X\n   2. Y\n";
+        let (other, plan) = observe_screen_menu(&store, &binding, &jsonl, OTHER).unwrap();
+        assert!(other.is_some_and(|other| other != id) && plan.is_none());
+        assert!(store.interactions().expected(&binding, Some(&id)).is_err());
+
+        // A resposta no transcript encerra o aviso: o mesmo quadro não revive o cartão velho.
+        std::fs::write(&jsonl, "{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"toolu_1\"}]}}\n").unwrap();
+        assert_eq!(observe_screen_menu(&store, &binding, &jsonl, PLAN), Err("plan_notice_missing".to_owned()));
     }
 
     #[test]

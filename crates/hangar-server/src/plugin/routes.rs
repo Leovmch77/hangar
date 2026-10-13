@@ -1,4 +1,4 @@
-//! As nove rotas do plugin do Claude, montadas na porta pública e na ponte local (`routes::plugin_routes`).
+//! As rotas do plugin do Claude, montadas na porta pública e na ponte local (`routes::plugin_routes`).
 use std::future::Future;
 use std::net::SocketAddr;
 use std::pin::Pin;
@@ -58,6 +58,7 @@ pub fn router<S: Clone + Send + Sync + 'static>(state: Arc<RouteState>) -> Route
         .route("/api/plugin/pull", post(pull))
         .route("/api/plugin/ask", post(ask))
         .route("/api/plugin/ask-fim", post(finish))
+        .route("/api/plugin/plan", post(plan))
         .route("/api/plugin/filled", post(filled))
         .route("/api/plugin/submitted", post(submitted))
         .route("/api/plugin/state", post(state_event))
@@ -93,6 +94,8 @@ struct StateBody {
     estado: String, motivo: Option<String>, session_id: Option<String>, context: Option<MeasuredContext>,
     // `cwd`, `model`, `tool` e `origin` já eram auxiliares ignorados pela memória Python.
 }
+#[derive(Deserialize)]
+struct Plan { id: String, plan: String, path: Option<String> }
 #[derive(Deserialize)]
 struct Suggest { texto: String, mostrada: bool }
 #[derive(Deserialize)]
@@ -244,6 +247,13 @@ async fn state_event(State(st): State<Arc<RouteState>>, Json(body): Json<Envelop
         if let Err(error) = st.sources.context(&identity, context).await { return fail(error); }
     }
     ok()
+}
+/// Aviso do plano: guarda e responde na hora, porque o diálogo do terminal não espera o app.
+async fn plan(State(st): State<Arc<RouteState>>, Json(body): Json<Envelope<Plan>>) -> Response {
+    let identity = match admit(&st, &body).await { Ok(identity) => identity, Err(error) => return fail(error) };
+    let Plan { id, plan, path } = body.body;
+    let Some(tool_use_id) = id.strip_prefix("plan:").filter(|id| !id.is_empty()) else { return fail(ServiceError("plugin_body_invalid")) };
+    match st.store.notice_plan(&identity.binding, tool_use_id.to_owned(), plan, path) { Ok(()) => ok(), Err(error) => fail(error) }
 }
 async fn suggest(State(st): State<Arc<RouteState>>, Json(body): Json<Envelope<Suggest>>) -> Response {
     let identity = match admit(&st, &body).await { Ok(identity) => identity, Err(error) => return fail(error) };

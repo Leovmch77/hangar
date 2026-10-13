@@ -120,6 +120,7 @@ pub fn preserve_cards(state: &mut hangar_api::state::StateEvent, previous: &hang
         state.interaction_id = previous.interaction_id.clone();
         state.question = previous.question.clone();
         state.options = previous.options.clone();
+        state.claude_plan_pending = previous.claude_plan_pending.clone();
     }
     if state.codex_question.is_some() || state.interaction_id.is_some() { state.state = "awaiting_input".into(); }
 }
