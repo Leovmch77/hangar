@@ -8090,7 +8090,7 @@
   "live_voice_memory_kind_projeto": "Projeto",
   "folder_branches_load_failed": "Não foi possível carregar as branches.",
   "native_activity_background": "Em segundo plano",
-  "native_subagent_composer": "Mensagem para @{agent}…",
+  "native_subagent_composer": "Mensagem para {agent}…",
   "native_subagent_message_unavailable": "Este subagente não aceita mensagem agora",
   "atividade_grupo_rodando": "Rodando · {n}",
   "atividade_grupo_terminados": "Terminados · {n}",

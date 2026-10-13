@@ -773,7 +773,7 @@ impl ActivityPanel {
         if std::mem::take(&mut self.clear_input) { input.update(cx, |input, cx| input.set_value("", window, cx)); }
         let Some(run) = self.opened.as_ref().map(|o| o.run.clone()) else { return div().into_any_element() };
         let agent = run.agent_type.clone().unwrap_or_else(|| web("atividade_subagente"));
-        let placeholder = tr("subagent_composer").replace("{agent}", &agent);
+        let placeholder = tr("subagent_composer").replace("{agent}", &format!("@{agent}"));
         if self.placeholder != placeholder {
             self.placeholder = placeholder.clone();
             input.update(cx, |input, cx| input.set_placeholder(placeholder, window, cx));
