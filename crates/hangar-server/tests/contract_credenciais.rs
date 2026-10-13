@@ -103,6 +103,12 @@ async fn run(case: &Value, python: std::net::SocketAddr) -> (Answer, Answer) {
     }
     let bin = root.path().join("bin");
     std::fs::create_dir(&bin).unwrap();
+    // Só o node de quem roda entra no PATH (no CI ele não está em /usr/bin); o diretório dele
+    // inteiro traria o `codex` instalado por npm e mudaria os casos sem Codex.
+    let node = std::env::var_os("PATH")
+        .and_then(|path| std::env::split_paths(&path).map(|dir| dir.join("node")).find(|node| node.is_file()))
+        .expect("node no PATH");
+    std::os::unix::fs::symlink(node, bin.join("node")).unwrap();
     executable(&bin.join("claude"), FAKE_CLAUDE);
     if case["codex_cli"] == true {
         executable(&bin.join("codex"), FAKE_CODEX);
@@ -120,8 +126,7 @@ async fn run(case: &Value, python: std::net::SocketAddr) -> (Answer, Answer) {
             hangar_server::accounts::environment::AccountEnvironment::from_map([
                 ("HOME".into(), home_text.clone()),
                 ("USERPROFILE".into(), home_text.clone()),
-                // O node dos falsos vem do PATH de quem roda: no CI ele não está em /usr/bin.
-                ("PATH".into(), format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default())),
+                ("PATH".into(), format!("{}:/usr/bin:/bin", bin.display())),
             ].into()),
         );
         state
