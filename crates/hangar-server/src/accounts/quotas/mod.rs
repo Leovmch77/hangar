@@ -226,9 +226,9 @@ impl AccountService {
         deadline: Duration,
         config: Arc<other::Config>,
     ) -> (Result<Value, AccountError>, bool) {
-        // ponytail: leitura de rede já em voo → responde do cache em vez de enfileirar outra (corrida
+        // ponytail: leitura de rede já em voo e o pedido não é forçado → responde do cache em vez de enfileirar outra (corrida
         // curta entre o try_lock e o lock do worker é aceitável: no pior caso uma leitura a mais).
-        if self.quotas.refresh.try_lock().is_err() {
+        if !force && self.quotas.refresh.try_lock().is_err() {
             return (self.quotas_with(bridge, false, true, Some(config)).await, true);
         }
         match tokio::time::timeout(deadline, self.quotas_with(bridge.clone(), force, false, Some(config.clone()))).await {
@@ -247,10 +247,7 @@ impl AccountService {
             if *last == sorted {
                 return;
             }
-            // Sem diário ainda, não marca como reportado: o próximo pedido tenta de novo.
-            if self.quotas.diag.get().is_some() {
-                *last = sorted.clone();
-            }
+            *last = sorted.clone();
         }
         for code in sorted {
             tracing::warn!(code, "configuração de fonte de cota fora do formato; as outras seguem");
