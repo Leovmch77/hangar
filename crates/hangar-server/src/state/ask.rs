@@ -92,22 +92,25 @@ pub fn consume_revision(jsonl: &Path, revision: &str) -> Result<(), String> {
 }
 
 /// Até onde o transcript já foi lido à procura da resposta de cada revisão: só o que cresceu é relido.
-static SCANNED: LazyLock<Mutex<HashMap<PathBuf, (String, u64)>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+static SCANNED: LazyLock<Mutex<HashMap<PathBuf, (String, u64, bool)>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
-/// O transcript tem o `tool_result` da chamada? Lê só linhas inteiras desde a última leitura.
-fn answered_in_transcript(jsonl: &Path, call: &str, revision: &str) -> Result<bool, String> {
+/// `(o transcript tem o tool_result da chamada, a própria chamada já apareceu)`. Lê só linhas
+/// inteiras desde a última leitura.
+fn answered_in_transcript(jsonl: &Path, call: &str, revision: &str) -> Result<(bool, bool), String> {
     use std::io::{Read, Seek, SeekFrom};
-    let start = SCANNED.lock().map_err(|_| "askq_scan_lock")?.get(jsonl)
-        .filter(|(seen, _)| seen == revision).map_or(0, |(_, offset)| *offset);
+    let (start, seen_before) = SCANNED.lock().map_err(|_| "askq_scan_lock")?.get(jsonl)
+        .filter(|(seen, ..)| seen == revision).map_or((0, false), |(_, offset, call_seen)| (*offset, *call_seen));
     let mut file = std::fs::File::open(jsonl).map_err(|e| format!("askq_transcript_unreadable:{:?}", e.kind()))?;
     let mut buf = Vec::new();
     file.seek(SeekFrom::Start(start)).and_then(|_| file.read_to_end(&mut buf))
         .map_err(|e| format!("askq_transcript_unreadable:{:?}", e.kind()))?;
     let complete = buf.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
     let needle = format!("\"tool_use_id\":\"{call}\"");
-    let found = buf[..complete].windows(needle.len()).any(|w| w == needle.as_bytes());
-    SCANNED.lock().map_err(|_| "askq_scan_lock")?.insert(jsonl.to_path_buf(), (revision.to_owned(), start + complete as u64));
-    Ok(found)
+    let contains = |needle: &str| buf[..complete].windows(needle.len()).any(|w| w == needle.as_bytes());
+    let found = contains(&needle);
+    let call_seen = seen_before || contains(&format!("\"id\":\"{call}\""));
+    SCANNED.lock().map_err(|_| "askq_scan_lock")?.insert(jsonl.to_path_buf(), (revision.to_owned(), start + complete as u64, call_seen));
+    Ok((found, call_seen))
 }
 
 pub fn read_revision(jsonl: &Path) -> Result<Option<(AskQuestion, String)>, String> {
@@ -145,7 +148,12 @@ pub fn read_revision(jsonl: &Path) -> Result<Option<(AskQuestion, String)>, Stri
     // prenderia todo menu seguinte (plano, permissão) em askq_pane_mismatch. Só a resposta achada
     // no transcript tira a pergunta; dúvida a mantém aberta.
     // ponytail: sidecar sem tool_use_id (o hook sempre grava) não é conferido.
-    if let Some(call) = sidecar.tool_use_id.as_deref() && answered_in_transcript(jsonl, call, &revision)? {
+    // Órfão: a chamada nunca chegou ao transcript passada a carência; a lista o expira igual.
+    let age = metadata.modified().ok().and_then(|m| m.elapsed().ok()).map_or(0.0, |d| d.as_secs_f64());
+    if let Some(call) = sidecar.tool_use_id.as_deref()
+        && let (answered, call_seen) = answered_in_transcript(jsonl, call, &revision)?
+        && (answered || !call_seen && age >= crate::list::facts_files::ASK_GRACE) {
+        if !answered { tracing::info!(transcript = %jsonl.display(), code = "askq_orphan", "askq: chamada fora do transcript, sidecar expirado"); }
         CONSUMED.lock().map_err(|_| "askq_consumed_lock")?.entry(path).or_default().insert(revision);
         return Ok(None);
     }
@@ -355,6 +363,26 @@ mod tests {
             r#"{"timestamp":"2099-01-01T00:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_cor"}]}}"#)).unwrap();
         assert_eq!(observe_terminal(&store, &binding, &jsonl, PLAN), Ok(None));
         assert!(observe_menu(&store, &binding, &jsonl, PLAN).unwrap().is_some());
+    }
+
+    #[test]
+    fn orphan_sidecar_whose_call_never_reached_the_transcript_expires_after_the_grace() {
+        const MENU: &str = "   Outra?\n\n ❯ 1. X\n   2. Y\n";
+        let tmp = tempfile::tempdir().unwrap();
+        let jsonl = tmp.path().join("projects/p/sid.jsonl");
+        let path = sidecar_path(&jsonl).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(jsonl.parent().unwrap()).unwrap();
+        std::fs::write(&jsonl, "{\"timestamp\":\"2099-01-01T00:00:00Z\",\"type\":\"user\"}\n").unwrap();
+        std::fs::write(&path, r#"{"tool_use_id":"toolu_orfa","tool_input":{"questions":[
+            {"question":"Cor?","header":"Cor","multiSelect":false,"options":[{"label":"Azul"},{"label":"Verde"}]}]}}"#).unwrap();
+        let (store, binding) = bound_store();
+        // Recém-gravado, a chamada ainda pode estar a caminho do transcript.
+        assert_eq!(observe_terminal(&store, &binding, &jsonl, MENU).unwrap_err(), "askq_pane_mismatch");
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(60);
+        std::fs::OpenOptions::new().write(true).open(&path).unwrap().set_times(std::fs::FileTimes::new().set_modified(old)).unwrap();
+        assert_eq!(observe_terminal(&store, &binding, &jsonl, MENU), Ok(None));
+        assert!(observe_menu(&store, &binding, &jsonl, MENU).unwrap().is_some());
     }
 
     #[test]

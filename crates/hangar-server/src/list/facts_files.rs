@@ -22,7 +22,7 @@ const STATUS_MAX_AGE: f64 = 86_400.0;
 /// Rabo do transcript lido para achar a resposta da pergunta.
 const ANSWER_SPAN: u64 = 256 * 1024;
 /// Prazo para a chamada da pergunta aparecer no transcript depois do sidecar.
-const ASK_GRACE: f64 = 5.0;
+pub(crate) const ASK_GRACE: f64 = 5.0;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Marker {
