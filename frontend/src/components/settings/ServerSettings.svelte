@@ -140,6 +140,16 @@
   const auxUrl = $derived(String(store.valorAtual('jev_aux_base_url') ?? '').trim());
   const buscaAtual = $derived(`${auxUrl}\n${store.rascunhoDe('jev_aux_api_key').trim()}`);
   const buscaValida = $derived(buscaDe === buscaAtual);
+  // Lista do campo Modelo: busca ao abrir quando ainda não há uma para o endereço e a chave atuais.
+  const modelosCombo = $derived({
+    opcoes: buscaValida ? modelos.map((id) => ({ value: id, label: id })) : [],
+    aoAbrir: () => { if (!buscaValida && auxUrl) void buscarModelos(); },
+    aviso: !auxUrl ? m.browser_jev_aux_models_need_url()
+      : buscando ? m.browser_jev_aux_models_fetching()
+      : !buscaValida ? null
+      : modelosErro || null,
+    vazio: m.browser_jev_aux_models_no_match(),
+  });
   const cliproxyMsgVisivel = $derived(cliproxyMsg && (!auxSuportado || auxUrl === cliproxyMsg.url) ? cliproxyMsg : null);
   async function buscarModelos() {
     if (buscando || !auxUrl) return;
@@ -325,23 +335,8 @@
           {:else if cliproxyErro}
             <p class="aviso erro" role="alert">{m.browser_jev_aux_cliproxy_error({ e: cliproxyErro })}</p>
           {/if}
-          {#each jevCampos(['jev_aux_base_url', 'jev_aux_api_key', 'jev_aux_modelo']) as c (c.chave)}<LinhaConfig campo={c} {store} />{/each}
-          <div class="jev-modelos">
-            <button type="button" class="btn" onclick={buscarModelos} disabled={buscando || !auxUrl} aria-busy={buscando}>
-              {buscando ? m.browser_jev_aux_models_fetching() : m.browser_jev_aux_models_fetch()}
-            </button>
-            {#if !auxUrl}<span class="ajuda">{m.browser_jev_aux_models_need_url()}</span>{/if}
-            {#if buscaValida && modelos.length}
-              <label class="ajuda" for="jev-aux-lista">{m.browser_jev_aux_models_found({ n: String(modelos.length) })}</label>
-              <select id="jev-aux-lista" class="jev-lista"
-                value={modelos.includes(String(store.valorAtual('jev_aux_modelo'))) ? String(store.valorAtual('jev_aux_modelo')) : ''}
-                onchange={(e) => { if (e.currentTarget.value) store.setRascunho('jev_aux_modelo', e.currentTarget.value); }}>
-                <option value="">{m.browser_jev_aux_models_pick()}</option>
-                {#each modelos as id (id)}<option value={id}>{id}</option>{/each}
-              </select>
-            {/if}
-            {#if buscaValida && modelosErro}<p class="aviso erro" role="alert">{modelosErro}</p>{/if}
-          </div>
+          {#each jevCampos(['jev_aux_base_url', 'jev_aux_api_key']) as c (c.chave)}<LinhaConfig campo={c} {store} />{/each}
+          {#each jevCampos(['jev_aux_modelo']) as c (c.chave)}<LinhaConfig campo={c} {store} combo={modelosCombo} />{/each}
           {#each jevCampos(['jev_aux_esforco']) as c (c.chave)}<LinhaConfig campo={c} {store} />{/each}
         {/if}
       </section>
@@ -498,12 +493,7 @@
   .jev-details { margin-top: var(--space-3); }
   .jev-details summary { cursor: pointer; color: var(--text-secondary); font-size: var(--text-sm); padding: var(--space-2) 0; }
   .jev-details summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
-  .jev-atalho, .jev-modelos, .jev-onde { display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-2); margin: var(--space-3) 0; }
-  .jev-lista {
-    width: 100%; box-sizing: border-box; padding: var(--space-2) var(--space-3); border: 1px solid var(--border-subtle);
-    border-radius: var(--radius-md); background: var(--surface-inset); color: var(--text-primary); font: inherit; font-size: var(--text-sm);
-  }
-  .jev-lista:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+  .jev-atalho, .jev-onde { display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-2); margin: var(--space-3) 0; }
   .lista { display: flex; flex-direction: column; }
   /* "editado" = veio de override, não do .env — sem isso não dá pra saber de onde o valor vem.
      Usada nas raízes mapeadas (badge de scan_roots, abaixo), fora da lista de campos — por isso

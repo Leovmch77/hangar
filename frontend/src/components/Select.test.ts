@@ -77,3 +77,48 @@ it('limita o menu à tela estreita e ancora a lista curta acima do campo', async
     expect(style.bottom).toBe('68px');
   } finally { await unmount(component); target.remove(); }
 });
+
+it('modo livre: digitar vale como valor e filtra; Enter escolhe; aviso toma o lugar da lista', async () => {
+  const target = document.body.appendChild(document.createElement('div'));
+  const onchange = vi.fn();
+  const aoAbrir = vi.fn();
+  const opcoes = [{ value: 'openai/gpt-4o', label: 'openai/gpt-4o' }, { value: 'anthropic/claude-haiku', label: 'anthropic/claude-haiku' }];
+  const settle = async () => { await tick(); await tick(); };
+  const buscando = mount(Select, { target, props: { value: '', livre: true, aviso: 'buscando', aoAbrir, onchange, opcoes } });
+  try {
+    await settle();
+    target.querySelector<HTMLInputElement>('input[role="combobox"]')!.click();
+    await settle();
+    expect(aoAbrir).toHaveBeenCalledTimes(1);
+    expect(document.querySelector('.sel-lista [role="status"]')?.textContent).toBe('buscando');
+    expect(document.querySelectorAll('[role="option"]')).toHaveLength(0);
+  } finally {
+    unmount(buscando);
+  }
+  const component = mount(Select, { target, props: { value: '', livre: true, ariaLabel: 'Modelo', vazio: 'nenhum com esse nome', onchange, opcoes } });
+  try {
+    await settle();
+    const campo = target.querySelector<HTMLInputElement>('input[role="combobox"]')!;
+    campo.value = 'HAIKU';
+    campo.dispatchEvent(new Event('input', { bubbles: true }));
+    await settle();
+    expect(onchange).toHaveBeenLastCalledWith('HAIKU');
+    expect(document.querySelectorAll('[role="option"]')).toHaveLength(1);
+    campo.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    await settle();
+    expect(onchange).toHaveBeenLastCalledWith('anthropic/claude-haiku');
+    expect(document.querySelector('.sel-lista')).toBeNull();
+    // Texto fora da lista continua valendo: Enter só fecha.
+    campo.value = 'meu/modelo';
+    campo.dispatchEvent(new Event('input', { bubbles: true }));
+    await settle();
+    expect(document.querySelector('.sel-vazio')?.textContent).toBe('nenhum com esse nome');
+    campo.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    await settle();
+    expect(onchange).toHaveBeenLastCalledWith('meu/modelo');
+    expect(document.querySelector('.sel-lista')).toBeNull();
+  } finally {
+    unmount(component);
+    target.remove();
+  }
+});
