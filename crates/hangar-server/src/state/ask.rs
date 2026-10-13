@@ -71,7 +71,7 @@ pub fn sidecar_path(jsonl: &Path) -> Option<PathBuf> {
 }
 
 #[derive(Deserialize)]
-struct Sidecar { tool_input: ToolInput }
+struct Sidecar { tool_input: ToolInput, #[serde(default)] tool_use_id: Option<String> }
 
 #[derive(Deserialize)]
 struct ToolInput { questions: Vec<AskQuestionItem> }
@@ -121,6 +121,14 @@ pub fn read_revision(jsonl: &Path) -> Result<Option<(AskQuestion, String)>, Stri
     // é o mesmo de um sidecar quebrado (fica o menu do pane), e o hook grava o booleano.
     // Só o código: a mensagem do serde pode citar o texto da pergunta.
     let sidecar: Sidecar = serde_json::from_slice(&bytes).map_err(|_| "askq_malformed".to_owned())?;
+    // O hook não apaga o sidecar quando a resposta vem pelo terminal: sem isto a pergunta velha
+    // prenderia todo menu seguinte (plano, permissão) em askq_pane_mismatch.
+    // ponytail: só sidecar com tool_use_id (o hook sempre grava) é conferido no transcript.
+    if let (Some(call), Some(transcript), Ok(modified)) = (sidecar.tool_use_id.as_deref(), jsonl.to_str(), metadata.modified()) {
+        let since = modified.duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64());
+        let session = jsonl.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        if crate::list::facts_files::answered_cached(session, transcript, since, Some(call)) { return Ok(None); }
+    }
     Ok(Some((AskQuestion { questions: sidecar.tool_input.questions, interaction_id: None }, revision)))
 }
 
@@ -302,6 +310,28 @@ mod tests {
         let replaced = observe_terminal(&store, &binding, &jsonl, STEP_TWO).unwrap().unwrap().interaction_id.unwrap();
         assert_ne!(replaced, published);
         assert!(store.expected(&binding, Some(&published)).is_err());
+    }
+
+    #[test]
+    fn sidecar_answered_in_the_transcript_does_not_hold_the_next_menu() {
+        const PLAN: &str = "   Claude has written up a plan and is ready to execute. Would you like to proceed?\n\n   ❯ 1. Yes, and use auto mode\n     2. Yes, manually approve edits\n     3. Tell Claude what to change\n";
+        let tmp = tempfile::tempdir().unwrap();
+        let jsonl = tmp.path().join("projects/p/sid.jsonl");
+        let path = sidecar_path(&jsonl).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(jsonl.parent().unwrap()).unwrap();
+        std::fs::write(&path, r#"{"tool_use_id":"toolu_cor","tool_input":{"questions":[
+            {"question":"Cor?","header":"Cor","multiSelect":false,"options":[{"label":"Azul"},{"label":"Verde"}]}]}}"#).unwrap();
+        let ask = r#"{"timestamp":"2099-01-01T00:00:00Z","message":{"content":[{"type":"tool_use","id":"toolu_cor","name":"AskUserQuestion"}]}}"#;
+        // Pergunta ainda aberta: o menu de outra pergunta segue recusado.
+        std::fs::write(&jsonl, format!("{ask}\n")).unwrap();
+        let (store, binding) = bound_store();
+        assert_eq!(observe_terminal(&store, &binding, &jsonl, PLAN).unwrap_err(), "askq_pane_mismatch");
+        // Respondida no terminal (o hook não apaga o sidecar): o plano é um menu comum, com identidade.
+        std::fs::write(&jsonl, format!("{ask}\n{}\n",
+            r#"{"timestamp":"2099-01-01T00:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_cor"}]}}"#)).unwrap();
+        assert_eq!(observe_terminal(&store, &binding, &jsonl, PLAN), Ok(None));
+        assert!(observe_menu(&store, &binding, &jsonl, PLAN).unwrap().is_some());
     }
 
     #[test]

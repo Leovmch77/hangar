@@ -505,7 +505,7 @@ thread_local! {
 /// 256 KB só é relido quando um dos dois muda.
 static ANSWERED: LazyLock<Mutex<Capped<String, ((FileKey, f64), bool)>>> = LazyLock::new(Default::default);
 
-fn answered_cached(session: &str, jsonl: &str, since: f64, call: Option<&str>) -> bool {
+pub(crate) fn answered_cached(session: &str, jsonl: &str, since: f64, call: Option<&str>) -> bool {
     let Some(key) = std::fs::metadata(jsonl).ok().as_ref().and_then(file_key).map(|k| (k, since)) else {
         return answered_after(session, jsonl, since, call).0;
     };
