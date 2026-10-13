@@ -6552,7 +6552,7 @@
   "native_machines_remove_far_failed": "Removido daqui. O lado de lá não desfez o registro — se precisar, remova por lá.",
   "native_machines_peer_remove_title": "Remover {nome}?",
   "native_computer_control_llm": "Leitura da tela (modelo de visão)",
-  "native_computer_control_llm_hint": "Outro modelo, com chave do provedor de visão: não é o Jev e não usa a chave dele. Precisa enxergar imagem.",
+  "native_computer_control_llm_hint": "Quem lê a tela quando o Jev não acha saída ou a árvore vem vazia: o modelo auxiliar da página Jev, que precisa enxergar imagem.",
   "native_machines_peer_here_only": "O registro sai só daqui — este aparelho não tem o token dele para desfazer o lado de lá.",
   "native_connection_failed": "Falha na conexão",
   "native_machines_add_band": "Só este aparelho passa a ver as sessões dele. Os outros aparelhos não mudam: cada um adiciona por si. Nada é gravado no servidor {este}.",
