@@ -576,7 +576,11 @@ async fn get(client: &reqwest::Client, url: &str, headers: &[(&str, String)]) ->
 pub async fn read(client: &reqwest::Client, reader: &Reader, endpoints: &Endpoints, now: f64) -> (Value, bool) {
     let url = reader.url(endpoints);
     let headers: Vec<(&str, String)> = match reader {
-        Reader::Kimi { key, .. } => vec![("authorization", format!("Bearer {key}")), ("accept", "application/json".into())],
+        Reader::Kimi { key, .. } => vec![
+            ("authorization", format!("Bearer {key}")),
+            ("accept", "application/json".into()),
+            ("user-agent", "hangar".into()),
+        ],
         Reader::CommandCode { key } => vec![
             ("authorization", format!("Bearer {key}")),
             ("accept", "application/json".into()),

@@ -3,7 +3,7 @@
 //! dá a MESMA resposta HTTP, e a leitura e o pedido têm de sair iguais. A enumeração das fontes
 //! parte dos mesmos arquivos. Casos com `diferenca` seguem a saída nova aprovada (decisoes.md):
 //! D5 (chave/cookie com quebra de linha vira `credencial-invalida`, sem rede) e D6 (redirecionamento
-//! não é seguido: `http-<3xx>`). Processo próprio porque troca o TZ.
+//! não é seguido: `http-<3xx>`) e D8 (o Kimi recebe `User-Agent: hangar`). Processo próprio porque troca o TZ.
 use hangar_server::accounts::environment::AccountEnvironment;
 use hangar_server::accounts::quotas::other::{self, Endpoints, Reader};
 use serde_json::{Value, json};
@@ -140,11 +140,13 @@ async fn readers_match_python() {
         if unreachable != (case["refused"] == true) {
             failures.push(format!("{name}: recusa marcada {unreachable}"));
         }
-        let fields: &[&str] = if case["reader"] == "kimi" {
-            &["path", "authorization", "accept", "cookie"]
+        // D8: o Kimi recebia o `Python-urllib/<versão>` do urllib; o Rust se identifica como `hangar`.
+        let requests: Vec<Value> = if case["reader"] == "kimi" {
+            requests.into_iter().map(|mut row| { row["user_agent"] = json!("hangar"); row }).collect()
         } else {
-            &["path", "authorization", "accept", "cookie", "user_agent"]
+            requests
         };
+        let fields = ["path", "authorization", "accept", "cookie", "user_agent"];
         let pick = |rows: &[Value]| -> Vec<Value> {
             rows.iter().map(|row| fields.iter().map(|f| (f.to_string(), row[*f].clone())).collect::<serde_json::Map<_, _>>().into()).collect()
         };
