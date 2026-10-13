@@ -68,7 +68,10 @@ function carregar(arq) {
   const r = JSON.parse(texto);
   // A versão 1 tinha um caminho só: vira a única variante.
   if (r?.versao === 1 && Array.isArray(r.passos)) return { versao: VERSAO, objetivo: r.objetivo, variantes: [{ passos: r.passos, fim: r.fim ?? null }] };
-  if (r?.versao !== VERSAO) throw new Error(`versão ${r?.versao} do formato, esperada ${VERSAO}`);
+  if (r?.versao !== VERSAO) {
+    // Versão desconhecida pode ser de um Hangar mais novo: quem lê não a sobrescreve.
+    throw Object.assign(new Error(`versão ${r?.versao} do formato, esperada ${VERSAO}`), { versao: r?.versao });
+  }
   if (!Array.isArray(r.variantes) || r.variantes.some((v) => !Array.isArray(v?.passos))) throw new Error('roteiro sem variantes');
   return r;
 }
@@ -240,6 +243,30 @@ async function lerPaginaInicial(executar) {
   return vista;
 }
 
+// Passo que abre uma página ou programa (o desktop grava `launch`). O gravador do navegador não
+// produz nenhum hoje; a escolha de variante os trata pelo tipo, igual ao desktop.
+const ABRE = new Set(['goto', 'open', 'launch']);
+const abre = (p) => ABRE.has(p?.acao?.op);
+/** Aonde a navegação leva: a página do passo seguinte, ou a final. */
+const destino = (passos, n, fim) => passos[n + 1]?.janela?.classe ?? fim?.classe;
+
+/**
+ * Três passes, como o desktop: (a) navegação para a página já aberta, (b) passo 1 que casa com a
+ * página, (c) por último a navegação para outra página, que casaria com qualquer uma às cegas.
+ */
+function escolher(variantes, vista, cofre) {
+  const passes = [
+    (v) => abre(v.passos[0]) && destino(v.passos, 0, v.fim) === vista.classe,
+    (v) => !abre(v.passos[0]) && !resolver(v.passos[0], vista, cofre).motivo,
+    (v) => abre(v.passos[0]),
+  ];
+  for (const casa of passes) {
+    const i = variantes.findIndex((v) => v.passos.length && casa(v));
+    if (i >= 0) return i;
+  }
+  return -1;
+}
+
 /** Valor e elemento do passo nesta página, sem ler de novo; `motivo` quando não resolve. */
 function resolver(p, vista, cofre) {
   if (vista.classe !== p.janela?.classe) return { motivo: `página ${vista.classe}, gravada ${p.janela?.classe}` };
@@ -264,7 +291,7 @@ function resolver(p, vista, cofre) {
  * Repete os passos enquanto a página bate com a gravada; para na primeira divergência. O passo 1
  * usa `vista`, a leitura que escolheu esta variante.
  */
-async function repetir({ passos, executar, dados, log, vista: primeira }) {
+async function repetir({ passos, fim = null, executar, dados, log, vista: primeira }) {
   const cofre = dados && typeof dados === 'object' ? dados : {};
   const feito = [];
   let antes = null;
@@ -280,6 +307,12 @@ async function repetir({ passos, executar, dados, log, vista: primeira }) {
         if (vista.erro) return parar(vista.erro);
       }
       if (assinatura(vista.candidatos) === antes) return parar('a tela não mudou depois do passo anterior');
+    }
+    if (abre(p)) {
+      // O navegador não grava navegação com endereço: só serve quando a página dela já está aberta.
+      if (destino(passos, n, fim) !== vista.classe) return parar(`navegação para ${destino(passos, n, fim)} sem endereço gravado`);
+      log(`jev-objetivo roteiro ${n + 1}/${passos.length}: ${p.acao.op} pulado, a página já está aberta`);
+      continue;
     }
     let r = resolver(p, vista, cofre);
     // Diálogo ou lista que ainda está chegando: olha de novo antes de chamar de divergência.
@@ -329,18 +362,23 @@ async function rodarComRoteiro({ objetivo, dados, perguntar, executar, refazer =
   const arq = arquivo(pasta, classeDe(await g.executar('url', [])), objetivo, cofre);
   const avisos = [];
   let gravado = null;
+  let versaoAlheia;
   try {
     gravado = carregar(arq);
   } catch (err) {
+    versaoAlheia = err?.versao;
     avisos.push(`roteiro ilegível, seguindo pelo Jev: ${String(err?.message ?? err).slice(0, 200)}`);
     log(`jev-objetivo: ${avisos.at(-1)}`);
   }
   const fechar = (resultado) => {
     if (resultado.sucesso) {
       const { variante, motivo } = g.variante();
-      if (variante) {
+      // JSON quebrado é substituído; versão desconhecida, nunca.
+      if (versaoAlheia !== undefined) avisos.push(`não gravado: arquivo em versão ${versaoAlheia}`);
+      else if (variante) {
         try {
-          salvar(arq, { versao: VERSAO, objetivo, variantes: juntar(gravado?.variantes ?? [], variante) });
+          // --refazer descarta as variantes antigas.
+          salvar(arq, { versao: VERSAO, objetivo, variantes: juntar(refazer ? [] : gravado?.variantes ?? [], variante) });
           avisos.push(`gravado em ${arq}`);
         } catch (err) {
           avisos.push(`não gravado: ${err.message}`);
@@ -352,13 +390,13 @@ async function rodarComRoteiro({ objetivo, dados, perguntar, executar, refazer =
   let feito = [];
   if (gravado && !refazer) {
     const vista = await lerPaginaInicial(g.executar);
-    const i = vista.erro ? -1 : gravado.variantes.findIndex((v) => v.passos.length && !resolver(v.passos[0], vista, cofre).motivo);
+    const i = vista.erro ? -1 : escolher(gravado.variantes, vista, cofre);
     if (i < 0) {
       avisos.push(`nenhuma das ${gravado.variantes.length} variantes casa com a página${vista.erro ? ` (${vista.erro})` : ''}; o Jev segue`);
       log(`jev-objetivo: ${avisos.at(-1)}`);
     } else {
-      const { passos } = gravado.variantes[i];
-      const r = await repetir({ passos, executar: g.executar, dados: cofre, log, vista });
+      const { passos, fim } = gravado.variantes[i];
+      const r = await repetir({ passos, fim, executar: g.executar, dados: cofre, log, vista });
       feito = r.feito;
       avisos.push(`variante ${i + 1} de ${gravado.variantes.length}: repetidos ${r.repetidos} de ${passos.length} passos${r.parou ? `; ${r.parou}` : ''}`);
       if (r.parou) log(`jev-objetivo: ${avisos.at(-1)}; o Jev segue daqui`);

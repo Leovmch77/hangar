@@ -278,3 +278,48 @@ test('arquivo da versao 1 e lido como uma variante e regravado na 2', async () =
   assert.equal(g.versao, 2);
   assert.equal(g.variantes.length, 1);
 });
+
+const navegar = (classe) => ({ janela: { classe, titulo: 't' }, alvo: null, acao: { op: 'goto' }, valor: null, mudou_tela: true });
+
+test('escolha em 3 passes: navegacao ja na pagina, depois passo que casa, por ultimo navegacao cega', async () => {
+  const { pasta, arq, boa } = await gravarBoa();
+  // Leva a outra pagina: casaria com qualquer uma.
+  const cega = { passos: [navegar('/inicio')], fim: { classe: '/outra', titulo: 't' } };
+  const jaAberta = { passos: [navegar('/inicio'), ...boa.passos], fim: boa.fim };
+  // (b) vence (c): a navegacao cega casaria com qualquer pagina.
+  escrever(arq, [cega, boa]);
+  let s = site();
+  let r = await rodarComRoteiro({ pasta, objetivo: OBJETIVO, dados: { descricao: 'B' }, executar: s.executar, perguntar: proibido });
+  assert.match(r.roteiro, /variante 2 de 2: repetidos 3 de 3/);
+  // (a) vence (b): a navegacao leva a pagina ja aberta e e pulada.
+  escrever(arq, [boa, jaAberta]);
+  s = site();
+  r = await rodarComRoteiro({ pasta, objetivo: OBJETIVO, dados: { descricao: 'B' }, executar: s.executar, perguntar: proibido });
+  assert.equal(r.sucesso, true, r.parou);
+  assert.match(r.roteiro, /variante 2 de 2: repetidos 4 de 4/);
+  // (c) so sem outra: escolhida, mas sem endereco para navegar, o Jev segue.
+  escrever(arq, [cega]);
+  s = site();
+  r = await rodarComRoteiro({ pasta, objetivo: OBJETIVO, dados: { descricao: 'B' }, executar: s.executar, perguntar: jevDoSite(s) });
+  assert.equal(r.sucesso, true);
+  assert.match(r.roteiro, /variante 1 de 1: repetidos 0 de 1 passos; parou no passo 1: navegação para \/outra/);
+});
+
+test('arquivo em versao desconhecida nunca e sobrescrito; a corrida segue valendo', async () => {
+  const { pasta, arq } = await gravarBoa();
+  const futuro = JSON.stringify({ versao: 3, objetivo: OBJETIVO, coisa: [] });
+  fs.writeFileSync(arq, futuro);
+  const s = site();
+  const r = await rodarComRoteiro({ pasta, objetivo: OBJETIVO, dados: { descricao: 'B' }, executar: s.executar, perguntar: jevDoSite(s) });
+  assert.equal(r.sucesso, true);
+  assert.match(r.roteiro, /não gravado: arquivo em versão 3/);
+  assert.equal(fs.readFileSync(arq, 'utf8'), futuro);
+});
+
+test('--refazer grava so a variante nova', async () => {
+  const { pasta, arq, boa } = await gravarBoa();
+  escrever(arq, [comNome(boa, 0, 'Outro'), comNome(boa, 0, 'Mais um')]);
+  const s = site();
+  await rodarComRoteiro({ pasta, refazer: true, objetivo: OBJETIVO, dados: { descricao: 'B' }, executar: s.executar, perguntar: jevDoSite(s) });
+  assert.deepEqual(lerUnico(pasta).variantes.map((v) => v.passos[0].alvo.elemento.name), ['Incluir']);
+});
