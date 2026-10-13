@@ -352,8 +352,9 @@ fn num(value: &Value) -> Option<f64> {
     }
 }
 
+/// Como `max(0.0, min(100.0, x))`: `-0.0` vira `0.0`, que o `clamp` preservaria.
 fn clamp_pct(x: f64) -> f64 {
-    x.clamp(0.0, 100.0)
+    if x <= 0.0 { 0.0 } else { x.min(100.0) }
 }
 
 /// JSON como o `json.loads`: aceita `NaN`/`Infinity` fora de texto. Eles viram texto, que o
@@ -418,7 +419,8 @@ pub fn py_iso(value: &Value) -> Option<f64> {
         let clock: String = time[..tz.unwrap_or(time.len())].iter().collect();
         let clock = clock.trim_end();
         let (h, m, s, us) = hh_mm_ss_ff(clock)?;
-        if h > 23 {
+        // `24:00` é a meia-noite seguinte, só com o resto zerado.
+        if h > 24 || (h == 24 && (m, s, us) != (0, 0, 0)) {
             return None;
         }
         micros_of_day = ((h * 3600 + m * 60 + s) as i64) * 1_000_000 + us as i64;
@@ -605,7 +607,7 @@ const MAX_BODY: usize = 1 << 20;
 enum Fetch {
     Body(u16, Vec<u8>),
     Status(u16),
-    /// Sem resposta HTTP; `refused` = conexão recusada ou sem rota (entra na espera crescente).
+    /// Sem resposta HTTP; `refused` = conexão recusada (entra na espera crescente).
     NoResponse { refused: bool, code: &'static str },
     BadHeader,
     BadUrl,
@@ -619,9 +621,9 @@ enum Fetch {
 pub enum Contact {
     /// Houve resposta HTTP: a fonte está no ar, a espera por recusa zera.
     Answered,
-    /// Conexão recusada ou sem rota: entra na espera crescente.
+    /// Conexão recusada: entra na espera crescente.
     Refused,
-    /// Sem resposta por outro motivo (prazo, DNS, corpo cortado, credencial que não vira cabeçalho,
+    /// Sem resposta por outro motivo (prazo, DNS, sem rota, corpo cortado, credencial que não vira cabeçalho,
     /// endereço que não se monta): não sobe a escada, o código vai ao diário.
     Silent,
 }
@@ -634,21 +636,21 @@ pub struct Outcome {
     pub code: Option<&'static str>,
 }
 
-/// Só recusa e falta de rota contam como "ninguém escutando": DNS e prazo de conexão também saem
-/// por `is_connect()`, e a Wi-Fi que cai não pode deixar as fontes da nuvem 1 h em espera.
+/// Só a recusa conta como "ninguém escutando": sem rota, DNS e prazo de conexão também saem por
+/// `is_connect()`, e a Wi-Fi ou a VPN que cai não pode deixar as fontes da nuvem 1 h em espera.
 fn refused(error: &reqwest::Error) -> bool {
-    use std::io::ErrorKind::{ConnectionRefused, HostUnreachable, NetworkUnreachable};
     let mut cause = std::error::Error::source(error);
     while let Some(err) = cause {
-        if err
-            .downcast_ref::<std::io::Error>()
-            .is_some_and(|io| matches!(io.kind(), ConnectionRefused | HostUnreachable | NetworkUnreachable))
-        {
+        if err.downcast_ref::<std::io::Error>().is_some_and(|io| is_refusal(io.kind())) {
             return true;
         }
         cause = err.source();
     }
     false
+}
+
+fn is_refusal(kind: std::io::ErrorKind) -> bool {
+    kind == std::io::ErrorKind::ConnectionRefused
 }
 
 async fn get(client: &reqwest::Client, url: &str, headers: &[(&str, String)]) -> Fetch {
@@ -737,17 +739,19 @@ pub async fn read(client: &reqwest::Client, reader: &Reader, endpoints: &Endpoin
             }
             windows
         }
-        _ => {
+        Reader::Kimi { .. } | Reader::CommandCode { .. } => {
             let Some(value) = parse_json(&body) else { return out("sem-resposta", Contact::Answered, None) };
             if !value.is_object() {
                 return out(&format!("http-{status}"), Contact::Answered, None);
             }
-            let windows = match reader {
-                Reader::CommandCode { .. } => commandcode(&value),
-                _ => match kimi(&value) {
+            // O braço só recebe Kimi ou CommandCode.
+            let windows = if matches!(reader, Reader::CommandCode { .. }) {
+                commandcode(&value)
+            } else {
+                match kimi(&value) {
                     Ok(windows) => windows,
                     Err(()) => return out("erro-leitor", Contact::Answered, Some("quota_reader_failed")),
-                },
+                }
             };
             if windows.is_empty() {
                 return out("formato-desconhecido", Contact::Answered, None);
@@ -942,6 +946,48 @@ mod tests {
         std::fs::write(home.join(".claude/.hangar-apelidos.json"), "{}").unwrap();
         std::fs::write(home.join(".claude/.hangar-opencode.json"), "{}").unwrap();
         assert!(load(&env).problems.is_empty());
+    }
+
+    #[test]
+    fn only_a_refused_connection_climbs_the_wait() {
+        use std::io::ErrorKind::*;
+        assert!(is_refusal(ConnectionRefused));
+        assert!(!is_refusal(NetworkUnreachable), "Wi-Fi/VPN caída não é motor desligado");
+        assert!(!is_refusal(HostUnreachable));
+        assert!(!is_refusal(TimedOut));
+    }
+
+    #[test]
+    fn negative_zero_percent_is_zero() {
+        assert!(clamp_pct(-0.0).is_sign_positive());
+        assert_eq!(clamp_pct(-5.0), 0.0);
+        assert_eq!(clamp_pct(150.0), 100.0);
+    }
+
+    #[test]
+    fn hour_24_is_next_midnight_like_fromisoformat() {
+        for text in ["2026-01-01T24:00:00Z", "2026-01-01T24:00Z", "2026-01-01T24:00:00.000Z", "2026-01-01T24Z", "2026-01-01T2400Z"] {
+            assert_eq!(py_iso(&json!(text)), Some(1767312000.0), "{text}");
+        }
+        assert_eq!(py_iso(&json!("2026-12-31T24:00:00Z")), Some(1798761600.0));
+        assert_eq!(py_iso(&json!("2026-01-01T24:00:01Z")), None);
+        assert_eq!(py_iso(&json!("2026-01-01T25:00:00Z")), None);
+    }
+
+    /// Sem `Content-Length` o teto vale do mesmo jeito, pedaço a pedaço.
+    #[tokio::test]
+    async fn chunked_body_over_the_cap_is_cut_off() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = axum::Router::new().route("/usages", axum::routing::get(|| async {
+            let chunks = (0..20).map(|_| Ok::<_, std::io::Error>(bytes::Bytes::from(vec![b'x'; 64 * 1024])));
+            axum::body::Body::from_stream(futures_util::stream::iter(chunks))
+        }));
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let reader = Reader::Kimi { key: "k".into(), base: format!("http://{address}") };
+        let outcome = read(&client().unwrap(), &reader, &Endpoints::default(), 0.0).await;
+        assert_eq!(outcome.value["motivo"], "resposta-grande");
+        server.abort();
     }
 
     #[test]
