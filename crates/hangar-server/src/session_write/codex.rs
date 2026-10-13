@@ -283,7 +283,16 @@ pub async fn limits(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
     let (fwd, owner) = gate(&st, peer, &req);
     let name = session_name(req.uri().path());
     let (Some(runtime), Some(name), true) = (st.state.runtime.get(), name, owner) else { return pass(&st, req, &fwd).await };
-    if !ours(&st, Some(&name)).await.unwrap_or(true) { return pass(&st, req, &fwd).await; }
+    match ours(&st, Some(&name)).await {
+        Ok(true) => {}
+        Ok(false) => return pass(&st, req, &fwd).await,
+        // Do Rust e não abriu: o código da falha, como nas outras rotas do Codex, nunca a resposta neutra.
+        Err(error) => {
+            let mut response = json_response(StatusCode::SERVICE_UNAVAILABLE, detail_body(&error.code, &error.message, json!({})));
+            cors(req.headers(), response.headers_mut());
+            return response;
+        }
+    }
     let sent = match enter_then_find(runtime, &name, Duration::ZERO).await {
         Ok(Some((_held, target))) if codex_owned(&target.provider, target.terminal) =>
             target.handle.command(RuntimeCommand { operation_id: random_hex(16), kind: OperationKind::ReadRateLimits, payload: json!({}) }).await,

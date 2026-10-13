@@ -1971,7 +1971,9 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
                             // do Python; a decisão em si continua sem confirmação até o turno.
                             Some(true) => {
                                 effects.extend(engine.settle_async_answer(&reservation.entry_id,true));
-                                effects.push_back(Effect::Reply { operation_id,disposition:Disposition::Accepted,payload:reservation.reply_payload() });
+                                // Gravada sem erro: aceita. Com erro da fila (mesmo gravada), o incerto que manda conferir.
+                                let disposition = if result.is_ok() { Disposition::Accepted } else { Disposition::Unknown };
+                                effects.push_back(Effect::Reply { operation_id,disposition,payload:reservation.reply_payload() });
                             }
                             Some(false) => {
                                 effects.extend(engine.settle_async_answer(&reservation.entry_id,false));

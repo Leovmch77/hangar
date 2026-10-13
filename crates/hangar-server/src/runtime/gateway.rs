@@ -302,6 +302,24 @@ impl RuntimeRegistry {
     pub async fn has_entry(&self,key:Option<&str>,name:&str) -> bool {
         self.entries.lock().await.iter().any(|(k,entry)|Some(k.as_str()) == key || entry.name == name)
     }
+    /// Sessão sem entrada aqui que nunca foi do Rust (o `claude` aberto à mão, que só entra no primeiro envio
+    /// pelo app). A que o Rust não abriu (erro no canal da sessão) ou fechou com o processo ainda vivo não é:
+    /// essa segue com o código (`runtime_lost`).
+    pub async fn hand_opened(&self,name:&str) -> bool {
+        !self.has_entry(None,name).await && self.runtime_lost(name).await.is_none()
+    }
+    /// Código da sessão do Rust que ficou sem entrada: a abertura que falhou, ou a vida fechada aqui cujo
+    /// processo continua de pé.
+    pub async fn runtime_lost(&self,name:&str) -> Option<String> {
+        let failed=self.live.lock().unwrap_or_else(|e|e.into_inner()).get(name)
+            .and_then(|sender|sender.borrow().as_ref().and_then(|state|state.error.as_ref().map(|error|error.0.clone())));
+        if failed.is_some() {return failed;}
+        let barriers:Vec<_>=self.lifecycle.lock().await.values().cloned().collect();
+        let procs=crate::list::procs::SystemProcs::default();
+        barriers.iter().filter_map(|barrier|barrier.closed.lock().ok().and_then(|closed|closed.clone()))
+            .find(|closed|closed.name==name && !super::lifecycle::process_absent(&procs,closed.pid,closed.birth).unwrap_or(false))
+            .map(|_|"runtime_binding".to_owned())
+    }
     /// Liga os hubs do chat: abrir e fechar o ator do Codex com terminal troca o dono do estado neles.
     pub fn bind_hubs(self:&Arc<Self>,hubs:crate::side::WeakHubs) {
         if self.hubs.set(hubs).is_err() {return;}
@@ -1092,14 +1110,29 @@ impl RuntimeRegistry {
         };
         // A troca vem do próprio Claude Code: o plugin passa a informar a conversa nova no `/pull` (o `/clear`
         // encerra a antiga com `session.end`). Sem ele, vale o registro nativo do processo.
-        let reported=self.plugin.as_ref().and_then(|plugin|plugin.reported_conversation(&crate::terminal_facts::LocalTerminalFacts::binding(&target)).ok().flatten());
+        let binding=crate::terminal_facts::LocalTerminalFacts::binding(&target);
+        let (reported,proved)=match &self.plugin {
+            Some(plugin)=>match (plugin.reported_conversation(&binding),plugin.conversation_proved(&binding)) {
+                (Ok(reported),proved)=>(reported,proved.unwrap_or(false)),
+                (Err(error),_)=>{
+                    if crate::warn_limit::allow(Some(key),error.0) {tracing::warn!(key,session=name,code=error.0,"troca de conversa: sinal do plugin ilegível; vale o registro nativo");}
+                    (None,false)
+                },
+            },
+            None=>(None,false),
+        };
+        // O plugin prova a conversa atual (`/pull` aberto com ela, sem `session.end` depois): nada a reler.
+        if reported.is_none() && proved {return Ok(json!({"changed":false}));}
         let sid=match &reported {
             Some(sid)=>sid.clone(),
             None=>match super::lifecycle::read_native_conversation(&target.metadata.config_dir,i64::from(target.metadata.agent_pid)) {
                 Ok(sid)=>sid,
-                // Registro que este Claude Code não grava, ou lido no meio da escrita: não é troca nem
-                // defeito da sessão; o próximo tique (ou o plugin) decide.
-                Err(error) if error.code=="lifecycle_native_read"=>return Ok(json!({"changed":false})),
+                // Registro que este Claude Code não grava, ou lido no meio da escrita: o próximo tique relê. Sem o
+                // plugin, é o único sinal de `/clear`: a falha vai ao log, uma vez por sessão e código.
+                Err(error) if error.code=="lifecycle_native_read"=> {
+                    if crate::warn_limit::allow(Some(key),&error.code) {tracing::warn!(key,session=name,code=%error.code,"troca de conversa: registro nativo ilegível e sem prova do plugin");}
+                    return Ok(json!({"changed":false}));
+                },
                 Err(error)=>return Err(error),
             },
         };
@@ -2031,6 +2064,26 @@ mod tests {
         registry.note_terminal_problem(&snapshot(7,json!({"error":null,"view":{"terminal":true}})));
         assert!(registry.terminal_problems().await.is_empty());
         handle.stop().await.unwrap();
+    }
+
+    /// Sem entrada aqui, só o `claude` aberto à mão é tratado como "nunca foi do Rust": a abertura que falhou
+    /// e a vida fechada com o processo vivo seguem com o código, sem parecer saudáveis.
+    #[tokio::test]
+    async fn failed_or_closed_rust_session_is_not_hand_opened() {
+        let registry=RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(),"test".into(),"instance".into());
+        assert!(registry.hand_opened("solta").await);
+        super::super::actor::mark_live_error(&registry.live_sender("falhou"),"cano_exited","o cano caiu ao abrir");
+        assert!(!registry.hand_opened("falhou").await);
+        assert_eq!(registry.runtime_lost("falhou").await.as_deref(),Some("cano_exited"));
+        let dir=tempfile::tempdir().unwrap();
+        let me=i64::from(std::process::id());
+        let birth=crate::terminal_facts::agent_birth(std::process::id()).unwrap();
+        let closed=super::super::lifecycle::ClosedLife {name:"fechada".into(),binding:crate::interactions::InteractionBinding {key:"K".into(),conversation:"c".into(),generation:1},
+            pid:me,birth,state_path:dir.path().join("s"),lease_path:dir.path().join("l"),projection:dir.path().into()};
+        *registry.barrier("K").await.closed.lock().unwrap()=Some(closed.clone());
+        assert_eq!(registry.runtime_lost("fechada").await.as_deref(),Some("runtime_binding"),"processo ainda vivo");
+        *registry.barrier("K").await.closed.lock().unwrap()=Some(super::super::lifecycle::ClosedLife {pid:i64::from(u32::MAX),..closed});
+        assert!(registry.hand_opened("fechada").await,"vida antiga já acabou: o nome volta a ser de quem abrir");
     }
 
     /// Parity M7: o Claude Code que não grava `sessions/<pid>.json` (ou o arquivo lido no meio da escrita)

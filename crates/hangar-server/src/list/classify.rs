@@ -369,7 +369,7 @@ impl Classifier {
                 if let Some(runtime) = &self.plugin_runtime {
                     let observed = async {
                         // `claude` aberto à mão, sem entrada no Rust: não há resposta a identificar, nem problema.
-                        if !runtime.has_entry(None, &row.name).await { return Ok(None); }
+                        if runtime.hand_opened(&row.name).await { return Ok(None); }
                         let binding = runtime.interaction_binding_readonly(&row.name).await.map_err(|e| e.code)?;
                         if capture_bindings.get(&row.name).and_then(|result| result.as_ref().ok()) != Some(&binding) { return Err("erro_interacao_desatualizada".into()); }
                         let target = runtime.terminal_target(&row.name).await.map_err(|e| e.code)?.ok_or("terminal_target_missing")?;

@@ -303,7 +303,13 @@ impl Watcher {
         if !meta.get("headless").is_some_and(truthy) || decide(WriteRoute::CodexControl,Route::Codex,false) != Owner::Rust { return None; }
         let key = terminal::text(&meta,"key")?.to_owned();
         if registry.codex_headless(name).await.is_some() { return Some(Ok(())); }
-        if registry.has_entry(Some(&key),name).await || self.transfer_busy(name,&meta).await { return None; }
+        // Outra entrada com esta chave ou nome (vida de terminal ainda aberta, outro provedor): é do Rust e
+        // não dá para abrir; a escrita recebe o código, nunca o Python.
+        if registry.has_entry(Some(&key),name).await {
+            return Some(Err(RuntimeError::new("codex_headless_entry_conflict","já há outra sessão aberta aqui com este nome ou chave")));
+        }
+        // Transferência a recuperar: é do Python, como hoje.
+        if self.transfer_busy(name,&meta).await { return None; }
         let generation = match self.generation(&key,name).await { Ok(generation)=>generation, Err(error)=>return Some(Err(error)) };
         let mut target = headless_target(&self.cfg.queue_dir,name,&key,generation,&meta);
         // Cano gravado e vivo é reaproveitado (`launch_if_needed`); sem ele, sobe um.
@@ -398,13 +404,17 @@ impl Watcher {
         let meta = self.load(name).await.filter(|meta|terminal::text(meta,"key") == Some(target.key.as_str())).ok_or_else(gone)?;
         let mut view = self.preconditions(registry,&handle,&meta,false).await?;
         // O `/model` digitado na TUI pode não ter avisado o motor: a configuração sai da conversa, como o
-        // `thread/resume` do Python. Sem resposta no prazo vale a vista.
+        // `thread/resume` do Python. Sem ela a troca não sai: subiria com modelo, esforço ou modo velhos.
         let settings_read = handle.command(RuntimeCommand { operation_id:random_hex(16),kind:OperationKind::ReadSettings,payload:json!({"include_turns":false}) });
         match tokio::time::timeout(SETTINGS_READ_WAIT,settings_read).await {
             Ok(Ok(reply)) if reply.disposition == Disposition::Accepted => {
                 for field in ["model","effort","service_tier","mode"] { if !reply.payload[field].is_null() { view[field] = reply.payload[field].clone(); } }
             }
-            _ => tracing::warn!(session=%name,"configuração da conversa não relida antes da troca; vale a do motor"),
+            other => {
+                let why = match other { Err(_) => "sem resposta no prazo".to_owned(), Ok(Err(error)) => error.code, Ok(Ok(reply)) => format!("{:?}",reply.disposition).to_lowercase() };
+                tracing::warn!(session=%name,code="codex_settings_unread",reason=%why,"configuração da conversa não relida; troca recusada");
+                return Err(refuse(&format!("Não consegui reler a configuração da conversa ({why}); a sessão foi mantida.")));
+            }
         }
         // Retenção dos turnos antes do seletor e até o ator sair: nenhum `turn/start` entre a leitura e o kill.
         let turns = match handle.hold_turns().await {
@@ -434,7 +444,14 @@ impl Watcher {
         // O Jev está no ambiente do processo vivo: o sidecar do terminal não o grava (`_jev_do_processo`).
         if let Some(pid) = terminal::pid(&meta,"app_pid").map(i64::from) {
             let read = tokio::task::spawn_blocking(move||SystemProcs::default().env_var(pid,"HANGAR_JEV")).await.map_err(|_|job())?;
-            if let Ok(value) = read { settings.insert("jev".into(),json!(value.is_some_and(|v|v == "on"))); }
+            match read {
+                Ok(value) => { settings.insert("jev".into(),json!(value.is_some_and(|v|v == "on"))); }
+                // Sem ler o ambiente não se sabe se o Jev estava ligado: a troca não o desliga calada.
+                Err(error) => {
+                    tracing::warn!(session=%name,code="codex_jev_unread",kind=?error.kind(),"ambiente do Codex com terminal ilegível; troca recusada");
+                    return Err(refuse("Não consegui ler o ambiente do terminal (Jev); a sessão foi mantida."));
+                }
+            }
         }
         let back = cleared(settings.clone(),false);
         let headless = cleared(settings,true);

@@ -44,9 +44,13 @@ const FOCUS_STEP_POLL:Duration=Duration::from_millis(20);
 struct Away {row:String,since:tokio::time::Instant,next:tokio::time::Instant,tries:u32}
 fn error(code:&str)->RuntimeError {RuntimeError::new(code,"operação terminal conservada no diário")}
 /// O Claude só põe o bypass no Shift+Tab de quem nasceu com ele.
-fn bypass_in_cycle(agent:u32)->bool {
+/// argv ilegível é erro com código, nunca "sem bypass" (que reabriria a sessão à toa).
+fn bypass_in_cycle(agent:u32)->Result<bool,RuntimeError> {
     use crate::list::procs::ProcessView;
-    let argv=crate::list::procs::SystemProcs::default().argv(i64::from(agent));
+    let argv=crate::list::procs::SystemProcs::default().argv_checked(i64::from(agent)).map_err(|_|error("lifecycle_process_read"))?;
+    Ok(argv_has_bypass(&argv))
+}
+fn argv_has_bypass(argv:&[String])->bool {
     argv.iter().any(|a|a=="--dangerously-skip-permissions" || a=="--allow-dangerously-skip-permissions" || a=="--permission-mode=bypassPermissions")
         || argv.windows(2).any(|pair|pair[0]=="--permission-mode" && pair[1]=="bypassPermissions")
 }
@@ -780,13 +784,13 @@ impl Executor {
         let probe=kind=="permission_modes" && payload["probe"].as_bool().unwrap_or(false);
         let action=if kind=="set_permission_mode" {PermissionAction::Set {mode:payload["mode"].as_str().ok_or_else(||error("erro_permissao_invalida"))?.into()}}
             else {PermissionAction::Read {probe:probe && cached.is_none()}};
-        self.action(Action::Prepare {id:id.into(),payload:original,entry_id:None}).await?;
-        self.action(Action::BeginDispatch {id:id.into(),wire_id:format!("permission:{}:{id}",self.target.generation),staged:false}).await?;
-        if !memory.lock().map_err(|_|error("permission_store_poisoned"))?.begin(&tracking) {return Err(error("permission_snapshot_absent"));}
         // Como o Python (`_bypass_no_ciclo`): sem a flag no processo o bypass não está no Shift+Tab; girar o
         // modo às cegas só mudaria o que a pessoa tinha. Vai direto à reabertura.
         // `dontAsk` não sai pelo Shift+Tab sem perder o modo: também reabre sem tecla.
-        let outside=matches!(&action,PermissionAction::Set {mode} if mode=="bypassPermissions") && (current=="dontAsk" || !bypass_in_cycle(self.target.metadata.agent_pid));
+        let outside=matches!(&action,PermissionAction::Set {mode} if mode=="bypassPermissions") && (current=="dontAsk" || !bypass_in_cycle(self.target.metadata.agent_pid)?);
+        self.action(Action::Prepare {id:id.into(),payload:original,entry_id:None}).await?;
+        self.action(Action::BeginDispatch {id:id.into(),wire_id:format!("permission:{}:{id}",self.target.generation),staged:false}).await?;
+        if !memory.lock().map_err(|_|error("permission_store_poisoned"))?.begin(&tracking) {return Err(error("permission_snapshot_absent"));}
         let controlled=if outside {
             let mut value=initial.clone();
             value["requires_reopen"]=json!(true);value["cycle_closed"]=json!(true);value["error_code"]=json!("permission_reopen_required");
@@ -1011,7 +1015,12 @@ impl Executor {
                             Err(_)=>DeliveryResult {disposition:input::Disposition::Rejected,stage:input::DeliveryStage::Validate,cleanup:input::Cleanup::NotNeeded,
                                 native:false,message_id:None,code:"invalid_answer".into(),draft:None},
                         },
-                        "answer_chat"=>driver.guarded_answer_chat(expected.as_ref().unwrap(),&serde_json::from_value::<Vec<QuestionAnswer>>(payload["answers"].clone()).unwrap(),&publication).await,
+                        "answer_chat"=>match serde_json::from_value::<Vec<QuestionAnswer>>(payload["answers"].clone()) {
+                            Ok(answers)=>driver.guarded_answer_chat(expected.as_ref().unwrap(),&answers,&publication).await,
+                            // Corpo torto recusa com o código, nunca derruba o executor.
+                            Err(_)=>DeliveryResult {disposition:input::Disposition::Rejected,stage:input::DeliveryStage::Validate,cleanup:input::Cleanup::NotNeeded,
+                                native:false,message_id:None,code:"invalid_answer".into(),draft:None},
+                        },
                         "submit_selected"=>driver.guarded_submit_selected(expected.as_ref().unwrap()).await,
                         "interrupt"=>driver.interrupt(payload["clear"].as_bool().unwrap_or(false)).await,
                         _=>unreachable!(),
@@ -1420,4 +1429,15 @@ fn validate(kind:&str,payload:&Value)->Result<(),RuntimeError> {
         "interrupt"=>payload.get("clear").is_none_or(Value::is_boolean),"steer_queue"=>payload.get("entry_id").is_none_or(Value::is_string),_=>true,
     };
     if !valid || payload.get("interaction_id").is_some_and(|id|!id.is_null() && !id.is_string()) {return Err(error("terminal_payload"));}Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    /// argv ilegível (processo que sumiu, `/proc` negado) é erro com código, não "sem bypass".
+    #[test]
+    fn unreadable_argv_is_a_coded_error_not_a_reopen() {
+        assert_eq!(super::bypass_in_cycle(u32::MAX).unwrap_err().code, "lifecycle_process_read");
+        assert!(super::argv_has_bypass(&["claude".into(), "--permission-mode".into(), "bypassPermissions".into()]));
+        assert!(!super::argv_has_bypass(&["claude".into()]));
+    }
 }

@@ -176,6 +176,82 @@ async fn reconnecting_follows_the_conversation_the_session_file_moved_to() {
     finish(&mut [&mut app,&mut tui]);
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn an_unreadable_queue_projection_refuses_the_adoption_instead_of_overwriting_it() {
+    use std::os::unix::fs::PermissionsExt;
+    if std::fs::metadata("/proc/self").map(|m|std::os::unix::fs::MetadataExt::uid(&m)==0).unwrap_or(false) { return; }
+    let fx = fixture();
+    let server = fake_app_server(true).await;
+    let (mut app,mut tui) = (app_server_process(&server.endpoint),tui());
+    std::fs::create_dir_all(&fx.queue).unwrap();
+    let projection = fx.queue.join("cx-proof.jsonl");
+    let typed = format!("{}\n",json!({"id":"early","text":"oi antes da TUI","ts":1.0e12,"delivered":false}));
+    std::fs::write(&projection,&typed).unwrap();
+    std::fs::set_permissions(&projection,std::fs::Permissions::from_mode(0o000)).unwrap();
+    fx.put_sidecar("cx-proof",fx.meta("cx-proof",&server.endpoint,Some(app.id()),&tui));
+    fx.panes(&["cx-proof"]);
+    let registry = registry().await;
+    let watcher = fx.watcher();
+    let adopted = watcher.adopt_now(&registry,"cx-proof").await;
+    std::fs::set_permissions(&projection,std::fs::Permissions::from_mode(0o600)).unwrap();
+    assert_eq!(adopted.map(|r|r.map_err(|e|e.code)),Some(Err("codex_queue_projection_unreadable".into())));
+    assert_eq!(std::fs::read_to_string(&projection).unwrap(),typed,"a mensagem digitada antes não foi apagada");
+    finish(&mut [&mut app,&mut tui]);
+}
+
+#[tokio::test]
+async fn a_terminal_stuck_launching_stops_going_to_python() {
+    // `launching` é a TUI abrindo: a escrita vai ao Python (que enfileira) só por um tempo.
+    let fx = fixture();
+    fx.put_sidecar("cx-proof",json!({"name":"cx-proof","provider":"codex","launching":true,"key":"k-l","cwd":fx.root}));
+    let registry = registry().await;
+    let watcher = fx.watcher();
+    assert!(watcher.adopt_now(&registry,"cx-proof").await.is_none(),"recém-aberto: o Python enfileira");
+    let old = std::time::SystemTime::now() - Duration::from_secs(600);
+    std::fs::File::options().write(true).open(fx.sidecar_path("cx-proof")).unwrap().set_modified(old).unwrap();
+    let stuck = watcher.adopt_now(&registry,"cx-proof").await;
+    assert_eq!(stuck.map(|r|r.map_err(|e|e.code)),Some(Err("codex_terminal_launch_stuck".into())));
+}
+
+#[tokio::test]
+async fn limits_of_a_rust_codex_that_cannot_open_answers_its_code() {
+    let fx = fixture();
+    let registry = registry().await;
+    registry.bind_watcher(fx.watcher());
+    // Sem terminal parado e sem `cwd`: o Rust é o dono e não consegue abrir.
+    fx.put_sidecar("cx-h",json!({"name":"cx-h","provider":"codex","headless":true,"key":"k-h","thread_id":"t"}));
+    let (python,server) = serve_owner(registry).await;
+    let response = crate::fake::client().get(format!("http://{server}/api/sessions/cx-h/limits"))
+        .header("authorization",format!("Bearer {}",crate::fake::OWNER)).send().await.unwrap();
+    assert_eq!(response.status().as_u16(),503);
+    let body:Value = serde_json::from_str(&response.text().await.unwrap()).unwrap();
+    assert_ne!(body["detail"]["code"],"session_transfer_busy","{body}");
+    assert!(body["detail"]["code"].is_string(),"{body}");
+    assert_eq!(python.hits_to("/api/sessions/cx-h/limits"),0);
+}
+
+#[tokio::test]
+async fn to_headless_refuses_when_the_conversation_settings_cannot_be_read() {
+    let fx = fixture();
+    let server = fake_app_server(true).await;
+    let (mut app,mut tui) = (app_server_process(&server.endpoint),tui());
+    let mut meta = relaunch_meta(&fx,&server.endpoint,&app,&tui);
+    meta["thread_id"] = json!("thread-unreadable");
+    fx.put_sidecar("cx-proof",meta);
+    fx.panes(&["cx-proof"]);
+    let registry = relaunch_registry(&fx).await;
+    let watcher = fx.watcher();
+    registry.bind_watcher(watcher.clone());
+    watcher.round(&registry).await;
+    let before = fx.sidecar("cx-proof").unwrap();
+    let error = switch_until_settled(&watcher,&registry,||PermissionRead::Known("Approve for me".into())).await;
+    assert_eq!(error.code,"erro_troca_modo");
+    assert!(error.message.contains("configuração"),"{}",error.message);
+    untouched(&fx,&registry,&before,&mut app,&mut tui);
+    finish(&mut [&mut app,&mut tui]);
+}
+
 #[tokio::test]
 async fn rename_and_mode_switch_close_the_actor_without_killing() {
     let fx = fixture();

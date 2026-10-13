@@ -252,6 +252,9 @@ pub(super) fn pane_of<'a>(panes:&'a [Pane],name:&str) -> Option<&'a Pane> {
     panes.iter().filter(|p|p.session == name).max_by_key(|p|(p.provider.as_deref() == Some("codex"),p.active))
 }
 
+/// Quanto um sidecar pode ficar `launching` antes de a escrita parar de ir ao Python.
+const LAUNCH_WAIT:Duration = Duration::from_secs(120);
+
 pub(super) fn queue_files(queue_dir:&Path,key:&str) -> (PathBuf,PathBuf) {
     let runtime = queue_dir.join("runtime");
     (runtime.join(format!("{key}.json")),runtime.join(format!("{key}.lock")))
@@ -337,7 +340,7 @@ fn prepare(sidecar_dir:&Path,queue_dir:&Path,c:&Candidate,life:&Value) -> Result
     let mut expected = c.key.clone();
     // Mensagem digitada antes da adoção (TUI ainda abrindo, sem sidecar pronto) foi para o Python, que a
     // gravou na projeção pelo nome; abrir a fila regrava a projeção e a apagaria calada. Lida antes.
-    let projected = pending_projection(queue_dir,&c.name);
+    let projected = pending_projection(queue_dir,&c.name)?;
     let mut foreign:Option<Vec<Value>> = None;
     for _ in 0..2 {
         let key = match &expected {
@@ -381,13 +384,25 @@ fn prepare(sidecar_dir:&Path,queue_dir:&Path,c:&Candidate,life:&Value) -> Result
     Err(changed())
 }
 
-/// Entradas não entregues da projeção pelo nome: as que o Python gravou sem a fila desta chave.
-fn pending_projection(queue_dir:&Path,name:&str) -> Vec<Value> {
-    let Ok(raw) = std::fs::read_to_string(super::queue::projection_path(queue_dir,name)) else { return Vec::new() };
-    raw.lines().filter_map(|line|serde_json::from_str::<Value>(line).ok())
-        .filter(|row|row["delivered"] == false && row["papel"].is_null() && row["text"].is_string()
-            && row["id"].as_str().is_some_and(|id|!id.is_empty()))
-        .collect()
+/// Entradas não entregues da projeção pelo nome: as que o Python gravou sem a fila desta chave. Ausente é
+/// fila vazia; ilegível recusa a adoção, que regravaria a projeção por cima do que não leu.
+fn pending_projection(queue_dir:&Path,name:&str) -> Result<Vec<Value>,RuntimeError> {
+    let raw = match std::fs::read_to_string(super::queue::projection_path(queue_dir,name)) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(RuntimeError::new("codex_queue_projection_unreadable",
+            &format!("a fila da sessão não pôde ser lida ({:?}); adotar a apagaria",error.kind()))),
+    };
+    let mut skipped = 0usize;
+    let rows = raw.lines().filter(|line|!line.trim().is_empty()).filter_map(|line|match serde_json::from_str::<Value>(line) {
+        Ok(row) => Some(row),
+        Err(_) => { skipped += 1; None }
+    }).collect::<Vec<_>>();
+    if skipped > 0 {
+        tracing::warn!(session=%name,code="codex_queue_projection_line_unreadable",skipped,"linhas ilegíveis na fila da sessão ficaram de fora da adoção");
+    }
+    Ok(rows.into_iter().filter(|row|row["delivered"] == false && row["papel"].is_null() && row["text"].is_string()
+        && row["id"].as_str().is_some_and(|id|!id.is_empty())).collect())
 }
 
 impl Watcher {
@@ -489,8 +504,14 @@ impl Watcher {
         if meta.get("headless").is_some_and(truthy) { return None; }
         if registry.has_entry(None,name).await { return Some(Ok(())); }
         // TUI ainda subindo: a mensagem fica na fila pelo nome (o Python a grava) e a adoção a assume,
-        // como antes de existir o sidecar.
-        if meta.get("launching").is_some_and(truthy) { return None; }
+        // como antes de existir o sidecar. Presa abrindo além do prazo, a escrita para de ir ao Python.
+        if meta.get("launching").is_some_and(truthy) {
+            let file = codex_sidecar::path(&codex_sidecar::dir(&self.cfg.home),name);
+            let age = tokio::task::spawn_blocking(move||std::fs::metadata(file).and_then(|m|m.modified()).ok()
+                .and_then(|at|at.elapsed().ok())).await.ok().flatten();
+            if age.is_none_or(|age|age < LAUNCH_WAIT) { return None; }
+            return Some(Err(RuntimeError::new("codex_terminal_launch_stuck","o terminal do Codex está abrindo há tempo demais; feche e abra a sessão de novo")));
+        }
         let Some(c) = candidate(&meta,&self.cfg.home) else {
             return Some(Err(RuntimeError::new("codex_terminal_not_ready","o Codex com terminal ainda não tem app-server pronto")));
         };

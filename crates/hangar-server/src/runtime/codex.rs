@@ -550,7 +550,13 @@ impl Engine {
 
     /// Pergunta assíncrona sem resposta registrada: a reservada na fila já foi respondida pela pessoa.
     fn shown_async(&self) -> Option<&(String,Value)> {
-        self.async_questions.pending.iter().find(|(id,_)|!self.reservations.iter().any(|r|r.reservation.request_id == *id))
+        self.async_questions.pending.iter().find(|(id,_)|!self.answer_queued(id))
+    }
+
+    /// Resposta a caminho na fila. A incerta (pode ter saído ou não) não conta: o cartão volta, e responder
+    /// de novo recebe o incerto que manda conferir, em vez de a pergunta sumir calada.
+    fn answer_queued(&self,request_id:&str) -> bool {
+        self.reservations.iter().any(|r|r.reservation.request_id == request_id && r.state != ReservationState::Uncertain)
     }
 
     pub fn control_view(&self) -> Value {
@@ -564,7 +570,7 @@ impl Engine {
             "async_seen":self.async_questions.seen,"async_resolved":self.async_questions.resolved,
             "async_echoes":self.async_questions.echoes,"async_during_load":self.async_questions.during_load,
             "skipped_async_questions":self.async_questions.skipped,
-            "pending_questions":self.async_questions.pending.iter().filter(|(id,_)|!self.reservations.iter().any(|r|r.reservation.request_id == *id)).count()})
+            "pending_questions":self.async_questions.pending.iter().filter(|(id,_)|!self.answer_queued(id)).count()})
     }
 
     fn blocking_question(&self) -> Option<Value> {
@@ -1314,8 +1320,8 @@ impl Engine {
                         }
                     }
                     ELICITATION => match option { 1=>json!({"action":"accept"}),2=>json!({"action":"cancel"}),_=>return Err(invalid()) },
-                    // Como no Python: fora de "Permitir" e "Sempre permitir" é negar. Comando ilegível não tem o "Sempre".
-                    _ => json!({"decision":match option { 1=>"accept",3 if unreadable_command(&request)=>return Err(invalid()),3=>"acceptForSession",_=>"decline" }}),
+                    // Só as opções do cartão; comando ilegível não tem o "Sempre".
+                    _ => json!({"decision":match option { 1=>"accept",2=>"decline",3 if !unreadable_command(&request)=>"acceptForSession",_=>return Err(invalid()) }}),
                 };
                 self.answer(id.clone(),request_id,result,None,&mut effects)?;
                 self.wires.get_mut(&id).unwrap().interaction = Some(expected);

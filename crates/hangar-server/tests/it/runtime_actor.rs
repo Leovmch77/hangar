@@ -2092,7 +2092,8 @@ mod terminal_async {
         std::fs::set_permissions(&projection,std::fs::Permissions::from_mode(0o500)).unwrap();
         let reply = answer(&handle,&store).await;
         std::fs::set_permissions(&projection,std::fs::Permissions::from_mode(0o700)).unwrap();
-        assert!(reply.disposition == Disposition::Accepted,"gravada, a resposta não pode virar erro de envio");
+        // Gravada, mas a fila respondeu erro: nem sucesso nem erro de envio, o incerto que manda conferir.
+        assert!(reply.disposition == Disposition::Unknown,"erro da fila não vira resposta aceita: {reply:?}");
         assert_eq!(reply.payload["reserved"],true);
         let entry = reply.payload["entry_id"].as_str().unwrap().to_owned();
         assert!(queue_state(dir.path()).operations.contains_key(&entry));

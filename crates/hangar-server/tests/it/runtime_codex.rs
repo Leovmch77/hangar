@@ -2254,3 +2254,29 @@ fn transferred_session_without_a_saved_mode_starts_in_the_mode_it_came_with() {
     let mut saved = meta(json!("Full Access")); saved["mode"] = json!("default");
     assert_eq!(Engine::new(saved,1,clock(10.0)).view()["codex_mode"],"default");
 }
+
+#[test]
+fn approval_option_outside_the_card_is_invalid_not_a_decline() {
+    let mut engine = subscribed_terminal();
+    let store = identified(&mut engine);
+    request(&mut engine,7,"item/commandExecution/requestApproval",json!({"threadId":"thread-1","command":"pwd"}));
+    for option in [0,4,99] {
+        let error = select(&mut engine,&store,json!(7),option,13.0).err().unwrap_or_else(||panic!("opção {option} virou resposta"));
+        assert_eq!(error.code,hangar_server::runtime::codex::INVALID_ANSWER,"{option}");
+    }
+    assert_eq!(reply_to(&select(&mut engine,&store,json!(7),2,13.5).unwrap(),7)["result"]["decision"],"decline");
+}
+
+#[test]
+fn an_uncertain_reserved_answer_shows_the_question_again() {
+    // Pode ter saído, pode não: o cartão volta (a nova resposta recebe o incerto), nunca some calado.
+    let mut engine = subscribed_terminal();
+    let store = identified(&mut engine);
+    let question = ask_async(&mut engine,"q1","Qual pasta?",13.0);
+    let reservation = reserved(&mut engine,&store,&question,"answer-1",13.5);
+    assert!(engine.view()["codex_question"].is_null());
+    dispatch(&mut engine,&reservation,14.0);
+    ack(&mut engine,&reservation.operation_id,WriteOutcome::Unknown,14.5);
+    assert_eq!(engine.view()["codex_question"]["questions"][0]["question"],"Qual pasta?");
+    assert_eq!(engine.control_view()["pending_questions"],1);
+}

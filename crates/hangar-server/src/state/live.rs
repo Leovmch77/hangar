@@ -297,7 +297,7 @@ impl Sources for LiveSources {
         let mut facts = RoundFacts { body_columns, band_anchor, ..Default::default() };
         // Sem entrada no Rust (claude aberto à mão, que só entra no primeiro envio pelo app): o estado sai
         // só do pane e dos arquivos, como no Python; não há vínculo de plugin, pergunta nem modo a ler.
-        if let Some(registry) = self.env.runtime.get() && !registry.has_entry(None, &self.name).await { return facts; }
+        if let Some(registry) = self.env.runtime.get() && registry.hand_opened(&self.name).await { return facts; }
         let local = match self.env.runtime.get() {
             Some(registry) => super::facts::plugin_reading(registry, &self.name).await,
             None => Err("plugin_runtime_absent".into()),
@@ -352,7 +352,7 @@ impl Sources for LiveSources {
         let epoch = self.epoch();
         *self.last_frame.lock().unwrap_or_else(|e| e.into_inner()) = None;
         let registry = self.env.runtime.get().ok_or_else(|| CaptureFailed { code: "state_runtime_unbound".into(), attempt: None })?;
-        if !registry.has_entry(None, &self.name).await { return self.pane().await.capture().await; }
+        if registry.hand_opened(&self.name).await { return self.pane().await.capture().await; }
         let binding = registry.interaction_binding_readonly(&self.name).await.map_err(|e| CaptureFailed { code: e.code, attempt: None })?;
         if self.sid().as_deref() != Some(binding.conversation.as_str()) { return Err(CaptureFailed { code: "state_binding_changed".into(), attempt: None }); }
         let revision = self.env.permissions.lock().map_err(|_| CaptureFailed { code: "permission_store_unavailable".into(), attempt: None })?
@@ -372,9 +372,9 @@ impl Sources for LiveSources {
     async fn dead(&self) -> Result<Dead, String> {
         let lifecycle = self.env.lifecycle.get().ok_or("state_lifecycle_unbound")?;
         let registry = self.env.runtime.get().ok_or("plugin_runtime_absent")?;
-        // Sessão sem entrada no Rust (claude aberto à mão, ou já fechada): o multiplexador sem ela basta,
-        // como no Python; não há fila nem vínculo a limpar aqui.
-        if !registry.has_entry(None, &self.name).await {
+        // `claude` aberto à mão (nunca foi do Rust): o multiplexador sem ela basta, como no Python; não há fila
+        // nem vínculo a limpar. A do Rust que perdeu a entrada segue com o código do vínculo.
+        if registry.hand_opened(&self.name).await {
             self.env.agents.forget(&self.name);
             return Ok(Dead::Ok);
         }
@@ -386,7 +386,7 @@ impl Sources for LiveSources {
 
     async fn observe_permission(&self, key: &str, mode: &str) -> Result<(String, String), String> {
         let registry = self.env.runtime.get().ok_or("state_runtime_unbound")?;
-        if !registry.has_entry(None, &self.name).await {
+        if registry.hand_opened(&self.name).await {
             // Sem executor que gire o modo, a leitura do rodapé é a confirmação (a memória é por conversa).
             let view = self.env.permissions.lock().map_err(|_| "permission_store_unavailable")?.observe(key, mode);
             return Ok((view.current, view.previous_non_plan));
