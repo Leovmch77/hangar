@@ -297,7 +297,7 @@ impl AccountService {
             }
             entries.extend(found.into_iter().map(|path| (String::new(), path)));
         }
-        let aliases: Value = fs::read(self.env.home.join(".claude/.hangar-apelidos.json"))
+        let aliases: Value = fs::read(super::quotas::other::read_path(self.env.home.join(".claude/.hangar-apelidos.json")))
             .ok()
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
             .unwrap_or(Value::Null);
@@ -699,6 +699,23 @@ mod tests {
         assert_eq!(error.code, "erro_processos_usam_conta");
         assert_eq!(error.params, json!({"pids":[83]}));
         assert!(account.home.exists());
+    }
+
+    /// Máquina que só tem o arquivo de apelidos do nome antigo (link de arquivo exige privilégio
+    /// no Windows) continua vendo o apelido.
+    #[test]
+    fn alias_falls_back_to_the_old_file_name() {
+        let root = tempfile::tempdir().unwrap();
+        let service = service_in(root.path());
+        let account = service.create(Provider::Claude, "work", |_| Ok(())).unwrap();
+        let id = format!("claude:{}", account.home.to_string_lossy());
+        fs::create_dir_all(root.path().join(".claude")).unwrap();
+        fs::write(root.path().join(".claude/.claude-pocket-apelidos.json"), json!({&id: "Antigo"}).to_string()).unwrap();
+        let labels = || service.claude_catalog().unwrap().as_array().unwrap().iter()
+            .map(|row| row["label"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
+        assert!(labels().contains(&"Antigo".to_owned()), "{:?}", labels());
+        fs::write(root.path().join(".claude/.hangar-apelidos.json"), json!({&id: "Novo"}).to_string()).unwrap();
+        assert!(labels().contains(&"Novo".to_owned()), "o nome novo vence: {:?}", labels());
     }
 
     fn service_in(root: &Path) -> AccountService {

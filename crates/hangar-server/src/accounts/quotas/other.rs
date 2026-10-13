@@ -113,7 +113,7 @@ fn shared(env: &AccountEnvironment) -> PathBuf {
 
 /// O nome novo; o antigo `.claude-pocket-*` só quando o novo não existe (no Windows link de
 /// arquivo exige privilégio, e o antigo pode ser o único).
-fn read_path(new: PathBuf) -> PathBuf {
+pub(crate) fn read_path(new: PathBuf) -> PathBuf {
     if new.exists() {
         return new;
     }
