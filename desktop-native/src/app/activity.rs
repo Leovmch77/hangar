@@ -18,6 +18,13 @@ const DETAIL_EVERY: Duration = Duration::from_millis(2500);
 /// Falhas seguidas que param a consulta; o 404 para na primeira.
 const DETAIL_FAILS: u32 = 3;
 const TAB_CROSS: IconName = IconName::Close;
+/// Eventos do subagente por página: o servidor devolve os últimos N.
+const DETAIL_PAGE: usize = 200;
+
+/// Página cheia: pode haver eventos antes dela.
+fn has_older(returned: usize, limit: usize) -> bool { returned >= limit }
+
+fn next_limit(limit: usize) -> usize { limit + DETAIL_PAGE }
 
 pub(super) enum ActivityReply {
     /// Quantos subagentes a sessão tem no disco, amarrado à sessão e ao pedido.
@@ -249,7 +256,11 @@ pub(super) struct Link { pub api: Api, pub runtime: Arc<Runtime>, pub tx: async_
 
 /// O subagente aberto no detalhe: o que a lista sabia dele até a primeira resposta, depois o que a consulta traz.
 /// `done` é o fim mostrado: o do backend ou o do Agent que o lançou.
-struct Opened { run: SubRun, title: String, raw: Option<Value>, loaded: bool, has_events: bool, fails: u32, busy: bool, done: bool }
+struct Opened {
+    run: SubRun, title: String, raw: Option<Value>, loaded: bool, has_events: bool, fails: u32, busy: bool, done: bool,
+    /// Quantos eventos pedir: cresce no "Carregar anteriores", e a consulta periódica segue com ele.
+    limit: usize, has_older: bool, loading_older: bool,
+}
 
 pub(super) struct ActivityPanel {
     link: Option<Link>,
@@ -463,7 +474,8 @@ impl ActivityPanel {
         self.close_detail(cx);
         self.notice = None;
         let done = self.done(&run);
-        self.opened = Some(Opened { run, title, raw: None, loaded: false, has_events: false, fails: 0, busy: false, done });
+        self.opened = Some(Opened { run, title, raw: None, loaded: false, has_events: false, fails: 0, busy: false, done,
+            limit: DETAIL_PAGE, has_older: false, loading_older: false });
         self.start_poll(cx);
         cx.notify();
     }
@@ -525,18 +537,29 @@ impl ActivityPanel {
         let (Some(link), Some(key)) = (self.link.clone(), self.key.clone()) else { return };
         let Some(opened) = self.opened.as_mut().filter(|o| !o.busy) else { return };
         opened.busy = true;
-        let (seq, id, tab) = (self.detail_seq, opened.run.agent_id.clone(), self.tab_id);
+        let (seq, id, tab, limit) = (self.detail_seq, opened.run.agent_id.clone(), self.tab_id, opened.limit.to_string());
         link.runtime.spawn(async move {
-            let result = link.api.read(&key.name, &["subagents", &id], &[("events", "200")], 15).await;
+            let result = link.api.read(&key.name, &["subagents", &id], &[("events", limit.as_str())], 15).await;
             let reply = match tab { Some(tab) => ActivityReply::TabDetail(tab, seq, result), None => ActivityReply::Detail(seq, result) };
             let _ = link.tx.send(Envelope { connection: link.connection, selection: None, payload: Payload::Activity(reply) }).await;
         });
+    }
+
+    /// Mais uma página para trás, como o `load_older` da conversa: a resposta em voo, com o limite velho, é descartada.
+    fn load_older(&mut self, cx: &mut Context<Self>) {
+        let Some(opened) = self.opened.as_mut().filter(|o| o.has_older && !o.loading_older) else { return };
+        (opened.limit, opened.busy, opened.loading_older) = (next_limit(opened.limit), false, true);
+        self.detail_seq += 1;
+        self.fetch_detail();
+        cx.notify();
     }
 
     fn receive_detail(&mut self, seq: u64, result: Result<Value, Failure>, cx: &mut Context<Self>) {
         if seq != self.detail_seq { return; }
         let Some(opened) = self.opened.as_mut() else { return };
         opened.busy = false;
+        let older_done = std::mem::take(&mut opened.loading_older);
+        if older_done { cx.notify(); }
         match result {
             Ok(value) => {
                 let run = parse_sub(&value).unwrap_or_else(|| opened.run.clone());
@@ -548,6 +571,9 @@ impl ActivityPanel {
                 let first = !opened.loaded;
                 opened.loaded = true;
                 let cleared = self.notice.take().is_some();
+                let returned = value.get("events").and_then(Value::as_array).map_or(0, Vec::len);
+                let older = has_older(returned, opened.limit);
+                if opened.has_older != older { opened.has_older = older; cx.notify(); }
                 // Resposta igual à anterior não pede quadro.
                 if opened.raw.as_ref() == Some(&value) && opened.done == done { if first || cleared { cx.notify(); } return; }
                 let events: Vec<ChatEvent> = value.get("events").cloned().and_then(|e| serde_json::from_value(e).ok()).unwrap_or_default();
@@ -781,7 +807,12 @@ impl ActivityPanel {
             else if opened.has_events {
                 let conversation = super::panes::cached_selectable(self.conversation.clone().into(), StyleRefinement::default().size_full());
                 // Como o `Spinner` que o web põe sob a conversa do subagente enquanto ele roda.
-                div().size_full().flex().flex_col().child(div().flex_1().min_h_0().child(conversation))
+                // O "Carregar anteriores" da conversa principal, no mesmo lugar: acima da lista.
+                let older = opened.has_older.then(|| div().flex_shrink_0().px_4().py_2().flex().gap_2().items_center()
+                    .child(Button::new("sub-older").small().outline().label(tr("older")).disabled(opened.loading_older)
+                        .on_click(cx.listener(|this, _, _, cx| this.load_older(cx))))
+                    .when(opened.loading_older, |el| el.child(div().text_sm().text_color(theme::muted()).child(tr("loading")))));
+                div().size_full().flex().flex_col().children(older).child(div().flex_1().min_h_0().child(conversation))
                     .when(running, |el| el.child(div().flex_shrink_0().px_4().h(px(38.)).flex().items_center().gap(px(8.))
                         .child(super::panes::mark_slot(&self.marks, super::panes::Area::Side, "act-sub-working", 14., theme::accent()))
                         .child(div().min_w_0().truncate().text_size(px(12.)).text_color(theme::muted()).child(web("pensamento_vivo")))
@@ -987,7 +1018,7 @@ impl Hangar {
             ActivityReply::TabDetail(id, seq, result) => {
                 if let Some(tab) = self.act.tabs.iter().find(|t| t.id == id) {
                     let changed = tab.view.update(cx, |view, cx| {
-                        let status = |v: &ActivityPanel| (v.opened.as_ref().map(|o| (o.done, o.run.failed, o.run.unreadable)), v.notice.is_some());
+                        let status = |v: &ActivityPanel| (v.opened.as_ref().map(|o| (o.done, o.run.failed, o.run.unreadable, o.has_older, o.loading_older)), v.notice.is_some());
                         let before = status(view);
                         view.receive_detail(seq, result, cx);
                         before != status(view)
@@ -1230,7 +1261,16 @@ impl Hangar {
 
 #[cfg(test)]
 mod tests {
-    use super::{AgentRun, SubRun, agent_failed, base_title, interval, match_sub, sub_done, sub_title};
+    use super::{AgentRun, SubRun, agent_failed, base_title, has_older, interval, match_sub, next_limit, sub_done, sub_title, DETAIL_PAGE};
+
+    #[test]
+    fn a_full_page_may_have_older_events_and_the_next_asks_one_page_more() {
+        assert!(has_older(DETAIL_PAGE, DETAIL_PAGE));
+        assert!(!has_older(DETAIL_PAGE - 1, DETAIL_PAGE));
+        assert!(!has_older(0, DETAIL_PAGE));
+        assert_eq!(next_limit(DETAIL_PAGE), 2 * DETAIL_PAGE);
+        assert!(has_older(next_limit(DETAIL_PAGE), next_limit(DETAIL_PAGE)));
+    }
 
     #[test]
     fn tab_status_and_close_icons_are_embedded() {

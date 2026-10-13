@@ -141,6 +141,12 @@ fn owner(rows: &[Row], key: &str) -> Option<usize> {
         .max_by_key(|(_, r)| r.id().len()).map(|(i, _)| i)
 }
 
+/// Eventos mais antigos entraram na frente: o id do primeiro de antes, onde a rolagem fica presa.
+fn prepended_anchor<'a>(old: &'a [ChatEvent], new: &[ChatEvent]) -> Option<&'a str> {
+    let first = old.first()?;
+    new.iter().skip(1).any(|e| e.id == first.id).then_some(first.id.as_str())
+}
+
 impl SubConversation {
     pub fn new() -> Self {
         Self { events: Vec::new(), finished: false, started: None, rows: Vec::new(), expanded: HashSet::new(), rich: HashMap::new(),
@@ -166,6 +172,7 @@ impl SubConversation {
     /// Conversa nova do mesmo subagente: só o trecho que mudou entra na lista, e linha igual não é remedida.
     pub fn set_events(&mut self, events: Vec<ChatEvent>, finished: bool, started: Option<f64>, cx: &mut Context<Self>) {
         let rows = prepare(&events, finished, started);
+        let anchor = prepended_anchor(&self.events, &events).map(str::to_owned);
         (self.events, self.finished, self.started) = (events, finished, started);
         // Só o estado do subagente mudou (chamadas, fim): as linhas são as mesmas e nada se redesenha.
         if rows == self.rows { return; }
@@ -177,6 +184,12 @@ impl SubConversation {
             self.list.splice(prefix..self.rows.len() - suffix, rows.len() - prefix - suffix);
         }
         for i in resized { self.list.remeasure_items(i..i + 1); }
+        // Página anterior carregada no topo: a primeira linha de antes continua onde estava, como na conversa principal.
+        // O splice já desloca a rolagem; isto cobre a linha do topo que mudou de forma ao juntar os eventos novos.
+        let top = self.list.logical_scroll_top();
+        if let (0, Some(i)) = (top.item_ix, anchor.and_then(|id| owner(&rows, &id)).filter(|&i| i > 0)) {
+            self.list.scroll_to(ListOffset { item_ix: i, offset_in_item: top.offset_in_item });
+        }
         self.rows = rows;
         let ids: HashSet<&str> = self.rows.iter().map(Row::id).collect();
         self.rich.retain(|key, _| ids.iter().any(|id| key.starts_with(id)));
@@ -489,7 +502,16 @@ impl SubConversation {
 
 #[cfg(test)]
 mod tests {
-    use super::{ChatEvent, Row, Tone, owner, prepare};
+    use super::{ChatEvent, Row, Tone, owner, prepare, prepended_anchor};
+
+    #[test]
+    fn older_events_in_front_anchor_the_previous_first_event_and_a_sliding_window_does_not() {
+        let evs = |ids: &[&str]| ids.iter().map(|id| event("user_msg", id, None, None)).collect::<Vec<_>>();
+        assert_eq!(prepended_anchor(&evs(&["c", "d"]), &evs(&["a", "b", "c", "d"])), Some("c"));
+        assert_eq!(prepended_anchor(&evs(&["c", "d"]), &evs(&["d", "e"])), None);
+        assert_eq!(prepended_anchor(&evs(&["c", "d"]), &evs(&["c", "d", "e"])), None);
+        assert_eq!(prepended_anchor(&[], &evs(&["a"])), None);
+    }
 
     #[test]
     fn a_key_belongs_to_the_row_with_the_same_id_or_the_longest_one_before_a_colon() {
