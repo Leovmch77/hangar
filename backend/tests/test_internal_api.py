@@ -217,6 +217,9 @@ def test_pure_policy_runs_without_a_journal_attempt(tmp_path, monkeypatch):
 def test_quota_route_is_gone():
     # A linha de status lê a cota no módulo de contas do Rust; aqui não sobra rota.
     assert _client().get("/internal/quota", headers={"X-Hangar-Internal": SECRET}).status_code == 404
+    # As fontes de cota de fora (Kimi, CommandCode, OpenCode) também são lidas no Rust: o Rust não
+    # volta ao Python dentro de um pedido de cota que o Python fez.
+    assert "/internal/accounts/quotas" not in {route.path for route in internal_api.router.routes}
 
 
 def test_native_message_still_needs_its_journal_attempt(tmp_path, monkeypatch):
@@ -315,22 +318,6 @@ def test_internal_term_origin_same_rules(monkeypatch):
         assert r.status_code == 400
     r = client.post("/internal/term/origin", json={"origin": "x", "host": None}, headers={"X-Hangar-Internal": "errado"})
     assert r.status_code == 404
-
-
-def test_quota_facts_runs_outside_the_default_pool():
-    # O Rust chama esta rota enquanto um pedido de cota do Python ocupa o pool padrão: lá dentro ela se trava.
-    import json
-    import threading
-    seen = []
-    def facts(action, ids):
-        seen.append(threading.current_thread().name)
-        return {"sources": []}
-    raw = json.dumps({"action": "sources", "ids": []}).encode()
-    with patch("app.internal_api._instance_body", AsyncMock(return_value=(None, None, raw))), \
-            patch("app.cotas.quota_facts", facts):
-        r = _client().post("/internal/accounts/quotas", headers={"X-Hangar-Internal": SECRET})
-    assert r.status_code == 200 and r.json() == {"sources": []}
-    assert seen and seen[0].startswith("quota-facts")
 
 
 def test_busy_pool_threads_sees_uvloop_default_executor_threads():

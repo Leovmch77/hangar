@@ -1,6 +1,7 @@
 pub mod cache;
 pub mod claude;
 pub mod codex;
+pub mod other;
 pub mod reset;
 
 use super::http::Json;
@@ -109,6 +110,17 @@ pub struct Quotas {
     /// Um refresh de rede por vez; quem só lê o cache não entra nesta fila.
     pub refresh: Arc<Mutex<()>>,
     pub runtime: Arc<std::sync::OnceLock<Arc<crate::runtime::gateway::RuntimeRegistry>>>,
+    pub diag: Arc<std::sync::OnceLock<crate::diag::DiagClient>>,
+    pub endpoints: other::Endpoints,
+}
+
+/// De onde sai a leitura de uma fonte.
+#[derive(Clone)]
+enum Origin {
+    Account(Provider, Account),
+    Other(other::Reader),
+    /// `label` de motor que não é texto: o Python quebrava ao montar a leitura (`sem-resposta`).
+    Broken,
 }
 
 pub fn now() -> f64 {
@@ -204,10 +216,11 @@ impl AccountService {
         } else {
             Some(self.quotas.refresh.lock().await)
         };
-        let facts = bridge
-            .quotas("sources", &[])
-            .await
-            .map_err(|_| AccountError::io())?;
+        let others = other::sources(&self.env).map_err(|code| {
+            tracing::warn!(code, "fontes de cota ilegíveis");
+            AccountError::io()
+        })?;
+        let aliases = other::aliases(&self.env);
         let mut sources = vec![];
         for (row, account) in self.claude_accounts()? {
             let path = row["path"].as_str().ok_or_else(AccountError::io)?;
@@ -218,24 +231,25 @@ impl AccountService {
             {
                 continue;
             }
-            sources.push((json!({"id":format!("claude:{path}"),"label":row["label"],"provedor":"claude","ativa":row["active"]}),Some((Provider::Claude, account))));
+            sources.push((json!({"id":format!("claude:{path}"),"label":row["label"],"provedor":"claude","ativa":row["active"]}),Origin::Account(Provider::Claude, account)));
         }
         for account in self.visible_codex_accounts()? {
             let path = crate::accounts::catalog::resolved(&account.home);
             sources.push((json!({"id":format!("codex:{}",path.to_string_lossy()),
-                "label":if account.is_default {"Codex"} else {&account.id},"provedor":"codex","ativa":false}),Some((Provider::Codex,account))));
+                "label":if account.is_default {"Codex"} else {&account.id},"provedor":"codex","ativa":false}),Origin::Account(Provider::Codex,account)));
         }
-        for row in facts["sources"].as_array().ok_or_else(AccountError::io)? {
-            if row["provedor"] == "claude" || row["provedor"] == "codex" {
-                return Err(AccountError::io());
-            }
-            sources.push((row.clone(), None));
+        let mut endpoints = vec![];
+        for source in others {
+            let origin = if source.label.is_string() { Origin::Other(source.reader.clone()) } else { Origin::Broken };
+            endpoints.push((source.id.clone(), source.reader.url(&self.quotas.endpoints)));
+            sources.push((source.row(), origin));
         }
         let client = external_client(Duration::from_secs(8))?;
+        let other_client = other::client()?;
         let signatures: std::collections::HashMap<String, Value> = sources
             .iter()
-            .filter_map(|(row, account)| {
-                let (provider, account) = account.as_ref()?;
+            .filter_map(|(row, origin)| {
+                let Origin::Account(provider, account) = origin else { return None };
                 let file = if *provider == Provider::Claude {
                     ".credentials.json"
                 } else {
@@ -260,6 +274,9 @@ impl AccountService {
                 }
                 cache.set_credential(id, signature.clone());
             }
+            for (id, endpoint) in &endpoints {
+                cache.set_endpoint(id, endpoint);
+            }
             let at = now();
             sources
                 .iter()
@@ -276,34 +293,37 @@ impl AccountService {
         let mut readings = vec![];
         {
             let mut jobs = futures_util::stream::iter(selected)
-                .map(|(source, account)| {
-                    let client = client.clone();
+                .map(|(source, origin)| {
+                    let (client, other_client) = (client.clone(), other_client.clone());
                     let bridge = bridge.clone();
                     let service = self.clone();
                     async move {
                         let id = source["id"].as_str().unwrap_or("");
-                        let (mut value, signature) = if let Some((provider, account)) = account {
-                            service
-                                .read_quota(provider, &account, &client, Some(&bridge))
-                                .await
-                        } else {
-                            (
-                                bridge
-                                    .quotas("read", &[id.to_owned()])
-                                    .await
-                                    .ok()
-                                    .and_then(|body| body["readings"][id].as_object().cloned())
-                                    .map(Value::Object)
-                                    .unwrap_or_else(|| {
-                                        reading("indisponivel", vec![], Some("sem-resposta"))
-                                    }),
-                                None,
-                            )
+                        let (mut value, signature, unreachable) = match origin {
+                            Origin::Account(provider, account) => {
+                                let (value, signature) = service
+                                    .read_quota(provider, &account, &client, Some(&bridge))
+                                    .await;
+                                (value, signature, false)
+                            }
+                            Origin::Other(reader) => {
+                                let (value, unreachable) = other::read(
+                                    &other_client,
+                                    &reader,
+                                    &service.quotas.endpoints,
+                                    now(),
+                                )
+                                .await;
+                                (value, None, unreachable)
+                            }
+                            Origin::Broken => {
+                                (reading("indisponivel", vec![], Some("sem-resposta")), None, false)
+                            }
                         };
                         for field in ["id", "label", "provedor", "ativa"] {
                             value[field] = source[field].clone();
                         }
-                        (id.to_owned(), value, signature)
+                        (id.to_owned(), value, signature, unreachable)
                     }
                 })
                 .buffer_unordered(8);
@@ -314,13 +334,23 @@ impl AccountService {
         }
         let mut held = self.quotas.cache.lock().await;
         let cache = held.get_or_insert_with(|| cache::QuotaCache::load(&self.quota_path()));
-        for ((id, value, signature), at) in readings {
+        for ((id, value, signature, unreachable), at) in readings {
             if value["motivo"] == "credencial-alterada" {
                 cache.remove(&id);
             }
             cache.update(&id, value, at);
             if let Some(signature) = signature {
                 cache.set_credential(&id, signature);
+            }
+            if let Some((_, endpoint)) = endpoints.iter().find(|(other, _)| *other == id) {
+                cache.set_endpoint(&id, endpoint);
+            }
+            if unreachable {
+                cache.mark_unreachable(&id, at);
+                if let Some(diag) = self.quotas.diag.get() {
+                    diag.report("rust.quota_source_unreachable", "cotas", "quota_source_unreachable",
+                        "fonte de cota recusou a conexão; nova tentativa com espera crescente");
+                }
             }
         }
         if !cached_only && cache.dirty() && cache.save(&self.quota_path()).is_err() {
@@ -330,7 +360,7 @@ impl AccountService {
             );
         }
         let mut output = vec![];
-        for (source, account) in sources {
+        for (source, origin) in sources {
             let id = source["id"].as_str().ok_or_else(AccountError::io)?;
             let Some(mut value) = cache.get(id) else {
                 continue;
@@ -338,14 +368,14 @@ impl AccountService {
             for field in ["id", "label", "provedor", "ativa"] {
                 value[field] = source[field].clone();
             }
-            if let Some(alias) = facts["aliases"][id].as_str().filter(|s| !s.is_empty()) {
+            if let Some(alias) = aliases.get(id).and_then(Value::as_str) {
                 value["label"] = json!(alias);
             }
             value["idade_s"] = value["ts"]
                 .as_f64()
                 .map(|at| json!(now() - at))
                 .unwrap_or(Value::Null);
-            value["refresh_expires_at"] = if let Some((Provider::Claude, account)) = account {
+            value["refresh_expires_at"] = if let Origin::Account(Provider::Claude, account) = origin {
                 std::fs::read(account.home.join(".credentials.json"))
                     .ok()
                     .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
@@ -587,129 +617,121 @@ mod tests {
         let client = external_client(Duration::from_secs(3)).unwrap();
         let _ = client.get("https://quota.invalid/").send().await;
     }
+    /// Conta temporária com um motor de chave apontando para `base`, apelido incluído.
+    fn service_with_engine(base: &str) -> (tempfile::TempDir, AccountService) {
+        let temp = tempfile::tempdir().unwrap();
+        let claude = temp.path().join(".claude");
+        std::fs::create_dir_all(&claude).unwrap();
+        std::fs::write(claude.join("engines.json"),
+            json!({"test":{"base_url":base,"api_key":"k","model":"m"}}).to_string()).unwrap();
+        std::fs::write(claude.join(".hangar-apelidos.json"), json!({"chave:test":"Chave"}).to_string()).unwrap();
+        let mut env =
+            crate::accounts::environment::AccountEnvironment::from_map(Default::default());
+        env.home = temp.path().to_owned();
+        env.claude_base = claude;
+        env.codex_default = temp.path().join(".codex");
+        (temp, AccountService::new(env))
+    }
+
+    fn bridge() -> AccountsBridge {
+        // Nenhuma volta ao Python nesta leitura: a ponte aponta para porta nenhuma.
+        AccountsBridge::new("127.0.0.1:9".parse().unwrap(), "synthetic".into(), "synthetic".into()).unwrap()
+    }
+
+    fn row<'a>(rows: &'a Value, id: &str) -> Option<&'a Value> {
+        rows.as_array().unwrap().iter().find(|v| v["id"] == id)
+    }
+
     #[tokio::test]
     async fn concurrent_requests_share_one_writer_and_keep_other_provider() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         let reads = Arc::new(AtomicUsize::new(0));
         let counter = reads.clone();
-        let handler = move |body: bytes::Bytes| {
+        let handler = move || {
             let counter = counter.clone();
             async move {
-                let body: Value = serde_json::from_slice(&body).unwrap();
-                if body["action"] == "sources" {
-                    Json(
-                        json!({"sources":[{"id":"kimi:test","label":"Kimi","provedor":"kimi","ativa":false}],"aliases":{"kimi:test":"Chave"}}),
-                    )
-                } else {
-                    counter.fetch_add(1, Ordering::SeqCst);
-                    Json(
-                        json!({"readings":{"kimi:test":reading("lida",vec![json!({"rotulo":"5h","pct":25,"reset_ts":null,"por_modelo":false})],None)}}),
-                    )
-                }
+                counter.fetch_add(1, Ordering::SeqCst);
+                Json(json!({"limits":[{"window":{"duration":300},"detail":{"limit":"100","remaining":"75"}}]}))
             }
         };
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let app =
-            axum::Router::new().route("/internal/accounts/quotas", axum::routing::post(handler));
+        let app = axum::Router::new().route("/v1/usages", axum::routing::get(handler));
         let server = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
-        let temp = tempfile::tempdir().unwrap();
-        let mut env =
-            crate::accounts::environment::AccountEnvironment::from_map(Default::default());
-        env.home = temp.path().to_owned();
-        env.claude_base = temp.path().join(".claude");
-        env.codex_default = temp.path().join(".codex");
-        let service = AccountService::new(env.clone());
-        let bridge = AccountsBridge::new(address, "synthetic".into(), "synthetic".into()).unwrap();
+        let (_temp, service) = service_with_engine(&format!("http://{address}/v1"));
         let (first, second) = tokio::join!(
-            service.quotas(bridge.clone(), false, false),
-            service.quotas(bridge.clone(), false, false)
+            service.quotas(bridge(), false, false),
+            service.quotas(bridge(), false, false)
         );
-        let first = first.unwrap();
-        let second = second.unwrap();
-        for rows in [&first, &second] {
-            let row = rows
-                .as_array()
-                .unwrap()
-                .iter()
-                .find(|v| v["id"] == "kimi:test")
-                .unwrap();
+        for rows in [&first.unwrap(), &second.unwrap()] {
+            let row = row(rows, "chave:test").unwrap();
             assert_eq!(row["label"], "Chave");
-            assert_eq!(row["janelas"][0]["pct"], 25);
+            assert_eq!(row["provedor"], "kimi");
+            assert_eq!(row["janelas"][0]["pct"], 25.0);
             assert!(row["idade_s"].as_f64().is_some_and(|age| age >= 0.0));
         }
         assert_eq!(reads.load(Ordering::SeqCst), 1);
-        let bytes = std::fs::read(service.quota_path()).unwrap();
-        let stored: Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(stored["kimi:test"]["cota"]["id"], "kimi:test");
-        let restarted = AccountService::new(env);
-        let rows = restarted.quotas(bridge, false, false).await.unwrap();
+        let stored: Value = serde_json::from_slice(&std::fs::read(service.quota_path()).unwrap()).unwrap();
+        assert_eq!(stored["chave:test"]["cota"]["id"], "chave:test");
+        let restarted = AccountService::new(service.env.clone());
+        let rows = restarted.quotas(bridge(), false, false).await.unwrap();
         assert_eq!(reads.load(Ordering::SeqCst), 1);
-        assert_eq!(
-            rows.as_array()
-                .unwrap()
-                .iter()
-                .find(|v| v["id"] == "kimi:test")
-                .unwrap()["label"],
-            "Chave"
-        );
+        assert_eq!(row(&rows, "chave:test").unwrap()["label"], "Chave");
         server.abort();
     }
+
     #[tokio::test]
     async fn cached_read_does_not_wait_for_refresh_in_flight() {
         let (entered, mut in_flight) = tokio::sync::mpsc::unbounded_channel::<()>();
         let release = Arc::new(tokio::sync::Notify::new());
         let gate = release.clone();
-        let handler = move |body: bytes::Bytes| {
+        let handler = move || {
             let (entered, gate) = (entered.clone(), gate.clone());
             async move {
-                let body: Value = serde_json::from_slice(&body).unwrap();
-                if body["action"] == "sources" {
-                    return Json(json!({"sources":[{"id":"kimi:test","label":"Kimi",
-                        "provedor":"kimi","ativa":false}],"aliases":{}}));
-                }
                 entered.send(()).unwrap();
                 gate.notified().await;
-                Json(json!({"readings":{"kimi:test":reading("lida",vec![],None)}}))
+                Json(json!({"usage":{"limit":"10","remaining":"5"}}))
             }
         };
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let app =
-            axum::Router::new().route("/internal/accounts/quotas", axum::routing::post(handler));
+        let app = axum::Router::new().route("/v1/usages", axum::routing::get(handler));
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let temp = tempfile::tempdir().unwrap();
-        let mut env =
-            crate::accounts::environment::AccountEnvironment::from_map(Default::default());
-        env.home = temp.path().to_owned();
-        env.claude_base = temp.path().join(".claude");
-        env.codex_default = temp.path().join(".codex");
-        let service = AccountService::new(env);
-        let bridge = AccountsBridge::new(address, "synthetic".into(), "synthetic".into()).unwrap();
+        let (_temp, service) = service_with_engine(&format!("http://{address}/v1"));
         let refreshing = tokio::spawn({
-            let (service, bridge) = (service.clone(), bridge.clone());
-            async move { service.quotas(bridge, false, false).await }
+            let service = service.clone();
+            async move { service.quotas(bridge(), false, false).await }
         });
         in_flight.recv().await.unwrap();
         // Quem escolhe conta ao abrir sessão lê só o cache; a rede das outras fontes não é dele.
-        let cached = tokio::time::timeout(
-            Duration::from_secs(2),
-            service.quotas(bridge.clone(), false, true),
-        )
-        .await
-        .expect("a leitura do cache esperou o refresh em voo");
-        let kimi = |rows: &Value| {
-            rows.as_array()
-                .unwrap()
-                .iter()
-                .any(|row| row["id"] == "kimi:test")
-        };
-        assert!(!kimi(&cached.unwrap()), "o cache ainda não tinha a leitura em voo");
+        let cached = tokio::time::timeout(Duration::from_secs(2), service.quotas(bridge(), false, true))
+            .await
+            .expect("a leitura do cache esperou o refresh em voo");
+        assert!(row(&cached.unwrap(), "chave:test").is_none(), "o cache ainda não tinha a leitura em voo");
         release.notify_one();
-        assert!(kimi(&refreshing.await.unwrap().unwrap()));
+        assert!(row(&refreshing.await.unwrap().unwrap(), "chave:test").is_some());
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn refused_source_waits_before_paying_the_connection_again() {
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
+        let (_temp, service) = service_with_engine(&format!("http://{closed}"));
+        let rows = service.quotas(bridge(), false, false).await.unwrap();
+        let first = row(&rows, "chave:test").unwrap();
+        assert_eq!((&first["estado"], &first["motivo"]), (&json!("indisponivel"), &json!("sem-resposta")));
+        let stored: Value = serde_json::from_slice(&std::fs::read(service.quota_path()).unwrap()).unwrap();
+        let entry = &stored["chave:test"];
+        assert_eq!(entry["unreachable_count"], 1);
+        let wait = entry["unreachable_until"].as_f64().unwrap() - entry["gravado_em"].as_f64().unwrap();
+        assert!((wait - 600.0).abs() < 1.0, "{wait}");
+        assert_eq!(entry["endpoint"], format!("http://{closed}/usages"));
+        // Forçar fura a espera e conta mais uma recusa (30 min na segunda).
+        service.quotas(bridge(), true, false).await.unwrap();
+        let stored: Value = serde_json::from_slice(&std::fs::read(service.quota_path()).unwrap()).unwrap();
+        assert_eq!(stored["chave:test"]["unreachable_count"], 2);
     }
     #[test]
     fn suggestion_uses_tightest_window_and_prefers_active_on_tie() {
