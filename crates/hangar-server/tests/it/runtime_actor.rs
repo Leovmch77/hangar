@@ -228,20 +228,39 @@ async fn operation_id_cannot_be_reused_with_another_payload() {
     assert_eq!(server.await.unwrap(),1);
 }
 
+/// Espera `work` e só falha com a fila 5 s sem gravar. Cada passo do runtime grava a fila com fsync:
+/// disco lento atrasa sem bloquear nada, e quem fica preso atrás da RPC deixa a fila parada.
+async fn unless_queue_stalls<T>(state:&std::path::Path,work:impl std::future::Future<Output=T>) -> T {
+    tokio::pin!(work);
+    let (mut last,mut since) = (std::fs::read(state).unwrap(),std::time::Instant::now());
+    loop {
+        tokio::select! {
+            done = &mut work => return done,
+            _ = tokio::time::sleep(std::time::Duration::from_millis(10)) => {
+                let now = std::fs::read(state).unwrap();
+                if now != last { (last,since) = (now,std::time::Instant::now()); }
+                assert!(since.elapsed() < std::time::Duration::from_secs(5),"a fila parou de gravar");
+            }
+        }
+    }
+}
+
 #[tokio::test]
 async fn blocked_rpc_does_not_block_interrupt_or_state() {
     let (handle,server,dir) = setup_behavior(false,true).await;
     let request = handle.clone();
     let pending = tokio::spawn(async move { request.command(command()).await });
-    tokio::time::timeout(std::time::Duration::from_secs(5),async {
+    let state = dir.path().join("key.queue-state.json");
+    unless_queue_stalls(&state,async {
         loop {
-            let state:State = serde_json::from_slice(&std::fs::read(dir.path().join("key.queue-state.json")).unwrap()).unwrap();
-            if state.operations.contains_key("op-1") { break; }
-            tokio::task::yield_now().await;
+            let saved:State = serde_json::from_slice(&std::fs::read(&state).unwrap()).unwrap();
+            if saved.operations.contains_key("op-1") { break; }
+            // Dormir, não girar: o giro disputa a CPU com quem grava a fila.
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
-    }).await.unwrap();
-    let result = tokio::time::timeout(std::time::Duration::from_secs(5),handle.command(RuntimeCommand {
-        operation_id:"interrupt".into(),kind:OperationKind::Interrupt,payload:json!({}) })).await.unwrap().unwrap();
+    }).await;
+    let result = unless_queue_stalls(&state,handle.command(RuntimeCommand {
+        operation_id:"interrupt".into(),kind:OperationKind::Interrupt,payload:json!({}) })).await.unwrap();
     assert!(result.disposition == Disposition::Accepted);
     assert!(handle.snapshot().await.unwrap()["view"].is_object());
     handle.stop().await.unwrap();
