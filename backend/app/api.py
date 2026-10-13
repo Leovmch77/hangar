@@ -610,7 +610,9 @@ async def _contas_pelo_rust(request: Request, call_next):
     autenticado segue para ele pela ponte privada, e a resposta dele volta como veio. Sem o Rust
     não há reserva Python: a rota responde indisponível."""
     from app import account_bridge
-    if not request.url.path.startswith(account_bridge.ACCOUNT_PREFIXES):
+    # A lista de credenciais é do Rust só no GET exato: apelido, cookie e sincronizar seguem aqui.
+    listing = request.method == "GET" and request.url.path == "/api/credenciais"
+    if not (listing or request.url.path.startswith(account_bridge.ACCOUNT_PREFIXES)):
         return await call_next(request)
     try:
         require_auth(request)

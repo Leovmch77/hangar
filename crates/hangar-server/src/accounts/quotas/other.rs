@@ -131,13 +131,19 @@ pub fn aliases(env: &AccountEnvironment) -> Map<String, Value> {
         .collect()
 }
 
+/// Cookies colados na tela, só os completos (`workspace_id` e `auth_cookie` texto não vazio).
+pub(crate) fn opencode_saved(env: &AccountEnvironment) -> Map<String, Value> {
+    let filled = |value: &Value| value.as_str().is_some_and(|s| !s.is_empty());
+    json_object(&read_path(shared(env).join(".hangar-opencode.json")))
+        .into_iter()
+        .filter(|(_, entry)| filled(&entry["workspace_id"]) && filled(&entry["auth_cookie"]))
+        .collect()
+}
+
 fn opencode_config(env: &AccountEnvironment, id: &str) -> Option<(String, String)> {
-    let saved = json_object(&read_path(shared(env).join(".hangar-opencode.json")));
-    let filled = |value: &Value| value.as_str().filter(|s| !s.is_empty()).map(str::to_owned);
-    if let Some(entry) = saved.get(id)
-        && let (Some(workspace), Some(cookie)) = (filled(&entry["workspace_id"]), filled(&entry["auth_cookie"]))
-    {
-        return Some((workspace, cookie));
+    if let Some(entry) = opencode_saved(env).get(id) {
+        let text = |field: &str| entry[field].as_str().unwrap_or_default().to_owned();
+        return Some((text("workspace_id"), text("auth_cookie")));
     }
     // Reserva do ambiente (as variáveis do pi-quotas): o que a pessoa colou na tela vence.
     let workspace = py_strip(env.base.get("OPENCODE_GO_WORKSPACE_ID").map_or("", String::as_str));
@@ -145,9 +151,12 @@ fn opencode_config(env: &AccountEnvironment, id: &str) -> Option<(String, String
     (!workspace.is_empty() && !cookie.is_empty()).then(|| (workspace.to_owned(), cookie.to_owned()))
 }
 
+pub(crate) fn kimi_config(env: &AccountEnvironment) -> PathBuf {
+    env_value(env, "KIMI_CODE_HOME").map(PathBuf::from).unwrap_or_else(|| env.home.join(".kimi-code")).join("config.toml")
+}
+
 fn kimi_providers(env: &AccountEnvironment) -> Vec<(String, String, String)> {
-    let home = env_value(env, "KIMI_CODE_HOME").map(PathBuf::from).unwrap_or_else(|| env.home.join(".kimi-code"));
-    let Some(text) = std::fs::read(home.join("config.toml")).ok().and_then(|b| String::from_utf8(b).ok()) else {
+    let Some(text) = std::fs::read(kimi_config(env)).ok().and_then(|b| String::from_utf8(b).ok()) else {
         return vec![];
     };
     // O `tomllib` recusa o arquivo com BOM.
@@ -171,13 +180,13 @@ fn kimi_providers(env: &AccountEnvironment) -> Vec<(String, String, String)> {
 }
 
 /// `^[a-z0-9][a-z0-9_-]{0,31}$` do Python, cujo `$` também casa antes de uma quebra final.
-fn engine_name_ok(name: &str) -> bool {
+pub(crate) fn engine_name_ok(name: &str) -> bool {
     static NAME: std::sync::LazyLock<regex::Regex> =
         std::sync::LazyLock::new(|| regex::Regex::new(r"\A[a-z0-9][a-z0-9_-]{0,31}\n?\z").unwrap());
     NAME.is_match(name)
 }
 
-fn engines(env: &AccountEnvironment) -> Result<Map<String, Value>, &'static str> {
+pub(crate) fn engines(env: &AccountEnvironment) -> Result<Map<String, Value>, &'static str> {
     let path = env_value(env, "CP_ENGINES_FILE").map(PathBuf::from).unwrap_or_else(|| shared(env).join("engines.json"));
     let bytes = match std::fs::read(&path) {
         Ok(bytes) => bytes,
@@ -198,7 +207,7 @@ fn engines(env: &AccountEnvironment) -> Result<Map<String, Value>, &'static str>
     }
 }
 
-fn falsy(value: &Value) -> bool {
+pub(crate) fn falsy(value: &Value) -> bool {
     match value {
         Value::Null => true,
         Value::Bool(b) => !b,
