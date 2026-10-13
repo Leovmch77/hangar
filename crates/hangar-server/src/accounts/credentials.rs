@@ -73,6 +73,27 @@ fn managed_block(text: Option<&str>, name: &str) -> bool {
     text.find(&start).is_some_and(|i| text[i..].contains(&end))
 }
 
+/// Login da linha Codex. Indisponível diz a causa: `cli-ausente`, `prazo` (3 s) ou `leitura-falhou`;
+/// preparo em curso não é falha e fica sem motivo. Status fora do conhecido não vira "desconectado".
+fn codex_login(auth: &Value, preparing: bool) -> Value {
+    let (state, logged, reason) = match auth["status"].as_str() {
+        Some("connected") => ("ok", json!(true), Value::Null),
+        Some("disconnected" | "none") => ("ok", json!(false), Value::Null),
+        Some("unavailable") => {
+            let reason = match auth["reason"].as_str() {
+                Some("cli_missing") => json!("cli-ausente"),
+                Some("deadline") => json!("prazo"),
+                _ if preparing => Value::Null,
+                _ => json!("leitura-falhou"),
+            };
+            ("indisponivel", Value::Null, reason)
+        }
+        _ => ("indisponivel", Value::Null, json!("formato-desconhecido")),
+    };
+    json!({"estado": state, "loggedIn": logged, "email": auth["email"], "plano": auth["plan"],
+        "motivo": reason, "refreshExpiresAt": null})
+}
+
 async fn codex_snapshot(state: &crate::routes::AppState, account: &super::catalog::Account, force: bool, bridge: Option<&super::bridge::AccountsBridge>) -> (Value, Value) {
     let service = &state.accounts;
     // Sem a ponte o preparo é desconhecido: `null`, nunca um `idle` inventado.
@@ -98,7 +119,9 @@ async fn codex_snapshot(state: &crate::routes::AppState, account: &super::catalo
         Ok(auth) => auth,
         Err(_) => {
             tracing::warn!(code = "codex_auth_deadline", account = %account.id, "leitura de autenticação Codex excedeu o prazo");
-            unavailable_auth()
+            let mut auth = unavailable_auth();
+            auth["reason"] = json!("deadline");
+            auth
         }
     };
     (auth, sync)
@@ -199,22 +222,19 @@ pub async fn public(state: Arc<crate::routes::AppState>, request: Request) -> Re
             report("codex_auth_method_unknown", "método de autenticação Codex desconhecido; sai unknown");
             method = "unknown";
         }
+        let sync_running = sync["status"] == "running";
         let mut sync = if account.is_default { Value::Null } else { sync["status"].clone() };
         if !(sync.is_null() || matches!(sync.as_str(), Some("idle" | "running" | "ready" | "partial" | "error"))) {
             report("codex_sync_unknown", "estado de preparo Codex desconhecido; sai null");
             sync = Value::Null;
         }
-        let known = auth["status"].as_str().unwrap_or("unavailable") != "unavailable";
-        let (state, logged) = if known { ("ok", json!(auth["status"] == "connected")) } else { ("indisponivel", Value::Null) };
-        let reason = if auth["reason"] == "cli_missing" { json!("cli-ausente") } else { Value::Null };
         let mut item = line(&id, "codex", method, &json!(account.id), &aliases, &quota);
         item["codex_account"] = json!(account.id);
         item["codex_sync"] = sync;
         item["ativa"] = json!(account.is_default);
         item["path"] = json!(account.home.to_string_lossy());
         item["usos"] = json!(["codex_cli"]);
-        item["login"] = json!({"estado": state, "loggedIn": logged, "email": auth["email"],
-            "plano": auth["plan"], "motivo": reason, "refreshExpiresAt": null});
+        item["login"] = codex_login(&auth, sync_running);
         out.push(item);
     }
     // Cota sem cadastro continua visível, mas não comprova autenticação do Codex.
@@ -261,5 +281,20 @@ mod tests {
         assert!(!managed_block(Some(&format!("{end}\n{start}")), "x"));
         assert!(!managed_block(None, "x"));
         assert!(managed_block(Some(&format!("{start}\n{end}yz")), "x"));
+    }
+
+    #[test]
+    fn codex_login_names_the_cause_and_never_guesses_disconnected() {
+        let reason = |auth: Value, preparing| codex_login(&auth, preparing)["motivo"].clone();
+        let mut deadline = unavailable_auth();
+        deadline["reason"] = json!("deadline");
+        assert_eq!(reason(deadline, false), json!("prazo"));
+        assert_eq!(reason(unavailable_auth(), false), json!("leitura-falhou"));
+        assert_eq!(reason(unavailable_auth(), true), Value::Null);
+        assert_eq!(reason(json!({"status":"unavailable","reason":"cli_missing"}), false), json!("cli-ausente"));
+        let odd = codex_login(&json!({"status":"expired"}), false);
+        assert_eq!((&odd["estado"], &odd["loggedIn"]), (&json!("indisponivel"), &Value::Null));
+        let off = codex_login(&json!({"status":"disconnected"}), false);
+        assert_eq!((&off["estado"], &off["loggedIn"], &off["motivo"]), (&json!("ok"), &json!(false), &Value::Null));
     }
 }

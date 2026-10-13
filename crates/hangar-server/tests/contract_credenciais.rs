@@ -192,8 +192,15 @@ async fn credentials_match_python() {
         if kind.as_deref() != expected["content_type"].as_str() {
             failures.push(format!("{name}: content-type {kind:?} != {}", expected["content_type"]));
         }
-        if body != expected["body"] {
-            failures.push(format!("{name}:\n rust   {body}\n python {}", expected["body"]));
+        // R#9 (usuário, 13/10): login Codex indisponível leva a causa na linha; o Python dava `null`.
+        let mut expected_body = expected["body"].clone();
+        if name == "codex_estoura_prazo" {
+            for row in expected_body.as_array_mut().into_iter().flatten().filter(|row| row["tipo"] == "codex") {
+                row["login"]["motivo"] = json!("prazo");
+            }
+        }
+        if body != expected_body {
+            failures.push(format!("{name}:\n rust   {body}\n python {expected_body}"));
         }
     }
     assert_eq!(hits.load(Ordering::SeqCst), 0, "a lista chegou ao Python");
