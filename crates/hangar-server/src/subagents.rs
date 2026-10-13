@@ -22,7 +22,7 @@ use regex::Regex;
 use serde_json::{Map, Value, json};
 
 use crate::interactions::InteractionBinding;
-use crate::plugin::{AgentLife, AgentSend};
+use crate::plugin::{AgentLife, AgentSend, AgentState};
 use crate::routes::{AppState, cors, gate, pass, route_failed};
 use crate::side::Binding;
 use crate::transcript::{LineParser, Provider, decode_line};
@@ -113,6 +113,21 @@ fn plugin_block(st: &AppState, binding: &InteractionBinding) -> Option<&'static 
     None
 }
 
+/// `{"<agentId>": {"state": running|completed|failed|stopped, "end_time": ms|null}}` do runtime sem terminal.
+fn headless_lives(map: &Value) -> HashMap<String, AgentLife> {
+    map.as_object().into_iter().flatten().filter_map(|(id, v)| {
+        let state = match v.get("state").and_then(Value::as_str)? {
+            "running" => AgentState::Running,
+            "completed" => AgentState::Finished,
+            "failed" | "stopped" => AgentState::Failed,
+            _ => return None,
+        };
+        let ended_at = v.get("end_time").and_then(Value::as_i64)
+            .and_then(chrono::DateTime::from_timestamp_millis).map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
+        Some((id.clone(), AgentLife { state, ended_at }))
+    }).collect()
+}
+
 /// `state`, `endedAt`, `canMessage` e `messageBlocked` de um item. No Claude com terminal o estado é o
 /// sinal do plugin (null sem sinal); Kimi e Pi dizem sozinhos que acabaram (`finished`).
 fn decorate(a: &mut Map<String, Value>, life: Option<&AgentLife>, blocked: Option<&str>, problem: Option<&str>) {
@@ -167,6 +182,14 @@ async fn serve(st: &AppState, (name, agent): (String, Option<String>), query: Op
         if let Some(code) = &problem {
             warn_once(&name, code);
             blocked = Some(STATE_UNAVAILABLE);
+        }
+    }
+    // Claude sem terminal: o stream-json do runtime diz o ciclo de vida e vence o sinal do plugin.
+    if provider == "claude" && let Some(runtime) = st.state.runtime.get() {
+        match runtime.claude_subagents(&name).await {
+            Some(Ok(map)) => lives.extend(headless_lives(&map)),
+            Some(Err(e)) => { warn_once(&name, "runtime_subagents_unavailable"); tracing::debug!(session = %name, ?e, "subagentes do runtime"); problem = Some("runtime_subagents_unavailable".into()); }
+            None => {}
         }
     }
     let problem = problem.map(|_| STATE_UNAVAILABLE);
