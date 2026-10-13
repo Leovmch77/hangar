@@ -6,8 +6,8 @@ use std::sync::{Arc,Mutex,atomic::AtomicU64};
 use std::time::Duration;
 use tokio::sync::{broadcast,Notify};
 
-struct Io { native_record:Mutex<Option<(std::path::PathBuf,u32,std::path::PathBuf)>>, idle:Arc<std::sync::atomic::AtomicBool>, ready:Arc<std::sync::atomic::AtomicBool>, native:Arc<std::sync::atomic::AtomicBool>, generation:Arc<AtomicU64>, binding_generation:AtomicU64, capture_error:std::sync::atomic::AtomicBool, calls:Mutex<Vec<CommandRequest>>, text:Mutex<String>, gate:Notify, blocked:std::sync::atomic::AtomicBool, fail_write:std::sync::atomic::AtomicBool, fail_enter:std::sync::atomic::AtomicBool, rotate_enter:std::sync::atomic::AtomicBool, conversation:Arc<Mutex<String>>, socket_calls:Mutex<Vec<Vec<u8>>>, ghost:Mutex<String>, hold_capture:std::sync::atomic::AtomicBool, hold_skip:std::sync::atomic::AtomicUsize, mods_screen:Mutex<Option<String>>, ring_keys:std::sync::atomic::AtomicUsize, ring_returns:std::sync::atomic::AtomicBool, swallow:std::sync::atomic::AtomicBool, footer:std::sync::atomic::AtomicBool, panes:Mutex<Vec<String>>, created:AtomicU64, switch_at:Mutex<Option<(usize,&'static str)>> }
-impl Io { fn new()->Self { Self { native_record:Default::default(),idle:Arc::new(std::sync::atomic::AtomicBool::new(true)),ready:Arc::new(std::sync::atomic::AtomicBool::new(true)),native:Default::default(),generation:Arc::new(AtomicU64::new(1)),binding_generation:AtomicU64::new(1),capture_error:Default::default(),calls:Mutex::new(vec![]),text:Mutex::new(String::new()),gate:Notify::new(),blocked:std::sync::atomic::AtomicBool::new(false),fail_write:std::sync::atomic::AtomicBool::new(false),fail_enter:std::sync::atomic::AtomicBool::new(false),rotate_enter:std::sync::atomic::AtomicBool::new(false),conversation:Arc::new(Mutex::new("sid".into())),socket_calls:Mutex::new(vec![]),ghost:Mutex::new(String::new()),hold_capture:std::sync::atomic::AtomicBool::new(false),hold_skip:Default::default(),mods_screen:Mutex::new(None),ring_keys:Default::default(),ring_returns:Default::default(),swallow:Default::default(),footer:Default::default(),panes:Mutex::new(vec![]),created:AtomicU64::new(1),switch_at:Mutex::new(None) } } }
+struct Io { native_record:Mutex<Option<(std::path::PathBuf,u32,std::path::PathBuf)>>, idle:Arc<std::sync::atomic::AtomicBool>, ready:Arc<std::sync::atomic::AtomicBool>, native:Arc<std::sync::atomic::AtomicBool>, generation:Arc<AtomicU64>, binding_generation:AtomicU64, capture_error:std::sync::atomic::AtomicBool, calls:Mutex<Vec<CommandRequest>>, text:Mutex<String>, gate:Notify, blocked:std::sync::atomic::AtomicBool, fail_write:std::sync::atomic::AtomicBool, fail_enter:std::sync::atomic::AtomicBool, rotate_enter:std::sync::atomic::AtomicBool, conversation:Arc<Mutex<String>>, socket_calls:Mutex<Vec<Vec<u8>>>, ghost:Mutex<String>, hold_capture:std::sync::atomic::AtomicBool, hold_skip:std::sync::atomic::AtomicUsize, mods_screen:Mutex<Option<String>>, ring_keys:std::sync::atomic::AtomicUsize, ring_returns:std::sync::atomic::AtomicBool, swallow:std::sync::atomic::AtomicBool, footer:std::sync::atomic::AtomicBool, panes:Mutex<Vec<String>>, created:AtomicU64, switch_at:Mutex<Option<(usize,&'static str)>>, projection_at_facts:Mutex<Option<(std::path::PathBuf,Vec<String>)>> }
+impl Io { fn new()->Self { Self { projection_at_facts:Mutex::new(None),native_record:Default::default(),idle:Arc::new(std::sync::atomic::AtomicBool::new(true)),ready:Arc::new(std::sync::atomic::AtomicBool::new(true)),native:Default::default(),generation:Arc::new(AtomicU64::new(1)),binding_generation:AtomicU64::new(1),capture_error:Default::default(),calls:Mutex::new(vec![]),text:Mutex::new(String::new()),gate:Notify::new(),blocked:std::sync::atomic::AtomicBool::new(false),fail_write:std::sync::atomic::AtomicBool::new(false),fail_enter:std::sync::atomic::AtomicBool::new(false),rotate_enter:std::sync::atomic::AtomicBool::new(false),conversation:Arc::new(Mutex::new("sid".into())),socket_calls:Mutex::new(vec![]),ghost:Mutex::new(String::new()),hold_capture:std::sync::atomic::AtomicBool::new(false),hold_skip:Default::default(),mods_screen:Mutex::new(None),ring_keys:Default::default(),ring_returns:Default::default(),swallow:Default::default(),footer:Default::default(),panes:Mutex::new(vec![]),created:AtomicU64::new(1),switch_at:Mutex::new(None) } } }
 impl Io {
     fn refresh_record(&self) {
         if let Some((path,pid,socket))=&*self.native_record.lock().unwrap() {
@@ -20,7 +20,11 @@ impl Io {
 impl TerminalIo for Io {
     fn command<'a>(&'a self,r:CommandRequest)->IoFuture<'a,CommandOutput> { Box::pin(async move {
         let cmd=r.args[0].clone();
-        let count={let mut calls=self.calls.lock().unwrap();calls.push(r.clone());calls.len()};
+        let (count,written)={let mut calls=self.calls.lock().unwrap();let written=calls.iter().any(|c|c.args.contains(&"-l".into()));calls.push(r.clone());(calls.len(),written)};
+        // Os fatos são lidos pela tela: a vista que existia em cada captura antes da primeira escrita.
+        if cmd=="capture-pane" && !written && let Some((path,seen))=&mut *self.projection_at_facts.lock().unwrap() {
+            seen.push(std::fs::read_to_string(path).unwrap_or_default());
+        }
         // `switch_at`: na chamada N, a vida (conversa) ou o pane trocam, e ficam trocados.
         match *self.switch_at.lock().unwrap() {
             Some((at,"life")) if at==count=>{self.generation.fetch_add(1,std::sync::atomic::Ordering::AcqRel);},
@@ -1568,5 +1572,80 @@ async fn each_mods_hold_checks_the_pane_again() {
         assert!(matches!(h.pane(PaneOp::Screen,far()).await.unwrap(),PaneReply::Screen(_)));
     }
     assert_eq!(checks()-before,2,"uma conferência por reserva");
+    h.stop().await.unwrap();
+}
+
+fn projection(f:&Fixture)->Vec<Value> {
+    std::fs::read_to_string(f.target.projection_dir.join("session.jsonl")).unwrap_or_default().lines().map(|l|serde_json::from_str(l).unwrap()).collect()
+}
+
+#[tokio::test]
+async fn direct_send_publishes_row_only_once_delivered() {
+    // Em idle a linha não aparece na vista enquanto os fatos são lidos: a primeira versão publicada já vem entregue.
+    let f=Fixture::new().await;
+    *f.io.projection_at_facts.lock().unwrap()=Some((f.target.projection_dir.join("session.jsonl"),vec![]));
+    let h=f.start();
+    assert_eq!(h.command(f.command("direct","Olá")).await.unwrap().disposition,hangar_server::runtime::protocol::Disposition::Accepted);
+    let seen=f.io.projection_at_facts.lock().unwrap().as_ref().unwrap().1.clone();
+    // Os fatos do `execute` são lidos entre a gravação da linha e o despacho: a primeira leitura não vê a
+    // linha, e nenhuma a vê ainda não entregue.
+    assert!(!seen.is_empty() && !seen[0].contains("\"direct\""),"vista publicada antes do despacho: {seen:?}");
+    assert!(!seen.iter().any(|view|view.contains("\"delivered\":false")),"linha publicada antes de entregue: {seen:?}");
+    let rows=projection(&f);
+    assert_eq!(rows.len(),1); assert_eq!(rows[0]["id"],"direct"); assert_eq!(rows[0]["delivered"],true);
+    h.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn deferred_send_publishes_queued_row() {
+    let f=Fixture::new().await; f.ready.store(false,std::sync::atomic::Ordering::Release); let h=f.start();
+    assert_eq!(h.command(f.command("wait","Olá")).await.unwrap().disposition,hangar_server::runtime::protocol::Disposition::Deferred);
+    let rows=projection(&f);
+    assert_eq!(rows.len(),1); assert_eq!(rows[0]["id"],"wait"); assert_eq!(rows[0]["delivered"],false);
+    h.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn held_projection_is_restored_on_restart() {
+    // Queda entre a gravação e o despacho: a linha está no diário e a abertura seguinte a publica.
+    let f=Fixture::new().await;
+    let store=Store::open(&f.target.state_path,&f.target.projection_dir,queue::State::new("key",1,"session",vec![])).unwrap();
+    let mut store=store;
+    store.exec_held(1,"held",ClockSample {monotonic_s:0.0,epoch_s:2.0},Action::Append {text:"Olá".into(),delivered:false,ts:None,pre_transcript:false,entry_id:Some("held".into())},true).unwrap();
+    assert!(projection(&f).is_empty());
+    drop(store);
+    Store::open(&f.target.state_path,&f.target.projection_dir,queue::State::new("key",1,"session",vec![])).unwrap();
+    let rows=projection(&f); assert_eq!(rows.len(),1); assert_eq!(rows[0]["delivered"],false);
+}
+
+#[tokio::test]
+async fn new_message_waits_behind_older_deferred_row() {
+    let f=Fixture::new().await; f.ready.store(false,std::sync::atomic::Ordering::Release); let h=f.start();
+    let first=h.command(f.command("A","Primeira")).await.unwrap();
+    assert_eq!(first.disposition,hangar_server::runtime::protocol::Disposition::Deferred); assert!(first.payload["code"].is_null());
+    let second=h.command(f.command("B","Segunda")).await.unwrap();
+    assert_eq!(second.disposition,hangar_server::runtime::protocol::Disposition::Deferred);
+    assert_eq!(second.payload["code"],"queue_ahead"); assert_eq!(second.payload["queued"],true);
+    f.ready.store(true,std::sync::atomic::Ordering::Release);
+    let typed=||->Vec<String> {f.io.calls.lock().unwrap().iter().filter(|r|r.args[0]=="send-keys" && r.args.contains(&"-l".into())).map(|r|r.args.last().unwrap().clone()).collect()};
+    f.wait_for("as duas digitadas",||typed().iter().any(|t|t=="Segunda")).await;
+    let typed=typed();
+    let (a,b)=(typed.iter().position(|t|t=="Primeira").unwrap(),typed.iter().position(|t|t=="Segunda").unwrap());
+    assert!(a<b,"ordem {typed:?}");
+    h.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn delivered_row_confirms_when_transcript_grows_without_waiting_the_tick() {
+    let f=Fixture::new().await;
+    let lease=crate::lease_when_free(&f.target.lease_path);
+    let store=Store::open(&f.target.state_path,&f.target.projection_dir,queue::State::new("key",1,"session",vec![])).unwrap();
+    let options=TerminalOptions {io:f.io.clone(),limits:InputLimits {settle:Duration::ZERO,literal_settle:Duration::ZERO,multiline_settle:Duration::ZERO,slash_settle:Duration::ZERO,proof_attempts:1,ready_attempts:1,cleanup_attempts:1},tick:Duration::from_secs(600),..TerminalOptions::default()};
+    let h=TerminalActor::spawn(f.target.clone(),QueueActor::start(store,lease),f.policy.clone(),options,broadcast::channel(128).0,Arc::new(AtomicU64::new(0)));
+    assert_eq!(h.command(f.command("fast","Olá")).await.unwrap().disposition,hangar_server::runtime::protocol::Disposition::Accepted);
+    std::fs::write(&f.target.transcript,"{\"type\":\"user\",\"uuid\":\"1\",\"message\":{\"content\":\"Olá\"}}\n").unwrap();
+    let start=std::time::Instant::now();
+    f.wait_for("confirmada pelo transcript",||f.state()["rows"][0]["confirmed"]==true).await;
+    assert!(start.elapsed()<Duration::from_secs(2),"confirmação esperou {:?}",start.elapsed());
     h.stop().await.unwrap();
 }

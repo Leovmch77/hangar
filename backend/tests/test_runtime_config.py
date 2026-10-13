@@ -40,6 +40,29 @@ def test_campo_desconhecido_e_ignorado():
     assert salvo == {}          # o cliente não inventa setting
 
 
+def test_dictation_organization_defaults_to_none_even_with_legacy_key():
+    rc.aplicar({"llm_api_key": "chave-sintetica", "llm_base_url": "https://exemplo.invalid/v1"})
+    assert rc.get("dictation_organization_mode") == "none"
+    assert rc.estado()["dictation_organization_mode"]["valor"] == "none"
+
+
+@pytest.mark.parametrize("mode", ["none", "harness", "external_api", ""])
+def test_dictation_organization_choice_is_persisted(mode):
+    rc.aplicar({"dictation_organization_mode": mode, "dictation_claude_model": "modelo-claude-real",
+                "dictation_codex_model": "modelo-codex-real"})
+    assert rc.get("dictation_organization_mode") == mode
+    assert rc.get("dictation_claude_model") == "modelo-claude-real"
+    assert rc.get("dictation_codex_model") == "modelo-codex-real"
+
+
+def test_dictation_organization_rejects_unknown_mode_and_reset_disables_it():
+    with pytest.raises(ValueError, match="dictation_organization_mode"):
+        rc.aplicar({"dictation_organization_mode": "automatica"})
+    rc.aplicar({"dictation_organization_mode": "harness"})
+    rc.aplicar({}, remover={"dictation_organization_mode"})
+    assert rc.get("dictation_organization_mode") == "none"
+
+
 def test_preferencia_statusline_ligada_por_padrao_e_persistida():
     assert rc.get("claude_statusline_update") is True
     rc.aplicar({"claude_statusline_update": False})
@@ -230,16 +253,39 @@ def test_env_jev_desligado_leva_so_o_marcador():
     assert rc.env_jev(False) == {"HANGAR_JEV": "off"}
 
 
-def test_env_jev_ligado_leva_chave_e_o_texto_configurado():
-    rc.aplicar({"jev_api_key": "ts-secreta", "jev_texto_base_url": "https://llm.exemplo",
+def test_env_jev_ligado_leva_chave_e_o_auxiliar_vindo_do_texto_antigo():
+    rc.aplicar({"jev_api_key": "ts-secreta", "jev_texto_base_url": "https://llm.exemplo/v1/chat/completions",
                 "jev_texto_api_key": "k", "jev_texto_modelo": "mini"})
     env = rc.env_jev(True)
     assert env["HANGAR_JEV"] == "on"
     assert env["TYPESAFE_API_KEY"] == "ts-secreta"
-    assert env["JEV_TEXTO_BASE_URL"] == "https://llm.exemplo"
-    assert env["JEV_TEXTO_MODELO"] == "mini"
+    assert env["JEV_AUX_BASE_URL"] == "https://llm.exemplo/v1"
+    assert env["JEV_AUX_MODELO"] == "mini" and env["JEV_AUX_API_KEY"] == "k"
     # Campo vazio não vira variável vazia: o CLI decide pela AUSÊNCIA, e "" ligaria o ramo errado.
-    assert "JEV_TEXTO_CMD" not in env
+    assert "JEV_TEXTO_CMD" not in env and "JEV_AUX_ESFORCO" not in env
+    assert not any(k.startswith("JEV_TEXTO_") for k in env)
+
+
+def test_jev_aux_primeira_gravacao_leva_o_legado_e_valida():
+    rc.aplicar({"jev_texto_base_url": "https://llm.exemplo/v1", "jev_texto_api_key": "k", "jev_texto_modelo": "mini"})
+    rc.aplicar({"jev_aux_modelo": "outro"})
+    assert rc.jev_aux() == {"jev_aux_base_url": "https://llm.exemplo/v1", "jev_aux_api_key": "k",
+                            "jev_aux_modelo": "outro", "jev_aux_esforco": ""}
+    assert rc.estado()["jev_aux_api_key"]["valor"] != "k"   # segredo mascarado
+    with pytest.raises(ValueError, match="jev_aux_esforco"):
+        rc.aplicar({"jev_aux_esforco": "max"})
+    with pytest.raises(ValueError, match="jev_aux_base_url"):
+        rc.aplicar({"jev_aux_base_url": "llm.exemplo"})
+
+
+def test_jev_aux_cliproxy_usa_a_chave_do_servidor(monkeypatch):
+    monkeypatch.setattr(cc, "_cliproxy_keys", lambda: [])
+    with pytest.raises(ValueError, match="jev_aux_cliproxy"):
+        rc.aplicar({"jev_aux_cliproxy": True})
+    monkeypatch.setattr(cc, "_cliproxy_keys", lambda: ["proxy-key"])
+    rc.aplicar({"jev_aux_base_url": "http://127.0.0.1:8317/v1", "jev_aux_cliproxy": True})
+    assert rc.get("jev_aux_api_key") == "proxy-key"
+    assert "jev_aux_cliproxy" not in rc.estado()
 
 
 def test_env_jev_ligado_leva_endpoint_e_modelo_do_jev():
@@ -376,6 +422,14 @@ def test_null_remove_a_lista_e_volta_ao_servico_unico():
     assert rc.estado()["transcription_providers"] == {"valor": [], "definido": False, "origem": "env"}
 
 
+def test_dictation_recent_messages_are_disabled_by_default_and_persisted():
+    assert rc.get("dictation_include_recent_messages") is False
+    rc.aplicar({"dictation_include_recent_messages": True})
+    assert rc.get("dictation_include_recent_messages") is True
+    rc.aplicar({}, remover={"dictation_include_recent_messages"})
+    assert rc.get("dictation_include_recent_messages") is False
+
+
 def test_openai_compatible_service_can_be_saved_without_key():
     item = {**_GROQ, "api_key": "", "base_url": "http://127.0.0.1:8000/v1"}
     rc.aplicar({"transcription_providers": [item]})
@@ -402,3 +456,13 @@ def test_whisper_configuration_requires_installed_files(field):
         rc.aplicar({"transcription_providers": [item]})
 
 
+
+
+def test_jev_aux_primeira_gravacao_recusa_com_legado_ilegivel(monkeypatch):
+    def quebrado():
+        raise cc.ComputerControlError(500, "erro_computer_control_read", "ilegível")
+    monkeypatch.setattr(cc, "_known_entry", quebrado)
+    assert rc.jev_aux()["jev_aux_modelo"] == ""   # só ler não derruba
+    with pytest.raises(ValueError, match="modelo antigo"):
+        rc.aplicar({"jev_aux_modelo": "m"})
+    assert "jev_aux_modelo" not in rc._carregar()

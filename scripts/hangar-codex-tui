@@ -526,7 +526,7 @@ def main() -> int:
     sys.path.insert(0, str(_REPO / "backend"))
     from app.adapters.codex import sessions as codex_sessions
     from app.adapters.codex.lancador import (APPROVAL, NO_UPDATE_CHECK, SANDBOX, PERMISSION_POLICIES,
-                                            service_tier_override, tool_output_override)
+                                            identity_override, service_tier_override, tool_output_override)
     launch_key = None
     def runtime():
         live = codex_sessions.load(args.name)
@@ -603,6 +603,11 @@ def main() -> int:
                          if policy == (approval, sandbox)), None)
     if imported_resume and resumed_mode is None:
         ap.error("combinação de aprovação e sandbox não suportada para conversa importada; sessão preservada")
+    # O modo gravado é o que a sessão criada por esta herda; par sem modo do app não apaga o que havia.
+    mode_record = {"permission_mode": resumed_mode} if resumed_mode else {}
+    if resumed_mode is None:
+        print(f"hangar-codex-tui: aprovação {approval} com sandbox {sandbox} não é um modo do app; "
+              "o modo gravado da sessão fica como estava", file=sys.stderr)
     resumed_metadata = ({"codex_home": str(selected_home), "codex_account": args.codex_account,
                          "cwd": cwd, "permission_mode": resumed_mode} if imported_resume else {})
     from app import codex_contas
@@ -703,7 +708,7 @@ def main() -> int:
                 [_codex(), "app-server", "--listen", endpoint, *instruction_overrides,
                  "-c", f'sandbox_mode="{sandbox}"', "-c", f'approval_policy="{approval}"',
                  *tool_output_override(args.tool_output_token_limit),
-                 *service_tier_override(selected_service_tier())],
+                 *service_tier_override(selected_service_tier()), *identity_override(os.environ)],
                 stdout=subprocess.DEVNULL, stderr=erros, cwd=cwd,
             )
         except (OSError, SystemExit) as exc:
@@ -725,7 +730,8 @@ def main() -> int:
                 update_runtime(headless=False, cano=None, launching=False,
                                       endpoint=endpoint, app_pid=servidor.pid, launcher_pid=os.getpid(),
                                       model=args.model, effort=args.effort, rollout_path=rollout,
-                                      tool_output_token_limit=args.tool_output_token_limit, **resumed_metadata,
+                                      tool_output_token_limit=args.tool_output_token_limit,
+                                      **{**mode_record, **resumed_metadata},
                                       **({"service_tier": args.service_tier} if args.service_tier is not None else {}))
             else:
                 codex_sessions.save(args.name, thread_id, rollout, cwd,
@@ -734,7 +740,7 @@ def main() -> int:
                                 codex_home=str(codex_home),
                                 codex_account=args.codex_account,
                                 tool_output_token_limit=args.tool_output_token_limit,
-                                service_tier=args.service_tier)
+                                service_tier=args.service_tier, **mode_record)
         elif thread_id != previous_thread and thread is not None:
             if args.transfer_id:
                 from app.conversation_transfer import load_transfer, TransferPhase

@@ -204,3 +204,20 @@ def test_facts_never_read_or_feed_the_python_plugin(monkeypatch):
     monkeypatch.setattr(sse._list_registry, "list_with_state", keep)
     out = _compute([_row("ct"), _row("ch", headless=True), _row("cx", "codex")], owner_clients=2)
     assert out["held"] == {}, "o campo segue no contrato, vazio"
+
+
+def test_one_session_without_snapshot_does_not_break_the_others(monkeypatch):
+    from types import SimpleNamespace
+
+    import app.adapters as adapters
+
+    class Headless:
+        def problema_de(self, name):
+            if name == "subindo":
+                raise RuntimeError("snapshot do runtime indisponível")
+            return ("headless_turno_erro", "x") if name == "quebrada" else None
+
+    monkeypatch.setattr(adapters, "get_adapter", lambda _key: Headless())
+    infos = [SimpleNamespace(name=n, provider="claude", headless=True) for n in ("subindo", "quebrada", "boa")]
+    # A sessão ainda sem retrato fica sem problema; as outras seguem com o delas.
+    assert list_facts._problems(infos) == {"quebrada": "headless_turno_erro"}

@@ -52,7 +52,8 @@ async def test_lista_tools_e_quem_sou(identidade):
     async with sessao_mcp({"X-Hangar-Pane": "%3"}) as s:
         nomes = {t.name for t in (await s.list_tools()).tools}
         assert nomes == {"who_am_i", "sessions", "send", "group", "pair", "unpair", "new_session",
-                         "close_session", "browser_open", "browser", "browser_batch", "html_render"}
+                         "close_session", "browser_open", "browser", "browser_batch", "browser_goal", "browser_check",
+                         "html_render"}
         res = await s.call_tool("who_am_i", {})
         assert not res.is_error and res.structured_content == {"name": "eu", "origem": "pane"}
 
@@ -210,6 +211,8 @@ async def test_browser_open_completa_pagina_propria_e_recusa_outro_caminho(ident
     monkeypatch.setattr(api, "nav_pendente", lambda name, url: gravados.append((name, url)))
     monkeypatch.setattr(api, "resolve_bind_ip", lambda s: "0.0.0.0")
     monkeypatch.setattr(settings, "port", 8765)
+    monkeypatch.setattr(mcp_server.navshell, "esperar_pronto", lambda name, desde, antes, pedida: "http://x/")
+    monkeypatch.setattr(mcp_server.navshell, "url_antes", lambda name: None)
     async with sessao_mcp({"X-Hangar-Pane": "%3"}) as s:
         # O Rust codifica o nome inteiro (`%65u` é `eu`).
         for url in ("/api/sessions/eu/pages/abc-1", "/api/sessions/%65u/pages/abc-1"):
@@ -320,3 +323,94 @@ async def test_html_render_takes_html_or_url_never_both(identidade, monkeypatch)
         assert (await s.call_tool("html_render", {"url": url, "html": "<p></p>", "title": "t"})).is_error
         assert (await s.call_tool("html_render", {"title": "t"})).is_error
     assert sent == [{"session": sent[0]["session"], "title": "t", "draft": False, "url": url}]
+
+
+@pytest.fixture
+def voz(monkeypatch):
+    monkeypatch.setattr(quem_chama, "resolver",
+                        lambda h: (quem_chama.VOICE, quem_chama.VOICE) if h.get("x-hangar-voice") == "ok" else
+                        (_ for _ in ()).throw(quem_chama.SessaoDesconhecida(quem_chama.DICA)))
+
+
+async def test_voz_usa_o_mcp_inteiro_e_fecha_so_pelo_sim_falado(voz, monkeypatch):
+    from app import api, pages_bridge
+    from app.models import CreatedSessionInfo
+    enviados, criadores, fechadas, chamadas, nav = [], [], [], {}, []
+
+    async def input_prompt(name, body):
+        enviados.append((name, body.text))
+        return {"delivered": True}
+
+    async def create_session(body):
+        criadores.append(body.creator)
+        return CreatedSessionInfo(name=body.name, cwd=body.cwd)
+
+    async def kill_session(name, by=None):
+        fechadas.append(name); return {"ok": True, "warning": None}
+
+    async def group_message(name, body):
+        chamadas["grupo"] = (name, body.text); return {"peers": [], "pulados": []}
+
+    async def pair_session(name, body):
+        chamadas["parear"] = (name, body.peer); return {"ok": True}
+
+    async def unpair_session(name):
+        chamadas["desparear"] = name; return {"ok": True}
+
+    async def abrir_nav_sessao(name, body):
+        chamadas["nav_abrir"] = (name, body.url)
+
+    monkeypatch.setattr(api, "input_prompt", input_prompt)
+    monkeypatch.setattr(api, "create_session", create_session)
+    monkeypatch.setattr(api, "kill_session", kill_session)
+    monkeypatch.setattr(api, "group_message", group_message)
+    monkeypatch.setattr(api, "pair_session", pair_session)
+    monkeypatch.setattr(api, "unpair_session", unpair_session)
+    monkeypatch.setattr(api, "abrir_nav_sessao", abrir_nav_sessao)
+    monkeypatch.setattr(mcp_server.navshell, "verbo", lambda name, v, args=None, aba=None: nav.append((name, v)) or f"ok: {v}")
+    monkeypatch.setattr(mcp_server.navshell, "esperar_pronto", lambda name, desde, antes, pedida: "http://x/")
+    monkeypatch.setattr(mcp_server.navshell, "url_antes", lambda name: None)
+    monkeypatch.setattr(pages_bridge, "publish", lambda payload: chamadas.setdefault("pagina", payload["session"]) and {"ok": True})
+    async with sessao_mcp({"X-Hangar-Voice": "ok"}) as s:
+        res = await s.call_tool("who_am_i", {})
+        assert res.structured_content == {"name": "voz", "origem": "voz", "kind": "voice",
+                                          "label": "assistente de voz do Hangar"}
+        assert not (await s.call_tool("send", {"alvo": "web", "texto": "terminei"})).is_error
+        assert not (await s.call_tool("new_session", {"nome": "n", "cwd": "/tmp", "provider": "codex"})).is_error
+        # Fechar é destrutivo: vai pela ferramenta da voz, que pede o sim falado.
+        res = await s.call_tool("close_session", {"alvo": "web"})
+        assert res.is_error and "close_session" in res.content[0].text and "sim" in res.content[0].text
+        # Tools de sessão funcionam dizendo em nome de qual sessão; sem ela, a mensagem diz o parâmetro.
+        for tool, args in (("group", {"texto": "x"}), ("pair", {"alvo": "web"}), ("unpair", {}),
+                           ("browser_open", {"url": "http://x"}), ("browser", {"verbo": "snapshot"}),
+                           ("browser_batch", {"passos": []}), ("html_render", {"title": "t", "html": "<p>x</p>"})):
+            res = await s.call_tool(tool, args)
+            assert res.is_error and "`sessao`" in res.content[0].text, tool
+            assert not (await s.call_tool(tool, {**args, "sessao": "web"})).is_error, tool
+    assert enviados == [("web", "[de: voz] terminei")]
+    assert criadores == [None], "a voz não tem conta nem modo para herdar"
+    assert fechadas == []
+    assert chamadas == {"grupo": ("web", "x"), "parear": ("web", "web"), "desparear": "web",
+                        "nav_abrir": ("web", "http://x"), "pagina": "web"}
+    assert nav == [("web", "snapshot")]
+
+
+async def test_browser_goal_so_com_o_jev_da_sessao(identidade, monkeypatch):
+    async with sessao_mcp({"X-Hangar-Pane": "%3"}) as s:
+        res = await s.call_tool("browser_goal", {"objetivo": "abre a agenda"})
+        assert res.is_error and "Jev não chegou ligado" in res.content[0].text
+    from app import runtime_config
+    monkeypatch.setattr(runtime_config, "env_jev", lambda ligado: {"HANGAR_JEV": "on"})
+    async with sessao_mcp({"X-Hangar-Pane": "%3", "X-Hangar-Jev": "on"}) as s:
+        res = await s.call_tool("browser_check", {"estado": "lista com o item"})
+        assert res.is_error and "não está configurado" in res.content[0].text
+
+
+async def test_shot_devolve_a_imagem(identidade, monkeypatch, tmp_path):
+    png = tmp_path / "a.png"
+    png.write_bytes(b"\x89PNG\r\n\x1a\n")
+    monkeypatch.setattr(mcp_server.navshell, "verbo", lambda name, v, args=None, aba=None: f"ok: shot {png}")
+    async with sessao_mcp({"X-Hangar-Pane": "%3"}) as s:
+        res = await s.call_tool("browser", {"verbo": "shot"})
+        assert not res.is_error
+        assert [c.type for c in res.content] == ["text", "image"] and res.content[1].mime_type == "image/png"

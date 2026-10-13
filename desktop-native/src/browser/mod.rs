@@ -22,7 +22,7 @@ pub mod cdp {
 #[cfg(target_os = "linux")]
 mod chromium;
 #[cfg(target_os = "linux")]
-pub use chromium::{Engine, Warm};
+pub use chromium::{Engine, Warm, carry::take_notice as take_cookie_notice};
 
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 mod wry_engine;
@@ -38,6 +38,9 @@ pub enum Event {
     /// Mensagem da página da conversa (`window.hangarHost`), JSON cru no formato do MCP Apps.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     Host(String),
+    /// Clique ou tecla da pessoa dentro da página nativa (Windows): a GPUI não os vê.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    UserInput,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

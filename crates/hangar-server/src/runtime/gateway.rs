@@ -424,6 +424,8 @@ impl RuntimeRegistry {
     pub fn with_codex_environment(mut self,env:crate::accounts::environment::AccountEnvironment) -> Self { self.policy = self.policy.with_codex_environment(env); self }
     /// Interface dos mods: sessão Claude sem terminal aberta aqui vira superfície remota e publica no `Mods`.
     pub fn with_mods(mut self,mods:crate::mods::state::Mods) -> Self { self.mods = Some(mods); self }
+    /// A linha de status do ator lê a cota direto do módulo de contas.
+    pub fn with_accounts(mut self,accounts:crate::accounts::AccountService) -> Self { self.policy = self.policy.with_accounts(accounts); self }
     pub fn with_plugin(mut self, plugin:Arc<crate::plugin::Store>) -> Self { self.plugin = Some(plugin); self }
     pub fn with_terminal_states(mut self, states:Arc<crate::state::published::Published>) -> Self { self.terminal_states=Some(states);self }
     pub fn with_terms(mut self, terms:Arc<crate::term::Terms>) -> Self {self.terms=Some(terms);self}

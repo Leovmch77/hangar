@@ -64,6 +64,52 @@ def test_unknown_session_404():
     assert r.status_code == 404
 
 
+def test_info_answers_without_waiting_for_the_projection():
+    calls = []
+
+    async def slow_op(name, command, operation_id):
+        calls.append((name, command["kind"]))
+        await asyncio.sleep(0.5)
+
+    coordinator = SimpleNamespace(managed_queue=lambda name: True, op=slow_op)
+
+    async def scenario():
+        started = time.monotonic()
+        first = await internal_api.session_info("s1")
+        second = await internal_api.session_info("s1")
+        assert time.monotonic() - started < 0.4
+        assert first == second and first["jsonl"] == "/p/abc-123.jsonl"
+        await asyncio.sleep(0.05)
+        # Uma reabertura em voo por sessão: a segunda tela não empilha outra.
+        assert calls == [("s1", "ensure_projection")]
+        await asyncio.sleep(0.6)
+        await internal_api.session_info("s1")
+        await asyncio.sleep(0.05)
+        assert calls == [("s1", "ensure_projection")] * 2
+        await asyncio.gather(*internal_api._projection_tasks.values())
+
+    with patch("app.api._cached_info", AsyncMock(return_value=_info())), \
+            patch("app.runtime_coordinator.current", return_value=coordinator):
+        asyncio.run(scenario())
+
+
+def test_projection_failure_goes_to_the_diary_without_failing_the_info():
+    async def broken(name, command, operation_id):
+        raise RuntimeError("ator ausente")
+
+    coordinator = SimpleNamespace(managed_queue=lambda name: True, op=broken)
+
+    async def scenario():
+        assert (await internal_api.session_info("s1"))["jsonl"] == "/p/abc-123.jsonl"
+        await asyncio.gather(*internal_api._projection_tasks.values())
+
+    with patch("app.api._cached_info", AsyncMock(return_value=_info())), \
+            patch("app.runtime_coordinator.current", return_value=coordinator), \
+            patch.object(internal_api.diag, "registrar") as registrar:
+        asyncio.run(scenario())
+    assert registrar.call_args.args[:2] == ("runtime.history_failed", "erro")
+
+
 def test_workspace_context_contains_only_registry_metadata(tmp_path):
     with patch("app.api._guardar_snap", return_value=[_info()]), patch("app.fs.allowed_roots", return_value=[tmp_path]):
         response = _client().get("/internal/workspace/context?name=s1", headers={"X-Hangar-Internal": SECRET})
@@ -214,16 +260,9 @@ def test_pure_policy_runs_without_a_journal_attempt(tmp_path, monkeypatch):
     coordinator.close_python_leases()
 
 
-def test_quota_route_returns_windows_for_the_account(tmp_path):
-    windows = [{"rotulo": "5h", "pct": 42, "reset_ts": None, "por_modelo": False}]
-    with patch("app.runtime_policy.quota_windows", return_value=windows) as quota:
-        ok = _client().get("/internal/quota", params={"config_dir": str(tmp_path)}, headers={"X-Hangar-Internal": SECRET})
-        relative = _client().get("/internal/quota", params={"config_dir": "relativo"}, headers={"X-Hangar-Internal": SECRET})
-        refused = _client().get("/internal/quota", params={"config_dir": str(tmp_path)})
-    assert ok.status_code == 200 and ok.json() == {"windows": windows}
-    quota.assert_called_once_with(str(tmp_path))
-    assert relative.status_code == 400
-    assert refused.status_code == 404, "sem o segredo, nem de 127.0.0.1"
+def test_quota_route_is_gone():
+    # A linha de status lê a cota no módulo de contas do Rust; aqui não sobra rota.
+    assert _client().get("/internal/quota", headers={"X-Hangar-Internal": SECRET}).status_code == 404
 
 
 def test_native_message_still_needs_its_journal_attempt(tmp_path, monkeypatch):
@@ -322,3 +361,81 @@ def test_internal_term_origin_same_rules(monkeypatch):
         assert r.status_code == 400
     r = client.post("/internal/term/origin", json={"origin": "x", "host": None}, headers={"X-Hangar-Internal": "errado"})
     assert r.status_code == 404
+
+
+def test_quota_facts_runs_outside_the_default_pool():
+    # O Rust chama esta rota enquanto um pedido de cota do Python ocupa o pool padrão: lá dentro ela se trava.
+    import json
+    import threading
+    seen = []
+    def facts(action, ids):
+        seen.append(threading.current_thread().name)
+        return {"sources": []}
+    raw = json.dumps({"action": "sources", "ids": []}).encode()
+    with patch("app.internal_api._instance_body", AsyncMock(return_value=(None, None, raw))), \
+            patch("app.cotas.quota_facts", facts):
+        r = _client().post("/internal/accounts/quotas", headers={"X-Hangar-Internal": SECRET})
+    assert r.status_code == 200 and r.json() == {"sources": []}
+    assert seen and seen[0].startswith("quota-facts")
+
+
+def test_busy_pool_threads_sees_uvloop_default_executor_threads():
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    from app.loop_monitor import _busy_pool_threads
+    release, started = threading.Event(), threading.Event()
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pool.submit(lambda: (started.set(), release.wait(5)))
+        assert started.wait(5)
+        try:
+            assert len(_busy_pool_threads()) == 1
+        finally:
+            release.set()
+
+
+@pytest.mark.asyncio
+async def test_stuck_pool_is_reported_before_the_probe_runs(monkeypatch):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    from app import diag, loop_monitor
+    monkeypatch.setattr(loop_monitor, "POOL_WAIT_WARN_S", 0.05)
+    monkeypatch.setattr(loop_monitor, "POOL_STUCK_S", 0.1)
+    logged = []
+    monkeypatch.setattr(diag, "registrar", lambda evento, nivel, **campos: logged.append((evento, campos.get("codigo"))))
+    release, started = threading.Event(), threading.Event()
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="travado") as pool:
+        pool.submit(lambda: (started.set(), release.wait(5)))
+        assert started.wait(5)
+        monitor = loop_monitor._Monitor()
+        monitor.pools["travado"] = loop_monitor._Throttle()
+        task = asyncio.create_task(monitor.probe_pool(asyncio.get_running_loop(), "travado", pool, ("travado",)))
+        try:
+            for _ in range(200):
+                if logged:
+                    break
+                await asyncio.sleep(0.01)
+            assert logged == [("pool.espera", "travado")]
+            assert "travado" in monitor.probing
+        finally:
+            release.set()
+            await task
+    assert "travado" not in monitor.probing
+
+
+def test_rust_que_desiste_antes_do_corpo_nao_vira_500():
+    # O Rust fecha a conexão ao estourar o prazo; ler o corpo depois disso não é erro do servidor.
+    sent = []
+
+    async def receive():
+        return {"type": "http.disconnect"}
+
+    async def send(message):
+        sent.append(message)
+
+    scope = {"type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1", "method": "POST",
+             "scheme": "http", "path": "/internal/list/facts", "raw_path": b"/internal/list/facts",
+             "query_string": b"", "root_path": "", "client": ("127.0.0.1", 50000), "server": ("127.0.0.1", 8765),
+             "headers": [(b"host", b"127.0.0.1"), (b"x-hangar-internal", SECRET.encode()),
+                         (b"content-type", b"application/json"), (b"content-length", b"10")]}
+    asyncio.run(api_mod.app(scope, receive, send))
+    assert [m["status"] for m in sent if m["type"] == "http.response.start"] == [499]

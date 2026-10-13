@@ -125,6 +125,9 @@ _MAX_PLAN_TASK_SEGMENTS = 9
 # anterior — erro nunca vira "repositorio limpo" no card.
 _git_ultimo: dict[str, tuple[dict | None, dict | None]] = {}
 _git_em_voo: set[str] = set()
+# O laço só guarda referência fraca da tarefa: sem esta, ela pode sumir antes do `finally` e o cwd
+# ficaria preso em `_git_em_voo`.
+_git_tarefas: set[asyncio.Task] = set()
 # Pool próprio: git lento não pode deixar na fila a captura do tmux e o resto do pool padrão.
 _git_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="hangar-git")
 
@@ -2124,7 +2127,9 @@ class SessionRegistry:
         for cwd in {d for d in map(_git_dir, infos) if d}:
             if cwd not in _git_em_voo:
                 _git_em_voo.add(cwd)
-                asyncio.create_task(_atualizar_git(cwd))
+                task = asyncio.create_task(_atualizar_git(cwd))
+                _git_tarefas.add(task)
+                task.add_done_callback(_git_tarefas.discard)
 
         def _decorate_planos() -> None:
             # Le markdown do disco: ler arquivo na corrotina e a mesma classe de erro que motivou
@@ -2393,6 +2398,8 @@ class SessionRegistry:
                 extra["perfil"] = omp_profile
             cmd = tmux.join_cmd(get_adapter(provider).spawn_command(
                 cwd, sid, model, effort, permission_mode, **extra))
+            if provider == "claude" and permission_mode:
+                modo_permissao.remember_launch_mode(sid, permission_mode)
         if engine:
             # `hangar-engine --exec` aplica o env DENTRO do pane (os.execvpe). Não usamos `tmux -e` porque
             # a key ficaria em /proc/<pid>/cmdline, legível por qualquer usuário da máquina. Depois do

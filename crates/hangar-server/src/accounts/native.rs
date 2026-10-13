@@ -84,7 +84,12 @@ impl AuthCache {
         value: Value,
     ) {
         let mut cache = self.0.lock().unwrap();
-        if *cache.generations.get(key).unwrap_or(&0) == generation {
+        // Leitura que falhou (prazo, processo) não sabe do login: o último bom da mesma credencial fica.
+        let kept = value == unavailable(false)
+            && cache.entries.get(key).is_some_and(|row| {
+                row.signature == signature && row.generation == generation && row.value["status"] != "unavailable"
+            });
+        if !kept && *cache.generations.get(key).unwrap_or(&0) == generation {
             cache.entries.insert(
                 key.clone(),
                 Cached {
@@ -239,15 +244,16 @@ impl NativeProcess {
         self.client.notify("initialized", json!({})).await
     }
     pub async fn read(&mut self) -> Result<Value, hangar_codex::client::ClientError> {
-        self.client
-            .request::<Value>(
-                ClientRequest::AccountRead(GetAccountParams {
-                    refresh_token: false,
-                }),
-                Duration::from_secs(30),
-            )
-            .await
-            .map(|v| auth_public(&v))
+        read_reply(
+            self.client
+                .request::<Value>(
+                    ClientRequest::AccountRead(GetAccountParams {
+                        refresh_token: false,
+                    }),
+                    Duration::from_secs(30),
+                )
+                .await,
+        )
     }
     pub async fn close(&mut self) {
         if self.closed {
@@ -258,6 +264,26 @@ impl NativeProcess {
         let _ = self.child.wait().await;
         self.closed = true;
     }
+}
+
+/// O servidor recusar o login guardado (revogado, vencido) é conta desconectada, que pede Entrar;
+/// as outras falhas de leitura continuam "não sei".
+fn read_reply(
+    reply: Result<Value, hangar_codex::client::ClientError>,
+) -> Result<Value, hangar_codex::client::ClientError> {
+    match reply {
+        Ok(value) => Ok(auth_public(&value)),
+        Err(hangar_codex::client::ClientError::Rpc { message, .. }) if login_refused(&message) => {
+            Ok(super::catalog::disconnected_auth())
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// O Codex não tem código próprio para isso: a recusa chega como erro interno citando o 401.
+fn login_refused(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    message.contains("unauthorized") || message.contains("(401)")
 }
 
 pub fn auth_public(result: &Value) -> Value {
@@ -309,10 +335,16 @@ impl AccountService {
             return self.read_codex_auth(account).await;
         };
         if self.codex_auth.0.lock().unwrap().refreshing.insert(key.clone()) {
+            // Solta a marca mesmo se a tarefa cair: presa, a conta nunca mais seria renovada.
+            struct Refreshing(AuthCache, AccountKey);
+            impl Drop for Refreshing {
+                fn drop(&mut self) { self.0.0.lock().unwrap_or_else(|e| e.into_inner()).refreshing.remove(&self.1); }
+            }
             let (service, account) = (self.clone(), account.clone());
+            let guard = Refreshing(self.codex_auth.clone(), key);
             tokio::spawn(async move {
+                let _guard = guard;
                 service.read_codex_auth(&account).await;
-                service.codex_auth.0.lock().unwrap().refreshing.remove(&key);
             });
         }
         value
@@ -449,7 +481,9 @@ mod cache_tests {
         assert_eq!(cache.get(&key, &signature), Some(connected));
         tokio::time::advance(Duration::from_secs(1)).await;
         assert_eq!(cache.get(&key, &signature), None);
-        cache.put(&key, signature.clone(), 0, unavailable(false));
+        cache.invalidate(&key);
+        let generation = cache.generation(&key);
+        cache.put(&key, signature.clone(), generation, unavailable(false));
         tokio::time::advance(Duration::from_secs(19)).await;
         assert!(cache.get(&key, &signature).is_some());
         tokio::time::advance(Duration::from_secs(1)).await;
@@ -461,6 +495,24 @@ mod cache_tests {
             None,
             "consulta anterior à invalidação repovoou o cache"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn failed_read_keeps_the_last_good_login_of_the_same_credential() {
+        let root = tempfile::tempdir().unwrap();
+        let key = AccountKey::new(Provider::Codex, root.path()).unwrap();
+        let signature = vec![None, None];
+        let cache = AuthCache::default();
+        let connected = json!({"status":"connected","email":"fixture@example.test"});
+        cache.put(&key, signature.clone(), 0, connected.clone());
+        // Leitura que estourou o prazo não diz nada do login: a lista não pode piscar "indisponível".
+        cache.put(&key, signature.clone(), 0, unavailable(false));
+        assert_eq!(cache.known(&key, &signature), Some(connected));
+        // CLI ausente e credencial trocada continuam aparecendo.
+        cache.put(&key, signature.clone(), 0, unavailable(true));
+        assert_eq!(cache.known(&key, &signature), Some(unavailable(true)));
+        cache.put(&key, vec![Some(vec![1])], 0, unavailable(false));
+        assert_eq!(cache.known(&key, &vec![Some(vec![1])]), Some(unavailable(false)));
     }
 
     #[tokio::test(start_paused = true)]
@@ -496,5 +548,27 @@ mod cache_tests {
         // Credencial trocada: nada conhecido para esta identidade, a leitura é esperada.
         std::fs::write(account.home.join("auth.json"), b"{}").unwrap();
         assert_ne!(service.read_codex_auth_fast(&account).await, connected);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::read_reply;
+    use hangar_codex::client::ClientError;
+    use serde_json::json;
+
+    #[test]
+    fn a_login_the_server_refuses_is_a_disconnected_account() {
+        // Login revogado: o `account/read` do Codex responde erro interno citando o 401.
+        let refused = Err(ClientError::Rpc { code: -32603, message: "workspace routing discovery unauthorized (401)".into() });
+        assert_eq!(read_reply(refused).unwrap(), json!({"method":"none","status":"disconnected","email":null,"plan":null}));
+    }
+
+    #[test]
+    fn other_read_failures_stay_unknown() {
+        let failed = Err(ClientError::Rpc { code: -32603, message: "error sending request".into() });
+        assert!(read_reply(failed).is_err());
+        assert!(read_reply(Err(ClientError::Timeout)).is_err());
+        assert_eq!(read_reply(Ok(json!({"account": {"type": "chatgpt", "email": "a@b.c", "planType": "pro"}}))).unwrap()["status"], "connected");
     }
 }

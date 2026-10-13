@@ -1106,7 +1106,8 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
         else:
             fontes = {"state": asyncio.create_task(pump("state", _monitor_de(prov))),
                       "preview": asyncio.create_task(preview_pump(broker))}
-        if not (rust and prov in ("codex", CLAUDE_HEADLESS)):
+        # Com o Rust dono não há quem publique aqui: Claude com terminal nunca publicou, e o resto é do hub.
+        if not rust:
             fontes["pensamento"] = asyncio.create_task(em_voo_pump("pensamento", fonte_pensamento(name)))
             fontes["ferramenta"] = asyncio.create_task(em_voo_pump("ferramenta", fonte_ferramenta(name)))
         return fontes

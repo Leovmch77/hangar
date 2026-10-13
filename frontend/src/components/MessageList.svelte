@@ -5,7 +5,7 @@
   import { toolLook } from '../lib/toolLook.svelte';
   import { tick } from 'svelte';
   import type { Snippet } from 'svelte';
-  import { planDisplayText, parseContextoUso, dayStarts } from '@hangar/core';
+  import { planDisplayText, parseContextoUso, dayStarts, waitsInQueue } from '@hangar/core';
   import OrqTimelineEvent from './OrqTimelineEvent.svelte';
   import ContextCard from './ContextCard.svelte';
   import SessionPlanPreview from './SessionPlanPreview.svelte';
@@ -53,6 +53,7 @@
     onAbrirAgente?: (prompt: string | undefined, titulo: string) => void;
     dockH: number;
     codex?: boolean;
+    headless?: boolean;
     plan?: {
       eventId: string | null;
       serverId?: string;
@@ -116,7 +117,7 @@
   let {
     events, stateEvent, pending, sessionName, dockH, preview = '', previewMd = false, previewFull = false, previewVivo = false, pensamento = '', ferramenta = null, onSelectOption, onSubmitSelected, onCancel, agentesRodando = [], onAbrirAgente = undefined,
     askOpen = false, askPayload = null, askActive = false, onAnswer, onAskClose, onFimDoLocal,
-    imageUrl, swapIds, codex = false, plan = null, footer,
+    imageUrl, swapIds, codex = false, headless = false, plan = null, footer,
     onForward, onRunCommand, onOpenSession, onOpenOrq, onDescartarFila, ancora = 0, focoId = null
   }: Props = $props();
   const sessionServer = useSessionServer();
@@ -583,8 +584,9 @@
                 ? img.filenames.slice(0, Math.max(0, img.filenames.length - ev.image_count))
                 : img.filenames)
             : []}
-          {@const srcs = [...enviadas.map((f) => uploadUrl(sessionName, f, false, sessionServer())),
-                          ...Array.from({ length: ev.image_count }, (_, i) => imageUrl ? imageUrl(ev.id, i) : transcriptImageUrl(sessionName, ev.id, i, sessionServer()))]}
+          {@const doTranscript = Array.from({ length: ev.image_count }, (_, i) => imageUrl ? imageUrl(ev.id, i) : transcriptImageUrl(sessionName, ev.id, i, sessionServer()))}
+          {@const srcs = [...enviadas.map((f) => uploadUrl(sessionName, f, false, sessionServer())), ...doTranscript]}
+          {@const thumbs = [...enviadas.map((f) => uploadUrl(sessionName, f, false, sessionServer(), 192)), ...doTranscript]}
           {#if peer}
             <!-- Recado de sessao-irma COM captura: continua sendo recado (chip "de: X", markdown),
                  so que com as miniaturas em cima. Sem este ramo a foto vencia e o recado saia
@@ -593,7 +595,7 @@
                         onForward={onForward ? () => onForward(forwardText) : null}
                         onOpenPeer={onOpenSession ? () => onOpenSession(peer.from) : null} />
           {:else}
-            <ImageBubble caption={img ? img.caption : ev.text ?? ''} {srcs} />
+            <ImageBubble caption={img ? img.caption : ev.text ?? ''} {srcs} {thumbs} />
           {/if}
         {:else if ev.id.startsWith('queued-') || ev.id.startsWith('held:')}
           <!-- Msg da fila durável ("queued-") ou recado preso em entrega bloqueada ("held:", o
@@ -602,9 +604,12 @@
                nao chegou ao agente (fila: a TUI engoliu as teclas; held: o hook barrou). Sem esta
                linha a bolha perdida acendia solida igual a uma aceita e o usuario ficava achando
                que mandou — falha tem que aparecer, nao sumir. -->
-          <div class="queued-row" class:dim={working && !ev.desistiu}>
+          <!-- Atenua só o que ainda espera a vez: sem terminal, a já entregue ao processo não está na fila. -->
+          <div class="queued-row" class:dim={working && !ev.desistiu
+            && (ev.id.startsWith('held:') || waitsInQueue(ev, codex ? 'codex' : null, headless))}>
             {#if imgFotos}
-              <ImageBubble caption={imgFotos.caption} srcs={imgFotos.filenames.map((f) => uploadUrl(sessionName, f, false, sessionServer()))} />
+              <ImageBubble caption={imgFotos.caption} srcs={imgFotos.filenames.map((f) => uploadUrl(sessionName, f, false, sessionServer()))}
+                           thumbs={imgFotos.filenames.map((f) => uploadUrl(sessionName, f, false, sessionServer(), 192))} />
             {:else if bastao}
               <!-- O kick-off da passagem chega SEMPRE por aqui: quem o entrega é a fila durável, e
                    não o terminal. Sem este ramo o cartão só existiria no caso que nunca acontece. -->
@@ -630,12 +635,21 @@
                   <pre>{ev.hook_error}</pre>
                 </div>
               {/if}
+            {:else if stateEvent?.problema === 'terminal_input_delivery_unproved' && ev.queued_delivered && ev.id.startsWith('queued-')}
+              <!-- Entregue sem prova: segura a fila até a pessoa descartar ou o prazo do servidor vencer. -->
+              <div class="queued-perdida">
+                <p role="status">{m.msg_entrega_sem_prova()}</p>
+                {#if onDescartarFila}
+                  <button type="button" class="queued-descartar" onclick={() => onDescartarFila(ev.id.slice('queued-'.length))}>{m.msg_descartar_perdida()}</button>
+                {/if}
+              </div>
             {/if}
           </div>
         {:else if sub}
           <SubagenteCard {sub} cru={ev.text ?? ''} ts={ev.ts} />
         {:else if imgFotos}
-          <ImageBubble caption={imgFotos.caption} srcs={imgFotos.filenames.map((f) => uploadUrl(sessionName, f, false, sessionServer()))} />
+          <ImageBubble caption={imgFotos.caption} srcs={imgFotos.filenames.map((f) => uploadUrl(sessionName, f, false, sessionServer()))}
+                           thumbs={imgFotos.filenames.map((f) => uploadUrl(sessionName, f, false, sessionServer(), 192))} />
         {:else if bastao}
           <!-- Passagem de bastão: cartão com os dois passos e os dois avisos do kick-off. O recado
                inteiro continua no bloco fechado do cartão. -->
@@ -729,7 +743,8 @@
       {@const pimg = pimg0 && pimg0.filenames.length ? pimg0 : null}
       <div class="pending-bubble" class:solid={p.solid}>
         {#if pimg}
-          <ImageBubble caption={pimg.caption} srcs={pimg.filenames.map((f) => uploadUrl(sessionName, f, false, sessionServer()))} />
+          <ImageBubble caption={pimg.caption} srcs={pimg.filenames.map((f) => uploadUrl(sessionName, f, false, sessionServer()))}
+                       thumbs={pimg.filenames.map((f) => uploadUrl(sessionName, f, false, sessionServer(), 192))} />
         {:else}
           <UserBubble text={p.text} ts={undefined} />
         {/if}

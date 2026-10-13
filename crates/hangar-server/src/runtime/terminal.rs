@@ -21,11 +21,12 @@ pub type ModsAnchor=Arc<std::sync::Mutex<Option<String>>>;
 /// `stall_notice`: entrega adiada sem escrita por mais que isso aparece na vista e no log. `focus_return`:
 /// com uma entrada esperando e o foco num painel ou na faixa de um mod há mais que isso, sem clique em curso,
 /// o executor devolve o teclado ao prompt e escreve. `clear_wait`: quanto a trava do `/clear` espera a
-/// conversa nova antes de conferir se ele foi aplicado.
-pub struct TerminalOptions { pub lifecycle:Option<std::sync::Weak<super::gateway::RuntimeRegistry>>,pub permissions:Option<Arc<std::sync::Mutex<crate::state::permission::PermissionMemory>>>,pub interactions:Option<Arc<InteractionStore>>,pub plugin:Option<Arc<crate::plugin::Store>>,pub mode_facts:Option<crate::terminal_facts::ModeReader>,pub terms:Option<Arc<crate::term::Terms>>,pub io:Arc<dyn TerminalIo>,pub limits:InputLimits,pub tick:Duration,pub stall_notice:Duration,pub anchor:ModsAnchor,pub focus_return:Duration,pub clear_wait:Duration }
+/// conversa nova antes de conferir se ele foi aplicado. `give_up_after`: quanto a entrega incerta espera a
+/// prova antes de ser desistida sozinha (com o Claude parado).
+pub struct TerminalOptions { pub lifecycle:Option<std::sync::Weak<super::gateway::RuntimeRegistry>>,pub permissions:Option<Arc<std::sync::Mutex<crate::state::permission::PermissionMemory>>>,pub interactions:Option<Arc<InteractionStore>>,pub plugin:Option<Arc<crate::plugin::Store>>,pub mode_facts:Option<crate::terminal_facts::ModeReader>,pub terms:Option<Arc<crate::term::Terms>>,pub io:Arc<dyn TerminalIo>,pub limits:InputLimits,pub tick:Duration,pub stall_notice:Duration,pub anchor:ModsAnchor,pub focus_return:Duration,pub clear_wait:Duration,pub give_up_after:Duration }
 impl Default for TerminalOptions {
     fn default()->Self {Self {lifecycle:None,permissions:None,interactions:None,plugin:None,mode_facts:None,terms:None,io:Arc::new(input::ProcessIo::default()),limits:InputLimits::default(),tick:Duration::from_secs(1),stall_notice:Duration::from_secs(30),
-        anchor:ModsAnchor::default(),focus_return:FOCUS_RETURN,clear_wait:CLEAR_APPLY_WAIT}}
+        anchor:ModsAnchor::default(),focus_return:FOCUS_RETURN,clear_wait:CLEAR_APPLY_WAIT,give_up_after:GIVE_UP_AFTER}}
 }
 /// Quanto uma linha espera, desde a primeira vez que viu o foco num mod, antes de o executor devolver o
 /// teclado ao prompt. Cobre quem acabou de levar o foco a um painel no terminal, sem deixar a mensagem do
@@ -131,9 +132,10 @@ struct Services {
     target:TerminalTarget,queue:Arc<QueueActor>,local:Arc<crate::terminal_facts::LocalTerminalFacts>,terms:Option<Arc<crate::term::Terms>>,root:String,attempt:String,text:String,sequence:Arc<AtomicU64>,life_proved:AtomicBool,
 }
 impl Services {
-    async fn action(&self,label:&str,action:Action)->Result<Value,RuntimeError> {
+    async fn action(&self,label:&str,action:Action)->Result<Value,RuntimeError> {self.action_held(label,action,false).await}
+    async fn action_held(&self,label:&str,action:Action,hold:bool)->Result<Value,RuntimeError> {
         let seq=self.sequence.fetch_add(1,Ordering::Relaxed);
-        self.queue.exec(self.target.generation,&format!("terminal:{label}:{seq}"),sample(),action).await.map_err(|_|error("queue_io"))
+        self.queue.exec_held(self.target.generation,&format!("terminal:{label}:{seq}"),sample(),action,hold).await.map_err(|_|error("queue_io"))
     }
 }
 impl TerminalServices for Services {
@@ -180,6 +182,8 @@ struct Executor {
     /// Entradas com linha na fila cuja entrega ficou incerta nesta vida do ator: o transcript ainda
     /// pode prová-las. Incerteza sem linha (tecla, seleção) não tem prova e só sai na reabertura.
     uncertain:Vec<String>,unprovable:bool,
+    /// Dona da trava de escrita e quando ela foi vista pela primeira vez nesta vida do ator (o prazo de desistir).
+    uncertain_since:Option<(String,tokio::time::Instant)>,
     /// Teclado emprestado ao Python (administração que digita no pane): id, prazo e o pedido que o abriu.
     loan:Option<(String,tokio::time::Instant,String)>,
     /// Linha da fila que o terminal recusa sem escrever (composer ocupado, tela ilegível): espera
@@ -203,7 +207,14 @@ struct Executor {
     /// tem teto e não vira laço de teclas.
     footer_misses:Option<(String,u32)>,
     reconciliation:Option<tokio::task::JoinHandle<Result<Value,RuntimeError>>>,
+    /// Depois de uma entrega aceita, a confirmação segue o crescimento do transcript em vez de esperar o
+    /// tique; a prova é a mesma (`confirm_rows`). Prazo para não vigiar uma linha que nunca chega.
+    confirm_until:Option<tokio::time::Instant>,
+    confirm_seen:Option<u64>,
 }
+/// Leitura do tamanho do transcript enquanto uma entrega espera confirmação: só `stat`.
+const CONFIRM_POLL:Duration=Duration::from_millis(50);
+const CONFIRM_WINDOW:Duration=Duration::from_secs(30);
 struct Stall {row:String,code:String,since:tokio::time::Instant,wait:Duration,next:tokio::time::Instant,surfaced:bool}
 /// Teto da espera entre tentativas: o composer que esvazia é visto na hora, e o resto (tela
 /// ilegível) não deve atrasar a mensagem muito além disso.
@@ -219,6 +230,8 @@ fn stalled_code(result:&RuntimeReply)->Option<&str> {
 const MAX_LOAN_S:u64=120;
 /// O `clear_wait` padrão: o transcript novo do `/clear` nasce em menos de um segundo.
 const CLEAR_APPLY_WAIT:Duration=Duration::from_secs(10);
+/// O `give_up_after` padrão: a prova chega em segundos; minutos sem ela, com o Claude parado, é perda.
+const GIVE_UP_AFTER:Duration=Duration::from_secs(180);
 /// Quanto o aviso de `/clear` não aplicado fica na vista.
 const CLEAR_NOTICE:Duration=Duration::from_secs(60);
 /// Até quando um transcript novo começado por `/clear` segura a trava esperando o Python trocar o
@@ -270,7 +283,7 @@ impl TerminalActor {
         let receipt=ReceiptIndex::new("claude",&target.binding.conversation);
         let (sender,receiver)=mpsc::channel(64); let closed=Arc::new(AtomicBool::new(false)); let anchor=options.anchor.clone();
         let local=Arc::new(crate::terminal_facts::LocalTerminalFacts::new(options.io.clone(),options.plugin.clone(),options.mode_facts.clone()));
-        let executor=Executor {target,queue:Arc::new(queue),local,options,events,revision,sequence,receipt,deliverable:false,last_error:None,uncertain:vec![],unprovable:false,loan:None,stall:None,hold:None,hold_checked:false,focus_refused:false,parked:VecDeque::new(),away:None,clear_watch:None,clear_notice:None,footer_misses:None,reconciliation:None};
+        let executor=Executor {target,queue:Arc::new(queue),local,options,events,revision,sequence,receipt,deliverable:false,last_error:None,uncertain:vec![],unprovable:false,uncertain_since:None,loan:None,stall:None,hold:None,hold_checked:false,focus_refused:false,parked:VecDeque::new(),away:None,clear_watch:None,clear_notice:None,footer_misses:None,reconciliation:None,confirm_until:None,confirm_seen:None};
         let task=tokio::spawn(executor.run(receiver,closed.clone()));
         TerminalHandle {sender,closed,task:Arc::new(Mutex::new(Some(task))),stopped:Arc::new(Mutex::new(None)),anchor}
     }
@@ -337,7 +350,8 @@ impl Executor {
         if state.generation!=self.target.generation{return Err(error("runtime_generation"));}
         Ok(json!({"key":self.target.key,"generation":self.target.generation,"revision":self.revision.load(Ordering::Acquire),
             "view":{"terminal":true,"conversation":self.target.binding.conversation,"deliverable":self.deliverable && !self.cleared(&state),"preserve_binding":state.runtime_state["preserve_binding"],"clear_barrier":state.runtime_state["clear_barrier"],
-                "input_stalled":self.stall.as_ref().filter(|s|s.surfaced).map(|s|s.code.clone()).or_else(||self.clear_notice.map(|_|"clear_not_applied".into()))},"channels":{},"error":self.last_error}))
+                "input_stalled":self.stall.as_ref().filter(|s|s.surfaced).map(|s|s.code.clone()).or_else(||self.clear_notice.map(|_|"clear_not_applied".into()))
+                    .or_else(||state.terminal_write_blocked(&self.target.binding.conversation).then(||"delivery_unproved".to_owned()))},"channels":{},"error":self.last_error}))
     }
     async fn publish(&self)->Result<(),RuntimeError> {
         self.revision.fetch_add(1,Ordering::AcqRel);
@@ -401,6 +415,7 @@ impl Executor {
                         if self.held() || !self.parked.is_empty() {continue;}
                         // Sem ciclo de vida ligado a reconciliação só falharia; a trava do `/clear` sai pelo `expire_clear` da drenagem.
                         if self.options.lifecycle.is_some() && let Err(failure)=self.reconcile_life().await {self.enter_error(failure).await?;}
+                        self.expire_uncertain().await;
                         // O `/clear` incerto depois do Enter deixa o erro de entrega incerta: a trava ainda vence.
                         if self.last_error.as_deref()==Some("terminal_facts") {
                             match self.drain_once(None).await {
@@ -412,6 +427,16 @@ impl Executor {
                         if self.last_error.is_some() {self.expire_clear().await; if self.reconciling() {self.reconcile_uncertain().await?;} continue;}
                         let result=async {self.confirm_rows().await?;self.drain_once(None).await?;Ok::<_,RuntimeError>(())}.await;
                         if let Err(failure)=result {self.enter_error(failure).await?;}
+                        continue;
+                    }
+                    _=tokio::time::sleep(CONFIRM_POLL),if self.confirm_until.is_some() && !closed.load(Ordering::Acquire) && self.last_error.is_none()=>{
+                        if self.held() || !self.parked.is_empty() {continue;}
+                        if self.confirm_until.is_some_and(|until|tokio::time::Instant::now()>=until) {self.confirm_until=None; continue;}
+                        let len=std::fs::metadata(&self.target.transcript).ok().map(|m|m.len());
+                        if len==self.confirm_seen {continue;}
+                        self.confirm_seen=len;
+                        if let Err(failure)=self.confirm_rows().await {self.enter_error(failure).await?; continue;}
+                        if self.queue.snapshot().await.is_ok_and(|state|!state.rows.iter().any(|r|r["delivered"]==true && r["confirmed"]!=true)) {self.confirm_until=None;}
                         continue;
                     }
                 };
@@ -434,6 +459,11 @@ impl Executor {
                     let result=match action {
                         Action::Finish {id,status,result}=>self.native_receipt(&id,status,result).await,
                         Action::Claim {..}|Action::SetDelivered {value:false,..}|Action::BumpAttempts {..}|Action::Reconcile {..}|Action::ReplaceRows {..}|Action::Prepare {..}|Action::BeginDispatch {..}|Action::MarkWriting {..}|Action::BindDispatch {..}|Action::Recover|Action::Confirm {..}|Action::ConfirmOccurrence {..}|Action::ConfirmLegacy {..}|Action::SetRuntimeState {..}|Action::LateRpcResolution {..}=>Err(error("terminal_queue_action")),
+                        action@Action::GiveUp {..}=>{
+                            let result=self.queue.exec(self.target.generation,&id,sample(),action).await.map_err(|_|error("queue_io"));
+                            if result.as_ref().is_ok_and(|given|*given==json!(true)) {self.release_uncertain().await;}
+                            result
+                        },
                         action=>self.queue.exec(self.target.generation,&id,sample(),action).await.map_err(|_|error("queue_io")),
                     };
                     if result.is_ok(){self.publish().await?;} let _=response.send(result);
@@ -827,9 +857,12 @@ impl Executor {
         } {
             return Ok(serde_json::from_value(prepared["result"].clone()).unwrap_or_else(|_|reply(id,disposition,Value::Null)));
         }
+        let mut fresh=false;
         if let Some(row)=&row_id {
             if !state.rows.iter().any(|r|r["id"]==*row) {
-                self.action(Action::Append {text:text.into(),delivered:false,ts:None,pre_transcript:payload["pre_transcript"]==true,entry_id:Some(row.clone())}).await?;
+                // Segurada: em idle a linha só aparece já entregue, sem piscar "Na fila"; o adiamento a publica no `Finish`.
+                self.services("maintenance","maintenance","").action_held("queue",Action::Append {text:text.into(),delivered:false,ts:None,pre_transcript:payload["pre_transcript"]==true,entry_id:Some(row.clone())},true).await?;
+                fresh=true;
             }
         }
         if prompt && !is_clear(text) && state.terminal_write_blocked(&self.target.binding.conversation) {
@@ -845,6 +878,12 @@ impl Executor {
             self.action(Action::Finish {id:id.into(),status,result:serde_json::to_value(&result).unwrap()}).await?;
             return Ok(result);
         }
+        // Mensagem nova não passa à frente de outra que ficou adiada: espera na fila e a drenagem entrega na ordem.
+        if fresh && state.pending_ahead(self.target.created) {
+            let result=reply(id,Disposition::Deferred,json!({"code":"queue_ahead","queued":true,"cleanup":"not_needed"}));
+            self.action(Action::Finish {id:id.into(),status:Status::Deferred,result:serde_json::to_value(&result).unwrap()}).await?;
+            return Ok(result);
+        }
         let root=row_id.as_deref().unwrap_or(id);
         // Antes da escrita: o transcript novo do `/clear` nasce logo depois do Enter.
         let dispatched_at=sample().epoch_s;
@@ -858,12 +897,25 @@ impl Executor {
         let mut result=if !current {reply(id,Disposition::Deferred,json!({"code":"terminal_facts","cleanup":"not_needed"}))}
             else if prompt && !slash && !facts.as_ref().is_some_and(|result|result.as_ref().is_ok_and(|f|f.ready && !f.open_question || f.native.is_some())) {reply(id,Disposition::Deferred,json!({"queued":true,"cleanup":"not_needed"}))}
             else {
-                if row_id.is_some() {
-                    let cursor=self.receipt.capture(&self.target.transcript).map_err(|_|error("receipt_cursor"))?;
-                    self.action(Action::BindDispatch {id:id.into(),cursor:serde_json::to_value(cursor).unwrap()}).await?;
-                }
+                let bound=match row_id.is_some() {
+                    true=>match self.receipt.capture(&self.target.transcript) {
+                        Ok(cursor)=>self.action(Action::BindDispatch {id:id.into(),cursor:serde_json::to_value(cursor).unwrap()}).await.map(|_|()),
+                        Err(_)=>Err(error("receipt_cursor")),
+                    },
+                    false=>Ok(()),
+                };
                 // A entrada só escreve depois do `writing` do escritor; antes disso, cair não a deixa incerta.
-                self.action(Action::BeginDispatch {id:id.into(),wire_id:format!("terminal:{}:{id}",self.target.generation),staged:kind=="input"}).await?;
+                let begun=match bound {
+                    Ok(())=>self.action(Action::BeginDispatch {id:id.into(),wire_id:format!("terminal:{}:{id}",self.target.generation),staged:kind=="input"}).await.map(|_|()),
+                    Err(failure)=>Err(failure),
+                };
+                // Falha com a projeção segurada: a linha que ficou na fila precisa aparecer.
+                if let Err(failure)=begun {
+                    if fresh && self.action(Action::EnsureProjection).await.is_err() {
+                        tracing::warn!(key=%self.target.key,session=%self.target.name,code="queue_projection_failed","a linha segurada não voltou à projeção depois da falha da entrega");
+                    }
+                    return Err(failure);
+                }
                 let publication=format!("{}:{}:{id}",self.target.key,self.target.generation);
                 let interrupted=if kind=="interrupt" {match &self.options.plugin {
                     Some(store)=>store.pending_all(&crate::terminal_facts::LocalTerminalFacts::binding(&self.target),std::time::Instant::now()).map_err(|failure|error(failure.0))?,None=>vec![],
@@ -950,6 +1002,9 @@ impl Executor {
             if row_id.is_some() {self.uncertain.push(id.into());} else if !clear_raised {self.unprovable=true;}
             self.enter_error(error("terminal_delivery_unknown")).await?;
         }else{self.last_error=None; self.uncertain.clear(); self.unprovable=false; self.publish().await?;}
+        if row_id.is_some() && result.disposition==Disposition::Accepted {
+            self.confirm_until=Some(tokio::time::Instant::now()+CONFIRM_WINDOW); self.confirm_seen=None;
+        }
         Ok(result)
     }
     /// Conta a série de recusas sem escrita; devolve se esta repete o código anterior (sem log novo).
@@ -1037,6 +1092,55 @@ impl Executor {
             }
         }
         if count>0{self.publish().await?;}Ok(json!({"confirmed":count}))
+    }
+    /// A entrega incerta que segue sem prova depois do prazo, com o Claude parado, é desistida sozinha:
+    /// parado, o que ele tivesse guardado já teria virado conversa. Nada é reenviado.
+    async fn expire_uncertain(&mut self) {
+        // Falha aqui adia a desistência para o próximo tique; o executor segue de pé e o diário diz por quê.
+        let skip=|key:&str,code:&str,reason:&str| if crate::warn_limit::allow(Some(key),code) {
+            tracing::warn!(key=%key,code=%code,"{reason}");
+        };
+        let state=match self.queue.snapshot().await {Ok(state)=>state, Err(_)=>{skip(&self.target.key,"give_up_queue_io","prazo da entrega incerta: fila ilegível, tenta no próximo tique"); return}};
+        let owner=state.runtime_state["terminal_write_barrier"]["operation_id"].as_str().map(str::to_owned);
+        let Some(entry)=owner.as_deref().and_then(|id|state.operations.get(id)).and_then(|op|op.entry_id.clone()) else {self.uncertain_since=None; return};
+        let now=tokio::time::Instant::now();
+        let since=match &self.uncertain_since {Some((seen,at)) if *seen==entry=>*at, _=>{self.uncertain_since=Some((entry,now)); return}};
+        if now.duration_since(since)<self.options.give_up_after {return;}
+        let services=self.services("maintenance","maintenance","");
+        match services.facts(&self.target.binding).await {
+            Ok(facts) if facts.binding==self.target.binding && facts.idle=>{},
+            Ok(_)=>return,
+            Err(_)=>{skip(&self.target.key,"give_up_facts","prazo da entrega incerta: fatos indisponíveis, sem saber se o Claude parou"); return},
+        }
+        // Texto ainda no composer é a própria entrega parada: desistir deixaria o dono com ele preso no prompt.
+        let driver=TerminalDriver::new(self.target.binding.clone(),services,self.options.io.clone(),self.options.limits.clone());
+        if !driver.composer_free().await {
+            skip(&self.target.key,"give_up_composer_busy","prazo da entrega incerta: o composer tem texto; a desistência fica com o Descartar");
+            return;
+        }
+        // Última chance da prova antes de desistir.
+        if self.confirm_rows().await.is_err() {skip(&self.target.key,"give_up_receipt","prazo da entrega incerta: transcript ilegível, tenta no próximo tique"); return;}
+        let id=format!("give_up:{entry}:{}",self.sequence.fetch_add(1,Ordering::Relaxed));
+        let given=self.queue.exec(self.target.generation,&id,sample(),Action::GiveUp {entry_id:entry.clone()}).await;
+        self.uncertain_since=None;
+        if !matches!(given,Ok(ref done) if *done==json!(true)) {
+            skip(&self.target.key,"give_up_refused","prazo da entrega incerta: a desistência não agiu; o prazo recomeça");
+            return;
+        }
+        tracing::warn!(key=%self.target.key,session=%self.target.name,code="delivery_given_up",entry=%entry,
+            waited_s=now.duration_since(since).as_secs(),"entrega incerta sem prova no prazo: desistida, sem reenviar; a fila segue");
+        self.release_uncertain().await;
+        if let Err(failure)=self.publish().await {tracing::warn!(key=%self.target.key,code=%failure.code,"vista da desistência não publicou");}
+    }
+    /// Depois de uma desistência: a memória da entrega incerta só sai quando o disco não segura mais a escrita.
+    async fn release_uncertain(&mut self) {
+        let Ok(state)=self.queue.snapshot().await else {
+            tracing::warn!(key=%self.target.key,code="give_up_queue_io","desistência gravada, mas a fila não releu; o erro de entrega incerta fica até a próxima leitura");
+            return;
+        };
+        if state.terminal_write_blocked(&self.target.binding.conversation) {return;}
+        self.uncertain.clear(); self.unprovable=false;
+        if self.last_error.as_deref()==Some("terminal_delivery_unknown") {self.last_error=None;}
     }
     fn reconciling(&self)->bool {
         self.last_error.as_deref()==Some("terminal_delivery_unknown") && !self.unprovable && !self.uncertain.is_empty()

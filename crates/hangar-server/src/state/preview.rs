@@ -191,6 +191,11 @@ pub fn committed_from_frame(frame: &[u8]) -> Option<String> {
             return None;
         }
     };
+    committed_from_event(ev)
+}
+
+/// A resposta que o evento grava, normalizada como a prévia compara.
+pub fn committed_from_event(ev: ChatEvent) -> Option<String> {
     (ev.kind == ChatKind::AssistantMsg).then_some(ev.text).flatten().filter(|t| !t.is_empty()).map(|t| norm(&t))
 }
 

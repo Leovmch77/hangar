@@ -87,7 +87,7 @@ pub fn baton(text: &str) -> Option<Baton> {
 
 /// De onde vem o recado: outra sessão (`[de: X]`), aviso para o grupo (`[grupo: X]`) ou o próprio app (`[painel: X]`).
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub enum PeerScope { Peer, Group, Panel }
+pub enum PeerScope { Peer, Group, Panel, External }
 
 /// Recado de outra sessão (`parsePeerMessage` + `parseCanal` do `packages/core`). Só apresentação: o texto gravado
 /// continua inteiro.
@@ -102,7 +102,7 @@ pub struct PeerMessage {
 
 pub fn peer_message(text: &str) -> Option<PeerMessage> {
     let rest = text.strip_prefix('[')?;
-    let (scope, rest) = [("de:", PeerScope::Peer), ("grupo:", PeerScope::Group), ("painel:", PeerScope::Panel)].into_iter()
+    let (scope, rest) = [("de:", PeerScope::Peer), ("de fora:", PeerScope::External), ("grupo:", PeerScope::Group), ("painel:", PeerScope::Panel)].into_iter()
         .find_map(|(mark, scope)| rest.strip_prefix(mark).map(|rest| (scope, rest)))?;
     let close = rest.find(']').filter(|&close| close > 0)?;
     let body = rest[close + 1..].trim_start();
@@ -205,6 +205,8 @@ mod tests {
         assert_eq!((peer.from.as_str(), peer.scope, peer.canal.as_deref(), peer.body.as_str()), ("orq-arbitro", PeerScope::Peer, Some("vigia"), "**Oi**"));
         assert_eq!(peer_message("[grupo: x] aviso").unwrap().scope, PeerScope::Group);
         assert_eq!(peer_message("[painel: Orquestração] ok").unwrap().scope, PeerScope::Panel);
+        let outside = peer_message("[de fora: pc-ana::api] faz o deploy").unwrap();
+        assert_eq!((outside.from.as_str(), outside.scope, outside.body.as_str()), ("pc-ana::api", PeerScope::External, "faz o deploy"));
         let link = peer_message("[de: x] [log](https://a) e mais").unwrap();
         assert_eq!((link.canal, link.body.as_str()), (None, "[log](https://a) e mais"));
         for text in ["oi [de: x] y", "[hangar: passagem de bastão] x", "[de:] x", "[de: x sem fechar"] {

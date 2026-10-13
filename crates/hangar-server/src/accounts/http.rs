@@ -330,28 +330,18 @@ pub async fn public(state: Arc<crate::routes::AppState>, request: Request) -> Re
         Ok(account) => account,
         Err(err) => return error(err),
     };
-    let instance = match crate::config::Config::runtime_instance() {
-        Ok(Some(instance)) => instance,
-        _ => {
-            return error(AccountError::new(
-                409,
-                "account_usage_unknown",
-                "não foi possível confirmar que a conta está livre",
-                json!({}),
-            ));
-        }
-    };
-    let bridge = match AccountsBridge::new(
-        state.cfg.upstream,
-        state.cfg.internal_secret.clone(),
-        instance,
-    ) {
-        Ok(bridge) => bridge,
-        Err(_) => return error(AccountError::io()),
-    };
+    // Sem instância o runtime não é identificável: os fatos dele não provariam nada.
+    if !matches!(crate::config::Config::runtime_instance(), Ok(Some(_))) {
+        return error(AccountError::new(
+            409,
+            "account_usage_unknown",
+            "não foi possível confirmar que a conta está livre",
+            json!({}),
+        ));
+    }
     let runtime = state.state.runtime.get().map(|r| &**r);
     let facts = super::bridge::settle_usage(
-        || service.usage(&bridge, runtime, &key),
+        || service.usage(runtime, &key),
         std::time::Duration::from_secs(10),
     )
     .await;
@@ -462,6 +452,17 @@ pub async fn private(
     let Ok(bytes) = axum::body::to_bytes(request.into_body(), 16384).await else {
         return StatusCode::BAD_REQUEST.into_response();
     };
+    // Se um processo usa a conta: o nascimento de sessão Codex do Python se aposenta com isso.
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct ProcessInput { process_uses: AccountKey, pid: u32 }
+    if let Ok(body) = serde_json::from_slice::<ProcessInput>(&bytes) {
+        // Remonta pela `new`: a chave desserializada crua não passa pela canonicalização.
+        let Ok(key) = AccountKey::new(body.process_uses.provider, &body.process_uses.canonical_home) else {
+            return StatusCode::BAD_REQUEST.into_response();
+        };
+        return Json(json!({"uses": state.accounts.process_uses(&key, body.pid).await})).into_response();
+    }
     #[derive(serde::Deserialize)]
     #[serde(deny_unknown_fields)]
     struct ResetInput { reset_account_id:String, credit_id:Option<String>, idempotency_key:String }
@@ -524,7 +525,7 @@ async fn codex_operation(state:&crate::routes::AppState,action:&str,id:&str,atte
         "status"=>Ok(state.accounts.codex_login_status(&account)),
         "login"=>match bridge(state) {
             Ok(bridge)=>match super::codex_login::CodexInvalidator::new(state.cfg.upstream,state.cfg.internal_secret.clone(),bridge.instance().into()) {
-                Ok(invalidator)=>state.accounts.start_codex_login(&account,bridge,state.state.runtime.get().cloned(),invalidator).await,
+                Ok(invalidator)=>state.accounts.start_codex_login(&account,state.state.runtime.get().cloned(),invalidator).await,
                 Err(err)=>Err(err),
             },Err(err)=>Err(err)},
         "cancel"=>state.accounts.cancel_codex_login(&account,attempt_id).await,
@@ -552,7 +553,7 @@ async fn codex_sign_out_operation(
     )?;
     state
         .accounts
-        .sign_out_codex(&account, bridge, state.state.runtime.get().cloned(), invalidator)
+        .sign_out_codex(&account, state.state.runtime.get().cloned(), invalidator)
         .await
 }
 
@@ -568,8 +569,8 @@ async fn device_operation(state: &crate::routes::AppState, action: &str, attempt
         state.cfg.internal_secret.clone(),facts.instance().into()) {Ok(bridge)=>bridge,Err(err)=>return error(err)};
     let runtime=state.state.runtime.get().cloned();
     let result=match action {
-        "start"=>state.accounts.start_device_login(facts,runtime,bridge).await,
-        "propagate"|"import"=>state.accounts.propagate_device(facts,runtime,bridge,action=="import").await,
+        "start"=>state.accounts.start_device_login(runtime,bridge).await,
+        "propagate"|"import"=>state.accounts.propagate_device(runtime,bridge,action=="import").await,
         "state"=>state.accounts.device_state(&bridge).await,
         _=>Err(AccountError::io()),
     };

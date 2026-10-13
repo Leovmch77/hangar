@@ -10,6 +10,10 @@ use std::{
 #[doc(hidden)]
 pub type SecondaryBarrier = Arc<dyn Fn(&Path) + Send + Sync>;
 
+/// Só para teste: saída de `list-sessions` no lugar do multiplexador real (`Err` = sem resposta).
+#[doc(hidden)]
+pub type TerminalFixture = Arc<dyn Fn() -> Result<String, ()> + Send + Sync>;
+
 #[derive(Clone)]
 pub struct AccountEnvironment {
     pub home: PathBuf,
@@ -19,6 +23,8 @@ pub struct AccountEnvironment {
     pub base: BTreeMap<String, String>,
     #[doc(hidden)]
     pub secondary_barrier: Option<SecondaryBarrier>,
+    #[doc(hidden)]
+    pub terminal_fixture: Option<TerminalFixture>,
 }
 
 impl AccountEnvironment {
@@ -48,6 +54,7 @@ impl AccountEnvironment {
             home,
             base,
             secondary_barrier: None,
+            terminal_fixture: None,
         }
     }
 
@@ -62,14 +69,8 @@ impl AccountEnvironment {
         });
         let mut env = self.base.clone();
         env.retain(|key, _| {
-            !matches!(
-                key.to_ascii_uppercase().as_str(),
-                "CP_AUTH_TOKEN"
-                    | "HANGAR_INTERNAL_SECRET"
-                    | "HANGAR_RUNTIME_INSTANCE"
-                    | "HANGAR_SERVER_LISTEN"
-                    | "HANGAR_SERVER_UPSTREAM"
-            )
+            let key = key.to_ascii_uppercase();
+            !crate::terminal_process::PRIVATE_ENV_KEYS.contains(&key.as_str())
         });
         if !account.is_default {
             env.retain(|key, _| {

@@ -249,16 +249,11 @@ enum Payload {
     Dossier(EntityId, u64, Result<String, Failure>),
     // Evento da chamada de voz com o número dela: o da chamada parada é descartado.
     Voice(u64, crate::voice::VoiceEvent),
-    // Opção beta do servidor local, o Codex achado e a voz gravada neste computador.
-    VoiceGate(Option<bool>, Option<crate::voice::rpc::Codex>, voice_ui::SavedVoice, Option<Vec<voice_ui::CodexAccount>>),
+    // `GET /api/voice/settings` do servidor ativo (a chave dele; `None` = leitura falhou) e as contas Codex de lá.
+    VoiceGate(String, Option<Value>, Option<Vec<voice_ui::CodexAccount>>),
+    VoiceMemory(String, u64, Result<Vec<Value>, String>),
     // Catálogo de modelos do organizador para a conta escolhida, com o número do pedido.
     VoiceModels(u64, Result<Vec<voice_ui::OrganizerModel>, String>),
-    // Histórico da sessão que recebeu pedido da voz e terminou fora da tela.
-    VoiceHistory(u64, SessionKey, Result<api::History, Failure>),
-    // Resultado de uma ferramenta de sessão da voz (criar, agrupar), com a chamada que espera a resposta.
-    VoiceDone(u64, crate::voice::CallId, voice_ui::VoiceDone),
-    // Decisão do Jev sobre uma fala, com as opções que foram perguntadas.
-    VoiceJev(u64, voice_ui::JevAsked, Result<crate::voice::jev::Decision, String>),
     // "No PC" / "Fora" de uma máquina do dono: a chave dela, se foi a troca pedida no botão e a resposta.
     Presence(String, bool, Result<Value, Failure>),
 }
@@ -941,6 +936,9 @@ impl Hangar {
                 return;
             }
             this.refresh_desktop_palette(cx);
+            // Página do navegador escondida por um diálogo que levou outra janela à frente: sem foco não há quadro, e é
+            // no quadro que ela volta ao lugar. A volta do foco pede esse quadro.
+            if !this.side.browsers.is_empty() { cx.notify(); }
             // O papel de parede muda fora da janela; a volta do foco é quando repintar importa.
             let a = appearance::get();
             if a.background == appearance::Background::Desktop && a.wallpaper == appearance::Wallpaper::Glass { this.refresh_backdrop(window, cx); }
@@ -1358,7 +1356,7 @@ impl Hangar {
         self.controls.on_select();
         self.reset_subagent_count();
         self.selected = Some(session.clone());
-        self.voice_session_opened(cx);
+        self.voice_session_opened();
         if !same_server || session.engine.as_deref().is_some_and(|e| !e.is_empty()) || session.uses_engine_account() {
             self.load_session_accounts(cx);
         }
@@ -1463,18 +1461,15 @@ impl Hangar {
         // Resultados amarrados à identidade da sessão valem mesmo depois de trocar a seleção.
         let payload = match envelope.payload {
             Payload::Sent(key, text, draft, result) => {
-                self.voice_sent(&key, &text, &result);
                 self.receive_sent(key, text, draft, result, window, cx);
                 cx.notify();
                 return;
             }
             // A chamada é deste computador: a troca de servidor não a derruba, só a geração dela decide.
             Payload::Voice(generation, event) => { self.receive_voice(generation, event, window, cx); return; }
-            Payload::VoiceGate(enabled, codex, saved, accounts) => { self.receive_voice_gate(enabled, codex, saved, accounts, window, cx); return; }
-            Payload::VoiceHistory(generation, key, result) => { self.voice_history(generation, key, result); return; }
+            Payload::VoiceGate(server, body, accounts) => { self.receive_voice_gate(server, body, accounts, window, cx); return; }
+            Payload::VoiceMemory(server, seq, list) => { self.receive_voice_memory(server, seq, list, cx); return; }
             Payload::VoiceModels(seq, result) => { self.receive_organizer_models(seq, result, window, cx); return; }
-            Payload::VoiceDone(generation, call, done) => { self.voice_done(generation, call, done, window, cx); return; }
-            Payload::VoiceJev(generation, asked, result) => { self.voice_jev_result(generation, asked, result, window, cx); return; }
             Payload::Files(key, owner, generation, files) => { self.receive_files(key, owner, generation, files, cx); cx.notify(); return; }
             Payload::UploadStep(key, id, result) => { let key = self.delivery.current(key); self.receive_upload(key, id, result); cx.notify(); return; }
             Payload::UploadsDone(key, draft, steer, known, group) => {
@@ -1540,7 +1535,6 @@ impl Hangar {
                         || matches!(&update, servers::RemoteUpdate::Stream(Update::Frame(frame)) if frame.event == "shortcut_terminals");
                     // Menu, renomear, fechar e grupo das linhas desta máquina acompanham a lista dela como os da ativa.
                     if self.receive_remote(generation, key.clone(), update, cx) { self.sidebar_sessions_changed(window, cx); }
-                    self.voice_sessions();
                     self.remote_changed(&key, window, cx);
                     if live { self.live_changed(&key, window, cx); }
                 }
@@ -1569,9 +1563,9 @@ impl Hangar {
                     self.sync_updater(cx);
                 }
                 self.replace_sessions(sessions, window, cx);
-                self.voice_sessions();
                 // Primeira lista desta conexão: liga a troca de servidor e a abertura do app.
                 self.refresh_voice_gate(cx);
+                if self.voice.open && self.voice.settings_open { self.refresh_voice_memory(); }
                 if let Some(name) = self.pending_open.take()
                     && let Some(session) = self.sessions.iter().find(|s| s.name == name).cloned() {
                     self.select(session, window, cx);
@@ -1628,7 +1622,6 @@ impl Hangar {
                             visible = self.list_error.is_some() || self.sessions != sessions;
                             self.list_error = None;
                             self.replace_sessions(sessions, window, cx);
-                            self.voice_sessions();
                             true
                         }
                         Err(_) => { self.list_error = Some(tr("invalid_response")); false }
@@ -1802,7 +1795,7 @@ impl Hangar {
             Payload::Sent(..) | Payload::Interrupted(..) | Payload::Acted(..) | Payload::Files(..) | Payload::UploadStep(..)
                 | Payload::UploadsDone(..) | Payload::Saved(..) | Payload::ConnectionNotSaved(..) | Payload::Reply(..) | Payload::HeadlessPlan(..)
                 | Payload::AppearanceSaved(..) | Payload::Backdrop(..) | Payload::BackdropPicked(..) | Payload::BackdropRemoved(..)
-                | Payload::Remote(..) | Payload::Lan(..) | Payload::Presence(..) | Payload::Voice(..) | Payload::VoiceGate(..) | Payload::VoiceHistory(..) | Payload::VoiceDone(..) | Payload::VoiceModels(..) | Payload::VoiceJev(..) => unreachable!(),
+                | Payload::Remote(..) | Payload::Lan(..) | Payload::Presence(..) | Payload::Voice(..) | Payload::VoiceGate(..) | Payload::VoiceMemory(..) | Payload::VoiceModels(..) => unreachable!(),
         }
         // Lista que trocou ou tirou a sessão aberta refaz a conversa.
         if rows || self.selection != selection { self.sync_rows(cx); }
@@ -2066,9 +2059,7 @@ impl Hangar {
                         self.delivery.confirm_real(&key, &event.id, text);
                     }
                 }
-                let assistant = event.kind == "assistant_msg";
                 self.chat.apply(event);
-                if assistant { self.voice_message(); }
                 if self.chat.preview.text.is_empty() {
                     self.cancel_preview_drop();
                     self.clear_visible_preview();
@@ -2101,7 +2092,6 @@ impl Hangar {
                 // Estado vazio é a conversa recém-aberta: o turno já corria, e quem conta é o último envio.
                 if turned { self.turn_seen = (state.state == "working" && !self.chat.state.state.is_empty()).then(Instant::now); }
                 if state.state == "working" { self.sent_until = None; }
-                if finished { self.voice_turn_finished(&state.state, cx); }
                 self.chat.update_state(state);
                 self.sync_working_row(cx);
                 if turned { self.restart_subagent_count(cx); }
@@ -2892,7 +2882,8 @@ impl Hangar {
             Action::Answer | Action::Skip => self.chat.ask.as_ref().map(|ask| ask.fingerprint.clone()),
             Action::Select(_) | Action::Submit => Some(select_snapshot(&self.chat.state)),
             Action::Implement => self.codex_plan().map(|(_, plan)| plan),
-            Action::Discard(id) => self.chat.events.iter().any(|e| e.id == format!("queued-{id}") && e.desistiu == Some(true)).then(|| id.clone()),
+            Action::Discard(id) => self.chat.events.iter().any(|e| e.id == format!("queued-{id}")
+                && (e.desistiu == Some(true) || holds_queue(e, self.chat.state.problema.as_deref()))).then(|| id.clone()),
             Action::Cancel | Action::Steer => Some(String::new()),
         }
     }
@@ -3962,7 +3953,7 @@ impl Hangar {
     /// recado do painel não tem sessão para abrir.
     fn peer_head(&self, row: &str, peer: cards::PeerMessage, cx: &mut Context<Self>) -> AnyElement {
         let name = HashMap::from([("n".to_owned(), peer.from.clone())]);
-        let key = match peer.scope { cards::PeerScope::Peer => "board_peer_de", cards::PeerScope::Group => "board_peer_grupo", cards::PeerScope::Panel => "board_peer_painel" };
+        let key = match peer.scope { cards::PeerScope::Peer => "board_peer_de", cards::PeerScope::Group => "board_peer_grupo", cards::PeerScope::Panel => "board_peer_painel", cards::PeerScope::External => "board_peer_fora" };
         let label = crate::i18n::tr_web(key, &name).unwrap_or_else(|| peer.from.clone());
         // O remetente é da máquina da conversa aberta, não da ativa.
         let server = self.open_server();
@@ -4531,6 +4522,10 @@ impl Hangar {
             }
             // Só entrada desistida sai da fila; o backend recusa descartar o que ainda está por entregar.
             if event.desistiu == Some(true) { discard = event.id.strip_prefix("queued-").map(str::to_owned); }
+            else if holds_queue(event, self.chat.state.problema.as_deref()) {
+                notes.push(tr("delivery_unproved"));
+                discard = event.id.strip_prefix("queued-").map(str::to_owned);
+            }
             else if event.queued() { notes.push(tr(if event.queued_delivered == Some(true) { "delivering" } else { "queued" })); }
             if event.is_error == Some(true) { notes.push(tr("tool_error")); }
             (label, (!notes.is_empty()).then(|| notes.join(" · ")), event.kind == "user_msg", event.is_error == Some(true))
@@ -4734,7 +4729,7 @@ fn peer_bubble(content: impl IntoElement, scope: cards::PeerScope) -> Div {
 }
 
 fn peer_tint(scope: cards::PeerScope) -> Hsla {
-    match scope { cards::PeerScope::Peer => theme::accent(), cards::PeerScope::Group => theme::warning(), cards::PeerScope::Panel => theme::muted() }
+    match scope { cards::PeerScope::Peer => theme::accent(), cards::PeerScope::Group => theme::warning(), cards::PeerScope::Panel => theme::muted(), cards::PeerScope::External => theme::danger() }
 }
 
 /// Recado de outra sessão numa mensagem do usuário, lido da legenda (os anexos ficam de fora).
@@ -5660,6 +5655,11 @@ fn prepare_detail(full: String) -> Prepared {
     let (shown, clipped) = conversation::clip(&full, DETAIL_MAX);
     let fenced = conversation::fenced(shown);
     Prepared::Detail { fenced, total, clipped, full: full.into() }
+}
+
+/// A bolha entregue sem prova que segura a fila: o servidor aceita descartá-la (desiste e tira).
+fn holds_queue(event: &ChatEvent, problem: Option<&str>) -> bool {
+    problem == Some("terminal_input_delivery_unproved") && event.queued() && event.queued_delivered == Some(true) && event.desistiu != Some(true)
 }
 
 fn prepare_message(event: &ChatEvent, dead: &HashSet<String>) -> Prepared {

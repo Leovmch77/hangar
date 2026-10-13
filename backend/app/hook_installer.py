@@ -172,13 +172,17 @@ def _write(settings_path: Path, data: dict) -> None:
 
 
 def _ensure_settings_file(settings_path: Path) -> bool:
-    """Garante o bloco PreToolUse/AskUserQuestion num unico settings.json, PRESERVANDO
+    """Garante os blocos AskUserQuestion (PreToolUse grava a pergunta; PostToolUse e
+    PostToolUseFailure a apagam quando ela termina no terminal) num unico settings.json, PRESERVANDO
     todo o resto: outros hooks do usuario (GateGuard, caveman, ponytail, matcher 'Bash'…)
     e qualquer outra chave (model, env, permissions…). Retorna True se gravou (mudou)."""
     data = _load_settings(settings_path)
     if data is None:
         return False
-    if not _sync_hook(data, "PreToolUse", _COMMAND, matcher=_MATCHER, por_nome=True):
+    changed = False
+    for event in ("PreToolUse", "PostToolUse", "PostToolUseFailure"):
+        changed |= _sync_hook(data, event, _COMMAND, matcher=_MATCHER, por_nome=True)
+    if not changed:
         return False
     _write(settings_path, data)
     return True

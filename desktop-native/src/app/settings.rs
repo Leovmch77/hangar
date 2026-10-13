@@ -85,7 +85,8 @@ const PAGE_ROWS: &[(Page, &[(&str, Option<&str>)])] = &[
     (Page::Connect, &[("connect_code", Some("connect_code_help"))]),
     (Page::Appearance, &APPEARANCE_ROWS),
     (Page::General, &[("settings_language", Some("settings_language_desc")), ("settings_currency", Some("settings_currency_search")),
-        ("settings_tray", Some("settings_tray_desc")), ("settings_chrome_autofill", Some("settings_chrome_autofill_desc"))]),
+        ("settings_tray", Some("settings_tray_desc")), ("settings_chrome_autofill", Some("settings_chrome_autofill_desc")),
+        ("settings_full_chrome", Some("settings_full_chrome_desc"))]),
     (Page::Diary, &[("settings_diary_rules", Some("settings_diary_rule_private")), ("settings_diary_download", Some("settings_diary_rule_local")),
         ("settings_diary_recent", None)]),
     (Page::About, &[("settings_about_app", None), ("settings_about_server", None), ("settings_about_update", Some("settings_about_update_desc")),
@@ -118,8 +119,8 @@ const PAGE_ROWS: &[(Page, &[(&str, Option<&str>)])] = &[
         ("server_roots", Some("server_roots_help")), ("server_machine_only", Some("server_machine_only_help")), ("server_env", Some("server_env_help"))]),
     (Page::Jev, &[("server_jev_key", Some("server_jev_key_help")), ("server_jev_default", Some("server_jev_default_help")),
         ("server_jev_endpoint", Some("server_jev_endpoint_help")), ("server_jev_model", Some("server_jev_model_help")),
-        ("server_jev_text_endpoint", Some("server_jev_text_endpoint_help")), ("server_jev_text_key", Some("server_jev_text_key_help")),
-        ("server_jev_text_model", Some("server_jev_text_model_help")), ("server_jev_cmd", Some("server_jev_cmd_help")),
+        ("server_jev_aux_endpoint", Some("server_jev_aux_endpoint_help")), ("server_jev_aux_key", Some("server_jev_aux_key_help")),
+        ("server_jev_aux_model", Some("server_jev_aux_model_help")), ("server_jev_aux_effort", Some("server_jev_aux_effort_help")),
         ("server_jev_provider", Some("server_jev_provider_help"))]),
 ];
 
@@ -152,7 +153,7 @@ fn find(query: &str) -> Vec<Found> {
     let rows = PAGE_ROWS.iter().flat_map(|&(page, rows)| rows.iter()
         // Sem bandeja no sistema a linha não é desenhada.
         .filter(|(title, _)| crate::tray::SUPPORTED || *title != "settings_tray")
-        .filter(|(title, _)| cfg!(target_os = "linux") || *title != "settings_chrome_autofill")
+        .filter(|(title, _)| cfg!(target_os = "linux") || !matches!(*title, "settings_chrome_autofill" | "settings_full_chrome"))
         .map(move |&(title, desc)| (Found { page, row: Some(title) }, tr(title), desc.map(tr).unwrap_or_default())));
     // Páginas que ainda não têm linhas continuam achadas pelo nome e abrem no aviso delas.
     let pages = Page::DEVICE.into_iter().chain(Page::SERVER).map(|page| (Found { page, row: None }, page.title(), String::new()));
@@ -1101,7 +1102,7 @@ mod tests {
     #[test]
     fn jev_search_finds_every_jev_field() {
         let (_, rows) = super::PAGE_ROWS.iter().find(|(page, _)| *page == super::Page::Jev).expect("Jev na busca");
-        for label in ["server_jev_key", "server_jev_default", "server_jev_endpoint", "server_jev_model", "server_jev_text_endpoint", "server_jev_text_key", "server_jev_text_model", "server_jev_cmd", "server_jev_provider"] {
+        for label in ["server_jev_key", "server_jev_default", "server_jev_endpoint", "server_jev_model", "server_jev_aux_endpoint", "server_jev_aux_key", "server_jev_aux_model", "server_jev_aux_effort", "server_jev_provider"] {
             assert!(rows.iter().any(|(row, _)| *row == label), "{label} fora da busca");
         }
     }

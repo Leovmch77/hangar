@@ -323,10 +323,11 @@ export function clusterByPair<T extends PairFields>(sessions: T[]): PairRow<T>[]
 
 // Recado de OUTRA sessão Claude (hangar-send): "[de: <sessao>] texto" (1:1) ou "[grupo: <sessao>] texto"
 // (aviso pro grupo) ou "[painel: <tela>] texto" (recado AUTOMÁTICO do app — ex.: o modal de
-// orquestração avisando o árbitro). Devolve remetente + texto sem o prefixo + scope; null = msg
+// orquestração avisando o árbitro) ou "[de fora: <alias::sessao>] texto" (par externo, pedido de
+// terceiro). Devolve remetente + texto sem o prefixo + scope; null = msg
 // normal do usuário. Só APRESENTAÇÃO: o texto guardado em events/pending fica intacto (dedup do
 // Chat compara o cru).
-const _PEER_RE = /^\[(de|grupo|painel):\s*([^\]]+)\]\s*/;
+const _PEER_RE = /^\[(de|grupo|painel)( fora)?:\s*([^\]]+)\]\s*/;
 
 // Só apresentação: o envelope original continua no histórico e na deduplicação.
 export function parseRealtimeDelegation(text: string): { input: string; transcript: string } | null {
@@ -334,12 +335,13 @@ export function parseRealtimeDelegation(text: string): { input: string; transcri
   return match ? { input: match[1].trim(), transcript: match[2]?.trim() ?? '' } : null;
 }
 
-export type PeerScope = 'peer' | 'group' | 'panel';
+export type PeerScope = 'peer' | 'group' | 'panel' | 'external';
 const _SCOPES: Record<string, PeerScope> = { de: 'peer', grupo: 'group', painel: 'panel' };
 export function parsePeerMessage(text: string): { from: string; text: string; scope: PeerScope } | null {
   const m = _PEER_RE.exec(text);
-  if (!m) return null;
-  return { from: m[2].trim(), text: text.slice(m[0].length), scope: _SCOPES[m[1]] };
+  // Só "de" tem a forma "de fora" (par externo); "[grupo fora: …]" não existe.
+  if (!m || (m[2] && m[1] !== 'de')) return null;
+  return { from: m[3].trim(), text: text.slice(m[0].length), scope: m[2] ? 'external' : _SCOPES[m[1]] };
 }
 
 // Canal do recado: uma sessão que manda aviso de máquina abre o texto com "[vigia] ...", "[ALERTA]
@@ -1036,4 +1038,10 @@ export function abbrevNum(n: number): string {
     if (n >= div) return (n / div).toFixed(1).replace(/\.0$/, '') + suf;
   }
   return String(Math.round(n));
+}
+
+/** Transcript do Claude (`<config>/projects/<projeto>/<uuid>.jsonl`) → o que o arquivo usa para retomar. */
+export function archiveRefFromJsonl(jsonl: string | null | undefined): { project: string; sessionId: string } | null {
+  const m = jsonl ? /\/projects\/([^/]+)\/([^/]+)\.jsonl$/.exec(jsonl) : null;
+  return m ? { project: m[1], sessionId: m[2] } : null;
 }

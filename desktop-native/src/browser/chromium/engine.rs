@@ -21,7 +21,7 @@ use serde_json::{Value, json};
 
 use super::{
     launch,
-    pipe::{Browser, CLOSED, Session},
+    pipe::{Acker, Browser, CLOSED, Session},
 };
 use crate::browser::{Event, Pointer, model};
 
@@ -41,28 +41,63 @@ struct Surface {
     events: async_channel::Sender<Event>,
     /// JPEG no painel, PNG nas páginas da conversa.
     format: image::ImageFormat,
+    /// Confirma um quadro ao Chromium. Ele só manda o próximo com poucos sem confirmação, então confirmar depois de
+    /// desenhar faz a página produzir quadros no ritmo da tela, e nenhum quando a janela não desenha.
+    ack: Acker,
 }
 
 #[derive(Default)]
 struct Slot {
-    /// Último quadro chegado, ainda em base64: o que chega antes de ele ser decodificado o substitui.
-    data: Option<String>,
+    /// Último quadro chegado (base64 e número para a confirmação): o que chega antes de ele ser decodificado o substitui.
+    data: Option<(String, Value)>,
     /// Há um `Event::Frame` que a tela ainda não desenhou: o próximo quadro espera, sem decodificar à toa.
     unseen: bool,
+    /// Número do quadro decodificado, confirmado quando a tela o desenhar.
+    drawn: Option<Value>,
+    /// Quadros trocados antes de decodificar, confirmados junto com o próximo desenho: confirmar na hora liberaria o
+    /// Chromium a mandar outro, e ele seguiria a todo vapor com a tela parada.
+    owed: Vec<Value>,
     closed: bool,
 }
 
 impl Slot {
     /// O quadro a decodificar agora: só o mais recente, e só depois de a tela ter desenhado o anterior.
-    fn next(&mut self) -> Option<String> { if self.unseen { None } else { self.data.take() } }
+    fn next(&mut self) -> Option<(String, Value)> { if self.unseen { None } else { self.data.take() } }
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> { m.lock().unwrap_or_else(PoisonError::into_inner) }
 
+/// Só para medir: com `HANGAR_NATIVE_NAV_TRACE` no ambiente, uma linha por segundo no stderr com os quadros que
+/// chegaram, os decodificados (e o tempo médio deles) e as pinturas da página.
+mod trace {
+    use std::sync::{OnceLock, atomic::{AtomicU64, Ordering::Relaxed}};
+    pub static ARRIVED: AtomicU64 = AtomicU64::new(0);
+    pub static DECODED: AtomicU64 = AtomicU64::new(0);
+    pub static DECODE_US: AtomicU64 = AtomicU64::new(0);
+    pub static PAINTED: AtomicU64 = AtomicU64::new(0);
+
+    pub fn on() -> bool {
+        static ON: OnceLock<bool> = OnceLock::new();
+        *ON.get_or_init(|| {
+            let on = std::env::var_os("HANGAR_NATIVE_NAV_TRACE").is_some();
+            if on {
+                let _ = std::thread::Builder::new().name("nav-trace".into()).spawn(|| loop {
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                    let (a, d, us, p) = (ARRIVED.swap(0, Relaxed), DECODED.swap(0, Relaxed), DECODE_US.swap(0, Relaxed), PAINTED.swap(0, Relaxed));
+                    eprintln!("nav chegaram={a} decodificados={d} decod_ms={:.1} pinturas={p}", if d > 0 { us as f64 / d as f64 / 1000. } else { 0. });
+                });
+            }
+            on
+        })
+    }
+
+    pub fn add(counter: &AtomicU64, n: u64) { if on() { counter.fetch_add(n, Relaxed); } }
+}
+
 impl Surface {
-    fn new(events: async_channel::Sender<Event>, format: image::ImageFormat) -> Arc<Self> {
+    fn new(events: async_channel::Sender<Event>, format: image::ImageFormat, ack: Acker) -> Arc<Self> {
         let surface = Arc::new(Surface {
-            shown: Mutex::new(None), slot: Mutex::default(), wake: Condvar::new(), replaced: AtomicBool::new(false), events, format,
+            shown: Mutex::new(None), slot: Mutex::default(), wake: Condvar::new(), replaced: AtomicBool::new(false), events, format, ack,
         });
         let worker = surface.clone();
         if let Err(e) = std::thread::Builder::new().name("chromium-frames".into()).spawn(move || worker.decode_loop()) {
@@ -73,33 +108,48 @@ impl Surface {
 
     /// Na thread de leitura do pipe: guarda e acorda quem decodifica.
     fn frame(&self, mut params: Value) {
-        let Some(Value::String(data)) = params.get_mut("data").map(Value::take) else { return };
-        lock(&self.slot).data = Some(data);
+        let id = params["sessionId"].take();
+        let Some(Value::String(data)) = params.get_mut("data").map(Value::take) else { return (self.ack)(id) };
+        trace::add(&trace::ARRIVED, 1);
+        let mut slot = lock(&self.slot);
+        if let Some((_, old)) = slot.data.replace((data, id)) { slot.owed.push(old); }
+        drop(slot);
         self.wake.notify_one();
     }
 
     fn decode_loop(&self) {
+        // Buffers da thread, reaproveitados de um quadro para o outro: um quadro do painel tem megabytes.
+        let (mut bytes, mut pixels) = (Vec::new(), Vec::new());
         loop {
-            let data = {
+            let (data, id) = {
                 let mut slot = lock(&self.slot);
                 loop {
                     if slot.closed { return; }
-                    if let Some(data) = slot.next() { break data; }
+                    if let Some(next) = slot.next() { break next; }
                     slot = self.wake.wait(slot).unwrap_or_else(PoisonError::into_inner);
                 }
             };
-            match self.upload(&data) {
+            let started = std::time::Instant::now();
+            match self.upload(&data, &mut bytes, &mut pixels) {
                 Ok(()) => {
-                    lock(&self.slot).unseen = true;
+                    trace::add(&trace::DECODED, 1);
+                    trace::add(&trace::DECODE_US, started.elapsed().as_micros() as u64);
+                    let mut slot = lock(&self.slot);
+                    slot.unseen = true;
+                    if let Some(old) = slot.drawn.replace(id) { slot.owed.push(old); }
+                    drop(slot);
                     let _ = self.events.try_send(Event::Frame);
                 }
-                Err(e) => eprintln!("[nav] quadro do Chromium descartado: {e}"),
+                Err(e) => { eprintln!("[nav] quadro do Chromium descartado: {e}"); (self.ack)(id); }
             }
         }
     }
 
+    /// A tela desenhou: confirma o quadro ao Chromium e libera o próximo para decodificar.
     fn seen(&self) {
-        lock(&self.slot).unseen = false;
+        let (drawn, owed) = { let mut slot = lock(&self.slot); slot.unseen = false; (slot.drawn.take(), std::mem::take(&mut slot.owed)) };
+        if drawn.is_some() { trace::add(&trace::PAINTED, 1); }
+        for id in drawn.into_iter().chain(owed) { (self.ack)(id); }
         self.wake.notify_one();
     }
 
@@ -108,10 +158,25 @@ impl Surface {
         self.wake.notify_one();
     }
 
-    fn upload(&self, data: &str) -> Result<(), String> {
-        let bytes = base64::engine::general_purpose::STANDARD.decode(data).map_err(|e| e.to_string())?;
-        let pixels = image::load_from_memory_with_format(&bytes, self.format).map_err(|e| e.to_string())?.into_rgba8();
-        let (width, height) = pixels.dimensions();
+    fn upload(&self, data: &str, bytes: &mut Vec<u8>, pixels: &mut Vec<u8>) -> Result<(), String> {
+        bytes.clear();
+        base64::engine::general_purpose::STANDARD.decode_vec(data, bytes).map_err(|e| e.to_string())?;
+        let (width, height) = if self.format == image::ImageFormat::Jpeg {
+            use zune_jpeg::{JpegDecoder, zune_core::{bytestream::ZCursor, colorspace::ColorSpace, options::DecoderOptions}};
+            let options = DecoderOptions::default().jpeg_set_out_colorspace(ColorSpace::RGBA);
+            let mut decoder = JpegDecoder::new_with_options(ZCursor::new(&bytes[..]), options);
+            decoder.decode_headers().map_err(|e| e.to_string())?;
+            let size = decoder.output_buffer_size().ok_or("quadro JPEG sem tamanho")?;
+            pixels.resize(size, 0);
+            decoder.decode_into(pixels).map_err(|e| e.to_string())?;
+            let info = decoder.info().ok_or("quadro JPEG sem cabeçalho")?;
+            (u32::from(info.width), u32::from(info.height))
+        } else {
+            let rgba = image::load_from_memory_with_format(bytes, self.format).map_err(|e| e.to_string())?.into_rgba8();
+            let size = rgba.dimensions();
+            *pixels = rgba.into_raw();
+            size
+        };
         let (device, queue) = gpui_wgpu::WgpuContext::shared_device().ok_or("a GPUI não expôs o device wgpu")?;
         let mut shown = lock(&self.shown);
         // Mesma textura enquanto o tamanho e o device não mudam: a fila do wgpu ordena a escrita depois do último desenho.
@@ -132,7 +197,7 @@ impl Surface {
         };
         queue.write_texture(
             wgpu::TexelCopyTextureInfo { texture: &texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
-            &pixels,
+            pixels,
             wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4 * width), rows_per_image: Some(height) },
             wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
         );
@@ -145,7 +210,6 @@ impl Surface {
 pub struct Starter {
     executor: ForegroundExecutor,
     background: BackgroundExecutor,
-    scale: f32,
 }
 
 /// Mantém o Chromium compartilhado de pé enquanto existir, para a primeira página não esperar o processo nascer.
@@ -174,9 +238,12 @@ pub struct Engine {
     /// Altura da barra que o Chrome completo sem janela ainda desconta da janela (o shell não tem).
     decoration: f32,
     executor: ForegroundExecutor,
+    background: BackgroundExecutor,
     surface: Arc<Surface>,
     placed: Cell<Option<(Size<Pixels>, f32)>>,
-    visible: Cell<bool>,
+    /// Conta os tamanhos pedidos durante um arrasto: só o último, parado por um instante, chega ao Chromium.
+    resizes: Rc<Cell<u64>>,
+    visible: Rc<Cell<bool>>,
     pressed: Cell<bool>,
     /// A página caiu ou se soltou com o Chromium vivo.
     dead: Rc<Cell<bool>>,
@@ -191,49 +258,23 @@ pub struct Engine {
 impl Engine {
     pub fn available() -> Result<(), String> { launch::find().map(|_| ()) }
 
-    pub fn prepare(window: &Window, cx: &App) -> Result<Starter, String> {
-        Ok(Starter { executor: cx.foreground_executor().clone(), background: cx.background_executor().clone(), scale: window.scale_factor() })
+    pub fn prepare(_window: &Window, cx: &App) -> Result<Starter, String> {
+        Ok(Starter { executor: cx.foreground_executor().clone(), background: cx.background_executor().clone() })
     }
 
     /// Sobe o Chromium agora, sem esperar ele responder.
-    pub fn warm(window: &Window, cx: &App) -> Result<Warm, String> {
-        Browser::shared_async(cx.foreground_executor(), cx.background_executor(), window.scale_factor()).map(|browser| Warm { _browser: browser })
+    pub fn warm(_window: &Window, cx: &App) -> Result<Warm, String> {
+        Browser::shared_async(cx.foreground_executor(), cx.background_executor()).map(|browser| Warm { _browser: browser })
     }
 }
 
 impl Starter {
-    /// Sobe o Chromium (se ainda não há um) e abre o alvo desta sessão. As respostas chegam pela thread de leitura,
-    /// então esperar aqui não trava o pipe; o primeiro navegador espera o processo nascer.
-    pub fn start(self, events: async_channel::Sender<Event>) -> Result<Engine, String> {
-        let browser = Browser::shared(&self.executor, self.scale)?;
-        let long = Duration::from_secs(10);
-        let created = browser.call_blocking(None, "Target.createTarget", json!({"url": "about:blank", "newWindow": true}), long)?;
-        let target = created["targetId"].as_str().ok_or("createTarget sem targetId")?.to_owned();
-        browser.own(&target, true);
-        browser.close_initial();
-        let session = Rc::new(Session::attach(&browser, &target)?);
-        let window = browser.call_blocking(None, "Browser.getWindowForTarget", json!({"targetId": target}), long)?["windowId"]
-            .as_i64().ok_or("getWindowForTarget sem windowId")?;
-        session.call_blocking("Page.enable", json!({}))?;
-        // Queda do renderer chega só por aqui (`Inspector.targetCrashed`, na sessão da página).
-        session.call_blocking("Inspector.enable", json!({}))?;
-        // A página do agente, que ninguém olha, se comporta como focada: `:focus`, `focus()` e o teclado funcionam.
-        session.call_blocking("Emulation.setFocusEmulationEnabled", json!({"enabled": true}))?;
-        // Mesma regra de endereço do painel: só web (http/https sem usuário e senha); o resto não carrega.
-        session.call_blocking("Fetch.enable", json!({"patterns": [{"resourceType": "Document", "requestStage": "Request"}]}))?;
-        browser.call_blocking(None, "Browser.setWindowBounds", json!({"windowId": window, "bounds": {"width": 1280, "height": 800}}), long)?;
-        let measured = session.call_blocking("Runtime.evaluate", json!({"expression": "outerHeight-innerHeight", "returnByValue": true}))?;
-        let decoration = measured["result"]["value"].as_f64().unwrap_or(0.).max(0.) as f32;
-        let state = Rc::new(RefCell::new(model::PageState::default()));
-        let surface = Surface::new(events.clone(), image::ImageFormat::Jpeg);
-        let sink = surface.clone();
-        browser.sink(session.id(), Box::new(move |params| sink.frame(params)));
-        let dead = Rc::new(Cell::new(false));
-        let publish = listen(&session, &target, &state, &events, &self.executor, &dead, false);
-        Ok(Engine {
-            session, publish, target, window, decoration, executor: self.executor, surface, dead, png: false, double: false, context: None,
-            placed: Cell::new(None), visible: Cell::new(false), pressed: Cell::new(false),
-        })
+    /// O navegador do painel: sobe o Chromium (se ainda não há um) e abre o alvo desta sessão sem travar a interface.
+    pub fn start(self, events: async_channel::Sender<Event>) -> impl Future<Output = Result<Engine, String>> + use<> {
+        async move {
+            let browser = self.browser().await?;
+            self.open(&browser, None, None, events, true).await
+        }
     }
 
     /// Site de verdade na conversa: o mesmo perfil do painel (cookies e login), navegação livre dentro do site e popup
@@ -241,7 +282,7 @@ impl Starter {
     pub fn start_url(self, url: String, events: async_channel::Sender<Event>) -> impl Future<Output = Result<Engine, String>> + use<> {
         async move {
             let browser = self.browser().await?;
-            let engine = self.open(&browser, None, None, events).await?;
+            let engine = self.open(&browser, None, None, events, false).await?;
             engine.load(&url);
             Ok(engine)
         }
@@ -255,7 +296,7 @@ impl Starter {
             let browser = self.browser().await?;
             let created = self.browser_call(&browser, "Target.createBrowserContext", json!({"disposeOnDetach": true})).await?;
             let context = created["browserContextId"].as_str().ok_or("createBrowserContext sem id")?.to_owned();
-            let opened = self.open(&browser, Some(context.clone()), Some((html, width, background)), events).await;
+            let opened = self.open(&browser, Some(context.clone()), Some((html, width, background)), events, false).await;
             // Falhou no meio: fechar o contexto fecha junto o alvo que já tenha nascido nele.
             if opened.is_err() { drop(browser.call(None, "Target.disposeBrowserContext", json!({"browserContextId": context}))); }
             opened
@@ -263,7 +304,7 @@ impl Starter {
     }
 
     async fn browser(&self) -> Result<Rc<Browser>, String> {
-        let browser = Browser::shared_async(&self.executor, &self.background, self.scale)?;
+        let browser = Browser::shared_async(&self.executor, &self.background)?;
         browser.ready().await?;
         Ok(browser)
     }
@@ -276,16 +317,17 @@ impl Starter {
         answer(&self.background, method, session.call(method, params)).await
     }
 
-    /// Alvo da página da conversa. Falhou depois de nascer: o alvo fecha aqui, que ninguém mais o conhece.
-    async fn open(&self, browser: &Rc<Browser>, context: Option<String>, document: Option<Document>, events: async_channel::Sender<Event>)
-        -> Result<Engine, String> {
+    /// Alvo do painel (`panel`: JPEG na escala da tela) ou da conversa (PNG no dobro). Falhou depois de nascer: o alvo
+    /// fecha aqui, que ninguém mais o conhece.
+    async fn open(&self, browser: &Rc<Browser>, context: Option<String>, document: Option<Document>, events: async_channel::Sender<Event>,
+        panel: bool) -> Result<Engine, String> {
         let mut create = json!({"url": "about:blank", "newWindow": true});
         if let Some(context) = &context { create["browserContextId"] = context.as_str().into(); }
         let created = self.browser_call(browser, "Target.createTarget", create).await?;
         let target = created["targetId"].as_str().ok_or("createTarget sem targetId")?.to_owned();
         browser.own(&target, true);
         browser.close_initial();
-        let opened = self.open_target(browser, &target, context, document, events).await;
+        let opened = self.open_target(browser, &target, context, document, events, panel).await;
         if opened.is_err() {
             browser.own(&target, false);
             drop(browser.call(None, "Target.closeTarget", json!({"targetId": target})));
@@ -295,13 +337,15 @@ impl Starter {
 
     async fn open_target(
         &self, browser: &Rc<Browser>, target: &str, context: Option<String>, document: Option<Document>, events: async_channel::Sender<Event>,
+        panel: bool,
     ) -> Result<Engine, String> {
         let session = Rc::new(answer(&self.background, "Target.attachToTarget", Session::attach_async(browser, target)).await?);
         // Ouvintes antes de qualquer espera: a interface segue rodando, e o que a página mandar enquanto nasce (a altura,
         // um pedido pausado) não pode chegar sem dono.
         let state = Rc::new(RefCell::new(model::PageState::default()));
-        // PNG nas duas formas: o texto da conversa ao lado pede a nitidez que o JPEG perde.
-        let surface = Surface::new(events.clone(), image::ImageFormat::Png);
+        // PNG na conversa: o texto ao lado pede a nitidez que o JPEG perde. No painel, JPEG, mais leve em página animada.
+        let format = if panel { image::ImageFormat::Jpeg } else { image::ImageFormat::Png };
+        let surface = Surface::new(events.clone(), format, browser.acker(session.id()));
         let sink = surface.clone();
         browser.sink(session.id(), Box::new(move |params| sink.frame(params)));
         let dead = Rc::new(Cell::new(false));
@@ -312,8 +356,9 @@ impl Starter {
         });
         match self.setup_target(browser, &session, target, &document).await {
             Ok((window, decoration)) => Ok(Engine {
-                session, publish, target: target.to_owned(), window, decoration, executor: self.executor.clone(), surface, dead, png: true, double: true,
-                context, placed: Cell::new(None), visible: Cell::new(false), pressed: Cell::new(false),
+                session, publish, target: target.to_owned(), window, decoration, executor: self.executor.clone(), background: self.background.clone(),
+                surface, dead, png: !panel, double: !panel, context, placed: Cell::new(None), resizes: Rc::default(), visible: Rc::default(),
+                pressed: Cell::new(false),
             }),
             Err(e) => { surface.close(); Err(e) }
         }
@@ -381,8 +426,12 @@ fn listen(
     let _ = session.on("Page.frameNavigated", move |params| {
         let frame = &params["frame"];
         if !frame["parentId"].is_null() { return; }
-        let url = frame["url"].as_str().unwrap_or("").to_owned();
-        p(&|page| { page.url = Some(url.clone()); page.error = None; });
+        // Página de erro do Chromium: o endereço é o que não abriu (`unreachableUrl`), e o erro da carga fica.
+        let failed = frame["unreachableUrl"].as_str().filter(|u| !u.is_empty());
+        let url = failed.unwrap_or(frame["url"].as_str().unwrap_or("")).to_owned();
+        let keep = failed.is_some();
+        // A página de erro de uma navegação bloqueada traz o aviso do bloqueio: ele fica com ela.
+        p(&|page| { page.url = Some(url.clone()); page.dialog = None; if !keep { page.error = None; page.notice = None; } });
         h();
     });
     let (p, h, m) = (publish.clone(), history.clone(), main.clone());
@@ -406,18 +455,33 @@ fn listen(
         }
         if model::allowed_request(&url) { return drop(session.call("Fetch.continueRequest", json!({"requestId": id}))); }
         drop(session.call("Fetch.failRequest", json!({"requestId": id, "errorReason": "BlockedByClient"})));
-        if params["frameId"] == m.as_str() { p(&|page| page.error = Some(crate::i18n::tr("browser_blocked").replace("{url}", &url))); }
+        // Bloqueio é aviso, não tela de falha: tentar de novo bloquearia de novo.
+        if params["frameId"] == m.as_str() {
+            let text = crate::i18n::tr("browser_blocked").replace("{url}", &url);
+            p(&|page| { page.notice = Some(text.clone()); page.notice_seq += 1; });
+        }
     });
-    // Sem resposta o diálogo trava a página, e no app não há quem o veja: `alert` e `beforeunload` passam, mas
-    // `confirm`/`prompt` são recusados, para nada ser confirmado sem alguém ter lido.
-    let weak = Rc::downgrade(session);
+    // O diálogo fica aberto até alguém responder: o agente (verbo `dialog`) ou a pessoa (caixa do painel). Testar
+    // um "Excluir? OK/Cancelar" exige escolher. Só o `beforeunload` passa sozinho: sem isso a navegação travaria.
+    let (weak, p) = (Rc::downgrade(session), publish.clone());
     let _ = session.on("Page.javascriptDialogOpening", move |params| {
-        let kind = params["type"].as_str().unwrap_or("");
-        let accept = matches!(kind, "alert" | "beforeunload");
-        let message: String = params["message"].as_str().unwrap_or("").chars().take(200).collect();
-        eprintln!("[nav] dialogo {kind} {}: {message}", if accept { "aceito" } else { "recusado" });
-        let Some(session) = weak.upgrade() else { return };
-        drop(session.call("Page.handleJavaScriptDialog", json!({"accept": accept})));
+        let kind = params["type"].as_str().unwrap_or("").to_owned();
+        if kind == "beforeunload" {
+            if let Some(session) = weak.upgrade() { drop(session.call("Page.handleJavaScriptDialog", json!({"accept": true}))); }
+            return;
+        }
+        let dialog = model::Dialog { kind, message: params["message"].as_str().unwrap_or("").chars().take(500).collect(),
+            default: params["defaultPrompt"].as_str().unwrap_or("").to_owned() };
+        p(&|page| page.dialog = Some(dialog.clone()));
+    });
+    let p = publish.clone();
+    let _ = session.on("Page.javascriptDialogClosed", move |_| p(&|page| page.dialog = None));
+    // O download é negado no navegador inteiro (`Browser.setDownloadBehavior`); sem aviso o clique parecia não fazer nada.
+    let p = publish.clone();
+    let _ = session.on("Page.downloadWillBegin", move |params| {
+        let file = params["suggestedFilename"].as_str().filter(|f| !f.is_empty()).or(params["url"].as_str()).unwrap_or("").to_owned();
+        let text = crate::i18n::tr("browser_download_denied").replace("{file}", &file);
+        p(&|page| { page.notice = Some(text.clone()); page.notice_seq += 1; });
     });
     let (p, m) = (publish.clone(), main.clone());
     session.watch("Target.targetInfoChanged", move |params| {
@@ -451,7 +515,7 @@ fn listen(
     }
     session.watch("Target.targetDestroyed", move |params| { if let Some(id) = params["targetId"].as_str() { closing.borrow_mut().remove(id); } });
     let p = publish.clone();
-    session.watch(CLOSED, move |_| p(&|page| { page.loading = false; page.error = Some("o Chromium fechou; feche e abra o navegador".into()); }));
+    session.watch(CLOSED, move |_| p(&|page| { page.loading = false; page.dialog = None; page.error = Some(crate::i18n::tr("browser_err_closed")); }));
     // A página caiu com o Chromium vivo: sem isto o painel congela no último quadro, calado.
     let fell: Rc<dyn Fn()> = {
         let (weak, p, dead) = (Rc::downgrade(session), publish.clone(), dead.clone());
@@ -459,7 +523,7 @@ fn listen(
             if dead.replace(true) { return; }
             eprintln!("[nav] a pagina caiu");
             if let Some(session) = weak.upgrade() { session.fail_pending(); }
-            p(&|page| { page.loading = false; page.error = Some("a pagina caiu; abra o endereco de novo".into()); });
+            p(&|page| { page.loading = false; page.dialog = None; page.error = Some(crate::i18n::tr("browser_err_crashed")); });
         })
     };
     let f = fell.clone();
@@ -478,10 +542,13 @@ impl Engine {
     pub fn cdp(&self) -> Rc<Session> { self.session.clone() }
 
     /// Sessão própria para a tela remota do celular: o screencast dela tem o tamanho do aparelho, sem mexer no do painel.
-    pub fn viewer_session(&self) -> Result<Rc<Session>, String> {
-        let session = Session::attach(self.session.browser(), &self.target)?;
-        session.call_blocking("Page.enable", json!({}))?;
-        Ok(Rc::new(session))
+    pub fn viewer_session(&self) -> impl Future<Output = Result<Rc<Session>, String>> + use<> {
+        let (attach, background) = (Session::attach_async(self.session.browser(), &self.target), self.background.clone());
+        async move {
+            let session = answer(&background, "Target.attachToTarget", attach).await?;
+            answer(&background, "Page.enable", session.call("Page.enable", json!({}))).await?;
+            Ok(Rc::new(session))
+        }
     }
 
     fn send(&self, method: &str, params: Value) { drop(self.session.call(method, params)); }
@@ -490,20 +557,32 @@ impl Engine {
     pub fn evaluate(&self, expression: &str) { self.send("Runtime.evaluate", json!({"expression": expression})); }
 
     pub fn load(&self, url: &str) {
-        let (call, publish) = (self.session.call("Page.navigate", json!({"url": url})), self.publish.clone());
+        let (call, publish, target) = (self.session.call("Page.navigate", json!({"url": url})), self.publish.clone(), url.to_owned());
         self.executor.spawn(async move {
             // Falha de rede: o Chromium mostra a página de erro dele, e a barra o motivo.
+            // ABORTED = a página não saiu do lugar (download, 204, navegação trocada por outra); BLOCKED_BY_CLIENT já
+            // virou aviso no `Fetch.requestPaused`. Nenhum dos dois traz página de erro que limpe o erro depois.
             let error = match call.await {
-                Ok(r) => r["errorText"].as_str().filter(|e| !e.is_empty()).map(str::to_owned),
-                Err(e) => Some(e),
+                Ok(r) => r["errorText"].as_str().filter(|e| !e.is_empty() && !e.ends_with("ERR_ABORTED") && !e.ends_with("ERR_BLOCKED_BY_CLIENT"))
+                    .map(|e| crate::browser::model::load_error(e, &target)),
+                Err(e) => Some(crate::browser::model::load_error(&e, &target)),
             };
-            if let Some(error) = error { publish(&|page| page.error = Some(error.clone())); }
+            if let Some(error) = error { publish(&|page| { page.loading = false; page.error = Some(error.clone()); }); }
         }).detach();
     }
 
     pub fn back(&self) { self.history_step(-1); }
     pub fn forward(&self) { self.history_step(1); }
     pub fn reload(&self) { self.send("Page.reload", json!({})); }
+    pub fn stop(&self) { self.send("Page.stopLoading", json!({})); }
+
+    /// Responde o diálogo aberto; o `javascriptDialogClosed` tira a caixa do painel.
+    pub fn answer_dialog(&self, accept: bool, text: Option<&str>) -> impl std::future::Future<Output = Result<(), String>> + 'static + use<> {
+        let mut params = json!({"accept": accept});
+        if let Some(text) = text { params["promptText"] = text.into(); }
+        let call = self.session.call("Page.handleJavaScriptDialog", params);
+        async move { call.await.map(|_| ()) }
+    }
 
     fn history_step(&self, step: i64) {
         let (call, session) = (self.session.call("Page.getNavigationHistory", json!({})), Rc::downgrade(&self.session));
@@ -523,23 +602,20 @@ impl Engine {
         // texto em cinza (o fundo é transparente) e ela sai com cara de vídeo em baixa resolução ao lado do texto do app.
         let frame_scale = if self.double { (scale * 2.).ceil() } else { scale };
         let resized = self.placed.get() != Some((bounds.size, scale));
-        if resized {
-            self.placed.set(Some((bounds.size, scale)));
-            let size = json!({"width": w.round() as i64, "height": (h + self.decoration).round() as i64});
-            drop(self.session.browser().call(None, "Browser.setWindowBounds", json!({"windowId": self.window, "bounds": size})));
-            if self.double {
-                self.send("Emulation.setDeviceMetricsOverride", json!({
-                    "width": w.round() as i64, "height": h.round() as i64, "deviceScaleFactor": frame_scale, "mobile": false,
-                }));
+        let first = !self.visible.replace(true);
+        if resized { self.placed.set(Some((bounds.size, scale))); }
+        if first || resized {
+            let fit = Fit { session: self.session.clone(), window: self.window, decoration: self.decoration, double: self.double, png: self.png, w, h, frame_scale };
+            let turn = self.resizes.get() + 1;
+            self.resizes.set(turn);
+            if first {
+                // O tamanho aplicado antes de esconder pode ter ficado para trás (ajuste pendente descartado).
+                fit.apply(true);
+            } else {
+                // Durante um arrasto o quadro antigo estica até o painel; o Chromium só recebe o tamanho em que ele parou.
+                let (resizes, visible, timer) = (self.resizes.clone(), self.visible.clone(), self.background.timer(Duration::from_millis(RESIZE_SETTLE_MS)));
+                self.executor.spawn(async move { timer.await; if resizes.get() == turn && visible.get() { fit.apply(true); } }).detach();
             }
-        }
-        if !self.visible.replace(true) || resized {
-            let (pw, ph) = ((w * frame_scale).round() as i64, (h * frame_scale).round() as i64);
-            // JPEG alto em vez de PNG: o PNG pesa na decodificação e no pipe em página animada; o q92 deixa o texto
-            // legível (o q85 borrava). O `shot` continua em PNG.
-            let mut params = json!({"format": "jpeg", "quality": 92, "maxWidth": pw.max(1), "maxHeight": ph.max(1), "everyNthFrame": 1});
-            if self.png { params["format"] = "png".into(); params.as_object_mut().map(|p| p.remove("quality")); }
-            self.send("Page.startScreencast", params);
         }
         // Antes de ler: um quadro que chegue no meio ainda avisa a tela.
         self.surface.seen();
@@ -559,28 +635,39 @@ impl Engine {
     /// A textura mudou desde a última pergunta: um desenho guardado ainda mostraria a antiga.
     pub fn texture_replaced(&self) -> bool { self.surface.replaced.swap(false, Ordering::SeqCst) }
 
-    /// Página fora da tela: sem screencast. O controlador cuida do tamanho dela para o `shot`.
+    /// Página fora da tela: sem screencast e sem a textura na GPU. O controlador cuida do tamanho dela para o `shot`.
     pub fn hide(&self) {
         if self.visible.replace(false) { self.send("Page.stopScreencast", json!({})); }
+        *lock(&self.surface.shown) = None;
     }
 
-    /// `at` relativo à origem da página, em px lógicos. Só o botão esquerdo.
-    pub fn pointer(&self, kind: Pointer, at: Point<Pixels>, clicks: usize) {
+    /// `at` relativo à origem da página, em px lógicos. Botão esquerdo, sem modificador.
+    pub fn pointer(&self, kind: Pointer, at: Point<Pixels>, clicks: usize) { self.mouse(kind, MouseButton::Left, at, clicks, &Modifiers::default()) }
+
+    /// Qualquer botão, com os modificadores. O `clickCount` da soltura repete o do aperto: sem ele o Chromium não
+    /// dispara `dblclick`. Arrasto só se acompanha com o esquerdo.
+    pub fn mouse(&self, kind: Pointer, button: MouseButton, at: Point<Pixels>, clicks: usize, modifiers: &Modifiers) {
         let (x, y) = (f32::from(at.x) as f64, f32::from(at.y) as f64);
-        let (kind, button, clicks) = match kind {
-            Pointer::Down => { self.pressed.set(true); ("mousePressed", "left", clicks.max(1)) }
-            Pointer::Up => { self.pressed.set(false); ("mouseReleased", "left", 1) }
-            Pointer::Move => ("mouseMoved", if self.pressed.get() { "left" } else { "none" }, 0),
+        let (name, bit) = match button { MouseButton::Right => ("right", 2), MouseButton::Middle => ("middle", 4), _ => ("left", 1) };
+        let left = name == "left";
+        let (kind, button, buttons, clicks) = match kind {
+            Pointer::Down => { if left { self.pressed.set(true) } ("mousePressed", name, bit, clicks.max(1)) }
+            Pointer::Up => { if left { self.pressed.set(false) } ("mouseReleased", name, 0, clicks.max(1)) }
+            Pointer::Move if self.pressed.get() => ("mouseMoved", "left", 1, 0),
+            Pointer::Move => ("mouseMoved", "none", 0, 0),
         };
-        let buttons = if self.pressed.get() { 1 } else { 0 };
-        self.send("Input.dispatchMouseEvent", json!({"type": kind, "x": x, "y": y, "button": button, "buttons": buttons, "clickCount": clicks}));
+        self.send("Input.dispatchMouseEvent", json!({"type": kind, "x": x, "y": y, "button": button, "buttons": buttons,
+            "clickCount": clicks, "modifiers": modifier_bits(modifiers)}));
     }
 
     /// `delta` em px lógicos; `delta.y > 0` avança a página. Quem chama já inverteu o sinal da GPUI.
-    pub fn wheel(&self, at: Point<Pixels>, delta: Point<Pixels>) {
+    pub fn wheel(&self, at: Point<Pixels>, delta: Point<Pixels>) { self.scroll(at, delta, &Modifiers::default()) }
+
+    /// Com modificadores: Ctrl+roda é zoom da página e Shift+roda rola de lado.
+    pub fn scroll(&self, at: Point<Pixels>, delta: Point<Pixels>, modifiers: &Modifiers) {
         self.send("Input.dispatchMouseEvent", json!({
             "type": "mouseWheel", "x": f32::from(at.x), "y": f32::from(at.y),
-            "deltaX": f32::from(delta.x), "deltaY": f32::from(delta.y), "button": "none",
+            "deltaX": f32::from(delta.x), "deltaY": f32::from(delta.y), "button": "none", "modifiers": modifier_bits(modifiers),
         }));
     }
 
@@ -593,6 +680,32 @@ impl Engine {
     /// A página finge estar sempre focada (`setFocusEmulationEnabled`): o foco do painel não precisa ir a ela.
     pub fn focus(&self, _focused: bool) {}
     pub fn release_focus(&self) {}
+}
+
+const RESIZE_SETTLE_MS: u64 = 120;
+
+/// Tamanho e escala da página no painel, e como pedir ao Chromium.
+struct Fit { session: Rc<Session>, window: i64, decoration: f32, double: bool, png: bool, w: f32, h: f32, frame_scale: f32 }
+
+impl Fit {
+    fn apply(&self, resized: bool) {
+        let Fit { session, window, decoration, double, png, w, h, frame_scale } = self;
+        if resized {
+            let size = json!({"width": w.round() as i64, "height": (h + decoration).round() as i64});
+            drop(session.browser().call(None, "Browser.setWindowBounds", json!({"windowId": window, "bounds": size})));
+            if *double {
+                drop(session.call("Emulation.setDeviceMetricsOverride", json!({
+                    "width": w.round() as i64, "height": h.round() as i64, "deviceScaleFactor": frame_scale, "mobile": false,
+                })));
+            }
+        }
+        let (pw, ph) = ((w * frame_scale).round() as i64, (h * frame_scale).round() as i64);
+        // JPEG alto em vez de PNG: o PNG pesa na decodificação e no pipe em página animada; o q92 deixa o texto
+        // legível (o q85 borrava). O `shot` continua em PNG.
+        let mut params = json!({"format": "jpeg", "quality": 92, "maxWidth": pw.max(1), "maxHeight": ph.max(1), "everyNthFrame": 1});
+        if *png { params["format"] = "png".into(); params.as_object_mut().map(|p| p.remove("quality")); }
+        drop(session.call("Page.startScreencast", params));
+    }
 }
 
 /// Retângulo em pixels inteiros da tela, do tamanho do quadro: posição ou largura fracionada faz a GPU reamostrar a
@@ -621,9 +734,26 @@ impl Drop for Engine {
 
 /// Tecla da GPUI → `Input.dispatchKeyEvent`. Texto digitado vence, para "ç"/"ã" de tecla morta; tecla morta ainda
 /// compondo (sem texto) não vai à página.
+fn modifier_bits(m: &Modifiers) -> u8 {
+    [(m.alt, 1), (m.control, 2), (m.platform, 4), (m.shift, 8)].iter().filter(|(on, _)| *on).fold(0, |a, (_, b)| a | b)
+}
+
+/// `code` e `keyCode` da pontuação como no teclado americano, que é o que o Chromium reporta sem saber a tecla
+/// física: atalho de página que lê `e.code`/`e.keyCode` ("/" para buscar, "-" para diminuir) volta a funcionar.
+fn punctuation(c: char) -> Option<(&'static str, u32)> {
+    Some(match c {
+        ';' | ':' => ("Semicolon", 186), '=' | '+' => ("Equal", 187), ',' | '<' => ("Comma", 188), '-' | '_' => ("Minus", 189),
+        '.' | '>' => ("Period", 190), '/' | '?' => ("Slash", 191), '`' | '~' => ("Backquote", 192), '[' | '{' => ("BracketLeft", 219),
+        '\\' | '|' => ("Backslash", 220), ']' | '}' => ("BracketRight", 221), '\'' | '"' => ("Quote", 222),
+        '!' => ("Digit1", 49), '@' => ("Digit2", 50), '#' => ("Digit3", 51), '$' => ("Digit4", 52), '%' => ("Digit5", 53),
+        '^' => ("Digit6", 54), '&' => ("Digit7", 55), '*' => ("Digit8", 56), '(' => ("Digit9", 57), ')' => ("Digit0", 48),
+        _ => return None,
+    })
+}
+
 fn key_event(down: bool, keystroke: &Keystroke) -> Option<Value> {
     let m = &keystroke.modifiers;
-    let modifiers = [(m.alt, 1), (m.control, 2), (m.platform, 4), (m.shift, 8)].iter().filter(|(on, _)| *on).fold(0, |a, (_, b)| a | b);
+    let modifiers = modifier_bits(m);
     let typed = keystroke.key_char.as_deref().filter(|_| !m.control && !m.alt).and_then(single_char).filter(|c| !c.is_control());
     let named = match keystroke.key.as_str() {
         "enter" => Some("Enter"), "backspace" => Some("Backspace"), "delete" => Some("Delete"), "escape" => Some("Escape"),
@@ -636,14 +766,25 @@ fn key_event(down: bool, keystroke: &Keystroke) -> Option<Value> {
         crate::browser::preview_fmt::key_event(name)
     } else if let Some(c) = typed {
         let text = c.to_string();
-        let vk = if c.is_ascii_alphanumeric() { c.to_ascii_uppercase() as u32 } else if c == ' ' { 32 } else { 0 };
-        json!({"key": text, "text": text, "unmodifiedText": text, "windowsVirtualKeyCode": vk})
+        let upper = c.to_ascii_uppercase();
+        let (code, vk) = match c {
+            _ if upper.is_ascii_alphabetic() => (format!("Key{upper}"), upper as u32),
+            _ if c.is_ascii_digit() => (format!("Digit{c}"), c as u32),
+            ' ' => ("Space".into(), 32),
+            _ => punctuation(c).map_or((String::new(), 0), |(code, vk)| (code.into(), vk)),
+        };
+        json!({"key": text, "code": code, "text": text, "unmodifiedText": text, "windowsVirtualKeyCode": vk})
     } else if m.control || m.alt {
         // Ctrl/Alt + letra: atalho da página (Ctrl+A, Ctrl+Z), sem texto.
         let c = single_char(&keystroke.key)?;
         let upper = c.to_ascii_uppercase();
-        let code = if upper.is_ascii_alphabetic() { format!("Key{upper}") } else if upper.is_ascii_digit() { format!("Digit{upper}") } else { String::new() };
-        json!({"key": c.to_string(), "code": code, "windowsVirtualKeyCode": upper as u32})
+        // O próprio caractere como código virtual erra a pontuação: "." é 46, o Delete, e Ctrl+. apagava a palavra.
+        let (code, vk) = if upper.is_ascii_alphabetic() || upper.is_ascii_digit() {
+            (if upper.is_ascii_alphabetic() { format!("Key{upper}") } else { format!("Digit{upper}") }, upper as u32)
+        } else {
+            punctuation(c).map_or((String::new(), 0), |(code, vk)| (code.into(), vk))
+        };
+        json!({"key": c.to_string(), "code": code, "windowsVirtualKeyCode": vk})
     } else {
         return None;
     };
@@ -672,15 +813,16 @@ mod tests {
     #[test]
     fn only_the_latest_frame_is_decoded_after_the_last_one_was_drawn() {
         let mut slot = Slot::default();
-        slot.data = Some("a".into());
-        slot.data = Some("b".into());
-        assert_eq!(slot.next().as_deref(), Some("b"), "o quadro trocado antes de decodificar não volta");
+        let frame = |d: &str| Some((d.to_owned(), serde_json::Value::Null));
+        slot.data = frame("a");
+        slot.data = frame("b");
+        assert_eq!(slot.next().map(|f| f.0).as_deref(), Some("b"), "o quadro trocado antes de decodificar não volta");
         slot.unseen = true;
-        slot.data = Some("c".into());
-        slot.data = Some("d".into());
+        slot.data = frame("c");
+        slot.data = frame("d");
         assert_eq!(slot.next(), None, "quadro anterior ainda não desenhado: espera");
         slot.unseen = false;
-        assert_eq!(slot.next().as_deref(), Some("d"));
+        assert_eq!(slot.next().map(|f| f.0).as_deref(), Some("d"));
         assert_eq!(slot.next(), None);
     }
 

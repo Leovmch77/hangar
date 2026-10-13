@@ -427,6 +427,34 @@ PANE_MULTI = (
     "   3. [ ] Type something\n"
     "   4. Chat about this\n"
 )
+# Múltipla escolha real: a faixa começa com "←", e a lista numerada da mensagem logo acima não é menu.
+PANE_MULTI_PROSE = (
+    "● Propostas, na ordem de valor:\n"
+    "  1. Regras de escrita de skill: um bloco curto em Convenções.\n"
+    "     - gatilhos e critério de pronto\n"
+    "  2. Corrigir o que está errado:\n"
+    "     - tabela de skills e testes\n"
+    "  3. Enxugar: levar o detalhe para docs/.\n"
+    "\n"
+    "  Qual aplico?\n"
+    "────────────────────────────────────────\n"
+    "←  ☐ CLAUDE.md  ✔ Submit  →\n"
+    "\n"
+    "Quais melhorias do CLAUDE.md eu aplico?\n"
+    "\n"
+    "❯ 1. [ ] Regras de escrita de skill\n"
+    "       Bloco curto em Convenções das Skills.\n"
+    "  2. [ ] Corrigir tabela e testes\n"
+    "       Tabela atualizada e testes num laço.\n"
+    "  3. [ ] Enxugar para docs/\n"
+    "       Credenciais e mods em docs/.\n"
+    "  4. [ ] Type something\n"
+    "     Submit\n"
+    "────────────────────────────────────────\n"
+    "  5. Chat about this\n"
+    "\n"
+    "Enter to select · ↑/↓ to navigate · Esc to cancel\n"
+)
 PREVIEW_Q = _ask_q("Ordem", "Como deixo?", ["System no topo (igual aos irmãos)", "Alfabético (obedece .editorconfig)"],
                    previews={"System no topo (igual aos irmãos)": "using System.Reflection;"})
 
@@ -455,6 +483,8 @@ ASK_CASES = [
     dict(name="preview_empty_pane_label", state="awaiting_input", options=["", "B"], questions=[_ask_q("P", "Q", ["A", "B"], previews={"A": "x"})]),
     dict(name="pane_preview", pane=PANE_PREVIEW, questions=[PREVIEW_Q]),
     dict(name="pane_multi_box", pane=PANE_MULTI, questions=[_ask_q("Cores", "Quais cores?", ["Alfa", "Bravo"], True)]),
+    dict(name="pane_multi_prose_above", pane=PANE_MULTI_PROSE, questions=[_ask_q("CLAUDE.md", "Quais melhorias do CLAUDE.md eu aplico?",
+         ["Regras de escrita de skill", "Corrigir tabela e testes", "Enxugar para docs/"], True)]),
     dict(name="no_sidecar", state="awaiting_input", options=["A"], questions=None),
     dict(name="malformed_no_header", state="awaiting_input", options=["A"], sidecar={"tool_input": {"questions": [{"question": "Q", "options": [{"label": "A"}]}]}}),
     dict(name="malformed_not_json", state="awaiting_input", options=["A"], sidecar="{"),

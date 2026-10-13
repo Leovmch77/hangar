@@ -293,3 +293,34 @@ def test_guard_de_conta_com_hooks_compartilhados_grava_o_caminho_do_principal(tm
     solta = tmp_path / ".claude-solta"
     solta.mkdir()
     assert hook_installer._guard_path(solta) == str((solta / "hooks").resolve() / "guard_tmux.py")
+
+
+def _run_hook(tmp_path, payload):
+    return subprocess.run([sys.executable, str(HOOK_SCRIPT)], input=json.dumps(payload), text=True,
+                          capture_output=True, env={**os.environ, "CLAUDE_CONFIG_DIR": str(tmp_path)})
+
+
+def test_pergunta_encerrada_no_terminal_apaga_so_a_propria(tmp_path):
+    # Respondida ou recusada direto no terminal, a pergunta não pode ficar aberta para a lista.
+    pergunta = {"hook_event_name": "PreToolUse", "tool_name": "AskUserQuestion", "session_id": "abc",
+                "tool_use_id": "t1", "tool_input": {"questions": []}}
+    sidecar = tmp_path / ".hangar-askq" / "abc.json"
+    for evento in ("PostToolUse", "PostToolUseFailure"):
+        _run_hook(tmp_path, pergunta)
+        # Fim de outra chamada (pergunta nova já gravou por cima) não apaga.
+        _run_hook(tmp_path, {**pergunta, "hook_event_name": evento, "tool_use_id": "outra"})
+        assert sidecar.exists()
+        assert _run_hook(tmp_path, {**pergunta, "hook_event_name": evento}).returncode == 0
+        assert not sidecar.exists(), evento
+    # Sidecar de versão antiga do Claude Code, sem id: o fim desta chamada também o tira.
+    sidecar.write_text(json.dumps({"tool_name": "AskUserQuestion", "session_id": "abc"}), encoding="utf-8")
+    _run_hook(tmp_path, {**pergunta, "hook_event_name": "PostToolUse"})
+    assert not sidecar.exists()
+
+
+def test_fim_da_pergunta_tambem_e_instalado(tmp_path):
+    hook_installer._ensure_settings_file(_settings(tmp_path))
+    hooks = json.loads(_settings(tmp_path).read_text(encoding="utf-8"))["hooks"]
+    for evento in ("PreToolUse", "PostToolUse", "PostToolUseFailure"):
+        assert [(b["matcher"], b["hooks"][0]["command"]) for b in hooks[evento]] == \
+            [("AskUserQuestion", hook_installer._COMMAND)], evento

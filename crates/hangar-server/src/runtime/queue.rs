@@ -118,6 +118,10 @@ impl State {
         let conversation=Value::from(conversation);
         self.operations.iter().any(|(key,op)|!key.starts_with(CALL_PREFIX) && holds_terminal_write(op,&conversation))
     }
+    /// Linha mais antiga que a drenagem ainda entregaria (mesmo filtro do `Claim`): a nova espera atrás dela.
+    pub fn pending_ahead(&self,min_ts:f64)->bool {
+        self.rows.iter().any(|r|r["delivered"]==false && current(r,min_ts) && !self.protected(row_id(r)))
+    }
     pub fn new(key: &str, generation: u64, name: &str, rows: Vec<Value>) -> Self {
         Self { version:VERSION, owner_key:key.into(), generation, name:name.into(), rows,
             operations:BTreeMap::new(), used_occurrences:BTreeMap::new(), runtime_state:json!({}), next_seq:1 }
@@ -188,6 +192,7 @@ pub enum Action {
     Claim { min_ts:f64, limit:Option<usize>, entry_id:Option<String> },
     SetDelivered { entry_id:String, value:bool, steered:bool },
     Abandon { entry_id:String },
+    GiveUp { entry_id:String },
     BumpAttempts { entry_id:String },
     EntryDelivered { entry_id:String },
     Confirm { entry_ids:Vec<String> },
@@ -223,6 +228,8 @@ pub struct Store {
     state: State,
     fenced: bool,
     recover_before_compact: bool,
+    /// Projeção segurada pelo envio direto: a linha só aparece depois do `BeginDispatch`, já entregue.
+    held: bool,
 }
 
 /// Recusa da própria fila: frase fixa, sem caminho nem texto da conversa, então pode ir ao log.
@@ -295,7 +302,7 @@ impl Store {
             Err(error) => return Err(error),
         };
         let recover_before_compact=needs_terminal_recovery(&state);
-        let mut store = Self { state_path:state_path.into(), projection_dir:projection_dir.into(), state, fenced:false, recover_before_compact };
+        let mut store = Self { state_path:state_path.into(), projection_dir:projection_dir.into(), state, fenced:false, recover_before_compact, held:false };
         store.ensure_projection()?;
         Ok(store)
     }
@@ -303,6 +310,7 @@ impl Store {
     pub fn state(&self) -> &State { &self.state }
 
     pub fn ensure_projection(&mut self) -> io::Result<()> {
+        self.held = false;
         let mut output = Vec::new();
         for row in &self.state.rows { serde_json::to_writer(&mut output, row)?; output.push(b'\n'); }
         let path = self.projection_dir.join(format!("{}.jsonl", sanitize(&self.state.name)));
@@ -333,6 +341,15 @@ impl Store {
     }
 
     pub fn exec(&mut self, generation: u64, call_id: &str, clock: ClockSample, action: Action) -> io::Result<Value> {
+        self.exec_held(generation, call_id, clock, action, false)
+    }
+
+    /// `hold`: grava com fsync mas não publica a projeção; ela segue segurada só pelo `BindDispatch`
+    /// seguinte, e qualquer outra ação (o `BeginDispatch` que marca entregue, o `Finish` que adia) a publica.
+    pub fn exec_held(&mut self, generation: u64, call_id: &str, clock: ClockSample, action: Action, hold: bool) -> io::Result<Value> {
+        // Lido sem zerar: ação que falha antes de gravar deixa a linha segurada para a próxima publicar.
+        let was_held = self.held;
+        let binds = matches!(&action, Action::BindDispatch { .. });
         self.unfence()?;
         if call_id.is_empty() { return Err(invalid("operação da fila sem identificador")); }
         let receipt_id = format!("{CALL_PREFIX}{call_id}");
@@ -383,7 +400,8 @@ impl Store {
             self.state = state;
             self.fenced = false;
             self.recover_before_compact=false;
-            self.ensure_projection()?;
+            self.held = hold || binds && was_held;
+            if !self.held { self.ensure_projection()?; }
         }
         Ok(result)
     }
@@ -633,6 +651,28 @@ fn apply(state: &mut State, action: Action, clock: ClockSample, call_id: &str) -
                 row["delivered"] = json!(true); row["desistiu"] = json!(true); row["desistiu_ts"] = json!(clock.epoch_s);
             }
             Value::Null
+        }
+        // A pessoa desiste da entrega que nunca se provou: sem isto a trava de escrita espera para sempre.
+        // Nada é reenviado; a linha vira "não chegou" e a fila volta a andar.
+        Action::GiveUp { entry_id } => {
+            let ids: Vec<String> = state.operations.iter().filter(|(key, op)| !key.starts_with(CALL_PREFIX)
+                && op.entry_id.as_deref() == Some(entry_id.as_str()) && holds_terminal_write(op, &Value::Null))
+                .map(|(key, _)| key.clone()).collect();
+            for id in &ids {
+                let op = state.operations.get_mut(id).unwrap();
+                let stage = op.result["payload"]["stage"].clone();
+                op.status = Status::Rejected;
+                op.result = json!({"operation_id":id,"disposition":"rejected","payload":{"code":"delivery_given_up","stage":stage,"cleanup":"not_needed"}});
+                op.terminal_finalized = true;
+            }
+            if !ids.is_empty() {
+                if let Some(row) = state.rows.iter_mut().find(|r| row_id(r) == entry_id && r["confirmed"] != true) {
+                    row["delivered"] = json!(true); row["desistiu"] = json!(true); row["desistiu_ts"] = json!(clock.epoch_s);
+                }
+            }
+            // Sem incerta desta entrada, a trava pode ter ficado de uma dona que já se resolveu: solta igual.
+            release_terminal_write_barrier(state);
+            json!(!ids.is_empty())
         }
         Action::BumpAttempts { entry_id } => {
             if let Some(row) = state.rows.iter_mut().find(|r| row_id(r) == entry_id && !protected.contains(&entry_id)) {
@@ -1007,7 +1047,7 @@ pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
 }
 
 enum QueueMessage {
-    Exec { generation:u64, call_id:String, clock:ClockSample, action:Action, reply:oneshot::Sender<io::Result<Value>> },
+    Exec { generation:u64, call_id:String, clock:ClockSample, action:Action, hold:bool, reply:oneshot::Sender<io::Result<Value>> },
     Stop,
     Snapshot(oneshot::Sender<io::Result<State>>),
 }
@@ -1039,11 +1079,11 @@ impl QueueActor {
                         }
                         let _ = reply.send(Ok(store.state.clone()));
                     }
-                    QueueMessage::Exec { generation,call_id,clock,action,reply } => {
+                    QueueMessage::Exec { generation,call_id,clock,action,hold,reply } => {
                         let lease = lease.clone();
                         let job = tokio::task::spawn_blocking(move || {
                             let _lease = lease;
-                            let result = store.exec(generation,&call_id,clock,action);
+                            let result = store.exec_held(generation,&call_id,clock,action,hold);
                             (store,result)
                         }).await;
                         match job {
@@ -1061,8 +1101,12 @@ impl QueueActor {
     pub fn lease(&self) -> Arc<File> { self.lease.clone() }
 
     pub async fn exec(&self, generation:u64, call_id:&str, clock:ClockSample, action:Action) -> io::Result<Value> {
+        self.exec_held(generation,call_id,clock,action,false).await
+    }
+
+    pub async fn exec_held(&self, generation:u64, call_id:&str, clock:ClockSample, action:Action, hold:bool) -> io::Result<Value> {
         let (reply,response) = oneshot::channel();
-        self.sender.send(QueueMessage::Exec { generation,call_id:call_id.into(),clock,action,reply }).await
+        self.sender.send(QueueMessage::Exec { generation,call_id:call_id.into(),clock,action,hold,reply }).await
             .map_err(|_|invalid("fila encerrada"))?;
         response.await.map_err(|_|invalid("fila encerrada sem recibo"))?
     }

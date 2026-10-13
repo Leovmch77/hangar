@@ -36,10 +36,15 @@ fn terminal_input_composer_proof() {
  assert!(ComposerSnapshot::parse("no composer").is_none());
  let empty=ComposerSnapshot::parse(&screen("")).unwrap();
  assert_eq!(ComposerSnapshot::parse(&screen("/clear │ [name]")).unwrap().proves("/clear",&empty),Proof::Present);
+ assert_eq!(ComposerSnapshot::parse(&screen("/compact <optional custom summarization instructions>")).unwrap().proves("/compact",&empty),Proof::Present);
+ assert_eq!(ComposerSnapshot::parse(&screen("/compact <a> <b>")).unwrap().proves("/compact",&empty),Proof::Unreadable);
  assert_eq!(ComposerSnapshot::parse(&screen("/clear [x] [name]")).unwrap().proves("/clear",&empty),Proof::Unreadable);
  assert_eq!(ComposerSnapshot::parse(&screen("/clear [a #1]")).unwrap().proves("/clear",&empty),Proof::Unreadable);
  let draft=ComposerSnapshot::parse(&screen("/clear [nota]")).unwrap();
  assert_eq!(draft.proves("/clear",&draft),Proof::Unreadable);
+ assert_eq!(ComposerSnapshot::parse(&screen("/compact <a #1>")).unwrap().proves("/compact",&empty),Proof::Unreadable);
+ let draft=ComposerSnapshot::parse(&screen("/compact <nota>")).unwrap();
+ assert_eq!(draft.proves("/compact",&draft),Proof::Unreadable);
 }
 #[test]
 fn terminal_input_composer_below_long_agent_panel() {
@@ -124,6 +129,31 @@ async fn terminal_input_plugin_fill_proves_then_enters() {
  let io=Arc::new(FakeIo::new(vec![screen(""),screen("hello @peer"),screen("")]));let s=Arc::new(Services::new());s.facts.lock().unwrap().plugin_live=true;*s.reply.lock().unwrap()=PluginReply::Filled;
  assert_eq!(driver(io.clone(),s.clone()).prompt("hello @peer","id").await.disposition,Disposition::Accepted);
  assert_eq!(s.published.lock().unwrap()[0].mode,PluginMode::Fill);assert_eq!(io.writes().len(),1);
+}
+#[tokio::test]
+async fn terminal_input_plugin_fill_enters_when_long_message_makes_composer_unreadable() {
+ let tall=screen(&(0..45).map(|i| format!("linha {i} da mensagem longa")).collect::<Vec<_>>().join("\n"));
+ assert!(ComposerSnapshot::parse(&tall).is_none(),"composer alto demais para ler");
+ assert!(ComposerSnapshot::too_tall(&tall) && !ComposerSnapshot::too_tall("um diálogo sem réguas"));
+ let text=(0..45).map(|i| format!("linha {i} da mensagem longa")).collect::<Vec<_>>().join("\n");
+ let io=Arc::new(FakeIo::new(vec![screen(""),tall,screen("")]));let s=Arc::new(Services::new());
+ s.facts.lock().unwrap().plugin_live=true;*s.reply.lock().unwrap()=PluginReply::Filled;
+ let r=driver(io.clone(),s.clone()).prompt(&text,"id").await;
+ assert_eq!(r.disposition,Disposition::Accepted,"o Filled do plugin basta");
+ assert_eq!(s.published.lock().unwrap()[0].mode,PluginMode::Fill);assert_eq!(io.writes().len(),1,"só o Enter");
+}
+#[tokio::test]
+async fn terminal_input_plugin_fill_never_enters_on_a_screen_without_composer() {
+ let io=Arc::new(FakeIo::new(vec![screen(""),"Diálogo qualquer\n❯ Sim\n  Não".into()]));let s=Arc::new(Services::new());
+ s.facts.lock().unwrap().plugin_live=true;*s.reply.lock().unwrap()=PluginReply::Filled;
+ let r=driver(io.clone(),s.clone()).prompt("uma mensagem qualquer","id").await;
+ assert_ne!(r.disposition,Disposition::Accepted);assert!(io.writes().is_empty(),"nenhum Enter");
+}
+#[test]
+fn terminal_input_composer_of_a_long_message_still_reads() {
+ let text=(0..20).map(|i| format!("linha {i} da mensagem longa")).collect::<Vec<_>>().join("\n");
+ let now=ComposerSnapshot::parse(&screen(&text)).expect("vinte linhas ainda são o composer");
+ assert_eq!(now.proves(&text,&ComposerSnapshot::parse(&screen("")).unwrap()),Proof::Present);
 }
 #[tokio::test]
 async fn terminal_input_plugin_user_requires_capability_idle_and_safe_text() {
@@ -222,6 +252,9 @@ async fn terminal_input_native_process_io_writes_envelope_and_missing_socket_is_
  let dir=tempfile::tempdir().unwrap();let path=dir.path().join("native.sock");let listener=tokio::net::UnixListener::bind(&path).unwrap();let native=NativeMessage {socket:path,origin:"uds:/inbox".into(),sender:"peer".into(),mode:"bypass".into(),message_id:Some("uuid-message".into())};
  let peer=tokio::spawn(async move{use tokio::io::AsyncReadExt;let (mut socket,_)=listener.accept().await.unwrap();let mut bytes=Vec::new();socket.read_to_end(&mut bytes).await.unwrap();bytes});
  assert_eq!(ProcessIo::default().socket(&native,b"envelope\n".to_vec()).await.unwrap(),WriteOutcome::Written);assert_eq!(peer.await.unwrap(),b"envelope\n");
+ // Socket ausente de fato: o ouvinte fechado ainda aceita conexão enquanto um `fork` de outro teste
+ // da suíte segura o descritor dele até o `exec`.
+ std::fs::remove_file(&native.socket).unwrap();
  assert_eq!(ProcessIo::default().socket(&native,b"envelope\n".to_vec()).await.unwrap(),WriteOutcome::NotWritten);
 }
 #[tokio::test]

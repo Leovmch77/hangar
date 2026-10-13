@@ -17,7 +17,8 @@ from app import codex_contas, runtime_config
 from app.adapters.claude_headless import adapter as hl_adapter
 from app.adapters.codex import sessions as codex_sessions
 from app.adapters.codex.appserver import AppServerClient
-from app.adapters.codex.lancador import CLIENT_INFO, PERMISSION_POLICIES, service_tier_override, tool_output_override
+from app.adapters.codex.lancador import (CLIENT_INFO, PERMISSION_POLICIES, identity_override, service_tier_override,
+                                         tool_output_override)
 
 
 class Ocupada(RuntimeError):
@@ -90,7 +91,9 @@ def argv(meta: dict) -> list[str]:
     return ["codex", "app-server", "--stdio",
             "-c", f'sandbox_mode="{sandbox}"', "-c", f'approval_policy="{approval}"',
             *tool_output_override(meta.get("tool_output_token_limit")),
-            *service_tier_override(meta.get("service_tier"))]
+            *service_tier_override(meta.get("service_tier")),
+            *identity_override({"CP_SESSION_NAME": meta.get("name"), "CP_SESSION_KEY": meta.get("key"),
+                                "HANGAR_CANO_KEY": meta.get("key")})]
 
 
 def _ambiente(meta: dict) -> dict:

@@ -193,7 +193,7 @@ while True:
    if pending.startswith(b'\\x1b[201~'):paste=False;pending=pending[6:];continue
   char,pending=pending[:1],pending[1:]
   if char==b'\\r' and not paste:
-   open(sys.argv[1],'wb').write(data);sys.exit(0)
+   open(sys.argv[1]+'.tmp','wb').write(data);os.replace(sys.argv[1]+'.tmp',sys.argv[1]);sys.exit(0)
   data+=b'\\n' if char==b'\\r' and paste else char
 ''')
     raw = subprocess.run

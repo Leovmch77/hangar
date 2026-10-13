@@ -425,6 +425,61 @@ async fn turn_end_confirms_the_delivered_input_without_being_asked() {
     server.await.unwrap();
 }
 
+#[tokio::test]
+async fn transcript_growth_confirms_the_input_before_the_turn_ends() {
+    // Sem fim de turno: a linha do usuário no transcript basta para confirmar, sem esperar o idle.
+    let dir = tempfile::tempdir().unwrap();
+    let transcript = dir.path().join("chat.jsonl");
+    std::fs::write(&transcript,"").unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let written = transcript.clone();
+    let server = tokio::spawn(async move {
+        let (stream,_) = listener.accept().await.unwrap();
+        let mut reader = BufReader::new(stream);
+        let mut header = String::new(); reader.read_line(&mut header).await.unwrap();
+        let snapshot = json!({"type":"cano_snapshot","versao":2,"pid":42,"init":null,"aberto":false,
+            "pendentes":[],"ultimo_result":null,"rate_limit":null,"stderr_tail":[],"saiu":null,"inflight":{}});
+        reader.get_mut().write_all(format!("{snapshot}\n").as_bytes()).await.unwrap();
+        loop {
+            let mut raw = String::new();
+            if reader.read_line(&mut raw).await.unwrap() == 0 { break; }
+            let envelope:Value = serde_json::from_str(&raw).unwrap();
+            let frame:Value = serde_json::from_str(envelope["frame"].as_str().unwrap()).unwrap();
+            let ack = json!({"type":"cano_input_ack","operation_id":envelope["operation_id"],"outcome":"written"});
+            reader.get_mut().write_all(format!("{ack}\n").as_bytes()).await.unwrap();
+            if frame["type"] == "user" {
+                use std::io::Write;
+                let mut file = std::fs::OpenOptions::new().append(true).open(&written).unwrap();
+                writeln!(file,"{}",json!({"type":"user","uuid":"u-1","message":{"role":"user","content":"Olá"}})).unwrap();
+            }
+        }
+    });
+    let target = RuntimeTarget { key:"key".into(),generation:1,name:"session".into(),provider:"claude".into(),
+        metadata:json!({"name":"session","headless":true,"session_id":"sid-1","initialized":true}),
+        binding:CanoBinding { pid:42,escuta:format!("tcp:{address}"),token:"secret-test".into(),versao:2 },
+        lease_path:dir.path().join("key.lock"),state_path:dir.path().join("key.queue-state.json"),projection_dir:dir.path().join("projection"),
+        transcript:transcript.clone(),created:0.0 };
+    let lease = acquire_lease(&target.lease_path).unwrap();
+    let store = Store::open(&target.state_path,&target.projection_dir,State::new("key",1,"session",vec![])).unwrap();
+    let queue = QueueActor::start(store,lease);
+    let connection = cano::connect(&target.binding).await.unwrap();
+    let engine = RuntimeEngine::new("claude",target.metadata.clone(),1,ClockSample { monotonic_s:0.0,epoch_s:1_800_000_000.0 }).unwrap();
+    let handle = RuntimeActor::spawn(target,queue,connection,engine);
+    let input = RuntimeCommand { operation_id:"msg".into(),kind:OperationKind::Input,payload:json!({"text":"Olá","entry_id":"msg"}) };
+    assert!(handle.command(input).await.unwrap().disposition == Disposition::Accepted);
+    let path = dir.path().join("key.queue-state.json");
+    tokio::time::timeout(std::time::Duration::from_secs(2),async {
+        loop {
+            let state:State = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            if state.rows.iter().any(|row|row["id"] == "msg" && row["confirmed"] == true) { break; }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }).await.expect("o crescimento do transcript precisa confirmar a entrada");
+    handle.stop().await.unwrap();
+    server.await.unwrap();
+}
+
 /// Serviço de política HTTP que responde `ok` a tudo e conta as chamadas.
 async fn policy_server() -> (std::net::SocketAddr,std::sync::Arc<std::sync::atomic::AtomicUsize>) {
     use tokio::io::AsyncReadExt;
@@ -447,13 +502,10 @@ async fn policy_server() -> (std::net::SocketAddr,std::sync::Arc<std::sync::atom
                         if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") { length = value.trim().parse().unwrap(); }
                     }
                     let mut body = vec![0;length]; reader.read_exact(&mut body).await.unwrap();
-                    // GET /internal/quota (sem corpo) não é uma política: responde sem contar.
-                    let reply = if body.is_empty() { json!({"windows":[]}).to_string() } else {
-                        counter.fetch_add(1,std::sync::atomic::Ordering::SeqCst);
-                        let kind = serde_json::from_slice::<Value>(&body).unwrap()["kind"].clone();
-                        let data = if kind == "prepare_prompt" { json!({"content":"Olá","notices":[],"native_candidate":false}) } else { json!({}) };
-                        json!({"ok":true,"data":data}).to_string()
-                    };
+                    counter.fetch_add(1,std::sync::atomic::Ordering::SeqCst);
+                    let kind = serde_json::from_slice::<Value>(&body).unwrap()["kind"].clone();
+                    let data = if kind == "prepare_prompt" { json!({"content":"Olá","notices":[],"native_candidate":false}) } else { json!({}) };
+                    let reply = json!({"ok":true,"data":data}).to_string();
                     let response = format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{reply}",reply.len());
                     reader.get_mut().write_all(response.as_bytes()).await.unwrap();
                 }

@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Garante um Chromium para o navegador do app nativo no Linux (painel, hangar-preview e tela remota no celular):
-# o Chrome ou o Chromium do sistema, ou o chrome-headless-shell do Chrome for Testing baixado em
-# ~/.hangar/native/chromium. Nunca falha nem pede senha: sem Chromium o app funciona, só sem o Navegador.
-# A marca ~/.hangar/native/chromium-ok é a prova do passo de atualização e diz o que foi encontrado.
-# O do sistema vem antes do baixado: a distro o atualiza, e o baixado só se renova quando este script roda.
+# o chrome-headless-shell do Chrome for Testing baixado em ~/.hangar/native/chromium, mesmo com Chrome no sistema,
+# porque o gerenciador de senhas do Chrome completo prende a entrada do site depois de um login. O do sistema fica
+# para a opção "Usar o Chrome completo" e para quando o download não dá. Nunca falha nem pede senha: sem Chromium o
+# app funciona, só sem o Navegador. A marca ~/.hangar/native/chromium-ok é a prova do passo de atualização e diz o
+# que foi encontrado.
 # Uso: scripts/install-chromium.sh
 set -uo pipefail
 
@@ -43,11 +44,12 @@ fi
 if [ -n "${HANGAR_CHROMIUM:-}" ] && [ -x "$HANGAR_CHROMIUM" ]; then
   marca "HANGAR_CHROMIUM: $HANGAR_CHROMIUM"; exit 0
 fi
-if BIN=$(achar_sistema); then
-  echo "navegador do app nativo: usando $BIN"
-  marca "sistema: $BIN"; exit 0
-fi
+SISTEMA=$(achar_sistema) || SISTEMA=""
 if [ "$(uname -m)" != x86_64 ]; then
+  if [ -n "$SISTEMA" ]; then
+    echo "navegador do app nativo: usando $SISTEMA (não há chrome-headless-shell para $(uname -m))"
+    marca "sistema: $SISTEMA"; exit 0
+  fi
   echo "navegador do app nativo: aviso — nenhum Chrome ou Chromium encontrado, e não há download pronto para $(uname -m)."
   echo "  O app funciona sem ele, só sem o Navegador. Instale o chromium pelo gerenciador da sua distro."
   marca "sem chromium ($(uname -m))"; exit 0
@@ -61,6 +63,11 @@ falhou() {
   if [ -n "$ATUAL" ]; then
     echo "navegador do app nativo: aviso — $1; segue o chrome-headless-shell $ATUAL que já estava aqui."
     marca "baixado: $DESTINO/chrome-headless-shell ($ATUAL; renovar falhou: $1)"
+    exit 0
+  fi
+  if [ -n "$SISTEMA" ]; then
+    echo "navegador do app nativo: aviso — $1; segue o Chrome do sistema ($SISTEMA), que para de responder num site depois de um login com senha."
+    marca "sistema: $SISTEMA (baixar o chrome-headless-shell falhou: $1)"
     exit 0
   fi
   echo "navegador do app nativo: aviso — $1. O app funciona sem ele, só sem o Navegador."

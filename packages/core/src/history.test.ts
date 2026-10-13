@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ChatEvent } from './types';
-import { appendTail, hasSeam, mergeHistoryWithLive, prependOlder, queuedMessages } from './history';
+import { appendTail, hasSeam, mergeHistoryWithLive, mergeHistoryWithLiveRetiring, prependOlder, queuedMessages, waitsInQueue } from './history';
 
 const ev = (id: string): ChatEvent => ({ kind: 'user_msg', id, text: id });
 const ids = (evs: ChatEvent[] | null) => (evs ?? []).map((e) => e.id);
@@ -13,6 +13,15 @@ it('Codex conta só mensagens ainda não encaminhadas, preservando Kimi e o lega
   expect(ids(queuedMessages(events, 'kimi'))).toEqual(['queued-legado', 'queued-enviada', 'queued-pendente']);
   expect(ids(queuedMessages(events, 'claude', true))).toEqual(['queued-legado', 'queued-pendente']);
   expect(events).toHaveLength(6);
+});
+
+it('sem terminal, a bolha já entregue ao processo não espera na fila; com terminal ainda espera o turno', () => {
+  const entregue: ChatEvent = { ...ev('queued-x'), queued_delivered: true };
+  expect(waitsInQueue(entregue, 'claude', true)).toBe(false);
+  expect(waitsInQueue(entregue, 'codex')).toBe(false);
+  expect(waitsInQueue(entregue, 'claude')).toBe(true);
+  expect(waitsInQueue({ ...ev('queued-y'), queued_delivered: false }, 'claude', true)).toBe(true);
+  expect(waitsInQueue(ev('real'), 'claude')).toBe(false);
 });
 
 describe('prependOlder', () => {
@@ -159,5 +168,21 @@ describe('mergeHistoryWithLive', () => {
     expect(ids(mergeHistoryWithLive(
       ['novo'].map(ev), [cached, live], { cachedEvents: new Set([cached]) },
     ))).toEqual(['novo', 'queued-atual']);
+  });
+});
+
+describe('mergeHistoryWithLiveRetiring: real que chega pelo /history', () => {
+  const user = (id: string, text: string, ts?: number, queued_ts?: number) => ({ kind: 'user_msg', id, text, ts, queued_ts }) as ChatEvent;
+  it('aposenta só a bolha da fila dona do texto', () => {
+    const current = [user('a', 'oi'), user('queued-1', 'ok', undefined, 100), user('queued-2', 'ok', undefined, 101)];
+    const r = mergeHistoryWithLiveRetiring([user('a', 'oi'), user('r1', 'ok', 102)], current);
+    expect(r.events.filter((e) => e.id.startsWith('queued-')).map((e) => e.id)).toEqual(['queued-2']);
+    expect(r.retired).toEqual(['queued-1']);
+  });
+  it('real mais antiga que a bolha não a aposenta', () => {
+    // Com o evento `a` em comum: sem costura a cauda REST manda e a fila sai por outro motivo.
+    const r = mergeHistoryWithLiveRetiring([user('a', 'oi'), user('r0', 'ok', 50)], [user('a', 'oi'), user('queued-1', 'ok', undefined, 100)]);
+    expect(r.events.map((e) => e.id)).toContain('queued-1');
+    expect(r.retired).toEqual([]);
   });
 });

@@ -1,7 +1,6 @@
 //! Cofre, Codex e destinos Pi/omp são gravados aqui, sem largar a guarda da conta antes do fim do I/O.
 use super::{
     AccountGuard, AccountKey, GuardMode, Provider,
-    bridge::AccountsBridge,
     catalog::{Account, AccountError, AccountService},
     storage,
 };
@@ -283,7 +282,6 @@ fn write_atomic(path: &Path, value: &Value, strict: bool) -> Result<(), &'static
 impl AccountService {
     async fn device_guard(
         &self,
-        facts_bridge: &AccountsBridge,
         runtime: Option<&Arc<crate::runtime::gateway::RuntimeRegistry>>,
     ) -> Result<(Account, AccountKey, AccountGuard), AccountError> {
         let account = self.resolve(Provider::Codex, "default")?;
@@ -314,7 +312,7 @@ impl AccountService {
                 ));
             }
         }
-        let facts = self.usage(facts_bridge, runtime.map(|r| &**r), &key).await;
+        let facts = self.usage(runtime.map(|r| &**r), &key).await;
         facts.ensure_unused().map_err(|code| {
             AccountError::codex(
                 409,
@@ -330,19 +328,17 @@ impl AccountService {
     }
     pub async fn start_device_login(
         &self,
-        facts: AccountsBridge,
         runtime: Option<Arc<crate::runtime::gateway::RuntimeRegistry>>,
         bridge: DeviceBridge,
     ) -> Result<Value, AccountError> {
         let service = self.clone();
         // O trabalho registrado sobrevive à perda da resposta HTTP de início.
-        tokio::spawn(async move { service.start_device_owned(facts, runtime, bridge).await })
+        tokio::spawn(async move { service.start_device_owned(runtime, bridge).await })
             .await
             .map_err(|_| AccountError::io())?
     }
     async fn start_device_owned(
         &self,
-        facts: AccountsBridge,
         runtime: Option<Arc<crate::runtime::gateway::RuntimeRegistry>>,
         bridge: DeviceBridge,
     ) -> Result<Value, AccountError> {
@@ -358,7 +354,7 @@ impl AccountService {
         {
             return Err(AccountError::codex(409, "device_login_in_progress", None));
         }
-        let (account, key, guard) = self.device_guard(&facts, runtime.as_ref()).await?;
+        let (account, key, guard) = self.device_guard(runtime.as_ref()).await?;
         let id = super::claude_login::nonce().map_err(|_| AccountError::io())?;
         let (status, _) =
             watch::channel(json!({"etapa":"iniciando","attempt_id":id,"user_code":"",
@@ -566,7 +562,6 @@ impl AccountService {
     }
     pub async fn propagate_device(
         &self,
-        facts: AccountsBridge,
         runtime: Option<Arc<crate::runtime::gateway::RuntimeRegistry>>,
         bridge: DeviceBridge,
         import: bool,
@@ -583,7 +578,7 @@ impl AccountService {
         let service = self.clone();
         tokio::spawn(async move {
             let result = service
-                .propagate_device_owned(facts, runtime, bridge, import)
+                .propagate_device_owned(runtime, bridge, import)
                 .await;
             done.send_replace(true);
             result
@@ -593,12 +588,11 @@ impl AccountService {
     }
     async fn propagate_device_owned(
         &self,
-        facts: AccountsBridge,
         runtime: Option<Arc<crate::runtime::gateway::RuntimeRegistry>>,
         bridge: DeviceBridge,
         import: bool,
     ) -> Result<Value, AccountError> {
-        let (account, key, guard) = self.device_guard(&facts, runtime.as_ref()).await?;
+        let (account, key, guard) = self.device_guard(runtime.as_ref()).await?;
         let mut saved = read_json(&vault_path(self)).filter(valid_tokens);
         if saved.is_none()
             && import

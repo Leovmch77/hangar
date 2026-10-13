@@ -224,7 +224,7 @@ def failure_reason(exc: BaseException) -> dict:
     return {"codigo": code or type(exc).__name__, "detalhe": str(exc)[:200] if plain else "", "raise_site": _raise_site(exc)}
 
 
-# Erro do terminal que o próprio Rust resolve na manutenção (confirm/drain), sem reabrir.
+# Erro do terminal que o próprio Rust resolve, sem reabrir; a vista segue valendo para operar.
 _TERMINAL_PRE_EFFECT_ERRORS = frozenset({"terminal_facts", "receipt_scan"})
 # Respostas normais do Rust ao pedido (botão velho, sessão ocupada, entrada inválida): não são
 # defeito: sobem como erro sem ir ao diário de falha.
@@ -303,7 +303,6 @@ class RuntimeCoordinator:
         self.loop = None
         self.events_task = None
         self.refreshing = {}
-        self.voice_clients = {}
         self.legacy_active = set()
         self.registration_locks = {}
         self.adoption_task = None
@@ -927,8 +926,6 @@ class RuntimeCoordinator:
         await asyncio.gather(*tasks, return_exceptions=True)
         self.events_task = None
         self.refreshing.clear()
-        for client in tuple(self.voice_clients.values()):
-            client.fail(RuntimeError("runtime encerrado; chamada de voz invalidada"))
 
     async def refresh_snapshot(self, name):
         from app.runtime_adapter import apply_event
@@ -969,6 +966,8 @@ class RuntimeCoordinator:
             except Exception as exc:
                 slot.cache_valid = False
                 self._signal(slot)
+                if isinstance(exc, RustCacheInvalid):
+                    return      # o `op` já registrou a recusa, uma vez por sequência
                 from app import diag
                 diag.registrar("runtime.drain_failed", "erro", sessao=name, **failure_reason(exc))
         self.drains[slot.binding.key] = self.loop.create_task(drain())
@@ -995,10 +994,6 @@ class RuntimeCoordinator:
                         slot.cache_valid = False
                         self._refresh(slot)
                     elif event.get("revision", -1) > previous or event.get("channel") == "snapshot":
-                        if event["channel"] in {"voice", "voice_target"}:
-                            client = self.voice_clients.get((event["key"], event["data"].get("call_id")))
-                            if client is not None:
-                                client.receive(event["channel"], event["data"]["event"])
                         if event["channel"] == "rate":
                             from app.live_rate import first_response_report, live_rate, rate_report
                             if (first := first_response_report(event["data"])) is not None:
@@ -1027,8 +1022,6 @@ class RuntimeCoordinator:
                     if slot.phase == Phase.Rust:
                         slot.cache_valid = False
                         self._signal(slot)
-                for client in tuple(self.voice_clients.values()):
-                    client.fail(RuntimeError("stream privado interrompido; voz invalidada"))
             await asyncio.sleep(delay)
             delay = min(5.0, delay * 2)
 
@@ -1402,9 +1395,8 @@ class RuntimeCoordinator:
         slot = self.slots.get(self.names.get(name, ""))
         if slot is None or slot.phase != Phase.Rust or slot.cache_valid:
             return
-        if (slot.binding.meta.get("terminal") and kind in {"confirm", "drain"}
-                and slot.view.get("error") in _TERMINAL_PRE_EFFECT_ERRORS):
-            return      # manutenção que o próprio erro pede; o `_op_once` a deixa passar
+        if slot.binding.meta.get("terminal") and slot.view.get("error") in _TERMINAL_PRE_EFFECT_ERRORS:
+            return      # o próprio Rust resolve; o `_op_once` deixa passar
         self._refresh(slot)
         deadline = time.monotonic() + _RESYNC_WAIT_S
         while not slot.cache_valid and slot.phase == Phase.Rust:
@@ -1526,7 +1518,8 @@ class RuntimeCoordinator:
             slot, phase, descriptor = route
             if phase == Phase.Rust:
                 try:
-                    maintenance = (slot.binding.meta.get("terminal") and command["kind"] in {"confirm", "drain"}
+                    # O ator terminal segue aceitando nesse erro: entrada vira linha na fila durável.
+                    maintenance = (slot.binding.meta.get("terminal")
                         and slot.view.get("error") in _TERMINAL_PRE_EFFECT_ERRORS)
                     if command["kind"] not in {"snapshot", "ensure_projection"} and not slot.cache_valid and not maintenance:
                         raise RustCacheInvalid("estado do runtime indisponível; aguarde a reposição")

@@ -1,83 +1,71 @@
+use hangar_server::accounts::{AccountService, environment::AccountEnvironment};
 use hangar_server::runtime::actor::PolicyClient;
-use std::sync::{Arc,atomic::{AtomicBool,AtomicUsize,Ordering}};
-use tokio::io::{AsyncBufReadExt,AsyncWriteExt,BufReader};
+use serde_json::json;
+use std::sync::{Arc,atomic::{AtomicUsize,Ordering}};
 
-/// Python falso só da cota: conta os pedidos e responde 500 quando mandado.
-async fn fake_quota(fail:Arc<AtomicBool>) -> (std::net::SocketAddr,Arc<AtomicUsize>) {
+/// Python falso: só conta conexões. A linha de status não pode abrir nenhuma.
+async fn counting_upstream() -> (std::net::SocketAddr,Arc<AtomicUsize>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let calls = Arc::new(AtomicUsize::new(0));
     let counter = calls.clone();
-    tokio::spawn(async move {
-        loop {
-            let (stream,_) = listener.accept().await.unwrap();
-            let (counter,fail) = (counter.clone(),fail.clone());
-            tokio::spawn(async move {
-                let mut reader = BufReader::new(stream);
-                let mut first = String::new();
-                if reader.read_line(&mut first).await.unwrap_or(0) == 0 { return; }
-                loop {
-                    let mut line = String::new();
-                    if reader.read_line(&mut line).await.unwrap_or(0) == 0 || line == "\r\n" { break; }
-                }
-                assert!(first.starts_with("GET /internal/quota?config_dir=%2F"),"{first}");
-                counter.fetch_add(1,Ordering::SeqCst);
-                let response = if fail.load(Ordering::SeqCst) { "HTTP/1.1 500 Internal Server Error\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".to_owned() }
-                    else { let body = r#"{"windows":[{"rotulo":"5h","pct":42}]}"#; format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",body.len()) };
-                reader.get_mut().write_all(response.as_bytes()).await.unwrap();
-            });
-        }
-    });
+    tokio::spawn(async move { while listener.accept().await.is_ok() { counter.fetch_add(1,Ordering::SeqCst); } });
     (address,calls)
 }
 
+fn now() -> f64 { std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64() }
+
+/// Casa isolada com a conta padrão (`~/.claude`) e uma cota lida há pouco no cache em disco.
+fn home_with_cached_quota(expires_ms:f64) -> (tempfile::TempDir,AccountService,std::path::PathBuf) {
+    let home = tempfile::tempdir().unwrap();
+    let claude = home.path().join(".claude");
+    std::fs::create_dir_all(&claude).unwrap();
+    std::fs::write(claude.join(".credentials.json"),
+        json!({"claudeAiOauth":{"accessToken":"t","expiresAt":expires_ms}}).to_string()).unwrap();
+    // O mesmo caminho do catálogo: no Windows o `canonicalize` cru leva o prefixo `\\?\`.
+    let id = format!("claude:{}",hangar_server::accounts::catalog::resolved(&claude).to_string_lossy());
+    let service = AccountService::new(AccountEnvironment::from_map([
+        ("HOME".into(),home.path().to_string_lossy().into_owned()),
+        ("USERPROFILE".into(),home.path().to_string_lossy().into_owned()),
+    ].into()));
+    // No Windows o cache mora em `AppData/Local`, não em `~/.hangar`.
+    let cache = service.quota_path();
+    std::fs::create_dir_all(cache.parent().unwrap()).unwrap();
+    std::fs::write(cache, json!({id:{"gravado_em":now(),"cota":{"estado":"lida",
+        "janelas":[{"rotulo":"5h","pct":42,"reset_ts":null,"por_modelo":false},{"rotulo":"Fable","pct":9,"reset_ts":null,"por_modelo":true}]}}})
+        .to_string()).unwrap();
+    (home,service,claude)
+}
+
 #[tokio::test]
-async fn quota_is_fetched_once_per_account_inside_the_cache_window() {
-    let (address,calls) = fake_quota(Arc::new(AtomicBool::new(false))).await;
-    let client = PolicyClient::new(address,"secret".into(),"instance".into());
-    for _ in 0..3 {
-        let quota = client.quota_windows("key","/conta/a").await.unwrap();
-        assert_eq!(quota["windows"][0]["pct"],42);
+async fn status_line_windows_come_from_the_accounts_module_without_python() {
+    let (_home,service,claude) = home_with_cached_quota((now() + 3600.0) * 1000.0);
+    let (address,calls) = counting_upstream().await;
+    let client = PolicyClient::new(address,"secret".into(),"instance".into()).with_accounts(service);
+    for config_dir in ["",claude.to_str().unwrap()] {
+        let quota = client.quota_windows("key",config_dir).await.unwrap();
+        assert_eq!(quota,json!({"windows":[{"rotulo":"5h","pct":42,"reset_ts":null,"por_modelo":false}]}),"{config_dir:?}");
     }
-    assert_eq!(calls.load(Ordering::SeqCst),1);
-    client.quota_windows("key","/conta/b").await.unwrap();
-    assert_eq!(calls.load(Ordering::SeqCst),2,"cada conta tem a sua entrada");
+    assert!(client.quota_windows("key","/conta/inexistente").await.is_none());
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert_eq!(calls.load(Ordering::SeqCst),0,"nenhuma ida ao Python no caminho da cota");
 }
 
 #[tokio::test]
-async fn quota_failure_formats_without_windows_and_the_next_call_retries() {
-    let fail = Arc::new(AtomicBool::new(true));
-    let (address,calls) = fake_quota(fail.clone()).await;
-    let client = PolicyClient::new(address,"secret".into(),"instance".into());
-    assert!(client.quota_windows("key","/conta/a").await.is_none());
-    fail.store(false,Ordering::SeqCst);
-    assert!(client.quota_windows("key","/conta/a").await.is_some(),"falha não fica guardada");
-    assert_eq!(calls.load(Ordering::SeqCst),2);
+async fn changed_credential_drops_the_old_quota_and_an_expired_token_does_not_renew() {
+    let (_home,service,claude) = home_with_cached_quota((now() + 3600.0) * 1000.0);
+    let config_dir = claude.to_str().unwrap().to_owned();
+    assert_eq!(service.claude_windows(&config_dir).await.unwrap().len(),1);
+    // Login trocado e já vencido: a cota da identidade anterior sai, e sem ponte não há renovação.
+    std::fs::write(claude.join(".credentials.json"),
+        json!({"claudeAiOauth":{"accessToken":"outro","expiresAt":1000.0}}).to_string()).unwrap();
+    assert_eq!(service.claude_windows(&config_dir).await,Err("quota_expired"));
 }
 
 #[tokio::test]
-async fn quota_transport_failure_is_remembered_per_account() {
-    // Aceita e derruba a conexão: falha de transporte, contada.
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let calls = Arc::new(AtomicUsize::new(0));
-    let counter = calls.clone();
-    tokio::spawn(async move { loop { let (stream,_) = listener.accept().await.unwrap(); counter.fetch_add(1,Ordering::SeqCst); drop(stream); } });
+async fn without_the_accounts_module_the_line_has_no_windows() {
+    let (address,calls) = counting_upstream().await;
     let client = PolicyClient::new(address,"secret".into(),"instance".into());
-    for _ in 0..3 { assert!(client.quota_windows("key","/conta/a").await.is_none()); }
-    assert_eq!(calls.load(Ordering::SeqCst),1,"Python fora do ar não é consultado de novo na janela curta");
-    assert!(client.quota_windows("key","/conta/b").await.is_none());
-    assert_eq!(calls.load(Ordering::SeqCst),2,"cada conta tem a sua entrada");
-}
-
-#[tokio::test]
-async fn quota_cache_holds_at_most_sixteen_accounts() {
-    let (address,calls) = fake_quota(Arc::new(AtomicBool::new(false))).await;
-    let client = PolicyClient::new(address,"secret".into(),"instance".into());
-    for index in 0..17 { client.quota_windows("key",&format!("/conta/{index}")).await.unwrap(); }
-    assert_eq!(calls.load(Ordering::SeqCst),17);
-    client.quota_windows("key","/conta/16").await.unwrap();
-    assert_eq!(calls.load(Ordering::SeqCst),17,"a mais nova continua guardada");
-    client.quota_windows("key","/conta/0").await.unwrap();
-    assert_eq!(calls.load(Ordering::SeqCst),18,"a mais antiga saiu para caber a 17ª");
+    assert!(client.quota_windows("key","").await.is_none());
+    assert_eq!(calls.load(Ordering::SeqCst),0);
 }

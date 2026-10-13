@@ -19,16 +19,12 @@ const PUBLISH_POLICY_TIMEOUT:Duration=Duration::from_secs(40);
 const READY_FIRST_WAIT:Duration=Duration::from_secs(1);
 const READY_MAX_WAIT:Duration=Duration::from_secs(16);
 const READY_BUDGET:Duration=Duration::from_secs(120);
+const CONFIRM_POLL:Duration=Duration::from_millis(50);
+const CONFIRM_WINDOW:Duration=Duration::from_secs(30);
 /// Teto de um pedido de app aos mods: o mais longo da superfície (desenho de novo e clique, 6 s) mais
 /// 1 s de folga para o relógio do ator, abaixo dos 8 s em que o app desiste. O registro serializa os
 /// pedidos da sessão, então um pedido sem teto prenderia os seguintes.
 const MODS_CALL_LIMIT:Duration=Duration::from_secs(crate::mods::surface::APP_CALL_MAX_S as u64 + 1);
-
-/// A cota do Claude muda devagar: uma consulta ao Python por conta a cada 5 minutos basta.
-const QUOTA_TTL:Duration=Duration::from_secs(300);
-const QUOTA_ACCOUNTS:usize=16;
-/// Python fora do ar: sem isto cada linha de status esperaria o prazo inteiro de novo.
-const QUOTA_DOWN_TTL:Duration=Duration::from_secs(30);
 
 #[derive(Clone)]
 pub struct PolicyClient {
@@ -36,10 +32,8 @@ pub struct PolicyClient {
     secret:String,
     instance:String,
     http:crate::proxy::HttpClient,
-    /// `config_dir` -> (quando veio, `{"windows":[…]}`).
-    quota:Arc<std::sync::Mutex<BTreeMap<String,(Instant,Value)>>>,
-    /// `config_dir` -> quando a consulta não chegou ao Python (transporte ou prazo).
-    quota_down:Arc<std::sync::Mutex<BTreeMap<String,(Instant,())>>>,
+    /// Dono das cotas; sem ele a linha de status sai sem janelas.
+    accounts:Option<crate::accounts::AccountService>,
     diag:crate::diag::DiagClient,
     /// (primeira espera, teto) da repetição enquanto o Python não está pronto.
     ready_retry:(Duration,Duration),
@@ -47,51 +41,25 @@ pub struct PolicyClient {
     codex_env:Option<Arc<crate::accounts::environment::AccountEnvironment>>,
 }
 
-/// Guarda no mapa limitado a `QUOTA_ACCOUNTS`, tirando a entrada mais antiga para caber a nova.
-fn remember<T>(cache:&std::sync::Mutex<BTreeMap<String,(Instant,T)>>,config_dir:&str,value:T) {
-    let Ok(mut cache) = cache.lock() else { return };
-    if !cache.contains_key(config_dir) && cache.len() >= QUOTA_ACCOUNTS {
-        if let Some(oldest) = cache.iter().min_by_key(|(_,(at,_))|*at).map(|(dir,_)|dir.clone()) { cache.remove(&oldest); }
-    }
-    cache.insert(config_dir.to_owned(),(Instant::now(),value));
-}
-
 impl PolicyClient {
     pub fn new(upstream:std::net::SocketAddr,secret:String,instance:String) -> Self {
         Self { upstream,diag:crate::diag::DiagClient::new(upstream,secret.clone()),secret,instance,http:crate::proxy::client(),
-            quota:Default::default(),quota_down:Default::default(),ready_retry:(READY_FIRST_WAIT,READY_BUDGET),codex_env:None }
+            accounts:None,ready_retry:(READY_FIRST_WAIT,READY_BUDGET),codex_env:None }
     }
     pub fn with_ready_retry(mut self,first_wait:Duration,budget:Duration) -> Self { self.ready_retry = (first_wait,budget); self }
+    pub fn with_accounts(mut self,accounts:crate::accounts::AccountService) -> Self { self.accounts = Some(accounts); self }
     #[doc(hidden)]
     pub fn with_codex_environment(mut self,env:crate::accounts::environment::AccountEnvironment) -> Self { self.codex_env = Some(Arc::new(env)); self }
     pub(super) fn codex_environment(&self) -> crate::accounts::environment::AccountEnvironment {
         self.codex_env.as_deref().cloned().unwrap_or_else(crate::accounts::environment::AccountEnvironment::capture)
     }
-    /// Janelas de cota da conta, só quando vai formatar. Falha formata sem janelas e deixa o cache
-    /// anterior como está; o log leva o código, nunca o dado.
+    /// Janelas de cota da conta, só quando vai formatar, lidas do módulo de contas (cache dele). Falha
+    /// formata sem janelas; o log leva o código, nunca o dado.
     pub async fn quota_windows(&self,key:&str,config_dir:&str) -> Option<Value> {
-        let cached = self.quota.lock().ok().and_then(|cache|cache.get(config_dir).cloned());
-        if let Some((at,value)) = &cached { if at.elapsed() < QUOTA_TTL { return Some(value.clone()); } }
-        let down = self.quota_down.lock().ok().and_then(|down|down.get(config_dir).map(|(at,_)|at.elapsed() < QUOTA_DOWN_TTL));
-        if down == Some(true) { return None; }
-        let query = form_urlencoded::Serializer::new(String::new()).append_pair("config_dir",config_dir).finish();
-        let fetched = tokio::time::timeout(POLICY_TIMEOUT,async {
-            let request = axum::http::Request::get(format!("http://{}/internal/quota?{query}",self.upstream))
-                .header("x-hangar-internal",&self.secret).body(axum::body::Body::empty()).map_err(|_|"quota_request")?;
-            let response = self.http.request(request).await.map_err(|_|"quota_transport")?;
-            if !response.status().is_success() { return Err("quota_refused"); }
-            let bytes = axum::body::to_bytes(axum::body::Body::new(response.into_body()),MAX_ENVELOPE).await.map_err(|_|"quota_limit")?;
-            let value:Value = serde_json::from_slice(&bytes).map_err(|_|"quota_json")?;
-            if value["windows"].is_array() { Ok(value) } else { Err("quota_shape") }
-        }).await.unwrap_or(Err("quota_timeout"));
-        match fetched {
-            Ok(value) => {
-                if let Ok(mut down) = self.quota_down.lock() { down.remove(config_dir); }
-                remember(&self.quota,config_dir,value.clone());
-                Some(value)
-            }
+        let accounts = self.accounts.as_ref()?;
+        match accounts.claude_windows(config_dir).await {
+            Ok(windows) => Some(json!({"windows":windows})),
             Err(code) => {
-                if matches!(code,"quota_transport" | "quota_timeout") { remember(&self.quota_down,config_dir,()); }
                 if crate::warn_limit::allow(Some(key),code) { tracing::warn!(key=%key,code=%code,"cota do Claude indisponível; a linha sai sem janelas"); }
                 None
             }
@@ -385,9 +353,6 @@ impl RuntimeEngine {
                     Core::Codex(core)=>{
                         core.restore_rpc(id.into(),&phase.payload["frame"],phase.payload["state_revision"].as_u64().unwrap_or(0),
                             phase.payload["settings_revision"].as_u64().unwrap_or(0));
-                        if let Some(call_id) = state.operations.get(id).and_then(|root|root.payload["payload"]["call_id"].as_str()) {
-                            core.restore_voice_scope(id,call_id);
-                        }
                     },
                     Core::Claude(core)=>{
                         let mut frame = phase.payload["frame"].clone();
@@ -791,6 +756,10 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
     let mut durable_view = json!({"alive":true,"initialized":false,"ready":false});
     let mut last_state = String::new();
     let mut confirming = false;
+    // Entrada enviada: a confirmação segue o crescimento do transcript (só `stat`) em vez de esperar o idle;
+    // a prova é a mesma do `confirm_inputs`. Prazo para não vigiar uma entrada que nunca chega.
+    let mut confirm_until: Option<Instant> = None;
+    let mut confirm_seen: Option<u64> = None;
     let mut channels:BTreeMap<String,Value> = ["preview","thinking","tool"].into_iter().map(|channel|
         (channel.into(),json!({"session":target.name,"text":"","md":true,"full":true,"vivo":true}))).collect();
     let mut live = LiveOut { sender:engine.live.clone(),state:LiveState {
@@ -969,7 +938,7 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
                         // Prévia só pelo canal do hub: no `events` ela subiria a
                         // revisão e o Python a decodificaria a cada delta.
                         if !live.channel(&channel,&data) { publish(&events,&target,&mut revision,&channel,data); }
-                    } else if ["voice","voice_target","rate"].contains(&channel.as_str()) {
+                    } else if channel == "rate" {
                         publish(&events,&target,&mut revision,&channel,data);
                     }
                 }
@@ -1235,6 +1204,8 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
                     let mut commands = Vec::new();
                     for row in &claimed {
                         let id = row["id"].as_str().ok_or_else(||failure("queue_entry"))?;
+                        // Controle da voz antiga que sobrou da versão anterior: não tem mais dono e não vira mensagem.
+                        if state.operations.get(id).is_some_and(|op|op.payload["kind"].as_str().is_some_and(|kind|kind.starts_with("voice_"))) { continue; }
                         let command = state.operations.get(id).and_then(|op|serde_json::from_value::<RuntimeCommand>(op.payload.clone()).ok())
                             .unwrap_or_else(||RuntimeCommand { operation_id:id.into(),kind:OperationKind::Input,
                                 payload:json!({"text":row["text"],"pre_transcript":row["pre_transcript"].as_bool().unwrap_or(false)}) });
@@ -1272,6 +1243,7 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
                             let _ = response.send(Err(RuntimeError::new("operation_internal","operação interna do runtime")));
                             continue;
                         }
+                        if matches!(command.kind,OperationKind::Input) { confirm_until = Some(Instant::now() + CONFIRM_WINDOW); confirm_seen = None; }
                         if from_queue && roots.get(&id).is_some_and(|pending|pending.result.as_ref().is_some_and(|reply|reply.disposition == Disposition::Deferred)) {
                             roots.remove(&id);
                         }
@@ -1342,7 +1314,9 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
                         });
                     }
                     Message::Snapshot(response) => {
+                        // Antes da primeira gravação a vista durável não tem retrato; o do motor é o mesmo que o `live` já publicou.
                         let mut view=durable_view.clone();
+                        if view.get("public_state").is_none() { view["public_state"] = engine.view()["public_state"].clone(); }
                         if sid_transition || target.metadata["lifecycle_pending"]==true {view["deliverable"]=json!(false);view["lifecycle_pending"]=json!(true);}
                         let _ = response.send(Ok(json!({"key":target.key,"generation":target.generation,"revision":revision.value,
                             "view":view,"channels":channels,"error":error.as_ref().map(|e|e.code.clone())})));
@@ -1869,6 +1843,8 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
                         if response.is_none() { confirming = false; }
                         match result {
                             Ok((ids,legacy))=>{
+                                // Sem desligar ao confirmar: outra entrada da janela pode esperar a vez dela; o
+                                // prazo encerra a vigília, que só custa um `stat` por volta.
                                 for id in &ids { effects.extend(engine.confirm_input(id)); }
                                 if let Some(response) = response { let _ = response.send(Ok(json!({"confirmed":ids.len() + legacy}))); }
                             }
@@ -1929,6 +1905,19 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
             }
             // Só acorda; a limpeza da retenção solta é a do topo do laço.
             _ = turn_hold_released.notified(), if turn_hold.is_some() => {}
+            _ = tokio::time::sleep(CONFIRM_POLL), if confirm_until.is_some() && !confirming => {
+                if confirm_until.is_some_and(|until|Instant::now() >= until) { confirm_until = None; continue; }
+                // O transcript da conversa vigente: a TUI do Codex com terminal pode ter trocado de conversa.
+                let view = engine.view();
+                let transcript = transcript_of(&target,&view);
+                let len = std::fs::metadata(&transcript).ok().map(|m|m.len());
+                if len != confirm_seen {
+                    confirm_seen = len;
+                    confirming = true;
+                    let job = confirm_inputs(queue.clone(),receipt.clone(),transcript,receipt_conversation(&target,&view),target.generation,clock(start));
+                    jobs.spawn(async move { Job::Confirmed { response:None,result:job.await } });
+                }
+            }
             _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
                 let sample = clock(start);
                 if !sid_commit_inflight && sid_retry.as_ref().is_some_and(|(_,at)|sample.monotonic_s>=*at) {

@@ -194,6 +194,17 @@ fn tail(lines: &[&str], n: usize) -> String {
 fn boundary(line: &str) -> bool {
     left(line).chars().next().is_some_and(|c| c == '●' || c == '⎿' || SPINNERS.contains(c))
 }
+/// Faixa de abas da AskUserQuestion, topo do menu: "☐ …" na escolha única, "←  ☐ … ✔ Submit  →" na múltipla.
+fn tab_bar(line: &str) -> bool {
+    let line = left(line);
+    left(line.strip_prefix('←').unwrap_or(line)).starts_with(['☐', '☑'])
+}
+/// Logo abaixo da régua acima do cursor está a linha de prompt do composer (`❯` sem número de opção).
+fn composer_prompt_above(lines: &[&str], cursor: usize) -> bool {
+    (0..cursor).rev().find(|&i| P.rule.is_match(lines[i]))
+        .and_then(|rule| lines.get(rule + 1))
+        .is_some_and(|line| left(line).starts_with('❯') && !P.cursor.is_match(line))
+}
 fn option(line: &str) -> Option<&str> {
     P.option.captures(line).or_else(|| P.omp_option.captures(line))
         .map(|c| c.get(1).unwrap().as_str())
@@ -220,10 +231,22 @@ fn menu_block(lines: &[&str]) -> Option<(usize, usize)> {
         let label = P.box_split.split(&lines[cursor][mark.end()..]).next().unwrap_or("");
         if P.embedded.is_match(label) { return None; }
     }
-    let top = (0..cursor).rev().find(|&i| boundary(lines[i]) || left(lines[i]).starts_with(['☐', '☑']))
+    // Rascunho numerado em várias linhas: o `❯ N.` é a própria linha de prompt, colada na régua de
+    // cima do composer. Opção de menu de verdade nunca encosta na régua: vem depois do título ou da pergunta.
+    // Rascunho não tem rodapé de navegação; com rodapé, segue como menu.
+    if !pi && cursor > 0 && P.rule.is_match(lines[cursor - 1]) && !lines[cursor + 1..].iter().any(|l| P.footer.is_match(l)) {
+        return None;
+    }
+    let top = (0..cursor).rev().find(|&i| boundary(lines[i]) || tab_bar(lines[i]))
         .map_or(0, |i| i + 1);
     let bottom = (cursor + 1..lines.len()).find(|&i| P.footer.is_match(lines[i]) || boundary(lines[i]))
         .unwrap_or(lines.len());
+    // Menu de verdade some com o composer: rodapé com régua embaixo é um menu desenhado no TEXTO do
+    // composer (recado colado), e tocar nele mandaria teclas para o prompt.
+    if !pi && bottom < lines.len() && P.footer.is_match(lines[bottom]) && lines[bottom + 1..].iter().any(|l| P.rule.is_match(l))
+        && composer_prompt_above(lines, cursor) {
+        return None;
+    }
     Some((top, bottom))
 }
 
@@ -232,7 +255,7 @@ fn question(lines: &[&str]) -> Option<String> {
     for line in lines {
         if option(line).is_some() { break; }
         let s = trim(trim(line).trim_matches('│'));
-        if s.is_empty() || P.rule.is_match(line) || P.frame.is_match(line) || s.starts_with(['☐', '☑']) { continue; }
+        if s.is_empty() || P.rule.is_match(line) || P.frame.is_match(line) || tab_bar(line) { continue; }
         found = Some(s.into());
     }
     found

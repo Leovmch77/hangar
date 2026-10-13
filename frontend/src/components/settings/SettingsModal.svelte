@@ -422,7 +422,7 @@
   {:else if telaAtual === 'computer'}
     <ComputerControlSettings apiTarget={alvo} onConfigureJev={() => onIrPara('jev')} />
   {:else}
-    <ServerSettings {store} secao={telaAtual} apiTarget={alvo} />
+    <ServerSettings {store} secao={telaAtual} apiTarget={alvo} onOpenComputer={() => onIrPara('computer')} />
   {/if}
 {/snippet}
 

@@ -50,7 +50,6 @@ import { cachePrazo } from '../lib/cachePrazo';
   import CodexModelPopover from './CodexModelPopover.svelte';
   import CodexEffortPopover from './CodexEffortPopover.svelte';
   import CodexPermissionPopover from './CodexPermissionPopover.svelte';
-  import CodexVoice from './CodexVoice.svelte';
   import PiModelPopover from './PiModelPopover.svelte';
   import KimiModelPopover from './KimiModelPopover.svelte';
   import KimiEffortPopover from './KimiEffortPopover.svelte';
@@ -60,7 +59,7 @@ import { cachePrazo } from '../lib/cachePrazo';
   import ConfirmSheet from './ConfirmSheet.svelte';
   import { skipChatConfirmations, rememberSkipChatConfirmations } from '../lib/confirmActions';
   import DitadoEstiloPopover from './DitadoEstiloPopover.svelte';
-  import { ditadoEstilo } from '../lib/ditadoEstilo.svelte';
+  import { ditadoEstilo, organizacaoDitado } from '../lib/ditadoEstilo.svelte';
   import { estilosDitado, type EstiloDitado } from '@hangar/core';
   import { desktop } from '../lib/desktop.svelte';
   import { getCommands, setModelEffort, uploadFile, uploadUrl, listUploads, relimparDitado, getCodexModels, getCodexPermissions, getPiModels, getKimiModels, getPermissionModes, setPermissionMode, type ModelEffortBody } from '@hangar/core';
@@ -126,10 +125,17 @@ import { cachePrazo } from '../lib/cachePrazo';
     // abertos, o chat vive em ~500px dentro de uma janela de 1900. A fileira de controles precisa
     // do arranjo de celular ali. Sem prop = decide pela janela, como sempre.
     estreito?: boolean;
-    voiceBeta?: boolean;
     // Transcript da sessão: identidade do ditado (sessão recriada com o mesmo nome não recebe o
     // texto) e da barra guardada em `cp-ditado:<servidor>::<sessão>`.
     sessionJsonl?: string | null;
+    // Celular: a faixa vira o rodapé do desktop numa linha (app.rs, composer): pasta e branch à
+    // esquerda; anéis de contexto e da conta à direita. Pasta e branch caem na sessão sem statusline.
+    sessionCwd?: string | null;
+    sessionBranch?: string | null;
+    accountLabel?: string | null;
+    accountPct?: number | null;
+    accountWindow?: string | null;
+    onOpenAccounts?: () => void;
   }
   let {
     sessionName, sessionState, status, lastCache = null, onSend, onSteer, onCommand, onInterrupt, onOpenGit,
@@ -147,9 +153,12 @@ import { cachePrazo } from '../lib/cachePrazo';
     claudePreviousNonPlan = null,
     stats = null,
     estreito = false,
-    voiceBeta = false,
     sessionJsonl = null,
+    sessionCwd = null, sessionBranch = null,
+    accountLabel = null, accountPct = null, accountWindow = null, onOpenAccounts,
   }: Props = $props();
+  const placeFolder = $derived(status?.repo || (sessionCwd ? sessionCwd.replace(/\/+$/, '').split('/').pop() || '' : ''));
+  const placeBranch = $derived(status?.branch || sessionBranch || '');
   const sessionServer = useSessionServer();
   // O Composer é remontado por sessão ({#key} do Chat): servidor e nome não mudam nesta instância.
   const dictationServerId = sessionServer()?.id ?? '';
@@ -196,10 +205,14 @@ import { cachePrazo } from '../lib/cachePrazo';
   // mais de uma tela (chat e peek do quadro) e cada uma pediria a config por conta própria.
   let estiloAberto = $state(false);
   let estiloPillEl = $state<HTMLElement | null>(null);
-  const rotuloEstilo = $derived(
-    estilosDitado().find((e) => e.valor === ditadoEstilo.valor)?.rotulo ?? m.composer_ditado_pill(),
+  // Organização desligada na máquina da sessão: todo estilo volta cru, então a pill diz isso e a
+  // barra do ditado não oferece versões.
+  const organizacaoOff = $derived(organizacaoDitado.de(sessionServer()) === 'off');
+  const rotuloEstilo = $derived(organizacaoOff ? m.ditado_organizacao_desligada_rotulo()
+    : estilosDitado().find((e) => e.valor === ditadoEstilo.valor)?.rotulo ?? m.composer_ditado_pill(),
   );
   $effect(() => { void ditadoEstilo.carregar(); });
+  $effect(() => { void organizacaoDitado.carregar(sessionServer()); });
 
   $effect(() => {
     const sn = sessionName;
@@ -222,12 +235,15 @@ import { cachePrazo } from '../lib/cachePrazo';
           if (sn === sessionName) commands = c;
         })
         .catch(() => {
-          // endpoint indisponivel -> segue com lista vazia, sem quebrar a UI
+          // Lista indisponível: segue vazia, mas quem digita "/" fica sabendo (abaixo do campo).
+          if (sn === sessionName) comandosErro = true;
         });
     });
     return () => aquecimento.abort();
   });
 
+  let comandosErro = $state(false);
+  $effect(() => { void sessionName; comandosErro = false; });
   let textareaEl: HTMLTextAreaElement | undefined = $state();
 
   // Exposto pro pai (atalho de teclado desktop "/" foca o campo).
@@ -492,7 +508,8 @@ import { cachePrazo } from '../lib/cachePrazo';
   const temAba = $derived(
     !!status?.repo || !!lastCache || status?.ctxPct != null
     || !!onOpenPair || (temFilaPromovivel && isWorking && (filaCount > 0 || steeringQueue) && !!onSteer)
-    || (shellsRodando > 0 && !!onOpenActivity),
+    || (shellsRodando > 0 && !!onOpenActivity)
+    || (!desktop.atual && (!!placeFolder || !!accountLabel)),
   );
 
   // ── Contagem regressiva do maos-livres: 3s antes do envio automatico ────────
@@ -1509,7 +1526,7 @@ import { cachePrazo } from '../lib/cachePrazo';
     relimpando = v;
     recError = '';
     try {
-      const { text, aviso, estilo_aplicado } = await relimparDitado(alvo.raw, v, sessionServer());
+      const { text, aviso, estilo_aplicado } = await relimparDitado(alvo.raw, v, sessionServer(), { session: sessionName });
       // Um ditado novo comecou enquanto esta troca estava no ar: a resposta e de uma gravacao que
       // ja saiu da tela. Nao aplica e nao avisa — o resultado nao interessa mais a ninguem, e um
       // erro aqui falaria de um ditado que a pessoa nem esta mais vendo.
@@ -1530,12 +1547,6 @@ import { cachePrazo } from '../lib/cachePrazo';
   }
 
   // ── Gravar audio: toggle (tap grava, tap para) -> vira um anexo de audio ─────
-  let voiceBusy = $state(false);
-
-  function prepareVoice() {
-    ttsPlayer.close();
-  }
-
   // Para a gravacao e zera o estado. Chamado no onstop, no onerror, em falha e no onDestroy
   // (trocar de sessao com gravacao ativa desmonta o Composer).
   function teardownRecording() {
@@ -1737,7 +1748,7 @@ import { cachePrazo } from '../lib/cachePrazo';
   }
 
   async function toggleRecord() {
-    if (voiceBusy || pendingSend) return;
+    if (pendingSend) return;
     if (recording) {
       pararPorMotivo('botao');
       return;
@@ -1883,6 +1894,17 @@ import { cachePrazo } from '../lib/cachePrazo';
     if (fileInput) fileInput.value = '';
   }
 
+  // Com a conversa desmontada no meio do envio (voltou para a lista), os $effect que gravam o
+  // rascunho e o cache de anexos já não rodam, e a conversa reaberta restaurava o que já foi.
+  // Só apaga o que ainda é o enviado: o que foi escrito depois fica.
+  function forgetSent(name: string, draftKey: string, caption: string, files: File[]) {
+    const cached = attachmentCache.get(name);
+    if (cached?.length === files.length && cached.every((a, i) => a.file === files[i])) attachmentCache.delete(name);
+    try {
+      if (parseStoredDraft(localStorage.getItem(draftKey)).text.trim() === caption) localStorage.removeItem(draftKey);
+    } catch { /* sem storage: o rascunho vivia só na memória */ }
+  }
+
   // Devolve se o envio deu certo -- enviarAutomatico() usa isso pra escolher o bipe (agudo/grave)
   // SO depois do desfecho real, nunca antes. O botao de enviar (onclick={submit}) ignora o retorno,
   // igual sempre ignorou.
@@ -1928,6 +1950,9 @@ import { cachePrazo } from '../lib/cachePrazo';
       uploading = true;
       attachError = '';
       let ok = true;
+      const sentName = sessionName;
+      const sentFiles = attachments.map((a) => a.file);
+      const sentDraftKey = draftStorageKey(dictationServerId, sessionName);
       try {
         // Sobe todos os anexos e junta os paths numa UNICA linha (o backend rejeita '\n' no
         // send-keys). Cada path nao tem espaco (nome gerado). Marca imagem x arquivo pelo tipo.
@@ -1958,6 +1983,7 @@ import { cachePrazo } from '../lib/cachePrazo';
         inputText = '';
         if (textareaEl) textareaEl.style.height = 'auto';
         clearAttachments();
+        forgetSent(sentName, sentDraftKey, caption, sentFiles);
       } catch (err) {
         // upload OU envio falhou -> mantem as fotos e o texto, mostra o erro.
         attachError = err instanceof Error ? err.message : m.composer_falha_envio();
@@ -2015,7 +2041,7 @@ import { cachePrazo } from '../lib/cachePrazo';
   </div>
 {/snippet}
 
-<footer class="composer" class:compacto>
+<footer class="composer" class:compacto class:celular={!desktop.atual}>
   <input
     type="file"
     accept="*/*"
@@ -2100,6 +2126,16 @@ import { cachePrazo } from '../lib/cachePrazo';
           <span class="fila-acao">{steeringQueue ? m.askq_enviando() : (isCodex || headless) ? m.codex_orientar() : m.composer_fila_acao()}</span>
         </button>
       {/if}
+      {#if !desktop.atual && placeFolder}
+        <button class="repo-chip place-chip" title={m.composer_git_chip()} onclick={onOpenGit}>
+          <IconFolder size={13} />
+          <span class="repo-name place-folder">{placeFolder}</span>
+          {#if placeBranch}
+            <span class="repo-sep" aria-hidden="true">·</span>
+            <span class="repo-branch">{placeBranch}{#if status?.dirty}<span class="repo-dirty" aria-label={m.composer_alteracoes_nao_commitadas()}>*</span>{/if}</span>
+          {/if}
+        </button>
+      {/if}
       {#if shellsRodando > 0 && onOpenActivity}
         <!-- Shells de FUNDO: comando que continua rodando depois que a ferramenta respondeu. O
              terminal mostra "N shells still running" no rodapé e o app não mostrava nada — dava
@@ -2118,7 +2154,7 @@ import { cachePrazo } from '../lib/cachePrazo';
       {@render seletorModo()}
     {/if}
     <div class="tab-right">
-      {#if status?.repo}
+      {#if status?.repo && desktop.atual}
         <button class="repo-chip" title={m.composer_git_chip()} onclick={onOpenGit}>
           <IconFolder size={13} />
           <span class="repo-name">{status.repo}</span>
@@ -2128,7 +2164,7 @@ import { cachePrazo } from '../lib/cachePrazo';
           {/if}
         </button>
       {/if}
-        {#if lastCache}
+        {#if lastCache && desktop.atual}
           <!-- Prazo do cache. Nao e botao: nao ha o que fazer com ele alem de saber. -->
           <span
             class="cache-chip"
@@ -2151,6 +2187,13 @@ import { cachePrazo } from '../lib/cachePrazo';
         {:else}
           <ContextRing pct={status.ctxPct} size={22} />
         {/if}
+      {/if}
+      {#if !desktop.atual && accountLabel}
+        <button class="ctx-ring-btn account-ring" onclick={onOpenAccounts}
+          aria-label={m.composer_account_ring_aria({ account: accountLabel, window: accountWindow ?? '', pct: String(Math.round(accountPct ?? 0)) })}>
+          <span class="ctx-ring-mudo" aria-hidden="true"><ContextRing pct={accountPct ?? 0} size={22} /></span>
+          <span class="account-name">{accountLabel}{#if accountWindow}{' · '}{accountWindow}{/if}</span>
+        </button>
       {/if}
     </div>
   </div>
@@ -2226,6 +2269,9 @@ import { cachePrazo } from '../lib/cachePrazo';
     <SlashSuggest bind:this={slashSuggest} bind:activeOptionId={slashActiveOptionId}
       {commands} query={slashQuery} onPick={pickSlash} onComplete={(cmd) => void completeSlashToken(cmd)}
       onDismiss={() => (slashDismissed = inputText)} listboxId={slashListboxId} />
+    {#if comandosErro && commands.length === 0 && inputText.startsWith('/')}
+      <p class="comandos-erro" role="status">{m.composer_commands_failed()}</p>
+    {/if}
 
     <textarea
       bind:this={textareaEl}
@@ -2289,6 +2335,7 @@ import { cachePrazo } from '../lib/cachePrazo';
         <audio class="ditado-audio" src={ditado.url} controls preload="metadata"
                aria-label={m.composer_ditado_ouvir()}
                onerror={() => (recError = m.composer_ditado_audio_indisponivel())}></audio>
+        {#if !organizacaoOff}
         <div class="ditado-versoes" role="group" aria-label={m.composer_ditado_versao()}>
           {#each versoesDitado() as v (v.valor)}
             <button
@@ -2301,6 +2348,7 @@ import { cachePrazo } from '../lib/cachePrazo';
             >{relimpando === v.valor ? m.composer_ditado_trocando() : v.rotulo}</button>
           {/each}
         </div>
+        {/if}
         <!-- Fechar a barra. Virou obrigatorio quando ela passou a sobreviver a trocar de sessao e a
              recarregar o app: antes ela morria sozinha, agora fica ate o envio — e quem desistiu do
              ditado nao tinha como tirar o player da frente. Nao mexe no texto que ja esta no campo. -->
@@ -2532,7 +2580,7 @@ import { cachePrazo } from '../lib/cachePrazo';
         <button
           class="attach-btn mic-btn"
           class:mic-btn--recording={recording}
-          disabled={voiceBusy || transcribing}
+          disabled={transcribing}
           onclick={toggleRecord}
           aria-label={recording ? m.composer_parar_gravacao() : starting ? m.composer_cancelar_prep_mic() : m.composer_gravar_audio()}
         >
@@ -2562,10 +2610,6 @@ import { cachePrazo } from '../lib/cachePrazo';
         {@render seletorModo()}
       {/if}
       <div class="control-right">
-        {#if isCodex && voiceBeta}
-          <CodexVoice {sessionName} disabled={recording || starting || transcribing}
-            onPrepare={prepareVoice} onBusyChange={(busy) => { voiceBusy = busy; }} />
-        {/if}
         {#if (isCodex || headless) && isWorking && hasInput && !sendToPair}
           <button class="model-pill" onclick={() => submit(true)} disabled={!canRequestSend}
             title={m.codex_orientar_ajuda()}>{m.codex_orientar()}</button>
@@ -2739,6 +2783,7 @@ import { cachePrazo } from '../lib/cachePrazo';
   <DitadoEstiloPopover
     open={estiloAberto}
     anchor={ehMobile ? plusBtnEl : estiloPillEl}
+    server={sessionServer()}
     onClose={() => (estiloAberto = false)}
   />
 
@@ -2769,7 +2814,7 @@ import { cachePrazo } from '../lib/cachePrazo';
                 class:baixando={reanexando === r.filename}
                 disabled={!!reanexando}
                 onclick={() => void reanexar(r.filename)}>
-          <img src={uploadUrl(sessionName, r.filename, false, sessionServer())} alt="" loading="lazy" />
+          <img src={uploadUrl(sessionName, r.filename, false, sessionServer(), 192)} alt="" loading="lazy" />
         </button>
       {/each}
     </div>
@@ -2927,6 +2972,18 @@ import { cachePrazo } from '../lib/cachePrazo';
   .composer.compacto .status-tab .tab-left { min-width: 32px; flex-shrink: 4; }
   .composer.compacto .status-tab .tab-right { min-width: 0; flex-shrink: 1; }
   .composer.compacto .status-tab .tab-right .repo-chip { overflow: hidden; }
+  /* Celular: uma linha só, sem rolar de lado; a pasta encolhe antes da branch, e os dois anéis ficam. */
+  .composer.celular .status-tab .tab-left { overflow: hidden; flex: 1 1 0; }
+  .composer.celular .status-tab .tab-right { flex-shrink: 0; }
+  .composer.celular .place-chip { min-width: 0; flex: 0 1 auto; overflow: hidden; }
+  /* Chips de ação (fila, shells, grupo) não quebram linha nem cedem: quem encolhe é a pasta. */
+  .composer.celular .status-tab .tab-left > .repo-chip:not(.place-chip) { flex-shrink: 0; white-space: nowrap; }
+  .composer.celular .place-chip .place-folder { flex-shrink: 3; min-width: 24px; }
+  .composer.celular .place-chip .repo-branch { flex-shrink: 1; min-width: 24px; }
+  .composer.celular .repo-chip, .composer.celular .account-ring { position: relative; }
+  .composer.celular .repo-chip::after, .composer.celular .account-ring::after { content: ''; position: absolute; inset: -11px -4px; }
+  .account-ring { display: inline-flex; align-items: center; gap: 4px; max-width: 128px; }
+  .account-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-secondary); }
 
   /* Card unico que reune status, textarea e controles. */
   .composer-card {
@@ -3172,6 +3229,11 @@ import { cachePrazo } from '../lib/cachePrazo';
      `.control-left >` não é enfeite: a regra base de .attach-btn vem DEPOIS neste arquivo e,
      em especificidade igual, venceria — o seletor composto desempata. */
   .composer.compacto .control-left > .attach-btn { width: 32px; min-width: 0; }  /* min-width fura o alvo global de 44px */
+  .comandos-erro { margin: 0 var(--space-3); font-size: var(--text-xs); color: var(--warning); }
+  /* Celular: o desenho fica compacto, mas o alvo de toque chega a 44px por fora dele. */
+  .composer.celular .model-pill, .composer.celular .control-left > .attach-btn { position: relative; }
+  .composer.celular .model-pill::after { content: ''; position: absolute; inset: -7px 0; }
+  .composer.celular .control-left > .attach-btn::after { content: ''; position: absolute; inset: 0 -6px; }
   /* Anel de contexto de 26px vira 20 dentro do chip (o viewBox escala o desenho inteiro). */
   .composer.compacto .pill-duo .model-pill :global(svg) { width: 20px; height: 20px; }
 

@@ -280,19 +280,78 @@ válido (Let's Encrypt) → escaneie o QR / preencha o token → **Adicionar à 
   outros formatos usam o FFmpeg configurado ou encontrado no PATH. Falta de arquivo ou conversor
   aparece como erro. Só há reserva externa se você a acrescentar à lista. A transcrição requer
   o `hangar-server` Rust; o modo Python não contém um segundo motor.
-- **Conversa por voz com Codex (Beta):** nasce desligada. Ative em **Configurações → Harnesses →
-  Codex → Opções → Conversa por voz**. O botão **Voz · Beta** aparece nas sessões Codex daquele
-  servidor. A escolha vale só para esse servidor; desligar durante uma chamada encerra o microfone
-  e a conexão. A voz escolhida fica salva neste navegador.
-- **Limpeza do ditado:** o texto gravado pelo microfone passa por um modelo que aplica a correção
-  que você falou em voz alta — dizer "usa o postgres, não, o redis" vira "Usa o Redis." —, tira
-  hesitação ("é... tipo assim...") e pontua. Preserva nome de arquivo, caminho, comando, sigla e
-  número exatamente como foram ditados; não resume nem reescreve o estilo. Não mexe em texto que
-  começa com `/` (senão `/clear` viraria comando quebrado) nem em frase com menos de 5 palavras. Se
-  a limpeza falhar ou sair errada (resumir demais, ou "responder" em vez de limpar), fica o texto
-  cru e aparece um aviso explicando o motivo; o botão **↩ original** ao lado do campo repõe o texto
-  exatamente como saiu da transcrição. Vale só pra gravação pelo microfone — áudio anexado como
-  arquivo não passa por essa limpeza.
+- **Organização do ditado no desktop nativo:** em **Configurações → Voz → Organização do texto**,
+  escolha **Sem organização** (padrão), **Harness da conversa** ou **API externa**. Sem organização
+  entrega o texto da transcrição e dispensa um serviço de organização. No harness, escolha o modelo
+  disponível na conta da conversa aberta; Claude e Codex têm preferências separadas. A chamada é
+  independente da conversa principal; o Hangar fornece transcrição e prompt de estilo. Claude usa
+  a autenticação original da conta de destino, inclusive a assinatura por login OAuth, e seu SDK
+  acrescenta metadados de ambiente e identificação da conta. O histórico e as instruções globais
+  ou do projeto ficam fora da chamada.
+  Com organização ligada, **Só limpar**, **Reorganizar** e **Briefing** mantêm as travas contra
+  invenção e perda de conteúdo. Frase com menos de cinco palavras ou começando com `/` é preservada.
+  Falha de serviço, modelo indisponível ou saída recusada conserva o cru com aviso, sem recorrer a
+  outra conta. Os botões de versão permitem recuperar **Cru** e mudar o estilo sem repetir o STT.
+  Áudio anexado como arquivo continua sem organização. No celular (PWA e app), a escolha de estilo
+  só aparece com a organização ligada no servidor; desligada, o campo avisa que o texto vai cru.
+- **Referência de grafia opcional:** com organização ligada, **Usar as três últimas mensagens**
+  envia somente texto de usuário e assistente da conversa de destino, em ordem, limitado a 2.000
+  caracteres por mensagem. Nasce desligado. Serve para conferir nomes e termos, sem completar a
+  fala com conteúdo do diálogo; ferramentas e pensamento ficam fora. Ao trocar o estilo, o app
+  reutiliza a referência capturada na primeira organização.
+- **Voz ao vivo (Beta):** uma conversa falada com um assistente que lê e acompanha as sessões,
+  troca de sessão pela fala, manda pedidos a elas e, no modo **Planejar**, monta um plano antes de
+  mandar. Nasce desligada: ative em **Configurações → Harnesses → Codex → Opções → Conversa por
+  voz**, em cada servidor onde quiser usar. Precisa do `codex` instalado e logado nesse servidor; a
+  conversa gasta a conta Codex dele.
+  - **No PC (app nativo):** a pílula da voz fica na barra de cima. Ela atende também os pedidos de
+    tela (trocar de sessão, ler a tela, clicar, abrir telas do Hangar).
+  - **No celular (PWA):** o botão de microfone **Voz ao vivo** aparece no topo da lista de sessões e
+    da conversa quando o servidor ativo tem a voz ligada. Um toque começa a conversa nesse servidor;
+    com ela aberta, outro toque abre o painel (silenciar, modo **Direto**/**Planejar**, ajustes,
+    **Servidor da voz**, **Encerrar**). No celular a voz só troca de sessão; ler a tela e clicar
+    ficam para o PC.
+  - **O que mais ela faz pela fala:** reabre a conversa que você fechou sem querer ("reabre a
+    auditoria-migracao", "reabre a última que eu fechei"), que volta com o nome que tinha e abre na
+    tela; diz o que você fechou e acha conversa pelo assunto; lista as pastas onde dá para abrir sessão
+    e abre sessão nova com o agente, modelo, conta ou modo que você disser; roda os atalhos do Hangar
+    ("abre a VM"); diz quais máquinas estão respondendo; interrompe uma sessão. Explica o que uma
+    sessão fez a partir do seu pedido a ela ("o que a web fez com o que eu pedi?"), mesmo fora da tela
+    e mesmo depois de muitas ferramentas, e volta a pedidos anteriores se você quiser. Usa também o
+    resto do Hangar (qualquer rota da API, em qualquer máquina, e as ferramentas do MCP `hangar`:
+    recado, sessão nova, grupo, navegador da sessão, página na conversa), sem nunca ver o token. Fechar
+    e interromper sessão, apagar, parar ou publicar pela API, atalho marcado para confirmar, atalho de
+    comando do repositório e comando que apaga ou publica algo sempre esperam o seu "sim" falado. Ela usa os botões
+    da tela só quando não há outro jeito.
+  - **Ajustes** (conta Codex, voz, modelo, esforço e velocidade de cada modo) ficam salvos no
+    servidor e valem para qualquer aparelho.
+  - **Uma conversa por servidor.** Abrir a voz em outro aparelho passa a conversa para ele; o
+    anterior mostra "A conversa passou para outro aparelho." Se o aparelho sair (app fechado, rede
+    caiu), reabrir em até 2 minutos retoma a mesma conversa do assistente; depois disso ela termina.
+  - **Peça silêncio até voltar.** "Vou sair uns minutos, não me avisa nada até eu voltar": as respostas
+    das sessões ficam guardadas, nada é falado e o trabalho continua. O silêncio não acaba sozinho; quando
+    você disser "voltei" ou "me dá o resumo", ela resume o que chegou, uma resposta por vez.
+  - **O que a voz lembra.** Ela guarda poucos fatos entre uma conversa e outra (quem você é, como
+    gosta de ser respondido, onde ficam seus projetos) e começa cada conversa já sabendo disso. Na
+    primeira conversa, logo ao conectar, ela se apresenta e pede licença para ler, só leitura, seu
+    `~/.claude/CLAUDE.md` e seus `~/.codex/AGENTS*.md`, e pergunta o que você faz e como prefere as
+    respostas. Depois de ler, ela conta o que entendeu ("Entendi que você … — confere?") e pergunta
+    como você quer usar a voz (acompanhar sessões, mandar pedidos, planejar); só guarda depois que você
+    confirmar ou corrigir, e nunca senha, token ou IP. Em seguida pede outra licença para
+    olhar só os nomes das suas pastas principais (o primeiro nível de `~/Projetos`, por exemplo) e
+    propõe poucas referências, como "`~/Projetos/hangar` parece ser o Hangar — confere?", guardadas só
+    depois do seu sim; não lê código nem arquivos ocultos. Se você recusar algum dos dois, ela guarda isso e não pergunta de novo. Essa lista é a
+    memória da voz; a memória do próprio Codex não entra nela. Só grava ou apaga num turno em que você falou. O que você
+    pede vale desde já e manda no jeito padrão dela (por exemplo, "ao entrar numa sessão, me resume o que ela fez"
+    faz a troca de sessão resumir sem perguntar), menos nas confirmações de segurança. Cada memória tem até 240
+    caracteres; se passar, ela avisa que cortou. Para ver ou apagar,
+    abra os ajustes da voz e procure **O que a voz lembra**; com a lista aberta durante a conversa, o que a voz grava
+    ou apaga aparece na hora. A lista fica no arquivo
+    `~/.hangar/voz/memoria.json`, no servidor, mas o texto dela segue para o provedor do assistente
+    (a OpenAI, pelo Codex) a cada conversa. Na primeira conversa, o conteúdo dos arquivos que ela
+    lê (`~/.claude/CLAUDE.md`, os `AGENTS*.md`, os nomes de pasta) também vai para esse provedor.
+  - O áudio vai direto do aparelho ao serviço de voz da OpenAI; o servidor só conduz a conversa. Só o dono usa a voz:
+    num servidor aberto por convite o botão não aparece. O app Expo ainda não tem a voz.
 - **Ditado mãos-livres:** chave **Enviar transcrição automaticamente** em Configurações → Voz,
   guardada **só neste aparelho** (não vai
   pro servidor; se você ligar no celular, o desktop continua sem). Com ela ligada, um toque no 🎤
@@ -309,13 +368,11 @@ válido (Let's Encrypt) → escaneie o QR / preencha o token → **Adicionar à 
   enviar e outro mais grave quando não deu pra enviar, pra dar pra saber sem olhar pra tela.
 - **Se estiver ouvindo uma resposta em voz** e você tocar o 🎤, a leitura para sozinha antes da
   gravação começar — sem isso o microfone captaria a própria voz do app.
-- **Provedor da limpeza e da leitura em voz:** por padrão usa a Groq (`openai/gpt-oss-120b`).
-  Pra apontar pra outro serviço compatível com a API da OpenAI, abra Configurações → Voz →
-  **Organização do texto** → **Usar outro serviço para organizar** e preencha **Endpoint da
-  organização**, **Chave da organização** e **Modelo da organização** (o Briefing pode ter um
-  modelo só dele). Fora do padrão essa chave é **obrigatória** (a chave da transcrição não é
-  reaproveitada pra outro host, de propósito). Com o endpoint vazio (padrão), ela não é usada em
-  nada — vale a **Chave da transcrição**, desde que a transcrição também use o serviço padrão.
+- **API externa para organizar:** selecione esse modo e preencha **Endpoint da organização**,
+  **Chave da organização** e **Modelo da organização**. Endpoint e modelo vazios usam o serviço
+  padrão compatível com OpenAI; a chave de organização é própria, inclusive no padrão. O Briefing
+  pode ter endpoint, chave e modelo próprios. Configuração antiga de LLM não liga a organização
+  automaticamente. A leitura em voz continua sendo uma capacidade configurada separadamente.
 - **Furar a fila (só Kimi):** mensagem mandada com a sessão trabalhando fica na fila **do Kimi** —
   ele processa quando o turno atual acabar. Enquanto houver fila, a fileira de cima do composer
   mostra **⏳ N na fila · mandar agora**; tocar manda o `ctrl-s` do Kimi e a fila **inteira** entra no
@@ -591,6 +648,69 @@ mesmo lugar que o clique do agente, e arrastar rola a página.
 **Abas (só no Electron antigo):** quem ainda usa o Electron tem a faixa de abas, até 8 por sessão.
 A aba ativa é uma só, sua e do agente ao mesmo tempo; quando ele precisa mexer numa página sem
 tirar da sua frente a que você está olhando, usa uma aba escondida.
+
+#### Usar seu login no navegador embutido
+
+O navegador embutido começa sem login em nada. Para não precisar entrar de novo em cada site, ele
+copia do seu Chrome os **cookies** (só eles: senhas, histórico e favoritos ficam no Chrome).
+
+**Como fazer (Linux e Windows):**
+
+1. Abra o site no navegador embutido (por exemplo `github.com`).
+2. Clique em **Trazer meu login**, à direita da barra de endereço. Se a página pedir senha,
+   aparece também uma linha "Esta página pede login…" com o botão **Usar meu login**: é o mesmo
+   caminho.
+3. No diálogo **Usar meu login em github.com**, clique em **Trazer login**. A página
+   recarrega já logada, e a linha embaixo da barra diz quantos cookies vieram.
+
+**Linux:** o Hangar lê o perfil do Chrome direto do disco, sem diálogo no Chrome e com ele aberto
+ou fechado. Vale para Chrome (também Beta, Dev, Flatpak), Chromium (também Snap e Flatpak), Brave e
+Firefox. Com mais de um perfil, aparece um botão por perfil ("Chrome — Pessoal") para você escolher.
+Precisa do programa `sqlite3` (no Arch: `sudo pacman -S sqlite`) e do chaveiro desbloqueado (o
+GNOME Keyring ou a KWallet abre junto com a sua sessão). Sem eles, a linha embaixo da barra diz
+o que falta.
+
+**Windows:** o Windows não deixa outro programa ler os cookies do Chrome no disco, então o Hangar os
+pede ao próprio Chrome (ou Edge) pela depuração remota. Na primeira vez:
+
+1. Deixe o Chrome (ou o Edge) aberto e clique em **Trazer meu login** → **Trazer login**.
+2. O Hangar abre o navegador que você usou por último (Chrome ou Edge) e copia o endereço da página
+   que liga a depuração (`chrome://inspect/#remote-debugging`; no Edge,
+   `edge://inspect/#remote-debugging`). O navegador não abre essa página sozinho: nele, **Ctrl+L**,
+   **Ctrl+V**, **Enter**.
+3. Marque **Allow remote debugging for this browser instance** (a opção aparece em inglês, mesmo no
+   Chrome em português). Isso fica ligado; não precisa repetir.
+4. Volte ao Hangar e clique de novo em **Trazer meu login** → **Trazer login**.
+5. O Chrome pergunta **Permitir a depuração remota?**: clique em **Permitir** em até 60 segundos.
+   Recusou ou passou do tempo, o Hangar não insiste; é só clicar de novo.
+
+O mesmo vale no Linux quando não há perfil legível no disco.
+
+**Um site ou todos.** O normal é trazer só o site aberto: entram os cookies dele e dos domínios
+acima (em `gist.github.com`, também os de `.github.com`). Marcando **Todos os sites**, entram os de
+todos — prático, mas **os agentes que usam o navegador embutido ficam logados em tudo em que você
+está logado**.
+
+**O agente pode pedir.** O agente da sessão pode chamar `hangar-preview login github.com` quando
+precisar entrar como você. Aparece no painel **"O agente pede o seu login do navegador em github.com"**
+com **Permitir** e **Recusar**; só um clique seu, no app, aprova (nem o agente nem o celular
+alcançam esses botões). O agente fica sabendo só quantos cookies vieram, nunca o valor deles.
+
+**Segurança.** O navegador embutido é **um só para todas as sessões** desta máquina: um login
+trazido vale no navegador de qualquer sessão e para qualquer agente que o use. Traga só o site de
+que o trabalho precisa.
+
+**O que não funciona.** O **Google** (Gmail, Drive, YouTube logado) recusa o navegador embutido:
+digitando a senha aparece "Esse navegador ou app pode não ser seguro", e os cookies trazidos não
+abrem a conta. Para esses, use o Chrome normal.
+
+**Desfazer.**
+
+- Um site: saia da conta nele, no próprio navegador embutido.
+- Tudo: feche o app e apague a pasta do perfil do navegador embutido — no Linux
+  `~/.config/hangar-native/chromium`, no Windows `%APPDATA%\hangar-native\browser`. Ela volta vazia
+  na próxima abertura. Não há botão para isso no app.
+- A depuração remota do Chrome (Windows): desmarque a opção na mesma página `chrome://inspect`.
 
 ### Checkpoints de código (Pi e OMP)
 

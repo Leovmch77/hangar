@@ -711,8 +711,10 @@ Computer Use (`jev_windows_api_key`, gravada só no `env` do MCP) saiu: duas cha
 diferentes eram a confusão da tela, e com chave do OpenRouter o Computer Use respondia 401 porque
 tinha a TypeSafe fixa.
 
-- **Uma regra de destino, em quatro cópias que precisam casar:** `runtime_config.destino_jev`
-  (Python), `voice::jev::destination` (nativo), `jev_config` do `orq.py` e `jev_destination` de
+- **Uma regra de destino, em cinco cópias que precisam casar:** `runtime_config.destino_jev`
+  (Python), `destination` em `crates/hangar-server/src/voice/jev.rs` (voz, que saiu do nativo para
+  o servidor em 10/10/2026), `jev::destination` em `desktop-native/src/app/server_config.rs` (tela
+  do Jev no nativo), `jev_config` do `orq.py` e `jev_destination` de
   `crates/hangar-server/src/runtime/codex_launch.rs` (11/10/2026: o Rust monta o ambiente do Codex
   que ele lança e relança, e o `hangar-server` não tinha leitor do Jev; o `env_jev` do Python foi
   portado, nunca copiado do processo que morre). OpenRouter quando o
@@ -732,6 +734,34 @@ tinha a TypeSafe fixa.
 - **A lista de modelos do OpenRouter não traz o Jev de decisão.** `GET /api/v1/models` (458 modelos)
   só tinha `typesafe/jev-router`. Por isso a tela oferece duas sugestões fixas ("Sempre o mais
   novo" e "Versão fixa") e um campo livre, nunca uma busca de modelos.
+- **12/10/2026: a regra do destino ficou com quatro cópias.** O `orq.py` não tem mais cópia própria.
+  O `backend/hooks/nav_hook.py` também perdeu a dele e usa o `JEV_ENDPOINT`/`JEV_MODEL` que o
+  `env_jev` já resolveu. A quarta cópia hoje é o `destinoDoJev` do `shell/jev_objetivo.cjs`, que só
+  decide quando o CLI roda fora de uma sessão; dentro dela recebe o par resolvido. A precedência é
+  uma só: o runtime-config acima do ambiente.
+- **12/10/2026: o modelo auxiliar também é um só (`jev_aux_*`).** Antes havia dois modelos
+  auxiliares OpenAI-compatíveis: o `jev_texto_*` do navegador e o `LLM_*` do json do MCP do Computer
+  Use. Hoje há um conjunto só, com estes campos:
+  - `jev_aux_base_url`: a base, sem `/chat/completions`;
+  - `jev_aux_api_key`;
+  - `jev_aux_modelo`;
+  - `jev_aux_esforco`: vazio, `low`, `medium` ou `high`.
+
+  A sessão recebe esses valores como `JEV_AUX_*`. O `hangar-preview` dá prioridade a um
+  `JEV_TEXTO_*` posto explicitamente no ambiente, mesmo vazio: é assim que um roteiro de teste
+  desliga o escritor. O MCP recebe o `LLM_*` gerado a partir do auxiliar, e o `PUT
+  /api/computer-control` recusa um modelo diferente.
+
+  Migração: o primeiro valor gravado em `jev_aux_*` e a subida do backend copiam o `jev_texto_*`, ou
+  o `LLM_*` do MCP quando o primeiro não existe. Se o legado estiver ilegível, a gravação recusa em
+  vez de perdê-lo. O `llm_*` do ditado continua separado, pela regra de capacidades separadas.
+- **12/10/2026: a busca de modelos é do auxiliar, e mora no Rust.** As rotas `GET
+  /api/jev/aux/cliproxy` e `POST /api/jev/aux/models` ficam no `hangar-server` e só leem o
+  runtime-config; quem grava continua sendo o Python. A Anthropic recebe `x-api-key` e
+  `?limit=1000`, porque a lista dela é paginada em 20. Os outros provedores recebem `Bearer`. Uma
+  resposta 200 sem lista `data` é erro, e não "nenhum modelo". O CLIProxyAPI atual guarda as chaves
+  de cliente em `access.api-keys` (a raiz `api-keys` passou a ser dos provedores); o leitor aceita os
+  dois formatos.
 
 ## Triagem de recados da orquestrar-auto: Jev ligado, regex só anotando
 
@@ -1880,7 +1910,7 @@ pelo Rust, com e sem terminal. Decisões:
   `/select`, o Rust é a referência (`unknown` não é "não convergiu"), e o Python foi alinhado a
   ele; só `no_pending_permission` vira "nenhum pedido pendente", o resto segue 503 com o motivo.
 - **Preparo do prompt, linha de status e catálogo de skills rodam no Rust.** Falha da linha de
-  status continua cosmética (não derruba a sessão); `/internal/quota` usa só o cache do Rust.
+  status continua cosmética (não derruba a sessão); a cota vem do módulo de contas do Rust.
 
 **Perda conhecida.** Com o Python na frente, um envio que ficou sem resposta porque o Rust caiu
 era repetido com o mesmo `operation_id` no Rust novo (`_repeat_after_crash`,
@@ -1939,10 +1969,102 @@ segue como antes. Desenho: [desenho.md](../migracao-rust/parte6-grupos/desenho.m
   antes): a saúde ganhou `groups`, e o filho recebe `HANGAR_SERVER_ID`, `HANGAR_PEERS_FILE` e
   `HANGAR_PAIR_ARCHIVE`.
 
+## Organização opcional do ditado no Rust
+
+Decisão e prova da issue 146 (10/10/2026): organização nasce em `none`, inclusive quando já há
+credenciais antigas de LLM. `harness` usa a conta da conversa de destino, com modelo de organização
+separado para Claude e Codex; `external_api` usa somente endpoint, chave e modelo próprios.
+Transcrição, narração e organização continuam capacidades separadas.
+
+O organizador, os prompts, as travas de conteúdo e os produtores de catálogo Claude/Codex moram em
+`crates/hangar-server/src/dictation/`. A porta privada recebe JSON autenticado, com limite de corpo;
+o protocolo interno passou a 52 nos dois lados. Python conserva autenticação, upload, configuração
+e transporte. Saíram o motor de ditado de `narrar.py` e a reserva `_via_claude`, inclusive do cliente
+externo compartilhado; narração, sugestão e tradução continuam usando esse cliente sem reserva.
+O parser/cache da TUI existente é outro consumidor e não organiza ditado.
+
+O nativo guarda modo, estilo, modelo, conta e geração antes da gravação. Revisão reaproveita o cru
+sem repetir STT; conta ou conversa recriada é recusada. Falha de organização conserva o texto exato
+obtido no STT e devolve aviso com código. A autenticação da conta fica protegida pela trava
+compartilhada até terminar a árvore auxiliar, inclusive no cancelamento. None não consulta catálogo,
+LLM nem histórico. Um modelo não escolhido no snapshot não passa a herdar uma escolha posterior.
+
+`dictation_include_recent_messages` nasce `false`. Quando ligado, o Rust lê o transcript estruturado
+da conversa de destino, seleciona as três últimas mensagens de usuário/assistente e limita cada uma
+a 2.000 caracteres Unicode. Ferramentas e pensamento ficam fora. O prompt cita esses dados somente
+como referência de grafia, sem seguir instruções nem completar a fala. A primeira organização
+devolve a referência congelada; as revisões reutilizam esse snapshot e as travas de honestidade.
+
+Provas: testes de configuração antiga, identidade, geração, conta, catálogo, travas, falhas e
+cancelamento; janela isolada do nativo com seleção dos modos, opção de referência salva, pedido com
+destino/geração e recuperação pela versão Cru. Fala sintética em português passou pelo whisper.cpp
+instalado: None preservou exatamente o STT sem chamada de organização; API externa fez somente as
+três chamadas solicitadas. A resposta da API nessa prova era sintética; os casos de transformação
+e rejeição foram conferidos pelo corpus portado e pelos testes do motor Rust.
+
+O isolamento dos CLIs foi conferido no pedido HTTP emitido pelos executáveis reais, usando o
+construtor Rust e um provedor local, conforme [a prova dos harnesses](harnesses.md#organização-mínima-do-ditado).
+Claude preserva a autenticação original da conta, inclusive assinatura OAuth; não abre login nem usa outra conta.
+O SDK acrescenta contexto interno de ambiente e identificação da conta, descrito na prova dos
+harnesses; não confundir esse overhead com histórico ou instruções do projeto.
+
+## Migrar é migrar o caminho inteiro
+
+Medido em 11/10/2026. Contas e cotas passaram ao Rust em 08/10 (`279b303db`), mas a linha de status
+das sessões Claude continuou pedindo a cota ao Python: o ator do Rust chama `GET /internal/quota`,
+o Python (`runtime_policy.quota_windows`, num `to_thread` do pool padrão) pergunta ao módulo de
+contas do Rust (`account_bridge.request_quotas`), e esse chama de volta o Python em
+`POST /internal/accounts/quotas`, também no pool padrão. Na subida todas as sessões pedem cota
+juntas, as 16 threads ficam presas esperando a si mesmas, o Rust desiste em 10 s e repete, e tudo
+que usa o pool (fatos da lista, política do runtime, dados da sessão) trava junto: sessões somem
+do celular e o `hangar-send` responde "backend inacessível". O `loop_monitor` não via, porque só
+contava threads `asyncio_N` e o uvloop nomeia `ThreadPoolExecutor-N_M` (mostrava `ocupadas=0`).
+
+- **Remédio imediato** (`c8e4bef1e`, PR #148): `/internal/accounts/quotas` roda num pool próprio
+  (`quota-facts`, 4) e o monitor reconhece as threads do uvloop.
+- **Remédio de fundo** (protocolo 54): o ator lê a cota em `AccountService::claude_windows`
+  (cache em disco das contas, e a API da Anthropic quando vencido) e o `/internal/quota` saiu do
+  Python. Token vencido nesse caminho não renova: a linha sai sem janelas até o ciclo de
+  renovação de fundo trocá-lo, porque a renovação ainda abre a janela de login pelo Python.
+- **Regra:** ao migrar uma responsabilidade, a mesma tarefa procura e apaga os chamadores que
+  sobraram nos dois lados. Uma ponte que vai e volta entre os processos no mesmo pedido é bug de
+  desenho, não detalhe de desempenho.
+
+## Processos que usam uma conta: o Claude Desktop não é cliente
+
+Medido em 11/10/2026. O Claude Desktop (app da Anthropic, Electron) se chama `claude`, junta o argv
+numa linha e escreve o título por cima da área do ambiente: o `/proc/<pid>/environ` dele tem 3120
+bytes, todos zero ou, quando o título transborda do argv, o resto da própria linha de comando. Na varredura Python, ambiente sem entrada contava como "não sei", e com o app aberto
+excluir, renomear e entrar numa conta Codex recusavam sempre com `account_usage_unknown`. Na
+varredura do Rust (`accounts/usage.rs`) a variável lida dali sai ausente, e o app passava por
+cliente da conta Claude padrão (`~/.claude`), o que segura a renovação e a exclusão dela.
+
+- **Processo sem a variável cujo ambiente foi coberto pelo título não cai na conta padrão**
+  (`ProcessView::environ_erased`: bytes em que tudo o que não é zero aparece na linha de comando).
+  Um ambiente de verdade tem entradas que o argv não tem (`PATH`, `HOME`), e nenhum CLI de conta
+  reescreve o título por cima dele. A regra só decide no ramo da conta padrão: com a variável lida,
+  ela não entra. Exigir "nenhuma entrada `NOME=valor`" deixava passar o título transbordado, que
+  traz `=`.
+- **A varredura usa um leitor sem o teto de cache da lista** (`SystemProcs::whole_machine`): ela
+  passa por todos os processos da máquina, e o teto de 256 despejava entradas e anotava
+  "cache da lista cheio" no diário a cada varredura.
+- **A varredura Python saiu.** O `retire_terminal_birth` do adaptador Codex pergunta ao Rust se o
+  `app_pid` da sessão usa a conta (`{"process_uses": chave, "pid": n}` em
+  `/__hangar_server/accounts`), sem varrer a máquina: a pergunta se repete a cada 1 s por sessão
+  até aposentar, e um processo alheio ilegível não pode segurá-la. Sem o Rust, o nascimento não se
+  aposenta e a pergunta se repete. Contrato interno 55.
+
+A conta Codex com login revogado aparecia em "Outros agentes", sem Entrar. O `account/read` do Codex
+responde erro interno (`-32603`) com a mensagem citando `unauthorized (401)`, e o leitor do Rust
+juntava isso às falhas sem resposta (`method: unknown`). Agora a recusa do login vira conta
+desconectada (`method: none`), que os dois clientes já mostram com Entrar; prazo, CLI ausente e
+outras falhas continuam `unknown`. No nativo, a conta Codex do app fica em Assinaturas mesmo com o
+login `unknown`: "Outros agentes" é o grupo das chaves de API.
+
 ## Perguntas, permissões e ciclo de vida no Rust: fronteira com o Python
 
-(11/10/2026, branch `Hangar-rust`, contrato interno **52**; desenho
-[`2026-10-10-conversation-permissions-rust-design.md`](../superpowers/specs/2026-10-10-conversation-permissions-rust-design.md),
+(11/10/2026, branch `Hangar-rust`, contrato interno **52**, **57** depois da fusão com a `main`,
+que já estava em 56; desenho [`2026-10-10-conversation-permissions-rust-design.md`](../superpowers/specs/2026-10-10-conversation-permissions-rust-design.md),
 decisões A/B do usuário de 11/10.) Perguntas, aprovações de ferramenta e modos de permissão do
 Claude e do Codex, e o ciclo de vida da sessão já aberta, passaram a ter um dono só: o
 `hangar-server`. O motivo é o mesmo do dono único: cada ida Rust → Python → Rust era um ponto onde

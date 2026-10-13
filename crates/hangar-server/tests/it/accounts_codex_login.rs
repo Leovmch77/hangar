@@ -81,6 +81,7 @@ async fn http_probe_process() {
         log_path: None,
         trusted: TrustedHosts::parse("127.0.0.1"),
     });
+    state.accounts.env.terminal_fixture = Some(super::accounts_catalog::reference_mux(upstream));
     if let Ok(base) = std::env::var("ACCOUNT_DEVICE_UPSTREAM") {
         use hangar_server::accounts::codex_device_login::{DeviceOAuth,DeviceLogins};
         state.accounts.device_logins=DeviceLogins::new(DeviceOAuth::new(&base).unwrap());
@@ -101,10 +102,10 @@ async fn http_probe_process() {
 async fn login_deadline_keeps_guard_until_helper_cleanup() {
     use axum::{Router, routing::post};
     use hangar_server::accounts::{
-        AccountKey, AccountService, GuardMode, Provider, bridge::AccountsBridge,
+        AccountKey, AccountService, GuardMode, Provider,
         codex_login::CodexInvalidator, environment::AccountEnvironment,
     };
-    use serde_json::{Value, json};
+    use serde_json::json;
     use std::{sync::Arc, time::Duration};
     let root = tempfile::tempdir().unwrap();
     let fixture = root.path().join("cli");
@@ -150,21 +151,12 @@ process.stdout.write(JSON.stringify({id:m.id,result})+'\n');});"#;
     let key = AccountKey::new(Provider::Codex, &account.home).unwrap();
     let router = Router::new()
         .route(
-            "/internal/accounts/facts",
-            post(|body: axum::body::Bytes| async move {
-                let body: Value = serde_json::from_slice(&body).unwrap();
-                json!([{"key":body["keys"][0],"facts":{"complete":true,"sessions":[],"pids":[]}}])
-                    .to_string()
-            }),
-        )
-        .route(
             "/internal/accounts/codex-invalidate",
             post(|| async { json!({"ok":true}).to_string() }),
         );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
-    let bridge = AccountsBridge::new(address, "synthetic".into(), "test".into()).unwrap();
     let invalidator = CodexInvalidator::new(address, "synthetic".into(), "test".into()).unwrap();
     let runtime = Arc::new(hangar_server::runtime::gateway::RuntimeRegistry::new(
         address,
@@ -174,7 +166,6 @@ process.stdout.write(JSON.stringify({id:m.id,result})+'\n');});"#;
     let attempt = service
         .start_codex_login(
             &account,
-            bridge.clone(),
             Some(runtime.clone()),
             invalidator.clone(),
         )
@@ -227,7 +218,7 @@ process.stdout.write(JSON.stringify({id:m.id,result})+'\n');});"#;
     );
     assert!(
         service
-            .start_codex_login(&account, bridge, Some(runtime), invalidator)
+            .start_codex_login(&account, Some(runtime), invalidator)
             .await
             .is_err(),
         "shutdown aceitou auxiliar novo"
@@ -239,7 +230,7 @@ process.stdout.write(JSON.stringify({id:m.id,result})+'\n');});"#;
 async fn native_secondary_writer_retains_ownership(start: bool) {
     use axum::{Router, routing::post};
     use hangar_server::accounts::{AccountService, AccountKey, Provider, GuardMode,
-        bridge::AccountsBridge, environment::AccountEnvironment,
+        environment::AccountEnvironment,
         codex_device_login::{DeviceBridge, DeviceLogins, DeviceOAuth}};
     use serde_json::{Value, json};
     use std::{path::Path, sync::{Arc, Mutex, mpsc}, time::Duration};
@@ -261,10 +252,6 @@ async fn native_secondary_writer_retains_ownership(start: bool) {
         .route("/api/accounts/deviceauth/usercode", post(|| async { json!({"device_auth_id":"fixture","user_code":"fixture","interval":1}).to_string() }))
         .route("/api/accounts/deviceauth/token", post(|| async { json!({"authorization_code":"fixture","code_verifier":"fixture"}).to_string() }))
         .route("/oauth/token", post(|| async { json!({"access_token":"synthetic","refresh_token":"synthetic","id_token":"","expires_in":1}).to_string() }))
-        .route("/internal/accounts/facts", post(|body: axum::body::Bytes| async move {
-            let body: Value = serde_json::from_slice(&body).unwrap();
-            json!([{"key":body["keys"][0],"facts":{"complete":true,"sessions":[],"pids":[]}}]).to_string()
-        }))
         .route("/internal/accounts/codex-invalidate", post(|| async { json!({"ok":true}).to_string() }));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -285,16 +272,21 @@ async fn native_secondary_writer_retains_ownership(start: bool) {
     }));
     let key = AccountKey::new(Provider::Codex, &root.path().join(".codex")).unwrap();
     let runtime = Arc::new(hangar_server::runtime::gateway::RuntimeRegistry::new(address,"synthetic".into(),"fixture".into()));
-    let facts = AccountsBridge::new(address,"synthetic".into(),"fixture".into()).unwrap();
     let bridge = DeviceBridge::new(address,"synthetic".into(),"fixture".into()).unwrap();
-    let operation = |service: AccountService| { let (facts, runtime, bridge) = (facts.clone(), runtime.clone(), bridge.clone());
+    let operation = |service: AccountService| { let (runtime, bridge) = (runtime.clone(), bridge.clone());
         async move {
-            if start { service.start_device_login(facts, Some(runtime), bridge).await }
-            else { service.propagate_device(facts, Some(runtime), bridge, false).await }
+            if start { service.start_device_login(Some(runtime), bridge).await }
+            else { service.propagate_device(Some(runtime), bridge, false).await }
         }};
     let request = tokio::spawn(operation(service.clone()));
     let arrived = tokio::task::spawn_blocking(move || entered.recv_timeout(Duration::from_secs(20))).await.unwrap();
-    if start { assert!(request.await.unwrap().is_ok()); } else { request.abort(); let _ = request.await; }
+    if start { let started = request.await.unwrap(); assert!(started.is_ok(), "{started:?}"); }
+    else if arrived.is_err() {
+        if request.is_finished() { panic!("a propagação terminou sem chegar à barreira: {:?}", request.await); }
+        request.abort();
+        panic!("a propagação não chegou à barreira em 20 s");
+    }
+    else { request.abort(); let _ = request.await; }
     let held = arrived.is_ok() && service.locks.try_acquire(&key, GuardMode::Exclusive).is_err();
     // Sem a guarda presa, um segundo writer entraria na mesma barreira: a asserção de posse decide.
     let second = if held { Some(operation(service.clone()).await) } else { None };
@@ -364,10 +356,10 @@ fn codex_sign_out_route_is_owned() {
 async fn sign_out_disconnects_confirms_and_invalidates() {
     use axum::{Router, routing::post};
     use hangar_server::accounts::{
-        AccountKey, AccountService, GuardMode, Provider, bridge::AccountsBridge,
+        AccountKey, AccountService, GuardMode, Provider,
         codex_login::CodexInvalidator, environment::AccountEnvironment,
     };
-    use serde_json::{Value, json};
+    use serde_json::json;
     
     use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
     let root = tempfile::tempdir().unwrap();
@@ -393,13 +385,6 @@ process.stdout.write(JSON.stringify({id:m.id,result})+'\n');});"#;
     let counted = invalidations.clone();
     let router = Router::new()
         .route(
-            "/internal/accounts/facts",
-            post(|body: axum::body::Bytes| async move {
-                let body: Value = serde_json::from_slice(&body).unwrap();
-                json!([{"key":body["keys"][0],"facts":{"complete":true,"sessions":[],"pids":[]}}]).to_string()
-            }),
-        )
-        .route(
             "/internal/accounts/codex-invalidate",
             post(move || {
                 counted.fetch_add(1, Ordering::SeqCst);
@@ -409,14 +394,13 @@ process.stdout.write(JSON.stringify({id:m.id,result})+'\n');});"#;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
-    let bridge = AccountsBridge::new(address, "synthetic".into(), "test".into()).unwrap();
     let invalidator = CodexInvalidator::new(address, "synthetic".into(), "test".into()).unwrap();
     let runtime = Arc::new(hangar_server::runtime::gateway::RuntimeRegistry::new(address, "synthetic".into(), "test".into()));
 
     let account = service.create(Provider::Codex, "work", |_| Ok(())).unwrap();
     assert_eq!(service.read_codex_auth(&account).await["status"], "connected");
     let auth = service
-        .sign_out_codex(&account, bridge.clone(), Some(runtime.clone()), invalidator.clone())
+        .sign_out_codex(&account, Some(runtime.clone()), invalidator.clone())
         .await
         .unwrap();
     assert_eq!(auth["method"], "none");
@@ -427,7 +411,7 @@ process.stdout.write(JSON.stringify({id:m.id,result})+'\n');});"#;
 
     let stuck = service.create(Provider::Codex, "stuck", |_| Ok(())).unwrap();
     let error = service
-        .sign_out_codex(&stuck, bridge, Some(runtime), invalidator)
+        .sign_out_codex(&stuck, Some(runtime), invalidator)
         .await
         .unwrap_err();
     assert_eq!((error.status, error.code), (502, "codex_account_sign_out_unconfirmed"));

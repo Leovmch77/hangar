@@ -24,14 +24,16 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.gzip import GZipMiddleware
+from starlette.requests import ClientDisconnect
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, StrictBool, model_validator
 from sse_starlette.sse import EventSourceResponse
-from app import (agentes_sync, atomico, atualizacoes, atualizar, btw, diag, harness_api,
+from app import (agentes_sync, atomico, atualizacoes, atualizar, btw, closed_names, diag, harness_api,
                  loop_monitor, pensamento_pt, permission_mode, plugin_bridge, procinfo, quem_chama, tmux,
                  uds_messaging)
 from app import external_pair_api, external_pairs, groups_bridge, internal_api, list_bridge, migration_status, update_channel
 from app.auth import require_auth, require_loopback
 from app.send_executor import send_thread as _send_thread
+from app.internal_pool import internal_thread
 from app import bastao as bastao_mod   # `bastao` sem sufixo é a ROTA GET, mais abaixo neste arquivo
 from app.bastao import montar as bastao_montar
 from app.commands import comandos_da_cli, list_commands, sem_os_desligados
@@ -40,6 +42,7 @@ from app.model_picker import PickerError
 from app.mensagens import erro
 from app import kimi_models
 from app import claude_models
+from app import dictation_bridge
 from app import claude_customizations
 from app import cliproxy
 from app import codex_models
@@ -213,13 +216,14 @@ def _resolve_codex_account(account_id: str | None):
         raise HTTPException(exc.status, detail=erro(exc.code, "conta Codex inválida", **exc.params)) from None
 
 
-def _codex_require_idle_preparation(account, service) -> None:
+async def _codex_require_idle_preparation(account, service) -> None:
     if account.is_default:
         return
     if service is None:
         raise HTTPException(503, detail=erro("codex_account_service_unavailable",
                                              "serviço de contas Codex indisponível"))
-    status = service.preparation_status(account)
+    # HTTP síncrono ao Rust: no laço, congelaria o backend inteiro até o prazo da ponte.
+    status = await asyncio.to_thread(service.preparation_status, account)
     if status.get("status") != "ready":
         _log.warning("conta Codex %s com sincronização %s; pendências: %s",
                      account.id, status.get("status"),
@@ -559,6 +563,13 @@ async def _ownership_moving(request: Request, exc: TransferInProgress):
     return JSONResponse(status_code=409, content={"detail":erro("session_transfer_busy", str(exc))})
 
 
+@app.exception_handler(ClientDisconnect)
+async def _client_gone(request: Request, exc: ClientDisconnect):
+    """Quem pediu fechou antes de mandar o corpo (o Rust estoura o prazo dele e desiste): ninguém
+    lê a resposta, e quem desistiu já registrou o próprio prazo."""
+    return Response(status_code=499)
+
+
 @app.exception_handler(GitError)
 async def _git_failed(request: Request, exc: GitError):
     """GitError que escapou da rota (citação, resolver) sai com o status dele, nunca 500 sem corpo.
@@ -638,6 +649,23 @@ async def _contas_pelo_rust(request: Request, call_next):
     if account_bridge.owner_mode() == "python":
         return JSONResponse({"detail": account_bridge.NEED_RUST}, status_code=503)
     return await account_bridge.forward_public(request)
+
+
+@app.middleware("http")
+async def _jev_aux_pelo_rust(request: Request, call_next):
+    """A busca de modelos do Jev é do Rust: o dono que entra pela porta do Python (Connect) segue para
+    ele pela ponte; sem o Rust, o erro diz isso em vez de um 404 que a tela leria como servidor antigo."""
+    if not request.url.path.startswith("/api/jev/aux/"):
+        return await call_next(request)
+    try:
+        require_auth(request)
+    except HTTPException as error:
+        return JSONResponse({"detail": error.detail}, status_code=error.status_code, headers=error.headers)
+    from app import account_bridge
+    if account_bridge.owner_mode() == "python":
+        return JSONResponse({"detail": erro("erro_jev_aux_precisa_rust",
+                                            "o servidor está sem o processo Rust; reinicie o Hangar")}, status_code=503)
+    return await account_bridge.forward_public(request, "/__hangar_server/jev/aux")
 
 
 @app.middleware("http")
@@ -729,7 +757,6 @@ app.include_router(share_guest_api.router)
 app.include_router(external_pair_api.router)
 app.include_router(migration_status.router)
 app.include_router(internal_api.router)
-app.include_router(internal_api.ping_router)
 registry = SessionRegistry()
 registry_mod.apos_saida_codex = _codex_lease_released
 registry_mod.apos_renomear_codex = _codex_lease_renamed
@@ -2201,6 +2228,19 @@ async def _kill_unclaimed(name: str) -> None:
         await asyncio.to_thread(_invalidate_lists)
 
 
+def _codex_as_claude_mode(name: str) -> str | None:
+    """Modo do Claude equivalente ao da sessão Codex `name` (None se não for Codex)."""
+    from app.adapters.codex import sessions as codex_sessions
+    from app.adapters.codex.lancador import PERMISSION_POLICIES
+    policy = PERMISSION_POLICIES.get(str((codex_sessions.load(name) or {}).get("permission_mode")))
+    if policy is None:
+        return None
+    approval, sandbox = policy
+    if approval == "never":
+        return "bypassPermissions"
+    return "acceptEdits" if sandbox == "workspace-write" else "manual"
+
+
 def _creator_permission_mode(name: str, jsonl: str | None) -> str | None:
     """Modo fora de `plan` da sessão Claude `name`, no nome que o `--permission-mode` aceita."""
     meta = headless_sessions.load(name)
@@ -2228,7 +2268,9 @@ async def _inherit_from_creator(body: CreateBody) -> tuple[CreateBody, str | Non
     avisos: list[str] = []
     account_source = None
     # Perfil do omp já define a conta.
-    if body.config_dir is None and body.provider in ("claude", "pi", "omp") and not body.omp_profile:
+    # Codex não tem conta Claude: a nova fica na padrão, como quando a criadora não é identificada.
+    if (body.config_dir is None and body.provider in ("claude", "pi", "omp") and not body.omp_profile
+            and info.provider != "codex"):
         cfg, confiavel = await asyncio.to_thread(_caller_config_dir, info.name)
         if not confiavel:
             # Criar assim nasceria na conta padrão, calado: gasta a cota de quem ninguém escolheu.
@@ -2240,8 +2282,9 @@ async def _inherit_from_creator(body: CreateBody) -> tuple[CreateBody, str | Non
             update["config_dir"] = str(cfg)
     if body.headless is None and body.provider in ("claude", "codex") and not body.read_only:
         update["headless"] = bool(info.headless)
-    if body.permission_mode is None and body.provider == "claude" and info.provider == "claude":
-        modo = await asyncio.to_thread(_creator_permission_mode, info.name, info.jsonl)
+    if body.permission_mode is None and body.provider == "claude" and info.provider in ("claude", "codex"):
+        modo = await (asyncio.to_thread(_codex_as_claude_mode, info.name) if info.provider == "codex"
+                      else asyncio.to_thread(_creator_permission_mode, info.name, info.jsonl))
         if modo:
             update["permission_mode"] = modo
         else:
@@ -2430,7 +2473,7 @@ async def _create_session_owned(body: CreateBody, worktree: dict):
             except ValueError as exc:
                 raise HTTPException(400, detail=erro("erro_criacao_sessao", str(exc))) from None
         if body.codex_account is not None:
-            _codex_require_idle_preparation(codex_account_obj, codex_service)
+            await _codex_require_idle_preparation(codex_account_obj, codex_service)
     if body.config_dir is not None and body.config_dir not in {c.path for c in list_config_dirs()}:
         raise HTTPException(400, detail=erro("erro_config_dir_invalido", "config_dir invalido"))
     # Mesma guarda do config_dir. Codex nao usa spawn_command/tmux desse jeito, entao motor + codex e
@@ -2693,6 +2736,15 @@ async def _create_session_owned(body: CreateBody, worktree: dict):
         raise HTTPException(409, detail=erro(code, str(e)))
 
 
+def _jsonl_of_session(name: str) -> str | None:
+    try:
+        return next((s.jsonl for s in registry.list() if s.name == name and s.jsonl), None)
+    except Exception:
+        # A lista falhar não impede fechar; só a conversa fica sem o nome no arquivo.
+        _log.warning("transcript of %s not found before close", name, exc_info=True)
+        return None
+
+
 @app.delete("/api/sessions/{name}", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
 async def kill_session(name: str, by: str | None = None, request: Request = None):
     # 500 quando a sessao SOBREVIVE ao kill — mesmo padrao do /rename logo abaixo, que ja confere e
@@ -2705,6 +2757,8 @@ async def kill_session(name: str, by: str | None = None, request: Request = None
     closed = bool(request and internal_api._secret) and secrets.compare_digest(request.headers.get("x-hangar-rust-closed", "").encode(), internal_api._secret.encode())
     # No modo Rust a saída do grupo (dentro do kill) já avisa as outras máquinas e o par externo.
     link = None if closed or groups_bridge.rust_owns_groups() else await asyncio.to_thread(lambda: PairLink(name).get())
+    # Fechada pelo Rust a sessão já saiu da lista: não há transcript a achar.
+    jsonl = None if closed else await asyncio.to_thread(_jsonl_of_session, name)
     try:
         errs = await asyncio.to_thread(registry.kill, name, closed_by_rust=closed) or []
     except KillFailed as e:
@@ -2712,6 +2766,14 @@ async def kill_session(name: str, by: str | None = None, request: Request = None
     finally:
         if not closed:
             await asyncio.to_thread(_invalidate_lists)
+    if jsonl:
+        try:
+            await asyncio.to_thread(closed_names.record, jsonl, name)
+        except OSError:
+            # Fechar já aconteceu; sem o nome, a conversa só não volta pelo nome antigo.
+            _log.warning("closed name not recorded for %s", name, exc_info=True)
+    else:
+        _log.info("closed name not recorded for %s: no transcript", name)
     plugin_bridge.esquecer(name)
     forget_frame(name)
     if await asyncio.to_thread(share_store.revoke_session, name):
@@ -4359,10 +4421,16 @@ def _classe_modo(remetente: str, alvo: str, cfg_alvo: Optional[str],
         m = headless_sessions.load(n)
         if m and m.get("permission_mode"):
             return str(m["permission_mode"])
+        if (codex := _codex_as_claude_mode(n)) is not None:
+            return codex
         return permission_mode.session_non_plan_mode(jsonl or _jsonl_atual(n))
     # Rótulo de aviso do app ([painel: …]) não é sessão; resolvê-lo só gastaria chamadas ao tmux.
     modo_remetente = _modo(remetente) if sanitize_session_name(remetente) == remetente else None
-    modo = modo_remetente or _modo(alvo, jsonl_alvo) or permission_mode.modo_da_conta(cfg_alvo)
+    modo = modo_remetente or _modo(alvo, jsonl_alvo)
+    if not modo:
+        modo = permission_mode.modo_da_conta(cfg_alvo)
+        # Errado, faz o receptor reter o recado: precisa aparecer.
+        _log.info("from-mode de %s para %s sem modo da sessão; vale o da conta (%s)", remetente, alvo, modo)
     return "bypass" if "bypass" in modo.lower() else "prompting"
 
 
@@ -5765,7 +5833,8 @@ async def orq_group_set(name: str, body: OrqGroupBody):
 async def _orq_associate(associate, name: str, gid: str, mtime: float) -> dict:
     """Resposta e erros da associação, iguais na rota pública e na interna do Rust."""
     try:
-        context = await asyncio.to_thread(associate, name, gid, mtime)
+        # O Rust chama pela rota interna segurando o lock de grupo: fora do pool padrão.
+        context = await internal_thread(associate, name, gid, mtime)
     except orq_md.Conflito:
         raise HTTPException(409, detail=erro("erro_orq_arquivo_mudou",
                                              "o time mudou desde a leitura — recarregue"))
@@ -5775,7 +5844,7 @@ async def _orq_associate(associate, name: str, gid: str, mtime: float) -> dict:
         raise HTTPException(409, detail=erro("erro_orq_arquivo_mudou", str(e)))
     return {"ok": True, "gid": context.gid, "grouped": context.grouped,
             "session_prefix": context.session_prefix, "arquivo": str(context.path),
-            "mtime": (await asyncio.to_thread(orq_md.ler_arquivo, context.path))[1]}
+            "mtime": (await internal_thread(orq_md.ler_arquivo, context.path))[1]}
 
 
 class ComecarBody(_StrictBody):
@@ -6547,20 +6616,29 @@ async def limits(name: str):
     }
 
 
-@app.websocket("/api/sessions/{name}/codex/voice")
-async def codex_voice_socket(ws: WebSocket, name: str):
-    from app.codex_voice import voice_ws
-    await voice_ws(ws, name, get_adapter("codex"), _provider_of)
+@app.websocket("/api/voice")
+async def server_voice_socket(ws: WebSocket):
+    # O dono pela 8765 é atendido pelo Rust; aqui chega o Connect (e o convidado, para ser recusado).
+    from app import voicesock
+    await voicesock.voice_ws(ws)
 
 
-@app.get("/api/sessions/{name}/codex/voices", dependencies=[Depends(require_auth)])
-async def codex_voice_options(name: str):
-    from app.codex_voice import VOICES
-    if runtime_config.get("codex_voice_beta") is not True:
-        raise HTTPException(404, detail=erro("erro_recurso_desligado", "Recurso não habilitado."))
-    if _provider_of(name) != "codex":
-        raise HTTPException(400, detail=erro("erro_models_so_codex", "Somente sessões Codex."))
-    return {"voices": VOICES}
+@app.api_route("/api/voice/settings", methods=["GET", "PUT"], dependencies=[Depends(require_auth)])
+async def server_voice_settings(request: Request):
+    from app import voicesock
+    if voicesock.is_guest(request):
+        raise HTTPException(403, detail=erro("voice_owner_only", "Só o dono usa a voz do servidor."))
+    return await voicesock.forward_settings(request)
+
+
+@app.api_route("/api/voice/memory", methods=["GET"], dependencies=[Depends(require_auth)])
+@app.api_route("/api/voice/memory/{memory_id}", methods=["DELETE"], dependencies=[Depends(require_auth)])
+async def server_voice_memory(request: Request, memory_id: str | None = None):
+    from app import voicesock
+    if voicesock.is_guest(request):
+        raise HTTPException(403, detail=erro("voice_owner_only", "Só o dono usa a voz do servidor."))
+    target = "/__hangar_server/voice/memory" + (f"/{urllib.parse.quote(memory_id, safe='')}" if memory_id else "")
+    return await voicesock.forward_settings(request, target)
 
 
 class CodexModelBody(_StrictBody):
@@ -6605,7 +6683,7 @@ async def set_codex_service_tier(name: str, body: CodexServiceTierBody):
         model, _ = await asyncio.to_thread(_engine_fast_selection, name)
         if not info or not await asyncio.to_thread(cliproxy.supports_fast, info.engine, model):
             raise HTTPException(400, detail=erro("erro_fast_indisponivel", "Fast exige GPT no CLIProxyAPI local"))
-        _recusa_se_painel_aberto(name)
+        await asyncio.to_thread(_recusa_se_painel_aberto, name)
         operation = asyncio.create_task(_durante_troca(name, _trocar_conta(name, None, service_tier=body.service_tier)))
         try:
             return await asyncio.shield(operation)
@@ -7503,6 +7581,10 @@ async def upload(name: str, request: Request, audio_only: bool = False):
 
 @app.post("/api/sessions/{name}/transcribe", dependencies=[Depends(require_auth), Depends(_transfer_check)])
 async def transcribe_audio(name: str, request: Request, limpar: bool = False, estilo: str | None = None,
+                           organization_mode: str | None = None, organization_model: str | None = None,
+                           generation: str | None = None,
+                           organization_account: str | None = None,
+                           include_recent_messages: bool | None = None,
                            arquivo: str | None = None):
     # Com corpo: salva o áudio (anexo de áudio/vídeo) e transcreve num round-trip, raw body +
     # X-Filename. Com `arquivo`: transcreve um áudio já enviado pelo /upload, sem gravar outra cópia
@@ -7553,11 +7635,18 @@ async def transcribe_audio(name: str, request: Request, limpar: bool = False, es
         raise HTTPException(e.status, e.payload())
     if not limpar:
         return _with_provider({"path": path, "text": t.text}, t)
-    return {"path": path, **_with_provider(await _cleaned_dictation(t.text, estilo), t)}
+    result = await asyncio.to_thread(dictation_bridge.organize, t.text, estilo, mode=organization_mode,
+                                    model=organization_model, session=name, generation=generation,
+                                    account=organization_account,
+                                    include_recent_messages=include_recent_messages,
+                                    harness_allowed=not _convidado(request))
+    return {"path": path, **_with_provider(result, t)}
 
 
 @app.post("/api/dictation/transcribe", dependencies=[Depends(require_auth)])
-async def transcribe_dictation(request: Request, estilo: str | None = None, limpar: bool = True):
+async def transcribe_dictation(request: Request, estilo: str | None = None, limpar: bool = True,
+                               organization_mode: str | None = None, organization_model: str | None = None,
+                               include_recent_messages: bool | None = None):
     # Antes de existir uma sessão, o áudio não tem uma pasta onde ser guardado.
     clen = request.headers.get("content-length")
     if clen and clen.isdigit() and int(clen) > 100 * 1024 * 1024:
@@ -7570,59 +7659,67 @@ async def transcribe_dictation(request: Request, estilo: str | None = None, limp
         raise HTTPException(e.status, e.payload())
     if not limpar:
         return _with_provider({"text": t.text}, t)
-    return _with_provider(await _cleaned_dictation(t.text, estilo), t)
+    result = await asyncio.to_thread(dictation_bridge.organize, t.text, estilo, mode=organization_mode,
+                                    model=organization_model, include_recent_messages=include_recent_messages,
+                                    harness_allowed=not _convidado(request))
+    return _with_provider(result, t)
 
 
 def _with_provider(result: dict, t: Transcription) -> dict:
     """Junta à resposta quem transcreveu. O aviso da reserva vem antes do da limpeza e nenhum dos
     dois some; `estilo_aplicado` já foi decidido só pelo aviso da limpeza."""
     out = {**result, "provider": t.provider}
+    if t.aviso:
+        out["aviso_transcricao"] = t.aviso
     avisos = [a for a in (t.aviso, result.get("aviso")) if a]
     if avisos:
         out["aviso"] = " · ".join(avisos)
     return out
 
 
-async def _cleaned_dictation(text: str, estilo: str | None) -> dict:
-    # `estilo` = o que a PILL do composer mostrava quando a pessoa falou. Vence a config do
-    # servidor (narrar.estilo_efetivo); ausente/desconhecido, a config manda como sempre.
-    texto_limpo, aviso = await asyncio.to_thread(narrar.limpar_ditado, text, estilo)
-    # `estilo_aplicado` = qual versao o texto de fato recebeu, pra barra do ditado no composer marcar
-    # o botao certo. NAO da pra deduzir na tela: o backend rebaixa briefing pra prosa em ditado curto
-    # e cai na config quando a pill ainda nao leu o servidor, entao marcar "Briefing" pelo que foi
-    # PEDIDO faria o botao mentir. Com aviso, o texto que voltou e o cru — nao um estilo. Idem
-    # quando limpar_ditado devolve o proprio texto sem tocar (ditado de menos de 5 palavras, ou
-    # comecando com "/"): ali nao houve estilo nenhum, e dizer "prosa" seria a mesma mentira.
-    aplicado = "cru" if (aviso or texto_limpo == text) else narrar.estilo_efetivo(text, estilo)
-    return {"text": texto_limpo, "raw": text, "aviso": aviso,
-            "estilo_aplicado": aplicado}
 
 
 class RelimparBody(_StrictBody):
     texto: str = Field(min_length=1)
     estilo: str
+    session: str | None = None
+    generation: str | None = None
+    organization_mode: str | None = None
+    organization_model: str | None = None
+    organization_account: str | None = None
+    include_recent_messages: bool | None = None
+    recent_messages: list[dict] | None = None
 
 
 @app.post("/api/ditado/relimpar", dependencies=[Depends(require_auth)])
-async def relimpar_ditado(body: RelimparBody):
-    """Aplica OUTRO estilo ao texto CRU de um ditado que ja foi transcrito.
+async def relimpar_ditado(body: RelimparBody, request: Request):
+    """Reorganiza o texto cru pelo Rust, sem repetir transcrição ou upload."""
+    if body.estilo not in ("limpar", "prosa", "briefing"):
+        raise HTTPException(400, detail=erro("erro_estilo_invalido", f"Estilo de organização inválido: '{body.estilo}'."))
+    if body.session:
+        from app import guest_users
+        guest = guest_of(request)
+        if guest is not None and guest.share_for(body.session) is None:
+            raise HTTPException(403, "A conversa de destino não está autorizada.")
+        viewer = guest_users.current.get()
+        if viewer is not None and not guest_users.visible_to(viewer, body.session):
+            raise HTTPException(403, "A conversa de destino não está autorizada.")
+    return await asyncio.to_thread(dictation_bridge.organize, body.texto, body.estilo,
+                                  mode=body.organization_mode, model=body.organization_model,
+                                  session=body.session, generation=body.generation,
+                                  account=body.organization_account,
+                                  include_recent_messages=body.include_recent_messages, recent_messages=body.recent_messages,
+                                  harness_allowed=not _convidado(request))
 
-    Sem audio e sem sessao de proposito. A parte cara (Whisper) ja foi paga na transcricao e o cru
-    volta de la no campo `raw`; trocar de estilo e so a limpeza de novo. Reenviar o audio custaria
-    uma segunda transcricao — dinheiro e ~10s — pra chegar no mesmo texto cru. E limpeza nao le nada
-    da sessao (nem cwd, nem provider), entao exigir `name` aqui so acrescentaria um registry.list()
-    e um 404 possivel num caminho que nao precisa de nenhum dos dois.
 
-    Estilo invalido e 400 e nao "cai no padrao": aqui a pessoa CLICOU num estilo, entao entregar
-    outro calado seria mentir sobre o botao que ela apertou (na transcricao o estilo e um palpite da
-    tela e cair na config e o certo)."""
-    if body.estilo not in narrar.ESTILOS_DITADO:
-        raise HTTPException(400, detail=erro(
-            "erro_estilo_invalido",
-            f"estilo '{body.estilo}' nao existe. Use um de: {', '.join(narrar.ESTILOS_DITADO)}."))
-    texto, aviso = await asyncio.to_thread(narrar.limpar_ditado, body.texto, body.estilo)
-    aplicado = "cru" if (aviso or texto == body.texto) else narrar.estilo_efetivo(body.texto, body.estilo)
-    return {"text": texto, "aviso": aviso, "estilo_aplicado": aplicado}
+@app.get("/api/dictation/models", dependencies=[Depends(require_auth)])
+async def dictation_models(request: Request, session: str, fresh: bool = False):
+    if _convidado(request) or request.scope.get("server", (None, None))[1] == 8768:
+        raise HTTPException(403, "O catálogo de organização é exclusivo do dono.")
+    try:
+        return await asyncio.to_thread(dictation_bridge.request, "catalog", {"session": session, "fresh": fresh})
+    except dictation_bridge.BridgeError as error:
+        raise HTTPException(error.status, detail={"code": error.code, "msg": error.detail}) from None
 
 
 @app.get("/api/transcription/providers/status", dependencies=[Depends(require_auth)])
@@ -8933,6 +9030,8 @@ class ResumeArchivedBody(_StrictBody):
     # `kimi --session`); Codex nao tem via de resume aqui e e recusado logo abaixo.
     provider: str = "claude"
     codex_account: str | None = None
+    # Nome com que a sessão volta (o que ela tinha ao fechar); ocupado ganha -2, -3. Omitido: o da pasta.
+    name: str | None = None
 
 
 def _sessao_com_transcript(jsonl: Path) -> str | None:
@@ -9059,7 +9158,7 @@ def resume_archived(project: str, session_id: str, body: ResumeArchivedBody = Re
             model_args.validar(body.provider, body.model, None)
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from None
-    base = sanitize_session_name(Path(cwd).name) or "sessao"
+    base = sanitize_session_name(body.name or Path(cwd).name) or "sessao"
     name, i = base, 2
     # As MESMAS fontes que a criacao normal consulta (registry.create). Olhando so o tmux, um nome
     # ja usado por uma sessao Codex ou sem terminal passava por aqui e o conflito estourava la
@@ -9110,18 +9209,12 @@ class ComputerControlBody(_StrictBody):
     mode: Literal["package", "local"] | None = None   # None = mantém o modo atual
     project_dir: str = ""
     agent_config: str = ""
+    # Cliente antigo: o modelo é o auxiliar da página Jev; igual passa, diferente volta erro.
     llm_url: str = ""
     llm_model: str = ""
     llm_effort: str = ""
-    llm_key: str | None = None     # None/vazio = mantém a gravada
-    jev_key: str | None = None     # cliente antigo: vazio passa, chave digitada volta erro (o Jev vem da página dele)
-    use_cliproxy_key: bool = False
-
-
-class ComputerControlModelsBody(_StrictBody):
-    llm_url: str
     llm_key: str | None = None
-    use_saved_key: bool = False
+    jev_key: str | None = None     # cliente antigo: vazio passa, chave digitada volta erro (o Jev vem da página dele)
     use_cliproxy_key: bool = False
 
 
@@ -9181,13 +9274,6 @@ def computer_control_install():
 def computer_control_new_target(body: ComputerControlTargetBody):
     from app import computer_control as cc
     return _computer_control_call(cc.create_target, body.model_dump())
-
-
-@app.post("/api/computer-control/models", dependencies=[Depends(require_auth)])
-def computer_control_models(body: ComputerControlModelsBody):
-    from app import computer_control as cc
-    return {"models": _computer_control_call(cc.list_models, body.llm_url, body.llm_key,
-                                             body.use_saved_key, body.use_cliproxy_key)}
 
 
 class ConnectBody(_StrictBody):
@@ -10247,12 +10333,13 @@ async def model_options(name: str):
         hl = get_adapter(CLAUDE_HEADLESS)
         try:
             modelos = await hl.list_models(name)
+            meta = headless_sessions.load(name) or {}
+            atual = hl.escolhas(name)[0] or meta.get("model")
+            models = await asyncio.to_thread(claude_models.para_tela, modelos, atual)
         except Exception as e:
             raise HTTPException(503, detail=erro("erro_modelos_indisponiveis", f"não consegui listar os modelos: {e}"))
-        meta = headless_sessions.load(name) or {}
-        atual = hl.escolhas(name)[0] or meta.get("model")
         return {"kind": "claude", "engine": None, "effort": meta.get("effort"),
-                "models": claude_models.para_tela(modelos, atual)}
+                "models": models}
     # Conta Anthropic: le o picker de verdade. Abre e fecha um overlay — nao vai pro scrollback,
     # nao entra no transcript e nao gasta token.
     await asyncio.to_thread(_recusa_se_painel_aberto, name)
@@ -10318,7 +10405,7 @@ async def model_options_sem_sessao(provider: str = "claude", engine: str = "",
         return {"kind": "kimi", "reduced": False, "models": cat["models"], "default": cat["default"]}
     if provider == "codex":
         account = _resolve_codex_account(codex_account or None)
-        _codex_require_idle_preparation(account, _codex_service())
+        await _codex_require_idle_preparation(account, _codex_service())
         # Nem config no disco (o ~/.codex/config.toml guarda o modelo escolhido, nunca a lista) nem
         # `codex --list-models`: a fonte e o `model/list` de um app-server efemero em stdio, a MESMA
         # que a folha da sessao viva usa. Ver app/codex_models.py.
@@ -10358,7 +10445,11 @@ async def model_options_sem_sessao(provider: str = "claude", engine: str = "",
         # Sem `effort`: quem sabe o nivel atual e a SESSAO, e aqui nao ha uma. A chave e a mesma do
         # picker de proposito (a lista vem da conta, nao da sessao); nenhum leitor do cache usa o
         # campo, e inventar um nivel aqui seria pior que a ausencia dele.
-        resp = {"kind": "claude", "engine": None, "models": claude_models.para_tela(crus)}
+        try:
+            models = await asyncio.to_thread(claude_models.para_tela, crus)
+        except claude_models.ClaudeIndisponivel as error:
+            raise HTTPException(503, detail=erro("erro_modelos_indisponiveis", str(error))) from None
+        resp = {"kind": "claude", "engine": None, "models": models}
         _models_cache_put(chave, resp)
         return {**resp, "reduced": False}
     return {"kind": "claude", "reduced": True,

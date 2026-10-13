@@ -203,9 +203,10 @@ pub struct ComposerSnapshot { pub content: String, pub placeholders: BTreeSet<St
 static PLACEHOLDER: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\[(Pasted text|Image) #(\d+)").unwrap());
 static CURSOR: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?m)^\s*[❯›]\s*(\d+)\.\s").unwrap());
 static AGENT_ROW: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\s*(?:❯\s+)?[●◯]\s+(\S+)").unwrap());
-// Dica de argumento que o Claude desenha depois de um comando com barra completo (`/clear │ [name]`).
+// Dica de argumento que o Claude desenha depois de um comando com barra completo (`/clear │ [name]`,
+// `/compact <optional custom summarization instructions>`). Em alguns temas ela não vem esmaecida.
 // Sem `#`: anexo (`[Image #1]`) nunca passa por dica.
-static ARG_HINT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\[[^\[\]#]*\]$").unwrap());
+static ARG_HINT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(?:\[[^\[\]#]*\]|<[^<>#]*>)$").unwrap());
 static NEXT_BUFFER: AtomicU64 = AtomicU64::new(0);
 fn compact(text: &str) -> String { text.chars().filter(|c| !c.is_whitespace() && !"│┃║".contains(*c)).collect() }
 /// O Claude marca `› stashed` na linha de dicas acima do composer enquanto guarda um rascunho.
@@ -215,7 +216,8 @@ fn stash_held(screen: &str) -> bool {
     rules.len().checked_sub(2).and_then(|n| rules[n].checked_sub(1)).is_some_and(|n| lines[n].contains("› stashed"))
 }
 impl ComposerSnapshot {
-    pub fn parse(screen: &str) -> Option<Self> {
+    /// As linhas da tela e as duas últimas réguas (topo e base do composer), sem conferir tamanho.
+    fn frame(screen: &str) -> Option<(Vec<&str>, usize, usize)> {
         let mut lines: Vec<_> = screen.split('\n').collect();
         while lines.last().is_some_and(|s| s.trim().is_empty()) { lines.pop(); }
         // O painel de agentes ganha uma linha por subagente abaixo do rodapé: fora da conta da distância.
@@ -229,7 +231,16 @@ impl ComposerSnapshot {
         let rules: Vec<_> = lines.iter().enumerate().filter(|(_, s)| s.matches('─').count() >= 20).map(|(n, _)| n).collect();
         let bottom = *rules.last()?;
         let top = *rules.get(rules.len().checked_sub(2)?)?;
-        if lines.len() - bottom > 8 || bottom - top > 15 { return None; }
+        Some((lines, top, bottom))
+    }
+    /// Composer no pé da tela e mais alto do que a leitura aceita: mensagem longa colada, não outra tela.
+    pub fn too_tall(screen: &str) -> bool {
+        Self::frame(screen).is_some_and(|(lines, top, bottom)| lines.len() - bottom <= 8 && bottom - top > 40)
+    }
+    pub fn parse(screen: &str) -> Option<Self> {
+        let (lines, top, bottom) = Self::frame(screen)?;
+        // Mensagem longa colada cresce o composer; acima disto as réguas já não são as dele.
+        if lines.len() - bottom > 8 || bottom - top > 40 { return None; }
         let content = lines[top+1..bottom].iter().map(|s| s.trim().strip_prefix('❯').unwrap_or(s.trim()).trim()).collect::<Vec<_>>().join("\n");
         let placeholders = PLACEHOLDER.captures_iter(&content).map(|c| format!("{}:{}", &c[1], &c[2])).collect();
         Some(Self { content, placeholders, stashed: stash_held(screen) })
@@ -753,10 +764,29 @@ impl TerminalDriver {
         DraftOutcome::Stashed
     }
     async fn prove_input(&self, text: &str, before: &ComposerSnapshot) -> bool {
-        for _ in 0..self.limits.proof_attempts.max(1) {
-            self.settle().await;
+        // A primeira leitura vem logo depois do `literal_settle` que a escrita já esperou; a espera fica
+        // entre as tentativas. A prova é a mesma: só o texto presente passa.
+        for attempt in 0..self.limits.proof_attempts.max(1) {
+            if attempt > 0 { self.settle().await; }
             let Ok(now) = self.snapshot().await else { return false; };
             if now.proves(text, before) == Proof::Present { return true; }
+        }
+        false
+    }
+    /// Depois do `Filled`: o plugin já confirmou o que pôs no campo. A tela só desmente quando dá para
+    /// lê-la; composer ilegível (mensagem longa demais para o desenho) não segura o Enter.
+    async fn prove_filled(&self, text: &str, before: &ComposerSnapshot) -> bool {
+        // O plugin já respondeu `Filled`: lê a tela na hora e só espera entre as tentativas.
+        for attempt in 0..self.limits.proof_attempts.max(1) {
+            if attempt > 0 { self.settle().await; }
+            let Ok((screen, typed)) = self.composer_capture().await else { return false };
+            match Self::composer(&screen, &typed) {
+                Ok(now) if now.proves(text, before) == Proof::Present => return true,
+                Ok(_) => {}
+                // Só o composer comprovadamente alto: tela sem as réguas dele pode ser um diálogo, e o Enter o confirmaria.
+                Err(e) if e.code == "composer_unreadable" && ComposerSnapshot::too_tall(&typed) => return true,
+                Err(_) => return false,
+            }
         }
         false
     }
@@ -793,8 +823,11 @@ impl TerminalDriver {
         let mut slash_selected = false;
         let clear = text.split_whitespace().next() == Some("/clear");
         let mut last_error = None;
-        for _ in 0..self.limits.proof_attempts.max(1) {
-            self.settle().await;
+        // Composer ainda com o texto logo após o Enter só reprova esta leitura: a seguinte espera o `settle`.
+        // Barra espera antes: o menu de sugestões ainda na tela pediria um segundo Enter antes do primeiro valer.
+        let slash = text.trim_start().starts_with('/');
+        for attempt in 0..self.limits.proof_attempts.max(1) {
+            if attempt > 0 || slash { self.settle().await; }
             let capture = if clear {
                 match self.verify_pane().await { Ok(()) => self.composer_capture_unverified().await, Err(e) => Err(e) }
             } else { self.composer_capture().await };
@@ -883,7 +916,7 @@ impl TerminalDriver {
                 Ok(PluginReply::Unavailable | PluginReply::NotWritten) => refresh_guard = true,
                 Ok(PluginReply::Accepted) if mode == PluginMode::User => return DeliveryResult::new(Disposition::Accepted, DeliveryStage::Plugin, "plugin_accepted"),
                 Ok(PluginReply::Filled) if mode == PluginMode::Fill => {
-                    if self.prove_input(text, &before).await { return self.submit(text, &before, draft, expected).await; }
+                    if self.prove_filled(text, &before).await { return self.submit(text, &before, draft, expected).await; }
                     return self.partial(text, &before, DeliveryStage::InputProof).await;
                 }
                 _ => return DeliveryResult::new(Disposition::Unknown, DeliveryStage::Plugin, "plugin_uncertain"),

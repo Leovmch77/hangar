@@ -501,11 +501,27 @@ describe('ServerSettings — Jev em uma tela própria', () => {
     document.body.appendChild(el);
     const comp = mount(ServerSettings, { target: el, props: { store, secao: 'jev' } });
     await tick();
-    expect(el.textContent).toContain(m.jev_browser_title());
+    expect(el.textContent).toContain(m.browser_jev_decisions_title());
+    expect(el.textContent).toContain(m.browser_jev_where_title());
     expect(el.querySelector('#cfg-jev_api_key')).not.toBeNull();
     expect(el.querySelector('[id^="cfg-jev_windows"]')).toBeNull();
+    expect(el.querySelector('[id^="cfg-jev_texto_"]')).toBeNull();
     expect(el.querySelector<HTMLDetailsElement>('.jev-details')?.open).toBe(false);
+    // Servidor sem o modelo auxiliar único: o bloco avisa em vez de mostrar campos que ele recusaria.
+    expect(el.textContent).toContain(m.browser_jev_aux_unsupported());
+    expect(el.querySelector('#cfg-jev_aux_base_url')).toBeNull();
     unmount(comp);
+    const comAux = { ...store, campos: { ...store.campos, jev_aux_base_url: { valor: '', definido: false, origem: 'env' } } } as ConfigServidorStore;
+    const aux = mount(ServerSettings, { target: el, props: { store: comAux, secao: 'jev' } });
+    await tick();
+    expect(el.querySelector('#cfg-jev_aux_base_url')).not.toBeNull();
+    // O campo Modelo é a própria lista com busca: sem endereço, ela abre dizendo o que falta.
+    const modelo = el.querySelector<HTMLInputElement>('#cfg-jev_aux_modelo');
+    expect(modelo?.getAttribute('role')).toBe('combobox');
+    modelo!.click();
+    await tick();
+    expect(document.body.textContent).toContain(m.browser_jev_aux_models_need_url());
+    unmount(aux);
     const advanced = mount(ServerSettings, { target: el, props: { store, secao: 'avancado' } });
     await tick();
     expect(el.querySelector('[id^="cfg-jev_"]')).toBeNull();

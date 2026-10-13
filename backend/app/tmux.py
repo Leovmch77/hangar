@@ -69,15 +69,31 @@ def _scope_probe() -> bool:
         # recem-subido) podem rodar o probe as duas — mas o probe é idempotente (mesmo comando,
         # mesmo resultado booleano), então o pior caso é um fork() de sobra, nunca um valor
         # inconsistente. Lock só entra se esse fork extra virar custo medido.
-        _scope_usavel = _run([*_SCOPE, "true"]).returncode == 0
-        if not _scope_usavel:
+        usavel = _run([*_SCOPE, "true"]).returncode == 0
+        _scope_usavel = usavel
+        if not usavel:
             # Falha aparece, nao some: sem o scope, uma sessao que TENHA de iniciar o servidor tmux
             # nasce no cgroup do backend, e ai um `systemctl restart` do backend derruba as sessoes.
             # Com o servidor tmux ja de pe (caso normal) o pane herda o cgroup DELE e nada muda.
             _log.warning("systemd-run --user --scope indisponivel; criando sessoes sem scope "
                          "proprio. Se o servidor tmux precisar ser iniciado por aqui, um restart "
                          "do backend pode derrubar as sessoes.")
+        return usavel
     return _scope_usavel
+
+
+def _scope_lost() -> bool:
+    """O escopo que a sonda da subida aprovou parou de funcionar? Sonda sem resposta não desliga nada."""
+    global _scope_usavel
+    # Com o cache em None, o `_run` da própria sonda não volta para a nova tentativa.
+    _scope_usavel = None
+    rc = _run([*_SCOPE, "true"]).returncode
+    _scope_usavel = rc != 1
+    if rc == 1:
+        _log.warning("systemd-run --user --scope parou de funcionar depois da subida; criando sessoes "
+                     "sem scope proprio. Se o servidor tmux precisar ser iniciado por aqui, um restart "
+                     "do backend pode derrubar as sessoes.")
+    return rc == 1
 
 
 def _scope_prefix() -> list[str]:
@@ -174,6 +190,13 @@ def _run(args: list[str], input: bytes | None = None) -> subprocess.CompletedPro
                 retry_args = [*args[:2], "-c", "", *args[2:]]
                 cp = RUN(retry_args, capture_output=True, text=True, encoding="utf-8", errors="replace",
                          timeout=5)
+        # O gerenciador do usuário pode parar de criar escopo no meio do dia, e aí o `systemd-run` sai 1
+        # sem rodar nada. Timeout fica de fora: o comando pode ter rodado dentro do escopo.
+        if cp.returncode == 1 and _scope_usavel is True and args[:len(_SCOPE)] == _SCOPE and _scope_lost():
+            inner = args[len(_SCOPE):]
+            diag.registrar("mux.scope_perdido", "aviso", retorno=cp.returncode,
+                           comando=inner[1] if len(inner) > 1 and inner[0] == "tmux" else "outro")
+            cp = _run(inner, input)
         return cp
     except (subprocess.TimeoutExpired, OSError) as exc:
         failure = exc

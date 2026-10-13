@@ -105,7 +105,7 @@ def _question(lines: list[str]) -> Optional[str]:
         # Tirar a moldura dos DOIS lados: no omp a pergunta vem dentro do box
         # (`│ Qual cor...?      │`) e sem isso as bordas entrariam no texto que o app mostra.
         s = line.strip().strip("│").strip()
-        if not s or _RULE_RE.match(line) or _SO_MOLDURA_RE.match(line) or s[:1] in "☐☑":
+        if not s or _RULE_RE.match(line) or _SO_MOLDURA_RE.match(line) or s.lstrip("←").lstrip()[:1] in "☐☑":
             continue
         found = s
     return found
@@ -253,14 +253,22 @@ def _menu_block(lines: list[str]) -> Optional[tuple[int, int]]:
         label = _BOX_SPLIT_RE.split(lines[cursor][marca.end():])[0]
         if _MARCADOR_EMBUTIDO_RE.search(label):
             return None
+    # Rascunho numerado em várias linhas: o `❯ N.` é a própria linha de prompt, colada na régua de
+    # cima do composer. Opção de menu de verdade nunca encosta na régua: vem depois do título ou da
+    # pergunta. Rascunho não tem rodapé de navegação; com rodapé, segue como menu.
+    if (not pi_cursor and cursor > 0 and _RULE_RE.match(lines[cursor - 1])
+            and not any(_FOOTER_RE.search(ln) for ln in lines[cursor + 1:])):
+        return None
     # Subindo do cursor, o topo do picker e o CHIP header (☐/☑ da AskUserQuestion) ou um boundary
     # (bullet/spinner do menu nativo, que nao tem chip). Parar no chip mantem FORA do bloco uma
     # LISTA NUMERADA EM PROSA da mensagem do assistente — ela vive acima do chip e, sem essa
     # ancora, "1. ... 2. ..." da prosa entrariam como opcoes falsas. A pergunta fica entre o chip
     # e as opcoes (com linha em branco no meio), entao continua dentro da regiao.
+    # Na multipla escolha o chip vem depois de uma seta: "←  ☐ ... ✔ Submit  →".
     top = 0
     for i in range(cursor - 1, -1, -1):
         s = lines[i].lstrip()
+        s = s[1:].lstrip() if s.startswith("←") else s
         if _is_boundary(lines[i]) or (bool(s) and s[0] in "☐☑"):
             top = i + 1
             break
@@ -269,7 +277,21 @@ def _menu_block(lines: list[str]) -> Optional[tuple[int, int]]:
         if _FOOTER_RE.search(lines[i]) or _is_boundary(lines[i]):
             bot = i
             break
+    # Menu de verdade some com o composer: rodape com regua embaixo e um menu desenhado no TEXTO do
+    # composer (recado colado), e tocar nele mandaria teclas para o prompt.
+    if (not pi_cursor and bot < len(lines) and _FOOTER_RE.search(lines[bot])
+            and any(_RULE_RE.match(ln) for ln in lines[bot + 1:]) and _prompt_acima(lines, cursor)):
+        return None
     return (top, bot)
+
+
+def _prompt_acima(lines: list[str], cursor: int) -> bool:
+    """Logo abaixo da régua acima do cursor está a linha de prompt do composer (❯ sem número de opção)."""
+    for i in range(cursor - 1, -1, -1):
+        if _RULE_RE.match(lines[i]):
+            nxt = lines[i + 1] if i + 1 < len(lines) else ""
+            return nxt.lstrip().startswith("❯") and not _CURSOR_RE.match(nxt)
+    return False
 
 
 def _live_spinner(pane_text: str) -> Optional[str]:

@@ -9,6 +9,8 @@
   import PushPresence from '../PushPresence.svelte';
   import { pushSupported } from '../../lib/push';
   import type { PushTarget } from '../../lib/quietHours';
+  import { getJevAuxCliproxy, listJevAuxModels, patchConfig, patchConfigForServer, sameJevAuxUrl, type JevAuxCliproxy } from '@hangar/core';
+  import { getComputerControl } from '../../lib/credenciais';
   import * as m from '../../paraglide/messages';
 
   // Configuração do servidor pelo app. Até aqui tudo vinha só de env/.env: pra mudar a chave da
@@ -23,8 +25,10 @@
     secao: 'notificacoes' | 'anexos' | 'avancado' | 'jev';
     // Só a seção notificacoes lê: onde as horas silenciosas são gravadas. null = servidor ativo.
     apiTarget?: Server | null;
+    /** Só a seção jev: abre a tela do Computer Use. */
+    onOpenComputer?: () => void;
   }
-  let { store, secao, apiTarget = null }: Props = $props();
+  let { store, secao, apiTarget = null, onOpenComputer }: Props = $props();
 
   const pushTarget = $derived<PushTarget>(apiTarget ? { mode: 'server', server: apiTarget } : { mode: 'global' });
 
@@ -77,17 +81,122 @@
       ajuda: m.config_server_jev_endpoint_ajuda() },
     { chave: 'jev_model', rotulo: m.config_server_jev_modelo(), tipo: 'texto', secao: 'jev',
       ajuda: m.config_server_jev_modelo_ajuda() },
-    { chave: 'jev_texto_base_url', rotulo: m.config_server_jev_texto_endpoint(), tipo: 'texto', secao: 'jev',
-      ajuda: m.config_server_jev_texto_endpoint_ajuda() },
-    { chave: 'jev_texto_api_key', rotulo: m.config_server_jev_texto_chave(), tipo: 'segredo', secao: 'jev',
-      ajuda: m.config_server_jev_texto_chave_ajuda() },
-    { chave: 'jev_texto_modelo', rotulo: m.config_server_jev_texto_modelo(), tipo: 'texto', secao: 'jev',
-      ajuda: m.config_server_jev_texto_modelo_ajuda() },
-    { chave: 'jev_texto_cmd', rotulo: m.config_server_jev_texto_cmd(), tipo: 'texto', secao: 'jev',
-      ajuda: m.config_server_jev_texto_cmd_ajuda() },
+    { chave: 'jev_aux_base_url', rotulo: m.browser_jev_aux_url(), tipo: 'texto', secao: 'jev',
+      ajuda: m.browser_jev_aux_url_help() },
+    { chave: 'jev_aux_api_key', rotulo: m.browser_jev_aux_key(), tipo: 'segredo', secao: 'jev',
+      ajuda: m.browser_jev_aux_key_help() },
+    { chave: 'jev_aux_modelo', rotulo: m.browser_jev_aux_model(), tipo: 'texto', secao: 'jev',
+      ajuda: m.browser_jev_aux_model_help() },
+    { chave: 'jev_aux_esforco', rotulo: m.browser_jev_aux_effort(), tipo: 'escolha', secao: 'jev',
+      ajuda: m.browser_jev_aux_effort_help(),
+      opcoes: [{ value: '', label: m.browser_jev_aux_effort_default() }, { value: 'low', label: 'low' },
+        { value: 'medium', label: 'medium' }, { value: 'high', label: 'high' }] },
   ];
 
   const visiveis = $derived(CAMPOS.filter((c) => c.secao === secao));
+  const jevCampos = (chaves: string[]) => visiveis.filter((c) => chaves.includes(c.chave));
+  // Servidor sem o modelo auxiliar único (versão anterior): o bloco diz isso em vez de campos que ele recusaria.
+  const auxSuportado = $derived('jev_aux_base_url' in store.campos);
+
+  // Atalho do CLIProxyAPI local, lista de modelos do provedor e o estado do Computer Use: só na seção jev.
+  let cliproxy = $state<JevAuxCliproxy | null>(null);
+  let cliproxyAplicando = $state(false);
+  // `url`: o endereço gravado; editar o campo depois tira a mensagem da tela.
+  let cliproxyMsg = $state<{ ok: boolean; texto: string; url: string } | null>(null);
+  let modelos = $state<string[]>([]);
+  // Endereço e chave da última busca: lista e erro só valem enquanto os campos forem esses.
+  let buscaDe = $state('');
+  let buscando = $state(false);
+  let modelosErro = $state('');
+  let computer = $state<{ enabled: boolean } | null>(null);
+  let computerErro = $state('');
+  let cliproxyErro = $state('');
+  // Troca de servidor no meio de uma chamada: a resposta do anterior não pinta esta tela.
+  let geracao = 0;
+  $effect(() => {
+    if (secao !== 'jev') return;
+    const alvo = apiTarget;
+    const g = ++geracao;
+    cliproxy = null;
+    cliproxyErro = '';
+    cliproxyMsg = null;
+    cliproxyAplicando = false;
+    buscando = false;
+    computer = null;
+    computerErro = '';
+    modelos = [];
+    modelosErro = '';
+    // 404 é servidor sem o atalho (versão anterior): só aí o atalho some calado.
+    getJevAuxCliproxy(alvo)
+      .then((c) => { if (g === geracao) cliproxy = c; })
+      .catch((e) => {
+        if (g === geracao && (e as { status?: number }).status !== 404) cliproxyErro = e instanceof Error ? e.message : String(e);
+      });
+    getComputerControl(alvo)
+      .then((c) => { if (alvo === apiTarget) computer = c; })
+      .catch((e) => { if (alvo === apiTarget) computerErro = e instanceof Error ? e.message : String(e); });
+  });
+
+  const auxUrl = $derived(String(store.valorAtual('jev_aux_base_url') ?? '').trim());
+  const buscaAtual = $derived(`${auxUrl}\n${store.rascunhoDe('jev_aux_api_key').trim()}`);
+  const buscaValida = $derived(buscaDe === buscaAtual);
+  // Lista do campo Modelo: busca ao abrir quando ainda não há uma para o endereço e a chave atuais.
+  const modelosCombo = $derived({
+    opcoes: buscaValida ? modelos.map((id) => ({ value: id, label: id })) : [],
+    // Busca que falhou (ou veio vazia) tenta de novo ao reabrir: não há mais botão de buscar.
+    aoAbrir: () => { if (auxUrl && !buscando && (!buscaValida || modelosErro)) void buscarModelos(); },
+    aviso: !auxUrl ? m.browser_jev_aux_models_need_url()
+      : buscando ? m.browser_jev_aux_models_fetching()
+      : !buscaValida ? m.browser_jev_aux_models_stale()
+      : modelosErro || null,
+    vazio: m.browser_jev_aux_models_no_match(),
+  });
+  const cliproxyMsgVisivel = $derived(cliproxyMsg && (!auxSuportado || auxUrl === cliproxyMsg.url) ? cliproxyMsg : null);
+  async function buscarModelos() {
+    if (buscando || !auxUrl) return;
+    buscando = true;
+    modelosErro = '';
+    const chave = store.rascunhoDe('jev_aux_api_key').trim();
+    buscaDe = buscaAtual;
+    const g = geracao;
+    try {
+      const salva = !chave && sameJevAuxUrl(auxUrl, store.campos['jev_aux_base_url']?.valor);
+      const r = await listJevAuxModels(store.alvo, { base_url: auxUrl, api_key: chave || null, use_saved_key: salva });
+      if (g !== geracao) return;
+      modelos = r.models;
+      if (!r.models.length) modelosErro = m.browser_jev_aux_models_none();
+    } catch (e) {
+      if (g !== geracao) return;
+      modelos = [];
+      modelosErro = e instanceof Error ? e.message : String(e);
+    } finally {
+      if (g === geracao) buscando = false;
+    }
+  }
+
+  // Grava na hora (não vai pelo rascunho): a chave do CLIProxyAPI só existe no servidor, e o campo não a recebe.
+  async function aplicarCliproxy() {
+    if (!cliproxy || cliproxyAplicando) return;
+    cliproxyAplicando = true;
+    cliproxyMsg = null;
+    const s = store.alvo;
+    const mudanca = { jev_aux_cliproxy: true, jev_aux_base_url: cliproxy.preset_url };
+    const g = geracao;
+    try {
+      await (s ? patchConfigForServer(s, mudanca) : patchConfig(mudanca));
+      if (g !== geracao) return;
+      // Gravado vale mesmo se a releitura abaixo falhar: o erro dela aparece pelo próprio store.
+      cliproxyMsg = { ok: true, texto: m.browser_jev_aux_cliproxy_done(), url: mudanca.jev_aux_base_url };
+      store.desfazerRascunho('jev_aux_base_url');
+      store.desfazerRascunho('jev_aux_api_key');
+      await store.carregar();
+    } catch (e) {
+      if (g !== geracao) return;
+      cliproxyMsg = { ok: false, texto: e instanceof Error ? e.message : String(e), url: auxUrl };
+    } finally {
+      if (g === geracao) cliproxyAplicando = false;
+    }
+  }
 
   // O que a tela Máquinas já mostra (identificador editável; porta, IP e URL na lista de endereços)
   // não se repete aqui — um dado, um lugar.
@@ -186,6 +295,10 @@
     <h2>{TITULOS[secao]}</h2>
   </header>
 
+  <!-- Fora dos estados da leitura: "gravado" continua à vista se a releitura logo depois falhar. -->
+  {#if secao === 'jev' && cliproxyMsgVisivel}
+    <p class="aviso" class:erro={!cliproxyMsgVisivel.ok} role="status">{cliproxyMsgVisivel.texto}</p>
+  {/if}
   {#if store.carregando}
     <p class="aviso">{m.comum_carregando()}</p>
   {:else if store.erro && !Object.keys(store.campos).length}
@@ -194,23 +307,51 @@
   {:else}
     {#if secao === 'jev'}
       <p class="jev-intro">{m.jev_intro()}</p>
-      <section class="jev-section" aria-labelledby="jev-browser">
-        <h3 id="jev-browser">{m.jev_browser_title()}</h3>
-        <p class="ajuda">{m.jev_browser_help()}</p>
-        {#each visiveis.filter((c) => c.chave === 'jev_api_key' || c.chave === 'jev_padrao') as c (c.chave)}
-          <LinhaConfig campo={c} {store} />
-        {/each}
+      <section class="jev-section" aria-labelledby="jev-decisions">
+        <h3 id="jev-decisions">{m.browser_jev_decisions_title()}</h3>
+        <p class="ajuda">{m.browser_jev_decisions_help()}</p>
+        {#each jevCampos(['jev_api_key']) as c (c.chave)}<LinhaConfig campo={c} {store} />{/each}
         <details class="jev-details">
           <summary>{m.jev_advanced()}</summary>
-          {#each visiveis.filter((c) => c.chave === 'jev_endpoint' || c.chave === 'jev_model') as c (c.chave)}
-            <LinhaConfig campo={c} {store} />
-          {/each}
-          <h4>{m.jev_text_title()}</h4>
-          <p class="ajuda">{m.jev_text_help()}</p>
-          {#each visiveis.filter((c) => c.chave.startsWith('jev_texto_')) as c (c.chave)}
-            <LinhaConfig campo={c} {store} />
-          {/each}
+          {#each jevCampos(['jev_endpoint', 'jev_model']) as c (c.chave)}<LinhaConfig campo={c} {store} />{/each}
         </details>
+      </section>
+
+      <section class="jev-section" aria-labelledby="jev-aux">
+        <h3 id="jev-aux">{m.browser_jev_aux_title()}</h3>
+        <p class="ajuda">{m.browser_jev_aux_help()}</p>
+        {#if !auxSuportado}
+          <p class="aviso">{m.browser_jev_aux_unsupported()}</p>
+        {:else}
+          {#if cliproxy}
+            <div class="jev-atalho">
+              <p class="ajuda">{!cliproxy.running ? m.browser_jev_aux_cliproxy_stopped({ url: cliproxy.preset_url })
+                : cliproxy.has_keys ? m.browser_jev_aux_cliproxy_ready({ url: cliproxy.preset_url })
+                : m.browser_jev_aux_cliproxy_no_key()}</p>
+              <button type="button" class="btn" onclick={aplicarCliproxy}
+                disabled={cliproxyAplicando || !cliproxy.running || !cliproxy.has_keys} aria-busy={cliproxyAplicando}>
+                {m.browser_jev_aux_cliproxy_use()}
+              </button>
+            </div>
+          {:else if cliproxyErro}
+            <p class="aviso erro" role="alert">{m.browser_jev_aux_cliproxy_error({ e: cliproxyErro })}</p>
+          {/if}
+          {#each jevCampos(['jev_aux_base_url', 'jev_aux_api_key']) as c (c.chave)}<LinhaConfig campo={c} {store} />{/each}
+          {#each jevCampos(['jev_aux_modelo']) as c (c.chave)}<LinhaConfig campo={c} {store} combo={modelosCombo} />{/each}
+          {#each jevCampos(['jev_aux_esforco']) as c (c.chave)}<LinhaConfig campo={c} {store} />{/each}
+        {/if}
+      </section>
+
+      <section class="jev-section" aria-labelledby="jev-where">
+        <h3 id="jev-where">{m.browser_jev_where_title()}</h3>
+        {#each jevCampos(['jev_padrao']) as c (c.chave)}<LinhaConfig campo={c} {store} />{/each}
+        <p class="ajuda jev-onde">{m.browser_jev_where_orq()}</p>
+        <div class="jev-onde">
+          <span class="ajuda">{computerErro ? m.browser_jev_where_cu_error({ e: computerErro })
+            : computer === null ? m.comum_carregando()
+            : computer.enabled ? m.browser_jev_where_cu_on() : m.browser_jev_where_cu_off()}</span>
+          {#if onOpenComputer}<button type="button" class="btn" onclick={onOpenComputer}>{m.browser_jev_where_cu_open()}</button>{/if}
+        </div>
       </section>
     {:else}
       <div class="lista">
@@ -349,11 +490,11 @@
 
   .jev-intro { max-width: 65ch; color: var(--text-secondary); font-size: var(--text-sm); line-height: 1.5; }
   .jev-section { margin-top: var(--space-5); }
-  .jev-section h3, .jev-section h4 { margin: 0 0 var(--space-2); font-size: var(--text-base); color: var(--text-primary); }
-  .jev-section h4 { margin-top: var(--space-4); font-size: var(--text-sm); }
+  .jev-section h3 { margin: 0 0 var(--space-2); font-size: var(--text-base); color: var(--text-primary); }
   .jev-details { margin-top: var(--space-3); }
   .jev-details summary { cursor: pointer; color: var(--text-secondary); font-size: var(--text-sm); padding: var(--space-2) 0; }
   .jev-details summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+  .jev-atalho, .jev-onde { display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-2); margin: var(--space-3) 0; }
   .lista { display: flex; flex-direction: column; }
   /* "editado" = veio de override, não do .env — sem isso não dá pra saber de onde o valor vem.
      Usada nas raízes mapeadas (badge de scan_roots, abaixo), fora da lista de campos — por isso

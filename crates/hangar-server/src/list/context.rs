@@ -45,8 +45,13 @@ pub struct ReadingInputs<'a> {
 
 /// Contexto e modelo em uso da sessão, numa leitura só do transcript.
 pub fn claude_reading(inputs: &ReadingInputs) -> Reading {
+    claude_reading_from(inputs, &scan_tail(inputs.jsonl))
+}
+
+/// Como `claude_reading`, a partir do rabo já varrido (`scan_tail` ou `ContextCache::scan`).
+pub fn claude_reading_from(inputs: &ReadingInputs, scan: &Scan) -> Reading {
     let model = non_empty(inputs.chosen).or(non_empty(inputs.opened));
-    let (ctx, answered) = read(inputs.jsonl, inputs.account_dir, model, inputs.declared);
+    let (ctx, answered) = assemble(scan, inputs.jsonl, inputs.account_dir, model, inputs.declared);
     let used = ctx.map_or(0, |c| c.used);
     (ctx, session_model(answered.as_deref(), model, inputs.account_dir, used, inputs.engine))
 }
@@ -81,22 +86,42 @@ pub fn declared_window_value(v: &Value) -> Option<u64> {
     }
 }
 
+/// Uso e modelo da última resposta principal no rabo do transcript. `None` = rabo ilegível ou
+/// ausente; `Some(None)` = nenhuma resposta com uso no trecho lido.
+pub type Scan = Option<Option<(u64, Option<String>)>>;
+
 /// Contexto da última resposta do agente principal e o id do modelo que a deu.
 pub fn read(jsonl: &Path, account_dir: &Path, model: Option<&str>, window_tokens: Option<u64>) -> Reading {
+    assemble(&scan_tail(jsonl), jsonl, account_dir, model, window_tokens)
+}
+
+/// A janela depende do modelo e da declaração, que mudam sem o transcript mudar: fica fora da varredura.
+fn assemble(scan: &Scan, jsonl: &Path, account_dir: &Path, model: Option<&str>, window_tokens: Option<u64>) -> Reading {
+    let Some(found) = scan else { return (None, None) };
     let measured = measured(jsonl).map(|mut c| {
         if let Some(declared) = window_tokens.filter(|n| *n > 0) { c.window = declared; }
         c
     });
+    match found {
+        Some((used, answered)) => {
+            let ctx = ContextUse { used: *used, window: measured.map_or_else(|| window(*used, account_dir, model, window_tokens), |c| c.window) };
+            (Some(ctx), answered.clone())
+        }
+        None => (measured, None),
+    }
+}
+
+pub fn scan_tail(jsonl: &Path) -> Scan {
     let tail = match read_tail(jsonl) {
         Ok(tail) => tail,
         // Sessão que acabou de fechar; o cache guarda o último valor do mesmo transcript.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return (None, None),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
         Err(e) => {
             // Calado, o contexto ficaria velho ou cairia na janela de 200k sem rastro.
             let sid = jsonl.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
             super::facts::note("rust.list_context_unreadable", &sid, format!("list_context_unreadable:{:?}", e.kind()),
                 "rabo do transcript ilegível; o contexto fica no último valor");
-            return (None, None);
+            return None;
         }
     };
     for line in tail.split(|b| *b == b'\n').rev() {
@@ -120,11 +145,10 @@ pub fn read(jsonl: &Path, account_dir: &Path, model: Option<&str>, window_tokens
         if used > 0 {
             let used = u64::try_from(used).unwrap_or(u64::MAX);
             let answered = message.get("model").and_then(Value::as_str).filter(|m| !m.is_empty());
-            let ctx = ContextUse { used, window: measured.map_or_else(|| window(used, account_dir, model, window_tokens), |c| c.window) };
-            return (Some(ctx), answered.map(str::to_owned));
+            return Some(Some((used, answered.map(str::to_owned))));
         }
     }
-    (measured, None)
+    Some(None)
 }
 
 /// O plugin publica a janela medida pelo Claude, inclusive com a statusline personalizada.
@@ -182,6 +206,9 @@ struct Entry {
     ctx: Option<ContextUse>,
     model: Option<String>,
     files: SourceVersion,
+    /// Varredura do rabo desta versão do transcript: vencido o prazo sem o arquivo mudar, só o
+    /// modelo e a janela são refeitos. `None` = não guardada.
+    scan: Option<Scan>,
 }
 
 #[derive(PartialEq)]
@@ -212,7 +239,22 @@ impl ContextCache {
     }
 
     /// Grava a leitura nova e devolve o valor que a linha mostra.
+    /// Rabo do transcript: o guardado se for da mesma versão do arquivo, senão lido agora.
+    pub fn scan(&self, name: &str, jsonl: &str, files: &SourceVersion) -> Scan {
+        match self.entries.peek(name) {
+            // Rabo ilegível não fica guardado: a próxima rodada tenta de novo e avisa de novo.
+            Some(Entry { jsonl: j, files: f, scan: Some(scan @ Some(_)), .. })
+                if j == jsonl && files.transcript.is_some() && f.transcript == files.transcript => scan.clone(),
+            _ => scan_tail(Path::new(jsonl)),
+        }
+    }
+
     pub fn store(&mut self, name: &str, jsonl: &str, now: f64, reading: Reading, files: SourceVersion) -> Reading {
+        self.store_with(name, jsonl, now, reading, files, None)
+    }
+
+    /// `store` guardando também a varredura do rabo, para `scan` reaproveitar.
+    pub fn store_with(&mut self, name: &str, jsonl: &str, now: f64, reading: Reading, files: SourceVersion, scan: Option<Scan>) -> Reading {
         let (ctx, mut model) = reading;
         // Sem resposta lida, o valor anterior só vale para o MESMO transcript; o modelo também,
         // senão a pílula cai no da conta quando a resposta sai do trecho lido.
@@ -224,7 +266,7 @@ impl ContextCache {
             }
         }
         let ctx = ctx.or(kept);
-        self.entries.insert(name.to_owned(), Entry { at: now, jsonl: jsonl.to_owned(), ctx, model: model.clone(), files });
+        self.entries.insert(name.to_owned(), Entry { at: now, jsonl: jsonl.to_owned(), ctx, model: model.clone(), files, scan });
         (ctx, model)
     }
 
@@ -317,6 +359,21 @@ fn truthy(v: &Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expired_entry_reuses_the_tail_scan_until_the_transcript_changes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let jsonl = tmp.path().join("same.jsonl");
+        std::fs::write(&jsonl, r#"{"type": "assistant", "message": {"usage": {"input_tokens": 10}}}"#).unwrap();
+        let path = jsonl.to_str().unwrap();
+        let mut cache = ContextCache::default();
+        let marked: Scan = Some(Some((42, None)));
+        cache.store_with("s", path, 0.0, (None, None), source_version(path), Some(marked.clone()));
+        assert!(cache.stale("s", path, TTL_SECS + 1.0), "o prazo ainda vence: modelo e janela são refeitos");
+        assert_eq!(cache.scan("s", path, &source_version(path)), marked, "arquivo igual não é relido");
+        std::fs::write(&jsonl, r#"{"type": "assistant", "message": {"usage": {"input_tokens": 110}}}"#).unwrap();
+        assert_eq!(cache.scan("s", path, &source_version(path)), Some(Some((110, None))));
+    }
 
     #[test]
     fn last_main_answer_wins_and_unreadable_tail_reaches_the_diary() {

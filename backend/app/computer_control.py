@@ -25,7 +25,6 @@ _log = logging.getLogger("hangar.computer_control")
 NAME = "hangar-computer-control"
 REPO = "jeffer1312/hangar-computer-control"
 PRESET_URL = "http://127.0.0.1:8317/v1/chat/completions"
-EFFORTS = ("", "low", "medium", "high")
 
 
 def _install_dir() -> Path:
@@ -121,25 +120,38 @@ def _park(entry: dict) -> None:
 
 
 def _cliproxy_keys() -> list[str]:
-    """`api-keys` do ~/.cli-proxy-api/config.yaml. Lido à mão: é uma lista simples de strings e o
-    backend não tem biblioteca de YAML."""
+    """Chaves de cliente do ~/.cli-proxy-api/config.yaml: `access.api-keys` no formato novo, `api-keys`
+    na raiz no antigo (no novo, a raiz é dos provedores). Lido à mão: o backend não tem biblioteca de YAML."""
     try:
         lines = (Path.home() / ".cli-proxy-api" / "config.yaml").read_text(encoding="utf-8").splitlines()
-    except OSError:
+    except FileNotFoundError:
         return []
-    keys: list[str] = []
-    inside = False
-    for ln in lines:
-        if re.match(r"^api-keys\s*:", ln):
-            inside = True
+    except (OSError, UnicodeDecodeError) as e:
+        _log.warning("computer-control: ~/.cli-proxy-api/config.yaml ilegível: %s", e)
+        return []
+    section = ""
+    found: dict[str, list[str]] = {}
+    for i, ln in enumerate(lines):
+        if re.match(r"^[^\s#]", ln):
+            section = ln.split(":", 1)[0].strip()
+        head = re.match(r"^(\s*)api-keys\s*:\s*$", ln)
+        if not head or (head.group(1) and section != "access"):
             continue
-        if inside:
-            item = re.match(r"^\s*-\s*['\"]?([^'\"#\s]+)", ln)
-            if item:
-                keys.append(item.group(1))
-            elif ln.strip() and not ln.startswith((" ", "\t", "-")):
+        keys = []
+        for item in lines[i + 1:]:
+            if not item.strip() or item.lstrip().startswith("#"):
+                continue
+            # Item escalar só: `- name: x` é provedor (objeto), não chave de cliente.
+            entry = re.match(r"""^(\s*)-\s*(?:"([^"]*)"|'([^']*)'|([^#\s]+))\s*(#.*)?$""", item)
+            if not entry or len(entry.group(1)) < len(head.group(1)):
                 break
-    return keys
+            key = next(g for g in entry.groups()[1:4] if g is not None).strip()
+            if key:
+                keys.append(key)
+        if keys:
+            found.setdefault("access" if head.group(1) else "root", keys)
+    # Mesma ordem do Rust (`jev_aux::cliproxy_keys`): `access.api-keys` vence a raiz.
+    return found.get("access") or found.get("root") or []
 
 
 def _ssh_hosts() -> list[str]:
@@ -254,12 +266,17 @@ def _cliproxy_running() -> bool:
         return False
 
 
-JEV_VARS = ("TYPESAFE_API_KEY", "JEV_ENDPOINT", "JEV_MODEL")
+JEV_VARS = ("TYPESAFE_API_KEY", "JEV_ENDPOINT", "JEV_MODEL", "LLM_PROXY_URL", "LLM_MODEL", "LLM_EFFORT", "LLM_PROXY_KEY")
 
 
 def _jev_env() -> dict[str, str]:
+    """Jev e modelo auxiliar com os nomes que o MCP lê: os dois vêm da página Jev."""
     from app import runtime_config
-    return runtime_config.jev_destino_env()
+    aux = runtime_config.jev_aux()
+    llm = {"LLM_PROXY_URL": runtime_config.com_chat_completions(aux["jev_aux_base_url"]),
+           "LLM_MODEL": aux["jev_aux_modelo"], "LLM_EFFORT": aux["jev_aux_esforco"],
+           "LLM_PROXY_KEY": aux["jev_aux_api_key"]}
+    return {**runtime_config.jev_destino_env(), **{k: v for k, v in llm.items() if v}}
 
 
 def _with_jev(env: dict, jev: dict[str, str]) -> dict:
@@ -273,6 +290,32 @@ def _env_of(entry: dict, where: str) -> dict:
     return env
 
 
+LLM_VARS = ("LLM_PROXY_URL", "LLM_MODEL", "LLM_EFFORT", "LLM_PROXY_KEY")
+
+
+def _old_llm_file() -> Path:
+    return Path.home() / ".hangar" / "computer-use-llm-antigo.json"
+
+
+def _keep_old_llm(source: str, env: dict, new: dict[str, str]) -> None:
+    """O modelo do Computer Use que vai ser trocado pelo auxiliar fica guardado, só para o dono, um por
+    arquivo de origem: o de antes da primeira troca; as seguintes já são do auxiliar, no runtime-config."""
+    old = {k: str(env[k]) for k in LLM_VARS if env.get(k)}
+    if not old or all(new.get(k, "") == v for k, v in old.items()):
+        return
+    kept = _old_llm_file()
+    previous = _read(kept) if kept.exists() else {}
+    if source in previous:
+        return
+    kept.parent.mkdir(parents=True, exist_ok=True)
+    tmp = kept.with_name(f"{kept.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        json.dump({**previous, source: old}, fh, indent=2)
+    atomico.substituir(tmp, kept)
+    _log.warning("computer-control: o modelo do Computer Use virou o auxiliar do Jev; o anterior está em %s", kept)
+
+
 def sync_jev() -> None:
     """Leva a configuração do Jev ao MCP, ativo ou guardado, sem ligar nem mexer no resto do env."""
     jev = _jev_env()
@@ -282,6 +325,7 @@ def sync_jev() -> None:
         if entry is not None:
             env = _env_of(entry, str(path))
             if _with_jev(env, jev) != env:
+                _keep_old_llm(str(path), env, jev)
                 data = _read(path)
                 data["mcpServers"][NAME] = {**entry, "env": _with_jev(env, jev)}
                 pending.append((path, data))
@@ -289,6 +333,7 @@ def sync_jev() -> None:
     if parked:
         env = _env_of(parked, str(_parked_file()))
         if _with_jev(env, jev) != env:
+            _keep_old_llm(str(_parked_file()), env, jev)
             _park({**parked, "env": _with_jev(env, jev)})
     for path, data in pending:
         _write(path, data)
@@ -451,8 +496,8 @@ def state() -> dict:
     entry = _known_entry()
     env = (entry or {}).get("env") or {}
     project = str(_local_project(entry))
-    llm_key = env.get("LLM_PROXY_KEY", "")
     jev = _jev_env()
+    llm_key = jev.get("LLM_PROXY_KEY", "")
     jev_key = jev.get("TYPESAFE_API_KEY", "")
     cliproxy = _cliproxy_keys()
     targets = _targets(_where_targets(entry)[0])
@@ -475,9 +520,11 @@ def state() -> dict:
         "project_dir": project,
         "agent_config": env.get("HCC_AGENT_CONFIG", agents[0] if agents else ""),
         "agent_configs": agents,
-        "llm_url": env.get("LLM_PROXY_URL", PRESET_URL),
-        "llm_model": env.get("LLM_MODEL", ""),
-        "llm_effort": env.get("LLM_EFFORT", ""),
+        # Só leitura: o modelo auxiliar é o da página Jev.
+        "llm_from_jev_aux": True,
+        "llm_url": jev.get("LLM_PROXY_URL", ""),
+        "llm_model": jev.get("LLM_MODEL", ""),
+        "llm_effort": jev.get("LLM_EFFORT", ""),
         "llm_key_set": bool(llm_key),
         "llm_key_tail": _tail(llm_key),
         # Só leitura: o Jev se configura na página dele, e o MCP recebe a mesma configuração.
@@ -490,6 +537,26 @@ def state() -> dict:
                      "key_is_cliproxy": bool(llm_key) and llm_key in cliproxy},
         "files": [{"path": str(p), "enabled": _entry(p) is not None} for p in _config_files()],
     }
+
+
+def _reject_own_model(body: dict) -> None:
+    """Cliente antigo ainda manda o modelo do Computer Use: igual ao auxiliar passa, diferente
+    sumiria calado e por isso volta erro."""
+    from app import runtime_config
+    aux = runtime_config.jev_aux()
+    sent = {"llm_url": runtime_config.sem_chat_completions(str(body.get("llm_url") or "")),
+            "llm_model": str(body.get("llm_model") or "").strip(),
+            "llm_effort": str(body.get("llm_effort") or "").strip(),
+            "llm_key": str(body.get("llm_key") or "").strip()}
+    current = {"llm_url": aux["jev_aux_base_url"], "llm_model": aux["jev_aux_modelo"],
+               "llm_effort": aux["jev_aux_esforco"], "llm_key": aux["jev_aux_api_key"]}
+    moved = [k for k, v in sent.items() if v and v != current[k]]
+    if body.get("use_cliproxy_key") and aux["jev_aux_api_key"] not in _cliproxy_keys():
+        moved.append("use_cliproxy_key")
+    if moved:
+        raise ComputerControlError(400, "erro_computer_control_llm_movido",
+                                   "o modelo do Computer Use agora é o modelo auxiliar da página Jev",
+                                   fields=",".join(moved))
 
 
 def save(body: dict, *, installing: bool = False) -> dict:
@@ -540,29 +607,12 @@ def save(body: dict, *, installing: bool = False) -> dict:
     agent = str(body.get("agent_config") or "").strip()
     if not Path(agent).is_file():
         raise ComputerControlError(400, "erro_computer_control_agent", f"o arquivo {agent} não existe", file=agent)
-    url = str(body.get("llm_url") or "").strip()
-    if not re.match(r"^https?://", url):
-        raise ComputerControlError(400, "erro_computer_control_url",
-                                   "a URL do LLM precisa começar com http:// ou https://")
-    effort = str(body.get("llm_effort") or "")
-    if effort not in EFFORTS:
-        raise ComputerControlError(400, "erro_computer_control_effort", f"esforço inválido: {effort}", effort=effort)
-
+    _reject_own_model(body)
     previous = (_known_entry() or {}).get("env") or {}
-    llm_key = str(body.get("llm_key") or "")
-    if body.get("use_cliproxy_key"):
-        keys = _cliproxy_keys()
-        if not keys:
-            raise ComputerControlError(400, "erro_computer_control_cliproxy_key",
-                                       "o ~/.cli-proxy-api/config.yaml não tem nenhuma api-key")
-        llm_key = previous.get("LLM_PROXY_KEY") if previous.get("LLM_PROXY_KEY") in keys else keys[0]
-    llm_key = llm_key or previous.get("LLM_PROXY_KEY", "")
 
     # HCC_AGENT_CONFIG é o alvo padrão; HCC_AGENTS_DIR, a pasta de onde o MCP tira os outros.
     managed = {"HCC_AGENT_CONFIG": agent, "HCC_AGENTS_DIR": str(agents_dir),
-               "LLM_PROXY_URL": url,
-               "LLM_MODEL": str(body.get("llm_model") or "").strip(), "LLM_EFFORT": effort,
-               "LLM_PROXY_KEY": llm_key, **{k: "" for k in JEV_VARS}, **_jev_env()}
+               **{k: "" for k in JEV_VARS}, **_jev_env()}
     # O resto do env é de quem montou o MCP e fica como está (o VIRTUAL_ENV vazio de propósito
     # impede herdar o venv do processo que abre a sessão). Das variáveis desta tela, vazia = ausente.
     env = {k: v for k, v in previous.items() if k not in managed and k != "PYTHONPATH"}
@@ -699,28 +749,3 @@ def install() -> dict:
                    "use_cliproxy_key": s["cliproxy"]["key_is_cliproxy"]}, installing=True)
     ligado.update({key: s[key] for key in ("migration_skipped", "legacy_package", "detail")})
     return ligado
-
-
-def list_models(url: str, key: str | None, use_saved_key: bool, use_cliproxy_key: bool) -> list[str]:
-    """Modelos do endpoint (`GET .../v1/models` com Bearer), pra escolher em vez de digitar."""
-    if not re.match(r"^https?://", url or ""):
-        raise ComputerControlError(400, "erro_computer_control_url",
-                                   "a URL do LLM precisa começar com http:// ou https://")
-    if use_cliproxy_key:
-        keys = _cliproxy_keys()
-        key = keys[0] if keys else ""
-    elif use_saved_key or not key:
-        key = ((_known_entry() or {}).get("env") or {}).get("LLM_PROXY_KEY", "")
-    base = re.sub(r"/chat/completions/?$", "", url.rstrip("/"))
-    request = urllib.request.Request(f"{base}/models", headers={"Authorization": f"Bearer {key}"} if key else {})
-    try:
-        with urllib.request.urlopen(request, timeout=8) as r:
-            data = json.loads(r.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        raise ComputerControlError(502, "erro_computer_control_models",
-                                   f"o endpoint respondeu {e.code} ao listar modelos", error=f"HTTP {e.code}")
-    except (urllib.error.URLError, OSError, ValueError) as e:
-        raise ComputerControlError(502, "erro_computer_control_models", f"não consegui listar os modelos: {e}",
-                                   error=str(e))
-    items = data.get("data") if isinstance(data, dict) else None
-    return sorted({i["id"] for i in items or [] if isinstance(i, dict) and isinstance(i.get("id"), str)})

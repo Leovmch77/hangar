@@ -199,6 +199,21 @@ def test_ambiente_identifica_a_sessao_headless_para_os_scripts(ambiente, monkeyp
     assert "TMUX" not in env and "TMUX_PANE" not in env
 
 
+def test_identidade_vai_ao_shell_do_codex_por_set(ambiente):
+    # `set` vale com qualquer `inherit` do usuário (provado no codex-cli 0.160.1 com inherit="core");
+    # aqui fica o contrato: cada `-c` é TOML válido e cai em shell_environment_policy.set.<VAR>.
+    import tomllib
+    meta = _sidecar("cx-shell", ambiente)
+    argv = sem_terminal.argv(meta)
+    prefixo = "shell_environment_policy.set."
+    sets = {}
+    for flag, valor in zip(argv, argv[1:]):
+        if flag == "-c" and valor.startswith(prefixo):
+            chave, toml = valor.split("=", 1)
+            sets[chave.removeprefix(prefixo)] = tomllib.loads(f"v = {toml}")["v"]
+    assert sets == {"CP_SESSION_NAME": "cx-shell", "CP_SESSION_KEY": meta["key"], "HANGAR_CANO_KEY": meta["key"]}
+
+
 def test_api_le_permissao_headless_durante_o_turno(ambiente, monkeypatch):
     _sidecar("cx-permissao", ambiente)
 

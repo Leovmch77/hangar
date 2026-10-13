@@ -121,8 +121,9 @@ describe('servidor da sessão fixado no chat', () => {
   it('limpeza do ditado vai à máquina que transcreveu', async () => {
     selectServer('principal');
     resposta = { status: 200, corpo: { text: 'ok' } };
-    await relimparDitado('bruto', 'normal', NOTEBOOK);
+    await relimparDitado('bruto', 'normal', NOTEBOOK, { session: 'conversa' });
     expect(chamadas[0].url).toBe('http://n.local:8765/api/ditado/relimpar');
+    expect(JSON.parse(String(vi.mocked(globalThis.fetch).mock.calls[0][1]?.body))).toEqual({ texto: 'bruto', estilo: 'normal', session: 'conversa' });
   });
 
   it('leitura de arquivo da sessão não desiste em 8 s', async () => {

@@ -30,9 +30,11 @@ Only terminal sessions use the tmux pane for live **state** and input. Backend p
 - `difusor.py` — **uma fonte por chave, não uma por conexão**: monitor de estado,
   acumulador de estatísticas e git da listagem são compartilhados entre os SSE abertos.
   Por quê e o que quebrou antes: [`docs/decisoes/plataforma.md`](docs/decisoes/plataforma.md).
-- `codex_voice.py` + `CodexVoice.svelte` — voz do Codex no web, **beta e opt-in por
-  servidor** (`codex_voice_beta`, nasce `false`). Desligada, o botão não monta e o backend
-  recusa o WebSocket. Contrato completo:
+- Voz ao vivo — roda no `hangar-server` (`crates/hangar-server/src/voice/`), **beta e opt-in
+  por servidor** (`codex_voice_beta` no `runtime-config.json`, nasce `false`). Uma chamada por
+  servidor, só do dono (`/api/voice`; pelo Connect, a ponte `voicesock.py`); o áudio fica no
+  aparelho. Clientes: nativo (`desktop-native/src/voice/`) e PWA no celular
+  (`lib/liveVoice.ts`). Contrato: "Regras vigentes" de
   [`docs/decisoes/harnesses.md`](docs/decisoes/harnesses.md).
 - `adapters/kimi/` + `hooks/kimi_state_hook.py` + `kimi_hook_installer.py` — Kimi Code runs in the
   same tmux-native shape as Pi: TUI in the pane, chat from
@@ -234,7 +236,9 @@ registrado, fora do caminho de leitura, para não competir com o que vale hoje.
 - **Todo texto de interface vem de `m.<chave>()`** (Paraglide). `pt.json` e `en.json` no mesmo
   commit. Dado do servidor não vira chave. A trava `i18nGuard.test.ts` só desce. Rótulo de
   stub/fixture de teste que vive em árvore varrida pela trava é identificador (`abrir-term`),
-  nunca frase.
+  nunca frase. O Paraglide compila com `locale-modules` em todo lugar (scripts e `vite.config.ts`):
+  um módulo por mensagem deixava os testes 3 a 4 vezes mais lentos.
+  [Medição](docs/decisoes/frontend.md#paraglide-compila-um-módulo-por-idioma-11102026).
 - **Markdown NUNCA aparece cru.** Todo `.md` exibido passa por `renderMarkdown`. Um `<pre>` com
   `**` e `##` à mostra é bug, não estilo.
 - **Tela ou lista nova trata os quatro estados: carregando, vazio, erro e sucesso.**
@@ -367,11 +371,19 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
 - **Transcrição, organização do texto e leitura são capacidades separadas.** A tela não leva nome
   de provedor no rótulo da transcrição; endpoint próprio de áudio nunca compartilha sua chave com
   o LLM padrão, e controles de voz só aparecem dentro do provedor que os oferece.
+- **Organização do ditado nasce desligada e pertence ao Rust.** None conserva o STT; harness usa
+  conta e modelo de organização próprios da conversa de destino; API externa usa sua chave própria.
+  Falha conserva o cru e mostra a causa, sem reserva Python ou troca de conta/modelo. Referência das
+  três últimas mensagens é opt-in e congelada por tentativa. O executor mínimo não leva ferramentas,
+  plugins, skills, hooks, MCP nem instruções globais ou do projeto; Claude usa `--safe-mode` com
+  a autenticação original da conta de destino, inclusive a assinatura OAuth. O SDK Claude acrescenta
+  metadados de ambiente e identificação da conta; a captura não contém literalmente só o texto do Hangar.
+  Contrato e prova em [plataforma.md](docs/decisoes/plataforma.md#organização-opcional-do-ditado-no-rust).
 - **Transcrição é do Rust; Enviar encerra o ditado.** Configuração local aponta para executável e
   modelo instalados pelo usuário na máquina do servidor selecionado. O Hangar inicia e encerra
   o whisper.cpp em loopback, sem instalar componentes. Texto, imagem, arquivo e ditado passam
   pela mesma parada, esperando transcrição e organização antes de enviar. O Python conserva a
-  borda HTTP e a organização compartilhada, sem motor STT de reserva. Contrato e evidência em
+  borda HTTP e o transporte da organização, sem motor STT de reserva. Contrato e evidência em
   [plataforma.md](docs/decisoes/plataforma.md#transcrição-no-rust-e-envio-encerra-o-ditado).
 - **Cota tem cache em disco e respeita 429**: restart do backend não relê todas as contas, e
   fonte que levou 429 espera 10 min antes de insistir.
@@ -451,15 +463,28 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
 - **Uma configuração do Jev para navegador, orquestração, voz e Computer Use.** `jev_api_key`,
   `jev_endpoint` e `jev_model` no `runtime_config`; no ambiente `TYPESAFE_API_KEY`, `JEV_ENDPOINT`
   e `JEV_MODEL`, já resolvidos. Não existe chave do Jev só para o Computer Use. A regra do destino
-  (chave `sk-or-` ou endereço do OpenRouter) tem quatro cópias que mudam juntas: `destino_jev`,
-  `voice::jev::destination`, `jev_config` do `orq.py` e `jev_destination` de
-  `runtime/codex_launch.rs` (ambiente do Codex que o Rust lança). Evidência em
+  (chave `sk-or-` ou endereço do OpenRouter) tem cinco cópias que mudam juntas: `destino_jev`,
+  `destination` em `crates/hangar-server/src/voice/jev.rs`, `jev::destination` em
+  `desktop-native/src/app/server_config.rs`, `destinoDoJev` em `shell/jev_objetivo.cjs` (só o CLI
+  fora de sessão) e `jev_destination` de `runtime/codex_launch.rs` (ambiente do Codex que o Rust
+  lança). Precedência única: runtime-config acima do ambiente. O modelo auxiliar (texto e
+  imagem) também é um só, `jev_aux_*`, lido pelo navegador e pelo Computer Use. Evidência em
   [plataforma.md](docs/decisoes/plataforma.md#uma-configuração-do-jev-para-os-quatro-usos).
 - **Hangar Connect entra por `127.0.0.1:8768`, e nada que chega por ela é local.** O
   `ConnectPortGate` troca o cliente por `192.0.2.1` antes de qualquer checagem; nunca decidir
   "local" por cabeçalho. Cookie de login só autoriza `GET`/`HEAD` e, em https, só o
   `__Host-cp_token`: máquinas do Connect dividem o mesmo site. Evidência em
   [plataforma.md](docs/decisoes/plataforma.md#connect-a-porta-dele-nunca-é-local).
+- **Backend novo nasce no Rust (`crates/`), não em `backend/app/`.** Rota, ponte, poller ou
+  integração nova vai para o `hangar-server`. O Python só é tocado quando o Rust precisa de um fato
+  ou rota que ainda mora lá, ou nas portas que são dele (8766 do convidado, 8768 do Connect), e
+  nessas ele só repassa ao Rust, num sentido.
+- **Migrar do Python para o Rust é migrar o caminho inteiro.** Antes de dar a migração por feita,
+  procure nos dois lados todo chamador da responsabilidade (rotas `/internal/*`, `*_bridge`,
+  `to_thread` que esperam o Rust) e apague o que ficou no Python. O Rust nunca pergunta ao Python o
+  que ele mesmo já é dono, e o Python nunca repergunta ao Rust dentro de uma chamada que o Rust
+  fez: a volta Rust → Python → Rust prende o pool do Python e trava o backend na subida. Evidência em
+  [plataforma.md](docs/decisoes/plataforma.md#migrar-é-migrar-o-caminho-inteiro).
 - **A porta 8765 é do `hangar-server` (Rust); o Python escuta atrás, numa porta de loopback.**
   Ele atende `/history` e `/events` de Claude/Codex, `/api/costs`, `/api/uso`, `/api/cotacao` e o
   custo de sessão Codex com o token do dono, e o terminal real do dono (só pelo

@@ -6,7 +6,7 @@
   import SegmentedPicker from '../SegmentedPicker.svelte';
   import { lerMaosLivres, setMaosLivres } from '../../lib/maosLivres';
   import { ditadoEstilo } from '../../lib/ditadoEstilo.svelte';
-  import { estilosDitado, parseTranscriptionProviders, type EstiloDitado } from '@hangar/core';
+  import { dictationOrganizationOf, estilosDitado, parseTranscriptionProviders, type EstiloDitado } from '@hangar/core';
   import TranscriptionProviders from './TranscriptionProviders.svelte';
   import { listarVozesTts, saldoTts, type TtsVoz } from '@hangar/core';
   import { ttsPlayer } from '../../lib/ttsPlayer.svelte';
@@ -312,8 +312,12 @@
             <span class="rot">{m.voz_estilo()} <EscopoChip escopo="servidor" /></span>
             <span class="ajuda">{m.voz_estilo_ajuda()}</span>
           </div>
-          <SegmentedPicker value={ditadoEstilo.valor} options={OPCOES_ESTILO}
-            ariaLabel={m.voz_estilo()} onPick={(v) => void escolherEstilo(v)} />
+          {#if dictationOrganizationOf(store.campos) === 'off'}
+            <span class="ajuda">{m.ditado_organizacao_desligada()}</span>
+          {:else}
+            <SegmentedPicker value={ditadoEstilo.valor} options={OPCOES_ESTILO}
+              ariaLabel={m.voz_estilo()} onPick={(v) => void escolherEstilo(v)} />
+          {/if}
         </div>
         {#if estiloErro}<p class="aviso erro">{estiloErro}</p>{/if}
 

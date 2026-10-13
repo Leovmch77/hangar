@@ -1,21 +1,27 @@
 import { useEffect, useState } from 'react';
 import { estilosDitado } from '@hangar/core';
+import type { Server } from '@hangar/core';
 import * as m from '../../paraglide/messages';
 import { useDitadoEstiloStore } from './ditadoEstiloStore';
 import { PillMenu } from '../pills/PillMenu';
+import { useDictationOrganization } from './dictationOrganization';
 
 // Rótulo do estilo vigente: é o que a pessoa precisa ler antes de falar.
-export function useDictationStyleLabel(): string {
+export function useDictationStyleLabel(server?: Server | null): string {
   const valor = useDitadoEstiloStore((s) => s.valor);
+  const organization = useDictationOrganization(server);
   // carrega na montagem
   useEffect(() => {
     void useDitadoEstiloStore.getState().carregar();
   }, []);
+  if (organization === 'off') return m.ditado_organizacao_desligada_rotulo();
   return estilosDitado().find((e) => e.valor === valor)?.rotulo ?? m.ditado_estilo_prosa();
 }
 
 // Seletor do estilo do ditado sem gatilho próprio: no composer ele abre pelo toque longo no microfone.
-export function DictationStyleMenu({ open, onClose }: { open: boolean; onClose: () => void }) {
+// Com a organização desligada no servidor, mostra só o aviso: todo estilo voltaria cru.
+export function DictationStyleMenu({ open, onClose, server }: { open: boolean; onClose: () => void; server?: Server | null }) {
+  const organization = useDictationOrganization(server, open);
   const valor = useDitadoEstiloStore((s) => s.valor);
   const revalidar = useDitadoEstiloStore((s) => s.revalidar);
   const trocar = useDitadoEstiloStore((s) => s.trocar);
@@ -31,7 +37,8 @@ export function DictationStyleMenu({ open, onClose }: { open: boolean; onClose: 
     void revalidar();
   }, [open, revalidar]);
 
-  const lista = estilosDitado();
+  const off = organization === 'off';
+  const lista = off ? [] : estilosDitado();
   const items = lista.map((e) => ({
     label: e.rotulo,
     hint: e.hint,
@@ -64,6 +71,7 @@ export function DictationStyleMenu({ open, onClose }: { open: boolean; onClose: 
       onSelect={handleSelect}
       error={erro}
       title={m.ditado_estilo_titulo()}
+      emptyText={off ? m.ditado_organizacao_desligada() : undefined}
     />
   );
 }

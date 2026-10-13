@@ -3,6 +3,7 @@ pub mod accounts;
 pub mod auth;
 pub mod config;
 pub mod claude_customizations;
+pub mod jev_aux;
 pub mod claude_defaults;
 pub mod presence;
 pub mod watchdog;
@@ -33,17 +34,20 @@ pub mod terminal_input;
 pub mod permission_control;
 pub mod terminal_facts;
 mod terminal_process;
+mod thumbnail;
 pub mod terminal_routes;
 pub mod transcript;
 pub mod transcription;
+pub mod dictation;
 pub mod workspace_routes;
 pub mod uploads;
+pub mod voice;
 pub mod worktree_routes;
 mod warn_limit;
 
 /// Versão do contrato com o Python (rotas `/internal`, eventos do side-events, ambiente). O
 /// Python (`RUST_SERVER_PROTOCOL`) recusa um binário de outra versão e atende sozinho.
-pub const INTERNAL_PROTOCOL: u32 = 52;
+pub const INTERNAL_PROTOCOL: u32 = 57;
 
 /// Todo socket TCP do servidor, aceito ou aberto. Sem isso o Nagle segura o último pedaço de uma
 /// resposta em pedaços até o ACK atrasado do outro lado; o asyncio do Python já liga sozinho.
@@ -102,7 +106,7 @@ pub async fn serve_until_with_state(
         let private = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let port = private.local_addr()?.port();
         let registry = std::sync::Arc::new(runtime::gateway::RuntimeRegistry::new(cfg.upstream,
-            cfg.internal_secret.clone(),instance.clone()).with_mods(state.mods.clone())
+            cfg.internal_secret.clone(),instance.clone()).with_mods(state.mods.clone()).with_accounts(state.accounts.clone())
             .with_interactions(state.interactions.clone()).with_plugin(state.plugin.clone())
             .with_terminal_states(state.list.published.clone()).with_terms(state.term.clone())
             .with_permissions(state.state.permissions.clone()));

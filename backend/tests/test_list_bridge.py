@@ -1,4 +1,5 @@
 """Ponte da lista: erro levanta, nunca vira lista vazia."""
+import asyncio
 import json
 import socket
 import threading
@@ -84,6 +85,22 @@ def test_list_bridge_off_or_down_raises():
         assert down.value.code == "list_bridge_unavailable"
     finally:
         list_bridge.configure(None, None)
+
+
+@pytest.mark.asyncio
+async def test_list_bridge_on_the_loop_is_logged_once_and_still_runs(bridge, monkeypatch):
+    from app import diag
+    logged = []
+    monkeypatch.setattr(diag, "registrar", lambda evento, nivel, **campos: logged.append((evento, campos["codigo"])))
+    monkeypatch.setattr(list_bridge, "_on_loop_seen", set())
+    bridge["reply"] = {"ok": True, "result": None}
+    for _ in range(2):
+        list_bridge.invalidate()
+    assert logged == [("lista.ponte_no_laco", "list.invalidate")]
+    list_bridge.invalidate()
+    await asyncio.to_thread(list_bridge.invalidate)
+    assert logged == [("lista.ponte_no_laco", "list.invalidate")] * 2
+    assert len(bridge["requests"]) == 4
 
 
 def test_dirs_env_has_every_folder():

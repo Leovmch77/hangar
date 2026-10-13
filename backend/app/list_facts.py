@@ -8,9 +8,12 @@ import asyncio
 import logging
 
 from app import guest_users, registry, runtime_config, share_store, sse
+from app.internal_pool import internal_thread
 from app.models import SessionInfo
 
 _log = logging.getLogger("hangar.list")
+# Uma linha de log por sessão e motivo: os fatos são pedidos a cada 1,5 s.
+_problema_avisado: set[tuple[str, str]] = set()
 
 _OTHERS = frozenset({"codex", "pi", "omp", "kimi"})
 _STATE_FIELDS = ("state", "label", "question", "options", "problema", "status_line", "pending_questions",
@@ -39,7 +42,7 @@ async def compute(rows: list[dict], owner_clients: int, pane_pids: dict[str, int
         # O código de hoje, só sobre as linhas que o Rust não classifica.
         await sse._list_registry.list_with_state(others, state_only=True)
     # Tudo o que lê disco numa ida só ao threadpool.
-    out = await asyncio.to_thread(_files, infos, others, pane_pids)
+    out = await internal_thread(_files, infos, others, pane_pids)
     # No laço: `nav_pendente`/`nav_confirmar` mexem no mesmo mapa daqui, sem trava.
     out["nav"] = dict(sse.nav_vivos())
     loop = asyncio.get_running_loop()
@@ -60,7 +63,7 @@ async def _shadow(infos: list[SessionInfo], pane_pids: dict[str, int]) -> dict:
     served = sse.recent_list(_SHADOW_MAX_AGE)
     by_name = {i.name: i for i in served or ()}
     others = [by_name[i.name] for i in infos if i.provider in _OTHERS and i.name in by_name]
-    out = await asyncio.to_thread(_files, infos, [], pane_pids)
+    out = await internal_thread(_files, infos, [], pane_pids)
     out["states"] = {i.name: {f: getattr(i, f) for f in (*_STATE_FIELDS, "conta")} for i in others}
     # `nav_vivos` grava ao vencer marcador; a sombra não serve navegador.
     out["nav"] = {}
@@ -172,7 +175,15 @@ def _problems(infos: list[SessionInfo]) -> dict[str, str]:
     for info in infos:
         if info.provider != "claude":
             continue
-        problem = hl.problema_de(info.name) if info.headless else runtime_problem(info.name)
+        try:
+            problem = hl.problema_de(info.name) if info.headless else runtime_problem(info.name)
+        except RuntimeError as exc:
+            # Sem fato novo só para ela (derrubar os fatos de todas tirava a lista do ar), mas com rastro:
+            # um RuntimeError de outra origem não pode esconder o problema da sessão calado.
+            if (info.name, str(exc)) not in _problema_avisado:
+                _problema_avisado.add((info.name, str(exc)))
+                _log.warning("lista: problema de %s indisponível: %s", info.name, exc)
+            continue
         if problem:
             out[info.name] = problem[0]
     return out

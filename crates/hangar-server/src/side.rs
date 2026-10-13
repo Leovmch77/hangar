@@ -96,6 +96,8 @@ const ASK_QUESTION: usize = 2;
 const PLUGIN_UI: usize = 7;
 /// Mesmos tetos do Python (`plugin_bridge.TOASTS_KEPT`, `TOAST_MAX_MS`).
 pub(crate) const TOASTS_KEPT: usize = 20;
+/// Entradas da fila que o retrato guarda para quem abre o chat depois.
+const QUEUE_KEPT: usize = 32;
 pub(crate) const TOAST_MAX_MS: f64 = 5.0 * 60.0 * 1000.0;
 /// Tempo que resta a um aviso: o 0 seria "sem prazo" para o app, então quem está no último
 /// milissegundo ainda leva 1.
@@ -222,6 +224,13 @@ impl SideCache {
         match self.queue.iter_mut().find(|(k, _)| *k == id) {
             Some(slot) => slot.1 = frame.clone(),
             None => self.queue.push((id, frame.clone())),
+        }
+        // A conexão interna só renova a fila ao religar: num chat aberto por horas ela crescia e cada
+        // aparelho novo recebia todas as confirmações antigas. Sai primeiro a confirmada mais velha;
+        // a pendente só sai se nenhuma confirmada sobrar.
+        if self.queue.len() > QUEUE_KEPT {
+            let i = self.queue.iter().position(|(_, f)| f.starts_with(b"event: queue_confirmed")).unwrap_or(0);
+            self.queue.remove(i);
         }
     }
 
@@ -884,18 +893,14 @@ async fn watch_commits(hub: Weak<Hub>, mut rx: broadcast::Receiver<Out>) {
 /// prévia logo depois de abrir o chat. Só preenche o vazio; a resposta ao vivo vence.
 async fn seed_committed(hub: &Weak<Hub>, only_if_empty: bool) {
     let Some((binding, generation)) = hub.upgrade().and_then(|h| h.bound.lock().unwrap().as_ref().map(|b| (b.binding.clone(), b.generation))) else { return };
-    let last = tokio::task::spawn_blocking(move || {
-        let size = match std::fs::metadata(&binding.jsonl) {
-            Ok(m) => m.len(),
-            Err(e) => {
-                if e.kind() != std::io::ErrorKind::NotFound && crate::warn_limit::allow(None, "state_committed_seed") {
-                    tracing::warn!(code = "state_committed_seed", kind = ?e.kind(), "estado: transcript ilegível; a prévia pode repetir a resposta gravada");
-                }
-                return None;
+    let last = tokio::task::spawn_blocking(move || match tail::last_committed(&binding.jsonl, binding.provider) {
+        Ok(text) => text,
+        Err(e) => {
+            if e.kind() != std::io::ErrorKind::NotFound && crate::warn_limit::allow(None, "state_committed_seed") {
+                tracing::warn!(code = "state_committed_seed", kind = ?e.kind(), "estado: transcript ilegível; a prévia pode repetir a resposta gravada");
             }
-        };
-        let frames = tail::backfill(&binding.jsonl, &binding.key, binding.provider, None, size);
-        frames.iter().rev().find_map(|f| crate::state::preview::committed_from_frame(f))
+            None
+        }
     })
     .await;
     match last {
@@ -1175,6 +1180,20 @@ mod tests {
         assert!(r[0].starts_with("event: state") && r[0].contains("idle"));
         assert!(r[1].starts_with("event: plugin_ui") && r[1].contains("Box"));
         assert!(r[2].starts_with("event: queue_confirmed"));
+    }
+
+    #[test]
+    fn queue_snapshot_drops_old_confirmations_first() {
+        let mut c = SideCache::default();
+        let rec = |c: &mut SideCache, e: &str, d: &str| c.record(e, d, &sse_frame(e, d, None), true);
+        rec(&mut c, "message", "{\"id\":\"queued-pending\"}");
+        for i in 0..40 {
+            rec(&mut c, "message", &format!("{{\"id\":\"queued-{i}\"}}"));
+            rec(&mut c, "queue_confirmed", &format!("{{\"id\":\"queued-{i}\",\"queued_confirmed\":true}}"));
+        }
+        assert_eq!(c.queue.len(), QUEUE_KEPT);
+        assert_eq!(c.queue[0].0, "queued-pending");
+        assert_eq!(c.queue.last().unwrap().0, "queued-39");
     }
 
     #[test]
