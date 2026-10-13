@@ -739,8 +739,8 @@ da TUI. A fronteira com o Python está em
   ↔ sem terminal e atende `/recarregar` do começo ao fim, sem devolver a posse ao Python (o
   `hand-over`/`python_client_released` saiu). Argv vai só com `--cwd`/`--resume` + `CP_SESSION_KEY`
   e o `hangar-codex-tui` completa pelo sidecar, para não haver segunda cópia do comando do
-  lançador. O ambiente do Jev é montado pelo Rust (`codex_launch::jev_env`), a quarta cópia da regra
-  do destino. Recibo da troca usa `call_id` determinístico (`codex-life:<geração>:<digest>`), para
+  lançador. O ambiente do Jev é montado pelo Rust (`codex_launch::jev_env`, que decide por
+  `codex_launch::jev_destination`), uma das cinco cópias da regra do destino (lista em `plataforma.md`). Recibo da troca usa `call_id` determinístico (`codex-life:<geração>:<digest>`), para
   A→B→A não reaproveitar o recibo antigo. Trocar de conta de um Codex aberto não existe e não foi
   criado; importar do Claude abre um Codex novo e segue na abertura Python.
 - **Modo desconhecido recusa.** O `stored_mode` transformava texto desconhecido em Full Access; agora
@@ -3351,9 +3351,11 @@ Descartados: ferramentas de leitura restritas à pasta e desligar a pesquisa com
   conta. Troca por clique continua calada. Pedido do Jefferson: trocar pode ser só para ir até lá.
 
 **Destino do Jev: uma regra para todos os usos.**
-- A regra está em quatro cópias que mudam juntas: `runtime_config.destino_jev` (Python),
+- A regra está em cinco cópias que mudam juntas: `runtime_config.destino_jev` (Python),
   `crates/hangar-server/src/voice/jev.rs` `destination` (voz no servidor),
-  `desktop-native/src/app/server_config.rs` `jev::destination` (tela do nativo) e `jev_config` (orq).
+  `desktop-native/src/app/server_config.rs` `jev::destination` (tela do nativo),
+  `destinoDoJev` do `shell/jev_objetivo.cjs` (CLI fora de sessão) e
+  `crates/hangar-server/src/runtime/codex_launch.rs` `jev_destination` (ambiente do Codex que o Rust lança).
 - Vai ao OpenRouter quando o endereço é dele ou, sem endereço, quando a chave é dele (`sk-or-`).
   - Modelo vazio vira `typesafe/jev-1.13-20260917`, porque o OpenRouter recusa o nome da TypeSafe.
   - `typesafe/jev-latest` ganha o `~`: só `~typesafe/jev-latest` existe lá, e sem o til ele responde
