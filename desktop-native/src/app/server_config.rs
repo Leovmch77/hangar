@@ -5,8 +5,8 @@
 use super::*;
 use super::device::Remote;
 use super::settings::{segments_with_hints, settings_box, Disclosure, Page};
-use gpui_kit::component::{select::{Select, SelectEvent, SelectState}, searchable_list::SearchableListItem, slider::{Slider, SliderEvent, SliderState},
-    switch::Switch, tooltip::Tooltip};
+use gpui_kit::component::{select::{Select, SelectEvent, SelectState}, searchable_list::{SearchableListDelegate, SearchableListItem},
+    slider::{Slider, SliderEvent, SliderState}, switch::Switch, tooltip::Tooltip, combobox::{Combobox, ComboboxEvent, ComboboxState}, IndexPath};
 use serde_json::Map;
 
 #[derive(Clone, Copy, PartialEq)]
@@ -88,6 +88,8 @@ const TUNES: [Tune; 4] = [
 ];
 
 struct Field { key: &'static str, label: &'static str, help: &'static str, icon: IconName, kind: Kind, page: Page }
+
+const AUX_MODEL: &str = "jev_aux_modelo";
 
 /// Na ordem do `CAMPOS` do web, filtrada por página.
 const FIELDS: [Field; 33] = [
@@ -294,7 +296,8 @@ pub(in crate::app) struct ServerConfig {
     /// Campos cuja edição saiu porque outra tela gravou por cima depois dela.
     replaced: Vec<&'static str>,
     aux_models: Remote<Vec<String>>,
-    aux_models_scroll: ScrollHandle,
+    /// Campo Modelo do auxiliar: lista com busca que também aceita texto livre.
+    model_box: Option<Entity<ComboboxState<ModelList>>>,
     /// Computer Use ligado no servidor, só para a linha "Onde vale".
     computer_on: Remote<bool>,
     /// Havia chave da ElevenLabs e comando local no último olhar: a seção de cada um abre quando isso passa a valer.
@@ -339,6 +342,56 @@ struct Quiet {
 
 impl Quiet {
     fn editable(&self) -> bool { self.confirmed && !self.load.loading && !self.saving }
+}
+
+/// Linha da lista de modelos: um modelo do provedor, ou o texto digitado (modelo fora da lista).
+#[derive(Clone)]
+struct ModelItem { id: String, title: SharedString }
+
+impl SearchableListItem for ModelItem {
+    type Value = String;
+    fn title(&self) -> SharedString { self.title.clone() }
+    fn value(&self) -> &String { &self.id }
+}
+
+/// Modelos do provedor filtrados pelo trecho digitado, sem diferenciar maiúscula. O digitado que não é um modelo da lista
+/// vem primeiro, para valer como modelo próprio.
+#[derive(Default)]
+struct ModelList { all: Vec<String>, shown: Vec<ModelItem> }
+
+impl ModelList {
+    fn new(all: Vec<String>, query: &str) -> Self {
+        let mut list = Self { all, shown: Vec::new() };
+        list.filter(query);
+        list
+    }
+
+    fn filter(&mut self, query: &str) {
+        let query = query.trim();
+        let low = query.to_lowercase();
+        let hits = self.all.iter().filter(|m| m.to_lowercase().contains(&low)).map(|m| ModelItem { id: m.clone(), title: m.clone().into() });
+        let mut shown = Vec::new();
+        if !query.is_empty() && !self.all.iter().any(|m| m == query) {
+            let key = if !self.all.is_empty() && !self.all.iter().any(|m| m.to_lowercase().contains(&low)) { "server_jev_aux_no_match_use" }
+                else { "server_jev_aux_use_typed" };
+            shown.push(ModelItem { id: query.to_owned(), title: tr(key).replace("{model}", query).into() });
+        }
+        shown.extend(hits);
+        self.shown = shown;
+    }
+}
+
+impl SearchableListDelegate for ModelList {
+    type Item = ModelItem;
+    fn items_count(&self, _: usize) -> usize { self.shown.len() }
+    fn item(&self, ix: IndexPath) -> Option<&ModelItem> { self.shown.get(ix.row) }
+    fn position<V>(&self, value: &V) -> Option<IndexPath> where ModelItem: SearchableListItem<Value = V>, V: PartialEq {
+        self.shown.iter().position(|m| m.value() == value).map(|ix| IndexPath::default().row(ix))
+    }
+    fn perform_search(&mut self, query: &str, _: &mut Window, _: &mut App) -> Task<()> {
+        self.filter(query);
+        Task::ready(())
+    }
 }
 
 #[derive(Clone, serde::Deserialize)]
@@ -740,6 +793,27 @@ impl Hangar {
         cx.notify();
     }
 
+    /// A lista do campo Modelo segue a última busca, refiltrada pelo que já está digitado nela.
+    fn refresh_model_box(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(model_box) = self.server_config.model_box.clone() else { return };
+        let all = self.server_config.aux_models.ok().cloned().unwrap_or_default();
+        model_box.update(cx, |state, cx| {
+            let query = state.query(cx);
+            state.set_items(ModelList::new(all, &query), window, cx);
+            cx.notify();
+        });
+    }
+
+    /// Abrir o campo Modelo busca a lista quando ainda não há uma para o endereço e a chave de agora. Depois de um erro
+    /// só o clique tenta de novo: as teclas de dentro da busca não podem disparar uma busca a cada toque.
+    fn ensure_aux_models(&mut self, retry: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let s = &self.server_config;
+        let failed = matches!(s.aux_models.value, Some(Err(_)));
+        if s.aux_models.loading || s.aux_models.ok().is_some() || (failed && !retry) { return; }
+        self.refresh_model_box(window, cx);
+        self.list_aux_models(cx);
+    }
+
     /// Recusa das rotas do auxiliar pela frase do app; o 502 traz a do provedor no `detail`.
     fn aux_failure(error: &Failure) -> String {
         match error.code.as_deref() {
@@ -1093,7 +1167,7 @@ impl Hangar {
                     value.get("models").and_then(Value::as_array).ok_or_else(|| tr("invalid_response"))?
                         .iter().map(|m| m.as_str().map(str::to_owned).ok_or_else(|| tr("invalid_response"))).collect()
                 });
-                self.server_config.aux_models.finish(seq, models);
+                if self.server_config.aux_models.finish(seq, models) { self.refresh_model_box(window, cx); }
             }
             ServerConfigReply::DictationModels(seq,target,result)=>{
                 let current=self.selected.as_ref().zip(self.session_api()).map(|(session,api)|format!("{}|{}|{:?}|{:?}",api.identity(),session.name,session.lifecycle_id,session.conta));
@@ -1130,7 +1204,7 @@ impl Hangar {
     /// Campos de texto com o valor atual. Criados na primeira leitura; nas seguintes só o que não está no rascunho muda.
     fn fill_config_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.server_config.inputs.is_empty() {
-            for field in FIELDS.iter().filter(|f| matches!(f.kind, Kind::Number(_) | Kind::Text | Kind::Secret)) {
+            for field in FIELDS.iter().filter(|f| matches!(f.kind, Kind::Number(_) | Kind::Text | Kind::Secret) && f.key != AUX_MODEL) {
                 let (key, kind) = (field.key, field.kind);
                 let input = cx.new(|cx| match kind {
                     // Como o `type="number" min="0"` do web: só dígitos entram.
@@ -1154,6 +1228,19 @@ impl Hangar {
                 self.server_config._subscriptions.push(sub);
                 self.server_config.inputs.push((key, input));
             }
+            let model_box = cx.new(|cx| ComboboxState::new(ModelList::default(), vec![], window, cx).searchable(true));
+            // Só a escolha conta: o `Confirm` também sai ao fechar sem escolher, com a seleção antiga.
+            // A seleção sai logo depois: o valor mora no rascunho, e escolher de novo o mesmo modelo (depois de um
+            // desfazer) tem que voltar a valer.
+            let sub = cx.subscribe_in(&model_box, window, |this: &mut Hangar, model_box, event: &ComboboxEvent<ModelList>, window, cx| {
+                let ComboboxEvent::Change(values) = event else { return };
+                let Some(model) = values.first() else { return };
+                this.set_jev_text(AUX_MODEL, model, window, cx);
+                model_box.update(cx, |state, cx| state.clear_selection(cx));
+                cx.notify();
+            });
+            self.server_config._subscriptions.push(sub);
+            self.server_config.model_box = Some(model_box);
             let root = cx.new(|cx| InputState::new(window, cx).placeholder(tr("server_root_placeholder")));
             let sub = cx.subscribe_in(&root, window, |this: &mut Hangar, _, event: &InputEvent, window, cx| match event {
                 InputEvent::PressEnter { .. } => this.add_typed_root(window, cx),
@@ -1476,42 +1563,53 @@ impl Hangar {
             // Servidor sem a rota (mais antigo) ou sem resposta: o atalho só não aparece.
             Some(Err(_)) | None => None,
         };
-        let models = &s.aux_models;
-        let can_list = !text_of(&s.current("jev_aux_base_url")).trim().is_empty();
-        let mut list = line()
-            .child(div().flex().items_center().gap(px(10.))
-                .child(Button::new("jev-aux-list-models").outline().small()
-                    .label(tr(if models.loading { "server_jev_aux_listing" } else { "server_jev_aux_list_models" }))
-                    .loading(models.loading).disabled(models.loading || !can_list)
-                    .on_click(cx.listener(|this, _, _, cx| this.list_aux_models(cx))))
-                .when(!can_list, |el| el.child(muted(tr("server_jev_aux_list_needs")))));
-        list = match &models.value {
-            Some(Ok(found)) if found.is_empty() => list.child(div().id("jev-aux-models-empty").role(Role::Status).text_size(px(12.5))
-                .text_color(theme::warning()).whitespace_normal().child(tr("server_jev_aux_models_empty"))),
-            Some(Ok(found)) => {
-                let chosen = text_of(&s.current("jev_aux_modelo"));
-                list.child(div().id("jev-aux-models-found").role(Role::Status).text_size(px(12.5)).text_color(theme::muted())
-                        .child(tr("server_jev_aux_models_found").replace("{n}", &found.len().to_string())))
-                    .child(scrolled("jev-aux-models", &s.aux_models_scroll, 180., settings_box().children(found.iter().map(|model| {
-                        let pick = model.clone();
-                        Button::new(SharedString::from(format!("jev-aux-model-{model}"))).ghost().small().w_full().label(model.clone())
-                            .selected(*model == chosen)
-                            .on_click(cx.listener(move |this, _, window, cx| { this.set_jev_text("jev_aux_modelo", &pick, window, cx); cx.notify(); }))
-                    }))))
-            }
-            Some(Err(error)) => list.child(div().id("jev-aux-models-error").role(Role::Alert).text_size(px(12.5)).text_color(theme::danger())
-                .whitespace_normal().child(error.clone())),
-            None => list,
-        };
+        let model = self.render_model_box(cx);
         settings_box()
             .child(div().px_4().pt(px(14.)).pb(px(4.)).text_base().font_weight(FontWeight::SEMIBOLD).child(tr("server_jev_aux_title")))
             .child(div().px_4().pb(px(10.)).child(muted(tr("server_jev_aux_help"))))
             .children(proxy)
             .child(self.config_row(field("jev_aux_base_url"), cx))
             .child(self.config_row(field("jev_aux_api_key"), cx))
-            .child(self.config_row(field("jev_aux_modelo"), cx))
-            .child(list)
+            .child(self.config_row_with(field(AUX_MODEL), model, cx))
             .child(self.config_row(field("jev_aux_esforco"), cx))
+    }
+
+    /// O campo Modelo: o valor atual no gatilho; aberto, a lista do provedor com busca, e os estados dela dentro.
+    fn render_model_box(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let s = &self.server_config;
+        let model_box = s.model_box.clone()?;
+        let error = s.fields.get(AUX_MODEL).and_then(|f| f.get("erro")).and_then(Value::as_str).filter(|e| !e.is_empty());
+        let off = !s.fields.contains_key(AUX_MODEL) || error.is_some();
+        let current = text_of(&s.current(AUX_MODEL));
+        let filled = !current.trim().is_empty();
+        let models = &s.aux_models;
+        let status: Option<(String, bool)> = if models.loading { Some((tr("server_jev_aux_searching"), false)) }
+            else if let Some(Err(error)) = &models.value { Some((error.clone(), true)) } else { None };
+        let empty = if text_of(&s.current("jev_aux_base_url")).trim().is_empty() { tr("server_jev_aux_list_needs") }
+            else if matches!(models.value, Some(Ok(_))) { tr("server_jev_aux_models_empty") } else { String::new() };
+        let mut combobox = Combobox::new(&model_box).small().w_full().disabled(off).menu_max_h(px(320.))
+            .search_placeholder(tr("server_jev_aux_search_placeholder"))
+            .render_trigger(move |_, _, _| {
+                let text = if current.trim().is_empty() { tr("server_jev_aux_model_placeholder") } else { current.clone() };
+                div().flex_1().min_w_0().truncate().child(text)
+            })
+            .empty(move |_, _| div().py_4().px_3().text_size(px(12.5)).text_color(theme::muted()).whitespace_normal().child(empty.clone()));
+        if let Some((text, error)) = status {
+            combobox = combobox.footer(move |_, _| div().px_3().py_2().text_size(px(12.5)).whitespace_normal()
+                .text_color(if error { theme::danger() } else { theme::muted() }).child(text.clone()));
+        }
+        Some(div().id("jev-aux-model").mt(px(8.)).w_full()
+            .flex().items_center().gap(px(8.))
+            .on_any_mouse_down(cx.listener(|this, _: &MouseDownEvent, window, cx| this.ensure_aux_models(true, window, cx)))
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if matches!(event.keystroke.key.as_str(), "enter" | "down") { this.ensure_aux_models(false, window, cx); }
+                cx.propagate();
+            }))
+            .child(div().flex_1().min_w_0().child(combobox))
+            // A lista só escolhe; deixar sem modelo é este botão.
+            .when(filled && !off, |el| el.child(Button::new("jev-aux-model-clear").ghost().xsmall().label(tr("server_jev_aux_model_clear"))
+                .on_click(cx.listener(|this, _, window, cx| { this.set_jev_text(AUX_MODEL, "", window, cx); cx.notify(); }))))
+            .into_any_element())
     }
 
     /// Grava um texto do Jev no rascunho e mostra no campo.
@@ -1549,7 +1647,10 @@ impl Hangar {
     }
 
     /// A linha de cada campo, no desenho do `row` das outras páginas, com as etiquetas ao lado do título.
-    fn config_row(&self, field: &Field, cx: &mut Context<Self>) -> Div {
+    fn config_row(&self, field: &Field, cx: &mut Context<Self>) -> Div { self.config_row_with(field, None, cx) }
+
+    /// `custom` toma o lugar do campo de texto embaixo da ajuda.
+    fn config_row_with(&self, field: &Field, custom: Option<AnyElement>, cx: &mut Context<Self>) -> Div {
         let s = &self.server_config;
         let key = field.key;
         let input = s.inputs.iter().find(|(k, _)| *k == key).map(|(_, i)| i.clone());
@@ -1572,7 +1673,7 @@ impl Hangar {
             Kind::Text | Kind::Secret => None,
         };
         let removing = s.removing(key);
-        let below = matches!(field.kind, Kind::Text | Kind::Secret).then_some(input).flatten().map(|i| {
+        let below = custom.or_else(|| matches!(field.kind, Kind::Text | Kind::Secret).then_some(input).flatten().map(|i| {
             let mask = (field.kind == Kind::Secret && !removing).then(|| s.secret_mask(key)).flatten();
             div().mt(px(8.)).flex().items_center().gap(px(10.))
                 .child(div().flex_1().min_w_0().child(Input::new(&i).small().disabled(off).aria_label(tr(field.label))))
@@ -1580,7 +1681,8 @@ impl Hangar {
                     .text_size(px(12.5)).text_color(theme::muted())
                     .child(div().font_family(theme::MONO).child(mask)).child(tr("server_secret_set"))
                     .tooltip(|window, cx| Tooltip::new(tr("server_secret_no_return")).build(window, cx))))
-        });
+                .into_any_element()
+        }));
         let open = s.why.contains(&key);
         let this = cx.entity().downgrade();
         let verdict = VERDICTS.iter().find(|(k, ..)| *k == key).map(|&(_, verdict, why)| div().flex().flex_col().gap(px(6.))
@@ -2368,6 +2470,22 @@ mod tests {
         s.draft.rebase(&s.fields);
         s.draft.drop_stale(&read("gpt-6-luna", 600));
         assert_eq!(s.draft.get("stall_seconds"), Some(&json!("700")), "mexido durante o Salvar sobrevive à leitura seguinte");
+    }
+
+    #[test]
+    fn model_list_filters_by_substring_and_keeps_typed_text() {
+        let all = vec!["openai/gpt-6-luna".to_owned(), "anthropic/claude-opus-5-5".to_owned(), "GPT-OSS".to_owned()];
+        use super::ModelList;
+        let ids = |l: &ModelList| l.shown.iter().map(|m| m.id.clone()).collect::<Vec<_>>();
+        let list = ModelList::new(all.clone(), "");
+        assert_eq!(ids(&list), all, "sem filtro, a lista inteira, sem corte");
+        let list = ModelList::new(all.clone(), "gpt");
+        assert_eq!(ids(&list), ["gpt", "openai/gpt-6-luna", "GPT-OSS"], "trecho, sem diferenciar maiúscula, e o digitado primeiro");
+        let list = ModelList::new(all.clone(), "GPT-OSS");
+        assert_eq!(ids(&list), ["GPT-OSS"], "nome exato da lista não repete como texto livre");
+        let list = ModelList::new(all, "meu-modelo");
+        assert_eq!(ids(&list), ["meu-modelo"], "fora da lista ainda vale");
+        assert!(list.shown[0].title.contains("meu-modelo"));
     }
 
     #[test]
