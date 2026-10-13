@@ -992,3 +992,21 @@ depois da volta da barra fechar encerrava o app.
 Não conferido no uso real: o serviço da bandeja sumindo de vez, sem outro assumir (Linux); no Windows, o
 duplo clique físico, o Explorer que demora a aceitar o ícone e o navegador embutido com o
 painel dele aberto na tela na hora de esconder; compositores Wayland além do Hyprland.
+
+## CDP de navegador inteiro do nativo: uma página só, a visível
+
+`GET /cdp/browser?chave=<chave>` no servidor local do navegador (mesma porta e mesmo
+`Authorization: Bearer` do `/cmd`; só Linux) fala CDP do nível do navegador, o do
+`connectOverCDP` do Playwright, com o navegador de UMA sessão. O endereço, sem token, fica no
+campo `cdp` do sidecar da sessão em `~/.hangar/nav/`; o token só sai do `_srv.json` para o
+cabeçalho, nunca para a URL.
+
+- O Chromium é um só para todas as sessões: o cliente vê apenas a página visível do painel da
+  sessão e as sessões CDP que ele mesmo abriu (e as filhas delas). Ids do cliente ganham id novo
+  do pipe; nada colide com o app.
+- Página nova (`Target.createTarget`) e contexto novo (`Target.createBrowserContext`, fictício)
+  ligam o cliente a essa mesma página: a pessoa vê a execução no painel. Contexto novo não isola
+  cookies; é o perfil do painel.
+- Fechar a página (`Target.closeTarget`, `Page.close`) e desconectar só soltam as sessões do
+  cliente; a página continua. Download segue negado pelo app.
+- O `/cdp` da tela remota do celular continua com a lista fechada de 8 comandos.

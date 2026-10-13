@@ -38,6 +38,14 @@ struct Wire {
     pending: Mutex<HashMap<u64, (Option<String>, Box<dyn FnOnce(Reply) + Send>)>>,
     /// Quadro de screencast por sessão, tratado antes de chegar à interface.
     sinks: Mutex<HashMap<String, Sink>>,
+    /// Clientes CDP de fora (`/cdp/browser`): cada um recebe os eventos das sessões dele, e só deles.
+    taps: Mutex<HashMap<u64, Tapped>>,
+}
+
+struct Tapped {
+    /// Sessões que o cliente abriu e as filhas delas (iframe, worker), que o auto-attach dele traz.
+    scope: HashSet<String>,
+    out: async_channel::Sender<String>,
 }
 
 impl Wire {
@@ -168,6 +176,7 @@ impl Browser {
             next: AtomicU64::new(1),
             pending: Mutex::default(),
             sinks: Mutex::default(),
+            taps: Mutex::default(),
         });
         let (events, received) = async_channel::unbounded::<Value>();
         let reading = wire.clone();
@@ -191,6 +200,8 @@ impl Browser {
     }
 
     pub fn alive(&self) -> bool { self.alive.get() }
+
+    pub fn port(&self) -> Port { Port(self.wire.clone()) }
 
     pub fn own(&self, target: &str, owned: bool) {
         if owned { self.owned.borrow_mut().insert(target.to_owned()); } else { self.owned.borrow_mut().remove(target); }
@@ -293,6 +304,8 @@ fn read(reader: std::io::PipeReader, wire: &Wire, events: &async_channel::Sender
         route(message, wire, events);
     }
     for (_, (_, done)) in lock(&wire.pending).drain() { done(Err("o Chromium fechou".into())); }
+    // O socket de cada cliente de fora fecha depois de entregar o que já estava na fila.
+    for (_, tap) in lock(&wire.taps).drain() { tap.out.close(); }
     events.close();
 }
 
@@ -301,6 +314,7 @@ fn route(mut message: Value, wire: &Wire, events: &async_channel::Sender<Value>)
         if let Some((_, done)) = lock(&wire.pending).remove(&id) { done(reply_of(&message)); }
         return;
     }
+    if tapped(&message, wire) { return; }
     if message["method"] == "Page.screencastFrame"
         && let Some(session) = message["sessionId"].as_str().map(str::to_owned)
         && lock(&wire.sinks).contains_key(&session)
@@ -310,6 +324,94 @@ fn route(mut message: Value, wire: &Wire, events: &async_channel::Sender<Value>)
         return;
     }
     let _ = events.try_send(message);
+}
+
+/// Evento de sessão de um cliente de fora vai só a ele. O fim de uma sessão dele no nível do navegador
+/// (`Target.detachedFromTarget`) vai a ele e segue também para a interface, que confere se era dela.
+fn tapped(message: &Value, wire: &Wire) -> bool {
+    let mut taps = lock(&wire.taps);
+    if taps.is_empty() { return false; }
+    let (method, child) = (message["method"].as_str().unwrap_or(""), message["params"]["sessionId"].as_str());
+    let Some(session) = message["sessionId"].as_str() else {
+        if method == "Target.detachedFromTarget" && let Some(child) = child
+            && let Some(tap) = taps.values_mut().find(|t| t.scope.contains(child)) {
+            tap.scope.remove(child);
+            let _ = tap.out.try_send(message.to_string());
+            drop(taps);
+            wire.fail(child);
+        }
+        return false;
+    };
+    let Some(tap) = taps.values_mut().find(|t| t.scope.contains(session)) else { return false };
+    let _ = tap.out.try_send(message.to_string());
+    match (method, child) {
+        ("Target.attachedToTarget", Some(child)) => { tap.scope.insert(child.to_owned()); }
+        ("Target.detachedFromTarget", Some(child)) => {
+            tap.scope.remove(child);
+            drop(taps);
+            // O que o cliente ainda esperava dessa sessão não vai ser respondido.
+            wire.fail(child);
+        }
+        _ => {}
+    }
+    true
+}
+
+/// O pipe visto de qualquer thread, para o cliente CDP de fora: cada comando ganha um id novo do `Wire` (nunca
+/// colide com os do app) e os eventos chegam filtrados pelas sessões do cliente.
+#[derive(Clone)]
+pub struct Port(Arc<Wire>);
+
+impl Port {
+    pub fn call(&self, session: Option<&str>, method: &str, params: Value) -> impl Future<Output = Reply> + Send + use<> {
+        let (tx, rx) = futures::channel::oneshot::channel();
+        self.0.send(session, method, params, Some(Box::new(move |reply| { let _ = tx.send(reply); })));
+        async move { rx.await.map_err(|_| "o Chromium fechou".to_string())? }
+    }
+
+    /// Registra um cliente; `out` é fechado (para todos os remetentes) quando o Chromium cai.
+    pub fn tap(&self, out: async_channel::Sender<String>) -> u64 {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        lock(&self.0.taps).insert(id, Tapped { scope: HashSet::new(), out });
+        id
+    }
+
+    pub fn adopt(&self, tap: u64, session: &str) {
+        if let Some(t) = lock(&self.0.taps).get_mut(&tap) { t.scope.insert(session.to_owned()); }
+    }
+
+    pub fn owns(&self, tap: u64, session: &str) -> bool { lock(&self.0.taps).get(&tap).is_some_and(|t| t.scope.contains(session)) }
+
+    /// Tira o cliente e devolve as sessões que ainda eram dele, para quem sai soltá-las.
+    pub fn untap(&self, tap: u64) -> Vec<String> { lock(&self.0.taps).remove(&tap).map(|t| t.scope.into_iter().collect()).unwrap_or_default() }
+
+    #[cfg(test)]
+    pub(in crate::browser) fn test() -> (Port, std::io::PipeReader) {
+        let (wire, reader) = tests::wire();
+        (Port(wire), reader)
+    }
+
+    /// Chromium de verdade num perfil descartável, sem a interface: os eventos dela são descartados.
+    #[cfg(test)]
+    pub(in crate::browser) fn launch(profile: &Path) -> (Port, Child) {
+        let launched = launch::spawn(launch::find().unwrap(), profile).unwrap();
+        let wire = Arc::new(Wire { writer: Mutex::new(launched.writer), next: AtomicU64::new(1), pending: Mutex::default(),
+            sinks: Mutex::default(), taps: Mutex::default() });
+        let (events, received) = async_channel::unbounded();
+        std::mem::forget(received);
+        let reading = wire.clone();
+        std::thread::spawn(move || read(launched.reader, &reading, &events));
+        (Port(wire), launched.child)
+    }
+
+    /// Mensagem como se viesse do Chromium; devolve o que seguiria para a interface.
+    #[cfg(test)]
+    pub(in crate::browser) fn inject(&self, message: Value) -> Option<Value> {
+        let (events, received) = async_channel::unbounded();
+        route(message, &self.0, &events);
+        received.try_recv().ok()
+    }
 }
 
 /// Uma sessão CDP num alvo, com a mesma forma do `cdp::Cdp` do WebView2. Cair a sessão a desliga do alvo.
@@ -359,9 +461,9 @@ mod tests {
     use super::*;
     use std::sync::mpsc;
 
-    fn wire() -> (Arc<Wire>, std::io::PipeReader) {
+    pub(super) fn wire() -> (Arc<Wire>, std::io::PipeReader) {
         let (reader, writer) = std::io::pipe().unwrap();
-        (Arc::new(Wire { writer: Mutex::new(writer), next: AtomicU64::new(1), pending: Mutex::default(), sinks: Mutex::default() }), reader)
+        (Arc::new(Wire { writer: Mutex::new(writer), next: AtomicU64::new(1), pending: Mutex::default(), sinks: Mutex::default(), taps: Mutex::default() }), reader)
     }
 
     #[test]
@@ -414,7 +516,7 @@ mod tests {
         let bin = launch::find().unwrap();
         let profile = std::env::temp_dir().join(format!("hangar-page-proof-{}", std::process::id()));
         let launched = launch::spawn(bin, &profile).unwrap();
-        let wire = Arc::new(Wire { writer: Mutex::new(launched.writer), next: AtomicU64::new(1), pending: Mutex::default(), sinks: Mutex::default() });
+        let wire = Arc::new(Wire { writer: Mutex::new(launched.writer), next: AtomicU64::new(1), pending: Mutex::default(), sinks: Mutex::default(), taps: Mutex::default() });
         let (events, _received) = async_channel::unbounded();
         let reading = wire.clone();
         std::thread::spawn(move || read(launched.reader, &reading, &events));

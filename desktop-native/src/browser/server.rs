@@ -24,13 +24,16 @@ pub enum Request {
     Watch { key: String, viewer: super::relay::Viewer, reply: oneshot::Sender<Result<(), String>> },
     /// O espectador `id` saiu; não vale se outro já o substituiu.
     Unwatch { key: String, id: u64 },
+    /// Pipe do Chromium e página visível da sessão, para o cliente CDP de fora (`/cdp/browser`).
+    #[cfg(target_os = "linux")]
+    Pipe { key: String, reply: oneshot::Sender<Result<(super::chromium::pipe::Port, String), String>> },
 }
 
 #[derive(Debug)]
 struct Head { method: String, path: String, auth: Option<String>, length: usize, upgrade: Option<String>, ws_key: Option<String> }
 
 #[derive(Debug, PartialEq, Eq)]
-enum Route { Cmd, Cdp(String) }
+enum Route { Cmd, Cdp(String), Browser(String) }
 
 struct Body { key: String, verb: String, args: Vec<String>, tab: Option<i64> }
 
@@ -61,8 +64,16 @@ fn now_ms() -> u128 { std::time::SystemTime::now().duration_since(std::time::UNI
 pub fn write_sidecar(key: &str, url: &str, title: &str) {
     let url = &without_token(url);
     let tab = json!({"id": 1, "url": url, "titulo": title, "targetId": null});
-    let value = json!({"chave": key, "url": url, "targetId": null, "ts": now_ms(), "ativa": 1, "abas": [tab], "pid": std::process::id()});
+    let mut value = json!({"chave": key, "url": url, "targetId": null, "ts": now_ms(), "ativa": 1, "abas": [tab], "pid": std::process::id()});
+    // Endereço do CDP de navegador inteiro desta sessão, sem o token: ele vai no `Authorization`, lido do `_srv.json`.
+    if cfg!(target_os = "linux") && let Some(port) = PORT.get() { value["cdp"] = browser_endpoint(*port, key).into(); }
     if let Err(e) = write_json(&sidecar_name(key), &value) { eprintln!("[nav] sidecar de {key} nao gravado: {e}"); }
+}
+
+static PORT: std::sync::OnceLock<u16> = std::sync::OnceLock::new();
+
+fn browser_endpoint(port: u16, key: &str) -> String {
+    format!("ws://127.0.0.1:{port}/cdp/browser?{}", url::form_urlencoded::Serializer::new(String::new()).append_pair("chave", key).finish())
 }
 
 /// A casca das páginas nasce com `?token=` e só o tira depois de carregar; o sidecar é lido pelo
@@ -132,17 +143,18 @@ fn parse_head(text: &str) -> Result<Head, (u16, String)> {
 
 fn check(head: &Head, token: &str) -> Result<Route, (u16, String)> {
     let (path, query) = head.path.split_once('?').unwrap_or((&head.path, ""));
+    let key = || url::form_urlencoded::parse(query.as_bytes()).find_map(|(name, value)| (name == "chave").then(|| value.into_owned())).unwrap_or_default();
     let route = match (head.method.as_str(), path) {
         ("POST", "/cmd") => Route::Cmd,
-        ("GET", "/cdp") => Route::Cdp(url::form_urlencoded::parse(query.as_bytes())
-            .find_map(|(name, value)| (name == "chave").then(|| value.into_owned())).unwrap_or_default()),
+        ("GET", "/cdp") => Route::Cdp(key()),
+        ("GET", "/cdp/browser") => Route::Browser(key()),
         _ => return Err((404, "erro: rota desconhecida".into())),
     };
     if !same(head.auth.as_deref().unwrap_or("").as_bytes(), format!("Bearer {token}").as_bytes()) { return Err((401, "erro: token invalido".into())); }
-    if let Route::Cdp(key) = &route {
-        if key.is_empty() { return Err((400, "erro: /cdp precisa de ?chave=".into())); }
+    if let Route::Cdp(key) | Route::Browser(key) = &route {
+        if key.is_empty() { return Err((400, format!("erro: {path} precisa de ?chave="))); }
         if !head.upgrade.as_deref().is_some_and(|u| u.eq_ignore_ascii_case("websocket")) || head.ws_key.is_none() {
-            return Err((400, "erro: /cdp so aceita WebSocket".into()));
+            return Err((400, format!("erro: {path} so aceita WebSocket")));
         }
     }
     Ok(route)
@@ -166,6 +178,7 @@ pub fn start(runtime: &Runtime, requests: async_channel::Sender<Request>) -> std
     let listener = { let _guard = runtime.enter(); tokio::net::TcpListener::from_std(listener)? };
     drop_stale_sidecars();
     write_json("_srv", &json!({"porta": port, "token": token, "pid": std::process::id(), "ts": now_ms()}))?;
+    let _ = PORT.set(port);
     let token: Arc<str> = token.into();
     runtime.spawn(async move {
         loop {
@@ -190,6 +203,13 @@ async fn serve(mut stream: TcpStream, token: Arc<str>, requests: async_channel::
                 let ws_key = head.ws_key.unwrap_or_default();
                 return super::relay::serve(stream, &ws_key, key, requests).await;
             }
+            #[cfg(target_os = "linux")]
+            Ok(Route::Browser(key)) => {
+                let ws_key = head.ws_key.unwrap_or_default();
+                return super::chromium::proxy::serve(stream, &ws_key, key, requests).await;
+            }
+            #[cfg(not(target_os = "linux"))]
+            Ok(Route::Browser(_)) => (501, "erro: /cdp/browser so existe no app nativo do Linux".into()),
         },
     };
     respond(&mut stream, status, &text).await;
@@ -203,6 +223,7 @@ pub(super) async fn respond(stream: &mut TcpStream, status: u16, text: &str) {
         401 => "Unauthorized",
         404 => "Not Found",
         413 => "Payload Too Large",
+        501 => "Not Implemented",
         431 => "Request Header Fields Too Large",
         _ => "Internal Server Error",
     };
@@ -287,6 +308,58 @@ mod tests {
         assert_eq!(check(&keyless, "abc"), Err((400, "erro: /cdp precisa de ?chave=".into())));
         let post = parse_head(&format!("POST /cdp?chave=a HTTP/1.1{upgrade}")).unwrap();
         assert_eq!(check(&post, "abc"), Err((404, "erro: rota desconhecida".into())));
+    }
+
+    #[test]
+    fn browser_cdp_route_has_the_same_checks_and_a_tokenless_endpoint() {
+        let upgrade = "\r\nAuthorization: Bearer abc\r\nUpgrade: websocket\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==";
+        let url = browser_endpoint(4321, "srv::nav teste");
+        assert_eq!(url, "ws://127.0.0.1:4321/cdp/browser?chave=srv%3A%3Anav+teste");
+        let head = parse_head(&format!("GET {} HTTP/1.1{upgrade}", url.trim_start_matches("ws://127.0.0.1:4321"))).unwrap();
+        assert_eq!(check(&head, "abc"), Ok(Route::Browser("srv::nav teste".into())));
+        assert_eq!(check(&head, "zzz"), Err((401, "erro: token invalido".into())));
+        let plain = parse_head("GET /cdp/browser?chave=a HTTP/1.1\r\nAuthorization: Bearer abc").unwrap();
+        assert_eq!(check(&plain, "abc"), Err((400, "erro: /cdp/browser so aceita WebSocket".into())));
+    }
+
+    /// Chromium de verdade atrás do servidor real (rota, token, proxy), sem o app: o comando em `HANGAR_CDP_PROOF`
+    /// (shell) recebe `HANGAR_CDP_URL` e `HANGAR_CDP_TOKEN` e precisa sair com 0. Depois dele, a sessão do "app" na
+    /// mesma página continua respondendo e vê a página que o cliente deixou.
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "sobe o Chromium da máquina e roda o cliente de HANGAR_CDP_PROOF"]
+    async fn real_chromium_serves_an_outside_cdp_client() {
+        use super::super::chromium::pipe::Port;
+        let proof = std::env::var("HANGAR_CDP_PROOF").expect("HANGAR_CDP_PROOF");
+        let profile = std::env::temp_dir().join(format!("hangar-cdp-proof-{}", std::process::id()));
+        let (port, mut child) = Port::launch(&profile);
+        let created = port.call(None, "Target.createTarget", json!({"url": "about:blank", "newWindow": true})).await.unwrap();
+        let target = created["targetId"].as_str().unwrap().to_owned();
+        let app = port.call(None, "Target.attachToTarget", json!({"targetId": target, "flatten": true})).await.unwrap()["sessionId"]
+            .as_str().unwrap().to_owned();
+        port.call(Some(&app), "Page.enable", json!({})).await.unwrap();
+
+        let (requests, ui) = async_channel::unbounded();
+        let (pipe, visible) = (port.clone(), target.clone());
+        tokio::spawn(async move {
+            while let Ok(request) = ui.recv().await {
+                if let Request::Pipe { reply, .. } = request { let _ = reply.send(Ok((pipe.clone(), visible.clone()))); }
+            }
+        });
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let token: Arc<str> = "t0k".into();
+        tokio::spawn(async move { loop { let (s, _) = listener.accept().await.unwrap(); tokio::spawn(serve(s, token.clone(), requests.clone())); } });
+
+        let status = tokio::process::Command::new("sh").arg("-c").arg(&proof)
+            .env("HANGAR_CDP_URL", browser_endpoint(address.port(), "srv::proof")).env("HANGAR_CDP_TOKEN", "t0k")
+            .status().await.unwrap();
+        let href = port.call(Some(&app), "Runtime.evaluate", json!({"expression": "document.title", "returnByValue": true})).await;
+        drop(port.call(None, "Browser.close", json!({})));
+        let _ = child.wait();
+        let _ = std::fs::remove_dir_all(&profile);
+        assert!(status.success(), "cliente falhou: {status}");
+        eprintln!("titulo visto pela sessao do app depois do cliente: {:?}", href.unwrap()["result"]["value"]);
     }
 
     #[test]

@@ -1757,6 +1757,12 @@ impl Hangar {
                 if let Some(b) = self.side.browsers.get(&key) { b.read(cx).unwatch(id); }
                 return;
             }
+            #[cfg(target_os = "linux")]
+            Request::Pipe { key, reply } => {
+                let found = self.side.browsers.get(&key).and_then(|b| b.read(cx).engine().filter(|e| e.alive()).map(|e| e.port()));
+                let _ = reply.send(found.ok_or_else(|| missing(&key)));
+                return;
+            }
         };
         if tab.is_some() { return answer(reply, "erro: o app nativo ainda nao tem abas: e um navegador por sessao".into()); }
         if verb == "login" {

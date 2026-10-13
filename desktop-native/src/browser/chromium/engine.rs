@@ -541,6 +541,9 @@ impl Engine {
     /// A sessão do painel, para o controlador do hangar-preview.
     pub fn cdp(&self) -> Rc<Session> { self.session.clone() }
 
+    /// O pipe e a página visível desta sessão, para o cliente CDP de fora (`/cdp/browser`).
+    pub fn port(&self) -> (super::pipe::Port, String) { (self.session.browser().port(), self.target.clone()) }
+
     /// Sessão própria para a tela remota do celular: o screencast dela tem o tamanho do aparelho, sem mexer no do painel.
     pub fn viewer_session(&self) -> impl Future<Output = Result<Rc<Session>, String>> + use<> {
         let (attach, background) = (Session::attach_async(self.session.browser(), &self.target), self.background.clone());
