@@ -360,7 +360,7 @@ export default function ChatScreen() {
   const optionsSlot = showOptions || planPending || decidablePlan || aviso ? (
     <View style={styles.slot}>
       {planPending ? (
-        <PendingPlan key={showOptions ? optionRequest.generation : undefined} {...planPending}
+        <PendingPlan key={planPending.tool_use_id ?? undefined} {...planPending}
                      {...(showOptions ? { options: stateEvent!.options!, question: stateEvent!.question!, interactionId: stateEvent!.interaction_id,
                                           onSelect: handleSelectOption, onCancel: handleCancelOptions } : {})} />
       ) : null}

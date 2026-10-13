@@ -197,7 +197,8 @@ impl Sources for NativeSources {
             }
             let target = registry.terminal_target(&identity.name).await.map_err(|_| ServiceError("plugin_identity_ambiguous"))?;
             let attached = if state.term.is_active(&identity.name) { Some(true) } else {
-                match target { Some(target) => self.attached(&target.binding).await, None => Some(false) }
+                // Sem terminal o pedido é do canal nativo (can_use_tool): o plugin nunca segura.
+                match target { Some(target) => self.attached(&target.binding).await, None => Some(true) }
             };
             let memory = state.state.permissions.lock().map_err(|_| ServiceError("permission_store_unavailable"))?;
             let mode = memory.confirmed(&identity.binding.conversation).map_err(ServiceError)?;

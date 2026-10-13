@@ -92,14 +92,14 @@ pub fn consume_revision(jsonl: &Path, revision: &str) -> Result<(), String> {
 }
 
 /// Até onde o transcript já foi lido à procura da resposta de cada revisão: só o que cresceu é relido.
-static SCANNED: LazyLock<Mutex<HashMap<PathBuf, (String, u64, bool)>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+static SCANNED: LazyLock<Mutex<HashMap<(PathBuf, String), (u64, bool)>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// `(o transcript tem o tool_result da chamada, a própria chamada já apareceu)`. Lê só linhas
 /// inteiras desde a última leitura.
 fn answered_in_transcript(jsonl: &Path, call: &str, revision: &str) -> Result<(bool, bool), String> {
     use std::io::{Read, Seek, SeekFrom};
-    let (start, seen_before) = SCANNED.lock().map_err(|_| "askq_scan_lock")?.get(jsonl)
-        .filter(|(seen, ..)| seen == revision).map_or((0, false), |(_, offset, call_seen)| (*offset, *call_seen));
+    let key = (jsonl.to_path_buf(), revision.to_owned());
+    let (start, seen_before) = SCANNED.lock().map_err(|_| "askq_scan_lock")?.get(&key).copied().unwrap_or((0, false));
     let mut file = std::fs::File::open(jsonl).map_err(|e| format!("askq_transcript_unreadable:{:?}", e.kind()))?;
     let mut buf = Vec::new();
     file.seek(SeekFrom::Start(start)).and_then(|_| file.read_to_end(&mut buf))
@@ -109,7 +109,10 @@ fn answered_in_transcript(jsonl: &Path, call: &str, revision: &str) -> Result<(b
     let contains = |needle: &str| buf[..complete].windows(needle.len()).any(|w| w == needle.as_bytes());
     let found = contains(&needle);
     let call_seen = seen_before || contains(&format!("\"id\":\"{call}\""));
-    SCANNED.lock().map_err(|_| "askq_scan_lock")?.insert(jsonl.to_path_buf(), (revision.to_owned(), start + complete as u64, call_seen));
+    let mut scanned = SCANNED.lock().map_err(|_| "askq_scan_lock")?;
+    // ponytail: uma entrada por revisão; acima de 64 recomeça do zero (só custa uma releitura).
+    if scanned.len() > 64 { scanned.clear(); }
+    scanned.insert(key, (start + complete as u64, call_seen));
     Ok((found, call_seen))
 }
 
@@ -191,14 +194,16 @@ pub fn observe_screen_menu(plugin: &crate::plugin::Store, binding: &crate::inter
     jsonl: &Path, pane: &str) -> Result<(Option<String>, Option<serde_json::Map<String, serde_json::Value>>), String> {
     let interactions = plugin.interactions();
     let mut notice = plugin.plan_notice(binding).map_err(|e| e.0.to_owned())?;
-    // ponytail: divide o cursor de leitura com o sidecar do askq; com os dois abertos, cada um relê do começo.
     if let Some(call) = notice.as_ref().map(|n| n.tool_use_id.clone())
         && answered_in_transcript(jsonl, &call, &format!("plan:{call}"))?.0 {
         plugin.drop_plan(binding, &call).map_err(|e| e.0.to_owned())?;
         interactions.observe(binding, &plan_target(&call), None).map_err(|e| e.code().to_owned())?;
         notice = None;
     }
-    if submit_tab(pane) || !crate::terminal_state::plan_dialog(&crate::terminal_state::analyze(pane)) {
+    let analysis = crate::terminal_state::analyze(pane);
+    if submit_tab(pane) || !crate::terminal_state::plan_dialog(&analysis) {
+        // Plano pendente e um menu que a âncora não reconhece (o CLI mudou a frase): nunca vira menu comum.
+        if notice.is_some() && analysis.state == "awaiting_input" && !submit_tab(pane) { return Err("plan_dialog_unrecognized".into()); }
         if let Some(n) = &notice { interactions.observe(binding, &plan_target(&n.tool_use_id), None).map_err(|e| e.code().to_owned())?; }
         return Ok((observe_menu(interactions, binding, jsonl, pane)?, None));
     }
@@ -459,11 +464,10 @@ mod tests {
         assert!(store.interactions().current(&binding, &menu).unwrap().is_none());
         assert_eq!(observe_screen_menu(&store, &binding, &jsonl, PLAN).unwrap().0.as_deref(), Some(id.as_str()));
 
-        // Fora do diálogo o cartão some e o menu comum volta a ter o ID dele.
+        // Plano pendente e um menu que a âncora não reconhece: erro, nunca menu comum respondível.
         const OTHER: &str = "   Outra?\n\n ❯ 1. X\n   2. Y\n";
-        let (other, plan) = observe_screen_menu(&store, &binding, &jsonl, OTHER).unwrap();
-        assert!(other.is_some_and(|other| other != id) && plan.is_none());
-        assert!(store.interactions().expected(&binding, Some(&id)).is_err());
+        assert_eq!(observe_screen_menu(&store, &binding, &jsonl, OTHER), Err("plan_dialog_unrecognized".to_owned()));
+        assert!(store.interactions().current(&binding, &menu).unwrap().is_none());
 
         // A resposta no transcript encerra o aviso: o mesmo quadro não revive o cartão velho.
         std::fs::write(&jsonl, "{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"toolu_1\"}]}}\n").unwrap();
