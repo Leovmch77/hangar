@@ -1,7 +1,6 @@
 # backend/tests/test_internal_api.py
 import asyncio
 import time
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -182,37 +181,11 @@ def test_left_out_of_the_api_schema():
     assert not any(p.startswith("/internal") for p in paths)
 
 
-def _rust_slot(tmp_path, monkeypatch):
-    from app import runtime_coordinator
-    from app.runtime_coordinator import Binding, Phase, RuntimeCoordinator
-    coordinator = RuntimeCoordinator()
-    coordinator.instance = "instance-1"
-    slot = coordinator.register(Binding(name="session", key="key", provider="claude", headless=True,
-        meta={"key": "key"}, jsonl=str(tmp_path / "chat.jsonl"), projection_dir=tmp_path / "projection",
-        state_path=tmp_path / "key.json", lock_path=tmp_path / "key.lock", generation=1))
-    slot.lease.close()
-    slot.phase = Phase.Rust
-    monkeypatch.setattr(runtime_coordinator, "_current", coordinator)
-    return coordinator
-
-
-def _policy(client, kind, phase_id, payload):
-    return client.post("/internal/runtime/policy", headers={"X-Hangar-Internal": SECRET,
-        "X-Hangar-Runtime-Instance": "instance-1"}, json={"key": "key", "generation": 1,
-        "request_id": "op-1", "phase_id": phase_id, "kind": kind, "payload": payload})
-
-
-def test_pure_policy_runs_without_a_journal_attempt(tmp_path, monkeypatch):
-    # A entrada adiada volta pelo drain e prepara o texto de novo: o cálculo não deixa tentativa no
-    # diário, e exigir uma recusava a segunda vez e perdia a mensagem.
-    coordinator = _rust_slot(tmp_path, monkeypatch)
-    client = _client()
-    for _ in range(2):
-        # Serviço recusado (o sidecar é do Rust): a recusa não toca no diário.
-        response = _policy(client, "session.patch_meta", "op-1:patch", {"campo_inexistente": {}})
-        assert response.status_code == 200 and response.json() == {"ok": False, "error_type": "ValueError"}
-    assert internal_api._policy_calls == {}
-    coordinator.close_python_leases()
+def test_policy_route_is_gone():
+    # Os serviços que o Rust pedia ao Python (sidecar, recado nativo, cálculo) são todos do Rust: a rota
+    # de política não existe mais.
+    assert "/internal/runtime/policy" not in {route.path for route in internal_api.router.routes}
+    assert _client().post("/internal/runtime/policy", headers={"X-Hangar-Internal": SECRET}, json={}).status_code == 404
 
 
 def test_quota_route_is_gone():
@@ -221,19 +194,6 @@ def test_quota_route_is_gone():
     # As fontes de cota de fora (Kimi, CommandCode, OpenCode) também são lidas no Rust: o Rust não
     # volta ao Python dentro de um pedido de cota que o Python fez.
     assert "/internal/accounts/quotas" not in {route.path for route in internal_api.router.routes}
-
-
-def test_native_message_is_refused_without_reading_the_state_file(tmp_path, monkeypatch):
-    # O recado nativo é escrito pelo Rust: o Python recusa sem abrir o arquivo de estado da fila, que o
-    # Rust troca enquanto isso (no Windows a leitura falharia e travaria a troca).
-    coordinator = _rust_slot(tmp_path, monkeypatch)
-    opened = []
-    real = Path.read_bytes
-    monkeypatch.setattr(Path, "read_bytes", lambda path: opened.append(path) or real(path))
-    response = _policy(_client(), "native_message", "op-1:native_message:x", {"text": "[de: a] oi", "mode": "bypass"})
-    assert response.status_code == 200 and response.json() == {"ok": False, "error_type": "ValueError"}
-    assert coordinator.slots["key"].binding.state_path not in opened
-    coordinator.close_python_leases()
 
 
 def test_rust_diag_route_records_event():

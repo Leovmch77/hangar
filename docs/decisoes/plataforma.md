@@ -2260,8 +2260,8 @@ contratado, também não iniciado.
   continua só para a reserva do modo `python` (`runtime_terminal._service`).
 - `launch_env`, `patch_meta` e `clear_cano` do Codex em `runtime_policy.py` (o Rust monta argv/env
   e grava o sidecar).
-- `patch_meta` e `clear_cano` do Claude e o `native_message` em `runtime_policy.py`, e a conferência
-  do diário no `/internal/runtime/policy` (#145).
+- `patch_meta` e `clear_cano` do Claude e o `native_message`; com eles, a rota `/internal/runtime/policy`,
+  o `runtime_policy.py` e a chamada HTTP do `PolicyClient` do Rust saíram inteiros (#145).
 - `hand-over` do relançamento (`open_terminal` no `lifecycle_call`, `python_client_released`).
 - `plugin_bridge.app_remoto` e `_held` nos fatos da lista; `held` segue no contrato como `{}`.
 - Reconciliação da fila do Codex com terminal do Rust pelo Python (`_confirm_codex_queue`).
@@ -2355,6 +2355,12 @@ ignorado `soak_writer_for_the_python_side`) e, em Python, três leitores e um gr
 
 As falhas que sobram são do `os.replace` do próprio Python (`MoveFileExW`), que não troca arquivo
 aberto mesmo com `FILE_SHARE_DELETE`; só aparecem com leitores Python em laço no mesmo arquivo.
+
+Sem esses serviços, nada mais o Rust pedia ao Python pela política: a rota `/internal/runtime/policy`,
+o `runtime_policy.py` (o despacho da reserva do terminal foi para o `runtime_terminal`, e o
+`demote_awaiting` para a rota `/internal/list/demote`) e o `run`/`run_for` do `PolicyClient`, com a
+repetição enquanto o Python sobe, saíram. O ramo `launch_env` do Claude na subida também: o Python já
+o recusava, e o processo do Claude nasce da receita em memória (`claude_relaunch`). Contrato 68.
 
 Ficaram no Python, por fazerem parte da abertura de sessão (#165): a geração lida em
 `runtime_adapter.binding()` e o `_has_pending` da reabertura.

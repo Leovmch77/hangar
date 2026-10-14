@@ -58,34 +58,19 @@ async fn cano(rpc: Value, busy: bool) -> String {
     format!("tcp:{address}")
 }
 
-/// Python falso da política: `ok` a tudo, com o `{"updated": true}` do `session.patch_meta` gravado (o
-/// pular só responde depois dele).
-async fn policy() -> std::net::SocketAddr {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        loop {
-            let Ok((stream, _)) = listener.accept().await else { return };
-            tokio::spawn(async move {
-                let mut reader = BufReader::new(stream);
-                loop {
-                    let mut length = 0usize;
-                    loop {
-                        let mut line = String::new();
-                        if reader.read_line(&mut line).await.unwrap_or(0) == 0 { return; }
-                        if line == "\r\n" { break; }
-                        if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") { length = value.trim().parse().unwrap(); }
-                    }
-                    let mut body = vec![0; length];
-                    reader.read_exact(&mut body).await.unwrap();
-                    let reply = json!({"ok":true,"data":{"updated":true}}).to_string();
-                    let response = format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{reply}", reply.len());
-                    reader.get_mut().write_all(response.as_bytes()).await.unwrap();
-                }
-            });
-        }
-    });
-    address
+/// Registro como o do servidor, sem Python atrás (nada do Codex vai a ele) e sem `codex` no PATH: uma
+/// subida pedida falha no processo, nunca abre um app-server de verdade.
+fn registry(dir: &std::path::Path) -> RuntimeRegistry {
+    RuntimeRegistry::new(crate::refused_address(), "secret-test".into(), "instance-test".into())
+        .with_codex_environment(hangar_server::accounts::environment::AccountEnvironment::from_map(
+            [("HOME".to_owned(), dir.to_string_lossy().into_owned()), ("PATH".to_owned(), dir.join("sem-bin").to_string_lossy().into_owned())].into()))
+}
+
+/// O arquivo da sessão que o Python grava ao criar o Codex sem terminal; o Rust grava nele.
+fn sidecar(dir: &std::path::Path, extra: Value) {
+    let mut meta = json!({"name": "s", "key": "k", "provider": "codex", "headless": true, "thread_id": "thread-1", "cwd": "/tmp/projeto"});
+    for (field, value) in extra.as_object().unwrap() { meta[field] = value.clone(); }
+    std::fs::write(dir.join("s.json"), meta.to_string()).unwrap();
 }
 
 async fn open(registry: &RuntimeRegistry, dir: &std::path::Path, case: &Value) {
@@ -94,10 +79,11 @@ async fn open(registry: &RuntimeRegistry, dir: &std::path::Path, case: &Value) {
     let metadata = json!({"name": "s", "headless": true, "thread_id": "thread-1", "initialized": true, "ready": true, "cwd": "/tmp/projeto",
         "model": s["model"], "effort": s["effort"], "service_tier": s["service_tier"], "mode": s["mode"],
         "permission_mode": s["permission_mode"], "async_questions": questions});
-    registry.open(RuntimeTarget { key: "k".into(), generation: 1, name: "s".into(), provider: "codex".into(), metadata,
+    sidecar(dir, json!({"permission_mode": s["permission_mode"]}));
+    registry.open_managed(RuntimeTarget { key: "k".into(), generation: 1, name: "s".into(), provider: "codex".into(), metadata,
         binding: CanoBinding { pid: 42, escuta: cano(case["rpc"].clone(), s["busy"] == true).await, token: "secret-test".into(), versao: 2 },
         lease_path: dir.join("k.lock"), state_path: dir.join("k.queue-state.json"), projection_dir: dir.join("k-projection"),
-        transcript: dir.join("k.jsonl"), created: 0.0 }).await.unwrap();
+        transcript: dir.join("k.jsonl"), created: 0.0 }, dir.into()).await.unwrap();
 }
 
 async fn serve(registry: Arc<RuntimeRegistry>) -> (Arc<Fake>, std::net::SocketAddr) {
@@ -132,7 +118,7 @@ async fn headless_codex_routes_match_the_python_golden() {
     for case in golden().iter().filter(|c| c["relay"].is_null() && c["fault"].is_null()) {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(InteractionStore::default());
-        let registry = RuntimeRegistry::new(policy().await, "secret-test".into(), "instance-test".into());
+        let registry = registry(dir.path());
         let registry = Arc::new(if case["route"] == "question/skip" { registry.with_interactions(store.clone()) } else { registry });
         open(&registry, dir.path(), case).await;
         let (python, server) = serve(registry.clone()).await;
@@ -153,7 +139,7 @@ async fn skip_route_accepts_and_forwards_the_displayed_interaction_id() {
     let request = case["body"]["request_id"].as_str().unwrap().to_owned();
     let dir = tempfile::tempdir().unwrap();
     let store = Arc::new(InteractionStore::default());
-    let registry = Arc::new(RuntimeRegistry::new(policy().await, "secret-test".into(), "instance-test".into()).with_interactions(store.clone()));
+    let registry = Arc::new(registry(dir.path()).with_interactions(store.clone()));
     open(&registry, dir.path(), &case).await;
     let (python, server) = serve(registry).await;
     let mut bare = case.clone();
@@ -171,7 +157,8 @@ async fn skip_route_accepts_and_forwards_the_displayed_interaction_id() {
 
 #[tokio::test]
 async fn sessions_the_rust_does_not_own_reach_python_intact() {
-    let registry = Arc::new(RuntimeRegistry::new(policy().await, "secret-test".into(), "instance-test".into()));
+    let dir = tempfile::tempdir().unwrap();
+    let registry = Arc::new(registry(dir.path()));
     let (python, server) = serve(registry).await;
     for case in golden().iter().filter(|c| !c["relay"].is_null()) {
         assert_eq!(call(server, case, OWNER).await, (200, Value::String("from-python".into())), "{}", case["name"]);
@@ -183,7 +170,7 @@ async fn sessions_the_rust_does_not_own_reach_python_intact() {
 #[tokio::test]
 async fn guest_reaches_python_and_bodies_the_route_refuses_are_a_rust_422() {
     let dir = tempfile::tempdir().unwrap();
-    let registry = Arc::new(RuntimeRegistry::new(policy().await, "secret-test".into(), "instance-test".into()));
+    let registry = Arc::new(registry(dir.path()));
     let case = golden().into_iter().find(|c| c["name"] == "model_ok").unwrap();
     open(&registry, dir.path(), &case).await;
     let (python, server) = serve(registry).await;
@@ -215,7 +202,7 @@ fn actor_failures_match_the_python_golden() {
 #[tokio::test]
 async fn limits_never_errors_nor_waits_with_the_gate_closed() {
     let dir = tempfile::tempdir().unwrap();
-    let registry = Arc::new(RuntimeRegistry::new(policy().await, "secret-test".into(), "instance-test".into()));
+    let registry = Arc::new(registry(dir.path()));
     let case = golden().into_iter().find(|c| c["name"] == "limits_ok").unwrap();
     open(&registry, dir.path(), &case).await;
     registry.ingress().close("s", Duration::from_secs(1)).await.unwrap();
@@ -231,7 +218,7 @@ async fn terminal_entry_goes_to_python() {
     // O registro do Rust só abre entrada de terminal como `claude` (Codex com terminal é do Python até a
     // 5C): é ela que exercita o desvio antes da porta.
     let dir = tempfile::tempdir().unwrap();
-    let registry = Arc::new(RuntimeRegistry::new(policy().await, "secret-test".into(), "instance-test".into()));
+    let registry = Arc::new(registry(dir.path()));
     let binding = TerminalBinding { name: "s".into(), pane: "%1".into(), conversation: "sid".into(), generation: 1, created: 1,
         mux_argv: vec!["/does-not-exist/hangar-test-tmux".into()], windows: false, clipboard_lock_path: None };
     let transcript = dir.path().join("s.jsonl");
@@ -285,13 +272,14 @@ async fn dying_cano() -> String {
 #[tokio::test]
 async fn permissions_of_a_dead_headless_codex_answer_from_the_session_file_not_503() {
     let dir = tempfile::tempdir().unwrap();
-    let registry = Arc::new(RuntimeRegistry::new(policy().await, "secret-test".into(), "instance-test".into()));
+    let registry = Arc::new(registry(dir.path()));
     let metadata = json!({"name": "s", "headless": true, "thread_id": "thread-1", "initialized": true, "ready": true, "cwd": "/tmp/projeto",
         "permission_mode": "Ask for approval"});
-    registry.open(RuntimeTarget { key: "k".into(), generation: 1, name: "s".into(), provider: "codex".into(), metadata,
+    sidecar(dir.path(), json!({"permission_mode": "Ask for approval"}));
+    registry.open_managed(RuntimeTarget { key: "k".into(), generation: 1, name: "s".into(), provider: "codex".into(), metadata,
         binding: CanoBinding { pid: 42, escuta: dying_cano().await, token: "secret-test".into(), versao: 2 },
         lease_path: dir.path().join("k.lock"), state_path: dir.path().join("k.queue-state.json"), projection_dir: dir.path().join("k-projection"),
-        transcript: dir.path().join("k.jsonl"), created: 0.0 }).await.unwrap();
+        transcript: dir.path().join("k.jsonl"), created: 0.0 }, dir.path().into()).await.unwrap();
     let handle = registry.handle("k", 1).await.unwrap();
     tokio::time::timeout(Duration::from_secs(5), async { while handle.view().await.unwrap()["alive"] != false { tokio::time::sleep(Duration::from_millis(20)).await; } })
         .await.expect("o cano caiu");

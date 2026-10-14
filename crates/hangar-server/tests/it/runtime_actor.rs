@@ -377,7 +377,7 @@ async fn setup_claude_unreachable_policy(initialized:bool) -> (RuntimeHandle,tok
     let queue = QueueActor::start(store,lease);
     let connection = cano::connect(&target.binding).await.unwrap();
     let engine = RuntimeEngine::new("claude",target.metadata.clone(),1,ClockSample { monotonic_s:0.0,epoch_s:1_800_000_000.0 }).unwrap()
-        .with_policy(PolicyClient::new(closed,"secret".into(),"instance".into()));
+        .with_policy(PolicyClient::new(closed,"secret".into()));
     (RuntimeActor::spawn(target,queue,connection,engine),server,dir,booted)
 }
 
@@ -505,41 +505,6 @@ async fn transcript_growth_confirms_the_input_before_the_turn_ends() {
     server.await.unwrap();
 }
 
-/// Serviço de política HTTP que responde `ok` a tudo e conta as chamadas.
-async fn policy_server() -> (std::net::SocketAddr,std::sync::Arc<std::sync::atomic::AtomicUsize>) {
-    use tokio::io::AsyncReadExt;
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let counter = calls.clone();
-    tokio::spawn(async move {
-        loop {
-            let Ok((stream,_)) = listener.accept().await else { return };
-            let counter = counter.clone();
-            tokio::spawn(async move {
-                let mut reader = BufReader::new(stream);
-                loop {
-                    let mut length = 0usize;
-                    loop {
-                        let mut line = String::new();
-                        if reader.read_line(&mut line).await.unwrap_or(0) == 0 { return; }
-                        if line == "\r\n" { break; }
-                        if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") { length = value.trim().parse().unwrap(); }
-                    }
-                    let mut body = vec![0;length]; reader.read_exact(&mut body).await.unwrap();
-                    counter.fetch_add(1,std::sync::atomic::Ordering::SeqCst);
-                    let kind = serde_json::from_slice::<Value>(&body).unwrap()["kind"].clone();
-                    let data = if kind == "prepare_prompt" { json!({"content":"Olá","notices":[],"native_candidate":false}) } else { json!({}) };
-                    let reply = json!({"ok":true,"data":data}).to_string();
-                    let response = format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{reply}",reply.len());
-                    reader.get_mut().write_all(response.as_bytes()).await.unwrap();
-                }
-            });
-        }
-    });
-    (address,calls)
-}
-
 #[tokio::test]
 async fn status_formatting_and_state_changes_do_not_rewrite_the_journal() {
     // Uma mensagem custava ~60 regravações do estado: cada format_status passava pelo diário e
@@ -589,7 +554,7 @@ async fn status_turn(bad_rate:bool) -> Vec<Value> {
             }
         }
     });
-    let (policy,calls) = policy_server().await;    let target = RuntimeTarget { key:"key".into(),generation:1,name:"session".into(),provider:"claude".into(),
+    let target = RuntimeTarget { key:"key".into(),generation:1,name:"session".into(),provider:"claude".into(),
         metadata:json!({"name":"session","headless":true,"session_id":"sid-1","initialized":true}),
         binding:CanoBinding { pid:42,escuta:format!("tcp:{address}"),token:"secret-test".into(),versao:2 },
         lease_path:dir.path().join("key.lock"),state_path:dir.path().join("key.queue-state.json"),projection_dir:dir.path().join("projection"),
@@ -599,7 +564,7 @@ async fn status_turn(bad_rate:bool) -> Vec<Value> {
     let queue = QueueActor::start(store,lease);
     let connection = cano::connect(&target.binding).await.unwrap();
     let engine = RuntimeEngine::new("claude",target.metadata.clone(),1,ClockSample { monotonic_s:0.0,epoch_s:1_800_000_000.0 }).unwrap()
-        .with_policy(PolicyClient::new(policy,"secret".into(),"instance".into()));
+        .with_policy(PolicyClient::new(crate::refused_address(),"secret".into()));
     let handle = RuntimeActor::spawn(target,queue,connection,engine);
     let mut events = handle.subscribe();
     let input = RuntimeCommand { operation_id:"msg".into(),kind:OperationKind::Input,payload:json!({"text":"Olá","entry_id":"msg"}) };
@@ -614,12 +579,10 @@ async fn status_turn(bad_rate:bool) -> Vec<Value> {
                 if event.channel == "problem" { problems.push(event.data.clone()); }
                 if event.channel == "state" && event.data["state"] == "idle" { idle_seen = true; }
             }
-            // Preparo, status, uso, carimbo e evento desconhecido são locais: o Python não é chamado neste turno.
             if idle_seen && (!bad_rate || !problems.is_empty()) { break; }
         }
     }).await.expect("o turno precisa terminar");
     handle.stop().await.unwrap();
-    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst),0,"nenhum serviço deste turno precisa mais do Python");
     server.await.unwrap();
     let state:State = queue_state(dir.path());
     assert!(!state.operations.keys().any(|id|id.starts_with("policy:")),"serviço sem efeito não entra no diário");
@@ -734,8 +697,7 @@ async fn headless_entry_without_proof_gives_up_after_the_deadline_and_can_be_dis
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("chat.jsonl"),"").unwrap();
     let (cano,server) = claude_cano(vec![]).await;
-    let (policy,_) = policy_server().await;
-    let handle = claude_actor(dir.path(),cano,policy).await;
+    let handle = claude_actor(dir.path(),cano).await;
     handle.queue("lost".into(),Action::Append { text:"perdida".into(),delivered:true,ts:Some(epoch_now()-120.0),
         pre_transcript:false,entry_id:Some("lost".into()) }).await.unwrap();
     handle.queue("fresh".into(),Action::Append { text:"recente".into(),delivered:true,ts:Some(epoch_now()),
@@ -808,8 +770,7 @@ async fn echo_from_the_cli_confirms_the_entry_without_the_transcript() {
             }
         }
     });
-    let (policy,_) = policy_server().await;
-    let handle = claude_actor(dir.path(),address,policy).await;
+    let handle = claude_actor(dir.path(),address).await;
     let input = RuntimeCommand { operation_id:"msg".into(),kind:OperationKind::Input,payload:json!({"text":"Olá","entry_id":"msg"}) };
     assert!(handle.command(input).await.unwrap().disposition == Disposition::Accepted);
     tokio::time::timeout(std::time::Duration::from_secs(3),async {
@@ -827,8 +788,7 @@ async fn queued_entries_become_not_delivered_when_the_process_gives_up() {
     let dir = tempfile::tempdir().unwrap();
     // Permissão em aberto: a sessão não entrega, a mensagem espera na fila.
     let (cano,server) = claude_cano(vec![json!({"type":"control_request","request_id":1,"request":{"subtype":"can_use_tool","tool_name":"Bash","input":{}}})]).await;
-    let (policy,_) = policy_server().await;
-    let handle = claude_actor(dir.path(),cano,policy).await;
+    let handle = claude_actor(dir.path(),cano).await;
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     handle.queue("wait".into(),Action::Append { text:"espera".into(),delivered:false,ts:None,pre_transcript:false,entry_id:Some("wait".into()) }).await.unwrap();
     assert_eq!(abandon_queued(&handle).await.unwrap(),1);
@@ -864,8 +824,7 @@ async fn rows_left_unconfirmed_by_an_older_binary_confirm_when_the_actor_opens()
     }
     std::fs::write(&transcript,format!("{}\n",crate::runtime_receipt::merged_inputs_line("sid-1","2026-10-13T13:50:29.778Z"))).unwrap();
     let (cano,server) = claude_cano(vec![]).await;
-    let (policy,_) = policy_server().await;
-    let handle = claude_actor(dir.path(),cano,policy).await;
+    let handle = claude_actor(dir.path(),cano).await;
     tokio::time::timeout(std::time::Duration::from_secs(3),async {
         loop {
             let state = queue_state(dir.path());
@@ -894,8 +853,7 @@ async fn headless_entry_is_not_given_up_while_a_turn_runs() {
         let mut raw = String::new();
         while reader.read_line(&mut raw).await.unwrap_or(0) > 0 { raw.clear(); }
     });
-    let (policy,_) = policy_server().await;
-    let handle = claude_actor(dir.path(),address,policy).await;
+    let handle = claude_actor(dir.path(),address).await;
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     handle.queue("lost".into(),Action::Append { text:"no meio do turno".into(),delivered:true,ts:Some(epoch_now()-120.0),
         pre_transcript:false,entry_id:Some("lost".into()) }).await.unwrap();
@@ -937,8 +895,7 @@ async fn steer_line_in_the_transcript_confirms_without_waiting_for_the_turn_end(
             }
         }
     });
-    let (policy,_) = policy_server().await;
-    let handle = claude_actor(dir.path(),address,policy).await;
+    let handle = claude_actor(dir.path(),address).await;
     handle.queue("steer".into(),Action::Append { text:"Olá".into(),delivered:true,ts:None,pre_transcript:false,entry_id:Some("steer".into()) }).await.unwrap();
     let steer = RuntimeCommand { operation_id:"steer".into(),kind:OperationKind::Steer,payload:json!({"text":"Olá","entry_id":"steer"}) };
     assert!(handle.command(steer).await.unwrap().disposition == Disposition::Accepted);
@@ -981,7 +938,7 @@ async fn claude_cano(lines:Vec<Value>) -> (std::net::SocketAddr,tokio::task::Joi
     (address,server)
 }
 
-async fn claude_actor(dir:&std::path::Path,cano:std::net::SocketAddr,policy:std::net::SocketAddr) -> RuntimeHandle {
+async fn claude_actor(dir:&std::path::Path,cano:std::net::SocketAddr) -> RuntimeHandle {
     let target = RuntimeTarget { key:"key".into(),generation:1,name:"session".into(),provider:"claude".into(),
         metadata:json!({"name":"session","headless":true,"session_id":"sid-1","initialized":true}),
         binding:CanoBinding { pid:42,escuta:format!("tcp:{cano}"),token:"secret-test".into(),versao:2 },
@@ -992,8 +949,7 @@ async fn claude_actor(dir:&std::path::Path,cano:std::net::SocketAddr,policy:std:
     let queue = QueueActor::start(store,lease);
     let connection = cano::connect(&target.binding).await.unwrap();
     let engine = RuntimeEngine::new("claude",target.metadata.clone(),1,ClockSample { monotonic_s:0.0,epoch_s:1_800_000_000.0 }).unwrap()
-        // Espera curta pelo Python: o teste de falha confere o erro depois da série.
-        .with_policy(PolicyClient::new(policy,"secret".into(),"instance".into()).with_ready_retry(std::time::Duration::from_millis(10),std::time::Duration::from_millis(200)));
+        .with_policy(PolicyClient::new(crate::refused_address(),"secret".into()));
     RuntimeActor::spawn(target,queue,connection,engine)
 }
 
@@ -1002,9 +958,8 @@ async fn a_failed_sidecar_update_still_hands_the_session_over() {
     // Só status/carimbo/uso/registro são perdoados; o sidecar segura a conversa atual (session_id
     // depois do /clear), e perdê-lo calado deixaria o app lendo o transcript velho.
     let dir = tempfile::tempdir().unwrap();
-    let closed = crate::refused_address();
     let (cano,server) = claude_cano(vec![json!({"type":"system","subtype":"init","session_id":"sid-2"})]).await;
-    let handle = claude_actor(dir.path(),cano,closed).await;
+    let handle = claude_actor(dir.path(),cano).await;
     tokio::time::timeout(std::time::Duration::from_secs(5),async {
         loop {
             // A troca de conversa grava o sidecar pelo ciclo de vida do Rust; sem ele ligado, a gravação
@@ -1022,36 +977,9 @@ async fn a_native_message_that_fails_is_never_typed_nor_put_back_in_the_queue() 
     // O recado nativo sai pelo socket do Claude. Falha a partir dali (aqui, sem o registro do servidor
     // não há classe de modo) é incerta: a entrada não volta para a fila nem cai no teclado (seria
     // enviada de novo).
-    use tokio::io::AsyncReadExt;
     let dir = tempfile::tempdir().unwrap();
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let policy = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        loop {
-            let Ok((stream,_)) = listener.accept().await else { return };
-            tokio::spawn(async move {
-                let mut reader = BufReader::new(stream);
-                loop {
-                    let mut length = 0usize;
-                    loop {
-                        let mut line = String::new();
-                        if reader.read_line(&mut line).await.unwrap_or(0) == 0 { return; }
-                        if line == "\r\n" { break; }
-                        if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") { length = value.trim().parse().unwrap(); }
-                    }
-                    let mut body = vec![0;length]; reader.read_exact(&mut body).await.unwrap();
-                    let kind = serde_json::from_slice::<Value>(&body).unwrap()["kind"].clone();
-                    let data = if kind == "prepare_prompt" { json!({"content":"[de: par] oi","notices":[],"native_candidate":true}) }
-                        else { json!({}) };
-                    let reply = json!({"ok":true,"data":data}).to_string();
-                    let response = format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{reply}",reply.len());
-                    if reader.get_mut().write_all(response.as_bytes()).await.is_err() { return; }
-                }
-            });
-        }
-    });
     let (cano,server) = claude_cano(vec![]).await;
-    let handle = claude_actor(dir.path(),cano,policy).await;
+    let handle = claude_actor(dir.path(),cano).await;
     let input = RuntimeCommand { operation_id:"msg".into(),kind:OperationKind::Input,payload:json!({"text":"[de: par] oi","entry_id":"msg"}) };
     let reply = handle.command(input).await.unwrap();
     assert!(reply.disposition == Disposition::Unknown,"envio nativo que falha é incerto, nunca adiado");
@@ -1294,8 +1222,7 @@ mod launch {
     use super::*;
     use hangar_server::runtime::gateway::RuntimeRegistry;
     use hangar_server::runtime::process;
-    use std::sync::{Arc,Mutex};
-    use tokio::io::AsyncReadExt;
+    use std::sync::Arc;
 
     fn unique_key() -> String {
         let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos() as u64;
@@ -1358,49 +1285,6 @@ for line in sys.stdin:
     }
     fn sidecar(dir:&std::path::Path) -> Value { serde_json::from_slice(&std::fs::read(dir.join("cx.json")).unwrap()).unwrap() }
 
-    /// Nenhuma política da subida nem do arquivo da sessão do Codex chega ao Python.
-    fn assert_python_untouched(calls:&Arc<Mutex<Vec<(String,Value)>>>) {
-        let leaked:Vec<String> = calls.lock().unwrap().iter().map(|(kind,_)|kind.clone())
-            .filter(|kind|matches!(kind.as_str(),"launch_env" | "session.patch_meta" | "session.clear_cano")).collect();
-        assert!(leaked.is_empty(),"o Codex pediu ao Python: {leaked:?}");
-    }
-
-    /// Python falso: anota cada pedido e responde `ok` vazio. Com o Codex local, nada da subida nem do
-    /// arquivo da sessão deveria chegar aqui.
-    async fn policy() -> (std::net::SocketAddr,Arc<Mutex<Vec<(String,Value)>>>) {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let calls = Arc::new(Mutex::new(Vec::new()));
-        let seen = calls.clone();
-        tokio::spawn(async move {
-            loop {
-                let Ok((stream,_)) = listener.accept().await else { return };
-                let seen = seen.clone();
-                tokio::spawn(async move {
-                    let mut reader = BufReader::new(stream);
-                    loop {
-                        let mut length = 0usize;
-                        loop {
-                            let mut line = String::new();
-                            if reader.read_line(&mut line).await.unwrap_or(0) == 0 { return; }
-                            if line == "\r\n" { break; }
-                            if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") { length = value.trim().parse().unwrap(); }
-                        }
-                        let mut body = vec![0;length]; reader.read_exact(&mut body).await.unwrap();
-                        // Só as políticas interessam; o resto (diário) recebe `{}`.
-                        let body:Value = serde_json::from_slice(&body).unwrap_or_default();
-                        let kind = body["kind"].as_str().unwrap_or("").to_owned();
-                        seen.lock().unwrap().push((kind,body["payload"].clone()));
-                        let reply = json!({"ok":true,"data":{}}).to_string();
-                        let response = format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{reply}",reply.len());
-                        if reader.get_mut().write_all(response.as_bytes()).await.is_err() { return; }
-                    }
-                });
-            }
-        });
-        (address,calls)
-    }
-
     fn target(dir:&std::path::Path,key:&str,binding:CanoBinding) -> RuntimeTarget {
         RuntimeTarget { key:key.into(),generation:1,name:"cx".into(),provider:"codex".into(),
             metadata:json!({"name":"cx","key":key,"headless":true,"cwd":dir}),binding,
@@ -1428,8 +1312,7 @@ for line in sys.stdin:
         let owner = dir.path().to_string_lossy().into_owned();
         fake_codex(dir.path());
         write_sidecar(dir.path(),&key,json!({}));
-        let (address,calls) = policy().await;
-        let registry = RuntimeRegistry::new(address,"secret".into(),"instance".into()).with_codex_environment(codex_env(dir.path()));
+        let registry = RuntimeRegistry::new(crate::refused_address(),"secret".into(),"instance".into()).with_codex_environment(codex_env(dir.path()));
         let opened = registry.open_with_launch(target(dir.path(),&key,no_cano()),dir.path().into()).await.unwrap();
         assert_eq!(opened["opened"],true);
         until_ready(&registry,&key).await;
@@ -1441,7 +1324,6 @@ for line in sys.stdin:
         let environ = std::fs::read(format!("/proc/{pid}/environ")).unwrap();
         assert!(environ.split(|b|*b == 0).any(|var|var == format!("HANGAR_CANO_KEY={key}").as_bytes()));
         assert!(environ.split(|b|*b == 0).any(|var|var == format!("HANGAR_CANO_OWNER={owner}").as_bytes()));
-        assert_python_untouched(&calls);
         registry.close(&key,1).await.unwrap();
         let cano:process::Cano = serde_json::from_value(recorded).unwrap();
         process::kill(&cano,&key,dir.path()).await.unwrap();
@@ -1456,16 +1338,13 @@ for line in sys.stdin:
         let codex = fake_codex(dir.path());
         let env:Vec<(String,String)> = env(&key,&owner).as_object().unwrap().iter().map(|(k,v)|(k.clone(),v.as_str().unwrap().to_owned())).collect();
         let live = process::spawn(&process::LaunchSpec { provider:process::Provider::Codex,key:key.clone(),cwd:dir.path().into(),
-            program:vec![codex.to_string_lossy().into_owned(),"app-server".into(),"--stdio".into()],env,
-            cano_extra:Default::default(),sidecar_dir:dir.path().into() }).await.unwrap();
+            program:vec![codex.to_string_lossy().into_owned(),"app-server".into(),"--stdio".into()],env,sidecar_dir:dir.path().into() }).await.unwrap();
         write_sidecar(dir.path(),&key,json!({"cano":serde_json::to_value(&live).unwrap()}));
-        let (address,calls) = policy().await;
-        let registry = RuntimeRegistry::new(address,"secret".into(),"instance".into()).with_codex_environment(codex_env(dir.path()));
+        let registry = RuntimeRegistry::new(crate::refused_address(),"secret".into(),"instance".into()).with_codex_environment(codex_env(dir.path()));
         let binding = CanoBinding { pid:live.pid,escuta:live.escuta.clone(),token:live.token.clone(),versao:2 };
         registry.open_with_launch(target(dir.path(),&key,binding),dir.path().into()).await.unwrap();
         until_ready(&registry,&key).await;
         assert_eq!(sidecar(dir.path())["cano"]["pid"],live.pid,"cano vivo da sessão: conecta e não sobe outro");
-        assert_python_untouched(&calls);
         registry.close(&key,1).await.unwrap();
         process::kill(&live,&key,dir.path()).await.unwrap();
     }
@@ -1481,18 +1360,15 @@ for line in sys.stdin:
         let codex = fake_codex(dir.path());
         let env:Vec<(String,String)> = env(&key,&owner).as_object().unwrap().iter().map(|(k,v)|(k.clone(),v.as_str().unwrap().to_owned())).collect();
         let live = process::spawn(&process::LaunchSpec { provider:process::Provider::Codex,key:key.clone(),cwd:dir.path().into(),
-            program:vec![codex.to_string_lossy().into_owned(),"app-server".into(),"--stdio".into()],env,
-            cano_extra:Default::default(),sidecar_dir:dir.path().into() }).await.unwrap();
+            program:vec![codex.to_string_lossy().into_owned(),"app-server".into(),"--stdio".into()],env,sidecar_dir:dir.path().into() }).await.unwrap();
         write_sidecar(dir.path(),&key,json!({"cano":serde_json::to_value(&live).unwrap()}));
-        let (address,calls) = policy().await;
-        let registry = RuntimeRegistry::new(address,"secret".into(),"instance".into()).with_codex_environment(codex_env(dir.path()));
+        let registry = RuntimeRegistry::new(crate::refused_address(),"secret".into(),"instance".into()).with_codex_environment(codex_env(dir.path()));
         let binding = CanoBinding { pid:live.pid,escuta:live.escuta.clone(),token:live.token.clone(),versao:2 };
         // Reaberta sem subir (a administração do Python): encerrar ainda mata o processo.
         registry.open_managed(target(dir.path(),&key,binding),dir.path().into()).await.unwrap();
         until_ready(&registry,&key).await;
         assert_eq!(registry.close_with_kill(&key,1).await.unwrap(),json!({"closed":true,"killed":true}));
         assert!(matches!(process::liveness(live.pid,&key),process::Liveness::Dead));
-        assert_python_untouched(&calls);
     }
 
     /// `codex` falso que anota cada subida e cada pedido em `calls.jsonl`. Com `crash` na pasta cai no
@@ -1564,18 +1440,17 @@ for line in sys.stdin:
             .map(|pid|process::Cano { pid:pid as u32,escuta:String::new(),token:String::new(),ts:0.0,versao:2,extra:Default::default() }).collect()
     }
 
-    async fn lifecycle_session(dir:&std::path::Path,key:&str,mode:&str,base:std::time::Duration) -> (Arc<RuntimeRegistry>,Arc<Mutex<Vec<(String,Value)>>>) {
+    async fn lifecycle_session(dir:&std::path::Path,key:&str,mode:&str,base:std::time::Duration) -> Arc<RuntimeRegistry> {
         use_cano_bin();
         lifecycle_codex(dir);
         // Sem modo no sidecar: vale o da abertura, e o patch do modo fica visível no arquivo.
         write_sidecar(dir,key,json!({}));
-        let (address,calls) = policy().await;
-        let registry = Arc::new(RuntimeRegistry::new(address,"secret".into(),"instance".into()).with_respawn_base(base).with_codex_environment(codex_env(dir)));
+        let registry = Arc::new(RuntimeRegistry::new(crate::refused_address(),"secret".into(),"instance".into()).with_respawn_base(base).with_codex_environment(codex_env(dir)));
         let mut target = target(dir,key,no_cano());
         target.metadata["permission_mode"] = json!(mode);
         registry.open_with_launch(target,dir.into()).await.unwrap();
         until_ready(&registry,key).await;
-        (registry,calls)
+        registry
     }
 
     async fn until<F:Fn()->bool>(what:&str,check:F) {
@@ -1585,13 +1460,12 @@ for line in sys.stdin:
 
     fn control(id:&str,kind:OperationKind,payload:Value) -> RuntimeCommand { RuntimeCommand { operation_id:id.into(),kind,payload } }
 
-    async fn cleanup(registry:&RuntimeRegistry,key:&str,dir:&std::path::Path,calls:&Arc<Mutex<Vec<(String,Value)>>>) {
+    async fn cleanup(registry:&RuntimeRegistry,key:&str,dir:&std::path::Path) {
         let _ = registry.close(key,1).await;
         // O `codex` falso simples não anota subidas: o cano dele é o do sidecar.
         let current = std::fs::read(dir.join("cx.json")).ok().and_then(|raw|serde_json::from_slice::<Value>(&raw).ok())
             .and_then(|meta|serde_json::from_value::<process::Cano>(meta["cano"].clone()).ok());
         for cano in recorded(dir).into_iter().chain(current) { let _ = process::kill(&cano,key,dir).await; }
-        assert_python_untouched(calls);
     }
 
     #[tokio::test]
@@ -1599,7 +1473,7 @@ for line in sys.stdin:
         let dir = tempfile::tempdir().unwrap();
         let key = unique_key();
         let base = std::time::Duration::from_millis(300);
-        let (registry,policy) = lifecycle_session(dir.path(),&key,"Full Access",base).await;
+        let registry = lifecycle_session(dir.path(),&key,"Full Access",base).await;
         // A partir daqui toda subida cai antes de ficar pronta.
         std::fs::write(dir.path().join("crash"),"").unwrap();
         std::fs::write(dir.path().join("die"),"").unwrap();
@@ -1616,7 +1490,7 @@ for line in sys.stdin:
         assert_eq!(snapshot["view"]["public_state"]["problema"],"codex_headless_nao_subiu",
             "teto esgotado deixa a sessão com o problema: {}",snapshot["view"]["public_state"]);
         assert_eq!(sidecar(dir.path())["cano"]["pid"],recorded(dir.path())[3].pid,"cada subida grava o cano novo no arquivo da sessão");
-        cleanup(&registry,&key,dir.path(),&policy).await;
+        cleanup(&registry,&key,dir.path()).await;
     }
 
     #[tokio::test]
@@ -1629,15 +1503,14 @@ for line in sys.stdin:
             let key = unique_key();
             fake_codex(dir.path());
             write_sidecar(dir.path(),&key,json!({"thread_id":"thread-old"}));
-            let (address,calls) = policy().await;
-            let registry = RuntimeRegistry::new(address,"secret".into(),"instance".into()).with_codex_environment(codex_env(dir.path()));
+            let registry = RuntimeRegistry::new(crate::refused_address(),"secret".into(),"instance".into()).with_codex_environment(codex_env(dir.path()));
             registry.open_with_launch(target(dir.path(),&key,no_cano()),dir.path().into()).await.unwrap();
             until_ready(&registry,&key).await;
             until("thread gravada no arquivo da sessão",||sidecar(dir.path())["thread_id"] == "thread-new").await;
             let meta = sidecar(dir.path());
             assert_eq!(meta["rollout_path"],"/tmp/rollout-thread-new.jsonl");
             assert!(handle_view(&registry,&key).await["public_state"]["problema"].is_null(),"patch recusado como velho");
-            cleanup(&registry,&key,dir.path(),&calls).await;
+            cleanup(&registry,&key,dir.path()).await;
         }
     }
 
@@ -1647,7 +1520,7 @@ for line in sys.stdin:
     async fn patch_on_a_sidecar_of_another_life_shows_a_problem() {
         let dir = tempfile::tempdir().unwrap();
         let key = unique_key();
-        let (registry,calls) = lifecycle_session(dir.path(),&key,"Full Access",std::time::Duration::from_secs(5)).await;
+        let registry = lifecycle_session(dir.path(),&key,"Full Access",std::time::Duration::from_secs(5)).await;
         let mut events = registry.subscribe();
         // Com a trava, como a outra vida grava: sem ela, um patch desta vida ainda a caminho lê o arquivo
         // antigo e o recoloca por cima, e o patch do modo deixa de ser recusado.
@@ -1665,7 +1538,7 @@ for line in sys.stdin:
             }
         }).await.expect("recusa do sidecar aparece como problema");
         assert!(sidecar(dir.path()).get("permission_mode").is_none(),"nada gravado no sidecar da outra vida");
-        cleanup(&registry,&key,dir.path(),&calls).await;
+        cleanup(&registry,&key,dir.path()).await;
     }
 
     /// Reação do ator ao `stale` do patch local: Fast confirmado quando o sidecar já está noutra thread
@@ -1674,7 +1547,7 @@ for line in sys.stdin:
     async fn stale_fast_patch_on_headless_is_only_logged() {
         let dir = tempfile::tempdir().unwrap();
         let key = unique_key();
-        let (registry,calls) = lifecycle_session(dir.path(),&key,"Full Access",std::time::Duration::from_secs(5)).await;
+        let registry = lifecycle_session(dir.path(),&key,"Full Access",std::time::Duration::from_secs(5)).await;
         until("thread no sidecar",||sidecar(dir.path())["thread_id"] == "thread-new").await;
         let mut moved = sidecar(dir.path());
         moved["thread_id"] = json!("thread-other");
@@ -1695,14 +1568,14 @@ for line in sys.stdin:
         let view = handle_view(&registry,&key).await;
         assert!(view["public_state"]["problema"].is_null(),"stale fora da conversa só vai ao log: {}",view["public_state"]);
         assert!(handle.snapshot().await.unwrap()["error"].is_null(),"a sessão segue no Rust");
-        cleanup(&registry,&key,dir.path(),&calls).await;
+        cleanup(&registry,&key,dir.path()).await;
     }
 
     #[tokio::test]
     async fn restart_kills_and_respawns_on_the_same_thread() {
         let dir = tempfile::tempdir().unwrap();
         let key = unique_key();
-        let (registry,policy) = lifecycle_session(dir.path(),&key,"Full Access",std::time::Duration::from_secs(5)).await;
+        let registry = lifecycle_session(dir.path(),&key,"Full Access",std::time::Duration::from_secs(5)).await;
         let old = recorded(dir.path())[0].clone();
         let handle = registry.handle(&key,1).await.unwrap();
         let reply = handle.command(control("restart-1",OperationKind::Restart,json!({}))).await.unwrap();
@@ -1715,14 +1588,14 @@ for line in sys.stdin:
         let resumed:Vec<Value> = calls(dir.path()).into_iter().filter(|call|call["method"] == "thread/resume").collect();
         assert_eq!(resumed.last().unwrap()["params"]["threadId"],"thread-new","a conversa continua na mesma thread");
         assert_eq!(starts(dir.path()).len(),2,"um processo novo, nunca dois");
-        cleanup(&registry,&key,dir.path(),&policy).await;
+        cleanup(&registry,&key,dir.path()).await;
     }
 
     #[tokio::test]
     async fn permission_same_sandbox_only_patches_meta() {
         let dir = tempfile::tempdir().unwrap();
         let key = unique_key();
-        let (registry,policy) = lifecycle_session(dir.path(),&key,"Full Access",std::time::Duration::from_secs(5)).await;
+        let registry = lifecycle_session(dir.path(),&key,"Full Access",std::time::Duration::from_secs(5)).await;
         let handle = registry.handle(&key,1).await.unwrap();
         let reply = handle.command(control("perm-1",OperationKind::SetPermissionMode,json!({"mode":"full access"}))).await.unwrap();
         assert!(reply.disposition == Disposition::Accepted);
@@ -1731,14 +1604,14 @@ for line in sys.stdin:
         assert_eq!(starts(dir.path()).len(),1,"mesmo sandbox: nenhum processo novo");
         let unknown = handle.command(control("perm-2",OperationKind::SetPermissionMode,json!({"mode":"turbo"}))).await;
         assert_eq!(unknown.err().unwrap().code,"erro_modo_desconhecido");
-        cleanup(&registry,&key,dir.path(),&policy).await;
+        cleanup(&registry,&key,dir.path()).await;
     }
 
     #[tokio::test]
     async fn permission_other_sandbox_respawns_when_idle_and_refuses_when_busy() {
         let dir = tempfile::tempdir().unwrap();
         let key = unique_key();
-        let (registry,policy) = lifecycle_session(dir.path(),&key,"Full Access",std::time::Duration::from_secs(5)).await;
+        let registry = lifecycle_session(dir.path(),&key,"Full Access",std::time::Duration::from_secs(5)).await;
         let handle = registry.handle(&key,1).await.unwrap();
         let input = handle.command(RuntimeCommand { operation_id:"in-1".into(),kind:OperationKind::Input,payload:json!({"text":"oi"}) }).await.unwrap();
         assert!(input.disposition == Disposition::Accepted);
@@ -1769,7 +1642,7 @@ for line in sys.stdin:
         tokio::time::timeout(std::time::Duration::from_secs(5),async {
             while handle.snapshot().await.unwrap()["view"]["permission_mode"] != "Ask for approval" { tokio::time::sleep(std::time::Duration::from_millis(20)).await; }
         }).await.expect("vista publicada com o modo novo");
-        cleanup(&registry,&key,dir.path(),&policy).await;
+        cleanup(&registry,&key,dir.path()).await;
     }
 
     async fn until_idle(handle:&RuntimeHandle) {
@@ -1782,7 +1655,7 @@ for line in sys.stdin:
     async fn sandbox_switch_that_fails_to_start_keeps_the_new_mode_for_the_next_life() {
         let dir = tempfile::tempdir().unwrap();
         let key = unique_key();
-        let (registry,policy) = lifecycle_session(dir.path(),&key,"Full Access",std::time::Duration::from_millis(300)).await;
+        let registry = lifecycle_session(dir.path(),&key,"Full Access",std::time::Duration::from_millis(300)).await;
         let handle = registry.handle(&key,1).await.unwrap();
         // Sem o `codex` no PATH a subida falha; ele volta antes da religação automática (300 ms).
         let (codex,hidden) = (dir.path().join("codex"),dir.path().join("codex.off"));
@@ -1801,7 +1674,7 @@ for line in sys.stdin:
         let view = handle_view(&registry,&key).await;
         assert_eq!(view["permission_mode"],"Ask for approval");
         assert!(view["public_state"]["problema"].is_null(),"a vida nova pronta não carrega o problema da subida que falhou: {}",view["public_state"]);
-        cleanup(&registry,&key,dir.path(),&policy).await;
+        cleanup(&registry,&key,dir.path()).await;
     }
 
     async fn handle_view(registry:&RuntimeRegistry,key:&str) -> Value {
@@ -1812,7 +1685,7 @@ for line in sys.stdin:
     async fn process_killed_mid_turn_respawns_and_shows_the_cut_turn() {
         let dir = tempfile::tempdir().unwrap();
         let key = unique_key();
-        let (registry,policy) = lifecycle_session(dir.path(),&key,"Full Access",std::time::Duration::from_millis(300)).await;
+        let registry = lifecycle_session(dir.path(),&key,"Full Access",std::time::Duration::from_millis(300)).await;
         let handle = registry.handle(&key,1).await.unwrap();
         handle.command(RuntimeCommand { operation_id:"in-1".into(),kind:OperationKind::Input,payload:json!({"text":"oi"}) }).await.unwrap();
         until("turno aberto",||calls(dir.path()).iter().any(|call|call["method"] == "turn/start")).await;
@@ -1828,7 +1701,7 @@ for line in sys.stdin:
             }
         }).await.expect("a sessão mostra o turno cortado depois de religar");
         assert_eq!(starts(dir.path()).len(),2,"um processo novo, nunca dois");
-        cleanup(&registry,&key,dir.path(),&policy).await;
+        cleanup(&registry,&key,dir.path()).await;
     }
 
     #[tokio::test]
@@ -1836,14 +1709,14 @@ for line in sys.stdin:
         // O canal do hub nasce com a sessão aberta no Rust, passa pela religação e esvazia no `close`.
         let dir = tempfile::tempdir().unwrap();
         let key = unique_key();
-        let (registry,policy) = lifecycle_session(dir.path(),&key,"Full Access",std::time::Duration::from_millis(300)).await;
+        let registry = lifecycle_session(dir.path(),&key,"Full Access",std::time::Duration::from_millis(300)).await;
         let rx = registry.live("cx");
         until("estado da sessão aberta no canal",||rx.borrow().as_ref().is_some_and(|s|s.public_state["state"] == "idle")).await;
         process::kill(&recorded(dir.path())[0],&key,dir.path()).await.unwrap();
         until("religou sozinho",||recorded(dir.path()).len() >= 2).await;
         until_ready(&registry,&key).await;
         until("vida nova no mesmo canal",||rx.borrow().as_ref().is_some_and(|s|s.public_state["state"] == "idle" && s.error.is_none())).await;
-        cleanup(&registry,&key,dir.path(),&policy).await;
+        cleanup(&registry,&key,dir.path()).await;
         until("fechar esvazia o canal",||rx.borrow().is_none()).await;
     }
 
@@ -1851,7 +1724,7 @@ for line in sys.stdin:
     async fn close_with_kill_ends_the_process() {
         let dir = tempfile::tempdir().unwrap();
         let key = unique_key();
-        let (registry,policy) = lifecycle_session(dir.path(),&key,"Full Access",std::time::Duration::from_secs(5)).await;
+        let registry = lifecycle_session(dir.path(),&key,"Full Access",std::time::Duration::from_secs(5)).await;
         let cano = recorded(dir.path())[0].clone();
         let traces = ||std::fs::read_dir(dir.path()).unwrap().flatten()
             .filter(|entry|entry.file_name().to_string_lossy().starts_with(&format!("cano-{}",&key[..16]))).count();

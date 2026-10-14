@@ -552,7 +552,6 @@ def _queue(coordinator, descriptor, action):
 
 
 def _service(coordinator, descriptor, operation_id, request_id, kind, payload):
-    from app import runtime_policy
     phase = 'reserve-policy:' + uuid.uuid4().hex
     _queue(coordinator, descriptor, {'kind':'prepare','id':phase,
         'payload':{'kind':kind,'request_id':request_id,'payload':payload},'entry_id':None})
@@ -561,7 +560,7 @@ def _service(coordinator, descriptor, operation_id, request_id, kind, payload):
         'generation':descriptor['generation'], 'jsonl':descriptor['jsonl'], 'descriptor':descriptor,
         'operation_id':request_id, 'validate':lambda:assert_writer(descriptor['name'])}
     try:
-        result = runtime_policy.run(kind, payload, metadata)
+        result = {'terminal_facts':facts, 'terminal_publish':publish, 'terminal_plugin_control':plugin_control}[kind](payload, metadata)
     except BaseException:
         _queue(coordinator, descriptor, {'kind':'finish','id':phase,'status':'unknown','result':None})
         raise

@@ -71,7 +71,9 @@ nascem nele (grupo, par, broadcast); o `native_receipt` do coordenador fica só 
 ### 5. Contrato
 
 Os serviços `session.patch_meta`/`session.clear_cano` do Claude e `native_message` saem da política
-do Python: sobem `RUST_SERVER_PROTOCOL` e `INTERNAL_PROTOCOL` juntos.
+do Python, e com eles a rota `/internal/runtime/policy` inteira (nada mais a usava): o
+`runtime_policy.py`, a chamada HTTP do `PolicyClient` e o ramo `launch_env` do Claude, que o Python já
+recusava. Sobem `RUST_SERVER_PROTOCOL` e `INTERNAL_PROTOCOL` juntos (68).
 
 ## Verificação
 

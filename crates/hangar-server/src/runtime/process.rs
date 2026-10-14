@@ -11,7 +11,7 @@ use std::time::Duration;
 
 pub use crate::session_write::table::Provider;
 
-/// O que o Python entrega pela política `launch_env`.
+/// Subida de um processo pelo cano (o Codex sem terminal; o comando vem de `codex_launch`).
 pub struct LaunchSpec {
     pub provider: Provider,
     /// Os 16 primeiros caracteres dão nome ao socket e ao log (`cano-<key16>…`).
@@ -21,7 +21,6 @@ pub struct LaunchSpec {
     pub program: Vec<String>,
     /// Ambiente completo. É segredo: nunca vai para log nem disco.
     pub env: Vec<(String, String)>,
-    pub cano_extra: Map<String, Value>,
     pub sidecar_dir: PathBuf,
 }
 
@@ -292,7 +291,7 @@ pub async fn spawn(spec: &LaunchSpec) -> Result<Cano, ProcessError> {
         .ok_or_else(|| ProcessError::Spawn(format!("binário não encontrado: {program}")))?;
     let program=std::iter::once(exe.into_os_string()).chain(spec.program[1..].iter().map(std::ffi::OsString::from)).collect();
     let env=spec.env.iter().map(|(k,v)|(k.into(),v.into())).collect();
-    spawn_recipe(PreparedRecipe {bin,prefix:prefix.to_vec(),program,env,cwd:spec.cwd.clone(),key:spec.key.clone(),sidecar_dir:spec.sidecar_dir.clone(),extra:spec.cano_extra.clone()}).await
+    spawn_recipe(PreparedRecipe {bin,prefix:prefix.to_vec(),program,env,cwd:spec.cwd.clone(),key:spec.key.clone(),sidecar_dir:spec.sidecar_dir.clone(),extra:Map::new()}).await
 }
 
 pub(crate) fn scope_command()->Result<Vec<std::ffi::OsString>,ProcessError> {

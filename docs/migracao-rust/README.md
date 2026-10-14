@@ -52,9 +52,9 @@ trabalho da máquina de origem; nesta pasta os arquivos equivalentes são os da 
   terminal, Pi, Kimi, omp e orq seguem no Python (provedores não migrados).
 - **Contrato interno versionado à mão.** Mudou rota `/internal`, evento do `side-events` ou variável
   passada ao filho → subir `RUST_SERVER_PROTOCOL` (Python) e `INTERNAL_PROTOCOL` (Rust) juntos.
-  Atual: **67** (a 67 tira da política do Python o `session.patch_meta`/`session.clear_cano` do
-  Claude e o `native_message`, que passam ao Rust na #145; a 66 veio com as credenciais no Rust);
-  antes, **65** (a 65 junta o filtro do `/commands` do Claude no Rust, operação `hidden` da ponte de
+  Atual: **68** (#145: o `session.patch_meta`/`session.clear_cano` do Claude e o `native_message`
+  passam ao Rust, e com eles sai a rota `/internal/runtime/policy`; a 66 veio com as credenciais no
+  Rust); antes, **65** (a 65 junta o filtro do `/commands` do Claude no Rust, operação `hidden` da ponte de
   customizações, com a ponte `/__hangar_server/forwarded`, por onde convidado e Connect chegam às
   rotas de plano e ao catálogo de customizações no Rust; cada um estava na 64 do seu branch); antes,
   **63** (perguntas, permissões e ciclo de vida da sessão aberta no Rust, branch

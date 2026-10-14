@@ -145,44 +145,36 @@ fn healthy(terminal:bool,view:&Value)->bool {
 fn failure(code:&str) -> RuntimeError { RuntimeError::new(code,"runtime indisponível para esta chave ou geração") }
 
 /// Regra 1 do módulo de processo: cano gravado `Ours` conecta (mesmo sem `versao`); morto, de outro
-/// programa ou ausente, sobe outro com o ambiente calculado agora (nunca guardado): o do Codex aqui
-/// mesmo (`codex_launch`), o dos outros pelo Python.
+/// programa ou ausente, sobe outro com o ambiente calculado agora (nunca guardado, `codex_launch`). Só o
+/// Codex sobe por aqui.
 pub(super) async fn launch_if_needed(policy:&PolicyClient,target:&mut RuntimeTarget,sidecar_dir:&std::path::Path) -> Result<Option<process::Cano>,RuntimeError> {
     let recorded = target.binding.pid;
     if recorded != 0 {
         let key = target.key.clone();
         let state = tokio::task::spawn_blocking(move||process::liveness(recorded,&key)).await.map_err(|_|failure("launch_job"))?;
         if state == process::Liveness::Ours { return Ok(None); }
-        if target.provider=="claude" {return Err(RuntimeError::new("relaunch_recipe_missing","a vida anterior já terminou e sua receita em memória não está disponível; não relancei pelo Python"));}
     }
-    let (program,vars,cano_extra) = if target.provider == "codex" {
-        let (base,dir,mut meta) = (policy.codex_environment(),sidecar_dir.to_owned(),target.metadata.clone());
-        if let Value::Object(fields) = &mut meta { fields.insert("name".into(),json!(target.name)); fields.insert("key".into(),json!(target.key)); }
-        let launch = tokio::task::spawn_blocking(move||super::codex_launch::launch_env(&base,&dir,&meta)).await.map_err(|_|failure("launch_job"))??;
-        (launch.program,launch.env,Default::default())
-    } else {
-        let env = launch_policy(policy,target,sidecar_dir,"launch_env",json!({})).await?;
-        if let Some(code) = env["error"].as_str() { return Err(RuntimeError::new(code,"o Python não montou o comando da sessão")); }
-        let shape = ||failure("launch_env_shape");
-        let program:Vec<String> = serde_json::from_value(env["program"].clone()).map_err(|_|shape())?;
-        let vars:BTreeMap<String,String> = serde_json::from_value(env["env"].clone()).map_err(|_|shape())?;
-        let cano_extra = match &env["cano_extra"] { Value::Null=>Default::default(),Value::Object(extra)=>extra.clone(),_=>return Err(shape()) };
-        (program,vars,cano_extra)
-    };
+    // O processo do Claude nasce da receita em memória (`claude_relaunch`), nunca por aqui.
+    if target.provider != "codex" {
+        return Err(RuntimeError::new("relaunch_recipe_missing","a vida anterior já terminou e sua receita em memória não está disponível; não relancei pelo Python"));
+    }
+    let (base,dir,mut meta) = (policy.codex_environment(),sidecar_dir.to_owned(),target.metadata.clone());
+    if let Value::Object(fields) = &mut meta { fields.insert("name".into(),json!(target.name)); fields.insert("key".into(),json!(target.key)); }
+    let launch = tokio::task::spawn_blocking(move||super::codex_launch::launch_env(&base,&dir,&meta)).await.map_err(|_|failure("launch_job"))??;
     let cwd = target.metadata["cwd"].as_str().filter(|cwd|!cwd.is_empty()).ok_or_else(||failure("launch_cwd"))?;
     let spec = process::LaunchSpec { provider:process::Provider::from_str(&target.provider).ok_or_else(||failure("runtime_provider"))?,
-        key:target.key.clone(),cwd:cwd.into(),program,env:vars.into_iter().collect(),cano_extra,sidecar_dir:sidecar_dir.to_owned() };
+        key:target.key.clone(),cwd:cwd.into(),program:launch.program,env:launch.env.into_iter().collect(),sidecar_dir:sidecar_dir.to_owned() };
     let cano = match process::spawn(&spec).await {
         Ok(cano)=>cano,
         Err(error)=>{
             // O gravado já não serve (morto ou de outro programa): o arquivo da sessão para de apontá-lo.
-            if recorded != 0 && matches!(error,process::ProcessError::NotListening) { clear_cano(policy,target,sidecar_dir,recorded).await; }
+            if recorded != 0 && matches!(error,process::ProcessError::NotListening) { clear_cano(target,sidecar_dir,recorded).await; }
             let detail = match &error { process::ProcessError::Spawn(detail)=>detail.as_str(),_=>"o processo da sessão não subiu" };
             return Err(RuntimeError::new(error.code(),detail));
         }
     };
     let value = serde_json::to_value(&cano).map_err(|_|failure("cano_json"))?;
-    if let Err(error) = launch_policy(policy,target,sidecar_dir,"session.patch_meta",json!({"cano":value})).await {
+    if let Err(error) = launch_sidecar(target,sidecar_dir,"session.patch_meta",json!({"cano":value})).await {
         // Sem o arquivo da sessão apontando para ele, o processo ficaria sem dono.
         if let Err(stop) = process::kill(&cano,&target.key,sidecar_dir).await {
             tracing::warn!(key=%target.key,code=stop.code(),"cano não gravado não foi encerrado");
@@ -193,18 +185,14 @@ pub(super) async fn launch_if_needed(policy:&PolicyClient,target:&mut RuntimeTar
     target.metadata["cano"] = value;
     Ok(Some(cano))
 }
-/// Arquivo da sessão na subida e na religação. O do Codex é gravado aqui (a vida é a chave, a vista
-/// vem do arquivo da fila, como o Python lia), sem passar pelo Python; os outros, pela política dele.
-pub(super) async fn launch_policy(policy:&PolicyClient,target:&RuntimeTarget,sidecar_dir:&std::path::Path,kind:&str,payload:Value) -> Result<Value,RuntimeError> {
-    if matches!(target.provider.as_str(),"codex" | "claude") && matches!(kind,"session.patch_meta" | "session.clear_cano") {
-        let (dir,provider,name,key,state_path,kind) = (sidecar_dir.to_owned(),target.provider.clone(),target.name.clone(),target.key.clone(),target.state_path.clone(),kind.to_owned());
-        return tokio::task::spawn_blocking(move || {
-            let saved = if kind == "session.clear_cano" { Value::Null } else { saved_view(&state_path)? };
-            sidecar_service(&provider,&dir,&name,&key,&kind,&payload,&saved)
-        }).await.map_err(|_|failure("sidecar_job"))?;
-    }
-    let phase = format!("launch:{}",crate::mods::state::random_hex(8));
-    policy.run_for(&target.key,target.generation,kind,&RequestId::String(phase.clone()),payload,&phase).await
+/// Arquivo da sessão na subida e na religação, gravado aqui (a vida é a chave, a vista vem do arquivo da
+/// fila, como o Python lia).
+pub(super) async fn launch_sidecar(target:&RuntimeTarget,sidecar_dir:&std::path::Path,kind:&str,payload:Value) -> Result<Value,RuntimeError> {
+    let (dir,provider,name,key,state_path,kind) = (sidecar_dir.to_owned(),target.provider.clone(),target.name.clone(),target.key.clone(),target.state_path.clone(),kind.to_owned());
+    tokio::task::spawn_blocking(move || {
+        let saved = if kind == "session.clear_cano" { Value::Null } else { saved_view(&state_path)? };
+        sidecar_service(&provider,&dir,&name,&key,&kind,&payload,&saved)
+    }).await.map_err(|_|failure("sidecar_job"))?
 }
 /// `session.patch_meta`/`session.clear_cano` de uma sessão sem terminal, gravados no sidecar do provedor.
 /// Bloqueante: chamar fora do runtime.
@@ -221,18 +209,18 @@ fn saved_view(state_path:&std::path::Path) -> Result<Value,RuntimeError> {
     let state:Value = super::queue::read_replaced(state_path).ok().and_then(|raw|serde_json::from_slice(&raw).ok()).ok_or_else(||failure("queue_state_read"))?;
     Ok(match &state["runtime_state"]["view"] { Value::Null=>json!({}),view=>view.clone() })
 }
-async fn clear_cano(policy:&PolicyClient,target:&RuntimeTarget,sidecar_dir:&std::path::Path,pid:u32) {
-    if let Err(error) = launch_policy(policy,target,sidecar_dir,"session.clear_cano",json!({"pid":pid})).await {
+async fn clear_cano(target:&RuntimeTarget,sidecar_dir:&std::path::Path,pid:u32) {
+    if let Err(error) = launch_sidecar(target,sidecar_dir,"session.clear_cano",json!({"pid":pid})).await {
         tracing::warn!(key=%target.key,code=%error.code,"cano não saiu do arquivo da sessão");
     }
 }
 /// O cano subido agora e que não deu conexão: morre e sai do arquivo da sessão.
-pub(super) async fn discard(policy:&PolicyClient,target:&RuntimeTarget,cano:&process::Cano,sidecar_dir:&std::path::Path) {
+pub(super) async fn discard(target:&RuntimeTarget,cano:&process::Cano,sidecar_dir:&std::path::Path) {
     if let Err(stop) = process::kill(cano,&target.key,sidecar_dir).await {
         tracing::warn!(key=%target.key,code=stop.code(),"cano sem conexão não foi encerrado");
         return;
     }
-    clear_cano(policy,target,sidecar_dir,cano.pid).await;
+    clear_cano(target,sidecar_dir,cano.pid).await;
 }
 
 /// Prazo da devolução da janela esticada ao abrir a sessão com terminal (`unstretch`).
@@ -261,7 +249,7 @@ impl RuntimeRegistry {
     pub fn new(upstream:SocketAddr,secret:String,instance:String) -> Self {
         let reopen_to=(upstream,secret.clone(),crate::proxy::client(),crate::diag::DiagClient::new(upstream,secret.clone()));
         Self { reopen_to,terminal_problems:Default::default(),terminal_status:Default::default(),heal_attempts:Default::default(),interactions:None,entries:Arc::new(Mutex::new(BTreeMap::new())),terminal_states:None,terms:None,events:broadcast::channel(1024).0,
-            policy:PolicyClient::new(upstream,secret,instance.clone()),instance,lifecycle:Mutex::new(BTreeMap::new()),revisions:Mutex::new(BTreeMap::new()),mods:None,plugin:None,ingress:Default::default(),
+            policy:PolicyClient::new(upstream,secret),instance,lifecycle:Mutex::new(BTreeMap::new()),revisions:Mutex::new(BTreeMap::new()),mods:None,plugin:None,ingress:Default::default(),
             respawn_base:Duration::from_secs(5),permissions:None,processes:Arc::new(crate::list::procs::SystemProcs::default()),live:Default::default(),codex_owned:Default::default(),hubs:std::sync::OnceLock::new(),self_ref:std::sync::OnceLock::new(),
             watcher:std::sync::OnceLock::new(),codex_wake:Arc::new(tokio::sync::Notify::new()),native:Default::default() }
     }
@@ -796,7 +784,7 @@ impl RuntimeRegistry {
                     tracing::warn!(key=%target.key,code=%error.code,stop=?stop.kind(),"fila não fechou depois da falha ao conectar no cano");
                 }
                 // Só o cano subido nesta chamada morre: um vivo de antes pode estar no meio de um turno.
-                if let (Ok(Some(cano)),Some(sidecar_dir)) = (launched,launch) { discard(&self.policy,&target,&cano,sidecar_dir).await; }
+                if let (Ok(Some(cano)),Some(sidecar_dir)) = (launched,launch) { discard(&target,&cano,sidecar_dir).await; }
                 return Err(error);
             },
         };
@@ -2514,13 +2502,12 @@ mod tests {
         assert_eq!(sidecar_dir.as_deref(),Some(std::path::Path::new("dir")));
     }
 
-    /// O Python desta política não atende (porta fechada, repetição curta): o Codex grava o arquivo da
-    /// sessão e monta o comando sem ele; o Claude grava o arquivo da sessão sem ele e só pede o comando.
+    /// Nada da subida vai ao Python (porta fechada): o Codex grava o arquivo da sessão e monta o comando;
+    /// o Claude grava o arquivo da sessão e nunca sobe por aqui.
     #[tokio::test]
     async fn sidecar_launch_policies_never_reach_python() {
         let dir = tempfile::tempdir().unwrap();
-        let policy = PolicyClient::new("127.0.0.1:9".parse().unwrap(),"test".into(),"instance".into())
-            .with_ready_retry(Duration::from_millis(1),Duration::from_millis(5))
+        let policy = PolicyClient::new("127.0.0.1:9".parse().unwrap(),"test".into())
             .with_codex_environment(crate::accounts::environment::AccountEnvironment::from_map(
                 [("HOME".to_owned(),dir.path().to_string_lossy().into_owned()),("PATH".to_owned(),dir.path().join("bin").to_string_lossy().into_owned())].into()));
         std::fs::write(super::super::codex_sidecar::path(dir.path(),"cx"),json!({"name":"cx","key":"k","headless":true,"cano":{"pid":7}}).to_string()).unwrap();
@@ -2530,19 +2517,19 @@ mod tests {
             binding:CanoBinding { pid:0,escuta:String::new(),token:String::new(),versao:2 },
             lease_path:dir.path().join("q.lock"),state_path:dir.path().join("q.json"),projection_dir:dir.path().join("projection"),
             transcript:dir.path().join("rollout.jsonl"),created:0.0 };
-        assert_eq!(launch_policy(&policy,&target,dir.path(),"session.patch_meta",json!({"model":"m"})).await.unwrap(),json!({"updated":true}));
-        assert_eq!(launch_policy(&policy,&target,dir.path(),"session.patch_meta",json!({"model":"x"})).await.unwrap()["stale"],true,"a vista do arquivo da fila vale");
-        assert_eq!(launch_policy(&policy,&target,dir.path(),"session.clear_cano",json!({"pid":7})).await.unwrap(),json!({"cleared":true}));
+        assert_eq!(launch_sidecar(&target,dir.path(),"session.patch_meta",json!({"model":"m"})).await.unwrap(),json!({"updated":true}));
+        assert_eq!(launch_sidecar(&target,dir.path(),"session.patch_meta",json!({"model":"x"})).await.unwrap()["stale"],true,"a vista do arquivo da fila vale");
+        assert_eq!(launch_sidecar(&target,dir.path(),"session.clear_cano",json!({"pid":7})).await.unwrap(),json!({"cleared":true}));
         // Sem `codex` no PATH injetado a subida falha no processo, nunca numa política do Python.
         let failed = launch_if_needed(&policy,&mut target,dir.path()).await.err().expect("a subida sem codex precisa falhar");
         assert!(!failed.code.starts_with("policy_"),"{}",failed.code);
         let claude = RuntimeTarget { provider:"claude".into(),name:"cl".into(),..target };
         std::fs::write(super::super::codex_sidecar::path(dir.path(),"cl"),json!({"name":"cl","key":"k","headless":true,"cano":{"pid":7}}).to_string()).unwrap();
-        assert_eq!(launch_policy(&policy,&claude,dir.path(),"session.patch_meta",json!({"cano":{"pid":8}})).await.unwrap(),json!({"updated":true}));
-        assert_eq!(launch_policy(&policy,&claude,dir.path(),"session.patch_meta",json!({"model":"x"})).await.unwrap()["stale"],true,"a vista do arquivo da fila vale");
-        assert_eq!(launch_policy(&policy,&claude,dir.path(),"session.clear_cano",json!({"pid":8})).await.unwrap(),json!({"cleared":true}));
-        assert!(launch_policy(&policy,&claude,dir.path(),"launch_env",json!({})).await.unwrap_err().code.starts_with("policy_"),
-            "o comando do Claude segue pelo Python");
+        assert_eq!(launch_sidecar(&claude,dir.path(),"session.patch_meta",json!({"cano":{"pid":8}})).await.unwrap(),json!({"updated":true}));
+        assert_eq!(launch_sidecar(&claude,dir.path(),"session.patch_meta",json!({"model":"x"})).await.unwrap()["stale"],true,"a vista do arquivo da fila vale");
+        assert_eq!(launch_sidecar(&claude,dir.path(),"session.clear_cano",json!({"pid":8})).await.unwrap(),json!({"cleared":true}));
+        let mut claude = claude;
+        assert_eq!(launch_if_needed(&policy,&mut claude,dir.path()).await.err().expect("o Claude nunca sobe por aqui").code,"relaunch_recipe_missing");
     }
 
     #[test]

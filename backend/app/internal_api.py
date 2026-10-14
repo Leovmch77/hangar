@@ -3,7 +3,6 @@
 import asyncio
 import secrets
 import json
-import copy
 import logging
 import re
 import time
@@ -48,7 +47,6 @@ async def require_internal(request: Request) -> None:
 
 
 router = APIRouter(prefix="/internal", dependencies=[Depends(require_internal)], include_in_schema=False)
-_policy_calls = {}
 
 
 @router.get("/ping")
@@ -122,58 +120,6 @@ async def claude_window(request: Request):
         return await internal_thread(account_bridge.claude_windows.run, body)
     except (KeyError, TypeError, ValueError, OSError, RuntimeError):
         raise HTTPException(409, detail={"code": "account_claude_window_rejected"}) from None
-
-
-@router.post("/runtime/policy")
-async def runtime_policy(request: Request):
-    from app import runtime_coordinator, runtime_policy as service
-    coordinator, instance, raw = await _instance_body(request, (32 << 20) + 1024)
-    try:
-        body = json.loads(raw)
-        if (not isinstance(body, dict) or set(body) != {"key", "generation", "request_id", "phase_id", "kind", "payload"}
-                or not isinstance(body["key"], str) or type(body["generation"]) is not int
-                or type(body["request_id"]) not in (int, str) or not isinstance(body["phase_id"], str)
-                or not isinstance(body["kind"], str) or not isinstance(body["payload"], dict)):
-            raise ValueError("serviço inválido")
-    except (KeyError, TypeError, ValueError):
-        raise HTTPException(400) from None
-    # Na subida o Rust pede a política antes de o open dele responder e a chave entrar aqui: 503 é
-    # "tente de novo", e o 400 fica só para pedido torto, que não adianta repetir.
-    slot = coordinator.slots.get(body["key"])
-    if slot is None:
-        raise HTTPException(503, detail={"code": "runtime_slot_pending"})
-
-    def validate():
-        with slot.guard:
-            if (coordinator.instance != instance or slot.binding.key != body["key"]
-                    or slot.binding.generation != body["generation"]
-                    or slot.phase != runtime_coordinator.Phase.Rust
-                    or slot.lease is not None and not slot.lease.closed):
-                raise RuntimeError("serviço de outra posse ou geração")
-
-    await internal_thread(validate)
-    key = (instance, body["key"], body["generation"], body["phase_id"])
-    if key not in _policy_calls:
-        metadata = copy.deepcopy(slot.binding.meta)
-        metadata.update(provider=slot.binding.provider, name=slot.binding.name, key=slot.binding.key,
-                        generation=slot.binding.generation, jsonl=slot.binding.jsonl,
-                        descriptor=slot.binding.descriptor(),
-                        operation_id=body["request_id"] if isinstance(body["request_id"], str) else body["phase_id"], validate=validate)
-        async def perform():
-            await internal_thread(validate)
-            with slot.guard:
-                slot.active += 1
-            try:
-                return await service.execute(body["kind"], body["payload"], metadata)
-            finally:
-                with slot.guard:
-                    slot.active -= 1
-                coordinator._signal(slot)
-        task = _policy_calls[key] = asyncio.create_task(perform())
-        # Só a chamada em curso fica: a repetida depois do fim é inofensiva (nenhum serviço daqui escreve
-        # na sessão), e guardar cada resultado fazia o mapa crescer sem fim.
-        task.add_done_callback(lambda _done: _policy_calls.pop(key, None))
-    return await asyncio.shield(_policy_calls[key])
 
 
 _LIST_FACTS_MAX = 8 << 20
@@ -251,7 +197,7 @@ async def term_origin(request: Request) -> dict:
 @router.post("/list/demote")
 async def list_demote(request: Request) -> dict:
     """`hooks.demote_awaiting`: o pane que a lista do Rust capturou contradisse o marcador."""
-    from app import runtime_policy
+    from app import hook_state
     raw = await request.body()
     try:
         body = json.loads(raw) if len(raw) <= 64 * 1024 else None
@@ -261,7 +207,10 @@ async def list_demote(request: Request) -> dict:
     except (ValueError, RecursionError):
         raise HTTPException(400) from None
     # No laço, como o rebaixamento de hoje: o mapa e o registro são mexidos sem trava pelo vigia.
-    runtime_policy.demote_awaiting(body["sids"])
+    # O mapa de marcadores e o registro nativo em memória são do Python (a prévia e as transições leem
+    # deles), então o Rust pede aqui em vez de regravar o sidecar.
+    for sid in body["sids"]:
+        hook_state.hook_state.demote_awaiting(sid)
     return {"ok": True}
 
 
