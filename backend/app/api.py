@@ -648,7 +648,9 @@ async def _repasse_ao_rust(request: Request, sem_rust: dict, destino: str):
 async def _contas_pelo_rust(request: Request, call_next):
     """Contas e cotas têm um dono só, o Rust."""
     from app import account_bridge
-    if not request.url.path.startswith(account_bridge.ACCOUNT_PREFIXES):
+    # A lista de credenciais é do Rust só no GET exato: apelido, cookie e sincronizar seguem aqui.
+    listing = request.method == "GET" and request.url.path == "/api/credenciais"
+    if not (listing or request.url.path.startswith(account_bridge.ACCOUNT_PREFIXES)):
         return await call_next(request)
     return await _repasse_ao_rust(request, account_bridge.NEED_RUST, "/__hangar_server/accounts/public")
 

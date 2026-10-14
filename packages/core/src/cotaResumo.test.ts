@@ -1,5 +1,39 @@
-import { describe, it, expect } from 'vitest';
-import { contaComFolga, cotaDaConta, resumoCota, type CotaContaResumo } from './cotaResumo';
+import { describe, it, expect, beforeEach } from 'vitest';
+import { contaComFolga, cotaDaConta, motivoCotaAntiga, resumoCota, type CotaContaResumo } from './cotaResumo';
+import { overwriteGetLocale } from './paraglide/runtime';
+import * as m from './paraglide/messages';
+
+describe('cota antiga com a falha nova', () => {
+  beforeEach(() => overwriteGetLocale(() => 'pt'));
+  const lida = (motivo: string | null): CotaContaResumo =>
+    ({ id: 'chave:a', estado: 'lida', janelas: [{ rotulo: '5h', pct: 40 }], motivo });
+  const aviso = (causa: string) => m.cota_nao_atualizou({ causa });
+  it('diz por que os números não atualizaram', () => {
+    expect(motivoCotaAntiga(lida('sem-resposta'))).toBe(aviso(m.cota_causa_sem_resposta()));
+    expect(motivoCotaAntiga(lida('http-429'))).toBe(aviso(m.cota_causa_limite()));
+    expect(motivoCotaAntiga(lida('http-401'))).toBe(aviso(m.cota_causa_recusou()));
+    expect(motivoCotaAntiga(lida('http-403'))).toBe(aviso(m.cota_causa_recusou()));
+    expect(motivoCotaAntiga(lida('http-502'))).toBe(aviso(m.cota_causa_http({ status: '502' })));
+    // 2xx com corpo que não serve não é erro da fonte: é formato.
+    expect(motivoCotaAntiga(lida('http-200'))).toBe(aviso(m.cota_causa_formato()));
+    expect(motivoCotaAntiga(lida('formato-desconhecido'))).toBe(aviso(m.cota_causa_formato()));
+    expect(motivoCotaAntiga(lida('painel-sem-numeros'))).toBe(aviso(m.cota_causa_formato()));
+    expect(motivoCotaAntiga(lida('erro-leitor'))).toBe(aviso(m.cota_causa_formato()));
+    expect(motivoCotaAntiga(lida('resposta-grande'))).toBe(aviso(m.cota_causa_grande()));
+    expect(motivoCotaAntiga(lida('credencial-invalida'))).toBe(aviso(m.cota_causa_credencial()));
+    expect(motivoCotaAntiga(lida('credencial-ilegivel'))).toBe(aviso(m.cota_causa_credencial()));
+    expect(motivoCotaAntiga(lida('causa-nova'))).toBe(aviso(m.cota_causa_outra()));
+  });
+  it('sem falha nova, ou fora da leitura boa, não há aviso', () => {
+    expect(motivoCotaAntiga(lida(null))).toBeNull();
+    // Conta ocupada (login, renovação, redefinição em curso) não é leitura que falhou.
+    expect(motivoCotaAntiga(lida('sessao-viva'))).toBeNull();
+    // A web manda a cota da linha sem `id`.
+    expect(motivoCotaAntiga({ estado: 'lida', motivo: 'sem-resposta' })).toBe(aviso(m.cota_causa_sem_resposta()));
+    expect(motivoCotaAntiga({ ...lida('sem-resposta'), estado: 'indisponivel' })).toBeNull();
+    expect(motivoCotaAntiga(undefined)).toBeNull();
+  });
+});
 
 describe('contaComFolga', () => {
   const cota = (path: string, janelas: CotaContaResumo['janelas'], estado: CotaContaResumo['estado'] = 'lida'): CotaContaResumo =>

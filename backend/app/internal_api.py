@@ -7,7 +7,6 @@ import copy
 import logging
 import re
 import time
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Literal
 
@@ -73,28 +72,6 @@ async def _instance_body(request: Request, limit: int, *, modes=None):
         if len(raw) > limit:
             raise HTTPException(413)
     return coordinator, instance, raw
-
-
-# O Rust só chama esta rota enquanto responde a um pedido de cota do Python que já ocupa um thread do
-# pool padrão; no pool padrão ela esperaria por ele mesmo e os pedidos se travariam até o prazo do Rust.
-_quota_facts_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="quota-facts")
-
-
-@router.post("/accounts/quotas")
-async def quota_facts(request: Request):
-    from app import cotas
-    _, _, raw = await _instance_body(request, 65536, modes={"rust", "pending"})
-    try:
-        body = json.loads(raw)
-        if (not isinstance(body, dict) or set(body) != {"action", "ids"}
-                or body["action"] not in {"sources", "read"}
-                or not isinstance(body["ids"], list) or len(body["ids"]) > 128
-                or any(not isinstance(item, str) or len(item) > 4096 for item in body["ids"])):
-            raise ValueError
-    except (ValueError, TypeError):
-        raise HTTPException(400) from None
-    return await asyncio.get_running_loop().run_in_executor(
-        _quota_facts_pool, cotas.quota_facts, body["action"], body["ids"])
 
 
 @router.post("/accounts/codex-invalidate")

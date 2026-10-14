@@ -2062,6 +2062,51 @@ contava threads `asyncio_N` e o uvloop nomeia `ThreadPoolExecutor-N_M` (mostrava
   sobraram nos dois lados. Uma ponte que vai e volta entre os processos no mesmo pedido é bug de
   desenho, não detalhe de desempenho.
 
+**Credenciais e cotas das outras fontes (13/10/2026, protocolo 58).** O `GET /api/credenciais`
+(chamado pelo app nativo a cada 300 s) ia ao Python, que perguntava ao Rust login, autenticação Codex
+e cota; dentro da cota o Rust voltava ao Python para listar e ler as fontes Kimi, CommandCode e
+OpenCode (`quota_facts`, pool `quota-facts`). Medido em 13/10 (versão `25e3cd44`): na DELPHI-02 e
+no notebook-lhais, ~2 s cravados na cota e ~5 s na lista a cada 10 min, com picos de 20–45 s; em
+12/10 o `pool.espera` mostrou 7 threads presas e um `POST /input` esperou 67 s. Agora a lista
+(caminho exato; as escritas seguem no Python) e as fontes e leitores dessas cotas moram no Rust
+(`accounts/credentials.rs`, `accounts/quotas/other.rs`), conferidos contra goldens gerados pelo
+Python. Regras como ficaram, cada uma conferida por teste:
+
+- **Espera por recusa.** Só conexão recusada (motor em `127.0.0.1:8317` sem ninguém escutando
+  custava 2 s por ciclo no Windows) sobe a escada: 10 min, depois 30 min, depois 1 h. Sem rota,
+  DNS e prazo de conexão não sobem: a Wi-Fi ou a VPN que cai não deixa as fontes da nuvem 1 h
+  apagadas. Qualquer resposta HTTP, `base_url` nova ou chave/cookie trocados zeram a escada (a
+  troca de credencial apaga também a espera do 429). O botão atualizar fura a espera por recusa,
+  não a do 429. Contador editado à mão no `cotas-cache.json` não passa do último degrau.
+- **Prazo de quem responde ao cliente.** `GET /api/credenciais`, `/api/cotas` e
+  `/api/cotas/sugestao` esperam a leitura de rede por até 6 s (o cliente desiste em 8 s); passou
+  disso, respondem com o cache e a leitura segue gravando para a próxima (`quota_deadline` no
+  diário). Pedido sem `forcar` que encontra outra leitura em voo responde do cache na hora, sem
+  entrar na fila; o forçado espera a vez. A rota privada `/internal/accounts/quotas` segue sem
+  prazo.
+- **Resposta.** Corpo acima de 1 MiB (com ou sem `Content-Length`) vira `resposta-grande`. Janela
+  com número não finito (NaN/inf) some; sem janela válida, `formato-desconhecido`. O cliente das
+  fontes não segue redirecionamento (a chave não sai do endereço cadastrado: `http-3xx`), nunca
+  registra valor de chave ou cookie e se apresenta ao Kimi como `User-Agent: hangar`. `resetTime`
+  só com hora local (sem fuso) dentro da troca do horário de verão pode diferir 1 h do Python, e a
+  hora que não existe sai sem reset; o Kimi manda `Z`, então fica como limite.
+- **O que a tela vê.** Falha nova depois de leitura boa mantém os números antigos com o `motivo`
+  da falha, e web, nativo e celular dizem "não atualizou: <causa>"; `sessao-viva` (conta ocupada
+  por login, renovação ou redefinição) não é falha e não ganha aviso, e 2xx com corpo inútil conta
+  como formato desconhecido. Login que não deu para ler leva a causa na linha (`prazo`,
+  `leitura-falhou`, `formato-desconhecido`, `cli-ausente`), mostrada nas três telas; o
+  `cli-indisponivel` do Claude também sai com a conta ocupada por um login, então a tela diz só
+  "Login não conferido". Conta Codex ocupada por um login em curso fica sem motivo e fora do
+  diário. Status de login desconhecido sai `indisponivel`, nunca "desconectado".
+- **Parte com problema sai sozinha.** Motor torto, `engines.json` ilegível, catálogo de contas
+  Claude ou Codex que falha: só aquela parte some (código no diário, `rust.credentials_partial` /
+  `rust.quota_sources_partial`), e a lista e as outras cotas seguem.
+
+Medição antes/depois na DELPHI-02: pendente. Pendências com dono a definir: o login Claude da lista
+não tem prazo total (10 s por chamada do CLI, 4 em paralelo: com 5 ou mais contas e cache frio a
+lista passa dos 8 s do cliente), e a renovação do token Claude vencido ainda volta ao Python pela
+janela de login (`/internal/accounts/claude-window`), em todo chamador da cota.
+
 ## A conversa da sessão é escolhida pelo Rust, e a troca espera duas leituras
 
 Relatado em 12/10/2026: no app nativo de outra máquina, a conversa de uma sessão Claude com terminal

@@ -14,16 +14,6 @@ pub struct AccountsBridge {
 impl AccountsBridge {
     pub(super) fn upstream(&self) -> std::net::SocketAddr { self.upstream }
     pub(super) fn secret(&self) -> &str { &self.secret }
-    pub async fn quotas(&self, action: &str, ids: &[String]) -> Result<serde_json::Value, &'static str> {
-        if !self.upstream.ip().is_loopback() { return Err("account_bridge_address"); }
-        let response = self.client.post(format!("http://{}/internal/accounts/quotas", self.upstream))
-            .header("x-hangar-internal", &self.secret).header("x-hangar-runtime-instance", &self.instance)
-            .header("content-type","application/json")
-            .body(serde_json::json!({"action":action,"ids":ids}).to_string()).send().await.map_err(|_|"quota_bridge_unavailable")?;
-        if !response.status().is_success() { return Err("quota_bridge_unavailable"); }
-        let bytes=response.bytes().await.map_err(|_|"quota_bridge_unavailable")?;
-        serde_json::from_slice(&bytes).map_err(|_|"quota_bridge_invalid")
-    }
     pub fn instance(&self) -> &str {
         &self.instance
     }

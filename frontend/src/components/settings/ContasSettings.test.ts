@@ -412,6 +412,40 @@ describe('ContasSettings — criar e apagar reusam as rotas de sempre', () => {
     unmount(t.comp);
   });
 
+  it('login que o servidor não conferiu diz a causa, no Codex e no Claude', async () => {
+    const codex = chave({ tipo: 'codex', auth_method: 'unknown', codex_account: 'default', ativa: true,
+      id: 'codex:/h/.codex', nome: 'default', nome_natural: 'default', usos: [],
+      login: { estado: 'indisponivel', loggedIn: null, motivo: 'prazo' },
+      cota: { estado: 'sem_credencial', janelas: [] } });
+    const conta = claude({ login: { estado: 'indisponivel', loggedIn: null, motivo: 'cli-indisponivel' } });
+    const t = montar([conta, codex]);
+    await tick(); await tick();
+    const texto = t.el.textContent ?? '';
+    expect(texto).toContain(m.contas_login_prazo());
+    expect(texto).toContain(m.contas_login_nao_conferido());
+    unmount(t.comp);
+  });
+
+  it('cota antiga diz por que os números não atualizaram', async () => {
+    const t = montar([claude({ cota: { estado: 'lida', janelas: [{ rotulo: '5h', pct: 64 }], ts: 1, idade_s: 5,
+      motivo: 'http-429' } })]);
+    await tick(); await tick();
+    const cota = t.el.querySelector<HTMLElement>('.ct-cota')!;
+    expect(cota.textContent).toContain(m.cota_nao_atualizou({ causa: m.cota_causa_limite() }));
+    expect(cota.textContent).toContain('64%');
+    unmount(t.comp);
+  });
+
+  it('no modo compacto a cota antiga também diz por que não atualizou', async () => {
+    localStorage.setItem('cp_contas_compacta', '1');
+    const t = montar([claude({ cota: { estado: 'lida', janelas: [{ rotulo: '5h', pct: 64 }], ts: 1, idade_s: 5,
+      motivo: 'sem-resposta' } })]);
+    await tick(); await tick();
+    const mini = t.el.querySelector<HTMLElement>('.ct-mini-cotas')!;
+    expect(mini.textContent).toContain(m.cota_nao_atualizou({ causa: m.cota_causa_sem_resposta() }));
+    unmount(t.comp);
+  });
+
   it('conta Codex adicional tem Remover; a padrão (ativa) não', async () => {
     const padrao = chave({ tipo: 'codex', auth_method: 'none', codex_account: 'default', ativa: true,
       id: 'codex:/h/.codex', nome: 'default', nome_natural: 'default', usos: [] });

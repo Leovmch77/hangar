@@ -3,7 +3,8 @@
 No modo python (sem binário, CP_RUST_SERVER=0, supervisor que desistiu), as rotas de conta e cota
 que o Rust atende respondem 503 `accounts_need_rust_server`, e os consumidores internos tratam a
 ponte ausente como "sem cota, sem login conhecido", sem ler credencial nem abrir CLI pelo Python.
-As rotas que só existem no Python (lista de credenciais, apelido, cookie) continuam.
+A lista de credenciais (`GET /api/credenciais`) também é do Rust e responde o mesmo 503; as escritas
+que só existem no Python (apelido, cookie, sincronizar) continuam.
 """
 import asyncio
 import json
@@ -25,6 +26,7 @@ TOKEN = "t-contas-sem-rust"
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
 
 RUST_OWNED = [
+    ("GET", "/api/credenciais"),
     ("GET", "/api/cotas"),
     ("GET", "/api/cotas/sugestao"),
     ("GET", "/api/conta-estado"),
@@ -109,15 +111,6 @@ def test_account_routes_answer_unavailable_without_rust(python_owner, method, pa
 def test_unauthenticated_account_route_is_refused_before_unavailable(python_owner):
     response = TestClient(app).get("/api/cotas")
     assert response.status_code == 401
-
-
-def test_python_only_credentials_list_keeps_working_without_reading(python_owner):
-    response = TestClient(app).get("/api/credenciais", headers=AUTH)
-    assert response.status_code == 200
-    [claude] = [row for row in response.json() if row["tipo"] == "claude"]
-    assert claude["login"]["estado"] == "indisponivel"
-    assert claude["login"]["loggedIn"] is None
-    assert claude["cota"] is None
 
 
 def test_python_only_alias_and_cookie_keep_working(python_owner):

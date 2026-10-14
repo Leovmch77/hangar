@@ -136,7 +136,3 @@ class CodexContasLogin:
 
     def preparation_status(self, account: accounts.Account) -> dict:
         return request_preparation(account) or copy.deepcopy(_NEED_RUST_PREPARATION)
-
-    async def preparation_status_async(self, account: accounts.Account) -> dict:
-        """Só a ida HTTP à ponte vai para thread."""
-        return await asyncio.to_thread(request_preparation, account) or copy.deepcopy(_NEED_RUST_PREPARATION)

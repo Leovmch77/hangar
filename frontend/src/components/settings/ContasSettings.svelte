@@ -23,7 +23,7 @@ import { apagarConta, claudeAccountFolder, sairConta, apagarProvedorKimi, delete
     motivoSessaoViva } from '../../lib/cota';
   import NovaCredencialSheet from './NovaCredencialSheet.svelte';
   import CodexContaLogin from './CodexContaLogin.svelte';
-  import { credentialAuth, credentialGroup, codexCliAusente } from '@hangar/core';
+  import { credentialAuth, credentialGroup, codexCliAusente, motivoLoginIndisponivel, motivoCotaAntiga } from '@hangar/core';
   import { listServers, getActiveId } from '../../lib/auth';
   import ProvedorIcone from '../icons/ProvedorIcone.svelte';
   import { serverIdentidade, type Server } from '../../lib/auth';
@@ -1004,6 +1004,8 @@ import { apagarConta, claudeAccountFolder, sairConta, apagarProvedorKimi, delete
                 <span class="ct-sub ct-codex-meta">{conta.login.email}</span>
               {:else if conta.login?.estado === 'ok' && !conta.login.loggedIn}
                 <span class="ct-sub fraco ct-codex-meta">{m.contas_nao_conectada()}</span>
+              {:else if motivoLoginIndisponivel(conta)}
+                <span class="ct-sub ct-vence ct-codex-meta">{motivoLoginIndisponivel(conta)}</span>
               {/if}
               {#if conta.ativa || conta.codex_account || dir}
                 <span class="ct-sub-l ct-codex-meta">
@@ -1061,6 +1063,8 @@ import { apagarConta, claudeAccountFolder, sairConta, apagarProvedorKimi, delete
               {/if}
             {:else if conta.tipo !== 'codex' && conta.login?.estado === 'ok' && !conta.login.loggedIn}
               <span class="ct-sub fraco">{m.contas_nao_conectada()}</span>
+            {:else if conta.tipo !== 'codex' && motivoLoginIndisponivel(conta)}
+              <span class="ct-sub ct-vence">{motivoLoginIndisponivel(conta)}</span>
             {/if}
             <!-- Marcas e caminho dividem UMA linha (densidade, 18/08): eram duas, e nenhuma das
                  duas é a identidade da conta — quem identifica é o nome e o e-mail acima. -->
@@ -1079,6 +1083,7 @@ import { apagarConta, claudeAccountFolder, sairConta, apagarProvedorKimi, delete
 
           <!-- Modo compacto: a cota vira rótulo+% na MESMA linha do nome, sem barra. -->
           {#if compacta && conta.cota && conta.cota.estado === 'lida' && conta.cota.janelas.length}
+            {@const falha = motivoCotaAntiga(conta.cota)}
             <span class="ct-mini-cotas" class:velha={!leituraFresca(conta)}>
               {#each conta.cota.janelas as j (j.rotulo)}
                 <span class="ct-mini-jan" style:grid-column={rotulos.indexOf(j.rotulo) + 1}>{j.rotulo} <b class={nivelDePct(j.pct)}>{Math.round(j.pct)}%</b>
@@ -1087,8 +1092,12 @@ import { apagarConta, claudeAccountFolder, sairConta, apagarProvedorKimi, delete
               {/each}
               <!-- Dado velho com sinal TEXTUAL também: opacidade sozinha não chega a leitor de
                    tela e some em tela clara (achado da revisão do commit). -->
-              {#if !leituraFresca(conta)}
-                <span class="ct-mini-idade">{m.cota_ultima_leitura({ n: formatarIntervalo(conta.cota.idade_s) })}</span>
+              <!-- Idade e falha num texto só: as duas ocupariam a mesma célula da grade. -->
+              {#if !leituraFresca(conta) || falha}
+                <span class="ct-mini-idade" class:ct-falha={falha}>{[
+                  leituraFresca(conta) ? null : m.cota_ultima_leitura({ n: formatarIntervalo(conta.cota.idade_s) }),
+                  falha,
+                ].filter(Boolean).join(' · ')}</span>
               {/if}
             </span>
           {/if}
@@ -1176,6 +1185,10 @@ import { apagarConta, claudeAccountFolder, sairConta, apagarProvedorKimi, delete
               {/each}
               {#if !leituraFresca(conta)}
                 <span class="ct-idade">{m.cota_ultima_leitura({ n: formatarIntervalo(conta.cota.idade_s) })}</span>
+              {/if}
+              <!-- Os números são da última leitura boa; a nova falhou e diz por quê. -->
+              {#if motivoCotaAntiga(conta.cota)}
+                <span class="ct-idade ct-falha">{motivoCotaAntiga(conta.cota)}</span>
               {/if}
             </span>
           {:else if !(conta.cota && conta.cota.estado === 'lida' && conta.cota.janelas.length)}
@@ -1546,6 +1559,7 @@ import { apagarConta, claudeAccountFolder, sairConta, apagarProvedorKimi, delete
   .ct-cota { display: flex; flex-direction: column; gap: 3px; margin-top: var(--space-2); }
   .ct-idade { font-size: 11px; color: var(--text-muted); opacity: 0.9; }
   .ct-cota.velha .ct-idade { opacity: 0.75; }
+  .ct-idade.ct-falha, .ct-mini-idade.ct-falha { color: var(--warning); }
   .ct-cota.velha { opacity: 0.55; }
   .ct-semleitura { display: block; margin-top: var(--space-1); font-size: var(--text-2xs);
                    color: var(--text-muted); line-height: 1.4; }
