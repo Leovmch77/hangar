@@ -30,8 +30,9 @@ Only terminal sessions use the tmux pane for live **state** and input. Backend p
 - `difusor.py` — **uma fonte por chave, não uma por conexão**: monitor de estado,
   acumulador de estatísticas e git da listagem são compartilhados entre os SSE abertos.
   Por quê e o que quebrou antes: [`docs/decisoes/plataforma.md`](docs/decisoes/plataforma.md).
-- Voz ao vivo — roda no `hangar-server` (`crates/hangar-server/src/voice/`), **beta e opt-in
-  por servidor** (`codex_voice_beta` no `runtime-config.json`, nasce `false`). Uma chamada por
+- Voz ao vivo — roda no `hangar-server` (`crates/hangar-server/src/voice/`), **disponível em todo
+  servidor com Codex instalado e ao menos uma conta Codex**, sem interruptor; o microfone só abre
+  quando a pessoa liga a chamada. Uma chamada por
   servidor, só do dono (`/api/voice`; pelo Connect, a ponte `voicesock.py`); o áudio fica no
   aparelho. Clientes: nativo (`desktop-native/src/voice/`) e PWA no celular
   (`lib/liveVoice.ts`). Contrato: "Regras vigentes" de

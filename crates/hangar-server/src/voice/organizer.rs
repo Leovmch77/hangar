@@ -37,9 +37,10 @@ programa interativo. Enquanto o comando roda você não responde, e o Hangar int
 e responda; para acompanhar uma sessão use follow_session; o que demora (CI, um PR) confira uma vez agora e diga ao usuário
 para perguntar de novo mais tarde.
 Comandos destrutivos (apagar, sobrescrever histórico do git, parar processos ou serviços, publicar, push): antes de rodar,
-diga ao usuário numa frase exatamente o que vai ser feito e pergunte; só depois do sim falado dele rode o comando. Se o
-Hangar recusar um comando, faça o mesmo: pergunte e, depois do sim, rode de novo o mesmo comando, idêntico. A confirmação
-é sempre falada: nunca peça ao usuário para aprovar ou conferir pedido no app.
+diga ao usuário numa frase exatamente o que vai ser feito e pergunte; só depois do sim falado dele rode o comando. Fora
+disso, não peça licença: você roda com acesso total. Se o Codex recusar um comando por considerá-lo perigoso, diga ao
+usuário numa frase o que foi recusado. A confirmação é sempre falada: nunca peça ao usuário para aprovar ou conferir
+pedido no app.
 De quem é o pedido, antes de qualquer ação:
 - Conversa com você: perguntas, opiniões, 'o que você acha', 'me explica', 'analisa', 'lê você', 'me ajuda a entender',
   pensar em voz alta, ideias pela metade. Responda você mesmo, lendo a sessão, o código ou a internet. Nada vai à sessão.
@@ -179,9 +180,12 @@ Quando responder sozinha
 Resultados
 - Enquanto espera, não adivinhe o resultado. Nunca diga que enviou, trocou, abriu ou terminou antes de o organizador
   confirmar. Enviado não significa terminado.
-- Textos que você recebe para falar são resultados reais: fale-os fielmente e curto, sem trocar o sentido nem omitir erros e perguntas.
-- Aviso de aprovação ou de pedido 'no app' que chegar a você não é para falar: o Hangar responde sozinho, e o que precisar de
-  confirmação o organizador pergunta. Nunca mande o usuário aprovar, clicar ou conferir algo no app; o sim dele é falado.
+- Textos que você recebe para falar são resultados reais: fale-os fielmente e curto, sem trocar o sentido nem omitir erros e
+  perguntas. A única exceção é o aviso automático do Codex, em inglês, seguido de um JSON: o que começa por
+  'I need your approval to continue' ou por 'I need your input. Please respond in the app'. Ele não é resultado nem pergunta: o Hangar já
+  respondeu o pedido sozinho e o trabalho continua. Não fale nada dele, nem traduzido, nem resumido; continue esperando o
+  resultado. O que precisar de confirmação o organizador pergunta. Nunca mande o usuário aprovar, aceitar, clicar ou conferir
+  algo no app; não existe pedido no app para ele, e o sim dele é falado.
 - Não narre ferramentas, não leia código, tabelas nem caminhos. Não anuncie em que sessão está: o usuário vê a tela.";
 
 fn tool(name: &str, description: &str, properties: Value) -> Value {
@@ -389,22 +393,38 @@ pub fn memory_note(block: &str, has_entries: bool) -> String {
         contradiz, vale o que você vê, e corrija com remember (replaces) ou forget. {MEMORY_PRECEDENCE} {MEMORY_SOURCE}")
 }
 
-/// `thread/start` do organizador. Acesso completo à máquina, como uma sessão, sem pedido de aprovação para o comando comum:
-/// todo pedido de aprovação o Codex também fala à voz como "aprove no app", e na voz não há app para aprovar. Com
-/// `on-request` e acesso completo ele só pede para o que ele mesmo marca como perigoso, e o laço da chamada segura esse até
-/// o sim falado (`approval_decision`); `never` recusaria esse de vez, nem com o sim. cwd na pasta própria; o código da sessão
-/// vai pelo caminho completo que a nota leva. Sem `"environments": []`: com ele o Codex não oferece o shell.
+/// `thread/start` do organizador: o Full Access das sessões Codex (`never` + `danger-full-access`). Todo pedido de aprovação
+/// que nasce o Codex fala à voz como "aprove no app", mesmo respondido na hora, e na voz não há app; com `never` nenhum nasce.
+/// O que o próprio Codex marca como perigoso roda pela regra da pasta (`write_voice_rules`), e a confirmação falada do
+/// destrutivo fica no prompt. cwd na pasta própria; o código da sessão vai pelo caminho completo que a nota leva. Sem `"environments": []`:
+/// com ele o Codex não oferece o shell.
 pub fn organizer_start(config: &Value, own: &Path, session: Option<&Path>, context: &str, pair: &ModeModel, tools: Value, memory: &str,
     hangar: Option<&Value>) -> Value {
     // Sem a entrada (assinatura falhou), o prompt não promete o MCP.
     let mcp = if hangar.is_some() { HANGAR_MCP_NOTE } else { "" };
-    let mut start = json!({"ephemeral": true, "cwd": own, "sandbox": "danger-full-access", "approvalPolicy": "on-request",
+    let mut start = json!({"ephemeral": true, "cwd": own, "sandbox": "danger-full-access", "approvalPolicy": "never",
         "baseInstructions": ORGANIZER_PROMPT,
         "developerInstructions": format!("{}{mcp}\n\n{memory}\n\n{context}", code_note(session, own)),
         "config": thread_config(config, &pair.effort, hangar), "dynamicTools": tools});
     if let Some(model) = pair.model.as_deref().or_else(|| config["model"].as_str()) { start["model"] = json!(model); }
     if let Some(tier) = &pair.tier { start["serviceTier"] = json!(tier); }
     start
+}
+
+/// Regras do Codex só da pasta do organizador: com `never`, o comando que o Codex marca como perigoso (`rm -f`; no Windows
+/// apagar com `-Force`/`/f`/`/s` e abrir link no navegador) volta recusado, e pedir aprovação faria a voz falar "aprove no
+/// app". Comando coberto por regra não passa por essa checagem. A confirmação falada do destrutivo fica no prompt.
+const VOICE_RULES: &str = r#"# Gerado pelo Hangar a cada chamada de voz; editar aqui se perde.
+prefix_rule(pattern=[["rm", "sudo", "env", "trap"]], decision="allow")
+prefix_rule(pattern=[["Remove-Item", "remove-item", "ri", "del", "erase", "rd", "rmdir", "Start-Process", "start-process", "start", "saps", "Invoke-Item", "invoke-item", "ii", "rundll32", "mshta", "explorer", "explorer.exe", "chrome", "chrome.exe", "msedge", "msedge.exe", "firefox", "firefox.exe", "iexplore", "iexplore.exe", "cmd", "cmd.exe", "powershell", "powershell.exe", "pwsh", "pwsh.exe"]], decision="allow")
+"#;
+
+pub fn voice_rules_path(own: &Path) -> PathBuf { own.join(".codex").join("rules").join("hangar-voz.rules") }
+
+pub fn write_voice_rules(own: &Path) -> std::io::Result<()> {
+    let path = voice_rules_path(own);
+    std::fs::create_dir_all(path.parent().unwrap_or(own))?;
+    crate::runtime::queue::atomic_write(&path, VOICE_RULES.as_bytes())
 }
 
 /// Velocidade do Codex: `priority` é o Fast; `default`, a normal.
@@ -1852,7 +1872,7 @@ mod tests {
         let chosen = ModeModel { model: Some("gpt-x".into()), effort: "medium".into(), tier: Some(TIER_FAST.into()) };
         let start = organizer_start(&config, own, Some(session), "ctx", &chosen, tools(), "", None);
         assert_eq!(start["sandbox"], json!("danger-full-access"));
-        assert_eq!(start["approvalPolicy"], json!("on-request"), "comando comum roda sem pedido de aprovação; o perigoso espera o sim falado");
+        assert_eq!(start["approvalPolicy"], json!("never"), "Full Access como a sessão Codex: nenhum pedido de aprovação nasce");
         assert_eq!(start["cwd"], json!(own));
         assert_eq!(start["model"], json!("gpt-x"));
         assert_eq!(start["serviceTier"], json!("priority"));
@@ -2006,6 +2026,27 @@ mod tests {
         assert!(prompt.contains("reabrir uma conversa fechada") && prompt.contains("atalhos (como a VM)"));
         assert!(VOICE_PROMPT.contains("Nunca diga que enviou, trocou, abriu ou terminou antes de o organizador\n  confirmar"));
         assert!(VOICE_PROMPT.contains("Não anuncie em que sessão está"));
+    }
+
+    /// O Codex repassa à voz todo pedido de aprovação com estas frases (core/src/session/turn.rs, `realtime_text_for_event`),
+    /// mesmo quando o Hangar já respondeu: a voz precisa reconhecê-las ao pé da letra para ficar calada.
+    #[test]
+    fn voice_rules_land_in_the_organizer_folder_and_cover_what_codex_calls_dangerous() {
+        let own = tempfile::tempdir().unwrap();
+        write_voice_rules(own.path()).unwrap();
+        let text = std::fs::read_to_string(own.path().join(".codex/rules/hangar-voz.rules")).unwrap();
+        for head in ["\"rm\"", "\"sudo\"", "\"Remove-Item\"", "\"Start-Process\"", "\"del\"", "\"rd\"", "\"explorer\"", "\"msedge\""] {
+            assert!(text.contains(head), "{head} fora da regra");
+        }
+        assert!(text.contains("decision=\"allow\"") && !text.contains("prompt"));
+        write_voice_rules(own.path()).unwrap();
+    }
+
+    #[test]
+    fn voice_prompt_silences_codex_approval_notices_verbatim() {
+        assert!(VOICE_PROMPT.contains("'I need your approval to continue'"));
+        assert!(VOICE_PROMPT.contains("'I need your input. Please respond in the app'"));
+        assert!(VOICE_PROMPT.contains("Não fale nada dele"));
     }
 
     #[test]

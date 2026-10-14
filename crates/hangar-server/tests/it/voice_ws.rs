@@ -27,7 +27,7 @@ async fn hello(ws: &mut Ws, client: &str, caps: Value) {
 
 #[tokio::test]
 async fn owner_opens_call_and_gets_answer() {
-    let t = voice_support::voice_server(true).await;
+    let t = voice_support::voice_server().await;
     let mut a = open(t.addr, fake::OWNER).await.unwrap();
     hello(&mut a, "pwa", json!(["switch_session"])).await;
     assert!(until(&mut a, "answer").await["sdp"].as_str().unwrap().starts_with("v=0 answer"));
@@ -37,23 +37,15 @@ async fn owner_opens_call_and_gets_answer() {
 }
 
 #[tokio::test]
-async fn disabled_beta_closes_with_code() {
-    let t = voice_support::voice_server(false).await;
-    let mut a = open(t.addr, fake::OWNER).await.unwrap();
-    hello(&mut a, "pwa", json!([])).await;
-    assert_eq!(until(&mut a, "error").await["code"], "disabled");
-}
-
-#[tokio::test]
 async fn guest_and_wrong_token_never_reach_the_call() {
-    let t = voice_support::voice_server(true).await;
+    let t = voice_support::voice_server().await;
     assert!(open(t.addr, "convidado").await.is_err());
     assert!(!t.app_server_saw("initialize"));
 }
 
 #[tokio::test]
 async fn second_device_takes_over_and_first_gets_taken() {
-    let t = voice_support::voice_server(true).await;
+    let t = voice_support::voice_server().await;
     let mut a = open(t.addr, fake::OWNER).await.unwrap();
     hello(&mut a, "native", json!(["switch_session", "read_screen"])).await;
     until(&mut a, "answer").await;
@@ -68,7 +60,7 @@ async fn second_device_takes_over_and_first_gets_taken() {
 
 #[tokio::test]
 async fn screen_tool_without_capability_is_refused() {
-    let t = voice_support::voice_server(true).await;
+    let t = voice_support::voice_server().await;
     let mut a = open(t.addr, fake::OWNER).await.unwrap();
     hello(&mut a, "native", json!(["switch_session", "read_screen"])).await;
     until(&mut a, "answer").await;
@@ -85,7 +77,7 @@ async fn screen_tool_without_capability_is_refused() {
 /// O servidor de teste usa prazo de 400 ms no lugar dos 2 min (relógio real; `start_paused` com TCP e reqwest estoura prazos à toa).
 #[tokio::test]
 async fn device_drop_keeps_call_for_grace_and_resumes() {
-    let t = voice_support::voice_server(true).await;
+    let t = voice_support::voice_server().await;
     let mut a = open(t.addr, fake::OWNER).await.unwrap();
     hello(&mut a, "pwa", json!(["switch_session"])).await;
     until(&mut a, "answer").await;
@@ -110,17 +102,6 @@ async fn device_drop_keeps_call_for_grace_and_resumes() {
 }
 
 #[tokio::test]
-async fn beta_turned_off_mid_call_ends_with_disabled() {
-    let t = voice_support::voice_server(true).await;
-    let mut a = open(t.addr, fake::OWNER).await.unwrap();
-    hello(&mut a, "pwa", json!(["switch_session"])).await;
-    until(&mut a, "answer").await;
-    t.set_beta(false);
-    assert_eq!(until(&mut a, "error").await["code"], "disabled");
-    assert!(t.app_server_sees("<eof>").await, "o app-server cai junto");
-}
-
-#[tokio::test]
 async fn call_that_dies_tells_the_device_why() {
     let t = voice_support::voice_server_failing_spawn().await;
     let mut a = open(t.addr, fake::OWNER).await.unwrap();
@@ -133,7 +114,7 @@ async fn call_that_dies_tells_the_device_why() {
 
 #[tokio::test]
 async fn missing_account_is_refused_without_falling_back() {
-    let t = voice_support::voice_server_with_account(true, "conta-que-sumiu").await;
+    let t = voice_support::voice_server_with_account("conta-que-sumiu").await;
     let mut a = open(t.addr, fake::OWNER).await.unwrap();
     hello(&mut a, "pwa", json!([])).await;
     assert_eq!(until(&mut a, "error").await["code"], "account_missing");
@@ -143,7 +124,7 @@ async fn missing_account_is_refused_without_falling_back() {
 #[tokio::test]
 async fn session_tool_goes_through_own_api_to_python() {
     // `set_self` aponta para o próprio servidor de teste: o envio passa pela rota real do Rust e chega ao Python falso.
-    let t = voice_support::voice_server_self_api(true).await;
+    let t = voice_support::voice_server_self_api().await;
     let mut a = open(t.addr, fake::OWNER).await.unwrap();
     hello(&mut a, "pwa", json!(["switch_session"])).await;
     until(&mut a, "answer").await;

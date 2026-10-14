@@ -270,7 +270,7 @@ class Handler(BASE["Handler"]):
     def context(self, _):
         if self.mine("context", "context_delay"):
             with LOCK:
-                self.send_json({"contexto_estendido": T13B["contexto"], "codex_voice_beta": False})
+                self.send_json({"contexto_estendido": T13B["contexto"]})
 
     def archive(self, query):
         mode = self.mine("archive")
@@ -405,7 +405,7 @@ class Handler(BASE["Handler"]):
             if self.written("contextpost", "context_delay"):
                 with LOCK:
                     T13B["contexto"] = bool(body.get("contexto_estendido"))
-                    self.send_json({"contexto_estendido": T13B["contexto"], "codex_voice_beta": False})
+                    self.send_json({"contexto_estendido": T13B["contexto"]})
             return
         if path.endswith("/resume"):
             if not self.written("resume", "create_delay"):

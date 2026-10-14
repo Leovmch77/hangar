@@ -1,6 +1,6 @@
 //! Uma chamada por servidor; o aparelho que abriu por último é o dono. Sem dono, a chamada espera um prazo e encerra.
 use super::call::{CallOptions, Spawn, Voice};
-use super::controller::{Controller, DeviceLink, GateSource};
+use super::controller::{Controller, DeviceLink};
 use super::machines::{Machines, SelfApi};
 use super::organizer::tools_for;
 use super::protocol::{ClientMsg, Screen, ServerMsg, ToController};
@@ -19,11 +19,10 @@ use tokio::sync::mpsc;
 pub type SpawnFactory = Arc<dyn Fn() -> Spawn + Send + Sync>;
 
 const GRACE: Duration = Duration::from_secs(120);
-const GATE_EVERY: Duration = Duration::from_secs(5);
 
 /// O que o teste injeta: pastas próprias, prazos curtos, app-server falso e contas fixas.
 pub struct TestParts {
-    pub home: PathBuf, pub claude_dir: PathBuf, pub grace: Duration, pub gate_every: Duration,
+    pub home: PathBuf, pub claude_dir: PathBuf, pub grace: Duration,
     pub spawn: Option<SpawnFactory>, pub accounts: Option<Vec<String>>,
 }
 
@@ -42,7 +41,6 @@ pub struct VoiceHub {
     claude_dir: PathBuf,
     env_jev_key: Option<String>,
     grace: Duration,
-    gate_every: Duration,
     /// Contas do teste; `None` pergunta ao catálogo.
     accounts: Option<Vec<String>>,
     spawn: Option<SpawnFactory>,
@@ -68,13 +66,13 @@ impl VoiceHub {
     pub fn new() -> Self {
         let home = std::env::home_dir().unwrap_or_default();
         let claude_dir = settings::claude_dir(&home);
-        let hub = Self::with_parts(TestParts { home, claude_dir, grace: GRACE, gate_every: GATE_EVERY, spawn: None, accounts: None });
+        let hub = Self::with_parts(TestParts { home, claude_dir, grace: GRACE, spawn: None, accounts: None });
         Self { env_jev_key: settings::env_jev_key(), ..hub }
     }
 
     /// Sem a chave do Jev do ambiente: o teste nunca fala com o Jev de verdade.
     pub fn with_parts(p: TestParts) -> Self {
-        Self { home: p.home, claude_dir: p.claude_dir, env_jev_key: None, grace: p.grace, gate_every: p.gate_every, accounts: p.accounts, spawn: p.spawn,
+        Self { home: p.home, claude_dir: p.claude_dir, env_jev_key: None, grace: p.grace, accounts: p.accounts, spawn: p.spawn,
             own: OnceLock::new(), live: Mutex::new(None), opening: tokio::sync::Mutex::new(()), next: AtomicU64::new(0) }
     }
 
@@ -134,7 +132,6 @@ impl VoiceHub {
         let (home, claude_dir, env_key) = (self.home.clone(), self.claude_dir.clone(), self.env_jev_key.clone());
         let (gate, chosen) = tokio::task::spawn_blocking(move || (settings::read_gate(&home, &claude_dir, env_key), settings::read_settings(&home))).await
             .map_err(|_| "failed")?;
-        if !gate.enabled { return Err("disabled"); }
         let spawn = self.spawn_for(st, &chosen.codex_account).await?;
         let Some(own) = self.self_api() else { super::log("voice refused: own api not ready"); return Err("failed") };
         let name = screen.as_ref().map(|s| s.name.clone()).unwrap_or_default();
@@ -151,8 +148,7 @@ impl VoiceHub {
         let machines = Arc::new(Machines { own, peers: st.peers.clone(), own_label });
         let link = DeviceLink::default();
         link.replace_owner(owner, caps, screen);
-        let gate_source = GateSource { home: self.home.clone(), claude_dir: self.claude_dir.clone(), every: self.gate_every };
-        let controller = Controller::new(voice, machines, gate.jev, link.clone(), gate_source, st.diag.clone());
+        let controller = Controller::new(voice, machines, gate.jev, link.clone(), st.diag.clone());
         let (to_controller, from_device) = mpsc::unbounded_channel();
         let _ = to_controller.send(ToController::Device(device_hello));
         let call_id = self.next.fetch_add(1, Ordering::Relaxed) + 1;
@@ -204,12 +200,13 @@ impl VoiceHub {
         if let Some(factory) = &self.spawn { return Ok(factory()); }
         let (accounts, id) = (st.accounts.clone(), account_id.to_owned());
         let command = tokio::task::spawn_blocking(move || -> Result<tokio::process::Command, &'static str> {
+            // Codex primeiro: sem ele a conta padrão some da lista e a recusa diria "conta" em vez de "Codex".
+            let mut command = accounts.codex_command().ok_or("codex_missing")?;
             let list = accounts.visible_codex_accounts().map_err(|e| {
                 super::log(format!("voice codex accounts unreadable status={}", e.status));
                 "account_missing"
             })?;
             let account = list.into_iter().find(|a| a.id == id).ok_or("account_missing")?;
-            let mut command = accounts.codex_command().ok_or("codex_missing")?;
             if !account.is_default { command.args(["-c", r#"cli_auth_credentials_store="file""#]); }
             command.arg("app-server").env_clear().envs(accounts.env.codex(&account));
             Ok(command)

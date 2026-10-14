@@ -30,9 +30,6 @@ const MOVED: &str = "A chamada passou para outro aparelho; tente de novo.";
 const NO_DEVICE: &str = "Nenhum aparelho conectado agora; tente de novo quando a voz voltar.";
 const UNSUPPORTED_TOOL: &str = "Este aparelho não atende essa ferramenta; peça no PC.";
 
-/// De onde e em que ritmo reler a trava do beta: desligar no meio encerra a chamada.
-pub struct GateSource { pub home: PathBuf, pub claude_dir: PathBuf, pub every: Duration }
-
 #[derive(Default)]
 struct DeviceState { owner: Option<mpsc::UnboundedSender<ServerMsg>>, caps: Vec<String>, screen: Option<Screen> }
 
@@ -110,7 +107,6 @@ enum Done {
     Switch { call: CallId, name: String },
     Jev(tools::JevAsked, Result<jev::Decision, String>),
     Failed { code: &'static str, text: String },
-    Gate(bool),
     /// Etapa e fim do objetivo `run` no computador; os de um objetivo que já não é o atual são largados.
     ComputerStep { run: u64, step: String },
     ComputerEnded { run: u64 },
@@ -144,7 +140,7 @@ pub(super) type ComputerRunner = Arc<dyn Fn(String, Box<dyn Fn(String) + Send + 
     -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>> + Send + Sync>;
 
 pub struct Controller {
-    voice: Voice, machines: Arc<Machines>, jev: Option<jev::Config>, device: DeviceLink, gate: GateSource, diag: DiagClient,
+    voice: Voice, machines: Arc<Machines>, jev: Option<jev::Config>, device: DeviceLink, diag: DiagClient,
     done: mpsc::UnboundedSender<Done>, done_rx: Option<mpsc::UnboundedReceiver<Done>>, backoff: watch::Backoff,
     client: String,
     /// Catálogo de ações de tela do nativo, para o Jev.
@@ -197,10 +193,10 @@ pub struct Controller {
 }
 
 impl Controller {
-    pub fn new(voice: Voice, machines: Arc<Machines>, jev: Option<jev::Config>, device: DeviceLink, gate: GateSource, diag: DiagClient) -> Self {
+    pub fn new(voice: Voice, machines: Arc<Machines>, jev: Option<jev::Config>, device: DeviceLink, diag: DiagClient) -> Self {
         let (done, done_rx) = mpsc::unbounded_channel();
         let target = device.screen();
-        Self { voice, machines, jev, device, gate, diag, done, done_rx: Some(done_rx), backoff: Arc::default(), client: String::new(),
+        Self { voice, machines, jev, device, diag, done, done_rx: Some(done_rx), backoff: Arc::default(), client: String::new(),
             actions: Vec::new(), rows: Vec::new(), followed: HashSet::new(), watched: HashSet::new(), talked: HashMap::new(), jev_switched: None,
             close_gate: ConfirmGate::default(), interrupt_gate: ConfirmGate::default(), shortcut_gate: Arc::default(), api_gate: ConfirmGate::default(), closing: false, last_screen: target.clone(), sent_turn: None, pending_question: None,
             spoken: HashSet::new(), heard_recent: String::new(), session_names: Vec::new(), target, plan_key: None, computer: None,
@@ -214,7 +210,6 @@ impl Controller {
         let Some(mut done_rx) = self.done_rx.take() else { return };
         let watcher = tokio::spawn(watch::watcher(self.machines.clone(), self.backoff.clone(), self.done.clone()));
         let mut ask_tick = tokio::time::interval(Duration::from_secs(1));
-        let mut gate_tick = tokio::time::interval_at(tokio::time::Instant::now() + self.gate.every, self.gate.every);
         loop {
             let flush = self.dirty.then(|| self.sent_at.map_or_else(Instant::now, |at| at + STATE_EVERY));
             let go = tokio::select! {
@@ -225,7 +220,6 @@ impl Controller {
                 },
                 Some(done) = done_rx.recv() => self.on_done(done),
                 _ = ask_tick.tick() => { self.ask_expiry(); true }
-                _ = gate_tick.tick() => { self.check_gate(); true }
                 _ = tokio::time::sleep_until(tokio::time::Instant::from_std(flush.unwrap_or_else(Instant::now))), if flush.is_some() => {
                     self.flush_state();
                     true
@@ -409,13 +403,6 @@ impl Controller {
                 self.snap.computer = Some(sentence(&step));
             },
             Done::ComputerEnded { run } => if run == self.computer_run { self.snap.computer = None; },
-            Done::Gate(true) => {}
-            Done::Gate(false) => {
-                log("voice beta turned off: stopping the call");
-                self.device.send(ServerMsg::Error { code: "disabled".into(), detail: None });
-                self.voice.stop();
-                return false;
-            }
         }
         self.dirty = true;
         true
@@ -590,15 +577,6 @@ impl Controller {
         self.diag.report("rust.voice_failed", "voice", code, "uma ação pedida por voz falhou");
         self.snap.error = Some((code.to_owned(), format!("A ação pedida por voz falhou: {text}")));
         self.dirty = true;
-    }
-
-    fn check_gate(&self) {
-        let (home, claude_dir, done) = (self.gate.home.clone(), self.gate.claude_dir.clone(), self.done.clone());
-        tokio::spawn(async move {
-            // Leitura que não terminou não derruba a chamada.
-            let enabled = tokio::task::spawn_blocking(move || super::settings::read_gate(&home, &claude_dir, None).enabled).await.unwrap_or(true);
-            let _ = done.send(Done::Gate(enabled));
-        });
     }
 
     fn stop_computer(&mut self) {

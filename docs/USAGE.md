@@ -301,13 +301,13 @@ válido (Let's Encrypt) → escaneie o QR / preencha o token → **Adicionar à 
   reutiliza a referência capturada na primeira organização.
 - **Voz ao vivo (Beta):** uma conversa falada com um assistente que lê e acompanha as sessões,
   troca de sessão pela fala, manda pedidos a elas e, no modo **Planejar**, monta um plano antes de
-  mandar. Nasce desligada: ative em **Configurações → Harnesses → Codex → Opções → Conversa por
-  voz**, em cada servidor onde quiser usar. Precisa do `codex` instalado e logado nesse servidor; a
-  conversa gasta a conta Codex dele.
+  mandar. Aparece sozinha em todo servidor com o `codex` instalado e ao menos uma conta Codex; não
+  há nada para ativar. O microfone só abre quando você liga a conversa, e ela gasta a conta Codex
+  desse servidor.
   - **No PC (app nativo):** a pílula da voz fica na barra de cima. Ela atende também os pedidos de
     tela (trocar de sessão, ler a tela, clicar, abrir telas do Hangar).
   - **No celular (PWA):** o botão de microfone **Voz ao vivo** aparece no topo da lista de sessões e
-    da conversa quando o servidor ativo tem a voz ligada. Um toque começa a conversa nesse servidor;
+    da conversa quando o servidor ativo tem a voz disponível. Um toque começa a conversa nesse servidor;
     com ela aberta, outro toque abre o painel (silenciar, modo **Direto**/**Planejar**, ajustes,
     **Servidor da voz**, **Encerrar**). No celular a voz só troca de sessão; ler a tela e clicar
     ficam para o PC.

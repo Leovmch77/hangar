@@ -93,7 +93,6 @@
     { tela: 'harnesses', rotulo: m.harness_codex_memoria, descricao: m.harness_codex_memoria_ajuda },
     { tela: 'harnesses', rotulo: m.codex_ui_account, descricao: m.harness_codex_conta_ajuda },
     { tela: 'harnesses', rotulo: m.codex_contexto_titulo, descricao: m.codex_contexto_ajuda },
-    { tela: 'harnesses', rotulo: m.codex_voice_config_title, descricao: m.codex_voice_config_help },
 
     { tela: 'sincronizacao', rotulo: m.sync_config_ativar, descricao: m.sync_config_ganho },
     { tela: 'sincronizacao', rotulo: m.sync_config_desativar, descricao: m.sync_config_desativada },

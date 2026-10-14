@@ -177,7 +177,10 @@ async fn settings_reply(st: &AppState, req: Request, home: PathBuf, claude_dir: 
             let read = tokio::task::spawn_blocking(move || (settings::read_gate(&home, &claude_dir, env_key), settings::read_settings(&home))).await;
             let Ok((gate, current)) = read else { return refuse(StatusCode::INTERNAL_SERVER_ERROR, "settings_read_failed") };
             let (active, client) = st.voice.call_status();
-            json_response(StatusCode::OK, json!({"enabled": gate.enabled, "codex": st.accounts.codex_command().is_some(), "jev": gate.jev.is_some(),
+            let codex = st.accounts.codex_command().is_some();
+            // A voz aparece com o Codex instalado e ao menos uma conta Codex; o microfone só abre quando a pessoa liga a chamada.
+            let enabled = codex && !st.voice.account_ids(&st.accounts).await.is_empty();
+            json_response(StatusCode::OK, json!({"enabled": enabled, "codex": codex, "jev": gate.jev.is_some(),
                 "voices": VOICES, "settings": SettingsDto::from(&current), "call": {"active": active, "client": client}}))
         }
         Method::PUT => {

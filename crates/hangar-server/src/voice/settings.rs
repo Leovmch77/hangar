@@ -1,4 +1,4 @@
-//! O que a voz lê do servidor: a trava e o Jev do runtime-config (só leitura) e as escolhas da chamada (arquivo próprio).
+//! O que a voz lê do servidor: o Jev do runtime-config (só leitura) e as escolhas da chamada (arquivo próprio).
 use super::{jev, organizer::{ModeModel, ModeModels, DEFAULT_EFFORT}};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -22,8 +22,16 @@ pub struct SettingsDto { #[serde(default)] pub voice: Option<String>, #[serde(de
 #[derive(Clone, Debug, PartialEq)]
 pub struct VoiceSettings { pub voice: Option<String>, pub codex_account: String, pub organizer: ModeModels }
 
+/// Escolhas de quem nunca gravou o `config.json`; quem já gravou fica com as suas.
+pub const FIRST_VOICE: &str = "sol";
+pub const FIRST_MODEL: &str = "gpt-6.1-sol";
+
 impl Default for VoiceSettings {
-    fn default() -> Self { Self { voice: None, codex_account: default_account(), organizer: ModeModels::default() } }
+    fn default() -> Self {
+        let pair = |effort: &str| ModeModel { model: Some(FIRST_MODEL.to_owned()), effort: effort.to_owned(), tier: None };
+        Self { voice: Some(FIRST_VOICE.to_owned()), codex_account: default_account(),
+            organizer: ModeModels { direct: pair("medium"), plan: pair("high") } }
+    }
 }
 
 impl From<SettingsDto> for VoiceSettings {
@@ -40,7 +48,8 @@ impl From<&VoiceSettings> for SettingsDto {
     }
 }
 
-pub struct Gate { pub enabled: bool, pub jev: Option<jev::Config> }
+/// O que a chamada lê do runtime-config: só o Jev. Quem decide se a voz aparece é o Codex e a conta (`routes::settings_reply`).
+pub struct Gate { pub jev: Option<jev::Config> }
 
 /// Lido uma vez, por quem monta o hub; o teste passa a própria pasta.
 pub fn claude_dir(home: &Path) -> PathBuf {
@@ -67,7 +76,7 @@ pub fn env_jev_key() -> Option<String> { std::env::var("TYPESAFE_API_KEY").ok().
 pub fn read_gate(home: &Path, claude_dir: &Path, env_key: Option<String>) -> Gate {
     let runtime = read_json(&claude_dir.join("runtime-config.json"));
     let settings = read_json(&home.join(".claude").join("settings.json"));
-    Gate { enabled: runtime["codex_voice_beta"] == Value::Bool(true), jev: jev::config_from(&runtime, &settings["env"], env_key) }
+    Gate { jev: jev::config_from(&runtime, &settings["env"], env_key) }
 }
 
 /// Raiz da voz: configuração, pasta própria do organizador e planos.
@@ -84,4 +93,30 @@ pub fn write_settings(home: &Path, s: &VoiceSettings) -> std::io::Result<()> {
     std::fs::create_dir_all(path.parent().unwrap_or(home))?;
     let bytes = serde_json::to_vec(&SettingsDto::from(s)).map_err(std::io::Error::other)?;
     crate::runtime::queue::atomic_write(&path, &bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn first_call_without_config_uses_sol_and_gpt_6_1() {
+        let home = tempfile::tempdir().unwrap();
+        let s = read_settings(home.path());
+        assert_eq!(s.voice.as_deref(), Some("sol"));
+        assert_eq!((s.organizer.direct.model.as_deref(), s.organizer.direct.effort.as_str()), (Some("gpt-6.1-sol"), "medium"));
+        assert_eq!((s.organizer.plan.model.as_deref(), s.organizer.plan.effort.as_str()), (Some("gpt-6.1-sol"), "high"));
+    }
+
+    #[test]
+    fn saved_choices_win_over_first_call_defaults() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(voice_dir(home.path())).unwrap();
+        std::fs::write(settings_path(home.path()), r#"{"voice": null, "codex_account": "default",
+            "organizer": {"direct": {"model": null, "effort": "low"}, "plan": {"model": "gpt-x", "effort": "xhigh"}}}"#).unwrap();
+        let s = read_settings(home.path());
+        assert_eq!(s.voice, None);
+        assert_eq!((s.organizer.direct.model.as_deref(), s.organizer.direct.effort.as_str()), (None, "low"));
+        assert_eq!((s.organizer.plan.model.as_deref(), s.organizer.plan.effort.as_str()), (Some("gpt-x"), "xhigh"));
+    }
 }

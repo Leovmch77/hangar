@@ -289,8 +289,6 @@ class Settings(BaseSettings):
     # Reconciliacao automatica do Codex (codex_integracao.acompanhar + abertura de TUI). Portao
     # PROPRIO por cima do `automations`, editavel pela tela (card do Codex em Harnesses).
     codex_sync: bool = True
-    # Voz realtime do Codex é experimental e nasce desligada; habilitada nas Opções do harness.
-    codex_voice_beta: bool = False
     # Organização é opt-in, independentemente de credenciais antigas de LLM.
     dictation_organization_mode: str = "none"
     dictation_claude_model: str = ""
