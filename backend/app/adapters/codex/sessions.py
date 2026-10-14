@@ -65,7 +65,8 @@ def switch_thread(name: str, thread: dict, previous: str, *, endpoint: str, app_
 @contextmanager
 def _locked(*names: str):
     _dir().mkdir(parents=True, exist_ok=True)
-    with _write_lock, atomico.locked(*(_path(name).with_suffix(".lock") for name in names)):
+    # A trava de arquivo primeiro: esperar o Rust numa sessão não segura as gravações das outras.
+    with atomico.locked(*(_path(name).with_suffix(".lock") for name in names)), _write_lock:
         yield
 
 

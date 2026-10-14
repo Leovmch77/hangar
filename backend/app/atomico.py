@@ -89,7 +89,18 @@ def _open_shared(caminho: str | os.PathLike):
     handle = k32.CreateFileW(os.fspath(caminho), generic_read, share_all, None, open_existing, normal, None)
     if handle is None or handle == wintypes.HANDLE(-1).value:
         raise ctypes.WinError(ctypes.get_last_error())
-    return open(msvcrt.open_osfhandle(handle, os.O_RDONLY | os.O_BINARY), "rb")
+    # Até o `open` ficar dono do descritor, a falha fecha o que já foi aberto.
+    try:
+        fd = msvcrt.open_osfhandle(handle, os.O_RDONLY | os.O_BINARY)
+    except BaseException:
+        k32.CloseHandle.argtypes = [wintypes.HANDLE]
+        k32.CloseHandle(handle)
+        raise
+    try:
+        return open(fd, "rb")
+    except BaseException:
+        os.close(fd)
+        raise
 
 
 def read(caminho: str | os.PathLike) -> bytes:

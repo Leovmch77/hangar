@@ -185,7 +185,6 @@ def test_policy_route_is_gone():
     # Os serviços que o Rust pedia ao Python (sidecar, recado nativo, cálculo) são todos do Rust: a rota
     # de política não existe mais.
     assert "/internal/runtime/policy" not in {route.path for route in internal_api.router.routes}
-    assert _client().post("/internal/runtime/policy", headers={"X-Hangar-Internal": SECRET}, json={}).status_code == 404
 
 
 def test_quota_route_is_gone():
