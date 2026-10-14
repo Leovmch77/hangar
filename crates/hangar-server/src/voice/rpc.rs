@@ -92,6 +92,20 @@ pub async fn handshake(rpc: &Rpc) -> Result<Value, RpcError> {
     Ok(rpc.request("config/read", json!({"includeLayers": false})).await?["config"].clone())
 }
 
+/// Modelos que a conta oferece (`id` e `model` de cada item, ocultos incluídos); `None` quando a lista não veio inteira.
+pub async fn account_models(rpc: &Rpc) -> Option<Vec<String>> {
+    let (mut names, mut cursor) = (Vec::new(), Value::Null);
+    for _ in 0..32 {
+        let page = rpc.request("model/list", json!({"cursor": cursor, "limit": 100, "includeHidden": true})).await.ok()?;
+        for item in page["data"].as_array()? {
+            names.extend(["id", "model"].iter().filter_map(|k| item[*k].as_str().map(str::to_owned)));
+        }
+        cursor = page["nextCursor"].clone();
+        if cursor.is_null() { return Some(names); }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

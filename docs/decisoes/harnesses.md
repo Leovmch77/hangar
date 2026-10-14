@@ -543,7 +543,10 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
     usa voz `sol` e `gpt-6.1-sol` com esforço `medium` no Direto e `high` no Planejar
     (`VoiceSettings::default`); arquivo gravado vale como está, inclusive `null` (padrão da conta).
     Arquivo que existe mas não lê não é primeira vez: cai no neutro (modelo da conta, `low`), com
-    linha no diário. Conta sem `gpt-6.1-sol` no catálogo falha visível na abertura, sem troca calada.
+    linha no diário. Na abertura a chamada pede `model/list` da conta (ocultos incluídos): modelo
+    escolhido ou padrão que a conta não oferece vira o padrão dela (`ModeModels::fit`), com linha
+    no diário, e a tela mostra o modelo em uso; vale também para troca de modelo no meio da chamada.
+    Lista que não vem não muda nada (decisão do Jefferson, 14/10: a voz sempre abre).
   - **A voz não tem interruptor.** `GET /api/voice/settings` responde `enabled` = Codex instalado
     e ao menos uma conta Codex visível (catálogo ilegível conta como conta: a abertura mostra o
     erro, nunca "sem conta" falso). Os clientes mostram o botão com Codex instalado; sem conta, o

@@ -457,6 +457,17 @@ pub struct ModeModels { pub direct: ModeModel, pub plan: ModeModel }
 
 impl ModeModels {
     pub fn get(&self, mode: Mode) -> &ModeModel { match mode { Mode::Direct => &self.direct, Mode::Plan => &self.plan } }
+
+    /// Modelo que a conta não oferece vira o padrão dela (`None`), para a voz abrir sempre; a tela mostra o que ficou em
+    /// uso. Sem a lista (`None`), nada muda. Devolve os modelos tirados, para o diário.
+    pub fn fit(&mut self, available: Option<&[String]>) -> Vec<String> {
+        let Some(available) = available else { return Vec::new() };
+        let mut dropped = Vec::new();
+        for pair in [&mut self.direct, &mut self.plan] {
+            if let Some(model) = pair.model.take_if(|m| !available.contains(m)) { dropped.push(model); }
+        }
+        dropped
+    }
 }
 
 /// `thread/settings/update` de `from` para `to`, só com o que muda; `None` = nada a mandar. Voltar ao modelo do config
@@ -1868,6 +1879,19 @@ mod tests {
         assert!(note.contains("/p/a") && note.contains("/h/.hangar/voz/arquivos"));
         let none = code_note(None, own);
         assert!(none.contains("não está disponível") && none.contains("/h/.hangar/voz/arquivos"));
+    }
+
+    #[test]
+    fn model_missing_from_the_account_falls_back_to_the_account_default() {
+        let pair = |model: Option<&str>, effort: &str| ModeModel { model: model.map(str::to_owned), effort: effort.into(), tier: None };
+        let mut models = ModeModels { direct: pair(Some("gpt-6.1-sol"), "medium"), plan: pair(Some("gpt-x"), "high") };
+        let available = vec!["gpt-x".to_owned(), "gpt-6-sol".to_owned()];
+        assert_eq!(models.fit(Some(&available)), ["gpt-6.1-sol"]);
+        assert_eq!((models.direct.model.as_deref(), models.direct.effort.as_str()), (None, "medium"), "esforço fica");
+        assert_eq!(models.plan.model.as_deref(), Some("gpt-x"));
+        let mut untouched = ModeModels { direct: pair(Some("gpt-6.1-sol"), "medium"), plan: pair(None, "high") };
+        assert!(untouched.fit(None).is_empty(), "sem a lista, nada muda");
+        assert_eq!(untouched.direct.model.as_deref(), Some("gpt-6.1-sol"));
     }
 
     #[test]
