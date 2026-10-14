@@ -73,14 +73,23 @@ function liveShells(list: BackgroundShell[], now: number): BackgroundShell[] {
 
 const SCAN = "find /proc/[0-9]*/fd -maxdepth 1 -lname '*/tasks/*.output' -printf '%h %l\\n' 2>/dev/null";
 
+// O find sai com 1 sempre que esbarra em /proc de outro usuário; só não rodar (ou estourar o prazo) é falha.
+async function scanFds($: EngineInterface): Promise<FdScan | undefined> {
+  const r = await $.process.run(["sh", "-c", SCAN], { timeoutMs: 5000 }).catch((err: unknown) => {
+    $.ui.log(`acompanhamento bg: varredura de /proc falhou: ${String(err)}`, { to: "debug" });
+    return undefined;
+  });
+  return r && parseFdScan(r.stdout);
+}
+
 async function scanShells($: EngineInterface, now: number) {
   const open = new Set((await read($, shells)).filter((s) => s.endedAt === undefined).map((s) => s.id));
   if (open.size === 0) return;
-  const r = await $.process.run(["sh", "-c", SCAN], { timeoutMs: 5000 }).catch(() => undefined);
-  // Processo sumindo no meio da varredura dá código 1; saída vazia com erro não prova que nada roda.
-  if (!r || (r.exitCode !== 0 && !r.stdout.trim())) return;
+  const all = await scanFds($);
+  // Sem varredura não dá para dizer que algo acabou: a lista fica como estava.
+  if (!all) return;
   // A varredura vê os comandos de todas as sessões; só os desta interessam.
-  const scan: FdScan = new Map([...parseFdScan(r.stdout)].filter(([id]) => open.has(id)));
+  const scan: FdScan = new Map([...all].filter(([id]) => open.has(id)));
   const tails = new Map<string, string[]>();
   for (const [id, hit] of scan) {
     const t = await $.process.run(["tail", "-c", "4000", hit.path], { timeoutMs: 3000 }).catch(() => undefined);
@@ -99,22 +108,33 @@ async function scanShells($: EngineInterface, now: number) {
 }
 
 // TaskStop é o caminho do próprio Claude Code; comando de outra vida da sessão ele não conhece,
-// e aí o pedido vai direto aos processos que seguram o arquivo de saída.
+// e aí o pedido vai direto aos processos que seguram o arquivo de saída agora (pids frescos,
+// nunca os do último tique, que podem ter sido reaproveitados).
+// O fim não é gravado aqui: só a varredura sem processo prova que o comando morreu.
 async function stopShell($: EngineInterface, id: string): Promise<string> {
   const s = (await read($, shells)).find((x) => x.id === id);
   if (!s || s.endedAt !== undefined) return `bg ${id} já não está rodando.`;
   const r = await $.tool.call({ tool: "TaskStop", task_id: id }).catch(() => undefined);
   const viaTool = !!r && r.deny === undefined && !r.isError;
+  let killed = "";
   if (!viaTool) {
-    if (!s.pids?.length) return `bg ${id}: o TaskStop recusou e não achei o processo.`;
-    const k = await $.process.run(["kill", "-TERM", ...s.pids.map(String)], { timeoutMs: 5000 }).catch(() => undefined);
-    if (!k || k.exitCode !== 0) return `bg ${id}: kill falhou${k ? `: ${k.stderr.trim()}` : ""}.`;
+    const scan = await scanFds($);
+    if (!scan) return `bg ${id}: o TaskStop recusou e a varredura de /proc falhou.`;
+    const pids = scan.get(id)?.pids ?? [];
+    if (!pids.length) return `bg ${id}: o TaskStop recusou e nenhum processo segura o log; deve ter acabado.`;
+    const k = await $.process.run(["kill", "-TERM", ...pids.map(String)], { timeoutMs: 5000 }).catch((err: unknown) => String(err));
+    if (typeof k === "string" || k.exitCode !== 0) return `bg ${id}: kill falhou: ${typeof k === "string" ? k : k.stderr.trim()}.`;
+    killed = ` (kill ${pids.join(" ")})`;
   }
-  const now = await $.clock.now();
-  await update($, shells, (list) =>
-    list.map((x) => (x.id === id && x.endedAt === undefined ? { ...x, endedAt: now, status: "killed" } : x)),
+  await update($, shells, (list) => list.map((x) => (x.id === id && x.endedAt === undefined ? { ...x, status: "killed" } : x)));
+  return `bg ${id}: pedido de parada enviado${killed}.`;
+}
+
+function pressStop($: EngineInterface, id: string) {
+  void stopShell($, id).then(
+    (msg) => $.ui.toast(msg),
+    (err: unknown) => $.ui.toast(`bg ${id}: parar falhou: ${String(err)}`),
   );
-  return `bg ${id} parado${viaTool ? "" : ` (kill ${s.pids?.join(" ")})`}.`;
 }
 
 const SHELL_STATUS: Record<string, string> = { completed: "ok", failed: "falhou", killed: "parado", terminou: "fim" };
@@ -283,12 +303,12 @@ export function registerVerificar(on: On) {
             </Box>
           );
         })}
-        {sh.slice(0, 3).map((s, i) => {
+        {sh.slice(0, 3).map((s) => {
           const last = s.tail?.at(-1) ?? (s.endedAt === undefined && s.current ? `agora: ${s.current}` : undefined);
           return (
             <Box key={s.id} flexDirection="row">
               {s.endedAt === undefined ? (
-                <Button key={`parar-${s.id}`} plain hotkey={String(i + 1)} dimColor onPress={() => void stopShell($, s.id)}>
+                <Button key={`parar-${s.id}`} plain dimColor onPress={() => pressStop($, s.id)}>
                   parar
                 </Button>
               ) : (
@@ -347,7 +367,7 @@ export function registerVerificar(on: On) {
             ))}
           </Box>
         ))}
-        {sh.map((s, i) => (
+        {sh.map((s) => (
           <Box key={s.id} flexDirection="column" marginBottom={1}>
             <Box flexDirection="row">
               <Text bold={s.endedAt === undefined} dimColor={s.endedAt !== undefined}>
@@ -356,7 +376,7 @@ export function registerVerificar(on: On) {
                 {"  "}
               </Text>
               {s.endedAt === undefined && (
-                <Button key={`parar-${s.id}`} hotkey={i < 9 ? String(i + 1) : undefined} onPress={() => void stopShell($, s.id)}>
+                <Button key={`parar-${s.id}`} onPress={() => pressStop($, s.id)}>
                   parar
                 </Button>
               )}
