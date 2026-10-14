@@ -51,13 +51,17 @@
   // Por `serverId::repo`: o fetch do remoto que falhou deixa mesclada/atrasada velhas, e isso aparece.
   let erroRemoto = $state<Record<string, true>>({});
   let remoto = $state({ feitos: 0, total: 0 });
+  let geracaoRemoto = 0;
   async function atualizar() {
+    // Só a busca mais nova conta e encerra o aviso: uma antiga que termina depois não mexe no da nova.
+    const meu = ++geracaoRemoto;
     releituras = 0;
     atualizando = true;
     const alvos = blocos.flatMap((b) => b.repos.map((r) => ({ b, repo: r.repo })));
     remoto = { feitos: 0, total: alvos.length };
     const res = await Promise.allSettled(alvos.map(({ b, repo }) =>
-      fetchWorktreesForServer(b.servidor, repo).finally(() => { remoto.feitos++; })));
+      fetchWorktreesForServer(b.servidor, repo).finally(() => { if (meu === geracaoRemoto) remoto.feitos++; })));
+    if (meu !== geracaoRemoto) return;
     const falhas: Record<string, true> = {};
     res.forEach((x, i) => { if (x.status === 'rejected') falhas[chaveLote(alvos[i].b, alvos[i].repo)] = true; });
     erroRemoto = falhas;
@@ -107,7 +111,7 @@
   }
 
   // O lote em andamento fica na folha, que só fecha no fim: o progresso é a confirmação de cada uma.
-  let execucao = $state<{ p: WorktreeBatchProgress; fim: boolean } | null>(null);
+  let execucao = $state<{ k: string; p: WorktreeBatchProgress; fim: boolean } | null>(null);
   const pct = $derived(execucao && execucao.p.total ? Math.round((execucao.p.done / execucao.p.total) * 100) : 0);
 
   async function apagarMescladas() {
@@ -117,12 +121,12 @@
     const k = chaveLote(b, repo);
     loteAndando = k;
     delete erroLote[k];
-    execucao = { fim: false, p: { total: deletable.length, done: 0, current: null, removed: [], failed: [],
+    execucao = { k, fim: false, p: { total: deletable.length, done: 0, current: null, removed: [], failed: [],
                                   freed: { bytes: 0, partial: false } } };
     try {
       await deleteWorktreeBatchForServer(b.servidor, repo, deletable, (p) => {
         for (const w of p.removed) worktreeStatus.drop(b.servidor.id, w.path);
-        execucao = { fim: false, p };
+        execucao = { k, fim: false, p };
       });
     } catch (e) {
       erroLote[k] = e instanceof Error ? e.message : String(e);
@@ -394,6 +398,7 @@
             </ul>
           </div>
         {/if}
+        {#if erroLote[execucao.k]}<p class="erro" role="alert">{erroLote[execucao.k]}</p>{/if}
         {#if execucao.fim}
           <div class="acoes"><button type="button" class="cancelar" onclick={fecharLote}>{m.worktree_lote_fechar()}</button></div>
         {/if}

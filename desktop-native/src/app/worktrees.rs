@@ -271,7 +271,7 @@ fn one_path_body(repo: &str, w: &WorktreeStatus) -> Value {
 
 /// O lote em andamento: uma worktree por pedido, para o progresso ser o que o servidor confirmou.
 #[derive(Debug, Default)]
-pub(super) struct BatchRun { total: usize, done: usize, current: Option<String>, removed: Vec<WorktreeStatus>, failed: Vec<(String, Option<String>)> }
+pub(super) struct BatchRun { id: u64, total: usize, done: usize, current: Option<String>, removed: Vec<WorktreeStatus>, failed: Vec<(String, Option<String>)> }
 
 impl BatchRun {
     fn new(total: usize) -> Self { Self { total, ..Default::default() } }
@@ -346,6 +346,7 @@ pub(super) struct Worktrees {
     dialog: Option<WtDialog>,
     batch: Option<Batch>,
     batch_run: Option<BatchRun>,
+    batch_seq: u64,
     create: Option<NewWorktree>,
     /// Releitura marcada enquanto o backend mede o espaço de alguma.
     size_poll: bool,
@@ -466,6 +467,8 @@ impl Hangar {
         self.worktrees.fetch_failed.clear();
         // Todos ao mesmo tempo: cada fetch é um repositório diferente, e o progresso conta o que já voltou.
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        // A que não responder (tarefa que caiu sem mandar nada) entra como falha, nunca some da conta.
+        let mut pending: HashSet<String> = repos.iter().cloned().collect();
         for repo in repos {
             let (api, tx) = (api.clone(), tx.clone());
             self.runtime.spawn(async move {
@@ -478,6 +481,7 @@ impl Hangar {
             // Fetch que falha deixa a base como estava: a lista relida vale, com o aviso de que pode estar desatualizada.
             let mut failed = Vec::new();
             while let Some((repo, ok)) = rx.recv().await {
+                pending.remove(&repo);
                 if !ok { failed.push(repo); }
                 let current = this.update(cx, |this, cx| {
                     let current = this.worktrees.fetch.seq == seq;
@@ -486,6 +490,7 @@ impl Hangar {
                 });
                 if !matches!(current, Ok(true)) { return; }
             }
+            failed.extend(pending);
             let _ = this.update(cx, |this, cx| if this.worktrees.fetch.finish(seq, Ok(())) {
                 this.worktrees.fetch_failed = failed;
                 this.load_worktrees(false, cx);
@@ -629,17 +634,19 @@ impl Hangar {
         let repo = batch.repo.clone();
         let runtime = self.runtime.clone();
         self.worktrees.deleting = true;
-        self.worktrees.batch_run = Some(BatchRun::new(queue.len()));
+        self.worktrees.batch_seq += 1;
+        let id = self.worktrees.batch_seq;
+        self.worktrees.batch_run = Some(BatchRun { id, ..BatchRun::new(queue.len()) });
         cx.spawn(async move |this, cx| {
             for w in queue {
-                // Sem o lote (conexão trocada zerou a página), para: o resto não tem mais onde aparecer.
+                // Sem este lote (conexão trocada zerou a página, ou outro tomou o lugar), para: o resto não tem onde aparecer.
                 let go = this.update(cx, |this, cx| {
-                    let Some(run) = this.worktrees.batch_run.as_mut() else { return false };
+                    let Some(run) = this.worktrees.batch_run.as_mut().filter(|r| r.id == id) else { return false };
                     run.current = Some(base_name(&w.path));
                     cx.notify();
                     true
                 });
-                if !matches!(go, Ok(true)) { return; }
+                if !matches!(go, Ok(true)) { break; }
                 let (api, body) = (api.clone(), one_path_body(&repo, &w));
                 let joined = runtime.spawn(async move { api.server_send(reqwest::Method::POST, &["worktrees", "delete-merged"], Some(body), 150).await }).await;
                 let outcome = match joined {
@@ -649,7 +656,7 @@ impl Hangar {
                 };
                 let _ = this.update(cx, |this, cx| {
                     let path = w.path.clone();
-                    let Some(run) = this.worktrees.batch_run.as_mut() else { return };
+                    let Some(run) = this.worktrees.batch_run.as_mut().filter(|r| r.id == id) else { return };
                     if run.record(w, outcome) {
                         this.worktrees.cache.remove(&path);
                         if this.worktrees.open.as_deref() == Some(path.as_str()) { this.close_worktree_panel(cx); }
@@ -658,8 +665,9 @@ impl Hangar {
                 });
             }
             // Mesmo com falha parte pode ter saído: a lista relida mostra o que sobrou.
+            // Também na saída antecipada: `deleting` preso deixaria o diálogo sem Cancelar nem Apagar.
             let _ = this.update(cx, |this, cx| {
-                this.worktrees.deleting = false;
+                if this.worktrees.batch_run.as_ref().is_none_or(|r| r.id == id) { this.worktrees.deleting = false; }
                 this.load_worktrees(false, cx);
                 cx.notify();
             });

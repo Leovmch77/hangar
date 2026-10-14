@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Pressable, Switch, Text, View } from 'react-native';
 import { StyleSheet } from 'react-native-unistyles';
 import { basename, deleteWorktreeBatchForServer, fmtBytes, worktreeReady, type Server, type WorktreeBatchProgress,
@@ -16,12 +16,16 @@ export function WorktreeBatchSheet({ server, batch: aberto, onClose, onDeleted }
   const [apagando, setApagando] = useState(false);
   const [erro, setErro] = useState('');
   const [marcadas, setMarcadas] = useState<Set<string>>(new Set());
-  const [progresso, setProgresso] = useState<WorktreeBatchProgress | null>(null);
+  // O progresso guarda de qual lote é: ao reabrir com outro, a confirmação nova aparece já no primeiro quadro.
+  const [execucao, setExecucao] = useState<{ batch: WorktreeBatch; p: WorktreeBatchProgress } | null>(null);
+  // Lote novo invalida o que ainda roda do anterior: o antigo termina no servidor, mas não escreve aqui.
+  const corrida = useRef(0);
   // O último lote continua desenhado enquanto a folha anima a saída.
   const [batch, setBatch] = useState(aberto);
   useEffect(() => {
-    if (aberto) { setBatch(aberto); setErro(''); setMarcadas(new Set()); setProgresso(null); }
+    if (aberto) { corrida.current++; setBatch(aberto); setErro(''); setMarcadas(new Set()); setApagando(false); }
   }, [aberto]);
+  const progresso = execucao && execucao.batch === (aberto ?? batch) ? execucao.p : null;
 
   const prontas = batch?.deletable.filter(worktreeReady) ?? [];
   const comArquivos = batch?.deletable.filter((w) => !worktreeReady(w)) ?? [];
@@ -37,18 +41,21 @@ export function WorktreeBatchSheet({ server, batch: aberto, onClose, onDeleted }
 
   async function apagar() {
     if (!server || !batch || apagando || !n) return;
+    const minha = ++corrida.current;
+    const vale = () => minha === corrida.current;
+    const lote = batch;
     setApagando(true); setErro('');
     const tiradas = new Set<string>();
     try {
       // O core marca como "perde arquivos" só as que esta tela mostrou perdendo.
-      await deleteWorktreeBatchForServer(server, batch.repo, escolhidas, (p) => {
-        setProgresso(p);
+      await deleteWorktreeBatchForServer(server, lote.repo, escolhidas, (p) => {
         p.removed.forEach((w) => { if (!tiradas.has(w.path)) { tiradas.add(w.path); dropWorktreeStatus(server.id, w.path); } });
+        if (vale()) setExecucao({ batch: lote, p });
       });
     } catch (e) {
-      setErro(e instanceof Error ? e.message : String(e));
+      if (vale()) setErro(e instanceof Error ? e.message : String(e));
     } finally {
-      setApagando(false);
+      if (vale()) setApagando(false);
       onDeleted();   // mesmo com erro, algumas podem ter saído: a lista recarrega
     }
   }
@@ -66,7 +73,7 @@ export function WorktreeBatchSheet({ server, batch: aberto, onClose, onDeleted }
       <Sheet open={!!aberto} sizes={['auto']} onDismiss={onClose} dismissible={!apagando}>
         <View style={styles.inner}>
           <Text style={styles.title}>{apagando ? m.worktree_lote_apagando_titulo() : m.worktree_lote_fim_titulo()}</Text>
-          <View accessibilityRole="progressbar" accessibilityValue={{ min: 0, max: progresso.total, now: progresso.done }}
+          <View accessible accessibilityRole="progressbar" accessibilityValue={{ min: 0, max: progresso.total, now: progresso.done }}
             style={styles.trilho}>
             <View style={[styles.preenchido, { width: `${pct}%` }]} />
           </View>

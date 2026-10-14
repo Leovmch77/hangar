@@ -155,7 +155,7 @@ export default function Worktrees() {
       <PageHeader title={m.worktrees_titulo()} subtitle={remoto ? m.worktrees_remoto_progresso(remoto) : undefined} />
       {!server ? <InfoNotice text={m.maquinas_vazio()} /> : null}
       {server && repos === null && !erro ? (
-        <View style={styles.lendo} accessibilityRole="progressbar" accessibilityLabel={m.worktrees_lendo()}>
+        <View style={styles.lendo} accessible accessibilityRole="progressbar" accessibilityLabel={m.worktrees_lendo()}>
           <ActivityIndicator color={c.muted} />
           <Text style={styles.muted}>{m.worktrees_lendo()}</Text>
         </View>
