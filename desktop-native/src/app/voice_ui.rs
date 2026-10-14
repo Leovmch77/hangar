@@ -613,7 +613,8 @@ impl Hangar {
         let before = (self.voice.settings.clone(), self.voice.accounts.clone(), self.voice.voices.clone());
         if let Some(body) = &body {
             // Só mostra ou esconde o botão; chamada viva não cai por esta leitura, quem a encerra é o servidor dela, com o motivo.
-            self.voice.enabled = body["enabled"] == true && body["codex"] == true;
+            // Codex sem conta mostra o botão: ligar a chamada traz a recusa `account_missing` com o texto, em vez de sumir calado.
+            self.voice.enabled = body["codex"] == true;
             self.voice.voices = body["voices"].as_array().into_iter().flatten().filter_map(|v| v.as_str().map(str::to_owned)).collect();
             self.voice.busy = (body["call"]["active"] == true).then(|| body["call"]["client"].as_str().unwrap_or_default().to_owned());
             // Escolha feita aqui no meio da chamada não volta atrás pela leitura.

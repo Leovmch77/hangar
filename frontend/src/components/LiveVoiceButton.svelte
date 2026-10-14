@@ -10,7 +10,8 @@
   // `taken` não é falha: a conversa seguiu noutro aparelho.
   const failed = $derived(!!liveVoiceStore.error && liveVoiceStore.error.code !== 'taken');
   // Chamada aberta noutra máquina continua alcançável daqui, mesmo onde a voz está desligada.
-  const visible = $derived(inCall || failed || !!(reply?.enabled && reply.codex));
+  // Com Codex sem conta o botão aparece e abre o painel, que diz o que falta, em vez de sumir calado.
+  const visible = $derived(inCall || failed || !!reply?.codex);
   const level = (v: number) => `scaleY(${0.15 + v * 0.85})`;
   const status = $derived(liveVoiceStore.status);
 
@@ -18,7 +19,7 @@
 
   function tap() {
     // Com erro pendente o painel mostra a causa (e o botão de começar); depois de `taken` recomeçar puxaria a conversa de volta.
-    if (!inCall && !liveVoiceStore.error && server) void liveVoiceStore.start(server);
+    if (!inCall && !liveVoiceStore.error && server && reply?.enabled) void liveVoiceStore.start(server);
     else liveVoiceStore.open = true;
   }
 </script>

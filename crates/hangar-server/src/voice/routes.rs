@@ -179,7 +179,8 @@ async fn settings_reply(st: &AppState, req: Request, home: PathBuf, claude_dir: 
             let (active, client) = st.voice.call_status();
             let codex = st.accounts.codex_command().is_some();
             // A voz aparece com o Codex instalado e ao menos uma conta Codex; o microfone só abre quando a pessoa liga a chamada.
-            let enabled = codex && !st.voice.account_ids(&st.accounts).await.is_empty();
+            // Catálogo ilegível não esconde a voz como "sem conta": a abertura da chamada mostra o erro de verdade.
+            let enabled = codex && st.voice.account_ids(&st.accounts).await.is_none_or(|ids| !ids.is_empty());
             json_response(StatusCode::OK, json!({"enabled": enabled, "codex": codex, "jev": gate.jev.is_some(),
                 "voices": VOICES, "settings": SettingsDto::from(&current), "call": {"active": active, "client": client}}))
         }
@@ -187,7 +188,7 @@ async fn settings_reply(st: &AppState, req: Request, home: PathBuf, claude_dir: 
             let Ok(bytes) = axum::body::to_bytes(req.into_body(), 64 * 1024).await else { return refuse(StatusCode::BAD_REQUEST, "invalid_body") };
             let Ok(dto) = serde_json::from_slice::<SettingsDto>(&bytes) else { return refuse(StatusCode::BAD_REQUEST, "invalid_body") };
             if dto.voice.as_deref().is_some_and(|v| !VOICES.contains(&v)) { return refuse(StatusCode::BAD_REQUEST, "invalid_voice"); }
-            if !st.voice.account_ids(&st.accounts).await.contains(&dto.codex_account) { return refuse(StatusCode::BAD_REQUEST, "unknown_account"); }
+            if !st.voice.account_ids(&st.accounts).await.unwrap_or_default().contains(&dto.codex_account) { return refuse(StatusCode::BAD_REQUEST, "unknown_account"); }
             let chosen: VoiceSettings = dto.into();
             let saved = tokio::task::spawn_blocking({ let chosen = chosen.clone(); move || settings::write_settings(&home, &chosen) }).await;
             if let Ok(Err(e)) = &saved { super::log(format!("voice settings write failed kind={:?}", e.kind())); }

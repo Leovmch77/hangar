@@ -83,13 +83,14 @@ impl VoiceHub {
     pub fn env_jev_key(&self) -> Option<String> { self.env_jev_key.clone() }
 
     /// `Account.id` é o nome que as sessões gravam em `codex_account`.
-    pub async fn account_ids(&self, accounts: &AccountService) -> Vec<String> {
-        if let Some(ids) = &self.accounts { return ids.clone(); }
+    /// `None`: o catálogo não pôde ser lido, o que não é o mesmo que não ter conta.
+    pub async fn account_ids(&self, accounts: &AccountService) -> Option<Vec<String>> {
+        if let Some(ids) = &self.accounts { return Some(ids.clone()); }
         let accounts = accounts.clone();
         match tokio::task::spawn_blocking(move || accounts.visible_codex_accounts()).await {
-            Ok(Ok(list)) => list.into_iter().map(|a| a.id).collect(),
-            Ok(Err(e)) => { super::log(format!("voice codex accounts unreadable status={}", e.status)); Vec::new() }
-            Err(_) => { super::log("voice codex accounts read panicked"); Vec::new() }
+            Ok(Ok(list)) => Some(list.into_iter().map(|a| a.id).collect()),
+            Ok(Err(e)) => { super::log(format!("voice codex accounts unreadable status={}", e.status)); None }
+            Err(_) => { super::log("voice codex accounts read panicked"); None }
         }
     }
 

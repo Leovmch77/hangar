@@ -85,7 +85,13 @@ pub fn voice_dir(home: &Path) -> PathBuf { home.join(".hangar").join("voz") }
 pub fn settings_path(home: &Path) -> PathBuf { voice_dir(home).join("config.json") }
 
 pub fn read_settings(home: &Path) -> VoiceSettings {
-    serde_json::from_value::<SettingsDto>(read_json(&settings_path(home))).map(Into::into).unwrap_or_default()
+    let path = settings_path(home);
+    if !path.exists() { return VoiceSettings::default(); }
+    // Arquivo que existe mas não serve não é "primeira vez": cai no neutro (modelo da conta), não nos padrões novos.
+    serde_json::from_value::<SettingsDto>(read_json(&path)).map(Into::into).unwrap_or_else(|e| {
+        super::log(format!("voice config.json unusable, using account defaults kind={:?}", e.classify()));
+        VoiceSettings { voice: None, codex_account: default_account(), organizer: ModeModels::default() }
+    })
 }
 
 pub fn write_settings(home: &Path, s: &VoiceSettings) -> std::io::Result<()> {
@@ -118,5 +124,16 @@ mod tests {
         assert_eq!(s.voice, None);
         assert_eq!((s.organizer.direct.model.as_deref(), s.organizer.direct.effort.as_str()), (None, "low"));
         assert_eq!((s.organizer.plan.model.as_deref(), s.organizer.plan.effort.as_str()), (Some("gpt-x"), "xhigh"));
+    }
+
+    #[test]
+    fn broken_config_is_not_a_first_call() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(voice_dir(home.path())).unwrap();
+        for broken in ["{not json", r#"{"voice": "sol"}"#] {
+            std::fs::write(settings_path(home.path()), broken).unwrap();
+            let s = read_settings(home.path());
+            assert_eq!((s.voice, s.organizer.direct.model, s.organizer.direct.effort.as_str()), (None, None, "low"), "{broken}");
+        }
     }
 }

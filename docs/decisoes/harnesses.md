@@ -539,12 +539,15 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   - **Aparelho calado por mais de 30 s derruba o socket** (os clientes mandam `ping` a cada 10 s).
     Fim fatal da chamada manda `error{code, detail}` antes do `closed`.
   - **Escolhas da chamada** (conta Codex, modelo, esforço, velocidade, voz) em
-    `~/.hangar/voz/config.json`, do Rust, gravado de forma atômica. Sem arquivo válido, a chamada
+    `~/.hangar/voz/config.json`, do Rust, gravado de forma atômica. Sem o arquivo, a chamada
     usa voz `sol` e `gpt-6.1-sol` com esforço `medium` no Direto e `high` no Planejar
     (`VoiceSettings::default`); arquivo gravado vale como está, inclusive `null` (padrão da conta).
-    Conta sem `gpt-6.1-sol` no catálogo falha visível na abertura, sem troca calada de modelo.
+    Arquivo que existe mas não lê não é primeira vez: cai no neutro (modelo da conta, `low`), com
+    linha no diário. Conta sem `gpt-6.1-sol` no catálogo falha visível na abertura, sem troca calada.
   - **A voz não tem interruptor.** `GET /api/voice/settings` responde `enabled` = Codex instalado
-    e ao menos uma conta Codex visível; os clientes só mostram o botão com ele. Ligar a chamada é
+    e ao menos uma conta Codex visível (catálogo ilegível conta como conta: a abertura mostra o
+    erro, nunca "sem conta" falso). Os clientes mostram o botão com Codex instalado; sem conta, o
+    PWA abre o painel que diz o que falta e o nativo recebe `account_missing` ao ligar. Ligar a chamada é
     sempre gesto da pessoa, e a abertura recusa com `codex_missing`/`account_missing`. A chave
     antiga `codex_voice_beta` do `runtime-config.json` é ignorada; `/api/harness/codex/opcoes`
     ainda a aceita e devolve `true` só para o cliente antigo não quebrar.
