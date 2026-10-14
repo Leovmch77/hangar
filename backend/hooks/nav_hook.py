@@ -192,7 +192,8 @@ def _jev_precisa(prompt: str) -> bool | None:
 def precisa_de_navegador(prompt: str) -> bool:
     if not prompt.strip() or any(m in prompt.lstrip()[:400] for m in _NAO_E_PEDIDO):
         return False
-    pelo_jev = _jev_precisa(prompt)
+    # Resposta curta ("A", "sim") fica na regex: o Jev custava ~0,5 s antes de toda mensagem.
+    pelo_jev = _jev_precisa(prompt) if len(prompt.split()) >= 4 else None
     return pelo_jev if pelo_jev is not None else bool(_TELA.search(_sem_acento(prompt)))
 
 
