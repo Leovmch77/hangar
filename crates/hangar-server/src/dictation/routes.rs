@@ -192,10 +192,11 @@ pub async fn private(
                 Ok((models, raw)) => {
                     response(json!({"ok":true,"result":{"models":models,"raw":raw}}), 200)
                 }
+                // O código vai no texto: quem mostra é o `erro` do Python, que não carrega o código do Rust.
                 Err(code) => failure(
                     502,
                     code,
-                    "Não foi possível consultar o catálogo da conta selecionada.",
+                    &format!("Não foi possível consultar o catálogo da conta selecionada ({code})."),
                 ),
             };
         }
