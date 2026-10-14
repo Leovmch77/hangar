@@ -140,6 +140,24 @@ mod tests {
         assert_eq!((after["model"].as_str(),after["effort"].as_str()),(Some("m"),Some("max")));
     }
 
+    /// Prova de dois processos no Windows (#145): grava `model` em laço pelo `patch` enquanto o Python lê e
+    /// grava o mesmo arquivo. `HANGAR_SOAK_DIR=<pasta com cl.json> HANGAR_SOAK_SECONDS=15 cargo test
+    /// -p hangar-server --lib -- --ignored soak_writer`; imprime gravações e falhas.
+    #[test]
+    #[ignore = "prova manual de dois processos"]
+    fn soak_writer_for_the_python_side() {
+        let dir = std::path::PathBuf::from(std::env::var("HANGAR_SOAK_DIR").expect("HANGAR_SOAK_DIR"));
+        let seconds:u64 = std::env::var("HANGAR_SOAK_SECONDS").ok().and_then(|s|s.parse().ok()).unwrap_or(15);
+        let (deadline,mut written,mut failed) = (std::time::Instant::now() + std::time::Duration::from_secs(seconds),0u64,0u64);
+        while std::time::Instant::now() < deadline {
+            match patch(&dir,"cl","k1",&json!({"model":format!("m{written}")}),&json!({})) {
+                Ok(_) => written += 1,
+                Err(error) => { failed += 1; eprintln!("falha: {} {}",error.code,error.message); }
+            }
+        }
+        println!("soak: {written} gravações, {failed} falhas");
+    }
+
     #[test]
     fn clear_cano_only_drops_the_same_process() {
         let dir = tempfile::tempdir().unwrap();
