@@ -76,6 +76,7 @@ pub(crate) type TableActionsFn =
     dyn Fn(&TableData, &mut Window, &mut App) -> AnyElement + Send + Sync;
 
 pub(crate) type ImageSourceFn = dyn Fn(&gpui::SharedUri) -> gpui::ImageSource + Send + Sync;
+pub(crate) type ImageSourceMapperFn = dyn Fn(&gpui::SharedUri) -> Option<gpui::ImageSource> + Send + Sync;
 
 pub(crate) type LinkClickHandlerFn =
     dyn Fn(&SharedString, &ClickEvent, &mut Window, &mut App) + Send + Sync;
@@ -137,6 +138,7 @@ pub struct TextView {
     table_actions: Option<Arc<TableActionsFn>>,
     link_click_handler: Option<Arc<LinkClickHandlerFn>>,
     image_source: Option<Arc<ImageSourceFn>>,
+    image_source_mapper: Option<Arc<ImageSourceMapperFn>>,
     reveal_handler: Option<Rc<RevealHandlerFn>>,
     markdown_extensions: Arc<MarkdownExtensions>,
     motion: Option<TextViewMotion>,
@@ -184,6 +186,7 @@ impl TextView {
             table_actions: None,
             link_click_handler: None,
             image_source: None,
+            image_source_mapper: None,
             reveal_handler: None,
             markdown_extensions: Arc::default(),
             motion: None,
@@ -208,6 +211,7 @@ impl TextView {
             table_actions: None,
             link_click_handler: None,
             image_source: None,
+            image_source_mapper: None,
             reveal_handler: None,
             markdown_extensions: Arc::default(),
             motion: None,
@@ -232,6 +236,7 @@ impl TextView {
             table_actions: None,
             link_click_handler: None,
             image_source: None,
+            image_source_mapper: None,
             reveal_handler: None,
             markdown_extensions: Arc::default(),
             motion: None,
@@ -248,6 +253,15 @@ impl TextView {
         F: Fn(&gpui::SharedUri) -> gpui::ImageSource + Send + Sync + 'static,
     {
         self.image_source = Some(Arc::new(resolver));
+        self
+    }
+
+    /// Resolve apenas as imagens reconhecidas pelo chamador. `None` conserva
+    /// a resolução padrão, inclusive o cache das imagens `data:` do AST.
+    pub fn image_source_mapper<F>(mut self, resolver: F) -> Self
+    where F: Fn(&gpui::SharedUri) -> Option<gpui::ImageSource> + Send + Sync + 'static,
+    {
+        self.image_source_mapper = Some(Arc::new(resolver));
         self
     }
 
@@ -641,6 +655,7 @@ impl Element for TextView {
             state.table_actions = self.table_actions.clone();
             state.link_click_handler = self.link_click_handler.clone();
             state.image_source = self.image_source.clone();
+            state.image_source_mapper = self.image_source_mapper.clone();
             state.set_markdown_extensions(self.markdown_extensions.clone(), cx);
             if let Some(motion) = &self.motion {
                 state.set_motion(motion.clone());

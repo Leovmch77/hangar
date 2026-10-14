@@ -74,7 +74,7 @@ image = { version = "=0.25.10", default-features = false, features = ["png", "jp
 libc.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { workspace = true, features = ["Win32_NetworkManagement_IpHelper", "Win32_Networking_WinSock", "Win32_Security_Authorization", "Win32_System_Pipes", "Win32_System_Threading"] }
+windows-sys = { workspace = true, features = ["Win32_NetworkManagement_IpHelper", "Win32_Networking_WinSock", "Win32_Security_Authorization", "Win32_System_Pipes", "Win32_System_Threading", "Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
 # Relógio pausado: as rodadas do `state::Monitor` contadas sem esperar o tempo real.

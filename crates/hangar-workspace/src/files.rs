@@ -1,4 +1,6 @@
 //! Políticas de raiz e mecânica de leitura/escrita são separadas para os arquivos citados.
+mod open_root;
+pub use open_root::{OpenedRootFile, open_root_file};
 use crate::{Result, WorkspaceError, error, file_error, git, real};
 use hangar_api::workspace::{FileContent, FileEntry};
 use serde_json::{Value, json};

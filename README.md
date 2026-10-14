@@ -188,6 +188,10 @@ Repository map: `crates/` (Rust server), `backend/` (Python, FastAPI), `desktop-
 desktop app), `frontend/` (Svelte PWA), `mobile/` (Expo app, in development), `packages/core`
 (shared TypeScript), `site/` (hangar.dev.br), `skills/` (agent skills shipped with Hangar).
 
+**API de artefatos (Rust, somente o dono):** `GET /api/sessions/{name}/artifacts` retorna
+`items` com referências de artefatos Claude (`id`, `url`, `title` e `version` opcional).
+A consulta é passiva e não publica conteúdo.
+
 ## Security model
 
 Treat Hangar like a remote shell: whoever holds the token drives your agents with your user's

@@ -99,7 +99,7 @@ pub(super) struct Viewer {
 fn source_name(source: &Source) -> String {
     match source {
         Source::Upload(name) => name.clone(),
-        Source::Cited(path) => composer::basename(path).to_owned(),
+        Source::Cited(path) | Source::Workspace(path) => composer::basename(path).to_owned(),
         Source::Transcript(_, index) => format!("imagem-{}.png", index + 1),
         Source::Remote(url) => composer::url_name(url).to_owned(),
         Source::Memory(name, _) => name.clone(),
