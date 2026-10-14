@@ -85,7 +85,7 @@ pub async fn render(html: &str, jobs: &[Job]) -> Result<Rendered, ChromeError> {
 pub async fn render_with(bin: Option<PathBuf>, html: &str, jobs: &[Job], own_theme: bool) -> Result<Rendered, ChromeError> {
     let bin = bin.ok_or(ChromeError::Absent)?;
     let _slot = SLOTS.acquire().await.map_err(|_| ChromeError::Failed("fila do navegador fechada"))?;
-    tokio::time::timeout(DEADLINE, run(&bin, html, jobs, own_theme)).await.map_err(|_| ChromeError::Failed("navegador do servidor passou do prazo"))?
+    run(&bin, html, jobs, own_theme).await
 }
 
 async fn run(bin: &Path, html: &str, jobs: &[Job], own_theme: bool) -> Result<Rendered, ChromeError> {
@@ -98,12 +98,33 @@ async fn run(bin: &Path, html: &str, jobs: &[Job], own_theme: bool) -> Result<Re
         .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
         .kill_on_drop(true)
         .spawn().map_err(|_| ChromeError::Failed("navegador do servidor não subiu"))?;
-    let result = match ws_url(profile.path(), &mut child).await {
-        Ok(url) => drive(&url, html, jobs, own_theme).await,
-        Err(e) => Err(e),
-    };
-    let _ = child.kill().await;
+    // O prazo cobre só o desenho: no Windows o Chrome leva segundos para morrer depois de desenhar.
+    let result = tokio::time::timeout(DEADLINE, async {
+        let url = ws_url(profile.path(), &mut child).await?;
+        drive(&url, html, jobs, own_theme).await
+    }).await.unwrap_or(Err(ChromeError::Failed("navegador do servidor passou do prazo")));
+    tokio::spawn(shutdown(child, profile));
     result
+}
+
+/// Encerra a árvore inteira (no Windows os filhos do Chrome sobrevivem ao pai) e só então apaga o perfil,
+/// que fica preso enquanto algum deles vive.
+async fn shutdown(mut child: tokio::process::Child, profile: tempfile::TempDir) {
+    #[cfg(windows)]
+    if let Some(pid) = child.id() {
+        let _ = tokio::process::Command::new("taskkill").args(["/T", "/F", "/PID", &pid.to_string()])
+            .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
+            .status().await;
+    }
+    let _ = child.kill().await;
+    for _ in 0..10 {
+        match tokio::fs::remove_dir_all(profile.path()).await {
+            Ok(()) => return,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+            Err(_) => tokio::time::sleep(Duration::from_secs(1)).await,
+        }
+    }
+    tracing::warn!(code = "page_chrome_profile_left", "perfil temporário do navegador do servidor não foi apagado");
 }
 
 async fn ws_url(profile: &Path, child: &mut tokio::process::Child) -> Result<String, ChromeError> {
@@ -336,6 +357,22 @@ mod tests {
         let mut raw = [0u8; 5];
         flate2::read::ZlibDecoder::new(&idat[..]).read_exact(&mut raw).unwrap();
         raw[4]
+    }
+
+    /// Mesmo pedido do `html_render`, seguido: no Windows o fim do Chrome anterior não pode comer o prazo do próximo.
+    #[tokio::test]
+    #[ignore = "sobe o Chrome da máquina"]
+    async fn renders_all_widths_back_to_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let html = super::super::theme::inject("<!doctype html><h1>oi</h1>", true);
+        for _ in 0..3 {
+            let started = std::time::Instant::now();
+            let jobs: Vec<Job> = super::super::WIDTHS.iter()
+                .map(|w| Job { width: *w, theme: Theme::Dark, shot: (*w == 728).then(|| dir.path().join("s.png")) }).collect();
+            let r = render(&html, &jobs).await.unwrap();
+            eprintln!("render {:?}", started.elapsed());
+            assert_eq!(r.heights.len(), super::super::WIDTHS.len());
+        }
     }
 
     #[tokio::test]
