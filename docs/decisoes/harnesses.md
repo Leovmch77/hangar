@@ -680,6 +680,8 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   arquivo e na tela). Sem entradas (arquivo inexistente ou vazio), o convite sai da própria voz ao
   conectar (`ONBOARDING_GREETING` no lugar de "Conectado. Pode falar."), porque o organizador só tem
   turno depois de a pessoa falar; o prompt da voz ganha o trecho que manda a resposta ao organizador.
+  O convite começa por uma apresentação curta do que a voz faz, em palavras do dia a dia e sem nome
+  de ferramenta (texto aprovado pelo Jefferson em 14/10), e termina mandando perguntar o resto.
   Passo 1: com licença, ler só `~/.claude/CLAUDE.md` e `~/.codex/AGENTS*.md` e guardar papel,
   linguagens e preferência de resposta, apresentados como proposta ("Entendi que você … — confere?")
   junto com a pergunta de como a pessoa quer usar a voz; só grava depois do sim ou da correção.

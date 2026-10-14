@@ -303,9 +303,12 @@ pub const DEFAULT_EFFORT: &str = "low";
 
 /// O organizador só ganha turno quando a voz delega uma fala: o convite da primeira conversa sai da própria voz ao conectar.
 pub const GREETING: &str = "Conectado. Pode falar.";
-pub const ONBOARDING_GREETING: &str = "Conectado. É a nossa primeira conversa nesta máquina. Posso ler, só para leitura, o CLAUDE.md \
-    do Claude e o AGENTS.md do Codex, se existirem, para te conhecer? E me conta o que você faz e como prefere as respostas. \
-    Antes de guardar, te digo o que entendi para você conferir.";
+pub const ONBOARDING_GREETING: &str = "Conectado. É a nossa primeira conversa nesta máquina, então deixa eu me apresentar rapidinho. \
+    Eu sou sua assistente no Hangar: posso abrir sessões novas, acompanhar o que elas estão fazendo e te contar quando responderem, \
+    mandar pedidos pra elas e explicar o que fizeram. Também planejo com você antes de mandar um trabalho, mexo em arquivos e \
+    programas aqui no computador, e lembro do que você me pedir pra lembrar. Se quiser saber mais, é só perguntar o que eu consigo \
+    fazer. Pra te conhecer melhor, posso ler, só pra leitura, o CLAUDE.md do Claude e o AGENTS.md do Codex, se existirem? E me \
+    conta o que você faz e como prefere as respostas. Antes de guardar, te digo o que entendi pra você conferir.";
 
 /// Vai junto do `VOICE_PROMPT` só com a memória da voz vazia: a resposta ao convite tem de chegar ao organizador.
 const VOICE_ONBOARDING: &str = "
@@ -1552,7 +1555,9 @@ mod tests {
     #[test]
     fn onboarding_rides_the_voice_only_when_asked() {
         assert!(greeting(true).contains("primeira conversa") && greeting(true).contains("AGENTS.md")
-            && greeting(true).contains("como prefere as respostas") && greeting(true).contains("para você conferir"));
+            && greeting(true).contains("como prefere as respostas") && greeting(true).contains("pra você conferir"));
+        assert!(greeting(true).contains("deixa eu me apresentar") && greeting(true).contains("perguntar o que eu consigo fazer"),
+            "a primeira conversa apresenta o que a voz faz antes das perguntas");
         assert_eq!(greeting(false), "Conectado. Pode falar.");
         let with = voice_prompt(true, &tools(), false);
         assert!(with.starts_with(VOICE_PROMPT) && with.contains("Primeira conversa"));
