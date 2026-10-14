@@ -48,7 +48,7 @@ const bridge = data(stripTypeScriptTypes(readFileSync(process.argv[2]+'/plugins/
 const source = readFileSync(process.argv[2]+'/plugins/hangar/hooks/input.ts','utf8').replace('"./bridge"',JSON.stringify(bridge));
 const {registerInput} = await import(data(stripTypeScriptTypes(source,{mode:'strip'})));
 let start, sid='A'; const timers=[], effects=[], receipts=[];
-registerInput((event,options,fn)=>{start=fn;});
+registerInput((event,options,fn)=>{if(options.isInteractive) start=fn;});
 const $={env:{get:async key=>({HANGAR_PLUGIN_URL:'http://fake',HANGAR_PLUGIN_TOKEN:'test',CP_SESSION_NAME:'session'})[key]},
  clock:{after:(ms,fn)=>timers.push(fn)}, session:{id:async()=>sid}, ui:{log:()=>{},invalidate:()=>{}},
  prompt:{fill:async()=>{effects.push({kind:'fill',sid});return {isFilled:true};},submit:async()=>effects.push({kind:'submit',sid})},
